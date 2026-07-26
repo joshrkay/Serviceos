@@ -43,7 +43,7 @@ import type { VoiceSession, VoiceSessionStore } from './voice-session-store';
 import type { VoiceSessionRepository } from '../../../voice/voice-session';
 import type { CallOutcome } from '../../../voice/voice-service';
 import { deriveCallOutcome } from './outcome-mapper';
-import { resolveSchedulingEntities } from './entity-resolution';
+import { resolveSchedulingEntities, requiresExistingEntity } from './entity-resolution';
 import type { SchedulingEntityResolution } from './entity-resolution';
 import {
   MAX_DISAMBIGUATION_ATTEMPTS,
@@ -480,6 +480,7 @@ export class InAppVoiceAdapter {
    */
   private async toResolutionEvent(
     tenantId: string,
+    intent: string,
     resolution: SchedulingEntityResolution,
   ): Promise<CallingAgentEvent> {
     if (resolution.status === 'ambiguous' && resolution.ambiguous) {
@@ -518,15 +519,21 @@ export class InAppVoiceAdapter {
         partialRefs: resolution.refs,
       };
     }
-    // No candidate reached even the lower confidence band — escalate rather
-    // than silently falling through to entity_resolved with no refs (that
-    // previously masked a not_found as a "success").
-    if (resolution.status === 'not_found') {
+    // No candidate reached even the lower confidence band. For intents that
+    // operate on a record that must ALREADY exist (send_estimate,
+    // record_payment, cancel_appointment, …) the request cannot proceed, so
+    // escalate rather than silently falling through to entity_resolved with
+    // no refs — that previously masked a not_found as a "success" (46a954e1).
+    if (resolution.status === 'not_found' && requiresExistingEntity(intent)) {
       return { type: 'entity_not_found' };
     }
-    // Unknown non-emergency references proceed to intent_confirm with partial
-    // refs — the proposal surfaces pendingReference for operator review
-    // instead of escalating to on-call (matches voice-action-router policy).
+    // Everything else — including CREATION intents (create_appointment,
+    // create_job, create_customer, draft_estimate), where "no such record"
+    // is the normal, expected outcome — proceeds to intent_confirm with the
+    // partial refs. The proposal surfaces pendingReference for operator
+    // review instead of escalating to on-call (matches voice-action-router
+    // policy), and create_appointment auto-opens a job from jobTitle at
+    // execution time (95a260cd).
     return { type: 'entity_resolved', refs: resolution.refs };
   }
 
@@ -1030,8 +1037,15 @@ export class InAppVoiceAdapter {
     //   ambiguous → entity_ambiguous with the candidate set — the FSM asks a
     //               one-tap disambiguation question and stays in
     //               entity_resolution.
-    //   not_found → entity_resolved with partial refs — intent_confirm readback;
-    //               the proposal carries pendingReference for operator review.
+    //   not_found → VOX-02: split by intent family (requiresExistingEntity).
+    //               Record-OPERATING intents (send_estimate, record_payment,
+    //               cancel_appointment, …) → entity_not_found → escalate to
+    //               on-call: the request can never execute without the record.
+    //               CREATION intents (create_appointment, create_job,
+    //               create_customer, draft_estimate) → entity_resolved with
+    //               partial refs — intent_confirm readback; the proposal
+    //               carries pendingReference for operator review. A caller
+    //               booking NEW work must never be escalated for it.
     if (
       session.machine.currentState === 'entity_resolution' &&
       fsmEvent.type === 'intent_classified'
@@ -1042,7 +1056,11 @@ export class InAppVoiceAdapter {
         fsmEvent.entities,
         session.machine.currentContext.jobId,
       );
-      const resolutionEvent = await this.toResolutionEvent(session.tenantId, resolution);
+      const resolutionEvent = await this.toResolutionEvent(
+        session.tenantId,
+        fsmEvent.intentType,
+        resolution,
+      );
       const effects2 = session.machine.dispatch(resolutionEvent);
       allSideEffects.push(...effects2);
       const aggregate2 = await this.executeSideEffects(session, effects2);

@@ -166,8 +166,12 @@ export const LOW_STT_CONFIDENCE_REPROMPT_COPY =
  * es translations for the FSM's hardcoded sentences (exact-match). Kept
  * small and literal — anything not listed passes through in English rather
  * than risking a bad machine paraphrase.
+ *
+ * Exported so the QA matrix's VOX-02 language oracle can assert against the
+ * SHIPPED Spanish copy instead of a hand-rolled marker word list (which went
+ * stale the moment a new sentence was added and failed correct responses).
  */
-const SENTENCE_CATALOG_ES: Record<string, string> = {
+export const SENTENCE_CATALOG_ES: Record<string, string> = {
   "Great, I've got that taken care of. You'll receive a confirmation shortly. Is there anything else I can help you with?":
     'Perfecto, ya quedó registrado. Recibirá una confirmación en breve. ¿Hay algo más en lo que pueda ayudarle?',
   'How can I help you today?': '¿En qué puedo ayudarle hoy?',

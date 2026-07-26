@@ -11,10 +11,16 @@
  *       (readback) — it is NOT auto-confirmed;
  *   (b) two candidates → entity_ambiguous is dispatched WITH the candidate
  *       set (a disambiguation question), NOT a silent pick + proposal;
- *   (c) zero matches → entity_not_found → escalates to on-call (Fix 1: this
- *       used to silently fall through to entity_resolved with empty refs —
- *       a not_found masquerading as a success — and is now a hard escalation,
- *       never a silent guess);
+ *   (c) zero matches on a RECORD-OPERATING intent (send_estimate,
+ *       record_payment, …) → entity_not_found → escalates to on-call (Fix 1:
+ *       this used to silently fall through to entity_resolved with empty refs
+ *       — a not_found masquerading as a success — and is now a hard
+ *       escalation, never a silent guess);
+ *   (c') VOX-02 — zero matches on a CREATION intent (create_appointment,
+ *       create_job, …) does NOT escalate: a caller asking to book NEW work
+ *       has no record to find, so the turn proceeds to the intent_confirm
+ *       readback with partial refs and the proposal carries pendingReference
+ *       for operator review;
  *   (d) the auto-confirm no longer fires — the proposal is created only after
  *       a REAL caller "yes" event on a later turn;
  *   (e) a single candidate in the middle confidence band (τ_ent_confirm_low
@@ -28,7 +34,10 @@ import {
   InAppVoiceAdapter,
   isAffirmation,
 } from '../../../../src/ai/agents/customer-calling/inapp-adapter';
-import { resolveSchedulingEntities } from '../../../../src/ai/agents/customer-calling/entity-resolution';
+import {
+  resolveSchedulingEntities,
+  requiresExistingEntity,
+} from '../../../../src/ai/agents/customer-calling/entity-resolution';
 import { VoiceSessionStore } from '../../../../src/ai/agents/customer-calling/voice-session-store';
 import { InMemoryProposalRepository } from '../../../../src/proposals/proposal';
 import { InMemoryAuditRepository } from '../../../../src/audit/audit';
@@ -76,6 +85,23 @@ const SCHEDULING_CLASSIFIER = JSON.stringify({
   intentType: 'create_appointment',
   confidence: 0.93,
   extractedEntities: { customerName: 'Bob Smith', dateTimeDescription: 'tomorrow at 2pm' },
+});
+
+/**
+ * VOX-02 — record-OPERATING intents (they act on a document that must already
+ * exist), used to prove the not_found escalation narrowing did not weaken
+ * 46a954e1's fix for the cases it was actually written for.
+ */
+const SEND_ESTIMATE_CLASSIFIER = JSON.stringify({
+  intentType: 'send_estimate',
+  confidence: 0.93,
+  extractedEntities: { customerName: 'Bob Smith' },
+});
+
+const RECORD_PAYMENT_CLASSIFIER = JSON.stringify({
+  intentType: 'record_payment',
+  confidence: 0.93,
+  extractedEntities: { customerName: 'Bob Smith', amount: '250' },
 });
 
 describe('InAppVoiceAdapter — entity-resolution voice safety', () => {
@@ -277,13 +303,16 @@ describe('InAppVoiceAdapter — entity-resolution voice safety', () => {
     expect(gateway.complete).toHaveBeenCalledTimes(1);
   });
 
-  // ── (c) zero matches → entity_not_found → escalates (Fix 1) ───────────────
-  it('zero matches → entity_not_found → escalates to on-call, never a silent entity_resolved', async () => {
+  // ── (c) zero matches on a RECORD-OPERATING intent → escalates (Fix 1) ─────
+  // VOX-02 narrowed the escalation to intents that genuinely need a
+  // pre-existing record; this is the guard that keeps 46a954e1's original bug
+  // (not_found silently masquerading as entity_resolved) fixed for them.
+  it('zero matches on a record-operating intent (send_estimate) → entity_not_found → escalates to on-call, never a silent entity_resolved', async () => {
     const resolver = stubResolver({ kind: 'not_found', reference: 'Bob Smith' });
-    const adapter = makeAdapter(resolver);
+    const adapter = makeAdapter(resolver, SEND_ESTIMATE_CLASSIFIER);
     const { sessionId } = await adapter.startSession(TENANT, USER);
 
-    const turn1 = await adapter.handleInput(sessionId, 'book Bob Smith for tomorrow at 2pm');
+    const turn1 = await adapter.handleInput(sessionId, 'send the estimate to Bob Smith');
 
     expect(turn1.state).toBe('escalating');
     expect(turn1.proposalIds.length).toBe(0);
@@ -295,6 +324,45 @@ describe('InAppVoiceAdapter — entity-resolution voice safety', () => {
     expect(auditRepo.getAll().map((e) => e.eventType)).not.toContain(
       'agent.calling.entity_resolution.entity_resolved',
     );
+  });
+
+  it('zero matches on record_payment also escalates (record-operating family, not just estimates)', async () => {
+    const resolver = stubResolver({ kind: 'not_found', reference: 'Bob Smith' });
+    const adapter = makeAdapter(resolver, RECORD_PAYMENT_CLASSIFIER);
+    const { sessionId } = await adapter.startSession(TENANT, USER);
+
+    const turn1 = await adapter.handleInput(sessionId, 'record a payment from Bob Smith');
+
+    expect(turn1.state).toBe('escalating');
+    expect(turn1.sideEffects.some((e) => e.type === 'notify_oncall')).toBe(true);
+    expect(auditRepo.getAll().map((e) => e.eventType)).toContain(
+      'agent.calling.entity_resolution.entity_not_found',
+    );
+  });
+
+  // ── (c') VOX-02: zero matches on a CREATION intent must NOT escalate ──────
+  it('zero matches on a creation intent (create_appointment) falls through to entity_resolved — a caller booking NEW work is never escalated', async () => {
+    const resolver = stubResolver({ kind: 'not_found', reference: 'Bob Smith' });
+    const adapter = makeAdapter(resolver);
+    const { sessionId } = await adapter.startSession(TENANT, USER);
+
+    const turn1 = await adapter.handleInput(sessionId, 'book Bob Smith for tomorrow at 2pm');
+
+    // intent_confirm readback, NOT on-call escalation.
+    expect(turn1.state).toBe('intent_confirm');
+    expect(turn1.sideEffects.some((e) => e.type === 'notify_oncall')).toBe(false);
+    const audits = auditRepo.getAll().map((e) => e.eventType);
+    expect(audits).toContain('agent.calling.entity_resolution.entity_resolved');
+    expect(audits).not.toContain('agent.calling.entity_resolution.entity_not_found');
+    // Still NEVER a guessed id — the unresolved reference stays pending.
+    expect(turn1.proposalIds.length).toBe(0);
+
+    // And a real caller "yes" still produces the proposal with no customerId.
+    const turn2 = await adapter.handleInput(sessionId, 'yes');
+    expect(turn2.state).toBe('closing');
+    const proposals = await proposalRepo.findByTenant(TENANT);
+    expect(proposals).toHaveLength(1);
+    expect((proposals[0].payload.entities as Record<string, unknown>).customerId).toBeUndefined();
   });
 
   // ── (e) middle confidence band → entity_confirm, then affirm/decline ──────
@@ -473,6 +541,62 @@ describe('resolveSchedulingEntities (pure resolver folding)', () => {
     expect(r.refs.appointmentId).toBeUndefined();
     // The cancellation reason default is still applied (not an identity guess).
     expect(r.refs.reason).toBe('Requested by caller via voice session');
+  });
+});
+
+// ── Pure logic: requiresExistingEntity (VOX-02) ─────────────────────────────
+describe('requiresExistingEntity', () => {
+  it('is FALSE for creation intents — a not_found there is the expected outcome', () => {
+    for (const intent of [
+      'create_appointment',
+      'create_booking',
+      'create_job',
+      'create_customer',
+      'create_invoice',
+      'draft_estimate',
+    ]) {
+      expect(requiresExistingEntity(intent)).toBe(false);
+    }
+  });
+
+  it('is TRUE for intents that operate on a record that must already exist', () => {
+    for (const intent of [
+      // invoice-doc family
+      'update_invoice',
+      'send_invoice',
+      'record_payment',
+      'apply_late_fee',
+      'issue_invoice',
+      'send_payment_reminder',
+      // estimate-doc family
+      'update_estimate',
+      'send_estimate',
+      'send_estimate_nudge',
+      // appointment-ref family
+      'cancel_appointment',
+      'reschedule_appointment',
+      'confirm_appointment',
+      'reassign_appointment',
+      // job-ref / technician-ref / customer-scoped families
+      'update_job',
+      'log_time_entry',
+      'add_note',
+      'notify_delay',
+      'request_feedback',
+      'add_crew_member',
+      'remove_crew_member',
+      'update_customer',
+      'lookup_balance',
+      'convert_lead',
+    ]) {
+      expect(requiresExistingEntity(intent)).toBe(true);
+    }
+  });
+
+  it('is FALSE for intents outside every reference family (no reference to miss)', () => {
+    for (const intent of ['unknown', 'operator_request', 'emergency_dispatch', 'language_switch']) {
+      expect(requiresExistingEntity(intent)).toBe(false);
+    }
   });
 });
 

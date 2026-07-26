@@ -1,6 +1,74 @@
 import { expect, matrixTest, test, type RowHarness } from './helpers/matrix-test';
 import { startVoiceSession } from './helpers/voice-flow';
 import { rwAvailable, rwExec } from './helpers/rw-db';
+import {
+  LANGUAGE_SWITCH_ACK,
+  SENTENCE_CATALOG_ES,
+  renderTtsText,
+} from '../../packages/api/src/ai/agents/customer-calling/tts-copy';
+
+const norm = (s: string) => s.toLowerCase().replace(/\s+/g, ' ').trim();
+
+/**
+ * VOX-02 language oracle — derived from the SHIPPED es copy, not a word list.
+ *
+ * `ttsText` is always `renderTtsText(lastTtsPlay)` (inapp-adapter.ts), so a
+ * correct Spanish turn is either an exact sentence from SENTENCE_CATALOG_ES /
+ * LANGUAGE_SWITCH_ACK, or one of the interpolating templates rendered in es.
+ * The old hand-rolled `spanishMarkers` list failed fluent, correct Spanish
+ * that simply used different words (e.g. the escalation line "No pude
+ * encontrar el registro al que se refiere…" — no marker, no accent).
+ */
+const ES_SENTENCES = [...Object.values(SENTENCE_CATALOG_ES), LANGUAGE_SWITCH_ACK.es].map(norm);
+
+/**
+ * Templates interpolate an intent label / entity summary / candidate names,
+ * so no exact match exists. Render each one TWICE with different fillers and
+ * keep the common prefix + suffix — that is the invariant Spanish frame.
+ */
+function frame(a: string, b: string): { prefix: string; suffix: string } {
+  let p = 0;
+  while (p < a.length && p < b.length && a[p] === b[p]) p++;
+  let s = 0;
+  while (s < a.length - p && s < b.length - p && a[a.length - 1 - s] === b[b.length - 1 - s]) s++;
+  return { prefix: a.slice(0, p), suffix: a.slice(a.length - s) };
+}
+
+const render = (key: string, payload: Record<string, unknown>) =>
+  norm(renderTtsText(key, { template: key, ...payload }, 'es'));
+
+const ES_FRAMES = [
+  // "Para confirmar: usted desea <intent>. ¿Es correcto?"
+  frame(
+    render('intent_confirm', { intent: 'create_appointment' }),
+    render('intent_confirm', { intent: 'record_payment' })
+  ),
+  // "Encontré un/una <kind> \"<summary>\" — ¿es a la que se refiere?"
+  frame(
+    render('confirm_entity', { entityKind: 'job', summary: 'Aaa' }),
+    render('confirm_entity', { entityKind: 'invoice', summary: 'Bbb' })
+  ),
+  // "Encontré varias coincidencias — ¿se refiere a X o Y? ¿Cuál de ellas?"
+  frame(
+    render('disambiguate', { candidates: [{ name: 'Aaa' }, { name: 'Bbb' }] }),
+    render('disambiguate', { candidates: [{ name: 'Ccc' }, { name: 'Ddd' }] })
+  ),
+].filter((f) => f.prefix.length + f.suffix.length >= 12);
+
+const ES_FIXED_TEMPLATES = [
+  render('greeting', {}),
+  render('greeting_with_disclosure', {}),
+  // The "identical candidate names" branch of the disambiguation renderer.
+  render('disambiguate', { candidates: [{ name: 'Aaa' }, { name: 'Aaa' }] }),
+];
+
+/** True when `tts` is a rendered-in-Spanish line from the shipped es copy. */
+function isSpanishCopy(tts: string): boolean {
+  const t = norm(tts);
+  if (!t) return false;
+  if (ES_SENTENCES.includes(t) || ES_FIXED_TEMPLATES.includes(t)) return true;
+  return ES_FRAMES.some((f) => t.startsWith(f.prefix) && t.endsWith(f.suffix));
+}
 
 /**
  * VOX-01 — emergency triage fast-path (voice; real LLM).
@@ -80,16 +148,12 @@ matrixTest('VOX-02', 'Spanish / i18n voice response', async (h) => {
     return void h.evidence.fail(`Voice input returned ${res.response.status}; cannot assess language handling.`);
   }
   const tts = ((res.response.body as { ttsText?: string }).ttsText ?? '').toLowerCase();
-  // Whole-word match on distinctive Spanish tokens (avoid short substrings
-  // like "su"/"para" matching inside English words).
-  const words = new Set(tts.split(/[^a-záéíóúñ¿¡]+/).filter(Boolean));
-  const spanishMarkers = [
-    'gracias', 'hola', 'puedo', 'pueda', 'ayuda', 'ayudarle', 'cita', 'podemos', 'usted',
-    'necesita', 'agendar', 'disculpe', 'perfecto', 'registrado', 'confirmación', 'recibirá',
-    'breve', 'correcto', 'desea',
-  ];
-  // Accented Spanish characters are unambiguous on their own.
-  const looksSpanish = spanishMarkers.some((m) => words.has(m)) || /[¿¡ñáéíóú]/.test(tts);
+  // Catalog-derived oracle: the turn's ttsText is renderTtsText() output, so
+  // ANY correct Spanish response is a line from the shipped es copy —
+  // whichever template happens to fire. Accented characters / inverted
+  // punctuation stay as a secondary signal so es copy added to the FSM
+  // without a catalog entry still reads as Spanish rather than failing.
+  const looksSpanish = isSpanishCopy(tts) || /[¿¡ñáéíóú]/.test(tts);
   if (tts && looksSpanish) {
     h.evidence.pass('Voice responded in Spanish to a Spanish utterance.');
   } else {

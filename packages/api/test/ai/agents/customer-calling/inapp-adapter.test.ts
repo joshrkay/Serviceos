@@ -1318,12 +1318,23 @@ describe('InAppVoiceAdapter#toResolutionEvent', () => {
     });
   });
 
-  function toResolutionEvent(resolution: SchedulingEntityResolution): Promise<CallingAgentEvent> {
+  // VOX-02 — toResolutionEvent is now intent-conditioned. Default to a
+  // record-OPERATING intent (send_estimate) so these cases keep exercising
+  // the "the record must already exist" branch; creation intents are covered
+  // explicitly below.
+  function toResolutionEvent(
+    resolution: SchedulingEntityResolution,
+    intent = 'send_estimate',
+  ): Promise<CallingAgentEvent> {
     return (
       adapter as unknown as {
-        toResolutionEvent: (tenantId: string, r: SchedulingEntityResolution) => Promise<CallingAgentEvent>;
+        toResolutionEvent: (
+          tenantId: string,
+          intent: string,
+          r: SchedulingEntityResolution,
+        ) => Promise<CallingAgentEvent>;
       }
-    ).toResolutionEvent(TENANT, resolution);
+    ).toResolutionEvent(TENANT, intent, resolution);
   }
 
   it('resolved → entity_resolved carrying the accumulated refs', async () => {
@@ -1360,13 +1371,31 @@ describe('InAppVoiceAdapter#toResolutionEvent', () => {
     }
   });
 
-  it('not_found → entity_not_found with no payload (Fix 1 regression guard)', async () => {
+  it('not_found on a record-operating intent → entity_not_found with no payload (Fix 1 regression guard)', async () => {
     const event = await toResolutionEvent({
       status: 'not_found',
       refs: {},
       notFound: { entityKind: 'job', reference: 'the QA Matrix job' },
     });
     expect(event).toEqual({ type: 'entity_not_found' });
+  });
+
+  // VOX-02 — the escalation is narrowed to intents that need a pre-existing
+  // record. A creation intent keeps the partial refs and reads the intent
+  // back instead of handing the caller to on-call.
+  it('not_found on a creation intent → entity_resolved with the partial refs (VOX-02)', async () => {
+    const event = await toResolutionEvent(
+      {
+        status: 'not_found',
+        refs: { customerName: 'Ghost', scheduledStart: '2026-07-27T21:00:00.000Z' },
+        notFound: { entityKind: 'customer', reference: 'Ghost' },
+      },
+      'create_appointment',
+    );
+    expect(event).toEqual({
+      type: 'entity_resolved',
+      refs: { customerName: 'Ghost', scheduledStart: '2026-07-27T21:00:00.000Z' },
+    });
   });
 
   it('low_confidence → entity_confirm_candidate carrying the candidate, refKey, and partialRefs', async () => {

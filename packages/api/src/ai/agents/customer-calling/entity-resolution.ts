@@ -123,6 +123,52 @@ const TECHNICIAN_REF_INTENTS = new Set([
   'remove_crew_member',
 ]);
 
+/**
+ * VOX-02 — intents whose whole point is to OPEN a record that does not exist
+ * yet. A `not_found` on one of these is the normal, expected outcome, not a
+ * failure: `create_appointment` carrying only a `jobTitle` is auto-opened as
+ * a job at execution time (proposals/execution/handlers.ts, 95a260cd), and
+ * `create_customer`/`create_job` never had a pre-existing record to find.
+ * Only SCHEDULING_CREATE_INTENTS is reused verbatim; the rest are named here
+ * because no existing set expresses "creation intent" (the intent families
+ * above are keyed by which reference they RESOLVE, not by what they create).
+ */
+const ENTITY_CREATION_INTENTS = new Set([
+  'create_customer',
+  'create_job',
+  'create_invoice',
+  'draft_estimate',
+  ...SCHEDULING_CREATE_INTENTS,
+]);
+
+/**
+ * VOX-02 — does a `not_found` resolution for `intent` mean the caller's
+ * request cannot proceed?
+ *
+ * TRUE for intents that operate on a record that must already exist (invoice
+ * / estimate document families, appointment references, job references,
+ * technician references, and the customer-scoped lookup/update family):
+ * "send the estimate for the Miller job" is meaningless if no such estimate
+ * exists, so the caller is handed to on-call rather than left with a
+ * proposal that can never execute (46a954e1's fix — preserved).
+ *
+ * FALSE for creation intents: a caller asking to BOOK NEW WORK has, by
+ * definition, no record to find. Those fall through to `entity_resolved`
+ * with the partial refs, so the FSM reads the intent back for confirmation
+ * and the proposal carries `pendingReference` for operator review.
+ */
+export function requiresExistingEntity(intent: string): boolean {
+  if (ENTITY_CREATION_INTENTS.has(intent)) return false;
+  return (
+    INVOICE_DOC_INTENTS.has(intent) ||
+    ESTIMATE_DOC_INTENTS.has(intent) ||
+    APPOINTMENT_REF_INTENTS.has(intent) ||
+    JOB_REF_INTENTS.has(intent) ||
+    TECHNICIAN_REF_INTENTS.has(intent) ||
+    CUSTOMER_REF_INTENTS.has(intent)
+  );
+}
+
 const REF_KEY_BY_KIND: Record<EntityKind, string | undefined> = {
   customer: 'customerId',
   job: 'jobId',
