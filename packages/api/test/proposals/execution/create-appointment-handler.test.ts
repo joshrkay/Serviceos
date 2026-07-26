@@ -528,7 +528,126 @@ describe('CreateAppointmentExecutionHandler — jobTitle-no-jobId auto-open-a-jo
     expect(appointment?.jobId).toBe(jobs[0].id);
   });
 
-  it('still hard-fails when jobId/jobTitle are both absent (unchanged baseline behavior)', async () => {
+  // THE regression guard for the SMS-01/SCH-02 flake. `jobTitle` is an
+  // LLM-extracted entity the classifier emits only most of the time
+  // (measured 39/40 on the SMS-01 utterance), so gating the auto-open block
+  // on it made every voice booking a dice roll: on a miss, execution
+  // hard-failed with "Payload must include a valid jobId" and the caller's
+  // booking was silently dropped. The block now runs on customerId alone
+  // and names the job from the always-present `proposal.summary`.
+  it('auto-creates a job named proposal.summary when customerId is present but jobTitle is ABSENT', async () => {
+    const appointmentRepo = new InMemoryAppointmentRepository();
+    const assignmentRepo = new InMemoryAssignmentRepository();
+    const jobRepo = new InMemoryJobRepository();
+    const locationRepo = await makeLocationRepo();
+
+    const handler = new CreateAppointmentExecutionHandler(
+      appointmentRepo,
+      assignmentRepo,
+      { enqueue: async () => {} },
+      undefined,
+      jobRepo,
+      undefined,
+      undefined,
+      locationRepo,
+    );
+
+    const result = await handler.execute(
+      makeProposal({
+        // no jobId, no jobTitle — the classifier-miss case
+        customerId,
+        scheduledStart: '2026-08-01T14:00:00Z',
+        scheduledEnd: '2026-08-01T15:00:00Z',
+      }),
+      context,
+    );
+
+    expect(result.success).toBe(true);
+    expect(result.resultEntityId).toBeDefined();
+
+    const jobs = await jobRepo.findByTenant(tenantId);
+    expect(jobs).toHaveLength(1);
+    expect(jobs[0].customerId).toBe(customerId);
+    // Falls back to the proposal summary — never empty (non-optional on
+    // Proposal; buildProposal rejects an empty one).
+    expect(jobs[0].summary).toBe('Create appointment');
+
+    const appointment = await appointmentRepo.findById(tenantId, result.resultEntityId!);
+    expect(appointment?.jobId).toBe(jobs[0].id);
+    // Step 3 — the notes cascade also terminates in an always-present value,
+    // so a voice booking no longer persists a blank reason-for-visit.
+    expect(appointment?.notes).toBe('Create appointment');
+  });
+
+  it('names the job from jobTitle when it IS present (behaviour unchanged) and notes it as the reason', async () => {
+    const appointmentRepo = new InMemoryAppointmentRepository();
+    const jobRepo = new InMemoryJobRepository();
+    const locationRepo = await makeLocationRepo();
+
+    const handler = new CreateAppointmentExecutionHandler(
+      appointmentRepo,
+      undefined,
+      { enqueue: async () => {} },
+      undefined,
+      jobRepo,
+      undefined,
+      undefined,
+      locationRepo,
+    );
+
+    const result = await handler.execute(
+      makeProposal({
+        jobTitle: 'Furnace tune-up',
+        customerId,
+        scheduledStart: '2026-08-02T14:00:00Z',
+        scheduledEnd: '2026-08-02T15:00:00Z',
+      }),
+      context,
+    );
+
+    expect(result.success).toBe(true);
+    const jobs = await jobRepo.findByTenant(tenantId);
+    expect(jobs).toHaveLength(1);
+    expect(jobs[0].summary).toBe('Furnace tune-up');
+
+    const appointment = await appointmentRepo.findById(tenantId, result.resultEntityId!);
+    expect(appointment?.notes).toBe('Furnace tune-up');
+  });
+
+  it('still returns the service-location error when the customer has no location', async () => {
+    const appointmentRepo = new InMemoryAppointmentRepository();
+    const jobRepo = new InMemoryJobRepository();
+    // Empty location repo — the customer exists but has no service location.
+    const locationRepo = new InMemoryLocationRepository();
+
+    const handler = new CreateAppointmentExecutionHandler(
+      appointmentRepo,
+      undefined,
+      { enqueue: async () => {} },
+      undefined,
+      jobRepo,
+      undefined,
+      undefined,
+      locationRepo,
+    );
+
+    const result = await handler.execute(
+      makeProposal({
+        customerId,
+        scheduledStart: '2026-08-03T14:00:00Z',
+        scheduledEnd: '2026-08-03T15:00:00Z',
+      }),
+      context,
+    );
+
+    expect(result.success).toBe(false);
+    expect(result.error).toBe(
+      'Customer has no service location — add one before booking a new job',
+    );
+    expect(await jobRepo.findByTenant(tenantId)).toHaveLength(0);
+  });
+
+  it('still hard-fails when there is no jobId AND no customerId (unchanged baseline behavior)', async () => {
     const appointmentRepo = new InMemoryAppointmentRepository();
     const jobRepo = new InMemoryJobRepository();
     const locationRepo = await makeLocationRepo();

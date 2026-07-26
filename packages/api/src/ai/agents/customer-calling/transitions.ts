@@ -15,6 +15,7 @@ import type {
   SideEffect,
 } from './types';
 import type { EntityKind } from '../../resolution/entity-resolver';
+import { redactByTier } from '../../../logging/redact';
 import { selectRepairTemplate } from './repair-templates';
 import { EMERGENCY_SAFETY_LINE } from './emergency-detector';
 
@@ -672,6 +673,21 @@ function transitionIntentCapture(
           auditLog(updatedContext, 'intent_capture', 'entity_resolution', 'intent_classified', {
             intentType: event.intentType,
             confidence: event.confidence,
+            // "Did the classifier actually emit jobTitle?" was previously
+            // only answerable by A/B-testing the live classifier — which is
+            // how a create_appointment booking could silently depend on a
+            // non-deterministic entity for months. Log the extracted
+            // entities so the question is answerable from logs.
+            //
+            // 'strict' is required: redactByTier only applies
+            // PII_KEY_PATTERNS at the strict tier (see logging/redact.ts
+            // walk()). Strict masks customerName/displayName/email/phone/
+            // *address (any key matching /name|email|phone|address|user|
+            // tenant/i) while preserving the diagnostic fields this exists
+            // for — jobTitle, dateTimeDescription. Note check-log-safety
+            // does NOT police this (it only bans req.body / auth headers in
+            // logger.* calls), so the tier is load-bearing, not decorative.
+            entities: redactByTier(event.entities, 'strict'),
           }),
         ],
         updatedContext,

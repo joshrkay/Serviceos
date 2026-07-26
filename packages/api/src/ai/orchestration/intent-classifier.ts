@@ -1035,7 +1035,7 @@ Return valid JSON with exactly this shape (no prose, no markdown fences):
     "sendChannel": "<email|sms, optional — on send_invoice>",
     "paymentMethod": "<cash|check|card|other, optional — on record_payment>",
     "paymentReference": "<string, optional — check number or memo on record_payment>",
-    "jobTitle": "<string, optional — title of new job on create_job>",
+    "jobTitle": "<string, optional — title of new job on create_job; also the short name of the new work being scheduled on create_appointment>",
     "updatedName": "<string, optional — new name on update_customer>",
     "updatedEmail": "<string, optional — new email on update_customer>",
     "updatedPhone": "<string, optional — new phone on update_customer>",
