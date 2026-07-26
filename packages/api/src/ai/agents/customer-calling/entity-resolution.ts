@@ -223,7 +223,20 @@ export function planVoiceEntityLookups(
     lookups.push({ kind: 'customer', reference: customerName, refKey: 'customerId' });
   }
 
-  const jobReference = trimReference(entities.jobReference);
+  // The extraction schema documents `jobTitle` as "title of new job on
+  // create_job" (intent-classifier.ts) — a NAME for a job being created, not
+  // a reference to resolve. But real-LLM output is non-deterministic: for
+  // reference-needing intents (draft_estimate, create_invoice, ...) the model
+  // sometimes puts an existing-job description in `jobTitle` instead of
+  // `jobReference` (observed live: "Draft an estimate for the QA Matrix job"
+  // classified with entities.jobTitle="QA Matrix job" and no jobReference at
+  // all, silently dropping the job link and failing execution downstream).
+  // create_job/create_booking are deliberately excluded from JOB_REF_INTENTS
+  // /SCHEDULING_CREATE_INTENTS's fallback below, so this can never misread an
+  // intentional new-job title as a reference to an existing job.
+  const jobReference =
+    trimReference(entities.jobReference) ??
+    (JOB_REF_INTENTS.has(intent) ? trimReference(entities.jobTitle) : undefined);
   if (jobReference) {
     const documentKind = documentKindForReference(intent, jobReference);
     if (documentKind) {
