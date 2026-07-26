@@ -45,7 +45,29 @@ export async function voiceInput(
     label: `${label}-vinput`,
     expectStatus: [200, 400, 403, 404],
   });
-  return (res.response.body as { proposalIds?: string[] }).proposalIds ?? [];
+  const body = res.response.body as { proposalIds?: string[]; state?: string };
+  const proposalIds = body.proposalIds ?? [];
+  if (proposalIds.length > 0) return proposalIds;
+
+  // Non-emergency intents land in `intent_confirm` first (a deliberate HITL
+  // readback turn — "...is that right?") and only create the proposal after
+  // an explicit yes on the NEXT turn (packages/api/src/ai/agents/customer-calling/
+  // transitions.ts: intent_confirm -> proposal_draft on confirmation). A single
+  // utterance never produces a proposal for these intents — treating that as
+  // "AI pipeline broken" was a QA-harness bug, not a product one. Complete the
+  // confirmation turn here so the row exercises the real multi-turn flow.
+  if (body.state === 'intent_confirm') {
+    const confirmRes = await h.api.call({
+      method: 'POST',
+      path: `/api/voice/sessions/${sessionId}/input`,
+      body: { text: "Yes, that's correct." },
+      token,
+      label: `${label}-vinput-confirm`,
+      expectStatus: [200, 400, 403, 404],
+    });
+    return (confirmRes.response.body as { proposalIds?: string[] }).proposalIds ?? [];
+  }
+  return proposalIds;
 }
 
 export async function approveAndAwaitExecution(
