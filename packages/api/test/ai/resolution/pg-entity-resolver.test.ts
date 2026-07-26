@@ -28,6 +28,7 @@ interface MockRow {
   invoice_number?: string;
   doc_number?: string;
   scheduled_start?: string;
+  job_id?: string;
   score?: number;
 }
 
@@ -539,6 +540,136 @@ describe('PgEntityResolver — appointment', () => {
     if (result.kind === 'ambiguous') {
       expect(result.candidates).toHaveLength(2);
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// SCH-03 — job-scoped appointment fallback ("that job" isn't a date phrase)
+// ---------------------------------------------------------------------------
+
+describe('PgEntityResolver — appointment job-scoped fallback (SCH-03)', () => {
+  const JOB_ID = 'job-42';
+
+  it('unparseable reference + jobId + one upcoming appointment → resolved', async () => {
+    const futureDate = new Date();
+    futureDate.setUTCDate(futureDate.getUTCDate() + 3);
+
+    const { pool, calls } = makeMockPool([
+      undefined,
+      [
+        {
+          id: 'appt-job-1',
+          job_id: JOB_ID,
+          scheduled_start: futureDate.toISOString(),
+          status: 'scheduled',
+        },
+      ],
+    ]);
+
+    const resolver = new PgEntityResolver(pool);
+    const result = await resolver.resolve({
+      tenantId: TENANT_ID,
+      reference: 'that job',
+      kind: 'appointment',
+      jobId: JOB_ID,
+    });
+
+    expect(result.kind).toBe('resolved');
+    if (result.kind === 'resolved') {
+      expect(result.candidate.id).toBe('appt-job-1');
+      expect(result.candidate.kind).toBe('appointment');
+    }
+
+    const businessQuery = calls.find((c) => c.sql.includes('FROM appointments'));
+    expect(businessQuery).toBeDefined();
+    expect(businessQuery!.sql).toMatch(/tenant_id\s*=\s*\$1/);
+    expect(businessQuery!.sql).toMatch(/job_id\s*=\s*\$2/);
+    expect(businessQuery!.sql).toMatch(/status\s*<>\s*'canceled'/);
+    expect(businessQuery!.sql).toMatch(/scheduled_start\s*>=\s*now\(\)/);
+    expect(businessQuery!.params).toEqual([TENANT_ID, JOB_ID]);
+  });
+
+  it('unparseable reference + jobId + two upcoming appointments → ambiguous', async () => {
+    const futureDate = new Date();
+    futureDate.setUTCDate(futureDate.getUTCDate() + 3);
+
+    const { pool } = makeMockPool([
+      undefined,
+      [
+        { id: 'appt-1', job_id: JOB_ID, scheduled_start: futureDate.toISOString(), status: 'scheduled' },
+        { id: 'appt-2', job_id: JOB_ID, scheduled_start: futureDate.toISOString(), status: 'scheduled' },
+      ],
+    ]);
+
+    const resolver = new PgEntityResolver(pool);
+    const result = await resolver.resolve({
+      tenantId: TENANT_ID,
+      reference: 'that job',
+      kind: 'appointment',
+      jobId: JOB_ID,
+    });
+
+    expect(result.kind).toBe('ambiguous');
+    if (result.kind === 'ambiguous') {
+      expect(result.candidates).toHaveLength(2);
+      expect(result.candidates.map((c) => c.id)).toEqual(['appt-1', 'appt-2']);
+    }
+  });
+
+  it('unparseable reference + jobId + zero upcoming appointments → not_found', async () => {
+    const { pool } = makeMockPool([undefined, []]);
+
+    const resolver = new PgEntityResolver(pool);
+    const result = await resolver.resolve({
+      tenantId: TENANT_ID,
+      reference: 'that job',
+      kind: 'appointment',
+      jobId: JOB_ID,
+    });
+
+    expect(result.kind).toBe('not_found');
+    if (result.kind === 'not_found') {
+      expect(result.reference).toBe('that job');
+    }
+  });
+
+  it('unparseable reference WITHOUT jobId returns not_found without querying the DB (no fallback)', async () => {
+    const { pool, calls } = makeMockPool([]);
+
+    const resolver = new PgEntityResolver(pool);
+    const result = await resolver.resolve({
+      tenantId: TENANT_ID,
+      reference: 'that job',
+      kind: 'appointment',
+    });
+
+    expect(result.kind).toBe('not_found');
+    expect(calls.filter((c) => c.sql.includes('FROM appointments'))).toHaveLength(0);
+  });
+
+  it('a PARSEABLE reference still uses the date-range query even when jobId is present (date wins)', async () => {
+    const futureDate = new Date();
+    futureDate.setUTCDate(futureDate.getUTCDate() + 1);
+
+    const { pool, calls } = makeMockPool([
+      undefined,
+      [{ id: 'appt-date', scheduled_start: futureDate.toISOString(), status: 'scheduled' }],
+    ]);
+
+    const resolver = new PgEntityResolver(pool);
+    const result = await resolver.resolve({
+      tenantId: TENANT_ID,
+      reference: 'tomorrow',
+      kind: 'appointment',
+      jobId: JOB_ID,
+    });
+
+    expect(result.kind).toBe('resolved');
+    if (result.kind === 'resolved') {
+      expect(result.candidate.id).toBe('appt-date');
+    }
+    const businessQuery = calls.find((c) => c.sql.includes('FROM appointments'));
+    expect(businessQuery!.sql).not.toMatch(/job_id/);
   });
 });
 

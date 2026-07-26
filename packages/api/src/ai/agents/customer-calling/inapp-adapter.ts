@@ -445,10 +445,15 @@ export class InAppVoiceAdapter {
     tenantId: string,
     intent: string,
     entities: Record<string, unknown>,
+    // SCH-03 — the FSM's sticky context.jobId (set whenever a job was
+    // resolved on any earlier turn this call). Only consulted by
+    // resolveSchedulingEntities for cancel/reschedule/reassign_appointment
+    // when the appointment reference isn't a date phrase.
+    stickyJobId?: string,
   ): Promise<SchedulingEntityResolution> {
     const resolver = this.getEntityResolver();
     try {
-      return await resolveSchedulingEntities(resolver, tenantId, intent, entities);
+      return await resolveSchedulingEntities(resolver, tenantId, intent, entities, stickyJobId);
     } catch {
       return { status: 'resolved', refs: {} };
     }
@@ -596,6 +601,7 @@ export class InAppVoiceAdapter {
       tenantId,
       intent,
       entities as Record<string, unknown>,
+      context.jobId,
     );
     if (resolution.status !== 'ambiguous' || !resolution.ambiguous) {
       return undefined;
@@ -982,6 +988,7 @@ export class InAppVoiceAdapter {
         session.tenantId,
         fsmEvent.intentType,
         fsmEvent.entities,
+        session.machine.currentContext.jobId,
       );
       const resolutionEvent = await this.toResolutionEvent(session.tenantId, resolution);
       const effects2 = session.machine.dispatch(resolutionEvent);

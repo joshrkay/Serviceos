@@ -167,6 +167,18 @@ export interface CallingAgentContext {
   conversationId?: string;    // in-app only
   customerId?: string;        // set after identifying
   /**
+   * SCH-03 — sticky job anchor, set whenever a job gets resolved for ANY
+   * intent (entity_resolved / entity_confirm_affirmed in transitions.ts).
+   * Mirrors `customerId`'s persistence semantics exactly: it survives the
+   * `correction` / `intent_classified`-as-correction / `second_intent` /
+   * `second_intent_via_classify` resets that clear `extractedEntities`, so
+   * a later turn's "cancel the appointment for that job" can fall back to
+   * it even though the classifier can't re-derive a job from that single
+   * utterance. Never set from anywhere but a genuine resolver hit — a
+   * fresh session/call always starts with this undefined.
+   */
+  jobId?: string;
+  /**
    * QA-2026-06-04: classifier confidence captured at intent_classified so the
    * eventual create_proposal side-effect can thread a REAL confidenceScore
    * into the proposal (auto-approve thresholds). Without it the calling-agent

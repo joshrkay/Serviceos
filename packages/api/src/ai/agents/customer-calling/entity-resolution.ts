@@ -101,6 +101,22 @@ const APPOINTMENT_REF_INTENTS = new Set([
   'reassign_appointment',
 ]);
 
+/**
+ * SCH-03 — intents whose appointment reference is often anchored to a job
+ * discussed earlier in the same call ("cancel the upcoming appointment for
+ * that job") rather than a date phrase. When the reference doesn't parse as
+ * a date, these intents fall back to the caller's sticky `context.jobId`
+ * (transitions.ts) so the resolver can look up the job's own appointments
+ * (appointments.job_id, idx_appointments_job) instead of returning
+ * `not_found`. confirm_appointment is deliberately excluded — it has no
+ * "for that job" phrasing in the corpus and stays date-only.
+ */
+const APPOINTMENT_JOB_FALLBACK_INTENTS = new Set([
+  'cancel_appointment',
+  'reschedule_appointment',
+  'reassign_appointment',
+]);
+
 const TECHNICIAN_REF_INTENTS = new Set([
   'reassign_appointment',
   'add_crew_member',
@@ -121,6 +137,12 @@ export interface VoiceEntityLookup {
   kind: EntityKind;
   reference: string;
   refKey: string;
+  /**
+   * SCH-03 — sticky job anchor threaded to the resolver for `kind:
+   * 'appointment'` lookups on APPOINTMENT_JOB_FALLBACK_INTENTS. Only set
+   * when the caller supplied a stickyJobId to `planVoiceEntityLookups`.
+   */
+  jobId?: string;
 }
 
 export interface ParsedWindow {
@@ -214,6 +236,7 @@ function documentKindForReference(intent: string, reference: string): 'invoice' 
 export function planVoiceEntityLookups(
   intent: string,
   entities: Record<string, unknown>,
+  stickyJobId?: string,
 ): VoiceEntityLookup[] {
   const lookups: VoiceEntityLookup[] = [];
 
@@ -271,6 +294,12 @@ export function planVoiceEntityLookups(
       kind: 'appointment',
       reference: appointmentReference,
       refKey: 'appointmentId',
+      // SCH-03 — anchor to the sticky session jobId only for the intents
+      // where a bare job reference ("that job") is plausible; the resolver
+      // only uses this when the reference fails to parse as a date.
+      ...(stickyJobId && APPOINTMENT_JOB_FALLBACK_INTENTS.has(intent)
+        ? { jobId: stickyJobId }
+        : {}),
     });
   }
 
@@ -323,6 +352,7 @@ async function resolvePlannedLookups(
       tenantId,
       reference: lookup.reference,
       kind: lookup.kind,
+      ...(lookup.jobId ? { jobId: lookup.jobId } : {}),
     });
     const terminal = foldResolution(
       result,
@@ -341,6 +371,13 @@ export async function resolveSchedulingEntities(
   tenantId: string,
   intent: string,
   entities: Record<string, unknown>,
+  /**
+   * SCH-03 — the caller's sticky `context.jobId` (transitions.ts), carried
+   * forward across turns the same way `context.customerId` is. Only
+   * consulted for APPOINTMENT_JOB_FALLBACK_INTENTS, and only when the
+   * appointment reference fails to parse as a date.
+   */
+  stickyJobId?: string,
 ): Promise<SchedulingEntityResolution> {
   const refs: Record<string, string> = {};
 
@@ -382,7 +419,7 @@ export async function resolveSchedulingEntities(
     }
   }
 
-  const planned = planVoiceEntityLookups(intent, entities).filter((lookup) => {
+  const planned = planVoiceEntityLookups(intent, entities, stickyJobId).filter((lookup) => {
     if (lookup.refKey === 'customerId' && refs.customerId) return false;
     if (lookup.refKey === 'jobId' && refs.jobId) return false;
     if (lookup.refKey === 'appointmentId' && refs.appointmentId) return false;
@@ -453,7 +490,12 @@ export async function resolveVoiceEntityReferences(
   if (input.verifiedCustomerId) delete entities.customerName;
   if (input.verifiedJobId) delete entities.jobReference;
 
-  const planned = planVoiceEntityLookups(input.intent, entities);
+  // SCH-03 — the already-known job (verifiedJobId) doubles as the sticky
+  // anchor for an appointment reference that isn't a date phrase ("that
+  // job"). Only consulted by planVoiceEntityLookups for
+  // APPOINTMENT_JOB_FALLBACK_INTENTS, and only when the resolver's date
+  // parse misses.
+  const planned = planVoiceEntityLookups(input.intent, entities, input.verifiedJobId);
   if (planned.length === 0) return ok;
 
   const results = await Promise.all(
@@ -465,6 +507,7 @@ export async function resolveVoiceEntityReferences(
             tenantId: input.tenantId,
             reference: lookup.reference,
             kind: lookup.kind,
+            ...(lookup.jobId ? { jobId: lookup.jobId } : {}),
           }),
         };
       } catch {

@@ -38,8 +38,9 @@ export class PgEntityResolver implements EntityResolver {
     tenantId: string;
     reference: string;
     kind: EntityKind;
+    jobId?: string;
   }): Promise<EntityResolverResult> {
-    const { tenantId, reference, kind } = input;
+    const { tenantId, reference, kind, jobId } = input;
 
     // Guard: empty/null/whitespace-only references are not resolvable.
     if (!reference || reference.trim() === '') {
@@ -54,7 +55,7 @@ export class PgEntityResolver implements EntityResolver {
       case 'invoice':
         return this.resolveInvoice(tenantId, reference);
       case 'appointment':
-        return this.resolveAppointment(tenantId, reference);
+        return this.resolveAppointment(tenantId, reference, jobId);
       case 'estimate':
         return this.resolveEstimate(tenantId, reference);
       case 'technician':
@@ -251,10 +252,14 @@ export class PgEntityResolver implements EntityResolver {
   private async resolveAppointment(
     tenantId: string,
     reference: string,
+    jobId?: string,
   ): Promise<EntityResolverResult> {
     const parsed = parseDateReference(reference);
     if (!parsed) {
-      return { kind: 'not_found', reference };
+      if (!jobId) {
+        return { kind: 'not_found', reference };
+      }
+      return this.resolveAppointmentByJob(tenantId, reference, jobId);
     }
 
     // Schema column is `scheduled_start`; appointments have no title — label is
@@ -276,6 +281,58 @@ export class PgEntityResolver implements EntityResolver {
             ORDER BY scheduled_start ASC
             LIMIT 5`,
           [tenantId, parsed.start.toISOString(), parsed.end.toISOString()],
+        )
+        .then((r) => r.rows),
+    );
+
+    if (rows.length === 0) {
+      return { kind: 'not_found', reference };
+    }
+
+    const candidates: EntityCandidate[] = rows.map((row) => ({
+      id: row.id,
+      kind: 'appointment' as EntityKind,
+      label: new Date(row.scheduled_start).toISOString(),
+      hint: row.status ?? undefined,
+      score: 1.0,
+    }));
+
+    if (candidates.length === 1) {
+      return { kind: 'resolved', candidate: candidates[0] };
+    }
+    return { kind: 'ambiguous', candidates };
+  }
+
+  /**
+   * SCH-03 — job-scoped fallback for appointment references that aren't date
+   * phrases ("that job", "the appointment for that job"). `appointments.job_id`
+   * is a real, indexed FK (idx_appointments_job), so this is an index-supported
+   * lookup rather than a fuzzy guess. Scoped to upcoming, non-canceled
+   * appointments — the same "not a reschedule/cancel target" exclusion the
+   * date-based branch above applies to canceled rows.
+   */
+  private async resolveAppointmentByJob(
+    tenantId: string,
+    reference: string,
+    jobId: string,
+  ): Promise<EntityResolverResult> {
+    const rows = await withTenantConnection(this.pool, tenantId, (client) =>
+      client
+        .query<{
+          id: string;
+          job_id: string;
+          scheduled_start: string;
+          status: string | null;
+        }>(
+          `SELECT id, job_id, scheduled_start, status
+             FROM appointments
+            WHERE tenant_id = $1
+              AND job_id = $2
+              AND status <> 'canceled'
+              AND scheduled_start >= now()
+            ORDER BY scheduled_start ASC
+            LIMIT 5`,
+          [tenantId, jobId],
         )
         .then((r) => r.rows),
     );

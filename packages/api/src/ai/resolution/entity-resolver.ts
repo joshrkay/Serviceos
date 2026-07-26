@@ -86,5 +86,13 @@ export interface EntityResolver {
     tenantId: string;
     reference: string;
     kind: EntityKind;
+    /**
+     * SCH-03 — optional job anchor for `kind: 'appointment'` lookups. When
+     * the reference doesn't parse as a date phrase ("that job" / "the
+     * appointment for that job"), PgEntityResolver falls back to the job's
+     * own upcoming appointments instead of returning `not_found`. Ignored
+     * by every other kind.
+     */
+    jobId?: string;
   }): Promise<EntityResolverResult>;
 }

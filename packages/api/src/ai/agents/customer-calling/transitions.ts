@@ -825,6 +825,10 @@ function transitionEntityResolution(
         ...context,
         extractedEntities: { ...context.extractedEntities, ...event.refs },
         pendingEntityAmbiguity: undefined,
+        // SCH-03 — stash the resolved job on the sticky session-level
+        // jobId (same persistence as customerId) so a later turn's
+        // non-date appointment reference ("that job") can fall back to it.
+        ...(event.refs.jobId ? { jobId: event.refs.jobId } : {}),
       },
     };
   }
@@ -920,6 +924,9 @@ function transitionEntityConfirm(
         ...context,
         extractedEntities: { ...context.extractedEntities, ...refs },
         pendingEntityConfirmation: undefined,
+        // SCH-03 — same sticky stash as the entity_resolved path above,
+        // for the middle-confidence-band job match the caller just confirmed.
+        ...(refs.jobId ? { jobId: refs.jobId } : {}),
       },
     };
   }
