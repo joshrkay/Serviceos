@@ -1,5 +1,14 @@
 import { expect, matrixTest, test, type RowHarness } from './helpers/matrix-test';
 import { startVoiceSession, voiceInput, approveAndAwaitExecution } from './helpers/voice-flow';
+// QA-2026-07-26 — VOX-11 asserts against the SHIPPED inbox response type, not a
+// hand-written structural cast. GET /api/proposals/inbox returns
+// `data: PrioritizedProposal[]`, i.e. the proposal is NESTED at `.proposal`.
+// The previous inline `Array<{ id: string }>` cast type-checked fine and made
+// every `p.id` `undefined`, so the row failed 100% of the time regardless of
+// product behaviour. Importing the real type makes that class of drift a
+// compile error instead of a silent false negative. (Same cross-package
+// type-import convention as voice-extras.spec.ts.)
+import type { PrioritizedProposal } from '../../packages/api/src/proposals/prioritization';
 
 /**
  * VOX-05..VOX-11 — voice-triggered billing funnel + inbox/timeline/session linkage.
@@ -277,8 +286,8 @@ matrixTest('VOX-11', 'Voice-created proposal appears in proposal inbox', async (
     label: '11-inbox',
     expectStatus: 200,
   });
-  const data = (inbox.response.body as { data?: Array<{ id: string }> }).data ?? [];
-  const found = data.some((p) => p.id === flow.proposalId);
+  const data = (inbox.response.body as { data?: PrioritizedProposal[] }).data ?? [];
+  const found = data.some((p) => p.proposal.id === flow.proposalId);
   if (!found) {
     h.evidence.fail(`Proposal ${flow.proposalId} not found in GET /api/proposals/inbox.`);
     return;

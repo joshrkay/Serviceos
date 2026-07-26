@@ -111,6 +111,20 @@ async function ensureTenantFixture(client: Client, slug: string): Promise<Fixtur
   // does not depend on this row — it creates its own non-consenting customer
   // via chain(h, false, '02'). The ambiguous pair below stays non-consenting;
   // its consent is irrelevant to what it tests.
+  //
+  // QA-2026-07-26 — email MUST be set on this primary customer. VOX-06 speaks
+  // "send estimate <number> to the customer by email"; the estimate is seeded
+  // against h.tenantA.jobId, which is THIS customer's job, so SendService
+  // resolves the recipient from this row. resolveTargets()
+  // (packages/api/src/notifications/send-service.ts) throws
+  // "Cannot send email — no email provided and customer has no email on file"
+  // when customers.email is NULL, and it throws BEFORE the status:'sent' write
+  // — so the proposal lands in execution_failed and the estimate stays 'draft',
+  // failing VOX-06 for a fixture reason rather than a product one. The address
+  // is deliberately non-routable (.local is reserved by RFC 6762 and never
+  // resolves publicly); non-prod is also structurally incapable of real
+  // delivery (b7e3a8e9), so this is belt-and-braces. Do NOT add an email to the
+  // ambiguous pair below — VOX-12/VOX-13 test phone ambiguity and need neither.
   const customerDisplay = `${slug}-customer`;
   const existingCustomer = await client.query(
     `SELECT id FROM customers WHERE tenant_id = $1 AND display_name = $2 LIMIT 1`,
@@ -121,11 +135,20 @@ async function ensureTenantFixture(client: Client, slug: string): Promise<Fixtur
     (await client
       .query(
         `INSERT INTO customers
-           (id, tenant_id, first_name, last_name, display_name, primary_phone, preferred_channel,
-            sms_consent, is_archived, created_by, created_at, updated_at)
-         VALUES ($1, $2, $3, $4, $5, $6, 'none', true, false, $7, now(), now())
+           (id, tenant_id, first_name, last_name, display_name, primary_phone, email,
+            preferred_channel, sms_consent, is_archived, created_by, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, 'none', true, false, $8, now(), now())
          RETURNING id`,
-        [randomUUID(), tenantId, 'QA', slug, customerDisplay, '555-0100', systemUser]
+        [
+          randomUUID(),
+          tenantId,
+          'QA',
+          slug,
+          customerDisplay,
+          '555-0100',
+          `${customerDisplay}@qa.serviceos.local`,
+          systemUser,
+        ]
       )
       .then((r) => r.rows[0].id));
 
