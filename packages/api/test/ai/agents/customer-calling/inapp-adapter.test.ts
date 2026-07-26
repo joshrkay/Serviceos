@@ -15,6 +15,10 @@ import type { CatalogPricingOutcome } from '../../../../src/ai/resolution/catalo
 import {
   DraftEstimateExecutionHandler,
 } from '../../../../src/proposals/execution/handlers';
+import {
+  SendEstimateExecutionHandler,
+  NoopEstimateDeliveryProvider,
+} from '../../../../src/proposals/execution/voice-extended-handlers';
 import { InMemoryCustomerRepository } from '../../../../src/customers/customer';
 import type { Customer } from '../../../../src/customers/customer';
 import type { EntityResolver } from '../../../../src/ai/resolution/entity-resolver';
@@ -1049,6 +1053,76 @@ describe('QA-2026-07-26 — voice-drafted estimate line items (lineItemDescripti
       expect(proposals).toHaveLength(1);
       expect(proposals[0].status).not.toBe('approved');
       expect(proposals[0].confidenceScore).toBeLessThanOrEqual(0.85);
+    });
+
+    // QA-2026-07-26 VOX-06: the classifier only emits `sendChannel`, the
+    // send_* task contracts read `channel`. The flat-promotion loop copies
+    // entity keys verbatim, so the persisted payload had sendChannel and no
+    // channel — "send estimate EST-0033 to the customer by email" classified,
+    // resolved and got approved, then failed execution with "Payload must
+    // specify channel as email or sms". The alias mirrors the non-voice
+    // path's `channel: ee.sendChannel ?? 'email'` (voice-extended-tasks.ts).
+    it('a send_estimate create_proposal effect promotes entities.sendChannel to payload.channel so SendEstimateExecutionHandler executes successfully', async () => {
+      const estimateUuid = '550e8400-e29b-41d4-a716-446655440000';
+      const adapter = buildAdapter();
+      const { sessionId } = await adapter.startSession(TENANT, USER);
+      const session = store.peek(sessionId);
+      if (!session) throw new Error('test session missing');
+
+      const proposalId = await callHandleCreateProposal(adapter, session, {
+        type: 'create_proposal',
+        payload: {
+          tenantId: TENANT,
+          intent: 'send_estimate',
+          entities: {
+            estimateId: estimateUuid,
+            estimateReference: 'EST-0033',
+            sendChannel: 'email',
+          },
+          sessionId: session.id,
+          confidence: 0.9,
+        },
+      });
+
+      expect(proposalId).toBeDefined();
+      const proposals = await proposalRepo.findByTenant(TENANT);
+      expect(proposals).toHaveLength(1);
+      const proposal = proposals[0];
+      expect(proposal.proposalType).toBe('send_estimate');
+      // BEFORE this fix payload.channel was undefined here.
+      expect(proposal.payload.channel).toBe('email');
+      // The raw classifier key is still carried for audit/rendering.
+      expect(proposal.payload.sendChannel).toBe('email');
+
+      const provider = new NoopEstimateDeliveryProvider();
+      const result = await new SendEstimateExecutionHandler(provider).execute(proposal, {
+        tenantId: TENANT,
+        executedBy: 'operator-1',
+      });
+      expect(result.success).toBe(true);
+      expect(provider.lastDispatch?.channel).toBe('email');
+    });
+
+    it('a send_estimate effect with sendChannel=sms promotes sms, not a hardcoded email default', async () => {
+      const estimateUuid = '550e8400-e29b-41d4-a716-446655440000';
+      const adapter = buildAdapter();
+      const { sessionId } = await adapter.startSession(TENANT, USER);
+      const session = store.peek(sessionId);
+      if (!session) throw new Error('test session missing');
+
+      await callHandleCreateProposal(adapter, session, {
+        type: 'create_proposal',
+        payload: {
+          tenantId: TENANT,
+          intent: 'send_estimate',
+          entities: { estimateId: estimateUuid, sendChannel: 'sms' },
+          sessionId: session.id,
+          confidence: 0.9,
+        },
+      });
+
+      const proposals = await proposalRepo.findByTenant(TENANT);
+      expect(proposals[0].payload.channel).toBe('sms');
     });
   });
 });

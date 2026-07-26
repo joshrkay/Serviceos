@@ -1414,11 +1414,13 @@ export class InAppVoiceAdapter {
       // this adapter only nested the raw classifier entities, so EVERY
       // voice execution failed its handler validation (live:
       // 'Payload must include a non-empty name' / 'a valid jobId').
-      // Promote primitive entity values to the payload top level — the
-      // classifier's entity keys ARE the task-contract field names — while
+      // Promote primitive entity values to the payload top level — for MOST
+      // entities the classifier's key IS the task-contract field name — while
       // keeping `entities` intact for audit/rendering. Reserved envelope
-      // keys are never clobbered, and create_customer's displayName→name
-      // alias mirrors the assistant route's translation.
+      // keys are never clobbered. Where the two vocabularies DIVERGE the
+      // generic loop is not enough and an explicit alias is required below
+      // (create_customer's displayName→name, send_*'s sendChannel→channel);
+      // both mirror translations the non-voice routes already perform.
       const RESERVED = new Set(['intent', 'entities', 'sessionId', 'conversationId', 'callSid', 'customerId', 'confidence']);
       const flat: Record<string, unknown> = {};
       for (const [k, v] of Object.entries(entities)) {
@@ -1426,6 +1428,19 @@ export class InAppVoiceAdapter {
         if (typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean') flat[k] = v;
       }
       if (typeof entities.displayName === 'string' && flat.name === undefined) flat.name = entities.displayName;
+      // QA-2026-07-26: the intent classifier only ever emits `sendChannel`
+      // (intent-classifier.ts ExtractedEntities), but the send_estimate /
+      // send_invoice task contracts — and therefore their execution handlers
+      // (proposals/execution/voice-extended-handlers.ts, which reject with
+      // 'Payload must specify channel as email or sms') — read `channel`.
+      // The generic loop above copies the key verbatim, so the voice payload
+      // carried sendChannel:'email' and no channel at all: the live VOX-06
+      // failure ("send estimate EST-0033 to the customer by email" classified,
+      // resolved and approved, then died at execution). Alias it here,
+      // mirroring the non-voice path's `channel: ee.sendChannel ?? 'email'`
+      // (ai/tasks/voice-extended-tasks.ts:517). Only set when absent so an
+      // explicit `channel` entity always wins.
+      if (typeof entities.sendChannel === 'string' && flat.channel === undefined) flat.channel = entities.sendChannel;
       // QA-2026-07-26: customerId stays in RESERVED above (never promoted by
       // the generic loop) because the top-level `payload.customerId` this
       // envelope also carries (see transitions.ts transitionIntentConfirm)
