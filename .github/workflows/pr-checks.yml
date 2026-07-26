@@ -244,3 +244,95 @@ jobs:
       - name: Corpus duplicate gate (non-blocking until generator dedup follow-up)
         continue-on-error: true
         run: npm run corpus:dedup
+
+  # Voice-quality cassette-drift guard.
+  #
+  # WHY THIS EXISTS SEPARATELY FROM THE `voice-quality` JOB
+  #
+  # The cassette lookup key is sha256({model, prompt, schema}) where `prompt`
+  # is the full messages array — so a SINGLE BYTE anywhere in the ~37KB
+  # classifier SYSTEM_PROMPT re-keys every entry in every cassette at once.
+  # When that happens the corpus suite goes ~64-red, but each failure surfaces
+  # as a rubric assertion ("expected intent 'draft_estimate', got '<none>'")
+  # because the drift error is thrown inside a turn and swallowed by the
+  # runner. The actionable "run voice-quality:refresh" line is buried in
+  # stderr. Commit d39e5708 (an 8-line DOC-COMMENT addition inside the
+  # classifier prompt) did exactly this and went unfixed.
+  #
+  # Two things made that invisible, and this job fixes both:
+  #   1. `voice-quality` has `needs: [test]`, so while `test` is red this
+  #      signal never runs at all. This job has NO `needs:` — sibling to
+  #      `corpus-integrity` — so drift reports even on a red-test PR.
+  #   2. The message was buried. This job reports ONLY drift, in one line.
+  #
+  # WHY IT CHECKS THE REAL CONDITION, NOT A PATH HEURISTIC
+  #
+  # The tempting cheap guard is "prompt file changed && cassettes didn't".
+  # That has a false-positive trap with no escape hatch: editing a comment
+  # OUTSIDE the prompt string changes no hash, so `voice-quality:refresh`
+  # would produce an EMPTY diff and the author could never satisfy the guard.
+  # A false positive that blocks PRs is worse than no guard. Since the whole
+  # replay suite runs offline in ~3s, this job just runs it and looks for the
+  # actual drift error — zero false positives by construction.
+  #
+  # SCOPE: this job fails ONLY on cassette drift. Genuine rubric/agent
+  # regressions are the `voice-quality` job's business and are deliberately
+  # NOT failed here, so a red mark on this job always means exactly one
+  # thing and always has exactly one fix.
+  voice-quality-cassette-drift:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: '.nvmrc'
+          cache: 'npm'
+      - run: npm ci
+      # Replay mode is the default. Never set
+      # VOICE_QUALITY_ALLOW_CASSETTE_FALLBACK here — the strict default is
+      # what makes a green gate PROVE cassettes match the current prompts.
+      # `|| true` keeps non-drift failures from failing THIS job; the grep
+      # below is the only thing that decides its verdict.
+      - name: Replay voice-quality corpus (drift detection only)
+        run: |
+          set -o pipefail
+          npx vitest run -c vitest.voice-quality.config.ts 2>&1 \
+            | tee /tmp/vq-replay.log || true
+        working-directory: packages/api
+      - name: Fail on cassette drift
+        run: |
+          if grep -q "cassette drift" /tmp/vq-replay.log; then
+            echo "::error title=Voice-quality cassette drift::Cassettes are stale — run 'npm run voice-quality:refresh' in packages/api and commit the cassette diff."
+            echo ""
+            echo "================================================================"
+            echo " VOICE-QUALITY CASSETTE DRIFT"
+            echo "================================================================"
+            echo ""
+            echo "A prompt used by the voice agent changed without the cassettes"
+            echo "being re-recorded. The cassette key is a sha256 over the FULL"
+            echo "system prompt, so one changed byte invalidates every entry —"
+            echo "expect the whole corpus red, not one test."
+            echo ""
+            echo "FIX (offline, ~3 seconds, no API key, costs \$0):"
+            echo ""
+            echo "    cd packages/api"
+            echo "    npm run voice-quality:refresh"
+            echo "    git add src/ai/voice-quality/corpus/cassettes"
+            echo ""
+            echo "Re-recording uses the deterministic in-repo ScriptAwareMockGateway,"
+            echo "NOT a live LLM. It makes no network calls."
+            echo ""
+            echo "Runbook: docs/superpowers/runbooks/voice-quality-cassette-refresh.md"
+            echo ""
+            echo "Do NOT set VOICE_QUALITY_ALLOW_CASSETTE_FALLBACK=1 to silence this."
+            echo "That re-introduces the documented silent-stale-response hazard:"
+            echo "docs/solutions/test-failures/voice-quality-cassette-drift-serves-stale-response.md"
+            echo ""
+            echo "Drifted scripts:"
+            grep -o "cassette drift: scriptId=[A-Za-z0-9_-]*" /tmp/vq-replay.log \
+              | sed 's/.*scriptId=/  - /' | sort -u
+            echo "================================================================"
+            exit 1
+          fi
+          echo "No cassette drift detected."
