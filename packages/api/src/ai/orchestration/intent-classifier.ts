@@ -546,6 +546,10 @@ Supported intents (return exactly ONE):
 - "draft_estimate"      — user wants to draft a new estimate/quote before work starts.
                            Example: "Draft an estimate for the Johnson water heater"
 - "create_appointment"  — user wants to schedule a new appointment or follow-up.
+                           Extract jobTitle (a short name for the new work
+                           being scheduled), dateTimeDescription (when they
+                           want it scheduled), and customerName if a specific
+                           customer is named.
                            Example: "Schedule a follow-up for Mrs Lee next Tuesday at 2pm"
 - "update_invoice"      — user wants to ADD or REMOVE a line item on an EXISTING
                            draft invoice. Requires an explicit invoice reference
@@ -692,7 +696,10 @@ Supported intents (return exactly ONE):
                            customer (email or SMS). This is a customer
                            comms action — never auto-execute, always
                            require a screen-tap approval. Extract the
-                           estimate reference and sendChannel.
+                           estimate number or description into jobReference
+                           (the shared reference field used to look up
+                           estimates/invoices/jobs), and sendChannel (email
+                           or sms).
                            Examples: "Send estimate EST-0042 to Sarah"
                                      "Email the Jones estimate"
                                      "Text the Miller estimate to them"
