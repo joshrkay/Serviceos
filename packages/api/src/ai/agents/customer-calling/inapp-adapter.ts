@@ -1268,6 +1268,30 @@ export class InAppVoiceAdapter {
         if (typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean') flat[k] = v;
       }
       if (typeof entities.displayName === 'string' && flat.name === undefined) flat.name = entities.displayName;
+      // QA-2026-07-26: customerId stays in RESERVED above (never promoted by
+      // the generic loop) because the top-level `payload.customerId` this
+      // envelope also carries (see transitions.ts transitionIntentConfirm)
+      // is context.customerId — the authenticated in-app OPERATOR's identity
+      // (used only for `createdBy` below), not a CRM customer, and is
+      // undefined for every in-app session by design (see the
+      // operator_session comment earlier in this file). Blindly promoting
+      // entities.customerId through the generic loop would have been safe
+      // value-wise but relied on incidental ordering; being explicit here
+      // documents intent and can't be silently broken by a future RESERVED
+      // edit. The *resolved* customer UUID execution handlers actually need
+      // lives in entities.customerId — populated by the entity-resolution
+      // refs merge (transitions.ts `entity_resolved` handler folds
+      // event.refs, including a resolver-validated customerId, into
+      // extractedEntities). Without this, the outgoing proposal payload had
+      // no customerId at all, and DraftEstimateExecutionHandler.execute()
+      // (proposals/execution/handlers.ts) reads payload.customerId directly,
+      // throwing "Estimate draft has neither a customerId nor a jobId" —
+      // the live VOX-05 (and create_booking/SMS-01) QA-matrix failure. Only
+      // set it when a resolved value is actually present so we never write
+      // an explicit `undefined` over some future legitimate default.
+      if (typeof entities.customerId === 'string' && entities.customerId.length > 0) {
+        flat.customerId = entities.customerId;
+      }
       const proposal = buildProposal({
         tenantId: session.tenantId,
         proposalType,
