@@ -138,6 +138,34 @@ function notifyOncall(context: CallingAgentContext, reason: string): SideEffect 
   };
 }
 
+/**
+ * Shared escalation used both when an entity reference resolves to nothing
+ * (`entity_not_found` in `entity_resolution`) and when a middle-confidence
+ * candidate is declined/unclear/timed out (`entity_confirm`). Same TTS,
+ * same on-call notification, same escalationReason — the caller experience
+ * is identical either way: "couldn't find/confirm the record, connecting
+ * you with a team member."
+ */
+function escalateEntityNotFound(
+  fromState: CallingAgentState,
+  eventType: string,
+  context: CallingAgentContext
+): TransitionResult {
+  return {
+    nextState: 'escalating',
+    sideEffects: [
+      auditLog(context, fromState, 'escalating', eventType),
+      ttsPlay("I wasn't able to find the record you're referring to. Let me connect you with a team member."),
+      notifyOncall(context, 'entity_not_found'),
+    ],
+    updatedContext: {
+      ...context,
+      escalationReason: 'entity_not_found',
+      pendingEntityConfirmation: undefined,
+    },
+  };
+}
+
 /** Ignored-event log: same state, log only */
 function ignoredTransition(
   state: CallingAgentState,
@@ -832,18 +860,77 @@ function transitionEntityResolution(
 
   // entity_not_found → escalate
   if (event.type === 'entity_not_found') {
+    return escalateEntityNotFound('entity_resolution', 'entity_not_found', context);
+  }
+
+  // entity_confirm_candidate → a single middle-confidence match. Ask the
+  // caller to confirm it before merging it into extractedEntities (stay out
+  // of entity_resolution; move to entity_confirm to await the yes/no).
+  if (event.type === 'entity_confirm_candidate') {
     return {
-      nextState: 'escalating',
+      nextState: 'entity_confirm',
       sideEffects: [
-        auditLog(context, 'entity_resolution', 'escalating', 'entity_not_found'),
-        ttsPlay("I wasn't able to find the record you're referring to. Let me connect you with a team member."),
-        notifyOncall(context, 'entity_not_found'),
+        auditLog(context, 'entity_resolution', 'entity_confirm', 'entity_confirm_candidate', {
+          entityKind: event.entityKind,
+          candidateId: event.candidate.id,
+          score: event.candidate.score,
+        }),
+        ttsPlay('entity_confirm', {
+          template: 'confirm_entity',
+          entityKind: event.entityKind,
+          summary: event.candidate.label,
+        }),
       ],
-      updatedContext: { ...context, escalationReason: 'entity_not_found' },
+      updatedContext: {
+        ...context,
+        pendingEntityConfirmation: {
+          entityKind: event.entityKind,
+          candidate: event.candidate,
+          reference: event.reference,
+          refKey: event.refKey,
+          partialRefs: event.partialRefs,
+        },
+      },
     };
   }
 
   return ignoredTransition('entity_resolution', event, context);
+}
+
+function transitionEntityConfirm(
+  event: CallingAgentEvent,
+  context: CallingAgentContext
+): TransitionResult {
+  // Affirmative → merge the confirmed candidate into extractedEntities and
+  // proceed exactly as the normal entity_resolved path would (into
+  // intent_confirm, same audit/tts as entity_resolved).
+  if (event.type === 'entity_confirm_affirmed' && context.pendingEntityConfirmation) {
+    const pending = context.pendingEntityConfirmation;
+    const refs = { ...pending.partialRefs, [pending.refKey]: pending.candidate.id };
+    return {
+      nextState: 'intent_confirm',
+      sideEffects: [
+        auditLog(context, 'entity_confirm', 'intent_confirm', 'entity_confirm_affirmed', {
+          entityKind: pending.entityKind,
+          candidateId: pending.candidate.id,
+        }),
+        ttsPlay('intent_confirm', { template: 'confirm_intent', intent: context.currentIntent }),
+      ],
+      updatedContext: {
+        ...context,
+        extractedEntities: { ...context.extractedEntities, ...refs },
+        pendingEntityConfirmation: undefined,
+      },
+    };
+  }
+
+  // Declined / unclear / timeout / no pending candidate → escalate, same
+  // path and effects as entity_not_found.
+  if (event.type === 'entity_confirm_declined') {
+    return escalateEntityNotFound('entity_confirm', 'entity_confirm_declined', context);
+  }
+
+  return ignoredTransition('entity_confirm', event, context);
 }
 
 function transitionIntentConfirm(
@@ -1219,6 +1306,9 @@ export function transition(
 
     case 'entity_resolution':
       return transitionEntityResolution(event, context);
+
+    case 'entity_confirm':
+      return transitionEntityConfirm(event, context);
 
     case 'intent_confirm':
       return transitionIntentConfirm(event, context);

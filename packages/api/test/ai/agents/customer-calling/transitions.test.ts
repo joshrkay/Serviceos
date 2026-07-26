@@ -495,3 +495,76 @@ describe('WS18 — a genuine second intent still clears the quote', () => {
     expect(result.updatedContext.pendingQuote).toBeUndefined();
   });
 });
+
+describe('entity_resolution — entity_confirm_candidate (middle confidence band)', () => {
+  it('moves to entity_confirm, stashes pendingEntityConfirmation, and speaks the confirm_entity readback', () => {
+    const result = transition(
+      'entity_resolution',
+      {
+        type: 'entity_confirm_candidate',
+        entityKind: 'job',
+        candidate: { id: 'job-9', kind: 'job', label: 'QA Matrix Repair', score: 0.7 },
+        reference: 'the QA Matrix job',
+        refKey: 'jobId',
+        partialRefs: { customerId: 'cust-1' },
+      },
+      baseContext,
+    );
+    expect(result.nextState).toBe('entity_confirm');
+    expect(result.updatedContext.pendingEntityConfirmation).toEqual({
+      entityKind: 'job',
+      candidate: { id: 'job-9', kind: 'job', label: 'QA Matrix Repair', score: 0.7 },
+      reference: 'the QA Matrix job',
+      refKey: 'jobId',
+      partialRefs: { customerId: 'cust-1' },
+    });
+    const tts = result.sideEffects.find((fx) => fx.type === 'tts_play');
+    expect(tts?.payload).toMatchObject({ template: 'confirm_entity', entityKind: 'job', summary: 'QA Matrix Repair' });
+  });
+});
+
+describe('entity_confirm', () => {
+  const pendingCtx: CallingAgentContext = {
+    ...baseContext,
+    currentIntent: 'draft_estimate',
+    extractedEntities: { customerId: 'cust-1' },
+    pendingEntityConfirmation: {
+      entityKind: 'job',
+      candidate: { id: 'job-9', kind: 'job', label: 'QA Matrix Repair', score: 0.7 },
+      reference: 'the QA Matrix job',
+      refKey: 'jobId',
+      partialRefs: { customerId: 'cust-1' },
+    },
+  };
+
+  it('entity_confirm_affirmed merges the candidate id into extractedEntities and proceeds to intent_confirm', () => {
+    const result = transition('entity_confirm', { type: 'entity_confirm_affirmed' }, pendingCtx);
+    expect(result.nextState).toBe('intent_confirm');
+    expect(result.updatedContext.extractedEntities).toEqual({ customerId: 'cust-1', jobId: 'job-9' });
+    expect(result.updatedContext.pendingEntityConfirmation).toBeUndefined();
+    const tts = result.sideEffects.find((fx) => fx.type === 'tts_play');
+    expect(tts?.payload).toMatchObject({ template: 'confirm_intent', intent: 'draft_estimate' });
+  });
+
+  it('entity_confirm_declined escalates via the same path/effects as entity_not_found', () => {
+    const result = transition('entity_confirm', { type: 'entity_confirm_declined' }, pendingCtx);
+    expect(result.nextState).toBe('escalating');
+    expect(result.updatedContext.escalationReason).toBe('entity_not_found');
+    expect(result.updatedContext.pendingEntityConfirmation).toBeUndefined();
+    const sideEffectTypes = result.sideEffects.map((fx) => fx.type);
+    expect(sideEffectTypes).toContain('notify_oncall');
+    const tts = result.sideEffects.find((fx) => fx.type === 'tts_play');
+    expect((tts?.payload as { text: string }).text).toContain("wasn't able to find the record");
+  });
+});
+
+describe('entity_resolution — entity_not_found (Fix 1 regression guard)', () => {
+  it('escalates instead of silently falling through to entity_resolved', () => {
+    const result = transition('entity_resolution', { type: 'entity_not_found' }, baseContext);
+    expect(result.nextState).toBe('escalating');
+    expect(result.updatedContext.escalationReason).toBe('entity_not_found');
+    const sideEffectTypes = result.sideEffects.map((fx) => fx.type);
+    expect(sideEffectTypes).toContain('notify_oncall');
+    expect(sideEffectTypes).not.toContain('create_proposal');
+  });
+});

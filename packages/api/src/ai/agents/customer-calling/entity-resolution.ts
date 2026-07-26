@@ -174,7 +174,7 @@ export function parseNaturalDatetime(desc: string, now: Date = new Date(), durat
 }
 
 export interface SchedulingEntityResolution {
-  status: 'resolved' | 'ambiguous' | 'not_found';
+  status: 'resolved' | 'ambiguous' | 'not_found' | 'low_confidence';
   refs: Record<string, string>;
   ambiguous?: {
     entityKind: EntityKind;
@@ -183,6 +183,15 @@ export interface SchedulingEntityResolution {
   };
   notFound?: {
     entityKind: EntityKind;
+    reference: string;
+  };
+  /**
+   * One candidate in [τ_ent_confirm_low, τ_ent) — probably right, but not
+   * confident enough to act without a one-tap voice confirmation turn.
+   */
+  lowConfidence?: {
+    entityKind: EntityKind;
+    candidate: EntityCandidate;
     reference: string;
   };
 }
@@ -290,6 +299,12 @@ function foldResolution(
         status: 'not_found',
         refs,
         notFound: { entityKind, reference },
+      };
+    case 'low_confidence':
+      return {
+        status: 'low_confidence',
+        refs,
+        lowConfidence: { entityKind, candidate: result.candidate, reference },
       };
     case 'skipped':
       return undefined;

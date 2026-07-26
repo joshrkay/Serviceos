@@ -10,6 +10,7 @@ import type { RepairTemplate } from '../../../verticals/registry';
 import type { EscalationSummary } from './escalation-summary-builder';
 import type { QuoteReadbackLine } from '../../voice-turn/quote-readback';
 import type { PendingEntityAmbiguity } from './entity-resolution';
+import type { EntityCandidate, EntityKind } from '../../resolution/entity-resolver';
 
 // ─── States ──────────────────────────────────────────────────────────────────
 
@@ -20,6 +21,13 @@ export type CallingAgentState =
   | 'ask_caller'
   | 'intent_capture'
   | 'entity_resolution'
+  /**
+   * Middle confidence band (τ_ent_confirm_low <= score < τ_ent): a single
+   * candidate was found but isn't confident enough to act on silently. The
+   * FSM asks a one-tap voice confirmation before merging it into
+   * extractedEntities and proceeding as if it had resolved normally.
+   */
+  | 'entity_confirm'
   | 'intent_confirm'
   | 'proposal_draft'
   | 'closing'
@@ -60,6 +68,25 @@ export type CallingAgentEvent =
       retry?: boolean;
     }
   | { type: 'entity_not_found' }
+  /**
+   * A free-text entity reference resolved to exactly one candidate in the
+   * middle confidence band [τ_ent_confirm_low, τ_ent) — probably right, but
+   * confirmed with the caller before use rather than acted on silently.
+   * `refKey`/`partialRefs` mirror `entity_ambiguous` so the FSM can merge
+   * the confirmed id alongside any refs already resolved this turn.
+   */
+  | {
+      type: 'entity_confirm_candidate';
+      entityKind: EntityKind;
+      candidate: EntityCandidate;
+      reference: string;
+      refKey: string;
+      partialRefs: Record<string, string>;
+    }
+  /** Caller affirmed the `entity_confirm` readback ("yes, that's the one"). */
+  | { type: 'entity_confirm_affirmed' }
+  /** Caller declined, was unclear, or timed out on the `entity_confirm` readback. */
+  | { type: 'entity_confirm_declined' }
   | { type: 'confidence_low'; threshold: number; score: number }
   // WS5 — `utterance` carries the grounded quote read-back computed by the
   // voice-turn processor (handleCreateProposal) so the FSM speaks a catalog-
@@ -166,6 +193,19 @@ export interface CallingAgentContext {
    * ordinal, phone hint) rather than a fresh intent classification.
    */
   pendingEntityAmbiguity?: PendingEntityAmbiguity;
+  /**
+   * Set when a free-text entity reference resolved to exactly one candidate
+   * in the middle confidence band (τ_ent_confirm_low <= score < τ_ent). The
+   * next caller turn is interpreted as a yes/no answer to the `entity_confirm`
+   * readback rather than a fresh intent classification.
+   */
+  pendingEntityConfirmation?: {
+    entityKind: EntityKind;
+    candidate: EntityCandidate;
+    reference: string;
+    refKey: string;
+    partialRefs: Record<string, string>;
+  };
   pendingProposalId?: string;
   retryCount: number;
   /**

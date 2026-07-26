@@ -43,6 +43,18 @@ export type EntityKind =
  */
 export const TAU_ENT = 0.8;
 
+/**
+ * Lower confidence band (τ_ent_confirm_low) for a "probably right, but
+ * confirm before acting" middle ground between τ_ent and not_found. A real
+ * caller phrase scored 0.70 against an obviously-correct match and was
+ * rejected outright — one candidate in [τ_ent_confirm_low, τ_ent) now
+ * triggers a one-tap voice confirmation turn instead of a hard not_found.
+ *
+ * Provisional/tunable: reasoned from a single real 0.70 data point, not a
+ * calibrated study. Should be recalibrated from real call data later.
+ */
+export const TAU_ENT_CONFIRM_LOW = 0.6;
+
 export interface EntityCandidate {
   id: string;
   kind: EntityKind;
@@ -57,6 +69,9 @@ export interface EntityCandidate {
 export type EntityResolverResult =
   | { kind: 'resolved'; candidate: EntityCandidate }
   | { kind: 'ambiguous'; candidates: EntityCandidate[] }
+  // One candidate in [τ_ent_confirm_low, τ_ent) — probably right, but not
+  // confident enough to act without a one-tap voice confirmation.
+  | { kind: 'low_confidence'; candidate: EntityCandidate }
   | { kind: 'not_found'; reference: string }
   | { kind: 'skipped' };
 

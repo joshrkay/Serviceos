@@ -78,6 +78,50 @@ function intentLabel(intent: string | undefined, lang: SessionLanguage): string 
   return (intent && table[intent]) || table._default;
 }
 
+/**
+ * Human-readable noun for an entity kind, used by the `entity_confirm`
+ * readback ("I found a job 'HVAC Repair' — is that the one you mean?").
+ */
+const ENTITY_KIND_LABELS: Record<SessionLanguage, Record<string, string>> = {
+  en: {
+    customer: 'customer',
+    job: 'job',
+    invoice: 'invoice',
+    estimate: 'estimate',
+    appointment: 'appointment',
+    technician: 'technician',
+    pending_proposal: 'record',
+    _default: 'record',
+  },
+  es: {
+    customer: 'cliente',
+    job: 'trabajo',
+    invoice: 'factura',
+    estimate: 'presupuesto',
+    appointment: 'cita',
+    technician: 'técnico',
+    pending_proposal: 'registro',
+    _default: 'registro',
+  },
+};
+
+/** Indefinite article for the es entity-kind nouns above ("un cliente", "una factura"). */
+const ENTITY_KIND_ARTICLE_ES: Record<string, string> = {
+  invoice: 'una',
+  estimate: 'un',
+  appointment: 'una',
+  _default: 'un',
+};
+
+function entityKindLabel(entityKind: string | undefined, lang: SessionLanguage): string {
+  const table = ENTITY_KIND_LABELS[lang];
+  return (entityKind && table[entityKind]) || table._default;
+}
+
+function entityKindArticleEs(entityKind: string | undefined): string {
+  return (entityKind && ENTITY_KIND_ARTICLE_ES[entityKind]) || ENTITY_KIND_ARTICLE_ES._default;
+}
+
 const TEMPLATE_KEYS = new Set(['intent_confirm', 'greeting', 'confirm_intent', 'greeting_with_disclosure']);
 
 /**
@@ -251,6 +295,16 @@ export function renderTtsText(
       // can pick; if the names are identical (the "two Bobs" case) listing them
       // helps nobody, so ask for a distinguishing detail instead. Never guess.
       return renderDisambiguation(payload.candidates, lang);
+    case 'confirm_entity': {
+      // Middle confidence band (τ_ent_confirm_low <= score < τ_ent): a single
+      // candidate was found but isn't confident enough to act on silently.
+      // Read back its label and ask for a one-tap yes/no before using it.
+      const entityKind = typeof payload.entityKind === 'string' ? payload.entityKind : undefined;
+      const summary = typeof payload.summary === 'string' ? payload.summary : '';
+      return lang === 'es'
+        ? `Encontré ${entityKindArticleEs(entityKind)} ${entityKindLabel(entityKind, 'es')} "${summary}" — ¿es a la que se refiere?`
+        : `I found a ${entityKindLabel(entityKind, 'en')} "${summary}" — is that the one you mean?`;
+    }
     case 'greeting':
       return lang === 'es'
         ? '¡Hola! ¿En qué puedo ayudarle hoy?'

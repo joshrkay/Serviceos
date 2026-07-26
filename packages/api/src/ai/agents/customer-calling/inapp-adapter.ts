@@ -464,6 +464,29 @@ export class InAppVoiceAdapter {
         partialRefs: resolution.refs,
       };
     }
+    // Middle confidence band: exactly one candidate, but not confident
+    // enough to act on silently. Ask the caller to confirm it (entity_confirm)
+    // rather than either guessing (resolved) or giving up (not_found).
+    if (resolution.status === 'low_confidence' && resolution.lowConfidence) {
+      const refKey = refKeyForEntityKind(resolution.lowConfidence.entityKind);
+      if (!refKey) {
+        return { type: 'entity_resolved', refs: resolution.refs };
+      }
+      return {
+        type: 'entity_confirm_candidate',
+        entityKind: resolution.lowConfidence.entityKind,
+        candidate: resolution.lowConfidence.candidate,
+        reference: resolution.lowConfidence.reference,
+        refKey,
+        partialRefs: resolution.refs,
+      };
+    }
+    // No candidate reached even the lower confidence band — escalate rather
+    // than silently falling through to entity_resolved with no refs (that
+    // previously masked a not_found as a "success").
+    if (resolution.status === 'not_found') {
+      return { type: 'entity_not_found' };
+    }
     // Unknown non-emergency references proceed to intent_confirm with partial
     // refs — the proposal surfaces pendingReference for operator review
     // instead of escalating to on-call (matches voice-action-router policy).
@@ -738,6 +761,7 @@ export class InAppVoiceAdapter {
 
     // Decide the primary FSM event for this turn:
     //  A) intent_confirm — yes/no readback answer (no classifier).
+    //  A2) entity_confirm — yes/no middle-confidence-candidate answer (no classifier).
     //  B) entity_resolution — disambiguation follow-up (no classifier).
     //  C) everything else — classify the utterance as an intent.
     const stateBeforeTurn: string = session.machine.currentState;
@@ -749,6 +773,10 @@ export class InAppVoiceAdapter {
       fsmEvent = isAffirmation(text)
         ? { type: 'confirmed' }
         : { type: 'correction', newTranscript: text };
+    } else if (stateBeforeTurn === 'entity_confirm') {
+      fsmEvent = isAffirmation(text)
+        ? { type: 'entity_confirm_affirmed' }
+        : { type: 'entity_confirm_declined' };
     } else if (stateBeforeTurn === 'entity_resolution') {
       const pending = await this.resolvePendingForDisambiguation(
         session.tenantId,

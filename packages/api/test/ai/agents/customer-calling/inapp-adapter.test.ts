@@ -7,6 +7,8 @@ import { InMemoryOnCallRepository } from '../../../../src/oncall/rotation';
 import { InMemoryVoiceSessionRepository } from '../../../../src/voice/voice-session';
 import type { LLMGateway, LLMResponse } from '../../../../src/ai/gateway/gateway';
 import type { TtsProvider } from '../../../../src/ai/tts/tts-provider';
+import type { SchedulingEntityResolution } from '../../../../src/ai/agents/customer-calling/entity-resolution';
+import type { CallingAgentEvent } from '../../../../src/ai/agents/customer-calling/types';
 
 const TENANT = 'tenant-x';
 const USER = 'user-x';
@@ -775,5 +777,98 @@ describe('InAppVoiceAdapter', () => {
       });
       await expect(adapter.startSession(TENANT, USER)).resolves.toBeDefined();
     });
+  });
+});
+
+describe('InAppVoiceAdapter#toResolutionEvent', () => {
+  let store: VoiceSessionStore;
+  let proposalRepo: InMemoryProposalRepository;
+  let auditRepo: InMemoryAuditRepository;
+  let onCallRepo: InMemoryOnCallRepository;
+  let adapter: InAppVoiceAdapter;
+
+  beforeEach(() => {
+    store = new VoiceSessionStore({ startInterval: false });
+    proposalRepo = new InMemoryProposalRepository();
+    auditRepo = new InMemoryAuditRepository();
+    onCallRepo = new InMemoryOnCallRepository();
+    adapter = new InAppVoiceAdapter({
+      store,
+      gateway: scriptedGateway([]),
+      proposalRepo,
+      auditRepo,
+      onCallRepo,
+    });
+  });
+
+  function toResolutionEvent(resolution: SchedulingEntityResolution): Promise<CallingAgentEvent> {
+    return (
+      adapter as unknown as {
+        toResolutionEvent: (tenantId: string, r: SchedulingEntityResolution) => Promise<CallingAgentEvent>;
+      }
+    ).toResolutionEvent(TENANT, resolution);
+  }
+
+  it('resolved → entity_resolved carrying the accumulated refs', async () => {
+    const event = await toResolutionEvent({
+      status: 'resolved',
+      refs: { customerId: 'cust-1' },
+    });
+    expect(event).toEqual({ type: 'entity_resolved', refs: { customerId: 'cust-1' } });
+  });
+
+  it('ambiguous → entity_ambiguous carrying candidates, refKey, and partialRefs', async () => {
+    const event = await toResolutionEvent({
+      status: 'ambiguous',
+      refs: { customerId: 'cust-1' },
+      ambiguous: {
+        entityKind: 'job',
+        reference: 'the HVAC job',
+        candidates: [
+          { id: 'job-1', kind: 'job', label: 'HVAC Repair', score: 0.9 },
+          { id: 'job-2', kind: 'job', label: 'HVAC Install', score: 0.85 },
+        ],
+      },
+    });
+    expect(event.type).toBe('entity_ambiguous');
+    if (event.type === 'entity_ambiguous') {
+      expect(event.entityKind).toBe('job');
+      expect(event.refKey).toBe('jobId');
+      expect(event.reference).toBe('the HVAC job');
+      expect(event.partialRefs).toEqual({ customerId: 'cust-1' });
+      expect(event.candidates).toEqual([
+        { id: 'job-1', name: 'HVAC Repair', score: 0.9, hint: undefined },
+        { id: 'job-2', name: 'HVAC Install', score: 0.85, hint: undefined },
+      ]);
+    }
+  });
+
+  it('not_found → entity_not_found with no payload (Fix 1 regression guard)', async () => {
+    const event = await toResolutionEvent({
+      status: 'not_found',
+      refs: {},
+      notFound: { entityKind: 'job', reference: 'the QA Matrix job' },
+    });
+    expect(event).toEqual({ type: 'entity_not_found' });
+  });
+
+  it('low_confidence → entity_confirm_candidate carrying the candidate, refKey, and partialRefs', async () => {
+    const event = await toResolutionEvent({
+      status: 'low_confidence',
+      refs: { customerId: 'cust-1' },
+      lowConfidence: {
+        entityKind: 'job',
+        reference: 'the QA Matrix job',
+        candidate: { id: 'job-9', kind: 'job', label: 'QA Matrix Repair', score: 0.7 },
+      },
+    });
+    expect(event.type).toBe('entity_confirm_candidate');
+    if (event.type === 'entity_confirm_candidate') {
+      expect(event.entityKind).toBe('job');
+      expect(event.refKey).toBe('jobId');
+      expect(event.reference).toBe('the QA Matrix job');
+      expect(event.partialRefs).toEqual({ customerId: 'cust-1' });
+      expect(event.candidate).toEqual({ id: 'job-9', kind: 'job', label: 'QA Matrix Repair', score: 0.7 });
+    }
   });
 });

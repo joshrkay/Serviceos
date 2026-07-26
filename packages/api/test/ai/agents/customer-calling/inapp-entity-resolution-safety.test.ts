@@ -11,10 +11,15 @@
  *       (readback) — it is NOT auto-confirmed;
  *   (b) two candidates → entity_ambiguous is dispatched WITH the candidate
  *       set (a disambiguation question), NOT a silent pick + proposal;
- *   (c) zero matches → entity_resolved → intent_confirm readback (no on-call
- *       escalation; proposal surfaces pendingReference for operator review);
+ *   (c) zero matches → entity_not_found → escalates to on-call (Fix 1: this
+ *       used to silently fall through to entity_resolved with empty refs —
+ *       a not_found masquerading as a success — and is now a hard escalation,
+ *       never a silent guess);
  *   (d) the auto-confirm no longer fires — the proposal is created only after
- *       a REAL caller "yes" event on a later turn.
+ *       a REAL caller "yes" event on a later turn;
+ *   (e) a single candidate in the middle confidence band (τ_ent_confirm_low
+ *       <= score < τ_ent) → entity_confirm, a one-tap voice confirmation
+ *       turn, NEVER acted on silently and NEVER a hard not_found either.
  *
  * Plus direct unit tests for the pure resolution/affirmation logic.
  */
@@ -272,23 +277,74 @@ describe('InAppVoiceAdapter — entity-resolution voice safety', () => {
     expect(gateway.complete).toHaveBeenCalledTimes(1);
   });
 
-  // ── (c) zero matches → entity_resolved → intent_confirm (no escalation) ───
-  it('zero matches → entity_resolved → intent_confirm readback without on-call escalation', async () => {
+  // ── (c) zero matches → entity_not_found → escalates (Fix 1) ───────────────
+  it('zero matches → entity_not_found → escalates to on-call, never a silent entity_resolved', async () => {
     const resolver = stubResolver({ kind: 'not_found', reference: 'Bob Smith' });
     const adapter = makeAdapter(resolver);
     const { sessionId } = await adapter.startSession(TENANT, USER);
 
     const turn1 = await adapter.handleInput(sessionId, 'book Bob Smith for tomorrow at 2pm');
 
-    expect(turn1.state).toBe('intent_confirm');
+    expect(turn1.state).toBe('escalating');
+    expect(turn1.proposalIds.length).toBe(0);
+    expect(await proposalRepo.findByTenant(TENANT)).toHaveLength(0);
+    expect(turn1.sideEffects.some((e) => e.type === 'notify_oncall')).toBe(true);
+    expect(auditRepo.getAll().map((e) => e.eventType)).toContain(
+      'agent.calling.entity_resolution.entity_not_found',
+    );
+    expect(auditRepo.getAll().map((e) => e.eventType)).not.toContain(
+      'agent.calling.entity_resolution.entity_resolved',
+    );
+  });
+
+  // ── (e) middle confidence band → entity_confirm, then affirm/decline ──────
+  it('a middle-confidence candidate → entity_confirm; an affirmative reply merges it in and proceeds to the proposal', async () => {
+    const resolver = stubResolver({
+      kind: 'low_confidence',
+      candidate: { id: 'cust-7', kind: 'customer', label: 'Bob Smith', score: 0.7 },
+    });
+    const adapter = makeAdapter(resolver);
+    const { sessionId } = await adapter.startSession(TENANT, USER);
+
+    const turn1 = await adapter.handleInput(sessionId, 'book Bob Smith for tomorrow at 2pm');
+    expect(turn1.state).toBe('entity_confirm');
     expect(turn1.proposalIds.length).toBe(0);
     expect(await proposalRepo.findByTenant(TENANT)).toHaveLength(0);
     expect(turn1.sideEffects.some((e) => e.type === 'notify_oncall')).toBe(false);
-    expect(auditRepo.getAll().map((e) => e.eventType)).toContain(
-      'agent.calling.entity_resolution.entity_resolved',
+    const confirmTts = turn1.sideEffects.find(
+      (e) => e.type === 'tts_play' && e.payload.template === 'confirm_entity',
     );
-    expect(auditRepo.getAll().map((e) => e.eventType)).not.toContain(
-      'agent.calling.entity_resolution.entity_not_found',
+    expect(confirmTts).toBeDefined();
+    expect(confirmTts?.payload.summary).toBe('Bob Smith');
+
+    const turn2 = await adapter.handleInput(sessionId, 'yes, that one');
+    expect(turn2.state).toBe('intent_confirm');
+    expect(turn2.proposalIds.length).toBe(0);
+
+    const turn3 = await adapter.handleInput(sessionId, 'yes');
+    expect(turn3.state).toBe('closing');
+    expect(turn3.proposalIds.length).toBe(1);
+    const proposals = await proposalRepo.findByTenant(TENANT);
+    expect((proposals[0].payload.entities as Record<string, unknown>).customerId).toBe('cust-7');
+  });
+
+  it('a middle-confidence candidate → entity_confirm; a decline escalates like entity_not_found', async () => {
+    const resolver = stubResolver({
+      kind: 'low_confidence',
+      candidate: { id: 'cust-7', kind: 'customer', label: 'Bob Smith', score: 0.7 },
+    });
+    const adapter = makeAdapter(resolver);
+    const { sessionId } = await adapter.startSession(TENANT, USER);
+
+    await adapter.handleInput(sessionId, 'book Bob Smith for tomorrow at 2pm');
+    const turn2 = await adapter.handleInput(sessionId, 'no, not them');
+
+    expect(turn2.state).toBe('escalating');
+    expect(turn2.proposalIds.length).toBe(0);
+    expect(await proposalRepo.findByTenant(TENANT)).toHaveLength(0);
+    expect(turn2.sideEffects.some((e) => e.type === 'notify_oncall')).toBe(true);
+    expect(auditRepo.getAll().map((e) => e.eventType)).toContain(
+      'agent.calling.entity_confirm.entity_confirm_declined',
     );
   });
 

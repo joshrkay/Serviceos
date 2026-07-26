@@ -226,6 +226,75 @@ describe('PgEntityResolver — customer', () => {
 });
 
 // ---------------------------------------------------------------------------
+// toResult confidence bands (τ_ent = 0.80 / τ_ent_confirm_low = 0.60)
+// ---------------------------------------------------------------------------
+
+describe('PgEntityResolver — toResult confidence bands', () => {
+  async function resolveWithScore(score: number) {
+    const { pool } = makeMockPool([
+      undefined,
+      [{ id: 'cust-1', display_name: 'Boundary Corp', primary_phone: null, score }],
+    ]);
+    const resolver = new PgEntityResolver(pool);
+    return resolver.resolve({ tenantId: TENANT_ID, reference: 'Boundary', kind: 'customer' });
+  }
+
+  it('0.85 (above τ_ent) → resolved', async () => {
+    const result = await resolveWithScore(0.85);
+    expect(result.kind).toBe('resolved');
+  });
+
+  it('0.80 (at τ_ent) → resolved', async () => {
+    const result = await resolveWithScore(0.80);
+    expect(result.kind).toBe('resolved');
+  });
+
+  it('0.70 (regression case: mid-band) → low_confidence, NOT resolved or not_found', async () => {
+    const result = await resolveWithScore(0.70);
+    expect(result.kind).toBe('low_confidence');
+    if (result.kind === 'low_confidence') {
+      expect(result.candidate.id).toBe('cust-1');
+      expect(result.candidate.score).toBe(0.70);
+    }
+  });
+
+  it('0.60 (at τ_ent_confirm_low) → low_confidence', async () => {
+    const result = await resolveWithScore(0.60);
+    expect(result.kind).toBe('low_confidence');
+  });
+
+  it('0.59 (just below τ_ent_confirm_low) → not_found', async () => {
+    const result = await resolveWithScore(0.59);
+    expect(result.kind).toBe('not_found');
+  });
+
+  it('0.30 (well below τ_ent_confirm_low) → not_found', async () => {
+    const result = await resolveWithScore(0.30);
+    expect(result.kind).toBe('not_found');
+  });
+
+  it('two candidates in the mid-band → ambiguous', async () => {
+    const { pool } = makeMockPool([
+      undefined,
+      [
+        { id: 'cust-1', display_name: 'Rodriguez Plumbing', primary_phone: null, score: 0.72 },
+        { id: 'cust-2', display_name: 'Rodriguez HVAC', primary_phone: null, score: 0.65 },
+      ],
+    ]);
+    const resolver = new PgEntityResolver(pool);
+    const result = await resolver.resolve({
+      tenantId: TENANT_ID,
+      reference: 'Rodriguez',
+      kind: 'customer',
+    });
+    expect(result.kind).toBe('ambiguous');
+    if (result.kind === 'ambiguous') {
+      expect(result.candidates).toHaveLength(2);
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Empty / null input → skipped
 // ---------------------------------------------------------------------------
 

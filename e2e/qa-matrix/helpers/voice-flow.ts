@@ -49,6 +49,31 @@ export async function voiceInput(
   const proposalIds = body.proposalIds ?? [];
   if (proposalIds.length > 0) return proposalIds;
 
+  // A free-text entity reference that lands in the middle confidence band
+  // (τ_ent_confirm_low <= score < τ_ent) surfaces an `entity_confirm` HITL
+  // readback turn — "I found a job 'X' — is that the one you mean?" — before
+  // the FSM ever reaches `intent_confirm`. Answer it the same way, then fall
+  // through to the intent_confirm handling below (packages/api/src/ai/agents/
+  // customer-calling/transitions.ts: entity_confirm -> intent_confirm on an
+  // affirmative reply).
+  if (body.state === 'entity_confirm') {
+    const entityConfirmRes = await h.api.call({
+      method: 'POST',
+      path: `/api/voice/sessions/${sessionId}/input`,
+      body: { text: "Yes, that's correct." },
+      token,
+      label: `${label}-vinput-entity-confirm`,
+      expectStatus: [200, 400, 403, 404],
+    });
+    const entityConfirmBody = entityConfirmRes.response.body as { proposalIds?: string[]; state?: string };
+    const entityConfirmProposalIds = entityConfirmBody.proposalIds ?? [];
+    if (entityConfirmProposalIds.length > 0) return entityConfirmProposalIds;
+    if (entityConfirmBody.state !== 'intent_confirm') return entityConfirmProposalIds;
+    // Fall through with the post-entity_confirm response body so the
+    // intent_confirm handling below completes the second HITL turn.
+    body.state = entityConfirmBody.state;
+  }
+
   // Non-emergency intents land in `intent_confirm` first (a deliberate HITL
   // readback turn — "...is that right?") and only create the proposal after
   // an explicit yes on the NEXT turn (packages/api/src/ai/agents/customer-calling/

@@ -7,9 +7,12 @@
  * and a btree index on appointments.scheduled_for.
  *
  * Resolution thresholds:
- *   τ_ent = 0.80  — above → `resolved`
- *                 — multiple above → `ambiguous`
- *                 — none above → `not_found`
+ *   τ_ent = 0.80             — 1 candidate at/above → `resolved`
+ *                            — 2+ at/above → `ambiguous`
+ *   τ_ent_confirm_low = 0.60 — 1 candidate in [0.60, 0.80) → `low_confidence`
+ *                              (voice-confirmed before use, never auto-acted)
+ *                            — 2+ in that band → `ambiguous`
+ *   below τ_ent_confirm_low  — `not_found`
  *
  * All queries are scoped to tenantId for tenant isolation.
  */
@@ -22,6 +25,7 @@ import {
   EntityResolver,
   EntityResolverResult,
   TAU_ENT,
+  TAU_ENT_CONFIRM_LOW,
 } from './entity-resolver';
 
 /** Minimum similarity score to even consider a candidate (pre-filter). */
@@ -346,25 +350,30 @@ export class PgEntityResolver implements EntityResolver {
   // ---------------------------------------------------------------------------
 
   /**
-   * Convert a scored candidate list into a resolution result using τ_ent.
+   * Convert a scored candidate list into a resolution result using τ_ent
+   * and, for the band just below it, τ_ent_confirm_low.
    *
-   *   - 0 candidates above τ_ent → not_found
-   *   - 1 candidate above τ_ent  → resolved
-   *   - 2+ candidates above τ_ent → ambiguous
+   *   - 1 candidate  >= τ_ent              → resolved
+   *   - 2+ candidates >= τ_ent             → ambiguous
+   *   - 1 candidate in [τ_ent_confirm_low, τ_ent) → low_confidence
+   *   - 2+ candidates in [τ_ent_confirm_low, τ_ent) → ambiguous
+   *   - otherwise                          → not_found
    */
   private toResult(
     candidates: EntityCandidate[],
     reference: string,
   ): EntityResolverResult {
     const above = candidates.filter((c) => c.score >= TAU_ENT);
+    if (above.length === 1) return { kind: 'resolved', candidate: above[0] };
+    if (above.length >= 2) return { kind: 'ambiguous', candidates: above };
 
-    if (above.length === 0) {
-      return { kind: 'not_found', reference };
-    }
-    if (above.length === 1) {
-      return { kind: 'resolved', candidate: above[0] };
-    }
-    return { kind: 'ambiguous', candidates: above };
+    const midBand = candidates.filter(
+      (c) => c.score >= TAU_ENT_CONFIRM_LOW && c.score < TAU_ENT,
+    );
+    if (midBand.length === 1) return { kind: 'low_confidence', candidate: midBand[0] };
+    if (midBand.length >= 2) return { kind: 'ambiguous', candidates: midBand };
+
+    return { kind: 'not_found', reference };
   }
 }
 
