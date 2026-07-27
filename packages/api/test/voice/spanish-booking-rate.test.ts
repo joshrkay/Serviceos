@@ -89,23 +89,28 @@ describe('Voice-parity Feature 6 — Spanish booking rate + language consistency
     store = new VoiceSessionStore({ startInterval: false });
     proposalRepo = guardVoiceProposalContract(new InMemoryProposalRepository(), {
       // PRE-EXISTING, DELIBERATELY OUT OF SCOPE for the payload-contract PR
-      // that added this guard. All six reduce to ONE root cause:
+      // that added this guard. All five reduce to ONE root cause:
       //
-      //   THE IN-APP ADAPTER HAS NO ENTITY RESOLUTION.
+      //   NO ENTITY RESOLVER IS WIRED IN THIS SUITE.
       //
-      // The real Twilio path runs `resolveSchedulingEntities` before building
-      // its payload, so a spoken name becomes a `customerId`, a spoken time an
-      // ISO instant, a spoken reference an id. The in-app adapter hands the
-      // shared builder RAW classifier entities, so every contract that needs a
-      // resolved id fails — `customerName` arrives where `customerId` is
-      // required, `dateTimeDescription` where `scheduledStart` is.
+      // `InAppVoiceAdapter.getEntityResolver()` returns an injected resolver
+      // (tests), else a `PgEntityResolver` built from `deps.pool`, else
+      // UNDEFINED — and resolution is then skipped rather than guessed. This
+      // suite wires neither, so the classifier's raw entities reach the shared
+      // payload builder untouched: `customerName` arrives where `customerId`
+      // is required, `dateTimeDescription` where `scheduledStart` is.
       //
-      // Not silent: the adapter emits a `voice.payload_contract_failed` audit
-      // row for each, and in-app is an authenticated S2 operator who reads and
-      // edits the card before approving (`approveProposal` re-validates at the
-      // execution boundary regardless). Closing it means giving the in-app
-      // adapter real entity resolution — the same change that was made for the
-      // phone path — which is its own PR.
+      // So this is a FIXTURE gap, not proof of a production defect — a
+      // pool-backed deployment does resolve. What it does prove is that the
+      // unresolved case degrades badly: the payload fails its contract with no
+      // `missingFields` gate, i.e. an approve-to-fail card. The honest fix is
+      // for the in-app adapter to gate on its own contract failures the way
+      // the phone path does; that is its own change.
+      //
+      // Not silent either way: the adapter emits a
+      // `voice.payload_contract_failed` audit row for each, and in-app is an
+      // authenticated S2 operator who reads and edits the card before
+      // approving (`approveProposal` re-validates at the execution boundary).
       knownGaps: [
         { proposalType: 'draft_estimate', reason: 'customerName never resolved → customerId absent' },
         { proposalType: 'update_customer', reason: 'customerName never resolved → customerId absent' },
