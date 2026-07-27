@@ -15,6 +15,7 @@ import type { CatalogPricingOutcome } from '../../../../src/ai/resolution/catalo
 import {
   DraftEstimateExecutionHandler,
 } from '../../../../src/proposals/execution/handlers';
+import { CreateInvoiceExecutionHandler } from '../../../../src/proposals/execution/invoice-execution-handler';
 import {
   SendEstimateExecutionHandler,
   NoopEstimateDeliveryProvider,
@@ -1024,6 +1025,79 @@ describe('QA-2026-07-26 — voice-drafted estimate line items (lineItemDescripti
         executedBy: 'operator-1',
       });
       expect(result.success).toBe(true);
+    });
+
+    // QA-2026-07-26 VOX-07 (blocker 2) — the grounding block above was
+    // hard-gated to `proposalType === 'draft_estimate'`, leaving the
+    // IDENTICAL hole open for draft_invoice: CreateInvoiceExecutionHandler
+    // enforces the same non-empty lineItems rule and nothing downstream
+    // derives lineItems from `amount`, so every voice-created invoice
+    // ("create an invoice for $350 for the furnace repair") failed execution.
+    // This is the exact mirror of the draft_estimate case above.
+    it('a draft_invoice create_proposal effect with lineItemDescriptions produces grounded lineItems that CreateInvoiceExecutionHandler executes successfully', async () => {
+      const catalogRepo = new InMemoryCatalogItemRepository();
+      await catalogRepo.create(
+        createCatalogItem({
+          tenantId: TENANT,
+          name: 'Furnace Repair',
+          category: 'Labor',
+          unit: 'each',
+          unitPriceCents: 35000,
+        }),
+      );
+      const adapter = buildAdapter(catalogRepo);
+      const { sessionId } = await adapter.startSession(TENANT, USER);
+      const session = store.peek(sessionId);
+      if (!session) throw new Error('test session missing');
+
+      const proposalId = await callHandleCreateProposal(adapter, session, {
+        type: 'create_proposal',
+        payload: {
+          tenantId: TENANT,
+          intent: 'create_invoice',
+          entities: {
+            customerId: 'cust-1',
+            // Exact catalog name so the grounding tier is deterministic
+            // ('exact' → pricingSource 'catalog'). A fuzzier phrasing like
+            // "completed furnace repair" correctly lands on 'ambiguous'
+            // instead — also grounded, but a weaker assertion.
+            lineItemDescriptions: ['Furnace Repair'],
+            amount: 35000,
+          },
+          sessionId: session.id,
+          confidence: 0.95,
+        },
+      });
+
+      expect(proposalId).toBeDefined();
+      const proposals = await proposalRepo.findByTenant(TENANT);
+      expect(proposals).toHaveLength(1);
+      const proposal = proposals[0];
+      expect(proposal.proposalType).toBe('draft_invoice');
+      const lineItems = proposal.payload.lineItems as Array<Record<string, unknown>>;
+      expect(Array.isArray(lineItems)).toBe(true);
+      expect(lineItems).toHaveLength(1);
+      // Proves the lines went through groundLineItemPricing rather than being
+      // hand-assembled: only that pass stamps pricingSource.
+      expect(lineItems[0].pricingSource).toBe('catalog');
+      // The caller-quoted total must survive grounding intact — a line priced
+      // at 0 (or dropped) would satisfy the handler while silently losing the
+      // money the operator actually said.
+      const totalCents = lineItems.reduce(
+        (sum, li) => sum + (li.unitPrice as number) * (li.quantity as number),
+        0,
+      );
+      expect(totalCents).toBe(35000);
+
+      // BEFORE this fix, payload.lineItems was undefined for draft_invoice
+      // and execution failed with "Payload must include at least one lineItem."
+      const handler = new CreateInvoiceExecutionHandler();
+      const result = await handler.execute(proposal, {
+        tenantId: TENANT,
+        executedBy: 'operator-1',
+      });
+      expect(result.success).toBe(true);
+      expect(result.resultEntityId).toBeTruthy();
     });
 
     it('forces the proposal out of auto-approval when a drafted line has no catalog match, even at high classifier confidence', async () => {

@@ -47,14 +47,38 @@ describe('P5-005 — Deterministic invoice proposal execution', () => {
     expect(typeof result.resultEntityId).toBe('string');
   });
 
-  it('validation — missing customerId returns error', async () => {
+  // QA-2026-07-26 (VOX-07, blocker 3) — this handler used to demand
+  // customerId UNCONDITIONALLY, even alongside a resolved jobId, while its
+  // sibling DraftEstimateExecutionHandler accepted either. The invoice create
+  // itself only needs the job (customerId is used solely to auto-open a job
+  // when there isn't one), so a jobId-only payload is complete. These two
+  // cases pin the corrected contract: EITHER identifier is enough, NEITHER
+  // still fails — and fails with a message that names both.
+  it('VOX-07 — a jobId-only payload (NO customerId) executes', async () => {
     const proposal = makeProposal({
-      payload: { jobId: 'job-1', lineItems: [{ id: 'li-1' }] },
+      payload: {
+        jobId: 'job-1',
+        lineItems: [{ id: 'li-1', description: 'Service', quantity: 1, unitPriceCents: 5000 }],
+      },
+    });
+    const result = await handler.execute(proposal, { tenantId, executedBy: 'user-1' });
+
+    expect(result.success).toBe(true);
+    expect(result.resultEntityId).toBeTruthy();
+  });
+
+  it('VOX-07 — neither customerId nor jobId still fails cleanly', async () => {
+    const proposal = makeProposal({
+      payload: {
+        lineItems: [{ id: 'li-1', description: 'Service', quantity: 1, unitPriceCents: 5000 }],
+      },
     });
     const result = await handler.execute(proposal, { tenantId, executedBy: 'user-1' });
 
     expect(result.success).toBe(false);
-    expect(result.error).toBe('Payload must include a valid customerId');
+    expect(result.error).toBe(
+      'Invoice draft has neither a customerId nor a jobId — link a customer before approving',
+    );
   });
 
   it('B6 — jobId is optional; a customer-only payload still executes (no auto-create repos wired → synthetic id)', async () => {

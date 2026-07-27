@@ -1495,9 +1495,26 @@ export class InAppVoiceAdapter {
       // a catalog match sets the authoritative price and an uncatalogued
       // line keeps its guessed price but is flagged for review, instead of
       // either inventing an untracked number or dropping the line.
+      //
+      // QA-2026-07-26 (VOX-07): this gate originally read
+      // `proposalType === 'draft_estimate'`, which left the IDENTICAL hole
+      // open for draft_invoice. CreateInvoiceExecutionHandler
+      // (proposals/execution/invoice-execution-handler.ts) enforces the same
+      // non-empty `lineItems` requirement as the estimate handler and there is
+      // no amount→lineItems fallback anywhere downstream, so every
+      // voice-drafted invoice — including the plain "create an invoice for
+      // $350 for the furnace repair" a real operator says — died at execution
+      // with "Payload must include at least one lineItem". The two proposal
+      // types consume line items identically (both go through
+      // normalizeDraftLineItems), so the grounding pass applies verbatim.
+      const GROUNDED_LINE_ITEM_PROPOSAL_TYPES: ReadonlySet<string> = new Set([
+        'draft_estimate',
+        'draft_invoice',
+      ]);
       let voiceLineItemOutcome: CatalogPricingOutcome | undefined;
       if (
-        proposalType === 'draft_estimate' &&
+        proposalType !== undefined &&
+        GROUNDED_LINE_ITEM_PROPOSAL_TYPES.has(proposalType) &&
         Array.isArray(entities.lineItemDescriptions) &&
         entities.lineItemDescriptions.length > 0
       ) {

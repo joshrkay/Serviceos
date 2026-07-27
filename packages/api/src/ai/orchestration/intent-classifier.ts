@@ -542,7 +542,16 @@ Given a voice transcript from a field service operator, decide which action they
 
 Supported intents (return exactly ONE):
 - "create_invoice"      — user wants to draft a NEW invoice for work completed.
-                           Example: "Create an invoice for Acme for 450 dollars"
+                           Extract lineItemDescriptions (one short entry per
+                           distinct piece of work billed — an invoice with no
+                           line items cannot be created), amount (stated total,
+                           integer cents), customerName, and jobReference when
+                           a job is referenced. Never invent lines; one
+                           described job is ONE line.
+                           Examples: "Create an invoice for Acme for 450 dollars"
+                                     "Invoice the Smith job for the completed
+                                      furnace repair, $350 total" →
+                                      lineItemDescriptions ["completed furnace repair"]
 - "draft_estimate"      — user wants to draft a new estimate/quote before work starts.
                            Example: "Draft an estimate for the Johnson water heater"
 - "create_appointment"  — user wants to schedule a new appointment or follow-up.

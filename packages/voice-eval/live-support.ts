@@ -62,8 +62,10 @@ export const HAIKU_OUTPUT_CENTS_PER_MTOKEN = 1500;
 //
 // This constant MUST stay an overestimate of the real classifier system
 // prompt (SYSTEM_PROMPT in packages/api/src/ai/orchestration/intent-classifier.ts,
-// exported for exactly this reason). Measured 2026-07-17: 35,309 chars ≈ 8,828
-// tokens by this file's own chars/4 heuristic (estimateTokens) — the live eval
+// exported for exactly this reason). Re-measured 2026-07-26 after the VOX-07
+// create_invoice field guidance was added to the prompt: 37,899
+// chars ≈ 9,475 tokens by this file's own chars/4 heuristic (estimateTokens).
+// (Previously 2026-07-17: 35,309 chars ≈ 8,828 tokens.) The live eval
 // path (SYNTHETIC_TENANT_ID, no vertical/plan/owner/extended context) sends
 // only that base prompt, nothing more. This constant carries ~25% headroom
 // over that measurement so future taxonomy growth doesn't silently make the
@@ -73,7 +75,7 @@ export const HAIKU_OUTPUT_CENTS_PER_MTOKEN = 1500;
 // overestimate — if that test fails, bump this constant (don't just raise the
 // test's margin) and re-verify the cost cap semantics still abort before
 // spending.
-export const EST_SYSTEM_PROMPT_TOKENS = 11000;
+export const EST_SYSTEM_PROMPT_TOKENS = 12000;
 export const EST_OUTPUT_TOKENS_PER_CALL = 250;
 export const DEFAULT_COST_CAP_CENTS = 500; // $5
 

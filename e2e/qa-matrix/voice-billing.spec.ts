@@ -21,9 +21,19 @@ async function voiceProposal(
   h: RowHarness,
   utterance: string,
   label: string,
+  // QA-2026-07-26 (VOX-07) — optional caller-ID phone, forwarded to
+  // POST /api/voice/sessions. InAppVoiceAdapter.startSession resolves it via
+  // findByPhoneNormalized and stashes the matched CRM customer on the session
+  // (context.customerId), which transitionIntentConfirm then bridges into the
+  // proposal `entities`. Rows whose utterance references the customer only by
+  // a fuzzy display name the classifier will not reproduce verbatim (VOX-07
+  // says "the QA Matrix job"; the seeded customer is "qa-matrix-A-customer")
+  // have no other way to reach a resolved customerId. Same mechanism SCH-02
+  // (scheduling.spec.ts) and SMS-01 (sms.spec.ts) already rely on.
+  callerPhone?: string,
 ): Promise<{ sessionId: string; proposalId: string } | null> {
   const { token } = h.tenantA;
-  const sessionId = await startVoiceSession(h, token, label);
+  const sessionId = await startVoiceSession(h, token, label, callerPhone);
   if (!sessionId) {
     h.evidence.fail('Voice session could not be started.');
     return null;
@@ -136,6 +146,13 @@ matrixTest('VOX-07', 'Voice-triggered invoice creation from sold work', async (h
     h,
     `Create an invoice for the QA Matrix job for the completed furnace repair, $350 total.`,
     '07',
+    // Seeded primary customer's phone (fixtures/seed.ts: '555-0100').
+    // "the QA Matrix job" is a job-summary reference, not the customer's
+    // display name ("qa-matrix-A-customer"), so name-based customer
+    // resolution can never hit — caller-ID resolution is what supplies the
+    // customerId CreateInvoiceExecutionHandler needs. Same argument SCH-02
+    // and SMS-01 already make.
+    '555-0100',
   );
   if (!flow) return;
 
@@ -156,6 +173,12 @@ matrixTest('VOX-07', 'Voice-triggered invoice creation from sold work', async (h
     params: [entityId],
   });
   expect(db.rowCount, 'voice-created invoice must exist').toBe(1);
+  // The row's pass criteria says "invoice row LINKED TO JOB" — assert the
+  // linkage, not just the row's existence. invoices.job_id is NOT NULL at the
+  // schema level, so a null here would mean we read the wrong row; asserting
+  // it keeps the criterion honest if the column ever loosens.
+  const invoiceRow = db.rows[0] as { job_id?: string | null };
+  expect(invoiceRow?.job_id, 'voice-created invoice must be linked to a job').toBeTruthy();
   h.evidence.pass();
 });
 
