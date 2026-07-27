@@ -176,6 +176,11 @@ import {
 import { getConfidenceLevel } from '../guardrails/confidence';
 import type { ProposalConfidenceMeta } from '../../proposals/contracts';
 import { buildVoiceProposalPayload } from '../../proposals/voice-payload';
+import {
+  intentToProposalType,
+  voiceProposalSummary,
+} from '../../proposals/voice-intent-map';
+import { buildVoiceClarificationPayload } from '../../proposals/voice-clarification';
 import type { EntityResolver } from '../resolution/entity-resolver';
 import {
   resolveSchedulingEntities,
@@ -269,61 +274,22 @@ function xmlEscape(s: string): string {
     .replace(/'/g, '&apos;');
 }
 
-/** Map a classifier intent string to the typed ProposalType bucket. */
-function intentToProposalType(intent: string | undefined): ProposalType {
-  switch (intent) {
-    case 'create_invoice':
-      return 'draft_invoice';
-    case 'update_invoice':
-      return 'update_invoice';
-    case 'issue_invoice':
-      return 'issue_invoice';
-    case 'send_invoice':
-      return 'send_invoice';
-    case 'send_estimate':
-      return 'send_estimate';
-    case 'record_payment':
-      return 'record_payment';
-    case 'draft_estimate':
-      return 'draft_estimate';
-    case 'update_estimate':
-      return 'update_estimate';
-    case 'create_appointment':
-      return 'create_appointment';
-    case 'reschedule_appointment':
-      return 'reschedule_appointment';
-    case 'cancel_appointment':
-      return 'cancel_appointment';
-    case 'reassign_appointment':
-      return 'reassign_appointment';
-    case 'create_customer':
-      return 'create_customer';
-    case 'create_job':
-      return 'create_job';
-    case 'add_note':
-      return 'add_note';
-    case 'update_job':
-      return 'update_job';
-    case 'emergency_dispatch':
-      return 'emergency_dispatch';
-    default:
-      return 'voice_clarification';
-  }
-}
+// `intentToProposalType` + `voiceProposalSummary` are imported from
+// `proposals/voice-intent-map.ts` — this file used to carry a private
+// 17-case copy of the map that had drifted from the router's canonical 35.
+// Every intent the shared map newly covers here resolves to a type that is
+// NOT on the S1 allowlist, so the surface gate below coerces it to a
+// clarification exactly as the fall-through used to; see that module's header.
 
 /**
  * The CANONICAL clarification a live call degrades to when the built payload
  * cannot satisfy its proposal contract.
  *
- * `voiceClarificationPayloadSchema` requires `transcript` + `reason`, so this
- * can never be the raw `{intent, entities}` envelope — persisting that was the
- * second-order bug behind `intentToProposalType`'s `voice_clarification`
- * DEFAULT (S1-allowed, so it sailed through the surface gate and landed in the
- * operator's queue as an approve-to-fail card). The caller's own words are
- * preserved when we have them, and the structured entities ride along as
- * `requestedEntities` so the operator can see WHICH invoice / time / customer
- * was asked for. Caller-derived data is fine to STORE and display (I13) — it
- * just never becomes instructions.
+ * The shape itself lives in `proposals/voice-clarification.ts` — it is SHARED
+ * with the in-app adapter, which had the same second-order hole for any intent
+ * that falls through to the `voice_clarification` default. This wrapper only
+ * adapts the `VoiceSession` to that module's session-free input (`proposals/`
+ * must not import `ai/`).
  */
 function buildContractFailureClarification(
   session: VoiceSession,
@@ -331,31 +297,14 @@ function buildContractFailureClarification(
   entities: Record<string, unknown>,
   requestedProposalType: ProposalType,
 ): Record<string, unknown> {
-  const lastCallerTurn = [...session.transcript]
-    .reverse()
-    .find((line) => line.toLowerCase().startsWith('caller:'));
-  const entityDetails = Object.entries(entities)
-    .filter(([, v]) => typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean')
-    .map(([k, v]) => `${k}=${String(v)}`)
-    .join(', ');
-  const transcript =
-    (typeof entities.transcript === 'string' && entities.transcript.trim().length > 0
-      ? entities.transcript.trim()
-      : undefined) ??
-    (lastCallerTurn ? lastCallerTurn.slice('caller:'.length).trim() || undefined : undefined) ??
-    `Caller asked for '${intent ?? 'unknown'}' but the request was incomplete.` +
-      (entityDetails ? ` Details heard: ${entityDetails}.` : '');
-  return {
-    transcript,
-    // An intent the processor's switch doesn't know maps to the
-    // `voice_clarification` DEFAULT — that's an unknown intent. Anything else
-    // classified fine but arrived without the fields its contract needs.
-    reason: requestedProposalType === 'voice_clarification' ? 'unknown_intent' : 'missing_entities',
-    ...(intent ? { suggestedIntents: [intent] } : {}),
-    ...(Object.keys(entities).length > 0 ? { requestedEntities: entities } : {}),
+  return buildVoiceClarificationPayload({
+    transcript: session.transcript,
+    intent,
+    entities,
+    requestedProposalType,
     sessionId: session.id,
     ...(session.callSid !== undefined ? { callSid: session.callSid } : {}),
-  };
+  });
 }
 
 /**
@@ -1497,12 +1446,17 @@ export function createVoiceTurnProcessor(
         tenantId,
         proposalType: payloadProposalType,
         payload,
+        // `voiceProposalSummary` (proposals/voice-intent-map.ts) — SHARED with
+        // the in-app adapter, which always had the better template. This is
+        // not cosmetic on the phone path: CreateAppointmentExecutionHandler
+        // names an auto-opened job from `proposal.summary` when the classifier
+        // emitted no `jobTitle`, so a caller who booked by phone used to get a
+        // job called "Voice intent: create_appointment". It now reads
+        // "Schedule appointment for Jane Smith".
         summary: surfaceAllowed
           ? degradedFromContract
             ? `Caller's '${intent ?? 'unknown'}' request needs a human — details were incomplete`
-            : intent
-              ? `Voice intent: ${intent}`
-              : 'Voice clarification needed'
+            : voiceProposalSummary(intent, entities)
           : `Caller requested an operator-only action (${intent ?? 'unknown'})`,
         sourceContext: {
           source: 'calling-agent',

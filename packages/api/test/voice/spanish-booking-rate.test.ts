@@ -29,6 +29,7 @@ import { InMemoryProposalRepository } from '../../src/proposals/proposal';
 import { InMemoryAuditRepository } from '../../src/audit/audit';
 import { InMemoryOnCallRepository } from '../../src/oncall/rotation';
 import type { LLMGateway, LLMResponse } from '../../src/ai/gateway/gateway';
+import { guardVoiceProposalContract } from './helpers/voice-proposal-contract';
 
 interface SpanishFixture {
   id: string;
@@ -86,7 +87,44 @@ describe('Voice-parity Feature 6 — Spanish booking rate + language consistency
 
   beforeEach(() => {
     store = new VoiceSessionStore({ startInterval: false });
-    proposalRepo = new InMemoryProposalRepository();
+    proposalRepo = guardVoiceProposalContract(new InMemoryProposalRepository(), {
+      // PRE-EXISTING, DELIBERATELY OUT OF SCOPE for the payload-contract PR
+      // that added this guard. All six reduce to ONE root cause:
+      //
+      //   THE IN-APP ADAPTER HAS NO ENTITY RESOLUTION.
+      //
+      // The real Twilio path runs `resolveSchedulingEntities` before building
+      // its payload, so a spoken name becomes a `customerId`, a spoken time an
+      // ISO instant, a spoken reference an id. The in-app adapter hands the
+      // shared builder RAW classifier entities, so every contract that needs a
+      // resolved id fails — `customerName` arrives where `customerId` is
+      // required, `dateTimeDescription` where `scheduledStart` is.
+      //
+      // Not silent: the adapter emits a `voice.payload_contract_failed` audit
+      // row for each, and in-app is an authenticated S2 operator who reads and
+      // edits the card before approving (`approveProposal` re-validates at the
+      // execution boundary regardless). Closing it means giving the in-app
+      // adapter real entity resolution — the same change that was made for the
+      // phone path — which is its own PR.
+      knownGaps: [
+        { proposalType: 'draft_estimate', reason: 'customerName never resolved → customerId absent' },
+        { proposalType: 'update_customer', reason: 'customerName never resolved → customerId absent' },
+        {
+          proposalType: 'create_appointment',
+          reason: 'dateTimeDescription never resolved → scheduledStart/scheduledEnd absent',
+        },
+        {
+          proposalType: 'reschedule_appointment',
+          reason:
+            'appointmentReference/newDateTimeDescription never resolved → ' +
+            'appointmentId/newScheduledStart/newScheduledEnd absent',
+        },
+        {
+          proposalType: 'cancel_appointment',
+          reason: 'appointmentReference never resolved → appointmentId absent',
+        },
+      ],
+    });
     auditRepo = new InMemoryAuditRepository();
     onCallRepo = new InMemoryOnCallRepository();
   });

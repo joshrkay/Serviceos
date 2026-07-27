@@ -27,6 +27,7 @@ import { UpdateInvoiceExecutionHandler } from '../../src/proposals/execution/upd
 import { createMockLLMGateway } from '../../src/ai/gateway/factory';
 import type { QueueMessage } from '../../src/queues/queue';
 import type { Logger } from '../../src/logging/logger';
+import { guardVoiceProposalContract } from './helpers/voice-proposal-contract';
 
 function silentLogger(): Logger {
   const noop = () => {};
@@ -76,7 +77,7 @@ function seedInvoice(): Invoice {
 
 describe('integration — voice "add trip fee to invoice" → proposal → executed', () => {
   it('classifies the transcript, creates update_invoice proposal, executes against live invoice', async () => {
-    const proposalRepo = new InMemoryProposalRepository();
+    const proposalRepo = guardVoiceProposalContract(new InMemoryProposalRepository());
     const invoiceRepo = new InMemoryInvoiceRepository();
     await invoiceRepo.create(seedInvoice());
 
@@ -161,7 +162,7 @@ describe('integration — voice "add trip fee to invoice" → proposal → execu
   });
 
   it('executes a remove_line_item on the real invoice', async () => {
-    const proposalRepo = new InMemoryProposalRepository();
+    const proposalRepo = guardVoiceProposalContract(new InMemoryProposalRepository());
     const invoiceRepo = new InMemoryInvoiceRepository();
     await invoiceRepo.create(seedInvoice());
 

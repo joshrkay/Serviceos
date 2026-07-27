@@ -31,6 +31,7 @@ import {
 import type { LLMGateway, LLMResponse } from '../../src/ai/gateway/gateway';
 import type { QueueMessage } from '../../src/queues/queue';
 import type { Logger } from '../../src/logging/logger';
+import { guardVoiceProposalContract } from './helpers/voice-proposal-contract';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const FIXTURE_PATH = resolve(__dirname, 'fixtures/operator-ops-top-40.json');
@@ -109,7 +110,7 @@ describe('Operator money/CRM top-40 closed loop', () => {
   let proposalRepo: InMemoryProposalRepository;
 
   beforeEach(() => {
-    proposalRepo = new InMemoryProposalRepository();
+    proposalRepo = guardVoiceProposalContract(new InMemoryProposalRepository());
   });
 
   it('corpus covers all ten ops with exactly forty cases (4 each)', () => {

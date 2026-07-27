@@ -52,6 +52,7 @@ import { validateProposalPayload } from '../../src/proposals/contracts';
 import { InMemoryVoiceSessionRepository } from '../../src/voice/voice-session';
 import { InMemoryPhoneNumberRepository } from '../../src/integrations/twilio/phone-number-repository';
 import type { LLMGateway, LLMResponse } from '../../src/ai/gateway/gateway';
+import { guardVoiceProposalContract } from './helpers/voice-proposal-contract';
 
 // The tradesperson's provisioned business number (what the AI answers
 // on), the customer's caller-ID, and the tenant that owns the number.
@@ -101,7 +102,7 @@ async function makeInboundCall(gateway: LLMGateway): Promise<InboundHarness> {
   const resolvedTenantId = lookup.tenantId;
 
   const store = new VoiceSessionStore({ startInterval: false });
-  const proposalRepo = new InMemoryProposalRepository();
+  const proposalRepo = guardVoiceProposalContract(new InMemoryProposalRepository());
   const auditRepo = new InMemoryAuditRepository();
   const voiceSessionRepo = new InMemoryVoiceSessionRepository();
 

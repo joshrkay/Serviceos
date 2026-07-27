@@ -24,6 +24,7 @@ import { InMemoryVoiceSessionRepository } from '../../src/voice/voice-session';
 import { InMemoryConversationRepository } from '../../src/conversations/conversation-service';
 import type { Customer, CustomerRepository } from '../../src/customers/customer';
 import type { LLMGateway, LLMResponse } from '../../src/ai/gateway/gateway';
+import { guardVoiceProposalContract } from './helpers/voice-proposal-contract';
 
 const BUSINESS_NUMBER = '+15125550999';
 const CALLER_NUMBER = '+15125550100';
@@ -70,7 +71,7 @@ const CONFIRM_YES = JSON.stringify({ answer: 'yes', reasoning: 'caller confirmed
 describe('Inbound unknown-caller booking', () => {
   it('creates a customer, logs the call, and books a review-gated appointment for them', async () => {
     const store = new VoiceSessionStore({ startInterval: false });
-    const proposalRepo = new InMemoryProposalRepository();
+    const proposalRepo = guardVoiceProposalContract(new InMemoryProposalRepository());
     const auditRepo = new InMemoryAuditRepository();
     const voiceSessionRepo = new InMemoryVoiceSessionRepository();
     const conversationRepo = new InMemoryConversationRepository();

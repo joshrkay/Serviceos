@@ -402,10 +402,14 @@ export class CreateAppointmentExecutionHandler implements ExecutionHandler {
     // (measured 39/40 on the SMS-01 utterance), so an unlucky phrasing
     // dropped the caller's booking with "Payload must include a valid
     // jobId". `proposal.summary` is an always-present terminator — it is
-    // non-optional on Proposal, buildProposal rejects an empty one, and the
-    // voice path fills it from inapp-adapter's hardcoded summaryFor()
-    // template (at minimum "Schedule appointment", well inside createJob's
-    // 500-char limit). Same shape DraftEstimateExecutionHandler and
+    // non-optional on Proposal, buildProposal rejects an empty one, and BOTH
+    // voice surfaces fill it from the shared `voiceProposalSummary()` template
+    // (proposals/voice-intent-map.ts) — at minimum "Schedule appointment",
+    // well inside createJob's 500-char limit. That sharing is recent: this
+    // comment used to claim the in-app template covered the voice path, but
+    // the real Twilio path passed a bare `Voice intent: ${intent}`, so a job
+    // auto-opened for a phone caller was named "Voice intent:
+    // create_appointment". Same shape DraftEstimateExecutionHandler and
     // CreateInvoiceExecutionHandler already use for their job names.
     if (!targetJobId) {
       const jobTitle = typeof payload.jobTitle === 'string' ? payload.jobTitle.trim() : '';

@@ -89,6 +89,7 @@ import {
 } from '../../src/proposals/execution/handlers';
 import { S1_ALLOWED_PROPOSAL_TYPES } from '../../src/proposals/surface';
 import type { LLMGateway, LLMResponse } from '../../src/ai/gateway/gateway';
+import { guardVoiceProposalContract } from './helpers/voice-proposal-contract';
 
 // The tradesperson's provisioned business number (what the AI answers on),
 // the customer's caller-ID, and the tenant that owns the number — same
@@ -384,7 +385,7 @@ async function makeInboundCall(
   const resolvedTenantId = lookup.tenantId;
 
   const store = new VoiceSessionStore({ startInterval: false });
-  const proposalRepo = new InMemoryProposalRepository();
+  const proposalRepo = guardVoiceProposalContract(new InMemoryProposalRepository());
   const voiceSessionRepo = new InMemoryVoiceSessionRepository();
 
   const session = store.create(resolvedTenantId, 'telephony', { callSid: CALL_SID });
@@ -577,7 +578,7 @@ async function approveAndExecute(
   // Step past the 5s undo window so the executor will run it.
   approved = { ...approved, approvedAt: new Date(Date.now() - UNDO_WINDOW_MS - 100) };
 
-  const proposalRepo = new InMemoryProposalRepository();
+  const proposalRepo = guardVoiceProposalContract(new InMemoryProposalRepository());
   await proposalRepo.create(approved);
   const executionRepo = new InMemoryProposalExecutionRepository();
 

@@ -28,6 +28,11 @@ import type { ProposalSurface } from '../../../proposals/surface';
 // promotion / alias / line-item translation exists, and it lives next to the
 // per-type contracts it has to satisfy.
 import { buildVoiceProposalPayload } from '../../../proposals/voice-payload';
+import {
+  intentToProposalType,
+  voiceProposalSummary,
+} from '../../../proposals/voice-intent-map';
+import { buildVoiceClarificationPayload } from '../../../proposals/voice-clarification';
 import type { AuditRepository } from '../../../audit/audit';
 import { createAuditEvent } from '../../../audit/audit';
 import type { OnCallRepository } from '../../../oncall/rotation';
@@ -327,47 +332,15 @@ export function classifierToFsmEvent(
   };
 }
 
-function summaryFor(intent: string | undefined, entities: Record<string, unknown> | undefined): string {
-  const name = entities && typeof entities.customerName === 'string' ? entities.customerName : undefined;
-  const ref = entities && typeof entities.jobReference === 'string' ? entities.jobReference : undefined;
-  if (intent === 'create_invoice') return `Draft invoice${name ? ` for ${name}` : ''}`;
-  if (intent === 'draft_estimate') return `Draft estimate${name ? ` for ${name}` : ''}`;
-  if (intent === 'create_appointment') return `Schedule appointment${name ? ` for ${name}` : ''}`;
-  if (intent === 'emergency_dispatch') return 'Emergency dispatch — escalate to on-call';
-  if (intent) return `Voice intent: ${intent}${ref ? ` (${ref})` : ''}`;
-  return 'Voice clarification needed';
-}
-
-export function intentToProposalType(intent: string | undefined): ProposalType {
-  switch (intent) {
-    case 'create_invoice': return 'draft_invoice';
-    case 'update_invoice': return 'update_invoice';
-    case 'issue_invoice': return 'issue_invoice';
-    case 'send_invoice': return 'send_invoice';
-    case 'send_estimate': return 'send_estimate';
-    case 'record_payment': return 'record_payment';
-    case 'draft_estimate': return 'draft_estimate';
-    case 'update_estimate': return 'update_estimate';
-    case 'create_appointment': return 'create_appointment';
-    case 'reschedule_appointment': return 'reschedule_appointment';
-    case 'cancel_appointment': return 'cancel_appointment';
-    case 'reassign_appointment': return 'reassign_appointment';
-    case 'create_customer': return 'create_customer';
-    case 'create_job': return 'create_job';
-    case 'add_note': return 'add_note';
-    case 'emergency_dispatch': return 'emergency_dispatch';
-    case 'update_customer': return 'update_customer';
-    case 'log_expense': return 'log_expense';
-    case 'convert_lead': return 'convert_lead';
-    case 'confirm_appointment': return 'confirm_appointment';
-    case 'mark_lead_lost': return 'mark_lead_lost';
-    case 'add_service_location': return 'add_service_location';
-    case 'log_time_entry': return 'log_time_entry';
-    case 'notify_delay': return 'notify_delay';
-    case 'request_feedback': return 'request_feedback';
-    default: return 'voice_clarification';
-  }
-}
+// `intentToProposalType` (this file's 25-case copy) and `summaryFor` moved to
+// `proposals/voice-intent-map.ts` as `intentToProposalType` /
+// `voiceProposalSummary`. The summary template was always the better of the
+// two implementations and is now what the real phone path uses as well; the
+// map gains the 10 cases the router carried and this copy had not (update_job,
+// batch_invoice, the crew pair, the collections trio, and the taxonomy-1.2.0
+// on-ramp trio), each of which previously degraded a real OPERATOR request
+// into a clarification card. In-app is surface S2, so no allowlist applies —
+// these now mint the proposal the operator actually asked for.
 
 /**
  * Map FSM escalation reasons to the strict EscalationReason union the
@@ -1415,7 +1388,7 @@ export class InAppVoiceAdapter {
       ? payload.entities as Record<string, unknown>
       : {};
     const proposalType = intentToProposalType(intent);
-    const summary = summaryFor(intent, entities);
+    const summary = voiceProposalSummary(intent, entities);
 
     try {
       // PR B — load tenant threshold override so the Settings UI value
@@ -1531,14 +1504,43 @@ export class InAppVoiceAdapter {
       // approving, and `approveProposal` re-validates at the execution
       // boundary regardless — so a contract gap here does NOT change what is
       // persisted. It must still be diagnosable, hence the audit row.
+      //
+      // ONE exception, and only one: `voice_clarification` itself. That is
+      // the map's DEFAULT for an intent nobody mapped (a `lookup_*`, or
+      // anything outside the shared map), and unlike every real type it has
+      // NO execution handler and no review-completion path — so there is no
+      // editable draft to preserve and nothing an operator could complete.
+      // The raw `{intent, entities}` envelope simply fails
+      // `voiceClarificationPayloadSchema` (transcript + reason) and lands in
+      // the queue as a malformed card. Degrade it to the CANONICAL
+      // clarification instead — the same shape, from the same shared module,
+      // that the phone path already degrades to.
+      //
+      // Deliberately NOT applied to real proposal types: those keep the
+      // persist-unchanged behaviour above, because destroying an operator's
+      // editable draft would be strictly worse than handing them one with a
+      // gap in it.
+      let effectivePayload = built.payload;
       if (!built.ok) {
+        const degradeToClarification = proposalType === 'voice_clarification';
+        if (degradeToClarification) {
+          effectivePayload = buildVoiceClarificationPayload({
+            transcript: session.transcript,
+            intent,
+            entities,
+            requestedProposalType: proposalType,
+            sessionId: session.id,
+          });
+        }
         await this.handleAuditLog(session, {
           type: 'audit_log',
           payload: {
             eventType: 'voice.payload_contract_failed',
             intent,
             proposalType,
-            outcome: 'persisted_unchanged',
+            outcome: degradeToClarification
+              ? 'degraded_to_clarification'
+              : 'persisted_unchanged',
             errors: built.errors,
             missingFields: built.missingFieldPaths,
             sessionId: session.id,
@@ -1550,8 +1552,9 @@ export class InAppVoiceAdapter {
       const proposal = buildProposal({
         tenantId: session.tenantId,
         proposalType,
-        // Flat, contract-checked, built by the shared module above.
-        payload: built.payload,
+        // Flat, contract-checked, built by the shared module above (or the
+        // canonical clarification, for the unmapped-intent fall-through).
+        payload: effectivePayload,
         summary,
         // QA-2026-06-04: mirror the AI task handlers (create-appointment-task
         // et al.) — calling-agent proposals are capture-class from the

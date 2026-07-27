@@ -32,6 +32,7 @@ import {
 } from '../../src/workers/voice-action-router';
 import { createMockLLMGateway } from '../../src/ai/gateway/factory';
 import type { Logger } from '../../src/logging/logger';
+import { guardVoiceProposalContract } from './helpers/voice-proposal-contract';
 
 function silentLogger(): Logger {
   const noop = () => {};
@@ -53,7 +54,7 @@ describe('integration — voice transcription → proposal', () => {
   beforeEach(() => {
     queue = new InMemoryQueue({ maxRetries: 3 });
     voiceRepo = new InMemoryVoiceRepository();
-    proposalRepo = new InMemoryProposalRepository();
+    proposalRepo = guardVoiceProposalContract(new InMemoryProposalRepository());
   });
 
   it('takes a voice recording and produces a draft_invoice proposal', async () => {
