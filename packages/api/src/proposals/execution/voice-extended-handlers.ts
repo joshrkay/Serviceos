@@ -304,7 +304,15 @@ export class SendEstimateExecutionHandler implements ExecutionHandler {
         error: 'Payload must include a valid estimateId UUID (resolve estimateReference at review time first)',
       };
     }
-    if (payload.channel !== 'email' && payload.channel !== 'sms') {
+    // QA-2026-07-26 (VOX-06): the intent classifier emits `sendChannel`
+    // while this task contract reads `channel` — accept either key here as
+    // belt-and-braces behind the inapp-adapter alias that now translates it
+    // (ai/agents/customer-calling/inapp-adapter.ts), so a payload persisted
+    // by any other producer isn't rejected on a naming mismatch alone. The
+    // validation itself is unchanged: anything that isn't email or sms is
+    // still refused.
+    const channel = payload.channel ?? payload.sendChannel;
+    if (channel !== 'email' && channel !== 'sms') {
       return { success: false, error: 'Payload must specify channel as email or sms' };
     }
 
@@ -316,7 +324,7 @@ export class SendEstimateExecutionHandler implements ExecutionHandler {
     const dispatch: EstimateDispatch = {
       tenantId: context.tenantId,
       estimateId: payload.estimateId,
-      channel: payload.channel,
+      channel,
       recipient: typeof payload.recipient === 'string' ? payload.recipient : undefined,
       customMessage: typeof payload.customMessage === 'string' ? payload.customMessage : undefined,
     };
@@ -349,7 +357,13 @@ export class SendInvoiceExecutionHandler implements ExecutionHandler {
         error: 'Payload must include a valid invoiceId UUID (resolve invoiceReference at review time first)',
       };
     }
-    if (payload.channel !== 'email' && payload.channel !== 'sms') {
+    // QA-2026-07-26 (VOX-06): same sendChannel/channel key mismatch as
+    // SendEstimateExecutionHandler above — latent here only because the
+    // passing QA row uses issue_invoice (no channel gate) rather than
+    // send_invoice. Resolve from either key; the email/sms validation below
+    // is unchanged.
+    const channel = payload.channel ?? payload.sendChannel;
+    if (channel !== 'email' && channel !== 'sms') {
       return { success: false, error: 'Payload must specify channel as email or sms' };
     }
 
@@ -361,7 +375,7 @@ export class SendInvoiceExecutionHandler implements ExecutionHandler {
     const dispatch: InvoiceDispatch = {
       tenantId: context.tenantId,
       invoiceId: payload.invoiceId,
-      channel: payload.channel,
+      channel,
       recipient: typeof payload.recipient === 'string' ? payload.recipient : undefined,
       customMessage: typeof payload.customMessage === 'string' ? payload.customMessage : undefined,
     };

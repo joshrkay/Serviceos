@@ -23,6 +23,7 @@ import { UpdateEstimateExecutionHandler } from '../../src/proposals/execution/up
 import { createMockLLMGateway } from '../../src/ai/gateway/factory';
 import type { QueueMessage } from '../../src/queues/queue';
 import type { Logger } from '../../src/logging/logger';
+import { guardVoiceProposalContract } from './helpers/voice-proposal-contract';
 
 function silentLogger(): Logger {
   const noop = () => {};
@@ -78,7 +79,7 @@ function seedEstimate(): Estimate {
 
 describe('integration — voice "add item to estimate" → proposal → executed', () => {
   it('adds a line item to the real estimate through the full chain', async () => {
-    const proposalRepo = new InMemoryProposalRepository();
+    const proposalRepo = guardVoiceProposalContract(new InMemoryProposalRepository());
     const estimateRepo = new InMemoryEstimateRepository();
     await estimateRepo.create(seedEstimate());
 
@@ -154,7 +155,7 @@ describe('integration — voice "add item to estimate" → proposal → executed
   });
 
   it('removes a line item from the real estimate', async () => {
-    const proposalRepo = new InMemoryProposalRepository();
+    const proposalRepo = guardVoiceProposalContract(new InMemoryProposalRepository());
     const estimateRepo = new InMemoryEstimateRepository();
     await estimateRepo.create(seedEstimate());
 

@@ -173,7 +173,19 @@ export const updateJobPayloadSchema = z
 
 export const createAppointmentPayloadSchema = z
   .object({
-    jobId: z.string().uuid(),
+    // Optional-with-a-refine (see the `jobId || customerId` rule at the bottom
+    // of this schema) rather than required. `CreateAppointmentExecutionHandler`
+    // (proposals/execution/handlers.ts, SCH-02) deliberately AUTO-OPENS a job
+    // when a caller describes NEW work: an inbound `create_appointment` is
+    // classified with `jobTitle` and no resolvable job — `create_appointment`
+    // is excluded from entity-resolution.ts's JOB_REF_INTENTS on purpose — and
+    // the handler opens the job from `jobTitle` (falling back to
+    // `proposal.summary`) against `customerId`. Pinning `jobId` as REQUIRED
+    // here made this contract stricter than the executor it describes, so
+    // enforcing it at the voice emit site would have rejected exactly the
+    // booking SCH-02 exists to serve. Strictly widening: every payload that
+    // validated before still validates.
+    jobId: z.string().uuid().optional(),
     // RV-081 — revisit linkage. When present, this appointment is a REVISIT
     // booked against an EXISTING job (no new job is created): the execution
     // handler validates the job exists in-tenant and attaches the
@@ -195,11 +207,26 @@ export const createAppointmentPayloadSchema = z
     customerId: z.string().optional(),
     customerName: z.string().optional(),
     summary: z.string().optional(),
+    // Declared (not merely tolerated by strip-mode) because the `jobId ||
+    // customerId` refine below and the SCH-02 executor fallback both read it:
+    // it is the NAME of the job the handler opens when no jobId resolved.
+    jobTitle: z.string().optional(),
     // Typed visit kind (estimate/repair/install/maintenance/diagnostic),
     // emitted enum-validated by the appointment task. Optional: inbound-caller
     // DRAFTs built at classify time carry none, and legacy payloads predate it.
     appointmentType: appointmentTypeSchema.optional(),
   })
+  // An appointment must attach to SOMETHING real: either an already-resolved
+  // job (`jobId` / `linkedJobId`) or the customer the executor will open a new
+  // job for (SCH-02). Neither present means nothing downstream can book it —
+  // that stays a hard contract failure.
+  .refine(
+    (v) => Boolean(v.jobId) || Boolean(v.linkedJobId) || Boolean(v.customerId),
+    {
+      message:
+        'create_appointment requires jobId (or linkedJobId), or a customerId the executor can open a job for',
+    },
+  )
   .refine(
     (v) => {
       const s = Date.parse(v.scheduledStart);

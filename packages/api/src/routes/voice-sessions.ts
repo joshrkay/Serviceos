@@ -28,6 +28,15 @@ export interface VoiceSessionsRouterDeps {
 
 const startSchema = z.object({
   conversationId: z.string().min(1).optional(),
+  /**
+   * QA-2026-07-26 — caller's phone number, optionally supplied by the
+   * in-app client at session start (e.g. the operator is on a call with a
+   * customer and starts the assistant with that number in hand). When it
+   * matches EXACTLY ONE tenant customer, the adapter resolves it immediately
+   * so a later generic reference like "our customer" still attaches to the
+   * right customer. See InAppVoiceAdapter.startSession.
+   */
+  callerPhone: z.string().optional(),
 });
 
 const inputSchema = z.object({
@@ -70,6 +79,7 @@ export function createVoiceSessionsRouter(deps: VoiceSessionsRouterDeps): Router
         req.auth!.userId,
         parsed.conversationId,
         req.auth!.role,
+        parsed.callerPhone,
       );
       res.status(201).json({
         sessionId: result.sessionId,

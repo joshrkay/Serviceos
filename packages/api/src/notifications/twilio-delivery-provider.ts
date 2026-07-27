@@ -5,13 +5,22 @@ import {
   SmsMessage,
 } from "./delivery-provider";
 import { DeliveryError } from "./notification-errors";
+import {
+  TwilioEmailConfig,
+  TwilioEmailDeliveryProvider,
+} from "./twilio-email-delivery-provider";
 
 /**
  * Production message delivery via Twilio.
  *
  * SMS uses Twilio Programmable Messaging (the same API the existing
- * feedback dispatcher uses). Email uses Twilio SendGrid v3. Both
- * channels share account credentials via the parent Twilio billing
+ * feedback dispatcher uses). Email has TWO possible backends, selected
+ * by which credentials the deployment actually has:
+ *   - `twilioEmail` — Twilio's native Email API (comms.twilio.com), which
+ *     reuses the SMS Account SID + Auth Token. See
+ *     twilio-email-delivery-provider.ts.
+ *   - `email` — Twilio SendGrid v3, which needs its own `SG.` API key.
+ * Both channels share account credentials via the parent Twilio billing
  * relationship — operationally we want one vendor to manage, not two.
  *
  * The provider performs the HTTP calls directly with `fetch`. We
@@ -48,9 +57,31 @@ export interface SendGridConfig {
   fetchImpl?: typeof fetch;
 }
 
+/**
+ * The two legs are INDEPENDENT and each is optional.
+ *
+ * Previously both were required, so a deployment with Twilio credentials but
+ * no SendGrid credentials could not send SMS at all — the constructor threw,
+ * app.ts fell through to `rawMessageDelivery = null`, and every SMS path went
+ * dark for want of an *email* key. Omitting a leg now configures a
+ * single-channel provider; the unconfigured channel fails loudly at send time
+ * (`DeliveryError('AUTH_FAILED', ...)`, the same error shape a rejected
+ * credential produces) rather than silently dropping the message.
+ *
+ * Supplying a leg with blank/partial credentials still throws at construction:
+ * that is a misconfiguration, not an intentional opt-out.
+ */
 export interface TwilioDeliveryProviderConfig {
-  sms: TwilioSmsConfig;
-  email: SendGridConfig;
+  sms?: TwilioSmsConfig;
+  /** SendGrid email leg. Needs its own `SG.` API key. */
+  email?: SendGridConfig;
+  /**
+   * Twilio-native email leg (comms.twilio.com/v1/Emails). Reuses the SMS
+   * Account SID + Auth Token — no new credential. Takes precedence over
+   * `email` if both are somehow supplied; app.ts picks exactly one and logs
+   * the choice at boot, so this is only a deterministic tiebreak.
+   */
+  twilioEmail?: TwilioEmailConfig;
 }
 
 interface TwilioMessageResponse {
@@ -119,59 +150,90 @@ function classifySendgridError(response: Response, providerBody: string): Normal
 const DELIVERY_REQUEST_TIMEOUT_MS = 15_000;
 
 export class TwilioDeliveryProvider implements MessageDeliveryProvider {
-  private readonly sms: Required<
+  private readonly smsConfig?: Required<
     Omit<TwilioSmsConfig, "fetchImpl" | "secondaryAuthToken">
   > & {
     fetchImpl: typeof fetch;
     secondaryAuthToken?: string;
   };
-  private readonly email: Required<
+  private readonly emailConfig?: Required<
     Omit<SendGridConfig, "fetchImpl" | "fromName" | "replyToEmail">
   > & {
     fromName?: string;
     replyToEmail?: string;
     fetchImpl: typeof fetch;
   };
+  /** Twilio-native email leg. Mutually exclusive with `emailConfig` in practice. */
+  private readonly twilioEmailProvider?: TwilioEmailDeliveryProvider;
 
   constructor(config: TwilioDeliveryProviderConfig) {
-    if (
-      !config.sms.accountSid ||
-      !config.sms.authToken ||
-      !config.sms.fromNumber
-    ) {
-      throw new Error("TwilioDeliveryProvider: missing SMS credentials");
+    if (config.sms) {
+      if (
+        !config.sms.accountSid ||
+        !config.sms.authToken ||
+        !config.sms.fromNumber
+      ) {
+        throw new Error("TwilioDeliveryProvider: missing SMS credentials");
+      }
+      this.smsConfig = {
+        accountSid: config.sms.accountSid,
+        authToken: config.sms.authToken,
+        secondaryAuthToken: config.sms.secondaryAuthToken,
+        fromNumber: config.sms.fromNumber,
+        apiBaseUrl: config.sms.apiBaseUrl ?? "https://api.twilio.com/2010-04-01",
+        fetchImpl: config.sms.fetchImpl ?? fetch,
+      };
     }
-    if (!config.email.apiKey || !config.email.fromEmail) {
-      throw new Error("TwilioDeliveryProvider: missing SendGrid credentials");
+    if (config.email) {
+      if (!config.email.apiKey || !config.email.fromEmail) {
+        throw new Error("TwilioDeliveryProvider: missing SendGrid credentials");
+      }
+      this.emailConfig = {
+        apiKey: config.email.apiKey,
+        fromEmail: config.email.fromEmail,
+        fromName: config.email.fromName,
+        replyToEmail: config.email.replyToEmail,
+        apiBaseUrl: config.email.apiBaseUrl ?? "https://api.sendgrid.com/v3",
+        fetchImpl: config.email.fetchImpl ?? fetch,
+      };
     }
+    if (config.twilioEmail) {
+      // Throws on blank/partial creds — same misconfiguration-vs-opt-out rule
+      // the sms/email legs use.
+      this.twilioEmailProvider = new TwilioEmailDeliveryProvider(config.twilioEmail);
+    }
+    if (!this.smsConfig && !this.emailConfig && !this.twilioEmailProvider) {
+      throw new Error(
+        "TwilioDeliveryProvider: at least one of sms/email must be configured",
+      );
+    }
+  }
 
-    this.sms = {
-      accountSid: config.sms.accountSid,
-      authToken: config.sms.authToken,
-      secondaryAuthToken: config.sms.secondaryAuthToken,
-      fromNumber: config.sms.fromNumber,
-      apiBaseUrl: config.sms.apiBaseUrl ?? "https://api.twilio.com/2010-04-01",
-      fetchImpl: config.sms.fetchImpl ?? fetch,
-    };
-    this.email = {
-      apiKey: config.email.apiKey,
-      fromEmail: config.email.fromEmail,
-      fromName: config.email.fromName,
-      replyToEmail: config.email.replyToEmail,
-      apiBaseUrl: config.email.apiBaseUrl ?? "https://api.sendgrid.com/v3",
-      fetchImpl: config.email.fetchImpl ?? fetch,
-    };
+  /** True when this provider can actually send on the given channel. */
+  supports(channel: "sms" | "email"): boolean {
+    return channel === "sms"
+      ? !!this.smsConfig
+      : !!this.twilioEmailProvider || !!this.emailConfig;
   }
 
   async sendSms(message: SmsMessage): Promise<DeliveryResult> {
+    const sms = this.smsConfig;
+    if (!sms) {
+      // Loud, not silent: an SMS attempted on an email-only deployment is a
+      // wiring bug, and a swallowed no-op would look like a delivered message.
+      throw new DeliveryError(
+        "AUTH_FAILED",
+        "SMS is not configured (TWILIO_ACCOUNT_SID / TWILIO_AUTH_TOKEN / TWILIO_FROM_NUMBER)",
+      );
+    }
     const body = new URLSearchParams({
       To: message.to,
-      From: this.sms.fromNumber,
+      From: sms.fromNumber,
       Body: message.body,
     });
 
     const auth = Buffer.from(
-      `${this.sms.accountSid}:${this.sms.authToken}`,
+      `${sms.accountSid}:${sms.authToken}`,
     ).toString("base64");
     const headers: Record<string, string> = {
       Authorization: `Basic ${auth}`,
@@ -182,8 +244,8 @@ export class TwilioDeliveryProvider implements MessageDeliveryProvider {
       headers["Idempotency-Key"] = message.idempotencyKey;
     }
 
-    const response = await this.sms.fetchImpl(
-      `${this.sms.apiBaseUrl}/Accounts/${this.sms.accountSid}/Messages.json`,
+    const response = await sms.fetchImpl(
+      `${sms.apiBaseUrl}/Accounts/${sms.accountSid}/Messages.json`,
       {
         method: "POST",
         headers,
@@ -215,8 +277,23 @@ export class TwilioDeliveryProvider implements MessageDeliveryProvider {
   }
 
   async sendEmail(message: EmailMessage): Promise<DeliveryResult> {
-    const fromEmail = message.from ?? this.email.fromEmail;
-    const replyToEmail = message.replyTo ?? this.email.replyToEmail;
+    // Twilio-native email wins deterministically when both legs are present.
+    // app.ts selects exactly one and logs it, so this only decides the
+    // pathological both-configured case.
+    if (this.twilioEmailProvider) {
+      return this.twilioEmailProvider.sendEmail(message);
+    }
+    const email = this.emailConfig;
+    if (!email) {
+      // Loud, not silent — same rationale as sendSms above.
+      throw new DeliveryError(
+        "AUTH_FAILED",
+        "Email is not configured (set TWILIO_EMAIL_FROM_ADDRESS for Twilio-native email, " +
+          "or SENDGRID_API_KEY / SENDGRID_FROM_EMAIL for SendGrid)",
+      );
+    }
+    const fromEmail = message.from ?? email.fromEmail;
+    const replyToEmail = message.replyTo ?? email.replyToEmail;
 
     const content: Array<{ type: string; value: string }> = [
       { type: "text/plain", value: message.text },
@@ -227,8 +304,8 @@ export class TwilioDeliveryProvider implements MessageDeliveryProvider {
 
     const payload: Record<string, unknown> = {
       personalizations: [{ to: [{ email: message.to }] }],
-      from: this.email.fromName
-        ? { email: fromEmail, name: this.email.fromName }
+      from: email.fromName
+        ? { email: fromEmail, name: email.fromName }
         : { email: fromEmail },
       subject: message.subject,
       content,
@@ -241,7 +318,7 @@ export class TwilioDeliveryProvider implements MessageDeliveryProvider {
     }
 
     const headers: Record<string, string> = {
-      Authorization: `Bearer ${this.email.apiKey}`,
+      Authorization: `Bearer ${email.apiKey}`,
       "Content-Type": "application/json",
     };
     if (message.idempotencyKey) {
@@ -249,8 +326,8 @@ export class TwilioDeliveryProvider implements MessageDeliveryProvider {
       headers["X-Message-Id"] = message.idempotencyKey;
     }
 
-    const response = await this.email.fetchImpl(
-      `${this.email.apiBaseUrl}/mail/send`,
+    const response = await email.fetchImpl(
+      `${email.apiBaseUrl}/mail/send`,
       {
         method: "POST",
         headers,

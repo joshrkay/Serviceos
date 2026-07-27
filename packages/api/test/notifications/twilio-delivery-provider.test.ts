@@ -227,4 +227,82 @@ describe('TwilioDeliveryProvider — config validation', () => {
         })
     ).toThrow(/missing SendGrid credentials/);
   });
+
+  it('throws when neither channel is configured', () => {
+    expect(() => new TwilioDeliveryProvider({})).toThrow(
+      /at least one of sms\/email must be configured/,
+    );
+  });
+});
+
+/**
+ * Production has Twilio credentials but no SendGrid credentials. Before the
+ * legs were decoupled, that combination threw here, app.ts fell through to
+ * `rawMessageDelivery = null`, and SMS was dark purely for want of an email
+ * key. These tests pin the fix.
+ */
+describe('TwilioDeliveryProvider — SMS with NO email credentials', () => {
+  function smsOnly(fetchImpl: typeof fetch) {
+    return new TwilioDeliveryProvider({
+      sms: {
+        accountSid: 'AC_test',
+        authToken: 'token_test',
+        fromNumber: '+15555550100',
+        apiBaseUrl: 'https://test.example/twilio',
+        fetchImpl,
+      },
+    });
+  }
+
+  it('constructs and sends SMS with Twilio creds alone', async () => {
+    const fetchImpl = vi.fn(async (url: string) => {
+      expect(url).toBe('https://test.example/twilio/Accounts/AC_test/Messages.json');
+      return new Response(JSON.stringify({ sid: 'SM_solo', status: 'queued' }), {
+        status: 201,
+      });
+    }) as unknown as typeof fetch;
+
+    const provider = smsOnly(fetchImpl);
+    expect(provider.supports('sms')).toBe(true);
+    expect(provider.supports('email')).toBe(false);
+
+    const result = await provider.sendSms({
+      to: '+15555550111',
+      body: 'on our way',
+      recipientClass: 'customer',
+    });
+    expect(result.providerMessageId).toBe('SM_solo');
+    expect(result.channel).toBe('sms');
+  });
+
+  it('fails LOUDLY on email rather than silently dropping it', async () => {
+    const fetchImpl = vi.fn() as unknown as typeof fetch;
+    const provider = smsOnly(fetchImpl);
+
+    await expect(
+      provider.sendEmail({ to: 'a@b.com', subject: 's', text: 't' }),
+    ).rejects.toBeInstanceOf(DeliveryError);
+    await expect(
+      provider.sendEmail({ to: 'a@b.com', subject: 's', text: 't' }),
+    ).rejects.toThrow(/Email is not configured/);
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it('mirror case — email creds alone construct, and SMS fails loudly', async () => {
+    const fetchImpl = vi.fn() as unknown as typeof fetch;
+    const provider = new TwilioDeliveryProvider({
+      email: {
+        apiKey: 'SG.test',
+        fromEmail: 'team@acmehvac.com',
+        apiBaseUrl: 'https://test.example/sendgrid',
+        fetchImpl,
+      },
+    });
+    expect(provider.supports('sms')).toBe(false);
+    expect(provider.supports('email')).toBe(true);
+    await expect(
+      provider.sendSms({ to: '+1555', body: 'x', recipientClass: 'owner' }),
+    ).rejects.toThrow(/SMS is not configured/);
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
 });

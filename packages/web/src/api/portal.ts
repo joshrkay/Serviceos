@@ -153,11 +153,20 @@ export interface PortalPaymentMethod {
   isDefault: boolean;
 }
 
+function portalRequestError(status: number): Error {
+  if (status === 401 || status === 403 || status === 404) {
+    return new Error('Portal request failed. This link is invalid or expired.');
+  }
+  if (status >= 500) {
+    return new Error('Portal request failed. The portal is temporarily unavailable.');
+  }
+  return new Error('Portal request failed. Please check the link and try again.');
+}
+
 async function getJson<T>(url: string): Promise<T> {
   const res = await fetch(url, { headers: { Accept: 'application/json' } });
   if (!res.ok) {
-    const body = await res.text();
-    throw new Error(`Portal request failed (${res.status}): ${body || res.statusText}`);
+    throw portalRequestError(res.status);
   }
   return (await res.json()) as T;
 }
@@ -169,8 +178,7 @@ async function postJson<T>(url: string, body: unknown): Promise<T> {
     body: JSON.stringify(body),
   });
   if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`Portal request failed (${res.status}): ${text || res.statusText}`);
+    throw portalRequestError(res.status);
   }
   return (await res.json()) as T;
 }

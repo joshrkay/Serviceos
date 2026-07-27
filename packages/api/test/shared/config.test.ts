@@ -372,6 +372,53 @@ describe('P0-006 — Secrets/config framework', () => {
       );
     });
 
+    // The email gate accepts EITHER backend. Production has Twilio credentials
+    // and NO SendGrid key, so demanding SENDGRID_* specifically hard-failed
+    // boot for the deployment that actually exists.
+    it('email — Twilio-native email satisfies the gate with NO SendGrid key', () => {
+      expect(() =>
+        loadConfig({
+          ...baseProdEnv,
+          TELEPHONY_ENABLED: 'false',
+          STORAGE_ENABLED: 'false',
+          TWILIO_ACCOUNT_SID: 'AC7x',
+          TWILIO_AUTH_TOKEN: 'tok',
+          TWILIO_FROM_NUMBER: '+15555550100',
+          TWILIO_EMAIL_FROM_ADDRESS: 'support@acmehvac.com',
+        })
+      ).not.toThrow();
+    });
+
+    it('email — TWILIO_EMAIL_FROM_ADDRESS alone is not enough (creds still required)', () => {
+      expect(() =>
+        loadConfig({
+          ...baseProdEnv,
+          TELEPHONY_ENABLED: 'false',
+          STORAGE_ENABLED: 'false',
+          TWILIO_EMAIL_FROM_ADDRESS: 'support@acmehvac.com',
+        })
+      ).toThrow(/TWILIO_ACCOUNT_SID/);
+    });
+
+    it('email — neither backend configured names BOTH options', () => {
+      let err: Error | undefined;
+      try {
+        loadConfig({
+          ...baseProdEnv,
+          TELEPHONY_ENABLED: 'false',
+          STORAGE_ENABLED: 'false',
+          TWILIO_ACCOUNT_SID: 'AC7x',
+          TWILIO_AUTH_TOKEN: 'tok',
+          TWILIO_FROM_NUMBER: '+15555550100',
+        });
+      } catch (e) {
+        err = e as Error;
+      }
+      expect(err?.message).toMatch(/TWILIO_EMAIL_FROM_ADDRESS/);
+      expect(err?.message).toMatch(/SENDGRID_API_KEY/);
+      expect(err?.message).toMatch(/EMAIL_ENABLED=false/);
+    });
+
     it('email + telephony off — no Twilio creds required', () => {
       expect(() =>
         loadConfig({

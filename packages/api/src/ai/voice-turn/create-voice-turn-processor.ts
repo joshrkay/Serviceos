@@ -175,6 +175,17 @@ import {
 } from '../resolution/catalog-resolver';
 import { getConfidenceLevel } from '../guardrails/confidence';
 import type { ProposalConfidenceMeta } from '../../proposals/contracts';
+import { buildVoiceProposalPayload } from '../../proposals/voice-payload';
+import {
+  intentToProposalType,
+  voiceProposalSummary,
+} from '../../proposals/voice-intent-map';
+import { buildVoiceClarificationPayload } from '../../proposals/voice-clarification';
+import type { EntityResolver } from '../resolution/entity-resolver';
+import {
+  resolveSchedulingEntities,
+  type SchedulingEntityResolution,
+} from '../agents/customer-calling/entity-resolution';
 import { preloadSessionCatalog, resolveSessionCatalog } from './session-catalog';
 import { buildQuoteReadback, type QuoteReadbackLine } from './quote-readback';
 import { parseLeadingQuantity } from './quantity-parse';
@@ -263,46 +274,37 @@ function xmlEscape(s: string): string {
     .replace(/'/g, '&apos;');
 }
 
-/** Map a classifier intent string to the typed ProposalType bucket. */
-function intentToProposalType(intent: string | undefined): ProposalType {
-  switch (intent) {
-    case 'create_invoice':
-      return 'draft_invoice';
-    case 'update_invoice':
-      return 'update_invoice';
-    case 'issue_invoice':
-      return 'issue_invoice';
-    case 'send_invoice':
-      return 'send_invoice';
-    case 'send_estimate':
-      return 'send_estimate';
-    case 'record_payment':
-      return 'record_payment';
-    case 'draft_estimate':
-      return 'draft_estimate';
-    case 'update_estimate':
-      return 'update_estimate';
-    case 'create_appointment':
-      return 'create_appointment';
-    case 'reschedule_appointment':
-      return 'reschedule_appointment';
-    case 'cancel_appointment':
-      return 'cancel_appointment';
-    case 'reassign_appointment':
-      return 'reassign_appointment';
-    case 'create_customer':
-      return 'create_customer';
-    case 'create_job':
-      return 'create_job';
-    case 'add_note':
-      return 'add_note';
-    case 'update_job':
-      return 'update_job';
-    case 'emergency_dispatch':
-      return 'emergency_dispatch';
-    default:
-      return 'voice_clarification';
-  }
+// `intentToProposalType` + `voiceProposalSummary` are imported from
+// `proposals/voice-intent-map.ts` — this file used to carry a private
+// 17-case copy of the map that had drifted from the router's canonical 35.
+// Every intent the shared map newly covers here resolves to a type that is
+// NOT on the S1 allowlist, so the surface gate below coerces it to a
+// clarification exactly as the fall-through used to; see that module's header.
+
+/**
+ * The CANONICAL clarification a live call degrades to when the built payload
+ * cannot satisfy its proposal contract.
+ *
+ * The shape itself lives in `proposals/voice-clarification.ts` — it is SHARED
+ * with the in-app adapter, which had the same second-order hole for any intent
+ * that falls through to the `voice_clarification` default. This wrapper only
+ * adapts the `VoiceSession` to that module's session-free input (`proposals/`
+ * must not import `ai/`).
+ */
+function buildContractFailureClarification(
+  session: VoiceSession,
+  intent: string | undefined,
+  entities: Record<string, unknown>,
+  requestedProposalType: ProposalType,
+): Record<string, unknown> {
+  return buildVoiceClarificationPayload({
+    transcript: session.transcript,
+    intent,
+    entities,
+    requestedProposalType,
+    sessionId: session.id,
+    ...(session.callSid !== undefined ? { callSid: session.callSid } : {}),
+  });
 }
 
 /**
@@ -410,6 +412,21 @@ export interface VoiceTurnProcessorDeps {
   customerNegotiationContextProvider?: CustomerNegotiationContextProvider;
   /** P2-036 V2 — resolves the live caller's current quote for the discount engine. */
   negotiationQuoteResolver?: CurrentQuoteResolver;
+  /**
+   * P0 voice-safety — shared, tenant-scoped entity resolver. Production wires
+   * the SAME `AliasFirstEntityResolver → PgEntityResolver` the voice-action-
+   * router uses (app.ts), so a tenant alias resolves before the pg_trgm search
+   * (the in-app adapter's bare `PgEntityResolver` silently misses alias-first
+   * resolution — deliberately not copied here).
+   *
+   * Without it the phone path echoed the classifier's free text back as
+   * "resolved" refs, so no spoken reference ever became an id and no spoken
+   * time ever became an ISO instant. Optional: when absent, resolution
+   * degrades to the deterministic parts only (datetime phrases, already-UUID
+   * ids) — references pass through unresolved and the payload contract, not a
+   * guess, decides what happens next.
+   */
+  entityResolver?: EntityResolver;
   systemActorId?: string;
   businessName: string;
   publicBaseUrl?: string;
@@ -560,6 +577,19 @@ export interface VoiceTurnProcessor {
     sideEffects: ReadonlyArray<SideEffect>,
     fallbackReason: string,
   ): void;
+  /**
+   * Resolve a classified turn's free-text references + spoken times into the
+   * `entity_resolved` refs the FSM merges onto `extractedEntities`. Shared with
+   * `TwilioGatherAdapter` so the Gather transport and the media-streams
+   * transport resolve identically instead of the Gather path echoing the
+   * classifier back at itself.
+   */
+  resolveTurnEntities(
+    session: VoiceSession,
+    tenantId: string,
+    intent: string,
+    entities: Record<string, unknown>,
+  ): Promise<Record<string, string>>;
   /** Execute audit/proposal/notify_oncall side effects against wired repos. */
   executeSideEffects(
     session: VoiceSession,
@@ -991,6 +1021,54 @@ export function createVoiceTurnProcessor(
     }
   }
 
+  /**
+   * REAL entity resolution for a classified turn (replaces the blind echo the
+   * Gather/media-streams paths used to run inline).
+   *
+   * The old code copied every string entity into `refs` verbatim — but
+   * `intent_classified` has ALREADY put those same entities on the FSM context
+   * (`transitions.ts` line ~299), so the echo overlaid identical values and
+   * resolved nothing: a spoken "my Tuesday furnace appointment" never became an
+   * appointmentId and "Tuesday at 2pm" never became an ISO instant, which is
+   * why every phone-originated scheduling proposal was unexecutable.
+   *
+   * Delegates to the SHARED `resolveSchedulingEntities` that already serves the
+   * in-app adapter and the voice-action-router — no new resolution logic here.
+   * Terminal outcomes (ambiguous / not_found / low_confidence) return the
+   * PARTIAL refs: the unresolved id is simply absent, never guessed, and the
+   * payload contract downstream turns "absent" into a clarification rather than
+   * a malformed proposal.
+   */
+  async function resolveTurnEntities(
+    session: VoiceSession,
+    tenantId: string,
+    intent: string,
+    entities: Record<string, unknown>,
+  ): Promise<Record<string, string>> {
+    let resolution: SchedulingEntityResolution;
+    try {
+      resolution = await resolveSchedulingEntities(
+        deps.entityResolver,
+        tenantId,
+        intent,
+        entities,
+        // SCH-03 — sticky job anchor for "the appointment for that job".
+        session.machine.currentContext.jobId,
+      );
+    } catch (err) {
+      // A resolver hiccup must never strand a live caller. The classifier's
+      // entities are already on the FSM context, so an empty overlay simply
+      // leaves the turn unresolved (operator review) instead of escalating.
+      logger.warn('entity resolution failed; continuing with unresolved references', {
+        error: err instanceof Error ? err.message : String(err),
+        sessionId: session.id,
+        intent,
+      });
+      return {};
+    }
+    return resolution.refs;
+  }
+
   async function handleCreateProposal(
     session: VoiceSession,
     fx: SideEffect,
@@ -1236,37 +1314,149 @@ export function createVoiceTurnProcessor(
           ? entities.transcript.trim()
           : `Caller asked for '${intent ?? 'unknown'}' — an operator-only action.` +
             (entityDetails ? ` Details heard: ${entityDetails}.` : '');
-      const payload: Record<string, unknown> = surfaceAllowed
-        ? {
+      // THE PAYLOAD CONTRACT. Every execution handler reads FLAT keys; the FSM
+      // hands us a nested `{intent, entities, …}` envelope. `buildVoiceProposalPayload`
+      // (proposals/voice-payload.ts) owns that translation — promotion, the
+      // classifier→contract aliases, the caller-identity customerId bridge, the
+      // grounded line items — and gates the result on the type's own schema.
+      //
+      // It NEVER throws: a throw here would strand a live caller mid-call.
+      // Two failure modes, chosen by whether an operator has anything to fix:
+      //
+      //   - NAMEABLE gaps (the contract points at payload keys) → persist the
+      //     real proposal type but stamp those keys as `missingFields`.
+      //     `approveProposal` (proposals/actions.ts) REFUSES a proposal with
+      //     unfilled missingFields, so the approve-to-fail card this branch
+      //     exists to prevent cannot happen, while the operator still gets an
+      //     editable draft of what the caller actually asked for — the same
+      //     partial-draft contract the AI task handlers already emit.
+      //   - NOTHING nameable (a whole-object refine failed, or the type is
+      //     `voice_clarification` itself, which has no execution handler and no
+      //     review-completion path) → degrade to a CANONICAL clarification and
+      //     hand it to a human. That closes the second-order hole where
+      //     `intentToProposalType`'s `voice_clarification` DEFAULT persisted a
+      //     `{intent, entities}` payload that `voiceClarificationPayloadSchema`
+      //     (transcript + reason) rejects outright.
+      let payload: Record<string, unknown>;
+      let payloadProposalType: ProposalType = effectiveProposalType;
+      let degradedFromContract = false;
+      let payloadConfidence: number | undefined;
+      let contractMissingFields: string[] = [];
+
+      if (surfaceAllowed) {
+        const built = await buildVoiceProposalPayload(
+          {
             intent,
+            proposalType: effectiveProposalType,
+            // POST-resolution: `entities` already carries whatever
+            // `resolveTurnEntities` folded onto the FSM context this turn.
             entities,
-            // WS5 — grounded line items + confidence meta ride alongside the
-            // raw entities so the operator-side draft shows exactly what was
-            // quoted.
-            ...(estimateQuote
-              ? { lineItems: estimateQuote.lineItems, _meta: estimateQuote.meta }
-              : {}),
-            sessionId: session.id,
-            callSid: session.callSid,
+            envelope: {
+              sessionId: session.id,
+              ...(session.callSid !== undefined ? { callSid: session.callSid } : {}),
+              ...(typeof fx.payload.conversationId === 'string'
+                ? { conversationId: fx.payload.conversationId }
+                : {}),
+            },
+            ...(typeof fx.payload.customerId === 'string' && fx.payload.customerId
+              ? { callerCustomerId: fx.payload.customerId }
+              : session.customerId
+                ? { callerCustomerId: session.customerId }
+                : {}),
+          },
+          {
+            tenantId,
+            // WS5 — the catalog grounding is INJECTED (proposals/ must not
+            // import ai/resolution/*). `groundVoiceQuote` already ran above for
+            // the read-back the caller heard; hand back that exact outcome so
+            // the spoken quote and the stored payload can never disagree.
+            ...(estimateQuote ? { groundLineItems: async () => estimateQuote } : {}),
+          },
+        );
+        payloadConfidence = built.confidence;
+        if (built.ok) {
+          payload = built.payload;
+        } else {
+          const gateable =
+            effectiveProposalType !== 'voice_clarification' &&
+            built.missingFieldPaths.length > 0;
+          if (gateable) {
+            payload = built.payload;
+            contractMissingFields = built.missingFieldPaths;
+          } else {
+            degradedFromContract = true;
+            payloadProposalType = 'voice_clarification';
+            payloadConfidence = undefined;
+            payload = buildContractFailureClarification(
+              session,
+              intent,
+              entities,
+              requestedProposalType,
+            );
           }
-        : {
-            transcript: blockedTranscript,
-            reason: 'surface_restricted',
-            ...(intent ? { suggestedIntents: [intent] } : {}),
-            requestedProposalType,
-            ...(Object.keys(entities).length > 0 ? { requestedEntities: entities } : {}),
+          // Always diagnosable: the operator-visible outcome differs, the log
+          // and the audit row do not.
+          logger.warn('voice payload failed its proposal contract', {
             sessionId: session.id,
-            callSid: session.callSid,
-          };
+            tenantId,
+            intent: intent ?? null,
+            requestedProposalType,
+            outcome: gateable ? 'gated_with_missing_fields' : 'degraded_to_clarification',
+            errors: built.errors,
+          });
+          if (deps.auditRepo) {
+            try {
+              await deps.auditRepo.create(
+                createAuditEvent({
+                  tenantId,
+                  actorId: deps.systemActorId ?? 'calling-agent',
+                  actorRole: 'system',
+                  eventType: 'voice.payload_contract_failed',
+                  entityType: 'voice_session',
+                  entityId: session.id,
+                  metadata: {
+                    intent: intent ?? null,
+                    requestedProposalType,
+                    outcome: gateable
+                      ? 'gated_with_missing_fields'
+                      : 'degraded_to_clarification',
+                    errors: built.errors,
+                    missingFields: built.missingFieldPaths,
+                  },
+                }),
+              );
+            } catch {
+              /* audit is best-effort */
+            }
+          }
+        }
+      } else {
+        payload = {
+          transcript: blockedTranscript,
+          reason: 'surface_restricted',
+          ...(intent ? { suggestedIntents: [intent] } : {}),
+          requestedProposalType,
+          ...(Object.keys(entities).length > 0 ? { requestedEntities: entities } : {}),
+          sessionId: session.id,
+          callSid: session.callSid,
+        };
+      }
 
       const proposal = buildProposal({
         tenantId,
-        proposalType: effectiveProposalType,
+        proposalType: payloadProposalType,
         payload,
+        // `voiceProposalSummary` (proposals/voice-intent-map.ts) — SHARED with
+        // the in-app adapter, which always had the better template. This is
+        // not cosmetic on the phone path: CreateAppointmentExecutionHandler
+        // names an auto-opened job from `proposal.summary` when the classifier
+        // emitted no `jobTitle`, so a caller who booked by phone used to get a
+        // job called "Voice intent: create_appointment". It now reads
+        // "Schedule appointment for Jane Smith".
         summary: surfaceAllowed
-          ? intent
-            ? `Voice intent: ${intent}`
-            : 'Voice clarification needed'
+          ? degradedFromContract
+            ? `Caller's '${intent ?? 'unknown'}' request needs a human — details were incomplete`
+            : voiceProposalSummary(intent, entities)
           : `Caller requested an operator-only action (${intent ?? 'unknown'})`,
         sourceContext: {
           source: 'calling-agent',
@@ -1293,7 +1483,7 @@ export function createVoiceTurnProcessor(
           // Ambiguous-line candidates for the review UI (same shape the
           // EstimateTaskHandler stores) — only present when a line was
           // ambiguous.
-          ...(estimateQuote?.catalogResolution
+          ...(!degradedFromContract && estimateQuote?.catalogResolution
             ? { catalogResolution: estimateQuote.catalogResolution }
             : {}),
         },
@@ -1301,12 +1491,28 @@ export function createVoiceTurnProcessor(
         // for an ambiguous line, matching the EstimateTaskHandler. The voice
         // path never sets sourceTrustTier, so the proposal is born 'draft'
         // regardless; these keep the operator-side signals consistent.
-        ...(estimateQuote && estimateQuote.confidenceScore !== undefined
-          ? { confidenceScore: estimateQuote.confidenceScore }
+        // `payloadConfidence` is the builder's echo of the same
+        // uncatalogued-capped score `groundVoiceQuote` produced; a degraded
+        // clarification carries neither it nor the quote's missingFields,
+        // because there is no quote on that payload to qualify.
+        ...(!degradedFromContract && payloadConfidence !== undefined
+          ? { confidenceScore: payloadConfidence }
           : {}),
-        ...(estimateQuote && estimateQuote.missingFields.length > 0
-          ? { missingFields: estimateQuote.missingFields }
-          : {}),
+        // Ambiguous catalog lines AND unmet contract keys both land here:
+        // `approveProposal` refuses a proposal with unfilled missingFields, so
+        // this is the gate that keeps a contract-incomplete voice draft out of
+        // the executor while still showing the operator what to fill.
+        ...(() => {
+          const missing = degradedFromContract
+            ? []
+            : [
+                ...new Set([
+                  ...(estimateQuote?.missingFields ?? []),
+                  ...contractMissingFields,
+                ]),
+              ];
+          return missing.length > 0 ? { missingFields: missing } : {};
+        })(),
         // proposals.ai_run_id has an FK to ai_runs(id). Use the REAL run id
         // threaded from the classify call (gateway → classifyIntent →
         // intent_classified event → this side-effect payload); never
@@ -1328,12 +1534,15 @@ export function createVoiceTurnProcessor(
         type: 'proposal_queued',
         proposalId: stored.id,
         // WS5 — the grounded quote read-back the caller hears. Absent for
-        // non-estimate proposals → the FSM speaks the fixed confirmation.
-        ...(estimateQuote ? { utterance: estimateQuote.utterance } : {}),
+        // non-estimate proposals (and for a contract-degraded clarification,
+        // which quoted nothing) → the FSM speaks the fixed confirmation.
+        ...(estimateQuote && !degradedFromContract
+          ? { utterance: estimateQuote.utterance }
+          : {}),
         // WS18 — a grounded ESTIMATE (only) becomes a live, refinable/closeable
         // pendingQuote on the FSM. Scoped to draft_estimate: an invoice quote is
         // for completed work, not a sale to close on the call.
-        ...(estimateQuote && intent === 'draft_estimate'
+        ...(estimateQuote && intent === 'draft_estimate' && !degradedFromContract
           ? {
               groundedLines: estimateQuote.readbackLines,
               groundedClean: estimateQuote.groundedClean,
@@ -3017,10 +3226,12 @@ export function createVoiceTurnProcessor(
         classifierEvent.type === 'intent_classified' &&
         session.machine.currentState === 'entity_resolution'
       ) {
-        const refs: Record<string, string> = {};
-        for (const [k, v] of Object.entries(classifierEvent.entities)) {
-          if (typeof v === 'string') refs[k] = v;
-        }
+        const refs = await resolveTurnEntities(
+          session,
+          tenantId,
+          classifierEvent.intentType,
+          classifierEvent.entities as Record<string, unknown>,
+        );
         sideEffectsAll.push(
           ...session.machine.dispatch({ type: 'entity_resolved', refs }),
         );
@@ -3076,6 +3287,9 @@ export function createVoiceTurnProcessor(
   return {
     speechTurn,
     finalizeTerminatedSession,
+    // Exposed so TwilioGatherAdapter's Gather entry point runs the SAME real
+    // resolution as speechTurn instead of its own duplicated blind echo.
+    resolveTurnEntities,
     executeSideEffects,
     recordCost,
     expandIntentConfirmTemplate,

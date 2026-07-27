@@ -101,11 +101,73 @@ const APPOINTMENT_REF_INTENTS = new Set([
   'reassign_appointment',
 ]);
 
+/**
+ * SCH-03 — intents whose appointment reference is often anchored to a job
+ * discussed earlier in the same call ("cancel the upcoming appointment for
+ * that job") rather than a date phrase. When the reference doesn't parse as
+ * a date, these intents fall back to the caller's sticky `context.jobId`
+ * (transitions.ts) so the resolver can look up the job's own appointments
+ * (appointments.job_id, idx_appointments_job) instead of returning
+ * `not_found`. confirm_appointment is deliberately excluded — it has no
+ * "for that job" phrasing in the corpus and stays date-only.
+ */
+const APPOINTMENT_JOB_FALLBACK_INTENTS = new Set([
+  'cancel_appointment',
+  'reschedule_appointment',
+  'reassign_appointment',
+]);
+
 const TECHNICIAN_REF_INTENTS = new Set([
   'reassign_appointment',
   'add_crew_member',
   'remove_crew_member',
 ]);
+
+/**
+ * VOX-02 — intents whose whole point is to OPEN a record that does not exist
+ * yet. A `not_found` on one of these is the normal, expected outcome, not a
+ * failure: `create_appointment` carrying only a `jobTitle` is auto-opened as
+ * a job at execution time (proposals/execution/handlers.ts, 95a260cd), and
+ * `create_customer`/`create_job` never had a pre-existing record to find.
+ * Only SCHEDULING_CREATE_INTENTS is reused verbatim; the rest are named here
+ * because no existing set expresses "creation intent" (the intent families
+ * above are keyed by which reference they RESOLVE, not by what they create).
+ */
+const ENTITY_CREATION_INTENTS = new Set([
+  'create_customer',
+  'create_job',
+  'create_invoice',
+  'draft_estimate',
+  ...SCHEDULING_CREATE_INTENTS,
+]);
+
+/**
+ * VOX-02 — does a `not_found` resolution for `intent` mean the caller's
+ * request cannot proceed?
+ *
+ * TRUE for intents that operate on a record that must already exist (invoice
+ * / estimate document families, appointment references, job references,
+ * technician references, and the customer-scoped lookup/update family):
+ * "send the estimate for the Miller job" is meaningless if no such estimate
+ * exists, so the caller is handed to on-call rather than left with a
+ * proposal that can never execute (46a954e1's fix — preserved).
+ *
+ * FALSE for creation intents: a caller asking to BOOK NEW WORK has, by
+ * definition, no record to find. Those fall through to `entity_resolved`
+ * with the partial refs, so the FSM reads the intent back for confirmation
+ * and the proposal carries `pendingReference` for operator review.
+ */
+export function requiresExistingEntity(intent: string): boolean {
+  if (ENTITY_CREATION_INTENTS.has(intent)) return false;
+  return (
+    INVOICE_DOC_INTENTS.has(intent) ||
+    ESTIMATE_DOC_INTENTS.has(intent) ||
+    APPOINTMENT_REF_INTENTS.has(intent) ||
+    JOB_REF_INTENTS.has(intent) ||
+    TECHNICIAN_REF_INTENTS.has(intent) ||
+    CUSTOMER_REF_INTENTS.has(intent)
+  );
+}
 
 const REF_KEY_BY_KIND: Record<EntityKind, string | undefined> = {
   customer: 'customerId',
@@ -121,6 +183,12 @@ export interface VoiceEntityLookup {
   kind: EntityKind;
   reference: string;
   refKey: string;
+  /**
+   * SCH-03 — sticky job anchor threaded to the resolver for `kind:
+   * 'appointment'` lookups on APPOINTMENT_JOB_FALLBACK_INTENTS. Only set
+   * when the caller supplied a stickyJobId to `planVoiceEntityLookups`.
+   */
+  jobId?: string;
 }
 
 export interface ParsedWindow {
@@ -174,7 +242,7 @@ export function parseNaturalDatetime(desc: string, now: Date = new Date(), durat
 }
 
 export interface SchedulingEntityResolution {
-  status: 'resolved' | 'ambiguous' | 'not_found';
+  status: 'resolved' | 'ambiguous' | 'not_found' | 'low_confidence';
   refs: Record<string, string>;
   ambiguous?: {
     entityKind: EntityKind;
@@ -183,6 +251,15 @@ export interface SchedulingEntityResolution {
   };
   notFound?: {
     entityKind: EntityKind;
+    reference: string;
+  };
+  /**
+   * One candidate in [τ_ent_confirm_low, τ_ent) — probably right, but not
+   * confident enough to act without a one-tap voice confirmation turn.
+   */
+  lowConfidence?: {
+    entityKind: EntityKind;
+    candidate: EntityCandidate;
     reference: string;
   };
 }
@@ -205,6 +282,7 @@ function documentKindForReference(intent: string, reference: string): 'invoice' 
 export function planVoiceEntityLookups(
   intent: string,
   entities: Record<string, unknown>,
+  stickyJobId?: string,
 ): VoiceEntityLookup[] {
   const lookups: VoiceEntityLookup[] = [];
 
@@ -223,7 +301,20 @@ export function planVoiceEntityLookups(
     lookups.push({ kind: 'customer', reference: customerName, refKey: 'customerId' });
   }
 
-  const jobReference = trimReference(entities.jobReference);
+  // The extraction schema documents `jobTitle` as "title of new job on
+  // create_job" (intent-classifier.ts) — a NAME for a job being created, not
+  // a reference to resolve. But real-LLM output is non-deterministic: for
+  // reference-needing intents (draft_estimate, create_invoice, ...) the model
+  // sometimes puts an existing-job description in `jobTitle` instead of
+  // `jobReference` (observed live: "Draft an estimate for the QA Matrix job"
+  // classified with entities.jobTitle="QA Matrix job" and no jobReference at
+  // all, silently dropping the job link and failing execution downstream).
+  // create_job/create_booking are deliberately excluded from JOB_REF_INTENTS
+  // /SCHEDULING_CREATE_INTENTS's fallback below, so this can never misread an
+  // intentional new-job title as a reference to an existing job.
+  const jobReference =
+    trimReference(entities.jobReference) ??
+    (JOB_REF_INTENTS.has(intent) ? trimReference(entities.jobTitle) : undefined);
   if (jobReference) {
     const documentKind = documentKindForReference(intent, jobReference);
     if (documentKind) {
@@ -249,6 +340,12 @@ export function planVoiceEntityLookups(
       kind: 'appointment',
       reference: appointmentReference,
       refKey: 'appointmentId',
+      // SCH-03 — anchor to the sticky session jobId only for the intents
+      // where a bare job reference ("that job") is plausible; the resolver
+      // only uses this when the reference fails to parse as a date.
+      ...(stickyJobId && APPOINTMENT_JOB_FALLBACK_INTENTS.has(intent)
+        ? { jobId: stickyJobId }
+        : {}),
     });
   }
 
@@ -278,6 +375,12 @@ function foldResolution(
         refs,
         notFound: { entityKind, reference },
       };
+    case 'low_confidence':
+      return {
+        status: 'low_confidence',
+        refs,
+        lowConfidence: { entityKind, candidate: result.candidate, reference },
+      };
     case 'skipped':
       return undefined;
   }
@@ -295,6 +398,7 @@ async function resolvePlannedLookups(
       tenantId,
       reference: lookup.reference,
       kind: lookup.kind,
+      ...(lookup.jobId ? { jobId: lookup.jobId } : {}),
     });
     const terminal = foldResolution(
       result,
@@ -313,6 +417,13 @@ export async function resolveSchedulingEntities(
   tenantId: string,
   intent: string,
   entities: Record<string, unknown>,
+  /**
+   * SCH-03 — the caller's sticky `context.jobId` (transitions.ts), carried
+   * forward across turns the same way `context.customerId` is. Only
+   * consulted for APPOINTMENT_JOB_FALLBACK_INTENTS, and only when the
+   * appointment reference fails to parse as a date.
+   */
+  stickyJobId?: string,
 ): Promise<SchedulingEntityResolution> {
   const refs: Record<string, string> = {};
 
@@ -339,6 +450,28 @@ export async function resolveSchedulingEntities(
     }
   }
 
+  // A reschedule names its NEW time in `newDateTimeDescription` (the classifier
+  // keeps it distinct from `dateTimeDescription` — see intent-classifier.ts's
+  // ExtractedEntities), and `rescheduleAppointmentPayloadSchema` /
+  // `RescheduleAppointmentExecutionHandler` read `newScheduledStart` +
+  // `newScheduledEnd`. Without this the phrase reached the proposal as raw
+  // free text and every voice reschedule died at execution with 'Payload must
+  // include a valid newScheduledStart'. Deterministic and non-guessing: the
+  // SAME `parseNaturalDatetime` the booking window above uses; an unparseable
+  // phrase leaves the ISO fields absent so the proposal fails its contract
+  // rather than mis-booking (the operator-side RescheduleAppointmentTaskHandler
+  // takes the identical "leave them missing" stance).
+  const newDt = typeof entities.newDateTimeDescription === 'string'
+    ? entities.newDateTimeDescription
+    : undefined;
+  if (newDt && typeof entities.newScheduledStart !== 'string') {
+    const win = parseNaturalDatetime(newDt);
+    if (win) {
+      refs.newScheduledStart = win.scheduledStart;
+      refs.newScheduledEnd = win.scheduledEnd;
+    }
+  }
+
   const explicitCustomerId =
     typeof entities.customerId === 'string' && UUID_RE.test(entities.customerId)
       ? entities.customerId
@@ -354,7 +487,7 @@ export async function resolveSchedulingEntities(
     }
   }
 
-  const planned = planVoiceEntityLookups(intent, entities).filter((lookup) => {
+  const planned = planVoiceEntityLookups(intent, entities, stickyJobId).filter((lookup) => {
     if (lookup.refKey === 'customerId' && refs.customerId) return false;
     if (lookup.refKey === 'jobId' && refs.jobId) return false;
     if (lookup.refKey === 'appointmentId' && refs.appointmentId) return false;
@@ -425,7 +558,12 @@ export async function resolveVoiceEntityReferences(
   if (input.verifiedCustomerId) delete entities.customerName;
   if (input.verifiedJobId) delete entities.jobReference;
 
-  const planned = planVoiceEntityLookups(input.intent, entities);
+  // SCH-03 — the already-known job (verifiedJobId) doubles as the sticky
+  // anchor for an appointment reference that isn't a date phrase ("that
+  // job"). Only consulted by planVoiceEntityLookups for
+  // APPOINTMENT_JOB_FALLBACK_INTENTS, and only when the resolver's date
+  // parse misses.
+  const planned = planVoiceEntityLookups(input.intent, entities, input.verifiedJobId);
   if (planned.length === 0) return ok;
 
   const results = await Promise.all(
@@ -437,6 +575,7 @@ export async function resolveVoiceEntityReferences(
             tenantId: input.tenantId,
             reference: lookup.reference,
             kind: lookup.kind,
+            ...(lookup.jobId ? { jobId: lookup.jobId } : {}),
           }),
         };
       } catch {

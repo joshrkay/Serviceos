@@ -3,6 +3,7 @@ import { Logger } from '../logging/logger';
 import { LLMGateway } from '../ai/gateway/gateway';
 import { Proposal, ProposalRepository, createProposal, CreateProposalInput, ProposalType, actionClassForProposalType } from '../proposals/proposal';
 import { assertValidProposalPayload } from '../proposals/contracts';
+import { INTENT_TO_PROPOSAL_TYPE } from '../proposals/voice-intent-map';
 import { isSupervisorPresent } from '../ai/supervisor-presence';
 import { routeUnsupervisedProposal, confidenceMetaBlocksAutoApprove } from '../proposals/auto-approve';
 import { getSupervisorReviewGate } from '../ai/supervisor/review-gate';
@@ -417,50 +418,13 @@ export interface VoiceActionRouterDeps {
   lookupAnswers?: VoiceLookupAnswerDeps;
 }
 
-// P11-001: lookup_* intents are READ-ONLY and never produce a
-// proposal — the Twilio adapter routes them to the lookup-skill family
-// directly. They're omitted from this map; the action router falls back
-// to `voice_clarification` for any IntentType not present here.
-export const INTENT_TO_PROPOSAL_TYPE: Partial<Record<Exclude<IntentType, 'unknown'>, ProposalType>> = {
-  create_invoice: 'draft_invoice',
-  draft_estimate: 'draft_estimate',
-  create_appointment: 'create_appointment',
-  update_invoice: 'update_invoice',
-  update_estimate: 'update_estimate',
-  issue_invoice: 'issue_invoice',
-  batch_invoice: 'batch_invoice',
-  create_customer: 'create_customer',
-  create_job: 'create_job',
-  update_job: 'update_job',
-  reschedule_appointment: 'reschedule_appointment',
-  cancel_appointment: 'cancel_appointment',
-  reassign_appointment: 'reassign_appointment',
-  add_crew_member: 'add_crew_member',
-  remove_crew_member: 'remove_crew_member',
-  add_note: 'add_note',
-  send_invoice: 'send_invoice',
-  send_estimate: 'send_estimate',
-  send_estimate_nudge: 'send_estimate_nudge',
-  send_payment_reminder: 'send_payment_reminder',
-  apply_late_fee: 'apply_late_fee',
-  record_payment: 'record_payment',
-  emergency_dispatch: 'emergency_dispatch',
-  update_customer: 'update_customer',
-  log_expense: 'log_expense',
-  convert_lead: 'convert_lead',
-  confirm_appointment: 'confirm_appointment',
-  mark_lead_lost: 'mark_lead_lost',
-  add_service_location: 'add_service_location',
-  log_time_entry: 'log_time_entry',
-  notify_delay: 'notify_delay',
-  request_feedback: 'request_feedback',
-  // Taxonomy 1.2.0 (agent wave, Track A) — the on-ramp trio. Each rides an
-  // existing (U2/U3) or new-in-this-train (UB-A2) proposal type + execution
-  // handler; the catalog contract test pins all three legs.
-  create_invoice_schedule: 'create_invoice_schedule',
-  respond_to_review: 'review_response_proposal',
-  create_standing_instruction: 'create_standing_instruction',
-};
+// THE intent → proposal-type map now lives in `proposals/voice-intent-map.ts`
+// (it was one of three drifted copies; see that module's header). It is
+// re-exported here unchanged so every existing consumer of
+// `workers/voice-action-router` — `app.ts`'s speakable-action catalog,
+// `proposals/redraft-handler-factory.ts`, and the catalog contract test —
+// keeps importing it from the same place.
+export { INTENT_TO_PROPOSAL_TYPE };
 
 function buildHandlers(deps: VoiceActionRouterDeps): Map<ProposalType, TaskHandler> {
   // B5 — the "core" taxonomy (draft/edit/send/schedule/CRM/collections

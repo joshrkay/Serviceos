@@ -30,6 +30,7 @@ import { InMemoryProposalRepository } from '../../src/proposals/proposal';
 import { InMemoryCustomerRepository, type Customer } from '../../src/customers/customer';
 import { InMemoryAppointmentRepository } from '../../src/appointments/in-memory-appointment';
 import type { SettingsRepository, TenantSettings } from '../../src/settings/settings';
+import { guardVoiceProposalContract } from './helpers/voice-proposal-contract';
 
 const AUTH_TOKEN = 'test-voice-smoke-token';
 
@@ -159,7 +160,7 @@ describe('voice smoke (synthetic) — §11 H2 Layer A', () => {
     const dateTimePhrase = absolutePhraseFromIso(targetIso, timezone);
 
     const store = new VoiceSessionStore({ startInterval: false });
-    const proposalRepo = new InMemoryProposalRepository();
+    const proposalRepo = guardVoiceProposalContract(new InMemoryProposalRepository());
     const appointmentRepo = new InMemoryAppointmentRepository();
     const customerRepo = new InMemoryCustomerRepository();
     // Seed the caller as a known customer so identity resolves by caller-ID and

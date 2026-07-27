@@ -495,3 +495,244 @@ describe('WS18 — a genuine second intent still clears the quote', () => {
     expect(result.updatedContext.pendingQuote).toBeUndefined();
   });
 });
+
+describe('entity_resolution — entity_confirm_candidate (middle confidence band)', () => {
+  it('moves to entity_confirm, stashes pendingEntityConfirmation, and speaks the confirm_entity readback', () => {
+    const result = transition(
+      'entity_resolution',
+      {
+        type: 'entity_confirm_candidate',
+        entityKind: 'job',
+        candidate: { id: 'job-9', kind: 'job', label: 'QA Matrix Repair', score: 0.7 },
+        reference: 'the QA Matrix job',
+        refKey: 'jobId',
+        partialRefs: { customerId: 'cust-1' },
+      },
+      baseContext,
+    );
+    expect(result.nextState).toBe('entity_confirm');
+    expect(result.updatedContext.pendingEntityConfirmation).toEqual({
+      entityKind: 'job',
+      candidate: { id: 'job-9', kind: 'job', label: 'QA Matrix Repair', score: 0.7 },
+      reference: 'the QA Matrix job',
+      refKey: 'jobId',
+      partialRefs: { customerId: 'cust-1' },
+    });
+    const tts = result.sideEffects.find((fx) => fx.type === 'tts_play');
+    expect(tts?.payload).toMatchObject({ template: 'confirm_entity', entityKind: 'job', summary: 'QA Matrix Repair' });
+  });
+});
+
+describe('entity_confirm', () => {
+  const pendingCtx: CallingAgentContext = {
+    ...baseContext,
+    currentIntent: 'draft_estimate',
+    extractedEntities: { customerId: 'cust-1' },
+    pendingEntityConfirmation: {
+      entityKind: 'job',
+      candidate: { id: 'job-9', kind: 'job', label: 'QA Matrix Repair', score: 0.7 },
+      reference: 'the QA Matrix job',
+      refKey: 'jobId',
+      partialRefs: { customerId: 'cust-1' },
+    },
+  };
+
+  it('entity_confirm_affirmed merges the candidate id into extractedEntities and proceeds to intent_confirm', () => {
+    const result = transition('entity_confirm', { type: 'entity_confirm_affirmed' }, pendingCtx);
+    expect(result.nextState).toBe('intent_confirm');
+    expect(result.updatedContext.extractedEntities).toEqual({ customerId: 'cust-1', jobId: 'job-9' });
+    expect(result.updatedContext.pendingEntityConfirmation).toBeUndefined();
+    const tts = result.sideEffects.find((fx) => fx.type === 'tts_play');
+    expect(tts?.payload).toMatchObject({ template: 'confirm_intent', intent: 'draft_estimate' });
+  });
+
+  it('entity_confirm_declined escalates via the same path/effects as entity_not_found', () => {
+    const result = transition('entity_confirm', { type: 'entity_confirm_declined' }, pendingCtx);
+    expect(result.nextState).toBe('escalating');
+    expect(result.updatedContext.escalationReason).toBe('entity_not_found');
+    expect(result.updatedContext.pendingEntityConfirmation).toBeUndefined();
+    const sideEffectTypes = result.sideEffects.map((fx) => fx.type);
+    expect(sideEffectTypes).toContain('notify_oncall');
+    const tts = result.sideEffects.find((fx) => fx.type === 'tts_play');
+    expect((tts?.payload as { text: string }).text).toContain("wasn't able to find the record");
+  });
+});
+
+describe('entity_resolution — entity_not_found (Fix 1 regression guard)', () => {
+  it('escalates instead of silently falling through to entity_resolved', () => {
+    const result = transition('entity_resolution', { type: 'entity_not_found' }, baseContext);
+    expect(result.nextState).toBe('escalating');
+    expect(result.updatedContext.escalationReason).toBe('entity_not_found');
+    const sideEffectTypes = result.sideEffects.map((fx) => fx.type);
+    expect(sideEffectTypes).toContain('notify_oncall');
+    expect(sideEffectTypes).not.toContain('create_proposal');
+  });
+});
+
+// ─── SCH-03 — sticky context.jobId (mirrors context.customerId) ───────────
+
+describe('SCH-03 — context.jobId is stashed alongside a resolved job, like customerId', () => {
+  it('entity_resolved with refs.jobId stashes context.jobId (in addition to extractedEntities.jobId)', () => {
+    const result = transition(
+      'entity_resolution',
+      { type: 'entity_resolved', refs: { jobId: 'job-42', customerId: 'cust-1' } },
+      baseContext,
+    );
+    expect(result.nextState).toBe('intent_confirm');
+    expect(result.updatedContext.jobId).toBe('job-42');
+    expect(result.updatedContext.extractedEntities).toEqual({ jobId: 'job-42', customerId: 'cust-1' });
+  });
+
+  it('entity_resolved WITHOUT refs.jobId leaves context.jobId untouched', () => {
+    const ctx: CallingAgentContext = { ...baseContext, jobId: 'job-prior' };
+    const result = transition(
+      'entity_resolution',
+      { type: 'entity_resolved', refs: { customerId: 'cust-1' } },
+      ctx,
+    );
+    // A turn that resolves some OTHER entity (e.g. just a customer) must not
+    // clobber a job anchored on an earlier turn.
+    expect(result.updatedContext.jobId).toBe('job-prior');
+  });
+
+  it('entity_confirm_affirmed for a job candidate stashes context.jobId', () => {
+    const pendingCtx: CallingAgentContext = {
+      ...baseContext,
+      currentIntent: 'cancel_appointment',
+      pendingEntityConfirmation: {
+        entityKind: 'job',
+        candidate: { id: 'job-9', kind: 'job', label: 'QA Matrix Repair', score: 0.7 },
+        reference: 'the QA Matrix job',
+        refKey: 'jobId',
+        partialRefs: {},
+      },
+    };
+    const result = transition('entity_confirm', { type: 'entity_confirm_affirmed' }, pendingCtx);
+    expect(result.nextState).toBe('intent_confirm');
+    expect(result.updatedContext.jobId).toBe('job-9');
+  });
+});
+
+describe('SCH-03 — context.jobId survives the same turn-boundary resets as customerId', () => {
+  const resolvedCtx: CallingAgentContext = {
+    ...baseContext,
+    customerId: 'cust-sticky',
+    jobId: 'job-sticky',
+    currentIntent: 'cancel_appointment',
+    extractedEntities: { appointmentReference: 'that job', jobId: 'job-sticky' },
+  };
+
+  it('correction (intent_confirm → intent_capture) clears extractedEntities but keeps customerId AND jobId', () => {
+    const result = transition('intent_confirm', { type: 'correction', newTranscript: 'never mind' }, resolvedCtx);
+    expect(result.nextState).toBe('intent_capture');
+    expect(result.updatedContext.extractedEntities).toBeUndefined();
+    expect(result.updatedContext.customerId).toBe('cust-sticky');
+    expect(result.updatedContext.jobId).toBe('job-sticky');
+  });
+
+  it('intent_classified-as-correction (intent_confirm → intent_capture) clears extractedEntities but keeps customerId AND jobId', () => {
+    const result = transition(
+      'intent_confirm',
+      { type: 'intent_classified', intentType: 'reschedule_appointment', entities: {}, confidence: 0.9 },
+      resolvedCtx,
+    );
+    expect(result.nextState).toBe('intent_capture');
+    expect(result.updatedContext.extractedEntities).toBeUndefined();
+    expect(result.updatedContext.customerId).toBe('cust-sticky');
+    expect(result.updatedContext.jobId).toBe('job-sticky');
+  });
+
+  it('second_intent (closing → intent_capture) clears extractedEntities but keeps customerId AND jobId', () => {
+    const closingCtx: CallingAgentContext = { ...resolvedCtx, pendingProposalId: 'prop-1' };
+    const result = transition('closing', { type: 'second_intent' }, closingCtx);
+    expect(result.nextState).toBe('intent_capture');
+    expect(result.updatedContext.extractedEntities).toBeUndefined();
+    expect(result.updatedContext.pendingProposalId).toBeUndefined();
+    expect(result.updatedContext.customerId).toBe('cust-sticky');
+    expect(result.updatedContext.jobId).toBe('job-sticky');
+  });
+
+  it('second_intent_via_classify (closing → intent_capture) clears extractedEntities but keeps customerId AND jobId', () => {
+    const closingCtx: CallingAgentContext = { ...resolvedCtx, pendingProposalId: 'prop-1' };
+    const result = transition(
+      'closing',
+      { type: 'intent_classified', intentType: 'cancel_appointment', entities: {}, confidence: 0.9 },
+      closingCtx,
+    );
+    expect(result.nextState).toBe('intent_capture');
+    expect(result.updatedContext.extractedEntities).toBeUndefined();
+    expect(result.updatedContext.customerId).toBe('cust-sticky');
+    expect(result.updatedContext.jobId).toBe('job-sticky');
+  });
+});
+
+describe('SCH-03 — no cross-call leakage: a fresh session context starts with jobId undefined', () => {
+  it('baseContext (a freshly constructed session context) has jobId undefined', () => {
+    expect(baseContext.jobId).toBeUndefined();
+  });
+
+  it('a second, unrelated fresh call context is unaffected by a prior call resolving a job', () => {
+    // Call A resolves a job and stashes it on ITS context.
+    const callA = transition(
+      'entity_resolution',
+      { type: 'entity_resolved', refs: { jobId: 'job-call-a' } },
+      { ...baseContext, sessionId: 'session-a' },
+    );
+    expect(callA.updatedContext.jobId).toBe('job-call-a');
+
+    // Call B is a brand-new session context (as CallingAgentStateMachine's
+    // constructor produces per instance) — never derived from call A's
+    // context, so it must start undefined regardless of what call A did.
+    const freshCallBContext: CallingAgentContext = { ...baseContext, sessionId: 'session-b' };
+    expect(freshCallBContext.jobId).toBeUndefined();
+  });
+});
+
+describe('QA-2026-07-26 — transitionIntentConfirm bridges context.customerId into entities', () => {
+  it('confirmed: entities.customerId is populated from the sticky context.customerId when extractedEntities has none', () => {
+    const ctx: CallingAgentContext = {
+      ...baseContext,
+      customerId: 'cust-phone-matched',
+      currentIntent: 'create_invoice',
+      extractedEntities: { customerName: 'our customer', amount: 45000 },
+    };
+    const result = transition('intent_confirm', { type: 'confirmed' }, ctx);
+    const createProposal = result.sideEffects.find((fx) => fx.type === 'create_proposal');
+    expect(createProposal).toBeDefined();
+    const payload = createProposal!.payload as { entities: Record<string, unknown>; customerId: string };
+    // Bridged into entities so execution handlers (which read ONLY
+    // entities.customerId) see the phone-matched fallback.
+    expect(payload.entities.customerId).toBe('cust-phone-matched');
+    // Top-level customerId (used only for createdBy) is unchanged.
+    expect(payload.customerId).toBe('cust-phone-matched');
+  });
+
+  it('confirmed: a MORE SPECIFIC customerId already resolved into extractedEntities wins over the sticky context.customerId fallback', () => {
+    const ctx: CallingAgentContext = {
+      ...baseContext,
+      customerId: 'cust-phone-matched',
+      currentIntent: 'create_invoice',
+      // Simulates transitionEntityResolution having already merged a
+      // resolver-matched customerId into extractedEntities this turn.
+      extractedEntities: { customerName: 'Bob Smith', customerId: 'cust-named-specific', amount: 45000 },
+    };
+    const result = transition('intent_confirm', { type: 'confirmed' }, ctx);
+    const createProposal = result.sideEffects.find((fx) => fx.type === 'create_proposal');
+    expect(createProposal).toBeDefined();
+    const payload = createProposal!.payload as { entities: Record<string, unknown> };
+    expect(payload.entities.customerId).toBe('cust-named-specific');
+  });
+
+  it('confirmed: entities.customerId stays undefined when context.customerId is unset (unchanged behavior)', () => {
+    const ctx: CallingAgentContext = {
+      ...baseContext,
+      customerId: undefined,
+      currentIntent: 'create_invoice',
+      extractedEntities: { customerName: 'our customer', amount: 45000 },
+    };
+    const result = transition('intent_confirm', { type: 'confirmed' }, ctx);
+    const createProposal = result.sideEffects.find((fx) => fx.type === 'create_proposal');
+    const payload = createProposal!.payload as { entities: Record<string, unknown> };
+    expect(payload.entities.customerId).toBeUndefined();
+  });
+});

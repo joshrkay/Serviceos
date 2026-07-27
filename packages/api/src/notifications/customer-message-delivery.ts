@@ -1,6 +1,6 @@
 import type { Pool } from 'pg';
 import { DeliveryResult, MessageDeliveryProvider } from './delivery-provider';
-import { SmsSuppressedError } from './gated-message-delivery';
+import { EmailSuppressedError, SmsSuppressedError } from './gated-message-delivery';
 import { DispatchRepository, DispatchEntityType } from './dispatch-repository';
 import { Customer } from '../customers/customer';
 import { withSendClaim } from './send-claim-ledger';
@@ -310,6 +310,19 @@ async function sendOneChannel(
     }
     if (err instanceof SmsSuppressedError) {
       deps.logger.info('Customer SMS suppressed by the consent/DNC gate', {
+        tenantId: input.tenantId,
+        entityType: input.entityType,
+        entityId: input.entityId,
+        channel,
+        reason: err.reason,
+      });
+      return { delivered: false, eligibilitySuppressed: false };
+    }
+    if (err instanceof EmailSuppressedError) {
+      // Kill switch, not a fault: log at info like the SMS suppression above
+      // rather than warning an operator about a state they deliberately set.
+      // The gate has already emitted the channel_disabled record.
+      deps.logger.info('Customer email suppressed by the channel kill switch', {
         tenantId: input.tenantId,
         entityType: input.entityType,
         entityId: input.entityId,

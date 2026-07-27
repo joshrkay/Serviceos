@@ -24,7 +24,6 @@ voice-load-report.json
 .tmp-prod-serviceos.jwt
 *.tsbuildinfo
 coverage/
-
 # Training corpus pipeline (local venv)
 serviceos_training/.venv/
 serviceos_training/.pytest_cache/
@@ -74,3 +73,4 @@ data/corpus/utterances.generated.jsonl
 # record is docs/quality/engineering-baseline-2026-07-25.md.
 eslint-report.json
 quality-metrics.json
+.gstack/

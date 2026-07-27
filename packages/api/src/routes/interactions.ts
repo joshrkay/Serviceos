@@ -186,6 +186,12 @@ export function createInteractionsRouter(deps: InteractionsRouterDeps): Router {
 
       const row = result.rows[0];
       const transcript = Array.isArray(row.transcript) ? (row.transcript as string[]) : [];
+      const startedAt = row.started_at ? new Date(row.started_at as string) : null;
+      const endedAt = row.ended_at ? new Date(row.ended_at as string) : null;
+      const durationSeconds =
+        startedAt && endedAt
+          ? Math.round((endedAt.getTime() - startedAt.getTime()) / 1000)
+          : null;
 
       res.json({
         id: row.id,
@@ -196,6 +202,9 @@ export function createInteractionsRouter(deps: InteractionsRouterDeps): Router {
         endedAt: row.ended_at,
         endedReason: row.ended_reason,
         costCents: row.cost_cents,
+        durationSeconds,
+        transcriptTurnCount: transcript.length,
+        excerpt: toExcerpt(transcript),
         transcript,
         customer: toCustomer(row as Record<string, unknown>),
       });

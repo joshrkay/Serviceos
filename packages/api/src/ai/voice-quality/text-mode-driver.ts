@@ -127,6 +127,7 @@ import type { AuditRepository } from '../../audit/audit';
 import type { AgreementRepository } from '../../agreements/agreement';
 import type { MoneyDashboardRepository } from '../../reports/money-dashboard';
 import type { CatalogItemRepository } from '../../catalog/catalog-item';
+import type { EntityResolver } from '../resolution/entity-resolver';
 import type { DailyDigestRepository } from '../../digest/digest-service';
 import { createProposal, type ProposalRepository } from '../../proposals/proposal';
 import type { DroppedCallRecoveryRepository } from '../../sms/recovery/scheduler';
@@ -216,6 +217,14 @@ export interface TextModeDriverDeps {
   dunningConfigRepo?: DunningConfigRepository;
   droppedCallRecoveryRepo?: Pick<DroppedCallRecoveryRepository, 'listUnansweredRecoveries'>;
   availabilityFinder?: AvailabilityFinder;
+  /**
+   * P0 voice-safety — tenant-scoped entity resolver threaded into the
+   * production voice-turn processor below, so a corpus script that says
+   * "move my Tuesday appointment" exercises real resolution. Optional: the
+   * offline/mock-backed harness runs without one and resolution degrades to
+   * the deterministic parts (datetime phrases, already-UUID ids).
+   */
+  entityResolver?: EntityResolver;
   /** Optional audit-trail of every lookup. */
   lookupEvents?: LookupEventService;
   /** Used as `userId` on synthesized voice-action-router messages. */
@@ -386,6 +395,10 @@ export class TextModeDriver implements AgentDriver {
       ...(deps.jobRepo ? { jobRepo: deps.jobRepo } : {}),
       ...(deps.leadRepo ? { leadRepo: deps.leadRepo } : {}),
       ...(deps.customerRepo ? { customerRepo: deps.customerRepo } : {}),
+      // P0 voice-safety — the harness resolves spoken references through the
+      // same resolver the driver already hands the voice-action-router, so a
+      // corpus script exercises real resolution rather than a free-text echo.
+      ...(deps.entityResolver ? { entityResolver: deps.entityResolver } : {}),
     });
   }
 

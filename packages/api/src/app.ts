@@ -386,12 +386,8 @@ import {
 import { PgFeedbackRequestRepository } from './feedback/pg-feedback-request';
 import { PgFeedbackResponseRepository } from './feedback/pg-feedback-response';
 import { NoopFeedbackDispatcher, MessageDeliveryFeedbackDispatcher } from './feedback/dispatcher';
-import {
-  MessageDeliveryProvider,
-  InMemoryDeliveryProvider,
-} from './notifications/delivery-provider';
-import { TwilioDeliveryProvider } from './notifications/twilio-delivery-provider';
-import { PerTenantTwilioDeliveryProvider } from './notifications/per-tenant-twilio-delivery-provider';
+import { MessageDeliveryProvider } from './notifications/delivery-provider';
+import { createMessageDeliveryProvider } from './notifications/delivery-provider-factory';
 import { GatedMessageDelivery } from './notifications/gated-message-delivery';
 import { SendService } from './notifications/send-service';
 import {
@@ -532,6 +528,7 @@ import { PgShadowComparisonStore } from './ai/evaluation/pg-shadow-comparison';
 import { InMemoryShadowComparisonStore } from './ai/evaluation/shadow-comparison';
 import { createTtsProvider, assertTtsProviderSupportsMediaStreams } from './ai/tts/tts-provider';
 import { InAppVoiceAdapter } from './ai/agents/customer-calling/inapp-adapter';
+import { lookupDayOverview } from './ai/skills/lookup-day-overview';
 import { VoiceSessionStore } from './ai/agents/customer-calling/voice-session-store';
 import { createVoiceEventTransport } from './ai/agents/customer-calling/voice-event-transport';
 import { createVoiceSessionsRouter } from './routes/voice-sessions';
@@ -1503,47 +1500,29 @@ export function createApp(): AppWithLifecycle {
     : new InMemoryCallTranscriptTurnRepository();
 
   // Customer-facing message delivery for estimates and invoices.
-  // Production wires Twilio (SMS) + Twilio SendGrid (email). Without
-  // the env vars, falls back to InMemoryDeliveryProvider so the app
-  // boots in dev without delivery credentials. Send routes return
+  // prod/staging wire Twilio (SMS) + Twilio-native email or SendGrid; every
+  // other environment gets InMemoryDeliveryProvider so the app boots without
+  // delivery credentials AND cannot send real messages. Send routes return
   // 503 when sendService is undefined.
   const dispatchRepo = pool ? new PgDispatchRepository(pool) : new InMemoryDispatchRepository();
-  let rawMessageDelivery: MessageDeliveryProvider | null;
-  if (
-    process.env.TWILIO_ACCOUNT_SID &&
-    process.env.TWILIO_AUTH_TOKEN &&
-    process.env.TWILIO_FROM_NUMBER &&
-    process.env.SENDGRID_API_KEY &&
-    process.env.SENDGRID_FROM_EMAIL
-  ) {
-    // The global Twilio/SendGrid provider handles email and any send that
-    // carries no tenantId; the global Twilio SMS creds also serve as the
-    // dev/test fallback inside getTenantTwilioCreds.
-    const baseDelivery = new TwilioDeliveryProvider({
-      sms: {
-        accountSid: process.env.TWILIO_ACCOUNT_SID,
-        authToken: process.env.TWILIO_AUTH_TOKEN,
-        fromNumber: process.env.TWILIO_FROM_NUMBER,
-      },
-      email: {
-        apiKey: process.env.SENDGRID_API_KEY,
-        fromEmail: process.env.SENDGRID_FROM_EMAIL,
-        fromName: process.env.SENDGRID_FROM_NAME,
-        replyToEmail: process.env.SENDGRID_REPLY_TO_EMAIL,
-      },
-    });
-    // Feature 7 — when a Postgres pool is available, route per-tenant SMS
-    // through each tenant's own Twilio subaccount (failing closed when a
-    // tenant has no credentials). Without a pool we cannot resolve per-tenant
-    // creds, so keep the global provider.
-    rawMessageDelivery = pool
-      ? new PerTenantTwilioDeliveryProvider({ pool, base: baseDelivery })
-      : baseDelivery;
-  } else if (config.NODE_ENV === 'prod' || config.NODE_ENV === 'staging') {
-    rawMessageDelivery = null;
-  } else {
-    rawMessageDelivery = new InMemoryDeliveryProvider();
-  }
+  // Provider selection lives in notifications/delivery-provider-factory.ts so
+  // it is unit-testable without booting createApp(). The invariant it enforces:
+  // ONLY prod/staging (or an explicit DELIVERY_ALLOW_REAL_PROVIDERS=true
+  // opt-in) may construct a real Twilio/SendGrid provider — a non-production
+  // environment is structurally incapable of sending, not merely flagged off.
+  // Inside prod/staging the SMS and email credential legs stay INDEPENDENT
+  // (36d30807), so SMS works with no email credentials at all. The chosen mode
+  // is logged at boot so a silent promotion can never happen unnoticed again.
+  const deliveryWiring = createMessageDeliveryProvider({
+    nodeEnv: config.NODE_ENV,
+    env: process.env,
+    pool,
+    logger: createLogger({
+      service: 'notifications-delivery',
+      environment: process.env.NODE_ENV || 'development',
+    }),
+  });
+  const rawMessageDelivery: MessageDeliveryProvider | null = deliveryWiring.provider;
   // RV-130 — consent ledger (append-only consent_events). Constructed here —
   // before the SMS gate — because WS12 makes it the cross-channel source of
   // truth both outbound gates consult; the STOP/START keyword handlers and
@@ -3421,13 +3400,23 @@ export function createApp(): AppWithLifecycle {
     ? new PgFeatureFlagRepository(pool)
     : new InMemoryFeatureFlagRepository();
   const featureFlagStore = new InMemoryFeatureFlagStore();
+  const featureFlagLogger = createLogger({
+    service: 'feature-flags',
+    environment: process.env.NODE_ENV ?? 'development',
+  });
   // Hydration is fire-and-forget on boot — the store starts empty and is
   // refilled from the repo asynchronously. isFeatureEnabled returns false
   // for missing flags, so the worst case during the hydration window is
   // that a flag reads as disabled for a few ms.
+  //
+  // EVERY await in this IIFE must be individually guarded. The IIFE is
+  // void'd, so nothing is awaiting it and nothing can catch what it throws:
+  // a single unguarded rejection escapes as an unhandled rejection, which
+  // Node terminates on under --unhandled-rejections=throw and which Vitest
+  // reports as a run-level error regardless of how many tests pass.
   void (async () => {
-    const { seedResilienceFlags } = await import('./flags/resilience-flags');
     try {
+      const { seedResilienceFlags } = await import('./flags/resilience-flags');
       await seedResilienceFlags(featureFlagRepo);
     } catch {
       /* fire-and-forget — admin flags surface via the admin API */
@@ -3448,7 +3437,21 @@ export function createApp(): AppWithLifecycle {
     } catch {
       /* fire-and-forget */
     }
-    await hydrateStoreFromRepository(featureFlagStore, featureFlagRepo);
+    // Hydration is the one call that reaches the database on the happy path,
+    // so it is the one most likely to reject — with no reachable Postgres the
+    // pg pool's connect fails with ECONNREFUSED. Degrade gracefully: the store
+    // stays empty and isFeatureEnabled falls back to false for every flag, the
+    // same state boot already tolerates during the hydration window. Log at
+    // warn so a real production hydration failure stays visible instead of
+    // being silently swallowed like the best-effort seeds above.
+    try {
+      await hydrateStoreFromRepository(featureFlagStore, featureFlagRepo);
+    } catch (err) {
+      featureFlagLogger.warn(
+        'Feature-flag hydration failed; flags fall back to disabled until the next boot',
+        { error: err instanceof Error ? err.message : String(err) },
+      );
+    }
   })();
   // RV-001 follow-up #8 / RV-122 — per-tenant feature-flag resolution
   // (tenant_feature_flags override → platform flag → false). This is the
@@ -3555,6 +3558,25 @@ export function createApp(): AppWithLifecycle {
     droppedCallRecoveryRepo,
     availabilityFinder,
     lookupEvents: lookupEventService,
+    // P0 voice-safety — the inbound PHONE path resolves free-text references
+    // through the SAME resolver stack the voice-action-router uses above
+    // (alias-first, then pg_trgm), NOT the bare PgEntityResolver the in-app
+    // adapter self-constructs — an inbound caller saying a tenant's own alias
+    // for a job deserves the same alias hit an operator gets. Without this the
+    // phone path echoed classifier free text back as "resolved" refs, so every
+    // spoken appointment/job reference and spoken time reached the proposal
+    // unresolved and the payload could never satisfy its execution contract.
+    ...(pool
+      ? {
+          entityResolver: entityAliasRepo
+            ? new AliasFirstEntityResolver(
+                entityAliasRepo,
+                new PgEntityResolver(pool),
+                pool,
+              )
+            : new PgEntityResolver(pool),
+        }
+      : {}),
     extendedIntentsEnabled: voiceExtendedIntentsFlagShim,
     systemActorId: 'system:inbound-call',
     businessName: process.env.TWILIO_BUSINESS_NAME ?? 'our team',
@@ -6494,6 +6516,13 @@ export function createApp(): AppWithLifecycle {
     repairTemplatesResolver,
     voiceSessionRepo,
     voicePersonaResolver,
+    // QA-2026-07-26 — grounds voice-drafted estimate line items
+    // (entities.lineItemDescriptions) against the tenant's real catalog.
+    catalogRepo,
+    // QA-2026-07-26 — resolves an optional session-start `callerPhone` to a
+    // CRM customer (exactly one findByPhoneNormalized match) so a later
+    // generic reference like "our customer" still attaches correctly.
+    customerRepo,
     // RV-115 — durable dropped-call recovery with the FSM context snapshot.
     // (In-app sessions rarely have a caller phone; the scheduler's own
     // detection rejects rows without a usable E.164.)
@@ -6506,6 +6535,19 @@ export function createApp(): AppWithLifecycle {
       return s?.supportedLanguages;
     },
     extendedIntentsEnabled: voiceExtendedIntentsFlagShim,
+    ownerLookupResolver: async (tenantId, sessionId, intentType) => {
+      if (intentType !== 'lookup_day_overview') return undefined;
+      const result = await lookupDayOverview(
+        { tenantId, sessionId },
+        {
+          appointmentRepo,
+          jobRepo,
+          proposalRepo,
+          userRepo,
+        },
+      );
+      return result.summary;
+    },
   });
   app.use(
     '/api/voice/sessions',

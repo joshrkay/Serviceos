@@ -975,10 +975,23 @@ describe('Phase-2 Track A — extended operator intents', () => {
     expect(matchExtendedIntentPhrase('what does my day look like')).toBe('lookup_day_overview');
     expect(matchExtendedIntentPhrase("how's my day looking?")).toBe('lookup_day_overview');
     expect(matchExtendedIntentPhrase('Give me my morning overview')).toBe('lookup_day_overview');
+    expect(matchExtendedIntentPhrase('What appointments are scheduled today?')).toBe('lookup_day_overview');
+    expect(matchExtendedIntentPhrase("Show me today's schedule")).toBe('lookup_day_overview');
     // Ordinary commands never collapse into a lookup.
     expect(matchExtendedIntentPhrase('Create an invoice for Acme for 450 dollars')).toBeNull();
     expect(matchExtendedIntentPhrase('Schedule my day off next Tuesday')).toBeNull();
     expect(matchExtendedIntentPhrase('')).toBeNull();
+  });
+
+  it('owner schedule questions bypass feature-flag and provider drift', async () => {
+    const gateway = mockGateway('{"intentType":"unknown","confidence":0.2}');
+    const result = await classifyIntent(
+      'What appointments are scheduled today?',
+      { ownerSession: true },
+      gateway,
+    );
+    expect(result.intentType).toBe('lookup_day_overview');
+    expect(result.confidence).toBeGreaterThanOrEqual(0.9);
   });
 
   it('extendedIntents: deterministic phrase short-circuits WITHOUT an LLM call', async () => {

@@ -7,6 +7,22 @@ import { InMemoryOnCallRepository } from '../../../../src/oncall/rotation';
 import { InMemoryVoiceSessionRepository } from '../../../../src/voice/voice-session';
 import type { LLMGateway, LLMResponse } from '../../../../src/ai/gateway/gateway';
 import type { TtsProvider } from '../../../../src/ai/tts/tts-provider';
+import type { SchedulingEntityResolution } from '../../../../src/ai/agents/customer-calling/entity-resolution';
+import type { CallingAgentEvent, SideEffect } from '../../../../src/ai/agents/customer-calling/types';
+import type { VoiceSession } from '../../../../src/ai/agents/customer-calling/voice-session-store';
+import { InMemoryCatalogItemRepository, createCatalogItem } from '../../../../src/catalog/catalog-item';
+import type { CatalogPricingOutcome } from '../../../../src/ai/resolution/catalog-resolver';
+import {
+  DraftEstimateExecutionHandler,
+} from '../../../../src/proposals/execution/handlers';
+import { CreateInvoiceExecutionHandler } from '../../../../src/proposals/execution/invoice-execution-handler';
+import {
+  SendEstimateExecutionHandler,
+  NoopEstimateDeliveryProvider,
+} from '../../../../src/proposals/execution/voice-extended-handlers';
+import { InMemoryCustomerRepository } from '../../../../src/customers/customer';
+import type { Customer } from '../../../../src/customers/customer';
+import type { EntityResolver } from '../../../../src/ai/resolution/entity-resolver';
 
 const TENANT = 'tenant-x';
 const USER = 'user-x';
@@ -97,6 +113,33 @@ describe('InAppVoiceAdapter', () => {
 
     expect(session?.machine.currentContext.customerId).toBeUndefined();
     expect(callerPlanResolver).not.toHaveBeenCalled();
+  });
+
+  it('answers an authenticated owner lookup without mutation confirmation', async () => {
+    const ownerLookupResolver = vi.fn(async () => 'You have two appointments today.');
+    const adapter = new InAppVoiceAdapter({
+      store,
+      gateway: scriptedGateway([
+        JSON.stringify({
+          intentType: 'lookup_day_overview',
+          confidence: 0.98,
+          extractedEntities: {},
+        }),
+      ]),
+      proposalRepo,
+      auditRepo,
+      onCallRepo,
+      extendedIntentsEnabled: async () => true,
+      ownerLookupResolver,
+    });
+
+    const { sessionId } = await adapter.startSession(TENANT, USER, undefined, 'owner');
+    const result = await adapter.handleInput(sessionId, 'What appointments are scheduled today?');
+
+    expect(result.state).toBe('intent_capture');
+    expect(result.ttsText).toBe('You have two appointments today.');
+    expect(result.proposalIds).toHaveLength(0);
+    expect(ownerLookupResolver).toHaveBeenCalledWith(TENANT, sessionId, 'lookup_day_overview');
   });
 
   it('happy path: high-confidence intent creates a proposal and closes', async () => {
@@ -748,5 +791,704 @@ describe('InAppVoiceAdapter', () => {
       });
       await expect(adapter.startSession(TENANT, USER)).resolves.toBeDefined();
     });
+  });
+});
+
+describe('QA-2026-07-26 — voice-drafted estimate line items (lineItemDescriptions)', () => {
+  let store: VoiceSessionStore;
+  let proposalRepo: InMemoryProposalRepository;
+  let auditRepo: InMemoryAuditRepository;
+  let onCallRepo: InMemoryOnCallRepository;
+
+  beforeEach(() => {
+    store = new VoiceSessionStore({ startInterval: false });
+    proposalRepo = new InMemoryProposalRepository();
+    auditRepo = new InMemoryAuditRepository();
+    onCallRepo = new InMemoryOnCallRepository();
+  });
+
+  afterEach(() => {
+    store.dispose();
+  });
+
+  function buildAdapter(catalogRepo?: InMemoryCatalogItemRepository): InAppVoiceAdapter {
+    return new InAppVoiceAdapter({
+      store,
+      gateway: scriptedGateway([]),
+      proposalRepo,
+      auditRepo,
+      onCallRepo,
+      ...(catalogRepo ? { catalogRepo } : {}),
+    });
+  }
+
+  function callBuildVoiceDraftLineItems(
+    adapter: InAppVoiceAdapter,
+    tenantId: string,
+    descriptions: string[],
+    amount: unknown,
+  ): Promise<CatalogPricingOutcome> {
+    return (
+      adapter as unknown as {
+        buildVoiceDraftLineItems: (
+          t: string,
+          d: string[],
+          a: unknown,
+        ) => Promise<CatalogPricingOutcome>;
+      }
+    ).buildVoiceDraftLineItems(tenantId, descriptions, amount);
+  }
+
+  function callHandleCreateProposal(
+    adapter: InAppVoiceAdapter,
+    session: VoiceSession,
+    effect: SideEffect,
+  ): Promise<string | undefined> {
+    return (
+      adapter as unknown as {
+        handleCreateProposal: (s: VoiceSession, e: SideEffect) => Promise<string | undefined>;
+      }
+    ).handleCreateProposal(session, effect);
+  }
+
+  describe('buildVoiceDraftLineItems (unit)', () => {
+    it('single description + amount produces one correctly-priced item', async () => {
+      const outcome = await callBuildVoiceDraftLineItems(
+        buildAdapter(),
+        TENANT,
+        ['diagnostic labor'],
+        15000,
+      );
+      expect(outcome.lineItems).toHaveLength(1);
+      expect(outcome.lineItems[0].description).toBe('diagnostic labor');
+      expect(outcome.lineItems[0].quantity).toBe(1);
+      expect(outcome.lineItems[0].unitPrice).toBe(15000);
+      // No catalog wired — kept as the caller-quoted price but flagged for
+      // review rather than trusted outright.
+      expect(outcome.lineItems[0].pricingSource).toBe('uncatalogued');
+      expect(outcome.requiresReview).toBe(true);
+    });
+
+    it('multiple descriptions + amount evenly splits the total across lines', async () => {
+      const outcome = await callBuildVoiceDraftLineItems(
+        buildAdapter(),
+        TENANT,
+        ['diagnostic labor', 'replacement filter', 'disposal fee'],
+        30000,
+      );
+      expect(outcome.lineItems).toHaveLength(3);
+      const prices = outcome.lineItems.map((li) => li.unitPrice as number);
+      expect(prices).toEqual([10000, 10000, 10000]);
+      expect(prices.reduce((a, b) => a + b, 0)).toBe(30000);
+    });
+
+    it('an uneven split folds the remainder into the last line so the sum matches the quoted total exactly', async () => {
+      const outcome = await callBuildVoiceDraftLineItems(
+        buildAdapter(),
+        TENANT,
+        ['line a', 'line b', 'line c'],
+        10000,
+      );
+      const prices = outcome.lineItems.map((li) => li.unitPrice as number);
+      expect(prices.reduce((a, b) => a + b, 0)).toBe(10000);
+      expect(prices[0]).toBe(3333);
+      expect(prices[1]).toBe(3333);
+      expect(prices[2]).toBe(3334);
+    });
+
+    it('a description with a catalog match uses the catalog price and does not force review', async () => {
+      const catalogRepo = new InMemoryCatalogItemRepository();
+      await catalogRepo.create(
+        createCatalogItem({
+          tenantId: TENANT,
+          name: 'Diagnostic Labor',
+          category: 'Labor',
+          unit: 'each',
+          unitPriceCents: 15000,
+        }),
+      );
+      // No amount quoted at all — the catalog is the sole source of truth
+      // and should still price the line (see catalog-resolver.ts: a
+      // missing drafted price never trips the price-conflict check).
+      const outcome = await callBuildVoiceDraftLineItems(
+        buildAdapter(catalogRepo),
+        TENANT,
+        ['diagnostic labor'],
+        undefined,
+      );
+      expect(outcome.lineItems).toHaveLength(1);
+      expect(outcome.lineItems[0].unitPrice).toBe(15000);
+      expect(outcome.lineItems[0].pricingSource).toBe('catalog');
+      expect(outcome.anyUncatalogued).toBe(false);
+      expect(outcome.requiresReview).toBe(false);
+    });
+
+    it('a description with no catalog match keeps the guessed price but forces review', async () => {
+      const catalogRepo = new InMemoryCatalogItemRepository();
+      await catalogRepo.create(
+        createCatalogItem({
+          tenantId: TENANT,
+          name: 'Water Heater Install',
+          category: 'Labor',
+          unit: 'each',
+          unitPriceCents: 90000,
+        }),
+      );
+      const outcome = await callBuildVoiceDraftLineItems(
+        buildAdapter(catalogRepo),
+        TENANT,
+        ['exotic bespoke widget calibration'],
+        15000,
+      );
+      expect(outcome.lineItems).toHaveLength(1);
+      expect(outcome.lineItems[0].unitPrice).toBe(15000);
+      expect(outcome.lineItems[0].pricingSource).toBe('uncatalogued');
+      expect(outcome.anyUncatalogued).toBe(true);
+      expect(outcome.requiresReview).toBe(true);
+    });
+
+    it('no amount and no catalog leaves the line unpriced rather than inventing a number', async () => {
+      // groundLineItemPricing's markAllUncatalogued (catalog-resolver.ts)
+      // only stamps `uncatalogued`/requiresReview for lines that DO carry a
+      // numeric drafted price — "a line with no numeric price carries no
+      // money risk and is left untouched" (its own doc comment), since the
+      // execution handler's normalizeDraftLineItems (handlers.ts) reports a
+      // truly priceless line as malformed at approval time rather than
+      // letting it through silently. Confirm that's exactly what happens
+      // here: no fabricated number, and the execution handler surfaces an
+      // actionable "no usable unit price" error instead of the old opaque
+      // "must include at least one lineItem".
+      const outcome = await callBuildVoiceDraftLineItems(
+        buildAdapter(),
+        TENANT,
+        ['exotic bespoke widget calibration'],
+        undefined,
+      );
+      expect(outcome.lineItems).toHaveLength(1);
+      expect(outcome.lineItems[0].unitPrice).toBeUndefined();
+      expect(outcome.requiresReview).toBe(false);
+
+      const { normalizeDraftLineItems } = await import(
+        '../../../../src/proposals/execution/handlers'
+      );
+      const { malformed } = normalizeDraftLineItems(outcome.lineItems);
+      expect(malformed).toHaveLength(1);
+      expect(malformed[0]).toContain('no usable unit price');
+    });
+  });
+
+  describe('handleCreateProposal integration (regression for "Payload must include at least one lineItem")', () => {
+    it('a draft_estimate create_proposal effect with lineItemDescriptions produces a payload that DraftEstimateExecutionHandler executes successfully', async () => {
+      const catalogRepo = new InMemoryCatalogItemRepository();
+      await catalogRepo.create(
+        createCatalogItem({
+          tenantId: TENANT,
+          name: 'Diagnostic Labor',
+          category: 'Labor',
+          unit: 'each',
+          unitPriceCents: 15000,
+        }),
+      );
+      const adapter = buildAdapter(catalogRepo);
+      const { sessionId } = await adapter.startSession(TENANT, USER);
+      const session = store.peek(sessionId);
+      if (!session) throw new Error('test session missing');
+
+      const proposalId = await callHandleCreateProposal(adapter, session, {
+        type: 'create_proposal',
+        payload: {
+          tenantId: TENANT,
+          intent: 'draft_estimate',
+          entities: {
+            customerId: 'cust-1',
+            lineItemDescriptions: ['diagnostic labor'],
+            amount: 15000,
+          },
+          sessionId: session.id,
+          confidence: 0.95,
+        },
+      });
+
+      expect(proposalId).toBeDefined();
+      const proposals = await proposalRepo.findByTenant(TENANT);
+      expect(proposals).toHaveLength(1);
+      const proposal = proposals[0];
+      expect(proposal.proposalType).toBe('draft_estimate');
+      expect(Array.isArray(proposal.payload.lineItems)).toBe(true);
+      expect((proposal.payload.lineItems as unknown[]).length).toBe(1);
+
+      // BEFORE this fix, payload.lineItems was always undefined here and
+      // execution failed with "Payload must include at least one lineItem."
+      const handler = new DraftEstimateExecutionHandler();
+      const result = await handler.execute(proposal, {
+        tenantId: TENANT,
+        executedBy: 'operator-1',
+      });
+      expect(result.success).toBe(true);
+    });
+
+    // QA-2026-07-26 VOX-07 (blocker 2) — the grounding block above was
+    // hard-gated to `proposalType === 'draft_estimate'`, leaving the
+    // IDENTICAL hole open for draft_invoice: CreateInvoiceExecutionHandler
+    // enforces the same non-empty lineItems rule and nothing downstream
+    // derives lineItems from `amount`, so every voice-created invoice
+    // ("create an invoice for $350 for the furnace repair") failed execution.
+    // This is the exact mirror of the draft_estimate case above.
+    it('a draft_invoice create_proposal effect with lineItemDescriptions produces grounded lineItems that CreateInvoiceExecutionHandler executes successfully', async () => {
+      const catalogRepo = new InMemoryCatalogItemRepository();
+      await catalogRepo.create(
+        createCatalogItem({
+          tenantId: TENANT,
+          name: 'Furnace Repair',
+          category: 'Labor',
+          unit: 'each',
+          unitPriceCents: 35000,
+        }),
+      );
+      const adapter = buildAdapter(catalogRepo);
+      const { sessionId } = await adapter.startSession(TENANT, USER);
+      const session = store.peek(sessionId);
+      if (!session) throw new Error('test session missing');
+
+      const proposalId = await callHandleCreateProposal(adapter, session, {
+        type: 'create_proposal',
+        payload: {
+          tenantId: TENANT,
+          intent: 'create_invoice',
+          entities: {
+            customerId: 'cust-1',
+            // Exact catalog name so the grounding tier is deterministic
+            // ('exact' → pricingSource 'catalog'). A fuzzier phrasing like
+            // "completed furnace repair" correctly lands on 'ambiguous'
+            // instead — also grounded, but a weaker assertion.
+            lineItemDescriptions: ['Furnace Repair'],
+            amount: 35000,
+          },
+          sessionId: session.id,
+          confidence: 0.95,
+        },
+      });
+
+      expect(proposalId).toBeDefined();
+      const proposals = await proposalRepo.findByTenant(TENANT);
+      expect(proposals).toHaveLength(1);
+      const proposal = proposals[0];
+      expect(proposal.proposalType).toBe('draft_invoice');
+      const lineItems = proposal.payload.lineItems as Array<Record<string, unknown>>;
+      expect(Array.isArray(lineItems)).toBe(true);
+      expect(lineItems).toHaveLength(1);
+      // Proves the lines went through groundLineItemPricing rather than being
+      // hand-assembled: only that pass stamps pricingSource.
+      expect(lineItems[0].pricingSource).toBe('catalog');
+      // The caller-quoted total must survive grounding intact — a line priced
+      // at 0 (or dropped) would satisfy the handler while silently losing the
+      // money the operator actually said.
+      const totalCents = lineItems.reduce(
+        (sum, li) => sum + (li.unitPrice as number) * (li.quantity as number),
+        0,
+      );
+      expect(totalCents).toBe(35000);
+
+      // BEFORE this fix, payload.lineItems was undefined for draft_invoice
+      // and execution failed with "Payload must include at least one lineItem."
+      const handler = new CreateInvoiceExecutionHandler();
+      const result = await handler.execute(proposal, {
+        tenantId: TENANT,
+        executedBy: 'operator-1',
+      });
+      expect(result.success).toBe(true);
+      expect(result.resultEntityId).toBeTruthy();
+    });
+
+    it('forces the proposal out of auto-approval when a drafted line has no catalog match, even at high classifier confidence', async () => {
+      const adapter = buildAdapter(); // no catalogRepo — every line is uncatalogued
+      const { sessionId } = await adapter.startSession(TENANT, USER);
+      const session = store.peek(sessionId);
+      if (!session) throw new Error('test session missing');
+
+      await callHandleCreateProposal(adapter, session, {
+        type: 'create_proposal',
+        payload: {
+          tenantId: TENANT,
+          intent: 'draft_estimate',
+          entities: {
+            customerId: 'cust-1',
+            lineItemDescriptions: ['diagnostic labor'],
+            amount: 15000,
+          },
+          sessionId: session.id,
+          // High confidence would normally auto-approve a capture-class
+          // proposal — must be blocked by the uncatalogued price cap.
+          confidence: 0.99,
+        },
+      });
+
+      const proposals = await proposalRepo.findByTenant(TENANT);
+      expect(proposals).toHaveLength(1);
+      expect(proposals[0].status).not.toBe('approved');
+      expect(proposals[0].confidenceScore).toBeLessThanOrEqual(0.85);
+    });
+
+    // QA-2026-07-26 VOX-06: the classifier only emits `sendChannel`, the
+    // send_* task contracts read `channel`. The flat-promotion loop copies
+    // entity keys verbatim, so the persisted payload had sendChannel and no
+    // channel — "send estimate EST-0033 to the customer by email" classified,
+    // resolved and got approved, then failed execution with "Payload must
+    // specify channel as email or sms". The alias mirrors the non-voice
+    // path's `channel: ee.sendChannel ?? 'email'` (voice-extended-tasks.ts).
+    it('a send_estimate create_proposal effect promotes entities.sendChannel to payload.channel so SendEstimateExecutionHandler executes successfully', async () => {
+      const estimateUuid = '550e8400-e29b-41d4-a716-446655440000';
+      const adapter = buildAdapter();
+      const { sessionId } = await adapter.startSession(TENANT, USER);
+      const session = store.peek(sessionId);
+      if (!session) throw new Error('test session missing');
+
+      const proposalId = await callHandleCreateProposal(adapter, session, {
+        type: 'create_proposal',
+        payload: {
+          tenantId: TENANT,
+          intent: 'send_estimate',
+          entities: {
+            estimateId: estimateUuid,
+            estimateReference: 'EST-0033',
+            sendChannel: 'email',
+          },
+          sessionId: session.id,
+          confidence: 0.9,
+        },
+      });
+
+      expect(proposalId).toBeDefined();
+      const proposals = await proposalRepo.findByTenant(TENANT);
+      expect(proposals).toHaveLength(1);
+      const proposal = proposals[0];
+      expect(proposal.proposalType).toBe('send_estimate');
+      // BEFORE this fix payload.channel was undefined here.
+      expect(proposal.payload.channel).toBe('email');
+      // The raw classifier key is still carried for audit/rendering.
+      expect(proposal.payload.sendChannel).toBe('email');
+
+      const provider = new NoopEstimateDeliveryProvider();
+      const result = await new SendEstimateExecutionHandler(provider).execute(proposal, {
+        tenantId: TENANT,
+        executedBy: 'operator-1',
+      });
+      expect(result.success).toBe(true);
+      expect(provider.lastDispatch?.channel).toBe('email');
+    });
+
+    it('a send_estimate effect with sendChannel=sms promotes sms, not a hardcoded email default', async () => {
+      const estimateUuid = '550e8400-e29b-41d4-a716-446655440000';
+      const adapter = buildAdapter();
+      const { sessionId } = await adapter.startSession(TENANT, USER);
+      const session = store.peek(sessionId);
+      if (!session) throw new Error('test session missing');
+
+      await callHandleCreateProposal(adapter, session, {
+        type: 'create_proposal',
+        payload: {
+          tenantId: TENANT,
+          intent: 'send_estimate',
+          entities: { estimateId: estimateUuid, sendChannel: 'sms' },
+          sessionId: session.id,
+          confidence: 0.9,
+        },
+      });
+
+      const proposals = await proposalRepo.findByTenant(TENANT);
+      expect(proposals[0].payload.channel).toBe('sms');
+    });
+  });
+});
+
+describe('QA-2026-07-26 — session-start callerPhone resolution', () => {
+  let store: VoiceSessionStore;
+  let proposalRepo: InMemoryProposalRepository;
+  let auditRepo: InMemoryAuditRepository;
+  let onCallRepo: InMemoryOnCallRepository;
+  let customerRepo: InMemoryCustomerRepository;
+
+  const CALLER_PHONE = '+15551234567';
+
+  function fixtureCustomer(overrides: Partial<Customer> = {}): Customer {
+    const now = new Date();
+    return {
+      id: 'cust-phone-1',
+      tenantId: TENANT,
+      firstName: 'Jane',
+      lastName: 'Doe',
+      displayName: 'Jane Doe',
+      preferredChannel: 'phone',
+      smsConsent: false,
+      isArchived: false,
+      primaryPhone: CALLER_PHONE,
+      createdBy: 'system',
+      createdAt: now,
+      updatedAt: now,
+      ...overrides,
+    };
+  }
+
+  beforeEach(() => {
+    store = new VoiceSessionStore({ startInterval: false });
+    proposalRepo = new InMemoryProposalRepository();
+    auditRepo = new InMemoryAuditRepository();
+    onCallRepo = new InMemoryOnCallRepository();
+    customerRepo = new InMemoryCustomerRepository();
+  });
+
+  afterEach(() => store.dispose());
+
+  it('1-match: resolves the caller to the matching customer and seeds context.customerId via caller_known', async () => {
+    await customerRepo.create(fixtureCustomer());
+    const adapter = new InAppVoiceAdapter({
+      store,
+      gateway: scriptedGateway([]),
+      proposalRepo,
+      auditRepo,
+      onCallRepo,
+      customerRepo,
+    });
+    const { sessionId } = await adapter.startSession(TENANT, USER, undefined, undefined, CALLER_PHONE);
+    const session = store.peek(sessionId);
+    expect(session?.customerId).toBe('cust-phone-1');
+    expect(session?.machine.currentContext.customerId).toBe('cust-phone-1');
+  });
+
+  it('0-match: leaves the caller unresolved and falls back to operator_session (unchanged)', async () => {
+    const adapter = new InAppVoiceAdapter({
+      store,
+      gateway: scriptedGateway([]),
+      proposalRepo,
+      auditRepo,
+      onCallRepo,
+      customerRepo,
+    });
+    const { sessionId } = await adapter.startSession(TENANT, USER, undefined, undefined, '+15559999999');
+    const session = store.peek(sessionId);
+    expect(session?.customerId).toBeUndefined();
+    expect(session?.machine.currentContext.customerId).toBeUndefined();
+  });
+
+  it('2+-match: never guesses — leaves the caller unresolved when the phone matches more than one customer', async () => {
+    await customerRepo.create(fixtureCustomer({ id: 'cust-phone-1' }));
+    await customerRepo.create(fixtureCustomer({ id: 'cust-phone-2' }));
+    const adapter = new InAppVoiceAdapter({
+      store,
+      gateway: scriptedGateway([]),
+      proposalRepo,
+      auditRepo,
+      onCallRepo,
+      customerRepo,
+    });
+    const { sessionId } = await adapter.startSession(TENANT, USER, undefined, undefined, CALLER_PHONE);
+    const session = store.peek(sessionId);
+    expect(session?.customerId).toBeUndefined();
+    expect(session?.machine.currentContext.customerId).toBeUndefined();
+  });
+
+  it('no callerPhone provided: unchanged operator_session path even when customerRepo is wired', async () => {
+    await customerRepo.create(fixtureCustomer());
+    const adapter = new InAppVoiceAdapter({
+      store,
+      gateway: scriptedGateway([]),
+      proposalRepo,
+      auditRepo,
+      onCallRepo,
+      customerRepo,
+    });
+    const { sessionId } = await adapter.startSession(TENANT, USER);
+    const session = store.peek(sessionId);
+    expect(session?.customerId).toBeUndefined();
+    expect(session?.machine.currentContext.customerId).toBeUndefined();
+  });
+
+  it('end-to-end: a generic "our customer" reference in a create_invoice turn resolves to the phone-matched customerId', async () => {
+    await customerRepo.create(fixtureCustomer());
+    const gateway = scriptedGateway([
+      JSON.stringify({
+        intentType: 'create_invoice',
+        confidence: 0.94,
+        extractedEntities: { customerName: 'our customer', amount: 45000 },
+      }),
+    ]);
+    const adapter = new InAppVoiceAdapter({
+      store,
+      gateway,
+      proposalRepo,
+      auditRepo,
+      onCallRepo,
+      customerRepo,
+    });
+    const { sessionId } = await adapter.startSession(TENANT, USER, undefined, undefined, CALLER_PHONE);
+    const readback = await adapter.handleInput(sessionId, 'invoice our customer for 450');
+    expect(readback.state).toBe('intent_confirm');
+    const result = await adapter.handleInput(sessionId, 'yes');
+    expect(result.state).toBe('closing');
+    expect(result.proposalIds).toHaveLength(1);
+    const proposals = await proposalRepo.findByTenant(TENANT);
+    expect(proposals).toHaveLength(1);
+    expect(proposals[0].payload.customerId).toBe('cust-phone-1');
+    expect((proposals[0].payload.entities as Record<string, unknown>).customerId).toBe('cust-phone-1');
+  });
+
+  it('ordering: a MORE SPECIFIC customer resolved this turn wins over the generic phone-matched fallback', async () => {
+    await customerRepo.create(fixtureCustomer({ id: 'cust-phone-1' }));
+    const namedResolver: EntityResolver = {
+      resolve: vi.fn(async () => ({
+        kind: 'resolved' as const,
+        candidate: { id: 'cust-named-2', kind: 'customer' as const, label: 'Bob Smith', score: 0.95 },
+      })),
+    };
+    const gateway = scriptedGateway([
+      JSON.stringify({
+        intentType: 'create_invoice',
+        confidence: 0.94,
+        extractedEntities: { customerName: 'Bob Smith', amount: 45000 },
+      }),
+    ]);
+    const adapter = new InAppVoiceAdapter({
+      store,
+      gateway,
+      proposalRepo,
+      auditRepo,
+      onCallRepo,
+      customerRepo,
+      entityResolver: namedResolver,
+    });
+    const { sessionId } = await adapter.startSession(TENANT, USER, undefined, undefined, CALLER_PHONE);
+    // Sanity: the phone-matched fallback IS on the session/context.
+    expect(store.peek(sessionId)?.customerId).toBe('cust-phone-1');
+    const readback = await adapter.handleInput(sessionId, 'invoice Bob Smith for 450');
+    expect(readback.state).toBe('intent_confirm');
+    const result = await adapter.handleInput(sessionId, 'yes');
+    expect(result.state).toBe('closing');
+    const proposals = await proposalRepo.findByTenant(TENANT);
+    expect(proposals).toHaveLength(1);
+    // The specifically-resolved customer wins, NOT the phone-matched fallback.
+    expect(proposals[0].payload.customerId).toBe('cust-named-2');
+    expect((proposals[0].payload.entities as Record<string, unknown>).customerId).toBe('cust-named-2');
+  });
+});
+
+describe('InAppVoiceAdapter#toResolutionEvent', () => {
+  let store: VoiceSessionStore;
+  let proposalRepo: InMemoryProposalRepository;
+  let auditRepo: InMemoryAuditRepository;
+  let onCallRepo: InMemoryOnCallRepository;
+  let adapter: InAppVoiceAdapter;
+
+  beforeEach(() => {
+    store = new VoiceSessionStore({ startInterval: false });
+    proposalRepo = new InMemoryProposalRepository();
+    auditRepo = new InMemoryAuditRepository();
+    onCallRepo = new InMemoryOnCallRepository();
+    adapter = new InAppVoiceAdapter({
+      store,
+      gateway: scriptedGateway([]),
+      proposalRepo,
+      auditRepo,
+      onCallRepo,
+    });
+  });
+
+  // VOX-02 — toResolutionEvent is now intent-conditioned. Default to a
+  // record-OPERATING intent (send_estimate) so these cases keep exercising
+  // the "the record must already exist" branch; creation intents are covered
+  // explicitly below.
+  function toResolutionEvent(
+    resolution: SchedulingEntityResolution,
+    intent = 'send_estimate',
+  ): Promise<CallingAgentEvent> {
+    return (
+      adapter as unknown as {
+        toResolutionEvent: (
+          tenantId: string,
+          intent: string,
+          r: SchedulingEntityResolution,
+        ) => Promise<CallingAgentEvent>;
+      }
+    ).toResolutionEvent(TENANT, intent, resolution);
+  }
+
+  it('resolved → entity_resolved carrying the accumulated refs', async () => {
+    const event = await toResolutionEvent({
+      status: 'resolved',
+      refs: { customerId: 'cust-1' },
+    });
+    expect(event).toEqual({ type: 'entity_resolved', refs: { customerId: 'cust-1' } });
+  });
+
+  it('ambiguous → entity_ambiguous carrying candidates, refKey, and partialRefs', async () => {
+    const event = await toResolutionEvent({
+      status: 'ambiguous',
+      refs: { customerId: 'cust-1' },
+      ambiguous: {
+        entityKind: 'job',
+        reference: 'the HVAC job',
+        candidates: [
+          { id: 'job-1', kind: 'job', label: 'HVAC Repair', score: 0.9 },
+          { id: 'job-2', kind: 'job', label: 'HVAC Install', score: 0.85 },
+        ],
+      },
+    });
+    expect(event.type).toBe('entity_ambiguous');
+    if (event.type === 'entity_ambiguous') {
+      expect(event.entityKind).toBe('job');
+      expect(event.refKey).toBe('jobId');
+      expect(event.reference).toBe('the HVAC job');
+      expect(event.partialRefs).toEqual({ customerId: 'cust-1' });
+      expect(event.candidates).toEqual([
+        { id: 'job-1', name: 'HVAC Repair', score: 0.9, hint: undefined },
+        { id: 'job-2', name: 'HVAC Install', score: 0.85, hint: undefined },
+      ]);
+    }
+  });
+
+  it('not_found on a record-operating intent → entity_not_found with no payload (Fix 1 regression guard)', async () => {
+    const event = await toResolutionEvent({
+      status: 'not_found',
+      refs: {},
+      notFound: { entityKind: 'job', reference: 'the QA Matrix job' },
+    });
+    expect(event).toEqual({ type: 'entity_not_found' });
+  });
+
+  // VOX-02 — the escalation is narrowed to intents that need a pre-existing
+  // record. A creation intent keeps the partial refs and reads the intent
+  // back instead of handing the caller to on-call.
+  it('not_found on a creation intent → entity_resolved with the partial refs (VOX-02)', async () => {
+    const event = await toResolutionEvent(
+      {
+        status: 'not_found',
+        refs: { customerName: 'Ghost', scheduledStart: '2026-07-27T21:00:00.000Z' },
+        notFound: { entityKind: 'customer', reference: 'Ghost' },
+      },
+      'create_appointment',
+    );
+    expect(event).toEqual({
+      type: 'entity_resolved',
+      refs: { customerName: 'Ghost', scheduledStart: '2026-07-27T21:00:00.000Z' },
+    });
+  });
+
+  it('low_confidence → entity_confirm_candidate carrying the candidate, refKey, and partialRefs', async () => {
+    const event = await toResolutionEvent({
+      status: 'low_confidence',
+      refs: { customerId: 'cust-1' },
+      lowConfidence: {
+        entityKind: 'job',
+        reference: 'the QA Matrix job',
+        candidate: { id: 'job-9', kind: 'job', label: 'QA Matrix Repair', score: 0.7 },
+      },
+    });
+    expect(event.type).toBe('entity_confirm_candidate');
+    if (event.type === 'entity_confirm_candidate') {
+      expect(event.entityKind).toBe('job');
+      expect(event.refKey).toBe('jobId');
+      expect(event.reference).toBe('the QA Matrix job');
+      expect(event.partialRefs).toEqual({ customerId: 'cust-1' });
+      expect(event.candidate).toEqual({ id: 'job-9', kind: 'job', label: 'QA Matrix Repair', score: 0.7 });
+    }
   });
 });

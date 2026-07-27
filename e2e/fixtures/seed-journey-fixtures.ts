@@ -127,6 +127,23 @@ async function ensureTenantFixture(client: Client, slug: string): Promise<Tenant
       )
     ).rows[0].id;
 
+  // QA identity — a `users` row for the HMAC-minted token's `sub` claim.
+  // Required since QUALITY-2026-07-12 WS4 added DB-authoritative authorization
+  // (packages/api/src/auth/authorization-loader.ts): a JWT with a valid
+  // signature and tenant_id claim is no longer sufficient on its own — the API
+  // now requires a matching `users` row (tenant_id, clerk_user_id) with
+  // status='active' or every authenticated request 403s with "No active
+  // membership for this tenant". scripts/qa-hmac-mint.ts mints
+  // `qa-runbook-user-${label}` for tenant A/B; label is the slug's trailing
+  // A/B (e.g. "qa-journey-A" -> "A").
+  const label = slug.slice(-1);
+  await client.query(
+    `INSERT INTO users (id, tenant_id, clerk_user_id, email, role, status, created_at, updated_at)
+     VALUES ($1, $2, $3, $4, 'owner', 'active', now(), now())
+     ON CONFLICT (tenant_id, clerk_user_id) DO NOTHING`,
+    [randomUUID(), tenantId, `qa-runbook-user-${label}`, `${slug}-runbook-owner@qa.serviceos.local`]
+  );
+
   // Customers (3)
   const customerIds: string[] = [];
   for (let i = 1; i <= 3; i++) {

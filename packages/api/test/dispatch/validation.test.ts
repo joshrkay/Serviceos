@@ -138,8 +138,8 @@ describe('P6-017 — Availability-block conflict detection', () => {
 
   it('detects appointment outside working hours', () => {
     const conflicts = detectAvailabilityConflicts(
-      new Date('2026-03-14T06:00:00'),
-      new Date('2026-03-14T08:00:00'),
+      new Date('2026-03-14T06:00:00Z'),
+      new Date('2026-03-14T08:00:00Z'),
       workingHours,
       [],
     );
@@ -151,8 +151,8 @@ describe('P6-017 — Availability-block conflict detection', () => {
 
   it('no conflict when within working hours', () => {
     const conflicts = detectAvailabilityConflicts(
-      new Date('2026-03-14T09:00:00'),
-      new Date('2026-03-14T11:00:00'),
+      new Date('2026-03-14T09:00:00Z'),
+      new Date('2026-03-14T11:00:00Z'),
       workingHours,
       [],
     );

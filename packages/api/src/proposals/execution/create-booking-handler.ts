@@ -33,8 +33,10 @@ export class CreateBookingExecutionHandler implements ExecutionHandler {
 
   // WS3 — degrades to an id passthrough (confirms nothing) without the
   // appointment repo; boot fails when a pool is configured but this is false.
+  // Also requires confirmationNotifier — without it, execute() silently skips
+  // the customer confirmation SMS/email enqueue (see execute() below).
   isFullyWired(): boolean {
-    return Boolean(this.appointmentRepo);
+    return Boolean(this.appointmentRepo) && Boolean(this.confirmationNotifier);
   }
 
   async execute(proposal: Proposal, context: ExecutionContext): Promise<ExecutionResult> {
