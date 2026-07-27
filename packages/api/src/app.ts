@@ -3400,13 +3400,23 @@ export function createApp(): AppWithLifecycle {
     ? new PgFeatureFlagRepository(pool)
     : new InMemoryFeatureFlagRepository();
   const featureFlagStore = new InMemoryFeatureFlagStore();
+  const featureFlagLogger = createLogger({
+    service: 'feature-flags',
+    environment: process.env.NODE_ENV ?? 'development',
+  });
   // Hydration is fire-and-forget on boot — the store starts empty and is
   // refilled from the repo asynchronously. isFeatureEnabled returns false
   // for missing flags, so the worst case during the hydration window is
   // that a flag reads as disabled for a few ms.
+  //
+  // EVERY await in this IIFE must be individually guarded. The IIFE is
+  // void'd, so nothing is awaiting it and nothing can catch what it throws:
+  // a single unguarded rejection escapes as an unhandled rejection, which
+  // Node terminates on under --unhandled-rejections=throw and which Vitest
+  // reports as a run-level error regardless of how many tests pass.
   void (async () => {
-    const { seedResilienceFlags } = await import('./flags/resilience-flags');
     try {
+      const { seedResilienceFlags } = await import('./flags/resilience-flags');
       await seedResilienceFlags(featureFlagRepo);
     } catch {
       /* fire-and-forget — admin flags surface via the admin API */
@@ -3427,7 +3437,21 @@ export function createApp(): AppWithLifecycle {
     } catch {
       /* fire-and-forget */
     }
-    await hydrateStoreFromRepository(featureFlagStore, featureFlagRepo);
+    // Hydration is the one call that reaches the database on the happy path,
+    // so it is the one most likely to reject — with no reachable Postgres the
+    // pg pool's connect fails with ECONNREFUSED. Degrade gracefully: the store
+    // stays empty and isFeatureEnabled falls back to false for every flag, the
+    // same state boot already tolerates during the hydration window. Log at
+    // warn so a real production hydration failure stays visible instead of
+    // being silently swallowed like the best-effort seeds above.
+    try {
+      await hydrateStoreFromRepository(featureFlagStore, featureFlagRepo);
+    } catch (err) {
+      featureFlagLogger.warn(
+        'Feature-flag hydration failed; flags fall back to disabled until the next boot',
+        { error: err instanceof Error ? err.message : String(err) },
+      );
+    }
   })();
   // RV-001 follow-up #8 / RV-122 — per-tenant feature-flag resolution
   // (tenant_feature_flags override → platform flag → false). This is the
