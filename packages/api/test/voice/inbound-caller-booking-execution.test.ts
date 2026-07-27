@@ -6,36 +6,40 @@
  * never been exercised:
  *
  *   - test/voice/inbound-caller-booking-golden-path.test.ts PRODUCES a
- *     real-path proposal via `createVoiceTurnProcessor.speechTurn` and
- *     asserts the raw classifier strings survive into `payload.entities`
- *     — then stops. It never executes what it produced.
+ *     real-path proposal via `createVoiceTurnProcessor.speechTurn` — then
+ *     stops. It never executes what it produced. (It also USED to assert
+ *     that the raw classifier strings survived into `payload.entities`,
+ *     i.e. it encoded the broken shape as correct; those assertions are
+ *     now written against the flat contract.)
  *   - test/integration/voice-inbound-appointment.test.ts EXECUTES through
  *     the production `createExecutionHandlerRegistry` + `ProposalExecutor`
  *     — but hand-writes `payload: { jobId, scheduledStart, ... }` under
  *     the comment "What the voice task handler emits for a cold inbound
  *     call". Nothing proves the real path emits that shape.
  *
- * It does not. `handleCreateProposal` in
- * `src/ai/voice-turn/create-voice-turn-processor.ts` persists a NESTED
+ * It did not. `handleCreateProposal` in
+ * `src/ai/voice-turn/create-voice-turn-processor.ts` persisted a NESTED
  * envelope — `{ intent, entities, sessionId, callSid }` — while every
  * execution handler reads FLAT keys (`payload.customerId`,
- * `payload.jobId`, `payload.scheduledStart`, `payload.appointmentId`, …).
- * The in-app adapter (`customer-calling/inapp-adapter.ts`) has an explicit
- * flat-promotion step before `buildProposal`; the real Twilio phone path
- * has no equivalent. `customer-calling/transitions.ts` even documents the
- * asymmetry in a comment on the emergency side effect ("Duplicated into
- * entities because the voice-turn processor's handleCreateProposal
- * persists only {intent, entities, sessionId, callSid}").
+ * `payload.jobId`, `payload.scheduledStart`, `payload.appointmentId`, …),
+ * and the Gather/media-streams "entity resolution" step was a verbatim ECHO
+ * of the classifier, so no spoken reference ever became an id and no spoken
+ * time ever became an ISO instant. The in-app adapter
+ * (`customer-calling/inapp-adapter.ts`) had an explicit flat-promotion step
+ * before `buildProposal`; the real Twilio phone path had no equivalent.
  *
  * This suite closes the seam: it drives the REAL path through both turns,
  * takes the proposal object EXACTLY AS THE CODE PRODUCED IT, approves it,
  * and runs it through the PRODUCTION execution registry + executor against
  * in-memory repositories.
  *
- * *** THIS SUITE IS EXPECTED TO BE RED. ***
- * It is the proof of the defect, not a regression guard for a fix. The
- * companion golden-path suite stays GREEN against the same code path —
- * that contrast is the whole statement of the problem.
+ * It was written RED (6 of 10 cases failing) as the proof of the defect. It
+ * is now the regression guard for the fix: `proposals/voice-payload.ts`
+ * (`buildVoiceProposalPayload`) owns the envelope→flat-contract translation
+ * for the voice surfaces, the processor resolves entities through the shared
+ * `resolveSchedulingEntities`, and a payload that cannot satisfy its contract
+ * degrades to a canonical `voice_clarification` instead of persisting an
+ * approve-to-fail card.
  *
  * INVARIANT FOR ANYONE EDITING THIS FILE: there is no `payload` literal
  * anywhere in it, and there must never be one. The moment a payload is
@@ -64,6 +68,17 @@ import { InMemoryJobRepository } from '../../src/jobs/job';
 import { InMemoryAppointmentRepository } from '../../src/appointments/in-memory-appointment';
 import { InMemoryEstimateRepository } from '../../src/estimates/estimate';
 import { InMemorySettingsRepository } from '../../src/settings/settings';
+import {
+  InMemoryCatalogItemRepository,
+  createCatalogItem,
+} from '../../src/catalog/catalog-item';
+import { StubSkillMatcher } from '../../src/scheduling/skill-matcher';
+import { HaversineFallbackProvider } from '../../src/scheduling/travel-time/haversine-fallback';
+import type { FeasibilityDependencies } from '../../src/scheduling/feasibility-types';
+import type {
+  EntityResolver,
+  EntityResolverResult,
+} from '../../src/ai/resolution/entity-resolver';
 import { transitionProposal, UNDO_WINDOW_MS } from '../../src/proposals/lifecycle';
 import { ProposalExecutor } from '../../src/proposals/execution/executor';
 import { IdempotencyGuard } from '../../src/proposals/execution/idempotency';
@@ -116,11 +131,116 @@ interface World {
   appointmentRepo: InMemoryAppointmentRepository;
   estimateRepo: InMemoryEstimateRepository;
   settingsRepo: InMemorySettingsRepository;
+  /**
+   * The tenant's price book. Production wires this into the voice-turn
+   * processor (app.ts `twilioAdapterDeps.catalogRepo`) so a spoken quote is
+   * priced from the catalog and never from an LLM guess; without it the
+   * grounded line items carry NO price and `normalizeDraftLineItems` rejects
+   * them ("has no usable unit price"). Part of "the world is complete".
+   */
+  catalogRepo: InMemoryCatalogItemRepository;
   auditRepo: InMemoryAuditRepository;
   customerId: string;
   locationId: string;
   jobId: string;
   appointmentId: string;
+}
+
+/**
+ * Tenant-scoped entity resolver over the seeded world — the fixture stand-in
+ * for production's `AliasFirstEntityResolver → PgEntityResolver` (pg_trgm).
+ *
+ * Deliberately a RESOLVER, not a lookup table: it matches a free-text reference
+ * against what actually exists in the tenant and obeys the EntityResolver
+ * contract (one match → resolved, several → ambiguous, none → not_found), so
+ * the suite still proves the real path RESOLVES ("my Tuesday furnace
+ * appointment" → an appointment UUID) rather than that the fixture handed an id
+ * over. Nothing here writes a payload field.
+ */
+function makeWorldEntityResolver(world: World): EntityResolver {
+  /**
+   * Distinctive (>=5 char) words — the ones a caller's phrasing and a record's
+   * own name actually share. "my Tuesday FURNACE appointment" vs the job
+   * "FURNACE not heating"; "Dana REYES" vs the customer "Dana Reyes".
+   */
+  const distinctive = (s: string): string[] => [
+    ...new Set(
+      s
+        .toLowerCase()
+        .replace(/[^a-z0-9\s]/g, ' ')
+        .split(/\s+/)
+        .filter((t) => t.length >= 5),
+    ),
+  ];
+
+  /**
+   * The EntityResolver contract, verbatim: exactly one match → resolved,
+   * several → ambiguous (a one-tap clarification, never a silent pick), none →
+   * not_found. `score` reports how much of the record's own name the caller
+   * said, for the candidate list.
+   */
+  const best = (
+    reference: string,
+    kind: 'customer' | 'job' | 'appointment',
+    rows: Array<{ id: string; label: string }>,
+  ): EntityResolverResult => {
+    const spoken = new Set(distinctive(reference));
+    const scored = rows
+      .map((r) => {
+        const words = distinctive(r.label);
+        const hits = words.filter((w) => spoken.has(w)).length;
+        return {
+          id: r.id,
+          kind,
+          label: r.label,
+          score: words.length === 0 ? 0 : hits / words.length,
+          hits,
+        };
+      })
+      .filter((c) => c.hits > 0)
+      .sort((a, b) => b.score - a.score);
+    if (scored.length === 0) return { kind: 'not_found', reference };
+    if (scored.length > 1) {
+      return { kind: 'ambiguous', candidates: scored.map(({ hits: _h, ...c }) => c) };
+    }
+    const { hits: _hits, ...candidate } = scored[0];
+    return { kind: 'resolved', candidate };
+  };
+
+  return {
+    async resolve({ tenantId, reference, kind }) {
+      if (kind === 'customer') {
+        const customers = await world.customerRepo.findByTenant(tenantId);
+        return best(
+          reference,
+          'customer',
+          customers.map((c) => ({ id: c.id, label: c.displayName })),
+        );
+      }
+      if (kind === 'job') {
+        const jobs = await world.jobRepo.findByTenant(tenantId);
+        return best(
+          reference,
+          'job',
+          jobs.map((j) => ({ id: j.id, label: j.summary })),
+        );
+      }
+      if (kind === 'appointment') {
+        // An appointment has no name of its own — production resolves the
+        // caller's phrase against the appointment's date and its JOB, which is
+        // what "my Tuesday furnace appointment" actually names.
+        const { data } = await world.appointmentRepo.listWithMeta(tenantId);
+        const labelled = await Promise.all(
+          data.map(async (a) => {
+            const job = await world.jobRepo.findById(tenantId, a.jobId);
+            return { id: a.id, label: job?.summary ?? '' };
+          }),
+        );
+        return best(reference, 'appointment', labelled);
+      }
+      return { kind: 'skipped' };
+    },
+  };
 }
 
 async function seedWorld(): Promise<World> {
@@ -130,7 +250,27 @@ async function seedWorld(): Promise<World> {
   const appointmentRepo = new InMemoryAppointmentRepository();
   const estimateRepo = new InMemoryEstimateRepository();
   const settingsRepo = new InMemorySettingsRepository();
+  const catalogRepo = new InMemoryCatalogItemRepository();
   const auditRepo = new InMemoryAuditRepository();
+
+  // The tenant's price book. A caller can only be quoted for work the
+  // tradesperson actually sells, so the two services this suite's caller asks
+  // about are in it — that is what makes the drafted estimate's lines
+  // catalog-priced (`pricingSource: 'catalog'`) instead of unpriced.
+  for (const [name, unitPriceCents] of [
+    ['water heater flush', 18_900],
+    ['thermostat replacement', 32_500],
+  ] as const) {
+    await catalogRepo.create(
+      createCatalogItem({
+        tenantId: TENANT,
+        name,
+        category: 'Labor',
+        unit: 'each',
+        unitPriceCents,
+      }),
+    );
+  }
 
   const customerId = randomUUID();
   const locationId = randomUUID();
@@ -205,6 +345,7 @@ async function seedWorld(): Promise<World> {
     appointmentRepo,
     estimateRepo,
     settingsRepo,
+    catalogRepo,
     auditRepo,
     customerId,
     locationId,
@@ -271,6 +412,15 @@ async function makeInboundCall(
     auditRepo: world.auditRepo,
     proposalRepo,
     voiceSessionRepo,
+    // Production wiring (app.ts `twilioAdapterDeps`) that the original harness
+    // omitted, and whose absence the RED run hid behind an earlier failure:
+    //  - `entityResolver`: turns the caller's spoken references into tenant
+    //    ids and their spoken times into ISO instants. Without it nothing on
+    //    the phone path ever resolves.
+    //  - `catalogRepo`: prices a spoken quote from the tenant price book, so a
+    //    drafted estimate's lines carry a real `unitPrice`.
+    entityResolver: makeWorldEntityResolver(world),
+    catalogRepo: world.catalogRepo,
   });
 
   return { processor, store, proposalRepo, session, resolvedTenantId };
@@ -376,26 +526,6 @@ const RECORD_CREATING_CASES: RealPathCase[] = [
       expect(estimates).toHaveLength(1);
     },
   },
-  {
-    // `create_booking` is on the S1 allowlist and has a production
-    // handler, but NO classifier intent maps to it: neither
-    // `intentToProposalType` (voice-turn/create-voice-turn-processor.ts)
-    // nor `SUPPORTED_INTENTS` (ai/orchestration/intent-classifier.ts)
-    // knows the string. Included so the parameterised run states, in
-    // output rather than in prose, that the real phone path cannot reach
-    // it at all — a DIFFERENT gap from the flat-payload one.
-    proposalType: 'create_booking',
-    intent: 'create_booking',
-    utterance: 'Yes, book me into that 2pm slot you just held.',
-    entities: {
-      dateTimeDescription: 'Tuesday at 2pm',
-      jobReference: 'furnace not heating',
-    },
-    expectRow: async (world) => {
-      const held = await world.appointmentRepo.findById(TENANT, world.appointmentId);
-      expect(held?.holdPendingApproval).toBe(false);
-    },
-  },
 ];
 
 /**
@@ -451,6 +581,31 @@ async function approveAndExecute(
   await proposalRepo.create(approved);
   const executionRepo = new InMemoryProposalExecutionRepository();
 
+  // The SAME dep bundle app.ts hands createExecutionHandlerRegistry. The
+  // scheduling repos are stubs (this suite models no crews, shifts or PTO), but
+  // `jobRepo` is the world's: RescheduleAppointmentExecutionHandler's S1
+  // ownership check (appointment → job → customerId) reads it off
+  // `feasibilityDeps` and FAILS CLOSED without it, which would refuse a caller's
+  // reschedule of their own appointment for a wiring reason rather than a
+  // payload one.
+  const feasibilityDeps: FeasibilityDependencies = {
+    assignmentRepo: {
+      findByTechnician: async () => [],
+      findByAppointment: async () => [],
+    } as unknown as FeasibilityDependencies['assignmentRepo'],
+    appointmentRepo: world.appointmentRepo,
+    jobRepo: world.jobRepo,
+    locationRepo: world.locationRepo,
+    workingHoursRepo: {
+      findByTechnician: async () => [],
+    } as unknown as FeasibilityDependencies['workingHoursRepo'],
+    unavailableBlockRepo: {
+      findByTechnicianAndDateRange: async () => [],
+    } as unknown as FeasibilityDependencies['unavailableBlockRepo'],
+    travelTimeProvider: new HaversineFallbackProvider(),
+    skillMatcher: new StubSkillMatcher(),
+  };
+
   const handlers = createExecutionHandlerRegistry({
     customerRepo: world.customerRepo,
     locationRepo: world.locationRepo,
@@ -458,7 +613,9 @@ async function approveAndExecute(
     appointmentRepo: world.appointmentRepo,
     estimateRepo: world.estimateRepo,
     settingsRepo: world.settingsRepo,
+    catalogRepo: world.catalogRepo,
     auditRepo: world.auditRepo,
+    feasibilityDeps,
   });
   const executor = new ProposalExecutor(
     handlers,
@@ -519,6 +676,48 @@ describe('Inbound caller — a real-path proposal must actually execute', () => 
       await c.expectRow(world);
     },
   );
+
+  /**
+   * `create_booking` is the one record-creating S1 type this suite does NOT
+   * parameterise over, because the real phone path cannot reach it AT ALL —
+   * a DIFFERENT gap from the flat-payload one, and deliberately not "fixed"
+   * here.
+   *
+   * It is on the S1 allowlist and has a production execution handler, but no
+   * classifier intent maps to it: the string is in neither
+   * `intentToProposalType` (ai/voice-turn/create-voice-turn-processor.ts) nor
+   * `SUPPORTED_INTENTS` (ai/orchestration/intent-classifier.ts). An utterance
+   * classified as `create_booking` is therefore rejected as an unknown intent
+   * BEFORE any proposal is minted — the FSM never reaches `intent_confirm`,
+   * so turn 2's "yes" confirms nothing and ZERO proposals are written. That
+   * is the correct fail-safe (never invent a booking the classifier can't
+   * name), and this assertion pins it so the day someone adds the intent, the
+   * missing payload contract has to be added with it.
+   */
+  it('create_booking is unreachable from the phone path — no classifier intent maps to it', async () => {
+    const world = await seedWorld();
+    const proposals = await driveRealPathProposal(
+      {
+        proposalType: 'create_booking',
+        intent: 'create_booking',
+        utterance: 'Yes, book me into that 2pm slot you just held.',
+        entities: {
+          dateTimeDescription: 'Tuesday at 2pm',
+          jobReference: 'furnace not heating',
+        },
+        expectRow: async () => {},
+      },
+      world,
+    );
+
+    expect(
+      proposals,
+      'a create_booking utterance must mint NOTHING while no classifier intent maps to it',
+    ).toEqual([]);
+    // ...even though the type is otherwise fully executable.
+    expect(S1_ALLOWED_PROPOSAL_TYPES.has('create_booking')).toBe(true);
+    expect(createExecutionHandlerRegistry({}).has('create_booking')).toBe(true);
+  });
 });
 
 /**
