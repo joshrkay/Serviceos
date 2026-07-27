@@ -241,6 +241,22 @@ describe('InAppVoiceAdapter', () => {
         'classifier_quota_failure',
         'quota',
       ],
+      // A provider throttle is its own class: transient and self-healing,
+      // unlike `provider` ("the AI is broken") and unlike our own per-tenant
+      // caps above. Operators reading the audit trail must be able to tell
+      // "OpenAI is rate limiting us" from "the AI is down".
+      [
+        'upstream rate limit (failover-surfaced)',
+        'LLM_RATE_LIMITED',
+        'classifier_rate_limit_failure',
+        'rate_limited',
+      ],
+      [
+        'upstream rate limit (raw adapter)',
+        'PROVIDER_RATE_LIMITED',
+        'classifier_rate_limit_failure',
+        'rate_limited',
+      ],
     ])(
       'returns and persists a safe %s audit side effect',
       async (_label, code, eventType, failureClass) => {
@@ -333,6 +349,48 @@ describe('InAppVoiceAdapter', () => {
       });
       // FM-06: do not adapter-retry breaker/failover exhaustion.
       expect(gateway.complete).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not adapter-retry an upstream rate limit (no pile-up on a throttle)', async () => {
+      // The gateway already waited out any retry-after that fit the deadline.
+      // A second full-budget attempt from here re-queues against the same
+      // exhausted quota AND holds a second per-tenant concurrency lease —
+      // which is how the 2026-07-27 throttle escalated into
+      // "Per-tenant concurrency cap exceeded for tenant …:classify_intent".
+      const gateway = {
+        complete: vi.fn(async () => {
+          const error = new Error(
+            'AI provider rate limit reached (rate_limit_exceeded/requests); retry after 8.6s.',
+          );
+          Object.assign(error, { code: 'LLM_RATE_LIMITED' });
+          throw error;
+        }),
+      } as unknown as LLMGateway;
+      const adapter = new InAppVoiceAdapter({
+        store,
+        gateway,
+        proposalRepo,
+        auditRepo,
+        onCallRepo,
+      });
+      const { sessionId } = await adapter.startSession(TENANT, USER);
+      const result = await adapter.handleInput(sessionId, 'schedule a visit');
+
+      expect(gateway.complete).toHaveBeenCalledTimes(1);
+      const failure = result.sideEffects.find(
+        (effect) => effect.payload.eventType === 'classifier_rate_limit_failure',
+      );
+      expect(failure?.payload).toEqual({
+        eventType: 'classifier_rate_limit_failure',
+        failureClass: 'rate_limited',
+        errorCode: 'LLM_RATE_LIMITED',
+      });
+      // It must NOT be filed as a generic provider failure.
+      expect(
+        result.sideEffects.some(
+          (effect) => effect.payload.eventType === 'classifier_provider_failure',
+        ),
+      ).toBe(false);
     });
 
     it('maps Request-was-aborted to classifier_deadline_failure (not provider)', async () => {

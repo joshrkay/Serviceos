@@ -41,7 +41,13 @@ import {
   DEFAULT_BREAKER,
   type BreakerConfig,
 } from './breaker';
-import { runWithRetry, DEFAULT_RETRY, type RetryPolicy } from './retry';
+import {
+  runWithRetry,
+  DEFAULT_RETRY,
+  isRateLimitError,
+  retryAfterMsFromError,
+  type RetryPolicy,
+} from './retry';
 import { adoptDeadline, STAGE_BUDGETS } from './deadline';
 import {
   TenantQuotaRegistry,
@@ -191,7 +197,11 @@ export class ProviderBreakerWrapper implements LLMProvider {
  * provider — they indicate bad input, not provider health.
  *
  * On full exhaustion (all providers failed with failover-eligible errors),
- * throws AppError with code LLM_PROVIDER_UNAVAILABLE (HTTP 503).
+ * throws AppError with code LLM_PROVIDER_UNAVAILABLE (HTTP 503) — EXCEPT when
+ * the last error was a provider throttle, which gets its own
+ * LLM_RATE_LIMITED (HTTP 429) carrying `retryAfterMs` and the provider's own
+ * error type/code. A 429 means "come back shortly", not "the AI is broken",
+ * and the two need to be distinguishable all the way up to the operator.
  *
  * `providerPath` is populated on the response with the ordered list of
  * provider:model entries that were attempted.
@@ -234,7 +244,42 @@ export class ProviderFailoverWrapper implements LLMProvider {
       }
     }
 
-    // All providers exhausted
+    // All providers exhausted.
+    //
+    // A throttle is NOT an outage, and saying "all providers failed" for one
+    // is what left the owner staring at an error that named neither the cause
+    // nor the remedy. Surface it as its own typed 429 carrying the provider's
+    // own error type/code/message and the wait hint, so the caller (and the
+    // operator in the UI) can tell "we're rate limited, try again shortly"
+    // from "the AI is broken".
+    if (isRateLimitError(lastErr)) {
+      const rl = lastErr as {
+        providerErrorType?: string;
+        providerErrorCode?: string;
+        message?: string;
+      };
+      const retryAfterMs = retryAfterMsFromError(lastErr);
+      const label = [rl.providerErrorType, rl.providerErrorCode]
+        .filter((v): v is string => typeof v === 'string' && v.length > 0)
+        .join('/');
+      const providerMessage =
+        lastErr instanceof Error ? lastErr.message : String(lastErr);
+      throw new AppError(
+        'LLM_RATE_LIMITED',
+        `AI provider rate limit reached${label ? ` (${label})` : ''}` +
+          `${retryAfterMs !== undefined ? `; retry after ${(retryAfterMs / 1000).toFixed(1)}s` : ''}. ` +
+          `Provider said: ${providerMessage}`,
+        429,
+        {
+          providerPath: path,
+          rateLimited: true,
+          ...(retryAfterMs !== undefined ? { retryAfterMs } : {}),
+          ...(rl.providerErrorType ? { providerErrorType: rl.providerErrorType } : {}),
+          ...(rl.providerErrorCode ? { providerErrorCode: rl.providerErrorCode } : {}),
+        },
+      );
+    }
+
     const retryAfterMs =
       lastErr instanceof BreakerOpenError ? lastErr.retryAfterMs : 1_000;
 

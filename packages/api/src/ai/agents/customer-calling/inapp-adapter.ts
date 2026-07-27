@@ -244,18 +244,37 @@ export interface HandleInputResult {
 
 const DEFAULT_GREETING_INAPP = 'Hi, this is your assistant. How can I help today?';
 
-type ClassifierFailureClass = 'parse_failed' | 'deadline' | 'quota' | 'provider';
+type ClassifierFailureClass =
+  | 'parse_failed'
+  | 'deadline'
+  | 'quota'
+  | 'rate_limited'
+  | 'provider';
 
 const CLASSIFIER_FAILURE_EVENT: Record<ClassifierFailureClass, string> = {
   parse_failed: 'classifier_parse_failure',
   deadline: 'classifier_deadline_failure',
   quota: 'classifier_quota_failure',
+  rate_limited: 'classifier_rate_limit_failure',
   provider: 'classifier_provider_failure',
 };
 
 const CLASSIFIER_QUOTA_CODES = new Set([
   'TENANT_CONCURRENCY_EXCEEDED',
   'TENANT_TOKEN_BUDGET_EXCEEDED',
+]);
+
+/**
+ * Upstream provider throttles. Distinct from `CLASSIFIER_QUOTA_CODES` (which
+ * are OUR per-tenant caps) and from `provider` (which means the AI is
+ * genuinely broken): a throttle is transient and self-healing, and an operator
+ * looking at the audit trail needs to be able to tell the three apart.
+ * `LLM_RATE_LIMITED` is what the failover layer raises; `PROVIDER_RATE_LIMITED`
+ * is the raw adapter error, which reaches here when only one attempt ran.
+ */
+const CLASSIFIER_RATE_LIMIT_CODES = new Set([
+  'LLM_RATE_LIMITED',
+  'PROVIDER_RATE_LIMITED',
 ]);
 
 function classifierErrorCode(error: unknown): string | undefined {
@@ -273,6 +292,11 @@ function classifierFailureFromError(
   }
   if (code && CLASSIFIER_QUOTA_CODES.has(code)) {
     return { failureClass: 'quota', errorCode: code };
+  }
+  // Upstream throttle — checked BEFORE the provider-failure branch so a 429
+  // is never audited as "the AI is broken".
+  if (code && CLASSIFIER_RATE_LIMIT_CODES.has(code)) {
+    return { failureClass: 'rate_limited', errorCode: code };
   }
   // Breaker / failover exhaustion can wrap a prior abort message
   // ("Last error: Request was aborted.") — keep those as provider, not deadline.
@@ -634,10 +658,18 @@ export class InAppVoiceAdapter {
     } catch (error) {
       const failure = classifierFailureFromError(error);
       const code = failure.errorCode;
-      // Quota / breaker-open / failover exhaustion: retrying burns load and
-      // cannot succeed until the cell recovers (FM-06).
+      // Quota / rate-limit / breaker-open / failover exhaustion: retrying
+      // burns load and cannot succeed until the cell recovers (FM-06).
+      //
+      // `rate_limited` belongs in this set for the same reason: the gateway
+      // has ALREADY waited out any retry-after that fit inside the deadline
+      // (see gateway/retry.ts planRateLimitWait). A second full-budget attempt
+      // from here would just re-queue against the same exhausted quota and
+      // hold another per-tenant concurrency lease while doing it — the exact
+      // pile-up that tripped `Per-tenant concurrency cap exceeded`.
       if (
         failure.failureClass === 'quota' ||
+        failure.failureClass === 'rate_limited' ||
         code === 'BREAKER_OPEN' ||
         code === 'LLM_PROVIDER_UNAVAILABLE'
       ) {
