@@ -19,6 +19,7 @@
  *    two-member chain (no booking member).
  */
 import { describe, it, expect, vi } from 'vitest';
+import { randomUUID } from 'node:crypto';
 
 import { createVoiceTurnProcessor } from '../../../src/ai/voice-turn';
 import {
@@ -53,7 +54,12 @@ const OWNER_PHONE = '+15125550999';
 function catalogItem(name: string, unitPriceCents: number): CatalogItem {
   const now = new Date().toISOString();
   return {
-    id: `c-${name.toLowerCase().replace(/\s+/g, '-')}`,
+    // A real `catalog_items.id` is a uuid (`createCatalogItem` → randomUUID),
+    // and `lineItemSchema.catalogItemId` is `z.string().uuid()`. The old
+    // slug id ('c-water-heater-replacement') made the grounded draft_estimate
+    // payload fail its own contract — invisible until the voice emit site
+    // started validating.
+    id: randomUUID(),
     tenantId: TENANT,
     name,
     description: '',

@@ -3534,6 +3534,25 @@ export function createApp(): AppWithLifecycle {
     droppedCallRecoveryRepo,
     availabilityFinder,
     lookupEvents: lookupEventService,
+    // P0 voice-safety — the inbound PHONE path resolves free-text references
+    // through the SAME resolver stack the voice-action-router uses above
+    // (alias-first, then pg_trgm), NOT the bare PgEntityResolver the in-app
+    // adapter self-constructs — an inbound caller saying a tenant's own alias
+    // for a job deserves the same alias hit an operator gets. Without this the
+    // phone path echoed classifier free text back as "resolved" refs, so every
+    // spoken appointment/job reference and spoken time reached the proposal
+    // unresolved and the payload could never satisfy its execution contract.
+    ...(pool
+      ? {
+          entityResolver: entityAliasRepo
+            ? new AliasFirstEntityResolver(
+                entityAliasRepo,
+                new PgEntityResolver(pool),
+                pool,
+              )
+            : new PgEntityResolver(pool),
+        }
+      : {}),
     extendedIntentsEnabled: voiceExtendedIntentsFlagShim,
     systemActorId: 'system:inbound-call',
     businessName: process.env.TWILIO_BUSINESS_NAME ?? 'our team',

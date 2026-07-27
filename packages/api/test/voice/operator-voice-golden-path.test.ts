@@ -33,6 +33,7 @@ import type { LLMGateway, LLMResponse } from '../../src/ai/gateway/gateway';
 import type { IntentClassification } from '../../src/ai/orchestration/intent-classifier';
 import type { QueueMessage } from '../../src/queues/queue';
 import type { Logger } from '../../src/logging/logger';
+import { guardVoiceProposalContract } from './helpers/voice-proposal-contract';
 
 const TENANT = 't-launch-hvac';
 const USER = 'u-launch-tech';
@@ -107,7 +108,7 @@ describe('Operator voice golden path — HVAC tenant', () => {
   let verticalPromptResolver: (tenantId: string) => Promise<string | undefined>;
 
   beforeEach(async () => {
-    proposalRepo = new InMemoryProposalRepository();
+    proposalRepo = guardVoiceProposalContract(new InMemoryProposalRepository());
     verticalPromptResolver = await buildHvacResolver();
   });
 

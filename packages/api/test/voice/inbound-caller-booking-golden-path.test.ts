@@ -48,9 +48,11 @@ import {
 import { VoiceSessionStore } from '../../src/ai/agents/customer-calling/voice-session-store';
 import { InMemoryAuditRepository } from '../../src/audit/audit';
 import { InMemoryProposalRepository } from '../../src/proposals/proposal';
+import { validateProposalPayload } from '../../src/proposals/contracts';
 import { InMemoryVoiceSessionRepository } from '../../src/voice/voice-session';
 import { InMemoryPhoneNumberRepository } from '../../src/integrations/twilio/phone-number-repository';
 import type { LLMGateway, LLMResponse } from '../../src/ai/gateway/gateway';
+import { guardVoiceProposalContract } from './helpers/voice-proposal-contract';
 
 // The tradesperson's provisioned business number (what the AI answers
 // on), the customer's caller-ID, and the tenant that owns the number.
@@ -100,7 +102,7 @@ async function makeInboundCall(gateway: LLMGateway): Promise<InboundHarness> {
   const resolvedTenantId = lookup.tenantId;
 
   const store = new VoiceSessionStore({ startInterval: false });
-  const proposalRepo = new InMemoryProposalRepository();
+  const proposalRepo = guardVoiceProposalContract(new InMemoryProposalRepository());
   const auditRepo = new InMemoryAuditRepository();
   const voiceSessionRepo = new InMemoryVoiceSessionRepository();
 
@@ -182,12 +184,44 @@ describe('Inbound caller booking — golden path', () => {
     const booking = proposals[0]!;
 
     // Properties 1 + 2 — it's an appointment booking carrying the
-    // caller's what + when.
-    expect(booking.proposalType).toBe('create_appointment');
-    const entities = (booking.payload as { entities: Record<string, unknown> })
-      .entities;
-    expect(entities.dateTimeDescription).toBe('Tuesday at 2pm');
-    expect(entities.jobReference).toBe('furnace not heating');
+    // caller's what + when, IN THE SHAPE THE EXECUTION HANDLER READS.
+    //
+    // This suite used to assert the raw classifier strings survived into
+    // `payload.entities` ("dateTimeDescription: 'Tuesday at 2pm'"), which
+    // encoded the broken shape as correct: every execution handler reads FLAT
+    // keys (`payload.scheduledStart`, `payload.customerId`, …) and a nested
+    // envelope satisfies none of them, so the suite stayed green over a
+    // booking that could never be executed. What the caller said has to arrive
+    // as what the booking IS.
+    const payload = booking.payload as Record<string, unknown>;
+
+    // The contract itself is the assertion — the same gate `createProposal`
+    // now enforces at the voice emit site.
+    expect(
+      validateProposalPayload('create_appointment', payload),
+      `the persisted booking payload must satisfy its own contract: ${JSON.stringify(payload)}`,
+    ).toEqual({ valid: true });
+
+    // WHEN — the spoken phrase was RESOLVED to a concrete UTC window, not
+    // echoed. 2pm in the parser's UTC frame, on a future day.
+    const start = new Date(payload.scheduledStart as string);
+    const end = new Date(payload.scheduledEnd as string);
+    expect(Number.isNaN(start.getTime())).toBe(false);
+    expect(start.getTime()).toBeGreaterThan(Date.now());
+    expect(start.getUTCHours()).toBe(14);
+    expect(end.getTime()).toBeGreaterThan(start.getTime());
+
+    // WHO — the identified caller rides through as the customer the executor
+    // opens the job against (session identity, never transcript content).
+    expect(payload.customerId).toBe('cust-furnace');
+
+    // WHAT — the caller's own words are still promoted flat AND preserved
+    // verbatim under `entities` for the operator's review card / audit trail.
+    expect(payload.jobReference).toBe('furnace not heating');
+    expect(payload.dateTimeDescription).toBe('Tuesday at 2pm');
+    expect((payload.entities as Record<string, unknown>).jobReference).toBe(
+      'furnace not heating',
+    );
 
     // Property 1 — the booking is scoped to the tenant the dialed number
     // resolved to (never leaks to a default).

@@ -450,6 +450,28 @@ export async function resolveSchedulingEntities(
     }
   }
 
+  // A reschedule names its NEW time in `newDateTimeDescription` (the classifier
+  // keeps it distinct from `dateTimeDescription` — see intent-classifier.ts's
+  // ExtractedEntities), and `rescheduleAppointmentPayloadSchema` /
+  // `RescheduleAppointmentExecutionHandler` read `newScheduledStart` +
+  // `newScheduledEnd`. Without this the phrase reached the proposal as raw
+  // free text and every voice reschedule died at execution with 'Payload must
+  // include a valid newScheduledStart'. Deterministic and non-guessing: the
+  // SAME `parseNaturalDatetime` the booking window above uses; an unparseable
+  // phrase leaves the ISO fields absent so the proposal fails its contract
+  // rather than mis-booking (the operator-side RescheduleAppointmentTaskHandler
+  // takes the identical "leave them missing" stance).
+  const newDt = typeof entities.newDateTimeDescription === 'string'
+    ? entities.newDateTimeDescription
+    : undefined;
+  if (newDt && typeof entities.newScheduledStart !== 'string') {
+    const win = parseNaturalDatetime(newDt);
+    if (win) {
+      refs.newScheduledStart = win.scheduledStart;
+      refs.newScheduledEnd = win.scheduledEnd;
+    }
+  }
+
   const explicitCustomerId =
     typeof entities.customerId === 'string' && UUID_RE.test(entities.customerId)
       ? entities.customerId

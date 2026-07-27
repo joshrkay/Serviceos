@@ -153,6 +153,7 @@ import { buildRecoveryContext } from '../sms/recovery/scheduler';
 import type { SettingsRepository } from '../settings/settings';
 import type { UserRepository } from '../users/user';
 import { isApproverPhone } from '../proposals/approver-identity';
+import type { EntityResolver } from '../ai/resolution/entity-resolver';
 import type { ProposalSmsEventRepository } from '../proposals/sms/sms-event';
 import type { OneTapFallbackDeps } from '../ai/tasks/proposal-approval-task';
 import { TenantGlossaryProvider } from '../voice/tenant-glossary-provider';
@@ -192,6 +193,13 @@ export interface TwilioAdapterDeps {
    * unknown callers are deduped by normalized phone.
    */
   leadRepo?: LeadRepository;
+  /**
+   * P0 voice-safety — tenant-scoped entity resolver, spread straight into
+   * `createVoiceTurnProcessor` by the constructor below. Declared here (rather
+   * than relying on the untyped runtime spread from app.ts) so the Gather
+   * path's `resolveTurnEntities` call is type-checked against a real dep.
+   */
+  entityResolver?: EntityResolver;
   /** Used as actorId on proposal/audit rows when none is in scope. */
   systemActorId?: string;
   /** Business name used in recording disclosure copy. */
@@ -2282,23 +2290,23 @@ export class TwilioGatherAdapter {
       sideEffectsAll.push(...session.machine.dispatch(classifierEvent));
 
       // After intent_classified, the FSM is in 'entity_resolution' (unless
-      // emergency_dispatch fast-path took us to 'escalating'). For Gather
-      // mode we don't run a separate entity-resolver — auto-advance with
-      // entity_resolved using whatever entities the classifier extracted
-      // so the FSM proceeds to intent_confirm.
+      // emergency_dispatch fast-path took us to 'escalating'). Gather mode
+      // used to skip resolution entirely and auto-advance with a verbatim
+      // ECHO of the classifier entities — which resolved nothing (the FSM
+      // already holds those entities from `intent_classified`), so no spoken
+      // reference became an id and no spoken time became an ISO instant. Run
+      // the SAME real resolution the media-streams `speechTurn` runs, via the
+      // shared processor helper.
       if (
         classifierEvent.type === 'intent_classified' &&
         session.machine.currentState === 'entity_resolution'
       ) {
-        // Forward classifier-extracted string entities (customerName,
-        // jobReference, etc.) into the FSM context. Without this, the
-        // entities pulled from the caller's utterance would be lost
-        // before intent_confirm and any downstream proposal builder
-        // would see an empty extractedEntities map.
-        const refs: Record<string, string> = {};
-        for (const [k, v] of Object.entries(classifierEvent.entities)) {
-          if (typeof v === 'string') refs[k] = v;
-        }
+        const refs = await this.processor.resolveTurnEntities(
+          session,
+          opts.tenantId,
+          classifierEvent.intentType,
+          classifierEvent.entities as Record<string, unknown>,
+        );
         sideEffectsAll.push(
           ...session.machine.dispatch({ type: 'entity_resolved', refs }),
         );
