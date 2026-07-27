@@ -13,9 +13,21 @@ import {
 } from '../conversations/conversation-service';
 import {
   classifyIntent,
+  isLookupIntent,
   isVoiceApprovalIntent,
   isVoiceEditIntent,
 } from '../ai/orchestration/intent-classifier';
+// Lookup wiring (2026-07): `lookup_*` intents previously matched nothing in
+// either dispatch map below and fell through to the generic LLM — which has
+// no DB access and answered from nothing (production: ZERO `ai_runs` rows
+// with model='data-lookup' or a lookup task_type, ever). They now dispatch
+// through the SAME per-skill implementation the recorded-memo worker uses
+// (`workers/voice-lookup-answer.ts#executeLookupAnswer`); the module below
+// is a thin surface adapter, NOT a second copy of the switch.
+import {
+  dispatchAssistantLookup,
+  type AssistantLookupDeps,
+} from '../ai/orchestration/lookup-dispatch';
 import type { TaskHandler } from '../ai/tasks/task-handlers';
 // Money/edit/send handlers are no longer constructed inline here — both
 // dispatch maps resolve them from the shared handler-registry below.
@@ -274,6 +286,14 @@ export interface AssistantRouterDeps {
   conversationRepo?: ConversationRepository;
   /** Audit sink for the conversation.created event on first persist. */
   auditRepo?: AuditRepository;
+  /**
+   * Read-only `lookup_*` dispatch. ONE bundle rather than ten sibling repo
+   * fields; app.ts passes the SAME `answers`/`shared` objects it already
+   * builds for the recorded-memo worker, so the two surfaces cannot be
+   * wired with different repos. Optional — absent, lookups keep falling
+   * through exactly as they did before (tests that don't care omit it).
+   */
+  lookups?: AssistantLookupDeps;
 }
 
 type AssistantProposal = z.infer<typeof assistantProposalSchema>;
@@ -684,11 +704,65 @@ async function generateAssistantReply(
         };
       }
 
-      const classification = await classifyIntent(
-        lastUserText,
-        { tenantId, ...(verticalPromptSection ? { verticalPromptSection } : {}) },
-        deps.gateway,
-      );
+      // `extendedIntents` is set unconditionally on THIS surface. That flag's
+      // real job is (a) keeping the TELEPHONY classifier's prompt messages
+      // byte-identical so voice-quality cassette hashes / gateway cache keys
+      // don't move, and (b) keeping an ANONYMOUS phone caller away from
+      // owner-grade reports. Neither concern exists for an authenticated
+      // operator on their own dashboard — and leaving it off would mean
+      // lookup_day_overview / lookup_digest / lookup_pending_items are never
+      // even EMITTED by the classifier, so "what does my day look like?"
+      // could never be answered here. Authorization is not weakened by this:
+      // owner-grade lookups are gated downstream on the operator's
+      // DB-authoritative RBAC role (`reports:view`), which fails closed.
+      const classifyContext = {
+        tenantId,
+        extendedIntents: true,
+        ...(verticalPromptSection ? { verticalPromptSection } : {}),
+      };
+
+      const classification = await classifyIntent(lastUserText, classifyContext, deps.gateway);
+
+      // ── Lookup path ────────────────────────────────────────────────
+      // Runs BEFORE the chain split and both dispatch maps: a lookup is a
+      // read-only question with one answer, and the chain splitter would
+      // shred "what's my day look like, then what am I owed" into segments
+      // that match no chain handler and get dropped silently.
+      //
+      // `dispatchAssistantLookup` NEVER throws and returns null only when
+      // the intent genuinely has no wired skill here. Everything else —
+      // found, empty, refused, FAILED — comes back as a reply we return
+      // immediately, so a lookup can never be swallowed by this block's
+      // outer `catch { }` and re-answered by the DB-less generic LLM.
+      if (deps.lookups && isLookupIntent(classification.intentType)) {
+        const lookupReply = await dispatchAssistantLookup(
+          {
+            tenantId,
+            userId,
+            intent: classification.intentType,
+            ...(classification.extractedEntities
+              ? { extractedEntities: classification.extractedEntities as Record<string, unknown> }
+              : {}),
+          },
+          deps.lookups,
+        );
+        if (lookupReply) {
+          if (lookupReply.degraded) {
+            logger.error('assistant/chat: lookup failed', {
+              correlationId,
+              tenantId,
+              intent: classification.intentType,
+              reason: lookupReply.message.reasoning,
+            });
+          }
+          return lookupReply;
+        }
+        logger.info('assistant/chat: lookup intent has no wired skill on this surface', {
+          correlationId,
+          tenantId,
+          intent: classification.intentType,
+        });
+      }
 
       // UB-B3 — voice-mode approval guard. approve/reject/edit_proposal are
       // NOT routed in this chat handler; before this guard they fell through
@@ -745,11 +819,9 @@ async function generateAssistantReply(
         for (const segment of chainSegments) {
           let segClass;
           try {
-            segClass = await classifyIntent(
-              segment,
-              { tenantId, ...(verticalPromptSection ? { verticalPromptSection } : {}) },
-              deps.gateway,
-            );
+            // Same context object as the top-level classification above so
+            // the two can't drift on which intents are even emittable.
+            segClass = await classifyIntent(segment, classifyContext, deps.gateway);
           } catch {
             continue;
           }

@@ -1236,9 +1236,11 @@ async function processSegment(
     const execution = await executeLookupAnswer(
       {
         tenantId,
-        recordingId,
+        // The memo's recording id is this surface's UUID correlation key
+        // (lookup_events.session_id). The chat surface passes its own.
+        sessionId: recordingId,
         intent: classification.intentType,
-        ...(memoCreatorId ? { memoCreatorId } : {}),
+        ...(memoCreatorId ? { actorId: memoCreatorId } : {}),
         ...(customerId ?? lookupAnnotation.resolved.customerId
           ? { customerId: customerId ?? lookupAnnotation.resolved.customerId }
           : {}),
