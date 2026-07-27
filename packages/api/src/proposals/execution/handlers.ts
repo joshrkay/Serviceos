@@ -1209,7 +1209,16 @@ export function createExecutionHandlerRegistry(deps?: {
       : undefined;
 
   const handlers: ExecutionHandler[] = [
-    new CreateCustomerVoiceExecutionHandler(deps?.customerRepo, deps?.auditRepo, deps?.locationRepo),
+    // `noteRepo` is the never-lose-it net: a spoken address that can't satisfy
+    // service_locations' NOT NULL columns is preserved as a pinned customer
+    // note instead of being discarded. Absent → the handler falls back to
+    // `customers.communication_notes`, which it writes atomically anyway.
+    new CreateCustomerVoiceExecutionHandler(
+      deps?.customerRepo,
+      deps?.auditRepo,
+      deps?.locationRepo,
+      deps?.noteRepo,
+    ),
     new UpdateCustomerExecutionHandler(deps?.customerRepo, requiredAuditRepo, deps?.consentEventRepo),
     new CreateJobExecutionHandler(deps?.jobRepo, deps?.locationRepo, deps?.auditRepo),
     new CreateAppointmentExecutionHandler(

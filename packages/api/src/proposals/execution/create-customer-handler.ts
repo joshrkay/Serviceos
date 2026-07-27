@@ -19,6 +19,12 @@
  */
 
 import { v4 as uuidv4 } from 'uuid';
+import {
+  formatStructuredAddress,
+  parseCompleteSpokenAddress,
+  resolveSpokenAddress,
+  type RequiredLocationField,
+} from '@ai-service-os/shared';
 import { Proposal, ProposalType } from '../proposal';
 import { ExecutionHandler, ExecutionContext, ExecutionResult } from './handlers';
 import {
@@ -28,6 +34,7 @@ import {
 } from '../../customers/customer';
 import { AuditRepository, createAuditEvent } from '../../audit/audit';
 import { LocationRepository, createLocation } from '../../locations/location';
+import { NoteRepository, createNote } from '../../notes/note';
 
 /**
  * Parse the free-text address the caller spoke into the structured shape
@@ -36,38 +43,43 @@ import { LocationRepository, createLocation } from '../../locations/location';
  * the same completeness gate `add_service_location` and lead conversion
  * already enforce (`refineCompleteAddress` in leads/enums.ts).
  *
- * We deliberately do NOT fabricate placeholders for missing parts the way
- * the web new-customer form does (`city: 'Unknown', state: 'NA',
- * postalCode: '00000'` in CustomersPage.tsx). Writing invented values into
- * the CRM is worse than leaving the verbatim address on the proposal
- * payload for a human to complete.
- *
- * Handles the shapes speech-to-text actually produces:
- *   "412 Oak Street, Scottsdale, AZ 85254"
- *   "412 Oak Street, Scottsdale, AZ, 85254"
+ * The rules themselves now live in `@ai-service-os/shared`
+ * (contracts/spoken-address.ts) so the API, the assistant route and the web
+ * review card cannot disagree about what "complete" means. This re-export
+ * is kept because it is the name the existing tests and callers use.
  */
-export function parseSpokenAddress(text: string):
-  | { street1: string; city: string; state: string; postalCode: string }
-  | undefined {
-  const parts = text
-    .split(',')
-    .map((p) => p.trim())
-    .filter((p) => p.length > 0);
-  if (parts.length < 3) return undefined;
+export const parseSpokenAddress = parseCompleteSpokenAddress;
 
-  const street1 = parts[0];
-  const city = parts[1];
+/** Human-readable name for a still-empty required column, for the note copy. */
+const MISSING_FIELD_WORD: Record<RequiredLocationField, string> = {
+  street1: 'street',
+  city: 'city',
+  state: 'state',
+  postalCode: 'ZIP',
+};
 
-  // Remaining parts hold state and postal code, either together
-  // ("AZ 85254") or split across two comma-separated fields.
-  const tail = parts.slice(2).join(' ').trim();
-  const match = /^([A-Za-z][A-Za-z .]*?)\s+(\d{5}(?:-\d{4})?)$/.exec(tail);
-  if (!match) return undefined;
+/**
+ * The one line that must appear somewhere durable whenever a spoken address
+ * could NOT become a `service_location`. Deliberately quotes the technician's
+ * words verbatim and names what is still owed, so a human reading the customer
+ * record later can finish the job without replaying the call.
+ */
+export function unstructuredAddressNote(
+  verbatim: string,
+  missing: readonly RequiredLocationField[],
+): string {
+  const needs = missing.map((f) => MISSING_FIELD_WORD[f]).join(', ');
+  return (
+    `Address from voice: "${verbatim}". ` +
+    `Saved as a note, not a service location` +
+    (needs ? ` — still needs ${needs}.` : '.')
+  );
+}
 
-  const state = match[1].trim();
-  const postalCode = match[2].trim();
-  if (!street1 || !city || !state || !postalCode) return undefined;
-  return { street1, city, state, postalCode };
+/** Join the operator's own notes with the address line, never clobbering either. */
+function joinNotes(...parts: Array<string | undefined>): string | undefined {
+  const kept = parts.map((p) => p?.trim()).filter((p): p is string => Boolean(p));
+  return kept.length > 0 ? kept.join('\n\n') : undefined;
 }
 
 /**
@@ -105,11 +117,16 @@ export class CreateCustomerVoiceExecutionHandler implements ExecutionHandler {
   constructor(
     private readonly customerRepo?: CustomerRepository,
     private readonly auditRepo?: AuditRepository,
-    // Optional: when wired, a COMPLETE spoken address on the payload is
-    // promoted to a primary service_location linked to the new customer.
-    // `customers` has no address column — a linked location is the only
-    // place an address can live.
+    // Optional: when wired, a COMPLETE address on the payload (spoken, or
+    // completed by the approver on the review card) is promoted to a primary
+    // service_location linked to the new customer. `customers` has no address
+    // column — a linked location is the only STRUCTURED place an address can
+    // live.
     private readonly locationRepo?: LocationRepository,
+    // Optional: the never-lose-it net. An address that can't become a
+    // service_location is written here as a pinned customer note. See
+    // `preserveAddress` below for why this is the chosen destination.
+    private readonly noteRepo?: NoteRepository,
   ) {}
 
   // WS3 — degrades to a synthetic-id passthrough (saves nothing) without the
@@ -147,6 +164,36 @@ export class CreateCustomerVoiceExecutionHandler implements ExecutionHandler {
       ? 'email'
       : 'none';
 
+    // ── Address routing, decided BEFORE the customer INSERT ───────────────
+    //
+    // The bug this exists for: an address rendered on the approval card, the
+    // approver said yes, and it vanished — `service_locations` requires
+    // street1/city/state/postal_code NOT NULL, spoken addresses on a job site
+    // are usually street-only, so the handler correctly declined to invent
+    // data and created nothing. Nothing else on `customers` held an address,
+    // so the words were gone with no trace.
+    //
+    // `resolveSpokenAddress` (shared with the review card, so "complete" means
+    // the same thing on both sides) merges the approver's structured fields
+    // over anything parseable from the verbatim text and reports one of:
+    //   'none'     → nothing to do
+    //   'location' → all four NOT NULL columns satisfied
+    //   'note'     → an address exists but is incomplete
+    //
+    // The decision is made HERE, before `createCustomer`, so the fallback can
+    // ride along in the customer's own INSERT. That is what makes it a real
+    // guarantee rather than a best-effort follow-up write: there is no window
+    // in which the customer exists and the address does not.
+    const addressPlan = resolveSpokenAddress(payload);
+    const willWriteLocation = addressPlan.kind === 'location' && Boolean(this.locationRepo);
+    const addressToPreserve =
+      addressPlan.kind === 'none' || willWriteLocation
+        ? undefined
+        : addressPlan.verbatim || formatStructuredAddress(addressPlan.prefill) || undefined;
+    const preservedLine = addressToPreserve
+      ? unstructuredAddressNote(addressToPreserve, addressPlan.missing)
+      : undefined;
+
     let createdCustomerId: string;
     try {
       const customer = await createCustomer(
@@ -159,7 +206,15 @@ export class CreateCustomerVoiceExecutionHandler implements ExecutionHandler {
           ...(email ? { email } : {}),
           preferredChannel,
           smsConsent,
-          ...(notes ? { communicationNotes: notes } : {}),
+          // The never-lose-it guarantee, part 1: when the address can't become
+          // a service_location it is written into the customer row itself, in
+          // the same INSERT. `communication_notes` is the ONLY free-text column
+          // `customers` has (db/schema.ts migration 013) and it is already
+          // rendered on CustomerDetail, so the words are on screen next to the
+          // customer rather than buried in an audit table.
+          ...(joinNotes(notes, preservedLine)
+            ? { communicationNotes: joinNotes(notes, preservedLine)! }
+            : {}),
           createdBy: context.executedBy,
           actorRole: 'voice_agent',
         },
@@ -172,35 +227,60 @@ export class CreateCustomerVoiceExecutionHandler implements ExecutionHandler {
       return { success: false, error: `Failed to create customer: ${msg}` };
     }
 
-    // The spoken address. `customers` has no address column, so the only
-    // destination is a linked service_location row — created here as the
-    // customer's primary location when the free text parses into all four
-    // NOT NULL fields. Best-effort by design (same posture as the audit
-    // join-row below): an incomplete address, or a location-write failure,
-    // must never unwind a customer the approver already said yes to. The
-    // verbatim text stays on `proposal.payload.address` either way, so
-    // nothing is silently lost.
-    const address = typeof payload.address === 'string' ? payload.address.trim() : '';
-    if (address.length > 0 && this.locationRepo) {
-      const parsed = parseSpokenAddress(address);
-      if (parsed) {
-        try {
-          await createLocation(
-            {
-              tenantId: context.tenantId,
-              customerId: createdCustomerId,
-              ...parsed,
-              isPrimary: true,
-            },
-            this.locationRepo,
-            this.auditRepo,
-            context.executedBy,
-            'voice_agent',
-          );
-        } catch {
-          // Swallowed on purpose — see comment above.
-        }
+    // A complete address becomes the customer's PRIMARY service_location.
+    // Best-effort by design (same posture as the audit join-row below): a
+    // location-write failure must never unwind a customer the approver
+    // already said yes to — but it must not lose the address either, so the
+    // catch falls through to the same preservation path an incomplete
+    // address takes.
+    let locationWritten = false;
+    if (willWriteLocation) {
+      try {
+        await createLocation(
+          {
+            tenantId: context.tenantId,
+            customerId: createdCustomerId,
+            ...addressPlan.location!,
+            isPrimary: true,
+          },
+          this.locationRepo!,
+          this.auditRepo,
+          context.executedBy,
+          'voice_agent',
+        );
+        locationWritten = true;
+      } catch {
+        // Swallowed on purpose — see comment above. Preserved below instead.
       }
+    }
+
+    // The never-lose-it guarantee, part 2: the VISIBLE surface.
+    //
+    // Why a `notes` row and not something else. `customers` has no address
+    // column, and the only other candidates were: the audit trail (durable but
+    // an investigator's tool, not something an owner opening a customer would
+    // ever see) and `communication_notes` alone (a single unattributed,
+    // undated blob that the next edit of that field silently overwrites). A
+    // `notes` row (db/schema.ts migration 037, entity_type 'customer') is
+    // tenant-scoped under RLS, carries an author + timestamp, renders in the
+    // customer's notes UI, and is already aggregated into the unified customer
+    // timeline as a first-class `note` event (customers/timeline.ts). Pinned,
+    // so it sorts to the top of the notes list where the gap is obvious.
+    //
+    // Belt AND braces on purpose: part 1 (communication_notes, written
+    // atomically with the customer) is the guarantee that survives a missing
+    // or failing note repo; this row is the surface a human actually reads.
+    const needsPreservation =
+      (addressToPreserve !== undefined && !locationWritten) ||
+      // The location write failed after we'd decided not to preserve. The
+      // address exists and is now nowhere — preserve it after the fact.
+      (willWriteLocation && !locationWritten);
+    if (needsPreservation) {
+      const text =
+        addressToPreserve ??
+        addressPlan.verbatim ??
+        formatStructuredAddress(addressPlan.prefill);
+      await this.preserveAddress(createdCustomerId, text, addressPlan.missing, proposal, context);
     }
 
     // Voice session correlation: AC-4 requires the audit event tying
@@ -235,6 +315,95 @@ export class CreateCustomerVoiceExecutionHandler implements ExecutionHandler {
     }
 
     return { success: true, resultEntityId: createdCustomerId };
+  }
+
+  /**
+   * Write the address somewhere a human will find it, and leave a queryable
+   * audit marker that it happened. Three layers, each covering the previous
+   * one's failure mode:
+   *
+   *   1. a PINNED `notes` row on the customer — the surface an owner reads;
+   *   2. `communication_notes` on the customer row — the backstop when no
+   *      NoteRepository is wired or the note write throws. (On the ordinary
+   *      incomplete-address path this was already written atomically with the
+   *      customer; this re-write matters for the location-write-failed path,
+   *      where part 1 was skipped because we expected the location to land.)
+   *   3. a `customer.address_unstructured` audit event — so "how often does
+   *      this happen, and to whom" is one query, not a table scan of notes.
+   *
+   * Every layer is individually failure-soft: the approver already said yes to
+   * this customer and nothing here may unwind it.
+   */
+  private async preserveAddress(
+    customerId: string,
+    verbatim: string,
+    missing: readonly RequiredLocationField[],
+    proposal: Proposal,
+    context: ExecutionContext,
+  ): Promise<void> {
+    const content = unstructuredAddressNote(verbatim, missing);
+
+    let noteWritten = false;
+    if (this.noteRepo) {
+      try {
+        await createNote(
+          {
+            tenantId: context.tenantId,
+            entityType: 'customer',
+            entityId: customerId,
+            content,
+            authorId: context.executedBy,
+            authorRole: 'voice_agent',
+            isPinned: true,
+          },
+          this.noteRepo,
+          this.auditRepo,
+        );
+        noteWritten = true;
+      } catch {
+        // Fall through to the customer-row backstop below.
+      }
+    }
+
+    if (!noteWritten && this.customerRepo) {
+      try {
+        const existing = await this.customerRepo.findById(context.tenantId, customerId);
+        const merged = joinNotes(existing?.communicationNotes, content);
+        if (merged && merged !== existing?.communicationNotes) {
+          await this.customerRepo.update(context.tenantId, customerId, {
+            communicationNotes: merged,
+            updatedAt: new Date(),
+          });
+        }
+      } catch {
+        // Nothing further to try — the audit marker below is the last trace.
+      }
+    }
+
+    if (this.auditRepo) {
+      try {
+        await this.auditRepo.create(
+          createAuditEvent({
+            tenantId: context.tenantId,
+            actorId: context.executedBy,
+            actorRole: 'voice_agent',
+            eventType: 'customer.address_unstructured',
+            entityType: 'customer',
+            entityId: customerId,
+            metadata: {
+              proposalId: proposal.id,
+              proposalType: 'create_customer',
+              source: 'voice',
+              address: verbatim,
+              missingFields: [...missing],
+              preservedAs: noteWritten ? 'note' : 'communication_notes',
+            },
+          }),
+        );
+      } catch {
+        // Audit is the observability layer, not the guarantee.
+      }
+    }
   }
 }
 

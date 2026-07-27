@@ -113,11 +113,44 @@ const confidenceMetaEnvelopeSchema = z
   .object({ _meta: proposalConfidenceMetaSchema.optional() })
   .passthrough();
 
+/**
+ * `create_customer`.
+ *
+ * `address` is the technician's VERBATIM spoken words ("1207 Riverbell
+ * Drive") and stays free text — it is evidence of what was said, never a
+ * structured record.
+ *
+ * The structured fields below are what an APPROVER supplies on the review
+ * card before approving, and they mirror the free-text address columns of
+ * `service_locations` exactly (db/schema.ts migration 015): `street1`,
+ * `city`, `state`, `postal_code` are NOT NULL; `street2` is nullable;
+ * `country` is NOT NULL DEFAULT 'US'. Geo (`latitude`/`longitude`), `label`,
+ * `access_notes` and `address_type` are intentionally absent — nothing in a
+ * spoken utterance or a review card supplies them, and the table defaults
+ * cover `address_type`/`country`.
+ *
+ * Every one is INDIVIDUALLY optional, on purpose. The lead schemas gate the
+ * same four columns with an all-or-nothing refine
+ * (`refineCompleteAddress`, leads/enums.ts); doing that here would make a
+ * half-completed review card unapprovable, and a blocked approve button on a
+ * job site is worse than an incomplete record. Completeness is enforced where
+ * the write happens instead — `resolveSpokenAddress` in the execution handler
+ * either has all four (→ a `service_location` row) or preserves the address
+ * verbatim on the customer (→ a durable note). Strictly widening: every
+ * payload that validated before this change still validates.
+ */
 export const createCustomerPayloadSchema = z.object({
   name: z.string().min(1),
   email: z.string().email().optional(),
   phone: z.string().optional(),
+  /** Verbatim spoken address. Never parsed destructively; never discarded. */
   address: z.string().optional(),
+  street1: z.string().min(1).optional(),
+  street2: z.string().min(1).optional(),
+  city: z.string().min(1).optional(),
+  state: z.string().min(1).optional(),
+  postalCode: z.string().min(1).optional(),
+  country: z.string().min(1).optional(),
   notes: z.string().optional(),
 });
 
