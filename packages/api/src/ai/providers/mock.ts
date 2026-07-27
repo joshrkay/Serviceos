@@ -87,8 +87,12 @@ function extractName(text: string): string | undefined {
     /\b(?:named|name\s+is)\s+([A-Z][A-Za-z0-9&.'-]+(?:\s+[A-Z][A-Za-z0-9&.'-]+){0,3})/,
   );
   if (named?.[1]) return named[1].trim();
+  // `,?` covers the common spoken form "Add a new customer, Mario Delingo,
+  // 412 Oak Street" — without it the comma blocks the match and the mock
+  // falls back to the literal 'New Customer', which would make any corpus
+  // script using that phrasing grade a placeholder instead of the real name.
   const forCustomer = text.match(
-    /\b(?:customer|for)\s+([A-Z][A-Za-z0-9&.'-]+(?:\s+[A-Z][A-Za-z0-9&.'-]+){0,3})/,
+    /\b(?:customer|for)\s*,?\s+([A-Z][A-Za-z0-9&.'-]+(?:\s+[A-Z][A-Za-z0-9&.'-]+){0,3})/,
   );
   if (forCustomer?.[1]) return forCustomer[1].trim();
   const quoted = text.match(/["']([^"']{2,80})["']/);
@@ -101,6 +105,32 @@ function extractEmail(text: string): string | undefined {
 
 function extractPhone(text: string): string | undefined {
   return text.match(/\+?\d[\d\s().-]{7,}\d/)?.[0]?.replace(/\s+/g, ' ').trim();
+}
+
+/**
+ * Street address stated on a create_customer utterance ("..., 412 Oak
+ * Street, Scottsdale, 85254", "He's at 34 Quarry Street"). Matches a house
+ * number followed by a street name and a street-type word, then greedily
+ * takes any trailing ", city[, state][, zip]" run.
+ *
+ * This exists because the voice-quality corpus replays THIS mock, not a real
+ * model — a create_customer field the mock cannot produce is a field the
+ * corpus can never grade, so it would sail through the launch gate exactly
+ * as the dropped address did.
+ */
+const STREET_TYPES =
+  'street|st|avenue|ave|road|rd|drive|dr|lane|ln|boulevard|blvd|way|court|ct|circle|cir|place|pl|terrace|ter|parkway|pkwy|highway|hwy';
+
+function extractAddress(text: string): string | undefined {
+  const re = new RegExp(
+    // house number + street words + street type, then optional ", ..." tail
+    `\\b(\\d+\\s+(?:[A-Za-z0-9.'-]+\\s+){0,4}?(?:${STREET_TYPES})\\b(?:\\s*,\\s*[A-Za-z0-9.'-]+(?:\\s+[A-Za-z0-9.'-]+){0,3}){0,3})`,
+    'i',
+  );
+  const match = text.match(re);
+  if (!match?.[1]) return undefined;
+  // Trim a trailing sentence period and any stray separator.
+  return match[1].replace(/[\s,.]+$/, '').trim();
 }
 
 /**
@@ -139,6 +169,7 @@ export function scriptHermeticResponse(request: LLMRequest): string {
           displayName: extractName(text) ?? 'New Customer',
           ...(extractEmail(text) ? { email: extractEmail(text) } : {}),
           ...(extractPhone(text) ? { phone: extractPhone(text) } : {}),
+          ...(extractAddress(text) ? { address: extractAddress(text) } : {}),
         },
       });
     }

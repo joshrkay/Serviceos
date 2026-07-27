@@ -609,6 +609,15 @@ async function createDeduped(
  * create_customer proposal contract expects `name`, so we translate
  * here — at the router boundary — so the task handler stays a dumb
  * passthrough and every downstream payload matches the Zod schema.
+ *
+ * WARNING — this is an ALLOWLIST, not a passthrough. For create_customer
+ * it rebuilds the entity bag from scratch, so ANY classifier entity not
+ * named below is dropped here, silently, before the task handler ever
+ * sees it. That is how the spoken street address went missing on the
+ * voice-worker path even after the classifier and the task handler were
+ * both fixed to carry it: the classifier emitted `address`, this function
+ * threw it away, and `readEntities` found nothing to read. Add the field
+ * here whenever you add one to the create_customer flow.
  */
 export function entitiesForProposal(
   intent: Exclude<IntentType, 'unknown'>,
@@ -621,6 +630,11 @@ export function entitiesForProposal(
   if (entities.displayName) payload.name = entities.displayName;
   if (entities.email) payload.email = entities.email;
   if (entities.phone) payload.phone = entities.phone;
+  // `serviceAddress` is accepted too: on a create_customer turn the model
+  // sometimes puts the new customer's address on the add_service_location
+  // key. Same meaning here, and dropping it is the bug.
+  const address = entities.address ?? entities.serviceAddress;
+  if (address) payload.address = address;
   return payload;
 }
 
