@@ -371,3 +371,140 @@ describe('charge.dispute.created — chargeback', () => {
     expect(res.status).toBe(500);
   });
 });
+
+// U5 — the ACH payer's RECEIPT on settlement.
+//
+// Regression: the `existing.status === 'processing'` settle branch returned
+// without ever reaching deps.paymentReceiptNotifier, while the recordPayment
+// branch directly below it passed the notifier through. Net effect in
+// production: ACH payers' invoices went to 'paid' in silence; card payers got
+// a receipt. These tests pin the settle path to the SAME receipt the card path
+// sends, and pin the redelivery guard.
+function piProcessing(opts: { piId: string; amount: number; eventId?: string }) {
+  return {
+    id: opts.eventId ?? `evt_${uuidv4()}`,
+    type: 'payment_intent.processing',
+    data: {
+      object: {
+        id: opts.piId,
+        amount: opts.amount,
+        amount_received: 0,
+        metadata: { tenant_id: TENANT, invoice_id: INVOICE_ID },
+        charges: { data: [{ payment_method_details: { type: 'us_bank_account' } }] },
+      },
+    },
+  };
+}
+
+describe('payment_intent.succeeded — ACH settlement sends the customer receipt', () => {
+  let invoiceRepo: InMemoryInvoiceRepository;
+  let paymentRepo: InMemoryPaymentRepository;
+  let auditRepo: InMemoryAuditRepository;
+  let app: express.Express;
+  let receipts: Array<{
+    tenantId: string;
+    invoiceId: string;
+    amountCents: number;
+    paymentId: string;
+  }>;
+
+  beforeEach(async () => {
+    invoiceRepo = new InMemoryInvoiceRepository();
+    paymentRepo = new InMemoryPaymentRepository();
+    auditRepo = new InMemoryAuditRepository();
+    receipts = [];
+    await invoiceRepo.create(makeOpenInvoice());
+    app = buildApp({
+      invoiceRepo,
+      paymentRepo,
+      auditRepo,
+      stripeWebhookSecret: STRIPE_SECRET,
+      paymentReceiptNotifier: {
+        async notifyPaymentReceived(tenantId, invoiceId, amountCents, paymentId) {
+          receipts.push({ tenantId, invoiceId, amountCents, paymentId });
+        },
+      },
+    });
+  });
+
+  it('notifies the receipt notifier when a processing ACH payment settles', async () => {
+    // Bank debit initiated — records the IN-FLIGHT row, deliberately no comms.
+    const initiated = await postSigned(app, piProcessing({ piId: 'pi_ach_r1', amount: 10000 }));
+    expect(initiated.status).toBe(200);
+    expect(receipts).toHaveLength(0);
+
+    const inFlight = await paymentRepo.findByInvoice(TENANT, INVOICE_ID);
+    expect(inFlight).toHaveLength(1);
+    expect(inFlight[0].status).toBe('processing');
+
+    // Funds clear — settle flips 'processing' -> 'completed' AND sends the
+    // receipt the card path sends.
+    const settled = await postSigned(app, piSucceeded({ piId: 'pi_ach_r1', amount: 10000 }));
+    expect(settled.status).toBe(200);
+    expect(settled.body.settled).toBe(true);
+
+    const rows = await paymentRepo.findByInvoice(TENANT, INVOICE_ID);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].status).toBe('completed');
+
+    // Same shape the card path passes: tenant, invoice, the SETTLED ROW's
+    // amount, and payment.id as the per-occurrence claim token.
+    expect(receipts).toEqual([
+      {
+        tenantId: TENANT,
+        invoiceId: INVOICE_ID,
+        amountCents: 10000,
+        paymentId: rows[0].id,
+      },
+    ]);
+  });
+
+  it('does not send a second receipt when Stripe redelivers payment_intent.succeeded', async () => {
+    await postSigned(app, piProcessing({ piId: 'pi_ach_r2', amount: 10000 }));
+    const first = await postSigned(app, piSucceeded({ piId: 'pi_ach_r2', amount: 10000 }));
+    expect(first.body.settled).toBe(true);
+    expect(receipts).toHaveLength(1);
+
+    // Redelivered under a DISTINCT event id, so the webhook-event-id dedup
+    // cannot be what saves us — the payment-state guard must.
+    const redelivered = await postSigned(app, piSucceeded({ piId: 'pi_ach_r2', amount: 10000 }));
+    expect(redelivered.status).toBe(200);
+    expect(redelivered.body.duplicate).toBe(true);
+    expect(receipts).toHaveLength(1);
+  });
+
+  it('a receipt-send failure does not fail the webhook (Stripe must not retry a settled payment)', async () => {
+    const throwingApp = buildApp({
+      invoiceRepo,
+      paymentRepo,
+      auditRepo,
+      stripeWebhookSecret: STRIPE_SECRET,
+      paymentReceiptNotifier: {
+        async notifyPaymentReceived() {
+          throw new Error('comms provider down');
+        },
+      },
+    });
+
+    await postSigned(throwingApp, piProcessing({ piId: 'pi_ach_r3', amount: 10000 }));
+    const res = await postSigned(throwingApp, piSucceeded({ piId: 'pi_ach_r3', amount: 10000 }));
+
+    expect(res.status).toBe(200);
+    expect(res.body.settled).toBe(true);
+
+    // The settlement still stands — the money is not held hostage by comms.
+    const rows = await paymentRepo.findByInvoice(TENANT, INVOICE_ID);
+    expect(rows[0].status).toBe('completed');
+  });
+
+  it('sends no receipt at payment_intent.processing — only once the money clears', async () => {
+    const res = await postSigned(app, piProcessing({ piId: 'pi_ach_r4', amount: 10000 }));
+    expect(res.status).toBe(200);
+
+    const rows = await paymentRepo.findByInvoice(TENANT, INVOICE_ID);
+    expect(rows[0].status).toBe('processing');
+    // The invoice is credited in-flight, but the customer is told nothing yet.
+    expect((await invoiceRepo.findById(TENANT, INVOICE_ID))?.status).toBe('paid');
+    expect(receipts).toHaveLength(0);
+  });
+});
