@@ -256,10 +256,16 @@ export class PgEntityResolver implements EntityResolver {
   ): Promise<EntityResolverResult> {
     const parsed = parseDateReference(reference);
     if (!parsed) {
-      if (!jobId) {
-        return { kind: 'not_found', reference };
+      // A job anchor is the tighter scope, so it wins when we have one.
+      if (jobId) {
+        return this.resolveAppointmentByJob(tenantId, reference, jobId);
       }
-      return this.resolveAppointmentByJob(tenantId, reference, jobId);
+      // SCH-03 — no date phrase AND no job anchor. Before this fallback the
+      // resolver gave up here, which made every FIRST-TURN "cancel the
+      // upcoming appointment" escalate to on-call (inapp-adapter.ts's
+      // requiresExistingEntity guard) even for a tenant with exactly one
+      // upcoming appointment and nothing to be ambiguous about.
+      return this.resolveUpcomingAppointment(tenantId, reference);
     }
 
     // Schema column is `scheduled_start`; appointments have no title — label is
@@ -338,6 +344,81 @@ export class PgEntityResolver implements EntityResolver {
     );
 
     if (rows.length === 0) {
+      return { kind: 'not_found', reference };
+    }
+
+    const candidates: EntityCandidate[] = rows.map((row) => ({
+      id: row.id,
+      kind: 'appointment' as EntityKind,
+      label: new Date(row.scheduled_start).toISOString(),
+      hint: row.status ?? undefined,
+      score: 1.0,
+    }));
+
+    if (candidates.length === 1) {
+      return { kind: 'resolved', candidate: candidates[0] };
+    }
+    return { kind: 'ambiguous', candidates };
+  }
+
+  /**
+   * SCH-03 — tenant-scoped upcoming-appointment fallback. Reached only when
+   * the reference is neither a date phrase NOR anchored to a job, i.e. the
+   * caller said something like "cancel the upcoming appointment for that job"
+   * on turn one of a fresh session, where `context.jobId` cannot exist yet
+   * (it is only written by a PRIOR turn that resolved a job —
+   * transitions.ts). Structurally, `cancel_appointment` is in neither
+   * JOB_REF_INTENTS nor SCHEDULING_CREATE_INTENTS, so the cancel turn itself
+   * never plans a job lookup and the sticky-jobId path is unreachable for a
+   * single-turn cancel — this is the only branch that can answer it.
+   *
+   * Deliberately the SAME query shape as `resolveAppointmentByJob` above,
+   * minus the `job_id` predicate: upcoming, non-canceled, earliest first. It
+   * is index-supported the same way — migration 051's
+   * `idx_appointments_scheduled_for ON appointments (tenant_id,
+   * scheduled_start)` (db/schema.ts) covers this predicate AND its ordering
+   * exactly, so this is a range scan, not a fuzzy guess.
+   *
+   * The "never a silent guess" invariant is preserved end to end:
+   *   - exactly one row  → `resolved` (and the FSM still reads the intent
+   *     back in `intent_confirm` before drafting, and the proposal still
+   *     needs an operator screen-tap — two human gates downstream);
+   *   - two to five rows → `ambiguous`, which `toResolutionEvent`
+   *     (inapp-adapter.ts) turns into the FSM's existing `entity_ambiguous`
+   *     one-tap disambiguation — no new path invented;
+   *   - zero rows        → `not_found`, so the escalation guard added in
+   *     46a954e1 still fires for a record-operating intent with genuinely
+   *     nothing to resolve;
+   *   - more than five   → also `not_found`. A busy tenant's true candidate
+   *     set is unbounded, and reading back an arbitrary five of forty would
+   *     be a guess wearing a disambiguation costume. Escalating is the
+   *     honest answer. (LIMIT 6 exists only to detect this.)
+   */
+  private async resolveUpcomingAppointment(
+    tenantId: string,
+    reference: string,
+  ): Promise<EntityResolverResult> {
+    const MAX_DISAMBIGUATION_CANDIDATES = 5;
+    const rows = await withTenantConnection(this.pool, tenantId, (client) =>
+      client
+        .query<{
+          id: string;
+          scheduled_start: string;
+          status: string | null;
+        }>(
+          `SELECT id, scheduled_start, status
+             FROM appointments
+            WHERE tenant_id = $1
+              AND status <> 'canceled'
+              AND scheduled_start >= now()
+            ORDER BY scheduled_start ASC
+            LIMIT ${MAX_DISAMBIGUATION_CANDIDATES + 1}`,
+          [tenantId],
+        )
+        .then((r) => r.rows),
+    );
+
+    if (rows.length === 0 || rows.length > MAX_DISAMBIGUATION_CANDIDATES) {
       return { kind: 'not_found', reference };
     }
 

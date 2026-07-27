@@ -633,8 +633,11 @@ describe('PgEntityResolver — appointment job-scoped fallback (SCH-03)', () => 
     }
   });
 
-  it('unparseable reference WITHOUT jobId returns not_found without querying the DB (no fallback)', async () => {
-    const { pool, calls } = makeMockPool([]);
+  it('unparseable reference WITHOUT jobId now falls through to the tenant-scoped lookup', async () => {
+    // Previously this asserted the resolver gave up WITHOUT touching the DB.
+    // That early return was the SCH-03 bug: it made a first-turn cancel
+    // escalate even when the tenant had exactly one upcoming appointment.
+    const { pool, calls } = makeMockPool([undefined, []]);
 
     const resolver = new PgEntityResolver(pool);
     const result = await resolver.resolve({
@@ -644,7 +647,9 @@ describe('PgEntityResolver — appointment job-scoped fallback (SCH-03)', () => 
     });
 
     expect(result.kind).toBe('not_found');
-    expect(calls.filter((c) => c.sql.includes('FROM appointments'))).toHaveLength(0);
+    const apptQueries = calls.filter((c) => c.sql.includes('FROM appointments'));
+    expect(apptQueries).toHaveLength(1);
+    expect(apptQueries[0].sql).not.toMatch(/job_id/);
   });
 
   it('a PARSEABLE reference still uses the date-range query even when jobId is present (date wins)', async () => {
@@ -670,6 +675,134 @@ describe('PgEntityResolver — appointment job-scoped fallback (SCH-03)', () => 
     }
     const businessQuery = calls.find((c) => c.sql.includes('FROM appointments'));
     expect(businessQuery!.sql).not.toMatch(/job_id/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// SCH-03 — tenant-scoped upcoming-appointment fallback (no date, no jobId)
+//
+// The caller's FIRST sentence is "Cancel the upcoming appointment for that
+// job." `context.jobId` is only ever written by a PRIOR turn that resolved a
+// job (transitions.ts), so on turn one there is no job anchor, and "the
+// upcoming appointment for that job" parses as no date. Before the fallback
+// the resolver returned not_found here and inapp-adapter.ts's
+// requiresExistingEntity guard escalated the caller to on-call.
+// ---------------------------------------------------------------------------
+
+describe('PgEntityResolver — tenant-scoped upcoming appointment fallback (SCH-03)', () => {
+  function upcoming(id: string, daysOut: number) {
+    const d = new Date();
+    d.setUTCDate(d.getUTCDate() + daysOut);
+    return { id, scheduled_start: d.toISOString(), status: 'scheduled' };
+  }
+
+  it('reference="that job", no jobId, ONE upcoming tenant appointment → resolved', async () => {
+    const { pool, calls } = makeMockPool([undefined, [upcoming('appt-only', 2)]]);
+    const resolver = new PgEntityResolver(pool);
+
+    const result = await resolver.resolve({
+      tenantId: TENANT_ID,
+      reference: 'that job',
+      kind: 'appointment',
+    });
+
+    expect(result.kind).toBe('resolved');
+    if (result.kind === 'resolved') {
+      expect(result.candidate.id).toBe('appt-only');
+      expect(result.candidate.kind).toBe('appointment');
+    }
+
+    // Same shape as resolveAppointmentByJob, minus job_id — and tenant-scoped.
+    const businessQuery = calls.find((c) => c.sql.includes('FROM appointments'));
+    expect(businessQuery).toBeDefined();
+    expect(businessQuery!.sql).toMatch(/tenant_id\s*=\s*\$1/);
+    expect(businessQuery!.sql).toMatch(/status\s*<>\s*'canceled'/);
+    expect(businessQuery!.sql).toMatch(/scheduled_start\s*>=\s*now\(\)/);
+    expect(businessQuery!.sql).toMatch(/ORDER BY scheduled_start ASC/);
+    expect(businessQuery!.sql).not.toMatch(/job_id/);
+    expect(businessQuery!.params).toEqual([TENANT_ID]);
+  });
+
+  it('reference="that job", no jobId, THREE upcoming tenant appointments → ambiguous', async () => {
+    const { pool } = makeMockPool([
+      undefined,
+      [upcoming('appt-1', 1), upcoming('appt-2', 2), upcoming('appt-3', 3)],
+    ]);
+    const resolver = new PgEntityResolver(pool);
+
+    const result = await resolver.resolve({
+      tenantId: TENANT_ID,
+      reference: 'that job',
+      kind: 'appointment',
+    });
+
+    // Routed into the FSM's existing entity_ambiguous one-tap disambiguation
+    // by inapp-adapter.ts toResolutionEvent — never a silent pick.
+    expect(result.kind).toBe('ambiguous');
+    if (result.kind === 'ambiguous') {
+      expect(result.candidates.map((c) => c.id)).toEqual(['appt-1', 'appt-2', 'appt-3']);
+    }
+  });
+
+  it('reference="that job", no jobId, NO upcoming tenant appointments → not_found', async () => {
+    const { pool } = makeMockPool([undefined, []]);
+    const resolver = new PgEntityResolver(pool);
+
+    const result = await resolver.resolve({
+      tenantId: TENANT_ID,
+      reference: 'that job',
+      kind: 'appointment',
+    });
+
+    // Still not_found — the 46a954e1 escalation guard must keep firing when a
+    // record-operating intent has genuinely nothing to resolve.
+    expect(result.kind).toBe('not_found');
+    if (result.kind === 'not_found') {
+      expect(result.reference).toBe('that job');
+    }
+  });
+
+  it('more candidates than the disambiguation cap → not_found, never a 5-of-many readback', async () => {
+    const { pool, calls } = makeMockPool([
+      undefined,
+      [
+        upcoming('appt-1', 1),
+        upcoming('appt-2', 2),
+        upcoming('appt-3', 3),
+        upcoming('appt-4', 4),
+        upcoming('appt-5', 5),
+        upcoming('appt-6', 6),
+      ],
+    ]);
+    const resolver = new PgEntityResolver(pool);
+
+    const result = await resolver.resolve({
+      tenantId: TENANT_ID,
+      reference: 'that job',
+      kind: 'appointment',
+    });
+
+    expect(result.kind).toBe('not_found');
+    // LIMIT 6 exists purely to detect "more than the 5 we can read back".
+    const businessQuery = calls.find((c) => c.sql.includes('FROM appointments'));
+    expect(businessQuery!.sql).toMatch(/LIMIT 6/);
+  });
+
+  it('a jobId anchor still wins over the tenant-wide fallback', async () => {
+    const { pool, calls } = makeMockPool([undefined, [upcoming('appt-job', 2)]]);
+    const resolver = new PgEntityResolver(pool);
+
+    const result = await resolver.resolve({
+      tenantId: TENANT_ID,
+      reference: 'that job',
+      kind: 'appointment',
+      jobId: 'job-99',
+    });
+
+    expect(result.kind).toBe('resolved');
+    const businessQuery = calls.find((c) => c.sql.includes('FROM appointments'));
+    expect(businessQuery!.sql).toMatch(/job_id\s*=\s*\$2/);
+    expect(businessQuery!.params).toEqual([TENANT_ID, 'job-99']);
   });
 });
 
