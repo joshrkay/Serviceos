@@ -13,7 +13,13 @@ import { bootstrapTenant, TenantRepository } from '../auth/clerk';
 import { LIFECYCLE_EMAIL_JOB_TYPE } from '../workers/lifecycle-email-worker';
 import { SettingsRepository } from '../settings/settings';
 import { InvoiceRepository } from '../invoices/invoice';
-import { PaymentRepository, recordPayment, PaymentReceiptNotifier, PaymentMethod } from '../invoices/payment';
+import {
+  PaymentRepository,
+  recordPayment,
+  notifyOwnerPaymentReceived,
+  PaymentReceiptNotifier,
+  PaymentMethod,
+} from '../invoices/payment';
 import {
   recordRefund,
   reversePayment,
@@ -1379,6 +1385,64 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
           logger.info('Settled in-flight ACH payment via payment_intent.succeeded', {
             tenantId, invoiceId, paymentIntentId: piId, settled: result.settled,
           });
+
+          // The ACH payer's receipt. The card / immediate-capture path below
+          // fires this inside recordPayment (applyPostPaymentSideEffects);
+          // settling bypasses recordPayment entirely, so without this an ACH
+          // invoice went to 'paid' in silence while card payers got a receipt.
+          // Sent HERE and not at payment_intent.processing because this is
+          // when the money actually cleared — recordProcessingPayment
+          // deliberately fires no customer comms.
+          //
+          // Amount comes from the SETTLED ROW, not the PaymentIntent: the
+          // in-flight credit was capped to the invoice balance at processing
+          // time, so the row is what the customer was actually charged
+          // against this invoice.
+          //
+          // Idempotent on four independent levels: the webhook-event-id dedup,
+          // the `existing.status === 'completed'` early return above (a
+          // redelivered succeeded never reaches this branch once settled),
+          // `settleProcessingPaymentAtomic` returning falsy on a second flip
+          // (so `result.settled` is true exactly once per payment), and the
+          // notifier's own `payment-receipt:{invoiceId}:{paymentId}` send
+          // claim. Gating on `settled` also keeps a REVERSED row (ACH return)
+          // from ever triggering a receipt.
+          //
+          // Failure-isolated: the settle already COMMITTED, so letting a
+          // notifier throw bubble would 500 the webhook, make Stripe redeliver
+          // an already-settled payment, and lose the receipt permanently (the
+          // redelivery takes the 'completed' early return). That is the one
+          // place this path must NOT mirror the card path, where a throw makes
+          // Stripe retry a recordPayment whose side effects have not committed.
+          if (result.settled && result.payment) {
+            const settledPayment = result.payment;
+            try {
+              if (deps.paymentReceiptNotifier) {
+                await deps.paymentReceiptNotifier.notifyPaymentReceived(
+                  tenantId,
+                  invoiceId,
+                  settledPayment.amountCents,
+                  settledPayment.id,
+                );
+              }
+              // U6 — the owner `payment_received` push, the other half of what
+              // applyPostPaymentSideEffects gives the card path.
+              await notifyOwnerPaymentReceived(
+                tenantId,
+                invoiceId,
+                settledPayment.amountCents,
+              );
+            } catch (notifyErr) {
+              logger.warn('ACH settlement receipt failed to send', {
+                tenantId,
+                invoiceId,
+                paymentIntentId: piId,
+                paymentId: settledPayment.id,
+                error: notifyErr instanceof Error ? notifyErr.message : String(notifyErr),
+              });
+            }
+          }
+
           await webhookRepo.updateStatus(webhookEvent.id, 'processed');
           return res.status(200).json({ received: true, settled: result.settled });
         }
