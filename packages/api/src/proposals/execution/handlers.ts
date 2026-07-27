@@ -821,6 +821,10 @@ export class DraftEstimateExecutionHandler implements ExecutionHandler {
     private readonly jobRepo?: JobRepository,
     private readonly locationRepo?: LocationRepository,
     private readonly auditRepo?: AuditRepository,
+    // QA-2026-07-27 — tenant-scoped EXISTENCE check for the drafted
+    // customerId. See the guard in execute(); optional so the existing
+    // partially-wired unit fixtures keep their current behavior.
+    private readonly customerRepo?: CustomerRepository,
   ) {}
 
   // WS3 — degrades to a synthetic-id passthrough (saves nothing) without both
@@ -867,6 +871,29 @@ export class DraftEstimateExecutionHandler implements ExecutionHandler {
 
     if (!this.estimateRepo || !this.settingsRepo) {
       return { success: true, resultEntityId: uuidv4() };
+    }
+
+    // QA-2026-07-27 — EXISTENCE check, not a format check. A drafted
+    // customerId can be perfectly well-formed and still reference nothing:
+    // the estimate prompt used to hand the model a `"customerId": "<uuid>"`
+    // template, and it invented ids — including the RFC 4122 EXAMPLE uuid
+    // 123e4567-e89b-12d3-a456-426614174000, which sails through
+    // `z.string().uuid()`. Left unchecked it either violates a foreign key
+    // deep inside createJob/createEstimate or, worse, resolves to nothing at
+    // all. So confirm the id names a real customer IN THIS TENANT before any
+    // write, and fail the proposal with a reason the operator can act on.
+    // Skipped when the repo isn't wired, matching this handler's existing
+    // degradation (unit fixtures construct it with estimate+settings only).
+    if (customerId && this.customerRepo) {
+      const customer = await this.customerRepo.findById(context.tenantId, customerId);
+      if (!customer) {
+        return {
+          success: false,
+          error:
+            `Estimate draft references customer '${customerId}', which does not exist in this ` +
+            `tenant — link a real customer before approving`,
+        };
+      }
     }
 
     try {
@@ -1206,6 +1233,8 @@ export function createExecutionHandlerRegistry(deps?: {
       deps?.jobRepo,
       deps?.locationRepo,
       deps?.auditRepo,
+      // QA-2026-07-27 — enables the tenant-scoped customer existence check.
+      deps?.customerRepo,
     ),
     new CreateInvoiceExecutionHandler(
       deps?.invoiceRepo,

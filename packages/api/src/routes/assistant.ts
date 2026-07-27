@@ -153,6 +153,35 @@ const assistantChatRequestSchema = z.object({
 export const VOICE_APPROVAL_REFUSAL =
   "Tap the card to approve — I don't take approvals by voice here yet.";
 
+/**
+ * The one sentence every unrouted reply MUST carry. An unrouted utterance
+ * created no proposal and changed no row, and the operator has to be able to
+ * read that off the reply without inference — see the guard in
+ * generateAssistantReply for the incident this exists for.
+ */
+export const NOTHING_WAS_SAVED_NOTICE =
+  'Nothing was saved, scheduled, sent, or changed.';
+
+/**
+ * Honest clarification copy for a classification the router cannot act on.
+ * Mirrors the voice pipeline's `clarificationExplanation`
+ * (workers/voice-action-router.ts): when the classifier leaned toward a real
+ * intent below the confidence threshold it is offered back as a "did you
+ * mean", otherwise we just ask for a rephrase.
+ */
+export function buildUnroutedClarification(classification: {
+  lowConfidenceIntent?: string;
+}): string {
+  const guess = classification.lowConfidenceIntent
+    ? ` It sounded like you might want to ${classification.lowConfidenceIntent.replace(/_/g, ' ')} — is that right?`
+    : '';
+  return (
+    `I'm not confident enough about that one to act on it, so I haven't done anything. ` +
+    `${NOTHING_WAS_SAVED_NOTICE}${guess}` +
+    ` Tell me again with the specifics (who, what, and when) and I'll draft it for you to approve.`
+  );
+}
+
 function inferTaskType(text: string): string {
   const t = text.toLowerCase();
   if (t.includes('invoice') || t.includes('payment') || t.includes('overdue')) return 'assistant.invoice';
@@ -161,6 +190,19 @@ function inferTaskType(text: string): string {
   if (t.includes('estimate') || t.includes('quote')) return 'assistant.estimate';
   return 'assistant.general';
 }
+
+/**
+ * Defence in depth for the generic LLM fallback. This path runs with NO tools
+ * and NO database writes — it can only produce text. Before this rule existed,
+ * an imperative that failed to classify ("put me down for two hours on this
+ * one") reached this prompt as "give operational help", and a past-tense
+ * confirmation ("I've scheduled you for two hours on this job.") was the
+ * model's most natural completion — while zero proposal rows were created. A
+ * tradesperson reading that drives away believing the time was logged.
+ */
+const NO_ACTION_CAPABILITY_RULE = `CRITICAL — YOU CANNOT PERFORM ACTIONS. On this path you have no tools, no database access, and no ability to schedule, book, log, record, send, create, update, cancel, or change anything. Nothing you write is executed.
+Therefore you MUST NEVER state or imply that an action was taken, is in progress, or has been queued. Never use phrasings such as "I've scheduled", "I've logged", "I've booked", "I've sent", "that's done", "all set", or "I'll take care of that".
+If the operator asks you to DO something, say plainly that you have not done it and that nothing was saved, then ask for the detail you need so it can be drafted for their approval. Answering a question or explaining a next step is fine.`;
 
 function getSystemPrompt(taskType: string): string {
   if (taskType === 'assistant.invoice') {
@@ -175,7 +217,7 @@ function getSystemPrompt(taskType: string): string {
   if (taskType === 'assistant.estimate') {
     return 'You are a field-service assistant. Focus on estimate clarity, scope, and customer-ready language.';
   }
-  return 'You are a field-service assistant. Provide concise, high-signal operational help for jobs, customers, schedule, and billing.';
+  return `You are a field-service assistant. Provide concise, high-signal operational help for jobs, customers, schedule, and billing.\n\n${NO_ACTION_CAPABILITY_RULE}`;
 }
 
 const outputContract = `
@@ -1165,9 +1207,65 @@ async function generateAssistantReply(
           },
         };
       }
-    } catch {
+
+      // ── Unrouted-intent guard ──────────────────────────────────────
+      // Nothing above matched. The classifier forces ANY result below
+      // CLASSIFIER_CONFIDENCE_THRESHOLD (0.6) to 'unknown' — keeping its best
+      // guess in `lowConfidenceIntent` — so a perfectly ordinary field
+      // imperative lands here whenever the transcript is terse or elliptical.
+      //
+      // Before this guard, 'unknown' fell through to the generic LLM path
+      // below, which is handed the raw imperative and asked for "concise
+      // operational help". A past-tense confirmation is that prompt's most
+      // natural completion, and production produced exactly that:
+      //   "put me down for two hours on this one"
+      //     → "I've scheduled you for two hours on this job."
+      //   "book her for Thursday at ten"
+      //     → "I have scheduled the appointment for Thursday at 10 AM."
+      // No proposal row was created in either case and nothing happened. The
+      // tradesperson drives away believing the time is logged and the job
+      // booked. Nothing in the reply schema or the output contract could
+      // catch this — the reply is well-formed, it is just false.
+      //
+      // The voice pipeline never had this hole: an 'unknown' classification
+      // emits a `voice_clarification` proposal instead of a guess
+      // (workers/voice-action-router.ts#emitClarification). This is the chat
+      // equivalent — ask, and say plainly that nothing was saved.
+      if (classification.intentType === 'unknown') {
+        logger.info('assistant/chat: unrouted intent, returning clarification', {
+          correlationId,
+          tenantId,
+          unknownReason: classification.unknownReason,
+          lowConfidenceIntent: classification.lowConfidenceIntent,
+          confidence: classification.confidence,
+        });
+        return {
+          taskType: 'assistant.clarification',
+          model: 'intent-classifier',
+          usage: { input: 0, output: 0, total: 0 },
+          message: {
+            role: 'assistant' as const,
+            content: buildUnroutedClarification(classification),
+            reasoning:
+              `Unrouted (${classification.unknownReason ?? 'unknown_intent'}, confidence ` +
+              `${classification.confidence.toFixed(2)}) — asked for clarification instead of ` +
+              'answering, because nothing was executed.',
+          },
+        };
+      }
+    } catch (err) {
       // Classifier failure should never break the chat — drop into the
-      // generic LLM path so the operator still gets a response.
+      // generic LLM path so the operator still gets a response. But it must
+      // never be SILENT: this catch previously swallowed every classifier
+      // exception with no log at all, so the resulting generic-LLM reply
+      // (which can no longer claim an action, but still answers from nothing)
+      // was indistinguishable from a healthy turn in production.
+      logger.error('assistant/chat: intent path failed, falling back to generic LLM', {
+        correlationId,
+        tenantId,
+        error: err instanceof Error ? err.message : String(err),
+        stack: err instanceof Error ? err.stack : undefined,
+      });
     }
   }
 

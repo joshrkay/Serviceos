@@ -368,6 +368,10 @@ export interface ExtractedEntities {
   serviceAddress?: string;
   // log_time_entry: which kind of time is being logged.
   timeEntryType?: 'job' | 'drive' | 'break' | 'admin';
+  // log_time_entry: a COMPLETED amount of worked time stated after the
+  // fact ("put me down for two hours"), in whole MINUTES — the unit
+  // time_entries.duration_minutes stores. Absent on a plain clock-in.
+  durationMinutes?: number;
   // notify_delay: how many minutes late the crew is running.
   delayMinutes?: number;
   // RV-071 — approve_proposal / reject_proposal (owner sessions only):
@@ -710,9 +714,14 @@ Supported intents (return exactly ONE):
 - "add_note"            — user wants to attach a note to an existing record.
                            Extract noteTargetKind (job / customer / invoice /
                            estimate / appointment) and noteBody.
+                           An observation, instruction or finding with NO
+                           stated amount of worked time. If the sentence
+                           states how long the work took ("two hours"), it
+                           is log_time_entry, not add_note.
                            Examples: "Note on the Rodriguez job: customer
                                       wants a call before we arrive"
                                      "Add a note to Smith's file: prefers SMS"
+                                     "Add a note that I found flue liner corrosion"
 - "send_invoice"        — user wants to SEND/DELIVER an existing invoice to a
                            customer (email or SMS). Send = deliver to the
                            customer; issue = make official/payable (see
@@ -826,12 +835,34 @@ Supported intents (return exactly ONE):
                            Examples: "Add a service location for Sarah at 412 Oak Street"
                                      "New address for the Acme account: 88 Industrial Way, Denver CO"
                                      "Add a second property for Jordan — 12 Pine Lane"
-- "log_time_entry"      — technician wants to start tracking time (clock
-                           in) on a job or task. Extract jobReference and
-                           timeEntryType (job / drive / break / admin).
+- "log_time_entry"      — technician wants to record work time — EITHER to
+                           START tracking it (clock in) OR to record an
+                           already-COMPLETED amount of time after the fact.
+                           Extract jobReference, timeEntryType (job / drive
+                           / break / admin), and — whenever a fixed amount
+                           of time is stated — durationMinutes, in whole
+                           MINUTES ("two hours" = 120, "an hour and a half"
+                           = 90, "forty five minutes" = 45).
+                           CORRECTIONS: when the speaker states a duration
+                           and then corrects it ("two hours not one hour",
+                           "this took two hours, did not take one hour"),
+                           keep ONLY the corrected value — durationMinutes
+                           is 120, never 60 and never both.
+                           NOT add_note: a stated amount of WORKED TIME is
+                           log_time_entry even when phrased as "put down" /
+                           "write down" / "make a note". Use add_note only
+                           when the content is an observation carrying no
+                           worked duration ("add a note that I found flue
+                           liner corrosion").
                            Examples: "Clock me in on the Miller job"
                                      "Start my drive time"
                                      "Log time on the Rodriguez install"
+                                     "Put me down for two hours on this one"
+                                     "Put down that this was two hours"
+                                     "Put down that this was two hours not one hour for this one"
+                                     "Log two hours on the Miller job"
+                                     "This took two hours"
+                                     "This took two hours, did not take one hour"
 - "notify_delay"        — user wants to tell a customer the crew is
                            running late. Customer-facing comms — never
                            auto-execute. Extract appointmentReference and
@@ -1082,6 +1113,7 @@ Return valid JSON with exactly this shape (no prose, no markdown fences):
     "lostReason": "<string, optional — why the lead was lost on mark_lead_lost>",
     "serviceAddress": "<string, optional — full address on add_service_location>",
     "timeEntryType": "<job|drive|break|admin, optional — on log_time_entry>",
+    "durationMinutes": <integer MINUTES of completed work time, optional — on log_time_entry; "two hours" is 120>,
     "delayMinutes": <integer minutes, optional — on notify_delay>,
     "scheduleDescription": "<string, optional — VERBATIM milestone sentence on create_invoice_schedule>",
     "reviewReference": "<string, optional — which review, verbatim, on respond_to_review>",
@@ -1518,6 +1550,12 @@ export function parseClassifierJson(content: string): IntentClassification | nul
     // log_time_entry fields
     const timeEntryType = pickEnum(ee, 'timeEntryType', TIME_ENTRY_TYPES);
     if (timeEntryType) extracted.timeEntryType = timeEntryType;
+    // A completed duration must be a positive whole number of minutes —
+    // the LLM occasionally answers "2" (hours) as a float or a negative,
+    // and time_entries.duration_minutes is an INTEGER column.
+    if (typeof ee.durationMinutes === 'number' && Number.isFinite(ee.durationMinutes) && ee.durationMinutes > 0) {
+      extracted.durationMinutes = Math.round(ee.durationMinutes);
+    }
     // notify_delay fields
     if (typeof ee.delayMinutes === 'number') extracted.delayMinutes = ee.delayMinutes;
     // approve_proposal / reject_proposal fields (RV-071)

@@ -336,9 +336,27 @@ export function tierStructureIssues(
   return issues;
 }
 
+// QA-2026-07-27 — `customerId` on a drafted estimate is authored by the ENTITY
+// RESOLVER (a verified, tenant-scoped uuid), never by the drafting model. The
+// live bug this shape closes: the estimate prompt handed the model a
+// `"customerId": "<uuid>"` template and told it to "ensure customerId is
+// present", so it invented ids — observed in Development as "unknown",
+// "<uuid>", and the RFC 4122 EXAMPLE uuid 123e4567-e89b-12d3-a456-426614174000
+// (twice). That last one is syntactically valid, so `z.string().uuid()` alone
+// waves it through; format validation is NOT sufficient and the id is
+// existence-checked against the tenant by DraftEstimateExecutionHandler before
+// any write.
+//
+// When nothing resolves, the draft must NOT carry a fake id: it carries the
+// spoken `customerReference` instead and is gated with
+// `missingFields: ['customerId']` so it can never auto-approve. Shape mirrors
+// addServiceLocationPayloadSchema / convertLeadPayloadSchema (resolved id OR
+// free-text reference, enforced by a `.refine`) rather than inventing a new
+// convention.
 export const draftEstimatePayloadSchema = z
   .object({
-    customerId: z.string().uuid(),
+    customerId: z.string().uuid().optional(),
+    customerReference: z.string().min(1).optional(),
     jobId: z.string().uuid().optional(),
     lineItems: z.array(lineItemSchema).min(1),
     notes: z.string().optional(),
@@ -352,6 +370,9 @@ export const draftEstimatePayloadSchema = z
     for (const message of tierStructureIssues(val.lineItems)) {
       ctx.addIssue({ code: z.ZodIssueCode.custom, message, path: ['lineItems'] });
     }
+  })
+  .refine((v) => Boolean(v.customerId || v.customerReference), {
+    message: 'customerId or customerReference is required',
   });
 
 // remove_line_item / update_line_item target an existing line item by
@@ -537,10 +558,14 @@ export const addServiceLocationPayloadSchema = z
 // log_time_entry: clock a technician in on a job/task. userId comes from
 // the execution context (the speaking technician). jobReference is
 // optional — break/admin time may not attach to a job.
+// durationMinutes is set only on the RETROACTIVE path ("put me down for two
+// hours") — a completed amount of worked time in the same unit the
+// time_entries.duration_minutes column stores. Absent means "clock in now".
 export const logTimeEntryPayloadSchema = z.object({
   entryType: z.enum(['job', 'drive', 'break', 'admin']),
   jobId: z.string().uuid().optional(),
   jobReference: z.string().optional(),
+  durationMinutes: z.number().int().positive().optional(),
   notes: z.string().optional(),
 });
 
