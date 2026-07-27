@@ -77,6 +77,7 @@ export interface CreateCustomerTaskDeps {
  *   displayName        — caller's stated name from the LLM
  *   email              — caller's stated email
  *   phone              — caller's stated callback (rare; usually missing)
+ *   address            — caller's stated street address (free text, verbatim)
  *   callerIdPhone      — Twilio "from" header (caller-id)
  *   phoneBlocked       — true when caller-id was withheld / 'restricted'
  *   sessionId          — voice session uuid for proposal->session join
@@ -91,6 +92,7 @@ export interface CreateCustomerEntities {
   displayName?: string;
   email?: string;
   phone?: string;
+  address?: string;
   callerIdPhone?: string;
   phoneBlocked?: boolean;
   sessionId?: string;
@@ -152,6 +154,41 @@ export function resolvePhone(input: {
 }
 
 /**
+ * Normalise a spoken name for the proposal payload. Speech-to-text
+ * frequently returns an all-lowercase token for names it does not
+ * recognise ("add a new customer, nguyen" → `nguyen`), which then
+ * lands in the CRM verbatim.
+ *
+ * Deliberately narrow — it fires only when BOTH hold:
+ *   1. the name contains no capital at all, so anything the transcriber
+ *      already cased (`McDonald`, `O'Brien`, `IBM`) is left byte-for-byte;
+ *   2. the name is made purely of name-shaped characters (letters, spaces,
+ *      hyphens, apostrophes, periods), so anything unusual — an injection
+ *      string, a handle, a payload probe — is stored verbatim exactly as
+ *      the caller said it, preserving the audit trail.
+ *
+ * Returns `undefined` for a missing/blank name so the caller's
+ * `needs_name` gate is unchanged.
+ */
+const NAME_SHAPED = /^[\p{Ll}\s'’.-]+$/u;
+
+export function capitalizeSpokenName(name: string | undefined): string | undefined {
+  const trimmed = name?.trim();
+  if (!trimmed || trimmed.length === 0) return undefined;
+  // Any capital, digit, or punctuation beyond ordinary name characters →
+  // leave it exactly as spoken.
+  if (!NAME_SHAPED.test(trimmed)) return trimmed;
+  return trimmed
+    .split(/(\s+)/) // keep separators so internal spacing round-trips
+    .map((token) =>
+      /\s/.test(token) || token.length === 0
+        ? token
+        : token.replace(/\p{Ll}/u, (ch) => ch.toUpperCase())
+    )
+    .join('');
+}
+
+/**
  * Build a CreateCustomerEntities object from a TaskContext.
  * Tolerant of missing fields — the caller passes whatever the FSM
  * accumulated.
@@ -175,6 +212,13 @@ function readEntities(context: TaskContext): CreateCustomerEntities {
     displayName: str('displayName') ?? str('customerName') ?? str('name'),
     email: str('email'),
     phone: str('phone'),
+    // The classifier emits `address` for create_customer. `serviceAddress`
+    // is accepted as a fallback because the same spoken sentence sometimes
+    // lands on that key when the model leans toward the add_service_location
+    // vocabulary — on a create_customer turn it means the same thing (the
+    // NEW customer's address), and silently dropping it is the bug this
+    // fallback closes.
+    address: str('address') ?? str('serviceAddress'),
     callerIdPhone: str('callerIdPhone'),
     phoneBlocked: bool('phoneBlocked'),
     sessionId: str('sessionId') ?? context.conversationId,
@@ -268,7 +312,7 @@ export class CreateCustomerVoiceTaskHandler implements TaskHandler {
     // missing AND the only signal is caller-id, raise needs_name so
     // the FSM can prompt for the name. The contract requires `name` —
     // we never produce a contract-violating proposal.
-    const name = ents.displayName?.trim();
+    const name = capitalizeSpokenName(ents.displayName);
     if (!name || name.length === 0) {
       return {
         status: 'needs_name',
@@ -294,6 +338,7 @@ export class CreateCustomerVoiceTaskHandler implements TaskHandler {
       name,
       email: ents.email,
       phone,
+      address: ents.address,
       voice: Object.keys(voice).length > 0 ? voice : undefined,
       smsConsent: false, // tenant default; never auto-opt-in
     });
@@ -339,7 +384,8 @@ export class CreateCustomerVoiceTaskHandler implements TaskHandler {
 
     const summaryPhone = phone ? ` (${phone})` : '';
     const summaryEmail = payload.email ? `, ${payload.email}` : '';
-    const summary = `New customer from inbound call: ${payload.name}${summaryPhone}${summaryEmail}`;
+    const summaryAddress = payload.address ? `, ${payload.address}` : '';
+    const summary = `New customer from inbound call: ${payload.name}${summaryPhone}${summaryEmail}${summaryAddress}`;
     const explanation = ents.existingLeadId
       ? `Caller phone matches lead ${ents.existingLeadId}. Approve to convert to customer; reject to keep as lead.`
       : 'Caller asked to sign up as a new customer. Approve to add them to the CRM.';

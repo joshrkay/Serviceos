@@ -1182,7 +1182,7 @@ export function createExecutionHandlerRegistry(deps?: {
       : undefined;
 
   const handlers: ExecutionHandler[] = [
-    new CreateCustomerVoiceExecutionHandler(deps?.customerRepo, deps?.auditRepo),
+    new CreateCustomerVoiceExecutionHandler(deps?.customerRepo, deps?.auditRepo, deps?.locationRepo),
     new UpdateCustomerExecutionHandler(deps?.customerRepo, requiredAuditRepo, deps?.consentEventRepo),
     new CreateJobExecutionHandler(deps?.jobRepo, deps?.locationRepo, deps?.auditRepo),
     new CreateAppointmentExecutionHandler(

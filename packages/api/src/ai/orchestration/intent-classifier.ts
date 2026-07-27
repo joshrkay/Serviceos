@@ -300,6 +300,19 @@ export interface ExtractedEntities {
   displayName?: string;
   email?: string;
   phone?: string;
+  // create_customer: the service/street address the caller stated as part
+  // of signing up ("Add a new customer, Mario Delingo, 412 Oak Street,
+  // Scottsdale, 85254"). Free text, verbatim — the customers table has no
+  // address column, so this rides on the proposal payload for the approver
+  // and is only promoted to a linked service_location row on execution when
+  // it parses into a COMPLETE address (street1 + city + state + postalCode),
+  // matching the completeness gate used by add_service_location / leads.
+  //
+  // Deliberately distinct from `serviceAddress` (add_service_location — a
+  // new address for an EXISTING customer) and `updatedAddress`
+  // (update_customer — a corrected address on an existing record), so a
+  // signup can never be mistaken for an edit to somebody else's account.
+  address?: string;
   // Scheduling-edit intents (reschedule / cancel / reassign). Either
   // an appointment reference ("tomorrow's 3pm", "the Miller job",
   // "APT-0012") or a newDateTimeDescription for reschedule. Target
@@ -611,17 +624,29 @@ Supported intents (return exactly ONE):
                            and any natural caller-side phrasing for
                            establishing a new account.
                            Extract the customer's displayName plus any stated
-                           email or phone. When only the name is given (or even
-                           no name at all — the caller-id phone is captured
-                           upstream), still classify as create_customer so the
-                           downstream flow can ask a clarifying question — do
-                           NOT fall back to "unknown" just because email/phone
-                           or even displayName are missing.
+                           email, phone, or address. When only the name is given
+                           (or even no name at all — the caller-id phone is
+                           captured upstream), still classify as create_customer
+                           so the downstream flow can ask a clarifying question
+                           — do NOT fall back to "unknown" just because
+                           email/phone or even displayName are missing.
+                           When the speaker states a street address as part of
+                           the signup ("..., 412 Oak Street, Scottsdale, 85254",
+                           "She's over at 1207 Riverbell Drive", "He's at 34
+                           Quarry Street"), put it VERBATIM in "address" — do
+                           NOT drop it and do NOT reclassify as
+                           add_service_location. A NEW customer stating their
+                           own address is still create_customer; the address is
+                           an entity on that intent, not a competing intent.
                            Examples: "Create a new customer named Alex"
                                      "Add customer Acme Corp, email alex@acme.com"
                                      "New customer: Sarah, phone 555-0100"
                                      "Add a customer called Jordan Lee"
                                      "Create customer Maria Gomez at maria@gomez.co"
+                                     "Add a new customer, Mario Delingo, 412 Oak Street, Scottsdale, 85254."
+                                        → displayName "Mario Delingo", address "412 Oak Street, Scottsdale, 85254"
+                                     "Add Jimmy Hartlett as a new customer. He's at 34 Quarry Street."
+                                        → displayName "Jimmy Hartlett", address "34 Quarry Street"
                                      "I'd like to sign up as a new customer"
                                      "I'm a new customer"
                                      "Can you set up an account for me?"
@@ -1034,6 +1059,7 @@ Return valid JSON with exactly this shape (no prose, no markdown fences):
     "displayName": "<string, optional — NEW customer's name on create_customer>",
     "email": "<string, optional — NEW customer's email on create_customer>",
     "phone": "<string, optional — NEW customer's phone on create_customer>",
+    "address": "<string, optional — NEW customer's street address, verbatim, on create_customer>",
     "appointmentReference": "<string, optional — existing appointment reference>",
     "newDateTimeDescription": "<string, optional — new time for reschedule_appointment>",
     "targetTechnicianName": "<string, optional — target technician on reassign_appointment>",
@@ -1452,6 +1478,7 @@ export function parseClassifierJson(content: string): IntentClassification | nul
     if (typeof ee.displayName === 'string') extracted.displayName = ee.displayName;
     if (typeof ee.email === 'string') extracted.email = ee.email;
     if (typeof ee.phone === 'string') extracted.phone = ee.phone;
+    if (typeof ee.address === 'string') extracted.address = ee.address;
     // Scheduling-edit fields
     if (typeof ee.appointmentReference === 'string') extracted.appointmentReference = ee.appointmentReference;
     if (typeof ee.newDateTimeDescription === 'string') extracted.newDateTimeDescription = ee.newDateTimeDescription;

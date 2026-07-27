@@ -27,6 +27,48 @@ import {
   createCustomer,
 } from '../../customers/customer';
 import { AuditRepository, createAuditEvent } from '../../audit/audit';
+import { LocationRepository, createLocation } from '../../locations/location';
+
+/**
+ * Parse the free-text address the caller spoke into the structured shape
+ * `service_locations` requires. Returns `undefined` unless ALL FOUR
+ * NOT NULL columns (street1, city, state, postal_code) are recoverable —
+ * the same completeness gate `add_service_location` and lead conversion
+ * already enforce (`refineCompleteAddress` in leads/enums.ts).
+ *
+ * We deliberately do NOT fabricate placeholders for missing parts the way
+ * the web new-customer form does (`city: 'Unknown', state: 'NA',
+ * postalCode: '00000'` in CustomersPage.tsx). Writing invented values into
+ * the CRM is worse than leaving the verbatim address on the proposal
+ * payload for a human to complete.
+ *
+ * Handles the shapes speech-to-text actually produces:
+ *   "412 Oak Street, Scottsdale, AZ 85254"
+ *   "412 Oak Street, Scottsdale, AZ, 85254"
+ */
+export function parseSpokenAddress(text: string):
+  | { street1: string; city: string; state: string; postalCode: string }
+  | undefined {
+  const parts = text
+    .split(',')
+    .map((p) => p.trim())
+    .filter((p) => p.length > 0);
+  if (parts.length < 3) return undefined;
+
+  const street1 = parts[0];
+  const city = parts[1];
+
+  // Remaining parts hold state and postal code, either together
+  // ("AZ 85254") or split across two comma-separated fields.
+  const tail = parts.slice(2).join(' ').trim();
+  const match = /^([A-Za-z][A-Za-z .]*?)\s+(\d{5}(?:-\d{4})?)$/.exec(tail);
+  if (!match) return undefined;
+
+  const state = match[1].trim();
+  const postalCode = match[2].trim();
+  if (!street1 || !city || !state || !postalCode) return undefined;
+  return { street1, city, state, postalCode };
+}
 
 /**
  * Split a single `name` field into firstName + lastName. Mirrors what
@@ -63,6 +105,11 @@ export class CreateCustomerVoiceExecutionHandler implements ExecutionHandler {
   constructor(
     private readonly customerRepo?: CustomerRepository,
     private readonly auditRepo?: AuditRepository,
+    // Optional: when wired, a COMPLETE spoken address on the payload is
+    // promoted to a primary service_location linked to the new customer.
+    // `customers` has no address column — a linked location is the only
+    // place an address can live.
+    private readonly locationRepo?: LocationRepository,
   ) {}
 
   // WS3 — degrades to a synthetic-id passthrough (saves nothing) without the
@@ -123,6 +170,37 @@ export class CreateCustomerVoiceExecutionHandler implements ExecutionHandler {
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       return { success: false, error: `Failed to create customer: ${msg}` };
+    }
+
+    // The spoken address. `customers` has no address column, so the only
+    // destination is a linked service_location row — created here as the
+    // customer's primary location when the free text parses into all four
+    // NOT NULL fields. Best-effort by design (same posture as the audit
+    // join-row below): an incomplete address, or a location-write failure,
+    // must never unwind a customer the approver already said yes to. The
+    // verbatim text stays on `proposal.payload.address` either way, so
+    // nothing is silently lost.
+    const address = typeof payload.address === 'string' ? payload.address.trim() : '';
+    if (address.length > 0 && this.locationRepo) {
+      const parsed = parseSpokenAddress(address);
+      if (parsed) {
+        try {
+          await createLocation(
+            {
+              tenantId: context.tenantId,
+              customerId: createdCustomerId,
+              ...parsed,
+              isPrimary: true,
+            },
+            this.locationRepo,
+            this.auditRepo,
+            context.executedBy,
+            'voice_agent',
+          );
+        } catch {
+          // Swallowed on purpose — see comment above.
+        }
+      }
     }
 
     // Voice session correlation: AC-4 requires the audit event tying
