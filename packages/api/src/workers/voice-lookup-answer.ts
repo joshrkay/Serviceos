@@ -1,5 +1,5 @@
 /**
- * U3 (iOS blueprint) — E-lane answer execution for the recorded-memo path.
+ * U3 (iOS blueprint) — the SHARED per-skill lookup dispatch adapter.
  *
  * The voice-action-router worker used to SKIP every `lookup_*` intent
  * because a recorded memo had no voice back-channel to speak the result
@@ -10,6 +10,18 @@
  * returns message/slots, not `{summary, data}`) into the shared
  * `VoiceLookupAnswer` wire contract the mobile AnswerCard renders.
  *
+ * SURFACE-NEUTRAL (2026-07): this switch is now the single lookup-dispatch
+ * implementation behind TWO surfaces — the recorded-memo worker
+ * (`workers/voice-action-router.ts`) and the in-app assistant chat
+ * (`routes/assistant.ts`, via `ai/orchestration/lookup-dispatch.ts`,
+ * which is where BOTH the mic button and typed input land). Nothing in
+ * here may reference memo-only concepts: the correlation key is
+ * `sessionId` (a memo's recordingId / a chat turn's lookup session id)
+ * and the authorization subject is `actorId` (the memo creator / the
+ * authenticated operator). Adding a surface means adding a caller, NOT
+ * copying this switch — three drifted copies of `intentToProposalType`
+ * are why that rule exists.
+ *
  * Invariants honored here:
  *   - Integer cents end-to-end: skill `*Cents` values ride the answer as
  *     `money` rows; the CLIENT formats. Never floats, never pre-formatted
@@ -17,12 +29,12 @@
  *   - Dates render in the tenant timezone (threaded by the caller).
  *   - Authorization: owner-grade lookups (lookup_revenue,
  *     lookup_job_profit, lookup_pending_items, lookup_digest — E3/E4/E6/D3)
- *     check the MEMO CREATOR's DB-authoritative role and FAIL CLOSED to a
+ *     check the ASKING ACTOR's DB-authoritative role and FAIL CLOSED to a
  *     refusal answer (copy, never data) when the role is missing or lacks
  *     `reports:view` (technicians).
  *   - Analytics: every skill call passes `lookupEvents` (keyed by the
- *     recordingId as the session id — both are UUIDs) so the memo path
- *     starts writing the same `lookup_events` rows telephony does.
+ *     caller-supplied `sessionId`, which must be a UUID) so every surface
+ *     writes the same `lookup_events` rows telephony does.
  *   - Missing deps degrade to `unsupported` (the caller keeps today's
  *     skip semantics), mirroring the adapters' LOOKUP_NOT_WIRED fallback.
  */
@@ -119,9 +131,11 @@ export interface VoiceLookupAnswerDeps {
   /** P11-001 analytics table writer — the memo path now records rows too. */
   lookupEvents?: LookupEventService;
   /**
-   * DB-authoritative role of the memo creator (voice_recordings.created_by
-   * is the Clerk subject — resolve like `createAuthorizationLoader`).
-   * Owner-grade lookups FAIL CLOSED to a refusal when absent/unresolvable.
+   * DB-authoritative role of the ASKING ACTOR — the memo creator
+   * (voice_recordings.created_by) on the worker path, the authenticated
+   * operator (req.auth.userId) on the assistant-chat path. Both are Clerk
+   * subjects — resolve like `createAuthorizationLoader`. Owner-grade
+   * lookups FAIL CLOSED to a refusal when absent/unresolvable.
    */
   resolveMemberRole?: (tenantId: string, userId: string) => Promise<string | null>;
 }
@@ -137,11 +151,23 @@ export interface SharedLookupRepos {
 
 export interface ExecuteLookupInput {
   tenantId: string;
-  /** The recording being answered — also the lookup_events session key. */
-  recordingId: string;
+  /**
+   * The surface's correlation key for this lookup, written to
+   * `lookup_events.session_id`. Memo path: the recording id. Assistant
+   * chat: a per-turn lookup session id. MUST be a UUID — the column is
+   * `session_id UUID NOT NULL` (schema.ts `061_create_lookup_events`), and
+   * a non-UUID makes the analytics insert fail (silently — every skill
+   * swallows audit-write errors, so the answer still lands, but the row
+   * is lost).
+   */
+  sessionId: string;
   intent: IntentType;
-  /** voice_recordings.created_by — authoritative identity for the authz gate. */
-  memoCreatorId?: string;
+  /**
+   * Clerk subject of the actor asking — authoritative identity for the
+   * owner-grade authz gate. Memo path: `voice_recordings.created_by`.
+   * Assistant chat: `req.auth.userId`.
+   */
+  actorId?: string;
   /** Verified (payload) or resolver-verified customer UUID. */
   customerId?: string;
   /** Verified (payload jobId) or resolver-verified job UUID (D3). */
@@ -231,14 +257,14 @@ export async function executeLookupAnswer(
   deps: VoiceLookupAnswerDeps,
   shared: SharedLookupRepos,
 ): Promise<LookupExecution> {
-  const { tenantId, recordingId, intent, customerId, timezone, now } = input;
+  const { tenantId, sessionId, intent, customerId, timezone, now } = input;
 
   // ── Authorization gate (owner-grade lookups fail closed) ────────────────
   if (OWNER_GRADE_LOOKUP_INTENTS.has(intent)) {
     let role: string | null = null;
-    if (deps.resolveMemberRole && input.memoCreatorId) {
+    if (deps.resolveMemberRole && input.actorId) {
       try {
-        role = await deps.resolveMemberRole(tenantId, input.memoCreatorId);
+        role = await deps.resolveMemberRole(tenantId, input.actorId);
       } catch {
         role = null; // fail closed — refusal, never data
       }
@@ -257,9 +283,10 @@ export async function executeLookupAnswer(
   }
 
   const events = deps.lookupEvents ? { lookupEvents: deps.lookupEvents } : {};
-  // lookup_events.session_id is a UUID; the recording id is the memo
-  // path's session-equivalent correlation key.
-  const sharedInput = { tenantId, customerId: customerId!, sessionId: recordingId, timezone };
+  // lookup_events.session_id is a UUID column — the caller supplies a
+  // surface-appropriate UUID correlation key (memo recording id / chat
+  // per-turn lookup session id).
+  const sharedInput = { tenantId, customerId: customerId!, sessionId, timezone };
 
   try {
     switch (intent) {
@@ -323,7 +350,7 @@ export async function executeLookupAnswer(
       case 'lookup_customer': {
         if (!shared.customerRepo) return { kind: 'unsupported' };
         const r = await lookupCustomer(
-          { tenantId, identifier: { type: 'id', value: customerId! }, sessionId: recordingId },
+          { tenantId, identifier: { type: 'id', value: customerId! }, sessionId },
           { customerRepo: shared.customerRepo, ...events },
         );
         if (r.status === 'error') return { kind: 'failed', error: r.data.error };
@@ -518,7 +545,7 @@ export async function executeLookupAnswer(
       case 'lookup_revenue': {
         if (!deps.moneyDashboardRepo) return { kind: 'unsupported' };
         const r = await lookupRevenue(
-          { tenantId, sessionId: recordingId, now },
+          { tenantId, sessionId, now },
           { moneyDashboardRepo: deps.moneyDashboardRepo, ...events },
         );
         if (r.status === 'error') return { kind: 'failed', error: r.data.error };
@@ -548,7 +575,7 @@ export async function executeLookupAnswer(
           return { kind: 'answer', answer: buildAnswer(intent, 'none', summary) };
         }
         const r = await lookupJobProfit(
-          { tenantId, jobId: input.jobId, sessionId: recordingId },
+          { tenantId, jobId: input.jobId, sessionId },
           {
             jobRepo: shared.jobRepo,
             settingsRepo: deps.settingsRepo,
@@ -582,7 +609,7 @@ export async function executeLookupAnswer(
       case 'lookup_day_overview': {
         if (!shared.appointmentRepo || !shared.jobRepo) return { kind: 'unsupported' };
         const r = await lookupDayOverview(
-          { tenantId, sessionId: recordingId, now, ...(timezone ? { timezone } : {}) },
+          { tenantId, sessionId, now, ...(timezone ? { timezone } : {}) },
           {
             appointmentRepo: shared.appointmentRepo,
             jobRepo: shared.jobRepo,
@@ -610,7 +637,7 @@ export async function executeLookupAnswer(
       case 'lookup_pending_items': {
         if (!deps.estimateRepo || !deps.invoiceRepo) return { kind: 'unsupported' };
         const r = await lookupPendingItems(
-          { tenantId, sessionId: recordingId, now },
+          { tenantId, sessionId, now },
           {
             estimateRepo: deps.estimateRepo,
             invoiceRepo: deps.invoiceRepo,
@@ -633,7 +660,7 @@ export async function executeLookupAnswer(
       case 'lookup_digest': {
         if (!deps.dailyDigestRepo) return { kind: 'unsupported' };
         const r = await lookupDigest(
-          { tenantId, sessionId: recordingId, now, ...(timezone ? { timezone } : {}) },
+          { tenantId, sessionId, now, ...(timezone ? { timezone } : {}) },
           { digestRepo: deps.dailyDigestRepo, ...events },
         );
         if (r.status === 'error') return { kind: 'failed', error: r.data.error };
