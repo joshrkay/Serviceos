@@ -2569,6 +2569,40 @@ export function createApp(): AppWithLifecycle {
     const user = users.find((u) => u.clerkUserId === userId || u.id === userId);
     return user?.role ?? null;
   };
+
+  // P8 — ONE alias-first entity resolver shared by every surface that has to
+  // turn a free-text reference ("the Rodriguez job", "Bob") into a verified
+  // tenant id: the voice-action-router worker, the inbound telephony FSM, and
+  // the assistant-chat lookup path. Previously constructed inline at each
+  // call site; hoisted so a third surface adds a reference, not a fourth copy.
+  // In-memory mode (no pool) leaves it undefined — resolution is skipped, as
+  // it always has been.
+  const sharedEntityResolver = pool
+    ? entityAliasRepo
+      ? new AliasFirstEntityResolver(entityAliasRepo, new PgEntityResolver(pool), pool)
+      : new PgEntityResolver(pool)
+    : undefined;
+
+  // U3 — the per-skill lookup dispatch deps. Built ONCE and handed to BOTH
+  // the recorded-memo worker (below) and the assistant-chat router
+  // (createAssistantRouter, further down), so the two surfaces physically
+  // cannot be wired with different repos.
+  const lookupAnswerDeps = {
+    invoiceRepo,
+    estimateRepo,
+    agreementRepo,
+    moneyDashboardRepo,
+    dailyDigestRepo,
+    dunningConfigRepo,
+    timeEntryRepo,
+    expenseRepo,
+    settingsRepo,
+    // Mirrors the telephony adapter wiring: every surface writes the same
+    // lookup_events analytics rows.
+    lookupEvents: lookupEventService,
+    resolveMemberRole: resolveVoiceMemberRole,
+  };
+
   const voiceActionRouterWorker = createVoiceActionRouterWorker({
     gateway: llmGateway,
     proposalRepo,
@@ -2622,17 +2656,7 @@ export function createApp(): AppWithLifecycle {
     // verified tenant IDs (pg_trgm) before drafting; ambiguous matches
     // become one-tap clarifications. In-memory mode (no pool) skips
     // resolution, same as before.
-    ...(pool
-      ? {
-          entityResolver: entityAliasRepo
-            ? new AliasFirstEntityResolver(
-                entityAliasRepo,
-                new PgEntityResolver(pool),
-                pool,
-              )
-            : new PgEntityResolver(pool),
-        }
-      : {}),
+    ...(sharedEntityResolver ? { entityResolver: sharedEntityResolver } : {}),
     // Lets reschedule/cancel/confirm scope appointment resolution to the
     // verified caller's own appointments (appointment → job → customerId).
     jobRepo,
@@ -2694,21 +2718,8 @@ export function createApp(): AppWithLifecycle {
     // execute their skill instead of skipping. `voiceRepo` doubles as the
     // memo-creator resolver for the owner-grade authorization gate.
     voiceRepo,
-    lookupAnswers: {
-      invoiceRepo,
-      estimateRepo,
-      agreementRepo,
-      moneyDashboardRepo,
-      dailyDigestRepo,
-      dunningConfigRepo,
-      timeEntryRepo,
-      expenseRepo,
-      settingsRepo,
-      // Mirrors the telephony adapter wiring: the memo path now writes the
-      // same lookup_events analytics rows (keyed by recordingId).
-      lookupEvents: lookupEventService,
-      resolveMemberRole: resolveVoiceMemberRole,
-    },
+    // Same object the assistant-chat router gets — see `lookupAnswerDeps`.
+    lookupAnswers: lookupAnswerDeps,
   });
   workerRegistry.set(
     voiceActionRouterWorker.type,
@@ -3566,17 +3577,7 @@ export function createApp(): AppWithLifecycle {
     // phone path echoed classifier free text back as "resolved" refs, so every
     // spoken appointment/job reference and spoken time reached the proposal
     // unresolved and the payload could never satisfy its execution contract.
-    ...(pool
-      ? {
-          entityResolver: entityAliasRepo
-            ? new AliasFirstEntityResolver(
-                entityAliasRepo,
-                new PgEntityResolver(pool),
-                pool,
-              )
-            : new PgEntityResolver(pool),
-        }
-      : {}),
+    ...(sharedEntityResolver ? { entityResolver: sharedEntityResolver } : {}),
     extendedIntentsEnabled: voiceExtendedIntentsFlagShim,
     systemActorId: 'system:inbound-call',
     businessName: process.env.TWILIO_BUSINESS_NAME ?? 'our team',
@@ -5460,6 +5461,25 @@ export function createApp(): AppWithLifecycle {
       // survives reload and is searchable.
       conversationRepo,
       auditRepo,
+      // Read-only `lookup_*` dispatch. `answers` is the SAME object the
+      // recorded-memo worker is wired with (see `lookupAnswerDeps`), and
+      // `shared` carries the repos the skills reuse — so the chat surface
+      // and the memo surface cannot drift on which repos a skill gets.
+      // Before this, every lookup question typed OR spoken into the app fell
+      // through to a generic LLM with no DB access.
+      lookups: {
+        answers: lookupAnswerDeps,
+        shared: {
+          jobRepo,
+          appointmentRepo,
+          customerRepo,
+          proposalRepo,
+          availabilityFinder,
+        },
+        ...(sharedEntityResolver ? { entityResolver: sharedEntityResolver } : {}),
+        tenantTimezoneResolver: async (tenantId: string) =>
+          (await tenantSchedulingResolver(tenantId))?.timezone,
+      },
     }),
   );
   // D2-1c — audit-log proposal approve / reject / edit / undo.

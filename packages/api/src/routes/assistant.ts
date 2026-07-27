@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { v4 as uuidv4 } from 'uuid';
 import { AuthenticatedRequest } from '../auth/clerk';
 import { requireAuth, requireTenant, requirePermission } from '../middleware/auth';
+import { hasPermission, isValidRole, type Permission, type Role } from '../auth/rbac';
 import { toErrorResponse } from '../shared/errors';
 import { LLMGateway } from '../ai/gateway/gateway';
 import { ProposalRepository, ProposalType } from '../proposals/proposal';
@@ -13,9 +14,35 @@ import {
 } from '../conversations/conversation-service';
 import {
   classifyIntent,
+  isLookupIntent,
   isVoiceApprovalIntent,
   isVoiceEditIntent,
+  CLASSIFIER_CONFIDENCE_THRESHOLD,
 } from '../ai/orchestration/intent-classifier';
+// Lookup wiring (2026-07): `lookup_*` intents previously matched nothing in
+// either dispatch map below and fell through to the generic LLM — which has
+// no DB access and answered from nothing (production: ZERO `ai_runs` rows
+// with model='data-lookup' or a lookup task_type, ever). They now dispatch
+// through the SAME per-skill implementation the recorded-memo worker uses
+// (`workers/voice-lookup-answer.ts#executeLookupAnswer`); the module below
+// is a thin surface adapter, NOT a second copy of the switch.
+import {
+  dispatchAssistantLookup,
+  type AssistantLookupDeps,
+} from '../ai/orchestration/lookup-dispatch';
+// Honest-failure guard (2026-07). The intent path can end without a proposal
+// three different ways, and every one of them used to fall into the same
+// DB-less generic LLM — which cheerfully replied "I've scheduled you for two
+// hours on this job." having scheduled nothing. See the module header for the
+// production evidence and the three-layer shape.
+import {
+  isActionIntent,
+  detectFabricatedActionClaim,
+  buildUnmappedCapabilityReply,
+  buildNotUnderstoodReply,
+  buildClassifierErrorReply,
+  NO_ACTION_TAKEN_DIRECTIVE,
+} from '../ai/orchestration/assistant-honesty-guard';
 import type { TaskHandler } from '../ai/tasks/task-handlers';
 // Money/edit/send handlers are no longer constructed inline here — both
 // dispatch maps resolve them from the shared handler-registry below.
@@ -274,6 +301,14 @@ export interface AssistantRouterDeps {
   conversationRepo?: ConversationRepository;
   /** Audit sink for the conversation.created event on first persist. */
   auditRepo?: AuditRepository;
+  /**
+   * Read-only `lookup_*` dispatch. ONE bundle rather than ten sibling repo
+   * fields; app.ts passes the SAME `answers`/`shared` objects it already
+   * builds for the recorded-memo worker, so the two surfaces cannot be
+   * wired with different repos. Optional — absent, lookups keep falling
+   * through exactly as they did before (tests that don't care omit it).
+   */
+  lookups?: AssistantLookupDeps;
 }
 
 type AssistantProposal = z.infer<typeof assistantProposalSchema>;
@@ -609,6 +644,51 @@ async function answerUnpaidInvoicesQuery(
   return `${unpaid.length} unpaid invoice${unpaid.length === 1 ? '' : 's'} from the last month, $${(totalDue / 100).toFixed(2)} total due: ${lines}${unpaid.length > 10 ? '; …' : ''}`;
 }
 
+/**
+ * Permission a proposal type needs before it may EXECUTE without a human
+ * approval tap.
+ *
+ * Most drafting handlers pass no `sourceTrustTier`, so their proposals always
+ * land in 'draft' → 'ready_for_review' and a permission holder approves them.
+ * `create_appointment` is the exception: it carries
+ * `sourceTrustTier: 'autonomous'` and is capture-class, so for a supervised,
+ * high-confidence tenant `decideInitialStatus` returns 'approved' and the
+ * worker executes it — and the execution layer performs NO permission check of
+ * its own (verified: no `hasPermission` anywhere under proposals/execution/).
+ *
+ * Granting technicians `ai:run` therefore has to not become a back door around
+ * `appointments:create`, which they deliberately lack (the day-view reschedule
+ * flow routes through the proposal path precisely so `proposals:create` stays
+ * the low-privilege action). A caller who lacks the direct permission still
+ * gets their draft — it just waits for the approval tap instead of
+ * self-executing. Fails closed: an unknown/invalid role gets the downgrade.
+ */
+const DIRECT_EXECUTION_PERMISSION: Partial<Record<ProposalType, Permission>> = {
+  create_appointment: 'appointments:create',
+  create_booking: 'appointments:create',
+};
+
+/**
+ * Downgrade an auto-approved proposal to 'ready_for_review' when the caller
+ * lacks the permission the equivalent direct route would demand. Returns true
+ * when a downgrade was applied. No-op for every proposal that was not
+ * auto-approved, so existing owner/dispatcher behavior is byte-identical.
+ */
+function downgradeIfCallerLacksDirectPermission(
+  proposal: { proposalType: ProposalType; status: string; approvedAt?: Date | undefined },
+  callerRole: string | undefined,
+): boolean {
+  if (proposal.status !== 'approved') return false;
+  const required = DIRECT_EXECUTION_PERMISSION[proposal.proposalType];
+  if (!required) return false;
+  const permitted =
+    !!callerRole && isValidRole(callerRole) && hasPermission(callerRole as Role, required);
+  if (permitted) return false;
+  proposal.status = 'ready_for_review';
+  proposal.approvedAt = undefined;
+  return true;
+}
+
 async function generateAssistantReply(
   messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>,
   tenantId: string,
@@ -635,6 +715,12 @@ async function generateAssistantReply(
   // caller persists the turn — a brand-new conversation has no prior drafts
   // to resolve against yet, so that ordering is never a gap.
   conversationId?: string,
+  // The caller's DB-authoritative role (middleware/auth overwrites
+  // req.auth.role with the membership row's role on every request). Used only
+  // by downgradeIfCallerLacksDirectPermission to keep an auto-approving
+  // proposal from executing for a caller who lacks the direct permission.
+  // Undefined → treated as "lacks it" (fails closed).
+  callerRole?: string,
 ) {
   const lastUser = [...messages].reverse().find((m) => m.role === 'user');
   const lastUserText = lastUser?.content ?? '';
@@ -644,6 +730,14 @@ async function generateAssistantReply(
   // a recognized action (today: create_customer), build a real proposal
   // and return it instead of a free-text LLM reply. Other intents fall
   // through to the LLM — separate stories wire them into the chat.
+  //
+  // Honest-failure guard state, hoisted OUT of the try below so the fallback
+  // path can tell WHY the intent path produced no proposal. Without this the
+  // fallback LLM cannot distinguish "I didn't understand you" from "the
+  // classifier threw", and it answered both by inventing a confirmation.
+  let guardIntent: string | undefined;
+  let guardConfidence: number | undefined;
+  let guardIntentError: string | undefined;
   if (lastUserText.trim().length > 0) {
     try {
       // §3B/3D/3E — resolve the tenant's vertical context (terminology +
@@ -684,11 +778,67 @@ async function generateAssistantReply(
         };
       }
 
-      const classification = await classifyIntent(
-        lastUserText,
-        { tenantId, ...(verticalPromptSection ? { verticalPromptSection } : {}) },
-        deps.gateway,
-      );
+      // `extendedIntents` is set unconditionally on THIS surface. That flag's
+      // real job is (a) keeping the TELEPHONY classifier's prompt messages
+      // byte-identical so voice-quality cassette hashes / gateway cache keys
+      // don't move, and (b) keeping an ANONYMOUS phone caller away from
+      // owner-grade reports. Neither concern exists for an authenticated
+      // operator on their own dashboard — and leaving it off would mean
+      // lookup_day_overview / lookup_digest / lookup_pending_items are never
+      // even EMITTED by the classifier, so "what does my day look like?"
+      // could never be answered here. Authorization is not weakened by this:
+      // owner-grade lookups are gated downstream on the operator's
+      // DB-authoritative RBAC role (`reports:view`), which fails closed.
+      const classifyContext = {
+        tenantId,
+        extendedIntents: true,
+        ...(verticalPromptSection ? { verticalPromptSection } : {}),
+      };
+
+      const classification = await classifyIntent(lastUserText, classifyContext, deps.gateway);
+      guardIntent = classification.intentType;
+      guardConfidence = classification.confidence;
+
+      // ── Lookup path ────────────────────────────────────────────────
+      // Runs BEFORE the chain split and both dispatch maps: a lookup is a
+      // read-only question with one answer, and the chain splitter would
+      // shred "what's my day look like, then what am I owed" into segments
+      // that match no chain handler and get dropped silently.
+      //
+      // `dispatchAssistantLookup` NEVER throws and returns null only when
+      // the intent genuinely has no wired skill here. Everything else —
+      // found, empty, refused, FAILED — comes back as a reply we return
+      // immediately, so a lookup can never be swallowed by this block's
+      // outer `catch { }` and re-answered by the DB-less generic LLM.
+      if (deps.lookups && isLookupIntent(classification.intentType)) {
+        const lookupReply = await dispatchAssistantLookup(
+          {
+            tenantId,
+            userId,
+            intent: classification.intentType,
+            ...(classification.extractedEntities
+              ? { extractedEntities: classification.extractedEntities as Record<string, unknown> }
+              : {}),
+          },
+          deps.lookups,
+        );
+        if (lookupReply) {
+          if (lookupReply.degraded) {
+            logger.error('assistant/chat: lookup failed', {
+              correlationId,
+              tenantId,
+              intent: classification.intentType,
+              reason: lookupReply.message.reasoning,
+            });
+          }
+          return lookupReply;
+        }
+        logger.info('assistant/chat: lookup intent has no wired skill on this surface', {
+          correlationId,
+          tenantId,
+          intent: classification.intentType,
+        });
+      }
 
       // UB-B3 — voice-mode approval guard. approve/reject/edit_proposal are
       // NOT routed in this chat handler; before this guard they fell through
@@ -745,11 +895,9 @@ async function generateAssistantReply(
         for (const segment of chainSegments) {
           let segClass;
           try {
-            segClass = await classifyIntent(
-              segment,
-              { tenantId, ...(verticalPromptSection ? { verticalPromptSection } : {}) },
-              deps.gateway,
-            );
+            // Same context object as the top-level classification above so
+            // the two can't drift on which intents are even emittable.
+            segClass = await classifyIntent(segment, classifyContext, deps.gateway);
           } catch {
             continue;
           }
@@ -787,6 +935,18 @@ async function generateAssistantReply(
             create_invoice_schedule: () => sharedHandlers.get('create_invoice_schedule')!,
             record_payment: () => sharedHandlers.get('record_payment')!,
             notify_delay: () => sharedHandlers.get('notify_delay')!,
+            // Field write intents (2026-07) — the technician's day loop. Each
+            // already had a task handler in the shared registry and an
+            // execution handler; only this dispatch entry was missing, so a
+            // tech saying "log two hours on the Miller job" fell through to a
+            // conversational reply with no draft. Same shared registry as
+            // every other entry, so the two maps still cannot drift.
+            add_note: () => sharedHandlers.get('add_note')!,
+            log_time_entry: () => sharedHandlers.get('log_time_entry')!,
+            log_expense: () => sharedHandlers.get('log_expense')!,
+            create_appointment: () => sharedHandlers.get('create_appointment')!,
+            send_estimate: () => sharedHandlers.get('send_estimate')!,
+            update_customer: () => sharedHandlers.get('update_customer')!,
           };
           const factory = chainHandlers[segClass.intentType];
           if (!factory) continue;
@@ -822,6 +982,9 @@ async function generateAssistantReply(
             proposal.status = 'ready_for_review';
             proposal.approvedAt = undefined;
           }
+          // A caller without the direct permission never gets a self-executing
+          // proposal — their draft waits for the approval tap instead.
+          downgradeIfCallerLacksDirectPermission(proposal, callerRole);
           await deps.proposalRepo.create(proposal);
           if (proposal.status === 'draft') {
             await deps.proposalRepo.updateStatus(tenantId, proposal.id, 'ready_for_review');
@@ -897,6 +1060,15 @@ async function generateAssistantReply(
         create_invoice_schedule: () => sharedHandlers.get('create_invoice_schedule')!,
         record_payment: () => sharedHandlers.get('record_payment')!,
         notify_delay: () => sharedHandlers.get('notify_delay')!,
+        // Field write intents (2026-07) — same six as the chain map above,
+        // same shared registry. Dispatch wiring only: the task handlers and
+        // execution handlers already existed.
+        add_note: () => sharedHandlers.get('add_note')!,
+        log_time_entry: () => sharedHandlers.get('log_time_entry')!,
+        log_expense: () => sharedHandlers.get('log_expense')!,
+        create_appointment: () => sharedHandlers.get('create_appointment')!,
+        send_estimate: () => sharedHandlers.get('send_estimate')!,
+        update_customer: () => sharedHandlers.get('update_customer')!,
       };
       const handlerFactory = proposalHandlers[classification.intentType];
       if (handlerFactory) {
@@ -921,6 +1093,9 @@ async function generateAssistantReply(
           { ...(classification.extractedEntities ?? {}) },
           proposal.sourceContext,
         );
+        // A caller without the direct permission never gets a self-executing
+        // proposal — their draft waits for the approval tap instead.
+        downgradeIfCallerLacksDirectPermission(proposal, callerRole);
         await deps.proposalRepo.create(proposal);
         if (proposal.status === 'draft') {
           await deps.proposalRepo.updateStatus(tenantId, proposal.id, 'ready_for_review');
@@ -1014,9 +1189,44 @@ async function generateAssistantReply(
           },
         };
       }
-    } catch {
+      // ── Honest-failure guard, layer 1 ──────────────────────────────
+      // We got a confident classification, it is a request to CHANGE
+      // something, and nothing above claimed it: no chain step, no entry in
+      // either dispatch map, no create_customer. There is, by construction,
+      // no code path left on which this turn mutates anything — so the only
+      // truthful answer is that we did not do it.
+      //
+      // This short-circuits BEFORE the generic LLM rather than trying to
+      // police its output afterwards, and it is keyed on the intent taxonomy
+      // rather than on a list of "known missing" intents, so it covers every
+      // unwired write intent that exists today and every one added later.
+      // A lookup, a conversational signal, or an unknown classification is
+      // NOT an action and still falls through to the LLM below (questions and
+      // operational advice must keep working) — layer 3 covers those.
+      if (
+        classification.confidence >= CLASSIFIER_CONFIDENCE_THRESHOLD &&
+        isActionIntent(classification.intentType)
+      ) {
+        logger.info('assistant/chat: action intent has no handler on this surface', {
+          correlationId,
+          tenantId,
+          intent: classification.intentType,
+          confidence: classification.confidence,
+        });
+        return buildUnmappedCapabilityReply(classification.intentType);
+      }
+    } catch (err) {
       // Classifier failure should never break the chat — drop into the
-      // generic LLM path so the operator still gets a response.
+      // generic LLM path so the operator still gets a response. But REMEMBER
+      // that it failed: an unrecorded throw here is exactly how "Book her for
+      // Thursday at ten." (classify_intent 429, requests-per-day) turned into
+      // "I have scheduled the appointment for Thursday at 10 AM."
+      guardIntentError = err instanceof Error ? err.message : String(err);
+      logger.error('assistant/chat: intent path failed, falling back to generic LLM', {
+        correlationId,
+        tenantId,
+        error: guardIntentError,
+      });
     }
   }
 
@@ -1035,7 +1245,15 @@ async function generateAssistantReply(
       tenantId,
       responseFormat: 'json',
       messages: [
-        { role: 'system', content: `${systemPrompt}\n\n${outputContract}` },
+        // Honest-failure guard, layer 2. This path has no tools and writes
+        // nothing; the model is the only participant that doesn't know that,
+        // so it is told. A directive alone is not the fix — the model can
+        // ignore it, which is exactly what the two observed fabrications
+        // were — so layer 3 below verifies the answer regardless.
+        {
+          role: 'system',
+          content: `${systemPrompt}\n\n${NO_ACTION_TAKEN_DIRECTIVE}\n\n${outputContract}`,
+        },
         ...messages.filter((m) => m.role !== 'system'),
       ],
       temperature: 0.2,
@@ -1044,6 +1262,40 @@ async function generateAssistantReply(
     });
 
     const parsed = assistantReplySchema.parse(JSON.parse(response.content));
+
+    // ── Honest-failure guard, layer 3 ────────────────────────────────
+    // Nothing on this path persists anything. So a reply that carries no
+    // proposal AND claims a completed action is, by construction, false —
+    // we do not need to guess, we know. Verify rather than trust: the two
+    // production fabrications came from a model that had every opportunity
+    // to behave and didn't, and a prompt instruction cannot be relied on to
+    // change that.
+    //
+    // Scoped to proposal-less replies exactly as the defect is scoped. A
+    // reply that carries a proposal legitimately says "I've drafted…",
+    // because it has.
+    const fabricated = parsed.proposal
+      ? null
+      : detectFabricatedActionClaim(parsed.content);
+    if (fabricated) {
+      logger.error('assistant/chat: suppressed fabricated action confirmation', {
+        correlationId,
+        tenantId,
+        taskType,
+        intent: guardIntent,
+        confidence: guardConfidence,
+        intentError: guardIntentError,
+        claim: fabricated,
+      });
+      // Three failures, three experiences. Layer 1 already took "I can't do
+      // that" (a confident, unmapped write intent never reaches here), so
+      // what is left is the other two — and they are genuinely different
+      // things to say to an operator standing in someone's kitchen.
+      return guardIntentError
+        ? buildClassifierErrorReply(guardIntentError)
+        : buildNotUnderstoodReply(guardConfidence);
+    }
+
     return {
       taskType,
       model: response.model,
@@ -1149,6 +1401,10 @@ export function createAssistantRouter(deps: AssistantRouterDeps): Router {
           // for handlers like IssueInvoiceTaskHandler that resolve "the one we
           // just drafted" from same-conversation proposal history.
           parsed.conversationId,
+          // DB-authoritative role (requireTenant overwrites req.auth.role with
+          // the membership row's role), so a stale/forged `owner` token claim
+          // cannot buy a self-executing proposal.
+          req.auth!.role,
         );
 
         // Story 3.11 — persist the turn so the conversation survives reload and
