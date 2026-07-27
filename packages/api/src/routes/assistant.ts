@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { v4 as uuidv4 } from 'uuid';
 import { AuthenticatedRequest } from '../auth/clerk';
 import { requireAuth, requireTenant, requirePermission } from '../middleware/auth';
+import { hasPermission, isValidRole, type Permission, type Role } from '../auth/rbac';
 import { toErrorResponse } from '../shared/errors';
 import { LLMGateway } from '../ai/gateway/gateway';
 import { ProposalRepository, ProposalType } from '../proposals/proposal';
@@ -629,6 +630,51 @@ async function answerUnpaidInvoicesQuery(
   return `${unpaid.length} unpaid invoice${unpaid.length === 1 ? '' : 's'} from the last month, $${(totalDue / 100).toFixed(2)} total due: ${lines}${unpaid.length > 10 ? '; …' : ''}`;
 }
 
+/**
+ * Permission a proposal type needs before it may EXECUTE without a human
+ * approval tap.
+ *
+ * Most drafting handlers pass no `sourceTrustTier`, so their proposals always
+ * land in 'draft' → 'ready_for_review' and a permission holder approves them.
+ * `create_appointment` is the exception: it carries
+ * `sourceTrustTier: 'autonomous'` and is capture-class, so for a supervised,
+ * high-confidence tenant `decideInitialStatus` returns 'approved' and the
+ * worker executes it — and the execution layer performs NO permission check of
+ * its own (verified: no `hasPermission` anywhere under proposals/execution/).
+ *
+ * Granting technicians `ai:run` therefore has to not become a back door around
+ * `appointments:create`, which they deliberately lack (the day-view reschedule
+ * flow routes through the proposal path precisely so `proposals:create` stays
+ * the low-privilege action). A caller who lacks the direct permission still
+ * gets their draft — it just waits for the approval tap instead of
+ * self-executing. Fails closed: an unknown/invalid role gets the downgrade.
+ */
+const DIRECT_EXECUTION_PERMISSION: Partial<Record<ProposalType, Permission>> = {
+  create_appointment: 'appointments:create',
+  create_booking: 'appointments:create',
+};
+
+/**
+ * Downgrade an auto-approved proposal to 'ready_for_review' when the caller
+ * lacks the permission the equivalent direct route would demand. Returns true
+ * when a downgrade was applied. No-op for every proposal that was not
+ * auto-approved, so existing owner/dispatcher behavior is byte-identical.
+ */
+function downgradeIfCallerLacksDirectPermission(
+  proposal: { proposalType: ProposalType; status: string; approvedAt?: Date | undefined },
+  callerRole: string | undefined,
+): boolean {
+  if (proposal.status !== 'approved') return false;
+  const required = DIRECT_EXECUTION_PERMISSION[proposal.proposalType];
+  if (!required) return false;
+  const permitted =
+    !!callerRole && isValidRole(callerRole) && hasPermission(callerRole as Role, required);
+  if (permitted) return false;
+  proposal.status = 'ready_for_review';
+  proposal.approvedAt = undefined;
+  return true;
+}
+
 async function generateAssistantReply(
   messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>,
   tenantId: string,
@@ -655,6 +701,12 @@ async function generateAssistantReply(
   // caller persists the turn — a brand-new conversation has no prior drafts
   // to resolve against yet, so that ordering is never a gap.
   conversationId?: string,
+  // The caller's DB-authoritative role (middleware/auth overwrites
+  // req.auth.role with the membership row's role on every request). Used only
+  // by downgradeIfCallerLacksDirectPermission to keep an auto-approving
+  // proposal from executing for a caller who lacks the direct permission.
+  // Undefined → treated as "lacks it" (fails closed).
+  callerRole?: string,
 ) {
   const lastUser = [...messages].reverse().find((m) => m.role === 'user');
   const lastUserText = lastUser?.content ?? '';
@@ -859,6 +911,18 @@ async function generateAssistantReply(
             create_invoice_schedule: () => sharedHandlers.get('create_invoice_schedule')!,
             record_payment: () => sharedHandlers.get('record_payment')!,
             notify_delay: () => sharedHandlers.get('notify_delay')!,
+            // Field write intents (2026-07) — the technician's day loop. Each
+            // already had a task handler in the shared registry and an
+            // execution handler; only this dispatch entry was missing, so a
+            // tech saying "log two hours on the Miller job" fell through to a
+            // conversational reply with no draft. Same shared registry as
+            // every other entry, so the two maps still cannot drift.
+            add_note: () => sharedHandlers.get('add_note')!,
+            log_time_entry: () => sharedHandlers.get('log_time_entry')!,
+            log_expense: () => sharedHandlers.get('log_expense')!,
+            create_appointment: () => sharedHandlers.get('create_appointment')!,
+            send_estimate: () => sharedHandlers.get('send_estimate')!,
+            update_customer: () => sharedHandlers.get('update_customer')!,
           };
           const factory = chainHandlers[segClass.intentType];
           if (!factory) continue;
@@ -894,6 +958,9 @@ async function generateAssistantReply(
             proposal.status = 'ready_for_review';
             proposal.approvedAt = undefined;
           }
+          // A caller without the direct permission never gets a self-executing
+          // proposal — their draft waits for the approval tap instead.
+          downgradeIfCallerLacksDirectPermission(proposal, callerRole);
           await deps.proposalRepo.create(proposal);
           if (proposal.status === 'draft') {
             await deps.proposalRepo.updateStatus(tenantId, proposal.id, 'ready_for_review');
@@ -969,6 +1036,15 @@ async function generateAssistantReply(
         create_invoice_schedule: () => sharedHandlers.get('create_invoice_schedule')!,
         record_payment: () => sharedHandlers.get('record_payment')!,
         notify_delay: () => sharedHandlers.get('notify_delay')!,
+        // Field write intents (2026-07) — same six as the chain map above,
+        // same shared registry. Dispatch wiring only: the task handlers and
+        // execution handlers already existed.
+        add_note: () => sharedHandlers.get('add_note')!,
+        log_time_entry: () => sharedHandlers.get('log_time_entry')!,
+        log_expense: () => sharedHandlers.get('log_expense')!,
+        create_appointment: () => sharedHandlers.get('create_appointment')!,
+        send_estimate: () => sharedHandlers.get('send_estimate')!,
+        update_customer: () => sharedHandlers.get('update_customer')!,
       };
       const handlerFactory = proposalHandlers[classification.intentType];
       if (handlerFactory) {
@@ -993,6 +1069,9 @@ async function generateAssistantReply(
           { ...(classification.extractedEntities ?? {}) },
           proposal.sourceContext,
         );
+        // A caller without the direct permission never gets a self-executing
+        // proposal — their draft waits for the approval tap instead.
+        downgradeIfCallerLacksDirectPermission(proposal, callerRole);
         await deps.proposalRepo.create(proposal);
         if (proposal.status === 'draft') {
           await deps.proposalRepo.updateStatus(tenantId, proposal.id, 'ready_for_review');
@@ -1221,6 +1300,10 @@ export function createAssistantRouter(deps: AssistantRouterDeps): Router {
           // for handlers like IssueInvoiceTaskHandler that resolve "the one we
           // just drafted" from same-conversation proposal history.
           parsed.conversationId,
+          // DB-authoritative role (requireTenant overwrites req.auth.role with
+          // the membership row's role), so a stale/forged `owner` token claim
+          // cannot buy a self-executing proposal.
+          req.auth!.role,
         );
 
         // Story 3.11 — persist the turn so the conversation survives reload and
