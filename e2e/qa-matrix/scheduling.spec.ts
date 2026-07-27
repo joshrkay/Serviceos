@@ -5,6 +5,9 @@ import { startVoiceSession, voiceInput, approveAndAwaitExecution } from './helpe
  * SCH-01 — create + reschedule an appointment via the REST API (deterministic).
  * SCH-02 — schedule an appointment by voice (inbound) → create_appointment proposal.
  * SCH-03 — cancel an appointment by voice → cancel_appointment proposal (no REST cancel).
+ *          Runs against tenant B so the tenant has exactly one upcoming
+ *          appointment and the resolution is genuinely unambiguous — see the
+ *          comment on the row itself.
  *
  * SCH-02/03 are Real-LLM-only and depend on the dev API's classifier + entity
  * resolution; they fail loudly if the voice pipeline isn't ready.
@@ -19,13 +22,17 @@ function futureWindow(daysOut: number): { scheduledStart: string; scheduledEnd: 
   return { scheduledStart: start.toISOString(), scheduledEnd: end.toISOString() };
 }
 
-async function createAppointment(h: RowHarness, label: string): Promise<{ id: string; version: number }> {
+async function createAppointment(
+  h: RowHarness,
+  label: string,
+  tenant: RowHarness['tenantA'] = h.tenantA,
+): Promise<{ id: string; version: number }> {
   const win = futureWindow(2);
   const res = await h.api.call({
     method: 'POST',
     path: '/api/appointments',
-    body: { jobId: h.tenantA.jobId, ...win, timezone: 'America/New_York', notes: 'QA scheduling' },
-    token: h.tenantA.token,
+    body: { jobId: tenant.jobId, ...win, timezone: 'America/New_York', notes: 'QA scheduling' },
+    token: tenant.token,
     label,
     expectStatus: 201,
   });
@@ -110,19 +117,61 @@ matrixTest('SCH-02', 'Schedule appointment by voice', async (h) => {
 });
 
 matrixTest('SCH-03', 'Cancel appointment by voice', async (h) => {
-  const { token, tenantId } = h.tenantA;
+  // QA-2026-07-27 (SCH-03) — this row runs against TENANT B, not tenant A.
+  //
+  // passCriteria: "Voice cancel utterance → cancel_appointment proposal →
+  // approve → executed; appointment status=canceled". To test that, the
+  // utterance has to name an appointment the resolver can actually land on.
+  //
+  // Two things were wrong with the old shape:
+  //  1. It spoke the pronoun "that job" with NO antecedent anywhere in the
+  //     session — the seed appointment is created over REST, outside the
+  //     voice call, so nothing in the transcript ever introduced a job. The
+  //     row was asserting a coreference the caller never established.
+  //  2. It passed no callerPhone, unlike SCH-02 (:76, '555-0100'), so the
+  //     adapter never resolved a caller identity up front.
+  //
+  // Tenant A accumulates upcoming appointments across the matrix (SCH-01,
+  // SCH-02, SCH-04, SCH-05, PROP-*, SMS-*), so a tenant-scoped "the upcoming
+  // appointment" lookup there is legitimately AMBIGUOUS and the honest
+  // product answer is a disambiguation question — which is not what this row
+  // is measuring. Tenant B is seeded identically (customer '555-0100', one
+  // open job, plumbing pack — fixtures/seed.ts) and NO other row creates an
+  // appointment for it, and `npm run qa:reset` wipes every tenant-scoped
+  // table before the run. So tenant B has exactly ONE upcoming appointment
+  // here: the one seeded on the line below. That makes the row deterministic
+  // AND makes it exercise the real single-match resolution path rather than
+  // asserting around it.
+  const { token, tenantId } = h.tenantB;
 
-  // Something to cancel.
-  const appt = await createAppointment(h, '03-seed-appt');
+  // Something to cancel — the only upcoming appointment this tenant has.
+  const appt = await createAppointment(h, '03-seed-appt', h.tenantB);
 
-  const sessionId = await startVoiceSession(h, token, '03');
+  // Guard the premise instead of assuming it: if this tenant somehow has more
+  // than one upcoming appointment, the row's own assertion is meaningless and
+  // we say so rather than reporting a resolution failure that isn't one.
+  const upcoming = await h.db.query({
+    label: '03-upcoming-precondition',
+    tenantId,
+    sql: `SELECT id FROM appointments
+           WHERE tenant_id = $1 AND status <> 'canceled' AND scheduled_start >= now()`,
+    params: [tenantId],
+  });
+  if (upcoming.rowCount !== 1) {
+    return void h.evidence.fail(
+      `Precondition broken: tenant B has ${upcoming.rowCount} upcoming appointments, expected exactly 1. ` +
+        'Run `npm run qa:reset && npm run qa:setup` before the matrix.'
+    );
+  }
+
+  const sessionId = await startVoiceSession(h, token, '03', '555-0100');
   if (!sessionId) return void h.evidence.fail('Voice session could not be started.');
 
   const proposalIds = await voiceInput(
     h,
     token,
     sessionId,
-    'Cancel the upcoming appointment for that job — the customer needs to reschedule later',
+    'Cancel my upcoming appointment please — I need to reschedule it for a later date',
     '03'
   );
   if (proposalIds.length === 0) {

@@ -98,6 +98,22 @@ const SEND_ESTIMATE_CLASSIFIER = JSON.stringify({
   extractedEntities: { customerName: 'Bob Smith' },
 });
 
+/**
+ * SCH-03 — the caller's FIRST sentence, exactly as the live QA row speaks it.
+ * cancel_appointment is a record-OPERATING intent (APPOINTMENT_REF_INTENTS),
+ * so the three resolver outcomes must land on three different FSM states.
+ * Confidence 0.8 is the value captured live, above TAU_INT = 0.75 — the
+ * classifier was never the problem.
+ */
+const CANCEL_APPOINTMENT_CLASSIFIER = JSON.stringify({
+  intentType: 'cancel_appointment',
+  confidence: 0.8,
+  extractedEntities: {
+    appointmentReference: 'the upcoming appointment for that job',
+    cancellationType: 'customer_request',
+  },
+});
+
 const RECORD_PAYMENT_CLASSIFIER = JSON.stringify({
   intentType: 'record_payment',
   confidence: 0.93,
@@ -334,6 +350,111 @@ describe('InAppVoiceAdapter — entity-resolution voice safety', () => {
     const turn1 = await adapter.handleInput(sessionId, 'record a payment from Bob Smith');
 
     expect(turn1.state).toBe('escalating');
+    expect(turn1.sideEffects.some((e) => e.type === 'notify_oncall')).toBe(true);
+    expect(auditRepo.getAll().map((e) => e.eventType)).toContain(
+      'agent.calling.entity_resolution.entity_not_found',
+    );
+  });
+
+  // ── SCH-03: first-turn cancel, the three resolver outcomes end-to-end ─────
+  // The caller says "Cancel the upcoming appointment for that job" as their
+  // FIRST sentence. context.jobId is only written by a PRIOR turn that
+  // resolved a job (transitions.ts), so there is no sticky anchor here — the
+  // resolver's tenant-scoped upcoming lookup is what answers, and each of its
+  // three outcomes must land somewhere different.
+  it('SCH-03 — one upcoming appointment resolves the first-turn cancel to intent_confirm, NOT on-call', async () => {
+    const resolver = stubResolver({
+      kind: 'resolved',
+      candidate: {
+        id: 'appt-only',
+        kind: 'appointment',
+        label: '2026-07-29T18:00:00.000Z',
+        score: 1,
+      },
+    });
+    const adapter = makeAdapter(resolver, CANCEL_APPOINTMENT_CLASSIFIER);
+    const { sessionId } = await adapter.startSession(TENANT, USER);
+
+    const turn1 = await adapter.handleInput(
+      sessionId,
+      'Cancel the upcoming appointment for that job',
+    );
+
+    // The caller-visible symptom of the bug was this turn ending in
+    // 'escalating' with "I wasn't able to find the record you're referring to".
+    expect(turn1.state).toBe('intent_confirm');
+    expect(turn1.sideEffects.some((e) => e.type === 'notify_oncall')).toBe(false);
+    const audits = auditRepo.getAll().map((e) => e.eventType);
+    expect(audits).toContain('agent.calling.entity_resolution.entity_resolved');
+    expect(audits).not.toContain('agent.calling.entity_resolution.entity_not_found');
+
+    // No sticky jobId existed, so the resolver was consulted WITHOUT a job
+    // anchor — this is exactly the branch that used to bail out.
+    expect(resolver.calls[0]).toMatchObject({
+      tenantId: TENANT,
+      kind: 'appointment',
+      reference: 'the upcoming appointment for that job',
+    });
+    expect((resolver.calls[0] as { jobId?: string }).jobId).toBeUndefined();
+
+    // A real caller "yes" then produces the cancel proposal carrying the id.
+    const turn2 = await adapter.handleInput(sessionId, 'yes');
+    const proposals = await proposalRepo.findByTenant(TENANT);
+    expect(turn2.proposalIds.length).toBe(1);
+    expect(proposals[0].proposalType).toBe('cancel_appointment');
+    expect(proposals[0].payload.appointmentId).toBe('appt-only');
+  });
+
+  it('SCH-03 — several upcoming appointments ask the existing entity_ambiguous question, never a silent pick', async () => {
+    const resolver = stubResolver({
+      kind: 'ambiguous',
+      candidates: [
+        { id: 'appt-1', kind: 'appointment', label: '2026-07-28T18:00:00.000Z', score: 1 },
+        { id: 'appt-2', kind: 'appointment', label: '2026-07-29T18:00:00.000Z', score: 1 },
+        { id: 'appt-3', kind: 'appointment', label: '2026-07-30T18:00:00.000Z', score: 1 },
+      ],
+    });
+    const adapter = makeAdapter(resolver, CANCEL_APPOINTMENT_CLASSIFIER);
+    const { sessionId } = await adapter.startSession(TENANT, USER);
+
+    const turn1 = await adapter.handleInput(
+      sessionId,
+      'Cancel the upcoming appointment for that job',
+    );
+
+    // The FSM's EXISTING one-tap disambiguation path — no new path invented.
+    expect(turn1.state).toBe('entity_resolution');
+    expect(turn1.proposalIds.length).toBe(0);
+    expect(await proposalRepo.findByTenant(TENANT)).toHaveLength(0);
+    const disambig = turn1.sideEffects.find(
+      (e) => e.type === 'tts_play' && e.payload.template === 'disambiguate',
+    );
+    expect(disambig).toBeDefined();
+    expect(disambig?.payload.candidates as unknown[]).toHaveLength(3);
+    expect(auditRepo.getAll().map((e) => e.eventType)).toContain(
+      'agent.calling.entity_resolution.entity_ambiguous',
+    );
+  });
+
+  it('SCH-03 — the escalation guard still fires: nothing to cancel still escalates to on-call', async () => {
+    // Regression fence for 46a954e1. cancel_appointment is record-operating,
+    // so a genuine not_found must NOT be softened into entity_resolved by the
+    // new fallback.
+    const resolver = stubResolver({
+      kind: 'not_found',
+      reference: 'the upcoming appointment for that job',
+    });
+    const adapter = makeAdapter(resolver, CANCEL_APPOINTMENT_CLASSIFIER);
+    const { sessionId } = await adapter.startSession(TENANT, USER);
+
+    const turn1 = await adapter.handleInput(
+      sessionId,
+      'Cancel the upcoming appointment for that job',
+    );
+
+    expect(turn1.state).toBe('escalating');
+    expect(turn1.proposalIds.length).toBe(0);
+    expect(await proposalRepo.findByTenant(TENANT)).toHaveLength(0);
     expect(turn1.sideEffects.some((e) => e.type === 'notify_oncall')).toBe(true);
     expect(auditRepo.getAll().map((e) => e.eventType)).toContain(
       'agent.calling.entity_resolution.entity_not_found',
