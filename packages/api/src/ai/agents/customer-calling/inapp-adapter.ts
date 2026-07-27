@@ -23,6 +23,11 @@ import type { ProposalRepository } from '../../../proposals/proposal';
 import { createProposal as buildProposal } from '../../../proposals/proposal';
 import type { ProposalType } from '../../../proposals/proposal';
 import type { ProposalSurface } from '../../../proposals/surface';
+// THE shared voice → proposal payload contract, also used by the real Twilio
+// path (ai/voice-turn/create-voice-turn-processor.ts). Exactly one copy of the
+// promotion / alias / line-item translation exists, and it lives next to the
+// per-type contracts it has to satisfy.
+import { buildVoiceProposalPayload } from '../../../proposals/voice-payload';
 import type { AuditRepository } from '../../../audit/audit';
 import { createAuditEvent } from '../../../audit/audit';
 import type { OnCallRepository } from '../../../oncall/rotation';
@@ -1426,134 +1431,127 @@ export class InAppVoiceAdapter {
           tenantThresholdOverride = undefined;
         }
       }
-      // QA-2026-06-05: execution handlers read the FLAT task contract
-      // (create_customer wants payload.name; create_appointment wants
-      // payload.jobId/scheduledStart/... — see proposals/execution/*), but
-      // this adapter only nested the raw classifier entities, so EVERY
-      // voice execution failed its handler validation (live:
-      // 'Payload must include a non-empty name' / 'a valid jobId').
-      // Promote primitive entity values to the payload top level — for MOST
-      // entities the classifier's key IS the task-contract field name — while
-      // keeping `entities` intact for audit/rendering. Reserved envelope
-      // keys are never clobbered. Where the two vocabularies DIVERGE the
-      // generic loop is not enough and an explicit alias is required below
-      // (create_customer's displayName→name, send_*'s sendChannel→channel);
-      // both mirror translations the non-voice routes already perform.
-      const RESERVED = new Set(['intent', 'entities', 'sessionId', 'conversationId', 'callSid', 'customerId', 'confidence']);
-      const flat: Record<string, unknown> = {};
-      for (const [k, v] of Object.entries(entities)) {
-        if (RESERVED.has(k)) continue;
-        if (typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean') flat[k] = v;
-      }
-      if (typeof entities.displayName === 'string' && flat.name === undefined) flat.name = entities.displayName;
-      // QA-2026-07-26: the intent classifier only ever emits `sendChannel`
-      // (intent-classifier.ts ExtractedEntities), but the send_estimate /
-      // send_invoice task contracts — and therefore their execution handlers
-      // (proposals/execution/voice-extended-handlers.ts, which reject with
-      // 'Payload must specify channel as email or sms') — read `channel`.
-      // The generic loop above copies the key verbatim, so the voice payload
-      // carried sendChannel:'email' and no channel at all: the live VOX-06
-      // failure ("send estimate EST-0033 to the customer by email" classified,
-      // resolved and approved, then died at execution). Alias it here,
-      // mirroring the non-voice path's `channel: ee.sendChannel ?? 'email'`
-      // (ai/tasks/voice-extended-tasks.ts:517). Only set when absent so an
-      // explicit `channel` entity always wins.
-      if (typeof entities.sendChannel === 'string' && flat.channel === undefined) flat.channel = entities.sendChannel;
-      // QA-2026-07-26: customerId stays in RESERVED above (never promoted by
-      // the generic loop) because the top-level `payload.customerId` this
-      // envelope also carries (see transitions.ts transitionIntentConfirm)
-      // is context.customerId — the authenticated in-app OPERATOR's identity
-      // (used only for `createdBy` below), not a CRM customer, and is
-      // undefined for every in-app session by design (see the
-      // operator_session comment earlier in this file). Blindly promoting
-      // entities.customerId through the generic loop would have been safe
-      // value-wise but relied on incidental ordering; being explicit here
-      // documents intent and can't be silently broken by a future RESERVED
-      // edit. The *resolved* customer UUID execution handlers actually need
-      // lives in entities.customerId — populated by the entity-resolution
-      // refs merge (transitions.ts `entity_resolved` handler folds
-      // event.refs, including a resolver-validated customerId, into
-      // extractedEntities). Without this, the outgoing proposal payload had
-      // no customerId at all, and DraftEstimateExecutionHandler.execute()
-      // (proposals/execution/handlers.ts) reads payload.customerId directly,
-      // throwing "Estimate draft has neither a customerId nor a jobId" —
-      // the live VOX-05 (and create_booking/SMS-01) QA-matrix failure. Only
-      // set it when a resolved value is actually present so we never write
-      // an explicit `undefined` over some future legitimate default.
-      if (typeof entities.customerId === 'string' && entities.customerId.length > 0) {
-        flat.customerId = entities.customerId;
-      }
-      // QA-2026-07-26: draft_estimate entities carry lineItemDescriptions as
-      // a string[] (intent-classifier.ts ExtractedEntities), which the
-      // generic scalar-only loop above never promotes (it only lifts
-      // string|number|boolean values) — payload.lineItems was always
-      // undefined for the voice path, so EVERY voice-drafted estimate died
-      // at execution with "Payload must include at least one lineItem."
-      // Build a draft line-items array from the descriptions and ground it
-      // through groundLineItemPricing — the SAME function the non-voice
-      // draft_estimate task (ai/tasks/estimate-task.ts) already calls — so
-      // a catalog match sets the authoritative price and an uncatalogued
-      // line keeps its guessed price but is flagged for review, instead of
-      // either inventing an untracked number or dropping the line.
+      // QA-2026-06-05 / QA-2026-07-26 — THE PAYLOAD CONTRACT. Execution
+      // handlers read the FLAT task contract (create_customer wants
+      // payload.name; create_appointment wants payload.jobId/scheduledStart —
+      // see proposals/execution/*), but the FSM hands this adapter a NESTED
+      // `{intent, entities, …}` envelope, so every voice execution used to
+      // fail its handler validation.
       //
-      // QA-2026-07-26 (VOX-07): this gate originally read
-      // `proposalType === 'draft_estimate'`, which left the IDENTICAL hole
-      // open for draft_invoice. CreateInvoiceExecutionHandler
-      // (proposals/execution/invoice-execution-handler.ts) enforces the same
-      // non-empty `lineItems` requirement as the estimate handler and there is
-      // no amount→lineItems fallback anywhere downstream, so every
-      // voice-drafted invoice — including the plain "create an invoice for
-      // $350 for the furnace repair" a real operator says — died at execution
-      // with "Payload must include at least one lineItem". The two proposal
-      // types consume line items identically (both go through
-      // normalizeDraftLineItems), so the grounding pass applies verbatim.
-      const GROUNDED_LINE_ITEM_PROPOSAL_TYPES: ReadonlySet<string> = new Set([
-        'draft_estimate',
-        'draft_invoice',
-      ]);
-      let voiceLineItemOutcome: CatalogPricingOutcome | undefined;
-      if (
-        proposalType !== undefined &&
-        GROUNDED_LINE_ITEM_PROPOSAL_TYPES.has(proposalType) &&
-        Array.isArray(entities.lineItemDescriptions) &&
-        entities.lineItemDescriptions.length > 0
-      ) {
-        const descriptions = entities.lineItemDescriptions.filter(
-          (d): d is string => typeof d === 'string' && d.trim().length > 0,
-        );
-        if (descriptions.length > 0) {
-          voiceLineItemOutcome = await this.buildVoiceDraftLineItems(
-            session.tenantId,
-            descriptions,
-            entities.amount,
-          );
-          flat.lineItems = voiceLineItemOutcome.lineItems;
-        }
-      }
-      // An uncatalogued (LLM/heuristic-priced) line must never ride the raw
-      // classifier confidence into auto-approval — cap it exactly like
-      // estimate-task.ts's UNCATALOGUED_CONFIDENCE_CAP, and stamp the RV-007
-      // `_meta.overallConfidence = 'low'` hard block (proposals/auto-approve.ts
-      // confidenceMetaBlocksAutoApprove) so decideInitialStatus can never
-      // return 'approved' for it, regardless of any tenant threshold override.
+      // That promotion / alias / line-item translation is no longer written
+      // here: it is owned by `buildVoiceProposalPayload`
+      // (proposals/voice-payload.ts), which was modelled on this very
+      // function and is now SHARED with the real Twilio phone path
+      // (ai/voice-turn/create-voice-turn-processor.ts) so the two voice
+      // surfaces can never drift apart again. Every QA-2026-* fix this block
+      // used to carry — displayName→name, sendChannel→channel, the resolved
+      // customerId, and grounded lineItems for draft_estimate AND
+      // draft_invoice — lives there now, next to the contract it satisfies.
+      //
+      // What stays HERE is what the module deliberately does not own:
+      // session/FSM concerns, the summary, status decisions, sourceContext,
+      // and the in-app line-item grounding wrapper injected below.
       const rawConfidence = typeof payload.confidence === 'number' ? payload.confidence : undefined;
-      const confidenceScore =
-        voiceLineItemOutcome?.anyUncatalogued && rawConfidence !== undefined
-          ? Math.min(rawConfidence, UNCATALOGUED_CONFIDENCE_CAP)
-          : rawConfidence;
+      const built = await buildVoiceProposalPayload(
+        {
+          intent,
+          proposalType,
+          // POST-resolution entities: the FSM's `entity_resolved` handler has
+          // already folded resolver-validated refs (including a validated
+          // customerId) into `extractedEntities` before this side effect is
+          // emitted (transitions.ts).
+          entities,
+          envelope: {
+            sessionId: session.id,
+            ...(typeof payload.conversationId === 'string'
+              ? { conversationId: payload.conversationId }
+              : {}),
+          },
+          ...(rawConfidence !== undefined ? { confidence: rawConfidence } : {}),
+          // DELIBERATELY NO `callerCustomerId`. On the telephony path that
+          // argument is the IDENTIFIED CALLER's customer id. In-app is the
+          // other way round: this envelope's top-level `payload.customerId`
+          // is context.customerId — the AUTHENTICATED OPERATOR's identity
+          // (used only for `createdBy` below, and undefined for every in-app
+          // session by design; see the operator_session comment earlier in
+          // this file). Passing it here would write an OPERATOR id into
+          // `payload.customerId`, which every record-linking execution
+          // handler reads as the CRM CUSTOMER. The only customer id an in-app
+          // payload may carry is the resolved `entities.customerId`, which
+          // the module already prefers on its own.
+          //
+          // QA-2026-07-26: that resolved id is what makes voice estimates
+          // executable at all — DraftEstimateExecutionHandler
+          // (proposals/execution/handlers.ts) reads payload.customerId
+          // directly and otherwise throws "Estimate draft has neither a
+          // customerId nor a jobId" (the live VOX-05 / create_booking /
+          // SMS-01 QA-matrix failures).
+        },
+        {
+          tenantId: session.tenantId,
+          // The catalog grounding is INJECTED (proposals/ must not import
+          // ai/resolution/* — the catalog resolver imports back through the
+          // proposal contracts). This is the IN-APP wrapper
+          // (`buildVoiceDraftLineItems`); the telephony path injects its own
+          // (`groundVoiceQuote`), which additionally produces the spoken
+          // read-back. Both bottom out in the same `groundLineItemPricing`;
+          // unifying the two wrappers is a separate step.
+          //
+          // An uncatalogued (LLM/heuristic-priced) line must never ride the
+          // raw classifier confidence into auto-approval — cap it exactly
+          // like estimate-task.ts's UNCATALOGUED_CONFIDENCE_CAP, and stamp
+          // the RV-007 `_meta.overallConfidence = 'low'` hard block
+          // (proposals/auto-approve.ts confidenceMetaBlocksAutoApprove) so
+          // decideInitialStatus can never return 'approved' for it,
+          // regardless of any tenant threshold override.
+          groundLineItems: async (descriptions) => {
+            const outcome = await this.buildVoiceDraftLineItems(
+              session.tenantId,
+              descriptions,
+              entities.amount,
+            );
+            return {
+              lineItems: outcome.lineItems,
+              ...(outcome.anyUncatalogued
+                ? { meta: { overallConfidence: 'low' as const } }
+                : {}),
+              missingFields: outcome.missingFields,
+              ...(outcome.anyUncatalogued && rawConfidence !== undefined
+                ? { confidenceScore: Math.min(rawConfidence, UNCATALOGUED_CONFIDENCE_CAP) }
+                : {}),
+            };
+          },
+        },
+      );
+      // The module gates every payload on its type's own schema. The inbound
+      // CALLER path ACTS on a failure (persist the real type with the unmet
+      // keys as `missingFields`, or degrade to a clarification card) because
+      // nobody is watching a live phone call. In-app is an AUTHENTICATED
+      // OPERATOR (surface S2) who reads and can edit the proposal card before
+      // approving, and `approveProposal` re-validates at the execution
+      // boundary regardless — so a contract gap here does NOT change what is
+      // persisted. It must still be diagnosable, hence the audit row.
+      if (!built.ok) {
+        await this.handleAuditLog(session, {
+          type: 'audit_log',
+          payload: {
+            eventType: 'voice.payload_contract_failed',
+            intent,
+            proposalType,
+            outcome: 'persisted_unchanged',
+            errors: built.errors,
+            missingFields: built.missingFieldPaths,
+            sessionId: session.id,
+          },
+        } as SideEffect);
+      }
+      const voiceLineItemOutcome = built.lineItemOutcome;
+      const confidenceScore = built.confidence;
       const proposal = buildProposal({
         tenantId: session.tenantId,
         proposalType,
-        payload: {
-          ...flat,
-          intent,
-          entities,
-          sessionId: session.id,
-          conversationId: typeof payload.conversationId === 'string' ? payload.conversationId : undefined,
-          ...(voiceLineItemOutcome?.anyUncatalogued
-            ? { _meta: { overallConfidence: 'low' as const } }
-            : {}),
-        },
+        // Flat, contract-checked, built by the shared module above.
+        payload: built.payload,
         summary,
         // QA-2026-06-04: mirror the AI task handlers (create-appointment-task
         // et al.) — calling-agent proposals are capture-class from the
@@ -1565,7 +1563,7 @@ export class InAppVoiceAdapter {
         // price-conflict "did you mean") require the operator to pick —
         // forces 'draft' regardless of trust tier / confidence, same as
         // estimate-task.ts.
-        ...(voiceLineItemOutcome && voiceLineItemOutcome.missingFields.length > 0
+        ...(voiceLineItemOutcome?.missingFields && voiceLineItemOutcome.missingFields.length > 0
           ? { missingFields: voiceLineItemOutcome.missingFields }
           : {}),
         sourceTrustTier: 'autonomous',
