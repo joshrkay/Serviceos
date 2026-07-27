@@ -29,6 +29,17 @@ updates:
       # type errors for APIs that are not actually available.
       - dependency-name: '@types/node'
         update-types: ['version-update:semver-major']
+      # Payments path. 3.x -> 6.x crosses three majors that moved peer
+      # requirements and Elements mounting behaviour; the failure mode is
+      # customers unable to check out. Upgrade deliberately against Stripe's
+      # migration guide with a payment smoke test, not on a weekly cadence.
+      - dependency-name: '@stripe/react-stripe-js'
+        update-types: ['version-update:semver-major']
+      # ESLint environment table. Majors add and remove environment keys, so a
+      # key our eslint.config still references disappearing is a repo-wide lint
+      # failure — real breakage for no runtime benefit.
+      - dependency-name: 'globals'
+        update-types: ['version-update:semver-major']
 
   # packages/mobile is not a root workspace and carries its own lockfile, so
   # the root entry above does not cover it.
@@ -50,6 +61,15 @@ updates:
         update-types: ['version-update:semver-major']
       - dependency-name: 'react-native'
         update-types: ['version-update:semver-major']
+      # The expo-* module set is versioned in lockstep with the SDK train, not
+      # independently: expo-file-system 18 -> 57 and expo-notifications 0.29 ->
+      # 57 were both just "align to SDK 57", and both rewrote their public API
+      # on the way. Bumping one alone desyncs packages/mobile against the
+      # others. Same reasoning as the two entries above, applied to the modules
+      # rather than the SDK package — a wildcard because the set keeps growing
+      # and enumerating it means a new ignore rule every time a module is added.
+      - dependency-name: 'expo-*'
+        update-types: ['version-update:semver-major']
 
   - package-ecosystem: github-actions
     directory: '/'
@@ -60,6 +80,18 @@ updates:
       actions:
         applies-to: version-updates
         update-types: ['minor', 'patch']
+    ignore:
+      # Used by every workflow in the repo, so a bad bump breaks all of CI at
+      # once rather than one job. v5 -> v7 also crosses two majors that change
+      # the runtime and default fetch/auth behaviour. Pin deliberately.
+      - dependency-name: 'actions/checkout'
+        update-types: ['version-update:semver-major']
+      # v2 replaced the action's input contract outright (payload/method
+      # superseded the webhook-style inputs), so our `with:` blocks are not
+      # forward-compatible — a major here is a rewrite of the call sites, and
+      # the failure mode is silently broken alerting.
+      - dependency-name: 'slackapi/slack-github-action'
+        update-types: ['version-update:semver-major']
 
   # Base images in /Dockerfile. Both are digest-pinned, which is deterministic
   # but does not self-update — an unwatched digest pin is how a service ends up
@@ -71,3 +103,15 @@ updates:
     schedule:
       interval: weekly
     open-pull-requests-limit: 3
+    ignore:
+      # Major-only. Node 20 -> 26 is six majors and changes the *production
+      # runtime*, crossing native-ABI/OpenSSL/ICU boundaries — every native
+      # module needs rebuilding and it lands on Railway. That is a planned
+      # migration, coordinated with .nvmrc and the CI Node version so the three
+      # do not drift apart.
+      #
+      # Deliberately scoped to majors so this entry keeps doing the job the
+      # comment above describes: node:20.x.y patch bumps, which are what
+      # actually carry the Alpine/OpenSSL CVE fixes, still come through.
+      - dependency-name: 'node'
+        update-types: ['version-update:semver-major']
