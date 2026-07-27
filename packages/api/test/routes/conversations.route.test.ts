@@ -171,6 +171,19 @@ describe('GET /api/conversations/:id — journey QA bug 11 (thread self-wipe)', 
   });
 });
 
+describe('GET /api/conversations/:id/messages — tenant isolation', () => {
+  it('returns 404 when the conversation is not owned by the authenticated tenant', async () => {
+    const { app } = buildApp({ withGateway: false });
+    const res = await request(app).get('/api/conversations/another-tenant-conversation/messages');
+
+    expect(res.status).toBe(404);
+    expect(res.body).toEqual({
+      error: 'NOT_FOUND',
+      message: 'Conversation not found',
+    });
+  });
+});
+
 describe('GET /api/conversations/search — Story 3.11 history search', () => {
   async function seedLinked(repo: InMemoryConversationRepository) {
     const custConv = await repo.createConversation({

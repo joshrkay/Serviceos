@@ -351,6 +351,18 @@ export class CreateAppointmentExecutionHandler implements ExecutionHandler {
     },
     /** Tenant-timezone fallback for payloads that omit `timezone`. */
     private readonly settingsRepo?: Pick<SettingsRepository, 'findByTenant'>,
+    /**
+     * SCH-02 — auto-open-a-job fallback. A caller describing NEW work
+     * ("book an appointment for a furnace tune-up") is classified with
+     * entities.jobTitle and no resolvable jobId (see entity-resolution.ts's
+     * JOB_REF_INTENTS comment — jobTitle documents "title of new job",
+     * deliberately never fuzzy-searched as an existing-job reference for
+     * create_appointment). Mirrors DraftEstimateExecutionHandler /
+     * CreateJobExecutionHandler's own customer-location lookup so the new
+     * job lands somewhere real. Absent → the jobTitle fallback is skipped
+     * and the handler keeps its original hard-fail behavior.
+     */
+    private readonly locationRepo?: LocationRepository,
   ) {}
 
   // Degrades to a synthetic-id passthrough (saves nothing) without the
@@ -368,8 +380,76 @@ export class CreateAppointmentExecutionHandler implements ExecutionHandler {
       typeof payload.linkedJobId === 'string' && payload.linkedJobId.length > 0
         ? payload.linkedJobId
         : undefined;
-    const targetJobId =
+    let targetJobId =
       linkedJobId ?? (typeof payload.jobId === 'string' && payload.jobId.length > 0 ? payload.jobId : undefined);
+
+    // SCH-02 — a caller describing NEW work ("book an appointment for a
+    // furnace tune-up") is classified with entities.jobTitle (documented as
+    // "title of new job on create_job" — a NAME for work being CREATED, not
+    // a lookup target) and no resolvable jobId, because create_appointment
+    // is deliberately excluded from entity-resolution.ts's JOB_REF_INTENTS
+    // fuzzy job search. Without this fallback every such call hard-failed
+    // below. Whenever an already-resolved customerId is present, auto-open a
+    // new job (reusing the same createJob domain fn + customer-location
+    // lookup CreateJobExecutionHandler and DraftEstimateExecutionHandler
+    // already use) and book against it — matching how a human dispatcher
+    // would actually handle the call. A linkedJobId revisit never reaches
+    // here (targetJobId is already set).
+    //
+    // The job NAME cascades jobTitle → proposal.summary. Gating the whole
+    // block on jobTitle made the booking nondeterministic: jobTitle is an
+    // LLM-extracted entity that the classifier emits only MOST of the time
+    // (measured 39/40 on the SMS-01 utterance), so an unlucky phrasing
+    // dropped the caller's booking with "Payload must include a valid
+    // jobId". `proposal.summary` is an always-present terminator — it is
+    // non-optional on Proposal, buildProposal rejects an empty one, and the
+    // voice path fills it from inapp-adapter's hardcoded summaryFor()
+    // template (at minimum "Schedule appointment", well inside createJob's
+    // 500-char limit). Same shape DraftEstimateExecutionHandler and
+    // CreateInvoiceExecutionHandler already use for their job names.
+    if (!targetJobId) {
+      const jobTitle = typeof payload.jobTitle === 'string' ? payload.jobTitle.trim() : '';
+      const customerId =
+        typeof payload.customerId === 'string' && payload.customerId.length > 0
+          ? payload.customerId
+          : undefined;
+      if (customerId && this.jobRepo && this.locationRepo) {
+        const locations = await this.locationRepo.findByCustomer(context.tenantId, customerId);
+        const primary = locations.find((loc) => loc.isPrimary && !loc.isArchived);
+        const fallback = locations.find((loc) => !loc.isArchived);
+        const locationId = primary?.id ?? fallback?.id;
+        if (!locationId) {
+          return {
+            success: false,
+            error: 'Customer has no service location — add one before booking a new job',
+          };
+        }
+        try {
+          const job = await createJob(
+            {
+              tenantId: context.tenantId,
+              customerId,
+              locationId,
+              summary: jobTitle || proposal.summary,
+              createdBy: context.executedBy,
+            },
+            this.jobRepo,
+            this.auditRepo,
+          );
+          targetJobId = job.id;
+        } catch (err) {
+          return {
+            success: false,
+            error: err instanceof Error ? err.message : String(err),
+          };
+        }
+      }
+    }
+
+    // customerId ALSO missing in the jobTitle-no-jobId scenario is a
+    // distinct, expected failure — can't open a job without a customer to
+    // own it. Falls through to the same original error as any other
+    // unresolved jobId so callers see one consistent message.
     if (!targetJobId) {
       return { success: false, error: 'Payload must include a valid jobId' };
     }
@@ -479,18 +559,28 @@ export class CreateAppointmentExecutionHandler implements ExecutionHandler {
         ? { arrivalWindowStart, arrivalWindowEnd }
         : {}),
       timezone,
-      // Reason-for-visit persistence: voice proposals carry the spoken work
-      // description in `summary` (the LLM-extracted "one-line description of
-      // the work requested"), while programmatic callers set `notes`. Persist
-      // whichever is present — `notes` wins when both exist — so an inbound
-      // cold-call create_appointment (no jobId → skips the held-slot path that
-      // already maps summary→notes) never drops the caller's reason.
+      // Reason-for-visit persistence: programmatic callers set `notes`;
+      // `payload.summary` is kept for any caller that sets it. Neither is
+      // ever present on the VOICE path — `ExtractedEntities` has no
+      // `summary` field (see intent-classifier.ts's extraction whitelist)
+      // and inapp-adapter passes the proposal summary to buildProposal's
+      // `summary`, never onto the payload — so voice bookings silently
+      // persisted no reason at all. Extend the cascade to the two values
+      // voice DOES carry: `payload.jobTitle`, the LLM-extracted spoken work
+      // description ("furnace tune-up") and by far the most useful reason,
+      // then `proposal.summary`, the always-present terminator (same
+      // guarantee relied on for the job name above). `notes` is an
+      // internal dispatcher/tech field — it is not read by any customer
+      // -facing notification or portal route — so the generic
+      // "Schedule appointment for X" terminator is safe as a last resort.
       notes:
         typeof payload.notes === 'string'
           ? payload.notes
           : typeof payload.summary === 'string'
             ? payload.summary
-            : undefined,
+            : typeof payload.jobTitle === 'string' && payload.jobTitle.trim().length > 0
+              ? payload.jobTitle.trim()
+              : proposal.summary,
       // Typed visit kind — enum-validate before persisting. The payload was
       // Zod-checked upstream, but never forward a raw value unguarded.
       appointmentType: appointmentTypeSchema.safeParse(payload.appointmentType).success
@@ -1101,8 +1191,11 @@ export function createExecutionHandlerRegistry(deps?: {
       // reassign/crew/reschedule handlers already consume.
       deps?.feasibilityDeps,
       deps?.settingsRepo,
+      // SCH-02 — jobTitle-no-jobId auto-open-a-job fallback needs the same
+      // customer-location lookup CreateJobExecutionHandler/DraftEstimateExecutionHandler use.
+      deps?.locationRepo,
     ),
-    new CreateBookingExecutionHandler(deps?.appointmentRepo, deps?.auditRepo),
+    new CreateBookingExecutionHandler(deps?.appointmentRepo, deps?.auditRepo, deps?.transactionalComms),
     new DraftEstimateExecutionHandler(
       deps?.estimateRepo,
       deps?.settingsRepo,

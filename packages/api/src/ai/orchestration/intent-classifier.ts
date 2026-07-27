@@ -542,10 +542,23 @@ Given a voice transcript from a field service operator, decide which action they
 
 Supported intents (return exactly ONE):
 - "create_invoice"      — user wants to draft a NEW invoice for work completed.
-                           Example: "Create an invoice for Acme for 450 dollars"
+                           Extract lineItemDescriptions (one short entry per
+                           distinct piece of work billed — an invoice with no
+                           line items cannot be created), amount (stated total,
+                           integer cents), customerName, and jobReference when
+                           a job is referenced. Never invent lines; one
+                           described job is ONE line.
+                           Examples: "Create an invoice for Acme for 450 dollars"
+                                     "Invoice the Smith job for the completed
+                                      furnace repair, $350 total" →
+                                      lineItemDescriptions ["completed furnace repair"]
 - "draft_estimate"      — user wants to draft a new estimate/quote before work starts.
                            Example: "Draft an estimate for the Johnson water heater"
 - "create_appointment"  — user wants to schedule a new appointment or follow-up.
+                           Extract jobTitle (a short name for the new work
+                           being scheduled), dateTimeDescription (when they
+                           want it scheduled), and customerName if a specific
+                           customer is named.
                            Example: "Schedule a follow-up for Mrs Lee next Tuesday at 2pm"
 - "update_invoice"      — user wants to ADD or REMOVE a line item on an EXISTING
                            draft invoice. Requires an explicit invoice reference
@@ -692,7 +705,10 @@ Supported intents (return exactly ONE):
                            customer (email or SMS). This is a customer
                            comms action — never auto-execute, always
                            require a screen-tap approval. Extract the
-                           estimate reference and sendChannel.
+                           estimate number or description into jobReference
+                           (the shared reference field used to look up
+                           estimates/invoices/jobs), and sendChannel (email
+                           or sms).
                            Examples: "Send estimate EST-0042 to Sarah"
                                      "Email the Jones estimate"
                                      "Text the Miller estimate to them"
@@ -1028,7 +1044,7 @@ Return valid JSON with exactly this shape (no prose, no markdown fences):
     "sendChannel": "<email|sms, optional — on send_invoice>",
     "paymentMethod": "<cash|check|card|other, optional — on record_payment>",
     "paymentReference": "<string, optional — check number or memo on record_payment>",
-    "jobTitle": "<string, optional — title of new job on create_job>",
+    "jobTitle": "<string, optional — title of new job on create_job; also the short name of the new work being scheduled on create_appointment>",
     "updatedName": "<string, optional — new name on update_customer>",
     "updatedEmail": "<string, optional — new email on update_customer>",
     "updatedPhone": "<string, optional — new phone on update_customer>",
@@ -1165,6 +1181,12 @@ interface OwnerOperatorCommandPattern {
  */
 const OWNER_OPERATOR_COMMAND_PATTERNS: ReadonlyArray<OwnerOperatorCommandPattern> = [
   {
+    intentType: 'lookup_day_overview',
+    pattern:
+      /^\s*(?:(?:what|which|show me|list)\s+(?:appointments?|jobs?)\s+(?:are\s+)?scheduled\s+(?:for\s+)?today|(?:show me|what(?:'s| is))\s+today(?:'s)?\s+schedule)\s*[?.!]?\s*$/i,
+    extract: () => ({}),
+  },
+  {
     intentType: 'create_customer',
     pattern:
       /^\s*(?:new\s+customer|add\s+(?:a\s+)?customer)\s+([a-z][a-z.'-]*(?:\s+[a-z][a-z.'-]*){0,3})\s*,\s*phone(?:\s+number)?\s*(?::|is)?\s*(\+?[\d(][\d\s().-]{5,20}\d)\s*[.!?]?\s*$/i,
@@ -1281,6 +1303,8 @@ const EXTENDED_INTENT_PHRASES: ReadonlyArray<{ intent: IntentType; patterns: Rea
       /\bwhat(?:'s| is| does)\s+my\s+day\s+look(?:ing)?\s+like\b/i,
       /\b(?:give me |what's )?my morning overview\b/i,
       /\bhow(?:'s| is)\s+my\s+day\s+looking\b/i,
+      /^\s*(?:what|which|show me|list)\s+(?:appointments?|jobs?)\s+(?:are\s+)?scheduled\s+(?:for\s+)?today\s*[?.!]?\s*$/i,
+      /^\s*(?:show me|what(?:'s| is))\s+today(?:'s)?\s+schedule\s*[?.!]?\s*$/i,
     ],
   },
   {

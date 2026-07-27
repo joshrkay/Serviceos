@@ -284,10 +284,31 @@ function validateFeatureRequiredConfig(env: Record<string, string | undefined>):
     missing.push('TWILIO_DEFAULT_TENANT_ID (or set TELEPHONY_ENABLED=false)');
   }
 
-  // SendGrid credentials — invoice + estimate delivery email side.
+  // Email sender — invoice + estimate delivery email side. TWO acceptable
+  // backends, mirroring `selectEmailProvider` in
+  // notifications/twilio-email-delivery-provider.ts (which is what app.ts
+  // actually wires):
+  //   - Twilio-native email (comms.twilio.com/v1/Emails) — reuses
+  //     TWILIO_ACCOUNT_SID + TWILIO_AUTH_TOKEN, so TWILIO_EMAIL_FROM_ADDRESS
+  //     is the only additional var. No new credential.
+  //   - SendGrid — needs its own SENDGRID_API_KEY + SENDGRID_FROM_EMAIL.
+  // Demanding SendGrid specifically used to hard-fail boot for a Twilio-email
+  // deployment (which is what production actually is: Twilio creds, no
+  // SendGrid key). Only error when NEITHER backend is complete.
   if (emailEnabled) {
-    if (!env.SENDGRID_API_KEY) missing.push('SENDGRID_API_KEY (or set EMAIL_ENABLED=false)');
-    if (!env.SENDGRID_FROM_EMAIL) missing.push('SENDGRID_FROM_EMAIL (or set EMAIL_ENABLED=false)');
+    const twilioEmailConfigured = !!(
+      env.TWILIO_ACCOUNT_SID &&
+      env.TWILIO_AUTH_TOKEN &&
+      env.TWILIO_EMAIL_FROM_ADDRESS
+    );
+    const sendgridConfigured = !!(env.SENDGRID_API_KEY && env.SENDGRID_FROM_EMAIL);
+    if (!twilioEmailConfigured && !sendgridConfigured) {
+      missing.push(
+        'an email sender — either TWILIO_EMAIL_FROM_ADDRESS (Twilio-native email; reuses ' +
+          'TWILIO_ACCOUNT_SID + TWILIO_AUTH_TOKEN) or both SENDGRID_API_KEY and ' +
+          'SENDGRID_FROM_EMAIL (or set EMAIL_ENABLED=false)'
+      );
+    }
   }
 
   // Object storage — voice recordings, file/job uploads via Cloudflare R2.

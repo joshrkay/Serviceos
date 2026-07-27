@@ -52,14 +52,29 @@ export class CreateInvoiceExecutionHandler implements ExecutionHandler {
   async execute(proposal: Proposal, context: ExecutionContext): Promise<ExecutionResult> {
     const { payload } = proposal;
 
-    if (!payload.customerId || typeof payload.customerId !== 'string') {
-      return { success: false, error: 'Payload must include a valid customerId' };
-    }
-    const customerId = payload.customerId;
+    // QA-2026-07-26 (VOX-07) — accept customerId OR jobId, exactly like
+    // DraftEstimateExecutionHandler (handlers.ts). This handler previously
+    // demanded customerId UNCONDITIONALLY, even when the payload already
+    // carried a resolved jobId — despite the invoice domain needing only the
+    // job (customerId is used solely to auto-open a job when there isn't one,
+    // ~20 lines below). A voice/assistant payload that resolved the JOB but
+    // not the customer was rejected with "Payload must include a valid
+    // customerId" while holding everything the create actually needs.
+    const customerId =
+      typeof payload.customerId === 'string' && payload.customerId.length > 0
+        ? payload.customerId
+        : undefined;
     // B6 — jobId is optional on the contract; a job is auto-opened below
     // (mirroring DraftEstimateExecutionHandler) when it's absent.
     let jobId =
       typeof payload.jobId === 'string' && payload.jobId.length > 0 ? payload.jobId : undefined;
+    if (!customerId && !jobId) {
+      return {
+        success: false,
+        error:
+          'Invoice draft has neither a customerId nor a jobId — link a customer before approving',
+      };
+    }
     if (!Array.isArray(payload.lineItems) || payload.lineItems.length === 0) {
       return { success: false, error: 'Payload must include at least one lineItem' };
     }
@@ -100,7 +115,11 @@ export class CreateInvoiceExecutionHandler implements ExecutionHandler {
               'Invoice draft has no jobId and job auto-creation is not configured — pick a job before approving',
           };
         }
-        const locations = await this.locationRepo.findByCustomer(context.tenantId, customerId);
+        // Non-null assertion is safe: the guard at the top of execute()
+        // already rejected the "neither customerId nor jobId" case, and this
+        // branch only runs when jobId is absent. Same shape as
+        // DraftEstimateExecutionHandler.
+        const locations = await this.locationRepo.findByCustomer(context.tenantId, customerId!);
         const location =
           locations.find((loc) => loc.isPrimary && !loc.isArchived) ??
           locations.find((loc) => !loc.isArchived);
@@ -113,7 +132,7 @@ export class CreateInvoiceExecutionHandler implements ExecutionHandler {
         const job = await createJob(
           {
             tenantId: context.tenantId,
-            customerId,
+            customerId: customerId!,
             locationId: location.id,
             summary:
               typeof payload.internalNotes === 'string' &&

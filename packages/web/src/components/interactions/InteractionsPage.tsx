@@ -10,6 +10,7 @@ import { useState, useEffect, useCallback } from 'react';
 import { Phone, User, Clock, ChevronRight, RefreshCw, AlertCircle, MessageSquare } from 'lucide-react';
 import { useTenantTimezone } from '../../hooks/useTenantTimezone';
 import { formatDateTimeInTenantTz } from '../../utils/formatInTenantTz';
+import { formatInteractionDuration } from '../../utils/interactionPresentation';
 import { Spinner, EmptyState } from '../ui';
 import { ErrorState } from '../ErrorState';
 import {
@@ -51,15 +52,6 @@ function ChannelBadge({ channel }: { channel: string }) {
       {label}
     </span>
   );
-}
-
-// ─── Duration formatter ───────────────────────────────────────────────────────
-
-function formatDuration(seconds: number | null): string {
-  if (seconds === null) return '—';
-  const m = Math.floor(seconds / 60);
-  const s = seconds % 60;
-  return m > 0 ? `${m}m ${s}s` : `${s}s`;
 }
 
 // ─── Relative time ────────────────────────────────────────────────────────────
@@ -147,7 +139,7 @@ function TranscriptDrawer({
                 <ChannelBadge channel={detail.channel} />
                 <span className="text-xs text-slate-400">
                   <Clock size={11} className="inline mr-0.5" />
-                  {formatDuration(detail.durationSeconds)}
+                  {formatInteractionDuration(detail.durationSeconds)}
                 </span>
               </div>
 
@@ -302,7 +294,7 @@ export function InteractionsPage() {
                   <ChannelBadge channel={interaction.channel} />
                   <span className="flex items-center gap-1">
                     <Clock size={10} />
-                    {formatDuration(interaction.durationSeconds)}
+                    {formatInteractionDuration(interaction.durationSeconds)}
                   </span>
                   <span>{relativeTime(interaction.startedAt)}</span>
                   {interaction.transcriptTurnCount > 0 && (

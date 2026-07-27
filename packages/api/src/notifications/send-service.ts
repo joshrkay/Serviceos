@@ -11,7 +11,7 @@ import {
   MessageDeliveryProvider,
   SmsMessage,
 } from './delivery-provider';
-import { SmsSuppressedError } from './gated-message-delivery';
+import { EmailSuppressedError, SmsSuppressedError } from './gated-message-delivery';
 import {
   renderEstimateEmail,
   renderEstimateSms,
@@ -544,7 +544,12 @@ export class SendService {
       // record of every channel attempt (success or failure). A gate
       // suppression is recorded with provider='suppressed' (as before);
       // any other transport failure stays provider='unknown'.
-      const suppressed = err instanceof SmsSuppressedError;
+      // A kill-switch suppression (either channel) is a suppression, not a
+      // transport failure — label it the same way the consent gate already is,
+      // so `provider='suppressed'` stays the one query an operator runs to see
+      // what did not go out.
+      const suppressed =
+        err instanceof SmsSuppressedError || err instanceof EmailSuppressedError;
       await this.deps.dispatchRepo
         .create({
           tenantId: args.tenantId,

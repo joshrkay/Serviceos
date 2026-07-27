@@ -200,7 +200,9 @@ export function recalculateBalance(invoice: Invoice): Invoice {
 
 export function calculateDueDate(issuedAt: Date, paymentTermDays: number): Date {
   const dueDate = new Date(issuedAt);
-  dueDate.setDate(dueDate.getDate() + paymentTermDays);
+  // Invoice terms are calendar-day arithmetic. Use UTC consistently so a
+  // server's local timezone (or a DST transition) cannot shift the due date.
+  dueDate.setUTCDate(dueDate.getUTCDate() + paymentTermDays);
   return dueDate;
 }
 

@@ -102,27 +102,26 @@ matrixTest('PROP-01', 'Scheduling proposal creation + approval-state guard', asy
   expect(created.rowCount, 'proposal row must exist under tenant A').toBe(1);
   expect((created.rows[0] as { status: string }).status, 'HTTP-created scheduling proposal starts as draft').toBe('draft');
 
-  // The approval engine must refuse a reject from `draft` (409 conflict): you
-  // cannot reject what has not yet been surfaced for review. This guards the
-  // human-in-the-loop invariant.
+  // Owners may discard a draft before it reaches the review inbox. This is a
+  // terminal rejection and must not execute the proposed action.
   const reject = await h.api.call({
     method: 'POST',
     path: `/api/proposals/${proposalId}/reject`,
     body: { reason: 'QA guard check' },
     token: h.tenantA.token,
     label: '01-reject-from-draft',
-    expectStatus: 409,
+    expectStatus: 200,
   });
-  expect(reject.response.status, 'rejecting a draft proposal must be refused with 409').toBe(409);
+  expect(reject.response.status, 'rejecting a draft proposal succeeds').toBe(200);
 
-  // And the draft must remain a draft — the refused reject left no side effect.
+  // The proposal is rejected and the appointment remains untouched.
   const after = await h.db.query({
     label: '01-proposal-after',
     tenantId: h.tenantA.tenantId,
     sql: `SELECT status FROM proposals WHERE id = $1`,
     params: [proposalId],
   });
-  expect((after.rows[0] as { status: string }).status, 'refused reject must not mutate the draft').toBe('draft');
+  expect((after.rows[0] as { status: string }).status, 'draft rejection must be persisted').toBe('rejected');
   await gotoUi(h, '/inbox', '01-inbox-ui');
   h.evidence.pass();
 });

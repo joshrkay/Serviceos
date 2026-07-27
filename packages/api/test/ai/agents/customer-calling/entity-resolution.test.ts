@@ -145,6 +145,104 @@ describe('planVoiceEntityLookups — intent-conditioned operator references', ()
   });
 });
 
+// SCH-03 — "cancel the upcoming appointment for that job" fails to parse as a
+// date; cancel/reschedule/reassign_appointment fall back to the sticky
+// context.jobId from an earlier turn. confirm_appointment does NOT get the
+// fallback (no "for that job" phrasing in the corpus).
+describe('planVoiceEntityLookups — SCH-03 job-scoped appointment fallback', () => {
+  it('attaches stickyJobId to the appointment lookup for cancel_appointment', () => {
+    const lookups = planVoiceEntityLookups(
+      'cancel_appointment',
+      { appointmentReference: 'that job' },
+      'job-42',
+    );
+    expect(lookups).toEqual([
+      { kind: 'appointment', reference: 'that job', refKey: 'appointmentId', jobId: 'job-42' },
+    ]);
+  });
+
+  it('attaches stickyJobId for reschedule_appointment', () => {
+    const lookups = planVoiceEntityLookups(
+      'reschedule_appointment',
+      { appointmentReference: 'that job' },
+      'job-42',
+    );
+    expect(lookups).toEqual([
+      { kind: 'appointment', reference: 'that job', refKey: 'appointmentId', jobId: 'job-42' },
+    ]);
+  });
+
+  it('attaches stickyJobId for reassign_appointment', () => {
+    const lookups = planVoiceEntityLookups(
+      'reassign_appointment',
+      { appointmentReference: 'that job' },
+      'job-42',
+    );
+    expect(lookups[0]).toMatchObject({ kind: 'appointment', jobId: 'job-42' });
+  });
+
+  it('does NOT attach stickyJobId for confirm_appointment (not in the fallback set)', () => {
+    const lookups = planVoiceEntityLookups(
+      'confirm_appointment',
+      { appointmentReference: 'that job' },
+      'job-42',
+    );
+    expect(lookups).toEqual([
+      { kind: 'appointment', reference: 'that job', refKey: 'appointmentId' },
+    ]);
+  });
+
+  it('omits jobId entirely when no stickyJobId is supplied (unchanged shape)', () => {
+    const lookups = planVoiceEntityLookups('cancel_appointment', {
+      appointmentReference: 'Tuesday',
+    });
+    expect(lookups).toEqual([
+      { kind: 'appointment', reference: 'Tuesday', refKey: 'appointmentId' },
+    ]);
+  });
+});
+
+describe('resolveSchedulingEntities — SCH-03 job fallback chain', () => {
+  function resolverThatOnlySucceedsWithJobId(expectedJobId: string): EntityResolver {
+    return {
+      resolve: vi.fn(async (input): Promise<EntityResolverResult> => {
+        if (input.kind === 'appointment' && input.jobId === expectedJobId) {
+          return {
+            kind: 'resolved',
+            candidate: { id: 'appt-from-job', kind: 'appointment', label: '2026-08-01', score: 1 },
+          };
+        }
+        return { kind: 'not_found', reference: input.reference };
+      }),
+    };
+  }
+
+  it('resolves the appointment via stickyJobId when appointmentReference is not a date phrase', async () => {
+    const resolver = resolverThatOnlySucceedsWithJobId('job-42');
+    const res = await resolveSchedulingEntities(
+      resolver,
+      'tenant-1',
+      'cancel_appointment',
+      { appointmentReference: 'that job' },
+      'job-42',
+    );
+    expect(res.status).toBe('resolved');
+    expect(res.refs.appointmentId).toBe('appt-from-job');
+  });
+
+  it('without a stickyJobId, the same non-date reference falls through to not_found', async () => {
+    const resolver = resolverThatOnlySucceedsWithJobId('job-42');
+    const res = await resolveSchedulingEntities(
+      resolver,
+      'tenant-1',
+      'cancel_appointment',
+      { appointmentReference: 'that job' },
+      // no stickyJobId
+    );
+    expect(res.status).toBe('not_found');
+  });
+});
+
 describe('resolveVoiceEntityReferences — router annotation folding', () => {
   const TID = 'tenant-voice';
 

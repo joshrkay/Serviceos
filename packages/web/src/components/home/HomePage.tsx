@@ -37,6 +37,7 @@ import {
   dayWindowUtc,
 } from '../../utils/formatInTenantTz';
 import { firstNameFromUser, homeGreetingHeading } from '../../utils/greeting';
+import { getEstimateTotalCents } from '../../utils/estimateMoney';
 
 // ─── API Types ────────────────────────────────────────────────────────────
 interface ApiJob {
@@ -56,7 +57,9 @@ interface ApiEstimate {
   id: string;
   estimateNumber: string;
   status: string;
-  totalCents: number;
+  totals?: { totalCents?: number } | null;
+  /** Compatibility with pre-document-totals API fixtures. */
+  totalCents?: number;
   customer?: { id: string; displayName?: string; firstName?: string; lastName?: string };
   sentAt?: string;
   viewedAt?: string;
@@ -400,7 +403,9 @@ export function HomePage() {
     ...pendingEsts.filter(e => !dismissed.has(`est-${e.id}`)).map(e => ({
       id: `est-${e.id}`, type: 'followup' as const,
       message: `${customerName(e.customer)} estimate not yet opened`,
-      sub: `${e.estimateNumber} · ${centsToDisplay(e.totalCents)}${e.sentAt ? ` · Sent ${formatDate(e.sentAt, tz)}` : ''}`,
+      sub: `${e.estimateNumber} · ${
+        getEstimateTotalCents(e) === null ? '—' : centsToDisplay(getEstimateTotalCents(e)!)
+      }${e.sentAt ? ` · Sent ${formatDate(e.sentAt, tz)}` : ''}`,
       action: 'Follow up', to: `/estimates/${e.id}`,
     })),
   ].filter(item => !dismissed.has(item.id));
@@ -683,7 +688,11 @@ export function HomePage() {
                           </p>
                         </div>
                         <div className="flex flex-col items-end gap-1 shrink-0">
-                          <p className="text-sm text-foreground">{centsToDisplay(est.totalCents)}</p>
+                          <p className="text-sm text-foreground">
+                            {getEstimateTotalCents(est) === null
+                              ? '—'
+                              : centsToDisplay(getEstimateTotalCents(est)!)}
+                          </p>
                           <StatusBadge status={normalizeEstimateStatus(est.status)} size="sm" />
                         </div>
                       </button>

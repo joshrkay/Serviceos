@@ -482,3 +482,164 @@ describe('SendEstimateExecutionHandler — EstimateDeliveryProvider wire-up', ()
     expect(result.error).toMatch(/provider down/);
   });
 });
+
+// ─── QA-2026-07-26 VOX-06: sendChannel / channel key mismatch ───
+//
+// The intent classifier only ever emits `sendChannel`
+// (ai/orchestration/intent-classifier.ts ExtractedEntities), but these
+// task contracts read `channel`. The in-app voice adapter's flat-payload
+// promotion loop copied the key verbatim, so "send estimate EST-0033 to
+// the customer by email" classified, resolved and got approved — then
+// died at execution with "Payload must specify channel as email or sms".
+// The adapter now aliases sendChannel→channel; these handlers accept
+// either key as belt-and-braces, WITHOUT weakening the validation.
+describe('QA-2026-07-26 VOX-06 — send_* handlers accept sendChannel as a channel alias', () => {
+  describe('SendEstimateExecutionHandler', () => {
+    it('channel only — unchanged, dispatches with that channel', async () => {
+      const provider = new NoopEstimateDeliveryProvider();
+      const handler = new SendEstimateExecutionHandler(provider);
+      const proposal = fakeApproved('send_estimate', {
+        estimateId: validUuid,
+        channel: 'email',
+      });
+
+      const result = await handler.execute(proposal, { tenantId: 't-1', executedBy: 'u-1' });
+
+      expect(result.success).toBe(true);
+      expect(provider.lastDispatch?.channel).toBe('email');
+    });
+
+    it('sendChannel only — the VOX-06 regression guard: now succeeds and dispatches on that channel', async () => {
+      const provider = new NoopEstimateDeliveryProvider();
+      const handler = new SendEstimateExecutionHandler(provider);
+      const proposal = fakeApproved('send_estimate', {
+        estimateId: validUuid,
+        sendChannel: 'email',
+      });
+
+      const result = await handler.execute(proposal, { tenantId: 't-1', executedBy: 'u-1' });
+
+      // BEFORE the fix: success=false, 'Payload must specify channel as email or sms'.
+      expect(result.success).toBe(true);
+      expect(provider.lastDispatch?.channel).toBe('email');
+    });
+
+    it('sendChannel=sms is carried through, not defaulted to email', async () => {
+      const provider = new NoopEstimateDeliveryProvider();
+      const handler = new SendEstimateExecutionHandler(provider);
+      const proposal = fakeApproved('send_estimate', {
+        estimateId: validUuid,
+        sendChannel: 'sms',
+      });
+
+      await handler.execute(proposal, { tenantId: 't-1', executedBy: 'u-1' });
+      expect(provider.lastDispatch?.channel).toBe('sms');
+    });
+
+    it('an explicit channel wins over a conflicting sendChannel', async () => {
+      const provider = new NoopEstimateDeliveryProvider();
+      const handler = new SendEstimateExecutionHandler(provider);
+      const proposal = fakeApproved('send_estimate', {
+        estimateId: validUuid,
+        channel: 'sms',
+        sendChannel: 'email',
+      });
+
+      await handler.execute(proposal, { tenantId: 't-1', executedBy: 'u-1' });
+      expect(provider.lastDispatch?.channel).toBe('sms');
+    });
+
+    it('neither key — still rejected (validation not weakened)', async () => {
+      const provider = new NoopEstimateDeliveryProvider();
+      const handler = new SendEstimateExecutionHandler(provider);
+      const proposal = fakeApproved('send_estimate', { estimateId: validUuid });
+
+      const result = await handler.execute(proposal, { tenantId: 't-1', executedBy: 'u-1' });
+      expect(result.success).toBe(false);
+      expect(result.error).toMatch(/channel/);
+      expect(provider.lastDispatch).toBeNull();
+    });
+
+    it('an invalid sendChannel is rejected exactly like an invalid channel', async () => {
+      const provider = new NoopEstimateDeliveryProvider();
+      const handler = new SendEstimateExecutionHandler(provider);
+      const proposal = fakeApproved('send_estimate', {
+        estimateId: validUuid,
+        sendChannel: 'fax',
+      });
+
+      const result = await handler.execute(proposal, { tenantId: 't-1', executedBy: 'u-1' });
+      expect(result.success).toBe(false);
+      expect(result.error).toMatch(/channel/);
+      expect(provider.lastDispatch).toBeNull();
+    });
+  });
+
+  describe('SendInvoiceExecutionHandler (same latent mismatch)', () => {
+    it('channel only — unchanged, dispatches with that channel', async () => {
+      const provider = new NoopInvoiceDeliveryProvider();
+      const handler = new SendInvoiceExecutionHandler(provider);
+      const proposal = fakeApproved('send_invoice', {
+        invoiceId: validUuid,
+        channel: 'email',
+      });
+
+      const result = await handler.execute(proposal, { tenantId: 't-1', executedBy: 'u-1' });
+
+      expect(result.success).toBe(true);
+      expect(provider.lastDispatch?.channel).toBe('email');
+    });
+
+    it('sendChannel only — now succeeds and dispatches on that channel', async () => {
+      const provider = new NoopInvoiceDeliveryProvider();
+      const handler = new SendInvoiceExecutionHandler(provider);
+      const proposal = fakeApproved('send_invoice', {
+        invoiceId: validUuid,
+        sendChannel: 'sms',
+      });
+
+      const result = await handler.execute(proposal, { tenantId: 't-1', executedBy: 'u-1' });
+
+      expect(result.success).toBe(true);
+      expect(provider.lastDispatch?.channel).toBe('sms');
+    });
+
+    it('an explicit channel wins over a conflicting sendChannel', async () => {
+      const provider = new NoopInvoiceDeliveryProvider();
+      const handler = new SendInvoiceExecutionHandler(provider);
+      const proposal = fakeApproved('send_invoice', {
+        invoiceId: validUuid,
+        channel: 'email',
+        sendChannel: 'sms',
+      });
+
+      await handler.execute(proposal, { tenantId: 't-1', executedBy: 'u-1' });
+      expect(provider.lastDispatch?.channel).toBe('email');
+    });
+
+    it('neither key — still rejected (validation not weakened)', async () => {
+      const provider = new NoopInvoiceDeliveryProvider();
+      const handler = new SendInvoiceExecutionHandler(provider);
+      const proposal = fakeApproved('send_invoice', { invoiceId: validUuid });
+
+      const result = await handler.execute(proposal, { tenantId: 't-1', executedBy: 'u-1' });
+      expect(result.success).toBe(false);
+      expect(result.error).toMatch(/channel/);
+      expect(provider.lastDispatch).toBeNull();
+    });
+
+    it('an invalid sendChannel is rejected exactly like an invalid channel', async () => {
+      const provider = new NoopInvoiceDeliveryProvider();
+      const handler = new SendInvoiceExecutionHandler(provider);
+      const proposal = fakeApproved('send_invoice', {
+        invoiceId: validUuid,
+        sendChannel: 'carrier-pigeon',
+      });
+
+      const result = await handler.execute(proposal, { tenantId: 't-1', executedBy: 'u-1' });
+      expect(result.success).toBe(false);
+      expect(result.error).toMatch(/channel/);
+      expect(provider.lastDispatch).toBeNull();
+    });
+  });
+});

@@ -43,7 +43,7 @@ import type { VoiceSession, VoiceSessionStore } from './voice-session-store';
 import type { VoiceSessionRepository } from '../../../voice/voice-session';
 import type { CallOutcome } from '../../../voice/voice-service';
 import { deriveCallOutcome } from './outcome-mapper';
-import { resolveSchedulingEntities } from './entity-resolution';
+import { resolveSchedulingEntities, requiresExistingEntity } from './entity-resolution';
 import type { SchedulingEntityResolution } from './entity-resolution';
 import {
   MAX_DISAMBIGUATION_ATTEMPTS,
@@ -54,6 +54,12 @@ import type { PendingEntityAmbiguity } from './entity-resolution';
 import { withTenantConnection } from '../../../db/tenant-transaction';
 import { PgEntityResolver } from '../../resolution/pg-entity-resolver';
 import type { EntityCandidate, EntityResolver } from '../../resolution/entity-resolver';
+import {
+  groundLineItemPricing,
+  UNCATALOGUED_CONFIDENCE_CAP,
+} from '../../resolution/catalog-resolver';
+import type { CatalogPricingOutcome } from '../../resolution/catalog-resolver';
+import type { CatalogItemRepository } from '../../../catalog/catalog-item';
 import { detectLanguage, renderTtsText } from './tts-copy';
 import type { Language } from '../../i18n/i18n';
 import { isLanguageSupported } from '../../orchestration/language-detector';
@@ -61,6 +67,8 @@ import type { VoicePersona, VoicePersonaResolver } from '../../../settings/voice
 import type { RepairTemplate } from '../../../verticals/registry';
 import type { DroppedCallScheduler } from '../../../sms/recovery/scheduler';
 import { buildRecoveryContext } from '../../../sms/recovery/scheduler';
+import type { CustomerRepository } from '../../../customers/customer';
+import { normalizePhone } from '../../../customers/dedup';
 
 export interface InAppAdapterDeps {
   store: VoiceSessionStore;
@@ -173,6 +181,39 @@ export interface InAppAdapterDeps {
    */
   supportedLanguagesResolver?: (tenantId: string) => Promise<Language[] | undefined>;
   extendedIntentsEnabled?: (tenantId: string) => Promise<boolean>;
+  /**
+   * Read-only owner/operator lookups bypass the mutation confirmation FSM.
+   * The authenticated in-app route supplies a tenant-scoped resolver.
+   */
+  ownerLookupResolver?: (
+    tenantId: string,
+    sessionId: string,
+    intentType: string,
+  ) => Promise<string | undefined>;
+  /**
+   * QA-2026-07-26 — catalog item repository used to ground voice-drafted
+   * estimate line items (entities.lineItemDescriptions on a draft_estimate
+   * intent) against the tenant's real price book via the SAME
+   * `groundLineItemPricing` pass the non-voice draft_estimate task
+   * (ai/tasks/estimate-task.ts) already runs. Optional: when absent, the
+   * grounding call's `loadActiveCatalog` is `null`, which
+   * `groundLineItemPricing` treats identically to "catalog read failed" —
+   * every drafted line is stamped `uncatalogued` / `requiresReview: true`
+   * rather than silently keeping an ungrounded guess.
+   */
+  catalogRepo?: CatalogItemRepository;
+  /**
+   * QA-2026-07-26 — tenant-scoped customer repository, consulted at
+   * `startSession` when the caller supplies a `callerPhone`: exactly one
+   * `findByPhoneNormalized` match resolves the session's caller identity the
+   * SAME way telephony/text-mode sessions do (see `TextModeDriver.startSession`
+   * and `TwilioGatherAdapter` caller-ID resolution) — via a `caller_known`
+   * FSM dispatch instead of `operator_session`. Optional: when absent (or when
+   * `callerPhone` is omitted, or the match count isn't exactly 1), the adapter
+   * falls back to the existing `operator_session` path unchanged. Never
+   * guesses — 0 or 2+ matches are left unresolved for the operator to specify.
+   */
+  customerRepo?: CustomerRepository;
 }
 
 export interface StartSessionResult {
@@ -418,10 +459,15 @@ export class InAppVoiceAdapter {
     tenantId: string,
     intent: string,
     entities: Record<string, unknown>,
+    // SCH-03 — the FSM's sticky context.jobId (set whenever a job was
+    // resolved on any earlier turn this call). Only consulted by
+    // resolveSchedulingEntities for cancel/reschedule/reassign_appointment
+    // when the appointment reference isn't a date phrase.
+    stickyJobId?: string,
   ): Promise<SchedulingEntityResolution> {
     const resolver = this.getEntityResolver();
     try {
-      return await resolveSchedulingEntities(resolver, tenantId, intent, entities);
+      return await resolveSchedulingEntities(resolver, tenantId, intent, entities, stickyJobId);
     } catch {
       return { status: 'resolved', refs: {} };
     }
@@ -434,6 +480,7 @@ export class InAppVoiceAdapter {
    */
   private async toResolutionEvent(
     tenantId: string,
+    intent: string,
     resolution: SchedulingEntityResolution,
   ): Promise<CallingAgentEvent> {
     if (resolution.status === 'ambiguous' && resolution.ambiguous) {
@@ -455,9 +502,38 @@ export class InAppVoiceAdapter {
         partialRefs: resolution.refs,
       };
     }
-    // Unknown non-emergency references proceed to intent_confirm with partial
-    // refs — the proposal surfaces pendingReference for operator review
-    // instead of escalating to on-call (matches voice-action-router policy).
+    // Middle confidence band: exactly one candidate, but not confident
+    // enough to act on silently. Ask the caller to confirm it (entity_confirm)
+    // rather than either guessing (resolved) or giving up (not_found).
+    if (resolution.status === 'low_confidence' && resolution.lowConfidence) {
+      const refKey = refKeyForEntityKind(resolution.lowConfidence.entityKind);
+      if (!refKey) {
+        return { type: 'entity_resolved', refs: resolution.refs };
+      }
+      return {
+        type: 'entity_confirm_candidate',
+        entityKind: resolution.lowConfidence.entityKind,
+        candidate: resolution.lowConfidence.candidate,
+        reference: resolution.lowConfidence.reference,
+        refKey,
+        partialRefs: resolution.refs,
+      };
+    }
+    // No candidate reached even the lower confidence band. For intents that
+    // operate on a record that must ALREADY exist (send_estimate,
+    // record_payment, cancel_appointment, …) the request cannot proceed, so
+    // escalate rather than silently falling through to entity_resolved with
+    // no refs — that previously masked a not_found as a "success" (46a954e1).
+    if (resolution.status === 'not_found' && requiresExistingEntity(intent)) {
+      return { type: 'entity_not_found' };
+    }
+    // Everything else — including CREATION intents (create_appointment,
+    // create_job, create_customer, draft_estimate), where "no such record"
+    // is the normal, expected outcome — proceeds to intent_confirm with the
+    // partial refs. The proposal surfaces pendingReference for operator
+    // review instead of escalating to on-call (matches voice-action-router
+    // policy), and create_appointment auto-opens a job from jobTitle at
+    // execution time (95a260cd).
     return { type: 'entity_resolved', refs: resolution.refs };
   }
 
@@ -546,6 +622,7 @@ export class InAppVoiceAdapter {
       tenantId,
       intent,
       entities as Record<string, unknown>,
+      context.jobId,
     );
     if (resolution.status !== 'ambiguous' || !resolution.ambiguous) {
       return undefined;
@@ -606,6 +683,7 @@ export class InAppVoiceAdapter {
     userId: string,
     conversationId?: string,
     role?: string,
+    callerPhone?: string,
   ): Promise<StartSessionResult> {
     const repairTemplates = this.deps.repairTemplatesResolver
       ? await this.deps.repairTemplatesResolver(tenantId).catch(() => [])
@@ -662,11 +740,48 @@ export class InAppVoiceAdapter {
     const greetedEffects = session.machine.dispatch({ type: 'greeted_ok' });
     await this.executeSideEffects(session, greetedEffects);
 
-    // An authenticated operator is the proposal actor, not a CRM caller.
-    // Treating their Clerk user id as customerId poisoned downstream entity
-    // resolution and caller-plan lookups for every in-app session.
-    const operatorSessionEffects = session.machine.dispatch({ type: 'operator_session' });
-    await this.executeSideEffects(session, operatorSessionEffects);
+    // QA-2026-07-26 — when the caller supplies a phone number at session
+    // start (e.g. the operator is on a call with a customer and starts the
+    // assistant with that number in hand) and it matches EXACTLY ONE
+    // existing tenant customer, resolve it now via the same
+    // findByPhoneNormalized path telephony/text-mode sessions use for
+    // caller-ID identification (see TextModeDriver.startSession). This is
+    // NOT the operator-as-customerId antipattern the comment below warns
+    // about — it's a real, resolver-matched CRM customer — so a later
+    // generic reference like "our customer" (GENERIC_CUSTOMER_REFS in
+    // entity-resolution.ts skips ANY name-based lookup for these phrases)
+    // still attaches to the right customer via the transitionIntentConfirm
+    // entities bridge. 0 or 2+ matches are left unresolved — never guessed.
+    let resolvedCustomerId: string | undefined;
+    if (callerPhone && this.deps.customerRepo?.findByPhoneNormalized) {
+      try {
+        const matches = await this.deps.customerRepo.findByPhoneNormalized(
+          tenantId,
+          normalizePhone(callerPhone),
+        );
+        if (matches.length === 1) {
+          resolvedCustomerId = matches[0].id;
+        }
+      } catch {
+        resolvedCustomerId = undefined;
+      }
+    }
+
+    if (resolvedCustomerId) {
+      session.callerPhone = callerPhone;
+      session.customerId = resolvedCustomerId;
+      const callerKnownEffects = session.machine.dispatch({
+        type: 'caller_known',
+        customerId: resolvedCustomerId,
+      });
+      await this.executeSideEffects(session, callerKnownEffects);
+    } else {
+      // An authenticated operator is the proposal actor, not a CRM caller.
+      // Treating their Clerk user id as customerId poisoned downstream entity
+      // resolution and caller-plan lookups for every in-app session.
+      const operatorSessionEffects = session.machine.dispatch({ type: 'operator_session' });
+      await this.executeSideEffects(session, operatorSessionEffects);
+    }
 
     // B1 — resolve per-tenant voice persona (best-effort).
     let persona: VoicePersona | null | undefined;
@@ -729,16 +844,22 @@ export class InAppVoiceAdapter {
 
     // Decide the primary FSM event for this turn:
     //  A) intent_confirm — yes/no readback answer (no classifier).
+    //  A2) entity_confirm — yes/no middle-confidence-candidate answer (no classifier).
     //  B) entity_resolution — disambiguation follow-up (no classifier).
     //  C) everything else — classify the utterance as an intent.
     const stateBeforeTurn: string = session.machine.currentState;
     let fsmEvent: CallingAgentEvent;
     let classifierFailureEffect: SideEffect | undefined;
+    let ownerLookupText: string | undefined;
 
     if (stateBeforeTurn === 'intent_confirm') {
       fsmEvent = isAffirmation(text)
         ? { type: 'confirmed' }
         : { type: 'correction', newTranscript: text };
+    } else if (stateBeforeTurn === 'entity_confirm') {
+      fsmEvent = isAffirmation(text)
+        ? { type: 'entity_confirm_affirmed' }
+        : { type: 'entity_confirm_declined' };
     } else if (stateBeforeTurn === 'entity_resolution') {
       const pending = await this.resolvePendingForDisambiguation(
         session.tenantId,
@@ -831,6 +952,18 @@ export class InAppVoiceAdapter {
           classification.confidence,
           classification.extractedEntities as Record<string, unknown> | undefined
         );
+        if (
+          classification.confidence >= TAU_INT &&
+          session.machine.currentContext.ownerSession === true &&
+          classification.intentType.startsWith('lookup_') &&
+          this.deps.ownerLookupResolver
+        ) {
+          ownerLookupText = await this.deps.ownerLookupResolver(
+            session.tenantId,
+            session.id,
+            classification.intentType,
+          );
+        }
       } catch (error) {
         const failure = classifierFailureFromError(error);
         classifierFailureEffect = classifierFailureAuditEffect(
@@ -884,7 +1017,12 @@ export class InAppVoiceAdapter {
 
     // Dispatch the primary event (classifier-derived, or the confirm/correct
     // event from the intent_confirm branch).
-    const effects1 = session.machine.dispatch(fsmEvent);
+    // Read-only owner lookups answer immediately and leave the FSM ready for
+    // the next request. They must never enter intent_confirm, which is the
+    // safety gate for proposal-producing mutations.
+    const effects1: SideEffect[] = ownerLookupText
+      ? [{ type: 'tts_play', payload: { text: ownerLookupText } }]
+      : session.machine.dispatch(fsmEvent);
     allSideEffects.push(...effects1);
     const aggregate1 = await this.executeSideEffects(session, effects1);
     let lastProposalId = aggregate1.lastProposalId;
@@ -899,8 +1037,15 @@ export class InAppVoiceAdapter {
     //   ambiguous → entity_ambiguous with the candidate set — the FSM asks a
     //               one-tap disambiguation question and stays in
     //               entity_resolution.
-    //   not_found → entity_resolved with partial refs — intent_confirm readback;
-    //               the proposal carries pendingReference for operator review.
+    //   not_found → VOX-02: split by intent family (requiresExistingEntity).
+    //               Record-OPERATING intents (send_estimate, record_payment,
+    //               cancel_appointment, …) → entity_not_found → escalate to
+    //               on-call: the request can never execute without the record.
+    //               CREATION intents (create_appointment, create_job,
+    //               create_customer, draft_estimate) → entity_resolved with
+    //               partial refs — intent_confirm readback; the proposal
+    //               carries pendingReference for operator review. A caller
+    //               booking NEW work must never be escalated for it.
     if (
       session.machine.currentState === 'entity_resolution' &&
       fsmEvent.type === 'intent_classified'
@@ -909,8 +1054,13 @@ export class InAppVoiceAdapter {
         session.tenantId,
         fsmEvent.intentType,
         fsmEvent.entities,
+        session.machine.currentContext.jobId,
       );
-      const resolutionEvent = await this.toResolutionEvent(session.tenantId, resolution);
+      const resolutionEvent = await this.toResolutionEvent(
+        session.tenantId,
+        fsmEvent.intentType,
+        resolution,
+      );
       const effects2 = session.machine.dispatch(resolutionEvent);
       allSideEffects.push(...effects2);
       const aggregate2 = await this.executeSideEffects(session, effects2);
@@ -1103,6 +1253,12 @@ export class InAppVoiceAdapter {
         outcome,
         state: session.machine.currentState,
         channel: 'inapp_voice',
+        ...(session.transcript.length > 0
+          ? { transcript: [...session.transcript] }
+          : {}),
+        ...(session.customerId !== undefined
+          ? { customerId: session.customerId }
+          : {}),
       });
     } catch {
       /* swallow — outcome stamping is best-effort */
@@ -1191,6 +1347,59 @@ export class InAppVoiceAdapter {
     }
   }
 
+  /**
+   * QA-2026-07-26 — build a draft line-items array from voice-classified
+   * `entities.lineItemDescriptions`, then ground it through the shared
+   * `groundLineItemPricing` pass (ai/resolution/catalog-resolver.ts) — the
+   * SAME function `ai/tasks/estimate-task.ts` already calls for the
+   * non-voice draft_estimate path — before it reaches the proposal payload.
+   *
+   * `amount` (when present) is `entities.amount`: the caller-quoted TOTAL
+   * across every drafted line (integer cents — see intent-classifier.ts
+   * `ExtractedEntities`), split evenly as each line's STARTING guess (the
+   * remainder folded into the last line so the guesses always sum back to
+   * the quoted total exactly). A catalog match still overwrites that guess
+   * outright; a >=10%-and->=$1 conflict between the guess and a catalog
+   * match surfaces as a one-tap "did you mean" instead of silently snapping
+   * (see catalog-resolver.ts `isPriceConflict`).
+   *
+   * When `amount` is absent there is no number to guess from, so the
+   * starting price is left UNSET rather than invented. `groundLineItemPricing`
+   * still resolves the real price when there's a catalog match (its
+   * exact/high tier sets `[priceField]` unconditionally); when there isn't,
+   * the line is stamped `uncatalogued` / folds into `requiresReview: true`
+   * instead of getting a fabricated number.
+   */
+  private async buildVoiceDraftLineItems(
+    tenantId: string,
+    descriptions: string[],
+    amount: unknown,
+  ): Promise<CatalogPricingOutcome> {
+    const totalCents =
+      typeof amount === 'number' && Number.isFinite(amount) && amount > 0
+        ? Math.round(amount)
+        : undefined;
+    const perItemCents =
+      totalCents !== undefined ? Math.floor(totalCents / descriptions.length) : undefined;
+    const draftLineItems: Array<Record<string, unknown>> = descriptions.map((description, idx) => ({
+      description,
+      quantity: 1,
+      ...(perItemCents !== undefined
+        ? {
+            unitPrice:
+              idx === descriptions.length - 1
+                ? totalCents! - perItemCents * (descriptions.length - 1)
+                : perItemCents,
+          }
+        : {}),
+    }));
+    return groundLineItemPricing(
+      draftLineItems,
+      'unitPrice',
+      this.deps.catalogRepo ? () => this.deps.catalogRepo!.listByTenant(tenantId) : null,
+    );
+  }
+
   private async handleCreateProposal(
     session: VoiceSession,
     effect: SideEffect
@@ -1223,11 +1432,13 @@ export class InAppVoiceAdapter {
       // this adapter only nested the raw classifier entities, so EVERY
       // voice execution failed its handler validation (live:
       // 'Payload must include a non-empty name' / 'a valid jobId').
-      // Promote primitive entity values to the payload top level — the
-      // classifier's entity keys ARE the task-contract field names — while
+      // Promote primitive entity values to the payload top level — for MOST
+      // entities the classifier's key IS the task-contract field name — while
       // keeping `entities` intact for audit/rendering. Reserved envelope
-      // keys are never clobbered, and create_customer's displayName→name
-      // alias mirrors the assistant route's translation.
+      // keys are never clobbered. Where the two vocabularies DIVERGE the
+      // generic loop is not enough and an explicit alias is required below
+      // (create_customer's displayName→name, send_*'s sendChannel→channel);
+      // both mirror translations the non-voice routes already perform.
       const RESERVED = new Set(['intent', 'entities', 'sessionId', 'conversationId', 'callSid', 'customerId', 'confidence']);
       const flat: Record<string, unknown> = {};
       for (const [k, v] of Object.entries(entities)) {
@@ -1235,6 +1446,101 @@ export class InAppVoiceAdapter {
         if (typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean') flat[k] = v;
       }
       if (typeof entities.displayName === 'string' && flat.name === undefined) flat.name = entities.displayName;
+      // QA-2026-07-26: the intent classifier only ever emits `sendChannel`
+      // (intent-classifier.ts ExtractedEntities), but the send_estimate /
+      // send_invoice task contracts — and therefore their execution handlers
+      // (proposals/execution/voice-extended-handlers.ts, which reject with
+      // 'Payload must specify channel as email or sms') — read `channel`.
+      // The generic loop above copies the key verbatim, so the voice payload
+      // carried sendChannel:'email' and no channel at all: the live VOX-06
+      // failure ("send estimate EST-0033 to the customer by email" classified,
+      // resolved and approved, then died at execution). Alias it here,
+      // mirroring the non-voice path's `channel: ee.sendChannel ?? 'email'`
+      // (ai/tasks/voice-extended-tasks.ts:517). Only set when absent so an
+      // explicit `channel` entity always wins.
+      if (typeof entities.sendChannel === 'string' && flat.channel === undefined) flat.channel = entities.sendChannel;
+      // QA-2026-07-26: customerId stays in RESERVED above (never promoted by
+      // the generic loop) because the top-level `payload.customerId` this
+      // envelope also carries (see transitions.ts transitionIntentConfirm)
+      // is context.customerId — the authenticated in-app OPERATOR's identity
+      // (used only for `createdBy` below), not a CRM customer, and is
+      // undefined for every in-app session by design (see the
+      // operator_session comment earlier in this file). Blindly promoting
+      // entities.customerId through the generic loop would have been safe
+      // value-wise but relied on incidental ordering; being explicit here
+      // documents intent and can't be silently broken by a future RESERVED
+      // edit. The *resolved* customer UUID execution handlers actually need
+      // lives in entities.customerId — populated by the entity-resolution
+      // refs merge (transitions.ts `entity_resolved` handler folds
+      // event.refs, including a resolver-validated customerId, into
+      // extractedEntities). Without this, the outgoing proposal payload had
+      // no customerId at all, and DraftEstimateExecutionHandler.execute()
+      // (proposals/execution/handlers.ts) reads payload.customerId directly,
+      // throwing "Estimate draft has neither a customerId nor a jobId" —
+      // the live VOX-05 (and create_booking/SMS-01) QA-matrix failure. Only
+      // set it when a resolved value is actually present so we never write
+      // an explicit `undefined` over some future legitimate default.
+      if (typeof entities.customerId === 'string' && entities.customerId.length > 0) {
+        flat.customerId = entities.customerId;
+      }
+      // QA-2026-07-26: draft_estimate entities carry lineItemDescriptions as
+      // a string[] (intent-classifier.ts ExtractedEntities), which the
+      // generic scalar-only loop above never promotes (it only lifts
+      // string|number|boolean values) — payload.lineItems was always
+      // undefined for the voice path, so EVERY voice-drafted estimate died
+      // at execution with "Payload must include at least one lineItem."
+      // Build a draft line-items array from the descriptions and ground it
+      // through groundLineItemPricing — the SAME function the non-voice
+      // draft_estimate task (ai/tasks/estimate-task.ts) already calls — so
+      // a catalog match sets the authoritative price and an uncatalogued
+      // line keeps its guessed price but is flagged for review, instead of
+      // either inventing an untracked number or dropping the line.
+      //
+      // QA-2026-07-26 (VOX-07): this gate originally read
+      // `proposalType === 'draft_estimate'`, which left the IDENTICAL hole
+      // open for draft_invoice. CreateInvoiceExecutionHandler
+      // (proposals/execution/invoice-execution-handler.ts) enforces the same
+      // non-empty `lineItems` requirement as the estimate handler and there is
+      // no amount→lineItems fallback anywhere downstream, so every
+      // voice-drafted invoice — including the plain "create an invoice for
+      // $350 for the furnace repair" a real operator says — died at execution
+      // with "Payload must include at least one lineItem". The two proposal
+      // types consume line items identically (both go through
+      // normalizeDraftLineItems), so the grounding pass applies verbatim.
+      const GROUNDED_LINE_ITEM_PROPOSAL_TYPES: ReadonlySet<string> = new Set([
+        'draft_estimate',
+        'draft_invoice',
+      ]);
+      let voiceLineItemOutcome: CatalogPricingOutcome | undefined;
+      if (
+        proposalType !== undefined &&
+        GROUNDED_LINE_ITEM_PROPOSAL_TYPES.has(proposalType) &&
+        Array.isArray(entities.lineItemDescriptions) &&
+        entities.lineItemDescriptions.length > 0
+      ) {
+        const descriptions = entities.lineItemDescriptions.filter(
+          (d): d is string => typeof d === 'string' && d.trim().length > 0,
+        );
+        if (descriptions.length > 0) {
+          voiceLineItemOutcome = await this.buildVoiceDraftLineItems(
+            session.tenantId,
+            descriptions,
+            entities.amount,
+          );
+          flat.lineItems = voiceLineItemOutcome.lineItems;
+        }
+      }
+      // An uncatalogued (LLM/heuristic-priced) line must never ride the raw
+      // classifier confidence into auto-approval — cap it exactly like
+      // estimate-task.ts's UNCATALOGUED_CONFIDENCE_CAP, and stamp the RV-007
+      // `_meta.overallConfidence = 'low'` hard block (proposals/auto-approve.ts
+      // confidenceMetaBlocksAutoApprove) so decideInitialStatus can never
+      // return 'approved' for it, regardless of any tenant threshold override.
+      const rawConfidence = typeof payload.confidence === 'number' ? payload.confidence : undefined;
+      const confidenceScore =
+        voiceLineItemOutcome?.anyUncatalogued && rawConfidence !== undefined
+          ? Math.min(rawConfidence, UNCATALOGUED_CONFIDENCE_CAP)
+          : rawConfidence;
       const proposal = buildProposal({
         tenantId: session.tenantId,
         proposalType,
@@ -1244,6 +1550,9 @@ export class InAppVoiceAdapter {
           entities,
           sessionId: session.id,
           conversationId: typeof payload.conversationId === 'string' ? payload.conversationId : undefined,
+          ...(voiceLineItemOutcome?.anyUncatalogued
+            ? { _meta: { overallConfidence: 'low' as const } }
+            : {}),
         },
         summary,
         // QA-2026-06-04: mirror the AI task handlers (create-appointment-task
@@ -1251,7 +1560,14 @@ export class InAppVoiceAdapter {
         // autonomous tier with a real classifier confidence. Without these,
         // initialProposalStatus always returned 'draft', which the approval
         // guard correctly refuses to approve — voice proposals were stuck.
-        ...(typeof payload.confidence === 'number' ? { confidenceScore: payload.confidence } : {}),
+        ...(confidenceScore !== undefined ? { confidenceScore } : {}),
+        // Ambiguous catalog matches (two-plus plausible items, or a
+        // price-conflict "did you mean") require the operator to pick —
+        // forces 'draft' regardless of trust tier / confidence, same as
+        // estimate-task.ts.
+        ...(voiceLineItemOutcome && voiceLineItemOutcome.missingFields.length > 0
+          ? { missingFields: voiceLineItemOutcome.missingFields }
+          : {}),
         sourceTrustTier: 'autonomous',
         sourceContext: {
           source: 'calling-agent',

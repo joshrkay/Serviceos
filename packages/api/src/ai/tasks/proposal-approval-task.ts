@@ -834,6 +834,12 @@ export async function startVoiceApproval(
         outcome: 'clarification',
       };
     }
+    // `low_confidence` is a PgEntityResolver-only band (TAU_ENT_CONFIRM_LOW)
+    // for free-text entity references; resolvePendingProposalReference above
+    // never emits it (pending-proposal-resolver.ts has no confirm-band logic
+    // of its own) — this case is structurally required because it shares
+    // EntityResolverResult with PgEntityResolver, not reachable here.
+    case 'low_confidence':
     case 'not_found':
     case 'skipped': {
       // A reference with NO usable signals ("approve it") falls back to
