@@ -79,6 +79,24 @@ jobs:
       - name: FK-path coverage guard
         run: npm run check:fk-paths --workspace=packages/api
 
+      # FAIL-VIS — env-coverage guard.
+      #
+      # A sweep of the running services found 85 environment variables read by
+      # the API and set in NEITHER Railway environment — including
+      # GOOGLE_MAPS_API_KEY (travel time silently degrades to straight-line
+      # distance), SENTRY_DSN (no crash reporting), and three
+      # SUPERVISOR_DEFAULT_* spend caps. Every one is read with `?? default`,
+      # so nothing ever failed loudly.
+      #
+      # This gate makes "a var the code reads that nobody declared" a build
+      # error. CI cannot query Railway, so the contract it enforces is the
+      # checked-in .env.production.example plus scripts/env-allowlist.json.
+      # It BLOCKS on genuinely undeclared vars and on stale allowlist entries;
+      # the seeded `unreviewed` backlog prints loudly but does not fail (run
+      # `npm run check:env-coverage:strict` locally to see the strict verdict).
+      - name: Env-coverage guard
+        run: npm run check:env-coverage
+
       - name: Unit tests
         run: npm test -- --reporter=verbose
 
