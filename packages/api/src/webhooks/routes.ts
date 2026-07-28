@@ -1042,6 +1042,8 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
 
       if (event.type === 'checkout.session.completed') {
         const session = event.data.object as {
+          /** Checkout session id (cs_...) — unique per checkout. */
+          id?: string;
           metadata?: {
             tenant_id?: string;
             invoice_id?: string;
@@ -1143,9 +1145,15 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
         // Stripe creation paths attach tenant_id+invoice_id metadata
         // but NEVER payment_id, so without this the refund handler had
         // no way to find the originating row and silently ACKed every
-        // real refund as 'skipped'. Fall back to the previous literal
-        // for the edge case where payment_intent is absent (preserves
-        // legacy behavior for any pre-existing fixtures).
+        // real refund as 'skipped'.
+        //
+        // P0-5 — when payment_intent is absent, fall back to the SESSION id
+        // (cs_..., unique per checkout), then the event id. The old literal
+        // 'stripe_checkout' collided tenant-wide: the second intent-less
+        // checkout in a tenant hit the (tenant, provider_reference) unique
+        // index against a DIFFERENT invoice, recordPayment surfaced a
+        // conflict the catch below doesn't match, and the 500 made Stripe
+        // redeliver the same collision forever.
         const paymentIntentRef: string =
           typeof session.payment_intent === 'string'
             ? session.payment_intent
@@ -1153,7 +1161,7 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
                 session.payment_intent !== null &&
                 typeof session.payment_intent.id === 'string')
               ? session.payment_intent.id
-              : 'stripe_checkout';
+              : (session.id ?? event.id);
 
         // §6 Time-to-Cash. Refresh deps for the post-payment job
         // money-state rollup. Undefined unless all three repos are
@@ -1472,9 +1480,9 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
             payErr instanceof ValidationError &&
             (payErr.message.includes('status') || payErr.message.includes('exceeds amount due'))
           ) {
-            // Invoice already settled (e.g. checkout.session.completed used
-            // the 'stripe_checkout' provider_reference fallback so the dedup
-            // above missed) — idempotent success.
+            // Invoice already settled (e.g. checkout.session.completed
+            // recorded under a session-id provider_reference fallback so the
+            // intent-keyed dedup above missed) — idempotent success.
             logger.info('Invoice already settled, ignoring payment_intent.succeeded', {
               tenantId, invoiceId,
             });

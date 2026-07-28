@@ -155,13 +155,17 @@ describe('checkout.session.completed — payment_intent → providerReference', 
     };
   }
 
-  function invoiceEvent(paymentIntent: unknown): Record<string, unknown> {
+  function invoiceEvent(
+    paymentIntent: unknown,
+    opts?: { sessionId?: string; invoiceId?: string; eventId?: string },
+  ): Record<string, unknown> {
     return {
-      id: `evt_${uuidv4()}`,
+      id: opts?.eventId ?? `evt_${uuidv4()}`,
       type: 'checkout.session.completed',
       data: {
         object: {
-          metadata: { tenant_id: TENANT, invoice_id: INVOICE_ID },
+          ...(opts?.sessionId ? { id: opts.sessionId } : {}),
+          metadata: { tenant_id: TENANT, invoice_id: opts?.invoiceId ?? INVOICE_ID },
           amount_total: 10000,
           payment_status: 'paid',
           payment_intent: paymentIntent,
@@ -190,9 +194,36 @@ describe('checkout.session.completed — payment_intent → providerReference', 
     expect(payments[0].providerReference).toBe('pi_object_456');
   });
 
-  it('falls back to the stripe_checkout literal when payment_intent is null', async () => {
-    await postSigned(app, invoiceEvent(null));
+  it('P0-5: falls back to the unique SESSION id when payment_intent is null', async () => {
+    await postSigned(app, invoiceEvent(null, { sessionId: 'cs_test_789' }));
     const payments = await paymentRepo.findByInvoice(TENANT, INVOICE_ID);
-    expect(payments[0].providerReference).toBe('stripe_checkout');
+    expect(payments[0].providerReference).toBe('cs_test_789');
+  });
+
+  it('P0-5: falls back to the event id when both payment_intent and session id are absent', async () => {
+    const eventId = `evt_${uuidv4()}`;
+    await postSigned(app, invoiceEvent(null, { eventId }));
+    const payments = await paymentRepo.findByInvoice(TENANT, INVOICE_ID);
+    expect(payments[0].providerReference).toBe(eventId);
+  });
+
+  it('P0-5 regression: two intent-less checkouts on DIFFERENT invoices both record (no tenant-wide collision)', async () => {
+    // With the old literal 'stripe_checkout' fallback both sessions shared one
+    // provider reference: the second hit the (tenant, reference) unique index
+    // against a different invoice, recordPayment surfaced a conflict the
+    // handler doesn't catch, and Stripe retried the 500 forever.
+    const secondInvoiceId = 'inv-002';
+    await invoiceRepo.create({ ...makeInvoice(), id: secondInvoiceId, invoiceNumber: 'INV-002' });
+
+    const res1 = await postSigned(app, invoiceEvent(null, { sessionId: 'cs_collide_a' }));
+    const res2 = await postSigned(
+      app,
+      invoiceEvent(null, { sessionId: 'cs_collide_b', invoiceId: secondInvoiceId }),
+    );
+
+    expect(res1.status).toBe(200);
+    expect(res2.status).toBe(200);
+    expect((await paymentRepo.findByInvoice(TENANT, INVOICE_ID))[0]?.providerReference).toBe('cs_collide_a');
+    expect((await paymentRepo.findByInvoice(TENANT, secondInvoiceId))[0]?.providerReference).toBe('cs_collide_b');
   });
 });
