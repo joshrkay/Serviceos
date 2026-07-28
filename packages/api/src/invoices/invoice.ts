@@ -1,5 +1,10 @@
 import { v4 as uuidv4 } from 'uuid';
-import { LineItem, DocumentTotals, calculateDocumentTotals } from '../shared/billing-engine';
+import {
+  LineItem,
+  DocumentTotals,
+  calculateDocumentTotals,
+  normalizeLineItemTotals,
+} from '../shared/billing-engine';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
 import { ValidationError } from '../shared/errors';
 import { SettingsRepository, getNextInvoiceNumber } from '../settings/settings';
@@ -241,8 +246,12 @@ export async function createInvoice(
   const errors = validateInvoiceInput(input);
   if (errors.length > 0) throw new ValidationError(`Validation failed: ${errors.join(', ')}`);
 
+  // P0-2 — the client's totalCents is never persisted; every line total is
+  // recomputed here from quantity × unitPriceCents (the web UI computes it
+  // in float dollars and can be off by a cent on fractional quantities).
+  const lineItems = normalizeLineItemTotals(input.lineItems);
   const totals = calculateDocumentTotals(
-    input.lineItems,
+    lineItems,
     input.discountCents || 0,
     input.taxRateBps || 0,
     input.processingFeeBps || 0
@@ -255,7 +264,7 @@ export async function createInvoice(
     estimateId: input.estimateId,
     invoiceNumber: input.invoiceNumber,
     status: 'draft',
-    lineItems: input.lineItems,
+    lineItems,
     totals,
     amountPaidCents: 0,
     amountDueCents: totals.totalCents,
@@ -382,7 +391,8 @@ export async function updateInvoice(
     throw new ValidationError(`Cannot edit invoice in '${existing.status}' status`);
   }
 
-  const lineItems = input.lineItems ?? existing.lineItems;
+  // P0-2 — client totals are recomputed, never trusted (see createInvoice).
+  const lineItems = normalizeLineItemTotals(input.lineItems ?? existing.lineItems);
   const discountCents = input.discountCents ?? existing.totals.discountCents;
   const taxRateBps = input.taxRateBps ?? existing.totals.taxRateBps;
   const processingFeeBps =

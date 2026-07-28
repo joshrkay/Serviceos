@@ -80,6 +80,25 @@ export function calculateLineItemTotal(quantity: number, unitPriceCents: number)
 }
 
 /**
+ * P0-2 — recompute every line's totalCents server-side from
+ * `quantity × unitPriceCents`, discarding whatever the client sent. The web
+ * write path round-trips money through float dollars (`rate = cents / 100`,
+ * then `round(qty * rate * 100)`), which diverges from the server formula by
+ * a cent on fractional quantities (e.g. 0.5 × 29¢: server 15, client 14) —
+ * and the REST create/update paths used to persist the client's number
+ * verbatim, so the wrong value flowed into subtotal → total → amount_due →
+ * the Stripe unit_amount. Normalizing at the domain layer makes L1
+ * (`line.total == round(qty × unit)`) hold no matter what the client
+ * computed. Idempotent on lines already built by `buildLineItem`.
+ */
+export function normalizeLineItemTotals(lineItems: LineItem[]): LineItem[] {
+  return lineItems.map((item) => ({
+    ...item,
+    totalCents: calculateLineItemTotal(item.quantity, item.unitPriceCents),
+  }));
+}
+
+/**
  * Apply a basis-points rate to an integer-cents amount, rounded to the
  * nearest cent. 10000 bps = 100%. This is the single home for
  * percentage-of-money math (tax lines, deposit rules, discounts) so the
