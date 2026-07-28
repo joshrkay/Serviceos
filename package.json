@@ -16,6 +16,8 @@
     "verify": "npm run doctor -- --warn-only && npm run typecheck && npm run lint && npm test",
     "check:dependency-audit": "tsx scripts/check-dependency-audit.ts",
     "check:dependency-audit:all": "tsx scripts/check-dependency-audit.ts --include-dev",
+    "check:env-coverage": "tsx scripts/check-env-coverage.ts",
+    "check:env-coverage:strict": "tsx scripts/check-env-coverage.ts --strict",
     "lint:eslint": "eslint .",
     "lint:eslint:report": "eslint . --format json -o eslint-report.json",
     "quality:metrics": "tsx scripts/collect-quality-metrics.ts",

@@ -339,6 +339,40 @@ export const sloBreachTotal = new Counter({
   registers: [metricsRegistry],
 });
 
+/**
+ * FAIL-VIS — last evaluated non-completion rate per AI task type, from the
+ * failure-rate monitor. Separate from `slo_rule_value` so the per-task label
+ * does not inflate that gauge's cardinality; `task_type` is a code-defined,
+ * bounded set (~dozens), not user input.
+ */
+export const aiTaskFailureRate = new Gauge({
+  name: 'ai_task_failure_rate',
+  help: 'Fraction of ai_runs in the trailing window that did NOT reach status=completed, by task_type (includes failed AND stuck pending/running)',
+  labelNames: ['task_type'],
+  registers: [metricsRegistry],
+});
+
+/** FAIL-VIS — total ai_runs observed per task type in the last evaluated window. */
+export const aiTaskRunsObserved = new Gauge({
+  name: 'ai_task_runs_observed',
+  help: 'ai_runs created in the last evaluated failure-monitor window, by task_type (the volume floor denominator)',
+  labelNames: ['task_type'],
+  registers: [metricsRegistry],
+});
+
+/**
+ * FAIL-VIS — silent proposal-execution findings. `check` is
+ * `stalled_executing` (stuck in `executing` past the staleness bound) or
+ * `failed_without_error` (terminal `execution_failed` carrying a NULL
+ * `execution_error` — the exact signature that hid the estimate bug).
+ */
+export const proposalSilentFailureFindings = new Gauge({
+  name: 'proposal_silent_failure_findings',
+  help: 'Proposals matching a silent-execution-failure predicate at last evaluation, by check (stalled_executing|failed_without_error)',
+  labelNames: ['check'],
+  registers: [metricsRegistry],
+});
+
 /** WS15 — operator alerts actually dispatched, per channel (post-cooldown). */
 export const sloAlertsSentTotal = new Counter({
   name: 'slo_alerts_sent_total',
