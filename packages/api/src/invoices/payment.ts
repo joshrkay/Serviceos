@@ -45,9 +45,16 @@ async function reconcileInvoiceFromPayments(
   }
 
   const payments = await paymentRepo.findByInvoice(tenantId, invoiceId);
+  // P0-7 — REFUND-INCLUSIVE, matching the codebase's stated invariant
+  // (`invoice.amount_paid == Σ(active payment amount_cents)`, see
+  // payments/payment-service.ts reconcileInvoiceAfterReversal): recordRefund
+  // never decrements invoice.amount_paid, so this repair must not subtract
+  // refundedAmountCents either. The two reconcilers previously disagreed
+  // (this one was refund-net), giving the same column two definitions
+  // depending on which repair path ran.
   const paidCents = payments
     .filter((p) => (p.status === 'completed' || p.status === 'processing') && !p.reversedAt)
-    .reduce((sum, p) => sum + (p.amountCents - (p.refundedAmountCents ?? 0)), 0);
+    .reduce((sum, p) => sum + p.amountCents, 0);
 
   // Already consistent (or over-counted by another concurrent writer) → leave
   // it; we only repair the under-credit the crash-mid-write case produces.

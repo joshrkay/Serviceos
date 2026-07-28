@@ -664,3 +664,136 @@ describe('P0-3 / P0-6 — atomic credit guards (live-state predicates)', () => {
     expect(rejectedEvents[0].metadata?.paymentId).toBe(failed!.id);
   });
 });
+
+describe('P0-7 — crash-repair reconciler is refund-INCLUSIVE and void-safe', () => {
+  // Shared shape with the duplicate-payment backstop tests: a wrapped repo
+  // reproduces migration 229's unique index so a retried reference hits the
+  // 23505 → reconcile branch.
+  function makeRacingRepos() {
+    const localInvoiceRepo = new InMemoryInvoiceRepository();
+    const inner = new InMemoryPaymentRepository();
+    const seen = new Set<string>();
+    const racingRepo: PaymentRepository = {
+      create: async (p: Payment) => {
+        if (p.providerReference && (p.method === 'credit_card' || p.method === 'bank_transfer')) {
+          const key = `${p.tenantId}:${p.providerReference}`;
+          if (seen.has(key)) throw Object.assign(new Error('duplicate key'), { code: '23505' });
+          seen.add(key);
+        }
+        return inner.create(p);
+      },
+      findByProviderReference: (t: string, r: string) => inner.findByProviderReference(t, r),
+      findByInvoice: (t: string, i: string) => inner.findByInvoice(t, i),
+      update: (t: string, id: string, u: Partial<Payment>) => inner.update(t, id, u),
+    } as unknown as PaymentRepository;
+    return { localInvoiceRepo, inner, racingRepo };
+  }
+
+  async function createOpenInvoice(repo: InMemoryInvoiceRepository, totalCents: number) {
+    const inv = await createInvoice(
+      {
+        tenantId: 'tenant-1',
+        jobId: 'job-1',
+        invoiceNumber: `INV-P07-${totalCents}`,
+        lineItems: [buildLineItem('1', 'Service', 1, totalCents, 1, true)],
+        createdBy: 'u-1',
+      },
+      repo,
+    );
+    await issueInvoice('tenant-1', inv.id, 30, repo);
+    return inv;
+  }
+
+  it('repairs to the FULL payment amount even when the payment carries a partial refund', async () => {
+    const { localInvoiceRepo, inner, racingRepo } = makeRacingRepos();
+    const inv = await createOpenInvoice(localInvoiceRepo, 20000);
+
+    const ref = 'pi_refund_inclusive_1';
+    const { payment } = await recordPayment(
+      { tenantId: 'tenant-1', invoiceId: inv.id, amountCents: 10000, method: 'credit_card', providerReference: ref, processedBy: 'stripe_webhook' },
+      localInvoiceRepo,
+      racingRepo,
+    );
+
+    // Crash: the credit is lost; meanwhile a $30 partial refund lands on the row.
+    await localInvoiceRepo.update('tenant-1', inv.id, {
+      amountPaidCents: 0,
+      amountDueCents: 20000,
+      status: 'open',
+      updatedAt: new Date(),
+    });
+    await inner.update('tenant-1', payment.id, { refundedAmountCents: 3000 });
+
+    const retry = await recordPayment(
+      { tenantId: 'tenant-1', invoiceId: inv.id, amountCents: 10000, method: 'credit_card', providerReference: ref, processedBy: 'stripe_webhook' },
+      localInvoiceRepo,
+      racingRepo,
+    );
+
+    // The stated invariant is refund-inclusive: amount_paid == Σ(active
+    // payments.amount_cents) == 10000. The old refund-net repair wrote 7000,
+    // silently diverging from every other writer of the column.
+    expect(retry.invoice.amountPaidCents).toBe(10000);
+    expect(retry.invoice.amountDueCents).toBe(10000);
+  });
+
+  it('never resurrects a voided invoice — the repair is scoped to payable statuses', async () => {
+    // The serial guard already rejects a retry on an ALREADY-void invoice; the
+    // repair-path hole only opens when the void lands BETWEEN the payable check
+    // and the duplicate insert. Reproduce that interleave: the wrapped create
+    // voids the invoice at the moment it raises the 23505, so the reconcile
+    // branch runs against a live-void row.
+    const localInvoiceRepo = new InMemoryInvoiceRepository();
+    const inner = new InMemoryPaymentRepository();
+    const seen = new Set<string>();
+    let voidOnDuplicate: (() => Promise<void>) | null = null;
+    const racingRepo: PaymentRepository = {
+      create: async (p: Payment) => {
+        if (p.providerReference) {
+          const key = `${p.tenantId}:${p.providerReference}`;
+          if (seen.has(key)) {
+            if (voidOnDuplicate) await voidOnDuplicate();
+            throw Object.assign(new Error('duplicate key'), { code: '23505' });
+          }
+          seen.add(key);
+        }
+        return inner.create(p);
+      },
+      findByProviderReference: (t: string, r: string) => inner.findByProviderReference(t, r),
+      findByInvoice: (t: string, i: string) => inner.findByInvoice(t, i),
+      update: (t: string, id: string, u: Partial<Payment>) => inner.update(t, id, u),
+    } as unknown as PaymentRepository;
+
+    const inv = await createOpenInvoice(localInvoiceRepo, 20000);
+    const ref = 'pi_void_norepair_1';
+    await recordPayment(
+      { tenantId: 'tenant-1', invoiceId: inv.id, amountCents: 10000, method: 'credit_card', providerReference: ref, processedBy: 'stripe_webhook' },
+      localInvoiceRepo,
+      racingRepo,
+    );
+
+    // Crash-lost credit: the row exists but the invoice was never credited.
+    await localInvoiceRepo.update('tenant-1', inv.id, {
+      amountPaidCents: 0,
+      amountDueCents: 20000,
+      status: 'open',
+      updatedAt: new Date(),
+    });
+    voidOnDuplicate = async () => {
+      await transitionInvoiceStatus('tenant-1', inv.id, 'void', localInvoiceRepo);
+    };
+
+    // A late redelivery of the same intent must NOT flip void back to
+    // partially_paid — that is P0-3's forbidden transition via the repair path.
+    const retry = await recordPayment(
+      { tenantId: 'tenant-1', invoiceId: inv.id, amountCents: 10000, method: 'credit_card', providerReference: ref, processedBy: 'stripe_webhook' },
+      localInvoiceRepo,
+      racingRepo,
+    );
+
+    expect(retry.invoice.status).toBe('void');
+    expect(retry.invoice.amountPaidCents).toBe(0);
+    const reloaded = await localInvoiceRepo.findById('tenant-1', inv.id);
+    expect(reloaded!.status).toBe('void');
+  });
+});
