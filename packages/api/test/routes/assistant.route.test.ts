@@ -15,7 +15,6 @@ import {
   editFieldsForMissing,
   dropUnverifiedIds,
   VOICE_APPROVAL_REFUSAL,
-  NOTHING_WAS_SAVED_NOTICE,
 } from '../../src/routes/assistant';
 import { InMemoryProposalRepository, createProposal } from '../../src/proposals/proposal';
 import { approveProposal } from '../../src/proposals/actions';
@@ -464,12 +463,16 @@ describe('Story 3.11/3.12 — assistant chat persistence + correlation id', () =
     return app;
   }
 
-  // classify → 'unknown', which the unrouted-intent guard answers with the
-  // honest clarification (it no longer improvises through the generic LLM —
-  // see routes/assistant.ts). What this describe block pins is PERSISTENCE:
+  // classify → 'unknown', which falls through to the generic LLM. The reply
+  // scripted below is HONEST (no completed-action claim), so the honesty
+  // guard passes it through untouched — see assistant-honest-refusal.test.ts
+  // for the taxonomy itself. What this describe block pins is PERSISTENCE:
   // both turns land on the thread whatever the reply text is.
   function replyGateway() {
-    return scriptedGateway([JSON.stringify({ intentType: 'unknown', confidence: 0.9 })]);
+    return scriptedGateway([
+      JSON.stringify({ intentType: 'unknown', confidence: 0.9 }),
+      JSON.stringify({ content: 'Here is what I can tell you about today.', proposal: null }),
+    ]);
   }
 
   it('persists the operator + agent turn and returns conversationId + correlationId', async () => {
@@ -488,7 +491,6 @@ describe('Story 3.11/3.12 — assistant chat persistence + correlation id', () =
     expect(messages.map((m) => m.senderRole)).toEqual(['user', 'assistant']);
     expect(messages[0].content).toBe('summarize my day');
     expect(messages[1].content).toBe(res.body.message.content);
-    expect(messages[1].content).toContain(NOTHING_WAS_SAVED_NOTICE);
   });
 
   it('appends to the same conversation when conversationId is supplied', async () => {

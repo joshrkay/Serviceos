@@ -14,17 +14,27 @@
  * tradesperson reading that drives away believing the time was logged and the
  * job booked — the worst possible failure mode for this product.
  *
- * The mechanism: the classifier forces anything below
- * CLASSIFIER_CONFIDENCE_THRESHOLD (0.6) to 'unknown' while keeping its best
- * guess in `lowConfidenceIntent`. 'unknown' matched no dispatch entry, so the
- * route fell through to a generic LLM prompt ("provide concise, high-signal
- * operational help") holding the raw imperative. A past-tense confirmation is
- * that prompt's most natural completion, and nothing in the reply schema, the
- * output contract, or any post-parse check could tell truth from fiction.
+ * WHAT CHANGED SINCE THE FIRST FIX
+ * --------------------------------
+ * PR #776 answered BOTH of those with one blanket reply
+ * (`assistant.clarification`). That was too coarse in one direction and too
+ * narrow in the other:
  *
- * The voice pipeline never had this hole — an 'unknown' classification emits a
- * `voice_clarification` proposal (workers/voice-action-router.ts). These tests
- * pin the chat-surface equivalent.
+ *   - too coarse: "I didn't understand you" and "we broke" are different
+ *     things to tell an operator standing in someone's kitchen, and the
+ *     second is not the operator's fault;
+ *   - too narrow: it keyed on `intentType === 'unknown'`, so a CONFIDENT
+ *     classification for an intent with no handler ('add_crew_member',
+ *     'convert_lead') still fell through to the generic LLM — the exact
+ *     fabrication path it was written to close.
+ *
+ * The taxonomy that replaced it (`assistant.not_understood` /
+ * `assistant.intent_failed` / `assistant.unhandled.<intent>`) is specified and
+ * pinned in `assistant-honest-refusal.test.ts`. THIS file keeps the coverage
+ * that is its own and is not duplicated there: the low-confidence classifier
+ * shape produced end to end, and the two defence-in-depth mechanisms behind
+ * the taxonomy — the fallback prompt's no-action directive, and the fact that
+ * a classifier exception is never swallowed silently.
  *
  * NO LIVE LLM CALLS — the gateway is a scripted fake, so the classifier output
  * is forced directly.
@@ -32,10 +42,7 @@
 import request from 'supertest';
 import express, { Request, Response, NextFunction } from 'express';
 import { describe, it, expect, vi } from 'vitest';
-import {
-  createAssistantRouter,
-  NOTHING_WAS_SAVED_NOTICE,
-} from '../../src/routes/assistant';
+import { createAssistantRouter } from '../../src/routes/assistant';
 import { InMemoryProposalRepository } from '../../src/proposals/proposal';
 import type { LLMGateway, LLMResponse } from '../../src/ai/gateway/gateway';
 import type { AuthenticatedRequest } from '../../src/auth/clerk';
@@ -100,8 +107,8 @@ const COMPLETION_CLAIM_RE =
 
 /**
  * The two live incidents, plus the intent the classifier leaned toward for
- * each. `lowConfidenceIntent` is what the clarification offers back as a
- * "did you mean".
+ * each. Both are forced BELOW the confidence threshold, so both land as
+ * 'unknown' — a failure to classify, not a capability gap.
  */
 const INCIDENTS: Array<{ utterance: string; leanedIntent: string; likelyLie: string }> = [
   {
@@ -118,11 +125,11 @@ const INCIDENTS: Array<{ utterance: string; leanedIntent: string; likelyLie: str
 
 describe('POST /api/assistant/chat — an unrouted utterance never claims an action', () => {
   for (const { utterance, leanedIntent, likelyLie } of INCIDENTS) {
-    it(`"${utterance}" gets a clarification, not a false confirmation`, async () => {
+    it(`"${utterance}" is answered honestly, not with a false confirmation`, async () => {
       const proposalRepo = new InMemoryProposalRepository();
-      // Second entry is what the generic LLM fallback WOULD have said. If the
-      // guard regresses, this is the reply the operator sees — and the
-      // assertions below fail on it.
+      // Second entry is what the generic LLM fallback DID say in production.
+      // The reply is allowed to reach the guard — what must not happen is
+      // that it reaches the OPERATOR.
       const gateway = scriptedGateway([
         lowConfidenceClassifierReply(leanedIntent),
         JSON.stringify({ content: likelyLie, autoApplied: false, proposal: null }),
@@ -141,29 +148,25 @@ describe('POST /api/assistant/chat — an unrouted utterance never claims an act
       expect(content).not.toBe(likelyLie);
 
       // 2. It says, in words, that nothing was saved.
-      expect(content).toContain(NOTHING_WAS_SAVED_NOTICE);
+      expect(content).toMatch(/haven't scheduled, logged, or changed anything/i);
 
-      // 3. It is a clarification — it asks, and names the intent it leaned
-      //    toward so the operator can confirm in one turn.
-      expect(res.body.taskType).toBe('assistant.clarification');
-      expect(content).toContain('?');
-      expect(content).toContain(leanedIntent.replace(/_/g, ' '));
+      // 3. It is the NOT-UNDERSTOOD outcome — the classifier could not place
+      //    the utterance, which is a different thing from "we broke" and from
+      //    "I can't do that". It asks rather than dead-ends.
+      expect(res.body.taskType).toBe('assistant.not_understood');
+      expect(content).toMatch(/not sure what you wanted/i);
 
       // 4. Reality check: nothing was persisted, and no proposal card is
       //    dangled that the operator could tap.
       expect(await proposalRepo.findByTenant(TEST_TENANT)).toHaveLength(0);
       expect(res.body.message.proposal ?? null).toBeNull();
-
-      // 5. The generic LLM improvisation never ran — only the classifier call.
-      expect((gateway.complete as ReturnType<typeof vi.fn>).mock.calls).toHaveLength(1);
     });
   }
 
   it('an unknown with no leaned intent still refuses to improvise', async () => {
     const proposalRepo = new InMemoryProposalRepository();
     const gateway = scriptedGateway([
-      // Classifier itself picked 'unknown' at HIGH confidence — no
-      // lowConfidenceIntent to offer, so there is no "did you mean".
+      // Classifier itself picked 'unknown' at HIGH confidence.
       JSON.stringify({ intentType: 'unknown', confidence: 0.95, extractedEntities: {} }),
       JSON.stringify({ content: "I've taken care of that.", proposal: null }),
     ]);
@@ -174,9 +177,39 @@ describe('POST /api/assistant/chat — an unrouted utterance never claims an act
       .send({ messages: [{ role: 'user', content: 'sort that thing out for me' }] });
 
     expect(res.status).toBe(200);
-    expect(res.body.taskType).toBe('assistant.clarification');
+    expect(res.body.taskType).toBe('assistant.not_understood');
     expect(res.body.message.content).not.toMatch(COMPLETION_CLAIM_RE);
-    expect(res.body.message.content).toContain(NOTHING_WAS_SAVED_NOTICE);
+    expect(res.body.message.content).toMatch(/haven't scheduled, logged, or changed anything/i);
+  });
+
+  it('a CONFIDENT intent with no handler never reaches the LLM at all', async () => {
+    // The hole PR #776 left open. 'remove_crew_member' is a real taxonomy
+    // intent wired into neither chat dispatch map, classified at 0.95 — so it
+    // is not a misunderstanding, it is a capability we do not have here. The
+    // second scripted response is the fabrication the fallback LLM would have
+    // returned; the gateway call count proves it was never asked.
+    const proposalRepo = new InMemoryProposalRepository();
+    const gateway = scriptedGateway([
+      JSON.stringify({
+        intentType: 'remove_crew_member',
+        confidence: 0.95,
+        reasoning: 'clear crew change',
+        extractedEntities: {},
+      }),
+      JSON.stringify({ content: "I've taken Dave off the crew.", proposal: null }),
+    ]);
+    const app = buildApp(gateway, proposalRepo);
+
+    const res = await request(app)
+      .post('/api/assistant/chat')
+      .send({ messages: [{ role: 'user', content: 'take Dave off the Miller crew' }] });
+
+    expect(res.status).toBe(200);
+    expect(res.body.taskType).toBe('assistant.unhandled.remove_crew_member');
+    expect(res.body.message.content).not.toMatch(COMPLETION_CLAIM_RE);
+    expect(res.body.message.content).toMatch(/can't do that from here yet/i);
+    expect(await proposalRepo.findByTenant(TEST_TENANT)).toHaveLength(0);
+    // Only the classifier call happened.
     expect((gateway.complete as ReturnType<typeof vi.fn>).mock.calls).toHaveLength(1);
   });
 
@@ -199,7 +232,7 @@ describe('POST /api/assistant/chat — an unrouted utterance never claims an act
       .send({ messages: [{ role: 'user', content: 'log two hours on the Miller job' }] });
 
     expect(res.status).toBe(200);
-    expect(res.body.taskType).not.toBe('assistant.clarification');
+    expect(res.body.taskType).not.toMatch(/unhandled|not_understood|intent_failed/);
     expect(res.body.message.proposal).toBeTruthy();
     const persisted = await proposalRepo.findByTenant(TEST_TENANT);
     expect(persisted).toHaveLength(1);
@@ -208,10 +241,11 @@ describe('POST /api/assistant/chat — an unrouted utterance never claims an act
 });
 
 describe('generic LLM fallback prompt — explicit no-action rule', () => {
-  it('the fallback system prompt forbids claiming an action was taken', async () => {
-    // Defence in depth: the guard above keeps 'unknown' away from this path,
-    // but a classifier EXCEPTION still lands here. The prompt must carry the
-    // capability disclaimer so the model cannot confirm work it never did.
+  it('the fallback system prompt tells the model it has taken no action', async () => {
+    // Defence in depth (layer 2). The deterministic refusals above keep
+    // confident-but-unmapped intents away from this path entirely, but
+    // 'unknown' and a classifier EXCEPTION both still land here. The prompt
+    // must carry the one fact the model cannot otherwise know.
     const proposalRepo = new InMemoryProposalRepository();
     const gateway = {
       complete: vi.fn(async (req: { taskType: string }) => {
@@ -249,8 +283,8 @@ describe('generic LLM fallback prompt — explicit no-action rule', () => {
       .map((m) => m.content)
       .join('\n');
 
-    expect(system).toContain('YOU CANNOT PERFORM ACTIONS');
-    expect(system).toMatch(/never state or imply that an action was taken/i);
+    expect(system).toContain('YOU HAVE TAKEN NO ACTION');
+    expect(system).toMatch(/never state or imply that you have done something/i);
     expect(system).toContain("I've scheduled");
   });
 
