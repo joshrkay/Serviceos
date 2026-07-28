@@ -128,6 +128,34 @@ const configSchema = z.object({
   SLO_ALERT_COOLDOWN_MIN: z.coerce.number().positive().default(60),
   // Operator phone (E.164) for SLO breach SMS pages. Unset → Sentry-only.
   ALERT_SMS_TO: z.string().min(1).optional(),
+  // ── FAIL-VIS — silent-failure monitor (workers/failure-rate-monitor.ts).
+  // Watches `ai_runs` and `proposals` for the failure shapes that shipped
+  // SILENTLY (a 26,894-call task that completed zero times; estimate
+  // executions terminal-failing with a NULL execution_error). All optional
+  // with defaults; pages through the SAME alertOperator seam as the SLO
+  // monitor. Documented in .env.production.example and
+  // docs/runbooks/failure-rate-monitor.md.
+  //
+  // Trailing window (minutes) for the ai_runs failure-rate aggregate.
+  FAILURE_MONITOR_WINDOW_MIN: z.coerce.number().positive().default(30),
+  // Settle offset (minutes): runs newer than this are EXCLUDED from the
+  // window because they may legitimately still be in flight. Gateway
+  // deadlines are seconds, so anything unresolved after this is stuck.
+  FAILURE_MONITOR_SETTLE_MIN: z.coerce.number().positive().default(5),
+  // Non-completion rate (0..1) above which a task_type breaches. Healthy
+  // task types sit near 0; the observed incidents were 0.85 and 1.00.
+  FAILURE_MONITOR_RATE_MAX: z.coerce.number().min(0).max(1).default(0.25),
+  // Volume floor: a task_type with fewer runs than this in the window can
+  // never breach (1 failure in 2 calls is noise; 500 in 600 is a fire).
+  FAILURE_MONITOR_MIN_RUNS: z.coerce.number().int().positive().default(20),
+  // Cap on task-failure pages per tick so a platform-wide outage (every task
+  // type breaching at once) cannot turn the monitor into its own storm.
+  FAILURE_MONITOR_MAX_TASK_ALERTS: z.coerce.number().int().positive().default(3),
+  // Minutes a proposal may sit in `executing` before it counts as stalled.
+  FAILURE_MONITOR_PROPOSAL_STALE_MIN: z.coerce.number().positive().default(15),
+  // Lookback (hours) for proposals that reached `execution_failed` with a
+  // NULL `execution_error` — a terminal failure state carrying no reason.
+  FAILURE_MONITOR_PROPOSAL_LOOKBACK_HOURS: z.coerce.number().positive().default(24),
   // QUALITY-2026-07-12 WS5 — Microsoft Presidio PII redaction backend for
   // training-asset ingestion. Two separate REST services (matching Presidio's
   // standard deployment): the Analyzer detects PII spans, the Anonymizer

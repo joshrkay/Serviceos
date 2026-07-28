@@ -6395,6 +6395,27 @@ export const MIGRATIONS = {
   '263_tenant_settings_timezone_no_silent_default': `
     ALTER TABLE tenant_settings ALTER COLUMN timezone DROP DEFAULT;
     ALTER TABLE tenant_settings ALTER COLUMN timezone DROP NOT NULL;
+  // FAIL-VIS — indexes for the silent-failure monitor (workers/failure-rate-
+  // monitor.ts). The monitor runs cross-tenant aggregates every 10 minutes and
+  // MUST stay cheap; without these it would seq-scan ai_runs (~14k rows/day,
+  // far more during exactly the storm it exists to catch) on every tick.
+  //
+  //  1. ai_runs — the failure-rate rule filters a bounded created_at range and
+  //     groups by task_type counting status. INCLUDE makes it an index-ONLY
+  //     scan: the heap is never touched, so the aggregate cost is proportional
+  //     to the window, not the table.
+  //  2/3. proposals — two PARTIAL indexes matching the two silent-execution
+  //     predicates exactly. Partial keeps them tiny (healthy systems have ~0
+  //     rows in either state) and makes both probes near-constant-time.
+  '263_failure_monitor_indexes': `
+    CREATE INDEX IF NOT EXISTS idx_ai_runs_created_at_status
+      ON ai_runs (created_at) INCLUDE (task_type, status);
+    CREATE INDEX IF NOT EXISTS idx_proposals_executing_stale
+      ON proposals (updated_at)
+      WHERE status = 'executing';
+    CREATE INDEX IF NOT EXISTS idx_proposals_silent_execution_failure
+      ON proposals (updated_at)
+      WHERE status = 'execution_failed' AND execution_error IS NULL;
   `,
 };
 

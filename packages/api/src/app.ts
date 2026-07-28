@@ -199,6 +199,11 @@ import {
   SLO_MONITOR_INTERVAL_MS,
   estimateTurnLatencyP95,
 } from './workers/slo-monitor';
+import { PgFailureMonitorRepository } from './monitoring/pg-failure-monitor';
+import {
+  runFailureRateMonitor,
+  FAILURE_MONITOR_INTERVAL_MS,
+} from './workers/failure-rate-monitor';
 
 // In-memory repositories (fallback for dev without DATABASE_URL)
 import { InMemoryCustomerRepository } from './customers/customer';
@@ -2344,6 +2349,11 @@ export function createApp(): AppWithLifecycle {
     // WS15 — platform SLO monitor (evaluates completion rate / queue
     // staleness / sweep lag and pages the operator on breach).
     sloMonitor: 590024,
+    // FAIL-VIS — silent-failure monitor (ai_runs non-completion rate per task
+    // type + stalled/reasonless proposal executions). DISTINCT key: sharing
+    // 590024 with sloMonitor would silently serialize the two monitors behind
+    // one advisory lock — the exact 590014 collision called out above.
+    failureMonitor: 590025,
   } as const;
   const runAsLeader = async (lockKey: number, work: () => Promise<void>): Promise<void> => {
     if (shuttingDown) return;
@@ -2481,6 +2491,69 @@ export function createApp(): AppWithLifecycle {
         sloMonitorInFlight = false;
       });
     }, SLO_MONITOR_INTERVAL_MS));
+
+    // FAIL-VIS — silent-failure monitor. Every defect found in the 2026-07
+    // investigation was silent while the evidence sat in tables nothing read:
+    // `supervisor_annotate` ran 26,894 times and completed ZERO times, and
+    // estimate executions terminal-failed for weeks with `execution_error`
+    // NULL. This sweep reads `ai_runs` (non-completion rate per task_type over
+    // a settled window, behind a volume floor) and `proposals` (stuck in
+    // `executing`; `execution_failed` with no reason) every 10 minutes and
+    // pages through the SAME alertOperator seam as the SLO monitor above —
+    // Sentry error event always, owner-class operator SMS when ALERT_SMS_TO is
+    // set — reusing its per-rule cooldown so a persistent condition pages once
+    // per SLO_ALERT_COOLDOWN_MIN, not every tick.
+    //
+    // Safety: distinct advisory lock (SWEEP_LOCK.failureMonitor), in-flight
+    // guard, indexed bounded aggregates only, NO LLM gateway call, and
+    // runFailureRateMonitor never rejects — the .catch() here is belt-and-
+    // braces. Runbook: docs/runbooks/failure-rate-monitor.md.
+    const failureMonitorLogger = createLogger({
+      service: 'failure-rate-monitor',
+      environment: process.env.NODE_ENV || 'development',
+    });
+    const failureMonitorRepo = pool ? new PgFailureMonitorRepository(pool) : null;
+    let failureMonitorInFlight = false;
+    registerInterval(setInterval(() => {
+      if (failureMonitorInFlight) return;
+      failureMonitorInFlight = true;
+      void runAsLeader(SWEEP_LOCK.failureMonitor, async () => {
+        await runFailureRateMonitor({
+          // In-memory dev (no pool): empty aggregates — the volume floor and
+          // zero counts keep every rule quiet.
+          getTaskRunCounts: (windowStart, windowEnd) =>
+            failureMonitorRepo
+              ? failureMonitorRepo.taskRunCounts(windowStart, windowEnd)
+              : Promise.resolve([]),
+          getProposalExecutionCounts: (stalledBefore, failedSince) =>
+            failureMonitorRepo
+              ? failureMonitorRepo.proposalExecutionCounts(stalledBefore, failedSince)
+              : Promise.resolve({
+                  stalledExecuting: 0,
+                  failedWithoutError: 0,
+                  stalledSampleIds: [],
+                  failedSampleIds: [],
+                }),
+          alert: alertOperator,
+          thresholds: {
+            windowMin: config.FAILURE_MONITOR_WINDOW_MIN,
+            settleMin: config.FAILURE_MONITOR_SETTLE_MIN,
+            rateMax: config.FAILURE_MONITOR_RATE_MAX,
+            minRuns: config.FAILURE_MONITOR_MIN_RUNS,
+            maxTaskAlerts: config.FAILURE_MONITOR_MAX_TASK_ALERTS,
+            proposalStaleMin: config.FAILURE_MONITOR_PROPOSAL_STALE_MIN,
+            proposalLookbackHours: config.FAILURE_MONITOR_PROPOSAL_LOOKBACK_HOURS,
+          },
+          logger: failureMonitorLogger,
+        });
+      }).catch((err) => {
+        failureMonitorLogger.error('Failure monitor sweep failed', {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }).finally(() => {
+        failureMonitorInFlight = false;
+      });
+    }, FAILURE_MONITOR_INTERVAL_MS));
   }
 
   const executionWorkerLogger = createLogger({
