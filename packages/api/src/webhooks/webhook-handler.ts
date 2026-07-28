@@ -22,6 +22,18 @@ export interface WebhookRepository {
   findByIdempotencyKey(source: string, idempotencyKey: string): Promise<WebhookEvent | null>;
   create(event: WebhookEvent): Promise<WebhookEvent>;
   updateStatus(id: string, status: WebhookEvent['status'], error?: string): Promise<void>;
+  /**
+   * P0-8 — atomically CLAIM an existing row for retry execution. The
+   * (source, idempotency_key) unique index arbitrates only the FIRST
+   * delivery; once a row exists, deciding "this failed/stale row may re-run"
+   * from a pure read lets two concurrent retries both run the handler. This
+   * compare-and-swap flips the row to 'processing' — and refreshes
+   * `createdAt`, the in-flight staleness anchor — ONLY when it is still
+   * retry-eligible (status 'failed', or 'received'/'processing' older than
+   * `stalenessMs`). Exactly one concurrent caller gets the row back; the
+   * rest get null and must treat the event as an in-flight duplicate.
+   */
+  claimForRetry(id: string, stalenessMs: number): Promise<WebhookEvent | null>;
 }
 
 export function verifyWebhookSignature(
@@ -179,7 +191,7 @@ export async function handleWebhookEvent(
   // retries.
   const existing = await repository.findByIdempotencyKey(source, idempotencyKey);
   if (existing) {
-    return classifyExisting(existing);
+    return claimIfRetry(repository, classifyExisting(existing));
   }
 
   const event: WebhookEvent = {
@@ -204,10 +216,33 @@ export async function handleWebhookEvent(
   // (The in-memory repo always returns the row we passed, so id matches
   // and this branch is a no-op there.)
   if (created.id !== event.id) {
-    return classifyExisting(created);
+    return claimIfRetry(repository, classifyExisting(created));
   }
 
   return { event: created, duplicate: false };
+}
+
+/**
+ * P0-8 — turn a "retry-eligible" classification into an EXCLUSIVE claim.
+ * `classifyExisting` is a pure read: two concurrent retries of the same
+ * failed/stale row both see duplicate=false and would both execute the
+ * handler (defeating every downstream check-then-act idempotency guard by
+ * timing — e.g. two refund retries both reading the pre-increment state).
+ * The repository CAS lets exactly one retry proceed; every loser is
+ * reported as an in-flight duplicate, which the routes ACK with 200 so the
+ * provider's later redelivery (well past the staleness window) can recover
+ * if the winner crashes.
+ */
+async function claimIfRetry(
+  repository: WebhookRepository,
+  classified: { event: WebhookEvent; duplicate: boolean },
+): Promise<{ event: WebhookEvent; duplicate: boolean }> {
+  if (classified.duplicate) return classified;
+  const claimed = await repository.claimForRetry(classified.event.id, INFLIGHT_STALENESS_MS);
+  if (!claimed) {
+    return { event: classified.event, duplicate: true };
+  }
+  return { event: claimed, duplicate: false };
 }
 
 export class InMemoryWebhookRepository implements WebhookRepository {
@@ -234,5 +269,25 @@ export class InMemoryWebhookRepository implements WebhookRepository {
       if (error) event.errorMessage = error;
       if (status === 'processed') event.processedAt = new Date();
     }
+  }
+
+  /**
+   * Mirror of the Pg compare-and-swap claim. Yields to the microtask queue
+   * once so two concurrent claimers actually interleave under the in-memory
+   * repo; the check+flip block itself is synchronous, matching the atomicity
+   * of the single SQL UPDATE.
+   */
+  async claimForRetry(id: string, stalenessMs: number): Promise<WebhookEvent | null> {
+    await Promise.resolve();
+    const event = this.events.get(id);
+    if (!event) return null;
+    const stale = Date.now() - event.createdAt.getTime() >= stalenessMs;
+    const eligible =
+      event.status === 'failed' ||
+      ((event.status === 'received' || event.status === 'processing') && stale);
+    if (!eligible) return null;
+    event.status = 'processing';
+    event.createdAt = new Date();
+    return { ...event };
   }
 }
