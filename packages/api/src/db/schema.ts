@@ -6395,6 +6395,7 @@ export const MIGRATIONS = {
   '263_tenant_settings_timezone_no_silent_default': `
     ALTER TABLE tenant_settings ALTER COLUMN timezone DROP DEFAULT;
     ALTER TABLE tenant_settings ALTER COLUMN timezone DROP NOT NULL;
+  `,
   // FAIL-VIS — indexes for the silent-failure monitor (workers/failure-rate-
   // monitor.ts). The monitor runs cross-tenant aggregates every 10 minutes and
   // MUST stay cheap; without these it would seq-scan ai_runs (~14k rows/day,
