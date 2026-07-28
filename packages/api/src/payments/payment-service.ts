@@ -696,13 +696,43 @@ export async function recordProcessingPayment(
       }
     }
 
+    // Compensation is a PROCESSING-ONLY CAS, never an unconditional write: a
+    // concurrent `payment_intent.succeeded` can settle this very row
+    // (processing → completed) between the ledger check above and this flip,
+    // and blindly overwriting 'completed' with 'failed' would erase a settled
+    // capture from the active ledger with no trace.
     const now = new Date();
-    await paymentRepo.update(input.tenantId, payment.id, {
-      status: 'failed',
+    const flipped = await paymentRepo.reverseInFlightPaymentAtomic(input.tenantId, payment.id, {
       reversedAt: now,
-      reversalReason: 'credit_rejected',
-      updatedAt: now,
+      reason: 'credit_rejected',
     });
+    if (!flipped && auditRepo) {
+      // Lost the CAS: the row settled while the credit was being rejected.
+      // The capture is real money with NO invoice credit — keep the
+      // completed row (it records the capture) and put the discrepancy on
+      // the audit trail for reconciliation.
+      await auditRepo
+        .create(
+          createAuditEvent({
+            tenantId: input.tenantId,
+            actorId: input.processedBy,
+            actorRole: auditContext?.actorRole ?? 'system',
+            eventType: 'payment.unapplied_capture',
+            entityType: 'invoice',
+            entityId: input.invoiceId,
+            correlationId: auditContext?.correlationId,
+            metadata: {
+              paymentId: payment.id,
+              capturedCents: payment.amountCents,
+              creditedCents: 0,
+              unappliedCents: payment.amountCents,
+              invoiceStatus: live?.status ?? 'missing',
+              reason: 'settled_during_credit_rejection',
+            },
+          }),
+        )
+        .catch(() => undefined);
+    }
     if (!live) throw new ValidationError('Invoice not found');
     if (!PAYABLE_STATUSES.includes(live.status)) {
       throw new ValidationError(
