@@ -449,6 +449,10 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   // dependency on pre-existing tenant rows beyond normal foreign keys.
   ['261_create_tenant_entity_aliases', 'f355ecfc94bf9a067c28ba86988832801bc2357a0ab1b2b5db5e3baa3d04bfe0'],
   ['262_portal_sessions_contact_id', '31af90200a435cb285e39c6c180da71a09f82562759fb28844641dc47409b85b'],
+  // FAIL-VIS — read-path indexes for the silent-failure monitor: one INCLUDE
+  // index on ai_runs(created_at) and two partial indexes on proposals. Index
+  // creation only; no columns, constraints, or data touched.
+  ['263_failure_monitor_indexes', 'bb6aeb2d17dca2c8c7b3959155b642d2018a7df5063b3acb88a3f82cc22ae872'],
 ];
 
 function hashMigration(value: string): string {
