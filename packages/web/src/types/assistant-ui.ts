@@ -81,6 +81,31 @@ export interface AIProposal {
    * Approve is blocked until the operator fills each missing field.
    */
   missingFields?: string[];
+  /**
+   * The backend's internal proposal type (`create_customer`, `draft_estimate`,
+   * …). Lets the card special-case a family without pattern-matching on the
+   * humanized `type` label.
+   */
+  proposalType?: string;
+  /**
+   * `create_customer` only — the ADDRESS SLICE of the proposal payload, keys
+   * spelled exactly as `createCustomerPayloadSchema` spells them: the verbatim
+   * `address` the technician spoke plus any structured fields already set.
+   *
+   * Passed through unresolved on purpose. The card runs the SAME
+   * `resolveSpokenAddress` the execution handler runs, so what the card calls
+   * "still missing" and what the writer calls "can't become a service
+   * location" are the same computation, not two that have to be kept in sync.
+   */
+  addressCapture?: {
+    address?: string;
+    street1?: string;
+    street2?: string;
+    city?: string;
+    state?: string;
+    postalCode?: string;
+    country?: string;
+  };
   /** Backend payload `_meta` confidence fragment for the 4-tier bar. */
   meta?: ProposalConfidenceMeta;
   /** Per-line catalog-grounding signal (`pricingSource`). */

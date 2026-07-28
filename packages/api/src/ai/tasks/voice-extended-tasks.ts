@@ -1184,6 +1184,17 @@ export class AddServiceLocationTaskHandler implements TaskHandler {
 }
 
 // ───────────── log_time_entry ─────────────
+
+/** "2 hours", "1 hour 30 minutes", "45 minutes" — readback only. */
+function formatWorkedDuration(minutes: number): string {
+  const h = Math.floor(minutes / 60);
+  const m = minutes % 60;
+  const parts: string[] = [];
+  if (h > 0) parts.push(`${h} ${h === 1 ? 'hour' : 'hours'}`);
+  if (m > 0 || h === 0) parts.push(`${m} ${m === 1 ? 'minute' : 'minutes'}`);
+  return parts.join(' ');
+}
+
 //
 // Clocks the speaking technician in on a job/task. entryType defaults to
 // 'job'.
@@ -1219,6 +1230,20 @@ export class LogTimeEntryTaskHandler implements TaskHandler {
     const payload: Record<string, unknown> = { entryType };
     const missing: string[] = [];
 
+    // RETROACTIVE capture — "put me down for two hours on this one".
+    // The classifier now states a COMPLETED duration in whole minutes (the
+    // unit time_entries.duration_minutes stores). Before this the number was
+    // dropped on the floor: the utterance landed as an add_note whose body
+    // said "this was two hours", and no billable time entry ever existed.
+    // Absent => the unchanged clock-in path.
+    const durationMinutes =
+      typeof ee.durationMinutes === 'number' &&
+      Number.isFinite(ee.durationMinutes) &&
+      ee.durationMinutes > 0
+        ? Math.round(ee.durationMinutes)
+        : undefined;
+    if (durationMinutes !== undefined) payload.durationMinutes = durationMinutes;
+
     // P8 — verified jobId resolved by the router from the spoken name.
     const resolvedJobId =
       typeof context.existingEntities?.jobId === 'string'
@@ -1229,13 +1254,17 @@ export class LogTimeEntryTaskHandler implements TaskHandler {
     if (entryType === 'job' && !resolvedJobId) missing.push('jobId');
 
     const readback =
-      entryType === 'job'
-        ? `Clocking you in on ${ee.jobReference ?? 'a job'} — right?`
-        : entryType === 'drive'
-          ? 'Starting your drive time — right?'
-          : entryType === 'break'
-            ? 'Starting your break — right?'
-            : 'Logging admin time — right?';
+      durationMinutes !== undefined
+        ? entryType === 'job'
+          ? `Logging ${formatWorkedDuration(durationMinutes)} on ${ee.jobReference ?? 'this job'} — right?`
+          : `Logging ${formatWorkedDuration(durationMinutes)} of ${entryType} time — right?`
+        : entryType === 'job'
+          ? `Clocking you in on ${ee.jobReference ?? 'a job'} — right?`
+          : entryType === 'drive'
+            ? 'Starting your drive time — right?'
+            : entryType === 'break'
+              ? 'Starting your break — right?'
+              : 'Logging admin time — right?';
 
     return {
       proposal: createProposal({

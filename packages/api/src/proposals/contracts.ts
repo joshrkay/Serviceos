@@ -113,11 +113,44 @@ const confidenceMetaEnvelopeSchema = z
   .object({ _meta: proposalConfidenceMetaSchema.optional() })
   .passthrough();
 
+/**
+ * `create_customer`.
+ *
+ * `address` is the technician's VERBATIM spoken words ("1207 Riverbell
+ * Drive") and stays free text — it is evidence of what was said, never a
+ * structured record.
+ *
+ * The structured fields below are what an APPROVER supplies on the review
+ * card before approving, and they mirror the free-text address columns of
+ * `service_locations` exactly (db/schema.ts migration 015): `street1`,
+ * `city`, `state`, `postal_code` are NOT NULL; `street2` is nullable;
+ * `country` is NOT NULL DEFAULT 'US'. Geo (`latitude`/`longitude`), `label`,
+ * `access_notes` and `address_type` are intentionally absent — nothing in a
+ * spoken utterance or a review card supplies them, and the table defaults
+ * cover `address_type`/`country`.
+ *
+ * Every one is INDIVIDUALLY optional, on purpose. The lead schemas gate the
+ * same four columns with an all-or-nothing refine
+ * (`refineCompleteAddress`, leads/enums.ts); doing that here would make a
+ * half-completed review card unapprovable, and a blocked approve button on a
+ * job site is worse than an incomplete record. Completeness is enforced where
+ * the write happens instead — `resolveSpokenAddress` in the execution handler
+ * either has all four (→ a `service_location` row) or preserves the address
+ * verbatim on the customer (→ a durable note). Strictly widening: every
+ * payload that validated before this change still validates.
+ */
 export const createCustomerPayloadSchema = z.object({
   name: z.string().min(1),
   email: z.string().email().optional(),
   phone: z.string().optional(),
+  /** Verbatim spoken address. Never parsed destructively; never discarded. */
   address: z.string().optional(),
+  street1: z.string().min(1).optional(),
+  street2: z.string().min(1).optional(),
+  city: z.string().min(1).optional(),
+  state: z.string().min(1).optional(),
+  postalCode: z.string().min(1).optional(),
+  country: z.string().min(1).optional(),
   notes: z.string().optional(),
 });
 
@@ -336,9 +369,27 @@ export function tierStructureIssues(
   return issues;
 }
 
+// QA-2026-07-27 — `customerId` on a drafted estimate is authored by the ENTITY
+// RESOLVER (a verified, tenant-scoped uuid), never by the drafting model. The
+// live bug this shape closes: the estimate prompt handed the model a
+// `"customerId": "<uuid>"` template and told it to "ensure customerId is
+// present", so it invented ids — observed in Development as "unknown",
+// "<uuid>", and the RFC 4122 EXAMPLE uuid 123e4567-e89b-12d3-a456-426614174000
+// (twice). That last one is syntactically valid, so `z.string().uuid()` alone
+// waves it through; format validation is NOT sufficient and the id is
+// existence-checked against the tenant by DraftEstimateExecutionHandler before
+// any write.
+//
+// When nothing resolves, the draft must NOT carry a fake id: it carries the
+// spoken `customerReference` instead and is gated with
+// `missingFields: ['customerId']` so it can never auto-approve. Shape mirrors
+// addServiceLocationPayloadSchema / convertLeadPayloadSchema (resolved id OR
+// free-text reference, enforced by a `.refine`) rather than inventing a new
+// convention.
 export const draftEstimatePayloadSchema = z
   .object({
-    customerId: z.string().uuid(),
+    customerId: z.string().uuid().optional(),
+    customerReference: z.string().min(1).optional(),
     jobId: z.string().uuid().optional(),
     lineItems: z.array(lineItemSchema).min(1),
     notes: z.string().optional(),
@@ -352,6 +403,9 @@ export const draftEstimatePayloadSchema = z
     for (const message of tierStructureIssues(val.lineItems)) {
       ctx.addIssue({ code: z.ZodIssueCode.custom, message, path: ['lineItems'] });
     }
+  })
+  .refine((v) => Boolean(v.customerId || v.customerReference), {
+    message: 'customerId or customerReference is required',
   });
 
 // remove_line_item / update_line_item target an existing line item by
@@ -396,8 +450,24 @@ export const updateEstimatePayloadSchema = z.object({
   editActions: z.array(estimateEditActionSchema).min(1),
 });
 
+// QA-2026-07-28 — same shape, and the same reasoning, as
+// draftEstimatePayloadSchema above; see that comment for the live evidence.
+// This path is the WORSE of the two: `customerId` here was a REQUIRED
+// `z.string().uuid()` while INVOICE_SYSTEM_PROMPT handed the model a
+// `"customerId": "<uuid>"` template and closed with "Ensure customerId and
+// jobId are present" — so the model was *obliged* to produce an id it could
+// not possibly know, and an invoice is a money proposal.
+//
+// `customerId` is now authored by the ENTITY RESOLVER (ai/tasks/invoice-task.ts
+// `authorCustomerId`), so it is optional here and an unresolved draft carries
+// the spoken `customerReference` plus `missingFields: ['customerId']` instead
+// of a fabricated uuid. Format validation is NOT sufficient — the RFC 4122
+// example uuid 123e4567-e89b-12d3-a456-426614174000 passes `.uuid()` — so both
+// `customerId` and `jobId` are existence-checked against THIS tenant by
+// CreateInvoiceExecutionHandler before any write.
 export const draftInvoicePayloadSchema = z.object({
-  customerId: z.string().uuid(),
+  customerId: z.string().uuid().optional(),
+  customerReference: z.string().min(1).optional(),
   // B6 — jobId is optional, mirroring draftEstimatePayloadSchema: a
   // resolved customer with no resolvable job reference (e.g. "invoice the
   // Smith account") should still draft for review instead of stalling.
@@ -411,7 +481,16 @@ export const draftInvoicePayloadSchema = z.object({
   taxRateBps: z.number().int().min(0).max(10000).optional(),
   customerMessage: z.string().optional(),
   internalNotes: z.string().optional(),
-});
+})
+  // Precedent: addServiceLocationPayloadSchema / convertLeadPayloadSchema —
+  // a resolved id OR a free-text reference, enforced on the finished object.
+  // NOTE: jobId deliberately does NOT satisfy this. VOX-07 lets the execution
+  // handler proceed on a jobId alone, but a DRAFT that names nobody must still
+  // record who was asked for, and `missingFields: ['customerId']` is what keeps
+  // an unattributed money proposal out of auto-approval.
+  .refine((v) => Boolean(v.customerId || v.customerReference), {
+    message: 'customerId or customerReference is required',
+  });
 
 // Edit-action schema for update_invoice proposals. Mirrors the
 // estimate-editor pattern but scoped to invoice line items: Phase-2
@@ -537,10 +616,14 @@ export const addServiceLocationPayloadSchema = z
 // log_time_entry: clock a technician in on a job/task. userId comes from
 // the execution context (the speaking technician). jobReference is
 // optional — break/admin time may not attach to a job.
+// durationMinutes is set only on the RETROACTIVE path ("put me down for two
+// hours") — a completed amount of worked time in the same unit the
+// time_entries.duration_minutes column stores. Absent means "clock in now".
 export const logTimeEntryPayloadSchema = z.object({
   entryType: z.enum(['job', 'drive', 'break', 'admin']),
   jobId: z.string().uuid().optional(),
   jobReference: z.string().optional(),
+  durationMinutes: z.number().int().positive().optional(),
   notes: z.string().optional(),
 });
 

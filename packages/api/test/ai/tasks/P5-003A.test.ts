@@ -27,6 +27,23 @@ function createMockGateway(responseContent: string): LLMGateway {
   } as unknown as LLMGateway;
 }
 
+/**
+ * QA-2026-07-28 — the customer/job on a drafted invoice now come from the
+ * RESOLVER (context.customerId / existingEntities.customerId|jobId), never
+ * from the model's JSON. So the default context carries the verified ids these
+ * fixtures used to feed through the stubbed LLM response. The ids are still
+ * present on `validAiOutput` on purpose: they prove the model's copies are
+ * ignored rather than merely absent.
+ */
+// NOTE: real v4-shaped uuids, NOT the '00000000-…-0001' placeholders these
+// fixtures used before. Those placeholders do not satisfy `z.string().uuid()`
+// (the version/variant nibbles are 0, and only the all-zero NIL uuid is
+// special-cased), so they never satisfied draftInvoicePayloadSchema either —
+// which nothing here noticed, because this suite never invoked the contract
+// gate. Adding `assertValidProposalPayload` to the handler surfaced it.
+const RESOLVED_CUSTOMER_ID = '7c9e6679-7425-40de-944b-e07fc1f90ae7';
+const RESOLVED_JOB_ID = '9b2c4d6e-1f3a-4b5c-8d7e-0a1b2c3d4e5f';
+
 const validAiOutput = {
   customerId: '00000000-0000-0000-0000-000000000001',
   jobId: '00000000-0000-0000-0000-000000000002',
@@ -46,6 +63,8 @@ const baseContext: TaskContext = {
   message: 'Generate invoice for AC repair job',
   conversationId: 'conv-1',
   userId: 'user-1',
+  customerId: RESOLVED_CUSTOMER_ID,
+  existingEntities: { jobId: RESOLVED_JOB_ID },
 };
 
 describe('P5-003A — Invoice draft generation from work context', () => {
@@ -60,8 +79,10 @@ describe('P5-003A — Invoice draft generation from work context', () => {
       expect(result.proposal.proposalType).toBe('draft_invoice');
       expect(result.proposal.status).toBe('draft');
       expect(result.proposal.tenantId).toBe('tenant-1');
-      expect(result.proposal.payload.customerId).toBe('00000000-0000-0000-0000-000000000001');
-      expect(result.proposal.payload.jobId).toBe('00000000-0000-0000-0000-000000000002');
+      // The RESOLVED ids, not the model's — validAiOutput carries different
+      // ones (QA-2026-07-28).
+      expect(result.proposal.payload.customerId).toBe(RESOLVED_CUSTOMER_ID);
+      expect(result.proposal.payload.jobId).toBe(RESOLVED_JOB_ID);
       expect(Array.isArray(result.proposal.payload.lineItems)).toBe(true);
       expect((result.proposal.payload.lineItems as unknown[]).length).toBe(2);
       expect(result.proposal.payload.discountCents).toBe(500);
@@ -144,7 +165,9 @@ describe('P5-003A — Invoice draft generation from work context', () => {
 
       const result = await handler.handle(baseContext);
 
-      expect(result.proposal.payload.customerId).toBe('cust-1');
+      // QA-2026-07-28: 'cust-1' was the MODEL's value and is now discarded —
+      // the resolved id is authored instead.
+      expect(result.proposal.payload.customerId).toBe(RESOLVED_CUSTOMER_ID);
       expect(result.proposal.payload.lineItems).toEqual([]);
     });
 
@@ -203,6 +226,9 @@ describe('P5-003A — Invoice draft generation from work context', () => {
         tenantId: 'tenant-1',
         message: 'Invoice',
         userId: 'user-1',
+        // A resolved customer is required for sourceContext to be empty: an
+        // unresolved one now stamps missingFields there (QA-2026-07-28).
+        customerId: RESOLVED_CUSTOMER_ID,
       });
 
       expect(result.proposal.sourceContext).toBeUndefined();
@@ -230,8 +256,6 @@ describe('P5-003A — Invoice draft generation from work context', () => {
   describe('buildPartialInvoicePayload', () => {
     it('builds payload from parsed AI output', () => {
       const result = buildPartialInvoicePayload(validAiOutput as unknown as Record<string, unknown>);
-      expect(result.customerId).toBe('00000000-0000-0000-0000-000000000001');
-      expect(result.jobId).toBe('00000000-0000-0000-0000-000000000002');
       expect(result.lineItems).toHaveLength(2);
       expect(result.discountCents).toBe(500);
     });
@@ -247,9 +271,23 @@ describe('P5-003A — Invoice draft generation from work context', () => {
       expect(result.lineItems).toEqual([]);
     });
 
-    it('ignores non-string customerId', () => {
-      const result = buildPartialInvoicePayload({ customerId: 123, lineItems: [] });
+    /**
+     * QA-2026-07-28 — the entity ids are no longer copied out of the model's
+     * JSON AT ALL, well-formed or not. This is the unit-level pin on that:
+     * `buildPartialInvoicePayload` is where the copy used to happen
+     * (`if (typeof parsed.customerId === 'string') payload.customerId = …`),
+     * so a future refactor that reinstates it fails here.
+     */
+    it('never copies customerId / jobId / estimateId out of the model output', () => {
+      const result = buildPartialInvoicePayload({
+        customerId: '123e4567-e89b-12d3-a456-426614174000',
+        jobId: '00000000-0000-0000-0000-000000000002',
+        estimateId: '7c9e6679-7425-40de-944b-e07fc1f90ae7',
+        lineItems: [],
+      });
       expect(result.customerId).toBeUndefined();
+      expect(result.jobId).toBeUndefined();
+      expect(result.estimateId).toBeUndefined();
     });
   });
 });

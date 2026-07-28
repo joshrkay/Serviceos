@@ -10,6 +10,7 @@ import {
   CreateCustomerVoiceTaskHandler,
   CREATE_CUSTOMER_CONFIRMATION_TTS,
   resolvePhone,
+  capitalizeSpokenName,
 } from '../../../src/ai/tasks/create-customer-task';
 import {
   classifyIntent,
@@ -737,5 +738,254 @@ describe('B8 — requirePhone: false (non-telephony surfaces)', () => {
     });
     expect(out.status).toBe('proposal_drafted');
     expect(out.proposal!.payload.phone).toBe('555-0199');
+  });
+});
+
+// ─── Voice field capture: spoken address must survive to the payload ──────
+//
+// Five utterances confirmed live against the Development deployment each
+// created a `create_customer` proposal that captured the name and SILENTLY
+// DISCARDED the street address. The address was dropped three times over:
+// the classifier prompt never asked for it, `ExtractedEntities` had no key
+// for it, and `sanitizeExtractedEntities` (a strict whitelist) stripped it
+// even when the model volunteered it. `readEntities` in the task handler
+// then never looked for it either.
+//
+// These tests pin the whole capture path — classifier JSON in, proposal
+// payload out — for each of the five reported transcripts.
+
+describe('voice field capture — spoken address survives into the create_customer payload', () => {
+  const handler = new CreateCustomerVoiceTaskHandler({ requirePhone: false });
+
+  /** The five transcripts, with the entities a correct classifier emits. */
+  const utterances: ReadonlyArray<{
+    transcript: string;
+    entities: Record<string, unknown>;
+    expectedName: string;
+    expectedAddress: string;
+    expectedPhone?: string;
+  }> = [
+    {
+      transcript: 'Add a new customer, Mario Delingo, 412 Oak Street, Scottsdale, 85254.',
+      entities: {
+        displayName: 'Mario Delingo',
+        address: '412 Oak Street, Scottsdale, 85254',
+      },
+      expectedName: 'Mario Delingo',
+      expectedAddress: '412 Oak Street, Scottsdale, 85254',
+    },
+    {
+      transcript:
+        'We have a new customer, Bill Roganowski, 88 Sycamore Lane, phone number is 555-0124.',
+      entities: {
+        displayName: 'Bill Roganowski',
+        phone: '555-0124',
+        address: '88 Sycamore Lane',
+      },
+      expectedName: 'Bill Roganowski',
+      expectedAddress: '88 Sycamore Lane',
+      expectedPhone: '555-0124',
+    },
+    {
+      transcript: "Create a new customer, Ashia Aksuna. She's over at 1207 Riverbell Drive.",
+      entities: {
+        displayName: 'Ashia Aksuna',
+        address: '1207 Riverbell Drive',
+      },
+      expectedName: 'Ashia Aksuna',
+      expectedAddress: '1207 Riverbell Drive',
+    },
+    {
+      transcript: "Add Jimmy Hartlett as a new customer. He's at 34 Quarry Street.",
+      entities: {
+        displayName: 'Jimmy Hartlett',
+        address: '34 Quarry Street',
+      },
+      expectedName: 'Jimmy Hartlett',
+      expectedAddress: '34 Quarry Street',
+    },
+    {
+      transcript: "Add a new customer, nguyen, that's N-G-U-Y-E-N at 91 Fairway Avenue.",
+      entities: {
+        displayName: 'nguyen',
+        address: '91 Fairway Avenue',
+      },
+      // Capitalisation fix — speech-to-text returns an all-lowercase token
+      // for names it doesn't recognise; it must not land in the CRM verbatim.
+      expectedName: 'Nguyen',
+      expectedAddress: '91 Fairway Avenue',
+    },
+  ];
+
+  for (const u of utterances) {
+    it(`keeps the address for: "${u.transcript}"`, async () => {
+      const out = await handler.run({
+        tenantId: TENANT,
+        message: u.transcript,
+        conversationId: SESSION,
+        userId: SYSTEM_USER,
+        existingEntities: u.entities,
+      });
+
+      expect(out.status).toBe('proposal_drafted');
+      expect(out.proposal!.proposalType).toBe('create_customer');
+      expect(out.proposal!.payload.name).toBe(u.expectedName);
+      // The regression: this was `undefined` on every one of the five.
+      expect(out.proposal!.payload.address).toBe(u.expectedAddress);
+      if (u.expectedPhone) {
+        expect(out.proposal!.payload.phone).toBe(u.expectedPhone);
+      }
+    });
+
+    it(`classifier surfaces the address entity for: "${u.transcript}"`, async () => {
+      // `sanitizeExtractedEntities` is a strict whitelist — an un-whitelisted
+      // key is dropped without error, which is exactly how the address went
+      // missing. Assert it now round-trips the classifier boundary.
+      const gateway = mockGateway(
+        JSON.stringify({
+          intentType: 'create_customer',
+          confidence: 0.93,
+          extractedEntities: u.entities,
+        })
+      );
+      const result = await classifyIntent(u.transcript, { tenantId: TENANT }, gateway);
+      expect(result.intentType).toBe('create_customer');
+      expect(result.extractedEntities?.address).toBe(u.expectedAddress);
+    });
+  }
+
+  it('end-to-end: classifier entities feed the handler without losing the address', async () => {
+    const transcript = 'Add a new customer, Mario Delingo, 412 Oak Street, Scottsdale, 85254.';
+    const gateway = mockGateway(
+      JSON.stringify({
+        intentType: 'create_customer',
+        confidence: 0.93,
+        extractedEntities: {
+          displayName: 'Mario Delingo',
+          address: '412 Oak Street, Scottsdale, 85254',
+        },
+      })
+    );
+    const classification = await classifyIntent(transcript, { tenantId: TENANT }, gateway);
+
+    const out = await handler.run({
+      tenantId: TENANT,
+      message: transcript,
+      conversationId: SESSION,
+      userId: SYSTEM_USER,
+      existingEntities: {
+        ...(classification.extractedEntities as Record<string, unknown>),
+        classifierConfidence: classification.confidence,
+      },
+    });
+
+    expect(out.proposal!.payload.address).toBe('412 Oak Street, Scottsdale, 85254');
+    expect(out.proposal!.payload.name).toBe('Mario Delingo');
+  });
+
+  it('surfaces the address in the proposal summary so the approver sees it on the card', async () => {
+    const out = await handler.run({
+      tenantId: TENANT,
+      message: "Add Jimmy Hartlett as a new customer. He's at 34 Quarry Street.",
+      conversationId: SESSION,
+      userId: SYSTEM_USER,
+      existingEntities: { displayName: 'Jimmy Hartlett', address: '34 Quarry Street' },
+    });
+    expect(out.proposal!.summary).toContain('34 Quarry Street');
+  });
+
+  it('accepts `serviceAddress` as a fallback key on a create_customer turn', async () => {
+    // The same spoken sentence sometimes lands on the add_service_location
+    // vocabulary; on a create_customer turn it means the new customer's
+    // address, and dropping it is the bug.
+    const out = await handler.run({
+      tenantId: TENANT,
+      message: 'Add a new customer, Sam Costello, 91 Fairway Avenue.',
+      conversationId: SESSION,
+      userId: SYSTEM_USER,
+      existingEntities: {
+        displayName: 'Sam Costello',
+        serviceAddress: '91 Fairway Avenue',
+      },
+    });
+    expect(out.proposal!.payload.address).toBe('91 Fairway Avenue');
+  });
+
+  it('omits address entirely when the caller stated none (shape unchanged)', async () => {
+    const out = await handler.run({
+      tenantId: TENANT,
+      message: "I'd like to sign up as a new customer",
+      conversationId: SESSION,
+      userId: SYSTEM_USER,
+      existingEntities: { displayName: 'Alex Smith', callerIdPhone: '+15551230100' },
+    });
+    expect(out.proposal!.payload.address).toBeUndefined();
+    expect('address' in out.proposal!.payload).toBe(false);
+  });
+
+  it('drops a whitespace-only address rather than writing an empty string', async () => {
+    const out = await handler.run({
+      tenantId: TENANT,
+      message: 'Add a new customer, Pat Jones.',
+      conversationId: SESSION,
+      userId: SYSTEM_USER,
+      existingEntities: { displayName: 'Pat Jones', address: '   ' },
+    });
+    expect(out.proposal!.payload.address).toBeUndefined();
+  });
+
+  it('does not change entity handling for other intents (add_service_location untouched)', async () => {
+    const gateway = mockGateway(
+      JSON.stringify({
+        intentType: 'add_service_location',
+        confidence: 0.9,
+        extractedEntities: {
+          serviceAddress: '91 Fairway Avenue',
+          customerName: 'Sam Costello',
+        },
+      })
+    );
+    const result = await classifyIntent(
+      'New address for Sam Costello: 91 Fairway Avenue',
+      { tenantId: TENANT },
+      gateway
+    );
+    expect(result.intentType).toBe('add_service_location');
+    expect(result.extractedEntities?.serviceAddress).toBe('91 Fairway Avenue');
+    expect(result.extractedEntities?.address).toBeUndefined();
+  });
+});
+
+describe('voice field capture — spoken-name capitalisation', () => {
+  it('capitalises an all-lowercase spoken name', () => {
+    expect(capitalizeSpokenName('nguyen')).toBe('Nguyen');
+    expect(capitalizeSpokenName('mario delingo')).toBe('Mario Delingo');
+  });
+
+  it('leaves names the transcriber already cased alone', () => {
+    // Conservative by design: never re-case a token that has any capital.
+    expect(capitalizeSpokenName('Mario Delingo')).toBe('Mario Delingo');
+    expect(capitalizeSpokenName('McDonald')).toBe('McDonald');
+    expect(capitalizeSpokenName("O'Brien")).toBe("O'Brien");
+    expect(capitalizeSpokenName('Acme Corp LLC')).toBe('Acme Corp LLC');
+    expect(capitalizeSpokenName('IBM')).toBe('IBM');
+  });
+
+  it('trims and returns undefined for a missing or blank name', () => {
+    expect(capitalizeSpokenName('  Alex Smith  ')).toBe('Alex Smith');
+    expect(capitalizeSpokenName('   ')).toBeUndefined();
+    expect(capitalizeSpokenName(undefined)).toBeUndefined();
+  });
+
+  it('stores anything that is not name-shaped verbatim (audit trail intact)', () => {
+    // Path 9's injection string must round-trip byte-for-byte — the
+    // capitaliser must never rewrite what the caller actually said.
+    expect(capitalizeSpokenName("Robert'); DROP TABLE customers;--")).toBe(
+      "Robert'); DROP TABLE customers;--"
+    );
+    expect(capitalizeSpokenName('robert); drop table customers;--')).toBe(
+      'robert); drop table customers;--'
+    );
+    expect(capitalizeSpokenName('unit 4b')).toBe('unit 4b');
   });
 });

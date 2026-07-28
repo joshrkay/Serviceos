@@ -208,16 +208,30 @@ export class LogTimeEntryExecutionHandler implements ExecutionHandler {
     const entryType = (typeof payload.entryType === 'string' ? payload.entryType : 'job') as EntryType;
     const jobId = typeof payload.jobId === 'string' ? payload.jobId : undefined;
     const notes = typeof payload.notes === 'string' ? payload.notes : undefined;
+    // Retroactive path — the tech stated a COMPLETED duration ("put me down
+    // for two hours"). Recorded as a born-closed entry so the hours are
+    // billable immediately and no running shift is disturbed.
+    const durationMinutes =
+      typeof payload.durationMinutes === 'number' && payload.durationMinutes > 0
+        ? Math.round(payload.durationMinutes)
+        : undefined;
 
     if (!this.timeEntryService) {
       return { success: true };
     }
     try {
-      const entry = await this.timeEntryService.clockIn(context.tenantId, context.executedBy, {
+      const opts = {
         entryType,
         ...(jobId ? { jobId } : {}),
         ...(notes ? { notes } : {}),
-      });
+      };
+      const entry =
+        durationMinutes !== undefined
+          ? await this.timeEntryService.logCompleted(context.tenantId, context.executedBy, {
+              ...opts,
+              durationMinutes,
+            })
+          : await this.timeEntryService.clockIn(context.tenantId, context.executedBy, opts);
       return { success: true, resultEntityId: entry.id };
     } catch (err) {
       return { success: false, error: err instanceof Error ? err.message : String(err) };

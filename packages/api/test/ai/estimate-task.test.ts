@@ -19,11 +19,20 @@ function makeGateway(stub: StubProvider): LLMGateway {
   return new LLMGateway(config, providers);
 }
 
+/**
+ * QA-2026-07-27 — the customer on a drafted estimate now comes from the
+ * RESOLVER (context.customerId / existingEntities.customerId), never from the
+ * model's JSON. So the default context carries the same verified id these
+ * fixtures used to feed through the stubbed LLM response.
+ */
+const RESOLVED_CUSTOMER_ID = '550e8400-e29b-41d4-a716-446655440000';
+
 function makeContext(overrides: Partial<TaskContext> = {}): TaskContext {
   return {
     tenantId: 'tenant-1',
     message: 'Generate an estimate for plumbing repair',
     userId: 'user-1',
+    customerId: RESOLVED_CUSTOMER_ID,
     ...overrides,
   };
 }
@@ -174,7 +183,8 @@ describe('P2-016 — Estimate draft proposal generation', () => {
     const gateway = makeGateway(stub);
     const handler = new EstimateTaskHandler(gateway);
 
-    const result = await handler.handle(makeContext());
+    // No resolved customer either — so nothing may author customerId.
+    const result = await handler.handle(makeContext({ customerId: undefined }));
 
     expect(result.proposal.proposalType).toBe('draft_estimate');
     expect(result.proposal.payload.lineItems).toEqual([]);
@@ -767,5 +777,158 @@ describe('EE-4 — image on AI-drafted estimate lines', () => {
     const line = (proposal.payload.lineItems as Array<Record<string, unknown>>)[0];
     expect(line.pricingSource).toBe('catalog');
     expect(line.imageFileId).toBe('file-heater'); // AI draft inherits the image
+  });
+});
+
+// ─── QA-2026-07-27: the model never authors customerId ───────────────────
+//
+// Live bug (Development, voice run): `draft_estimate` proposals carried
+// garbage in `customerId` because ESTIMATE_SYSTEM_PROMPT handed the model a
+// `"customerId": "<uuid>"` template and told it to "ensure customerId is
+// present". Observed values, verbatim from the dev database:
+//
+//     "unknown"
+//     "<uuid>"
+//     "123e4567-e89b-12d3-a456-426614174000"   ← twice
+//
+// The third is the RFC 4122 EXAMPLE uuid. It is SYNTACTICALLY VALID, so a
+// naive `z.string().uuid()` check waves it through — it would then violate a
+// foreign key deep in execution, or silently resolve to nothing. The fix is
+// authorship, not format: the customer comes from the entity resolver
+// (voice-action-router's annotateResolvedEntities), which has already matched
+// the spoken name against tenant-scoped records.
+describe('QA-2026-07-27 — customerId is authored by the resolver, never the model', () => {
+  const HALLUCINATED = [
+    'unknown',
+    '<uuid>',
+    // RFC 4122 §C.1 example — valid format, references nothing.
+    '123e4567-e89b-12d3-a456-426614174000',
+  ];
+
+  function estimateJsonWithCustomerId(customerId: string): string {
+    return JSON.stringify({
+      customerId,
+      lineItems: [{ description: 'Pipe repair', quantity: 1, unitPrice: 7460 }],
+      confidence_score: 0.95,
+    });
+  }
+
+  for (const garbage of HALLUCINATED) {
+    it(`discards a model-invented customerId (${garbage}) in favour of the resolved one`, async () => {
+      const stub = new StubProvider('stub');
+      stub.setResponse({ content: estimateJsonWithCustomerId(garbage) });
+      const handler = new EstimateTaskHandler(makeGateway(stub), await groundedCatalog());
+
+      const { proposal } = await handler.handle(
+        makeContext({ customerId: '7c9e6679-7425-40de-944b-e07fc1f90ae7' }),
+      );
+
+      expect(proposal.payload.customerId).toBe('7c9e6679-7425-40de-944b-e07fc1f90ae7');
+      expect(proposal.payload.customerId).not.toBe(garbage);
+      expect(proposal.payload.customerReference).toBeUndefined();
+    });
+
+    it(`never emits a model-invented customerId (${garbage}) when nothing resolved`, async () => {
+      const stub = new StubProvider('stub');
+      stub.setResponse({ content: estimateJsonWithCustomerId(garbage) });
+      const handler = new EstimateTaskHandler(makeGateway(stub), await groundedCatalog());
+
+      const { proposal } = await handler.handle(
+        makeContext({
+          customerId: undefined,
+          existingEntities: { customerName: 'the Henderson place' },
+        }),
+      );
+
+      // No fake id — the spoken reference rides instead (the
+      // customerId-or-customerReference convention shared with
+      // addServiceLocation / convertLead).
+      expect(proposal.payload.customerId).toBeUndefined();
+      expect(proposal.payload.customerReference).toBe('the Henderson place');
+
+      // …and the unresolved variant is forced non-auto-approvable, despite
+      // the model's 0.95 and a fully catalog-grounded line.
+      expect(proposal.status).toBe('draft');
+      expect(proposal.status).not.toBe('approved');
+      const ctx = proposal.sourceContext as Record<string, unknown>;
+      expect(ctx.missingFields).toContain('customerId');
+    });
+  }
+
+  it('the RFC example uuid is not distinguishable by format — only authorship saves us', async () => {
+    // Pinning the crux: this string passes `z.string().uuid()`. Any fix built
+    // on format validation alone would let it straight through.
+    const stub = new StubProvider('stub');
+    stub.setResponse({
+      content: estimateJsonWithCustomerId('123e4567-e89b-12d3-a456-426614174000'),
+    });
+    const handler = new EstimateTaskHandler(makeGateway(stub), await groundedCatalog());
+
+    const { proposal } = await handler.handle(makeContext({ customerId: undefined }));
+
+    expect(proposal.payload.customerId).toBeUndefined();
+    expect(JSON.stringify(proposal.payload)).not.toContain('123e4567');
+  });
+
+  it('happy path — a resolved customer flows onto the payload and can auto-approve', async () => {
+    const stub = new StubProvider('stub');
+    stub.setResponse({ content: estimateJsonWithCustomerId('unknown') });
+    const handler = new EstimateTaskHandler(makeGateway(stub), await groundedCatalog());
+
+    const { proposal } = await handler.handle(makeContext());
+
+    expect(proposal.payload.customerId).toBe(RESOLVED_CUSTOMER_ID);
+    expect(proposal.sourceContext?.missingFields).toBeUndefined();
+    expect(proposal.status).toBe('approved');
+  });
+
+  it('resolver-supplied customerId on existingEntities is honoured (voice-action-router path)', async () => {
+    // voice-action-router places the resolved id on BOTH context.customerId
+    // and existingEntities.customerId; the latter alone must be enough.
+    const stub = new StubProvider('stub');
+    stub.setResponse({ content: estimateJsonWithCustomerId('<uuid>') });
+    const handler = new EstimateTaskHandler(makeGateway(stub), await groundedCatalog());
+
+    const { proposal } = await handler.handle(
+      makeContext({
+        customerId: undefined,
+        existingEntities: {
+          customerName: 'Henderson',
+          customerId: '7c9e6679-7425-40de-944b-e07fc1f90ae7',
+        },
+      }),
+    );
+
+    expect(proposal.payload.customerId).toBe('7c9e6679-7425-40de-944b-e07fc1f90ae7');
+    expect(proposal.payload.customerReference).toBeUndefined();
+  });
+
+  it('P2-002 — the payload contract gate blocks approval instead of throwing the turn away', async () => {
+    // assertValidProposalPayload is documented as MANDATORY before
+    // createProposal. On this live-voice handler a rejected payload must still
+    // surface a reviewable draft, so the gate is enforced as a forced 'draft'
+    // + recorded errors rather than an exception.
+    const stub = new StubProvider('stub');
+    stub.setResponse({ content: JSON.stringify({ notes: 'no line items at all' }) });
+    const handler = new EstimateTaskHandler(makeGateway(stub));
+
+    const { proposal } = await handler.handle(makeContext());
+
+    expect(proposal.status).toBe('draft');
+    const ctx = proposal.sourceContext as Record<string, unknown>;
+    expect(ctx.missingFields).toContain('lineItems');
+    expect(proposal.confidenceFactors).toContain('payload_contract_violation');
+    expect(Array.isArray(ctx.payloadContractErrors)).toBe(true);
+  });
+
+  it('the prompt no longer asks the model for a customerId', async () => {
+    const stub = new StubProvider('stub');
+    stub.setResponse({ content: validEstimateJson });
+    await new EstimateTaskHandler(makeGateway(stub)).handle(makeContext());
+
+    const system = stub.getLastRequest()!.messages.find((m) => m.role === 'system')!.content;
+    expect(system).not.toContain('"customerId": "<uuid>"');
+    expect(system).not.toContain('Ensure customerId is present');
+    expect(system).toContain('Never output a "customerId" field');
   });
 });

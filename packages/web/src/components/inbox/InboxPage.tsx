@@ -9,6 +9,13 @@ import { UndoToast } from '../common/UndoToast';
 import { ProposalChainCard, ChainRow } from './ProposalChainCard';
 import { TierBreakdown, hasTierBreakdown } from './TierBreakdown';
 import { AmbiguityPicker, type AmbiguityCandidate } from './AmbiguityPicker';
+import {
+  ServiceAddressCompletion,
+  addressEditsFrom,
+  initialAddressValues,
+  needsAddressCompletion,
+  type AddressValues,
+} from '../shared/ServiceAddressCompletion';
 
 type Urgency = 'critical' | 'high' | 'normal' | 'low';
 
@@ -107,6 +114,18 @@ interface InboxProposalRow {
       editActions?: EditActionView[];
       // U8 (E9) — ambiguous entity candidates on a voice_clarification card.
       entityCandidates?: EntityCandidateView[];
+      // `create_customer` address capture. The inbox endpoint serializes the
+      // FULL proposal, so these keys were already arriving here at runtime —
+      // they were simply never declared, and therefore never read. Spelled
+      // exactly as `createCustomerPayloadSchema` spells them so an edit lands
+      // on the key the execution handler reads.
+      address?: string;
+      street1?: string;
+      street2?: string;
+      city?: string;
+      state?: string;
+      postalCode?: string;
+      country?: string;
     };
     sourceContext?: {
       catalogResolution?: Record<string, AmbiguityCandidate[]>;
@@ -185,6 +204,22 @@ function groupIntoFeed(rows: InboxProposalRow[]): FeedItem[] {
   });
 
   return items;
+}
+
+/**
+ * Does this row need the service-address completion control?
+ *
+ * Gated on `create_customer` specifically: other proposal types carry an
+ * `address` too (`add_service_location` and friends), and they have their own
+ * completeness handling. Only `create_customer` has the failure mode this
+ * control exists for — a customer created with an address that had nowhere to
+ * go.
+ */
+function rowNeedsAddress(row: InboxProposalRow): boolean {
+  return (
+    row.proposal.proposalType === 'create_customer' &&
+    needsAddressCompletion(row.proposal.payload)
+  );
 }
 
 function holdExpiryLine(row: InboxProposalRow, timezone: string): string | null {
@@ -527,10 +562,39 @@ export function InboxPage() {
     return () => window.removeEventListener(PROPOSALS_CHANGED, onChanged);
   }, [loadInbox]);
 
+  /**
+   * Per-row service-address inputs, keyed by proposal id. Lives here rather
+   * than in the row because the Approve button — which has to send these as
+   * an edit BEFORE approving — is a sibling of the inputs, not a child.
+   * Lazily seeded from the payload the first time a row is edited, so a row
+   * that is never touched keeps the parser's prefill.
+   */
+  const [addressDrafts, setAddressDrafts] = useState<Record<string, AddressValues>>({});
+  const addressValuesFor = (row: InboxProposalRow): AddressValues =>
+    addressDrafts[row.proposal.id] ?? initialAddressValues(row.proposal.payload);
+
   async function actOnProposal(id: string, action: 'approve' | 'reject'): Promise<void> {
     const removed = rows.find((r) => r.proposal.id === id);
     setRows((prev) => prev.filter((r) => r.proposal.id !== id));
     try {
+      // A spoken address that can't satisfy `service_locations`' NOT NULL
+      // columns is completed by the approver right on this row. Persist those
+      // edits through the EXISTING edit endpoint first — the approve endpoint
+      // takes no payload and applies the proposal as stored, so without this
+      // the completed city/state/ZIP would be silently discarded (which is
+      // the whole class of bug this change exists to close). Throw on failure
+      // rather than approving a proposal the approver did not see.
+      if (action === 'approve' && removed && rowNeedsAddress(removed)) {
+        const edits = addressEditsFrom(removed.proposal.payload, addressValuesFor(removed));
+        if (edits) {
+          const editRes = await apiFetch(`/api/proposals/${id}`, {
+            method: 'PUT',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ edits }),
+          });
+          if (!editRes.ok) throw new Error(`HTTP ${editRes.status}`);
+        }
+      }
       const res = await apiFetch(`/api/proposals/${id}/${action}`, { method: 'POST' });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       emitProposalsChanged();
@@ -799,6 +863,21 @@ export function InboxPage() {
                     )}
                     {row.reason && <p className="text-xs text-muted-foreground mt-0.5">{row.reason}</p>}
                     <ProposalMarkers row={row} onResolveLine={resolveLine} onResolveEntity={resolveEntity} />
+                    {/* A spoken address that can't yet become a
+                        `service_location`. Completing it here is the obvious
+                        path; leaving it blank is still allowed and the
+                        consequence is spelled out. See
+                        shared/ServiceAddressCompletion.tsx. */}
+                    {rowNeedsAddress(row) && (
+                      <ServiceAddressCompletion
+                        capture={row.proposal.payload!}
+                        values={addressValuesFor(row)}
+                        onChange={(next) =>
+                          setAddressDrafts((prev) => ({ ...prev, [row.proposal.id]: next }))
+                        }
+                        idPrefix={row.proposal.id}
+                      />
+                    )}
                   </div>
                   <div className="flex items-center gap-2 shrink-0">
                     <button

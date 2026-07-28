@@ -2,6 +2,13 @@ import { useState } from 'react';
 import { useNavigate } from 'react-router';
 import { toast } from 'sonner';
 import {
+  ServiceAddressCompletion,
+  addressEditsFrom,
+  initialAddressValues,
+  needsAddressCompletion,
+  type AddressValues,
+} from './ServiceAddressCompletion';
+import {
   Check, Pencil, X, Sparkles, ChevronDown, ChevronUp,
   Brain, Receipt, Calendar, MessageCircle, AlertCircle, Copy,
   ArrowUpRight, UserPlus, HelpCircle, StickyNote, DollarSign, Send,
@@ -145,6 +152,25 @@ export function AIProposalCard({ proposal, onApprove, onReject }: Props) {
     Object.fromEntries((proposal.editFields ?? []).map(f => [f.key, f.value]))
   );
 
+  // ── Service-address completion ────────────────────────────────
+  // See ServiceAddressCompletion.tsx for why this exists and why it is never
+  // a blocker. Inputs appear ONLY when an address was captured that can't yet
+  // satisfy `service_locations` — a complete address, or none at all, renders
+  // nothing new here.
+  const needsAddress = needsAddressCompletion(proposal.addressCapture);
+  const [addressValues, setAddressValues] = useState<AddressValues>(() =>
+    initialAddressValues(proposal.addressCapture),
+  );
+
+  /** Merge card edits with address edits; undefined when there is nothing to save. */
+  const mergedEdits = (base?: Record<string, string>): Record<string, string> | undefined => {
+    const merged = {
+      ...(base ?? {}),
+      ...(addressEditsFrom(proposal.addressCapture, addressValues) ?? {}),
+    };
+    return Object.keys(merged).length > 0 ? merged : undefined;
+  };
+
   // Optimistically flip to Approved, then await the handler. On failure
   // revert to the prior state and surface a toast — never leave a failed
   // approval showing "Applied successfully".
@@ -261,7 +287,7 @@ export function AIProposalCard({ proposal, onApprove, onReject }: Props) {
           </div>
           <div className="flex items-center gap-2">
             <button
-              onClick={() => { void runApprove(() => setEditing(false), fieldValues); }}
+              onClick={() => { void runApprove(() => setEditing(false), mergedEdits(fieldValues)); }}
               disabled={isApproving}
               className="flex items-center gap-1.5 rounded-lg bg-primary px-4 py-2 text-xs text-primary-foreground hover:bg-primary/90 transition-colors disabled:bg-muted disabled:cursor-not-allowed"
             >
@@ -397,6 +423,22 @@ export function AIProposalCard({ proposal, onApprove, onReject }: Props) {
               </div>
             )}
 
+            {/* Service-address completion.
+                Rendered only when an address was captured and can't yet
+                become a `service_location`. Deliberately NOT a blocker:
+                the approver may genuinely not know the ZIP, and a dead
+                Approve button on a job site is worse than an incomplete
+                record. So the consequence is stated plainly and the
+                approval proceeds either way. */}
+            {needsAddress && (
+              <ServiceAddressCompletion
+                capture={proposal.addressCapture!}
+                values={addressValues}
+                onChange={setAddressValues}
+                idPrefix={proposal.id}
+              />
+            )}
+
             {/* "Did you mean?" suggestion chips on Clarification cards.
                 Clicking a chip would re-emit with that intent — wired in
                 a follow-up slice. For now the chips are display-only so
@@ -455,7 +497,9 @@ export function AIProposalCard({ proposal, onApprove, onReject }: Props) {
       <div className="flex items-center gap-2 border-t border-border bg-secondary/80 px-4 py-2.5">
         {proposal.type !== 'Clarification' && (
           <button
-            onClick={() => { void runApprove(); }}
+            // Address completion rides along with the approval — it is
+            // NEVER a precondition for it. See the address block above.
+            onClick={() => { void runApprove(undefined, mergedEdits()); }}
             disabled={isApproving || Boolean(proposal.missingFields && proposal.missingFields.length > 0)}
             className="flex items-center gap-1.5 rounded-lg bg-primary px-3.5 py-2 text-xs text-primary-foreground hover:bg-primary/90 active:bg-primary/80 transition-colors disabled:bg-muted disabled:cursor-not-allowed"
           >

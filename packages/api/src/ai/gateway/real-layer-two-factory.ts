@@ -50,7 +50,7 @@ import type {
   LLMResponse,
   LLMGatewayConfig,
 } from './gateway';
-import { buildChatMessages } from '../providers/openai-compatible';
+import { buildChatMessages, ensureJsonModeMessages } from '../providers/openai-compatible';
 import type { AgentEventBus } from '../voice-quality/event-bus';
 import { costIncurredEvent } from '../voice-quality/events';
 
@@ -306,7 +306,12 @@ class AnthropicCompatibleProvider implements LLMProvider {
         model,
         // Content may be a string or multimodal content-block array; cast at
         // the provider boundary (the gateway LLMMessage type is provider-agnostic).
-        messages: request.messages as unknown as OpenAI.Chat.Completions.ChatCompletionMessageParam[],
+        // `ensureJsonModeMessages` is a strict no-op unless this is a JSON-mode
+        // request whose messages would trip the OpenAI-compatible
+        // "must contain the word 'json'" precondition on `json_object`.
+        messages: (request.responseFormat === 'json'
+          ? ensureJsonModeMessages(request.messages)
+          : request.messages) as unknown as OpenAI.Chat.Completions.ChatCompletionMessageParam[],
         temperature: request.temperature ?? 0.2,
         max_tokens: request.maxTokens,
         response_format:

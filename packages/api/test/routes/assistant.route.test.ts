@@ -15,6 +15,7 @@ import {
   editFieldsForMissing,
   dropUnverifiedIds,
   VOICE_APPROVAL_REFUSAL,
+  NOTHING_WAS_SAVED_NOTICE,
 } from '../../src/routes/assistant';
 import { InMemoryProposalRepository, createProposal } from '../../src/proposals/proposal';
 import { approveProposal } from '../../src/proposals/actions';
@@ -463,12 +464,12 @@ describe('Story 3.11/3.12 — assistant chat persistence + correlation id', () =
     return app;
   }
 
-  // classify → 'unknown' (fall through), then a generic LLM reply.
+  // classify → 'unknown', which the unrouted-intent guard answers with the
+  // honest clarification (it no longer improvises through the generic LLM —
+  // see routes/assistant.ts). What this describe block pins is PERSISTENCE:
+  // both turns land on the thread whatever the reply text is.
   function replyGateway() {
-    return scriptedGateway([
-      JSON.stringify({ intentType: 'unknown', confidence: 0.9 }),
-      JSON.stringify({ content: 'Summary: 3 jobs today.' }),
-    ]);
+    return scriptedGateway([JSON.stringify({ intentType: 'unknown', confidence: 0.9 })]);
   }
 
   it('persists the operator + agent turn and returns conversationId + correlationId', async () => {
@@ -486,7 +487,8 @@ describe('Story 3.11/3.12 — assistant chat persistence + correlation id', () =
     const messages = await conversationRepo.getMessages(TEST_TENANT, res.body.conversationId);
     expect(messages.map((m) => m.senderRole)).toEqual(['user', 'assistant']);
     expect(messages[0].content).toBe('summarize my day');
-    expect(messages[1].content).toBe('Summary: 3 jobs today.');
+    expect(messages[1].content).toBe(res.body.message.content);
+    expect(messages[1].content).toContain(NOTHING_WAS_SAVED_NOTICE);
   });
 
   it('appends to the same conversation when conversationId is supplied', async () => {
