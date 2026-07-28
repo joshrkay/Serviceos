@@ -206,6 +206,79 @@ describe('Postgres integration — atomic credit guards (P0-3 / P0-6)', () => {
     expect(reloaded!.amountPaidCents).toBe(0);
   });
 
+  it('a failed compensation row does NOT block the capped retry for the same provider reference', async () => {
+    // xhawk-ai review claim on PR #783: after the atomic credit rejects and
+    // the compensation flips the row to 'failed', the webhook's capped retry
+    // (same paymentIntentRef) would hit the unique reference index and
+    // return the failed duplicate without crediting. The index (migration
+    // 232) is PARTIAL on status IN ('completed','processing'), so the failed
+    // row is excluded and the capped re-insert must succeed.
+    const invoice = await createOpenInvoice(30000);
+
+    // Concurrent partial payment shrinks the balance after the first
+    // delivery's payable read...
+    await recordPayment(
+      {
+        tenantId: tenant.tenantId,
+        invoiceId: invoice.id,
+        amountCents: 10000,
+        method: 'credit_card',
+        providerReference: 'pi_partial_other',
+        processedBy: 'stripe_webhook',
+      },
+      invoiceRepo,
+      paymentRepo,
+    );
+
+    // ...so the racing full-amount delivery's credit was rejected at the SQL
+    // predicate and compensated to 'failed'. Serially the serial guard fires
+    // first (no row), so plant the compensation end-state directly: a
+    // 'failed' row already holding the reference.
+    const ref = 'pi_capped_retry_1';
+    await paymentRepo.create({
+      id: crypto.randomUUID(),
+      tenantId: tenant.tenantId,
+      invoiceId: invoice.id,
+      amountCents: 30000,
+      method: 'credit_card',
+      status: 'failed',
+      providerReference: ref,
+      receivedAt: new Date(),
+      processedBy: 'stripe_webhook',
+      createdAt: new Date(),
+      updatedAt: new Date(),
+      refundedAmountCents: 0,
+      refundedAt: null,
+      lastRefundStripeId: null,
+      reversedAt: new Date(),
+      reversalReason: 'credit_rejected',
+    });
+
+    // The webhook's capped retry reuses the SAME reference — and must credit.
+    const capped = await recordPayment(
+      {
+        tenantId: tenant.tenantId,
+        invoiceId: invoice.id,
+        amountCents: 20000,
+        method: 'credit_card',
+        providerReference: ref,
+        processedBy: 'stripe_webhook',
+      },
+      invoiceRepo,
+      paymentRepo,
+    );
+
+    expect(capped.invoice.amountPaidCents).toBe(30000);
+    expect(capped.invoice.status).toBe('paid');
+    const { rows } = await pool.query<{ status: string }>(
+      `SELECT status FROM payments
+       WHERE tenant_id = $1 AND invoice_id = $2 AND reference_number = $3
+       ORDER BY status`,
+      [tenant.tenantId, invoice.id, ref],
+    );
+    expect(rows.map((r) => r.status)).toEqual(['completed', 'failed']);
+  });
+
   it('payment-link CAS clear (P0-9/R3): clears only while the column holds the expected id', async () => {
     const invoice = await createOpenInvoice(5000);
     await invoiceRepo.update(tenant.tenantId, invoice.id, {

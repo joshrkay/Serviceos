@@ -351,3 +351,68 @@ describe('P0-9 — unapplied captures are audited; stale links die on credit', (
     expect(auditRepo.getAll().filter((e) => e.eventType === 'payment.unapplied_capture')).toHaveLength(0);
   });
 });
+
+describe('P0-9 — payment_intent.succeeded on a settled invoice audits the capture', () => {
+  it('audits payment.unapplied_capture and retries the link kill instead of a bare ACK', async () => {
+    const invoiceRepo = new InMemoryInvoiceRepository();
+    const paymentRepo = new InMemoryPaymentRepository();
+    const auditRepo = new InMemoryAuditRepository();
+    const deactivated: string[] = [];
+    const app = buildApp({
+      invoiceRepo,
+      paymentRepo,
+      auditRepo,
+      stripeWebhookSecret: STRIPE_SECRET,
+      paymentLinkProvider: {
+        generateLink: async () => { throw new Error('not used'); },
+        deactivateLink: async (linkId: string) => { deactivated.push(linkId); },
+      },
+    });
+
+    const lineItems = [buildLineItem('li-1', 'Service', 1, 10000, 1, false)];
+    const totals = calculateDocumentTotals(lineItems, 0, 0);
+    await invoiceRepo.create({
+      id: 'inv-pi-settled',
+      tenantId: TENANT,
+      jobId: 'job-pi',
+      invoiceNumber: 'INV-PI-1',
+      status: 'void',
+      lineItems,
+      totals,
+      amountPaidCents: 0,
+      amountDueCents: totals.totalCents,
+      stripePaymentLinkId: 'plink_pi_stale',
+      stripePaymentLinkUrl: 'https://pay.stripe.com/pi-stale',
+      createdBy: 'user-1',
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+
+    // A stale/direct PaymentIntent succeeds against the voided invoice —
+    // money captured, nothing creditable.
+    const res = await postSigned(app, {
+      id: `evt_${uuidv4()}`,
+      type: 'payment_intent.succeeded',
+      data: {
+        object: {
+          id: 'pi_stale_direct',
+          amount: 10000,
+          amount_received: 10000,
+          metadata: { tenant_id: TENANT, invoice_id: 'inv-pi-settled' },
+        },
+      },
+    });
+    expect(res.status).toBe(200);
+
+    const events = auditRepo.getAll().filter((e) => e.eventType === 'payment.unapplied_capture');
+    expect(events).toHaveLength(1);
+    expect(events[0].metadata).toMatchObject({
+      capturedCents: 10000,
+      creditedCents: 0,
+      unappliedCents: 10000,
+      reason: 'not_payable_payment_intent',
+      invoiceStatus: 'void',
+    });
+    expect(deactivated).toEqual(['plink_pi_stale']);
+  });
+});

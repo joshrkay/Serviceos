@@ -1610,12 +1610,32 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
             payErr instanceof ValidationError &&
             (payErr.message.includes('status') || payErr.message.includes('exceeds amount due'))
           ) {
-            // Invoice already settled (e.g. checkout.session.completed
-            // recorded under a session-id provider_reference fallback so the
-            // intent-keyed dedup above missed) — idempotent success.
+            // Invoice already settled — idempotent for the EVENT, but this is
+            // still a succeeded capture with no intent-keyed payment row
+            // (P0-9): either the same money was recorded under the checkout
+            // session-id fallback reference (benign; the audit row is a
+            // reviewable false positive), or a genuinely stale/direct intent
+            // captured against a settled/void invoice (real unapplied money).
+            // Audit it either way and retry the stale-link kill — the
+            // reconciliation trail must not depend on which Stripe event
+            // shape happened to arrive.
             logger.info('Invoice already settled, ignoring payment_intent.succeeded', {
               tenantId, invoiceId,
             });
+            const invoice = await deps.invoiceRepo.findById(tenantId, invoiceId);
+            if (invoice) {
+              await auditUnappliedCapture({
+                tenantId, invoiceId, eventId: event.id,
+                providerReference: piId,
+                capturedCents: amountCents,
+                creditedCents: 0,
+                invoiceStatus: invoice.status,
+                reason: payErr.message.includes('exceeds amount due')
+                  ? 'exceeds_balance_payment_intent'
+                  : 'not_payable_payment_intent',
+              });
+              await killStaleInvoiceLink(tenantId, invoice);
+            }
           } else {
             throw payErr;
           }
