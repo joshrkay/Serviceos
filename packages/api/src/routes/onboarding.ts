@@ -227,7 +227,12 @@ export function createOnboardingRouter(deps: OnboardingRouterDeps): Router {
              next_invoice_number, default_payment_term_days
            )
            VALUES (gen_random_uuid(), $1, $2, $3, $4, $5::jsonb, $6, $7,
-                   COALESCE($8, 'America/New_York'),
+                   -- NO fallback zone. Defaulting to ET here is what left a
+                   -- Phoenix operator booking three hours off: the stored
+                   -- value looked chosen, so nothing downstream could tell it
+                   -- was a guess. NULL means "not chosen", which the
+                   -- scheduling handlers gate on instead of guessing.
+                   $8,
                    $9, $11,
                    'EST-', 'INV-', 1001, 1001, 30)
            ON CONFLICT (tenant_id) DO UPDATE SET
@@ -352,7 +357,9 @@ export function createOnboardingRouter(deps: OnboardingRouterDeps): Router {
             id: uuidv4(),
             tenantId,
             businessName: '', // Will remain empty until /identity is called
-            timezone: 'America/New_York',
+            // No guessed timezone — the zone stays unset until the tenant
+            // chooses one, matching createSettings/ensureTenantSettings, so
+            // the scheduling gate never mistakes a seeded value for a choice.
             estimatePrefix: 'EST-',
             invoicePrefix: 'INV-',
             nextEstimateNumber: 1001,
@@ -482,7 +489,7 @@ export function createOnboardingRouter(deps: OnboardingRouterDeps): Router {
             id: uuidv4(),
             tenantId,
             businessName: '', // placeholder; /identity will populate
-            timezone: 'America/New_York',
+            // No guessed timezone — see /pack's seeder above.
             estimatePrefix: 'EST-',
             invoicePrefix: 'INV-',
             nextEstimateNumber: 1001,

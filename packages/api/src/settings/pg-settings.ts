@@ -45,7 +45,11 @@ function mapRow(row: Record<string, unknown>): TenantSettings {
     businessPhone: (row.business_phone as string) ?? undefined,
     businessEmail: (row.business_email as string) ?? undefined,
     ownerPhone: (row.owner_phone as string) ?? undefined,
-    timezone: row.timezone as string,
+    // NULL ⇒ undefined ("never chosen"), never a substituted default. See
+    // migration 263 and TenantSettings.timezone.
+    ...(typeof row.timezone === 'string' && row.timezone.length > 0
+      ? { timezone: row.timezone }
+      : {}),
     estimatePrefix: row.estimate_prefix as string,
     invoicePrefix: row.invoice_prefix as string,
     nextEstimateNumber: row.next_estimate_number as number,

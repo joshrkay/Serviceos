@@ -3,6 +3,7 @@ import {
   LineItem,
   DocumentTotals,
   calculateSelectedDocumentTotals,
+  normalizeLineItemTotals,
 } from '../shared/billing-engine';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
 import { estimateCreatedProps } from '../analytics/estimate-event-props';
@@ -259,13 +260,17 @@ export async function createEstimate(
   const errors = validateEstimateInput(input);
   if (errors.length > 0) throw new ValidationError(`Validation failed: ${errors.join(', ')}`);
 
+  // P0-2 — the client's totalCents is never persisted; every line total is
+  // recomputed from quantity × unitPriceCents (the web UI computes it in
+  // float dollars and can be off by a cent on fractional quantities).
+  const lineItems = normalizeLineItemTotals(input.lineItems);
   // EE-1 — a tiered estimate's headline total reflects the DEFAULT selection
   // (each group's default tier + pre-checked add-ons + always-billed lines),
   // not the sum of every option; a flat estimate's total is byte-identical
-  // (all lines selected). Every line item is still persisted (input.lineItems
+  // (all lines selected). Every line item is still persisted (lineItems
   // below); only the headline total narrows. See calculateSelectedDocumentTotals.
   const totals = calculateSelectedDocumentTotals(
-    input.lineItems,
+    lineItems,
     input.discountCents ?? 0,
     input.taxRateBps ?? 0
   );
@@ -276,7 +281,7 @@ export async function createEstimate(
     jobId: input.jobId,
     estimateNumber: input.estimateNumber,
     status: 'draft',
-    lineItems: input.lineItems,
+    lineItems,
     totals,
     validUntil: input.validUntil,
     customerMessage: input.customerMessage,
@@ -516,7 +521,13 @@ export async function updateEstimate(
   });
   assertVersionMatch(existing, input.expectedVersion);
 
-  const lineItems = input.lineItems ?? existing.lineItems;
+  // P0-2 — client totals are recomputed, never trusted (see createEstimate).
+  // Only INCOMING lines are normalized: a metadata-only edit (e.g. just
+  // customerMessage) must not shift a sent estimate's customer-visible total
+  // by re-normalizing legacy persisted lines the customer already saw.
+  const lineItems = input.lineItems
+    ? normalizeLineItemTotals(input.lineItems)
+    : existing.lineItems;
   const discountCents = input.discountCents ?? existing.totals.discountCents;
   const taxRateBps = input.taxRateBps ?? existing.totals.taxRateBps;
   // EE-1 — headline over the default selection so a tiered estimate isn't
@@ -618,7 +629,12 @@ export async function reviseEstimate(
   assertEstimateEditable(existing, { allowSent: true, depositPaidCents: deps?.depositPaidCents });
   assertVersionMatch(existing, input.expectedVersion);
 
-  const lineItems = input.lineItems ?? existing.lineItems;
+  // P0-2 — client totals are recomputed, never trusted (see createEstimate).
+  // Incoming lines only — see updateEstimate for why persisted lines are
+  // left untouched on a metadata-only revision.
+  const lineItems = input.lineItems
+    ? normalizeLineItemTotals(input.lineItems)
+    : existing.lineItems;
   const discountCents = input.discountCents ?? existing.totals.discountCents;
   const taxRateBps = input.taxRateBps ?? existing.totals.taxRateBps;
   // EE-1 — headline over the default selection (see calculateSelectedDocumentTotals).

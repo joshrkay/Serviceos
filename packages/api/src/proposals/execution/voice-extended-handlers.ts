@@ -11,6 +11,7 @@ import {
   PaymentMethod,
   recordPayment,
   PaymentReceiptNotifier,
+  PaymentLinkCleanupDeps,
 } from '../../invoices/payment';
 import { InvoiceRepository } from '../../invoices/invoice';
 import { RefreshJobMoneyStateDeps } from '../../jobs/job-money-state';
@@ -164,6 +165,8 @@ export class RecordPaymentExecutionHandler implements ExecutionHandler {
     private readonly moneyStateDeps?: RefreshJobMoneyStateDeps,
     private readonly paymentReceiptNotifier?: PaymentReceiptNotifier,
     private readonly auditRepo?: AuditRepository,
+    /** P0-9 — lets recordPayment kill a link the credit made stale. */
+    private readonly paymentLinkCleanup?: PaymentLinkCleanupDeps,
   ) {}
 
   // WS3 — degrades to a synthetic-id passthrough (records no payment) without
@@ -213,6 +216,8 @@ export class RecordPaymentExecutionHandler implements ExecutionHandler {
         this.paymentReceiptNotifier,
         this.auditRepo,
         { actorRole: 'system', correlationId: proposal.id },
+        undefined,
+        this.paymentLinkCleanup,
       );
       return { success: true, resultEntityId: payment.id };
     } catch (err) {

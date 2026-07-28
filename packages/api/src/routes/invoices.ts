@@ -452,6 +452,7 @@ export function createInvoiceRouter(
           invoiceRepo,
           paymentLinkProvider,
           connectAccountResolver,
+          auditRepo,
         );
         res.json(result);
       } catch (err) {
@@ -532,6 +533,11 @@ export function createInvoiceRouter(
           undefined,
           auditRepo,
           { actorRole: req.auth!.role },
+          undefined,
+          // P0-9 — recordPayment deactivates any link the credit made stale.
+          paymentLinkProvider
+            ? { provider: paymentLinkProvider, connectAccountResolver }
+            : undefined,
         );
         res.status(201).json(result);
       } catch (err) {
@@ -559,6 +565,15 @@ export function createInvoiceRouter(
           status,
           invoiceRepo,
           refreshDeps,
+          {
+            auditRepo,
+            actor: { actorId: req.auth!.userId, actorRole: req.auth!.role },
+            // P0-1 — voiding/canceling must kill any hosted payment link so a
+            // stale link can't capture money against a dead invoice.
+            paymentLink: paymentLinkProvider
+              ? { provider: paymentLinkProvider, connectAccountResolver }
+              : undefined,
+          },
         );
         if (!result) {
           res.status(404).json({ error: 'NOT_FOUND', message: 'Invoice not found' });

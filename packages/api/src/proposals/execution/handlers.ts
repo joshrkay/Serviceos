@@ -32,7 +32,7 @@ import {
 } from './review-response-handler';
 import { ServiceCreditRepository } from '../../reputation/service-credit';
 import { NoteRepository } from '../../notes/note';
-import { PaymentRepository } from '../../invoices/payment';
+import { PaymentRepository, PaymentLinkCleanupDeps } from '../../invoices/payment';
 import { ExpenseRepository } from '../../expenses/expense';
 import { AuditRepository, InMemoryAuditRepository, createAuditEvent } from '../../audit/audit';
 import type { ConsentEventRepository } from '../../compliance/consent-events';
@@ -419,9 +419,25 @@ export class CreateAppointmentExecutionHandler implements ExecutionHandler {
           : undefined;
       if (customerId && this.jobRepo && this.locationRepo) {
         const locations = await this.locationRepo.findByCustomer(context.tenantId, customerId);
+        // An operator-supplied `locationId` wins: it is how the
+        // `missingFields: ['locationId']` gate (drafted by
+        // `detectServiceLocationGap`) gets cleared for a customer who had no
+        // location at draft time. Validated against THIS customer's own
+        // non-archived rows, so a stale or cross-customer id can never site a
+        // job at someone else's address.
+        const supplied =
+          typeof payload.locationId === 'string' && payload.locationId.length > 0
+            ? locations.find((loc) => loc.id === payload.locationId && !loc.isArchived)
+            : undefined;
+        if (typeof payload.locationId === 'string' && payload.locationId.length > 0 && !supplied) {
+          return {
+            success: false,
+            error: `Service location ${payload.locationId} does not belong to this customer (or is archived)`,
+          };
+        }
         const primary = locations.find((loc) => loc.isPrimary && !loc.isArchived);
         const fallback = locations.find((loc) => !loc.isArchived);
-        const locationId = primary?.id ?? fallback?.id;
+        const locationId = supplied?.id ?? primary?.id ?? fallback?.id;
         if (!locationId) {
           return {
             success: false,
@@ -1141,6 +1157,8 @@ export function createExecutionHandlerRegistry(deps?: {
   transactionalComms?: TransactionalCommsService;
   noteRepo?: NoteRepository;
   paymentRepo?: PaymentRepository;
+  /** P0-9 — record_payment execution deactivates a link its credit made stale. */
+  paymentLinkCleanup?: PaymentLinkCleanupDeps;
   invoiceDeliveryProvider?: InvoiceDeliveryProvider;
   estimateDeliveryProvider?: EstimateDeliveryProvider;
   analyticsRepo?: DispatchAnalyticsRepository;
@@ -1297,6 +1315,7 @@ export function createExecutionHandlerRegistry(deps?: {
       moneyStateDeps,
       deps?.transactionalComms,
       deps?.auditRepo,
+      deps?.paymentLinkCleanup,
     ),
     new LogExpenseExecutionHandler(deps?.expenseRepo, deps?.auditRepo),
     new ConvertLeadExecutionHandler(deps?.leadRepo, deps?.customerRepo, deps?.auditRepo, deps?.locationRepo),

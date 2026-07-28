@@ -2520,7 +2520,14 @@ export function createVoiceTurnProcessor(
     );
     if (!hold.ok) {
       return fallback(
-        hold.failed === 'unresolved_datetime' ? 'scheduling_incomplete' : 'hold_not_placed',
+        // `timezone_unconfigured` takes the same chute as an unparseable
+        // phrase: the turn declines to book and declines to speak a time.
+        // The caller is not told the business is misconfigured — that is the
+        // operator's problem, surfaced to them elsewhere — but nothing wrong
+        // is written or read aloud, which is the point.
+        hold.failed === 'unresolved_datetime' || hold.failed === 'timezone_unconfigured'
+          ? 'scheduling_incomplete'
+          : 'hold_not_placed',
       );
     }
 

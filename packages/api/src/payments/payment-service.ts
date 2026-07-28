@@ -85,32 +85,39 @@ export async function recordRefund(
     throw new ValidationError('refundCents must be a positive integer');
   }
 
-  // Codex P1 (PR #384) — per-refund idempotency. Same Stripe refund.id
-  // can arrive via both charge.refunded AND charge.refund.updated; the
-  // webhook-event-id dedup doesn't help because the two events have
-  // different ids. Short-circuit here so we don't double-count.
-  //
-  // Limitation: only catches the LATEST refund on this payment. For
-  // multi-partial-refunds where an earlier refund's event re-fires
-  // after a later one has been recorded, we can't deduplicate without
-  // the payment_refunds child table (D2-4a follow-up in TODOS.md).
+  // D2-4a / P0-4 — per-refund idempotency via the payment_refunds claim
+  // ledger. Same Stripe refund.id can arrive via both charge.refunded AND
+  // charge.refund.updated (different event ids, so the webhook-event dedup
+  // doesn't help), a failed event's retry can re-fire an EARLIER refund
+  // after a later one was recorded, and two concurrent retries can race the
+  // read. The claim is keyed (tenant, stripe_refund_id) and taken in the
+  // SAME statement as the increment, so every one of those routes resolves
+  // to exactly one applied refund.
+  const refundedAt = input.refundedAt ?? new Date();
+  let updated: Payment | null;
   if (input.stripeRefundId) {
-    const existing = await paymentRepo.findById(input.tenantId, input.paymentId);
-    if (existing && existing.lastRefundStripeId === input.stripeRefundId) {
+    const result = await paymentRepo.recordRefundIdempotent(input.tenantId, input.paymentId, {
+      refundCents: input.refundCents,
+      refundedAt,
+      stripeRefundId: input.stripeRefundId,
+    });
+    if (result?.duplicate) {
       return {
-        payment: existing,
+        payment: result.payment,
         refundCents: 0,
-        totalRefundedCents: existing.refundedAmountCents ?? 0,
+        totalRefundedCents: result.payment.refundedAmountCents ?? 0,
       };
     }
+    updated = result?.payment ?? null;
+  } else {
+    // No provider refund id (nothing to key a claim on) — the plain atomic
+    // increment with its over-refund guard is the only protection available.
+    updated = await paymentRepo.incrementRefundAtomic(input.tenantId, input.paymentId, {
+      refundCents: input.refundCents,
+      refundedAt,
+      stripeRefundId: null,
+    });
   }
-
-  const refundedAt = input.refundedAt ?? new Date();
-  const updated = await paymentRepo.incrementRefundAtomic(input.tenantId, input.paymentId, {
-    refundCents: input.refundCents,
-    refundedAt,
-    stripeRefundId: input.stripeRefundId ?? null,
-  });
 
   if (!updated) {
     // 0 rows came back from the atomic UPDATE. Two reasons that's
@@ -263,13 +270,21 @@ async function reconcileInvoiceAfterReversal(
   else if (activePaidCents >= invoice.totals.totalCents) newStatus = 'paid';
   else newStatus = 'partially_paid';
 
-  const updated = await invoiceRepo.update(tenantId, invoice.id, {
-    amountPaidCents: activePaidCents,
-    amountDueCents: newAmountDue,
-    status: newStatus,
-    updatedAt: new Date(),
-  });
-  return { invoice: updated ?? invoice, repaired: true, previousStatus: invoice.status };
+  // The REOPENABLE check above reads a snapshot; the WRITE re-checks the
+  // same predicate atomically so a void committing mid-repair is never
+  // overwritten back to an open/paid state (P0-3, reconciler leg).
+  const updated = await invoiceRepo.reconcileBalanceAtomic(
+    tenantId,
+    invoice.id,
+    { amountPaidCents: activePaidCents, amountDueCents: newAmountDue, status: newStatus },
+    REOPENABLE,
+    new Date(),
+  );
+  if (!updated) {
+    const live = (await invoiceRepo.findById(tenantId, invoice.id)) ?? invoice;
+    return { invoice: live, repaired: false, previousStatus: live.status };
+  }
+  return { invoice: updated, repaired: true, previousStatus: invoice.status };
 }
 
 export async function reversePayment(
@@ -655,6 +670,77 @@ export async function recordProcessingPayment(
     creditCents,
     new Date(),
   );
+  if (!updatedInvoice) {
+    // The atomic credit's own payable-status + remaining-balance predicates
+    // (P0-3 / P0-6) rejected the write against the row's LIVE state — the
+    // invoice was voided/settled or another credit filled it between the
+    // snapshot read above and this UPDATE. The 'processing' row already
+    // committed, so the default compensation is to flip it to 'failed'
+    // (never counted by any paid-ledger sum, never settled by a later
+    // `payment_intent.succeeded`, whose CAS requires status='processing').
+    //
+    // BUT — mirroring recordPayment — if a concurrent duplicate delivery's
+    // reconcile already credited the invoice from the ledger (which includes
+    // OUR row), the rejection means "already credited", not "not creditable":
+    // flipping the row would orphan that credit. The L3 comparison detects
+    // it; success is returned and the reconciling delivery owns the side
+    // effects.
+    const live = await invoiceRepo.findById(input.tenantId, input.invoiceId);
+    if (live) {
+      const ledger = await paymentRepo.findByInvoice(input.tenantId, input.invoiceId);
+      const activeSum = ledger
+        .filter((p) => (p.status === 'completed' || p.status === 'processing') && !p.reversedAt)
+        .reduce((sum, p) => sum + p.amountCents, 0);
+      if (activeSum > 0 && activeSum <= live.amountPaidCents) {
+        return { payment, invoice: live };
+      }
+    }
+
+    // Compensation is a PROCESSING-ONLY CAS, never an unconditional write: a
+    // concurrent `payment_intent.succeeded` can settle this very row
+    // (processing → completed) between the ledger check above and this flip,
+    // and blindly overwriting 'completed' with 'failed' would erase a settled
+    // capture from the active ledger with no trace.
+    const now = new Date();
+    const flipped = await paymentRepo.reverseInFlightPaymentAtomic(input.tenantId, payment.id, {
+      reversedAt: now,
+      reason: 'credit_rejected',
+    });
+    if (!flipped && auditRepo) {
+      // Lost the CAS: the row settled while the credit was being rejected.
+      // The capture is real money with NO invoice credit — keep the
+      // completed row (it records the capture) and put the discrepancy on
+      // the audit trail for reconciliation.
+      await auditRepo
+        .create(
+          createAuditEvent({
+            tenantId: input.tenantId,
+            actorId: input.processedBy,
+            actorRole: auditContext?.actorRole ?? 'system',
+            eventType: 'payment.unapplied_capture',
+            entityType: 'invoice',
+            entityId: input.invoiceId,
+            correlationId: auditContext?.correlationId,
+            metadata: {
+              paymentId: payment.id,
+              capturedCents: payment.amountCents,
+              creditedCents: 0,
+              unappliedCents: payment.amountCents,
+              invoiceStatus: live?.status ?? 'missing',
+              reason: 'settled_during_credit_rejection',
+            },
+          }),
+        )
+        .catch(() => undefined);
+    }
+    if (!live) throw new ValidationError('Invoice not found');
+    if (!PAYABLE_STATUSES.includes(live.status)) {
+      throw new ValidationError(
+        `Cannot record processing payment on invoice with status '${live.status}'`,
+      );
+    }
+    throw new ValidationError('Invoice already fully paid');
+  }
 
   if (auditRepo) {
     const actorRole = auditContext?.actorRole ?? 'system';

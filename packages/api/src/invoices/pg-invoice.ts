@@ -7,6 +7,7 @@ import {
   InvoiceListResult,
   InvoiceRepository,
   InvoiceStatus,
+  InvoiceUpdate,
   DEFAULT_INVOICE_LIMIT,
   MAX_INVOICE_LIMIT,
 } from './invoice';
@@ -194,7 +195,7 @@ export class PgInvoiceRepository extends PgBaseRepository implements InvoiceRepo
     });
   }
 
-  async update(tenantId: string, id: string, updates: Partial<Invoice>): Promise<Invoice | null> {
+  async update(tenantId: string, id: string, updates: InvoiceUpdate): Promise<Invoice | null> {
     return this.withTenantTransaction(tenantId, async (client) => {
       const setClauses: string[] = [];
       const values: unknown[] = [];
@@ -314,20 +315,26 @@ export class PgInvoiceRepository extends PgBaseRepository implements InvoiceRepo
   ): Promise<Invoice | null> {
     return this.withTenantTransaction(tenantId, async (client) => {
       // Single atomic UPDATE: the new paid/due/status are derived from the
-      // row's OWN current values, so two concurrent credits both apply (no
-      // lost update). GREATEST(0, …) matches the prior JS Math.max(0, …). The
-      // status CASE mirrors the old newStatus logic exactly.
+      // row's OWN current values, so two concurrent legitimate credits both
+      // apply (no lost update). The WHERE carries the two predicates the
+      // caller's check-then-act guards cannot enforce against a stale read:
+      // payable status (a voided invoice must never flip to 'paid') and
+      // remaining balance (two concurrent full-balance credits must not sum
+      // past total_cents — the second returns 0 rows instead of overpaying).
+      // GREATEST(0, …) is retained as a belt against a concurrent total_cents
+      // rewrite. The status CASE mirrors the old newStatus logic exactly.
       const { rows } = await client.query<{ id: string }>(
         `UPDATE invoices
          SET amount_paid_cents = amount_paid_cents + $3,
              amount_due_cents  = GREATEST(0, total_cents - (amount_paid_cents + $3)),
              status = CASE
                WHEN total_cents - (amount_paid_cents + $3) <= 0 THEN 'paid'
-               WHEN amount_paid_cents + $3 > 0 AND status IN ('open', 'partially_paid') THEN 'partially_paid'
-               ELSE status
+               ELSE 'partially_paid'
              END,
              updated_at = $4
          WHERE id = $2 AND tenant_id = $1
+           AND status IN ('open', 'partially_paid')
+           AND amount_paid_cents + $3 <= total_cents
          RETURNING id`,
         [tenantId, id, deltaCents, now],
       );
@@ -370,6 +377,100 @@ export class PgInvoiceRepository extends PgBaseRepository implements InvoiceRepo
       );
       if (rows.length === 0) return null;
       return this.findByIdWithClient(client, tenantId, id);
+    });
+  }
+
+  /**
+   * P0-3 (reconciler leg) — the guarded absolute balance repair. The status
+   * predicate lives in the UPDATE itself, so a void committing after the
+   * caller's read can never be overwritten back to a paid state; the
+   * repair simply matches 0 rows and returns null.
+   */
+  async reconcileBalanceAtomic(
+    tenantId: string,
+    id: string,
+    balance: { amountPaidCents: number; amountDueCents: number; status: InvoiceStatus },
+    guardStatuses: InvoiceStatus[],
+    now: Date,
+  ): Promise<Invoice | null> {
+    return this.withTenantTransaction(tenantId, async (client) => {
+      const { rows } = await client.query<{ id: string }>(
+        `UPDATE invoices
+         SET amount_paid_cents = $3,
+             amount_due_cents  = $4,
+             status            = $5,
+             updated_at        = $6
+         WHERE id = $2 AND tenant_id = $1
+           AND status = ANY($7)
+         RETURNING id`,
+        [
+          tenantId,
+          id,
+          balance.amountPaidCents,
+          balance.amountDueCents,
+          balance.status,
+          now,
+          guardStatuses,
+        ],
+      );
+      if (rows.length === 0) return null;
+      return this.findByIdWithClient(client, tenantId, id);
+    });
+  }
+
+  /**
+   * P0-9 (mint leg) — guarded link persist: the payable-status, exact-balance
+   * and no-existing-link predicates live in the UPDATE itself, so a link
+   * minted concurrently with a void/credit (or with another mint) can never
+   * be attached to an invoice it no longer prices. Null → the caller must
+   * deactivate the link it just minted.
+   */
+  async setPaymentLinkIfPayable(
+    tenantId: string,
+    id: string,
+    link: { linkId: string; linkUrl: string },
+    expectedAmountDueCents: number,
+    now: Date,
+  ): Promise<Invoice | null> {
+    return this.withTenantTransaction(tenantId, async (client) => {
+      const { rows } = await client.query<{ id: string }>(
+        `UPDATE invoices
+         SET stripe_payment_link_id = $3,
+             stripe_payment_link_url = $4,
+             updated_at = $5
+         WHERE id = $2 AND tenant_id = $1
+           AND status IN ('open', 'partially_paid')
+           AND amount_due_cents = $6
+           AND stripe_payment_link_id IS NULL
+         RETURNING id`,
+        [tenantId, id, link.linkId, link.linkUrl, now, expectedAmountDueCents],
+      );
+      if (rows.length === 0) return null;
+      return this.findByIdWithClient(client, tenantId, id);
+    });
+  }
+
+  /**
+   * P0-9 — CAS clear of the payment-link columns: applies only while the
+   * row still holds `expectedLinkId`, so a deactivation working from a stale
+   * snapshot can never wipe a concurrently re-minted link's columns.
+   */
+  async clearPaymentLinkIfMatches(
+    tenantId: string,
+    id: string,
+    expectedLinkId: string,
+  ): Promise<boolean> {
+    return this.withTenantTransaction(tenantId, async (client) => {
+      const { rowCount } = await client.query(
+        `UPDATE invoices
+         SET stripe_payment_link_id = NULL,
+             stripe_payment_link_url = NULL,
+             updated_at = NOW()
+         WHERE id = $2 AND tenant_id = $1
+           AND stripe_payment_link_id = $3`,
+        [tenantId, id, expectedLinkId],
+      );
+      return (rowCount ?? 0) > 0;
     });
   }
 

@@ -61,6 +61,7 @@ import type { AppointmentRepository } from '../appointments/appointment';
 import type { JobRepository } from '../jobs/job';
 import type { DunningEventRepository } from '../invoices/dunning-config';
 import type { CustomerRepository } from '../customers/customer';
+import type { LocationRepository } from '../locations/location';
 import type { StandingInstruction } from '../instructions/standing-instructions';
 import { selectInjectedStandingInstructions } from '../ai/standing-instructions-context';
 import { createLogger } from '../logging/logger';
@@ -142,6 +143,27 @@ const assistantProposalSchema = z.object({
     .nullish()
     .transform((v) => v ?? undefined),
   missingFields: z.array(z.string()).nullish().transform((v) => v ?? undefined),
+  /**
+   * The address a `missingFields: ['locationId']` gate needs in order to be
+   * closable by a human. Without it the card shows a bare "locationId"
+   * prompt and the operator has no way to know WHICH address was spoken —
+   * the gate becomes a dead end and the booking is stuck exactly as hard as
+   * the execution failure it replaced. Carries the preserved address, where
+   * it was recovered from, and a structured prefill for the address inputs.
+   */
+  serviceLocationGap: z
+    .object({
+      customerId: z.string(),
+      recoveredAddress: z.string().nullish().transform((v) => v ?? undefined),
+      recoveredFrom: z
+        .enum(['communication_notes', 'transcript'])
+        .nullish()
+        .transform((v) => v ?? undefined),
+      prefill: z.record(z.string()).nullish().transform((v) => v ?? undefined),
+      stillMissing: z.array(z.string()).nullish().transform((v) => v ?? undefined),
+    })
+    .nullish()
+    .transform((v) => v ?? undefined),
   /**
    * The internal proposal type, so the card can special-case a family
    * without pattern-matching on the humanized `type` label.
@@ -354,6 +376,15 @@ export interface AssistantRouterDeps {
    */
   customerRepo?: CustomerRepository;
   /**
+   * create_appointment draft-time bookability. `jobs.location_id` is NOT
+   * NULL, so a customer with zero `service_locations` rows cannot be booked
+   * — the execution handler fails with "Customer has no service location".
+   * Threaded into `buildTaskHandlers` (the SAME registry the voice worker
+   * uses) so a booking drafted here gates on the gap instead of
+   * auto-approving into a guaranteed failure. Optional; absent → no gate.
+   */
+  locationRepo?: LocationRepository;
+  /**
    * Story 3.11 — persist each chat turn (operator message + agent reply) so the
    * running conversation survives reload and is searchable. Optional so tests
    * without a repo keep working (persistence simply skipped).
@@ -369,6 +400,25 @@ export interface AssistantRouterDeps {
    * through exactly as they did before (tests that don't care omit it).
    */
   lookups?: AssistantLookupDeps;
+  /**
+   * Tenant IANA timezone (`tenant_settings.timezone`), resolved once per
+   * request and threaded onto every drafting TaskContext.
+   *
+   * This route dispatches `create_appointment` (both the single-intent and
+   * the multi-action chain path) and, until 2026-07-28, built its TaskContext
+   * WITHOUT a timezone — the one scheduling entry point that never resolved
+   * one. `CreateAppointmentAITaskHandler` then fell through to its
+   * (now-removed) `America/New_York` default, so an operator in
+   * America/Phoenix had every spoken booking stored three hours early and
+   * auto-executed at confidence 1.
+   *
+   * Mirrors the voice worker's `tenantSchedulingResolver` and shares the SAME
+   * cached settings read in app.ts, so the two surfaces cannot drift on which
+   * zone a tenant books in. Optional and failure-soft: absent or throwing ⇒
+   * no zone on the context ⇒ the handler emits a clarification rather than
+   * booking at a guessed offset.
+   */
+  tenantTimezoneResolver?: (tenantId: string) => Promise<string | undefined>;
 }
 
 export type AssistantProposal = z.infer<typeof assistantProposalSchema>;
@@ -389,8 +439,11 @@ export type AssistantProposal = z.infer<typeof assistantProposalSchema>;
 export function proposalSignals(
   payload: Record<string, unknown> | undefined,
   sourceContext: Record<string, unknown> | undefined,
-): Pick<AssistantProposal, 'meta' | 'lineItems' | 'missingFields'> {
-  const out: Pick<AssistantProposal, 'meta' | 'lineItems' | 'missingFields'> = {};
+): Pick<AssistantProposal, 'meta' | 'lineItems' | 'missingFields' | 'serviceLocationGap'> {
+  const out: Pick<
+    AssistantProposal,
+    'meta' | 'lineItems' | 'missingFields' | 'serviceLocationGap'
+  > = {};
 
   const rawMeta = payload?._meta;
   if (rawMeta !== null && typeof rawMeta === 'object') {
@@ -462,6 +515,40 @@ export function proposalSignals(
   if (Array.isArray(rawMissing)) {
     const missingFields = rawMissing.filter((f): f is string => typeof f === 'string');
     if (missingFields.length > 0) out.missingFields = missingFields;
+  }
+
+  // The companion context for a `missingFields: ['locationId']` gate. This
+  // function rebuilds `out` from a whitelist, so anything not lifted HERE is
+  // silently dropped no matter how carefully the drafting handler assembled
+  // it — the recovered address would never reach the operator and the gate
+  // would be unclosable. Lifted with the same defensive shape-checking the
+  // other branches use.
+  const rawGap = sourceContext?.serviceLocationGap;
+  if (rawGap !== null && typeof rawGap === 'object') {
+    const g = rawGap as Record<string, unknown>;
+    if (typeof g.customerId === 'string' && g.customerId.length > 0) {
+      const gap: NonNullable<AssistantProposal['serviceLocationGap']> = {
+        customerId: g.customerId,
+      };
+      if (typeof g.recoveredAddress === 'string' && g.recoveredAddress.length > 0) {
+        gap.recoveredAddress = g.recoveredAddress;
+      }
+      if (g.recoveredFrom === 'communication_notes' || g.recoveredFrom === 'transcript') {
+        gap.recoveredFrom = g.recoveredFrom;
+      }
+      if (g.prefill !== null && typeof g.prefill === 'object') {
+        const prefill: Record<string, string> = {};
+        for (const [k, v] of Object.entries(g.prefill as Record<string, unknown>)) {
+          if (typeof v === 'string' && v.length > 0) prefill[k] = v;
+        }
+        if (Object.keys(prefill).length > 0) gap.prefill = prefill;
+      }
+      if (Array.isArray(g.stillMissing)) {
+        const stillMissing = g.stillMissing.filter((f): f is string => typeof f === 'string');
+        if (stillMissing.length > 0) gap.stillMissing = stillMissing;
+      }
+      out.serviceLocationGap = gap;
+    }
   }
 
   return out;
@@ -870,6 +957,22 @@ async function generateAssistantReply(
         }
       }
 
+      // Tenant IANA timezone, resolved once per turn (same shape/posture as
+      // the two resolvers above) and threaded onto EVERY drafting TaskContext
+      // below. `create_appointment` resolves spoken times ("Thursday at ten")
+      // against it; without it this route booked at a hardcoded US-East
+      // default. Failure-soft: a resolver hiccup leaves it undefined and the
+      // scheduling handler gates rather than guessing a zone.
+      let tenantTimezone: string | undefined;
+      if (deps.tenantTimezoneResolver) {
+        try {
+          tenantTimezone = await deps.tenantTimezoneResolver(tenantId);
+        } catch {
+          tenantTimezone = undefined;
+        }
+      }
+      const timezoneContext = tenantTimezone ? { timezone: tenantTimezone } : {};
+
       // QA-2026-06-05 (AST-05): deterministic read-only query — answer from
       // data, never propose. Runs before classification so phrasing variance
       // in the classifier can't turn a question into a mutation proposal.
@@ -1071,6 +1174,8 @@ async function generateAssistantReply(
             message: segment,
             conversationId,
             existingEntities: segEntities,
+            // Tenant zone for the scheduling handlers in this chain.
+            ...timezoneContext,
             ...(segStandingInstructions
               ? { standingInstructions: segStandingInstructions }
               : {}),
@@ -1190,6 +1295,9 @@ async function generateAssistantReply(
           message: lastUserText,
           conversationId,
           existingEntities: { ...(classification.extractedEntities ?? {}) },
+          // Tenant zone — `create_appointment` resolves the spoken time
+          // against it. Absent ⇒ the handler gates instead of guessing.
+          ...timezoneContext,
           ...(standingInstructions ? { standingInstructions } : {}),
         });
         dropUnverifiedIds(
@@ -1499,6 +1607,9 @@ export function createAssistantRouter(deps: AssistantRouterDeps): Router {
     proposalRepo: deps.proposalRepo,
     // B8 — create_customer draft-time duplicate detection parity.
     customerRepo: deps.customerRepo,
+    // Draft-time bookability gate for create_appointment (no service
+    // location ⇒ missingFields, never an auto-approved doomed execution).
+    ...(deps.locationRepo ? { locationRepo: deps.locationRepo } : {}),
   });
 
   router.post(

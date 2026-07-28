@@ -15,11 +15,21 @@ function fakeGateway(json: Record<string, unknown>): LLMGateway {
   } as unknown as LLMGateway;
 }
 
+/**
+ * The tenant timezone is REQUIRED input for this handler — there is no
+ * default zone any more (see create-appointment-task.ts's "NO DEFAULT
+ * TIMEZONE" note). A context without one gates into a clarification, so
+ * these held-slot fixtures thread the same zone every other scheduling
+ * fixture does.
+ */
+const TZ = 'America/New_York';
+
 function context(): TaskContext {
   return {
     tenantId: tenantA,
     userId: 'agent-1',
     message: 'Book the Johnson AC repair next Tuesday at 2pm',
+    timezone: TZ,
   } as TaskContext;
 }
 
@@ -110,6 +120,7 @@ function contextFor(customerId?: string): TaskContext {
     tenantId: tenantA,
     userId: 'agent-1',
     message: 'Book the Johnson AC repair next Tuesday at 2pm',
+    timezone: TZ,
     // supervisorPresent + the fixture's 0.9 confidence are auto-approve
     // favorable, so a degraded fallback that (wrongly) kept the autonomous
     // trust tier would land in 'approved' — the regression these tests guard.

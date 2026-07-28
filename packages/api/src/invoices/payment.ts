@@ -1,6 +1,9 @@
 import { v4 as uuidv4 } from 'uuid';
 import { formatUsdCents } from '@ai-service-os/shared';
 import { Invoice, InvoiceRepository } from './invoice';
+import { deactivateInvoicePaymentLink } from './invoice-payment-link';
+import type { PaymentLinkProvider } from '../payments/payment-link-provider';
+import type { ConnectAccountResolver } from './public-invoice-service';
 import { ValidationError } from '../shared/errors';
 import { RefreshJobMoneyStateDeps, refreshJobMoneyStateSafe } from '../jobs/job-money-state';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
@@ -34,10 +37,27 @@ async function reconcileInvoiceFromPayments(
   fallback: Invoice,
 ): Promise<{ invoice: Invoice; repaired: boolean; previousStatus: string }> {
   const invoice = (await invoiceRepo.findById(tenantId, invoiceId)) ?? fallback;
+
+  // P0-3 — the repair is scoped to PAYABLE invoices. The crash window this
+  // path exists for (payment row committed, invoice credit lost) always leaves
+  // the invoice 'open' or 'partially_paid'; a void/canceled/draft invoice
+  // reaching here is a post-void capture, and resurrecting it to
+  // 'paid'/'partially_paid' would be the forbidden void → paid transition.
+  if (invoice.status !== 'open' && invoice.status !== 'partially_paid') {
+    return { invoice, repaired: false, previousStatus: invoice.status };
+  }
+
   const payments = await paymentRepo.findByInvoice(tenantId, invoiceId);
+  // P0-7 — REFUND-INCLUSIVE, matching the codebase's stated invariant
+  // (`invoice.amount_paid == Σ(active payment amount_cents)`, see
+  // payments/payment-service.ts reconcileInvoiceAfterReversal): recordRefund
+  // never decrements invoice.amount_paid, so this repair must not subtract
+  // refundedAmountCents either. The two reconcilers previously disagreed
+  // (this one was refund-net), giving the same column two definitions
+  // depending on which repair path ran.
   const paidCents = payments
     .filter((p) => (p.status === 'completed' || p.status === 'processing') && !p.reversedAt)
-    .reduce((sum, p) => sum + (p.amountCents - (p.refundedAmountCents ?? 0)), 0);
+    .reduce((sum, p) => sum + p.amountCents, 0);
 
   // Already consistent (or over-counted by another concurrent writer) → leave
   // it; we only repair the under-credit the crash-mid-write case produces.
@@ -49,13 +69,24 @@ async function reconcileInvoiceFromPayments(
 
   const amountDueCents = Math.max(0, invoice.totals.totalCents - paidCents);
   const status = amountDueCents === 0 ? 'paid' : 'partially_paid';
-  const updated = await invoiceRepo.update(tenantId, invoiceId, {
-    amountPaidCents: paidCents,
-    amountDueCents,
-    status,
-    updatedAt: new Date(),
-  });
-  return { invoice: updated ?? invoice, repaired: true, previousStatus: invoice.status };
+  // The payable check above is a fast path over a stale read; the WRITE
+  // carries the same predicate atomically (reconcileBalanceAtomic), so a
+  // void committing between that read and this repair matches 0 rows
+  // instead of being resurrected to 'paid' (P0-3, reconciler leg).
+  const updated = await invoiceRepo.reconcileBalanceAtomic(
+    tenantId,
+    invoiceId,
+    { amountPaidCents: paidCents, amountDueCents, status },
+    ['open', 'partially_paid'],
+    new Date(),
+  );
+  if (!updated) {
+    // The invoice left the payable world mid-repair — report "not repaired"
+    // so the caller skips the post-payment side effects.
+    const live = (await invoiceRepo.findById(tenantId, invoiceId)) ?? invoice;
+    return { invoice: live, repaired: false, previousStatus: live.status };
+  }
+  return { invoice: updated, repaired: true, previousStatus: invoice.status };
 }
 
 /**
@@ -217,6 +248,20 @@ export interface RecordPaymentAuditContext {
   actorRole?: string;
   /** Correlation id (e.g. Stripe payment_intent / event id) for traceability. */
   correlationId?: string;
+}
+
+/**
+ * P0-9 — stale-link cleanup deps for `recordPayment`. A credit reprices (or
+ * settles) the invoice, so any hosted payment link minted at the OLD balance
+ * must be deactivated — left live, it still captures its original amount and
+ * the excess has nowhere to go. This lives INSIDE recordPayment (rather than
+ * at each HTTP wrapper) so every entry point — REST routes, webhooks, voice
+ * proposal execution, dues collection — gets the cleanup by passing deps;
+ * without them recordPayment behaves as before.
+ */
+export interface PaymentLinkCleanupDeps {
+  provider: PaymentLinkProvider;
+  connectAccountResolver?: ConnectAccountResolver;
 }
 
 export interface PaymentReceiptNotifier {
@@ -387,6 +432,23 @@ export interface PaymentRepository {
     opts: IncrementRefundOptions,
   ): Promise<Payment | null>;
   /**
+   * D2-4a / P0-4 — idempotent refund keyed by the Stripe refund id. In ONE
+   * atomic step: claim a `payment_refunds` row for (tenant, stripeRefundId)
+   * and, only when the claim is NEW and the over-refund guard passes, apply
+   * the `refundedAmountCents` increment. A refund id that was already
+   * recorded — including an EARLIER refund whose failed event retries after
+   * a later refund landed, the interleave that defeats the
+   * latest-id-only `lastRefundStripeId` short-circuit — returns
+   * `duplicate: true` with no increment. Returns null when the payment is
+   * missing/cross-tenant OR the increment would over-refund (caller
+   * distinguishes via findById, mirroring `incrementRefundAtomic`).
+   */
+  recordRefundIdempotent(
+    tenantId: string,
+    id: string,
+    opts: IncrementRefundOptions & { stripeRefundId: string },
+  ): Promise<{ payment: Payment; duplicate: boolean } | null>;
+  /**
    * Invoice-to-cash failure handling — atomically flip a `completed`
    * payment to `failed`, stamping `reversedAt`/`reversalReason`, but ONLY
    * if it has not already been reversed. Returns the updated payment on
@@ -463,7 +525,27 @@ export async function recordPayment(
    * → the owner push still fires with a generic label.
    */
   customerNameResolver?: PaymentCustomerNameResolver,
+  /**
+   * P0-9 — when wired, any credited invoice that still carries a hosted
+   * payment link has it deactivated (settled/repriced) before returning.
+   */
+  paymentLinkCleanup?: PaymentLinkCleanupDeps,
 ): Promise<{ payment: Payment; invoice: Invoice }> {
+  // Kill a link the credit just made stale. Best-effort and never blocking;
+  // deactivateInvoicePaymentLink no-ops when the invoice carries no link.
+  const killStaleLink = async (credited: Invoice): Promise<void> => {
+    if (!paymentLinkCleanup || !credited.stripePaymentLinkId) return;
+    await deactivateInvoicePaymentLink({
+      tenantId: input.tenantId,
+      invoice: credited,
+      reason: credited.amountDueCents <= 0 ? 'settled' : 'repriced',
+      invoiceRepo,
+      provider: paymentLinkCleanup.provider,
+      connectAccountResolver: paymentLinkCleanup.connectAccountResolver,
+      auditRepo,
+      actor: { actorId: input.processedBy, actorRole: auditContext?.actorRole ?? 'system' },
+    });
+  };
   const errors = validatePaymentInput(input);
   if (errors.length > 0) throw new ValidationError(`Validation failed: ${errors.join(', ')}`);
 
@@ -536,6 +618,10 @@ export async function recordPayment(
             paymentRepo,
             invoice,
           );
+        // Link cleanup BEFORE the fallible side effects: a throwing audit or
+        // notifier must not leave a stale link live with no retry path (the
+        // retry short-circuits as a duplicate and never reaches cleanup).
+        await killStaleLink(reconciled);
         // Only the crash-recovery case (the invoice was actually under-credited
         // and we just repaired it) runs the post-payment side effects the
         // original attempt never reached. A pure duplicate leaves them alone so
@@ -574,10 +660,82 @@ export async function recordPayment(
     new Date(),
   );
   if (!updatedInvoice) {
-    // The invoice was deleted between the payable check and the atomic credit —
-    // surface rather than proceeding (or crediting) against a missing row.
-    throw new ValidationError('Invoice not found');
+    // The atomic credit carries its own payable-status + remaining-balance
+    // predicates (P0-3 / P0-6), evaluated against the row's LIVE state — a
+    // null here means the invoice vanished, was voided/settled after the
+    // snapshot read above, or the credit would overpay it (e.g. a concurrent
+    // full-balance payment won the race). The payment row already committed in
+    // its own transaction, so the default compensation is to flip it to
+    // 'failed' (excluded from every paid-ledger sum) rather than leave a
+    // completed row with no matching invoice credit.
+    //
+    // BUT first: was this row already credited ON OUR BEHALF? A concurrent
+    // duplicate delivery for the same intent can hit the 23505 branch and run
+    // reconcileInvoiceFromPayments, which sums the ledger (including OUR row)
+    // and writes the invoice balance before our own increment executes — our
+    // increment then matches 0 rows precisely BECAUSE the invoice is already
+    // paid with this row's money. Flipping the row to 'failed' there would
+    // orphan the credit (invoice paid, active ledger empty). Detect it with
+    // the L3 comparison: if the active ledger sum INCLUDING our row fits
+    // inside the live balance, the credit exists — return success and skip
+    // the side effects (the reconciling delivery already ran them).
+    const live = await invoiceRepo.findById(input.tenantId, input.invoiceId);
+    if (live) {
+      const ledger = await paymentRepo.findByInvoice(input.tenantId, input.invoiceId);
+      const activeSum = ledger
+        .filter((p) => (p.status === 'completed' || p.status === 'processing') && !p.reversedAt)
+        .reduce((sum, p) => sum + p.amountCents, 0);
+      if (activeSum > 0 && activeSum <= live.amountPaidCents) {
+        await killStaleLink(live);
+        return { payment, invoice: live };
+      }
+    }
+
+    const now = new Date();
+    await paymentRepo.update(input.tenantId, payment.id, {
+      status: 'failed',
+      reversedAt: now,
+      reversalReason: 'credit_rejected',
+      updatedAt: now,
+    });
+    if (auditRepo) {
+      await auditRepo.create(
+        createAuditEvent({
+          tenantId: input.tenantId,
+          actorId: input.processedBy,
+          actorRole: auditContext?.actorRole ?? 'system',
+          eventType: 'payment.credit_rejected',
+          entityType: 'invoice',
+          entityId: input.invoiceId,
+          correlationId: auditContext?.correlationId,
+          metadata: {
+            paymentId: payment.id,
+            amountCents: payment.amountCents,
+            providerReference: payment.providerReference ?? null,
+            invoiceStatus: live?.status ?? 'missing',
+            amountDueCents: live?.amountDueCents ?? null,
+          },
+        }),
+      );
+    }
+    if (!live) throw new ValidationError('Invoice not found');
+    if (!PAYABLE_STATUSES.includes(live.status)) {
+      throw new ValidationError(
+        `Cannot record payment on invoice with status '${live.status}'`,
+      );
+    }
+    throw new ValidationError('Payment amount exceeds amount due');
   }
+
+  // Kill the now-stale link IMMEDIATELY after the credit commits, before any
+  // fallible side effect: outside the request-scoped transaction (webhooks,
+  // proposal execution) the credit is already durable here, and if the audit
+  // or receipt below throws, the caller's retry hits the paid-status guard —
+  // never this cleanup — leaving a live link at the old amount forever. The
+  // reverse failure mode (link killed, side effect throws, request
+  // transaction rolls back the credit) is the safe direction: a dead link
+  // with stale columns is recoverable; a live mispriced link captures money.
+  await killStaleLink(updatedInvoice);
 
   // Audit trail + money-state rollup + receipt/owner push. The audit write is
   // emitted before the best-effort rollup so that — on authenticated /api
@@ -610,6 +768,8 @@ export async function getPaymentsByInvoice(
 
 export class InMemoryPaymentRepository implements PaymentRepository {
   private payments: Map<string, Payment> = new Map();
+  /** D2-4a — per-refund claim ledger keyed `${tenantId}:${stripeRefundId}`. */
+  private refundClaims: Set<string> = new Set();
 
   async create(payment: Payment): Promise<Payment> {
     this.payments.set(payment.id, { ...payment });
@@ -691,6 +851,39 @@ export class InMemoryPaymentRepository implements PaymentRepository {
     };
     this.payments.set(id, updated);
     return { ...updated };
+  }
+
+  /**
+   * D2-4a — mirror of the pg claim+increment. Yields once so concurrent
+   * callers interleave; the check+claim+increment block runs synchronously,
+   * matching the single-statement atomicity of the Pg impl. The claim is
+   * recorded ONLY when the over-refund guard passes, so a rejected
+   * increment never strands a claim that would dedupe a legitimate retry.
+   */
+  async recordRefundIdempotent(
+    tenantId: string,
+    id: string,
+    opts: IncrementRefundOptions & { stripeRefundId: string },
+  ): Promise<{ payment: Payment; duplicate: boolean } | null> {
+    await Promise.resolve();
+    const p = this.payments.get(id);
+    if (!p || p.tenantId !== tenantId) return null;
+    const key = `${tenantId}:${opts.stripeRefundId}`;
+    if (this.refundClaims.has(key)) {
+      return { payment: { ...p }, duplicate: true };
+    }
+    const next = (p.refundedAmountCents ?? 0) + opts.refundCents;
+    if (next > p.amountCents) return null;
+    this.refundClaims.add(key);
+    const updated: Payment = {
+      ...p,
+      refundedAmountCents: next,
+      refundedAt: opts.refundedAt,
+      lastRefundStripeId: opts.stripeRefundId,
+      updatedAt: new Date(),
+    };
+    this.payments.set(id, updated);
+    return { payment: { ...updated }, duplicate: false };
   }
 
   /**

@@ -25,7 +25,13 @@ describe('P1-017 — Tenant business settings and numbering preferences', () => 
     expect(settings.id).toBeTruthy();
     expect(settings.tenantId).toBe('tenant-1');
     expect(settings.businessName).toBe('ACME HVAC');
-    expect(settings.timezone).toBe('America/New_York');
+    // No timezone default any more. A settings row created without an
+    // explicit zone leaves it UNSET rather than silently claiming Eastern —
+    // that default is what booked an America/Phoenix operator three hours off
+    // for every spoken appointment, because a stored 'America/New_York' is
+    // indistinguishable from a zone the tenant actually chose. Scheduling
+    // handlers gate on the unset value instead of guessing.
+    expect(settings.timezone).toBeUndefined();
     expect(settings.estimatePrefix).toBe('EST-');
     expect(settings.invoicePrefix).toBe('INV-');
     expect(settings.nextEstimateNumber).toBe(1);
@@ -293,5 +299,23 @@ describe('P1-017 — Tenant business settings and numbering preferences', () => 
       const updated = await updateSettings('tenant-packs', { activeVerticalPacks: [] }, repo);
       expect(updated?.activeVerticalPacks).toEqual([]);
     });
+  });
+});
+
+describe('no-guessed-timezone — ensureTenantSettings seeds no zone either', () => {
+  it('a bootstrap-seeded settings row leaves timezone unset until the tenant chooses', async () => {
+    const { InMemorySettingsRepository } = await import('../../src/settings/settings');
+    const repo = new InMemorySettingsRepository();
+
+    // Clerk tenant provisioning path (auth/clerk.ts) — the OTHER first-row
+    // seeder. It previously hardcoded 'America/New_York', which the
+    // scheduling gate could not distinguish from a chosen zone, so
+    // provisioned tenants kept auto-booking on a guessed Eastern clock even
+    // after createSettings stopped guessing.
+    const settings = await ensureTenantSettings('tenant-bootstrap-tz', repo, {
+      businessName: 'Zoneless Co',
+    });
+
+    expect(settings.timezone).toBeUndefined();
   });
 });

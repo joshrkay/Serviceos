@@ -6372,6 +6372,30 @@ export const MIGRATIONS = {
       WHERE contact_id IS NOT NULL;
   `,
 
+  /**
+   * Make "this tenant has not chosen a timezone" REPRESENTABLE.
+   *
+   * `timezone TEXT NOT NULL DEFAULT 'America/New_York'` (migration 013) is
+   * the true origin of the Phoenix mis-booking: a tenant that never submitted
+   * a zone at onboarding still reads back a perfectly valid
+   * `'America/New_York'`, so every consumer — including the new
+   * no-default gate in create-appointment-task.ts — sees a CHOSEN Eastern
+   * zone and books against it. A defaulted value is indistinguishable from a
+   * deliberate one, which is exactly why the appointment path could not
+   * detect its own misconfiguration.
+   *
+   * Dropping the default and the NOT NULL lets an unset zone read back as
+   * NULL, which the drafting handlers already gate on (voice_clarification /
+   * missingFields) instead of guessing. Existing rows are deliberately NOT
+   * rewritten: a stored 'America/New_York' may be a real Eastern tenant's
+   * genuine choice, and this migration has no way to tell the two apart.
+   * Identifying the affected tenants is an operator decision — see the
+   * diagnostic query in docs/ rather than a blind UPDATE here.
+   */
+  '263_tenant_settings_timezone_no_silent_default': `
+    ALTER TABLE tenant_settings ALTER COLUMN timezone DROP DEFAULT;
+    ALTER TABLE tenant_settings ALTER COLUMN timezone DROP NOT NULL;
+  `,
   // FAIL-VIS — indexes for the silent-failure monitor (workers/failure-rate-
   // monitor.ts). The monitor runs cross-tenant aggregates every 10 minutes and
   // MUST stay cheap; without these it would seq-scan ai_runs (~14k rows/day,
@@ -6393,6 +6417,51 @@ export const MIGRATIONS = {
     CREATE INDEX IF NOT EXISTS idx_proposals_silent_execution_failure
       ON proposals (updated_at)
       WHERE status = 'execution_failed' AND execution_error IS NULL;
+  `,
+
+  // D2-4a / P0-4 — per-refund idempotency ledger. The payments-row guard
+  // (`last_refund_stripe_id`) remembers only the LATEST refund id, so a
+  // failed-then-retried earlier refund event re-applied after a later refund
+  // was recorded (and two concurrent retries could both pass the read-based
+  // short-circuit). One row per Stripe refund; the (tenant_id,
+  // stripe_refund_id) unique index is the dedup arbiter, claimed in the SAME
+  // statement as the refunded_amount_cents increment (see
+  // PgPaymentRepository.recordRefundIdempotent). BIGINT matches the
+  // established money-column convention for post-core tables.
+  '264_create_payment_refunds': `
+    CREATE TABLE IF NOT EXISTS payment_refunds (
+      id UUID PRIMARY KEY,
+      tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+      payment_id UUID NOT NULL REFERENCES payments(id) ON DELETE CASCADE,
+      stripe_refund_id TEXT NOT NULL,
+      amount_cents BIGINT NOT NULL CHECK (amount_cents > 0),
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_payment_refunds_stripe_refund
+      ON payment_refunds (tenant_id, stripe_refund_id);
+    CREATE INDEX IF NOT EXISTS idx_payment_refunds_payment
+      ON payment_refunds (tenant_id, payment_id);
+    -- Backfill claims for refunds recorded BEFORE this ledger existed: their
+    -- payments rows carry last_refund_stripe_id, and without a claim a late
+    -- redelivery of that same refund (e.g. charge.refund.updated after an
+    -- earlier charge.refunded) would count it a second time. Only the LATEST
+    -- refund id per payment was ever persisted, so that is all that can be
+    -- seeded; amount_cents is the cumulative refunded total at backfill time
+    -- (informational — the unique id is the dedup arbiter). Runs BEFORE the
+    -- RLS enablement below so the cross-tenant seed needs no policy bypass;
+    -- idempotent via ON CONFLICT for safe re-execution.
+    INSERT INTO payment_refunds (id, tenant_id, payment_id, stripe_refund_id, amount_cents)
+    SELECT gen_random_uuid(), p.tenant_id, p.id, p.last_refund_stripe_id,
+           GREATEST(p.refunded_amount_cents, 1)
+    FROM payments p
+    WHERE p.last_refund_stripe_id IS NOT NULL
+    ON CONFLICT (tenant_id, stripe_refund_id) DO NOTHING;
+    ALTER TABLE payment_refunds ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE payment_refunds FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_payment_refunds ON payment_refunds;
+    CREATE POLICY tenant_isolation_payment_refunds ON payment_refunds
+      USING (tenant_id = current_setting('app.current_tenant_id', true)::UUID)
+      WITH CHECK (tenant_id = current_setting('app.current_tenant_id', true)::UUID);
   `,
 };
 
