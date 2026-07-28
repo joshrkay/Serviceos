@@ -357,7 +357,9 @@ export function createOnboardingRouter(deps: OnboardingRouterDeps): Router {
             id: uuidv4(),
             tenantId,
             businessName: '', // Will remain empty until /identity is called
-            timezone: 'America/New_York',
+            // No guessed timezone — the zone stays unset until the tenant
+            // chooses one, matching createSettings/ensureTenantSettings, so
+            // the scheduling gate never mistakes a seeded value for a choice.
             estimatePrefix: 'EST-',
             invoicePrefix: 'INV-',
             nextEstimateNumber: 1001,
@@ -487,7 +489,7 @@ export function createOnboardingRouter(deps: OnboardingRouterDeps): Router {
             id: uuidv4(),
             tenantId,
             businessName: '', // placeholder; /identity will populate
-            timezone: 'America/New_York',
+            // No guessed timezone — see /pack's seeder above.
             estimatePrefix: 'EST-',
             invoicePrefix: 'INV-',
             nextEstimateNumber: 1001,
