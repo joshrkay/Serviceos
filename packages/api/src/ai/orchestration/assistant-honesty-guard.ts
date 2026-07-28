@@ -166,6 +166,15 @@ const COMPLETED_ACTION_VERBS = [
   'put them down',
   'set you up',
   'set that up',
+  // Vaguer completion claims. These carry no object, so they are the shapes a
+  // model reaches for when it has nothing concrete to report — exactly the
+  // situation on this path. "I've taken care of that." was emitted for an
+  // 'unknown' turn and is every bit as false as "I've scheduled you".
+  // Safe against the conditional forms this file must not flag: "I can handle
+  // that" and "I'll take care of it" do not match, because the pattern admits
+  // only I / I've / I have plus a fixed adverb set before the verb.
+  'taken care of',
+  'handled',
 ].join('|');
 
 /**

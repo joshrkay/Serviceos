@@ -27,7 +27,7 @@
 import request from 'supertest';
 import express, { Request, Response, NextFunction } from 'express';
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { createAssistantRouter, NOTHING_WAS_SAVED_NOTICE } from '../../src/routes/assistant';
+import { createAssistantRouter } from '../../src/routes/assistant';
 import {
   requirePermission,
   resolveAuthorization,
@@ -97,7 +97,10 @@ describe('technician × assistant — RBAC grant', () => {
     expect(hasPermission('technician', 'ai:run')).toBe(true);
 
     const app = buildApp(
-      scriptedGateway([JSON.stringify({ intentType: 'unknown', confidence: 0.2 })]),
+      scriptedGateway([
+        JSON.stringify({ intentType: 'unknown', confidence: 0.2 }),
+        JSON.stringify({ content: "Here's what's on today.", proposal: null }),
+      ]),
     );
     const res = await request(app)
       .post('/api/assistant/chat')
@@ -105,11 +108,11 @@ describe('technician × assistant — RBAC grant', () => {
 
     expect(res.status).toBe(200);
     // A real answer, not a 403 and not an empty body. This turn classifies as
-    // 'unknown', which the unrouted-intent guard now answers with the honest
-    // clarification instead of a generic-LLM improvisation (routes/assistant.ts)
-    // — the point here is that the technician REACHES the AI at all.
-    expect(res.body.message.content).toContain(NOTHING_WAS_SAVED_NOTICE);
-    expect(res.body.message.content.length).toBeGreaterThan(0);
+    // 'unknown' and falls through to the generic LLM; the scripted reply is
+    // honest, so the honesty guard passes it through (see
+    // assistant-honest-refusal.test.ts) — the point here is that the
+    // technician REACHES the AI at all.
+    expect(res.body.message.content).toBe("Here's what's on today.");
   });
 
   it('the grant is ONLY ai:run — office/billing permissions stay withheld', () => {
