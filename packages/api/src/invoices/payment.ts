@@ -618,6 +618,10 @@ export async function recordPayment(
             paymentRepo,
             invoice,
           );
+        // Link cleanup BEFORE the fallible side effects: a throwing audit or
+        // notifier must not leave a stale link live with no retry path (the
+        // retry short-circuits as a duplicate and never reaches cleanup).
+        await killStaleLink(reconciled);
         // Only the crash-recovery case (the invoice was actually under-credited
         // and we just repaired it) runs the post-payment side effects the
         // original attempt never reached. A pure duplicate leaves them alone so
@@ -635,7 +639,6 @@ export async function recordPayment(
             customerNameResolver,
           });
         }
-        await killStaleLink(reconciled);
         return { payment: existing, invoice: reconciled };
       }
     }
@@ -724,6 +727,16 @@ export async function recordPayment(
     throw new ValidationError('Payment amount exceeds amount due');
   }
 
+  // Kill the now-stale link IMMEDIATELY after the credit commits, before any
+  // fallible side effect: outside the request-scoped transaction (webhooks,
+  // proposal execution) the credit is already durable here, and if the audit
+  // or receipt below throws, the caller's retry hits the paid-status guard —
+  // never this cleanup — leaving a live link at the old amount forever. The
+  // reverse failure mode (link killed, side effect throws, request
+  // transaction rolls back the credit) is the safe direction: a dead link
+  // with stale columns is recoverable; a live mispriced link captures money.
+  await killStaleLink(updatedInvoice);
+
   // Audit trail + money-state rollup + receipt/owner push. The audit write is
   // emitted before the best-effort rollup so that — on authenticated /api
   // routes, which run inside the request-scoped transaction — the audit row
@@ -741,8 +754,6 @@ export async function recordPayment(
     paymentReceiptNotifier,
     customerNameResolver,
   });
-
-  await killStaleLink(updatedInvoice);
 
   return { payment, invoice: updatedInvoice };
 }

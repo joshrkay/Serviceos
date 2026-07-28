@@ -998,3 +998,60 @@ describe('P0-9 centralized — recordPayment itself kills a link its credit made
     expect(reloaded!.stripePaymentLinkId).toBeUndefined();
   });
 });
+
+describe('Codex P1 — stale-link cleanup precedes fallible side effects', () => {
+  it('a throwing audit write does not leave the stale link live', async () => {
+    const invoiceRepo = new InMemoryInvoiceRepository();
+    const paymentRepo = new InMemoryPaymentRepository();
+    const inv = await createInvoice(
+      {
+        tenantId: 'tenant-1',
+        jobId: 'job-1',
+        invoiceNumber: 'INV-ORDER-1',
+        lineItems: [buildLineItem('1', 'Service', 1, 10000, 1, true)],
+        createdBy: 'u-1',
+      },
+      invoiceRepo,
+    );
+    await issueInvoice('tenant-1', inv.id, 30, invoiceRepo);
+    await invoiceRepo.update('tenant-1', inv.id, {
+      stripePaymentLinkId: 'plink_order_1',
+      stripePaymentLinkUrl: 'https://pay.stripe.com/order1',
+      updatedAt: new Date(),
+    });
+
+    const deactivated: string[] = [];
+    const cleanup = {
+      provider: {
+        generateLink: async () => { throw new Error('not used'); },
+        deactivateLink: async (linkId: string) => { deactivated.push(linkId); },
+      },
+    };
+    // The proposal-execution failure mode: the credit commits, then the
+    // audit write rejects. The retry will hit the paid-status guard and
+    // never reach cleanup — so cleanup must already have run.
+    const throwingAudit = {
+      create: async () => { throw new Error('audit store down'); },
+    };
+
+    await expect(
+      recordPayment(
+        { tenantId: 'tenant-1', invoiceId: inv.id, amountCents: 10000, method: 'cash', processedBy: 'u-1' },
+        invoiceRepo,
+        paymentRepo,
+        undefined,
+        undefined,
+        throwingAudit as never,
+        undefined,
+        undefined,
+        cleanup,
+      ),
+    ).rejects.toThrow('audit store down');
+
+    // The credit landed and the link died BEFORE the side effect threw.
+    const reloaded = await invoiceRepo.findById('tenant-1', inv.id);
+    expect(reloaded!.status).toBe('paid');
+    expect(deactivated).toEqual(['plink_order_1']);
+    expect(reloaded!.stripePaymentLinkId).toBeUndefined();
+  });
+});
