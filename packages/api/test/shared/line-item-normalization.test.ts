@@ -155,3 +155,34 @@ describe('P0-2 — estimate REST paths recompute line totals', () => {
     expect(updated!.totals.subtotalCents).toBe(15);
   });
 });
+
+describe('R5 — metadata-only updates never rewrite persisted line totals', () => {
+  it('an estimate customerMessage edit leaves legacy line totals untouched', async () => {
+    const repo = new InMemoryEstimateRepository();
+    const estimate = await createEstimate(
+      {
+        tenantId: 't1',
+        jobId: 'j1',
+        estimateNumber: 'EST-R5',
+        lineItems: [clientLine('1', 1, 1000, 1000)],
+        createdBy: 'u1',
+      },
+      repo,
+    );
+    // Simulate a legacy pre-fix row whose persisted total is the client's
+    // wrong number (0.5 × 29¢ stored as 14¢).
+    await repo.update('t1', estimate.id, {
+      lineItems: [clientLine('legacy', 0.5, 29, 14)],
+    });
+
+    const updated = await updateEstimate(
+      't1',
+      estimate.id,
+      { customerMessage: 'See you Tuesday', expectedVersion: 1 },
+      repo,
+    );
+
+    // The customer-visible total must not shift under a metadata edit.
+    expect(updated!.lineItems[0].totalCents).toBe(14);
+  });
+});

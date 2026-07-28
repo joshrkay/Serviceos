@@ -11,6 +11,9 @@ import { AuditRepository } from '../audit/audit';
 import { RefreshJobMoneyStateDeps } from '../jobs/job-money-state';
 import { PaymentReceiptNotifier } from '../invoices/payment';
 import { createLogger } from '../logging/logger';
+import { deactivateInvoicePaymentLink } from '../invoices/invoice-payment-link';
+import type { PaymentLinkProvider } from '../payments/payment-link-provider';
+import type { ConnectAccountResolver } from '../invoices/public-invoice-service';
 
 const logger = createLogger({
   service: 'payments-route',
@@ -26,6 +29,9 @@ export function createPaymentRouter(
   estimateRepo?: EstimateRepository,
   auditRepo?: AuditRepository,
   paymentReceiptNotifier?: PaymentReceiptNotifier,
+  /** P0-9 — kills a stale hosted payment link once a credit reprices/settles its invoice. */
+  paymentLinkProvider?: PaymentLinkProvider,
+  connectAccountResolver?: ConnectAccountResolver,
 ): Router {
   const router = Router();
 
@@ -60,6 +66,20 @@ export function createPaymentRouter(
         auditRepo,
         { actorRole: req.auth!.role },
       );
+      // P0-9 — this credit repriced (or settled) the invoice; a hosted link
+      // minted at the old balance would still capture its original amount.
+      if (paymentLinkProvider && result.invoice.stripePaymentLinkId) {
+        await deactivateInvoicePaymentLink({
+          tenantId: req.auth!.tenantId,
+          invoice: result.invoice,
+          reason: result.invoice.amountDueCents <= 0 ? 'settled' : 'repriced',
+          invoiceRepo,
+          provider: paymentLinkProvider,
+          connectAccountResolver,
+          auditRepo,
+          actor: { actorId: req.auth!.userId, actorRole: req.auth!.role },
+        });
+      }
       res.status(201).json(result);
     })
   );

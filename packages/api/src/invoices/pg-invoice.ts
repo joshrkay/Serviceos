@@ -380,6 +380,30 @@ export class PgInvoiceRepository extends PgBaseRepository implements InvoiceRepo
     });
   }
 
+  /**
+   * P0-9 — CAS clear of the payment-link columns: applies only while the
+   * row still holds `expectedLinkId`, so a deactivation working from a stale
+   * snapshot can never wipe a concurrently re-minted link's columns.
+   */
+  async clearPaymentLinkIfMatches(
+    tenantId: string,
+    id: string,
+    expectedLinkId: string,
+  ): Promise<boolean> {
+    return this.withTenantTransaction(tenantId, async (client) => {
+      const { rowCount } = await client.query(
+        `UPDATE invoices
+         SET stripe_payment_link_id = NULL,
+             stripe_payment_link_url = NULL,
+             updated_at = NOW()
+         WHERE id = $2 AND tenant_id = $1
+           AND stripe_payment_link_id = $3`,
+        [tenantId, id, expectedLinkId],
+      );
+      return (rowCount ?? 0) > 0;
+    });
+  }
+
   async findByViewToken(token: string): Promise<Invoice | null> {
     const headerRow = await this.withClient(async (client) => {
       // Use a SECURITY DEFINER function to bypass RLS for the initial token

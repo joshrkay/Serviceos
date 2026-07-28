@@ -182,6 +182,19 @@ export interface InvoiceRepository {
     deltaCents: number,
     now: Date,
   ): Promise<Invoice | null>;
+  /**
+   * P0-9 — clear the payment-link columns ONLY while they still hold
+   * `expectedLinkId` (single compare-and-swap UPDATE). Deactivation flows
+   * hold an invoice snapshot that may predate a concurrent
+   * deactivate-and-re-mint; a blind clear would wipe the NEW link's columns
+   * while it stays live at Stripe. Returns true when the clear applied.
+   * Optional: callers fall back to read-compare-clear.
+   */
+  clearPaymentLinkIfMatches?(
+    tenantId: string,
+    id: string,
+    expectedLinkId: string,
+  ): Promise<boolean>;
   /** Look up by unauthenticated view token — no tenant isolation needed (token is the secret). */
   findByViewToken?(token: string): Promise<Invoice | null>;
   /**
@@ -392,7 +405,11 @@ export async function updateInvoice(
   }
 
   // P0-2 — client totals are recomputed, never trusted (see createInvoice).
-  const lineItems = normalizeLineItemTotals(input.lineItems ?? existing.lineItems);
+  // Only INCOMING lines are normalized: a metadata-only edit must not
+  // silently rewrite persisted totals the tenant has already seen.
+  const lineItems = input.lineItems
+    ? normalizeLineItemTotals(input.lineItems)
+    : existing.lineItems;
   const discountCents = input.discountCents ?? existing.totals.discountCents;
   const taxRateBps = input.taxRateBps ?? existing.totals.taxRateBps;
   const processingFeeBps =
@@ -668,6 +685,23 @@ export class InMemoryInvoiceRepository implements InvoiceRepository {
     };
     this.invoices.set(id, updated);
     return { ...updated, lineItems: [...updated.lineItems] };
+  }
+
+  async clearPaymentLinkIfMatches(
+    tenantId: string,
+    id: string,
+    expectedLinkId: string,
+  ): Promise<boolean> {
+    const i = this.invoices.get(id);
+    if (!i || i.tenantId !== tenantId) return false;
+    if (i.stripePaymentLinkId !== expectedLinkId) return false;
+    this.invoices.set(id, {
+      ...i,
+      stripePaymentLinkId: undefined,
+      stripePaymentLinkUrl: undefined,
+      updatedAt: new Date(),
+    });
+    return true;
   }
 
   async findByViewToken(token: string): Promise<Invoice | null> {

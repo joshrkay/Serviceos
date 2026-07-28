@@ -115,14 +115,23 @@ export async function deactivateInvoicePaymentLink(params: {
   actor?: { actorId: string; actorRole: string };
 }): Promise<{ deactivated: boolean }> {
   const { tenantId, invoice, reason, invoiceRepo, provider, connectAccountResolver, auditRepo, actor } = params;
-  if (!invoice.stripePaymentLinkId) return { deactivated: false };
+  const linkId = invoice.stripePaymentLinkId;
+  if (!linkId) return { deactivated: false };
 
-  // Same Connect resolution the mint used: a direct-charge link is scoped to
-  // the tenant's account and can only be deactivated with that header.
+  // A link is scoped to the account it was MINTED under, and nothing persists
+  // which account that was — the tenant's Connect state can have changed
+  // since (onboarded after a platform mint, or charges later disabled after a
+  // Connect mint). Resolving only the CURRENT scope would then fail forever,
+  // leaving the stale link live. So try the current resolution first, and on
+  // failure fall back to the other scope; Stripe's deactivate is idempotent,
+  // so hitting the wrong scope is a clean error, never a double effect.
   const connect = connectAccountResolver
     ? await connectAccountResolver.resolveTenantConnectAccount(tenantId).catch(() => null)
     : null;
-  const stripeAccountId = connect && connect.chargesEnabled ? connect.accountId : undefined;
+  const primaryScope = connect && connect.chargesEnabled ? connect.accountId : undefined;
+  const scopes: Array<string | undefined> = [primaryScope];
+  if (primaryScope !== undefined) scopes.push(undefined);
+  else if (connect?.accountId) scopes.push(connect.accountId);
 
   const emit = async (eventType: string, metadata: Record<string, unknown>) => {
     if (!auditRepo) return;
@@ -141,26 +150,51 @@ export async function deactivateInvoicePaymentLink(params: {
       .catch(() => undefined);
   };
 
-  try {
-    await provider.deactivateLink(invoice.stripePaymentLinkId, stripeAccountId);
-  } catch (err) {
+  let lastError: unknown;
+  let deactivated = false;
+  for (const scope of scopes) {
+    try {
+      await provider.deactivateLink(linkId, scope);
+      deactivated = true;
+      break;
+    } catch (err) {
+      lastError = err;
+    }
+  }
+  if (!deactivated) {
     await emit('invoice.payment_link_deactivation_failed', {
-      stripePaymentLinkId: invoice.stripePaymentLinkId,
+      stripePaymentLinkId: linkId,
       reason,
-      error: err instanceof Error ? err.message : String(err),
+      error: lastError instanceof Error ? lastError.message : String(lastError),
     });
     return { deactivated: false };
   }
 
-  await invoiceRepo
-    .update(tenantId, invoice.id, {
-      stripePaymentLinkId: null,
-      stripePaymentLinkUrl: null,
-      updatedAt: new Date(),
-    })
-    .catch(() => undefined); // the link is dead at Stripe — the stale column is cosmetic
+  // Clear ONLY if the column still holds the link we just deactivated. The
+  // caller's invoice may be a snapshot from before a concurrent
+  // deactivate-and-re-mint; a blind clear would then wipe the NEW link's
+  // columns while it stays live at Stripe (exactly the invisible-charge-
+  // vector state this helper exists to prevent). Prefer the repo's CAS;
+  // fall back to read-compare-clear for repos that don't implement it.
+  const clearFailureIsCosmetic = () => undefined; // link is dead at Stripe either way
+  if (invoiceRepo.clearPaymentLinkIfMatches) {
+    await invoiceRepo
+      .clearPaymentLinkIfMatches(tenantId, invoice.id, linkId)
+      .catch(clearFailureIsCosmetic);
+  } else {
+    const fresh = await invoiceRepo.findById(tenantId, invoice.id).catch(() => null);
+    if (fresh?.stripePaymentLinkId === linkId) {
+      await invoiceRepo
+        .update(tenantId, invoice.id, {
+          stripePaymentLinkId: null,
+          stripePaymentLinkUrl: null,
+          updatedAt: new Date(),
+        })
+        .catch(clearFailureIsCosmetic);
+    }
+  }
   await emit('invoice.payment_link_deactivated', {
-    stripePaymentLinkId: invoice.stripePaymentLinkId,
+    stripePaymentLinkId: linkId,
     reason,
   });
   return { deactivated: true };

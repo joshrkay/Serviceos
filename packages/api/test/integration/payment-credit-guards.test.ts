@@ -206,6 +206,35 @@ describe('Postgres integration — atomic credit guards (P0-3 / P0-6)', () => {
     expect(reloaded!.amountPaidCents).toBe(0);
   });
 
+  it('payment-link CAS clear (P0-9/R3): clears only while the column holds the expected id', async () => {
+    const invoice = await createOpenInvoice(5000);
+    await invoiceRepo.update(tenant.tenantId, invoice.id, {
+      stripePaymentLinkId: 'plink_cas_1',
+      stripePaymentLinkUrl: 'https://pay.stripe.com/cas1',
+      updatedAt: new Date(),
+    });
+
+    // Wrong expected id → no-op.
+    expect(
+      await invoiceRepo.clearPaymentLinkIfMatches(tenant.tenantId, invoice.id, 'plink_other'),
+    ).toBe(false);
+    let fresh = await invoiceRepo.findById(tenant.tenantId, invoice.id);
+    expect(fresh!.stripePaymentLinkId).toBe('plink_cas_1');
+
+    // Matching id → cleared.
+    expect(
+      await invoiceRepo.clearPaymentLinkIfMatches(tenant.tenantId, invoice.id, 'plink_cas_1'),
+    ).toBe(true);
+    fresh = await invoiceRepo.findById(tenant.tenantId, invoice.id);
+    expect(fresh!.stripePaymentLinkId).toBeUndefined();
+    expect(fresh!.stripePaymentLinkUrl).toBeUndefined();
+
+    // Second clear finds nothing to match.
+    expect(
+      await invoiceRepo.clearPaymentLinkIfMatches(tenant.tenantId, invoice.id, 'plink_cas_1'),
+    ).toBe(false);
+  });
+
   it('a partial credit within the balance still applies (guards do not over-reject)', async () => {
     const invoice = await createOpenInvoice(10000);
 

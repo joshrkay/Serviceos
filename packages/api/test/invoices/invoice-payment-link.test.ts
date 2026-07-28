@@ -304,3 +304,110 @@ describe('P0-1 — void/cancel deactivates the hosted payment link', () => {
     expect(calls).toBe(0);
   });
 });
+
+describe('R2/R3 — deactivation scope fallback and CAS-guarded clear', () => {
+  const TENANT = 'tenant-1';
+
+  it('falls back to the platform scope when the Connect-scoped call fails (mint-time scope drift)', async () => {
+    const { InMemoryInvoiceRepository, createInvoice, issueInvoice } =
+      await import('../../src/invoices/invoice');
+    const { deactivateInvoicePaymentLink } = await import('../../src/invoices/invoice-payment-link');
+
+    const invoiceRepo = new InMemoryInvoiceRepository();
+    const invoice = await createInvoice(
+      {
+        tenantId: TENANT,
+        jobId: 'job-1',
+        invoiceNumber: 'INV-R2',
+        lineItems: [(await import('../../src/shared/billing-engine')).buildLineItem('1', 'S', 1, 1000, 1, true)],
+        createdBy: 'u-1',
+      },
+      invoiceRepo,
+    );
+    await issueInvoice(TENANT, invoice.id, 30, invoiceRepo);
+    await invoiceRepo.update(TENANT, invoice.id, {
+      stripePaymentLinkId: 'plink_platform_minted',
+      stripePaymentLinkUrl: 'https://pay.stripe.com/x',
+      updatedAt: new Date(),
+    });
+
+    // Link was minted on the PLATFORM before the tenant onboarded to
+    // Connect; the current resolution is Connect-scoped and fails.
+    const attempts: Array<string | undefined> = [];
+    const provider = {
+      generateLink: async () => { throw new Error('not used'); },
+      deactivateLink: async (_id: string, account?: string) => {
+        attempts.push(account);
+        if (account) throw new Error('resource_missing');
+      },
+    };
+
+    const fresh = await invoiceRepo.findById(TENANT, invoice.id);
+    const result = await deactivateInvoicePaymentLink({
+      tenantId: TENANT,
+      invoice: fresh!,
+      reason: 'voided',
+      invoiceRepo,
+      provider,
+      connectAccountResolver: {
+        resolveTenantConnectAccount: async () => ({ accountId: 'acct_now', chargesEnabled: true }),
+      },
+    });
+
+    expect(result.deactivated).toBe(true);
+    expect(attempts).toEqual(['acct_now', undefined]); // Connect first, then platform fallback
+    expect((await invoiceRepo.findById(TENANT, invoice.id))!.stripePaymentLinkId).toBeUndefined();
+  });
+
+  it('a deactivation holding a stale snapshot never clears a re-minted link (CAS)', async () => {
+    const { InMemoryInvoiceRepository, createInvoice, issueInvoice } =
+      await import('../../src/invoices/invoice');
+    const { deactivateInvoicePaymentLink } = await import('../../src/invoices/invoice-payment-link');
+    const { buildLineItem } = await import('../../src/shared/billing-engine');
+
+    const invoiceRepo = new InMemoryInvoiceRepository();
+    const invoice = await createInvoice(
+      {
+        tenantId: TENANT,
+        jobId: 'job-1',
+        invoiceNumber: 'INV-R3',
+        lineItems: [buildLineItem('1', 'S', 1, 1000, 1, true)],
+        createdBy: 'u-1',
+      },
+      invoiceRepo,
+    );
+    await issueInvoice(TENANT, invoice.id, 30, invoiceRepo);
+    await invoiceRepo.update(TENANT, invoice.id, {
+      stripePaymentLinkId: 'plink_L1',
+      stripePaymentLinkUrl: 'https://pay.stripe.com/L1',
+      updatedAt: new Date(),
+    });
+    const staleSnapshot = await invoiceRepo.findById(TENANT, invoice.id);
+
+    // Concurrent flow: L1 deactivated+cleared, then L2 re-minted.
+    await invoiceRepo.update(TENANT, invoice.id, {
+      stripePaymentLinkId: 'plink_L2',
+      stripePaymentLinkUrl: 'https://pay.stripe.com/L2',
+      updatedAt: new Date(),
+    });
+
+    // Our late deactivation still holds the L1 snapshot; Stripe's
+    // deactivate on the already-dead L1 succeeds idempotently.
+    const provider = {
+      generateLink: async () => { throw new Error('not used'); },
+      deactivateLink: async () => {},
+    };
+    await deactivateInvoicePaymentLink({
+      tenantId: TENANT,
+      invoice: staleSnapshot!,
+      reason: 'repriced',
+      invoiceRepo,
+      provider,
+    });
+
+    // L2's columns survive — no invisible live link.
+    const fresh = await invoiceRepo.findById(TENANT, invoice.id);
+    expect(fresh!.stripePaymentLinkId).toBe('plink_L2');
+    expect(fresh!.stripePaymentLinkUrl).toBe('https://pay.stripe.com/L2');
+  });
+});

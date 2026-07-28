@@ -1412,7 +1412,7 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
         }
 
         try {
-          await recordProcessingPayment(
+          const { invoice: creditedInvoice } = await recordProcessingPayment(
             {
               tenantId,
               invoiceId,
@@ -1430,6 +1430,9 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
           logger.info('Recorded in-flight ACH payment via payment_intent.processing', {
             tenantId, invoiceId, amountCents, paymentIntentId: piId,
           });
+          // P0-9 — the in-flight credit repriced (or settled) the invoice; a
+          // hosted link minted at the old balance must not stay live.
+          await killStaleInvoiceLink(tenantId, creditedInvoice);
         } catch (payErr) {
           if (
             payErr instanceof ValidationError &&
@@ -1580,7 +1583,7 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
         }
 
         try {
-          await recordPayment(
+          const { invoice: creditedInvoice } = await recordPayment(
             {
               tenantId,
               invoiceId,
@@ -1599,6 +1602,9 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
           logger.info('Invoice marked paid via payment_intent.succeeded (async settlement)', {
             tenantId, invoiceId, amountCents, paymentIntentId: piId,
           });
+          // P0-9 — this credit settled/repriced the invoice; kill any link
+          // still priced at the pre-credit balance.
+          await killStaleInvoiceLink(tenantId, creditedInvoice);
         } catch (payErr) {
           if (
             payErr instanceof ValidationError &&

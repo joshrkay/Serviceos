@@ -797,3 +797,70 @@ describe('P0-7 — crash-repair reconciler is refund-INCLUSIVE and void-safe', (
     expect(reloaded!.status).toBe('void');
   });
 });
+
+describe('R1 — compensation must not orphan a reconciler-credited payment', () => {
+  it('returns success (no failed flip) when the invoice balance already reflects this row', async () => {
+    // Race: our payment row committed; a concurrent duplicate delivery hit
+    // the 23505 branch and reconciled the invoice FROM THE LEDGER (which
+    // includes our row) before our own increment ran. The increment then
+    // matches 0 rows because the invoice is already paid — with OUR money.
+    // Flipping our row to 'failed' would leave invoice paid over an empty
+    // active ledger.
+    const inner = new InMemoryInvoiceRepository();
+    const paymentRepo = new InMemoryPaymentRepository();
+    const inv = await createInvoice(
+      {
+        tenantId: 'tenant-1',
+        jobId: 'job-1',
+        invoiceNumber: 'INV-R1',
+        lineItems: [buildLineItem('1', 'Service', 1, 10000, 1, true)],
+        createdBy: 'u-1',
+      },
+      inner,
+    );
+    await issueInvoice('tenant-1', inv.id, 30, inner);
+
+    // Wrap the invoice repo: the first increment "loses" — and at that
+    // moment the reconciler has already written the credited balance.
+    let intercepted = false;
+    const racingInvoiceRepo = new Proxy(inner, {
+      get(target, prop, receiver) {
+        if (prop === 'incrementAmountPaidAtomic' && !intercepted) {
+          return async () => {
+            intercepted = true;
+            // Simulate the concurrent reconcile: balance written from the
+            // ledger (which contains our just-committed row).
+            await inner.update('tenant-1', inv.id, {
+              amountPaidCents: 10000,
+              amountDueCents: 0,
+              status: 'paid',
+              updatedAt: new Date(),
+            });
+            return null; // our own UPDATE matched 0 rows
+          };
+        }
+        return Reflect.get(target, prop, receiver);
+      },
+    });
+
+    const result = await recordPayment(
+      {
+        tenantId: 'tenant-1',
+        invoiceId: inv.id,
+        amountCents: 10000,
+        method: 'credit_card',
+        providerReference: 'pi_r1_race',
+        processedBy: 'stripe_webhook',
+      },
+      racingInvoiceRepo,
+      paymentRepo,
+    );
+
+    // Success, not a throw — and the row stays 'completed' so
+    // invoice.amount_paid == Σ(active payments) still holds.
+    expect(result.invoice.status).toBe('paid');
+    const rows = await paymentRepo.findByInvoice('tenant-1', inv.id);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].status).toBe('completed');
+  });
+});

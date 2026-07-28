@@ -667,10 +667,27 @@ export async function recordProcessingPayment(
     // (P0-3 / P0-6) rejected the write against the row's LIVE state — the
     // invoice was voided/settled or another credit filled it between the
     // snapshot read above and this UPDATE. The 'processing' row already
-    // committed, so compensate: flip it to 'failed' (never counted by any
-    // paid-ledger sum, never settled by a later `payment_intent.succeeded`,
-    // whose CAS requires status='processing'), then surface the same
-    // ValidationError shape the serial guards use.
+    // committed, so the default compensation is to flip it to 'failed'
+    // (never counted by any paid-ledger sum, never settled by a later
+    // `payment_intent.succeeded`, whose CAS requires status='processing').
+    //
+    // BUT — mirroring recordPayment — if a concurrent duplicate delivery's
+    // reconcile already credited the invoice from the ledger (which includes
+    // OUR row), the rejection means "already credited", not "not creditable":
+    // flipping the row would orphan that credit. The L3 comparison detects
+    // it; success is returned and the reconciling delivery owns the side
+    // effects.
+    const live = await invoiceRepo.findById(input.tenantId, input.invoiceId);
+    if (live) {
+      const ledger = await paymentRepo.findByInvoice(input.tenantId, input.invoiceId);
+      const activeSum = ledger
+        .filter((p) => (p.status === 'completed' || p.status === 'processing') && !p.reversedAt)
+        .reduce((sum, p) => sum + p.amountCents, 0);
+      if (activeSum > 0 && activeSum <= live.amountPaidCents) {
+        return { payment, invoice: live };
+      }
+    }
+
     const now = new Date();
     await paymentRepo.update(input.tenantId, payment.id, {
       status: 'failed',
@@ -678,7 +695,6 @@ export async function recordProcessingPayment(
       reversalReason: 'credit_rejected',
       updatedAt: now,
     });
-    const live = await invoiceRepo.findById(input.tenantId, input.invoiceId);
     if (!live) throw new ValidationError('Invoice not found');
     if (!PAYABLE_STATUSES.includes(live.status)) {
       throw new ValidationError(

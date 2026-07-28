@@ -5146,6 +5146,8 @@ export function createApp(): AppWithLifecycle {
       estimateRepo,
       auditRepo,
       transactionalComms,
+      paymentLinkProvider,
+      connectAccountResolver,
     ),
   );
   // Stripe Terminal — field card-present collect (Connect direct charges).

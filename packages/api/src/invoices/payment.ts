@@ -613,10 +613,31 @@ export async function recordPayment(
     // null here means the invoice vanished, was voided/settled after the
     // snapshot read above, or the credit would overpay it (e.g. a concurrent
     // full-balance payment won the race). The payment row already committed in
-    // its own transaction, so compensate: flip it to 'failed' (excluded from
-    // every paid-ledger sum) rather than leave a completed row with no
-    // matching invoice credit, then surface the same ValidationError the
-    // serial guards throw so callers see one failure shape.
+    // its own transaction, so the default compensation is to flip it to
+    // 'failed' (excluded from every paid-ledger sum) rather than leave a
+    // completed row with no matching invoice credit.
+    //
+    // BUT first: was this row already credited ON OUR BEHALF? A concurrent
+    // duplicate delivery for the same intent can hit the 23505 branch and run
+    // reconcileInvoiceFromPayments, which sums the ledger (including OUR row)
+    // and writes the invoice balance before our own increment executes — our
+    // increment then matches 0 rows precisely BECAUSE the invoice is already
+    // paid with this row's money. Flipping the row to 'failed' there would
+    // orphan the credit (invoice paid, active ledger empty). Detect it with
+    // the L3 comparison: if the active ledger sum INCLUDING our row fits
+    // inside the live balance, the credit exists — return success and skip
+    // the side effects (the reconciling delivery already ran them).
+    const live = await invoiceRepo.findById(input.tenantId, input.invoiceId);
+    if (live) {
+      const ledger = await paymentRepo.findByInvoice(input.tenantId, input.invoiceId);
+      const activeSum = ledger
+        .filter((p) => (p.status === 'completed' || p.status === 'processing') && !p.reversedAt)
+        .reduce((sum, p) => sum + p.amountCents, 0);
+      if (activeSum > 0 && activeSum <= live.amountPaidCents) {
+        return { payment, invoice: live };
+      }
+    }
+
     const now = new Date();
     await paymentRepo.update(input.tenantId, payment.id, {
       status: 'failed',
@@ -624,7 +645,6 @@ export async function recordPayment(
       reversalReason: 'credit_rejected',
       updatedAt: now,
     });
-    const live = await invoiceRepo.findById(input.tenantId, input.invoiceId);
     if (auditRepo) {
       await auditRepo.create(
         createAuditEvent({
