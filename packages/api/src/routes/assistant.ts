@@ -18,6 +18,7 @@ import {
   isLookupIntent,
   isVoiceApprovalIntent,
   isVoiceEditIntent,
+  CLASSIFIER_CONFIDENCE_THRESHOLD,
 } from '../ai/orchestration/intent-classifier';
 // Lookup wiring (2026-07): `lookup_*` intents previously matched nothing in
 // either dispatch map below and fell through to the generic LLM — which has
@@ -30,6 +31,19 @@ import {
   dispatchAssistantLookup,
   type AssistantLookupDeps,
 } from '../ai/orchestration/lookup-dispatch';
+// Honest-failure guard (2026-07). The intent path can end without a proposal
+// three different ways, and every one of them used to fall into the same
+// DB-less generic LLM — which cheerfully replied "I've scheduled you for two
+// hours on this job." having scheduled nothing. See the module header for the
+// production evidence and the three-layer shape.
+import {
+  isActionIntent,
+  detectFabricatedActionClaim,
+  buildUnmappedCapabilityReply,
+  buildNotUnderstoodReply,
+  buildClassifierErrorReply,
+  NO_ACTION_TAKEN_DIRECTIVE,
+} from '../ai/orchestration/assistant-honesty-guard';
 import type { TaskHandler } from '../ai/tasks/task-handlers';
 // Money/edit/send handlers are no longer constructed inline here — both
 // dispatch maps resolve them from the shared handler-registry below.
@@ -835,6 +849,14 @@ async function generateAssistantReply(
   // a recognized action (today: create_customer), build a real proposal
   // and return it instead of a free-text LLM reply. Other intents fall
   // through to the LLM — separate stories wire them into the chat.
+  //
+  // Honest-failure guard state, hoisted OUT of the try below so the fallback
+  // path can tell WHY the intent path produced no proposal. Without this the
+  // fallback LLM cannot distinguish "I didn't understand you" from "the
+  // classifier threw", and it answered both by inventing a confirmation.
+  let guardIntent: string | undefined;
+  let guardConfidence: number | undefined;
+  let guardIntentError: string | undefined;
   if (lastUserText.trim().length > 0) {
     try {
       // §3B/3D/3E — resolve the tenant's vertical context (terminology +
@@ -893,6 +915,8 @@ async function generateAssistantReply(
       };
 
       const classification = await classifyIntent(lastUserText, classifyContext, deps.gateway);
+      guardIntent = classification.intentType;
+      guardConfidence = classification.confidence;
 
       // ── Lookup path ────────────────────────────────────────────────
       // Runs BEFORE the chain split and both dispatch maps: a lookup is a
@@ -1361,7 +1385,15 @@ async function generateAssistantReply(
       tenantId,
       responseFormat: 'json',
       messages: [
-        { role: 'system', content: `${systemPrompt}\n\n${outputContract}` },
+        // Honest-failure guard, layer 2. This path has no tools and writes
+        // nothing; the model is the only participant that doesn't know that,
+        // so it is told. A directive alone is not the fix — the model can
+        // ignore it, which is exactly what the two observed fabrications
+        // were — so layer 3 below verifies the answer regardless.
+        {
+          role: 'system',
+          content: `${systemPrompt}\n\n${NO_ACTION_TAKEN_DIRECTIVE}\n\n${outputContract}`,
+        },
         ...messages.filter((m) => m.role !== 'system'),
       ],
       temperature: 0.2,
@@ -1370,6 +1402,40 @@ async function generateAssistantReply(
     });
 
     const parsed = assistantReplySchema.parse(JSON.parse(response.content));
+
+    // ── Honest-failure guard, layer 3 ────────────────────────────────
+    // Nothing on this path persists anything. So a reply that carries no
+    // proposal AND claims a completed action is, by construction, false —
+    // we do not need to guess, we know. Verify rather than trust: the two
+    // production fabrications came from a model that had every opportunity
+    // to behave and didn't, and a prompt instruction cannot be relied on to
+    // change that.
+    //
+    // Scoped to proposal-less replies exactly as the defect is scoped. A
+    // reply that carries a proposal legitimately says "I've drafted…",
+    // because it has.
+    const fabricated = parsed.proposal
+      ? null
+      : detectFabricatedActionClaim(parsed.content);
+    if (fabricated) {
+      logger.error('assistant/chat: suppressed fabricated action confirmation', {
+        correlationId,
+        tenantId,
+        taskType,
+        intent: guardIntent,
+        confidence: guardConfidence,
+        intentError: guardIntentError,
+        claim: fabricated,
+      });
+      // Three failures, three experiences. Layer 1 already took "I can't do
+      // that" (a confident, unmapped write intent never reaches here), so
+      // what is left is the other two — and they are genuinely different
+      // things to say to an operator standing in someone's kitchen.
+      return guardIntentError
+        ? buildClassifierErrorReply(guardIntentError)
+        : buildNotUnderstoodReply(guardConfidence);
+    }
+
     return {
       taskType,
       model: response.model,
