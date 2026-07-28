@@ -189,6 +189,9 @@ describe('voice-action-router — autonomous booking lane (UB-D)', () => {
     platformDisabled?: boolean;
   }) {
     return createVoiceActionRouterWorker({
+    // Production always resolves a tenant zone; a booking without one now
+    // asks the operator instead of guessing at US-Eastern.
+    tenantSchedulingResolver: async () => ({ timezone: 'America/Phoenix' }),
       gateway: bookingGateway(),
       proposalRepo,
       appointmentRepo,

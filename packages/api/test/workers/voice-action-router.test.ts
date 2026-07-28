@@ -37,6 +37,16 @@ import type {
   EntityResolverResult,
 } from '../../src/ai/resolution/entity-resolver';
 
+/**
+ * Every real deployment resolves a tenant zone (app.ts always wires
+ * `tenantSchedulingResolver` off `tenant_settings.timezone`), and a booking
+ * without one no longer guesses at America/New_York — it emits a
+ * `voice_clarification` asking the operator to set the business timezone.
+ * Booking fixtures therefore have to supply a zone the way production does.
+ * Deliberately NOT Eastern, so a reintroduced US-East default fails here.
+ */
+const TZ_RESOLVER = async () => ({ timezone: 'America/Phoenix' });
+
 function silentLogger(): Logger {
   const noop = (..._args: unknown[]) => {};
   const base = {
@@ -140,7 +150,7 @@ describe('voice-action-router worker', () => {
       }),
     ]);
 
-    const worker = createVoiceActionRouterWorker({ gateway, proposalRepo });
+    const worker = createVoiceActionRouterWorker({ gateway, proposalRepo, tenantSchedulingResolver: TZ_RESOLVER });
 
     await worker.handle(
       msg({
@@ -175,7 +185,7 @@ describe('voice-action-router worker', () => {
       }),
     ]);
 
-    const worker = createVoiceActionRouterWorker({ gateway, proposalRepo });
+    const worker = createVoiceActionRouterWorker({ gateway, proposalRepo, tenantSchedulingResolver: TZ_RESOLVER });
     await worker.handle(
       msg({ tenantId: 't-unsup', userId: 'u-1', transcript: 'Book Mrs Lee next Tuesday at 2pm' }),
       silentLogger()
@@ -205,7 +215,7 @@ describe('voice-action-router worker', () => {
       }),
     ]);
 
-    const worker = createVoiceActionRouterWorker({ gateway, proposalRepo });
+    const worker = createVoiceActionRouterWorker({ gateway, proposalRepo, tenantSchedulingResolver: TZ_RESOLVER });
     await worker.handle(
       msg({ tenantId: 't-sup', userId: 'u-1', transcript: 'Book Mrs Lee next Tuesday at 2pm' }),
       silentLogger()
@@ -245,6 +255,7 @@ describe('voice-action-router worker', () => {
     };
 
     const worker = createVoiceActionRouterWorker({
+      tenantSchedulingResolver: TZ_RESOLVER,
       gateway,
       proposalRepo,
       slotConflictChecker: checker,
@@ -775,7 +786,7 @@ describe('voice-action-router worker', () => {
         },
       }),
     ]);
-    const worker = createVoiceActionRouterWorker({ gateway, proposalRepo });
+    const worker = createVoiceActionRouterWorker({ gateway, proposalRepo, tenantSchedulingResolver: TZ_RESOLVER });
 
     await worker.handle(
       msg({
@@ -1402,7 +1413,7 @@ describe('voice-action-router worker', () => {
     ]);
     const appointmentRepo = new InMemoryAppointmentRepository();
 
-    const worker = createVoiceActionRouterWorker({ gateway, proposalRepo, appointmentRepo });
+    const worker = createVoiceActionRouterWorker({ gateway, proposalRepo, appointmentRepo, tenantSchedulingResolver: TZ_RESOLVER });
 
     const payload = {
       tenantId: 't-1',

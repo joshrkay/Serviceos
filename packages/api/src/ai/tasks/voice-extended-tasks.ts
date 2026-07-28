@@ -29,7 +29,8 @@ import type { JobRepository } from '../../jobs/job';
 import type { InvoiceRepository } from '../../invoices/invoice';
 import type { EstimateRepository } from '../../estimates/estimate';
 import type { LLMGateway } from '../gateway/gateway';
-import { resolveDateTime, DEFAULT_TENANT_TIMEZONE } from '../scheduling/resolve-datetime';
+import { resolveDateTime } from '../scheduling/resolve-datetime';
+import { isRuntimeTimezone } from '../../shared/timezone';
 import { findJobsRequiringInvoicing, InvoicingQueueDeps } from '../../invoices/invoicing-queue';
 import {
   DunningEvent,
@@ -266,13 +267,25 @@ export class RescheduleAppointmentTaskHandler implements TaskHandler {
     // in draft for the dispatcher to complete.
     const phrase =
       typeof ee.newDateTimeDescription === 'string' ? ee.newDateTimeDescription.trim() : '';
-    const resolved = phrase
-      ? resolveDateTime(phrase, {
-          timezone: context.timezone ?? DEFAULT_TENANT_TIMEZONE,
-          now: context.now ?? new Date(),
-          ...(originalDurationMin ? { defaultDurationMin: originalDurationMin } : {}),
-        })
-      : undefined;
+    // No tenant timezone ⇒ no resolution. Falling back to a product-default
+    // zone here silently moved a Phoenix tenant's appointment three hours
+    // (the create-side bug this mirrors — see create-appointment-task.ts's
+    // "NO DEFAULT TIMEZONE" note). Leaving the ISO fields unresolved routes
+    // through the SAME missingFields gate an unparseable phrase already
+    // takes: the reschedule stays in draft for the dispatcher instead of
+    // moving a real appointment to a guessed hour.
+    const tenantTimezone =
+      typeof context.timezone === 'string' && isRuntimeTimezone(context.timezone.trim())
+        ? context.timezone.trim()
+        : undefined;
+    const resolved =
+      phrase && tenantTimezone
+        ? resolveDateTime(phrase, {
+            timezone: tenantTimezone,
+            now: context.now ?? new Date(),
+            ...(originalDurationMin ? { defaultDurationMin: originalDurationMin } : {}),
+          })
+        : undefined;
 
     if (resolved && resolved.ok) {
       payload.newScheduledStart = resolved.startUtc;

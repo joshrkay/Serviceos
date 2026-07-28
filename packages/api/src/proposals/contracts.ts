@@ -225,6 +225,19 @@ export const createAppointmentPayloadSchema = z
     // appointment to it, overriding `jobId`. Audit metadata marks the
     // appointment as a revisit.
     linkedJobId: z.string().uuid().optional(),
+    /**
+     * The `service_locations` row the auto-opened job should be sited at.
+     *
+     * `jobs.location_id` is NOT NULL, so a customer with no location cannot
+     * have a job — and therefore cannot be booked. When the drafting handler
+     * detects that (`detectServiceLocationGap`) it gates the proposal with
+     * `missingFields: ['locationId']`; the operator fills THIS field to clear
+     * the gate, and `CreateAppointmentExecutionHandler` sites the new job on
+     * it. Optional and additive: a customer who already has a primary
+     * location never needs it, and the executor's existing lookup is unchanged
+     * when it is absent.
+     */
+    locationId: z.string().uuid().optional(),
     scheduledStart: z.string().min(1),
     scheduledEnd: z.string().min(1),
     technicianId: z.string().uuid().optional(),

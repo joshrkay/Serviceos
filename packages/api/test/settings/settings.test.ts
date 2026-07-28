@@ -25,7 +25,13 @@ describe('P1-017 — Tenant business settings and numbering preferences', () => 
     expect(settings.id).toBeTruthy();
     expect(settings.tenantId).toBe('tenant-1');
     expect(settings.businessName).toBe('ACME HVAC');
-    expect(settings.timezone).toBe('America/New_York');
+    // No timezone default any more. A settings row created without an
+    // explicit zone leaves it UNSET rather than silently claiming Eastern —
+    // that default is what booked an America/Phoenix operator three hours off
+    // for every spoken appointment, because a stored 'America/New_York' is
+    // indistinguishable from a zone the tenant actually chose. Scheduling
+    // handlers gate on the unset value instead of guessing.
+    expect(settings.timezone).toBeUndefined();
     expect(settings.estimatePrefix).toBe('EST-');
     expect(settings.invoicePrefix).toBe('INV-');
     expect(settings.nextEstimateNumber).toBe(1);

@@ -6371,6 +6371,31 @@ export const MIGRATIONS = {
       ON portal_sessions (tenant_id, contact_id)
       WHERE contact_id IS NOT NULL;
   `,
+
+  /**
+   * Make "this tenant has not chosen a timezone" REPRESENTABLE.
+   *
+   * `timezone TEXT NOT NULL DEFAULT 'America/New_York'` (migration 013) is
+   * the true origin of the Phoenix mis-booking: a tenant that never submitted
+   * a zone at onboarding still reads back a perfectly valid
+   * `'America/New_York'`, so every consumer — including the new
+   * no-default gate in create-appointment-task.ts — sees a CHOSEN Eastern
+   * zone and books against it. A defaulted value is indistinguishable from a
+   * deliberate one, which is exactly why the appointment path could not
+   * detect its own misconfiguration.
+   *
+   * Dropping the default and the NOT NULL lets an unset zone read back as
+   * NULL, which the drafting handlers already gate on (voice_clarification /
+   * missingFields) instead of guessing. Existing rows are deliberately NOT
+   * rewritten: a stored 'America/New_York' may be a real Eastern tenant's
+   * genuine choice, and this migration has no way to tell the two apart.
+   * Identifying the affected tenants is an operator decision — see the
+   * diagnostic query in docs/ rather than a blind UPDATE here.
+   */
+  '263_tenant_settings_timezone_no_silent_default': `
+    ALTER TABLE tenant_settings ALTER COLUMN timezone DROP DEFAULT;
+    ALTER TABLE tenant_settings ALTER COLUMN timezone DROP NOT NULL;
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

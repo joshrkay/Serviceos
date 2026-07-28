@@ -227,7 +227,17 @@ export interface TenantSettings {
   // emergency triage to patch a customer through to the owner. Never the
   // same as businessPhone (which the AI answers on).
   ownerPhone?: string | null;
-  timezone: string;
+  /**
+   * The tenant's IANA zone, or undefined when they have never chosen one.
+   *
+   * Optional on purpose (migration 263 dropped the column's NOT NULL and its
+   * `DEFAULT 'America/New_York'`). A required-and-defaulted timezone is what
+   * made the Phoenix mis-booking undetectable: every consumer read a valid
+   * Eastern zone and had no way to tell a guess from a choice. Consumers that
+   * merely DISPLAY a time may substitute a default; consumers that BOOK one
+   * must gate instead — see create-appointment-task.ts.
+   */
+  timezone?: string;
   estimatePrefix: string;
   invoicePrefix: string;
   nextEstimateNumber: number;
@@ -933,7 +943,9 @@ export async function createSettings(
     businessPhone: input.businessPhone,
     businessEmail: input.businessEmail,
     ownerPhone: input.ownerPhone,
-    timezone: input.timezone || 'America/New_York',
+    // No ET fallback — an unchosen zone stays unchosen so the booking path
+    // can gate on it rather than silently booking three hours off.
+    ...(input.timezone ? { timezone: input.timezone } : {}),
     estimatePrefix: input.estimatePrefix || 'EST-',
     invoicePrefix: input.invoicePrefix || 'INV-',
     nextEstimateNumber: 1,

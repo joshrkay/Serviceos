@@ -25,8 +25,8 @@ import {
 import { JobRepository } from '../../jobs/job';
 import {
   resolveDateTime,
-  DEFAULT_TENANT_TIMEZONE,
 } from './resolve-datetime';
+import { isRuntimeTimezone } from '../../shared/timezone';
 import type { AppointmentTypeValue } from '@ai-service-os/shared';
 
 /** Default tentative-hold window — a 24h approval window (matches the task). */
@@ -36,6 +36,13 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 
 export type PlaceHoldFailure =
   | 'unresolved_datetime'
+  /**
+   * The TENANT has no usable IANA timezone, so a spoken phrase cannot be
+   * turned into an instant. Distinct from `unresolved_datetime`, where the
+   * phrase itself was the problem — here the caller said something perfectly
+   * clear and the business is misconfigured.
+   */
+  | 'timezone_unconfigured'
   | 'job_not_owned'
   | 'hold_write_failed';
 
@@ -158,7 +165,17 @@ export async function resolveAndPlaceAppointmentHold(
   | { ok: true; appointmentId: string; holdExpiryAt: Date; scheduledStart: string; scheduledEnd: string; timezone: string; arrival?: { startUtc: string; endUtc: string } }
   | { ok: false; failed: PlaceHoldFailure }
 > {
-  const timezone = args.timezone ?? DEFAULT_TENANT_TIMEZONE;
+  // NO DEFAULT ZONE. This is the autonomous live-call close: it writes a real
+  // held appointment AND speaks the time back to the caller. Falling through
+  // to America/New_York here is the same defect that put an America/Phoenix
+  // operator's bookings three hours off — except on this path the wrong time
+  // is also read aloud to the customer as confirmation. Refusing routes the
+  // turn to the caller's existing `scheduling_incomplete` fallback, which
+  // does not book and does not claim a time.
+  const timezone = typeof args.timezone === 'string' ? args.timezone.trim() : '';
+  if (!timezone || !isRuntimeTimezone(timezone)) {
+    return { ok: false, failed: 'timezone_unconfigured' };
+  }
   const now = args.now ?? new Date();
   const resolved = resolveDateTime(args.dateTimeDescription, {
     timezone,

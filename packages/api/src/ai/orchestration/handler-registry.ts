@@ -20,6 +20,7 @@ import type { ProposalRepository } from '../../proposals/proposal';
 import { InvoicingQueueDeps } from '../../invoices/invoicing-queue';
 import { DunningEventRepository } from '../../invoices/dunning-config';
 import type { CustomerRepository } from '../../customers/customer';
+import type { LocationRepository } from '../../locations/location';
 import { isCustomerDuplicateLoader } from '../../customers/dedup';
 import {
   RescheduleAppointmentTaskHandler,
@@ -147,6 +148,17 @@ export interface HandlerRegistryDeps {
    * handler's always-clean draft).
    */
   customerRepo?: CustomerRepository;
+  /**
+   * create_appointment draft-time bookability check. `jobs.location_id` is
+   * NOT NULL, so booking a customer with zero `service_locations` rows is a
+   * guaranteed execution failure. With this wired, the drafting handler
+   * detects the gap up front and gates the proposal with
+   * `missingFields: ['locationId']` instead of letting it auto-approve into
+   * that failure — and surfaces any address preserved on
+   * `customers.communication_notes` so the operator can close the gap from
+   * the review card. Optional; absent → no gate (pre-existing behavior).
+   */
+  locationRepo?: LocationRepository;
 }
 
 /**
@@ -169,6 +181,10 @@ export function buildTaskHandlers(deps: HandlerRegistryDeps): Map<ProposalType, 
       deps.availabilityFinder,
       deps.appointmentRepo,
       deps.jobRepo,
+      // Draft-time bookability: no service location ⇒ gate rather than
+      // auto-approve into a guaranteed execution failure.
+      { ...(deps.locationRepo ? { locationRepo: deps.locationRepo } : {}),
+        ...(deps.customerRepo ? { customerRepo: deps.customerRepo } : {}) },
     ),
   );
   handlers.set(

@@ -449,6 +449,7 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   // dependency on pre-existing tenant rows beyond normal foreign keys.
   ['261_create_tenant_entity_aliases', 'f355ecfc94bf9a067c28ba86988832801bc2357a0ab1b2b5db5e3baa3d04bfe0'],
   ['262_portal_sessions_contact_id', '31af90200a435cb285e39c6c180da71a09f82562759fb28844641dc47409b85b'],
+  ['263_tenant_settings_timezone_no_silent_default', '79215e9f7e13a00ba8f29a41d20a9b22c003df5483666c2e1471951fb505313a'],
 ];
 
 function hashMigration(value: string): string {

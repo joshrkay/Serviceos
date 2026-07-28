@@ -2611,6 +2611,12 @@ export function createApp(): AppWithLifecycle {
     // build its duplicateLoader, so the worker's create_customer proposals
     // get the identical dedup-aware handler.
     customerRepo,
+    // Draft-time bookability gate for create_appointment — the SAME repo the
+    // execution handler uses to find a job's location, so the draft-time
+    // check and the execution-time precondition cannot disagree. Without it
+    // `detectServiceLocationGap` no-ops and an unbookable customer's booking
+    // auto-approves at confidence 1 and fails in a log.
+    locationRepo,
     ...(customerNegotiationContextProvider ? { customerNegotiationContextProvider } : {}),
     // P2-036 V2 — additive discount engine; fail-closed (dormant until a tenant
     // configures a discount policy via settings).
@@ -5449,6 +5455,18 @@ export function createApp(): AppWithLifecycle {
       // B8 — create_customer draft-time duplicate detection parity, same
       // customerRepo the voice worker and telephony FSM already use.
       customerRepo,
+      // Draft-time bookability gate for create_appointment. `jobs.location_id`
+      // is NOT NULL, so a customer with zero `service_locations` rows cannot
+      // be booked — without this repo the drafting handler cannot see the gap
+      // and the proposal auto-approves into a guaranteed execution failure.
+      locationRepo,
+      // The tenant's IANA zone for the scheduling handlers this route
+      // dispatches. NOTE: `lookups.tenantTimezoneResolver` below is a
+      // DIFFERENT field consumed by the read-only lookup skills — it does not
+      // reach the drafting TaskContext. Before this line, `create_appointment`
+      // drafted from assistant chat received NO timezone at all.
+      tenantTimezoneResolver: async (tenantId: string) =>
+        (await tenantSchedulingResolver(tenantId))?.timezone,
       // §3B/3D/3E — assistant chat shares the operator-side resolver
       // shim with the voice-action-router so the same vertical context
       // reaches both text and voice classification paths.

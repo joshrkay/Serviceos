@@ -419,9 +419,25 @@ export class CreateAppointmentExecutionHandler implements ExecutionHandler {
           : undefined;
       if (customerId && this.jobRepo && this.locationRepo) {
         const locations = await this.locationRepo.findByCustomer(context.tenantId, customerId);
+        // An operator-supplied `locationId` wins: it is how the
+        // `missingFields: ['locationId']` gate (drafted by
+        // `detectServiceLocationGap`) gets cleared for a customer who had no
+        // location at draft time. Validated against THIS customer's own
+        // non-archived rows, so a stale or cross-customer id can never site a
+        // job at someone else's address.
+        const supplied =
+          typeof payload.locationId === 'string' && payload.locationId.length > 0
+            ? locations.find((loc) => loc.id === payload.locationId && !loc.isArchived)
+            : undefined;
+        if (typeof payload.locationId === 'string' && payload.locationId.length > 0 && !supplied) {
+          return {
+            success: false,
+            error: `Service location ${payload.locationId} does not belong to this customer (or is archived)`,
+          };
+        }
         const primary = locations.find((loc) => loc.isPrimary && !loc.isArchived);
         const fallback = locations.find((loc) => !loc.isArchived);
-        const locationId = primary?.id ?? fallback?.id;
+        const locationId = supplied?.id ?? primary?.id ?? fallback?.id;
         if (!locationId) {
           return {
             success: false,

@@ -46,7 +46,6 @@ import {
   payloadPathFor,
 } from '../proposals/chain';
 import { v4 as uuidv4 } from 'uuid';
-import { DEFAULT_TENANT_TIMEZONE } from '../ai/scheduling/resolve-datetime';
 import { SlotConflictChecker } from '../ai/tasks/slot-conflict-checker';
 import { AvailabilityFinder } from '../ai/tasks/availability-finder';
 import { AppointmentRepository } from '../appointments/appointment';
@@ -55,6 +54,7 @@ import { CatalogItemRepository } from '../catalog/catalog-item';
 import { InvoicingQueueDeps } from '../invoices/invoicing-queue';
 import { DunningEventRepository } from '../invoices/dunning-config';
 import type { CustomerRepository } from '../customers/customer';
+import type { LocationRepository } from '../locations/location';
 import {
   EntityCandidate,
   EntityKind,
@@ -399,6 +399,16 @@ export interface VoiceActionRouterDeps {
    */
   customerRepo?: CustomerRepository;
   /**
+   * create_appointment draft-time bookability. `jobs.location_id` is NOT
+   * NULL, so a customer with zero `service_locations` rows cannot be booked
+   * — the execution handler fails with "Customer has no service location".
+   * Threaded into `buildTaskHandlers` so the drafting handler detects that
+   * up front and gates the proposal (`missingFields: ['locationId']`) rather
+   * than auto-approving it into a guaranteed failure. Optional; absent → no
+   * gate (pre-existing behavior).
+   */
+  locationRepo?: LocationRepository;
+  /**
    * U3 (E-lane answers) — routed-outcome back-channel for the recorded-memo
    * path. When wired, the worker stamps `voice_recordings.answer_status`
    * (pending → answered | proposal | clarification | skipped | failed) at
@@ -456,6 +466,9 @@ function buildHandlers(deps: VoiceActionRouterDeps): Map<ProposalType, TaskHandl
     thresholdResolver: deps.thresholdResolver,
     // B8 — create_customer draft-time duplicate detection parity.
     customerRepo: deps.customerRepo,
+    // Draft-time bookability gate for create_appointment (no service
+    // location ⇒ missingFields, never an auto-approved doomed execution).
+    ...(deps.locationRepo ? { locationRepo: deps.locationRepo } : {}),
   });
   // The handlers below stay surface-specific by design — see the doc
   // comment on HandlerRegistryDeps (ai/orchestration/handler-registry.ts)
@@ -1493,7 +1506,13 @@ async function processSegment(
       // tenant ownership. Keep it last so no classifier/resolver value can win.
       ...(jobId ? { jobId } : {}),
     },
-    timezone: scheduling?.timezone ?? DEFAULT_TENANT_TIMEZONE,
+    // Pass the tenant's zone through ONLY when it actually resolved from
+    // tenant_settings. Defaulting to America/New_York here re-created the
+    // exact bug the scheduling handlers now gate on: an unresolved zone is
+    // indistinguishable from a real Eastern tenant once it's been filled in,
+    // so a Phoenix operator's bookings landed three hours early and
+    // auto-executed. Absent ⇒ the handler emits a clarification.
+    ...(scheduling?.timezone ? { timezone: scheduling.timezone } : {}),
     ...(scheduling?.businessHours !== undefined
       ? { businessHours: scheduling.businessHours }
       : {}),
