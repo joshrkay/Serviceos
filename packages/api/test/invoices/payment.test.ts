@@ -575,3 +575,92 @@ describe('Blocker 6 — recordPayment emits audit events', () => {
     expect(auditRepo.getAll()).toHaveLength(0);
   });
 });
+
+describe('P0-3 / P0-6 — atomic credit guards (live-state predicates)', () => {
+  let invoiceRepo: InMemoryInvoiceRepository;
+  let paymentRepo: InMemoryPaymentRepository;
+  let auditRepo: InMemoryAuditRepository;
+  let invoiceId: string;
+
+  const sampleItems = [buildLineItem('1', 'Service', 1, 10000, 1, true)]; // $100
+
+  beforeEach(async () => {
+    invoiceRepo = new InMemoryInvoiceRepository();
+    paymentRepo = new InMemoryPaymentRepository();
+    auditRepo = new InMemoryAuditRepository();
+    const invoice = await createInvoice(
+      { tenantId: 'tenant-1', jobId: 'job-1', invoiceNumber: 'INV-0001', lineItems: sampleItems, createdBy: 'u-1' },
+      invoiceRepo
+    );
+    await issueInvoice('tenant-1', invoice.id, 30, invoiceRepo);
+    invoiceId = invoice.id;
+  });
+
+  it('incrementAmountPaidAtomic returns null on a void invoice (void can never flip to paid)', async () => {
+    await transitionInvoiceStatus('tenant-1', invoiceId, 'void', invoiceRepo);
+
+    const result = await invoiceRepo.incrementAmountPaidAtomic('tenant-1', invoiceId, 10000, new Date());
+
+    expect(result).toBeNull();
+    const reloaded = await invoiceRepo.findById('tenant-1', invoiceId);
+    expect(reloaded!.status).toBe('void');
+    expect(reloaded!.amountPaidCents).toBe(0);
+  });
+
+  it('incrementAmountPaidAtomic returns null when the credit would exceed total_cents', async () => {
+    const first = await invoiceRepo.incrementAmountPaidAtomic('tenant-1', invoiceId, 10000, new Date());
+    expect(first!.status).toBe('paid');
+
+    const second = await invoiceRepo.incrementAmountPaidAtomic('tenant-1', invoiceId, 10000, new Date());
+
+    expect(second).toBeNull();
+    const reloaded = await invoiceRepo.findById('tenant-1', invoiceId);
+    expect(reloaded!.amountPaidCents).toBe(10000); // never 2x total
+  });
+
+  it('two concurrent full-balance payments: exactly one credits; the loser is compensated to failed', async () => {
+    const mkInput = (ref: string) => ({
+      tenantId: 'tenant-1',
+      invoiceId,
+      amountCents: 10000,
+      method: 'credit_card' as const,
+      providerReference: ref,
+      processedBy: 'u-1',
+    });
+
+    // Both pass the serial check-then-act guards against the same snapshot;
+    // the SQL-mirror predicate must reject the second credit.
+    const results = await Promise.allSettled([
+      recordPayment(mkInput('pi_race_a'), invoiceRepo, paymentRepo, undefined, undefined, auditRepo),
+      recordPayment(mkInput('pi_race_b'), invoiceRepo, paymentRepo, undefined, undefined, auditRepo),
+    ]);
+
+    const fulfilled = results.filter((r) => r.status === 'fulfilled');
+    const rejected = results.filter((r) => r.status === 'rejected');
+    expect(fulfilled).toHaveLength(1);
+    expect(rejected).toHaveLength(1);
+    expect((rejected[0] as PromiseRejectedResult).reason.message).toMatch(
+      /exceeds amount due|status 'paid'/,
+    );
+
+    // The invoice is paid exactly once — the double-charge is structurally impossible.
+    const reloaded = await invoiceRepo.findById('tenant-1', invoiceId);
+    expect(reloaded!.amountPaidCents).toBe(10000);
+    expect(reloaded!.amountDueCents).toBe(0);
+    expect(reloaded!.status).toBe('paid');
+
+    // The loser's payment row was compensated to 'failed', so every
+    // paid-ledger sum (completed|processing, !reversed) still equals the credit.
+    const payments = await paymentRepo.findByInvoice('tenant-1', invoiceId);
+    expect(payments).toHaveLength(2);
+    expect(payments.filter((p) => p.status === 'completed')).toHaveLength(1);
+    const failed = payments.find((p) => p.status === 'failed');
+    expect(failed).toBeDefined();
+    expect(failed!.reversalReason).toBe('credit_rejected');
+
+    // The compensation is on the audit trail.
+    const rejectedEvents = auditRepo.getAll().filter((e) => e.eventType === 'payment.credit_rejected');
+    expect(rejectedEvents).toHaveLength(1);
+    expect(rejectedEvents[0].metadata?.paymentId).toBe(failed!.id);
+  });
+});

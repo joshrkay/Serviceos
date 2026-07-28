@@ -122,7 +122,16 @@ export interface InvoiceRepository {
    * from a caller's stale snapshot. Closes the recordPayment lost-update race:
    * two concurrent legitimate payments (e.g. a manual cash entry and a Stripe/ACH
    * webhook) otherwise each read the same amount_paid and blind-set it, silently
-   * dropping one credit. Returns the updated invoice, or null if not found.
+   * dropping one credit.
+   *
+   * The write itself is guarded (P0-3 / P0-6): it applies ONLY when the row is
+   * currently payable ('open' / 'partially_paid') AND the credit fits the
+   * remaining balance (`amount_paid + delta <= total`). A voided invoice can
+   * therefore never be flipped to 'paid' by a racing credit, and two concurrent
+   * full-balance credits cannot overpay — the loser gets null. Returns the
+   * updated invoice, or null when the row is missing, not payable, or the
+   * credit would exceed the total; callers must re-read to distinguish and
+   * compensate for any payment row they already committed.
    */
   incrementAmountPaidAtomic(
     tenantId: string,
@@ -518,16 +527,18 @@ export class InMemoryInvoiceRepository implements InvoiceRepository {
   ): Promise<Invoice | null> {
     const i = this.invoices.get(id);
     if (!i || i.tenantId !== tenantId) return null;
+    // Mirror the Pg WHERE guards (P0-3 / P0-6): only a payable invoice takes a
+    // credit, and only a credit that fits the remaining balance applies. A
+    // void/canceled/draft row and an overpaying credit both return null,
+    // exactly as the SQL returns 0 rows.
+    if (i.status !== 'open' && i.status !== 'partially_paid') return null;
+    if (i.amountPaidCents + deltaCents > i.totals.totalCents) return null;
     // JS is single-threaded, so read-modify-write here is already atomic; the
     // Pg impl uses a single UPDATE to get the same guarantee under real
     // concurrency. Recompute from the stored row, never a caller snapshot.
     const newPaid = i.amountPaidCents + deltaCents;
     const newDue = Math.max(0, i.totals.totalCents - newPaid);
-    let status = i.status;
-    if (newDue === 0) status = 'paid';
-    else if (newPaid > 0 && (i.status === 'open' || i.status === 'partially_paid')) {
-      status = 'partially_paid';
-    }
+    const status: InvoiceStatus = newDue === 0 ? 'paid' : 'partially_paid';
     const updated: Invoice = {
       ...i,
       amountPaidCents: newPaid,

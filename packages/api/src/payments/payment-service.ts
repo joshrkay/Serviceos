@@ -655,6 +655,31 @@ export async function recordProcessingPayment(
     creditCents,
     new Date(),
   );
+  if (!updatedInvoice) {
+    // The atomic credit's own payable-status + remaining-balance predicates
+    // (P0-3 / P0-6) rejected the write against the row's LIVE state — the
+    // invoice was voided/settled or another credit filled it between the
+    // snapshot read above and this UPDATE. The 'processing' row already
+    // committed, so compensate: flip it to 'failed' (never counted by any
+    // paid-ledger sum, never settled by a later `payment_intent.succeeded`,
+    // whose CAS requires status='processing'), then surface the same
+    // ValidationError shape the serial guards use.
+    const now = new Date();
+    await paymentRepo.update(input.tenantId, payment.id, {
+      status: 'failed',
+      reversedAt: now,
+      reversalReason: 'credit_rejected',
+      updatedAt: now,
+    });
+    const live = await invoiceRepo.findById(input.tenantId, input.invoiceId);
+    if (!live) throw new ValidationError('Invoice not found');
+    if (!PAYABLE_STATUSES.includes(live.status)) {
+      throw new ValidationError(
+        `Cannot record processing payment on invoice with status '${live.status}'`,
+      );
+    }
+    throw new ValidationError('Invoice already fully paid');
+  }
 
   if (auditRepo) {
     const actorRole = auditContext?.actorRole ?? 'system';

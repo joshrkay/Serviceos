@@ -34,6 +34,16 @@ async function reconcileInvoiceFromPayments(
   fallback: Invoice,
 ): Promise<{ invoice: Invoice; repaired: boolean; previousStatus: string }> {
   const invoice = (await invoiceRepo.findById(tenantId, invoiceId)) ?? fallback;
+
+  // P0-3 — the repair is scoped to PAYABLE invoices. The crash window this
+  // path exists for (payment row committed, invoice credit lost) always leaves
+  // the invoice 'open' or 'partially_paid'; a void/canceled/draft invoice
+  // reaching here is a post-void capture, and resurrecting it to
+  // 'paid'/'partially_paid' would be the forbidden void → paid transition.
+  if (invoice.status !== 'open' && invoice.status !== 'partially_paid') {
+    return { invoice, repaired: false, previousStatus: invoice.status };
+  }
+
   const payments = await paymentRepo.findByInvoice(tenantId, invoiceId);
   const paidCents = payments
     .filter((p) => (p.status === 'completed' || p.status === 'processing') && !p.reversedAt)
@@ -574,9 +584,50 @@ export async function recordPayment(
     new Date(),
   );
   if (!updatedInvoice) {
-    // The invoice was deleted between the payable check and the atomic credit —
-    // surface rather than proceeding (or crediting) against a missing row.
-    throw new ValidationError('Invoice not found');
+    // The atomic credit carries its own payable-status + remaining-balance
+    // predicates (P0-3 / P0-6), evaluated against the row's LIVE state — a
+    // null here means the invoice vanished, was voided/settled after the
+    // snapshot read above, or the credit would overpay it (e.g. a concurrent
+    // full-balance payment won the race). The payment row already committed in
+    // its own transaction, so compensate: flip it to 'failed' (excluded from
+    // every paid-ledger sum) rather than leave a completed row with no
+    // matching invoice credit, then surface the same ValidationError the
+    // serial guards throw so callers see one failure shape.
+    const now = new Date();
+    await paymentRepo.update(input.tenantId, payment.id, {
+      status: 'failed',
+      reversedAt: now,
+      reversalReason: 'credit_rejected',
+      updatedAt: now,
+    });
+    const live = await invoiceRepo.findById(input.tenantId, input.invoiceId);
+    if (auditRepo) {
+      await auditRepo.create(
+        createAuditEvent({
+          tenantId: input.tenantId,
+          actorId: input.processedBy,
+          actorRole: auditContext?.actorRole ?? 'system',
+          eventType: 'payment.credit_rejected',
+          entityType: 'invoice',
+          entityId: input.invoiceId,
+          correlationId: auditContext?.correlationId,
+          metadata: {
+            paymentId: payment.id,
+            amountCents: payment.amountCents,
+            providerReference: payment.providerReference ?? null,
+            invoiceStatus: live?.status ?? 'missing',
+            amountDueCents: live?.amountDueCents ?? null,
+          },
+        }),
+      );
+    }
+    if (!live) throw new ValidationError('Invoice not found');
+    if (!PAYABLE_STATUSES.includes(live.status)) {
+      throw new ValidationError(
+        `Cannot record payment on invoice with status '${live.status}'`,
+      );
+    }
+    throw new ValidationError('Payment amount exceeds amount due');
   }
 
   // Audit trail + money-state rollup + receipt/owner push. The audit write is
