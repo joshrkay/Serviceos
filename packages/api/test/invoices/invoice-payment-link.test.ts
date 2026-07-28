@@ -472,3 +472,118 @@ describe('Codex P1 — a failed column clear after successful deactivation is au
     expect(events).not.toContain('invoice.payment_link_deactivated');
   });
 });
+
+describe('P0-9 mint leg — link persist is guarded against concurrent invoice mutations', () => {
+  const TENANT = 'tenant-1';
+
+  async function setupOpenInvoice() {
+    const { InMemoryInvoiceRepository, createInvoice, issueInvoice } =
+      await import('../../src/invoices/invoice');
+    const { buildLineItem } = await import('../../src/shared/billing-engine');
+    const invoiceRepo = new InMemoryInvoiceRepository();
+    const invoice = await createInvoice(
+      {
+        tenantId: TENANT,
+        jobId: 'job-1',
+        invoiceNumber: 'INV-MINT-1',
+        lineItems: [buildLineItem('1', 'S', 1, 10000, 1, true)],
+        createdBy: 'u-1',
+      },
+      invoiceRepo,
+    );
+    await issueInvoice(TENANT, invoice.id, 30, invoiceRepo);
+    return { invoiceRepo, invoiceId: invoice.id };
+  }
+
+  it('a link minted while a void lands is deactivated, never attached', async () => {
+    const { invoiceRepo, invoiceId } = await setupOpenInvoice();
+    const { createInvoicePaymentLink } = await import('../../src/invoices/invoice-payment-link');
+    const { transitionInvoiceStatus } = await import('../../src/invoices/invoice');
+
+    const deactivated: string[] = [];
+    const provider = {
+      // The void commits while Stripe is minting the link.
+      generateLink: async () => {
+        await transitionInvoiceStatus(TENANT, invoiceId, 'void', invoiceRepo);
+        return {
+          linkId: 'plink_mint_race',
+          linkUrl: 'https://pay.stripe.com/mint-race',
+          expiresAt: null as unknown as Date,
+          providerReference: 'stripe_plink_mint_race',
+        };
+      },
+      deactivateLink: async (linkId: string) => { deactivated.push(linkId); },
+    };
+
+    await expect(
+      createInvoicePaymentLink(TENANT, invoiceId, invoiceRepo, provider),
+    ).rejects.toThrow(/Invoice changed while the payment link was being created/);
+
+    // The fresh link died and nothing was attached to the voided invoice.
+    expect(deactivated).toEqual(['plink_mint_race']);
+    const reloaded = await invoiceRepo.findById(TENANT, invoiceId);
+    expect(reloaded!.stripePaymentLinkId).toBeUndefined();
+    expect(reloaded!.stripePaymentLinkUrl).toBeUndefined();
+  });
+
+  it('a link minted while a credit reprices the invoice is deactivated, never attached', async () => {
+    const { invoiceRepo, invoiceId } = await setupOpenInvoice();
+    const { createInvoicePaymentLink } = await import('../../src/invoices/invoice-payment-link');
+
+    const deactivated: string[] = [];
+    const provider = {
+      generateLink: async () => {
+        // A partial payment lands mid-mint: the balance the link was priced
+        // at (10000) no longer matches the live due (6000).
+        await invoiceRepo.incrementAmountPaidAtomic(TENANT, invoiceId, 4000, new Date());
+        return {
+          linkId: 'plink_reprice_race',
+          linkUrl: 'https://pay.stripe.com/reprice-race',
+          expiresAt: null as unknown as Date,
+          providerReference: 'stripe_plink_reprice_race',
+        };
+      },
+      deactivateLink: async (linkId: string) => { deactivated.push(linkId); },
+    };
+
+    await expect(
+      createInvoicePaymentLink(TENANT, invoiceId, invoiceRepo, provider),
+    ).rejects.toThrow(/Invoice changed while the payment link was being created/);
+    expect(deactivated).toEqual(['plink_reprice_race']);
+    const reloaded = await invoiceRepo.findById(TENANT, invoiceId);
+    expect(reloaded!.stripePaymentLinkId).toBeUndefined();
+  });
+
+  it('losing to a COMPETING mint serves the winner link instead of erroring', async () => {
+    const { invoiceRepo, invoiceId } = await setupOpenInvoice();
+    const { createInvoicePaymentLink } = await import('../../src/invoices/invoice-payment-link');
+
+    const deactivated: string[] = [];
+    const provider = {
+      generateLink: async () => {
+        // The competing mint persists its link first (same balance).
+        await invoiceRepo.setPaymentLinkIfPayable(
+          TENANT,
+          invoiceId,
+          { linkId: 'plink_winner', linkUrl: 'https://pay.stripe.com/winner' },
+          10000,
+          new Date(),
+        );
+        return {
+          linkId: 'plink_loser',
+          linkUrl: 'https://pay.stripe.com/loser',
+          expiresAt: null as unknown as Date,
+          providerReference: 'stripe_plink_loser',
+        };
+      },
+      deactivateLink: async (linkId: string) => { deactivated.push(linkId); },
+    };
+
+    const result = await createInvoicePaymentLink(TENANT, invoiceId, invoiceRepo, provider);
+
+    expect(result.url).toBe('https://pay.stripe.com/winner');
+    expect(deactivated).toEqual(['plink_loser']); // the loser's link died
+    const reloaded = await invoiceRepo.findById(TENANT, invoiceId);
+    expect(reloaded!.stripePaymentLinkId).toBe('plink_winner');
+  });
+});

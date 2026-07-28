@@ -167,10 +167,26 @@ export class PublicInvoiceService {
         currency: 'usd',
         description: `Invoice ${invoice.invoiceNumber}`,
       });
-      await this.deps.invoiceRepo.update(invoice.tenantId, invoice.id, {
-        stripePaymentLinkUrl: link.linkUrl,
-        updatedAt: new Date(),
-      });
+      // P0-9 (mint leg) — persist only while the invoice still prices this
+      // link; a void/credit landing during the mint wins and the fresh link
+      // is deactivated instead of attached (see setPaymentLinkIfPayable).
+      const persisted = await this.deps.invoiceRepo.setPaymentLinkIfPayable(
+        invoice.tenantId,
+        invoice.id,
+        { linkId: link.linkId, linkUrl: link.linkUrl },
+        invoice.amountDueCents,
+        new Date(),
+      );
+      if (!persisted) {
+        await this.deps.paymentLinkProvider.deactivateLink(link.linkId).catch(() => undefined);
+        const fresh = await this.deps.invoiceRepo.findById(invoice.tenantId, invoice.id);
+        if (fresh && PAYABLE.includes(fresh.status) && fresh.stripePaymentLinkUrl) {
+          return { url: fresh.stripePaymentLinkUrl };
+        }
+        throw new ValidationError(
+          'Invoice changed while the payment link was being created — refresh and retry',
+        );
+      }
       return { url: link.linkUrl };
     }
 
@@ -233,21 +249,11 @@ export class PublicInvoiceService {
       throw new Error('Stripe API returned incomplete payment link (missing id or url)');
     }
 
-    try {
-      await this.deps.invoiceRepo.update(invoice.tenantId, invoice.id, {
-        stripePaymentLinkId: data.id,
-        stripePaymentLinkUrl: data.url,
-        updatedAt: new Date(),
-      });
-    } catch (dbErr) {
-      // The Stripe link was created but we can't persist the URL. Deactivate
-      // it (best-effort) so it isn't an orphaned charge vector, then re-throw.
-      // The link ID is included in the error message so it can be recovered
-      // manually if deactivation also fails.
-      //
-      // PR 2: when minted via Connect, the deactivation must also
-      // carry the Stripe-Account header — Stripe scopes the link to
-      // that account.
+    // Best-effort kill for a link that must not survive: persist failed or
+    // the payable/balance guard lost. PR 2: when minted via Connect, the
+    // deactivation must carry the same Stripe-Account header — Stripe scopes
+    // the link to that account.
+    const deactivateMintedLink = async () => {
       const deactivateHeaders: Record<string, string> = {
         Authorization: `Bearer ${this.deps.stripeConfig!.apiKey}`,
         'Content-Type': 'application/x-www-form-urlencoded',
@@ -259,10 +265,44 @@ export class PublicInvoiceService {
         method: 'POST',
         headers: deactivateHeaders,
         body: new URLSearchParams({ active: 'false' }),
-      }).catch(() => undefined); // deactivation is best-effort; don't mask the original error
+      }).catch(() => undefined); // best-effort; don't mask the original error
+    };
 
+    let persisted: Invoice | null;
+    try {
+      // P0-9 (mint leg) — the Stripe mint above is slow; a void, a credit, or
+      // a competing mint can land after the payable read at the top. The
+      // guarded persist attaches the link only while the invoice still owes
+      // exactly what the link charges and carries no other link.
+      persisted = await this.deps.invoiceRepo.setPaymentLinkIfPayable(
+        invoice.tenantId,
+        invoice.id,
+        { linkId: data.id, linkUrl: data.url },
+        invoice.amountDueCents,
+        new Date(),
+      );
+    } catch (dbErr) {
+      // The Stripe link was created but we can't persist the URL. Deactivate
+      // it (best-effort) so it isn't an orphaned charge vector, then re-throw.
+      // The link ID is included in the error message so it can be recovered
+      // manually if deactivation also fails.
+      await deactivateMintedLink();
       const msg = dbErr instanceof Error ? dbErr.message : String(dbErr);
       throw new Error(`Failed to persist Stripe payment link ${data.id}: ${msg}`);
+    }
+    if (!persisted) {
+      // Guard lost: the invoice was voided, repriced, or another mint won
+      // while Stripe was creating this link. The fresh link prices a state
+      // that no longer exists — kill it, then either serve the winner's link
+      // or surface the change.
+      await deactivateMintedLink();
+      const fresh = await this.deps.invoiceRepo.findById(invoice.tenantId, invoice.id);
+      if (fresh && PAYABLE.includes(fresh.status) && fresh.stripePaymentLinkUrl) {
+        return { url: fresh.stripePaymentLinkUrl };
+      }
+      throw new ValidationError(
+        'Invoice changed while the payment link was being created — refresh and retry',
+      );
     }
 
     if (this.deps.auditRepo) {

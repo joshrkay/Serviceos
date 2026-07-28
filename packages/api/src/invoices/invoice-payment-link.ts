@@ -64,11 +64,31 @@ export async function createInvoicePaymentLink(
     ...(stripeAccountId ? { stripeAccountId } : {}),
   });
 
-  await invoiceRepo.update(tenantId, invoice.id, {
-    stripePaymentLinkId: link.linkId,
-    stripePaymentLinkUrl: link.linkUrl,
-    updatedAt: new Date(),
-  });
+  // P0-9 (mint leg) — the Stripe call above is slow; a void, a credit, or a
+  // competing mint can land between the read at the top and this persist.
+  // The guarded write only attaches the link while the invoice is still
+  // payable at EXACTLY the balance the link was priced at and carries no
+  // other link; when it loses, the link we just minted must die (it prices
+  // a state that no longer exists) and the caller re-resolves.
+  const persisted = await invoiceRepo.setPaymentLinkIfPayable(
+    tenantId,
+    invoice.id,
+    { linkId: link.linkId, linkUrl: link.linkUrl },
+    invoice.amountDueCents,
+    new Date(),
+  );
+  if (!persisted) {
+    await provider.deactivateLink(link.linkId, stripeAccountId).catch(() => undefined);
+    const fresh = await invoiceRepo.findById(tenantId, invoice.id);
+    // A competing mint won and the invoice is still payable → serve the
+    // winner's link. Anything else → the invoice changed underneath us.
+    if (fresh && PAYABLE_STATUSES.has(fresh.status) && fresh.stripePaymentLinkUrl) {
+      return { url: fresh.stripePaymentLinkUrl, expiresAt: null };
+    }
+    throw new ConflictError(
+      `Invoice changed while the payment link was being created (status: ${fresh?.status ?? 'missing'})`,
+    );
+  }
 
   return {
     url: link.linkUrl,

@@ -419,6 +419,38 @@ export class PgInvoiceRepository extends PgBaseRepository implements InvoiceRepo
   }
 
   /**
+   * P0-9 (mint leg) — guarded link persist: the payable-status, exact-balance
+   * and no-existing-link predicates live in the UPDATE itself, so a link
+   * minted concurrently with a void/credit (or with another mint) can never
+   * be attached to an invoice it no longer prices. Null → the caller must
+   * deactivate the link it just minted.
+   */
+  async setPaymentLinkIfPayable(
+    tenantId: string,
+    id: string,
+    link: { linkId: string; linkUrl: string },
+    expectedAmountDueCents: number,
+    now: Date,
+  ): Promise<Invoice | null> {
+    return this.withTenantTransaction(tenantId, async (client) => {
+      const { rows } = await client.query<{ id: string }>(
+        `UPDATE invoices
+         SET stripe_payment_link_id = $3,
+             stripe_payment_link_url = $4,
+             updated_at = $5
+         WHERE id = $2 AND tenant_id = $1
+           AND status IN ('open', 'partially_paid')
+           AND amount_due_cents = $6
+           AND stripe_payment_link_id IS NULL
+         RETURNING id`,
+        [tenantId, id, link.linkId, link.linkUrl, now, expectedAmountDueCents],
+      );
+      if (rows.length === 0) return null;
+      return this.findByIdWithClient(client, tenantId, id);
+    });
+  }
+
+  /**
    * P0-9 — CAS clear of the payment-link columns: applies only while the
    * row still holds `expectedLinkId`, so a deactivation working from a stale
    * snapshot can never wipe a concurrently re-minted link's columns.

@@ -201,6 +201,23 @@ export interface InvoiceRepository {
     now: Date,
   ): Promise<Invoice | null>;
   /**
+   * P0-9 (mint leg) — persist a freshly minted payment link ONLY while the
+   * invoice is still payable, still owes exactly the balance the link was
+   * priced at, and carries no other link. Minting spans a slow Stripe call:
+   * a void or a credit can land between the mint-time read and the persist,
+   * and an unguarded write would then attach a live link (priced at the
+   * OLD balance) to a dead or repriced invoice — the unapplied-capture path
+   * again, from the other side. Returns null when the guard loses; the
+   * caller must deactivate the link it just minted.
+   */
+  setPaymentLinkIfPayable(
+    tenantId: string,
+    id: string,
+    link: { linkId: string; linkUrl: string },
+    expectedAmountDueCents: number,
+    now: Date,
+  ): Promise<Invoice | null>;
+  /**
    * P0-9 — clear the payment-link columns ONLY while they still hold
    * `expectedLinkId` (single compare-and-swap UPDATE). Deactivation flows
    * hold an invoice snapshot that may predate a concurrent
@@ -723,6 +740,29 @@ export class InMemoryInvoiceRepository implements InvoiceRepository {
       amountPaidCents: balance.amountPaidCents,
       amountDueCents: balance.amountDueCents,
       status: balance.status,
+      updatedAt: now,
+    };
+    this.invoices.set(id, updated);
+    return { ...updated, lineItems: [...updated.lineItems] };
+  }
+
+  async setPaymentLinkIfPayable(
+    tenantId: string,
+    id: string,
+    link: { linkId: string; linkUrl: string },
+    expectedAmountDueCents: number,
+    now: Date,
+  ): Promise<Invoice | null> {
+    const i = this.invoices.get(id);
+    if (!i || i.tenantId !== tenantId) return null;
+    // Mirror the Pg WHERE guard: payable, unchanged balance, no other link.
+    if (i.status !== 'open' && i.status !== 'partially_paid') return null;
+    if (i.amountDueCents !== expectedAmountDueCents) return null;
+    if (i.stripePaymentLinkId !== undefined) return null;
+    const updated: Invoice = {
+      ...i,
+      stripePaymentLinkId: link.linkId,
+      stripePaymentLinkUrl: link.linkUrl,
       updatedAt: now,
     };
     this.invoices.set(id, updated);
