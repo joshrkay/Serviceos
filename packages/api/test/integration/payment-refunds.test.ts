@@ -225,3 +225,91 @@ describe('Postgres integration — payment_refunds idempotency ledger (P0-4)', (
     ).rejects.toThrow(/Payment/);
   });
 });
+
+describe('Postgres integration — migration 264 backfills legacy refund claims', () => {
+  let pool: Pool;
+  let paymentRepo: PgPaymentRepository;
+  let invoiceRepo: PgInvoiceRepository;
+  let tenant: { tenantId: string; userId: string };
+
+  beforeAll(async () => {
+    pool = await getSharedTestDb();
+    paymentRepo = new PgPaymentRepository(pool);
+    invoiceRepo = new PgInvoiceRepository(pool);
+    tenant = await createTestTenant(pool);
+  });
+
+  afterAll(async () => {
+    await closeSharedTestDb();
+  });
+
+  it('a pre-ledger refund (last_refund_stripe_id only) gains a claim on re-run and dedupes redelivery', async () => {
+    // Minimal fixture chain for a payment row.
+    const customerRepo = new PgCustomerRepository(pool);
+    const locationRepo = new PgLocationRepository(pool);
+    const jobRepo = new PgJobRepository(pool);
+    const customerId = crypto.randomUUID();
+    await customerRepo.create({
+      id: customerId, tenantId: tenant.tenantId, firstName: 'Leg', lastName: 'Acy',
+      displayName: 'Leg Acy', preferredChannel: 'phone', smsConsent: false,
+      isArchived: false, createdBy: tenant.userId, createdAt: new Date(), updatedAt: new Date(),
+    });
+    const locationId = crypto.randomUUID();
+    await locationRepo.create({
+      id: locationId, tenantId: tenant.tenantId, customerId, street1: '4 Legacy Ln',
+      city: 'Austin', state: 'TX', postalCode: '78701', country: 'USA', isPrimary: true,
+      addressType: 'service', isArchived: false, createdAt: new Date(), updatedAt: new Date(),
+    });
+    const jobId = crypto.randomUUID();
+    await jobRepo.create({
+      id: jobId, tenantId: tenant.tenantId, customerId, locationId, jobNumber: 'JOB-LEGACY-1',
+      summary: 'Legacy refund job', status: 'completed', priority: 'normal',
+      createdBy: tenant.userId, createdAt: new Date(), updatedAt: new Date(),
+    });
+    const invoiceId = crypto.randomUUID();
+    const lineItems = [buildLineItem(crypto.randomUUID(), 'Service', 1, 10000, 0, true, 'labor')];
+    const totals = calculateDocumentTotals(lineItems, 0, 0);
+    await invoiceRepo.create({
+      id: invoiceId, tenantId: tenant.tenantId, jobId, invoiceNumber: 'INV-LEGACY-1',
+      status: 'open', lineItems, totals, amountPaidCents: 0, amountDueCents: totals.totalCents,
+      createdBy: tenant.userId, createdAt: new Date(), updatedAt: new Date(),
+    });
+
+    // Pre-264 shape: refund recorded on the payments row, NO claim.
+    const payment = await paymentRepo.create({
+      id: crypto.randomUUID(), tenantId: tenant.tenantId, invoiceId,
+      amountCents: 10000, method: 'credit_card', status: 'completed',
+      providerReference: `pi_${crypto.randomUUID()}`, receivedAt: new Date(),
+      processedBy: 'stripe_webhook', createdAt: new Date(), updatedAt: new Date(),
+      refundedAmountCents: 3000, refundedAt: new Date(),
+      lastRefundStripeId: 're_legacy_bf', reversedAt: null, reversalReason: null,
+    });
+    await pool.query(
+      `DELETE FROM payment_refunds WHERE tenant_id = $1 AND stripe_refund_id = 're_legacy_bf'`,
+      [tenant.tenantId],
+    );
+
+    // Deploy-time behavior: the (idempotent) migration block re-runs and
+    // seeds a claim for the legacy refund id.
+    const { MIGRATIONS } = await import('../../src/db/schema');
+    await pool.query(MIGRATIONS['264_create_payment_refunds']);
+
+    const { rows } = await pool.query(
+      `SELECT payment_id, amount_cents::int AS amount FROM payment_refunds
+       WHERE tenant_id = $1 AND stripe_refund_id = 're_legacy_bf'`,
+      [tenant.tenantId],
+    );
+    expect(rows).toHaveLength(1);
+    expect(rows[0].payment_id).toBe(payment.id);
+    expect(rows[0].amount).toBe(3000);
+
+    // A late redelivery of the legacy refund is now deduped by the claim —
+    // even though last_refund_stripe_id could since have been overwritten.
+    const retry = await recordRefund(
+      { tenantId: tenant.tenantId, paymentId: payment.id, refundCents: 3000, stripeRefundId: 're_legacy_bf' },
+      paymentRepo,
+    );
+    expect(retry.refundCents).toBe(0);
+    expect(Number(retry.payment.refundedAmountCents)).toBe(3000); // NOT 6000
+  });
+});

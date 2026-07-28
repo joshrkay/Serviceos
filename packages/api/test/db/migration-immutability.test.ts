@@ -456,7 +456,7 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['263_failure_monitor_indexes', 'bb6aeb2d17dca2c8c7b3959155b642d2018a7df5063b3acb88a3f82cc22ae872'],
   // D2-4a / P0-4 — per-refund idempotency ledger (payment_refunds table +
   // unique claim index + RLS). New table only; nothing existing touched.
-  ['264_create_payment_refunds', 'f9bad243c434d96781b2cf2465fb07dbac66837a926ddc87f49c37f74dc3a18c'],
+  ['264_create_payment_refunds', '529b0d8cef10288a44c01c3065e815ed3b666b5d8ca47a312defa93861530376'],
 ];
 
 function hashMigration(value: string): string {

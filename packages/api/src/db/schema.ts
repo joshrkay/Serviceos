@@ -6441,6 +6441,21 @@ export const MIGRATIONS = {
       ON payment_refunds (tenant_id, stripe_refund_id);
     CREATE INDEX IF NOT EXISTS idx_payment_refunds_payment
       ON payment_refunds (tenant_id, payment_id);
+    -- Backfill claims for refunds recorded BEFORE this ledger existed: their
+    -- payments rows carry last_refund_stripe_id, and without a claim a late
+    -- redelivery of that same refund (e.g. charge.refund.updated after an
+    -- earlier charge.refunded) would count it a second time. Only the LATEST
+    -- refund id per payment was ever persisted, so that is all that can be
+    -- seeded; amount_cents is the cumulative refunded total at backfill time
+    -- (informational — the unique id is the dedup arbiter). Runs BEFORE the
+    -- RLS enablement below so the cross-tenant seed needs no policy bypass;
+    -- idempotent via ON CONFLICT for safe re-execution.
+    INSERT INTO payment_refunds (id, tenant_id, payment_id, stripe_refund_id, amount_cents)
+    SELECT gen_random_uuid(), p.tenant_id, p.id, p.last_refund_stripe_id,
+           GREATEST(p.refunded_amount_cents, 1)
+    FROM payments p
+    WHERE p.last_refund_stripe_id IS NOT NULL
+    ON CONFLICT (tenant_id, stripe_refund_id) DO NOTHING;
     ALTER TABLE payment_refunds ENABLE ROW LEVEL SECURITY;
     ALTER TABLE payment_refunds FORCE ROW LEVEL SECURITY;
     DROP POLICY IF EXISTS tenant_isolation_payment_refunds ON payment_refunds;
