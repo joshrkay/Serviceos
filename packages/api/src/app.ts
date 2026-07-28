@@ -3070,6 +3070,11 @@ export function createApp(): AppWithLifecycle {
         },
       }
     : undefined;
+  // P0-9 — lets the Stripe webhook deactivate a stale hosted payment link as
+  // soon as a credit settles/reprices its invoice (same late-wiring pattern
+  // as customerPaymentMethodRepo above: the router reads deps lazily).
+  webhookRouterDeps.paymentLinkProvider = paymentLinkProvider;
+  webhookRouterDeps.connectAccountResolver = connectAccountResolver;
   const publicInvoiceService = new PublicInvoiceService({
     paymentLinkProvider,
     invoiceRepo,

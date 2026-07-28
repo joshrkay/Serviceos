@@ -32,7 +32,7 @@ import { AgreementRepository } from '../agreements/agreement';
 import { getCustomerMemberDiscountBps } from '../agreements/member-pricing';
 import { createLogger } from '../logging/logger';
 import { PaymentLinkProvider } from '../payments/payment-link-provider';
-import { createInvoicePaymentLink } from '../invoices/invoice-payment-link';
+import { createInvoicePaymentLink, deactivateInvoicePaymentLink } from '../invoices/invoice-payment-link';
 import { ConnectAccountResolver } from '../invoices/public-invoice-service';
 
 const logger = createLogger({
@@ -533,6 +533,21 @@ export function createInvoiceRouter(
           auditRepo,
           { actorRole: req.auth!.role },
         );
+        // P0-9 — a manual credit reprices (or settles) the invoice, so any
+        // hosted payment link minted at the OLD balance must die: left live
+        // it still captures its original amount and the excess is unapplied.
+        if (paymentLinkProvider && result.invoice.stripePaymentLinkId) {
+          await deactivateInvoicePaymentLink({
+            tenantId: req.auth!.tenantId,
+            invoice: result.invoice,
+            reason: result.invoice.amountDueCents <= 0 ? 'settled' : 'repriced',
+            invoiceRepo,
+            provider: paymentLinkProvider,
+            connectAccountResolver,
+            auditRepo,
+            actor: { actorId: req.auth!.userId, actorRole: req.auth!.role },
+          });
+        }
         res.status(201).json(result);
       } catch (err) {
         const { statusCode, body } = toErrorResponse(err);

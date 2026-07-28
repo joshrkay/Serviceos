@@ -98,7 +98,16 @@ export function isPayableInvoice(invoice: Invoice): boolean {
 export async function deactivateInvoicePaymentLink(params: {
   tenantId: string;
   invoice: Invoice;
-  reason: 'voided' | 'canceled' | 'settled';
+  /**
+   * voided/canceled — the invoice left the payable world (P0-1);
+   * settled — the balance reached zero;
+   * repriced — a credit changed the balance the link was priced against
+   * (P0-9): the link's mint-time amount no longer matches what is owed, so
+   * letting it live invites a capture whose excess has nowhere to go. A
+   * fresh link at the current balance is minted on demand by the pay-now
+   * flows once the columns are cleared.
+   */
+  reason: 'voided' | 'canceled' | 'settled' | 'repriced';
   invoiceRepo: InvoiceRepository;
   provider: PaymentLinkProvider;
   connectAccountResolver?: ConnectAccountResolver;

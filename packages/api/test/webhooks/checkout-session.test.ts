@@ -227,3 +227,127 @@ describe('checkout.session.completed — payment_intent → providerReference', 
     expect((await paymentRepo.findByInvoice(TENANT, secondInvoiceId))[0]?.providerReference).toBe('cs_collide_b');
   });
 });
+
+describe('P0-9 — unapplied captures are audited; stale links die on credit', () => {
+  let invoiceRepo: InMemoryInvoiceRepository;
+  let paymentRepo: InMemoryPaymentRepository;
+  let auditRepo: InMemoryAuditRepository;
+  let deactivated: Array<{ linkId: string; account?: string }>;
+  let app: express.Express;
+  const INVOICE_ID = 'inv-p09';
+
+  function makeInvoice(over: Partial<Invoice> = {}): Invoice {
+    const lineItems = [buildLineItem('li-1', 'Service', 1, 10000, 1, false)];
+    const totals = calculateDocumentTotals(lineItems, 0, 0);
+    return {
+      id: INVOICE_ID,
+      tenantId: TENANT,
+      jobId: 'job-p09',
+      invoiceNumber: 'INV-P09',
+      status: 'open',
+      lineItems,
+      totals,
+      amountPaidCents: 0,
+      amountDueCents: totals.totalCents,
+      stripePaymentLinkId: 'plink_stale_1',
+      stripePaymentLinkUrl: 'https://pay.stripe.com/plink_stale_1',
+      createdBy: 'user-1',
+      createdAt: new Date(),
+      updatedAt: new Date(),
+      ...over,
+    };
+  }
+
+  function checkoutEvent(amountTotal: number): Record<string, unknown> {
+    return {
+      id: `evt_${uuidv4()}`,
+      type: 'checkout.session.completed',
+      data: {
+        object: {
+          id: `cs_${uuidv4()}`,
+          metadata: { tenant_id: TENANT, invoice_id: INVOICE_ID },
+          amount_total: amountTotal,
+          payment_status: 'paid',
+          payment_intent: `pi_${uuidv4()}`,
+        },
+      },
+    };
+  }
+
+  beforeEach(() => {
+    invoiceRepo = new InMemoryInvoiceRepository();
+    paymentRepo = new InMemoryPaymentRepository();
+    auditRepo = new InMemoryAuditRepository();
+    deactivated = [];
+    app = buildApp({
+      invoiceRepo,
+      paymentRepo,
+      auditRepo,
+      stripeWebhookSecret: STRIPE_SECRET,
+      paymentLinkProvider: {
+        generateLink: async () => { throw new Error('not used'); },
+        deactivateLink: async (linkId: string, account?: string) => {
+          deactivated.push({ linkId, account });
+        },
+      },
+    });
+  });
+
+  it('a capture that must be capped audits the unapplied remainder', async () => {
+    // Balance drops to 4000 after the link was minted at 10000.
+    await invoiceRepo.create(makeInvoice({ amountPaidCents: 6000, amountDueCents: 4000 }));
+
+    const res = await postSigned(app, checkoutEvent(10000));
+    expect(res.status).toBe(200);
+
+    // Credit capped to the remaining balance…
+    const invoice = await invoiceRepo.findById(TENANT, INVOICE_ID);
+    expect(invoice!.amountPaidCents).toBe(10000);
+    expect(invoice!.status).toBe('paid');
+
+    // …and the 6000-cent excess is on the audit trail, not just a log line.
+    const events = auditRepo.getAll().filter((e) => e.eventType === 'payment.unapplied_capture');
+    expect(events).toHaveLength(1);
+    expect(events[0].metadata).toMatchObject({
+      capturedCents: 10000,
+      creditedCents: 4000,
+      unappliedCents: 6000,
+      reason: 'capped_to_balance',
+    });
+  });
+
+  it('a capture on an unpayable invoice audits the full amount and retries the link kill', async () => {
+    await invoiceRepo.create(makeInvoice({ status: 'void' }));
+
+    const res = await postSigned(app, checkoutEvent(10000));
+    expect(res.status).toBe(200);
+
+    const events = auditRepo.getAll().filter((e) => e.eventType === 'payment.unapplied_capture');
+    expect(events).toHaveLength(1);
+    expect(events[0].metadata).toMatchObject({
+      capturedCents: 10000,
+      creditedCents: 0,
+      unappliedCents: 10000,
+      reason: 'not_payable',
+      invoiceStatus: 'void',
+    });
+    // The link a failed void-time deactivation left behind dies here.
+    expect(deactivated).toEqual([{ linkId: 'plink_stale_1', account: undefined }]);
+    const invoice = await invoiceRepo.findById(TENANT, INVOICE_ID);
+    expect(invoice!.stripePaymentLinkId).toBeUndefined();
+  });
+
+  it('a clean full payment consumes the link and clears its columns', async () => {
+    await invoiceRepo.create(makeInvoice());
+
+    const res = await postSigned(app, checkoutEvent(10000));
+    expect(res.status).toBe(200);
+
+    const invoice = await invoiceRepo.findById(TENANT, INVOICE_ID);
+    expect(invoice!.status).toBe('paid');
+    expect(invoice!.stripePaymentLinkId).toBeUndefined();
+    expect(deactivated).toHaveLength(1);
+    // A clean exact-amount settlement leaves no unapplied capture.
+    expect(auditRepo.getAll().filter((e) => e.eventType === 'payment.unapplied_capture')).toHaveLength(0);
+  });
+});
