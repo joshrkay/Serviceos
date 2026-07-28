@@ -176,26 +176,42 @@ export async function deactivateInvoicePaymentLink(params: {
   // columns while it stays live at Stripe (exactly the invisible-charge-
   // vector state this helper exists to prevent). Prefer the repo's CAS;
   // fall back to read-compare-clear for repos that don't implement it.
-  const clearFailureIsCosmetic = () => undefined; // link is dead at Stripe either way
-  if (invoiceRepo.clearPaymentLinkIfMatches) {
-    await invoiceRepo
-      .clearPaymentLinkIfMatches(tenantId, invoice.id, linkId)
-      .catch(clearFailureIsCosmetic);
-  } else {
-    const fresh = await invoiceRepo.findById(tenantId, invoice.id).catch(() => null);
-    if (fresh?.stripePaymentLinkId === linkId) {
-      await invoiceRepo
-        .update(tenantId, invoice.id, {
+  //
+  // A clear FAILURE is NOT cosmetic on a still-payable invoice: the pay-now
+  // flows return any stored URL without consulting Stripe, so a surviving
+  // column would serve the now-dead link on every subsequent Pay Now until
+  // something re-triggers this helper. Surface it as its own actionable
+  // audit event (never folded into the success event) so operators can see
+  // and retry; the link IS dead at Stripe, so `deactivated` stays true.
+  let clearError: unknown;
+  try {
+    if (invoiceRepo.clearPaymentLinkIfMatches) {
+      await invoiceRepo.clearPaymentLinkIfMatches(tenantId, invoice.id, linkId);
+    } else {
+      const fresh = await invoiceRepo.findById(tenantId, invoice.id);
+      if (fresh?.stripePaymentLinkId === linkId) {
+        await invoiceRepo.update(tenantId, invoice.id, {
           stripePaymentLinkId: null,
           stripePaymentLinkUrl: null,
           updatedAt: new Date(),
-        })
-        .catch(clearFailureIsCosmetic);
+        });
+      }
     }
+  } catch (err) {
+    clearError = err;
   }
-  await emit('invoice.payment_link_deactivated', {
-    stripePaymentLinkId: linkId,
-    reason,
-  });
+
+  if (clearError !== undefined) {
+    await emit('invoice.payment_link_clear_failed', {
+      stripePaymentLinkId: linkId,
+      reason,
+      error: clearError instanceof Error ? clearError.message : String(clearError),
+    });
+  } else {
+    await emit('invoice.payment_link_deactivated', {
+      stripePaymentLinkId: linkId,
+      reason,
+    });
+  }
   return { deactivated: true };
 }

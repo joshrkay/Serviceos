@@ -411,3 +411,64 @@ describe('R2/R3 — deactivation scope fallback and CAS-guarded clear', () => {
     expect(fresh!.stripePaymentLinkUrl).toBe('https://pay.stripe.com/L2');
   });
 });
+
+describe('Codex P1 — a failed column clear after successful deactivation is audited, not hidden', () => {
+  it('emits payment_link_clear_failed (never the success event) when the DB clear throws', async () => {
+    const { InMemoryInvoiceRepository, createInvoice, issueInvoice } =
+      await import('../../src/invoices/invoice');
+    const { deactivateInvoicePaymentLink } = await import('../../src/invoices/invoice-payment-link');
+    const { InMemoryAuditRepository } = await import('../../src/audit/audit');
+    const { buildLineItem } = await import('../../src/shared/billing-engine');
+
+    const inner = new InMemoryInvoiceRepository();
+    const auditRepo = new InMemoryAuditRepository();
+    const invoice = await createInvoice(
+      {
+        tenantId: 'tenant-1',
+        jobId: 'job-1',
+        invoiceNumber: 'INV-CLR-1',
+        lineItems: [buildLineItem('1', 'S', 1, 1000, 1, true)],
+        createdBy: 'u-1',
+      },
+      inner,
+    );
+    await issueInvoice('tenant-1', invoice.id, 30, inner);
+    await inner.update('tenant-1', invoice.id, {
+      stripePaymentLinkId: 'plink_clr_1',
+      stripePaymentLinkUrl: 'https://pay.stripe.com/clr1',
+      updatedAt: new Date(),
+    });
+
+    // Stripe deactivation succeeds; the DB clear throws (transient outage).
+    const failingClear = new Proxy(inner, {
+      get(target, prop, receiver) {
+        if (prop === 'clearPaymentLinkIfMatches') {
+          return async () => { throw new Error('db down'); };
+        }
+        return Reflect.get(target, prop, receiver);
+      },
+    });
+    const provider = {
+      generateLink: async () => { throw new Error('not used'); },
+      deactivateLink: async () => {},
+    };
+
+    const fresh = await inner.findById('tenant-1', invoice.id);
+    const result = await deactivateInvoicePaymentLink({
+      tenantId: 'tenant-1',
+      invoice: fresh!,
+      reason: 'repriced',
+      invoiceRepo: failingClear,
+      provider,
+      auditRepo,
+    });
+
+    // The link IS dead at Stripe...
+    expect(result.deactivated).toBe(true);
+    // ...but the stranded column is surfaced as its own actionable event,
+    // never masked by the success event.
+    const events = auditRepo.getAll().map((e) => e.eventType);
+    expect(events).toContain('invoice.payment_link_clear_failed');
+    expect(events).not.toContain('invoice.payment_link_deactivated');
+  });
+});
