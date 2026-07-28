@@ -15,7 +15,12 @@
  * NEVER a status change, NEVER through approveProposal. Any LLM /
  * parse / write failure skips that proposal silently (advisory note;
  * the human reviewer sees the proposal either way and a later sweep
- * retries while the proposal stays in the recency window).
+ * retries while the proposal stays in the recency window) — but each
+ * failure is now counted in `payload._meta.supervisorAnnotationAttempts`
+ * and a proposal that has failed MAX_ANNOTATION_ATTEMPTS times is dropped
+ * from later candidate sets. That bound is load-bearing: silently swallowing
+ * a DETERMINISTIC failure (the JSON-mode 400 this worker shipped with) meant
+ * re-issuing the same doomed call every 60s for 24h per proposal.
  *
  * PII discipline: the prompt carries the proposal type, action class,
  * operator-facing summary, headline amount and confidence — not the raw
@@ -29,7 +34,11 @@ import {
 } from '../proposals/proposal';
 import { payloadHeadlineCents } from '../proposals/payload-money';
 import {
+  annotationAttemptCount,
+  hasExhaustedAnnotationAttempts,
   hasSupervisorAnnotation,
+  MAX_ANNOTATION_ATTEMPTS,
+  payloadWithAnnotationAttempt,
   payloadWithSupervisorAnnotation,
   type SupervisorAnnotation,
 } from '../proposals/supervisor/marker';
@@ -96,6 +105,36 @@ export function parseAnnotationResponse(content: string): Omit<SupervisorAnnotat
   };
 }
 
+/**
+ * System instruction for the annotation call.
+ *
+ * MUST name the output format explicitly. `annotateProposal` sets
+ * `responseFormat: 'json'`, which the OpenAI-compatible adapters translate to
+ * `response_format: { type: 'json_object' }` — and OpenAI rejects that request
+ * outright ("'messages' must contain the word 'json' in some form") unless the
+ * outbound messages mention "json". The original prompt was a prose line plus a
+ * `JSON.stringify`'d fact object, neither of which is GUARANTEED to contain the
+ * literal substring, so every annotation call 400'd before generating a token
+ * and the advisory catch below re-tried it on every 60s sweep for the whole 24h
+ * recency window. Stating the schema here fixes the precondition and gives the
+ * model the shape `parseAnnotationResponse` actually accepts — dropping
+ * `responseFormat` instead would have traded a hard failure for a much higher
+ * parse-failure rate. `ensureJsonModeMessages` in the provider adapter is the
+ * backstop that keeps this from regressing.
+ */
+export const SUPERVISOR_ANNOTATE_SYSTEM_PROMPT = `You review pending proposals and write a short advisory note for the human reviewer.
+
+Return valid JSON only (no prose, no markdown fences):
+{
+  "riskSummary": "<one or two plain sentences on what the reviewer should check>",
+  "flags": ["<short_snake_case_tag>", "..."]
+}
+
+Rules:
+- riskSummary is required and must be non-empty; ${MAX_RISK_SUMMARY_CHARS} characters or fewer.
+- flags holds up to ${MAX_FLAGS} short machine-readable tags (e.g. "high_amount", "new_customer", "vague_scope"). Use [] when nothing stands out.
+- You are advisory only: never instruct the reviewer to approve or reject.`;
+
 function annotationPrompt(proposal: Proposal): string {
   const amountCents = payloadHeadlineCents(proposal.payload);
   return JSON.stringify({
@@ -108,20 +147,35 @@ function annotationPrompt(proposal: Proposal): string {
   });
 }
 
+/**
+ * Outcome of one annotation attempt.
+ *   - 'annotated' — the advisory note was written.
+ *   - 'skipped'   — benign terminal condition (proposal gone, or it left
+ *                   ready_for_review while we were calling the LLM). NOT a
+ *                   failure: retrying would be pointless, and it must never
+ *                   count against the attempt budget.
+ *   - 'failed'    — the model output was unusable. Counts against the budget.
+ * A thrown error (provider outage, repo write failure) is caught by the sweep
+ * and treated as 'failed' too.
+ */
+type AnnotationOutcome = 'annotated' | 'skipped' | 'failed';
+
 async function annotateProposal(
   deps: SupervisorAnnotationSweepDeps,
   proposal: Proposal,
   now: Date,
-): Promise<boolean> {
+): Promise<AnnotationOutcome> {
   const response = await deps.gateway.complete({
     taskType: SUPERVISOR_ANNOTATE_TASK_TYPE,
     responseFormat: 'json',
     tenantId: proposal.tenantId,
     messages: [
+      { role: 'system', content: SUPERVISOR_ANNOTATE_SYSTEM_PROMPT },
       {
         role: 'user',
         content:
-          'Annotate this pending proposal for the human reviewer:\n' +
+          'Annotate this pending proposal for the human reviewer. ' +
+          'Its facts follow as a JSON object:\n' +
           annotationPrompt(proposal),
       },
     ],
@@ -133,7 +187,7 @@ async function annotateProposal(
       tenantId: proposal.tenantId,
       proposalId: proposal.id,
     });
-    return false;
+    return 'failed';
   }
   const annotation: SupervisorAnnotation = { ...parsed, annotatedAt: now.toISOString() };
 
@@ -149,20 +203,61 @@ async function annotateProposal(
   // the strongest signal that the proposal is no longer a candidate (it may
   // have been approved or rejected while we were calling the LLM).
   const fresh = await deps.proposalRepo.findById(proposal.tenantId, proposal.id);
-  if (!fresh) return false;
+  if (!fresh) return 'skipped';
   if (fresh.status !== 'ready_for_review') {
     deps.logger.warn('supervisor-annotator: proposal status changed during annotation, skipping', {
       tenantId: proposal.tenantId,
       proposalId: proposal.id,
       newStatus: fresh.status,
     });
-    return false;
+    return 'skipped';
   }
 
   const updated = await deps.proposalRepo.update(proposal.tenantId, proposal.id, {
     payload: payloadWithSupervisorAnnotation(fresh.payload, annotation),
   });
-  return updated !== null;
+  return updated !== null ? 'annotated' : 'skipped';
+}
+
+/**
+ * Record one failed annotation attempt on the proposal so later sweeps can give
+ * up on it. Without this, a proposal that fails every time is retried once per
+ * 60s sweep for the whole 24h recency window (~1,440 wasted gateway calls per
+ * proposal) with no backoff and no failure marker — which is exactly how the
+ * JSON-mode 400 above drained the org's AI quota. The prompt fix removes the
+ * known cause; this removes the unbounded amplification for every FUTURE cause.
+ *
+ * Stays inside the worker's contract: writes `payload._meta` ONLY, never the
+ * status, never via `approveProposal`. Uses the same fresh-payload narrow merge
+ * as the annotation write so a concurrent edit is preserved, and is itself
+ * failure-isolated — if we cannot record the attempt we log and move on rather
+ * than turning a soft skip into a hard failure.
+ */
+async function recordFailedAttempt(
+  deps: SupervisorAnnotationSweepDeps,
+  proposal: Proposal,
+  now: Date,
+): Promise<void> {
+  try {
+    const fresh = await deps.proposalRepo.findById(proposal.tenantId, proposal.id);
+    if (!fresh || fresh.status !== 'ready_for_review') return;
+    const next = payloadWithAnnotationAttempt(fresh.payload, now.toISOString());
+    await deps.proposalRepo.update(proposal.tenantId, proposal.id, { payload: next });
+    const attempts = annotationAttemptCount(next);
+    if (attempts >= MAX_ANNOTATION_ATTEMPTS) {
+      deps.logger.warn('supervisor-annotator: attempt budget exhausted, will stop retrying', {
+        tenantId: proposal.tenantId,
+        proposalId: proposal.id,
+        attempts,
+      });
+    }
+  } catch (err) {
+    deps.logger.warn('supervisor-annotator: could not record failed attempt', {
+      tenantId: proposal.tenantId,
+      proposalId: proposal.id,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
 }
 
 /**
@@ -201,21 +296,35 @@ export async function runSupervisorAnnotationSweep(
       const candidates = pending
         .filter((p) => now.getTime() - p.createdAt.getTime() <= recentWindowMs)
         .filter((p) => !hasSupervisorAnnotation(p.payload))
+        // Retry-storm brake: a proposal that has already failed annotation
+        // MAX_ANNOTATION_ATTEMPTS times is dropped from the candidate set, so a
+        // deterministic failure costs a handful of gateway calls instead of one
+        // per 60s sweep for the whole 24h recency window.
+        .filter((p) => !hasExhaustedAnnotationAttempts(p.payload))
         .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())
         .slice(0, maxPerTenant);
       for (const proposal of candidates) {
         try {
-          const annotated = await annotateProposal(deps, proposal, now);
-          if (annotated) result.annotated += 1;
-          else result.skipped += 1;
+          const outcome = await annotateProposal(deps, proposal, now);
+          if (outcome === 'annotated') {
+            result.annotated += 1;
+          } else {
+            result.skipped += 1;
+            // Only genuine failures burn the budget; a benign 'skipped'
+            // (status changed / proposal gone) must not.
+            if (outcome === 'failed') await recordFailedAttempt(deps, proposal, now);
+          }
         } catch (err) {
           // Advisory: an LLM (or write) failure must never escalate.
           result.skipped += 1;
           deps.logger.warn('supervisor-annotator: annotation failed, skipping proposal', {
             tenantId,
             proposalId: proposal.id,
+            attempts: annotationAttemptCount(proposal.payload) + 1,
+            maxAttempts: MAX_ANNOTATION_ATTEMPTS,
             error: err instanceof Error ? err.message : String(err),
           });
+          await recordFailedAttempt(deps, proposal, now);
         }
       }
     } catch (err) {

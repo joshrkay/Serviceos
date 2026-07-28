@@ -83,6 +83,71 @@ export function payloadWithSupervisorAnnotation(
   return next;
 }
 
+/**
+ * How many failed annotation attempts a proposal gets before later sweeps stop
+ * retrying it. The annotator runs every 60s over a 24h window, so without a
+ * budget a permanently-failing proposal costs ~1,440 gateway calls/day on its
+ * own. Three attempts absorbs a transient provider blip while capping a
+ * deterministic failure (a bad prompt, an unparseable model, a poison payload)
+ * at three calls total instead of a day's worth.
+ */
+export const MAX_ANNOTATION_ATTEMPTS = 3;
+
+/** `_meta` key holding the annotator's failure bookkeeping. */
+export const ANNOTATION_ATTEMPTS_KEY = 'supervisorAnnotationAttempts';
+
+export interface SupervisorAnnotationAttempts {
+  count: number;
+  lastAttemptAt: string;
+}
+
+function readAttempts(payload: Record<string, unknown>): SupervisorAnnotationAttempts | null {
+  const meta = payload._meta;
+  if (!meta || typeof meta !== 'object' || Array.isArray(meta)) return null;
+  const raw = (meta as Record<string, unknown>)[ANNOTATION_ATTEMPTS_KEY];
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const count = (raw as Record<string, unknown>).count;
+  const lastAttemptAt = (raw as Record<string, unknown>).lastAttemptAt;
+  // Defensive: a hand-edited or truncated marker must read as "no attempts"
+  // rather than throwing or silently disabling annotation forever.
+  if (typeof count !== 'number' || !Number.isFinite(count) || count < 0) return null;
+  return {
+    count: Math.floor(count),
+    lastAttemptAt: typeof lastAttemptAt === 'string' ? lastAttemptAt : '',
+  };
+}
+
+/** Failed annotation attempts recorded so far (0 when never attempted). */
+export function annotationAttemptCount(payload: Record<string, unknown>): number {
+  return readAttempts(payload)?.count ?? 0;
+}
+
+/**
+ * True when this proposal has burned its annotation attempt budget and later
+ * sweeps should leave it alone. Advisory-only: the proposal is still fully
+ * reviewable by the human, it just never gets the optional AI note.
+ */
+export function hasExhaustedAnnotationAttempts(payload: Record<string, unknown>): boolean {
+  return annotationAttemptCount(payload) >= MAX_ANNOTATION_ATTEMPTS;
+}
+
+/**
+ * Increment the failed-attempt counter. Non-mutating, and touches nothing in
+ * `_meta` besides this one key — the annotator's whole contract is that it only
+ * ever writes `payload._meta`, never the proposal status.
+ */
+export function payloadWithAnnotationAttempt(
+  payload: Record<string, unknown>,
+  attemptedAt: string,
+): Record<string, unknown> {
+  const { next, meta } = cloneWithValidMeta(payload);
+  meta[ANNOTATION_ATTEMPTS_KEY] = {
+    count: annotationAttemptCount(payload) + 1,
+    lastAttemptAt: attemptedAt,
+  } satisfies SupervisorAnnotationAttempts;
+  return next;
+}
+
 /** True when the annotator already visited this payload. */
 export function hasSupervisorAnnotation(payload: Record<string, unknown>): boolean {
   const meta = payload._meta;
