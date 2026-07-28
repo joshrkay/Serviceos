@@ -107,6 +107,37 @@ export interface PublicInvoiceServiceDeps {
 export class PublicInvoiceService {
   constructor(private readonly deps: PublicInvoiceServiceDeps) {}
 
+  /**
+   * A loser link from a lost mint-guard is still LIVE at Stripe and its id
+   * exists nowhere else (it was never persisted) — when its cleanup ALSO
+   * fails, the id must land on the audit trail so an operator can
+   * deactivate it manually. Best-effort: never blocks the caller.
+   */
+  private async auditLoserLinkCleanupFailure(
+    invoice: Invoice,
+    linkId: string,
+    err: unknown,
+  ): Promise<void> {
+    if (!this.deps.auditRepo) return;
+    await this.deps.auditRepo
+      .create(
+        createAuditEvent({
+          tenantId: invoice.tenantId,
+          actorId: 'system',
+          actorRole: 'system',
+          eventType: 'invoice.payment_link_deactivation_failed',
+          entityType: 'invoice',
+          entityId: invoice.id,
+          metadata: {
+            stripePaymentLinkId: linkId,
+            reason: 'mint_guard_lost',
+            error: err instanceof Error ? err.message : String(err),
+          },
+        }),
+      )
+      .catch(() => undefined);
+  }
+
   async getByToken(token: string): Promise<PublicInvoiceView> {
     const invoice = await this.lookupByToken(token);
     return this.toView(invoice);
@@ -178,7 +209,11 @@ export class PublicInvoiceService {
         new Date(),
       );
       if (!persisted) {
-        await this.deps.paymentLinkProvider.deactivateLink(link.linkId).catch(() => undefined);
+        try {
+          await this.deps.paymentLinkProvider.deactivateLink(link.linkId);
+        } catch (err) {
+          await this.auditLoserLinkCleanupFailure(invoice, link.linkId, err);
+        }
         const fresh = await this.deps.invoiceRepo.findById(invoice.tenantId, invoice.id);
         if (fresh && PAYABLE.includes(fresh.status) && fresh.stripePaymentLinkUrl) {
           return { url: fresh.stripePaymentLinkUrl };
@@ -253,7 +288,7 @@ export class PublicInvoiceService {
     // the payable/balance guard lost. PR 2: when minted via Connect, the
     // deactivation must carry the same Stripe-Account header — Stripe scopes
     // the link to that account.
-    const deactivateMintedLink = async () => {
+    const deactivateMintedLink = async (): Promise<boolean> => {
       const deactivateHeaders: Record<string, string> = {
         Authorization: `Bearer ${this.deps.stripeConfig!.apiKey}`,
         'Content-Type': 'application/x-www-form-urlencoded',
@@ -261,11 +296,16 @@ export class PublicInvoiceService {
       if (useConnect && connect) {
         deactivateHeaders['Stripe-Account'] = connect.accountId;
       }
-      await fetchFn(`https://api.stripe.com/v1/payment_links/${data.id}`, {
-        method: 'POST',
-        headers: deactivateHeaders,
-        body: new URLSearchParams({ active: 'false' }),
-      }).catch(() => undefined); // best-effort; don't mask the original error
+      try {
+        const res = await fetchFn(`https://api.stripe.com/v1/payment_links/${data.id}`, {
+          method: 'POST',
+          headers: deactivateHeaders,
+          body: new URLSearchParams({ active: 'false' }),
+        });
+        return res.ok;
+      } catch {
+        return false; // best-effort; callers decide how to surface a miss
+      }
     };
 
     let persisted: Invoice | null;
@@ -294,8 +334,16 @@ export class PublicInvoiceService {
       // Guard lost: the invoice was voided, repriced, or another mint won
       // while Stripe was creating this link. The fresh link prices a state
       // that no longer exists — kill it, then either serve the winner's link
-      // or surface the change.
-      await deactivateMintedLink();
+      // or surface the change. A cleanup miss is audited: the loser's id is
+      // persisted nowhere else, and it is still live at Stripe.
+      const cleanedUp = await deactivateMintedLink();
+      if (!cleanedUp) {
+        await this.auditLoserLinkCleanupFailure(
+          invoice,
+          data.id,
+          new Error('Stripe deactivation failed for mint-guard loser link'),
+        );
+      }
       const fresh = await this.deps.invoiceRepo.findById(invoice.tenantId, invoice.id);
       if (fresh && PAYABLE.includes(fresh.status) && fresh.stripePaymentLinkUrl) {
         return { url: fresh.stripePaymentLinkUrl };

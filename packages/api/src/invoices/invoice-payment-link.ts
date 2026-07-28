@@ -25,6 +25,12 @@ export async function createInvoicePaymentLink(
   invoiceRepo: InvoiceRepository,
   provider: PaymentLinkProvider,
   connectAccountResolver?: ConnectAccountResolver,
+  /**
+   * When wired, a loser-link cleanup failure on the mint-guard path is
+   * audited with the link id — the id was never persisted anywhere else, so
+   * without this a still-live stale link would vanish without a trace.
+   */
+  auditRepo?: AuditRepository,
 ): Promise<InvoicePaymentLinkResult> {
   const invoice = await invoiceRepo.findById(tenantId, invoiceId);
   if (!invoice) {
@@ -78,7 +84,33 @@ export async function createInvoicePaymentLink(
     new Date(),
   );
   if (!persisted) {
-    await provider.deactivateLink(link.linkId, stripeAccountId).catch(() => undefined);
+    try {
+      await provider.deactivateLink(link.linkId, stripeAccountId);
+    } catch (err) {
+      // The loser link is still LIVE at Stripe and its id exists nowhere
+      // else — it was never persisted. Audit it durably so an operator can
+      // deactivate it by id; swallowing here would orphan a stale charge
+      // vector with zero trace (Codex P1 on PR #783).
+      if (auditRepo) {
+        await auditRepo
+          .create(
+            createAuditEvent({
+              tenantId,
+              actorId: 'system',
+              actorRole: 'system',
+              eventType: 'invoice.payment_link_deactivation_failed',
+              entityType: 'invoice',
+              entityId: invoice.id,
+              metadata: {
+                stripePaymentLinkId: link.linkId,
+                reason: 'mint_guard_lost',
+                error: err instanceof Error ? err.message : String(err),
+              },
+            }),
+          )
+          .catch(() => undefined);
+      }
+    }
     const fresh = await invoiceRepo.findById(tenantId, invoice.id);
     // A competing mint won and the invoice is still payable → serve the
     // winner's link. Anything else → the invoice changed underneath us.

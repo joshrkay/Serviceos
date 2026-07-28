@@ -452,6 +452,7 @@ export function createInvoiceRouter(
           invoiceRepo,
           paymentLinkProvider,
           connectAccountResolver,
+          auditRepo,
         );
         res.json(result);
       } catch (err) {

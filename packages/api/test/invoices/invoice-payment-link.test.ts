@@ -587,3 +587,55 @@ describe('P0-9 mint leg — link persist is guarded against concurrent invoice m
     expect(reloaded!.stripePaymentLinkId).toBe('plink_winner');
   });
 });
+
+describe('Codex P1 — a loser-link cleanup miss is audited with the link id', () => {
+  it('deactivation failure on the mint-guard loser lands the link id on the audit trail', async () => {
+    const { InMemoryInvoiceRepository, createInvoice, issueInvoice, transitionInvoiceStatus } =
+      await import('../../src/invoices/invoice');
+    const { createInvoicePaymentLink } = await import('../../src/invoices/invoice-payment-link');
+    const { InMemoryAuditRepository } = await import('../../src/audit/audit');
+    const { buildLineItem } = await import('../../src/shared/billing-engine');
+
+    const invoiceRepo = new InMemoryInvoiceRepository();
+    const auditRepo = new InMemoryAuditRepository();
+    const invoice = await createInvoice(
+      {
+        tenantId: 'tenant-1',
+        jobId: 'job-1',
+        invoiceNumber: 'INV-LOSER-1',
+        lineItems: [buildLineItem('1', 'S', 1, 10000, 1, true)],
+        createdBy: 'u-1',
+      },
+      invoiceRepo,
+    );
+    await issueInvoice('tenant-1', invoice.id, 30, invoiceRepo);
+
+    const provider = {
+      generateLink: async () => {
+        // Void lands mid-mint AND the loser cleanup will fail at Stripe.
+        await transitionInvoiceStatus('tenant-1', invoice.id, 'void', invoiceRepo);
+        return {
+          linkId: 'plink_orphan_1',
+          linkUrl: 'https://pay.stripe.com/orphan',
+          expiresAt: null as unknown as Date,
+          providerReference: 'stripe_plink_orphan_1',
+        };
+      },
+      deactivateLink: async () => { throw new Error('stripe 500'); },
+    };
+
+    await expect(
+      createInvoicePaymentLink('tenant-1', invoice.id, invoiceRepo, provider, undefined, auditRepo),
+    ).rejects.toThrow(/Invoice changed/);
+
+    // The orphaned-but-live link id is durably traceable.
+    const events = auditRepo
+      .getAll()
+      .filter((e) => e.eventType === 'invoice.payment_link_deactivation_failed');
+    expect(events).toHaveLength(1);
+    expect(events[0].metadata).toMatchObject({
+      stripePaymentLinkId: 'plink_orphan_1',
+      reason: 'mint_guard_lost',
+    });
+  });
+});
