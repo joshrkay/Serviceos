@@ -1056,7 +1056,11 @@ export async function ensureTenantSettings(
     id: uuidv4(),
     tenantId,
     businessName: options?.businessName ?? 'My Business',
-    timezone: 'America/New_York',
+    // No ET fallback — same rationale as createSettings above: a seeded
+    // 'America/New_York' is indistinguishable from a chosen one, so the
+    // scheduling gate would treat a guessed zone as configured and book
+    // non-Eastern tenants hours off. The zone stays UNSET until the tenant
+    // picks one; drafting handlers gate on the absence instead of guessing.
     estimatePrefix: 'EST-',
     invoicePrefix: 'INV-',
     nextEstimateNumber: 1,

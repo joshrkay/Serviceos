@@ -301,3 +301,21 @@ describe('P1-017 — Tenant business settings and numbering preferences', () => 
     });
   });
 });
+
+describe('no-guessed-timezone — ensureTenantSettings seeds no zone either', () => {
+  it('a bootstrap-seeded settings row leaves timezone unset until the tenant chooses', async () => {
+    const { InMemorySettingsRepository } = await import('../../src/settings/settings');
+    const repo = new InMemorySettingsRepository();
+
+    // Clerk tenant provisioning path (auth/clerk.ts) — the OTHER first-row
+    // seeder. It previously hardcoded 'America/New_York', which the
+    // scheduling gate could not distinguish from a chosen zone, so
+    // provisioned tenants kept auto-booking on a guessed Eastern clock even
+    // after createSettings stopped guessing.
+    const settings = await ensureTenantSettings('tenant-bootstrap-tz', repo, {
+      businessName: 'Zoneless Co',
+    });
+
+    expect(settings.timezone).toBeUndefined();
+  });
+});
