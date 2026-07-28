@@ -5,6 +5,9 @@ import { ValidationError } from '../shared/errors';
 import { SettingsRepository, getNextInvoiceNumber } from '../settings/settings';
 import { buildOriginationMetadata } from '../leads/attribution-metadata';
 import { RefreshJobMoneyStateDeps, refreshJobMoneyStateSafe } from '../jobs/job-money-state';
+import { deactivateInvoicePaymentLink } from './invoice-payment-link';
+import type { PaymentLinkProvider } from '../payments/payment-link-provider';
+import type { ConnectAccountResolver } from './public-invoice-service';
 
 export type InvoiceStatus = 'draft' | 'open' | 'partially_paid' | 'paid' | 'void' | 'canceled';
 
@@ -99,6 +102,21 @@ export interface InvoiceListResult {
   total: number;
 }
 
+/**
+ * Update patch for `InvoiceRepository.update`. Identical to Partial<Invoice>
+ * except the payment-link columns also accept `null`, which CLEARS the
+ * column — needed when a link is deactivated (P0-1): `undefined` means
+ * "leave unchanged", so without null there was no way to remove a dead
+ * link, and every write path could only ever set the columns.
+ */
+export type InvoiceUpdate = Omit<
+  Partial<Invoice>,
+  'stripePaymentLinkId' | 'stripePaymentLinkUrl'
+> & {
+  stripePaymentLinkId?: string | null;
+  stripePaymentLinkUrl?: string | null;
+};
+
 export const DEFAULT_INVOICE_LIMIT = 50;
 export const MAX_INVOICE_LIMIT = 200;
 
@@ -115,7 +133,7 @@ export interface InvoiceRepository {
   findByTenant(tenantId: string, options?: InvoiceListOptions): Promise<Invoice[]>;
   /** P1-018: paginated `{ data, total }` form for list UIs. */
   listWithMeta?(tenantId: string, options?: InvoiceListOptions): Promise<InvoiceListResult>;
-  update(tenantId: string, id: string, updates: Partial<Invoice>): Promise<Invoice | null>;
+  update(tenantId: string, id: string, updates: InvoiceUpdate): Promise<Invoice | null>;
   /**
    * Atomically credit `deltaCents` to the paid balance in a SINGLE UPDATE,
    * recomputing amount_due and status from the row's own current values — never
@@ -414,12 +432,30 @@ export async function issueInvoice(
   return updated;
 }
 
+/**
+ * Optional wiring for `transitionInvoiceStatus`. `auditRepo` + `actor` put
+ * the status change on the audit trail (previously the status route emitted
+ * NO event, so a void left no durable timestamp). `paymentLink` arms the
+ * P0-1 fix: a void/cancel deactivates the invoice's hosted Stripe payment
+ * link, closing the path where a customer pays a stale link on a dead
+ * invoice and Stripe captures money the system refuses to credit.
+ */
+export interface TransitionInvoiceStatusOptions {
+  auditRepo?: AuditRepository;
+  actor?: { actorId: string; actorRole: string };
+  paymentLink?: {
+    provider: PaymentLinkProvider;
+    connectAccountResolver?: ConnectAccountResolver;
+  };
+}
+
 export async function transitionInvoiceStatus(
   tenantId: string,
   id: string,
   newStatus: InvoiceStatus,
   repository: InvoiceRepository,
   moneyStateDeps?: RefreshJobMoneyStateDeps,
+  opts?: TransitionInvoiceStatusOptions,
 ): Promise<Invoice | null> {
   const invoice = await repository.findById(tenantId, id);
   if (!invoice) return null;
@@ -432,6 +468,38 @@ export async function transitionInvoiceStatus(
     status: newStatus,
     updatedAt: new Date(),
   });
+
+  if (updated && opts?.auditRepo) {
+    await opts.auditRepo.create(
+      createAuditEvent({
+        tenantId,
+        actorId: opts.actor?.actorId ?? 'system',
+        actorRole: opts.actor?.actorRole ?? 'system',
+        eventType: 'invoice.status_changed',
+        entityType: 'invoice',
+        entityId: id,
+        metadata: { oldStatus: invoice.status, newStatus },
+      }),
+    );
+  }
+
+  // P0-1 — an invoice leaving the payable world must take its hosted
+  // payment link with it. The link was priced at mint and is never
+  // re-priced; left live, a customer can still pay it after the void and
+  // Stripe captures money no local record will hold. Best-effort with an
+  // audit trail either way; never blocks the transition itself.
+  if (updated && (newStatus === 'void' || newStatus === 'canceled') && opts?.paymentLink) {
+    await deactivateInvoicePaymentLink({
+      tenantId,
+      invoice,
+      reason: newStatus === 'void' ? 'voided' : 'canceled',
+      invoiceRepo: repository,
+      provider: opts.paymentLink.provider,
+      connectAccountResolver: opts.paymentLink.connectAccountResolver,
+      auditRepo: opts.auditRepo,
+      actor: opts.actor,
+    });
+  }
 
   // §6 Time-to-Cash. Best-effort job money-state rollup.
   if (updated && moneyStateDeps) {
@@ -511,10 +579,19 @@ export class InMemoryInvoiceRepository implements InvoiceRepository {
     return { data, total: totalRows.length };
   }
 
-  async update(tenantId: string, id: string, updates: Partial<Invoice>): Promise<Invoice | null> {
+  async update(tenantId: string, id: string, updates: InvoiceUpdate): Promise<Invoice | null> {
     const i = this.invoices.get(id);
     if (!i || i.tenantId !== tenantId) return null;
-    const updated = { ...i, ...updates };
+    // null on the link columns means CLEAR (Pg writes SQL NULL); the domain
+    // object represents an absent link as undefined.
+    const { stripePaymentLinkId, stripePaymentLinkUrl, ...rest } = updates;
+    const updated: Invoice = { ...i, ...rest };
+    if (stripePaymentLinkId !== undefined) {
+      updated.stripePaymentLinkId = stripePaymentLinkId ?? undefined;
+    }
+    if (stripePaymentLinkUrl !== undefined) {
+      updated.stripePaymentLinkUrl = stripePaymentLinkUrl ?? undefined;
+    }
     this.invoices.set(id, updated);
     return { ...updated, lineItems: [...updated.lineItems] };
   }

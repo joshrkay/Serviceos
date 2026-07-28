@@ -22,7 +22,12 @@ export interface PaymentLinkResult {
 
 export interface PaymentLinkProvider {
   generateLink(request: PaymentLinkRequest): Promise<PaymentLinkResult>;
-  deactivateLink(linkId: string): Promise<void>;
+  /**
+   * Deactivate a hosted link so it can no longer capture money. When the
+   * link was minted as a Connect direct charge, `stripeAccountId` must carry
+   * the same account the mint used — Stripe scopes the link to that account.
+   */
+  deactivateLink(linkId: string, stripeAccountId?: string): Promise<void>;
 }
 
 export function validatePaymentLinkRequest(request: PaymentLinkRequest): string[] {

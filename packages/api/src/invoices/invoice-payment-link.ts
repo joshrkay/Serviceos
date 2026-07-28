@@ -1,7 +1,11 @@
 import { ConflictError, NotFoundError, ValidationError } from '../shared/errors';
 import { PaymentLinkProvider } from '../payments/payment-link-provider';
-import { ConnectAccountResolver } from './public-invoice-service';
-import { Invoice, InvoiceRepository } from './invoice';
+import { AuditRepository, createAuditEvent } from '../audit/audit';
+// Type-only: `invoice.ts` calls back into this module at runtime
+// (transitionInvoiceStatus → deactivateInvoicePaymentLink), so a value
+// import from './invoice' here would create a require cycle.
+import type { ConnectAccountResolver } from './public-invoice-service';
+import type { Invoice, InvoiceRepository } from './invoice';
 
 const PAYABLE_STATUSES = new Set(['open', 'partially_paid']);
 
@@ -74,4 +78,81 @@ export async function createInvoicePaymentLink(
 
 export function isPayableInvoice(invoice: Invoice): boolean {
   return PAYABLE_STATUSES.has(invoice.status) && invoice.amountDueCents > 0;
+}
+
+/**
+ * P0-1 / P0-9 — kill an invoice's hosted payment link so it can no longer
+ * capture money. Called when the invoice leaves the payable world (void /
+ * cancel) and when it settles in full: a link is priced at mint time and
+ * never re-priced, so any live link on a non-payable or zero-due invoice is
+ * a stale charge vector — the customer pays it, Stripe captures, and the
+ * webhook can only refuse the credit.
+ *
+ * Best-effort but never silent: on success the link columns are cleared and
+ * an `invoice.payment_link_deactivated` audit event is emitted; on a Stripe
+ * failure the columns are KEPT (a cleared column with a live link would hide
+ * the exposure) and an `invoice.payment_link_deactivation_failed` event is
+ * emitted instead. Never throws — the caller's transition/settlement must
+ * not be blocked.
+ */
+export async function deactivateInvoicePaymentLink(params: {
+  tenantId: string;
+  invoice: Invoice;
+  reason: 'voided' | 'canceled' | 'settled';
+  invoiceRepo: InvoiceRepository;
+  provider: PaymentLinkProvider;
+  connectAccountResolver?: ConnectAccountResolver;
+  auditRepo?: AuditRepository;
+  actor?: { actorId: string; actorRole: string };
+}): Promise<{ deactivated: boolean }> {
+  const { tenantId, invoice, reason, invoiceRepo, provider, connectAccountResolver, auditRepo, actor } = params;
+  if (!invoice.stripePaymentLinkId) return { deactivated: false };
+
+  // Same Connect resolution the mint used: a direct-charge link is scoped to
+  // the tenant's account and can only be deactivated with that header.
+  const connect = connectAccountResolver
+    ? await connectAccountResolver.resolveTenantConnectAccount(tenantId).catch(() => null)
+    : null;
+  const stripeAccountId = connect && connect.chargesEnabled ? connect.accountId : undefined;
+
+  const emit = async (eventType: string, metadata: Record<string, unknown>) => {
+    if (!auditRepo) return;
+    await auditRepo
+      .create(
+        createAuditEvent({
+          tenantId,
+          actorId: actor?.actorId ?? 'system',
+          actorRole: actor?.actorRole ?? 'system',
+          eventType,
+          entityType: 'invoice',
+          entityId: invoice.id,
+          metadata,
+        }),
+      )
+      .catch(() => undefined);
+  };
+
+  try {
+    await provider.deactivateLink(invoice.stripePaymentLinkId, stripeAccountId);
+  } catch (err) {
+    await emit('invoice.payment_link_deactivation_failed', {
+      stripePaymentLinkId: invoice.stripePaymentLinkId,
+      reason,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return { deactivated: false };
+  }
+
+  await invoiceRepo
+    .update(tenantId, invoice.id, {
+      stripePaymentLinkId: null,
+      stripePaymentLinkUrl: null,
+      updatedAt: new Date(),
+    })
+    .catch(() => undefined); // the link is dead at Stripe — the stale column is cosmetic
+  await emit('invoice.payment_link_deactivated', {
+    stripePaymentLinkId: invoice.stripePaymentLinkId,
+    reason,
+  });
+  return { deactivated: true };
 }

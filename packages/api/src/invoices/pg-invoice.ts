@@ -7,6 +7,7 @@ import {
   InvoiceListResult,
   InvoiceRepository,
   InvoiceStatus,
+  InvoiceUpdate,
   DEFAULT_INVOICE_LIMIT,
   MAX_INVOICE_LIMIT,
 } from './invoice';
@@ -194,7 +195,7 @@ export class PgInvoiceRepository extends PgBaseRepository implements InvoiceRepo
     });
   }
 
-  async update(tenantId: string, id: string, updates: Partial<Invoice>): Promise<Invoice | null> {
+  async update(tenantId: string, id: string, updates: InvoiceUpdate): Promise<Invoice | null> {
     return this.withTenantTransaction(tenantId, async (client) => {
       const setClauses: string[] = [];
       const values: unknown[] = [];
