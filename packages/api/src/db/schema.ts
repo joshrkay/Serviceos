@@ -6418,6 +6418,36 @@ export const MIGRATIONS = {
       ON proposals (updated_at)
       WHERE status = 'execution_failed' AND execution_error IS NULL;
   `,
+
+  // D2-4a / P0-4 — per-refund idempotency ledger. The payments-row guard
+  // (`last_refund_stripe_id`) remembers only the LATEST refund id, so a
+  // failed-then-retried earlier refund event re-applied after a later refund
+  // was recorded (and two concurrent retries could both pass the read-based
+  // short-circuit). One row per Stripe refund; the (tenant_id,
+  // stripe_refund_id) unique index is the dedup arbiter, claimed in the SAME
+  // statement as the refunded_amount_cents increment (see
+  // PgPaymentRepository.recordRefundIdempotent). BIGINT matches the
+  // established money-column convention for post-core tables.
+  '264_create_payment_refunds': `
+    CREATE TABLE IF NOT EXISTS payment_refunds (
+      id UUID PRIMARY KEY,
+      tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+      payment_id UUID NOT NULL REFERENCES payments(id) ON DELETE CASCADE,
+      stripe_refund_id TEXT NOT NULL,
+      amount_cents BIGINT NOT NULL CHECK (amount_cents > 0),
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_payment_refunds_stripe_refund
+      ON payment_refunds (tenant_id, stripe_refund_id);
+    CREATE INDEX IF NOT EXISTS idx_payment_refunds_payment
+      ON payment_refunds (tenant_id, payment_id);
+    ALTER TABLE payment_refunds ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE payment_refunds FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_payment_refunds ON payment_refunds;
+    CREATE POLICY tenant_isolation_payment_refunds ON payment_refunds
+      USING (tenant_id = current_setting('app.current_tenant_id', true)::UUID)
+      WITH CHECK (tenant_id = current_setting('app.current_tenant_id', true)::UUID);
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

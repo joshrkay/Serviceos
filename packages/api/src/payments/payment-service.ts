@@ -85,32 +85,39 @@ export async function recordRefund(
     throw new ValidationError('refundCents must be a positive integer');
   }
 
-  // Codex P1 (PR #384) — per-refund idempotency. Same Stripe refund.id
-  // can arrive via both charge.refunded AND charge.refund.updated; the
-  // webhook-event-id dedup doesn't help because the two events have
-  // different ids. Short-circuit here so we don't double-count.
-  //
-  // Limitation: only catches the LATEST refund on this payment. For
-  // multi-partial-refunds where an earlier refund's event re-fires
-  // after a later one has been recorded, we can't deduplicate without
-  // the payment_refunds child table (D2-4a follow-up in TODOS.md).
+  // D2-4a / P0-4 — per-refund idempotency via the payment_refunds claim
+  // ledger. Same Stripe refund.id can arrive via both charge.refunded AND
+  // charge.refund.updated (different event ids, so the webhook-event dedup
+  // doesn't help), a failed event's retry can re-fire an EARLIER refund
+  // after a later one was recorded, and two concurrent retries can race the
+  // read. The claim is keyed (tenant, stripe_refund_id) and taken in the
+  // SAME statement as the increment, so every one of those routes resolves
+  // to exactly one applied refund.
+  const refundedAt = input.refundedAt ?? new Date();
+  let updated: Payment | null;
   if (input.stripeRefundId) {
-    const existing = await paymentRepo.findById(input.tenantId, input.paymentId);
-    if (existing && existing.lastRefundStripeId === input.stripeRefundId) {
+    const result = await paymentRepo.recordRefundIdempotent(input.tenantId, input.paymentId, {
+      refundCents: input.refundCents,
+      refundedAt,
+      stripeRefundId: input.stripeRefundId,
+    });
+    if (result?.duplicate) {
       return {
-        payment: existing,
+        payment: result.payment,
         refundCents: 0,
-        totalRefundedCents: existing.refundedAmountCents ?? 0,
+        totalRefundedCents: result.payment.refundedAmountCents ?? 0,
       };
     }
+    updated = result?.payment ?? null;
+  } else {
+    // No provider refund id (nothing to key a claim on) — the plain atomic
+    // increment with its over-refund guard is the only protection available.
+    updated = await paymentRepo.incrementRefundAtomic(input.tenantId, input.paymentId, {
+      refundCents: input.refundCents,
+      refundedAt,
+      stripeRefundId: null,
+    });
   }
-
-  const refundedAt = input.refundedAt ?? new Date();
-  const updated = await paymentRepo.incrementRefundAtomic(input.tenantId, input.paymentId, {
-    refundCents: input.refundCents,
-    refundedAt,
-    stripeRefundId: input.stripeRefundId ?? null,
-  });
 
   if (!updated) {
     // 0 rows came back from the atomic UPDATE. Two reasons that's

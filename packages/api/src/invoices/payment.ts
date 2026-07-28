@@ -404,6 +404,23 @@ export interface PaymentRepository {
     opts: IncrementRefundOptions,
   ): Promise<Payment | null>;
   /**
+   * D2-4a / P0-4 — idempotent refund keyed by the Stripe refund id. In ONE
+   * atomic step: claim a `payment_refunds` row for (tenant, stripeRefundId)
+   * and, only when the claim is NEW and the over-refund guard passes, apply
+   * the `refundedAmountCents` increment. A refund id that was already
+   * recorded — including an EARLIER refund whose failed event retries after
+   * a later refund landed, the interleave that defeats the
+   * latest-id-only `lastRefundStripeId` short-circuit — returns
+   * `duplicate: true` with no increment. Returns null when the payment is
+   * missing/cross-tenant OR the increment would over-refund (caller
+   * distinguishes via findById, mirroring `incrementRefundAtomic`).
+   */
+  recordRefundIdempotent(
+    tenantId: string,
+    id: string,
+    opts: IncrementRefundOptions & { stripeRefundId: string },
+  ): Promise<{ payment: Payment; duplicate: boolean } | null>;
+  /**
    * Invoice-to-cash failure handling — atomically flip a `completed`
    * payment to `failed`, stamping `reversedAt`/`reversalReason`, but ONLY
    * if it has not already been reversed. Returns the updated payment on
@@ -668,6 +685,8 @@ export async function getPaymentsByInvoice(
 
 export class InMemoryPaymentRepository implements PaymentRepository {
   private payments: Map<string, Payment> = new Map();
+  /** D2-4a — per-refund claim ledger keyed `${tenantId}:${stripeRefundId}`. */
+  private refundClaims: Set<string> = new Set();
 
   async create(payment: Payment): Promise<Payment> {
     this.payments.set(payment.id, { ...payment });
@@ -749,6 +768,39 @@ export class InMemoryPaymentRepository implements PaymentRepository {
     };
     this.payments.set(id, updated);
     return { ...updated };
+  }
+
+  /**
+   * D2-4a — mirror of the pg claim+increment. Yields once so concurrent
+   * callers interleave; the check+claim+increment block runs synchronously,
+   * matching the single-statement atomicity of the Pg impl. The claim is
+   * recorded ONLY when the over-refund guard passes, so a rejected
+   * increment never strands a claim that would dedupe a legitimate retry.
+   */
+  async recordRefundIdempotent(
+    tenantId: string,
+    id: string,
+    opts: IncrementRefundOptions & { stripeRefundId: string },
+  ): Promise<{ payment: Payment; duplicate: boolean } | null> {
+    await Promise.resolve();
+    const p = this.payments.get(id);
+    if (!p || p.tenantId !== tenantId) return null;
+    const key = `${tenantId}:${opts.stripeRefundId}`;
+    if (this.refundClaims.has(key)) {
+      return { payment: { ...p }, duplicate: true };
+    }
+    const next = (p.refundedAmountCents ?? 0) + opts.refundCents;
+    if (next > p.amountCents) return null;
+    this.refundClaims.add(key);
+    const updated: Payment = {
+      ...p,
+      refundedAmountCents: next,
+      refundedAt: opts.refundedAt,
+      lastRefundStripeId: opts.stripeRefundId,
+      updatedAt: new Date(),
+    };
+    this.payments.set(id, updated);
+    return { payment: { ...updated }, duplicate: false };
   }
 
   /**
