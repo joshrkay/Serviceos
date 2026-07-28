@@ -154,6 +154,13 @@ const rescheduleSchema = z.object({
 
 interface ResolvedScheduling {
   timezone: string;
+  /**
+   * True when the timezone came from an explicit tenant choice. The seeders
+   * deliberately leave the zone unset until the tenant picks one, so an
+   * unchosen zone must GATE self-service booking rather than fall back to
+   * Eastern — a guessed clock books customers hours off.
+   */
+  timezoneChosen: boolean;
   weeklyHours: WeeklyBusinessHours | null;
   bufferMinutes: number | null;
   serviceAreaZips: string[] | null;
@@ -171,6 +178,7 @@ async function resolveTenantScheduling(
   if (!deps.settingsRepo) {
     return {
       timezone: DEFAULT_BOOKING_TIMEZONE,
+      timezoneChosen: true, // dev harness without a settings repo — not tenant data
       weeklyHours: null,
       bufferMinutes: null,
       serviceAreaZips: null,
@@ -180,10 +188,27 @@ async function resolveTenantScheduling(
   const config = schedulingConfigFromSettings(settings);
   return {
     timezone: config.timezone || DEFAULT_BOOKING_TIMEZONE,
+    timezoneChosen: Boolean(config.timezone),
     weeklyHours: config.weeklyHours,
     bufferMinutes: config.bufferMinutes,
     serviceAreaZips: settings?.serviceAreaZips ?? null,
   };
+}
+
+/**
+ * Self-service booking is gated on a CHOSEN tenant timezone: availability and
+ * holds are computed/validated in the tenant zone, and substituting Eastern
+ * for an unset zone silently books non-Eastern tenants hours off (the exact
+ * guess the scheduling gate exists to prevent). 409 so clients surface a
+ * clear "not bookable yet" state rather than a server error.
+ */
+function requireChosenTimezone(res: Response, scheduling: ResolvedScheduling): boolean {
+  if (scheduling.timezoneChosen) return true;
+  res.status(409).json({
+    error: 'TIMEZONE_NOT_CONFIGURED',
+    message: 'Online booking is unavailable until the business sets its timezone',
+  });
+  return false;
 }
 
 /**
@@ -549,6 +574,7 @@ export function createPublicPortalRouter(deps: PublicPortalDeps): Router {
       const { tenantId, customerId } = req.portal!;
       const parsed = availabilityQuerySchema.parse(req.query);
       const scheduling = await resolveTenantScheduling(deps, tenantId);
+      if (!requireChosenTimezone(res, scheduling)) return;
       const timezone = scheduling.timezone;
 
       // Priority-booking members (#6) can book further out; everyone else is
@@ -631,6 +657,7 @@ export function createPublicPortalRouter(deps: PublicPortalDeps): Router {
       // a client can POST any slot — re-check it against the customer's horizon
       // (priority members get the extended one) so it can't be bypassed.
       const scheduling = await resolveTenantScheduling(deps, tenantId);
+      if (!requireChosenTimezone(res, scheduling)) return;
       const timezone = scheduling.timezone;
       // Same defense for business hours: only what GET would offer is bookable.
       if (!isWithinBusinessHours(slotStart, slotEnd, timezone, scheduling.weeklyHours)) {
@@ -893,6 +920,7 @@ export function createPublicPortalRouter(deps: PublicPortalDeps): Router {
       }
 
       const scheduling = await resolveTenantScheduling(deps, tenantId);
+      if (!requireChosenTimezone(res, scheduling)) return;
       const timezone = scheduling.timezone;
       // A reschedule is a new commitment — hold it to the same business-hours
       // discipline as a fresh booking.
