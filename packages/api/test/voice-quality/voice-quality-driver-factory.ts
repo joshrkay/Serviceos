@@ -110,8 +110,18 @@ function classifierJsonForTurn(script: VoiceQualityScript, turnIndex: number): s
   const slots = (turn.expected.slots ?? {}) as Record<string, unknown>;
   const entities: Record<string, unknown> = {};
   if (intent === 'create_customer') {
-    const name = displayNameFromCaller(turn.caller);
+    // Slots are the source of truth (same convention as proposalReference /
+    // lineItemDescriptions below): the utterance-regex fallback only matches
+    // "name is / I am / this is <Name>" phrasings, and an operator-style
+    // "Add a new customer, <Name>, <address>" sentence defeats it — which
+    // silently emitted a nameless classify response and made the handler
+    // decline to draft (needs_name) on a scenario that pins create_customer.
+    const name =
+      (typeof slots.name === 'string' ? slots.name : undefined) ??
+      displayNameFromCaller(turn.caller);
     if (name) entities.displayName = name;
+    const address = typeof slots.address === 'string' ? slots.address : undefined;
+    if (address) entities.address = address;
     if (script.callerId) entities.phone = script.callerId;
   }
   if (intent === 'cancel_appointment') {
