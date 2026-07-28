@@ -6,7 +6,12 @@
  * 15 secondary scenarios.
  */
 import { describe, it, expect } from 'vitest';
-import { CreateCustomerVoiceExecutionHandler, splitName } from '../../../src/proposals/execution/create-customer-handler';
+import {
+  CreateCustomerVoiceExecutionHandler,
+  splitName,
+  parseSpokenAddress,
+} from '../../../src/proposals/execution/create-customer-handler';
+import { InMemoryLocationRepository } from '../../../src/locations/location';
 import { createExecutionHandlerRegistry } from '../../../src/proposals/execution/handlers';
 import { createProposal } from '../../../src/proposals/proposal';
 import {
@@ -194,5 +199,141 @@ describe('P18-001 splitName helper', () => {
 
   it('handles whitespace gracefully', () => {
     expect(splitName('  Alex  Smith  ')).toEqual({ firstName: 'Alex', lastName: 'Smith' });
+  });
+});
+
+// ─── Voice field capture: the spoken address on execution ────────────────
+//
+// `customers` has no address column (db/schema.ts `014_create_customers`),
+// so the only destination for a spoken address is a linked
+// `service_locations` row — whose street1/city/state/postal_code are all
+// NOT NULL. The handler therefore promotes the free-text address to a
+// primary location only when all four are recoverable, matching the
+// completeness gate `add_service_location` and lead conversion enforce.
+// An incomplete address is never fabricated into placeholders; it stays
+// verbatim on the proposal payload for a human to finish.
+
+describe('voice field capture — spoken address on execution', () => {
+  it('parseSpokenAddress recovers a complete address', () => {
+    expect(parseSpokenAddress('412 Oak Street, Scottsdale, AZ 85254')).toEqual({
+      street1: '412 Oak Street',
+      city: 'Scottsdale',
+      state: 'AZ',
+      postalCode: '85254',
+    });
+    expect(parseSpokenAddress('412 Oak Street, Scottsdale, AZ, 85254')).toEqual({
+      street1: '412 Oak Street',
+      city: 'Scottsdale',
+      state: 'AZ',
+      postalCode: '85254',
+    });
+  });
+
+  it('parseSpokenAddress returns undefined for the incomplete spoken forms', () => {
+    // These are 4 of the 5 reported transcripts — genuinely missing
+    // city/state/zip. We refuse to invent them.
+    expect(parseSpokenAddress('88 Sycamore Lane')).toBeUndefined();
+    expect(parseSpokenAddress('1207 Riverbell Drive')).toBeUndefined();
+    expect(parseSpokenAddress('34 Quarry Street')).toBeUndefined();
+    expect(parseSpokenAddress('91 Fairway Avenue')).toBeUndefined();
+    // No state — "412 Oak Street, Scottsdale, 85254" as actually spoken.
+    expect(parseSpokenAddress('412 Oak Street, Scottsdale, 85254')).toBeUndefined();
+  });
+
+  it('creates a primary service location when the address is complete', async () => {
+    const customerRepo = new InMemoryCustomerRepository();
+    const locationRepo = new InMemoryLocationRepository();
+    const handler = new CreateCustomerVoiceExecutionHandler(
+      customerRepo,
+      undefined,
+      locationRepo
+    );
+
+    const result = await handler.execute(
+      makeProposal({ name: 'Mario Delingo', address: '412 Oak Street, Scottsdale, AZ 85254' }),
+      { tenantId: TENANT, executedBy: EXECUTOR }
+    );
+
+    expect(result.success).toBe(true);
+    const locations = await locationRepo.findByCustomer(TENANT, result.resultEntityId!);
+    expect(locations).toHaveLength(1);
+    expect(locations[0]).toMatchObject({
+      street1: '412 Oak Street',
+      city: 'Scottsdale',
+      state: 'AZ',
+      postalCode: '85254',
+      isPrimary: true,
+    });
+  });
+
+  it('still creates the customer when the address is incomplete — no placeholder row', async () => {
+    const customerRepo = new InMemoryCustomerRepository();
+    const locationRepo = new InMemoryLocationRepository();
+    const handler = new CreateCustomerVoiceExecutionHandler(
+      customerRepo,
+      undefined,
+      locationRepo
+    );
+
+    const result = await handler.execute(
+      makeProposal({ name: 'Jimmy Hartlett', address: '34 Quarry Street' }),
+      { tenantId: TENANT, executedBy: EXECUTOR }
+    );
+
+    expect(result.success).toBe(true);
+    expect(await locationRepo.findByCustomer(TENANT, result.resultEntityId!)).toHaveLength(0);
+  });
+
+  it('creates no location when no address was spoken (behaviour unchanged)', async () => {
+    const customerRepo = new InMemoryCustomerRepository();
+    const locationRepo = new InMemoryLocationRepository();
+    const handler = new CreateCustomerVoiceExecutionHandler(
+      customerRepo,
+      undefined,
+      locationRepo
+    );
+
+    const result = await handler.execute(
+      makeProposal({ name: 'Alex Smith', phone: '+15551230100' }),
+      { tenantId: TENANT, executedBy: EXECUTOR }
+    );
+
+    expect(result.success).toBe(true);
+    expect(await locationRepo.findByCustomer(TENANT, result.resultEntityId!)).toHaveLength(0);
+  });
+
+  it('succeeds without a locationRepo wired (degrades, never throws)', async () => {
+    const customerRepo = new InMemoryCustomerRepository();
+    const handler = new CreateCustomerVoiceExecutionHandler(customerRepo);
+
+    const result = await handler.execute(
+      makeProposal({ name: 'Mario Delingo', address: '412 Oak Street, Scottsdale, AZ 85254' }),
+      { tenantId: TENANT, executedBy: EXECUTOR }
+    );
+
+    expect(result.success).toBe(true);
+    expect(result.resultEntityId).toBeDefined();
+  });
+
+  it('a location-write failure never unwinds the approved customer', async () => {
+    const customerRepo = new InMemoryCustomerRepository();
+    const exploding = {
+      create: async () => {
+        throw new Error('locations table unavailable');
+      },
+    } as unknown as InMemoryLocationRepository;
+    const handler = new CreateCustomerVoiceExecutionHandler(
+      customerRepo,
+      undefined,
+      exploding
+    );
+
+    const result = await handler.execute(
+      makeProposal({ name: 'Mario Delingo', address: '412 Oak Street, Scottsdale, AZ 85254' }),
+      { tenantId: TENANT, executedBy: EXECUTOR }
+    );
+
+    expect(result.success).toBe(true);
+    expect(result.resultEntityId).toBeDefined();
   });
 });

@@ -1,6 +1,7 @@
 import { Router, Response } from 'express';
 import { z } from 'zod';
 import { v4 as uuidv4 } from 'uuid';
+import { readStructuredAddress, resolveSpokenAddress } from '@ai-service-os/shared';
 import { AuthenticatedRequest } from '../auth/clerk';
 import { requireAuth, requireTenant, requirePermission } from '../middleware/auth';
 import { hasPermission, isValidRole, type Permission, type Role } from '../auth/rbac';
@@ -17,6 +18,7 @@ import {
   isLookupIntent,
   isVoiceApprovalIntent,
   isVoiceEditIntent,
+  CLASSIFIER_CONFIDENCE_THRESHOLD,
 } from '../ai/orchestration/intent-classifier';
 // Lookup wiring (2026-07): `lookup_*` intents previously matched nothing in
 // either dispatch map below and fell through to the generic LLM — which has
@@ -29,6 +31,19 @@ import {
   dispatchAssistantLookup,
   type AssistantLookupDeps,
 } from '../ai/orchestration/lookup-dispatch';
+// Honest-failure guard (2026-07). The intent path can end without a proposal
+// three different ways, and every one of them used to fall into the same
+// DB-less generic LLM — which cheerfully replied "I've scheduled you for two
+// hours on this job." having scheduled nothing. See the module header for the
+// production evidence and the three-layer shape.
+import {
+  isActionIntent,
+  detectFabricatedActionClaim,
+  buildUnmappedCapabilityReply,
+  buildNotUnderstoodReply,
+  buildClassifierErrorReply,
+  NO_ACTION_TAKEN_DIRECTIVE,
+} from '../ai/orchestration/assistant-honesty-guard';
 import type { TaskHandler } from '../ai/tasks/task-handlers';
 // Money/edit/send handlers are no longer constructed inline here — both
 // dispatch maps resolve them from the shared handler-registry below.
@@ -127,6 +142,37 @@ const assistantProposalSchema = z.object({
     .nullish()
     .transform((v) => v ?? undefined),
   missingFields: z.array(z.string()).nullish().transform((v) => v ?? undefined),
+  /**
+   * The internal proposal type, so the card can special-case a family
+   * without pattern-matching on the humanized `type` label.
+   */
+  proposalType: z.string().nullish().transform((v) => v ?? undefined),
+  /**
+   * The ADDRESS SLICE of a `create_customer` payload, passed through
+   * verbatim — the free-text `address` the technician spoke plus whatever
+   * structured fields already exist.
+   *
+   * Deliberately NOT pre-resolved into "here are the inputs to render".
+   * This card shape is the fourth allowlist a spoken address had to survive
+   * (classifier prompt → ExtractedEntities → the classifier sanitizer →
+   * entitiesForProposal → HERE), and every previous one broke by rebuilding
+   * an object and quietly dropping a key. So the server hands over the raw
+   * keys and the card calls the SAME `resolveSpokenAddress` the execution
+   * handler uses to decide what's missing — one implementation, no chance of
+   * the card and the writer disagreeing about "complete".
+   */
+  addressCapture: z
+    .object({
+      address: z.string().nullish().transform((v) => v ?? undefined),
+      street1: z.string().nullish().transform((v) => v ?? undefined),
+      street2: z.string().nullish().transform((v) => v ?? undefined),
+      city: z.string().nullish().transform((v) => v ?? undefined),
+      state: z.string().nullish().transform((v) => v ?? undefined),
+      postalCode: z.string().nullish().transform((v) => v ?? undefined),
+      country: z.string().nullish().transform((v) => v ?? undefined),
+    })
+    .nullish()
+    .transform((v) => v ?? undefined),
 });
 
 const assistantReplySchema = z.object({
@@ -153,6 +199,35 @@ const assistantChatRequestSchema = z.object({
 export const VOICE_APPROVAL_REFUSAL =
   "Tap the card to approve — I don't take approvals by voice here yet.";
 
+/**
+ * The one sentence every unrouted reply MUST carry. An unrouted utterance
+ * created no proposal and changed no row, and the operator has to be able to
+ * read that off the reply without inference — see the guard in
+ * generateAssistantReply for the incident this exists for.
+ */
+export const NOTHING_WAS_SAVED_NOTICE =
+  'Nothing was saved, scheduled, sent, or changed.';
+
+/**
+ * Honest clarification copy for a classification the router cannot act on.
+ * Mirrors the voice pipeline's `clarificationExplanation`
+ * (workers/voice-action-router.ts): when the classifier leaned toward a real
+ * intent below the confidence threshold it is offered back as a "did you
+ * mean", otherwise we just ask for a rephrase.
+ */
+export function buildUnroutedClarification(classification: {
+  lowConfidenceIntent?: string;
+}): string {
+  const guess = classification.lowConfidenceIntent
+    ? ` It sounded like you might want to ${classification.lowConfidenceIntent.replace(/_/g, ' ')} — is that right?`
+    : '';
+  return (
+    `I'm not confident enough about that one to act on it, so I haven't done anything. ` +
+    `${NOTHING_WAS_SAVED_NOTICE}${guess}` +
+    ` Tell me again with the specifics (who, what, and when) and I'll draft it for you to approve.`
+  );
+}
+
 function inferTaskType(text: string): string {
   const t = text.toLowerCase();
   if (t.includes('invoice') || t.includes('payment') || t.includes('overdue')) return 'assistant.invoice';
@@ -161,6 +236,19 @@ function inferTaskType(text: string): string {
   if (t.includes('estimate') || t.includes('quote')) return 'assistant.estimate';
   return 'assistant.general';
 }
+
+/**
+ * Defence in depth for the generic LLM fallback. This path runs with NO tools
+ * and NO database writes — it can only produce text. Before this rule existed,
+ * an imperative that failed to classify ("put me down for two hours on this
+ * one") reached this prompt as "give operational help", and a past-tense
+ * confirmation ("I've scheduled you for two hours on this job.") was the
+ * model's most natural completion — while zero proposal rows were created. A
+ * tradesperson reading that drives away believing the time was logged.
+ */
+const NO_ACTION_CAPABILITY_RULE = `CRITICAL — YOU CANNOT PERFORM ACTIONS. On this path you have no tools, no database access, and no ability to schedule, book, log, record, send, create, update, cancel, or change anything. Nothing you write is executed.
+Therefore you MUST NEVER state or imply that an action was taken, is in progress, or has been queued. Never use phrasings such as "I've scheduled", "I've logged", "I've booked", "I've sent", "that's done", "all set", or "I'll take care of that".
+If the operator asks you to DO something, say plainly that you have not done it and that nothing was saved, then ask for the detail you need so it can be drafted for their approval. Answering a question or explaining a next step is fine.`;
 
 function getSystemPrompt(taskType: string): string {
   if (taskType === 'assistant.invoice') {
@@ -175,7 +263,7 @@ function getSystemPrompt(taskType: string): string {
   if (taskType === 'assistant.estimate') {
     return 'You are a field-service assistant. Focus on estimate clarity, scope, and customer-ready language.';
   }
-  return 'You are a field-service assistant. Provide concise, high-signal operational help for jobs, customers, schedule, and billing.';
+  return `You are a field-service assistant. Provide concise, high-signal operational help for jobs, customers, schedule, and billing.\n\n${NO_ACTION_CAPABILITY_RULE}`;
 }
 
 const outputContract = `
@@ -297,7 +385,7 @@ export interface AssistantRouterDeps {
   lookups?: AssistantLookupDeps;
 }
 
-type AssistantProposal = z.infer<typeof assistantProposalSchema>;
+export type AssistantProposal = z.infer<typeof assistantProposalSchema>;
 
 /**
  * E10 (U7) — lift the trust signals AIProposalCard renders out of a persisted
@@ -394,6 +482,32 @@ export function proposalSignals(
 }
 
 /**
+ * Pull the `create_customer` address slice out of a payload for the review
+ * card. Returns `undefined` when there is no address of any kind, so a card
+ * for a name-and-phone-only customer looks exactly as it did before.
+ *
+ * NOTE THE ABSENCE OF A RENAME. Every key here is spelled exactly as it is
+ * spelled in `createCustomerPayloadSchema`, so the values the card sends back
+ * through `PUT /api/proposals/:id { edits }` land on the payload keys the
+ * execution handler reads. A translation layer here is precisely how the
+ * address got lost four times already.
+ */
+export function addressCaptureFor(
+  proposalType: string,
+  payload: Record<string, unknown>,
+): AssistantProposal['addressCapture'] {
+  if (proposalType !== 'create_customer') return undefined;
+  const resolution = resolveSpokenAddress(payload);
+  if (resolution.kind === 'none') return undefined;
+  const structured = readStructuredAddress(payload);
+  const verbatim = typeof payload.address === 'string' ? payload.address.trim() : '';
+  return {
+    ...(verbatim ? { address: verbatim } : {}),
+    ...structured,
+  };
+}
+
+/**
  * Map the server-side create_customer Proposal to the UI card shape.
  * Reads `name` / `email` / `phone` out of the payload (the router
  * translates classifier `displayName` → contract `name` in AST-01).
@@ -409,11 +523,17 @@ function customerProposalToUI(
   const email = typeof payload.email === 'string' ? payload.email : undefined;
   const phone = typeof payload.phone === 'string' ? payload.phone : undefined;
 
+  // The verbatim spoken address belongs in the SUMMARY the approver reads —
+  // it is the field that was silently dropped on the way to the CRM, so it
+  // has to be visible on the card that authorises the write.
+  const spokenAddress = typeof payload.address === 'string' ? payload.address.trim() : '';
+
   const title = name ? `New customer: ${name}` : 'New customer (needs details)';
   const summary = [
     name ? `Name: ${name}` : 'Name not provided',
     email ? `Email: ${email}` : undefined,
     phone ? `Phone: ${phone}` : undefined,
+    spokenAddress ? `Address: ${spokenAddress}` : undefined,
   ]
     .filter(Boolean)
     .join(' · ');
@@ -427,10 +547,17 @@ function customerProposalToUI(
       { label: 'Name', key: 'name', value: name ?? '' },
       { label: 'Email', key: 'email', value: email ?? '' },
       { label: 'Phone', key: 'phone', value: phone ?? '' },
+      // The verbatim spoken address is editable here too. It is the payload's
+      // `address` key, unrenamed, so an edit lands where the executor reads.
+      { label: 'Address (as spoken)', key: 'address', value: spokenAddress },
     ],
     confidence: confidenceScore >= 0.85 ? 'High' : 'Medium',
     type: 'Customer',
     status: 'Pending',
+    proposalType: 'create_customer',
+    // The address slice the card turns into "city / state / ZIP" inputs when
+    // an address was captured but can't yet satisfy service_locations.
+    addressCapture: addressCaptureFor('create_customer', payload),
     // E10 (U7) — surface any missing-field / confidence signals (a
     // create_customer with only a name carries missingFields).
     ...proposalSignals(payload, sourceContext),
@@ -599,6 +726,12 @@ function proposalToUI(
     confidence: (proposal.confidenceScore ?? 0) >= 0.85 ? 'High' : 'Medium',
     type: cardType,
     status: 'Pending',
+    proposalType: proposal.proposalType,
+    // Same address slice as customerProposalToUI. Kept on BOTH mappers on
+    // purpose: `create_customer` reaches the card through either one
+    // depending on the branch, and a field present on only one of two
+    // parallel serializers is exactly the drift that caused this bug.
+    addressCapture: addressCaptureFor(proposal.proposalType, proposal.payload),
     // E10 (U7) — surface AI-pricing / confidence / missing-field warnings so
     // the card can render them and block Approve on unresolved lines.
     ...signals,
@@ -716,6 +849,14 @@ async function generateAssistantReply(
   // a recognized action (today: create_customer), build a real proposal
   // and return it instead of a free-text LLM reply. Other intents fall
   // through to the LLM — separate stories wire them into the chat.
+  //
+  // Honest-failure guard state, hoisted OUT of the try below so the fallback
+  // path can tell WHY the intent path produced no proposal. Without this the
+  // fallback LLM cannot distinguish "I didn't understand you" from "the
+  // classifier threw", and it answered both by inventing a confirmation.
+  let guardIntent: string | undefined;
+  let guardConfidence: number | undefined;
+  let guardIntentError: string | undefined;
   if (lastUserText.trim().length > 0) {
     try {
       // §3B/3D/3E — resolve the tenant's vertical context (terminology +
@@ -774,6 +915,8 @@ async function generateAssistantReply(
       };
 
       const classification = await classifyIntent(lastUserText, classifyContext, deps.gateway);
+      guardIntent = classification.intentType;
+      guardConfidence = classification.confidence;
 
       // ── Lookup path ────────────────────────────────────────────────
       // Runs BEFORE the chain split and both dispatch maps: a lookup is a
@@ -1165,9 +1308,65 @@ async function generateAssistantReply(
           },
         };
       }
-    } catch {
+
+      // ── Unrouted-intent guard ──────────────────────────────────────
+      // Nothing above matched. The classifier forces ANY result below
+      // CLASSIFIER_CONFIDENCE_THRESHOLD (0.6) to 'unknown' — keeping its best
+      // guess in `lowConfidenceIntent` — so a perfectly ordinary field
+      // imperative lands here whenever the transcript is terse or elliptical.
+      //
+      // Before this guard, 'unknown' fell through to the generic LLM path
+      // below, which is handed the raw imperative and asked for "concise
+      // operational help". A past-tense confirmation is that prompt's most
+      // natural completion, and production produced exactly that:
+      //   "put me down for two hours on this one"
+      //     → "I've scheduled you for two hours on this job."
+      //   "book her for Thursday at ten"
+      //     → "I have scheduled the appointment for Thursday at 10 AM."
+      // No proposal row was created in either case and nothing happened. The
+      // tradesperson drives away believing the time is logged and the job
+      // booked. Nothing in the reply schema or the output contract could
+      // catch this — the reply is well-formed, it is just false.
+      //
+      // The voice pipeline never had this hole: an 'unknown' classification
+      // emits a `voice_clarification` proposal instead of a guess
+      // (workers/voice-action-router.ts#emitClarification). This is the chat
+      // equivalent — ask, and say plainly that nothing was saved.
+      if (classification.intentType === 'unknown') {
+        logger.info('assistant/chat: unrouted intent, returning clarification', {
+          correlationId,
+          tenantId,
+          unknownReason: classification.unknownReason,
+          lowConfidenceIntent: classification.lowConfidenceIntent,
+          confidence: classification.confidence,
+        });
+        return {
+          taskType: 'assistant.clarification',
+          model: 'intent-classifier',
+          usage: { input: 0, output: 0, total: 0 },
+          message: {
+            role: 'assistant' as const,
+            content: buildUnroutedClarification(classification),
+            reasoning:
+              `Unrouted (${classification.unknownReason ?? 'unknown_intent'}, confidence ` +
+              `${classification.confidence.toFixed(2)}) — asked for clarification instead of ` +
+              'answering, because nothing was executed.',
+          },
+        };
+      }
+    } catch (err) {
       // Classifier failure should never break the chat — drop into the
-      // generic LLM path so the operator still gets a response.
+      // generic LLM path so the operator still gets a response. But it must
+      // never be SILENT: this catch previously swallowed every classifier
+      // exception with no log at all, so the resulting generic-LLM reply
+      // (which can no longer claim an action, but still answers from nothing)
+      // was indistinguishable from a healthy turn in production.
+      logger.error('assistant/chat: intent path failed, falling back to generic LLM', {
+        correlationId,
+        tenantId,
+        error: err instanceof Error ? err.message : String(err),
+        stack: err instanceof Error ? err.stack : undefined,
+      });
     }
   }
 
@@ -1186,7 +1385,15 @@ async function generateAssistantReply(
       tenantId,
       responseFormat: 'json',
       messages: [
-        { role: 'system', content: `${systemPrompt}\n\n${outputContract}` },
+        // Honest-failure guard, layer 2. This path has no tools and writes
+        // nothing; the model is the only participant that doesn't know that,
+        // so it is told. A directive alone is not the fix — the model can
+        // ignore it, which is exactly what the two observed fabrications
+        // were — so layer 3 below verifies the answer regardless.
+        {
+          role: 'system',
+          content: `${systemPrompt}\n\n${NO_ACTION_TAKEN_DIRECTIVE}\n\n${outputContract}`,
+        },
         ...messages.filter((m) => m.role !== 'system'),
       ],
       temperature: 0.2,
@@ -1195,6 +1402,40 @@ async function generateAssistantReply(
     });
 
     const parsed = assistantReplySchema.parse(JSON.parse(response.content));
+
+    // ── Honest-failure guard, layer 3 ────────────────────────────────
+    // Nothing on this path persists anything. So a reply that carries no
+    // proposal AND claims a completed action is, by construction, false —
+    // we do not need to guess, we know. Verify rather than trust: the two
+    // production fabrications came from a model that had every opportunity
+    // to behave and didn't, and a prompt instruction cannot be relied on to
+    // change that.
+    //
+    // Scoped to proposal-less replies exactly as the defect is scoped. A
+    // reply that carries a proposal legitimately says "I've drafted…",
+    // because it has.
+    const fabricated = parsed.proposal
+      ? null
+      : detectFabricatedActionClaim(parsed.content);
+    if (fabricated) {
+      logger.error('assistant/chat: suppressed fabricated action confirmation', {
+        correlationId,
+        tenantId,
+        taskType,
+        intent: guardIntent,
+        confidence: guardConfidence,
+        intentError: guardIntentError,
+        claim: fabricated,
+      });
+      // Three failures, three experiences. Layer 1 already took "I can't do
+      // that" (a confident, unmapped write intent never reaches here), so
+      // what is left is the other two — and they are genuinely different
+      // things to say to an operator standing in someone's kitchen.
+      return guardIntentError
+        ? buildClassifierErrorReply(guardIntentError)
+        : buildNotUnderstoodReply(guardConfidence);
+    }
+
     return {
       taskType,
       model: response.model,

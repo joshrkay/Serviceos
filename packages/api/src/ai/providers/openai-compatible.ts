@@ -6,6 +6,70 @@ type OpenAIChatMessage = OpenAI.Chat.Completions.ChatCompletionMessageParam;
 type OpenAIContentPart = OpenAI.Chat.Completions.ChatCompletionContentPart;
 
 /**
+ * OpenAI rejects `response_format: { type: 'json_object' }` outright unless the
+ * outbound messages mention "json" somewhere:
+ *
+ *   400 'messages' must contain the word 'json' in some form, to use
+ *       'response_format' of type 'json_object'
+ *
+ * The rejection lands BEFORE any tokens are generated, so a caller that forgets
+ * the word fails 100% of the time — and a caller that swallows the error as an
+ * advisory skip (as the supervisor annotator sweep did) re-issues the same
+ * doomed request on every tick, burning the tenant's AI quota with nothing to
+ * show for it. This helper closes that hole at the ONE point where
+ * `responseFormat: 'json'` is translated into the provider parameter, so no
+ * present or future gateway caller can reintroduce the bug.
+ *
+ * Deliberately case-insensitive and `parts`-aware: the precondition is
+ * satisfied by any mention, in any message, in either the plain `content` or a
+ * text content part.
+ */
+export function messagesMentionJson(messages: LLMMessage[]): boolean {
+  return messages.some((message) => {
+    if (typeof message.content === 'string' && message.content.toLowerCase().includes('json')) {
+      return true;
+    }
+    return (
+      Array.isArray(message.parts) &&
+      message.parts.some(
+        (part) =>
+          part != null &&
+          part.type === 'text' &&
+          typeof part.text === 'string' &&
+          part.text.toLowerCase().includes('json'),
+      )
+    );
+  });
+}
+
+/**
+ * Minimal instruction injected only when a JSON-mode request would otherwise be
+ * rejected. Intentionally says nothing about SHAPE — the caller's own prompt
+ * owns the schema; this exists purely to satisfy the provider precondition.
+ */
+export const JSON_MODE_SYSTEM_INSTRUCTION =
+  'Respond with a single valid JSON object and nothing else.';
+
+/**
+ * Guard for the JSON-mode precondition. Chosen remedy is INJECTION rather than
+ * throwing in development, because a dev-only throw would convert a silent
+ * production 400 into a loud crash only on the paths that are already broken,
+ * while leaving production just as broken; injecting makes the request VALID,
+ * which is what the caller asked for by setting `responseFormat: 'json'`.
+ *
+ * Cannot silently change behaviour for callers that already work: when the word
+ * is already present this returns the SAME ARRAY BY REFERENCE, so those
+ * requests stay byte-identical (load-bearing here — cassette hashes and the
+ * gateway cache key are derived from message content). Injection also happens
+ * inside the adapter, i.e. downstream of the gateway's cache-key computation,
+ * so it cannot perturb cache identity either.
+ */
+export function ensureJsonModeMessages(messages: LLMMessage[]): LLMMessage[] {
+  if (messagesMentionJson(messages)) return messages;
+  return [{ role: 'system', content: JSON_MODE_SYSTEM_INSTRUCTION }, ...messages];
+}
+
+/**
  * Translate gateway messages to the OpenAI chat format. Messages without
  * `parts` pass through as plain string content (the text path is unchanged);
  * messages with `parts` become an ordered content-part array — the message's
@@ -299,8 +363,14 @@ export class OpenAICompatibleProvider implements LLMProvider, EmbeddingProvider 
         {
           model,
           // Translate gateway messages (text + optional multimodal parts) to the
-          // OpenAI chat format via the shared pure helper.
-          messages: buildChatMessages(request.messages),
+          // OpenAI chat format via the shared pure helper. `ensureJsonModeMessages`
+          // is a strict no-op unless this is a JSON-mode request whose messages
+          // would trip OpenAI's "must contain the word 'json'" precondition.
+          messages: buildChatMessages(
+            request.responseFormat === 'json'
+              ? ensureJsonModeMessages(request.messages)
+              : request.messages,
+          ),
           temperature: request.temperature ?? 0.2,
           max_tokens: request.maxTokens,
           response_format:
