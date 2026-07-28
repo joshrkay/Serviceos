@@ -1251,6 +1251,9 @@ export function createExecutionHandlerRegistry(deps?: {
       deps?.auditRepo,
       deps?.jobRepo,
       deps?.locationRepo,
+      // QA-2026-07-28 — enables the tenant-scoped customer existence check
+      // (the jobId check uses jobRepo, already threaded above).
+      deps?.customerRepo,
     ),
     new CreateInvoiceScheduleExecutionHandler(deps?.scheduleRepo, deps?.invoiceRepo, deps?.settingsRepo, deps?.estimateRepo),
     new BatchInvoiceExecutionHandler(deps?.proposalRepo),

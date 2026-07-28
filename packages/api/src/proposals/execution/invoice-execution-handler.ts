@@ -10,6 +10,7 @@ import { SettingsRepository } from '../../settings/settings';
 import { AuditRepository } from '../../audit/audit';
 import { JobRepository, createJob } from '../../jobs/job';
 import { LocationRepository } from '../../locations/location';
+import { CustomerRepository } from '../../customers/customer';
 
 /**
  * P5-005 — Deterministic execution for draft_invoice proposals.
@@ -41,6 +42,10 @@ export class CreateInvoiceExecutionHandler implements ExecutionHandler {
     // auditRepo so existing positional call sites remain valid.
     private readonly jobRepo?: JobRepository,
     private readonly locationRepo?: LocationRepository,
+    // QA-2026-07-28 — tenant-scoped EXISTENCE check for the drafted
+    // customerId. See the guard in execute(); optional so the existing
+    // partially-wired unit fixtures keep their current behavior.
+    private readonly customerRepo?: CustomerRepository,
   ) {}
 
   // Degrades to a synthetic-id passthrough (saves nothing) without both
@@ -100,6 +105,43 @@ export class CreateInvoiceExecutionHandler implements ExecutionHandler {
 
     if (!this.invoiceRepo || !this.settingsRepo) {
       return { success: true, resultEntityId: uuidv4() };
+    }
+
+    // QA-2026-07-28 — EXISTENCE checks, not format checks. A drafted id can be
+    // perfectly well-formed and still reference nothing: INVOICE_SYSTEM_PROMPT
+    // used to hand the model `"customerId": "<uuid>"` / `"jobId": "<uuid>"`
+    // templates and close with "Ensure customerId and jobId are present", so it
+    // invented ids — including the RFC 4122 EXAMPLE uuid
+    // 123e4567-e89b-12d3-a456-426614174000, which sails through
+    // `z.string().uuid()`. Unchecked, `customerId` auto-opens a JOB from a
+    // customer that doesn't exist and `jobId` is written straight onto the
+    // invoice as its job container (bypassing the auto-open path entirely) —
+    // either violating a foreign key deep inside createJob/createInvoice or
+    // attaching real money to nothing. So confirm each id names a real record
+    // IN THIS TENANT before any write, and fail with a reason the operator can
+    // act on. Skipped when a repo isn't wired, matching this handler's existing
+    // degradation.
+    if (customerId && this.customerRepo) {
+      const customer = await this.customerRepo.findById(context.tenantId, customerId);
+      if (!customer) {
+        return {
+          success: false,
+          error:
+            `Invoice draft references customer '${customerId}', which does not exist in this ` +
+            `tenant — link a real customer before approving`,
+        };
+      }
+    }
+    if (jobId && this.jobRepo) {
+      const job = await this.jobRepo.findById(context.tenantId, jobId);
+      if (!job) {
+        return {
+          success: false,
+          error:
+            `Invoice draft references job '${jobId}', which does not exist in this tenant — ` +
+            `link a real job before approving`,
+        };
+      }
     }
 
     try {

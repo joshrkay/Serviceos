@@ -806,11 +806,20 @@ describe('U8/U1 — resolveProposalEntity multi-ambiguity chain (P8/U-multi)', (
 // (no fabricated handler) so the regression cannot hide.
 // See docs/solutions/test-failures/mocked-client-shape-masks-server-schema-rejection.md
 describe('U8/U1 — resolveProposalEntity re-draft via REAL handler factory', () => {
-  const CUST_A = '11111111-1111-1111-1111-111111111111';
-  const CUST_B = '22222222-2222-2222-2222-222222222222';
-  const JOB_A = '33333333-3333-3333-3333-333333333333';
-  const JOB_B = '44444444-4444-4444-4444-444444444444';
-  const REAL_JOB = '66666666-6666-6666-6666-666666666666';
+  // QA-2026-07-28 — these MUST be real v4-shaped uuids, not the
+  // 'NNNNNNNN-NNNN-NNNN-NNNN-…' pattern used in the mock-handler blocks above.
+  // The variant nibble there is not [89abAB], so `z.string().uuid()` REJECTS
+  // them, so `draftInvoicePayloadSchema.customerId` never accepted them
+  // either — which nothing noticed while InvoiceTaskHandler skipped
+  // `assertValidProposalPayload`. Adding that gate (and authoring customerId
+  // from the resolved pick rather than the model) surfaced it here: the
+  // "complete case" below asserts a payload with NO gaps, which is only
+  // meaningful if the operator's chosen id is one the contract can hold.
+  const CUST_A = '11111111-1111-4111-8111-111111111111';
+  const CUST_B = '22222222-2222-4222-8222-222222222222';
+  const JOB_A = '33333333-3333-4333-8333-333333333333';
+  const JOB_B = '44444444-4444-4444-8444-444444444444';
+  const REAL_JOB = '66666666-6666-4666-8666-666666666666';
 
   let repo: InMemoryProposalRepository;
   let auditRepo: InMemoryAuditRepository;

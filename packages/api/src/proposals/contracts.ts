@@ -450,8 +450,24 @@ export const updateEstimatePayloadSchema = z.object({
   editActions: z.array(estimateEditActionSchema).min(1),
 });
 
+// QA-2026-07-28 — same shape, and the same reasoning, as
+// draftEstimatePayloadSchema above; see that comment for the live evidence.
+// This path is the WORSE of the two: `customerId` here was a REQUIRED
+// `z.string().uuid()` while INVOICE_SYSTEM_PROMPT handed the model a
+// `"customerId": "<uuid>"` template and closed with "Ensure customerId and
+// jobId are present" — so the model was *obliged* to produce an id it could
+// not possibly know, and an invoice is a money proposal.
+//
+// `customerId` is now authored by the ENTITY RESOLVER (ai/tasks/invoice-task.ts
+// `authorCustomerId`), so it is optional here and an unresolved draft carries
+// the spoken `customerReference` plus `missingFields: ['customerId']` instead
+// of a fabricated uuid. Format validation is NOT sufficient — the RFC 4122
+// example uuid 123e4567-e89b-12d3-a456-426614174000 passes `.uuid()` — so both
+// `customerId` and `jobId` are existence-checked against THIS tenant by
+// CreateInvoiceExecutionHandler before any write.
 export const draftInvoicePayloadSchema = z.object({
-  customerId: z.string().uuid(),
+  customerId: z.string().uuid().optional(),
+  customerReference: z.string().min(1).optional(),
   // B6 — jobId is optional, mirroring draftEstimatePayloadSchema: a
   // resolved customer with no resolvable job reference (e.g. "invoice the
   // Smith account") should still draft for review instead of stalling.
@@ -465,7 +481,16 @@ export const draftInvoicePayloadSchema = z.object({
   taxRateBps: z.number().int().min(0).max(10000).optional(),
   customerMessage: z.string().optional(),
   internalNotes: z.string().optional(),
-});
+})
+  // Precedent: addServiceLocationPayloadSchema / convertLeadPayloadSchema —
+  // a resolved id OR a free-text reference, enforced on the finished object.
+  // NOTE: jobId deliberately does NOT satisfy this. VOX-07 lets the execution
+  // handler proceed on a jobId alone, but a DRAFT that names nobody must still
+  // record who was asked for, and `missingFields: ['customerId']` is what keeps
+  // an unattributed money proposal out of auto-approval.
+  .refine((v) => Boolean(v.customerId || v.customerReference), {
+    message: 'customerId or customerReference is required',
+  });
 
 // Edit-action schema for update_invoice proposals. Mirrors the
 // estimate-editor pattern but scoped to invoice line items: Phase-2
