@@ -381,6 +381,44 @@ export class PgInvoiceRepository extends PgBaseRepository implements InvoiceRepo
   }
 
   /**
+   * P0-3 (reconciler leg) — the guarded absolute balance repair. The status
+   * predicate lives in the UPDATE itself, so a void committing after the
+   * caller's read can never be overwritten back to a paid state; the
+   * repair simply matches 0 rows and returns null.
+   */
+  async reconcileBalanceAtomic(
+    tenantId: string,
+    id: string,
+    balance: { amountPaidCents: number; amountDueCents: number; status: InvoiceStatus },
+    guardStatuses: InvoiceStatus[],
+    now: Date,
+  ): Promise<Invoice | null> {
+    return this.withTenantTransaction(tenantId, async (client) => {
+      const { rows } = await client.query<{ id: string }>(
+        `UPDATE invoices
+         SET amount_paid_cents = $3,
+             amount_due_cents  = $4,
+             status            = $5,
+             updated_at        = $6
+         WHERE id = $2 AND tenant_id = $1
+           AND status = ANY($7)
+         RETURNING id`,
+        [
+          tenantId,
+          id,
+          balance.amountPaidCents,
+          balance.amountDueCents,
+          balance.status,
+          now,
+          guardStatuses,
+        ],
+      );
+      if (rows.length === 0) return null;
+      return this.findByIdWithClient(client, tenantId, id);
+    });
+  }
+
+  /**
    * P0-9 — CAS clear of the payment-link columns: applies only while the
    * row still holds `expectedLinkId`, so a deactivation working from a stale
    * snapshot can never wipe a concurrently re-minted link's columns.

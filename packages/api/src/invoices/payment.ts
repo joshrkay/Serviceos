@@ -66,13 +66,24 @@ async function reconcileInvoiceFromPayments(
 
   const amountDueCents = Math.max(0, invoice.totals.totalCents - paidCents);
   const status = amountDueCents === 0 ? 'paid' : 'partially_paid';
-  const updated = await invoiceRepo.update(tenantId, invoiceId, {
-    amountPaidCents: paidCents,
-    amountDueCents,
-    status,
-    updatedAt: new Date(),
-  });
-  return { invoice: updated ?? invoice, repaired: true, previousStatus: invoice.status };
+  // The payable check above is a fast path over a stale read; the WRITE
+  // carries the same predicate atomically (reconcileBalanceAtomic), so a
+  // void committing between that read and this repair matches 0 rows
+  // instead of being resurrected to 'paid' (P0-3, reconciler leg).
+  const updated = await invoiceRepo.reconcileBalanceAtomic(
+    tenantId,
+    invoiceId,
+    { amountPaidCents: paidCents, amountDueCents, status },
+    ['open', 'partially_paid'],
+    new Date(),
+  );
+  if (!updated) {
+    // The invoice left the payable world mid-repair — report "not repaired"
+    // so the caller skips the post-payment side effects.
+    const live = (await invoiceRepo.findById(tenantId, invoiceId)) ?? invoice;
+    return { invoice: live, repaired: false, previousStatus: live.status };
+  }
+  return { invoice: updated, repaired: true, previousStatus: invoice.status };
 }
 
 /**

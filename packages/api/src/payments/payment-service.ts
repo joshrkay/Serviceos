@@ -270,13 +270,21 @@ async function reconcileInvoiceAfterReversal(
   else if (activePaidCents >= invoice.totals.totalCents) newStatus = 'paid';
   else newStatus = 'partially_paid';
 
-  const updated = await invoiceRepo.update(tenantId, invoice.id, {
-    amountPaidCents: activePaidCents,
-    amountDueCents: newAmountDue,
-    status: newStatus,
-    updatedAt: new Date(),
-  });
-  return { invoice: updated ?? invoice, repaired: true, previousStatus: invoice.status };
+  // The REOPENABLE check above reads a snapshot; the WRITE re-checks the
+  // same predicate atomically so a void committing mid-repair is never
+  // overwritten back to an open/paid state (P0-3, reconciler leg).
+  const updated = await invoiceRepo.reconcileBalanceAtomic(
+    tenantId,
+    invoice.id,
+    { amountPaidCents: activePaidCents, amountDueCents: newAmountDue, status: newStatus },
+    REOPENABLE,
+    new Date(),
+  );
+  if (!updated) {
+    const live = (await invoiceRepo.findById(tenantId, invoice.id)) ?? invoice;
+    return { invoice: live, repaired: false, previousStatus: live.status };
+  }
+  return { invoice: updated, repaired: true, previousStatus: invoice.status };
 }
 
 export async function reversePayment(

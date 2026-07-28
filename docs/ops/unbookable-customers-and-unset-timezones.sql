@@ -68,7 +68,7 @@ SELECT
         FROM proposals p2
         WHERE p2.tenant_id = c.tenant_id
           AND p2.proposal_type = 'create_appointment'
-          AND p2.status = 'failed'
+          AND p2.status = 'execution_failed'
           AND p2.payload ->> 'customerId' = c.id::text
     )                   AS failed_booking_attempts
 

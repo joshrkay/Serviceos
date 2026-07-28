@@ -279,6 +279,41 @@ describe('Postgres integration — atomic credit guards (P0-3 / P0-6)', () => {
     expect(rows.map((r) => r.status)).toEqual(['completed', 'failed']);
   });
 
+  it('reconcileBalanceAtomic never resurrects a void — the guard is in the UPDATE itself', async () => {
+    const invoice = await createOpenInvoice(20000);
+    await invoiceRepo.update(tenant.tenantId, invoice.id, {
+      status: 'void',
+      updatedAt: new Date(),
+    });
+
+    // A crash-repair that read 'open' before the void committed now writes:
+    // the SQL status predicate must reject it.
+    const repaired = await invoiceRepo.reconcileBalanceAtomic(
+      tenant.tenantId,
+      invoice.id,
+      { amountPaidCents: 20000, amountDueCents: 0, status: 'paid' },
+      ['open', 'partially_paid'],
+      new Date(),
+    );
+    expect(repaired).toBeNull();
+
+    const reloaded = await invoiceRepo.findById(tenant.tenantId, invoice.id);
+    expect(reloaded!.status).toBe('void');
+    expect(reloaded!.amountPaidCents).toBe(0);
+
+    // And on a still-payable row the same repair applies.
+    const open = await createOpenInvoice(20000);
+    const applied = await invoiceRepo.reconcileBalanceAtomic(
+      tenant.tenantId,
+      open.id,
+      { amountPaidCents: 5000, amountDueCents: 15000, status: 'partially_paid' },
+      ['open', 'partially_paid'],
+      new Date(),
+    );
+    expect(applied!.status).toBe('partially_paid');
+    expect(applied!.amountPaidCents).toBe(5000);
+  });
+
   it('payment-link CAS clear (P0-9/R3): clears only while the column holds the expected id', async () => {
     const invoice = await createOpenInvoice(5000);
     await invoiceRepo.update(tenant.tenantId, invoice.id, {

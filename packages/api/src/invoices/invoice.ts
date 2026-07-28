@@ -183,6 +183,24 @@ export interface InvoiceRepository {
     now: Date,
   ): Promise<Invoice | null>;
   /**
+   * P0-3 (reconciler leg) — absolute balance repair guarded in the SAME
+   * statement: writes amountPaid/amountDue/status ONLY while the row's
+   * current status is in `guardStatuses`. The crash-repair reconcilers
+   * previously read a payable/reopenable status and then wrote the repaired
+   * balance unconditionally, so a void committing between the read and the
+   * write was resurrected to 'paid'/'partially_paid' — the same
+   * check-then-act hole the atomic increment closes for credits. Returns
+   * the updated invoice, or null when the row is missing or its live status
+   * left the guarded set (the caller treats that as "nothing repaired").
+   */
+  reconcileBalanceAtomic(
+    tenantId: string,
+    id: string,
+    balance: { amountPaidCents: number; amountDueCents: number; status: InvoiceStatus },
+    guardStatuses: InvoiceStatus[],
+    now: Date,
+  ): Promise<Invoice | null>;
+  /**
    * P0-9 — clear the payment-link columns ONLY while they still hold
    * `expectedLinkId` (single compare-and-swap UPDATE). Deactivation flows
    * hold an invoice snapshot that may predate a concurrent
@@ -681,6 +699,30 @@ export class InMemoryInvoiceRepository implements InvoiceRepository {
       amountPaidCents: newPaid,
       amountDueCents: newDue,
       status,
+      updatedAt: now,
+    };
+    this.invoices.set(id, updated);
+    return { ...updated, lineItems: [...updated.lineItems] };
+  }
+
+  async reconcileBalanceAtomic(
+    tenantId: string,
+    id: string,
+    balance: { amountPaidCents: number; amountDueCents: number; status: InvoiceStatus },
+    guardStatuses: InvoiceStatus[],
+    now: Date,
+  ): Promise<Invoice | null> {
+    const i = this.invoices.get(id);
+    if (!i || i.tenantId !== tenantId) return null;
+    // Mirror the Pg WHERE guard: the repair applies only while the live
+    // status is still in the guarded set — a concurrently voided invoice is
+    // left untouched (null), never resurrected.
+    if (!guardStatuses.includes(i.status)) return null;
+    const updated: Invoice = {
+      ...i,
+      amountPaidCents: balance.amountPaidCents,
+      amountDueCents: balance.amountDueCents,
+      status: balance.status,
       updatedAt: now,
     };
     this.invoices.set(id, updated);

@@ -864,3 +864,87 @@ describe('R1 — compensation must not orphan a reconciler-credited payment', ()
     expect(rows[0].status).toBe('completed');
   });
 });
+
+describe('P0-3 reconciler leg — the repair WRITE is status-guarded, not just the read', () => {
+  it('a void committing between the reconciler read and write is never resurrected', async () => {
+    const inner = new InMemoryInvoiceRepository();
+    const paymentRepo = new InMemoryPaymentRepository();
+    const inv = await createInvoice(
+      {
+        tenantId: 'tenant-1',
+        jobId: 'job-1',
+        invoiceNumber: 'INV-RACE-RECON',
+        lineItems: [buildLineItem('1', 'Service', 1, 20000, 1, true)],
+        createdBy: 'u-1',
+      },
+      inner,
+    );
+    await issueInvoice('tenant-1', inv.id, 30, inner);
+
+    // A completed payment row exists but the credit was crash-lost.
+    await paymentRepo.create({
+      id: 'pay-recon-1',
+      tenantId: 'tenant-1',
+      invoiceId: inv.id,
+      amountCents: 10000,
+      method: 'credit_card',
+      status: 'completed',
+      providerReference: 'pi_recon_race',
+      receivedAt: new Date(),
+      processedBy: 'stripe_webhook',
+      createdAt: new Date(),
+      updatedAt: new Date(),
+      refundedAmountCents: 0,
+      refundedAt: null,
+      lastRefundStripeId: null,
+      reversedAt: null,
+      reversalReason: null,
+    } as Payment);
+
+    // The reconciler's own findById returns the STALE open snapshot; the
+    // void commits immediately after that read, before the repair write.
+    let staleServed = false;
+    const racingInvoiceRepo = new Proxy(inner, {
+      get(target, prop, receiver) {
+        if (prop === 'findById' && !staleServed) {
+          return async (tenantId: string, id: string) => {
+            staleServed = true;
+            const snapshot = await inner.findById(tenantId, id); // open
+            await transitionInvoiceStatus(tenantId, id, 'void', inner);
+            return snapshot;
+          };
+        }
+        return Reflect.get(target, prop, receiver);
+      },
+    });
+
+    // Drive the reconcile branch via a duplicate insert (23505).
+    const dupRepo: PaymentRepository = {
+      create: async () => {
+        throw Object.assign(new Error('duplicate key'), { code: '23505' });
+      },
+      findByProviderReference: (t: string, r: string) => paymentRepo.findByProviderReference(t, r),
+      findByInvoice: (t: string, i: string) => paymentRepo.findByInvoice(t, i),
+      update: (t: string, id: string, u: Partial<Payment>) => paymentRepo.update(t, id, u),
+    } as unknown as PaymentRepository;
+
+    const retry = await recordPayment(
+      {
+        tenantId: 'tenant-1',
+        invoiceId: inv.id,
+        amountCents: 10000,
+        method: 'credit_card',
+        providerReference: 'pi_recon_race',
+        processedBy: 'stripe_webhook',
+      },
+      racingInvoiceRepo,
+      dupRepo,
+    );
+
+    // The atomic repair matched 0 rows: the invoice stays void, unrepaired.
+    const reloaded = await inner.findById('tenant-1', inv.id);
+    expect(reloaded!.status).toBe('void');
+    expect(reloaded!.amountPaidCents).toBe(0);
+    expect(retry.invoice.status).toBe('void');
+  });
+});
