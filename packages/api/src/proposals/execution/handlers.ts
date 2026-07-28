@@ -32,7 +32,7 @@ import {
 } from './review-response-handler';
 import { ServiceCreditRepository } from '../../reputation/service-credit';
 import { NoteRepository } from '../../notes/note';
-import { PaymentRepository } from '../../invoices/payment';
+import { PaymentRepository, PaymentLinkCleanupDeps } from '../../invoices/payment';
 import { ExpenseRepository } from '../../expenses/expense';
 import { AuditRepository, InMemoryAuditRepository, createAuditEvent } from '../../audit/audit';
 import type { ConsentEventRepository } from '../../compliance/consent-events';
@@ -1157,6 +1157,8 @@ export function createExecutionHandlerRegistry(deps?: {
   transactionalComms?: TransactionalCommsService;
   noteRepo?: NoteRepository;
   paymentRepo?: PaymentRepository;
+  /** P0-9 — record_payment execution deactivates a link its credit made stale. */
+  paymentLinkCleanup?: PaymentLinkCleanupDeps;
   invoiceDeliveryProvider?: InvoiceDeliveryProvider;
   estimateDeliveryProvider?: EstimateDeliveryProvider;
   analyticsRepo?: DispatchAnalyticsRepository;
@@ -1313,6 +1315,7 @@ export function createExecutionHandlerRegistry(deps?: {
       moneyStateDeps,
       deps?.transactionalComms,
       deps?.auditRepo,
+      deps?.paymentLinkCleanup,
     ),
     new LogExpenseExecutionHandler(deps?.expenseRepo, deps?.auditRepo),
     new ConvertLeadExecutionHandler(deps?.leadRepo, deps?.customerRepo, deps?.auditRepo, deps?.locationRepo),

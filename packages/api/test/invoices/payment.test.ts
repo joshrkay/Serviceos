@@ -948,3 +948,53 @@ describe('P0-3 reconciler leg — the repair WRITE is status-guarded, not just t
     expect(retry.invoice.status).toBe('void');
   });
 });
+
+describe('P0-9 centralized — recordPayment itself kills a link its credit made stale', () => {
+  it('deactivates the stored link (settled) on any entry point that passes cleanup deps', async () => {
+    const invoiceRepo = new InMemoryInvoiceRepository();
+    const paymentRepo = new InMemoryPaymentRepository();
+    const inv = await createInvoice(
+      {
+        tenantId: 'tenant-1',
+        jobId: 'job-1',
+        invoiceNumber: 'INV-CENTRAL-1',
+        lineItems: [buildLineItem('1', 'Service', 1, 10000, 1, true)],
+        createdBy: 'u-1',
+      },
+      invoiceRepo,
+    );
+    await issueInvoice('tenant-1', inv.id, 30, invoiceRepo);
+    await invoiceRepo.update('tenant-1', inv.id, {
+      stripePaymentLinkId: 'plink_central_1',
+      stripePaymentLinkUrl: 'https://pay.stripe.com/central1',
+      updatedAt: new Date(),
+    });
+
+    const deactivated: string[] = [];
+    const cleanup = {
+      provider: {
+        generateLink: async () => { throw new Error('not used'); },
+        deactivateLink: async (linkId: string) => { deactivated.push(linkId); },
+      },
+    };
+
+    // A cash credit through ANY caller (route, webhook, voice proposal,
+    // dues collector) — the cleanup now lives inside recordPayment.
+    const { invoice } = await recordPayment(
+      { tenantId: 'tenant-1', invoiceId: inv.id, amountCents: 10000, method: 'cash', processedBy: 'u-1' },
+      invoiceRepo,
+      paymentRepo,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      cleanup,
+    );
+
+    expect(invoice.status).toBe('paid');
+    expect(deactivated).toEqual(['plink_central_1']);
+    const reloaded = await invoiceRepo.findById('tenant-1', inv.id);
+    expect(reloaded!.stripePaymentLinkId).toBeUndefined();
+  });
+});

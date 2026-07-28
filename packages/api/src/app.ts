@@ -1245,10 +1245,32 @@ export function createApp(): AppWithLifecycle {
   // STRIPE_SECRET_KEY (or STRIPE_API_KEY) is missing while NODE_ENV=production,
   // and emits a loud dev-mode warning when the mock is used.
   const paymentLinkProvider = createPaymentLinkProvider(process.env);
-  // Reference the variable so TS doesn't drop it; the provider will be
-  // wired into routes/workers in a follow-up. The factory call itself is
-  // load-bearing — it asserts the production guard at boot time.
-  void paymentLinkProvider;
+  // Tier 4 (Payment methods — PR 2). When the connectService is wired AND the
+  // tenant has an active Connect account with charges enabled, payments route
+  // directly to the tenant's account via the Stripe-Account header. Without
+  // it, payments stay on the legacy platform path. Shared by the invoice
+  // service, the portal save-card flow (#6 phase 4), the webhook stale-link
+  // cleanup, and the execution-handler registry — all must scope Stripe calls
+  // to the same connected account. Defined HERE (not later, next to the
+  // public invoice service) because the registry construction below consumes
+  // it.
+  const connectAccountResolver = connectService
+    ? {
+        resolveTenantConnectAccount: async (tenantId: string) => {
+          const view = await connectService.getAccount(tenantId);
+          if (!view.accountId) return null;
+          return {
+            accountId: view.accountId,
+            chargesEnabled: view.chargesEnabled,
+          };
+        },
+      }
+    : undefined;
+  // P0-9 — lets the Stripe webhook deactivate a stale hosted payment link as
+  // soon as a credit settles/reprices its invoice (same late-wiring pattern
+  // as customerPaymentMethodRepo: the router reads deps lazily).
+  webhookRouterDeps.paymentLinkProvider = paymentLinkProvider;
+  webhookRouterDeps.connectAccountResolver = connectAccountResolver;
   const noteRepo           = pool ? new PgNoteRepository(pool)           : new InMemoryNoteRepository();
   const conversationRepo   = pool ? new PgConversationRepository(pool)   : new InMemoryConversationRepository();
   // settingsRepo is constructed once above (webhook + /api/settings share it).
@@ -2041,6 +2063,8 @@ export function createApp(): AppWithLifecycle {
     editDeltaRepo: deltaRepo,
     noteRepo,
     paymentRepo,
+    // P0-9 — record_payment execution kills a link its credit made stale.
+    paymentLinkCleanup: { provider: paymentLinkProvider, connectAccountResolver },
     invoiceDeliveryProvider,
     estimateDeliveryProvider,
     analyticsRepo: dispatchAnalyticsRepo,
@@ -3051,30 +3075,8 @@ export function createApp(): AppWithLifecycle {
 
   // Public unauthenticated invoice payment flow (token-authenticated).
   // Stripe Payment Link creation is enabled when STRIPE_SECRET_KEY is set.
-  // Tier 4 (Payment methods — PR 2). When the connectService is
-  // wired AND the tenant has an active Connect account with charges
-  // enabled, payments route directly to the tenant's account via
-  // the Stripe-Account header. Without it, payments stay on the
-  // legacy platform path. Shared by the invoice service and the portal
-  // save-card flow (#6 phase 4) — both must scope Stripe calls to the
-  // same connected account.
-  const connectAccountResolver = connectService
-    ? {
-        resolveTenantConnectAccount: async (tenantId: string) => {
-          const view = await connectService.getAccount(tenantId);
-          if (!view.accountId) return null;
-          return {
-            accountId: view.accountId,
-            chargesEnabled: view.chargesEnabled,
-          };
-        },
-      }
-    : undefined;
-  // P0-9 — lets the Stripe webhook deactivate a stale hosted payment link as
-  // soon as a credit settles/reprices its invoice (same late-wiring pattern
-  // as customerPaymentMethodRepo above: the router reads deps lazily).
-  webhookRouterDeps.paymentLinkProvider = paymentLinkProvider;
-  webhookRouterDeps.connectAccountResolver = connectAccountResolver;
+  // (connectAccountResolver is defined earlier, alongside paymentLinkProvider,
+  // so the execution-handler registry can consume both.)
   const publicInvoiceService = new PublicInvoiceService({
     paymentLinkProvider,
     invoiceRepo,
@@ -5738,6 +5740,10 @@ export function createApp(): AppWithLifecycle {
         undefined,
         undefined,
         auditRepo,
+        undefined,
+        undefined,
+        // P0-9 — the dues credit reprices the invoice; kill a stale link.
+        { provider: paymentLinkProvider, connectAccountResolver },
       );
     },
   };

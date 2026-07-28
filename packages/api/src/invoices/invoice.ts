@@ -551,9 +551,13 @@ export async function transitionInvoiceStatus(
   // Stripe captures money no local record will hold. Best-effort with an
   // audit trail either way; never blocks the transition itself.
   if (updated && (newStatus === 'void' || newStatus === 'canceled') && opts?.paymentLink) {
+    // Deactivate from the POST-transition snapshot, not the read at the top:
+    // a mint can legitimately win its payable guard between that read and the
+    // status update committing, so the pre-transition snapshot may be missing
+    // the very link that must now die on the voided invoice.
     await deactivateInvoicePaymentLink({
       tenantId,
-      invoice,
+      invoice: updated,
       reason: newStatus === 'void' ? 'voided' : 'canceled',
       invoiceRepo: repository,
       provider: opts.paymentLink.provider,

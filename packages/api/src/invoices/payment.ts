@@ -1,6 +1,9 @@
 import { v4 as uuidv4 } from 'uuid';
 import { formatUsdCents } from '@ai-service-os/shared';
 import { Invoice, InvoiceRepository } from './invoice';
+import { deactivateInvoicePaymentLink } from './invoice-payment-link';
+import type { PaymentLinkProvider } from '../payments/payment-link-provider';
+import type { ConnectAccountResolver } from './public-invoice-service';
 import { ValidationError } from '../shared/errors';
 import { RefreshJobMoneyStateDeps, refreshJobMoneyStateSafe } from '../jobs/job-money-state';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
@@ -245,6 +248,20 @@ export interface RecordPaymentAuditContext {
   actorRole?: string;
   /** Correlation id (e.g. Stripe payment_intent / event id) for traceability. */
   correlationId?: string;
+}
+
+/**
+ * P0-9 — stale-link cleanup deps for `recordPayment`. A credit reprices (or
+ * settles) the invoice, so any hosted payment link minted at the OLD balance
+ * must be deactivated — left live, it still captures its original amount and
+ * the excess has nowhere to go. This lives INSIDE recordPayment (rather than
+ * at each HTTP wrapper) so every entry point — REST routes, webhooks, voice
+ * proposal execution, dues collection — gets the cleanup by passing deps;
+ * without them recordPayment behaves as before.
+ */
+export interface PaymentLinkCleanupDeps {
+  provider: PaymentLinkProvider;
+  connectAccountResolver?: ConnectAccountResolver;
 }
 
 export interface PaymentReceiptNotifier {
@@ -508,7 +525,27 @@ export async function recordPayment(
    * → the owner push still fires with a generic label.
    */
   customerNameResolver?: PaymentCustomerNameResolver,
+  /**
+   * P0-9 — when wired, any credited invoice that still carries a hosted
+   * payment link has it deactivated (settled/repriced) before returning.
+   */
+  paymentLinkCleanup?: PaymentLinkCleanupDeps,
 ): Promise<{ payment: Payment; invoice: Invoice }> {
+  // Kill a link the credit just made stale. Best-effort and never blocking;
+  // deactivateInvoicePaymentLink no-ops when the invoice carries no link.
+  const killStaleLink = async (credited: Invoice): Promise<void> => {
+    if (!paymentLinkCleanup || !credited.stripePaymentLinkId) return;
+    await deactivateInvoicePaymentLink({
+      tenantId: input.tenantId,
+      invoice: credited,
+      reason: credited.amountDueCents <= 0 ? 'settled' : 'repriced',
+      invoiceRepo,
+      provider: paymentLinkCleanup.provider,
+      connectAccountResolver: paymentLinkCleanup.connectAccountResolver,
+      auditRepo,
+      actor: { actorId: input.processedBy, actorRole: auditContext?.actorRole ?? 'system' },
+    });
+  };
   const errors = validatePaymentInput(input);
   if (errors.length > 0) throw new ValidationError(`Validation failed: ${errors.join(', ')}`);
 
@@ -598,6 +635,7 @@ export async function recordPayment(
             customerNameResolver,
           });
         }
+        await killStaleLink(reconciled);
         return { payment: existing, invoice: reconciled };
       }
     }
@@ -645,6 +683,7 @@ export async function recordPayment(
         .filter((p) => (p.status === 'completed' || p.status === 'processing') && !p.reversedAt)
         .reduce((sum, p) => sum + p.amountCents, 0);
       if (activeSum > 0 && activeSum <= live.amountPaidCents) {
+        await killStaleLink(live);
         return { payment, invoice: live };
       }
     }
@@ -702,6 +741,8 @@ export async function recordPayment(
     paymentReceiptNotifier,
     customerNameResolver,
   });
+
+  await killStaleLink(updatedInvoice);
 
   return { payment, invoice: updatedInvoice };
 }

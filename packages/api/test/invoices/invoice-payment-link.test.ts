@@ -639,3 +639,68 @@ describe('Codex P1 — a loser-link cleanup miss is audited with the link id', (
     });
   });
 });
+
+describe('Codex P1 — void deactivation uses the POST-transition snapshot', () => {
+  it('kills a link that won its mint guard between the transition read and the status commit', async () => {
+    const { InMemoryInvoiceRepository, createInvoice, issueInvoice, transitionInvoiceStatus } =
+      await import('../../src/invoices/invoice');
+    const { InMemoryAuditRepository } = await import('../../src/audit/audit');
+    const { buildLineItem } = await import('../../src/shared/billing-engine');
+
+    const inner = new InMemoryInvoiceRepository();
+    const auditRepo = new InMemoryAuditRepository();
+    const invoice = await createInvoice(
+      {
+        tenantId: 'tenant-1',
+        jobId: 'job-1',
+        invoiceNumber: 'INV-SNAP-1',
+        lineItems: [buildLineItem('1', 'S', 1, 10000, 1, true)],
+        createdBy: 'u-1',
+      },
+      inner,
+    );
+    await issueInvoice('tenant-1', invoice.id, 30, inner);
+
+    // The mint lands AFTER the transition's read (invoice had no link) but
+    // BEFORE the status update commits — its payable guard legitimately
+    // passes. The deactivation must therefore work from the POST-update
+    // snapshot, which carries the fresh link.
+    let mintInjected = false;
+    const racingRepo = new Proxy(inner, {
+      get(target, prop, receiver) {
+        if (prop === 'update' && !mintInjected) {
+          return async (tenantId: string, id: string, updates: unknown) => {
+            mintInjected = true;
+            await inner.setPaymentLinkIfPayable(
+              tenantId,
+              id,
+              { linkId: 'plink_mid_transition', linkUrl: 'https://pay.stripe.com/mid' },
+              10000,
+              new Date(),
+            );
+            return inner.update(tenantId, id, updates as never);
+          };
+        }
+        return Reflect.get(target, prop, receiver);
+      },
+    });
+
+    const deactivated: string[] = [];
+    const provider = {
+      generateLink: async () => { throw new Error('not used'); },
+      deactivateLink: async (linkId: string) => { deactivated.push(linkId); },
+    };
+
+    const result = await transitionInvoiceStatus('tenant-1', invoice.id, 'void', racingRepo, undefined, {
+      auditRepo,
+      paymentLink: { provider },
+    });
+
+    expect(result!.status).toBe('void');
+    // The pre-transition snapshot had NO link; only the post-update snapshot
+    // sees plink_mid_transition — and it must die.
+    expect(deactivated).toEqual(['plink_mid_transition']);
+    const reloaded = await inner.findById('tenant-1', invoice.id);
+    expect(reloaded!.stripePaymentLinkId).toBeUndefined();
+  });
+});

@@ -1275,11 +1275,14 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
             deps.paymentReceiptNotifier,
             deps.auditRepo,
             { actorRole: 'system', correlationId: paymentIntentRef },
+            undefined,
+            // The link that produced this capture is consumed (and any other
+            // stored link is now mispriced) — recordPayment kills it.
+            deps.paymentLinkProvider
+              ? { provider: deps.paymentLinkProvider, connectAccountResolver: deps.connectAccountResolver }
+              : undefined,
           );
           logger.info('Invoice marked paid via Stripe checkout', { tenantId, invoiceId, amountTotal });
-          // The link that produced this capture is consumed (and any other
-          // stored link is now mispriced) — kill it so it can't fire again.
-          await killStaleInvoiceLink(tenantId, creditedInvoice);
         } catch (payErr) {
           if (payErr instanceof ValidationError) {
             if (payErr.message.includes('exceeds amount due')) {
@@ -1318,6 +1321,10 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
                   deps.paymentReceiptNotifier,
                   deps.auditRepo,
                   { actorRole: 'system', correlationId: paymentIntentRef },
+                  undefined,
+                  deps.paymentLinkProvider
+                    ? { provider: deps.paymentLinkProvider, connectAccountResolver: deps.connectAccountResolver }
+                    : undefined,
                 );
                 logger.info('Invoice paid at capped amount', {
                   tenantId, invoiceId, requested: amountTotal, paid: capped,
@@ -1330,7 +1337,6 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
                   invoiceStatus: creditedInvoice.status,
                   reason: 'capped_to_balance',
                 });
-                await killStaleInvoiceLink(tenantId, creditedInvoice);
               }
             } else if (payErr.message.includes('status')) {
               // Invoice already settled (paid/void/canceled) — idempotent for
@@ -1598,13 +1604,16 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
             deps.paymentReceiptNotifier,
             deps.auditRepo,
             { actorRole: 'system', correlationId: piId },
+            undefined,
+            // P0-9 — recordPayment kills any link still priced at the
+            // pre-credit balance.
+            deps.paymentLinkProvider
+              ? { provider: deps.paymentLinkProvider, connectAccountResolver: deps.connectAccountResolver }
+              : undefined,
           );
           logger.info('Invoice marked paid via payment_intent.succeeded (async settlement)', {
             tenantId, invoiceId, amountCents, paymentIntentId: piId,
           });
-          // P0-9 — this credit settled/repriced the invoice; kill any link
-          // still priced at the pre-credit balance.
-          await killStaleInvoiceLink(tenantId, creditedInvoice);
         } catch (payErr) {
           if (
             payErr instanceof ValidationError &&
