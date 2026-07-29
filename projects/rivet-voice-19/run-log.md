@@ -136,6 +136,23 @@ as a known follow-up for the next phase.
 | P-7 | B5.3 | The staleness gate on reassignment (`checkSchedulingProposalFreshness`) compares against `proposal.sourceContext.{status,scheduledStart,technicianId}`, but nothing in the voice draft path ever snapshots those onto a reassign proposal — so for a genuinely voice-drafted proposal the gate executes and always reports "fresh": a structural no-op. | **Not fixed — logged.** Found while writing B5.3's AC-5 proof. The test proves the mechanism genuinely blocks when a stale baseline exists (stamped manually), but does **not** claim the drafting path populates one. Outside B5.3's declared scope; recorded rather than quietly counted as a working safeguard. |
 | P-3 | Item 9 → B4.7 | `RescheduleAppointmentTaskHandler` and `CancelAppointmentTaskHandler` never read `existingEntities.appointmentId`; they re-resolved via `resolveActiveAppointmentId`, which only answers when the tenant has **exactly one** active appointment. In any shop with two jobs on the books, "Move the Garcia job to Thursday at 10" gated as unresolvable — even though the router had already disambiguated the reference and threaded the correct id. Found empirically: a shared two-appointment fixture made the second test fail with `Payload must include a valid appointmentId`. | **Fixed** — resolver-verified id now wins, single-active fallback retained for the SCH-03 first-turn case. Five regression tests, the key one using the two-appointment fixture that used to fail. Same defect class as B5.3's reassign gate. |
 
+## D-013 integrity check (definition-of-done item)
+
+Re-verified at the current head, after all focus work landed — not just at run start:
+
+- `routes/assistant.ts`, `ai/voice-turn/create-voice-turn-processor.ts` and
+  `ai/tasks/proposal-approval-task.ts` are **byte-untouched** vs `origin/main`.
+- `workers/voice-action-router.ts` IS modified (B5.5's `en_route` branch), so it was inspected
+  rather than assumed: the branch sits at ~:1338, **before** the RV-071/225 gate at ~:1412, but it
+  fires only when `classification.intentType === 'en_route'`. Approval and edit intents do not
+  match it and still reach the gate unchanged.
+- No added line anywhere in the diff touches `isVoiceApprovalIntent`, `isVoiceEditIntent`,
+  `ownerSession`, `VOICE_APPROVAL_REFUSAL`, `RV-071` or `RV-225` — the only matches are this run
+  log's own prose.
+- Contract tests at the current head: **86 passed** across the catalog contract, intent-map
+  contract, voice approval/edit gather refusals and the task-level approval re-check.
+  `npm run test:voice-fixtures`: **22 passed**.
+
 ## Deferred-five integrity check (definition-of-done item)
 
 Verified by diff against `origin/main`, not by assertion:
