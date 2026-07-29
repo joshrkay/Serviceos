@@ -188,4 +188,51 @@ describe('useOnboardingConversation — B1.19 AC-1/AC-2', () => {
     expect(result.current.completed).toBe(true);
     expect(result.current.proposalIds).toEqual(['prop-1', 'prop-2']);
   });
+
+  // Regression: the session ref and history state initialize once at mount, so
+  // a tenant switch while this hook stays mounted used to bootstrap with the
+  // PREVIOUS tenant's session id. That took the expected 404, and the recovery
+  // path then cleared the NEW tenant's perfectly valid stored session.
+  it('re-seeds from the new tenant’s storage when tenantId changes', async () => {
+    const OTHER = 'tenant-conv-2';
+    window.localStorage.setItem(
+      `serviceos.onboarding_conversation.session.${OTHER}`,
+      'sess-other',
+    );
+    window.localStorage.setItem(
+      `serviceos.onboarding_conversation.history.${OTHER}`,
+      JSON.stringify([{ role: 'assistant', text: 'welcome back' }]),
+    );
+
+    apiFetchMock.mockResolvedValue(
+      jsonResponse(200, {
+        sessionId: 'sess-1',
+        assistantMessage: 'Hi!',
+        state: 'profile_capture',
+        turnCount: 0,
+        completed: false,
+        proposalIds: [],
+      }),
+    );
+
+    const { result, rerender } = renderHook(
+      ({ tenant }) => useOnboardingConversation(tenant),
+      { initialProps: { tenant: TENANT } },
+    );
+    await waitFor(() => expect(result.current.loading).toBe(false));
+
+    apiFetchMock.mockClear();
+    rerender({ tenant: OTHER });
+    await waitFor(() => expect(result.current.loading).toBe(false));
+
+    // Bootstrapped with the NEW tenant's stored session, not the old one…
+    expect(apiFetchMock).toHaveBeenCalledWith(
+      '/api/onboarding/conversation/turn',
+      expect.objectContaining({ body: JSON.stringify({ sessionId: 'sess-other' }) }),
+    );
+    // …and that tenant's stored session survived.
+    expect(
+      window.localStorage.getItem(`serviceos.onboarding_conversation.session.${OTHER}`),
+    ).not.toBeNull();
+  });
 });

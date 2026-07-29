@@ -174,6 +174,16 @@ export function useOnboardingConversation(tenantId: string): UseOnboardingConver
     setLoading(true);
     setError(null);
 
+    // Re-seed from THIS tenant's storage keys before bootstrapping. The ref
+    // and the history state are initialized once at mount, so on a tenant
+    // switch while this route stays mounted they still hold the previous
+    // tenant's values: we would submit the old session under the new tenant,
+    // take the expected 404, and the recovery below would then clear the NEW
+    // tenant's perfectly valid stored session — while the old tenant's
+    // transcript rendered during the transition.
+    sessionIdRef.current = readSessionId(tenantId);
+    setHistory(readHistory(tenantId));
+
     (async () => {
       try {
         const existingSessionId = sessionIdRef.current;
