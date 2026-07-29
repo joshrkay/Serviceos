@@ -179,7 +179,11 @@ describe('EstimateApprovalPage — mobile layout contract', () => {
           ...view,
           lineItems: [
             // 'per gal' is the LONGEST unit in catalogUnitSchema — the worst
-            // case for the narrow (3rem) Qty track at 320px.
+            // case for the narrow 2rem Qty track at 320px. The track is
+            // deliberately NOT widened: at 320px the description track has
+            // only ~30px of slack, and the existing e2e guard requires it to
+            // stay above that, so the unit wraps inside the track (adding
+            // height) rather than stealing width.
             { description: 'Sealant', quantity: 12, unit: 'per gal', unitPriceCents: 4_200, totalCents: 50_400 },
             { description: 'Prep labor', quantity: 3, unitPriceCents: 8_500, totalCents: 25_500 },
           ],
