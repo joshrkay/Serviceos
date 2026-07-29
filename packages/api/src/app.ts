@@ -5554,6 +5554,10 @@ export function createApp(): AppWithLifecycle {
         // partly-completed form wizard) is not asked for it again on the
         // gated tenant-settings card. Never a source of a guessed zone.
         settingsRepo,
+        // Review finding #4 — session-scoped advisory lock so two browser
+        // tabs racing the same persisted sessionId can't clobber each
+        // other's turn (see OnboardingConversationDeps.pool doc).
+        pool: pool ?? undefined,
       }),
     }),
   );

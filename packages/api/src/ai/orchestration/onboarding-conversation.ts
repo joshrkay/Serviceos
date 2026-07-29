@@ -12,6 +12,7 @@
  * emission).
  */
 import { v4 as uuidv4 } from 'uuid';
+import type { Pool, PoolClient } from 'pg';
 import { LLMGateway } from '../gateway/gateway';
 import {
   AuditRepository,
@@ -68,6 +69,34 @@ export interface OnboardingConversationDeps {
   settingsRepo?: Pick<SettingsRepository, 'findByTenant'>;
   /** Injectable clock. Defaults to `() => new Date()`. */
   now?: () => Date;
+  /**
+   * Review finding #4 — two browser tabs can read the SAME persisted
+   * `sessionId` out of localStorage and POST a turn concurrently.
+   * `OnboardingSessionRepository.update` is an unconditional
+   * read-then-write with no version/CAS column (db/onboarding-session-
+   * repository.ts) and nothing upstream serializes two `turn()` calls for
+   * the same session, so two concurrent requests both read the SAME
+   * pre-turn state, both independently advance the FSM from it, and the
+   * second `update()` silently clobbers the first's transcript +
+   * extractions — worse on the TERMINAL turn, where both calls run
+   * `emitProposalBatches` and persist two full, independently-random-ID'd
+   * proposal batches (duplicate onboarding cards, duplicate templates).
+   *
+   * When supplied, `turn()` wraps its entire read → FSM-advance → write
+   * critical section in a SESSION-scoped Postgres advisory lock (same
+   * `pg_advisory_lock`/`hashtextextended` instrument as
+   * `activate-pack-with-seed.ts`'s `lockPool` — composes with, does not
+   * duplicate, that fix) so a second concurrent request for the same
+   * (tenant, session) BLOCKS until the first commits, then reads the
+   * FIRST request's already-advanced state — never the stale pre-turn
+   * one. On the terminal turn this makes the second request's `turn()`
+   * hit step 2's "terminal sessions short-circuit" and return the
+   * EXISTING proposal batch instead of emitting a duplicate one.
+   *
+   * Optional: absent (dev/test without a DB) preserves the pre-fix
+   * behavior exactly — no lock, no serialization.
+   */
+  pool?: Pool;
 }
 
 export interface TurnRequest {
@@ -108,7 +137,59 @@ export interface TurnResponse {
 export class OnboardingConversationOrchestrator {
   constructor(private readonly deps: OnboardingConversationDeps) {}
 
+  /**
+   * Review finding #4 — public entry point. Only a request naming an
+   * EXISTING `sessionId` can race another request for the same session (a
+   * brand-new session's id is unknown to anyone else at creation time, so
+   * there is nothing to serialize against yet). When `deps.pool` is wired,
+   * take the session-scoped advisory lock around the whole turn; otherwise
+   * (or for a new session) run `turnLocked` directly, exactly as before.
+   */
   async turn(req: TurnRequest): Promise<TurnResponse> {
+    if (req.sessionId && this.deps.pool) {
+      return this.withSessionLock(req.tenantId, req.sessionId, this.deps.pool, () =>
+        this.turnLocked(req),
+      );
+    }
+    return this.turnLocked(req);
+  }
+
+  /**
+   * Acquire a SESSION-scoped (tenant, sessionId) Postgres advisory lock on a
+   * dedicated connection for the duration of `fn`, then release it. Uses the
+   * BLOCKING form (`pg_advisory_lock`, not a try-lock): unlike the pack-seed
+   * fallback lock (a background executor, where failing fast and reporting
+   * `PACK_ACTIVATION_IN_PROGRESS` is correct), this guards an interactive
+   * HTTP request — the right behavior for a second tab's concurrent turn is
+   * to wait the brief moment for the first turn to commit and then proceed
+   * against the now-current state, not to error out. Safe against a dead
+   * connection holding the lock forever: the lock is session-scoped, so if
+   * release fails the connection is destroyed (`client.release(true)`)
+   * rather than returned to the pool, and Postgres frees every advisory lock
+   * held by a session when that session's connection closes.
+   */
+  private async withSessionLock<T>(
+    tenantId: string,
+    sessionId: string,
+    pool: Pool,
+    fn: () => Promise<T>,
+  ): Promise<T> {
+    const client: PoolClient = await pool.connect();
+    const key = `onboarding_session:${tenantId}:${sessionId}`;
+    try {
+      await client.query('SELECT pg_advisory_lock(hashtextextended($1::text, 0))', [key]);
+      return await fn();
+    } finally {
+      try {
+        await client.query('SELECT pg_advisory_unlock(hashtextextended($1::text, 0))', [key]);
+        client.release();
+      } catch {
+        client.release(true);
+      }
+    }
+  }
+
+  private async turnLocked(req: TurnRequest): Promise<TurnResponse> {
     const now = this.deps.now ?? (() => new Date());
 
     // 1. Load or create session.
@@ -535,6 +616,24 @@ export class OnboardingConversationOrchestrator {
           ? { hoursTarget: ex.schedule.sla.hoursTarget, isGuarantee: ex.schedule.sla.isGuarantee }
           : undefined,
       };
+      // Finding #2 (review) — ScheduleExtractor deliberately returns a
+      // seasonal-only entry when that's all the owner said ("we work
+      // Saturdays in summer"): see its SYSTEM_PROMPT's "Seasonal patterns"
+      // rule, which records `seasonal` on the entry rather than dropping it.
+      // `OnboardingScheduleExecutionHandler.buildBusinessHours` then strips
+      // EVERY seasonal entry (tenant_settings has no seasonal-hours column)
+      // and, if that leaves zero base weekly entries, refuses with
+      // `ALL_ENTRIES_SEASONAL` — an execution-failed card AFTER an operator
+      // already approved a proposal with `missingFields` empty, the same
+      // approved-then-failed shape as the `onboarding_team_member` `email`
+      // gate below. Gate it the same way: `workingHours` is a real top-level
+      // key of `onboardingSchedulePayloadSchema`, so the gate is fillable
+      // (the operator adds/edits a base entry from the review card — an
+      // edit to the top-level `workingHours` array clears the gate via
+      // editProposal's flat-key clear-on-fill) and unfillable-with-garbage
+      // (the merged payload is re-validated against the schema, which
+      // requires a non-empty array, before the gate lifts).
+      const hasBaseWeeklyHours = ex.schedule.workingHours.some((wh) => !wh.seasonal);
       inputs.push({
         tenantId: req.tenantId,
         proposalType: 'onboarding_schedule',
@@ -545,6 +644,7 @@ export class OnboardingConversationOrchestrator {
         confidenceScore: 1.0,
         sourceContext,
         createdBy: req.userId,
+        ...(hasBaseWeeklyHours ? {} : { missingFields: ['workingHours'] }),
       });
     }
 
