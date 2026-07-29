@@ -1,5 +1,8 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { OnboardingTeamMemberExecutionHandler } from '../../src/proposals/execution/onboarding-handlers';
+import {
+  OnboardingTeamMemberExecutionHandler,
+  OnboardingScheduleExecutionHandler,
+} from '../../src/proposals/execution/onboarding-handlers';
 import type { ExecutionContext } from '../../src/proposals/execution/handlers';
 import type { Proposal, ProposalType } from '../../src/proposals/proposal';
 
@@ -10,6 +13,10 @@ const context: ExecutionContext = {
   executedBy: 'user_owner',
   executedByRole: 'owner',
 };
+
+function auditRepoStub() {
+  return { create: vi.fn().mockResolvedValue(undefined) } as never;
+}
 
 function proposalOf(proposalType: ProposalType, payload: Record<string, unknown>): Proposal {
   return {
@@ -110,5 +117,71 @@ describe('OnboardingTeamMemberExecutionHandler', () => {
     expect(result.success).toBe(false);
     expect(result.error).toContain('email');
     expect(invitationRepo.create).not.toHaveBeenCalled();
+  });
+});
+
+describe('OnboardingScheduleExecutionHandler', () => {
+  let settingsRepo: { upsertIdentityFields: ReturnType<typeof vi.fn> };
+
+  beforeEach(() => {
+    settingsRepo = { upsertIdentityFields: vi.fn().mockResolvedValue(undefined) };
+  });
+
+  function handler() {
+    return new OnboardingScheduleExecutionHandler(settingsRepo as never, auditRepoStub());
+  }
+
+  it('persists well-formed hours', async () => {
+    const result = await handler().execute(
+      proposalOf('onboarding_schedule', {
+        workingHours: [{ days: ['monday', 'tuesday'], startTime: '08:00', endTime: '17:00' }],
+      }),
+      context,
+    );
+
+    expect(result.success).toBe(true);
+    expect(settingsRepo.upsertIdentityFields).toHaveBeenCalledWith(
+      TENANT,
+      expect.objectContaining({
+        businessHours: { mon: { open: '08:00', close: '17:00' }, tue: { open: '08:00', close: '17:00' } },
+      }),
+    );
+  });
+
+  // `dayWindowFor` reads a malformed or open>=close entry as CLOSED, so
+  // persisting one silently makes the business unbookable that day.
+  it.each([
+    ['non-HH:MM start', '9am', '17:00'],
+    ['unpadded hour', '8:00', '17:00'],
+    ['hour out of range', '25:00', '26:00'],
+    ['close before open', '17:00', '08:00'],
+    ['close equal to open', '09:00', '09:00'],
+  ])('refuses %s instead of persisting a day that reads as closed', async (_label, start, end) => {
+    const result = await handler().execute(
+      proposalOf('onboarding_schedule', {
+        workingHours: [{ days: ['monday'], startTime: start, endTime: end }],
+      }),
+      context,
+    );
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('MALFORMED_HOURS');
+    expect(settingsRepo.upsertIdentityFields).not.toHaveBeenCalled();
+  });
+
+  it('refuses the whole proposal rather than dropping the bad day', async () => {
+    const result = await handler().execute(
+      proposalOf('onboarding_schedule', {
+        workingHours: [
+          { days: ['monday'], startTime: '08:00', endTime: '17:00' },
+          { days: ['tuesday'], startTime: 'noon', endTime: '17:00' },
+        ],
+      }),
+      context,
+    );
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('tue');
+    expect(settingsRepo.upsertIdentityFields).not.toHaveBeenCalled();
   });
 });

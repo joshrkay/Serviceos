@@ -482,10 +482,27 @@ const DAY_ABBREVIATION: Record<string, string> = {
   sunday: 'sun',
 };
 
+const HHMM_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
+
+function hhmmToMinutes(hhmm: string): number {
+  return Number(hhmm.slice(0, 2)) * 60 + Number(hhmm.slice(3, 5));
+}
+
+// `dayWindowFor` (scheduling/booking-availability.ts) reads a malformed or
+// open>=close day as CLOSED and never guesses a window. So an unvalidated
+// spoken schedule does not fail loudly — it persists and quietly makes the
+// business unbookable on that day. The form wizard cannot reach that state
+// because PUT /identity parses through `BusinessHoursSchema`; this path has
+// to hold the same line before it writes.
 function buildBusinessHours(
   workingHours: WorkingHoursEntry[],
-): { hours: Record<string, { open: string; close: string }>; seasonalSkipped: number } {
+): {
+  hours: Record<string, { open: string; close: string }>;
+  seasonalSkipped: number;
+  invalid: string[];
+} {
   const hours: Record<string, { open: string; close: string }> = {};
+  const invalid: string[] = [];
   let seasonalSkipped = 0;
   for (const entry of workingHours) {
     if (entry.seasonal) {
@@ -493,13 +510,21 @@ function buildBusinessHours(
       seasonalSkipped += 1;
       continue;
     }
+    const wellFormed =
+      HHMM_RE.test(entry.startTime) &&
+      HHMM_RE.test(entry.endTime) &&
+      hhmmToMinutes(entry.startTime) < hhmmToMinutes(entry.endTime);
     for (const day of entry.days) {
       const abbrev = DAY_ABBREVIATION[day.toLowerCase()];
       if (!abbrev) continue;
+      if (!wellFormed) {
+        invalid.push(`${abbrev} (${entry.startTime}-${entry.endTime})`);
+        continue;
+      }
       hours[abbrev] = { open: entry.startTime, close: entry.endTime };
     }
   }
-  return { hours, seasonalSkipped };
+  return { hours, seasonalSkipped, invalid };
 }
 
 export class OnboardingScheduleExecutionHandler implements ExecutionHandler {
@@ -520,7 +545,16 @@ export class OnboardingScheduleExecutionHandler implements ExecutionHandler {
       return { success: false, error: 'Payload must include at least one workingHours entry' };
     }
 
-    const { hours, seasonalSkipped } = buildBusinessHours(payload.workingHours);
+    const { hours, seasonalSkipped, invalid } = buildBusinessHours(payload.workingHours);
+    if (invalid.length > 0) {
+      // Refuse the whole proposal rather than persist the well-formed days
+      // and drop the rest: a dropped day reads downstream as "closed", which
+      // is a silent wrong answer the operator never sees.
+      return {
+        success: false,
+        error: `MALFORMED_HOURS: expected HH:MM with open before close — ${invalid.join(', ')}`,
+      };
+    }
     if (Object.keys(hours).length === 0) {
       // Every entry was seasonal-only — nothing safe to write (writing
       // an empty map would CLEAR any hours already stored by a prior
