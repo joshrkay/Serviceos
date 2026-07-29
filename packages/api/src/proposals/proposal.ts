@@ -149,6 +149,12 @@ export interface Proposal {
   approvedAt?: Date;
   executedAt?: Date;
   executedBy?: string;
+  /**
+   * Role the approver held when they approved. Stamped at approval because
+   * the execution sweep runs detached from that request and cannot recover
+   * it. Absent on auto-approved and historical proposals.
+   */
+  executedByRole?: string;
   /** QA-2026-06-05: why execution failed — persisted so failed proposals are debuggable. */
   executionError?: string;
   claimedBy?: string;
@@ -710,6 +716,7 @@ export interface ProposalRepository {
         | 'approvedAt'
         | 'executedAt'
         | 'executedBy'
+        | 'executedByRole'
         | 'executionError'
         | 'undoneAt'
         | 'undoneBy'
@@ -1163,6 +1170,7 @@ export class InMemoryProposalRepository implements ProposalRepository {
         | 'approvedAt'
         | 'executedAt'
         | 'executedBy'
+        | 'executedByRole'
         | 'executionError'
         | 'undoneAt'
         | 'undoneBy'
@@ -1182,6 +1190,7 @@ export class InMemoryProposalRepository implements ProposalRepository {
       if (updates.executionError !== undefined) proposal.executionError = updates.executionError;
       if (updates.executedAt !== undefined) proposal.executedAt = updates.executedAt;
       if (updates.executedBy !== undefined) proposal.executedBy = updates.executedBy;
+      if (updates.executedByRole !== undefined) proposal.executedByRole = updates.executedByRole;
       if (updates.undoneAt !== undefined) proposal.undoneAt = updates.undoneAt;
       if (updates.undoneBy !== undefined) proposal.undoneBy = updates.undoneBy;
     }

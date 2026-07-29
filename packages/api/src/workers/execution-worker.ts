@@ -75,10 +75,12 @@ async function runExecutionSweepInner(deps: ExecutionWorkerDeps): Promise<{
       }
       await deps.executor.execute(claimed, {
         tenantId: proposal.tenantId,
-        executedBy:
-          proposal.proposalType === 'adopt_entity_alias'
-            ? proposal.executedBy ?? proposal.createdBy
-            : proposal.createdBy,
+        // `executedBy` is stamped at approval for the types where the
+        // approver — not the drafter — is the human exercising authority
+        // (alias adoption, config writes). Everything else attributes to the
+        // drafter, which is correct for work the drafter authored.
+        executedBy: proposal.executedBy ?? proposal.createdBy,
+        ...(proposal.executedByRole ? { executedByRole: proposal.executedByRole } : {}),
       });
       executed++;
       deps.logger.info('Execution sweep: proposal executed', {

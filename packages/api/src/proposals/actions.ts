@@ -260,13 +260,20 @@ export async function approveProposal(
   // executor and undoProposal can agree on when the window opened.
   const updated = await proposalRepo.updateStatus(tenantId, proposalId, 'approved', {
     approvedAt: transitioned.approvedAt,
-    // The execution worker normally attributes work to proposal.createdBy.
+    // The execution worker normally attributes work to proposal.createdBy —
+    // the DRAFTER. For anything where the approver is the one exercising
+    // authority, that is the wrong human, so carry the real approver through.
+    //
     // Alias candidates may be raised by a dispatcher, but activation must use
-    // the canonical OWNER who approved. Carry that actor through the existing
-    // execution attribution field until the executor writes the same value on
-    // completion.
+    // the canonical OWNER who approved. Config-writing types join for the same
+    // reason and one more: the sweep runs detached from this request, so if
+    // the approver's role isn't stamped here it cannot be recovered later, and
+    // the audit falls back to asserting 'owner' regardless of who acted.
     ...(proposal.proposalType === 'adopt_entity_alias'
       ? { executedBy: actorId }
+      : {}),
+    ...(CONFIG_WRITING_PROPOSAL_TYPES.has(proposal.proposalType)
+      ? { executedBy: actorId, executedByRole: actorRole }
       : {}),
   });
   if (!updated) {

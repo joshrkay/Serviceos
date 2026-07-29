@@ -113,6 +113,41 @@ describe('P2-005 — Approve / reject / edit interactions', () => {
     expect(approved.status).toBe('approved');
   });
 
+  // Also raised in PR review: gating the approval is only half the job. The
+  // execution sweep runs detached from this request and attributes work to
+  // `createdBy` — the DRAFTER — so a technician-drafted config proposal
+  // approved by an owner executed and audited as the technician, with the role
+  // defaulted to 'owner'. Both halves wrong, in opposite directions. The
+  // approver's identity AND role are stamped here because nothing downstream
+  // can recover them.
+  it.each([
+    ['onboarding_tenant_settings', { businessName: 'Acme', verticalPacks: ['plumbing'] }],
+    ['update_brand_voice', { register: 'friendly' }],
+  ])('config-writing type %s stamps the approver, not the drafter', async (type, payload) => {
+    const repo = makeRepo();
+    const proposal = await createReadyProposal(repo, {
+      proposalType: type as never,
+      payload: payload as Record<string, unknown>,
+      createdBy: 'technician-7',
+    });
+
+    const approved = await approveProposal(repo, tenantId, proposal.id, actorId, 'owner');
+
+    expect(approved.createdBy).toBe('technician-7');
+    expect(approved.executedBy).toBe(actorId);
+    expect(approved.executedByRole).toBe('owner');
+  });
+
+  it('leaves the drafter as the executor for a non-config type', async () => {
+    const repo = makeRepo();
+    const proposal = await createReadyProposal(repo, { createdBy: 'technician-7' });
+
+    const approved = await approveProposal(repo, tenantId, proposal.id, actorId, 'owner');
+
+    expect(approved.executedBy).toBeUndefined();
+    expect(approved.executedByRole).toBeUndefined();
+  });
+
   it('approves a draft directly (inbox surfaces drafts)', async () => {
     const repo = makeRepo();
     const proposal = createProposal(baseInput); // lands in 'draft'

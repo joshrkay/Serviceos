@@ -178,4 +178,66 @@ describe('Execution auto-delivery worker (D9 undo window complement)', () => {
     const { executed } = await runExecutionSweep(makeDeps(repo));
     expect(executed).toBe(1);
   });
+
+  // Raised in PR review: the sweep attributed every type but
+  // `adopt_entity_alias` to `createdBy` — the DRAFTER — and passed no role at
+  // all. A technician-drafted config proposal approved by an owner therefore
+  // executed as the technician, and the audit fell back to asserting 'owner'.
+  // Both halves are stamped at approval precisely because this sweep runs
+  // detached from that request and cannot recover them.
+  describe('execution attribution', () => {
+    function capturingDeps(repo: InMemoryProposalRepository) {
+      const contexts: Array<Record<string, unknown>> = [];
+      const executor = {
+        execute: async (_p: unknown, context: Record<string, unknown>) => {
+          contexts.push(context);
+        },
+      } as unknown as ExecutionWorkerDeps['executor'];
+      return { deps: { proposalRepo: repo, executor, logger }, contexts };
+    }
+
+    async function seedApproved(overrides: Partial<CreateProposalInput> & { executedBy?: string; executedByRole?: string }) {
+      const { executedBy, executedByRole, ...input } = overrides;
+      let proposal = createProposal({ ...baseInput, ...input });
+      proposal = transitionProposal(proposal, 'ready_for_review', 'user-1');
+      proposal = transitionProposal(proposal, 'approved', 'user-1');
+      proposal = {
+        ...proposal,
+        approvedAt: new Date(Date.now() - UNDO_WINDOW_MS - 100),
+        ...(executedBy ? { executedBy } : {}),
+        ...(executedByRole ? { executedByRole } : {}),
+      };
+      await repo.create(proposal);
+      return proposal;
+    }
+
+    it('passes the stamped approver and role, not the drafter', async () => {
+      await seedApproved({
+        proposalType: 'update_brand_voice',
+        payload: { register: 'friendly' },
+        createdBy: 'technician-7',
+        executedBy: 'owner-1',
+        executedByRole: 'owner',
+        idempotencyKey: 'attrib-config',
+      });
+
+      const { deps, contexts } = capturingDeps(repo);
+      await runExecutionSweep(deps);
+
+      expect(contexts).toHaveLength(1);
+      expect(contexts[0].executedBy).toBe('owner-1');
+      expect(contexts[0].executedByRole).toBe('owner');
+    });
+
+    it('falls back to the drafter when no approver was stamped', async () => {
+      await seedApproved({ createdBy: 'technician-7', idempotencyKey: 'attrib-plain' });
+
+      const { deps, contexts } = capturingDeps(repo);
+      await runExecutionSweep(deps);
+
+      expect(contexts).toHaveLength(1);
+      expect(contexts[0].executedBy).toBe('technician-7');
+      expect(contexts[0].executedByRole).toBeUndefined();
+    });
+  });
 });

@@ -21,7 +21,7 @@ import { PgProposalExecutionRepository } from '../../src/proposals/pg-proposal-e
 import { PgBrandVoiceRepository } from '../../src/tenants/brand/pg-brand-voice-repository';
 import { PgSettingsRepository } from '../../src/settings/pg-settings';
 import { ensureTenantSettings } from '../../src/settings/settings';
-import { missingFieldsFor, Proposal } from '../../src/proposals/proposal';
+import { createProposal, missingFieldsFor, Proposal } from '../../src/proposals/proposal';
 import { UNDO_WINDOW_MS } from '../../src/proposals/lifecycle';
 import { approveProposal } from '../../src/proposals/actions';
 import { ProposalExecutor } from '../../src/proposals/execution/executor';
@@ -31,6 +31,8 @@ import {
   ExecutionContext,
 } from '../../src/proposals/execution/handlers';
 import { UpdateBrandVoiceTaskHandler } from '../../src/ai/tasks/brand-voice-task';
+import { runExecutionSweep } from '../../src/workers/execution-worker';
+import { createLogger } from '../../src/logging/logger';
 import type { TaskContext } from '../../src/ai/tasks/task-handlers';
 import type { LLMGateway, LLMResponse } from '../../src/ai/gateway/gateway';
 
@@ -119,6 +121,81 @@ describe('Postgres integration — voice update_brand_voice → approve → exec
 
     expect(result.success).toBe(true);
     expect(result.resultEntityId).toBe(tenant.tenantId);
+  });
+
+
+  // Raised in PR review, and the reason `executed_by_role` (migration 266)
+  // exists. The execution sweep runs detached from the approving request and
+  // attributed work to `created_by` — the DRAFTER — passing no role at all, so
+  // a technician-drafted brand-voice edit approved by an owner wrote and
+  // audited as the technician with the role defaulted to 'owner'. Both halves
+  // wrong, in opposite directions, and unrecoverable after the fact.
+  //
+  // Real Postgres because the column round-trip is the point: a mocked repo
+  // would have happily "persisted" a column that does not exist.
+  it('attributes a technician-drafted, owner-approved config write to the OWNER through the real sweep', async () => {
+    const t = await createTestTenant(pool);
+    await ensureTenantSettings(t.tenantId, settingsRepo);
+    const technicianId = `${t.userId}-tech`;
+
+    const drafted = createProposal({
+      tenantId: t.tenantId,
+      proposalType: 'update_brand_voice',
+      payload: { register: 'formal' },
+      summary: 'Set brand voice register to formal',
+      createdBy: technicianId,
+    });
+    await proposalRepo.create(drafted);
+    await proposalRepo.updateStatus(t.tenantId, drafted.id, 'ready_for_review');
+
+    await approveProposal(
+      proposalRepo,
+      t.tenantId,
+      drafted.id,
+      t.userId,
+      'owner',
+      auditRepo,
+      'ui',
+    );
+
+    // Re-read from Postgres: the approver's identity AND role survived the
+    // round-trip through the new column, rather than living only in memory.
+    const persisted = await proposalRepo.findById(t.tenantId, drafted.id);
+    expect(persisted!.createdBy).toBe(technicianId);
+    expect(persisted!.executedBy).toBe(t.userId);
+    expect(persisted!.executedByRole).toBe('owner');
+
+    // Backdate past the undo window so the sweep picks it up, then run the
+    // REAL worker — the code path that was getting attribution wrong.
+    await proposalRepo.updateStatus(t.tenantId, drafted.id, 'approved', {
+      approvedAt: new Date(Date.now() - UNDO_WINDOW_MS - 100),
+    });
+    const registry = createExecutionHandlerRegistry({ brandVoiceRepo, auditRepo });
+    const sweepExecutor = new ProposalExecutor(
+      registry,
+      proposalRepo,
+      new IdempotencyGuard(new PgProposalExecutionRepository(pool), proposalRepo),
+      auditRepo,
+    );
+    await runExecutionSweep({
+      proposalRepo,
+      executor: sweepExecutor,
+      logger: createLogger({ service: 'test', environment: 'test', level: 'error' }),
+    });
+
+    expect((await proposalRepo.findById(t.tenantId, drafted.id))!.status).toBe('executed');
+
+    const events = await auditRepo.findByEntity(t.tenantId, 'brand_voice', t.tenantId);
+    expect(events).toHaveLength(1);
+    expect(events[0].eventType).toBe('brand_voice.updated');
+    expect(events[0].actorId).toBe(t.userId);
+    expect(events[0].actorId).not.toBe(technicianId);
+    expect(events[0].actorRole).toBe('owner');
+
+    // Cross-tenant negative: neither the write nor its audit leaks.
+    const other = await createTestTenant(pool);
+    expect((await brandVoiceRepo.getState(other.tenantId)).version).toBe(0);
+    expect(await auditRepo.findByEntity(other.tenantId, 'brand_voice', t.tenantId)).toHaveLength(0);
   });
 
   afterAll(async () => {

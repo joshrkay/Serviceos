@@ -6477,6 +6477,24 @@ export const MIGRATIONS = {
     ALTER TABLE estimate_line_items ADD COLUMN IF NOT EXISTS unit TEXT;
     ALTER TABLE invoice_line_items ADD COLUMN IF NOT EXISTS unit TEXT;
   `,
+
+  // The approver's role at the moment of approval, so a config write's audit
+  // event names who actually authorized it.
+  //
+  // `executed_by` alone cannot answer this. The execution sweep runs detached
+  // from the approving request and attributes work to `created_by` (the
+  // DRAFTER) for every type but `adopt_entity_alias`, so a technician-drafted
+  // `update_brand_voice` approved by an owner audited as the technician, with
+  // the role defaulted to 'owner'. Both halves wrong, in opposite directions.
+  //
+  // Role AT APPROVAL, deliberately not looked up at execution time: the audit
+  // records the capacity in which the human authorized the write, which a
+  // later role change must not rewrite. Nullable — historical rows and the
+  // auto-approve lane have no approving human, and the handlers already treat
+  // an absent role as "caller didn't know".
+  '266_proposals_executed_by_role': `
+    ALTER TABLE proposals ADD COLUMN IF NOT EXISTS executed_by_role TEXT;
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {
