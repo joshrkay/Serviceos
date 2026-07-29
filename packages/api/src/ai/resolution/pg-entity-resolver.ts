@@ -146,6 +146,27 @@ function extractNameLikeToken(reference: string): string | undefined {
   return nameWords.length > 0 ? nameWords.join(' ') : undefined;
 }
 
+// Technicians are named the way customers are: an operator says "assign
+// CARLOS", not "assign Carlos Vega". Whole-string similarity cannot see that —
+// `similarity('Carlos Vega','Carlos')` = 0.583, under TAU_ENT_CONFIRM_LOW, so
+// the reference resolved to nothing and the reassign proposal gated on
+// `toTechnicianId`. This was the LAST resolution path still on plain
+// similarity, and it was masked by every technician fixture in the repo
+// speaking a full name — including B5.3's, whose utterance says "Carlos"
+// while its fixture fed "Carlos Vega", contradicting the classifier launch
+// fixture for the very same sentence.
+//
+// Same shape as `resolveCustomer`: GREATEST keeps whole-string similarity so
+// nothing that resolved before changes score, and the STRICT variant keeps a
+// partial first name out — `strict_word_similarity('carl','Carlos Vega')` =
+// 0.500, under the floor. Two technicians named Carlos both score 1.000 and
+// become an `ambiguous` clarification rather than a guess.
+const TECH_NAME_EXPR = `TRIM(COALESCE(first_name,'') || ' ' || COALESCE(last_name,''))`;
+const TECH_SCORE_EXPR = `GREATEST(
+             similarity(${TECH_NAME_EXPR}, $2),
+             strict_word_similarity($2, ${TECH_NAME_EXPR})
+           )`;
+
 export class PgEntityResolver implements EntityResolver {
   constructor(private readonly pool: Pool) {}
 
@@ -930,14 +951,14 @@ export class PgEntityResolver implements EntityResolver {
           score: number;
         }>(
           `SELECT id,
-                  TRIM(COALESCE(first_name,'') || ' ' || COALESCE(last_name,'')) AS full_name,
+                  ${TECH_NAME_EXPR} AS full_name,
                   role,
-                  similarity(TRIM(COALESCE(first_name,'') || ' ' || COALESCE(last_name,'')), $2) AS score
+                  ${TECH_SCORE_EXPR} AS score
              FROM users
             WHERE tenant_id = $1
               AND role IN ('technician','dispatcher','owner')
               AND deleted_at IS NULL
-              AND similarity(TRIM(COALESCE(first_name,'') || ' ' || COALESCE(last_name,'')), $2) > $3
+              AND ${TECH_SCORE_EXPR} > $3
             ORDER BY score DESC
             LIMIT 5`,
           [tenantId, reference, SIMILARITY_PREFILTER],

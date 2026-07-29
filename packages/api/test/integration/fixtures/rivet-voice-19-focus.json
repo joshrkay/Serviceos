@@ -40,7 +40,7 @@
         "confidence": 0.92,
         "extractedEntities": {
           "appointmentReference": "the Johnson job",
-          "targetTechnicianName": "Carlos Vega"
+          "targetTechnicianName": "Carlos"
         }
       },
       "expect": {
@@ -175,7 +175,7 @@
         "confidence": 0.88,
         "extractedEntities": {
           "appointmentReference": "the Fitzgerald job",
-          "targetTechnicianName": "Carlos Vega"
+          "targetTechnicianName": "Carlos"
         }
       },
       "expect": {
