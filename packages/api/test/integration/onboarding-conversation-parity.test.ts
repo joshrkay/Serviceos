@@ -29,6 +29,7 @@ import type { AuthenticatedRequest } from '../../src/auth/clerk';
 
 import { createOnboardingRouter } from '../../src/routes/onboarding';
 import { PgSettingsRepository } from '../../src/settings/pg-settings';
+import { PgPendingInvitationRepository } from '../../src/users/pg-pending-invitation';
 import { PgPackActivationRepository } from '../../src/settings/pg-pack-activation';
 import { PgAuditRepository } from '../../src/audit/pg-audit';
 import { PgCatalogItemRepository } from '../../src/catalog/pg-catalog-item';
@@ -441,12 +442,54 @@ describe('B1.19 — onboarding parity: conversation vs. wizard, real Postgres', 
     );
     expect(teamExecutions).toHaveLength(0);
 
-    // No fabricated row anywhere: no pending_invitation, no note, no user.
-    const invitations = await pool.query(
-      `SELECT id FROM pending_invitations WHERE tenant_id = $1`,
+    // …and the gate is genuinely COMPLETABLE, which is what separates it from
+    // a dead end. Supplying the email the operator would type on the review
+    // card lets the same proposal execute into a real pending invitation.
+    // (`pending_invitations` has existed since migration 082 — the handler
+    // used to refuse on the false premise that no target existed.)
+    const target = teamProposals[0]!;
+    const filled: Proposal = {
+      ...target,
+      payload: { ...target.payload, email: 'carlos@example.com' },
+      missingFields: [],
+      status: 'approved',
+      approvedAt: new Date(Date.now() - UNDO_WINDOW_MS - 100),
+    };
+    await proposalRepo.create(filled);
+    const handlers = createExecutionHandlerRegistry({
+      settingsRepo,
+      packActivationRepo,
+      templateRepo,
+      packSeedDeps: { catalogRepo, templateRepo },
+      pendingInvitationRepo: new PgPendingInvitationRepository(pool),
+      auditRepo,
+    });
+    const executor = new ProposalExecutor(
+      handlers,
+      proposalRepo,
+      new IdempotencyGuard(new InMemoryProposalExecutionRepository(), proposalRepo),
+      auditRepo,
+    );
+    const { result } = await executor.execute(filled, {
+      tenantId: filled.tenantId,
+      executedBy: conversationTenant.userId,
+    });
+    expect(result.success).toBe(true);
+
+    const invited = await pool.query(
+      `SELECT email, role FROM pending_invitations WHERE tenant_id = $1`,
       [conversationTenant.tenantId],
-    ).catch(() => ({ rows: [] as unknown[] }));
-    expect(invitations.rows).toHaveLength(0);
+    );
+    expect(invited.rows).toHaveLength(1);
+    expect(invited.rows[0].email).toBe('carlos@example.com');
+
+    // The ONLY invitation is the one the operator explicitly completed —
+    // nothing was fabricated from the name alone.
+    const allInvites = await pool.query(
+      `SELECT email FROM pending_invitations WHERE tenant_id = $1`,
+      [conversationTenant.tenantId],
+    );
+    expect(allInvites.rows).toHaveLength(1);
   });
 
   it('audit events: every applied proposal (identity, pack activation, schedule, estimate template) has a real audit row; the failed team proposals audit their failure', async () => {

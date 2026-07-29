@@ -35,6 +35,7 @@ import {
   createTemplate,
 } from '../../templates/estimate-template';
 import { VALID_VERTICAL_TYPES, VerticalType } from '../../shared/vertical-types';
+import type { PendingInvitationRepository } from '../../users/pending-invitation';
 import {
   OnboardingSchedulePayload,
   TeamMemberRole,
@@ -353,28 +354,34 @@ export class OnboardingEstimateTemplateExecutionHandler implements ExecutionHand
 
 // ─── onboarding_team_member ────────────────────────────────────────────────
 //
-// Payload: OnboardingTeamMemberPayload — { name, role }. There is
-// genuinely no wizard-equivalent write target for this proposal: the
-// only real team-member persistence surface in the app,
-// POST /api/users/invitations, requires an email (it drives a Clerk
-// invitation) and the voice extractor cannot produce one ("me and my
-// cousin Carlos" carries no address). Rather than fabricate a
-// placeholder email or invent a new table out of scope for this story,
-// this handler always reports not-wired — WS3-honest: the proposal
-// still reaches "approved" and is visible for the operator to act on
-// manually (Team Settings → invite, with a real email), but execution
-// never claims to have created a real account. See the B1.19 report's
-// "could not assert parity" note for `team`.
+// Payload: OnboardingTeamMemberPayload — { name, role, email? }.
+//
+// This handler previously always refused, on the stated grounds that there was
+// "no persistence target". That was wrong: `pending_invitations` and its
+// repository (users/pending-invitation.ts) have existed since migration 082.
+// The proposal is gated on `email` at draft time — voice cannot produce an
+// address from "me and my cousin Carlos" — and the operator supplies it from
+// the review card, exactly like any other missing field. Once they do, the
+// gate clears and this handler creates the real invitation.
+//
+// A gate the operator can fill but that then fails anyway would be worse than
+// no gate at all, so the two must stay in step: if the `email` gate is ever
+// removed, this handler must stop depending on it.
 const TEAM_ROLES: ReadonlySet<TeamMemberRole> = new Set(['technician', 'dispatcher', 'owner']);
 
 export class OnboardingTeamMemberExecutionHandler implements ExecutionHandler {
   proposalType: ProposalType = 'onboarding_team_member';
 
+  constructor(
+    private readonly invitationRepo: PendingInvitationRepository | undefined,
+    private readonly auditRepo: AuditRepository,
+  ) {}
+
   isFullyWired(): boolean {
-    return false;
+    return Boolean(this.invitationRepo);
   }
 
-  async execute(proposal: Proposal): Promise<ExecutionResult> {
+  async execute(proposal: Proposal, context: ExecutionContext): Promise<ExecutionResult> {
     const { payload } = proposal;
     if (!isNonEmptyString(payload.name)) {
       return { success: false, error: 'Payload must include a non-empty name' };
@@ -382,13 +389,45 @@ export class OnboardingTeamMemberExecutionHandler implements ExecutionHandler {
     if (typeof payload.role !== 'string' || !TEAM_ROLES.has(payload.role as TeamMemberRole)) {
       return { success: false, error: 'Payload must include a valid role' };
     }
-    return {
-      success: false,
-      error:
-        'handler_not_wired:no_persistence_target — team members require an invitation email ' +
-        '(POST /api/users/invitations), which voice extraction does not capture. Invite ' +
-        `${payload.name} manually from Team Settings with their email.`,
-    };
+    // The draft-time gate should have held until this was supplied; refuse
+    // rather than invent a placeholder address if it somehow did not.
+    if (!isNonEmptyString(payload.email)) {
+      return {
+        success: false,
+        error:
+          'Payload must include an email — an invitation cannot be sent without one. ' +
+          `Add ${payload.name}'s email on the review card first.`,
+      };
+    }
+    if (!this.invitationRepo) {
+      return { success: false, error: 'handler_not_wired:invitationRepo' };
+    }
+
+    try {
+      const invitation = await this.invitationRepo.create({
+        tenantId: context.tenantId,
+        email: payload.email,
+        role: payload.role as TeamMemberRole,
+        invitedBy: context.executedBy,
+      });
+      await this.auditRepo.create(
+        createAuditEvent({
+          tenantId: context.tenantId,
+          actorId: context.executedBy,
+          actorRole: ONBOARDING_ACTOR_ROLE,
+          eventType: 'user.invitation_created',
+          entityType: 'pending_invitation',
+          entityId: invitation.id,
+          metadata: { email: invitation.email, role: invitation.role, source: 'onboarding_voice' },
+        }),
+      );
+      return { success: true, resultEntityId: invitation.id };
+    } catch (err) {
+      return {
+        success: false,
+        error: err instanceof Error ? err.message : 'Invitation creation failed',
+      };
+    }
   }
 }
 

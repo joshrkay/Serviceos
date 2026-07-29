@@ -109,6 +109,7 @@ import {
   OnboardingScheduleExecutionHandler,
 } from './onboarding-handlers';
 import { PackActivationRepository } from '../../settings/pack-activation';
+import type { PendingInvitationRepository } from '../../users/pending-invitation';
 import { EstimateTemplateRepository } from '../../templates/estimate-template';
 import { SeedPackDefaultsDeps } from '../../packs/seed-pack-defaults';
 import { UpdateBrandVoiceExecutionHandler } from './brand-voice-handler';
@@ -1220,6 +1221,12 @@ export function createExecutionHandlerRegistry(deps?: {
   // route uses. Absent → the corresponding handler(s) report isFullyWired()
   // false and refuse to execute rather than passthrough.
   packActivationRepo?: PackActivationRepository;
+  /**
+   * B1.19 — target for an approved `onboarding_team_member`. Exists since
+   * migration 082; the handler was previously refusing on the false premise
+   * that no persistence target existed.
+   */
+  pendingInvitationRepo?: PendingInvitationRepository;
   templateRepo?: EstimateTemplateRepository;
   packSeedDeps?: SeedPackDefaultsDeps;
   // B1.18 — update_brand_voice writes through the SAME versioned path the
@@ -1418,7 +1425,7 @@ export function createExecutionHandlerRegistry(deps?: {
     new OnboardingEstimateTemplateExecutionHandler(deps?.templateRepo, requiredAuditRepo),
     // No repo dep: this handler never persists (see its class doc) —
     // always reports isFullyWired() === false.
-    new OnboardingTeamMemberExecutionHandler(),
+    new OnboardingTeamMemberExecutionHandler(deps?.pendingInvitationRepo, requiredAuditRepo),
     new OnboardingScheduleExecutionHandler(deps?.settingsRepo, requiredAuditRepo),
     // B1.18 — update_brand_voice: writes through the SAME versioned
     // read→cool-down-check→merge→bump path the Brand-Voice Configurator

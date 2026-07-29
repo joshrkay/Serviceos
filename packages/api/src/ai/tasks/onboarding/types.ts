@@ -182,6 +182,12 @@ export interface OnboardingEstimateTemplatePayload {
 export interface OnboardingTeamMemberPayload {
   name: string;
   role: TeamMemberRole;
+  /**
+   * B1.19 — required to actually send the invitation. Voice cannot produce an
+   * address ("me and my cousin Carlos"), so the proposal is emitted gated on
+   * this field and the operator supplies it from the review card.
+   */
+  email?: string;
 }
 
 export interface OnboardingSchedulePayload {

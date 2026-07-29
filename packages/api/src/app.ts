@@ -2117,6 +2117,10 @@ export function createApp(): AppWithLifecycle {
     packActivationRepo,
     templateRepo,
     packSeedDeps: { catalogRepo, templateRepo },
+    // B1.19 — an approved onboarding_team_member creates a real pending
+    // invitation (migration 082), so the gate the operator fills on the
+    // review card actually completes instead of failing at execution.
+    pendingInvitationRepo,
     // B1.18 — update_brand_voice writes through the SAME versioned path
     // (tenants/brand/brand-voice-service.ts updateBrandVoice) the
     // Brand-Voice Configurator sheet's PUT /api/settings/brand-voice uses.
