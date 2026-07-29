@@ -10,6 +10,10 @@ export function mapLineItemRow(row: Record<string, any>): LineItem {
     description: row.description,
     category: row.category,
     quantity: Number(row.quantity),
+    // B7.5 — descriptive unit of measure (migration 265, both line-item
+    // tables). NULL on every row written before it and on any path that
+    // states no unit → undefined here. Never used in money math.
+    unit: row.unit ?? undefined,
     unitPriceCents: Number(row.unit_price_cents),
     totalCents: Number(row.total_cents),
     sortOrder: Number(row.sort_order),

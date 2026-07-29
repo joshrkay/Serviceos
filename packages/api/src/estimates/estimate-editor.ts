@@ -9,6 +9,7 @@ import {
   validateLineItem as validateBillingLineItem,
 } from '../shared/billing-engine';
 import { ValidationError } from '../shared/errors';
+import type { CatalogUnitValue } from '@ai-service-os/shared';
 
 /**
  * Estimate ENTITY editor for voice-driven `update_estimate` proposals.
@@ -30,6 +31,8 @@ import { ValidationError } from '../shared/errors';
 export interface EstimateEditLineItemInput {
   description: string;
   quantity: number;
+  /** B7.5 — descriptive unit ('each', 'hour', …). Never used in money math. */
+  unit?: CatalogUnitValue;
   unitPrice: number; // integer cents
   category?: LineItemCategory;
   taxable?: boolean;

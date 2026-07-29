@@ -560,6 +560,12 @@ export function applyCatalogPricing(
         pricingSource: 'catalog' satisfies PricingSource,
         needsPricing: false,
         category: contractCategory(item),
+        // B7.5 — carry the catalog item's unit of measure onto the grounded
+        // line. It was previously dropped here, so a spoken "three
+        // capacitors" lost the fact that the catalog prices them per each.
+        // Descriptive only: the price above is still the authoritative one
+        // and no total is derived from this.
+        ...(item.unit ? { unit: item.unit } : {}),
         // EE-4 — carry the catalog item's photo onto the grounded line so
         // AI-drafted estimates show images with no separate AI code path.
         // Only when the item has one (else leave absent = no image).

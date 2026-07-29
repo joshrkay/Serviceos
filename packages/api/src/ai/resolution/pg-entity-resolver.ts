@@ -326,10 +326,19 @@ export class PgEntityResolver implements EntityResolver {
           case 'resolved':
             return this.resolveAppointmentByJob(tenantId, reference, jobResult.candidate.id);
           case 'ambiguous':
-            // The NAME itself matches several jobs — still an honest
-            // ambiguity (never a guess), just one level up from "which
-            // appointment": which Johnson job did you mean.
-            return jobResult;
+            // The NAME matches several jobs. Returning `jobResult` as-is
+            // would hand back candidates of kind 'job' for an APPOINTMENT
+            // reference: the operator taps one, `resolveProposalEntity`
+            // injects it as `jobId`, and reassign/cancel/reschedule still
+            // have no `appointmentId` — the proposal stays blocked with no
+            // appointment picker ever shown. So fan the matched jobs out to
+            // their upcoming appointments and answer in the kind the caller
+            // actually needs.
+            return this.resolveAppointmentsForJobs(
+              tenantId,
+              reference,
+              jobResult.candidates.map((c) => c.id),
+            );
           case 'not_found':
           case 'low_confidence':
           case 'skipped':
@@ -445,6 +454,74 @@ export class PgEntityResolver implements EntityResolver {
     );
 
     if (rows.length === 0) {
+      return { kind: 'not_found', reference };
+    }
+
+    const candidates: EntityCandidate[] = rows.map((row) => ({
+      id: row.id,
+      kind: 'appointment' as EntityKind,
+      label: new Date(row.scheduled_start).toISOString(),
+      hint: row.tech_name ? `assigned to ${row.tech_name}` : 'unassigned',
+      score: 1.0,
+    }));
+
+    if (candidates.length === 1) {
+      return { kind: 'resolved', candidate: candidates[0] };
+    }
+    return { kind: 'ambiguous', candidates };
+  }
+
+  /**
+   * B5.3 follow-up — fan several name-matched jobs out to their upcoming
+   * appointments, so an ambiguous NAME is still answered in the kind the
+   * caller asked for.
+   *
+   * Without this, "the Johnson job" matching two jobs returned job-kind
+   * candidates for an appointment reference: picking one injected a `jobId`,
+   * and the scheduling handlers (reassign / cancel / reschedule) still had no
+   * `appointmentId`, so the proposal stayed gated and the operator never got
+   * an appointment picker at all.
+   *
+   * Same shape and honesty rules as the single-job path above: exactly one
+   * upcoming appointment across all matched jobs resolves; two to five become
+   * a one-tap picker carrying date + assigned tech; zero or more than five
+   * are `not_found`, because reading back an arbitrary five of forty would be
+   * a guess wearing a disambiguation costume.
+   */
+  private async resolveAppointmentsForJobs(
+    tenantId: string,
+    reference: string,
+    jobIds: string[],
+  ): Promise<EntityResolverResult> {
+    if (jobIds.length === 0) return { kind: 'not_found', reference };
+    const MAX_DISAMBIGUATION_CANDIDATES = 5;
+
+    const rows = await withTenantConnection(this.pool, tenantId, (client) =>
+      client
+        .query<{
+          id: string;
+          scheduled_start: string;
+          status: string | null;
+          tech_name: string | null;
+        }>(
+          `SELECT a.id, a.scheduled_start, a.status,
+                  NULLIF(TRIM(COALESCE(u.first_name,'') || ' ' || COALESCE(u.last_name,'')), '') AS tech_name
+             FROM appointments a
+             LEFT JOIN appointment_assignments aa
+               ON aa.appointment_id = a.id AND aa.tenant_id = a.tenant_id AND aa.is_primary = true
+             LEFT JOIN users u ON u.id = aa.technician_id
+            WHERE a.tenant_id = $1
+              AND a.job_id = ANY($2::uuid[])
+              AND a.status <> 'canceled'
+              AND a.scheduled_start >= now()
+            ORDER BY a.scheduled_start ASC
+            LIMIT ${MAX_DISAMBIGUATION_CANDIDATES + 1}`,
+          [tenantId, jobIds],
+        )
+        .then((r) => r.rows),
+    );
+
+    if (rows.length === 0 || rows.length > MAX_DISAMBIGUATION_CANDIDATES) {
       return { kind: 'not_found', reference };
     }
 

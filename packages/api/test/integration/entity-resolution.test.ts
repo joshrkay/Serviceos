@@ -487,6 +487,83 @@ describe('Postgres integration — entity resolution (P8)', () => {
       return id;
     }
 
+    /** Add a SECOND job (plus one upcoming appointment) to an existing tenant. */
+    async function seedSecondJobWithAppointment(
+      tenantId: string,
+      userId: string,
+      jobSummary: string,
+      daysOut: number,
+    ): Promise<string> {
+      const localCustomerRepo = new PgCustomerRepository(pool);
+      const locationRepo = new PgLocationRepository(pool);
+      const jobRepo = new PgJobRepository(pool);
+      const localAppointmentRepo = new PgAppointmentRepository(pool);
+
+      const customerId = crypto.randomUUID();
+      await localCustomerRepo.create({
+        id: customerId, tenantId, firstName: jobSummary.split(' ')[0] ?? 'Customer',
+        lastName: 'Customer', displayName: jobSummary, preferredChannel: 'phone',
+        smsConsent: false, isArchived: false, createdBy: userId,
+        createdAt: new Date(), updatedAt: new Date(),
+      });
+      const locationId = crypto.randomUUID();
+      await locationRepo.create({
+        id: locationId, tenantId, customerId, street1: '2 Test St', city: 'Austin',
+        state: 'TX', postalCode: '78701', country: 'USA', isPrimary: true,
+        addressType: 'service', isArchived: false, createdAt: new Date(), updatedAt: new Date(),
+      });
+      const jobId = crypto.randomUUID();
+      await jobRepo.create({
+        id: jobId, tenantId, customerId, locationId,
+        jobNumber: `JOB-${jobId.slice(0, 8)}`, summary: jobSummary, status: 'scheduled',
+        priority: 'normal', createdBy: userId, createdAt: new Date(), updatedAt: new Date(),
+      });
+      const start = new Date();
+      start.setUTCDate(start.getUTCDate() + daysOut);
+      const appointmentId = crypto.randomUUID();
+      await localAppointmentRepo.create({
+        id: appointmentId, tenantId, jobId, scheduledStart: start,
+        scheduledEnd: new Date(start.getTime() + 2 * 60 * 60 * 1000),
+        timezone: 'America/Chicago', status: 'scheduled', holdPendingApproval: false,
+        notes: jobSummary, createdBy: userId, createdAt: new Date(), updatedAt: new Date(),
+      });
+      return appointmentId;
+    }
+
+    // Follow-up to AC-3, raised in PR review: when the NAME matches several
+    // jobs, the resolver used to return job-kind candidates for an APPOINTMENT
+    // reference. The operator would tap a job, the redraft would inject a
+    // `jobId`, and reassign/cancel/reschedule still had no `appointmentId` —
+    // the proposal stayed gated and no appointment picker was ever shown.
+    it('an ambiguous job NAME answers with APPOINTMENT candidates, not job candidates', async () => {
+      // Two OPEN jobs for the same customer — an ordinary shop, and the case
+      // that makes the name itself ambiguous.
+      const seeded = await seedTenantWithJobAppointments('the Johnson job', [{ daysOut: 3 }]);
+      const secondAppointmentId = await seedSecondJobWithAppointment(
+        seeded.tenantId,
+        seeded.userId,
+        'the Johnson job',
+        6,
+      );
+
+      const result = await resolver.resolve({
+        tenantId: seeded.tenantId,
+        reference: 'the Johnson job',
+        kind: 'appointment',
+      });
+
+      expect(result.kind).toBe('ambiguous');
+      if (result.kind === 'ambiguous') {
+        // Every candidate is answerable by the scheduling handlers…
+        for (const c of result.candidates) {
+          expect(c.kind).toBe('appointment');
+        }
+        // …and they are the real appointments behind BOTH matched jobs.
+        const ids = result.candidates.map((c) => c.id).sort();
+        expect(ids).toEqual([seeded.appointmentIds[0], secondAppointmentId].sort());
+      }
+    });
+
     it('AC-3 positive: a named job reference with ONE upcoming appointment resolves to that appointment', async () => {
       const { tenantId, appointmentIds } = await seedTenantWithJobAppointments(
         'the Johnson job',

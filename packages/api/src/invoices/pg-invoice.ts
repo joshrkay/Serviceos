@@ -516,9 +516,9 @@ export class PgInvoiceRepository extends PgBaseRepository implements InvoiceRepo
       await client.query(
         `INSERT INTO invoice_line_items (
           id, tenant_id, invoice_id, description, category,
-          quantity, unit_price_cents, total_cents, sort_order, taxable,
+          quantity, unit, unit_price_cents, total_cents, sort_order, taxable,
           pricing_source
-        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
         [
           rowId,
           tenantId,
@@ -526,6 +526,9 @@ export class PgInvoiceRepository extends PgBaseRepository implements InvoiceRepo
           item.description,
           item.category ?? 'other',
           item.quantity,
+          // B7.5 — descriptive unit (migration 265). NULL on legacy and
+          // non-voice paths.
+          item.unit ?? null,
           item.unitPriceCents,
           item.totalCents,
           item.sortOrder,

@@ -122,6 +122,10 @@ export function useOnboardingConversation(tenantId: string): UseOnboardingConver
   const [error, setError] = useState<string | null>(null);
 
   const sessionIdRef = useRef<string | null>(readSessionId(tenantId));
+  // The tenant this hook is currently bound to, readable from inside
+  // already-scheduled async work (a captured `tenantId` would be stale).
+  const tenantIdRef = useRef(tenantId);
+  tenantIdRef.current = tenantId;
   // Sequential lock so overlapping submissions (e.g. mic auto-submit firing
   // while a prior turn is still in flight) apply in order instead of racing
   // on sessionIdRef / history.
@@ -239,7 +243,16 @@ export function useOnboardingConversation(tenantId: string): UseOnboardingConver
       const trimmed = text.trim();
       if (!trimmed) return Promise.resolve();
 
+      // Tenant generation captured at submit time. The bootstrap effect has a
+      // `cancelled` flag, but a turn already in flight had none: switching
+      // tenants mid-request let the old response apply to the NEW tenant —
+      // overwriting its visible history and resetting the shared sessionIdRef
+      // to the previous tenant's session, so the next turn 404'd and the
+      // recovery cleared the new tenant's stored session.
+      const submittedForTenant = tenantId;
+
       const run = async () => {
+        if (submittedForTenant !== tenantIdRef.current) return;
         appendTurn({ role: 'user', text: trimmed, at: new Date().toISOString() });
         setSending(true);
         setError(null);
@@ -251,12 +264,15 @@ export function useOnboardingConversation(tenantId: string): UseOnboardingConver
               userMessage: trimmed,
             }),
           });
+          // The tenant may have changed while this was in flight; anything
+          // below would write the wrong tenant's state.
+          if (submittedForTenant !== tenantIdRef.current) return;
           if (res.status === 404) {
             // The persisted session vanished server-side mid-conversation
             // (rare — e.g. it was manually purged). Surface it plainly
             // rather than silently starting over and losing the user's
             // in-flight answer.
-            clearSession(tenantId);
+            clearSession(submittedForTenant);
             sessionIdRef.current = null;
             setError('This conversation session has expired. Refresh to start a new one.');
             return;
@@ -265,9 +281,10 @@ export function useOnboardingConversation(tenantId: string): UseOnboardingConver
           const body = (await res.json()) as OnboardingConversationTurnResponse;
           applyResponse(body);
         } catch (err) {
+          if (submittedForTenant !== tenantIdRef.current) return;
           setError(err instanceof Error ? err.message : 'Could not reach the assistant.');
         } finally {
-          setSending(false);
+          if (submittedForTenant === tenantIdRef.current) setSending(false);
         }
       };
 
