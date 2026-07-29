@@ -54,14 +54,39 @@ function isVerticalType(v: unknown): v is VerticalType {
 // ─── onboarding_tenant_settings ────────────────────────────────────────────
 //
 // Payload: OnboardingTenantSettingsPayload — { businessName, city?,
-// state?, verticalPacks: VerticalType[] }. Writes BOTH halves of what
-// the wizard splits across two routes: the identity fields (matching
-// PUT /identity) and one activatePackWithSeed call per vertical pack
-// (matching POST /pack). city/state have no dedicated tenant_settings
+// state?, verticalPacks: VerticalType[], hourlyRateCents? }. Writes BOTH
+// halves of what the wizard splits across two routes: the identity fields
+// (matching PUT /identity) and one activatePackWithSeed call per vertical
+// pack (matching POST /pack). city/state have no dedicated tenant_settings
 // columns — the closest existing field is service_area_text (a free
 // string), so they're joined into it ("Austin, TX"); this is a
 // best-effort mapping, not a 1:1 column match (documented — see the
 // B1.19 report).
+//
+// B1.20 — this handler is also where the identity step's two previously
+// missing columns get closed:
+//   - hourlyRateCents: threaded through from the pricing capture (see
+//     tenant-settings-proposer.ts's pickHourlyRateCents). Left untouched
+//     (upsertIdentityFields only writes a key that's present) when the
+//     conversation never captured a rate — never fabricated, because a
+//     wrong hourly rate is a money defect.
+//   - jobBufferMinutes: the conversation never asks for this at all, so
+//     there is no extracted value to thread through. We instead write the
+//     SAME default the form wizard pre-fills
+//     (packages/web/src/components/onboarding/v2/steps/IdentityStep.tsx:77,
+//     `useState<number>(30)`) so a form user who never touches the field
+//     and a conversation user who never mentions it land on the identical
+//     column value — genuine outcome parity, not a guess. This is
+//     deliberately NOT the same move as timezone: routes/onboarding.ts's
+//     PUT /identity refuses to ever default a timezone, because a wrong
+//     zone silently misbooks appointments (Phoenix mis-booking postmortem,
+//     migration 263) — there is no safe fallback value for "which zone is
+//     this business in". A job buffer has no equivalent correctness
+//     cliff: 30 minutes is a padding default the form itself ships to
+//     every silent user, not a fact about the tenant that can be "wrong"
+//     in a way that breaks bookings. Written unconditionally (every run of
+//     this handler represents a fresh conversational onboarding) rather
+//     than "only if unset", matching the wizard's own one-shot save.
 export class OnboardingTenantSettingsExecutionHandler implements ExecutionHandler {
   proposalType: ProposalType = 'onboarding_tenant_settings';
 
@@ -89,6 +114,22 @@ export class OnboardingTenantSettingsExecutionHandler implements ExecutionHandle
     const state = typeof payload.state === 'string' ? payload.state.trim() : '';
     const serviceAreaText = [city, state].filter((s) => s.length > 0).join(', ') || undefined;
 
+    // B1.20 — integer-cents guard mirrors the money invariant enforced
+    // everywhere else (see catalog-resolver.ts, settings.ts validators).
+    // A malformed/negative value fails the whole proposal rather than
+    // silently dropping the rate or writing garbage.
+    let hourlyRateCents: number | undefined;
+    if (payload.hourlyRateCents !== undefined) {
+      if (
+        typeof payload.hourlyRateCents !== 'number' ||
+        !Number.isInteger(payload.hourlyRateCents) ||
+        payload.hourlyRateCents < 0
+      ) {
+        return { success: false, error: 'hourlyRateCents must be a non-negative integer (cents)' };
+      }
+      hourlyRateCents = payload.hourlyRateCents;
+    }
+
     if (!this.settingsRepo || !this.packActivationRepo) {
       // WS3 — no synthetic success: fail before writing anything so a
       // partially-wired registry can't leave the tenant half-configured.
@@ -102,6 +143,10 @@ export class OnboardingTenantSettingsExecutionHandler implements ExecutionHandle
       await this.settingsRepo.upsertIdentityFields(context.tenantId, {
         businessName: payload.businessName,
         serviceAreaText,
+        // B1.20 parity default — see the class doc above for why this is
+        // safe to always write (unlike timezone).
+        jobBufferMinutes: 30,
+        ...(hourlyRateCents !== undefined ? { hourlyRateCents } : {}),
         bootstrapAiModel: resolveBootstrapAiModel(),
       });
       await this.auditRepo.create(
@@ -112,7 +157,12 @@ export class OnboardingTenantSettingsExecutionHandler implements ExecutionHandle
           eventType: 'tenant.identity_set',
           entityType: 'tenant_settings',
           entityId: context.tenantId,
-          metadata: { businessName: payload.businessName, source: 'onboarding_conversation' },
+          metadata: {
+            businessName: payload.businessName,
+            jobBufferMinutes: 30,
+            ...(hourlyRateCents !== undefined ? { hourlyRateCents } : {}),
+            source: 'onboarding_conversation',
+          },
         }),
       );
 

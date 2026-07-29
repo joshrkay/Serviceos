@@ -26,7 +26,7 @@ exist today.
 
 ## A) Speakable today — intent + proposal + execution handler all exist
 
-These 35 actions can be spoken, drafted as a proposal, approved, and executed.
+These 36 actions can be spoken, drafted as a proposal, approved, and executed.
 "Persistence proof" = a Docker-gated integration test that proves the row +
 audit event actually land in Postgres (vs. mocked-DB-only coverage, which cannot
 catch schema drift or a missing dependency).
@@ -68,6 +68,7 @@ catch schema drift or a missing dependency).
 | "Set up 50% deposit, 50% on completion for the Hendersons" | `create_invoice_schedule` | `create_invoice_schedule` | capture | unit + handler-level (schedule execution: `proposals/invoice-schedule-handler.test.ts`) |
 | "Respond to that 1-star review" | `respond_to_review` | `review_response_proposal` | comms | unit |
 | "From now on always add a $79 diagnostic fee to AC calls" | `create_standing_instruction` | `create_standing_instruction` | capture | unit (table: integration via UB-A1 `integration/standing-instructions.test.ts`) |
+| "Set my brand voice: friendly, plain-spoken, no slang, always sign off 'Thanks — Bob's HVAC'" | `update_brand_voice` | `update_brand_voice` | manual | integration (`integration/update-brand-voice-voice-execution.test.ts`) |
 
 > **Voice technician resolution (U1, taxonomy 1.2.0):** `reassign_appointment`,
 > `add_crew_member`, and `remove_crew_member` now resolve the spoken technician
@@ -109,6 +110,33 @@ Notes on the taxonomy-1.2.0 rows:
   `sourceTrustTier`, so the instruction itself ALWAYS lands for human review
   even though the type is capture-class. On approval the execution handler
   inserts a `standing_instructions` row (source `proposal`, UB-A1 table).
+
+B1.18 — `update_brand_voice` (taxonomy 1.5.0):
+
+- **Action class is `manual`, not `capture`.** Brand voice is the tenant's
+  locked outbound identity — a wrong extraction poisons every future
+  customer message, so it is structurally excluded from auto-approval:
+  `decideInitialStatus`'s only auto-approve branch requires
+  `sourceTrustTier === 'autonomous' AND` action class `=== 'capture'`, which a
+  `manual`-class type can never satisfy at any trust tier or confidence.
+- **Reuses the versioned write path, never re-implements it.** The execution
+  handler calls `updateBrandVoice`
+  (`tenants/brand/brand-voice-service.ts`) — the SAME TOCTOU-safe
+  read→cool-down-check→merge→version-bump the Brand-Voice Configurator
+  sheet's `PUT /api/settings/brand-voice` uses. A cool-down violation
+  surfaces as an honest failed-execution reason (`brand_voice_cooldown: …`),
+  never a silent skip.
+- **Lock stays tap-only (Part F decision F-2).** The payload
+  (`proposals/contracts/brand-voice.ts`) has NO field capable of expressing
+  `brand_voice_locked` — a spoken "lock my brand voice" cannot set that
+  column through this proposal type no matter how it classifies. Pinned by
+  a regression test (`test/ai/tasks/brand-voice-task.test.ts`).
+- **Nothing spoken is dropped.** The six `brandVoiceSchema` fields
+  (register, opening_lines, signoff, banned_phrases, persona_name, pronoun)
+  are reused verbatim from the form surface; an additive `freeText` field
+  carries any instruction the extraction pass couldn't map to a field, and
+  a total extraction failure falls back to the verbatim transcript — same
+  fallback shape as `create_standing_instruction`.
 
 Two further intents are special-cased in the router (they reuse existing
 proposal types and live outside `INTENT_TO_PROPOSAL_TYPE`):
@@ -237,7 +265,8 @@ not a gap. No new `JobStatus` value was introduced for this.
     { "intent": "request_feedback", "proposalType": "request_feedback", "actionClass": "comms" },
     { "intent": "create_invoice_schedule", "proposalType": "create_invoice_schedule", "actionClass": "capture" },
     { "intent": "respond_to_review", "proposalType": "review_response_proposal", "actionClass": "comms" },
-    { "intent": "create_standing_instruction", "proposalType": "create_standing_instruction", "actionClass": "capture" }
+    { "intent": "create_standing_instruction", "proposalType": "create_standing_instruction", "actionClass": "capture" },
+    { "intent": "update_brand_voice", "proposalType": "update_brand_voice", "actionClass": "manual" }
   ],
   "handlerNoOnramp": [
     "create_booking",

@@ -212,6 +212,24 @@ const CASES: FixtureCase[] = [
       extractedEntities: { targetTechnicianName: 'Carlos', appointmentReference: 'the Garcia appointment' },
     },
   },
+  // B1.18 — update_brand_voice launch fixture. It doesn't fit any of the
+  // four named launch categories (it's neither scheduling, an estimate, a
+  // status query, nor a human handoff), so `toLaunchIntent`'s default lands
+  // it on 'unknown' — `expectedIntent` pins the RAW intentType so this case
+  // proves the new intent classifies cleanly at real confidence rather than
+  // collapsing into an existing category or the low-confidence fallback.
+  {
+    file: 'set-brand-voice.json',
+    expected: 'unknown',
+    expectedIntent: 'update_brand_voice',
+    stub: {
+      intentType: 'update_brand_voice',
+      confidence: 0.91,
+      extractedEntities: {
+        brandVoiceInstruction: "friendly, plain-spoken, no slang, always sign off 'Thanks — Bob's HVAC'",
+      },
+    },
+  },
 ];
 
 describe('Feature 1 — Inbound call handling: fixture transcripts -> launch intent', () => {

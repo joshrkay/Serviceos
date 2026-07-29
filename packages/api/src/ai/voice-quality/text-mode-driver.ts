@@ -373,12 +373,6 @@ export class TextModeDriver implements AgentDriver {
             },
           }
         : {}),
-      // B5.3 — P8 entity resolution for the SAME production router the rest
-      // of this deps object drives. Absent for every script that doesn't
-      // declare `fixtures.technicians` (i.e. every pre-existing script),
-      // so this is byte-identical for them; only reassign_appointment /
-      // add_crew_member / remove_crew_member scripts opt in.
-      ...(deps.entityResolver ? { entityResolver: deps.entityResolver } : {}),
       now: () => (deps.now ? deps.now() : new Date()),
     });
     // WS21b — construct the production voice-turn processor once. Only the

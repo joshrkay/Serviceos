@@ -1,0 +1,140 @@
+{
+  "version": 1,
+  "title": "rivet-voice-19 focus items — operator entity-resolution closed loop",
+  "description": "One case per rivet-voice-19 focus item that is operator-reachable today (B7.4 add_note, B5.3 reassign_appointment, B6.3 log_time_entry, B4.7 reschedule_appointment / cancel_appointment), plus a negative case pinning the B5.3 resolver fix. Unlike test/voice/fixtures/operator-ops-top-40.json, cases here carry NO pre-resolved ids: every id in `expect` is a `seedRef` resolved by the runner against a REAL Postgres-seeded tenant via the REAL PgEntityResolver, so the corpus proves the spoken free-text reference produces the resolved id end to end, not just that a task handler accepts an id it was handed. `payloadContainsSeedRefs` maps a payload key to a key in the runner's `seedIds` map; `payloadContains` carries literal (non-id) values.",
+  "cases": [
+    {
+      "id": "b7-4-add-note",
+      "focusItem": "B7.4",
+      "op": "add_note",
+      "utterance": "Note on the Patel job — wants morning visits",
+      "llmResponse": {
+        "intentType": "add_note",
+        "confidence": 0.91,
+        "extractedEntities": {
+          "jobReference": "the Patel job",
+          "noteBody": "wants morning visits"
+        }
+      },
+      "expect": {
+        "proposalType": "add_note",
+        "status": "draft",
+        "actionClass": "capture",
+        "missingFieldsExact": [],
+        "payloadContains": { "targetKind": "job", "body": "wants morning visits" },
+        "payloadContainsSeedRefs": { "targetId": "patelJobId" }
+      }
+    },
+    {
+      "id": "b5-3-reassign-appointment",
+      "focusItem": "B5.3",
+      "op": "reassign_appointment",
+      "utterance": "Assign Carlos to the Johnson job",
+      "llmResponse": {
+        "intentType": "reassign_appointment",
+        "confidence": 0.92,
+        "extractedEntities": {
+          "appointmentReference": "the Johnson job",
+          "targetTechnicianName": "Carlos Vega"
+        }
+      },
+      "expect": {
+        "proposalType": "reassign_appointment",
+        "status": "draft",
+        "actionClass": "capture",
+        "missingFieldsExact": [],
+        "payloadContainsSeedRefs": {
+          "appointmentId": "johnsonAppointmentId",
+          "toTechnicianId": "carlosId"
+        }
+      }
+    },
+    {
+      "id": "b6-3-log-time-entry",
+      "focusItem": "B6.3",
+      "op": "log_time_entry",
+      "utterance": "Clock 2 hours on the Patel job",
+      "llmResponse": {
+        "intentType": "log_time_entry",
+        "confidence": 0.9,
+        "extractedEntities": {
+          "jobReference": "the Patel job",
+          "durationMinutes": 120
+        }
+      },
+      "expect": {
+        "proposalType": "log_time_entry",
+        "status": "draft",
+        "actionClass": "capture",
+        "missingFieldsExact": [],
+        "payloadContains": { "durationMinutes": 120 },
+        "payloadContainsSeedRefs": { "jobId": "patelJobId" }
+      }
+    },
+    {
+      "id": "b4-7-reschedule-appointment",
+      "focusItem": "B4.7",
+      "op": "reschedule_appointment",
+      "utterance": "Move the Garcia job to Thursday at 10",
+      "llmResponse": {
+        "intentType": "reschedule_appointment",
+        "confidence": 0.9,
+        "extractedEntities": {
+          "appointmentReference": "the Garcia job",
+          "newDateTimeDescription": "Thursday at 10"
+        }
+      },
+      "expect": {
+        "proposalType": "reschedule_appointment",
+        "status": "draft",
+        "actionClass": "capture",
+        "missingFieldsExact": [],
+        "payloadContainsSeedRefs": { "appointmentId": "garciaAppointmentId" }
+      }
+    },
+    {
+      "id": "b4-7-cancel-appointment",
+      "focusItem": "B4.7",
+      "op": "cancel_appointment",
+      "utterance": "Cancel Tuesday's Garcia appointment",
+      "llmResponse": {
+        "intentType": "cancel_appointment",
+        "confidence": 0.9,
+        "extractedEntities": {
+          "appointmentReference": "the Garcia job",
+          "cancellationReason": "no longer needed"
+        }
+      },
+      "expect": {
+        "proposalType": "cancel_appointment",
+        "status": "draft",
+        "actionClass": "irreversible",
+        "missingFieldsExact": [],
+        "payloadContainsSeedRefs": { "appointmentId": "garciaAppointmentId" }
+      }
+    },
+    {
+      "id": "b5-3-negative-named-reference-must-not-fall-back",
+      "focusItem": "B5.3 (resolver fix negative)",
+      "op": "reassign_appointment",
+      "utterance": "Assign Carlos to the Fitzgerald job",
+      "note": "'Fitzgerald' names no customer/job this tenant has. Pre-fix, PgEntityResolver.resolveAppointment fell straight through to the tenant-wide soonest-upcoming-appointment fallback for ANY non-date, non-job-anchored reference, so this would have silently resolved to Johnson's or Garcia's appointment. Post-fix (b5.3-design.md §3), a name-bearing reference that matches no job returns not_found and is never allowed to reach that fallback — the proposal must gate on appointmentId instead of picking an arbitrary appointment. The technician side (Carlos) resolves fine on its own, isolating the assertion to appointment resolution specifically.",
+      "llmResponse": {
+        "intentType": "reassign_appointment",
+        "confidence": 0.88,
+        "extractedEntities": {
+          "appointmentReference": "the Fitzgerald job",
+          "targetTechnicianName": "Carlos Vega"
+        }
+      },
+      "expect": {
+        "proposalType": "reassign_appointment",
+        "status": "draft",
+        "actionClass": "capture",
+        "missingFieldsContains": ["appointmentId"],
+        "payloadContainsSeedRefs": { "toTechnicianId": "carlosId" },
+        "payloadAppointmentIdMustBeUnset": true
+      }
+    }
+  ]
+}

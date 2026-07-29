@@ -10,6 +10,11 @@ export const onboardingTenantSettingsPayloadSchema = z.object({
   city: z.string().optional(),
   state: z.string().optional(),
   verticalPacks: z.array(verticalTypeSchema).min(1),
+  // B1.20 — the owner's hourly rate, when the pricing capture state
+  // extracted one (price_type: 'hourly_rate'). Integer cents, per the
+  // repo's money invariant. Optional/absent when no hourly rate was
+  // spoken — never fabricated (see tenant-settings-proposer.ts).
+  hourlyRateCents: z.number().int().min(0).optional(),
 });
 
 export const onboardingServiceCategoryPayloadSchema = z.object({

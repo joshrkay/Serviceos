@@ -231,7 +231,11 @@ export function buildTaskHandlers(deps: HandlerRegistryDeps): Map<ProposalType, 
   // Wire estimateRepo so gated free-text refs get AmbiguityPicker candidates
   // (same B2 pattern as send_invoice). The gate itself never lifts.
   handlers.set('send_estimate', new SendEstimateTaskHandler({ estimateRepo: deps.estimateRepo }));
-  handlers.set('send_estimate_nudge', new SendEstimateNudgeTaskHandler());
+  // B8.10 — wire estimateRepo so a unique, verified, nudgeable match lifts
+  // the gate outright instead of always stalling on missingFields (see the
+  // handler's own doc comment in voice-extended-tasks.ts for the full
+  // resolution ladder).
+  handlers.set('send_estimate_nudge', new SendEstimateNudgeTaskHandler({ estimateRepo: deps.estimateRepo }));
   handlers.set(
     'send_payment_reminder',
     new SendPaymentReminderTaskHandler({

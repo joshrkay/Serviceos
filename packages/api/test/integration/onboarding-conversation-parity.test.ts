@@ -43,6 +43,8 @@ import { ProposalExecutor } from '../../src/proposals/execution/executor';
 import { IdempotencyGuard } from '../../src/proposals/execution/idempotency';
 import { createExecutionHandlerRegistry, ExecutionContext } from '../../src/proposals/execution/handlers';
 import type { LLMGateway, LLMRequest, LLMResponse } from '../../src/ai/gateway/gateway';
+import { loadOnboardingFacts } from '../../src/onboarding/load-facts';
+import { deriveOnboardingStatus } from '../../src/onboarding/derive-status';
 
 function scriptedGateway(scripts: Record<string, unknown>): LLMGateway {
   return {
@@ -68,6 +70,11 @@ const CITY = 'Tucson';
 const STATE = 'AZ';
 const SERVICE_AREA_TEXT = `${CITY}, ${STATE}`;
 const TIMEZONE = 'America/Phoenix';
+// B1.20 — matches the extract_pricing script's hourly_rate entry below
+// ($120/hr), and IdentityStep.tsx:77's `useState<number>(30)` form
+// default, so both paths are asserted against the SAME expected values.
+const HOURLY_RATE_CENTS = 12000;
+const JOB_BUFFER_MINUTES = 30;
 const BUSINESS_HOURS = {
   mon: { open: '08:00', close: '17:00' },
   tue: { open: '08:00', close: '17:00' },
@@ -171,8 +178,8 @@ describe('B1.19 — onboarding parity: conversation vs. wizard, real Postgres', 
       businessName: BUSINESS_NAME,
       serviceAreaText: SERVICE_AREA_TEXT,
       businessHours: BUSINESS_HOURS,
-      jobBufferMinutes: 30,
-      hourlyRateCents: 12000,
+      jobBufferMinutes: JOB_BUFFER_MINUTES,
+      hourlyRateCents: HOURLY_RATE_CENTS,
       // Explicitly confirmed timezone — proves the wizard path CAN set a
       // real, chosen zone (never a guessed default).
       timezone: TIMEZONE,
@@ -284,6 +291,34 @@ describe('B1.19 — onboarding parity: conversation vs. wizard, real Postgres', 
 
     expect(conversationSettings?.businessHours).toEqual(BUSINESS_HOURS);
     expect(wizardSettings?.businessHours).toEqual(BUSINESS_HOURS);
+  });
+
+  it('identity: hourlyRateCents threads through from the pricing capture and matches the wizard', async () => {
+    // B1.20 — verified defect fix: onboarding-handlers.ts previously wrote
+    // neither hourlyRateCents nor jobBufferMinutes, so an approved
+    // conversational onboarding could never satisfy derive-status.ts's
+    // isIdentityDone check. This proves the extracted $120/hr rate
+    // (extract_pricing script above) lands in the SAME column the wizard
+    // writes, as the same integer-cents value.
+    const wizardSettings = await settingsRepo.findByTenant(wizardTenant.tenantId);
+    const conversationSettings = await settingsRepo.findByTenant(conversationTenant.tenantId);
+
+    expect(wizardSettings?.hourlyRateCents).toBe(HOURLY_RATE_CENTS);
+    expect(conversationSettings?.hourlyRateCents).toBe(HOURLY_RATE_CENTS);
+    expect(Number.isInteger(conversationSettings?.hourlyRateCents)).toBe(true);
+  });
+
+  it('identity: jobBufferMinutes defaults to 30 on the conversational path, matching the wizard form default (parity, not a guess — see onboarding-handlers.ts)', async () => {
+    // The conversation never asks about job buffer at all — there is no
+    // capture state for it. The handler writes the SAME default the form
+    // wizard pre-fills (IdentityStep.tsx:77 `useState<number>(30)`), which
+    // is why this is asserted as parity rather than skipped like timezone
+    // (a buffer default has no correctness cliff a wrong timezone has).
+    const wizardSettings = await settingsRepo.findByTenant(wizardTenant.tenantId);
+    const conversationSettings = await settingsRepo.findByTenant(conversationTenant.tenantId);
+
+    expect(wizardSettings?.jobBufferMinutes).toBe(JOB_BUFFER_MINUTES);
+    expect(conversationSettings?.jobBufferMinutes).toBe(JOB_BUFFER_MINUTES);
   });
 
   it('timezone: the wizard path stores the EXPLICITLY CONFIRMED value; the conversational path — which has no capture channel for timezone at all — never guesses one', async () => {
@@ -403,6 +438,40 @@ describe('B1.19 — onboarding parity: conversation vs. wizard, real Postgres', 
       );
       expect(failed.rows.length).toBe(1);
     }
+  });
+
+  it('B1.20 — the identity onboarding step now derives DONE for the conversation-driven tenant (the actual user-visible soft-gate outcome, not just non-null columns)', async () => {
+    // This is the real defect assertion: before this fix, a tenant could
+    // approve+execute all five onboarding_* proposals and derive-status.ts's
+    // isIdentityDone would still report false (missing jobBufferMinutes AND
+    // hourlyRateCents), bouncing them back to redo the identity step in the
+    // form even though they'd just finished it by voice. Reproduces the
+    // exact facts-loading path routes/onboarding.ts's GET /status uses.
+    const conversationFacts = await loadOnboardingFacts({ pool, settingsRepo }, conversationTenant.tenantId);
+    const conversationStatus = deriveOnboardingStatus(conversationFacts);
+    const identityStep = conversationStatus.steps.find((s) => s.id === 'identity');
+
+    expect(identityStep?.status).toBe('done');
+
+    // Same derivation for the wizard tenant, as a sanity check that the
+    // status function itself is being exercised correctly (both paths
+    // should agree once the conversational path is fixed).
+    const wizardFacts = await loadOnboardingFacts({ pool, settingsRepo }, wizardTenant.tenantId);
+    const wizardStatus = deriveOnboardingStatus(wizardFacts);
+    expect(wizardStatus.steps.find((s) => s.id === 'identity')?.status).toBe('done');
+
+    // Regression pin (must not regress): the identity step derives DONE
+    // WITHOUT a timezone — deriveOnboardingStatus's isIdentityDone check
+    // never required one, and the conversational path still never guesses
+    // one (see the timezone test above). Confirms the fix didn't
+    // accidentally start defaulting timezone to make this test pass.
+    expect(conversationFacts.identity.jobBufferMinutes).toBe(JOB_BUFFER_MINUTES);
+    expect(conversationFacts.identity.hourlyRateCents).toBe(HOURLY_RATE_CENTS);
+    const rawTimezone = await pool.query<{ timezone: string | null }>(
+      'SELECT timezone FROM tenant_settings WHERE tenant_id = $1',
+      [conversationTenant.tenantId],
+    );
+    expect(rawTimezone.rows[0].timezone).toBeNull();
   });
 
   it('cross-tenant negative: a third tenant sees none of the conversation tenant\'s config', async () => {

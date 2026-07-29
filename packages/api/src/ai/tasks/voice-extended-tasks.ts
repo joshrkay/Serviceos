@@ -778,30 +778,242 @@ export class SendEstimateTaskHandler implements TaskHandler {
 // ───────────── send_estimate_nudge ─────────────
 //
 // Comms class — never auto-approves. A nudge re-sends the link for an
-// ALREADY-sent estimate (the execution handler enforces a 48h cooldown and
-// requires the estimate to be in 'sent'). Mirrors SendEstimateTaskHandler:
-// carry estimateReference (free text) and flag estimateId missing so the
-// operator resolves it in the review card before approval.
+// ALREADY-sent estimate (SendEstimateNudgeExecutionHandler enforces a 48h
+// cooldown and requires estimate.status === 'sent').
+//
+// B8.10 (rivet-voice-19, see projects/rivet-voice-19/b8.10-design.md) —
+// "Nudge the Khan estimate" used to be blocked by a design comment
+// (missing = ['estimateId'] unconditional), not a missing capability: the
+// resolution technique already existed elsewhere. This reuses
+// EstimateEditTaskHandler.resolveEstimateIdGate's VERIFICATION half exactly
+// (estimate-edit-task.ts:427-461) — an id-shaped reference is only trusted
+// once a repo lookup confirms it, never from raw LLM/router text — but goes
+// one step further: a unique, VERIFIED, NUDGEABLE match lifts the gate
+// outright (payload.estimateId set, missingFields: []), because that is
+// this item's whole point. A free-text reference that resolves to more than
+// one nudgeable estimate still asks (voice_clarification) rather than
+// guessing.
+//
+// Nudgeable states: only 'sent' participates in matching. There is no
+// separate 'viewed' EstimateStatus (view activity is tracked on
+// estimate.firstViewedAt, a substate of 'sent', not a distinct status) — so
+// the design doc's "sent/viewed" language collapses to exactly
+// `status === 'sent'`, matching SendEstimateNudgeExecutionHandler's own gate
+// (`estimate.status !== 'sent'`) verbatim. No drift is possible between
+// draft-time and execute-time nudgeability.
+//
+// DECISION (b8.10-design.md, AC-3 — logged, not re-litigated here): a
+// UNIQUE match that exists but is in a non-nudgeable status (draft/
+// accepted/rejected/expired) GATES with a reason, it does NOT become a
+// clarification. Rationale: clarification is for picking among several
+// live options; here there is nothing to pick — the estimate is simply not
+// nudgeable, and "the Khan estimate was already accepted" beats a picker
+// with one disabled row. The reason rides `Proposal.explanation` (not the
+// payload — sendEstimateNudgePayloadSchema has no reason field and
+// proposals/contracts.ts is out of scope for this item).
+const NUDGEABLE_ESTIMATE_STATUSES = new Set<Estimate['status']>(['sent']);
+
+/** AC-2 — nudge disambiguation candidate: estimate number + amount + age,
+ *  so a spoken picker ("the first one" / "EST-0042") is answerable by ear —
+ *  a bare label/status hint (mapEstimatesToCandidates) isn't enough here. */
+function nudgeCandidateFrom(estimate: Estimate, now: Date): EntityCandidate {
+  return {
+    id: estimate.id,
+    kind: 'estimate',
+    label: estimate.estimateNumber,
+    hint: `${formatCents(estimate.totals.totalCents)} • ${nudgeAgeDescription(estimate, now)}`,
+    score: 1,
+  };
+}
+
+/** "sent today" / "sent 1 day ago" / "sent 12 days ago" — falls back to
+ *  createdAt for the (should-never-happen) case of a 'sent' row with no
+ *  sentAt, rather than throwing on a null date. */
+function nudgeAgeDescription(estimate: Estimate, now: Date): string {
+  const since = estimate.sentAt ?? estimate.createdAt;
+  const days = Math.max(0, Math.floor((now.getTime() - since.getTime()) / DAY_MS));
+  return days === 0 ? 'sent today' : `sent ${days} ${days === 1 ? 'day' : 'days'} ago`;
+}
+
+export interface SendEstimateNudgeTaskDeps {
+  /**
+   * B8.10 — powers BOTH halves of resolution: `findById` verifies a
+   * router-resolved `existingEntities.estimateId` (resolvedEstimateIdFrom)
+   * before it's trusted; `findByTenant` runs the same ILIKE
+   * estimate_number/customer_message search `candidatesForReference` uses,
+   * widened here to ALSO see non-nudgeable matches so a unique
+   * non-nudgeable hit (AC-3) can be told apart from real ambiguity (AC-2).
+   * Absent → today's unconditional gate (AC-4 fallback only) — unchanged.
+   */
+  estimateRepo?: Pick<EstimateRepository, 'findById' | 'findByTenant'>;
+}
+
 export class SendEstimateNudgeTaskHandler implements TaskHandler {
   readonly taskType = 'send_estimate_nudge' as const;
+  private readonly deps: SendEstimateNudgeTaskDeps;
+
+  constructor(deps: SendEstimateNudgeTaskDeps = {}) {
+    this.deps = deps;
+  }
 
   async handle(context: TaskContext): Promise<TaskResult> {
     const ee = entitiesFrom(context);
     const payload: Record<string, unknown> = {};
-    // estimateId is a required UUID for the execution handler and is NOT
-    // resolved by the customer/job entity resolver — always flag it missing so
-    // the approval gate holds until the operator resolves the estimate (matches
-    // reassign_appointment's toTechnicianId contract). The reference, when
-    // present, gives the review card something to resolve from.
-    const missing: string[] = ['estimateId'];
+    const reference = ee.jobReference ?? ee.customerName;
+    if (reference) payload.estimateReference = reference;
 
-    if (ee.jobReference) payload.estimateReference = ee.jobReference;
-    else if (ee.customerName) payload.estimateReference = ee.customerName;
+    const repo = this.deps.estimateRepo;
+    const now = context.now ?? new Date();
 
+    if (repo) {
+      // Router-verified id first (mirrors resolvedAppointmentIdFrom's
+      // convention) — VERIFY it against the repo before trusting it; a
+      // repo miss (or a hallucinated id) is never trusted on its own.
+      const resolvedId = resolvedEstimateIdFrom(context);
+      if (resolvedId) {
+        const verified = await safeFindEstimateById(repo, context.tenantId, resolvedId);
+        if (verified) {
+          return NUDGEABLE_ESTIMATE_STATUSES.has(verified.status)
+            ? this.liftGate(context, payload, verified)
+            : this.gateNonNudgeable(context, payload, verified);
+        }
+        // Unverifiable — fall through to the reference search below rather
+        // than trusting an id that didn't check out.
+      }
+
+      // No router-verified id (or it didn't verify) — search the SAME
+      // estimate_number/customer_message ILIKE index candidatesForReference
+      // uses, but keep ALL matches (any status) so a unique-but-non-nudgeable
+      // hit (AC-3) is distinguishable from genuine ambiguity (AC-2) and from
+      // no match at all (AC-4).
+      if (typeof reference === 'string' && reference.trim().length > 0) {
+        const matches = await safeFindEstimatesByTenant(repo, context.tenantId, reference.trim());
+        const nudgeable = matches.filter((m) => NUDGEABLE_ESTIMATE_STATUSES.has(m.status));
+
+        if (nudgeable.length === 1) {
+          return this.liftGate(context, payload, nudgeable[0]);
+        }
+        if (nudgeable.length > 1) {
+          return this.clarify(context, reference, nudgeable, now);
+        }
+        if (matches.length === 1) {
+          // AC-3 — exactly one estimate matched the reference at all, and it
+          // isn't nudgeable. Multiple non-nudgeable matches (0 nudgeable,
+          // >1 total) fall through to the plain AC-4 gate below instead: the
+          // "one disabled row" rationale for a custom explanation doesn't
+          // extend cleanly to "several disabled rows", and the ACs don't
+          // require it — scope stays literal to what was asked.
+          return this.gateNonNudgeable(context, payload, matches[0]);
+        }
+      }
+    }
+
+    // AC-4 — no repo wired, no reference extracted, or nothing matched:
+    // today's behavior becomes the fallback, not the default.
     return {
-      proposal: createProposal(inputFor(context, this.taskType, payload, missing)),
+      proposal: createProposal(inputFor(context, this.taskType, payload, ['estimateId'])),
       taskType: this.taskType,
     };
+  }
+
+  /** AC-1 — unique, verified, NUDGEABLE match: lifts the gate outright. */
+  private liftGate(
+    context: TaskContext,
+    payload: Record<string, unknown>,
+    target: Estimate,
+  ): TaskResult {
+    payload.estimateId = target.id;
+    return {
+      proposal: createProposal(
+        inputFor(context, this.taskType, payload, [], {
+          // Repo-confirmed, not copied from LLM/router text — safe to
+          // allowlist against assistant.ts's dropUnverifiedIds the same way
+          // resolveEstimateIdGate's verifiedIds does.
+          sourceContext: { verifiedIds: { estimateId: target.id } },
+        }),
+      ),
+      taskType: this.taskType,
+    };
+  }
+
+  /** AC-2 — two or more nudgeable matches: ask, never guess. */
+  private clarify(
+    context: TaskContext,
+    reference: string,
+    candidates: Estimate[],
+    now: Date,
+  ): TaskResult {
+    return {
+      proposal: createProposal({
+        tenantId: context.tenantId,
+        proposalType: 'voice_clarification',
+        payload: {
+          transcript: context.message,
+          reason: 'ambiguous_entity',
+          entityReference: reference,
+          entityCandidates: candidates.map((c) => nudgeCandidateFrom(c, now)),
+        },
+        summary: `Which estimate? "${reference}" matched ${candidates.length} sent, unanswered estimates`,
+        explanation: `Heard the request, but ${candidates.length} sent-and-unanswered estimates match. Tap the right one below.`,
+        sourceContext: baseSourceContext(context),
+        createdBy: context.userId,
+      }),
+      taskType: 'voice_clarification',
+    };
+  }
+
+  /**
+   * AC-3 (decision, logged above and in b8.10-design.md) — a unique match
+   * exists but its status isn't nudgeable: gate honestly with the reason on
+   * `explanation`, rather than a clarification picker with one dead row.
+   * estimateId is still stamped (review-card context, exactly as
+   * resolveEstimateIdGate stamps a free-text-resolved target) but the gate
+   * never lifts.
+   */
+  private gateNonNudgeable(
+    context: TaskContext,
+    payload: Record<string, unknown>,
+    target: Estimate,
+  ): TaskResult {
+    payload.estimateId = target.id;
+    return {
+      proposal: createProposal(
+        inputFor(context, this.taskType, payload, ['estimateId'], {
+          explanation:
+            `The ${target.estimateNumber} estimate is '${target.status}' — only a sent, ` +
+            'still-unanswered estimate can be nudged.',
+        }),
+      ),
+      taskType: this.taskType,
+    };
+  }
+}
+
+/** Never throws — a repo hiccup fails closed to "unverified", same posture
+ *  as resolveTargetEstimate (estimate-edit-task.ts). */
+async function safeFindEstimateById(
+  repo: Pick<EstimateRepository, 'findById'>,
+  tenantId: string,
+  id: string,
+): Promise<Estimate | null> {
+  try {
+    return await repo.findById(tenantId, id);
+  } catch {
+    return null;
+  }
+}
+
+/** Never throws — a repo hiccup degrades to "no matches", same posture as
+ *  candidatesForReference (resolution/reference-candidates.ts). */
+async function safeFindEstimatesByTenant(
+  repo: Pick<EstimateRepository, 'findByTenant'>,
+  tenantId: string,
+  search: string,
+): Promise<Estimate[]> {
+  try {
+    return await repo.findByTenant(tenantId, { search, limit: 5 });
+  } catch {
+    return [];
   }
 }
 

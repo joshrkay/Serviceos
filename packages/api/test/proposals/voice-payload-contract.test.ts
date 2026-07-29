@@ -48,6 +48,7 @@ import { buildTaskHandlers, HandlerRegistryDeps } from '../../src/ai/orchestrati
 import { TaskContext, TaskResult } from '../../src/ai/tasks/task-handlers';
 import { RespondToReviewTaskHandler } from '../../src/ai/tasks/review-response-task';
 import { CreateStandingInstructionTaskHandler } from '../../src/ai/tasks/standing-instruction-task';
+import { UpdateBrandVoiceTaskHandler } from '../../src/ai/tasks/brand-voice-task';
 import {
   Proposal,
   ProposalType,
@@ -63,7 +64,9 @@ import {
   CreateJobExecutionHandler,
   CreateAppointmentExecutionHandler,
   UpdateCustomerExecutionHandler,
+  SendEstimateNudgeExecutionHandler,
 } from '../../src/proposals/execution/handlers';
+import type { SendService } from '../../src/notifications/send-service';
 import { IssueInvoiceExecutionHandler } from '../../src/proposals/execution/issue-invoice-handler';
 import { CreateInvoiceScheduleExecutionHandler } from '../../src/proposals/execution/invoice-schedule-handler';
 import { BatchInvoiceExecutionHandler } from '../../src/proposals/execution/batch-invoice-handler';
@@ -80,6 +83,7 @@ import {
 import { AddNoteExecutionHandler } from '../../src/proposals/execution/voice-extended-handlers';
 import { LogExpenseExecutionHandler } from '../../src/proposals/execution/log-expense-handler';
 import { CreateStandingInstructionExecutionHandler } from '../../src/proposals/execution/standing-instruction-handler';
+import { UpdateBrandVoiceExecutionHandler } from '../../src/proposals/execution/brand-voice-handler';
 import { CreateCustomerVoiceExecutionHandler } from '../../src/proposals/execution/create-customer-handler';
 import { EmergencyDispatchExecutionHandler } from '../../src/proposals/execution/emergency-dispatch-handler';
 import { InMemoryAuditRepository } from '../../src/audit/audit';
@@ -615,10 +619,38 @@ const ROWS: Row[] = [
   },
   {
     intent: 'send_estimate_nudge',
-    mode: 'gated',
-    note: 'estimateId is unconditionally gated — never resolved by the entity resolver',
-    draft: () =>
-      draft({ gateway: NOOP_GATEWAY }, 'send_estimate_nudge', ctx({ existingEntities: { customerName: 'Khan' } })),
+    mode: 'resolves',
+    note: 'B8.10 — a unique, verified, NUDGEABLE ("sent") Khan estimate resolves via the wired estimateRepo search and lifts the gate; SendEstimateNudgeExecutionHandler dispatches through a fake SendService',
+    draft: () => {
+      const estimateRepo = new InMemoryEstimateRepository();
+      return estimateRepo
+        .create(makeEstimate({ id: ESTIMATE_ID, status: 'sent', customerMessage: 'Khan' }))
+        .then(() =>
+          draft(
+            { gateway: NOOP_GATEWAY, estimateRepo },
+            'send_estimate_nudge',
+            ctx({ existingEntities: { customerName: 'Khan' } }),
+          ),
+        );
+    },
+    execute: async (p) => {
+      const estimateRepo = new InMemoryEstimateRepository();
+      await estimateRepo.create(makeEstimate({ id: ESTIMATE_ID, status: 'sent', customerMessage: 'Khan' }));
+      const sendService: Pick<SendService, 'sendEstimate'> = {
+        sendEstimate: async () => ({
+          estimateId: ESTIMATE_ID,
+          viewUrl: 'https://example.test/e/tok',
+          viewToken: 'tok',
+          channelsSent: [],
+        }),
+      };
+      return new SendEstimateNudgeExecutionHandler(
+        estimateRepo,
+        sendService,
+        undefined,
+        new InMemoryAuditRepository(),
+      ).execute(p, execContext());
+    },
   },
   {
     intent: 'send_payment_reminder',
@@ -703,6 +735,26 @@ const ROWS: Row[] = [
       new RespondToReviewTaskHandler(new InMemoryProposalRepository()).handle(
         ctx({ existingEntities: { reviewReference: 'the 1-star review' } }),
       ),
+  },
+  // B1.18 — excluded from the shared registry by design (constructed the way
+  // voice-action-router.ts ~line 505 does, mirroring create_standing_instruction
+  // above). The payload always carries AT LEAST a freeText fallback of the
+  // verbatim instruction even on a total extraction failure, so missingFields
+  // is always []; dep-less UpdateBrandVoiceExecutionHandler refuses on
+  // wiring, not validation (handler_not_wired:brandVoiceRepo).
+  {
+    intent: 'update_brand_voice',
+    mode: 'resolves',
+    note: 'a mapped six-field patch drafts ungated; dep-less UpdateBrandVoiceExecutionHandler refuses on wiring, not validation (handler_not_wired:brandVoiceRepo)',
+    draft: () =>
+      new UpdateBrandVoiceTaskHandler(
+        mockGateway(
+          JSON.stringify({ register: 'friendly', signoff: "Thanks — Bob's HVAC", confidence_score: 0.9 }),
+        ),
+      ).handle(
+        ctx({ message: "Set my brand voice: friendly, always sign off 'Thanks — Bob's HVAC'" }),
+      ),
+    execute: (p) => new UpdateBrandVoiceExecutionHandler(undefined, stubAuditRepo).execute(p, execContext()),
   },
 ];
 

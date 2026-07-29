@@ -74,6 +74,7 @@ import { selectInjectedStandingInstructions } from '../ai/standing-instructions-
 import { buildTaskHandlers } from '../ai/orchestration/handler-registry';
 import { RespondToReviewTaskHandler } from '../ai/tasks/review-response-task';
 import { CreateStandingInstructionTaskHandler } from '../ai/tasks/standing-instruction-task';
+import { UpdateBrandVoiceTaskHandler } from '../ai/tasks/brand-voice-task';
 import type { ReviewRepository } from '../reputation/review';
 import type { BuildReviewResponseProposalDeps } from '../reputation/build-proposal';
 import { instrument } from '../monitoring/instrumentation';
@@ -502,6 +503,11 @@ function buildHandlers(deps: VoiceActionRouterDeps): Map<ProposalType, TaskHandl
   // UB-A2 — persistent directives ("from now on…"); normalized via the LLM
   // gateway, ALWAYS drafts for review (no sourceTrustTier).
   handlers.set('create_standing_instruction', new CreateStandingInstructionTaskHandler(deps.gateway));
+  // B1.18 — brand voice captured by voice ("Set my brand voice: ..."). Voice-
+  // only by design (mirrors create_standing_instruction above): a spoken
+  // edit to the tenant's own outbound identity, not a customer-calling-FSM
+  // concern, so it's excluded from the shared registry (handler-registry.ts).
+  handlers.set('update_brand_voice', new UpdateBrandVoiceTaskHandler(deps.gateway));
   // RV-080 — complaint uses 'add_note' proposal type but needs its own
   // handler (pinned-prefix note + companion callback). Registered under
   // a synthetic key ('_complaint') so it doesn't collide with the plain

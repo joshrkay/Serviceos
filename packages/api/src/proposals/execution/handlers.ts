@@ -111,6 +111,8 @@ import {
 import { PackActivationRepository } from '../../settings/pack-activation';
 import { EstimateTemplateRepository } from '../../templates/estimate-template';
 import { SeedPackDefaultsDeps } from '../../packs/seed-pack-defaults';
+import { UpdateBrandVoiceExecutionHandler } from './brand-voice-handler';
+import type { BrandVoiceRepository } from '../../tenants/brand/brand-voice';
 
 export interface ExecutionContext {
   tenantId: string;
@@ -1220,6 +1222,11 @@ export function createExecutionHandlerRegistry(deps?: {
   packActivationRepo?: PackActivationRepository;
   templateRepo?: EstimateTemplateRepository;
   packSeedDeps?: SeedPackDefaultsDeps;
+  // B1.18 — update_brand_voice writes through the SAME versioned path the
+  // Brand-Voice Configurator sheet uses (tenants/brand/brand-voice-service.ts
+  // updateBrandVoice). Absent → the handler reports isFullyWired() false and
+  // refuses to execute (WS3 convention) rather than a synthetic passthrough.
+  brandVoiceRepo?: BrandVoiceRepository;
 }): Map<ProposalType, ExecutionHandler> {
   // WS3 — audit is a structural invariant for the consent/entity mutation
   // handlers below (their constructors take a non-optional AuditRepository).
@@ -1413,6 +1420,11 @@ export function createExecutionHandlerRegistry(deps?: {
     // always reports isFullyWired() === false.
     new OnboardingTeamMemberExecutionHandler(),
     new OnboardingScheduleExecutionHandler(deps?.settingsRepo, requiredAuditRepo),
+    // B1.18 — update_brand_voice: writes through the SAME versioned
+    // read→cool-down-check→merge→bump path the Brand-Voice Configurator
+    // sheet uses (never re-implemented here — see brand-voice-handler.ts).
+    // manual action class, so it only ever runs after an explicit owner tap.
+    new UpdateBrandVoiceExecutionHandler(deps?.brandVoiceRepo, requiredAuditRepo),
   ];
 
   // Handlers that mutate existing entities take a repo dep. Registered

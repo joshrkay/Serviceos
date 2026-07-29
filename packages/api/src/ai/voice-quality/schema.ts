@@ -53,17 +53,6 @@ export const VoiceQualityScriptSchema = z.object({
      * quoting-scenario gap). Seeded into the driver factory's catalog repo.
      */
     catalog: z.array(z.unknown()).optional(),
-    /**
-     * B5.3 — team members a `reassign_appointment` / `add_crew_member` /
-     * `remove_crew_member` script can name. Each row is `{id, name}`
-     * (`unknown` for forward-compat like the other fixture arrays). Seeded
-     * into a tiny technician-only `EntityResolver` (driver factory) so the
-     * spoken name resolves the SAME way production does — never a raw id
-     * emitted by the classifier (see CLAUDE.md's entity-resolution
-     * invariant). Absent/empty → the resolver stays unwired for that
-     * script, byte-identical to every pre-existing corpus script.
-     */
-    technicians: z.array(z.unknown()).optional(),
   }),
   callerId: z.string().nullable(),
   callerIdBlocked: z.boolean().default(false),

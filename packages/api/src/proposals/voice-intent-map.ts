@@ -103,6 +103,11 @@ export const INTENT_TO_PROPOSAL_TYPE: Partial<Record<Exclude<IntentType, 'unknow
   create_invoice_schedule: 'create_invoice_schedule',
   respond_to_review: 'review_response_proposal',
   create_standing_instruction: 'create_standing_instruction',
+  // B1.18 — brand voice captured by voice. `manual` action class (never
+  // auto-approves at any trust tier — proposals/proposal.ts). Lock stays
+  // tap-only: the payload has no field capable of expressing
+  // `brand_voice_locked` (see contracts/brand-voice.ts).
+  update_brand_voice: 'update_brand_voice',
 };
 
 /**
@@ -148,6 +153,7 @@ export function voiceProposalSummary(
   if (intent === 'draft_estimate') return `Draft estimate${name ? ` for ${name}` : ''}`;
   if (intent === 'create_appointment') return `Schedule appointment${name ? ` for ${name}` : ''}`;
   if (intent === 'emergency_dispatch') return 'Emergency dispatch — escalate to on-call';
+  if (intent === 'update_brand_voice') return 'Update brand voice';
   if (intent) return `Voice intent: ${intent}${ref ? ` (${ref})` : ''}`;
   return 'Voice clarification needed';
 }

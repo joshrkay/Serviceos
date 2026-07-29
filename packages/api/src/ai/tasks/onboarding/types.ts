@@ -143,6 +143,17 @@ export interface OnboardingTenantSettingsPayload {
   city?: string;
   state?: string;
   verticalPacks: VerticalType[];
+  /**
+   * B1.20 — the owner's hourly rate (integer cents), when the pricing
+   * capture state extracted a `price_type: 'hourly_rate'` entry (see
+   * pricing-extractor.ts). Carried on the tenant-settings proposal
+   * (rather than a new proposal type) because both write through the
+   * same `upsertIdentityFields` handler that already owns the tenant's
+   * identity columns. Absent when the conversation never captured a
+   * rate — the handler must never invent one (a wrong hourly rate is a
+   * money defect, not just a UX gap).
+   */
+  hourlyRateCents?: number;
 }
 
 export interface OnboardingServiceCategoryPayload {

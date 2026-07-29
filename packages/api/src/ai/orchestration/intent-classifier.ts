@@ -75,6 +75,15 @@ export type IntentType =
   | 'create_invoice_schedule'
   | 'respond_to_review'
   | 'create_standing_instruction'
+  // B1.18 — the owner captures/edits the tenant's brand voice by speaking
+  // ("Set my brand voice: friendly, plain-spoken, always sign off 'Thanks —
+  // Bob's HVAC'"). PROPOSAL-DRIVING but deliberately `manual` action class
+  // (proposals/proposal.ts) — never auto-approves at any trust tier, because
+  // a wrong extraction poisons every future outbound message. Scope
+  // decision (Part F entry F-2): capture is speakable; LOCKING the brand
+  // voice stays tap-only — this intent's payload has no field capable of
+  // expressing `brand_voice_locked` (see proposals/contracts/brand-voice.ts).
+  | 'update_brand_voice'
   // B5.5 / Part F decision F-3 — a technician announcing they're headed to
   // an appointment ("on my way"). NOT proposal-driving: the router fires
   // the SAME audited direct status act the app en-route button already
@@ -200,6 +209,7 @@ export const SUPPORTED_INTENTS: readonly IntentType[] = [
   'create_invoice_schedule',
   'respond_to_review',
   'create_standing_instruction',
+  'update_brand_voice',
   'en_route',
   'lookup_appointments',
   'lookup_invoices',
@@ -257,8 +267,14 @@ export const SUPPORTED_INTENTS: readonly IntentType[] = [
  *           announcing "on my way". Not proposal-driving (see the IntentType
  *           doc comment); a technician's own recorded memo fires the SAME
  *           audited direct status act the app en-route button executes.
+ *   1.5.0 — B1.18: update_brand_voice (additive) — the owner captures/edits
+ *           the tenant's brand voice by speaking. Proposal-driving,
+ *           `manual` action class (never auto-approves at any trust tier).
+ *           Locking the brand voice stays tap-only — this intent's payload
+ *           structurally cannot express `brand_voice_locked` (Part F
+ *           entry F-2).
  */
-export const INTENT_TAXONOMY_VERSION = '1.4.0';
+export const INTENT_TAXONOMY_VERSION = '1.5.0';
 
 /**
  * P11-001: convenience predicate the FSM adapter uses to route
@@ -422,6 +438,13 @@ export interface ExtractedEntities {
   // speaker scoped it (e.g. "on invoices" → create_invoice). Free text — the
   // task handler normalizes it into the structured scope.
   scopeIntentHint?: string;
+  // B1.18 — update_brand_voice: the VERBATIM spoken brand-voice instruction
+  // ("friendly, plain-spoken, no slang, always sign off 'Thanks — Bob's
+  // HVAC'"). Flat string by design, mirroring instructionText/
+  // scheduleDescription — the task handler's own (separate) LLM pass maps it
+  // onto the six brandVoiceSchema fields + a freeText catch-all; the
+  // classifier itself never emits structured tone fields.
+  brandVoiceInstruction?: string;
 }
 
 /**
@@ -963,6 +986,29 @@ Supported intents (return exactly ONE):
                            NOT create_standing_instruction: a one-off edit
                            ("add a $79 fee to the Smith invoice" =
                            update_invoice).
+- "update_brand_voice"  — the OWNER sets or edits how the AI sounds in
+                           outbound customer messages: register/tone,
+                           opening lines, sign-off, banned phrases, persona
+                           name, or which pronoun the business uses ("we"
+                           vs "I"). Put the FULL spoken instruction
+                           VERBATIM in brandVoiceInstruction — do not try to
+                           split it into fields yourself; a separate pass
+                           maps it onto the structured fields. Distinct from
+                           create_standing_instruction (a persistent
+                           business RULE about pricing/scheduling, not how
+                           the AI talks) and from update_customer (edits a
+                           CUSTOMER record, not the tenant's own voice).
+                           Never classify a request to LOCK/finalize the
+                           brand voice any differently — locking is a
+                           tap-only action with no voice path; still extract
+                           whatever tone instruction was spoken, if any.
+                           Examples: "Set my brand voice: friendly,
+                                      plain-spoken, no slang, always sign
+                                      off 'Thanks — Bob's HVAC'"
+                                     "Make our tone more formal and never
+                                      say 'no problem'"
+                                     "From now on our texts should refer to
+                                      the business as 'I', not 'we'"
 - "operator_request"   — caller explicitly asks to speak with a person,
                           dispatcher, owner, or asks to leave the AI agent.
                           Skip normal intent confirmation — escalate
@@ -1166,7 +1212,8 @@ Return valid JSON with exactly this shape (no prose, no markdown fences):
     "scheduleDescription": "<string, optional — VERBATIM milestone sentence on create_invoice_schedule>",
     "reviewReference": "<string, optional — which review, verbatim, on respond_to_review>",
     "instructionText": "<string, optional — verbatim standing rule on create_standing_instruction>",
-    "scopeIntentHint": "<string, optional — what work the standing rule applies to>"
+    "scopeIntentHint": "<string, optional — what work the standing rule applies to>",
+    "brandVoiceInstruction": "<string, optional — VERBATIM spoken tone/sign-off/persona instruction on update_brand_voice>"
   }
 }
 
@@ -1619,6 +1666,8 @@ export function parseClassifierJson(content: string): IntentClassification | nul
     // create_standing_instruction fields (UB-A2)
     if (typeof ee.instructionText === 'string') extracted.instructionText = ee.instructionText;
     if (typeof ee.scopeIntentHint === 'string') extracted.scopeIntentHint = ee.scopeIntentHint;
+    // update_brand_voice fields (B1.18)
+    if (typeof ee.brandVoiceInstruction === 'string') extracted.brandVoiceInstruction = ee.brandVoiceInstruction;
     if (Object.keys(extracted).length > 0) {
       result.extractedEntities = extracted;
     }

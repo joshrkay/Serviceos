@@ -2044,6 +2044,12 @@ export function createApp(): AppWithLifecycle {
   const delayNotificationService = messageDelivery
     ? new TwilioDelayNotificationService(messageDelivery, dispatchRepo, customerRepo)
     : new NoopDelayNotificationService();
+  // B1.18 — hoisted ahead of the execution registry (was declared next to the
+  // brand-voice router further down) so update_brand_voice's execution
+  // handler can be wired with the SAME repo instance the sheet's router uses.
+  const brandVoiceRepo = pool
+    ? new PgBrandVoiceRepository(pool)
+    : new InMemoryBrandVoiceRepository();
   const executionHandlers = createExecutionHandlerRegistry({
     customerRepo,
     jobRepo,
@@ -2111,6 +2117,10 @@ export function createApp(): AppWithLifecycle {
     packActivationRepo,
     templateRepo,
     packSeedDeps: { catalogRepo, templateRepo },
+    // B1.18 — update_brand_voice writes through the SAME versioned path
+    // (tenants/brand/brand-voice-service.ts updateBrandVoice) the
+    // Brand-Voice Configurator sheet's PUT /api/settings/brand-voice uses.
+    brandVoiceRepo,
   });
   // U5 / WS3 — fail boot loudly if a voice-reachable persist handler is
   // degraded (would return success without saving). Every voice-reachable
@@ -5470,9 +5480,8 @@ export function createApp(): AppWithLifecycle {
   );
   // N-011 — Brand-Voice Configurator (behind the brand_voice_configurator flag,
   // enforced at the web surface; the API is permission-gated as normal).
-  const brandVoiceRepo = pool
-    ? new PgBrandVoiceRepository(pool)
-    : new InMemoryBrandVoiceRepository();
+  // brandVoiceRepo is constructed earlier (B1.18) so the voice execution
+  // handler and this router share the same instance.
   app.use(
     '/api/settings/brand-voice',
     createBrandVoiceRouter(brandVoiceRepo, settingsRepo, auditRepo),

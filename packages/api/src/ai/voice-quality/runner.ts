@@ -74,7 +74,7 @@ import { InMemoryAppointmentRepository } from '../../appointments/in-memory-appo
 import type { Appointment } from '../../appointments/appointment';
 import { InMemoryInvoiceRepository, type Invoice } from '../../invoices/invoice';
 import { InMemoryEstimateRepository, type Estimate } from '../../estimates/estimate';
-import { InMemoryJobRepository } from '../../jobs/job';
+import { InMemoryJobRepository, type Job } from '../../jobs/job';
 import { InMemoryLeadRepository } from '../../leads/in-memory-lead';
 import { InMemoryProposalRepository } from '../../proposals/proposal';
 import { InMemoryAuditRepository } from '../../audit/audit';

@@ -392,6 +392,11 @@ export class OnboardingConversationOrchestrator {
         req.userId,
         ex.businessProfile,
         ctx.sessionId,
+        // B1.20 — carry the owner's hourly rate (if captured) onto the
+        // same proposal; ex.pricing may be undefined if pricing_capture
+        // never ran, which createTenantSettingsProposal handles as "no
+        // rate captured", never a guess.
+        ex.pricing,
       );
       if (settings) {
         // createTenantSettingsProposal returns a Proposal + payload tuple
