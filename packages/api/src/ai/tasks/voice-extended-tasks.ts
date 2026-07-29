@@ -27,7 +27,7 @@ import { ExtractedEntities } from '../orchestration/intent-classifier';
 import type { AppointmentRepository } from '../../appointments/appointment';
 import type { JobRepository } from '../../jobs/job';
 import type { InvoiceRepository } from '../../invoices/invoice';
-import type { EstimateRepository } from '../../estimates/estimate';
+import type { Estimate, EstimateRepository } from '../../estimates/estimate';
 import type { LLMGateway } from '../gateway/gateway';
 import { resolveDateTime } from '../scheduling/resolve-datetime';
 import { isRuntimeTimezone } from '../../shared/timezone';
@@ -39,6 +39,8 @@ import {
 } from '../../invoices/dunning-config';
 import { parseMilestoneSentence } from '../../invoices/milestone-sentence-parser';
 import { candidatesForReference } from '../resolution/reference-candidates';
+import type { EntityCandidate } from '../resolution/entity-resolver';
+import { formatCents } from '../skills/spoken-format';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -177,6 +179,22 @@ function resolvedAppointmentIdFrom(context: TaskContext): string | undefined {
   return isUuid(id) ? id : undefined;
 }
 
+/**
+ * The estimate id the router's entity resolver already verified, if any.
+ * House style matches `resolvedAppointmentIdFrom` above: `send_estimate_nudge`
+ * is one of `ESTIMATE_DOC_INTENTS` (ai/agents/customer-calling/
+ * entity-resolution.ts), so the router already plans an 'estimate' kind
+ * lookup for a spoken jobReference/customerName before the task handler ever
+ * runs. Still just a shape check — SendEstimateNudgeTaskHandler.handle
+ * VERIFIES this against the repo before trusting it (never trust an
+ * LLM/router-shaped UUID on its own; see resolveEstimateIdGate,
+ * estimate-edit-task.ts:427-461, for the pattern this copies).
+ */
+function resolvedEstimateIdFrom(context: TaskContext): string | undefined {
+  const id = context.existingEntities?.estimateId;
+  return isUuid(id) ? id : undefined;
+}
+
 function baseSourceContext(context: TaskContext): Record<string, unknown> | undefined {
   if (!context.conversationId) return undefined;
   return { conversationId: context.conversationId };
@@ -195,6 +213,14 @@ function inputFor(
      * Optional and additive; existing call sites are unaffected.
      */
     sourceContext?: Record<string, unknown>;
+    /**
+     * B8.10 — surfaces a human-readable "why" on the review card
+     * (Proposal.explanation) without touching the payload's Zod contract.
+     * Used for the AC-3 non-nudgeable-match gate ("the Khan estimate was
+     * already accepted") — optional and additive; existing call sites are
+     * unaffected.
+     */
+    explanation?: string;
   }
 ): CreateProposalInput {
   const base = baseSourceContext(context);
@@ -205,6 +231,7 @@ function inputFor(
     proposalType,
     payload,
     summary: context.message,
+    explanation: opts?.explanation,
     sourceContext,
     createdBy: context.userId,
     missingFields: missingFields.length > 0 ? missingFields : undefined,

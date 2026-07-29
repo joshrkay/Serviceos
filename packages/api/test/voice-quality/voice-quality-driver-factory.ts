@@ -398,6 +398,8 @@ class FixtureTechnicianEntityResolver implements EntityResolver {
         candidate: { id: matches[0].id, kind: 'technician', label: matches[0].name, score: 1 },
       };
     }
+    // eslint-disable-next-line no-console
+    console.error('DEBUG resolve() called', input.kind, input.reference, this.soleAppointmentId);
     if (input.kind === 'appointment' && this.soleAppointmentId) {
       return {
         kind: 'resolved',
