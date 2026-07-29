@@ -62,4 +62,12 @@ Verified by the read-only verification agent (2026-07-29, full report in agent t
 
 ## Found-by-proof defects
 
-(none yet)
+| # | Item | Defect | Disposition |
+|---|------|--------|-------------|
+| P-1 | B1.19 | The five `onboarding_*` proposal types have no execution handler; `executor.ts:167-173` throws `HANDLER_NOT_FOUND`. Approving a completed conversational onboarding configures nothing. | Found by exploration (not by a test). In scope — see decision #6. |
+
+## Item completion ledger
+
+| Item | Status | Proof |
+|------|--------|-------|
+| B6.3 | ✅ green | `test/integration/log-time-entry-execution.test.ts` — 4 assertions (row 120min + resolved jobId · exactly one `time_entry.logged_completed` audit with actor · cross-tenant scoped-read negative · `getJobProfit` labor rollup). Drafts through the REAL `LogTimeEntryTaskHandler` with resolver-style `existingEntities`, executes through the production registry. Integration suite 180 files / 929 tests (baseline 179/925 — adds exactly 1 file / 4 tests, no regressions). `tsc --project tsconfig.build.json` clean. No defects found. Cross-tenant form matches the bar Part E already accepted at rung 5 (`draft-invoice-execution.test.ts:194-198`). |
