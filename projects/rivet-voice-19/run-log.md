@@ -250,6 +250,14 @@ Verified by diff against `origin/main`, not by assertion:
   line: the diff touches **no** `AddCrewMemberTaskHandler`, `RemoveCrewMemberTaskHandler`,
   `LogExpenseTaskHandler`, `ApplyLateFeeTaskHandler`, `SendPaymentReminderTaskHandler` or
   `BatchInvoiceTaskHandler` line.
+- **The deferred-looking filenames in the diff are cassette regenerations, not work.** A reviewer
+  scanning `--name-only` sees `log-expense-*.json` and eleven `lookup-*.json` cassettes and would
+  reasonably suspect B7.8/B7.9 got touched. They did not: all 66 changed cassettes are `M`
+  (modified), **zero** are `A` (added), and no fixture *script* on a deferred path was added.
+  The cassette key is a sha256 over the full system prompt, so adding any intent re-keys the
+  entire corpus — that is the whole of this churn, and CI's `voice-quality-cassette-drift` check
+  passing is the independent confirmation. Stated here because the filenames are the misleading
+  part, and a reader should not have to re-derive this.
 - C1 **pins** the deferred intents' current honest gating (`batch_invoice`, `log_expense`,
   `add_crew_member`, `remove_crew_member`, `send_payment_reminder`, `apply_late_fee` rows in
   `voice-payload-contract.test.ts`) — pins, not fixes, exactly as the master prompt requires.
