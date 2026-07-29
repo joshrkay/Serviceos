@@ -503,7 +503,7 @@ describe('B1.19 — onboarding parity: conversation vs. wizard, real Postgres', 
     expect(result.success).toBe(true);
 
     const invited = await pool.query(
-      `SELECT email, role FROM pending_invitations WHERE tenant_id = $1`,
+      `SELECT id, email, role FROM pending_invitations WHERE tenant_id = $1`,
       [conversationTenant.tenantId],
     );
     expect(invited.rows).toHaveLength(1);
@@ -516,6 +516,39 @@ describe('B1.19 — onboarding parity: conversation vs. wizard, real Postgres', 
       [conversationTenant.tenantId],
     );
     expect(allInvites.rows).toHaveLength(1);
+
+    // …and the write is AUDITED, against real Postgres. This event was
+    // previously asserted only against a mocked audit repo, which cannot
+    // catch a column that does not exist or a row that never commits — the
+    // exact failure mode CLAUDE.md calls out (the entity resolver once
+    // shipped with nonexistent column names because its Pool was mocked).
+    const invitationAudit = await pool.query(
+      `SELECT actor_id, actor_role, entity_type, entity_id, metadata
+         FROM audit_events
+        WHERE tenant_id = $1 AND event_type = 'user.invitation_created'`,
+      [conversationTenant.tenantId],
+    );
+    expect(invitationAudit.rows).toHaveLength(1);
+    expect(invitationAudit.rows[0].entity_type).toBe('pending_invitation');
+    expect(invitationAudit.rows[0].entity_id).toBe(invited.rows[0].id);
+    expect(invitationAudit.rows[0].actor_id).toBe(conversationTenant.userId);
+    expect(invitationAudit.rows[0].metadata.email).toBe('carlos@example.com');
+    // Null because Clerk is unconfigured here: the trail distinguishes an
+    // invitation that was emailed from one that is only recorded.
+    expect(invitationAudit.rows[0].metadata.clerkInvitationId).toBeNull();
+
+    // Cross-tenant negative: neither the invitation nor its audit leaks.
+    const otherTenant = await createTestTenant(pool);
+    const leakedInvites = await pool.query(
+      `SELECT id FROM pending_invitations WHERE tenant_id = $1`,
+      [otherTenant.tenantId],
+    );
+    expect(leakedInvites.rows).toHaveLength(0);
+    const leakedAudit = await pool.query(
+      `SELECT id FROM audit_events WHERE tenant_id = $1 AND event_type = 'user.invitation_created'`,
+      [otherTenant.tenantId],
+    );
+    expect(leakedAudit.rows).toHaveLength(0);
   });
 
   it('audit events: every applied proposal (identity, pack activation, schedule, estimate template) has a real audit row; the failed team proposals audit their failure', async () => {
