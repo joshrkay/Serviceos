@@ -36,7 +36,12 @@ import { PgEstimateTemplateRepository } from '../../src/templates/pg-estimate-te
 
 import { OnboardingConversationOrchestrator } from '../../src/ai/orchestration/onboarding-conversation';
 import { PgOnboardingSessionRepository } from '../../src/db/onboarding-session-repository';
-import { InMemoryProposalRepository, Proposal } from '../../src/proposals/proposal';
+import {
+  InMemoryProposalRepository,
+  Proposal,
+  missingFieldsFor,
+} from '../../src/proposals/proposal';
+import { approveProposal } from '../../src/proposals/actions';
 import { InMemoryProposalExecutionRepository } from '../../src/proposals/proposal-execution';
 import { transitionProposal, UNDO_WINDOW_MS } from '../../src/proposals/lifecycle';
 import { ProposalExecutor } from '../../src/proposals/execution/executor';
@@ -132,6 +137,10 @@ describe('B1.19 — onboarding parity: conversation vs. wizard, real Postgres', 
   let catalogRepo: PgCatalogItemRepository;
   let templateRepo: PgEstimateTemplateRepository;
 
+  // Hoisted so the gated-team-member test can drive the REAL approveProposal
+  // against the same repo the conversation wrote its proposals into.
+  let proposalRepo: InMemoryProposalRepository;
+
   let wizardTenant: { tenantId: string; userId: string };
   let conversationTenant: { tenantId: string; userId: string };
   let crossTenant: { tenantId: string; userId: string };
@@ -191,7 +200,7 @@ describe('B1.19 — onboarding parity: conversation vs. wizard, real Postgres', 
 
     // ── Conversation path: scripted FSM turns → approve → execute ─────
     const sessionRepo = new PgOnboardingSessionRepository(pool);
-    const proposalRepo = new InMemoryProposalRepository();
+    proposalRepo = new InMemoryProposalRepository();
     const orchestrator = new OnboardingConversationOrchestrator({
       gateway: scriptedGateway(CONVERSATION_SCRIPTS),
       sessionRepo,
@@ -235,7 +244,14 @@ describe('B1.19 — onboarding parity: conversation vs. wizard, real Postgres', 
 
     // Approve each (draft → ready_for_review → approved, backdated past
     // the 5-second undo window — same pattern as draft-estimate-execution.test.ts).
-    const approved: Proposal[] = conversationProposals.map((p) => {
+    // Gated proposals are deliberately excluded: a proposal carrying
+    // missingFields cannot be approved through the real gate
+    // (proposals/actions.ts), so forcing it through transitionProposal here
+    // would test a path production forbids. `onboarding_team_member` is the
+    // gated case — see the dedicated test below, which exercises the REAL
+    // approveProposal and asserts the refusal.
+    const approvable = conversationProposals.filter((p) => missingFieldsFor(p).length === 0);
+    const approved: Proposal[] = approvable.map((p) => {
       let cur = p;
       if (cur.status !== 'approved') {
         cur = transitionProposal(cur, 'ready_for_review', conversationTenant.userId);
@@ -385,20 +401,45 @@ describe('B1.19 — onboarding parity: conversation vs. wizard, real Postgres', 
     expect(cents).toContain(12000);
   });
 
-  it('team: CANNOT assert parity — there is no wizard team-member surface, and the handler honestly refuses rather than fabricating an account', async () => {
-    // The wizard flow has NO team-member step at all (grep confirms no
-    // team UI under packages/web/src/onboarding), so there is nothing to
-    // compare parity against. The conversation's two onboarding_team_member
-    // proposals (Mike, Rosa) are approved above, but execution must FAIL
-    // — WS3-honest, never a synthetic-id passthrough — because the only
-    // real persistence target (POST /api/users/invitations) requires an
-    // email voice extraction cannot produce.
-    const teamExecutions = conversationExecutions.filter((e) => e.proposal.proposalType === 'onboarding_team_member');
-    expect(teamExecutions.length).toBe(2);
-    for (const { result } of teamExecutions) {
-      expect(result.success).toBe(false);
-      expect(result.error).toContain('handler_not_wired');
+  it('team: the capture is GATED, not approved-then-failed — the B7.4 shape this run exists to remove', async () => {
+    // The wizard flow has NO team-member step (no team UI under
+    // packages/web/src/onboarding), so there is no parity to assert. What
+    // matters is the SHAPE of the refusal.
+    //
+    // These proposals used to approve and then fail at execution, because
+    // adding a team member means sending an invitation — which needs an email
+    // the spoken capture cannot produce, and for which no endpoint yet exists
+    // (routes/users.ts: "PR 3 will add POST /api/users"). The rivet-voice-19
+    // re-measurement correctly called that out as the same defect class as the
+    // dictated-note bug (B7.4): honest and audited, but still "approve, then
+    // nothing happens" from the owner's seat.
+    //
+    // The proposal is now gated at draft time instead, so the real approval
+    // gate refuses it and the failure can never occur.
+    const teamProposals = conversationProposals.filter(
+      (p) => p.proposalType === 'onboarding_team_member',
+    );
+    expect(teamProposals.length).toBe(2);
+
+    for (const p of teamProposals) {
+      // Honestly gated…
+      expect(missingFieldsFor(p)).toContain('email');
+      // …and nothing the owner said was dropped to achieve it.
+      expect(p.payload.name).toBeTruthy();
+      expect(p.payload.role).toBeTruthy();
+      // …and the REAL approval gate refuses it (not transitionProposal, which
+      // bypasses the check — this is the production path).
+      await expect(
+        approveProposal(proposalRepo, p.tenantId, p.id, conversationTenant.userId, 'owner'),
+      ).rejects.toThrow(/unfilled required fields/);
     }
+
+    // It never reached execution at all, so there is no failed execution to
+    // observe — the point of the gate.
+    const teamExecutions = conversationExecutions.filter(
+      (e) => e.proposal.proposalType === 'onboarding_team_member',
+    );
+    expect(teamExecutions).toHaveLength(0);
 
     // No fabricated row anywhere: no pending_invitation, no note, no user.
     const invitations = await pool.query(

@@ -456,6 +456,19 @@ export class OnboardingConversationOrchestrator {
           confidenceScore: member.confidence,
           sourceContext,
           createdBy: req.userId,
+          // Gated so this can never be approved-then-failed. Adding a team
+          // member means sending an invitation, which needs an email address
+          // the spoken capture cannot produce — and no invitation endpoint
+          // exists yet (routes/users.ts: "PR 3 will add POST /api/users").
+          // OnboardingTeamMemberExecutionHandler therefore always refuses.
+          //
+          // Without this gate the card approved and then failed at execution:
+          // the same shape as the dictated-note defect (B7.4) that this whole
+          // run existed to remove, and it was rightly flagged in the
+          // re-measurement. The name and role stay on the payload so nothing
+          // the owner said is lost, and the review card now reads as "needs an
+          // email" instead of inviting a tap that cannot work.
+          missingFields: ['email'],
         });
       }
     }
