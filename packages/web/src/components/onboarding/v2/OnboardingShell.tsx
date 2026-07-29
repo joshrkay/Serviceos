@@ -274,8 +274,13 @@ export function OnboardingShell() {
           {inConversationMode && (
             <ConversationStep
               tenantId={data.tenantId}
+              // Refetch only — do NOT leave conversation mode here. This fires
+              // from an effect the moment the FSM goes terminal, so exiting
+              // would unmount the completion panel (and its Continue button)
+              // in the same tick it rendered, dropping the owner back on an
+              // unfinished form with no sign that proposals were created.
+              // Leaving is the explicit Continue action below.
               onCompleted={() => {
-                setVoiceMode(false);
                 void refetch();
               }}
               onExit={() => setVoiceMode(false)}
