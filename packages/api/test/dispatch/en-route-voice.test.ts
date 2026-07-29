@@ -306,6 +306,38 @@ describe('B5.5 — resolveEnRouteAppointment (speaker scoping + resolution outco
     });
   });
 
+  // Raised in PR review: the service-day filter was applied only to the bare
+  // branch, so a NAMED reference could reach across days — "on my way to the
+  // Garcia job" resolved a Garcia appointment scheduled for TOMORROW and sent
+  // that customer an ETA a day early.
+  it('AC-3: a named reference never reaches tomorrow\'s appointment', async () => {
+    const tomorrow = appt({
+      id: 'appt-tomorrow',
+      jobId: 'job-garcia',
+      scheduledStart: new Date('2026-07-30T16:00:00.000Z'),
+    });
+    const jobGarcia = job({ id: 'job-garcia', summary: 'AC repair', customerId: 'cust-garcia' });
+
+    const deps: EnRouteResolutionDeps = {
+      assignmentRepo: {
+        findByTechnician: async () => [assignment({ id: 'a-1', appointmentId: 'appt-tomorrow' })],
+      },
+      appointmentRepo: { findById: async (_t, id) => (id === 'appt-tomorrow' ? tomorrow : null) },
+      jobRepo: { findById: async (_t, id) => (id === 'job-garcia' ? jobGarcia : null) },
+      customerRepo: { findById: async () => customer({}) },
+    };
+
+    const result = await resolveEnRouteAppointment(deps, {
+      tenantId: TENANT,
+      technicianId: TECH,
+      jobReference: 'the Garcia job',
+      now: NOW,
+      dayBoundary: TODAY_BOUNDARY,
+    });
+
+    expect(result).toEqual({ kind: 'not_found' });
+  });
+
   // Raised in PR review against the day-boundary widening: once every earlier
   // appointment today became eligible, "earliest wins" could pick a stale
   // morning visit and text the WRONG customer. The bare path picks the visit

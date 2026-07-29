@@ -187,6 +187,18 @@ export function useOnboardingConversation(tenantId: string): UseOnboardingConver
     // transcript rendered during the transition.
     sessionIdRef.current = readSessionId(tenantId);
     setHistory(readHistory(tenantId));
+    // Also clear the previous tenant's FSM-derived state before bootstrapping
+    // the new one. These only ever get (re)set from a successful response in
+    // applyResponse, so if tenant B's bootstrap fails, leaving them alone
+    // would strand tenant B on tenant A's `completed`/`state` — rendering the
+    // terminal completion panel with no input controls even though B never
+    // reached that state. Resetting here (not inside the try/catch below) is
+    // safe: this effect only runs on mount and on an actual tenantId change,
+    // never as a side effect of an in-flight response for the CURRENT tenant.
+    setState(null);
+    setCompleted(false);
+    setTurnCount(0);
+    setProposalIds([]);
 
     const bootstrap = (async () => {
       try {

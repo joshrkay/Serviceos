@@ -67,7 +67,7 @@ export interface EnRouteResolutionInput {
   /** Free-text job reference from the transcript ("the Garcia job"), when named. */
   jobReference?: string;
   now?: Date;
-  /** Tenant-local "today" window, used only for the bare (unnamed) case. */
+  /** Tenant-local service-day window. Bounds BOTH the named and bare cases. */
   dayBoundary?: { start: Date; end: Date };
 }
 
@@ -230,6 +230,22 @@ export async function resolveEnRouteAppointment(
   const eligible = await hydrateEligibleAppointments(deps, input.tenantId, assignments, now, input.dayBoundary);
   if (eligible.length === 0) return { kind: 'not_found' };
 
+  // The tenant-local service day bounds BOTH branches. "On my way" is a
+  // statement about right now, so an appointment on another day is never what
+  // it means — and a named reference must not escape that: with only the
+  // lower bound applied, "on my way to the Garcia job" resolved a Garcia
+  // appointment scheduled for TOMORROW and sent that customer an ETA a day
+  // early. Without a dayBoundary (direct callers that don't supply one) this
+  // is the unfiltered set, exactly as before.
+  const todays = input.dayBoundary
+    ? eligible.filter(
+        (appt) =>
+          appt.scheduledStart >= input.dayBoundary!.start &&
+          appt.scheduledStart < input.dayBoundary!.end,
+      )
+    : eligible;
+  if (todays.length === 0) return { kind: 'not_found' };
+
   if (input.jobReference && input.jobReference.trim().length > 0) {
     // Named job → that appointment. Without a jobRepo we cannot verify a
     // name match, so we fail closed to not_found rather than guess.
@@ -237,7 +253,7 @@ export async function resolveEnRouteAppointment(
     const needle = normalizeJobPhrase(input.jobReference);
     if (!needle) return { kind: 'not_found' };
     const matches: Appointment[] = [];
-    for (const appt of eligible) {
+    for (const appt of todays) {
       if (await appointmentMatchesReference(loader, appt, needle)) matches.push(appt);
     }
     if (matches.length === 0) return { kind: 'not_found' };
@@ -260,15 +276,6 @@ export async function resolveEnRouteAppointment(
   // minutes away and wins (the tech IS running late to it); at 15:00 with a
   // stale 09:00 and a 16:00, the 16:00 is an hour away and wins. With every
   // appointment still ahead it degrades to exactly the old behaviour.
-  const todays = input.dayBoundary
-    ? eligible.filter(
-        (appt) =>
-          appt.scheduledStart >= input.dayBoundary!.start &&
-          appt.scheduledStart < input.dayBoundary!.end,
-      )
-    : eligible;
-  if (todays.length === 0) return { kind: 'not_found' };
-
   const distanceMs = (appt: Appointment) =>
     Math.abs(appt.scheduledStart.getTime() - now.getTime());
   todays.sort((a, b) => distanceMs(a) - distanceMs(b));

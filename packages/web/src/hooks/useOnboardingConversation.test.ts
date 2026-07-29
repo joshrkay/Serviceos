@@ -384,4 +384,110 @@ describe('useOnboardingConversation — B1.19 AC-1/AC-2', () => {
       { role: 'assistant', text: 'Opening prompt B', at: expect.any(String) },
     ]);
   });
+
+  // P2 fix: completed/state/turnCount/proposalIds are only ever (re)assigned
+  // from a successful response, so if tenant A reached the terminal state and
+  // tenant B's bootstrap then fails, B must not render A's completion panel.
+  it('clears completed/state/turnCount/proposalIds on tenant switch, even when the new tenant bootstrap fails', async () => {
+    const OTHER = 'tenant-conv-4';
+
+    apiFetchMock.mockResolvedValueOnce(
+      jsonResponse(200, {
+        sessionId: 'sess-a',
+        assistantMessage: 'Opening prompt A',
+        state: 'schedule_capture',
+        turnCount: 5,
+        completed: false,
+        proposalIds: [],
+      }),
+    );
+
+    const { result, rerender } = renderHook(
+      ({ tenant }) => useOnboardingConversation(tenant),
+      { initialProps: { tenant: TENANT } },
+    );
+    await waitFor(() => expect(result.current.loading).toBe(false));
+
+    apiFetchMock.mockResolvedValueOnce(
+      jsonResponse(200, {
+        sessionId: 'sess-a',
+        assistantMessage: 'Done. Your setup proposals are in the inbox.',
+        state: 'completed',
+        turnCount: 6,
+        completed: true,
+        proposalIds: ['prop-1', 'prop-2'],
+      }),
+    );
+    await act(async () => {
+      await result.current.sendMessage('looks good');
+    });
+
+    expect(result.current.completed).toBe(true);
+    expect(result.current.state).toBe('completed');
+    expect(result.current.turnCount).toBe(6);
+    expect(result.current.proposalIds).toEqual(['prop-1', 'prop-2']);
+
+    // Tenant B's bootstrap fails outright.
+    apiFetchMock.mockRejectedValueOnce(new Error('network down'));
+
+    rerender({ tenant: OTHER });
+    await waitFor(() => expect(result.current.loading).toBe(false));
+
+    // Tenant B is not stuck showing tenant A's terminal UI…
+    expect(result.current.completed).toBe(false);
+    expect(result.current.state).toBeNull();
+    expect(result.current.turnCount).toBe(0);
+    expect(result.current.proposalIds).toEqual([]);
+    // …and the error surfaced instead of silently keeping A's state.
+    expect(result.current.error).not.toBeNull();
+  });
+
+  // Control: a successful switch still loads tenant B's own session/state
+  // cleanly (not just "not A's state" — actually B's).
+  it('on a successful tenant switch, loads the new tenant’s own session and state', async () => {
+    const OTHER = 'tenant-conv-5';
+
+    apiFetchMock.mockResolvedValueOnce(
+      jsonResponse(200, {
+        sessionId: 'sess-a',
+        assistantMessage: 'Done. Your setup proposals are in the inbox.',
+        state: 'completed',
+        turnCount: 6,
+        completed: true,
+        proposalIds: ['prop-1', 'prop-2'],
+      }),
+    );
+
+    const { result, rerender } = renderHook(
+      ({ tenant }) => useOnboardingConversation(tenant),
+      { initialProps: { tenant: TENANT } },
+    );
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    expect(result.current.completed).toBe(true);
+
+    apiFetchMock.mockResolvedValueOnce(
+      jsonResponse(200, {
+        sessionId: 'sess-other',
+        assistantMessage: 'Hi! Tell me about your business.',
+        state: 'profile_capture',
+        turnCount: 0,
+        completed: false,
+        proposalIds: [],
+      }),
+    );
+
+    rerender({ tenant: OTHER });
+    await waitFor(() => expect(result.current.loading).toBe(false));
+
+    expect(result.current.completed).toBe(false);
+    expect(result.current.state).toBe('profile_capture');
+    expect(result.current.turnCount).toBe(0);
+    expect(result.current.proposalIds).toEqual([]);
+    expect(result.current.history).toEqual([
+      { role: 'assistant', text: 'Hi! Tell me about your business.', at: expect.any(String) },
+    ]);
+    expect(
+      window.localStorage.getItem(`serviceos.onboarding_conversation.session.${OTHER}`),
+    ).toBe('sess-other');
+  });
 });
