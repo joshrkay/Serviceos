@@ -1,7 +1,7 @@
 {
   "version": 1,
   "title": "rivet-voice-19 focus items — operator entity-resolution closed loop",
-  "description": "One case per rivet-voice-19 focus item that is operator-reachable today (B7.4 add_note, B5.3 reassign_appointment, B6.3 log_time_entry, B4.7 reschedule_appointment / cancel_appointment), plus a negative case pinning the B5.3 resolver fix. Unlike test/voice/fixtures/operator-ops-top-40.json, cases here carry NO pre-resolved ids: every id in `expect` is a `seedRef` resolved by the runner against a REAL Postgres-seeded tenant via the REAL PgEntityResolver, so the corpus proves the spoken free-text reference produces the resolved id end to end, not just that a task handler accepts an id it was handed. `payloadContainsSeedRefs` maps a payload key to a key in the runner's `seedIds` map; `payloadContains` carries literal (non-id) values.",
+  "description": "One case per rivet-voice-19 focus item that is operator-reachable today (B7.4 add_note, B5.3 reassign_appointment, B6.3 log_time_entry, B4.7 create_appointment / reschedule_appointment / cancel_appointment), plus a negative case pinning the B5.3 resolver fix. Unlike test/voice/fixtures/operator-ops-top-40.json, cases here carry NO pre-resolved ids: every id in `expect` is a `seedRef` resolved by the runner against a REAL Postgres-seeded tenant via the REAL PgEntityResolver, so the corpus proves the spoken free-text reference produces the resolved id end to end, not just that a task handler accepts an id it was handed. `payloadContainsSeedRefs` maps a payload key to a key in the runner's `seedIds` map; `payloadContains` carries literal (non-id) values. `taskResponse` is the SECOND scripted gateway reply, present only for the one intent whose task handler makes its own drafting round-trip (create_appointment); every other handler here is a documented passthrough.",
   "cases": [
     {
       "id": "b7-4-add-note",
@@ -69,6 +69,42 @@
         "missingFieldsExact": [],
         "payloadContains": { "durationMinutes": 120 },
         "payloadContainsSeedRefs": { "jobId": "patelJobId" }
+      }
+    },
+    {
+      "id": "b4-7-create-appointment",
+      "focusItem": "B4.7",
+      "op": "create_appointment",
+      "utterance": "Book Garcia for a water heater repair Thursday at 10 AM",
+      "note": "The CREATE leg of B4.7's conjunctive requirement (book/move/cancel by speaking). The other two legs resolve an EXISTING appointment; this one resolves the customer the booking is for. The scripted drafting reply deliberately carries a HALLUCINATED customerId that matches nothing in the tenant — the drafted payload must still carry the PgEntityResolver's id for the spoken name 'Garcia', because CreateAppointmentAITaskHandler overwrites the model's customerId with the resolved one (create-appointment-task.ts, 'the LLM is instructed never to invent a customerId'). No id in this case's script is ever echoed into an assertion, so nothing here can pass by hand-feeding. scheduledStart/End are produced by the REAL resolveDateTime from the verbatim spoken phrase against the tenant's timezone at the fixed NOW (Mon 2026-08-03 12:00 Chicago) — stored UTC, rendered in tenant tz by the companion it-block.",
+      "llmResponse": {
+        "intentType": "create_appointment",
+        "confidence": 0.93,
+        "extractedEntities": {
+          "customerName": "Garcia",
+          "dateTimeDescription": "Thursday at 10 AM"
+        }
+      },
+      "taskResponse": {
+        "dateTimePhrase": "Thursday at 10 AM",
+        "customerId": "11111111-2222-3333-4444-555555555555",
+        "summary": "Water heater repair",
+        "appointmentType": "repair",
+        "confidence_score": 0.72
+      },
+      "expect": {
+        "proposalType": "create_appointment",
+        "status": "draft",
+        "actionClass": "capture",
+        "missingFieldsExact": [],
+        "payloadContains": {
+          "summary": "Water heater repair",
+          "appointmentType": "repair",
+          "timezone": "America/Chicago",
+          "scheduledStart": "2026-08-06T15:00:00.000Z",
+          "scheduledEnd": "2026-08-06T16:00:00.000Z"
+        },
+        "payloadContainsSeedRefs": { "customerId": "garciaCustomerId" }
       }
     },
     {

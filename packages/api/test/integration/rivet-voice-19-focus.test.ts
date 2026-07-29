@@ -17,12 +17,18 @@
  *
  * This suite is the sibling that closes that gap: fixture JSON (one case per
  * operator-reachable focus item, entities as bare free text — no ids) →
- * scripted LLM gateway (classification only; these handlers are documented
- * passthroughs, no second drafting round-trip) → the REAL
- * `createVoiceActionRouterWorker`, wired with the REAL `PgEntityResolver`
- * plus `PgJobRepository` / `PgAppointmentRepository` against a
- * Postgres-seeded tenant → asserts the resolved id lands on the drafted
- * proposal's payload.
+ * scripted LLM gateway → the REAL `createVoiceActionRouterWorker`, wired with
+ * the REAL `PgEntityResolver` plus `PgJobRepository` /
+ * `PgAppointmentRepository` against a Postgres-seeded tenant → asserts the
+ * resolved id lands on the drafted proposal's payload.
+ *
+ * Most of these handlers are documented passthroughs, so one scripted
+ * gateway reply (the classification) is the whole conversation. The ONE
+ * exception is `create_appointment`: `CreateAppointmentAITaskHandler` makes
+ * its own drafting round-trip, so that case carries a second scripted reply
+ * (`taskResponse`). That reply deliberately contains a hallucinated
+ * customerId — the resolver's id must win — so the create leg still proves
+ * "the spoken sentence produces the id", not "the script hands us the id".
  *
  * FORM CHOICE: an in-memory/fake `EntityResolver` was rejected. The negative
  * case (B5.3's resolver fix — a NAMED job reference that matches nothing must
@@ -91,6 +97,13 @@ interface FocusCase {
   utterance: string;
   note?: string;
   llmResponse: { intentType: string; confidence: number; extractedEntities: Record<string, unknown> };
+  /**
+   * Second scripted gateway reply, consumed only by task handlers that make
+   * their own drafting round-trip after classification (today: exactly one —
+   * `create_appointment`). Absent for the passthrough handlers, which never
+   * call the gateway a second time.
+   */
+  taskResponse?: Record<string, unknown>;
   expect: CaseExpect;
 }
 
@@ -128,6 +141,16 @@ function scriptedGateway(responses: unknown[]): LLMGateway {
       latencyMs: 1,
     } satisfies LLMResponse)),
   } as unknown as LLMGateway;
+}
+
+/**
+ * The full gateway script for one case, in call order: the classification
+ * reply first, then (only where the handler round-trips again) the drafting
+ * reply. `scriptedGateway` repeats its last entry, so a passthrough handler
+ * that never makes a second call is unaffected.
+ */
+function scriptFor(c: FocusCase): unknown[] {
+  return c.taskResponse ? [c.llmResponse, c.taskResponse] : [c.llmResponse];
 }
 
 function msg<T>(payload: T): QueueMessage<T> {
@@ -291,11 +314,17 @@ describe('rivet-voice-19 focus items — operator entity-resolution closed loop 
     const { jobId: johnsonJobId } = await seedJob('Johnson', 'the Johnson job');
     const johnsonAppointmentId = await seedAppointment(johnsonJobId, 3, aidenId);
 
-    // B4.7 — "the Garcia job" with ONE upcoming appointment. Reused for both
-    // the reschedule AND cancel cases: neither drafts-only test executes
-    // (approve/execute is out of scope here — that's the sibling
+    // B4.7 — "the Garcia job" with ONE upcoming appointment. Reused for the
+    // reschedule, cancel AND create cases: none of the drafts-only tests
+    // executes (approve/execute is out of scope here — that's the sibling
     // integration tests' job), so nothing mutates the appointment row.
-    const { jobId: garciaJobId } = await seedJob('Garcia', 'the Garcia job');
+    // `seedJob` also creates a customer whose display_name is exactly the
+    // name spoken in the create case ("Garcia"), which is what the CREATE
+    // leg resolves — the other two legs resolve the appointment instead.
+    const { customerId: garciaCustomerId, jobId: garciaJobId } = await seedJob(
+      'Garcia',
+      'the Garcia job',
+    );
     const garciaAppointmentId = await seedAppointment(garciaJobId, 5);
 
     // Tenant now has TWO active upcoming appointments (Johnson + Garcia).
@@ -313,6 +342,7 @@ describe('rivet-voice-19 focus items — operator entity-resolution closed loop 
       patelJobId,
       johnsonJobId,
       johnsonAppointmentId,
+      garciaCustomerId,
       garciaJobId,
       garciaAppointmentId,
       carlosId,
@@ -337,7 +367,7 @@ describe('rivet-voice-19 focus items — operator entity-resolution closed loop 
 
   for (const c of corpus.cases) {
     it(`${c.id} [${c.focusItem}]: "${c.utterance}" → ${c.expect.proposalType}`, async () => {
-      const gateway = scriptedGateway([c.llmResponse]);
+      const gateway = scriptedGateway(scriptFor(c));
       const proposalRepo = new InMemoryProposalRepository();
       const worker = buildWorker(gateway, proposalRepo);
 
@@ -428,7 +458,7 @@ describe('rivet-voice-19 focus items — operator entity-resolution closed loop 
     // Full-stack proof via the router + real task handler: the drafted
     // proposal's appointmentId is neither Johnson's nor Garcia's — the
     // gate fired instead of guessing at all.
-    const gateway = scriptedGateway([negativeCase!.llmResponse]);
+    const gateway = scriptedGateway(scriptFor(negativeCase!));
     const proposalRepo = new InMemoryProposalRepository();
     const worker = buildWorker(gateway, proposalRepo);
     await worker.handle(
@@ -446,8 +476,92 @@ describe('rivet-voice-19 focus items — operator entity-resolution closed loop 
     expect(payload.appointmentReference).toBe('the Fitzgerald job');
   });
 
-  it('sanity: the corpus covers exactly the five operator-reachable focus cases plus the one negative case', () => {
-    expect(corpus.cases).toHaveLength(6);
+  // ── B4.7 CREATE leg, the extra proof beyond the generic loop above ──
+  //
+  // B4.7 is conjunctive: book AND move AND cancel by speaking. The generic
+  // loop above already asserts the drafted payload carries the resolver's
+  // customerId for the spoken name. This block proves the two properties a
+  // `payloadContainsSeedRefs` equality can't express on its own:
+  //
+  //   1. RESOLUTION BEATS THE MODEL. The drafting reply for this case carries
+  //      a hallucinated customerId. The payload must carry the PgEntityResolver
+  //      id instead — i.e. the id came from resolving the spoken words, not
+  //      from anything the script handed the handler. (Found by the
+  //      rivet-voice-19 re-measurement: the create leg's real-Postgres proof
+  //      hand-built its payload as a literal, so it could only ever show that
+  //      the handler works GIVEN resolved ids.)
+  //   2. STORED UTC, RENDERED IN TENANT TZ. `resolveDateTime` — not the model,
+  //      and not any local-time arithmetic in this file — turned the verbatim
+  //      spoken phrase into a UTC instant against the TENANT's zone.
+  it('B4.7 create leg — "Book Garcia … Thursday at 10 AM" resolves the spoken name through PgEntityResolver and books a UTC instant in the tenant timezone', async () => {
+    const createCase = corpus.cases.find((c) => c.id === 'b4-7-create-appointment');
+    expect(createCase, 'fixture must carry the create case').toBeDefined();
+    const hallucinatedCustomerId = createCase!.taskResponse?.customerId as string;
+    expect(hallucinatedCustomerId, 'the drafting script must hallucinate an id to beat').toBeTruthy();
+
+    // Direct resolver-level proof: the spoken name alone resolves to the
+    // seeded customer, with no id anywhere in the input.
+    const direct = await entityResolver.resolve({
+      tenantId: tenant.tenantId,
+      reference: 'Garcia',
+      kind: 'customer',
+    });
+    expect(direct.kind).toBe('resolved');
+    if (direct.kind === 'resolved') {
+      expect(direct.candidate.id).toBe(seedIds.garciaCustomerId);
+    }
+
+    // Full-stack proof via the router + the REAL CreateAppointmentAITaskHandler.
+    const gateway = scriptedGateway(scriptFor(createCase!));
+    const proposalRepo = new InMemoryProposalRepository();
+    const worker = buildWorker(gateway, proposalRepo);
+    await worker.handle(
+      msg({ tenantId: tenant.tenantId, userId: tenant.userId, transcript: createCase!.utterance }),
+      silentLogger(),
+    );
+
+    const proposals = await proposalRepo.findByTenant(tenant.tenantId);
+    expect(proposals).toHaveLength(1);
+    const proposal = proposals[0]!;
+    expect(proposal.proposalType).toBe('create_appointment');
+    const payload = proposal.payload as Record<string, unknown>;
+
+    // (1) The model's id lost; the resolver's won.
+    expect(payload.customerId).toBe(seedIds.garciaCustomerId);
+    expect(payload.customerId).not.toBe(hallucinatedCustomerId);
+
+    // (2) Stored UTC. Asserted on the raw string so a value that merely
+    // *renders* correctly in the runner's local zone can't pass.
+    expect(payload.scheduledStart).toBe('2026-08-06T15:00:00.000Z');
+    expect(payload.scheduledEnd).toBe('2026-08-06T16:00:00.000Z');
+    expect(payload.timezone).toBe(TENANT_TIMEZONE);
+
+    // …and rendered in the TENANT's zone it is the Thursday 10 AM that was
+    // spoken. Intl with an explicit timeZone — never the host's local time.
+    const rendered = new Intl.DateTimeFormat('en-US', {
+      timeZone: TENANT_TIMEZONE,
+      weekday: 'long',
+      hour: 'numeric',
+      minute: '2-digit',
+      hour12: true,
+    }).format(new Date(payload.scheduledStart as string));
+    expect(rendered).toBe('Thursday 10:00 AM');
+
+    // Cross-tenant negative, matching the sibling voice proofs
+    // (cancel-appointment-voice.test.ts): the same spoken name resolves to
+    // NOTHING for a tenant that has no Garcia — resolution is tenant-scoped,
+    // so a drafted booking can never borrow another tenant's customer.
+    const other = await createTestTenant(pool);
+    const crossTenant = await entityResolver.resolve({
+      tenantId: other.tenantId,
+      reference: 'Garcia',
+      kind: 'customer',
+    });
+    expect(crossTenant.kind).toBe('not_found');
+  });
+
+  it('sanity: the corpus covers exactly the six operator-reachable focus cases plus the one negative case', () => {
+    expect(corpus.cases).toHaveLength(7);
     const ids = corpus.cases.map((c) => c.id);
     expect(new Set(ids).size).toBe(ids.length);
     const focusItems = new Set(corpus.cases.map((c) => c.op));
@@ -456,6 +570,9 @@ describe('rivet-voice-19 focus items — operator entity-resolution closed loop 
         'add_note',
         'reassign_appointment',
         'log_time_entry',
+        // B4.7 is conjunctive — all three legs (book / move / cancel) must be
+        // in the corpus, each driven by FREE TEXT through PgEntityResolver.
+        'create_appointment',
         'reschedule_appointment',
         'cancel_appointment',
       ]),
