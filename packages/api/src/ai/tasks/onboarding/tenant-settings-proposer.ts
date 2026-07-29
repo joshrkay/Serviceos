@@ -196,9 +196,24 @@ export function createTenantSettingsProposal(
     (payload.hourlyRateCents === undefined
       ? ' — what is your hourly labor rate?'
       : '') +
+    // B1.19 AC-5 — the timezone must be "explicitly confirmed, never guessed".
+    // When the owner said it, approving the card confirms what they said. When
+    // it arrived as `clientTimezone` from the browser it is a DETECTION, and a
+    // detection the owner never reads is not a confirmation: the payload
+    // carries it, but nothing in the sentence the owner actually taps
+    // "Approve" on mentioned a zone. Naming it here is what turns the tap into
+    // a confirmation — and it is also the owner's only chance to catch the
+    // ordinary failure, a laptop still set to the zone of the last trip.
+    //
+    // Deliberately in the summary rather than a second conversational turn:
+    // the review card is already the confirmation surface for every other
+    // onboarding field (the team-member email gate works the same way), and
+    // AC-8 caps the conversation at 10-15 exchanges, so spending one on a
+    // value that is usually right would cost the budget for a field that
+    // isn't.
     (payload.timezone === undefined
       ? ' — which timezone are you in? (e.g. America/Phoenix)'
-      : '');
+      : ` — timezone ${payload.timezone}`);
 
   const input: CreateProposalInput = {
     tenantId,

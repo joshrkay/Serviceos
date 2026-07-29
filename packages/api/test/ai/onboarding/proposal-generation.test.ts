@@ -359,7 +359,41 @@ describe('P4-EXT-006 — Tenant settings proposal from extraction', () => {
 
     expect(result!.proposal.payload.timezone).toBe(KNOWN_TZ);
     expect(missingFieldsFor(result!.proposal)).toEqual([]);
-    expect(result!.proposal.summary.toLowerCase()).not.toContain('timezone');
+    // The control's claim is "is NOT asked again", and it used to prove that
+    // by asserting the word 'timezone' was absent from the summary entirely.
+    // That proxy stopped meaning what it says once the summary began NAMING
+    // the resolved zone (B1.19 AC-5, below): the word is present now, as a
+    // statement rather than a question. Assert the question instead, which is
+    // what the control was ever about.
+    expect(result!.proposal.summary).not.toContain('which timezone are you in?');
+  });
+
+  /**
+   * B1.19 AC-5 — the timezone must be "explicitly confirmed, never guessed".
+   *
+   * The zone reaches this proposer two ways: the owner said it, or the browser
+   * detected it and the client sent `clientTimezone`. The payload looks
+   * identical either way, so the *approval* has to carry the confirmation —
+   * and an owner cannot confirm a value the card never showed them. Before
+   * this, the summary read "Configure tenant: Acme HVAC (hvac)" and the zone
+   * rode along invisibly; a laptop still set to the zone of the owner's last
+   * trip would have been approved without anyone reading it, and every spoken
+   * booking afterwards would be silently off by hours.
+   *
+   * Naming it in the summary is the whole fix: the tap the owner already has
+   * to make becomes a confirmation of a value they have actually read.
+   */
+  it('AC-5 — a resolved zone is NAMED in the summary, so approving it is a confirmation', () => {
+    const result = createTenantSettingsProposal(
+      'tenant-1',
+      'user-1',
+      baseProfile,
+      'conv-9',
+      hourlyPricing,
+      KNOWN_TZ,
+    );
+
+    expect(result!.proposal.summary).toContain(KNOWN_TZ);
   });
 
   it.each([
