@@ -54,9 +54,16 @@ const CATEGORY_SCRIPT = {
   confidence_score: 0.9,
 };
 
+// B1.20 — the hourly_rate entry is what makes pricing_capture advance in a
+// single turn. `PricingExtractor` now clarifies when a price list carries no
+// hourly rate (the identity step hard-requires hourly_rate_cents), so a
+// service-call-fee-only script would spend extra turns here and shift every
+// turn count in this file. The missing-rate path has its own coverage in
+// onboarding-conversation-no-hourly-rate.test.ts.
 const PRICING_SCRIPT = {
   prices: [
     { service_ref: 'service_call', amount_cents: 9500, price_type: 'exact', confidence: 0.9, source_text: '$95 service call' },
+    { service_ref: 'labor', amount_cents: 12000, price_type: 'hourly_rate', confidence: 0.9, source_text: '$120 an hour' },
   ],
   confidence_score: 0.9,
 };

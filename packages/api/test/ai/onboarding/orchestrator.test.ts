@@ -146,7 +146,17 @@ describe('P4-EXT-008 — Onboarding proposal orchestration and sequencing', () =
 
     // Proposals generated
     expect(result.proposalIds.length).toBeGreaterThanOrEqual(8); // settings + categories + templates + team + schedule
-    expect(result.needsClarification).toBe(false);
+
+    // B1.20 — this transcript quotes a diagnostic fee, a tune-up price and a
+    // replacement range, but never an hourly labor rate. That is NOT a
+    // complete capture: `deriveOnboardingStatus` requires a non-null
+    // hourly_rate_cents for the identity step, so the extractor asks for it
+    // instead of reporting the configuration as finished. (This assertion
+    // previously read `false` — that fixture encoded the defect: it called a
+    // rate-less capture "full tenant configuration", which is exactly the
+    // state that leaves the owner bounced back to the identity form.)
+    expect(result.needsClarification).toBe(true);
+    expect(result.clarificationQuestions.join(' ').toLowerCase()).toContain('hourly');
   });
 
   // ─── E2E: Plumbing (T7-002) ───────────────────────────────────────────

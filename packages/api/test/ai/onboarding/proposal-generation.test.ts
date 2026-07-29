@@ -17,6 +17,21 @@ import type {
 // ─── TenantSettingsProposer ──────────────────────────────────────────────────
 
 describe('P4-EXT-006 — Tenant settings proposal from extraction', () => {
+  /**
+   * B1.20 — a pricing capture that DID produce an hourly rate. Passed by
+   * every case below that is not specifically about the missing-rate gate,
+   * because `createTenantSettingsProposal` now gates on `hourlyRateCents`
+   * whenever no rate was captured (see the missing-rate cases at the bottom
+   * of this describe): without a rate on the payload the tenant-settings
+   * write leaves `hourly_rate_cents` NULL and `deriveOnboardingStatus`
+   * bounces the owner back to the identity form.
+   */
+  const hourlyPricing: PricingExtraction = {
+    prices: [
+      { serviceRef: 'labor', amountCents: 12000, priceType: 'hourly_rate', confidence: 0.9, sourceText: '$120 an hour' },
+    ],
+  };
+
   const baseProfile: BusinessProfileExtraction = {
     businessName: 'Comfort Zone HVAC',
     city: 'Scottsdale',
@@ -96,7 +111,13 @@ describe('P4-EXT-006 — Tenant settings proposal from extraction', () => {
   });
 
   it('includes conversationId in sourceContext when provided', () => {
-    const result = createTenantSettingsProposal('tenant-1', 'user-1', baseProfile, 'conv-42');
+    const result = createTenantSettingsProposal(
+      'tenant-1',
+      'user-1',
+      baseProfile,
+      'conv-42',
+      hourlyPricing,
+    );
 
     expect(result!.proposal.sourceContext).toEqual({ conversationId: 'conv-42' });
   });
@@ -119,7 +140,13 @@ describe('P4-EXT-006 — Tenant settings proposal from extraction', () => {
       lowConfidenceFields: ['verticalPacks'],
     };
 
-    const result = createTenantSettingsProposal('tenant-1', 'user-1', unresolvedProfile, 'conv-9');
+    const result = createTenantSettingsProposal(
+      'tenant-1',
+      'user-1',
+      unresolvedProfile,
+      'conv-9',
+      hourlyPricing,
+    );
 
     expect(result).not.toBeNull();
     // Everything the owner DID say survives onto the card.
@@ -135,7 +162,13 @@ describe('P4-EXT-006 — Tenant settings proposal from extraction', () => {
   });
 
   it('positive control — a supported trade drafts an APPROVABLE proposal with the pack set (gate cannot pass vacuously)', () => {
-    const result = createTenantSettingsProposal('tenant-1', 'user-1', baseProfile, 'conv-9');
+    const result = createTenantSettingsProposal(
+      'tenant-1',
+      'user-1',
+      baseProfile,
+      'conv-9',
+      hourlyPricing,
+    );
 
     expect(result!.proposal.payload.verticalPacks).toEqual(['hvac']);
     expect(missingFieldsFor(result!.proposal)).toEqual([]);
@@ -147,12 +180,118 @@ describe('P4-EXT-006 — Tenant settings proposal from extraction', () => {
       verticalPacks: [{ type: 'plumbing', confidence: 0.2, sourceText: 'maybe plumbing' }],
     };
 
-    const result = createTenantSettingsProposal('tenant-1', 'user-1', lowConfProfile);
+    const result = createTenantSettingsProposal(
+      'tenant-1',
+      'user-1',
+      lowConfProfile,
+      undefined,
+      hourlyPricing,
+    );
 
     // The fallback above put 'plumbing' on the payload, so the handler can
     // execute — gating here would block a proposal that would have worked.
     expect(result!.proposal.payload.verticalPacks).toEqual(['plumbing']);
     expect(missingFieldsFor(result!.proposal)).toEqual([]);
+  });
+
+  // ── No hourly rate captured ⇒ GATED, never a silent bounce-back ────────
+  //
+  // The silent twin of the verticalPacks gate. `PricingExtractor` treats any
+  // nonempty price list as complete, so a service-call-fee-only or
+  // flat-rate-only answer yields prices with no `hourly_rate` entry and
+  // `pickHourlyRateCents` returns undefined. Ungated, that proposal is
+  // approvable AND executes SUCCESSFULLY — the handler just never writes the
+  // column — leaving `hourly_rate_cents` NULL, which
+  // `deriveOnboardingStatus` (onboarding/derive-status.ts) requires non-null
+  // for the identity step. The owner completes the conversation, approves,
+  // sees no error, and is sent back to the identity form.
+
+  it('service-call fee only (no hourly rate) — gates on hourlyRateCents instead of drafting an approvable proposal', () => {
+    const serviceCallOnly: PricingExtraction = {
+      prices: [
+        { serviceRef: 'service call', amountCents: 9500, priceType: 'exact', confidence: 0.9, sourceText: '$95 to come out' },
+      ],
+    };
+
+    const result = createTenantSettingsProposal(
+      'tenant-1',
+      'user-1',
+      baseProfile,
+      'conv-9',
+      serviceCallOnly,
+    );
+
+    // Everything the owner DID say survives, and no rate is invented.
+    expect(result!.proposal.payload.businessName).toBe('Comfort Zone HVAC');
+    expect(result!.proposal.payload.verticalPacks).toEqual(['hvac']);
+    expect(result!.proposal.payload.hourlyRateCents).toBeUndefined();
+    // …but it cannot be approved until the rate is supplied.
+    expect(missingFieldsFor(result!.proposal)).toEqual(['hourlyRateCents']);
+    expect(result!.proposal.status).toBe('draft');
+    expect(result!.proposal.summary.toLowerCase()).toContain('hourly labor rate');
+  });
+
+  it('flat-rate-only pricing (ranges/components, no hourly entry) — still gated', () => {
+    const flatRateOnly: PricingExtraction = {
+      prices: [
+        { serviceRef: 'water heater', amountCents: 145000, priceType: 'range_start', confidence: 0.9, sourceText: 'starts at $1,450' },
+        { serviceRef: 'filter', amountCents: 2500, priceType: 'component', confidence: 0.9, sourceText: '$25 filter' },
+      ],
+    };
+
+    const result = createTenantSettingsProposal('tenant-1', 'user-1', baseProfile, 'conv-9', flatRateOnly);
+
+    expect(result!.proposal.payload.hourlyRateCents).toBeUndefined();
+    expect(missingFieldsFor(result!.proposal)).toEqual(['hourlyRateCents']);
+  });
+
+  it('no pricing extraction at all (single-shot orchestrator) — gated, never defaulted', () => {
+    const result = createTenantSettingsProposal('tenant-1', 'user-1', baseProfile, 'conv-9');
+
+    expect(result!.proposal.payload.hourlyRateCents).toBeUndefined();
+    expect(missingFieldsFor(result!.proposal)).toEqual(['hourlyRateCents']);
+  });
+
+  it('rate AND pack both missing — both gates are listed, not just the first', () => {
+    const unresolvedProfile: BusinessProfileExtraction = {
+      ...baseProfile,
+      businessName: 'Blue Water Pool Service',
+      verticalPacks: [],
+      lowConfidenceFields: ['verticalPacks'],
+    };
+    const serviceCallOnly: PricingExtraction = {
+      prices: [
+        { serviceRef: 'service call', amountCents: 9500, priceType: 'exact', confidence: 0.9, sourceText: '$95' },
+      ],
+    };
+
+    const result = createTenantSettingsProposal(
+      'tenant-1',
+      'user-1',
+      unresolvedProfile,
+      'conv-9',
+      serviceCallOnly,
+    );
+
+    expect(missingFieldsFor(result!.proposal).sort()).toEqual(['hourlyRateCents', 'verticalPacks']);
+    // The card asks for both, not just whichever was checked first.
+    expect(result!.proposal.summary.toLowerCase()).toContain('which trade');
+    expect(result!.proposal.summary.toLowerCase()).toContain('hourly labor rate');
+  });
+
+  it('positive control — an hourly rate on the pricing capture leaves the proposal APPROVABLE with the rate in integer cents', () => {
+    const result = createTenantSettingsProposal(
+      'tenant-1',
+      'user-1',
+      baseProfile,
+      'conv-9',
+      hourlyPricing,
+    );
+
+    expect(result!.proposal.payload.hourlyRateCents).toBe(12000);
+    expect(Number.isInteger(result!.proposal.payload.hourlyRateCents)).toBe(true);
+    expect(missingFieldsFor(result!.proposal)).toEqual([]);
+    expect(result!.proposal.summary.toLowerCase()).not.toContain('hourly labor rate');
   });
 
   it('uses "My Business" fallback when name is null but verticals exist', () => {

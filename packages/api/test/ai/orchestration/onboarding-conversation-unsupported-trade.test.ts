@@ -75,9 +75,16 @@ const REMAINING_SCRIPTS = {
     ],
     confidence_score: 0.9,
   },
+  // B1.20 — an hourly_rate entry is required for the tenant-settings
+  // proposal to be approvable at all (see the `hourlyRateCents` gate in
+  // tenant-settings-proposer.ts, and its end-to-end coverage in
+  // onboarding-conversation-no-hourly-rate.test.ts). Scripted here so these
+  // cases stay about the verticalPacks gate, and so the positive control
+  // below is a real one rather than passing for the wrong reason.
   extract_pricing: {
     prices: [
       { service_ref: 'service_call', amount_cents: 9500, price_type: 'exact', confidence: 0.9, source_text: '$95' },
+      { service_ref: 'labor', amount_cents: 12000, price_type: 'hourly_rate', confidence: 0.9, source_text: '$120 an hour' },
     ],
     confidence_score: 0.9,
   },

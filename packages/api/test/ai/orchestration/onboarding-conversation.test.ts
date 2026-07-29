@@ -48,9 +48,15 @@ const HIGH_CONFIDENCE_SCRIPTS = {
     ],
     confidence_score: 0.9,
   },
+  // B1.20 — the hourly_rate entry keeps pricing_capture a single
+  // high-confidence turn. `PricingExtractor` clarifies when a price list has
+  // no hourly rate, because the identity step hard-requires
+  // hourly_rate_cents; that path is covered in
+  // onboarding-conversation-no-hourly-rate.test.ts.
   extract_pricing: {
     prices: [
       { service_ref: 'service_call', amount_cents: 12500, price_type: 'exact', confidence: 0.9, source_text: '$125 service call' },
+      { service_ref: 'labor', amount_cents: 12000, price_type: 'hourly_rate', confidence: 0.9, source_text: '$120 an hour' },
     ],
     confidence_score: 0.9,
   },
