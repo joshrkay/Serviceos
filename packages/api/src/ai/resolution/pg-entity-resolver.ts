@@ -48,6 +48,17 @@ const MAX_JOB_CANDIDATES = 5;
 const MAX_ESTIMATE_CANDIDATES = 5;
 
 /**
+ * Most technicians a one-tap picker may honestly offer. Same ceiling and same
+ * reasoning as `MAX_JOB_CANDIDATES` / `MAX_ESTIMATE_CANDIDATES`: since
+ * `TECH_SCORE_EXPR` scores on first name too, a shared first name (or
+ * surname) matches EVERY technician who has it at 1.000, so a shop with six
+ * Carloses is ordinary, not exotic, and `LIMIT 5` would hand back an
+ * arbitrary five as a picker that need not even contain the right one.
+ * `resolveTechnician` reads one extra row to detect overflow.
+ */
+const MAX_TECHNICIAN_CANDIDATES = 5;
+
+/**
  * B4.7 / B5.3 — an appointment reference is treated as a CLOCK TIME only when
  * it contains an explicit time-of-day token. Deliberately digit-bearing and
  * narrow, for one reason: the alternative (handing every reference to
@@ -1159,7 +1170,7 @@ export class PgEntityResolver implements EntityResolver {
               AND deleted_at IS NULL
               AND ${TECH_SCORE_EXPR} > $3
             ORDER BY score DESC
-            LIMIT 5`,
+            LIMIT ${MAX_TECHNICIAN_CANDIDATES + 1}`,
           [tenantId, reference, SIMILARITY_PREFILTER],
         )
         .then((r) => r.rows),
@@ -1173,7 +1184,18 @@ export class PgEntityResolver implements EntityResolver {
       score: Number(row.score),
     }));
 
-    return this.toResult(candidates, reference);
+    // THE OVERFLOW TRAP, same one `resolveJob`/`resolveEstimate` guard: since
+    // 7fbff6e, a shared first name (or surname) scores 1.000 against every
+    // matching technician, so a shop with six Carloses — or six Smiths — is
+    // ordinary, not exotic, and `LIMIT 5` would hand back an arbitrary five as
+    // a one-tap picker that need not even contain the right person.
+    // Escalating to not_found is the honest answer. Counted on the CONFIDENT
+    // band only, so six rows of which one is above τ_ent and five are weak
+    // trigram noise still resolve that one.
+    const confident = candidates.filter((c) => c.score >= TAU_ENT);
+    if (confident.length > MAX_TECHNICIAN_CANDIDATES) return { kind: 'not_found', reference };
+
+    return this.toResult(candidates.slice(0, MAX_TECHNICIAN_CANDIDATES), reference);
   }
 
   // ---------------------------------------------------------------------------

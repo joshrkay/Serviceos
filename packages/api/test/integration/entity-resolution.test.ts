@@ -325,6 +325,105 @@ describe('Postgres integration — entity resolution (P8)', () => {
       expect(proposals[0].proposalType).toBe('reassign_appointment');
       expect(proposals[0].payload.toTechnicianId).toBe(felixId);
     });
+
+    // Each test below uses a FRESH tenant (not the file-shared `tenant`,
+    // which already carries a 'Carlos Rodriguez' seeded by the exact-match
+    // test above) — otherwise a "Carlos" reference would pick up that
+    // earlier row too and every assertion here would be testing tenant
+    // contamination, not the scoring expression.
+
+    // 7fbff6e added TECH_SCORE_EXPR's strict_word_similarity variant so a
+    // FIRST-NAME-ONLY reference ("assign CARLOS", not "assign Carlos Vega")
+    // resolves — real Postgres, real pg_trgm, since a mocked Pool cannot
+    // prove a scoring expression scores anything.
+    it('a FIRST-NAME-ONLY reference resolves against a full name (7fbff6e)', async () => {
+      const t = await createTestTenant(pool);
+      const carlosId = await seedUser(t.tenantId, 'Carlos', 'Vega', 'technician');
+      const result = await resolver.resolve({
+        tenantId: t.tenantId,
+        reference: 'Carlos',
+        kind: 'technician',
+      });
+      expect(result.kind).toBe('resolved');
+      if (result.kind === 'resolved') {
+        expect(result.candidate.id).toBe(carlosId);
+        expect(result.candidate.score).toBe(1);
+      }
+    });
+
+    // The other side of the same fix: `strict_word_similarity` must not go
+    // so loose that a PARTIAL first name also resolves — 'carl' scores 0.500
+    // against 'Carlos Vega' (per 7fbff6e's commit message), under
+    // TAU_ENT_CONFIRM_LOW (0.6), so this must stay not_found rather than
+    // guessing at a name the caller didn't finish saying.
+    it('a PARTIAL first name stays below the floor and does not resolve', async () => {
+      const t = await createTestTenant(pool);
+      await seedUser(t.tenantId, 'Carlos', 'Vega', 'technician');
+      const result = await resolver.resolve({
+        tenantId: t.tenantId,
+        reference: 'carl',
+        kind: 'technician',
+      });
+      expect(result.kind).toBe('not_found');
+    });
+
+    // Two technicians who share only a FIRST name (not a full-name
+    // duplicate, see "two technicians with the same name" above) must
+    // become ambiguous, never a guess at which Carlos the caller meant.
+    it('two technicians sharing only a FIRST name → ambiguous, never a guess', async () => {
+      const t = await createTestTenant(pool);
+      const carlosVega = await seedUser(t.tenantId, 'Carlos', 'Vega', 'technician');
+      const carlosMendoza = await seedUser(t.tenantId, 'Carlos', 'Mendoza', 'dispatcher');
+      const result = await resolver.resolve({
+        tenantId: t.tenantId,
+        reference: 'Carlos',
+        kind: 'technician',
+      });
+      expect(result.kind).toBe('ambiguous');
+      if (result.kind === 'ambiguous') {
+        const ids = result.candidates.map((c) => c.id);
+        expect(ids).toContain(carlosVega);
+        expect(ids).toContain(carlosMendoza);
+      }
+    });
+
+    // The overflow guard `resolveTechnician` now shares with `resolveJob` /
+    // `resolveEstimate`: since a shared first name scores every matching
+    // technician at 1.000, a shop with six Carloses is ordinary, not exotic,
+    // and handing back an arbitrary five would be a picker that need not
+    // even contain the right person. Six CONFIDENT matches must escalate to
+    // not_found; five must still resolve/ambiguate exactly as before.
+    describe('overflow guard (six confident matches escalate, five do not)', () => {
+      it('SIX technicians sharing a first name → not_found, not an arbitrary five-candidate picker', async () => {
+        const t = await createTestTenant(pool);
+        for (let i = 0; i < 6; i++) {
+          await seedUser(t.tenantId, 'Carlos', `Surname${i}`, 'technician');
+        }
+        const result = await resolver.resolve({
+          tenantId: t.tenantId,
+          reference: 'Carlos',
+          kind: 'technician',
+        });
+        expect(result.kind).toBe('not_found');
+      });
+
+      it('FIVE technicians sharing a first name → ambiguous with all five, not escalated', async () => {
+        const t = await createTestTenant(pool);
+        const ids: string[] = [];
+        for (let i = 0; i < 5; i++) {
+          ids.push(await seedUser(t.tenantId, 'Carlos', `Fivesurname${i}`, 'technician'));
+        }
+        const result = await resolver.resolve({
+          tenantId: t.tenantId,
+          reference: 'Carlos',
+          kind: 'technician',
+        });
+        expect(result.kind).toBe('ambiguous');
+        if (result.kind === 'ambiguous') {
+          expect(result.candidates.map((c) => c.id).sort()).toEqual([...ids].sort());
+        }
+      });
+    });
   });
 
   it('resolves jobs by summary (schema column, not the nonexistent title)', async () => {
@@ -667,19 +766,23 @@ describe('Postgres integration — entity resolution (P8)', () => {
       }
     });
 
-    it('AC-4: two technicians sharing a name → reassign_appointment drafting short-circuits to voice_clarification (technician picker)', async () => {
+    it('AC-4: two technicians sharing a FIRST NAME → reassign_appointment drafting short-circuits to voice_clarification (technician picker)', async () => {
       const { tenantId, userId, appointmentIds } = await seedTenantWithJobAppointments(
         'the Ramirez job',
         [{ daysOut: 2 }],
       );
-      // Real Postgres, real pg_trgm — deliberately IDENTICAL full names (not
-      // just a shared first name) so `similarity()` scores each candidate at
-      // 1.0 deterministically, matching the file's existing "two
-      // technicians with the same name" precedent above instead of
-      // depending on a first-name-only fuzzy score landing in a particular
-      // confidence band.
+      // Real Postgres, real pg_trgm — DIFFERENT last names, sharing only a
+      // first name, because that is the case an operator actually produces:
+      // "Assign Carlos" names one word, not a surname the caller may not
+      // even know. Before 7fbff6e this arrangement used two IDENTICAL full
+      // names specifically to avoid a first-name-only score landing in the
+      // confidence band `TECH_SCORE_EXPR`'s `strict_word_similarity` variant
+      // lives in — the band the product actually serves. Post-fix, a full
+      // first-name word match scores 1.000 via strict_word_similarity same
+      // as an identical full name would, so this is the honest version of
+      // the same proof.
       const carlosA = await seedTechnician(tenantId, 'Carlos', 'Vega');
-      const carlosB = await seedTechnician(tenantId, 'Carlos', 'Vega');
+      const carlosB = await seedTechnician(tenantId, 'Carlos', 'Mendoza');
 
       const proposalRepo = new InMemoryProposalRepository();
       const gateway = gatewayReturning([
@@ -688,7 +791,11 @@ describe('Postgres integration — entity resolution (P8)', () => {
           confidence: 0.9,
           extractedEntities: {
             appointmentReference: 'the Ramirez job',
-            targetTechnicianName: 'Carlos Vega',
+            // A classifier extracting from "Assign Carlos to the Ramirez
+            // job" produces the FIRST NAME spoken, not a surname never
+            // uttered — see intent-classifier.ts's own example for this
+            // exact sentence ("Assign Carlos to the Johnson job").
+            targetTechnicianName: 'Carlos',
           },
         }),
       ]);
@@ -720,6 +827,60 @@ describe('Postgres integration — entity resolution (P8)', () => {
       // picker fires on the reassign path specifically, not as a stand-in
       // for an unresolved appointment.
       void appointmentIds;
+    });
+
+    // The de-arrangement above swaps the pair's claim from "two IDENTICAL
+    // full names" to "two names sharing only a first word" — a different
+    // and now-honest case, but it silently drops the original one: that the
+    // FULL voice-action-router pipeline (not just `resolver.resolve`
+    // directly, which "two technicians with the same name" up in the U1
+    // block already pins) short-circuits to voice_clarification when an
+    // operator speaks a full name two technicians both carry. Kept as its
+    // own case so neither claim is lost.
+    it('AC-4 (identical full name, retained): two technicians with the SAME full name → reassign_appointment drafting also short-circuits to voice_clarification', async () => {
+      const { tenantId, userId } = await seedTenantWithJobAppointments('the Ramirez job', [
+        { daysOut: 2 },
+      ]);
+      const carlosA = await seedTechnician(tenantId, 'Carlos', 'Vega');
+      const carlosB = await seedTechnician(tenantId, 'Carlos', 'Vega');
+
+      const proposalRepo = new InMemoryProposalRepository();
+      const gateway = gatewayReturning([
+        JSON.stringify({
+          intentType: 'reassign_appointment',
+          confidence: 0.9,
+          extractedEntities: {
+            appointmentReference: 'the Ramirez job',
+            // "Assign Carlos Vega" — the operator spoke the full name this
+            // time, so the classifier extracts the full name, unlike the
+            // first-name-only case above.
+            targetTechnicianName: 'Carlos Vega',
+          },
+        }),
+      ]);
+      const worker = createVoiceActionRouterWorker({
+        gateway,
+        proposalRepo,
+        entityResolver: resolver,
+      });
+
+      await worker.handle(
+        msg({
+          tenantId,
+          userId,
+          transcript: 'Assign Carlos Vega to the Ramirez job',
+        }),
+        silentLogger(),
+      );
+
+      const proposals = await proposalRepo.findByTenant(tenantId);
+      expect(proposals).toHaveLength(1);
+      expect(proposals[0].proposalType).toBe('voice_clarification');
+      const payload = proposals[0].payload as Record<string, unknown>;
+      expect(payload.reason).toBe('ambiguous_entity');
+      const candidateIds = (payload.entityCandidates as Array<{ id: string }>).map((c) => c.id);
+      expect(candidateIds).toContain(carlosA);
+      expect(candidateIds).toContain(carlosB);
     });
   });
 
