@@ -15,6 +15,7 @@ import { PhoneStep } from './steps/PhoneStep';
 import { BillingStep } from './steps/BillingStep';
 import { AiCheckStep } from './steps/AiCheckStep';
 import { TestCallStep } from './steps/TestCallStep';
+import { ConversationStep } from './steps/ConversationStep';
 import type { OnboardingStepId } from '../../../types/onboarding';
 
 /**
@@ -49,12 +50,48 @@ export function OnboardingShell() {
   const [override, setOverride] = useState<OnboardingStepId | null>(null);
   const billingToastShown = useRef(false);
 
+  // B1.19 — "talk it through" conversational alternative to the form
+  // wizard. The engine (onboarding-conversation FSM) captures business
+  // profile, category, pricing, team, schedule, and tools in one running
+  // conversation — it doesn't map onto a single wizard step, so it's only
+  // offered while the user is on the two form steps it substitutes for
+  // (identity, pack); later steps are infra (phone/billing/AI/test-call)
+  // the FSM never touches. The form wizard remains the default and the
+  // only edit surface — this is purely an alternate capture path.
+  const [voiceMode, setVoiceMode] = useState(false);
+
   // The step the user is currently looking at. Derived the same way as the
   // render-time activeId below, but computed up here (before the early
   // returns) so the funnel effects can depend on it without breaking the
   // rules-of-hooks ordering. null until the first status load.
   const activeStepId: OnboardingStepId | null = override ?? data?.currentStep ?? null;
   const tenantId = data?.tenantId ?? null;
+
+  // B1.19 AC-2 — persist voiceMode itself (not just the conversation
+  // session/history, which live in useOnboardingConversation) so a
+  // mid-conversation refresh lands the user back in the conversation panel
+  // rather than silently dropping them into the form. Best-effort:
+  // localStorage failures degrade to "always reopen the form," never throw.
+  const voiceModeKey = tenantId ? `serviceos.onboarding_conversation_mode.${tenantId}` : null;
+  const voiceModeHydrated = useRef(false);
+  useEffect(() => {
+    if (!voiceModeKey || voiceModeHydrated.current) return;
+    voiceModeHydrated.current = true;
+    try {
+      if (window.localStorage.getItem(voiceModeKey) === '1') setVoiceMode(true);
+    } catch {
+      // Storage unavailable — fall back to the form, same as a fresh session.
+    }
+  }, [voiceModeKey]);
+  useEffect(() => {
+    if (!voiceModeKey) return;
+    try {
+      if (voiceMode) window.localStorage.setItem(voiceModeKey, '1');
+      else window.localStorage.removeItem(voiceModeKey);
+    } catch {
+      // Best-effort — worst case a refresh reopens the form instead.
+    }
+  }, [voiceMode, voiceModeKey]);
 
   useEffect(() => {
     const billing = searchParams.get('billing');
@@ -204,15 +241,50 @@ export function OnboardingShell() {
   }
 
   const activeId: OnboardingStepId = activeStepId ?? 'test_call';
+  const voiceAvailable = activeId === 'identity' || activeId === 'pack';
+  const inConversationMode = voiceMode && voiceAvailable;
+
+  // Selecting a different step from the sidebar/mobile strip always drops
+  // back to the form — the conversation panel is scoped to the step it was
+  // opened from, not a standing mode that follows the user around.
+  const handleSelect = (id: OnboardingStepId) => {
+    setVoiceMode(false);
+    setOverride(id);
+  };
 
   return (
     <div className="flex min-h-screen bg-white">
-      <Sidebar status={data} activeId={activeId} onSelect={setOverride} />
+      <Sidebar
+        status={data}
+        activeId={activeId}
+        onSelect={handleSelect}
+        voiceAvailable={voiceAvailable}
+        voiceMode={inConversationMode}
+        onToggleVoice={() => setVoiceMode((v) => !v)}
+      />
       <main className="flex-1">
-        <MobileProgress status={data} activeId={activeId} />
+        <MobileProgress
+          status={data}
+          activeId={activeId}
+          voiceAvailable={voiceAvailable}
+          voiceMode={inConversationMode}
+          onToggleVoice={() => setVoiceMode((v) => !v)}
+        />
         <div className="p-6 md:p-8 max-w-3xl">
-          {activeId === 'identity' && <IdentityStep onSaved={() => void refetch()} />}
-          {activeId === 'pack' && <PackStep onSaved={() => void refetch()} />}
+          {inConversationMode && (
+            <ConversationStep
+              tenantId={data.tenantId}
+              onCompleted={() => {
+                setVoiceMode(false);
+                void refetch();
+              }}
+              onExit={() => setVoiceMode(false)}
+            />
+          )}
+          {!inConversationMode && activeId === 'identity' && (
+            <IdentityStep onSaved={() => void refetch()} />
+          )}
+          {!inConversationMode && activeId === 'pack' && <PackStep onSaved={() => void refetch()} />}
           {activeId === 'phone' && (
             <PhoneStep
               status={data}
