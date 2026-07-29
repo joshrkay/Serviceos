@@ -1447,12 +1447,14 @@ export function createExecutionHandlerRegistry(deps?: {
       deps?.packActivationRepo,
       requiredAuditRepo,
       deps?.packSeedDeps,
+      deps?.pool ?? undefined,
     ),
     new OnboardingServiceCategoryExecutionHandler(
       deps?.settingsRepo,
       deps?.packActivationRepo,
       requiredAuditRepo,
       deps?.packSeedDeps,
+      deps?.pool ?? undefined,
     ),
     new OnboardingEstimateTemplateExecutionHandler(deps?.templateRepo, requiredAuditRepo),
     // No repo dep: this handler never persists (see its class doc) —

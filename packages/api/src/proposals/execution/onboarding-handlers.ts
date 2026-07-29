@@ -19,6 +19,7 @@
  * failure — NEVER a synthetic-id passthrough that reports success while
  * persisting nothing.
  */
+import type { Pool } from 'pg';
 import { Proposal, ProposalType } from '../proposal';
 import { ExecutionHandler, ExecutionContext, ExecutionResult } from './handlers';
 import { AuditRepository, createAuditEvent } from '../../audit/audit';
@@ -121,6 +122,14 @@ export class OnboardingTenantSettingsExecutionHandler implements ExecutionHandle
     private readonly packActivationRepo: PackActivationRepository | undefined,
     private readonly auditRepo: AuditRepository,
     private readonly packSeedDeps?: SeedPackDefaultsDeps,
+    /**
+     * Review finding #3 — threaded through so `activatePackWithSeed` can take
+     * the session-level fallback lock (see its `lockPool` doc). Absent in
+     * dev/test without a DB: pack activation still runs, just without the
+     * cross-proposal serialization (same narrower-coverage tradeoff the code
+     * previously accepted unconditionally).
+     */
+    private readonly pool?: Pool,
   ) {}
 
   isFullyWired(): boolean {
@@ -220,12 +229,14 @@ export class OnboardingTenantSettingsExecutionHandler implements ExecutionHandle
         packSeedDeps: this.packSeedDeps,
       };
       for (const packId of verticalPacks as VerticalType[]) {
-        // No lockClient — the executor doesn't run inside an HTTP
-        // request's tenant transaction. See activatePackWithSeed's
-        // lockClient doc for the (narrower, documented) race this
-        // leaves relative to POST /pack.
+        // No lockClient — the executor doesn't run inside an HTTP request's
+        // tenant transaction, so an xact lock can't be used here. lockPool
+        // (review finding #3) is the session-level fallback that actually
+        // serializes this against a concurrent onboarding_service_category
+        // execution (or a form-wizard POST /pack) for the same pack; see
+        // activatePackWithSeed's lockPool doc.
         const result = await activatePackWithSeed(
-          { tenantId: context.tenantId, packId, actorId: context.executedBy },
+          { tenantId: context.tenantId, packId, actorId: context.executedBy, lockPool: this.pool },
           activateDeps,
         );
         if (result.status === 'locked') {
@@ -262,6 +273,8 @@ export class OnboardingServiceCategoryExecutionHandler implements ExecutionHandl
     private readonly packActivationRepo: PackActivationRepository | undefined,
     private readonly auditRepo: AuditRepository,
     private readonly packSeedDeps?: SeedPackDefaultsDeps,
+    /** Review finding #3 — see OnboardingTenantSettingsExecutionHandler's pool doc. */
+    private readonly pool?: Pool,
   ) {}
 
   isFullyWired(): boolean {
@@ -285,8 +298,20 @@ export class OnboardingServiceCategoryExecutionHandler implements ExecutionHandl
     }
 
     try {
+      // Review finding #3 — this call site previously supplied no lockClient
+      // AND no fallback, unlike the HTTP route: two proposals from the same
+      // conversation (this one + onboarding_tenant_settings) targeting the
+      // same pack could both pass activatePack's "already activated" guard
+      // and both run seedPackDefaults' non-atomic name-probe-then-insert,
+      // producing duplicate catalog items/templates. `lockPool` closes that
+      // window (see activatePackWithSeed's doc).
       const result = await activatePackWithSeed(
-        { tenantId: context.tenantId, packId: payload.verticalType, actorId: context.executedBy },
+        {
+          tenantId: context.tenantId,
+          packId: payload.verticalType,
+          actorId: context.executedBy,
+          lockPool: this.pool,
+        },
         {
           settingsRepo: this.settingsRepo,
           packActivationRepo: this.packActivationRepo,
