@@ -58,16 +58,81 @@ Verified by the read-only verification agent (2026-07-29, full report in agent t
 
 ## C1 red→green transition
 
-(to be recorded when C1 lands)
+**2026-07-29.** `packages/api/test/proposals/voice-payload-contract.test.ts` added — the
+table-driven payload-contract drift test (design: `projects/rivet-voice-19/c1-design.md`), one row
+per intent in `INTENT_TO_PROPOSAL_TYPE` (35 rows), completeness-checked both directions against the
+map. 20 rows are `mode:'resolves'` (drafts ungated with resolver-style `existingEntities` AND the
+real execution handler accepts the payload); 15 are `mode:'gated'` (today's honest gating, pinned).
+
+The `add_note` row is the required RED — it drafts through the REAL `AddNoteTaskHandler` with
+`existingEntities: { jobId, jobReference: 'the Henderson job', noteTargetKind: 'job', noteBody: ... }`,
+producing `missingFields: []` (the handler sets `payload.targetReference` but never
+`payload.targetId`), then executes through the REAL `AddNoteExecutionHandler` (constructed
+dep-less, `auditRepo` stubbed since it's a structurally-required ctor param). Verbatim failing
+assertion, captured before any other change:
+
+```
+FAIL  test/proposals/voice-payload-contract.test.ts > C1 — voice payload-contract drift (per mapped intent) > add_note (add_note, resolves) — RED — see B7.4 / run-log.md "C1 red→green transition". AddNoteTaskHandler sets payload.targetReference but never payload.targetId, so missingFields is empty while AddNoteExecutionHandler demands a targetId UUID.
+AssertionError: C1 DRIFT for 'add_note': missingFields was empty but the real execution handler rejected the payload — Payload must include a valid targetId UUID (resolve targetReference at review time first): expected false to be true // Object.is equality
+
+- Expected
++ Received
+
+- true
++ false
+
+ ❯ test/proposals/voice-payload-contract.test.ts:744:9
+    742|         result.success || isWiringRefusal,
+    743|         `C1 DRIFT for '${row.intent}': missingFields was empty but the…
+    744|       ).toBe(true);
+       |         ^
+    745|     });
+    746|   }
+
+Test Files  1 failed (1)
+     Tests  1 failed | 35 passed (36)
+```
+
+All 35 other rows pass (34 assertion rows + the completeness-check row). One deviation from the
+design's suggested `'resolves'` set: `record_payment` moved to `'gated'` —
+`RecordPaymentTaskHandler` never reads `existingEntities.invoiceId` (the real resolver seam) at
+all, only `ee.jobReference`/`ee.customerName` (classifier free text), so `invoiceId` stays gated
+even with a resolver-verified id in `existingEntities`; it is not provably resolver-completable
+today (a same-class latent gap to `add_note`, out of this story's scope — noted in the row's
+`note` field for the next agent).
+
+Green arrives with the B7.4 fix (a separate work item) — do not "fix" `AddNoteTaskHandler` here to
+make this row pass; the row is the point.
+
+**GREEN (2026-07-29, after the B7.4 fix):** same command →
+`Test Files 1 passed (1) · Tests 36 passed (36)`. The transition is therefore observed in both
+directions. C1 and the fix ship in ONE commit so `main` never carries a red test; the permanent
+in-CI proof of the red state is the regression pin in
+`test/ai/tasks/add-note-voice-task.test.ts` ("REGRESSION PIN (B7.4): the pre-fix payload shape is
+no longer producible"), which asserts the exact `targetReference` + no `targetId` + empty
+`missingFields` combination can no longer be produced.
+
+**`record_payment` deviation, adjudicated:** the C1 agent's finding is correct and is the same
+latent class as B7.4 — `RecordPaymentTaskHandler` ignores the resolver's `invoiceId` seam. It is
+**left gated and NOT fixed in this run**: `record_payment` is money movement, it is not in the
+focus eight, and the deferred list is explicit that C1 *pins* current honest gating for
+non-focus intents rather than fixing them. Gating is the safe state (the proposal cannot approve),
+so no user-visible loss occurs — unlike B7.4, where the gate was missing entirely. Recorded here
+as a known follow-up for the next phase.
 
 ## Found-by-proof defects
 
 | # | Item | Defect | Disposition |
 |---|------|--------|-------------|
 | P-1 | B1.19 | The five `onboarding_*` proposal types have no execution handler; `executor.ts:167-173` throws `HANDLER_NOT_FOUND`. Approving a completed conversational onboarding configures nothing. | Found by exploration (not by a test). In scope — see decision #6. |
+| P-2 | B7.4 | `ComplaintTaskHandler` (`complaint-task.ts:98-103`) carried the **same** silent-loss defect on its two free-text tiers: `targetReference` set, `missingFields` left empty → approvable → `AddNoteExecutionHandler` refuses on the UUID check. A complaint note dictated on a call was lost the same way a job note was. | **Fixed in B7.4's commit** — a complaint note *is* an `add_note` proposal, so fixing the contract without fixing this producer would have left the hole open. C1 does not cover it (`_complaint` is a synthetic key outside `INTENT_TO_PROPOSAL_TYPE`), so three regression tests pin both gated tiers and the resolved-id path. |
+| P-3 | Item 9 → B4.7 | `RescheduleAppointmentTaskHandler` and `CancelAppointmentTaskHandler` never read `existingEntities.appointmentId`; they re-resolved via `resolveActiveAppointmentId`, which only answers when the tenant has **exactly one** active appointment. In any shop with two jobs on the books, "Move the Garcia job to Thursday at 10" gated as unresolvable — even though the router had already disambiguated the reference and threaded the correct id. Found empirically: a shared two-appointment fixture made the second test fail with `Payload must include a valid appointmentId`. | **Fixed** — resolver-verified id now wins, single-active fallback retained for the SCH-03 first-turn case. Five regression tests, the key one using the two-appointment fixture that used to fail. Same defect class as B5.3's reassign gate. |
 
 ## Item completion ledger
 
 | Item | Status | Proof |
 |------|--------|-------|
+| B7.4 | ✅ green | `AddNoteTaskHandler` resolves the target from `existingEntities` and gates honestly (`voice-extended-tasks.ts`). Proof: 9 unit tests + regression pin (`test/ai/tasks/add-note-voice-task.test.ts`), 3 complaint-path regressions, C1 row red→green, and `test/integration/add-note-voice-execution.test.ts` (real Postgres: note row with the verbatim dictated body on the job · exactly one note audit event with actor · cross-tenant negative). AC-3 (ambiguity → `voice_clarification`) is satisfied upstream: the router short-circuits an ambiguous reference to a clarification picker before drafting, so no ambiguous reference reaches this handler — the handler-level guarantee proven here is that an *unresolved* target always gates. |
+| B4.7 | ✅ restored | `test/integration/reschedule-appointment-voice.test.ts` (3) + `cancel-appointment-voice.test.ts` (4): task-produced payloads through approval and the production registry; row change · one audit event with the right actor · cross-tenant negative; cancel additionally sweeps every trust tier × confidence × supervisor mode/presence × threshold override through `decideInitialStatus` proving the irreversible class never auto-approves, with a positive control so the sweep can't pass vacuously. Plus the P-3 fix this proof surfaced. |
+| B7.6 / B8.1 / B9.1 (proof legs) | ✅ restored | `draft-estimate-execution.test.ts` (catalog-grounded integer-cents lines — the LLM's 14950¢ overridden by the catalog's 15000¢ · one `estimate.created` audit · cross-tenant negative); `update-estimate-execution.test.ts` (first-ever coverage of `UpdateEstimateExecutionHandler` itself · totals/version recomputed · `estimate.updated` audit · cross-tenant negative both by scoped read and a forged cross-tenant execute); `issue-invoice-conversation-resolution.test.ts` extended with B9.1's missing cross-tenant negative on the issue transition. **B9.1's rung 5 still depends on Part F entry F-1 being ratified** — the proof leg alone does not restore it. |
 | B6.3 | ✅ green | `test/integration/log-time-entry-execution.test.ts` — 4 assertions (row 120min + resolved jobId · exactly one `time_entry.logged_completed` audit with actor · cross-tenant scoped-read negative · `getJobProfit` labor rollup). Drafts through the REAL `LogTimeEntryTaskHandler` with resolver-style `existingEntities`, executes through the production registry. Integration suite 180 files / 929 tests (baseline 179/925 — adds exactly 1 file / 4 tests, no regressions). `tsc --project tsconfig.build.json` clean. No defects found. Cross-tenant form matches the bar Part E already accepted at rung 5 (`draft-invoice-execution.test.ts:194-198`). |
