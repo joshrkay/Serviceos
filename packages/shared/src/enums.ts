@@ -218,6 +218,10 @@ export enum ProposalType {
   UPDATE_CATALOG_ITEM = 'update_catalog_item',
   // U4 — owner-approved tenant alias activation after voice entity correction.
   ADOPT_ENTITY_ALIAS = 'adopt_entity_alias',
+  // B1.18 — brand voice captured by voice. Manual action class: it never
+  // auto-approves at any trust tier, and its payload cannot express the lock
+  // (locking stays tap-only, same theory as the D-013 approval exception).
+  UPDATE_BRAND_VOICE = 'update_brand_voice',
 }
 
 export enum RejectionCategory {
