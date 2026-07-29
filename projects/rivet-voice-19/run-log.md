@@ -130,6 +130,26 @@ as a known follow-up for the next phase.
 | P-5 | B1.19 | The team extractor's per-member `needsClarification` was hardcoded `false`, so an ambiguous role ("me and my cousin Carlos") never triggered the clarification loop the PRD requires. | **Fixed** — per-member confidence gate now actually fires; AC-4's scripted test proves the follow-up question is asked and `clarificationCountByState` increments. |
 | P-3 | Item 9 → B4.7 | `RescheduleAppointmentTaskHandler` and `CancelAppointmentTaskHandler` never read `existingEntities.appointmentId`; they re-resolved via `resolveActiveAppointmentId`, which only answers when the tenant has **exactly one** active appointment. In any shop with two jobs on the books, "Move the Garcia job to Thursday at 10" gated as unresolvable — even though the router had already disambiguated the reference and threaded the correct id. Found empirically: a shared two-appointment fixture made the second test fail with `Payload must include a valid appointmentId`. | **Fixed** — resolver-verified id now wins, single-active fallback retained for the SCH-03 first-turn case. Five regression tests, the key one using the two-appointment fixture that used to fail. Same defect class as B5.3's reassign gate. |
 
+## Deferred-five integrity check (definition-of-done item)
+
+Verified by diff against `origin/main`, not by assertion:
+
+- **No source file on a deferred path was modified.** `git diff origin/main...HEAD --name-only`
+  over `packages/api/src` + `packages/web/src` contains nothing belonging to B7.8 (expense
+  job-link), B7.10 (crew add/remove), B9.12 (reminder/late fee), B9.4 (batch-invoice) or B7.9
+  (lookups).
+- `voice-extended-tasks.ts` is shared with several deferred handlers, so it was checked line by
+  line: the diff touches **no** `AddCrewMemberTaskHandler`, `RemoveCrewMemberTaskHandler`,
+  `LogExpenseTaskHandler`, `ApplyLateFeeTaskHandler`, `SendPaymentReminderTaskHandler` or
+  `BatchInvoiceTaskHandler` line.
+- C1 **pins** the deferred intents' current honest gating (`batch_invoice`, `log_expense`,
+  `add_crew_member`, `remove_crew_member`, `send_payment_reminder`, `apply_late_fee` rows in
+  `voice-payload-contract.test.ts`) — pins, not fixes, exactly as the master prompt requires.
+- The live-call UTC datetime fix (Part E punch-list #1) stays deferred. **No focus item's
+  fixtures depend on it**: the only spoken-datetime path exercised is B4.7's reschedule, whose
+  integration test threads an explicit tenant timezone and a fixed `now` into `TaskContext` and
+  asserts the resolved instant, so it neither depends on nor masks the live-call bug.
+
 ## Item completion ledger
 
 | Item | Status | Proof |
