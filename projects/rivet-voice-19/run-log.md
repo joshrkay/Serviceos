@@ -136,6 +136,27 @@ as a known follow-up for the next phase.
 | P-7 | B5.3 | The staleness gate on reassignment (`checkSchedulingProposalFreshness`) compares against `proposal.sourceContext.{status,scheduledStart,technicianId}`, but nothing in the voice draft path ever snapshots those onto a reassign proposal — so for a genuinely voice-drafted proposal the gate executes and always reports "fresh": a structural no-op. | **Not fixed — logged.** Found while writing B5.3's AC-5 proof. The test proves the mechanism genuinely blocks when a stale baseline exists (stamped manually), but does **not** claim the drafting path populates one. Outside B5.3's declared scope; recorded rather than quietly counted as a working safeguard. |
 | P-3 | Item 9 → B4.7 | `RescheduleAppointmentTaskHandler` and `CancelAppointmentTaskHandler` never read `existingEntities.appointmentId`; they re-resolved via `resolveActiveAppointmentId`, which only answers when the tenant has **exactly one** active appointment. In any shop with two jobs on the books, "Move the Garcia job to Thursday at 10" gated as unresolvable — even though the router had already disambiguated the reference and threaded the correct id. Found empirically: a shared two-appointment fixture made the second test fail with `Payload must include a valid appointmentId`. | **Fixed** — resolver-verified id now wins, single-active fallback retained for the SCH-03 first-turn case. Five regression tests, the key one using the two-appointment fixture that used to fail. Same defect class as B5.3's reassign gate. |
 
+## Held-commit audit (Guardrail 3, definition-of-done item)
+
+Guardrail 3 requires money/RLS/auth-touching commits to be isolated, labeled and **held** for
+human review; everything else merges on green. Audited across all 34 commits on the branch:
+
+- **One held commit**: `feat(B7.5)[HELD: money-contract]` — migration 265 adding the nullable,
+  descriptive `unit` column to `estimate_line_items` and `invoice_line_items`, plus the contract
+  types. Labeled in the subject line so it cannot be merged by accident.
+- **No RLS change anywhere**: no added line in the schema diff contains `POLICY`,
+  `ROW LEVEL SECURITY` or `FORCE`. The new column lands on tables whose existing policies are
+  untouched.
+- **No auth/permission change**: nothing under `packages/api/src/auth/` or `middleware/` is
+  modified.
+- **No money-movement change**: the only other files matching money-ish names are voice-quality
+  cassettes and tests. `record_payment`'s latent resolver gap was found and deliberately left
+  gated rather than fixed (see the C1 section) precisely because fixing it would have put money
+  movement in scope.
+
+Everything else on the branch is voice drafting/resolution, config writes, tests and docs —
+merges on green.
+
 ## D-013 integrity check (definition-of-done item)
 
 Re-verified at the current head, after all focus work landed — not just at run start:
