@@ -1,8 +1,8 @@
 # Rivet — VOICE Phase 1 (8 of 19) `/goal` Master Prompt
 
 For **Rivet** — the voice-and-AI-first back office for 1–3-truck owner-operator shops. Part E
-(2026-07-29, incl. post-review corrections — run log #16-17) measured voice coverage at **3/19
-strict** (after post-review correction rounds, run log #16-18). This run ships the **eight focus
+(2026-07-29, incl. post-review corrections — run log #16-17) measured voice coverage at **2/19
+strict** (after post-review correction rounds, run log #16-22). This run ships the **eight focus
 requirements** below to rung 5, taking coverage to **14/19**. Five items are explicitly deferred
 (appendix) — do not touch them except where a cross-cutting gate requires it.
 
@@ -43,9 +43,10 @@ Ship the eight focus requirements to **rung 5, with proof**: for each, a spoken 
 proposal → execution → persisted row + audit event` (or the audited status-act / conversation
 equivalent), pinned by a Docker-gated integration test (audit + cross-tenant negative) and a
 voice-quality fixture. The run ends with a **read-only re-measurement of all 19** using the Part E
-Track B method; the deliverable is that re-run scoring **14/19**: the three previously-green items (B7.1, B7.7,
-B9.1) still green, B4.7/B7.6/B8.1 restored to rung 5 by items 9-10's proof-only tests, the eight
-focus items newly green, and the five deferred items unchanged.
+Track B method; the deliverable is that re-run scoring **14/19**: the two previously-green items (B7.1, B7.7)
+still green, B4.7/B7.6/B8.1/B9.1 restored to rung 5 by items 9-10's proof-only tests (B9.1 also
+needs the Part F interpretation entry recorded), the eight focus items newly green, and the five
+deferred items unchanged.
 
 ## GUARDRAILS
 
@@ -363,8 +364,16 @@ any defect found by writing them is in scope and must be flagged as found-by-pro
    task-produced `update_estimate` add-line-item payload → approve → execute via
    `UpdateEstimateExecutionHandler` → line persisted, totals recomputed correctly; estimate-updated
    audit event; **cross-tenant negative**.
-3. **C1** rows for both intents green with resolver-provided ids; both already have rubric
-   fixtures — extend only if the new tests reveal a fixture gap.
+3. **Integration (B9.1 issue leg)**: extend `issue-invoice-conversation-resolution.test.ts` (or a
+   sibling) with the missing **cross-tenant negative** on the issue transition.
+4. **Part F entry (B9.1 interpretation)**: record the decision "does 'invoice issued from a spoken
+   sentence' mean single-utterance-to-issued, or draft-then-issue with two taps?" with a
+   recommendation (default: the two-step flow is the trust-correct reading; if product wants
+   single-utterance issuance, that is a new auto-issue-on-approve behavior needing its own risk
+   review — not silently built here). B9.1 scores rung 5 in the re-measurement once the proof leg
+   exists and the entry is recorded.
+5. **C1** rows for these intents green with resolver-provided ids; existing rubric fixtures
+   extended only if the new tests reveal a gap.
 
 ## DEFERRED — do not build in this run
 
@@ -378,7 +387,7 @@ deferred intents by pinning their current honest-gating behavior — pins, not f
 ## DEFINITION OF DONE (self-grade before reporting)
 
 - [ ] Read-only re-measurement of all 19 (Part E Track B method, fresh agent): **14/19 at rung 5** —
-      the focus eight newly green, the prior three still green, B4.7/B7.6/B8.1 restored via items 9-10's proofs, the deferred five unchanged
+      the focus eight newly green, the prior two still green, B4.7/B7.6/B8.1/B9.1 restored via items 9-10's proofs + Part F entry, the deferred five unchanged
 - [ ] Every numbered AC above is demonstrably satisfied — each cites the test/file/command a
       reviewer can re-run
 - [ ] C1 payload-contract test exists, covers **all** mapped intents, gates CI, and its
