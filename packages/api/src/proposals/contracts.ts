@@ -1,5 +1,10 @@
 import { z } from 'zod';
-import { appointmentTypeSchema, jobStatusSchema, jobPrioritySchema } from '@ai-service-os/shared';
+import {
+  appointmentTypeSchema,
+  jobStatusSchema,
+  jobPrioritySchema,
+  catalogUnitSchema,
+} from '@ai-service-os/shared';
 import { ProposalType } from './proposal';
 import { ValidationError } from '../shared/errors';
 import { reassignAppointmentPayloadSchema } from './contracts/reassignment';
@@ -308,6 +313,12 @@ const lineItemSchema = z
   .object({
     description: z.string().min(1),
     quantity: z.number(),
+    // B7.5 — descriptive unit of measure for a spoken part ("three
+    // capacitors", "two hours of labor"). Declared explicitly for the same
+    // reason imageFileId is: assertValidProposalPayload would otherwise strip
+    // it and the unit would vanish on the AI path only. Never used in money
+    // math — price stays in the unitPrice/unitPriceCents fields below.
+    unit: catalogUnitSchema.optional(),
     unitPrice: z.number().optional(),
     unitPriceCents: z.number().int().min(0).nullable().optional(),
     category: z.string().optional(),

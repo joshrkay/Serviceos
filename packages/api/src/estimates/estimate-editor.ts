@@ -74,7 +74,7 @@ function toBillingLineItem(
   id: string,
   sortOrder: number
 ): LineItem {
-  return buildLineItem(
+  const line = buildLineItem(
     id,
     input.description,
     input.quantity,
@@ -84,6 +84,11 @@ function toBillingLineItem(
     input.category,
     input.pricingSource
   );
+  // B7.5 — carry the descriptive unit onto the built line. Applied after
+  // buildLineItem rather than as another positional argument: the money math
+  // lives inside that function and must not grow a parameter that could ever
+  // be mistaken for one of its inputs.
+  return input.unit ? { ...line, unit: input.unit } : line;
 }
 
 function validateInput(input: EstimateEditLineItemInput): void {
