@@ -107,6 +107,23 @@ export interface UseOnboardingConversationResult {
   sendMessage: (text: string) => Promise<void>;
 }
 
+/**
+ * The browser's IANA zone, or undefined when it cannot be determined.
+ *
+ * Deliberately NOT IdentityStep's `detectBrowserTimezone`, which falls back to
+ * 'America/New_York'. On this path a fallback would be a DEFAULT, and a wrong
+ * zone silently misbooks every appointment the tenant takes (Phoenix
+ * mis-booking postmortem, migration 263). Sending nothing makes the server
+ * gate the proposal and ask — the safe failure, not the silent one.
+ */
+function browserTimezoneOrUndefined(): string | undefined {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 export function useOnboardingConversation(tenantId: string): UseOnboardingConversationResult {
   const apiFetch = useApiClient();
 
@@ -205,7 +222,10 @@ export function useOnboardingConversation(tenantId: string): UseOnboardingConver
         const existingSessionId = sessionIdRef.current;
         const res = await apiFetch('/api/onboarding/conversation/turn', {
           method: 'POST',
-          body: JSON.stringify(existingSessionId ? { sessionId: existingSessionId } : {}),
+          body: JSON.stringify({
+            ...(existingSessionId ? { sessionId: existingSessionId } : {}),
+            clientTimezone: browserTimezoneOrUndefined(),
+          }),
         });
 
         if (res.status === 404) {
@@ -217,7 +237,7 @@ export function useOnboardingConversation(tenantId: string): UseOnboardingConver
           setHistory([]);
           const retry = await apiFetch('/api/onboarding/conversation/turn', {
             method: 'POST',
-            body: JSON.stringify({}),
+            body: JSON.stringify({ clientTimezone: browserTimezoneOrUndefined() }),
           });
           if (!retry.ok) throw new Error(`HTTP ${retry.status}`);
           const body = (await retry.json()) as OnboardingConversationTurnResponse;
@@ -289,6 +309,7 @@ export function useOnboardingConversation(tenantId: string): UseOnboardingConver
             body: JSON.stringify({
               sessionId: sessionIdRef.current ?? undefined,
               userMessage: trimmed,
+              clientTimezone: browserTimezoneOrUndefined(),
             }),
           });
           // The tenant may have changed while this was in flight; anything

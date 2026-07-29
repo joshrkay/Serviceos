@@ -8,6 +8,11 @@ import { useOnboardingConversation } from './useOnboardingConversation';
 
 const TENANT = 'tenant-conv-1';
 
+// The zone the browser reports in this environment. The hook must SEND it —
+// the server gates onboarding when no usable zone arrives, and must never
+// default one (a wrong zone silently misbooks; migration 263).
+const BROWSER_TZ = Intl.DateTimeFormat().resolvedOptions().timeZone;
+
 function jsonResponse(status: number, body: unknown) {
   return { ok: status >= 200 && status < 300, status, json: async () => body };
 }
@@ -36,7 +41,10 @@ describe('useOnboardingConversation — B1.19 AC-1/AC-2', () => {
 
     expect(apiFetchMock).toHaveBeenCalledWith(
       '/api/onboarding/conversation/turn',
-      expect.objectContaining({ method: 'POST', body: JSON.stringify({}) }),
+      expect.objectContaining({
+        method: 'POST',
+        body: JSON.stringify({ clientTimezone: BROWSER_TZ }),
+      }),
     );
     expect(result.current.history).toEqual([
       { role: 'assistant', text: "Hi! Tell me about your business.", at: expect.any(String) },
@@ -84,6 +92,7 @@ describe('useOnboardingConversation — B1.19 AC-1/AC-2', () => {
     expect(JSON.parse((turnCall[1] as RequestInit).body as string)).toEqual({
       sessionId: 'sess-2',
       userMessage: 'Acme HVAC in Austin',
+      clientTimezone: BROWSER_TZ,
     });
   });
 
@@ -116,7 +125,9 @@ describe('useOnboardingConversation — B1.19 AC-1/AC-2', () => {
 
     expect(apiFetchMock).toHaveBeenCalledWith(
       '/api/onboarding/conversation/turn',
-      expect.objectContaining({ body: JSON.stringify({ sessionId: 'sess-3' }) }),
+      expect.objectContaining({
+        body: JSON.stringify({ sessionId: 'sess-3', clientTimezone: BROWSER_TZ }),
+      }),
     );
     // Still exactly 3 turns — the replayed message matched the tail of the
     // locally-persisted history, so it was not appended again.
@@ -228,7 +239,9 @@ describe('useOnboardingConversation — B1.19 AC-1/AC-2', () => {
     // Bootstrapped with the NEW tenant's stored session, not the old one…
     expect(apiFetchMock).toHaveBeenCalledWith(
       '/api/onboarding/conversation/turn',
-      expect.objectContaining({ body: JSON.stringify({ sessionId: 'sess-other' }) }),
+      expect.objectContaining({
+        body: JSON.stringify({ sessionId: 'sess-other', clientTimezone: BROWSER_TZ }),
+      }),
     );
     // …and that tenant's stored session survived.
     expect(
@@ -298,6 +311,7 @@ describe('useOnboardingConversation — B1.19 AC-1/AC-2', () => {
     expect(JSON.parse((apiFetchMock.mock.calls[1][1] as RequestInit).body as string)).toEqual({
       sessionId: 'sess-boot',
       userMessage: 'Acme HVAC in Austin',
+      clientTimezone: BROWSER_TZ,
     });
     // The owner's answer survived, in order, and its reply landed.
     expect(result.current.history.map((t) => t.text)).toEqual([

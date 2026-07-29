@@ -111,6 +111,9 @@ describe('ConversationStep — B1.19 AC-1', () => {
     expect(JSON.parse((turnCall[1] as RequestInit).body as string)).toEqual({
       sessionId: 'sess-2',
       userMessage: 'Acme HVAC in Austin',
+      // The client sends the browser's zone so the server need not default
+      // one; onboarding gates rather than guesses when it is absent.
+      clientTimezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
     });
   });
 
