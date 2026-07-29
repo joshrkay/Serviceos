@@ -646,9 +646,11 @@ export class PgEntityResolver implements EntityResolver {
       // exactly one appointment sat at the stated time. Resolved against
       // `scheduled_start` in the TENANT's zone before the named-job branch.
       //
-      // Returns null when the reference states no clock time, or when the
-      // stated time matches nothing — in both cases the pre-existing branches
-      // below still get their turn, so this is purely additive.
+      // Returns null ONLY when the reference states no clock time — then the
+      // branches below get their turn. When a clock time IS stated it answers
+      // definitively, including `not_found` if nothing sits at that time.
+      // It is deliberately not "purely additive": that framing is what made
+      // an unmatched explicit time fall through to a different appointment.
       const byClock = await this.resolveAppointmentByClockTime(tenantId, reference, jobId);
       if (byClock) return byClock;
 
@@ -894,9 +896,13 @@ export class PgEntityResolver implements EntityResolver {
         .then((r) => r.rows),
     );
 
-    // Nothing at the stated time: fall through rather than answer. The name
-    // branch and the SCH-03 fallback below still get their turn.
-    if (rows.length === 0) return null;
+    // Nothing at the stated time. This is NOT a fall-through: the speaker gave
+    // an explicit constraint, and the branches below would answer with a
+    // DIFFERENT appointment — "cancel the 2pm" against a job whose only
+    // upcoming visit is 4pm would silently target the 4pm. Same shape as the
+    // unknown-zone refusal above: once an explicit time fails to match, every
+    // remaining route reaches a wrong answer by a longer path.
+    if (rows.length === 0) return { kind: 'not_found', reference };
     // More candidates than a picker can honestly show — same rule as the
     // sibling fallbacks: escalating beats reading back an arbitrary five.
     if (rows.length > MAX_DISAMBIGUATION_CANDIDATES) return { kind: 'not_found', reference };

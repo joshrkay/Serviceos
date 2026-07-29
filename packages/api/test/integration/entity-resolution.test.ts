@@ -1182,10 +1182,16 @@ describe('Postgres integration — entity resolution (P8)', () => {
       expect(result.kind).toBe('not_found');
     });
 
-    it('a clock time that matches nothing falls THROUGH to the pre-existing branches rather than answering', async () => {
-      // "the 2pm Garcia job" states a time the tenant has nothing at, but
-      // still names a customer. The temporal branch must step aside so the
-      // customer traversal answers — proving the new branch is additive.
+    it('a clock time that matches nothing REFUSES — it never answers with a different appointment', async () => {
+      // Raised in PR review. This case previously asserted the opposite, that
+      // an unmatched time "falls through" so the customer traversal answers,
+      // on the reasoning that the temporal branch should be purely additive.
+      // That reasoning is the defect: the speaker stated 2pm, and the only
+      // thing here is at 9am. Falling through hands "the 2pm Garcia job" to
+      // the name branch, which resolves the 9am — so cancel/reschedule would
+      // target a visit the operator did not name. An explicit constraint that
+      // matches nothing has to be terminal; every remaining route reaches a
+      // wrong answer by a longer path.
       const seed = await seedRealisticTenant({
         displayName: 'Jamie Garcia',
         jobSummary: 'AC repair',
@@ -1200,8 +1206,18 @@ describe('Postgres integration — entity resolution (P8)', () => {
         kind: 'appointment',
       });
 
-      expect(result.kind).toBe('resolved');
-      if (result.kind === 'resolved') expect(result.candidate.id).toBe(appointmentId);
+      expect(result.kind).toBe('not_found');
+
+      // Control: the SAME tenant and appointment resolve fine when the spoken
+      // time matches, so the refusal above is about the stated time and not
+      // about the seed being unreachable.
+      const matching = await resolver.resolve({
+        tenantId: seed.tenantId,
+        reference: 'the 9am Garcia job',
+        kind: 'appointment',
+      });
+      expect(matching.kind).toBe('resolved');
+      if (matching.kind === 'resolved') expect(matching.candidate.id).toBe(appointmentId);
     });
 
     // -- an UNSET tenant timezone must REFUSE, never default ---------------
