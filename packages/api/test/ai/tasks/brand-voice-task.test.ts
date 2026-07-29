@@ -18,6 +18,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
   BRAND_VOICE_GATE_FIELD,
+  FREE_TEXT_GATE_FIELD,
   UpdateBrandVoiceTaskHandler,
 } from '../../../src/ai/tasks/brand-voice-task';
 import { TaskContext } from '../../../src/ai/tasks/task-handlers';
@@ -29,10 +30,12 @@ import { InMemoryAuditRepository } from '../../../src/audit/audit';
 import { UpdateBrandVoiceExecutionHandler } from '../../../src/proposals/execution/brand-voice-handler';
 import {
   createProposal,
+  InMemoryProposalRepository,
   missingFieldsFor,
   actionClassForProposalType,
   decideInitialStatus,
 } from '../../../src/proposals/proposal';
+import { editProposal } from '../../../src/proposals/actions';
 import type { LLMGateway, LLMResponse } from '../../../src/ai/gateway/gateway';
 
 function gatewayReturning(content: string): LLMGateway {
@@ -66,7 +69,7 @@ function ctx(overrides: Partial<TaskContext> = {}): TaskContext {
 }
 
 describe('UpdateBrandVoiceTaskHandler', () => {
-  it('AC-2: maps the fixture sentence onto tone/sign-off fields; unmapped text lands in freeText; nothing dropped', async () => {
+  it('AC-2: maps the fixture sentence onto tone/sign-off fields; unmapped text lands in freeText; nothing dropped; MIXED payload is gated', async () => {
     const gateway = gatewayReturning(
       JSON.stringify({
         register: 'friendly',
@@ -91,7 +94,11 @@ describe('UpdateBrandVoiceTaskHandler', () => {
     // so it survives verbatim in freeText rather than being discarded.
     expect(res.proposal.payload.freeText).toBe('no slang');
     assertValidProposalPayload('update_brand_voice', res.proposal.payload);
-    expect(missingFieldsFor(res.proposal)).toEqual([]);
+    // MIXED payload (a mapped field AND unmapped content in the same
+    // utterance) is NOT approvable: without this gate, execution would apply
+    // only register/signoff and silently drop "no slang" while reporting
+    // success. See FREE_TEXT_GATE_FIELD.
+    expect(missingFieldsFor(res.proposal)).toEqual([FREE_TEXT_GATE_FIELD]);
     // manual action class → decideInitialStatus can never auto-approve this,
     // even though the task handler itself doesn't set sourceTrustTier.
     expect(res.proposal.status).toBe('draft');
@@ -317,12 +324,13 @@ describe('UpdateBrandVoiceTaskHandler', () => {
       }
     });
 
-    it('positive control: a real extracted field (register/tone) stays approvable — missingFields empty and execution succeeds', async () => {
+    it('positive control: a real extracted field ALONE (register/tone, nothing unmapped) stays approvable — missingFields empty and execution succeeds', async () => {
       const res = await new UpdateBrandVoiceTaskHandler(
-        gatewayReturning(JSON.stringify({ register: 'friendly', unmapped: 'no slang', confidence_score: 0.9 })),
+        gatewayReturning(JSON.stringify({ register: 'friendly', confidence_score: 0.9 })),
       ).handle(ctx());
 
       expect(res.proposal.payload.register).toBe('friendly');
+      expect(res.proposal.payload.freeText).toBeUndefined();
       expect(missingFieldsFor(res.proposal)).toEqual([]);
       assertValidProposalPayload('update_brand_voice', res.proposal.payload);
 
@@ -352,6 +360,104 @@ describe('UpdateBrandVoiceTaskHandler', () => {
         { tenantId: 't-1', executedBy: 'u-1' },
       );
       expect(result.success).toBe(true);
+    });
+  });
+
+  // ── PR review (2026-07) — approved-then-silently-partial ─────────────────
+  //
+  // "Be friendly, and never quote prices by text" mapped `register` AND
+  // flagged `unmapped: 'never quote prices by text'`. Before this gate,
+  // `mappedAnything` alone (register persisted) made the proposal
+  // approvable with an EMPTY missingFields, so approveProposal let it
+  // through; UpdateBrandVoiceExecutionHandler's strip-mode parse
+  // (brandVoiceSchema.safeParse) then silently dropped `freeText`, applied
+  // only `register`, and reported SUCCESS. Nothing surfaced the loss — worse
+  // than approved-then-failed, because here the card lies that everything
+  // the owner said was honored. These tests pin the fix and its unblock path.
+  describe('mixed-payload gate — a mapped field AND unmapped content together is NOT silently approvable', () => {
+    function mixedGateway(): LLMGateway {
+      return gatewayReturning(
+        JSON.stringify({
+          register: 'friendly',
+          unmapped: 'never quote prices by text',
+          confidence_score: 0.85,
+        }),
+      );
+    }
+
+    it('"be friendly, and never quote prices by text": register maps, the pricing prohibition is flagged unmapped, and the proposal is gated (not approvable)', async () => {
+      const res = await new UpdateBrandVoiceTaskHandler(mixedGateway()).handle(
+        ctx({
+          message: 'be friendly, and never quote prices by text',
+          existingEntities: { brandVoiceInstruction: 'be friendly, and never quote prices by text' },
+        }),
+      );
+
+      expect(res.proposal.payload.register).toBe('friendly');
+      // AC-2 still holds at the payload level: nothing spoken is discarded
+      // from the DRAFT itself.
+      expect(res.proposal.payload.freeText).toBe('never quote prices by text');
+      // …but unlike before the fix, it is gated: an operator must resolve
+      // the unmapped constraint before this can ever be approved.
+      expect(missingFieldsFor(res.proposal)).toEqual([FREE_TEXT_GATE_FIELD]);
+      expect(res.proposal.status).toBe('draft');
+      assertValidProposalPayload('update_brand_voice', res.proposal.payload);
+    });
+
+    it('the gate is real, not decorative: bypassing it (as approveProposal used to allow) applies register and silently drops the pricing prohibition on execution — this is exactly the hazard the gate exists to prevent', async () => {
+      const res = await new UpdateBrandVoiceTaskHandler(mixedGateway()).handle(ctx());
+      expect(missingFieldsFor(res.proposal)).toEqual([FREE_TEXT_GATE_FIELD]);
+
+      const repo = new InMemoryBrandVoiceRepository();
+      const handler = new UpdateBrandVoiceExecutionHandler(repo, new InMemoryAuditRepository());
+      // Simulating what execution would do if the (pre-fix) empty gate had
+      // let this through — proves the payload really does silently lose the
+      // pricing instruction, not merely that a gate field is set somewhere.
+      const result = await handler.execute(
+        { ...res.proposal, status: 'approved' },
+        { tenantId: 't-1', executedBy: 'u-1' },
+      );
+      expect(result.success).toBe(true);
+      const state = await repo.getState('t-1');
+      expect(state.config.register).toBe('friendly');
+      // The pricing prohibition has no home anywhere in the persisted state.
+      expect(JSON.stringify(state.config)).not.toMatch(/price/i);
+    });
+
+    it('gate has a real unblock path: editProposal + clearSatisfiedMissingFields lift it ONLY when the exact `freeText` key is edited to a non-empty value; an unrelated edit does not clear it', async () => {
+      const res = await new UpdateBrandVoiceTaskHandler(mixedGateway()).handle(ctx());
+      expect(missingFieldsFor(res.proposal)).toEqual([FREE_TEXT_GATE_FIELD]);
+
+      const proposalRepo = new InMemoryProposalRepository();
+      await proposalRepo.create(res.proposal);
+
+      // Editing an unrelated key must NOT clear the gate — clear-on-fill
+      // only lifts the entry for the EXACT key edited (missing-fields.ts).
+      const afterUnrelatedEdit = await editProposal(
+        proposalRepo,
+        't-1',
+        res.proposal.id,
+        'u-owner',
+        'owner',
+        { persona_name: 'Bob' },
+      );
+      expect(missingFieldsFor(afterUnrelatedEdit.proposal)).toEqual([FREE_TEXT_GATE_FIELD]);
+
+      // Editing `freeText` itself — the operator has now seen the pricing
+      // instruction and handled it (e.g. added a banned_phrases entry
+      // separately, or is explicitly acknowledging it) — clears the gate.
+      // `freeText` is a real flat key of `updateBrandVoicePayloadSchema`, so
+      // editProposal's Zod re-validation of the merged payload accepts it.
+      const afterFreeTextEdit = await editProposal(
+        proposalRepo,
+        't-1',
+        res.proposal.id,
+        'u-owner',
+        'owner',
+        { freeText: 'never quote prices by text — handled: added to banned_phrases' },
+      );
+      expect(missingFieldsFor(afterFreeTextEdit.proposal)).toEqual([]);
+      assertValidProposalPayload('update_brand_voice', afterFreeTextEdit.proposal.payload);
     });
   });
 });

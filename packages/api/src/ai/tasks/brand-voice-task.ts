@@ -23,6 +23,14 @@
  * it, because execution would deterministically refuse it. See
  * BRAND_VOICE_GATE_FIELD.
  *
+ * A MIXED payload is also NOT approvable: when the model both maps a field
+ * AND reports unmapped content in the same utterance (e.g. "be friendly, and
+ * never quote prices by text"), the persisted field alone would otherwise let
+ * the proposal through while the execution handler's strip-mode parse
+ * silently discards the unmapped instruction. That case is stamped
+ * `missingFields: [FREE_TEXT_GATE_FIELD]` too, so nothing spoken is ever lost
+ * behind a card that reports success. See FREE_TEXT_GATE_FIELD.
+ *
  * Execution note: this handler ONLY drafts. It never re-implements the
  * merge/cool-down/version-bump — that lives entirely in
  * `tenants/brand/brand-voice-service.ts:updateBrandVoice`, called by
@@ -145,6 +153,37 @@ const UNRECOGNIZED_VALUE_REASON = 'unrecognized_value';
  */
 const BRAND_VOICE_GATE_FIELD = 'register';
 
+/**
+ * PR review finding (2026-07) — the approved-then-silently-partial gate.
+ *
+ * "Be friendly, and never quote prices by text" maps `register: 'friendly'`
+ * AND reports `unmapped: 'never quote prices by text'`. Before this gate,
+ * `mappedAnything` was true (register persisted), so the proposal shipped
+ * with NO `missingFields` entry — fully approvable. On approval,
+ * `UpdateBrandVoiceExecutionHandler` projects the payload through
+ * `brandVoiceSchema` (strip-mode), which drops `freeText` on the floor
+ * un-forwarded, applies only `register`, and reports SUCCESS. The owner's
+ * explicit pricing prohibition vanished with no failure, no card, nothing —
+ * worse than the approved-then-failed class the sibling gate above closes,
+ * because here nothing surfaces the loss at all.
+ *
+ * Gate key: `freeText` itself, not a synthetic token, for the same
+ * clear-on-fill reason as `BRAND_VOICE_GATE_FIELD` above — `freeText` is a
+ * real flat key of `updateBrandVoicePayloadSchema` (proposals/contracts/
+ * brand-voice.ts), so `editProposal`'s re-validation against that schema
+ * accepts it, and `clearSatisfiedMissingFields` (proposals/missing-fields.ts)
+ * lifts the gate only when an operator edits THAT exact key to a non-empty
+ * value — i.e. only once they've actually seen and handled the unmapped
+ * instruction (folding it into a banned phrase, a sign-off, or wherever it
+ * belongs) rather than the gate silently clearing itself.
+ *
+ * Only stamped for the MIXED case (something mapped AND something the model
+ * flagged as unmapped) — the "nothing mapped at all" case is already fully
+ * blocked by `BRAND_VOICE_GATE_FIELD` above (execution would refuse an empty
+ * patch regardless), so adding this key there would be redundant, not wrong.
+ */
+const FREE_TEXT_GATE_FIELD = 'freeText';
+
 export class UpdateBrandVoiceTaskHandler implements TaskHandler {
   readonly taskType = 'update_brand_voice' as const;
 
@@ -249,11 +288,22 @@ export class UpdateBrandVoiceTaskHandler implements TaskHandler {
       // decideInitialStatus.
       //
       // missingFields is the APPROVAL gate (decideInitialStatus forces
-      // 'draft'; approveProposal refuses outright). It is stamped exactly
-      // when the extraction produced NONE of the six persisted brand-voice
-      // fields — the freeText-only payload the execution handler
-      // deterministically refuses. See BRAND_VOICE_GATE_FIELD above.
-      ...(mappedAnything ? {} : { missingFields: [BRAND_VOICE_GATE_FIELD] }),
+      // 'draft'; approveProposal refuses outright).
+      //
+      // Case 1 — nothing mapped: stamped when the extraction produced NONE
+      // of the six persisted brand-voice fields — the freeText-only payload
+      // the execution handler deterministically refuses. See
+      // BRAND_VOICE_GATE_FIELD above.
+      //
+      // Case 2 — mixed: something mapped AND the model explicitly reported
+      // unmapped content alongside it. Without this, the proposal would be
+      // approvable while the unmapped instruction is silently dropped by the
+      // execution handler's strip-mode parse. See FREE_TEXT_GATE_FIELD above.
+      ...(!mappedAnything
+        ? { missingFields: [BRAND_VOICE_GATE_FIELD] }
+        : modelUnmapped
+          ? { missingFields: [FREE_TEXT_GATE_FIELD] }
+          : {}),
     };
 
     return { proposal: createProposal(input), taskType: this.taskType };
@@ -287,4 +337,4 @@ export class UpdateBrandVoiceTaskHandler implements TaskHandler {
   }
 }
 
-export { BRAND_VOICE_SYSTEM_PROMPT, BRAND_VOICE_GATE_FIELD, tryParseJson };
+export { BRAND_VOICE_SYSTEM_PROMPT, BRAND_VOICE_GATE_FIELD, FREE_TEXT_GATE_FIELD, tryParseJson };
