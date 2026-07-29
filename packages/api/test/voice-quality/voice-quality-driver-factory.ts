@@ -16,6 +16,7 @@ import {
   type CassetteMode,
 } from '../../src/ai/voice-quality/cassette-gateway';
 import { TextModeDriver, type AgentDriver } from '../../src/ai/voice-quality/text-mode-driver';
+import type { EntityResolver, EntityResolverResult, EntityKind } from '../../src/ai/resolution/entity-resolver';
 import { InMemoryMoneyDashboardRepository } from '../../src/reports/money-dashboard';
 import { InMemoryCatalogItemRepository } from '../../src/catalog/catalog-item';
 import { DefaultAvailabilityFinder } from '../../src/ai/tasks/availability-finder';
@@ -161,6 +162,15 @@ function classifierJsonForTurn(script: VoiceQualityScript, turnIndex: number): s
     entities.newDateTimeDescription = newStart
       ? absolutePhraseFromIso(newStart, tenantTimezone(script))
       : 'the requested new time';
+  }
+  // B5.3 — reassign_appointment. Both references are free text (a raw id
+  // is never emitted by the classifier — CLAUDE.md's entity-resolution
+  // invariant); `entityResolver` (fixtures.technicians, wired below)
+  // resolves them the same way production's P8 resolver does.
+  if (intent === 'reassign_appointment') {
+    entities.appointmentReference = 'the appointment';
+    entities.targetTechnicianName =
+      typeof slots.targetTechnicianName === 'string' ? slots.targetTechnicianName : 'the technician';
   }
   // Full-app voice coverage intents — surface the entities each task
   // handler needs so the proposal payload is well-formed. Values are
@@ -342,6 +352,67 @@ export class ScriptAwareMockGateway extends LLMGateway {
   }
 }
 
+/**
+ * B5.3 — a minimal, opt-in `EntityResolver` for scripts that declare
+ * `fixtures.technicians`. Only handles the two kinds `reassign_appointment`
+ * needs; every other kind is `skipped`, exactly the production resolver's
+ * contract for "nothing planned/matched" — this never invents behavior for
+ * kinds it doesn't model.
+ *
+ *   - 'technician' — case-insensitive exact/substring match against the
+ *     fixture's `{id, name}` rows: 0 → not_found, 1 → resolved, 2+ →
+ *     ambiguous (mirrors PgEntityResolver's tri-state, no silent guess).
+ *   - 'appointment' — the single-active-appointment convention this same
+ *     harness already uses for reschedule_appointment/cancel_appointment
+ *     (resolveActiveAppointmentId): exactly one fixture appointment →
+ *     resolved; otherwise skipped (never guesses among several).
+ *   - anything else — skipped, so customer/job/invoice/estimate resolution
+ *     is untouched for every script that opts into this resolver.
+ */
+class FixtureTechnicianEntityResolver implements EntityResolver {
+  constructor(
+    private readonly technicians: Array<{ id: string; name: string }>,
+    private readonly soleAppointmentId: string | undefined,
+  ) {}
+
+  async resolve(input: {
+    tenantId: string;
+    reference: string;
+    kind: EntityKind;
+    jobId?: string;
+  }): Promise<EntityResolverResult> {
+    if (input.kind === 'technician') {
+      const ref = input.reference.trim().toLowerCase();
+      const matches = this.technicians.filter(
+        (t) => t.name.toLowerCase() === ref || t.name.toLowerCase().includes(ref),
+      );
+      if (matches.length === 0) return { kind: 'not_found', reference: input.reference };
+      if (matches.length > 1) {
+        return {
+          kind: 'ambiguous',
+          candidates: matches.map((m) => ({ id: m.id, kind: 'technician', label: m.name, score: 1 })),
+        };
+      }
+      return {
+        kind: 'resolved',
+        candidate: { id: matches[0].id, kind: 'technician', label: matches[0].name, score: 1 },
+      };
+    }
+    if (input.kind === 'appointment' && this.soleAppointmentId) {
+      return {
+        kind: 'resolved',
+        candidate: {
+          id: this.soleAppointmentId,
+          kind: 'appointment',
+          label: this.soleAppointmentId,
+          score: 1,
+        },
+      };
+    }
+    return { kind: 'skipped' };
+  }
+}
+
 export function buildCassetteGatewayForScript(
   script: VoiceQualityScript,
   mode?: CassetteMode,
@@ -461,6 +532,21 @@ export function makeVoiceQualityDriverFactory(
       }
     }
 
+    // B5.3 — opt-in P8 entity resolution for reassign_appointment /
+    // add_crew_member / remove_crew_member scripts. Absent for every
+    // pre-existing script (none declares `fixtures.technicians`), so this
+    // is `undefined` for them, exactly as before this change.
+    const technicianFixtures = (script.fixtures as { technicians?: unknown[] }).technicians;
+    const entityResolver =
+      Array.isArray(technicianFixtures) && technicianFixtures.length > 0
+        ? new FixtureTechnicianEntityResolver(
+            technicianFixtures as Array<{ id: string; name: string }>,
+            Array.isArray(script.fixtures.appointments) && script.fixtures.appointments.length === 1
+              ? (script.fixtures.appointments[0] as { id: string }).id
+              : undefined,
+          )
+        : undefined;
+
     const driver = new TextModeDriver({
       voiceSessionStore: store,
       bus: fctx.bus,
@@ -482,6 +568,7 @@ export function makeVoiceQualityDriverFactory(
       dncRepo,
       settingsRepo,
       ...(now ? { now } : {}),
+      ...(entityResolver ? { entityResolver } : {}),
       systemActorId: 'system:vq-corpus',
     });
 
