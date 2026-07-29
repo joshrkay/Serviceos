@@ -118,6 +118,14 @@ import type { BrandVoiceRepository } from '../../tenants/brand/brand-voice';
 export interface ExecutionContext {
   tenantId: string;
   executedBy: string;
+  /**
+   * Role of the human whose approval authorized this execution, when the
+   * caller knows it. Config-writing handlers stamp it on their audit event
+   * instead of asserting 'owner', so the trail records who actually acted.
+   * Optional: the background execution sweep runs detached from the approving
+   * request and legitimately may not have it.
+   */
+  executedByRole?: string;
 }
 
 export interface ExecutionResult {

@@ -42,7 +42,19 @@ import {
   WorkingHoursEntry,
 } from '../../ai/tasks/onboarding/types';
 
+/**
+ * Fallback audit actor role for the onboarding handlers. `approveProposal`
+ * now refuses every `onboarding_*` type without `settings:update`
+ * (CONFIG_WRITING_PROPOSAL_TYPES), so whoever reached execution held the same
+ * authority routes/onboarding.ts demands. Prefer the approver's REAL role
+ * from the execution context when the caller supplied it, so the audit trail
+ * names who actually acted instead of asserting owner.
+ */
 const ONBOARDING_ACTOR_ROLE = 'owner';
+
+function actorRoleFor(context: { executedByRole?: string }): string {
+  return context.executedByRole ?? ONBOARDING_ACTOR_ROLE;
+}
 
 function isNonEmptyString(v: unknown): v is string {
   return typeof v === 'string' && v.trim().length > 0;
@@ -154,7 +166,7 @@ export class OnboardingTenantSettingsExecutionHandler implements ExecutionHandle
         createAuditEvent({
           tenantId: context.tenantId,
           actorId: context.executedBy,
-          actorRole: ONBOARDING_ACTOR_ROLE,
+          actorRole: actorRoleFor(context),
           eventType: 'tenant.identity_set',
           entityType: 'tenant_settings',
           entityId: context.tenantId,
@@ -414,7 +426,7 @@ export class OnboardingTeamMemberExecutionHandler implements ExecutionHandler {
         createAuditEvent({
           tenantId: context.tenantId,
           actorId: context.executedBy,
-          actorRole: ONBOARDING_ACTOR_ROLE,
+          actorRole: actorRoleFor(context),
           eventType: 'user.invitation_created',
           entityType: 'pending_invitation',
           entityId: invitation.id,
@@ -515,7 +527,7 @@ export class OnboardingScheduleExecutionHandler implements ExecutionHandler {
         createAuditEvent({
           tenantId: context.tenantId,
           actorId: context.executedBy,
-          actorRole: ONBOARDING_ACTOR_ROLE,
+          actorRole: actorRoleFor(context),
           eventType: 'tenant.identity_set',
           entityType: 'tenant_settings',
           entityId: context.tenantId,

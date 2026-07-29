@@ -74,7 +74,16 @@ export class UpdateBrandVoiceExecutionHandler implements ExecutionHandler {
     try {
       const result = await updateBrandVoice(
         {
-          actor: { tenantId: context.tenantId, userId: context.executedBy, role: 'owner' },
+          actor: {
+            tenantId: context.tenantId,
+            userId: context.executedBy,
+            // The approver's real role when the caller knows it, so the
+            // brand_voice.updated audit names who actually acted rather than
+            // asserting 'owner'. approveProposal now refuses this type without
+            // `settings:update` (CONFIG_WRITING_PROPOSAL_TYPES), so whoever
+            // got here held the same authority the brand-voice route demands.
+            role: context.executedByRole ?? 'owner',
+          },
           patch,
           // A spoken edit is a normal edit — never the onboarding exemption.
           onboarding: false,

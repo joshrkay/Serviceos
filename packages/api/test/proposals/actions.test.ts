@@ -86,6 +86,33 @@ describe('P2-005 — Approve / reject / edit interactions', () => {
     expect(approved.executedBy).toBe(actorId);
   });
 
+  // Raised in PR review: a dispatcher holds `proposals:approve` but NOT
+  // `settings:update`. Without a type-specific guard the approval queue became
+  // a way around the route permission model — approving one of these cards
+  // rewrites tenant identity, seeds the price book, or replaces the locked
+  // brand voice, all of which routes/onboarding.ts and brand-voice-router.ts
+  // deliberately withhold from dispatchers.
+  it.each([
+    ['onboarding_tenant_settings', { businessName: 'Acme', verticalPacks: ['plumbing'] }],
+    ['update_brand_voice', { register: 'friendly' }],
+  ])('config-writing type %s cannot be approved without settings:update', async (type, payload) => {
+    const repo = makeRepo();
+    const proposal = await createReadyProposal(repo, {
+      proposalType: type as never,
+      payload: payload as Record<string, unknown>,
+    });
+
+    await expect(
+      approveProposal(repo, tenantId, proposal.id, 'dispatcher-1', 'dispatcher'),
+    ).rejects.toThrow(ForbiddenError);
+    // Refused, not silently left half-approved.
+    expect((await repo.findById(tenantId, proposal.id))?.status).toBe('ready_for_review');
+
+    // An owner (who does hold settings:update) still gets through.
+    const approved = await approveProposal(repo, tenantId, proposal.id, actorId, 'owner');
+    expect(approved.status).toBe('approved');
+  });
+
   it('approves a draft directly (inbox surfaces drafts)', async () => {
     const repo = makeRepo();
     const proposal = createProposal(baseInput); // lands in 'draft'
