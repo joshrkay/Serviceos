@@ -1,7 +1,8 @@
 # Rivet — VOICE Phase 1 (8 of 19) `/goal` Master Prompt
 
 For **Rivet** — the voice-and-AI-first back office for 1–3-truck owner-operator shops. Part E
-(2026-07-29) measured voice coverage at **6/19 strict**. This run ships the **eight focus
+(2026-07-29, incl. post-review corrections — run log #16-17) measured voice coverage at **5/19
+strict**. This run ships the **eight focus
 requirements** below to rung 5, taking coverage to **14/19**. Five items are explicitly deferred
 (appendix) — do not touch them except where a cross-cutting gate requires it.
 
@@ -42,8 +43,9 @@ Ship the eight focus requirements to **rung 5, with proof**: for each, a spoken 
 proposal → execution → persisted row + audit event` (or the audited status-act / conversation
 equivalent), pinned by a Docker-gated integration test (audit + cross-tenant negative) and a
 voice-quality fixture. The run ends with a **read-only re-measurement of all 19** using the Part E
-Track B method; the deliverable is that re-run scoring **14/19**, with the six previously-green
-items still green and the five deferred items unchanged.
+Track B method; the deliverable is that re-run scoring **14/19**: the five previously-green items still green,
+B4.7 restored to rung 5 by item 9's reschedule/cancel proofs, the eight focus items newly green,
+and the five deferred items unchanged.
 
 ## GUARDRAILS
 
@@ -311,6 +313,27 @@ missing the PRD's `tools` capture state. Shipped UX is the form wizard.
 
 ---
 
+### 9 · B4.7 restoration — reschedule/cancel real-DB proofs (proof-only, no behavior change)
+
+**Today:** B4.7 (book/move/cancel by speaking) was corrected to rung 3 in the Part E post-review
+round (run log #17): the create leg is integration-proven (`voice-inbound-appointment.test.ts`),
+but no integration test exercises `RescheduleAppointmentExecutionHandler` or
+`CancelAppointmentExecutionHandler` with the rung-4 assertions. The spoken chains work; the proof
+is missing. This item is test-only — if writing the tests reveals a real defect, fixing it is in
+scope, and the run log must call it out as a found-by-proof defect.
+
+**AC:**
+1. **Integration (reschedule)** (`test/integration/reschedule-appointment-voice.test.ts`, real
+   Postgres): task-produced payload for "Move the Garcia job to Thursday at 10" → approve →
+   execute → appointment's scheduled window updated; reschedule audit event with actor;
+   **cross-tenant negative**.
+2. **Integration (cancel)** (`test/integration/cancel-appointment-voice.test.ts`, real Postgres):
+   task-produced payload for "Cancel Tuesday's Garcia appointment" → approve → execute →
+   appointment status `canceled`; cancellation audit event; **cross-tenant negative**; and the
+   irreversible action class is asserted (never auto-approvable at any trust tier).
+3. **C1** rows for `reschedule_appointment`/`cancel_appointment` green with resolver-provided ids.
+4. Both fixtures added to the rubric suite (spoken sentence → approvable proposal).
+
 ## DEFERRED — do not build in this run
 
 B7.8 (expense job-link) · B7.10 (crew add/remove) · B9.12 (reminder/late fee by voice) · B9.4
@@ -323,7 +346,7 @@ deferred intents by pinning their current honest-gating behavior — pins, not f
 ## DEFINITION OF DONE (self-grade before reporting)
 
 - [ ] Read-only re-measurement of all 19 (Part E Track B method, fresh agent): **14/19 at rung 5** —
-      the focus eight newly green, the prior six still green, the deferred five unchanged
+      the focus eight newly green, the prior five still green, B4.7 restored via item 9's proofs, the deferred five unchanged
 - [ ] Every numbered AC above is demonstrably satisfied — each cites the test/file/command a
       reviewer can re-run
 - [ ] C1 payload-contract test exists, covers **all** mapped intents, gates CI, and its

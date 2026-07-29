@@ -8,8 +8,8 @@
 
 ## 1. Summary
 
-- **117 requirements scored.** Rung distribution: **0 Absent: 7 · 1 Specced: 1 · 2 Present: 14 · 3 Wired: 41 · 4 Proven: 4 · 5 Reachable: 50 · 6 Live: 0 assessed.** *(Corrected post-review — see run log #16.)*
-- **Voice coverage (headline): 6 of 19 🎙️ requirements reach rung 5 — 32%.** A second, deliberately separated number: **8 of 19 (42%) are functionally completable by a spoken sentence** (spoken → approvable proposal → correct execution) but two of those lack the real-DB proof rung 5 presupposes under this run's ordinal reading of the ladder. Both numbers are far below what the code's own intent map implies (35 mapped intents, both drift contract tests green): the map is intact, but **six voice actions are broken one layer below it** — the drafting-task ↔ execution-handler payload contract, which nothing tests. See §5 (voice matrix).
+- **117 requirements scored.** Rung distribution: **0 Absent: 7 · 1 Specced: 1 · 2 Present: 14 · 3 Wired: 43 · 4 Proven: 4 · 5 Reachable: 48 · 6 Live: 0 assessed.** *(Corrected post-review — see run log #16–17.)*
+- **Voice coverage (headline): 5 of 19 🎙️ requirements reach rung 5 — 26%** (B7.1, B7.6, B7.7, B8.1, B9.1). A second, deliberately separated number: **8 of 19 (42%) are functionally completable by a spoken sentence** (spoken → approvable proposal → correct execution) but three of those lack the real-DB proof rung 5 presupposes under this run's ordinal reading of the ladder. *(Corrected post-review — run log #16–17.)* Both numbers are far below what the code's own intent map implies (35 mapped intents, both drift contract tests green): the map is intact, but **six voice actions are broken one layer below it** — the drafting-task ↔ execution-handler payload contract, which nothing tests. See §5 (voice matrix).
 - **Track C (rung 6): NOT assessed per-service — Railway credentials were absent.** Every per-service env cell is `UNKNOWN — no credential`. Partial runtime truth was recovered read-only via authorized connectors and is decisive where it exists: **PostHog ingestion is observed through 2026-07-28 but cannot be attributed to an environment or service** (no env property in the taxonomy — the cells stay UNKNOWN); the **live Stripe "Rivet" platform account has webhooks pointed at production Railway but zero Connect accounts and zero payment intents ever** — no tenant bank has ever been connected and no live payment has ever been attempted. See §6.
 - **The single worst finding:** the live inbound-call path parses spoken datetimes with `Date.UTC` and **no tenant timezone** (`packages/api/src/ai/agents/customer-calling/entity-resolution.ts:204-241`) — a caller's "Thursday at 2pm" books 14:00 UTC. The timezone fixes shipped this month (`85ad37e`, `ba064b6`) touched every path except this one.
 - **The most dangerous voice defect:** voice-dictated job notes (`add_note`) pass the approval gate and then **fail at execution** (`targetId` never populated from the resolved entity) — the owner approves, nothing saves, no error reaches them (B7.4).
@@ -72,7 +72,7 @@ Rung = highest rung fully satisfied, ordinal (Wired-but-unproven = 3; see run lo
 | B3.3 | Intent + urgency classified | ⚙️ | 5 | `detectEmergency` both transports (`twilio-adapter.ts:1553`, `mediastream-adapter.ts:2066`); urgencyTier → `state-machine.ts:64-65` | — |
 | B3.4 | Severity triage per vertical | ⚙️ | 2 | `ai/skills/classify-urgency-tier.ts` complete + unit-tested — **zero production callers**; `loadTriageRules` zero callers | Fully built engine unreachable from any entry point |
 | B3.5 | Vulnerability signals elevate urgency | ⚙️ | 5 | `vulnerability-grader.ts` + hook wired both transports (`app.ts:4266-4267,4362-4363,4492-4493`); RLS proof `tenant-isolation.leak.test.ts:748-789` `[suite]` | `weather` signal is LLM self-report — the weather-provider integration was cut (`vulnerability-triage-hook.ts:134-139`) |
-| B3.6 | Urgency+vulnerability → patch-through | ⚙️ | 5 | `patch-owner-through.ts` ladder, audited (:121-261); wired via same live hook (`app.ts:4287-4296`) | No dedicated real-DB test |
+| B3.6 | Urgency+vulnerability → patch-through | ⚙️ | 3 | `patch-owner-through.ts` ladder, audited (:121-261); wired via same live hook (`app.ts:4287-4296`) | Mutation/audit path with no real-DB test of the patch action itself (`tenant-isolation.leak.test.ts` covers only the triage-event repo) — rung 4 unmet under R1, capped at 3 |
 | B3.7 | Dropped-call SMS recovery <60s w/ context | ⚙️ | 5 | Durable scheduler (`sms/recovery/scheduler.ts`, +60s) @ teardown `twilio-adapter.ts:3308-3329`; worker `app.ts:5860-5900`; `dropped-call-worker.test.ts:220,362-414` audit+RLS `[suite]` | — |
 | B3.8 | B2B/property-manager routes differently | ⚙️ | 2 | `account_type` widened (migration 183, `schema.ts:4555-4562`); `assembleB2bAccountContext` called live (`twilio-adapter.ts:1309`) — but `session.b2bAccountContext` **written once, read nowhere**; prompt-injection fn zero callers | Recognized, then ignored — nothing routes differently. (Old seeded defect fixed; new one found) |
 | B3.9 | Equipment/asset history on call | ⚙️ | 0 | No equipment table/repo/context field anywhere | Absent |
@@ -91,7 +91,7 @@ Rung = highest rung fully satisfied, ordinal (Wired-but-unproven = 3; see run lo
 | B4.4 | Owner approves | 📱 | 5 | `isSystemActor` bar (`lifecycle.ts:113-117`); missingFields refusal (`actions.ts:211-218`); SMS tap RV-071 | — |
 | B4.5 | Confirmation in brand voice | ⚙️ | 3 | Sends on approval (`app.ts:2071` → handlers) | Fixed i18n template (`notifications/i18n/en.ts:23-25`) — brand voice never consulted; second notifier impl dead in prod |
 | B4.6 | Day-before reminder | ⚙️ | 3 | `appointment-reminder-worker.ts` 24h, hourly leader-locked `app.ts:6292-6318` | Customer-send leg has no real-DB audit+cross-tenant proof |
-| B4.7 | Book / move / cancel by speaking | 🎙️ | 5 | All three intents → map → task handlers → registered execution handlers w/ real deps (`handler-registry.ts:176,218,222`; `handlers.ts:1243,1287,1294`); resolved ids consumed (`voice-extended-tasks.ts:232-234,331-333`); boot guard `app.ts:2111`; persistence+audit `voice-inbound-appointment.test.ts` `[suite]` | Reschedule/cancel real-DB legs thin; appointment-resolution heuristic narrow without a customer name |
+| B4.7 | Book / move / cancel by speaking | 🎙️ | 3 | All three intents → map → task handlers → registered execution handlers w/ real deps (`handler-registry.ts:176,218,222`; `handlers.ts:1243,1287,1294`); resolved ids consumed (`voice-extended-tasks.ts:232-234,331-333`); boot guard `app.ts:2111`; create leg proven `voice-inbound-appointment.test.ts` `[suite]` | Conjunctive requirement: reschedule/cancel execution handlers have **no** real-DB proof (no integration test exercises them with audit + cross-tenant), so rung 4 is unmet for two of three verbs under R1 — capped at 3 despite full spoken-chain reachability. Appointment-resolution heuristic also narrow without a customer name |
 | B4.8 | Ambiguity → clarification, never a guess | ⚙️ | 5 | `foldResolution` (`entity-resolution.ts:355-387`); live-call disambiguation `transitions.ts:852-858`; `entity-resolution.test.ts:142,159,168,406` incl. cross-tenant `[suite]` | e2e leg persists via in-memory repo |
 | B4.9 | New customer + job = one combined proposal | ⚙️ | 5 | Atomic single `create_booking` (`public-booking.ts:333-439`); voice: one proposal + SCH-02 job auto-open (`handlers.ts:386-459`) | — |
 | B4.10 | Proposals expire after 48h | ⚙️ | 3 | Constants + creation-time application (`proposal.ts:93-100,874-876`); sweep + `proposal.expired` audit (`proposal-expiry-worker.ts` @ `app.ts:6420`); unit 12/12 | Mocked-DB only — no integration test for the sweep |
@@ -198,15 +198,15 @@ Rung = highest rung fully satisfied, ordinal (Wired-but-unproven = 3; see run lo
 |---|---|---|---|---|---|---|---|---|
 | B1 Setup | 20 | – | – | 4 | 11 | 1 | 4 | 3.25 |
 | **B2 Situational context** | **10** | **4** | – | **4** | **1** | – | **1** | **1.60** |
-| B3 Capture | 13 | 1 | – | 2 | 1 | – | 9 | 4.00 |
-| B4 Book | 10 | – | – | 1 | 4 | – | 5 | 3.90 |
+| B3 Capture | 13 | 1 | – | 2 | 2 | – | 8 | 3.85 |
+| B4 Book | 10 | – | – | 1 | 5 | – | 4 | 3.70 |
 | B5 Dispatch | 9 | 1 | – | 3 | 3 | – | 2 | 2.78 |
 | B6 Execute | 4 | – | – | – | 3 | – | 1 | 3.50 |
 | B7 Narrate | 12 | 1 | – | – | 6 | – | 5 | 3.58 |
 | B8 Quote | 14 | – | 1 | – | 5 | – | 8 | 4.00 |
 | B9 Bill | 15 | – | – | – | 4 | 2 | 9 | 4.33 |
 | B10 Close | 10 | – | – | – | 3 | 1 | 6 | 4.30 |
-| **Total** | **117** | **7** | **1** | **14** | **41** | **4** | **50** | **3.57** |
+| **Total** | **117** | **7** | **1** | **14** | **43** | **4** | **48** | **3.54** |
 
 **B2 is the weakest section, and it is not close** — mean 1.40 against 2.78 for the next-weakest (B5). The product's entire "what the system knows before anyone speaks" layer — geocoding, address candidates, territory-as-prior, speaker-scoped context — is between absent and unreachable, while the PRD calls it the thing that makes a spoken sentence resolvable. B5 Dispatch is the second-weakest: three of its nine requirements are complete implementations with zero production callers or an un-instantiated notifier.
 
@@ -248,13 +248,13 @@ The strongest sections are the money loop (B9, B10) — which is also where the 
 
 ## 5. Voice reachability matrix (Track B)
 
-Of 19 🎙️ requirements: **6 reach rung 5** (B4.7, B7.1, B7.6, B7.7, B8.1, B9.1) → **32% strict voice coverage**. **8 are functionally completable by voice** (adds B6.3, B9.4 — completable but lacking real-DB proof) → 42%. The break points:
+Of 19 🎙️ requirements: **5 reach rung 5** (B7.1, B7.6, B7.7, B8.1, B9.1) → **26% strict voice coverage**. **8 are functionally completable by voice** (adds B4.7, B6.3, B9.4 — completable but lacking full real-DB proof) → 42%. The break points:
 
 | 🎙️ Req | Verdict | Break point |
 |---|---|---|
 | B1.18 brand voice | ✗ no on-ramp | No capture intent exists |
 | B1.19 conversational onboarding | ✗ no surface | Engine wired; zero clients; text-only |
-| B4.7 book/move/cancel | ✓ rung 5 | — |
+| B4.7 book/move/cancel | ✓ completable (rung 3) | Reschedule/cancel execution legs lack real-DB proof |
 | B5.3 assign | ✗ blocked | `missingFields=['appointmentId']` unconditional (`voice-extended-tasks.ts:378`) → approval refused |
 | B5.5 on-my-way | ✗ no voice leg | No intent; no `en_route` JobStatus; no SMS keyword |
 | B6.3 time entry | ✓ completable (rung 3) | No integration proof |
@@ -299,7 +299,7 @@ Per service × dependency (web / worker / voice share one image, split by `PROCE
 | Stripe Connect | **live-NOT-ONBOARDED** | N/A | N/A | Probe: **zero connected accounts ever** — B1.7–B1.11 have never completed in production; **zero live payment intents ever** — the B9 money rail has never moved real money |
 | Clerk | UNKNOWN — no credential | UNKNOWN | UNKNOWN | Dev-token paths NODE_ENV-gated at runtime; **the test-key-prefix refusal is dead code** (see below) |
 | Sentry | UNKNOWN — no credential | UNKNOWN | UNKNOWN | 3 of 4 claimed paths `instrument()`ed; **Stripe webhook (`webhooks/routes.ts:962`) has zero instrumentation** — its P1 alert can never fire (seed confirmed) |
-| QuickBooks | not-configured | not-configured | N/A | OAuth creds undeclared in every manifest |
+| QuickBooks | UNKNOWN — no credential | UNKNOWN — no credential | N/A | OAuth creds undeclared in every manifest — suggests not-configured but cannot prove a dashboard variable unset (the declared≠set lesson, C8.1c) |
 | SendGrid | UNKNOWN — no credential | N/A | N/A | Required unless `EMAIL_ENABLED=false` |
 | PostHog | UNKNOWN — ingestion observed, attribution unavailable | UNKNOWN — same | N/A | Probe: Rivet events ARE ingesting through 2026-07-28 (`proposal_executed` 238/30d, `job_created` 527, …) — but the taxonomy has **no environment property**, so the events cannot be attributed to production vs staging vs a local process, nor to a specific service. Also: **no `$pageview`** (web capture absent everywhere) and **no `$ai_generation`** (LLM analytics not wired) |
 | Storage (R2) | UNKNOWN — no credential | UNKNOWN | UNKNOWN | `R2_BUCKET`/`R2_PUBLIC_URL` undeclared in prod manifest |
@@ -354,6 +354,7 @@ Per service × dependency (web / worker / voice share one image, split by `PROCE
 14. **No tenant data appears in this document** — aggregates, schema names, and counts only. PostHog queries returned event-level aggregates; Stripe queries returned empty lists and endpoint metadata.
 15. **Read-only guardrail held**: the only working-tree changes across the run are `projects/rivet-part-e/**` and this file, verified by `git status` before the final commit.
 16. **Post-review corrections (2026-07-29, from PR #784 automated review + re-derivation).** Three verdicts were corrected to match this document's own R1 ordinal rule: **B5.8 5→3** (only the tech-self-reports-out branch cascades; single `no_show`/cancel does not; test lacks the cross-tenant negative), **B9.5 4→3** (no Connect-scoped charge test exists; settlement-to-tenant also contradicted by the B1.7 platform fallback), and the **PostHog Track C cells LIVE→UNKNOWN** (ingestion observed but environment/service attribution is impossible — observed data recorded in the evidence column instead). Re-deriving all rollups from the row values also fixed arithmetic slips in four published means (B2 1.40→1.60, B3 3.92→4.00, B8 3.79→4.00, B9 4.20→4.33) and the totals (3:39→41, 4:5→4, 5:51→50, mean 3.50→3.57). Voice coverage is unaffected (neither corrected row is 🎙️-tagged). These are adjudication corrections logged per the document's own rule that hand-edits without provenance void the evidence.
+17. **Second post-review correction round (2026-07-29, same source).** Three more verdicts corrected under R1/R2: **B4.7 5→3** (conjunctive — reschedule/cancel execution handlers have no real-DB proof; only the create leg does; the row's own missing-link column recorded the gap), **B3.6 5→3** (mutation/audit path, no real-DB test of the patch action itself), and **QuickBooks Track C cells not-configured→UNKNOWN** (manifest omission cannot prove a deployed dashboard variable unset — the run briefly committed the very declared≠set fallacy C8.1c warns about). Ripple: strict voice coverage **6/19→5/19 (26%)** — functional completability stays 8/19; distribution 3:41→43, 5:50→48; B3 mean 4.00→3.85, B4 3.90→3.70, total mean 3.57→3.54. The Phase 1 fix-run target (14/19) is unaffected: its item 1 already requires the reschedule/cancel real-DB proofs that restore B4.7 to rung 5.
 
 ---
 
