@@ -10,11 +10,40 @@
  * (`groundEditActionPricing`) never attached one, so a real spoken edit
  * persisted `unit = NULL` while the test stayed green.
  *
- * This test closes that. It drives the fixture sentence through:
+ * WHY THE DRAFTING LEG IS DRIVEN BY A SENTENCE, NOT A UUID. This file used to
+ * hand the handler `estimateReference: <the seeded estimate's UUID>`. No
+ * spoken sentence produces a UUID — the operator says "the Smith estimate" —
+ * so the leg that had to work in production (spoken reference → resolved
+ * estimate → gate lifted) was never exercised. B7.6 (9bed666) taught
+ * `resolveEstimate` the customer → jobs → estimates traversal and taught
+ * `EstimateEditTaskHandler` to read the router's verified id; this file now
+ * speaks and lets the REAL `PgEntityResolver` do the resolving, so
+ * (spoken part) × (spoken document reference) is proven end to end together,
+ * not just the part in isolation.
  *
- *   REAL EstimateEditTaskHandler.handle() (the same handler
- *   handler-registry.ts wires for the voice worker and the assistant route),
- *   with the REAL PgCatalogItemRepository and the REAL
+ * Rule 3 of docs/solutions/test-failures/a-fixture-arranged-to-pass-proves-
+ * nothing.md is applied deliberately: the scripted drafting reply carries a
+ * HALLUCINATED `estimateId`, so "the payload carries the RESOLVER's id" can
+ * only pass if resolution actually beat the model.
+ *
+ * Each test seeds its OWN customer with a distinct surname (mirrors
+ * update-estimate-execution.test.ts's `seedCustomerWithEstimate` — the
+ * resolver answers a surname against ALL of that customer's estimates, so
+ * reusing one customer across five tests would leave later ones speaking a
+ * reference that genuinely matches several estimates, which the resolver
+ * correctly calls `ambiguous` rather than resolving). Nothing in the seed is
+ * arranged to match the query: the job summary describes the WORK, not the
+ * customer, and the estimate's `customer_message` is an ordinary note that
+ * never mentions the surname — the exact planting that made the nudge suite
+ * a false green (docs/solutions/test-failures/
+ * a-fixture-arranged-to-pass-proves-nothing.md).
+ *
+ * This test closes the gap. It drives the fixture sentence through:
+ *
+ *   REAL PgEntityResolver + resolveVoiceEntityReferences (the router's own
+ *   resolution step) → REAL EstimateEditTaskHandler.handle() (the same
+ *   handler handler-registry.ts wires for the voice worker and the
+ *   assistant route), with the REAL PgCatalogItemRepository and the REAL
  *   `groundEditActionPricing` grounding pass
  *     → approveProposal / the proposal FSM
  *     → the PRODUCTION execution registry (createExecutionHandlerRegistry)
@@ -26,10 +55,10 @@
  *
  *   1. The catalog is the source of truth for the unit exactly as it is for
  *      the price — an LLM-emitted unit is overridden, never honored.
- *   2. An UNCATALOGUED line gains no unit at all. The model can copy a unit
- *      out of the `name | unit | price` catalog table
- *      (`buildCatalogPromptSection`) and staple it to a line that resolves to
- *      nothing; that unit is invented and must not reach the row.
+ *   2. An UNCATALOGUED line gains no INVENTED unit — but (B7.5 narrowing) a
+ *      vocabulary-valid one the operator actually said survives, because a
+ *      unit drawn from the catalog's own closed vocabulary is not invention
+ *      the way a price is. See catalog-resolver.ts `dropOutOfVocabularyUnit`.
  *
  * Runs only under `npm run test:integration` (Docker-gated).
  */
@@ -49,8 +78,10 @@ import { getNextEstimateNumber } from '../../src/settings/settings';
 import { buildLineItem } from '../../src/shared/billing-engine';
 import { EstimateEditTaskHandler } from '../../src/ai/tasks/estimate-edit-task';
 import { UpdateEstimateExecutionHandler } from '../../src/proposals/execution/update-estimate-handler';
+import { PgEntityResolver } from '../../src/ai/resolution/pg-entity-resolver';
+import { resolveVoiceEntityReferences } from '../../src/ai/agents/customer-calling/entity-resolution';
 import { LLMGateway, LLMResponse } from '../../src/ai/gateway/gateway';
-import { InMemoryProposalRepository, Proposal } from '../../src/proposals/proposal';
+import { InMemoryProposalRepository, missingFieldsFor, Proposal } from '../../src/proposals/proposal';
 import { InMemoryProposalExecutionRepository } from '../../src/proposals/proposal-execution';
 import { transitionProposal, UNDO_WINDOW_MS } from '../../src/proposals/lifecycle';
 import { ProposalExecutor } from '../../src/proposals/execution/executor';
@@ -78,6 +109,13 @@ function mockGateway(jsonContent: string): LLMGateway {
 
 const CAPACITOR_PRICE_CENTS = 4250;
 
+interface SeededEstimate {
+  estimateId: string;
+  customerId: string;
+  jobId: string;
+  subtotalBefore: number;
+}
+
 describe('Postgres integration — B7.5 spoken parts edit → real handler + grounding → execute → persisted unit', () => {
   let pool: Pool;
   let estimateRepo: PgEstimateRepository;
@@ -85,8 +123,10 @@ describe('Postgres integration — B7.5 spoken parts edit → real handler + gro
   let auditRepo: PgAuditRepository;
   let jobRepo: PgJobRepository;
   let catalogRepo: PgCatalogItemRepository;
+  let customerRepo: PgCustomerRepository;
+  let locationRepo: PgLocationRepository;
+  let entityResolver: PgEntityResolver;
   let tenant: { tenantId: string; userId: string };
-  let jobId: string;
 
   beforeAll(async () => {
     pool = await getSharedTestDb();
@@ -95,59 +135,13 @@ describe('Postgres integration — B7.5 spoken parts edit → real handler + gro
     auditRepo = new PgAuditRepository(pool);
     jobRepo = new PgJobRepository(pool);
     catalogRepo = new PgCatalogItemRepository(pool);
-    const customerRepo = new PgCustomerRepository(pool);
-    const locationRepo = new PgLocationRepository(pool);
+    customerRepo = new PgCustomerRepository(pool);
+    locationRepo = new PgLocationRepository(pool);
+    entityResolver = new PgEntityResolver(pool);
     tenant = await createTestTenant(pool);
 
-    const customerId = crypto.randomUUID();
-    await customerRepo.create({
-      id: customerId,
-      tenantId: tenant.tenantId,
-      firstName: 'Dana',
-      lastName: 'Smith',
-      displayName: 'Dana Smith',
-      preferredChannel: 'phone',
-      smsConsent: false,
-      isArchived: false,
-      createdBy: tenant.userId,
-      createdAt: new Date(),
-      updatedAt: new Date(),
-    });
-
-    const locationId = crypto.randomUUID();
-    await locationRepo.create({
-      id: locationId,
-      tenantId: tenant.tenantId,
-      customerId,
-      street1: '7 Smith Way',
-      city: 'Austin',
-      state: 'TX',
-      postalCode: '78701',
-      country: 'USA',
-      addressType: 'service',
-      isPrimary: true,
-      isArchived: false,
-      createdAt: new Date(),
-      updatedAt: new Date(),
-    });
-
-    jobId = crypto.randomUUID();
-    await jobRepo.create({
-      id: jobId,
-      tenantId: tenant.tenantId,
-      customerId,
-      locationId,
-      jobNumber: 'JOB-SMITH-SPOKEN-PARTS',
-      summary: 'Smith — AC service',
-      status: 'scheduled',
-      priority: 'normal',
-      createdBy: tenant.userId,
-      createdAt: new Date(),
-      updatedAt: new Date(),
-    });
-
     // The tenant's price book entry the spoken part must ground to. Its
-    // `unit` is the ONLY legitimate source of the persisted unit.
+    // `unit` is the ONLY legitimate source of a CATALOG-MATCHED line's unit.
     await catalogRepo.create(
       createCatalogItem({
         tenantId: tenant.tenantId,
@@ -163,50 +157,170 @@ describe('Postgres integration — B7.5 spoken parts edit → real handler + gro
     await closeSharedTestDb();
   });
 
-  async function seedEstimate(jobNumberSuffix: string): Promise<string> {
-    const estimateNumber = await getNextEstimateNumber(tenant.tenantId, settingsRepo);
+  /**
+   * A realistic tenant record set for ONE customer, seeded per test.
+   *
+   * Per-test (rather than shared) because the resolver answers a surname
+   * against ALL of that customer's estimates: reusing one customer across
+   * five tests would leave later ones speaking a reference that genuinely
+   * matches several estimates, which the resolver correctly calls
+   * `ambiguous` (the overflow/ambiguity postures are pinned at the resolver
+   * level in test/integration/entity-resolution.test.ts). Distinct surnames
+   * keep each test's reference unambiguous for the honest reason — the
+   * tenant really does have exactly one estimate for that customer — instead
+   * of by arrangement.
+   */
+  async function seedCustomerWithEstimate(
+    surname: string,
+    tenantId = tenant.tenantId,
+    userId = tenant.userId,
+  ): Promise<SeededEstimate> {
+    const customerId = crypto.randomUUID();
+    await customerRepo.create({
+      id: customerId,
+      tenantId,
+      firstName: 'Dana',
+      lastName: surname,
+      displayName: `Dana ${surname}`,
+      preferredChannel: 'phone',
+      smsConsent: false,
+      isArchived: false,
+      createdBy: userId,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+
+    const locationId = crypto.randomUUID();
+    await locationRepo.create({
+      id: locationId,
+      tenantId,
+      customerId,
+      street1: `7 ${surname} Way`,
+      city: 'Austin',
+      state: 'TX',
+      postalCode: '78701',
+      country: 'USA',
+      addressType: 'service',
+      isPrimary: true,
+      isArchived: false,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+
+    const jobId = crypto.randomUUID();
+    await jobRepo.create({
+      id: jobId,
+      tenantId,
+      customerId,
+      locationId,
+      jobNumber: `JOB-${surname.toUpperCase()}-SPOKEN-PARTS`,
+      // The summary says what the WORK is; the customer's name appears
+      // NOWHERE on the job or the estimate.
+      summary: 'AC service',
+      status: 'scheduled',
+      priority: 'normal',
+      createdBy: userId,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+
+    const estimateNumber = await getNextEstimateNumber(tenantId, settingsRepo);
     const estimate = await createEstimate(
       {
-        tenantId: tenant.tenantId,
+        tenantId,
         jobId,
         estimateNumber,
-        lineItems: [
-          buildLineItem(`li-seed-${jobNumberSuffix}`, 'Diagnostic', 1, 9900, 0, true, 'labor'),
-        ],
-        createdBy: tenant.userId,
+        lineItems: [buildLineItem(`li-seed-${surname}`, 'Diagnostic', 1, 9900, 0, true, 'labor')],
+        // An ORDINARY customer message. It deliberately does not contain the
+        // surname: planting it there is the exact arrangement that made
+        // estimate-nudge.test.ts a false green — see
+        // docs/solutions/test-failures/a-fixture-arranged-to-pass-proves-nothing.md.
+        customerMessage: 'Thanks for having us out — here is the estimate for the AC work.',
+        createdBy: userId,
       },
       estimateRepo,
       auditRepo,
     );
-    return estimate.id;
+    return {
+      estimateId: estimate.id,
+      customerId,
+      jobId,
+      subtotalBefore: estimate.totals.subtotalCents,
+    };
+  }
+
+  /**
+   * The router-side half of production, unmocked: `planVoiceEntityLookups`
+   * routes an `update_estimate` jobReference to a `kind: 'estimate'` lookup
+   * (ESTIMATE_DOC_INTENTS) and `PgEntityResolver` answers it against real
+   * Postgres — exactly what workers/voice-action-router.ts calls before
+   * drafting.
+   */
+  async function resolveSpokenReference(tenantId: string, spokenReference: string) {
+    return resolveVoiceEntityReferences(entityResolver, {
+      tenantId,
+      intent: 'update_estimate',
+      entities: { jobReference: spokenReference },
+    });
   }
 
   /**
    * Draft with the REAL task handler (real catalog repo → real
-   * `groundEditActionPricing`), walk the proposal FSM, and execute through
-   * the PRODUCTION registry. Returns the grounded edit-action line item so
-   * callers can assert what grounding produced BEFORE persistence.
+   * `groundEditActionPricing`), fed the router's resolved estimate id the
+   * way voice-action-router.ts feeds it, walk the proposal FSM, and execute
+   * through the PRODUCTION registry. Returns the grounded edit-action line
+   * item so callers can assert what grounding produced BEFORE persistence.
    */
-  async function draftGroundApproveExecute(
-    estimateId: string,
-    transcript: string,
-    llmJson: Record<string, unknown>,
+  async function speakGroundApproveExecute(
+    seeded: SeededEstimate,
+    spokenSentence: string,
+    spokenReference: string,
+    lineItem: Record<string, unknown>,
   ): Promise<{ groundedLineItem: Record<string, unknown>; proposal: Proposal }> {
+    const annotation = await resolveSpokenReference(tenant.tenantId, spokenReference);
+    // The whole point: a SPOKEN reference — no document number, no UUID —
+    // resolves to the seeded estimate through customer → jobs → estimates.
+    expect(annotation.kind).toBe('ok');
+    if (annotation.kind !== 'ok') throw new Error('expected ok resolution');
+    expect(annotation.resolved.estimateId).toBe(seeded.estimateId);
+
+    // Rule 3 (a-fixture-arranged-to-pass-proves-nothing.md): an id the model
+    // invented from nowhere. If the drafted payload ends up carrying this,
+    // resolution lost and the assertion below fails.
+    const hallucinatedEstimateId = crypto.randomUUID();
     const handler = new EstimateEditTaskHandler(
-      mockGateway(JSON.stringify(llmJson)),
+      mockGateway(
+        JSON.stringify({
+          // Free text, exactly what the operator said — NOT an id.
+          estimateReference: spokenReference,
+          estimateId: hallucinatedEstimateId,
+          editActions: [{ type: 'add_line_item', lineItem }],
+          confidence_score: 0.93,
+        }),
+      ),
       estimateRepo,
       catalogRepo,
     );
     const result = await handler.handle({
       tenantId: tenant.tenantId,
       userId: tenant.userId,
-      message: transcript,
+      message: spokenSentence,
+      // Threaded the way voice-action-router.ts threads it.
+      existingEntities: { ...annotation.resolved },
     });
 
     expect(result.taskType).toBe('update_estimate');
     const payload = result.proposal.payload as Record<string, unknown>;
-    // Repo-verified UUID reference lands on payload.estimateId (verify-or-gate).
-    expect(payload.estimateId).toBe(estimateId);
+    // Resolution beat the model: the RESOLVED id rides the payload, never
+    // the hallucinated one.
+    expect(payload.estimateId).toBe(seeded.estimateId);
+    expect(payload.estimateId).not.toBe(hallucinatedEstimateId);
+    expect(missingFieldsFor(result.proposal)).not.toContain('estimateId');
+    const sourceContext = result.proposal.sourceContext as
+      | { verifiedIds?: Record<string, string> }
+      | undefined;
+    expect(sourceContext?.verifiedIds?.estimateId).toBe(seeded.estimateId);
+
     const actions = payload.editActions as Array<Record<string, unknown>>;
     expect(actions).toHaveLength(1);
     const groundedLineItem = actions[0].lineItem as Record<string, unknown>;
@@ -231,35 +345,23 @@ describe('Postgres integration — B7.5 spoken parts edit → real handler + gro
     const context: ExecutionContext = { tenantId: tenant.tenantId, executedBy: tenant.userId };
     const { result: execResult } = await executor.execute(proposal, context);
     expect(execResult.success).toBe(true);
-    expect(execResult.resultEntityId).toBe(estimateId);
+    expect(execResult.resultEntityId).toBe(seeded.estimateId);
 
     return { groundedLineItem, proposal };
   }
 
-  it('"Add three 45-microfarad capacitors" persists the catalog unit on the line-item row', async () => {
-    const estimateId = await seedEstimate('a');
+  it('"Add three 45-microfarad capacitors to the Smith estimate" persists the catalog unit on the line-item row', async () => {
+    const seeded = await seedCustomerWithEstimate('Smith');
 
     // What the extraction step produces for the transcript. The drafted
     // price (4200) is deliberately a NEAR miss of the catalog price (4250) —
     // inside the "did you mean" tolerance — so a persisted 4250 proves the
     // catalog price won without tripping the price-conflict carve-out.
-    const { groundedLineItem } = await draftGroundApproveExecute(
-      estimateId,
-      'Add three 45-microfarad capacitors to that estimate',
-      {
-        estimateReference: estimateId,
-        editActions: [
-          {
-            type: 'add_line_item',
-            lineItem: {
-              description: '45-microfarad capacitor',
-              quantity: 3,
-              unitPrice: 4200,
-            },
-          },
-        ],
-        confidence_score: 0.93,
-      },
+    const { groundedLineItem } = await speakGroundApproveExecute(
+      seeded,
+      'Add three 45-microfarad capacitors to the Smith estimate',
+      'the Smith estimate',
+      { description: '45-microfarad capacitor', quantity: 3, unitPrice: 4200 },
     );
 
     // 1) Grounding produced the unit (this is the rung that was missing).
@@ -272,7 +374,7 @@ describe('Postgres integration — B7.5 spoken parts edit → real handler + gro
       `SELECT description, quantity, unit, unit_price_cents, total_cents, pricing_source
          FROM estimate_line_items
         WHERE estimate_id = $1 AND description = $2`,
-      [estimateId, '45-Microfarad Capacitor'],
+      [seeded.estimateId, '45-Microfarad Capacitor'],
     );
     expect(rows).toHaveLength(1);
     expect(rows[0].unit).toBe('each');
@@ -282,7 +384,7 @@ describe('Postgres integration — B7.5 spoken parts edit → real handler + gro
     expect(Number(rows[0].total_cents)).toBe(3 * CAPACITOR_PRICE_CENTS);
 
     // 3) And it survives the read path (row mapper → domain object).
-    const reloaded = await estimateRepo.findById(tenant.tenantId, estimateId);
+    const reloaded = await estimateRepo.findById(tenant.tenantId, seeded.estimateId);
     const line = reloaded!.lineItems.find((l) => l.description === '45-Microfarad Capacitor');
     expect(line!.unit).toBe('each');
     expect(line!.quantity).toBe(3);
@@ -290,59 +392,38 @@ describe('Postgres integration — B7.5 spoken parts edit → real handler + gro
     expect(line!.totalCents).toBe(3 * CAPACITOR_PRICE_CENTS);
     // Descriptive-only invariant, at the row level: the estimate subtotal is
     // the seeded 9900 + qty × price, with nothing derived from the unit.
-    expect(reloaded!.totals.subtotalCents).toBe(9900 + 3 * CAPACITOR_PRICE_CENTS);
+    expect(reloaded!.totals.subtotalCents).toBe(seeded.subtotalBefore + 3 * CAPACITOR_PRICE_CENTS);
   });
 
   it('emits exactly one estimate.updated audit event for the spoken parts edit', async () => {
-    const estimateId = await seedEstimate('b');
-    await draftGroundApproveExecute(
-      estimateId,
-      'Add three 45-microfarad capacitors to that estimate',
-      {
-        estimateReference: estimateId,
-        editActions: [
-          {
-            type: 'add_line_item',
-            lineItem: { description: '45-microfarad capacitor', quantity: 3, unitPrice: 4200 },
-          },
-        ],
-        confidence_score: 0.93,
-      },
+    const seeded = await seedCustomerWithEstimate('Okafor');
+    await speakGroundApproveExecute(
+      seeded,
+      'Add three 45-microfarad capacitors to the Okafor estimate',
+      'the Okafor estimate',
+      { description: '45-microfarad capacitor', quantity: 3, unitPrice: 4200 },
     );
 
     const { rows } = await pool.query(
       `SELECT event_type, actor_id FROM audit_events
         WHERE tenant_id = $1 AND event_type = 'estimate.updated'
           AND entity_type = 'estimate' AND entity_id = $2`,
-      [tenant.tenantId, estimateId],
+      [tenant.tenantId, seeded.estimateId],
     );
     expect(rows).toHaveLength(1);
     expect(rows[0].actor_id).toBe(tenant.userId);
   });
 
   it('the CATALOG unit wins: an LLM-emitted unit never overrides it', async () => {
-    const estimateId = await seedEstimate('c');
+    const seeded = await seedCustomerWithEstimate('Alvarez');
 
     // The edit prompt hands the model a `name | unit | price` catalog table,
     // so it can emit a unit of its own. Here it emits the WRONG one.
-    const { groundedLineItem } = await draftGroundApproveExecute(
-      estimateId,
-      'Add three 45-microfarad capacitors to that estimate',
-      {
-        estimateReference: estimateId,
-        editActions: [
-          {
-            type: 'add_line_item',
-            lineItem: {
-              description: '45-microfarad capacitor',
-              quantity: 3,
-              unit: 'hour',
-              unitPrice: 4200,
-            },
-          },
-        ],
-        confidence_score: 0.93,
-      },
+    const { groundedLineItem } = await speakGroundApproveExecute(
+      seeded,
+      'Add three 45-microfarad capacitors to the Alvarez estimate',
+      'the Alvarez estimate',
+      { description: '45-microfarad capacitor', quantity: 3, unit: 'hour', unitPrice: 4200 },
     );
 
     expect(groundedLineItem.unit).toBe('each');
@@ -350,38 +431,57 @@ describe('Postgres integration — B7.5 spoken parts edit → real handler + gro
     const { rows } = await pool.query(
       `SELECT unit FROM estimate_line_items
         WHERE estimate_id = $1 AND description = $2`,
-      [estimateId, '45-Microfarad Capacitor'],
+      [seeded.estimateId, '45-Microfarad Capacitor'],
     );
     expect(rows).toHaveLength(1);
     expect(rows[0].unit).toBe('each');
   });
 
-  it('an UNCATALOGUED spoken line gains no invented unit (column stays NULL)', async () => {
-    const estimateId = await seedEstimate('d');
+  it('an UNCATALOGUED spoken line KEEPS a vocabulary-valid unit — no invented unit, but no invented drop either', async () => {
+    const seeded = await seedCustomerWithEstimate('Whitfield');
 
-    const { groundedLineItem } = await draftGroundApproveExecute(
-      estimateId,
-      'Add a bespoke flux manifold for eighty dollars to that estimate',
-      {
-        estimateReference: estimateId,
-        editActions: [
-          {
-            type: 'add_line_item',
-            lineItem: {
-              description: 'Bespoke flux manifold',
-              quantity: 1,
-              // Copied out of the catalog table for an item that is NOT in
-              // the catalog — invented, and must not reach the row.
-              unit: 'each',
-              unitPrice: 8000,
-            },
-          },
-        ],
-        confidence_score: 0.93,
-      },
+    // "Bespoke flux manifold" is not in the catalog. Its spoken unit, "each",
+    // IS a member of the catalog's own vocabulary (catalogUnitSchema) — a
+    // bounded value, not invention — so B7.5's narrowing keeps it even
+    // though the line's PRICE stays untrusted and human-reviewed.
+    const { groundedLineItem } = await speakGroundApproveExecute(
+      seeded,
+      'Add a bespoke flux manifold for eighty dollars to the Whitfield estimate',
+      'the Whitfield estimate',
+      { description: 'Bespoke flux manifold', quantity: 1, unit: 'each', unitPrice: 8000 },
     );
 
-    // Grounding refused to trust the line: no unit, price flagged.
+    // Grounding refused to trust the PRICE, but the vocabulary-valid unit
+    // survives.
+    expect(groundedLineItem.unit).toBe('each');
+    expect(groundedLineItem.pricingSource).toBe('uncatalogued');
+    expect(groundedLineItem.needsPricing).toBe(true);
+
+    const { rows } = await pool.query(
+      `SELECT unit, unit_price_cents FROM estimate_line_items
+        WHERE estimate_id = $1 AND description = $2`,
+      [seeded.estimateId, 'Bespoke flux manifold'],
+    );
+    expect(rows).toHaveLength(1);
+    expect(rows[0].unit).toBe('each');
+    // The spoken price still rides through (human-reviewed, never
+    // auto-approved) — only ever an OUT-OF-VOCABULARY unit is dropped.
+    expect(Number(rows[0].unit_price_cents)).toBe(8000);
+  });
+
+  it('an UNCATALOGUED spoken line with an out-of-vocabulary unit still gains no invented unit (column stays NULL)', async () => {
+    const seeded = await seedCustomerWithEstimate('Reyes');
+
+    // "microfarads" is not a member of catalogUnitSchema — the model copied
+    // it from nowhere real, so it is invented exactly like an ungrounded
+    // price would be, and must not reach the row.
+    const { groundedLineItem } = await speakGroundApproveExecute(
+      seeded,
+      'Add a bespoke flux manifold for eighty dollars to the Reyes estimate',
+      'the Reyes estimate',
+      { description: 'Bespoke flux manifold', quantity: 1, unit: 'microfarads', unitPrice: 8000 },
+    );
+
     expect(groundedLineItem.unit).toBeUndefined();
     expect(groundedLineItem.pricingSource).toBe('uncatalogued');
     expect(groundedLineItem.needsPricing).toBe(true);
@@ -389,34 +489,38 @@ describe('Postgres integration — B7.5 spoken parts edit → real handler + gro
     const { rows } = await pool.query(
       `SELECT unit, unit_price_cents FROM estimate_line_items
         WHERE estimate_id = $1 AND description = $2`,
-      [estimateId, 'Bespoke flux manifold'],
+      [seeded.estimateId, 'Bespoke flux manifold'],
     );
     expect(rows).toHaveLength(1);
     expect(rows[0].unit).toBeNull();
-    // The spoken price still rides through (human-reviewed, never
-    // auto-approved) — only the ungrounded UNIT is dropped.
     expect(Number(rows[0].unit_price_cents)).toBe(8000);
   });
 
-  it('cross-tenant negative: another tenant can neither read the estimate nor edit it through the handler', async () => {
-    const estimateId = await seedEstimate('e');
-    await draftGroundApproveExecute(
-      estimateId,
-      'Add three 45-microfarad capacitors to that estimate',
-      {
-        estimateReference: estimateId,
-        editActions: [
-          {
-            type: 'add_line_item',
-            lineItem: { description: '45-microfarad capacitor', quantity: 3, unitPrice: 4200 },
-          },
-        ],
-        confidence_score: 0.93,
-      },
+  it('cross-tenant negative: the spoken reference does not resolve from another tenant, and the estimate is not readable or editable there', async () => {
+    const seeded = await seedCustomerWithEstimate('Delgado');
+    await speakGroundApproveExecute(
+      seeded,
+      'Add three 45-microfarad capacitors to the Delgado estimate',
+      'the Delgado estimate',
+      { description: '45-microfarad capacitor', quantity: 3, unitPrice: 4200 },
     );
 
     const other = await createTestTenant(pool);
-    expect(await estimateRepo.findById(other.tenantId, estimateId)).toBeNull();
+
+    // The SAME sentence, spoken inside another tenant, resolves nothing — the
+    // traversal is scoped by tenant on the estimate, the job, and the
+    // customer, on top of the RLS session context.
+    const foreign = await resolveSpokenReference(other.tenantId, 'the Delgado estimate');
+    expect(foreign.kind).toBe('ok');
+    if (foreign.kind === 'ok') {
+      expect(foreign.resolved.estimateId).toBeUndefined();
+      expect(foreign.pendingReferences).toContainEqual({
+        kind: 'estimate',
+        reference: 'the Delgado estimate',
+      });
+    }
+
+    expect(await estimateRepo.findById(other.tenantId, seeded.estimateId)).toBeNull();
 
     const handler = new UpdateEstimateExecutionHandler(
       estimateRepo,
@@ -431,7 +535,7 @@ describe('Postgres integration — B7.5 spoken parts edit → real handler + gro
         tenantId: other.tenantId,
         proposalType: 'update_estimate',
         payload: {
-          estimateId,
+          estimateId: seeded.estimateId,
           editActions: [
             {
               type: 'add_line_item',
@@ -458,7 +562,7 @@ describe('Postgres integration — B7.5 spoken parts edit → real handler + gro
     // And nothing landed on tenant A's estimate.
     const { rows } = await pool.query(
       `SELECT 1 FROM estimate_line_items WHERE estimate_id = $1 AND description = $2`,
-      [estimateId, 'Should Not Land'],
+      [seeded.estimateId, 'Should Not Land'],
     );
     expect(rows).toHaveLength(0);
   });

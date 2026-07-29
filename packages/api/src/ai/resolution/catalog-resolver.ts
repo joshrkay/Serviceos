@@ -44,6 +44,7 @@
  */
 import type { CatalogItem } from '../../catalog/catalog-item';
 import type { ConfidenceLevel } from '../guardrails/confidence';
+import { catalogUnitSchema } from '@ai-service-os/shared';
 
 export type CatalogMatchTier = 'exact' | 'high' | 'ambiguous' | 'none';
 export type CatalogMatchType = 'exact' | 'prefix' | 'token_overlap' | 'fuzzy';
@@ -483,25 +484,33 @@ function contractCategory(item: CatalogItem): string {
 }
 
 /**
- * B7.5 — drop any `unit` the LLM emitted from a line this pass could NOT
- * ground. The unit of measure is a CATALOG fact, not a spoken one: the
- * enum (`catalogUnitSchema`) is the catalog's own vocabulary, and the
- * drafting prompts feed the model a `name | unit | price` catalog table
- * (`buildCatalogPromptSection`) it can copy a unit out of. On a line that
- * resolved to nothing there is no catalog identity to copy FROM, so a unit
- * on it is invented — exactly like the price on the same line, which this
- * module already refuses to trust. Stripping here is what makes it safe
- * for `normalizeDraftLineItems` (proposals/execution/handlers.ts) to
- * forward `unit` to the persisted row: everything that survives grounding
- * came from a catalog item.
+ * B7.5 — drop a `unit` the LLM emitted ONLY when it is not a member of the
+ * catalog's own vocabulary (`catalogUnitSchema`). A unit and a price are
+ * NOT the same kind of claim: a price is a number the model can invent
+ * without limit, so an ungrounded line's price is always untrusted
+ * (contracts.ts `unit: catalogUnitSchema.optional()` — "DESCRIPTIVE ONLY:
+ * no billing arithmetic reads it"). A unit, by contrast, is a value drawn
+ * from a small closed enum. When the model's spoken/drafted unit parses
+ * as `catalogUnitSchema` it is not invention — it's a real member of a
+ * bounded vocabulary the tenant's catalog also draws from — so it survives
+ * onto a line this pass could not ground to a specific catalog item (e.g.
+ * "three 45-microfarad capacitors" when that part isn't catalogued: name
+ * and quantity would otherwise persist with the unit silently dropped).
+ * Anything that does NOT parse against the enum (a hallucinated or
+ * malformed string) is still dropped — that case remains indistinguishable
+ * from invention. This does not touch price/confidence/requiresReview:
+ * an uncatalogued line's PRICE stays untrusted and `anyUncatalogued` still
+ * drives `requiresReview` and the confidence cap exactly as before —
+ * only the descriptive `unit` field's fate changes.
  *
- * Returns the SAME object when there is no unit to strip, so the common
+ * Returns the SAME object when there is no unit to touch, so the common
  * path allocates nothing.
  */
-export function stripUngroundedUnit(
+export function dropOutOfVocabularyUnit(
   li: Record<string, unknown>,
 ): Record<string, unknown> {
   if (li.unit === undefined) return li;
+  if (catalogUnitSchema.safeParse(li.unit).success) return li;
   const next = { ...li };
   delete next.unit;
   return next;
@@ -565,7 +574,7 @@ export function applyCatalogPricing(
         // choice. Nothing is priced yet, so `anyCatalogPriced` stays
         // false for this line.
         out.push({
-          ...stripUngroundedUnit(li),
+          ...dropOutOfVocabularyUnit(li),
           pricingSource: 'ambiguous' satisfies PricingSource,
           needsPricing: true,
         });
@@ -619,7 +628,7 @@ export function applyCatalogPricing(
     }
     if (resolution.tier === 'ambiguous' && resolution.candidates) {
       out.push({
-        ...stripUngroundedUnit(li),
+        ...dropOutOfVocabularyUnit(li),
         pricingSource: 'ambiguous' satisfies PricingSource,
         needsPricing: true,
       });
@@ -635,7 +644,7 @@ export function applyCatalogPricing(
       return;
     }
     out.push({
-      ...stripUngroundedUnit(li),
+      ...dropOutOfVocabularyUnit(li),
       pricingSource: 'uncatalogued' satisfies PricingSource,
       needsPricing: true,
     });
@@ -674,7 +683,7 @@ function markAllUncatalogued(
     if (typeof li[priceField] === 'number') {
       anyUncatalogued = true;
       return {
-        ...stripUngroundedUnit(li),
+        ...dropOutOfVocabularyUnit(li),
         pricingSource: 'uncatalogued' satisfies PricingSource,
         needsPricing: true,
       };
@@ -683,7 +692,7 @@ function markAllUncatalogued(
     // unit is ungrounded. (A line with no price carries no money risk and
     // is dropped downstream, but it must not smuggle an invented unit
     // through in the meantime.)
-    return stripUngroundedUnit(li);
+    return dropOutOfVocabularyUnit(li);
   });
   return {
     lineItems: out,

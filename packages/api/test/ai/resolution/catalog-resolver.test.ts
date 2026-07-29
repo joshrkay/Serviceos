@@ -7,6 +7,7 @@ import {
   resolveLineItems,
   applyCatalogPricing,
   groundLineItemPricing,
+  dropOutOfVocabularyUnit,
   TAU_HIGH,
   TAU_FLOOR,
   MARGIN,
@@ -756,12 +757,39 @@ describe('groundLineItemPricing — requiresReview hard gate', () => {
 });
 
 /**
- * B7.5 — `unit` is a CATALOG fact, grounded on the same terms as the price.
- * The drafting prompts feed the model a `name | unit | price` catalog table
- * (buildCatalogPromptSection), so it can staple a unit onto a line that
- * grounds to nothing. Only a catalog-matched line keeps one — which is what
- * lets `normalizeDraftLineItems` forward `unit` straight to the row.
+ * B7.5 — `unit` is DESCRIPTIVE and VOCABULARY-BOUNDED (`catalogUnitSchema`
+ * is a closed enum), unlike `unitPrice`/`unitPriceCents`, which are money
+ * and must be catalog-grounded. `dropOutOfVocabularyUnit` therefore drops
+ * a unit only when it does NOT parse as a member of that enum — a
+ * vocabulary-valid unit is not invention and survives even on a line this
+ * pass could not ground to a catalog item (the flagship case: "three
+ * 45-microfarad capacitors" — an uncatalogued part — still keeps "each").
+ * Price/confidence/requiresReview behaviour is untouched by this: an
+ * uncatalogued line's PRICE stays unresolved and `anyUncatalogued` still
+ * drives `requiresReview` and the confidence cap exactly as before.
  */
+describe('dropOutOfVocabularyUnit', () => {
+  it('returns the SAME object when there is no unit (no allocation on the common path)', () => {
+    const li = { description: 'trip fee', quantity: 1 };
+    expect(dropOutOfVocabularyUnit(li)).toBe(li);
+  });
+
+  it('keeps a vocabulary-valid unit unchanged', () => {
+    const li = { description: 'capacitor', quantity: 3, unit: 'each' };
+    expect(dropOutOfVocabularyUnit(li)).toEqual(li);
+  });
+
+  it('drops an out-of-vocabulary unit', () => {
+    const out = dropOutOfVocabularyUnit({ description: 'capacitor', quantity: 3, unit: 'microfarads' });
+    expect(out).not.toHaveProperty('unit');
+  });
+
+  it('drops a non-string unit (defensive against a malformed LLM payload)', () => {
+    const out = dropOutOfVocabularyUnit({ description: 'capacitor', quantity: 3, unit: 42 });
+    expect(out).not.toHaveProperty('unit');
+  });
+});
+
 describe('applyCatalogPricing / groundLineItemPricing — unit of measure grounding', () => {
   const heater = item('Water Heater Install', 15_000);
   const hourly = item('Standard Labor', 12_000, { unit: 'hour' });
@@ -779,11 +807,11 @@ describe('applyCatalogPricing / groundLineItemPricing — unit of measure ground
     expect(out.lineItems[0].unit).toBe('hour');
   });
 
-  it('an ambiguous line drops the LLM unit (the pick will supply it)', () => {
+  it('an ambiguous line drops an out-of-vocabulary LLM unit (the pick will supply the real one)', () => {
     const air = item('Air Filter', 2_000);
     const water = item('Water Filter', 3_500);
     const out = applyCatalogPricing(
-      [{ description: 'filter', quantity: 1, unitPriceCents: 2_500, unit: 'each' }],
+      [{ description: 'filter', quantity: 1, unitPriceCents: 2_500, unit: 'furlongs' }],
       [
         {
           query: 'filter',
@@ -800,9 +828,29 @@ describe('applyCatalogPricing / groundLineItemPricing — unit of measure ground
     expect(out.catalogResolution![0][0].unit).toBe('each');
   });
 
-  it('an uncatalogued line drops the LLM unit — no invented unit reaches the row', () => {
+  it('an ambiguous line KEEPS a vocabulary-valid LLM unit', () => {
+    const air = item('Air Filter', 2_000);
+    const water = item('Water Filter', 3_500);
     const out = applyCatalogPricing(
-      [{ description: 'mystery widget', quantity: 1, unitPriceCents: 4_200, unit: 'each' }],
+      [{ description: 'filter', quantity: 1, unitPriceCents: 2_500, unit: 'each' }],
+      [
+        {
+          query: 'filter',
+          tier: 'ambiguous',
+          candidates: [
+            { item: air, score: 0.77, matchType: 'token_overlap' },
+            { item: water, score: 0.77, matchType: 'token_overlap' },
+          ],
+        },
+      ],
+      'unitPriceCents',
+    );
+    expect(out.lineItems[0].unit).toBe('each');
+  });
+
+  it('an uncatalogued line drops an out-of-vocabulary unit — not reaching the row', () => {
+    const out = applyCatalogPricing(
+      [{ description: 'mystery widget', quantity: 1, unitPriceCents: 4_200, unit: 'microfarads' }],
       [{ query: 'mystery widget', tier: 'none' }],
       'unitPriceCents',
     );
@@ -812,9 +860,25 @@ describe('applyCatalogPricing / groundLineItemPricing — unit of measure ground
     expect(out.lineItems[0].unitPriceCents).toBe(4_200);
   });
 
-  it('an EMPTY catalog (markAllUncatalogued) drops the LLM unit', async () => {
+  it('an UNCATALOGUED line KEEPS a vocabulary-valid unit — the B7.5 flagship case', () => {
+    // "Add three 45-microfarad capacitors" — the exact capacitor part is
+    // not in the catalog, but "each" is a real member of catalogUnitSchema,
+    // not an invented one, so it must survive onto the uncatalogued line.
+    const out = applyCatalogPricing(
+      [{ description: '45-microfarad capacitor', quantity: 3, unitPriceCents: 4_250, unit: 'each' }],
+      [{ query: '45-microfarad capacitor', tier: 'none' }],
+      'unitPriceCents',
+    );
+    expect(out.lineItems[0].unit).toBe('each');
+    expect(out.lineItems[0].pricingSource).toBe('uncatalogued');
+    // The PRICE/confidence/review path is unaffected by the unit surviving.
+    expect(out.anyUncatalogued).toBe(true);
+    expect(out.requiresReview).toBe(true);
+  });
+
+  it('an EMPTY catalog (markAllUncatalogued) drops an out-of-vocabulary unit', async () => {
     const outcome = await groundLineItemPricing(
-      [{ description: 'standard labor', quantity: 2, unitPriceCents: 12_000, unit: 'hour' }],
+      [{ description: 'standard labor', quantity: 2, unitPriceCents: 12_000, unit: 'furlongs' }],
       'unitPriceCents',
       () => Promise.resolve([]),
     );
@@ -822,13 +886,33 @@ describe('applyCatalogPricing / groundLineItemPricing — unit of measure ground
     expect(outcome.anyUncatalogued).toBe(true);
   });
 
-  it('no catalog repo wired at all drops the LLM unit', async () => {
+  it('an EMPTY catalog (markAllUncatalogued) KEEPS a vocabulary-valid unit', async () => {
+    const outcome = await groundLineItemPricing(
+      [{ description: 'standard labor', quantity: 2, unitPriceCents: 12_000, unit: 'hour' }],
+      'unitPriceCents',
+      () => Promise.resolve([]),
+    );
+    expect(outcome.lineItems[0].unit).toBe('hour');
+    expect(outcome.anyUncatalogued).toBe(true);
+    expect(outcome.requiresReview).toBe(true);
+  });
+
+  it('no catalog repo wired at all drops an out-of-vocabulary unit', async () => {
+    const outcome = await groundLineItemPricing(
+      [{ description: 'standard labor', quantity: 2, unitPriceCents: 12_000, unit: 'furlongs' }],
+      'unitPriceCents',
+      null,
+    );
+    expect(outcome.lineItems[0]).not.toHaveProperty('unit');
+  });
+
+  it('no catalog repo wired at all KEEPS a vocabulary-valid unit', async () => {
     const outcome = await groundLineItemPricing(
       [{ description: 'standard labor', quantity: 2, unitPriceCents: 12_000, unit: 'hour' }],
       'unitPriceCents',
       null,
     );
-    expect(outcome.lineItems[0]).not.toHaveProperty('unit');
+    expect(outcome.lineItems[0].unit).toBe('hour');
   });
 
   it('a unit never moves money: the grounded totals are identical with and without one', () => {

@@ -514,6 +514,77 @@ describe('P22 — InvoiceTaskHandler catalog grounding', () => {
     expect(line).not.toHaveProperty('catalogItemId');
     expect(proposal.confidenceScore).toBeLessThanOrEqual(UNCATALOGUED_CONFIDENCE_CAP);
   });
+
+  /**
+   * B7.5 (AC-7) — defect found while adding C1 unit coverage
+   * (voice-payload-contract.test.ts): the line-item normalization step
+   * above (invoice-task.ts) reconstructed each line item from an explicit
+   * field whitelist that OMITTED `unit`, so a voice-drafted invoice line
+   * lost its unit of measure BEFORE catalog grounding ever ran — no
+   * catalog match, no ungrounded-unit strip, just silent loss on every
+   * draft_invoice line, catalogued or not. estimate-task.ts's equivalent
+   * step forwards the raw parsed line item unchanged and never had this
+   * gap. Fixed by adding `unit` to the whitelist; `groundLineItemPricing` /
+   * `normalizeDraftLineItems` (execution/handlers.ts) still validate it
+   * against `catalogUnitSchema` downstream, so this passthrough trusts
+   * nothing on its own.
+   */
+  describe('unit of measure passthrough (B7.5 AC-7)', () => {
+    it('a catalog-matched line gets the CATALOG unit, not whatever the LLM emitted', async () => {
+      const { repo, heater } = seededCatalog();
+      const gateway = createMockGateway(
+        aiOutput([
+          { description: 'Water Heater Install', quantity: 1, unit: 'hour', unitPrice: 185_000 },
+        ]),
+      );
+      const handler = new InvoiceTaskHandler(gateway, repo);
+
+      const { proposal } = await handler.handle(baseContext);
+
+      const line = (proposal.payload.lineItems as Array<Record<string, unknown>>)[0];
+      expect(line.catalogItemId).toBe(heater.id);
+      expect(line.unit).toBe('each');
+    });
+
+    it('an UNCATALOGUED line KEEPS a vocabulary-valid unit — it now reaches grounding at all', async () => {
+      const { repo } = seededCatalog();
+      const gateway = createMockGateway(
+        aiOutput([
+          { description: '45-microfarad capacitor', quantity: 3, unit: 'each', unitPrice: 4_250 },
+        ]),
+      );
+      const handler = new InvoiceTaskHandler(gateway, repo);
+
+      const { proposal } = await handler.handle(baseContext);
+
+      const line = (proposal.payload.lineItems as Array<Record<string, unknown>>)[0];
+      expect(line.pricingSource).toBe('uncatalogued');
+      expect(line.unit).toBe('each');
+      // Price/confidence path is unaffected by the unit surviving.
+      expect(proposal.confidenceFactors).toContain('uncatalogued_line_item');
+    });
+
+    it('an UNCATALOGUED line still drops an out-of-vocabulary unit', async () => {
+      const { repo } = seededCatalog();
+      const gateway = createMockGateway(
+        aiOutput([
+          {
+            description: '45-microfarad capacitor',
+            quantity: 3,
+            unit: 'microfarads',
+            unitPrice: 4_250,
+          },
+        ]),
+      );
+      const handler = new InvoiceTaskHandler(gateway, repo);
+
+      const { proposal } = await handler.handle(baseContext);
+
+      const line = (proposal.payload.lineItems as Array<Record<string, unknown>>)[0];
+      expect(line.pricingSource).toBe('uncatalogued');
+      expect(line).not.toHaveProperty('unit');
+    });
+  });
 });
 
 // ─── RV-007 (F-4): Confidence Marker `_meta` ─────────────────────────────

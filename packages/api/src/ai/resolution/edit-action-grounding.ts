@@ -32,15 +32,20 @@
  * bug the note documents.
  *
  * UNIT OF MEASURE (B7.5). `unit` is DESCRIPTIVE — it never enters money
- * math (`quantity × unitPriceCents = totalCents` does not read it) — but it
- * is grounded on exactly the same terms as the price, because it is a
- * CATALOG fact: the enum (`catalogUnitSchema`) is the catalog's own
- * vocabulary and `buildCatalogPromptSection` shows the model a
- * `name | unit | price` table it could copy a unit out of. So an exact/high
- * match stamps the catalog item's unit (overwriting anything the model
- * emitted), and every untrusted tier strips it (`stripUngroundedUnit`) —
- * an uncatalogued line never gains an invented unit. The stamped value is
- * what `estimate-editor.ts` / `invoice-editor.ts` read off
+ * math (`quantity × unitPriceCents = totalCents` does not read it) — and
+ * that is exactly why it is NOT grounded on the same terms as the price.
+ * A price is money and must be catalog-grounded (or explicitly untrusted).
+ * A unit is a value from a small closed enum (`catalogUnitSchema`): when
+ * the model's unit parses against that enum it is a real member of a
+ * bounded vocabulary, not an invented number, so it survives even on a
+ * line this pass could not match to a specific catalog item (e.g. "three
+ * 45-microfarad capacitors" when that part isn't catalogued — the unit
+ * "each" still persists). An exact/high match still stamps the catalog
+ * item's own unit over whatever the model emitted (the catalog is more
+ * specific than the model's guess), and any unit that does NOT parse
+ * against the enum is still dropped (`dropOutOfVocabularyUnit`) — that
+ * case remains indistinguishable from invention. The stamped/surviving
+ * value is what `estimate-editor.ts` / `invoice-editor.ts` read off
  * `action.lineItem.unit` and what reaches the `line_items.unit` column.
  *
  * SEMANTICS PARITY with the draft path:
@@ -113,7 +118,7 @@ import {
   CatalogLineResolution,
   isPriceConflict,
   resolveLineItemToCatalog,
-  stripUngroundedUnit,
+  dropOutOfVocabularyUnit,
   type PricingSource,
 } from './catalog-resolver';
 
@@ -277,13 +282,12 @@ export function groundEditActionPricing(
       return {
         ...action,
         lineItem: {
-          // B7.5 — an ungrounded line loses any `unit` too, for the same
-          // reason its price is untrusted: the unit vocabulary IS the
-          // catalog's, and the edit prompt hands the model a
-          // `name | unit | price` catalog table it can copy one out of.
-          // With no catalog identity behind this line, a unit on it would
-          // be invented. See catalog-resolver.ts stripUngroundedUnit.
-          ...stripUngroundedUnit(lineItem),
+          // B7.5 — an ungrounded line's UNIT survives if it parses against
+          // the catalog's closed vocabulary (`catalogUnitSchema`) — that is
+          // a bounded value, not invention, unlike the untrusted price on
+          // this same line. Only a unit that does NOT parse against the
+          // enum is dropped. See catalog-resolver.ts dropOutOfVocabularyUnit.
+          ...dropOutOfVocabularyUnit(lineItem),
           unitPriceCents: null,
           pricingSource: source,
           needsPricing: true,
@@ -324,11 +328,12 @@ export function groundEditActionPricing(
       return {
         ...action,
         lineItem: {
-          // Any `unit` the model emitted is dropped first, then the catalog
-          // item's own unit is stamped below — the catalog is the source of
-          // truth for the unit exactly as it is for the price, so an
-          // LLM-emitted unit can never override (or survive alongside) it.
-          ...stripUngroundedUnit(lineItem),
+          // An out-of-vocabulary `unit` the model emitted is dropped first
+          // (a vocabulary-valid one would otherwise survive unchanged);
+          // then the catalog item's own unit is stamped below, overwriting
+          // whatever survived — the catalog is more specific than the
+          // model's guess, so it always wins on a matched line.
+          ...dropOutOfVocabularyUnit(lineItem),
           description: item.name,
           // Catalog price ALWAYS overwrites the LLM guess. `unitPrice` is
           // the executable field (both editors read it); `unitPriceCents`

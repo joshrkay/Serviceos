@@ -283,6 +283,17 @@ export class InvoiceTaskHandler implements TaskHandler {
     // when no catalog price rescued them. Entity-id trust is enforced at
     // the entry points that accept free text (the assistant route) —
     // pipeline callers feed verified context ids.
+    //
+    // B7.5 — this whitelist used to omit `unit` entirely, so a voice-drafted
+    // INVOICE line lost its unit of measure before catalog grounding ever ran
+    // (draft_estimate's equivalent step, estimate-task.ts, forwards the raw
+    // parsed line item unchanged and never had this gap). Passed through
+    // here as an untyped string — `groundLineItemPricing` below still stamps
+    // the catalog's own unit on a matched line and drops one that fails
+    // `catalogUnitSchema` on an ungrounded line (dropOutOfVocabularyUnit),
+    // and `normalizeDraftLineItems` (execution/handlers.ts) re-validates
+    // against the enum again before the row is ever written — so nothing
+    // downstream trusts this raw value on its own.
     if (Array.isArray(payload.lineItems)) {
       payload.lineItems = (payload.lineItems as Array<Record<string, unknown>>).map((li, idx) => {
         const qty = Number(li.quantity ?? 1) || 1;
@@ -305,6 +316,7 @@ export class InvoiceTaskHandler implements TaskHandler {
           ...(unitPriceCents !== undefined
             ? { unitPriceCents, totalCents: Math.round(unitPriceCents * qty) }
             : {}),
+          ...(typeof li.unit === 'string' ? { unit: li.unit } : {}),
           sortOrder: idx,
           taxable: typeof li.taxable === 'boolean' ? li.taxable : false,
         };

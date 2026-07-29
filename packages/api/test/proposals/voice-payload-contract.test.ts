@@ -242,6 +242,15 @@ interface Row {
   draft: () => Promise<TaskResult>;
   /** Only present for 'resolves' rows. */
   execute?: (proposal: Proposal) => Promise<ExecutionResult>;
+  /**
+   * B7.5 (AC-7) — extra payload-shape assertions beyond missingFields/
+   * execution success. Used by the parts rows (create_invoice, draft_estimate,
+   * update_invoice, update_estimate) to pin name + quantity + UNIT as the
+   * drafted contract — the requirement's own words ("structured name +
+   * quantity + unit") — not just name + quantity + price. Runs right after
+   * drafting, before the resolves/gated branch, so it applies uniformly.
+   */
+  assertPayload?: (payload: Record<string, unknown>) => void;
 }
 
 function execContext(): ExecutionContext {
@@ -263,32 +272,49 @@ const ROWS: Row[] = [
   {
     intent: 'create_invoice',
     mode: 'resolves',
-    note: 'resolved customerId + a priced line item drafts ungated; dep-less CreateInvoiceExecutionHandler synthetic-succeeds',
+    note: 'resolved customerId + a priced, unit-bearing line item drafts ungated; dep-less CreateInvoiceExecutionHandler synthetic-succeeds',
     draft: () =>
       draft(
         { gateway: mockGateway(JSON.stringify({
-          lineItems: [{ description: 'Water heater install', quantity: 1, unitPrice: 85000, category: 'labor' }],
+          lineItems: [{ description: 'Water heater install', quantity: 1, unit: 'each', unitPrice: 85000, category: 'labor' }],
           confidence_score: 0.9,
         })) },
         'draft_invoice',
         ctx({ existingEntities: { customerId: CUSTOMER_ID } }),
       ),
     execute: (p) => new CreateInvoiceExecutionHandler().execute(p, execContext()),
+    // B7.5 (AC-7) — name + quantity + unit is the drafted contract, not just
+    // name + quantity + price. No catalog is wired for this row (uncatalogued
+    // line), so this also pins that a vocabulary-valid unit SURVIVES an
+    // uncatalogued line (dropOutOfVocabularyUnit) rather than being stripped.
+    assertPayload: (payload) => {
+      const lineItems = payload.lineItems as Array<Record<string, unknown>>;
+      expect(lineItems[0].description).toBe('Water heater install');
+      expect(lineItems[0].quantity).toBe(1);
+      expect(lineItems[0].unit).toBe('each');
+    },
   },
   {
     intent: 'draft_estimate',
     mode: 'resolves',
-    note: 'resolved customerId + a priced line item drafts ungated; dep-less DraftEstimateExecutionHandler synthetic-succeeds',
+    note: 'resolved customerId + a priced, unit-bearing line item drafts ungated; dep-less DraftEstimateExecutionHandler synthetic-succeeds',
     draft: () =>
       draft(
         { gateway: mockGateway(JSON.stringify({
-          lineItems: [{ description: '50-gallon heater', quantity: 1, unitPrice: 85000, category: 'material' }],
+          lineItems: [{ description: '50-gallon heater', quantity: 1, unit: 'each', unitPrice: 85000, category: 'material' }],
           confidence_score: 0.9,
         })) },
         'draft_estimate',
         ctx({ existingEntities: { customerId: CUSTOMER_ID } }),
       ),
     execute: (p) => new DraftEstimateExecutionHandler().execute(p, execContext()),
+    // B7.5 (AC-7) — same pin as create_invoice above.
+    assertPayload: (payload) => {
+      const lineItems = payload.lineItems as Array<Record<string, unknown>>;
+      expect(lineItems[0].description).toBe('50-gallon heater');
+      expect(lineItems[0].quantity).toBe(1);
+      expect(lineItems[0].unit).toBe('each');
+    },
   },
   {
     intent: 'create_appointment',
@@ -310,7 +336,7 @@ const ROWS: Row[] = [
   {
     intent: 'update_invoice',
     mode: 'resolves',
-    note: 'invoiceReference is a UUID the wired invoiceRepo confirms → verify-or-gate lifts the gate; UpdateInvoiceExecutionHandler applies the edit against a seeded draft invoice',
+    note: 'invoiceReference is a UUID the wired invoiceRepo confirms → verify-or-gate lifts the gate; UpdateInvoiceExecutionHandler applies the edit (unit-bearing) against a seeded draft invoice',
     draft: () => {
       const invoiceRepo = new InMemoryInvoiceRepository();
       return invoiceRepo.create(makeInvoice({ id: INVOICE_ID })).then(() =>
@@ -318,7 +344,7 @@ const ROWS: Row[] = [
           { gateway: mockGateway(JSON.stringify({
             invoiceReference: INVOICE_ID,
             editActions: [
-              { type: 'add_line_item', lineItem: { description: 'Trip fee', quantity: 1, unitPrice: 5000, category: 'labor' } },
+              { type: 'add_line_item', lineItem: { description: 'Trip fee', quantity: 1, unit: 'each', unitPrice: 5000, category: 'labor' } },
             ],
             confidence_score: 0.9,
           })), invoiceRepo },
@@ -332,11 +358,23 @@ const ROWS: Row[] = [
       await invoiceRepo.create(makeInvoice({ id: INVOICE_ID }));
       return new UpdateInvoiceExecutionHandler(invoiceRepo).execute(p, execContext());
     },
+    // B7.5 (AC-7) — name + quantity + unit on the edit-action leg too. No
+    // catalog is wired for this row, so this also pins that a
+    // vocabulary-valid unit SURVIVES an uncatalogued edit line
+    // (edit-action-grounding.ts's dropOutOfVocabularyUnit call) instead of
+    // being stripped the way the pre-B7.5 blanket strip would have.
+    assertPayload: (payload) => {
+      const actions = payload.editActions as Array<Record<string, unknown>>;
+      const lineItem = actions[0].lineItem as Record<string, unknown>;
+      expect(lineItem.description).toBe('Trip fee');
+      expect(lineItem.quantity).toBe(1);
+      expect(lineItem.unit).toBe('each');
+    },
   },
   {
     intent: 'update_estimate',
     mode: 'resolves',
-    note: 'estimateReference is a UUID the wired estimateRepo confirms; UpdateEstimateExecutionHandler applies the edit against a seeded draft estimate (deposit-free job)',
+    note: 'estimateReference is a UUID the wired estimateRepo confirms; UpdateEstimateExecutionHandler applies the edit (unit-bearing) against a seeded draft estimate (deposit-free job)',
     draft: () => {
       const estimateRepo = new InMemoryEstimateRepository();
       return estimateRepo.create(makeEstimate({ id: ESTIMATE_ID })).then(() =>
@@ -344,7 +382,7 @@ const ROWS: Row[] = [
           { gateway: mockGateway(JSON.stringify({
             estimateReference: ESTIMATE_ID,
             editActions: [
-              { type: 'add_line_item', lineItem: { description: 'Disposal fee', quantity: 1, unitPrice: 7500, category: 'labor' } },
+              { type: 'add_line_item', lineItem: { description: 'Disposal fee', quantity: 1, unit: 'each', unitPrice: 7500, category: 'labor' } },
             ],
             confidence_score: 0.9,
           })), estimateRepo },
@@ -360,6 +398,14 @@ const ROWS: Row[] = [
         p,
         execContext(),
       );
+    },
+    // B7.5 (AC-7) — same pin as update_invoice above.
+    assertPayload: (payload) => {
+      const actions = payload.editActions as Array<Record<string, unknown>>;
+      const lineItem = actions[0].lineItem as Record<string, unknown>;
+      expect(lineItem.description).toBe('Disposal fee');
+      expect(lineItem.quantity).toBe(1);
+      expect(lineItem.unit).toBe('each');
     },
   },
   {
@@ -785,6 +831,8 @@ describe('C1 — voice payload-contract drift (per mapped intent)', () => {
     it(`${row.intent} (${proposalType}, ${row.mode}) — ${row.note}`, async () => {
       const { proposal } = await row.draft();
       const missing = missingFieldsFor(proposal);
+
+      row.assertPayload?.(proposal.payload as Record<string, unknown>);
 
       if (row.mode === 'gated') {
         // Honest gating today: either the drafted proposal still carries

@@ -404,11 +404,16 @@ describe('groundEditActionPricing', () => {
   });
 
   /**
-   * B7.5 — unit of measure. The unit vocabulary IS the catalog's (see
-   * catalogUnitSchema), and the edit prompt shows the model a
-   * `name | unit | price` catalog table it can copy a unit out of — so the
-   * unit is grounded on exactly the same terms as the price: the catalog is
-   * the only source, and anything ungrounded loses it.
+   * B7.5 — unit of measure. `unit` is DESCRIPTIVE and VOCABULARY-BOUNDED
+   * (`catalogUnitSchema` is a closed enum) — unlike `unitPrice`, which is
+   * money and must be catalog-grounded. `dropOutOfVocabularyUnit` drops a
+   * unit only when it does NOT parse as a member of that enum; a
+   * vocabulary-valid unit is not invention and survives even on a line
+   * this pass could not ground to a catalog item — the flagship case:
+   * "three 45-microfarad capacitors" when that exact part isn't
+   * catalogued still keeps "each". An exact/high catalog match still
+   * stamps the catalog item's own (more specific) unit over anything the
+   * model emitted.
    */
   describe('unit of measure', () => {
     const capacitor = item('45-Microfarad Capacitor', 4_250, {
@@ -441,32 +446,70 @@ describe('groundEditActionPricing', () => {
       expect(lineItems[0].unit).toBe('each');
     });
 
-    it('an UNCATALOGUED line drops the LLM-emitted unit — no invented unit', () => {
+    it('an UNCATALOGUED line drops an OUT-OF-VOCABULARY unit — still no invention', () => {
       const { result, lineItems } = ground(
-        [addAction({ description: 'bespoke flux manifold', quantity: 1, unit: 'each', unitPrice: 8_000 })],
+        [
+          addAction({
+            description: 'bespoke flux manifold',
+            quantity: 1,
+            unit: 'microfarads', // not a member of catalogUnitSchema
+            unitPrice: 8_000,
+          }),
+        ],
         [capacitor],
       );
       expect(lineItems[0]).not.toHaveProperty('unit');
       expect(lineItems[0].pricingSource).toBe('uncatalogued');
       expect(result.anyUncatalogued).toBe(true);
       // The ungrounded PRICE still rides through (executable field), as
-      // before — only the ungrounded unit is dropped.
+      // before — only the out-of-vocabulary unit is dropped.
       expect(lineItems[0].unitPrice).toBe(8_000);
     });
 
-    it('a NO-CATALOG tenant drops the LLM-emitted unit too', () => {
+    it('an UNCATALOGUED line KEEPS a vocabulary-valid unit — the B7.5 flagship case', () => {
+      // "Add three 45-microfarad capacitors" — this exact part is not in
+      // the catalog, but "each" is a real catalogUnitSchema member, not an
+      // invented one, so it must survive onto the uncatalogued line.
+      const { result, lineItems } = ground(
+        [
+          addAction({
+            description: 'bespoke flux manifold',
+            quantity: 3,
+            unit: 'each',
+            unitPrice: 8_000,
+          }),
+        ],
+        [capacitor],
+      );
+      expect(lineItems[0].unit).toBe('each');
+      expect(lineItems[0].pricingSource).toBe('uncatalogued');
+      // Surviving unit does NOT change the price/review path.
+      expect(result.anyUncatalogued).toBe(true);
+      expect(lineItems[0].unitPrice).toBe(8_000);
+    });
+
+    it('a NO-CATALOG tenant drops an out-of-vocabulary unit too', () => {
       const { lineItems } = ground(
-        [addAction({ description: 'standard labor', quantity: 2, unit: 'hour', unitPrice: 12_000 })],
+        [addAction({ description: 'standard labor', quantity: 2, unit: 'furlongs', unitPrice: 12_000 })],
         [],
       );
       expect(lineItems[0]).not.toHaveProperty('unit');
       expect(lineItems[0].pricingSource).toBe('uncatalogued');
     });
 
-    it('a price-conflict ("did you mean") line drops the unit until the operator picks', () => {
+    it('a NO-CATALOG tenant keeps a vocabulary-valid unit', () => {
+      const { lineItems } = ground(
+        [addAction({ description: 'standard labor', quantity: 2, unit: 'hour', unitPrice: 12_000 })],
+        [],
+      );
+      expect(lineItems[0].unit).toBe('hour');
+      expect(lineItems[0].pricingSource).toBe('uncatalogued');
+    });
+
+    it('a price-conflict ("did you mean") line drops an out-of-vocabulary unit until the operator picks', () => {
       const { result, lineItems } = ground(
         // 7_500 vs 12_000 exceeds BOTH conflict thresholds → not snapped.
-        [addAction({ description: 'standard labor', quantity: 2, unit: 'each', unitPrice: 7_500 })],
+        [addAction({ description: 'standard labor', quantity: 2, unit: 'furlongs', unitPrice: 7_500 })],
         [labor],
       );
       expect(lineItems[0]).not.toHaveProperty('unit');
@@ -475,6 +518,15 @@ describe('groundEditActionPricing', () => {
       // (proposals/resolve-line.ts) lands 'hour'.
       expect(result.catalogResolution?.[0]?.[0].unit).toBe('hour');
       expect(result.catalogResolution?.[0]?.[1].unit).toBeUndefined();
+    });
+
+    it('a price-conflict ("did you mean") line KEEPS a vocabulary-valid unit until the operator picks', () => {
+      const { lineItems } = ground(
+        [addAction({ description: 'standard labor', quantity: 2, unit: 'each', unitPrice: 7_500 })],
+        [labor],
+      );
+      expect(lineItems[0].unit).toBe('each');
+      expect(lineItems[0].pricingSource).toBe('ambiguous');
     });
 
     it('a unit never touches the money: the grounded line totals identically without one', () => {
