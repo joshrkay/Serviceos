@@ -38,6 +38,7 @@ import { PgLocationRepository } from '../../src/locations/pg-location';
 import { PgUserRepository } from '../../src/users/pg-user';
 import { PgAuditRepository } from '../../src/audit/pg-audit';
 import { PgSettingsRepository } from '../../src/settings/pg-settings';
+import { ensureTenantSettings } from '../../src/settings/settings';
 import { PgDelayNoticeStateRepository } from '../../src/notifications/pg-delay-notice-state';
 import {
   DelayNotificationCoordinator,
@@ -104,7 +105,19 @@ describe('Integration — "on my way" by voice (real Postgres)', () => {
     coordinator = new DelayNotificationCoordinator(queue, selector, stateRepo);
 
     tenantA = await createTestTenant(pool);
+    // The tenant's own zone, which is what bounds the service day. Previously
+    // unset: the resolver fell back to UTC, and the tests passed on that
+    // fallback. It now declines without a zone, because a UTC day for a
+    // western tenant already contains the next local morning — so a real
+    // tenant must have one here for these assertions to mean anything.
+    await ensureTenantSettings(tenantA.tenantId, settingsRepo);
+    await settingsRepo.upsertIdentityFields(tenantA.tenantId, { timezone: 'America/Chicago' });
     tenantB = await createTestTenant(pool);
+    // Tenant B needs a zone too, or the cross-tenant negative below would
+    // pass for the WRONG reason — declining on a missing timezone rather than
+    // proving it cannot see tenant A's appointment.
+    await ensureTenantSettings(tenantB.tenantId, settingsRepo);
+    await settingsRepo.upsertIdentityFields(tenantB.tenantId, { timezone: 'America/Chicago' });
 
     techAClerkId = `clerk-tech-a-${crypto.randomUUID()}`;
     techA = await insertTechnician(pool, tenantA.tenantId, {

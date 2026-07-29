@@ -98,6 +98,12 @@ async function buildHarness(enqueueResult: string | null = 'appt-1:en_route'): P
     appointmentRepo,
     enRouteCoordinator,
     auditRepo,
+    // A real tenant has a zone. Without one the handler now declines rather
+    // than fall back to a UTC service day, which late in a western tenant's
+    // evening already contains the NEXT local morning.
+    settingsRepo: {
+      findByTenant: async () => ({ tenantId: TENANT, timezone: 'America/Chicago' }),
+    } as never,
     now: () => NOW,
   };
 
@@ -191,6 +197,11 @@ describe('B5.5 — handleEnRouteSms', () => {
       assignmentRepo: new InMemoryAssignmentRepository(),
       appointmentRepo: new InMemoryAppointmentRepository(),
       enRouteCoordinator: { enqueueEnRouteNotice },
+      // A real tenant has a zone; without one the handler declines rather
+      // than fall back to a UTC day that can reach the next local morning.
+      settingsRepo: {
+        findByTenant: async () => ({ tenantId: TENANT, timezone: 'America/Chicago' }),
+      } as never,
       now: () => NOW,
     };
 

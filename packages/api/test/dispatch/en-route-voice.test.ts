@@ -310,6 +310,57 @@ describe('B5.5 — resolveEnRouteAppointment (speaker scoping + resolution outco
   // branch, so a NAMED reference could reach across days — "on my way to the
   // Garcia job" resolved a Garcia appointment scheduled for TOMORROW and sent
   // that customer an ETA a day early.
+  // Raised in PR review. Bidirectional substring containment matched "the Ann
+  // job" against a customer named "Joanne" — and a lone eligible appointment
+  // resolves without asking, so the ETA went to the wrong customer. Every
+  // other resolution path degrades to not_found; this one degraded to
+  // confidently wrong on an OUTBOUND message.
+  it('AC-3: a spoken name that is only a SUBSTRING of a customer never matches', async () => {
+    const joanneAppt = appt({ id: 'appt-jo', jobId: 'job-jo', scheduledStart: new Date('2026-07-29T15:00:00.000Z') });
+    const joanneJob = job({ id: 'job-jo', summary: 'AC repair', customerId: 'cust-jo' });
+
+    const deps: EnRouteResolutionDeps = {
+      assignmentRepo: { findByTechnician: async () => [assignment({ id: 'a-jo', appointmentId: 'appt-jo' })] },
+      appointmentRepo: { findById: async (_t, id) => (id === 'appt-jo' ? joanneAppt : null) },
+      jobRepo: { findById: async (_t, id) => (id === 'job-jo' ? joanneJob : null) },
+      customerRepo: {
+        findById: async () => customer({ id: 'cust-jo', firstName: 'Joanne', lastName: 'Whitfield', displayName: 'Joanne Whitfield' }),
+      },
+    };
+
+    const result = await resolveEnRouteAppointment(deps, {
+      tenantId: TENANT,
+      technicianId: TECH,
+      jobReference: 'the Ann job',
+      now: NOW,
+      dayBoundary: TODAY_BOUNDARY,
+    });
+
+    expect(result).toEqual({ kind: 'not_found' });
+  });
+
+  it('AC-3: a possessive reference still matches its customer', async () => {
+    const garciaAppt = appt({ id: 'appt-g', jobId: 'job-g', scheduledStart: new Date('2026-07-29T15:00:00.000Z') });
+    const garciaJob = job({ id: 'job-g', summary: 'AC repair', customerId: 'cust-garcia' });
+
+    const deps: EnRouteResolutionDeps = {
+      assignmentRepo: { findByTechnician: async () => [assignment({ id: 'a-g', appointmentId: 'appt-g' })] },
+      appointmentRepo: { findById: async (_t, id) => (id === 'appt-g' ? garciaAppt : null) },
+      jobRepo: { findById: async (_t, id) => (id === 'job-g' ? garciaJob : null) },
+      customerRepo: { findById: async () => customer({}) },
+    };
+
+    const result = await resolveEnRouteAppointment(deps, {
+      tenantId: TENANT,
+      technicianId: TECH,
+      jobReference: "Garcia's job",
+      now: NOW,
+      dayBoundary: TODAY_BOUNDARY,
+    });
+
+    expect(result).toMatchObject({ kind: 'resolved', appointmentId: 'appt-g' });
+  });
+
   it('AC-3: a named reference never reaches tomorrow\'s appointment', async () => {
     const tomorrow = appt({
       id: 'appt-tomorrow',
@@ -582,10 +633,32 @@ describe('B5.5 — handleEnRouteVoiceIntent (router orchestration)', () => {
       appointmentRepo: { findById: async () => appt1 },
       enRouteCoordinator,
       auditRepo: { create: auditCreate } as any,
+      // A real tenant has a zone. These fixtures previously had none and
+      // passed only because the day boundary fell back to UTC — the fallback
+      // that could reach the next local day and text tomorrow's customer.
+      settingsRepo: {
+        findByTenant: async () => ({ tenantId: TENANT, timezone: 'America/Chicago' }),
+      } as any,
       now: () => NOW,
       ...overrides,
     };
   }
+
+  // Raised in PR review: defaulting the service day to UTC when the tenant's
+  // zone is unknown can select the NEXT local day — late evening for a
+  // Los Angeles tenant already sits in tomorrow UTC — and text that customer
+  // a day early. Declining is the only honest answer; there is no safe
+  // fallback zone (Phoenix mis-booking postmortem, migration 263).
+  it('declines when the tenant has no usable timezone, rather than assuming UTC', async () => {
+    const deps = baseDeps({
+      settingsRepo: { findByTenant: async () => ({ tenantId: TENANT, timezone: null }) } as never,
+    });
+
+    const outcome = await handleEnRouteVoiceIntent(deps, { tenantId: TENANT, recordingId: RECORDING_ID });
+
+    expect(outcome.kind).toBe('unavailable');
+    expect(deps.enRouteCoordinator.enqueueEnRouteNotice).not.toHaveBeenCalled();
+  });
 
   it('unavailable when there is no recordingId (no answer surface on this path)', async () => {
     const outcome = await handleEnRouteVoiceIntent(baseDeps(), { tenantId: TENANT });

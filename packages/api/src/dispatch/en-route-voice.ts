@@ -94,11 +94,43 @@ function normalizeJobPhrase(text: string): string {
     .trim();
 }
 
-/** `needle` is already normalized by `normalizeJobPhrase` and non-empty. */
+/**
+ * `needle` is already normalized by `normalizeJobPhrase` and non-empty.
+ *
+ * WHOLE TOKENS ONLY. This was bidirectional substring containment, which
+ * matched "the Ann job" against a customer named "Joanne" — and because a
+ * lone eligible appointment resolves without asking, that sent an ETA to the
+ * wrong customer. Every other resolution path on this branch degrades to
+ * not_found or a clarification; substring containment degraded to
+ * confidently wrong on an OUTBOUND customer message.
+ *
+ * Both sides are split on word boundaries and compared as token sequences, so
+ * "garcia" still matches "Jamie Garcia" and "AC repair" still matches "AC
+ * repair — second visit", while "ann" no longer matches "joanne". Possessives
+ * are stripped first ("garcia's" → "garcia") rather than being left to fail a
+ * token match.
+ */
+function tokenize(text: string): string[] {
+  return text
+    .toLowerCase()
+    .replace(/[’']s\b/g, '')
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean);
+}
+
+/** Does `needle`'s token sequence appear contiguously in `hay`'s? */
+function containsTokenRun(hay: string[], needle: string[]): boolean {
+  if (needle.length === 0 || needle.length > hay.length) return false;
+  return hay.some((_, i) => needle.every((tok, j) => hay[i + j] === tok));
+}
+
 function referenceMatchesText(text: string | undefined, needle: string): boolean {
-  const haystack = (text ?? '').toLowerCase().trim();
-  if (!haystack) return false;
-  return haystack.includes(needle) || needle.includes(haystack);
+  const hay = tokenize(text ?? '');
+  const needleTokens = tokenize(needle);
+  if (hay.length === 0 || needleTokens.length === 0) return false;
+  return containsTokenRun(hay, needleTokens) || containsTokenRun(needleTokens, hay);
 }
 
 /**
@@ -343,13 +375,28 @@ async function resolveCanonicalTechnician(
  * SMS-keyword leg (sms/tech-status/en-route-keyword.ts) so both scope the
  * bare "on my way" case to the SAME calendar day.
  */
+/**
+ * The tenant-local service day, or `null` when the tenant's zone is unknown.
+ *
+ * Returns null rather than falling back to UTC. "Today" is the entire scope of
+ * an "on my way" — a UTC day for an America/Los_Angeles tenant contains the
+ * NEXT local morning from late evening onward, so the fallback could select
+ * tomorrow's appointment and text that customer a day early. That is the same
+ * class as the resolver's clock-time defaulting: a wrong zone does not fail
+ * loudly, it silently answers about the wrong day. The repo's rule holds here
+ * too — `routes/onboarding.ts` refuses to ever default a zone (Phoenix
+ * mis-booking postmortem, migration 263), and there is no safe fallback.
+ *
+ * Callers treat null as "cannot answer" and say so, rather than guessing.
+ */
 export async function resolveTodayBoundary(
   settingsRepo: Pick<SettingsRepository, 'findByTenant'> | undefined,
   tenantId: string,
   now: Date,
-): Promise<{ start: Date; end: Date }> {
+): Promise<{ start: Date; end: Date } | null> {
   const settings = settingsRepo ? await settingsRepo.findByTenant(tenantId).catch(() => null) : null;
-  const tz = settings?.timezone && isRuntimeTimezone(settings.timezone) ? settings.timezone : 'UTC';
+  const tz = settings?.timezone;
+  if (!tz || !isRuntimeTimezone(tz)) return null;
   return getDayBoundaries(localDateKey(now, tz), tz);
 }
 
@@ -393,7 +440,10 @@ export async function handleEnRouteVoiceIntent(
   if (!technician) return { kind: 'unavailable' };
 
   const now = deps.now ? deps.now() : new Date();
+  // No tenant zone → we cannot say which appointments are "today", so we
+  // decline rather than guess a day. See resolveTodayBoundary.
   const dayBoundary = await resolveTodayBoundary(deps.settingsRepo, input.tenantId, now);
+  if (!dayBoundary) return { kind: 'unavailable' };
 
   const resolution = await resolveEnRouteAppointment(
     {

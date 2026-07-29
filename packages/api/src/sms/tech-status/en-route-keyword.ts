@@ -103,6 +103,11 @@ export async function handleEnRouteSms(
   try {
     const now = deps.now ? deps.now() : new Date();
     const dayBoundary = await resolveTodayBoundary(deps.settingsRepo, ctx.tenantId, now);
+    // Without the tenant's zone "today" is undefined, and a UTC fallback can
+    // reach the next local day — texting tomorrow's customer. Decline instead;
+    // `handled: false` threads the message onto the tech's conversation
+    // rather than dropping it.
+    if (!dayBoundary) return { handled: false };
 
     // Speaker-scoped resolution — the SAME resolver the voice leg uses.
     // "on my way" over SMS never names a job (the keyword IS the whole
