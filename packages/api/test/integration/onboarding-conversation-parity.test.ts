@@ -42,7 +42,7 @@ import {
   Proposal,
   missingFieldsFor,
 } from '../../src/proposals/proposal';
-import { approveProposal } from '../../src/proposals/actions';
+import { approveProposal, editProposal } from '../../src/proposals/actions';
 import { InMemoryProposalExecutionRepository } from '../../src/proposals/proposal-execution';
 import { transitionProposal, UNDO_WINDOW_MS } from '../../src/proposals/lifecycle';
 import { ProposalExecutor } from '../../src/proposals/execution/executor';
@@ -447,15 +447,41 @@ describe('B1.19 — onboarding parity: conversation vs. wizard, real Postgres', 
     // card lets the same proposal execute into a real pending invitation.
     // (`pending_invitations` has existed since migration 082 — the handler
     // used to refuse on the false premise that no target existed.)
+    // Driven through the REAL edit → approve path, not a hand-built approved
+    // proposal. An earlier version of this block set `missingFields: []` on a
+    // `Proposal` literal, which is a no-op: the gate lives in
+    // `sourceContext.missingFields`, so the field did not exist on the type
+    // and cleared nothing. It also skipped `approveProposal`, the only place
+    // the gate is enforced — so it could not have caught a gate that refused
+    // to clear. `editProposal` supplies the email exactly as the operator
+    // would, `clearSatisfiedMissingFields` lifts the gate on that exact key,
+    // and approval then has to succeed on its own merits.
     const target = teamProposals[0]!;
-    const filled: Proposal = {
-      ...target,
-      payload: { ...target.payload, email: 'carlos@example.com' },
-      missingFields: [],
-      status: 'approved',
+    expect(missingFieldsFor(target)).toContain('email');
+
+    const { proposal: edited } = await editProposal(
+      proposalRepo,
+      target.tenantId,
+      target.id,
+      conversationTenant.userId,
+      'owner',
+      { email: 'carlos@example.com' },
+    );
+    expect(missingFieldsFor(edited)).toEqual([]);
+
+    const approved = await approveProposal(
+      proposalRepo,
+      target.tenantId,
+      target.id,
+      conversationTenant.userId,
+      'owner',
+    );
+    expect(approved.status).toBe('approved');
+
+    // Past the undo window so the executor will run it.
+    const filled = (await proposalRepo.updateStatus(target.tenantId, target.id, 'approved', {
       approvedAt: new Date(Date.now() - UNDO_WINDOW_MS - 100),
-    };
-    await proposalRepo.create(filled);
+    }))!;
     const handlers = createExecutionHandlerRegistry({
       settingsRepo,
       packActivationRepo,
