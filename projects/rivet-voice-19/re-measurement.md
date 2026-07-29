@@ -1,299 +1,275 @@
-# Rivet Voice 19 — Read-only re-measurement (FIFTH PASS)
+# Rivet Voice 19 — Read-only re-measurement (SIXTH PASS)
 
 Measured by a fresh, read-only agent. No source or test file was changed to produce this
-document; the only file written is this one. All mutation testing was done in a **detached git
-worktree**, which has been removed and verified gone (`git worktree list` shows only the main
-tree). Scored independently against the C1 done ladder (0 Absent · 1 Specced · 2 Present ·
-3 Wired · 4 Proven · 5 Reachable) and the master prompt's own rung-5 bar: *a spoken sentence
-produces a persisted row plus an audit event, reachable from a real surface, proven against real
-Postgres* — not merely that a handler works given resolved ids.
+document; the only file written is this one. Mutation testing was done in **detached git
+worktrees** (`git worktree add --detach`), symlinking `node_modules` in; each worktree was removed
+and confirmed gone before this document was finalized. Scored against the C1 done ladder
+(0 Absent · 1 Specced · 2 Present · 3 Wired · 4 Proven · 5 Reachable) and the master prompt's own
+rung-5 bar: *a spoken sentence produces a persisted row plus an audit event, reachable from a real
+surface, proven against real Postgres* — not merely that a handler works given resolved ids.
 
-**Head measured: `a14c2d7`** (`test(B1.19): the timezone and email gate proofs`) — the commit the
-brief named. Previous pass measured `42adb1c`.
-
-**Tree state disclosure (again, and it matters this time).** The tree was clean at `a14c2d7` when
-this audit began. **Mid-audit the branch advanced to `c6fbcdc`** (`fix(B1.19): send the browser
-timezone from the conversational client`) — written by an agent other than me; I made no
-Write/Edit call outside this document. By the time I finished writing, the branch had advanced
-twice more — to `005d549` (`fix(B4.7, B5.3): an unmatched explicit clock time refuses, never
-falls through`), with further uncommitted edits to `packages/api/src/invoices/public-invoice-service.ts`
-and `run-log.md` in flight. **Everything scored below is the committed state at `a14c2d7`.**
-`c6fbcdc` is analysed separately in the addendum because it is the fix for this pass's headline
-finding; `005d549` hardens B4.7/B5.3 rows that are already at rung 5 and cannot raise the number;
-the uncommitted work is disclosed and counted for nothing. This branch is being written by
-multiple agents concurrently, and any number in this document decays the moment it is published —
-re-derive before relying on it.
+**Head named in the brief: `bc6652f`** (`fix(B7.5): show the unit to the operator, not just to
+their customer`), branch `claude/rivet-voice-master-prompt-xwz102`. **The branch advanced by one
+commit while this pass was in progress**: `ca92e91` (`docs(rivet-voice-19): P-44, P-45, and close
+out every stale in-flight row`) landed mid-audit, from a concurrent session. Checked before relying
+on anything: `git diff bc6652f..ca92e91 --stat` touches **only** `projects/rivet-voice-19/
+run-log.md` (18 lines) — it retroactively labels two already-fixed defects as the "ninth and tenth
+false greens" and closes out seven stale "In flight" rows that had, in fact, already shipped, in
+commits this pass had already read and mutation-tested directly from source (`29b5de2`/`168ae3f`
+for the brand-voice mixed-utterance defect, `267c4ad` for the invoice-unit whitelist gap,
+`0d18e53`/`218b520`/`5c959f7`/`67244ed` for P-40/P-41/P-42/P-43). **No source file changed.**
+Everything scored below rests on source read and tests run at `bc6652f`; `ca92e91` does not alter
+any of it. This pass treats the run log's own "ninth/tenth" labeling only as a label, not as
+evidence — the evidence is the diffs read and the mutations run directly against source, below.
 
 ---
 
 ## Headline
 
-**10 / 19 at rung 5.** Previous pass: 7/19.
+**12 / 19 at rung 5.** Prior pass (fifth, `9c35b62`): 10/19 at `a14c2d7`, 11/19 at `c6fbcdc`
+(branch tip when that pass finished writing).
 
-Three rows moved up — **B5.3, B7.6, B7.7** — and each move was mutation-verified by me, not
-accepted on a passing test. Nothing moved down.
+**12/19 is the ceiling, and this pass measures the branch landing exactly on it — not a point
+below it, and not a self-awarded point above it.**
 
 | Bucket | Count | Rows |
 |---|---|---|
-| **Rung 5** | **10** | B4.7, B5.3, B5.5, B6.3, B7.1, B7.4, B7.6, B7.7, B8.1, B8.10 |
+| **Rung 5** | **12** | B1.19, B4.7, B5.3, B5.5, B6.3, B7.1, B7.4, B7.5, B7.6, B7.7, B8.1, B8.10 |
 | Rung 4 — capped by unratified Part F (F-1, F-2) | 2 | B1.18, B9.1 |
-| Rung 4 — real gap remaining | 2 | B1.19, B7.5 |
 | Rung 3 — deferred five, unchanged | 5 | B7.8, B7.9, B7.10, B9.4, B9.12 |
 
-Exact arithmetic: 10 + 2 + 2 + 5 = **19**.
+Arithmetic: 12 + 2 + 5 = **19**.
 
-## The ceiling, stated before the detail
+Two rows moved since the fifth pass's own scored head (`a14c2d7` = 10/19): **B1.19** (4→5, credited
+by the fifth pass's own addendum once `c6fbcdc` landed — re-verified independently here, see
+below) and **B7.5** (4→5, genuinely new work on this pass: `267c4ad`, `d9aee4d`, `bc6652f`).
+**Nothing moved down.**
 
-`docs/PRD-v4-part-E-state.md:364` (Part E run-log #24) removed the pre-award of B9.1 and B1.18.
-`docs/PRD-v4-part-F-decisions.md:12` (F-1) and `:31` (F-2) are **both still marked PROPOSED —
-awaiting ratification**. No sign-off, timestamp or approver marker for either exists anywhere in
-the repo. Therefore:
+## The ceiling, re-derived from source, not assumed
 
-> **The honest ceiling for this run is 12/19** = 19 − 5 deferred − 2 capped by unratified Part F.
-> B9.1 and B1.18 cannot exceed rung 4 however good their code is, and their code *is* good
-> (B1.18's execution proof and B9.1's issue-leg cross-tenant negative both exist and are green).
-> **12 is the ceiling, not a failure.**
+`docs/PRD-v4-part-E-state.md:364` (Part E run-log #24) reads: *"Pre-award removed from the Phase 1
+prompt: B9.1 and B1.18 were counted toward the 14/19 target on the strength of Part F entries not
+yet decided... the re-measurement reports the actual number (12–14/19), never the assumed one."*
 
-**10/19 is two short of that ceiling.** The two rows short are B1.19 and B7.5, and both are
-described precisely below.
+I read `docs/PRD-v4-part-F-decisions.md` at the current HEAD directly:
+
+```
+## F-1 · B9.1 issuance semantics — PROPOSED (awaiting ratification)
+## F-2 · B1.18 lock-as-tap amendment — PROPOSED (awaiting ratification)
+```
+
+Both still say **PROPOSED**, with no sign-off, timestamp, or approver marker anywhere in the file
+or its git history (`git diff a14c2d7..bc6652f -- docs/PRD-v4-part-F-decisions.md` is empty — the
+file has not moved since the fifth pass, and F-1/F-2 were PROPOSED then too). Per the brief's own
+non-negotiable rule and Part E's precedent, an unratified PROPOSED entry awards nothing:
+
+> **Ceiling = 19 − 5 deferred − 2 capped (B1.18, B9.1) = 12.**
+
+The five deferred items (B7.8, B7.9, B7.10, B9.4, B9.12) are confirmed untouched below, not
+assumed. **This pass measures exactly 12/19 — the ceiling itself, not a number I rounded up to
+it.** I looked hard for a reason it should be lower (see "False greens hunted and not found,"
+below) and did not find one that holds up under mutation.
 
 ---
 
-## THE EIGHTH FALSE GREEN — say it loudly
+## What changed since the fifth pass, verified from source
 
-> **At the audited head `a14c2d7`, `fac9e4f` claims to "capture the tenant timezone
-> conversationally". Nothing in production could send it.** The server learned to accept
-> `clientTimezone` (`routes/onboarding-conversation.ts:38,68` →
-> `ai/orchestration/onboarding-conversation.ts:433` →
-> `ai/tasks/onboarding/tenant-settings-proposer.ts:190`), and the same commit made
-> `isIdentityDone` *require* a timezone. But `packages/web` was outside that commit's scope:
-> `git show a14c2d7:packages/web/src/hooks/useOnboardingConversation.ts | grep clientTimezone`
-> returns **nothing**. Every real conversational onboarding would have hit the new gate on every
-> turn — the fix made the conversational path strictly worse than the form wizard, which is the
-> exact outcome the commit's own reasoning said it was avoiding.
+Commits `c6fbcdc..bc6652f` (16 commits). I read every non-doc commit's diff directly (`git show`),
+not the run log's description of it.
 
-### Why this is a *false green* and not merely an incomplete build
+### B7.5 — genuinely moved 4 → 5
 
-The web suite was green — and it was green **because it asserted the bug**. At `a14c2d7`:
+Three commits, in order:
+
+**`267c4ad` — `dropOutOfVocabularyUnit` (renamed from `stripUngroundedUnit`).**
+`packages/api/src/ai/resolution/catalog-resolver.ts:509-517`:
+
+```ts
+export function dropOutOfVocabularyUnit(
+  li: Record<string, unknown>,
+): Record<string, unknown> {
+  if (li.unit === undefined) return li;
+  if (catalogUnitSchema.safeParse(li.unit).success) return li;   // ← the narrowing
+  const next = { ...li };
+  delete next.unit;
+  return next;
+}
+```
+A spoken unit that parses against the catalog's own closed enum now survives on an uncatalogued
+line; anything else is still dropped. Price grounding, `anyUncatalogued`, `requiresReview` and the
+confidence cap are untouched (confirmed by reading `applyCatalogPricing` and
+`edit-action-grounding.ts:277-336` — every call site still stamps `needsPricing: true` /
+`pricingSource: 'uncatalogued'|'ambiguous'` around the renamed call; only the unit's fate changed).
+
+Same commit fixes an independent gap found while working: `InvoiceTaskHandler`'s line-item
+whitelist (`invoice-task.ts:283-321`, now `:319`) never copied `unit` at all, so a voice-drafted
+**invoice** lost its unit before grounding ever ran — `EstimateTaskHandler` forwards the parsed
+item unchanged and never had this gap, so the two document types had silently diverged.
+
+**Mutation-tested by me, detached worktree (`wt/mutate1`, pinned to `bc6652f`, removed and
+confirmed gone):**
+- Reverted `dropOutOfVocabularyUnit` to the unconditional strip (removed the `safeParse` check) →
+  `test/ai/resolution/catalog-resolver.test.ts` + `edit-action-grounding.test.ts` +
+  `voice-payload-contract.test.ts`: **12 failed**, all `expected undefined to be 'each'/'hour'`.
+- Removed the invoice `unit` passthrough (`invoice-task.ts:319`) → `test/ai/tasks/P5-003A.test.ts`
+  + `voice-payload-contract.test.ts` (`create_invoice` row): **2 failed**, same shape
+  (`expected undefined to be 'each'`).
+
+Both mutations are load-bearing — the right kind (an early return would have masked a weaker
+mutation; these fail on the exact assertion the fix claims to satisfy).
+
+**`d9aee4d` — unit on the public invoice** (customer-facing parity with the already-shipped
+`PublicEstimateView.unit` from `ea46e5a`). `public-invoice-service.ts` + `InvoicePaymentPage.tsx`,
+pinned by a 320px Playwright spec (`e2e/invoice-payment-mobile.spec.ts`) and a jsdom layout test.
+
+**`bc6652f` — unit on the *operator's own* views**, not just the customer's: `EstimatesPage.tsx`
+(inline line-items editor *and* the "what the customer sees" preview modal),
+`InvoicesPage.tsx`, `JobSheets.tsx`. Block+`break-words` child of the existing fixed Qty track —
+no new grid column, so height can grow at 320px but width cannot (pinned by
+`EstimatesPage.layout.test.tsx` / `InvoicesPage.layout.test.tsx` / `JobSheets.layout.test.tsx`,
+23 tests, all green at HEAD).
+
+**Mutation-tested by me:** removed the unit `<span>` JSX from `EstimatesPage.tsx`'s inline editor
+AND its preview-modal render site (`:472`, `:644`) → `EstimatesPage.layout.test.tsx`: **3 of 7
+failed** (`expected [...] to have a length of 2 but got 1`). Load-bearing.
+
+**AC-by-AC read against the current head:**
+1. Contract change — done (`b5595dc`/`ea46e5a`, prior passes).
+2. Resolver threading — done, mutation-verified above.
+3. Classifier structured part mentions — **partially literal.** The two named sentences ("Add
+   three 45-microfarad capacitors…", "Add two hours of labor…") appear verbatim and are asserted
+   for `quantity`+`unit` in `catalog-resolver.test.ts`, `edit-action-grounding.test.ts`, and C1
+   (`voice-payload-contract.test.ts`) — but **not** as `fixtures/ai/transcripts/*.json` launch
+   fixtures consumed by `npm run test:voice-fixtures`, which is what AC-3's literal wording asks
+   for. I checked: no such fixture exists (`grep -rl capacitor fixtures/ai/transcripts/` — no
+   hits). This is **not an oversight** — it is the same precedent the run itself established at
+   decision #8/#8b/#8c: that fixture corpus models the **inbound caller (S1)** surface, and
+   `update_estimate`/`update_invoice` are deliberately excluded from `S1_ALLOWED_PROPOSAL_TYPES`
+   (confirmed below). Adding them there would recreate the exact false-green species this run spent
+   three rounds removing. The proof instead lives one level stronger — full chain through the real
+   `PgEntityResolver` in `spoken-parts-edit-unit-execution.test.ts` — which is more, not less, than
+   AC-3 asks for on the resolution axis, but is not literally "a launch fixture." Noted as a
+   literal-wording gap that does not, on balance, hold the row below rung 5, given the north-star
+   test (spoken sentence → persisted row → audit, reachable from a real surface, proven against
+   real Postgres) is satisfied by the operator-path proof.
+4. Targeting (named document / clarification / honest gate) — done via B7.6's `resolveEstimate`
+   traversal, re-exercised by the parts test with a **hallucinated** id in the scripted reply
+   (Rule 3 of `docs/solutions/test-failures/a-fixture-arranged-to-pass-proves-nothing.md`
+   deliberately applied) so resolution has to win, not just be present.
+5. Integration — `spoken-parts-edit-unit-execution.test.ts` (now resolver-driven, not UUID-driven)
+   + `spoken-parts-line-item.test.ts` (DB round-trip, editor-level). Both green at HEAD.
+6. UI — done, both customer and operator sides, four render sites, 320px/44px pinned.
+7. C1 — `assertPayload` on `create_invoice`, `draft_estimate`, `update_invoice`, `update_estimate`
+   rows all pin `name`+`quantity`+`unit`; 37/37 green.
+
+**Verdict: B7.5 is rung 5.** The one literal gap (AC-3's fixture location) is a wording/vehicle
+mismatch the run correctly avoided filling the wrong way, not a missing capability.
+
+### B1.19 — re-confirmed at 5 (already credited by the fifth pass's addendum; independently re-verified here, plus one further hardening)
+
+`8ac5a51` — `packages/api/src/ai/tasks/onboarding/tenant-settings-proposer.ts:216`:
+```ts
+: ` — timezone ${payload.timezone}`);
+```
+replacing a summary that named every other missing field but never the resolved zone. This closes
+the residual concern the fifth pass explicitly flagged as surviving `c6fbcdc`: AC-5 requires the
+timezone "explicitly confirmed, never guessed," and a silently browser-detected zone the owner
+never reads is a detection, not a confirmation. Naming it in the approval summary makes the tap the
+owner already performs into that confirmation.
+
+**Mutation-tested by me:** reverted the summary line to `''` (pre-fix) → `test/ai/onboarding/
+proposal-generation.test.ts`: **1 failed** (`AC-5 — a resolved zone is NAMED in the summary…`,
+`expected '...' to contain 'America/Phoenix'`). Load-bearing.
+
+Everything else the fifth pass credited for B1.19's rung 5 (client sends `clientTimezone` since
+`c6fbcdc`, verified `packages/web/src/hooks/useOnboardingConversation.ts` now greps positive for
+the field; parity proof on real Postgres with audit + cross-tenant negative
+`onboarding-conversation-parity.test.ts:519-551`; surface wired in `OnboardingShell`; `tools` state
+present) is unchanged in this window and re-confirmed green in the full suite run below.
+
+### B1.18 — stays at 4, correctly, despite two more real code fixes landing
+
+`29b5de2` gates a MIXED brand-voice utterance ("be friendly, and never quote prices by text") on
+`missingFields: ['freeText']` instead of letting it half-apply — this closes a genuine
+**approved-then-silently-partial** defect (worse than approved-then-failed: nothing surfaces the
+loss). `168ae3f` fixes the third copy of the same false-green pattern in
+`update-brand-voice-voice-execution.test.ts`, which had literally asserted
+`missingFieldsFor(drafted)).toEqual([])` for the same mixed payload the code now correctly gates —
+re-read `[HELD: none needed]` — this is a drafting-gate change, not money/RLS/auth, and correctly
+carries no `[HELD:` label.
+
+Both are real quality improvements. **Neither can move the row's rung**, because F-2
+(`docs/PRD-v4-part-F-decisions.md:31`) is still PROPOSED and the master prompt's own rule is
+explicit: *"rung 5 for this row is contingent on a Part F amendment ratifying lock-as-tap... Do not
+count it restored by documentation alone."* Confirmed `git diff a14c2d7..bc6652f --
+docs/PRD-v4-part-F-decisions.md` is empty — no attempted self-ratification. **B1.18 = 4.**
+
+### B9.1 — stays at 4, unchanged in this window
+
+No commit in `c6fbcdc..bc6652f` touches the issue-invoice path. F-1 still PROPOSED. **B9.1 = 4.**
+
+### Deferred five, boot-guard C2, live-call UTC — still deferred, re-verified
 
 ```
-packages/web/src/hooks/useOnboardingConversation.test.ts:39
-  expect.objectContaining({ method: 'POST', body: JSON.stringify({}) }),
-:119  expect.objectContaining({ body: JSON.stringify({ sessionId: 'sess-3' }) }),
-:231  expect.objectContaining({ body: JSON.stringify({ sessionId: 'sess-other' }) }),
+git diff origin/main...HEAD --name-only -- packages/api/src packages/web/src \
+  | grep -iE "expense|crew|late-fee|payment-reminder|batch-invoice|lookup"
 ```
-
-Three assertions pinning that the client sends **no timezone**, byte-exact, at the moment the
-server began requiring one. This is the same genus as the seven before it, in its purest form
-yet: not a fixture arranged to pass, but a *contract assertion frozen against the old behaviour*
-while the other half of the system moved. A reviewer reading either side alone sees green.
-
-The integration proof did not catch it either, because it supplies the field itself:
-`test/integration/onboarding-conversation-parity.test.ts` passes `clientTimezone` into the
-orchestrator directly. Server-side test green, client-side test green, feature dead in between —
-**nothing in the suite spanned the seam**.
-
-**Status:** fixed at `c6fbcdc`, which lands the hook change and — correctly — *updates* the three
-body assertions to expect the field rather than loosening them (`useOnboardingConversation.test.ts`
-now derives `BROWSER_TZ` from `Intl` so the tests pin that it is genuinely sent). That commit
-landed while this audit was running and is **not** part of the scored head. Its effect is in the
-addendum.
-
-### Second finding on the same row, NOT fixed by `c6fbcdc`
-
-Master prompt B1.19 AC-5 requires an **"explicitly confirmed"** timezone, "never guessed —
-regression pin stays green". What ships is a **silently browser-detected** zone: the hook reads
-`Intl.DateTimeFormat().resolvedOptions().timeZone` and posts it; the conversation never surfaces
-it, never reads it back, and never asks the owner to confirm it. The form wizard at least renders
-it in a select the owner can see and change (`IdentityStep`). The conversational path has no such
-moment. This is defensible (it is not *guessed* by the server, and the never-default rule holds —
-absent ⇒ gate, never a fallback), but it is **not** "explicitly confirmed", and no Part F entry
-amends AC-5 to say so. Recorded, not scored as a lie.
+→ 12 hits, **all** `packages/api/src/ai/voice-quality/corpus/cassettes/*.json` (cassette
+regenerations, the sha256-over-system-prompt churn explained in prior passes).
+`git diff ... --name-status -- .../cassettes | awk '{print $1}' | sort | uniq -c` → **66 `M`, 0
+`A`** — nothing added, nothing removed on net; `npm run voice-quality` still 67/67. No
+`AddCrewMember`/`RemoveCrewMember`/`LogExpense`/`ApplyLateFee`/`SendPaymentReminder`/
+`BatchInvoice` handler class line appears anywhere in the diff against `origin/main`. Boot-guard
+C2: `grep -r bootGuard packages/api/src` — nothing. Live-call UTC: unchanged, and no focus item's
+fixtures depend on it (B4.7's reschedule/cancel tests thread an explicit tenant timezone and a
+fixed `now`).
 
 ---
 
-## What DID move, and why I believe it
+## Gates — every one re-run by me at `bc6652f`, not taken from the log
 
-Three rows moved. I re-derived each by reading the diff, then killed a mutant for each in the
-detached worktree. All three mutants died.
+| Gate | Command | Result |
+|---|---|---|
+| Typecheck | `npx tsc --project tsconfig.build.json --noEmit` | **exit 0** |
+| Unit | `npx vitest run` (packages/api) | **1064 files / 12255 tests passed**, 5 files skipped, 6 expected-fail, 12 skipped, 38 todo |
+| Integration | `npm run test:integration` (Docker, RLS role on) | **195 files / 1064 tests passed**, exit 0 |
+| Voice quality | `npm run voice-quality` | **67/67**, `launchGate.pass=true` |
+| C1 | `npx vitest run test/proposals/voice-payload-contract.test.ts` | **37/37** |
+| Launch fixtures | `npm run test:voice-fixtures` | **22/22** |
+| Web onboarding suites | `npx vitest run .../useOnboardingConversation.test.ts .../ConversationStep.test.tsx` | **16/16** |
+| Web B7.5 layout suites | `EstimatesPage/InvoicesPage/JobSheets/InvoicePaymentPage.layout.test.tsx` | **23/23** |
 
-### B5.3 — 4 → 5. The seventh false green is genuinely fixed.
-
-`7fbff6e` gives `resolveTechnician` the `GREATEST(similarity, strict_word_similarity)` shape
-`resolveCustomer` already had (`pg-entity-resolver.ts:222-226`, applied at `:1126`+), and — the
-half that matters — **changes the fixture to speak what the transcript contains**:
-`test/integration/fixtures/rivet-voice-19-focus.json:43,178` now say `"Carlos"`, not
-`"Carlos Vega"`. The contradiction with the run's own classifier launch fixture
-(`intent-classifier.launch-fixtures.test.ts:192`, `'Carlos'`) is resolved in favour of the
-classifier, which was the correct model of reality.
-
-The seed is honest: `rivet-voice-19-focus.test.ts:355` seeds `Carlos Vega` as a `users` row and
-`:356-359` gives Dana Johnson a job summarised `'Water heater replacement'`; the first-declared
-guard (`:427-450`) fails first if any spoken surname ever reappears in a summary or job number.
-
-**Mutation test (mine, detached worktree, since removed):** replaced `TECH_SCORE_EXPR` with plain
-`similarity(...)`, nothing else.
-
-```
-FAIL b5-3-reassign-appointment: payload.toTechnicianId … expected undefined to be '3302…'
-FAIL b5-3-negative-named-reference-must-not-fall-back: payload.toTechnicianId … expected undefined
-2 failed | 9 passed
-```
-
-Load-bearing. Execution is proven at the resolved-id seam by
-`test/integration/reassign-appointment-voice.test.ts` (row change, feasibility gate asserted to
-have run, staleness gate, `appointment.technician_assigned` audit, cross-tenant negative) — the
-same composite standard on which the previous pass awarded B4.7 rung 5.
-
-### B7.6 — 4 → 5. The ungateable free-text reference is gateable.
-
-`9bed666` fixes three dead halves at once: `resolveEstimate` gains the customer → jobs →
-estimates traversal (`pg-entity-resolver.ts:547`+) with a **separate** `ESTIMATE_DOC_STOPWORDS`
-set so `"the Garcia estimate"` reduces to the needle `garcia` that actually clears the 0.60 floor;
-`estimate-edit-task.ts:497-500` lifts the gate for a router-resolved id **after** `findById`
-confirms it; and `estimates.customer_message` is deliberately *not* matched — the column the
-nudge false green was planted in.
-
-`test/integration/update-estimate-execution.test.ts` was rewritten to stop feeding the drafting
-leg a UUID. It now speaks `"the Garcia estimate"`, resolves it through the real
-`PgEntityResolver` via the real `resolveVoiceEntityReferences` (`:246-253`), drafts against a
-scripted reply carrying a **hallucinated** `estimateId` (`:257`), asserts the resolver's id won
-(`:289-290`), asserts the gate lifted (`:293`), executes through
-`createExecutionHandlerRegistry` (`:320`) and then asserts the **row** (qty 2, `unit 'hour'`,
-catalog price 9500 beating the model's 9400, correct recomputed totals, version 2), **one**
-`estimate.updated` audit, and a three-way cross-tenant negative (the sentence resolves nothing
-in tenant B; scoped read null; a forged cross-tenant execute refused).
-
-Anti-arrangement is explicit: the customer's surname appears nowhere on the job summary
-(`'AC condenser replacement'`) or the estimate's `customer_message`, and
-`test/integration/entity-resolution.test.ts` asserts a literal zero-row count for
-`estimate_number/customer_message/summary ILIKE '%garcia%'` before resolving.
-
-**Mutation test (mine):** severed the traversal (returned `not_found` for a non-empty needle).
-`3 failed (3)` — every test in the file dies. Load-bearing.
-
-### B7.7 — 4 → 5. The gate no longer depends on an LLM echoing a UUID.
-
-`19090b9` makes `UpdateJobTaskHandler` read the router-resolved `jobId` and verify it against the
-repo before trusting it (`job-edit-task.ts:363`), and tightens the fail-closed branch to delete
-*any* id-shaped `payload.jobId` rather than only the losing candidate.
-
-The new suite in `test/integration/update-job-execution.test.ts:427-778` is the strongest proof
-in the run. Three independent anti-vacuity devices: (1) `:624-639` proves the ILIKE display-text
-search returns **zero** rows for the spoken name, so the old fallback cannot reach the job;
-(2) a prefix decoy customer `Marco Garcialopez` (`:594-600`) would make a loose matcher ambiguous;
-(3) the scripted drafting reply hallucinates a `jobId` (`:450`) that must lose. Then: the payload
-carries the resolver's id and `missingFields` is `[]` (`:660-666`); the real `approveProposal` →
-production registry → **`jobs.status = 'completed'`, `completed_at` non-null**, plus `job.updated`
-*and* `job.status_changed` audits (`:671-720`); an **illegal** transition ("the Raman job",
-seeded `scheduled`) resolves and drafts but is refused at execution with the row untouched
-(`:723-757`); and a cross-tenant block where even a *handed* real `jobId` stays gated (`:759-778`).
-
-**Mutation test (mine):** made `resolvedJobIdFrom` return `undefined`. `3 failed | 8 passed`.
-Load-bearing.
-
-### Rows that were already 5 and got stronger
-
-- **B5.5** — `436fe49` fixes a genuine P1 in the run's own code: `referenceMatchesText` was
-  bidirectional substring containment, so *"the Ann job"* matched a customer named *"Joanne"* and
-  a lone eligible appointment resolves without asking — a wrong-customer **outbound ETA text**.
-  Now whole-token runs with possessive stripping (`dispatch/en-route-voice.ts:110-131`). Second:
-  `resolveTodayBoundary` fell back to UTC when the tenant zone was missing, so an evening
-  reference in a Pacific tenant could reach the next local day; it now returns `null` and both
-  callers decline (`en-route-voice.ts:446`, `sms/tech-status/en-route-keyword.ts:110`). The
-  fixtures had **no** tenant zone and were passing *because of* the fallback — including tenant B
-  in the cross-tenant negative, which would have started passing for the wrong reason. That is an
-  honest self-report of a near-miss false green, and it was corrected properly.
-- **B4.7** — `9bed666` also closes a P1 the same author introduced: `resolveAppointmentByClockTime`
-  passed `undefined` to `resolveDateTime`, which silently substitutes `America/New_York`
-  (`resolve-datetime.ts:161`), so "cancel the 2pm" in a Phoenix tenant could match the
-  Eastern-equivalent instant and feed a wrong `appointmentId` into an irreversible action. Now a
-  **terminal** `not_found` (`pg-entity-resolver.ts:853`), with a CONTROL test proving the same
-  fixture *does* resolve once the tenant states Eastern — so the refusals are the missing zone,
-  not an unmatchable appointment (`entity-resolution.test.ts`, four cases).
-
----
-
-## The two rows short of the ceiling
-
-### B1.19 — 4. Two reasons, one of them now fixed off-head.
-
-At `a14c2d7`: the eighth false green above. The invitation-audit gap the previous pass flagged
-**is** closed — `7e49319` asserts `user.invitation_created` against real Postgres with
-`entity_type`, `entity_id`, `actor_id`, `metadata.email`, a null `clerkInvitationId`, and a
-cross-tenant negative on both the invitation and its audit
-(`onboarding-conversation-parity.test.ts:519-551`). Timezone parity is genuinely proven in the
-same file (`:357-376` both paths write the same column; `:379-439` a zoneless conversation
-**gates** and leaves the column NULL rather than guessing). The surface is real
-(`ConversationStep.tsx` + `useOnboardingConversation.ts`, `OnboardingShell.tsx:297`), the `tools`
-capture state exists (`onboarding-conversation.ts:349,624`), and the AC-8 Playwright journey
-asserts the exchange count lands in [10,15] (`e2e/journeys/onboarding-v2-conversation.spec.ts:149`).
-
-What holds it at 4 at the scored head is that the timezone capture was **unreachable from the
-real surface** — which is precisely the clause rung 5 turns on. The remaining, unfixed item is
-AC-5's "explicitly confirmed" wording versus a silently browser-detected zone.
-
-The team-member leg still needs a human-typed email. I do **not** count that against it any more:
-`fac9e4f` makes it an honest, schema-enforced gate (`proposals/contracts/onboarding.ts`, the same
-`trim().email().max(320)` rule as `inviteUserSchema`), and `a14c2d7`'s
-`onboarding-conversation-team-email.test.ts` proves the previous shape — an approvable card that
-died at execution because `carlos` cleared the gate — is gone. Typing one field on a review card
-is inside the proposal/approval model, not outside it.
-
-### B7.5 — 4. The chain closes for catalogued lines; the requirement's own word does not.
-
-Real progress, all of it verified: `ea46e5a` fixes **silent data loss** (editing any line item
-replaces every row, and `lineItemSchema` did not declare `unit`, so Zod stripped it and an
-untouched line's unit became NULL — `shared/contracts.ts:122`), carries the unit to the customer
-(`public-estimate-service.ts` `PublicEstimateView.unit`), and renders it on the estimates page,
-invoices page, customer approval page and the PDF, pinned by a jsdom class-contract test and a
-320px Playwright spec. `update-estimate-execution.test.ts` now proves a **spoken sentence** puts a
-`unit` on a persisted row with an audit event and a cross-tenant negative.
-
-What keeps it at 4 is the requirement's own text — *"structured name + quantity + **unit**"* —
-against the shipped design: **a spoken unit on an uncatalogued line is deliberately stripped**
-(`ai/resolution/catalog-resolver.ts:486-506`, `delete next.unit`). The unit is a catalog fact by
-design, so for a 1–3-truck shop with a thin catalog, the common case — the master prompt's own
-flagship sentence, *"Add three 45-microfarad capacitors to the Smith estimate"* — persists name
-and quantity and **no unit** unless that exact capacitor is already in the catalog. Two
-corroborating gaps: the only test that speaks the capacitor sentence
-(`spoken-parts-edit-unit-execution.test.ts:250`) still hands the drafting leg
-`estimateReference: <UUID>` — the arrangement `9bed666` removed from the sibling file — so
-*(spoken part) × (spoken document reference)* is nowhere co-proven; and C1 still carries no
-`unit` on any parts payload row (`test/proposals/voice-payload-contract.test.ts:270,285,321,347`),
-so master prompt AC-7 is unmet.
-
-This is the most movable row in the document. **One Part F entry** recording "a spoken unit is out
-of scope; the catalog is the sole source" would amend the requirement's text to match a
-deliberate, well-argued build — the same instrument F-1 and F-2 use — and B7.5 would be a 5.
-Documentation alone restores nothing *elsewhere*, but here the disagreement genuinely is between
-the requirement's wording and a design decision, not between a claim and the code.
+Every number the master prompt claimed for this head (`12,255 unit · 1,064 integration / 195
+files · voice-quality 67/67`) **reproduced exactly** on independent re-run. Nothing decayed between
+when it was measured and when I re-measured it.
 
 ---
 
 ## 19-row table
 
-Prior rung = fourth-pass re-measurement at `42adb1c`. New rung = this pass at `a14c2d7`.
+Prior rung = fifth-pass re-measurement (10/19 at `a14c2d7`, with 11/19 noted for `c6fbcdc` in its
+own addendum — I use the addendum's 11/19 column as "prior" for B1.19 since that is the fifth
+pass's own considered position on the branch tip it saw). New rung = this pass at `bc6652f`.
 
-| # | Requirement | 4th pass | **New** | Moved? | One-line justification (file:line evidence) |
+| # | Requirement | Prior | **New** | Moved? | One-line justification (file:line evidence) |
 |---|---|---|---|---|---|
-| B1.18 | Brand voice captured, then locked | 4 | **4** | no | `docs/PRD-v4-part-F-decisions.md:31` (F-2) still **PROPOSED**; capped at 4 by the brief's non-negotiable rule regardless of code. Execution proof itself is sound (`test/integration/update-brand-voice-voice-execution.test.ts`, green in the 193-file run). |
-| B1.19 | Conversational onboarding | 4 | **4** | no (reasons swapped) | **Eighth false green**: at `a14c2d7` the server requires `clientTimezone` (`tenant-settings-proposer.ts:190`) and no client sends it — `git show a14c2d7:packages/web/src/hooks/useOnboardingConversation.ts` has no such field, while `useOnboardingConversation.test.ts:39` pins `body: JSON.stringify({})`. The invitation-audit gap **is** closed (`onboarding-conversation-parity.test.ts:519-551`, real PG). AC-5's "explicitly confirmed" zone is still browser-detected silently. |
-| B4.7 | Book / move / cancel by speaking | 5 | **5** | no | Held and strengthened: the zone-defaulting P1 on the clock-time branch is now a terminal refusal (`pg-entity-resolver.ts:853`) with a control test proving the refusal is the missing zone, not an unmatchable appointment (`entity-resolution.test.ts`, 5 cases incl. NULL zone, garbage zone, name-bearing clock ref). Create/move/cancel proofs unchanged and green. |
-| B5.3 | Assign work (reassign) by speaking | 4 | **5** ▲ | **yes, 4→5** | Seventh false green fixed: `TECH_SCORE_EXPR` = `GREATEST(similarity, strict_word_similarity)` (`pg-entity-resolver.ts:222-226`) and the fixture now speaks `"Carlos"` (`fixtures/rivet-voice-19-focus.json:43,178`), matching the classifier contract. Mutation-verified by me: reverting to plain `similarity` fails 2 cases. Execution + feasibility + staleness + audit + cross-tenant at `reassign-appointment-voice.test.ts`. |
-| B5.5 | "On my way" by app / SMS / voice | 5 | **5** | no | Strengthened by two real P1 fixes: whole-token name matching so "the Ann job" no longer ETA-texts "Joanne" (`en-route-voice.ts:110-131`), and a zoneless tenant now declines a service day instead of falling back to UTC (`:446`, `en-route-keyword.ts:110`). The fixtures that were passing *because of* the UTC fallback now seed a real zone. |
-| B6.3 | Time entries by voice | 5 | **5** | no | Untouched since the previous pass; `log-time-entry-execution.test.ts` (row `durationMinutes:120` + resolved `jobId`, one `time_entry.logged_completed` audit with actor, cross-tenant negative, P&L rollup) green in the 193-file run. |
-| B7.1 | Push-to-talk from any screen | 5 | **5** | no | `git diff 5b5538d..a14c2d7 -- packages/web/src/components/Shell.tsx …/voice …/VoiceBar.tsx` is empty. UI capability, no resolution leg. |
-| B7.4 | Job notes dictated | 5 | **5** | no | Unchanged; `add-note-voice-execution.test.ts` + focus case `b7-4-add-note` (fixture `rivet-voice-19-focus.json:6-30`, realistic seed `'AC repair'` at `:349`) both green. |
-| B7.5 | Parts by speaking (name + qty + unit) | 4 | **4** | no (new reason) | Big advance — silent data loss fixed (`shared/contracts.ts:122`), unit on the customer view + PDF + 320px specs, and a **spoken** sentence now persists `unit 'hour'` with audit + cross-tenant (`update-estimate-execution.test.ts`). But a spoken unit on an **uncatalogued** line is stripped by design (`catalog-resolver.ts:506`), the capacitor sentence still drafts from a UUID (`spoken-parts-edit-unit-execution.test.ts:250`), and C1 has no `unit` row (`voice-payload-contract.test.ts:270-347`). |
-| B7.6 | Spoken line-item to existing estimate | 4 | **5** ▲ | **yes, 4→5** | `resolveEstimate` traverses customer → jobs → estimates (`pg-entity-resolver.ts:547`+) and the task lifts the gate on a repo-verified router id (`estimate-edit-task.ts:497`). `"the Garcia estimate"` → resolver beats a hallucinated id → row + one `estimate.updated` audit + three-way cross-tenant negative (`update-estimate-execution.test.ts`). Mutation-verified by me: severing the traversal fails all 3. |
-| B7.7 | Job status by voice | 4 | **5** ▲ | **yes, 4→5** | The gate no longer needs an LLM to echo a UUID (`job-edit-task.ts:363`). `"the Garcia job"` → real resolver past a prefix decoy → payload carries the resolver id, `missingFields []` → real `approveProposal` → production registry → `status='completed'` + `job.updated` + `job.status_changed` audits; illegal transition refused with the row untouched; cross-tenant gated even when handed a real id (`update-job-execution.test.ts:427-778`). Mutation-verified by me: 3 fail. |
-| B7.8 | Expense by voice *(deferred)* | 3 | **3** | no | No `LogExpenseTaskHandler` line changed in `voice-extended-tasks.ts` across `5b5538d..a14c2d7`; the only diff hits are prose comments. |
-| B7.9 | Read-only lookups *(deferred)* | 3 | **3** | no | No handler touched; the `lookup-*` filenames in the diff are cassette regenerations (integrity §2). |
-| B7.10 | Crew add/remove *(deferred)* | 3 | **3** | no | No `AddCrewMember`/`RemoveCrewMember` line changed. (They share `resolveTechnician`, so they inherit its fix — and its missing overflow guard, §Findings.) |
-| B8.1 | Estimate from spoken description | 5 | **5** | no | Unchanged; `draft-estimate-execution.test.ts` drives the real `EstimateTaskHandler` with catalog grounding overriding the LLM price. Green. |
-| B8.10 | Nudge by voice | 5 | **5** | no | Unchanged and green; the new `resolveEstimate` traversal now also serves `send_estimate_nudge` (`ESTIMATE_DOC_INTENTS`, `entity-resolution.ts:86-90`) with no regression — `estimate-nudge.test.ts` green in the 193-file run. |
-| B9.1 | Invoice from a spoken sentence | 4 | **4** | no | `docs/PRD-v4-part-F-decisions.md:12` (F-1) still **PROPOSED**; capped at 4 by the brief's rule. Proof leg exists (`issue-invoice-conversation-resolution.test.ts`, cross-tenant negative on the issue transition). |
+| B1.18 | Brand voice captured, then locked | 4 | **4** | no | `docs/PRD-v4-part-F-decisions.md:31` (F-2) still PROPOSED, re-confirmed byte-identical since `a14c2d7`. Code improved (`29b5de2` mixed-utterance gate, `168ae3f` de-arranged the third copy of the same false green) but cannot move the rung per the brief's own rule. |
+| B1.19 | Conversational onboarding | 4→5 (fifth pass's own addendum, at `c6fbcdc`) | **5** | no (confirmed, hardened) | Client sends `clientTimezone` (`c6fbcdc`, verified `useOnboardingConversation.ts` greps positive); AC-5's residual "explicitly confirmed, never guessed" gap closed by `8ac5a51` — zone now named in the approval summary (`tenant-settings-proposer.ts:216`), mutation-verified by me (reverting the line fails `proposal-generation.test.ts`'s AC-5 case). Parity + audit + cross-tenant negative unchanged and green (`onboarding-conversation-parity.test.ts:519-551`). |
+| B4.7 | Book / move / cancel by speaking | 5 | **5** | no | Unchanged this window; `005d549` (between the two passes) hardened the explicit-clock-time refusal further, no regression. |
+| B5.3 | Assign work (reassign) by speaking | 5 | **5** | no | `67244ed` (between passes) closed the technician-overflow asymmetry (P-43) and de-arranged the AC-4 test's full-name-only case — strengthens, does not move, an already-5 row. |
+| B5.5 | "On my way" by app / SMS / voice | 5 | **5** | no | Untouched in this window. |
+| B6.3 | Time entries by voice | 5 | **5** | no | Untouched in this window. |
+| B7.1 | Push-to-talk from any screen | 5 | **5** | no | Untouched. |
+| B7.4 | Job notes dictated | 5 | **5** | no | Untouched. |
+| B7.5 | Parts by speaking (name + qty + unit) | 4 | **5 ▲** | **yes, 4→5** | Uncatalogued lines now keep a vocabulary-valid spoken unit (`catalog-resolver.ts:509-517`, `dropOutOfVocabularyUnit`); invoice-side unit passthrough fixed (`invoice-task.ts:319`); both mutation-verified by me (12 + 2 failures respectively). Operator-facing render sites added (`bc6652f`, `EstimatesPage.tsx:472,644`, mutation-verified, 3/7 fail). C1 pins name+qty+unit on all 4 parts rows. One literal-wording gap noted (AC-3's fixture vehicle) but does not hold the row below 5 — see detail above. |
+| B7.6 | Spoken line-item to existing estimate | 5 | **5** | no | Untouched in this window. |
+| B7.7 | Job status by voice | 5 | **5** | no | Untouched in this window. |
+| B7.8 | Expense by voice *(deferred)* | 3 | **3** | no | No handler line touched; cassette-only diff. |
+| B7.9 | Read-only lookups *(deferred)* | 3 | **3** | no | No handler touched; cassette-only diff. |
+| B7.10 | Crew add/remove *(deferred)* | 3 | **3** | no | No handler touched; inherits B5.3's new overflow guard only if/when built, not yet built. |
+| B8.1 | Estimate from spoken description | 5 | **5** | no | Untouched in this window. |
+| B8.10 | Nudge by voice | 5 | **5** | no | Untouched in this window. |
+| B9.1 | Invoice from a spoken sentence | 4 | **4** | no | `docs/PRD-v4-part-F-decisions.md:12` (F-1) still PROPOSED. No code touched this window. |
 | B9.4 | Batch invoice *(deferred)* | 3 | **3** | no | No touch. |
 | B9.12 | Reminder + late fee *(deferred)* | 3 | **3** | no | No touch. |
 
@@ -303,214 +279,203 @@ Prior rung = fourth-pass re-measurement at `42adb1c`. New rung = this pass at `a
 
 ## Integrity checks
 
-### 1 · D-013 — INTACT
+### 1 · D-013 — INTACT, re-verified against `origin/main` at this HEAD
 
-`git diff 5b5538d..a14c2d7` on the enforcement sites returns **no rows at all** for
-`routes/assistant.ts`, `ai/voice-turn/create-voice-turn-processor.ts`,
-`ai/tasks/proposal-approval-task.ts` and `proposals/surface.ts` — all four byte-untouched.
-`workers/voice-action-router.ts` is **+102 / −0**, additive only, zero deletions, and grepping
-that diff for `isVoiceApproval|isVoiceEdit|ownerSession|RV-071|RV-225|approve_proposal|
-reject_proposal|edit_proposal` returns **nothing**. Both RV-071/RV-225 gate markers still present
-at head.
+```
+git diff origin/main...HEAD --stat -- packages/api/src/routes/assistant.ts \
+  packages/api/src/ai/voice-turn/create-voice-turn-processor.ts \
+  packages/api/src/ai/tasks/proposal-approval-task.ts \
+  packages/api/src/proposals/surface.ts
+```
+→ **empty**. All four are byte-identical to `origin/main`.
 
-**`S1_ALLOWED_PROPOSAL_TYPES` was never widened** — `proposals/surface.ts` is byte-identical to
-the baseline; still eight entries, still no money/send/approval type. Checked against the three
-rows that moved: `reassign_appointment` (B5.3), `update_estimate` (B7.6) and `update_job` (B7.7)
-are all **deliberately excluded** from the caller allowlist and named in its exclusion comment
-(`surface.ts:36-40`). No verdict above rests on a caller-surface reachability claim the product
-refuses; all three are operator-surface intents reached through the recorder → `voice_action_router`
-path, which is production-wired (`app.ts` recording → transcription → `queue.send`, worker
-registered, `entityResolver: sharedEntityResolver`, and `existingEntities` threaded at
-`voice-action-router.ts:1592-1610`).
+`workers/voice-action-router.ts` IS modified on the branch (B5.5's `en_route` branch, from a prior
+pass). Grepped its diff for `isVoiceApproval|isVoiceEdit|ownerSession|RV-071|RV-225|
+approve_proposal|reject_proposal|edit_proposal` — the only matches are the router's own comments
+citing the gate it sits **before** (`voice-action-router.ts:1423-1434`,
+`isVoiceApprovalIntent` imported at `:29`, gate fires at `:1434`), never a change to the gate
+logic itself.
 
-### 2 · Deferred five + boot-guard C2 + live-call UTC — STILL DEFERRED
+### 2 · S1 allowlist — byte-identical, 8 entries
 
-- No `AddCrewMemberTaskHandler` / `RemoveCrewMemberTaskHandler` / `LogExpenseTaskHandler` /
-  `ApplyLateFeeTaskHandler` / `SendPaymentReminderTaskHandler` / `BatchInvoiceTaskHandler` line
-  changed in `voice-extended-tasks.ts`; only prose comment references appear in the diff.
-- **Cassettes: 66 changed, `M` = 66, `A` = 0** — re-verified independently
-  (`git diff 5b5538d..a14c2d7 --name-status -- …/cassettes | awk '{print $1}' | sort | uniq -c`).
-  `npm run voice-quality` → **67/67, `launchGate.pass=true`**, same script count as baseline, so
-  nothing was added or removed on net. Regenerations, not work.
-- Boot-guard default-fail (C2): **no implementation found** — no `bootGuard` / `default-fail`
-  symbol exists anywhere in `packages/api/src`. Still deferred.
-- Live-call UTC datetime fix: **still deferred, and flagged per the master prompt.** No focus
-  item's fixtures depend on it — B4.7's spoken-datetime path threads an explicit tenant timezone
-  and a fixed `now` (`rivet-voice-19-focus.test.ts:76-78`) and asserts a literal UTC instant
-  (`:620`). Note that `9bed666` and `436fe49` both *hardened* zone handling this pass (refuse
-  rather than default), which narrows the blast radius of the deferred bug rather than masking it.
+`packages/api/src/proposals/surface.ts` diff against `origin/main` is empty (same command as
+above). Read the file directly at HEAD: `S1_ALLOWED_PROPOSAL_TYPES` contains exactly
+`create_customer, create_appointment, create_booking, create_job, reschedule_appointment,
+draft_estimate, callback, voice_clarification` — 8 entries. `reassign_appointment`,
+`update_estimate`, `update_invoice`, `update_job`, `send_estimate_nudge`, `update_brand_voice` are
+all named in the file's own exclusion comment as deliberately excluded. This is the fact that makes
+B7.5's AC-3 literal-fixture gap a non-issue (see above): those intents are operator-surface only,
+by design, and do not belong in the S1-facing corpus.
 
-### 3 · Held commits — the same four, all isolated; one borderline new case
+### 3 · Held-commit audit
 
-`git log --oneline --grep='HELD:' 5b5538d..a14c2d7` returns exactly the four from prior passes:
-`370c0fe8`, `abff9c7`, `4db3e13` (all `[HELD: auth]`, isolated to authorization / attribution /
-user provisioning) and `b5595dc` (`[HELD: money-contract]`, the `line_items.unit` column). **No
-new held commit was needed and none was added.** No commit in `42adb1c..a14c2d7` touches money
-movement, RLS policy, or authorization logic.
+```
+git log --oneline --grep='HELD:' 5b5538d..bc6652f
+```
+Ten commits carry a `[HELD:` label: three from before the fifth pass (`370c0fe8`, `abff9c7`,
+`4db3e13`, all `[HELD: auth]`; `b5595dc`, `[HELD: money-contract]`) plus **four new since the
+fifth pass**, all correctly labeled and correctly scoped to money-touching code:
 
-**One borderline case, recorded not asserted as a violation:** `ea46e5a` adds
-`unit: catalogUnitSchema.optional()` to `lineItemSchema` in `packages/api/src/shared/contracts.ts:122`
-— the HTTP money contract — **without** a `[HELD:` label, while its DB-column sibling `b5595dc`
-was labeled `[HELD: money-contract]` for the same field. The field is descriptive, no arithmetic
-reads it (`quantity × unitPriceCents = totalCents` is untouched and pinned by billing-engine
-tests), and `unitPriceCents` / `totalCents` are byte-unchanged — so I do not call this a guardrail
-breach. But the two halves of one money-contract change were labeled inconsistently, and a
-reviewer scanning for `[HELD:` would see only half of it.
+- `267c4ad` `[HELD: money-contract]` — the vocabulary-check unit narrowing + invoice unit
+  passthrough (verified: touches `catalog-resolver.ts`, `edit-action-grounding.ts`,
+  `invoice-task.ts` — all reach a line item that flows into money math's neighboring fields,
+  correctly held even though `unit` itself is descriptive-only).
+- `d9aee4d` `[HELD: money-contract]` — public invoice unit exposure.
+- `0d18e53` `[HELD: money-gate]` — P-40, the $0 placeholder-template approval gate. Read the diff:
+  a real money defect (a $0 default price could silently install and bill zero), correctly held.
+- `5c959f7` `[HELD: money-integrity]` — P-42, the pack-seeding advisory lock. Read the diff: fixes
+  a genuine concurrent-duplicate-catalog-row race, correctly held.
 
-### 4 · Part F — F-1 and F-2 both still PROPOSED
+I checked every non-doc, non-HELD commit in the `a14c2d7..bc6652f` window for money/RLS/auth
+content it should have been held for and was not (`218b520`, `29b5de2`, `168ae3f`, `8ac5a51`,
+`67244ed`, `005d549`, `c6fbcdc`, `bc6652f`): none touch a payment/refund/RLS-policy/permission-
+check path. `29b5de2` is a drafting-gate change (brand voice), correctly unlabeled.
+`218b520`'s `app.ts`/`onboarding-conversation.ts` change is a session-scoped advisory lock for
+conversation-turn concurrency (P-43) and a schedule-payload validation gate (P-41) — neither is
+money movement, RLS, or auth; correctly unlabeled.
 
-| Entry | Subject | Status | Consequence |
-|---|---|---|---|
-| F-1 | B9.1 issuance semantics (two-step reading) | **PROPOSED** (`:12`) | **B9.1 cannot exceed 4** |
-| F-2 | B1.18 lock-as-tap amendment | **PROPOSED** (`:31`) | **B1.18 cannot exceed 4** |
-| F-3 | B5.5 direct audited status act | RECORDED (`:45`) | — |
-| F-4 | B7.5 parts land on billing documents | RECORDED (`:59`) | — |
-| F-5 | B1.19 wizard remains default | RECORDED (`:68`) | — |
-| F-6 | Deferred-set integrity | RECORDED (`:74`) | — |
+**`ea46e5a` remains the one known unlabeled money-contract commit**, from before the fifth pass
+(adds `unit: catalogUnitSchema.optional()` to `lineItemSchema` with no `[HELD:` marker, while its
+DB-column sibling `b5595dc` was labeled). Already recorded by hash in the run log and by the fifth
+pass; no new instance of this class of miss found in this window's commits — the corrective rule
+the run adopted ("label on which object you touched, not which field") held for all four newly
+held commits, and `5c959f7`'s own commit message explicitly cites `ea46e5a` as the reason the rule
+exists.
 
-No ratification marker — sign-off, timestamp, or approver — exists anywhere in the repo for F-1
-or F-2. Both caps applied. **Two rows sit at 4 purely for want of a signature.**
+**No RLS change anywhere**: `git diff origin/main...HEAD | grep -iE 'POLICY|ROW LEVEL SECURITY|
+FORCE'` over migrations returns nothing. **No new migration on this branch at all since the fifth
+pass** (`git log --oneline 5b5538d..bc6652f -- 'packages/api/migrations/*'` is empty — `b5595dc`'s
+migration 265 predates the fifth pass and is the only one on the branch).
 
-Note also what is *missing* from the register: no entry covers the B7.5 spoken-unit scoping
-decision (§B7.5 above) or the B1.19 browser-detected-vs-explicitly-confirmed timezone. Both are
-deliberate design calls made in code with good reasoning, and neither is recorded where a product
-owner would see it.
+### 4 · Voice-action catalog / launch fixtures — consistent
 
-### 5 · Gates, all re-run by me at this head
-
-| Gate | Result |
-|---|---|
-| `npx tsc --project tsconfig.build.json --noEmit` | **exit 0** |
-| `npx vitest run` (api unit) | **1061 files / 12224 tests passed**, 5 files + 12 tests skipped, 6 expected-fail, 38 todo |
-| `npm run test:integration` (full, Docker, RLS role on) | **193 files / 1054 tests passed**, exit 0 |
-| `npm run voice-quality` | **67/67**, `launchGate.pass=true` |
-| C1 `voice-payload-contract.test.ts` | **37/37** |
-| `npm run test:voice-fixtures` | **22/22** |
-| web onboarding-conversation suites (at tip) | **2 files / 16 tests passed** |
-
-Everything the run claims is green **is** green. As every pass before this one has had to say: the
-problem was never a red test.
+`docs/reference/voice-action-catalog.md` documents `update_brand_voice` (§B1.18) and `en_route`
+(§ the non-proposal set) exactly matching `INTENT_TO_PROPOSAL_TYPE` and the deliberate omission
+list; both contract tests green (`intent-classifier.launch-fixtures.test.ts` +
+`launch-slots.test.ts`, 22/22; `voice-payload-contract.test.ts`, 37/37).
 
 ---
 
-## Claims and near-misses worth recording
+## False greens hunted, and not found (this pass)
 
-1. **`fac9e4f`'s subject — "capture the tenant timezone conversationally" — was not true of the
-   product at the commit that made it.** The server half shipped, the client half did not, and
-   three green web assertions pinned the absence. This is the eighth false green and the single
-   most valuable finding in this pass. Fixed off-head at `c6fbcdc`.
-2. **`resolveTechnician` has no overflow guard.** `resolveJob` escalates past
-   `MAX_JOB_CANDIDATES` and `9bed666` gave `resolveEstimate` the same treatment
-   (`MAX_ESTIMATE_CANDIDATES + 1`, escalate on confident overflow). `resolveTechnician`
-   (`pg-entity-resolver.ts:1126`+) is still a bare `LIMIT 5` with no overflow detection, so six
-   technicians named "Mike" yield an arbitrary five-candidate picker that need not contain the
-   right one. Low blast radius at 1–3 trucks, but it is an unexplained asymmetry between three
-   sibling paths, and `add_crew_member` / `remove_crew_member` will inherit it when they are built.
-3. **The AC-4 technician picker test still contains the arrangement `7fbff6e` removed elsewhere.**
-   `entity-resolution.test.ts:670-723` drives the transcript *"Assign Carlos to the Ramirez job"*
-   with `targetTechnicianName: 'Carlos Vega'` against two technicians seeded with **identical**
-   full names, and its comment still says full names were chosen to avoid "a first-name-only fuzzy
-   score landing in a particular confidence band." Post-fix that band is 1.000 and the arrangement
-   is unnecessary. The test is not *wrong* — it still asserts a real picker — but the more
-   realistic and product-relevant ambiguity (two technicians sharing only a **first** name, e.g.
-   Carlos Vega and Carlos Ramirez) remains untested anywhere, and every technician case in
-   `entity-resolution.test.ts:228-296` still speaks a full name.
-4. **`7fbff6e` shipped no test of its own.** Its only coverage is the flipped value in an existing
-   fixture. That coverage is genuinely load-bearing (I killed the mutant), so this is a
-   process note rather than a proof gap — but Guardrail 5 and CLAUDE.md both ask for a regression
-   test in the same commit, and a resolver-level first-name case does not exist.
-5. **Everything else reproduced exactly**: D-013, the S1 allowlist, held-commit isolation, the
-   cassette-regeneration explanation, the deferred five, the B4.7 hallucinated-id create leg,
-   B8.10's migrated-out arrangement, and the previous pass's reading of the `estimates` traversal
-   as the missing piece.
+Per the brief's method, I read the new tests added since the fifth pass for the two named species
+(fixture arranged to pass; contract assertion frozen against moved behavior). Two were already
+present in this window's commits — I found and mutation-verified both independently before the
+concurrent `ca92e91` commit landed and retroactively numbered them "ninth and tenth" in the run
+log: `brand-voice-task.test.ts`'s "positive control" (fixed by `29b5de2`) and
+`update-brand-voice-voice-execution.test.ts:97` (fixed by `168ae3f`) both asserted
+`missingFieldsFor === []` for a mixed brand-voice payload that the execution handler would
+silently half-apply — the same defect pinned as correct behaviour in two files. I did not find an
+eleventh. What I checked specifically, and why each one clears:
 
----
+1. **`onboarding-conversation-seasonal-schedule-gate.test.ts` (P-41).** Scripted LLM responses
+   speak an ordinary, realistic conversation ("$120 an hour", "we work Saturdays in summer");
+   nothing is planted to match a query artificially — the gate fires on a real top-level schema
+   key (`workingHours`), not a synthetic token. Not an arrangement.
+2. **`onboarding-pack-seed-concurrency.test.ts` (P-42).** Genuine `Promise.all` race against real
+   Postgres, asserting zero duplicate catalog rows — the kind of test that cannot be faked by
+   seeding, since the race either produces duplicates or it doesn't.
+3. **`entity-resolution.test.ts`'s de-arranged AC-4 case (`67244ed`).** Now speaks bare "Carlos"
+   (`:798`, `:812`) for the first-name-only case, keeping the identical-full-name case
+   ("Carlos Vega", `:857`, `:871`) as a separate, honestly-labeled test rather than silently
+   dropping the original claim. Not an arrangement; the two cases test two different things now.
+4. **`update-brand-voice-voice-execution.test.ts` (`168ae3f`).** This commit *removes* the tenth
+   false green (a `toEqual([])` assertion pinning the mixed-payload bug as correct — the same bug
+   `29b5de2`'s `brand-voice-task.test.ts` fix removed as the ninth), it does not introduce a new
+   one — verified the replacement (`editProposal` unblocking the gate via the real schema key, then
+   re-asserting `missingFieldsFor` is empty) exercises a real unblock path rather than asserting a
+   synthetic success.
+5. **`spoken-parts-edit-unit-execution.test.ts`'s rewrite (`267c4ad`).** Deliberately hands the
+   scripted LLM reply a **hallucinated** `estimateId` alongside the spoken reference, so the
+   assertion that the resolver's id wins can only pass if resolution genuinely beats the model —
+   the exact discipline decision #11 established after the first three false greens. Each test
+   seeds its own customer with a distinct surname and an ordinary, non-matching `customerMessage`
+   — I checked this is not planted (`'AC service'` / `'Thanks for having us out...'` neither
+   contains the surname).
 
-## Addendum — what `c6fbcdc` (landed mid-audit) changes
-
-`c6fbcdc` adds `clientTimezone` to all three requests the conversational client makes (bootstrap,
-its 404 retry, and each turn), derived from `Intl` with **no** `America/New_York` fallback — so an
-unreportable zone still gates rather than defaulting. It updates the three body assertions to
-expect the field rather than loosening them. I ran the two affected web suites at the tip:
-**16/16 green**, and the assertions now derive `BROWSER_TZ` from `Intl` so they pin that the field
-is genuinely sent.
-
-**With `c6fbcdc`, B1.19 reaches rung 5 and the number is 11/19** — one short of the 12 ceiling,
-with B7.5 the only remaining non-Part-F gap. I am stating both numbers rather than choosing:
-**10/19 at the head this audit was asked to measure (`a14c2d7`), 11/19 at the branch tip
-(`c6fbcdc`)**. Neither is assumed; both were measured. The residual AC-5 concern
-("explicitly confirmed" vs silently browser-detected) survives `c6fbcdc` and is a Part F entry,
-not a build.
+I did not find an eleventh false green in this window. That is a statement about *this window's
+commits*, not a re-litigation of the ten already recorded and fixed, and not a guarantee that a
+more adversarial pass with more time would not find one elsewhere in the ~180-file diff against
+`origin/main` that predates this window.
 
 ---
 
-## What each remaining gap would need
+## Tree state and decay
 
-Ordered by leverage.
-
-1. **Ratify or reject F-1 and F-2.** Two rows are otherwise built, proven and green. This is the
-   single highest-leverage action in the document: it is worth **+2** and costs a signature.
-2. **B7.5 — one Part F entry, or one build.** Either record "the catalog is the sole source of a
-   line's unit; a spoken unit on an uncatalogued line is out of scope" (amending the requirement's
-   "name + quantity + unit" the same way F-1/F-2 amend theirs), **or** allow an uncatalogued line
-   to carry the spoken unit under the existing confidence cap. Whichever is chosen, also add a
-   `unit` to C1's parts payload rows (`voice-payload-contract.test.ts:270-347`, AC-7) and change
-   `spoken-parts-edit-unit-execution.test.ts:250` to speak a document reference instead of a UUID,
-   so *(spoken part) × (spoken reference)* is co-proven in one test.
-3. **B1.19 — land `c6fbcdc` (done) and record the timezone-confirmation decision in Part F.**
-   Either surface the detected zone in the conversation for confirmation, or amend AC-5 to accept
-   browser detection. Right now the requirement says "explicitly confirmed" and the build does not
-   do that.
-4. **Give `resolveTechnician` the overflow guard its two siblings have**, and add the missing
-   first-name-collision case (two Carloses, different surnames) plus a resolver-level first-name
-   resolution test. Cheap, and it closes the last structural asymmetry among the four resolution
-   paths.
-5. **Add a test that spans the client/server seam on `POST /api/onboarding/conversation/turn`.**
-   The eighth false green existed because no test in the repo asserts that what the client sends
-   satisfies what the server requires — server tests supply the field themselves, client tests
-   assert a frozen literal. A contract test over the request body shape would have caught it in
-   either half.
-6. **Give a `not_found` reference a picker.** Carried over unchanged from the previous pass:
-   `toResult` returns `not_found` with zero candidates, so a resolution miss is a dead end rather
-   than a one-tap outcome. Still the difference between "the north star" and "usually works".
-7. **Deferred five, boot-guard C2, live-call UTC** — out of scope, unchanged, and correctly so.
+- **Tree state at measurement:** the working tree was clean throughout — every `git status --short`
+  I ran, including the final one, is empty. **HEAD advanced by one commit while I was writing**:
+  `ca92e91`, from a concurrent session, landed between my gate re-runs and my final `git status`
+  check. Diffed it against `bc6652f` immediately (`git diff bc6652f..ca92e91 --stat`): touches only
+  `projects/rivet-voice-19/run-log.md`, no source. All source-level findings, mutation tests, and
+  gate re-runs in this document were performed at `bc6652f`, before that commit landed, and remain
+  valid against the current tip `ca92e91` because nothing between the two changed source or tests.
+- **Nothing in source decayed while I measured.** Every gate number matched the master prompt's own
+  claimed figures exactly on independent re-run (unit 12255, integration 1064/195 files,
+  voice-quality 67/67, C1 37/37, launch fixtures 22/22), all executed before `ca92e91` landed.
+- **One pre-existing housekeeping item, not from this pass:** a detached-HEAD git worktree
+  (`.../scratchpad/mutation-p44b`, pinned at `5c959f7`) was already present in this session's
+  scratchpad directory before I started, with uncommitted modifications to
+  `onboarding-conversation.ts` and `app.ts` and an untracked test file — leftover mutation-testing
+  scaffolding from an earlier pass in this run that was not cleaned up per the worktree-removal
+  discipline the brief requires. It does not touch the main tree (confirmed `git status --short`
+  on `/home/user/Serviceos` is empty throughout) and its content matches what became commit
+  `218b520` (P-43), so nothing is at risk of shipping unreviewed — but it is exactly the kind of
+  leftover the brief's worktree instructions exist to prevent, and I flag it rather than silently
+  ignore it. I did not delete it, since removing another session's worktree is outside this
+  read-only pass's mandate and the instruction is to report tree state, not to remediate it.
+- **My own two mutation worktrees** (`wt/mutate1`, `wt/mutate2`) were created, used, reverted
+  file-by-file (`git checkout --`), and removed (`git worktree remove --force`) in this pass;
+  `git worktree list` at the end shows only the main tree and the pre-existing `mutation-p44b`
+  worktree described above.
 
 ---
 
-## Commands run (all re-runnable; all read-only against the main tree)
+## Commands run (all re-runnable)
 
 ```bash
-git rev-parse HEAD; git status --short; git log --oneline 42adb1c..HEAD
-git show 7fbff6e 9bed666 19090b9 436fe49 ea46e5a c3a65e8 fac9e4f a14c2d7 7e49319 --stat
-git show a14c2d7:packages/web/src/hooks/useOnboardingConversation.ts | grep clientTimezone  # EMPTY
-git show a14c2d7:packages/web/src/hooks/useOnboardingConversation.test.ts | grep 'body:'    # {} pinned
-git diff 5b5538d..a14c2d7 --numstat -- packages/api/src/routes/assistant.ts \
+git rev-parse HEAD; git status --short; git log --oneline a14c2d7..bc6652f
+git show 267c4ad d9aee4d bc6652f 8ac5a51 29b5de2 168ae3f 67244ed 218b520 0d18e53 5c959f7 --stat
+
+git diff origin/main...HEAD --stat -- packages/api/src/routes/assistant.ts \
   packages/api/src/ai/voice-turn/create-voice-turn-processor.ts \
-  packages/api/src/ai/tasks/proposal-approval-task.ts packages/api/src/proposals/surface.ts   # no rows
-git diff 5b5538d..a14c2d7 --numstat -- packages/api/src/workers/voice-action-router.ts       # 102 / 0
-git diff 5b5538d..a14c2d7 --name-status -- packages/api/src/ai/voice-quality/corpus/cassettes \
-  | awk '{print $1}' | sort | uniq -c                                                        # 66 M, 0 A
-git log --oneline --grep='HELD:' 5b5538d..a14c2d7                                            # same four
+  packages/api/src/ai/tasks/proposal-approval-task.ts packages/api/src/proposals/surface.ts   # empty
+git diff origin/main...HEAD --name-only -- packages/api/src packages/web/src \
+  | grep -iE "expense|crew|late-fee|payment-reminder|batch-invoice|lookup"                    # cassettes only
+git diff origin/main...HEAD --name-status -- packages/api/src/ai/voice-quality/corpus/cassettes \
+  | awk '{print $1}' | sort | uniq -c                                                          # 66 M, 0 A
+git log --oneline --grep='HELD:' 5b5538d..bc6652f
+git diff a14c2d7..bc6652f -- docs/PRD-v4-part-F-decisions.md                                   # empty
 
 cd packages/api
 npx tsc --project tsconfig.build.json --noEmit          # exit 0
-npx vitest run                                          # 1061 files / 12224 tests
-npm run test:integration                                # 193 files / 1054 tests, exit 0
+npx vitest run                                          # 1064 files / 12255 tests
+npm run test:integration                                # 195 files / 1064 tests, exit 0
 npm run voice-quality                                   # 67/67, launchGate.pass=true
 npx vitest run test/proposals/voice-payload-contract.test.ts   # 37/37
 npm run test:voice-fixtures                             # 22/22
 cd ../web && npx vitest run src/hooks/useOnboardingConversation.test.ts \
   src/components/onboarding/v2/steps/ConversationStep.test.tsx   # 16/16
+npx vitest run src/components/estimates/EstimatesPage.layout.test.tsx \
+  src/components/invoices/InvoicesPage.layout.test.tsx \
+  src/components/jobs/JobSheets.layout.test.tsx \
+  src/components/customer/InvoicePaymentPage.layout.test.tsx     # 23/23
 
-# Mutation tests — DETACHED WORKTREE ONLY, pinned to a14c2d7, removed and verified gone
-git worktree add --detach "$WT" HEAD; git -C "$WT" checkout --detach a14c2d7
-#  (a) TECH_SCORE_EXPR -> plain similarity(...)
-#      => rivet-voice-19-focus.test.ts: 2 failed | 9 passed
-#         "payload.toTechnicianId … expected undefined to be '3302…'"
-#  (b) resolveEstimate: return not_found for a non-empty needle (traversal severed)
-#      => update-estimate-execution.test.ts: 3 failed (3)
-#         "annotation.resolved.estimateId … expected undefined"
-#  (c) job-edit-task resolvedJobIdFrom -> always undefined
-#      => update-job-execution.test.ts: 3 failed | 8 passed
-git worktree remove --force "$WT"; git worktree prune; git worktree list   # main tree only ✅
+# Mutation tests — DETACHED WORKTREES ONLY, pinned to bc6652f, removed and verified gone
+WT=.../wt/mutate1; git worktree add --detach "$WT" HEAD
+ln -s .../node_modules "$WT/node_modules"; ln -s .../packages/api/node_modules "$WT/packages/api/node_modules"
+#  (a) dropOutOfVocabularyUnit -> unconditional strip (remove safeParse check)
+#      => catalog-resolver.test.ts + edit-action-grounding.test.ts + voice-payload-contract.test.ts: 12 failed
+#  (b) invoice-task.ts: remove `...(typeof li.unit === 'string' ? { unit: li.unit } : {})`
+#      => P5-003A.test.ts + voice-payload-contract.test.ts (create_invoice row): 2 failed
+#  (c) tenant-settings-proposer.ts: revert summary suffix to '' (pre-8ac5a51)
+#      => proposal-generation.test.ts AC-5 case: 1 failed
+git worktree remove --force "$WT"
+
+WT2=.../wt/mutate2; git worktree add --detach "$WT2" HEAD; ln -s .../node_modules "$WT2/node_modules"
+ln -s .../packages/web/node_modules "$WT2/packages/web/node_modules"
+#  (d) EstimatesPage.tsx: remove the unit <span> from both render sites (:472, :644)
+#      => EstimatesPage.layout.test.tsx: 3 of 7 failed
+git worktree remove --force "$WT2"
+
+git worktree list   # main tree + one pre-existing, unrelated worktree only
 ```
