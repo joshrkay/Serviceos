@@ -218,6 +218,15 @@ function classifierJsonForTurn(script: VoiceQualityScript, turnIndex: number): s
   if (intent === 'request_feedback') {
     if (typeof slots.jobReference === 'string') entities.jobReference = slots.jobReference;
   }
+  // B8.10 — send_estimate_nudge's reference resolution reads
+  // customerName/jobReference off entitiesFrom(context) exactly like
+  // send_estimate/send_invoice; surface whichever the script pins so the
+  // real SendEstimateNudgeTaskHandler's estimateRepo search has something to
+  // resolve against (fixtures.estimates seeds the row it should find).
+  if (intent === 'send_estimate_nudge') {
+    if (typeof slots.customerName === 'string') entities.customerName = slots.customerName;
+    else if (typeof slots.jobReference === 'string') entities.jobReference = slots.jobReference;
+  }
   return JSON.stringify({
     intentType: intent,
     confidence: 0.95,

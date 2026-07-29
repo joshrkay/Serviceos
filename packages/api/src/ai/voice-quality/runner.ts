@@ -311,11 +311,23 @@ async function seedFixtures(
       await repos.proposalRepo.create(coerceProposalDates(p));
     }
   }
-  // Estimates / jobs / leads not surfaced in the v1 schema's optional
-  // fixture set, but the repo bundle exposes them so future schema
-  // versions can extend without touching this signature. Treated as
-  // pass-through for now.
-  void (null as unknown as Estimate);
+  // B8.10 — jobs / estimates now surfaced in the schema's optional fixture
+  // set (fixtures.jobs / fixtures.estimates) so a script can seed a real,
+  // resolvable estimate (e.g. for send_estimate_nudge's reference-search
+  // resolution) instead of the repo bundle always starting empty. Jobs seed
+  // before estimates since an estimate carries a jobId FK by convention
+  // (unenforced in-memory, but seeding order should still make sense).
+  // Leads remain pass-through — no corpus script needs a seeded lead yet.
+  if (script.fixtures.jobs) {
+    for (const j of script.fixtures.jobs as Job[]) {
+      await repos.jobRepo.create(j);
+    }
+  }
+  if (script.fixtures.estimates) {
+    for (const e of script.fixtures.estimates as Estimate[]) {
+      await repos.estimateRepo.create(e);
+    }
+  }
 }
 
 /**
