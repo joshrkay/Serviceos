@@ -329,7 +329,24 @@ function InvoiceLineItems({ items, editable, onChange }: {
             ) : (
               <>
                 <p className="text-sm text-foreground truncate">{item.description}</p>
-                <p className="text-sm text-muted-foreground text-right">{item.qty}</p>
+                {/* B7.5 (operator side) — the descriptive unit sits UNDER the
+                    quantity as a block child of the SAME fixed Qty track, not
+                    a new column, so it can only add height, never width: it
+                    wraps (break-words) inside the existing cell. Mirrors the
+                    customer-facing fix on InvoicePaymentPage — the operator
+                    who spoke "three hours of labor" should see the same unit
+                    their customer sees. */}
+                <p className="text-sm text-muted-foreground text-right">
+                  {item.qty}
+                  {item.unit && (
+                    <span
+                      data-testid={`line-item-unit-${i}`}
+                      className="block min-w-0 break-words text-[10px] leading-tight text-muted-foreground"
+                    >
+                      {item.unit}
+                    </span>
+                  )}
+                </p>
                 <p className="text-sm text-muted-foreground text-right">${formatDollars(item.rate)}</p>
                 <p className="text-sm text-foreground text-right">${formatDollars(item.qty * item.rate)}</p>
               </>

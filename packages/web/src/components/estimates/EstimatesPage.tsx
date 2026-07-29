@@ -458,7 +458,24 @@ function LineItemsEditor({ items, editable, onChange, onAddRow }: {
                 <div className="min-w-0">
                   <p className="text-sm text-foreground truncate">{item.description}</p>
                 </div>
-                <p className="text-sm text-muted-foreground text-right">{item.qty}</p>
+                {/* B7.5 (operator side) — the descriptive unit sits UNDER the
+                    quantity as a block child of the SAME fixed Qty track, not
+                    a new column, so it can only add height, never width: it
+                    wraps (break-words) inside the existing cell. Mirrors the
+                    customer-facing fix on EstimateApprovalPage/InvoicePaymentPage —
+                    the operator who spoke "three hours of labor" should see
+                    the same unit their customer sees. */}
+                <p className="text-sm text-muted-foreground text-right">
+                  {item.qty}
+                  {item.unit && (
+                    <span
+                      data-testid={`line-item-unit-${i}`}
+                      className="block min-w-0 break-words text-[10px] leading-tight text-muted-foreground"
+                    >
+                      {item.unit}
+                    </span>
+                  )}
+                </p>
                 <p className="text-sm text-muted-foreground text-right">${item.rate.toLocaleString()}</p>
                 <p className="text-sm text-foreground text-right">${(item.qty * item.rate).toLocaleString()}</p>
               </>
@@ -617,7 +634,20 @@ function EstimateDocPreview({ est, lineItems, onClose }: {
               {lineItems.map((item, i) => (
                 <div key={i} className="grid grid-cols-[1fr_32px_72px_72px] gap-x-2 px-3 py-2.5 items-center">
                   <p className="text-sm text-foreground">{item.description}</p>
-                  <p className="text-sm text-muted-foreground text-right">{item.qty}</p>
+                  {/* B7.5 (operator side) — same block+break-words technique as
+                      the customer-facing document: the unit adds height inside
+                      the existing 32px Qty track, never a new column. */}
+                  <p className="text-sm text-muted-foreground text-right">
+                    {item.qty}
+                    {item.unit && (
+                      <span
+                        data-testid={`line-item-unit-${i}`}
+                        className="block min-w-0 break-words text-[10px] leading-tight text-muted-foreground"
+                      >
+                        {item.unit}
+                      </span>
+                    )}
+                  </p>
                   <p className="text-sm text-muted-foreground text-right">${item.rate.toLocaleString()}</p>
                   <p className="text-sm text-foreground text-right">${(item.qty * item.rate).toLocaleString()}</p>
                 </div>
