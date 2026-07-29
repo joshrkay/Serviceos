@@ -457,24 +457,87 @@ export class RemoveCrewMemberTaskHandler implements TaskHandler {
 }
 
 // ───────────── add_note ─────────────
+//
+// B7.4 — this used to be the most dangerous voice defect in the product: the
+// handler set only `targetReference` (free text) and left `missingFields`
+// EMPTY, so "Note on the Patel job — wants morning visits" was approvable
+// straight from drafting, and then AddNoteExecutionHandler
+// (proposals/execution/voice-extended-handlers.ts:92-97) refused it because
+// `targetId` was never a UUID. The owner tapped approve and the note was
+// silently lost — no row, no error reaching them.
+//
+// The fix is the tiered resolve-then-gate ladder ComplaintTaskHandler already
+// uses (ai/tasks/complaint-task.ts:92-107): consume the id the router's entity
+// resolver already put on `existingEntities` (voice-action-router.ts:1490-1508)
+// for the target kind, and gate honestly whenever no id is resolvable. An
+// AMBIGUOUS reference never arrives here — the router short-circuits to a
+// voice_clarification picker before drafting.
+//
+// `targetKind` is also gated (not silently defaulted) when the classifier
+// emitted a kind the note store cannot hold: NOTE_ENTITY_TYPES has no
+// 'appointment', so an appointment-scoped note is another approve-then-fail
+// shape. Gating it keeps the refusal at review time, where it is visible.
+
+/** Note target kinds the execution handler can actually persist. */
+const EXECUTABLE_NOTE_TARGET_KINDS = ['job', 'customer', 'invoice', 'estimate'] as const;
+type ExecutableNoteTargetKind = (typeof EXECUTABLE_NOTE_TARGET_KINDS)[number];
+
+function isExecutableNoteTargetKind(value: unknown): value is ExecutableNoteTargetKind {
+  return (
+    typeof value === 'string' &&
+    (EXECUTABLE_NOTE_TARGET_KINDS as readonly string[]).includes(value)
+  );
+}
+
+/**
+ * The resolver-verified id for a note's target kind, read from the same
+ * `existingEntities` seam every other voice task consumes. `customer` also
+ * accepts the verified caller identity (`context.customerId`), matching
+ * ComplaintTaskHandler's precedence: caller-ID first, then resolver output.
+ */
+function resolvedNoteTargetId(
+  context: TaskContext,
+  kind: ExecutableNoteTargetKind,
+): string | undefined {
+  const ee = entitiesFrom(context) as Record<string, unknown>;
+  const candidate =
+    kind === 'customer' ? context.customerId ?? ee.customerId : ee[`${kind}Id`];
+  return isUuid(candidate) ? candidate : undefined;
+}
+
 export class AddNoteTaskHandler implements TaskHandler {
   readonly taskType = 'add_note' as const;
 
   async handle(context: TaskContext): Promise<TaskResult> {
     const ee = entitiesFrom(context);
+    const targetKind = ee.noteTargetKind ?? 'job';
     const payload: Record<string, unknown> = {
-      targetKind: ee.noteTargetKind ?? 'job',
+      targetKind,
+      // The dictated note verbatim. Falls back to the whole utterance only
+      // when the classifier extracted no distinct body.
       body: ee.noteBody ?? context.message,
     };
     const missing: string[] = [];
 
-    if (ee.customerName || ee.jobReference) {
-      payload.targetReference = ee.jobReference ?? ee.customerName;
-    } else {
-      missing.push('targetId');
+    if (!isExecutableNoteTargetKind(targetKind)) {
+      // 'appointment' (or anything unmapped): the note store has no such
+      // entity type, so approving could only ever fail at execution.
+      missing.push('targetKind');
     }
 
-    if (!ee.noteTargetKind) missing.push('targetKind');
+    const resolvedId = isExecutableNoteTargetKind(targetKind)
+      ? resolvedNoteTargetId(context, targetKind)
+      : undefined;
+
+    if (resolvedId) {
+      payload.targetId = resolvedId;
+    } else {
+      // No verified id — carry the spoken reference so the review card has
+      // something to resolve from, and hold the proposal at the gate.
+      const reference = ee.jobReference ?? ee.customerName;
+      if (reference) payload.targetReference = reference;
+      missing.push('targetId');
+    }
 
     return {
       proposal: createProposal(inputFor(context, this.taskType, payload, missing)),
