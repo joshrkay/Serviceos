@@ -137,6 +137,11 @@ as a known follow-up for the next phase.
 | P-7 | B5.3 | The staleness gate on reassignment (`checkSchedulingProposalFreshness`) compares against `proposal.sourceContext.{status,scheduledStart,technicianId}`, but nothing in the voice draft path ever snapshots those onto a reassign proposal — so for a genuinely voice-drafted proposal the gate executes and always reports "fresh": a structural no-op. | **Not fixed — logged.** Found while writing B5.3's AC-5 proof. The test proves the mechanism genuinely blocks when a stale baseline exists (stamped manually), but does **not** claim the drafting path populates one. Outside B5.3's declared scope; recorded rather than quietly counted as a working safeguard. |
 | P-8 | B1.19 | **A structural deadlock: the flow told the owner to do something the app prevented.** `ConversationStep` ends with "Check your inbox to review and approve the proposals", and one of those proposals (`onboarding_tenant_settings`) is what writes the identity fields. But `ProtectedRoute`'s soft gate redirected every non-`/onboarding` path back to onboarding until identity was done — and `/inbox` is where the proposals live (`routes.ts:222`). The approval that opens the gate sat behind the gate. A brand-new tenant could not complete conversational onboarding at all. | **Fixed.** The approval queue now passes the soft gate (`/inbox` + its `/proposals` alias), with the reasoning in a comment so it isn't "tightened" back later: the queue is part of *finishing* onboarding, not part of the CRM the gate defers, and it exposes the review surface rather than data entry. Pinned by a parameterized guard test over both paths; the existing B1.20 guard tests stay green (12 total, was 10). Raised by a reviewer looking at a different file — they could see the missing identity fields but not that fixing them still left the user stuck. |
 | P-9 | B1.19 | `useOnboardingConversation`'s session ref and history state initialize **once at mount**, so switching tenants while the route stayed mounted bootstrapped with the *previous* tenant's session id. That 404s as designed — and the 404 recovery path then called `clearSession(tenantId)`, deleting the **new** tenant's perfectly valid stored session, while the old tenant's transcript rendered during the transition. | **Fixed** — both re-seed from the current tenant's storage keys before bootstrap. Regression test drives an actual `tenantId` change through `rerender` and asserts the new tenant's session is used and survives. |
+| P-10 | B1.19 (auth) | **A dispatcher could approve their way past a permission they do not hold.** Dispatchers carry `proposals:approve` but not `settings:update`. Nothing in `approveProposal` distinguished a config-writing proposal type from any other, so approving a voice-drafted `update_brand_voice` or any `onboarding_*` executed a write the same actor is refused on the settings routes — a lateral path around the permission, created by this run when it wired those handlers. Raised by a PR reviewer. | **Fixed, HELD** (`4db3e13`). `CONFIG_WRITING_PROPOSAL_TYPES` gates the six types on `settings:update`. `ExecutionContext` also gained `executedByRole` so the audit names the real approver instead of asserting `'owner'` — the trail previously could not tell who acted. Isolated + labeled per Guardrail 3. |
+| P-11 | B1.19 | **The team-member gate reported success while sending the teammate nothing.** My own prior fix (`5f71f79`) had the handler call `PendingInvitationRepository.create` directly. But `POST /api/users/invitations` also POSTs to Clerk — the local row is intent, the Clerk call is the invitation. So an approved proposal created a row nobody could act on: no email, no accept flow. Raised by a PR reviewer against the commit whose message claimed the gate "executes into an actual pending_invitations row" — true, and still not an invitation. | **Fixed, HELD** (`abff9c7`). Route's inline issuance extracted to `users/invite-team-member.ts`; both callers use it. Audit now records `clerkInvitationId` so the trail distinguishes emailed from merely recorded. Held because it makes a tenant-access grant reachable from a voice-drafted proposal. |
+| P-12 | B1.19 | **Unvalidated spoken hours silently close the business.** `onboarding_schedule` wrote the extractor's `startTime`/`endTime` straight through. Downstream, `dayWindowFor` (`booking-availability.ts:139-151`) treats a non-HH:MM or `open>=close` entry as **closed** and deliberately never guesses — so a misheard "we open at nine" persisted *successfully* and made that day unbookable, with nothing surfaced. The form wizard cannot reach that state (`PUT /identity` parses through `BusinessHoursSchema`). Raised by a PR reviewer. | **Fixed** (`47a5b01`). Same validation before the write, and the whole proposal is refused rather than persisting the good days — a dropped day is the same silent "closed" with an approval receipt on it. |
+| P-13 | B5.5 | **The voice path refused the case it exists to serve.** Eligibility required `scheduledStart >= now`, so a technician already running late — the person most likely to say "on my way" — got `not_found`. The in-app button has no such bound: the route and `NextCustomerSelector.selectCurrent` gate on status alone. Raised by a PR reviewer. | **Fixed** (`5a1a0d7`). The `dayBoundary` both production callers already compute was never threaded into hydration, leaving a future-only filter doing duty as a past-exclusion rule. Verified both callers pass it before relying on it. |
+| P-14 | B7.5 / B1.19 | Two narrower reviewer findings, same session: the unit thread reached the estimate editor but not `InvoiceEditLineItemInput`, so a spoken **invoice** edit persisted NULL `unit` where the identical estimate edit kept it; and `useOnboardingConversation`'s new generation guard was applied to the `finally` block too, so `sending` never cleared after a mid-send tenant switch and the composer stayed dead for the session. | **Both fixed** (`76f40fa`, `d06bc82`). |
 | P-3 | Item 9 → B4.7 | `RescheduleAppointmentTaskHandler` and `CancelAppointmentTaskHandler` never read `existingEntities.appointmentId`; they re-resolved via `resolveActiveAppointmentId`, which only answers when the tenant has **exactly one** active appointment. In any shop with two jobs on the books, "Move the Garcia job to Thursday at 10" gated as unresolvable — even though the router had already disambiguated the reference and threaded the correct id. Found empirically: a shared two-appointment fixture made the second test fail with `Payload must include a valid appointmentId`. | **Fixed** — resolver-verified id now wins, single-active fallback retained for the SCH-03 first-turn case. Five regression tests, the key one using the two-appointment fixture that used to fail. Same defect class as B5.3's reassign gate. |
 
 ## B7.5 — INCOMPLETE (implementation cancelled mid-run)
@@ -185,20 +190,33 @@ Stated honestly, including where this run deviated from the letter of the prompt
 ## Held-commit audit (Guardrail 3, definition-of-done item)
 
 Guardrail 3 requires money/RLS/auth-touching commits to be isolated, labeled and **held** for
-human review; everything else merges on green. Audited across all 34 commits on the branch:
+human review; everything else merges on green.
 
-- **One held commit**: `feat(B7.5)[HELD: money-contract]` — migration 265 adding the nullable,
-  descriptive `unit` column to `estimate_line_items` and `invoice_line_items`, plus the contract
-  types. Labeled in the subject line so it cannot be merged by accident.
+**Re-audited after the PR review round** — the earlier version of this section is superseded. It
+recorded "one held commit / no auth change anywhere", which was true when written and became
+wrong when the review round landed two authorization fixes. Three held commits now:
+
+- `feat(B7.5)[HELD: money-contract]` — migration 265 adding the nullable, descriptive `unit`
+  column to `estimate_line_items` and `invoice_line_items`, plus the contract types.
+- `[HELD: auth] fix(proposals)` (`4db3e13`) — `CONFIG_WRITING_PROPOSAL_TYPES` gate on
+  `approveProposal` (P-10), plus `executedByRole` threading so config-writing audit events name
+  the real approver.
+- `[HELD: auth] fix(B1.19)` (`abff9c7`) — team-member invitations routed through the shared
+  Clerk issuance path (P-11). Held because it makes a tenant-access grant reachable from a
+  voice-drafted proposal, not because the authorization logic itself changed.
+
+Each is isolated to its own commit and labeled in the subject line so it cannot merge by
+accident. Splitting the first of these took real surgery: the auth fix and the unrelated
+schedule-hours validation (P-12) sat in the same file, and were separated hunk-by-hunk rather
+than shipped as one mixed commit.
+
 - **No RLS change anywhere**: no added line in the schema diff contains `POLICY`,
   `ROW LEVEL SECURITY` or `FORCE`. The new column lands on tables whose existing policies are
   untouched.
-- **No auth/permission change**: nothing under `packages/api/src/auth/` or `middleware/` is
-  modified.
-- **No money-movement change**: the only other files matching money-ish names are voice-quality
-  cassettes and tests. `record_payment`'s latent resolver gap was found and deliberately left
-  gated rather than fixed (see the C1 section) precisely because fixing it would have put money
-  movement in scope.
+- **No money-movement change**: `record_payment`'s latent resolver gap was found and
+  deliberately left gated rather than fixed (see the C1 section) precisely because fixing it
+  would have put money movement in scope. The `unit` thread is descriptive only and never enters
+  a total — pinned by tests on both editors.
 
 Everything else on the branch is voice drafting/resolution, config writes, tests and docs —
 merges on green.

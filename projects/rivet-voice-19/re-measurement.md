@@ -1,182 +1,308 @@
-# Rivet Voice 19 — Read-only re-measurement
+# Rivet Voice 19 — Read-only re-measurement (SECOND PASS)
 
 Measured by a fresh, read-only agent per `projects/rivet-voice-19/re-measurement-brief.md`.
-No source file was changed to produce this document. All commands were actually run
-(Docker-gated integration tests included); results below reflect what executed, not what
-the run log claims.
+No source file was changed to produce this document. This is the second re-measurement of
+the same 19 requirements; the first pass (measured at commit `7d8fbd4`, scored **9/19**) is at
+`projects/rivet-voice-19/re-measurement.md`'s prior revision and was read in full before this
+pass began, along with the brief and `docs/PRD-v4-part-E-state.md` §5.
 
-Initial pass was measured at commit `bdd5e20` (branch head when this task started). A
-mid-task coordinator message flagged two fixes that landed afterward (`152c5e9`
-fix + `7d8fbd4` doc), which were re-verified against the new head. **Final head measured:
-`7d8fbd4`.** Where the two commits changed a conclusion, that is called out inline; they
-did not change any conclusion except to confirm B1.19's cap stands for an independent
-reason (see B1.19 below).
+**Head measured: `5f71f79`.** This is one commit further than the four work items the master
+prompt described — see "A finding the master prompt did not anticipate" below. The working
+tree also carried **uncommitted, in-progress changes** at measurement time (an RBAC hardening
+pass touching `proposals/actions.ts`, `brand-voice-handler.ts`, `handlers.ts`,
+`onboarding-handlers.ts`, `test/proposals/actions.test.ts` — apparently a concurrent session
+still editing the repo). Per the read-only mandate, **scoring below is anchored to committed
+HEAD `5f71f79` only**; the uncommitted diff was not evaluated or scored either way. It is
+disclosed for transparency, not as a caveat on the numbers: the full API unit suite (run while
+that diff was present on disk) still matched the stated baseline exactly (1056 files / 12053
+tests, all green), so nothing below rests on a broken tree.
 
 ## Headline
 
-**9 / 19 at rung 5.**
+**11 / 19 at rung 5.**
 
 Arithmetic, shown rather than asserted:
 
 | Bucket | Count | Rows |
 |---|---|---|
-| Already at rung 5 in Part E, untouched this run | 2 | B7.1, B7.7 |
-| This run's "focus eight" + "restoration four" claimed as rung-5-reaching | 12 | B7.4, B5.3, B8.10, B6.3, B5.5, B1.18, B7.5, B1.19, B4.7, B7.6, B8.1, B9.1 |
-| **Verified rung 5** out of that claimed 12 | **7** | B7.4, B5.3, B8.10, B6.3, B5.5, B7.6, B8.1 |
-| Capped below 5 — Part F unratified (F-1, F-2) | 2 | B1.18 (→4), B9.1 (→4) |
-| Capped below 5 — B7.4 failure-class recurrence found by this measurement | 1 | B1.19 (→3) |
-| Capped below 5 — a per-leg proof gap found by this measurement | 1 | B4.7 (→4) |
-| Confirmed incomplete (agent cancelled mid-run) | 1 | B7.5 (→2) |
-| Deferred five — confirmed unchanged | 5 | B7.8, B7.9, B7.10, B9.4, B9.12 (all →3, matching Part E) |
+| Already at rung 5 before this pass, untouched | 9 | B7.1, B7.7, B7.4, B5.3, B8.10, B6.3, B5.5, B7.6, B8.1 |
+| This pass's re-verification of the two rows the first pass found short | +2 | B4.7 (4→**5**), B1.19 (3→**4**, not 5 — see below) |
+| Net change from the first pass's 9 | +2 | 11 total |
+| Capped below 5 — Part F unratified (F-1, F-2) | 2 | B1.18 (4, unchanged), B9.1 (4, unchanged) |
+| Capped below 5 — team-member sub-flow requires non-voice input | 1 | B1.19 (3→**4**) |
+| Confirmed still incomplete | 1 | B7.5 (2, unchanged — see finding below) |
+| Deferred five — confirmed unchanged | 5 | B7.8, B7.9, B7.10, B9.4, B9.12 (all 3, matching Part E and the first pass) |
 
-9 = 2 (unchanged rung-5) + 7 (newly verified rung-5). This is **below** the brief's
-anticipated 12–14 range. That range was computed before B7.5's incompleteness was known
-and before this measurement's two additional findings (B1.19's team-member sub-flow, B4.7's
-create-leg gap). Both are explained in detail below with file:line evidence; I am reporting
-what I measured, not adjusting toward the target.
+11 = 9 (carried forward from the first pass, re-spot-checked, all still green) + 2 (B4.7 and
+B1.19 both moved up this pass). This is **below** the brief's original 12–14 range for the same
+reason the first pass found (B1.18/B9.1 unratified caps the ceiling at 17, and B7.5's
+functional gap caps it further) and **one below** what a naive reading of "the four listed work
+items all landed cleanly" would suggest, because independent verification found a real
+per-leg gap in B4.7's create leg that the commit fixing the *other* gap didn't address, and
+because B1.19's team-member leg — even now genuinely completable, which is new and real — still
+requires a human to type an email that voice can never produce. I did not adjust toward 12–14;
+this is what I measured.
 
-**Part F ratification status:** entries F-1 (B9.1 two-step issuance) and F-2 (B1.18
-lock-as-tap) in `docs/PRD-v4-part-F-decisions.md` are both marked **PROPOSED**, written by
-the implementation run itself. Neither carries any product-owner sign-off, timestamp, or
-approval marker anywhere in the repo. Per the brief's rule ("documentation alone restores
-nothing... a Part F entry written by this run is not ratification"), both rows are **red**
-regardless of code quality, and are reported at the technical rung the code actually
-supports (4 for each — see rows below) rather than at 5.
+**Part F ratification status — unchanged.** `docs/PRD-v4-part-F-decisions.md` entries F-1
+(B9.1) and F-2 (B1.18) are still marked **PROPOSED**. No ratification marker (sign-off,
+timestamp, approval) exists anywhere in the repo for either. Both rows stay capped at 4 per the
+master prompt's explicit, non-negotiable instruction.
+
+## A finding the master prompt did not anticipate: B1.19's premise had already changed
+
+The master prompt described B1.19 as: gated at draft time with `missingFields: ['email']`,
+"the real approveProposal refuses them and execution is never reached," and asked me to judge
+whether a gated-but-never-completable capture reaches 5. I verified that gate first
+(`packages/api/src/ai/orchestration/onboarding-conversation.ts:471`, `test/integration/
+onboarding-conversation-parity.test.ts:433-435` — ran, confirms `approveProposal` really
+throws `/unfilled required fields/` for a team-member proposal with no email). But `git log`
+showed one more commit past what I was briefed on: `5f71f79 fix(B1.19): make the team-member
+gate completable — invitations already had a home`.
+
+That commit found that the premise behind the earlier gate — "no invitation endpoint exists
+yet" — was **false**. `pending_invitations` and `PgPendingInvitationRepository`
+(`packages/api/src/users/pending-invitation.ts`) have existed since migration 082, predating
+this entire voice run by a wide margin (`git log --follow` on that file: last touched by an
+unrelated commit, `4bc8f59`, "ISSUE-005 — redact public portal API errors"). `5f71f79` wires
+`OnboardingTeamMemberExecutionHandler` to the real repo (`app.ts:2117-2121`,
+`handlers.ts:1425`) so that once an operator supplies the missing email on the review card, the
+**same voice-drafted proposal** (name + role captured by voice; only email added) executes and
+creates a real `pending_invitations` row, with a `user.invitation_created` audit event
+(`onboarding-handlers.ts` — read directly).
+
+I ran the updated test (`onboarding-conversation-parity.test.ts`, 11/11 pass) and independently
+confirmed both halves: (1) the gate genuinely refuses approval while the email is missing
+(`missingFieldsFor(p)` contains `'email'`; `approveProposal` throws), and (2) filling the email
+and re-executing through the production registry (`createExecutionHandlerRegistry`, not a
+hand-rolled handler) inserts exactly one `pending_invitations` row with the supplied email —
+`invited.rows` length 1, `invited.rows[0].email === 'carlos@example.com'`.
+
+**One gap this measurement found in that same test that the run didn't flag:** the "genuinely
+completable" assertion checks the `pending_invitations` row but never queries
+`audit_events` for `user.invitation_created` — I grepped the whole repo
+(`grep -rln invitation_created test/ src/`) and found the event type emitted only in
+`onboarding-handlers.ts`, asserted nowhere. So the team-member completion path has row proof
+but not audit proof — the rung-4 triple is two-thirds present for that specific leg. Also
+worth noting: the *other* test in the same file, "audit events: ... the failed team proposals
+audit their failure," is now vacuous prose left over from the prior gate — since gated
+proposals never enter `conversationExecutions`, the loop that's supposed to check
+`proposal.execution_failed` audit rows for team members iterates zero times. It still passes,
+but not because it proves anything about team members anymore; it's dead-code-shaped, not a
+scoring issue.
+
+**My judgment on the rung, given this:** B1.19 moves to **4**, not 5. Four of five onboarding
+proposal types (identity, pack, schedule, template) are fully voice-reachable with complete
+rung-4 proof (row + audit + cross-tenant negative) — genuinely rung 5 material on their own.
+The team-member leg is now real and honestly gated, not a dead end, and is a categorically
+different — better — shape than B7.4's "approves, then fails" defect (this one never reaches
+`approved` until a human supplies missing data, then it actually works). But it can never be
+completed by a spoken sentence alone: email is not something the voice channel could have
+captured or could ever produce from "me and my cousin Carlos" — this isn't disambiguating
+something already said (the way a one-tap picker resolves an ambiguous appointment reference),
+it's introducing wholly new information voice structurally cannot supply. Since the row's own
+test file explicitly scopes team-member capture as part of what "conversational onboarding"
+covers, the conjunctive row cannot be called "reachable by a spoken sentence" (rung 5) while one
+of its five capture types always requires a keyboard. Rung 4 — proven, not fully reachable — is
+the right call.
+
+## B4.7 — the cross-tenant fix landed clean, but a different per-leg gap surfaces on independent review
+
+The first pass capped B4.7 at 4 because the create leg's own test asserted the appointment row
+and audit event but never a cross-tenant negative. `efe05f3` closed exactly that gap: I read the
+diff and ran the test — `voice-inbound-appointment.test.ts`, 2/2 pass, and the added lines
+(`booked!.id` looked up under `other.tenantId`, expects `null`) are a real scoped-read negative,
+the same form the sibling reschedule/cancel tests use. Taken alone, that would satisfy rung 5.
+
+Independently re-deriving the row from scratch (not just checking the one gap flagged), I found
+a **second, different per-leg gap in the same conjunctive requirement**: the create/book leg's
+real-Postgres proof (`voice-inbound-appointment.test.ts`) constructs its `CreateProposalInput`
+as a **hand-built payload literal** (`payload: { jobId, scheduledStart, ... summary: REASON }`)
+— it does not exercise `CreateAppointmentTaskHandler` (the actual drafting task that turns a
+transcript into this shape). The reschedule and cancel legs don't have this problem:
+`rivet-voice-19-focus.test.ts`'s own sanity check (`expect(corpus.cases).toHaveLength(6)`,
+line 449-463) confirms its 6-case corpus covers `reschedule_appointment` and
+`cancel_appointment` — proving drafting + `PgEntityResolver` resolution against real Postgres
+for those two — but not `create_appointment`/`create_booking` at all. I grepped for any other
+real-Postgres test that drives the create/book drafting task and found none;
+`create-appointment-task.test.ts` and its siblings are mocked-DB unit tests, which the brief's
+own rule excludes from rung-4 proof ("Mocked-DB coverage is not proof... A test that hand-builds
+the payload does not prove the chain").
+
+So: book/create has full row+audit+cross-tenant proof for **execution**, but its
+**drafting/resolution leg is unproven by real Postgres** — the exact standard the brief applies
+strictly. Under the brief's own conjunctive-requirement precedent (which is what capped this row
+at 4 in the first place), one of three verbs lacking full end-to-end proof caps the row.
+
+**I score B4.7 at 4 (unchanged from the first pass), for a different reason than the one the
+first pass found and this run's own commit fixed.** The cross-tenant gap is genuinely closed;
+a new gap in the same leg keeps the row from 5.
+
+## B7.5 — a finding that overturns the run's own framing
+
+The master prompt described B7.5 as: "unit now exists on the shared lineItemSchema... on the
+catalog resolver now carries a matched item's unit onto the grounded line... STILL MISSING: no
+classifier structured part-mention extraction... Score accordingly." I verified the plumbing
+claims directly and they are all true — `unit` exists and round-trips cleanly through:
+`packages/shared/src/contracts/money.ts:48` (`lineItemSchema`), `packages/api/src/shared/
+billing-engine.ts:31` (`LineItem`), `packages/api/src/proposals/contracts.ts:321`
+(the proposal line-item contract), `packages/api/src/estimates/estimate-editor.ts:35,87-91`
+(`EstimateEditLineItemInput`, applied post-`buildLineItem` so it can't touch money math), both
+INSERT paths (`pg-estimate.ts:396`, `pg-invoice.ts:531`), the row mapper
+(`document-row-mappers.ts:16`), and `catalog-resolver.ts:568` (`groundLineItemPricing` carries a
+matched catalog item's unit onto a grounded draft line). I ran every cited test:
+`money.test.ts` (17/17), `spoken-parts-line-item.test.ts` (3/3, real-Postgres round-trip + raw
+column read + money-unchanged assertion), `estimate-grounding-idempotent.test.ts` (4/4, the two
+new B7.5 cases). All pass, and none of this plumbing broke the previously-passing estimate/
+invoice execution suites (re-ran 10 files / 46 tests touching the same shared modules, all
+green).
+
+But two of those tests **hand-build their payload literals** — `spoken-parts-line-item.test.ts`
+constructs `{ description, quantity, unit: 'each', unitPrice, category }` directly as an
+`EstimateEditAction`, not via the real drafting task. Per the brief's rule that disqualifies the
+drafting leg in exactly this situation, I traced the *actual* production path a spoken "add
+three capacitors to the Smith estimate" would take, and found it never produces a `unit`
+anywhere, for a genuinely structural reason the run's framing did not surface:
+
+1. **The LLM extraction prompt for the real edit task never asks for a unit.**
+   `estimate-edit-task.ts`'s `ESTIMATE_EDIT_SYSTEM_PROMPT` (lines 41-79) requests only
+   `description`, `quantity`, `unitPrice`, `category` — no unit-of-measure field exists in the
+   schema the model is asked to fill, for either estimates or (checked `estimate-task.ts`
+   similarly) fresh drafts.
+2. **The real edit-path grounding function doesn't attach one either.** `estimate-edit-task.ts`
+   calls `groundEditActionPricing` (`ai/resolution/edit-action-grounding.ts`) — a *different*
+   module from `groundLineItemPricing`. I grepped it for `unit` and found zero references to a
+   unit-of-measure field (only `unitPrice`/`unitPriceCents` money fields). So even a catalogued
+   match, on the actual "add a line to an existing estimate" voice path (the flow F-4 in Part F
+   describes as how B7.5 is meant to land), never carries a unit forward.
+3. **The one place a catalog match *does* attach unit (`groundLineItemPricing`, used by the
+   fresh-draft path `estimate-task.ts`/`invoice-task.ts`, i.e. B8.1/B9.1) gets it stripped
+   again before persistence.** `DraftEstimateExecutionHandler.execute` and its invoice
+   equivalent both call `normalizeDraftLineItems` (`handlers.ts:765-833`) to convert the
+   approved payload into `LineItem[]`. That function explicitly whitelists which fields survive
+   (`id, description, quantity, unitPriceCents, totalCents, sortOrder, taxable, category,
+   pricingSource, groupKey, groupLabel, isOptional, isDefaultSelected, imageFileId` —
+   read line by line) and `unit` is not among them. I confirmed `draft-estimate-execution.test.ts`
+   never selects the `unit` column in its row-read assertions (only `description, quantity,
+   unit_price_cents, total_cents, pricing_source`), so this gap is untested and unnoticed by
+   the run's own suite.
+
+**Net: in the entire live system, there is currently no path — voice, catalog match, or
+otherwise — by which a spoken sentence's unit-of-measure survives to a persisted row.** The
+storage layer is real and correctly built (money-safety proven, round-trip proven), but it is
+reachable only from a hand-built test literal, never from the drafting → execution pipeline that
+actually runs in production. This is a stronger, more specific finding than the master prompt's
+own "Score accordingly" framing suggested (which implied at least the catalogued-match path was
+live) — that path is dead too, one layer further down (`normalizeDraftLineItems`). I score B7.5
+at **2** (Present, unreachable), unchanged from the first pass: more plumbing exists, and it is
+provably correct in isolation, but reachability from an actual spoken sentence is still zero.
 
 ## 19-row table
 
-Prior rung = `docs/PRD-v4-part-E-state.md` §5. New rung = this measurement, `7d8fbd4`.
+Prior rung = `docs/PRD-v4-part-E-state.md` §5. First-pass rung = the prior revision of this
+document (measured at `7d8fbd4`). New rung = this measurement, `5f71f79`.
 
-| Requirement | Prior | New | Evidence I personally ran/verified | What's missing below 5 |
-|---|---|---|---|---|
-| **B1.18** Brand voice captured, then locked | 3 | **4** | `packages/api/src/proposals/execution/brand-voice-handler.ts`; `packages/api/src/proposals/contracts/brand-voice.ts` (no `lock` key exists in the schema — verified by reading the file); integration `test/integration/update-brand-voice-voice-execution.test.ts` — ran, **4/4 pass**: version row persisted, exactly one `brand_voice.updated` audit event with actor, cross-tenant scoped-read returns nothing, cooldown fails honestly (never silent skip). | **RED per brief rule**: Part F entry F-2 is PROPOSED, not ratified (`docs/PRD-v4-part-F-decisions.md:31-43`, no ratification marker anywhere). Capture leg is genuinely proven (rung 4); "locked by voice" is impossible by design (no schema key can express it), so under the *literal, unamended* requirement text the row can never reach 5 without ratifying F-2's redefinition of "locked" as by-tap. |
-| **B1.19** Conversational onboarding, 10–15 exchanges, clarification loop | 3 | **3** | `test/integration/onboarding-conversation-parity.test.ts` — ran, **passes**, incl. real audit rows for identity/pack/schedule/template and cross-tenant negative. BUT same file, lines 388–409: `onboarding_team_member` proposals are **approved**, then **execution fails** (`result.success` is `false`, `error` contains `'handler_not_wired'`) — asserted by the test itself as intentional. Web fix `packages/web/src/components/auth/ProtectedRoute.tsx` (commit `152c5e9`) + `ProtectedRoute.test.tsx` — ran, **12/12 pass** (was 10) — genuinely fixes a real deadlock (identity-writing proposals lived behind the very gate their approval was supposed to open). `useOnboardingConversation.test.ts` — ran, **6/6 pass** — fixes a real tenant-switch session bug. | Team-member capture reproduces the **exact B7.4 failure-class shape** the brief names explicitly: "Approves but cannot execute is rung 3, not 5." That the failure is *honest* (audited as `proposal.execution_failed`, no fabricated row) doesn't change the shape — the proposal reaches `approved` and then cannot execute. Since the row's own ACs include team capture, the conjunctive row is capped at 3, matching Part E's own precedent for B4.7. Also: no `onboarding_*` payload carries a timezone (an honest gap, not independently disqualifying, but consistent with "not the whole chain"). **The P-8/P-9 web fixes are real and necessary but orthogonal to this cap** — they fix reachability of the FSM itself, not the team-member execution failure. Measured before AND after `152c5e9`; the cap is unchanged either way. |
-| **B4.7** Book / move / cancel by speaking | 3 | **4** | `test/integration/reschedule-appointment-voice.test.ts` (3/3) and `cancel-appointment-voice.test.ts` (4/4) — ran, both pass: row change, exactly one audit event with correct actor, cross-tenant negative, AND (via `rivet-voice-19-focus.test.ts`, 8/8 pass) drafting/resolution proof through the real router + `PgEntityResolver` for both verbs. `cancel-appointment-voice.test.ts:310` also sweeps every trust-tier × confidence × supervisor combo through `decideInitialStatus`, with a positive control, proving `cancel_appointment` never auto-approves. | Own finding, not in the run's claims: `test/integration/voice-inbound-appointment.test.ts` (the **create** leg's cited proof) — ran, 2/2 pass — has **no cross-tenant negative test** (grepped the file; only match for "cross" is an unrelated comment about a different lookup path). Under the brief's strict per-leg rung-4 bar, one of the three verbs in this conjunctive requirement lacks the full row+audit+cross-tenant triple, so the row is capped at 4, not 5, despite reschedule/cancel now being fully proven. |
-| **B5.3** Assign work (reassign) by speaking | 3 | **5** | `test/integration/reassign-appointment-voice.test.ts` — ran, **5/5 pass**: resolver-provided ids, `appointment.technician_assigned` audit, feasibility gate rejects real conflicts, staleness gate rejects stale baseline, cross-tenant negative. `test/integration/rivet-voice-19-focus.test.ts` — ran, **8/8 pass**, incl. the negative case proving a NAMED reference that matches nothing resolves to `not_found` and never falls back to the tenant's soonest appointment (direct `PgEntityResolver` call AND full router run both assert this). | — |
-| **B5.5** "On my way" by app/SMS/voice | 3 | **5** | `test/integration/en-route-voice.test.ts` — ran, **3/3 pass**: `appointment.en_route_triggered` audit with TECH actor (not generic system), real `delay_notice_state` dispatch row, idempotence on a second utterance (same row reused), cross-tenant negative (tenant B tech resolves to "no appointment," zero audit rows). `test/sms/tech-status/en-route-keyword.test.ts` + `test/dispatch/en-route-voice.test.ts` — ran, **19/19 pass**. `git diff origin/main...HEAD -- packages/api/src/workers/voice-action-router.ts` — confirmed additive-only (97 insertions, 0 deletions), branch fires only on `en_route` classification, sits before the RV-071/225 D-013 gate but doesn't affect it. | — |
-| **B6.3** Time entries by voice | 3 | **5** | `test/integration/log-time-entry-execution.test.ts` — ran, **4/4 pass**: 120-min row with resolved jobId, exactly one `time_entry.logged_completed` audit with actor, cross-tenant scoped-read negative, `getJobProfit` labor rollup reflects the entry. `rivet-voice-19-focus.test.ts` includes `log_time_entry` in its 5-op corpus (drafting/resolution via real router). | — |
-| **B7.1** Push-to-talk from any screen | 5 | **5** (unchanged) | `git diff origin/main...HEAD --name-only` — confirmed no touch to `Shell.tsx`/`VoiceBar` paths; this run made no change here. | — |
-| **B7.4** Job notes dictated | 3 | **5** | `test/integration/add-note-voice-execution.test.ts` — ran, **3/3 pass**: note row with verbatim body, exactly one note-created audit with actor, cross-tenant negative. `test/ai/tasks/add-note-voice-task.test.ts` — ran, **37/37 pass**, incl. the permanent regression pin that the pre-fix `targetReference`-without-`targetId` shape can no longer be produced. `test/proposals/voice-payload-contract.test.ts` — ran, **37/37 pass** (C1 red→green transition verified structurally: the run log's captured RED failure message matches the code's stated pre-fix defect). `rivet-voice-19-focus.test.ts` proves the drafting/resolution leg via the real router. | — |
-| **B7.5** Parts by speaking (name + qty + unit) | 0 | **2** | Confirmed independently, not taken on the run log's word: migration exists (`packages/api/src/db/schema.ts:6476-6479`, `'265_line_items_unit'`, nullable `unit TEXT` on both line-item tables). Grepped and confirmed **absent**: `unit` field on `lineItemSchema` (`packages/shared/src/contracts/money.ts:20-47` — only `unitPriceCents` exists); `unit` on billing-engine `LineItem` (`packages/api/src/shared/billing-engine.ts:19-58`); any read/write of the column in `catalog-resolver.ts` (grepped — zero matches for a bare `unit` key, only `unitPriceCents`); any parts/materials intent, classifier field, or UI (grepped repo-wide for `spoken-parts`, `SpokenPart` — no matches). No `catalogUnitSchema` exists anywhere despite the migration comment referencing it. | A nullable column that nothing in application code reads or writes. Scored 2 (Present, unreachable) rather than 1, since actual migration code did ship and would run in production — but zero drafting, resolution, classifier, or UI work exists. Cannot be rung 5; the run's own admission of "at best 1–2" is accurate. |
-| **B7.6** Spoken line-item to existing estimate | 3 | **5** | `test/integration/update-estimate-execution.test.ts` — ran, **3/3 pass**: new line item persisted with correct integer-cent totals, exactly one `estimate.updated` audit event, cross-tenant negative (scoped-read AND a forged cross-tenant execute attempt). First-ever exercise of `UpdateEstimateExecutionHandler` via the production registry (confirmed: Part E found zero files imported it before). | — |
-| **B7.7** Job status by voice | 5 | **5** (unchanged) | `git diff origin/main...HEAD --name-only` — confirmed no touch to `job-edit-task.ts` / `update-job-execution.test.ts` paths. | — |
-| **B7.8** Expense by voice *(deferred)* | 3 | **3** (unchanged) | `git diff origin/main...HEAD --name-only` — no file under `LogExpenseTaskHandler`'s path touched; C1 pins its current gating (`voice-payload-contract.test.ts:520-526`, ran, passes). | Deferred per master prompt; unchanged, as required. |
-| **B7.9** Read-only lookups by voice *(deferred)* | 3 | **3** (unchanged) | `git diff origin/main...HEAD --name-only` — no touch to voice-lookup files. | Deferred; unchanged. |
-| **B7.10** Crew add/remove by voice *(deferred)* | 3 | **3** (unchanged) | `git diff origin/main...HEAD -- packages/api/src/ai/tasks/voice-extended-tasks.ts` — read the diff directly; the only hunk touching this file's `RemoveCrewMemberTaskHandler` region is unchanged context around the `add_note` rewrite, not an edit to the class itself. C1 pins current gating (`voice-payload-contract.test.ts:587-604`, ran, passes). | Deferred; unchanged. |
-| **B8.1** Estimate from spoken description or photo | 3 | **5** | `test/integration/draft-estimate-execution.test.ts` — ran, **3/3 pass**: estimate persisted with catalog-grounded integer-cents lines (LLM's 14950¢ overridden by the seeded catalog's 15000¢, `pricingSource: 'catalog'`), exactly one `estimate.created` audit event, cross-tenant negative. Drafted through the real `EstimateTaskHandler`, executed through the production registry (`createExecutionHandlerRegistry`, not constructed directly) — closes the exact false-positive Part E flagged (a comment-only citation). | — |
-| **B8.10** Nudge by voice | 3 | **5** | `test/integration/estimate-nudge.test.ts` — ran, **11/11 pass**: the voice-specific describe block constructs `TaskContext.existingEntities: { customerName: 'Khan' }` (free text, not a hand-fed id) and lets the real `SendEstimateNudgeTaskHandler` resolve it against a real Postgres `estimateRepo` query — this is genuine resolution proof, not a hand-built payload. Confirms: real dispatch row, `proposal.executed` + `estimate.reminder_sent` audit events, 48h cooldown holds under a second voice-approved nudge (records suppressed outcome, sends nothing), cross-tenant negative. | — |
-| **B9.1** Invoice from a spoken sentence | 3 | **4** | `test/integration/draft-invoice-execution.test.ts` — ran, **7/7 pass** (cents + audit + cross-tenant, pre-existing Part E bar). `test/integration/issue-invoice-conversation-resolution.test.ts` — ran, **3/3 pass**, including the **newly added** cross-tenant negative on the issue transition (Part E explicitly flagged this as missing; now present, lines 244-299: scoped read returns nothing AND a forged cross-tenant execute is rejected). Both legs of the two-step flow are now fully proven. | **RED per brief rule**: Part F entry F-1 is PROPOSED, not ratified. Both draft and issue legs have real rung-4 proof, but whether the two-utterance/two-tap flow satisfies "issued from a spoken sentence" is exactly the unresolved interpretation question F-1 poses — without ratification the row can't be credited at 5. |
-| **B9.4** Batch invoice by voice *(deferred)* | 3 | **3** (unchanged) | `git diff origin/main...HEAD --name-only` — no touch to `BatchInvoiceTaskHandler`'s path. C1 pins current gating (`voice-payload-contract.test.ts:374-393`, ran, passes). | Deferred; unchanged. |
-| **B9.12** Reminder + late fee by voice *(deferred)* | 3 | **3** (unchanged) | `git diff origin/main...HEAD --name-only` — no touch to `ApplyLateFeeTaskHandler`/`SendPaymentReminderTaskHandler` paths. C1 pins current gating (`voice-payload-contract.test.ts:656-669`, ran, passes). | Deferred; unchanged. |
+| Requirement | Part E | 1st pass | New | Evidence I personally ran/verified | What's missing below 5 |
+|---|---|---|---|---|---|
+| **B1.18** Brand voice captured, then locked | 3 | 4 | **4** (unchanged) | Re-ran `test/integration/update-brand-voice-voice-execution.test.ts` — 4/4 pass. `docs/PRD-v4-part-F-decisions.md:31-43` (F-2) still **PROPOSED**, no ratification marker anywhere in the repo (grepped `docs/decisions.md` and Part F itself). | RED per brief rule: F-2 unratified. |
+| **B1.19** Conversational onboarding, 10–15 exchanges, clarification loop | 3 | 3 | **4** | `onboarding-conversation-parity.test.ts` — ran, 11/11 pass (was passing at 3 originally too, count unchanged — the new assertions extended the SAME test, not a new one). Verified `5f71f79` genuinely wires a real `pending_invitations` row + `user.invitation_created` audit event once an operator supplies the email the voice-drafted proposal is gated on; confirmed `pending-invitation.ts` predates this entire run (`git log --follow`, last touch `4bc8f59`, unrelated). 4 of 5 onboarding proposal types (identity/pack/schedule/template) have full rung-5-worthy proof (row+audit+cross-tenant, all re-run). | Team-member completion always requires a human-typed email — structurally never producible by voice, unlike disambiguation-by-tap. Also: the completion path's `pending_invitations` row is proven but its audit event (`user.invitation_created`) is asserted by no test anywhere (grepped). Row capped at 4, not 5. |
+| **B4.7** Book / move / cancel by speaking | 3 | 4 | **4** (unchanged, different reason) | `efe05f3`'s cross-tenant fix verified: ran `voice-inbound-appointment.test.ts` (2/2), the added negative (`appointmentRepo.findById(other.tenantId, booked!.id)` → null) is real. Reschedule/cancel re-ran (7/7), still fully proven incl. drafting via `rivet-voice-19-focus.test.ts` (8/8). | **New finding, not flagged by the run**: the create/book leg's real-Postgres proof hand-builds its `CreateProposalInput` payload literal rather than driving `CreateAppointmentTaskHandler`; `rivet-voice-19-focus.test.ts`'s own corpus (verified: `toHaveLength(6)`, ops = add_note/reassign/log_time/reschedule/cancel) never covers create/book. Drafting-leg proof for book/create rests on mocked-DB unit tests only, which the brief excludes. One of three verbs unproven end-to-end → row capped at 4. |
+| **B5.3** Assign work (reassign) by speaking | 3 | 5 | **5** | Re-ran `reassign-appointment-voice.test.ts` (5/5) and `rivet-voice-19-focus.test.ts` (8/8, incl. the named-no-match negative). No files touched this pass. | — |
+| **B5.5** "On my way" by app/SMS/voice | 3 | 5 | **5** | Re-ran `en-route-voice.test.ts` (3/3). No files touched this pass. | — |
+| **B6.3** Time entries by voice | 3 | 5 | **5** | Re-ran `log-time-entry-execution.test.ts` (4/4). No files touched this pass. | — |
+| **B7.1** Push-to-talk from any screen | 5 | 5 | **5** (unchanged) | `git diff 1074ecd..5f71f79 --name-only` — no touch to `Shell.tsx`/`VoiceBar`. | — |
+| **B7.4** Job notes dictated | 3 | 5 | **5** | Re-ran `add-note-voice-execution.test.ts` (3/3). No files touched this pass. | — |
+| **B7.5** Parts by speaking (name + qty + unit) | 0 | 2 | **2** (unchanged) | See finding above: schema/contracts/persistence genuinely round-trip (ran `money.test.ts` 17/17, `spoken-parts-line-item.test.ts` 3/3, `estimate-grounding-idempotent.test.ts` 4/4), but traced the real production chain and found unit never reaches a payload from an actual utterance — the edit-task LLM prompt never asks for it, the edit-path grounding function never attaches it, and even the one place a catalog match does attach it (draft-path `groundLineItemPricing`) gets it stripped by `normalizeDraftLineItems` before persistence. | No classifier extraction, no live catalog-carry to persistence (even for catalogued items), no UI, no C1 rows (grepped — zero matches for `SpokenPart`/`spoken-parts` anywhere in `src/`, zero `part`-related lines in `voice-payload-contract.test.ts`). |
+| **B7.6** Spoken line-item to existing estimate | 3 | 5 | **5** | Re-ran `update-estimate-execution.test.ts` (3/3). Confirmed the B7.5 changes to `estimate-editor.ts`/`pg-estimate.ts` didn't regress this. | — |
+| **B7.7** Job status by voice | 5 | 5 | **5** (unchanged) | `git diff 1074ecd..5f71f79 --name-only` — no touch. | — |
+| **B7.8** Expense by voice *(deferred)* | 3 | 3 | **3** (unchanged) | `git diff 1074ecd..5f71f79 --name-only` — no touch to `LogExpenseTaskHandler`'s path. | Deferred; unchanged. |
+| **B7.9** Read-only lookups by voice *(deferred)* | 3 | 3 | **3** (unchanged) | No touch. | Deferred; unchanged. |
+| **B7.10** Crew add/remove by voice *(deferred)* | 3 | 3 | **3** (unchanged) | No touch. | Deferred; unchanged. |
+| **B8.1** Estimate from spoken description or photo | 3 | 5 | **5** | Re-ran `draft-estimate-execution.test.ts` (3/3). Confirmed the B7.5 `normalizeDraftLineItems` review didn't change any existing assertion (it already never selected `unit`). | — |
+| **B8.10** Nudge by voice | 3 | 5 | **5** | Re-ran `estimate-nudge.test.ts` (11/11). No files touched this pass. | — |
+| **B9.1** Invoice from a spoken sentence | 3 | 4 | **4** (unchanged) | Re-ran `draft-invoice-execution.test.ts` (7/7) and `issue-invoice-conversation-resolution.test.ts` (3/3). F-1 still **PROPOSED**, no ratification. | RED per brief rule: F-1 unratified. |
+| **B9.4** Batch invoice by voice *(deferred)* | 3 | 3 | **3** (unchanged) | No touch. | Deferred; unchanged. |
+| **B9.12** Reminder + late fee by voice *(deferred)* | 3 | 3 | **3** (unchanged) | No touch. | Deferred; unchanged. |
 
-## The eight-focus-fixture placement question (rivet-voice-19-focus.test.ts)
+## Rows that changed since the first pass, and why
 
-Verified `packages/api/src/proposals/surface.ts` directly: `S1_ALLOWED_PROPOSAL_TYPES`
-(lines 43-52) contains only `create_customer`, `create_appointment`, `create_booking`,
-`create_job`, `reschedule_appointment`, `draft_estimate`, `callback`, `voice_clarification`.
-`add_note`, `reassign_appointment`, `log_time_entry`, `send_estimate_nudge`,
-`update_brand_voice`, `cancel_appointment` are all genuinely absent — confirmed these are
-legitimately operator-only (S2) acts, not caller-reachable ones, so placing their fixtures
-in an inbound-customer-call corpus (Layer-1) would indeed have been a category error, not
-just a harness convenience.
+- **B4.7 (4 → 4, same number, different basis).** The cross-tenant gap the first pass found is
+  genuinely closed (`efe05f3`, verified). It stays at 4 because this pass's own independent
+  re-derivation found a different gap in the same leg: the create/book verb's drafting proof is
+  unproven by real Postgres (hand-built payload). Net: still not 5, for a reason the run's own
+  commit did not — and could not, since it targeted a different gap — address.
+- **B1.19 (3 → 4).** The team-member sub-flow is no longer a dead end. `5f71f79` corrected a
+  false premise from an earlier commit ("no invitation endpoint exists") and wired the handler to
+  a real, pre-existing repo. This is a genuine improvement, verified by running the updated test
+  and independently tracing the invitation repository's history. It stops short of 5 because
+  completion always requires a human-typed field voice cannot supply, and because that specific
+  completion path's audit event is unasserted by any test.
+- **All other rows: unchanged from the first pass.** Re-ran every cited integration test for
+  each row that wasn't part of this round's work (B5.3, B5.5, B6.3, B7.4, B7.6, B8.1, B8.10) and
+  confirmed all still pass, with no regression from the B7.5 plumbing touching shared modules
+  (`billing-engine.ts`, `estimate-editor.ts`, `pg-estimate.ts`, `pg-invoice.ts`,
+  `document-row-mappers.ts`).
 
-**I find the substitution adequate, with one caveat.** `rivet-voice-19-focus.test.ts`
-drives the real `createVoiceActionRouterWorker` with a real `PgEntityResolver` against
-seeded Postgres — this is a stronger proof of resolution than the Layer-1 harness (which
-the run correctly notes has no entity resolver wired at all) and genuinely closes the gap
-decision #9 describes. I ran it (8/8 pass) and independently confirmed the two false-green
-fixtures the run says it deleted are in fact gone: `git diff origin/main...HEAD -- packages/api/src/proposals/surface.ts`
-is empty (no allowlist widening), and no `S1_ALLOWED_PROPOSAL_TYPES` reference appears in
-`text-mode-driver.ts`. The caveat: this sibling harness only covers 5 of the "focus eight"
-ops (`add_note`, `reassign_appointment`, `log_time_entry`, `reschedule_appointment`,
-`cancel_appointment` — confirmed by the corpus's own sanity-check test, line 449-463). It
-does **not** cover `send_estimate_nudge`, `update_brand_voice`, or the onboarding intents —
-those three get their resolution proof by a different, also-legitimate mechanism (the task
-handler's own real-repo lookup, in the case of B8.10; no resolution needed for B1.18;
-conversation-turn state machine, not entity resolution, for B1.19). None of the three fall
-back to a hand-built payload, so the standard ("payload must come from the real task
-handler") is met in every case I checked, just via more than one mechanism.
+## Deferred five, D-013, and S1 allowlist — integrity re-checked at the new head
 
-## Deferred five — integrity check
+```
+git diff 1074ecd..5f71f79 --name-only | grep -iE "AddCrewMember|RemoveCrewMember|LogExpense|ApplyLateFee|SendPaymentReminder|BatchInvoice"
+```
+returns nothing — no deferred-handler path touched between the first pass and this one. All
+five stay at rung 3, matching Part E and the first pass exactly.
 
-`git diff origin/main...HEAD --name-only -- packages/api/src packages/web/src` — read the
-full 90-file list directly. Confirmed no file under any deferred handler's path
-(`AddCrewMemberTaskHandler`, `RemoveCrewMemberTaskHandler`, `LogExpenseTaskHandler`,
-`ApplyLateFeeTaskHandler`, `SendPaymentReminderTaskHandler`, `BatchInvoiceTaskHandler`) is
-touched. Read the actual diff hunks in `voice-extended-tasks.ts` (the one file shared with
-deferred handlers) line by line — the only real edits are to `AddNoteTaskHandler` and the
-reschedule/cancel/reassign/nudge handlers; `RemoveCrewMemberTaskHandler` appears only as
-unchanged diff-context. **No scope violation. All five deferred rows confirmed unchanged
-at rung 3, matching Part E exactly.**
+```
+git diff 1074ecd..5f71f79 -- packages/api/src/routes/assistant.ts \
+  packages/api/src/ai/voice-turn/create-voice-turn-processor.ts \
+  packages/api/src/ai/tasks/proposal-approval-task.ts
+```
+empty — D-013's three byte-untouched files remain untouched.
 
-## D-013 integrity check
-
-`git diff origin/main...HEAD -- packages/api/src/routes/assistant.ts packages/api/src/ai/voice-turn/create-voice-turn-processor.ts packages/api/src/ai/tasks/proposal-approval-task.ts`
-— empty, confirming byte-untouched as claimed. `workers/voice-action-router.ts` IS modified
-(+97/-0, additive only) for B5.5's `en_route` branch; read the diff, confirmed it fires only
-on `classification.intentType === 'en_route'` and sits structurally before, not inside, the
-RV-071/225 approval gate.
-
-## On the ProtectedRoute deadlock fix (commit `152c5e9`) — the coordinator asked for scepticism here
-
-The fix is real and necessary: before it, `OnboardingGuard` redirected every non-`/onboarding`
-path (including `/inbox`, where approvable proposals live) back to `/onboarding` until the
-identity step was done — and the identity step is *written by* approving one of the
-conversation's own proposals. That is a genuine deadlock, not a cosmetic bug: a brand-new
-tenant using only the conversational path had no way to ever open the CRM. `ProtectedRoute.test.tsx`
-ran, 12/12 pass (was 10).
-
-**I am skeptical the fix is scoped as narrowly as it could be.** It exempts the entire
-`/inbox` and `/proposals` routes from the soft gate — not just the onboarding-emitted
-proposals. For a genuinely brand-new tenant this is low-risk (there is usually nothing else
-in the queue yet), but the exemption as written would also expose any *other* proposal that
-happened to exist (e.g., a voice channel already live, or a second team member's activity)
-before identity is confirmed — the general proposal review surface, including job/customer/
-price details on unrelated cards, rather than only the onboarding completion cards. A
-narrower fix (filtering the gate exemption to onboarding-sourced proposals specifically, or
-routing the completion panel to a dedicated mini-review view) would close the same deadlock
-without widening general CRM visibility. I'd flag this as a candidate follow-up, not a
-blocker — it doesn't change any rung score above, since B1.19's cap is independently driven
-by the team-member execution failure, not by this fix's precision.
+```
+git diff 1074ecd..5f71f79 -- packages/api/src/proposals/surface.ts
+```
+empty — no widening of the `S1_ALLOWED_PROPOSAL_TYPES` allowlist since the first pass.
 
 ## Claims that did not survive verification
 
-This section is not empty.
+1. **The master prompt's own framing of B1.19** ("gated at draft time... never
+   completable... judge whether that reaches 5") described a state that had already been
+   superseded by commit `5f71f79` at the time I measured. This isn't a run claim that failed —
+   it's the master prompt citing an intermediate state one commit behind HEAD. I measured the
+   actual head and scored accordingly (4, not the binary "3 or unchanged-3" the prompt implied).
+2. **The master prompt's framing of B7.5** ("the catalog resolver now carries a matched item's
+   unit onto the grounded line... Score accordingly") is true only of one grounding function
+   (`groundLineItemPricing`, used by the fresh-draft path) and even that gets the unit stripped
+   before persistence by `normalizeDraftLineItems`. The actual live edit-path grounding function
+   (`groundEditActionPricing`) never attaches a unit at all. In practice, zero live paths carry a
+   spoken/catalog-matched unit to a persisted row. I did not take the "Score accordingly"
+   framing as license to score higher than 2; if anything this finding argues for staying
+   exactly where the first pass had it.
+3. **B4.7's "restored" framing.** `efe05f3`'s commit message is explicit that it doesn't itself
+   re-score the row ("It does NOT itself re-score the row... any move to 5 needs
+   re-verification") — that message survives verification intact. But nothing in the run
+   claimed the create leg's drafting proof was hand-built; that gap was found independently by
+   this pass, not asserted-and-checked.
 
-1. **B1.19 claimed as one of the "focus eight" reaching rung 5** (implicit in the run
-   log's "This run claims the eight focus items reached rung 5" framing, brief line 41,
-   and the DoD ledger's unqualified "✅ green" for both the backend and web halves). Did
-   not survive: `onboarding-conversation-parity.test.ts` itself proves that
-   `onboarding_team_member` proposals reach `approved` and then fail execution
-   (`handler_not_wired`) — the exact shape the brief names as the B7.4 failure class,
-   which the brief says scores 3, not 5. Scored 3.
-
-2. **B4.7 claimed as fully "restored"** with the implication of rung 5 (DoD ledger:
-   "✅ restored"). Reschedule and cancel are genuinely restored to full rung-4 proof. But
-   the create leg's own cited test (`voice-inbound-appointment.test.ts`, unchanged by this
-   run and not re-scrutinized by it) has no cross-tenant negative — a gap this
-   measurement found, not one the run flagged. Scored 4, not 5.
-
-Nothing else I checked failed to hold up: every audit-event assertion, every cross-tenant
-negative, the C1 red→green transition, the D-013 untouched-file claims, the deferred-five
-integrity, the S1-allowlist non-widening claim, the `record_payment` gating deviation, and
-the test-count claims I spot-checked (18, 20, 8, 11, 4, 3, 22, 12, 6, 37, etc. — all matched
-exactly) all reproduced exactly as the run log describes.
+Nothing else failed to hold up. Every audit-event assertion, cross-tenant negative, and test
+count I spot-checked for the unchanged nine rows (B7.1, B7.7, B7.4, B5.3, B8.10, B6.3, B5.5,
+B7.6, B8.1) reproduced exactly.
 
 ## Commands run (all re-runnable)
 
 ```bash
 # Environment / diff checks
-git log --oneline -5
+git log --oneline -20
 git status --short
-git branch --show-current
-git diff origin/main...HEAD -- packages/api/src/routes/assistant.ts packages/api/src/ai/voice-turn/create-voice-turn-processor.ts packages/api/src/ai/tasks/proposal-approval-task.ts
-git diff origin/main...HEAD --stat -- packages/api/src/workers/voice-action-router.ts
-git diff origin/main...HEAD --name-only -- packages/api/src packages/web/src
-git diff origin/main...HEAD -- packages/api/src/ai/tasks/voice-extended-tasks.ts
-git diff origin/main...HEAD -- packages/api/src/proposals/surface.ts
-git show --stat 152c5e9
-git show --stat 7d8fbd4
+git rev-parse HEAD
+git diff 1074ecd..5f71f79 --stat
+git diff 1074ecd..5f71f79 --name-only -- packages/api/src packages/web/src
+git diff 1074ecd..5f71f79 -- packages/api/src/routes/assistant.ts \
+  packages/api/src/ai/voice-turn/create-voice-turn-processor.ts \
+  packages/api/src/ai/tasks/proposal-approval-task.ts
+git diff 1074ecd..5f71f79 -- packages/api/src/proposals/surface.ts
+git diff 1074ecd..5f71f79 --name-only | grep -iE "AddCrewMember|RemoveCrewMember|LogExpense|ApplyLateFee|SendPaymentReminder|BatchInvoice"
+git show --stat efe05f3 4c07cf4 52edb15 0d85691 3c50d1c 5f71f79
+git log --follow -- packages/api/src/users/pending-invitation.ts
 
 # Build verification
 cd packages/api && npx tsc --project tsconfig.build.json --noEmit
@@ -184,59 +310,51 @@ cd packages/api && npx tsc --project tsconfig.build.json --noEmit
 # Docker-gated integration tests (RLS_RUNTIME_ROLE=true, vitest.integration.config.ts)
 cd packages/api
 RLS_RUNTIME_ROLE=true npx vitest run --config vitest.integration.config.ts \
-  test/integration/rivet-voice-19-focus.test.ts \
-  test/integration/add-note-voice-execution.test.ts \
-  test/integration/log-time-entry-execution.test.ts \
-  test/integration/reassign-appointment-voice.test.ts
-
-RLS_RUNTIME_ROLE=true npx vitest run --config vitest.integration.config.ts \
-  test/integration/estimate-nudge.test.ts \
-  test/integration/en-route-voice.test.ts \
-  test/integration/update-brand-voice-voice-execution.test.ts
+  test/integration/onboarding-conversation-parity.test.ts \
+  test/integration/voice-inbound-appointment.test.ts \
+  test/integration/entity-resolution.test.ts \
+  test/integration/spoken-parts-line-item.test.ts
 
 RLS_RUNTIME_ROLE=true npx vitest run --config vitest.integration.config.ts \
   test/integration/reschedule-appointment-voice.test.ts \
-  test/integration/cancel-appointment-voice.test.ts \
-  test/integration/draft-estimate-execution.test.ts \
-  test/integration/update-estimate-execution.test.ts \
-  test/integration/issue-invoice-conversation-resolution.test.ts \
-  test/integration/draft-invoice-execution.test.ts
+  test/integration/cancel-appointment-voice.test.ts
 
 RLS_RUNTIME_ROLE=true npx vitest run --config vitest.integration.config.ts \
-  test/integration/voice-inbound-appointment.test.ts
+  test/integration/update-estimate-execution.test.ts \
+  test/integration/draft-estimate-execution.test.ts \
+  test/integration/draft-invoice-execution.test.ts \
+  test/integration/issue-invoice-conversation-resolution.test.ts \
+  test/integration/estimate-nudge.test.ts \
+  test/integration/en-route-voice.test.ts \
+  test/integration/update-brand-voice-voice-execution.test.ts \
+  test/integration/log-time-entry-execution.test.ts \
+  test/integration/reassign-appointment-voice.test.ts \
+  test/integration/add-note-voice-execution.test.ts
 
-# Individual per-file counts (used to cross-check the combined runs above)
-RLS_RUNTIME_ROLE=true npx vitest run --config vitest.integration.config.ts test/integration/add-note-voice-execution.test.ts
-RLS_RUNTIME_ROLE=true npx vitest run --config vitest.integration.config.ts test/integration/log-time-entry-execution.test.ts
-RLS_RUNTIME_ROLE=true npx vitest run --config vitest.integration.config.ts test/integration/reassign-appointment-voice.test.ts
-RLS_RUNTIME_ROLE=true npx vitest run --config vitest.integration.config.ts test/integration/rivet-voice-19-focus.test.ts
-RLS_RUNTIME_ROLE=true npx vitest run --config vitest.integration.config.ts test/integration/estimate-nudge.test.ts
-RLS_RUNTIME_ROLE=true npx vitest run --config vitest.integration.config.ts test/integration/update-brand-voice-voice-execution.test.ts
-RLS_RUNTIME_ROLE=true npx vitest run --config vitest.integration.config.ts test/integration/en-route-voice.test.ts
-RLS_RUNTIME_ROLE=true npx vitest run --config vitest.integration.config.ts test/integration/reschedule-appointment-voice.test.ts
-RLS_RUNTIME_ROLE=true npx vitest run --config vitest.integration.config.ts test/integration/cancel-appointment-voice.test.ts
-RLS_RUNTIME_ROLE=true npx vitest run --config vitest.integration.config.ts test/integration/draft-estimate-execution.test.ts
-RLS_RUNTIME_ROLE=true npx vitest run --config vitest.integration.config.ts test/integration/update-estimate-execution.test.ts
-RLS_RUNTIME_ROLE=true npx vitest run --config vitest.integration.config.ts test/integration/issue-invoice-conversation-resolution.test.ts
-RLS_RUNTIME_ROLE=true npx vitest run --config vitest.integration.config.ts test/integration/draft-invoice-execution.test.ts
+# Unit tests
+npx vitest run test/ai/tasks/estimate-grounding-idempotent.test.ts
+npx vitest run   # full api unit suite — 1056 files / 12053 tests, all green
 
-# Unit / contract tests
-cd packages/api
-npx vitest run test/proposals/voice-payload-contract.test.ts
-npx vitest run test/ai/tasks/add-note-voice-task.test.ts
-npx vitest run test/ai/tasks/complaint-task.test.ts
-npx vitest run test/sms/tech-status/en-route-keyword.test.ts test/dispatch/en-route-voice.test.ts
-npm run test:voice-fixtures
+# Shared package
+cd packages/shared && npx vitest run   # 16 files / 169 tests, all green
+npx vitest run src/contracts/money.test.ts
 
 # Web
 cd packages/web
-npx vitest run src/components/onboarding/v2/steps/ConversationStep.test.tsx src/components/onboarding/v2/steps/ConversationStep.layout.test.tsx src/hooks/useOnboardingConversation.test.ts
-npx vitest run src/components/auth/ProtectedRoute.test.tsx
-npx vitest run src/hooks/useOnboardingConversation.test.ts
+npx vitest run src/hooks/useOnboardingConversation.test.ts src/components/auth/ProtectedRoute.test.tsx
 
-# Schema / contract greps (B7.5)
-grep -n "unit" packages/shared/src/contracts/money.ts
-grep -rn "interface LineItem" packages/api/src
+# B7.5 production-path tracing (the finding above)
 grep -n "unit" packages/api/src/ai/resolution/catalog-resolver.ts
-grep -n "line_items_unit\|265\b" packages/api/src/db/schema.ts
+grep -n "unit" packages/api/src/ai/resolution/edit-action-grounding.ts   # zero unit-of-measure refs
+grep -n "unit" packages/api/src/ai/tasks/estimate-edit-task.ts           # prompt never asks for it
+grep -n "unit" packages/api/src/proposals/execution/handlers.ts          # normalizeDraftLineItems whitelist
+grep -rln "SpokenPart\|spoken-parts" packages/api/src                    # no matches
+grep -n "unit" test/integration/draft-estimate-execution.test.ts        # never selects unit column
+
+# B1.19 production-path tracing
+grep -n "missingFields\|unfilled required fields" packages/api/src/proposals/actions.ts
+git log --follow --oneline -- packages/api/src/users/pending-invitation.ts
+grep -rln invitation_created packages/api/test packages/api/src         # asserted nowhere
+
+# Deferred five / D-013 / S1 allowlist re-check (see "Deferred five" section above)
 ```
