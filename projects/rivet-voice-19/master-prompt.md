@@ -307,9 +307,11 @@ missing the PRD's `tools` capture state. Shipped UX is the form wizard.
 7. **Mobile-safe:** the step meets ≥44px targets and no horizontal overflow at 320px — jsdom
    class-contract test + Playwright viewport test (repo-mandated pattern,
    `e2e/estimate-approval-mobile.spec.ts` as reference).
-8. **E2E:** one Playwright script drives a 6-turn spoken-style conversation (mocked gateway,
-   text-injected transcripts) from fresh signup to "CRM unlocked", asserting the B1.20 soft-gate
-   opens.
+8. **E2E:** one Playwright script drives a **10–15 exchange** spoken-style conversation (mocked
+   gateway, text-injected transcripts) from fresh signup to "CRM unlocked" — matching the source
+   requirement's stated depth, covering all six capture states (profile, category, pricing, team,
+   schedule, tools) with at least one clarification exchange — asserting the exchange count lands
+   in [10,15] and the B1.20 soft-gate opens.
 
 ---
 
