@@ -3,8 +3,12 @@
 For **Rivet** — the voice-and-AI-first back office for 1–3-truck owner-operator shops. Part E
 (2026-07-29, incl. post-review corrections — run log #16-17) measured voice coverage at **2/19
 strict** (after post-review correction rounds, run log #16-22). This run ships the **eight focus
-requirements** below to rung 5, taking coverage to **14/19**. Five items are explicitly deferred
-(appendix) — do not touch them except where a cross-cutting gate requires it.
+requirements** below to rung 5, taking coverage to **14/19 — conditionally**: two of the
+contributing items (B9.1's issuance semantics, B1.18's lock leg) depend on Part F decisions the
+product owner must ratify. If either decision rejects the recommended reading, that item stays red
+until the implied build ships and the honest result is 12–13/19 — **the re-measurement reports
+what was actually decided and built, never a pre-awarded number.** Five items are explicitly
+deferred (appendix) — do not touch them except where a cross-cutting gate requires it.
 
 **Focus set:** B7.4 · B5.3 · B8.10 · B6.3 · B5.5 · B1.18 · B1.19 · B7.5
 
@@ -246,7 +250,11 @@ theory as D-013). Smallest honest scope: one new intent + proposal type; no mult
    (real Postgres): version row + audit event + **cross-tenant negative**.
 4. **Lock negative:** a spoken "lock my brand voice" does **not** set `brand_voice_locked` — pinned
    by a test (either the classifier maps it to the capture intent whose payload cannot express
-   lock, or it clarifies; both acceptable, logged).
+   lock, or it clarifies; both acceptable, logged). **Scoring honesty:** B1.18's text includes
+   "then locked," so rung 5 for this row is contingent on a **Part F amendment** ratifying
+   lock-as-tap (same structure as D-013's approval exception — recommended, but the product
+   owner's call). Record the entry; if it is rejected, B1.18 stays red in the re-measurement and
+   the target drops accordingly. Do not count it restored by documentation alone.
 5. **UI:** `BrandVoiceSheet` shows the voice-created version identically to a form-created one
    (existing component test extended).
 6. **C1** row green. **Fixture:** rubric script → approvable brand-voice proposal.
@@ -370,8 +378,10 @@ any defect found by writing them is in scope and must be flagged as found-by-pro
    sentence' mean single-utterance-to-issued, or draft-then-issue with two taps?" with a
    recommendation (default: the two-step flow is the trust-correct reading; if product wants
    single-utterance issuance, that is a new auto-issue-on-approve behavior needing its own risk
-   review — not silently built here). B9.1 scores rung 5 in the re-measurement once the proof leg
-   exists and the entry is recorded.
+   review — not silently built here). **B9.1 scores rung 5 in the re-measurement only if the
+   ratified decision amends the requirement to the two-step reading AND the proof leg exists;
+   if the decision demands single-utterance issuance, B9.1 stays red until that is built (out of
+   this run's scope) and the target is reported one lower.** Documentation alone restores nothing.
 5. **C1** rows for these intents green with resolver-provided ids; existing rubric fixtures
    extended only if the new tests reveal a gap.
 
