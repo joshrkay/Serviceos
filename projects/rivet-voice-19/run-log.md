@@ -9,6 +9,10 @@ during this run is logged here, per Guardrail 1 (never ask).
 | # | Item | Decision | Rationale |
 |---|------|----------|-----------|
 | 1 | — | Run started; branch reset to merged main containing the master prompt (PR #784). | The designated branch had no unique commits; the master prompt arrived via PR #784. |
+| 2 | D-013 | The hard stop is the **voice-approval** D-013 (PRD-v4-part-E-state.md:282), NOT `docs/decisions.md`'s D-013 (QuickBooks sync status) — a decision-ID collision across two documents. Enforcement sites pinned: `voice-action-router.ts:1321-1339`, `routes/assistant.ts:1058-1090`, ownerSession origin in `create-voice-turn-processor.ts`, task-level re-check in `proposal-approval-task.ts`. Any diff touching these is reverted. | Ambiguity resolved by evidence, not assumption; recorded so a reviewer can check diffs against the right sites. |
+| 3 | Part F | Part F had no file. Created `docs/PRD-v4-part-F-decisions.md` with entries F-1…F-6 (B9.1 issuance PROPOSED, B1.18 lock-as-tap PROPOSED, B5.5 direct-act RECORDED, B7.5 billing-document landing RECORDED, B1.19 wizard-default RECORDED, deferred-set integrity RECORDED). | The master prompt requires Part F entries; a register that doesn't exist can't hold them. PROPOSED vs RECORDED distinguishes "needs product-owner ratification before it can move a score" from "scoping call inside this run's mandate." |
+| 4 | Fixtures | Regression/unit/integration tests land in the SAME commit as their fix (Guardrail 5, strictly). Voice-quality **rubric fixtures** land in a grouped fixtures commit rather than strictly per-item. | Guardrail 5's same-commit rule is about proof of the fix; the rubric suite is additive eval coverage with its own runner (`npm run voice-quality`) and cassette conventions. Logged so the deviation is visible, not silent. |
+| 5 | Baseline | Docker-gated integration baseline captured BEFORE any change: **179 files / 925 tests / 0 failures** (2026-07-29 04:04-04:06). | Every later integration count is judged against a measured baseline, not a remembered one. |
 
 ## Break-point re-verification (pre-change)
 
