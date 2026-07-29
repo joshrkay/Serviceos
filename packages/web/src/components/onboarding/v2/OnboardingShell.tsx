@@ -72,26 +72,48 @@ export function OnboardingShell() {
   // mid-conversation refresh lands the user back in the conversation panel
   // rather than silently dropping them into the form. Best-effort:
   // localStorage failures degrade to "always reopen the form," never throw.
+  //
+  // The hydration guard is keyed BY the storage key (i.e. by tenant), not a
+  // bare "have we hydrated once" boolean. Same family as P-9: a tenant switch
+  // that doesn't remount this shell used to leave the guard latched true, so
+  // the new tenant's persisted mode was never read and the persistence effect
+  // below wrote the PREVIOUS tenant's voiceMode into the new tenant's key —
+  // either forcing the conversation open for a tenant that never chose it, or
+  // erasing that tenant's saved in-progress mode.
+  //
+  // `voiceModeHydratedFor` is state, not a ref, on purpose. Both effects run
+  // in the same commit as the key change; a ref written by the first would
+  // already read as "hydrated" to the second, which would then persist the
+  // stale mode under the new key before the reset landed. As state, the
+  // persistence effect still sees the OLD key in that commit and correctly
+  // skips, then runs on the next render with the reconciled mode.
   const voiceModeKey = tenantId ? `serviceos.onboarding_conversation_mode.${tenantId}` : null;
-  const voiceModeHydrated = useRef(false);
+  const [voiceModeHydratedFor, setVoiceModeHydratedFor] = useState<string | null>(null);
   useEffect(() => {
-    if (!voiceModeKey || voiceModeHydrated.current) return;
-    voiceModeHydrated.current = true;
+    if (!voiceModeKey || voiceModeHydratedFor === voiceModeKey) return;
+    let stored = false;
     try {
-      if (window.localStorage.getItem(voiceModeKey) === '1') setVoiceMode(true);
+      stored = window.localStorage.getItem(voiceModeKey) === '1';
     } catch {
       // Storage unavailable — fall back to the form, same as a fresh session.
     }
-  }, [voiceModeKey]);
+    // Assign, don't just set-true: on a tenant switch the mode must be RESET
+    // to what this tenant actually saved, otherwise tenant A's open
+    // conversation carries over into tenant B.
+    setVoiceMode(stored);
+    setVoiceModeHydratedFor(voiceModeKey);
+  }, [voiceModeKey, voiceModeHydratedFor]);
   useEffect(() => {
-    if (!voiceModeKey) return;
+    // Suppresses only the stale WRITE — no UI flag is held down by this guard,
+    // and it clears on the very next render once hydration resolves.
+    if (!voiceModeKey || voiceModeHydratedFor !== voiceModeKey) return;
     try {
       if (voiceMode) window.localStorage.setItem(voiceModeKey, '1');
       else window.localStorage.removeItem(voiceModeKey);
     } catch {
       // Best-effort — worst case a refresh reopens the form instead.
     }
-  }, [voiceMode, voiceModeKey]);
+  }, [voiceMode, voiceModeKey, voiceModeHydratedFor]);
 
   useEffect(() => {
     const billing = searchParams.get('billing');

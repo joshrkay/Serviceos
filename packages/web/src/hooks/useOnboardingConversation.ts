@@ -188,7 +188,7 @@ export function useOnboardingConversation(tenantId: string): UseOnboardingConver
     sessionIdRef.current = readSessionId(tenantId);
     setHistory(readHistory(tenantId));
 
-    (async () => {
+    const bootstrap = (async () => {
       try {
         const existingSessionId = sessionIdRef.current;
         const res = await apiFetch('/api/onboarding/conversation/turn', {
@@ -229,6 +229,21 @@ export function useOnboardingConversation(tenantId: string): UseOnboardingConver
         if (!cancelled) setLoading(false);
       }
     })();
+
+    // Submitted turns must queue BEHIND the bootstrap, not race it. The
+    // controls stay enabled while `loading` is true (only `sending` disables
+    // them), so an owner who types or speaks during the opening round-trip
+    // used to hit `sendMessage` while `sessionIdRef.current` was still null:
+    // the route then created a SECOND session, and whichever response landed
+    // last won sessionIdRef — losing the first answer or splicing turns from
+    // two sessions into one transcript. Chaining (rather than rejecting) is
+    // what the queue already exists for, and silently dropping what the owner
+    // typed would just be a different defect. `bootstrap` never rejects (it
+    // has its own try/catch/finally), so this cannot poison the queue.
+    queueRef.current = queueRef.current.then(
+      () => bootstrap,
+      () => bootstrap,
+    );
 
     return () => {
       cancelled = true;

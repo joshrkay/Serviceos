@@ -236,6 +236,81 @@ describe('useOnboardingConversation — B1.19 AC-1/AC-2', () => {
     ).not.toBeNull();
   });
 
+  // Regression: the composer is disabled by `sending`, never by `loading`, so
+  // a turn could be submitted while the bootstrap round-trip was still in
+  // flight. `sessionIdRef.current` was still null at that point, so the route
+  // created a SECOND independent session; whichever response landed last won
+  // sessionIdRef, losing the first answer or splicing two sessions' turns into
+  // one transcript. `queueRef` serialized submitted turns against each other
+  // but not against the bootstrap.
+  it('queues a turn submitted during bootstrap behind it — exactly one session, turn not lost', async () => {
+    let resolveBootstrap!: (value: unknown) => void;
+    apiFetchMock.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveBootstrap = resolve;
+        }),
+    );
+    apiFetchMock.mockResolvedValueOnce(
+      jsonResponse(200, {
+        sessionId: 'sess-boot',
+        assistantMessage: 'Got it — what services do you offer?',
+        state: 'category_capture',
+        turnCount: 1,
+        completed: false,
+        proposalIds: [],
+      }),
+    );
+
+    const { result } = renderHook(() => useOnboardingConversation(TENANT));
+    expect(result.current.loading).toBe(true);
+
+    let sendPromise!: Promise<void>;
+    act(() => {
+      sendPromise = result.current.sendMessage('Acme HVAC in Austin');
+    });
+
+    // Flush microtasks WITHOUT resolving the bootstrap. Nothing may have gone
+    // out yet — the turn has to wait for the session the bootstrap creates.
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(apiFetchMock).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      resolveBootstrap(
+        jsonResponse(200, {
+          sessionId: 'sess-boot',
+          assistantMessage: 'Hi! Tell me about your business.',
+          state: 'profile_capture',
+          turnCount: 0,
+          completed: false,
+          proposalIds: [],
+        }),
+      );
+      await sendPromise;
+    });
+
+    // Exactly two requests: the bootstrap, then the queued turn — no second
+    // session was created.
+    expect(apiFetchMock).toHaveBeenCalledTimes(2);
+    expect(JSON.parse((apiFetchMock.mock.calls[1][1] as RequestInit).body as string)).toEqual({
+      sessionId: 'sess-boot',
+      userMessage: 'Acme HVAC in Austin',
+    });
+    // The owner's answer survived, in order, and its reply landed.
+    expect(result.current.history.map((t) => t.text)).toEqual([
+      'Hi! Tell me about your business.',
+      'Acme HVAC in Austin',
+      'Got it — what services do you offer?',
+    ]);
+    expect(window.localStorage.getItem('serviceos.onboarding_conversation.session.' + TENANT)).toBe(
+      'sess-boot',
+    );
+    expect(result.current.state).toBe('category_capture');
+  });
+
   // Regression: the generation guard in sendMessage's `finally` used to also
   // gate setSending(false), so a response arriving after a tenant switch left
   // `sending` stuck true and the composer disabled for the rest of the session.
