@@ -36,6 +36,7 @@ import {
 } from '../../templates/estimate-template';
 import { VALID_VERTICAL_TYPES, VerticalType } from '../../shared/vertical-types';
 import type { PendingInvitationRepository } from '../../users/pending-invitation';
+import { inviteTeamMember, type ClerkInvitationConfig } from '../../users/invite-team-member';
 import {
   OnboardingSchedulePayload,
   TeamMemberRole,
@@ -387,6 +388,7 @@ export class OnboardingTeamMemberExecutionHandler implements ExecutionHandler {
   constructor(
     private readonly invitationRepo: PendingInvitationRepository | undefined,
     private readonly auditRepo: AuditRepository,
+    private readonly clerk: ClerkInvitationConfig = {},
   ) {}
 
   isFullyWired(): boolean {
@@ -416,12 +418,19 @@ export class OnboardingTeamMemberExecutionHandler implements ExecutionHandler {
     }
 
     try {
-      const invitation = await this.invitationRepo.create({
-        tenantId: context.tenantId,
-        email: payload.email,
-        role: payload.role as TeamMemberRole,
-        invitedBy: context.executedBy,
-      });
+      // Through the same service POST /api/users/invitations calls, never
+      // the repository directly: a local row on its own sends the teammate
+      // nothing, and they cannot reach the accept flow.
+      const { invitation, clerkInvitationId } = await inviteTeamMember(
+        {
+          tenantId: context.tenantId,
+          email: payload.email,
+          role: payload.role as TeamMemberRole,
+          invitedBy: context.executedBy,
+        },
+        this.invitationRepo,
+        this.clerk,
+      );
       await this.auditRepo.create(
         createAuditEvent({
           tenantId: context.tenantId,
@@ -430,7 +439,15 @@ export class OnboardingTeamMemberExecutionHandler implements ExecutionHandler {
           eventType: 'user.invitation_created',
           entityType: 'pending_invitation',
           entityId: invitation.id,
-          metadata: { email: invitation.email, role: invitation.role, source: 'onboarding_voice' },
+          metadata: {
+            email: invitation.email,
+            role: invitation.role,
+            source: 'onboarding_voice',
+            // Null when Clerk is unconfigured or the call failed — the row
+            // stands as intent and the operator re-sends from the dashboard.
+            // Recorded so the audit distinguishes "emailed" from "recorded".
+            clerkInvitationId,
+          },
         }),
       );
       return { success: true, resultEntityId: invitation.id };

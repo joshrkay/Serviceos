@@ -110,6 +110,7 @@ import {
 } from './onboarding-handlers';
 import { PackActivationRepository } from '../../settings/pack-activation';
 import type { PendingInvitationRepository } from '../../users/pending-invitation';
+import type { ClerkInvitationConfig } from '../../users/invite-team-member';
 import { EstimateTemplateRepository } from '../../templates/estimate-template';
 import { SeedPackDefaultsDeps } from '../../packs/seed-pack-defaults';
 import { UpdateBrandVoiceExecutionHandler } from './brand-voice-handler';
@@ -1235,6 +1236,12 @@ export function createExecutionHandlerRegistry(deps?: {
    * that no persistence target existed.
    */
   pendingInvitationRepo?: PendingInvitationRepository;
+  /**
+   * Clerk config for that invitation, same values POST /api/users/invitations
+   * gets. Without it the teammate never receives an email — the local row on
+   * its own is intent, not an invitation.
+   */
+  clerkInvitationConfig?: ClerkInvitationConfig;
   templateRepo?: EstimateTemplateRepository;
   packSeedDeps?: SeedPackDefaultsDeps;
   // B1.18 — update_brand_voice writes through the SAME versioned path the
@@ -1433,7 +1440,11 @@ export function createExecutionHandlerRegistry(deps?: {
     new OnboardingEstimateTemplateExecutionHandler(deps?.templateRepo, requiredAuditRepo),
     // No repo dep: this handler never persists (see its class doc) —
     // always reports isFullyWired() === false.
-    new OnboardingTeamMemberExecutionHandler(deps?.pendingInvitationRepo, requiredAuditRepo),
+    new OnboardingTeamMemberExecutionHandler(
+      deps?.pendingInvitationRepo,
+      requiredAuditRepo,
+      deps?.clerkInvitationConfig,
+    ),
     new OnboardingScheduleExecutionHandler(deps?.settingsRepo, requiredAuditRepo),
     // B1.18 — update_brand_voice: writes through the SAME versioned
     // read→cool-down-check→merge→bump path the Brand-Voice Configurator
