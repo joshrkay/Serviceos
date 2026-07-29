@@ -6,7 +6,7 @@ strict** (after post-review correction rounds, run log #16-22). This run ships t
 requirements** below to rung 5, taking coverage to **14/19 — conditionally**: two of the
 contributing items (B9.1's issuance semantics, B1.18's lock leg) depend on Part F decisions the
 product owner must ratify. If either decision rejects the recommended reading, that item stays red
-until the implied build ships and the honest result is 12–13/19 — **the re-measurement reports
+until the implied build ships and the honest result is 12–13/19 (12 if both are rejected) — **the re-measurement reports
 what was actually decided and built, never a pre-awarded number.** Five items are explicitly
 deferred (appendix) — do not touch them except where a cross-cutting gate requires it.
 
@@ -47,10 +47,11 @@ Ship the eight focus requirements to **rung 5, with proof**: for each, a spoken 
 proposal → execution → persisted row + audit event` (or the audited status-act / conversation
 equivalent), pinned by a Docker-gated integration test (audit + cross-tenant negative) and a
 voice-quality fixture. The run ends with a **read-only re-measurement of all 19** using the Part E
-Track B method; the deliverable is that re-run scoring **14/19**: the two previously-green items (B7.1, B7.7)
-still green, B4.7/B7.6/B8.1/B9.1 restored to rung 5 by items 9-10's proof-only tests (B9.1 also
-needs the Part F interpretation entry recorded), the eight focus items newly green, and the five
-deferred items unchanged.
+Track B method; the deliverable is that re-run scoring **12–14/19, per the ratified Part F decisions**: the two
+previously-green items (B7.1, B7.7) still green, B4.7/B7.6/B8.1 restored to rung 5 by items 9-10's
+proof-only tests, B9.1 and B1.18 each contributing only if their Part F decision ratifies the
+recommended reading, the remaining focus items newly green, and the five deferred items unchanged.
+The re-measurement reports the actual number and the decisions that produced it.
 
 ## GUARDRAILS
 
@@ -396,12 +397,13 @@ deferred intents by pinning their current honest-gating behavior — pins, not f
 
 ## DEFINITION OF DONE (self-grade before reporting)
 
-- [ ] Read-only re-measurement of all 19 (Part E Track B method, fresh agent): **13–14/19 at rung
-      5, per the ratified Part F decisions** — the focus eight newly green (B1.18 contingent on the
-      lock-as-tap amendment), the prior two still green, B4.7/B7.6/B8.1 restored via items 9-10's
-      proofs, B9.1 restored only if its Part F decision ratifies the two-step reading. Report the
-      ACTUAL number with the decisions that produced it; a rejected decision makes the honest
-      result lower, never a blocker to finishing
+- [ ] Read-only re-measurement of all 19 (Part E Track B method, fresh agent): **12–14/19 at rung
+      5, per the ratified Part F decisions** — B1.18 and B9.1 are independent contingencies (both
+      rejected → 12/19; one → 13/19; both ratified → 14/19). The focus items are newly green
+      (B1.18 contingent on the lock-as-tap amendment), the prior two still green, B4.7/B7.6/B8.1
+      restored via items 9-10's proofs, B9.1 only if its decision ratifies the two-step reading.
+      Report the ACTUAL number with the decisions that produced it; a rejected decision makes the
+      honest result lower, never a blocker to finishing
 - [ ] Every numbered AC above is demonstrably satisfied — each cites the test/file/command a
       reviewer can re-run
 - [ ] C1 payload-contract test exists, covers **all** mapped intents, gates CI, and its
