@@ -316,10 +316,29 @@ describe('dispatchEstimateNudge (integration) — claim-before-send against real
  *
  * Runs only under `npm run test:integration`.
  */
-/** What the operator says / the classifier extracts as `customerName`. */
-const SPOKEN_CUSTOMER_NAME = 'Khan Household';
+/**
+ * The customer as the tenant has them on file. NOT what anybody says out loud.
+ */
+const CUSTOMER_DISPLAY_NAME = 'Khan Household';
 
-describe('Postgres integration — voice send_estimate_nudge ("Nudge the Khan Household estimate") → approve → execute → dispatch + audit; 48h cooldown holds under voice', () => {
+/**
+ * What the operator actually SAYS, and therefore what the classifier extracts
+ * as `customerName`: the surname on its own.
+ *
+ * This used to be the full display name, `'Khan Household'`, which made the
+ * whole chain below green while production was broken — nobody says "nudge the
+ * Khan Household estimate", and `resolveCustomer`'s whole-string
+ * `similarity('Khan Household','Khan')` = 0.333 against a 0.60 confirm floor
+ * meant the real phrasing resolved no customer at all. The arrangement had
+ * simply moved out of the seed data and into the utterance (the seed was
+ * cleaned up in 81a68b8); see
+ * docs/solutions/test-failures/a-fixture-arranged-to-pass-proves-nothing.md.
+ * The customer keeps its real display name — the RESOLVER was fixed, not the
+ * fixture.
+ */
+const SPOKEN_CUSTOMER_NAME = 'Khan';
+
+describe('Postgres integration — voice send_estimate_nudge ("Nudge the Khan estimate") → approve → execute → dispatch + audit; 48h cooldown holds under voice', () => {
   let pool: Pool;
   let estimateRepo: PgEstimateRepository;
   let auditRepo: PgAuditRepository;
@@ -350,7 +369,7 @@ describe('Postgres integration — voice send_estimate_nudge ("Nudge the Khan Ho
       tenantId: tenant.tenantId,
       firstName: 'Khan',
       lastName: 'Household',
-      displayName: 'Khan Household',
+      displayName: CUSTOMER_DISPLAY_NAME,
       preferredChannel: 'phone',
       smsConsent: true,
       isArchived: false,
@@ -533,15 +552,15 @@ describe('Postgres integration — voice send_estimate_nudge ("Nudge the Khan Ho
     // nothing. This is the assertion that makes the drafting proof above
     // non-vacuous.
     const byText = await estimateRepo.findByTenant(tenant.tenantId, {
-      search: SPOKEN_CUSTOMER_NAME,
+      search: CUSTOMER_DISPLAY_NAME,
       limit: 5,
     });
     expect(byText).toHaveLength(0);
-    const byFirstNameOnly = await estimateRepo.findByTenant(tenant.tenantId, {
-      search: 'Khan',
+    const bySpokenSurname = await estimateRepo.findByTenant(tenant.tenantId, {
+      search: SPOKEN_CUSTOMER_NAME,
       limit: 5,
     });
-    expect(byFirstNameOnly).toHaveLength(0);
+    expect(bySpokenSurname).toHaveLength(0);
 
     // ...while the relationship the handler now uses does reach it.
     const jobs = await new PgJobRepository(pool).findByCustomer(tenant.tenantId, customerId);
@@ -666,5 +685,88 @@ describe('Postgres integration — voice send_estimate_nudge ("Nudge the Khan Ho
     expect(dispatches).toHaveLength(0);
     const found = await estimateRepo.findById(other.tenantId, estimate.id);
     expect(found).toBeNull();
+  });
+});
+
+/**
+ * The natural phrasing, pinned on its own tenant.
+ *
+ * `'Khan Household'` puts the spoken surname FIRST in the display name, which
+ * is the easier half of the problem. A real person is far more often stored as
+ * `'Aisha Khan'`, where the spoken word is the LAST of two — and there
+ * whole-string trigram similarity is worse still
+ * (`similarity('Aisha Khan','Khan')` = 0.455 against a 0.60 confirm floor).
+ * This block is the one that says a spoken surname reaches its customer no
+ * matter which end of the display name it sits on, and that a customer who
+ * merely SHARES A PREFIX is not reached at all.
+ */
+describe('Postgres integration — a spoken SURNAME resolves its customer (CUSTOMER_REF_INTENTS)', () => {
+  let pool: Pool;
+  let tenant: { tenantId: string; userId: string };
+  let aishaKhanId: string;
+
+  async function seedCustomer(displayName: string): Promise<string> {
+    const customerRepo = new PgCustomerRepository(pool);
+    const id = crypto.randomUUID();
+    const [firstName, ...rest] = displayName.split(' ');
+    await customerRepo.create({
+      id,
+      tenantId: tenant.tenantId,
+      firstName,
+      lastName: rest.join(' '),
+      displayName,
+      preferredChannel: 'phone',
+      smsConsent: false,
+      isArchived: false,
+      createdBy: tenant.userId,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+    return id;
+  }
+
+  beforeAll(async () => {
+    pool = await getSharedTestDb();
+    tenant = await createTestTenant(pool);
+    aishaKhanId = await seedCustomer('Aisha Khan');
+    // A DIFFERENT customer sharing the prefix, on the same tenant. If the
+    // resolver reached her, "Khan" would come back ambiguous (or wrong) and
+    // the nudge would stall on a clarification the operator should never see.
+    await seedCustomer('Priya Khanna');
+  });
+
+  afterAll(async () => {
+    await closeSharedTestDb();
+  });
+
+  it('spoken "Khan" resolves to "Aisha Khan" — the surname is the LAST word of the display name', async () => {
+    const routed = await resolveVoiceEntityReferences(new PgEntityResolver(pool), {
+      tenantId: tenant.tenantId,
+      intent: 'send_estimate_nudge',
+      entities: { customerName: 'Khan' },
+    });
+    expect(routed.kind).toBe('ok');
+    expect(routed.kind === 'ok' ? routed.resolved.customerId : undefined).toBe(aishaKhanId);
+  });
+
+  it('a prefix-sharing customer is NOT reachable from the surname — "Khanna" is a different person', async () => {
+    const resolver = new PgEntityResolver(pool);
+    const result = await resolver.resolve({
+      tenantId: tenant.tenantId,
+      reference: 'Khan',
+      kind: 'customer',
+    });
+    expect(result.kind).toBe('resolved');
+    if (result.kind === 'resolved') expect(result.candidate.label).toBe('Aisha Khan');
+  });
+
+  it('never resolves a spoken surname across tenants', async () => {
+    const stranger = await createTestTenant(pool);
+    const result = await new PgEntityResolver(pool).resolve({
+      tenantId: stranger.tenantId,
+      reference: 'Khan',
+      kind: 'customer',
+    });
+    expect(result.kind).toBe('not_found');
   });
 });

@@ -19,6 +19,8 @@
 
 import { Pool } from 'pg';
 import { withTenantConnection } from '../../db/tenant-transaction';
+import { resolveDateTime } from '../scheduling/resolve-datetime';
+import { isRuntimeTimezone } from '../../shared/timezone';
 import {
   EntityCandidate,
   EntityKind,
@@ -30,6 +32,69 @@ import {
 
 /** Minimum similarity score to even consider a candidate (pre-filter). */
 const SIMILARITY_PREFILTER = 0.3;
+
+/**
+ * B4.7 / B5.3 — an appointment reference is treated as a CLOCK TIME only when
+ * it contains an explicit time-of-day token. Deliberately digit-bearing and
+ * narrow, for one reason: the alternative (handing every reference to
+ * chrono-node) makes a customer surname a scheduling term the moment it
+ * collides with a month or weekday — "the March job", "the Sunday job", "the
+ * May job" all parse as dates. None of them contain a clock token, so none of
+ * them reach the temporal branch.
+ *
+ * Covered: "2pm", "2 p.m.", "2:30", "2:30pm", "at 2", "@2", "noon",
+ * "midnight" — which is every phrasing the classifier's own
+ * `appointmentReference` examples produce ("tomorrow's 10am", "the 2pm").
+ */
+const CLOCK_TIME_PATTERN =
+  /\b\d{1,2}\s*(?::\s*\d{2})?\s*[ap]\.?\s?m\.?\b|\b\d{1,2}\s*:\s*\d{2}\b|\b(?:at|@)\s*\d{1,2}(?:\s*:\s*\d{2})?\b|\bnoon\b|\bmidnight\b/i;
+
+/**
+ * How far from the STATED time an appointment may start and still be the one
+ * the caller meant. Fifteen minutes absorbs the ordinary slop between "the
+ * 2pm" and a slot actually booked at 2:05, without ever reaching the
+ * neighbouring half-hour slot (a 1:30 or a 2:30 is a different appointment and
+ * the caller would have said so). Anything inside the window that is not
+ * unique stays a one-tap clarification, never a guess; anything outside it
+ * falls through to the pre-existing branches rather than being answered.
+ */
+const CLOCK_TIME_TOLERANCE_MS = 15 * 60 * 1000;
+
+/** True when the reference states a time of day at all. See CLOCK_TIME_PATTERN. */
+function hasClockTime(reference: string): boolean {
+  return CLOCK_TIME_PATTERN.test(reference);
+}
+
+/** Bare clock words left over once punctuation is flattened to spaces. */
+const CLOCK_WORDS = new Set(['am', 'pm', 'at', 'noon', 'midnight', 'oclock']);
+
+/**
+ * The name token with CLOCK tokens removed, for matching against a person's
+ * name. "the 2pm Garcia job" reduces to "2pm garcia" under
+ * `extractNameLikeToken` (which strips filler, not times), and a customer's
+ * name is never going to word-match a needle carrying "2pm" — measured,
+ * `strict_word_similarity('2pm garcia','Jamie Garcia')` = 0.636, i.e. below
+ * τ_ent and thus a low_confidence the appointment branch folds into not_found.
+ * Against the clean needle it is 1.000.
+ *
+ * ONLY clock tokens are removed, and ONLY for the customer-name comparison:
+ *
+ *   - Day words ("tomorrow", weekday and month names) are deliberately left
+ *     alone. They are real surnames — May, March, Friday — and dropping them
+ *     would make a named reference match the wrong person.
+ *   - `extractNameLikeToken` itself is untouched, so the named-vs-NAMELESS
+ *     decision that guards the SCH-03 tenant-wide fallback (the AC-3 defect)
+ *     behaves exactly as before. Stripping there could turn "tomorrow's
+ *     appointment" into a NAMELESS reference and answer it with today's.
+ *   - If nothing survives (the reference was ALL clock), the original token is
+ *     used, so this can never match less than before.
+ */
+function stripClockTokens(nameToken: string): string {
+  const kept = nameToken
+    .split(/\s+/)
+    .filter((w) => w.length > 0 && !CLOCK_WORDS.has(w) && !/^\d+(?:am|pm)?$/.test(w));
+  return kept.length > 0 ? kept.join(' ') : nameToken;
+}
 
 /**
  * B5.3 (AC-3) — filler words stripped from an appointment reference to
@@ -119,6 +184,35 @@ export class PgEntityResolver implements EntityResolver {
     // Schema columns are display_name / primary_phone (the trigram index from
     // migration 051 is on display_name). Archived customers are excluded —
     // they must not become invoice/estimate targets.
+    //
+    // The score is the SAME two-function GREATEST as the job path (see
+    // `resolveJobByNameOrCustomer` for the full reasoning and measurements),
+    // and for the same reason: `similarity()` is whole-string, so the way a
+    // person actually names a customer out loud — a surname — scores below
+    // τ_ent_confirm_low against a full display name and returned `not_found`.
+    // Measured on pgvector/pgvector:pg16 with pg_trgm:
+    //   similarity('Khan Household','Khan')             = 0.333
+    //   similarity('Aisha Khan','Khan')                 = 0.455   (floor: 0.60)
+    //   strict_word_similarity('Khan','Khan Household') = 1.000
+    //   strict_word_similarity('Khan','Aisha Khan')     = 1.000
+    // This is the path `CUSTOMER_REF_INTENTS` feeds, so it is what B8.10's
+    // `send_estimate_nudge` traversal stands on: before this, "nudge the Khan
+    // estimate" resolved no customer at all and the whole chain stopped. Its
+    // integration test only passed because the utterance it spoke was the
+    // customer's FULL display name, "Khan Household", which nobody says.
+    //
+    // Whole-string similarity is KEPT in the GREATEST, so every reference that
+    // resolved before still resolves at the same score — a strictly additive
+    // change with no threshold moved. The strict variant (not `word_similarity`)
+    // is what keeps it safe on the other side: a shared prefix scores
+    // strict_word_similarity('khan','Khanna Enterprises') = 0.500 and
+    // ('smith','Smithson Plumbing') = 0.500, both under the confirm floor, and
+    // a multi-word near-miss stays low too — ('Bob Smith','Bob Jones') = 0.400.
+    const SCORE_EXPR = `GREATEST(
+             similarity(display_name, $2),
+             strict_word_similarity($2, display_name),
+             COALESCE(strict_word_similarity($2, company_name), 0)
+           )`;
     const rows = await withTenantConnection(this.pool, tenantId, (client) =>
       client
         .query<{
@@ -127,11 +221,11 @@ export class PgEntityResolver implements EntityResolver {
           primary_phone: string | null;
           score: number;
         }>(
-          `SELECT id, display_name, primary_phone, similarity(display_name, $2) AS score
+          `SELECT id, display_name, primary_phone, ${SCORE_EXPR} AS score
              FROM customers
             WHERE tenant_id = $1
               AND is_archived = false
-              AND similarity(display_name, $2) > $3
+              AND ${SCORE_EXPR} > $3
             ORDER BY score DESC
             LIMIT 5`,
           [tenantId, reference, SIMILARITY_PREFILTER],
@@ -299,6 +393,21 @@ export class PgEntityResolver implements EntityResolver {
   ): Promise<EntityResolverResult> {
     const parsed = parseDateReference(reference);
     if (!parsed) {
+      // B4.7/B5.3 (review finding B) — a TIME-OF-DAY reference ("the 2pm",
+      // "tomorrow at 2", "push tomorrow's 10am to 3pm"). `parseDateReference`
+      // above only accepts whole-day strings, so these fell through with
+      // `extractNameLikeToken` happily treating `2pm` / `tomorrow` / `at` as
+      // name content — the reference went into a fuzzy job-SUMMARY search and
+      // came back not_found, so cancel/reschedule/reassign failed even when
+      // exactly one appointment sat at the stated time. Resolved against
+      // `scheduled_start` in the TENANT's zone before the named-job branch.
+      //
+      // Returns null when the reference states no clock time, or when the
+      // stated time matches nothing — in both cases the pre-existing branches
+      // below still get their turn, so this is purely additive.
+      const byClock = await this.resolveAppointmentByClockTime(tenantId, reference, jobId);
+      if (byClock) return byClock;
+
       // A job anchor is the tighter scope, so it wins when we have one.
       if (jobId) {
         return this.resolveAppointmentByJob(tenantId, reference, jobId);
@@ -317,11 +426,11 @@ export class PgEntityResolver implements EntityResolver {
       // against jobs by that name first — never silently discarded.
       const nameToken = extractNameLikeToken(reference);
       if (nameToken) {
-        // Named reference, no job anchor yet: resolve the name against jobs
-        // (the same trigram search `resolveJob` already does for an
-        // explicit job reference) and build on `resolveAppointmentByJob`
-        // for the unique-match case — exactly the AC-3 positive path.
-        const jobResult = await this.resolveJob(tenantId, reference);
+        // Named reference, no job anchor yet: resolve the name against jobs —
+        // by their own summary AND by their linked CUSTOMER (review finding
+        // A) — and build on `resolveAppointmentByJob` for the unique-match
+        // case, exactly the AC-3 positive path.
+        const jobResult = await this.resolveJobByNameOrCustomer(tenantId, reference, nameToken);
         switch (jobResult.kind) {
           case 'resolved':
             return this.resolveAppointmentByJob(tenantId, reference, jobResult.candidate.id);
@@ -400,6 +509,206 @@ export class PgEntityResolver implements EntityResolver {
       kind: 'appointment' as EntityKind,
       label: new Date(row.scheduled_start).toISOString(),
       hint: row.status ?? undefined,
+      score: 1.0,
+    }));
+
+    if (candidates.length === 1) {
+      return { kind: 'resolved', candidate: candidates[0] };
+    }
+    return { kind: 'ambiguous', candidates };
+  }
+
+  /**
+   * Review finding A — resolve a job by its own summary OR by the name of the
+   * CUSTOMER it is for. The shared-resolver generalization of the B5.5 en-route
+   * fix (26f2345): `jobs.summary` is operator-authored free text describing the
+   * WORK ("AC repair"), while "move the Garcia job" names the PERSON, who lives
+   * on `jobs.customer_id → customers`. Matching only the summary returned
+   * not_found for every ordinarily-summarized job, which is B4.7
+   * (reschedule/cancel) and B5.3 (reassign) failing on the most natural
+   * phrasing there is.
+   *
+   * WHY TWO DIFFERENT SIMILARITY FUNCTIONS. `similarity()` is whole-string, and
+   * a last-name-only reference against a full display name scores far below
+   * τ_ent_confirm_low: measured on pgvector/pgvector:pg16,
+   * `similarity('Jamie Garcia','garcia')` = 0.538 and
+   * `similarity('Jamie Garcia','the Garcia job')` = 0.400, against a 0.60
+   * floor. Implementing the customer traversal as plain `similarity()` would
+   * therefore have reproduced the exact silent not_found it exists to fix, with
+   * extra steps. `strict_word_similarity(needle, display_name)` instead scores
+   * the needle against the best WORD-BOUNDED extent of the name:
+   * `strict_word_similarity('garcia','Jamie Garcia')` = 1.000 — comfortably
+   * above τ_ent — with no threshold change anywhere. The thresholds still guard
+   * every other path untouched.
+   *
+   * It is the STRICT variant, not `word_similarity`, precisely because the
+   * loose one is unsafe here: measured on the same image,
+   * `word_similarity('khan','Khanna Enterprises')` = 0.800 and
+   * `word_similarity('smith','Smithson Plumbing')` = 0.833 — both would clear
+   * or crowd τ_ent on a customer who merely SHARES A PREFIX. Forcing extent
+   * boundaries to word boundaries drops those to 0.500 (below the confirm
+   * floor, so they cannot resolve or even low-confidence), while real
+   * last-name hits stay at 1.000. Checked in both directions.
+   *
+   * The needle is the stopword-stripped token from `extractNameLikeToken`, not
+   * the raw phrase — "the Garcia job" must reach the name as "garcia" for a
+   * word-extent match to mean anything. The SUMMARY half deliberately still
+   * sees the ORIGINAL reference, so the pre-existing whole-phrase trigram
+   * behavior of `resolveJob` is bit-for-bit preserved and this can only ADD
+   * matches (GREATEST with a non-negative second term).
+   */
+  private async resolveJobByNameOrCustomer(
+    tenantId: string,
+    reference: string,
+    nameToken: string,
+  ): Promise<EntityResolverResult> {
+    // Archived customers are excluded on the customer half for the same reason
+    // `resolveCustomer` excludes them — they must not become voice targets.
+    // `c.tenant_id = j.tenant_id` keeps the join inside the tenant on top of
+    // the RLS session context `withTenantConnection` sets.
+    const SCORE_EXPR = `GREATEST(
+             similarity(j.summary, $2),
+             COALESCE(strict_word_similarity($4, c.display_name), 0),
+             COALESCE(strict_word_similarity($4, c.company_name), 0)
+           )`;
+    const rows = await withTenantConnection(this.pool, tenantId, (client) =>
+      client
+        .query<{
+          id: string;
+          summary: string;
+          status: string | null;
+          score: number;
+        }>(
+          `SELECT j.id, j.summary, j.status, ${SCORE_EXPR} AS score
+             FROM jobs j
+             LEFT JOIN customers c
+               ON c.id = j.customer_id
+              AND c.tenant_id = j.tenant_id
+              AND c.is_archived = false
+            WHERE j.tenant_id = $1
+              AND ${SCORE_EXPR} > $3
+            ORDER BY score DESC
+            LIMIT 5`,
+          [tenantId, reference, SIMILARITY_PREFILTER, stripClockTokens(nameToken)],
+        )
+        .then((r) => r.rows),
+    );
+
+    const candidates: EntityCandidate[] = rows.map((row) => ({
+      id: row.id,
+      kind: 'job' as EntityKind,
+      label: row.summary,
+      hint: row.status ?? undefined,
+      score: Number(row.score),
+    }));
+
+    return this.toResult(candidates, reference);
+  }
+
+  /**
+   * The tenant's IANA zone from `tenant_settings`, or undefined when it is
+   * missing/unrecognized so `resolveDateTime` applies its own documented
+   * default — which is the SAME value as the column default
+   * (`America/New_York`), so a settings row that has never been written and one
+   * that holds the default resolve identically. Read inside
+   * `withTenantConnection` like every other query here, so RLS scopes it.
+   */
+  private async resolveTenantTimezone(tenantId: string): Promise<string | undefined> {
+    const rows = await withTenantConnection(this.pool, tenantId, (client) =>
+      client
+        .query<{ timezone: string | null }>(
+          `SELECT timezone FROM tenant_settings WHERE tenant_id = $1 LIMIT 1`,
+          [tenantId],
+        )
+        .then((r) => r.rows),
+    );
+    const tz = rows[0]?.timezone ?? undefined;
+    return tz && isRuntimeTimezone(tz) ? tz : undefined;
+  }
+
+  /**
+   * Review finding B — resolve a TIME-OF-DAY appointment reference ("the 2pm",
+   * "tomorrow at 2", "tomorrow's 10am") against `scheduled_start`.
+   *
+   * Tenant-zone correctness is delegated wholesale to `resolveDateTime`
+   * (ai/scheduling/resolve-datetime.ts) rather than reinvented: it anchors
+   * chrono to the tenant's wall clock, converts through luxon so DST is right,
+   * and hands back a UTC instant. There is no server-local arithmetic in here —
+   * the only Date math is the ± tolerance around that returned UTC instant, and
+   * the comparison happens in Postgres against a `timestamptz`.
+   *
+   * Returns null (not `not_found`) in the two cases where the caller must keep
+   * going: the reference states no clock time at all, or `resolveDateTime`
+   * cannot make a concrete instant of it (a bare "tomorrow" is
+   * `ambiguous_no_time`, a bare daypart is not an exact time, a past instant is
+   * `in_past`). That keeps this branch strictly additive — every reference that
+   * resolved before still reaches the branch that resolved it.
+   */
+  private async resolveAppointmentByClockTime(
+    tenantId: string,
+    reference: string,
+    jobId?: string,
+  ): Promise<EntityResolverResult | null> {
+    if (!hasClockTime(reference)) return null;
+
+    const timezone = await this.resolveTenantTimezone(tenantId);
+    const resolved = resolveDateTime(reference, { timezone });
+    // `precision: 'daypart'` is a WINDOW ("tomorrow morning"), not a stated
+    // time — treating it as one would silently pick whichever appointment sat
+    // nearest an invented 8am. Only an exact clock time answers here.
+    if (!resolved.ok || resolved.precision !== 'exact') return null;
+
+    const target = new Date(resolved.startUtc).getTime();
+    const windowStart = new Date(target - CLOCK_TIME_TOLERANCE_MS);
+    const windowEnd = new Date(target + CLOCK_TIME_TOLERANCE_MS);
+
+    const MAX_DISAMBIGUATION_CANDIDATES = 5;
+    const rows = await withTenantConnection(this.pool, tenantId, (client) =>
+      client
+        .query<{
+          id: string;
+          scheduled_start: string;
+          job_summary: string | null;
+          tech_name: string | null;
+        }>(
+          // Same joins as `resolveAppointmentByJob` so an ambiguous result
+          // carries WHEN + WHAT + WHO. For a TIME reference the differentiator
+          // is not the clock (every candidate is within a quarter hour of the
+          // same instant) but the work and the tech, so both are in the hint.
+          `SELECT a.id, a.scheduled_start, j.summary AS job_summary,
+                  NULLIF(TRIM(COALESCE(u.first_name,'') || ' ' || COALESCE(u.last_name,'')), '') AS tech_name
+             FROM appointments a
+             LEFT JOIN jobs j ON j.id = a.job_id AND j.tenant_id = a.tenant_id
+             LEFT JOIN appointment_assignments aa
+               ON aa.appointment_id = a.id AND aa.tenant_id = a.tenant_id AND aa.is_primary = true
+             LEFT JOIN users u ON u.id = aa.technician_id
+            WHERE a.tenant_id = $1
+              AND a.status <> 'canceled'
+              AND a.scheduled_start >= $2
+              AND a.scheduled_start < $3
+              AND ($4::uuid IS NULL OR a.job_id = $4::uuid)
+            ORDER BY a.scheduled_start ASC
+            LIMIT ${MAX_DISAMBIGUATION_CANDIDATES + 1}`,
+          [tenantId, windowStart.toISOString(), windowEnd.toISOString(), jobId ?? null],
+        )
+        .then((r) => r.rows),
+    );
+
+    // Nothing at the stated time: fall through rather than answer. The name
+    // branch and the SCH-03 fallback below still get their turn.
+    if (rows.length === 0) return null;
+    // More candidates than a picker can honestly show — same rule as the
+    // sibling fallbacks: escalating beats reading back an arbitrary five.
+    if (rows.length > MAX_DISAMBIGUATION_CANDIDATES) return { kind: 'not_found', reference };
+
+    const candidates: EntityCandidate[] = rows.map((row) => ({
+      id: row.id,
+      kind: 'appointment' as EntityKind,
+      label: new Date(row.scheduled_start).toISOString(),
+      hint:
+        [row.job_summary ?? undefined, row.tech_name ? `assigned to ${row.tech_name}` : undefined]
+          .filter(Boolean)
+          .join(' · ') || 'unassigned',
       score: 1.0,
     }));
 

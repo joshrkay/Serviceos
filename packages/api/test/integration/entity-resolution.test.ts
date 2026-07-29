@@ -12,8 +12,10 @@
  */
 import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import { Pool } from 'pg';
+import { DateTime } from 'luxon';
 import { getSharedTestDb, createTestTenant, closeSharedTestDb, TestTenant } from './shared';
 import { PgEntityResolver } from '../../src/ai/resolution/pg-entity-resolver';
+import { TAU_ENT, TAU_ENT_CONFIRM_LOW } from '../../src/ai/resolution/entity-resolver';
 import { PgCustomerRepository } from '../../src/customers/pg-customer';
 import { PgLocationRepository } from '../../src/locations/pg-location';
 import { PgJobRepository } from '../../src/jobs/pg-job';
@@ -715,6 +717,488 @@ describe('Postgres integration — entity resolution (P8)', () => {
       // picker fires on the reassign path specifically, not as a stand-in
       // for an unresolved appointment.
       void appointmentIds;
+    });
+  });
+
+  // ---------------------------------------------------------------------
+  // PR review findings A + B — an appointment named by its CUSTOMER, and an
+  // appointment named by its TIME. Both were `not_found` before, which is
+  // B4.7 (reschedule/cancel) and B5.3 (reassign) failing on the two most
+  // natural phrasings a dispatcher uses.
+  //
+  // FIXTURE RULE (docs/solutions/test-failures/a-fixture-arranged-to-pass-
+  // proves-nothing.md): the seed here contains only what a real shop would
+  // produce. Job summaries say what the WORK is; the customer's name appears
+  // ONLY on the customer row; the appointment's notes do not repeat it. Every
+  // test below asserts that separation explicitly, so the planting the
+  // sibling helper does (displayName = jobSummary) cannot creep back in.
+  // ---------------------------------------------------------------------
+  describe('appointment resolution by CUSTOMER name and by CLOCK TIME', () => {
+    interface RealisticSeed {
+      tenantId: string;
+      userId: string;
+      customerId: string;
+      jobId: string;
+    }
+
+    /** A tenant with one customer and one ordinarily-summarized job. */
+    async function seedRealisticTenant(opts: {
+      displayName: string;
+      jobSummary: string;
+      timezone?: string;
+      companyName?: string;
+    }): Promise<RealisticSeed> {
+      const t = await createTestTenant(pool);
+      if (opts.timezone) {
+        await pool.query(
+          `INSERT INTO tenant_settings (id, tenant_id, business_name, timezone, region)
+           VALUES ($1, $2, $3, $4, 'TX')`,
+          [crypto.randomUUID(), t.tenantId, 'Test Shop', opts.timezone],
+        );
+      }
+      const localCustomerRepo = new PgCustomerRepository(pool);
+      const locationRepo = new PgLocationRepository(pool);
+      const jobRepo = new PgJobRepository(pool);
+
+      const [firstName, ...rest] = opts.displayName.split(' ');
+      const customerId = crypto.randomUUID();
+      await localCustomerRepo.create({
+        id: customerId,
+        tenantId: t.tenantId,
+        firstName,
+        lastName: rest.join(' '),
+        displayName: opts.displayName,
+        companyName: opts.companyName,
+        preferredChannel: 'phone',
+        smsConsent: false,
+        isArchived: false,
+        createdBy: t.userId,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      });
+
+      const locationId = crypto.randomUUID();
+      await locationRepo.create({
+        id: locationId,
+        tenantId: t.tenantId,
+        customerId,
+        street1: '9 Real St',
+        city: 'Austin',
+        state: 'TX',
+        postalCode: '78701',
+        country: 'USA',
+        isPrimary: true,
+        addressType: 'service',
+        isArchived: false,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      });
+
+      const jobId = crypto.randomUUID();
+      await jobRepo.create({
+        id: jobId,
+        tenantId: t.tenantId,
+        customerId,
+        locationId,
+        jobNumber: `JOB-${jobId.slice(0, 8)}`,
+        summary: opts.jobSummary,
+        status: 'scheduled',
+        priority: 'normal',
+        createdBy: t.userId,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      });
+
+      return { tenantId: t.tenantId, userId: t.userId, customerId, jobId };
+    }
+
+    /** Another customer + job inside an EXISTING tenant. */
+    async function addRealisticJob(
+      seed: RealisticSeed,
+      opts: { displayName: string; jobSummary: string },
+    ): Promise<string> {
+      const localCustomerRepo = new PgCustomerRepository(pool);
+      const locationRepo = new PgLocationRepository(pool);
+      const jobRepo = new PgJobRepository(pool);
+      const [firstName, ...rest] = opts.displayName.split(' ');
+      const customerId = crypto.randomUUID();
+      await localCustomerRepo.create({
+        id: customerId, tenantId: seed.tenantId, firstName, lastName: rest.join(' '),
+        displayName: opts.displayName, preferredChannel: 'phone', smsConsent: false,
+        isArchived: false, createdBy: seed.userId, createdAt: new Date(), updatedAt: new Date(),
+      });
+      const locationId = crypto.randomUUID();
+      await locationRepo.create({
+        id: locationId, tenantId: seed.tenantId, customerId, street1: '10 Real St',
+        city: 'Austin', state: 'TX', postalCode: '78701', country: 'USA', isPrimary: true,
+        addressType: 'service', isArchived: false, createdAt: new Date(), updatedAt: new Date(),
+      });
+      const jobId = crypto.randomUUID();
+      await jobRepo.create({
+        id: jobId, tenantId: seed.tenantId, customerId, locationId,
+        jobNumber: `JOB-${jobId.slice(0, 8)}`, summary: opts.jobSummary, status: 'scheduled',
+        priority: 'normal', createdBy: seed.userId, createdAt: new Date(), updatedAt: new Date(),
+      });
+      return jobId;
+    }
+
+    /**
+     * An appointment at an EXACT instant. `notes` deliberately never carries
+     * the customer's name — nothing but the customer row may answer a
+     * customer-named reference.
+     */
+    async function seedAppointmentAt(
+      seed: RealisticSeed,
+      jobId: string,
+      start: Date,
+    ): Promise<string> {
+      const localAppointmentRepo = new PgAppointmentRepository(pool);
+      const appointmentId = crypto.randomUUID();
+      await localAppointmentRepo.create({
+        id: appointmentId,
+        tenantId: seed.tenantId,
+        jobId,
+        scheduledStart: start,
+        scheduledEnd: new Date(start.getTime() + 2 * 60 * 60 * 1000),
+        timezone: 'America/Chicago',
+        status: 'scheduled',
+        holdPendingApproval: false,
+        createdBy: seed.userId,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      });
+      return appointmentId;
+    }
+
+    function daysOut(n: number): Date {
+      const d = new Date();
+      d.setUTCDate(d.getUTCDate() + n);
+      return d;
+    }
+
+    /**
+     * The UTC instant of `hour`:00 wall-clock in `zone`, on the tenant-local
+     * day `dayOffset` days from the tenant's today. Stated here with luxon
+     * directly rather than by calling the production `resolveDateTime`, so the
+     * fixture is an INDEPENDENT statement of the tenant-zone instant and not a
+     * restatement of the code under test.
+     */
+    function localHourUtc(zone: string, hour: number, dayOffset = 0): Date {
+      return DateTime.now()
+        .setZone(zone)
+        .plus({ days: dayOffset })
+        .set({ hour, minute: 0, second: 0, millisecond: 0 })
+        .toUTC()
+        .toJSDate();
+    }
+
+    /** Today's `hour`:00 in `zone` if still ahead, else tomorrow's — what a bare "the 2pm" means. */
+    function nextLocalHourUtc(zone: string, hour: number): Date {
+      const today = localHourUtc(zone, hour, 0);
+      return today.getTime() > Date.now() ? today : localHourUtc(zone, hour, 1);
+    }
+
+    // -- Finding A -------------------------------------------------------
+
+    it('"move the Garcia job" resolves through customers → jobs when the SUMMARY is "AC repair" and only the CUSTOMER carries the name', async () => {
+      const seed = await seedRealisticTenant({
+        displayName: 'Jamie Garcia',
+        jobSummary: 'AC repair',
+      });
+      const appointmentId = await seedAppointmentAt(seed, seed.jobId, daysOut(3));
+
+      // The word "Garcia" exists on the customer row and NOWHERE else that a
+      // query could reach: not the summary, not the job number, not the
+      // appointment notes. Asserted, so it cannot be re-planted later.
+      const planted = await pool.query<{ n: string }>(
+        `SELECT count(*)::text AS n
+           FROM jobs j
+           LEFT JOIN appointments a ON a.job_id = j.id
+          WHERE j.tenant_id = $1
+            AND (j.summary ILIKE '%garcia%' OR j.job_number ILIKE '%garcia%'
+                 OR COALESCE(a.notes,'') ILIKE '%garcia%')`,
+        [seed.tenantId],
+      );
+      expect(planted.rows[0].n).toBe('0');
+
+      const result = await resolver.resolve({
+        tenantId: seed.tenantId,
+        reference: 'the Garcia job',
+        kind: 'appointment',
+      });
+
+      expect(result.kind).toBe('resolved');
+      if (result.kind === 'resolved') {
+        expect(result.candidate.id).toBe(appointmentId);
+        expect(result.candidate.kind).toBe('appointment');
+      }
+    });
+
+    it('a LAST-NAME-ONLY reference clears the confirm floor, which whole-string similarity() provably does not', async () => {
+      // The measurement that drove the design, pinned against the real
+      // pg_trgm this suite runs on: whole-string similarity of a last-name
+      // reference against a full display name is BELOW τ_ent_confirm_low
+      // (0.60), so a `similarity(display_name, needle)` traversal would have
+      // reproduced the same silent not_found. strict_word_similarity is above
+      // τ_ent (0.80). If this ever inverts, the fix's premise has changed.
+      const scores = await pool.query<{
+        whole: number;
+        phrase: number;
+        strict: number;
+        loose_prefix: number;
+        strict_prefix: number;
+      }>(
+        `SELECT similarity('Jamie Garcia', 'garcia')                AS whole,
+                similarity('Jamie Garcia', 'the Garcia job')        AS phrase,
+                strict_word_similarity('garcia', 'Jamie Garcia')    AS strict,
+                word_similarity('khan', 'Khanna Enterprises')       AS loose_prefix,
+                strict_word_similarity('khan', 'Khanna Enterprises') AS strict_prefix`,
+      );
+      const s = scores.rows[0];
+      expect(Number(s.whole)).toBeLessThan(TAU_ENT_CONFIRM_LOW);
+      expect(Number(s.phrase)).toBeLessThan(TAU_ENT_CONFIRM_LOW);
+      expect(Number(s.strict)).toBeGreaterThanOrEqual(TAU_ENT);
+      // …and the reason it is the STRICT variant: the loose one scores a mere
+      // shared PREFIX near τ_ent, where strict word boundaries put it below
+      // the confirm floor, i.e. unable to resolve or even low-confidence.
+      expect(Number(s.loose_prefix)).toBeGreaterThan(Number(s.strict_prefix));
+      expect(Number(s.strict_prefix)).toBeLessThan(TAU_ENT_CONFIRM_LOW);
+
+      const seed = await seedRealisticTenant({
+        displayName: 'Aisha Khan',
+        jobSummary: 'Water heater replacement',
+      });
+      const appointmentId = await seedAppointmentAt(seed, seed.jobId, daysOut(2));
+      // A customer who merely SHARES THE PREFIX, with her own upcoming
+      // appointment. A loose word match would make "the Khan job" ambiguous
+      // (or worse, pick her); strict word boundaries must not reach her.
+      const khannaJobId = await addRealisticJob(seed, {
+        displayName: 'Priya Khanna',
+        jobSummary: 'Drain cleaning',
+      });
+      await seedAppointmentAt(seed, khannaJobId, daysOut(4));
+
+      const result = await resolver.resolve({
+        tenantId: seed.tenantId,
+        reference: 'the Khan job',
+        kind: 'appointment',
+      });
+
+      expect(result.kind).toBe('resolved');
+      if (result.kind === 'resolved') expect(result.candidate.id).toBe(appointmentId);
+    });
+
+    it('two jobs for the SAME customer stay a one-tap clarification, in appointment kind', async () => {
+      const seed = await seedRealisticTenant({
+        displayName: 'Jamie Garcia',
+        jobSummary: 'AC repair',
+      });
+      const secondJobId = await addRealisticJob(seed, {
+        displayName: 'Jamie Garcia',
+        jobSummary: 'Furnace tune-up',
+      });
+      const a1 = await seedAppointmentAt(seed, seed.jobId, daysOut(2));
+      const a2 = await seedAppointmentAt(seed, secondJobId, daysOut(5));
+
+      const result = await resolver.resolve({
+        tenantId: seed.tenantId,
+        reference: 'the Garcia job',
+        kind: 'appointment',
+      });
+
+      expect(result.kind).toBe('ambiguous');
+      if (result.kind !== 'ambiguous') return;
+      for (const c of result.candidates) expect(c.kind).toBe('appointment');
+      expect(result.candidates.map((c) => c.id).sort()).toEqual([a1, a2].sort());
+    });
+
+    it('a customer-named reference never crosses tenants', async () => {
+      const seed = await seedRealisticTenant({
+        displayName: 'Jamie Garcia',
+        jobSummary: 'AC repair',
+      });
+      await seedAppointmentAt(seed, seed.jobId, daysOut(3));
+      const stranger = await createTestTenant(pool);
+
+      const result = await resolver.resolve({
+        tenantId: stranger.tenantId,
+        reference: 'the Garcia job',
+        kind: 'appointment',
+      });
+      expect(result.kind).toBe('not_found');
+    });
+
+    it('an ARCHIVED customer cannot answer a named reference', async () => {
+      const seed = await seedRealisticTenant({
+        displayName: 'Jamie Garcia',
+        jobSummary: 'AC repair',
+      });
+      await seedAppointmentAt(seed, seed.jobId, daysOut(3));
+      await pool.query(`UPDATE customers SET is_archived = true WHERE id = $1`, [seed.customerId]);
+
+      const result = await resolver.resolve({
+        tenantId: seed.tenantId,
+        reference: 'the Garcia job',
+        kind: 'appointment',
+      });
+      expect(result.kind).toBe('not_found');
+    });
+
+    // -- Finding B -------------------------------------------------------
+
+    // Pacific/Honolulu is UTC-10 with no DST: 2pm local is 00:00 UTC the NEXT
+    // day. A resolver doing server-local or UTC arithmetic would look ten
+    // hours away from the right instant — and each test below seeds a decoy
+    // appointment at exactly the instant such a resolver would have picked.
+    const TZ = 'Pacific/Honolulu';
+
+    it('"the 2pm" resolves the appointment at 2pm in the TENANT\'s zone, not at 14:00 UTC', async () => {
+      const seed = await seedRealisticTenant({
+        displayName: 'Jamie Garcia',
+        jobSummary: 'AC repair',
+        timezone: TZ,
+      });
+      const localTwoPm = nextLocalHourUtc(TZ, 14);
+      const target = await seedAppointmentAt(seed, seed.jobId, localTwoPm);
+
+      // The decoy: 14:00 UTC on the same local day — what a UTC-arithmetic
+      // implementation would resolve "the 2pm" to.
+      const utcTwoPm = new Date(localTwoPm);
+      utcTwoPm.setUTCHours(14, 0, 0, 0);
+      if (utcTwoPm.getTime() <= Date.now()) utcTwoPm.setUTCDate(utcTwoPm.getUTCDate() + 1);
+      expect(Math.abs(utcTwoPm.getTime() - localTwoPm.getTime())).toBeGreaterThan(60 * 60 * 1000);
+      const decoy = await seedAppointmentAt(seed, seed.jobId, utcTwoPm);
+
+      const result = await resolver.resolve({
+        tenantId: seed.tenantId,
+        reference: 'the 2pm',
+        kind: 'appointment',
+      });
+
+      expect(result.kind).toBe('resolved');
+      if (result.kind === 'resolved') {
+        expect(result.candidate.id).toBe(target);
+        expect(result.candidate.id).not.toBe(decoy);
+        expect(result.candidate.kind).toBe('appointment');
+      }
+    });
+
+    it('"tomorrow at 2" resolves TOMORROW\'s 2pm in the tenant zone', async () => {
+      const seed = await seedRealisticTenant({
+        displayName: 'Jamie Garcia',
+        jobSummary: 'AC repair',
+        timezone: TZ,
+      });
+      const todayTwoPm = localHourUtc(TZ, 14, 0);
+      const tomorrowTwoPm = localHourUtc(TZ, 14, 1);
+      expect(tomorrowTwoPm.getTime() - todayTwoPm.getTime()).toBe(24 * 60 * 60 * 1000);
+      // BOTH exist, so picking the right day is the whole assertion.
+      const near = await seedAppointmentAt(seed, seed.jobId, todayTwoPm);
+      const target = await seedAppointmentAt(seed, seed.jobId, tomorrowTwoPm);
+
+      const result = await resolver.resolve({
+        tenantId: seed.tenantId,
+        reference: 'tomorrow at 2',
+        kind: 'appointment',
+      });
+
+      expect(result.kind).toBe('resolved');
+      if (result.kind === 'resolved') {
+        expect(result.candidate.id).toBe(target);
+        expect(result.candidate.id).not.toBe(near);
+      }
+    });
+
+    it('two appointments at the stated time stay a one-tap clarification carrying what distinguishes them', async () => {
+      const seed = await seedRealisticTenant({
+        displayName: 'Jamie Garcia',
+        jobSummary: 'AC repair',
+        timezone: TZ,
+      });
+      const otherJobId = await addRealisticJob(seed, {
+        displayName: 'Linh Nguyen',
+        jobSummary: 'Furnace tune-up',
+      });
+      const at2 = nextLocalHourUtc(TZ, 14);
+      const a1 = await seedAppointmentAt(seed, seed.jobId, at2);
+      const a2 = await seedAppointmentAt(seed, otherJobId, at2);
+
+      const result = await resolver.resolve({
+        tenantId: seed.tenantId,
+        reference: 'the 2pm',
+        kind: 'appointment',
+      });
+
+      expect(result.kind).toBe('ambiguous');
+      if (result.kind !== 'ambiguous') return;
+      expect(result.candidates.map((c) => c.id).sort()).toEqual([a1, a2].sort());
+      for (const c of result.candidates) expect(c.kind).toBe('appointment');
+      // The clock cannot tell these apart, so the picker must say what does.
+      const hints = result.candidates.map((c) => c.hint ?? '');
+      expect(hints.some((h) => h.includes('AC repair'))).toBe(true);
+      expect(hints.some((h) => h.includes('Furnace tune-up'))).toBe(true);
+    });
+
+    it('a canceled appointment is not a reschedule target even at the stated time', async () => {
+      const seed = await seedRealisticTenant({
+        displayName: 'Jamie Garcia',
+        jobSummary: 'AC repair',
+        timezone: TZ,
+      });
+      const at2 = nextLocalHourUtc(TZ, 14);
+      const canceled = await seedAppointmentAt(seed, seed.jobId, at2);
+      await pool.query(`UPDATE appointments SET status = 'canceled' WHERE id = $1`, [canceled]);
+
+      const result = await resolver.resolve({
+        tenantId: seed.tenantId,
+        reference: 'the 2pm',
+        kind: 'appointment',
+      });
+      expect(result.kind).toBe('not_found');
+    });
+
+    it('a clock-time reference never crosses tenants', async () => {
+      const seed = await seedRealisticTenant({
+        displayName: 'Jamie Garcia',
+        jobSummary: 'AC repair',
+        timezone: TZ,
+      });
+      await seedAppointmentAt(seed, seed.jobId, nextLocalHourUtc(TZ, 14));
+      const stranger = await createTestTenant(pool);
+      await pool.query(
+        `INSERT INTO tenant_settings (id, tenant_id, business_name, timezone, region)
+         VALUES ($1, $2, 'Stranger', $3, 'TX')`,
+        [crypto.randomUUID(), stranger.tenantId, TZ],
+      );
+
+      const result = await resolver.resolve({
+        tenantId: stranger.tenantId,
+        reference: 'the 2pm',
+        kind: 'appointment',
+      });
+      expect(result.kind).toBe('not_found');
+    });
+
+    it('a clock time that matches nothing falls THROUGH to the pre-existing branches rather than answering', async () => {
+      // "the 2pm Garcia job" states a time the tenant has nothing at, but
+      // still names a customer. The temporal branch must step aside so the
+      // customer traversal answers — proving the new branch is additive.
+      const seed = await seedRealisticTenant({
+        displayName: 'Jamie Garcia',
+        jobSummary: 'AC repair',
+        timezone: TZ,
+      });
+      const at9 = nextLocalHourUtc(TZ, 9);
+      const appointmentId = await seedAppointmentAt(seed, seed.jobId, at9);
+
+      const result = await resolver.resolve({
+        tenantId: seed.tenantId,
+        reference: 'the 2pm Garcia job',
+        kind: 'appointment',
+      });
+
+      expect(result.kind).toBe('resolved');
+      if (result.kind === 'resolved') expect(result.candidate.id).toBe(appointmentId);
     });
   });
 
