@@ -186,17 +186,85 @@ describe('B5.5 — resolveEnRouteAppointment (speaker scoping + resolution outco
     expect(result).toEqual({ kind: 'not_found' });
   });
 
-  it('excludes canceled appointments and appointments already in the past', async () => {
+  it('excludes canceled appointments', async () => {
     const canceled = assignment({ id: 'a-canceled', appointmentId: 'appt-canceled' });
-    const past = assignment({ id: 'a-past', appointmentId: 'appt-past' });
     const apptCanceled = appt({ id: 'appt-canceled', status: 'canceled', scheduledStart: new Date('2026-07-29T16:00:00.000Z') });
-    const apptPast = appt({ id: 'appt-past', scheduledStart: new Date('2026-07-29T10:00:00.000Z') }); // before NOW (14:00)
 
     const deps: EnRouteResolutionDeps = {
-      assignmentRepo: { findByTechnician: async () => [canceled, past] },
+      assignmentRepo: { findByTechnician: async () => [canceled] },
       appointmentRepo: {
-        findById: async (_t, id) => (id === 'appt-canceled' ? apptCanceled : id === 'appt-past' ? apptPast : null),
+        findById: async (_t, id) => (id === 'appt-canceled' ? apptCanceled : null),
       },
+    };
+
+    const result = await resolveEnRouteAppointment(deps, {
+      tenantId: TENANT,
+      technicianId: TECH,
+      now: NOW,
+      dayBoundary: TODAY_BOUNDARY,
+    });
+
+    expect(result).toEqual({ kind: 'not_found' });
+  });
+
+  it('a same-day appointment that already started (the tech is running late) is still selectable', async () => {
+    const running = assignment({ id: 'a-running', appointmentId: 'appt-running' });
+    const apptRunning = appt({
+      id: 'appt-running',
+      jobId: 'job-running',
+      status: 'in_progress',
+      scheduledStart: new Date('2026-07-29T10:00:00.000Z'), // 4 hours before NOW (14:00), same day
+    });
+
+    const deps: EnRouteResolutionDeps = {
+      assignmentRepo: { findByTechnician: async () => [running] },
+      appointmentRepo: { findById: async (_t, id) => (id === 'appt-running' ? apptRunning : null) },
+    };
+
+    const result = await resolveEnRouteAppointment(deps, {
+      tenantId: TENANT,
+      technicianId: TECH,
+      now: NOW,
+      dayBoundary: TODAY_BOUNDARY,
+    });
+
+    expect(result).toEqual({
+      kind: 'resolved',
+      appointmentId: 'appt-running',
+      jobId: 'job-running',
+      scheduledStart: apptRunning.scheduledStart,
+    });
+  });
+
+  it('an appointment from a different day is still excluded even though its status is eligible', async () => {
+    const stale = assignment({ id: 'a-stale', appointmentId: 'appt-stale' });
+    const apptStale = appt({
+      id: 'appt-stale',
+      scheduledStart: new Date('2026-07-28T10:00:00.000Z'), // yesterday, well outside today's boundary
+    });
+
+    const deps: EnRouteResolutionDeps = {
+      assignmentRepo: { findByTechnician: async () => [stale] },
+      appointmentRepo: { findById: async (_t, id) => (id === 'appt-stale' ? apptStale : null) },
+    };
+
+    const result = await resolveEnRouteAppointment(deps, {
+      tenantId: TENANT,
+      technicianId: TECH,
+      now: NOW,
+      dayBoundary: TODAY_BOUNDARY,
+    });
+
+    expect(result).toEqual({ kind: 'not_found' });
+  });
+
+  it('without a day boundary, still excludes an appointment already in the past (fallback behavior)', async () => {
+    const past = assignment({ id: 'a-past', appointmentId: 'appt-past' });
+    const apptPast = appt({ id: 'appt-past', scheduledStart: new Date('2026-07-29T10:00:00.000Z') });
+
+    const deps: EnRouteResolutionDeps = {
+      assignmentRepo: { findByTechnician: async () => [past] },
+      appointmentRepo: { findById: async (_t, id) => (id === 'appt-past' ? apptPast : null) },
     };
 
     const result = await resolveEnRouteAppointment(deps, { tenantId: TENANT, technicianId: TECH, now: NOW });

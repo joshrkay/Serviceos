@@ -94,7 +94,9 @@ async function hydrateEligibleAppointments(
   tenantId: string,
   assignments: AppointmentAssignment[],
   now: Date,
+  dayBoundary?: { start: Date; end: Date },
 ): Promise<Appointment[]> {
+  const lowerBound = dayBoundary ? dayBoundary.start : now;
   const hydrated = await Promise.all(
     assignments.map((a) => deps.appointmentRepo.findById(tenantId, a.appointmentId)),
   );
@@ -102,7 +104,7 @@ async function hydrateEligibleAppointments(
     (appt): appt is Appointment =>
       appt !== null &&
       EN_ROUTE_ELIGIBLE_STATUSES.has(appt.status) &&
-      appt.scheduledStart.getTime() >= now.getTime(),
+      appt.scheduledStart.getTime() >= lowerBound.getTime(),
   );
 }
 
@@ -141,7 +143,7 @@ export async function resolveEnRouteAppointment(
   const assignments = await deps.assignmentRepo.findByTechnician(input.tenantId, input.technicianId);
   if (assignments.length === 0) return { kind: 'not_found' };
 
-  const eligible = await hydrateEligibleAppointments(deps, input.tenantId, assignments, now);
+  const eligible = await hydrateEligibleAppointments(deps, input.tenantId, assignments, now, input.dayBoundary);
   if (eligible.length === 0) return { kind: 'not_found' };
 
   if (input.jobReference && input.jobReference.trim().length > 0) {
