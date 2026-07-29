@@ -34,6 +34,13 @@ import {
 const SIMILARITY_PREFILTER = 0.3;
 
 /**
+ * Most jobs a one-tap picker may honestly offer. Matches the ceiling the
+ * appointment fallbacks below already use; `resolveJob` reads one extra row to
+ * detect overflow.
+ */
+const MAX_JOB_CANDIDATES = 5;
+
+/**
  * B4.7 / B5.3 — an appointment reference is treated as a CLOCK TIME only when
  * it contains an explicit time-of-day token. Deliberately digit-bearing and
  * narrow, for one reason: the alternative (handing every reference to
@@ -186,8 +193,8 @@ export class PgEntityResolver implements EntityResolver {
     // they must not become invoice/estimate targets.
     //
     // The score is the SAME two-function GREATEST as the job path (see
-    // `resolveJobByNameOrCustomer` for the full reasoning and measurements),
-    // and for the same reason: `similarity()` is whole-string, so the way a
+    // `resolveJob` for the full reasoning and measurements), and for the same
+    // reason: `similarity()` is whole-string, so the way a
     // person actually names a customer out loud — a surname — scores below
     // τ_ent_confirm_low against a full display name and returned `not_found`.
     // Measured on pgvector/pgvector:pg16 with pg_trgm:
@@ -244,12 +251,59 @@ export class PgEntityResolver implements EntityResolver {
     return this.toResult(candidates, reference);
   }
 
+  /**
+   * Resolve a job by its own summary OR by the name of the CUSTOMER it is for.
+   *
+   * `jobs.summary` (the trigram index from migration 051 is on jobs.summary —
+   * there is no `title` column) is operator-authored free text describing the
+   * WORK: "AC repair". But "the Garcia job" names the PERSON, who lives on
+   * `jobs.customer_id → customers`. Matching only the summary returned
+   * not_found for every ordinarily-summarized job — the shared-resolver
+   * generalization of the B5.5 en-route fix (26f2345), and the reason
+   * `log_time_entry` (B6.3) and `add_note` (B7.4) failed in production on the
+   * most natural phrasing there is.
+   *
+   * WHY TWO DIFFERENT SIMILARITY FUNCTIONS. `similarity()` is whole-string, so
+   * a last-name-only reference against a full display name scores far below
+   * τ_ent_confirm_low. Measured on pgvector/pgvector:pg16 with pg_trgm:
+   *   similarity('Jamie Garcia','garcia')             = 0.538
+   *   similarity('Jamie Garcia','the Garcia job')     = 0.400   (floor: 0.60)
+   *   strict_word_similarity('garcia','Jamie Garcia') = 1.000   (τ_ent: 0.80)
+   * Implementing the traversal as plain `similarity()` would have reproduced
+   * the exact silent not_found it exists to fix, with extra steps.
+   *
+   * It is the STRICT variant, not `word_similarity`, precisely because the
+   * loose one is unsafe here: word_similarity('khan','Khanna Enterprises') =
+   * 0.800 and ('smith','Smithson Plumbing') = 0.833 would clear or crowd τ_ent
+   * on a customer who merely SHARES A PREFIX. Forcing extent boundaries to word
+   * boundaries drops those to 0.500 — below the confirm floor, so they cannot
+   * resolve or even low-confidence — while real surname hits stay at 1.000.
+   *
+   * The customer half matches the stopword-stripped NEEDLE ("the Garcia job" →
+   * "garcia"), because a word-extent match against the raw phrase means
+   * nothing. The summary half deliberately still sees the ORIGINAL reference,
+   * and whole-string similarity is kept inside the GREATEST, so every reference
+   * that resolved before resolves at an identical score: strictly additive,
+   * with no threshold moved.
+   */
   private async resolveJob(
     tenantId: string,
     reference: string,
   ): Promise<EntityResolverResult> {
-    // Schema column is `summary` (the trigram index from migration 051 is on
-    // jobs.summary — there is no `title` column).
+    // '' when the reference is pure filler ("that job"): strict_word_similarity
+    // of an empty needle is 0, so such a reference keeps exactly today's
+    // summary-only behavior instead of matching every customer.
+    const needle = stripClockTokens(extractNameLikeToken(reference) ?? '');
+
+    // Archived customers are excluded on the customer half for the same reason
+    // `resolveCustomer` excludes them — they must not become voice targets.
+    // `c.tenant_id = j.tenant_id` keeps the join inside the tenant on top of
+    // the RLS session context `withTenantConnection` sets.
+    const SCORE_EXPR = `GREATEST(
+             similarity(j.summary, $2),
+             COALESCE(strict_word_similarity($4, c.display_name), 0),
+             COALESCE(strict_word_similarity($4, c.company_name), 0)
+           )`;
     const rows = await withTenantConnection(this.pool, tenantId, (client) =>
       client
         .query<{
@@ -258,13 +312,17 @@ export class PgEntityResolver implements EntityResolver {
           status: string | null;
           score: number;
         }>(
-          `SELECT id, summary, status, similarity(summary, $2) AS score
-             FROM jobs
-            WHERE tenant_id = $1
-              AND similarity(summary, $2) > $3
+          `SELECT j.id, j.summary, j.status, ${SCORE_EXPR} AS score
+             FROM jobs j
+             LEFT JOIN customers c
+               ON c.id = j.customer_id
+              AND c.tenant_id = j.tenant_id
+              AND c.is_archived = false
+            WHERE j.tenant_id = $1
+              AND ${SCORE_EXPR} > $3
             ORDER BY score DESC
-            LIMIT 5`,
-          [tenantId, reference, SIMILARITY_PREFILTER],
+            LIMIT ${MAX_JOB_CANDIDATES + 1}`,
+          [tenantId, reference, SIMILARITY_PREFILTER, needle],
         )
         .then((r) => r.rows),
     );
@@ -277,7 +335,19 @@ export class PgEntityResolver implements EntityResolver {
       score: Number(row.score),
     }));
 
-    return this.toResult(candidates, reference);
+    // A customer's name matches EVERY job of theirs at 1.000, so a commercial
+    // account with eight open jobs is an ordinary case, not an exotic one —
+    // and `LIMIT 5` would have handed back an arbitrary five of the eight as a
+    // picker that may not even contain the right job. Escalating is the honest
+    // answer, the same rule the appointment fallbacks already apply ("reading
+    // back an arbitrary five of forty would be a guess wearing a
+    // disambiguation costume"). Deliberately counted on the CONFIDENT band
+    // only: six rows of which one is above τ_ent and five are weak trigram
+    // noise must still resolve that one, exactly as before.
+    const confident = candidates.filter((c) => c.score >= TAU_ENT);
+    if (confident.length > MAX_JOB_CANDIDATES) return { kind: 'not_found', reference };
+
+    return this.toResult(candidates.slice(0, MAX_JOB_CANDIDATES), reference);
   }
 
   private async resolveInvoice(
@@ -427,10 +497,13 @@ export class PgEntityResolver implements EntityResolver {
       const nameToken = extractNameLikeToken(reference);
       if (nameToken) {
         // Named reference, no job anchor yet: resolve the name against jobs —
-        // by their own summary AND by their linked CUSTOMER (review finding
-        // A) — and build on `resolveAppointmentByJob` for the unique-match
-        // case, exactly the AC-3 positive path.
-        const jobResult = await this.resolveJobByNameOrCustomer(tenantId, reference, nameToken);
+        // by their own summary AND by their linked CUSTOMER — and build on
+        // `resolveAppointmentByJob` for the unique-match case, exactly the
+        // AC-3 positive path. `resolveJob` derives the same customer needle
+        // from the same `extractNameLikeToken(reference)` computed just above,
+        // which is why this branch and the `kind: 'job'` entry point can share
+        // ONE implementation instead of two that drift.
+        const jobResult = await this.resolveJob(tenantId, reference);
         switch (jobResult.kind) {
           case 'resolved':
             return this.resolveAppointmentByJob(tenantId, reference, jobResult.candidate.id);
@@ -516,93 +589,6 @@ export class PgEntityResolver implements EntityResolver {
       return { kind: 'resolved', candidate: candidates[0] };
     }
     return { kind: 'ambiguous', candidates };
-  }
-
-  /**
-   * Review finding A — resolve a job by its own summary OR by the name of the
-   * CUSTOMER it is for. The shared-resolver generalization of the B5.5 en-route
-   * fix (26f2345): `jobs.summary` is operator-authored free text describing the
-   * WORK ("AC repair"), while "move the Garcia job" names the PERSON, who lives
-   * on `jobs.customer_id → customers`. Matching only the summary returned
-   * not_found for every ordinarily-summarized job, which is B4.7
-   * (reschedule/cancel) and B5.3 (reassign) failing on the most natural
-   * phrasing there is.
-   *
-   * WHY TWO DIFFERENT SIMILARITY FUNCTIONS. `similarity()` is whole-string, and
-   * a last-name-only reference against a full display name scores far below
-   * τ_ent_confirm_low: measured on pgvector/pgvector:pg16,
-   * `similarity('Jamie Garcia','garcia')` = 0.538 and
-   * `similarity('Jamie Garcia','the Garcia job')` = 0.400, against a 0.60
-   * floor. Implementing the customer traversal as plain `similarity()` would
-   * therefore have reproduced the exact silent not_found it exists to fix, with
-   * extra steps. `strict_word_similarity(needle, display_name)` instead scores
-   * the needle against the best WORD-BOUNDED extent of the name:
-   * `strict_word_similarity('garcia','Jamie Garcia')` = 1.000 — comfortably
-   * above τ_ent — with no threshold change anywhere. The thresholds still guard
-   * every other path untouched.
-   *
-   * It is the STRICT variant, not `word_similarity`, precisely because the
-   * loose one is unsafe here: measured on the same image,
-   * `word_similarity('khan','Khanna Enterprises')` = 0.800 and
-   * `word_similarity('smith','Smithson Plumbing')` = 0.833 — both would clear
-   * or crowd τ_ent on a customer who merely SHARES A PREFIX. Forcing extent
-   * boundaries to word boundaries drops those to 0.500 (below the confirm
-   * floor, so they cannot resolve or even low-confidence), while real
-   * last-name hits stay at 1.000. Checked in both directions.
-   *
-   * The needle is the stopword-stripped token from `extractNameLikeToken`, not
-   * the raw phrase — "the Garcia job" must reach the name as "garcia" for a
-   * word-extent match to mean anything. The SUMMARY half deliberately still
-   * sees the ORIGINAL reference, so the pre-existing whole-phrase trigram
-   * behavior of `resolveJob` is bit-for-bit preserved and this can only ADD
-   * matches (GREATEST with a non-negative second term).
-   */
-  private async resolveJobByNameOrCustomer(
-    tenantId: string,
-    reference: string,
-    nameToken: string,
-  ): Promise<EntityResolverResult> {
-    // Archived customers are excluded on the customer half for the same reason
-    // `resolveCustomer` excludes them — they must not become voice targets.
-    // `c.tenant_id = j.tenant_id` keeps the join inside the tenant on top of
-    // the RLS session context `withTenantConnection` sets.
-    const SCORE_EXPR = `GREATEST(
-             similarity(j.summary, $2),
-             COALESCE(strict_word_similarity($4, c.display_name), 0),
-             COALESCE(strict_word_similarity($4, c.company_name), 0)
-           )`;
-    const rows = await withTenantConnection(this.pool, tenantId, (client) =>
-      client
-        .query<{
-          id: string;
-          summary: string;
-          status: string | null;
-          score: number;
-        }>(
-          `SELECT j.id, j.summary, j.status, ${SCORE_EXPR} AS score
-             FROM jobs j
-             LEFT JOIN customers c
-               ON c.id = j.customer_id
-              AND c.tenant_id = j.tenant_id
-              AND c.is_archived = false
-            WHERE j.tenant_id = $1
-              AND ${SCORE_EXPR} > $3
-            ORDER BY score DESC
-            LIMIT 5`,
-          [tenantId, reference, SIMILARITY_PREFILTER, stripClockTokens(nameToken)],
-        )
-        .then((r) => r.rows),
-    );
-
-    const candidates: EntityCandidate[] = rows.map((row) => ({
-      id: row.id,
-      kind: 'job' as EntityKind,
-      label: row.summary,
-      hint: row.status ?? undefined,
-      score: Number(row.score),
-    }));
-
-    return this.toResult(candidates, reference);
   }
 
   /**

@@ -1200,6 +1200,196 @@ describe('Postgres integration — entity resolution (P8)', () => {
       expect(result.kind).toBe('resolved');
       if (result.kind === 'resolved') expect(result.candidate.id).toBe(appointmentId);
     });
+
+    // -- kind: 'job' ------------------------------------------------------
+    //
+    // The SAME defect, one branch over. `JOB_REF_INTENTS`
+    // (agents/customer-calling/entity-resolution.ts:92) routes update_job,
+    // log_time_entry, create_invoice, draft_estimate, add_note, notify_delay
+    // and request_feedback through `kind: 'job'`, so "note on the Garcia job"
+    // (B7.4) and "clock two hours on the Garcia job" (B6.3) were failing for
+    // exactly the reason the appointment branch was. Same fixture rule: the
+    // summary says what the WORK is, and the surname exists only on the
+    // customer row.
+    describe('kind: job — the same traversal, for JOB_REF_INTENTS', () => {
+      it('a spoken surname resolves a job whose summary is "AC repair"', async () => {
+        const seed = await seedRealisticTenant({
+          displayName: 'Jamie Garcia',
+          jobSummary: 'AC repair',
+        });
+
+        // "Garcia" appears on the customer row and NOWHERE a job query could
+        // reach it. Asserted so the planting cannot creep back.
+        const planted = await pool.query<{ n: string }>(
+          `SELECT count(*)::text AS n
+             FROM jobs j
+             LEFT JOIN appointments a ON a.job_id = j.id
+            WHERE j.tenant_id = $1
+              AND (j.summary ILIKE '%garcia%' OR j.job_number ILIKE '%garcia%'
+                   OR COALESCE(a.notes,'') ILIKE '%garcia%')`,
+          [seed.tenantId],
+        );
+        expect(planted.rows[0].n).toBe('0');
+
+        const result = await resolver.resolve({
+          tenantId: seed.tenantId,
+          reference: 'the Garcia job',
+          kind: 'job',
+        });
+
+        expect(result.kind).toBe('resolved');
+        if (result.kind === 'resolved') {
+          expect(result.candidate.id).toBe(seed.jobId);
+          expect(result.candidate.kind).toBe('job');
+          // The label is still the summary — this resolved THROUGH the
+          // customer, it did not start matching customers as jobs.
+          expect(result.candidate.label).toBe('AC repair');
+        }
+      });
+
+      it('a prefix-sharing customer is NOT reachable — "Khanna" is a different person', async () => {
+        const seed = await seedRealisticTenant({
+          displayName: 'Aisha Khan',
+          jobSummary: 'Water heater replacement',
+        });
+        await addRealisticJob(seed, {
+          displayName: 'Priya Khanna',
+          jobSummary: 'Drain cleaning',
+        });
+
+        const result = await resolver.resolve({
+          tenantId: seed.tenantId,
+          reference: 'the Khan job',
+          kind: 'job',
+        });
+
+        expect(result.kind).toBe('resolved');
+        if (result.kind === 'resolved') expect(result.candidate.id).toBe(seed.jobId);
+      });
+
+      it('two customers sharing a surname stay a one-tap clarification, never a guess', async () => {
+        const seed = await seedRealisticTenant({
+          displayName: 'Jamie Garcia',
+          jobSummary: 'AC repair',
+        });
+        const otherGarciaJobId = await addRealisticJob(seed, {
+          displayName: 'Marco Garcia',
+          jobSummary: 'Thermostat swap',
+        });
+
+        const result = await resolver.resolve({
+          tenantId: seed.tenantId,
+          reference: 'the Garcia job',
+          kind: 'job',
+        });
+
+        expect(result.kind).toBe('ambiguous');
+        if (result.kind !== 'ambiguous') return;
+        for (const c of result.candidates) expect(c.kind).toBe('job');
+        expect(result.candidates.map((c) => c.id).sort()).toEqual(
+          [seed.jobId, otherGarciaJobId].sort(),
+        );
+      });
+
+      it('a reference naming the WORK still resolves by summary, at the identical score', async () => {
+        // The pre-existing path, pinned: widening the query must not change
+        // what a work-named reference scores, or the τ_ent bands shift under
+        // every other caller.
+        const seed = await seedRealisticTenant({
+          displayName: 'Jamie Garcia',
+          jobSummary: 'Water heater replacement',
+        });
+
+        const result = await resolver.resolve({
+          tenantId: seed.tenantId,
+          reference: 'Water heater replacement',
+          kind: 'job',
+        });
+
+        expect(result.kind).toBe('resolved');
+        if (result.kind === 'resolved') {
+          expect(result.candidate.id).toBe(seed.jobId);
+          expect(result.candidate.score).toBe(1);
+        }
+      });
+
+      it('a purely filler reference matches nothing — an empty needle must not match every customer', async () => {
+        // "that job" reduces to no name at all. The customer half of the
+        // GREATEST gets an empty needle, which must score 0 rather than
+        // matching every job in the tenant.
+        const seed = await seedRealisticTenant({
+          displayName: 'Jamie Garcia',
+          jobSummary: 'AC repair',
+        });
+        await addRealisticJob(seed, { displayName: 'Linh Nguyen', jobSummary: 'Furnace tune-up' });
+
+        const result = await resolver.resolve({
+          tenantId: seed.tenantId,
+          reference: 'that job',
+          kind: 'job',
+        });
+        expect(result.kind).toBe('not_found');
+      });
+
+      it('a customer with MORE jobs than a picker can show escalates instead of offering an arbitrary five', async () => {
+        // A commercial account with six open jobs is ordinary, and the
+        // surname matches every one of them at 1.000. `LIMIT 5` would have
+        // returned a picker that need not even contain the right job.
+        const seed = await seedRealisticTenant({
+          displayName: 'Jamie Garcia',
+          jobSummary: 'AC repair',
+        });
+        for (const summary of [
+          'Furnace tune-up',
+          'Thermostat swap',
+          'Duct cleaning',
+          'Condenser replacement',
+          'Refrigerant top-up',
+        ]) {
+          await addRealisticJob(seed, { displayName: 'Jamie Garcia', jobSummary: summary });
+        }
+
+        const result = await resolver.resolve({
+          tenantId: seed.tenantId,
+          reference: 'the Garcia job',
+          kind: 'job',
+        });
+        expect(result.kind).toBe('not_found');
+      });
+
+      it('never resolves a job by customer name across tenants', async () => {
+        const seed = await seedRealisticTenant({
+          displayName: 'Jamie Garcia',
+          jobSummary: 'AC repair',
+        });
+        void seed;
+        const stranger = await createTestTenant(pool);
+
+        const result = await resolver.resolve({
+          tenantId: stranger.tenantId,
+          reference: 'the Garcia job',
+          kind: 'job',
+        });
+        expect(result.kind).toBe('not_found');
+      });
+
+      it('an ARCHIVED customer cannot answer a job reference', async () => {
+        const seed = await seedRealisticTenant({
+          displayName: 'Jamie Garcia',
+          jobSummary: 'AC repair',
+        });
+        await pool.query(`UPDATE customers SET is_archived = true WHERE id = $1`, [
+          seed.customerId,
+        ]);
+
+        const result = await resolver.resolve({
+          tenantId: seed.tenantId,
+          reference: 'the Garcia job',
+          kind: 'job',
+        });
+        expect(result.kind).toBe('not_found');
+      });
+    });
   });
 
   describe('voice-action-router end-to-end', () => {

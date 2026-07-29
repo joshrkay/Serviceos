@@ -1,13 +1,13 @@
 {
   "version": 1,
-  "title": "rivet-voice-19 focus items — operator entity-resolution closed loop",
+  "title": "rivet-voice-19 focus items \u2014 operator entity-resolution closed loop",
   "description": "One case per rivet-voice-19 focus item that is operator-reachable today (B7.4 add_note, B5.3 reassign_appointment, B6.3 log_time_entry, B4.7 create_appointment / reschedule_appointment / cancel_appointment), plus a negative case pinning the B5.3 resolver fix. Unlike test/voice/fixtures/operator-ops-top-40.json, cases here carry NO pre-resolved ids: every id in `expect` is a `seedRef` resolved by the runner against a REAL Postgres-seeded tenant via the REAL PgEntityResolver, so the corpus proves the spoken free-text reference produces the resolved id end to end, not just that a task handler accepts an id it was handed. `payloadContainsSeedRefs` maps a payload key to a key in the runner's `seedIds` map; `payloadContains` carries literal (non-id) values. `taskResponse` is the SECOND scripted gateway reply, present only for the one intent whose task handler makes its own drafting round-trip (create_appointment); every other handler here is a documented passthrough.",
   "cases": [
     {
       "id": "b7-4-add-note",
       "focusItem": "B7.4",
       "op": "add_note",
-      "utterance": "Note on the Patel job — wants morning visits",
+      "utterance": "Note on the Patel job \u2014 wants morning visits",
       "llmResponse": {
         "intentType": "add_note",
         "confidence": 0.91,
@@ -21,8 +21,13 @@
         "status": "draft",
         "actionClass": "capture",
         "missingFieldsExact": [],
-        "payloadContains": { "targetKind": "job", "body": "wants morning visits" },
-        "payloadContainsSeedRefs": { "targetId": "patelJobId" }
+        "payloadContains": {
+          "targetKind": "job",
+          "body": "wants morning visits"
+        },
+        "payloadContainsSeedRefs": {
+          "targetId": "patelJobId"
+        }
       }
     },
     {
@@ -67,8 +72,12 @@
         "status": "draft",
         "actionClass": "capture",
         "missingFieldsExact": [],
-        "payloadContains": { "durationMinutes": 120 },
-        "payloadContainsSeedRefs": { "jobId": "patelJobId" }
+        "payloadContains": {
+          "durationMinutes": 120
+        },
+        "payloadContainsSeedRefs": {
+          "jobId": "patelJobId"
+        }
       }
     },
     {
@@ -76,7 +85,7 @@
       "focusItem": "B4.7",
       "op": "create_appointment",
       "utterance": "Book Garcia for a water heater repair Thursday at 10 AM",
-      "note": "The CREATE leg of B4.7's conjunctive requirement (book/move/cancel by speaking). The other two legs resolve an EXISTING appointment; this one resolves the customer the booking is for. The scripted drafting reply deliberately carries a HALLUCINATED customerId that matches nothing in the tenant — the drafted payload must still carry the PgEntityResolver's id for the spoken name 'Garcia', because CreateAppointmentAITaskHandler overwrites the model's customerId with the resolved one (create-appointment-task.ts, 'the LLM is instructed never to invent a customerId'). No id in this case's script is ever echoed into an assertion, so nothing here can pass by hand-feeding. scheduledStart/End are produced by the REAL resolveDateTime from the verbatim spoken phrase against the tenant's timezone at the fixed NOW (Mon 2026-08-03 12:00 Chicago) — stored UTC, rendered in tenant tz by the companion it-block.",
+      "note": "The CREATE leg of B4.7's conjunctive requirement (book/move/cancel by speaking). The other two legs resolve an EXISTING appointment; this one resolves the customer the booking is for. The scripted drafting reply deliberately carries a HALLUCINATED customerId that matches nothing in the tenant \u2014 the drafted payload must still carry the PgEntityResolver's id for the spoken name 'Garcia', because CreateAppointmentAITaskHandler overwrites the model's customerId with the resolved one (create-appointment-task.ts, 'the LLM is instructed never to invent a customerId'). No id in this case's script is ever echoed into an assertion, so nothing here can pass by hand-feeding. scheduledStart/End are produced by the REAL resolveDateTime from the verbatim spoken phrase against the tenant's timezone at the fixed NOW (Mon 2026-08-03 12:00 Chicago) \u2014 stored UTC, rendered in tenant tz by the companion it-block.",
       "llmResponse": {
         "intentType": "create_appointment",
         "confidence": 0.93,
@@ -104,7 +113,9 @@
           "scheduledStart": "2026-08-06T15:00:00.000Z",
           "scheduledEnd": "2026-08-06T16:00:00.000Z"
         },
-        "payloadContainsSeedRefs": { "customerId": "garciaCustomerId" }
+        "payloadContainsSeedRefs": {
+          "customerId": "garciaCustomerId"
+        }
       }
     },
     {
@@ -125,19 +136,21 @@
         "status": "draft",
         "actionClass": "capture",
         "missingFieldsExact": [],
-        "payloadContainsSeedRefs": { "appointmentId": "garciaAppointmentId" }
+        "payloadContainsSeedRefs": {
+          "appointmentId": "garciaAppointmentId"
+        }
       }
     },
     {
       "id": "b4-7-cancel-appointment",
       "focusItem": "B4.7",
       "op": "cancel_appointment",
-      "utterance": "Cancel Tuesday's Garcia appointment",
+      "utterance": "Cancel the Garcia appointment",
       "llmResponse": {
         "intentType": "cancel_appointment",
         "confidence": 0.9,
         "extractedEntities": {
-          "appointmentReference": "the Garcia job",
+          "appointmentReference": "the Garcia appointment",
           "cancellationReason": "no longer needed"
         }
       },
@@ -146,7 +159,9 @@
         "status": "draft",
         "actionClass": "irreversible",
         "missingFieldsExact": [],
-        "payloadContainsSeedRefs": { "appointmentId": "garciaAppointmentId" }
+        "payloadContainsSeedRefs": {
+          "appointmentId": "garciaAppointmentId"
+        }
       }
     },
     {
@@ -154,7 +169,7 @@
       "focusItem": "B5.3 (resolver fix negative)",
       "op": "reassign_appointment",
       "utterance": "Assign Carlos to the Fitzgerald job",
-      "note": "'Fitzgerald' names no customer/job this tenant has. Pre-fix, PgEntityResolver.resolveAppointment fell straight through to the tenant-wide soonest-upcoming-appointment fallback for ANY non-date, non-job-anchored reference, so this would have silently resolved to Johnson's or Garcia's appointment. Post-fix (b5.3-design.md §3), a name-bearing reference that matches no job returns not_found and is never allowed to reach that fallback — the proposal must gate on appointmentId instead of picking an arbitrary appointment. The technician side (Carlos) resolves fine on its own, isolating the assertion to appointment resolution specifically.",
+      "note": "'Fitzgerald' names no customer/job this tenant has. Pre-fix, PgEntityResolver.resolveAppointment fell straight through to the tenant-wide soonest-upcoming-appointment fallback for ANY non-date, non-job-anchored reference, so this would have silently resolved to Johnson's or Garcia's appointment. Post-fix (b5.3-design.md \u00a73), a name-bearing reference that matches no job returns not_found and is never allowed to reach that fallback \u2014 the proposal must gate on appointmentId instead of picking an arbitrary appointment. The technician side (Carlos) resolves fine on its own, isolating the assertion to appointment resolution specifically.",
       "llmResponse": {
         "intentType": "reassign_appointment",
         "confidence": 0.88,
@@ -167,8 +182,12 @@
         "proposalType": "reassign_appointment",
         "status": "draft",
         "actionClass": "capture",
-        "missingFieldsContains": ["appointmentId"],
-        "payloadContainsSeedRefs": { "toTechnicianId": "carlosId" },
+        "missingFieldsContains": [
+          "appointmentId"
+        ],
+        "payloadContainsSeedRefs": {
+          "toTechnicianId": "carlosId"
+        },
         "payloadAppointmentIdMustBeUnset": true
       }
     }

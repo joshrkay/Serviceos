@@ -104,6 +104,17 @@ interface FocusCase {
    * call the gateway a second time.
    */
   taskResponse?: Record<string, unknown>;
+  /**
+   * Declared, asserted-empty escape hatch: set ONLY when a case cannot pass
+   * against realistically-shaped tenant data because the resolution path it
+   * needs does not exist yet. Nothing skips on it — a gapped case still runs
+   * and still fails loudly. The sanity block below pins the gapped set, so
+   * marking one is a deliberate, reviewable act rather than a quiet retirement.
+   * Reshaping the seed to rescue a case is never the alternative — that is the
+   * defect this suite exists to catch (docs/solutions/test-failures/
+   * a-fixture-arranged-to-pass-proves-nothing.md).
+   */
+  knownGap?: string;
   expect: CaseExpect;
 }
 
@@ -112,6 +123,22 @@ interface FocusCorpus {
   title: string;
   description: string;
   cases: FocusCase[];
+}
+
+/**
+ * One seeded customer and their job, shaped the way a real tenant's rows are
+ * shaped: the person's name lives on the CUSTOMER record, and the job's
+ * `summary` says what the WORK is ("AC repair"). Nothing is planted anywhere
+ * to match a spoken phrase — the guard case below fails first if it ever is.
+ */
+interface SeededJob {
+  /** What an operator actually says out loud: the customer's surname. */
+  spokenName: string;
+  displayName: string;
+  summary: string;
+  customerId: string;
+  jobId: string;
+  jobNumber: string;
 }
 
 function loadCorpus(): FocusCorpus {
@@ -177,23 +204,28 @@ describe('rivet-voice-19 focus items — operator entity-resolution closed loop 
   let entityResolver: PgEntityResolver;
   let tenant: TestTenant;
   let seedIds: Record<string, string>;
+  const seededJobs: SeededJob[] = [];
 
   /**
-   * Seeds a customer + location + job whose `summary` is set to the EXACT
-   * text the case's extractedEntities reference — the same technique
-   * test/integration/entity-resolution.test.ts's AC-3 suite uses
-   * (`seedTenantWithJobAppointments`) to get a deterministic score-1.0
-   * trigram match, so a case failing to resolve can only be a real
-   * regression, never fixture-text drift.
+   * Seeds a customer + service location + job the way a real tenant has them:
+   * a person with a full name on the CUSTOMER row, and a job whose `summary`
+   * describes the WORK. The spoken surname appears in exactly one place — the
+   * customer's `display_name` — so a case can only go green by walking
+   * `jobs.customer_id → customers`, which is the claim this suite makes.
    */
-  async function seedJob(name: string, jobSummary: string): Promise<{ customerId: string; jobId: string }> {
+  async function seedJob(
+    firstName: string,
+    lastName: string,
+    summary: string,
+  ): Promise<SeededJob> {
+    const displayName = `${firstName} ${lastName}`;
     const customerId = crypto.randomUUID();
     await customerRepo.create({
       id: customerId,
       tenantId: tenant.tenantId,
-      firstName: name,
-      lastName: 'Customer',
-      displayName: name,
+      firstName,
+      lastName,
+      displayName,
       preferredChannel: 'phone',
       smsConsent: false,
       isArchived: false,
@@ -207,7 +239,7 @@ describe('rivet-voice-19 focus items — operator entity-resolution closed loop 
       id: locationId,
       tenantId: tenant.tenantId,
       customerId,
-      street1: `1 ${name} Way`,
+      street1: `${1200 + seededJobs.length * 40} Cedar Lane`,
       city: 'Austin',
       state: 'TX',
       postalCode: '78701',
@@ -220,13 +252,14 @@ describe('rivet-voice-19 focus items — operator entity-resolution closed loop 
     });
 
     const jobId = crypto.randomUUID();
+    const jobNumber = `JOB-${jobId.slice(0, 8).toUpperCase()}`;
     await jobRepo.create({
       id: jobId,
       tenantId: tenant.tenantId,
       customerId,
       locationId,
-      jobNumber: `JOB-${name.toUpperCase()}-${jobId.slice(0, 8)}`,
-      summary: jobSummary,
+      jobNumber,
+      summary,
       status: 'scheduled',
       priority: 'normal',
       createdBy: tenant.userId,
@@ -234,7 +267,16 @@ describe('rivet-voice-19 focus items — operator entity-resolution closed loop 
       updatedAt: new Date(),
     });
 
-    return { customerId, jobId };
+    const seeded: SeededJob = {
+      spokenName: lastName,
+      displayName,
+      summary,
+      customerId,
+      jobId,
+      jobNumber,
+    };
+    seededJobs.push(seeded);
+    return seeded;
   }
 
   async function seedAppointment(
@@ -303,27 +345,31 @@ describe('rivet-voice-19 focus items — operator entity-resolution closed loop 
     entityResolver = new PgEntityResolver(pool);
     tenant = await createTestTenant(pool);
 
-    // B7.4 / B6.3 — "the Patel job" (no appointment needed for either case).
-    const { jobId: patelJobId } = await seedJob('Patel', 'the Patel job');
+    // B7.4 / B6.3 — Ravi Patel's job (no appointment needed for either case).
+    const { jobId: patelJobId } = await seedJob('Ravi', 'Patel', 'AC repair');
 
-    // B5.3 — "the Johnson job" with ONE upcoming appointment, initially
+    // B5.3 — Dana Johnson's job with ONE upcoming appointment, initially
     // assigned to a DIFFERENT technician than the reassignment target
     // (mirrors reassign-appointment-voice.test.ts's techA/techB shape).
     const aidenId = await seedTechnician('Aiden', 'Cole');
     const carlosId = await seedTechnician('Carlos', 'Vega');
-    const { jobId: johnsonJobId } = await seedJob('Johnson', 'the Johnson job');
+    const { jobId: johnsonJobId } = await seedJob(
+      'Dana',
+      'Johnson',
+      'Water heater replacement',
+    );
     const johnsonAppointmentId = await seedAppointment(johnsonJobId, 3, aidenId);
 
-    // B4.7 — "the Garcia job" with ONE upcoming appointment. Reused for the
+    // B4.7 — Jamie Garcia's job with ONE upcoming appointment. Reused for the
     // reschedule, cancel AND create cases: none of the drafts-only tests
     // executes (approve/execute is out of scope here — that's the sibling
-    // integration tests' job), so nothing mutates the appointment row.
-    // `seedJob` also creates a customer whose display_name is exactly the
-    // name spoken in the create case ("Garcia"), which is what the CREATE
-    // leg resolves — the other two legs resolve the appointment instead.
+    // integration tests' job), so nothing mutates the appointment row. The
+    // CREATE leg resolves the spoken surname against the CUSTOMER; the other
+    // two resolve an appointment by walking the same customer link.
     const { customerId: garciaCustomerId, jobId: garciaJobId } = await seedJob(
+      'Jamie',
       'Garcia',
-      'the Garcia job',
+      'Seasonal maintenance',
     );
     const garciaAppointmentId = await seedAppointment(garciaJobId, 5);
 
@@ -364,6 +410,45 @@ describe('rivet-voice-19 focus items — operator entity-resolution closed loop 
       now: () => NOW,
     });
   }
+
+  // ── GUARD, declared first on purpose ──────────────────────────────────
+  //
+  // Mirrors the en-route guard added in 26f2345/567e846. Every case below
+  // claims "the SPOKEN sentence produces the resolved id". That claim is
+  // only worth anything if the spoken customer name is unreachable from the
+  // job's own display text — otherwise a whole-string trigram match on
+  // `jobs.summary` answers it and the customer traversal is never exercised.
+  // Measured on pgvector/pgvector:pg16: an arranged summary scores
+  // similarity('the Patel job','the Patel job') = 1.000, while the realistic
+  // one scores similarity('AC repair','the Patel job') = 0.000 — i.e. the
+  // arrangement, not the code, was doing the resolving. If a future change
+  // re-plants a name in a summary or job number, THIS fails first and by
+  // name, instead of the real assertions going green for the wrong reason.
+  it('guard: no seeded job names its own customer — the spoken surname lives only on the customer record', async () => {
+    expect(seededJobs, 'three seeded jobs').toHaveLength(3);
+    for (const seed of seededJobs) {
+      const spoken = seed.spokenName.toLowerCase();
+      const job = await jobRepo.findById(tenant.tenantId, seed.jobId);
+      expect(job, `${seed.spokenName}: seeded job row`).not.toBeNull();
+      expect(
+        job!.summary.toLowerCase(),
+        `${seed.spokenName}: summary must say what the WORK is, never who it is for`,
+      ).not.toContain(spoken);
+      expect(
+        job!.jobNumber.toLowerCase(),
+        `${seed.spokenName}: job number must not carry the customer's name either`,
+      ).not.toContain(spoken);
+
+      // …and the one relationship the resolver is claimed to walk does reach
+      // the name, so a failure below means the traversal broke, not that the
+      // data never had the name at all.
+      const customer = await customerRepo.findById(tenant.tenantId, job!.customerId);
+      expect(customer?.displayName, `${seed.spokenName}: customer display_name`).toBe(
+        seed.displayName,
+      );
+      expect(customer!.displayName.toLowerCase()).toContain(spoken);
+    }
+  });
 
   for (const c of corpus.cases) {
     it(`${c.id} [${c.focusItem}]: "${c.utterance}" → ${c.expect.proposalType}`, async () => {
@@ -564,6 +649,18 @@ describe('rivet-voice-19 focus items — operator entity-resolution closed loop 
     expect(corpus.cases).toHaveLength(7);
     const ids = corpus.cases.map((c) => c.id);
     expect(new Set(ids).size).toBe(ids.length);
+    // Pin WHICH cases are gapped. A `knownGap` is how this file records a
+    // resolution path that does not exist yet — it must never become the
+    // quiet way to retire a case that started failing.
+    //
+    // Now EMPTY, and that is the point of pinning it: add_note and
+    // log_time_entry were gapped because `resolveJob` (the kind:'job' path
+    // both reach through JOB_REF_INTENTS) matched `jobs.summary` alone, so a
+    // spoken surname scored 0.000 against a real summary like "AC repair".
+    // Extending the customer traversal to that path closed it, and both cases
+    // now resolve from realistic data rather than a planted summary. Anything
+    // added back here has to be declared deliberately.
+    expect(new Set(corpus.cases.filter((c) => c.knownGap).map((c) => c.id))).toEqual(new Set([]));
     const focusItems = new Set(corpus.cases.map((c) => c.op));
     expect(focusItems).toEqual(
       new Set([
