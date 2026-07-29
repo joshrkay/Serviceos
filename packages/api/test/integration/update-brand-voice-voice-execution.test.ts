@@ -23,7 +23,7 @@ import { PgSettingsRepository } from '../../src/settings/pg-settings';
 import { ensureTenantSettings } from '../../src/settings/settings';
 import { createProposal, missingFieldsFor, Proposal } from '../../src/proposals/proposal';
 import { UNDO_WINDOW_MS } from '../../src/proposals/lifecycle';
-import { approveProposal } from '../../src/proposals/actions';
+import { approveProposal, editProposal } from '../../src/proposals/actions';
 import { ProposalExecutor } from '../../src/proposals/execution/executor';
 import { IdempotencyGuard } from '../../src/proposals/execution/idempotency';
 import {
@@ -94,10 +94,37 @@ describe('Postgres integration — voice update_brand_voice → approve → exec
 
     expect(drafted.proposalType).toBe('update_brand_voice');
     expect(drafted.payload.register).toBe('friendly');
-    expect(missingFieldsFor(drafted)).toEqual([]);
+    // This utterance is genuinely MIXED: "no slang" is a real instruction the
+    // owner gave and the model could not map onto any of the six persisted
+    // fields. Before the B1.18 gate, the proposal was approvable and execution
+    // silently dropped "no slang" while reporting success — this assertion used
+    // to read `toEqual([])` and was the THIRD copy of that false green in the
+    // repo, after the two in brand-voice-task.test.ts.
+    //
+    // Deliberately not "fixed" by deleting `unmapped` from the mock. A real
+    // owner saying this sentence does produce unmapped content, so a fixture
+    // without it would be arranging the fixture to suit the code. The test
+    // instead walks the path the product now has.
+    expect(missingFieldsFor(drafted)).toEqual(['freeText']);
     expect(drafted.status).toBe('draft'); // manual action class — never auto-approved
 
     await proposalRepo.create(drafted);
+
+    // 1b) The operator resolves the unmapped instruction on the review card.
+    // `clearSatisfiedMissingFields` lifts the gate only when this exact key is
+    // edited to a non-empty value, and `editProposal` re-validates the merged
+    // payload against `updateBrandVoicePayloadSchema` first — so this step is
+    // the human actually seeing "no slang" rather than it vanishing.
+    const ungated: Proposal = await editProposal(
+      proposalRepo,
+      tenant.tenantId,
+      drafted.id,
+      tenant.userId,
+      'owner',
+      { freeText: 'no slang — avoid casual filler in customer messages' },
+      auditRepo,
+    );
+    expect(missingFieldsFor(ungated)).toEqual([]);
 
     // 2) The real approval gate lets it through (a human tap).
     const approved: Proposal = await approveProposal(
