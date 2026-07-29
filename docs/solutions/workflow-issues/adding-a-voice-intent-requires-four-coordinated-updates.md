@@ -62,6 +62,14 @@ npm run test:voice-fixtures
   (`packages/api/src/proposals/prioritization.ts`) and in `reports/time-credits.ts`, both typed as
   `Record<ProposalType, number>` — the compiler catches these, but only after the rest is done, so
   expect a second round if you stop at green tests.
+- **`packages/shared` is a separate workspace and is easy to forget.** A new proposal type must be
+  registered in `packages/shared/src/enums.ts` (`ProposalType`) *and* in the right lane in
+  `packages/shared/src/contracts/proposal-action-class.ts`; parity tests there pin both against the
+  API. Miss it and `proposalTypeSchema` rejects the type while the shared lane classifier returns
+  `'unknown'`, which consumers are documented to fail closed on. `cd packages/api && npx vitest run`
+  will NOT catch this — CI runs `npm run test --workspaces`. Run `cd packages/shared && npm run build
+  && npx vitest run` too (the build matters: a stale `dist` makes the API typecheck fail on exports
+  that do exist in source).
 - If several people are adding intents concurrently, the cassette refresh is
   **last-writer-wins**: refresh again after the other change lands, or CI stays red on a hash that
   no longer matches anyone's prompt.
