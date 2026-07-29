@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { catalogUnitSchema } from '@ai-service-os/shared';
 import { CUSTOMER_SOURCES } from '../customers/customer';
 
 export const tenantIdHeader = 'x-tenant-id';
@@ -110,6 +111,15 @@ const lineItemSchema = z.object({
   description: z.string().min(1),
   category: z.enum(['labor', 'material', 'equipment', 'other']).optional(),
   quantity: z.number().nonnegative(),
+  // B7.5 — descriptive unit of measure. Must be declared here or Zod strips it
+  // on create/update/revise, exactly like pricingSource and imageFileId below:
+  // both repositories DELETE and re-INSERT every line-item row on a lineItems
+  // update, so a unit stripped at the HTTP boundary is persisted as NULL even
+  // on lines the operator never touched. `catalogUnitSchema` (shared money.ts)
+  // is the vocabulary — the DB column is a plain nullable TEXT with no CHECK,
+  // so this parse is what keeps an out-of-vocabulary unit out of the column.
+  // DESCRIPTIVE ONLY: no billing arithmetic reads it.
+  unit: catalogUnitSchema.optional(),
   unitPriceCents: z.number().int().nonnegative(),
   totalCents: z.number().int().nonnegative(),
   sortOrder: z.number().int(),
