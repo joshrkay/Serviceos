@@ -8,14 +8,31 @@
  * `brand_voice_locked` — the payload contract has no field capable of
  * expressing it, so this is pinned structurally, independent of exactly how
  * the classifier routes the phrase.
+ *
+ * PR review (2026-07): also pins the approve-to-fail gate — a draft carrying
+ * none of the six persisted brand-voice fields must be stamped
+ * `missingFields` (never approvable), because UpdateBrandVoiceExecutionHandler
+ * refuses exactly that payload. The gate cases are cross-checked against the
+ * REAL execution handler so the two halves can't drift.
  */
 import { describe, expect, it, vi } from 'vitest';
-import { UpdateBrandVoiceTaskHandler } from '../../../src/ai/tasks/brand-voice-task';
+import {
+  BRAND_VOICE_GATE_FIELD,
+  UpdateBrandVoiceTaskHandler,
+} from '../../../src/ai/tasks/brand-voice-task';
 import { TaskContext } from '../../../src/ai/tasks/task-handlers';
 import { assertValidProposalPayload, PROPOSAL_TYPE_SCHEMAS } from '../../../src/proposals/contracts';
 import { updateBrandVoicePayloadSchema } from '../../../src/proposals/contracts/brand-voice';
-import { brandVoiceSchema } from '../../../src/tenants/brand/brand-voice';
-import { missingFieldsFor, actionClassForProposalType, decideInitialStatus } from '../../../src/proposals/proposal';
+import { BRAND_VOICE_FIELDS, brandVoiceSchema } from '../../../src/tenants/brand/brand-voice';
+import { InMemoryBrandVoiceRepository } from '../../../src/tenants/brand/in-memory-brand-voice-repository';
+import { InMemoryAuditRepository } from '../../../src/audit/audit';
+import { UpdateBrandVoiceExecutionHandler } from '../../../src/proposals/execution/brand-voice-handler';
+import {
+  createProposal,
+  missingFieldsFor,
+  actionClassForProposalType,
+  decideInitialStatus,
+} from '../../../src/proposals/proposal';
 import type { LLMGateway, LLMResponse } from '../../../src/ai/gateway/gateway';
 
 function gatewayReturning(content: string): LLMGateway {
@@ -116,7 +133,9 @@ describe('UpdateBrandVoiceTaskHandler', () => {
     expect(res.proposal.payload.freeText).toBe('always be upbeat and never use jargon');
     const meta = res.proposal.payload._meta as { overallConfidence: string };
     expect(meta.overallConfidence).toBe('very_low');
-    expect(missingFieldsFor(res.proposal)).toEqual([]);
+    // …and it is GATED: no persisted field was extracted, so execution could
+    // only ever fail — see the approve-to-fail block below.
+    expect(missingFieldsFor(res.proposal)).toEqual([BRAND_VOICE_GATE_FIELD]);
     assertValidProposalPayload('update_brand_voice', res.proposal.payload);
   });
 
@@ -125,6 +144,7 @@ describe('UpdateBrandVoiceTaskHandler', () => {
       ctx({ existingEntities: { brandVoiceInstruction: 'sound more formal' } }),
     );
     expect(res.proposal.payload.freeText).toBe('sound more formal');
+    expect(missingFieldsFor(res.proposal)).toEqual([BRAND_VOICE_GATE_FIELD]);
     assertValidProposalPayload('update_brand_voice', res.proposal.payload);
   });
 
@@ -191,10 +211,147 @@ describe('UpdateBrandVoiceTaskHandler', () => {
       }
       expect(res.proposal.payload.freeText).toBe('lock my brand voice');
       assertValidProposalPayload('update_brand_voice', res.proposal.payload);
+      // …and, crucially, it is NOT approvable: a lock utterance must land as a
+      // gated card, never as a card an operator can tap Approve on. See the
+      // approve-to-fail block below for the execution-side pairing.
+      expect(missingFieldsFor(res.proposal)).toEqual([BRAND_VOICE_GATE_FIELD]);
       // Even if the payload somehow carried a stray `locked`/`brand_voice_locked`
       // key (it can't — see the schema-shape test above), execution never
       // forwards anything outside the six merge fields — see
       // brand-voice-handler.test.ts.
+    });
+  });
+
+  // ── PR review (2026-07) — no approvable-but-doomed proposal ───────────────
+  //
+  // The defect: a payload carrying only `freeText` + `_meta` left
+  // `missingFields` EMPTY, so approveProposal let it through, and
+  // UpdateBrandVoiceExecutionHandler — which strips `freeText`/`_meta` via
+  // brandVoiceSchema and refuses an empty patch — then failed 100% of the
+  // time. These tests pin BOTH halves of the pairing: the drafted proposal is
+  // gated, AND the very same payload really is refused by the production
+  // execution handler (so the gate is not merely decorative).
+  describe('approve-to-fail gate — no persisted brand-voice field means NOT approvable', () => {
+    async function executionRefuses(payload: Record<string, unknown>): Promise<string> {
+      const handler = new UpdateBrandVoiceExecutionHandler(
+        new InMemoryBrandVoiceRepository(),
+        new InMemoryAuditRepository(),
+      );
+      const result = await handler.execute(
+        {
+          ...createProposal({
+            tenantId: 't-1',
+            proposalType: 'update_brand_voice',
+            payload,
+            summary: 'Update brand voice',
+            createdBy: 'u-1',
+          }),
+          status: 'approved',
+        },
+        { tenantId: 't-1', executedBy: 'u-1' },
+      );
+      expect(result.success).toBe(false);
+      return result.error ?? '';
+    }
+
+    const cases: Array<{ name: string; gateway: () => LLMGateway; spoken: string }> = [
+      {
+        name: 'extraction failure (gateway throws)',
+        gateway: failingGateway,
+        spoken: 'always be upbeat and never use jargon',
+      },
+      {
+        name: 'unparseable JSON',
+        gateway: () => gatewayReturning('not json at all {{{'),
+        spoken: 'sound more formal',
+      },
+      {
+        name: 'freeText-only (model mapped nothing onto the six fields)',
+        gateway: () => gatewayReturning(JSON.stringify({ unmapped: 'keep replies under two sentences', confidence_score: 0.7 })),
+        spoken: 'keep replies under two sentences',
+      },
+      {
+        name: '"Lock my brand voice" — tap-only by design, never executable by voice',
+        gateway: () => gatewayReturning(JSON.stringify({ confidence_score: 0.4 })),
+        spoken: 'lock my brand voice',
+      },
+    ];
+
+    for (const { name, gateway, spoken } of cases) {
+      it(`${name}: gated (missingFields non-empty), and the same payload is refused at execution`, async () => {
+        const res = await new UpdateBrandVoiceTaskHandler(gateway()).handle(
+          ctx({ message: spoken, existingEntities: { brandVoiceInstruction: spoken } }),
+        );
+
+        // No persisted field was extracted…
+        for (const key of BRAND_VOICE_FIELDS) {
+          expect(res.proposal.payload[key]).toBeUndefined();
+        }
+        // …so the proposal is gated and can never be approved.
+        expect(missingFieldsFor(res.proposal)).toEqual([BRAND_VOICE_GATE_FIELD]);
+        expect(res.proposal.status).toBe('draft');
+        // Nothing spoken is dropped despite the gate (AC-2 still holds).
+        expect(res.proposal.payload.freeText).toBeTruthy();
+        assertValidProposalPayload('update_brand_voice', res.proposal.payload);
+
+        // The gate is real, not decorative: had it been approved, execution
+        // would have failed deterministically.
+        expect(await executionRefuses(res.proposal.payload as Record<string, unknown>)).toMatch(
+          /no brand-voice fields/,
+        );
+      });
+    }
+
+    it('AC-4: the gate never becomes a lock affordance — the gated key is one of the six persisted fields, and no payload key is lock-shaped', async () => {
+      const res = await new UpdateBrandVoiceTaskHandler(
+        gatewayReturning(JSON.stringify({ confidence_score: 0.4 })),
+      ).handle(ctx({ message: 'Lock my brand voice', existingEntities: { brandVoiceInstruction: 'lock my brand voice' } }));
+
+      // The gate asks for a real brand-voice field, never a lock field.
+      expect(BRAND_VOICE_FIELDS).toContain(BRAND_VOICE_GATE_FIELD);
+      for (const key of Object.keys(res.proposal.payload)) {
+        expect(key.toLowerCase()).not.toContain('lock');
+      }
+      for (const key of missingFieldsFor(res.proposal)) {
+        expect(key.toLowerCase()).not.toContain('lock');
+      }
+    });
+
+    it('positive control: a real extracted field (register/tone) stays approvable — missingFields empty and execution succeeds', async () => {
+      const res = await new UpdateBrandVoiceTaskHandler(
+        gatewayReturning(JSON.stringify({ register: 'friendly', unmapped: 'no slang', confidence_score: 0.9 })),
+      ).handle(ctx());
+
+      expect(res.proposal.payload.register).toBe('friendly');
+      expect(missingFieldsFor(res.proposal)).toEqual([]);
+      assertValidProposalPayload('update_brand_voice', res.proposal.payload);
+
+      const handler = new UpdateBrandVoiceExecutionHandler(
+        new InMemoryBrandVoiceRepository(),
+        new InMemoryAuditRepository(),
+      );
+      const result = await handler.execute(
+        { ...res.proposal, status: 'approved' },
+        { tenantId: 't-1', executedBy: 'u-1' },
+      );
+      expect(result.success).toBe(true);
+    });
+
+    it('positive control: a non-register field alone (signoff) is also ungated and executes', async () => {
+      const res = await new UpdateBrandVoiceTaskHandler(
+        gatewayReturning(JSON.stringify({ signoff: "Thanks — Bob's HVAC", confidence_score: 0.9 })),
+      ).handle(ctx());
+
+      expect(missingFieldsFor(res.proposal)).toEqual([]);
+      const handler = new UpdateBrandVoiceExecutionHandler(
+        new InMemoryBrandVoiceRepository(),
+        new InMemoryAuditRepository(),
+      );
+      const result = await handler.execute(
+        { ...res.proposal, status: 'approved' },
+        { tenantId: 't-1', executedBy: 'u-1' },
+      );
+      expect(result.success).toBe(true);
     });
   });
 });

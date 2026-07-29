@@ -18,12 +18,18 @@
  * the verbatim transcript in `freeText` (same fallback shape as
  * CreateStandingInstructionTaskHandler) — never a dropped utterance.
  *
+ * That degraded payload is NOT approvable: a proposal carrying no persisted
+ * brand-voice field is stamped `missingFields` so `approveProposal` blocks
+ * it, because execution would deterministically refuse it. See
+ * BRAND_VOICE_GATE_FIELD.
+ *
  * Execution note: this handler ONLY drafts. It never re-implements the
  * merge/cool-down/version-bump — that lives entirely in
  * `tenants/brand/brand-voice-service.ts:updateBrandVoice`, called by
  * `UpdateBrandVoiceExecutionHandler` (proposals/execution/brand-voice-handler.ts).
  */
 import { createProposal, CreateProposalInput } from '../../proposals/proposal';
+import { BRAND_VOICE_FIELDS } from '../../tenants/brand/brand-voice';
 import { LLMGateway } from '../gateway/gateway';
 import { ExtractedEntities } from '../orchestration/intent-classifier';
 import { assessConfidence, getConfidenceLevel } from '../guardrails/confidence';
@@ -104,6 +110,41 @@ function normalizeStringArray(value: unknown, maxItems: number, maxLen: number):
 /** Marker reason for a field the model returned but that failed validation — dropped, never coerced into a guess. */
 const UNRECOGNIZED_VALUE_REASON = 'unrecognized_value';
 
+/**
+ * PR review finding (2026-07) — the approve-to-fail gate.
+ *
+ * `UpdateBrandVoiceExecutionHandler` projects the payload through
+ * `brandVoiceSchema` (strip-mode), which DROPS `freeText` and `_meta`, and
+ * then refuses an empty patch ("Payload carries no brand-voice fields to
+ * apply"). So a payload carrying only `freeText` — which is exactly what an
+ * extraction failure, unparseable JSON, an `unmapped`-only extraction, or the
+ * deliberately non-executable "Lock my brand voice" utterance produces —
+ * could be approved and was then GUARANTEED to fail execution. Approval
+ * succeeding for an action that can never execute is the defect class this
+ * branch exists to eliminate (see the same fix on SendInvoiceTaskHandler /
+ * SendEstimateTaskHandler in voice-extended-tasks.ts): `approveProposal`
+ * (proposals/actions.ts) blocks ONLY on `missingFields`, so the gate has to
+ * live there.
+ *
+ * Gate key: `register`, not a synthetic "one of the six" token, because
+ * `missingFields` gates in this repo must have a working unblock path —
+ * `clearSatisfiedMissingFields` (proposals/missing-fields.ts) lifts an entry
+ * only when THAT exact payload key is edited to a non-empty value. `register`
+ * is the one always-present-in-the-contract field whose presence alone makes
+ * the merge non-empty, so an operator edit that supplies it both clears the
+ * gate and makes execution genuinely succeed. Supplying a different field
+ * (e.g. `signoff`) leaves the gate up — deliberately fail-safe: an
+ * un-liftable gate is a blocked card, an unlifted one is never a doomed
+ * approval.
+ *
+ * AC-4 note: this MUST NOT become a lock affordance. The gate only ever asks
+ * for one of the six persisted brand-voice fields; the payload contract has
+ * no lock-shaped key (see proposals/contracts/brand-voice.ts) and nothing
+ * here adds one. "Lock my brand voice" therefore lands as a gated,
+ * non-approvable card — never a silent success, never a voice-reachable lock.
+ */
+const BRAND_VOICE_GATE_FIELD = 'register';
+
 export class UpdateBrandVoiceTaskHandler implements TaskHandler {
   readonly taskType = 'update_brand_voice' as const;
 
@@ -153,7 +194,10 @@ export class UpdateBrandVoiceTaskHandler implements TaskHandler {
     // full spoken instruction so the proposal always preserves what was
     // said, even when the review card can't offer structured fields.
     const modelUnmapped = normalizeShortString(parsed?.unmapped, MAX_FREE_TEXT_LEN);
-    const mappedAnything = Object.keys(payload).length > 0;
+    // Read the canonical six-field list rather than counting payload keys, so
+    // this stays correct if a field is ever added to the Brand-Voice
+    // Configurator or this block is reordered.
+    const mappedAnything = BRAND_VOICE_FIELDS.some((field) => payload[field] !== undefined);
     const freeText = modelUnmapped ?? (!mappedAnything ? spoken.slice(0, MAX_FREE_TEXT_LEN) : undefined);
     if (freeText) payload.freeText = freeText;
 
@@ -200,11 +244,16 @@ export class UpdateBrandVoiceTaskHandler implements TaskHandler {
       ...(context.tenantThresholdOverride
         ? { tenantThresholdOverride: context.tenantThresholdOverride }
         : {}),
-      // No sourceTrustTier / missingFields: the action class ('manual') is
-      // what makes this structurally never-auto-approve — see AC-1's unit
-      // test on decideInitialStatus. The payload is otherwise always
-      // ungated (missingFields stays empty) because there is always at
-      // least the freeText fallback to review.
+      // No sourceTrustTier: the action class ('manual') is what makes this
+      // structurally never-auto-approve — see AC-1's unit test on
+      // decideInitialStatus.
+      //
+      // missingFields is the APPROVAL gate (decideInitialStatus forces
+      // 'draft'; approveProposal refuses outright). It is stamped exactly
+      // when the extraction produced NONE of the six persisted brand-voice
+      // fields — the freeText-only payload the execution handler
+      // deterministically refuses. See BRAND_VOICE_GATE_FIELD above.
+      ...(mappedAnything ? {} : { missingFields: [BRAND_VOICE_GATE_FIELD] }),
     };
 
     return { proposal: createProposal(input), taskType: this.taskType };
@@ -238,4 +287,4 @@ export class UpdateBrandVoiceTaskHandler implements TaskHandler {
   }
 }
 
-export { BRAND_VOICE_SYSTEM_PROMPT, tryParseJson };
+export { BRAND_VOICE_SYSTEM_PROMPT, BRAND_VOICE_GATE_FIELD, tryParseJson };
