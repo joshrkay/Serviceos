@@ -1,8 +1,8 @@
 # Rivet — VOICE Phase 1 (8 of 19) `/goal` Master Prompt
 
 For **Rivet** — the voice-and-AI-first back office for 1–3-truck owner-operator shops. Part E
-(2026-07-29, incl. post-review corrections — run log #16-17) measured voice coverage at **5/19
-strict**. This run ships the **eight focus
+(2026-07-29, incl. post-review corrections — run log #16-17) measured voice coverage at **3/19
+strict** (after post-review correction rounds, run log #16-18). This run ships the **eight focus
 requirements** below to rung 5, taking coverage to **14/19**. Five items are explicitly deferred
 (appendix) — do not touch them except where a cross-cutting gate requires it.
 
@@ -43,9 +43,9 @@ Ship the eight focus requirements to **rung 5, with proof**: for each, a spoken 
 proposal → execution → persisted row + audit event` (or the audited status-act / conversation
 equivalent), pinned by a Docker-gated integration test (audit + cross-tenant negative) and a
 voice-quality fixture. The run ends with a **read-only re-measurement of all 19** using the Part E
-Track B method; the deliverable is that re-run scoring **14/19**: the five previously-green items still green,
-B4.7 restored to rung 5 by item 9's reschedule/cancel proofs, the eight focus items newly green,
-and the five deferred items unchanged.
+Track B method; the deliverable is that re-run scoring **14/19**: the three previously-green items (B7.1, B7.7,
+B9.1) still green, B4.7/B7.6/B8.1 restored to rung 5 by items 9-10's proof-only tests, the eight
+focus items newly green, and the five deferred items unchanged.
 
 ## GUARDRAILS
 
@@ -334,6 +334,27 @@ scope, and the run log must call it out as a found-by-proof defect.
 3. **C1** rows for `reschedule_appointment`/`cancel_appointment` green with resolver-provided ids.
 4. Both fixtures added to the rubric suite (spoken sentence → approvable proposal).
 
+### 10 · B7.6 + B8.1 restoration — estimate execution real-DB proofs (proof-only)
+
+**Today:** both were corrected to rung 3 in Part E review round three (run log #18): the spoken
+chains work, but **no integration test exercises `UpdateEstimateExecutionHandler` at all** (the
+only `update_estimate` integration coverage calls `applyEstimateEdits` directly), and the
+`draft_estimate` execution citation was a comment-grep false positive — no test asserts the
+estimate audit event + cross-tenant negative through `DraftEstimateExecutionHandler`. Test-only;
+any defect found by writing them is in scope and must be flagged as found-by-proof.
+
+**AC:**
+1. **Integration (B8.1)** (`test/integration/draft-estimate-execution.test.ts`, real Postgres):
+   task-produced `draft_estimate` payload → approve → execute via the registered
+   `DraftEstimateExecutionHandler` → estimate row with catalog-grounded integer-cents lines;
+   exactly one estimate-created audit event; **cross-tenant negative**.
+2. **Integration (B7.6)** (`test/integration/update-estimate-execution.test.ts`, real Postgres):
+   task-produced `update_estimate` add-line-item payload → approve → execute via
+   `UpdateEstimateExecutionHandler` → line persisted, totals recomputed correctly; estimate-updated
+   audit event; **cross-tenant negative**.
+3. **C1** rows for both intents green with resolver-provided ids; both already have rubric
+   fixtures — extend only if the new tests reveal a fixture gap.
+
 ## DEFERRED — do not build in this run
 
 B7.8 (expense job-link) · B7.10 (crew add/remove) · B9.12 (reminder/late fee by voice) · B9.4
@@ -346,7 +367,7 @@ deferred intents by pinning their current honest-gating behavior — pins, not f
 ## DEFINITION OF DONE (self-grade before reporting)
 
 - [ ] Read-only re-measurement of all 19 (Part E Track B method, fresh agent): **14/19 at rung 5** —
-      the focus eight newly green, the prior five still green, B4.7 restored via item 9's proofs, the deferred five unchanged
+      the focus eight newly green, the prior three still green, B4.7/B7.6/B8.1 restored via items 9-10's proofs, the deferred five unchanged
 - [ ] Every numbered AC above is demonstrably satisfied — each cites the test/file/command a
       reviewer can re-run
 - [ ] C1 payload-contract test exists, covers **all** mapped intents, gates CI, and its
