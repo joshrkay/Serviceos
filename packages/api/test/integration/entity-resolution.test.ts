@@ -20,6 +20,9 @@ import { PgCustomerRepository } from '../../src/customers/pg-customer';
 import { PgLocationRepository } from '../../src/locations/pg-location';
 import { PgJobRepository } from '../../src/jobs/pg-job';
 import { PgAppointmentRepository } from '../../src/appointments/pg-appointment';
+import { PgEstimateRepository } from '../../src/estimates/pg-estimate';
+import { createEstimate } from '../../src/estimates/estimate';
+import { buildLineItem } from '../../src/shared/billing-engine';
 import { PgAssignmentRepository } from '../../src/appointments/pg-assignment';
 import { assignTechnician } from '../../src/appointments/assignment';
 import { createVoiceActionRouterWorker } from '../../src/workers/voice-action-router';
@@ -1201,6 +1204,120 @@ describe('Postgres integration — entity resolution (P8)', () => {
       if (result.kind === 'resolved') expect(result.candidate.id).toBe(appointmentId);
     });
 
+    // -- an UNSET tenant timezone must REFUSE, never default ---------------
+    //
+    // `resolveDateTime` substitutes `DEFAULT_TENANT_TIMEZONE`
+    // ('America/New_York') for an absent zone — resolve-datetime.ts:161, with
+    // the constant at :32. So passing `undefined` through does not fail
+    // loudly; it silently answers in Eastern. For a Phoenix tenant that means
+    // "cancel the 2pm" can select the appointment sitting at the
+    // 2pm-EASTERN instant and feed that id to cancel / reschedule / reassign.
+    // Every other failure on this branch degrades to not_found or ambiguous;
+    // this one degraded to confidently-wrong on an irreversible action class.
+    //
+    // The CONTROL test is the load-bearing one: it proves the appointment in
+    // these fixtures really is matchable at the Eastern instant, so the
+    // refusals above it are caused by the missing zone and not by an
+    // appointment that nothing could have found.
+    describe('an unset tenant timezone refuses instead of defaulting to Eastern', () => {
+      const EASTERN = 'America/New_York';
+
+      it('a tenant with NO tenant_settings row does not resolve "the 2pm"', async () => {
+        // Omitting `timezone` seeds no tenant_settings row at all.
+        const seed = await seedRealisticTenant({
+          displayName: 'Jamie Garcia',
+          jobSummary: 'AC repair',
+        });
+        await seedAppointmentAt(seed, seed.jobId, nextLocalHourUtc(EASTERN, 14));
+
+        const result = await resolver.resolve({
+          tenantId: seed.tenantId,
+          reference: 'the 2pm',
+          kind: 'appointment',
+        });
+        expect(result.kind).toBe('not_found');
+      });
+
+      it('an explicit NULL timezone refuses the same way — migration 263 made "unchosen" representable precisely so it could be told apart from a real Eastern tenant', async () => {
+        const seed = await seedRealisticTenant({
+          displayName: 'Jamie Garcia',
+          jobSummary: 'AC repair',
+        });
+        await pool.query(
+          `INSERT INTO tenant_settings (id, tenant_id, business_name, timezone, region)
+           VALUES ($1, $2, $3, NULL, 'TX')`,
+          [crypto.randomUUID(), seed.tenantId, 'Zoneless Shop'],
+        );
+        await seedAppointmentAt(seed, seed.jobId, nextLocalHourUtc(EASTERN, 14));
+
+        const result = await resolver.resolve({
+          tenantId: seed.tenantId,
+          reference: 'the 2pm',
+          kind: 'appointment',
+        });
+        expect(result.kind).toBe('not_found');
+      });
+
+      it('an UNRECOGNIZED timezone string refuses too — a garbage zone is not a chosen one', async () => {
+        const seed = await seedRealisticTenant({
+          displayName: 'Jamie Garcia',
+          jobSummary: 'AC repair',
+        });
+        await pool.query(
+          `INSERT INTO tenant_settings (id, tenant_id, business_name, timezone, region)
+           VALUES ($1, $2, $3, $4, 'TX')`,
+          [crypto.randomUUID(), seed.tenantId, 'Typo Shop', 'Amerca/Phoenix'],
+        );
+        await seedAppointmentAt(seed, seed.jobId, nextLocalHourUtc(EASTERN, 14));
+
+        const result = await resolver.resolve({
+          tenantId: seed.tenantId,
+          reference: 'the 2pm',
+          kind: 'appointment',
+        });
+        expect(result.kind).toBe('not_found');
+      });
+
+      it('CONTROL: the identical fixture DOES resolve once the tenant actually states Eastern — so the refusals above are the missing zone, not an unmatchable appointment', async () => {
+        const seed = await seedRealisticTenant({
+          displayName: 'Jamie Garcia',
+          jobSummary: 'AC repair',
+          timezone: EASTERN,
+        });
+        const target = await seedAppointmentAt(seed, seed.jobId, nextLocalHourUtc(EASTERN, 14));
+
+        const result = await resolver.resolve({
+          tenantId: seed.tenantId,
+          reference: 'the 2pm',
+          kind: 'appointment',
+        });
+        expect(result.kind).toBe('resolved');
+        if (result.kind === 'resolved') expect(result.candidate.id).toBe(target);
+      });
+
+      it('a NAME-bearing clock reference in a zoneless tenant refuses rather than quietly answering by name', async () => {
+        // "the 2pm Garcia job" would otherwise fall through to the customer
+        // traversal and resolve Garcia's ONLY appointment — which is at 9am,
+        // i.e. not the 2pm anything. Returning a resolved id there would
+        // still be answering a time question without knowing the time, so the
+        // refusal is terminal rather than a fall-through. (With a zone set,
+        // the fall-through behavior is unchanged — pinned by "a clock time
+        // that matches nothing falls THROUGH" above.)
+        const seed = await seedRealisticTenant({
+          displayName: 'Jamie Garcia',
+          jobSummary: 'AC repair',
+        });
+        await seedAppointmentAt(seed, seed.jobId, nextLocalHourUtc(EASTERN, 9));
+
+        const result = await resolver.resolve({
+          tenantId: seed.tenantId,
+          reference: 'the 2pm Garcia job',
+          kind: 'appointment',
+        });
+        expect(result.kind).toBe('not_found');
+      });
+    });
+
     // -- kind: 'job' ------------------------------------------------------
     //
     // The SAME defect, one branch over. `JOB_REF_INTENTS`
@@ -1386,6 +1503,250 @@ describe('Postgres integration — entity resolution (P8)', () => {
           tenantId: seed.tenantId,
           reference: 'the Garcia job',
           kind: 'job',
+        });
+        expect(result.kind).toBe('not_found');
+      });
+    });
+
+    // -- kind: 'estimate' --------------------------------------------------
+    //
+    // B7.6. The estimate branch was the last one still answering ONLY an
+    // exact document number, so "the Garcia estimate" — which is how an
+    // operator actually names one — resolved to nothing, and every spoken
+    // `update_estimate` / `send_estimate` reference arrived at its task
+    // handler unresolved. `estimates` has no customer_id, so the only real
+    // path from a person's name to their estimates is customer → jobs →
+    // estimates, the same hop SendEstimateNudgeTaskHandler makes.
+    //
+    // Same fixture rule as the two blocks above, and it matters more here
+    // than anywhere: the surname exists ONLY on the customer row. Planting it
+    // in `estimates.customer_message` is precisely what made
+    // estimate-nudge.test.ts a green test for a feature that did not work
+    // (docs/solutions/test-failures/a-fixture-arranged-to-pass-proves-
+    // nothing.md), so these estimates carry an ordinary message and the
+    // absence of the planting is asserted, not assumed.
+    describe('kind: estimate — customer → jobs → estimates', () => {
+      async function seedEstimateForJob(
+        seed: RealisticSeed,
+        jobId: string,
+        opts?: { customerMessage?: string },
+      ): Promise<string> {
+        const localEstimateRepo = new PgEstimateRepository(pool);
+        const estimate = await createEstimate(
+          {
+            tenantId: seed.tenantId,
+            jobId,
+            estimateNumber: `EST-${crypto.randomUUID().slice(0, 8)}`,
+            lineItems: [buildLineItem('li-1', 'Diagnostic', 1, 9900, 0, true, 'labor')],
+            customerMessage:
+              opts?.customerMessage ?? 'Here is the quote for the work we talked through.',
+            createdBy: seed.userId,
+          },
+          localEstimateRepo,
+        );
+        return estimate.id;
+      }
+
+      it('a spoken surname resolves an estimate whose own text names nobody', async () => {
+        const seed = await seedRealisticTenant({
+          displayName: 'Jamie Garcia',
+          jobSummary: 'AC repair',
+        });
+        const estimateId = await seedEstimateForJob(seed, seed.jobId);
+
+        // "Garcia" must be unreachable from every column an estimate query
+        // could touch. Asserted so the planting cannot creep back in.
+        const planted = await pool.query<{ n: string }>(
+          `SELECT count(*)::text AS n
+             FROM estimates e
+             JOIN jobs j ON j.id = e.job_id
+            WHERE e.tenant_id = $1
+              AND (e.estimate_number ILIKE '%garcia%'
+                   OR COALESCE(e.customer_message,'') ILIKE '%garcia%'
+                   OR COALESCE(e.internal_notes,'') ILIKE '%garcia%'
+                   OR j.summary ILIKE '%garcia%'
+                   OR j.job_number ILIKE '%garcia%')`,
+          [seed.tenantId],
+        );
+        expect(planted.rows[0].n).toBe('0');
+
+        const result = await resolver.resolve({
+          tenantId: seed.tenantId,
+          reference: 'the Garcia estimate',
+          kind: 'estimate',
+        });
+
+        expect(result.kind).toBe('resolved');
+        if (result.kind === 'resolved') {
+          expect(result.candidate.id).toBe(estimateId);
+          expect(result.candidate.kind).toBe('estimate');
+        }
+      });
+
+      it('"the Garcia quote" resolves the same estimate — the document noun is stripped, not matched', async () => {
+        const seed = await seedRealisticTenant({
+          displayName: 'Jamie Garcia',
+          jobSummary: 'AC repair',
+        });
+        const estimateId = await seedEstimateForJob(seed, seed.jobId);
+
+        const result = await resolver.resolve({
+          tenantId: seed.tenantId,
+          reference: 'the Garcia quote',
+          kind: 'estimate',
+        });
+        expect(result.kind).toBe('resolved');
+        if (result.kind === 'resolved') expect(result.candidate.id).toBe(estimateId);
+      });
+
+      it('an exact estimate number still resolves — the fast path is untouched', async () => {
+        const seed = await seedRealisticTenant({
+          displayName: 'Jamie Garcia',
+          jobSummary: 'AC repair',
+        });
+        const localEstimateRepo = new PgEstimateRepository(pool);
+        const estimate = await createEstimate(
+          {
+            tenantId: seed.tenantId,
+            jobId: seed.jobId,
+            estimateNumber: 'EST-0042',
+            lineItems: [buildLineItem('li-1', 'Diagnostic', 1, 9900, 0, true, 'labor')],
+            createdBy: seed.userId,
+          },
+          localEstimateRepo,
+        );
+
+        const result = await resolver.resolve({
+          tenantId: seed.tenantId,
+          reference: 'EST-0042',
+          kind: 'estimate',
+        });
+        expect(result.kind).toBe('resolved');
+        if (result.kind === 'resolved') {
+          expect(result.candidate.id).toBe(estimate.id);
+          expect(result.candidate.score).toBe(1.0);
+        }
+      });
+
+      it('a prefix-sharing customer is NOT reachable — "Khanna" is a different person', async () => {
+        const seed = await seedRealisticTenant({
+          displayName: 'Aisha Khan',
+          jobSummary: 'Water heater replacement',
+        });
+        const khanEstimateId = await seedEstimateForJob(seed, seed.jobId);
+        const khannaJobId = await addRealisticJob(seed, {
+          displayName: 'Priya Khanna',
+          jobSummary: 'Drain cleaning',
+        });
+        await seedEstimateForJob(seed, khannaJobId);
+
+        const result = await resolver.resolve({
+          tenantId: seed.tenantId,
+          reference: 'the Khan estimate',
+          kind: 'estimate',
+        });
+        expect(result.kind).toBe('resolved');
+        if (result.kind === 'resolved') expect(result.candidate.id).toBe(khanEstimateId);
+      });
+
+      it('two estimates for the SAME customer stay a one-tap clarification, never a guess', async () => {
+        const seed = await seedRealisticTenant({
+          displayName: 'Jamie Garcia',
+          jobSummary: 'AC repair',
+        });
+        const first = await seedEstimateForJob(seed, seed.jobId);
+        const second = await seedEstimateForJob(seed, seed.jobId);
+
+        const result = await resolver.resolve({
+          tenantId: seed.tenantId,
+          reference: 'the Garcia estimate',
+          kind: 'estimate',
+        });
+        expect(result.kind).toBe('ambiguous');
+        if (result.kind === 'ambiguous') {
+          expect(result.candidates.map((c) => c.id).sort()).toEqual([first, second].sort());
+        }
+      });
+
+      it('a customer with MORE estimates than a picker can show escalates instead of offering an arbitrary five', async () => {
+        // The overflow trap `resolveJob` already guards, one table over: the
+        // surname matches EVERY estimate of theirs at 1.000, so `LIMIT 5`
+        // would return a picker that need not contain the right one.
+        const seed = await seedRealisticTenant({
+          displayName: 'Jamie Garcia',
+          jobSummary: 'AC repair',
+        });
+        for (let i = 0; i < 6; i++) await seedEstimateForJob(seed, seed.jobId);
+
+        const result = await resolver.resolve({
+          tenantId: seed.tenantId,
+          reference: 'the Garcia estimate',
+          kind: 'estimate',
+        });
+        expect(result.kind).toBe('not_found');
+      });
+
+      it('a purely filler reference matches nothing — an empty needle must not match every customer', async () => {
+        const seed = await seedRealisticTenant({
+          displayName: 'Jamie Garcia',
+          jobSummary: 'AC repair',
+        });
+        await seedEstimateForJob(seed, seed.jobId);
+
+        const result = await resolver.resolve({
+          tenantId: seed.tenantId,
+          reference: 'the estimate',
+          kind: 'estimate',
+        });
+        expect(result.kind).toBe('not_found');
+      });
+
+      it('a SOFT-DELETED estimate is not reachable by the customer name either', async () => {
+        const seed = await seedRealisticTenant({
+          displayName: 'Jamie Garcia',
+          jobSummary: 'AC repair',
+        });
+        const estimateId = await seedEstimateForJob(seed, seed.jobId);
+        await pool.query(`UPDATE estimates SET deleted_at = now() WHERE id = $1`, [estimateId]);
+
+        const result = await resolver.resolve({
+          tenantId: seed.tenantId,
+          reference: 'the Garcia estimate',
+          kind: 'estimate',
+        });
+        expect(result.kind).toBe('not_found');
+      });
+
+      it('never resolves an estimate by customer name across tenants', async () => {
+        const seed = await seedRealisticTenant({
+          displayName: 'Jamie Garcia',
+          jobSummary: 'AC repair',
+        });
+        await seedEstimateForJob(seed, seed.jobId);
+        const stranger = await createTestTenant(pool);
+
+        const result = await resolver.resolve({
+          tenantId: stranger.tenantId,
+          reference: 'the Garcia estimate',
+          kind: 'estimate',
+        });
+        expect(result.kind).toBe('not_found');
+      });
+
+      it('an ARCHIVED customer cannot answer an estimate reference', async () => {
+        const seed = await seedRealisticTenant({
+          displayName: 'Jamie Garcia',
+          jobSummary: 'AC repair',
+        });
+        await seedEstimateForJob(seed, seed.jobId);
+        await pool.query(`UPDATE customers SET is_archived = true WHERE id = $1`, [
+          seed.customerId,
+        ]);
+
+        const result = await resolver.resolve({
+          tenantId: seed.tenantId,
+          reference: 'the Garcia estimate',
+          kind: 'estimate',
         });
         expect(result.kind).toBe('not_found');
       });

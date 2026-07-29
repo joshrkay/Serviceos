@@ -41,6 +41,13 @@ const SIMILARITY_PREFILTER = 0.3;
 const MAX_JOB_CANDIDATES = 5;
 
 /**
+ * Most estimates a one-tap picker may honestly offer. Same ceiling and same
+ * reasoning as `MAX_JOB_CANDIDATES`; `resolveEstimate` reads one extra row to
+ * detect overflow.
+ */
+const MAX_ESTIMATE_CANDIDATES = 5;
+
+/**
  * B4.7 / B5.3 — an appointment reference is treated as a CLOCK TIME only when
  * it contains an explicit time-of-day token. Deliberately digit-bearing and
  * narrow, for one reason: the alternative (handing every reference to
@@ -144,6 +151,56 @@ function extractNameLikeToken(reference: string): string | undefined {
     .filter(Boolean);
   const nameWords = words.filter((w) => !APPOINTMENT_REFERENCE_STOPWORDS.has(w));
   return nameWords.length > 0 ? nameWords.join(' ') : undefined;
+}
+
+/**
+ * Document nouns an operator hangs on a SPOKEN estimate reference: "the Garcia
+ * estimate", "the Garcia quote". Stripped ONLY to build the customer-name
+ * needle inside `resolveEstimate`.
+ *
+ * Deliberately a SEPARATE set from APPOINTMENT_REFERENCE_STOPWORDS rather than
+ * more entries in it. That set also decides whether an APPOINTMENT reference
+ * is nameless enough to reach the SCH-03 tenant-wide "soonest upcoming"
+ * fallback, and "cancel the estimate appointment" (a real phrase — the visit
+ * where you go quote the work) must not become a nameless reference answered
+ * with an unrelated appointment. That is the AC-3 defect exactly, so the
+ * shared set is left untouched and this one is scoped to the estimate path.
+ *
+ * WHY THE STRIP IS LOAD-BEARING, measured on pgvector/pgvector:pg16 with
+ * pg_trgm against a customer named 'Marisol Garcia' (floor: 0.60):
+ *   similarity('Marisol Garcia','the Garcia estimate')             = 0.250
+ *   strict_word_similarity('the Garcia estimate','Marisol Garcia') = 0.350
+ *   strict_word_similarity('garcia estimate','Marisol Garcia')     = 0.438
+ *   strict_word_similarity('garcia','Marisol Garcia')              = 1.000
+ * The middle row is the trap: a traversal built on the stopword-stripped
+ * needle ALONE still leaves the document noun in it, still scores under
+ * τ_ent_confirm_low, and still answers `not_found` — the fix would exist and
+ * do nothing. Only the fully stripped needle clears the floor.
+ *
+ * Safe on the other side, same measurement run: a customer who merely shares
+ * a prefix stays out — strict_word_similarity('garcia','Garciaparra
+ * Landscaping') = 0.462, below the confirm floor. No threshold is moved.
+ */
+const ESTIMATE_DOC_STOPWORDS = new Set([
+  'estimate', 'estimates', 'quote', 'quotes', 'bid', 'bids', 'proposal', 'proposals',
+]);
+
+/**
+ * The person-name needle for an estimate reference, or '' when the reference
+ * names nobody ("the estimate", "that quote").
+ *
+ * '' is returned rather than falling back to the original phrase on purpose:
+ * `strict_word_similarity('', <any name>)` = 0 (measured), so a nameless
+ * reference matches NOTHING instead of matching every customer in the tenant.
+ * Same posture as `resolveJob`'s empty-needle case.
+ */
+function estimateNameNeedle(reference: string): string {
+  const base = extractNameLikeToken(reference);
+  if (!base) return '';
+  const kept = base
+    .split(/\s+/)
+    .filter((w) => w.length > 0 && !ESTIMATE_DOC_STOPWORDS.has(w));
+  return kept.length > 0 ? kept.join(' ') : '';
 }
 
 // Technicians are named the way customers are: an operator says "assign
@@ -414,6 +471,41 @@ export class PgEntityResolver implements EntityResolver {
     return this.toResult(candidates, reference);
   }
 
+  /**
+   * Resolve an estimate by its document number, else by the name of the
+   * CUSTOMER it belongs to.
+   *
+   * B7.6 — before this, the estimate path was exact-document-number ONLY, so
+   * "the Garcia estimate" resolved to nothing and every spoken
+   * `update_estimate` / `send_estimate` reference stayed unresolved. No spoken
+   * sentence produces an EST-0042; the number path answers a typed/read-back
+   * reference, not an operator talking.
+   *
+   * THE TRAVERSAL. `estimates` has no `customer_id` — it carries `job_id`, and
+   * `jobs` carries `customer_id`. So a person's name reaches their estimates
+   * exactly one way: customer → jobs → estimates. That is the same hop
+   * `SendEstimateNudgeTaskHandler` makes with `findByTenant({ jobIds })`
+   * (voice-extended-tasks.ts, `estimatesForResolvedCustomer`) and the same one
+   * the estimates list route makes with `job_id = ANY(...)`; this is the
+   * resolver-level version, so a reference resolves BEFORE drafting rather
+   * than each task handler re-deriving it.
+   *
+   * WHAT IS DELIBERATELY NOT MATCHED: `estimates.customer_message`. That is
+   * the trap documented in docs/solutions/test-failures/
+   * a-fixture-arranged-to-pass-proves-nothing.md — the nudge integration test
+   * went green only because its fixture planted the customer's surname in that
+   * optional, operator-authored column. Matching it here would re-create the
+   * same illusion: references resolving in tests and not in production.
+   *
+   * SCORING is `resolveCustomer`'s, unchanged and with no threshold moved:
+   * `strict_word_similarity` over display_name and company_name, because
+   * whole-string `similarity` cannot see a surname (measurements on
+   * ESTIMATE_DOC_STOPWORDS above). Whole-string similarity is NOT in this
+   * GREATEST because there is nothing on the estimate row worth comparing a
+   * whole phrase against — the exact-number fast path above already owns the
+   * only self-describing text an estimate has, and it runs first, so no
+   * reference that resolved before can score differently now.
+   */
   private async resolveEstimate(
     tenantId: string,
     reference: string,
@@ -427,7 +519,68 @@ export class PgEntityResolver implements EntityResolver {
       { excludeDeleted: true },
     );
     if (exact) return exact;
-    return { kind: 'not_found', reference };
+
+    // Names nobody ("the estimate") → keep exactly the pre-existing not_found
+    // rather than letting an empty needle fan out across the tenant.
+    const needle = estimateNameNeedle(reference);
+    if (needle === '') return { kind: 'not_found', reference };
+
+    // `c.tenant_id = j.tenant_id` / `j.tenant_id = e.tenant_id` keep both joins
+    // inside the tenant on top of the RLS session context
+    // `withTenantConnection` sets. Archived customers are excluded for the same
+    // reason `resolveCustomer` and `resolveJob` exclude them — they must not
+    // become voice targets. Soft-deleted estimates are excluded to match the
+    // exact-number path's `excludeDeleted`.
+    const SCORE_EXPR = `GREATEST(
+             strict_word_similarity($2, c.display_name),
+             COALESCE(strict_word_similarity($2, c.company_name), 0)
+           )`;
+    const rows = await withTenantConnection(this.pool, tenantId, (client) =>
+      client
+        .query<{
+          id: string;
+          estimate_number: string;
+          status: string | null;
+          score: number;
+        }>(
+          `SELECT e.id, e.estimate_number, e.status, ${SCORE_EXPR} AS score
+             FROM estimates e
+             JOIN jobs j
+               ON j.id = e.job_id
+              AND j.tenant_id = e.tenant_id
+             JOIN customers c
+               ON c.id = j.customer_id
+              AND c.tenant_id = j.tenant_id
+              AND c.is_archived = false
+            WHERE e.tenant_id = $1
+              AND e.deleted_at IS NULL
+              AND ${SCORE_EXPR} > $3
+            ORDER BY score DESC
+            LIMIT ${MAX_ESTIMATE_CANDIDATES + 1}`,
+          [tenantId, needle, SIMILARITY_PREFILTER],
+        )
+        .then((r) => r.rows),
+    );
+
+    const candidates: EntityCandidate[] = rows.map((row) => ({
+      id: row.id,
+      kind: 'estimate' as EntityKind,
+      label: row.estimate_number,
+      hint: row.status ?? undefined,
+      score: Number(row.score),
+    }));
+
+    // THE OVERFLOW TRAP, same one `resolveJob` guards: a customer's name
+    // matches EVERY estimate of theirs at 1.000, so a commercial account with
+    // eight of them is ordinary, not exotic — and `LIMIT 5` would hand back an
+    // arbitrary five as a picker that need not even contain the right one.
+    // Escalating to not_found is the honest answer. Counted on the CONFIDENT
+    // band only, so six rows of which one is above τ_ent and five are weak
+    // trigram noise still resolve that one.
+    const confident = candidates.filter((c) => c.score >= TAU_ENT);
+    if (confident.length > MAX_ESTIMATE_CANDIDATES) return { kind: 'not_found', reference };
+
+    return this.toResult(candidates.slice(0, MAX_ESTIMATE_CANDIDATES), reference);
   }
 
   /**
@@ -613,12 +766,25 @@ export class PgEntityResolver implements EntityResolver {
   }
 
   /**
-   * The tenant's IANA zone from `tenant_settings`, or undefined when it is
-   * missing/unrecognized so `resolveDateTime` applies its own documented
-   * default — which is the SAME value as the column default
-   * (`America/New_York`), so a settings row that has never been written and one
-   * that holds the default resolve identically. Read inside
-   * `withTenantConnection` like every other query here, so RLS scopes it.
+   * The tenant's IANA zone from `tenant_settings`, or undefined when the
+   * tenant has not got one — no settings row, a NULL zone, or a string
+   * `isRuntimeTimezone` doesn't recognize.
+   *
+   * `undefined` here means "UNKNOWN", not "use the default". It used to mean
+   * the latter: the comment this replaces argued that handing `undefined` to
+   * `resolveDateTime` was harmless because its default equals the column
+   * default, so an unwritten settings row and a defaulted one resolve alike.
+   * That reasoning is exactly the Phoenix mis-booking, and migration 263
+   * (db/schema.ts) overturned its premise — it dropped `timezone TEXT NOT NULL
+   * DEFAULT 'America/New_York'` precisely so an unset zone reads back NULL and
+   * is DISTINGUISHABLE from a real Eastern tenant's choice. `resolveDateTime`
+   * still substitutes `DEFAULT_TENANT_TIMEZONE` for an absent zone
+   * (resolve-datetime.ts:161, `DEFAULT_TENANT_TIMEZONE = 'America/New_York'`
+   * at :32), so the caller — not this method — must refuse to resolve. See
+   * `resolveAppointmentByClockTime`.
+   *
+   * Read inside `withTenantConnection` like every other query here, so RLS
+   * scopes it.
    */
   private async resolveTenantTimezone(tenantId: string): Promise<string | undefined> {
     const rows = await withTenantConnection(this.pool, tenantId, (client) =>
@@ -650,6 +816,30 @@ export class PgEntityResolver implements EntityResolver {
    * `ambiguous_no_time`, a bare daypart is not an exact time, a past instant is
    * `in_past`). That keeps this branch strictly additive — every reference that
    * resolved before still reaches the branch that resolved it.
+   *
+   * AN UNSET TENANT ZONE IS THE ONE TERMINAL CASE. If the tenant has no
+   * timezone, a stated clock time cannot be converted to an instant at all,
+   * and this branch must not answer. It must also not return null: falling
+   * through would hand "cancel the 2pm" to the name branch and then to
+   * SCH-03's nameless tenant-wide fallback, which answers with the soonest
+   * upcoming appointment — the same confidently-wrong id by a longer route.
+   * So it returns `not_found`, which is terminal here (`resolveAppointment`
+   * returns any non-null result) and is this seam's "I cannot answer that":
+   * `requiresExistingEntity` is true for APPOINTMENT_REF_INTENTS, so a
+   * not_found escalates / lands as a pendingReference instead of executing.
+   *
+   * WHY THIS IS NOT AN EDGE CASE. Every other failure on this branch degrades
+   * to `not_found` or `ambiguous` — both safe. Defaulting the zone degrades to
+   * SELECTING A DIFFERENT APPOINTMENT: with `undefined`, resolveDateTime
+   * silently substitutes Eastern (resolve-datetime.ts:161), so for a Phoenix
+   * tenant "the 2pm" targets the 2pm-Eastern instant, and the ±15-minute
+   * window can match a real appointment that is not the one the operator
+   * meant. That id then drives cancel / reschedule / reassign. The repo
+   * already refuses to guess a zone everywhere else this matters —
+   * create-appointment-task.ts raises a clarification, routes/onboarding.ts
+   * never defaults one, and migration 263 exists so an unset zone is
+   * representable as NULL rather than an indistinguishable 'America/New_York'.
+   * This branch was the remaining place that guessed.
    */
   private async resolveAppointmentByClockTime(
     tenantId: string,
@@ -659,6 +849,9 @@ export class PgEntityResolver implements EntityResolver {
     if (!hasClockTime(reference)) return null;
 
     const timezone = await this.resolveTenantTimezone(tenantId);
+    // Unknown zone → refuse, never default. See the block comment above.
+    if (!timezone) return { kind: 'not_found', reference };
+
     const resolved = resolveDateTime(reference, { timezone });
     // `precision: 'daypart'` is a WINDOW ("tomorrow morning"), not a stated
     // time — treating it as one would silently pick whichever appointment sat
