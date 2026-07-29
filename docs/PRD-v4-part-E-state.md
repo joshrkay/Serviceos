@@ -8,9 +8,9 @@
 
 ## 1. Summary
 
-- **117 requirements scored.** Rung distribution: **0 Absent: 7 · 1 Specced: 1 · 2 Present: 14 · 3 Wired: 39 · 4 Proven: 5 · 5 Reachable: 51 · 6 Live: 0 assessed.**
+- **117 requirements scored.** Rung distribution: **0 Absent: 7 · 1 Specced: 1 · 2 Present: 14 · 3 Wired: 41 · 4 Proven: 4 · 5 Reachable: 50 · 6 Live: 0 assessed.** *(Corrected post-review — see run log #16.)*
 - **Voice coverage (headline): 6 of 19 🎙️ requirements reach rung 5 — 32%.** A second, deliberately separated number: **8 of 19 (42%) are functionally completable by a spoken sentence** (spoken → approvable proposal → correct execution) but two of those lack the real-DB proof rung 5 presupposes under this run's ordinal reading of the ladder. Both numbers are far below what the code's own intent map implies (35 mapped intents, both drift contract tests green): the map is intact, but **six voice actions are broken one layer below it** — the drafting-task ↔ execution-handler payload contract, which nothing tests. See §5 (voice matrix).
-- **Track C (rung 6): NOT assessed per-service — Railway credentials were absent.** Every per-service env cell is `UNKNOWN — no credential`. Partial runtime truth was recovered read-only via authorized connectors and is decisive where it exists: **PostHog server-side capture is live** (events through 2026-07-28); the **live Stripe "Rivet" platform account has webhooks pointed at production Railway but zero Connect accounts and zero payment intents ever** — no tenant bank has ever been connected and no live payment has ever been attempted. See §6.
+- **Track C (rung 6): NOT assessed per-service — Railway credentials were absent.** Every per-service env cell is `UNKNOWN — no credential`. Partial runtime truth was recovered read-only via authorized connectors and is decisive where it exists: **PostHog ingestion is observed through 2026-07-28 but cannot be attributed to an environment or service** (no env property in the taxonomy — the cells stay UNKNOWN); the **live Stripe "Rivet" platform account has webhooks pointed at production Railway but zero Connect accounts and zero payment intents ever** — no tenant bank has ever been connected and no live payment has ever been attempted. See §6.
 - **The single worst finding:** the live inbound-call path parses spoken datetimes with `Date.UTC` and **no tenant timezone** (`packages/api/src/ai/agents/customer-calling/entity-resolution.ts:204-241`) — a caller's "Thursday at 2pm" books 14:00 UTC. The timezone fixes shipped this month (`85ad37e`, `ba064b6`) touched every path except this one.
 - **The most dangerous voice defect:** voice-dictated job notes (`add_note`) pass the approval gate and then **fail at execution** (`targetId` never populated from the resolved entity) — the owner approves, nothing saves, no error reaches them (B7.4).
 - **The money-rail invariant is violated by design:** invoice payment links silently fall back to Rivet's platform Stripe account when a tenant's Connect account isn't active (`public-invoice-service.ts:235-250`) — and in production, *no* tenant has an active Connect account, so every live payment link would settle to Rivet's own account (B1.7/B1.10 + Stripe probe).
@@ -107,7 +107,7 @@ Rung = highest rung fully satisfied, ordinal (Wired-but-unproven = 3; see run lo
 | B5.5 | "On my way" by app/SMS/voice | 🎙️ | 3 | App leg wired (`TechnicianDayView.tsx:510` → `dispatch/routes.ts:262-310`, audit :53) | Voice leg: no intent (and `JobStatus` has no `en_route`); SMS leg: no OMW keyword (only out/sick/unavailable) — 1 of 3 named channels |
 | B5.6 | GPS-ping drive-time ETA SMS | ⚙️ | 2 | Branded en-route SMS sends (`delay-notifications.ts:139-142,419-452`) but "ETA" = scheduled window (:443-447); pings captured write-only, zero readers; no ETA computation exists | The defining computation is absent |
 | B5.7 | Proactive late-arrival update | ⚙️ | 2 | `computeDispatchLateness` complete, 13/13 unit — zero production callers | No worker/route invokes it |
-| B5.8 | No-show/cancel → cascade reschedule proposals | ⚙️ | 5 | SMS OUT/SICK/UNAVAILABLE → `from-tech-out.ts:136` per-appointment proposals (ready_for_review); registered `app.ts:1883-1904`; `tech-status-sms.test.ts:198` audit `[suite]` | Single-appointment no_show doesn't cascade; test lacks cross-tenant negative |
+| B5.8 | No-show/cancel → cascade reschedule proposals | ⚙️ | 3 | SMS OUT/SICK/UNAVAILABLE → `from-tech-out.ts:136` per-appointment proposals (ready_for_review); registered `app.ts:1883-1904`; `tech-status-sms.test.ts:198` audit `[suite]` | Only the tech-self-reports-out branch exists — an appointment marked `no_show` (`appointment-lifecycle.ts:37`) or a single cancellation does **not** cascade (`createRescheduleProposalsFromTechOut` has exactly one caller); test also lacks the cross-tenant negative, so rung 4's bar is unmet under R1 |
 | B5.9 | Electrical license/two-person flags | ⚙️ | 0 | Zero "license"/"two-person" hits repo-wide; electrical pack has no such concept | Absent |
 
 ### B6 — Execute
@@ -163,7 +163,7 @@ Rung = highest rung fully satisfied, ordinal (Wired-but-unproven = 3; see run lo
 | B9.2 | Estimate → invoice w/ review step | 📱 | 5 | `convert-estimate.ts:45-150` idempotent, draft status, audit; UI sheet | — |
 | B9.3 | Auto-invoice on completion | ⚙️ | 5 | Opt-in proposal-raising (`auto-invoice-on-completion.ts:55-96`); fires from route AND voice handler (`completion-effects.ts:47-63`) | — |
 | B9.4 | Batch invoice by voice | 🎙️ | 3 | Chain wired; approvable (probe `missing=[]`); per-job idempotent fan-out (`batch-invoice-handler.ts:59-80`) | No integration test; handler has synthetic-passthrough w/o `isFullyWired` (B7.12 hole) → Wired-but-unproven |
-| B9.5 | Payment link; funds settle to tenant account | ⚙️ | 4 | Direct-charge `Stripe-Account` header (`stripe-payment-link.ts:34-35`, `stripe-payment-intent.ts`); resolver `app.ts:1257-1273` | Holds **only** when Connect active — else silent platform fallback (B1.7); no Connect-scoped charge test; live probe: no tenant is Connect-active |
+| B9.5 | Payment link; funds settle to tenant account | ⚙️ | 3 | Direct-charge `Stripe-Account` header (`stripe-payment-link.ts:34-35`, `stripe-payment-intent.ts`); resolver `app.ts:1257-1273` | No real-DB test asserts a Connect-scoped charge (rung 4 unmet under R1) — and settlement-to-tenant holds **only** when Connect is active; otherwise the silent platform fallback (B1.7) violates the requirement's substance. Live probe: no tenant is Connect-active |
 | B9.6 | Card + platform-originated ACH | ⚙️ | 3 | `automatic_payment_methods` on platform-created PI (`stripe-payment-intent.ts:83`, 9/9 unit ran) via `<PaymentElement>` | ACH not explicitly requested — depends on tenant Stripe dashboard; hosted-link fallback sets no method params; no rendering proof |
 | B9.7 | ACH processing→credit, succeeded→settle, failed→reverse | ⚙️ | 4 | `webhooks/routes.ts:1381-1457,1474-1520,1663-1724`; `ach-webhook.test.ts` audit chain + cross-tenant + duplicate-safety `[suite]` | Rung 5 needs a real customer path exercised with ACH enabled — unproven |
 | B9.8 | Partial payments + deposits | ⚙️ | 4 | Status machine (`invoices/payment.ts:43-80`); per-partial receipts; both deposit policies; `deposit-concurrent-credit.test.ts` `[suite]` | — |
@@ -197,16 +197,16 @@ Rung = highest rung fully satisfied, ordinal (Wired-but-unproven = 3; see run lo
 | Section | Reqs | 0 | 1 | 2 | 3 | 4 | 5 | Mean |
 |---|---|---|---|---|---|---|---|---|
 | B1 Setup | 20 | – | – | 4 | 11 | 1 | 4 | 3.25 |
-| **B2 Situational context** | **10** | **4** | – | **4** | **1** | – | **1** | **1.40** |
-| B3 Capture | 13 | 1 | – | 2 | 1 | – | 9 | 3.92 |
+| **B2 Situational context** | **10** | **4** | – | **4** | **1** | – | **1** | **1.60** |
+| B3 Capture | 13 | 1 | – | 2 | 1 | – | 9 | 4.00 |
 | B4 Book | 10 | – | – | 1 | 4 | – | 5 | 3.90 |
-| B5 Dispatch | 9 | 1 | – | 3 | 2 | – | 3 | 2.78 |
+| B5 Dispatch | 9 | 1 | – | 3 | 3 | – | 2 | 2.78 |
 | B6 Execute | 4 | – | – | – | 3 | – | 1 | 3.50 |
 | B7 Narrate | 12 | 1 | – | – | 6 | – | 5 | 3.58 |
-| B8 Quote | 14 | – | 1 | – | 5 | – | 8 | 3.79 |
-| B9 Bill | 15 | – | – | – | 3 | 3 | 9 | 4.20 |
+| B8 Quote | 14 | – | 1 | – | 5 | – | 8 | 4.00 |
+| B9 Bill | 15 | – | – | – | 4 | 2 | 9 | 4.33 |
 | B10 Close | 10 | – | – | – | 3 | 1 | 6 | 4.30 |
-| **Total** | **117** | **7** | **1** | **14** | **39** | **5** | **51** | **3.50** |
+| **Total** | **117** | **7** | **1** | **14** | **41** | **4** | **50** | **3.57** |
 
 **B2 is the weakest section, and it is not close** — mean 1.40 against 2.78 for the next-weakest (B5). The product's entire "what the system knows before anyone speaks" layer — geocoding, address candidates, territory-as-prior, speaker-scoped context — is between absent and unreachable, while the PRD calls it the thing that makes a spoken sentence resolvable. B5 Dispatch is the second-weakest: three of its nine requirements are complete implementations with zero production callers or an un-instantiated notifier.
 
@@ -301,7 +301,7 @@ Per service × dependency (web / worker / voice share one image, split by `PROCE
 | Sentry | UNKNOWN — no credential | UNKNOWN | UNKNOWN | 3 of 4 claimed paths `instrument()`ed; **Stripe webhook (`webhooks/routes.ts:962`) has zero instrumentation** — its P1 alert can never fire (seed confirmed) |
 | QuickBooks | not-configured | not-configured | N/A | OAuth creds undeclared in every manifest |
 | SendGrid | UNKNOWN — no credential | N/A | N/A | Required unless `EMAIL_ENABLED=false` |
-| PostHog | **LIVE (server-side)** | LIVE | N/A | Probe: Rivet events ingesting through 2026-07-28 (`proposal_executed` 238/30d, `job_created` 527, …); **no `$pageview`** (web capture absent); **no `$ai_generation`** (LLM analytics not wired); environment attribution impossible (no env property) |
+| PostHog | UNKNOWN — ingestion observed, attribution unavailable | UNKNOWN — same | N/A | Probe: Rivet events ARE ingesting through 2026-07-28 (`proposal_executed` 238/30d, `job_created` 527, …) — but the taxonomy has **no environment property**, so the events cannot be attributed to production vs staging vs a local process, nor to a specific service. Also: **no `$pageview`** (web capture absent everywhere) and **no `$ai_generation`** (LLM analytics not wired) |
 | Storage (R2) | UNKNOWN — no credential | UNKNOWN | UNKNOWN | `R2_BUCKET`/`R2_PUBLIC_URL` undeclared in prod manifest |
 | Push / EAS | not-configured / UNKNOWN | N/A | N/A | `EXPO_ACCESS_TOKEN` undeclared; provider constructed unconditionally |
 | Wisetack | UNKNOWN (likely off) | N/A | N/A | Provider degrades to manual without key; routes mounted unconditionally |
@@ -353,6 +353,7 @@ Per service × dependency (web / worker / voice share one image, split by `PROCE
 13. **Wisetack and VAPI scope questions** answered by observation (§4 delta 10, §5 D-014) and routed to Part F rather than scored as requirements.
 14. **No tenant data appears in this document** — aggregates, schema names, and counts only. PostHog queries returned event-level aggregates; Stripe queries returned empty lists and endpoint metadata.
 15. **Read-only guardrail held**: the only working-tree changes across the run are `projects/rivet-part-e/**` and this file, verified by `git status` before the final commit.
+16. **Post-review corrections (2026-07-29, from PR #784 automated review + re-derivation).** Three verdicts were corrected to match this document's own R1 ordinal rule: **B5.8 5→3** (only the tech-self-reports-out branch cascades; single `no_show`/cancel does not; test lacks the cross-tenant negative), **B9.5 4→3** (no Connect-scoped charge test exists; settlement-to-tenant also contradicted by the B1.7 platform fallback), and the **PostHog Track C cells LIVE→UNKNOWN** (ingestion observed but environment/service attribution is impossible — observed data recorded in the evidence column instead). Re-deriving all rollups from the row values also fixed arithmetic slips in four published means (B2 1.40→1.60, B3 3.92→4.00, B8 3.79→4.00, B9 4.20→4.33) and the totals (3:39→41, 4:5→4, 5:51→50, mean 3.50→3.57). Voice coverage is unaffected (neither corrected row is 🎙️-tagged). These are adjudication corrections logged per the document's own rule that hand-edits without provenance void the evidence.
 
 ---
 
