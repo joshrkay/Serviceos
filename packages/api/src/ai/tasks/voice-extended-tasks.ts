@@ -839,14 +839,36 @@ export interface SendEstimateNudgeTaskDeps {
   /**
    * B8.10 — powers BOTH halves of resolution: `findById` verifies a
    * router-resolved `existingEntities.estimateId` (resolvedEstimateIdFrom)
-   * before it's trusted; `findByTenant` runs the same ILIKE
-   * estimate_number/customer_message search `candidatesForReference` uses,
-   * widened here to ALSO see non-nudgeable matches so a unique
-   * non-nudgeable hit (AC-3) can be told apart from real ambiguity (AC-2).
+   * before it's trusted; `findByTenant` runs the customer-scoped
+   * `job_id = ANY(...)` query (with `jobRepo` below) and, as a fallback, the
+   * same ILIKE estimate_number/customer_message search
+   * `candidatesForReference` uses — widened here to ALSO see non-nudgeable
+   * matches so a unique non-nudgeable hit (AC-3) can be told apart from real
+   * ambiguity (AC-2).
    * Absent → today's unconditional gate (AC-4 fallback only) — unchanged.
    */
   estimateRepo?: Pick<EstimateRepository, 'findById' | 'findByTenant'>;
+  /**
+   * Maps the router-resolved customerId to that customer's jobs, which is
+   * the ONLY real path from a spoken person's name to their estimates
+   * (estimates carry job_id; jobs carry customer_id — there is no
+   * estimates.customer_id). Optional by the same convention as
+   * `estimateRepo` and SendPaymentReminderTaskDeps: absent (or an
+   * implementation without the optional `findByCustomer`) degrades to the
+   * ILIKE display-text search alone, exactly today's behavior.
+   */
+  jobRepo?: Pick<JobRepository, 'findByCustomer'>;
 }
+
+/**
+ * Cap on the customer-anchored candidate set. Generous compared with the
+ * ILIKE search's `limit: 5` because the status filter runs client-side (a
+ * customer with many old accepted estimates must not push their one 'sent'
+ * estimate out of the window), still bounded so a pathological account can't
+ * pull an unbounded result set into a draft-time path.
+ */
+const NUDGE_CUSTOMER_JOB_LIMIT = 50;
+const NUDGE_CUSTOMER_ESTIMATE_LIMIT = 25;
 
 export class SendEstimateNudgeTaskHandler implements TaskHandler {
   readonly taskType = 'send_estimate_nudge' as const;
@@ -881,19 +903,23 @@ export class SendEstimateNudgeTaskHandler implements TaskHandler {
         // than trusting an id that didn't check out.
       }
 
-      // No router-verified id (or it didn't verify) — search the SAME
-      // estimate_number/customer_message ILIKE index candidatesForReference
-      // uses, but keep ALL matches (any status) so a unique-but-non-nudgeable
-      // hit (AC-3) is distinguishable from genuine ambiguity (AC-2) and from
-      // no match at all (AC-4).
-      if (typeof reference === 'string' && reference.trim().length > 0) {
-        const matches = await safeFindEstimatesByTenant(repo, context.tenantId, reference.trim());
+      // No router-verified id (or it didn't verify) — build the candidate set
+      // from the customer relationship when one was resolved, else from the
+      // ILIKE display-text search. Either way keep ALL matches (any status)
+      // so a unique-but-non-nudgeable hit (AC-3) is distinguishable from
+      // genuine ambiguity (AC-2) and from no match at all (AC-4).
+      {
+        const matches = await this.candidateEstimates(context, repo, reference);
         const nudgeable = matches.filter((m) => NUDGEABLE_ESTIMATE_STATUSES.has(m.status));
 
         if (nudgeable.length === 1) {
           return this.liftGate(context, payload, nudgeable[0]);
         }
-        if (nudgeable.length > 1) {
+        // A picker needs the spoken phrase to echo back. Caller-identity-only
+        // resolution (no reference at all) has nothing to echo, so genuine
+        // ambiguity there falls through to the AC-4 gate rather than asking a
+        // question the operator can't tie to anything — still never a guess.
+        if (nudgeable.length > 1 && reference) {
           return this.clarify(context, reference, nudgeable, now);
         }
         if (matches.length === 1) {
@@ -914,6 +940,70 @@ export class SendEstimateNudgeTaskHandler implements TaskHandler {
       proposal: createProposal(inputFor(context, this.taskType, payload, ['estimateId'])),
       taskType: this.taskType,
     };
+  }
+
+  /**
+   * Candidate set for the spoken request, strongest signal first.
+   *
+   * 1. The REAL relationship: a router-resolved customerId (spoken name →
+   *    `existingEntities.customerId`, CUSTOMER_REF_INTENTS) or the verified
+   *    inbound caller → that customer's jobs → `findByTenant({ jobIds })`,
+   *    the same customer → jobs → estimates traversal the estimates list
+   *    route already uses (pg-estimate.ts's `job_id = ANY(...)` branch).
+   *    "Nudge the Khan estimate" must not depend on the optional, operator-
+   *    authored `customer_message` happening to contain the word "Khan".
+   * 2. Fallback: the ILIKE estimate_number/customer_message search. This is
+   *    the path for a spoken DOCUMENT NUMBER ("nudge EST-0042"), for tenants
+   *    whose caller wasn't resolved, and whenever `jobRepo` isn't wired.
+   */
+  private async candidateEstimates(
+    context: TaskContext,
+    repo: Pick<EstimateRepository, 'findByTenant'>,
+    reference: string | undefined,
+  ): Promise<Estimate[]> {
+    const byCustomer = await this.estimatesForResolvedCustomer(context, repo);
+    if (byCustomer.length > 0) {
+      // "Nudge EST-0042 for the Khans" — when the spoken reference also names
+      // a specific document, narrow within the customer's own estimates
+      // rather than handing back every one of them as ambiguous. Narrowing
+      // only ever applies when it matches something.
+      const narrowed = reference ? narrowByEstimateNumber(byCustomer, reference) : [];
+      return narrowed.length > 0 ? narrowed : byCustomer;
+    }
+    if (typeof reference === 'string' && reference.trim().length > 0) {
+      return safeFindEstimatesByTenant(repo, context.tenantId, reference.trim());
+    }
+    return [];
+  }
+
+  /**
+   * customer → jobs → estimates. Empty (never throws) when no customer was
+   * resolved, when `jobRepo` isn't wired or lacks the OPTIONAL
+   * `findByCustomer`, or when the customer has no jobs/estimates — each of
+   * which degrades to the display-text fallback above, i.e. today's behavior.
+   */
+  private async estimatesForResolvedCustomer(
+    context: TaskContext,
+    repo: Pick<EstimateRepository, 'findByTenant'>,
+  ): Promise<Estimate[]> {
+    const customerId = resolvedCustomerIdFrom(context);
+    const jobRepo = this.deps.jobRepo;
+    if (!customerId || !jobRepo?.findByCustomer) return [];
+    try {
+      // Default scope (active jobs — canceled excluded) is deliberate: an
+      // estimate on a canceled job isn't something to chase. If that scope
+      // yields nothing the display-text fallback still runs.
+      const jobs = await jobRepo.findByCustomer(context.tenantId, customerId, {
+        limit: NUDGE_CUSTOMER_JOB_LIMIT,
+      });
+      if (jobs.length === 0) return [];
+      return await repo.findByTenant(context.tenantId, {
+        jobIds: jobs.map((j) => j.id),
+        limit: NUDGE_CUSTOMER_ESTIMATE_LIMIT,
+      });
+    } catch {
+      return [];
+    }
   }
 
   /** AC-1 — unique, verified, NUDGEABLE match: lifts the gate outright. */
@@ -1001,6 +1091,27 @@ async function safeFindEstimateById(
   } catch {
     return null;
   }
+}
+
+/**
+ * The customer the request is about: the router-resolved spoken name first
+ * (`existingEntities.customerId`, populated for send_estimate_nudge via
+ * CUSTOMER_REF_INTENTS), then the verified inbound caller
+ * (`context.customerId`) — the same precedence SendPaymentReminderTaskHandler
+ * uses for its customer → jobs → invoices walk. UUID-shaped only, so
+ * free-text that leaked into the id slot is never used as a scope.
+ */
+function resolvedCustomerIdFrom(context: TaskContext): string | undefined {
+  const fromRouter = context.existingEntities?.customerId;
+  if (isUuid(fromRouter)) return fromRouter;
+  return isUuid(context.customerId) ? context.customerId : undefined;
+}
+
+/** Estimates whose number contains the spoken reference ("EST-0042"). */
+function narrowByEstimateNumber(estimates: Estimate[], reference: string): Estimate[] {
+  const needle = reference.trim().toLowerCase();
+  if (needle.length === 0) return [];
+  return estimates.filter((e) => e.estimateNumber.toLowerCase().includes(needle));
 }
 
 /** Never throws — a repo hiccup degrades to "no matches", same posture as

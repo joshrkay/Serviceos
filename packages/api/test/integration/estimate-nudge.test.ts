@@ -34,6 +34,8 @@ import {
 } from '../../src/proposals/execution/handlers';
 import { SendEstimateNudgeTaskHandler } from '../../src/ai/tasks/voice-extended-tasks';
 import type { TaskContext } from '../../src/ai/tasks/task-handlers';
+import { PgEntityResolver } from '../../src/ai/resolution/pg-entity-resolver';
+import { resolveVoiceEntityReferences } from '../../src/ai/agents/customer-calling/entity-resolution';
 
 describe('dispatchEstimateNudge (integration) — claim-before-send against real Postgres', () => {
   let pool: Pool;
@@ -286,10 +288,13 @@ describe('dispatchEstimateNudge (integration) — claim-before-send against real
  * Pre-B8.10, SendEstimateNudgeTaskHandler hard-coded
  * `missing = ['estimateId']` unconditionally, so a spoken nudge could never
  * complete. This certifies the full chain against real rows: the REAL
- * SendEstimateNudgeTaskHandler.handle() (the same handler
- * handler-registry.ts:234 wires for both the voice worker and the assistant
- * chat route) resolves "Khan" to the seeded, unique, nudgeable ("sent")
- * estimate → approveProposal (proposals/actions.ts) → the PRODUCTION
+ * PgEntityResolver + resolveVoiceEntityReferences resolve the SPOKEN NAME to
+ * a customerId (send_estimate_nudge is in CUSTOMER_REF_INTENTS), then the
+ * REAL SendEstimateNudgeTaskHandler.handle() (the same handler
+ * handler-registry.ts wires for both the voice worker and the assistant chat
+ * route) walks customer → jobs → estimates (`job_id = ANY(...)`) to the
+ * seeded, unique, nudgeable ("sent") estimate → approveProposal
+ * (proposals/actions.ts) → the PRODUCTION
  * execution registry (createExecutionHandlerRegistry, handlers.ts:1139) +
  * ProposalExecutor → a real message_dispatches row + `estimate.reminder_sent`
  * audit event (dispatchEstimateNudge, estimate-nudge.ts) + a
@@ -311,7 +316,10 @@ describe('dispatchEstimateNudge (integration) — claim-before-send against real
  *
  * Runs only under `npm run test:integration`.
  */
-describe('Postgres integration — voice send_estimate_nudge ("Nudge the Khan estimate") → approve → execute → dispatch + audit; 48h cooldown holds under voice', () => {
+/** What the operator says / the classifier extracts as `customerName`. */
+const SPOKEN_CUSTOMER_NAME = 'Khan Household';
+
+describe('Postgres integration — voice send_estimate_nudge ("Nudge the Khan Household estimate") → approve → execute → dispatch + audit; 48h cooldown holds under voice', () => {
   let pool: Pool;
   let estimateRepo: PgEstimateRepository;
   let auditRepo: PgAuditRepository;
@@ -322,6 +330,8 @@ describe('Postgres integration — voice send_estimate_nudge ("Nudge the Khan es
   let estimate: Estimate;
   let firstProposalId: string;
   let sendEstimate: ReturnType<typeof vi.fn>;
+  let customerId: string;
+  let resolvedCustomerId: string | undefined;
 
   beforeAll(async () => {
     pool = await getSharedTestDb();
@@ -334,7 +344,7 @@ describe('Postgres integration — voice send_estimate_nudge ("Nudge the Khan es
     const locationRepo = new PgLocationRepository(pool);
     tenant = await createTestTenant(pool);
 
-    const customerId = crypto.randomUUID();
+    customerId = crypto.randomUUID();
     await customerRepo.create({
       id: customerId,
       tenantId: tenant.tenantId,
@@ -382,10 +392,11 @@ describe('Postgres integration — voice send_estimate_nudge ("Nudge the Khan es
     });
 
     // Seed the UNIQUE, verified, NUDGEABLE ("sent") estimate B8.10's
-    // resolution ladder is meant to find. customerMessage carries "Khan" so
-    // the SAME estimate_number/customer_message ILIKE search
-    // candidatesForReference (and this handler) already use resolves it —
-    // exactly one match, in a nudgeable status.
+    // resolution ladder is meant to find. NOTHING in the estimate's display
+    // text (estimate_number / customer_message — the only two columns the
+    // ILIKE search reads) contains the customer's name, so the ONLY way to
+    // reach this row from the spoken "Khan Household" is the real
+    // customer → jobs → estimates traversal.
     const items: LineItem[] = [buildLineItem('li-1', 'Service call', 1, 45000, 0, true, 'labor')];
     const created = await createEstimate(
       {
@@ -393,7 +404,7 @@ describe('Postgres integration — voice send_estimate_nudge ("Nudge the Khan es
         jobId,
         estimateNumber: 'EST-NUDGE-VOICE-1',
         lineItems: items,
-        customerMessage: 'Khan residence — water heater estimate',
+        customerMessage: 'Water heater estimate — thanks for your time',
         createdBy: tenant.userId,
       },
       estimateRepo,
@@ -444,17 +455,36 @@ describe('Postgres integration — voice send_estimate_nudge ("Nudge the Khan es
     const guard = new IdempotencyGuard(executionRepo, proposalRepo);
     executor = new ProposalExecutor(registry, proposalRepo, guard, auditRepo);
 
-    // 1) Draft via the REAL SendEstimateNudgeTaskHandler for the fixture
-    // sentence — "Khan" is all the classifier extracts
-    // (existingEntities.customerName); the handler's own B8.10 resolution
-    // ladder (estimateRepo search) resolves the unique, verified, nudgeable
-    // match — NOT a hand-built payload.
-    const handler = new SendEstimateNudgeTaskHandler({ estimateRepo: new PgEstimateRepository(pool) });
+    // 1a) Resolve the SPOKEN NAME through the production router path —
+    // resolveVoiceEntityReferences + the REAL PgEntityResolver — exactly as
+    // voice-action-router does. send_estimate_nudge is in
+    // CUSTOMER_REF_INTENTS, so the spoken name becomes a verified
+    // customerId on existingEntities; without that membership this returns
+    // no customerId at all and the traversal below has nothing to stand on.
+    const routed = await resolveVoiceEntityReferences(new PgEntityResolver(pool), {
+      tenantId: tenant.tenantId,
+      intent: 'send_estimate_nudge',
+      entities: { customerName: SPOKEN_CUSTOMER_NAME },
+    });
+    expect(routed.kind).toBe('ok');
+    resolvedCustomerId = routed.kind === 'ok' ? routed.resolved.customerId : undefined;
+    expect(resolvedCustomerId).toBe(customerId);
+
+    // 1b) Draft via the REAL SendEstimateNudgeTaskHandler for the fixture
+    // sentence — the classifier extracts the spoken name, the router
+    // resolved it to `customerId`, and the handler's B8.10 resolution ladder
+    // walks customer → jobs → estimates to the unique, verified, nudgeable
+    // match — NOT a hand-built payload, and NOT an ILIKE on display text
+    // (this estimate's display text contains no customer name at all).
+    const handler = new SendEstimateNudgeTaskHandler({
+      estimateRepo: new PgEstimateRepository(pool),
+      jobRepo: new PgJobRepository(pool),
+    });
     const taskContext: TaskContext = {
       tenantId: tenant.tenantId,
       userId: tenant.userId,
-      message: 'Nudge the Khan estimate',
-      existingEntities: { customerName: 'Khan' },
+      message: `Nudge the ${SPOKEN_CUSTOMER_NAME} estimate`,
+      existingEntities: { customerName: SPOKEN_CUSTOMER_NAME, customerId: resolvedCustomerId },
     };
     const { proposal: draftedProposal } = await handler.handle(taskContext);
 
@@ -496,6 +526,52 @@ describe('Postgres integration — voice send_estimate_nudge ("Nudge the Khan es
     await closeSharedTestDb();
   });
 
+  it('the ILIKE display-text search CANNOT reach this estimate from the spoken name — only the customer→jobs→estimates traversal can', async () => {
+    // The fixture is arranged against the weak query, not for it: neither
+    // estimate_number nor customer_message contains the customer's name, so
+    // `findByTenant({ search })` — the pre-fix resolution path — returns
+    // nothing. This is the assertion that makes the drafting proof above
+    // non-vacuous.
+    const byText = await estimateRepo.findByTenant(tenant.tenantId, {
+      search: SPOKEN_CUSTOMER_NAME,
+      limit: 5,
+    });
+    expect(byText).toHaveLength(0);
+    const byFirstNameOnly = await estimateRepo.findByTenant(tenant.tenantId, {
+      search: 'Khan',
+      limit: 5,
+    });
+    expect(byFirstNameOnly).toHaveLength(0);
+
+    // ...while the relationship the handler now uses does reach it.
+    const jobs = await new PgJobRepository(pool).findByCustomer(tenant.tenantId, customerId);
+    const byJobIds = await estimateRepo.findByTenant(tenant.tenantId, {
+      jobIds: jobs.map((j) => j.id),
+      limit: 25,
+    });
+    expect(byJobIds.map((e) => e.id)).toEqual([estimate.id]);
+  });
+
+  it('text fallback survives: a spoken ESTIMATE NUMBER with no resolved customer still lifts the gate', async () => {
+    // No customerId on the context (an operator naming a document, not a
+    // person) → the customer traversal is skipped entirely and the ILIKE
+    // estimate_number search is the genuine fallback that resolves it.
+    const handler = new SendEstimateNudgeTaskHandler({
+      estimateRepo: new PgEstimateRepository(pool),
+      jobRepo: new PgJobRepository(pool),
+    });
+    const { proposal } = await handler.handle({
+      tenantId: tenant.tenantId,
+      userId: tenant.userId,
+      message: 'Nudge EST-NUDGE-VOICE-1',
+      existingEntities: { jobReference: 'EST-NUDGE-VOICE-1' },
+    });
+
+    expect(proposal.proposalType).toBe('send_estimate_nudge');
+    expect(proposal.payload.estimateId).toBe(estimate.id);
+    expect(missingFieldsFor(proposal)).toEqual([]);
+  });
+
   it('dispatches a real message_dispatches row for the estimate', async () => {
     const dispatches = await dispatchRepo.findByEntity(tenant.tenantId, 'estimate', estimate.id);
     expect(dispatches).toHaveLength(1);
@@ -526,12 +602,15 @@ describe('Postgres integration — voice send_estimate_nudge ("Nudge the Khan es
     // Draft AGAIN via the real handler for the same spoken reference — the
     // estimate's status is still 'sent' (nudging doesn't transition it), so
     // B8.10's resolution ladder resolves it ungated exactly as before.
-    const handler = new SendEstimateNudgeTaskHandler({ estimateRepo: new PgEstimateRepository(pool) });
+    const handler = new SendEstimateNudgeTaskHandler({
+      estimateRepo: new PgEstimateRepository(pool),
+      jobRepo: new PgJobRepository(pool),
+    });
     const taskContext: TaskContext = {
       tenantId: tenant.tenantId,
       userId: tenant.userId,
-      message: 'Nudge the Khan estimate again',
-      existingEntities: { customerName: 'Khan' },
+      message: `Nudge the ${SPOKEN_CUSTOMER_NAME} estimate again`,
+      existingEntities: { customerName: SPOKEN_CUSTOMER_NAME, customerId: resolvedCustomerId },
     };
     const { proposal: secondDraft } = await handler.handle(taskContext);
     expect(missingFieldsFor(secondDraft)).toEqual([]);
