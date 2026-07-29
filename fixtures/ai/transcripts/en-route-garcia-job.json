@@ -1,0 +1,11 @@
+{
+  "id": "transcript-en-route-001",
+  "type": "voice_memo",
+  "duration_seconds": 4,
+  "service_type": "hvac",
+  "transcript": "Technician: On my way to the Garcia job.",
+  "expected_entities": {
+    "job_reference": "the Garcia job",
+    "intent_note": "Technician departing now for a named appointment — en_route, not a proposal"
+  }
+}

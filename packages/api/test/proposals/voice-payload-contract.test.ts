@@ -72,6 +72,7 @@ import { UpdateInvoiceExecutionHandler } from '../../src/proposals/execution/upd
 import { UpdateEstimateExecutionHandler } from '../../src/proposals/execution/update-estimate-handler';
 import { RescheduleAppointmentExecutionHandler } from '../../src/proposals/execution/reschedule-handler';
 import { CancelAppointmentExecutionHandler } from '../../src/proposals/execution/cancellation-handler';
+import { ReassignAppointmentExecutionHandler } from '../../src/proposals/execution/reassignment-handler';
 import {
   ConfirmAppointmentExecutionHandler,
   LogTimeEntryExecutionHandler,
@@ -102,6 +103,9 @@ const JOB_ID = '22222222-2222-4222-8222-222222222222';
 const JOB_ID_FOR_EDIT = '22222222-2222-4222-8222-222222222223';
 const INVOICE_ID = '33333333-3333-4333-8333-333333333333';
 const ESTIMATE_ID = '44444444-4444-4444-8444-444444444444';
+// B5.3 — reassign_appointment's resolver-verified seams.
+const APPOINTMENT_ID = '55555555-5555-4555-8555-555555555555';
+const TECHNICIAN_ID = '66666666-6666-4666-8666-666666666666';
 
 // Anchor instant + tenant zone that `resolveDateTime` resolves "tomorrow at
 // 2pm" against deterministically (mirrors test/ai/scheduling/resolve-datetime.test.ts).
@@ -550,16 +554,30 @@ const ROWS: Row[] = [
 
   // ── mode:'gated' — today's honest gating, pinned so a future "fix" can't
   // silently weaken it without this test noticing ──────────────────────
+  // ── B5.3 AC-6 — flipped from 'gated' to 'resolves': the defect this row
+  // used to pin (appointmentId gated UNCONDITIONALLY, ignoring the id the
+  // router's entity resolver already verified onto
+  // existingEntities.appointmentId) is fixed in ReassignAppointmentTaskHandler.
+  // With BOTH the appointment and the technician resolver-verified, the
+  // draft is ungated and the payload executes.
   {
     intent: 'reassign_appointment',
-    mode: 'gated',
-    note: 'appointmentId always stays gated for review-time resolution',
+    mode: 'resolves',
+    note: 'resolver-verified appointmentId + technicianId (U1) draft ungated; dep-less ReassignAppointmentExecutionHandler synthetic-succeeds',
     draft: () =>
       draft(
         { gateway: NOOP_GATEWAY },
         'reassign_appointment',
-        ctx({ existingEntities: { appointmentReference: 'the Garcia appointment', targetTechnicianName: 'Carlos' } }),
+        ctx({
+          existingEntities: {
+            appointmentReference: 'the Garcia appointment',
+            appointmentId: APPOINTMENT_ID,
+            targetTechnicianName: 'Carlos',
+            technicianId: TECHNICIAN_ID,
+          },
+        }),
       ),
+    execute: (p) => new ReassignAppointmentExecutionHandler().execute(p, execContext()),
   },
   {
     intent: 'add_crew_member',

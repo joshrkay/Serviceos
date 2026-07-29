@@ -88,9 +88,16 @@ describe('Execution auto-delivery worker (D9 undo window complement)', () => {
 
   it('handles execution failure without crashing the sweep', async () => {
     // Create a proposal with a type that has no execution handler.
+    // 'update_invoice' is only registered when createExecutionHandlerRegistry
+    // is given an invoiceRepo (see handlers.ts); makeDeps() above calls it
+    // with no deps at all, so this always throws HANDLER_NOT_FOUND. (Was
+    // 'onboarding_schedule' — B1.19 registered a real handler for that type,
+    // so it stopped throwing and started resolving with a failed
+    // ExecutionResult instead, which the sweep counts as `executed`, not
+    // `failed` — see the throw/catch below.)
     let proposal = createProposal({
       ...baseInput,
-      proposalType: 'onboarding_schedule',
+      proposalType: 'update_invoice',
     });
     proposal = transitionProposal(proposal, 'ready_for_review', 'user-1');
     proposal = transitionProposal(proposal, 'approved', 'user-1');

@@ -1191,10 +1191,11 @@ describe('Story 3.4 — "log inventory" maps to expense logging', () => {
 // and the version stamp reflects the coordinated bump.
 describe('taxonomy 1.2.0 — new intents + entities', () => {
   // B7 (feat: voice-transcript-and-agent-paths) bumped the taxonomy again to
-  // 1.3.0 (update_job); classifyIntent always stamps the CURRENT constant
-  // regardless of which intent, so this pin tracks the live value.
-  it('taxonomy version reflects the latest coordinated bump (1.3.0)', () => {
-    expect(INTENT_TAXONOMY_VERSION).toBe('1.3.0');
+  // 1.3.0 (update_job); B5.5 (Part F decision F-3) bumped it again to 1.4.0
+  // (en_route). classifyIntent always stamps the CURRENT constant regardless
+  // of which intent, so this pin tracks the live value.
+  it('taxonomy version reflects the latest coordinated bump (1.4.0)', () => {
+    expect(INTENT_TAXONOMY_VERSION).toBe('1.4.0');
   });
 
   it('parses create_invoice_schedule with the verbatim milestone sentence', () => {

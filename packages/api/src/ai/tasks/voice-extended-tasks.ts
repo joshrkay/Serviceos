@@ -384,6 +384,17 @@ export class CancelAppointmentTaskHandler implements TaskHandler {
 // short-circuits to a voice_clarification picker). Only when the name
 // stayed unresolved (not_found / no resolver) do we keep the legacy
 // missing-marker so the review UI resolves it before approval.
+//
+// B5.3 (defect fix) — this used to push 'appointmentId' onto missing
+// UNCONDITIONALLY, ignoring the id the router's entity resolver already
+// verified and threaded onto `existingEntities.appointmentId` (the same
+// seam RescheduleAppointmentTaskHandler/CancelAppointmentTaskHandler read
+// via `resolvedAppointmentIdFrom`). So even a fully-resolved "Assign Carlos
+// to the Johnson job" — appointment AND technician both verified — landed
+// with `missingFields: ['appointmentId']` and could never auto-clear the
+// gate. Fix: resolve-then-gate, exactly the sibling handlers' shape —
+// resolved id -> payload; free-text reference -> carry the reference AND
+// gate; nothing -> gate.
 export class ReassignAppointmentTaskHandler implements TaskHandler {
   readonly taskType = 'reassign_appointment' as const;
 
@@ -392,12 +403,18 @@ export class ReassignAppointmentTaskHandler implements TaskHandler {
     const payload: Record<string, unknown> = {};
     const missing: string[] = [];
 
-    // The execution handler acts only on a concrete appointmentId (uuid), so
-    // a free-text reference always flags the id for review-time resolution.
-    // Pre-U1 this was masked by the always-missing toTechnicianId; now that
-    // the technician can resolve, the appointment gate must stand on its own.
-    if (ee.appointmentReference) payload.appointmentReference = ee.appointmentReference;
-    missing.push('appointmentId');
+    // Resolver-verified id first (see resolvedAppointmentIdFrom) — the same
+    // precedence RescheduleAppointmentTaskHandler/CancelAppointmentTaskHandler
+    // use. Only a free-text reference that never resolved falls to the gate.
+    const resolvedAppointmentId = resolvedAppointmentIdFrom(context);
+    if (resolvedAppointmentId) {
+      payload.appointmentId = resolvedAppointmentId;
+    } else if (ee.appointmentReference) {
+      payload.appointmentReference = ee.appointmentReference;
+      missing.push('appointmentId');
+    } else {
+      missing.push('appointmentId');
+    }
 
     if (ee.targetTechnicianName) payload.targetTechnicianName = ee.targetTechnicianName;
     const resolvedTechnicianId = resolvedTechnicianIdFrom(context);

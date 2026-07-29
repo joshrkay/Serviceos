@@ -133,6 +133,7 @@ migration).
 | "Book this caller for Thursday" | `create_booking` | capture | deferred (customer-call FSM path) |
 | _(none — system-generated, not spoken)_ | `update_catalog_item` | capture | WS20: the correction loop emits this after N same-SKU price corrections; intentionally never voice-reachable (no on-ramp by design) |
 | _(none — minted after entity resolution, not spoken)_ | `adopt_entity_alias` | manual | U4: alias-learning lifecycle mints this when an operator resolves an ambiguous reference; owner-only approval, never voice-reachable |
+| _(none — conversational onboarding, not the voice intent classifier)_ | `onboarding_tenant_settings`, `onboarding_service_category`, `onboarding_estimate_template`, `onboarding_team_member`, `onboarding_schedule` | capture | B1.19: emitted by the onboarding FSM (`ai/orchestration/onboarding-conversation.ts`), a separate conversation surface from the voice intent classifier — never mapped through `INTENT_TO_PROPOSAL_TYPE`, so by design there is no spoken on-ramp for these. Execution handlers registered in `proposals/execution/onboarding-handlers.ts`; `onboarding_team_member` always reports `handler_not_wired` (no persistence target — see that file's doc comment). |
 
 (`create_invoice_schedule` and `review_response_proposal` graduated to
 section A in taxonomy 1.2.0 — U2/U3 of the agent build wave.)
@@ -159,6 +160,42 @@ approves by screen/SMS tap).
 `lookup_estimates`, `lookup_availability`, `lookup_leads`, `lookup_revenue`,
 `lookup_catalog`, `lookup_day_overview`, `lookup_digest`, `lookup_pending_items`
 — routed to read-only skills, never to a proposal (correct by design).
+
+## F) Direct status acts — audited directly, never a proposal (B5.5, Part F decision F-3)
+
+`en_route` ("on my way") is neither read-only (E, above) nor proposal-driving
+(A, above) — it's a technician acting DIRECTLY. A5.2's invariant governs
+**AI-proposed** actions; a technician saying "on my way" is the human acting
+themselves, the same precedent PRD B10.10 already blesses for the owner.
+Both the voice leg and the SMS-keyword leg call the exact same audited act
+the shipped app en-route button already executes
+(`dispatch/routes.ts triggerEnRoute` → `appointment.en_route_triggered`
+audit event, tech actor, + the existing branded ETA SMS via
+`DelayNotificationCoordinator.enqueueEnRouteNotice`) — never a drafted
+proposal a human has to tap.
+
+| Spoken/texted example | Intent / trigger | What fires | Persistence proof |
+|---|---|---|---|
+| "On my way to the Garcia job" | `en_route` (voice) | `triggerEnRoute` (same act as the app button) | integration (`integration/en-route-voice.test.ts`) |
+| "Heading to my next one now" | `en_route` (voice, bare — resolves to the tech's next upcoming appointment today) | `triggerEnRoute` | integration (`integration/en-route-voice.test.ts`) |
+| "OMW" / "on my way" texted from a registered tech phone | SMS keyword (joins `TECH_STATUS_KEYWORDS`) | `triggerEnRoute` | handler-suite |
+
+Because misclassification risk is real on the voice leg (unlike a tap), a
+low-confidence `en_route` classification gates to clarification instead of
+firing — the standard `CLASSIFIER_CONFIDENCE_THRESHOLD` floor in
+`ai/orchestration/intent-classifier.ts` covers this generically, pinned by a
+dedicated regression test for this intent. Resolution is speaker-scoped: the
+voice leg resolves the appointment within the ACTING technician's OWN
+assignments only (`dispatch/en-route-voice.ts resolveEnRouteAppointment`) —
+a technician's "on my way" can never target another tech's appointment. A
+named job resolves to that appointment; a bare "on my way" resolves to the
+tech's next upcoming appointment today; two candidates clarify; zero yields
+an explicit "no upcoming appointment" answer (never silent).
+
+`en_route` is intentionally absent from `INTENT_TO_PROPOSAL_TYPE` — see the
+comment block in `proposals/voice-intent-map.ts` (next to the `lookup_*`
+exclusion) — so the intent-map drift test reads its absence as deliberate,
+not a gap. No new `JobStatus` value was introduced for this.
 
 ---
 
@@ -205,7 +242,12 @@ approves by screen/SMS tap).
   "handlerNoOnramp": [
     "create_booking",
     "update_catalog_item",
-    "adopt_entity_alias"
+    "adopt_entity_alias",
+    "onboarding_tenant_settings",
+    "onboarding_service_category",
+    "onboarding_estimate_template",
+    "onboarding_team_member",
+    "onboarding_schedule"
   ],
   "gated": ["approve_proposal", "reject_proposal", "edit_proposal"]
 }

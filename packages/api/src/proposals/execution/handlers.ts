@@ -101,6 +101,16 @@ import { CatalogItemRepository } from '../../catalog/catalog-item';
 import type { StandingInstructionRepository } from '../../instructions/standing-instructions';
 import type { EntityAliasRepository } from '../../learning/entity-aliases/entity-alias';
 import { EntityAliasExecutionHandler } from './entity-alias-handler';
+import {
+  OnboardingTenantSettingsExecutionHandler,
+  OnboardingServiceCategoryExecutionHandler,
+  OnboardingEstimateTemplateExecutionHandler,
+  OnboardingTeamMemberExecutionHandler,
+  OnboardingScheduleExecutionHandler,
+} from './onboarding-handlers';
+import { PackActivationRepository } from '../../settings/pack-activation';
+import { EstimateTemplateRepository } from '../../templates/estimate-template';
+import { SeedPackDefaultsDeps } from '../../packs/seed-pack-defaults';
 
 export interface ExecutionContext {
   tenantId: string;
@@ -1202,6 +1212,14 @@ export function createExecutionHandlerRegistry(deps?: {
   // toggle appends to the consent ledger (kind 'sms', source 'manual') in the
   // SAME transaction as the customer update + audit event.
   consentEventRepo?: ConsentEventRepository;
+  // B1.19 — onboarding_* execution handlers. packActivationRepo/templateRepo
+  // mirror the deps POST /api/onboarding/pack and POST /api/templates already
+  // take; packSeedDeps threads the same catalog+template seeder the pack
+  // route uses. Absent → the corresponding handler(s) report isFullyWired()
+  // false and refuse to execute rather than passthrough.
+  packActivationRepo?: PackActivationRepository;
+  templateRepo?: EstimateTemplateRepository;
+  packSeedDeps?: SeedPackDefaultsDeps;
 }): Map<ProposalType, ExecutionHandler> {
   // WS3 — audit is a structural invariant for the consent/entity mutation
   // handlers below (their constructors take a non-optional AuditRepository).
@@ -1375,6 +1393,26 @@ export function createExecutionHandlerRegistry(deps?: {
     // runs after a human tap.
     new UpdateCatalogItemExecutionHandler(deps?.catalogRepo, deps?.auditRepo),
     new EntityAliasExecutionHandler(deps?.entityAliasRepo),
+    // B1.19 — conversational onboarding execution handlers. Each writes
+    // through the SAME shared function the form wizard's routes use
+    // (see proposals/execution/onboarding-handlers.ts doc comment).
+    new OnboardingTenantSettingsExecutionHandler(
+      deps?.settingsRepo,
+      deps?.packActivationRepo,
+      requiredAuditRepo,
+      deps?.packSeedDeps,
+    ),
+    new OnboardingServiceCategoryExecutionHandler(
+      deps?.settingsRepo,
+      deps?.packActivationRepo,
+      requiredAuditRepo,
+      deps?.packSeedDeps,
+    ),
+    new OnboardingEstimateTemplateExecutionHandler(deps?.templateRepo, requiredAuditRepo),
+    // No repo dep: this handler never persists (see its class doc) —
+    // always reports isFullyWired() === false.
+    new OnboardingTeamMemberExecutionHandler(),
+    new OnboardingScheduleExecutionHandler(deps?.settingsRepo, requiredAuditRepo),
   ];
 
   // Handlers that mutate existing entities take a repo dep. Registered

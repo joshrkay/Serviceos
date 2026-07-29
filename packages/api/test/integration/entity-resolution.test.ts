@@ -17,6 +17,9 @@ import { PgEntityResolver } from '../../src/ai/resolution/pg-entity-resolver';
 import { PgCustomerRepository } from '../../src/customers/pg-customer';
 import { PgLocationRepository } from '../../src/locations/pg-location';
 import { PgJobRepository } from '../../src/jobs/pg-job';
+import { PgAppointmentRepository } from '../../src/appointments/pg-appointment';
+import { PgAssignmentRepository } from '../../src/appointments/pg-assignment';
+import { assignTechnician } from '../../src/appointments/assignment';
 import { createVoiceActionRouterWorker } from '../../src/workers/voice-action-router';
 import { InMemoryProposalRepository } from '../../src/proposals/proposal';
 import type { LLMGateway, LLMResponse } from '../../src/ai/gateway/gateway';
@@ -359,6 +362,283 @@ describe('Postgres integration — entity resolution (P8)', () => {
     });
     expect(result.kind).toBe('resolved');
     if (result.kind === 'resolved') expect(result.candidate.id).toBe(jobId);
+  });
+
+  // ---------------------------------------------------------------------
+  // B5.3 AC-3 — job-name → appointment resolution, and the delicate fix:
+  // a NAME-BEARING appointment reference that matches no job must never
+  // fall through to the nameless tenant-wide "soonest upcoming" fallback
+  // (b5.3-design.md §3). Each `it` seeds its own tenant so the tenant-wide
+  // fallback's "exactly one upcoming appointment" precondition is under
+  // this test's control, not shared/perturbed by other tests in this file
+  // (mirrors test/integration/reschedule-appointment-voice.test.ts's
+  // per-test tenant isolation for the same reason).
+  // ---------------------------------------------------------------------
+  describe('appointment resolution by job name (AC-3 / AC-4)', () => {
+    async function seedTenantWithJobAppointments(
+      jobSummary: string,
+      appointments: Array<{ daysOut: number; technicianId?: string }>,
+    ): Promise<{
+      tenantId: string;
+      userId: string;
+      jobId: string;
+      appointmentIds: string[];
+    }> {
+      const t = await createTestTenant(pool);
+      const localCustomerRepo = new PgCustomerRepository(pool);
+      const locationRepo = new PgLocationRepository(pool);
+      const jobRepo = new PgJobRepository(pool);
+      const localAppointmentRepo = new PgAppointmentRepository(pool);
+      const assignmentRepo = new PgAssignmentRepository(pool);
+
+      const customerId = crypto.randomUUID();
+      await localCustomerRepo.create({
+        id: customerId,
+        tenantId: t.tenantId,
+        firstName: jobSummary.split(' ')[0] ?? 'Customer',
+        lastName: 'Customer',
+        displayName: jobSummary,
+        preferredChannel: 'phone',
+        smsConsent: false,
+        isArchived: false,
+        createdBy: t.userId,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      });
+
+      const locationId = crypto.randomUUID();
+      await locationRepo.create({
+        id: locationId,
+        tenantId: t.tenantId,
+        customerId,
+        street1: '1 Test St',
+        city: 'Austin',
+        state: 'TX',
+        postalCode: '78701',
+        country: 'USA',
+        isPrimary: true,
+        addressType: 'service',
+        isArchived: false,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      });
+
+      const jobId = crypto.randomUUID();
+      await jobRepo.create({
+        id: jobId,
+        tenantId: t.tenantId,
+        customerId,
+        locationId,
+        jobNumber: `JOB-${jobId.slice(0, 8)}`,
+        summary: jobSummary,
+        status: 'scheduled',
+        priority: 'normal',
+        createdBy: t.userId,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      });
+
+      const appointmentIds: string[] = [];
+      for (const appt of appointments) {
+        const start = new Date();
+        start.setUTCDate(start.getUTCDate() + appt.daysOut);
+        const end = new Date(start.getTime() + 2 * 60 * 60 * 1000);
+        const appointmentId = crypto.randomUUID();
+        await localAppointmentRepo.create({
+          id: appointmentId,
+          tenantId: t.tenantId,
+          jobId,
+          scheduledStart: start,
+          scheduledEnd: end,
+          timezone: 'America/Chicago',
+          status: 'scheduled',
+          holdPendingApproval: false,
+          notes: jobSummary,
+          createdBy: t.userId,
+          createdAt: new Date(),
+          updatedAt: new Date(),
+        });
+        if (appt.technicianId) {
+          await assignTechnician(
+            {
+              tenantId: t.tenantId,
+              appointmentId,
+              technicianId: appt.technicianId,
+              technicianRole: 'technician',
+              isPrimary: true,
+              assignedBy: t.userId,
+            },
+            assignmentRepo,
+          );
+        }
+        appointmentIds.push(appointmentId);
+      }
+
+      return { tenantId: t.tenantId, userId: t.userId, jobId, appointmentIds };
+    }
+
+    async function seedTechnician(tenantId: string, firstName: string, lastName: string): Promise<string> {
+      const id = crypto.randomUUID();
+      await pool.query(
+        `INSERT INTO users (id, tenant_id, clerk_user_id, email, role, first_name, last_name)
+         VALUES ($1, $2, $3, $4, 'technician', $5, $6)`,
+        [id, tenantId, `clerk-${id}`, `${firstName}.${lastName}.${id.slice(0, 8)}@example.com`.toLowerCase(), firstName, lastName],
+      );
+      return id;
+    }
+
+    it('AC-3 positive: a named job reference with ONE upcoming appointment resolves to that appointment', async () => {
+      const { tenantId, appointmentIds } = await seedTenantWithJobAppointments(
+        'the Johnson job',
+        [{ daysOut: 3 }],
+      );
+      const result = await resolver.resolve({
+        tenantId,
+        reference: 'the Johnson job',
+        kind: 'appointment',
+      });
+      expect(result.kind).toBe('resolved');
+      if (result.kind === 'resolved') {
+        expect(result.candidate.id).toBe(appointmentIds[0]);
+        expect(result.candidate.kind).toBe('appointment');
+      }
+    });
+
+    it('AC-3: a named job reference with MULTIPLE upcoming appointments → ambiguous, ≤5 candidates carrying date + assigned tech', async () => {
+      const { tenantId, appointmentIds } = await seedTenantWithJobAppointments('the Garcia job', [
+        { daysOut: 2 },
+        { daysOut: 5 },
+      ]);
+      const carlosId = await seedTechnician(tenantId, 'Carlos', 'Ramirez');
+      // Assign a tech to only the SECOND appointment so the hint text is
+      // provably per-candidate, not a fixed string.
+      const assignmentRepo = new PgAssignmentRepository(pool);
+      await assignTechnician(
+        {
+          tenantId,
+          appointmentId: appointmentIds[1],
+          technicianId: carlosId,
+          technicianRole: 'technician',
+          isPrimary: true,
+          assignedBy: 'seed',
+        },
+        assignmentRepo,
+      );
+
+      const result = await resolver.resolve({
+        tenantId,
+        reference: 'the Garcia job',
+        kind: 'appointment',
+      });
+      expect(result.kind).toBe('ambiguous');
+      if (result.kind !== 'ambiguous') return;
+      expect(result.candidates.length).toBeLessThanOrEqual(5);
+      expect(result.candidates.map((c) => c.id).sort()).toEqual([...appointmentIds].sort());
+      // Every candidate's label is a real ISO date (the "DATE" half of
+      // "DATE + ASSIGNED TECH" the picker needs to be answerable).
+      for (const c of result.candidates) {
+        expect(() => new Date(c.label).toISOString()).not.toThrow();
+      }
+      const assigned = result.candidates.find((c) => c.id === appointmentIds[1]);
+      const unassigned = result.candidates.find((c) => c.id === appointmentIds[0]);
+      expect(assigned?.hint).toBe('assigned to Carlos Ramirez');
+      expect(unassigned?.hint).toBe('unassigned');
+    });
+
+    it('AC-3 (the defect fix): a NAME-BEARING reference matching NO job returns not_found — even when the tenant has exactly one upcoming appointment (the case that would otherwise resolve via the nameless fallback)', async () => {
+      const { tenantId } = await seedTenantWithJobAppointments('Miller AC repair', [
+        { daysOut: 4 },
+      ]);
+      // The tenant's ONLY upcoming appointment belongs to an unrelated
+      // "Miller" job. A reference naming "Johnson" — a customer/job this
+      // tenant has no record of — must NEVER resolve to Miller's
+      // appointment just because it happens to be the tenant's sole
+      // upcoming one. Before the fix, `resolveAppointment` fell straight
+      // to `resolveUpcomingAppointment` here and DID return it.
+      const result = await resolver.resolve({
+        tenantId,
+        reference: 'the Johnson job',
+        kind: 'appointment',
+      });
+      expect(result.kind).toBe('not_found');
+      if (result.kind === 'not_found') {
+        expect(result.reference).toBe('the Johnson job');
+      }
+    });
+
+    it('AC-3 regression pin: a NAMELESS reference with exactly one upcoming appointment still resolves (SCH-03 unbroken)', async () => {
+      const { tenantId, appointmentIds } = await seedTenantWithJobAppointments(
+        'Miller AC repair',
+        [{ daysOut: 4 }],
+      );
+      // Same shape of tenant state as the negative case above — the ONLY
+      // difference is the reference itself carries no name. This must
+      // still resolve via the SCH-03 tenant-wide fallback.
+      const result = await resolver.resolve({
+        tenantId,
+        reference: 'the upcoming appointment',
+        kind: 'appointment',
+      });
+      expect(result.kind).toBe('resolved');
+      if (result.kind === 'resolved') {
+        expect(result.candidate.id).toBe(appointmentIds[0]);
+      }
+    });
+
+    it('AC-4: two technicians sharing a name → reassign_appointment drafting short-circuits to voice_clarification (technician picker)', async () => {
+      const { tenantId, userId, appointmentIds } = await seedTenantWithJobAppointments(
+        'the Ramirez job',
+        [{ daysOut: 2 }],
+      );
+      // Real Postgres, real pg_trgm — deliberately IDENTICAL full names (not
+      // just a shared first name) so `similarity()` scores each candidate at
+      // 1.0 deterministically, matching the file's existing "two
+      // technicians with the same name" precedent above instead of
+      // depending on a first-name-only fuzzy score landing in a particular
+      // confidence band.
+      const carlosA = await seedTechnician(tenantId, 'Carlos', 'Vega');
+      const carlosB = await seedTechnician(tenantId, 'Carlos', 'Vega');
+
+      const proposalRepo = new InMemoryProposalRepository();
+      const gateway = gatewayReturning([
+        JSON.stringify({
+          intentType: 'reassign_appointment',
+          confidence: 0.9,
+          extractedEntities: {
+            appointmentReference: 'the Ramirez job',
+            targetTechnicianName: 'Carlos Vega',
+          },
+        }),
+      ]);
+      const worker = createVoiceActionRouterWorker({
+        gateway,
+        proposalRepo,
+        entityResolver: resolver,
+      });
+
+      await worker.handle(
+        msg({
+          tenantId,
+          userId,
+          transcript: 'Assign Carlos to the Ramirez job',
+        }),
+        silentLogger(),
+      );
+
+      const proposals = await proposalRepo.findByTenant(tenantId);
+      expect(proposals).toHaveLength(1);
+      expect(proposals[0].proposalType).toBe('voice_clarification');
+      const payload = proposals[0].payload as Record<string, unknown>;
+      expect(payload.reason).toBe('ambiguous_entity');
+      const candidateIds = (payload.entityCandidates as Array<{ id: string }>).map((c) => c.id);
+      expect(candidateIds).toContain(carlosA);
+      expect(candidateIds).toContain(carlosB);
+      // The appointment itself resolved cleanly (job-name unique match) —
+      // technician ambiguity is the ONLY thing gating this, proving the
+      // picker fires on the reassign path specifically, not as a stand-in
+      // for an unresolved appointment.
+      void appointmentIds;
+    });
   });
 
   describe('voice-action-router end-to-end', () => {

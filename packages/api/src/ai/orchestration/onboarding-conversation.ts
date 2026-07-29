@@ -39,6 +39,7 @@ import { CategoryExtractor } from '../tasks/onboarding/category-extractor';
 import { PricingExtractor } from '../tasks/onboarding/pricing-extractor';
 import { TeamExtractor } from '../tasks/onboarding/team-extractor';
 import { ScheduleExtractor } from '../tasks/onboarding/schedule-extractor';
+import { ToolsExtractor } from '../tasks/onboarding/tools-extractor';
 import type {
   ExtractionContext,
   OnboardingExtraction,
@@ -320,6 +321,16 @@ export class OnboardingConversationOrchestrator {
             clarificationQuestions: r.clarificationQuestions ?? [],
           };
         }
+        case 'tools_capture': {
+          const r = await new ToolsExtractor(this.deps.gateway).extract(ctx);
+          return {
+            state,
+            data: r.data,
+            confidence: r.confidence.score,
+            needsClarification: r.needsClarification,
+            clarificationQuestions: r.clarificationQuestions ?? [],
+          };
+        }
       }
     } catch (err) {
       // Surface as low-confidence so the FSM falls through to a
@@ -345,6 +356,12 @@ export class OnboardingConversationOrchestrator {
    * calls `proposalRepo.create` for each — the single-shot path is
    * dormant in the codebase and never persists its output.
    *
+   * `ex.tools` (the sixth capture state, B1.19 AC-3) is deliberately
+   * NOT turned into a proposal here — there is no tenant_settings
+   * column or other row for "tools currently used," so it stays
+   * informational context on the session only. See ToolsExtraction's
+   * doc comment (tasks/onboarding/types.ts).
+   *
    * Empty extractions short-circuit: a `capped` session with no
    * captured data shouldn't emit no-op proposals.
    */
@@ -355,6 +372,18 @@ export class OnboardingConversationOrchestrator {
     const ex = ctx.extractions;
     const inputs: CreateProposalInput[] = [];
     const sourceContext = ctx.sessionId ? { conversationId: ctx.sessionId } : undefined;
+    // B1.19 — found-by-proof defect (parity integration test): the two
+    // proposal groups persisted DIRECTLY via proposalRepo.create below
+    // (tenant settings + estimate templates) were never added to the ids
+    // this method returns — only the `inputs[]`-built ones (category,
+    // team, schedule) were. TurnResponse.proposalIds is the ONLY signal
+    // callers (the review inbox, this orchestrator's own persisted
+    // proposalBatchIds, and this integration test) have for "what did
+    // this turn create" — silently dropping two of the five onboarding_*
+    // types out of it meant an operator's inbox would never surface them
+    // for approval, even though they were sitting in the DB as 'draft'.
+    // Collected here so every persisted proposal is actually returned.
+    const directlyPersistedIds: string[] = [];
 
     // 1. Tenant settings (business profile).
     if (ex.businessProfile) {
@@ -368,6 +397,7 @@ export class OnboardingConversationOrchestrator {
         // createTenantSettingsProposal returns a Proposal + payload tuple
         // (not a CreateProposalInput) — persist directly via the repo.
         await this.deps.proposalRepo.create(settings.proposal);
+        directlyPersistedIds.push(settings.proposal.id);
       }
     }
 
@@ -402,6 +432,7 @@ export class OnboardingConversationOrchestrator {
       );
       for (const proposal of templateResult.proposals) {
         await this.deps.proposalRepo.create(proposal);
+        directlyPersistedIds.push(proposal.id);
       }
     }
 
@@ -446,7 +477,7 @@ export class OnboardingConversationOrchestrator {
     }
 
     // Build + persist the simple-payload proposals collected above.
-    const created: string[] = [];
+    const created: string[] = [...directlyPersistedIds];
     for (const input of inputs) {
       const proposal = createProposal(input);
       await this.deps.proposalRepo.create(proposal);
@@ -518,6 +549,8 @@ function emptyExtractionData(state: ExtractionState): unknown {
       return { members: [] };
     case 'schedule_capture':
       return { workingHours: [] };
+    case 'tools_capture':
+      return { tools: [] };
   }
 }
 

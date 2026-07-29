@@ -1,0 +1,428 @@
+/**
+ * B1.19 AC-5 — parity of outcome: a completed conversational onboarding
+ * (scripted turns, mocked LLM gateway) must produce the SAME tenant
+ * configuration the form wizard produces for identical facts, against
+ * real Postgres.
+ *
+ * Two tenants, same input facts:
+ *   - `wizardTenant`  drives the REAL Express routes (PUT /identity,
+ *     POST /pack) via supertest — mirrors test/integration/
+ *     onboarding-identity.test.ts and onboarding-pack.test.ts's
+ *     conventions.
+ *   - `conversationTenant` drives OnboardingConversationOrchestrator
+ *     with a scripted gateway to `completed`, approves every emitted
+ *     `onboarding_*` proposal, and executes each through the PRODUCTION
+ *     registry (createExecutionHandlerRegistry, real Pg repos — not a
+ *     hand-rolled handler).
+ *
+ * Fields both paths can produce are asserted equal. Fields where the
+ * conversational engine has no capture channel (timezone; team-member
+ * accounts) are called out explicitly below rather than silently
+ * skipped — see the "cannot assert" comments and the B1.19 report.
+ */
+import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import express, { Request, Response, NextFunction } from 'express';
+import request from 'supertest';
+import { Pool } from 'pg';
+import { getSharedTestDb, createTestTenant, closeSharedTestDb } from './shared';
+import type { AuthenticatedRequest } from '../../src/auth/clerk';
+
+import { createOnboardingRouter } from '../../src/routes/onboarding';
+import { PgSettingsRepository } from '../../src/settings/pg-settings';
+import { PgPackActivationRepository } from '../../src/settings/pg-pack-activation';
+import { PgAuditRepository } from '../../src/audit/pg-audit';
+import { PgCatalogItemRepository } from '../../src/catalog/pg-catalog-item';
+import { PgEstimateTemplateRepository } from '../../src/templates/pg-estimate-template';
+
+import { OnboardingConversationOrchestrator } from '../../src/ai/orchestration/onboarding-conversation';
+import { PgOnboardingSessionRepository } from '../../src/db/onboarding-session-repository';
+import { InMemoryProposalRepository, Proposal } from '../../src/proposals/proposal';
+import { InMemoryProposalExecutionRepository } from '../../src/proposals/proposal-execution';
+import { transitionProposal, UNDO_WINDOW_MS } from '../../src/proposals/lifecycle';
+import { ProposalExecutor } from '../../src/proposals/execution/executor';
+import { IdempotencyGuard } from '../../src/proposals/execution/idempotency';
+import { createExecutionHandlerRegistry, ExecutionContext } from '../../src/proposals/execution/handlers';
+import type { LLMGateway, LLMRequest, LLMResponse } from '../../src/ai/gateway/gateway';
+
+function scriptedGateway(scripts: Record<string, unknown>): LLMGateway {
+  return {
+    async complete(req: LLMRequest): Promise<LLMResponse> {
+      const payload = scripts[req.taskType];
+      if (payload === undefined) {
+        throw new Error(`No script for taskType=${req.taskType}`);
+      }
+      return {
+        content: JSON.stringify(payload),
+        model: 'test',
+        provider: 'test',
+        tokenUsage: { input: 0, output: 0, total: 0 },
+        latencyMs: 0,
+      };
+    },
+  } as unknown as LLMGateway;
+}
+
+// ─── Fixed facts, used by BOTH paths ───────────────────────────────────────
+const BUSINESS_NAME = 'Desert Rose Plumbing';
+const CITY = 'Tucson';
+const STATE = 'AZ';
+const SERVICE_AREA_TEXT = `${CITY}, ${STATE}`;
+const TIMEZONE = 'America/Phoenix';
+const BUSINESS_HOURS = {
+  mon: { open: '08:00', close: '17:00' },
+  tue: { open: '08:00', close: '17:00' },
+  wed: { open: '08:00', close: '17:00' },
+  thu: { open: '08:00', close: '17:00' },
+  fri: { open: '08:00', close: '17:00' },
+};
+
+const CONVERSATION_SCRIPTS = {
+  extract_business_profile: {
+    business_name: BUSINESS_NAME,
+    city: CITY,
+    state: STATE,
+    verticals: [{ type: 'plumbing', confidence: 0.95, source_text: 'plumbing' }],
+    service_descriptions: ['plumbing repair'],
+    confidence_score: 0.9,
+  },
+  extract_categories: {
+    categories: [
+      { vertical_type: 'plumbing', category_id: 'repair', name: 'Repair', confidence: 0.9, source_text: 'repair' },
+    ],
+    confidence_score: 0.9,
+  },
+  extract_pricing: {
+    prices: [
+      { service_ref: 'repair diagnostic visit', amount_cents: 9500, price_type: 'exact', confidence: 0.9, source_text: '$95 service call' },
+      { service_ref: 'repair hourly labor', amount_cents: 12000, price_type: 'hourly_rate', confidence: 0.9, source_text: '$120 an hour' },
+    ],
+    confidence_score: 0.9,
+  },
+  extract_team: {
+    members: [
+      { name: 'Mike', inferred_role: 'owner', confidence: 0.95, source_text: 'I run the shop' },
+      { name: 'Rosa', inferred_role: 'dispatcher', confidence: 0.9, source_text: 'Rosa answers the phones' },
+    ],
+    confidence_score: 0.9,
+  },
+  extract_schedule: {
+    working_hours: [
+      { days: ['monday', 'tuesday', 'wednesday', 'thursday', 'friday'], start_time: '08:00', end_time: '17:00' },
+    ],
+    confidence_score: 0.9,
+  },
+  extract_tools: {
+    tools: [{ name: 'QuickBooks', confidence: 0.9, source_text: 'I use QuickBooks' }],
+    confidence_score: 0.9,
+  },
+};
+
+describe('B1.19 — onboarding parity: conversation vs. wizard, real Postgres', () => {
+  let pool: Pool;
+  let settingsRepo: PgSettingsRepository;
+  let packActivationRepo: PgPackActivationRepository;
+  let auditRepo: PgAuditRepository;
+  let catalogRepo: PgCatalogItemRepository;
+  let templateRepo: PgEstimateTemplateRepository;
+
+  let wizardTenant: { tenantId: string; userId: string };
+  let conversationTenant: { tenantId: string; userId: string };
+  let crossTenant: { tenantId: string; userId: string };
+
+  let conversationProposals: Proposal[] = [];
+  let conversationExecutions: Array<{ proposal: Proposal; result: { success: boolean; error?: string; resultEntityId?: string } }> = [];
+
+  beforeAll(async () => {
+    pool = await getSharedTestDb();
+    settingsRepo = new PgSettingsRepository(pool);
+    packActivationRepo = new PgPackActivationRepository(pool);
+    auditRepo = new PgAuditRepository(pool);
+    catalogRepo = new PgCatalogItemRepository(pool);
+    templateRepo = new PgEstimateTemplateRepository(pool);
+
+    wizardTenant = await createTestTenant(pool);
+    conversationTenant = await createTestTenant(pool);
+    crossTenant = await createTestTenant(pool);
+
+    // ── Wizard path: real Express routes ──────────────────────────────
+    const wizardApp = express();
+    wizardApp.use(express.json());
+    wizardApp.use((req: Request, _res: Response, next: NextFunction) => {
+      (req as AuthenticatedRequest).auth = {
+        userId: wizardTenant.userId,
+        sessionId: 'sess-wizard',
+        tenantId: wizardTenant.tenantId,
+        role: 'owner',
+      };
+      next();
+    });
+    wizardApp.use(
+      '/api/onboarding',
+      createOnboardingRouter({
+        settingsRepo,
+        packActivationRepo,
+        auditRepo,
+        pool,
+        packSeedDeps: { catalogRepo, templateRepo },
+      }),
+    );
+
+    const identityRes = await request(wizardApp).put('/api/onboarding/identity').send({
+      businessName: BUSINESS_NAME,
+      serviceAreaText: SERVICE_AREA_TEXT,
+      businessHours: BUSINESS_HOURS,
+      jobBufferMinutes: 30,
+      hourlyRateCents: 12000,
+      // Explicitly confirmed timezone — proves the wizard path CAN set a
+      // real, chosen zone (never a guessed default).
+      timezone: TIMEZONE,
+    });
+    expect(identityRes.status).toBe(200);
+
+    const packRes = await request(wizardApp).post('/api/onboarding/pack').send({ packId: 'plumbing' });
+    expect(packRes.status).toBe(200);
+
+    // ── Conversation path: scripted FSM turns → approve → execute ─────
+    const sessionRepo = new PgOnboardingSessionRepository(pool);
+    const proposalRepo = new InMemoryProposalRepository();
+    const orchestrator = new OnboardingConversationOrchestrator({
+      gateway: scriptedGateway(CONVERSATION_SCRIPTS),
+      sessionRepo,
+      proposalRepo,
+      auditRepo,
+      now: () => new Date('2026-06-17T15:00:00Z'),
+    });
+
+    const opened = await orchestrator.turn({ tenantId: conversationTenant.tenantId, userId: conversationTenant.userId });
+    let last = opened;
+    // Six high-confidence turns: profile → category → pricing → team →
+    // schedule → tools, landing in `review`.
+    for (let i = 0; i < 6; i++) {
+      last = await orchestrator.turn({
+        tenantId: conversationTenant.tenantId,
+        userId: conversationTenant.userId,
+        sessionId: opened.sessionId,
+        userMessage: `Turn ${i}`,
+      });
+    }
+    expect(last.state).toBe('review');
+
+    const confirmation = await orchestrator.turn({
+      tenantId: conversationTenant.tenantId,
+      userId: conversationTenant.userId,
+      sessionId: opened.sessionId,
+      userMessage: 'looks good',
+    });
+    expect(confirmation.state).toBe('completed');
+    expect(confirmation.proposalIds.length).toBeGreaterThan(0);
+
+    for (const id of confirmation.proposalIds) {
+      const p = await proposalRepo.findById(conversationTenant.tenantId, id);
+      expect(p).not.toBeNull();
+      conversationProposals.push(p as Proposal);
+    }
+    // Every emitted proposal is one of the five onboarding_* types.
+    for (const p of conversationProposals) {
+      expect(p.proposalType.startsWith('onboarding_')).toBe(true);
+    }
+
+    // Approve each (draft → ready_for_review → approved, backdated past
+    // the 5-second undo window — same pattern as draft-estimate-execution.test.ts).
+    const approved: Proposal[] = conversationProposals.map((p) => {
+      let cur = p;
+      if (cur.status !== 'approved') {
+        cur = transitionProposal(cur, 'ready_for_review', conversationTenant.userId);
+        cur = transitionProposal(cur, 'approved', conversationTenant.userId);
+      }
+      return { ...cur, approvedAt: new Date(Date.now() - UNDO_WINDOW_MS - 100) };
+    });
+
+    // PRODUCTION registry — real Pg repos, exactly what app.ts wires.
+    const handlers = createExecutionHandlerRegistry({
+      settingsRepo,
+      packActivationRepo,
+      templateRepo,
+      packSeedDeps: { catalogRepo, templateRepo },
+      auditRepo,
+    });
+    const executionRepo = new InMemoryProposalExecutionRepository();
+    const guard = new IdempotencyGuard(executionRepo, proposalRepo);
+    const executor = new ProposalExecutor(handlers, proposalRepo, guard, auditRepo);
+
+    for (const p of approved) {
+      // Overwrites the 'draft' row emitProposalBatches already created
+      // (same id) with the approved + backdated shape.
+      await proposalRepo.create(p);
+      const context: ExecutionContext = { tenantId: p.tenantId, executedBy: conversationTenant.userId };
+      const { result } = await executor.execute(p, context);
+      conversationExecutions.push({ proposal: p, result });
+    }
+  });
+
+  afterAll(async () => {
+    await closeSharedTestDb();
+  });
+
+  it('business profile: businessName + city/state (as service_area_text) match the wizard', async () => {
+    const wizardSettings = await settingsRepo.findByTenant(wizardTenant.tenantId);
+    const conversationSettings = await settingsRepo.findByTenant(conversationTenant.tenantId);
+
+    expect(conversationSettings?.businessName).toBe(BUSINESS_NAME);
+    expect(wizardSettings?.businessName).toBe(BUSINESS_NAME);
+
+    // city/state have no dedicated tenant_settings columns — both this
+    // handler and the assertion below use the same "City, State" join
+    // documented in onboarding-handlers.ts; the wizard's serviceAreaText
+    // is free-text and was submitted with the identical string.
+    expect(conversationSettings?.serviceAreaText).toBe(SERVICE_AREA_TEXT);
+    expect(wizardSettings?.serviceAreaText).toBe(SERVICE_AREA_TEXT);
+  });
+
+  it('hours: business_hours match the wizard exactly', async () => {
+    const wizardSettings = await settingsRepo.findByTenant(wizardTenant.tenantId);
+    const conversationSettings = await settingsRepo.findByTenant(conversationTenant.tenantId);
+
+    expect(conversationSettings?.businessHours).toEqual(BUSINESS_HOURS);
+    expect(wizardSettings?.businessHours).toEqual(BUSINESS_HOURS);
+  });
+
+  it('timezone: the wizard path stores the EXPLICITLY CONFIRMED value; the conversational path — which has no capture channel for timezone at all — never guesses one', async () => {
+    const wizardSettings = await settingsRepo.findByTenant(wizardTenant.tenantId);
+    const conversationSettings = await settingsRepo.findByTenant(conversationTenant.tenantId);
+
+    // Positive assertion: the wizard's stored zone is EXACTLY what was
+    // confirmed, never a substituted default.
+    expect(wizardSettings?.timezone).toBe(TIMEZONE);
+
+    // CANNOT ASSERT full parity here: none of the five onboarding_*
+    // extractors/payloads carry a timezone (see B1.19 report). The
+    // honest assertion available on the conversation side is the
+    // negative half of the AC — it is never guessed. NULL is the only
+    // representable "not chosen" per migration 263 / the timezone
+    // no-fallback rule (routes/onboarding.ts PUT /identity), so raw SQL
+    // (not the repo mapper, which folds NULL into `undefined`) confirms
+    // the column itself, not just the TS projection.
+    const raw = await pool.query<{ timezone: string | null }>(
+      'SELECT timezone FROM tenant_settings WHERE tenant_id = $1',
+      [conversationTenant.tenantId],
+    );
+    expect(raw.rows[0].timezone).toBeNull();
+    expect(conversationSettings?.timezone).toBeUndefined();
+  });
+
+  it('vertical pack: both tenants have an active plumbing pack_activations row', async () => {
+    const wizardActivation = await packActivationRepo.findByTenantAndPack(wizardTenant.tenantId, 'plumbing');
+    const conversationActivation = await packActivationRepo.findByTenantAndPack(conversationTenant.tenantId, 'plumbing');
+
+    expect(wizardActivation?.status).toBe('active');
+    expect(conversationActivation?.status).toBe('active');
+  });
+
+  it('pricing seed: both tenants end up with a non-empty, non-zero-priced plumbing estimate template (content differs by design — see comment)', async () => {
+    // NOT byte-for-byte parity: the wizard's POST /pack seeds CANNED
+    // defaults (seedPackDefaults — "Plumbing Diagnostic Visit", etc, at
+    // fixed prices from PLUMBING_LINE_ITEM_DEFAULTS); the conversation's
+    // onboarding_estimate_template proposal carries the OWNER'S OWN
+    // spoken prices ($95 / $120 here) via a bespoke template. Both are
+    // real "pricing seed" outcomes — an operator lands on a non-empty,
+    // priced price book either way — but the row contents are
+    // intentionally different data, so this asserts outcome KIND, not
+    // exact-value equality. See onboarding-handlers.ts's class doc for
+    // OnboardingEstimateTemplateExecutionHandler.
+    const wizardTemplates = await templateRepo.findByVertical(wizardTenant.tenantId, 'plumbing');
+    const conversationTemplates = await templateRepo.findByVertical(conversationTenant.tenantId, 'plumbing');
+
+    expect(wizardTemplates.length).toBeGreaterThan(0);
+    expect(conversationTemplates.length).toBeGreaterThan(0);
+    for (const t of wizardTemplates) {
+      expect(t.lineItemTemplates.some((li) => li.defaultUnitPriceCents > 0)).toBe(true);
+    }
+    for (const t of conversationTemplates) {
+      expect(t.lineItemTemplates.some((li) => li.defaultUnitPriceCents > 0)).toBe(true);
+    }
+
+    // The conversation-drafted template DOES carry the owner's actual
+    // stated prices (this part IS exact).
+    const drafted = conversationTemplates.find((t) => t.categoryId === 'repair');
+    expect(drafted).toBeDefined();
+    const cents = drafted!.lineItemTemplates.map((li) => li.defaultUnitPriceCents).sort((a, b) => a - b);
+    expect(cents).toContain(9500);
+    expect(cents).toContain(12000);
+  });
+
+  it('team: CANNOT assert parity — there is no wizard team-member surface, and the handler honestly refuses rather than fabricating an account', async () => {
+    // The wizard flow has NO team-member step at all (grep confirms no
+    // team UI under packages/web/src/onboarding), so there is nothing to
+    // compare parity against. The conversation's two onboarding_team_member
+    // proposals (Mike, Rosa) are approved above, but execution must FAIL
+    // — WS3-honest, never a synthetic-id passthrough — because the only
+    // real persistence target (POST /api/users/invitations) requires an
+    // email voice extraction cannot produce.
+    const teamExecutions = conversationExecutions.filter((e) => e.proposal.proposalType === 'onboarding_team_member');
+    expect(teamExecutions.length).toBe(2);
+    for (const { result } of teamExecutions) {
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('handler_not_wired');
+    }
+
+    // No fabricated row anywhere: no pending_invitation, no note, no user.
+    const invitations = await pool.query(
+      `SELECT id FROM pending_invitations WHERE tenant_id = $1`,
+      [conversationTenant.tenantId],
+    ).catch(() => ({ rows: [] as unknown[] }));
+    expect(invitations.rows).toHaveLength(0);
+  });
+
+  it('audit events: every applied proposal (identity, pack activation, schedule, estimate template) has a real audit row; the failed team proposals audit their failure', async () => {
+    const identitySet = await pool.query(
+      `SELECT id FROM audit_events WHERE tenant_id = $1 AND event_type = 'tenant.identity_set'`,
+      [conversationTenant.tenantId],
+    );
+    // One from onboarding_tenant_settings, one from onboarding_schedule.
+    expect(identitySet.rows.length).toBeGreaterThanOrEqual(2);
+
+    const packActivated = await pool.query(
+      `SELECT id FROM audit_events WHERE tenant_id = $1 AND event_type = 'tenant.pack_activated' AND entity_id = 'plumbing'`,
+      [conversationTenant.tenantId],
+    );
+    expect(packActivated.rows.length).toBeGreaterThanOrEqual(1);
+
+    const templateCreated = await pool.query(
+      `SELECT id FROM audit_events WHERE tenant_id = $1 AND event_type = 'estimate_template.created'`,
+      [conversationTenant.tenantId],
+    );
+    expect(templateCreated.rows.length).toBeGreaterThanOrEqual(1);
+
+    const teamProposalIds = conversationExecutions
+      .filter((e) => e.proposal.proposalType === 'onboarding_team_member')
+      .map((e) => e.proposal.id);
+    for (const id of teamProposalIds) {
+      const failed = await pool.query(
+        `SELECT id FROM audit_events WHERE tenant_id = $1 AND event_type = 'proposal.execution_failed' AND entity_id = $2`,
+        [conversationTenant.tenantId, id],
+      );
+      expect(failed.rows.length).toBe(1);
+    }
+  });
+
+  it('cross-tenant negative: a third tenant sees none of the conversation tenant\'s config', async () => {
+    const settings = await settingsRepo.findByTenant(crossTenant.tenantId);
+    expect(settings?.businessName ?? '').not.toBe(BUSINESS_NAME);
+
+    const packActivation = await packActivationRepo.findByTenantAndPack(crossTenant.tenantId, 'plumbing');
+    expect(packActivation).toBeNull();
+
+    const templates = await templateRepo.findByVertical(crossTenant.tenantId, 'plumbing');
+    expect(templates).toHaveLength(0);
+
+    const catalogItems = await catalogRepo.listByTenant(crossTenant.tenantId);
+    expect(catalogItems).toHaveLength(0);
+
+    // Audit rows are tenant-scoped too.
+    const events = await pool.query(
+      `SELECT id FROM audit_events WHERE tenant_id = $1 AND event_type = 'tenant.identity_set'`,
+      [crossTenant.tenantId],
+    );
+    expect(events.rows).toHaveLength(0);
+  });
+});

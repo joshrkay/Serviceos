@@ -49,6 +49,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { SlotConflictChecker } from '../ai/tasks/slot-conflict-checker';
 import { AvailabilityFinder } from '../ai/tasks/availability-finder';
 import { AppointmentRepository } from '../appointments/appointment';
+import type { AssignmentRepository } from '../appointments/assignment';
 import { JobRepository } from '../jobs/job';
 import { CatalogItemRepository } from '../catalog/catalog-item';
 import { InvoicingQueueDeps } from '../invoices/invoicing-queue';
@@ -90,6 +91,9 @@ import {
   OWNER_GRADE_LOOKUP_INTENTS,
   type VoiceLookupAnswerDeps,
 } from './voice-lookup-answer';
+import type { UserRepository } from '../users/user';
+import type { EnRouteEnqueuer } from '../dispatch/routes';
+import { handleEnRouteVoiceIntent } from '../dispatch/en-route-voice';
 
 // Re-export for callers that import these from this module (e.g. router tests).
 export { complaintSeverity, COMPLAINT_HIGH_SEVERITY_REASON };
@@ -426,6 +430,22 @@ export interface VoiceActionRouterDeps {
    * an executed answer with nowhere to persist would be dropped.
    */
   lookupAnswers?: VoiceLookupAnswerDeps;
+  /**
+   * B5.5 / Part F decision F-3 — deps for the `en_route` intent's
+   * router-facing orchestrator (dispatch/en-route-voice.ts). Not a proposal:
+   * a resolved "on my way" fires the SAME audited direct status act the app
+   * button does (`triggerEnRoute`) and stamps its outcome as an E-lane
+   * answer (mirrors the lookup family's `answered`/`clarification`
+   * outcomes). `userRepo` resolves the memo creator's canonical technician
+   * id; `assignmentRepo` scopes resolution to that technician's OWN
+   * assignments (never tenant-wide); `enRouteCoordinator` is the SAME
+   * coordinator instance dispatch/routes.ts wires for the app button.
+   * Optional: any dep missing ⇒ the intent is skipped (no answer surface on
+   * this path), same posture as an unwired lookup.
+   */
+  userRepo?: Pick<UserRepository, 'findByTenant'>;
+  assignmentRepo?: Pick<AssignmentRepository, 'findByTechnician'>;
+  enRouteCoordinator?: EnRouteEnqueuer;
 }
 
 // THE intent → proposal-type map now lives in `proposals/voice-intent-map.ts`
@@ -1315,6 +1335,77 @@ async function processSegment(
       classification,
       answerStatus: 'answered',
       answer: execution.answer,
+    };
+  }
+
+  // B5.5 / Part F decision F-3 — `en_route` ("on my way") is a technician
+  // acting directly, not an AI proposal: it is deliberately NOT in
+  // INTENT_TO_PROPOSAL_TYPE (registered instead in the documented
+  // non-proposal set, proposals/voice-intent-map.ts, the same way lookup_*
+  // is). Resolve → fire the SAME audited direct status act the app button
+  // uses, or answer honestly (ambiguous → clarification; nothing upcoming →
+  // an explicit "no upcoming appointment" answer, never silent). Handled
+  // here, before the generic proposalType lookup below, for the same reason
+  // isLookupIntent is: there is no proposal type to look up.
+  if (classification.intentType === 'en_route') {
+    const enRoute = await handleEnRouteVoiceIntent(
+      {
+        userRepo: deps.userRepo,
+        voiceRepo: deps.voiceRepo,
+        assignmentRepo: deps.assignmentRepo,
+        appointmentRepo: deps.appointmentRepo,
+        jobRepo: deps.jobRepo,
+        enRouteCoordinator: deps.enRouteCoordinator,
+        auditRepo: deps.auditRepo,
+        settingsRepo: deps.settingsRepo,
+        ...(deps.now ? { now: deps.now } : {}),
+      },
+      {
+        tenantId,
+        recordingId,
+        ...(classification.extractedEntities?.jobReference
+          ? { jobReference: classification.extractedEntities.jobReference }
+          : {}),
+      },
+    );
+
+    if (enRoute.kind === 'unavailable') {
+      log.info('voice-action-router: en_route intent — no answer surface on this path', {
+        intent: classification.intentType,
+      });
+      return { kind: 'skipped', classification };
+    }
+    if (enRoute.kind === 'ambiguous') {
+      await emitClarification(
+        deps,
+        {
+          tenantId,
+          userId,
+          transcript: segmentText,
+          classification,
+          conversationId,
+          recordingId,
+          entityAmbiguity: {
+            entityKind: 'appointment',
+            reference: enRoute.reference,
+            candidates: enRoute.candidates,
+          },
+          ...(params.applyDedup && recordingId
+            ? { idempotencyKey: voiceProposalIdempotencyKey(recordingId) }
+            : {}),
+        },
+        log,
+      );
+      return { kind: 'clarified', classification };
+    }
+    log.info('voice-action-router: en_route resolved on the memo path', {
+      result: enRoute.answer.result,
+    });
+    return {
+      kind: 'answered',
+      classification,
+      answerStatus: 'answered',
+      answer: enRoute.answer,
     };
   }
 

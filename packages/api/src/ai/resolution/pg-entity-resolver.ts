@@ -31,6 +31,49 @@ import {
 /** Minimum similarity score to even consider a candidate (pre-filter). */
 const SIMILARITY_PREFILTER = 0.3;
 
+/**
+ * B5.3 (AC-3) — filler words stripped from an appointment reference to
+ * decide whether ANYTHING nameable is left. "the upcoming appointment" /
+ * "the appointment for that job" reduce to nothing (genuinely nameless —
+ * SCH-03's fallback still applies); "the Johnson job" / "the Garcia
+ * appointment" reduce to "johnson" / "garcia" (a name — never allowed to
+ * fall through to the tenant-wide soonest-first fallback un-searched).
+ *
+ * Deliberately conservative (a short, hand-picked stopword list rather than
+ * a POS tagger): false negatives here just mean a name-bearing reference
+ * gets treated as nameless and takes the pre-existing SCH-03 path, which is
+ * always safe (it either resolves an unambiguous tenant-wide fallback or
+ * says not_found/ambiguous). False positives — treating a genuinely nameless
+ * phrase as name-bearing — are the ones that matter, and every word in this
+ * list is a real filler word that appears in the corpus's nameless phrasing
+ * ("the appointment for that job", "the upcoming visit").
+ */
+const APPOINTMENT_REFERENCE_STOPWORDS = new Set([
+  'the', 'a', 'an', 'my', 'our', 'that', 'this', 'it', 'its',
+  'next', 'upcoming', 'coming', 'soon',
+  'appointment', 'appointments', 'visit', 'visits', 'job', 'jobs',
+  'for', 'to', 'on', 'of', 'with', 'about', 'from',
+  'instead', 'me', 'us',
+]);
+
+/**
+ * Returns the reference's remaining word(s) once stopwords are stripped, or
+ * `undefined` when nothing is left (a genuinely nameless reference). Used
+ * ONLY to decide whether `resolveAppointment` may fall through to the
+ * nameless tenant-wide fallback — never itself used as a search string (the
+ * ORIGINAL reference still drives the actual job-name lookup, so trigram
+ * similarity sees full context, not a stripped fragment).
+ */
+function extractNameLikeToken(reference: string): string | undefined {
+  const words = reference
+    .toLowerCase()
+    .replace(/[^a-z0-9\s']/g, ' ')
+    .split(/\s+/)
+    .filter(Boolean);
+  const nameWords = words.filter((w) => !APPOINTMENT_REFERENCE_STOPWORDS.has(w));
+  return nameWords.length > 0 ? nameWords.join(' ') : undefined;
+}
+
 export class PgEntityResolver implements EntityResolver {
   constructor(private readonly pool: Pool) {}
 
@@ -260,11 +303,59 @@ export class PgEntityResolver implements EntityResolver {
       if (jobId) {
         return this.resolveAppointmentByJob(tenantId, reference, jobId);
       }
-      // SCH-03 — no date phrase AND no job anchor. Before this fallback the
+
+      // B5.3 (AC-3, the delicate fix — see b5.3-design.md §3). Before this
+      // branch, EVERY non-date, non-job-anchored reference fell straight to
+      // `resolveUpcomingAppointment`'s tenant-wide "soonest upcoming"
+      // fallback — including a reference that names someone ("the Johnson
+      // job") the tenant has NO record of. That silently swapped the
+      // caller's named target for an unrelated appointment instead of
+      // saying "I couldn't find that". The fix is narrow: only a reference
+      // with NO name-like content at all (a genuinely nameless "cancel the
+      // upcoming appointment", SCH-03's case) is allowed to reach the
+      // nameless fallback. A reference that DOES carry a name is resolved
+      // against jobs by that name first — never silently discarded.
+      const nameToken = extractNameLikeToken(reference);
+      if (nameToken) {
+        // Named reference, no job anchor yet: resolve the name against jobs
+        // (the same trigram search `resolveJob` already does for an
+        // explicit job reference) and build on `resolveAppointmentByJob`
+        // for the unique-match case — exactly the AC-3 positive path.
+        const jobResult = await this.resolveJob(tenantId, reference);
+        switch (jobResult.kind) {
+          case 'resolved':
+            return this.resolveAppointmentByJob(tenantId, reference, jobResult.candidate.id);
+          case 'ambiguous':
+            // The NAME itself matches several jobs — still an honest
+            // ambiguity (never a guess), just one level up from "which
+            // appointment": which Johnson job did you mean.
+            return jobResult;
+          case 'not_found':
+          case 'low_confidence':
+          case 'skipped':
+            // The name was searched and matched nothing confidently. This
+            // is the AC-3 defect's exact case: never fall through to the
+            // nameless tenant-wide fallback here — that would silently
+            // answer about a different customer's appointment. Fold
+            // low_confidence into not_found too: a single below-τ_ent job
+            // match is not confident enough to silently drive an
+            // appointment guess, and the caller (resolveVoiceEntityReferences)
+            // has no case for `low_confidence` on this seam today, so
+            // returning it here would be silently swallowed rather than
+            // surfaced for review — not_found at least lands as a
+            // pendingReference the operator can see.
+            return { kind: 'not_found', reference };
+        }
+      }
+
+      // SCH-03 — no date phrase, no job anchor, and no name-like token at
+      // all ("cancel the upcoming appointment"). Before this fallback the
       // resolver gave up here, which made every FIRST-TURN "cancel the
       // upcoming appointment" escalate to on-call (inapp-adapter.ts's
       // requiresExistingEntity guard) even for a tenant with exactly one
-      // upcoming appointment and nothing to be ambiguous about.
+      // upcoming appointment and nothing to be ambiguous about. Unchanged
+      // by the AC-3 fix above — a genuinely nameless reference still
+      // reaches here, exactly as SCH-03 requires.
       return this.resolveUpcomingAppointment(tenantId, reference);
     }
 
@@ -322,6 +413,11 @@ export class PgEntityResolver implements EntityResolver {
     reference: string,
     jobId: string,
   ): Promise<EntityResolverResult> {
+    // B5.3 (AC-3) — LEFT JOIN the primary assignment + technician name so an
+    // ambiguous result's candidates carry DATE (label, already ISO) + the
+    // ASSIGNED TECH (hint), not just status: "the Johnson job" resolving to
+    // two appointments is only answerable as a one-tap picker if each option
+    // says WHEN and WHO, not just a status string.
     const rows = await withTenantConnection(this.pool, tenantId, (client) =>
       client
         .query<{
@@ -329,14 +425,19 @@ export class PgEntityResolver implements EntityResolver {
           job_id: string;
           scheduled_start: string;
           status: string | null;
+          tech_name: string | null;
         }>(
-          `SELECT id, job_id, scheduled_start, status
-             FROM appointments
-            WHERE tenant_id = $1
-              AND job_id = $2
-              AND status <> 'canceled'
-              AND scheduled_start >= now()
-            ORDER BY scheduled_start ASC
+          `SELECT a.id, a.job_id, a.scheduled_start, a.status,
+                  NULLIF(TRIM(COALESCE(u.first_name,'') || ' ' || COALESCE(u.last_name,'')), '') AS tech_name
+             FROM appointments a
+             LEFT JOIN appointment_assignments aa
+               ON aa.appointment_id = a.id AND aa.tenant_id = a.tenant_id AND aa.is_primary = true
+             LEFT JOIN users u ON u.id = aa.technician_id
+            WHERE a.tenant_id = $1
+              AND a.job_id = $2
+              AND a.status <> 'canceled'
+              AND a.scheduled_start >= now()
+            ORDER BY a.scheduled_start ASC
             LIMIT 5`,
           [tenantId, jobId],
         )
@@ -351,7 +452,7 @@ export class PgEntityResolver implements EntityResolver {
       id: row.id,
       kind: 'appointment' as EntityKind,
       label: new Date(row.scheduled_start).toISOString(),
-      hint: row.status ?? undefined,
+      hint: row.tech_name ? `assigned to ${row.tech_name}` : 'unassigned',
       score: 1.0,
     }));
 

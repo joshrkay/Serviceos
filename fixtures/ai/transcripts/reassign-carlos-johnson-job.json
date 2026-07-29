@@ -1,0 +1,12 @@
+{
+  "id": "transcript-reassign-001",
+  "type": "voice_memo",
+  "duration_seconds": 3,
+  "service_type": "hvac",
+  "transcript": "Dispatcher: Assign Carlos to the Johnson job.",
+  "expected_entities": {
+    "target_technician_name": "Carlos",
+    "job_reference": "the Johnson job",
+    "intent_note": "\"Assign\" replaces the appointment's primary technician — reassign_appointment, not add_crew_member."
+  }
+}

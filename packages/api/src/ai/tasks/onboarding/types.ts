@@ -101,6 +101,26 @@ export interface ScheduleExtraction {
   sla?: SLAEntry;
 }
 
+/**
+ * B1.19 — the `tools` capture state (PRD §8, AC-3). What software/tools
+ * the owner currently runs the business with (paper, a spreadsheet, a
+ * competitor CRM, QuickBooks, …) — free-text, non-canonical. Unlike the
+ * other five extraction states this never becomes an `onboarding_*`
+ * proposal: there is no tenant_settings column or other row for
+ * "tools currently used," so it's informational context only (surfaced
+ * in the review summary), not a config write. See the B1.19 report for
+ * the full rationale.
+ */
+export interface ToolEntry {
+  name: string;
+  confidence: number;
+  sourceText: string;
+}
+
+export interface ToolsExtraction {
+  tools: ToolEntry[];
+}
+
 // --- Combined extraction ---
 
 export interface OnboardingExtraction {
@@ -110,6 +130,10 @@ export interface OnboardingExtraction {
   pricing: PricingExtraction;
   team: TeamMemberExtraction;
   schedule: ScheduleExtraction;
+  // Optional: the dormant single-shot orchestrator (ai/orchestration/onboarding.ts)
+  // predates the `tools` capture state and does not populate it; only the
+  // conversational FSM (ai/orchestration/onboarding-conversation.ts) does.
+  tools?: ToolsExtraction;
 }
 
 // --- Proposal payloads ---

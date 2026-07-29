@@ -75,6 +75,19 @@ export type IntentType =
   | 'create_invoice_schedule'
   | 'respond_to_review'
   | 'create_standing_instruction'
+  // B5.5 / Part F decision F-3 — a technician announcing they're headed to
+  // an appointment ("on my way"). NOT proposal-driving: the router fires
+  // the SAME audited direct status act the app en-route button already
+  // executes (dispatch/routes.ts triggerEnRoute) — the human is acting
+  // directly, the exact precedent PRD B10.10 already blesses. Deliberately
+  // absent from INTENT_TO_PROPOSAL_TYPE; see proposals/voice-intent-map.ts
+  // for the documented non-proposal registration. jobReference carries a
+  // named job ("the Garcia job"); absent ⇒ the tech's next upcoming
+  // appointment today. Distinct from notify_delay (the crew is running
+  // LATE, not departing now) — a low-confidence classification here still
+  // gates to clarification via the standard CLASSIFIER_CONFIDENCE_THRESHOLD
+  // floor below, same as every other intent.
+  | 'en_route'
   // P11-001: voice lookup-skill family. Read-only intents — the
   // adapter routes these straight to the `lookup_*` skill instead
   // of the proposal-draft path.
@@ -187,6 +200,7 @@ export const SUPPORTED_INTENTS: readonly IntentType[] = [
   'create_invoice_schedule',
   'respond_to_review',
   'create_standing_instruction',
+  'en_route',
   'lookup_appointments',
   'lookup_invoices',
   'lookup_balance',
@@ -239,8 +253,12 @@ export const SUPPORTED_INTENTS: readonly IntentType[] = [
  *           (additive) — a bounded, safe field edit (status/priority/
  *           title/description) to an existing job, distinct from
  *           create_job / reschedule_appointment / add_note.
+ *   1.4.0 — B5.5 (Part F decision F-3): en_route (additive) — a technician
+ *           announcing "on my way". Not proposal-driving (see the IntentType
+ *           doc comment); a technician's own recorded memo fires the SAME
+ *           audited direct status act the app en-route button executes.
  */
-export const INTENT_TAXONOMY_VERSION = '1.3.0';
+export const INTENT_TAXONOMY_VERSION = '1.4.0';
 
 /**
  * P11-001: convenience predicate the FSM adapter uses to route
@@ -696,14 +714,26 @@ Supported intents (return exactly ONE):
                            Examples: "Cancel tomorrow's 3pm, the customer called out"
                                      "Kill the Johnson appointment"
                                      "Cancel the Wilson job — weather closed us down"
-- "reassign_appointment" — user wants to assign an EXISTING appointment to a
-                           different technician. Extract appointmentReference
-                           and targetTechnicianName.
-                           Examples: "Give Tuesday's Davis job to Mike"
+- "reassign_appointment" — user wants an EXISTING appointment's PRIMARY
+                           technician REPLACED by someone else — the named
+                           person becomes the (sole) one doing the work; who
+                           was on it before comes off. Extract
+                           appointmentReference and targetTechnicianName.
+                           "Assign NAME to JOB" is a replace, not an add — the
+                           verb "assign" hands the whole job to that person.
+                           "instead of" / "instead of me" is an explicit
+                           replacement signal. Examples:
+                                     "Give Tuesday's Davis job to Mike"
                                      "Reassign the 2pm to Sarah"
-- "add_crew_member"     — user wants to ADD a second/helper technician to an
-                           EXISTING appointment (the primary tech stays on).
-                           Extract appointmentReference and targetTechnicianName.
+                                     "Assign Carlos to the Johnson job"
+                                     "Put Carlos on the Garcia job instead of me"
+- "add_crew_member"     — user wants to ADD a second/helper technician
+                           ALONGSIDE the existing one on an EXISTING
+                           appointment — an ATTACH, not a replace: the
+                           primary tech stays on, the named person joins as
+                           help. "Add NAME to JOB" (no replacement language)
+                           is this, not reassign_appointment. Extract
+                           appointmentReference and targetTechnicianName.
                            Examples: "Add Carlos to the Garcia appointment"
                                      "Put Mike on Tuesday's Davis job too"
 - "remove_crew_member"  — user wants to REMOVE a helper/crew technician from an
@@ -870,6 +900,24 @@ Supported intents (return exactly ONE):
                            Examples: "Let the 10am know we're running 30 minutes behind"
                                      "Tell the Miller job we're delayed about an hour"
                                      "Text the customer that we'll be 20 minutes late"
+                           NOT en_route: a stated LATE amount of time is
+                           notify_delay even when the technician is also
+                           about to leave — "I'm running 20 minutes late" is
+                           notify_delay, never en_route.
+- "en_route"            — a TECHNICIAN announces they are DEPARTING NOW for
+                           an appointment ("on my way", "heading out",
+                           "leaving now") — not a delay, not a schedule
+                           change. Extract jobReference ONLY when a specific
+                           job/customer is named; omit it for a bare "on my
+                           way" (the next upcoming appointment today).
+                           Examples: "On my way to the Garcia job"
+                                     "Heading to my next one now"
+                                     "I'm leaving for the Patel install"
+                                     "En route to the 2pm"
+                           NOT en_route: "I'm running 20 minutes late" (a
+                           stated delay, not a departure — notify_delay);
+                           "Move the Garcia job to Thursday" (a schedule
+                           change — reschedule_appointment).
 - "request_feedback"    — user wants to send a post-job feedback / review
                            request to a customer. Customer-facing comms —
                            never auto-execute. Extract the jobReference or

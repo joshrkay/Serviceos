@@ -670,6 +670,8 @@ import {
   registerTechStatusKeywords,
   PgTechStatusTodayRepository,
   InMemoryTechStatusTodayRepository,
+  // B5.5 — the en-route ('omw' / 'on my way') SMS keyword leg.
+  registerEnRouteSmsKeyword,
 } from './sms/tech-status';
 import { createMmsIngestWorker } from './workers/mms-ingest-worker';
 import { PhoneRateLimiter } from './shared/rate-limit/phone-rate-limit';
@@ -2103,6 +2105,12 @@ export function createApp(): AppWithLifecycle {
     // appends to the consent ledger in the same transaction as the customer
     // update + audit event (matching the authenticated route path).
     consentEventRepo,
+    // B1.19 — conversational onboarding_* handlers write through the same
+    // pack-activation/seed + template-creation deps the onboarding + template
+    // routes already use (packActivationRepo, catalogRepo/templateRepo below).
+    packActivationRepo,
+    templateRepo,
+    packSeedDeps: { catalogRepo, templateRepo },
   });
   // U5 / WS3 — fail boot loudly if a voice-reachable persist handler is
   // degraded (would return success without saving). Every voice-reachable
@@ -2269,6 +2277,25 @@ export function createApp(): AppWithLifecycle {
     delayNoticeStateRepo,
     undefined, // internalAlertSink — keep the default no-op sink
     dncRepo, // Story 10.3 — DNC suppression on the SMS delay/en-route path
+  );
+  // B5.5 / Part F decision F-3 — 'omw' / "on my way" from a registered tech
+  // phone fires the SAME audited direct status act as the app en-route
+  // button and the voice leg: `delayNotificationCoordinator` is the exact
+  // same instance createDispatchRoutes wires below as `enRouteCoordinator`.
+  // `overwrite: true` mirrors every other keyword bootstrap in this file so
+  // re-running createApp() (multiple test files / bootstraps in one
+  // process) re-registers without tripping the duplicate-keyword guard.
+  registerEnRouteSmsKeyword(
+    {
+      userRepo,
+      settingsRepo,
+      assignmentRepo,
+      appointmentRepo,
+      jobRepo,
+      enRouteCoordinator: delayNotificationCoordinator,
+      auditRepo,
+    },
+    { overwrite: true },
   );
   const delayNotificationWorker = createDelayNotificationWorker({
     service: delayNotificationService,
@@ -2823,6 +2850,15 @@ export function createApp(): AppWithLifecycle {
     voiceRepo,
     // Same object the assistant-chat router gets — see `lookupAnswerDeps`.
     lookupAnswers: lookupAnswerDeps,
+    // B5.5 — en_route ("on my way") voice leg: userRepo resolves the memo
+    // creator's canonical technician id, assignmentRepo scopes appointment
+    // resolution to that technician's OWN assignments, and
+    // enRouteCoordinator is the SAME coordinator instance the app button
+    // (createDispatchRoutes below) uses, so both legs fire the identical
+    // audited act.
+    userRepo,
+    assignmentRepo,
+    enRouteCoordinator: delayNotificationCoordinator,
   });
   workerRegistry.set(
     voiceActionRouterWorker.type,
