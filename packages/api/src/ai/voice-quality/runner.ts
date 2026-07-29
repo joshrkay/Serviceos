@@ -276,6 +276,50 @@ export function coerceProposalDates(p: Proposal): Proposal {
   };
 }
 
+/**
+ * B8.10 — generic counterpart of `coerceProposalDates` for any fixture row:
+ * JSON fixtures carry ISO strings, but production repos (Pg-hydrated)
+ * always hand handlers real `Date` objects, and downstream code (e.g.
+ * SendEstimateNudgeTaskHandler's age-from-sentAt math) calls `.getTime()`
+ * on them without a defensive `instanceof Date` check — matching every
+ * other seam in this codebase, which assumes the repo layer already did
+ * this coercion. Idempotent: already-`Date` values pass through untouched;
+ * an unparseable/absent value is dropped rather than coerced to `Invalid
+ * Date`.
+ */
+function coerceFixtureDates<T extends object>(
+  row: T,
+  fields: readonly (keyof T & string)[],
+): T {
+  const out = { ...row } as Record<string, unknown>;
+  const src = row as Record<string, unknown>;
+  for (const field of fields) {
+    const v = src[field];
+    if (v instanceof Date) continue;
+    if (typeof v === 'string' || typeof v === 'number') {
+      const d = new Date(v);
+      if (!Number.isNaN(d.getTime())) out[field] = d;
+    }
+  }
+  return out as T;
+}
+
+const ESTIMATE_DATE_FIELDS = [
+  'validUntil',
+  'viewTokenExpiresAt',
+  'sentAt',
+  'firstViewedAt',
+  'acceptedAt',
+  'rejectedAt',
+  'lastRevisedAt',
+  'lastReminderAt',
+  'deletedAt',
+  'createdAt',
+  'updatedAt',
+] as const;
+
+const JOB_DATE_FIELDS = ['completedAt', 'createdAt', 'updatedAt'] as const;
+
 async function seedFixtures(
   script: VoiceQualityScript,
   repos: RepoBundle,
@@ -320,12 +364,12 @@ async function seedFixtures(
   // Leads remain pass-through — no corpus script needs a seeded lead yet.
   if (script.fixtures.jobs) {
     for (const j of script.fixtures.jobs as Job[]) {
-      await repos.jobRepo.create(j);
+      await repos.jobRepo.create(coerceFixtureDates(j, JOB_DATE_FIELDS));
     }
   }
   if (script.fixtures.estimates) {
     for (const e of script.fixtures.estimates as Estimate[]) {
-      await repos.estimateRepo.create(e);
+      await repos.estimateRepo.create(coerceFixtureDates(e, ESTIMATE_DATE_FIELDS));
     }
   }
 }
