@@ -6463,6 +6463,20 @@ export const MIGRATIONS = {
       USING (tenant_id = current_setting('app.current_tenant_id', true)::UUID)
       WITH CHECK (tenant_id = current_setting('app.current_tenant_id', true)::UUID);
   `,
+
+  // B7.5 — spoken parts with qty + unit. `unit` is DESCRIPTIVE ONLY (e.g.
+  // 'each' | 'hour' | 'sq ft' | 'per lb' | 'per gal', mirroring
+  // catalog/catalog-item.ts CatalogUnit) — price stays integer cents,
+  // quantity x unit_price_cents = total_cents is untouched, and no billing
+  // arithmetic reads this column. Nullable, no CHECK: the Zod
+  // `catalogUnitSchema` (packages/shared/src/contracts/money.ts) is the
+  // validation boundary, kept in lockstep with CatalogUnit by money.test.ts —
+  // a DB CHECK would make every future catalog-unit addition a migration.
+  // Additive no-op for existing rows on both line-item tables.
+  '265_line_items_unit': `
+    ALTER TABLE estimate_line_items ADD COLUMN IF NOT EXISTS unit TEXT;
+    ALTER TABLE invoice_line_items ADD COLUMN IF NOT EXISTS unit TEXT;
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

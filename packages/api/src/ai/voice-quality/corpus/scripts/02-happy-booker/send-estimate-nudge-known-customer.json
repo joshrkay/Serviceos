@@ -89,7 +89,7 @@
         "intent": "send_estimate_nudge",
         "proposalType": "send_estimate_nudge",
         "slots": {
-          "customerName": "Khan"
+          "estimateId": "est_02_nudge_1"
         },
         "spokenAnswerMatches": "I've drafted a nudge for the Khan estimate for review; an operator will confirm before it's re-sent.",
         "escalates": false
