@@ -188,8 +188,17 @@ SMS keyword (`tech-status-event.ts:70` = out/sick/unavailable).
 
 **Decision (log it):** voice/SMS legs invoke the **same audited direct status act** as the app
 button (en-route coordinator → `appointment.en_route_triggered` audit → branded ETA SMS), not a
-proposal — matching the existing app-leg pattern for tech status acts. The A5.2 tension is recorded
-in the run log and as a Part F note. No new `JobStatus` value is introduced.
+proposal. Governance rationale, stated fully because a reviewer challenged it: A5.2's invariant
+governs **AI-proposed actions**; a technician saying "on my way" is the human acting directly —
+the exact precedent PRD B10.10 already blesses ("the owner IS the human", direct + audited +
+DNC-gated), and the shipped app button already executes this same act directly. What voice adds is
+classification risk, so: a low-confidence `en_route` classification MUST gate to clarification
+rather than fire (add a confidence-floor test), the intent is registered in the documented
+non-proposal set exactly as `lookup_*` is (so B7.11's drift test recognizes it as intentional, not
+a gap), and the decision is recorded in the run log and Part F. If the reviewer of this run's held
+commits rejects the rationale, the fallback is an auto-approvable capture-class proposal — but
+that is a human call at review time, not a reason to stall the run. No new `JobStatus` value is
+introduced.
 
 **AC:**
 1. **Classifier:** new `en_route` intent in `SUPPORTED_INTENTS` with launch fixtures: "On my way to
