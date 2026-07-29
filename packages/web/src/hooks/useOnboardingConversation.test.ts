@@ -235,4 +235,78 @@ describe('useOnboardingConversation — B1.19 AC-1/AC-2', () => {
       window.localStorage.getItem(`serviceos.onboarding_conversation.session.${OTHER}`),
     ).not.toBeNull();
   });
+
+  // Regression: the generation guard in sendMessage's `finally` used to also
+  // gate setSending(false), so a response arriving after a tenant switch left
+  // `sending` stuck true and the composer disabled for the rest of the session.
+  it('clears sending after a tenant switch mid-send, while still discarding the stale response', async () => {
+    const OTHER = 'tenant-conv-3';
+
+    apiFetchMock.mockResolvedValueOnce(
+      jsonResponse(200, {
+        sessionId: 'sess-a',
+        assistantMessage: 'Opening prompt A',
+        state: 'profile_capture',
+        turnCount: 0,
+        completed: false,
+        proposalIds: [],
+      }),
+    );
+
+    const { result, rerender } = renderHook(
+      ({ tenant }) => useOnboardingConversation(tenant),
+      { initialProps: { tenant: TENANT } },
+    );
+    await waitFor(() => expect(result.current.loading).toBe(false));
+
+    let resolveSend!: (value: unknown) => void;
+    apiFetchMock.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveSend = resolve;
+        }),
+    );
+
+    let sendPromise!: Promise<void>;
+    act(() => {
+      sendPromise = result.current.sendMessage('hello from tenant A');
+    });
+    await waitFor(() => expect(result.current.sending).toBe(true));
+
+    apiFetchMock.mockResolvedValueOnce(
+      jsonResponse(200, {
+        sessionId: 'sess-b',
+        assistantMessage: 'Opening prompt B',
+        state: 'profile_capture',
+        turnCount: 0,
+        completed: false,
+        proposalIds: [],
+      }),
+    );
+
+    rerender({ tenant: OTHER });
+    await waitFor(() => expect(result.current.loading).toBe(false));
+
+    // The tenant-A response finally arrives after the switch.
+    await act(async () => {
+      resolveSend(
+        jsonResponse(200, {
+          sessionId: 'sess-a-stale',
+          assistantMessage: 'stale reply for tenant A',
+          state: 'category_capture',
+          turnCount: 1,
+          completed: false,
+          proposalIds: [],
+        }),
+      );
+      await sendPromise;
+    });
+
+    // The composer is re-enabled…
+    expect(result.current.sending).toBe(false);
+    // …but the stale tenant-A response never got applied to tenant B's state.
+    expect(result.current.history).toEqual([
+      { role: 'assistant', text: 'Opening prompt B', at: expect.any(String) },
+    ]);
+  });
 });

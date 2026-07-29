@@ -284,7 +284,7 @@ export function useOnboardingConversation(tenantId: string): UseOnboardingConver
           if (submittedForTenant !== tenantIdRef.current) return;
           setError(err instanceof Error ? err.message : 'Could not reach the assistant.');
         } finally {
-          if (submittedForTenant === tenantIdRef.current) setSending(false);
+          setSending(false);
         }
       };
 
