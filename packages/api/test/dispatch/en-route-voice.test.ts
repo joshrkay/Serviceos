@@ -13,6 +13,7 @@ import { describe, it, expect, vi } from 'vitest';
 import type { Appointment, AppointmentRepository } from '../../src/appointments/appointment';
 import type { AppointmentAssignment, AssignmentRepository } from '../../src/appointments/assignment';
 import type { Job, JobRepository } from '../../src/jobs/job';
+import type { Customer, CustomerRepository } from '../../src/customers/customer';
 import type { User, UserRepository } from '../../src/users/user';
 import type { VoiceRepository } from '../../src/voice/voice-service';
 import type { EnRouteEnqueuer } from '../../src/dispatch/routes';
@@ -58,17 +59,42 @@ function assignment(overrides: Partial<AppointmentAssignment>): AppointmentAssig
   };
 }
 
+/**
+ * A REAL job summary: what the work is, not who it's for. The customer's name
+ * lives on the customer record (`customerId`), which is the only place a
+ * spoken "the Garcia job" can honestly be resolved from.
+ */
 function job(overrides: Partial<Job>): Job {
   return {
     id: 'job-default',
     tenantId: TENANT,
-    customerId: 'cust-1',
+    customerId: 'cust-garcia',
     locationId: 'loc-1',
     jobNumber: 'JOB-0001',
-    summary: 'Garcia — AC repair',
+    summary: 'AC repair',
     status: 'scheduled',
     priority: 'normal',
+    ...overrides,
   } as Job;
+}
+
+function customer(overrides: Partial<Customer>): Customer {
+  return {
+    id: 'cust-garcia',
+    tenantId: TENANT,
+    firstName: 'Jamie',
+    lastName: 'Garcia',
+    displayName: 'Jamie Garcia',
+    preferredChannel: 'sms',
+    smsConsent: true,
+    isArchived: false,
+    ...overrides,
+  } as Customer;
+}
+
+/** A customer repo over a fixed set, keyed by id — nothing else is reachable. */
+function customerRepoFor(customers: Customer[]): Pick<CustomerRepository, 'findById'> {
+  return { findById: async (_t: string, id: string) => customers.find((c) => c.id === id) ?? null };
 }
 
 describe('B5.5 — resolveEnRouteAppointment (speaker scoping + resolution outcomes)', () => {
@@ -88,15 +114,20 @@ describe('B5.5 — resolveEnRouteAppointment (speaker scoping + resolution outco
     expect(findByTechnician).not.toHaveBeenCalledWith(TENANT, OTHER_TECH);
   });
 
-  it('AC-3: named job with a unique match resolves to that appointment', async () => {
+  it('AC-3: a job named by its CUSTOMER ("the Garcia job") resolves through jobs.customer_id, not the summary', async () => {
     const a1 = assignment({ id: 'a1', appointmentId: 'appt-garcia', technicianId: TECH });
     const appointmentGarcia = appt({ id: 'appt-garcia', jobId: 'job-garcia', scheduledStart: new Date('2026-07-29T16:00:00.000Z') });
-    const jobGarcia = job({ id: 'job-garcia', summary: 'Garcia — AC repair' });
+    // A perfectly ordinary job: the summary says what the work IS. The word
+    // "Garcia" appears NOWHERE on it — only on the customer it links to — so
+    // this can pass only if the resolver traverses job → customer.
+    const jobGarcia = job({ id: 'job-garcia', summary: 'AC repair', customerId: 'cust-garcia' });
+    expect(jobGarcia.summary.toLowerCase()).not.toContain('garcia');
 
     const deps: EnRouteResolutionDeps = {
       assignmentRepo: { findByTechnician: async () => [a1] },
       appointmentRepo: { findById: async (_t, id) => (id === 'appt-garcia' ? appointmentGarcia : null) },
       jobRepo: { findById: async (_t, id) => (id === 'job-garcia' ? jobGarcia : null) },
+      customerRepo: customerRepoFor([customer({ id: 'cust-garcia' })]),
     };
 
     const result = await resolveEnRouteAppointment(deps, {
@@ -111,6 +142,135 @@ describe('B5.5 — resolveEnRouteAppointment (speaker scoping + resolution outco
       appointmentId: 'appt-garcia',
       jobId: 'job-garcia',
       scheduledStart: appointmentGarcia.scheduledStart,
+    });
+  });
+
+  it('AC-3: a reference naming the WORK still matches the job summary (the pre-existing path is preserved)', async () => {
+    const a1 = assignment({ id: 'a1', appointmentId: 'appt-ac', technicianId: TECH });
+    const apptAc = appt({ id: 'appt-ac', jobId: 'job-ac', scheduledStart: new Date('2026-07-29T16:00:00.000Z') });
+    const jobAc = job({ id: 'job-ac', summary: 'AC repair' });
+
+    const deps: EnRouteResolutionDeps = {
+      assignmentRepo: { findByTechnician: async () => [a1] },
+      appointmentRepo: { findById: async (_t, id) => (id === 'appt-ac' ? apptAc : null) },
+      jobRepo: { findById: async (_t, id) => (id === 'job-ac' ? jobAc : null) },
+      // No customerRepo — summary matching must not depend on it.
+    };
+
+    const result = await resolveEnRouteAppointment(deps, {
+      tenantId: TENANT,
+      technicianId: TECH,
+      jobReference: 'the AC repair job',
+      now: NOW,
+    });
+
+    expect(result).toEqual({
+      kind: 'resolved',
+      appointmentId: 'appt-ac',
+      jobId: 'job-ac',
+      scheduledStart: apptAc.scheduledStart,
+    });
+  });
+
+  it('without a customerRepo a customer-named reference degrades to not_found — never a throw, never a guess', async () => {
+    const a1 = assignment({ id: 'a1', appointmentId: 'appt-garcia', technicianId: TECH });
+    const appointmentGarcia = appt({ id: 'appt-garcia', jobId: 'job-garcia' });
+    const jobGarcia = job({ id: 'job-garcia', summary: 'AC repair' });
+
+    const deps: EnRouteResolutionDeps = {
+      assignmentRepo: { findByTechnician: async () => [a1] },
+      appointmentRepo: { findById: async () => appointmentGarcia },
+      jobRepo: { findById: async () => jobGarcia },
+      // customerRepo intentionally omitted — the optional-dependency contract.
+    };
+
+    const result = await resolveEnRouteAppointment(deps, {
+      tenantId: TENANT,
+      technicianId: TECH,
+      jobReference: 'the Garcia job',
+      now: NOW,
+    });
+
+    expect(result).toEqual({ kind: 'not_found' });
+  });
+
+  it('a customerRepo that throws degrades to summary-only matching instead of failing the whole "on my way"', async () => {
+    const a1 = assignment({ id: 'a1', appointmentId: 'appt-ac', technicianId: TECH });
+    const apptAc = appt({ id: 'appt-ac', jobId: 'job-ac' });
+    const jobAc = job({ id: 'job-ac', summary: 'AC repair' });
+
+    const deps: EnRouteResolutionDeps = {
+      assignmentRepo: { findByTechnician: async () => [a1] },
+      appointmentRepo: { findById: async () => apptAc },
+      jobRepo: { findById: async () => jobAc },
+      customerRepo: {
+        findById: async () => {
+          throw new Error('customer lookup exploded');
+        },
+      },
+    };
+
+    // The customer read fails; the summary still answers this reference.
+    await expect(
+      resolveEnRouteAppointment(deps, {
+        tenantId: TENANT,
+        technicianId: TECH,
+        jobReference: 'the AC repair job',
+        now: NOW,
+      }),
+    ).resolves.toEqual({
+      kind: 'resolved',
+      appointmentId: 'appt-ac',
+      jobId: 'job-ac',
+      scheduledStart: apptAc.scheduledStart,
+    });
+
+    // ...and a reference only the customer could have answered is not_found,
+    // not an exception escaping into the voice worker.
+    await expect(
+      resolveEnRouteAppointment(deps, {
+        tenantId: TENANT,
+        technicianId: TECH,
+        jobReference: 'the Garcia job',
+        now: NOW,
+      }),
+    ).resolves.toEqual({ kind: 'not_found' });
+  });
+
+  it('a customer-named reference never reaches a DIFFERENT customer\'s job on the same technician', async () => {
+    const a1 = assignment({ id: 'a1', appointmentId: 'appt-garcia' });
+    const a2 = assignment({ id: 'a2', appointmentId: 'appt-nguyen' });
+    const apptGarcia = appt({ id: 'appt-garcia', jobId: 'job-garcia', scheduledStart: new Date('2026-07-29T16:00:00.000Z') });
+    const apptNguyen = appt({ id: 'appt-nguyen', jobId: 'job-nguyen', scheduledStart: new Date('2026-07-29T18:00:00.000Z') });
+    const jobGarcia = job({ id: 'job-garcia', summary: 'AC repair', customerId: 'cust-garcia' });
+    const jobNguyen = job({ id: 'job-nguyen', summary: 'Furnace tune-up', customerId: 'cust-nguyen' });
+
+    const deps: EnRouteResolutionDeps = {
+      assignmentRepo: { findByTechnician: async () => [a1, a2] },
+      appointmentRepo: {
+        findById: async (_t, id) => (id === 'appt-garcia' ? apptGarcia : id === 'appt-nguyen' ? apptNguyen : null),
+      },
+      jobRepo: {
+        findById: async (_t, id) => (id === 'job-garcia' ? jobGarcia : id === 'job-nguyen' ? jobNguyen : null),
+      },
+      customerRepo: customerRepoFor([
+        customer({ id: 'cust-garcia' }),
+        customer({ id: 'cust-nguyen', firstName: 'Linh', lastName: 'Nguyen', displayName: 'Linh Nguyen' }),
+      ]),
+    };
+
+    const result = await resolveEnRouteAppointment(deps, {
+      tenantId: TENANT,
+      technicianId: TECH,
+      jobReference: 'the Garcia job',
+      now: NOW,
+    });
+
+    expect(result).toEqual({
+      kind: 'resolved',
+      appointmentId: 'appt-garcia',
+      jobId: 'job-garcia',
+      scheduledStart: apptGarcia.scheduledStart,
     });
   });
 
@@ -151,8 +311,9 @@ describe('B5.5 — resolveEnRouteAppointment (speaker scoping + resolution outco
     const a2 = assignment({ id: 'a2', appointmentId: 'appt-2' });
     const appt1 = appt({ id: 'appt-1', jobId: 'job-1', scheduledStart: new Date('2026-07-29T15:00:00.000Z') });
     const appt2 = appt({ id: 'appt-2', jobId: 'job-2', scheduledStart: new Date('2026-07-29T17:00:00.000Z') });
-    const job1 = job({ id: 'job-1', summary: 'Garcia — AC repair' });
-    const job2 = job({ id: 'job-2', summary: 'Garcia — water heater' });
+    // Two jobs for the SAME customer, neither summary naming them.
+    const job1 = job({ id: 'job-1', summary: 'AC repair', customerId: 'cust-garcia' });
+    const job2 = job({ id: 'job-2', summary: 'Water heater replacement', customerId: 'cust-garcia' });
 
     const deps: EnRouteResolutionDeps = {
       assignmentRepo: { findByTechnician: async () => [a1, a2] },
@@ -160,6 +321,7 @@ describe('B5.5 — resolveEnRouteAppointment (speaker scoping + resolution outco
         findById: async (_t, id) => (id === 'appt-1' ? appt1 : id === 'appt-2' ? appt2 : null),
       },
       jobRepo: { findById: async (_t, id) => (id === 'job-1' ? job1 : id === 'job-2' ? job2 : null) },
+      customerRepo: customerRepoFor([customer({ id: 'cust-garcia' })]),
     };
 
     const result = await resolveEnRouteAppointment(deps, {
@@ -374,8 +536,8 @@ describe('B5.5 — handleEnRouteVoiceIntent (router orchestration)', () => {
     const a2 = assignment({ id: 'a2', appointmentId: 'appt-2' });
     const appt1 = appt({ id: 'appt-1', jobId: 'job-1', scheduledStart: new Date('2026-07-29T15:00:00.000Z') });
     const appt2 = appt({ id: 'appt-2', jobId: 'job-2', scheduledStart: new Date('2026-07-29T17:00:00.000Z') });
-    const job1 = job({ id: 'job-1', summary: 'Garcia — AC repair' });
-    const job2 = job({ id: 'job-2', summary: 'Garcia — water heater' });
+    const job1 = job({ id: 'job-1', summary: 'AC repair', customerId: 'cust-garcia' });
+    const job2 = job({ id: 'job-2', summary: 'Water heater replacement', customerId: 'cust-garcia' });
 
     const deps = baseDeps({
       assignmentRepo: { findByTechnician: async () => [a1, a2] },
@@ -383,6 +545,7 @@ describe('B5.5 — handleEnRouteVoiceIntent (router orchestration)', () => {
         findById: async (_t: string, id: string) => (id === 'appt-1' ? appt1 : id === 'appt-2' ? appt2 : null),
       },
       jobRepo: { findById: async (_t: string, id: string) => (id === 'job-1' ? job1 : id === 'job-2' ? job2 : null) },
+      customerRepo: customerRepoFor([customer({ id: 'cust-garcia' })]),
     });
 
     const outcome = await handleEnRouteVoiceIntent(deps, {
@@ -397,6 +560,31 @@ describe('B5.5 — handleEnRouteVoiceIntent (router orchestration)', () => {
       expect(outcome.candidates.every((c) => c.kind === 'appointment')).toBe(true);
     }
     expect(deps.enRouteCoordinator.enqueueEnRouteNotice).not.toHaveBeenCalled();
+  });
+
+  it('forwards customerRepo to the resolver, so "on my way to the Garcia job" fires the act for an ordinarily-named job', async () => {
+    const a1 = assignment({ id: 'a1', appointmentId: 'appt-1', technicianId: TECH });
+    const appt1 = appt({ id: 'appt-1', jobId: 'job-1', scheduledStart: new Date('2026-07-29T15:00:00.000Z') });
+    const job1 = job({ id: 'job-1', summary: 'AC repair', customerId: 'cust-garcia' });
+
+    const deps = baseDeps({
+      assignmentRepo: { findByTechnician: async () => [a1] },
+      appointmentRepo: { findById: async () => appt1 },
+      jobRepo: { findById: async () => job1 },
+      customerRepo: customerRepoFor([customer({ id: 'cust-garcia' })]),
+    });
+
+    const outcome = await handleEnRouteVoiceIntent(deps, {
+      tenantId: TENANT,
+      recordingId: RECORDING_ID,
+      jobReference: 'the Garcia job',
+    });
+
+    expect(outcome.kind).toBe('answered');
+    if (outcome.kind === 'answered') expect(outcome.answer.result).toBe('found');
+    expect(deps.enRouteCoordinator.enqueueEnRouteNotice).toHaveBeenCalledWith(
+      expect.objectContaining({ tenantId: TENANT, appointmentId: 'appt-1' }),
+    );
   });
 
   it('unavailable when the memo creator cannot be resolved to a canonical technician', async () => {

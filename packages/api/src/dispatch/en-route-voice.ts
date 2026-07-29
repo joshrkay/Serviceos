@@ -19,7 +19,8 @@
  */
 import type { AssignmentRepository, AppointmentAssignment } from '../appointments/assignment';
 import type { Appointment, AppointmentRepository, AppointmentStatus } from '../appointments/appointment';
-import type { JobRepository } from '../jobs/job';
+import type { Job, JobRepository } from '../jobs/job';
+import type { Customer, CustomerRepository } from '../customers/customer';
 import type { User, UserRepository } from '../users/user';
 import type { VoiceRepository } from '../voice/voice-service';
 import type { SettingsRepository } from '../settings/settings';
@@ -46,6 +47,17 @@ export interface EnRouteResolutionDeps {
   appointmentRepo: Pick<AppointmentRepository, 'findById'>;
   /** Optional: without it a named-job reference cannot be matched (fails closed to not_found rather than guessing). */
   jobRepo?: Pick<JobRepository, 'findById'>;
+  /**
+   * Optional: resolves an assigned job's LINKED CUSTOMER, which is the only
+   * real path from a spoken PERSON'S NAME to a job. "On my way to the Garcia
+   * job" names the customer, not the work — `jobs.summary` is operator-
+   * authored free text ("AC repair") that usually does NOT contain the
+   * customer's name, and `Job` carries `customerId` separately. Optional by
+   * the same convention as `jobRepo` above (and `SendEstimateNudgeTaskDeps`):
+   * absent — or a repo hiccup — degrades to summary-only matching, exactly
+   * today's behavior, and never throws.
+   */
+  customerRepo?: Pick<CustomerRepository, 'findById'>;
 }
 
 export interface EnRouteResolutionInput {
@@ -73,7 +85,7 @@ export type EnRouteResolution =
   // returned silently; the caller must surface it.
   | { kind: 'not_found' };
 
-/** Strip filler words so "the Garcia job" / "Garcia" both match a job whose summary mentions Garcia. */
+/** Strip filler words so "the Garcia job" / "Garcia" both reduce to the same needle. */
 function normalizeJobPhrase(text: string): string {
   return text
     .toLowerCase()
@@ -82,11 +94,83 @@ function normalizeJobPhrase(text: string): string {
     .trim();
 }
 
-function jobReferenceMatches(jobSummary: string, reference: string): boolean {
-  const needle = normalizeJobPhrase(reference);
-  if (!needle) return false;
-  const haystack = jobSummary.toLowerCase();
+/** `needle` is already normalized by `normalizeJobPhrase` and non-empty. */
+function referenceMatchesText(text: string | undefined, needle: string): boolean {
+  const haystack = (text ?? '').toLowerCase().trim();
+  if (!haystack) return false;
   return haystack.includes(needle) || needle.includes(haystack);
+}
+
+/**
+ * The names a technician could legitimately use for this customer out loud.
+ * `displayName` is what the tenant sees everywhere; `companyName` covers
+ * commercial accounts whose display name is a person; the first/last pair
+ * covers a display name that is a nickname or has been re-formatted.
+ */
+function customerNames(customer: Customer): string[] {
+  return [
+    customer.displayName,
+    customer.companyName,
+    [customer.firstName, customer.lastName].filter(Boolean).join(' '),
+  ].filter((name): name is string => typeof name === 'string' && name.trim().length > 0);
+}
+
+/**
+ * Per-resolution memo for the job/customer reads the named-reference path
+ * needs. The match loop and `toCandidates` both walk the same appointments,
+ * so without this a two-candidate ambiguity issued four job reads for two
+ * jobs. Customer reads are additionally fail-safe: this dep is optional, so a
+ * missing repo or a repo hiccup yields `null` (summary-only matching) rather
+ * than failing the whole "on my way".
+ */
+interface EnRouteEntityLoader {
+  job(jobId: string): Promise<Job | null>;
+  customer(customerId: string): Promise<Customer | null>;
+}
+
+function createEntityLoader(deps: EnRouteResolutionDeps, tenantId: string): EnRouteEntityLoader {
+  const jobs = new Map<string, Promise<Job | null>>();
+  const customers = new Map<string, Promise<Customer | null>>();
+  return {
+    job(jobId: string): Promise<Job | null> {
+      let pending = jobs.get(jobId);
+      if (!pending) {
+        pending = deps.jobRepo ? deps.jobRepo.findById(tenantId, jobId) : Promise.resolve(null);
+        jobs.set(jobId, pending);
+      }
+      return pending;
+    },
+    customer(customerId: string): Promise<Customer | null> {
+      let pending = customers.get(customerId);
+      if (!pending) {
+        pending = deps.customerRepo
+          ? deps.customerRepo.findById(tenantId, customerId).catch(() => null)
+          : Promise.resolve(null);
+        customers.set(customerId, pending);
+      }
+      return pending;
+    },
+  };
+}
+
+/**
+ * Does the spoken reference name THIS appointment's job? Two ways, both real:
+ * the job's own summary ("the AC repair job"), or — the reason B5.5's first
+ * cut was wrong — the job's LINKED CUSTOMER ("the Garcia job", where the
+ * summary is "AC repair" and Garcia is `jobs.customer_id → customers`).
+ */
+async function appointmentMatchesReference(
+  loader: EnRouteEntityLoader,
+  appt: Appointment,
+  needle: string,
+): Promise<boolean> {
+  const job = await loader.job(appt.jobId);
+  if (!job) return false;
+  if (referenceMatchesText(job.summary, needle)) return true;
+  if (!job.customerId) return false;
+  const customer = await loader.customer(job.customerId);
+  if (!customer) return false;
+  return customerNames(customer).some((name) => referenceMatchesText(name, needle));
 }
 
 async function hydrateEligibleAppointments(
@@ -109,13 +193,12 @@ async function hydrateEligibleAppointments(
 }
 
 async function toCandidates(
-  deps: EnRouteResolutionDeps,
-  tenantId: string,
+  loader: EnRouteEntityLoader,
   appts: Appointment[],
 ): Promise<EnRouteCandidate[]> {
   return Promise.all(
     appts.map(async (appt) => {
-      const job = deps.jobRepo ? await deps.jobRepo.findById(tenantId, appt.jobId) : null;
+      const job = await loader.job(appt.jobId);
       return {
         appointmentId: appt.id,
         jobId: appt.jobId,
@@ -139,6 +222,7 @@ export async function resolveEnRouteAppointment(
   input: EnRouteResolutionInput,
 ): Promise<EnRouteResolution> {
   const now = input.now ?? new Date();
+  const loader = createEntityLoader(deps, input.tenantId);
 
   const assignments = await deps.assignmentRepo.findByTechnician(input.tenantId, input.technicianId);
   if (assignments.length === 0) return { kind: 'not_found' };
@@ -150,17 +234,18 @@ export async function resolveEnRouteAppointment(
     // Named job → that appointment. Without a jobRepo we cannot verify a
     // name match, so we fail closed to not_found rather than guess.
     if (!deps.jobRepo) return { kind: 'not_found' };
+    const needle = normalizeJobPhrase(input.jobReference);
+    if (!needle) return { kind: 'not_found' };
     const matches: Appointment[] = [];
     for (const appt of eligible) {
-      const job = await deps.jobRepo.findById(input.tenantId, appt.jobId);
-      if (job && jobReferenceMatches(job.summary, input.jobReference)) matches.push(appt);
+      if (await appointmentMatchesReference(loader, appt, needle)) matches.push(appt);
     }
     if (matches.length === 0) return { kind: 'not_found' };
     if (matches.length === 1) {
       const m = matches[0];
       return { kind: 'resolved', appointmentId: m.id, jobId: m.jobId, scheduledStart: m.scheduledStart };
     }
-    return { kind: 'ambiguous', candidates: await toCandidates(deps, input.tenantId, matches) };
+    return { kind: 'ambiguous', candidates: await toCandidates(loader, matches) };
   }
 
   // Bare "on my way" — the tech's next upcoming appointment TODAY.
@@ -177,7 +262,7 @@ export async function resolveEnRouteAppointment(
   const earliestMs = todays[0].scheduledStart.getTime();
   const tiedForEarliest = todays.filter((a) => a.scheduledStart.getTime() === earliestMs);
   if (tiedForEarliest.length > 1) {
-    return { kind: 'ambiguous', candidates: await toCandidates(deps, input.tenantId, tiedForEarliest) };
+    return { kind: 'ambiguous', candidates: await toCandidates(loader, tiedForEarliest) };
   }
   const next = todays[0];
   return { kind: 'resolved', appointmentId: next.id, jobId: next.jobId, scheduledStart: next.scheduledStart };
@@ -193,6 +278,8 @@ export interface EnRouteVoiceDeps {
   assignmentRepo?: Pick<AssignmentRepository, 'findByTechnician'>;
   appointmentRepo?: Pick<AppointmentRepository, 'findById'>;
   jobRepo?: Pick<JobRepository, 'findById'>;
+  /** Lets a spoken "the Garcia job" resolve through the job's customer — see `EnRouteResolutionDeps`. */
+  customerRepo?: Pick<CustomerRepository, 'findById'>;
   enRouteCoordinator?: EnRouteEnqueuer;
   auditRepo?: AuditRepository;
   settingsRepo?: Pick<SettingsRepository, 'findByTenant'>;
@@ -288,7 +375,12 @@ export async function handleEnRouteVoiceIntent(
   const dayBoundary = await resolveTodayBoundary(deps.settingsRepo, input.tenantId, now);
 
   const resolution = await resolveEnRouteAppointment(
-    { assignmentRepo: deps.assignmentRepo, appointmentRepo: deps.appointmentRepo, jobRepo: deps.jobRepo },
+    {
+      assignmentRepo: deps.assignmentRepo,
+      appointmentRepo: deps.appointmentRepo,
+      jobRepo: deps.jobRepo,
+      customerRepo: deps.customerRepo,
+    },
     {
       tenantId: input.tenantId,
       technicianId: technician.id,

@@ -1361,6 +1361,11 @@ async function processSegment(
         assignmentRepo: deps.assignmentRepo,
         appointmentRepo: deps.appointmentRepo,
         jobRepo: deps.jobRepo,
+        // "on my way to the Garcia job" names the CUSTOMER, not the work —
+        // without this the reference is matched against jobs.summary alone
+        // and a normal job ("AC repair") for Garcia answers "no upcoming
+        // appointment". Already in scope for the telephony FSM (app.ts).
+        customerRepo: deps.customerRepo,
         enRouteCoordinator: deps.enRouteCoordinator,
         auditRepo: deps.auditRepo,
         settingsRepo: deps.settingsRepo,
