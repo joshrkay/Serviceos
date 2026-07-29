@@ -248,7 +248,18 @@ export async function resolveEnRouteAppointment(
     return { kind: 'ambiguous', candidates: await toCandidates(loader, matches) };
   }
 
-  // Bare "on my way" — the tech's next upcoming appointment TODAY.
+  // Bare "on my way" — the tech's CURRENT visit today, meaning the one
+  // closest to right now in either direction.
+  //
+  // Not "earliest today". Once the lower bound widened to the start of the
+  // local day (so a late tech can still say it), earliest-wins would let a
+  // 9am visit still sitting in `scheduled` win a 3pm "on my way" and text
+  // that customer instead of the 4pm one — a notice to the wrong person.
+  // Nearest-to-now is right in both directions and needs no lateness
+  // constant to justify: at 09:15 with a 09:00 and a 14:00, the 09:00 is 15
+  // minutes away and wins (the tech IS running late to it); at 15:00 with a
+  // stale 09:00 and a 16:00, the 16:00 is an hour away and wins. With every
+  // appointment still ahead it degrades to exactly the old behaviour.
   const todays = input.dayBoundary
     ? eligible.filter(
         (appt) =>
@@ -258,11 +269,14 @@ export async function resolveEnRouteAppointment(
     : eligible;
   if (todays.length === 0) return { kind: 'not_found' };
 
-  todays.sort((a, b) => a.scheduledStart.getTime() - b.scheduledStart.getTime());
-  const earliestMs = todays[0].scheduledStart.getTime();
-  const tiedForEarliest = todays.filter((a) => a.scheduledStart.getTime() === earliestMs);
-  if (tiedForEarliest.length > 1) {
-    return { kind: 'ambiguous', candidates: await toCandidates(loader, tiedForEarliest) };
+  const distanceMs = (appt: Appointment) =>
+    Math.abs(appt.scheduledStart.getTime() - now.getTime());
+  todays.sort((a, b) => distanceMs(a) - distanceMs(b));
+  const nearestMs = distanceMs(todays[0]);
+  const tiedForNearest = todays.filter((a) => distanceMs(a) === nearestMs);
+  if (tiedForNearest.length > 1) {
+    // Equidistant either side of now is a genuine coin-flip — ask, never guess.
+    return { kind: 'ambiguous', candidates: await toCandidates(loader, tiedForNearest) };
   }
   const next = todays[0];
   return { kind: 'resolved', appointmentId: next.id, jobId: next.jobId, scheduledStart: next.scheduledStart };

@@ -306,6 +306,70 @@ describe('B5.5 — resolveEnRouteAppointment (speaker scoping + resolution outco
     });
   });
 
+  // Raised in PR review against the day-boundary widening: once every earlier
+  // appointment today became eligible, "earliest wins" could pick a stale
+  // morning visit and text the WRONG customer. The bare path picks the visit
+  // nearest to now in either direction — which also keeps the late-arrival
+  // case the widening existed for.
+  describe('AC-3: bare "on my way" picks the visit nearest to now, in either direction', () => {
+    function depsFor(appts: Appointment[]): EnRouteResolutionDeps {
+      return {
+        assignmentRepo: {
+          findByTechnician: async () =>
+            appts.map((a, i) => assignment({ id: `a-${i}`, appointmentId: a.id })),
+        },
+        appointmentRepo: {
+          findById: async (_t, id) => appts.find((a) => a.id === id) ?? null,
+        },
+      };
+    }
+
+    async function resolveAt(nowIso: string, appts: Appointment[]) {
+      return resolveEnRouteAppointment(depsFor(appts), {
+        tenantId: TENANT,
+        technicianId: TECH,
+        now: new Date(nowIso),
+        dayBoundary: TODAY_BOUNDARY,
+      });
+    }
+
+    it('at 15:00 does NOT pick a stale 09:00 over the real 16:00 visit', async () => {
+      const stale = appt({ id: 'appt-stale', jobId: 'job-stale', scheduledStart: new Date('2026-07-29T09:00:00.000Z') });
+      const real = appt({ id: 'appt-real', jobId: 'job-real', scheduledStart: new Date('2026-07-29T16:00:00.000Z') });
+
+      const result = await resolveAt('2026-07-29T15:00:00.000Z', [stale, real]);
+
+      expect(result).toMatchObject({ kind: 'resolved', appointmentId: 'appt-real' });
+    });
+
+    it('at 09:15 still picks the 09:00 the tech is running late to, over a 14:00', async () => {
+      const overdue = appt({ id: 'appt-overdue', jobId: 'job-overdue', scheduledStart: new Date('2026-07-29T09:00:00.000Z') });
+      const afternoon = appt({ id: 'appt-pm', jobId: 'job-pm', scheduledStart: new Date('2026-07-29T14:00:00.000Z') });
+
+      const result = await resolveAt('2026-07-29T09:15:00.000Z', [overdue, afternoon]);
+
+      expect(result).toMatchObject({ kind: 'resolved', appointmentId: 'appt-overdue' });
+    });
+
+    it('with every visit still ahead, behaves exactly as before — the earliest wins', async () => {
+      const soon = appt({ id: 'appt-soon', jobId: 'job-soon', scheduledStart: new Date('2026-07-29T15:00:00.000Z') });
+      const later = appt({ id: 'appt-later', jobId: 'job-later', scheduledStart: new Date('2026-07-29T18:00:00.000Z') });
+
+      const result = await resolveAt('2026-07-29T14:00:00.000Z', [soon, later]);
+
+      expect(result).toMatchObject({ kind: 'resolved', appointmentId: 'appt-soon' });
+    });
+
+    it('equidistant either side of now is a coin-flip — asks instead of guessing', async () => {
+      const before = appt({ id: 'appt-before', jobId: 'job-before', scheduledStart: new Date('2026-07-29T13:00:00.000Z') });
+      const after = appt({ id: 'appt-after', jobId: 'job-after', scheduledStart: new Date('2026-07-29T15:00:00.000Z') });
+
+      const result = await resolveAt('2026-07-29T14:00:00.000Z', [before, after]);
+
+      expect(result.kind).toBe('ambiguous');
+    });
+  });
+
   it('AC-3: two matching candidates yields ambiguous, never a guess', async () => {
     const a1 = assignment({ id: 'a1', appointmentId: 'appt-1' });
     const a2 = assignment({ id: 'a2', appointmentId: 'appt-2' });
