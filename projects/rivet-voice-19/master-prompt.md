@@ -396,8 +396,12 @@ deferred intents by pinning their current honest-gating behavior — pins, not f
 
 ## DEFINITION OF DONE (self-grade before reporting)
 
-- [ ] Read-only re-measurement of all 19 (Part E Track B method, fresh agent): **14/19 at rung 5** —
-      the focus eight newly green, the prior two still green, B4.7/B7.6/B8.1/B9.1 restored via items 9-10's proofs + Part F entry, the deferred five unchanged
+- [ ] Read-only re-measurement of all 19 (Part E Track B method, fresh agent): **13–14/19 at rung
+      5, per the ratified Part F decisions** — the focus eight newly green (B1.18 contingent on the
+      lock-as-tap amendment), the prior two still green, B4.7/B7.6/B8.1 restored via items 9-10's
+      proofs, B9.1 restored only if its Part F decision ratifies the two-step reading. Report the
+      ACTUAL number with the decisions that produced it; a rejected decision makes the honest
+      result lower, never a blocker to finishing
 - [ ] Every numbered AC above is demonstrably satisfied — each cites the test/file/command a
       reviewer can re-run
 - [ ] C1 payload-contract test exists, covers **all** mapped intents, gates CI, and its
