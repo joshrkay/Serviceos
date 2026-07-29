@@ -125,6 +125,20 @@ describe('OnboardingTeamMemberExecutionHandler', () => {
     );
   });
 
+  // Raised in PR review: issuing the invitation made this handler perform
+  // synchronous network I/O, so it must declare it. Otherwise the executor
+  // takes its DB-only path and holds the advisory lock and a pooled
+  // connection across the Clerk round-trip — and a later rollback erases the
+  // local row while Clerk has already sent the email.
+  it('declares external I/O so the executor runs it outside the transaction', () => {
+    const handler = new OnboardingTeamMemberExecutionHandler(
+      invitationRepo as never,
+      auditRepo as never,
+    );
+
+    expect(handler.performsExternalIo).toBe(true);
+  });
+
   it('refuses without an email rather than inventing an address', async () => {
     const handler = new OnboardingTeamMemberExecutionHandler(
       invitationRepo as never,

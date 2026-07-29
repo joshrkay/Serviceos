@@ -385,6 +385,16 @@ const TEAM_ROLES: ReadonlySet<TeamMemberRole> = new Set(['technician', 'dispatch
 export class OnboardingTeamMemberExecutionHandler implements ExecutionHandler {
   proposalType: ProposalType = 'onboarding_team_member';
 
+  // `inviteTeamMember` awaits Clerk when a secret key is configured, so this
+  // handler is no longer DB-only. Without this flag the executor takes its
+  // Path A branch and holds the advisory lock and a pooled connection across
+  // that network round-trip; worse, a later audit or status write that rolls
+  // back would erase the local `pending_invitations` row while Clerk had
+  // already accepted — an invitation the recipient can act on with nothing
+  // behind it. The flag is the difference between "we recorded an intent"
+  // and "someone has an email".
+  performsExternalIo = true;
+
   constructor(
     private readonly invitationRepo: PendingInvitationRepository | undefined,
     private readonly auditRepo: AuditRepository,
