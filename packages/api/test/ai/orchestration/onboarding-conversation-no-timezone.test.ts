@@ -198,7 +198,16 @@ describe('OnboardingConversationOrchestrator — a tenant with no chosen timezon
 
     expect(settings.payload.timezone).toBe(CHOSEN_TZ);
     expect(missingFieldsFor(settings)).toEqual([]);
-    expect(settings.summary.toLowerCase()).not.toContain('timezone');
+    // "NO extra question" is the claim; the absence of the WORD 'timezone' was
+    // only ever a proxy for it, and the proxy stopped tracking the claim once
+    // the summary began naming the resolved zone (B1.19 AC-5). Assert the
+    // question itself. The sibling proxy in proposal-generation.test.ts needed
+    // the identical correction — a comment there states the reasoning in full.
+    expect(settings.summary).not.toContain('which timezone are you in?');
+    // And the other half of AC-5: a browser-DETECTED zone is exactly the case
+    // where the owner must still see what they are approving, because nothing
+    // in the conversation ever said it out loud.
+    expect(settings.summary).toContain(CHOSEN_TZ);
     const approved = await approveProposal(proposalRepo, TENANT, settings.id, USER, 'owner');
     expect(approved.status).toBe('approved');
   });

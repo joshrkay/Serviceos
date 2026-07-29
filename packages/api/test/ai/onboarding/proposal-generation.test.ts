@@ -312,7 +312,12 @@ describe('P4-EXT-006 — Tenant settings proposal from extraction', () => {
     expect(result!.proposal.payload.hourlyRateCents).toBe(12000);
     expect(Number.isInteger(result!.proposal.payload.hourlyRateCents)).toBe(true);
     expect(missingFieldsFor(result!.proposal)).toEqual([]);
-    expect(result!.proposal.summary.toLowerCase()).not.toContain('hourly labor rate');
+    // Assert the QUESTION is absent, not the words. Found by sweeping after the
+    // timezone proxy in this same file broke: this is the identical shape, and
+    // it would break the identical way the moment the summary starts naming the
+    // captured rate. Not a defect today — pinned precisely so it stays one test
+    // about one claim.
+    expect(result!.proposal.summary).not.toContain('what is your hourly labor rate?');
   });
 
   // ── No timezone ⇒ GATED, never guessed ────────────────────────────────
