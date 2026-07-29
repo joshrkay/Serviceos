@@ -35,6 +35,7 @@ import {
   createTemplate,
 } from '../../templates/estimate-template';
 import { VALID_VERTICAL_TYPES, VerticalType } from '../../shared/vertical-types';
+import { isRuntimeTimezone } from '../../shared/timezone';
 import type { PendingInvitationRepository } from '../../users/pending-invitation';
 import { inviteTeamMember, type ClerkInvitationConfig } from '../../users/invite-team-member';
 import {
@@ -101,6 +102,17 @@ function isVerticalType(v: unknown): v is VerticalType {
 //     in a way that breaks bookings. Written unconditionally (every run of
 //     this handler represents a fresh conversational onboarding) rather
 //     than "only if unset", matching the wizard's own one-shot save.
+//   - timezone: REQUIRED, and gated at draft time by
+//     tenant-settings-proposer.ts so it is always supplied by the time the
+//     card is approvable. This handler previously omitted the key entirely,
+//     leaving tenant_settings.timezone NULL — and `isIdentityDone`
+//     (onboarding/derive-status.ts) did not require it either, so the
+//     conversation reported a completed identity step while
+//     `CreateAppointmentTaskHandler` turned every spoken booking into a
+//     timezone `voice_clarification`, deterministically. Refused (loudly)
+//     rather than defaulted when absent, for the same reason `verticalPacks`
+//     is: the two must stay in step with the gate, and there is NO safe
+//     fallback zone.
 export class OnboardingTenantSettingsExecutionHandler implements ExecutionHandler {
   proposalType: ProposalType = 'onboarding_tenant_settings';
 
@@ -144,6 +156,25 @@ export class OnboardingTenantSettingsExecutionHandler implements ExecutionHandle
       hourlyRateCents = payload.hourlyRateCents;
     }
 
+    // Gated at draft time (tenant-settings-proposer.ts). Refuse rather than
+    // substitute a zone: writing a guess is the Phoenix mis-booking defect,
+    // and writing nothing is the silent one this gate closes. Validated with
+    // `isRuntimeTimezone` — the same predicate CreateAppointmentTaskHandler
+    // gates bookings on — so anything this handler persists is a zone the
+    // booking path will accept.
+    if (!isNonEmptyString(payload.timezone)) {
+      return {
+        success: false,
+        error:
+          'Payload must include a timezone — bookings cannot be scheduled without one. ' +
+          'Set the timezone on the review card first.',
+      };
+    }
+    const timezone = payload.timezone.trim();
+    if (!isRuntimeTimezone(timezone)) {
+      return { success: false, error: `timezone is not a recognized IANA zone: ${timezone}` };
+    }
+
     if (!this.settingsRepo || !this.packActivationRepo) {
       // WS3 — no synthetic success: fail before writing anything so a
       // partially-wired registry can't leave the tenant half-configured.
@@ -161,6 +192,7 @@ export class OnboardingTenantSettingsExecutionHandler implements ExecutionHandle
         // safe to always write (unlike timezone).
         jobBufferMinutes: 30,
         ...(hourlyRateCents !== undefined ? { hourlyRateCents } : {}),
+        timezone,
         bootstrapAiModel: resolveBootstrapAiModel(),
       });
       await this.auditRepo.create(
@@ -175,6 +207,7 @@ export class OnboardingTenantSettingsExecutionHandler implements ExecutionHandle
             businessName: payload.businessName,
             jobBufferMinutes: 30,
             ...(hourlyRateCents !== undefined ? { hourlyRateCents } : {}),
+            timezone,
             source: 'onboarding_conversation',
           },
         }),
@@ -379,7 +412,12 @@ export class OnboardingEstimateTemplateExecutionHandler implements ExecutionHand
 //
 // A gate the operator can fill but that then fails anyway would be worse than
 // no gate at all, so the two must stay in step: if the `email` gate is ever
-// removed, this handler must stop depending on it.
+// removed, this handler must stop depending on it. The same rule is why
+// `onboardingTeamMemberPayloadSchema` now DECLARES `email` with
+// `inviteUserSchema`'s exact rule — while the schema stayed silent about the
+// key, `clearSatisfiedMissingFields` lifted the gate for any non-empty string
+// (`carlos`, a padded address), the UI reported the card satisfied, and
+// execution died in the invitation repository.
 const TEAM_ROLES: ReadonlySet<TeamMemberRole> = new Set(['technician', 'dispatcher', 'owner']);
 
 export class OnboardingTeamMemberExecutionHandler implements ExecutionHandler {
@@ -423,6 +461,14 @@ export class OnboardingTeamMemberExecutionHandler implements ExecutionHandler {
           `Add ${payload.name}'s email on the review card first.`,
       };
     }
+    // Trimmed for the same reason POST /api/users/invitations is: that route
+    // passes `inviteUserSchema.parse(...)`'s OUTPUT, which `.trim()` has
+    // already normalized. `validateProposalPayload` only safeParses (it keeps
+    // the operator's raw string on the payload), so without this the two
+    // paths would disagree about "  a@b.com  " — accepted at edit time by the
+    // schema's trim, then rejected by the invitation repository's anchored
+    // `EMAIL_RE` at execution. Shape of the very defect the schema closes.
+    const email = payload.email.trim();
     if (!this.invitationRepo) {
       return { success: false, error: 'handler_not_wired:invitationRepo' };
     }
@@ -434,7 +480,7 @@ export class OnboardingTeamMemberExecutionHandler implements ExecutionHandler {
       const { invitation, clerkInvitationId } = await inviteTeamMember(
         {
           tenantId: context.tenantId,
-          email: payload.email,
+          email,
           role: payload.role as TeamMemberRole,
           invitedBy: context.executedBy,
         },

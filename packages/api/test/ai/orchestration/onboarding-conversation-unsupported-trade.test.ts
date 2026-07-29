@@ -3,6 +3,7 @@ import { OnboardingConversationOrchestrator } from '../../../src/ai/orchestratio
 import { InMemoryOnboardingSessionRepository } from '../../../src/db/onboarding-session-repository';
 import { InMemoryAuditRepository } from '../../../src/audit/audit';
 import { InMemoryProposalRepository, missingFieldsFor } from '../../../src/proposals/proposal';
+import { InMemorySettingsRepository } from '../../../src/settings/settings';
 import { approveProposal, editProposal } from '../../../src/proposals/actions';
 import type { LLMGateway, LLMRequest, LLMResponse } from '../../../src/ai/gateway/gateway';
 import { MAX_CLARIFICATIONS_PER_STATE } from '../../../src/ai/agents/onboarding/constants';
@@ -106,11 +107,20 @@ describe('OnboardingConversationOrchestrator — unresolved vertical pack must d
   let sessionRepo: InMemoryOnboardingSessionRepository;
   let auditRepo: InMemoryAuditRepository;
   let proposalRepo: InMemoryProposalRepository;
+  let settingsRepo: InMemorySettingsRepository;
 
-  beforeEach(() => {
+  beforeEach(async () => {
     sessionRepo = new InMemoryOnboardingSessionRepository();
     auditRepo = new InMemoryAuditRepository();
     proposalRepo = new InMemoryProposalRepository();
+    // This suite is about the `verticalPacks` gate, so the OTHER two gates
+    // are held open by giving the tenant what they need: an hourly rate on
+    // the pricing script, and a timezone this tenant had ALREADY chosen
+    // (the one non-gating source — see tenant-settings-proposer.ts). Nothing
+    // here guesses a zone; a tenant without one is covered by the dedicated
+    // timezone suite.
+    settingsRepo = new InMemorySettingsRepository();
+    await settingsRepo.upsertIdentityFields(TENANT, { timezone: 'America/Phoenix', bootstrapAiModel: 'test-model' });
   });
 
   function newOrchestrator(gateway: LLMGateway): OnboardingConversationOrchestrator {
@@ -119,6 +129,7 @@ describe('OnboardingConversationOrchestrator — unresolved vertical pack must d
       sessionRepo,
       proposalRepo,
       auditRepo,
+      settingsRepo,
       now: () => NOW,
     });
   }

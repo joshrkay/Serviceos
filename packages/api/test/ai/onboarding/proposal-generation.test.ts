@@ -32,6 +32,20 @@ describe('P4-EXT-006 — Tenant settings proposal from extraction', () => {
     ],
   };
 
+  /**
+   * A zone the tenant had ALREADY chosen (a partly-completed form wizard, or
+   * an account predating migration 263) — the one non-gating source of a
+   * timezone. Passed by every case below that is not specifically about the
+   * missing-timezone gate, because `createTenantSettingsProposal` gates on
+   * `timezone` whenever the tenant has none: no onboarding extractor captures
+   * a zone, and this path must never derive one from the city/state it DID
+   * capture (Scottsdale, AZ is precisely the case the Phoenix mis-booking
+   * postmortem is named after). Without a zone the settings write leaves
+   * `tenant_settings.timezone` NULL and CreateAppointmentTaskHandler turns
+   * every spoken booking into a timezone clarification.
+   */
+  const KNOWN_TZ = 'America/Phoenix';
+
   const baseProfile: BusinessProfileExtraction = {
     businessName: 'Comfort Zone HVAC',
     city: 'Scottsdale',
@@ -117,6 +131,7 @@ describe('P4-EXT-006 — Tenant settings proposal from extraction', () => {
       baseProfile,
       'conv-42',
       hourlyPricing,
+      KNOWN_TZ,
     );
 
     expect(result!.proposal.sourceContext).toEqual({ conversationId: 'conv-42' });
@@ -146,6 +161,7 @@ describe('P4-EXT-006 — Tenant settings proposal from extraction', () => {
       unresolvedProfile,
       'conv-9',
       hourlyPricing,
+      KNOWN_TZ,
     );
 
     expect(result).not.toBeNull();
@@ -168,6 +184,7 @@ describe('P4-EXT-006 — Tenant settings proposal from extraction', () => {
       baseProfile,
       'conv-9',
       hourlyPricing,
+      KNOWN_TZ,
     );
 
     expect(result!.proposal.payload.verticalPacks).toEqual(['hvac']);
@@ -186,6 +203,7 @@ describe('P4-EXT-006 — Tenant settings proposal from extraction', () => {
       lowConfProfile,
       undefined,
       hourlyPricing,
+      KNOWN_TZ,
     );
 
     // The fallback above put 'plumbing' on the payload, so the handler can
@@ -219,6 +237,7 @@ describe('P4-EXT-006 — Tenant settings proposal from extraction', () => {
       baseProfile,
       'conv-9',
       serviceCallOnly,
+      KNOWN_TZ,
     );
 
     // Everything the owner DID say survives, and no rate is invented.
@@ -239,14 +258,14 @@ describe('P4-EXT-006 — Tenant settings proposal from extraction', () => {
       ],
     };
 
-    const result = createTenantSettingsProposal('tenant-1', 'user-1', baseProfile, 'conv-9', flatRateOnly);
+    const result = createTenantSettingsProposal('tenant-1', 'user-1', baseProfile, 'conv-9', flatRateOnly, KNOWN_TZ);
 
     expect(result!.proposal.payload.hourlyRateCents).toBeUndefined();
     expect(missingFieldsFor(result!.proposal)).toEqual(['hourlyRateCents']);
   });
 
   it('no pricing extraction at all (single-shot orchestrator) — gated, never defaulted', () => {
-    const result = createTenantSettingsProposal('tenant-1', 'user-1', baseProfile, 'conv-9');
+    const result = createTenantSettingsProposal('tenant-1', 'user-1', baseProfile, 'conv-9', undefined, KNOWN_TZ);
 
     expect(result!.proposal.payload.hourlyRateCents).toBeUndefined();
     expect(missingFieldsFor(result!.proposal)).toEqual(['hourlyRateCents']);
@@ -271,6 +290,7 @@ describe('P4-EXT-006 — Tenant settings proposal from extraction', () => {
       unresolvedProfile,
       'conv-9',
       serviceCallOnly,
+      KNOWN_TZ,
     );
 
     expect(missingFieldsFor(result!.proposal).sort()).toEqual(['hourlyRateCents', 'verticalPacks']);
@@ -286,12 +306,95 @@ describe('P4-EXT-006 — Tenant settings proposal from extraction', () => {
       baseProfile,
       'conv-9',
       hourlyPricing,
+      KNOWN_TZ,
     );
 
     expect(result!.proposal.payload.hourlyRateCents).toBe(12000);
     expect(Number.isInteger(result!.proposal.payload.hourlyRateCents)).toBe(true);
     expect(missingFieldsFor(result!.proposal)).toEqual([]);
     expect(result!.proposal.summary.toLowerCase()).not.toContain('hourly labor rate');
+  });
+
+  // ── No timezone ⇒ GATED, never guessed ────────────────────────────────
+  //
+  // The LOUDEST-DOWNSTREAM member of the same family. No onboarding
+  // extractor captures a zone, so a "Talk it through" tenant reaches here
+  // with none. Ungated, the card approved and — before the handler was made
+  // to require it — executed SUCCESSFULLY with the key simply omitted,
+  // leaving `tenant_settings.timezone` NULL. `CreateAppointmentTaskHandler`
+  // (ai/tasks/create-appointment-task.ts) then converts EVERY spoken booking
+  // into a `voice_clarification`, deterministically, because it refuses to
+  // guess a zone. There is no safe fallback — not the locale, not the area
+  // code, and not the city/state on this very payload (`baseProfile` is in
+  // Arizona, the state that named the postmortem) — so the answer is a gate.
+
+  it('no stored timezone — gates on timezone instead of drafting an approvable proposal', () => {
+    const result = createTenantSettingsProposal(
+      'tenant-1',
+      'user-1',
+      baseProfile,
+      'conv-9',
+      hourlyPricing,
+    );
+
+    // Everything the owner DID say survives onto the card…
+    expect(result!.proposal.payload.businessName).toBe('Comfort Zone HVAC');
+    expect(result!.proposal.payload.verticalPacks).toEqual(['hvac']);
+    // …and no zone is invented from Scottsdale, AZ.
+    expect(result!.proposal.payload.timezone).toBeUndefined();
+    expect(missingFieldsFor(result!.proposal)).toEqual(['timezone']);
+    expect(result!.proposal.status).toBe('draft');
+    expect(result!.proposal.summary.toLowerCase()).toContain('timezone');
+  });
+
+  it('positive control — a tenant who already chose a zone is NOT asked again (gate cannot pass vacuously)', () => {
+    const result = createTenantSettingsProposal(
+      'tenant-1',
+      'user-1',
+      baseProfile,
+      'conv-9',
+      hourlyPricing,
+      KNOWN_TZ,
+    );
+
+    expect(result!.proposal.payload.timezone).toBe(KNOWN_TZ);
+    expect(missingFieldsFor(result!.proposal)).toEqual([]);
+    expect(result!.proposal.summary.toLowerCase()).not.toContain('timezone');
+  });
+
+  it.each([
+    ['a bogus zone', 'Foo/Bar'],
+    ['an empty string', ''],
+    ['whitespace only', '   '],
+  ])('a stored %s is not trusted onto the payload — the proposal gates and asks', (_label, stored) => {
+    const result = createTenantSettingsProposal(
+      'tenant-1',
+      'user-1',
+      baseProfile,
+      'conv-9',
+      hourlyPricing,
+      stored,
+    );
+
+    expect(result!.proposal.payload.timezone).toBeUndefined();
+    expect(missingFieldsFor(result!.proposal)).toEqual(['timezone']);
+  });
+
+  it('all three gates at once are listed independently', () => {
+    const unresolvedProfile: BusinessProfileExtraction = {
+      ...baseProfile,
+      businessName: 'Blue Water Pool Service',
+      verticalPacks: [],
+      lowConfidenceFields: ['verticalPacks'],
+    };
+
+    const result = createTenantSettingsProposal('tenant-1', 'user-1', unresolvedProfile, 'conv-9');
+
+    expect(missingFieldsFor(result!.proposal).sort()).toEqual([
+      'hourlyRateCents',
+      'timezone',
+      'verticalPacks',
+    ]);
   });
 
   it('uses "My Business" fallback when name is null but verticals exist', () => {

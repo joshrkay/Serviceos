@@ -1,5 +1,6 @@
 import { createProposal, CreateProposalInput, Proposal } from '../../../proposals/proposal';
 import { assessConfidence, ConfidenceMetadata } from '../../guardrails/confidence';
+import { isRuntimeTimezone } from '../../../shared/timezone';
 import {
   BusinessProfileExtraction,
   OnboardingTenantSettingsPayload,
@@ -36,8 +37,40 @@ function pickHourlyRateCents(pricing: PricingExtraction | undefined): number | u
  * get a proposal gated on `hourlyRateCents` rather than one that silently
  * writes NULL.
  *
- * Gated on `verticalPacks` and on `hourlyRateCents` — independently, and
- * both at once when both are absent.
+ * Gated on `verticalPacks`, on `hourlyRateCents`, and on `timezone` —
+ * independently, and all at once when all are absent.
+ *
+ * `timezone` is CAPTURED first and gated only as a fallback — the opposite
+ * emphasis from the two gates above, and deliberately so.
+ *
+ * The problem it solves is the loudest-downstream of the family: ungated and
+ * unwritten, the settings card approved, executed SUCCESSFULLY, and left
+ * `tenant_settings.timezone` NULL — at which point
+ * `CreateAppointmentTaskHandler` (ai/tasks/create-appointment-task.ts) turns
+ * EVERY spoken booking into a `voice_clarification`, deterministically,
+ * because its required-timezone gate can never be satisfied.
+ *
+ * But a gate alone would have been the WRONG shape here, because the form
+ * wizard does not ask this question either: `BusinessIdentityInputSchema`
+ * documents `timezone` as "the client sends browser-detected tz", and
+ * IdentityStep pre-fills a select from
+ * `Intl.DateTimeFormat().resolvedOptions().timeZone`. A wizard owner never
+ * types an IANA name. Gating the conversational path unconditionally would
+ * have traded a silent defect for a guaranteed extra manual step and made
+ * "Talk it through" strictly worse than the form — so `knownTimezone` carries
+ * the SAME browser-detected value the wizard's client already sends
+ * (TurnRequest.clientTimezone), or the zone the tenant previously chose.
+ *
+ * What is never allowed is a value this server made up. `knownTimezone` is
+ * re-validated with `isRuntimeTimezone` here rather than trusted, and an
+ * absent or unrecognized one falls through to the GATE — never to a default.
+ * There is no safe fallback zone: not `America/New_York` (migration 263
+ * dropped exactly that column default), not the area code, and not the city
+ * and state the profile extractor DID capture — Arizona is the counterexample
+ * that named the Phoenix mis-booking postmortem. So the gate is what happens
+ * when capture fails, and it is reachable in practice: a non-browser client
+ * (telephony onboarding), a browser that reports a zone Intl does not know,
+ * or a client that has not been updated to send the field.
  *
  * The `hourlyRateCents` gate closes the SILENT half of the same B1.20
  * requirement the `verticalPacks` gate closes loudly. `PricingExtractor`
@@ -81,16 +114,19 @@ function pickHourlyRateCents(pricing: PricingExtraction | undefined): number | u
  * cannot work. The handler's refusal is the correct behaviour and is
  * deliberately untouched — the two must stay in step.
  *
- * Both gate keys are REAL flat keys of the emitted payload and of
+ * All three gate keys are REAL flat keys of the emitted payload and of
  * `onboardingTenantSettingsPayloadSchema` (proposals/contracts/onboarding.ts),
  * which is what makes them fillable: `editProposal` re-validates the merged
  * payload against that schema and then `clearSatisfiedMissingFields`
  * (proposals/missing-fields.ts) drops a gate only when that exact flat key
  * was edited to a non-empty value. A synthetic key (`hourlyRate`,
- * `pricing.hourlyRate`) would be permanently unfillable. And because the
- * schema still applies, the gate cannot clear onto a payload the handler
- * would refuse: `verticalPacks` must be a non-empty array of known
- * verticals, `hourlyRateCents` a non-negative integer (cents).
+ * `pricing.hourlyRate`, `identity.timezone`) would be permanently unfillable.
+ * And because the schema still applies, the gate cannot clear onto a payload
+ * the handler would refuse: `verticalPacks` must be a non-empty array of
+ * known verticals, `hourlyRateCents` a non-negative integer (cents), and
+ * `timezone` a zone `isRuntimeTimezone` accepts — the same predicate the
+ * booking handler gates on, so filling this gate cannot hand the owner a
+ * different failure one layer down.
  */
 export function createTenantSettingsProposal(
   tenantId: string,
@@ -98,12 +134,25 @@ export function createTenantSettingsProposal(
   extraction: BusinessProfileExtraction,
   conversationId?: string,
   pricing?: PricingExtraction,
+  /**
+   * The tenant's already-stored zone, else the client-detected one their
+   * browser reported — the same two sources, in the same order, the wizard's
+   * IdentityStep uses. Never a value this server derived.
+   */
+  knownTimezone?: string,
 ): TenantSettingsProposerResult | null {
   if (!extraction.businessName && extraction.verticalPacks.length === 0) {
     return null;
   }
 
   const hourlyRateCents = pickHourlyRateCents(pricing);
+  // Trimmed and re-validated here rather than trusted: a stored zone can
+  // predate migration 263's validation, and an unrecognized one must gate
+  // (ask) rather than ride through to a payload the handler will refuse.
+  const timezone =
+    typeof knownTimezone === 'string' && isRuntimeTimezone(knownTimezone.trim())
+      ? knownTimezone.trim()
+      : undefined;
 
   const payload: OnboardingTenantSettingsPayload = {
     businessName: extraction.businessName ?? 'My Business',
@@ -113,6 +162,7 @@ export function createTenantSettingsProposal(
       .filter((v) => v.confidence >= 0.5)
       .map((v) => v.type),
     ...(hourlyRateCents !== undefined ? { hourlyRateCents } : {}),
+    ...(timezone !== undefined ? { timezone } : {}),
   };
 
   if (payload.verticalPacks.length === 0 && extraction.verticalPacks.length > 0) {
@@ -135,6 +185,9 @@ export function createTenantSettingsProposal(
   // Absent (never 0, never a guess) ⇒ hourly_rate_cents would stay NULL and
   // deriveOnboardingStatus would send the owner back to the identity form.
   if (payload.hourlyRateCents === undefined) missingFields.push('hourlyRateCents');
+  // Absent (never guessed from city/state/locale) ⇒ tenant_settings.timezone
+  // stays NULL and every spoken booking gates as a timezone clarification.
+  if (payload.timezone === undefined) missingFields.push('timezone');
 
   const summary = `Configure tenant: ${payload.businessName}` +
     (payload.verticalPacks.length > 0
@@ -142,6 +195,9 @@ export function createTenantSettingsProposal(
       : ' — which trade? (HVAC, plumbing, electrical, painting)') +
     (payload.hourlyRateCents === undefined
       ? ' — what is your hourly labor rate?'
+      : '') +
+    (payload.timezone === undefined
+      ? ' — which timezone are you in? (e.g. America/Phoenix)'
       : '');
 
   const input: CreateProposalInput = {

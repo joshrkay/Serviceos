@@ -22,6 +22,7 @@ import {
   type OnboardingSession,
 } from '../../db/onboarding-session-repository';
 import { ProposalRepository, createProposal, CreateProposalInput } from '../../proposals/proposal';
+import type { SettingsRepository } from '../../settings/settings';
 import { createTenantSettingsProposal } from '../tasks/onboarding/tenant-settings-proposer';
 import { assembleEstimateTemplates } from '../tasks/onboarding/template-assembler';
 import { transition, STATE_OPENING_PROMPT } from '../agents/onboarding/transitions';
@@ -55,6 +56,16 @@ export interface OnboardingConversationDeps {
   sessionRepo: OnboardingSessionRepository;
   proposalRepo: ProposalRepository;
   auditRepo: AuditRepository;
+  /**
+   * Read-only, and used for exactly one thing: discovering whether the tenant
+   * has ALREADY chosen an IANA timezone (a partly-completed form wizard, or an
+   * account predating migration 263). If they have, the tenant-settings
+   * proposal carries it and is not gated on `timezone`; if they have not — the
+   * normal "Talk it through" case — the proposal is gated and the operator
+   * supplies it on the review card. Never used to derive or guess a zone.
+   * Optional: unwired callers simply always gate.
+   */
+  settingsRepo?: Pick<SettingsRepository, 'findByTenant'>;
   /** Injectable clock. Defaults to `() => new Date()`. */
   now?: () => Date;
 }
@@ -67,6 +78,20 @@ export interface TurnRequest {
   /** User utterance. Optional only when starting a new session — the
    *  caller may want the opening prompt before any text is entered. */
   userMessage?: string;
+  /**
+   * The CLIENT-detected IANA zone — the conversational equivalent of what the
+   * form wizard's IdentityStep already sends on PUT /identity
+   * (`detectBrowserTimezone()`, i.e. `Intl.DateTimeFormat().resolvedOptions().timeZone`).
+   * Parity, not a new question: the wizard's owner never types a zone either,
+   * their browser supplies it. Send it on every turn — the proposals are
+   * emitted on the terminal turn, so that is the one that must carry it.
+   *
+   * NOT trusted blindly and never a fallback: `createTenantSettingsProposal`
+   * re-validates it with `isRuntimeTimezone` and, if it is missing or bogus,
+   * GATES the settings proposal instead of writing a guess. This value can
+   * only ever come from the operator's own device.
+   */
+  clientTimezone?: string;
 }
 
 export interface TurnResponse {
@@ -387,6 +412,25 @@ export class OnboardingConversationOrchestrator {
 
     // 1. Tenant settings (business profile).
     if (ex.businessProfile) {
+      // Timezone precedence mirrors the form wizard's IdentityStep exactly:
+      // a zone the tenant ALREADY chose wins (IdentityStep hydrates the
+      // select from stored settings — `if (body.timezone) setTimezone(...)`),
+      // otherwise the client-detected one the browser supplies. Neither is a
+      // guess by this server; if both are absent the settings proposal GATES
+      // and asks, because there is no safe fallback zone (Phoenix mis-booking
+      // postmortem, migration 263).
+      //
+      // The stored read is failure-soft: a hiccup falls through to the client
+      // value, and ultimately to the gate — never to a default.
+      let storedTimezone: string | undefined;
+      if (this.deps.settingsRepo) {
+        try {
+          storedTimezone = (await this.deps.settingsRepo.findByTenant(req.tenantId))?.timezone;
+        } catch {
+          storedTimezone = undefined;
+        }
+      }
+      const knownTimezone = storedTimezone ?? req.clientTimezone;
       const settings = createTenantSettingsProposal(
         req.tenantId,
         req.userId,
@@ -397,6 +441,7 @@ export class OnboardingConversationOrchestrator {
         // never ran, which createTenantSettingsProposal handles as "no
         // rate captured", never a guess.
         ex.pricing,
+        knownTimezone,
       );
       if (settings) {
         // createTenantSettingsProposal returns a Proposal + payload tuple
@@ -458,9 +503,10 @@ export class OnboardingConversationOrchestrator {
           createdBy: req.userId,
           // Gated so this can never be approved-then-failed. Adding a team
           // member means sending an invitation, which needs an email address
-          // the spoken capture cannot produce — and no invitation endpoint
-          // exists yet (routes/users.ts: "PR 3 will add POST /api/users").
-          // OnboardingTeamMemberExecutionHandler therefore always refuses.
+          // the spoken capture cannot produce. The operator supplies it on the
+          // review card; `OnboardingTeamMemberExecutionHandler` then creates a
+          // real `pending_invitations` row through `inviteTeamMember` — the
+          // same service POST /api/users/invitations calls.
           //
           // Without this gate the card approved and then failed at execution:
           // the same shape as the dictated-note defect (B7.4) that this whole
@@ -468,6 +514,14 @@ export class OnboardingConversationOrchestrator {
           // re-measurement. The name and role stay on the payload so nothing
           // the owner said is lost, and the review card now reads as "needs an
           // email" instead of inviting a tap that cannot work.
+          //
+          // `email` is a REAL flat key of `onboardingTeamMemberPayloadSchema`
+          // (proposals/contracts/onboarding.ts) — which is what makes the gate
+          // both fillable AND unfillable-with-garbage: `editProposal`
+          // re-validates the merged payload against that schema before
+          // `clearSatisfiedMissingFields` lifts the key, so `carlos` is
+          // refused at edit time instead of clearing the gate and dying in the
+          // invitation repository at execution.
           missingFields: ['email'],
         });
       }

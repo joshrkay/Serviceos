@@ -13,6 +13,8 @@ import type { LLMGateway, LLMRequest, LLMResponse } from '../../../src/ai/gatewa
 const TENANT = 'tenant-no-rate-1';
 const USER = 'user-no-rate-1';
 const NOW = new Date('2026-07-29T15:00:00Z');
+/** A zone this tenant explicitly chose earlier — never derived, never a default. */
+const TIMEZONE = 'America/Phoenix';
 
 /**
  * B1.20 — the SILENT twin of the `verticalPacks` gate covered by the sibling
@@ -122,11 +124,19 @@ describe('OnboardingConversationOrchestrator — a captured price that is not an
   let sessionRepo: InMemoryOnboardingSessionRepository;
   let auditRepo: InMemoryAuditRepository;
   let proposalRepo: InMemoryProposalRepository;
+  let tenantSettingsRepo: InMemorySettingsRepository;
 
-  beforeEach(() => {
+  beforeEach(async () => {
     sessionRepo = new InMemoryOnboardingSessionRepository();
     auditRepo = new InMemoryAuditRepository();
     proposalRepo = new InMemoryProposalRepository();
+    // This suite is about the `hourlyRateCents` gate. The tenant here had
+    // ALREADY chosen a timezone (the one non-gating source — see
+    // tenant-settings-proposer.ts), so the independent `timezone` gate stays
+    // out of the way. Nothing guesses a zone; the dedicated timezone suite
+    // covers the tenant who has none.
+    tenantSettingsRepo = new InMemorySettingsRepository();
+    await tenantSettingsRepo.upsertIdentityFields(TENANT, { timezone: TIMEZONE, bootstrapAiModel: 'test-model' });
   });
 
   /**
@@ -142,6 +152,7 @@ describe('OnboardingConversationOrchestrator — a captured price that is not an
       sessionRepo,
       proposalRepo,
       auditRepo,
+      settingsRepo: tenantSettingsRepo,
       now: () => NOW,
     });
     const opened = await orch.turn({ tenantId: TENANT, userId: USER });
@@ -284,11 +295,16 @@ describe('OnboardingConversationOrchestrator — a captured price that is not an
     const written = await settingsRepo.findByTenant(TENANT);
     expect(written?.hourlyRateCents).toBe(12000);
 
+    // Read back from the repo, never hand-supplied: the timezone below is
+    // whatever the handler actually persisted, so this cannot pass if the
+    // handler stopped writing it.
+    expect(written?.timezone).toBe(TIMEZONE);
     const status = deriveOnboardingStatus(factsFrom({
       businessName: written?.businessName ?? null,
       businessHours: { monday: { start: '08:00', end: '17:00' } },
       jobBufferMinutes: written?.jobBufferMinutes ?? null,
       hourlyRateCents: written?.hourlyRateCents ?? null,
+      timezone: written?.timezone ?? null,
     }));
     expect(status.steps.find((s) => s.id === 'identity')?.status).toBe('done');
     expect(status.currentStep).not.toBe('identity');
@@ -328,6 +344,7 @@ describe('OnboardingConversationOrchestrator — a captured price that is not an
       businessHours: { monday: { start: '08:00', end: '17:00' } },
       jobBufferMinutes: written?.jobBufferMinutes ?? null,
       hourlyRateCents: written?.hourlyRateCents ?? null,
+      timezone: written?.timezone ?? null,
     }));
     expect(status.currentStep).toBe('identity');
   });

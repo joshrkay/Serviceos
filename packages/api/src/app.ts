@@ -5550,6 +5550,10 @@ export function createApp(): AppWithLifecycle {
         sessionRepo: onboardingSessionRepo,
         proposalRepo,
         auditRepo,
+        // Read-only, and only so a tenant who ALREADY chose a timezone (a
+        // partly-completed form wizard) is not asked for it again on the
+        // gated tenant-settings card. Never a source of a guessed zone.
+        settingsRepo,
       }),
     }),
   );

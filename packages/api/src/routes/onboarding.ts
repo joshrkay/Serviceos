@@ -105,6 +105,15 @@ export function createOnboardingRouter(deps: OnboardingRouterDeps): Router {
                 settings?.jobBufferMinutes ?? (softIdentityDone ? 15 : null),
               hourlyRateCents:
                 settings?.hourlyRateCents ?? (softIdentityDone ? 15000 : null),
+              // Soft-filled like the three above, and for the same
+              // CRM-unlock reason — `isIdentityDone` requires a zone because
+              // a tenant without one cannot book. This is NOT the defaulting
+              // migration 263 outlawed: nothing here is written to
+              // tenant_settings (there is no pool), so no appointment can be
+              // misbooked by it. Per settings.ts's rule, a consumer that
+              // merely DISPLAYS may substitute; one that BOOKS must gate —
+              // and the booking path still reads the real (absent) column.
+              timezone: settings?.timezone ?? (softIdentityDone ? 'UTC' : null),
             },
             packActivated: false,
             twilioStatus: null,

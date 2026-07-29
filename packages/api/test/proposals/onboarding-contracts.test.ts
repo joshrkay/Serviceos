@@ -172,6 +172,57 @@ describe('Onboarding proposal contract validation', () => {
       });
       expect(result.valid).toBe(false);
     });
+
+    // `email` is the proposal's missingFields gate key
+    // (orchestration/onboarding-conversation.ts). While the schema stayed
+    // silent about it, `editProposal` accepted ANY non-empty string —
+    // `clearSatisfiedMissingFields` lifted the gate, approval proceeded, and
+    // `PendingInvitationRepository.create`'s anchored EMAIL_RE then refused
+    // the address at execution: `execution_failed` after the UI said the gate
+    // was satisfied. The rule below is `inviteUserSchema`'s
+    // (routes/users.ts) verbatim, so the review-card path and
+    // POST /api/users/invitations cannot drift on what an address is.
+    it('accepts a well-formed email on the gate key', () => {
+      const result = validateProposalPayload('onboarding_team_member', {
+        name: 'Carlos',
+        role: 'technician',
+        email: 'carlos@example.com',
+      });
+      expect(result.valid).toBe(true);
+    });
+
+    it.each([
+      ['a bare first name (the exact typo from the review)', 'carlos'],
+      ['a missing domain', 'carlos@'],
+      ['a missing local part', '@example.com'],
+      ['an internal space', 'car los@example.com'],
+      ['an empty string', ''],
+      ['over 320 characters', `${'a'.repeat(320)}@example.com`],
+    ])('rejects %s as an email', (_label, email) => {
+      const result = validateProposalPayload('onboarding_team_member', {
+        name: 'Carlos',
+        role: 'technician',
+        email,
+      });
+      expect(result.valid).toBe(false);
+    });
+
+    it('accepts a whitespace-padded address (trimmed, like inviteUserSchema)', () => {
+      const result = validateProposalPayload('onboarding_team_member', {
+        name: 'Carlos',
+        role: 'technician',
+        email: '  carlos@example.com  ',
+      });
+      expect(result.valid).toBe(true);
+    });
+
+    it('email stays OPTIONAL so voice can still draft the gated proposal', () => {
+      const result = validateProposalPayload('onboarding_team_member', {
+        name: 'Carlos',
+        role: 'technician',
+      });
+      expect(result.valid).toBe(true);
+    });
   });
 
   describe('onboarding_schedule', () => {

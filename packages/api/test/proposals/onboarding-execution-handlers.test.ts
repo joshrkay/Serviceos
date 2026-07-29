@@ -235,7 +235,14 @@ describe('OnboardingTenantSettingsExecutionHandler', () => {
     return new OnboardingTenantSettingsExecutionHandler(settingsRepo as never, packRepo, audit);
   }
 
-  const base = { businessName: 'Acme Plumbing', verticalPacks: ['plumbing'] };
+  // The shape of an APPROVABLE payload: the timezone gate
+  // (tenant-settings-proposer.ts) has been filled by the operator, so every
+  // proposal that reaches this handler carries one.
+  const base = {
+    businessName: 'Acme Plumbing',
+    verticalPacks: ['plumbing'],
+    timezone: 'America/Phoenix',
+  };
 
   it('writes identity fields and activates each spoken pack', async () => {
     const result = await handler().execute(
@@ -257,16 +264,60 @@ describe('OnboardingTenantSettingsExecutionHandler', () => {
         // The same default IdentityStep pre-fills, so a silent form user and a
         // silent conversation user land on the identical column value.
         jobBufferMinutes: 30,
+        // The operator-supplied zone reaches the SAME column PUT /identity
+        // writes. Without it the tenant derives identity-done but every spoken
+        // booking gates as a timezone clarification.
+        timezone: 'America/Phoenix',
       }),
     );
     expect(activatePackWithSeed).toHaveBeenCalledTimes(2);
   });
 
-  it('never writes a timezone it was not told', async () => {
-    await handler().execute(proposalOf('onboarding_tenant_settings', base), context);
+  // Still "never writes a timezone it was not told" — the refusal is just
+  // LOUD now instead of a silent omission. A silent omission left
+  // tenant_settings.timezone NULL while the proposal reported success, and
+  // CreateAppointmentTaskHandler then refused every spoken booking. There is
+  // no safe fallback zone (Phoenix mis-booking postmortem, migration 263), so
+  // the only correct behaviours are "refuse" or "be told" — never "default".
+  it('refuses, and writes nothing at all, when it was not told a timezone', async () => {
+    const { timezone: _omitted, ...noTimezone } = base;
+    const result = await handler().execute(
+      proposalOf('onboarding_tenant_settings', noTimezone),
+      context,
+    );
 
-    const [, fields] = settingsRepo.upsertIdentityFields.mock.calls[0];
-    expect(fields).not.toHaveProperty('timezone');
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('timezone');
+    expect(settingsRepo.upsertIdentityFields).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['a bogus zone', 'Foo/Bar'],
+    ['an empty string', ''],
+    ['whitespace only', '   '],
+    ['a non-string', 42],
+  ])('refuses %s as a timezone rather than writing it', async (_label, tz) => {
+    const result = await handler().execute(
+      proposalOf('onboarding_tenant_settings', { ...base, timezone: tz }),
+      context,
+    );
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('timezone');
+    expect(settingsRepo.upsertIdentityFields).not.toHaveBeenCalled();
+  });
+
+  it('trims a padded zone so the stored value is one isRuntimeTimezone accepts', async () => {
+    const result = await handler().execute(
+      proposalOf('onboarding_tenant_settings', { ...base, timezone: '  America/Phoenix  ' }),
+      context,
+    );
+
+    expect(result.success).toBe(true);
+    expect(settingsRepo.upsertIdentityFields).toHaveBeenCalledWith(
+      TENANT,
+      expect.objectContaining({ timezone: 'America/Phoenix' }),
+    );
   });
 
   // A wrong hourly rate is a money defect, so an absent one is left untouched

@@ -154,6 +154,15 @@ export interface OnboardingTenantSettingsPayload {
    * money defect, not just a UX gap).
    */
   hourlyRateCents?: number;
+  /**
+   * The tenant's IANA zone. No onboarding extractor captures one and this
+   * path never derives one from city/state or locale (a wrong zone silently
+   * misbooks — Phoenix postmortem, migration 263), so it is present only
+   * when the tenant had ALREADY chosen a zone or the operator supplied it on
+   * the gated review card. Required by
+   * `OnboardingTenantSettingsExecutionHandler`.
+   */
+  timezone?: string;
 }
 
 export interface OnboardingServiceCategoryPayload {

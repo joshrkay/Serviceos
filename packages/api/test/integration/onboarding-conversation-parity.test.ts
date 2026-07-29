@@ -15,10 +15,12 @@
  *     registry (createExecutionHandlerRegistry, real Pg repos — not a
  *     hand-rolled handler).
  *
- * Fields both paths can produce are asserted equal. Fields where the
- * conversational engine has no capture channel (timezone; team-member
- * accounts) are called out explicitly below rather than silently
- * skipped — see the "cannot assert" comments and the B1.19 report.
+ * Fields both paths can produce are asserted equal — including `timezone`,
+ * which BOTH clients supply from the browser (the wizard on PUT /identity,
+ * the conversation on each turn). Fields where the conversational engine
+ * genuinely has no capture channel (team-member accounts) are called out
+ * explicitly below rather than silently skipped — see the "cannot assert"
+ * comments and the B1.19 report.
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import express, { Request, Response, NextFunction } from 'express';
@@ -210,7 +212,19 @@ describe('B1.19 — onboarding parity: conversation vs. wizard, real Postgres', 
       now: () => new Date('2026-06-17T15:00:00Z'),
     });
 
-    const opened = await orchestrator.turn({ tenantId: conversationTenant.tenantId, userId: conversationTenant.userId });
+    // `clientTimezone` is the SAME browser-detected value the wizard's
+    // IdentityStep sends on PUT /identity above — sent on every turn because
+    // the terminal turn is the one that emits the proposals. This is what
+    // makes timezone a parity field rather than an extra question the
+    // conversational owner would have to answer and the wizard owner would
+    // not (BusinessIdentityInputSchema: "the client sends browser-detected
+    // tz"). The server still never derives one — see the no-zone client
+    // below.
+    const opened = await orchestrator.turn({
+      tenantId: conversationTenant.tenantId,
+      userId: conversationTenant.userId,
+      clientTimezone: TIMEZONE,
+    });
     let last = opened;
     // Six high-confidence turns: profile → category → pricing → team →
     // schedule → tools, landing in `review`.
@@ -220,6 +234,7 @@ describe('B1.19 — onboarding parity: conversation vs. wizard, real Postgres', 
         userId: conversationTenant.userId,
         sessionId: opened.sessionId,
         userMessage: `Turn ${i}`,
+        clientTimezone: TIMEZONE,
       });
     }
     expect(last.state).toBe('review');
@@ -229,6 +244,7 @@ describe('B1.19 — onboarding parity: conversation vs. wizard, real Postgres', 
       userId: conversationTenant.userId,
       sessionId: opened.sessionId,
       userMessage: 'looks good',
+      clientTimezone: TIMEZONE,
     });
     expect(confirmation.state).toBe('completed');
     expect(confirmation.proposalIds.length).toBeGreaterThan(0);
@@ -338,28 +354,89 @@ describe('B1.19 — onboarding parity: conversation vs. wizard, real Postgres', 
     expect(conversationSettings?.jobBufferMinutes).toBe(JOB_BUFFER_MINUTES);
   });
 
-  it('timezone: the wizard path stores the EXPLICITLY CONFIRMED value; the conversational path — which has no capture channel for timezone at all — never guesses one', async () => {
+  it('timezone: BOTH paths store the client-supplied zone, in the same column, as the same value', async () => {
+    // Full parity, and the point of the fix. Neither owner types an IANA
+    // name: the wizard's client sends `detectBrowserTimezone()` on PUT
+    // /identity, and the conversation's client sends the same value on each
+    // turn. Before this the conversational handler omitted the column
+    // entirely — identity still derived "done", and every spoken booking
+    // then gated as a timezone clarification.
     const wizardSettings = await settingsRepo.findByTenant(wizardTenant.tenantId);
     const conversationSettings = await settingsRepo.findByTenant(conversationTenant.tenantId);
 
-    // Positive assertion: the wizard's stored zone is EXACTLY what was
-    // confirmed, never a substituted default.
     expect(wizardSettings?.timezone).toBe(TIMEZONE);
+    expect(conversationSettings?.timezone).toBe(TIMEZONE);
 
-    // CANNOT ASSERT full parity here: none of the five onboarding_*
-    // extractors/payloads carry a timezone (see B1.19 report). The
-    // honest assertion available on the conversation side is the
-    // negative half of the AC — it is never guessed. NULL is the only
-    // representable "not chosen" per migration 263 / the timezone
-    // no-fallback rule (routes/onboarding.ts PUT /identity), so raw SQL
-    // (not the repo mapper, which folds NULL into `undefined`) confirms
-    // the column itself, not just the TS projection.
+    // Raw SQL (not the repo mapper, which folds NULL into `undefined`) so
+    // this is about the column, not the TS projection.
+    const raw = await pool.query<{ timezone: string | null }>(
+      'SELECT timezone FROM tenant_settings WHERE tenant_id = ANY($1)',
+      [[wizardTenant.tenantId, conversationTenant.tenantId]],
+    );
+    expect(raw.rows.map((r) => r.timezone)).toEqual([TIMEZONE, TIMEZONE]);
+  });
+
+  it('timezone: a conversation whose client supplies NO zone GATES instead of guessing one', async () => {
+    // The other half of the no-default rule, against real Postgres. A
+    // non-browser client (or one reporting a zone Intl does not know) leaves
+    // the server with nothing — and the server must ask, not substitute. The
+    // profile script is in Mesa, AZ: the city/state ARE on the payload and
+    // are still not turned into a zone, because Arizona is the case the
+    // Phoenix mis-booking postmortem is named after.
+    const noZoneTenant = await createTestTenant(pool);
+    const noZoneProposalRepo = new InMemoryProposalRepository();
+    const orchestrator = new OnboardingConversationOrchestrator({
+      gateway: scriptedGateway(CONVERSATION_SCRIPTS),
+      sessionRepo: new PgOnboardingSessionRepository(pool),
+      proposalRepo: noZoneProposalRepo,
+      auditRepo,
+      settingsRepo,
+      now: () => new Date('2026-06-17T15:00:00Z'),
+    });
+
+    const opened = await orchestrator.turn({
+      tenantId: noZoneTenant.tenantId,
+      userId: noZoneTenant.userId,
+    });
+    let last = opened;
+    for (let i = 0; i < 6; i++) {
+      last = await orchestrator.turn({
+        tenantId: noZoneTenant.tenantId,
+        userId: noZoneTenant.userId,
+        sessionId: opened.sessionId,
+        userMessage: `Turn ${i}`,
+      });
+    }
+    const confirmation = await orchestrator.turn({
+      tenantId: noZoneTenant.tenantId,
+      userId: noZoneTenant.userId,
+      sessionId: opened.sessionId,
+      userMessage: 'looks good',
+    });
+    expect(confirmation.completed).toBe(true);
+
+    const emitted = await Promise.all(
+      confirmation.proposalIds.map((id) => noZoneProposalRepo.findById(noZoneTenant.tenantId, id)),
+    );
+    const gated = emitted.find((p) => p?.proposalType === 'onboarding_tenant_settings');
+    expect(gated).toBeTruthy();
+    // The city/state the owner DID give are on the card…
+    expect(gated!.payload.city).toBe(CITY);
+    expect(gated!.payload.state).toBe(STATE);
+    // …and were still not converted into a zone.
+    expect(gated!.payload.timezone).toBeUndefined();
+    expect(missingFieldsFor(gated!)).toContain('timezone');
+    await expect(
+      approveProposal(noZoneProposalRepo, noZoneTenant.tenantId, gated!.id, noZoneTenant.userId, 'owner'),
+    ).rejects.toThrow(/unfilled required fields/i);
+
+    // Nothing was written for this tenant, so the column is NULL rather than
+    // a plausible-looking guess.
     const raw = await pool.query<{ timezone: string | null }>(
       'SELECT timezone FROM tenant_settings WHERE tenant_id = $1',
-      [conversationTenant.tenantId],
+      [noZoneTenant.tenantId],
     );
-    expect(raw.rows[0].timezone).toBeNull();
-    expect(conversationSettings?.timezone).toBeUndefined();
+    expect(raw.rows[0]?.timezone ?? null).toBeNull();
   });
 
   it('vertical pack: both tenants have an active plumbing pack_activations row', async () => {
@@ -458,6 +535,31 @@ describe('B1.19 — onboarding parity: conversation vs. wizard, real Postgres', 
     // and approval then has to succeed on its own merits.
     const target = teamProposals[0]!;
     expect(missingFieldsFor(target)).toContain('email');
+
+    // …and it is NOT fillable with something that only LOOKS filled. While
+    // `onboardingTeamMemberPayloadSchema` did not declare `email`, the
+    // strip-mode schema had nothing to say about it and
+    // `clearSatisfiedMissingFields` lifted the gate for any non-empty string:
+    // a typo like `carlos`, or a padded address, cleared the card, approval
+    // succeeded, and `pending_invitations`' anchored EMAIL_RE then refused it
+    // at execution — `execution_failed` after the UI said the gate was
+    // satisfied. The schema now carries `inviteUserSchema`'s exact rule, so
+    // the refusal happens at EDIT time and the operator is simply asked again.
+    for (const bad of ['carlos', 'carlos@', '@example.com']) {
+      await expect(
+        editProposal(
+          proposalRepo,
+          target.tenantId,
+          target.id,
+          conversationTenant.userId,
+          'owner',
+          { email: bad },
+        ),
+      ).rejects.toThrow(/Invalid payload after edit/i);
+    }
+    const stillGated = await proposalRepo.findById(target.tenantId, target.id);
+    expect(missingFieldsFor(stillGated!)).toContain('email');
+    expect(stillGated!.payload.email).toBeUndefined();
 
     const { proposal: edited } = await editProposal(
       proposalRepo,
@@ -603,18 +705,22 @@ describe('B1.19 — onboarding parity: conversation vs. wizard, real Postgres', 
     const wizardStatus = deriveOnboardingStatus(wizardFacts);
     expect(wizardStatus.steps.find((s) => s.id === 'identity')?.status).toBe('done');
 
-    // Regression pin (must not regress): the identity step derives DONE
-    // WITHOUT a timezone — deriveOnboardingStatus's isIdentityDone check
-    // never required one, and the conversational path still never guesses
-    // one (see the timezone test above). Confirms the fix didn't
-    // accidentally start defaulting timezone to make this test pass.
+    // The columns behind that outcome, so a failure is diagnosable. NOTE the
+    // change from the previous version of this test, which pinned
+    // `timezone IS NULL` as correct: identity deriving DONE with no zone was
+    // the P1 defect, not the invariant. `isIdentityDone` now requires a zone
+    // (a tenant without one cannot book at all — CreateAppointmentTaskHandler
+    // gates every spoken booking), and the zone below is the CLIENT-supplied
+    // one, not a server default — the no-zone client above proves the server
+    // still refuses to invent it.
     expect(conversationFacts.identity.jobBufferMinutes).toBe(JOB_BUFFER_MINUTES);
     expect(conversationFacts.identity.hourlyRateCents).toBe(HOURLY_RATE_CENTS);
+    expect(conversationFacts.identity.timezone).toBe(TIMEZONE);
     const rawTimezone = await pool.query<{ timezone: string | null }>(
       'SELECT timezone FROM tenant_settings WHERE tenant_id = $1',
       [conversationTenant.tenantId],
     );
-    expect(rawTimezone.rows[0].timezone).toBeNull();
+    expect(rawTimezone.rows[0].timezone).toBe(TIMEZONE);
   });
 
   it('cross-tenant negative: a third tenant sees none of the conversation tenant\'s config', async () => {
