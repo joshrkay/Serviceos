@@ -2,11 +2,33 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import {
   OnboardingTeamMemberExecutionHandler,
   OnboardingScheduleExecutionHandler,
+  OnboardingTenantSettingsExecutionHandler,
+  OnboardingServiceCategoryExecutionHandler,
+  OnboardingEstimateTemplateExecutionHandler,
 } from '../../src/proposals/execution/onboarding-handlers';
+import { activatePackWithSeed } from '../../src/onboarding/activate-pack-with-seed';
+import { createTemplate } from '../../src/templates/estimate-template';
 import type { ExecutionContext } from '../../src/proposals/execution/handlers';
 import type { Proposal, ProposalType } from '../../src/proposals/proposal';
 
+// These two are the shared write paths the form wizard's own routes call.
+// Mocking them is the point: the property under test is that the spoken path
+// REACHES them, rather than growing a parallel implementation beside them.
+vi.mock('../../src/onboarding/activate-pack-with-seed', () => ({
+  activatePackWithSeed: vi.fn().mockResolvedValue({ status: 'activated' }),
+}));
+vi.mock('../../src/templates/estimate-template', () => ({
+  createTemplate: vi.fn().mockResolvedValue({ id: 'tpl_1' }),
+}));
+
 const TENANT = '11111111-1111-1111-1111-111111111111';
+
+// The two module mocks above are shared across every case, so call history has
+// to be dropped between them or a "never called" assertion passes on stale
+// calls from an earlier test.
+beforeEach(() => {
+  vi.clearAllMocks();
+});
 
 const context: ExecutionContext = {
   tenantId: TENANT,
@@ -183,5 +205,295 @@ describe('OnboardingScheduleExecutionHandler', () => {
     expect(result.success).toBe(false);
     expect(result.error).toContain('tue');
     expect(settingsRepo.upsertIdentityFields).not.toHaveBeenCalled();
+  });
+});
+
+describe('OnboardingTenantSettingsExecutionHandler', () => {
+  let settingsRepo: { upsertIdentityFields: ReturnType<typeof vi.fn> };
+  const packRepo = {} as never;
+
+  beforeEach(() => {
+    vi.mocked(activatePackWithSeed).mockResolvedValue({ status: 'activated' } as never);
+    settingsRepo = { upsertIdentityFields: vi.fn().mockResolvedValue(undefined) };
+  });
+
+  function handler(audit = auditRepoStub()) {
+    return new OnboardingTenantSettingsExecutionHandler(settingsRepo as never, packRepo, audit);
+  }
+
+  const base = { businessName: 'Acme Plumbing', verticalPacks: ['plumbing'] };
+
+  it('writes identity fields and activates each spoken pack', async () => {
+    const result = await handler().execute(
+      proposalOf('onboarding_tenant_settings', {
+        ...base,
+        city: 'Austin',
+        state: 'TX',
+        verticalPacks: ['plumbing', 'hvac'],
+      }),
+      context,
+    );
+
+    expect(result.success).toBe(true);
+    expect(settingsRepo.upsertIdentityFields).toHaveBeenCalledWith(
+      TENANT,
+      expect.objectContaining({
+        businessName: 'Acme Plumbing',
+        serviceAreaText: 'Austin, TX',
+        // The same default IdentityStep pre-fills, so a silent form user and a
+        // silent conversation user land on the identical column value.
+        jobBufferMinutes: 30,
+      }),
+    );
+    expect(activatePackWithSeed).toHaveBeenCalledTimes(2);
+  });
+
+  it('never writes a timezone it was not told', async () => {
+    await handler().execute(proposalOf('onboarding_tenant_settings', base), context);
+
+    const [, fields] = settingsRepo.upsertIdentityFields.mock.calls[0];
+    expect(fields).not.toHaveProperty('timezone');
+  });
+
+  // A wrong hourly rate is a money defect, so an absent one is left untouched
+  // rather than defaulted — unlike jobBufferMinutes.
+  it('omits hourlyRateCents when the conversation never captured one', async () => {
+    await handler().execute(proposalOf('onboarding_tenant_settings', base), context);
+
+    const [, fields] = settingsRepo.upsertIdentityFields.mock.calls[0];
+    expect(fields).not.toHaveProperty('hourlyRateCents');
+  });
+
+  it.each([
+    ['a float', 12550.5],
+    ['a negative', -100],
+    ['a string', '12550'],
+  ])('refuses %s hourlyRateCents rather than writing it', async (_label, rate) => {
+    const result = await handler().execute(
+      proposalOf('onboarding_tenant_settings', { ...base, hourlyRateCents: rate }),
+      context,
+    );
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('hourlyRateCents');
+    expect(settingsRepo.upsertIdentityFields).not.toHaveBeenCalled();
+  });
+
+  it('passes an integer-cents rate through', async () => {
+    const result = await handler().execute(
+      proposalOf('onboarding_tenant_settings', { ...base, hourlyRateCents: 12550 }),
+      context,
+    );
+
+    expect(result.success).toBe(true);
+    expect(settingsRepo.upsertIdentityFields).toHaveBeenCalledWith(
+      TENANT,
+      expect.objectContaining({ hourlyRateCents: 12550 }),
+    );
+  });
+
+  it.each([
+    ['no businessName', { verticalPacks: ['plumbing'] }, 'businessName'],
+    ['no packs', { businessName: 'Acme', verticalPacks: [] }, 'verticalPacks'],
+    ['an unknown pack', { businessName: 'Acme', verticalPacks: ['underwater-basketweaving'] }, 'verticalPacks'],
+  ])('refuses a payload with %s', async (_label, payload, expected) => {
+    const result = await handler().execute(
+      proposalOf('onboarding_tenant_settings', payload as Record<string, unknown>),
+      context,
+    );
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain(expected);
+    expect(settingsRepo.upsertIdentityFields).not.toHaveBeenCalled();
+  });
+
+  it('stamps the approver’s real role on the audit event', async () => {
+    const audit = { create: vi.fn().mockResolvedValue(undefined) };
+    await new OnboardingTenantSettingsExecutionHandler(
+      settingsRepo as never,
+      packRepo,
+      audit as never,
+    ).execute(proposalOf('onboarding_tenant_settings', base), {
+      ...context,
+      executedByRole: 'dispatcher',
+    });
+
+    expect(audit.create).toHaveBeenCalledWith(
+      expect.objectContaining({ eventType: 'tenant.identity_set', actorRole: 'dispatcher' }),
+    );
+  });
+
+  it('surfaces a locked pack activation instead of reporting success', async () => {
+    vi.mocked(activatePackWithSeed).mockResolvedValue({ status: 'locked' } as never);
+
+    const result = await handler().execute(proposalOf('onboarding_tenant_settings', base), context);
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('PACK_ACTIVATION_IN_PROGRESS');
+  });
+
+  it('refuses rather than half-configuring the tenant when a repo is missing', async () => {
+    const unwired = new OnboardingTenantSettingsExecutionHandler(
+      undefined,
+      packRepo,
+      auditRepoStub(),
+    );
+
+    expect(unwired.isFullyWired()).toBe(false);
+    const result = await unwired.execute(proposalOf('onboarding_tenant_settings', base), context);
+    expect(result.success).toBe(false);
+    expect(result.error).toBe('handler_not_wired:settingsRepo');
+  });
+});
+
+describe('OnboardingServiceCategoryExecutionHandler', () => {
+  beforeEach(() => {
+    vi.mocked(activatePackWithSeed).mockResolvedValue({ status: 'activated' } as never);
+  });
+
+  function handler() {
+    return new OnboardingServiceCategoryExecutionHandler(
+      {} as never,
+      {} as never,
+      auditRepoStub(),
+    );
+  }
+
+  const payload = { verticalType: 'plumbing', categoryId: 'drain-cleaning', displayName: 'Drains' };
+
+  it('activates the category’s vertical pack', async () => {
+    const result = await handler().execute(
+      proposalOf('onboarding_service_category', payload),
+      context,
+    );
+
+    expect(result.success).toBe(true);
+    expect(result.resultEntityId).toBe('plumbing');
+    expect(activatePackWithSeed).toHaveBeenCalledWith(
+      expect.objectContaining({ tenantId: TENANT, packId: 'plumbing' }),
+      expect.anything(),
+    );
+  });
+
+  it.each([
+    ['an unknown verticalType', { ...payload, verticalType: 'nope' }, 'verticalType'],
+    ['no categoryId', { verticalType: 'plumbing', displayName: 'Drains' }, 'categoryId'],
+  ])('refuses a payload with %s', async (_label, bad, expected) => {
+    const result = await handler().execute(
+      proposalOf('onboarding_service_category', bad as Record<string, unknown>),
+      context,
+    );
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain(expected);
+    expect(activatePackWithSeed).not.toHaveBeenCalled();
+  });
+});
+
+describe('OnboardingEstimateTemplateExecutionHandler', () => {
+  let templateRepo: Record<string, unknown>;
+
+  beforeEach(() => {
+    vi.mocked(createTemplate).mockResolvedValue({ id: 'tpl_1' } as never);
+    templateRepo = {};
+  });
+
+  function handler(audit = auditRepoStub()) {
+    return new OnboardingEstimateTemplateExecutionHandler(templateRepo as never, audit);
+  }
+
+  const payload = {
+    verticalType: 'plumbing',
+    categoryId: 'drain-cleaning',
+    templateName: 'Standard drain clear',
+    lineItems: [{ description: 'Labor', defaultUnitPriceCents: 15000, category: 'labor' }],
+  };
+
+  it('creates the template through the same domain function the templates route uses', async () => {
+    const result = await handler().execute(
+      proposalOf('onboarding_estimate_template', payload),
+      context,
+    );
+
+    expect(result.success).toBe(true);
+    expect(result.resultEntityId).toBe('tpl_1');
+    const [input] = vi.mocked(createTemplate).mock.calls[0];
+    expect(input).toMatchObject({
+      tenantId: TENANT,
+      verticalType: 'plumbing',
+      name: 'Standard drain clear',
+    });
+    expect(input.lineItemTemplates).toEqual([
+      expect.objectContaining({ description: 'Labor', defaultUnitPriceCents: 15000, category: 'labor' }),
+    ]);
+  });
+
+  it('stamps the approver’s real role rather than asserting owner', async () => {
+    await handler().execute(proposalOf('onboarding_estimate_template', payload), {
+      ...context,
+      executedByRole: 'dispatcher',
+    });
+
+    expect(vi.mocked(createTemplate).mock.calls[0][3]).toBe('dispatcher');
+  });
+
+  it('defaults an unrecognized category to other and quantity to 1', async () => {
+    await handler().execute(
+      proposalOf('onboarding_estimate_template', {
+        ...payload,
+        lineItems: [{ description: 'Mystery', defaultUnitPriceCents: 100, category: 'sorcery' }],
+      }),
+      context,
+    );
+
+    expect(vi.mocked(createTemplate).mock.calls[0][0].lineItemTemplates[0]).toMatchObject({
+      category: 'other',
+      defaultQuantity: 1,
+    });
+  });
+
+  it.each([
+    ['a float price', 150.5],
+    ['a negative price', -1],
+    ['a string price', '15000'],
+  ])('refuses %s rather than persisting it', async (_label, price) => {
+    const result = await handler().execute(
+      proposalOf('onboarding_estimate_template', {
+        ...payload,
+        lineItems: [{ description: 'Labor', defaultUnitPriceCents: price }],
+      }),
+      context,
+    );
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('defaultUnitPriceCents');
+    expect(createTemplate).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['no line items', { ...payload, lineItems: [] }, 'line item'],
+    ['a line item with no description', { ...payload, lineItems: [{ defaultUnitPriceCents: 1 }] }, 'description'],
+    ['no templateName', { verticalType: 'plumbing', categoryId: 'c', lineItems: payload.lineItems }, 'templateName'],
+  ])('refuses a payload with %s', async (_label, bad, expected) => {
+    const result = await handler().execute(
+      proposalOf('onboarding_estimate_template', bad as Record<string, unknown>),
+      context,
+    );
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain(expected);
+    expect(createTemplate).not.toHaveBeenCalled();
+  });
+
+  it('refuses when the template repo is not wired', async () => {
+    const unwired = new OnboardingEstimateTemplateExecutionHandler(undefined, auditRepoStub());
+
+    expect(unwired.isFullyWired()).toBe(false);
+    const result = await unwired.execute(
+      proposalOf('onboarding_estimate_template', payload),
+      context,
+    );
+    expect(result.success).toBe(false);
+    expect(result.error).toBe('handler_not_wired:templateRepo');
   });
 });

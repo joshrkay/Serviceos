@@ -353,7 +353,7 @@ export class OnboardingEstimateTemplateExecutionHandler implements ExecutionHand
         },
         this.templateRepo,
         this.auditRepo,
-        ONBOARDING_ACTOR_ROLE,
+        actorRoleFor(context),
       );
       return { success: true, resultEntityId: created.id };
     } catch (err) {
