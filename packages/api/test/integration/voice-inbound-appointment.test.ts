@@ -227,5 +227,14 @@ describe('Integration — inbound voice appointment-setting (real Postgres)', ()
       [tenant.tenantId, booked!.id],
     );
     expect(auditRows.rows).toHaveLength(1);
+
+    // Cross-tenant negative. Found by the rivet-voice-19 re-measurement: the
+    // reschedule and cancel legs each carry one, but this — the CREATE leg of
+    // the same conjunctive requirement (B4.7, book/move/cancel by speaking) —
+    // asserted the row and the audit event without ever proving the booking is
+    // invisible to another tenant. Same scoped-read form the sibling voice
+    // execution proofs use.
+    const other = await createTestTenant(pool);
+    expect(await appointmentRepo.findById(other.tenantId, booked!.id)).toBeNull();
   });
 });
