@@ -137,6 +137,34 @@ as a known follow-up for the next phase.
 | P-7 | B5.3 | The staleness gate on reassignment (`checkSchedulingProposalFreshness`) compares against `proposal.sourceContext.{status,scheduledStart,technicianId}`, but nothing in the voice draft path ever snapshots those onto a reassign proposal — so for a genuinely voice-drafted proposal the gate executes and always reports "fresh": a structural no-op. | **Not fixed — logged.** Found while writing B5.3's AC-5 proof. The test proves the mechanism genuinely blocks when a stale baseline exists (stamped manually), but does **not** claim the drafting path populates one. Outside B5.3's declared scope; recorded rather than quietly counted as a working safeguard. |
 | P-3 | Item 9 → B4.7 | `RescheduleAppointmentTaskHandler` and `CancelAppointmentTaskHandler` never read `existingEntities.appointmentId`; they re-resolved via `resolveActiveAppointmentId`, which only answers when the tenant has **exactly one** active appointment. In any shop with two jobs on the books, "Move the Garcia job to Thursday at 10" gated as unresolvable — even though the router had already disambiguated the reference and threaded the correct id. Found empirically: a shared two-appointment fixture made the second test fail with `Payload must include a valid appointmentId`. | **Fixed** — resolver-verified id now wins, single-active fallback retained for the SCH-03 first-turn case. Five regression tests, the key one using the two-appointment fixture that used to fail. Same defect class as B5.3's reassign gate. |
 
+## B7.5 — INCOMPLETE (implementation cancelled mid-run)
+
+**The user stopped the B7.5 agent while it was working.** I did not relaunch it, per the
+instruction that accompanies a user-cancelled agent. So B7.5 is the one focus item that did not
+ship, and this is stated plainly rather than absorbed into a summary.
+
+**What landed** (commit `b5595dc`, labeled `[HELD: money-contract]`): migration `265_line_items_unit`
+adding a nullable, descriptive `unit TEXT` to `estimate_line_items` and `invoice_line_items`, plus
+its immutability-snapshot entry. Verified additive; no RLS policy touched.
+
+**What did NOT land** — verified by grep, not assumed:
+- `unit` on the shared `lineItemSchema` (`packages/shared/src/contracts/money.ts`) — **absent**
+- `unit` on the billing-engine `LineItem` — **absent**
+- resolver threading (`catalog-resolver.ts:558` still drops the catalog unit), classifier
+  structured part mentions, document targeting, the `spoken-parts-line-item` integration test,
+  the C1 rows, and the UI rendering — **none of them**
+
+**Consequence for scoring:** B7.5 was rung 0 in Part E. It is now at best rung 1–2 — a column
+exists that nothing writes or reads. **It cannot score rung 5**, so the re-measurement's ceiling
+drops by one regardless of the Part F decisions.
+
+**Reviewer decision needed on the held commit.** The migration is correctly shaped for the design
+(nullable, no DB CHECK so the Zod enum stays the validation boundary), so keeping it means a
+resumed B7.5 has its first layer already in place. But migrations are immutable once merged: a
+column nothing writes will sit there permanently. Either merge it and finish B7.5 soon, or drop
+the commit — I have deliberately not made that call unilaterally, because it is a
+ship-an-orphan-schema-object decision and the commit is already held for human review.
+
 ## Definition of done — status before the re-measurement
 
 Stated honestly, including where this run deviated from the letter of the prompt and why.
