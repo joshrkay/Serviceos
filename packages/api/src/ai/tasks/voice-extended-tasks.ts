@@ -158,6 +158,25 @@ async function resolveActiveAppointmentId(
   return active.length === 1 ? active[0].id : undefined;
 }
 
+/**
+ * The appointment id the router's entity resolver already verified, if any.
+ *
+ * Found-by-proof (rivet-voice-19 item 9): the scheduling tasks used to skip
+ * this seam entirely and re-resolve from scratch via
+ * `resolveActiveAppointmentId`, which can only answer when the tenant has
+ * exactly ONE active appointment. So in any shop with two jobs on the books,
+ * "Move the Garcia job to Thursday at 10" could not resolve — even though the
+ * router had already disambiguated "the Garcia job" and threaded the correct
+ * id onto `existingEntities.appointmentId`
+ * (workers/voice-action-router.ts:1490-1508). The verified id must win; the
+ * single-active-appointment fallback stays for the references the resolver
+ * could not answer (the SCH-03 first-turn case it was built for).
+ */
+function resolvedAppointmentIdFrom(context: TaskContext): string | undefined {
+  const id = context.existingEntities?.appointmentId;
+  return isUuid(id) ? id : undefined;
+}
+
 function baseSourceContext(context: TaskContext): Record<string, unknown> | undefined {
   if (!context.conversationId) return undefined;
   return { conversationId: context.conversationId };
@@ -223,13 +242,15 @@ export class RescheduleAppointmentTaskHandler implements TaskHandler {
     const payload: Record<string, unknown> = {};
     const missing: string[] = [];
 
-    // Resolve the concrete appointment id from the caller's active
-    // appointment (the classifier only gives a natural-language ref).
-    const resolvedId = await resolveActiveAppointmentId(
-      this.appointmentRepo,
-      context.tenantId,
-      { customerId: context.customerId, jobRepo: this.jobRepo },
-    );
+    // Prefer the id the entity resolver already verified for the spoken
+    // reference; only fall back to the caller's single-active-appointment
+    // lookup when it could not answer.
+    const resolvedId =
+      resolvedAppointmentIdFrom(context) ??
+      (await resolveActiveAppointmentId(this.appointmentRepo, context.tenantId, {
+        customerId: context.customerId,
+        jobRepo: this.jobRepo,
+      }));
     if (resolvedId) {
       payload.appointmentId = resolvedId;
     } else if (ee.appointmentReference) {
@@ -322,13 +343,14 @@ export class CancelAppointmentTaskHandler implements TaskHandler {
     };
     const missing: string[] = [];
 
-    // Resolve the concrete appointment id from the caller's active
-    // appointment; fall back to the natural-language reference.
-    const resolvedId = await resolveActiveAppointmentId(
-      this.appointmentRepo,
-      context.tenantId,
-      { customerId: context.customerId, jobRepo: this.jobRepo },
-    );
+    // Resolver-verified id first (see resolvedAppointmentIdFrom), then the
+    // caller's single-active-appointment lookup, then the free-text gate.
+    const resolvedId =
+      resolvedAppointmentIdFrom(context) ??
+      (await resolveActiveAppointmentId(this.appointmentRepo, context.tenantId, {
+        customerId: context.customerId,
+        jobRepo: this.jobRepo,
+      }));
     if (resolvedId) {
       payload.appointmentId = resolvedId;
     } else if (ee.appointmentReference) {
