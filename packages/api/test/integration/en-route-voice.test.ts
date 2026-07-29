@@ -160,7 +160,10 @@ describe('Integration — "on my way" by voice (real Postgres)', () => {
       customerId,
       locationId,
       jobNumber: 'JOB-EN-ROUTE-1',
-      summary: 'Garcia — AC repair',
+      // An ordinary summary: what the work IS. "Garcia" appears nowhere on
+      // the job row — only on the customer it links to — so "the Garcia job"
+      // can only reach this appointment through jobs.customer_id → customers.
+      summary: 'AC repair',
       status: 'scheduled',
       priority: 'normal',
       createdBy: tenantA.userId,
@@ -209,6 +212,19 @@ describe('Integration — "on my way" by voice (real Postgres)', () => {
     };
   }
 
+  it('the seeded job is an ORDINARY one — "the Garcia job" is unreachable from its summary, so only the customer traversal can answer it', async () => {
+    // The fixture is arranged against the weak match, not for it. This is the
+    // assertion that makes the three proofs below non-vacuous: if a future
+    // change re-plants the customer's name in the summary, this fails first.
+    const job = await jobRepo.findById(tenantA.tenantId, jobId);
+    expect(job).not.toBeNull();
+    expect(job!.summary.toLowerCase()).not.toContain('garcia');
+    expect(job!.jobNumber.toLowerCase()).not.toContain('garcia');
+    // ...while the relationship the resolver now walks does reach the name.
+    const customer = await customerRepo.findById(tenantA.tenantId, job!.customerId);
+    expect(customer?.displayName).toBe('Jamie Garcia');
+  });
+
   it('AC-4.1/4.2: a voice-triggered en-route emits the audit event (TECH actor) + a customer ETA SMS dispatch row', async () => {
     const outcome = await handleEnRouteVoiceIntent(
       {
@@ -217,6 +233,7 @@ describe('Integration — "on my way" by voice (real Postgres)', () => {
         assignmentRepo,
         appointmentRepo,
         jobRepo,
+        customerRepo,
         enRouteCoordinator: coordinator,
         auditRepo,
         settingsRepo,
@@ -262,6 +279,7 @@ describe('Integration — "on my way" by voice (real Postgres)', () => {
         assignmentRepo,
         appointmentRepo,
         jobRepo,
+        customerRepo,
         enRouteCoordinator: coordinator,
         auditRepo,
         settingsRepo,
@@ -307,6 +325,7 @@ describe('Integration — "on my way" by voice (real Postgres)', () => {
         assignmentRepo,
         appointmentRepo,
         jobRepo,
+        customerRepo,
         enRouteCoordinator: coordinator,
         auditRepo,
         settingsRepo,
