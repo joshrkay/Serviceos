@@ -7,6 +7,7 @@ import {
   onboardingTeamMemberPayloadSchema,
   onboardingSchedulePayloadSchema,
 } from '../../../src/proposals/contracts/onboarding';
+import { missingFieldsFor } from '../../../src/proposals/proposal';
 import type {
   BusinessProfileExtraction,
   ServiceCategoryExtraction,
@@ -98,6 +99,60 @@ describe('P4-EXT-006 — Tenant settings proposal from extraction', () => {
     const result = createTenantSettingsProposal('tenant-1', 'user-1', baseProfile, 'conv-42');
 
     expect(result!.proposal.sourceContext).toEqual({ conversationId: 'conv-42' });
+  });
+
+  // ── Unresolved vertical pack ⇒ GATED, never approve-then-fail ──────────
+  //
+  // `OnboardingTenantSettingsExecutionHandler` always refuses an empty
+  // `verticalPacks`, so drafting one ungated is an approvable proposal that
+  // deterministically fails at execution (losing the identity fields with
+  // it, since the handler writes identity + packs in one shot).
+
+  it('unsupported/unresolved trade — gates on verticalPacks instead of drafting an approvable proposal', () => {
+    const unresolvedProfile: BusinessProfileExtraction = {
+      businessName: 'Blue Water Pool Service',
+      city: 'Mesa',
+      state: 'AZ',
+      verticalPacks: [],
+      serviceDescriptions: ['pool cleaning'],
+      confidence: 0.9,
+      lowConfidenceFields: ['verticalPacks'],
+    };
+
+    const result = createTenantSettingsProposal('tenant-1', 'user-1', unresolvedProfile, 'conv-9');
+
+    expect(result).not.toBeNull();
+    // Everything the owner DID say survives onto the card.
+    expect(result!.proposal.payload.businessName).toBe('Blue Water Pool Service');
+    expect(result!.proposal.payload.city).toBe('Mesa');
+    expect(result!.proposal.payload.verticalPacks).toEqual([]);
+    // …but it cannot be approved until the pack is supplied.
+    expect(missingFieldsFor(result!.proposal)).toEqual(['verticalPacks']);
+    expect(result!.proposal.status).toBe('draft');
+    expect(result!.proposal.sourceContext).toMatchObject({ conversationId: 'conv-9' });
+    // The card says what it needs rather than implying it is ready.
+    expect(result!.proposal.summary.toLowerCase()).toContain('which trade');
+  });
+
+  it('positive control — a supported trade drafts an APPROVABLE proposal with the pack set (gate cannot pass vacuously)', () => {
+    const result = createTenantSettingsProposal('tenant-1', 'user-1', baseProfile, 'conv-9');
+
+    expect(result!.proposal.payload.verticalPacks).toEqual(['hvac']);
+    expect(missingFieldsFor(result!.proposal)).toEqual([]);
+  });
+
+  it('a low-confidence-only vertical still counts as resolved — no gate', () => {
+    const lowConfProfile: BusinessProfileExtraction = {
+      ...baseProfile,
+      verticalPacks: [{ type: 'plumbing', confidence: 0.2, sourceText: 'maybe plumbing' }],
+    };
+
+    const result = createTenantSettingsProposal('tenant-1', 'user-1', lowConfProfile);
+
+    // The fallback above put 'plumbing' on the payload, so the handler can
+    // execute — gating here would block a proposal that would have worked.
+    expect(result!.proposal.payload.verticalPacks).toEqual(['plumbing']);
+    expect(missingFieldsFor(result!.proposal)).toEqual([]);
   });
 
   it('uses "My Business" fallback when name is null but verticals exist', () => {
