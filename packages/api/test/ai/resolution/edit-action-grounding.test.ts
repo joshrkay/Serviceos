@@ -99,7 +99,16 @@ describe('groundEditActionPricing', () => {
     // spoken price" choice, mirroring the draft path's applyCatalogPricing.
     expect(result.missingFields).toEqual(['editActions[0].lineItem.catalogItemId']);
     expect(result.catalogResolution?.[0]).toEqual([
-      { id: heater.id, name: heater.name, unitPriceCents: 15_000, score: 1, category: 'labor' },
+      // B7.5 — the catalog candidate carries its unit; the synthetic "keep
+      // spoken price" choice has no catalog identity, so no unit.
+      {
+        id: heater.id,
+        name: heater.name,
+        unitPriceCents: 15_000,
+        score: 1,
+        category: 'labor',
+        unit: heater.unit,
+      },
       { id: 'spoken:0', name: 'Keep spoken price', unitPriceCents: 7_500, score: 0 },
     ]);
   });
@@ -391,6 +400,117 @@ describe('groundEditActionPricing', () => {
       expect(updatedInvoice.lineItems).toHaveLength(2);
       expect(updatedInvoice.lineItems[1].quantity).toBe(1);
       expect(updatedInvoice.lineItems[1].totalCents).toBe(15_000);
+    });
+  });
+
+  /**
+   * B7.5 — unit of measure. The unit vocabulary IS the catalog's (see
+   * catalogUnitSchema), and the edit prompt shows the model a
+   * `name | unit | price` catalog table it can copy a unit out of — so the
+   * unit is grounded on exactly the same terms as the price: the catalog is
+   * the only source, and anything ungrounded loses it.
+   */
+  describe('unit of measure', () => {
+    const capacitor = item('45-Microfarad Capacitor', 4_250, {
+      category: 'Parts',
+      unit: 'each',
+    });
+    const labor = item('Standard Labor', 12_000, { unit: 'hour' });
+
+    it('stamps the catalog item’s unit onto a catalog-matched edit line', () => {
+      const { lineItems } = ground(
+        [addAction({ description: 'standard labor', quantity: 2, unitPrice: 12_000 })],
+        [labor],
+      );
+      expect(lineItems[0].unit).toBe('hour');
+      expect(lineItems[0].pricingSource).toBe('catalog');
+    });
+
+    it('the catalog unit OVERRIDES an LLM-emitted one (catalog is the source of truth)', () => {
+      const { lineItems } = ground(
+        [
+          addAction({
+            description: '45-microfarad capacitor',
+            quantity: 3,
+            unit: 'hour', // model guessed wrong
+            unitPrice: 4_250,
+          }),
+        ],
+        [capacitor],
+      );
+      expect(lineItems[0].unit).toBe('each');
+    });
+
+    it('an UNCATALOGUED line drops the LLM-emitted unit — no invented unit', () => {
+      const { result, lineItems } = ground(
+        [addAction({ description: 'bespoke flux manifold', quantity: 1, unit: 'each', unitPrice: 8_000 })],
+        [capacitor],
+      );
+      expect(lineItems[0]).not.toHaveProperty('unit');
+      expect(lineItems[0].pricingSource).toBe('uncatalogued');
+      expect(result.anyUncatalogued).toBe(true);
+      // The ungrounded PRICE still rides through (executable field), as
+      // before — only the ungrounded unit is dropped.
+      expect(lineItems[0].unitPrice).toBe(8_000);
+    });
+
+    it('a NO-CATALOG tenant drops the LLM-emitted unit too', () => {
+      const { lineItems } = ground(
+        [addAction({ description: 'standard labor', quantity: 2, unit: 'hour', unitPrice: 12_000 })],
+        [],
+      );
+      expect(lineItems[0]).not.toHaveProperty('unit');
+      expect(lineItems[0].pricingSource).toBe('uncatalogued');
+    });
+
+    it('a price-conflict ("did you mean") line drops the unit until the operator picks', () => {
+      const { result, lineItems } = ground(
+        // 7_500 vs 12_000 exceeds BOTH conflict thresholds → not snapped.
+        [addAction({ description: 'standard labor', quantity: 2, unit: 'each', unitPrice: 7_500 })],
+        [labor],
+      );
+      expect(lineItems[0]).not.toHaveProperty('unit');
+      expect(lineItems[0].pricingSource).toBe('ambiguous');
+      // …but the catalog candidate carries the unit, so resolving the pick
+      // (proposals/resolve-line.ts) lands 'hour'.
+      expect(result.catalogResolution?.[0]?.[0].unit).toBe('hour');
+      expect(result.catalogResolution?.[0]?.[1].unit).toBeUndefined();
+    });
+
+    it('a unit never touches the money: the grounded line totals identically without one', () => {
+      const withUnit = ground(
+        [addAction({ description: 'standard labor', quantity: 2, unit: 'hour', unitPrice: 12_000 })],
+        [labor],
+      ).lineItems[0];
+      const withoutUnit = ground(
+        [addAction({ description: 'standard labor', quantity: 2, unitPrice: 12_000 })],
+        [labor],
+      ).lineItems[0];
+      expect(withUnit.unitPrice).toBe(withoutUnit.unitPrice);
+      expect(withUnit.unitPriceCents).toBe(withoutUnit.unitPriceCents);
+      expect(
+        calculateDocumentTotals(
+          [buildLineItem('a', 'Standard Labor', 2, withUnit.unitPrice as number, 0, true, 'labor')],
+          0,
+          0,
+        ),
+      ).toEqual(
+        calculateDocumentTotals(
+          [
+            buildLineItem(
+              'b',
+              'Standard Labor',
+              2,
+              withoutUnit.unitPrice as number,
+              0,
+              true,
+              'labor',
+            ),
+          ],
+          0,
+          0,
+        ),
+      );
     });
   });
 });

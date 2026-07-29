@@ -435,6 +435,15 @@ export interface CatalogPricingOutcome {
        * it must leave the line's own category untouched (resolve-line.ts).
        */
       category?: string;
+      /**
+       * B7.5 — the candidate catalog item's unit of measure, recorded so a
+       * one-tap resolution (resolve-line.ts) lands the SAME unit a direct
+       * exact/high match would have. Absent on the synthetic `spoken:`
+       * candidate (no catalog identity) and on candidates recorded before
+       * this field existed; either way resolution leaves the line's unit
+       * alone rather than clobbering it with undefined.
+       */
+      unit?: string;
     }>
   >;
   anyUncatalogued: boolean;
@@ -471,6 +480,31 @@ export interface CatalogPricingOutcome {
 /** Catalog categories → the proposal contract's line-item vocabulary. */
 function contractCategory(item: CatalogItem): string {
   return item.category === 'Labor' ? 'labor' : 'material';
+}
+
+/**
+ * B7.5 — drop any `unit` the LLM emitted from a line this pass could NOT
+ * ground. The unit of measure is a CATALOG fact, not a spoken one: the
+ * enum (`catalogUnitSchema`) is the catalog's own vocabulary, and the
+ * drafting prompts feed the model a `name | unit | price` catalog table
+ * (`buildCatalogPromptSection`) it can copy a unit out of. On a line that
+ * resolved to nothing there is no catalog identity to copy FROM, so a unit
+ * on it is invented — exactly like the price on the same line, which this
+ * module already refuses to trust. Stripping here is what makes it safe
+ * for `normalizeDraftLineItems` (proposals/execution/handlers.ts) to
+ * forward `unit` to the persisted row: everything that survives grounding
+ * came from a catalog item.
+ *
+ * Returns the SAME object when there is no unit to strip, so the common
+ * path allocates nothing.
+ */
+export function stripUngroundedUnit(
+  li: Record<string, unknown>,
+): Record<string, unknown> {
+  if (li.unit === undefined) return li;
+  const next = { ...li };
+  delete next.unit;
+  return next;
 }
 
 /**
@@ -531,7 +565,7 @@ export function applyCatalogPricing(
         // choice. Nothing is priced yet, so `anyCatalogPriced` stays
         // false for this line.
         out.push({
-          ...li,
+          ...stripUngroundedUnit(li),
           pricingSource: 'ambiguous' satisfies PricingSource,
           needsPricing: true,
         });
@@ -543,6 +577,7 @@ export function applyCatalogPricing(
             unitPriceCents: item.unitPriceCents,
             score: 1,
             category: contractCategory(item),
+            ...(item.unit ? { unit: item.unit } : {}),
           },
           // Synthetic "keep spoken price" choice has no catalog identity —
           // no category is stamped, so picking it leaves the line's own
@@ -584,7 +619,7 @@ export function applyCatalogPricing(
     }
     if (resolution.tier === 'ambiguous' && resolution.candidates) {
       out.push({
-        ...li,
+        ...stripUngroundedUnit(li),
         pricingSource: 'ambiguous' satisfies PricingSource,
         needsPricing: true,
       });
@@ -595,11 +630,12 @@ export function applyCatalogPricing(
         unitPriceCents: c.item.unitPriceCents,
         score: c.score,
         category: contractCategory(c.item),
+        ...(c.item.unit ? { unit: c.item.unit } : {}),
       }));
       return;
     }
     out.push({
-      ...li,
+      ...stripUngroundedUnit(li),
       pricingSource: 'uncatalogued' satisfies PricingSource,
       needsPricing: true,
     });
@@ -637,9 +673,17 @@ function markAllUncatalogued(
   const out = lineItems.map((li) => {
     if (typeof li[priceField] === 'number') {
       anyUncatalogued = true;
-      return { ...li, pricingSource: 'uncatalogued' satisfies PricingSource, needsPricing: true };
+      return {
+        ...stripUngroundedUnit(li),
+        pricingSource: 'uncatalogued' satisfies PricingSource,
+        needsPricing: true,
+      };
     }
-    return li;
+    // B7.5 — no catalog was consulted at all, so even an unpriced line's
+    // unit is ungrounded. (A line with no price carries no money risk and
+    // is dropped downstream, but it must not smuggle an invented unit
+    // through in the meantime.)
+    return stripUngroundedUnit(li);
   });
   return {
     lineItems: out,

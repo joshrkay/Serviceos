@@ -1,6 +1,11 @@
 import { v4 as uuidv4 } from 'uuid';
 import type { Pool } from 'pg';
-import { appointmentTypeSchema, type AppointmentTypeValue } from '@ai-service-os/shared';
+import {
+  appointmentTypeSchema,
+  catalogUnitSchema,
+  type AppointmentTypeValue,
+  type CatalogUnitValue,
+} from '@ai-service-os/shared';
 import { Proposal, ProposalType, ProposalRepository } from '../proposal';
 import { CreateInvoiceExecutionHandler } from './invoice-execution-handler';
 import { CreateInvoiceScheduleExecutionHandler } from './invoice-schedule-handler';
@@ -838,6 +843,18 @@ export function normalizeDraftLineItems(raw: unknown[]): {
       // otherwise drop it between the approved proposal and the persisted line
       // (the parity bug this unit exists to prevent).
       ...(typeof li.imageFileId === 'string' ? { imageFileId: li.imageFileId } : {}),
+      // B7.5 — forward the catalog-grounded unit of measure. Same parity bug
+      // as imageFileId above: `applyCatalogPricing` stamps `unit` from the
+      // matched catalog item and `lineItemSchema` (contracts.ts) validates it,
+      // but this whitelist dropped it, so the unit vanished between the
+      // approved proposal and `estimate_line_items.unit`. Re-validated against
+      // the enum here rather than trusted as a bare string — the persisted
+      // column is plain TEXT with no CHECK, so this whitelist is the last
+      // gate before the row. DESCRIPTIVE ONLY: totalCents above is computed
+      // from quantity × unitPriceCents and never reads this.
+      ...(catalogUnitSchema.safeParse(li.unit).success
+        ? { unit: li.unit as CatalogUnitValue }
+        : {}),
     });
   });
 
