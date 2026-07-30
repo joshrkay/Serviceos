@@ -5,7 +5,7 @@ function facts(overrides: Partial<OnboardingFacts> = {}): OnboardingFacts {
   return {
     tenantId: '00000000-0000-0000-0000-000000000001',
     tenantExists: true,
-    identity: { businessName: null, businessHours: null, jobBufferMinutes: null, hourlyRateCents: null },
+    identity: { businessName: null, businessHours: null, jobBufferMinutes: null, hourlyRateCents: null, timezone: null },
     packActivated: false,
     twilioStatus: null,
     subscription: { stripeSubscriptionId: null, status: null },
@@ -23,7 +23,7 @@ function facts(overrides: Partial<OnboardingFacts> = {}): OnboardingFacts {
 /** Facts with everything up to and including billing satisfied. */
 function billingDoneFacts(overrides: Partial<OnboardingFacts> = {}): OnboardingFacts {
   return facts({
-    identity: { businessName: 'A', businessHours: { mon: null }, jobBufferMinutes: 30, hourlyRateCents: 10000 },
+    identity: { businessName: 'A', businessHours: { mon: null }, jobBufferMinutes: 30, hourlyRateCents: 10000, timezone: 'America/Phoenix' },
     packActivated: true,
     twilioStatus: 'full_readiness',
     subscription: { stripeSubscriptionId: 'sub_1', status: 'trialing' },
@@ -50,7 +50,7 @@ describe('deriveOnboardingStatus', () => {
 
   it('identity done: pack becomes current', () => {
     const r = deriveOnboardingStatus(facts({
-      identity: { businessName: 'A', businessHours: { mon: null }, jobBufferMinutes: 30, hourlyRateCents: 10000 },
+      identity: { businessName: 'A', businessHours: { mon: null }, jobBufferMinutes: 30, hourlyRateCents: 10000, timezone: 'America/Phoenix' },
     }));
     expect(r.steps[1].status).toBe('done');
     expect(r.steps[2].status).toBe('current');
@@ -59,14 +59,44 @@ describe('deriveOnboardingStatus', () => {
 
   it('identity partial (no hourly rate): identity stays current', () => {
     const r = deriveOnboardingStatus(facts({
-      identity: { businessName: 'A', businessHours: { mon: null }, jobBufferMinutes: 30, hourlyRateCents: null },
+      identity: { businessName: 'A', businessHours: { mon: null }, jobBufferMinutes: 30, hourlyRateCents: null, timezone: 'America/Phoenix' },
+    }));
+    expect(r.steps[1].status).toBe('current');
+  });
+
+  // A tenant with a NULL timezone cannot book: CreateAppointmentTaskHandler
+  // (ai/tasks/create-appointment-task.ts) refuses to guess a zone and turns
+  // every spoken booking into a voice_clarification. Reporting identity
+  // "done" in that state unlocks onboarding onto a product that cannot take
+  // an appointment — which is exactly what conversational onboarding used to
+  // do, because its settings handler never wrote the column and this check
+  // never asked for it. Null and absent are the same "never chosen"
+  // (migration 263 dropped the column's NOT NULL and its Eastern DEFAULT).
+  it('identity partial (no timezone): identity stays current', () => {
+    const r = deriveOnboardingStatus(facts({
+      identity: { businessName: 'A', businessHours: { mon: null }, jobBufferMinutes: 30, hourlyRateCents: 10000, timezone: null },
+    }));
+    expect(r.steps[1].status).toBe('current');
+    expect(r.currentStep).toBe('identity');
+  });
+
+  it('identity partial (timezone key absent entirely): identity stays current', () => {
+    const r = deriveOnboardingStatus(facts({
+      identity: { businessName: 'A', businessHours: { mon: null }, jobBufferMinutes: 30, hourlyRateCents: 10000 },
+    }));
+    expect(r.steps[1].status).toBe('current');
+  });
+
+  it('identity partial (empty-string timezone): identity stays current', () => {
+    const r = deriveOnboardingStatus(facts({
+      identity: { businessName: 'A', businessHours: { mon: null }, jobBufferMinutes: 30, hourlyRateCents: 10000, timezone: '' },
     }));
     expect(r.steps[1].status).toBe('current');
   });
 
   it('pack activated: phone becomes current', () => {
     const r = deriveOnboardingStatus(facts({
-      identity: { businessName: 'A', businessHours: { mon: null }, jobBufferMinutes: 30, hourlyRateCents: 10000 },
+      identity: { businessName: 'A', businessHours: { mon: null }, jobBufferMinutes: 30, hourlyRateCents: 10000, timezone: 'America/Phoenix' },
       packActivated: true,
     }));
     expect(r.steps[2].status).toBe('done');
@@ -75,7 +105,7 @@ describe('deriveOnboardingStatus', () => {
 
   it('phone provisioning: phone is current (not done)', () => {
     const r = deriveOnboardingStatus(facts({
-      identity: { businessName: 'A', businessHours: { mon: null }, jobBufferMinutes: 30, hourlyRateCents: 10000 },
+      identity: { businessName: 'A', businessHours: { mon: null }, jobBufferMinutes: 30, hourlyRateCents: 10000, timezone: 'America/Phoenix' },
       packActivated: true,
       twilioStatus: 'provisioning',
     }));
@@ -84,7 +114,7 @@ describe('deriveOnboardingStatus', () => {
 
   it('phone full_readiness: billing becomes current', () => {
     const r = deriveOnboardingStatus(facts({
-      identity: { businessName: 'A', businessHours: { mon: null }, jobBufferMinutes: 30, hourlyRateCents: 10000 },
+      identity: { businessName: 'A', businessHours: { mon: null }, jobBufferMinutes: 30, hourlyRateCents: 10000, timezone: 'America/Phoenix' },
       packActivated: true,
       twilioStatus: 'full_readiness',
     }));
@@ -94,7 +124,7 @@ describe('deriveOnboardingStatus', () => {
 
   it('phone failed: phone is error with blocker', () => {
     const r = deriveOnboardingStatus(facts({
-      identity: { businessName: 'A', businessHours: { mon: null }, jobBufferMinutes: 30, hourlyRateCents: 10000 },
+      identity: { businessName: 'A', businessHours: { mon: null }, jobBufferMinutes: 30, hourlyRateCents: 10000, timezone: 'America/Phoenix' },
       packActivated: true,
       twilioStatus: 'failed',
     }));
@@ -176,7 +206,7 @@ describe('deriveOnboardingStatus', () => {
 
   it('intermediate twilio status (e.g., t0_requested): phone is current', () => {
     const r = deriveOnboardingStatus(facts({
-      identity: { businessName: 'A', businessHours: { mon: null }, jobBufferMinutes: 30, hourlyRateCents: 10000 },
+      identity: { businessName: 'A', businessHours: { mon: null }, jobBufferMinutes: 30, hourlyRateCents: 10000, timezone: 'America/Phoenix' },
       packActivated: true,
       twilioStatus: 't0_requested',
     }));

@@ -218,6 +218,20 @@ function classifierJsonForTurn(script: VoiceQualityScript, turnIndex: number): s
   if (intent === 'request_feedback') {
     if (typeof slots.jobReference === 'string') entities.jobReference = slots.jobReference;
   }
+  // B8.10 — send_estimate_nudge's reference resolution reads
+  // customerName/jobReference off entitiesFrom(context) exactly like
+  // send_estimate/send_invoice. `slots.customerName` is NOT reused here for
+  // the extraction hint (unlike most other branches) because the disposition-
+  // structured grader (graders/disposition-structured.ts) diffs
+  // `expected.slots` against the drafted proposal's PAYLOAD — a short,
+  // whitespace-free string counts as a hard slot (`looksLikeEnum`), so a
+  // script pinning `customerName` there would spuriously require it on the
+  // payload, which SendEstimateNudgeTaskHandler resolves INTO `estimateId`
+  // and never carries verbatim. Mirrors `add_service_location`'s
+  // slots-optional-with-a-fixed-fallback convention just above.
+  if (intent === 'send_estimate_nudge') {
+    entities.customerName = typeof slots.customerReference === 'string' ? slots.customerReference : 'Khan';
+  }
   return JSON.stringify({
     intentType: intent,
     confidence: 0.95,

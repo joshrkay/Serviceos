@@ -29,6 +29,7 @@ function mapRow(row: Record<string, unknown>): Proposal {
     approvedAt: row.approved_at ? new Date(row.approved_at as string) : undefined,
     executedAt: row.executed_at ? new Date(row.executed_at as string) : undefined,
     executedBy: (row.executed_by as string) ?? undefined,
+    executedByRole: (row.executed_by_role as string) ?? undefined,
     claimedBy: (row.claimed_by as string) ?? undefined,
     claimedAt: row.claimed_at ? new Date(row.claimed_at as string) : undefined,
     executionRetryCount:
@@ -398,6 +399,7 @@ export class PgProposalRepository extends PgBaseRepository implements ProposalRe
         | 'approvedAt'
         | 'executedAt'
         | 'executedBy'
+        | 'executedByRole'
         | 'executionError'
         | 'undoneAt'
         | 'undoneBy'
@@ -421,6 +423,7 @@ export class PgProposalRepository extends PgBaseRepository implements ProposalRe
       if (updates?.approvedAt !== undefined)        { setClauses.push(`approved_at = $${p++}`);      params.push(updates.approvedAt); }
       if (updates?.executedAt !== undefined)        { setClauses.push(`executed_at = $${p++}`);      params.push(updates.executedAt); }
       if (updates?.executedBy !== undefined)        { setClauses.push(`executed_by = $${p++}`);      params.push(updates.executedBy); }
+      if (updates?.executedByRole !== undefined)    { setClauses.push(`executed_by_role = $${p++}`); params.push(updates.executedByRole); }
       if (updates?.executionError !== undefined)    { setClauses.push(`execution_error = $${p++}`);  params.push(updates.executionError); }
       if (updates?.undoneAt !== undefined)          { setClauses.push(`undone_at = $${p++}`);        params.push(updates.undoneAt); }
       if (updates?.undoneBy !== undefined)          { setClauses.push(`undone_by = $${p++}`);        params.push(updates.undoneBy); }
@@ -464,6 +467,7 @@ export class PgProposalRepository extends PgBaseRepository implements ProposalRe
         approvedAt: 'approved_at',
         executedAt: 'executed_at',
         executedBy: 'executed_by',
+        executedByRole: 'executed_by_role',
         undoneAt: 'undone_at',
         undoneBy: 'undone_by',
         // WS18 (D-018) — the live close flow retrofits an EXISTING drafted

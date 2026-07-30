@@ -105,8 +105,13 @@ export class OnboardingOrchestrator {
     const proposals: Proposal[] = [];
 
     // 1. Tenant settings proposal
+    // B1.20 — pass the pricing extraction so a transcript that DID state an
+    // hourly rate carries it onto the settings payload here too. Without it
+    // this path would gate every proposal on `hourlyRateCents` even when the
+    // rate was spoken (the identity step requires the column; see
+    // tenant-settings-proposer.ts).
     const settingsResult = createTenantSettingsProposal(
-      tenantId, userId, extraction.businessProfile, conversationId
+      tenantId, userId, extraction.businessProfile, conversationId, extraction.pricing
     );
     if (settingsResult) {
       proposals.push(settingsResult.proposal);

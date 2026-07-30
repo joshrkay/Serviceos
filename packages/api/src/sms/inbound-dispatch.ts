@@ -301,6 +301,24 @@ async function runFallback(ctx: InboundSmsContext): Promise<HandlerResult | null
   }
 }
 
+/**
+ * B5.5 — whole-body normalization for MULTI-WORD keywords ("on my way"),
+ * which the single-token lookup below can never match (its first token is
+ * just "on"). Lowercases, strips leading/trailing punctuation, and collapses
+ * internal whitespace — the same tolerant shape single-word keywords already
+ * get from the first-token path. Only ever consulted as a FALLBACK after the
+ * first-token lookup misses, and only matches if a feature explicitly
+ * registered a phrase key — every existing single-word registration is
+ * unaffected.
+ */
+function normalizeWholeBody(body: string): string {
+  return body
+    .trim()
+    .toLowerCase()
+    .replace(/^[^a-z0-9]+|[^a-z0-9]+$/g, '')
+    .replace(/\s+/g, ' ');
+}
+
 export async function dispatchInboundSms(
   ctx: InboundSmsContext,
 ): Promise<HandlerResult> {
@@ -318,7 +336,17 @@ export async function dispatchInboundSms(
   // their keyword like the bare word does — handlers' own parsers are
   // punctuation-tolerant, but they never run if the lookup misses here.
   const token = firstToken.toLowerCase().replace(/^[^a-z0-9]+|[^a-z0-9]+$/g, '');
-  const entry = token ? registry.get(token) : undefined;
+  // B5.5 — a multi-word keyword ("on my way") can never match on first token
+  // alone; fall back to a whole-body match ONLY when: (a) the single-token
+  // lookup misses, (b) the first token is REAL content (non-empty after
+  // stripping punctuation) — a punctuation-only lead ("!!! yes") must keep
+  // failing to match, exactly as the existing punctuation-tolerance
+  // guarantee pins, never "corrupt-prefix, salvage the rest" — and (c) a
+  // feature actually registered a phrase key. Bounded: this can only start
+  // matching messages that were previously unhandled.
+  const entry =
+    (token ? registry.get(token) : undefined) ??
+    (token ? registry.get(normalizeWholeBody(ctx.body)) : undefined);
   if (!entry) {
     const viaFallback = await runFallback(ctx);
     if (viaFallback?.handled) return viaFallback;

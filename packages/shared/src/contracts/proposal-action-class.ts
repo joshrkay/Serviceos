@@ -101,6 +101,11 @@ export const IRREVERSIBLE_PROPOSAL_TYPES: ReadonlySet<string> = new Set<string>(
 /** Owner-only learning/config proposals — never auto-executed or batch-approved. */
 export const MANUAL_PROPOSAL_TYPES: ReadonlySet<string> = new Set<string>([
   ProposalType.ADOPT_ENTITY_ALIAS,
+  // B1.18 — a spoken brand-voice capture. Manual rather than capture: brand
+  // voice is the tenant's locked outbound identity, so a wrong extraction
+  // poisons every outbound message. 'manual' makes non-auto-approval
+  // structural at every trust tier instead of threshold-dependent.
+  ProposalType.UPDATE_BRAND_VOICE,
 ]);
 
 /** Mirrors the API's ActionClass union (packages/api/src/proposals/proposal.ts). */

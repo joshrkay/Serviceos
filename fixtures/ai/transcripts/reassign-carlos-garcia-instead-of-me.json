@@ -1,0 +1,12 @@
+{
+  "id": "transcript-reassign-002",
+  "type": "voice_memo",
+  "duration_seconds": 3,
+  "service_type": "plumbing",
+  "transcript": "Dispatcher: Put Carlos on the Garcia job instead of me.",
+  "expected_entities": {
+    "target_technician_name": "Carlos",
+    "job_reference": "the Garcia job",
+    "intent_note": "\"instead of me\" is an explicit replacement signal — reassign_appointment, not add_crew_member."
+  }
+}

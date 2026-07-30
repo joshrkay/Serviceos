@@ -9,6 +9,7 @@ import {
   validateLineItem as validateBillingLineItem,
 } from '../shared/billing-engine';
 import { ValidationError } from '../shared/errors';
+import type { CatalogUnitValue } from '@ai-service-os/shared';
 
 /**
  * Invoice line-item editor for voice-driven `update_invoice` proposals.
@@ -33,6 +34,8 @@ import { ValidationError } from '../shared/errors';
 export interface InvoiceEditLineItemInput {
   description: string;
   quantity: number;
+  /** B7.5 — descriptive unit ('each', 'hour', …). Never used in money math. */
+  unit?: CatalogUnitValue;
   unitPrice: number; // integer cents
   category?: LineItemCategory;
   taxable?: boolean;
@@ -74,7 +77,7 @@ function toBillingLineItem(
   id: string,
   sortOrder: number
 ): LineItem {
-  return buildLineItem(
+  const line = buildLineItem(
     id,
     input.description,
     input.quantity,
@@ -84,6 +87,11 @@ function toBillingLineItem(
     input.category,
     input.pricingSource
   );
+  // B7.5 — carry the descriptive unit onto the built line. Applied after
+  // buildLineItem rather than as another positional argument: the money math
+  // lives inside that function and must not grow a parameter that could ever
+  // be mistaken for one of its inputs.
+  return input.unit ? { ...line, unit: input.unit } : line;
 }
 
 function validateInput(input: InvoiceEditLineItemInput): void {

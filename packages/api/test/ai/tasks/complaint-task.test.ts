@@ -148,6 +148,46 @@ describe('ComplaintTaskHandler', () => {
     expect(note.payload.targetKind).toBe('job');
     expect(note.payload.targetReference).toBe('JOB-0042');
   });
+
+  // B7.4 — the complaint path builds an `add_note` proposal, so it carried the
+  // same silent-loss defect: a free-text reference with an EMPTY missingFields
+  // was approvable, then refused by AddNoteExecutionHandler's targetId UUID
+  // check. A reference is not a resolved target; both reference tiers gate.
+  it('gates targetId when only a free-text reference resolved (job tier)', async () => {
+    const repo = new InMemoryProposalRepository();
+    const handler = new ComplaintTaskHandler(repo);
+
+    const { proposal: note } = await handler.handle(
+      makeContext({ existingEntities: { jobReference: 'JOB-0042' } }),
+    );
+
+    expect(missingFieldsFor(note)).toContain('targetId');
+  });
+
+  it('gates targetId when only a customer name resolved (customer tier)', async () => {
+    const repo = new InMemoryProposalRepository();
+    const handler = new ComplaintTaskHandler(repo);
+
+    const { proposal: note } = await handler.handle(
+      makeContext({ existingEntities: { customerName: 'Smith' } }),
+    );
+
+    expect(missingFieldsFor(note)).toContain('targetId');
+  });
+
+  it('does NOT gate when the router resolved a real jobId', async () => {
+    const repo = new InMemoryProposalRepository();
+    const handler = new ComplaintTaskHandler(repo);
+
+    const { proposal: note } = await handler.handle(
+      makeContext({
+        existingEntities: { jobId: '3f7d6c1e-9a2b-4c5d-8e1f-0a1b2c3d4e5f' },
+      }),
+    );
+
+    expect(note.payload.targetId).toBe('3f7d6c1e-9a2b-4c5d-8e1f-0a1b2c3d4e5f');
+    expect(missingFieldsFor(note)).not.toContain('targetId');
+  });
 });
 
 describe('complaintSeverity', () => {

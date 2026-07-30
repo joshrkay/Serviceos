@@ -27,7 +27,7 @@ import { ExtractedEntities } from '../orchestration/intent-classifier';
 import type { AppointmentRepository } from '../../appointments/appointment';
 import type { JobRepository } from '../../jobs/job';
 import type { InvoiceRepository } from '../../invoices/invoice';
-import type { EstimateRepository } from '../../estimates/estimate';
+import type { Estimate, EstimateRepository } from '../../estimates/estimate';
 import type { LLMGateway } from '../gateway/gateway';
 import { resolveDateTime } from '../scheduling/resolve-datetime';
 import { isRuntimeTimezone } from '../../shared/timezone';
@@ -39,6 +39,8 @@ import {
 } from '../../invoices/dunning-config';
 import { parseMilestoneSentence } from '../../invoices/milestone-sentence-parser';
 import { candidatesForReference } from '../resolution/reference-candidates';
+import type { EntityCandidate } from '../resolution/entity-resolver';
+import { formatCents } from '../skills/spoken-format';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -158,6 +160,41 @@ async function resolveActiveAppointmentId(
   return active.length === 1 ? active[0].id : undefined;
 }
 
+/**
+ * The appointment id the router's entity resolver already verified, if any.
+ *
+ * Found-by-proof (rivet-voice-19 item 9): the scheduling tasks used to skip
+ * this seam entirely and re-resolve from scratch via
+ * `resolveActiveAppointmentId`, which can only answer when the tenant has
+ * exactly ONE active appointment. So in any shop with two jobs on the books,
+ * "Move the Garcia job to Thursday at 10" could not resolve — even though the
+ * router had already disambiguated "the Garcia job" and threaded the correct
+ * id onto `existingEntities.appointmentId`
+ * (workers/voice-action-router.ts:1490-1508). The verified id must win; the
+ * single-active-appointment fallback stays for the references the resolver
+ * could not answer (the SCH-03 first-turn case it was built for).
+ */
+function resolvedAppointmentIdFrom(context: TaskContext): string | undefined {
+  const id = context.existingEntities?.appointmentId;
+  return isUuid(id) ? id : undefined;
+}
+
+/**
+ * The estimate id the router's entity resolver already verified, if any.
+ * House style matches `resolvedAppointmentIdFrom` above: `send_estimate_nudge`
+ * is one of `ESTIMATE_DOC_INTENTS` (ai/agents/customer-calling/
+ * entity-resolution.ts), so the router already plans an 'estimate' kind
+ * lookup for a spoken jobReference/customerName before the task handler ever
+ * runs. Still just a shape check — SendEstimateNudgeTaskHandler.handle
+ * VERIFIES this against the repo before trusting it (never trust an
+ * LLM/router-shaped UUID on its own; see resolveEstimateIdGate,
+ * estimate-edit-task.ts:427-461, for the pattern this copies).
+ */
+function resolvedEstimateIdFrom(context: TaskContext): string | undefined {
+  const id = context.existingEntities?.estimateId;
+  return isUuid(id) ? id : undefined;
+}
+
 function baseSourceContext(context: TaskContext): Record<string, unknown> | undefined {
   if (!context.conversationId) return undefined;
   return { conversationId: context.conversationId };
@@ -176,6 +213,14 @@ function inputFor(
      * Optional and additive; existing call sites are unaffected.
      */
     sourceContext?: Record<string, unknown>;
+    /**
+     * B8.10 — surfaces a human-readable "why" on the review card
+     * (Proposal.explanation) without touching the payload's Zod contract.
+     * Used for the AC-3 non-nudgeable-match gate ("the Khan estimate was
+     * already accepted") — optional and additive; existing call sites are
+     * unaffected.
+     */
+    explanation?: string;
   }
 ): CreateProposalInput {
   const base = baseSourceContext(context);
@@ -186,6 +231,7 @@ function inputFor(
     proposalType,
     payload,
     summary: context.message,
+    explanation: opts?.explanation,
     sourceContext,
     createdBy: context.userId,
     missingFields: missingFields.length > 0 ? missingFields : undefined,
@@ -223,13 +269,15 @@ export class RescheduleAppointmentTaskHandler implements TaskHandler {
     const payload: Record<string, unknown> = {};
     const missing: string[] = [];
 
-    // Resolve the concrete appointment id from the caller's active
-    // appointment (the classifier only gives a natural-language ref).
-    const resolvedId = await resolveActiveAppointmentId(
-      this.appointmentRepo,
-      context.tenantId,
-      { customerId: context.customerId, jobRepo: this.jobRepo },
-    );
+    // Prefer the id the entity resolver already verified for the spoken
+    // reference; only fall back to the caller's single-active-appointment
+    // lookup when it could not answer.
+    const resolvedId =
+      resolvedAppointmentIdFrom(context) ??
+      (await resolveActiveAppointmentId(this.appointmentRepo, context.tenantId, {
+        customerId: context.customerId,
+        jobRepo: this.jobRepo,
+      }));
     if (resolvedId) {
       payload.appointmentId = resolvedId;
     } else if (ee.appointmentReference) {
@@ -322,13 +370,14 @@ export class CancelAppointmentTaskHandler implements TaskHandler {
     };
     const missing: string[] = [];
 
-    // Resolve the concrete appointment id from the caller's active
-    // appointment; fall back to the natural-language reference.
-    const resolvedId = await resolveActiveAppointmentId(
-      this.appointmentRepo,
-      context.tenantId,
-      { customerId: context.customerId, jobRepo: this.jobRepo },
-    );
+    // Resolver-verified id first (see resolvedAppointmentIdFrom), then the
+    // caller's single-active-appointment lookup, then the free-text gate.
+    const resolvedId =
+      resolvedAppointmentIdFrom(context) ??
+      (await resolveActiveAppointmentId(this.appointmentRepo, context.tenantId, {
+        customerId: context.customerId,
+        jobRepo: this.jobRepo,
+      }));
     if (resolvedId) {
       payload.appointmentId = resolvedId;
     } else if (ee.appointmentReference) {
@@ -362,6 +411,17 @@ export class CancelAppointmentTaskHandler implements TaskHandler {
 // short-circuits to a voice_clarification picker). Only when the name
 // stayed unresolved (not_found / no resolver) do we keep the legacy
 // missing-marker so the review UI resolves it before approval.
+//
+// B5.3 (defect fix) — this used to push 'appointmentId' onto missing
+// UNCONDITIONALLY, ignoring the id the router's entity resolver already
+// verified and threaded onto `existingEntities.appointmentId` (the same
+// seam RescheduleAppointmentTaskHandler/CancelAppointmentTaskHandler read
+// via `resolvedAppointmentIdFrom`). So even a fully-resolved "Assign Carlos
+// to the Johnson job" — appointment AND technician both verified — landed
+// with `missingFields: ['appointmentId']` and could never auto-clear the
+// gate. Fix: resolve-then-gate, exactly the sibling handlers' shape —
+// resolved id -> payload; free-text reference -> carry the reference AND
+// gate; nothing -> gate.
 export class ReassignAppointmentTaskHandler implements TaskHandler {
   readonly taskType = 'reassign_appointment' as const;
 
@@ -370,12 +430,18 @@ export class ReassignAppointmentTaskHandler implements TaskHandler {
     const payload: Record<string, unknown> = {};
     const missing: string[] = [];
 
-    // The execution handler acts only on a concrete appointmentId (uuid), so
-    // a free-text reference always flags the id for review-time resolution.
-    // Pre-U1 this was masked by the always-missing toTechnicianId; now that
-    // the technician can resolve, the appointment gate must stand on its own.
-    if (ee.appointmentReference) payload.appointmentReference = ee.appointmentReference;
-    missing.push('appointmentId');
+    // Resolver-verified id first (see resolvedAppointmentIdFrom) — the same
+    // precedence RescheduleAppointmentTaskHandler/CancelAppointmentTaskHandler
+    // use. Only a free-text reference that never resolved falls to the gate.
+    const resolvedAppointmentId = resolvedAppointmentIdFrom(context);
+    if (resolvedAppointmentId) {
+      payload.appointmentId = resolvedAppointmentId;
+    } else if (ee.appointmentReference) {
+      payload.appointmentReference = ee.appointmentReference;
+      missing.push('appointmentId');
+    } else {
+      missing.push('appointmentId');
+    }
 
     if (ee.targetTechnicianName) payload.targetTechnicianName = ee.targetTechnicianName;
     const resolvedTechnicianId = resolvedTechnicianIdFrom(context);
@@ -457,24 +523,87 @@ export class RemoveCrewMemberTaskHandler implements TaskHandler {
 }
 
 // ───────────── add_note ─────────────
+//
+// B7.4 — this used to be the most dangerous voice defect in the product: the
+// handler set only `targetReference` (free text) and left `missingFields`
+// EMPTY, so "Note on the Patel job — wants morning visits" was approvable
+// straight from drafting, and then AddNoteExecutionHandler
+// (proposals/execution/voice-extended-handlers.ts:92-97) refused it because
+// `targetId` was never a UUID. The owner tapped approve and the note was
+// silently lost — no row, no error reaching them.
+//
+// The fix is the tiered resolve-then-gate ladder ComplaintTaskHandler already
+// uses (ai/tasks/complaint-task.ts:92-107): consume the id the router's entity
+// resolver already put on `existingEntities` (voice-action-router.ts:1490-1508)
+// for the target kind, and gate honestly whenever no id is resolvable. An
+// AMBIGUOUS reference never arrives here — the router short-circuits to a
+// voice_clarification picker before drafting.
+//
+// `targetKind` is also gated (not silently defaulted) when the classifier
+// emitted a kind the note store cannot hold: NOTE_ENTITY_TYPES has no
+// 'appointment', so an appointment-scoped note is another approve-then-fail
+// shape. Gating it keeps the refusal at review time, where it is visible.
+
+/** Note target kinds the execution handler can actually persist. */
+const EXECUTABLE_NOTE_TARGET_KINDS = ['job', 'customer', 'invoice', 'estimate'] as const;
+type ExecutableNoteTargetKind = (typeof EXECUTABLE_NOTE_TARGET_KINDS)[number];
+
+function isExecutableNoteTargetKind(value: unknown): value is ExecutableNoteTargetKind {
+  return (
+    typeof value === 'string' &&
+    (EXECUTABLE_NOTE_TARGET_KINDS as readonly string[]).includes(value)
+  );
+}
+
+/**
+ * The resolver-verified id for a note's target kind, read from the same
+ * `existingEntities` seam every other voice task consumes. `customer` also
+ * accepts the verified caller identity (`context.customerId`), matching
+ * ComplaintTaskHandler's precedence: caller-ID first, then resolver output.
+ */
+function resolvedNoteTargetId(
+  context: TaskContext,
+  kind: ExecutableNoteTargetKind,
+): string | undefined {
+  const ee = entitiesFrom(context) as Record<string, unknown>;
+  const candidate =
+    kind === 'customer' ? context.customerId ?? ee.customerId : ee[`${kind}Id`];
+  return isUuid(candidate) ? candidate : undefined;
+}
+
 export class AddNoteTaskHandler implements TaskHandler {
   readonly taskType = 'add_note' as const;
 
   async handle(context: TaskContext): Promise<TaskResult> {
     const ee = entitiesFrom(context);
+    const targetKind = ee.noteTargetKind ?? 'job';
     const payload: Record<string, unknown> = {
-      targetKind: ee.noteTargetKind ?? 'job',
+      targetKind,
+      // The dictated note verbatim. Falls back to the whole utterance only
+      // when the classifier extracted no distinct body.
       body: ee.noteBody ?? context.message,
     };
     const missing: string[] = [];
 
-    if (ee.customerName || ee.jobReference) {
-      payload.targetReference = ee.jobReference ?? ee.customerName;
-    } else {
-      missing.push('targetId');
+    if (!isExecutableNoteTargetKind(targetKind)) {
+      // 'appointment' (or anything unmapped): the note store has no such
+      // entity type, so approving could only ever fail at execution.
+      missing.push('targetKind');
     }
 
-    if (!ee.noteTargetKind) missing.push('targetKind');
+    const resolvedId = isExecutableNoteTargetKind(targetKind)
+      ? resolvedNoteTargetId(context, targetKind)
+      : undefined;
+
+    if (resolvedId) {
+      payload.targetId = resolvedId;
+    } else {
+      // No verified id — carry the spoken reference so the review card has
+      // something to resolve from, and hold the proposal at the gate.
+      const reference = ee.jobReference ?? ee.customerName;
+      if (reference) payload.targetReference = reference;
+      missing.push('targetId');
+    }
 
     return {
       proposal: createProposal(inputFor(context, this.taskType, payload, missing)),
@@ -649,30 +778,353 @@ export class SendEstimateTaskHandler implements TaskHandler {
 // ───────────── send_estimate_nudge ─────────────
 //
 // Comms class — never auto-approves. A nudge re-sends the link for an
-// ALREADY-sent estimate (the execution handler enforces a 48h cooldown and
-// requires the estimate to be in 'sent'). Mirrors SendEstimateTaskHandler:
-// carry estimateReference (free text) and flag estimateId missing so the
-// operator resolves it in the review card before approval.
+// ALREADY-sent estimate (SendEstimateNudgeExecutionHandler enforces a 48h
+// cooldown and requires estimate.status === 'sent').
+//
+// B8.10 (rivet-voice-19, see projects/rivet-voice-19/b8.10-design.md) —
+// "Nudge the Khan estimate" used to be blocked by a design comment
+// (missing = ['estimateId'] unconditional), not a missing capability: the
+// resolution technique already existed elsewhere. This reuses
+// EstimateEditTaskHandler.resolveEstimateIdGate's VERIFICATION half exactly
+// (estimate-edit-task.ts:427-461) — an id-shaped reference is only trusted
+// once a repo lookup confirms it, never from raw LLM/router text — but goes
+// one step further: a unique, VERIFIED, NUDGEABLE match lifts the gate
+// outright (payload.estimateId set, missingFields: []), because that is
+// this item's whole point. A free-text reference that resolves to more than
+// one nudgeable estimate still asks (voice_clarification) rather than
+// guessing.
+//
+// Nudgeable states: only 'sent' participates in matching. There is no
+// separate 'viewed' EstimateStatus (view activity is tracked on
+// estimate.firstViewedAt, a substate of 'sent', not a distinct status) — so
+// the design doc's "sent/viewed" language collapses to exactly
+// `status === 'sent'`, matching SendEstimateNudgeExecutionHandler's own gate
+// (`estimate.status !== 'sent'`) verbatim. No drift is possible between
+// draft-time and execute-time nudgeability.
+//
+// DECISION (b8.10-design.md, AC-3 — logged, not re-litigated here): a
+// UNIQUE match that exists but is in a non-nudgeable status (draft/
+// accepted/rejected/expired) GATES with a reason, it does NOT become a
+// clarification. Rationale: clarification is for picking among several
+// live options; here there is nothing to pick — the estimate is simply not
+// nudgeable, and "the Khan estimate was already accepted" beats a picker
+// with one disabled row. The reason rides `Proposal.explanation` (not the
+// payload — sendEstimateNudgePayloadSchema has no reason field and
+// proposals/contracts.ts is out of scope for this item).
+const NUDGEABLE_ESTIMATE_STATUSES = new Set<Estimate['status']>(['sent']);
+
+/** AC-2 — nudge disambiguation candidate: estimate number + amount + age,
+ *  so a spoken picker ("the first one" / "EST-0042") is answerable by ear —
+ *  a bare label/status hint (mapEstimatesToCandidates) isn't enough here. */
+function nudgeCandidateFrom(estimate: Estimate, now: Date): EntityCandidate {
+  return {
+    id: estimate.id,
+    kind: 'estimate',
+    label: estimate.estimateNumber,
+    hint: `${formatCents(estimate.totals.totalCents)} • ${nudgeAgeDescription(estimate, now)}`,
+    score: 1,
+  };
+}
+
+/** "sent today" / "sent 1 day ago" / "sent 12 days ago" — falls back to
+ *  createdAt for the (should-never-happen) case of a 'sent' row with no
+ *  sentAt, rather than throwing on a null date. */
+function nudgeAgeDescription(estimate: Estimate, now: Date): string {
+  const since = estimate.sentAt ?? estimate.createdAt;
+  const days = Math.max(0, Math.floor((now.getTime() - since.getTime()) / DAY_MS));
+  return days === 0 ? 'sent today' : `sent ${days} ${days === 1 ? 'day' : 'days'} ago`;
+}
+
+export interface SendEstimateNudgeTaskDeps {
+  /**
+   * B8.10 — powers BOTH halves of resolution: `findById` verifies a
+   * router-resolved `existingEntities.estimateId` (resolvedEstimateIdFrom)
+   * before it's trusted; `findByTenant` runs the customer-scoped
+   * `job_id = ANY(...)` query (with `jobRepo` below) and, as a fallback, the
+   * same ILIKE estimate_number/customer_message search
+   * `candidatesForReference` uses — widened here to ALSO see non-nudgeable
+   * matches so a unique non-nudgeable hit (AC-3) can be told apart from real
+   * ambiguity (AC-2).
+   * Absent → today's unconditional gate (AC-4 fallback only) — unchanged.
+   */
+  estimateRepo?: Pick<EstimateRepository, 'findById' | 'findByTenant'>;
+  /**
+   * Maps the router-resolved customerId to that customer's jobs, which is
+   * the ONLY real path from a spoken person's name to their estimates
+   * (estimates carry job_id; jobs carry customer_id — there is no
+   * estimates.customer_id). Optional by the same convention as
+   * `estimateRepo` and SendPaymentReminderTaskDeps: absent (or an
+   * implementation without the optional `findByCustomer`) degrades to the
+   * ILIKE display-text search alone, exactly today's behavior.
+   */
+  jobRepo?: Pick<JobRepository, 'findByCustomer'>;
+}
+
+/**
+ * Cap on the customer-anchored candidate set. Generous compared with the
+ * ILIKE search's `limit: 5` because the status filter runs client-side (a
+ * customer with many old accepted estimates must not push their one 'sent'
+ * estimate out of the window), still bounded so a pathological account can't
+ * pull an unbounded result set into a draft-time path.
+ */
+const NUDGE_CUSTOMER_JOB_LIMIT = 50;
+const NUDGE_CUSTOMER_ESTIMATE_LIMIT = 25;
+
 export class SendEstimateNudgeTaskHandler implements TaskHandler {
   readonly taskType = 'send_estimate_nudge' as const;
+  private readonly deps: SendEstimateNudgeTaskDeps;
+
+  constructor(deps: SendEstimateNudgeTaskDeps = {}) {
+    this.deps = deps;
+  }
 
   async handle(context: TaskContext): Promise<TaskResult> {
     const ee = entitiesFrom(context);
     const payload: Record<string, unknown> = {};
-    // estimateId is a required UUID for the execution handler and is NOT
-    // resolved by the customer/job entity resolver — always flag it missing so
-    // the approval gate holds until the operator resolves the estimate (matches
-    // reassign_appointment's toTechnicianId contract). The reference, when
-    // present, gives the review card something to resolve from.
-    const missing: string[] = ['estimateId'];
+    const reference = ee.jobReference ?? ee.customerName;
+    if (reference) payload.estimateReference = reference;
 
-    if (ee.jobReference) payload.estimateReference = ee.jobReference;
-    else if (ee.customerName) payload.estimateReference = ee.customerName;
+    const repo = this.deps.estimateRepo;
+    const now = context.now ?? new Date();
 
+    if (repo) {
+      // Router-verified id first (mirrors resolvedAppointmentIdFrom's
+      // convention) — VERIFY it against the repo before trusting it; a
+      // repo miss (or a hallucinated id) is never trusted on its own.
+      const resolvedId = resolvedEstimateIdFrom(context);
+      if (resolvedId) {
+        const verified = await safeFindEstimateById(repo, context.tenantId, resolvedId);
+        if (verified) {
+          return NUDGEABLE_ESTIMATE_STATUSES.has(verified.status)
+            ? this.liftGate(context, payload, verified)
+            : this.gateNonNudgeable(context, payload, verified);
+        }
+        // Unverifiable — fall through to the reference search below rather
+        // than trusting an id that didn't check out.
+      }
+
+      // No router-verified id (or it didn't verify) — build the candidate set
+      // from the customer relationship when one was resolved, else from the
+      // ILIKE display-text search. Either way keep ALL matches (any status)
+      // so a unique-but-non-nudgeable hit (AC-3) is distinguishable from
+      // genuine ambiguity (AC-2) and from no match at all (AC-4).
+      {
+        const matches = await this.candidateEstimates(context, repo, reference);
+        const nudgeable = matches.filter((m) => NUDGEABLE_ESTIMATE_STATUSES.has(m.status));
+
+        if (nudgeable.length === 1) {
+          return this.liftGate(context, payload, nudgeable[0]);
+        }
+        // A picker needs the spoken phrase to echo back. Caller-identity-only
+        // resolution (no reference at all) has nothing to echo, so genuine
+        // ambiguity there falls through to the AC-4 gate rather than asking a
+        // question the operator can't tie to anything — still never a guess.
+        if (nudgeable.length > 1 && reference) {
+          return this.clarify(context, reference, nudgeable, now);
+        }
+        if (matches.length === 1) {
+          // AC-3 — exactly one estimate matched the reference at all, and it
+          // isn't nudgeable. Multiple non-nudgeable matches (0 nudgeable,
+          // >1 total) fall through to the plain AC-4 gate below instead: the
+          // "one disabled row" rationale for a custom explanation doesn't
+          // extend cleanly to "several disabled rows", and the ACs don't
+          // require it — scope stays literal to what was asked.
+          return this.gateNonNudgeable(context, payload, matches[0]);
+        }
+      }
+    }
+
+    // AC-4 — no repo wired, no reference extracted, or nothing matched:
+    // today's behavior becomes the fallback, not the default.
     return {
-      proposal: createProposal(inputFor(context, this.taskType, payload, missing)),
+      proposal: createProposal(inputFor(context, this.taskType, payload, ['estimateId'])),
       taskType: this.taskType,
     };
+  }
+
+  /**
+   * Candidate set for the spoken request, strongest signal first.
+   *
+   * 1. The REAL relationship: a router-resolved customerId (spoken name →
+   *    `existingEntities.customerId`, CUSTOMER_REF_INTENTS) or the verified
+   *    inbound caller → that customer's jobs → `findByTenant({ jobIds })`,
+   *    the same customer → jobs → estimates traversal the estimates list
+   *    route already uses (pg-estimate.ts's `job_id = ANY(...)` branch).
+   *    "Nudge the Khan estimate" must not depend on the optional, operator-
+   *    authored `customer_message` happening to contain the word "Khan".
+   * 2. Fallback: the ILIKE estimate_number/customer_message search. This is
+   *    the path for a spoken DOCUMENT NUMBER ("nudge EST-0042"), for tenants
+   *    whose caller wasn't resolved, and whenever `jobRepo` isn't wired.
+   */
+  private async candidateEstimates(
+    context: TaskContext,
+    repo: Pick<EstimateRepository, 'findByTenant'>,
+    reference: string | undefined,
+  ): Promise<Estimate[]> {
+    const byCustomer = await this.estimatesForResolvedCustomer(context, repo);
+    if (byCustomer.length > 0) {
+      // "Nudge EST-0042 for the Khans" — when the spoken reference also names
+      // a specific document, narrow within the customer's own estimates
+      // rather than handing back every one of them as ambiguous. Narrowing
+      // only ever applies when it matches something.
+      const narrowed = reference ? narrowByEstimateNumber(byCustomer, reference) : [];
+      return narrowed.length > 0 ? narrowed : byCustomer;
+    }
+    if (typeof reference === 'string' && reference.trim().length > 0) {
+      return safeFindEstimatesByTenant(repo, context.tenantId, reference.trim());
+    }
+    return [];
+  }
+
+  /**
+   * customer → jobs → estimates. Empty (never throws) when no customer was
+   * resolved, when `jobRepo` isn't wired or lacks the OPTIONAL
+   * `findByCustomer`, or when the customer has no jobs/estimates — each of
+   * which degrades to the display-text fallback above, i.e. today's behavior.
+   */
+  private async estimatesForResolvedCustomer(
+    context: TaskContext,
+    repo: Pick<EstimateRepository, 'findByTenant'>,
+  ): Promise<Estimate[]> {
+    const customerId = resolvedCustomerIdFrom(context);
+    const jobRepo = this.deps.jobRepo;
+    if (!customerId || !jobRepo?.findByCustomer) return [];
+    try {
+      // Default scope (active jobs — canceled excluded) is deliberate: an
+      // estimate on a canceled job isn't something to chase. If that scope
+      // yields nothing the display-text fallback still runs.
+      const jobs = await jobRepo.findByCustomer(context.tenantId, customerId, {
+        limit: NUDGE_CUSTOMER_JOB_LIMIT,
+      });
+      if (jobs.length === 0) return [];
+      return await repo.findByTenant(context.tenantId, {
+        jobIds: jobs.map((j) => j.id),
+        limit: NUDGE_CUSTOMER_ESTIMATE_LIMIT,
+      });
+    } catch {
+      return [];
+    }
+  }
+
+  /** AC-1 — unique, verified, NUDGEABLE match: lifts the gate outright. */
+  private liftGate(
+    context: TaskContext,
+    payload: Record<string, unknown>,
+    target: Estimate,
+  ): TaskResult {
+    payload.estimateId = target.id;
+    return {
+      proposal: createProposal(
+        inputFor(context, this.taskType, payload, [], {
+          // Repo-confirmed, not copied from LLM/router text — safe to
+          // allowlist against assistant.ts's dropUnverifiedIds the same way
+          // resolveEstimateIdGate's verifiedIds does.
+          sourceContext: { verifiedIds: { estimateId: target.id } },
+        }),
+      ),
+      taskType: this.taskType,
+    };
+  }
+
+  /** AC-2 — two or more nudgeable matches: ask, never guess. */
+  private clarify(
+    context: TaskContext,
+    reference: string,
+    candidates: Estimate[],
+    now: Date,
+  ): TaskResult {
+    return {
+      proposal: createProposal({
+        tenantId: context.tenantId,
+        proposalType: 'voice_clarification',
+        payload: {
+          transcript: context.message,
+          reason: 'ambiguous_entity',
+          entityReference: reference,
+          entityCandidates: candidates.map((c) => nudgeCandidateFrom(c, now)),
+        },
+        summary: `Which estimate? "${reference}" matched ${candidates.length} sent, unanswered estimates`,
+        explanation: `Heard the request, but ${candidates.length} sent-and-unanswered estimates match. Tap the right one below.`,
+        sourceContext: baseSourceContext(context),
+        createdBy: context.userId,
+      }),
+      taskType: 'voice_clarification',
+    };
+  }
+
+  /**
+   * AC-3 (decision, logged above and in b8.10-design.md) — a unique match
+   * exists but its status isn't nudgeable: gate honestly with the reason on
+   * `explanation`, rather than a clarification picker with one dead row.
+   * estimateId is still stamped (review-card context, exactly as
+   * resolveEstimateIdGate stamps a free-text-resolved target) but the gate
+   * never lifts.
+   */
+  private gateNonNudgeable(
+    context: TaskContext,
+    payload: Record<string, unknown>,
+    target: Estimate,
+  ): TaskResult {
+    payload.estimateId = target.id;
+    return {
+      proposal: createProposal(
+        inputFor(context, this.taskType, payload, ['estimateId'], {
+          explanation:
+            `The ${target.estimateNumber} estimate is '${target.status}' — only a sent, ` +
+            'still-unanswered estimate can be nudged.',
+        }),
+      ),
+      taskType: this.taskType,
+    };
+  }
+}
+
+/** Never throws — a repo hiccup fails closed to "unverified", same posture
+ *  as resolveTargetEstimate (estimate-edit-task.ts). */
+async function safeFindEstimateById(
+  repo: Pick<EstimateRepository, 'findById'>,
+  tenantId: string,
+  id: string,
+): Promise<Estimate | null> {
+  try {
+    return await repo.findById(tenantId, id);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The customer the request is about: the router-resolved spoken name first
+ * (`existingEntities.customerId`, populated for send_estimate_nudge via
+ * CUSTOMER_REF_INTENTS), then the verified inbound caller
+ * (`context.customerId`) — the same precedence SendPaymentReminderTaskHandler
+ * uses for its customer → jobs → invoices walk. UUID-shaped only, so
+ * free-text that leaked into the id slot is never used as a scope.
+ */
+function resolvedCustomerIdFrom(context: TaskContext): string | undefined {
+  const fromRouter = context.existingEntities?.customerId;
+  if (isUuid(fromRouter)) return fromRouter;
+  return isUuid(context.customerId) ? context.customerId : undefined;
+}
+
+/** Estimates whose number contains the spoken reference ("EST-0042"). */
+function narrowByEstimateNumber(estimates: Estimate[], reference: string): Estimate[] {
+  const needle = reference.trim().toLowerCase();
+  if (needle.length === 0) return [];
+  return estimates.filter((e) => e.estimateNumber.toLowerCase().includes(needle));
+}
+
+/** Never throws — a repo hiccup degrades to "no matches", same posture as
+ *  candidatesForReference (resolution/reference-candidates.ts). */
+async function safeFindEstimatesByTenant(
+  repo: Pick<EstimateRepository, 'findByTenant'>,
+  tenantId: string,
+  search: string,
+): Promise<Estimate[]> {
+  try {
+    return await repo.findByTenant(tenantId, { search, limit: 5 });
+  } catch {
+    return [];
   }
 }
 

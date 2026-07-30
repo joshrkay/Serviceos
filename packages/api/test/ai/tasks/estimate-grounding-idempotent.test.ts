@@ -64,4 +64,32 @@ describe('WS5 — grounding idempotency', () => {
     expect(second.anyUncatalogued).toBe(true);
     expect(second.lineItems[0]!.pricingSource).toBe('uncatalogued');
   });
+
+  // B7.5 — the catalog is the authority on unit of measure, and it was being
+  // dropped here: a spoken "two gaskets" lost the fact that the catalog prices
+  // them per each. The unit rides the same match that sets the price, so a
+  // grounded line can never carry a unit from one item and a price from
+  // another.
+  it('a catalog match carries the item’s unit onto the grounded line', async () => {
+    const grounded = await groundLineItemPricing(
+      [{ description: 'gasket', quantity: 2 }],
+      'unitPrice',
+      loader,
+    );
+    expect(grounded.lineItems[0]!.pricingSource).toBe('catalog');
+    expect(grounded.lineItems[0]!.unit).toBe('each');
+    // Still idempotent with the unit attached.
+    const again = await groundLineItemPricing(grounded.lineItems, 'unitPrice', loader);
+    expect(again.lineItems).toEqual(grounded.lineItems);
+  });
+
+  it('an uncatalogued line gets no invented unit', async () => {
+    const grounded = await groundLineItemPricing(
+      [{ description: 'bespoke unicorn polish', quantity: 1, unitPrice: 9999 }],
+      'unitPrice',
+      loader,
+    );
+    expect(grounded.lineItems[0]!.pricingSource).toBe('uncatalogued');
+    expect(grounded.lineItems[0]!.unit).toBeUndefined();
+  });
 });

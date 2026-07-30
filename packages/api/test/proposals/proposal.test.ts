@@ -329,6 +329,11 @@ describe('actionClassForProposalType — D3 action-class registry', () => {
     expect(VALID_PROPOSAL_TYPES).toContain('adopt_entity_alias');
     expect(actionClassForProposalType('adopt_entity_alias')).toBe('manual');
   });
+
+  it('B1.18 — classifies update_brand_voice as manual and registers it as a proposal type', () => {
+    expect(VALID_PROPOSAL_TYPES).toContain('update_brand_voice');
+    expect(actionClassForProposalType('update_brand_voice')).toBe('manual');
+  });
 });
 
 describe('decideInitialStatus — D3 trust-tier decision', () => {
@@ -424,6 +429,30 @@ describe('decideInitialStatus — D3 trust-tier decision', () => {
         sourceTrustTier: 'autonomous',
         confidenceScore: 1,
       }),
+    ).toBe('draft');
+  });
+
+  // B1.18 AC-1 — the manual action class makes "never auto-approves"
+  // STRUCTURAL, not threshold-dependent: decideInitialStatus's only
+  // auto-approve branch requires `sourceTrustTier === 'autonomous' AND`
+  // action class `=== 'capture'`, so a manual-class type is unreachable from
+  // it at ANY trust tier — asserted across the full tier set, not just
+  // 'autonomous', so this can't regress if a future tier is added.
+  it('B1.18 — update_brand_voice can never auto-approve at ANY trust tier, even at maximum confidence', () => {
+    const ALL_TIERS = ['autonomous', 'graduates_fast', 'graduates_slowly', 'always_asks'] as const;
+    for (const sourceTrustTier of ALL_TIERS) {
+      expect(
+        decideInitialStatus({
+          proposalType: 'update_brand_voice',
+          sourceTrustTier,
+          confidenceScore: 1,
+        }),
+        `sourceTrustTier=${sourceTrustTier} must never auto-approve update_brand_voice`,
+      ).toBe('draft');
+    }
+    // No trust tier at all (the common voice-drafted case) also stays draft.
+    expect(
+      decideInitialStatus({ proposalType: 'update_brand_voice', confidenceScore: 1 }),
     ).toBe('draft');
   });
 

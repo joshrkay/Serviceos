@@ -1,0 +1,10 @@
+{
+  "id": "transcript-en-route-002",
+  "type": "voice_memo",
+  "duration_seconds": 3,
+  "service_type": "plumbing",
+  "transcript": "Technician: Heading to my next one now.",
+  "expected_entities": {
+    "intent_note": "Bare departure, no job named — resolves to the tech's next upcoming appointment today"
+  }
+}

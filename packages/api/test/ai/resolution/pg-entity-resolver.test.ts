@@ -807,7 +807,13 @@ describe('PgEntityResolver — tenant-scoped upcoming appointment fallback (SCH-
 });
 
 // ---------------------------------------------------------------------------
-// Estimate kind → skipped (no index defined)
+// Estimate kind — exact document number, then customer → jobs → estimates
+//
+// SQL SHAPE ONLY. The Pool is mocked here, so these tests can say which query
+// runs with which parameters and nothing more; whether the traversal actually
+// finds an estimate is pinned against real Postgres in
+// test/integration/entity-resolution.test.ts ("kind: estimate"), per the repo
+// rule that a mocked-DB test is never the only proof a query works.
 // ---------------------------------------------------------------------------
 
 describe('PgEntityResolver — estimate', () => {
@@ -848,6 +854,52 @@ describe('PgEntityResolver — estimate', () => {
     });
 
     expect(result.kind).toBe('not_found');
+  });
+
+  it('a spoken reference falls back to the customer → jobs → estimates traversal, with the document noun stripped from the needle', async () => {
+    const { pool, calls } = makeMockPool([undefined, []]);
+    const resolver = new PgEntityResolver(pool);
+
+    await resolver.resolve({
+      tenantId: TENANT_ID,
+      reference: 'the Garcia estimate',
+      kind: 'estimate',
+    });
+
+    const traversal = calls.find((c) => c.sql.includes('JOIN customers'));
+    expect(traversal).toBeDefined();
+    expect(traversal!.sql).toMatch(/FROM estimates e/);
+    expect(traversal!.sql).toMatch(/JOIN jobs j\s+ON j\.id = e\.job_id/);
+    expect(traversal!.sql).toMatch(/JOIN customers c\s+ON c\.id = j\.customer_id/);
+    expect(traversal!.sql).toMatch(/e\.tenant_id\s*=\s*\$1/);
+    expect(traversal!.sql).toMatch(/e\.deleted_at IS NULL/);
+    expect(traversal!.sql).toMatch(/c\.is_archived = false/);
+    expect(traversal!.sql).toMatch(/strict_word_similarity\(\$2, c\.display_name\)/);
+    // "the" is a shared stopword; "estimate" is the document noun. Both are
+    // out of the needle — keeping either leaves the score under the confirm
+    // floor (measurements in ESTIMATE_DOC_STOPWORDS' doc comment).
+    expect(traversal!.params[1]).toBe('garcia');
+    // The estimate row's OWN free text is never searched: matching
+    // customer_message is the arrangement that made the nudge suite a false
+    // green (docs/solutions/test-failures/a-fixture-arranged-to-pass-proves-
+    // nothing.md).
+    expect(traversal!.sql).not.toMatch(/customer_message/);
+  });
+
+  it('a reference naming nobody ("the estimate") never issues the traversal query at all', async () => {
+    const { pool, calls } = makeMockPool([undefined, []]);
+    const resolver = new PgEntityResolver(pool);
+
+    const result = await resolver.resolve({
+      tenantId: TENANT_ID,
+      reference: 'the estimate',
+      kind: 'estimate',
+    });
+
+    expect(result.kind).toBe('not_found');
+    // An empty needle must not fan out across the tenant — the traversal is
+    // skipped entirely rather than run with ''.
+    expect(calls.find((c) => c.sql.includes('JOIN customers'))).toBeUndefined();
   });
 });
 

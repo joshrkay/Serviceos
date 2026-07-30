@@ -12,6 +12,7 @@
  * emission).
  */
 import { v4 as uuidv4 } from 'uuid';
+import type { Pool, PoolClient } from 'pg';
 import { LLMGateway } from '../gateway/gateway';
 import {
   AuditRepository,
@@ -22,6 +23,7 @@ import {
   type OnboardingSession,
 } from '../../db/onboarding-session-repository';
 import { ProposalRepository, createProposal, CreateProposalInput } from '../../proposals/proposal';
+import type { SettingsRepository } from '../../settings/settings';
 import { createTenantSettingsProposal } from '../tasks/onboarding/tenant-settings-proposer';
 import { assembleEstimateTemplates } from '../tasks/onboarding/template-assembler';
 import { transition, STATE_OPENING_PROMPT } from '../agents/onboarding/transitions';
@@ -39,6 +41,7 @@ import { CategoryExtractor } from '../tasks/onboarding/category-extractor';
 import { PricingExtractor } from '../tasks/onboarding/pricing-extractor';
 import { TeamExtractor } from '../tasks/onboarding/team-extractor';
 import { ScheduleExtractor } from '../tasks/onboarding/schedule-extractor';
+import { ToolsExtractor } from '../tasks/onboarding/tools-extractor';
 import type {
   ExtractionContext,
   OnboardingExtraction,
@@ -54,8 +57,46 @@ export interface OnboardingConversationDeps {
   sessionRepo: OnboardingSessionRepository;
   proposalRepo: ProposalRepository;
   auditRepo: AuditRepository;
+  /**
+   * Read-only, and used for exactly one thing: discovering whether the tenant
+   * has ALREADY chosen an IANA timezone (a partly-completed form wizard, or an
+   * account predating migration 263). If they have, the tenant-settings
+   * proposal carries it and is not gated on `timezone`; if they have not — the
+   * normal "Talk it through" case — the proposal is gated and the operator
+   * supplies it on the review card. Never used to derive or guess a zone.
+   * Optional: unwired callers simply always gate.
+   */
+  settingsRepo?: Pick<SettingsRepository, 'findByTenant'>;
   /** Injectable clock. Defaults to `() => new Date()`. */
   now?: () => Date;
+  /**
+   * Review finding #4 — two browser tabs can read the SAME persisted
+   * `sessionId` out of localStorage and POST a turn concurrently.
+   * `OnboardingSessionRepository.update` is an unconditional
+   * read-then-write with no version/CAS column (db/onboarding-session-
+   * repository.ts) and nothing upstream serializes two `turn()` calls for
+   * the same session, so two concurrent requests both read the SAME
+   * pre-turn state, both independently advance the FSM from it, and the
+   * second `update()` silently clobbers the first's transcript +
+   * extractions — worse on the TERMINAL turn, where both calls run
+   * `emitProposalBatches` and persist two full, independently-random-ID'd
+   * proposal batches (duplicate onboarding cards, duplicate templates).
+   *
+   * When supplied, `turn()` wraps its entire read → FSM-advance → write
+   * critical section in a SESSION-scoped Postgres advisory lock (same
+   * `pg_advisory_lock`/`hashtextextended` instrument as
+   * `activate-pack-with-seed.ts`'s `lockPool` — composes with, does not
+   * duplicate, that fix) so a second concurrent request for the same
+   * (tenant, session) BLOCKS until the first commits, then reads the
+   * FIRST request's already-advanced state — never the stale pre-turn
+   * one. On the terminal turn this makes the second request's `turn()`
+   * hit step 2's "terminal sessions short-circuit" and return the
+   * EXISTING proposal batch instead of emitting a duplicate one.
+   *
+   * Optional: absent (dev/test without a DB) preserves the pre-fix
+   * behavior exactly — no lock, no serialization.
+   */
+  pool?: Pool;
 }
 
 export interface TurnRequest {
@@ -66,6 +107,20 @@ export interface TurnRequest {
   /** User utterance. Optional only when starting a new session — the
    *  caller may want the opening prompt before any text is entered. */
   userMessage?: string;
+  /**
+   * The CLIENT-detected IANA zone — the conversational equivalent of what the
+   * form wizard's IdentityStep already sends on PUT /identity
+   * (`detectBrowserTimezone()`, i.e. `Intl.DateTimeFormat().resolvedOptions().timeZone`).
+   * Parity, not a new question: the wizard's owner never types a zone either,
+   * their browser supplies it. Send it on every turn — the proposals are
+   * emitted on the terminal turn, so that is the one that must carry it.
+   *
+   * NOT trusted blindly and never a fallback: `createTenantSettingsProposal`
+   * re-validates it with `isRuntimeTimezone` and, if it is missing or bogus,
+   * GATES the settings proposal instead of writing a guess. This value can
+   * only ever come from the operator's own device.
+   */
+  clientTimezone?: string;
 }
 
 export interface TurnResponse {
@@ -82,7 +137,59 @@ export interface TurnResponse {
 export class OnboardingConversationOrchestrator {
   constructor(private readonly deps: OnboardingConversationDeps) {}
 
+  /**
+   * Review finding #4 — public entry point. Only a request naming an
+   * EXISTING `sessionId` can race another request for the same session (a
+   * brand-new session's id is unknown to anyone else at creation time, so
+   * there is nothing to serialize against yet). When `deps.pool` is wired,
+   * take the session-scoped advisory lock around the whole turn; otherwise
+   * (or for a new session) run `turnLocked` directly, exactly as before.
+   */
   async turn(req: TurnRequest): Promise<TurnResponse> {
+    if (req.sessionId && this.deps.pool) {
+      return this.withSessionLock(req.tenantId, req.sessionId, this.deps.pool, () =>
+        this.turnLocked(req),
+      );
+    }
+    return this.turnLocked(req);
+  }
+
+  /**
+   * Acquire a SESSION-scoped (tenant, sessionId) Postgres advisory lock on a
+   * dedicated connection for the duration of `fn`, then release it. Uses the
+   * BLOCKING form (`pg_advisory_lock`, not a try-lock): unlike the pack-seed
+   * fallback lock (a background executor, where failing fast and reporting
+   * `PACK_ACTIVATION_IN_PROGRESS` is correct), this guards an interactive
+   * HTTP request — the right behavior for a second tab's concurrent turn is
+   * to wait the brief moment for the first turn to commit and then proceed
+   * against the now-current state, not to error out. Safe against a dead
+   * connection holding the lock forever: the lock is session-scoped, so if
+   * release fails the connection is destroyed (`client.release(true)`)
+   * rather than returned to the pool, and Postgres frees every advisory lock
+   * held by a session when that session's connection closes.
+   */
+  private async withSessionLock<T>(
+    tenantId: string,
+    sessionId: string,
+    pool: Pool,
+    fn: () => Promise<T>,
+  ): Promise<T> {
+    const client: PoolClient = await pool.connect();
+    const key = `onboarding_session:${tenantId}:${sessionId}`;
+    try {
+      await client.query('SELECT pg_advisory_lock(hashtextextended($1::text, 0))', [key]);
+      return await fn();
+    } finally {
+      try {
+        await client.query('SELECT pg_advisory_unlock(hashtextextended($1::text, 0))', [key]);
+        client.release();
+      } catch {
+        client.release(true);
+      }
+    }
+  }
+
+  private async turnLocked(req: TurnRequest): Promise<TurnResponse> {
     const now = this.deps.now ?? (() => new Date());
 
     // 1. Load or create session.
@@ -320,6 +427,16 @@ export class OnboardingConversationOrchestrator {
             clarificationQuestions: r.clarificationQuestions ?? [],
           };
         }
+        case 'tools_capture': {
+          const r = await new ToolsExtractor(this.deps.gateway).extract(ctx);
+          return {
+            state,
+            data: r.data,
+            confidence: r.confidence.score,
+            needsClarification: r.needsClarification,
+            clarificationQuestions: r.clarificationQuestions ?? [],
+          };
+        }
       }
     } catch (err) {
       // Surface as low-confidence so the FSM falls through to a
@@ -345,6 +462,12 @@ export class OnboardingConversationOrchestrator {
    * calls `proposalRepo.create` for each — the single-shot path is
    * dormant in the codebase and never persists its output.
    *
+   * `ex.tools` (the sixth capture state, B1.19 AC-3) is deliberately
+   * NOT turned into a proposal here — there is no tenant_settings
+   * column or other row for "tools currently used," so it stays
+   * informational context on the session only. See ToolsExtraction's
+   * doc comment (tasks/onboarding/types.ts).
+   *
    * Empty extractions short-circuit: a `capped` session with no
    * captured data shouldn't emit no-op proposals.
    */
@@ -355,19 +478,57 @@ export class OnboardingConversationOrchestrator {
     const ex = ctx.extractions;
     const inputs: CreateProposalInput[] = [];
     const sourceContext = ctx.sessionId ? { conversationId: ctx.sessionId } : undefined;
+    // B1.19 — found-by-proof defect (parity integration test): the two
+    // proposal groups persisted DIRECTLY via proposalRepo.create below
+    // (tenant settings + estimate templates) were never added to the ids
+    // this method returns — only the `inputs[]`-built ones (category,
+    // team, schedule) were. TurnResponse.proposalIds is the ONLY signal
+    // callers (the review inbox, this orchestrator's own persisted
+    // proposalBatchIds, and this integration test) have for "what did
+    // this turn create" — silently dropping two of the five onboarding_*
+    // types out of it meant an operator's inbox would never surface them
+    // for approval, even though they were sitting in the DB as 'draft'.
+    // Collected here so every persisted proposal is actually returned.
+    const directlyPersistedIds: string[] = [];
 
     // 1. Tenant settings (business profile).
     if (ex.businessProfile) {
+      // Timezone precedence mirrors the form wizard's IdentityStep exactly:
+      // a zone the tenant ALREADY chose wins (IdentityStep hydrates the
+      // select from stored settings — `if (body.timezone) setTimezone(...)`),
+      // otherwise the client-detected one the browser supplies. Neither is a
+      // guess by this server; if both are absent the settings proposal GATES
+      // and asks, because there is no safe fallback zone (Phoenix mis-booking
+      // postmortem, migration 263).
+      //
+      // The stored read is failure-soft: a hiccup falls through to the client
+      // value, and ultimately to the gate — never to a default.
+      let storedTimezone: string | undefined;
+      if (this.deps.settingsRepo) {
+        try {
+          storedTimezone = (await this.deps.settingsRepo.findByTenant(req.tenantId))?.timezone;
+        } catch {
+          storedTimezone = undefined;
+        }
+      }
+      const knownTimezone = storedTimezone ?? req.clientTimezone;
       const settings = createTenantSettingsProposal(
         req.tenantId,
         req.userId,
         ex.businessProfile,
         ctx.sessionId,
+        // B1.20 — carry the owner's hourly rate (if captured) onto the
+        // same proposal; ex.pricing may be undefined if pricing_capture
+        // never ran, which createTenantSettingsProposal handles as "no
+        // rate captured", never a guess.
+        ex.pricing,
+        knownTimezone,
       );
       if (settings) {
         // createTenantSettingsProposal returns a Proposal + payload tuple
         // (not a CreateProposalInput) — persist directly via the repo.
         await this.deps.proposalRepo.create(settings.proposal);
+        directlyPersistedIds.push(settings.proposal.id);
       }
     }
 
@@ -402,6 +563,7 @@ export class OnboardingConversationOrchestrator {
       );
       for (const proposal of templateResult.proposals) {
         await this.deps.proposalRepo.create(proposal);
+        directlyPersistedIds.push(proposal.id);
       }
     }
 
@@ -420,6 +582,28 @@ export class OnboardingConversationOrchestrator {
           confidenceScore: member.confidence,
           sourceContext,
           createdBy: req.userId,
+          // Gated so this can never be approved-then-failed. Adding a team
+          // member means sending an invitation, which needs an email address
+          // the spoken capture cannot produce. The operator supplies it on the
+          // review card; `OnboardingTeamMemberExecutionHandler` then creates a
+          // real `pending_invitations` row through `inviteTeamMember` — the
+          // same service POST /api/users/invitations calls.
+          //
+          // Without this gate the card approved and then failed at execution:
+          // the same shape as the dictated-note defect (B7.4) that this whole
+          // run existed to remove, and it was rightly flagged in the
+          // re-measurement. The name and role stay on the payload so nothing
+          // the owner said is lost, and the review card now reads as "needs an
+          // email" instead of inviting a tap that cannot work.
+          //
+          // `email` is a REAL flat key of `onboardingTeamMemberPayloadSchema`
+          // (proposals/contracts/onboarding.ts) — which is what makes the gate
+          // both fillable AND unfillable-with-garbage: `editProposal`
+          // re-validates the merged payload against that schema before
+          // `clearSatisfiedMissingFields` lifts the key, so `carlos` is
+          // refused at edit time instead of clearing the gate and dying in the
+          // invitation repository at execution.
+          missingFields: ['email'],
         });
       }
     }
@@ -432,6 +616,24 @@ export class OnboardingConversationOrchestrator {
           ? { hoursTarget: ex.schedule.sla.hoursTarget, isGuarantee: ex.schedule.sla.isGuarantee }
           : undefined,
       };
+      // Finding #2 (review) — ScheduleExtractor deliberately returns a
+      // seasonal-only entry when that's all the owner said ("we work
+      // Saturdays in summer"): see its SYSTEM_PROMPT's "Seasonal patterns"
+      // rule, which records `seasonal` on the entry rather than dropping it.
+      // `OnboardingScheduleExecutionHandler.buildBusinessHours` then strips
+      // EVERY seasonal entry (tenant_settings has no seasonal-hours column)
+      // and, if that leaves zero base weekly entries, refuses with
+      // `ALL_ENTRIES_SEASONAL` — an execution-failed card AFTER an operator
+      // already approved a proposal with `missingFields` empty, the same
+      // approved-then-failed shape as the `onboarding_team_member` `email`
+      // gate below. Gate it the same way: `workingHours` is a real top-level
+      // key of `onboardingSchedulePayloadSchema`, so the gate is fillable
+      // (the operator adds/edits a base entry from the review card — an
+      // edit to the top-level `workingHours` array clears the gate via
+      // editProposal's flat-key clear-on-fill) and unfillable-with-garbage
+      // (the merged payload is re-validated against the schema, which
+      // requires a non-empty array, before the gate lifts).
+      const hasBaseWeeklyHours = ex.schedule.workingHours.some((wh) => !wh.seasonal);
       inputs.push({
         tenantId: req.tenantId,
         proposalType: 'onboarding_schedule',
@@ -442,11 +644,12 @@ export class OnboardingConversationOrchestrator {
         confidenceScore: 1.0,
         sourceContext,
         createdBy: req.userId,
+        ...(hasBaseWeeklyHours ? {} : { missingFields: ['workingHours'] }),
       });
     }
 
     // Build + persist the simple-payload proposals collected above.
-    const created: string[] = [];
+    const created: string[] = [...directlyPersistedIds];
     for (const input of inputs) {
       const proposal = createProposal(input);
       await this.deps.proposalRepo.create(proposal);
@@ -518,6 +721,8 @@ function emptyExtractionData(state: ExtractionState): unknown {
       return { members: [] };
     case 'schedule_capture':
       return { workingHours: [] };
+    case 'tools_capture':
+      return { tools: [] };
   }
 }
 
