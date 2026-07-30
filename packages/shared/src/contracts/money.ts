@@ -17,6 +17,21 @@ import { z } from 'zod';
 export const lineItemCategorySchema = z.enum(['labor', 'material', 'equipment', 'other']);
 export type LineItemCategoryValue = z.infer<typeof lineItemCategorySchema>;
 
+/**
+ * B7.5 — unit of measure for a spoken part ("three 45-microfarad capacitors",
+ * "two hours of labor"). DESCRIPTIVE ONLY: price stays integer cents and
+ * `quantity × unitPriceCents = totalCents` never consults this field, so no
+ * billing arithmetic can be changed by it.
+ *
+ * Mirrors `CatalogUnit` (packages/api/src/catalog/catalog-item.ts) and is kept
+ * in lockstep with it by money.test.ts, the same way the category enum is. The
+ * DB column (migration 265) is a plain nullable TEXT with no CHECK: this enum
+ * is the validation boundary, so adding a unit later stays a code change
+ * rather than another migration.
+ */
+export const catalogUnitSchema = z.enum(['each', 'hour', 'sq ft', 'per lb', 'per gal']);
+export type CatalogUnitValue = z.infer<typeof catalogUnitSchema>;
+
 export const lineItemSchema = z.object({
   id: z.string(),
   description: z.string(),
@@ -27,6 +42,10 @@ export const lineItemSchema = z.object({
   category: lineItemCategorySchema.nullish(),
   // quantity is NUMERIC server-side and may be fractional (e.g. 1.5 hrs).
   quantity: z.number(),
+  // B7.5 — descriptive unit of measure. Optional/nullish: every line written
+  // before migration 265, and every path that doesn't state a unit, reads back
+  // absent. Never participates in money math.
+  unit: catalogUnitSchema.nullish(),
   unitPriceCents: z.number().int(),
   totalCents: z.number().int(),
   sortOrder: z.number().int(),

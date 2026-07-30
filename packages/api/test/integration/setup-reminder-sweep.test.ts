@@ -59,8 +59,22 @@ describe('runSetupReminderSweep (integration)', () => {
     // shared DB being empty of other tenants.
     const incompleteEmail = `incomplete-${incomplete.tenantId}@test.dev`;
     const completeEmail = `complete-${complete.tenantId}@test.dev`;
-    await pool.query(`UPDATE tenants SET owner_email=$1 WHERE id=$2`, [incompleteEmail, incomplete.tenantId]);
-    await pool.query(`UPDATE tenants SET owner_email=$1 WHERE id=$2`, [completeEmail, complete.tenantId]);
+    // Backdated so this test's tenants sort FIRST. The sweep is
+    // `ORDER BY created_at ASC LIMIT 500` (setup-reminder-sweep.ts), and with
+    // `minAgeHours: 0` every tenant in the shared integration DB is eligible —
+    // so once the suite accumulated 500+ tenants, these two (created last, so
+    // newest) fell outside the window and the assertion failed in the full
+    // run while passing in isolation. Backdating is also what a real
+    // reminder-eligible tenant looks like: one that signed up days ago and
+    // never finished. The property under test is untouched.
+    await pool.query(
+      `UPDATE tenants SET owner_email=$1, created_at = NOW() - INTERVAL '400 days' WHERE id=$2`,
+      [incompleteEmail, incomplete.tenantId],
+    );
+    await pool.query(
+      `UPDATE tenants SET owner_email=$1, created_at = NOW() - INTERVAL '400 days' WHERE id=$2`,
+      [completeEmail, complete.tenantId],
+    );
 
     const delivery = new InMemoryDeliveryProvider();
     await runSetupReminderSweep({

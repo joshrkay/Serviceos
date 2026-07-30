@@ -380,10 +380,10 @@ export class PgEstimateRepository extends PgBaseRepository implements EstimateRe
       await client.query(
         `INSERT INTO estimate_line_items (
           id, tenant_id, estimate_id, description, category,
-          quantity, unit_price_cents, total_cents, sort_order, taxable,
+          quantity, unit, unit_price_cents, total_cents, sort_order, taxable,
           group_key, group_label, is_optional, is_default_selected,
           pricing_source, image_file_id
-        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)`,
+        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)`,
         [
           rowId,
           tenantId,
@@ -391,6 +391,9 @@ export class PgEstimateRepository extends PgBaseRepository implements EstimateRe
           item.description,
           item.category ?? 'other',
           item.quantity,
+          // B7.5 — descriptive unit (migration 265). Absent on every legacy
+          // and non-voice path → SQL NULL.
+          item.unit ?? null,
           item.unitPriceCents,
           item.totalCents,
           item.sortOrder,

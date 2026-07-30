@@ -1,5 +1,10 @@
 import { z } from 'zod';
-import { appointmentTypeSchema, jobStatusSchema, jobPrioritySchema } from '@ai-service-os/shared';
+import {
+  appointmentTypeSchema,
+  jobStatusSchema,
+  jobPrioritySchema,
+  catalogUnitSchema,
+} from '@ai-service-os/shared';
 import { ProposalType } from './proposal';
 import { ValidationError } from '../shared/errors';
 import { reassignAppointmentPayloadSchema } from './contracts/reassignment';
@@ -18,6 +23,7 @@ import { applyLateFeePayloadSchema } from './contracts/apply-late-fee';
 import { createStandingInstructionPayloadSchema } from './contracts/standing-instruction';
 import { updateCatalogItemPayloadSchema } from './contracts/update-catalog-item';
 import { adoptEntityAliasPayloadSchema } from './contracts/adopt-entity-alias';
+import { updateBrandVoicePayloadSchema } from './contracts/brand-voice';
 import {
   onboardingTenantSettingsPayloadSchema,
   onboardingServiceCategoryPayloadSchema,
@@ -307,6 +313,12 @@ const lineItemSchema = z
   .object({
     description: z.string().min(1),
     quantity: z.number(),
+    // B7.5 — descriptive unit of measure for a spoken part ("three
+    // capacitors", "two hours of labor"). Declared explicitly for the same
+    // reason imageFileId is: assertValidProposalPayload would otherwise strip
+    // it and the unit would vanish on the AI path only. Never used in money
+    // math — price stays in the unitPrice/unitPriceCents fields below.
+    unit: catalogUnitSchema.optional(),
     unitPrice: z.number().optional(),
     unitPriceCents: z.number().int().min(0).nullable().optional(),
     category: z.string().optional(),
@@ -796,6 +808,7 @@ export const PROPOSAL_TYPE_SCHEMAS: Record<ProposalType, z.ZodSchema> = {
   create_standing_instruction: createStandingInstructionPayloadSchema,
   update_catalog_item: updateCatalogItemPayloadSchema,
   adopt_entity_alias: adoptEntityAliasPayloadSchema,
+  update_brand_voice: updateBrandVoicePayloadSchema,
 };
 
 export function validateProposalPayload(

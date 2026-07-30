@@ -362,6 +362,13 @@ export class TextModeDriver implements AgentDriver {
       // P22 — catalog grounding so corpus scripts can assert that drafted
       // invoice/estimate lines carry catalog prices, not LLM-invented ones.
       ...(deps.catalogRepo ? { catalogRepo: deps.catalogRepo } : {}),
+      // B8.10 — threads through to buildTaskHandlers' send_estimate_nudge /
+      // send_estimate / update_estimate wiring, so a corpus script that
+      // seeds `fixtures.estimates` (runner.ts's seedFixtures) can exercise
+      // real reference resolution instead of always gating. No existing
+      // script seeds estimates today, so this is a no-op for the rest of
+      // the corpus.
+      ...(deps.estimateRepo ? { estimateRepo: deps.estimateRepo } : {}),
       // Thread the fixture's tenant timezone so spoken times resolve in the
       // tenant zone, and pin the scheduling clock to the fixture's call
       // moment so relative/absolute booking dates are deterministic.

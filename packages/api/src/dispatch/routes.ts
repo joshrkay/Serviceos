@@ -38,24 +38,74 @@ interface DispatchRouteDeps {
   auditRepo?: AuditRepository;
 }
 
+/**
+ * Minimal actor shape `triggerEnRoute` needs for the audit event — deliberately
+ * NOT `AuthenticatedRequest['auth']` so this stays callable from non-HTTP
+ * callers (the voice and SMS-keyword legs) that never have an Express request.
+ */
+export interface EnRouteActor {
+  tenantId: string;
+  userId: string;
+  role: string;
+}
+
 async function emitEnRouteAudit(
-  deps: DispatchRouteDeps,
-  auth: NonNullable<AuthenticatedRequest['auth']>,
+  deps: Pick<DispatchRouteDeps, 'auditRepo'>,
+  actor: EnRouteActor,
   appointmentId: string,
   idempotencyKey: string | null,
 ): Promise<void> {
   if (!deps.auditRepo) return;
   await deps.auditRepo.create(
     createAuditEvent({
-      tenantId: auth.tenantId,
-      actorId: auth.userId,
-      actorRole: auth.role,
+      tenantId: actor.tenantId,
+      actorId: actor.userId,
+      actorRole: actor.role,
       eventType: 'appointment.en_route_triggered',
       entityType: 'appointment',
       entityId: appointmentId,
       correlationId: idempotencyKey ?? undefined,
     }),
   );
+}
+
+export interface TriggerEnRouteInput {
+  tenantId: string;
+  appointmentId: string;
+  technicianName?: string;
+  actor: EnRouteActor;
+}
+
+export interface TriggerEnRouteResult {
+  notified: boolean;
+  idempotencyKey: string | null;
+}
+
+/**
+ * B5.5 / Part F decision F-3 — the ONE audited direct status act behind
+ * "on my way": enqueue the branded ETA SMS via the en-route coordinator, then
+ * emit the `appointment.en_route_triggered` audit event. The app button (the
+ * POST /appointments/:id/en-route handler below), the voice leg
+ * (workers/voice-action-router.ts → dispatch/en-route-voice.ts), and the
+ * SMS-keyword leg (sms/tech-status/*) all call this SAME function — voice/SMS
+ * "on my way" is the human acting directly, not an AI proposal, so it reuses
+ * the exact act the shipped button already executes rather than a parallel
+ * implementation that could drift from it.
+ */
+export async function triggerEnRoute(
+  deps: Pick<DispatchRouteDeps, 'enRouteCoordinator' | 'auditRepo'>,
+  input: TriggerEnRouteInput,
+): Promise<TriggerEnRouteResult> {
+  if (!deps.enRouteCoordinator) {
+    throw new Error('En-route notifications are not configured');
+  }
+  const idempotencyKey = await deps.enRouteCoordinator.enqueueEnRouteNotice({
+    tenantId: input.tenantId,
+    appointmentId: input.appointmentId,
+    technicianName: input.technicianName,
+  });
+  await emitEnRouteAudit(deps, input.actor, input.appointmentId, idempotencyKey);
+  return { notified: idempotencyKey !== null, idempotencyKey };
 }
 
 /**
@@ -297,16 +347,16 @@ export function createDispatchRoutes(deps: DispatchRouteDeps): Router {
             ? req.body.technicianName.trim()
             : undefined;
 
-        const idempotencyKey = await deps.enRouteCoordinator.enqueueEnRouteNotice({
+        const { notified, idempotencyKey } = await triggerEnRoute(deps, {
           tenantId,
           appointmentId,
           technicianName,
+          actor: { tenantId, userId: req.auth!.userId, role: req.auth!.role },
         });
-        await emitEnRouteAudit(deps, req.auth!, appointmentId, idempotencyKey);
 
         return res.status(202).json({
           accepted: true,
-          notified: idempotencyKey !== null,
+          notified,
           idempotencyKey,
         });
       } catch (err) {

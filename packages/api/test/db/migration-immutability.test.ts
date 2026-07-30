@@ -457,6 +457,13 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   // D2-4a / P0-4 — per-refund idempotency ledger (payment_refunds table +
   // unique claim index + RLS). New table only; nothing existing touched.
   ['264_create_payment_refunds', '529b0d8cef10288a44c01c3065e815ed3b666b5d8ca47a312defa93861530376'],
+  // B7.5 — nullable, descriptive-only `unit` column on both line-item
+  // tables. Additive ALTER only; nothing existing touched.
+  ['265_line_items_unit', '6780eeea0dfeb24582c84b206e8cbdaf4ceaa21678ff849b58fa698e3b118f14'],
+  // Nullable `executed_by_role` on proposals — the approver's role at
+  // approval time, so a config write's audit names who authorized it.
+  // Additive ALTER only; nothing existing touched.
+  ['266_proposals_executed_by_role', '75a8f66b03c36528111b5a5743a1d03ab8676a9d6647a345fa0d44aa9f564727'],
 ];
 
 function hashMigration(value: string): string {

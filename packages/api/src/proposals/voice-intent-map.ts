@@ -50,6 +50,19 @@ import type { ProposalType } from './proposal';
  * Twilio adapter routes them to the lookup-skill family directly. They are
  * omitted from this map on purpose; every consumer falls back to
  * `voice_clarification` for any IntentType not present here.
+ *
+ * B5.5 / Part F decision F-3: `en_route` ("on my way") is ALSO deliberately
+ * omitted, for a different reason than lookup_* — it isn't read-only, it's a
+ * DIRECT status act. Voice/SMS "on my way" invokes the exact same audited
+ * act the shipped app en-route button already executes (dispatch/routes.ts
+ * `triggerEnRoute` → `appointment.en_route_triggered` audit + branded ETA
+ * SMS) rather than drafting an AI proposal for a human to approve — the
+ * technician IS the human acting, the precedent PRD B10.10 already blesses.
+ * See workers/voice-action-router.ts (the `en_route` branch, handled before
+ * the proposalType lookup below) and dispatch/en-route-voice.ts. Registered
+ * here, next to lookup_*, so the drift test
+ * (test/ai/voice-action-catalog.contract.test.ts) and a human reader both
+ * see this as an intentional exclusion, not a gap.
  */
 export const INTENT_TO_PROPOSAL_TYPE: Partial<Record<Exclude<IntentType, 'unknown'>, ProposalType>> = {
   create_invoice: 'draft_invoice',
@@ -90,6 +103,11 @@ export const INTENT_TO_PROPOSAL_TYPE: Partial<Record<Exclude<IntentType, 'unknow
   create_invoice_schedule: 'create_invoice_schedule',
   respond_to_review: 'review_response_proposal',
   create_standing_instruction: 'create_standing_instruction',
+  // B1.18 — brand voice captured by voice. `manual` action class (never
+  // auto-approves at any trust tier — proposals/proposal.ts). Lock stays
+  // tap-only: the payload has no field capable of expressing
+  // `brand_voice_locked` (see contracts/brand-voice.ts).
+  update_brand_voice: 'update_brand_voice',
 };
 
 /**
@@ -135,6 +153,7 @@ export function voiceProposalSummary(
   if (intent === 'draft_estimate') return `Draft estimate${name ? ` for ${name}` : ''}`;
   if (intent === 'create_appointment') return `Schedule appointment${name ? ` for ${name}` : ''}`;
   if (intent === 'emergency_dispatch') return 'Emergency dispatch — escalate to on-call';
+  if (intent === 'update_brand_voice') return 'Update brand voice';
   if (intent) return `Voice intent: ${intent}${ref ? ` (${ref})` : ''}`;
   return 'Voice clarification needed';
 }

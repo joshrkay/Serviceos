@@ -1191,10 +1191,12 @@ describe('Story 3.4 — "log inventory" maps to expense logging', () => {
 // and the version stamp reflects the coordinated bump.
 describe('taxonomy 1.2.0 — new intents + entities', () => {
   // B7 (feat: voice-transcript-and-agent-paths) bumped the taxonomy again to
-  // 1.3.0 (update_job); classifyIntent always stamps the CURRENT constant
-  // regardless of which intent, so this pin tracks the live value.
-  it('taxonomy version reflects the latest coordinated bump (1.3.0)', () => {
-    expect(INTENT_TAXONOMY_VERSION).toBe('1.3.0');
+  // 1.3.0 (update_job); B5.5 (Part F decision F-3) bumped it again to 1.4.0
+  // (en_route); B1.18 bumped it again to 1.5.0 (update_brand_voice).
+  // classifyIntent always stamps the CURRENT constant regardless of which
+  // intent, so this pin tracks the live value.
+  it('taxonomy version reflects the latest coordinated bump (1.5.0)', () => {
+    expect(INTENT_TAXONOMY_VERSION).toBe('1.5.0');
   });
 
   it('parses create_invoice_schedule with the verbatim milestone sentence', () => {
@@ -1274,6 +1276,55 @@ describe('taxonomy 1.2.0 — new intents + entities', () => {
     const result = await classifyIntent('Respond to that bad review', { tenantId: 't-1' }, gateway);
     expect(result.intentType).toBe('respond_to_review');
     expect(result.taxonomyVersion).toBe(INTENT_TAXONOMY_VERSION);
+  });
+
+  // B1.18 — update_brand_voice (taxonomy 1.5.0).
+  it('parses update_brand_voice with the verbatim brandVoiceInstruction', () => {
+    const result = parseClassifierJson(
+      JSON.stringify({
+        intentType: 'update_brand_voice',
+        confidence: 0.91,
+        extractedEntities: {
+          brandVoiceInstruction:
+            "friendly, plain-spoken, no slang, always sign off 'Thanks — Bob's HVAC'",
+        },
+      }),
+    );
+    expect(result?.intentType).toBe('update_brand_voice');
+    expect(result?.extractedEntities?.brandVoiceInstruction).toBe(
+      "friendly, plain-spoken, no slang, always sign off 'Thanks — Bob's HVAC'",
+    );
+  });
+
+  it('a nested-object brandVoiceInstruction is dropped (flat string only)', () => {
+    const result = parseClassifierJson(
+      JSON.stringify({
+        intentType: 'update_brand_voice',
+        confidence: 0.9,
+        extractedEntities: { brandVoiceInstruction: { register: 'friendly' } },
+      }),
+    );
+    expect(result?.extractedEntities?.brandVoiceInstruction).toBeUndefined();
+  });
+
+  it('classifyIntent end-to-end for update_brand_voice stamps the current taxonomy version', async () => {
+    const gateway = mockGateway(
+      JSON.stringify({
+        intentType: 'update_brand_voice',
+        confidence: 0.91,
+        extractedEntities: { brandVoiceInstruction: 'friendly, always sign off Thanks Bob' },
+      }),
+    );
+    const result = await classifyIntent(
+      "Set my brand voice: friendly, always sign off 'Thanks — Bob's HVAC'",
+      { tenantId: 't-1' },
+      gateway,
+    );
+    expect(result.intentType).toBe('update_brand_voice');
+    expect(result.taxonomyVersion).toBe(INTENT_TAXONOMY_VERSION);
+    expect(result.extractedEntities?.brandVoiceInstruction).toBe(
+      'friendly, always sign off Thanks Bob',
+    );
   });
 });
 

@@ -46,6 +46,12 @@ interface PublicEstimateView {
     id: string;
     description: string;
     quantity: number;
+    /**
+     * B7.5 — descriptive unit of measure shown beside the quantity so the
+     * customer can tell what the approved rate measures. Never used in any
+     * money calculation on this page.
+     */
+    unit?: string;
     unitPriceCents: number;
     totalCents: number;
     taxable?: boolean;
@@ -839,6 +845,9 @@ export function EstimateApprovalPage() {
   const lineItems       = billedApiItems.map(li => ({
     description: li.description,
     qty: li.quantity,
+    // B7.5 — descriptive only. Deliberately NOT fed into `total` below or
+    // into any fmtUsd call; the money is qty × rate exactly as before.
+    unit: li.unit,
     rate: li.unitPriceCents / 100,
     imageUrl: li.imageUrl,
   }));
@@ -1064,7 +1073,7 @@ export function EstimateApprovalPage() {
                 forced horizontal overflow on ≤390px phones). Narrower fixed
                 columns below the sm breakpoint; tabular-nums keeps money
                 digits stable and right-aligned. */}
-            <div className="grid grid-cols-[minmax(0,1fr)_2rem_4rem_4.5rem] sm:grid-cols-[minmax(0,1fr)_40px_72px_72px] gap-x-2 px-5 py-2.5 bg-slate-50 border-b border-slate-100">
+            <div className="grid grid-cols-[minmax(0,1fr)_2rem_4rem_4.5rem] sm:grid-cols-[minmax(0,1fr)_56px_72px_72px] gap-x-2 px-5 py-2.5 bg-slate-50 border-b border-slate-100">
               <p className="text-xs text-slate-400">Item</p>
               <p className="text-xs text-slate-400 text-right">Qty</p>
               <p className="text-xs text-slate-400 text-right">Rate</p>
@@ -1072,7 +1081,7 @@ export function EstimateApprovalPage() {
             </div>
             <div className="divide-y divide-slate-50">
               {visItems.map((item, i) => (
-                <div key={i} className="grid grid-cols-[minmax(0,1fr)_2rem_4rem_4.5rem] sm:grid-cols-[minmax(0,1fr)_40px_72px_72px] gap-x-2 px-5 py-3 items-start">
+                <div key={i} className="grid grid-cols-[minmax(0,1fr)_2rem_4rem_4.5rem] sm:grid-cols-[minmax(0,1fr)_56px_72px_72px] gap-x-2 px-5 py-3 items-start">
                   {/* flex-wrap: at the narrowest widths the line's item column
                       is only ~46px, so a fixed 40px thumbnail beside the text
                       would starve the description to ~0 width (one char per
@@ -1093,7 +1102,30 @@ export function EstimateApprovalPage() {
                     )}
                     <p className="text-sm text-slate-800 min-w-0 break-words">{item.description}</p>
                   </div>
-                  <p className="text-sm text-slate-500 text-right tabular-nums">{item.qty}</p>
+                  {/* B7.5 — the descriptive unit sits UNDER the quantity, not
+                      beside it, and the MOBILE Qty track stays 2rem.
+                      At 320px the budget is exact: 320 − 40 (page px-5) − 2
+                      (card border) − 40 (row px-5) − 24 (3 × gap-x-2) = 238px
+                      of tracks, so a 2rem Qty leaves the description 46px.
+                      Widening Qty to 3rem for the unit would cut that to
+                      exactly 30px and starve the description the way the EE-4
+                      thumbnail once did (e2e asserts descBox.width > 30).
+                      Instead the unit is a block child with break-words: it
+                      wraps INSIDE the existing 2rem track — "per gal", the
+                      longest value in catalogUnitSchema, breaks over two lines
+                      — so it adds height, never width. The sm: breakpoint has
+                      room to spare, so Qty widens to 56px there for one line. */}
+                  <p className="text-sm text-slate-500 text-right tabular-nums">
+                    {item.qty}
+                    {item.unit && (
+                      <span
+                        data-testid={`line-item-unit-${i}`}
+                        className="block min-w-0 break-words text-[10px] leading-tight text-slate-400"
+                      >
+                        {item.unit}
+                      </span>
+                    )}
+                  </p>
                   <p className="text-sm text-slate-500 text-right tabular-nums">${fmtUsd(item.rate)}</p>
                   <p className="text-sm text-slate-800 text-right tabular-nums">${fmtUsd(item.qty * item.rate)}</p>
                 </div>
@@ -1121,7 +1153,7 @@ export function EstimateApprovalPage() {
               businessContact: businessPhone,
               description,
               validUntil: validUntilText,
-              lineItems: lineItems.map((i) => ({ description: i.description, qty: i.qty, rate: i.rate, imageUrl: i.imageUrl })),
+              lineItems: lineItems.map((i) => ({ description: i.description, qty: i.qty, unit: i.unit, rate: i.rate, imageUrl: i.imageUrl })),
               totalDollars: total,
             })}
             className="mb-4 flex min-h-11 items-center justify-center gap-1.5 w-full rounded-xl border border-slate-200 bg-white py-2.5 text-xs text-slate-500 hover:bg-slate-50 transition-colors"

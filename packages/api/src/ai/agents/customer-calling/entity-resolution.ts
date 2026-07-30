@@ -51,6 +51,13 @@ const CUSTOMER_REF_INTENTS = new Set([
   'create_booking',
   'send_invoice',
   'send_estimate',
+  // A spoken nudge names a PERSON ("nudge the Khan estimate"), not display
+  // text. Without this the router never resolved that name to a customerId,
+  // so SendEstimateNudgeTaskHandler could only ILIKE estimate_number /
+  // customer_message and never traverse customer → jobs → estimates.
+  // requiresExistingEntity() already returned true for this intent via
+  // ESTIMATE_DOC_INTENTS, so its VOX-02 escalation posture is unchanged.
+  'send_estimate_nudge',
   'update_invoice',
   'update_estimate',
   'issue_invoice',

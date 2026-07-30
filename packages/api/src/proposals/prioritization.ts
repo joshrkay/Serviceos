@@ -62,6 +62,11 @@ const TYPE_PRIORITY: Record<ProposalType, number> = {
   send_estimate_nudge: 1,
   // Notes are low priority — they never gate other work.
   add_note: 5,
+  // B1.18 — a spoken brand-voice capture is tenant configuration, not
+  // customer-facing work: nothing downstream waits on it and it has no
+  // same-day relevance. Same low tier as notes and the other back-office
+  // captures, and well below the CRM follow-ups.
+  update_brand_voice: 5,
   // Expense logging is informational — captured after the fact, never
   // gates any other work.
   log_expense: 5,

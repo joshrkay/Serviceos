@@ -4,6 +4,7 @@ import {
   DEFAULT_ESCALATION_SETTINGS,
   EscalationSettings,
   SettingsRepository,
+  TenantIdentityUpsertFields,
   TenantSettings,
   normalizeReminderOffsets,
 } from './settings';
@@ -585,6 +586,84 @@ export class PgSettingsRepository extends PgBaseRepository implements SettingsRe
       );
       if (result.rows.length === 0) throw new Error('Settings not found');
       return result.rows[0].current_number as number;
+    });
+  }
+
+  /**
+   * B1.19 — single atomic upsert for the identity-shaped fields, shared
+   * by PUT /api/onboarding/identity (form wizard) and the conversational
+   * onboarding_tenant_settings / onboarding_schedule execution handlers.
+   * One INSERT ... ON CONFLICT statement (not a read-then-write) so two
+   * proposals for the same tenant approved back-to-back — one from the
+   * business-profile state, one from the schedule state — can't race
+   * each other into a lost update or a duplicate-key error.
+   *
+   * Every optional field COALESCEs to the existing column value when
+   * omitted, on both the INSERT branch (via a literal fallback matching
+   * the column's own DEFAULT) and the UPDATE branch (via
+   * `tenant_settings.<col>`). `timezone` and `owner_phone` keep their
+   * original special-cased semantics (see TenantIdentityUpsertFields):
+   * timezone never regresses to unset once chosen; owner_phone is
+   * written only when the caller passed the key at all (tri-state).
+   */
+  async upsertIdentityFields(
+    tenantId: string,
+    fields: TenantIdentityUpsertFields,
+  ): Promise<TenantSettings> {
+    return this.withTenantTransaction(tenantId, async (client) => {
+      const writeOwnerPhone = Object.prototype.hasOwnProperty.call(fields, 'ownerPhone');
+      const result = await client.query(
+        `INSERT INTO tenant_settings (
+           id, tenant_id, business_name, service_area_text, service_area_radius,
+           business_hours, job_buffer_minutes, hourly_rate_cents,
+           timezone, owner_phone, ai_model, estimate_prefix, invoice_prefix,
+           next_estimate_number, next_invoice_number, default_payment_term_days
+         )
+         VALUES (
+           gen_random_uuid(), $1,
+           COALESCE($2, ''),
+           $3,
+           $4,
+           COALESCE($5::jsonb, '{}'::jsonb),
+           COALESCE($6, 30),
+           $7,
+           -- NO fallback zone on first insert either — see
+           -- TenantIdentityUpsertFields.timezone / migration 263.
+           $8,
+           $9,
+           $11,
+           'EST-', 'INV-', 1001, 1001, 30
+         )
+         ON CONFLICT (tenant_id) DO UPDATE SET
+           business_name        = COALESCE($2, tenant_settings.business_name),
+           service_area_text    = COALESCE($3, tenant_settings.service_area_text),
+           service_area_radius  = COALESCE($4, tenant_settings.service_area_radius),
+           business_hours       = COALESCE($5::jsonb, tenant_settings.business_hours),
+           job_buffer_minutes   = COALESCE($6, tenant_settings.job_buffer_minutes),
+           hourly_rate_cents    = COALESCE($7, tenant_settings.hourly_rate_cents),
+           timezone             = COALESCE($8, tenant_settings.timezone),
+           owner_phone          = CASE
+             WHEN $10::boolean THEN $9
+             ELSE tenant_settings.owner_phone
+           END,
+           ai_model             = COALESCE(tenant_settings.ai_model, $11),
+           updated_at           = now()
+         RETURNING *`,
+        [
+          tenantId,
+          fields.businessName ?? null,
+          fields.serviceAreaText ?? null,
+          fields.serviceAreaRadius ?? null,
+          fields.businessHours ? JSON.stringify(fields.businessHours) : null,
+          fields.jobBufferMinutes ?? null,
+          fields.hourlyRateCents ?? null,
+          fields.timezone ?? null,
+          writeOwnerPhone ? (fields.ownerPhone ?? null) : null,
+          writeOwnerPhone,
+          fields.bootstrapAiModel,
+        ],
+      );
+      return mapRow(result.rows[0]);
     });
   }
 }

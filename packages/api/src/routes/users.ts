@@ -18,6 +18,7 @@ import {
   UserRole,
 } from '../users/user';
 import { PendingInvitationRepository } from '../users/pending-invitation';
+import { inviteTeamMember } from '../users/invite-team-member';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
 import { normalizeMobileE164 } from '../shared/phone/normalize';
 
@@ -712,49 +713,18 @@ export function createUsersRouter(
         }
         const parsed = inviteUserSchema.parse(req.body ?? {});
 
-        // Persist the local row first so a Clerk-side outage doesn't
-        // wipe our intent. Unique-on-pending index throws ValidationError
-        // (re-mapped from 23505) for a duplicate pending invite.
-        const local = await deps.pendingInvitationRepo.create({
-          tenantId: req.auth!.tenantId,
-          email: parsed.email,
-          role: parsed.role,
-          invitedBy: req.auth!.userId,
-        });
-
-        // Best-effort Clerk call. We keep going even on failure so the
-        // local row stands; the operator can retry via dashboard.
-        let clerkInvitationId: string | null = null;
-        if (deps.clerkSecretKey) {
-          try {
-            const fetchFn = deps.clerkFetch ?? fetch;
-            const redirectUrl =
-              `${deps.appBaseUrl ?? ''}/accept-invitation?invitation_id=${encodeURIComponent(local.id)}`;
-            const clerkRes = await fetchFn('https://api.clerk.com/v1/invitations', {
-              method: 'POST',
-              headers: {
-                Authorization: `Bearer ${deps.clerkSecretKey}`,
-                'Content-Type': 'application/json',
-              },
-              body: JSON.stringify({
-                email_address: parsed.email,
-                public_metadata: {
-                  invitation_id: local.id,
-                  tenant_id: req.auth!.tenantId,
-                  role: parsed.role,
-                },
-                redirect_url: redirectUrl,
-              }),
-            });
-            if (clerkRes.ok) {
-              const data = (await clerkRes.json()) as { id?: string };
-              clerkInvitationId = data.id ?? null;
-            }
-          } catch {
-            // Best-effort. Local row stays; UI surfaces "Invited" on
-            // it regardless. Re-send is via Clerk dashboard.
-          }
-        }
+        // Unique-on-pending index throws ValidationError (re-mapped from
+        // 23505) for a duplicate pending invite.
+        const { invitation: local, clerkInvitationId } = await inviteTeamMember(
+          {
+            tenantId: req.auth!.tenantId,
+            email: parsed.email,
+            role: parsed.role,
+            invitedBy: req.auth!.userId,
+          },
+          deps.pendingInvitationRepo,
+          deps,
+        );
 
         // D2-1c — audit-log the invitation. Entity id is the local pending
         // invitation row (matches the eventual users.id that the Clerk

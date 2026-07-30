@@ -16,6 +16,29 @@ function isUuid(value: unknown): value is string {
   return typeof value === 'string' && UUID_RE.test(value);
 }
 
+/**
+ * The job id the router's entity resolver already resolved for this turn, if
+ * any. `update_job` is a member of `JOB_REF_INTENTS`
+ * (ai/agents/customer-calling/entity-resolution.ts:92-100), so a spoken "the
+ * Garcia job" is planned as a `kind: 'job'` lookup whose result lands on
+ * `existingEntities.jobId` (REF_KEY_BY_KIND) BEFORE this handler runs.
+ *
+ * House style matches `resolvedEstimateIdFrom` / `resolvedNoteTargetId`
+ * (ai/tasks/voice-extended-tasks.ts): this is only a SHAPE check. The id is
+ * still VERIFIED against the job repo (resolveTargetJob → findById) before
+ * resolveJobIdGate will trust it — a router/LLM-shaped UUID is never trusted
+ * on its own.
+ *
+ * Why it matters: without this, `existingEntities` only reached the model as
+ * a "Classifier hints" blob in `buildUserMessage`, so the ONLY way a resolved
+ * id could lift the gate was the LLM choosing to echo it back into its JSON.
+ * A drafting leg that depends on a model repeating a UUID is not resolution.
+ */
+function resolvedJobIdFrom(context: TaskContext): string | undefined {
+  const id = context.existingEntities?.jobId;
+  return isUuid(id) ? id : undefined;
+}
+
 /** Canonical Job status/priority value sets (mirrors jobStatusSchema / jobPrioritySchema in @ai-service-os/shared). */
 const VALID_STATUSES = new Set([
   'new',
@@ -46,7 +69,12 @@ const VALID_PRIORITIES = new Set(['low', 'normal', 'high', 'urgent']);
  *
  * The LLM returns a `jobReference` (a string the operator/review UI
  * resolves to a real job id) plus whichever fields the operator asked to
- * change. jobId resolution follows the SAME verify-or-gate pattern as
+ * change. The id itself comes from the ROUTER's entity resolver
+ * (`existingEntities.jobId`, via `resolvedJobIdFrom` — `update_job` is one of
+ * `JOB_REF_INTENTS`), not from the model: the previous shape reached the LLM
+ * only as a "Classifier hints" string, so lifting the gate depended on the
+ * model echoing a UUID back. jobId resolution follows the SAME verify-or-gate
+ * pattern as
  * EstimateEditTaskHandler.resolveEstimateIdGate (estimate-edit-task.ts):
  * a UUID reference/id is trusted and ungates the proposal ONLY when the
  * jobRepo confirms it via findById (stamping the B4 `verifiedIds`
@@ -164,7 +192,7 @@ export class UpdateJobTaskHandler implements TaskHandler {
 
     const confidence = assessConfidence(parsed ?? {});
 
-    const { target, candidates } = await this.resolveTargetJob(context.tenantId, payload);
+    const { target, candidates } = await this.resolveTargetJob(context.tenantId, payload, context);
 
     // Resolve the free-text jobReference onto payload.jobId (direct UUID,
     // or an unambiguous jobRepo match) before this proposal can be
@@ -173,7 +201,11 @@ export class UpdateJobTaskHandler implements TaskHandler {
     // approveProposal blocks it instead of letting an unresolved edit
     // reach UpdateJobExecutionHandler, which has no resolution step of its
     // own and would fail after approval.
-    const { missingFields: jobIdMissingFields, verifiedIds } = this.resolveJobIdGate(payload, target);
+    const { missingFields: jobIdMissingFields, verifiedIds } = this.resolveJobIdGate(
+      payload,
+      target,
+      context,
+    );
 
     // B2 pattern — layer the resolved candidate list ON TOP of the gate
     // (never a substitute for it): only recorded while the gate is still
@@ -240,9 +272,21 @@ export class UpdateJobTaskHandler implements TaskHandler {
   private async resolveTargetJob(
     tenantId: string,
     payload: Record<string, unknown>,
+    context: TaskContext,
   ): Promise<{ target: { id: string } | null; candidates: EntityCandidate[] }> {
     if (!this.jobRepo) return { target: null, candidates: [] };
     try {
+      // The router's entity resolver already turned the SPOKEN reference into
+      // a job id (JOB_REF_INTENTS ∋ update_job) — highest precedence, because
+      // it is the one candidate that came from resolution rather than from
+      // model text. Still VERIFIED here (never trusted on shape alone); a miss
+      // falls through to the LLM-derived candidates below, and resolveJobIdGate
+      // then fails closed.
+      const routed = resolvedJobIdFrom(context);
+      if (routed) {
+        const verified = await this.jobRepo.findById(tenantId, routed);
+        if (verified) return { target: verified, candidates: [] };
+      }
       if (typeof payload.jobId === 'string' && payload.jobId.length > 0) {
         const target = await this.jobRepo.findById(tenantId, payload.jobId);
         return { target, candidates: [] };
@@ -309,12 +353,19 @@ export class UpdateJobTaskHandler implements TaskHandler {
   private resolveJobIdGate(
     payload: Record<string, unknown>,
     target: { id: string } | null,
+    context: TaskContext,
   ): { missingFields: string[]; verifiedIds?: Record<string, string> } {
-    const uuidCandidate = isUuid(payload.jobId)
-      ? (payload.jobId as string)
-      : isUuid(payload.jobReference)
-        ? (payload.jobReference as string)
-        : undefined;
+    // Precedence: the ROUTER-RESOLVED id first (resolution beat the model),
+    // then an LLM-emitted jobId, then an id-shaped jobReference. Every one of
+    // them is only an assumption until `target` — a repo `findById` hit —
+    // confirms it below.
+    const uuidCandidate =
+      resolvedJobIdFrom(context) ??
+      (isUuid(payload.jobId)
+        ? (payload.jobId as string)
+        : isUuid(payload.jobReference)
+          ? (payload.jobReference as string)
+          : undefined);
 
     if (uuidCandidate) {
       // Trust the UUID ONLY when resolveTargetJob's findById returned it. A
@@ -323,9 +374,12 @@ export class UpdateJobTaskHandler implements TaskHandler {
         payload.jobId = uuidCandidate;
         return { missingFields: [], verifiedIds: { jobId: uuidCandidate } };
       }
-      // Unverifiable — drop a bare unverified jobId so nothing untrusted
-      // rides the payload, and gate (fail closed).
-      if (payload.jobId === uuidCandidate) delete payload.jobId;
+      // Unverifiable — drop ANY id-shaped jobId so nothing untrusted rides the
+      // payload, and gate (fail closed). Deliberately not just the candidate
+      // that lost the precedence race above: when the router's id fails to
+      // verify, an LLM-emitted UUID sitting in payload.jobId is exactly the
+      // unverified value this gate exists to refuse.
+      if (isUuid(payload.jobId)) delete payload.jobId;
       return { missingFields: ['jobId'] };
     }
 
