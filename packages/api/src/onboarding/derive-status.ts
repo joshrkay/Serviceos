@@ -18,6 +18,15 @@ export interface OnboardingFacts {
     businessHours: unknown | null;     // null OR an empty object {} both count as "not set"
     jobBufferMinutes: number | null;
     hourlyRateCents: number | null;
+    /**
+     * tenant_settings.timezone — null when the tenant has never CHOSEN one
+     * (migration 263 dropped the column's NOT NULL and its
+     * `DEFAULT 'America/New_York'`, so null is now representable and means
+     * "not chosen", not "Eastern"). Optional on the interface only so fact
+     * fixtures predating this field still compile; `isIdentityDone` treats
+     * absent exactly like null.
+     */
+    timezone?: string | null;
   };
   packActivated: boolean;
   twilioStatus: string | null;  // full set of tenant_integrations.status values; only 'full_readiness' and 'failed' have special handling
@@ -43,10 +52,24 @@ export interface OnboardingFacts {
   aiVerificationError?: string | null;
 }
 
+/**
+ * `timezone` is load-bearing, not cosmetic. Without a chosen zone
+ * `CreateAppointmentTaskHandler` (ai/tasks/create-appointment-task.ts) turns
+ * EVERY spoken booking into a timezone `voice_clarification` — it refuses to
+ * guess, because a wrong zone silently misbooks (Phoenix mis-booking
+ * postmortem, migration 263). Reporting identity "done" while that is true
+ * unlocks onboarding onto a product that cannot book, which is why the step
+ * must stay incomplete until the owner supplies one. The form wizard always
+ * submits a zone (IdentityStep.tsx pre-fills the browser-detected value into
+ * a select), so this only ever blocks a path that genuinely never captured
+ * one — e.g. conversational onboarding, whose settings proposal is gated on
+ * the same field (ai/tasks/onboarding/tenant-settings-proposer.ts).
+ */
 const isIdentityDone = (i: OnboardingFacts['identity']): boolean =>
   !!i.businessName &&
   i.jobBufferMinutes !== null &&
   i.hourlyRateCents !== null &&
+  !!i.timezone &&
   i.businessHours !== null &&
   typeof i.businessHours === 'object' &&
   Object.keys(i.businessHours as object).length > 0;

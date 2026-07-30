@@ -42,7 +42,9 @@ const STATE_OPENING_PROMPT: Record<ExtractionState, string> = {
   team_capture:
     "Who's on your team? Just names and roles (technician, dispatcher, owner) — I'll add accounts for them.",
   schedule_capture:
-    'Last one — what are your business hours, and do you cover after-hours emergency calls?',
+    'Almost done — what are your business hours, and do you cover after-hours emergency calls?',
+  tools_capture:
+    "One more thing — what are you using to run the business today? Paper, a spreadsheet, another app? No wrong answer, just helps me get a feel for where you're coming from.",
 };
 
 /** Spoken at the start of `review`. */
@@ -65,6 +67,7 @@ const EXTRACTION_ORDER: ExtractionState[] = [
   'pricing_capture',
   'team_capture',
   'schedule_capture',
+  'tools_capture',
 ];
 
 function nextExtractionState(state: ExtractionState): ExtractionState | 'review' {
@@ -233,6 +236,9 @@ export function transition(
         break;
       case 'schedule_capture':
         newExtractions.schedule = event.result.data;
+        break;
+      case 'tools_capture':
+        newExtractions.tools = event.result.data;
         break;
     }
 

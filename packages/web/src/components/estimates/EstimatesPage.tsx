@@ -5,7 +5,7 @@ import {
   CheckCircle2, Copy, Phone, Mail, Sparkles, MessageSquare,
   Briefcase, MapPin, RotateCcw, Download,
 } from 'lucide-react';
-import type { EstimateResponse, LineItem as EstimateLineItem } from '@ai-service-os/shared';
+import type { EstimateResponse, LineItem as EstimateLineItem, CatalogUnitValue } from '@ai-service-os/shared';
 import { useListQuery } from '../../hooks/useListQuery';
 import { useDetailQuery } from '../../hooks/useDetailQuery';
 import { useMutation } from '../../hooks/useMutation';
@@ -63,7 +63,7 @@ interface EstCompat {
 }
 
 /** Convert a shared line item to UI LineItem for the editor */
-function apiLineToUi(item: EstimateLineItem): LineItem {
+export function apiLineToUi(item: EstimateLineItem): LineItem {
   return {
     id: item.id,
     description: item.description,
@@ -76,11 +76,17 @@ function apiLineToUi(item: EstimateLineItem): LineItem {
     groupLabel: item.groupLabel,
     isOptional: item.isOptional,
     isDefaultSelected: item.isDefaultSelected,
+    // B7.5 — descriptive unit of measure, same hazard as the tier metadata
+    // above: PgEstimateRepository.update DELETEs every estimate_line_items
+    // row and re-INSERTs the payload, so a field missing from the editor
+    // model is persisted as NULL even on lines the operator never edited.
+    // Descriptive only — totals remain qty × unitPriceCents in integer cents.
+    unit: item.unit ?? undefined,
   };
 }
 
 /** Convert UI LineItem back to a shared line item for saving */
-function uiLineToApi(item: LineItem, sortOrder: number): Partial<EstimateLineItem> {
+export function uiLineToApi(item: LineItem, sortOrder: number): Partial<EstimateLineItem> {
   return {
     ...(item.id ? { id: item.id } : {}),
     description: item.description,
@@ -93,6 +99,9 @@ function uiLineToApi(item: LineItem, sortOrder: number): Partial<EstimateLineIte
     groupLabel: item.groupLabel,
     isOptional: item.isOptional,
     isDefaultSelected: item.isDefaultSelected,
+    // B7.5 — echo the descriptive unit back so saving ANY line does not NULL
+    // it on the untouched ones. Omitted (not null) when absent.
+    ...(item.unit ? { unit: item.unit } : {}),
   };
 }
 
@@ -106,6 +115,8 @@ type LineItem = {
   groupLabel?: string;
   isOptional?: boolean;
   isDefaultSelected?: boolean;
+  /** B7.5 — descriptive unit of measure; never read by money math. */
+  unit?: CatalogUnitValue;
 };
 
 // ─── AI suggestion types ──────────────────────────────────────────────────
@@ -447,7 +458,24 @@ function LineItemsEditor({ items, editable, onChange, onAddRow }: {
                 <div className="min-w-0">
                   <p className="text-sm text-foreground truncate">{item.description}</p>
                 </div>
-                <p className="text-sm text-muted-foreground text-right">{item.qty}</p>
+                {/* B7.5 (operator side) — the descriptive unit sits UNDER the
+                    quantity as a block child of the SAME fixed Qty track, not
+                    a new column, so it can only add height, never width: it
+                    wraps (break-words) inside the existing cell. Mirrors the
+                    customer-facing fix on EstimateApprovalPage/InvoicePaymentPage —
+                    the operator who spoke "three hours of labor" should see
+                    the same unit their customer sees. */}
+                <p className="text-sm text-muted-foreground text-right">
+                  {item.qty}
+                  {item.unit && (
+                    <span
+                      data-testid={`line-item-unit-${i}`}
+                      className="block min-w-0 break-words text-[10px] leading-tight text-muted-foreground"
+                    >
+                      {item.unit}
+                    </span>
+                  )}
+                </p>
                 <p className="text-sm text-muted-foreground text-right">${item.rate.toLocaleString()}</p>
                 <p className="text-sm text-foreground text-right">${(item.qty * item.rate).toLocaleString()}</p>
               </>
@@ -551,7 +579,10 @@ function EstimateDocPreview({ est, lineItems, onClose }: {
                 description: est.description,
                 validUntil: est.validUntil,
                 documentLabel: estimateTerm,
-                lineItems: lineItems.map((i) => ({ description: i.description, qty: i.qty, rate: i.rate })),
+                // B7.5 — carry the descriptive unit into the generated
+                // document so the owner-side preview matches what the
+                // customer downloads from the approval page.
+                lineItems: lineItems.map((i) => ({ description: i.description, qty: i.qty, unit: i.unit, rate: i.rate })),
               })}
               className="flex items-center gap-1.5 rounded-lg border border-border px-2.5 py-1.5 text-xs text-foreground hover:bg-secondary transition-colors"
             >
@@ -603,7 +634,20 @@ function EstimateDocPreview({ est, lineItems, onClose }: {
               {lineItems.map((item, i) => (
                 <div key={i} className="grid grid-cols-[1fr_32px_72px_72px] gap-x-2 px-3 py-2.5 items-center">
                   <p className="text-sm text-foreground">{item.description}</p>
-                  <p className="text-sm text-muted-foreground text-right">{item.qty}</p>
+                  {/* B7.5 (operator side) — same block+break-words technique as
+                      the customer-facing document: the unit adds height inside
+                      the existing 32px Qty track, never a new column. */}
+                  <p className="text-sm text-muted-foreground text-right">
+                    {item.qty}
+                    {item.unit && (
+                      <span
+                        data-testid={`line-item-unit-${i}`}
+                        className="block min-w-0 break-words text-[10px] leading-tight text-muted-foreground"
+                      >
+                        {item.unit}
+                      </span>
+                    )}
+                  </p>
                   <p className="text-sm text-muted-foreground text-right">${item.rate.toLocaleString()}</p>
                   <p className="text-sm text-foreground text-right">${(item.qty * item.rate).toLocaleString()}</p>
                 </div>

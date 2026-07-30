@@ -1,6 +1,11 @@
 import { v4 as uuidv4 } from 'uuid';
 import type { Pool } from 'pg';
-import { appointmentTypeSchema, type AppointmentTypeValue } from '@ai-service-os/shared';
+import {
+  appointmentTypeSchema,
+  catalogUnitSchema,
+  type AppointmentTypeValue,
+  type CatalogUnitValue,
+} from '@ai-service-os/shared';
 import { Proposal, ProposalType, ProposalRepository } from '../proposal';
 import { CreateInvoiceExecutionHandler } from './invoice-execution-handler';
 import { CreateInvoiceScheduleExecutionHandler } from './invoice-schedule-handler';
@@ -101,10 +106,32 @@ import { CatalogItemRepository } from '../../catalog/catalog-item';
 import type { StandingInstructionRepository } from '../../instructions/standing-instructions';
 import type { EntityAliasRepository } from '../../learning/entity-aliases/entity-alias';
 import { EntityAliasExecutionHandler } from './entity-alias-handler';
+import {
+  OnboardingTenantSettingsExecutionHandler,
+  OnboardingServiceCategoryExecutionHandler,
+  OnboardingEstimateTemplateExecutionHandler,
+  OnboardingTeamMemberExecutionHandler,
+  OnboardingScheduleExecutionHandler,
+} from './onboarding-handlers';
+import { PackActivationRepository } from '../../settings/pack-activation';
+import type { PendingInvitationRepository } from '../../users/pending-invitation';
+import type { ClerkInvitationConfig } from '../../users/invite-team-member';
+import { EstimateTemplateRepository } from '../../templates/estimate-template';
+import { SeedPackDefaultsDeps } from '../../packs/seed-pack-defaults';
+import { UpdateBrandVoiceExecutionHandler } from './brand-voice-handler';
+import type { BrandVoiceRepository } from '../../tenants/brand/brand-voice';
 
 export interface ExecutionContext {
   tenantId: string;
   executedBy: string;
+  /**
+   * Role of the human whose approval authorized this execution, when the
+   * caller knows it. Config-writing handlers stamp it on their audit event
+   * instead of asserting 'owner', so the trail records who actually acted.
+   * Optional: the background execution sweep runs detached from the approving
+   * request and legitimately may not have it.
+   */
+  executedByRole?: string;
 }
 
 export interface ExecutionResult {
@@ -816,6 +843,18 @@ export function normalizeDraftLineItems(raw: unknown[]): {
       // otherwise drop it between the approved proposal and the persisted line
       // (the parity bug this unit exists to prevent).
       ...(typeof li.imageFileId === 'string' ? { imageFileId: li.imageFileId } : {}),
+      // B7.5 — forward the catalog-grounded unit of measure. Same parity bug
+      // as imageFileId above: `applyCatalogPricing` stamps `unit` from the
+      // matched catalog item and `lineItemSchema` (contracts.ts) validates it,
+      // but this whitelist dropped it, so the unit vanished between the
+      // approved proposal and `estimate_line_items.unit`. Re-validated against
+      // the enum here rather than trusted as a bare string — the persisted
+      // column is plain TEXT with no CHECK, so this whitelist is the last
+      // gate before the row. DESCRIPTIVE ONLY: totalCents above is computed
+      // from quantity × unitPriceCents and never reads this.
+      ...(catalogUnitSchema.safeParse(li.unit).success
+        ? { unit: li.unit as CatalogUnitValue }
+        : {}),
     });
   });
 
@@ -1202,6 +1241,31 @@ export function createExecutionHandlerRegistry(deps?: {
   // toggle appends to the consent ledger (kind 'sms', source 'manual') in the
   // SAME transaction as the customer update + audit event.
   consentEventRepo?: ConsentEventRepository;
+  // B1.19 — onboarding_* execution handlers. packActivationRepo/templateRepo
+  // mirror the deps POST /api/onboarding/pack and POST /api/templates already
+  // take; packSeedDeps threads the same catalog+template seeder the pack
+  // route uses. Absent → the corresponding handler(s) report isFullyWired()
+  // false and refuse to execute rather than passthrough.
+  packActivationRepo?: PackActivationRepository;
+  /**
+   * B1.19 — target for an approved `onboarding_team_member`. Exists since
+   * migration 082; the handler was previously refusing on the false premise
+   * that no persistence target existed.
+   */
+  pendingInvitationRepo?: PendingInvitationRepository;
+  /**
+   * Clerk config for that invitation, same values POST /api/users/invitations
+   * gets. Without it the teammate never receives an email — the local row on
+   * its own is intent, not an invitation.
+   */
+  clerkInvitationConfig?: ClerkInvitationConfig;
+  templateRepo?: EstimateTemplateRepository;
+  packSeedDeps?: SeedPackDefaultsDeps;
+  // B1.18 — update_brand_voice writes through the SAME versioned path the
+  // Brand-Voice Configurator sheet uses (tenants/brand/brand-voice-service.ts
+  // updateBrandVoice). Absent → the handler reports isFullyWired() false and
+  // refuses to execute (WS3 convention) rather than a synthetic passthrough.
+  brandVoiceRepo?: BrandVoiceRepository;
 }): Map<ProposalType, ExecutionHandler> {
   // WS3 — audit is a structural invariant for the consent/entity mutation
   // handlers below (their constructors take a non-optional AuditRepository).
@@ -1375,6 +1439,37 @@ export function createExecutionHandlerRegistry(deps?: {
     // runs after a human tap.
     new UpdateCatalogItemExecutionHandler(deps?.catalogRepo, deps?.auditRepo),
     new EntityAliasExecutionHandler(deps?.entityAliasRepo),
+    // B1.19 — conversational onboarding execution handlers. Each writes
+    // through the SAME shared function the form wizard's routes use
+    // (see proposals/execution/onboarding-handlers.ts doc comment).
+    new OnboardingTenantSettingsExecutionHandler(
+      deps?.settingsRepo,
+      deps?.packActivationRepo,
+      requiredAuditRepo,
+      deps?.packSeedDeps,
+      deps?.pool ?? undefined,
+    ),
+    new OnboardingServiceCategoryExecutionHandler(
+      deps?.settingsRepo,
+      deps?.packActivationRepo,
+      requiredAuditRepo,
+      deps?.packSeedDeps,
+      deps?.pool ?? undefined,
+    ),
+    new OnboardingEstimateTemplateExecutionHandler(deps?.templateRepo, requiredAuditRepo),
+    // No repo dep: this handler never persists (see its class doc) —
+    // always reports isFullyWired() === false.
+    new OnboardingTeamMemberExecutionHandler(
+      deps?.pendingInvitationRepo,
+      requiredAuditRepo,
+      deps?.clerkInvitationConfig,
+    ),
+    new OnboardingScheduleExecutionHandler(deps?.settingsRepo, requiredAuditRepo),
+    // B1.18 — update_brand_voice: writes through the SAME versioned
+    // read→cool-down-check→merge→bump path the Brand-Voice Configurator
+    // sheet uses (never re-implemented here — see brand-voice-handler.ts).
+    // manual action class, so it only ever runs after an explicit owner tap.
+    new UpdateBrandVoiceExecutionHandler(deps?.brandVoiceRepo, requiredAuditRepo),
   ];
 
   // Handlers that mutate existing entities take a repo dep. Registered

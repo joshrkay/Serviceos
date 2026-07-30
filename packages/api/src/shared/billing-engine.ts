@@ -1,5 +1,6 @@
 // Shared billing engine for estimates and invoices
 // All money values are integer cents. Tax rate in basis points (bps).
+import type { CatalogUnitValue } from '@ai-service-os/shared';
 
 export type LineItemCategory = 'labor' | 'material' | 'equipment' | 'other';
 
@@ -21,6 +22,13 @@ export interface LineItem {
   description: string;
   category?: LineItemCategory;
   quantity: number;
+  /**
+   * B7.5 — descriptive unit of measure ('each', 'hour', …), carried from a
+   * catalog match or a spoken part. Nothing in this file reads it: totals are
+   * quantity × unitPriceCents regardless, so a unit can never move money.
+   * Optional — legacy rows and every non-voice path leave it absent.
+   */
+  unit?: CatalogUnitValue;
   unitPriceCents: number;
   totalCents: number;
   sortOrder: number;

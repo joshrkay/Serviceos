@@ -24,7 +24,7 @@ function facts(over: Partial<OnboardingFacts> = {}): OnboardingFacts {
   return {
     tenantId: '00000000-0000-0000-0000-000000000001',
     tenantExists: true,
-    identity: { businessName: null, businessHours: null, jobBufferMinutes: null, hourlyRateCents: null },
+    identity: { businessName: null, businessHours: null, jobBufferMinutes: null, hourlyRateCents: null, timezone: null },
     packActivated: false,
     twilioStatus: null,
     subscription: { stripeSubscriptionId: null, status: null },
@@ -44,6 +44,10 @@ const completeIdentity = {
   businessHours: { mon: { open: '08:00', close: '17:00' } },
   jobBufferMinutes: 30,
   hourlyRateCents: 15000,
+  // The wizard always submits a zone (IdentityStep.tsx pre-fills the
+  // browser-detected value into a select), and derive-status.ts requires
+  // one before identity is done — a tenant with no zone cannot book.
+  timezone: 'America/Chicago',
 };
 
 describe('Feature 1 — Signup → account creation', () => {

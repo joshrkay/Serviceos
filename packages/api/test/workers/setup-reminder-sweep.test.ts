@@ -30,6 +30,9 @@ function facts(overrides: Partial<OnboardingFacts> = {}): OnboardingFacts {
       businessHours: { mon: '9-5' },
       jobBufferMinutes: 30,
       hourlyRateCents: 12000,
+      // Required for identity to derive done (derive-status.ts) — a tenant
+      // with no chosen zone cannot book, so onboarding is not complete.
+      timezone: 'America/Phoenix',
     },
     packActivated: true,
     twilioStatus: 'full_readiness',

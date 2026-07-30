@@ -670,6 +670,8 @@ import {
   registerTechStatusKeywords,
   PgTechStatusTodayRepository,
   InMemoryTechStatusTodayRepository,
+  // B5.5 — the en-route ('omw' / 'on my way') SMS keyword leg.
+  registerEnRouteSmsKeyword,
 } from './sms/tech-status';
 import { createMmsIngestWorker } from './workers/mms-ingest-worker';
 import { PhoneRateLimiter } from './shared/rate-limit/phone-rate-limit';
@@ -2042,6 +2044,12 @@ export function createApp(): AppWithLifecycle {
   const delayNotificationService = messageDelivery
     ? new TwilioDelayNotificationService(messageDelivery, dispatchRepo, customerRepo)
     : new NoopDelayNotificationService();
+  // B1.18 — hoisted ahead of the execution registry (was declared next to the
+  // brand-voice router further down) so update_brand_voice's execution
+  // handler can be wired with the SAME repo instance the sheet's router uses.
+  const brandVoiceRepo = pool
+    ? new PgBrandVoiceRepository(pool)
+    : new InMemoryBrandVoiceRepository();
   const executionHandlers = createExecutionHandlerRegistry({
     customerRepo,
     jobRepo,
@@ -2103,6 +2111,25 @@ export function createApp(): AppWithLifecycle {
     // appends to the consent ledger in the same transaction as the customer
     // update + audit event (matching the authenticated route path).
     consentEventRepo,
+    // B1.19 — conversational onboarding_* handlers write through the same
+    // pack-activation/seed + template-creation deps the onboarding + template
+    // routes already use (packActivationRepo, catalogRepo/templateRepo below).
+    packActivationRepo,
+    templateRepo,
+    packSeedDeps: { catalogRepo, templateRepo },
+    // B1.19 — an approved onboarding_team_member issues a real invitation
+    // through the same service POST /api/users/invitations calls, so the gate
+    // the operator fills on the review card actually reaches the teammate
+    // instead of failing at execution or recording intent that never sends.
+    pendingInvitationRepo,
+    clerkInvitationConfig: {
+      clerkSecretKey: process.env.CLERK_SECRET_KEY,
+      appBaseUrl: process.env.APP_PUBLIC_URL ?? 'http://localhost:3000',
+    },
+    // B1.18 — update_brand_voice writes through the SAME versioned path
+    // (tenants/brand/brand-voice-service.ts updateBrandVoice) the
+    // Brand-Voice Configurator sheet's PUT /api/settings/brand-voice uses.
+    brandVoiceRepo,
   });
   // U5 / WS3 — fail boot loudly if a voice-reachable persist handler is
   // degraded (would return success without saving). Every voice-reachable
@@ -2269,6 +2296,25 @@ export function createApp(): AppWithLifecycle {
     delayNoticeStateRepo,
     undefined, // internalAlertSink — keep the default no-op sink
     dncRepo, // Story 10.3 — DNC suppression on the SMS delay/en-route path
+  );
+  // B5.5 / Part F decision F-3 — 'omw' / "on my way" from a registered tech
+  // phone fires the SAME audited direct status act as the app en-route
+  // button and the voice leg: `delayNotificationCoordinator` is the exact
+  // same instance createDispatchRoutes wires below as `enRouteCoordinator`.
+  // `overwrite: true` mirrors every other keyword bootstrap in this file so
+  // re-running createApp() (multiple test files / bootstraps in one
+  // process) re-registers without tripping the duplicate-keyword guard.
+  registerEnRouteSmsKeyword(
+    {
+      userRepo,
+      settingsRepo,
+      assignmentRepo,
+      appointmentRepo,
+      jobRepo,
+      enRouteCoordinator: delayNotificationCoordinator,
+      auditRepo,
+    },
+    { overwrite: true },
   );
   const delayNotificationWorker = createDelayNotificationWorker({
     service: delayNotificationService,
@@ -2823,6 +2869,15 @@ export function createApp(): AppWithLifecycle {
     voiceRepo,
     // Same object the assistant-chat router gets — see `lookupAnswerDeps`.
     lookupAnswers: lookupAnswerDeps,
+    // B5.5 — en_route ("on my way") voice leg: userRepo resolves the memo
+    // creator's canonical technician id, assignmentRepo scopes appointment
+    // resolution to that technician's OWN assignments, and
+    // enRouteCoordinator is the SAME coordinator instance the app button
+    // (createDispatchRoutes below) uses, so both legs fire the identical
+    // audited act.
+    userRepo,
+    assignmentRepo,
+    enRouteCoordinator: delayNotificationCoordinator,
   });
   workerRegistry.set(
     voiceActionRouterWorker.type,
@@ -5434,9 +5489,8 @@ export function createApp(): AppWithLifecycle {
   );
   // N-011 — Brand-Voice Configurator (behind the brand_voice_configurator flag,
   // enforced at the web surface; the API is permission-gated as normal).
-  const brandVoiceRepo = pool
-    ? new PgBrandVoiceRepository(pool)
-    : new InMemoryBrandVoiceRepository();
+  // brandVoiceRepo is constructed earlier (B1.18) so the voice execution
+  // handler and this router share the same instance.
   app.use(
     '/api/settings/brand-voice',
     createBrandVoiceRouter(brandVoiceRepo, settingsRepo, auditRepo),
@@ -5496,6 +5550,14 @@ export function createApp(): AppWithLifecycle {
         sessionRepo: onboardingSessionRepo,
         proposalRepo,
         auditRepo,
+        // Read-only, and only so a tenant who ALREADY chose a timezone (a
+        // partly-completed form wizard) is not asked for it again on the
+        // gated tenant-settings card. Never a source of a guessed zone.
+        settingsRepo,
+        // Review finding #4 — session-scoped advisory lock so two browser
+        // tabs racing the same persisted sessionId can't clobber each
+        // other's turn (see OnboardingConversationDeps.pool doc).
+        pool: pool ?? undefined,
       }),
     }),
   );

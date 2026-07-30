@@ -7,6 +7,7 @@ import {
   lineItemSchema,
   documentTotalsSchema,
   lineItemCategorySchema,
+  catalogUnitSchema,
   formatUsdCents,
   formatUsdCentsFixed,
   formatUsdCentsWhole,
@@ -54,6 +55,39 @@ describe('lineItemSchema', () => {
     expect([...lineItemCategorySchema.options].sort()).toEqual([...Object.values(LineItemCategory)].sort());
     const dbSet = resolveDbCheckSet(schemaSource, 'estimate_line_items', 'category');
     expect([...lineItemCategorySchema.options].sort()).toEqual([...dbSet].sort());
+  });
+
+  // B7.5 — `unit` is descriptive only, so these pin the two things that could
+  // silently go wrong: the enum drifting from CatalogUnit, and the field
+  // leaking into money math.
+  it('catalogUnitSchema stays in lockstep with the API CatalogUnit union', () => {
+    // CatalogUnit is a type-only union in packages/api, so it cannot be
+    // reflected at runtime — read its literals from the source of truth
+    // instead, the same technique resolveDbCheckSet uses for the DB CHECK.
+    const catalogSource = readFileSync(
+      resolve(dirname(fileURLToPath(import.meta.url)), '../../../api/src/catalog/catalog-item.ts'),
+      'utf8',
+    );
+    const match = catalogSource.match(/export type CatalogUnit\s*=\s*([^;]+);/);
+    expect(match).not.toBeNull();
+    const declared = [...match![1].matchAll(/'([^']+)'/g)].map((m) => m[1]);
+    expect([...catalogUnitSchema.options].sort()).toEqual([...declared].sort());
+  });
+
+  it('accepts a line with a unit, and a unit never changes the money fields', () => {
+    const withUnit = lineItemSchema.parse({ ...baseLineItem, unit: 'hour' });
+    const withoutUnit = lineItemSchema.parse(baseLineItem);
+    expect(withUnit.unit).toBe('hour');
+    // Same money, unit or no unit.
+    expect(withUnit.quantity).toBe(withoutUnit.quantity);
+    expect(withUnit.unitPriceCents).toBe(withoutUnit.unitPriceCents);
+    expect(withUnit.totalCents).toBe(withoutUnit.totalCents);
+    // Legacy/absent rows still parse.
+    expect(lineItemSchema.safeParse({ ...baseLineItem, unit: null }).success).toBe(true);
+    expect(lineItemSchema.safeParse({ ...baseLineItem, unit: undefined }).success).toBe(true);
+    // An invented unit is refused — this enum is the validation boundary,
+    // since the DB column deliberately carries no CHECK.
+    expect(lineItemSchema.safeParse({ ...baseLineItem, unit: 'furlong' }).success).toBe(false);
   });
 });
 

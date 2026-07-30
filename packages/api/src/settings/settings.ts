@@ -702,12 +702,65 @@ export interface UpdateSettingsInput {
   autonomousCloseMaxCents?: number;
 }
 
+/**
+ * B1.19 — the identity-shaped subset of TenantSettings written by
+ * PUT /api/onboarding/identity (the form wizard). Every field is
+ * OPTIONAL and touches only its own column — this is the partial-upsert
+ * contract shared by the wizard route and the conversational
+ * onboarding_tenant_settings / onboarding_schedule execution handlers
+ * so both write through the SAME implementation instead of two
+ * divergent ones (see routes/onboarding.ts PUT /identity and
+ * proposals/execution/onboarding-handlers.ts).
+ */
+export interface TenantIdentityUpsertFields {
+  businessName?: string;
+  serviceAreaText?: string;
+  serviceAreaRadius?: number;
+  businessHours?: Record<string, { open: string; close: string } | null>;
+  jobBufferMinutes?: number;
+  hourlyRateCents?: number;
+  /**
+   * Omit to leave whatever's stored untouched. NEVER pass a guessed or
+   * default zone here — omitted means "not chosen" (migration 263 /
+   * the Phoenix mis-booking postmortem in routes/onboarding.ts). Once a
+   * zone is set, this call never clears it back to unset.
+   */
+  timezone?: string;
+  /**
+   * Tri-state via key presence: omit the KEY entirely to leave the
+   * stored phone untouched; pass `null` to explicitly clear it; pass a
+   * (caller-normalized) string to set it. Mirrors the route's
+   * `ownerPhoneToWrite` tri-state.
+   */
+  ownerPhone?: string | null;
+  /**
+   * Seeded only when the tenant has no ai_model yet (first-ever row, or
+   * an existing row that predates this bootstrap) — never overrides an
+   * existing tenant-specific override. Required so every call site is
+   * explicit about which model to bootstrap with (matches
+   * resolveBootstrapAiModel()) rather than this method guessing.
+   */
+  bootstrapAiModel: string;
+}
+
 export interface SettingsRepository {
   create(settings: TenantSettings): Promise<TenantSettings>;
   findByTenant(tenantId: string): Promise<TenantSettings | null>;
   update(tenantId: string, updates: Partial<TenantSettings>): Promise<TenantSettings | null>;
   incrementEstimateNumber(tenantId: string): Promise<number>;
   incrementInvoiceNumber(tenantId: string): Promise<number>;
+  /**
+   * Atomic partial upsert for the identity-shaped fields. See
+   * `TenantIdentityUpsertFields` — single source of truth for
+   * PUT /api/onboarding/identity AND the conversational onboarding
+   * execution handlers. A brand-new row gets '' for businessName
+   * (matches the established POST /api/onboarding/pack "seed a
+   * minimal row" convention) and schema defaults for everything else.
+   */
+  upsertIdentityFields(
+    tenantId: string,
+    fields: TenantIdentityUpsertFields,
+  ): Promise<TenantSettings>;
 }
 
 export interface ActiveVerticalPackValidationOptions {
@@ -1220,5 +1273,57 @@ export class InMemorySettingsRepository implements SettingsRepository {
     s.nextInvoiceNumber += 1;
     this.settings.set(tenantId, s);
     return num;
+  }
+
+  async upsertIdentityFields(
+    tenantId: string,
+    fields: TenantIdentityUpsertFields,
+  ): Promise<TenantSettings> {
+    const existing = this.settings.get(tenantId);
+    if (!existing) {
+      const created: TenantSettings = {
+        id: uuidv4(),
+        tenantId,
+        businessName: fields.businessName ?? '',
+        serviceAreaText: fields.serviceAreaText,
+        serviceAreaRadius: fields.serviceAreaRadius,
+        businessHours: fields.businessHours,
+        jobBufferMinutes: fields.jobBufferMinutes,
+        hourlyRateCents: fields.hourlyRateCents,
+        // NO fallback zone — see TenantIdentityUpsertFields.timezone.
+        timezone: fields.timezone,
+        ownerPhone: fields.ownerPhone ?? undefined,
+        estimatePrefix: 'EST-',
+        invoicePrefix: 'INV-',
+        nextEstimateNumber: 1001,
+        nextInvoiceNumber: 1001,
+        defaultPaymentTermDays: 30,
+        aiModel: fields.bootstrapAiModel,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      };
+      this.settings.set(tenantId, created);
+      return { ...created };
+    }
+
+    const updates: Partial<TenantSettings> = {};
+    if (fields.businessName !== undefined) updates.businessName = fields.businessName;
+    if (fields.serviceAreaText !== undefined) updates.serviceAreaText = fields.serviceAreaText;
+    if (fields.serviceAreaRadius !== undefined) updates.serviceAreaRadius = fields.serviceAreaRadius;
+    if (fields.businessHours !== undefined) updates.businessHours = fields.businessHours;
+    if (fields.jobBufferMinutes !== undefined) updates.jobBufferMinutes = fields.jobBufferMinutes;
+    if (fields.hourlyRateCents !== undefined) updates.hourlyRateCents = fields.hourlyRateCents;
+    if (fields.timezone !== undefined) updates.timezone = fields.timezone;
+    if (Object.prototype.hasOwnProperty.call(fields, 'ownerPhone')) {
+      updates.ownerPhone = fields.ownerPhone;
+    }
+    if (!existing.aiModel) {
+      updates.aiModel = fields.bootstrapAiModel;
+    }
+    if (Object.keys(updates).length === 0) {
+      return { ...existing };
+    }
+    const updated = (await this.update(tenantId, updates)) ?? existing;
+    return { ...updated };
   }
 }

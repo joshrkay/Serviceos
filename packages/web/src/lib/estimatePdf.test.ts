@@ -117,4 +117,50 @@ describe('printEstimateDocument', () => {
     expect(html).not.toContain('"><script>alert(1)</script>');
     expect(html).toContain('&quot;&gt;&lt;script&gt;');
   });
+  it('B7.5 — prints the descriptive unit beside the quantity', () => {
+    const { win, writes } = makeFakeWindow();
+    vi.spyOn(window, 'open').mockReturnValue(win as unknown as Window);
+    printEstimateDocument({
+      ...base,
+      lineItems: [
+        { description: 'Deck staining', qty: 240, unit: 'sq ft', rate: 3.75 },
+        { description: 'Prep labor', qty: 3, rate: 85 },
+      ],
+    });
+    const html = writes.join('');
+    expect(html).toContain('240 <span class="unit">sq ft</span>');
+    // The unit-less line stays exactly as before — no stray markup.
+    expect(html.match(/class="unit"/g)).toHaveLength(1);
+    expect(html).toContain('<td class="num">3</td>');
+  });
+
+  it('B7.5 — the unit is descriptive: it changes no printed money', () => {
+    const withUnit = makeFakeWindow();
+    vi.spyOn(window, 'open').mockReturnValue(withUnit.win as unknown as Window);
+    printEstimateDocument({
+      ...base,
+      lineItems: [{ description: 'Deck staining', qty: 240, unit: 'sq ft', rate: 3.75 }],
+    });
+    const withoutUnit = makeFakeWindow();
+    vi.spyOn(window, 'open').mockReturnValue(withoutUnit.win as unknown as Window);
+    printEstimateDocument({
+      ...base,
+      lineItems: [{ description: 'Deck staining', qty: 240, rate: 3.75 }],
+    });
+    // 240 x $3.75 = $900.00 either way.
+    expect(withUnit.writes.join('')).toContain('$900.00');
+    expect(withoutUnit.writes.join('')).toContain('$900.00');
+  });
+
+  it('B7.5 — escapes a malicious unit string', () => {
+    const { win, writes } = makeFakeWindow();
+    vi.spyOn(window, 'open').mockReturnValue(win as unknown as Window);
+    printEstimateDocument({
+      ...base,
+      lineItems: [{ description: 'X', qty: 1, unit: '<script>alert(1)</script>', rate: 1 }],
+    });
+    const html = writes.join('');
+    expect(html).not.toContain('<script>alert(1)</script>');
+    expect(html).toContain('&lt;script&gt;');
+  });
 });

@@ -69,6 +69,13 @@ function MarketingRedirect() {
  * must not hard-block the product when Stripe/Twilio are still pending.
  * Status is polled at 30s so a save elsewhere unblocks soon.
  */
+/**
+ * Paths the soft gate always allows: the proposal approval queue. `/proposals`
+ * is the alias that redirects to `/inbox` (routes.ts), so both are listed —
+ * the redirect itself happens inside the gate.
+ */
+const APPROVAL_QUEUE_PATHS = ['/inbox', '/proposals'] as const;
+
 function OnboardingGuard() {
   const location = useLocation();
   const { data, isLoading } = useOnboardingStatus(30_000, true);
@@ -78,6 +85,17 @@ function OnboardingGuard() {
   if (isLoading || !data) return <Outlet />;
 
   if (location.pathname.startsWith('/onboarding')) {
+    return <Outlet />;
+  }
+
+  // B1.19 — the approval queue is part of finishing onboarding, not part of
+  // the CRM this gate defers. Conversational onboarding ends by emitting
+  // draft proposals (one of which writes the identity fields), and the
+  // completion panel tells the owner to approve them. Gating /inbox made that
+  // instruction impossible to follow: the approval that opens the gate lived
+  // behind the gate. Letting the queue through is the minimum that breaks the
+  // deadlock — it exposes the review surface, not CRM data entry.
+  if (APPROVAL_QUEUE_PATHS.some((p) => location.pathname.startsWith(p))) {
     return <Outlet />;
   }
 

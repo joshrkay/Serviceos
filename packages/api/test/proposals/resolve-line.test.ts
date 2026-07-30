@@ -161,6 +161,54 @@ describe('U2 — resolveProposalLine', () => {
     expect(line.pricingSource).toBe('catalog'); // resolution still proceeds normally
   });
 
+  it('B7.5 — stamps the chosen candidate’s unit onto the line, and leaves it alone on a legacy candidate', async () => {
+    await repo.create(
+      ambiguousProposal({
+        payload: {
+          lineItems: [
+            {
+              id: 'l1',
+              description: 'flush valve',
+              quantity: 1,
+              unitPrice: 0,
+              pricingSource: 'ambiguous',
+              needsPricing: true,
+            },
+          ],
+        },
+        sourceContext: {
+          missingFields: ['lineItems[0].catalogItemId'],
+          catalogResolution: {
+            0: [
+              {
+                id: 'cat-a',
+                name: 'Flush valve (standard)',
+                unitPriceCents: 4500,
+                score: 0.7,
+                category: 'material',
+                unit: 'each',
+              },
+              // Legacy candidate recorded before `unit` existed.
+              {
+                id: 'cat-b',
+                name: 'Flush valve (premium)',
+                unitPriceCents: 8200,
+                score: 0.6,
+                category: 'material',
+              },
+            ],
+          },
+        },
+      }),
+    );
+
+    const picked = await call('cat-a');
+    const line = (picked.payload.lineItems as Array<Record<string, unknown>>)[0];
+    expect(line.unit).toBe('each');
+    // Descriptive only — the stamped price is still the candidate's.
+    expect(line.unitPrice).toBe(4500);
+  });
+
   it('rejects a catalogItemId that is not one of the line candidates (grounding invariant)', async () => {
     await repo.create(ambiguousProposal());
     await expect(call('cat-not-a-candidate')).rejects.toBeInstanceOf(ValidationError);
@@ -538,6 +586,44 @@ describe('B3 — resolveProposalLine — editActions branch', () => {
     expect(resolved).toBeDefined();
     expect(resolved?.metadata?.priceOverride).toBe(true);
     expect(resolved?.metadata?.target).toBe('editAction');
+  });
+
+  it('B7.5 — a catalog pick stamps the candidate’s unit; the spoken-price pick leaves the line unit-less', async () => {
+    const withUnits = () =>
+      editActionProposal({
+        sourceContext: {
+          missingFields: ['editActions[0].lineItem.catalogItemId'],
+          catalogResolution: {
+            0: [
+              {
+                id: 'cat-heater',
+                name: 'Water Heater Install',
+                unitPriceCents: 15_000,
+                score: 1,
+                category: 'labor',
+                unit: 'each',
+              },
+              // Synthetic "keep spoken price" choice — no catalog identity,
+              // so no unit; picking it must not invent one.
+              { id: 'spoken:0', name: 'Keep spoken price', unitPriceCents: 7_500, score: 0 },
+            ],
+          },
+        },
+      });
+
+    await repo.create(withUnits());
+    const picked = await call('cat-heater');
+    const line = (picked.payload.editActions as Array<Record<string, unknown>>)[0]
+      .lineItem as Record<string, unknown>;
+    expect(line.unit).toBe('each');
+
+    repo = new InMemoryProposalRepository();
+    auditRepo = new InMemoryAuditRepository();
+    await repo.create(withUnits());
+    const spoken = await call('spoken:0');
+    const spokenLine = (spoken.payload.editActions as Array<Record<string, unknown>>)[0]
+      .lineItem as Record<string, unknown>;
+    expect(spokenLine.unit).toBeUndefined();
   });
 
   it('rejects a catalogItemId not among this editAction line’s candidates (grounding invariant)', async () => {

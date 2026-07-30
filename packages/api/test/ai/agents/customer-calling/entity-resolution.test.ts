@@ -111,6 +111,28 @@ describe('planVoiceEntityLookups — intent-conditioned operator references', ()
     ]);
   });
 
+  // "Nudge the Khan estimate" resolves a PERSON. Without send_estimate_nudge
+  // in CUSTOMER_REF_INTENTS the router planned no lookup at all, so the task
+  // handler had nothing but display text (estimate_number/customer_message)
+  // to ILIKE and could never reach the customer's estimates.
+  it('resolves the spoken customer name for send_estimate_nudge', () => {
+    const lookups = planVoiceEntityLookups('send_estimate_nudge', { customerName: 'Khan' });
+    expect(lookups).toEqual([
+      { kind: 'customer', reference: 'Khan', refKey: 'customerId' },
+    ]);
+  });
+
+  it('still routes a spoken estimate NUMBER to the estimate lookup for send_estimate_nudge', () => {
+    const lookups = planVoiceEntityLookups('send_estimate_nudge', {
+      customerName: 'Khan',
+      jobReference: 'EST-0042',
+    });
+    expect(lookups).toEqual([
+      { kind: 'customer', reference: 'Khan', refKey: 'customerId' },
+      { kind: 'estimate', reference: 'EST-0042', refKey: 'estimateId' },
+    ]);
+  });
+
   it('resolves Henderson customer name for lookup_balance', () => {
     const lookups = planVoiceEntityLookups('lookup_balance', { customerName: 'Henderson' });
     expect(lookups).toEqual([

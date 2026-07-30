@@ -58,6 +58,15 @@ describe('PUT /api/onboarding/identity', () => {
       businessHours: { mon: { open: '08:00', close: '17:00' }, sat: null, sun: null },
       jobBufferMinutes: 45,
       hourlyRateCents: 15000,
+      // The real client always sends this (IdentityStep pre-fills
+      // `detectBrowserTimezone()`), and `isIdentityDone`
+      // (onboarding/derive-status.ts) now requires it: a tenant with no
+      // chosen zone cannot book at all — CreateAppointmentTaskHandler turns
+      // every spoken booking into a timezone clarification rather than guess
+      // one (Phoenix mis-booking postmortem, migration 263). Omitting it here
+      // made the fixture assert a "done" identity step for a tenant the
+      // product cannot actually serve.
+      timezone: 'America/Chicago',
     };
     const res = await request(app).put('/api/onboarding/identity').send(payload);
     expect(res.status).toBe(200);

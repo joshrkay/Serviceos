@@ -1,0 +1,11 @@
+{
+  "id": "transcript-en-route-003",
+  "type": "voice_memo",
+  "duration_seconds": 3,
+  "service_type": "electrical",
+  "transcript": "Technician: I'm running 20 minutes late.",
+  "expected_entities": {
+    "delay_minutes": 20,
+    "intent_note": "Negative pin — a stated delay must stay notify_delay, never en_route"
+  }
+}

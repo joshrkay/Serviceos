@@ -1,0 +1,10 @@
+{
+  "id": "transcript-brand-voice-lock-001",
+  "type": "voice_memo",
+  "duration_seconds": 2,
+  "service_type": "hvac",
+  "transcript": "Owner: Lock my brand voice.",
+  "expected_entities": {
+    "intent_note": "AC-4 negative pin — locking the brand voice is tap-only (Part F decision F-2). The update_brand_voice payload has no field capable of expressing brand_voice_locked, so this can never lock through voice regardless of how it classifies."
+  }
+}
