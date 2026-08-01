@@ -75,6 +75,9 @@ export interface TtsProvider {
  * you want a different voice service, swap this class at the
  * `createTtsProvider` factory in app.ts.
  */
+// Upper bound for one blocking synthesize() call across providers.
+const TTS_SYNTH_TIMEOUT_MS = 30_000;
+
 export class OpenAiTtsProvider implements TtsProvider {
   constructor(
     private readonly apiKey: string,
@@ -100,6 +103,9 @@ export class OpenAiTtsProvider implements TtsProvider {
         voice: input.voice ?? defaultVoice,
         response_format: 'mp3',
       }),
+      // fetch has no default timeout — a stalled TTS vendor would hang the
+      // voice turn indefinitely (the streaming path threads its own signal).
+      signal: AbortSignal.timeout(TTS_SYNTH_TIMEOUT_MS),
     });
     if (!res.ok) {
       const body = await res.text().catch(() => '');
@@ -151,6 +157,9 @@ export class ElevenLabsTtsProvider implements TtsProvider {
           model_id: modelId,
           voice_settings: { stability: 0.5, similarity_boost: 0.75 },
         }),
+        // Same bound as OpenAiTtsProvider — never hang a voice turn on a
+        // stalled vendor.
+        signal: AbortSignal.timeout(TTS_SYNTH_TIMEOUT_MS),
       }
     );
     if (!res.ok) {
@@ -188,16 +197,60 @@ export class ElevenLabsTtsProvider implements TtsProvider {
 export function createTtsProvider(env: {
   TTS_PROVIDER?: string;
   ELEVENLABS_API_KEY?: string;
+  ELEVENLABS_VOICE_ID?: string;
   AI_PROVIDER_API_KEY?: string;
 }): TtsProvider | undefined {
   if (env.TTS_PROVIDER === 'elevenlabs') {
     if (!env.ELEVENLABS_API_KEY) return undefined;
-    return new ElevenLabsTtsProvider(env.ELEVENLABS_API_KEY);
+    // UB-C2 — honor the same ELEVENLABS_VOICE_ID that scripts/render-fillers.ts
+    // uses, so pre-rendered filler clips and live TTS speak with ONE voice.
+    // (Per-tenant voice selection on the streaming path is a known gap:
+    // settings.ttsVoiceEn/Es are Twilio <Say> Polly voices for the Gather
+    // path — no per-tenant ElevenLabs voice mapping exists yet.)
+    return env.ELEVENLABS_VOICE_ID
+      ? new ElevenLabsTtsProvider(env.ELEVENLABS_API_KEY, env.ELEVENLABS_VOICE_ID)
+      : new ElevenLabsTtsProvider(env.ELEVENLABS_API_KEY);
   }
   if (env.AI_PROVIDER_API_KEY) {
     return new OpenAiTtsProvider(env.AI_PROVIDER_API_KEY);
   }
   return undefined;
+}
+
+/**
+ * P0 boot guard — Twilio Media Streams requires a TtsProvider capable of
+ * emitting raw PCM (`synthesizeStream`). `mediastream-adapter.ts` feeds
+ * `synthesize()`'s buffered result straight into `streamPcmAsMedia`, which
+ * assumes raw PCM16 and does no decoding — a provider that only implements
+ * `synthesize()` returns compressed audio (mp3 for OpenAI/ElevenLabs),
+ * which streams out as inaudible static with no error surfaced anywhere.
+ *
+ * Call this once at boot, right after resolving the shared TTS provider,
+ * so a misconfigured deploy (e.g. TTS_PROVIDER unset/openai with Media
+ * Streams on) fails loud instead of shipping a silent voice outage. Mirrors
+ * the fail-fast style used for DATABASE_URL elsewhere in app.ts.
+ *
+ * No-ops when Media Streams is disabled, and when no provider resolved at
+ * all (that's a distinct "no TTS configured" failure mode already surfaced
+ * via the /health warnings in app.ts).
+ */
+export function assertTtsProviderSupportsMediaStreams(input: {
+  mediaStreamsEnabled: boolean;
+  provider: TtsProvider | undefined;
+  /** Raw TTS_PROVIDER env value, for the error message only. */
+  ttsProviderEnv?: string;
+}): void {
+  if (!input.mediaStreamsEnabled) return;
+  if (!input.provider) return;
+  if (typeof input.provider.synthesizeStream === 'function') return;
+  throw new Error(
+    `TWILIO_MEDIA_STREAMS_ENABLED=true but the resolved TTS provider ` +
+      `(TTS_PROVIDER=${input.ttsProviderEnv ?? 'openai (default)'}) only implements ` +
+      `synthesize(), which returns compressed audio (e.g. mp3) unsuitable for ` +
+      `Twilio's raw-PCM media path. Media Streams requires a provider that ` +
+      `implements synthesizeStream() (raw PCM streaming) — set TTS_PROVIDER=elevenlabs ` +
+      `with ELEVENLABS_API_KEY set, or disable TWILIO_MEDIA_STREAMS_ENABLED.`
+  );
 }
 
 /**

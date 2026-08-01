@@ -4,8 +4,25 @@ import {
   DEFAULT_ESCALATION_SETTINGS,
   EscalationSettings,
   SettingsRepository,
+  TenantIdentityUpsertFields,
   TenantSettings,
+  normalizeReminderOffsets,
 } from './settings';
+
+/**
+ * node-pg returns JSONB already parsed, but tolerate a string form too so a
+ * stringified column (e.g. via some drivers/migrations) still yields an array.
+ */
+function parseJsonbArray(value: unknown): unknown {
+  if (typeof value === 'string') {
+    try {
+      return JSON.parse(value);
+    } catch {
+      return null;
+    }
+  }
+  return value;
+}
 
 function mapRow(row: Record<string, unknown>): TenantSettings {
   const terminologyRaw = row.terminology_preferences as Record<string, unknown> | null;
@@ -29,7 +46,11 @@ function mapRow(row: Record<string, unknown>): TenantSettings {
     businessPhone: (row.business_phone as string) ?? undefined,
     businessEmail: (row.business_email as string) ?? undefined,
     ownerPhone: (row.owner_phone as string) ?? undefined,
-    timezone: row.timezone as string,
+    // NULL ⇒ undefined ("never chosen"), never a substituted default. See
+    // migration 263 and TenantSettings.timezone.
+    ...(typeof row.timezone === 'string' && row.timezone.length > 0
+      ? { timezone: row.timezone }
+      : {}),
     estimatePrefix: row.estimate_prefix as string,
     invoicePrefix: row.invoice_prefix as string,
     nextEstimateNumber: row.next_estimate_number as number,
@@ -50,10 +71,14 @@ function mapRow(row: Record<string, unknown>): TenantSettings {
     // DEFAULT value.
     autoApplyInternalUpdates: row.auto_apply_internal_updates as boolean | undefined,
     autoSendAppointmentReminders: row.auto_send_appointment_reminders as boolean | undefined,
+    appointmentReminderOffsetsHours: normalizeReminderOffsets(
+      parseJsonbArray(row.appointment_reminder_offsets_hours),
+    ),
     autoInvoiceOnCompletion: row.auto_invoice_on_completion as boolean | undefined,
     // Migration 194 — DEFAULT TRUE at the column level so legacy rows
     // surface as `true` (matches the "built-in, included" framing).
     sendThankYouSms: row.send_thank_you_sms as boolean | undefined,
+    sendReviewRequest: row.send_review_request as boolean | undefined,
     billLaborFromTimeEntries: row.bill_labor_from_time_entries as boolean | undefined,
     batchInvoiceEnabled: row.batch_invoice_enabled as boolean | undefined,
     milestoneBillingEnabled: row.milestone_billing_enabled as boolean | undefined,
@@ -99,6 +124,7 @@ function mapRow(row: Record<string, unknown>): TenantSettings {
     // this mapper's convention.
     serviceAreaText: (row.service_area_text as string | null) ?? undefined,
     serviceAreaRadius: (row.service_area_radius as number | null) ?? undefined,
+    serviceAreaZips: (row.service_area_zips as string[] | null) ?? undefined,
     businessHours: (() => {
       const raw = row.business_hours as
         | Record<string, { open: string; close: string } | null>
@@ -115,6 +141,16 @@ function mapRow(row: Record<string, unknown>): TenantSettings {
     // convention as all other nullable optional columns here).
     voiceAgentName: (row.voice_agent_name as string | null) ?? undefined,
     voiceGreeting: (row.voice_greeting as string | null) ?? undefined,
+    // Feature 4 — migration 147. Vapi binding columns. findByTenant uses
+    // SELECT *, so the row carries these; NULL → undefined per this mapper's
+    // convention. Read-only projection (set by the provisioning worker /
+    // voice-config raw SQL, not the update fieldMap below).
+    voiceId: (row.voice_id as string | null) ?? undefined,
+    vapiAssistantId: (row.vapi_assistant_id as string | null) ?? undefined,
+    // Story 15.2 — migration 205. speed_to_lead_enabled is NOT NULL DEFAULT
+    // false so legacy rows read false; template NULL → undefined.
+    speedToLeadEnabled: (row.speed_to_lead_enabled as boolean | null) ?? false,
+    speedToLeadTemplate: (row.speed_to_lead_template as string | null) ?? undefined,
     escalationSettings: (() => {
       const raw = row.escalation_settings as Partial<EscalationSettings> | null | undefined;
       if (!raw || typeof raw !== 'object' || Object.keys(raw).length === 0) {
@@ -129,6 +165,15 @@ function mapRow(row: Record<string, unknown>): TenantSettings {
       const raw = row.brand_voice as Record<string, unknown> | null | undefined;
       if (!raw || typeof raw !== 'object' || Object.keys(raw).length === 0) return undefined;
       return raw as TenantSettings['brandVoice'];
+    })(),
+    // N-011 — migration 238 bookkeeping columns. NOT NULL DEFAULT 0/false so a
+    // pre-migration row reads version 0 / unlocked; updated_at NULL → null.
+    brandVoiceVersion: (row.brand_voice_version as number | null) ?? 0,
+    brandVoiceLocked: (row.brand_voice_locked as boolean | null) ?? false,
+    brandVoiceUpdatedAt: (() => {
+      const v = row.brand_voice_updated_at as Date | string | null | undefined;
+      if (v == null) return null;
+      return v instanceof Date ? v.toISOString() : String(v);
     })(),
     // Migration 120. NULL → undefined to match the InMemory repo shape.
     googleReviewUrl: (row.google_review_url as string | null) ?? undefined,
@@ -162,6 +207,27 @@ function mapRow(row: Record<string, unknown>): TenantSettings {
     // FIX 10(i) (ANS-001) — migration 197. NULL → undefined = the embedded
     // placeholder script (LIFE_SAFETY_E1_SCRIPT) is still in effect.
     e1ReviewedScript: (row.e1_reviewed_script as string | null) ?? undefined,
+    // Epic 12.6 — migration 204. Opt-out: column defaults true, so a
+    // pre-migration row reads as enabled.
+    weeklyFeedbackEnabled: (row.weekly_feedback_enabled as boolean | null) ?? true,
+    // UB-D / D-015 — migration 231. enabled is NOT NULL DEFAULT FALSE so
+    // legacy rows read false. threshold is NUMERIC(3,2), which node-pg
+    // returns as a STRING (the only fractional NUMERIC column on this
+    // table) — convert explicitly instead of the bare int-column casts
+    // used elsewhere in this mapper.
+    autonomousBookingEnabled: (row.autonomous_booking_enabled as boolean | null) ?? false,
+    autonomousBookingThreshold:
+      row.autonomous_booking_threshold != null
+        ? Number(row.autonomous_booking_threshold)
+        : undefined,
+    // D-018 (WS18) — migration 247. enabled is NOT NULL DEFAULT FALSE so
+    // legacy rows read false; max_cents is a nullable BIGINT (node-pg
+    // returns bigint as a string — convert explicitly).
+    autonomousCloseEnabled: (row.autonomous_close_enabled as boolean | null) ?? false,
+    autonomousCloseMaxCents:
+      row.autonomous_close_max_cents != null
+        ? Number(row.autonomous_close_max_cents)
+        : undefined,
     createdAt: new Date(row.created_at as string),
     updatedAt: new Date(row.updated_at as string),
   };
@@ -250,9 +316,15 @@ export class PgSettingsRepository extends PgBaseRepository implements SettingsRe
 
   async update(tenantId: string, updates: Partial<TenantSettings>): Promise<TenantSettings | null> {
     return this.withTenantTransaction(tenantId, async (client) => {
-      // If terminology or packs are being updated, we need to merge with existing
-      const needsTerminologyMerge =
-        'terminologyPreferences' in updates || 'activeVerticalPacks' in updates;
+      // If terminology or packs are being updated, we need to merge with existing.
+      // Sweep-2 S1: an `undefined` VALUE means "untouched", never "clear" —
+      // the contract types these keys as `string[]` / `Record<string,string>`
+      // (no null), so an explicit clear is `[]` / `{}`. Keying off `'x' in
+      // updates` let a stray `activeVerticalPacks: undefined` wipe the
+      // tenant's packs on every unrelated save.
+      const touchesTerms = updates.terminologyPreferences !== undefined;
+      const touchesPacks = updates.activeVerticalPacks !== undefined;
+      const needsTerminologyMerge = touchesTerms || touchesPacks;
 
       let terminologyJson: Record<string, unknown> | null | undefined;
 
@@ -266,11 +338,11 @@ export class PgSettingsRepository extends PgBaseRepository implements SettingsRe
         const currentRaw = existing.rows[0].terminology_preferences as Record<string, unknown> | null;
         const { _activeVerticalPacks: currentPacks, ...currentTerms } = currentRaw ?? {};
 
-        const newTerms = 'terminologyPreferences' in updates
+        const newTerms = touchesTerms
           ? updates.terminologyPreferences
           : (Object.keys(currentTerms).length > 0 ? currentTerms as Record<string, string> : undefined);
 
-        const newPacks = 'activeVerticalPacks' in updates
+        const newPacks = touchesPacks
           ? updates.activeVerticalPacks
           : (Array.isArray(currentPacks) ? currentPacks as string[] : undefined);
 
@@ -297,6 +369,8 @@ export class PgSettingsRepository extends PgBaseRepository implements SettingsRe
         autoInvoiceOnCompletion: 'auto_invoice_on_completion',
         // Migration 194.
         sendThankYouSms: 'send_thank_you_sms',
+        // Migration 214 — post-job 24h review request opt-out.
+        sendReviewRequest: 'send_review_request',
         billLaborFromTimeEntries: 'bill_labor_from_time_entries',
         batchInvoiceEnabled: 'batch_invoice_enabled',
         milestoneBillingEnabled: 'milestone_billing_enabled',
@@ -314,6 +388,10 @@ export class PgSettingsRepository extends PgBaseRepository implements SettingsRe
         discountNeverBelowCatalog: 'discount_never_below_catalog',
         // Tier 4 — migration 079.
         depositTimingPolicy: 'deposit_timing_policy',
+        // Foundation gate (I12/V17) — migration 148 stored it, onboarding
+        // wrote it, but the generic update path dropped it, so the travel
+        // buffer could never be changed from the settings surface.
+        jobBufferMinutes: 'job_buffer_minutes',
         // §9 — migration 098.
         hourlyRateCents: 'hourly_rate_cents',
         // P22-005 (U7) — migration 181.
@@ -337,6 +415,9 @@ export class PgSettingsRepository extends PgBaseRepository implements SettingsRe
         transferNumber: 'transfer_number',
         // Migration 120 — per-tenant AI model override.
         aiModel: 'ai_model',
+        // Story 15.2 — migration 205.
+        speedToLeadEnabled: 'speed_to_lead_enabled',
+        speedToLeadTemplate: 'speed_to_lead_template',
         // RV-063 — migration 163. digest_time accepts 'HH:MM' (Postgres
         // casts to TIME); digest_channel is CHECK-constrained in the DB
         // and validated at the route boundary.
@@ -345,6 +426,16 @@ export class PgSettingsRepository extends PgBaseRepository implements SettingsRe
         digestChannel: 'digest_channel',
         // FIX 10(i) (ANS-001) — migration 197.
         e1ReviewedScript: 'e1_reviewed_script',
+        // Epic 12.6 — migration 204.
+        weeklyFeedbackEnabled: 'weekly_feedback_enabled',
+        // UB-D / D-015 — migration 231. Both NOT NULL with column defaults;
+        // route validation (Zod + validateCommonSettingsFields) never passes
+        // null through, so the generic `value ?? null` handler is safe.
+        autonomousBookingEnabled: 'autonomous_booking_enabled',
+        autonomousBookingThreshold: 'autonomous_booking_threshold',
+        // D-018 (WS18) — migration 247.
+        autonomousCloseEnabled: 'autonomous_close_enabled',
+        autonomousCloseMaxCents: 'autonomous_close_max_cents',
         updatedAt: 'updated_at',
       };
 
@@ -362,6 +453,32 @@ export class PgSettingsRepository extends PgBaseRepository implements SettingsRe
           setClauses.push(`auto_approve_threshold = $${paramIndex}::jsonb`);
           const v = value as Record<string, number> | undefined | null;
           params.push(v && Object.keys(v).length > 0 ? JSON.stringify(v) : '{}');
+          paramIndex++;
+          continue;
+        }
+        // Story 10.2 — appointment_reminder_offsets_hours is JSONB. Normalize
+        // (dedupe/clamp/sort/cap) before persist so the column never holds an
+        // out-of-range or duplicate cadence; a cleared write resets to [24].
+        if (key === 'appointmentReminderOffsetsHours') {
+          setClauses.push(`appointment_reminder_offsets_hours = $${paramIndex}::jsonb`);
+          params.push(JSON.stringify(normalizeReminderOffsets(value)));
+          paramIndex++;
+          continue;
+        }
+        // Foundation gate (I12/V17) — business_hours is JSONB and was
+        // previously writable only through the onboarding identity route's
+        // raw SQL; the generic update silently DROPPED the key, so a
+        // settings-surface hours change never reached the scheduler. A
+        // cleared write ('{}' for undefined/empty/null) reads back as
+        // "not configured" and the scheduler falls back to defaults.
+        if (key === 'businessHours') {
+          setClauses.push(`business_hours = $${paramIndex}::jsonb`);
+          const v = value as Record<string, unknown> | undefined | null;
+          params.push(
+            v && typeof v === 'object' && Object.keys(v).length > 0
+              ? JSON.stringify(v)
+              : '{}',
+          );
           paramIndex++;
           continue;
         }
@@ -409,6 +526,16 @@ export class PgSettingsRepository extends PgBaseRepository implements SettingsRe
           setClauses.push(`supported_languages = $${paramIndex}::text[]`);
           const v = value as string[] | undefined | null;
           params.push(Array.isArray(v) && v.length > 0 ? v : ['en']);
+          paramIndex++;
+          continue;
+        }
+        // Foundation gate (F2 term 5 / V17) — service_area_zips is a native
+        // text[] (NOT NULL DEFAULT '{}'). Cleared (null / []) writes '{}' =
+        // unbounded area; previously writable only via onboarding raw SQL.
+        if (key === 'serviceAreaZips') {
+          setClauses.push(`service_area_zips = $${paramIndex}::text[]`);
+          const v = value as string[] | undefined | null;
+          params.push(Array.isArray(v) ? v : []);
           paramIndex++;
           continue;
         }
@@ -464,6 +591,84 @@ export class PgSettingsRepository extends PgBaseRepository implements SettingsRe
       );
       if (result.rows.length === 0) throw new Error('Settings not found');
       return result.rows[0].current_number as number;
+    });
+  }
+
+  /**
+   * B1.19 — single atomic upsert for the identity-shaped fields, shared
+   * by PUT /api/onboarding/identity (form wizard) and the conversational
+   * onboarding_tenant_settings / onboarding_schedule execution handlers.
+   * One INSERT ... ON CONFLICT statement (not a read-then-write) so two
+   * proposals for the same tenant approved back-to-back — one from the
+   * business-profile state, one from the schedule state — can't race
+   * each other into a lost update or a duplicate-key error.
+   *
+   * Every optional field COALESCEs to the existing column value when
+   * omitted, on both the INSERT branch (via a literal fallback matching
+   * the column's own DEFAULT) and the UPDATE branch (via
+   * `tenant_settings.<col>`). `timezone` and `owner_phone` keep their
+   * original special-cased semantics (see TenantIdentityUpsertFields):
+   * timezone never regresses to unset once chosen; owner_phone is
+   * written only when the caller passed the key at all (tri-state).
+   */
+  async upsertIdentityFields(
+    tenantId: string,
+    fields: TenantIdentityUpsertFields,
+  ): Promise<TenantSettings> {
+    return this.withTenantTransaction(tenantId, async (client) => {
+      const writeOwnerPhone = Object.prototype.hasOwnProperty.call(fields, 'ownerPhone');
+      const result = await client.query(
+        `INSERT INTO tenant_settings (
+           id, tenant_id, business_name, service_area_text, service_area_radius,
+           business_hours, job_buffer_minutes, hourly_rate_cents,
+           timezone, owner_phone, ai_model, estimate_prefix, invoice_prefix,
+           next_estimate_number, next_invoice_number, default_payment_term_days
+         )
+         VALUES (
+           gen_random_uuid(), $1,
+           COALESCE($2, ''),
+           $3,
+           $4,
+           COALESCE($5::jsonb, '{}'::jsonb),
+           COALESCE($6, 30),
+           $7,
+           -- NO fallback zone on first insert either — see
+           -- TenantIdentityUpsertFields.timezone / migration 263.
+           $8,
+           $9,
+           $11,
+           'EST-', 'INV-', 1001, 1001, 30
+         )
+         ON CONFLICT (tenant_id) DO UPDATE SET
+           business_name        = COALESCE($2, tenant_settings.business_name),
+           service_area_text    = COALESCE($3, tenant_settings.service_area_text),
+           service_area_radius  = COALESCE($4, tenant_settings.service_area_radius),
+           business_hours       = COALESCE($5::jsonb, tenant_settings.business_hours),
+           job_buffer_minutes   = COALESCE($6, tenant_settings.job_buffer_minutes),
+           hourly_rate_cents    = COALESCE($7, tenant_settings.hourly_rate_cents),
+           timezone             = COALESCE($8, tenant_settings.timezone),
+           owner_phone          = CASE
+             WHEN $10::boolean THEN $9
+             ELSE tenant_settings.owner_phone
+           END,
+           ai_model             = COALESCE(tenant_settings.ai_model, $11),
+           updated_at           = now()
+         RETURNING *`,
+        [
+          tenantId,
+          fields.businessName ?? null,
+          fields.serviceAreaText ?? null,
+          fields.serviceAreaRadius ?? null,
+          fields.businessHours ? JSON.stringify(fields.businessHours) : null,
+          fields.jobBufferMinutes ?? null,
+          fields.hourlyRateCents ?? null,
+          fields.timezone ?? null,
+          writeOwnerPhone ? (fields.ownerPhone ?? null) : null,
+          writeOwnerPhone,
+          fields.bootstrapAiModel,
+        ],
+      );
+      return mapRow(result.rows[0]);
     });
   }
 }

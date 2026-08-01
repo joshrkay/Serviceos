@@ -71,7 +71,6 @@ import { Role, Permission, hasPermission, getPermissionContract } from '../../sr
 
 const REPO_ROOT = path.resolve(__dirname, '../../../..');
 const API_SRC = path.resolve(REPO_ROOT, 'packages/api/src');
-const AGENT_PY = path.resolve(REPO_ROOT, 'experiments/service-os-agent');
 
 // ────────────────────────────────────────────────────────────────────────────
 // Helpers: file and content searches across the repo surface.
@@ -80,15 +79,6 @@ const AGENT_PY = path.resolve(REPO_ROOT, 'experiments/service-os-agent');
 async function exists(relPath: string): Promise<boolean> {
   try {
     await fs.access(path.resolve(API_SRC, relPath));
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-async function existsAt(absRoot: string, relPath: string): Promise<boolean> {
-  try {
-    await fs.access(path.resolve(absRoot, relPath));
     return true;
   } catch {
     return false;
@@ -137,14 +127,6 @@ async function grepRoots(roots: string[], pattern: RegExp, extensions: Set<strin
 
 async function grepApiSrc(pattern: RegExp): Promise<string[]> {
   return grepRoots([API_SRC], pattern, new Set(['.ts']));
-}
-
-// Search both the TS API source and the Python agent service for any file
-// matching the pattern. This is the shape the agent-platform architecture
-// takes: MCP servers, ceiling constants, and agent definitions live in
-// service-os-agent/ while business logic lives in packages/api/src/.
-async function grepAgentStack(pattern: RegExp): Promise<string[]> {
-  return grepRoots([API_SRC, AGENT_PY], pattern, new Set(['.ts', '.py']));
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -557,92 +539,14 @@ describe('D9 — Hard gates at MCP tool layer', () => {
     expect(await exists('proposals/execution/executor.ts')).toBe(true);
   });
 
-  it('MCP tool layer scaffold exists in the Python agent service', async () => {
-    // Decision 9 lives in the Python side per the Hybrid framework
-    // decision: MCP servers are Python modules under service-os-agent/
-    // so they can be wrapped by a real claude-agent-sdk MCP server in the
-    // next slice. A server must declare a tenant-scoped call_tool path.
-    const init = await existsAt(AGENT_PY, 'mcp_servers/__init__.py');
-    const jobs = await existsAt(AGENT_PY, 'mcp_servers/jobs_server.py');
-    expect(init && jobs).toBe(true);
-
-    const hits = await grepAgentStack(/class JobsServer|def call_tool|async def call_tool/);
-    expect(hits.length).toBeGreaterThan(0);
-  });
-
-  it('MCP tool layer enforces tenant isolation, not the prompt', async () => {
-    const jobs = await fs.readFile(
-      path.resolve(AGENT_PY, 'mcp_servers/jobs_server.py'),
-      'utf8'
-    );
-    // The server must raise when tenant_id is missing — tenant isolation
-    // at the tool layer, not the prompt. This is the architectural line
-    // the retrospective drew; the test enforces it.
-    expect(jobs).toMatch(/tenant_id is required/);
-    expect(jobs).toMatch(/PermissionError/);
-  });
-
-  it('$500 ceiling constant is declared at the MCP tool layer', async () => {
-    // Decision 9: ceilings are constants in the tool layer, not in the
-    // prompt. The canonical declaration lives in
-    // service-os-agent/mcp_servers/ceilings.py — every server imports
-    // from there. Step 0 slice #2 extracted the constant from
-    // jobs_server.py into the shared module so jobs_server, money_server,
-    // and future servers all reference the same value.
-    const hits = await grepAgentStack(/MAX_UNATTENDED_CENTS/);
-    expect(hits.length).toBeGreaterThan(0);
-
-    const ceilings = await fs.readFile(
-      path.resolve(AGENT_PY, 'mcp_servers/ceilings.py'),
-      'utf8'
-    );
-    expect(ceilings).toMatch(/MAX_UNATTENDED_CENTS\s*:\s*int\s*=\s*50_000/);
-  });
-
-  it('tool schemas carry an explicit money_ceiling_cents field', async () => {
-    // New tools inherit the ceiling discipline via the ToolSchema shape.
-    // Adding a money-moving tool without setting the field forces a
-    // conscious decision about its ceiling at review time.
-    const jobs = await fs.readFile(
-      path.resolve(AGENT_PY, 'mcp_servers/jobs_server.py'),
-      'utf8'
-    );
-    expect(jobs).toMatch(/money_ceiling_cents/);
-  });
-
-  it('voice confirmation is the second factor for money-moving tools above the ceiling', async () => {
-    // money_server.py inspects voice_confirmation_token at call_tool
-    // BEFORE invoking the handler. Above money_ceiling_cents without
-    // a token, the call raises PermissionError. The Python smoke test
-    // in step 0 slice #2 verifies this end-to-end at runtime; this
-    // assertion locks the source-level shape so the gate cannot
-    // silently regress.
-    const money = await fs.readFile(
-      path.resolve(AGENT_PY, 'mcp_servers/money_server.py'),
-      'utf8'
-    );
-    expect(money).toMatch(/voice_confirmation_token/);
-    expect(money).toMatch(/has_voice_token/);
-    expect(money).toMatch(/exceeds.*ceiling.*voice_confirmation_token required/s);
-  });
-
-  it('adversarial: tool call above ceiling without token is rejected at the tool layer, not the prompt', async () => {
-    // The check sits inside MoneyServer.call_tool — code path, not
-    // prompt instruction. The handler is never invoked when the
-    // gate fails. Even prompt-injection that tells the agent
-    // "ceiling lifted" cannot bypass this because the gate is
-    // enforced before reg.handler() runs.
-    const money = await fs.readFile(
-      path.resolve(AGENT_PY, 'mcp_servers/money_server.py'),
-      'utf8'
-    );
-    // Source-level structure check: the ceiling condition appears
-    // textually before the handler invocation.
-    const ceilingIdx = money.search(/exceeds[\s\S]*ceiling[\s\S]*voice_confirmation_token required/);
-    const handlerIdx = money.indexOf('return await reg.handler(');
-    expect(ceilingIdx).toBeGreaterThan(0);
-    expect(handlerIdx).toBeGreaterThan(ceilingIdx);
-  });
+  // NOTE (2026-07 cleanup): this describe block previously contained five
+  // more tests asserting MCP-tool-layer ceiling/gate behavior against
+  // experiments/service-os-agent (a quarantined, never-deployed Python
+  // prototype with known defects — see /experiments/README.md). Those
+  // tests were deleted with /experiments removal: they pinned "founding
+  // decisions" against code that proves nothing about the shipping
+  // product. D9's undo-window guarantee (below) is enforced against the
+  // real TS proposal executor and remains.
 
   it('5-second undo window: executor refuses inside window; undoProposal transitions to undone', async () => {
     // The full runtime coverage lives in:
@@ -791,205 +695,18 @@ describe('A1 — Multi-tenant managed agent runtime', () => {
     expect(appTs).toMatch(/DATABASE_URL is required in production/);
   });
 
-  it('Agent primitive is data: name, scope, prompt, memory, mcp_tools, trust_tier, triggers', async () => {
-    // The retrospective lesson was that "agent platform" means agents are
-    // DATA, not hardcoded code paths. The primitive lives in the Python
-    // agent service (per the Hybrid framework decision) and must
-    // include every field the platform dispatches on.
-    const primitive = await fs.readFile(
-      path.resolve(AGENT_PY, 'agent/primitive.py'),
-      'utf8'
-    );
-    for (const field of [
-      'name',
-      'scope',
-      'system_prompt',
-      'memory_namespace',
-      'mcp_tools',
-      'trust_tier',
-      'triggers',
-    ]) {
-      expect(primitive).toMatch(new RegExp(`\\b${field}\\b`));
-    }
-    // The trust tiers must match Decision 3's action classes.
-    for (const tier of [
-      'autonomous',
-      'graduates_fast',
-      'graduates_slowly',
-      'always_asks',
-    ]) {
-      expect(primitive).toMatch(new RegExp(`"${tier}"`));
-    }
-  });
-
-  it('CaptureAgent is defined as a first-class data instance', async () => {
-    const capture = await fs.readFile(
-      path.resolve(AGENT_PY, 'agents/capture.py'),
-      'utf8'
-    );
-    expect(capture).toMatch(/CAPTURE_AGENT\s*=\s*Agent\(/);
-    expect(capture).toMatch(/trust_tier="autonomous"/);
-    expect(capture).toMatch(/mcp_tools=\("jobs_server",?\s*\)/);
-  });
-
-  it('InvoiceAgent is defined as a first-class data instance', async () => {
-    const invoice = await fs.readFile(
-      path.resolve(AGENT_PY, 'agents/invoice.py'),
-      'utf8'
-    );
-    expect(invoice).toMatch(/INVOICE_AGENT\s*=\s*Agent\(/);
-    // Money-moving agents must NOT be autonomous (Decision 3).
-    expect(invoice).toMatch(/trust_tier="graduates_slowly"/);
-    // Must reach money_server for sends + AR.
-    expect(invoice).toMatch(/mcp_tools=\([^)]*"money_server"/);
-    // Must be triggered by capture handoff (inter-agent graph edge).
-    expect(invoice).toMatch(/handoff:capture/);
-  });
-
-  it('PaymentAgent is defined as a first-class data instance', async () => {
-    const payment = await fs.readFile(
-      path.resolve(AGENT_PY, 'agents/payment.py'),
-      'utf8'
-    );
-    expect(payment).toMatch(/PAYMENT_AGENT\s*=\s*Agent\(/);
-    expect(payment).toMatch(/trust_tier="graduates_slowly"/);
-    // Payment agent has narrower tool scope: only money_server.
-    // It cannot draft new invoices (that's the InvoiceAgent's job).
-    expect(payment).toMatch(/mcp_tools=\("money_server",?\s*\)/);
-    // Triggered by Stripe webhooks + scheduled AR sweep, not by voice.
-    expect(payment).toMatch(/webhook:stripe/);
-    expect(payment).toMatch(/schedule:cron:daily_ar_sweep/);
-  });
-
-  it('agents/__init__.py exports the three v1 agents', async () => {
-    const init = await fs.readFile(
-      path.resolve(AGENT_PY, 'agents/__init__.py'),
-      'utf8'
-    );
-    for (const name of ['CAPTURE_AGENT', 'INVOICE_AGENT', 'PAYMENT_AGENT']) {
-      expect(init).toContain(name);
-    }
-  });
-
-  it('Python agent-platform surface does not import supabase directly', async () => {
-    // Writes must go through the TS API so the proposal gate, audit
-    // trail, RLS context, and billing invariants are preserved. The
-    // invariant scans the entire new agent-platform surface — agents,
-    // mcp_servers, clients — not just the first MCP server. Any new file
-    // under these directories must route writes through the TS API.
-    //
-    // The legacy `agent/nodes.py` still imports supabase for the
-    // pre-retrospective linear graph; that migration is tracked as a
-    // separate todo below (part of step 0 slice #3).
-    const platformRoots = [
-      path.resolve(AGENT_PY, 'agents'),
-      path.resolve(AGENT_PY, 'mcp_servers'),
-      path.resolve(AGENT_PY, 'clients'),
-    ];
-    const supabaseHits = await grepRoots(
-      platformRoots,
-      /(^|\n)\s*(from supabase|import supabase)\b/,
-      new Set(['.py'])
-    );
-    expect(supabaseHits).toEqual([]);
-
-    // And the jobs server specifically must use the TS API client.
-    const jobs = await fs.readFile(
-      path.resolve(AGENT_PY, 'mcp_servers/jobs_server.py'),
-      'utf8'
-    );
-    expect(jobs).toMatch(/from clients\.service_os_api/);
-  });
-
-  it.todo(
-    'legacy service-os-agent/agent/nodes.py migrates off direct Supabase access (part of step 0 slice #3)'
-  );
-
-  it.todo(
-    'each agent runs under an outer LangGraph dispatcher with checkpointing and interrupt-based approval gates'
-  );
-});
-
-describe('A2 — MCP servers (target 12–14)', () => {
-  it('jobs_server (read/draft) is defined', async () => {
-    expect(await existsAt(AGENT_PY, 'mcp_servers/jobs_server.py')).toBe(true);
-  });
-
-  it('money_server (write/AR) is defined', async () => {
-    expect(await existsAt(AGENT_PY, 'mcp_servers/money_server.py')).toBe(true);
-  });
-
-  it('ceiling constants live in a single shared module', async () => {
-    // Decision 9: ceilings live at the MCP tool layer, in one place.
-    // mcp_servers/ceilings.py is that place. Both jobs_server and
-    // money_server import from it, not from each other.
-    expect(await existsAt(AGENT_PY, 'mcp_servers/ceilings.py')).toBe(true);
-    const ceilings = await fs.readFile(
-      path.resolve(AGENT_PY, 'mcp_servers/ceilings.py'),
-      'utf8'
-    );
-    expect(ceilings).toMatch(/MAX_UNATTENDED_CENTS\s*:\s*int\s*=\s*50_000/);
-    expect(ceilings).toMatch(/INVOICE_SEND_CEILING_CENTS/);
-    expect(ceilings).toMatch(/REFUND_HARD_CAP_CENTS/);
-
-    const money = await fs.readFile(
-      path.resolve(AGENT_PY, 'mcp_servers/money_server.py'),
-      'utf8'
-    );
-    expect(money).toMatch(/from mcp_servers\.ceilings import/);
-
-    const jobs = await fs.readFile(
-      path.resolve(AGENT_PY, 'mcp_servers/jobs_server.py'),
-      'utf8'
-    );
-    expect(jobs).toMatch(/from mcp_servers\.ceilings import/);
-  });
-
-  it('money_server tools declare ceilings explicitly', async () => {
-    const money = await fs.readFile(
-      path.resolve(AGENT_PY, 'mcp_servers/money_server.py'),
-      'utf8'
-    );
-    // Each money-moving tool must set money_ceiling_cents from the
-    // shared constants. The shape is enforced by code review through
-    // this test — adding a money tool without a ceiling fails review.
-    expect(money).toMatch(/money_ceiling_cents=INVOICE_SEND_CEILING_CENTS/);
-    expect(money).toMatch(/money_ceiling_cents=PAYMENT_LINK_CEILING_CENTS/);
-    expect(money).toMatch(/money_ceiling_cents=DUNNING_SEND_CEILING_CENTS/);
-  });
-
-  it('money_server enforces the ceiling at call_tool, not in the prompt', async () => {
-    const money = await fs.readFile(
-      path.resolve(AGENT_PY, 'mcp_servers/money_server.py'),
-      'utf8'
-    );
-    // The check must happen inside call_tool() before the handler
-    // runs, AND must look at amount_cents (not just trust the prompt).
-    expect(money).toMatch(/async def call_tool/);
-    expect(money).toMatch(/voice_confirmation_token required/i);
-    expect(money).toMatch(/amount_cents/);
-  });
-
-  it('refunds always require voice confirmation regardless of amount', async () => {
-    // Decision 3 "irreversible actions always ask". The issue_refund
-    // tool must set always_requires_voice_confirmation=True so even a
-    // $1 refund is gated. Hard cap is set so a $20k refund fails
-    // outright even WITH a token, escalating to a human.
-    const money = await fs.readFile(
-      path.resolve(AGENT_PY, 'mcp_servers/money_server.py'),
-      'utf8'
-    );
-    const refundBlock = money.slice(
-      money.indexOf('"issue_refund"'),
-      money.indexOf('"issue_refund"') + 1500
-    );
-    expect(refundBlock).toMatch(/always_requires_voice_confirmation=True/);
-    expect(refundBlock).toMatch(/hard_cap_cents=REFUND_HARD_CAP_CENTS/);
-  });
-
-  it.todo('internal MCP servers: customers, inventory, schedule, intel');
-
-  it.todo('external MCP wrappers: Stripe, Plaid, Twilio, Google Maps, suppliers, DocuSign, Gmail/Calendar');
+  // NOTE (2026-07 cleanup): A1 previously asserted the shape of an
+  // "Agent primitive" (CaptureAgent/InvoiceAgent/PaymentAgent) and A2
+  // ("MCP servers (target 12-14)") asserted MCP-server ceiling/gate
+  // behavior — both entirely against experiments/service-os-agent, a
+  // quarantined, never-deployed Python LangGraph prototype with known
+  // defects (unauthenticated /process endpoint, NameError crash). Those
+  // tests were deleted along with /experiments: they pinned "founding
+  // decisions" against code that was never the shipping product. A1's
+  // remaining two tests (RLS/tenant middleware, no silent DB fallback)
+  // assert against the real TS API and remain. A2 had no assertions
+  // left once its experiments-dependent tests were removed, so the
+  // A2 describe block was deleted outright.
 });
 
 describe('A3 — Memory synthesis as core infrastructure', () => {

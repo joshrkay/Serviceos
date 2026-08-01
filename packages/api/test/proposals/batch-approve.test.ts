@@ -125,4 +125,43 @@ describe('P2-035 — approveProposalsBatch', () => {
     expect(approvedEvents).toHaveLength(2);
     expect(approvedEvents.map((e) => e.entityId).sort()).toEqual([...ids].sort());
   });
+
+  // U1 lane backstop — the batch lane must never sweep a non-capture proposal,
+  // even if a (buggy or malicious) client puts one in the id list. The client
+  // filter (isBatchEligible) is the first guard; this is the server truth.
+  it('non-capture ids fail per-id with BATCH_NON_CAPTURE; capture ids still approve', async () => {
+    const repo = new InMemoryProposalRepository();
+    const audit = new InMemoryAuditRepository();
+    const capture = await seedReady(repo); // create_customer (capture)
+    const money = await seedReady(repo, {
+      proposalType: 'record_payment',
+      payload: { invoiceId: 'inv-1', amountCents: 12300 },
+      summary: 'Record $123 payment',
+    });
+    const comms = await seedReady(repo, {
+      proposalType: 'send_invoice',
+      payload: { invoiceId: 'inv-1' },
+      summary: 'Send invoice to Jane',
+    });
+    const irreversible = await seedReady(repo, {
+      proposalType: 'cancel_appointment',
+      payload: { appointmentId: 'appt-1' },
+      summary: 'Cancel Tuesday visit',
+    });
+
+    const result = await approveProposalsBatch(
+      repo, tenantId, [capture, money, comms, irreversible], actorId, 'owner', audit,
+    );
+
+    expect(result.approved).toEqual([capture]);
+    expect(result.failed.map((f) => f.id).sort()).toEqual([money, comms, irreversible].sort());
+    expect(result.failed.every((f) => f.reason === 'BATCH_NON_CAPTURE')).toBe(true);
+    // The blocked proposals are untouched — still approvable individually.
+    for (const id of [money, comms, irreversible]) {
+      const fresh = await repo.findById(tenantId, id);
+      expect(fresh?.status).toBe('ready_for_review');
+    }
+    // Exactly one audit event: only the capture approval ran.
+    expect(audit.getAll().filter((e) => e.eventType === 'proposal.approved')).toHaveLength(1);
+  });
 });

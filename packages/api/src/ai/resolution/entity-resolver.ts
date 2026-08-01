@@ -28,7 +28,12 @@ export type EntityKind =
   | 'estimate'
   // RV-072 — a proposal awaiting review (status draft / ready_for_review),
   // resolved by the voice approval channel ("approve the Henderson estimate").
-  | 'pending_proposal';
+  | 'pending_proposal'
+  // U1 (agent wave) — a tenant team member spoken by name ("give it to
+  // Carlos"). Resolved against users (role technician/dispatcher/owner) so
+  // reassign/add-crew/remove-crew proposals carry a verified technician id
+  // instead of stalling in draft on a free-text name.
+  | 'technician';
 
 /**
  * Confidence threshold above which a match is considered "resolved"
@@ -37,6 +42,18 @@ export type EntityKind =
  * none above → not_found.
  */
 export const TAU_ENT = 0.8;
+
+/**
+ * Lower confidence band (τ_ent_confirm_low) for a "probably right, but
+ * confirm before acting" middle ground between τ_ent and not_found. A real
+ * caller phrase scored 0.70 against an obviously-correct match and was
+ * rejected outright — one candidate in [τ_ent_confirm_low, τ_ent) now
+ * triggers a one-tap voice confirmation turn instead of a hard not_found.
+ *
+ * Provisional/tunable: reasoned from a single real 0.70 data point, not a
+ * calibrated study. Should be recalibrated from real call data later.
+ */
+export const TAU_ENT_CONFIRM_LOW = 0.6;
 
 export interface EntityCandidate {
   id: string;
@@ -52,6 +69,9 @@ export interface EntityCandidate {
 export type EntityResolverResult =
   | { kind: 'resolved'; candidate: EntityCandidate }
   | { kind: 'ambiguous'; candidates: EntityCandidate[] }
+  // One candidate in [τ_ent_confirm_low, τ_ent) — probably right, but not
+  // confident enough to act without a one-tap voice confirmation.
+  | { kind: 'low_confidence'; candidate: EntityCandidate }
   | { kind: 'not_found'; reference: string }
   | { kind: 'skipped' };
 
@@ -66,5 +86,13 @@ export interface EntityResolver {
     tenantId: string;
     reference: string;
     kind: EntityKind;
+    /**
+     * SCH-03 — optional job anchor for `kind: 'appointment'` lookups. When
+     * the reference doesn't parse as a date phrase ("that job" / "the
+     * appointment for that job"), PgEntityResolver falls back to the job's
+     * own upcoming appointments instead of returning `not_found`. Ignored
+     * by every other kind.
+     */
+    jobId?: string;
   }): Promise<EntityResolverResult>;
 }

@@ -39,6 +39,77 @@ function fakePool(state: FakePoolState): Pool {
   } as unknown as Pool;
 }
 
+/**
+ * T4-F01 claim-aware fake pool — real fakePool() above returns the same
+ * eligibility rows for every query, which is too coarse to exercise
+ * send_claims semantics (claim/reclaim/tombstone). This variant additionally
+ * simulates the send_claims table with a real in-memory Map so the
+ * claim-before-send scenarios below observe genuine claim/reclaim/duplicate
+ * behavior, matching send-claim-ledger.ts's exact SQL shapes. Full proof of
+ * the actual SQL against real Postgres lives in
+ * test/integration/thank-you-sms-worker.test.ts (Docker-gated).
+ */
+interface ClaimRow {
+  status: 'claimed' | 'sending' | 'sent';
+  claimedAt: number;
+}
+
+function claimAwarePool(
+  state: FakePoolState,
+  claims: Map<string, ClaimRow> = new Map(),
+): { pool: Pool; claims: Map<string, ClaimRow> } {
+  const query = vi.fn(async (sql: string, params: unknown[]) => {
+    if (sql.includes('send_claims')) {
+      const key = `${params[0]}::${params[1]}`;
+      if (sql.trim().startsWith('INSERT')) {
+        const staleMinutes = Number(params[2]);
+        const existing = claims.get(key);
+        if (!existing) {
+          claims.set(key, { status: 'claimed', claimedAt: Date.now() });
+          return { rows: [{ claim_key: params[1] }], rowCount: 1 } as unknown as QueryResult;
+        }
+        const staleMs = staleMinutes * 60_000;
+        // Only ever reclaims 'claimed' rows — a 'sending' row (provider call
+        // in flight or crashed mid-flight) is NEVER auto-reclaimed, matching
+        // claimSend's real WHERE clause.
+        if (existing.status === 'claimed' && Date.now() - existing.claimedAt >= staleMs) {
+          existing.claimedAt = Date.now();
+          return { rows: [{ claim_key: params[1] }], rowCount: 1 } as unknown as QueryResult;
+        }
+        return { rows: [], rowCount: 0 } as unknown as QueryResult;
+      }
+      if (sql.trim().startsWith('UPDATE')) {
+        const existing = claims.get(key);
+        // Distinguish the sending-transition UPDATE from the completion
+        // UPDATE by SQL text so the fake models the intermediate state.
+        if (existing) existing.status = sql.includes("'sending'") ? 'sending' : 'sent';
+        return { rows: [], rowCount: existing ? 1 : 0 } as unknown as QueryResult;
+      }
+      if (sql.trim().startsWith('DELETE')) {
+        const existing = claims.get(key);
+        if (existing?.status === 'claimed' || existing?.status === 'sending') claims.delete(key);
+        return { rows: [], rowCount: 1 } as unknown as QueryResult;
+      }
+      if (sql.trim().startsWith('SELECT')) {
+        // withSendClaim reads the losing claim's status to report priorStatus.
+        const existing = claims.get(key);
+        return {
+          rows: existing ? [{ status: existing.status }] : [],
+          rowCount: existing ? 1 : 0,
+        } as unknown as QueryResult;
+      }
+    }
+    return {
+      rows: state.rows,
+      rowCount: state.rows.length,
+      command: 'SELECT',
+      oid: 0,
+      fields: [],
+    } as unknown as QueryResult;
+  });
+  return { pool: { query } as unknown as Pool, claims };
+}
+
 function makeJob(overrides: Partial<Job>): Job {
   return {
     id: overrides.id ?? 'job-1',
@@ -268,5 +339,102 @@ describe('runThankYouSmsSweep', () => {
     expect(result.tenants).toBe(2);
     expect(result.candidates).toBe(2);
     expect(result.sent).toBe(2);
+  });
+
+  describe('T4-F01 — claim-before-send', () => {
+    it('crash-between-claim-and-send recovery: a stale claim is reclaimed and the sweep sends', async () => {
+      const job = makeJob({});
+      await jobRepo.create(job);
+      await customerRepo.create(makeCustomer());
+      const { pool, claims } = claimAwarePool({ rows: [{ id: job.id, tenant_id: TENANT }] });
+      // Pre-seed a claim >15min old — simulates a crash before/during a prior send attempt.
+      claims.set(`${TENANT}::thank_you_sms:${job.id}`, {
+        status: 'claimed',
+        claimedAt: Date.now() - 20 * 60_000,
+      });
+
+      const result = await runThankYouSmsSweep(deps([], { pool }));
+
+      expect(result.sent).toBe(1);
+      expect(send).toHaveBeenCalledTimes(1);
+      const stamped = await jobRepo.findById(TENANT, job.id);
+      expect(stamped?.thankYouSmsSentAt).toEqual(NOW);
+    });
+
+    it('Codex P2 (PR #705) — crash-between-send-and-mark: a "sent" claim with no thankYouSmsSentAt is RECONCILED (stamped, not resent)', async () => {
+      const job = makeJob({});
+      await jobRepo.create(job);
+      await customerRepo.create(makeCustomer());
+      const { pool, claims } = claimAwarePool({ rows: [{ id: job.id, tenant_id: TENANT }] });
+      // Simulates the crash landing after the provider send succeeded but
+      // before the job-row write — the claim ledger's tombstone is set, the
+      // business-level completion field is not. Left null forever, the
+      // eligibility query re-selects this job every tick (oldest-first, LIMIT
+      // 500) and can starve newer jobs — so the sweep must reconcile the stamp.
+      claims.set(`${TENANT}::thank_you_sms:${job.id}`, { status: 'sent', claimedAt: Date.now() });
+
+      const result = await runThankYouSmsSweep(deps([], { pool }));
+
+      // No resend (SMS already went out) but the missing stamp is reconciled so
+      // the job stops being re-selected.
+      expect(send).not.toHaveBeenCalled();
+      expect(result.sent).toBe(1);
+      const stamped = await jobRepo.findById(TENANT, job.id);
+      expect(stamped?.thankYouSmsSentAt).toEqual(NOW);
+    });
+
+    it('a "claimed" (in-flight) duplicate is left for the owning attempt — not resent, not stamped by this sweep', async () => {
+      const job = makeJob({});
+      await jobRepo.create(job);
+      await customerRepo.create(makeCustomer());
+      const { pool, claims } = claimAwarePool({ rows: [{ id: job.id, tenant_id: TENANT }] });
+      // A fresh in-flight claim held by a concurrent sweep (NOT sent yet).
+      claims.set(`${TENANT}::thank_you_sms:${job.id}`, { status: 'claimed', claimedAt: Date.now() });
+
+      const result = await runThankYouSmsSweep(deps([], { pool }));
+
+      expect(send).not.toHaveBeenCalled();
+      expect(result.suppressed).toBe(1);
+      // The owning (in-flight) attempt will stamp it; this sweep must not.
+      const stamped = await jobRepo.findById(TENANT, job.id);
+      expect(stamped?.thankYouSmsSentAt).toBeUndefined();
+    });
+
+    it('concurrent sweep runs racing the same job: exactly one send', async () => {
+      const job = makeJob({});
+      await jobRepo.create(job);
+      await customerRepo.create(makeCustomer());
+      const { pool, claims } = claimAwarePool({ rows: [{ id: job.id, tenant_id: TENANT }] });
+
+      await Promise.all([
+        runThankYouSmsSweep(deps([], { pool })),
+        runThankYouSmsSweep(deps([], { pool })),
+      ]);
+
+      // The invariant that matters: the provider is called exactly once (no
+      // double-send). The metrics `sent` sum is not asserted — a loser that
+      // observes the winner's 'sent' tombstone legitimately reconciles the
+      // stamp (Codex P2) and also counts, but it never re-invokes the provider.
+      expect(send).toHaveBeenCalledTimes(1);
+      expect(claims.get(`${TENANT}::thank_you_sms:${job.id}`)?.status).toBe('sent');
+      const stamped = await jobRepo.findById(TENANT, job.id);
+      expect(stamped?.thankYouSmsSentAt).toEqual(NOW);
+    });
+
+    it('a dispatcher throw releases the claim so the very next tick can retry', async () => {
+      const job = makeJob({});
+      await jobRepo.create(job);
+      await customerRepo.create(makeCustomer());
+      const { pool, claims } = claimAwarePool({ rows: [{ id: job.id, tenant_id: TENANT }] });
+      send.mockRejectedValueOnce(new Error('Twilio 503'));
+
+      const first = await runThankYouSmsSweep(deps([], { pool }));
+      expect(first.failed).toBe(1);
+      expect(claims.has(`${TENANT}::thank_you_sms:${job.id}`)).toBe(false); // released, not stale-waiting
+
+      const second = await runThankYouSmsSweep(deps([], { pool }));
+      expect(second.sent).toBe(1);
+      expect(send).toHaveBeenCalledTimes(2);
+    });
   });
 });

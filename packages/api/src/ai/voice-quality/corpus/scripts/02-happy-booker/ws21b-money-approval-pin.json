@@ -1,0 +1,74 @@
+{
+  "id": "ws21b-money-approval-pin",
+  "bucket": "02-happy-booker",
+  "callerId": "+15125550100",
+  "callerIdBlocked": false,
+  "callerIsOwner": true,
+  "fixtures": {
+    "tenant": {
+      "id": "t_ws21b_money",
+      "display_name": "WS21b Owner Co",
+      "timezone": "America/Los_Angeles",
+      "ownerPhone": "+15125550100",
+      "voiceApprovalPin": "4271"
+    },
+    "customers": [
+      {
+        "id": "cust_ws21b_acme",
+        "tenantId": "t_ws21b_money",
+        "firstName": "Acme",
+        "lastName": "Corp",
+        "displayName": "Acme Corp",
+        "primaryPhone": "+15125550100",
+        "preferredChannel": "phone",
+        "smsConsent": false,
+        "isArchived": false,
+        "createdBy": "seed",
+        "createdAt": "2026-01-01T00:00:00.000Z",
+        "updatedAt": "2026-01-01T00:00:00.000Z"
+      }
+    ],
+    "proposals": [
+      {
+        "id": "prop_ws21b_payment",
+        "tenantId": "t_ws21b_money",
+        "proposalType": "record_payment",
+        "status": "ready_for_review",
+        "payload": { "customerName": "Acme Corp", "amountCents": 20000 },
+        "summary": "Record $200 payment from Acme",
+        "createdBy": "seed",
+        "createdAt": "2026-01-01T00:00:00.000Z",
+        "updatedAt": "2026-01-01T00:00:00.000Z"
+      }
+    ]
+  },
+  "turns": [
+    {
+      "caller": "Approve the Acme payment.",
+      "expected": {
+        "intent": "approve_proposal",
+        "slots": { "proposalReference": "the Acme payment" },
+        "spokenAnswerMatches": "Record payment for Acme Corp, total $200.00 — approve it?",
+        "escalates": false
+      }
+    },
+    {
+      "caller": "Yes, approve it.",
+      "expected": {
+        "spokenAnswerMatches": "This one moves money, so I need your approval code first — go ahead.",
+        "escalates": false
+      }
+    },
+    {
+      "caller": "Four two seven one.",
+      "expected": {
+        "spokenAnswerMatches": "Approved.",
+        "escalates": false
+      }
+    }
+  ],
+  "grading": {
+    "appliesFloor": [1, 2, 3],
+    "appliesDisposition": [9, 12]
+  }
+}

@@ -83,4 +83,9 @@ describe('CustomerPicker (P11-006)', () => {
     expect(vi.mocked(apiFetch)).not.toHaveBeenCalled();
     vi.useRealTimers();
   });
+
+  it('renders the kit search input at the 44px tap target (U8c)', () => {
+    render(<Harness />);
+    expect(screen.getByLabelText('customer-search').className).toContain('min-h-11');
+  });
 });

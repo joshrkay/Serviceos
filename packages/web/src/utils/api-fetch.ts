@@ -33,9 +33,9 @@
  */
 
 import {
+  handleAuthFailure,
   isPublicApiPath,
   makeUnauthenticatedAbort,
-  redirectToLogin,
   shouldInjectAuth,
 } from '../lib/apiClient';
 
@@ -67,14 +67,30 @@ export function clearTokenGetter(): void {
   getToken = null;
 }
 
-function pathFrom(input: RequestInfo | URL): string {
-  if (typeof input === 'string') return input;
-  if (input instanceof URL) return input.pathname + input.search;
-  // Request object — read .url
+/**
+ * Resolves the request target to a same-origin path, or `null` when the
+ * target is cross-origin. Classifying by resolved origin (not raw string
+ * prefix) is what keeps the Bearer token from ever being attached to a
+ * foreign host — an absolute 'https://other.example/api/…' string, URL, or
+ * Request previously slipped past the '/api/' prefix check.
+ */
+function sameOriginPathFrom(input: RequestInfo | URL): string | null {
+  const raw =
+    typeof input === 'string'
+      ? input
+      : input instanceof URL
+        ? input.href
+        : (input as Request).url;
+  const base =
+    typeof window !== 'undefined' && window.location
+      ? window.location.origin
+      : 'http://localhost';
   try {
-    return new URL((input as Request).url, 'http://x').pathname;
+    const url = new URL(raw, base);
+    if (url.origin !== base) return null;
+    return url.pathname + url.search;
   } catch {
-    return '';
+    return null;
   }
 }
 
@@ -92,13 +108,22 @@ function buildHeaders(init: RequestInit): Record<string, string> {
   // Set default Content-Type only for string bodies. fetch() already
   // infers it for FormData / URLSearchParams / Blob / ArrayBuffer, and
   // forcing JSON onto those would corrupt the request.
-  if (typeof init.body === 'string' && !headers['Content-Type']) {
-    headers['Content-Type'] = 'application/json';
-  } else if (init.body && !(init.body instanceof FormData) && typeof init.body !== 'string' && !headers['Content-Type']) {
-    // Legacy behavior: caller-supplied non-string, non-FormData bodies
-    // historically defaulted to JSON via the previous apiFetch
-    // implementation. Preserve that to avoid surprising existing
-    // callers, but only when no Content-Type was already set.
+  //
+  // HTTP header names are case-insensitive, so the presence check MUST be
+  // too (sweep-2 comms-reply bug, same root cause as journey QA bug 1 in
+  // lib/apiClient.ts): a caller-supplied lowercase 'content-type' did not
+  // suppress the injected 'Content-Type', fetch merged the duplicate keys
+  // into "application/json, application/json", and Express's JSON parser
+  // dropped the body — every conversation reply / suggest-reply 400'd.
+  const hasContentType = Object.keys(headers).some(
+    (key) => key.toLowerCase() === 'content-type',
+  );
+  // STRING bodies only — mirroring lib/apiClient.ts exactly. fetch() infers
+  // the correct Content-Type for FormData / URLSearchParams / Blob /
+  // ArrayBuffer; force-labelling those as JSON corrupts the request (the
+  // old "legacy" branch here did exactly that, diverging from the hook
+  // client this file claims to mirror).
+  if (typeof init.body === 'string' && !hasContentType) {
     headers['Content-Type'] = 'application/json';
   }
   return headers;
@@ -108,8 +133,15 @@ export async function apiFetch(
   input: RequestInfo | URL,
   init: RequestInit = {},
 ): Promise<Response> {
-  const path = pathFrom(input);
+  const path = sameOriginPathFrom(input);
   const headers = buildHeaders(init);
+
+  // Cross-origin targets — plain passthrough. The Clerk JWT must never
+  // reach a foreign host, and foreign 401s must never trigger our
+  // login redirect.
+  if (path === null) {
+    return fetch(input, { ...init, headers });
+  }
 
   // Public, view-token-gated paths — pass through with no Authorization
   // and no 401 redirect. This matches `useApiClient`'s isPublicApiPath
@@ -118,9 +150,9 @@ export async function apiFetch(
     return fetch(input, { ...init, headers });
   }
 
-  // Non-`/api/` paths (assets, third-party hosts, etc.) — just attach
-  // a token opportunistically if we happen to have one, like the
-  // pre-fix behavior. No 401 retry or redirect for these.
+  // Same-origin non-`/api/` paths (assets etc.) — attach a token
+  // opportunistically if we happen to have one, like the pre-fix
+  // behavior. No 401 retry or redirect for these.
   if (!shouldInjectAuth(path)) {
     if (getToken) {
       try {
@@ -153,6 +185,9 @@ export async function apiFetch(
     headers['Authorization'] = `Bearer ${token}`;
   }
 
+  // Request inputs are consumed by the first fetch; clone up front so the
+  // 401 retry re-sends a live body instead of throwing 'body already used'.
+  const retryInput = input instanceof Request ? input.clone() : input;
   const response = await fetch(input, { ...init, headers });
 
   if (response.status !== 401 || !getToken) return response;
@@ -170,10 +205,12 @@ export async function apiFetch(
       ...headers,
       Authorization: `Bearer ${fresh}`,
     };
-    const retry = await fetch(input, { ...init, headers: retryHeaders });
+    const retry = await fetch(retryInput, { ...init, headers: retryHeaders });
     if (retry.status !== 401) return retry;
   }
-  // Still unauthorized after a refresh — bounce to login.
-  redirectToLogin();
+  // Still unauthorized after a refresh — the server rejects a session the
+  // client still holds. Route through the shared auth-failure exit (Clerk
+  // sign-out when wired, latched against concurrent 401s).
+  await handleAuthFailure();
   throw new Error('Unauthorized — redirecting to login');
 }

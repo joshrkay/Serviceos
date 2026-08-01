@@ -1,6 +1,10 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { pickActiveAppointment, tenantLocalDate } from '@ai-service-os/shared';
 import { useNavigate } from 'react-router';
 import { apiFetch } from '../../utils/api-fetch';
+import { useTenantTimezone } from '../../hooks/useTenantTimezone';
+import { formatInTenantTz, formatTimeInTenantTz } from '../../utils/formatInTenantTz';
+import { TechnicianProfitCard } from '../../components/technician/TechnicianProfitCard';
 
 export interface TechnicianAppointment {
   id: string;
@@ -13,6 +17,7 @@ export interface TechnicianAppointment {
   scheduledEnd: string;
   status: string;
   jobSummary?: string;
+  updatedAt?: string;
 }
 
 export interface TechnicianDayViewProps {
@@ -47,13 +52,11 @@ interface ReliabilityDecision {
   sampleCount: number;
 }
 
-function formatTime(iso: string): string {
-  return new Date(iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-}
-
-function toDateInputValue(date: Date): string {
-  const pad = (value: number) => String(value).padStart(2, '0');
-  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+function generateIdempotencyKey(): string {
+  if (typeof crypto !== 'undefined' && 'randomUUID' in crypto) {
+    return crypto.randomUUID();
+  }
+  return `tech-day-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
 function toDateTimeInputValue(iso: string): string {
@@ -138,19 +141,25 @@ function computePromptConfidence(history: Coordinates[]): number {
   return clamp((recencyScore * 0.4) + (accuracyScore * 0.4) + (movementConsistency * 0.2));
 }
 
-function answerScheduleQuestion(question: string, appointments: TechnicianAppointment[], now: Date): string {
+// Exported for unit testing: pins that appointment times render in the tenant
+// timezone regardless of the JS runtime timezone (CLAUDE.md: "stored UTC,
+// rendered in tenant timezone").
+export function answerScheduleQuestion(
+  question: string,
+  appointments: TechnicianAppointment[],
+  now: Date,
+  timezone: string,
+): string {
   const normalized = question.toLowerCase();
 
   if (normalized.includes('next appointment') || normalized.includes('where') || normalized.includes('next stop')) {
-    const next = appointments
-      .filter((appt) => new Date(appt.scheduledStart).getTime() >= now.getTime())
-      .sort((a, b) => new Date(a.scheduledStart).getTime() - new Date(b.scheduledStart).getTime())[0];
+    const next = pickActiveAppointment(appointments, now.getTime());
 
     if (!next) {
       return 'You do not have any more appointments scheduled today.';
     }
 
-    return `Your next appointment is with ${next.customerName} at ${formatTime(next.scheduledStart)} (${next.locationAddress}).`;
+    return `Your next appointment is with ${next.customerName} at ${formatTimeInTenantTz(next.scheduledStart, timezone)} (${next.locationAddress}).`;
   }
 
   if (normalized.includes('entire schedule') || normalized.includes('today')) {
@@ -160,7 +169,7 @@ function answerScheduleQuestion(question: string, appointments: TechnicianAppoin
 
     return appointments
       .sort((a, b) => new Date(a.scheduledStart).getTime() - new Date(b.scheduledStart).getTime())
-      .map((appt) => `${formatTime(appt.scheduledStart)} ${appt.customerName}`)
+      .map((appt) => `${formatTimeInTenantTz(appt.scheduledStart, timezone)} ${appt.customerName}`)
       .join(' • ');
   }
 
@@ -169,6 +178,7 @@ function answerScheduleQuestion(question: string, appointments: TechnicianAppoin
 
 export function TechnicianDayView({ technicianId }: TechnicianDayViewProps) {
   const navigate = useNavigate();
+  const timezone = useTenantTimezone();
   const [appointments, setAppointments] = useState<TechnicianAppointment[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -177,6 +187,8 @@ export function TechnicianDayView({ technicianId }: TechnicianDayViewProps) {
   const [editedStart, setEditedStart] = useState<string>('');
   const [editedEnd, setEditedEnd] = useState<string>('');
   const [savingAppointmentId, setSavingAppointmentId] = useState<string | null>(null);
+  const [staleAppointmentId, setStaleAppointmentId] = useState<string | null>(null);
+  const [refetchNonce, setRefetchNonce] = useState(0);
   const [gpsError, setGpsError] = useState<string | null>(null);
   const [positionHistory, setPositionHistory] = useState<Coordinates[]>([]);
   const [activeAppointmentId, setActiveAppointmentId] = useState<string | null>(null);
@@ -191,11 +203,12 @@ export function TechnicianDayView({ technicianId }: TechnicianDayViewProps) {
   const [onMyWayNotified, setOnMyWayNotified] = useState<Record<string, boolean>>({});
 
   useEffect(() => {
+    let cancelled = false;
     async function fetchAppointments() {
       setIsLoading(true);
       setError(null);
       try {
-        const dateStr = toDateInputValue(selectedDate);
+        const dateStr = tenantLocalDate(selectedDate, timezone);
         const response = await apiFetch(
           `/api/dispatch/technician/${technicianId}/appointments?date=${dateStr}`
         );
@@ -203,16 +216,31 @@ export function TechnicianDayView({ technicianId }: TechnicianDayViewProps) {
           throw new Error('Failed to load appointments');
         }
         const data = await response.json();
-        setAppointments(data.appointments ?? []);
+        if (!cancelled) setAppointments(data.appointments ?? []);
       } catch (err) {
-        setError(err instanceof Error ? err.message : 'Failed to load appointments');
+        if (!cancelled) {
+          setError(err instanceof Error ? err.message : 'Failed to load appointments');
+        }
       } finally {
-        setIsLoading(false);
+        if (!cancelled) setIsLoading(false);
       }
     }
 
-    fetchAppointments();
-  }, [technicianId, selectedDate]);
+    void fetchAppointments();
+    return () => {
+      cancelled = true;
+    };
+  }, [technicianId, selectedDate, refetchNonce, timezone]);
+
+  // Clear the day when the identity changes so we never paint yesterday's
+  // jobs under today's header. Soft refreshes (refetchNonce) keep rows.
+  const dayIdentity = `${technicianId}|${tenantLocalDate(selectedDate, timezone)}`;
+  const lastDayIdentityRef = useRef(dayIdentity);
+  useEffect(() => {
+    if (lastDayIdentityRef.current === dayIdentity) return;
+    lastDayIdentityRef.current = dayIdentity;
+    setAppointments([]);
+  }, [dayIdentity]);
 
   useEffect(() => {
     if (typeof navigator === 'undefined' || !navigator.geolocation) {
@@ -251,10 +279,10 @@ export function TechnicianDayView({ technicianId }: TechnicianDayViewProps) {
     [appointments]
   );
 
-  const nextAppointment = useMemo(() => {
-    const now = Date.now();
-    return sortedAppointments.find((appt) => new Date(appt.scheduledStart).getTime() >= now) ?? null;
-  }, [sortedAppointments]);
+  const nextAppointment = useMemo(
+    () => pickActiveAppointment(sortedAppointments, Date.now()),
+    [sortedAppointments],
+  );
 
   useEffect(() => {
     if (positionHistory.length === 0 || sortedAppointments.length === 0 || delayPromptAcknowledged) {
@@ -344,10 +372,10 @@ export function TechnicianDayView({ technicianId }: TechnicianDayViewProps) {
     if (decision.shouldAutoNotify && decision.confidence >= MIN_CONFIDENCE_FOR_CUSTOMER_NOTIFY) {
       setDelayPromptAcknowledged(true);
       setShowDelayPrompt(false);
-      void apiFetch(`/api/appointments/${active.id}`, {
-        method: 'PUT',
-        body: JSON.stringify({ status: 'running_late', confidence: decision.confidence }),
-      });
+      // running_late is a status signal (no new time) — not expressible as a
+      // reschedule_appointment proposal. Send the running-late notice, and
+      // surface failures instead of dropping them with a fire-and-forget void apiFetch.
+      void markRunningLate(active.id);
       return;
     }
 
@@ -405,7 +433,7 @@ export function TechnicianDayView({ technicianId }: TechnicianDayViewProps) {
     technicianId,
   ]);
 
-  const today = selectedDate.toLocaleDateString(undefined, {
+  const today = formatInTenantTz(selectedDate, timezone, {
     weekday: 'long',
     month: 'long',
     day: 'numeric',
@@ -417,32 +445,59 @@ export function TechnicianDayView({ technicianId }: TechnicianDayViewProps) {
       return;
     }
 
+    const appointment = appointments.find((appt) => appt.id === appointmentId);
+    const appointmentVersion = appointment?.updatedAt;
+    const newScheduledStart = new Date(editedStart).toISOString();
+    const newScheduledEnd = new Date(editedEnd).toISOString();
+
     try {
       setSavingAppointmentId(appointmentId);
-      const response = await apiFetch(`/api/appointments/${appointmentId}`, {
-        method: 'PUT',
+      setError(null);
+      setStaleAppointmentId(null);
+
+      // Techs do not hold `appointments:update`; route the edit through the
+      // human-approval-gated proposal path (mirrors the dispatch board) rather
+      // than a direct PUT /api/appointments/:id.
+      const response = await apiFetch('/api/proposals', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(appointmentVersion ? { 'If-Match': appointmentVersion } : {}),
+        },
         body: JSON.stringify({
-          scheduledStart: new Date(editedStart).toISOString(),
-          scheduledEnd: new Date(editedEnd).toISOString(),
+          proposalType: 'reschedule_appointment',
+          payload: {
+            appointmentId,
+            newScheduledStart,
+            newScheduledEnd,
+            reason: 'Rescheduled by technician from the day view',
+          },
+          summary: 'Reschedule appointment requested by technician',
+          idempotencyKey: generateIdempotencyKey(),
+          ...(appointmentVersion ? { appointmentVersion } : {}),
         }),
       });
 
       if (!response.ok) {
-        throw new Error('Failed to save appointment changes');
+        if (response.status === 409) {
+          setStaleAppointmentId(appointmentId);
+          setError('This appointment changed since you opened it. Refresh and try again.');
+          return;
+        }
+        if (response.status === 422) {
+          const body = (await response.json().catch(() => ({}))) as {
+            blocking?: Array<{ message?: string }>;
+          };
+          const reason = body.blocking?.[0]?.message ?? 'feasibility check failed';
+          setError(`Cannot reschedule: ${reason}`);
+          return;
+        }
+        throw new Error('Failed to submit reschedule request');
       }
 
-      setAppointments((current) => current.map((appt) => (
-        appt.id === appointmentId
-          ? {
-            ...appt,
-            scheduledStart: new Date(editedStart).toISOString(),
-            scheduledEnd: new Date(editedEnd).toISOString(),
-          }
-          : appt
-      )));
       setEditingAppointmentId(null);
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to save appointment changes');
+      setError(err instanceof Error ? err.message : 'Failed to submit reschedule request');
     } finally {
       setSavingAppointmentId(null);
     }
@@ -475,6 +530,29 @@ export function TechnicianDayView({ technicianId }: TechnicianDayViewProps) {
     }
   }
 
+  async function markRunningLate(appointmentId: string): Promise<boolean> {
+    try {
+      // Technicians hold only `appointments:view`, so the old
+      // PUT /api/appointments/:id virtual-status call always 403'd here.
+      // Use the technician-reachable running-late endpoint instead. No
+      // delay estimate is available on this path — an empty body lets the
+      // server apply its default (20 minutes).
+      const response = await apiFetch(`/api/appointments/${appointmentId}/running-late`, {
+        method: 'POST',
+        body: JSON.stringify({}),
+      });
+      if (!response.ok) {
+        throw new Error('Failed to send running-late notice');
+      }
+      return true;
+    } catch (err) {
+      // Previously this was a fire-and-forget `void apiFetch` with no .catch,
+      // so failures were silently dropped. Surface them to the technician.
+      setError(err instanceof Error ? err.message : 'Failed to send running-late notice');
+      return false;
+    }
+  }
+
   async function sendDelayNotification(accepted: boolean) {
     setShowDelayPrompt(false);
     setDelayPromptAcknowledged(true);
@@ -483,10 +561,10 @@ export function TechnicianDayView({ technicianId }: TechnicianDayViewProps) {
       return;
     }
 
-    await apiFetch(`/api/appointments/${activeAppointmentId}`, {
-      method: 'PUT',
-      body: JSON.stringify({ status: 'running_late', confidence: promptConfidence }),
-    });
+    const notified = await markRunningLate(activeAppointmentId);
+    if (!notified) {
+      return;
+    }
     await apiFetch('/api/dispatch/delay-prompt-audits', {
       method: 'POST',
       body: JSON.stringify({
@@ -500,16 +578,27 @@ export function TechnicianDayView({ technicianId }: TechnicianDayViewProps) {
     });
   }
 
+  // Sweep-2 S3 — this view previously used BEM class names with no
+  // stylesheet (inert in this Tailwind app), rendering as raw unstyled
+  // text. Restyled with the repo's mobile conventions: card patterns
+  // mirroring TechJobView and ≥44px (min-h-11) tap targets per the
+  // CLAUDE.md mobile rule. All behavior and data-testids are unchanged.
+  const secondaryButtonClass =
+    'flex min-h-11 items-center justify-center rounded-xl border border-border bg-card px-4 text-sm text-foreground hover:bg-secondary active:bg-secondary transition-colors disabled:opacity-50';
+  const primaryButtonClass =
+    'flex min-h-11 items-center justify-center rounded-xl bg-primary px-4 text-sm text-primary-foreground hover:bg-primary/90 active:bg-primary/80 transition-colors disabled:opacity-50';
+
   return (
-    <div className="technician-day-view" data-testid="technician-day-view">
-      <div className="technician-day-view__header" data-testid="technician-day-header">
-        <div>
-          <h2>My Schedule</h2>
-          <span className="technician-day-view__date">{today}</span>
+    <div className="mx-auto w-full max-w-lg space-y-4 px-4 py-4" data-testid="technician-day-view">
+      <div className="flex items-start justify-between gap-3" data-testid="technician-day-header">
+        <div className="min-w-0">
+          <h2 className="text-xl font-semibold text-foreground">My Schedule</h2>
+          <span className="text-sm text-muted-foreground">{today}</span>
         </div>
-        <div className="technician-day-view__date-nav">
+        <div className="flex shrink-0 gap-2">
           <button
             type="button"
+            className={secondaryButtonClass}
             onClick={() => setSelectedDate((value) => new Date(value.getFullYear(), value.getMonth(), value.getDate() - 1))}
             data-testid="technician-day-prev"
           >
@@ -517,6 +606,7 @@ export function TechnicianDayView({ technicianId }: TechnicianDayViewProps) {
           </button>
           <button
             type="button"
+            className={secondaryButtonClass}
             onClick={() => setSelectedDate((value) => new Date(value.getFullYear(), value.getMonth(), value.getDate() + 1))}
             data-testid="technician-day-next"
           >
@@ -525,66 +615,134 @@ export function TechnicianDayView({ technicianId }: TechnicianDayViewProps) {
         </div>
       </div>
 
+      {/* Manager-only (invoices:view-gated; hides for technicians). */}
+      <TechnicianProfitCard technicianId={technicianId} />
+
       {nextAppointment && (
-        <div className="technician-day-view__next" data-testid="technician-day-next-appointment">
-          <strong>Next appointment:</strong> {nextAppointment.customerName} at {formatTime(nextAppointment.scheduledStart)}
+        <div
+          className="rounded-2xl border border-primary/20 bg-primary/10 px-4 py-3 text-sm text-foreground"
+          data-testid="technician-day-next-appointment"
+        >
+          <strong>Next appointment:</strong> {nextAppointment.customerName} at {formatTimeInTenantTz(nextAppointment.scheduledStart, timezone)}
           {' '}
-          <a href={buildMapsHref(nextAppointment.locationAddress)} target="_blank" rel="noreferrer" data-testid="technician-day-next-map-link">
+          <a
+            href={buildMapsHref(nextAppointment.locationAddress)}
+            target="_blank"
+            rel="noreferrer"
+            className="text-primary underline"
+            data-testid="technician-day-next-map-link"
+          >
             Open in maps
           </a>
         </div>
       )}
 
-      <div className="technician-day-view__assistant" data-testid="technician-day-assistant">
-        <label htmlFor="tech-schedule-question">Ask AI about your schedule</label>
-        <div>
+      <div
+        className="space-y-2 rounded-2xl border border-border bg-card p-4"
+        data-testid="technician-day-assistant"
+      >
+        <label htmlFor="tech-schedule-question" className="text-sm font-medium text-foreground">
+          Ask AI about your schedule
+        </label>
+        <div className="flex gap-2">
           <input
             id="tech-schedule-question"
+            className="min-h-11 w-full min-w-0 flex-1 rounded-xl border border-border bg-background px-3 text-sm text-foreground"
             value={aiQuestion}
             onChange={(event) => setAiQuestion(event.target.value)}
           />
           <button
             type="button"
-            onClick={() => setAiAnswer(answerScheduleQuestion(aiQuestion, sortedAppointments, new Date()))}
+            className={`${primaryButtonClass} shrink-0`}
+            onClick={() => setAiAnswer(answerScheduleQuestion(aiQuestion, sortedAppointments, new Date(), timezone))}
             data-testid="technician-day-ask-ai"
           >
             Ask
           </button>
         </div>
-        {aiAnswer && <p data-testid="technician-day-ai-answer">{aiAnswer}</p>}
+        {aiAnswer && (
+          <p className="text-sm text-muted-foreground" data-testid="technician-day-ai-answer">
+            {aiAnswer}
+          </p>
+        )}
       </div>
 
-      {gpsError && <div data-testid="technician-day-gps-error">{gpsError}</div>}
+      {gpsError && (
+        <div
+          className="rounded-xl border border-border bg-secondary px-4 py-3 text-xs text-muted-foreground"
+          data-testid="technician-day-gps-error"
+        >
+          {gpsError}
+        </div>
+      )}
 
       {showDelayPrompt && (
-        <div className="technician-day-view__delay-prompt" data-testid="technician-day-delay-prompt">
+        <div
+          className="space-y-3 rounded-2xl border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-foreground"
+          data-testid="technician-day-delay-prompt"
+        >
           You appear to still be on-site and running 15-20 minutes behind. Notify upcoming customers?
-          <div data-testid="technician-day-delay-confidence">
+          <div className="text-xs text-muted-foreground" data-testid="technician-day-delay-confidence">
             Reliability confidence: {Math.round(promptConfidence * 100)}%
           </div>
-          <div>
-            <button type="button" onClick={() => void sendDelayNotification(true)} data-testid="technician-day-delay-accept">Accept</button>
-            <button type="button" onClick={() => void sendDelayNotification(false)} data-testid="technician-day-delay-decline">Decline</button>
+          <div className="flex gap-2">
+            <button
+              type="button"
+              className={`${primaryButtonClass} flex-1`}
+              onClick={() => void sendDelayNotification(true)}
+              data-testid="technician-day-delay-accept"
+            >
+              Accept
+            </button>
+            <button
+              type="button"
+              className={`${secondaryButtonClass} flex-1`}
+              onClick={() => void sendDelayNotification(false)}
+              data-testid="technician-day-delay-decline"
+            >
+              Decline
+            </button>
           </div>
         </div>
       )}
 
-      {isLoading && (
-        <div className="technician-day-view__loading" data-testid="technician-day-loading">
+      {isLoading && appointments.length === 0 && (
+        <div className="py-8 text-center text-sm text-muted-foreground" data-testid="technician-day-loading">
           Loading schedule...
         </div>
       )}
 
       {error && (
-        <div className="technician-day-view__error" data-testid="technician-day-error">
+        <div
+          className="rounded-xl border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive"
+          data-testid="technician-day-error"
+        >
           {error}
+          {staleAppointmentId && (
+            <button
+              type="button"
+              onClick={() => {
+                setStaleAppointmentId(null);
+                setEditingAppointmentId(null);
+                setError(null);
+                setRefetchNonce((value) => value + 1);
+              }}
+              data-testid="technician-day-refresh"
+              className="ml-2 min-h-11 underline"
+            >
+              Refresh
+            </button>
+          )}
         </div>
       )}
 
-      {!isLoading && !error && (
-        <div className="technician-day-view__list" data-testid="technician-day-list">
+      {!(isLoading && appointments.length === 0) && !error && (
+        <div className="space-y-3" data-testid="technician-day-list">
           {sortedAppointments.length === 0 ? (
-            <div className="technician-day-view__empty" data-testid="technician-day-empty">
+            <div
+              className="rounded-2xl border border-dashed border-border bg-card px-4 py-8 text-center text-sm text-muted-foreground"
+              data-testid="technician-day-empty"
+            >
               No appointments scheduled for today
             </div>
           ) : (
@@ -594,96 +752,116 @@ export function TechnicianDayView({ technicianId }: TechnicianDayViewProps) {
               return (
                 <div
                   key={appt.id}
-                  className="technician-day-view__appointment"
+                  className="space-y-2 rounded-2xl border border-border bg-card p-4"
                   data-testid="technician-day-appointment"
                 >
-                  <div className="technician-day-view__time" data-testid="technician-day-time">
-                    {formatTime(appt.scheduledStart)} - {formatTime(appt.scheduledEnd)}
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="text-sm font-semibold text-foreground" data-testid="technician-day-time">
+                      {formatTimeInTenantTz(appt.scheduledStart, timezone)} - {formatTimeInTenantTz(appt.scheduledEnd, timezone)}
+                    </div>
+                    <div
+                      className="inline-flex rounded-full bg-secondary px-2.5 py-0.5 text-xs capitalize text-foreground"
+                      data-testid="technician-day-status"
+                    >
+                      {getStatusLabel(appt.status)}
+                    </div>
                   </div>
-                  <div className="technician-day-view__customer" data-testid="technician-day-customer">
+                  <div className="text-base font-medium text-foreground" data-testid="technician-day-customer">
                     {appt.customerName}
                   </div>
-                  <div className="technician-day-view__location" data-testid="technician-day-location">
-                    <a href={buildMapsHref(appt.locationAddress)} target="_blank" rel="noreferrer">
+                  <div className="text-sm" data-testid="technician-day-location">
+                    <a
+                      href={buildMapsHref(appt.locationAddress)}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="break-words text-primary underline"
+                    >
                       {appt.locationAddress}
                     </a>
                   </div>
                   {appt.jobSummary && (
-                    <div className="technician-day-view__summary">
+                    <div className="break-words text-sm text-muted-foreground">
                       {appt.jobSummary}
                     </div>
                   )}
-                  <div className="technician-day-view__status" data-testid="technician-day-status">
-                    {getStatusLabel(appt.status)}
+
+                  <div className="flex flex-col gap-2 pt-1">
+                    {appt.jobId && (
+                      <button
+                        type="button"
+                        data-testid="technician-day-view-job"
+                        onClick={() => navigate(`/jobs/${appt.jobId}?view=tech`)}
+                        className={`${secondaryButtonClass} w-full`}
+                      >
+                        View job →
+                      </button>
+                    )}
+
+                    <button
+                      type="button"
+                      className={`${primaryButtonClass} w-full`}
+                      data-testid="technician-day-on-my-way"
+                      disabled={onMyWaySending === appt.id || onMyWayNotified[appt.id]}
+                      onClick={() => void sendOnMyWay(appt.id)}
+                    >
+                      {onMyWayNotified[appt.id]
+                        ? 'Customer notified ✓'
+                        : onMyWaySending === appt.id
+                          ? 'Sending…'
+                          : 'On my way'}
+                    </button>
+
+                    {!isEditing ? (
+                      <button
+                        type="button"
+                        className={`${secondaryButtonClass} w-full`}
+                        data-testid="technician-day-edit"
+                        onClick={() => {
+                          setEditingAppointmentId(appt.id);
+                          setEditedStart(toDateTimeInputValue(appt.scheduledStart));
+                          setEditedEnd(toDateTimeInputValue(appt.scheduledEnd));
+                        }}
+                      >
+                        Edit time
+                      </button>
+                    ) : (
+                      <div className="space-y-2" data-testid="technician-day-edit-form">
+                        <input
+                          type="datetime-local"
+                          className="min-h-11 w-full rounded-xl border border-border bg-background px-3 text-sm text-foreground"
+                          value={editedStart}
+                          onChange={(event) => setEditedStart(event.target.value)}
+                          data-testid="technician-day-edit-start"
+                        />
+                        <input
+                          type="datetime-local"
+                          className="min-h-11 w-full rounded-xl border border-border bg-background px-3 text-sm text-foreground"
+                          value={editedEnd}
+                          onChange={(event) => setEditedEnd(event.target.value)}
+                          data-testid="technician-day-edit-end"
+                        />
+                        <div className="flex gap-2">
+                          <button
+                            type="button"
+                            className={`${primaryButtonClass} flex-1`}
+                            disabled={savingAppointmentId === appt.id}
+                            onClick={() => void saveAppointmentTimes(appt.id)}
+                            data-testid="technician-day-save"
+                          >
+                            Save
+                          </button>
+                          <button
+                            type="button"
+                            className={`${secondaryButtonClass} flex-1`}
+                            onClick={() => setEditingAppointmentId(null)}
+                            data-testid="technician-day-cancel"
+                          >
+                            Cancel
+                          </button>
+                        </div>
+                      </div>
+                    )}
                   </div>
-
-                  {appt.jobId && (
-                    <button
-                      type="button"
-                      data-testid="technician-day-view-job"
-                      onClick={() => navigate(`/jobs/${appt.jobId}?view=tech`)}
-                      className="mt-1 text-xs text-blue-600 hover:underline"
-                    >
-                      View job →
-                    </button>
-                  )}
-
-                  <button
-                    type="button"
-                    data-testid="technician-day-on-my-way"
-                    disabled={onMyWaySending === appt.id || onMyWayNotified[appt.id]}
-                    onClick={() => void sendOnMyWay(appt.id)}
-                  >
-                    {onMyWayNotified[appt.id]
-                      ? 'Customer notified ✓'
-                      : onMyWaySending === appt.id
-                        ? 'Sending…'
-                        : 'On my way'}
-                  </button>
-
-                  {!isEditing ? (
-                    <button
-                      type="button"
-                      data-testid="technician-day-edit"
-                      onClick={() => {
-                        setEditingAppointmentId(appt.id);
-                        setEditedStart(toDateTimeInputValue(appt.scheduledStart));
-                        setEditedEnd(toDateTimeInputValue(appt.scheduledEnd));
-                      }}
-                    >
-                      Edit time
-                    </button>
-                  ) : (
-                    <div data-testid="technician-day-edit-form">
-                      <input
-                        type="datetime-local"
-                        value={editedStart}
-                        onChange={(event) => setEditedStart(event.target.value)}
-                        data-testid="technician-day-edit-start"
-                      />
-                      <input
-                        type="datetime-local"
-                        value={editedEnd}
-                        onChange={(event) => setEditedEnd(event.target.value)}
-                        data-testid="technician-day-edit-end"
-                      />
-                      <button
-                        type="button"
-                        disabled={savingAppointmentId === appt.id}
-                        onClick={() => void saveAppointmentTimes(appt.id)}
-                        data-testid="technician-day-save"
-                      >
-                        Save
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => setEditingAppointmentId(null)}
-                        data-testid="technician-day-cancel"
-                      >
-                        Cancel
-                      </button>
-                    </div>
-                  )}
                 </div>
               );
             })

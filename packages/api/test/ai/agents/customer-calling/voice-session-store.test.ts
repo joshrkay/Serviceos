@@ -48,6 +48,19 @@ describe('VoiceSessionStore', () => {
     expect(store.size()).toBe(2);
   });
 
+  it('liveCount() excludes ended sessions; size() retains them (Codex P2 drain)', () => {
+    const store = newStore();
+    const a = store.create('tenant-a', 'inapp');
+    store.create('tenant-b', 'inapp');
+    expect(store.size()).toBe(2);
+    expect(store.liveCount()).toBe(2);
+    // An ended session stays in the map for post-call lookups (size stays 2)
+    // but must NOT count toward the SIGTERM drain wait.
+    a.ended = true;
+    expect(store.size()).toBe(2);
+    expect(store.liveCount()).toBe(1);
+  });
+
   it('delete removes the session', () => {
     const store = newStore();
     const s = store.create('t', 'inapp');

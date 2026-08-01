@@ -177,6 +177,9 @@ export async function decomposeTranscript(
 
   const response = await gateway.complete({
     taskType: 'decompose_transcript',
+    // Top-level tenantId — the quota/cache resilience wrappers key on
+    // this, not metadata.tenantId (see gateway.ts's tenant-id guard).
+    tenantId: context.tenantId,
     messages: [
       { role: 'system', content: SYSTEM_PROMPT },
       { role: 'user', content: transcript },

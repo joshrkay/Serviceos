@@ -53,20 +53,20 @@ export function Field({
       {label && (
         <label
           htmlFor={controlId}
-          className="text-xs font-medium text-slate-600"
+          className="text-xs font-medium text-muted-foreground"
         >
           {label}
-          {required && <span className="ml-0.5 text-red-500">*</span>}
+          {required && <span className="ml-0.5 text-destructive">*</span>}
         </label>
       )}
       {hint && (
-        <p id={hintId} className="text-xs text-slate-400">
+        <p id={hintId} className="text-xs text-muted-foreground">
           {hint}
         </p>
       )}
       {control}
       {error && (
-        <p id={errorId} role="alert" className="text-xs text-red-600">
+        <p id={errorId} role="alert" className="text-xs text-destructive">
           {error}
         </p>
       )}

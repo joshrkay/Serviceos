@@ -5,7 +5,8 @@ import { PgEstimateRepository } from '../../src/estimates/pg-estimate';
 import { PgJobRepository } from '../../src/jobs/pg-job';
 import { PgCustomerRepository } from '../../src/customers/pg-customer';
 import { PgLocationRepository } from '../../src/locations/pg-location';
-import { buildLineItem, calculateDocumentTotals } from '../../src/shared/billing-engine';
+import { buildLineItem, calculateDocumentTotals, LineItem } from '../../src/shared/billing-engine';
+import { createEstimate } from '../../src/estimates/estimate';
 
 describe('Postgres integration — estimates', () => {
   let pool: Pool;
@@ -73,6 +74,57 @@ describe('Postgres integration — estimates', () => {
     await closeSharedTestDb();
   });
 
+  describe('EE-1 — good-better-best', () => {
+    it('persists all tier rows and headlines at the default selection', async () => {
+      const items: LineItem[] = [
+        { id: crypto.randomUUID(), description: 'Diagnostic', quantity: 1, unitPriceCents: 5000, totalCents: 5000, sortOrder: 0, taxable: false },
+        { id: crypto.randomUUID(), description: 'Builder heater', quantity: 1, unitPriceCents: 90000, totalCents: 90000, sortOrder: 1, taxable: false, groupKey: 'wh', groupLabel: 'Water heater', isOptional: true, isDefaultSelected: true },
+        { id: crypto.randomUUID(), description: 'Premium heater', quantity: 1, unitPriceCents: 140000, totalCents: 140000, sortOrder: 2, taxable: false, groupKey: 'wh', groupLabel: 'Water heater', isOptional: true, isDefaultSelected: false },
+        { id: crypto.randomUUID(), description: 'Surge protector', quantity: 1, unitPriceCents: 8000, totalCents: 8000, sortOrder: 3, taxable: false, isOptional: true, isDefaultSelected: false },
+      ];
+      const estimate = await createEstimate(
+        { tenantId: tenant.tenantId, jobId, estimateNumber: 'EST-GBB-1', lineItems: items, createdBy: tenant.userId },
+        estimateRepo,
+      );
+
+      // Round-trip through the real estimate_line_items columns (migration 127).
+      const found = await estimateRepo.findById(tenant.tenantId, estimate.id);
+      expect(found).not.toBeNull();
+      expect(found!.lineItems).toHaveLength(4);
+      const builder = found!.lineItems.find((li) => li.description === 'Builder heater')!;
+      expect(builder.groupKey).toBe('wh');
+      expect(builder.isOptional).toBe(true);
+      expect(builder.isDefaultSelected).toBe(true);
+      const premium = found!.lineItems.find((li) => li.description === 'Premium heater')!;
+      expect(premium.groupKey).toBe('wh');
+      expect(premium.isDefaultSelected).toBe(false);
+      // Headline total = Diagnostic (5000) + default Builder tier (90000) only —
+      // NOT the 243000 sum of every option + add-on.
+      expect(found!.totals.totalCents).toBe(95000);
+    });
+  });
+
+  describe('EE-4 — line image_file_id', () => {
+    it('persists and round-trips a line image_file_id (real column)', async () => {
+      const fileId = crypto.randomUUID();
+      const items: LineItem[] = [
+        { id: crypto.randomUUID(), description: 'Water heater', quantity: 1, unitPriceCents: 90000, totalCents: 90000, sortOrder: 0, taxable: true, imageFileId: fileId },
+        { id: crypto.randomUUID(), description: 'Labor', quantity: 2, unitPriceCents: 7500, totalCents: 15000, sortOrder: 1, taxable: true },
+      ];
+      const estimate = await createEstimate(
+        { tenantId: tenant.tenantId, jobId, estimateNumber: 'EST-IMG-1', lineItems: items, createdBy: tenant.userId },
+        estimateRepo,
+      );
+
+      const found = await estimateRepo.findById(tenant.tenantId, estimate.id);
+      const heater = found!.lineItems.find((li) => li.description === 'Water heater')!;
+      expect(heater.imageFileId).toBe(fileId);
+      // A line with no image reads back undefined (SQL NULL).
+      const labor = found!.lineItems.find((li) => li.description === 'Labor')!;
+      expect(labor.imageFileId).toBeUndefined();
+    });
+  });
+
   describe('CRUD', () => {
     it('creates estimate and retrieves via findById', async () => {
       const lineItems = [
@@ -99,6 +151,47 @@ describe('Postgres integration — estimates', () => {
       expect(found!.status).toBe('draft');
       expect(found!.estimateNumber).toBe('EST-001');
       expect(found!.lineItems).toHaveLength(1);
+    });
+
+    it('filters by jobIds (customer filter) against the real DB', async () => {
+      // A second job for the same tenant, so the jobIds predicate has to
+      // isolate. estimates only carry job_id; the route resolves customerId
+      // → jobIds, which this exercises at the SQL level.
+      const customerRepo = new PgCustomerRepository(pool);
+      const locationRepo = new PgLocationRepository(pool);
+      const customer2 = crypto.randomUUID();
+      await customerRepo.create({
+        id: customer2, tenantId: tenant.tenantId, firstName: 'Second', lastName: 'Customer',
+        displayName: 'Second Customer', preferredChannel: 'phone', smsConsent: false,
+        isArchived: false, createdBy: tenant.userId, createdAt: new Date(), updatedAt: new Date(),
+      });
+      const location2 = crypto.randomUUID();
+      await locationRepo.create({
+        id: location2, tenantId: tenant.tenantId, customerId: customer2, street1: '9 Oak',
+        city: 'Austin', state: 'TX', postalCode: '78702', country: 'USA', isPrimary: true,
+        addressType: 'service', isArchived: false, createdAt: new Date(), updatedAt: new Date(),
+      });
+      const jobId2 = crypto.randomUUID();
+      await jobRepo.create({
+        id: jobId2, tenantId: tenant.tenantId, customerId: customer2, locationId: location2,
+        jobNumber: 'JOB-002', summary: 'Second job', status: 'scheduled', priority: 'normal',
+        createdBy: tenant.userId, createdAt: new Date(), updatedAt: new Date(),
+      });
+
+      const mk = (jobIdForEst: string, num: string) => estimateRepo.create({
+        id: crypto.randomUUID(), tenantId: tenant.tenantId, jobId: jobIdForEst, estimateNumber: num,
+        status: 'draft', lineItems: [buildLineItem(crypto.randomUUID(), 'L', 1, 1000, 1, false, 'labor')],
+        totals: calculateDocumentTotals([buildLineItem(crypto.randomUUID(), 'L', 1, 1000, 1, false, 'labor')], 0, 0),
+        version: 1, createdBy: tenant.userId, createdAt: new Date(), updatedAt: new Date(),
+      });
+      await mk(jobId, 'EST-CF-1');
+      const onJob2 = await mk(jobId2, 'EST-CF-2');
+
+      const filtered = await estimateRepo.findByTenant(tenant.tenantId, { jobIds: [jobId2] });
+      expect(filtered.map((e) => e.id)).toEqual([onJob2.id]);
+
+      const empty = await estimateRepo.findByTenant(tenant.tenantId, { jobIds: [] });
+      expect(empty).toEqual([]);
     });
 
     it('updates estimate and reflects in findById', async () => {

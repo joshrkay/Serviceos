@@ -2,7 +2,16 @@ import { Router, Response } from 'express';
 import { z } from 'zod';
 import { AuthenticatedRequest } from '../auth/clerk';
 import { requireAuth, requireTenant, requirePermission } from '../middleware/auth';
-import { createEstimateSchema } from '../shared/contracts';
+import {
+  createEstimateSchema,
+  updateEstimateSchema,
+  verticalTypeSchema,
+} from '../shared/contracts';
+import {
+  EstimateTemplateRepository,
+  createTemplate,
+  buildTemplateInputFromEstimate,
+} from '../templates/estimate-template';
 import { toErrorResponse } from '../shared/errors';
 import { TenantOwnership } from '../shared/tenant-ownership';
 import {
@@ -29,14 +38,16 @@ import { SendService } from '../notifications/send-service';
 import { LLMGateway } from '../ai/gateway/gateway';
 import { ProposalRepository } from '../proposals/proposal';
 import { EstimateTaskHandler } from '../ai/tasks/estimate-task';
+import { CatalogItemRepository } from '../catalog/catalog-item';
 import { JobRepository } from '../jobs/job';
 import { InvoiceRepository } from '../invoices/invoice';
 import { PaymentRepository } from '../invoices/payment';
 import { convertEstimateToInvoice } from '../invoices/convert-estimate';
 import { RefreshJobMoneyStateDeps, refreshJobMoneyStateSafe } from '../jobs/job-money-state';
-import { applyBps } from '../shared/billing-engine';
+import { applyBps, resolveSelectedLineItems } from '../shared/billing-engine';
 import { AgreementRepository } from '../agreements/agreement';
 import { getCustomerMemberDiscountBps } from '../agreements/member-pricing';
+import { Customer, CustomerRepository } from '../customers/customer';
 import { createLogger } from '../logging/logger';
 
 const logger = createLogger({
@@ -70,6 +81,13 @@ function parseExpectedVersion(req: AuthenticatedRequest): number | undefined {
 export interface EstimateAIDeps {
   gateway: LLMGateway;
   proposalRepo: ProposalRepository;
+  // Tenant catalog repo used to ground AI-suggested line-item prices to the
+  // real catalog price (locked pattern: never trust an LLM-emitted price
+  // without resolution). Wired through so /suggest grounds prices identically
+  // to the voice path. Optional so legacy harnesses without a catalog still
+  // build; when absent, every LLM price is treated as uncatalogued and the
+  // confidence cap fires (see EstimateTaskHandler.groundLineItemPricing).
+  catalogRepo?: CatalogItemRepository;
 }
 
 export function createEstimateRouter(
@@ -93,10 +111,62 @@ export function createEstimateRouter(
   // estimate for a customer with an active discounting membership has that
   // discount folded in automatically. Optional so legacy harnesses build.
   agreementRepo?: AgreementRepository,
+  // Estimate templates (#7.9). When wired, mounts POST /:id/save-as-template,
+  // which turns an existing estimate into a reusable, tenant-scoped template.
+  // Optional so legacy harnesses build (the route returns 503 when absent).
+  templateRepo?: EstimateTemplateRepository,
+  // Journey QA 2026-07-02 (bug 5) — list rows carry a customer summary
+  // (resolved estimate → job → customer) so the UI stops rendering the
+  // literal "Customer" fallback. Optional so legacy harnesses build.
+  customerRepo?: CustomerRepository,
 ): Router {
   const router = Router();
 
   const jobRepo = moneyStateDeps?.jobRepo;
+
+  /**
+   * Journey QA 2026-07-02 (bug 5) — attach a customer summary to each list
+   * row. Estimates carry only job_id, so this resolves estimate → job →
+   * customer with deduplicated, page-bounded batches of lookups. Best-effort:
+   * missing repos or rows leave the estimate unenriched.
+   */
+  const attachCustomerSummaries = async <T extends { jobId: string }>(
+    tenantId: string,
+    estimates: T[],
+  ): Promise<Array<T & { customer?: Record<string, unknown> }>> => {
+    if (!jobRepo || !customerRepo || estimates.length === 0) return estimates;
+    const jobIds = [...new Set(estimates.map((e) => e.jobId).filter(Boolean))];
+    const jobs = await Promise.all(
+      jobIds.map((id) => jobRepo.findById(tenantId, id).catch(() => null)),
+    );
+    const jobById = new Map(jobs.filter((j) => j !== null).map((j) => [j!.id, j!]));
+    const customerIds = [
+      ...new Set(
+        [...jobById.values()].map((j) => j.customerId).filter((id): id is string => !!id),
+      ),
+    ];
+    const customers = await Promise.all(
+      customerIds.map((id) => customerRepo.findById(tenantId, id).catch(() => null)),
+    );
+    const customerById = new Map(
+      customers.filter((c): c is Customer => c !== null).map((c) => [c.id, c]),
+    );
+    return estimates.map((e) => {
+      const job = jobById.get(e.jobId);
+      const c = job?.customerId ? customerById.get(job.customerId) : undefined;
+      return c
+        ? {
+            ...e,
+            customer: {
+              id: c.id,
+              displayName: c.displayName,
+              firstName: c.firstName,
+              lastName: c.lastName,
+            },
+          }
+        : e;
+    });
+  };
 
   // Build the per-request mutation deps (audit + revision history + the
   // deposit lock). The deposit-paid amount comes from the linked job so
@@ -161,7 +231,14 @@ export function createEstimateRouter(
           if (job) {
             const bps = await getCustomerMemberDiscountBps(tenantId, job.customerId, agreementRepo);
             if (bps > 0) {
-              const subtotalCents = parsed.lineItems.reduce((sum, li) => sum + li.totalCents, 0);
+              // EE-1 — base the member discount on the DEFAULT selection, the
+              // same subset createEstimate headlines. Summing every tier option
+              // here would over-discount a tiered estimate (a discount computed
+              // on the full menu but applied to only the default tier).
+              const subtotalCents = resolveSelectedLineItems(parsed.lineItems).reduce(
+                (sum, li) => sum + li.totalCents,
+                0,
+              );
               const cents = applyBps(subtotalCents, bps);
               if (cents > 0) {
                 discountCents += cents;
@@ -223,6 +300,7 @@ export function createEstimateRouter(
     async (req: AuthenticatedRequest, res: Response) => {
       try {
         const jobId = typeof req.query.jobId === 'string' ? req.query.jobId : undefined;
+        const customerId = typeof req.query.customerId === 'string' ? req.query.customerId : undefined;
         const status = typeof req.query.status === 'string' ? req.query.status as EstimateStatus : undefined;
         const search = typeof req.query.search === 'string' ? req.query.search : undefined;
         const sort: 'asc' | 'desc' = req.query.sort === 'asc' ? 'asc' : 'desc';
@@ -231,6 +309,7 @@ export function createEstimateRouter(
         // Preserves the existing UI contract for `?jobId=...` consumers.
         if (
           jobId &&
+          customerId === undefined &&
           status === undefined &&
           search === undefined &&
           req.query.paginated !== 'true' &&
@@ -238,7 +317,7 @@ export function createEstimateRouter(
           req.query.offset === undefined
         ) {
           const result = await estimateRepo.findByJob(req.auth!.tenantId, jobId);
-          res.json(result);
+          res.json(await attachCustomerSummaries(req.auth!.tenantId, result));
           return;
         }
 
@@ -266,7 +345,29 @@ export function createEstimateRouter(
           return;
         }
 
-        const baseOptions = { status, jobId, search, sort };
+        // Customer filter (Story 7.10). Estimates carry only job_id, so
+        // translate a customerId into the customer's jobIds and filter on
+        // those. Both queries are tenant-scoped (RLS + explicit tenant_id).
+        let jobIds: string[] | undefined;
+        if (customerId !== undefined) {
+          if (!jobRepo?.findByCustomer) {
+            res.status(400).json({
+              error: 'VALIDATION_ERROR',
+              message: 'Customer filtering is not available in this environment',
+            });
+            return;
+          }
+          const customerJobs = await jobRepo.findByCustomer(req.auth!.tenantId, customerId);
+          jobIds = customerJobs.map((j) => j.id);
+          if (jobIds.length === 0) {
+            // The customer has no jobs → no estimates. Return the empty shape
+            // matching the requested response form.
+            res.json(wantsPaginated ? { data: [], total: 0 } : []);
+            return;
+          }
+        }
+
+        const baseOptions = { status, jobId, jobIds, search, sort };
 
         if (wantsPaginated) {
           const result = await listEstimatesWithMeta(req.auth!.tenantId, estimateRepo, {
@@ -274,12 +375,15 @@ export function createEstimateRouter(
             limit,
             offset,
           });
-          res.json(result);
+          res.json({
+            ...result,
+            data: await attachCustomerSummaries(req.auth!.tenantId, result.data),
+          });
           return;
         }
 
         const result = await listEstimates(req.auth!.tenantId, estimateRepo, baseOptions);
-        res.json(result);
+        res.json(await attachCustomerSummaries(req.auth!.tenantId, result));
       } catch (err) {
         const { statusCode, body } = toErrorResponse(err);
         res.status(statusCode).json(body);
@@ -307,13 +411,50 @@ export function createEstimateRouter(
     }
   );
 
+  // GET /:id/history — edit/revision history for the detail view (Story
+  // 7.10). Returns the recorded edit deltas (what changed between persisted
+  // versions) newest-last. 503 when the revision subsystem isn't wired.
+  router.get(
+    '/:id/history',
+    requireAuth,
+    requireTenant,
+    requirePermission('estimates:view'),
+    async (req: AuthenticatedRequest, res: Response) => {
+      try {
+        if (!revisionDeps?.editDeltaRepo) {
+          res.status(503).json({
+            error: 'NOT_CONFIGURED',
+            message: 'Estimate history is not configured for this environment',
+          });
+          return;
+        }
+        // Tenant-ownership check: only surface history for an estimate the
+        // caller can actually see.
+        const estimate = await getEstimate(req.auth!.tenantId, req.params.id, estimateRepo);
+        if (!estimate) {
+          res.status(404).json({ error: 'NOT_FOUND', message: 'Estimate not found' });
+          return;
+        }
+        const history = await revisionDeps.editDeltaRepo.findByEstimate(
+          req.auth!.tenantId,
+          req.params.id,
+        );
+        res.json(history);
+      } catch (err) {
+        const { statusCode, body } = toErrorResponse(err);
+        res.status(statusCode).json(body);
+      }
+    }
+  );
+
   const updateHandler = async (req: AuthenticatedRequest, res: Response) => {
     try {
       const mutationDeps = await buildMutationDeps(req.auth!.tenantId, req.params.id, req);
+      const input = updateEstimateSchema.parse(req.body);
       const result = await updateEstimate(
         req.auth!.tenantId,
         req.params.id,
-        { ...req.body, expectedVersion: parseExpectedVersion(req) },
+        { ...input, expectedVersion: parseExpectedVersion(req) },
         estimateRepo,
         mutationDeps,
       );
@@ -357,10 +498,11 @@ export function createEstimateRouter(
     async (req: AuthenticatedRequest, res: Response) => {
       try {
         const mutationDeps = await buildMutationDeps(req.auth!.tenantId, req.params.id, req);
+        const input = updateEstimateSchema.parse(req.body);
         const result = await reviseEstimate(
           req.auth!.tenantId,
           req.params.id,
-          { ...req.body, expectedVersion: parseExpectedVersion(req) },
+          { ...input, expectedVersion: parseExpectedVersion(req) },
           estimateRepo,
           mutationDeps,
         );
@@ -428,6 +570,59 @@ export function createEstimateRouter(
           return;
         }
         res.status(201).json(result);
+      } catch (err) {
+        const { statusCode, body } = toErrorResponse(err);
+        res.status(statusCode).json(body);
+      }
+    }
+  );
+
+  // POST /:id/save-as-template — turn an existing estimate into a reusable,
+  // tenant-scoped template (Story 7.9). The server fills the template's line
+  // items, discount, tax rate, and customer message from the estimate; the
+  // caller supplies the template's name + classification. The canonical
+  // estimate is unchanged.
+  const saveAsTemplateSchema = z.object({
+    name: z.string().min(1).max(255),
+    verticalType: verticalTypeSchema,
+    categoryId: z.string().min(1),
+    description: z.string().max(1000).optional(),
+  });
+
+  router.post(
+    '/:id/save-as-template',
+    requireAuth,
+    requireTenant,
+    requirePermission('estimates:create'),
+    async (req: AuthenticatedRequest, res: Response) => {
+      try {
+        if (!templateRepo) {
+          res.status(503).json({
+            error: 'NOT_CONFIGURED',
+            message: 'Estimate templates are not configured for this environment',
+          });
+          return;
+        }
+        const parsed = saveAsTemplateSchema.parse(req.body ?? {});
+        const estimate = await getEstimate(req.auth!.tenantId, req.params.id, estimateRepo);
+        if (!estimate) {
+          res.status(404).json({ error: 'NOT_FOUND', message: 'Estimate not found' });
+          return;
+        }
+        const template = await createTemplate(
+          buildTemplateInputFromEstimate(estimate, {
+            tenantId: req.auth!.tenantId,
+            name: parsed.name,
+            verticalType: parsed.verticalType,
+            categoryId: parsed.categoryId,
+            description: parsed.description,
+            createdBy: req.auth!.userId,
+          }),
+          templateRepo,
+          auditRepo,
+          req.auth!.role ?? undefined,
+        );
+        res.status(201).json(template);
       } catch (err) {
         const { statusCode, body } = toErrorResponse(err);
         res.status(statusCode).json(body);
@@ -597,7 +792,7 @@ export function createEstimateRouter(
           await ownership.requireExists(req.auth!.tenantId, 'customer', parsed.customerId);
         }
 
-        const handler = new EstimateTaskHandler(aiDeps.gateway);
+        const handler = new EstimateTaskHandler(aiDeps.gateway, aiDeps.catalogRepo);
         const existingEntities: Record<string, unknown> = {};
         if (parsed.serviceType) existingEntities.serviceType = parsed.serviceType;
         if (parsed.customerId) existingEntities.customerId = parsed.customerId;

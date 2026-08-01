@@ -1,0 +1,88 @@
+name: Clean Install
+
+# Proves a fresh clone can be set up and checked with no cached state and no
+# tribal knowledge — the thing pr-checks.yml cannot prove, because it warms an
+# npm cache and installs only what each job happens to need.
+#
+# Runs on dependency/tooling changes and daily. Deliberately NOT on every PR:
+# it installs twice with the cache disabled, which is slow and would add
+# nothing to a PR that touches only application code.
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'package.json'
+      - 'package-lock.json'
+      - 'packages/*/package.json'
+      - 'packages/mobile/package-lock.json'
+      - '.nvmrc'
+      - 'Dockerfile'
+      - 'scripts/doctor.ts'
+      - '.github/workflows/clean-install.yml'
+  schedule:
+    - cron: '35 6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  clean-install:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v5
+
+      # node-version-file rather than a literal: this job is the one that
+      # should fail if .nvmrc and the rest of CI ever disagree again.
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: '.nvmrc'
+          # No `cache:` on purpose — a cache hit would hide a lockfile that
+          # cannot actually resolve from scratch.
+
+      - name: Assert the runner matches the .nvmrc pin exactly
+        run: |
+          pinned="$(tr -d 'v \n' < .nvmrc)"
+          actual="$(node -v | tr -d 'v')"
+          echo "pinned=$pinned actual=$actual"
+          if [ "$pinned" != "$actual" ]; then
+            echo "::error::Runner Node $actual does not match .nvmrc pin $pinned"
+            exit 1
+          fi
+
+      - name: Install root workspace deps
+        run: npm ci
+
+      # packages/mobile is not a root workspace and has its own lockfile, so
+      # the root install above does not cover it. This is the setup step that
+      # was previously undocumented.
+      - name: Install mobile deps
+        run: npm ci
+        working-directory: packages/mobile
+
+      # Should pass cleanly here: correct Node, both installs present.
+      # Docker is available on the runner, so include the integration checks.
+      - name: Doctor
+        run: npm run doctor -- --integration
+
+      - name: Typecheck (api, web, corpus)
+        run: npm run typecheck
+
+      - name: Typecheck mobile
+        run: npm run typecheck:mobile
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Dependency audit
+        run: npm run check:dependency-audit
+
+      # Second install into a pristine tree. Catches a lockfile that only
+      # resolves because of state left behind by the first install.
+      - name: Re-install from scratch (determinism check)
+        run: |
+          rm -rf node_modules packages/*/node_modules
+          npm ci
+          npm ci --prefix packages/mobile
+          npm run doctor -- --integration

@@ -5,7 +5,7 @@
  * nesting depth and leaves non-secret values untouched.
  */
 import { describe, it, expect } from 'vitest';
-import { redactSecrets, isSecretKey } from '../../src/logging/redact';
+import { redactSecrets, isSecretKey, redactUrlValue, redactByTier } from '../../src/logging/redact';
 
 describe('redactSecrets', () => {
   it('redacts top-level secret-like keys', () => {
@@ -95,5 +95,86 @@ describe('redactSecrets', () => {
     // The second occurrence is the already-seen shared object, replaced by
     // the circular sentinel to stop the walk.
     expect(out[1]).toBe('[Circular]');
+  });
+});
+
+/**
+ * SEC-20 — bearer tokens travel in the URL on public, token-gated routes
+ * (`/public/estimates/:token`, `/api/public/portal/:token`, etc). Key-based
+ * redaction never inspects a string VALUE for an embedded token, so a raw
+ * `route`/`url` field logged verbatim leaked live session tokens.
+ * redactUrlValue is the value-pattern scrub; these tests pin its behavior
+ * directly, independent of the request-logging middleware that calls it.
+ */
+describe('redactUrlValue', () => {
+  const TOKEN = 'abc123.def456-ghiJKL_verylongtoken789';
+
+  it('masks the token path segment on /public/estimates/:token routes', () => {
+    const out = redactUrlValue(`/public/estimates/${TOKEN}/approve`);
+    expect(out).toBe('/public/estimates/[REDACTED]/approve');
+    expect(out).not.toContain(TOKEN);
+  });
+
+  it('masks the token path segment on /api/public/portal/:token routes', () => {
+    const out = redactUrlValue(`/api/public/portal/${TOKEN}/customer`);
+    expect(out).toBe('/api/public/portal/[REDACTED]/customer');
+    expect(out).not.toContain(TOKEN);
+  });
+
+  it('masks the token path segment on /public/invoices/:token routes', () => {
+    const out = redactUrlValue(`/public/invoices/${TOKEN}/checkout`);
+    expect(out).toBe('/public/invoices/[REDACTED]/checkout');
+  });
+
+  it('masks the token path segment on /public/feedback/:token routes', () => {
+    const out = redactUrlValue(`/public/feedback/${TOKEN}`);
+    expect(out).toBe('/public/feedback/[REDACTED]');
+  });
+
+  it('masks a ?token= query param', () => {
+    const out = redactUrlValue(`/public/proposals/one-tap-approve?token=${TOKEN}`);
+    expect(out).toBe('/public/proposals/one-tap-approve?token=[REDACTED]');
+    expect(out).not.toContain(TOKEN);
+  });
+
+  it('masks a ?token= query param alongside other, non-sensitive params', () => {
+    const out = redactUrlValue(`/public/proposals/one-tap-undo?token=${TOKEN}&source=sms`);
+    expect(out).toBe('/public/proposals/one-tap-undo?token=[REDACTED]&source=sms');
+  });
+
+  it('leaves an ordinary authenticated route unchanged', () => {
+    expect(redactUrlValue('/api/jobs')).toBe('/api/jobs');
+    expect(redactUrlValue('/api/jobs/123')).toBe('/api/jobs/123');
+    expect(redactUrlValue('/api/jobs?status=open')).toBe('/api/jobs?status=open');
+  });
+
+  it('leaves non-string / empty input untouched', () => {
+    expect(redactUrlValue('')).toBe('');
+    // @ts-expect-error — exercising runtime guard against non-string input
+    expect(redactUrlValue(undefined)).toBe(undefined);
+    // @ts-expect-error — exercising runtime guard against non-string input
+    expect(redactUrlValue(null)).toBe(null);
+  });
+
+  it('is wired into redactByTier/redactSecrets for `route` and `url` keys at any nesting depth, at every tier', () => {
+    const input = {
+      safeRequestLog: {
+        route: `/public/estimates/${TOKEN}/approve`,
+        method: 'POST',
+      },
+    };
+    const standard = redactByTier(input, 'standard') as typeof input;
+    const strict = redactByTier(input, 'strict') as typeof input;
+
+    expect(standard.safeRequestLog.route).toBe('/public/estimates/[REDACTED]/approve');
+    expect(strict.safeRequestLog.route).toBe('/public/estimates/[REDACTED]/approve');
+    expect(JSON.stringify(standard)).not.toContain(TOKEN);
+  });
+
+  it('does not scrub unrelated keys that happen to contain a token-looking string', () => {
+    const out = redactSecrets({ notes: `see /public/estimates/${TOKEN}/approve in the ticket` });
+    // `notes` is not a URL-value key, so it is left to the ordinary
+    // key-based redaction path (which does not match "notes"), unchanged.
+    expect(out.notes).toContain(TOKEN);
   });
 });

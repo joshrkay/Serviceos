@@ -74,10 +74,12 @@ describe('DispatchLogPage', () => {
     expect(screen.queryByText('No outbound messages yet')).toBeNull();
   });
 
-  it('fetches the interactions endpoint on mount', async () => {
+  it('fetches the dispatch-log endpoint on mount', async () => {
     mockApiFetch.mockResolvedValue(jsonResponse({ dispatches: [], total: 0 }));
     render(<DispatchLogPage />);
     await waitFor(() => expect(mockApiFetch).toHaveBeenCalled());
-    expect(String(mockApiFetch.mock.calls[0][0])).toContain('/api/interactions');
+    // U6 (E8): reads the dedicated dispatch log, not the voice-sessions list,
+    // so `data.dispatches` is populated rather than always-empty.
+    expect(String(mockApiFetch.mock.calls[0][0])).toContain('/api/interactions/dispatches');
   });
 });

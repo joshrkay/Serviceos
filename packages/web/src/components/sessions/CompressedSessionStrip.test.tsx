@@ -19,6 +19,7 @@ function setup(
     sessions,
     pendingProposalCount,
     isConnecting,
+    gateway: { status: 'idle', send: () => {}, onFrame: () => () => {} },
   });
   return render(
     <MemoryRouter>

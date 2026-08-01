@@ -1,5 +1,9 @@
 # QA Matrix — 4-agent swarm harness
 
+**Unblock the matrix:** [docs/runbooks/qa-full-matrix-unblock.md](../docs/runbooks/qa-full-matrix-unblock.md)
+— `npm run qa:setup` from a filled `.env.qa`, then `npm run qa:matrix:run` or
+`npm run qa:runbook`. CI secrets: [docs/runbooks/qa-github-secrets.md](../docs/runbooks/qa-github-secrets.md).
+
 Cross-layer QA for the full product surface: provisioning, customers, estimates,
 billing journeys, scheduling, SMS, payments, voice, proposals, isolation, and
 public portal. Each matrix row is executed by a 4-agent swarm inside a single
@@ -125,7 +129,9 @@ qa/
 
 | Script | Purpose |
 |--------|---------|
-| `npm run qa:doctor` | Preflight env + reachability |
+| `npm run qa:doctor` | Preflight env + reachability (full 11 vars) |
+| `npm run qa:doctor:bootstrap` | URLs + DB + HMAC secret only (pre-seed) |
+| `npm run qa:setup` | One-shot bootstrap (seed → mint → doctor) |
 | `npm run qa:matrix:run` | Full pipeline including gate |
 | `npm run e2e:qa-matrix` | Matrix only |
 | `npm run qa:matrix:gate` | Post-run gate enforcement |

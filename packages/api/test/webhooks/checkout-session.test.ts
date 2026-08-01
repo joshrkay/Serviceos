@@ -155,13 +155,17 @@ describe('checkout.session.completed — payment_intent → providerReference', 
     };
   }
 
-  function invoiceEvent(paymentIntent: unknown): Record<string, unknown> {
+  function invoiceEvent(
+    paymentIntent: unknown,
+    opts?: { sessionId?: string; invoiceId?: string; eventId?: string },
+  ): Record<string, unknown> {
     return {
-      id: `evt_${uuidv4()}`,
+      id: opts?.eventId ?? `evt_${uuidv4()}`,
       type: 'checkout.session.completed',
       data: {
         object: {
-          metadata: { tenant_id: TENANT, invoice_id: INVOICE_ID },
+          ...(opts?.sessionId ? { id: opts.sessionId } : {}),
+          metadata: { tenant_id: TENANT, invoice_id: opts?.invoiceId ?? INVOICE_ID },
           amount_total: 10000,
           payment_status: 'paid',
           payment_intent: paymentIntent,
@@ -190,9 +194,225 @@ describe('checkout.session.completed — payment_intent → providerReference', 
     expect(payments[0].providerReference).toBe('pi_object_456');
   });
 
-  it('falls back to the stripe_checkout literal when payment_intent is null', async () => {
-    await postSigned(app, invoiceEvent(null));
+  it('P0-5: falls back to the unique SESSION id when payment_intent is null', async () => {
+    await postSigned(app, invoiceEvent(null, { sessionId: 'cs_test_789' }));
     const payments = await paymentRepo.findByInvoice(TENANT, INVOICE_ID);
-    expect(payments[0].providerReference).toBe('stripe_checkout');
+    expect(payments[0].providerReference).toBe('cs_test_789');
+  });
+
+  it('P0-5: falls back to the event id when both payment_intent and session id are absent', async () => {
+    const eventId = `evt_${uuidv4()}`;
+    await postSigned(app, invoiceEvent(null, { eventId }));
+    const payments = await paymentRepo.findByInvoice(TENANT, INVOICE_ID);
+    expect(payments[0].providerReference).toBe(eventId);
+  });
+
+  it('P0-5 regression: two intent-less checkouts on DIFFERENT invoices both record (no tenant-wide collision)', async () => {
+    // With the old literal 'stripe_checkout' fallback both sessions shared one
+    // provider reference: the second hit the (tenant, reference) unique index
+    // against a different invoice, recordPayment surfaced a conflict the
+    // handler doesn't catch, and Stripe retried the 500 forever.
+    const secondInvoiceId = 'inv-002';
+    await invoiceRepo.create({ ...makeInvoice(), id: secondInvoiceId, invoiceNumber: 'INV-002' });
+
+    const res1 = await postSigned(app, invoiceEvent(null, { sessionId: 'cs_collide_a' }));
+    const res2 = await postSigned(
+      app,
+      invoiceEvent(null, { sessionId: 'cs_collide_b', invoiceId: secondInvoiceId }),
+    );
+
+    expect(res1.status).toBe(200);
+    expect(res2.status).toBe(200);
+    expect((await paymentRepo.findByInvoice(TENANT, INVOICE_ID))[0]?.providerReference).toBe('cs_collide_a');
+    expect((await paymentRepo.findByInvoice(TENANT, secondInvoiceId))[0]?.providerReference).toBe('cs_collide_b');
+  });
+});
+
+describe('P0-9 — unapplied captures are audited; stale links die on credit', () => {
+  let invoiceRepo: InMemoryInvoiceRepository;
+  let paymentRepo: InMemoryPaymentRepository;
+  let auditRepo: InMemoryAuditRepository;
+  let deactivated: Array<{ linkId: string; account?: string }>;
+  let app: express.Express;
+  const INVOICE_ID = 'inv-p09';
+
+  function makeInvoice(over: Partial<Invoice> = {}): Invoice {
+    const lineItems = [buildLineItem('li-1', 'Service', 1, 10000, 1, false)];
+    const totals = calculateDocumentTotals(lineItems, 0, 0);
+    return {
+      id: INVOICE_ID,
+      tenantId: TENANT,
+      jobId: 'job-p09',
+      invoiceNumber: 'INV-P09',
+      status: 'open',
+      lineItems,
+      totals,
+      amountPaidCents: 0,
+      amountDueCents: totals.totalCents,
+      stripePaymentLinkId: 'plink_stale_1',
+      stripePaymentLinkUrl: 'https://pay.stripe.com/plink_stale_1',
+      createdBy: 'user-1',
+      createdAt: new Date(),
+      updatedAt: new Date(),
+      ...over,
+    };
+  }
+
+  function checkoutEvent(amountTotal: number): Record<string, unknown> {
+    return {
+      id: `evt_${uuidv4()}`,
+      type: 'checkout.session.completed',
+      data: {
+        object: {
+          id: `cs_${uuidv4()}`,
+          metadata: { tenant_id: TENANT, invoice_id: INVOICE_ID },
+          amount_total: amountTotal,
+          payment_status: 'paid',
+          payment_intent: `pi_${uuidv4()}`,
+        },
+      },
+    };
+  }
+
+  beforeEach(() => {
+    invoiceRepo = new InMemoryInvoiceRepository();
+    paymentRepo = new InMemoryPaymentRepository();
+    auditRepo = new InMemoryAuditRepository();
+    deactivated = [];
+    app = buildApp({
+      invoiceRepo,
+      paymentRepo,
+      auditRepo,
+      stripeWebhookSecret: STRIPE_SECRET,
+      paymentLinkProvider: {
+        generateLink: async () => { throw new Error('not used'); },
+        deactivateLink: async (linkId: string, account?: string) => {
+          deactivated.push({ linkId, account });
+        },
+      },
+    });
+  });
+
+  it('a capture that must be capped audits the unapplied remainder', async () => {
+    // Balance drops to 4000 after the link was minted at 10000.
+    await invoiceRepo.create(makeInvoice({ amountPaidCents: 6000, amountDueCents: 4000 }));
+
+    const res = await postSigned(app, checkoutEvent(10000));
+    expect(res.status).toBe(200);
+
+    // Credit capped to the remaining balance…
+    const invoice = await invoiceRepo.findById(TENANT, INVOICE_ID);
+    expect(invoice!.amountPaidCents).toBe(10000);
+    expect(invoice!.status).toBe('paid');
+
+    // …and the 6000-cent excess is on the audit trail, not just a log line.
+    const events = auditRepo.getAll().filter((e) => e.eventType === 'payment.unapplied_capture');
+    expect(events).toHaveLength(1);
+    expect(events[0].metadata).toMatchObject({
+      capturedCents: 10000,
+      creditedCents: 4000,
+      unappliedCents: 6000,
+      reason: 'capped_to_balance',
+    });
+  });
+
+  it('a capture on an unpayable invoice audits the full amount and retries the link kill', async () => {
+    await invoiceRepo.create(makeInvoice({ status: 'void' }));
+
+    const res = await postSigned(app, checkoutEvent(10000));
+    expect(res.status).toBe(200);
+
+    const events = auditRepo.getAll().filter((e) => e.eventType === 'payment.unapplied_capture');
+    expect(events).toHaveLength(1);
+    expect(events[0].metadata).toMatchObject({
+      capturedCents: 10000,
+      creditedCents: 0,
+      unappliedCents: 10000,
+      reason: 'not_payable',
+      invoiceStatus: 'void',
+    });
+    // The link a failed void-time deactivation left behind dies here.
+    expect(deactivated).toEqual([{ linkId: 'plink_stale_1', account: undefined }]);
+    const invoice = await invoiceRepo.findById(TENANT, INVOICE_ID);
+    expect(invoice!.stripePaymentLinkId).toBeUndefined();
+  });
+
+  it('a clean full payment consumes the link and clears its columns', async () => {
+    await invoiceRepo.create(makeInvoice());
+
+    const res = await postSigned(app, checkoutEvent(10000));
+    expect(res.status).toBe(200);
+
+    const invoice = await invoiceRepo.findById(TENANT, INVOICE_ID);
+    expect(invoice!.status).toBe('paid');
+    expect(invoice!.stripePaymentLinkId).toBeUndefined();
+    expect(deactivated).toHaveLength(1);
+    // A clean exact-amount settlement leaves no unapplied capture.
+    expect(auditRepo.getAll().filter((e) => e.eventType === 'payment.unapplied_capture')).toHaveLength(0);
+  });
+});
+
+describe('P0-9 — payment_intent.succeeded on a settled invoice audits the capture', () => {
+  it('audits payment.unapplied_capture and retries the link kill instead of a bare ACK', async () => {
+    const invoiceRepo = new InMemoryInvoiceRepository();
+    const paymentRepo = new InMemoryPaymentRepository();
+    const auditRepo = new InMemoryAuditRepository();
+    const deactivated: string[] = [];
+    const app = buildApp({
+      invoiceRepo,
+      paymentRepo,
+      auditRepo,
+      stripeWebhookSecret: STRIPE_SECRET,
+      paymentLinkProvider: {
+        generateLink: async () => { throw new Error('not used'); },
+        deactivateLink: async (linkId: string) => { deactivated.push(linkId); },
+      },
+    });
+
+    const lineItems = [buildLineItem('li-1', 'Service', 1, 10000, 1, false)];
+    const totals = calculateDocumentTotals(lineItems, 0, 0);
+    await invoiceRepo.create({
+      id: 'inv-pi-settled',
+      tenantId: TENANT,
+      jobId: 'job-pi',
+      invoiceNumber: 'INV-PI-1',
+      status: 'void',
+      lineItems,
+      totals,
+      amountPaidCents: 0,
+      amountDueCents: totals.totalCents,
+      stripePaymentLinkId: 'plink_pi_stale',
+      stripePaymentLinkUrl: 'https://pay.stripe.com/pi-stale',
+      createdBy: 'user-1',
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+
+    // A stale/direct PaymentIntent succeeds against the voided invoice —
+    // money captured, nothing creditable.
+    const res = await postSigned(app, {
+      id: `evt_${uuidv4()}`,
+      type: 'payment_intent.succeeded',
+      data: {
+        object: {
+          id: 'pi_stale_direct',
+          amount: 10000,
+          amount_received: 10000,
+          metadata: { tenant_id: TENANT, invoice_id: 'inv-pi-settled' },
+        },
+      },
+    });
+    expect(res.status).toBe(200);
+
+    const events = auditRepo.getAll().filter((e) => e.eventType === 'payment.unapplied_capture');
+    expect(events).toHaveLength(1);
+    expect(events[0].metadata).toMatchObject({
+      capturedCents: 10000,
+      creditedCents: 0,
+      unappliedCents: 10000,
+      reason: 'not_payable_payment_intent',
+      invoiceStatus: 'void',
+    });
+    expect(deactivated).toEqual(['plink_pi_stale']);
   });
 });

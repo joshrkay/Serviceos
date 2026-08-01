@@ -1,5 +1,6 @@
 import React from 'react';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { MemoryRouter } from 'react-router';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 const apiFetchMock = vi.fn();
@@ -9,6 +10,14 @@ vi.mock('../../utils/api-fetch', () => ({
 
 import { CommsInboxPage } from './CommsInboxPage';
 import type { InboxThread } from '../../api/conversations';
+
+function renderInbox(initialEntry = '/comms-inbox') {
+  return render(
+    <MemoryRouter initialEntries={[initialEntry]}>
+      <CommsInboxPage />
+    </MemoryRouter>,
+  );
+}
 
 function jsonResponse(body: unknown, ok = true, status = 200): Response {
   return {
@@ -87,14 +96,14 @@ describe('CommsInboxPage', () => {
   });
 
   it('renders the thread list with customer name, preview, and a needs-reply marker', async () => {
-    render(<CommsInboxPage />);
+    renderInbox();
     expect(await screen.findByText('Dana Diaz')).toBeInTheDocument();
     expect(screen.getByText('one more question')).toBeInTheDocument();
     expect(screen.getByLabelText('Needs reply')).toBeInTheDocument();
   });
 
   it('mobile layout contract — grid tracks use minmax(0,…) and rows are ≥44px tap targets', async () => {
-    render(<CommsInboxPage />);
+    renderInbox();
     await screen.findByText('Dana Diaz');
 
     const grid = screen.getByTestId('comms-inbox-grid');
@@ -109,14 +118,14 @@ describe('CommsInboxPage', () => {
   });
 
   it('opens a thread and renders its messages', async () => {
-    render(<CommsInboxPage />);
+    renderInbox();
     fireEvent.click(await screen.findByTestId('comms-thread-row'));
     expect(await screen.findByTestId('conversation-thread')).toBeInTheDocument();
     expect(screen.getAllByText('one more question').length).toBeGreaterThan(0);
   });
 
   it('sends an owner reply and appends it to the thread', async () => {
-    render(<CommsInboxPage />);
+    renderInbox();
     fireEvent.click(await screen.findByTestId('comms-thread-row'));
     await screen.findByTestId('conversation-thread');
 
@@ -148,7 +157,7 @@ describe('CommsInboxPage', () => {
       return routeApi(url, init);
     });
 
-    render(<CommsInboxPage />);
+    renderInbox();
     fireEvent.click(await screen.findByTestId('comms-thread-row'));
     await screen.findByTestId('conversation-thread');
 
@@ -165,7 +174,88 @@ describe('CommsInboxPage', () => {
       if (String(url).includes('/api/conversations')) return jsonResponse({ threads: [] });
       return jsonResponse({});
     });
-    render(<CommsInboxPage />);
+    renderInbox();
     expect(await screen.findByTestId('comms-inbox-empty')).toBeInTheDocument();
+  });
+
+  it('deep-links ?conversation= to open that thread', async () => {
+    renderInbox('/comms-inbox?conversation=conv-1');
+    expect(await screen.findByTestId('conversation-thread')).toBeInTheDocument();
+    expect(screen.getAllByText('one more question').length).toBeGreaterThan(0);
+  });
+});
+
+describe('CommsInboxPage — history search (Story 3.11)', () => {
+  const THREAD2: InboxThread = {
+    ...THREAD,
+    conversation: { ...THREAD.conversation, id: 'conv-2', title: 'Bob Smith', entityId: 'cust-2' },
+    customerName: 'Bob Smith',
+    lastMessagePreview: 'invoice please',
+    lastMessageAt: '2026-06-16T09:00:00Z',
+  };
+
+  // /search and /messages must be matched before the generic GET /api/conversations branch.
+  function routeSearch(url: string, init?: RequestInit): Response {
+    const u = String(url);
+    if (u.includes('/api/conversations/search')) {
+      const q = new URL(`http://x${u.startsWith('/') ? u : `/${u}`}`).searchParams.get('q')?.toLowerCase() ?? '';
+      const results = q.includes('rooftop')
+        ? [
+            {
+              message: { ...MESSAGES[0], conversationId: 'conv-2', content: 'rooftop unit replaced' },
+              conversation: { id: 'conv-2', title: 'Bob Smith', entityType: 'customer', entityId: 'cust-2' },
+            },
+          ]
+        : [];
+      return jsonResponse({ results });
+    }
+    if (u.includes('/messages')) return jsonResponse(MESSAGES);
+    if (u.includes('/api/conversations') && (init?.method ?? 'GET') === 'GET') {
+      return jsonResponse({ threads: [THREAD, THREAD2] });
+    }
+    return routeApi(u, init);
+  }
+
+  beforeEach(() => {
+    apiFetchMock.mockReset();
+    apiFetchMock.mockImplementation(async (url: string, init?: RequestInit) => routeSearch(url, init));
+  });
+
+  it('filters by customer name instantly (client-side)', async () => {
+    renderInbox();
+    await screen.findByText('Dana Diaz');
+    expect(screen.getByText('Bob Smith')).toBeInTheDocument();
+
+    fireEvent.change(screen.getByTestId('search-input'), { target: { value: 'dana' } });
+    fireEvent.click(screen.getByTestId('search-button'));
+
+    await waitFor(() => expect(screen.queryByText('Bob Smith')).toBeNull());
+    expect(screen.getByText('Dana Diaz')).toBeInTheDocument();
+  });
+
+  it('filters by message content via the search endpoint', async () => {
+    renderInbox();
+    await screen.findByText('Bob Smith');
+
+    // 'rooftop' is in no customer name or preview — only the server content hit
+    // (conv-2) keeps Bob Smith in the list.
+    fireEvent.change(screen.getByTestId('search-input'), { target: { value: 'rooftop' } });
+    fireEvent.click(screen.getByTestId('search-button'));
+
+    await waitFor(() => expect(screen.getByText('Bob Smith')).toBeInTheDocument());
+    expect(screen.queryByText('Dana Diaz')).toBeNull();
+    expect(
+      apiFetchMock.mock.calls.some(([u]) => String(u).includes('/api/conversations/search?')),
+    ).toBe(true);
+  });
+
+  it('shows a no-matches state when nothing matches', async () => {
+    renderInbox();
+    await screen.findByText('Dana Diaz');
+
+    fireEvent.change(screen.getByTestId('search-input'), { target: { value: 'zzzznomatch' } });
+    fireEvent.click(screen.getByTestId('search-button'));
+
+    expect(await screen.findByTestId('comms-inbox-no-matches')).toBeInTheDocument();
   });
 });

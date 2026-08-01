@@ -1,79 +1,229 @@
 // @vitest-environment jsdom
 // Screen tests live under src/ (NOT app/) so expo-router's file-based routing
 // doesn't treat them as routes and Metro doesn't bundle vitest into the app.
-import { cleanup, fireEvent, render } from '@testing-library/react';
+import { cleanup, fireEvent, render, waitFor } from '@testing-library/react';
 import { createElement } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { MeResponse } from '@ai-service-os/shared';
+import type { MoneySummary } from '../hooks/useMoneyDashboard';
+// eslint-disable-next-line import/order
+import { __resetEmergencyForTests, currentEmergency, raiseEmergency } from '../push/emergencyBanner';
 
 const h = vi.hoisted(() => ({
   push: vi.fn(),
-  signOut: vi.fn(),
+  showErrorToast: vi.fn(),
+  refetch: vi.fn(),
   switchMode: vi.fn().mockResolvedValue(undefined),
-  me: {
-    user_id: 'u',
-    tenant_id: 't1',
-    role: 'supervisor',
-    can_field_serve: true,
-    current_mode: 'both',
-    mode_changed_at: null,
-    permissions: [] as string[],
-    backup_supervisor_user_id: null,
-    unsupervised_proposal_routing: 'queue_only' as const,
-  } as unknown,
+  me: null as MeResponse | null,
   isLoading: false,
   error: null as Error | null,
+  // approvals
+  approvalsCount: 0,
+  approvalsLoading: false,
+  // money
+  summary: {
+    month: '2026-06',
+    revenueCents: 1_250_000,
+    outstandingCents: 340_000,
+    overdueCents: 50_000,
+    revenueTrendCents: 120_000,
+  } as MoneySummary | null,
+  moneyLoading: false,
+  moneyError: null as string | null,
+  notConfigured: false,
+  // U4 — executed-proposal feed
+  executed: [] as unknown[],
 }));
 
-vi.mock('@clerk/clerk-expo', () => ({ useAuth: () => ({ signOut: h.signOut }) }));
 vi.mock('expo-router', () => ({
   useRouter: () => ({ push: h.push, back: vi.fn(), replace: vi.fn() }),
 }));
+vi.mock('../components/Toast', () => ({
+  useToast: () => ({ showToast: vi.fn(), showErrorToast: h.showErrorToast, hideToast: vi.fn() }),
+}));
+vi.mock('../lib/useReconnectRetry', () => ({ useReconnectRetry: vi.fn() }));
+vi.mock('../push/pushStatusContext', () => ({ usePushStatus: () => null }));
 vi.mock('../hooks/useMe', () => ({
   useMe: () => ({
     me: h.me,
     isLoading: h.isLoading,
     error: h.error,
     switchMode: h.switchMode,
+    refetch: h.refetch,
+  }),
+}));
+vi.mock('../hooks/useListQuery', () => ({
+  useListQuery: () => ({
+    data: h.executed,
+    total: (h.executed as unknown[]).length,
+    isLoading: false,
+    error: null,
     refetch: vi.fn(),
+  }),
+}));
+vi.mock('../hooks/usePendingProposals', () => ({
+  usePendingProposals: () => ({
+    count: h.approvalsCount,
+    proposals: [],
+    isLoading: h.approvalsLoading,
+    error: null,
+    refresh: vi.fn(),
+  }),
+}));
+vi.mock('../hooks/useMoneyDashboard', () => ({
+  useMoneyDashboard: () => ({
+    summary: h.summary,
+    isLoading: h.moneyLoading,
+    error: h.moneyError,
+    notConfigured: h.notConfigured,
   }),
 }));
 
 // eslint-disable-next-line import/first
-import Home from '../../app/index';
+import Home from '../../app/(tabs)/index';
 
 beforeEach(() => {
   vi.clearAllMocks();
   h.isLoading = false;
   h.error = null;
+  h.me = {
+    user_id: 'user_clerk_123',
+    internal_user_id: '059f1a36-2d09-4698-954f-e640d61a9237',
+    tenant_id: 't1',
+    role: 'owner',
+    can_field_serve: true,
+    current_mode: 'supervisor',
+    mode_changed_at: null,
+    permissions: [],
+    backup_supervisor_user_id: null,
+    unsupervised_proposal_routing: 'queue_only',
+  };
   h.switchMode = vi.fn().mockResolvedValue(undefined);
+  h.approvalsCount = 0;
+  h.approvalsLoading = false;
+  h.summary = {
+    month: '2026-06',
+    revenueCents: 1_250_000,
+    outstandingCents: 340_000,
+    overdueCents: 50_000,
+    revenueTrendCents: 120_000,
+  };
+  h.moneyLoading = false;
+  h.moneyError = null;
+  h.notConfigured = false;
+  h.executed = [];
+  __resetEmergencyForTests();
 });
 
 afterEach(() => cleanup());
 
-function clickText(text: string): void {
-  const node = render(createElement(Home)).getByText(text).closest('button');
-  if (!node) throw new Error(`no button wrapping "${text}"`);
-  fireEvent.click(node);
-}
+describe('Home / Today dashboard', () => {
+  it('greets by time of day with the date', () => {
+    const { getByText } = render(createElement(Home));
+    expect(getByText(/^Good (morning|afternoon|evening)$/)).toBeTruthy();
+  });
 
-describe('Home screen', () => {
   it('renders every tap target at the >=44px contract (min-h-11)', () => {
     const { container } = render(createElement(Home));
     const buttons = Array.from(container.querySelectorAll('button'));
-    expect(buttons.length).toBeGreaterThanOrEqual(5); // 3 modes + speak + approvals + sign out
+    // speak + approvals + money + 3 modes + 5 quick links
+    expect(buttons.length).toBeGreaterThanOrEqual(8);
     for (const b of buttons) {
       expect(b.className).toMatch(/\bmin-h-11\b/);
     }
   });
 
   it('navigates to the voice screen from "Speak an action"', () => {
-    clickText('Speak an action');
+    fireEvent.click(render(createElement(Home)).getByText('Speak an action').closest('button')!);
     expect(h.push).toHaveBeenCalledWith('/voice');
   });
 
-  it('navigates to the approvals inbox', () => {
-    clickText('Approvals');
+  it('shows the live approval count and opens the inbox', () => {
+    h.approvalsCount = 3;
+    const { getByText } = render(createElement(Home));
+    expect(getByText('3 waiting for your tap')).toBeTruthy();
+    expect(getByText('3')).toBeTruthy(); // badge
+    fireEvent.click(getByText('Approval inbox').closest('button')!);
     expect(h.push).toHaveBeenCalledWith('/approvals');
+  });
+
+  it('shows the caught-up state with no badge when nothing is waiting', () => {
+    h.approvalsCount = 0;
+    const { getByText, queryByText } = render(createElement(Home));
+    expect(getByText(/caught up/)).toBeTruthy();
+    expect(queryByText('0')).toBeNull(); // no badge at zero
+  });
+
+  it('caps the badge at 9+', () => {
+    h.approvalsCount = 12;
+    const { getByText } = render(createElement(Home));
+    expect(getByText('9+')).toBeTruthy();
+  });
+
+  it('renders this month money (rounded dollars + trend) and opens invoices', () => {
+    const { getByText } = render(createElement(Home));
+    expect(getByText(/\$12,500 collected \(\+\$1,200 vs last month\)/)).toBeTruthy();
+    expect(getByText(/\$3,400 outstanding.*\$500 overdue/)).toBeTruthy();
+    fireEvent.click(getByText('This month').closest('button')!);
+    expect(h.push).toHaveBeenCalledWith('/invoices');
+  });
+
+  it('hides the money card entirely when the report is not configured', () => {
+    h.notConfigured = true;
+    const { queryByText } = render(createElement(Home));
+    expect(queryByText('This month')).toBeNull();
+  });
+
+  it('surfaces a money load failure without breaking the screen', () => {
+    h.summary = null;
+    h.moneyError = 'HTTP 500';
+    const { getByText } = render(createElement(Home));
+    expect(getByText(/Couldn.t load money summary/)).toBeTruthy();
+  });
+
+  it('navigates to quick links from the dashboard', () => {
+    const { getByText } = render(createElement(Home));
+    fireEvent.click(getByText('Messages').closest('button')!);
+    expect(h.push).toHaveBeenCalledWith('/messages');
+    fireEvent.click(getByText('Approvals').closest('button')!);
+    expect(h.push).toHaveBeenCalledWith('/approvals');
+  });
+
+  it('gives tech mode a prominent Today path and hides money, approvals, and mode controls', () => {
+    h.me = {
+      ...h.me!,
+      role: 'technician',
+      current_mode: 'tech',
+      can_field_serve: true,
+    };
+    const { getByText, queryByText } = render(createElement(Home));
+
+    fireEvent.click(getByText('Open Today').closest('button')!);
+    expect(h.push).toHaveBeenCalledWith('/today');
+    expect(queryByText('Speak an action')).toBeNull();
+    expect(queryByText('Approval inbox')).toBeNull();
+    expect(queryByText('This month')).toBeNull();
+    expect(queryByText('Switch mode')).toBeNull();
+    expect(queryByText('Invoices')).toBeNull();
+  });
+
+  it('blends Today and approvals in both mode without supervisor money bloat', () => {
+    h.me = { ...h.me!, current_mode: 'both' };
+    const { getByText, queryByText } = render(createElement(Home));
+
+    expect(getByText('Open Today')).toBeTruthy();
+    expect(getByText('Approval inbox')).toBeTruthy();
+    expect(queryByText('This month')).toBeNull();
+  });
+
+  it('hides the mode toggle for a non-owner who cannot field serve', () => {
+    h.me = {
+      ...h.me!,
+      role: 'dispatcher',
+      can_field_serve: false,
+      current_mode: 'supervisor',
+    };
+    expect(render(createElement(Home)).queryByText('Switch mode')).toBeNull();
   });
 
   it('shows a loading spinner and no actions while /api/me is loading', () => {
@@ -82,16 +232,63 @@ describe('Home screen', () => {
     expect(container.querySelectorAll('button')).toHaveLength(0);
   });
 
-  it('renders the error message when /api/me fails', () => {
+  it('renders a friendly error state with a Retry when /api/me fails', () => {
     h.error = new Error('me failed');
     const { getByText } = render(createElement(Home));
+    // copyForError surfaces the message as the body; the Retry calls refetch.
     expect(getByText('me failed')).toBeTruthy();
+    const retry = getByText('Try again').closest('button')!;
+    expect(retry.className).toMatch(/\bmin-h-11\b/);
+    fireEvent.click(retry);
+    expect(h.refetch).toHaveBeenCalledTimes(1);
   });
 
-  it('surfaces a mode-switch failure inline instead of swallowing it', async () => {
-    h.switchMode = vi.fn().mockRejectedValue(new Error('Not allowed for your role'));
-    const { getByText, findByText } = render(createElement(Home));
+  it('surfaces a mode-switch failure as a toast instead of swallowing it', async () => {
+    const failure = new Error('Not allowed for your role');
+    h.switchMode = vi.fn().mockRejectedValue(failure);
+    const { getByText } = render(createElement(Home));
     fireEvent.click(getByText('tech').closest('button')!);
-    expect(await findByText('Not allowed for your role')).toBeTruthy();
+    await waitFor(() => expect(h.showErrorToast).toHaveBeenCalledWith(failure));
+  });
+
+  // U4 — recent activity feed (executed proposals).
+  it('renders recent activity rows for executed proposals with relative times', () => {
+    h.executed = [
+      { id: 'e1', summary: 'Invoice sent · Rodriguez', proposalType: 'send_invoice', updatedAt: new Date(Date.now() - 120_000).toISOString() },
+      { id: 'e2', summary: 'Appt booked · 123 Oak St', proposalType: 'create_appointment', updatedAt: new Date(Date.now() - 18 * 60_000).toISOString() },
+    ];
+    const { getByText } = render(createElement(Home));
+    expect(getByText('Recent activity')).toBeTruthy();
+    expect(getByText('✓ Invoice sent · Rodriguez')).toBeTruthy();
+    expect(getByText('2m')).toBeTruthy();
+    expect(getByText('18m')).toBeTruthy();
+  });
+
+  it('hides the recent-activity section entirely when nothing has executed', () => {
+    h.executed = [];
+    const { queryByText } = render(createElement(Home));
+    expect(queryByText('Recent activity')).toBeNull();
+  });
+
+  // U4 (B7) — emergency banner.
+  it('renders the emergency banner while raised; View deep-links and clears it', () => {
+    raiseEmergency({ type: 'emergency', screen: '/approvals' });
+    const { getByText } = render(createElement(Home));
+    expect(getByText('⚠ Emergency')).toBeTruthy();
+    const view = getByText('View').closest('button')!;
+    expect(view.className).toMatch(/\bmin-h-11\b/);
+    fireEvent.click(view);
+    expect(h.push).toHaveBeenCalledWith('/approvals');
+    expect(currentEmergency()).toBeNull();
+  });
+
+  it('Dismiss acknowledges the emergency without navigating', () => {
+    raiseEmergency({ type: 'escalation' });
+    const { getByText, queryByText } = render(createElement(Home));
+    expect(getByText('⚠ Needs you now')).toBeTruthy();
+    fireEvent.click(getByText('Dismiss').closest('button')!);
+    expect(queryByText('⚠ Needs you now')).toBeNull();
+    expect(h.push).not.toHaveBeenCalled();
+    expect(currentEmergency()).toBeNull();
   });
 });

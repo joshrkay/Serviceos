@@ -7,6 +7,7 @@ import {
   InvoiceListResult,
   InvoiceRepository,
   InvoiceStatus,
+  InvoiceUpdate,
   DEFAULT_INVOICE_LIMIT,
   MAX_INVOICE_LIMIT,
 } from './invoice';
@@ -24,11 +25,12 @@ export class PgInvoiceRepository extends PgBaseRepository implements InvoiceRepo
         `INSERT INTO invoices (
           id, tenant_id, job_id, estimate_id, invoice_number, status,
           discount_cents, tax_rate_bps, subtotal_cents, taxable_subtotal_cents,
-          tax_cents, total_cents, amount_paid_cents, amount_due_cents,
+          tax_cents, processing_fee_bps, processing_fee_cents, total_cents,
+          amount_paid_cents, amount_due_cents,
           issued_at, due_date, customer_message, originating_lead_id,
           schedule_id, milestone_index,
           created_by, created_at, updated_at
-        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23)`,
+        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25)`,
         [
           invoice.id,
           invoice.tenantId,
@@ -41,6 +43,8 @@ export class PgInvoiceRepository extends PgBaseRepository implements InvoiceRepo
           invoice.totals.subtotalCents,
           invoice.totals.taxableSubtotalCents,
           invoice.totals.taxCents,
+          invoice.totals.processingFeeBps ?? null,
+          invoice.totals.processingFeeCents ?? null,
           invoice.totals.totalCents,
           invoice.amountPaidCents,
           invoice.amountDueCents,
@@ -191,7 +195,7 @@ export class PgInvoiceRepository extends PgBaseRepository implements InvoiceRepo
     });
   }
 
-  async update(tenantId: string, id: string, updates: Partial<Invoice>): Promise<Invoice | null> {
+  async update(tenantId: string, id: string, updates: InvoiceUpdate): Promise<Invoice | null> {
     return this.withTenantTransaction(tenantId, async (client) => {
       const setClauses: string[] = [];
       const values: unknown[] = [];
@@ -239,6 +243,10 @@ export class PgInvoiceRepository extends PgBaseRepository implements InvoiceRepo
         values.push(updates.totals.taxableSubtotalCents);
         setClauses.push(`tax_cents = $${paramIndex++}`);
         values.push(updates.totals.taxCents);
+        setClauses.push(`processing_fee_bps = $${paramIndex++}`);
+        values.push(updates.totals.processingFeeBps ?? null);
+        setClauses.push(`processing_fee_cents = $${paramIndex++}`);
+        values.push(updates.totals.processingFeeCents ?? null);
         setClauses.push(`total_cents = $${paramIndex++}`);
         values.push(updates.totals.totalCents);
       }
@@ -299,6 +307,173 @@ export class PgInvoiceRepository extends PgBaseRepository implements InvoiceRepo
     });
   }
 
+  async incrementAmountPaidAtomic(
+    tenantId: string,
+    id: string,
+    deltaCents: number,
+    now: Date,
+  ): Promise<Invoice | null> {
+    return this.withTenantTransaction(tenantId, async (client) => {
+      // Single atomic UPDATE: the new paid/due/status are derived from the
+      // row's OWN current values, so two concurrent legitimate credits both
+      // apply (no lost update). The WHERE carries the two predicates the
+      // caller's check-then-act guards cannot enforce against a stale read:
+      // payable status (a voided invoice must never flip to 'paid') and
+      // remaining balance (two concurrent full-balance credits must not sum
+      // past total_cents — the second returns 0 rows instead of overpaying).
+      // GREATEST(0, …) is retained as a belt against a concurrent total_cents
+      // rewrite. The status CASE mirrors the old newStatus logic exactly.
+      const { rows } = await client.query<{ id: string }>(
+        `UPDATE invoices
+         SET amount_paid_cents = amount_paid_cents + $3,
+             amount_due_cents  = GREATEST(0, total_cents - (amount_paid_cents + $3)),
+             status = CASE
+               WHEN total_cents - (amount_paid_cents + $3) <= 0 THEN 'paid'
+               ELSE 'partially_paid'
+             END,
+             updated_at = $4
+         WHERE id = $2 AND tenant_id = $1
+           AND status IN ('open', 'partially_paid')
+           AND amount_paid_cents + $3 <= total_cents
+         RETURNING id`,
+        [tenantId, id, deltaCents, now],
+      );
+      if (rows.length === 0) return null;
+      return this.findByIdWithClient(client, tenantId, id);
+    });
+  }
+
+  async decrementAmountPaidAtomic(
+    tenantId: string,
+    id: string,
+    deltaCents: number,
+    now: Date,
+  ): Promise<Invoice | null> {
+    return this.withTenantTransaction(tenantId, async (client) => {
+      // Single atomic UPDATE: the new paid/due/status are derived from the
+      // row's OWN current values, so a concurrent credit and this reversal both
+      // apply (no lost update). GREATEST(0, …) clamps paid at 0, matching the
+      // prior JS Math.max(0, …). The status CASE derives the reopened status:
+      // 'open' (nothing left paid), 'paid' (still fully covered — e.g. one of
+      // several payments reversed), else 'partially_paid'. The WHERE guards to
+      // REOPENABLE statuses only, so a void/canceled/draft invoice is left
+      // untouched (0 rows → null), exactly as the read-modify-write path skipped
+      // it. `total_cents - GREATEST(0, amount_paid_cents - $3)` recomputes the
+      // due from the clamped paid, never negative.
+      const { rows } = await client.query<{ id: string }>(
+        `UPDATE invoices
+         SET amount_paid_cents = GREATEST(0, amount_paid_cents - $3),
+             amount_due_cents  = GREATEST(0, total_cents - GREATEST(0, amount_paid_cents - $3)),
+             status = CASE
+               WHEN GREATEST(0, amount_paid_cents - $3) <= 0 THEN 'open'
+               WHEN GREATEST(0, amount_paid_cents - $3) >= total_cents THEN 'paid'
+               ELSE 'partially_paid'
+             END,
+             updated_at = $4
+         WHERE id = $2 AND tenant_id = $1
+           AND status IN ('open', 'partially_paid', 'paid')
+         RETURNING id`,
+        [tenantId, id, deltaCents, now],
+      );
+      if (rows.length === 0) return null;
+      return this.findByIdWithClient(client, tenantId, id);
+    });
+  }
+
+  /**
+   * P0-3 (reconciler leg) — the guarded absolute balance repair. The status
+   * predicate lives in the UPDATE itself, so a void committing after the
+   * caller's read can never be overwritten back to a paid state; the
+   * repair simply matches 0 rows and returns null.
+   */
+  async reconcileBalanceAtomic(
+    tenantId: string,
+    id: string,
+    balance: { amountPaidCents: number; amountDueCents: number; status: InvoiceStatus },
+    guardStatuses: InvoiceStatus[],
+    now: Date,
+  ): Promise<Invoice | null> {
+    return this.withTenantTransaction(tenantId, async (client) => {
+      const { rows } = await client.query<{ id: string }>(
+        `UPDATE invoices
+         SET amount_paid_cents = $3,
+             amount_due_cents  = $4,
+             status            = $5,
+             updated_at        = $6
+         WHERE id = $2 AND tenant_id = $1
+           AND status = ANY($7)
+         RETURNING id`,
+        [
+          tenantId,
+          id,
+          balance.amountPaidCents,
+          balance.amountDueCents,
+          balance.status,
+          now,
+          guardStatuses,
+        ],
+      );
+      if (rows.length === 0) return null;
+      return this.findByIdWithClient(client, tenantId, id);
+    });
+  }
+
+  /**
+   * P0-9 (mint leg) — guarded link persist: the payable-status, exact-balance
+   * and no-existing-link predicates live in the UPDATE itself, so a link
+   * minted concurrently with a void/credit (or with another mint) can never
+   * be attached to an invoice it no longer prices. Null → the caller must
+   * deactivate the link it just minted.
+   */
+  async setPaymentLinkIfPayable(
+    tenantId: string,
+    id: string,
+    link: { linkId: string; linkUrl: string },
+    expectedAmountDueCents: number,
+    now: Date,
+  ): Promise<Invoice | null> {
+    return this.withTenantTransaction(tenantId, async (client) => {
+      const { rows } = await client.query<{ id: string }>(
+        `UPDATE invoices
+         SET stripe_payment_link_id = $3,
+             stripe_payment_link_url = $4,
+             updated_at = $5
+         WHERE id = $2 AND tenant_id = $1
+           AND status IN ('open', 'partially_paid')
+           AND amount_due_cents = $6
+           AND stripe_payment_link_id IS NULL
+         RETURNING id`,
+        [tenantId, id, link.linkId, link.linkUrl, now, expectedAmountDueCents],
+      );
+      if (rows.length === 0) return null;
+      return this.findByIdWithClient(client, tenantId, id);
+    });
+  }
+
+  /**
+   * P0-9 — CAS clear of the payment-link columns: applies only while the
+   * row still holds `expectedLinkId`, so a deactivation working from a stale
+   * snapshot can never wipe a concurrently re-minted link's columns.
+   */
+  async clearPaymentLinkIfMatches(
+    tenantId: string,
+    id: string,
+    expectedLinkId: string,
+  ): Promise<boolean> {
+    return this.withTenantTransaction(tenantId, async (client) => {
+      const { rowCount } = await client.query(
+        `UPDATE invoices
+         SET stripe_payment_link_id = NULL,
+             stripe_payment_link_url = NULL,
+             updated_at = NOW()
+         WHERE id = $2 AND tenant_id = $1
+           AND stripe_payment_link_id = $3`,
+        [tenantId, id, expectedLinkId],
+      );
+      return (rowCount ?? 0) > 0;
+    });
+  }
+
   async findByViewToken(token: string): Promise<Invoice | null> {
     const headerRow = await this.withClient(async (client) => {
       // Use a SECURITY DEFINER function to bypass RLS for the initial token
@@ -341,8 +516,9 @@ export class PgInvoiceRepository extends PgBaseRepository implements InvoiceRepo
       await client.query(
         `INSERT INTO invoice_line_items (
           id, tenant_id, invoice_id, description, category,
-          quantity, unit_price_cents, total_cents, sort_order, taxable
-        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+          quantity, unit, unit_price_cents, total_cents, sort_order, taxable,
+          pricing_source
+        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
         [
           rowId,
           tenantId,
@@ -350,10 +526,17 @@ export class PgInvoiceRepository extends PgBaseRepository implements InvoiceRepo
           item.description,
           item.category ?? 'other',
           item.quantity,
+          // B7.5 — descriptive unit (migration 265). NULL on legacy and
+          // non-voice paths.
+          item.unit ?? null,
           item.unitPriceCents,
           item.totalCents,
           item.sortOrder,
           item.taxable,
+          // Catalog-grounding provenance threaded from the proposal payload
+          // (set by the catalog resolver, migration 255). Undefined on
+          // legacy/manual creates → SQL NULL → treated as NOT grounded.
+          item.pricingSource ?? null,
         ],
       );
     }

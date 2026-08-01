@@ -267,3 +267,57 @@ describe('POST /api/customers/:id/archive', () => {
     expect(res.status).toBe(404);
   });
 });
+
+describe('POST /api/customers/:id/merge (Story 4.6)', () => {
+  let app: Express;
+
+  beforeEach(async () => {
+    ({ app } = await buildTestApp());
+  });
+
+  it('merges the loser into the survivor and archives the loser', async () => {
+    const survivor = await createCustomer(app, { firstName: 'Keep', lastName: 'Me' });
+    const loser = await createCustomer(app, {
+      firstName: 'Drop',
+      lastName: 'Me',
+      primaryPhone: '555-000-1111',
+      email: 'drop@example.com',
+    });
+
+    const res = await request(app)
+      .post(`/api/customers/${survivor.body.id}/merge`)
+      .send({ losingId: loser.body.id });
+
+    expect(res.status).toBe(200);
+    expect(res.body.survivingId).toBe(survivor.body.id);
+    expect(res.body.losingId).toBe(loser.body.id);
+
+    const loserAfter = await request(app).get(`/api/customers/${loser.body.id}`);
+    expect(loserAfter.body.isArchived).toBe(true);
+    const survivorAfter = await request(app).get(`/api/customers/${survivor.body.id}`);
+    expect(survivorAfter.body.isArchived).toBe(false);
+  });
+
+  it('returns 400 when losingId is missing', async () => {
+    const survivor = await createCustomer(app, { firstName: 'Keep', lastName: 'Me' });
+    const res = await request(app).post(`/api/customers/${survivor.body.id}/merge`).send({});
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('VALIDATION_ERROR');
+  });
+
+  it('returns 400 when merging a customer into itself', async () => {
+    const c = await createCustomer(app, { firstName: 'Solo', lastName: 'One' });
+    const res = await request(app)
+      .post(`/api/customers/${c.body.id}/merge`)
+      .send({ losingId: c.body.id });
+    expect(res.status).toBe(400);
+  });
+
+  it('returns 404 when the surviving customer does not exist', async () => {
+    const loser = await createCustomer(app, { firstName: 'Drop', lastName: 'Me' });
+    const res = await request(app)
+      .post('/api/customers/ghost/merge')
+      .send({ losingId: loser.body.id });
+    expect(res.status).toBe(404);
+  });
+});

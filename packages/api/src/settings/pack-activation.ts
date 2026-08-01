@@ -1,5 +1,6 @@
 import { v4 as uuidv4 } from 'uuid';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
+import type { SettingsRepository } from './settings';
 
 export type ActivationStatus = 'active' | 'deactivated';
 
@@ -133,6 +134,45 @@ export async function getActivePacks(
 ): Promise<TenantPackActivation[]> {
   const all = await repository.findByTenant(tenantId);
   return all.filter((a) => a.status === 'active');
+}
+
+/**
+ * Single-source-of-truth reconciliation for active vertical packs.
+ *
+ * Packs are tracked in two places:
+ *   (a) the `pack_activations` table — the authoritative source, written
+ *       by every activate/deactivate path; and
+ *   (b) `tenant_settings.terminology_preferences._activeVerticalPacks` —
+ *       a read mirror consumed by the Templates page (LiveTemplatesSection)
+ *       and the public intake form (routes/public-intake.ts).
+ *
+ * Nothing kept them in sync, so any activate/deactivate through the
+ * Vertical Packs settings sheet (routes/pack-activation.ts) left the
+ * mirror stale — the Templates page and public intake showed the wrong
+ * packs (drift). This derives the mirror from the authoritative table and
+ * writes it back, so a single call after any pack_activations write keeps
+ * both in lock-step. In the request scope both writes share the same
+ * tenant transaction (see PgBaseRepository.withTenantTransaction), so the
+ * mirror update commits or rolls back atomically with the table write.
+ *
+ * No-op (returns false) when the tenant has no settings row yet — the
+ * mirror is materialized when that row is first created (onboarding seeds
+ * `activeVerticalPacks` at creation time), and `settingsRepo.update`
+ * returns null for a missing row rather than creating a partial one.
+ */
+export async function syncActiveVerticalPacksMirror(
+  tenantId: string,
+  packActivationRepo: PackActivationRepository,
+  settingsRepo: Pick<SettingsRepository, 'update'>
+): Promise<boolean> {
+  const active = await getActivePacks(tenantId, packActivationRepo);
+  const packIds = active
+    .sort((a, b) => b.activatedAt.getTime() - a.activatedAt.getTime())
+    .map((a) => a.packId);
+  // `activeVerticalPacks: []` is an explicit clear (defined, not undefined),
+  // so a tenant with every pack deactivated correctly empties the mirror.
+  const updated = await settingsRepo.update(tenantId, { activeVerticalPacks: packIds });
+  return updated !== null;
 }
 
 export class InMemoryPackActivationRepository implements PackActivationRepository {

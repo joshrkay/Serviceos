@@ -202,6 +202,57 @@ describe('reversePayment', () => {
     expect((await paymentRepo.findById(TENANT, payment.id))?.status).toBe('failed');
     expect((await invoiceRepo.findById(TENANT, INVOICE_ID))?.status).toBe('void');
   });
+
+  // TEST-01/03 — refund/reversal on an already-closed invoice must never
+  // double-mutate. A second dispute/NSF-return webhook for the SAME
+  // payment on a void invoice (e.g. a redelivered charge.dispute.created,
+  // or an unrelated ach_return arriving after the chargeback already
+  // reversed it) is a clean no-op: the atomic flip guard rejects the
+  // second reversal, and — because reconcileInvoiceAfterReversal's
+  // reduce-only guard sees the ledger already matches amount_paid — no
+  // repair audit fires either. The invoice must never go negative.
+  it('a SECOND reversal attempt on an already-reversed payment tied to a closed invoice is a clean no-op — no negative balance, no duplicate audit', async () => {
+    await invoiceRepo.create(makeOpenInvoice(10000));
+    const { payment } = await recordPayment(
+      { tenantId: TENANT, invoiceId: INVOICE_ID, amountCents: 6000, method: 'credit_card', providerReference: 'pi_double_rev', processedBy: 'u1' },
+      invoiceRepo,
+      paymentRepo,
+    );
+    await transitionInvoiceStatus(TENANT, INVOICE_ID, 'void', invoiceRepo);
+
+    const first = await reversePayment(
+      { tenantId: TENANT, paymentId: payment.id, reason: 'dispute', correlationId: 'disp_1' },
+      invoiceRepo,
+      paymentRepo,
+      auditRepo,
+    );
+    expect(first.reversed).toBe(true);
+    const afterFirst = await invoiceRepo.findById(TENANT, INVOICE_ID);
+    expect(afterFirst?.status).toBe('void');
+    expect(afterFirst?.amountPaidCents).toBe(6000); // untouched — terminal invoice
+    const auditCountAfterFirst = auditRepo.getAll().length;
+
+    // Second delivery for the SAME payment (double-reversal attempt).
+    const second = await reversePayment(
+      { tenantId: TENANT, paymentId: payment.id, reason: 'dispute', correlationId: 'disp_1_retry' },
+      invoiceRepo,
+      paymentRepo,
+      auditRepo,
+    );
+
+    expect(second.reversed).toBe(false);
+    const afterSecond = await invoiceRepo.findById(TENANT, INVOICE_ID);
+    // Never negative, never double-decremented — still exactly what it was
+    // after the first (and only) real reversal.
+    expect(afterSecond?.amountPaidCents).toBe(6000);
+    expect(afterSecond?.amountDueCents).toBeGreaterThanOrEqual(0);
+    expect(afterSecond?.status).toBe('void');
+    // No repair was needed (ledger already matched amount_paid), so no
+    // extra audit event — the skip/no-op leaves no trace beyond the one
+    // real reversal's audit trail.
+    expect(auditRepo.getAll().length).toBe(auditCountAfterFirst);
+    expect((await paymentRepo.findById(TENANT, payment.id))?.status).toBe('failed');
+  });
 });
 
 describe('recordFailedPaymentAttempt', () => {

@@ -34,6 +34,7 @@ describe('runEstimateReminderSweep', () => {
       estimateRepo,
       sendService,
       auditRepo,
+      pool: null, // no-DB unit posture — dispatchEstimateNudge's claim wrapper no-ops
       listTenantIds: async () => ['t1'],
       logger,
       now: () => NOW,

@@ -7,15 +7,19 @@ import path from 'node:path';
 // `// @vitest-environment jsdom`) with the native modules mocked. React Native
 // component-render tests use jest-expo (`test:rn`).
 export default defineConfig({
-  esbuild: {
-    // Don't read packages/mobile/tsconfig.json here — it `extends`
-    // expo/tsconfig.base, which only exists after `npm install` in this
-    // isolated project. Pure-logic tests don't need the Expo TS settings.
-    tsconfigRaw: '{}',
+  // Vite 8 transforms TS/JSX with Oxc (not esbuild), so the old `esbuild`
+  // block is ignored. Oxc has no `tsconfigRaw` bypass and always resolves the
+  // nearest on-disk tsconfig — packages/mobile/tsconfig.json is kept
+  // self-contained (no `expo/tsconfig.base` extends) precisely so this lane
+  // resolves without installing the isolated Expo project. See that file's
+  // top comment.
+  oxc: {
     // Screen tests render .tsx with no explicit React import (the screens use
-    // the automatic runtime via babel-preset-expo); use it here too so esbuild
-    // emits react/jsx-runtime calls instead of bare React.createElement.
-    jsx: 'automatic',
+    // the automatic runtime via babel-preset-expo); use it here too so Oxc
+    // emits react/jsx-runtime calls instead of bare React.createElement. This
+    // overrides the tsconfig's `jsx: "react-native"` (which the real
+    // `tsc --noEmit` typecheck still uses).
+    jsx: { runtime: 'automatic' },
   },
   test: {
     // Tests live under src/ only — never under app/, where expo-router's
@@ -32,15 +36,45 @@ export default defineConfig({
       exclude: [
         '**/*.test.ts',
         'src/voice/nativeVoiceDeps.ts',
+        // U13 — device-only assistant wiring: `expo/fetch` SSE streaming +
+        // multipart transport and the expo-audio TTS player. The pure SSE
+        // parser and the session hook (with an injected fake transport) carry
+        // the logic; these two only bind it to the device (spike-verified).
+        'src/assistant/expoFetchTransport.ts',
+        'src/assistant/nativeAssistantDeps.ts',
+        'src/assistant/useAssistantController.ts',
+        // U12 — native/RN-only offline wiring (adapter + singleton + AppState/
+        // Clerk host). The queue + flush LOGIC (queue.ts, flush.ts) is fully
+        // unit-tested; these only bind it to the device.
+        'src/offline/nativeOfflineDeps.ts',
+        'src/offline/offlineQueue.ts',
+        'src/offline/useOfflineSync.ts',
+        'src/push/nativePushDeps.ts',
+        'src/push/nativeNotificationDeps.ts',
+        'src/jobs/nativeJobPhotoDeps.ts',
+        'src/location/nativeLocationDeps.ts',
         'src/lib/env.ts',
         'src/lib/tokenCache.ts',
+        'src/calls/callbackStorage.ts',
         'src/theme/tokens.d.ts',
         'app/_layout.tsx',
+        // Thin stub routes (no logic to assert).
+        'app/(onboarding)/**',
+        'app/(tabs)/_layout.tsx',
+        'app/(tabs)/settings/_layout.tsx',
+        'app/(tabs)/settings/brand-voice.tsx',
+        'app/(tabs)/settings/voice.tsx',
+        'app/jobs/\\[id\\]/photos.tsx',
       ],
-      // Floors sit a few points under current coverage (stmts/lines ~96%,
-      // funcs ~93%, branches ~76%) so routine churn passes but dropped tests
-      // or untested new code fail the lane.
-      thresholds: { statements: 92, branches: 72, functions: 88, lines: 92 },
+      // Rescaled for vitest 4 (QUALITY-2026-07-12 WS8): @vitest/coverage-v8 v4
+      // remaps via `ast-v8-to-istanbul` (no opt-out), counting statements/
+      // functions more granularly than v1's `v8-to-istanbul`. The identical
+      // 482 tests now measure stmts ~88% / funcs ~85% / lines ~91% / branches
+      // ~76% (was stmts/lines ~96%, funcs ~93%) — a measurement change, not a
+      // coverage regression (no test was removed or weakened). Floors sit a few
+      // points under the new measured values; branches is unchanged (still
+      // passes at ~76%).
+      thresholds: { statements: 86, branches: 72, functions: 82, lines: 89 },
     },
     // tsconfigRaw above disables esbuild's tsconfig path resolution, so map the
     // project aliases explicitly here for tests that import via them. Shared is
@@ -62,12 +96,31 @@ export default defineConfig({
       // that don't resolve under the jsdom env the hook test uses. They are
       // mocked per test, so alias them to resolve-time stubs.
       'expo-audio': path.resolve(__dirname, './test/stubs/expo-audio.ts'),
+      // `expo/fetch` streaming is native-only; the assistant transport that
+      // uses it is device-only (excluded from coverage). Stubbed so screen
+      // tests that statically import the transport module resolve under jsdom.
+      'expo/fetch': path.resolve(__dirname, './test/stubs/expo-fetch.ts'),
+      'expo-camera': path.resolve(__dirname, './test/stubs/expo-camera.ts'),
+      'expo-crypto': path.resolve(__dirname, './test/stubs/expo-crypto.ts'),
       'expo-file-system': path.resolve(__dirname, './test/stubs/expo-file-system.ts'),
+      'expo-secure-store': path.resolve(__dirname, './test/stubs/expo-secure-store.ts'),
       '@clerk/clerk-expo': path.resolve(__dirname, './test/stubs/clerk-clerk-expo.ts'),
       // react-native + expo-router don't resolve under jsdom in the root-only
       // lane. Screen tests render against host-DOM stubs (and mock useRouter).
       'react-native': path.resolve(__dirname, './test/stubs/react-native.ts'),
       'expo-router': path.resolve(__dirname, './test/stubs/expo-router.ts'),
+      // Native-only entry; the chrome components read insets, so stub to zero.
+      'react-native-safe-area-context': path.resolve(
+        __dirname,
+        './test/stubs/react-native-safe-area-context.ts',
+      ),
+      // NetInfo's native entry doesn't resolve under jsdom/node in the
+      // root-only lane; the connectivity layer drives state through
+      // __emitNetInfoForTests, so this only needs to be importable.
+      '@react-native-community/netinfo': path.resolve(
+        __dirname,
+        './test/stubs/react-native-community-netinfo.ts',
+      ),
     },
   },
 });

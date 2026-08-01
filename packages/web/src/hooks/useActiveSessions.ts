@@ -38,7 +38,12 @@ import React, {
 } from 'react';
 import { useAuth } from '@clerk/clerk-react';
 import { useMe } from './useMe';
-import { useResilientStream, type WsServerFrame } from './useResilientStream';
+import { fetchWithAuthRetry, type StreamTokenGetter } from '../lib/streamAuth';
+import {
+  useResilientStream,
+  type StreamStatus,
+  type WsServerFrame,
+} from './useResilientStream';
 
 export type SessionChannel = 'voice_inbound' | 'sms' | 'mms' | 'inapp_voice';
 
@@ -53,12 +58,28 @@ export interface ActiveSessionSummary {
   startedAt: string;
 }
 
+/**
+ * UC-3 — shared access to the app's single client-gateway WebSocket (the
+ * connection this provider already opens for the supervisor wall). Other
+ * consumers (dispatch presence) piggyback on it instead of opening a second
+ * socket per operator. `send` is a stable identity that no-ops when the
+ * socket is not open; `onFrame` registers a listener for every inbound frame
+ * and returns its unsubscribe.
+ */
+export interface GatewayHandle {
+  status: StreamStatus;
+  send: (frame: object) => void;
+  onFrame: (listener: (frame: WsServerFrame) => void) => () => void;
+}
+
 export interface UseActiveSessionsResult {
   sessions: ActiveSessionSummary[];
   /** True while the WS is connecting / waiting for the first frame. */
   isConnecting: boolean;
   /** Count of proposals currently in 'ready_for_review' across all sessions. */
   pendingProposalCount: number;
+  /** The shared client-gateway WS connection (inert without a provider). */
+  gateway: GatewayHandle;
 }
 
 interface ActiveSessionDTO {
@@ -76,10 +97,14 @@ function buildWsUrl(): string {
   return `${proto}//${window.location.host}/api/ws`;
 }
 
-async function fetchActiveSessions(token: string): Promise<ActiveSessionDTO[]> {
-  const res = await fetch('/api/voice/sessions/active', {
-    headers: { Authorization: `Bearer ${token}` },
-  });
+async function fetchActiveSessions(getToken: StreamTokenGetter): Promise<ActiveSessionDTO[]> {
+  // ARCH-30 — previously took an already-resolved token string and treated
+  // any non-2xx (including a 401) as a generic network blip subject to the
+  // discovery loop's backoff, so a persistently rejected session just
+  // retried forever instead of signing out. fetchWithAuthRetry retries once
+  // with a force-refreshed token and, on a still-rejected 401/403, routes
+  // through the shared handleAuthFailure() exit like the request layer.
+  const res = await fetchWithAuthRetry(getToken, '/api/voice/sessions/active');
   // Throw on non-2xx so the caller's catch keeps the previous session
   // state instead of treating a transient 401/500/proxy blip as
   // "tenant has zero sessions" and flapping the wall to empty.
@@ -108,6 +133,9 @@ function useActiveSessionsInternal(): UseActiveSessionsResult {
   const sendRef = useRef<((frame: object) => void) | null>(null);
   const subscribedRef = useRef<Set<string>>(new Set());
   const wsConnectedRef = useRef(false);
+  // UC-3 — external frame listeners (dispatch presence, ...). A ref-backed
+  // Set so registering/unregistering never re-binds the socket.
+  const frameListenersRef = useRef<Set<(frame: WsServerFrame) => void>>(new Set());
 
   const refreshToken = useCallback(async (): Promise<string | null> => {
     try {
@@ -181,14 +209,32 @@ function useActiveSessionsInternal(): UseActiveSessionsResult {
   useEffect(() => {
     if (!isAuthorized) return;
     let cancelled = false;
+    // Error backoff: skip ticks (doubling per consecutive failure, capped
+    // at 5 min) instead of re-hitting a persistently failing endpoint at
+    // full rate forever with the error silently swallowed.
+    let consecutiveFailures = 0;
+    let nextAttemptAt = 0;
+    const BACKOFF_CAP_MS = 5 * 60_000;
     const poll = async () => {
+      if (Date.now() < nextAttemptAt) return;
+      // Mirror a fresh token into `token` state for the WS connection below
+      // (useResilientStream reconnects with it). The REST call itself uses
+      // `getToken` directly via fetchActiveSessions, which does its own
+      // retry-then-signout on a rejected token independent of this value.
       const fresh = await refreshToken();
       if (cancelled || !fresh) return;
       try {
-        const list = await fetchActiveSessions(fresh);
+        const list = await fetchActiveSessions((opts) => getToken({ template: 'serviceos', ...opts }));
         if (!cancelled) reconcileSessions(list);
+        consecutiveFailures = 0;
+        nextAttemptAt = 0;
       } catch {
-        // Network blip / expired token — next tick refreshes + retries.
+        // Network blip — retried after the backoff window. A persistently
+        // rejected token no longer lands here: fetchActiveSessions already
+        // routed it through handleAuthFailure() before throwing.
+        consecutiveFailures += 1;
+        nextAttemptAt =
+          Date.now() + Math.min(DISCOVERY_POLL_MS * 2 ** consecutiveFailures, BACKOFF_CAP_MS);
       }
     };
     void poll();
@@ -197,7 +243,7 @@ function useActiveSessionsInternal(): UseActiveSessionsResult {
       cancelled = true;
       clearInterval(handle);
     };
-  }, [isAuthorized, refreshToken, reconcileSessions]);
+  }, [isAuthorized, refreshToken, reconcileSessions, getToken]);
 
   // Authorization can flip true → false mid-session (mode switch from
   // supervisor to technician, role downgrade, sign-out). The discovery
@@ -216,6 +262,13 @@ function useActiveSessionsInternal(): UseActiveSessionsResult {
   }, [isAuthorized]);
 
   const handleFrame = useCallback((frame: WsServerFrame) => {
+    for (const listener of Array.from(frameListenersRef.current)) {
+      try {
+        listener(frame);
+      } catch {
+        // one bad listener mustn't block the rest
+      }
+    }
     if (frame.kind !== 'voice.event') return;
     const { sessionId, event, payload } = frame;
     if (TERMINAL_VOICE_EVENTS.has(event)) {
@@ -289,17 +342,40 @@ function useActiveSessionsInternal(): UseActiveSessionsResult {
     }
   }, [status]);
 
+  // Stable identities so gateway consumers' effects key off `status` only.
+  const gatewaySend = useCallback((frame: object) => {
+    sendRef.current?.(frame);
+  }, []);
+  const gatewayOnFrame = useCallback((listener: (frame: WsServerFrame) => void) => {
+    frameListenersRef.current.add(listener);
+    return () => {
+      frameListenersRef.current.delete(listener);
+    };
+  }, []);
+  const gateway = useMemo<GatewayHandle>(
+    () => ({ status, send: gatewaySend, onFrame: gatewayOnFrame }),
+    [status, gatewaySend, gatewayOnFrame]
+  );
+
   return {
     sessions: Array.from(sessions.values()),
     isConnecting: status === 'connecting',
     pendingProposalCount: 0,
+    gateway,
   };
 }
+
+const INERT_GATEWAY: GatewayHandle = {
+  status: 'idle',
+  send: () => {},
+  onFrame: () => () => {},
+};
 
 const INERT_RESULT: UseActiveSessionsResult = {
   sessions: [],
   isConnecting: false,
   pendingProposalCount: 0,
+  gateway: INERT_GATEWAY,
 };
 
 const ActiveSessionsContext = createContext<UseActiveSessionsResult | null>(null);

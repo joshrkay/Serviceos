@@ -1,37 +1,84 @@
-import { useRouter } from 'expo-router';
-import { ActivityIndicator, FlatList, Pressable, RefreshControl, Text, View } from 'react-native';
+import { useCallback, useMemo, useState } from 'react';
+import { ActivityIndicator, FlatList, RefreshControl, Text } from 'react-native';
+import { ScreenShell } from '../src/components/ScreenShell';
+import { PrimaryButton } from '../src/components/Buttons';
+import { useToast } from '../src/components/Toast';
 import { usePendingProposals } from '../src/hooks/usePendingProposals';
-import { typeLabel } from '../src/proposals/proposalReview';
+import { ErrorState } from '../src/components/ErrorState';
+import { ProposalCard } from '../src/components/ProposalCard';
+import { isBatchEligible } from '../src/proposals/proposalEvents';
+import { useApproveBatch } from '../src/proposals/useApproveBatch';
+import { requestOfflineFlush } from '../src/offline/flushSignal';
 
-// Approvals inbox: the AI's pending drafts (from voice capture etc.), polled
-// live. Tapping a proposal opens the review screen (approve with a 5s undo).
+/** Match owner-operator-app-spec: "Approve all (N)" only when 3+ eligible. */
+const BATCH_APPROVE_MIN = 3;
+
 export default function Approvals() {
-  const router = useRouter();
   const { proposals, count, isLoading, error, refresh } = usePendingProposals();
+  const approveBatch = useApproveBatch();
+  const { showToast, showErrorToast } = useToast();
+  const [batchLoading, setBatchLoading] = useState(false);
+
+  const eligible = useMemo(() => proposals.filter(isBatchEligible), [proposals]);
+
+  const onApproveAll = useCallback(async () => {
+    if (eligible.length < BATCH_APPROVE_MIN || batchLoading) return;
+    setBatchLoading(true);
+    try {
+      const result = await approveBatch(eligible.map((p) => p.id));
+      await refresh();
+      const n = result.approved.length;
+      showToast({
+        title: n === 1 ? 'Approved 1 proposal' : `Approved ${n} proposals`,
+        body:
+          result.failed.length > 0
+            ? `${result.failed.length} couldn't be approved and ${
+                result.failed.length === 1 ? 'is' : 'are'
+              } still waiting.`
+            : undefined,
+        tone: 'info',
+      });
+    } catch (err) {
+      showErrorToast(err);
+    } finally {
+      setBatchLoading(false);
+    }
+  }, [approveBatch, batchLoading, eligible, refresh, showErrorToast, showToast]);
 
   return (
-    <View className="flex-1 bg-background pt-16">
-      <View className="px-6">
-        <Pressable
-          accessibilityRole="button"
-          accessibilityLabel="Back"
-          onPress={() => router.back()}
-          className="min-h-11 justify-center"
-        >
-          <Text className="text-base text-mutedForeground">‹ Back</Text>
-        </Pressable>
-        <Text className="mt-2 text-2xl font-semibold text-foreground">Approvals</Text>
-        <Text className="mt-1 text-base text-mutedForeground">
-          {count === 0 ? 'Nothing waiting' : `${count} waiting for you`}
-        </Text>
-        {error ? <Text className="mt-3 text-base text-destructive">{error}</Text> : null}
-      </View>
-
+    <ScreenShell
+      title="Approvals"
+      subtitle={count === 0 ? 'Nothing waiting' : `${count} waiting for you`}
+      scroll={false}
+      headerRight={
+        eligible.length >= BATCH_APPROVE_MIN ? (
+          <PrimaryButton
+            label={`Approve all (${eligible.length})`}
+            loading={batchLoading}
+            onPress={() => void onApproveAll()}
+            className="shrink-0"
+          />
+        ) : undefined
+      }
+    >
+      {error ? <ErrorState error={error} showRetry={false} className="mb-3" /> : null}
       <FlatList
         data={proposals}
         keyExtractor={(item) => item.id}
-        contentContainerStyle={{ padding: 24 }}
-        refreshControl={<RefreshControl refreshing={isLoading} onRefresh={() => void refresh()} />}
+        refreshControl={
+          <RefreshControl
+            refreshing={isLoading}
+            onRefresh={() => {
+              // Pull-to-refresh is the owner's "try my waiting actions again"
+              // gesture: retry the offline queue (reactivating any poison-parked
+              // voice notes / approvals) AND re-fetch the inbox. Refresh once
+              // immediately for responsiveness, then again after the drain
+              // settles so a just-flushed approval doesn't linger as "pending".
+              void refresh();
+              void requestOfflineFlush().then(() => refresh());
+            }}
+          />
+        }
         ListEmptyComponent={
           isLoading ? (
             <ActivityIndicator />
@@ -41,18 +88,8 @@ export default function Approvals() {
             </Text>
           )
         }
-        renderItem={({ item }) => (
-          <Pressable
-            accessibilityRole="button"
-            accessibilityLabel={`Review ${typeLabel(item.proposalType)}: ${item.summary}`}
-            onPress={() => router.push(`/proposals/${item.id}`)}
-            className="mb-3 min-h-11 rounded-lg border border-border p-4"
-          >
-            <Text className="text-sm text-mutedForeground">{typeLabel(item.proposalType)}</Text>
-            <Text className="mt-1 text-base text-foreground">{item.summary}</Text>
-          </Pressable>
-        )}
+        renderItem={({ item }) => <ProposalCard proposal={item} />}
       />
-    </View>
+    </ScreenShell>
   );
 }

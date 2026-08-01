@@ -25,6 +25,7 @@ function mapRow(row: Record<string, unknown>): AiRun {
     completedAt: row.completed_at ? new Date(row.completed_at as string) : undefined,
     durationMs: row.duration_ms != null ? Number(row.duration_ms) : undefined,
     tokenUsage: (row.token_usage as { input?: number; output?: number; total?: number } | null) ?? undefined,
+    costMicroCents: row.cost_micro_cents != null ? Number(row.cost_micro_cents) : undefined,
     correlationId: (row.correlation_id as string | null) ?? undefined,
     createdBy: row.created_by as string,
     createdAt: new Date(row.created_at as string),
@@ -50,8 +51,8 @@ export class PgAiRunRepository extends PgBaseRepository implements AiRunReposito
            (id, tenant_id, task_type, model, prompt_version_id,
             input_snapshot, output_snapshot, status, error_message,
             started_at, completed_at, duration_ms, token_usage,
-            correlation_id, created_by, created_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+            correlation_id, created_by, created_at, cost_micro_cents)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
          ON CONFLICT (id) DO UPDATE SET
            status = EXCLUDED.status,
            output_snapshot = EXCLUDED.output_snapshot,
@@ -59,7 +60,8 @@ export class PgAiRunRepository extends PgBaseRepository implements AiRunReposito
            started_at = EXCLUDED.started_at,
            completed_at = EXCLUDED.completed_at,
            duration_ms = EXCLUDED.duration_ms,
-           token_usage = EXCLUDED.token_usage
+           token_usage = EXCLUDED.token_usage,
+           cost_micro_cents = EXCLUDED.cost_micro_cents
          RETURNING *`,
         [
           run.id,
@@ -78,6 +80,7 @@ export class PgAiRunRepository extends PgBaseRepository implements AiRunReposito
           run.correlationId ?? null,
           run.createdBy,
           run.createdAt,
+          run.costMicroCents ?? null,
         ]
       );
       return mapRow(result.rows[0]);
@@ -119,6 +122,8 @@ export class PgAiRunRepository extends PgBaseRepository implements AiRunReposito
       tokenUsage?: { input?: number; output?: number; total?: number };
       completedAt?: Date;
       durationMs?: number;
+      costMicroCents?: number | null;
+      model?: string;
     }
   ): Promise<AiRun | null> {
     return this.withTenant(tenantId, async (client) => {
@@ -130,6 +135,11 @@ export class PgAiRunRepository extends PgBaseRepository implements AiRunReposito
         ? (result?.completedAt ?? new Date())
         : null;
       const hasDurationMs = isTerminal && result?.durationMs !== undefined;
+      // costMicroCents is legitimately `null` (priced-but-unknown model), so —
+      // like durationMs above — a presence flag distinguishes "set to null"
+      // from "field omitted, leave the existing value alone"; COALESCE alone
+      // can't express that distinction.
+      const hasCostMicroCents = result != null && 'costMicroCents' in result;
 
       const queryResult = await client.query(
         `UPDATE ai_runs
@@ -144,7 +154,9 @@ export class PgAiRunRepository extends PgBaseRepository implements AiRunReposito
              WHEN $4 AND started_at IS NOT NULL THEN
                EXTRACT(EPOCH FROM ($5::timestamptz - started_at)) * 1000
              ELSE duration_ms
-           END
+           END,
+           cost_micro_cents = CASE WHEN $11 THEN $12 ELSE cost_micro_cents END,
+           model = COALESCE($13, model)
          WHERE tenant_id = $1 AND id = $2
          RETURNING *`,
         [
@@ -158,6 +170,9 @@ export class PgAiRunRepository extends PgBaseRepository implements AiRunReposito
           result?.tokenUsage ? JSON.stringify(result.tokenUsage) : null,
           hasDurationMs,
           hasDurationMs ? result!.durationMs : null,
+          hasCostMicroCents,
+          hasCostMicroCents ? result!.costMicroCents : null,
+          result?.model ?? null,
         ]
       );
 

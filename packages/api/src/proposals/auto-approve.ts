@@ -174,6 +174,7 @@ import type { AuditRepository } from '../audit/audit';
 import { createAuditEvent } from '../audit/audit';
 import type { UnsupervisedProposalRouting } from '../settings/settings';
 import type { OutboundAnchorKind } from './sms/sms-event';
+import { notifyOwner } from '../notifications/owner-notifications-instance';
 
 /** Hard ceiling on one-tap link lifetime (risk note: TTL ≤ 30 minutes). */
 export const ONE_TAP_APPROVE_MAX_TTL_MS = 30 * 60 * 1000;
@@ -399,6 +400,15 @@ export interface RouteUnsupervisedProposalDeps {
    */
   sendSms?: (to: string, body: string) => Promise<void>;
   /**
+   * U7 — best-effort push to the owner's registered devices that a proposal
+   * needs approval. Fires for queue_and_sms routing alongside the SMS,
+   * independent of `ownerPhone`. Optional; failure-isolated by the caller.
+   */
+  notifyPush?: (args: {
+    tenantId: string;
+    proposal: { id: string; summary: string };
+  }) => Promise<void>;
+  /**
    * Emits an `escalate_to_human` skill call so the active call routes to
    * on-call. Only invoked for the `escalate_to_oncall` routing on a voice
    * channel; non-call channels fall back to queue_only per the story.
@@ -513,6 +523,12 @@ export async function routeUnsupervisedProposal(
   if (effective === 'escalate_to_oncall' && deps.escalateToOnCall) {
     await deps.escalateToOnCall();
     escalated = true;
+    // U6 — owner `escalation` push alongside the on-call routing. Best-effort
+    // and failure-isolated by the notifier; never blocks the escalation.
+    await notifyOwner(input.tenantId, 'escalation', {
+      reason: input.summaryText ?? 'A proposal was escalated to on-call.',
+      proposalId: input.proposalId,
+    });
   }
 
   if (effective === 'queue_and_sms') {
@@ -591,6 +607,16 @@ export async function routeUnsupervisedProposal(
     }
     // No phone / no SMS seam: the proposal still sits in ready_for_review —
     // behaviorally queue_only, but we record the requested routing in audit.
+
+    // U7 — push the owner's registered devices that a proposal needs approval.
+    // Fires for queue_and_sms (active-notify) routing regardless of the SMS
+    // seam / phone; the notifier swallows its own errors.
+    if (deps.notifyPush) {
+      await deps.notifyPush({
+        tenantId: input.tenantId,
+        proposal: { id: input.proposalId, summary: input.summaryText ?? '' },
+      });
+    }
   }
 
   // Audit — every unsupervised-route decision emits an event (story item 6).

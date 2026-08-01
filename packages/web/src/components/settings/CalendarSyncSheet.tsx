@@ -1,10 +1,7 @@
 /**
- * Tier 4 (Calendar sync — PR 1: connect lifecycle).
- *
- * Closes the "Calendar sync" stub on Settings. PR 1 lets the operator
- * connect their personal Google Calendar via OAuth, view connection
- * status, and disconnect. The actual appointment push lives behind
- * a follow-up worker hook.
+ * Calendar sync — connect a personal Google Calendar via OAuth, view
+ * connection status, and disconnect. Appointment push runs via a
+ * follow-up worker hook.
  */
 import { useEffect, useState } from 'react';
 import { X, Calendar, AlertCircle } from 'lucide-react';

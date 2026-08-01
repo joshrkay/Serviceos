@@ -327,3 +327,144 @@ describe('PriceBookPage', () => {
     );
   });
 });
+
+describe('PriceBookPage — EE-4 catalog photo (U2)', () => {
+  const imageFile = () => new File(['bytes'], 'heater.jpg', { type: 'image/jpeg' });
+
+  async function createWithPhoto(uploadImage: (f: File) => Promise<{ fileId: string; downloadUrl: string }>) {
+    render(<PriceBookPage uploadImage={uploadImage} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Add item' }));
+    fireEvent.change(screen.getByLabelText('Item name'), { target: { value: 'Tankless heater' } });
+    fireEvent.change(screen.getByLabelText('Unit price'), { target: { value: '2500' } });
+    fireEvent.change(screen.getByTestId('catalog-image-input'), { target: { files: [imageFile()] } });
+  }
+
+  it('uploads a photo, previews it, and saves imageFileId on create', async () => {
+    const uploadImage = vi.fn().mockResolvedValue({ fileId: 'file-abc', downloadUrl: 'https://cdn/preview.jpg' });
+    await createWithPhoto(uploadImage);
+
+    await waitFor(() => expect(uploadImage).toHaveBeenCalledTimes(1));
+    // Thumbnail preview shows the returned URL.
+    const preview = await screen.findByAltText('Catalog item');
+    expect(preview).toHaveAttribute('src', 'https://cdn/preview.jpg');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Create item' }));
+    await waitFor(() =>
+      expect(apiFetch).toHaveBeenCalledWith(
+        '/api/catalog/items',
+        expect.objectContaining({
+          method: 'POST',
+          body: JSON.stringify({
+            name: 'Tankless heater',
+            description: '',
+            unitPriceCents: 250000,
+            unit: 'each',
+            category: 'Labor',
+            imageFileId: 'file-abc',
+          }),
+        })
+      )
+    );
+  });
+
+  it('removing the photo clears imageFileId (create omits it)', async () => {
+    const uploadImage = vi.fn().mockResolvedValue({ fileId: 'file-abc', downloadUrl: 'https://cdn/preview.jpg' });
+    await createWithPhoto(uploadImage);
+    await screen.findByAltText('Catalog item');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Remove' }));
+    expect(screen.queryByAltText('Catalog item')).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Create item' }));
+    await waitFor(() =>
+      expect(apiFetch).toHaveBeenCalledWith(
+        '/api/catalog/items',
+        expect.objectContaining({
+          method: 'POST',
+          // No imageFileId key — byte-identical to a photo-less create.
+          body: JSON.stringify({
+            name: 'Tankless heater',
+            description: '',
+            unitPriceCents: 250000,
+            unit: 'each',
+            category: 'Labor',
+          }),
+        })
+      )
+    );
+  });
+
+  it('a failed upload surfaces an error and does not save a dangling id', async () => {
+    const uploadImage = vi.fn().mockRejectedValue(new Error('S3 down'));
+    await createWithPhoto(uploadImage);
+
+    expect(await screen.findByText('S3 down')).toBeInTheDocument();
+    expect(screen.queryByAltText('Catalog item')).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Create item' }));
+    await waitFor(() =>
+      expect(apiFetch).toHaveBeenCalledWith(
+        '/api/catalog/items',
+        expect.objectContaining({
+          method: 'POST',
+          body: JSON.stringify({
+            name: 'Tankless heater',
+            description: '',
+            unitPriceCents: 250000,
+            unit: 'each',
+            category: 'Labor',
+          }),
+        })
+      )
+    );
+  });
+
+  it('the photo control is a ≥44px tap target and accepts images (camera-capable)', () => {
+    render(<PriceBookPage />);
+    fireEvent.click(screen.getByRole('button', { name: 'Add item' }));
+
+    const addPhoto = screen.getByRole('button', { name: /add photo/i });
+    expect(addPhoto.className).toContain('min-h-11');
+
+    const input = screen.getByTestId('catalog-image-input');
+    expect(input).toHaveAttribute('type', 'file');
+    expect(input).toHaveAttribute('accept', 'image/*');
+  });
+
+  it('editing an item with a photo (unchanged) does not send imageFileId', async () => {
+    vi.mocked(useListQuery).mockReturnValueOnce({
+      data: [{ id: 'item-9', name: 'Boiler', unitPriceCents: 500000, unit: 'each', category: 'Parts', imageFileId: 'file-existing' }],
+      total: 1,
+      page: 1,
+      pageSize: 200,
+      isLoading: false,
+      error: null,
+      refetch: mockRefetch,
+      setPage: vi.fn(),
+      setSearch: vi.fn(),
+      setFilters: vi.fn(),
+    } as any);
+    render(<PriceBookPage />);
+
+    const row = screen.getByRole('row', { name: /boiler/i });
+    fireEvent.click(within(row).getByRole('button', { name: /edit/i }));
+    fireEvent.change(screen.getByLabelText('Unit price'), { target: { value: '5100' } });
+    fireEvent.click(screen.getByRole('button', { name: /save/i }));
+
+    await waitFor(() =>
+      expect(apiFetch).toHaveBeenCalledWith(
+        '/api/catalog/items/item-9',
+        expect.objectContaining({
+          method: 'PUT',
+          body: JSON.stringify({
+            name: 'Boiler',
+            description: '',
+            unitPriceCents: 510000,
+            unit: 'each',
+            category: 'Parts',
+          }),
+        })
+      )
+    );
+  });
+});

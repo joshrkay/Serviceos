@@ -1,0 +1,274 @@
+{
+  "version": "v1",
+  "customers": [
+    {
+      "key": "customer.khan",
+      "firstName": "Khan",
+      "lastName": "",
+      "displayName": "Khan",
+      "primaryPhone": "+14805550101",
+      "email": "khan.qa@example.com"
+    },
+    {
+      "key": "customer.johnson",
+      "firstName": "Johnson",
+      "lastName": "",
+      "displayName": "Johnson",
+      "primaryPhone": "+14805550102",
+      "email": "johnson.qa@example.com"
+    },
+    {
+      "key": "customer.mrs-lee",
+      "firstName": "Mrs",
+      "lastName": "Lee",
+      "displayName": "Mrs Lee",
+      "primaryPhone": "+14805550103",
+      "email": "mrs.lee.qa@example.com"
+    },
+    {
+      "key": "customer.smith-a",
+      "firstName": "Smith",
+      "lastName": "",
+      "displayName": "Smith",
+      "primaryPhone": "+14805550104",
+      "email": "smith.a.qa@example.com"
+    },
+    {
+      "key": "customer.smith-b",
+      "firstName": "Smith",
+      "lastName": "",
+      "displayName": "Smith",
+      "primaryPhone": "+14805550105",
+      "email": "smith.b.qa@example.com"
+    },
+    {
+      "key": "customer.garcia",
+      "firstName": "Garcia",
+      "lastName": "",
+      "displayName": "Garcia",
+      "primaryPhone": "+14805550106",
+      "email": "garcia.qa@example.com"
+    }
+  ],
+  "locations": [
+    {
+      "key": "location.khan",
+      "customerKey": "customer.khan",
+      "street1": "101 QA Cedar Avenue",
+      "city": "Phoenix",
+      "state": "AZ",
+      "postalCode": "85001"
+    },
+    {
+      "key": "location.johnson",
+      "customerKey": "customer.johnson",
+      "street1": "102 QA Cedar Avenue",
+      "city": "Phoenix",
+      "state": "AZ",
+      "postalCode": "85002"
+    },
+    {
+      "key": "location.mrs-lee",
+      "customerKey": "customer.mrs-lee",
+      "street1": "103 QA Cedar Avenue",
+      "city": "Phoenix",
+      "state": "AZ",
+      "postalCode": "85003"
+    },
+    {
+      "key": "location.smith-a",
+      "customerKey": "customer.smith-a",
+      "street1": "104 QA Cedar Avenue",
+      "city": "Phoenix",
+      "state": "AZ",
+      "postalCode": "85004"
+    },
+    {
+      "key": "location.smith-b",
+      "customerKey": "customer.smith-b",
+      "street1": "105 QA Cedar Avenue",
+      "city": "Phoenix",
+      "state": "AZ",
+      "postalCode": "85005"
+    },
+    {
+      "key": "location.garcia",
+      "customerKey": "customer.garcia",
+      "street1": "106 QA Cedar Avenue",
+      "city": "Phoenix",
+      "state": "AZ",
+      "postalCode": "85006"
+    }
+  ],
+  "jobs": [
+    {
+      "key": "job.khan-install",
+      "customerKey": "customer.khan",
+      "locationKey": "location.khan",
+      "summary": "Khan 3-ton condenser install"
+    },
+    {
+      "key": "job.johnson-water-heater",
+      "customerKey": "customer.johnson",
+      "locationKey": "location.johnson",
+      "summary": "Johnson water heater replacement"
+    },
+    {
+      "key": "job.mrs-lee-service",
+      "customerKey": "customer.mrs-lee",
+      "locationKey": "location.mrs-lee",
+      "summary": "Mrs Lee service visit"
+    },
+    {
+      "key": "job.smith-a-service",
+      "customerKey": "customer.smith-a",
+      "locationKey": "location.smith-a",
+      "summary": "Smith furnace service at Cedar 104"
+    },
+    {
+      "key": "job.smith-b-service",
+      "customerKey": "customer.smith-b",
+      "locationKey": "location.smith-b",
+      "summary": "Smith furnace service at Cedar 105"
+    },
+    {
+      "key": "job.garcia-install",
+      "customerKey": "customer.garcia",
+      "locationKey": "location.garcia",
+      "summary": "Garcia HVAC install"
+    }
+  ],
+  "estimates": [
+    {
+      "key": "estimate.khan",
+      "jobKey": "job.khan-install",
+      "estimateNumber": "EST-0001",
+      "taxRateBps": 850,
+      "validUntil": "2026-08-31T23:59:59.000Z",
+      "lineItems": [
+        {
+          "description": "3-ton condenser",
+          "category": "equipment",
+          "quantity": 1,
+          "unitPriceCents": 325000,
+          "taxable": true
+        }
+      ]
+    },
+    {
+      "key": "estimate.explicit-0042",
+      "jobKey": "job.garcia-install",
+      "estimateNumber": "EST-0042",
+      "taxRateBps": 850,
+      "validUntil": "2026-08-31T23:59:59.000Z",
+      "lineItems": [
+        {
+          "description": "Garcia install package",
+          "category": "equipment",
+          "quantity": 1,
+          "unitPriceCents": 480000,
+          "taxable": true
+        }
+      ]
+    }
+  ],
+  "invoices": [
+    {
+      "key": "invoice.johnson",
+      "jobKey": "job.johnson-water-heater",
+      "invoiceNumber": "INV-0042",
+      "taxRateBps": 850,
+      "lineItems": [
+        {
+          "description": "Capacitor and labor",
+          "category": "labor",
+          "quantity": 1,
+          "unitPriceCents": 45000,
+          "taxable": true
+        }
+      ]
+    },
+    {
+      "key": "invoice.smith-a",
+      "jobKey": "job.smith-a-service",
+      "invoiceNumber": "INV-0041",
+      "taxRateBps": 850,
+      "lineItems": [
+        {
+          "description": "Furnace service",
+          "category": "labor",
+          "quantity": 1,
+          "unitPriceCents": 28500,
+          "taxable": true
+        }
+      ]
+    },
+    {
+      "key": "invoice.smith-b",
+      "jobKey": "job.smith-b-service",
+      "invoiceNumber": "INV-0043",
+      "taxRateBps": 850,
+      "lineItems": [
+        {
+          "description": "Furnace diagnostic",
+          "category": "labor",
+          "quantity": 1,
+          "unitPriceCents": 19500,
+          "taxable": true
+        }
+      ]
+    },
+    {
+      "key": "invoice.garcia",
+      "jobKey": "job.garcia-install",
+      "estimateKey": "estimate.explicit-0042",
+      "invoiceNumber": "INV-0044",
+      "taxRateBps": 850,
+      "lineItems": [
+        {
+          "description": "Garcia install deposit",
+          "category": "labor",
+          "quantity": 1,
+          "unitPriceCents": 144000,
+          "taxable": true
+        }
+      ]
+    }
+  ],
+  "appointments": [
+    {
+      "key": "appointment.garcia-tuesday",
+      "jobKey": "job.garcia-install",
+      "scheduledStart": "2026-07-28T14:00:00.000Z",
+      "scheduledEnd": "2026-07-28T15:00:00.000Z",
+      "timezone": "UTC",
+      "notes": "Operator voice QA Tuesday appointment"
+    }
+  ],
+  "technicians": [
+    {
+      "key": "technician.carlos",
+      "firstName": "Carlos",
+      "lastName": "",
+      "role": "technician",
+      "existingOnly": true
+    }
+  ],
+  "leads": [
+    {
+      "key": "lead.greenfield",
+      "firstName": "",
+      "lastName": "",
+      "companyName": "Greenfield Property Management",
+      "primaryPhone": "+14805550107",
+      "email": "operations@greenfield-qa.example.com",
+      "source": "phone_call",
+      "estimatedValueCents": 750000,
+      "street1": "107 QA Cedar Avenue",
+      "city": "Phoenix",
+      "state": "AZ",
+      "postalCode": "85007",
+      "country": "US"
+    }
+  ]
+}

@@ -8,6 +8,29 @@ import { isValidTimezone } from '../shared/timezone';
  *  settings→ai module dependency. */
 export type Language = 'en' | 'es';
 
+/** Story 10.2 / PRD US-340+US-341 — default reminder cadence: 24h AND 2h
+ *  before the appointment. normalizeReminderOffsets sorts descending, so the
+ *  soonest (2h) fires last. Tenants can override the cadence in settings. */
+export const DEFAULT_REMINDER_OFFSETS_HOURS: readonly number[] = [24, 2];
+
+/**
+ * Story 10.2 — sanitize tenant-supplied reminder offsets into a safe,
+ * deterministic list: integer hours in [1, 720], deduped, sorted descending
+ * (soonest-configured reminder fires last), capped at 5. Anything invalid or
+ * empty falls back to the default [24, 2]. Used on both the write
+ * path (before persist) and the read path (defensive), so the worker never
+ * sees garbage.
+ */
+export function normalizeReminderOffsets(input: unknown): number[] {
+  if (!Array.isArray(input)) return [...DEFAULT_REMINDER_OFFSETS_HOURS];
+  const cleaned = input
+    .map((v) => Number(v))
+    .filter((n) => Number.isFinite(n) && n >= 1 && n <= 720)
+    .map((n) => Math.round(n));
+  const unique = Array.from(new Set(cleaned)).sort((a, b) => b - a);
+  return unique.length > 0 ? unique.slice(0, 5) : [...DEFAULT_REMINDER_OFFSETS_HOURS];
+}
+
 /**
  * F8 — per-tenant escalation channel + trigger flags.
  *
@@ -39,8 +62,27 @@ export interface EscalationSettings {
    * JSONB so no new migration is needed (161-163 are owned by parallel
    * tracks). A dedicated column is the planned permanent home; when it
    * lands, read it first and fall back to this key.
+   *
+   * DEPRECATED (WS21a) — plaintext-at-rest. Superseded by
+   * `voice_approval_pin_hash` (HMAC-SHA256, hashed at rest). Retained for
+   * back-compat: the verify seam checks the hash first and only falls back to
+   * this plaintext field when no hash exists, so a tenant that DID set this
+   * legacy value keeps working with no migration. Enrolling a PIN through the
+   * settings route stores ONLY the hash and clears this field; do not add new
+   * writers of the plaintext path.
    */
   voice_approval_challenge?: string;
+  /**
+   * WS21a — HMAC-SHA256 of the normalized PIN digits (hex), keyed by the
+   * tenant-secrets key and salted by tenantId (see
+   * settings/voice-approval-pin.ts). This is the ENROLLED, hashed-at-rest home
+   * for the money/irreversible voice-approval PIN. Written only by the
+   * dedicated settings route (`PUT /api/settings/voice-approval-pin`) which
+   * hashes server-side — never by the generic settings PUT (the
+   * `escalationSettings` zod schema strips unknown keys, so a raw hash can't be
+   * injected). Redacted from `GET /api/settings` (never echoed).
+   */
+  voice_approval_pin_hash?: string;
 }
 
 export const DEFAULT_ESCALATION_SETTINGS: EscalationSettings = {
@@ -131,17 +173,31 @@ export const UNSUPERVISED_PROPOSAL_ROUTING_VALUES: ReadonlyArray<UnsupervisedPro
  * All fields optional; a missing value falls back to a neutral default tone.
  */
 export interface BrandVoiceSettings {
-  formality?: 'casual' | 'professional';
-  pronoun?: 'we' | 'i';
-  vibe_words?: string[];
-  business_name?: string;
+  // N-011 — the six configured fields.
+  /** 1. Register. Supersedes the legacy 2-valued `formality`. */
+  register?: 'formal' | 'friendly' | 'casual';
+  /** 2. Preferred opening lines (rotated/sampled by the composer). */
+  opening_lines?: string[];
+  /** 3. Sign-off (first-class; legacy paths derived it from business_name). */
+  signoff?: string;
   /**
-   * N-009 / P2-038 — brand-voice negative prompt. Phrases the AI must never
+   * 4. N-009 / P2-038 — brand-voice negative prompt. Phrases the AI must never
    * use in customer-facing copy. Grown by the correction loop when an owner
    * edit removes a phrase (each addition is a reversible `banned_phrase`
    * lesson); rendered as a non-overridable "never say" instruction.
    */
   banned_phrases?: string[];
+  /** 5. Shop persona name, e.g. "M&R Mechanical's office". */
+  persona_name?: string;
+  /** 6. Self-reference pronoun (retained; used by renderToneAuthority). */
+  pronoun?: 'we' | 'i';
+
+  // --- retained legacy keys, mapped forward, NOT surfaced in the new UI ---
+  /** Legacy 2-valued formality; read only when `register` is absent. */
+  formality?: 'casual' | 'professional';
+  vibe_words?: string[];
+  /** Legacy business name; signoff fallback. */
+  business_name?: string;
 }
 
 /**
@@ -171,7 +227,17 @@ export interface TenantSettings {
   // emergency triage to patch a customer through to the owner. Never the
   // same as businessPhone (which the AI answers on).
   ownerPhone?: string | null;
-  timezone: string;
+  /**
+   * The tenant's IANA zone, or undefined when they have never chosen one.
+   *
+   * Optional on purpose (migration 263 dropped the column's NOT NULL and its
+   * `DEFAULT 'America/New_York'`). A required-and-defaulted timezone is what
+   * made the Phoenix mis-booking undetectable: every consumer read a valid
+   * Eastern zone and had no way to tell a guess from a choice. Consumers that
+   * merely DISPLAY a time may substitute a default; consumers that BOOK one
+   * must gate instead — see create-appointment-task.ts.
+   */
+  timezone?: string;
   estimatePrefix: string;
   invoicePrefix: string;
   nextEstimateNumber: number;
@@ -204,6 +270,14 @@ export interface TenantSettings {
    */
   autoSendAppointmentReminders?: boolean;
   /**
+   * Story 10.2 — tenant-configurable reminder cadence. Hours-before-start
+   * at which an appointment reminder fires; e.g. [24, 2] sends a reminder a
+   * day ahead and again two hours out. Normalized (deduped, 1..720h, ≤5
+   * entries, descending). Defaults to [24]. A single entry preserves the
+   * legacy one-shot behavior exactly.
+   */
+  appointmentReminderOffsetsHours?: number[];
+  /**
    * P20-001 — when true, completing a job auto-drafts an invoice (as a
    * proposal the owner approves to send). Default false (opt-in).
    */
@@ -216,6 +290,13 @@ export interface TenantSettings {
    * demo moment).
    */
   sendThankYouSms?: boolean;
+  /**
+   * Post-job review request: when true (default), a review/feedback request is
+   * auto-sent 24h after a job completes (PRD US-345). Idempotent on
+   * `jobs.review_request_sent_at`. Reuses the gated feedback-send delivery
+   * (4★+ customers are shown the configured Google/Yelp review link).
+   */
+  sendReviewRequest?: boolean;
   /**
    * Feature (launch) — when true, an auto-drafted invoice recomputes its labor
    * line from ACTUAL logged time entries instead of the estimated hours.
@@ -310,6 +391,12 @@ export interface TenantSettings {
    */
   serviceAreaText?: string | null;
   serviceAreaRadius?: number | null;
+  /**
+   * ZIP allowlist bounding the service area (migration 148). Empty/absent =
+   * unbounded. Consumed by scheduling/service-area.ts at booking intake —
+   * F2 term 5 (spec/RIVET_FOUNDATION_SPEC.md §4).
+   */
+  serviceAreaZips?: string[] | null;
   businessHours?: Record<string, { open: string; close: string } | null> | null;
   jobBufferMinutes?: number | null;
   /**
@@ -337,6 +424,30 @@ export interface TenantSettings {
    */
   voiceGreeting?: string | null;
   /**
+   * Feature 4 (migration 147) — the chosen ElevenLabs preset voice key
+   * (e.g. 'rachel'/'adam'/'bella'), persisted onto the tenant's Vapi
+   * assistant and mirrored here. Null/undefined = not yet configured (the
+   * default preset applies).
+   */
+  voiceId?: string | null;
+  /**
+   * Feature 4 (migration 147) — the tenant's bound Vapi assistant id, set
+   * during Twilio/Vapi provisioning (workers/provision-twilio.ts) once the
+   * assistant is created. Null/undefined until then. Read-only projection:
+   * written by the provisioning worker + voice-config save via raw SQL, not
+   * the generic settings update path (mirrors the serviceArea* fields).
+   */
+  vapiAssistantId?: string | null;
+  /**
+   * Story 15.2 — Speed-to-lead instant response. When true, a new web/
+   * marketplace lead gets an immediate templated SMS (the "answer before
+   * voicemail" thesis). OFF by default (opt-in) for TCPA/consent safety; the
+   * send still routes through the DNC/consent gate. Migration 205.
+   */
+  speedToLeadEnabled?: boolean;
+  /** Story 15.2 — first-response SMS template ({first_name}/{business_name}); null/undefined → built-in default. */
+  speedToLeadTemplate?: string | null;
+  /**
    * F8 — per-tenant escalation channel + trigger flags. When absent,
    * `resolveEscalationSettings` returns `DEFAULT_ESCALATION_SETTINGS`.
    */
@@ -346,6 +457,16 @@ export interface TenantSettings {
    * brand-voice composer uses a neutral default. Explicit `null` clears it.
    */
   brandVoice?: BrandVoiceSettings | null;
+  /**
+   * N-011 — brand-voice version bookkeeping (migration 238). Read-only
+   * projections of the `brand_voice_version` / `brand_voice_locked` /
+   * `brand_voice_updated_at` columns; the brand-voice router owns writes
+   * (transactional version bump). `brandVoiceVersion` is 0 until the first
+   * configure; the composer stamps it onto every utterance it drafts.
+   */
+  brandVoiceVersion?: number;
+  brandVoiceLocked?: boolean;
+  brandVoiceUpdatedAt?: string | null;
   /**
    * Public review links shown to satisfied customers (4★+) on the
    * post-job feedback page. Migration 120. null/undefined = not
@@ -411,6 +532,46 @@ export interface TenantSettings {
    * undefined = placeholder still in effect. Migration 197.
    */
   e1ReviewedScript?: string | null;
+   * Epic 12.6 — weekly feedback email. Opt-OUT (column defaults true,
+   * migration 204), so pilots receive it unless they turn it off. Optional
+   * on the type so pre-migration rows / legacy fixtures read as "on" via
+   * `?? true`.
+   */
+  weeklyFeedbackEnabled?: boolean;
+  /**
+   * UB-D / D-015 — autonomous booking lane. Opt-in (column defaults FALSE,
+   * migration 231): when true, inbound-receptionist booking proposals
+   * (create_appointment / create_booking, capture class only) may
+   * auto-approve with no supervisor present, judged against
+   * `autonomousBookingThreshold`. Optional on the type so pre-migration
+   * rows / legacy fixtures read as "off" via `?? false`.
+   */
+  autonomousBookingEnabled?: boolean;
+  /**
+   * UB-D / D-015 — the lane's dedicated confidence threshold. NUMERIC(3,2)
+   * with DB CHECK 0.90–0.99 (default 0.95); the evaluator
+   * (proposals/autonomous-lane.ts) re-clamps to the 0.90 floor in code as
+   * defense in depth.
+   */
+  autonomousBookingThreshold?: number;
+  /**
+   * D-018 → amended by D-019 (QUALITY-2026-07-12 WS2). Opt-in (column defaults
+   * FALSE, migration 247 — column retained). It NO LONGER authorizes any
+   * autonomous execution: a system actor can never approve a proposal. When
+   * true, a caller's confirmed on-call close is PREPARED for the owner — the
+   * held slot is staged as a `create_booking` DRAFT in the owner-approval chain
+   * so the owner's one-tap approval confirms the booking too. When false, that
+   * booking is left to the owner (the estimate+send chain still stages).
+   * Optional on the type so pre-migration rows / legacy fixtures read as "off"
+   * via `?? false`.
+   */
+  autonomousCloseEnabled?: boolean;
+  /**
+   * D-018 → amended by D-019 — per-tenant cap (integer cents) on the quote
+   * total for which the held booking is staged in the owner chain. Nullable
+   * BIGINT; undefined ⇒ no cap gate. Never authorizes autonomous execution.
+   */
+  autonomousCloseMaxCents?: number;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -474,10 +635,14 @@ export interface UpdateSettingsInput {
   autoApplyInternalUpdates?: boolean;
   /** Tier 4 — auto-text customers ~2h before scheduled appointments. */
   autoSendAppointmentReminders?: boolean;
+  /** Story 10.2 — reminder cadence (hours-before-start); e.g. [24, 2]. */
+  appointmentReminderOffsetsHours?: number[];
   /** P20-001 — auto-draft an invoice (as a proposal) on job completion. */
   autoInvoiceOnCompletion?: boolean;
   /** Post-job 2hr thank-you SMS. Default true. */
   sendThankYouSms?: boolean;
+  /** Post-job 24h review request (PRD US-345). Default true. */
+  sendReviewRequest?: boolean;
   /** Feature (launch) — recompute auto-invoice labor from actual time entries. */
   billLaborFromTimeEntries?: boolean;
   /** P21-003 — opt into the daily batch-invoice proposal sweep. */
@@ -505,6 +670,10 @@ export interface UpdateSettingsInput {
   voiceAgentName?: string | null;
   /** B1 — custom greeting text; null clears the field. */
   voiceGreeting?: string | null;
+  /** Story 15.2 — enable the speed-to-lead first-response SMS (opt-in). */
+  speedToLeadEnabled?: boolean;
+  /** Story 15.2 — first-response SMS template; null clears (→ built-in default). */
+  speedToLeadTemplate?: string | null;
   /** F8 — per-tenant escalation settings; partial — missing keys fall back to DEFAULT_ESCALATION_SETTINGS. */
   escalationSettings?: Partial<EscalationSettings>;
   /** P4-015 — per-tenant brand voice tone; null clears the field. */
@@ -532,6 +701,57 @@ export interface UpdateSettingsInput {
   digestChannel?: DigestChannel;
   /** FIX 10(i) (ANS-001) — reviewed E1 script; null clears (reverts to the placeholder). */
   e1ReviewedScript?: string | null;
+  /** Epic 12.6 — opt out of the weekly feedback email (column default true). */
+  weeklyFeedbackEnabled?: boolean;
+  /** UB-D / D-015 — opt into the autonomous booking lane (column default false). */
+  autonomousBookingEnabled?: boolean;
+  /** UB-D / D-015 — lane confidence threshold, 0.90–0.99 (column default 0.95). */
+  autonomousBookingThreshold?: number;
+  /** D-018 — opt into the autonomous close lane (column default false). */
+  autonomousCloseEnabled?: boolean;
+  /** D-018 — cap (integer cents) on the auto-closeable quote total. */
+  autonomousCloseMaxCents?: number;
+}
+
+/**
+ * B1.19 — the identity-shaped subset of TenantSettings written by
+ * PUT /api/onboarding/identity (the form wizard). Every field is
+ * OPTIONAL and touches only its own column — this is the partial-upsert
+ * contract shared by the wizard route and the conversational
+ * onboarding_tenant_settings / onboarding_schedule execution handlers
+ * so both write through the SAME implementation instead of two
+ * divergent ones (see routes/onboarding.ts PUT /identity and
+ * proposals/execution/onboarding-handlers.ts).
+ */
+export interface TenantIdentityUpsertFields {
+  businessName?: string;
+  serviceAreaText?: string;
+  serviceAreaRadius?: number;
+  businessHours?: Record<string, { open: string; close: string } | null>;
+  jobBufferMinutes?: number;
+  hourlyRateCents?: number;
+  /**
+   * Omit to leave whatever's stored untouched. NEVER pass a guessed or
+   * default zone here — omitted means "not chosen" (migration 263 /
+   * the Phoenix mis-booking postmortem in routes/onboarding.ts). Once a
+   * zone is set, this call never clears it back to unset.
+   */
+  timezone?: string;
+  /**
+   * Tri-state via key presence: omit the KEY entirely to leave the
+   * stored phone untouched; pass `null` to explicitly clear it; pass a
+   * (caller-normalized) string to set it. Mirrors the route's
+   * `ownerPhoneToWrite` tri-state.
+   */
+  ownerPhone?: string | null;
+  /**
+   * Seeded only when the tenant has no ai_model yet (first-ever row, or
+   * an existing row that predates this bootstrap) — never overrides an
+   * existing tenant-specific override. Required so every call site is
+   * explicit about which model to bootstrap with (matches
+   * resolveBootstrapAiModel()) rather than this method guessing.
+   */
+  bootstrapAiModel: string;
 }
 
 export interface SettingsRepository {
@@ -540,6 +760,18 @@ export interface SettingsRepository {
   update(tenantId: string, updates: Partial<TenantSettings>): Promise<TenantSettings | null>;
   incrementEstimateNumber(tenantId: string): Promise<number>;
   incrementInvoiceNumber(tenantId: string): Promise<number>;
+  /**
+   * Atomic partial upsert for the identity-shaped fields. See
+   * `TenantIdentityUpsertFields` — single source of truth for
+   * PUT /api/onboarding/identity AND the conversational onboarding
+   * execution handlers. A brand-new row gets '' for businessName
+   * (matches the established POST /api/onboarding/pack "seed a
+   * minimal row" convention) and schema defaults for everything else.
+   */
+  upsertIdentityFields(
+    tenantId: string,
+    fields: TenantIdentityUpsertFields,
+  ): Promise<TenantSettings>;
 }
 
 export interface ActiveVerticalPackValidationOptions {
@@ -610,6 +842,7 @@ function validateCommonSettingsFields(
     discountMaxBps?: number | null;
     discountFloorCents?: number | null;
     laborRateCentsPerHour?: number | null;
+    autonomousBookingThreshold?: number | null;
   }
 ): string[] {
   const errors: string[] = [];
@@ -662,6 +895,19 @@ function validateCommonSettingsFields(
     if (!Number.isInteger(rate) || rate < 0) {
       errors.push('laborRateCentsPerHour must be a non-negative integer of cents');
     }
+  }
+  // UB-D / D-015 — autonomous booking threshold mirrors the migration-231
+  // CHECK (NUMERIC(3,2) in [0.90, 0.99]). Fractional by design (a confidence
+  // score, not money); the evaluator (proposals/autonomous-lane.ts) re-clamps
+  // to the 0.90 floor at read time as defense in depth.
+  if (
+    input.autonomousBookingThreshold !== undefined &&
+    input.autonomousBookingThreshold !== null &&
+    (!Number.isFinite(input.autonomousBookingThreshold) ||
+      input.autonomousBookingThreshold < 0.9 ||
+      input.autonomousBookingThreshold > 0.99)
+  ) {
+    errors.push('autonomousBookingThreshold must be between 0.90 and 0.99');
   }
   return errors;
 }
@@ -761,7 +1007,9 @@ export async function createSettings(
     businessPhone: input.businessPhone,
     businessEmail: input.businessEmail,
     ownerPhone: input.ownerPhone,
-    timezone: input.timezone || 'America/New_York',
+    // No ET fallback — an unchosen zone stays unchosen so the booking path
+    // can gate on it rather than silently booking three hours off.
+    ...(input.timezone ? { timezone: input.timezone } : {}),
     estimatePrefix: input.estimatePrefix || 'EST-',
     invoicePrefix: input.invoicePrefix || 'INV-',
     nextEstimateNumber: 1,
@@ -810,13 +1058,21 @@ export async function updateSettings(
   repository: SettingsRepository,
   options?: ActiveVerticalPackValidationOptions
 ): Promise<TenantSettings | null> {
-  const normalizedInput: UpdateSettingsInput = {
-    ...input,
-    activeVerticalPacks: normalizeActiveVerticalPacks(
+  // Sweep-2 S1: only touch `activeVerticalPacks` when the caller actually
+  // provided a value. Unconditionally spreading a normalized `undefined`
+  // inserted the KEY into every update, which the Pg repo read as an
+  // explicit clear ("key present" semantics) — so ANY unrelated settings
+  // save silently wiped the tenant's active vertical packs. `undefined`
+  // means "untouched"; an explicit clear is `[]`.
+  const normalizedInput: UpdateSettingsInput = { ...input };
+  if (input.activeVerticalPacks === undefined) {
+    delete normalizedInput.activeVerticalPacks;
+  } else {
+    normalizedInput.activeVerticalPacks = normalizeActiveVerticalPacks(
       input.activeVerticalPacks,
       options?.normalizePackId ?? normalizePackId
-    ),
-  };
+    );
+  }
   const errors = validateUpdateSettingsInput(normalizedInput, options);
   if (errors.length > 0) {
     throw new Error(`Validation failed: ${errors.join('; ')}`);
@@ -864,7 +1120,11 @@ export async function ensureTenantSettings(
     id: uuidv4(),
     tenantId,
     businessName: options?.businessName ?? 'My Business',
-    timezone: 'America/New_York',
+    // No ET fallback — same rationale as createSettings above: a seeded
+    // 'America/New_York' is indistinguishable from a chosen one, so the
+    // scheduling gate would treat a guessed zone as configured and book
+    // non-Eastern tenants hours off. The zone stays UNSET until the tenant
+    // picks one; drafting handlers gate on the absence instead of guessing.
     estimatePrefix: 'EST-',
     invoicePrefix: 'INV-',
     nextEstimateNumber: 1,
@@ -998,6 +1258,11 @@ export class InMemorySettingsRepository implements SettingsRepository {
     const s = this.settings.get(tenantId);
     if (!s) return null;
     const { id: _id, tenantId: _tid, createdAt: _ca, ...safeUpdates } = updates;
+    // Sweep-2 S1 parity with PgSettingsRepository: an undefined VALUE means
+    // "untouched" — never let it clobber a stored value via spread.
+    for (const key of Object.keys(safeUpdates) as (keyof typeof safeUpdates)[]) {
+      if (safeUpdates[key] === undefined) delete safeUpdates[key];
+    }
     const updated = { ...s, ...safeUpdates };
     this.settings.set(tenantId, updated);
     return { ...updated };
@@ -1019,5 +1284,57 @@ export class InMemorySettingsRepository implements SettingsRepository {
     s.nextInvoiceNumber += 1;
     this.settings.set(tenantId, s);
     return num;
+  }
+
+  async upsertIdentityFields(
+    tenantId: string,
+    fields: TenantIdentityUpsertFields,
+  ): Promise<TenantSettings> {
+    const existing = this.settings.get(tenantId);
+    if (!existing) {
+      const created: TenantSettings = {
+        id: uuidv4(),
+        tenantId,
+        businessName: fields.businessName ?? '',
+        serviceAreaText: fields.serviceAreaText,
+        serviceAreaRadius: fields.serviceAreaRadius,
+        businessHours: fields.businessHours,
+        jobBufferMinutes: fields.jobBufferMinutes,
+        hourlyRateCents: fields.hourlyRateCents,
+        // NO fallback zone — see TenantIdentityUpsertFields.timezone.
+        timezone: fields.timezone,
+        ownerPhone: fields.ownerPhone ?? undefined,
+        estimatePrefix: 'EST-',
+        invoicePrefix: 'INV-',
+        nextEstimateNumber: 1001,
+        nextInvoiceNumber: 1001,
+        defaultPaymentTermDays: 30,
+        aiModel: fields.bootstrapAiModel,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      };
+      this.settings.set(tenantId, created);
+      return { ...created };
+    }
+
+    const updates: Partial<TenantSettings> = {};
+    if (fields.businessName !== undefined) updates.businessName = fields.businessName;
+    if (fields.serviceAreaText !== undefined) updates.serviceAreaText = fields.serviceAreaText;
+    if (fields.serviceAreaRadius !== undefined) updates.serviceAreaRadius = fields.serviceAreaRadius;
+    if (fields.businessHours !== undefined) updates.businessHours = fields.businessHours;
+    if (fields.jobBufferMinutes !== undefined) updates.jobBufferMinutes = fields.jobBufferMinutes;
+    if (fields.hourlyRateCents !== undefined) updates.hourlyRateCents = fields.hourlyRateCents;
+    if (fields.timezone !== undefined) updates.timezone = fields.timezone;
+    if (Object.prototype.hasOwnProperty.call(fields, 'ownerPhone')) {
+      updates.ownerPhone = fields.ownerPhone;
+    }
+    if (!existing.aiModel) {
+      updates.aiModel = fields.bootstrapAiModel;
+    }
+    if (Object.keys(updates).length === 0) {
+      return { ...existing };
+    }
+    const updated = (await this.update(tenantId, updates)) ?? existing;
+    return { ...updated };
   }
 }

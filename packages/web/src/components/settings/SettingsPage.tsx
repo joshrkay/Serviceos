@@ -2,10 +2,11 @@ import { useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router';
 import { useClerk } from '@clerk/clerk-react';
 import {
-  ChevronRight, Building2, Users, Shield, Bell, Globe, Clock,
+  ChevronRight, Building2, Users, Globe, Clock,
   CreditCard, Link, Zap, FileText, Sparkles, Copy, ExternalLink,
   MapPin, Check, Store, RefreshCw, TrendingUp, Mail, BookOpen, Star, Phone,
-  Calendar,
+  Calendar, ClipboardList, SlidersHorizontal, Megaphone, ScrollText,
+  MessageSquareQuote,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { QuickBooksIntegrationSheet } from './QuickBooksIntegrationSheet';
@@ -17,6 +18,12 @@ import { SupervisorBackupSection } from './SupervisorBackupSection';
 import { BusinessProfileSheet } from './BusinessProfileSheet';
 import { TechnicianPhoneSheet } from './TechnicianPhoneSheet';
 import { TerminologySheet } from './TerminologySheet';
+import { JobFormTemplatesSheet } from './JobFormTemplatesSheet';
+import { JobCustomFieldsSheet } from './JobCustomFieldsSheet';
+import { MarketingCampaignsSheet } from './MarketingCampaignsSheet';
+import { CustomerGroupsSheet } from './CustomerGroupsSheet';
+import { StandingInstructionsSheet } from './StandingInstructionsSheet';
+import { BrandVoiceSheet } from './BrandVoiceSheet';
 import { AIApprovalRulesSheet } from './AIApprovalRulesSheet';
 import { DepositRulesSheet } from './DepositRulesSheet';
 import { DiscountPolicySheet } from './DiscountPolicySheet';
@@ -37,7 +44,7 @@ export function SettingsPage() {
   const navigate = useNavigate();
   const { signOut } = useClerk();
   const { me } = useMe();
-  // Tier 4 — Quick toggles: load from backend on mount, persist on
+  // Quick toggles: load from backend on mount, persist on
   // toggle. aiAuto + reminders live on /api/settings (migration 075).
   // spanishMode derives from /api/settings/language (P11-002).
   const [aiAuto, setAiAuto]         = useState(false);
@@ -45,13 +52,21 @@ export function SettingsPage() {
   const [spanishMode, setSpanishMode] = useState(false);
   const [businessName, setBusinessName] = useState<string | null>(null);
   const [voiceAgentLive, setVoiceAgentLive] = useState<boolean | null>(null);
+  // Surface a failure to load the main /api/settings document instead of
+  // silently swallowing it (which left the page showing stale defaults with
+  // no signal that the user's real preferences never loaded).
+  const [settingsLoadError, setSettingsLoadError] = useState(false);
+  const [settingsReloadNonce, setSettingsReloadNonce] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
     (async () => {
       try {
         const res = await apiFetch('/api/settings');
-        if (cancelled || !res.ok) return;
+        if (cancelled) return;
+        if (!res.ok) {
+          throw new Error(`GET /api/settings ${res.status}`);
+        }
         const data = (await res.json()) as {
           autoApplyInternalUpdates?: boolean;
           autoSendAppointmentReminders?: boolean;
@@ -74,12 +89,26 @@ export function SettingsPage() {
         if (typeof data.yelpReviewUrl === 'string') {
           setYelpReviewUrl(data.yelpReviewUrl);
         }
+        setSettingsLoadError(false);
       } catch {
-        /* network hiccup — defaults remain */
+        if (cancelled) return;
+        setSettingsLoadError(true);
+        toast.error('Could not load your settings', {
+          action: {
+            label: 'Retry',
+            onClick: () => setSettingsReloadNonce((n) => n + 1),
+          },
+        });
       }
       try {
         const statusRes = await apiFetch('/api/onboarding/status');
-        if (cancelled || !statusRes.ok) return;
+        if (cancelled) return;
+        if (!statusRes.ok) {
+          // Soft-fail: keep Settings usable; don't leave the AI phone
+          // answering row stuck on "Loading…" forever.
+          setVoiceAgentLive(false);
+          return;
+        }
         const status = (await statusRes.json()) as { voiceAgentLive?: boolean };
         setVoiceAgentLive(status.voiceAgentLive ?? false);
       } catch {
@@ -107,7 +136,7 @@ export function SettingsPage() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [settingsReloadNonce]);
 
   async function refreshQuickBooksIntegration() {
     try {
@@ -166,6 +195,12 @@ export function SettingsPage() {
   const [businessProfileOpen, setBusinessProfileOpen] = useState(false);
   const [technicianPhoneOpen, setTechnicianPhoneOpen] = useState(false);
   const [terminologyOpen, setTerminologyOpen] = useState(false);
+  const [jobFormsOpen, setJobFormsOpen] = useState(false);
+  const [jobCustomFieldsOpen, setJobCustomFieldsOpen] = useState(false);
+  const [marketingOpen, setMarketingOpen] = useState(false);
+  const [customerGroupsOpen, setCustomerGroupsOpen] = useState(false);
+  const [standingInstructionsOpen, setStandingInstructionsOpen] = useState(false);
+  const [brandVoiceOpen, setBrandVoiceOpen] = useState(false);
   const [aiRulesOpen, setAiRulesOpen] = useState(false);
   const [depositRulesOpen, setDepositRulesOpen] = useState(false);
   const [discountPolicyOpen, setDiscountPolicyOpen] = useState(false);
@@ -176,7 +211,7 @@ export function SettingsPage() {
   const [callRoutingOpen, setCallRoutingOpen] = useState(false);
   const [dncListOpen, setDncListOpen] = useState(false);
   const [operatorHoursOpen, setOperatorHoursOpen] = useState(false);
-  // Tier 4 (Calendar sync — PR 1). Auto-open the sheet + toast when
+  // Calendar sync OAuth return: auto-open the sheet + toast when
   // the user lands back here from Google's OAuth redirect. The
   // server-side callback redirects to /settings?calendar_connected=1
   // on success or ?calendar_error=<reason> when Google rejects /
@@ -186,7 +221,7 @@ export function SettingsPage() {
     const params = new URLSearchParams(window.location.search);
     const isConnected = params.get('calendar_connected') === '1';
     const connectionError = params.get('calendar_error');
-    // Tier 4 (Payment methods — PR 1). Operator returns from Stripe
+    // Payment methods OAuth return: operator returns from Stripe
     // Connect onboarding to /settings?stripe_connect=1. Auto-open
     // the sheet so they see the freshly-mirrored status.
     const stripeReturned = params.get('stripe_connect') === '1';
@@ -235,7 +270,7 @@ export function SettingsPage() {
   const [reviewsError, setReviewsError]       = useState('');
 
   /**
-   * Tier 4 (Subscription — Rivet billing). POST /api/billing/portal-session
+   * Rivet billing portal — POST /api/billing/portal-session
    * and redirect the operator to the Stripe-hosted portal where they can
    * manage card, plan, view invoices, etc. Returns to /settings on close.
    */
@@ -347,6 +382,7 @@ export function SettingsPage() {
         { icon: Phone,     label: 'On-call phone',       description: 'The number escalations ring when you are on call',     action: () => setTechnicianPhoneOpen(true) },
         { icon: Globe,     label: 'Language & region',   description: 'English / Español · Voice + customer messages', action: () => navigate('/settings/language') },
         { icon: FileText,  label: 'Terminology',         description: 'Customize labels (e.g. "Quote" vs "Estimate")',    action: () => setTerminologyOpen(true) },
+        { icon: Users,     label: 'Customer groups',     description: 'Named segments you can target with campaigns',     action: () => setCustomerGroupsOpen(true) },
         { icon: BookOpen,  label: 'Price book',          description: 'Services, parts & materials with set prices',          action: () => navigate('/settings/price-book') },
         { icon: Zap,       label: 'Vertical packs',      description: 'Activate HVAC, Plumbing, or other service verticals',  action: () => setVerticalPacksOpen(true) },
       ],
@@ -355,7 +391,6 @@ export function SettingsPage() {
       title: 'Team',
       items: [
         { icon: Users,  label: 'Team members',        description: 'View the roster and roles', action: () => setTeamMembersOpen(true) },
-        { icon: Shield, label: 'Roles & permissions', description: 'Owner, Admin, Technician',             action: () => toast.info('Coming soon') },
       ],
     },
     {
@@ -386,8 +421,14 @@ export function SettingsPage() {
           },
         },
         { icon: Zap,      label: 'AI approval rules',               description: 'Set what the AI can apply automatically',    action: () => setAiRulesOpen(true) },
-        { icon: Bell,     label: 'Reminders & follow-ups',          description: 'Auto-send thresholds and timing',             action: () => toast.info('Coming soon') },
+        { icon: ScrollText, label: 'Standing instructions',         description: 'Rules the AI follows on every draft ("always add a trip fee")', action: () => setStandingInstructionsOpen(true) },
+        // N-011 — gated behind the brand_voice_configurator flag (default off).
+        ...(me?.brand_voice_configurator_enabled
+          ? [{ icon: MessageSquareQuote, label: 'Brand voice', description: 'How the AI sounds in every customer message — register, sign-off, banned phrases', action: () => setBrandVoiceOpen(true) }]
+          : []),
         { icon: FileText, label: 'Estimate & invoice templates',    description: 'Default line items, terms, expiry',           action: () => navigate('/settings/templates') },
+        { icon: ClipboardList, label: 'Forms & checklists',         description: 'Reusable job forms your team fills out on site', action: () => setJobFormsOpen(true) },
+        { icon: SlidersHorizontal, label: 'Job custom fields',      description: 'Extra fields on every job (PO #, permit #, gate code)', action: () => setJobCustomFieldsOpen(true) },
         { icon: Clock,    label: 'Operator hours',                  description: 'Business hours for after-hours call routing', action: () => setOperatorHoursOpen(true) },
         { icon: Zap,      label: 'Call routing & handoff',          description: 'Channels, triggers, and after-hours behavior', action: () => setCallRoutingOpen(true) },
         { icon: Zap,      label: 'Do-Not-Call list',                description: 'Numbers blocked from outbound calls (TCPA / DNC)', action: () => setDncListOpen(true) },
@@ -397,6 +438,7 @@ export function SettingsPage() {
       title: 'Customer experience',
       items: [
         { icon: Star, label: 'Feedback & reviews', description: 'Average rating, distribution, and recent comments', action: () => navigate('/settings/feedback') },
+        { icon: Megaphone, label: 'Email campaigns', description: 'Send promos & announcements to customer segments', action: () => setMarketingOpen(true) },
       ],
     },
     {
@@ -428,12 +470,6 @@ export function SettingsPage() {
             : { label: 'Connect', color: 'bg-blue-100 text-blue-700' },
           action: () => setQbOpen(true),
         },
-        {
-          icon: Link,
-          label: 'Zapier',
-          description: 'Not connected',
-          action: () => toast.info('Coming soon'),
-        },
       ],
     },
   ];
@@ -442,6 +478,26 @@ export function SettingsPage() {
     <div className="h-full overflow-y-auto pb-20 md:pb-0" style={{ scrollbarWidth: 'thin' }}>
       <div className="p-4 md:p-6 max-w-2xl mx-auto">
         <h1 className="text-slate-900 mb-6">Settings</h1>
+
+        {settingsLoadError && (
+          <div
+            data-testid="settings-load-error"
+            role="alert"
+            className="mb-5 flex items-center justify-between gap-3 rounded-xl border border-red-200 bg-red-50 px-4 py-3.5"
+          >
+            <p className="text-sm text-red-700">
+              We couldn’t load your settings. Your current preferences may not be shown.
+            </p>
+            <button
+              type="button"
+              onClick={() => setSettingsReloadNonce((n) => n + 1)}
+              data-testid="settings-load-retry"
+              className="shrink-0 rounded-lg bg-red-600 px-3 py-2 text-sm text-white hover:bg-red-700"
+            >
+              Retry
+            </button>
+          </div>
+        )}
 
         {/* Onboarding re-run banner */}
         <button
@@ -818,7 +874,7 @@ export function SettingsPage() {
         <SuppliersSheet serviceType="HVAC" onClose={() => setSuppliersOpen(false)} />
       )}
 
-      {/* Business profile sheet — closes the first of the 13 settings stubs. */}
+      {/* Business profile sheet */}
       {businessProfileOpen && (
         <BusinessProfileSheet
           onClose={() => setBusinessProfileOpen(false)}
@@ -832,6 +888,24 @@ export function SettingsPage() {
       )}
 
       {/* Terminology sheet — entity-label overrides (Quote vs Estimate, etc.) */}
+      {jobFormsOpen && (
+        <JobFormTemplatesSheet onClose={() => setJobFormsOpen(false)} />
+      )}
+      {jobCustomFieldsOpen && (
+        <JobCustomFieldsSheet onClose={() => setJobCustomFieldsOpen(false)} />
+      )}
+      {marketingOpen && (
+        <MarketingCampaignsSheet onClose={() => setMarketingOpen(false)} />
+      )}
+      {customerGroupsOpen && (
+        <CustomerGroupsSheet onClose={() => setCustomerGroupsOpen(false)} />
+      )}
+      {brandVoiceOpen && me?.brand_voice_configurator_enabled && (
+        <BrandVoiceSheet onClose={() => setBrandVoiceOpen(false)} />
+      )}
+      {standingInstructionsOpen && (
+        <StandingInstructionsSheet onClose={() => setStandingInstructionsOpen(false)} />
+      )}
       {terminologyOpen && (
         <TerminologySheet onClose={() => setTerminologyOpen(false)} />
       )}

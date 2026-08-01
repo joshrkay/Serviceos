@@ -59,10 +59,24 @@ function makeOpenInvoice(totalCents = 10000): Invoice {
   };
 }
 
-function piSucceeded(opts: { piId: string; amount: number; methodType?: string }) {
+function piSucceeded(opts: {
+  piId: string;
+  amount: number;
+  methodType?: string;
+  /**
+   * Top-level `account` on the event envelope, as Stripe delivers it from a
+   * "Connected accounts" webhook destination for a Connect direct charge. The
+   * settlement path keys off data.object.metadata, so this must be inert to
+   * routing — that origin-agnosticism is exactly what the Connect-scoped tests
+   * below assert.
+   */
+  account?: string;
+  eventId?: string;
+}) {
   return {
-    id: `evt_${uuidv4()}`,
+    id: opts.eventId ?? `evt_${uuidv4()}`,
     type: 'payment_intent.succeeded',
+    ...(opts.account ? { account: opts.account } : {}),
     data: {
       object: {
         id: opts.piId,
@@ -191,6 +205,79 @@ describe('payment_intent.succeeded — async (ACH/bank) settlement', () => {
   });
 });
 
+// U6 — Connect direct charges settle through the SAME webhook ledger.
+//
+// The primary customer path is an Elements PaymentIntent on the tenant's
+// connected account (a Stripe "direct charge"). Stripe delivers the resulting
+// `payment_intent.succeeded` from the *connected-accounts* destination, so the
+// event envelope carries a top-level `account: acct_…`. The settlement branch
+// in routes.ts routes purely off `data.object.metadata` (tenant_id/invoice_id)
+// and never reads `event.account` for payment settlement, so a connected-origin
+// event must settle the invoice identically to a platform one. These tests pin
+// that origin-agnosticism — the premise of "Connect direct charges settle
+// through the existing ledger" (prd-stripe-trades-payments §acceptance, plan U6).
+describe('payment_intent.succeeded — Connect direct charge (connected-account delivery)', () => {
+  const CONNECTED_ACCOUNT = 'acct_connect_w1_2';
+  let invoiceRepo: InMemoryInvoiceRepository;
+  let paymentRepo: InMemoryPaymentRepository;
+  let auditRepo: InMemoryAuditRepository;
+  let app: express.Express;
+
+  beforeEach(async () => {
+    invoiceRepo = new InMemoryInvoiceRepository();
+    paymentRepo = new InMemoryPaymentRepository();
+    auditRepo = new InMemoryAuditRepository();
+    await invoiceRepo.create(makeOpenInvoice());
+    app = buildApp({
+      invoiceRepo,
+      paymentRepo,
+      auditRepo,
+      stripeWebhookSecret: STRIPE_SECRET,
+    });
+  });
+
+  it('settles an open invoice from a connected-account card charge (event.account present)', async () => {
+    const res = await postSigned(
+      app,
+      piSucceeded({ piId: 'pi_connect_card_1', amount: 10000, methodType: 'card', account: CONNECTED_ACCOUNT }),
+    );
+    expect(res.status).toBe(200);
+
+    const inv = await invoiceRepo.findById(TENANT, INVOICE_ID);
+    expect(inv?.status).toBe('paid');
+    expect(inv?.amountDueCents).toBe(0);
+
+    const payments = await paymentRepo.findByInvoice(TENANT, INVOICE_ID);
+    expect(payments).toHaveLength(1);
+    // Card-on-Connect settles as a card payment, not ACH — proves the method
+    // mapping still reads data.object, unaffected by the connected origin.
+    expect(payments[0].method).toBe('credit_card');
+    expect(payments[0].providerReference).toBe('pi_connect_card_1');
+  });
+
+  it('is idempotent on a re-delivered connected-account event id', async () => {
+    const event = piSucceeded({
+      piId: 'pi_connect_idem',
+      amount: 10000,
+      methodType: 'card',
+      account: CONNECTED_ACCOUNT,
+      eventId: 'evt_connect_idem',
+    });
+
+    const first = await postSigned(app, event);
+    expect(first.status).toBe(200);
+
+    const second = await postSigned(app, event);
+    expect(second.status).toBe(200);
+    expect(second.body.duplicate).toBe(true);
+
+    const inv = await invoiceRepo.findById(TENANT, INVOICE_ID);
+    expect(inv?.status).toBe('paid');
+    expect(inv?.amountPaidCents).toBe(10000);
+    expect(await paymentRepo.findByInvoice(TENANT, INVOICE_ID)).toHaveLength(1);
+  });
+});
+
 describe('payment_intent.payment_failed', () => {
   let invoiceRepo: InMemoryInvoiceRepository;
   let paymentRepo: InMemoryPaymentRepository;
@@ -282,5 +369,142 @@ describe('charge.dispute.created — chargeback', () => {
   it('returns 500 (so Stripe retries) when the payment cannot be resolved yet', async () => {
     const res = await postSigned(app, disputeCreated({ piId: 'pi_unknown' }));
     expect(res.status).toBe(500);
+  });
+});
+
+// U5 — the ACH payer's RECEIPT on settlement.
+//
+// Regression: the `existing.status === 'processing'` settle branch returned
+// without ever reaching deps.paymentReceiptNotifier, while the recordPayment
+// branch directly below it passed the notifier through. Net effect in
+// production: ACH payers' invoices went to 'paid' in silence; card payers got
+// a receipt. These tests pin the settle path to the SAME receipt the card path
+// sends, and pin the redelivery guard.
+function piProcessing(opts: { piId: string; amount: number; eventId?: string }) {
+  return {
+    id: opts.eventId ?? `evt_${uuidv4()}`,
+    type: 'payment_intent.processing',
+    data: {
+      object: {
+        id: opts.piId,
+        amount: opts.amount,
+        amount_received: 0,
+        metadata: { tenant_id: TENANT, invoice_id: INVOICE_ID },
+        charges: { data: [{ payment_method_details: { type: 'us_bank_account' } }] },
+      },
+    },
+  };
+}
+
+describe('payment_intent.succeeded — ACH settlement sends the customer receipt', () => {
+  let invoiceRepo: InMemoryInvoiceRepository;
+  let paymentRepo: InMemoryPaymentRepository;
+  let auditRepo: InMemoryAuditRepository;
+  let app: express.Express;
+  let receipts: Array<{
+    tenantId: string;
+    invoiceId: string;
+    amountCents: number;
+    paymentId: string;
+  }>;
+
+  beforeEach(async () => {
+    invoiceRepo = new InMemoryInvoiceRepository();
+    paymentRepo = new InMemoryPaymentRepository();
+    auditRepo = new InMemoryAuditRepository();
+    receipts = [];
+    await invoiceRepo.create(makeOpenInvoice());
+    app = buildApp({
+      invoiceRepo,
+      paymentRepo,
+      auditRepo,
+      stripeWebhookSecret: STRIPE_SECRET,
+      paymentReceiptNotifier: {
+        async notifyPaymentReceived(tenantId, invoiceId, amountCents, paymentId) {
+          receipts.push({ tenantId, invoiceId, amountCents, paymentId });
+        },
+      },
+    });
+  });
+
+  it('notifies the receipt notifier when a processing ACH payment settles', async () => {
+    // Bank debit initiated — records the IN-FLIGHT row, deliberately no comms.
+    const initiated = await postSigned(app, piProcessing({ piId: 'pi_ach_r1', amount: 10000 }));
+    expect(initiated.status).toBe(200);
+    expect(receipts).toHaveLength(0);
+
+    const inFlight = await paymentRepo.findByInvoice(TENANT, INVOICE_ID);
+    expect(inFlight).toHaveLength(1);
+    expect(inFlight[0].status).toBe('processing');
+
+    // Funds clear — settle flips 'processing' -> 'completed' AND sends the
+    // receipt the card path sends.
+    const settled = await postSigned(app, piSucceeded({ piId: 'pi_ach_r1', amount: 10000 }));
+    expect(settled.status).toBe(200);
+    expect(settled.body.settled).toBe(true);
+
+    const rows = await paymentRepo.findByInvoice(TENANT, INVOICE_ID);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].status).toBe('completed');
+
+    // Same shape the card path passes: tenant, invoice, the SETTLED ROW's
+    // amount, and payment.id as the per-occurrence claim token.
+    expect(receipts).toEqual([
+      {
+        tenantId: TENANT,
+        invoiceId: INVOICE_ID,
+        amountCents: 10000,
+        paymentId: rows[0].id,
+      },
+    ]);
+  });
+
+  it('does not send a second receipt when Stripe redelivers payment_intent.succeeded', async () => {
+    await postSigned(app, piProcessing({ piId: 'pi_ach_r2', amount: 10000 }));
+    const first = await postSigned(app, piSucceeded({ piId: 'pi_ach_r2', amount: 10000 }));
+    expect(first.body.settled).toBe(true);
+    expect(receipts).toHaveLength(1);
+
+    // Redelivered under a DISTINCT event id, so the webhook-event-id dedup
+    // cannot be what saves us — the payment-state guard must.
+    const redelivered = await postSigned(app, piSucceeded({ piId: 'pi_ach_r2', amount: 10000 }));
+    expect(redelivered.status).toBe(200);
+    expect(redelivered.body.duplicate).toBe(true);
+    expect(receipts).toHaveLength(1);
+  });
+
+  it('a receipt-send failure does not fail the webhook (Stripe must not retry a settled payment)', async () => {
+    const throwingApp = buildApp({
+      invoiceRepo,
+      paymentRepo,
+      auditRepo,
+      stripeWebhookSecret: STRIPE_SECRET,
+      paymentReceiptNotifier: {
+        async notifyPaymentReceived() {
+          throw new Error('comms provider down');
+        },
+      },
+    });
+
+    await postSigned(throwingApp, piProcessing({ piId: 'pi_ach_r3', amount: 10000 }));
+    const res = await postSigned(throwingApp, piSucceeded({ piId: 'pi_ach_r3', amount: 10000 }));
+
+    expect(res.status).toBe(200);
+    expect(res.body.settled).toBe(true);
+
+    // The settlement still stands — the money is not held hostage by comms.
+    const rows = await paymentRepo.findByInvoice(TENANT, INVOICE_ID);
+    expect(rows[0].status).toBe('completed');
+  });
+
+  it('sends no receipt at payment_intent.processing — only once the money clears', async () => {
+    const res = await postSigned(app, piProcessing({ piId: 'pi_ach_r4', amount: 10000 }));
+    expect(res.status).toBe(200);
+
+    const rows = await paymentRepo.findByInvoice(TENANT, INVOICE_ID);
+    expect(rows[0].status).toBe('processing');
+    // The invoice is credited in-flight, but the customer is told nothing yet.
+    expect((await invoiceRepo.findById(TENANT, INVOICE_ID))?.status).toBe('paid');
+    expect(receipts).toHaveLength(0);
   });
 });

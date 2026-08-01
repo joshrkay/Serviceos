@@ -25,7 +25,13 @@ describe('P1-017 — Tenant business settings and numbering preferences', () => 
     expect(settings.id).toBeTruthy();
     expect(settings.tenantId).toBe('tenant-1');
     expect(settings.businessName).toBe('ACME HVAC');
-    expect(settings.timezone).toBe('America/New_York');
+    // No timezone default any more. A settings row created without an
+    // explicit zone leaves it UNSET rather than silently claiming Eastern —
+    // that default is what booked an America/Phoenix operator three hours off
+    // for every spoken appointment, because a stored 'America/New_York' is
+    // indistinguishable from a zone the tenant actually chose. Scheduling
+    // handlers gate on the unset value instead of guessing.
+    expect(settings.timezone).toBeUndefined();
     expect(settings.estimatePrefix).toBe('EST-');
     expect(settings.invoicePrefix).toBe('INV-');
     expect(settings.nextEstimateNumber).toBe(1);
@@ -247,5 +253,69 @@ describe('P1-017 — Tenant business settings and numbering preferences', () => 
 
       expect(second.aiModel).toBe('tenant-pinned-model');
     });
+  });
+
+  // Sweep-2 S1 — updateSettings used to unconditionally spread a normalized
+  // `activeVerticalPacks: undefined` into every repo update, which the Pg
+  // repo's "key present" semantics read as an explicit clear → any unrelated
+  // PUT /api/settings silently wiped the tenant's active vertical packs.
+  describe('Sweep-2 S1 — unrelated updates never touch activeVerticalPacks', () => {
+    beforeEach(async () => {
+      await createSettings(
+        { tenantId: 'tenant-packs', businessName: 'Packed Co', activeVerticalPacks: ['hvac'] },
+        repo,
+      );
+    });
+
+    it('never passes the activeVerticalPacks key to the repo when the caller omitted it', async () => {
+      const updateSpy = vi.spyOn(repo, 'update');
+      await updateSettings('tenant-packs', { digestEnabled: true }, repo);
+
+      expect(updateSpy).toHaveBeenCalledTimes(1);
+      const passed = updateSpy.mock.calls[0][1];
+      expect('activeVerticalPacks' in passed).toBe(false);
+      updateSpy.mockRestore();
+    });
+
+    it('packs survive an unrelated digestEnabled-only update', async () => {
+      const updated = await updateSettings('tenant-packs', { digestEnabled: true }, repo);
+      expect(updated?.digestEnabled).toBe(true);
+      expect(updated?.activeVerticalPacks).toEqual(['hvac']);
+
+      const reread = await getSettings('tenant-packs', repo);
+      expect(reread?.activeVerticalPacks).toEqual(['hvac']);
+    });
+
+    it('an explicit packs update still persists (with normalization)', async () => {
+      const updated = await updateSettings(
+        'tenant-packs',
+        { activeVerticalPacks: [' HVAC ', 'plumbing'] },
+        repo,
+      );
+      expect(updated?.activeVerticalPacks).toEqual(['hvac', 'plumbing']);
+    });
+
+    it('an explicit empty array is an intentional clear', async () => {
+      const updated = await updateSettings('tenant-packs', { activeVerticalPacks: [] }, repo);
+      expect(updated?.activeVerticalPacks).toEqual([]);
+    });
+  });
+});
+
+describe('no-guessed-timezone — ensureTenantSettings seeds no zone either', () => {
+  it('a bootstrap-seeded settings row leaves timezone unset until the tenant chooses', async () => {
+    const { InMemorySettingsRepository } = await import('../../src/settings/settings');
+    const repo = new InMemorySettingsRepository();
+
+    // Clerk tenant provisioning path (auth/clerk.ts) — the OTHER first-row
+    // seeder. It previously hardcoded 'America/New_York', which the
+    // scheduling gate could not distinguish from a chosen zone, so
+    // provisioned tenants kept auto-booking on a guessed Eastern clock even
+    // after createSettings stopped guessing.
+    const settings = await ensureTenantSettings('tenant-bootstrap-tz', repo, {
+      businessName: 'Zoneless Co',
+    });
+
+    expect(settings.timezone).toBeUndefined();
   });
 });

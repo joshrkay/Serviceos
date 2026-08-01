@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, waitFor, fireEvent } from '@testing-library/react';
+import { render, screen, waitFor, fireEvent, within } from '@testing-library/react';
 import { InboxPage } from './InboxPage';
 
 const apiFetch = vi.fn();
@@ -85,6 +85,100 @@ describe('InboxPage', () => {
     );
   });
 
+  it('Finding 2 — approve raises the server-window undo toast; Undo POSTs the undo endpoint', async () => {
+    apiFetch.mockResolvedValueOnce(
+      jsonResponse({
+        data: [
+          { proposal: { id: 'p-u', proposalType: 'add_note', summary: 'Add a note', status: 'ready_for_review', createdAt: new Date().toISOString() }, urgency: 'low', reason: 'Standard priority' },
+        ],
+        summary: { totalCount: 1, criticalCount: 0, highCount: 0, normalCount: 0, lowCount: 1, truncated: false },
+      }),
+    );
+    // Approve response carries the server undo window (approvedAt + undoExpiresAt).
+    apiFetch.mockResolvedValueOnce(
+      jsonResponse({
+        id: 'p-u',
+        status: 'approved',
+        approvedAt: new Date().toISOString(),
+        undoExpiresAt: new Date(Date.now() + 5000).toISOString(),
+      }),
+    );
+
+    render(<InboxPage />);
+    await waitFor(() => screen.getByText('Add a note'));
+    fireEvent.click(screen.getByRole('button', { name: /approve/i }));
+
+    // The undo toast surfaces after approval, anchored to the server window.
+    await waitFor(() => expect(screen.getByTestId('undo-toast')).toBeInTheDocument());
+
+    apiFetch.mockResolvedValueOnce(jsonResponse({ id: 'p-u', status: 'undone' }));
+    fireEvent.click(screen.getByRole('button', { name: /undo/i }));
+
+    await waitFor(() => {
+      expect(apiFetch).toHaveBeenCalledWith(
+        '/api/proposals/p-u/undo',
+        expect.objectContaining({ method: 'POST' }),
+      );
+    });
+  });
+
+  it('§5.5 — marks expired schedule cards and re-proposes one optimistically', async () => {
+    apiFetch.mockResolvedValueOnce(
+      jsonResponse({
+        data: [],
+        summary: { totalCount: 0, criticalCount: 0, highCount: 0, normalCount: 0, lowCount: 0, truncated: false },
+        expired: [
+          { id: 'exp-1', proposalType: 'create_appointment', summary: 'Tuesday 2pm with Jordan', status: 'expired', createdAt: new Date().toISOString() },
+        ],
+      }),
+    );
+    apiFetch.mockResolvedValueOnce(jsonResponse({ id: 'new-1', status: 'draft' }, { status: 201 }));
+
+    render(<InboxPage />);
+    await waitFor(() => screen.getByTestId('expired-section'));
+    expect(screen.getByText('Tuesday 2pm with Jordan')).toBeInTheDocument();
+    // the "Expired" badge marks the card (distinct from the section heading)
+    expect(screen.getByText('Expired')).toBeInTheDocument();
+    // not the empty-state, even though there are no pending rows
+    expect(screen.queryByText(/nothing waiting/i)).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: /re-propose/i }));
+
+    await waitFor(() => {
+      expect(screen.queryByText('Tuesday 2pm with Jordan')).not.toBeInTheDocument();
+    });
+    expect(apiFetch).toHaveBeenCalledWith(
+      '/api/proposals/exp-1/re-propose',
+      expect.objectContaining({ method: 'POST' }),
+    );
+  });
+
+  it('journey QA bug 10 — surfaces execution-failed proposals with their executionError', async () => {
+    apiFetch.mockResolvedValueOnce(
+      jsonResponse({
+        data: [],
+        summary: { totalCount: 0, criticalCount: 0, highCount: 0, normalCount: 0, lowCount: 0, truncated: false },
+        failed: [
+          {
+            id: 'p-fail',
+            proposalType: 'draft_estimate',
+            summary: 'Estimate for Dana — $424.00',
+            status: 'execution_failed',
+            executionError: 'Estimate draft has no jobId and job auto-creation is not configured — pick a job before approving',
+            failedAt: new Date().toISOString(),
+          },
+        ],
+      }),
+    );
+
+    render(<InboxPage />);
+    await waitFor(() => screen.getByTestId('failed-section'));
+    expect(screen.getByText('Estimate for Dana — $424.00')).toBeInTheDocument();
+    expect(screen.getByTestId('execution-error')).toHaveTextContent(/no jobId/);
+    // A failed card means something needs attention — not the empty state.
+    expect(screen.queryByText(/nothing waiting/i)).not.toBeInTheDocument();
+  });
+
   it('renders confidence + pricing-source markers and a one-tap picker for an ambiguous line (U2)', async () => {
     apiFetch.mockResolvedValueOnce(
       jsonResponse({
@@ -126,6 +220,149 @@ describe('InboxPage', () => {
     expect(screen.getByText(/Wasn’t sure which flush valve/)).toBeInTheDocument();
     // The picker surfaces the candidates.
     expect(screen.getAllByTestId('ambiguity-option')).toHaveLength(2);
+  });
+
+  it('surfaces the §6.4-B severity badge on an MMS photo draft in the inbox (U5)', async () => {
+    apiFetch.mockResolvedValueOnce(
+      jsonResponse({
+        data: [
+          {
+            proposal: {
+              id: 'p-mms',
+              proposalType: 'draft_estimate',
+              summary: 'Photo quote for the Ruiz job',
+              status: 'draft',
+              createdAt: new Date().toISOString(),
+              payload: {
+                _meta: { overallConfidence: 'medium', severity: 'TIER_2_EMERGENCY_DISPATCH' },
+                lineItems: [{ id: 'l1', description: 'Burst pipe repair', pricingSource: 'catalog' }],
+              },
+              sourceContext: { source: 'customer_mms' },
+            },
+            urgency: 'high',
+            reason: 'Awaiting review',
+          },
+        ],
+        summary: { totalCount: 1, criticalCount: 0, highCount: 1, normalCount: 0, lowCount: 0, truncated: false },
+      }),
+    );
+
+    render(<InboxPage />);
+
+    await waitFor(() => screen.getByText('Photo quote for the Ruiz job'));
+    // The urgency badge must appear where MMS drafts are actually reviewed.
+    expect(screen.getByTestId('severity-badge')).toHaveTextContent('Emergency');
+  });
+
+  it('renders good-better-best tiers and add-ons so the operator sees the choices (EE-1)', async () => {
+    apiFetch.mockResolvedValueOnce(
+      jsonResponse({
+        data: [
+          {
+            proposal: {
+              id: 'p-gbb',
+              proposalType: 'draft_estimate',
+              summary: 'Water heater options for the Diaz job',
+              status: 'draft',
+              createdAt: new Date().toISOString(),
+              payload: {
+                lineItems: [
+                  { id: 'l1', description: 'Diagnostic', unitPrice: 5000, pricingSource: 'catalog' },
+                  { id: 'l2', description: 'Builder heater', unitPrice: 90000, pricingSource: 'catalog', groupKey: 'wh', groupLabel: 'Water heater', isOptional: true, isDefaultSelected: true },
+                  { id: 'l3', description: 'Premium heater', unitPrice: 140000, pricingSource: 'catalog', groupKey: 'wh', groupLabel: 'Water heater', isOptional: true },
+                  { id: 'l4', description: 'Surge protector', unitPrice: 8000, pricingSource: 'catalog', isOptional: true },
+                ],
+              },
+              sourceContext: {},
+            },
+            urgency: 'normal',
+            reason: 'Awaiting review',
+          },
+        ],
+        summary: { totalCount: 1, criticalCount: 0, highCount: 0, normalCount: 1, lowCount: 0, truncated: false },
+      }),
+    );
+
+    render(<InboxPage />);
+
+    await waitFor(() => screen.getByText('Water heater options for the Diaz job'));
+    const group = screen.getByTestId('tier-group');
+    expect(group).toHaveTextContent('Water heater');
+    expect(group).toHaveTextContent('Builder heater');
+    expect(group).toHaveTextContent('Premium heater');
+    // Exactly one option is marked default, and it is the Builder tier.
+    expect(within(group).getByTestId('tier-default').closest('li')).toHaveTextContent('Builder heater');
+    // Catalog-grounded prices are shown per option.
+    expect(group).toHaveTextContent('$900.00');
+    expect(group).toHaveTextContent('$1,400.00');
+    // The standalone optional add-on renders in its own block.
+    expect(screen.getByTestId('tier-addons')).toHaveTextContent('Surge protector');
+  });
+
+  it('renders a "Standing instruction applied" chip per applied instruction (UB-A3)', async () => {
+    apiFetch.mockResolvedValueOnce(
+      jsonResponse({
+        data: [
+          {
+            proposal: {
+              id: 'p-si',
+              proposalType: 'draft_estimate',
+              summary: 'Estimate for the Nguyen job',
+              status: 'draft',
+              createdAt: new Date().toISOString(),
+              payload: {
+                _meta: {
+                  overallConfidence: 'high',
+                  appliedStandingInstructions: [
+                    { id: 'si-1', text: 'Always add a $50 trip fee' },
+                    { id: 'si-2', text: 'Mention the referral discount' },
+                  ],
+                },
+                lineItems: [{ id: 'l1', description: 'Water heater install', pricingSource: 'catalog' }],
+              },
+            },
+            urgency: 'normal',
+            reason: 'Awaiting review',
+          },
+        ],
+        summary: { totalCount: 1, criticalCount: 0, highCount: 0, normalCount: 1, lowCount: 0, truncated: false },
+      }),
+    );
+
+    render(<InboxPage />);
+
+    await waitFor(() => screen.getByText('Estimate for the Nguyen job'));
+    const chips = screen.getAllByTestId('standing-instruction-chip');
+    expect(chips).toHaveLength(2);
+    expect(chips[0]).toHaveTextContent('Standing instruction applied: Always add a $50 trip fee');
+    expect(chips[1]).toHaveTextContent('Standing instruction applied: Mention the referral discount');
+  });
+
+  it('renders no standing-instruction chip when _meta carries none (UB-A3)', async () => {
+    apiFetch.mockResolvedValueOnce(
+      jsonResponse({
+        data: [
+          {
+            proposal: {
+              id: 'p-no-si',
+              proposalType: 'draft_estimate',
+              summary: 'Estimate without instructions',
+              status: 'draft',
+              createdAt: new Date().toISOString(),
+              payload: { _meta: { overallConfidence: 'high' } },
+            },
+            urgency: 'normal',
+            reason: 'Awaiting review',
+          },
+        ],
+        summary: { totalCount: 1, criticalCount: 0, highCount: 0, normalCount: 1, lowCount: 0, truncated: false },
+      }),
+    );
+
+    render(<InboxPage />);
+
+    await waitFor(() => screen.getByText('Estimate without instructions'));
+    expect(screen.queryByTestId('standing-instruction-chip')).not.toBeInTheDocument();
   });
 
   it('resolving an ambiguous line POSTs resolve-line and merges the returned proposal (U2)', async () => {
@@ -183,6 +420,158 @@ describe('InboxPage', () => {
     });
   });
 
+  // B3 — update_invoice / update_estimate proposals carry `editActions`, not
+  // `lineItems`. An ambiguous edit-action line with recorded candidates gets
+  // the SAME one-tap picker as a draft line, POSTing to the SAME
+  // resolve-line endpoint with the SAME body shape.
+  it('renders a one-tap picker for an ambiguous editAction line and resolves it via resolve-line (B3)', async () => {
+    apiFetch.mockResolvedValueOnce(
+      jsonResponse({
+        data: [
+          {
+            proposal: {
+              id: 'p-edit',
+              proposalType: 'update_invoice',
+              summary: 'Edit invoice INV-0042 — add a water heater install',
+              status: 'draft',
+              createdAt: new Date().toISOString(),
+              payload: {
+                _meta: {
+                  overallConfidence: 'high',
+                  markers: [
+                    {
+                      path: 'editActions[0].lineItem.unitPrice',
+                      reason: 'price differs from the catalog price for "Water Heater Install"',
+                    },
+                  ],
+                },
+                editActions: [
+                  {
+                    type: 'add_line_item',
+                    lineItem: { description: 'water heater install', pricingSource: 'ambiguous' },
+                  },
+                ],
+              },
+              sourceContext: {
+                missingFields: ['editActions[0].lineItem.catalogItemId'],
+                catalogResolution: {
+                  0: [
+                    { id: 'cat-heater', name: 'Water Heater Install', unitPriceCents: 15_000, score: 1 },
+                    { id: 'spoken:0', name: 'Keep spoken price', unitPriceCents: 7_500, score: 0 },
+                  ],
+                },
+              },
+            },
+            urgency: 'normal',
+            reason: 'Awaiting review',
+          },
+        ],
+        summary: { totalCount: 1, criticalCount: 0, highCount: 0, normalCount: 1, lowCount: 0, truncated: false },
+      }),
+    );
+    // resolve-line returns the patched proposal: editAction grounded, gate cleared.
+    apiFetch.mockResolvedValueOnce(
+      jsonResponse({
+        id: 'p-edit',
+        proposalType: 'update_invoice',
+        summary: 'Edit invoice INV-0042 — add a water heater install',
+        status: 'ready_for_review',
+        createdAt: new Date().toISOString(),
+        payload: {
+          editActions: [
+            {
+              type: 'add_line_item',
+              lineItem: { description: 'Water Heater Install', pricingSource: 'catalog' },
+            },
+          ],
+        },
+        sourceContext: { missingFields: [], catalogResolution: {} },
+      }),
+    );
+
+    render(<InboxPage />);
+    await waitFor(() => screen.getByText('Edit invoice INV-0042 — add a water heater install'));
+    expect(screen.getAllByTestId('ambiguity-option')).toHaveLength(2);
+    fireEvent.click(screen.getByText('Water Heater Install'));
+
+    await waitFor(() => {
+      expect(apiFetch).toHaveBeenCalledWith(
+        '/api/proposals/p-edit/resolve-line',
+        expect.objectContaining({
+          method: 'POST',
+          body: JSON.stringify({ lineIndex: 0, catalogItemId: 'cat-heater' }),
+        }),
+      );
+    });
+    // After resolution the picker is gone (the editAction line is now catalog-grounded).
+    await waitFor(() => {
+      expect(screen.queryByTestId('ambiguity-picker')).not.toBeInTheDocument();
+    });
+  });
+
+  it('resolving an ambiguous entity ("which Bob?") POSTs resolve-entity and merges the re-drafted proposal (U8/E9)', async () => {
+    apiFetch.mockResolvedValueOnce(
+      jsonResponse({
+        data: [
+          {
+            proposal: {
+              id: 'p-bob',
+              proposalType: 'voice_clarification',
+              summary: 'Which customer? "Bob" matched 2 records',
+              status: 'draft',
+              createdAt: new Date().toISOString(),
+              payload: {
+                reason: 'ambiguous_entity',
+                entityReference: 'Bob',
+                entityCandidates: [
+                  { id: 'cust-a', label: 'Bob Smith', hint: '555-0100', score: 0.82 },
+                  { id: 'cust-b', label: 'Bob Jones', score: 0.81 },
+                ],
+              },
+              sourceContext: { entityKind: 'customer', entityReference: 'Bob' },
+            },
+            urgency: 'normal',
+            reason: 'Awaiting review',
+          },
+        ],
+        summary: { totalCount: 1, criticalCount: 0, highCount: 0, normalCount: 1, lowCount: 0, truncated: false },
+      }),
+    );
+    // resolve-entity returns the re-drafted proposal: chosen id stamped, no
+    // candidates left, surfaced for review (never approved).
+    apiFetch.mockResolvedValueOnce(
+      jsonResponse({
+        id: 'p-bob',
+        proposalType: 'voice_clarification',
+        summary: 'Which customer? "Bob" matched 2 records',
+        status: 'ready_for_review',
+        createdAt: new Date().toISOString(),
+        payload: { customerId: 'cust-b' },
+        sourceContext: { resolvedEntity: { id: 'cust-b', kind: 'customer' } },
+      }),
+    );
+
+    render(<InboxPage />);
+    await waitFor(() => screen.getByText('Bob Jones'));
+    // The picker surfaces both candidates by label (no price column).
+    expect(screen.getAllByTestId('ambiguity-option')).toHaveLength(2);
+    fireEvent.click(screen.getByText('Bob Jones'));
+
+    await waitFor(() => {
+      expect(apiFetch).toHaveBeenCalledWith(
+        '/api/proposals/p-bob/resolve-entity',
+        expect.objectContaining({
+          method: 'POST',
+          body: JSON.stringify({ candidateId: 'cust-b' }),
+        }),
+      );
+    });
+    // After resolution the picker is gone (the reference is resolved).
+    await waitFor(() => {
+      expect(screen.queryByTestId('ambiguity-picker')).not.toBeInTheDocument();
+    });
+  });
+
   it('rejects a proposal and removes it from the list', async () => {
     apiFetch.mockResolvedValueOnce(
       jsonResponse({
@@ -205,5 +594,189 @@ describe('InboxPage', () => {
       '/api/proposals/p-2/reject',
       expect.objectContaining({ method: 'POST' }),
     );
+  });
+
+  // ── U6: "approve all eligible" (capture-class + high-confidence only) ──
+  describe('approve all eligible (U6)', () => {
+    interface RowOpts {
+      id: string;
+      proposalType: string;
+      summary: string;
+      confidenceScore?: number;
+      overallConfidence?: 'high' | 'medium' | 'low' | 'very_low';
+    }
+
+    function row(opts: RowOpts) {
+      const proposal: Record<string, unknown> = {
+        id: opts.id,
+        proposalType: opts.proposalType,
+        summary: opts.summary,
+        status: 'ready_for_review',
+        createdAt: new Date().toISOString(),
+      };
+      if (opts.confidenceScore !== undefined) proposal.confidenceScore = opts.confidenceScore;
+      if (opts.overallConfidence) proposal.payload = { _meta: { overallConfidence: opts.overallConfidence } };
+      return { proposal, urgency: 'normal', reason: 'Awaiting review' };
+    }
+
+    function inbox(rows: ReturnType<typeof row>[]) {
+      return jsonResponse({
+        data: rows,
+        summary: { totalCount: rows.length, criticalCount: 0, highCount: 0, normalCount: rows.length, lowCount: 0, truncated: false },
+      });
+    }
+
+    it('counts only capture-class, ≥0.8-confidence rows as eligible — incl. the no-_meta numeric path, and excludes money/comms/irreversible', async () => {
+      apiFetch.mockResolvedValueOnce(
+        inbox([
+          // eligible: capture + explicit _meta:'high' (no numeric score)
+          row({ id: 'cap-meta-high', proposalType: 'add_note', summary: 'Note: gate code is 4821', overallConfidence: 'high' }),
+          // eligible: capture + numeric 0.9, NO _meta (the common path a string-only gate would miss)
+          row({ id: 'cap-num-high', proposalType: 'create_customer', summary: 'New customer: Dana Lee', confidenceScore: 0.9 }),
+          // excluded: capture but only 0.6
+          row({ id: 'cap-mid', proposalType: 'draft_estimate', summary: 'Estimate for the Park job', confidenceScore: 0.6 }),
+          // excluded: non-capture (money) even at 0.95
+          row({ id: 'money', proposalType: 'record_payment', summary: 'Record $200 cash', confidenceScore: 0.95 }),
+          // excluded: non-capture (comms) even at _meta:'high'
+          row({ id: 'comms', proposalType: 'send_invoice', summary: 'Send invoice to the Ruiz job', overallConfidence: 'high' }),
+          // excluded: non-capture (irreversible) even at 0.99
+          row({ id: 'irrev', proposalType: 'cancel_appointment', summary: 'Cancel Tuesday 2pm', confidenceScore: 0.99 }),
+        ]),
+      );
+      apiFetch.mockResolvedValueOnce(jsonResponse({ approved: ['cap-meta-high', 'cap-num-high'], failed: [] }));
+
+      render(<InboxPage />);
+      await waitFor(() => screen.getByText('Note: gate code is 4821'));
+
+      const hero = screen.getByTestId('approve-all-eligible');
+      // Exactly the two capture-class high-confidence rows are counted.
+      expect(within(hero).getByRole('button')).toHaveTextContent('Approve all 2');
+
+      fireEvent.click(within(hero).getByRole('button'));
+
+      await waitFor(() => {
+        expect(apiFetch).toHaveBeenCalledWith(
+          '/api/proposals/approve-batch',
+          expect.objectContaining({
+            method: 'POST',
+            body: JSON.stringify({ proposalIds: ['cap-meta-high', 'cap-num-high'] }),
+          }),
+        );
+      });
+      // The two eligible rows are removed; the four excluded ones remain.
+      await waitFor(() => {
+        expect(screen.queryByText('Note: gate code is 4821')).not.toBeInTheDocument();
+      });
+      expect(screen.getByText('Record $200 cash')).toBeInTheDocument();
+      expect(screen.getByText('Send invoice to the Ruiz job')).toBeInTheDocument();
+      expect(screen.getByText('Cancel Tuesday 2pm')).toBeInTheDocument();
+    });
+
+    it('does not show the hero when nothing is eligible', async () => {
+      apiFetch.mockResolvedValueOnce(
+        inbox([
+          row({ id: 'money', proposalType: 'record_payment', summary: 'Record $200 cash', confidenceScore: 0.95 }),
+          row({ id: 'cap-mid', proposalType: 'draft_estimate', summary: 'Estimate for the Park job', confidenceScore: 0.6 }),
+        ]),
+      );
+      render(<InboxPage />);
+      await waitFor(() => screen.getByText('Record $200 cash'));
+      expect(screen.queryByTestId('approve-all-eligible')).not.toBeInTheDocument();
+    });
+
+    it('partial failure restores ONLY the failed row and leaves the approved one gone', async () => {
+      apiFetch.mockResolvedValueOnce(
+        inbox([
+          row({ id: 'a', proposalType: 'add_note', summary: 'Note A', overallConfidence: 'high' }),
+          row({ id: 'b', proposalType: 'create_customer', summary: 'Customer B', confidenceScore: 0.9 }),
+        ]),
+      );
+      // Server approved a but rejected b (e.g. a concurrent state change).
+      apiFetch.mockResolvedValueOnce(
+        jsonResponse({ approved: ['a'], failed: [{ id: 'b', reason: 'no longer pending' }] }),
+      );
+
+      render(<InboxPage />);
+      await waitFor(() => screen.getByText('Note A'));
+      fireEvent.click(within(screen.getByTestId('approve-all-eligible')).getByRole('button'));
+
+      await waitFor(() => {
+        // a is approved → gone; b failed → restored and still visible.
+        expect(screen.queryByText('Note A')).not.toBeInTheDocument();
+        expect(screen.getByText('Customer B')).toBeInTheDocument();
+      });
+      expect(screen.getByText(/1 couldn't be approved.*still waiting/i)).toBeInTheDocument();
+    });
+
+    it('a 400 (the journey-QA duplicate-header repro) restores the whole batch and shows an error', async () => {
+      apiFetch.mockResolvedValueOnce(
+        inbox([
+          row({ id: 'a', proposalType: 'add_note', summary: 'Note A', overallConfidence: 'high' }),
+          row({ id: 'b', proposalType: 'create_customer', summary: 'Customer B', confidenceScore: 0.9 }),
+        ]),
+      );
+      apiFetch.mockResolvedValueOnce(
+        jsonResponse({ error: 'VALIDATION_ERROR', message: 'proposalIds Required' }, { status: 400 }),
+      );
+
+      render(<InboxPage />);
+      await waitFor(() => screen.getByText('Note A'));
+      fireEvent.click(within(screen.getByTestId('approve-all-eligible')).getByRole('button'));
+
+      // Both optimistically-removed rows come back, with a visible error.
+      await waitFor(() => {
+        expect(screen.getByText('Note A')).toBeInTheDocument();
+        expect(screen.getByText('Customer B')).toBeInTheDocument();
+        expect(screen.getByText(/HTTP 400/)).toBeInTheDocument();
+      });
+    });
+
+    it('a transport error restores the whole batch', async () => {
+      apiFetch.mockResolvedValueOnce(
+        inbox([row({ id: 'a', proposalType: 'add_note', summary: 'Note A', overallConfidence: 'high' })]),
+      );
+      apiFetch.mockResolvedValueOnce(jsonResponse({ message: 'boom' }, { status: 500 }));
+
+      render(<InboxPage />);
+      await waitFor(() => screen.getByText('Note A'));
+      fireEvent.click(within(screen.getByTestId('approve-all-eligible')).getByRole('button'));
+
+      // Optimistically removed, then restored when the POST fails.
+      await waitFor(() => {
+        expect(screen.getByText('Note A')).toBeInTheDocument();
+        expect(screen.getByText(/HTTP 500/)).toBeInTheDocument();
+      });
+    });
+
+    it('per-chain "Approve all" still batch-approves a chain (unaffected by the hero)', async () => {
+      apiFetch.mockResolvedValueOnce(
+        jsonResponse({
+          data: [
+            { proposal: { id: 'c1', proposalType: 'create_customer', summary: 'Create customer Pat', status: 'draft', createdAt: new Date().toISOString(), chainId: 'chain-1', sourceContext: { chainIndex: 0 } }, urgency: 'normal' },
+            { proposal: { id: 'c2', proposalType: 'draft_estimate', summary: 'Estimate for Pat', status: 'draft', createdAt: new Date().toISOString(), chainId: 'chain-1', sourceContext: { chainIndex: 1, dependsOnChainIndices: [0] } }, urgency: 'normal' },
+          ],
+          summary: { totalCount: 2, criticalCount: 0, highCount: 0, normalCount: 2, lowCount: 0, truncated: false },
+        }),
+      );
+      apiFetch.mockResolvedValueOnce(jsonResponse({ approved: ['c1', 'c2'], failed: [] }));
+
+      render(<InboxPage />);
+      await waitFor(() => screen.getByTestId('inbox-chain'));
+      // No confidence on the chain members → no hero affordance.
+      expect(screen.queryByTestId('approve-all-eligible')).not.toBeInTheDocument();
+
+      fireEvent.click(within(screen.getByTestId('inbox-chain')).getByRole('button', { name: /approve all/i }));
+
+      await waitFor(() => {
+        expect(apiFetch).toHaveBeenCalledWith(
+          '/api/proposals/approve-batch',
+          expect.objectContaining({
+            method: 'POST',
+            body: JSON.stringify({ proposalIds: ['c1', 'c2'] }),
+          }),
+        );
+      });
+      await waitFor(() => expect(screen.queryByTestId('inbox-chain')).not.toBeInTheDocument());
+    });
   });
 });

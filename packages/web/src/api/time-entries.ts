@@ -33,18 +33,6 @@ export interface ClockOutBody {
   clockedOutAt?: string;
 }
 
-export interface DailyBucket {
-  date: string;
-  hours: number;
-}
-
-export interface WeeklyHoursRollup {
-  userId: string;
-  weekStart: string;
-  byDay: DailyBucket[];
-  totalHours: number;
-}
-
 async function asJson<T>(res: Response): Promise<T> {
   if (!res.ok) {
     const text = await res.text().catch(() => '');
@@ -77,32 +65,6 @@ export const timeEntriesApi = {
         method: 'POST',
         body: JSON.stringify(body),
       })
-    );
-  },
-
-  async list(
-    fetcher: ApiFetch,
-    options: { userId?: string; weekOf?: string; tz?: string; limit?: number } = {}
-  ): Promise<TimeEntry[] | WeeklyHoursRollup[]> {
-    const params = new URLSearchParams();
-    if (options.userId) params.set('userId', options.userId);
-    if (options.weekOf) params.set('weekOf', options.weekOf);
-    if (options.tz) params.set('tz', options.tz);
-    if (options.limit !== undefined) params.set('limit', String(options.limit));
-    const qs = params.toString();
-    return asJson(await fetcher(`/api/time-entries${qs ? `?${qs}` : ''}`));
-  },
-
-  async weeklyHours(
-    fetcher: ApiFetch,
-    options: { userId: string; weekOf: string; tz?: string }
-  ): Promise<WeeklyHoursRollup[]> {
-    const params = new URLSearchParams();
-    params.set('userId', options.userId);
-    params.set('weekOf', options.weekOf);
-    if (options.tz) params.set('tz', options.tz);
-    return asJson(
-      await fetcher(`/api/time-entries?${params.toString()}`)
     );
   },
 };

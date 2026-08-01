@@ -2,13 +2,79 @@ import { useState, useEffect, useRef } from 'react';
 import {
   X, Search, Check, ArrowLeft, Mic, StopCircle, Sparkles,
   RotateCcw, Calendar, Clock, User, AlertCircle, MapPin,
-  ChevronRight, ClipboardList, Pencil, Zap, Send, FileText,
+  ChevronRight, ClipboardList, Zap, Send, FileText,
   Plus,
 } from 'lucide-react';
 import { apiFetch } from '../../utils/api-fetch';
+import { Input, Textarea } from '../ui';
 import { useMutation } from '../../hooks/useMutation';
 import { useListQuery } from '../../hooks/useListQuery';
 import { useTechnicianRoster } from '../../hooks/useTechnicianRoster';
+import { useTenantTimezone } from '../../hooks/useTenantTimezone';
+import {
+  todayInTz,
+  tenantWallClockToUtc,
+  formatDateInTenantTz,
+  formatDateTimeInTenantTz,
+} from '../../utils/formatInTenantTz';
+
+// Fixed schedule-step time chips → 24h wall clock, so a picked slot maps to a
+// real tenant-local instant via tenantWallClockToUtc.
+const TIME_SLOTS_24H: Record<string, string> = {
+  '8:00 AM': '08:00',
+  '9:00 AM': '09:00',
+  '10:00 AM': '10:00',
+  '11:00 AM': '11:00',
+  '1:00 PM': '13:00',
+  '2:00 PM': '14:00',
+  '3:00 PM': '15:00',
+  '4:00 PM': '16:00',
+};
+
+/**
+ * Convert a time label to 'HH:mm'. Fast-path the whole-hour chips above, then
+ * parse arbitrary labels like "2:30 PM" / "2 pm" / "14:30". Voice parsing can
+ * produce off-chip times ("tomorrow at 2:30pm" → "2:30 PM"); without this they
+ * failed the chip lookup and the job was silently saved unscheduled. Returns
+ * null for anything unparseable.
+ */
+export function timeLabelTo24h(label: string): string | null {
+  const chip = TIME_SLOTS_24H[label];
+  if (chip) return chip;
+  const m = label.trim().match(/^(\d{1,2})(?::(\d{2}))?\s*([AaPp][Mm])?$/);
+  if (!m) return null;
+  let h = parseInt(m[1], 10);
+  const min = m[2] ? parseInt(m[2], 10) : 0;
+  const ampm = m[3]?.toUpperCase();
+  if (Number.isNaN(h) || Number.isNaN(min) || min > 59) return null;
+  if (ampm === 'PM' && h < 12) h += 12;
+  if (ampm === 'AM' && h === 12) h = 0;
+  if (h > 23) return null;
+  return `${pad2(h)}:${pad2(min)}`;
+}
+
+/** A schedule chip holds a real 'YYYY-MM-DD' date key (never a stale label). */
+const isDateKey = (value: string): boolean => /^\d{4}-\d{2}-\d{2}$/.test(value);
+
+const pad2 = (n: number): string => String(n).padStart(2, '0');
+
+/** The next `count` calendar days as tenant-tz date-key chips (today first). */
+function buildDateChips(
+  timezone: string,
+  count: number,
+): { label: string; value: string }[] {
+  const [y, m, d] = todayInTz(timezone).split('-').map(Number);
+  return Array.from({ length: count }).map((_, i) => {
+    const dt = new Date(Date.UTC(y, m - 1, d + i));
+    const key = `${dt.getUTCFullYear()}-${pad2(dt.getUTCMonth() + 1)}-${pad2(dt.getUTCDate())}`;
+    // Format off a tenant-local-noon instant so the rendered date matches the
+    // key regardless of the viewer's browser zone.
+    const noon = tenantWallClockToUtc(key, '12:00', timezone);
+    const label =
+      i === 0 ? 'Today' : i === 1 ? 'Tomorrow' : formatDateInTenantTz(noon, timezone);
+    return { label, value: key };
+  });
+}
 
 type ServiceType = 'HVAC' | 'Plumbing' | 'Painting';
 
@@ -48,7 +114,6 @@ interface JobDraft {
   priority:      'Normal' | 'Urgent';
   scheduledDate: string;
   scheduledTime: string;
-  assignedTech:  string;
   notes:         string;
 }
 
@@ -63,6 +128,10 @@ interface CreateJobRequest {
   summary: string;
   problemDescription?: string;
   priority?: 'low' | 'normal' | 'high' | 'urgent';
+  /** Optional schedule-on-create — when present the API books the appointment. */
+  scheduledStart?: string;
+  technicianId?: string;
+  timezone?: string;
 }
 
 interface CreateJobResponse {
@@ -105,17 +174,19 @@ interface CreateLocationResponse {
 }
 
 // ─── Constants ────────────────────────────────────────────────────────────────
+// Service type is a category, not a status — neutral chip; the emoji + label
+// carry the per-type distinction (matches U7a / StatusBadge).
 const SVC_CHIP: Record<ServiceType, string> = {
-  HVAC:     'bg-blue-50 text-blue-700 border-blue-200',
-  Plumbing: 'bg-green-50 text-green-700 border-green-200',
-  Painting: 'bg-violet-50 text-violet-700 border-violet-200',
+  HVAC:     'bg-secondary text-foreground border-border',
+  Plumbing: 'bg-secondary text-foreground border-border',
+  Painting: 'bg-secondary text-foreground border-border',
 };
 const SVC_ICON: Record<ServiceType, string> = { HVAC: '❄️', Plumbing: '🔧', Painting: '🎨' };
 
 const BLANK: JobDraft = {
   customerId: null, locationId: null, serviceType: null,
   description: '', priority: 'Normal',
-  scheduledDate: '', scheduledTime: '', assignedTech: '', notes: '',
+  scheduledDate: '', scheduledTime: '', notes: '',
 };
 
 // ─── Voice demo transcripts ───────────────────────────────────────────────────
@@ -157,6 +228,7 @@ function parseVoice(
   input: string,
   customerPool: Customer[],
   techRoster: { id: string; name: string }[],
+  timezone: string,
 ): ParsedJob {
   const t = input.toLowerCase();
 
@@ -174,18 +246,22 @@ function parseVoice(
   const priority: 'Normal' | 'Urgent' =
     /urgent|asap|emergency|immediately|right away|burst|flood/.test(t) ? 'Urgent' : 'Normal';
 
+  // Only today/tomorrow resolve to a concrete tenant-tz date key here — a bare
+  // weekday ("Friday") is ambiguous without a year and must not be guessed into
+  // a real appointment, so it stays unscheduled for the user to pick.
+  const todayKey = todayInTz(timezone);
+  const [ty, tm, td] = todayKey.split('-').map(Number);
+  const tomorrowDt = new Date(Date.UTC(ty, tm - 1, td + 1));
+  const tomorrowKey = `${tomorrowDt.getUTCFullYear()}-${pad2(tomorrowDt.getUTCMonth() + 1)}-${pad2(tomorrowDt.getUTCDate())}`;
   const scheduledDate =
-    /today|this (morning|afternoon|evening)/.test(t) ? 'Today' :
-    /tomorrow/.test(t)  ? 'Tomorrow' :
-    /monday/.test(t)    ? 'Mon Mar 16' :
-    /tuesday/.test(t)   ? 'Tue Mar 11' :
-    /wednesday/.test(t) ? 'Wed Mar 12' :
-    /thursday/.test(t)  ? 'Thu Mar 13' :
-    /friday/.test(t)    ? 'Fri Mar 14' : '';
+    /today|this (morning|afternoon|evening)/.test(t) ? todayKey :
+    /tomorrow/.test(t) ? tomorrowKey : '';
 
+  // Normalize a spoken time to a schedule-step slot label ("2:00 PM") so it
+  // lines up with TIME_SLOTS_24H when persisting.
   const timeMatch = t.match(/(\d{1,2})(?::(\d{2}))?\s*(am|pm)/);
   const scheduledTime = timeMatch
-    ? `${timeMatch[1]}:${timeMatch[2] ?? '00'} ${timeMatch[3].toUpperCase()}`
+    ? `${Number(timeMatch[1])}:${timeMatch[2] ?? '00'} ${timeMatch[3].toUpperCase()}`
     : '';
 
   const matchedTech = techRoster.find(tech =>
@@ -219,7 +295,6 @@ function parseVoice(
     priority,
     scheduledDate,
     scheduledTime,
-    assignedTech:  matchedTech?.name ?? '',
     notes:         '',
   };
 }
@@ -230,7 +305,7 @@ function Waveform({ active }: { active: boolean }) {
     <div className="flex items-center justify-center gap-[3px] h-7">
       {Array.from({ length: 20 }).map((_, i) => (
         <div key={i}
-          className={`w-[3px] rounded-full ${active ? 'bg-red-400' : 'bg-slate-300'}`}
+          className={`w-[3px] rounded-full ${active ? 'bg-destructive' : 'bg-muted'}`}
           style={{
             animation: active ? 'wBar 0.7s ease-in-out infinite' : 'none',
             animationDelay: `${i * 0.04}s`, height: '100%',
@@ -244,9 +319,11 @@ function Waveform({ active }: { active: boolean }) {
 
 // ─── Parsed result review card ────────────────────────────────────────────────
 function ParsedReviewCard({
-  parsed, onEdit,
-}: { parsed: ParsedJob; onEdit: (field: string, val: string) => void }) {
-  const [expandNotes, setExpandNotes] = useState(false);
+  parsed, timezone,
+}: { parsed: ParsedJob; timezone: string }) {
+  const dateDisplay = isDateKey(parsed.scheduledDate)
+    ? formatDateInTenantTz(tenantWallClockToUtc(parsed.scheduledDate, '12:00', timezone), timezone)
+    : '';
 
   const rows: { icon: typeof Mic; label: string; value: string; field: string; empty?: boolean }[] = [
     {
@@ -269,7 +346,7 @@ function ParsedReviewCard({
     },
     {
       icon: Calendar, label: 'Date',
-      value: parsed.scheduledDate || 'Unscheduled',
+      value: dateDisplay || 'Unscheduled',
       field: 'scheduledDate',
     },
     {
@@ -278,50 +355,45 @@ function ParsedReviewCard({
       field: 'scheduledTime',
       empty: !parsed.scheduledTime,
     },
-    {
-      icon: User, label: 'Technician',
-      value: parsed.assignedTech || 'Unassigned',
-      field: 'assignedTech',
-    },
   ];
 
   return (
-    <div className="rounded-2xl border border-slate-200 overflow-hidden bg-white"
+    <div className="rounded-2xl border border-border overflow-hidden bg-card"
       style={{ animation: 'fadeUp 0.25s ease' }}>
       {/* AI header */}
-      <div className="flex items-center gap-2.5 px-4 py-3 bg-indigo-50 border-b border-indigo-100">
-        <div className="flex size-6 items-center justify-center rounded-full bg-indigo-600 shrink-0">
-          <Sparkles size={11} className="text-white" />
+      <div className="flex items-center gap-2.5 px-4 py-3 bg-primary/10 border-b border-primary/20">
+        <div className="flex size-6 items-center justify-center rounded-full bg-primary shrink-0">
+          <Sparkles size={11} className="text-primary-foreground" />
         </div>
-        <p className="text-sm text-indigo-800">Rivet AI · Job parsed from voice</p>
+        <p className="text-sm text-primary">Rivet AI · Job parsed from voice</p>
         {parsed.priority === 'Urgent' && (
-          <span className="ml-auto flex items-center gap-1 text-xs bg-red-100 text-red-600 border border-red-200 rounded-full px-2 py-0.5">
+          <span className="ml-auto flex items-center gap-1 text-xs bg-destructive/15 text-destructive border border-destructive/30 rounded-full px-2 py-0.5">
             <AlertCircle size={10} /> Urgent
           </span>
         )}
       </div>
 
-      <div className="divide-y divide-slate-50">
+      <div className="divide-y divide-border">
         {rows.map(({ icon: Icon, label, value, field, empty }) => (
           <div key={field} className="flex items-start gap-3 px-4 py-3">
-            <Icon size={14} className={`mt-0.5 shrink-0 ${empty ? 'text-amber-400' : 'text-slate-400'}`} />
+            <Icon size={14} className={`mt-0.5 shrink-0 ${empty ? 'text-warning' : 'text-muted-foreground'}`} />
             <div className="flex-1 min-w-0">
-              <p className="text-xs text-slate-400 mb-0.5">{label}</p>
-              <p className={`text-sm leading-snug ${empty ? 'text-amber-500 italic' : 'text-slate-800'}`}>
+              <p className="text-xs text-muted-foreground mb-0.5">{label}</p>
+              <p className={`text-sm leading-snug ${empty ? 'text-warning italic' : 'text-foreground'}`}>
                 {value}
               </p>
             </div>
             {empty && (
-              <span className="text-xs text-amber-500 shrink-0 mt-0.5">needs input</span>
+              <span className="text-xs text-warning shrink-0 mt-0.5">needs input</span>
             )}
           </div>
         ))}
       </div>
 
       {parsed.address && (
-        <div className="flex items-start gap-3 px-4 py-2.5 border-t border-slate-50 bg-slate-50/50">
-          <MapPin size={13} className="text-slate-400 mt-0.5 shrink-0" />
-          <p className="text-xs text-slate-500">{parsed.address}</p>
+        <div className="flex items-start gap-3 px-4 py-2.5 border-t border-border bg-secondary">
+          <MapPin size={13} className="text-muted-foreground mt-0.5 shrink-0" />
+          <p className="text-xs text-muted-foreground">{parsed.address}</p>
         </div>
       )}
     </div>
@@ -339,6 +411,7 @@ export function NewJobFlow({
   preSelectedCustomerId?: string;
 }) {
   const { technicians: techRoster } = useTechnicianRoster();
+  const timezone = useTenantTimezone();
   const [step,     setStep]     = useState<FlowStep>('start');
   const [customerOptions, setCustomerOptions] = useState<Customer[]>([]);
   const [draft,    setDraft]    = useState<JobDraft>({
@@ -350,8 +423,29 @@ export function NewJobFlow({
   const [parsed,   setParsed]   = useState<ParsedJob | null>(null);
   const [search,   setSearch]   = useState('');
   const [creating, setCreating] = useState(false);
+  // Which day-quick-pick offset the user tapped (0 = Today, 1 = Tomorrow, …),
+  // or null for a custom/no pick. `useTenantTimezone` starts at a fallback and
+  // resolves the real tz after /api/me; the day chips freeze concrete dates, so
+  // a pick made before the tz resolves would otherwise persist the fallback-tz
+  // date and create the appointment on the wrong day. Re-derive the picked
+  // day's concrete date whenever the tz changes.
+  const [pickedDateOffset, setPickedDateOffset] = useState<number | null>(null);
+  useEffect(() => {
+    if (pickedDateOffset == null) return;
+    const chip = buildDateChips(timezone, 7)[pickedDateOffset];
+    if (chip) setDraft(d => ({ ...d, scheduledDate: chip.value }));
+    // Intentionally keyed on timezone only: a fresh chip tap sets the date
+    // directly, so we re-derive solely when the tenant tz resolves/changes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [timezone]);
   const [jobNum,   setJobNum]   = useState('');
   const [createError, setCreateError] = useState('');
+  // Persisted-only facts for the done screen: the appointment instant we
+  // actually stored (null when the job was left unscheduled) and the tab the
+  // job landed on. Scheduling is atomic with the create, so there is no
+  // job-created-but-schedule-failed state to warn about.
+  const [persistedStart, setPersistedStart] = useState<Date | null>(null);
+  const [resultFilter, setResultFilter] = useState<'New' | 'Scheduled'>('New');
   const [showNewCustomerForm, setShowNewCustomerForm] = useState(false);
   const [newCustomerName, setNewCustomerName] = useState('');
   const [newCustomerPhone, setNewCustomerPhone] = useState('');
@@ -360,6 +454,7 @@ export function NewJobFlow({
   const [newCustomerError, setNewCustomerError] = useState('');
   const [addressConflictNote, setAddressConflictNote] = useState('');
   const { data: apiCustomers } = useListQuery<ApiCustomer>('/api/customers');
+  const tenantTz = useTenantTimezone();
   const { mutate: createJobMutation } = useMutation<CreateJobRequest, CreateJobResponse>('POST', '/api/jobs');
   const { mutate: createCustomerMutation } = useMutation<Record<string, unknown>, CreateCustomerResponse>('POST', '/api/customers');
   const { mutate: createLocationMutation } = useMutation<Record<string, unknown>, CreateLocationResponse>('POST', '/api/locations');
@@ -466,19 +561,33 @@ export function NewJobFlow({
     };
     recorder.stop();
   }
-  function buildFromVoice() {
-    const result = parseVoice(vTranscript, customerOptions, techRoster);
+  async function buildFromVoice() {
+    const result = parseVoice(vTranscript, customerOptions, techRoster, timezone);
+
+    // Voice-matched customers rarely have their locations embedded in the list
+    // payload, so fetch them (mirroring selectCustomer) and pick a default so
+    // the confirmed voice flow can render a location picker and complete.
+    let locationId = result.locationId;
+    if (result.customerId) {
+      const matched = customerOptions.find(c => c.id === result.customerId);
+      if (matched) {
+        const resolved = await ensureLocations(matched);
+        const locs = resolved.locations;
+        const primary = locs.find(l => l.isPrimary) ?? locs[0];
+        locationId = locs.length <= 1 ? (locs[0]?.id ?? null) : (primary?.id ?? null);
+      }
+    }
+
     setParsed(result);
     setDraft(d => ({
       ...d,
       customerId:    result.customerId,
-      locationId:    result.locationId,
+      locationId,
       serviceType:   result.serviceType,
       description:   result.description,
       priority:      result.priority,
       scheduledDate: result.scheduledDate,
       scheduledTime: result.scheduledTime,
-      assignedTech:  result.assignedTech,
     }));
     setVPhase('confirmed');
   }
@@ -489,7 +598,6 @@ export function NewJobFlow({
   const location   = customer?.locations.find(l => l.id === draft.locationId);
   const primaryLoc = customer?.locations.find(l => l.isPrimary) ?? customer?.locations[0];
   const address    = (draft.locationId ? location?.address : primaryLoc?.address) ?? customer?.address ?? '';
-  const tech       = techRoster.find(t => t.name === draft.assignedTech);
 
   const filteredCustomers = search
     ? customerOptions.filter(c =>
@@ -498,35 +606,36 @@ export function NewJobFlow({
         c.address.toLowerCase().includes(search.toLowerCase()))
     : customerOptions;
 
+  // Fetch a customer's locations on-demand (the customers list doesn't embed
+  // them) and cache them into customerOptions so pickers render. Shared by the
+  // manual customer step and the voice flow. Returns the resolved customer.
+  async function ensureLocations(customer: Customer): Promise<Customer> {
+    if (customer.locations.length > 0) return customer;
+    try {
+      const res = await apiFetch(`/api/locations?customerId=${customer.id}`);
+      if (res.ok) {
+        const locs: ApiLocation[] = await res.json();
+        const mappedLocs = locs.map((loc) => ({
+          id: loc.id,
+          nickname: loc.label || (loc.isPrimary ? 'Primary' : 'Location'),
+          address: [loc.street1, loc.city, loc.state, loc.postalCode].filter(Boolean).join(', '),
+          serviceTypes: loc.serviceTypes?.length ? loc.serviceTypes : ['HVAC' as ServiceType],
+          isPrimary: !!loc.isPrimary,
+          jobCount: 0,
+        }));
+        const resolved = { ...customer, locations: mappedLocs };
+        setCustomerOptions(prev => prev.map(opt => (opt.id === customer.id ? resolved : opt)));
+        return resolved;
+      }
+    } catch {
+      // Non-fatal: fall through with empty locations
+    }
+    return customer;
+  }
+
   async function selectCustomer(id: string, source: Customer[] = customerOptions) {
     const c = source.find(c => c.id === id);
-
-    // If the customer has no locations loaded yet (API list doesn't embed them),
-    // fetch them on-demand so the location picker can appear.
-    let resolvedCustomer = c;
-    if (c && c.locations.length === 0) {
-      try {
-        const res = await apiFetch(`/api/locations?customerId=${id}`);
-        if (res.ok) {
-          const locs: ApiLocation[] = await res.json();
-          const mappedLocs = locs.map((loc) => ({
-            id: loc.id,
-            nickname: loc.label || (loc.isPrimary ? 'Primary' : 'Location'),
-            address: [loc.street1, loc.city, loc.state, loc.postalCode].filter(Boolean).join(', '),
-            serviceTypes: loc.serviceTypes?.length ? loc.serviceTypes : ['HVAC' as ServiceType],
-            isPrimary: !!loc.isPrimary,
-            jobCount: 0,
-          }));
-          resolvedCustomer = { ...c, locations: mappedLocs };
-          // Update customerOptions so the picker renders with fresh locations
-          setCustomerOptions(prev =>
-            prev.map(opt => (opt.id === id ? resolvedCustomer! : opt))
-          );
-        }
-      } catch {
-        // Non-fatal: fall through with empty locations
-      }
-    }
+    const resolvedCustomer = c ? await ensureLocations(c) : c;
 
     const locs = resolvedCustomer?.locations ?? [];
     const primaryLoc = locs.find(l => l.isPrimary) ?? locs[0];
@@ -681,9 +790,31 @@ export function NewJobFlow({
       setNewCustomerPhone('');
       setNewCustomerEmail('');
       setNewCustomerAddress('');
-    } catch {
-      applyLocalCustomer();
+    } catch (err) {
+      // Surface the failure and keep the form open. Previously this fell back
+      // to a fabricated local customer with a non-UUID id (`c<timestamp>`),
+      // which the API then rejected at job-create time — the user saw a
+      // misleading "couldn't save the job" error and no customer was ever
+      // persisted. Fail honestly at the point of failure instead.
+      setNewCustomerError(
+        err instanceof Error
+          ? `Couldn't save the customer: ${err.message}`
+          : "Couldn't save the customer. Please try again.",
+      );
     }
+  }
+
+  /**
+   * The concrete UTC instant a picked date + time maps to, or null when the
+   * job is left unscheduled. Requires BOTH a real tenant-tz date key and a
+   * known time slot — a date alone can't become an appointment.
+   */
+  function resolveScheduledStart(): Date | null {
+    if (!isDateKey(draft.scheduledDate)) return null;
+    const time24 = timeLabelTo24h(draft.scheduledTime);
+    if (!time24) return null;
+    const start = tenantWallClockToUtc(draft.scheduledDate, time24, timezone);
+    return Number.isNaN(start.getTime()) ? null : start;
   }
 
   async function createJob() {
@@ -699,13 +830,29 @@ export function NewJobFlow({
     setCreateError('');
     setCreating(true);
     try {
+      // Schedule-on-create: when the draft resolves to a concrete tenant-tz
+      // instant, send it WITH the create so the API books the appointment in
+      // the SAME atomic request — the job reaches the dispatch board. The slot
+      // is optional (an unscheduled job otherwise). The technician is left
+      // unassigned here (there is no create-time tech picker; assign from the
+      // schedule panel), so a scheduled job lands in the board's unassigned
+      // lane. A scheduling conflict rolls the whole create back, so the catch
+      // below is the only place a failure surfaces — there is never an orphaned
+      // unscheduled job, and no separate appointment call to fall out of sync.
+      const start = resolveScheduledStart();
       const created = await createJobMutation({
         customerId: draft.customerId,
         locationId: draft.locationId,
         summary: draft.description.trim(),
         problemDescription: draft.notes.trim() || undefined,
         priority: draft.priority === 'Urgent' ? 'urgent' : 'normal',
+        ...(start ? { scheduledStart: start.toISOString(), timezone } : {}),
       });
+
+      // A returned job means the create — and its atomic schedule, if any —
+      // stuck, so the done screen can reflect the booked slot honestly.
+      setPersistedStart(start);
+      setResultFilter(start ? 'Scheduled' : 'New');
       setJobNum(created.jobNumber);
       setStep('done');
     } catch {
@@ -714,8 +861,6 @@ export function NewJobFlow({
       setCreating(false);
     }
   }
-
-  const createdJobFilter: 'New' | 'Scheduled' = draft.scheduledDate ? 'Scheduled' : 'New';
 
   const canCreate = !!draft.customerId && !!draft.locationId && !!draft.serviceType && !!draft.description.trim();
 
@@ -732,15 +877,12 @@ export function NewJobFlow({
 
   const fmt = (s: number) => `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
 
-  // ── Date quick-picks ──
+  // ── Date quick-picks — the next 7 tenant-tz days, plus a custom picker. Each
+  // day chip carries a real 'YYYY-MM-DD' date key so the picked slot resolves
+  // to a concrete instant at create time.
   const DATE_CHIPS = [
-    { label: 'Today',     value: 'Today'       },
-    { label: 'Tomorrow',  value: 'Tomorrow'    },
-    { label: 'Tue 11',    value: 'Tue Mar 11'  },
-    { label: 'Wed 12',    value: 'Wed Mar 12'  },
-    { label: 'Thu 13',    value: 'Thu Mar 13'  },
-    { label: 'Fri 14',    value: 'Fri Mar 14'  },
-    { label: 'Later',     value: '__custom'    },
+    ...buildDateChips(timezone, 7),
+    { label: 'Later', value: '__custom' },
   ];
   const [customDate, setCustomDate] = useState('');
 
@@ -750,20 +892,20 @@ export function NewJobFlow({
       onClick={onClose}
     >
       <div
-        className="mt-auto md:mt-0 bg-white rounded-t-3xl md:rounded-2xl w-full md:max-w-lg max-h-[94vh] overflow-hidden flex flex-col shadow-2xl"
+        className="mt-auto md:mt-0 bg-card rounded-t-3xl md:rounded-2xl w-full md:max-w-lg max-h-[94vh] overflow-hidden flex flex-col shadow-2xl"
         style={{ animation: 'jobUp 0.28s cubic-bezier(0.32,0.72,0,1)' }}
         onClick={e => e.stopPropagation()}
       >
 
         {/* ── Handle (mobile) ── */}
         <div className="flex justify-center pt-3 pb-0 shrink-0 md:hidden">
-          <div className="w-9 h-1 rounded-full bg-slate-200" />
+          <div className="w-9 h-1 rounded-full bg-border" />
         </div>
 
         {/* ── Header ── */}
-        <div className="flex items-center gap-3 px-5 py-3.5 border-b border-slate-100 shrink-0">
+        <div className="flex items-center gap-3 px-5 py-3.5 border-b border-border shrink-0">
           {step !== 'start' && step !== 'done' && (
-            <button onClick={goBack} className="text-slate-400 hover:text-slate-600 transition-colors -ml-1">
+            <button onClick={goBack} className="text-muted-foreground hover:text-foreground transition-colors -ml-1">
               <ArrowLeft size={16} />
             </button>
           )}
@@ -771,13 +913,13 @@ export function NewJobFlow({
             <div className="flex gap-1.5">
               {STEP_DOTS.map((_, i) => (
                 <div key={i} className={`rounded-full transition-all duration-200 ${
-                  i < dotIdx  ? 'w-2 h-2 bg-blue-400' :
-                  i === dotIdx ? 'w-5 h-2 bg-slate-900' : 'w-2 h-2 bg-slate-200'
+                  i < dotIdx  ? 'w-2 h-2 bg-primary' :
+                  i === dotIdx ? 'w-5 h-2 bg-primary' : 'w-2 h-2 bg-border'
                 }`} />
               ))}
             </div>
           )}
-          <p className="text-sm text-slate-600 flex-1">
+          <p className="text-sm text-foreground flex-1">
             {step === 'start'    ? 'New job' :
              step === 'voice'    ? 'New job · Voice' :
              step === 'customer' ? 'Customer' :
@@ -785,8 +927,8 @@ export function NewJobFlow({
              step === 'schedule' ? 'Schedule & assign' : 'Job created'}
           </p>
           {step !== 'done' && (
-            <button onClick={onClose} className="flex size-7 items-center justify-center rounded-full hover:bg-slate-100 transition-colors">
-              <X size={15} className="text-slate-500" />
+            <button onClick={onClose} className="flex size-7 items-center justify-center rounded-full hover:bg-secondary transition-colors">
+              <X size={15} className="text-muted-foreground" />
             </button>
           )}
         </div>
@@ -799,30 +941,30 @@ export function NewJobFlow({
             <div className="p-5 flex flex-col gap-3">
               {/* Customer chip if pre-selected */}
               {preSelectedCustomerId && customer && (
-                <div className="flex items-center gap-2.5 rounded-xl bg-green-50 border border-green-200 px-3.5 py-2.5">
-                  <div className="flex size-7 items-center justify-center rounded-full bg-green-100 shrink-0">
-                    <Check size={12} className="text-green-600" />
+                <div className="flex items-center gap-2.5 rounded-xl bg-success/10 border border-success/30 px-3.5 py-2.5">
+                  <div className="flex size-7 items-center justify-center rounded-full bg-success/15 shrink-0">
+                    <Check size={12} className="text-success" />
                   </div>
                   <div className="flex-1 min-w-0">
-                    <p className="text-sm text-slate-800">{customer.name}</p>
-                    <p className="text-xs text-slate-400 truncate">{address || customer.address}</p>
+                    <p className="text-sm text-foreground">{customer.name}</p>
+                    <p className="text-xs text-muted-foreground truncate">{address || customer.address}</p>
                   </div>
                 </div>
               )}
 
-              <p className="text-sm text-slate-500 mb-1">How would you like to create this job?</p>
+              <p className="text-sm text-muted-foreground mb-1">How would you like to create this job?</p>
 
               {/* Speak it */}
               <button
                 onClick={() => setStep('voice')}
-                className="flex items-start gap-4 rounded-2xl border-2 border-slate-200 bg-white px-5 py-4 text-left hover:border-indigo-300 hover:shadow-sm active:bg-slate-50 transition-all group"
+                className="flex items-start gap-4 rounded-2xl border-2 border-border bg-card px-5 py-4 text-left hover:border-primary/30 hover:shadow-sm active:bg-secondary transition-all group"
               >
-                <div className="flex size-11 items-center justify-center rounded-2xl bg-slate-900 shrink-0 group-hover:bg-indigo-600 transition-colors">
-                  <Mic size={20} className="text-white" />
+                <div className="flex size-11 items-center justify-center rounded-2xl bg-primary shrink-0 group-hover:bg-primary/90 transition-colors">
+                  <Mic size={20} className="text-primary-foreground" />
                 </div>
                 <div>
-                  <p className="text-slate-900">Speak it</p>
-                  <p className="text-xs text-slate-400 mt-1 leading-relaxed">
+                  <p className="text-foreground">Speak it</p>
+                  <p className="text-xs text-muted-foreground mt-1 leading-relaxed">
                     Say the customer, service, date, and tech — AI fills in the whole job from your voice.
                   </p>
                 </div>
@@ -831,14 +973,14 @@ export function NewJobFlow({
               {/* Fill it in */}
               <button
                 onClick={() => setStep(preSelectedCustomerId ? 'details' : 'customer')}
-                className="flex items-start gap-4 rounded-2xl border-2 border-slate-200 bg-white px-5 py-4 text-left hover:border-blue-300 hover:shadow-sm active:bg-slate-50 transition-all group"
+                className="flex items-start gap-4 rounded-2xl border-2 border-border bg-card px-5 py-4 text-left hover:border-primary/30 hover:shadow-sm active:bg-secondary transition-all group"
               >
-                <div className="flex size-11 items-center justify-center rounded-2xl bg-slate-100 shrink-0 group-hover:bg-blue-50 transition-colors">
-                  <ClipboardList size={20} className="text-slate-600 group-hover:text-blue-600 transition-colors" />
+                <div className="flex size-11 items-center justify-center rounded-2xl bg-secondary shrink-0 group-hover:bg-primary/10 transition-colors">
+                  <ClipboardList size={20} className="text-foreground group-hover:text-primary transition-colors" />
                 </div>
                 <div>
-                  <p className="text-slate-900">Fill it in</p>
-                  <p className="text-xs text-slate-400 mt-1 leading-relaxed">
+                  <p className="text-foreground">Fill it in</p>
+                  <p className="text-xs text-muted-foreground mt-1 leading-relaxed">
                     Step through customer, details, and scheduling — best for complex or custom jobs.
                   </p>
                 </div>
@@ -853,19 +995,19 @@ export function NewJobFlow({
               {/* Idle */}
               {vPhase === 'idle' && (
                 <div className="flex flex-col items-center gap-5 py-6">
-                  <p className="text-sm text-slate-500 text-center leading-relaxed px-2">
+                  <p className="text-sm text-muted-foreground text-center leading-relaxed px-2">
                     Say the customer name, service type, what needs to be done, when, and who to assign.
                   </p>
-                  <div className="text-xs text-slate-400 bg-slate-50 rounded-xl px-4 py-3 w-full leading-relaxed">
-                    <span className="text-slate-600">Try: </span>
+                  <div className="text-xs text-muted-foreground bg-secondary rounded-xl px-4 py-3 w-full leading-relaxed">
+                    <span className="text-foreground">Try: </span>
                     "Schedule an HVAC job for Maria Garcia tomorrow at 2pm, assign Carlos Reyes — AC not cooling."
                   </div>
                   <button onClick={startRecording} className="group flex flex-col items-center gap-3">
-                    <div className="relative flex size-20 items-center justify-center rounded-full bg-slate-900 shadow-xl shadow-slate-900/20 hover:bg-slate-700 active:scale-95 transition-all">
-                      <Mic size={28} className="text-white" />
-                      <div className="absolute inset-0 rounded-full border-2 border-slate-900/20 scale-110 group-hover:scale-125 transition-transform" />
+                    <div className="relative flex size-20 items-center justify-center rounded-full bg-primary shadow-xl shadow-border/20 hover:bg-primary/90 active:scale-95 transition-all">
+                      <Mic size={28} className="text-primary-foreground" />
+                      <div className="absolute inset-0 rounded-full border-2 border-primary/20 scale-110 group-hover:scale-125 transition-transform" />
                     </div>
-                    <p className="text-sm text-slate-700">Tap to start</p>
+                    <p className="text-sm text-foreground">Tap to start</p>
                   </button>
                 </div>
               )}
@@ -874,15 +1016,15 @@ export function NewJobFlow({
               {vPhase === 'recording' && (
                 <div className="flex flex-col items-center gap-4 py-6">
                   <div className="flex items-center gap-2">
-                    <span className="size-2 rounded-full bg-red-500 animate-pulse" />
-                    <p className="text-sm text-red-600">{fmt(vSeconds)} · Recording…</p>
+                    <span className="size-2 rounded-full bg-destructive animate-pulse" />
+                    <p className="text-sm text-destructive">{fmt(vSeconds)} · Recording…</p>
                   </div>
                   <Waveform active />
                   <button onClick={stopRecording}
-                    className="flex items-center gap-2 rounded-xl bg-red-500 text-white px-6 py-3 text-sm hover:bg-red-600 active:scale-95 transition-all shadow-lg shadow-red-500/30">
+                    className="flex items-center gap-2 rounded-xl bg-destructive text-primary-foreground px-6 py-3 text-sm hover:bg-destructive/90 active:scale-95 transition-all shadow-lg shadow-destructive/30">
                     <StopCircle size={16} /> Tap to stop
                   </button>
-                  <p className="text-xs text-slate-400">Auto-stops at 10s</p>
+                  <p className="text-xs text-muted-foreground">Auto-stops at 10s</p>
                 </div>
               )}
 
@@ -890,8 +1032,8 @@ export function NewJobFlow({
               {vPhase === 'processing' && (
                 <div className="flex flex-col items-center gap-4 py-14">
                   <Waveform active={false} />
-                  <div className="flex items-center gap-2 text-sm text-slate-500">
-                    <span className="size-4 rounded-full border-2 border-slate-200 border-t-slate-600 animate-spin" />
+                  <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                    <span className="size-4 rounded-full border-2 border-border border-t-border animate-spin" />
                     Transcribing…
                   </div>
                 </div>
@@ -902,23 +1044,23 @@ export function NewJobFlow({
                 <div className="flex flex-col gap-4" style={{ animation: 'fadeUp 0.2s ease' }}>
                   {/* Transcript bubble */}
                   <div className="flex items-start gap-2.5">
-                    <div className="flex size-7 items-center justify-center rounded-full bg-slate-900 shrink-0 mt-0.5">
-                      <Mic size={12} className="text-white" />
+                    <div className="flex size-7 items-center justify-center rounded-full bg-primary shrink-0 mt-0.5">
+                      <Mic size={12} className="text-primary-foreground" />
                     </div>
-                    <div className="flex-1 bg-slate-100 rounded-2xl rounded-tl-sm px-4 py-3">
-                      <p className="text-xs text-slate-400 mb-1">Your recording</p>
-                      <p className="text-sm text-slate-800 leading-relaxed italic">"{vTranscript}"</p>
+                    <div className="flex-1 bg-secondary rounded-2xl rounded-tl-sm px-4 py-3">
+                      <p className="text-xs text-muted-foreground mb-1">Your recording</p>
+                      <p className="text-sm text-foreground leading-relaxed italic">"{vTranscript}"</p>
                     </div>
                   </div>
 
                   {vPhase === 'parsed' && (
                     <div className="flex gap-2">
                       <button onClick={() => { setVPhase('idle'); setVTranscript(''); }}
-                        className="flex items-center gap-1.5 rounded-xl border border-slate-200 px-3 py-2.5 text-sm text-slate-600 hover:bg-slate-50 transition-colors">
+                        className="flex items-center gap-1.5 rounded-xl border border-border px-3 py-2.5 text-sm text-foreground hover:bg-secondary transition-colors">
                         <RotateCcw size={13} /> Re-record
                       </button>
                       <button onClick={buildFromVoice}
-                        className="flex-1 flex items-center justify-center gap-1.5 rounded-xl bg-indigo-600 text-white py-2.5 text-sm hover:bg-indigo-700 transition-colors">
+                        className="flex-1 flex items-center justify-center gap-1.5 rounded-xl bg-primary text-primary-foreground py-2.5 text-sm hover:bg-primary/90 transition-colors">
                         <Sparkles size={14} /> Parse this job
                       </button>
                     </div>
@@ -926,9 +1068,32 @@ export function NewJobFlow({
 
                   {vPhase === 'confirmed' && parsed && (
                     <>
-                      <ParsedReviewCard parsed={parsed} onEdit={() => {}} />
+                      <ParsedReviewCard parsed={parsed} timezone={timezone} />
+
+                      {/* Location picker — the voice parse can only guess the
+                          customer's primary location, so let the user confirm
+                          or switch the service location before creating. */}
+                      {customer && customer.locations.length > 0 && (
+                        <div className="flex flex-col gap-2">
+                          <p className="text-xs text-muted-foreground">Service location</p>
+                          {customer.locations.map(loc => (
+                            <button key={loc.id} onClick={() => setField('locationId', loc.id)}
+                              className={`flex items-center gap-3 rounded-xl px-4 py-3 text-left border transition-all ${
+                                draft.locationId === loc.id ? 'border-primary/30 bg-primary/10' : 'border-border bg-card hover:border-border'
+                              }`}>
+                              <MapPin size={14} className={draft.locationId === loc.id ? 'text-primary shrink-0' : 'text-muted-foreground shrink-0'} />
+                              <div className="flex-1 min-w-0">
+                                <p className="text-sm text-foreground">{loc.nickname}</p>
+                                <p className="text-xs text-muted-foreground mt-0.5 truncate">{loc.address}</p>
+                              </div>
+                              {draft.locationId === loc.id && <Check size={14} className="text-primary shrink-0" />}
+                            </button>
+                          ))}
+                        </div>
+                      )}
+
                       <button onClick={() => { setVPhase('idle'); setVTranscript(''); setParsed(null); }}
-                        className="flex items-center justify-center gap-1.5 text-xs text-slate-400 hover:text-slate-600 transition-colors">
+                        className="flex items-center justify-center gap-1.5 text-xs text-muted-foreground hover:text-foreground transition-colors">
                         <RotateCcw size={11} /> Re-record
                       </button>
                     </>
@@ -941,17 +1106,17 @@ export function NewJobFlow({
           {/* ══ CUSTOMER ══ */}
           {step === 'customer' && (
             <div className="p-5 flex flex-col gap-4">
-              <div className="flex items-center gap-2 rounded-xl border border-slate-200 bg-slate-50 px-3.5 py-2.5">
-                <Search size={14} className="text-slate-400 shrink-0" />
+              <div className="flex items-center gap-2 rounded-xl border border-border bg-secondary px-3.5 py-2.5">
+                <Search size={14} className="text-muted-foreground shrink-0" />
                 <input
                   value={search}
                   onChange={e => setSearch(e.target.value)}
                   placeholder="Search customers…"
                   autoFocus
-                  className="flex-1 bg-transparent text-sm text-slate-700 placeholder-slate-400 outline-none"
+                  className="flex-1 bg-transparent text-sm text-foreground placeholder:text-muted-foreground outline-none"
                 />
                 {search && (
-                  <button onClick={() => setSearch('')}><X size={12} className="text-slate-300" /></button>
+                  <button onClick={() => setSearch('')}><X size={12} className="text-muted-foreground" /></button>
                 )}
               </div>
 
@@ -962,53 +1127,53 @@ export function NewJobFlow({
                     setNewCustomerError('');
                     setAddressConflictNote('');
                   }}
-                  className="flex items-center justify-center gap-2 rounded-xl border border-dashed border-blue-300 bg-blue-50 px-4 py-3 text-sm text-blue-700 hover:bg-blue-100 transition-colors"
+                  className="flex items-center justify-center gap-2 rounded-xl border border-dashed border-primary/30 bg-primary/10 px-4 py-3 text-sm text-primary hover:bg-primary/15 transition-colors"
                 >
                   <Plus size={14} /> {showNewCustomerForm ? 'Cancel new customer' : 'Create new customer'}
                 </button>
 
                 {showNewCustomerForm && (
-                  <div className="rounded-xl border border-slate-200 bg-slate-50 p-3.5 space-y-2.5">
-                    <input
+                  <div className="rounded-xl border border-border bg-secondary p-3.5 space-y-2.5">
+                    <Input
                       value={newCustomerName}
                       onChange={e => setNewCustomerName(e.target.value)}
                       placeholder="Full name *"
-                      className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-blue-400"
+                      className="min-h-11"
                     />
-                    <input
+                    <Input
                       value={newCustomerPhone}
                       onChange={e => setNewCustomerPhone(e.target.value)}
                       placeholder="Phone"
-                      className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-blue-400"
+                      className="min-h-11"
                     />
-                    <input
+                    <Input
                       value={newCustomerEmail}
                       onChange={e => setNewCustomerEmail(e.target.value)}
                       placeholder="Email"
-                      className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-blue-400"
+                      className="min-h-11"
                     />
-                    <input
+                    <Input
                       value={newCustomerAddress}
                       onChange={e => {
                         setAddressConflictNote('');
                         setNewCustomerAddress(e.target.value);
                       }}
                       placeholder="Address *"
-                      className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-blue-400"
+                      className="min-h-11"
                     />
                     {newCustomerError && (
-                      <p className="text-xs text-red-500">{newCustomerError}</p>
+                      <p className="text-xs text-destructive">{newCustomerError}</p>
                     )}
                     <button
                       onClick={createCustomerFromFlow}
-                      className="w-full rounded-lg bg-slate-900 px-3 py-2 text-sm text-white hover:bg-slate-700 transition-colors"
+                      className="w-full rounded-lg bg-primary px-3 py-2 text-sm text-primary-foreground hover:bg-primary/90 transition-colors"
                     >
                       Save customer
                     </button>
                   </div>
                 )}
                 {addressConflictNote && (
-                  <p className="text-xs text-amber-700">{addressConflictNote}</p>
+                  <p className="text-xs text-warning">{addressConflictNote}</p>
                 )}
 
                 {filteredCustomers.map(c => {
@@ -1017,31 +1182,31 @@ export function NewJobFlow({
                   return (
                     <button key={c.id} onClick={() => selectCustomer(c.id)}
                       className={`flex items-center gap-3 rounded-xl px-4 py-3 text-left border transition-all ${
-                        sel ? 'border-blue-300 bg-blue-50 shadow-sm' : 'border-slate-200 bg-white hover:border-slate-300'
+                        sel ? 'border-primary/30 bg-primary/10 shadow-sm' : 'border-border bg-card hover:border-border'
                       }`}>
-                      <span className="flex size-9 items-center justify-center rounded-full bg-slate-100 text-sm shrink-0 text-slate-600">
+                      <span className="flex size-9 items-center justify-center rounded-full bg-secondary text-sm shrink-0 text-foreground">
                         {c.name.split(' ').map(n => n[0]).join('')}
                       </span>
                       <div className="flex-1 min-w-0">
                         <div className="flex items-center gap-2">
-                          <p className="text-sm text-slate-900">{c.name}</p>
+                          <p className="text-sm text-foreground">{c.name}</p>
                           {c.tags?.includes('VIP') && (
-                            <span className="text-xs bg-amber-100 text-amber-600 rounded-full px-2 py-0.5">VIP</span>
+                            <span className="text-xs bg-warning/15 text-warning rounded-full px-2 py-0.5">VIP</span>
                           )}
                           {c.openJobs > 0 && (
-                            <span className="text-xs bg-blue-50 text-blue-600 rounded-full px-2 py-0.5">{c.openJobs} open</span>
+                            <span className="text-xs bg-primary/10 text-primary rounded-full px-2 py-0.5">{c.openJobs} open</span>
                           )}
                         </div>
-                        <p className="text-xs text-slate-400 mt-0.5 truncate">
+                        <p className="text-xs text-muted-foreground mt-0.5 truncate">
                           {c.locations.length > 1
                             ? `${c.locations.length} locations`
                             : currentLocation?.address ?? c.address}
                         </p>
                       </div>
                       {(c.locations.some(loc => loc.nickname.toLowerCase().includes('old')) || !c.locations.some(loc => loc.isPrimary)) && (
-                        <span className="text-[10px] bg-amber-100 text-amber-700 rounded-full px-2 py-0.5">old address</span>
+                        <span className="text-[10px] bg-warning/15 text-warning rounded-full px-2 py-0.5">old address</span>
                       )}
-                      {sel ? <Check size={15} className="text-blue-600 shrink-0" /> : <ChevronRight size={14} className="text-slate-300 shrink-0" />}
+                      {sel ? <Check size={15} className="text-primary shrink-0" /> : <ChevronRight size={14} className="text-muted-foreground shrink-0" />}
                     </button>
                   );
                 })}
@@ -1049,19 +1214,19 @@ export function NewJobFlow({
 
               {/* Location picker for multi-location customers */}
               {draft.customerId && multiLoc && (
-                <div className="flex flex-col gap-2 pt-2 border-t border-slate-100">
-                  <p className="text-xs text-slate-500">Service location</p>
+                <div className="flex flex-col gap-2 pt-2 border-t border-border">
+                  <p className="text-xs text-muted-foreground">Service location</p>
                   {customer?.locations.map(loc => (
                     <button key={loc.id} onClick={() => setField('locationId', loc.id)}
                       className={`flex items-center gap-3 rounded-xl px-4 py-3 text-left border transition-all ${
-                        draft.locationId === loc.id ? 'border-blue-300 bg-blue-50' : 'border-slate-200 bg-white hover:border-slate-300'
+                        draft.locationId === loc.id ? 'border-primary/30 bg-primary/10' : 'border-border bg-card hover:border-border'
                       }`}>
-                      <MapPin size={14} className={draft.locationId === loc.id ? 'text-blue-500 shrink-0' : 'text-slate-400 shrink-0'} />
+                      <MapPin size={14} className={draft.locationId === loc.id ? 'text-primary shrink-0' : 'text-muted-foreground shrink-0'} />
                       <div className="flex-1 min-w-0">
-                        <p className="text-sm text-slate-800">{loc.nickname}</p>
-                        <p className="text-xs text-slate-400 mt-0.5 truncate">{loc.address}</p>
+                        <p className="text-sm text-foreground">{loc.nickname}</p>
+                        <p className="text-xs text-muted-foreground mt-0.5 truncate">{loc.address}</p>
                       </div>
-                      {draft.locationId === loc.id && <Check size={14} className="text-blue-600 shrink-0" />}
+                      {draft.locationId === loc.id && <Check size={14} className="text-primary shrink-0" />}
                     </button>
                   ))}
                 </div>
@@ -1074,31 +1239,31 @@ export function NewJobFlow({
             <div className="p-5 flex flex-col gap-4">
               {/* Customer chip */}
               {customer && (
-                <div className="flex items-center gap-2.5 rounded-xl bg-slate-50 border border-slate-200 px-3.5 py-2.5">
-                  <span className="flex size-7 items-center justify-center rounded-full bg-slate-800 text-white text-xs shrink-0">
+                <div className="flex items-center gap-2.5 rounded-xl bg-secondary border border-border px-3.5 py-2.5">
+                  <span className="flex size-7 items-center justify-center rounded-full bg-primary text-primary-foreground text-xs shrink-0">
                     {customer.name.split(' ').map(n => n[0]).join('')}
                   </span>
                   <div className="flex-1 min-w-0">
-                    <p className="text-sm text-slate-800">{customer.name}</p>
-                    <p className="text-xs text-slate-400 truncate">{address}</p>
+                    <p className="text-sm text-foreground">{customer.name}</p>
+                    <p className="text-xs text-muted-foreground truncate">{address}</p>
                   </div>
                   {!preSelectedCustomerId && (
                     <button onClick={() => setStep('customer')}
-                      className="text-xs text-blue-600 hover:underline shrink-0">Change</button>
+                      className="text-xs text-primary hover:underline shrink-0">Change</button>
                   )}
                 </div>
               )}
 
               {/* Service type */}
               <div>
-                <p className="text-xs text-slate-500 mb-2">Service type *</p>
+                <p className="text-xs text-muted-foreground mb-2">Service type *</p>
                 <div className="flex gap-2">
                   {(['HVAC', 'Plumbing', 'Painting'] as ServiceType[]).map(s => (
                     <button key={s} onClick={() => setField('serviceType', s)}
                       className={`flex-1 flex items-center justify-center gap-1.5 rounded-full border py-2.5 text-sm transition-all ${
                         draft.serviceType === s
                           ? `${SVC_CHIP[s]} shadow-sm`
-                          : 'border-slate-200 text-slate-500 hover:border-slate-300 bg-white'
+                          : 'border-border text-muted-foreground hover:border-border bg-card'
                       }`}>
                       {SVC_ICON[s]} {s}
                     </button>
@@ -1108,29 +1273,29 @@ export function NewJobFlow({
 
               {/* Description */}
               <div>
-                <p className="text-xs text-slate-500 mb-2">What needs to be done? *</p>
-                <textarea
+                <p className="text-xs text-muted-foreground mb-2">What needs to be done? *</p>
+                <Textarea
                   value={draft.description}
                   onChange={e => setField('description', e.target.value)}
                   placeholder="Describe the issue or scope of work…"
                   rows={4}
                   autoFocus={!draft.description}
-                  className="w-full rounded-xl border border-slate-200 px-4 py-3 text-sm text-slate-700 placeholder-slate-400 focus:outline-none focus:border-blue-400 transition-colors resize-none leading-relaxed"
+                  className="min-h-11 resize-none leading-relaxed"
                 />
               </div>
 
               {/* Priority */}
               <div>
-                <p className="text-xs text-slate-500 mb-2">Priority</p>
+                <p className="text-xs text-muted-foreground mb-2">Priority</p>
                 <div className="flex gap-2">
                   {(['Normal', 'Urgent'] as const).map(p => (
                     <button key={p} onClick={() => setField('priority', p)}
                       className={`flex items-center gap-1.5 rounded-full border px-4 py-2 text-sm transition-all ${
                         draft.priority === p
                           ? p === 'Urgent'
-                            ? 'bg-red-500 border-red-500 text-white shadow-sm'
-                            : 'bg-slate-900 border-slate-900 text-white'
-                          : 'border-slate-200 text-slate-500 hover:border-slate-300 bg-white'
+                            ? 'bg-destructive border-destructive text-primary-foreground shadow-sm'
+                            : 'bg-primary border-primary text-primary-foreground'
+                          : 'border-border text-muted-foreground hover:border-border bg-card'
                       }`}>
                       {p === 'Urgent' && <AlertCircle size={13} />}
                       {p}
@@ -1141,12 +1306,12 @@ export function NewJobFlow({
 
               {/* Notes (optional) */}
               <div>
-                <p className="text-xs text-slate-500 mb-2">Internal notes <span className="text-slate-400">(optional)</span></p>
-                <input
+                <p className="text-xs text-muted-foreground mb-2">Internal notes <span className="text-muted-foreground">(optional)</span></p>
+                <Input
                   value={draft.notes}
                   onChange={e => setField('notes', e.target.value)}
                   placeholder="Gate code, access instructions, customer preferences…"
-                  className="w-full rounded-xl border border-slate-200 px-4 py-3 text-sm focus:outline-none focus:border-blue-400 transition-colors"
+                  className="min-h-11"
                 />
               </div>
             </div>
@@ -1157,14 +1322,14 @@ export function NewJobFlow({
             <div className="p-5 flex flex-col gap-5">
 
               {/* Job summary chip */}
-              <div className="flex items-center gap-2.5 rounded-xl bg-slate-50 border border-slate-200 px-3.5 py-2.5">
+              <div className="flex items-center gap-2.5 rounded-xl bg-secondary border border-border px-3.5 py-2.5">
                 <span className="text-base">{draft.serviceType ? SVC_ICON[draft.serviceType] : '🔧'}</span>
                 <div className="flex-1 min-w-0">
-                  <p className="text-sm text-slate-800 truncate">{draft.description || 'No description'}</p>
-                  <p className="text-xs text-slate-400">{customer?.name} · {draft.serviceType}</p>
+                  <p className="text-sm text-foreground truncate">{draft.description || 'No description'}</p>
+                  <p className="text-xs text-muted-foreground">{customer?.name} · {draft.serviceType}</p>
                 </div>
                 {draft.priority === 'Urgent' && (
-                  <span className="flex items-center gap-1 text-xs bg-red-100 text-red-600 rounded-full px-2 py-0.5 shrink-0">
+                  <span className="flex items-center gap-1 text-xs bg-destructive/15 text-destructive rounded-full px-2 py-0.5 shrink-0">
                     <AlertCircle size={10} /> Urgent
                   </span>
                 )}
@@ -1172,23 +1337,25 @@ export function NewJobFlow({
 
               {/* Date */}
               <div>
-                <p className="text-xs text-slate-500 mb-2.5">When?</p>
+                <p className="text-xs text-muted-foreground mb-2.5">When?</p>
                 <div className="flex flex-wrap gap-2">
-                  {DATE_CHIPS.map(chip => {
+                  {DATE_CHIPS.map((chip, chipIdx) => {
                     const isCustom  = chip.value === '__custom';
-                    const isSelected = isCustom
-                      ? !DATE_CHIPS.slice(0,-1).some(c => c.value === draft.scheduledDate) && !!draft.scheduledDate
-                      : draft.scheduledDate === chip.value;
+                    const dayChipValues = DATE_CHIPS.slice(0, -1).map(c => c.value);
+                    const isCustomSelected =
+                      draft.scheduledDate === '__custom' ||
+                      (isDateKey(draft.scheduledDate) && !dayChipValues.includes(draft.scheduledDate));
+                    const isSelected = isCustom ? isCustomSelected : draft.scheduledDate === chip.value;
                     return (
                       <button key={chip.value}
                         onClick={() => {
-                          if (isCustom) setField('scheduledDate', customDate || 'Custom');
-                          else setField('scheduledDate', chip.value);
+                          if (isCustom) { setPickedDateOffset(null); setField('scheduledDate', customDate || '__custom'); }
+                          else { setPickedDateOffset(chipIdx); setField('scheduledDate', chip.value); }
                         }}
                         className={`rounded-full border px-3.5 py-2 text-sm transition-all ${
                           isSelected
-                            ? 'bg-slate-900 border-slate-900 text-white shadow-sm'
-                            : 'border-slate-200 text-slate-600 bg-white hover:border-slate-400'
+                            ? 'bg-primary border-primary text-primary-foreground shadow-sm'
+                            : 'border-border text-foreground bg-card hover:border-border'
                         }`}>
                         {isCustom ? '📅 Pick date' : chip.label}
                       </button>
@@ -1198,35 +1365,38 @@ export function NewJobFlow({
                     onClick={() => setField('scheduledDate', '')}
                     className={`rounded-full border px-3.5 py-2 text-sm transition-all ${
                       draft.scheduledDate === ''
-                        ? 'bg-slate-100 border-slate-300 text-slate-700'
-                        : 'border-slate-200 text-slate-400 bg-white hover:border-slate-300'
+                        ? 'bg-secondary border-border text-foreground'
+                        : 'border-border text-muted-foreground bg-card hover:border-border'
                     }`}>
                     Unscheduled
                   </button>
                 </div>
 
-                {/* Custom date input */}
-                {draft.scheduledDate === 'Custom' || draft.scheduledDate === '__custom' ? (
-                  <input
+                {/* Custom date input — shown for the "Later" placeholder or a
+                    picked custom date key not in the quick-pick chips. */}
+                {draft.scheduledDate === '__custom' ||
+                (isDateKey(draft.scheduledDate) &&
+                  !DATE_CHIPS.slice(0, -1).some(c => c.value === draft.scheduledDate)) ? (
+                  <Input
                     type="date"
                     value={customDate}
                     onChange={e => { setCustomDate(e.target.value); setField('scheduledDate', e.target.value); }}
-                    className="mt-2.5 w-full rounded-xl border border-slate-200 px-4 py-3 text-sm focus:outline-none focus:border-blue-400 transition-colors"
+                    className="mt-2.5 min-h-11"
                   />
                 ) : null}
               </div>
 
-              {/* Time */}
-              {draft.scheduledDate && draft.scheduledDate !== '' && (
+              {/* Time — only meaningful once a concrete date is chosen. */}
+              {isDateKey(draft.scheduledDate) && (
                 <div style={{ animation: 'fadeUp 0.15s ease' }}>
-                  <p className="text-xs text-slate-500 mb-2.5">What time?</p>
+                  <p className="text-xs text-muted-foreground mb-2.5">What time?</p>
                   <div className="flex flex-wrap gap-2">
                     {['8:00 AM','9:00 AM','10:00 AM','11:00 AM','1:00 PM','2:00 PM','3:00 PM','4:00 PM'].map(t => (
                       <button key={t} onClick={() => setField('scheduledTime', draft.scheduledTime === t ? '' : t)}
                         className={`rounded-full border px-3 py-2 text-sm transition-all ${
                           draft.scheduledTime === t
-                            ? 'bg-slate-900 border-slate-900 text-white'
-                            : 'border-slate-200 text-slate-600 bg-white hover:border-slate-400'
+                            ? 'bg-primary border-primary text-primary-foreground'
+                            : 'border-border text-foreground bg-card hover:border-border'
                         }`}>
                         {t}
                       </button>
@@ -1235,46 +1405,11 @@ export function NewJobFlow({
                 </div>
               )}
 
-              {/* Tech assignment */}
-              <div>
-                <p className="text-xs text-slate-500 mb-2.5">Assign technician</p>
-                <div className="flex flex-col gap-2">
-                  {/* Unassigned */}
-                  <button onClick={() => setField('assignedTech', '')}
-                    className={`flex items-center gap-3 rounded-xl border px-4 py-3 text-left transition-all ${
-                      draft.assignedTech === ''
-                        ? 'border-slate-300 bg-slate-50 shadow-sm'
-                        : 'border-slate-200 bg-white hover:border-slate-300'
-                    }`}>
-                    <div className="flex size-9 items-center justify-center rounded-full bg-slate-200 shrink-0">
-                      <User size={16} className="text-slate-500" />
-                    </div>
-                    <p className="flex-1 text-sm text-slate-600">Unassigned</p>
-                    {draft.assignedTech === '' && <Check size={14} className="text-slate-700 shrink-0" />}
-                  </button>
-
-                  {techRoster.map(t => (
-                    <button key={t.id} onClick={() => setField('assignedTech', t.name)}
-                      className={`flex items-center gap-3 rounded-xl border px-4 py-3 text-left transition-all ${
-                        draft.assignedTech === t.name
-                          ? 'border-blue-300 bg-blue-50 shadow-sm'
-                          : 'border-slate-200 bg-white hover:border-slate-300'
-                      }`}>
-                      <div
-                        className="flex size-9 items-center justify-center rounded-full text-white text-xs shrink-0"
-                        style={{ background: t.color }}
-                      >
-                        {t.initials}
-                      </div>
-                      <div className="flex-1 min-w-0">
-                        <p className="text-sm text-slate-800">{t.name}</p>
-                        <p className="text-xs text-slate-400 mt-0.5">{t.activeJobs} active job{t.activeJobs !== 1 ? 's' : ''}</p>
-                      </div>
-                      {draft.assignedTech === t.name && <Check size={14} className="text-blue-600 shrink-0" />}
-                    </button>
-                  ))}
-                </div>
-              </div>
+              {/* Technician assignment is intentionally omitted from create:
+                  there is no create-time assignee endpoint (assignment is a
+                  separate appointment_assignees mechanism), so offering it here
+                  would fabricate a persistence claim. Assign from the job or
+                  schedule surface after creation. */}
             </div>
           )}
 
@@ -1283,61 +1418,53 @@ export function NewJobFlow({
             <div className="p-5 flex flex-col gap-5" style={{ animation: 'fadeUp 0.25s ease' }}>
               {/* Success */}
               <div className="flex flex-col items-center gap-3 pt-3 text-center">
-                <div className="flex size-16 items-center justify-center rounded-full bg-green-100">
-                  <Check size={28} className="text-green-600" />
+                <div className="flex size-16 items-center justify-center rounded-full bg-success/15">
+                  <Check size={28} className="text-success" />
                 </div>
                 <div>
-                  <p className="text-slate-900" style={{ fontSize: '1.05rem' }}>Job #{jobNum} created</p>
-                  <p className="text-sm text-slate-400 mt-0.5">{customer?.name}</p>
+                  <p className="text-foreground" style={{ fontSize: '1.05rem' }}>Job #{jobNum} created</p>
+                  <p className="text-sm text-muted-foreground mt-0.5">{customer?.name}</p>
                 </div>
               </div>
 
+              {createError && (
+                <p className="text-xs text-destructive text-center">{createError}</p>
+              )}
+
               {/* Summary card */}
-              <div className="rounded-2xl border border-slate-200 overflow-hidden bg-white">
-                <div className="px-4 py-3 bg-slate-900">
+              <div className="rounded-2xl border border-border overflow-hidden bg-card">
+                <div className="px-4 py-3 bg-primary">
                   <div className="flex items-center justify-between">
-                    <p className="text-sm text-white">{draft.serviceType ? `${SVC_ICON[draft.serviceType]} ${draft.serviceType}` : '🔧 Service'}</p>
-                    <span className="text-xs text-slate-400">#{jobNum}</span>
+                    <p className="text-sm text-primary-foreground">{draft.serviceType ? `${SVC_ICON[draft.serviceType]} ${draft.serviceType}` : '🔧 Service'}</p>
+                    <span className="text-xs text-muted-foreground">#{jobNum}</span>
                   </div>
-                  <p className="text-xs text-slate-400 mt-1.5 leading-relaxed">{draft.description}</p>
+                  <p className="text-xs text-muted-foreground mt-1.5 leading-relaxed">{draft.description}</p>
                 </div>
-                <div className="divide-y divide-slate-50">
+                <div className="divide-y divide-border">
                   <div className="flex items-center gap-3 px-4 py-2.5">
-                    <User size={13} className="text-slate-400 shrink-0" />
-                    <p className="text-xs text-slate-500">Customer</p>
-                    <p className="text-sm text-slate-800 ml-auto">{customer?.name}</p>
+                    <User size={13} className="text-muted-foreground shrink-0" />
+                    <p className="text-xs text-muted-foreground">Customer</p>
+                    <p className="text-sm text-foreground ml-auto">{customer?.name}</p>
                   </div>
                   <div className="flex items-center gap-3 px-4 py-2.5">
-                    <MapPin size={13} className="text-slate-400 shrink-0" />
-                    <p className="text-xs text-slate-500 flex-1 truncate">{address || customer?.address}</p>
+                    <MapPin size={13} className="text-muted-foreground shrink-0" />
+                    <p className="text-xs text-muted-foreground flex-1 truncate">{address || customer?.address}</p>
                   </div>
+                  {/* Only persisted facts: show the scheduled instant when an
+                      appointment was actually stored, otherwise Unscheduled. */}
                   <div className="flex items-center gap-3 px-4 py-2.5">
-                    <Calendar size={13} className="text-slate-400 shrink-0" />
-                    <p className="text-xs text-slate-500">Date</p>
-                    <p className="text-sm text-slate-800 ml-auto">
-                      {draft.scheduledDate
-                        ? `${draft.scheduledDate}${draft.scheduledTime ? ` · ${draft.scheduledTime}` : ''}`
+                    <Calendar size={13} className="text-muted-foreground shrink-0" />
+                    <p className="text-xs text-muted-foreground">Date</p>
+                    <p className="text-sm text-foreground ml-auto">
+                      {persistedStart
+                        ? formatDateTimeInTenantTz(persistedStart, timezone)
                         : 'Unscheduled'}
                     </p>
                   </div>
-                  <div className="flex items-center gap-3 px-4 py-2.5">
-                    <User size={13} className="text-slate-400 shrink-0" />
-                    <p className="text-xs text-slate-500">Technician</p>
-                    <div className="ml-auto flex items-center gap-1.5">
-                      {tech ? (
-                        <>
-                          <span className="flex size-5 items-center justify-center rounded-full text-white" style={{ fontSize: 8, background: tech.color }}>{tech.initials}</span>
-                          <p className="text-sm text-slate-800">{tech.name.split(' ')[0]}</p>
-                        </>
-                      ) : (
-                        <p className="text-sm text-slate-400">Unassigned</p>
-                      )}
-                    </div>
-                  </div>
                   {draft.priority === 'Urgent' && (
-                    <div className="flex items-center gap-3 px-4 py-2.5 bg-red-50">
-                      <AlertCircle size={13} className="text-red-500 shrink-0" />
-                      <p className="text-sm text-red-600">Marked urgent</p>
+                    <div className="flex items-center gap-3 px-4 py-2.5 bg-destructive/10">
+                      <AlertCircle size={13} className="text-destructive shrink-0" />
+                      <p className="text-sm text-destructive">Marked urgent</p>
                     </div>
                   )}
                 </div>
@@ -1345,52 +1472,52 @@ export function NewJobFlow({
 
               {/* Next actions */}
               <div>
-                <p className="text-xs text-slate-400 text-center mb-3">What would you like to do next?</p>
+                <p className="text-xs text-muted-foreground text-center mb-3">What would you like to do next?</p>
                 <div className="grid grid-cols-2 gap-3">
                   <button
-                    onClick={() => { onCreated(createdJobFilter); onClose(); }}
-                    className="flex flex-col items-center gap-2.5 rounded-2xl border-2 border-slate-200 bg-white py-4 px-3 hover:border-blue-300 hover:bg-blue-50/60 active:scale-[0.97] transition-all group"
+                    onClick={() => { onCreated(resultFilter); onClose(); }}
+                    className="flex flex-col items-center gap-2.5 rounded-2xl border-2 border-border bg-card py-4 px-3 hover:border-primary/30 hover:bg-primary/10 active:scale-[0.97] transition-all group"
                   >
-                    <div className="flex size-11 items-center justify-center rounded-xl bg-blue-100 group-hover:bg-blue-200 transition-colors">
-                      <ClipboardList size={20} className="text-blue-600" />
+                    <div className="flex size-11 items-center justify-center rounded-xl bg-primary/15 group-hover:bg-primary/15 transition-colors">
+                      <ClipboardList size={20} className="text-primary" />
                     </div>
                     <div className="text-center">
-                      <p className="text-sm text-slate-800">View job</p>
-                      <p className="text-xs text-slate-400 mt-0.5">Open detail</p>
+                      <p className="text-sm text-foreground">View job</p>
+                      <p className="text-xs text-muted-foreground mt-0.5">Open detail</p>
                     </div>
                   </button>
 
                   {onOpenEstimate ? (
                     <button
-                      onClick={() => { onCreated(createdJobFilter); onOpenEstimate(); }}
-                      className="flex flex-col items-center gap-2.5 rounded-2xl border-2 border-slate-200 bg-white py-4 px-3 hover:border-indigo-300 hover:bg-indigo-50/60 active:scale-[0.97] transition-all group"
+                      onClick={() => { onCreated(resultFilter); onOpenEstimate(); }}
+                      className="flex flex-col items-center gap-2.5 rounded-2xl border-2 border-border bg-card py-4 px-3 hover:border-primary/30 hover:bg-primary/10 active:scale-[0.97] transition-all group"
                     >
-                      <div className="flex size-11 items-center justify-center rounded-xl bg-indigo-100 group-hover:bg-indigo-200 transition-colors">
-                        <FileText size={20} className="text-indigo-600" />
+                      <div className="flex size-11 items-center justify-center rounded-xl bg-primary/15 group-hover:bg-primary/15 transition-colors">
+                        <FileText size={20} className="text-primary" />
                       </div>
                       <div className="text-center">
-                        <p className="text-sm text-slate-800">Add estimate</p>
-                        <p className="text-xs text-slate-400 mt-0.5">Build a quote</p>
+                        <p className="text-sm text-foreground">Add estimate</p>
+                        <p className="text-xs text-muted-foreground mt-0.5">Build a quote</p>
                       </div>
                     </button>
                   ) : (
                     <button
-                      onClick={() => { onCreated(createdJobFilter); onClose(); }}
-                      className="flex flex-col items-center gap-2.5 rounded-2xl border-2 border-slate-200 bg-white py-4 px-3 hover:border-green-300 hover:bg-green-50/60 active:scale-[0.97] transition-all group"
+                      onClick={() => { onCreated(resultFilter); onClose(); }}
+                      className="flex flex-col items-center gap-2.5 rounded-2xl border-2 border-border bg-card py-4 px-3 hover:border-success/30 hover:bg-success/10 active:scale-[0.97] transition-all group"
                     >
-                      <div className="flex size-11 items-center justify-center rounded-xl bg-green-100 group-hover:bg-green-200 transition-colors">
-                        <Send size={20} className="text-green-600" />
+                      <div className="flex size-11 items-center justify-center rounded-xl bg-success/15 group-hover:bg-success/15 transition-colors">
+                        <Send size={20} className="text-success" />
                       </div>
                       <div className="text-center">
-                        <p className="text-sm text-slate-800">Dispatch</p>
-                        <p className="text-xs text-slate-400 mt-0.5">Notify tech</p>
+                        <p className="text-sm text-foreground">Dispatch</p>
+                        <p className="text-xs text-muted-foreground mt-0.5">Notify tech</p>
                       </div>
                     </button>
                   )}
                 </div>
               </div>
 
-              <button onClick={onClose} className="text-sm text-slate-400 hover:text-slate-600 transition-colors text-center">
+              <button onClick={onClose} className="text-sm text-muted-foreground hover:text-foreground transition-colors text-center">
                 Done for now
               </button>
             </div>
@@ -1400,7 +1527,7 @@ export function NewJobFlow({
 
         {/* ── Footer CTA ── */}
         {step === 'voice' && vPhase === 'confirmed' && parsed && (
-          <div className="shrink-0 px-5 py-4 border-t border-slate-100 bg-white">
+          <div className="shrink-0 px-5 py-4 border-t border-border bg-card">
             <button
               onClick={createJob}
               // BUG-3 — disabled predicate must mirror the validation
@@ -1408,15 +1535,15 @@ export function NewJobFlow({
               // light up while createJob silently early-returns or, in
               // the inverse case, stay disabled with no explanation.
               disabled={!draft.customerId || !draft.locationId || !draft.description.trim() || creating}
-              className="flex items-center justify-center gap-2 w-full rounded-xl bg-slate-900 text-white py-3.5 text-sm disabled:opacity-40 hover:bg-slate-700 transition-colors"
+              className="flex items-center justify-center gap-2 w-full rounded-xl bg-primary text-primary-foreground py-3.5 text-sm disabled:opacity-40 hover:bg-primary/90 transition-colors"
             >
               {creating
-                ? <><span className="size-4 rounded-full border-2 border-white/30 border-t-white animate-spin" /> Creating job…</>
-                : <><Check size={14} /> Create job {parsed.scheduledDate ? `· ${parsed.scheduledDate}` : ''}</>
+                ? <><span className="size-4 rounded-full border-2 border-primary-foreground/30 border-t-primary-foreground animate-spin" /> Creating job…</>
+                : <><Check size={14} /> Create job</>
               }
             </button>
             {(!draft.customerId || !draft.locationId || !draft.description.trim()) && (
-              <p className="text-xs text-amber-600 text-center mt-2">
+              <p className="text-xs text-warning text-center mt-2">
                 {!draft.customerId
                   ? 'Couldn’t detect customer — use "Fill it in" for manual entry'
                   : !draft.locationId
@@ -1425,17 +1552,17 @@ export function NewJobFlow({
               </p>
             )}
             {createError && (
-              <p className="text-xs text-red-500 text-center mt-2">{createError}</p>
+              <p className="text-xs text-destructive text-center mt-2">{createError}</p>
             )}
           </div>
         )}
 
         {step === 'customer' && (
-          <div className="shrink-0 px-5 py-4 border-t border-slate-100 bg-white">
+          <div className="shrink-0 px-5 py-4 border-t border-border bg-card">
             <button
               onClick={() => setStep('details')}
               disabled={!draft.customerId || (multiLoc && !draft.locationId)}
-              className="flex items-center justify-center gap-2 w-full rounded-xl bg-slate-900 text-white py-3.5 text-sm disabled:opacity-40 hover:bg-slate-700 transition-colors"
+              className="flex items-center justify-center gap-2 w-full rounded-xl bg-primary text-primary-foreground py-3.5 text-sm disabled:opacity-40 hover:bg-primary/90 transition-colors"
             >
               Next: Job details →
             </button>
@@ -1443,11 +1570,11 @@ export function NewJobFlow({
         )}
 
         {step === 'details' && (
-          <div className="shrink-0 px-5 py-4 border-t border-slate-100 bg-white">
+          <div className="shrink-0 px-5 py-4 border-t border-border bg-card">
             <button
               onClick={() => setStep('schedule')}
               disabled={!draft.serviceType || !draft.description.trim()}
-              className="flex items-center justify-center gap-2 w-full rounded-xl bg-slate-900 text-white py-3.5 text-sm disabled:opacity-40 hover:bg-slate-700 transition-colors"
+              className="flex items-center justify-center gap-2 w-full rounded-xl bg-primary text-primary-foreground py-3.5 text-sm disabled:opacity-40 hover:bg-primary/90 transition-colors"
             >
               Next: Schedule →
             </button>
@@ -1455,24 +1582,24 @@ export function NewJobFlow({
         )}
 
         {step === 'schedule' && (
-          <div className="shrink-0 px-5 py-4 border-t border-slate-100 bg-white">
+          <div className="shrink-0 px-5 py-4 border-t border-border bg-card">
             <button
               onClick={createJob}
               disabled={creating || !canCreate}
-              className="flex items-center justify-center gap-2 w-full rounded-xl bg-slate-900 text-white py-3.5 text-sm disabled:opacity-40 hover:bg-slate-700 transition-colors"
+              className="flex items-center justify-center gap-2 w-full rounded-xl bg-primary text-primary-foreground py-3.5 text-sm disabled:opacity-40 hover:bg-primary/90 transition-colors"
             >
               {creating
-                ? <><span className="size-4 rounded-full border-2 border-white/30 border-t-white animate-spin" /> Creating job…</>
+                ? <><span className="size-4 rounded-full border-2 border-primary-foreground/30 border-t-primary-foreground animate-spin" /> Creating job…</>
                 : <>
                     <Check size={14} />
-                    Create job{draft.scheduledDate
-                      ? ` · ${draft.scheduledDate}${draft.assignedTech ? ` · ${draft.assignedTech.split(' ')[0]}` : ''}`
+                    Create job{resolveScheduledStart()
+                      ? ` · ${formatDateTimeInTenantTz(resolveScheduledStart()!, timezone)}`
                       : ' (unscheduled)'}
                   </>
               }
             </button>
             {createError && (
-              <p className="text-xs text-red-500 text-center mt-2">{createError}</p>
+              <p className="text-xs text-destructive text-center mt-2">{createError}</p>
             )}
           </div>
         )}

@@ -1,5 +1,18 @@
 import { Proposal, ProposalStatus } from './proposal';
-import { ConflictError } from '../shared/errors';
+import { ConflictError, ForbiddenError } from '../shared/errors';
+
+/**
+ * QUALITY-2026-07-12 WS2 — human-authority invariant. A `system:` actor
+ * (e.g. the on-call close drafter) may CREATE and stage proposals but may
+ * NEVER approve one: approval is the point at which canonical writes, customer
+ * communication, booking confirmation, and money movement become authorized,
+ * and that gate belongs to a human (owner). This is the structural seam every
+ * approval transition flows through (approveProposal → transitionProposal), so
+ * the invariant cannot be bypassed by a future caller.
+ */
+export function isSystemActor(actorId: string): boolean {
+  return actorId.startsWith('system:');
+}
 
 const VALID_TRANSITIONS: Record<ProposalStatus, ProposalStatus[]> = {
   // A draft can be promoted to ready_for_review, or acted on directly:
@@ -62,6 +75,24 @@ export function isInUndoWindow(
   return elapsed < windowMs;
 }
 
+/**
+ * Finding 2 — the instant the 5-second undo window closes for an approved
+ * proposal: `approvedAt + windowMs`. Returns undefined when the proposal has
+ * no `approvedAt` (historical rows, or a non-approved proposal) so the
+ * response layer can OMIT the field rather than emit a bogus expiry.
+ *
+ * The client drives its undo countdown from this instant (not a fresh 5s at
+ * round-trip-return time), so the tail of the window the approve round-trip
+ * already consumed is never offered as undoable.
+ */
+export function undoExpiresAt(
+  proposal: Proposal,
+  windowMs: number = UNDO_WINDOW_MS
+): Date | undefined {
+  if (!proposal.approvedAt) return undefined;
+  return new Date(proposal.approvedAt.getTime() + windowMs);
+}
+
 export function canTransition(from: ProposalStatus, to: ProposalStatus): boolean {
   const allowed = VALID_TRANSITIONS[from];
   return allowed !== undefined && allowed.includes(to);
@@ -76,6 +107,14 @@ export function transitionProposal(
   targetStatus: ProposalStatus,
   actorId: string
 ): Proposal {
+  // WS2 human-authority invariant: a system actor can never approve. This is
+  // deliberately structural (not scattered across call sites) — every approval
+  // path stamps `approvedAt` here.
+  if (targetStatus === 'approved' && isSystemActor(actorId)) {
+    throw new ForbiddenError(
+      `Proposal approval requires a human actor — '${actorId}' may not approve a proposal`,
+    );
+  }
   if (!canTransition(proposal.status, targetStatus)) {
     throw new ConflictError(
       `Cannot transition proposal from '${proposal.status}' to '${targetStatus}'`

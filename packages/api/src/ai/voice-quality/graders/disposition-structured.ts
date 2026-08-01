@@ -17,15 +17,17 @@
  * pairs with the i-th script turn, the i-th `proposal_created` event pairs
  * the same way (proposals are looked up by id in `observation.proposals`).
  *
- * Escalation correlation is per-turn by timestamp: a turn is graded as
- * "escalated" iff an `escalation_triggered` event fired AFTER the
+ * Escalation correlation is per-turn by event-log index: a turn is graded
+ * as "escalated" iff an `escalation_triggered` event fired AFTER the
  * previous turn's `intent_classified` event AND AT-OR-BEFORE the current
  * turn's `intent_classified` event. (For turn 0 the lower bound is the
  * start of the call.) For the final turn, anything after the previous
- * turn's intent counts. This avoids retroactively marking earlier turns
- * "escalated" when only a late turn triggered escalation — which is
- * the correct behavior for adversarial multi-turn scripts where
- * `expected.escalates` differs across turns.
+ * turn's intent counts. Log index — not the `Date.now()` ms timestamp — is
+ * the ordering key, because a sub-millisecond script ties timestamps and
+ * would mis-attribute a late-turn escalation to the earlier turn. This
+ * avoids retroactively marking earlier turns "escalated" when only a late
+ * turn triggered escalation — the correct behavior for adversarial
+ * multi-turn scripts where `expected.escalates` differs across turns.
  *
  * Hard/soft heuristic — v1, deliberately simple, will be tuned with usage:
  *   HARD if the key:
@@ -48,6 +50,7 @@ import type { Observation } from '../observation';
 import type { VoiceQualityScript } from '../schema';
 import type { Proposal } from '../../../proposals/proposal';
 import type { VoiceSessionEvent } from '../../agents/customer-calling/voice-session-store';
+import { eventLogIndex } from './event-order';
 
 type IntentClassifiedEvent = Extract<VoiceSessionEvent, { type: 'intent_classified' }>;
 type EscalationTriggeredEvent = Extract<VoiceSessionEvent, { type: 'escalation_triggered' }>;
@@ -258,6 +261,14 @@ export function gradeDispositionStructured(
   const proposalsById = new Map<string, Proposal>();
   for (const p of observation.proposals) proposalsById.set(p.id, p);
 
+  // Attribute escalations to turns by causal log order, not `Date.now()`
+  // timestamps — a sub-millisecond script ties a turn's intent_classified
+  // with a later turn's escalation_triggered, mis-grading criterion 11.
+  // See `eventLogIndex`.
+  const logIndexAt = eventLogIndex(observation.events);
+  // Escalation positions are turn-independent — derive them once.
+  const escalationIndices = escalations.map(logIndexAt);
+
   const perTurnDetail: DispositionStructuredResult['perTurnDetail'] = [];
   const failedSet = new Set<number>();
   const reasons: Record<number, string> = {};
@@ -292,24 +303,21 @@ export function gradeDispositionStructured(
         ? true
         : expectedProposalType === actualProposalType;
 
-    // Escalation correlation (per-turn): an escalation_triggered event
-    // is attributed to turn i iff its timestamp falls within turn i's
-    // window. The window's lower bound is the previous turn's
-    // intent_classified.ts (or -Inf for turn 0); the upper bound is
-    // turn i's intent_classified.ts EXCEPT for the last turn, whose
-    // upper bound extends to +Inf so an escalation that fires AFTER
-    // the agent's last classification (but before session_terminated)
-    // still gets attributed to the final turn. When the i-th intent
-    // event is missing AND it isn't the last turn, the window is
-    // un-anchored and we record "no escalation observed for this
-    // turn" — false positives would mis-grade.
-    const lowerBound = i === 0 ? -Infinity : intents[i - 1]?.ts ?? -Infinity;
+    // Escalation correlation (per-turn): an escalation_triggered event is
+    // attributed to turn i iff its log index falls within turn i's window
+    // (see `logIndexOf` above for why log index, not timestamp). The lower
+    // bound is the previous turn's intent_classified index (or -1 before
+    // turn 0); the upper bound is turn i's intent_classified index EXCEPT
+    // for the last turn, whose upper bound is +Inf so an escalation that
+    // fires after the agent's last classification (but before
+    // session_terminated) still lands on the final turn. A missing intent
+    // on a non-last turn leaves the window un-anchored (upper = -1) so
+    // nothing is attributed — a false positive would mis-grade.
+    const lowerBound = i === 0 ? -1 : intents[i - 1] ? logIndexAt(intents[i - 1]) : -1;
     const isLastTurn = i === script.turns.length - 1;
-    const upperBound = isLastTurn
-      ? Infinity
-      : intentEv?.ts ?? -Infinity;
-    const actualEscalated = escalations.some(
-      (esc) => esc.ts > lowerBound && esc.ts <= upperBound,
+    const upperBound = isLastTurn ? Infinity : intentEv ? logIndexAt(intentEv) : -1;
+    const actualEscalated = escalationIndices.some(
+      (k) => k > lowerBound && k <= upperBound,
     );
     const expectedEscalates = expected.escalates;
     const escalationMatched =

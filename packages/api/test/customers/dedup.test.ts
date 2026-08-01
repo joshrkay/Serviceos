@@ -2,6 +2,7 @@ import {
   checkCustomerDuplicates,
   checkCustomerDuplicatesPg,
   isCustomerDuplicateLoader,
+  nameSimilarity,
   normalizePhone,
   normalizeEmail,
   normalizeName,
@@ -277,5 +278,90 @@ describe('P1-019 — Pg-backed customer dedup (checkCustomerDuplicatesPg)', () =
       repo
     );
     expect(warnings).toHaveLength(0);
+  });
+});
+
+describe('P4-004 — Fuzzy name dedup (pg_trgm parity)', () => {
+  it('nameSimilarity — identical names score 1.0', () => {
+    expect(nameSimilarity('john doe', 'john doe')).toBe(1);
+  });
+
+  it('nameSimilarity — a close typo scores above the fuzzy threshold', () => {
+    expect(nameSimilarity('john doe', 'jon doe')).toBeGreaterThanOrEqual(0.4);
+  });
+
+  it('nameSimilarity — unrelated names score below the fuzzy threshold', () => {
+    expect(nameSimilarity('john doe', 'jane smith')).toBeLessThan(0.4);
+  });
+
+  it('nameSimilarity — empty input scores 0', () => {
+    expect(nameSimilarity('', 'john doe')).toBe(0);
+  });
+
+  let repo: InMemoryCustomerRepository;
+  beforeEach(async () => {
+    repo = new InMemoryCustomerRepository();
+    await createCustomer(
+      {
+        tenantId: 'tenant-1',
+        firstName: 'Jonathan',
+        lastName: 'Doe',
+        primaryPhone: '(415) 555-7777',
+        createdBy: 'user-1',
+      },
+      repo
+    );
+  });
+
+  it('flags a close name as a "possible duplicate" (medium, score 0.6)', async () => {
+    const warnings = await checkCustomerDuplicatesPg(
+      { tenantId: 'tenant-1', firstName: 'Jonathon', lastName: 'Doe' },
+      repo
+    );
+    const nameMatch = warnings.find((w) => w.matchType === 'name');
+    expect(nameMatch).toBeDefined();
+    expect(nameMatch!.confidence).toBe('medium');
+    expect(nameMatch!.score).toBe(0.6);
+  });
+
+  it('exact normalized name match still scores 0.8', async () => {
+    const warnings = await checkCustomerDuplicatesPg(
+      { tenantId: 'tenant-1', firstName: 'jonathan', lastName: 'DOE' },
+      repo
+    );
+    const nameMatch = warnings.find((w) => w.matchType === 'name');
+    expect(nameMatch).toBeDefined();
+    expect(nameMatch!.score).toBe(0.8);
+  });
+
+  it('an unrelated name produces no warning', async () => {
+    const warnings = await checkCustomerDuplicatesPg(
+      { tenantId: 'tenant-1', firstName: 'Maria', lastName: 'Gonzalez' },
+      repo
+    );
+    expect(warnings).toHaveLength(0);
+  });
+
+  it('cross-tenant — a close name on another tenant is NOT flagged', async () => {
+    const warnings = await checkCustomerDuplicatesPg(
+      { tenantId: 'tenant-2', firstName: 'Jonathon', lastName: 'Doe' },
+      repo
+    );
+    expect(warnings).toHaveLength(0);
+  });
+
+  it('flags a company-only (B2B) duplicate by companyName', async () => {
+    const b2b = new InMemoryCustomerRepository();
+    await createCustomer(
+      { tenantId: 'tenant-1', firstName: '', lastName: '', companyName: 'Acme Plumbing LLC', createdBy: 'u' },
+      b2b
+    );
+    const warnings = await checkCustomerDuplicatesPg(
+      { tenantId: 'tenant-1', companyName: 'Acme Plumbing' },
+      b2b
+    );
+    const nameMatch = warnings.find((w) => w.matchType === 'name');
+    expect(nameMatch).toBeDefined();
+    expect(nameMatch!.confidence).toBe('medium');
   });
 });

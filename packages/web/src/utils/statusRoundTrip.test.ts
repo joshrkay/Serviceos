@@ -25,7 +25,16 @@ import {
 // These are the values that get passed to setFilters({ status: VALUE }) and
 // then become API query params. They must be valid API enum values.
 
-const JOB_FILTER_VALUES = ['new', 'scheduled', 'in_progress', 'completed', 'canceled'];
+const JOB_FILTER_VALUES = [
+  'new',
+  'scheduled',
+  'dispatched',
+  'in_progress',
+  'completed',
+  'invoiced',
+  'closed',
+  'canceled',
+];
 
 const ESTIMATE_FILTER_VALUES = [
   'draft',
@@ -40,7 +49,16 @@ const INVOICE_FILTER_VALUES = ['draft', 'open', 'partially_paid', 'paid', 'void'
 
 // ─── API enum values (the full set the API can return) ───────────────────────
 
-const JOB_API_STATUSES = ['new', 'scheduled', 'in_progress', 'completed', 'canceled'];
+const JOB_API_STATUSES = [
+  'new',
+  'scheduled',
+  'dispatched',
+  'in_progress',
+  'completed',
+  'invoiced',
+  'closed',
+  'canceled',
+];
 const ESTIMATE_API_STATUSES = ['draft', 'ready_for_review', 'sent', 'accepted', 'rejected', 'expired'];
 const INVOICE_API_STATUSES = ['draft', 'open', 'partially_paid', 'paid', 'void', 'canceled'];
 
@@ -58,8 +76,11 @@ describe('JOB_STATUS_MAP — forward mapping (API → UI label)', () => {
   it('maps each status to the correct human-readable label', () => {
     expect(normalizeJobStatus('new')).toBe('New');
     expect(normalizeJobStatus('scheduled')).toBe('Scheduled');
+    expect(normalizeJobStatus('dispatched')).toBe('Dispatched');
     expect(normalizeJobStatus('in_progress')).toBe('In Progress');
     expect(normalizeJobStatus('completed')).toBe('Completed');
+    expect(normalizeJobStatus('invoiced')).toBe('Invoiced');
+    expect(normalizeJobStatus('closed')).toBe('Closed');
     expect(normalizeJobStatus('canceled')).toBe('Canceled');
   });
 

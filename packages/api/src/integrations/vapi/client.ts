@@ -60,6 +60,9 @@ export class HttpVapiClient implements VapiClient {
         'Content-Type': 'application/json',
       },
       ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
+      // fetch has no default timeout — a Vapi stall would hang the
+      // provisioning worker mid assistant create/update.
+      signal: AbortSignal.timeout(20_000),
     });
     if (!res.ok) {
       const text = await res.text().catch(() => '');

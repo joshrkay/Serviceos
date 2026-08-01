@@ -76,7 +76,14 @@ describe('PgAttachmentRepository tenant context lifecycle', () => {
     const repo = new PgAttachmentRepository(pool);
     await repo.findById(TENANT, ATTACHMENT_ID);
 
-    expect(calls[0].sql).toContain(`SET app.current_tenant_id = '${TENANT}'`);
+    // U2b-2: the standalone tenant path is now a SET LOCAL transaction —
+    // BEGIN -> set_config('app.current_tenant_id',$1,true) -> business query ->
+    // COMMIT -> RESET (belt-and-suspenders) -> release. PgBouncer-safe.
+    expect(calls[0].sql).toBe('BEGIN');
+    const ctx = calls.find((c) => c.sql.includes('set_config'));
+    expect(ctx).toBeDefined();
+    expect(ctx!.params).toContain(TENANT); // tenant bound as a param, not inlined
+    expect(calls.some((c) => c.sql === 'COMMIT')).toBe(true);
     expect(calls[calls.length - 1].sql).toContain('RESET app.current_tenant_id');
     expect(getReleaseCount()).toBe(1);
   });

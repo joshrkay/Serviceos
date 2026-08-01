@@ -34,6 +34,8 @@ except ImportError:
     print("Install dependencies first: pip install -r requirements.txt")
     sys.exit(1)
 
+import posthog_client as ph
+
 TARGET_SUBREDDITS = {"plumbing", "hvac", "homeimprovement", "diy"}
 
 # Keywords that signal a plumbing or HVAC post — used to filter r/homeimprovement
@@ -215,6 +217,17 @@ No local dump file provided. To download the Pushshift corpus:
     for sub in subreddit_filter:
         build_pairs(sub, OUTPUT_DIR, args.min_answer_score)
 
+    ph.capture("corpus_reddit_extraction_completed", {
+        "record_type": args.type,
+        "subreddit_count": len(subreddit_filter),
+        "subreddits": sorted(subreddit_filter),
+        "min_answer_score": args.min_answer_score,
+    })
+
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as exc:
+        ph.capture_exception(exc)
+        raise

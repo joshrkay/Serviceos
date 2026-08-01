@@ -21,6 +21,7 @@ import {
   tenantContextStore,
   currentTenantContext,
   withRequestSavepoint,
+  runAfterCommit,
 } from '../../src/middleware/tenant-context';
 import { PgBaseRepository } from '../../src/db/pg-base';
 import type { AuthenticatedRequest } from '../../src/auth/clerk';
@@ -195,12 +196,17 @@ describe('P0-024 — tenant-context middleware (withTenantTransaction)', () => {
     expect(response.status).toBe(200);
     expect(response.body).toEqual({ t: TENANT_A });
 
-    // First three statements on this connection: BEGIN, set_config, SELECT.
+    // Statement order on this connection: BEGIN, tenant set_config, the
+    // transaction-local timeouts (statement_timeout +
+    // idle_in_transaction_session_timeout — PgBouncer-safe via is_local),
+    // then the handler's SELECT.
     const sqls = calls.map((c) => c.sql);
     expect(sqls[0]).toMatch(/^BEGIN/i);
     expect(sqls[1]).toMatch(/set_config\('app\.current_tenant_id'/i);
     expect(calls[1].params[0]).toBe(TENANT_A);
-    expect(sqls[2]).toMatch(/current_setting/i);
+    expect(sqls[2]).toMatch(/set_config\('statement_timeout'/i);
+    expect(sqls[2]).toMatch(/idle_in_transaction_session_timeout/i);
+    expect(sqls[3]).toMatch(/current_setting/i);
     // After the response finishes, COMMIT must run.
     // res.finish handlers run async — wait a tick.
     await new Promise((r) => setImmediate(r));
@@ -406,6 +412,131 @@ describe('P0-024 — tenant-context middleware (withTenantTransaction)', () => {
     expect(connectCount).toBe(0);
   });
 
+  it('SSE bypass (Codex P1) — a known SSE GET route holds no request transaction', async () => {
+    // A long-lived SSE stream must NOT pin a pooled connection / PgBouncer
+    // backend for its whole life; the middleware skips the BEGIN..COMMIT
+    // transaction for the explicit SSE route allowlist.
+    const { pool, calls } = makeMockPool();
+    let sawTenant: string | undefined;
+    const app = express();
+    app.use(express.json());
+    app.use((req, _res, next) => {
+      (req as AuthenticatedRequest).auth = {
+        userId: 'u1', sessionId: 's1', tenantId: TENANT_A, role: 'owner',
+      };
+      next();
+    });
+    app.use('/api', withTenantTransaction(pool));
+    app.get('/api/escalations/events', (req, res) => {
+      sawTenant = (req as AuthenticatedRequest).auth?.tenantId;
+      res.json({ ok: true });
+    });
+
+    const response = await request(app).get('/api/escalations/events');
+
+    expect(response.status).toBe(200);
+    // Tenant is still enforced/available to the handler …
+    expect(sawTenant).toBe(TENANT_A);
+    // … but no connection was checked out and no BEGIN was issued.
+    const connectCount = (pool.connect as unknown as ReturnType<typeof vi.fn>).mock.calls
+      .length;
+    expect(connectCount).toBe(0);
+    expect(calls.some((c) => /^\s*BEGIN/i.test(c.sql))).toBe(false);
+  });
+
+  it('SSE bypass is route-restricted (Codex P2) — a mutating route with Accept: text/event-stream still opens the transaction', async () => {
+    // The bypass must be keyed off the route allowlist, NOT the client-supplied
+    // Accept header — otherwise any caller could send `text/event-stream` to a
+    // mutating route and skip the request transaction, losing multi-write
+    // atomicity (e.g. job + audit committing separately).
+    const { pool, calls } = makeMockPool();
+    const app = express();
+    app.use(express.json());
+    app.use((req, _res, next) => {
+      (req as AuthenticatedRequest).auth = {
+        userId: 'u1', sessionId: 's1', tenantId: TENANT_A, role: 'owner',
+      };
+      next();
+    });
+    app.use('/api', withTenantTransaction(pool));
+    app.post('/api/jobs', (_req, res) => res.json({ created: true }));
+
+    const response = await request(app)
+      .post('/api/jobs')
+      .set('Accept', 'text/event-stream')
+      .send({ title: 'x' });
+
+    expect(response.status).toBe(200);
+    // Transaction was NOT skipped: one checkout + a BEGIN.
+    const connectCount = (pool.connect as unknown as ReturnType<typeof vi.fn>).mock.calls
+      .length;
+    expect(connectCount).toBe(1);
+    expect(calls.some((c) => /^\s*BEGIN/i.test(c.sql))).toBe(true);
+  });
+
+  it('UC-2 LLM-long-call bypass — POST /assistant/chat holds no request transaction and stashes no ALS client', async () => {
+    // The assistant chat handler awaits the LLM gateway call; holding the
+    // request transaction across it pins a pooled connection (and under
+    // PgBouncer a server backend) for the whole call. The middleware skips
+    // the transaction for the explicit method+path allowlist; repos on this
+    // route self-manage short SET LOCAL transactions (U2b-2) with an
+    // explicit tenantId — the same contract as the voice worker path.
+    const { pool, calls } = makeMockPool();
+    let sawTenant: string | undefined;
+    let storeAtHandler: unknown = 'unset';
+    const app = express();
+    app.use(express.json());
+    app.use((req, _res, next) => {
+      (req as AuthenticatedRequest).auth = {
+        userId: 'u1', sessionId: 's1', tenantId: TENANT_A, role: 'owner',
+      };
+      next();
+    });
+    app.use('/api', withTenantTransaction(pool));
+    app.post('/api/assistant/chat', (req, res) => {
+      sawTenant = (req as AuthenticatedRequest).auth?.tenantId;
+      // What a repo would see mid-"LLM call": no request-scoped client.
+      storeAtHandler = currentTenantContext();
+      res.json({ ok: true });
+    });
+
+    const response = await request(app)
+      .post('/api/assistant/chat')
+      .send({ messages: [{ role: 'user', content: 'hi' }] });
+
+    expect(response.status).toBe(200);
+    // Tenant still enforced/available to the handler …
+    expect(sawTenant).toBe(TENANT_A);
+    // … but no ALS client is stashed, no connection checked out, no BEGIN.
+    expect(storeAtHandler).toBeUndefined();
+    const connectCount = (pool.connect as unknown as ReturnType<typeof vi.fn>).mock.calls
+      .length;
+    expect(connectCount).toBe(0);
+    expect(calls.some((c) => /^\s*BEGIN/i.test(c.sql))).toBe(false);
+  });
+
+  it('UC-2 bypass is method-anchored — GET /assistant/chat still opens the transaction', async () => {
+    const { pool, calls } = makeMockPool();
+    const app = express();
+    app.use(express.json());
+    app.use((req, _res, next) => {
+      (req as AuthenticatedRequest).auth = {
+        userId: 'u1', sessionId: 's1', tenantId: TENANT_A, role: 'owner',
+      };
+      next();
+    });
+    app.use('/api', withTenantTransaction(pool));
+    app.get('/api/assistant/chat', (_req, res) => res.json({ ok: true }));
+
+    const response = await request(app).get('/api/assistant/chat');
+
+    expect(response.status).toBe(200);
+    const connectCount = (pool.connect as unknown as ReturnType<typeof vi.fn>).mock.calls
+      .length;
+    expect(connectCount).toBe(1);
+    expect(calls.some((c) => /^\s*BEGIN/i.test(c.sql))).toBe(true);
+  });
+
   it('rollback on response close before finish', async () => {
     // Simulate a client disconnect: emit `close` without `finish`.
     const { pool, calls } = makeMockPool();
@@ -542,6 +673,59 @@ describe('P0-024 — tenant-context middleware (withTenantTransaction)', () => {
     );
 
     expect(currentTenantContext()).toBeUndefined();
+  });
+});
+
+describe('runAfterCommit', () => {
+  it('runs the effect AFTER the transaction COMMITs (2xx)', async () => {
+    const { pool, calls } = makeMockPool();
+    let hookRan = false;
+    let commitSeenWhenHookRan: boolean | undefined;
+    const app = buildApp(pool, async (_req, res) => {
+      const ctx = currentTenantContext();
+      await ctx!.client.query('INSERT INTO things (id) VALUES (9)');
+      runAfterCommit(res, () => {
+        hookRan = true;
+        // The effect must observe COMMIT already issued on the connection.
+        commitSeenWhenHookRan = calls.some((c) => /^COMMIT/i.test(c.sql));
+      });
+      res.json({ ok: true });
+    });
+
+    const response = await request(app).get('/protected/echo').set('x-test-tenant', TENANT_A);
+    expect(response.status).toBe(200);
+    await new Promise((r) => setImmediate(r));
+
+    expect(hookRan).toBe(true);
+    expect(commitSeenWhenHookRan).toBe(true);
+  });
+
+  it('does NOT run the effect when the request rolls back (4xx)', async () => {
+    const { pool } = makeMockPool();
+    let hookRan = false;
+    const app = buildApp(pool, async (_req, res) => {
+      const ctx = currentTenantContext();
+      await ctx!.client.query('INSERT INTO things (id) VALUES (10)');
+      runAfterCommit(res, () => {
+        hookRan = true;
+      });
+      res.status(409).json({ error: 'CONFLICT' });
+    });
+
+    const response = await request(app).get('/protected/echo').set('x-test-tenant', TENANT_A);
+    expect(response.status).toBe(409);
+    await new Promise((r) => setImmediate(r));
+
+    expect(hookRan).toBe(false);
+  });
+
+  it('runs the effect immediately when there is no request transaction (no store)', () => {
+    let ran = false;
+    const res = { locals: {} } as unknown as express.Response;
+    runAfterCommit(res, () => {
+      ran = true;
+    });
+    expect(ran).toBe(true);
   });
 });
 

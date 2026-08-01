@@ -1,7 +1,7 @@
 /**
  * P0-027 — Hardened Whisper transcription provider tests.
  */
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
   DevNoopTranscriptionProvider,
   WhisperTranscriptionProvider,
@@ -13,6 +13,7 @@ import {
   WHISPER_MAX_BYTES,
   createWhisperTranscriptionProvider,
   DeepgramStreamingProvider,
+  DEEPGRAM_OPEN_TIMEOUT_MS,
 } from '../../src/voice/transcription-providers';
 
 function audioResponse(ok = true, status = 200, sizeBytes = 1024): Response {
@@ -175,14 +176,14 @@ describe('DeepgramStreamingProvider URL builder', () => {
     expect(url).toContain('endpointing=450');
   });
 
-  it('appends URL-encoded keywords when provided', () => {
+  it('appends URL-encoded boost terms when provided, stripped of weight suffix (A2: keyterm=, since the default model is nova-3)', () => {
     const url = (provider as unknown as {
       buildWsUrl: (lang: 'en' | 'es', options?: { keywords?: ReadonlyArray<string>; endpointingMs?: number }) => string;
     }).buildWsUrl('en', { keywords: ['heat pump:3', 'P-trap:3'] });
-    expect(url).toContain('keywords=heat%20pump%3A3');
-    expect(url).toContain('keywords=P-trap%3A3');
+    expect(url).toContain('keyterm=heat%20pump');
+    expect(url).toContain('keyterm=P-trap');
     // Both should appear as separate query params (joined by &)
-    expect(url).toMatch(/keywords=heat%20pump%3A3&keywords=P-trap%3A3|keywords=P-trap%3A3&keywords=heat%20pump%3A3/);
+    expect(url).toMatch(/keyterm=heat%20pump&keyterm=P-trap|keyterm=P-trap&keyterm=heat%20pump/);
   });
 
   it('omits the keywords parameter when the list is empty', () => {
@@ -190,5 +191,174 @@ describe('DeepgramStreamingProvider URL builder', () => {
       buildWsUrl: (lang: 'en' | 'es', options?: { keywords?: ReadonlyArray<string>; endpointingMs?: number }) => string;
     }).buildWsUrl('en', { keywords: [] });
     expect(url).not.toContain('keywords=');
+  });
+
+  it('defaults to model=nova-3', () => {
+    const url = (provider as unknown as {
+      buildWsUrl: (lang: 'en' | 'es', options?: { keywords?: ReadonlyArray<string>; endpointingMs?: number }) => string;
+    }).buildWsUrl('en');
+    expect(url).toContain('model=nova-3');
+  });
+});
+
+// A2 — Nova-3 uses Deepgram's `keyterm` prompting param; the legacy
+// `keywords` param is a Nova-2-era feature Nova-3 silently ignores. Detect
+// the model family so a future Nova-2 pin still boosts via the param it
+// supports, while preserving the weighted-term format and URL-encoding.
+describe('DeepgramStreamingProvider keyterm vs keywords by model family (A2)', () => {
+  it('nova-3 (default model) emits keyterm=, not keywords=, with the weight suffix stripped', () => {
+    const provider = new DeepgramStreamingProvider('test-key');
+    const url = (provider as unknown as {
+      buildWsUrl: (lang: 'en' | 'es', options?: { keywords?: ReadonlyArray<string>; endpointingMs?: number }) => string;
+    }).buildWsUrl('en', { keywords: ['furnace:3'] });
+    expect(url).toContain('keyterm=furnace');
+    expect(url).not.toContain('keyterm=furnace%3A3');
+    expect(url).not.toContain('keywords=');
+  });
+
+  it('an explicit nova-3 variant (e.g. nova-3-general) still emits keyterm=, weight stripped', () => {
+    const provider = new DeepgramStreamingProvider('test-key', 'en', 'nova-3-general');
+    const url = (provider as unknown as {
+      buildWsUrl: (lang: 'en' | 'es', options?: { keywords?: ReadonlyArray<string>; endpointingMs?: number }) => string;
+    }).buildWsUrl('en', { keywords: ['furnace:3'] });
+    expect(url).toContain('model=nova-3-general');
+    expect(url).toContain('keyterm=furnace');
+    expect(url).not.toContain('keyterm=furnace%3A3');
+  });
+
+  it('a nova-2 pin still emits the legacy keywords= param', () => {
+    const provider = new DeepgramStreamingProvider('test-key', 'en', 'nova-2');
+    const url = (provider as unknown as {
+      buildWsUrl: (lang: 'en' | 'es', options?: { keywords?: ReadonlyArray<string>; endpointingMs?: number }) => string;
+    }).buildWsUrl('en', { keywords: ['heat pump:3', 'P-trap:3'] });
+    expect(url).toContain('model=nova-2');
+    expect(url).toContain('keywords=heat%20pump%3A3');
+    expect(url).toContain('keywords=P-trap%3A3');
+    expect(url).not.toContain('keyterm=');
+  });
+
+  it('strips the trailing :<weight> suffix under keyterm= but preserves URL-encoding of the bare term', () => {
+    const provider = new DeepgramStreamingProvider('test-key');
+    const url = (provider as unknown as {
+      buildWsUrl: (lang: 'en' | 'es', options?: { keywords?: ReadonlyArray<string>; endpointingMs?: number }) => string;
+    }).buildWsUrl('en', { keywords: ['heat pump:3', 'P-trap:3'] });
+    expect(url).toContain('keyterm=heat%20pump');
+    expect(url).toContain('keyterm=P-trap');
+    expect(url).not.toContain('%3A3');
+    expect(url).toMatch(/keyterm=heat%20pump&keyterm=P-trap|keyterm=P-trap&keyterm=heat%20pump/);
+  });
+
+  it('preserves the weighted term:weight format and URL-encoding under keywords= (nova-2)', () => {
+    const provider = new DeepgramStreamingProvider('test-key', 'en', 'nova-2');
+    const url = (provider as unknown as {
+      buildWsUrl: (lang: 'en' | 'es', options?: { keywords?: ReadonlyArray<string>; endpointingMs?: number }) => string;
+    }).buildWsUrl('en', { keywords: ['heat pump:3', 'P-trap:3'] });
+    expect(url).toContain('keywords=heat%20pump%3A3');
+    expect(url).toContain('keywords=P-trap%3A3');
+    expect(url).toMatch(/keywords=heat%20pump%3A3&keywords=P-trap%3A3|keywords=P-trap%3A3&keywords=heat%20pump%3A3/);
+  });
+
+  it('passes unweighted terms through unchanged on both the keyterm and keywords paths', () => {
+    const nova3 = new DeepgramStreamingProvider('test-key');
+    const nova2 = new DeepgramStreamingProvider('test-key', 'en', 'nova-2');
+    const buildUrl = (provider: DeepgramStreamingProvider) =>
+      (provider as unknown as {
+        buildWsUrl: (
+          lang: 'en' | 'es',
+          options?: { keywords?: ReadonlyArray<string>; endpointingMs?: number }
+        ) => string;
+      }).buildWsUrl('en', { keywords: ['gasket'] });
+
+    expect(buildUrl(nova3)).toContain('keyterm=gasket');
+    expect(buildUrl(nova2)).toContain('keywords=gasket');
+  });
+
+  it('only strips a FINAL :<digits> suffix under keyterm=, leaving a legitimate internal colon intact', () => {
+    const provider = new DeepgramStreamingProvider('test-key');
+    const url = (provider as unknown as {
+      buildWsUrl: (lang: 'en' | 'es', options?: { keywords?: ReadonlyArray<string>; endpointingMs?: number }) => string;
+    }).buildWsUrl('en', { keywords: ['model:X200:3'] });
+    // Only the trailing ':3' weight is stripped — the internal ':X200' colon survives.
+    expect(url).toContain(`keyterm=${encodeURIComponent('model:X200')}`);
+    expect(url).not.toContain(`keyterm=${encodeURIComponent('model:X200:3')}`);
+  });
+
+  it('omits both params when the keyword list is empty, regardless of model', () => {
+    const provider = new DeepgramStreamingProvider('test-key', 'en', 'nova-2');
+    const url = (provider as unknown as {
+      buildWsUrl: (lang: 'en' | 'es', options?: { keywords?: ReadonlyArray<string>; endpointingMs?: number }) => string;
+    }).buildWsUrl('en', { keywords: [] });
+    expect(url).not.toContain('keyterm=');
+    expect(url).not.toContain('keywords=');
+  });
+});
+
+describe('DeepgramStreamingProvider open timeout (VOX-01)', () => {
+  let originalWebSocket: typeof WebSocket;
+
+  beforeEach(() => {
+    originalWebSocket = global.WebSocket;
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    global.WebSocket = originalWebSocket;
+    vi.useRealTimers();
+  });
+
+  it('rejects and closes the socket when the WS handshake never opens', async () => {
+    // Fake WS that NEVER fires open/error — models a stalled Deepgram
+    // handshake. Without a bound, `await openSession` would hang forever
+    // with caller audio already bridged (dead air). The bound must reject.
+    let closed = false;
+    const fakeWs = {
+      readyState: 0,
+      addEventListener: vi.fn(), // deliberately never invokes any listener
+      send: vi.fn(),
+      close: vi.fn(() => {
+        closed = true;
+      }),
+    };
+    global.WebSocket = vi.fn(function () { return fakeWs; }) as unknown as typeof WebSocket;
+
+    const provider = new DeepgramStreamingProvider('test-key');
+    const openPromise = provider.openSession(
+      () => undefined,
+      () => undefined,
+      () => undefined,
+    );
+    // Attach the rejection assertion BEFORE advancing timers so the
+    // rejection is never unhandled.
+    const assertion = expect(openPromise).rejects.toThrow(/deepgram_open_timeout/);
+    await vi.advanceTimersByTimeAsync(DEEPGRAM_OPEN_TIMEOUT_MS + 50);
+    await assertion;
+    expect(closed).toBe(true);
+  });
+
+  it('resolves normally when the socket opens before the timeout', async () => {
+    const listeners: Record<string, (e: unknown) => void> = {};
+    const fakeWs = {
+      readyState: 0,
+      addEventListener: vi.fn((event: string, fn: (e: unknown) => void) => {
+        listeners[event] = fn;
+      }),
+      send: vi.fn(),
+      close: vi.fn(),
+    };
+    global.WebSocket = vi.fn(function () { return fakeWs; }) as unknown as typeof WebSocket;
+
+    const provider = new DeepgramStreamingProvider('test-key');
+    const openPromise = provider.openSession(
+      () => undefined,
+      () => undefined,
+      () => undefined,
+    );
+    // Fire open well within the bound.
+    await vi.advanceTimersByTimeAsync(10);
+    fakeWs.readyState = 1;
+    listeners['open']?.({});
+    const session = await openPromise;
+    expect(session).toHaveProperty('send');
+    expect(fakeWs.close).not.toHaveBeenCalled();
   });
 });

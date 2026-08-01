@@ -114,6 +114,32 @@ describe('P2-029 — Provider health monitoring and automatic failover', () => {
     expect(gateway.getFailoverCount()).toBe(1);
   });
 
+  it('providerPath records the serving model on the fallback-provider stage', async () => {
+    // Mirrors the primary stage's `primary:${model}` entries — without the
+    // model here, the ai_runs row's providerPath gives no way to recover
+    // which model actually served a failed-over request.
+    const primary = new StubProvider('primary');
+    primary.setResponse({ content: 'primary response' });
+
+    const fallback = new StubProvider('fallback');
+    fallback.setResponse({ content: 'fallback response' });
+
+    const monitor = new ProviderHealthMonitor({ maxErrorRate: 0.1 });
+    for (let i = 0; i < 10; i++) {
+      monitor.recordResult('primary', 100, false);
+    }
+
+    const gateway = new FailoverGateway(
+      makeGateway(primary),
+      makeGateway(fallback),
+      monitor
+    );
+
+    const response = await gateway.complete(makeRequest({ model: 'claude-sonnet-4-6' }));
+
+    expect(response.providerPath).toContain('fallback:claude-sonnet-4-6');
+  });
+
   it('happy path — failover count tracked', async () => {
     const primary = new StubProvider('primary');
     const fallback = new StubProvider('fallback');

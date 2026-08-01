@@ -295,3 +295,83 @@ describe('recordRefund (D2-4)', () => {
     expect(reread?.refundedAmountCents).toBe(1234);
   });
 });
+
+describe('D2-4a / P0-4 — per-refund idempotency ledger', () => {
+  let paymentRepo: InMemoryPaymentRepository;
+
+  beforeEach(() => {
+    paymentRepo = new InMemoryPaymentRepository();
+  });
+
+  it('an EARLIER refund retried after a LATER refund landed is a duplicate (the interleave that defeated last_refund_stripe_id)', async () => {
+    const payment = makePayment({ amountCents: 10000 });
+    await paymentRepo.create(payment);
+
+    // re_1 applies; its webhook event then fails AFTER the increment committed.
+    const first = await recordRefund(
+      { tenantId: TENANT_A, paymentId: payment.id, refundCents: 3000, stripeRefundId: 're_1' },
+      paymentRepo,
+    );
+    expect(first.totalRefundedCents).toBe(3000);
+
+    // re_2 records next — the latest-id-only guard now remembers re_2, not re_1.
+    const second = await recordRefund(
+      { tenantId: TENANT_A, paymentId: payment.id, refundCents: 2000, stripeRefundId: 're_2' },
+      paymentRepo,
+    );
+    expect(second.totalRefundedCents).toBe(5000);
+
+    // Stripe retries re_1's failed event. The claim ledger must dedupe it.
+    const retry = await recordRefund(
+      { tenantId: TENANT_A, paymentId: payment.id, refundCents: 3000, stripeRefundId: 're_1' },
+      paymentRepo,
+    );
+    expect(retry.refundCents).toBe(0); // no re-apply
+    expect(retry.totalRefundedCents).toBe(5000); // NOT 8000
+
+    const reloaded = await paymentRepo.findById(TENANT_A, payment.id);
+    expect(reloaded!.refundedAmountCents).toBe(5000);
+  });
+
+  it('two CONCURRENT deliveries of the same refund id apply exactly once', async () => {
+    const payment = makePayment({ amountCents: 10000 });
+    await paymentRepo.create(payment);
+
+    const results = await Promise.all([
+      recordRefund(
+        { tenantId: TENANT_A, paymentId: payment.id, refundCents: 4000, stripeRefundId: 're_conc' },
+        paymentRepo,
+      ),
+      recordRefund(
+        { tenantId: TENANT_A, paymentId: payment.id, refundCents: 4000, stripeRefundId: 're_conc' },
+        paymentRepo,
+      ),
+    ]);
+
+    // One applied, one deduped — never both.
+    expect(results.filter((r) => r.refundCents === 4000)).toHaveLength(1);
+    expect(results.filter((r) => r.refundCents === 0)).toHaveLength(1);
+    const reloaded = await paymentRepo.findById(TENANT_A, payment.id);
+    expect(reloaded!.refundedAmountCents).toBe(4000);
+  });
+
+  it('an over-refund attempt does NOT strand a claim that would dedupe a corrected retry', async () => {
+    const payment = makePayment({ amountCents: 10000 });
+    await paymentRepo.create(payment);
+
+    await expect(
+      recordRefund(
+        { tenantId: TENANT_A, paymentId: payment.id, refundCents: 20000, stripeRefundId: 're_over' },
+        paymentRepo,
+      ),
+    ).rejects.toThrow(ValidationError);
+
+    // The rejected attempt left no claim; a corrected amount for the same
+    // refund id still applies.
+    const corrected = await recordRefund(
+      { tenantId: TENANT_A, paymentId: payment.id, refundCents: 10000, stripeRefundId: 're_over' },
+      paymentRepo,
+    );
+    expect(corrected.totalRefundedCents).toBe(10000);
+  });
+});

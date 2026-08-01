@@ -4,7 +4,9 @@
 **Audience:** Any engineer asked to refresh the Voice Quality v1 cassette suite.
 **Prereq knowledge:** none — this runbook is self-contained. You do not need to have read the Voice Quality design spec.
 
-The Voice Quality Layer 1 suite replays recorded LLM exchanges (cassettes) against the voice agent so the same prompts produce the same scores on every CI run. Cassettes are checked into the repo at `packages/api/src/ai/voice-quality/corpus/cassettes/<scriptId>.json`. When the upstream model changes — or when prompts change — the cassettes drift from reality and must be re-recorded.
+The Voice Quality Layer 1 suite replays recorded LLM exchanges (cassettes) against the voice agent so the same prompts produce the same scores on every CI run. Cassettes are checked into the repo at `packages/api/src/ai/voice-quality/corpus/cassettes/<scriptId>.json`. When the agent's **prompts** change, the recorded request hashes no longer match and the cassettes must be re-recorded.
+
+> **Read this first if you are here because CI is red.** Re-recording is **offline, mock-backed, takes about 3 seconds, needs no API key, and costs $0.** Earlier revisions of this runbook claimed it made real LLM calls and took 8–15 minutes; that was wrong and is corrected throughout. `cd packages/api && npm run voice-quality:refresh`, then commit the cassette diff.
 
 This runbook covers **the refresh procedure only.** For the launch gate decision flow and threshold overrides, see `docs/superpowers/runbooks/voice-quality-launch-gate.md` (VQ-027).
 
@@ -14,8 +16,9 @@ This runbook covers **the refresh procedure only.** For the launch gate decision
 
 Refresh cassettes whenever the recorded responses no longer represent what the live model would return today. Concretely:
 
-- ✅ **Anthropic ships a new model version** that the voice agent will adopt (e.g., Haiku 4.5 → 4.6, Sonnet 4.5 → 4.6). Refresh as part of the model bump PR.
-- ✅ **Voice agent prompts change substantially.** Any non-trivial edit to the classifier system prompt, a skill prompt, or a tool schema invalidates the cassette hash. Refresh in the same PR as the prompt change.
+- ✅ **Voice agent prompts change — at all.** This is the dominant trigger. The cassette key is `sha256({model, prompt, schema})` where `prompt` is the entire messages array, so **a single byte anywhere in the ~37 KB classifier `SYSTEM_PROMPT` invalidates every entry in every cassette simultaneously.** Even a doc-comment addition does it (commit `d39e5708` did exactly that and turned the suite 64-red). Refresh in the same PR as the prompt change — CI has a guard that will tell you to.
+- ✅ **The mock recording contract changes.** Edits to `classifierJsonForTurn` / `appointmentJsonForTurn` / `draftEstimateJsonForTurn` in `voice-quality-driver-factory.ts` change the recorded *content*, not just the hash.
+- ⛔ **NOT for upstream model bumps.** Layer 1 cassettes are recorded from a deterministic in-repo mock and store `"model": "(default)"` / `"provider": "mock"`. Adopting a new Anthropic model version does not change them and does not require a refresh. (Layer 2 — `npm run voice-quality:layer2` — is the model-facing suite; it is out of scope for this runbook.)
 - ✅ **New corpus scripts are added.** New scripts ship with no cassette; the first run records them.
 - ✅ **Quarterly schedule.** First Monday of Q1, Q2, Q3, Q4 — refresh against the current production model so any silent drift surfaces on a predictable cadence.
 
@@ -29,9 +32,8 @@ Do NOT refresh because a single test went red. A single failure is more likely a
 
 Run through this before starting the refresh. A failed refresh leaves partial cassettes on disk and creates a noisy diff that is hard to back out.
 
-- [ ] ✅ `ANTHROPIC_API_KEY` is set in your local environment (`echo $ANTHROPIC_API_KEY | head -c 8` should print a prefix, not empty).
-- [ ] ✅ Outbound network to `api.anthropic.com` is unblocked. If you are on a corporate VPN or restricted egress, confirm with `curl -sS -o /dev/null -w '%{http_code}\n' https://api.anthropic.com/` (any non-zero HTTP code is fine; connection refused / DNS failure is not).
-- [ ] ✅ At least 100 MB free on the working disk. Cassettes are JSON; a full refresh writes ~40 files totalling 5–20 MB, but the recording process buffers token streams and tmp dirs.
+- [ ] ✅ **No API key and no network access are required.** Refresh runs fully offline against the deterministic in-repo mock (see §3). If you were about to go find an `ANTHROPIC_API_KEY`, you don't need one — `record`/`refresh` never call a live provider.
+- [ ] ✅ At least 100 MB free on the working disk. Cassettes are JSON; a full refresh writes ~68 files totalling 5–20 MB.
 - [ ] ✅ You are on a **fresh branch from `main`** — never refresh on a feature branch that already has unrelated changes. The cassette diff must be reviewable in isolation.
 - [ ] ✅ Local working tree is clean (`git status` shows no modified files outside the cassette directory).
 - [ ] ✅ The current `main` Voice Quality run is green. Refreshing on top of a known-broken main means you cannot tell whether the new cassettes fixed or hid a regression.
@@ -44,16 +46,20 @@ Run through this before starting the refresh. A failed refresh leaves partial ca
 
 All commands run from the repo root unless noted.
 
-### Full refresh (all 40 scripts)
+### Full refresh (all 68 cassettes)
 
 ```bash
 cd packages/api
 npm run voice-quality:refresh
 ```
 
-This sets `VOICE_QUALITY_CASSETTE_MODE=refresh` and runs the corpus suite under `vitest.voice-quality.config.ts`. The runner makes real LLM calls and **overwrites** every entry whose request hash is reached during the run.
+This sets `VOICE_QUALITY_CASSETTE_MODE=refresh` and runs the corpus suite under `vitest.voice-quality.config.ts`.
 
-Expected wall-clock: 8–15 minutes for the full corpus on a warm network. Each script issues 1–4 LLM calls; with the 4-way fork parallelism pinned in the vitest config, throughput is roughly ten scripts per minute.
+⚠️ **The runner makes NO live LLM calls and costs $0.** `buildCassetteGatewayForScript` (`test/voice-quality/voice-quality-driver-factory.ts`) wraps `CassetteLLMGateway` around `ScriptAwareMockGateway` — a deterministic in-repo mock whose output is a pure function of the corpus fixture, falling through to `createMockLLMGateway()`. Every recorded entry carries `"provider": "mock"`. No API key, no network egress, runnable in an offline sandbox. See `docs/solutions/test-failures/voice-quality-cassette-drift-serves-stale-response.md`.
+
+Expected wall-clock: **a few seconds** for the full corpus (measured 2026-07-26: 3.2 s wall clock, 66/66 scripts, on a laptop with network egress deliberately blackholed). If it appears to hang on the network, something is misconfigured — the refresh path should never open a socket.
+
+⚠️ **`refresh` does NOT prune dead entries — it only grows the cassettes.** `recordOrRefresh` overwrites an entry only when the request hash matches exactly; otherwise it *appends*. Because a prompt edit changes every hash, a refresh after a prompt change leaves all the pre-existing entries in place and adds a new generation alongside them (measured 2026-07-26: 292 → 384 entries, 0 removed). Dead entries are inert under the strict default (`allowFallback=false` only ever returns an exact-hash match), but they accumulate. For a genuinely clean re-record you must record into a temp dir and install over the corpus files — see the "Clean re-record" recipe in the solutions doc above, and `npm run voice-quality:staleness` to see current accretion depth.
 
 ### Single-script refresh
 
@@ -83,7 +89,8 @@ npm run voice-quality:record
 | `VOICE_QUALITY_CASSETTE_MODE` | `replay` (default), `record`, `refresh` | `replay` reads from cassette and fails on cache miss. `record` appends new entries, never overwrites. `refresh` overwrites existing entries with the same hash. |
 | `VOICE_QUALITY_REPO` | `memory` (default), `pg` | Selects the repo bundle. CI PR runs use `memory`; nightly uses `pg` against a testcontainer. For cassette refresh, leave on `memory` — cassettes are LLM-only and not repo-coupled. |
 | `VOICE_QUALITY_SCRIPT_FILTER` | (not yet implemented) | Future: restrict the run to scripts whose ID matches this string. Track as a follow-up. |
-| `ANTHROPIC_API_KEY` | secret | Required for `record` and `refresh`; ignored in `replay`. |
+| `ANTHROPIC_API_KEY` | — | **Not used by this suite in any mode.** `record`/`refresh` are backed by the in-repo deterministic mock, not a live provider. |
+| `VOICE_QUALITY_ALLOW_CASSETTE_FALLBACK` | unset (default), `1` | `1` re-enables the loose drift fallback (schema + system-prompt first sentence + last user message) on a hash miss. **Local iteration only — never set in CI.** It silently serves a recorded response after a prompt change, which is the documented silent-stale-response hazard. |
 
 ✅ `replay` is the default and is what CI uses. You should never need to set `VOICE_QUALITY_CASSETTE_MODE` for normal development — only for refresh.
 
@@ -113,13 +120,15 @@ jq . packages/api/src/ai/voice-quality/corpus/cassettes/lookup-account-summary-k
 
 These changes are normal and expected on every refresh:
 
-- ✅ `response` text — wording shifts when the model changes.
-- ✅ `tokenUsage.inputTokens` / `outputTokens` — token counts vary with response length.
 - ✅ `recordedAt` — timestamp updates on every refresh.
+- ✅ **`requestHash` changed on every entry, plus a new entry appended alongside each old one.** This is the *normal* shape of a post-prompt-edit refresh: the hash covers the full system prompt, so any prompt byte re-keys every entry, and `refresh` appends rather than replaces (see §3). Expect entry counts to grow, not stay flat.
+- ✅ `response.content` **unchanged** — because the recording gateway is a deterministic mock, a refresh that only follows a prompt edit should reproduce byte-identical response content. Verify this; it is the strongest signal the refresh was mechanical.
+
+⚠️ **`response.content` that actually changed is the diff worth reading.** It means the mock's contract (`classifierJsonForTurn` et al. in `voice-quality-driver-factory.ts`) changed, not just the prompt hash — that is a real behavioral change and belongs in the PR description.
 
 ### Unexpected diffs (investigate)
 
-- ⚠️ **`requestHash` changed.** The hash is `sha256` over `{ model, prompt, schema }`. If it changed, *the prompt the agent sent has changed.* That means a code or prompt change slipped in — possibly intentional, possibly not. Trace it before approving:
+- ⚠️ **`requestHash` changed but you did not knowingly touch a prompt.** The hash is `sha256` over `{ model, prompt, schema }`. If it changed, *the prompt the agent sent has changed* — possibly a change that slipped in unnoticed. (If you are refreshing *because* you edited a prompt, hash churn is expected — see "Expected diffs" above.) Trace it before approving:
 
   ```bash
   git log --since="last refresh date" -- packages/api/src/ai/skills packages/api/src/ai/voice
@@ -268,13 +277,19 @@ For full implementation details see `packages/api/src/ai/voice-quality/cassette-
     {
       "requestHash": "sha256:abcdef...",
       "request": {
-        "model": "claude-haiku-4-5",
+        "model": "(default)",
         "prompt": "[canonical-JSON messages array]",
-        "schema": "text"
+        "schema": "json"
       },
-      "response": { "text": "...", "tokenUsage": { "input": 0, "output": 0 } },
-      "tokenUsage": { "inputTokens": 0, "outputTokens": 0, "costCents": 0 },
-      "recordedAt": "2026-05-04T12:00:00.000Z"
+      "response": {
+        "content": "{\"intentType\":\"lookup_customer\",\"confidence\":0.95,\"reasoning\":\"voice-quality mock classifier\"}",
+        "model": "mock-model",
+        "provider": "mock",
+        "latencyMs": 1,
+        "tokenUsage": { "input": 10, "output": 10, "total": 20 }
+      },
+      "tokenUsage": { "inputTokens": 10, "outputTokens": 10, "costCents": 0 },
+      "recordedAt": "2026-07-26T22:44:57.518Z"
     }
   ]
 }
@@ -299,9 +314,9 @@ Object keys are sorted before serialization, so call-site key ordering does not 
 
 ### Modes
 
-- `replay` (default) — read cassette, match by hash, return recorded response. Cache miss throws `cassette stale, refresh needed for scriptId=X requestHash=Y`.
-- `record` — pass through to real gateway, append new entries, **never overwrite**. Idempotent.
-- `refresh` — pass through to real gateway, **overwrite** entries with matching hash.
+- `replay` (default) — read cassette, match by hash, return recorded response. Cache miss throws `cassette drift: scriptId=X requestHash=Y — no entry matches the current request`. Strict by default; the loose fallback is opt-in via `VOICE_QUALITY_ALLOW_CASSETTE_FALLBACK=1`.
+- `record` — pass through to the **deterministic mock gateway** (not a live provider), append new entries, **never overwrite**. Idempotent.
+- `refresh` — pass through to the **deterministic mock gateway**, **overwrite** entries with a matching hash, **append** otherwise. Never deletes.
 
 ---
 
@@ -309,8 +324,8 @@ Object keys are sorted before serialization, so call-site key ordering does not 
 
 | Symptom | Likely cause | Fix |
 |---|---|---|
-| `cassette stale, refresh needed for scriptId=...` in CI replay | Prompt or model changed without a refresh. | Run `npm run voice-quality:refresh` and commit the diff. |
-| Refresh fails halfway with `ECONNRESET` / 5xx | Anthropic API hiccup. | Re-run; `refresh` is overwrite-safe so partial state is recoverable. |
+| `cassette drift: scriptId=... — no entry matches the current request` in CI replay | Prompt or model changed without a refresh. Every entry invalidates at once, so expect the whole suite to go red, not one test. | Run `npm run voice-quality:refresh` (offline, ~3 s, no API key) and commit the cassette diff. |
+| Refresh fails halfway with a network error | Should be impossible — the refresh path never opens a socket. | Treat as a real bug: something has wired a live provider into the record path. Investigate `buildCassetteGatewayForScript` before re-running. |
 | `could not acquire lock for scriptId=...` | Stale `.lock` file from a killed process. | `rm packages/api/src/ai/voice-quality/corpus/cassettes/*.lock` and re-run. |
 | Diff is enormous (every script's hash changed) | Prompt template or shared context shifted globally. | Expected and OK if the prompt change was intentional; document in the PR. If unintentional, find the change in the prompt module. |
 | Pass rate dropped > 10 pp | Real model regression. | STOP. Do not merge. See §5 step 2 and §7. |

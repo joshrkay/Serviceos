@@ -40,6 +40,29 @@ export const GOOGLE_AUTH_URL = 'https://accounts.google.com/o/oauth2/v2/auth';
 export const GOOGLE_TOKEN_URL = 'https://oauth2.googleapis.com/token';
 export const GOOGLE_USERINFO_URL = 'https://openidconnect.googleapis.com/v1/userinfo';
 
+// fetch has no default timeout — a stalled Google endpoint would hang the
+// OAuth callback route (exchangeAuthorizationCode, run inline in the
+// operator's browser request) or the calendar-sync worker (getValidAccessToken)
+// indefinitely. Matches the QBO_REQUEST_TIMEOUT_MS style used elsewhere.
+const GOOGLE_REQUEST_TIMEOUT_MS = 15_000;
+
+/**
+ * Runs a Google fetch call and converts an AbortSignal timeout into a
+ * descriptive error instead of letting the raw DOMException/AbortError
+ * propagate — callers (OAuth route handler, calendar-sync worker) get a
+ * clear reason for the failure instead of an opaque abort.
+ */
+async function withGoogleTimeout<T>(label: string, run: () => Promise<T>): Promise<T> {
+  try {
+    return await run();
+  } catch (err) {
+    if (err instanceof Error && err.name === 'AbortError') {
+      throw new Error(`${label} timed out after ${GOOGLE_REQUEST_TIMEOUT_MS}ms`);
+    }
+    throw err;
+  }
+}
+
 export function buildGoogleAuthUrl(config: GoogleOAuthConfig, state: string): string {
   const params = new URLSearchParams({
     client_id: config.clientId,
@@ -75,17 +98,20 @@ export async function exchangeAuthorizationCode(
   code: string,
   fetchFn: GoogleFetch = fetch,
 ): Promise<ExchangedTokens> {
-  const tokenRes = await fetchFn(GOOGLE_TOKEN_URL, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: new URLSearchParams({
-      code,
-      client_id: config.clientId,
-      client_secret: config.clientSecret,
-      redirect_uri: config.redirectUri,
-      grant_type: 'authorization_code',
+  const tokenRes = await withGoogleTimeout('Google token exchange', () =>
+    fetchFn(GOOGLE_TOKEN_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        code,
+        client_id: config.clientId,
+        client_secret: config.clientSecret,
+        redirect_uri: config.redirectUri,
+        grant_type: 'authorization_code',
+      }),
+      signal: AbortSignal.timeout(GOOGLE_REQUEST_TIMEOUT_MS),
     }),
-  });
+  );
   if (!tokenRes.ok) {
     const body = await tokenRes.text();
     throw new Error(`Google token exchange failed (${tokenRes.status}): ${body}`);
@@ -103,9 +129,12 @@ export async function exchangeAuthorizationCode(
     throw new Error('Google did not return access + refresh tokens');
   }
 
-  const userinfoRes = await fetchFn(GOOGLE_USERINFO_URL, {
-    headers: { Authorization: `Bearer ${tokenJson.access_token}` },
-  });
+  const userinfoRes = await withGoogleTimeout('Google userinfo fetch', () =>
+    fetchFn(GOOGLE_USERINFO_URL, {
+      headers: { Authorization: `Bearer ${tokenJson.access_token}` },
+      signal: AbortSignal.timeout(GOOGLE_REQUEST_TIMEOUT_MS),
+    }),
+  );
   if (!userinfoRes.ok) {
     const body = await userinfoRes.text();
     throw new Error(`Google userinfo fetch failed (${userinfoRes.status}): ${body}`);
@@ -145,16 +174,19 @@ export async function getValidAccessToken(
   }
 
   const refreshToken = decryptRefreshToken(integration);
-  const res = await fetchFn(GOOGLE_TOKEN_URL, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: new URLSearchParams({
-      client_id: config.clientId,
-      client_secret: config.clientSecret,
-      refresh_token: refreshToken,
-      grant_type: 'refresh_token',
+  const res = await withGoogleTimeout('Google token refresh', () =>
+    fetchFn(GOOGLE_TOKEN_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        client_id: config.clientId,
+        client_secret: config.clientSecret,
+        refresh_token: refreshToken,
+        grant_type: 'refresh_token',
+      }),
+      signal: AbortSignal.timeout(GOOGLE_REQUEST_TIMEOUT_MS),
     }),
-  });
+  );
   if (!res.ok) {
     const body = await res.text();
     if (res.status === 400 || res.status === 401) {

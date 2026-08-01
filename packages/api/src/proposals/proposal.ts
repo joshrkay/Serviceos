@@ -26,12 +26,13 @@ export type ProposalStatus =
   // or re-executed. If the operator wants to proceed after undoing,
   // they draft a new proposal. Decision 9 ("5-second undo window").
   | 'undone';
-export type ProposalType = 'create_customer' | 'update_customer' | 'create_job' | 'create_appointment' | 'create_booking' | 'callback' | 'draft_estimate' | 'update_estimate' | 'draft_invoice' | 'update_invoice' | 'issue_invoice' | 'create_invoice_schedule' | 'batch_invoice' | 'reassign_appointment' | 'reschedule_appointment' | 'add_crew_member' | 'remove_crew_member' | 'cancel_appointment' | 'voice_clarification' | 'add_note' | 'send_invoice' | 'send_estimate' | 'send_estimate_nudge' | 'record_payment' | 'log_expense' | 'convert_lead' | 'confirm_appointment' | 'mark_lead_lost' | 'add_service_location' | 'log_time_entry' | 'notify_delay' | 'request_feedback' | 'emergency_dispatch' | 'onboarding_tenant_settings' | 'onboarding_service_category' | 'onboarding_estimate_template' | 'onboarding_team_member' | 'onboarding_schedule' | 'review_response_proposal' | 'send_payment_reminder' | 'apply_late_fee';
+export type ProposalType = 'create_customer' | 'update_customer' | 'create_job' | 'update_job' | 'create_appointment' | 'create_booking' | 'callback' | 'draft_estimate' | 'update_estimate' | 'draft_invoice' | 'update_invoice' | 'issue_invoice' | 'create_invoice_schedule' | 'batch_invoice' | 'reassign_appointment' | 'reschedule_appointment' | 'add_crew_member' | 'remove_crew_member' | 'cancel_appointment' | 'voice_clarification' | 'add_note' | 'send_invoice' | 'send_estimate' | 'send_estimate_nudge' | 'record_payment' | 'log_expense' | 'convert_lead' | 'confirm_appointment' | 'mark_lead_lost' | 'add_service_location' | 'log_time_entry' | 'notify_delay' | 'request_feedback' | 'emergency_dispatch' | 'onboarding_tenant_settings' | 'onboarding_service_category' | 'onboarding_estimate_template' | 'onboarding_team_member' | 'onboarding_schedule' | 'review_response_proposal' | 'send_payment_reminder' | 'apply_late_fee' | 'create_standing_instruction' | 'update_catalog_item' | 'adopt_entity_alias' | 'update_brand_voice';
 
 export const VALID_PROPOSAL_TYPES: ProposalType[] = [
   'create_customer',
   'update_customer',
   'create_job',
+  'update_job',
   'create_appointment',
   'create_booking',
   'callback',
@@ -70,7 +71,49 @@ export const VALID_PROPOSAL_TYPES: ProposalType[] = [
   'review_response_proposal',
   'send_payment_reminder',
   'apply_late_fee',
+  'create_standing_instruction',
+  'update_catalog_item',
+  'adopt_entity_alias',
+  'update_brand_voice',
 ];
+
+/**
+ * §5.5 Schedule proposal cards expire after 48 hours. These are the proposal
+ * types that put a specific time on the calendar (the booking/reschedule cards
+ * a contractor reviews) — if not acted on they go stale: the slot may pass or
+ * be taken, so a silently-lingering one could be approved into a conflict.
+ * Every OTHER proposal type persists indefinitely (its `expiresAt` is left
+ * unset). This list is the single source of truth for the expiry policy.
+ *
+ * Note: the product also speaks of "message schedule" proposals, but the live
+ * stack has no distinct scheduled-message proposal type — outbound messages
+ * (send_estimate/send_invoice/etc.) are comms proposals that intentionally
+ * persist until an operator acts. If a scheduled-message type is added later,
+ * add it here.
+ */
+export const SCHEDULE_PROPOSAL_TYPES: readonly ProposalType[] = [
+  'create_appointment',
+  'create_booking',
+  'reschedule_appointment',
+];
+
+/** §5.5 — 48 hours, in milliseconds. */
+export const SCHEDULE_PROPOSAL_EXPIRY_MS = 48 * 60 * 60 * 1000;
+
+export function isScheduleProposalType(type: ProposalType): boolean {
+  return SCHEDULE_PROPOSAL_TYPES.includes(type);
+}
+
+/**
+ * §5.5 Default expiry for a newly created proposal: schedule proposals get a
+ * 48-hour TTL from `now`; everything else persists (returns undefined). An
+ * explicit `expiresAt` supplied by the caller always takes precedence.
+ */
+export function defaultProposalExpiry(type: ProposalType, now: Date): Date | undefined {
+  return isScheduleProposalType(type)
+    ? new Date(now.getTime() + SCHEDULE_PROPOSAL_EXPIRY_MS)
+    : undefined;
+}
 
 export interface Proposal {
   id: string;
@@ -106,6 +149,12 @@ export interface Proposal {
   approvedAt?: Date;
   executedAt?: Date;
   executedBy?: string;
+  /**
+   * Role the approver held when they approved. Stamped at approval because
+   * the execution sweep runs detached from that request and cannot recover
+   * it. Absent on auto-approved and historical proposals.
+   */
+  executedByRole?: string;
   /** QA-2026-06-05: why execution failed — persisted so failed proposals are debuggable. */
   executionError?: string;
   claimedBy?: string;
@@ -188,6 +237,13 @@ export interface CreateProposalInput {
   supervisorMode?: Mode;
   supervisorPresent?: boolean;
   tenantThresholdOverride?: ResolveThresholdInput['tenantOverride'];
+  /**
+   * UB-D / D-015 — autonomous booking lane result, set ONLY by the
+   * inbound-receptionist booking call sites after
+   * `evaluateAutonomousBookingLane` (proposals/autonomous-lane.ts) passed
+   * every gate. See `decideInitialStatus.autonomousLane`.
+   */
+  autonomousLane?: { eligible: true; threshold: number };
 }
 
 /**
@@ -218,7 +274,7 @@ export function missingFieldsFor(proposal: Proposal): string[] {
 // `decideInitialStatus` is the SINGLE place where (action class, trust
 // tier, confidence) maps to an initial proposal status.
 
-export type ActionClass = 'capture' | 'comms' | 'money' | 'irreversible';
+export type ActionClass = 'capture' | 'comms' | 'money' | 'irreversible' | 'manual';
 export type TrustTier =
   | 'autonomous'
   | 'graduates_fast'
@@ -235,6 +291,12 @@ export function actionClassForProposalType(type: ProposalType): ActionClass {
     case 'create_customer':
     case 'update_customer':
     case 'create_job':
+    // B7 — update_job is a bounded, safe field edit (status/priority/
+    // title/description) to an EXISTING job — no money, no schedule (those
+    // have their own proposal paths). Mirrors update_estimate/
+    // update_invoice's capture classification: an AI-drafted edit to an
+    // existing entity, always human-approved before execution.
+    case 'update_job':
     case 'create_appointment':
     case 'create_booking':
     // A callback request is a low-risk capture: it asks an operator to
@@ -278,6 +340,18 @@ export function actionClassForProposalType(type: ProposalType): ActionClass {
     case 'mark_lead_lost':
     case 'add_service_location':
     case 'log_time_entry':
+    // UB-A2 — capturing a standing instruction WRITES a directive row, moves
+    // no money and contacts no customer; the instruction only ever shapes
+    // future DRAFTS (which are themselves reviewed). Capture-class, but the
+    // voice task handler deliberately omits sourceTrustTier, so the
+    // instruction itself always lands for human review in v1.
+    case 'create_standing_instruction':
+    // WS20 — updating a catalog item's unit price is a config change: it moves
+    // no money (only shapes FUTURE drafts, which are themselves reviewed),
+    // contacts no customer, and is reversible (edit the price back). Capture-
+    // class, but the correction loop creates it with no trust tier, so it
+    // always lands for human review — never auto-executed (D-004).
+    case 'update_catalog_item':
       return 'capture';
     // Delay notices and feedback requests are outbound customer-facing
     // messages — comms-class so they never auto-approve regardless of
@@ -343,6 +417,21 @@ export function actionClassForProposalType(type: ProposalType): ActionClass {
     // before any fee is charged.
     case 'apply_late_fee':
       return 'money';
+    // Tenant learning changes future resolver behavior. It is reversible, but
+    // never eligible for trust-tier graduation or one-tap capture batching:
+    // only an explicit owner approval may activate it.
+    case 'adopt_entity_alias':
+    // B1.18 — brand voice is the tenant's locked outbound identity; every
+    // future customer message is composed through it. A wrong extraction
+    // poisons every outbound message until corrected, so this is deliberately
+    // NOT 'capture' (capture is auto-approvable at high confidence under an
+    // autonomous tier). 'manual' makes "never auto-approves" STRUCTURAL —
+    // decideInitialStatus's only auto-approve branch requires
+    // sourceTrustTier === 'autonomous' AND action class === 'capture', so a
+    // manual-class type can never reach it at any trust tier or confidence
+    // (see b1.18-design.md and the AC-1 unit test).
+    case 'update_brand_voice':
+      return 'manual';
   }
 }
 
@@ -401,6 +490,20 @@ export function decideInitialStatus(input: {
    * that don't thread the payload) keep pre-RV-007 behavior exactly.
    */
   payload?: unknown;
+  /**
+   * UB-D / D-015 — autonomous booking lane. Set ONLY by the
+   * inbound-receptionist booking call sites after
+   * `evaluateAutonomousBookingLane` passed every gate (tenant opt-in,
+   * booking capture types only, clean resolution, live held slot in
+   * business hours, no session flags). When present-and-eligible AND the
+   * tenant is unsupervised (threshold resolution returned null), the lane's
+   * dedicated (stricter) threshold is used instead of categorically
+   * blocking. Absent input ⇒ behavior byte-identical to pre-lane code for
+   * every proposal type × trust tier × supervisorPresent combination
+   * (pinned by test). Money/comms/irreversible classes never reach this
+   * branch (it lives inside the `autonomous + capture` arm).
+   */
+  autonomousLane?: { eligible: true; threshold: number };
 }): ProposalStatus {
   // Missing required fields always land in 'draft' — a partial payload
   // can't be auto-approved even by an autonomous agent with high
@@ -437,6 +540,18 @@ export function decideInitialStatus(input: {
     });
 
     if (threshold === null) {
+      // UB-D / D-015 — the autonomous booking lane is the single, scoped
+      // exception to the unsupervised block: booking capture proposals
+      // from the inbound receptionist, tenant opted in, every lane gate
+      // passed (evaluated by the call site), judged against the lane's
+      // dedicated stricter threshold. Anything below it falls through to
+      // the normal unsupervised routing.
+      if (
+        input.autonomousLane?.eligible &&
+        shouldAutoApprove(input.confidenceScore, input.autonomousLane.threshold)
+      ) {
+        return 'approved';
+      }
       // Unsupervised. The proposal would have auto-approved if a
       // supervisor were present — surface it in the queue (rather than
       // 'draft') so the unsupervised-routing path picks it up. The
@@ -465,7 +580,85 @@ export interface ProposalRepository {
   findById(tenantId: string, id: string): Promise<Proposal | null>;
   findByTenant(tenantId: string): Promise<Proposal[]>;
   findByStatus(tenantId: string, status: ProposalStatus): Promise<Proposal[]>;
+  /**
+   * Scale-to-1000 (P3): proposals of `status` created on/after `since`, newest
+   * first, optionally capped at `limit`. Bounds a recurring sweep's working set
+   * in the DB (WHERE created_at >= $3 + the (tenant_id, status, created_at)
+   * index) instead of loading every row of that status and filtering by time in
+   * memory — the supervisor-review sweep's hot path. Optional so legacy fakes
+   * still satisfy the interface; callers fall back to findByStatus when absent.
+   */
+  findByStatusSince?(
+    tenantId: string,
+    status: ProposalStatus,
+    since: Date,
+    limit?: number,
+  ): Promise<Proposal[]>;
+  /**
+   * §5.5 — expired proposals of the given types that lapsed on/after `since`,
+   * newest first, capped at `limit`. Bounds the inbox's re-proposable list in
+   * the DB (WHERE + ORDER BY + LIMIT) instead of fetching every expired row and
+   * trimming in memory. Optional so legacy fakes still satisfy the interface;
+   * callers fall back to findByStatus + in-memory filtering when it's absent.
+   */
+  findExpiredScheduleProposals?(
+    tenantId: string,
+    proposalTypes: readonly ProposalType[],
+    since: Date,
+    limit: number,
+  ): Promise<Proposal[]>;
+  /**
+   * N-005 — proposals created in [from, to) whose `_meta.overallConfidence` is
+   * a blocking level ('low' | 'very_low'). Drives the digest "what I wasn't
+   * sure about today". Newest first, capped at `limit`. Optional so partial
+   * test doubles still satisfy the interface; the digest falls back to an empty
+   * section when it is absent.
+   */
+  findConfidenceMarkedForDay?(
+    tenantId: string,
+    from: Date,
+    to: Date,
+    limit?: number,
+  ): Promise<Proposal[]>;
+  /**
+   * D-015 amendment — proposals created in [from, to) that took the
+   * autonomous booking lane (`sourceContext.autonomousLaneEvaluation.eligible
+   * === true`). Drives the digest "Auto-booked: N appointment(s)"
+   * reflection. Newest first, capped at `limit`. Optional so partial test
+   * doubles still satisfy the interface; the digest falls back to an empty
+   * section when it is absent.
+   */
+  findAutonomousLaneApprovedForDay?(
+    tenantId: string,
+    from: Date,
+    to: Date,
+    limit?: number,
+  ): Promise<Proposal[]>;
+  /**
+   * WS10 — proposals created in [from, to) that carry at least one stamp in
+   * `payload._meta.appliedStandingInstructions` (see
+   * ai/standing-instructions-context.ts:36-39 — Array<{id, text}>, only
+   * stamped by drafting tasks when non-empty). Drives the digest "Applied
+   * your rule ..." reflection. Newest first, capped at `limit`. Optional so
+   * partial test doubles still satisfy the interface; the digest falls back
+   * to an empty section when it is absent.
+   */
+  findAppliedInstructionsForDay?(
+    tenantId: string,
+    from: Date,
+    to: Date,
+    limit?: number,
+  ): Promise<Proposal[]>;
   findByAiRun(tenantId: string, aiRunId: string): Promise<Proposal[]>;
+  /**
+   * Indexed lookup for deterministic producer deduplication. Optional so
+   * narrow legacy fakes remain source-compatible; both production repositories
+   * implement it.
+   */
+  findByIdempotencyKey?(
+    tenantId: string,
+    idempotencyKey: string,
+  ): Promise<Proposal | null>;
   /**
    * Indexed lookup for voice redelivery dedup (P1). Returns the most recent
    * proposal whose idempotencyKey === `idempotencyKey` (single-action path) OR
@@ -486,6 +679,30 @@ export interface ProposalRepository {
    * chain into one card.
    */
   findByChain(tenantId: string, chainId: string): Promise<Proposal[]>;
+  /**
+   * Conversation-scoped fetch — every proposal whose
+   * sourceContext.conversationId matches, filtered in SQL. Lets callers count
+   * per-conversation state (e.g. the Estimate Agent's clarification-loop count)
+   * without pulling a tenant-wide proposal set into memory. Optional so partial
+   * test doubles still satisfy the interface; both real repos implement it.
+   */
+  findByConversation?(tenantId: string, conversationId: string): Promise<Proposal[]>;
+  /**
+   * WS20 — proposals of `proposalType` that carry a matching
+   * `sourceContext.correctionTarget` (`{ kind, key }`), optionally filtered to
+   * `statuses`. Backs the correction-repetition dedup: a meta-proposal for the
+   * same catalog SKU (or banned phrase) that is already open (draft /
+   * ready_for_review) suppresses a duplicate; a rejected one suppresses until a
+   * NEWER correction re-earns it. Filtered in SQL on the JSONB path so a
+   * tenant-wide proposal set is never pulled into memory. Optional so partial
+   * test doubles still satisfy the interface; both real repos implement it.
+   */
+  findByCorrectionTarget?(
+    tenantId: string,
+    proposalType: ProposalType,
+    target: { kind: string; key: string },
+    statuses?: readonly ProposalStatus[],
+  ): Promise<Proposal[]>;
   updateStatus(
     tenantId: string,
     id: string,
@@ -499,6 +716,7 @@ export interface ProposalRepository {
         | 'approvedAt'
         | 'executedAt'
         | 'executedBy'
+        | 'executedByRole'
         | 'executionError'
         | 'undoneAt'
         | 'undoneBy'
@@ -586,6 +804,23 @@ export function validateProposalInput(input: CreateProposalInput): string[] {
 
 export function createProposal(input: CreateProposalInput): Proposal {
   const now = new Date();
+  // The load-bearing signal is the explicit `voiceMutation` flag every voice
+  // call site sets — a conversational readback confirms interpretation, never
+  // authorization. RIVET P4: an S1 (inbound, unauthenticated caller) surface
+  // is treated the same way — a stranger's transcript can never carry an
+  // autonomous trust tier into an auto-approve. (The previous
+  // `'inapp_voice'`/`'telephony_voice'` channel comparisons were dead — real
+  // channels are `'telephony'`/`'inapp'` — so the `voiceMutation` flag and the
+  // surface stamp are the two real guards, not a channel string.)
+  const voiceMutation =
+    input.sourceContext?.voiceMutation === true ||
+    input.sourceContext?.surface === 'S1';
+  // The only voice-originated exception is the separately gated autonomous
+  // booking lane, whose evaluation is explicit and auditable.
+  const effectiveTrustTier =
+    voiceMutation && !input.autonomousLane?.eligible
+      ? undefined
+      : input.sourceTrustTier;
   // Rivet P2 F-1 — Supervisor Agent v1 hook point. Evaluated BEFORE the
   // trust-tier decision so the deterministic tenant policy (budget caps,
   // blocked types) sees every proposal at creation. The hook is a
@@ -609,7 +844,7 @@ export function createProposal(input: CreateProposalInput): Proposal {
   // exactly as before — every existing test and AI task is unchanged.
   const baselineStatus = decideInitialStatus({
     proposalType: input.proposalType,
-    sourceTrustTier: input.sourceTrustTier,
+    sourceTrustTier: effectiveTrustTier,
     confidenceScore: input.confidenceScore,
     missingFields: input.missingFields,
     // Phase 12: forward the supervisor-gating signals. Previously these
@@ -625,6 +860,11 @@ export function createProposal(input: CreateProposalInput): Proposal {
     // through createProposal → decideInitialStatus, so this is the
     // single wiring point.
     payload: input.payload,
+    // UB-D / D-015: the autonomous booking lane input, set only by the
+    // inbound-receptionist booking call sites after every lane gate
+    // passed. The supervisor hook below still runs and can only
+    // downgrade — a policy block/force_review beats the lane.
+    autonomousLane: input.autonomousLane,
   });
   // Supervisor verdict application:
   //   'block'        → 'draft' (decideInitialStatus result discarded);
@@ -680,7 +920,9 @@ export function createProposal(input: CreateProposalInput): Proposal {
     targetEntityType: input.targetEntityType,
     targetEntityId: input.targetEntityId,
     idempotencyKey: input.idempotencyKey,
-    expiresAt: input.expiresAt,
+    // §5.5 — schedule proposals default to a 48h TTL; an explicit caller
+    // value always wins, and non-schedule types stay unset (persist).
+    expiresAt: input.expiresAt ?? defaultProposalExpiry(input.proposalType, now),
     chainId: input.chainId,
     approvedAt,
     createdBy: input.createdBy,
@@ -762,10 +1004,131 @@ export class InMemoryProposalRepository implements ProposalRepository {
       .map((p) => ({ ...p }));
   }
 
+  async findByStatusSince(
+    tenantId: string,
+    status: ProposalStatus,
+    since: Date,
+    limit?: number,
+  ): Promise<Proposal[]> {
+    const rows = Array.from(this.proposals.values())
+      .filter(
+        (p) =>
+          p.tenantId === tenantId &&
+          p.status === status &&
+          p.createdAt.getTime() >= since.getTime(),
+      )
+      .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())
+      .map((p) => ({ ...p }));
+    return typeof limit === 'number' ? rows.slice(0, limit) : rows;
+  }
+
+  async findExpiredScheduleProposals(
+    tenantId: string,
+    proposalTypes: readonly ProposalType[],
+    since: Date,
+    limit: number,
+  ): Promise<Proposal[]> {
+    return Array.from(this.proposals.values())
+      .filter(
+        (p) =>
+          p.tenantId === tenantId &&
+          p.status === 'expired' &&
+          proposalTypes.includes(p.proposalType) &&
+          !!p.expiresAt &&
+          p.expiresAt.getTime() >= since.getTime(),
+      )
+      .sort((a, b) => (b.expiresAt?.getTime() ?? 0) - (a.expiresAt?.getTime() ?? 0))
+      .slice(0, limit)
+      .map((p) => ({ ...p }));
+  }
+
+  async findConfidenceMarkedForDay(
+    tenantId: string,
+    from: Date,
+    to: Date,
+    limit?: number,
+  ): Promise<Proposal[]> {
+    const BLOCKING = new Set(['low', 'very_low']);
+    const rows = Array.from(this.proposals.values())
+      .filter((p) => {
+        if (p.tenantId !== tenantId) return false;
+        const t = p.createdAt.getTime();
+        if (t < from.getTime() || t >= to.getTime()) return false;
+        const meta = (p.payload as Record<string, unknown>)?._meta;
+        const overall =
+          meta && typeof meta === 'object'
+            ? (meta as Record<string, unknown>).overallConfidence
+            : undefined;
+        return typeof overall === 'string' && BLOCKING.has(overall);
+      })
+      .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())
+      .map((p) => ({ ...p }));
+    return typeof limit === 'number' ? rows.slice(0, limit) : rows;
+  }
+
+  async findAutonomousLaneApprovedForDay(
+    tenantId: string,
+    from: Date,
+    to: Date,
+    limit?: number,
+  ): Promise<Proposal[]> {
+    const rows = Array.from(this.proposals.values())
+      .filter((p) => {
+        if (p.tenantId !== tenantId) return false;
+        const t = p.createdAt.getTime();
+        if (t < from.getTime() || t >= to.getTime()) return false;
+        const evaluation = (p.sourceContext as Record<string, unknown> | undefined)
+          ?.autonomousLaneEvaluation;
+        return (
+          !!evaluation &&
+          typeof evaluation === 'object' &&
+          (evaluation as Record<string, unknown>).eligible === true
+        );
+      })
+      .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())
+      .map((p) => ({ ...p }));
+    return typeof limit === 'number' ? rows.slice(0, limit) : rows;
+  }
+
+  async findAppliedInstructionsForDay(
+    tenantId: string,
+    from: Date,
+    to: Date,
+    limit?: number,
+  ): Promise<Proposal[]> {
+    const rows = Array.from(this.proposals.values())
+      .filter((p) => {
+        if (p.tenantId !== tenantId) return false;
+        const t = p.createdAt.getTime();
+        if (t < from.getTime() || t >= to.getTime()) return false;
+        const meta = (p.payload as Record<string, unknown> | undefined)?._meta;
+        const applied =
+          meta && typeof meta === 'object'
+            ? (meta as Record<string, unknown>).appliedStandingInstructions
+            : undefined;
+        return Array.isArray(applied) && applied.length > 0;
+      })
+      .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())
+      .map((p) => ({ ...p }));
+    return typeof limit === 'number' ? rows.slice(0, limit) : rows;
+  }
+
   async findByAiRun(tenantId: string, aiRunId: string): Promise<Proposal[]> {
     return Array.from(this.proposals.values())
       .filter((p) => p.tenantId === tenantId && p.aiRunId === aiRunId)
       .map((p) => ({ ...p }));
+  }
+
+  async findByIdempotencyKey(
+    tenantId: string,
+    idempotencyKey: string,
+  ): Promise<Proposal | null> {
+    const proposal = Array.from(this.proposals.values()).find(
+      (candidate) =>
+        candidate.tenantId === tenantId &&
+        candidate.idempotencyKey === idempotencyKey,
+    );
+    return proposal ? { ...proposal } : null;
   }
 
   async findByRecordingId(
@@ -796,6 +1159,35 @@ export class InMemoryProposalRepository implements ProposalRepository {
       });
   }
 
+  async findByConversation(tenantId: string, conversationId: string): Promise<Proposal[]> {
+    return Array.from(this.proposals.values())
+      .filter(
+        (p) =>
+          p.tenantId === tenantId &&
+          (p.sourceContext as Record<string, unknown> | undefined)?.conversationId ===
+            conversationId,
+      )
+      .map((p) => ({ ...p }));
+  }
+
+  async findByCorrectionTarget(
+    tenantId: string,
+    proposalType: ProposalType,
+    target: { kind: string; key: string },
+    statuses?: readonly ProposalStatus[],
+  ): Promise<Proposal[]> {
+    return Array.from(this.proposals.values())
+      .filter((p) => {
+        if (p.tenantId !== tenantId || p.proposalType !== proposalType) return false;
+        if (statuses && !statuses.includes(p.status)) return false;
+        const ct = (p.sourceContext as Record<string, unknown> | undefined)?.correctionTarget as
+          | { kind?: unknown; key?: unknown }
+          | undefined;
+        return ct?.kind === target.kind && ct?.key === target.key;
+      })
+      .map((p) => ({ ...p }));
+  }
+
   async updateStatus(
     tenantId: string,
     id: string,
@@ -809,6 +1201,7 @@ export class InMemoryProposalRepository implements ProposalRepository {
         | 'approvedAt'
         | 'executedAt'
         | 'executedBy'
+        | 'executedByRole'
         | 'executionError'
         | 'undoneAt'
         | 'undoneBy'
@@ -828,6 +1221,7 @@ export class InMemoryProposalRepository implements ProposalRepository {
       if (updates.executionError !== undefined) proposal.executionError = updates.executionError;
       if (updates.executedAt !== undefined) proposal.executedAt = updates.executedAt;
       if (updates.executedBy !== undefined) proposal.executedBy = updates.executedBy;
+      if (updates.executedByRole !== undefined) proposal.executedByRole = updates.executedByRole;
       if (updates.undoneAt !== undefined) proposal.undoneAt = updates.undoneAt;
       if (updates.undoneBy !== undefined) proposal.undoneBy = updates.undoneBy;
     }

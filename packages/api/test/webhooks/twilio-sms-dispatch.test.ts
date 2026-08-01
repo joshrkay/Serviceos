@@ -77,7 +77,10 @@ beforeEach(() => {
 });
 
 describe('P2-034 — Twilio SMS webhook → keyword dispatcher integration', () => {
-  it('invokes dispatcher AFTER markProcessed succeeds and returns 200', async () => {
+  it('stamps markProcessed only AFTER the dispatcher ran (at-least-once)', async () => {
+    // Ordering is the crash-safety contract: if the process dies mid-dispatch
+    // the row must still be 'received' so Twilio's retry reprocesses it.
+    // (markProcessed-before-dispatch turned crashes into lost messages.)
     const callOrder: string[] = [];
     const repo = {
       recordReceipt: vi.fn(async () => {
@@ -104,15 +107,18 @@ describe('P2-034 — Twilio SMS webhook → keyword dispatcher integration', () 
       .send('AccountSid=AC-real&MessageSid=SM-1&From=%2B15551234567&Body=OUT');
 
     expect(res.status).toBe(200);
-    expect(callOrder).toEqual(['recordReceipt', 'markProcessed', 'handler']);
+    expect(callOrder).toEqual(['recordReceipt', 'handler', 'markProcessed']);
   });
 
-  it('does NOT dispatch on a duplicate (inserted=false) — short-circuits with duplicate:true', async () => {
+  it('does NOT dispatch on a fully-processed duplicate — short-circuits with duplicate:true', async () => {
     const handleSpy = vi.fn(async () => ({ handled: true }));
     registerKeywordHandler({ keywords: ['OUT'], handle: handleSpy });
 
     const repo = {
-      recordReceipt: vi.fn().mockResolvedValue({ inserted: false }),
+      recordReceipt: vi.fn().mockResolvedValue({
+        inserted: false,
+        record: { processedAt: new Date() },
+      }),
       markProcessed: vi.fn().mockResolvedValue(undefined),
     };
     const app = buildApp({ webhookEventRepo: repo as any });
@@ -126,6 +132,32 @@ describe('P2-034 — Twilio SMS webhook → keyword dispatcher integration', () 
     expect(res.body).toEqual({ received: true, duplicate: true });
     expect(handleSpy).not.toHaveBeenCalled();
     expect(repo.markProcessed).not.toHaveBeenCalled();
+  });
+
+  it('REPROCESSES a received-but-never-processed duplicate (crash recovery)', async () => {
+    // inserted=false with processedAt=null means an earlier delivery died
+    // between receipt and dispatch — the retry must run the handler.
+    const handleSpy = vi.fn(async () => ({ handled: true, handler: 'tech-status' }));
+    registerKeywordHandler({ keywords: ['OUT'], handle: handleSpy });
+
+    const repo = {
+      recordReceipt: vi.fn().mockResolvedValue({
+        inserted: false,
+        record: { processedAt: null },
+      }),
+      markProcessed: vi.fn().mockResolvedValue(undefined),
+    };
+    const app = buildApp({ webhookEventRepo: repo as any });
+
+    const res = await request(app)
+      .post(`/webhooks/twilio/sms/${TENANT_ID}`)
+      .set('x-twilio-signature', 'ok')
+      .send('AccountSid=AC-real&MessageSid=SM-crash&From=%2B15551234567&Body=OUT');
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ received: true });
+    expect(handleSpy).toHaveBeenCalledTimes(1);
+    expect(repo.markProcessed).toHaveBeenCalledTimes(1);
   });
 
   it('returns 200 when a handler throws (dispatcher swallows the error)', async () => {

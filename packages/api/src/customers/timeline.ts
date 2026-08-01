@@ -11,6 +11,7 @@
  * pure mapper functions used by `timeline-service.ts`.
  */
 import { z } from 'zod';
+import { formatUsdCentsPlain } from '@ai-service-os/shared';
 import type { InternalNote } from '../notes/note';
 import type { Job } from '../jobs/job';
 import type { JobTimelineEntry } from '../jobs/job-lifecycle';
@@ -392,10 +393,7 @@ function labelForKind(kind: TimelineKind): string {
   }
 }
 
-function formatCents(cents: number): string {
-  const dollars = (cents / 100).toFixed(2);
-  return `$${dollars}`;
-}
+const formatCents = formatUsdCentsPlain;
 
 /**
  * Sort-and-slice helper. Pure — exposed for unit tests.

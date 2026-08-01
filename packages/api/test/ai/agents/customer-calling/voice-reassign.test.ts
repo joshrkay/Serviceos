@@ -85,10 +85,13 @@ describe('P18-006 voice-reassign — reassign_appointment FSM voice flow', () =>
     const adapter = makeAdapter(gateway);
     const { sessionId } = await adapter.startSession(TENANT, USER);
 
-    const result = await adapter.handleInput(
+    // Turn 1 parks at the intent_confirm readback; the caller's "yes" on
+    // turn 2 confirms and queues the proposal (auto-confirm removed).
+    await adapter.handleInput(
       sessionId,
       'reassign the Acme Corp appointment to Bob Sanchez'
     );
+    const result = await adapter.handleInput(sessionId, 'yes');
 
     expect(result.state).toBe('closing');
     expect(result.proposalIds.length).toBe(1);
@@ -129,10 +132,11 @@ describe('P18-006 voice-reassign — reassign_appointment FSM voice flow', () =>
     ]);
     const adapter = makeAdapter(gateway);
     const { sessionId } = await adapter.startSession(TENANT, USER);
-    const result = await adapter.handleInput(
+    await adapter.handleInput(
       sessionId,
       'give APT-OFF to Carla even though she is off'
     );
+    const result = await adapter.handleInput(sessionId, 'yes');
     expect(result.state).toBe('closing');
     const [p] = await proposalRepo.findByTenant(TENANT);
     expect(p.proposalType).toBe('reassign_appointment');
@@ -174,10 +178,11 @@ describe('P18-006 voice-reassign — reassign_appointment FSM voice flow', () =>
     ]);
     const adapter = makeAdapter(gateway);
     const { sessionId } = await adapter.startSession(TENANT, USER);
-    const result = await adapter.handleInput(
+    await adapter.handleInput(
       sessionId,
       'reassign APT-MISS to Bob the imaginary'
     );
+    const result = await adapter.handleInput(sessionId, 'yes');
     expect(result.state).toBe('closing');
     const [p] = await proposalRepo.findByTenant(TENANT);
     expect(p.proposalType).toBe('reassign_appointment');
@@ -236,6 +241,7 @@ describe('P18-006 voice-reassign — reassign_appointment FSM voice flow', () =>
     const adapter = makeAdapter(gateway);
     const { sessionId } = await adapter.startSession(TENANT, USER);
     await adapter.handleInput(sessionId, 'reassign APT-RACE to Voice Tech');
+    await adapter.handleInput(sessionId, 'yes');
 
     // Concurrent UI drag-drop persists a second proposal directly via repo.
     const { createProposal } = await import('../../../../src/proposals/proposal');
@@ -298,7 +304,9 @@ describe('P18-006 voice-reassign — reassign_appointment FSM voice flow', () =>
     const { sessionId: sa } = await adapterA.startSession('tenant-A', 'user-A');
     const { sessionId: sb } = await adapterB.startSession('tenant-B', 'user-B');
     await adapterA.handleInput(sa, 'reassign APT-A to Tech A');
+    await adapterA.handleInput(sa, 'yes');
     await adapterB.handleInput(sb, 'reassign APT-B to Tech B');
+    await adapterB.handleInput(sb, 'yes');
 
     const propsA = await proposalRepo.findByTenant('tenant-A');
     const propsB = await proposalRepo.findByTenant('tenant-B');

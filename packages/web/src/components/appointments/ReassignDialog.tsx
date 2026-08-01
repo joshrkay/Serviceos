@@ -9,6 +9,13 @@ interface UserOption {
 
 export interface ReassignDialogProps {
   appointmentId: string;
+  /**
+   * The appointment's parent job. Assignment is persisted on the job's
+   * `assignedTechnicianId` — the appointment PUT has no assignment field,
+   * so the previous `PUT /api/appointments/:id { assignedUserId }` was a
+   * silent no-op that faked success.
+   */
+  jobId: string;
   initialAssignedUserId?: string;
   onSaved?: () => void;
   onCancel?: () => void;
@@ -18,12 +25,14 @@ export interface ReassignDialogProps {
  * P11-007 — ReassignDialog.
  *
  * Loads the technician roster from /api/users?role=technician (when
- * available) and PUTs the new assignedUserId. If the users endpoint
+ * available) and assigns the chosen technician to the appointment's job
+ * via PUT /api/jobs/:id { assignedTechnicianId }. If the users endpoint
  * isn't reachable, we fall back to a manual ID input so the operator
  * is never blocked.
  */
 export function ReassignDialog({
   appointmentId,
+  jobId,
   initialAssignedUserId,
   onSaved,
   onCancel,
@@ -72,9 +81,11 @@ export function ReassignDialog({
 
       setSubmitting(true);
       try {
-        const res = await apiFetch(`/api/appointments/${appointmentId}`, {
+        // Assignment lives on the job, not the appointment — the appointment
+        // update endpoint ignores assignment fields entirely.
+        const res = await apiFetch(`/api/jobs/${jobId}`, {
           method: 'PUT',
-          body: JSON.stringify({ assignedUserId: selectedId.trim() }),
+          body: JSON.stringify({ assignedTechnicianId: selectedId.trim() }),
         });
         if (!res.ok) {
           const json = await res.json().catch(() => ({}));
@@ -87,7 +98,7 @@ export function ReassignDialog({
         setSubmitting(false);
       }
     },
-    [appointmentId, selectedId, onSaved]
+    [jobId, selectedId, onSaved]
   );
 
   const inputCls = 'w-full rounded-lg border border-slate-200 px-3 py-2 text-sm';

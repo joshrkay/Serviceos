@@ -14,6 +14,13 @@ export interface SentimentInput {
   transcript: string;
   priorTurns: ReadonlyArray<{ role: 'caller' | 'ai'; text: string }>;
   intent: string;
+  /**
+   * Threaded through to the gateway's top-level `tenantId` so the
+   * `call_sentiment` task keys the tenant's own concurrency quota / cache
+   * bucket rather than falling back to the shared SYSTEM_TENANT_ID bucket
+   * (see gateway.ts's `enforceTopLevelTenantId`).
+   */
+  tenantId: string;
 }
 
 export interface SentimentDeps {

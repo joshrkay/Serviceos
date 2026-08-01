@@ -1,11 +1,7 @@
 /**
- * Tier 4 (Deposit rules — PR 1: data plane only).
- *
- * Closes the "Deposit rules" stub in SettingsPage. Lets the tenant
- * pick a deposit strategy (none / percentage / fixed amount) and an
- * optional threshold above which the rule applies. The value persists
- * end-to-end through Settings UI and DB. Estimates do NOT yet enforce
- * the rule — that lands in PR 2.
+ * Deposit rules settings — strategy (none / percentage / fixed) and
+ * optional threshold. Persists through Settings UI and DB. Estimates
+ * do not yet enforce the rule at draft time (separate follow-up).
  *
  * Field correlation mirrors the Zod schema + DB CHECK constraint:
  *   - 'none' (UI label for null strategy): all amount fields cleared.

@@ -1,4 +1,6 @@
 import React from 'react';
+import { useTenantTimezone } from '../../hooks/useTenantTimezone';
+import { formatTimeInTenantTz } from '../../utils/formatInTenantTz';
 
 export interface AppointmentEditingInfo {
   userId: string;
@@ -64,13 +66,16 @@ export interface AppointmentCardProps {
   onRemoveCoAssignee?: (appointmentId: string, technicianId: string) => void;
 }
 
-function formatTime(iso: string): string {
-  return new Date(iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+// Journey QA 2026-07-02 (bug 4) — dispatch rendered times in the BROWSER tz
+// while the schedule page rendered tenant tz, so the same appointment showed
+// two different times. Core pattern: stored UTC, rendered in TENANT tz.
+function formatTime(iso: string, tz: string): string {
+  return formatTimeInTenantTz(iso, tz);
 }
 
-function formatArrivalWindow(start?: string, end?: string): string | null {
+function formatArrivalWindow(tz: string, start?: string, end?: string): string | null {
   if (!start || !end) return null;
-  return `${formatTime(start)} - ${formatTime(end)}`;
+  return `${formatTime(start, tz)} - ${formatTime(end, tz)}`;
 }
 
 function getStatusClass(status: string): string {
@@ -95,6 +100,7 @@ export function AppointmentCard({
   onAddCrew,
   onRemoveCoAssignee,
 }: AppointmentCardProps) {
+  const tz = useTenantTimezone();
   const coAssignees = appointment.coAssignees ?? [];
   const editing =
     appointment.editing &&
@@ -103,6 +109,7 @@ export function AppointmentCard({
       ? appointment.editing
       : null;
   const arrivalWindow = formatArrivalWindow(
+    tz,
     appointment.arrivalWindowStart,
     appointment.arrivalWindowEnd
   );
@@ -133,7 +140,7 @@ export function AppointmentCard({
     >
       <div className="appointment-card__header">
         <span className="appointment-card__time" data-testid="appointment-time">
-          {formatTime(appointment.scheduledStart)} - {formatTime(appointment.scheduledEnd)}
+          {formatTime(appointment.scheduledStart, tz)} - {formatTime(appointment.scheduledEnd, tz)}
         </span>
         {isHold && (
           <span

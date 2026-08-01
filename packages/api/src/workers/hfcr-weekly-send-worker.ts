@@ -14,6 +14,7 @@
  * are skipped (no $0 spam).
  */
 import { v4 as uuidv4 } from 'uuid';
+import { formatUsdCentsFixed } from '@ai-service-os/shared';
 import { Logger } from '../logging/logger';
 import { PaymentRepository } from '../invoices/payment';
 import { ProposalRepository } from '../proposals/proposal';
@@ -50,14 +51,7 @@ function dateString(d: Date): string {
   return d.toISOString().slice(0, 10);
 }
 
-const CURRENCY_FORMATTER = new Intl.NumberFormat('en-US', {
-  style: 'currency',
-  currency: 'USD',
-});
-
-function formatMoneyCents(cents: number): string {
-  return CURRENCY_FORMATTER.format(cents / 100);
-}
+const formatMoneyCents = formatUsdCentsFixed;
 
 export function composeWeeklyHfcrSms(hfcrCents: number, recoveredCallCount: number): string {
   const money = formatMoneyCents(hfcrCents);

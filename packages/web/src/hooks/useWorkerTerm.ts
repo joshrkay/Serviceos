@@ -12,6 +12,11 @@ import { useApiClient } from '../lib/apiClient';
 
 let cachedWorkerTerm: string | null = null;
 
+/** Drop the cached term so the next mount re-reads it (call on sign-out / tenant switch). */
+export function clearWorkerTermCache(): void {
+  cachedWorkerTerm = null;
+}
+
 export function useWorkerTerm(): string {
   const apiFetch = useApiClient();
   const [workerTerm, setWorkerTerm] = useState<string>(cachedWorkerTerm ?? 'Technician');

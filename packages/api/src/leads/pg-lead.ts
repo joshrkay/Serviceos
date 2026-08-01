@@ -53,6 +53,13 @@ function mapRow(row: Record<string, unknown>): Lead {
     lostReason: (row.lost_reason as string) ?? undefined,
     preferredLanguage:
       (row.preferred_language as 'en' | 'es' | null | undefined) ?? undefined,
+    street1: (row.street1 as string) ?? undefined,
+    street2: (row.street2 as string) ?? undefined,
+    city: (row.city as string) ?? undefined,
+    state: (row.state as string) ?? undefined,
+    postalCode: (row.postal_code as string) ?? undefined,
+    country: (row.country as string) ?? undefined,
+    accessNotes: (row.access_notes as string) ?? undefined,
     createdBy: row.created_by as string,
     createdAt: new Date(row.created_at as string),
     updatedAt: new Date(row.updated_at as string),
@@ -71,9 +78,11 @@ export class PgLeadRepository extends PgBaseRepository implements LeadRepository
           id, tenant_id, first_name, last_name, company_name, primary_phone, email,
           source, source_detail, utm_source, utm_medium, utm_campaign, attribution,
           stage, estimated_value_cents, notes, assigned_user_id,
-          converted_customer_id, lost_reason, created_by, created_at, updated_at
+          converted_customer_id, lost_reason, created_by, created_at, updated_at,
+          street1, street2, city, state, postal_code, country, access_notes
         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13::jsonb,
-                  $14, $15, $16, $17, $18, $19, $20, $21, $22)
+                  $14, $15, $16, $17, $18, $19, $20, $21, $22,
+                  $23, $24, $25, $26, $27, $28, $29)
         RETURNING *`,
         [
           lead.id,
@@ -98,6 +107,13 @@ export class PgLeadRepository extends PgBaseRepository implements LeadRepository
           lead.createdBy,
           lead.createdAt,
           lead.updatedAt,
+          lead.street1 ?? null,
+          lead.street2 ?? null,
+          lead.city ?? null,
+          lead.state ?? null,
+          lead.postalCode ?? null,
+          lead.country ?? null,
+          lead.accessNotes ?? null,
         ]
       );
       return mapRow(result.rows[0]);
@@ -243,6 +259,13 @@ export class PgLeadRepository extends PgBaseRepository implements LeadRepository
       convertedCustomerId: 'converted_customer_id',
       lostReason: 'lost_reason',
       preferredLanguage: 'preferred_language',
+      street1: 'street1',
+      street2: 'street2',
+      city: 'city',
+      state: 'state',
+      postalCode: 'postal_code',
+      country: 'country',
+      accessNotes: 'access_notes',
       updatedAt: 'updated_at',
     };
 

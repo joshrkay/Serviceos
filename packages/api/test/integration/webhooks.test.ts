@@ -92,3 +92,50 @@ describe('Postgres integration — webhooks', () => {
     await expect(repo.updateStatus(randomUUID(), 'processed')).resolves.toBeUndefined();
   });
 });
+
+describe('Postgres integration — P0-8 retry claim CAS', () => {
+  let pool: Pool;
+  let repo: PgWebhookRepository;
+
+  beforeAll(async () => {
+    pool = await getSharedTestDb();
+    repo = new PgWebhookRepository(pool);
+  });
+
+  afterAll(async () => {
+    await closeSharedTestDb();
+  });
+
+  it('exactly one of N concurrent retries of a FAILED row wins the claim', async () => {
+    const event = await repo.create(makeEvent({ status: 'failed' }));
+
+    const claims = await Promise.all([
+      repo.claimForRetry(event.id, 30_000),
+      repo.claimForRetry(event.id, 30_000),
+      repo.claimForRetry(event.id, 30_000),
+    ]);
+
+    const winners = claims.filter((c) => c !== null);
+    expect(winners).toHaveLength(1);
+    expect(winners[0]!.status).toBe('processing');
+  });
+
+  it('a stale in-flight row is claimable once; a fresh one is not claimable at all', async () => {
+    const stale = await repo.create(
+      makeEvent({ status: 'processing', createdAt: new Date(Date.now() - 60_000) }),
+    );
+    const fresh = await repo.create(makeEvent({ status: 'processing' }));
+
+    // Stale: first claim wins and refreshes created_at, so a follow-up claim
+    // sees a FRESH in-flight row and loses — the third-retry window is closed.
+    expect(await repo.claimForRetry(stale.id, 30_000)).not.toBeNull();
+    expect(await repo.claimForRetry(stale.id, 30_000)).toBeNull();
+
+    expect(await repo.claimForRetry(fresh.id, 30_000)).toBeNull();
+  });
+
+  it('a processed row is never claimable', async () => {
+    const event = await repo.create(makeEvent({ status: 'processed' }));
+    expect(await repo.claimForRetry(event.id, 30_000)).toBeNull();
+  });
+});

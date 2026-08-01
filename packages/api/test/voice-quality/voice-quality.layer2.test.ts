@@ -140,9 +140,22 @@ describe('Voice Quality Layer 2 — corpus', () => {
   }
 
   if (!hasKeys) {
+    // In CI mode (VOICE_QUALITY_LAYER2=true), missing keys must FAIL the gate,
+    // not skip — a skipped test exits 0 and allows a false-green deploy.
+    // Local/dev runs (VOICE_QUALITY_LAYER2 unset) still skip gracefully.
+    const isLayer2CIMode = process.env.VOICE_QUALITY_LAYER2 === 'true';
+    if (isLayer2CIMode) {
+      it('VQ2-016 — Layer 2 requires ANTHROPIC_API_KEY + OPENAI_API_KEY (CI mode — must fail)', () => {
+        throw new Error(
+          'Layer 2 CI mode requires ANTHROPIC_API_KEY and OPENAI_API_KEY. ' +
+            'One or both are missing. This is a gate failure, not a skip.',
+        );
+      });
+      return;
+    }
     writeEmptyReport();
     it.skip(
-      'VQ2-016 — Layer 2 requires ANTHROPIC_API_KEY + OPENAI_API_KEY (skipping in env without keys)',
+      'VQ2-016 — Layer 2 requires ANTHROPIC_API_KEY + OPENAI_API_KEY (skipping in local env without keys)',
       () => {
         expect(true).toBe(true);
       },

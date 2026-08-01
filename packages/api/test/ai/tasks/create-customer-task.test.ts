@@ -10,6 +10,7 @@ import {
   CreateCustomerVoiceTaskHandler,
   CREATE_CUSTOMER_CONFIRMATION_TTS,
   resolvePhone,
+  capitalizeSpokenName,
 } from '../../../src/ai/tasks/create-customer-task';
 import {
   classifyIntent,
@@ -461,5 +462,530 @@ describe('RV-007 — create-customer task populates payload._meta', () => {
     });
 
     expect(out.proposal!.payload._meta).toBeUndefined();
+  });
+});
+
+describe('4.3 — duplicate check before the proposal card', () => {
+  // Minimal duplicate loader stub: returns a single same-tenant customer
+  // whose phone matches, so checkCustomerDuplicatesPg scores a high-confidence
+  // phone warning. Mirrors the CustomerDuplicateLoader contract.
+  function loaderWithMatch(): {
+    findDuplicates: (
+      tenantId: string,
+      criteria: { phone?: string; email?: string; name?: string }
+    ) => Promise<Array<Record<string, unknown>>>;
+  } {
+    return {
+      findDuplicates: async (tenantId: string) => [
+        {
+          id: 'existing-cust-1',
+          tenantId,
+          firstName: 'Alex',
+          lastName: 'Smith',
+          displayName: 'Alex Smith',
+          primaryPhone: '+15551230100',
+          preferredChannel: 'phone',
+          smsConsent: false,
+          isArchived: false,
+          createdBy: 'u',
+          createdAt: new Date(),
+          updatedAt: new Date(),
+        },
+      ],
+    };
+  }
+
+  it('embeds duplicateWarnings in sourceContext when a loader is wired and a match exists', async () => {
+    const handler = new CreateCustomerVoiceTaskHandler({
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      duplicateLoader: loaderWithMatch() as any,
+    });
+    const out = await handler.run({
+      tenantId: TENANT,
+      message: "I'd like to sign up as a new customer",
+      conversationId: SESSION,
+      userId: SYSTEM_USER,
+      existingEntities: {
+        displayName: 'Alex Smith',
+        callerIdPhone: '+15551230100',
+      },
+    });
+    expect(out.status).toBe('proposal_drafted');
+    const ctx = out.proposal!.sourceContext as Record<string, unknown>;
+    expect(ctx.hasPossibleDuplicates).toBe(true);
+    const warnings = ctx.duplicateWarnings as Array<{ matchType: string; existingId: string }>;
+    expect(warnings.length).toBeGreaterThanOrEqual(1);
+    expect(warnings.find((w) => w.matchType === 'phone')?.existingId).toBe('existing-cust-1');
+  });
+
+  it('omits duplicate fields when no loader is wired (unchanged behavior)', async () => {
+    const handler = new CreateCustomerVoiceTaskHandler();
+    const out = await handler.run({
+      tenantId: TENANT,
+      message: "I'd like to sign up as a new customer",
+      conversationId: SESSION,
+      userId: SYSTEM_USER,
+      existingEntities: {
+        displayName: 'Alex Smith',
+        callerIdPhone: '+15551230100',
+      },
+    });
+    const ctx = out.proposal!.sourceContext as Record<string, unknown>;
+    expect(ctx.hasPossibleDuplicates).toBeUndefined();
+    expect(ctx.duplicateWarnings).toBeUndefined();
+  });
+
+  it('still drafts the proposal when the loader throws (best-effort, non-blocking)', async () => {
+    const handler = new CreateCustomerVoiceTaskHandler({
+      duplicateLoader: {
+        findDuplicates: async () => {
+          throw new Error('db down');
+        },
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      } as any,
+    });
+    const out = await handler.run({
+      tenantId: TENANT,
+      message: "I'd like to sign up",
+      conversationId: SESSION,
+      userId: SYSTEM_USER,
+      existingEntities: {
+        displayName: 'Alex Smith',
+        callerIdPhone: '+15551230100',
+      },
+    });
+    expect(out.status).toBe('proposal_drafted');
+    expect(out.proposal).toBeDefined();
+  });
+});
+
+// ─── B8 — draft-time duplicate detection parity ───────────────────────────
+// Prior to B8, the advisory `duplicateWarnings` computed above only ever
+// landed in `sourceContext` — nothing in the review card (AIProposalCard /
+// InboxPage, both surfaces read `payload._meta.markers`) rendered it. B8
+// stamps the SAME advisory into `_meta.markers` so a near-duplicate is
+// visible on the draft BEFORE approval, on every surface that routes
+// through this handler (telephony FSM, voice worker, assistant chat).
+describe('B8 — advisory duplicate marker in payload._meta', () => {
+  function loaderWithMatch(): {
+    findDuplicates: (
+      tenantId: string,
+      criteria: { phone?: string; email?: string; name?: string }
+    ) => Promise<Array<Record<string, unknown>>>;
+  } {
+    return {
+      findDuplicates: async (tenantId: string) => [
+        {
+          id: 'existing-cust-1',
+          tenantId,
+          firstName: 'Alex',
+          lastName: 'Smith',
+          displayName: 'Alex Smith',
+          primaryPhone: '+15551230100',
+          preferredChannel: 'phone',
+          smsConsent: false,
+          isArchived: false,
+          createdBy: 'u',
+          createdAt: new Date(),
+          updatedAt: new Date(),
+        },
+      ],
+    };
+  }
+
+  it('stamps a _meta.markers advisory when a near-duplicate name exists — draft stays approvable', async () => {
+    const handler = new CreateCustomerVoiceTaskHandler({
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      duplicateLoader: loaderWithMatch() as any,
+    });
+    const out = await handler.run({
+      tenantId: TENANT,
+      message: "I'd like to sign up as a new customer",
+      conversationId: SESSION,
+      userId: SYSTEM_USER,
+      existingEntities: {
+        displayName: 'Alex Smith',
+        callerIdPhone: '+15551230100',
+      },
+    });
+    expect(out.status).toBe('proposal_drafted');
+    const proposal = out.proposal!;
+    // Advisory only — never blocks. The proposal still lands 'draft'
+    // (create_customer omits sourceTrustTier unconditionally, D3) and is
+    // approvable exactly as an unflagged proposal would be.
+    expect(proposal.status).toBe('draft');
+    const meta = proposal.payload._meta as { overallConfidence?: string; markers?: Array<{ path: string; reason: string }> };
+    expect(meta.markers).toBeDefined();
+    expect(meta.markers!.length).toBeGreaterThanOrEqual(1);
+    expect(meta.markers![0].reason).toMatch(/duplicate|match/i);
+    expect(meta.overallConfidence).toBeDefined();
+  });
+
+  it('leaves payload._meta clean when no duplicate match exists', async () => {
+    const handler = new CreateCustomerVoiceTaskHandler({
+      duplicateLoader: { findDuplicates: async () => [] },
+    });
+    const out = await handler.run({
+      tenantId: TENANT,
+      message: "I'd like to sign up as a new customer",
+      conversationId: SESSION,
+      userId: SYSTEM_USER,
+      existingEntities: {
+        displayName: 'Brand New Customer',
+        callerIdPhone: '+15559990000',
+      },
+    });
+    expect(out.status).toBe('proposal_drafted');
+    expect(out.proposal!.payload._meta).toBeUndefined();
+  });
+
+  it('omits the marker (failure-soft) when the duplicateLoader throws', async () => {
+    const handler = new CreateCustomerVoiceTaskHandler({
+      duplicateLoader: {
+        findDuplicates: async () => {
+          throw new Error('db down');
+        },
+      },
+    });
+    const out = await handler.run({
+      tenantId: TENANT,
+      message: "I'd like to sign up as a new customer",
+      conversationId: SESSION,
+      userId: SYSTEM_USER,
+      existingEntities: {
+        displayName: 'Alex Smith',
+        callerIdPhone: '+15551230100',
+      },
+    });
+    expect(out.status).toBe('proposal_drafted');
+    expect(out.proposal!.payload._meta).toBeUndefined();
+  });
+
+  it('preserves a real overallConfidence (from classifierConfidence) instead of stomping it to medium', async () => {
+    const handler = new CreateCustomerVoiceTaskHandler({
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      duplicateLoader: loaderWithMatch() as any,
+    });
+    const out = await handler.run({
+      tenantId: TENANT,
+      message: "I'd like to sign up as a new customer",
+      conversationId: SESSION,
+      userId: SYSTEM_USER,
+      existingEntities: {
+        displayName: 'Alex Smith',
+        callerIdPhone: '+15551230100',
+        classifierConfidence: 0.95, // maps to 'high' via getConfidenceLevel
+      },
+    });
+    const meta = out.proposal!.payload._meta as { overallConfidence?: string };
+    expect(meta.overallConfidence).toBe('high');
+  });
+});
+
+// ─── B8 — requirePhone: false (worker + assistant surfaces) ───────────────
+// The telephony FSM (twilio-adapter.ts) constructs this handler with the
+// default `requirePhone: true` — a live caller IS reachable by phone, so a
+// blocked caller-ID with no stated callback must escalate. The shared
+// handler-registry (ai/orchestration/handler-registry.ts), which builds the
+// handler for the voice worker and assistant chat, passes
+// `requirePhone: false` — neither surface has a caller-ID concept, so a
+// missing phone must NOT block drafting (parity with the pre-B8 thin
+// passthrough handler, which never required a phone at all).
+describe('B8 — requirePhone: false (non-telephony surfaces)', () => {
+  it('drafts a phone-less proposal instead of needs_callback when requirePhone is false', async () => {
+    const handler = new CreateCustomerVoiceTaskHandler({ requirePhone: false });
+    const out = await handler.run({
+      tenantId: TENANT,
+      message: 'Add customer Sarah, email sarah@example.com',
+      userId: SYSTEM_USER,
+      existingEntities: {
+        displayName: 'Sarah',
+        email: 'sarah@example.com',
+        // No phone, no callerIdPhone — a live call would escalate here.
+      },
+    });
+    expect(out.status).toBe('proposal_drafted');
+    expect(out.proposal!.payload.name).toBe('Sarah');
+    expect(out.proposal!.payload.phone).toBeUndefined();
+    // No "(undefined)" leaking into the summary when phone is absent.
+    expect(out.proposal!.summary).not.toMatch(/undefined/);
+  });
+
+  it('still escalates to needs_callback by default (requirePhone true) — telephony FSM behavior unchanged', async () => {
+    const handler = new CreateCustomerVoiceTaskHandler();
+    const out = await handler.run({
+      tenantId: TENANT,
+      message: "I'd like to sign up",
+      userId: SYSTEM_USER,
+      existingEntities: {
+        displayName: 'Sarah',
+        phoneBlocked: true,
+      },
+    });
+    expect(out.status).toBe('needs_callback');
+  });
+
+  it('still uses a spoken/caller-id phone when present, even with requirePhone: false', async () => {
+    const handler = new CreateCustomerVoiceTaskHandler({ requirePhone: false });
+    const out = await handler.run({
+      tenantId: TENANT,
+      message: 'Add customer Sarah, phone 555-0199',
+      userId: SYSTEM_USER,
+      existingEntities: {
+        displayName: 'Sarah',
+        phone: '555-0199',
+      },
+    });
+    expect(out.status).toBe('proposal_drafted');
+    expect(out.proposal!.payload.phone).toBe('555-0199');
+  });
+});
+
+// ─── Voice field capture: spoken address must survive to the payload ──────
+//
+// Five utterances confirmed live against the Development deployment each
+// created a `create_customer` proposal that captured the name and SILENTLY
+// DISCARDED the street address. The address was dropped three times over:
+// the classifier prompt never asked for it, `ExtractedEntities` had no key
+// for it, and `sanitizeExtractedEntities` (a strict whitelist) stripped it
+// even when the model volunteered it. `readEntities` in the task handler
+// then never looked for it either.
+//
+// These tests pin the whole capture path — classifier JSON in, proposal
+// payload out — for each of the five reported transcripts.
+
+describe('voice field capture — spoken address survives into the create_customer payload', () => {
+  const handler = new CreateCustomerVoiceTaskHandler({ requirePhone: false });
+
+  /** The five transcripts, with the entities a correct classifier emits. */
+  const utterances: ReadonlyArray<{
+    transcript: string;
+    entities: Record<string, unknown>;
+    expectedName: string;
+    expectedAddress: string;
+    expectedPhone?: string;
+  }> = [
+    {
+      transcript: 'Add a new customer, Mario Delingo, 412 Oak Street, Scottsdale, 85254.',
+      entities: {
+        displayName: 'Mario Delingo',
+        address: '412 Oak Street, Scottsdale, 85254',
+      },
+      expectedName: 'Mario Delingo',
+      expectedAddress: '412 Oak Street, Scottsdale, 85254',
+    },
+    {
+      transcript:
+        'We have a new customer, Bill Roganowski, 88 Sycamore Lane, phone number is 555-0124.',
+      entities: {
+        displayName: 'Bill Roganowski',
+        phone: '555-0124',
+        address: '88 Sycamore Lane',
+      },
+      expectedName: 'Bill Roganowski',
+      expectedAddress: '88 Sycamore Lane',
+      expectedPhone: '555-0124',
+    },
+    {
+      transcript: "Create a new customer, Ashia Aksuna. She's over at 1207 Riverbell Drive.",
+      entities: {
+        displayName: 'Ashia Aksuna',
+        address: '1207 Riverbell Drive',
+      },
+      expectedName: 'Ashia Aksuna',
+      expectedAddress: '1207 Riverbell Drive',
+    },
+    {
+      transcript: "Add Jimmy Hartlett as a new customer. He's at 34 Quarry Street.",
+      entities: {
+        displayName: 'Jimmy Hartlett',
+        address: '34 Quarry Street',
+      },
+      expectedName: 'Jimmy Hartlett',
+      expectedAddress: '34 Quarry Street',
+    },
+    {
+      transcript: "Add a new customer, nguyen, that's N-G-U-Y-E-N at 91 Fairway Avenue.",
+      entities: {
+        displayName: 'nguyen',
+        address: '91 Fairway Avenue',
+      },
+      // Capitalisation fix — speech-to-text returns an all-lowercase token
+      // for names it doesn't recognise; it must not land in the CRM verbatim.
+      expectedName: 'Nguyen',
+      expectedAddress: '91 Fairway Avenue',
+    },
+  ];
+
+  for (const u of utterances) {
+    it(`keeps the address for: "${u.transcript}"`, async () => {
+      const out = await handler.run({
+        tenantId: TENANT,
+        message: u.transcript,
+        conversationId: SESSION,
+        userId: SYSTEM_USER,
+        existingEntities: u.entities,
+      });
+
+      expect(out.status).toBe('proposal_drafted');
+      expect(out.proposal!.proposalType).toBe('create_customer');
+      expect(out.proposal!.payload.name).toBe(u.expectedName);
+      // The regression: this was `undefined` on every one of the five.
+      expect(out.proposal!.payload.address).toBe(u.expectedAddress);
+      if (u.expectedPhone) {
+        expect(out.proposal!.payload.phone).toBe(u.expectedPhone);
+      }
+    });
+
+    it(`classifier surfaces the address entity for: "${u.transcript}"`, async () => {
+      // `sanitizeExtractedEntities` is a strict whitelist — an un-whitelisted
+      // key is dropped without error, which is exactly how the address went
+      // missing. Assert it now round-trips the classifier boundary.
+      const gateway = mockGateway(
+        JSON.stringify({
+          intentType: 'create_customer',
+          confidence: 0.93,
+          extractedEntities: u.entities,
+        })
+      );
+      const result = await classifyIntent(u.transcript, { tenantId: TENANT }, gateway);
+      expect(result.intentType).toBe('create_customer');
+      expect(result.extractedEntities?.address).toBe(u.expectedAddress);
+    });
+  }
+
+  it('end-to-end: classifier entities feed the handler without losing the address', async () => {
+    const transcript = 'Add a new customer, Mario Delingo, 412 Oak Street, Scottsdale, 85254.';
+    const gateway = mockGateway(
+      JSON.stringify({
+        intentType: 'create_customer',
+        confidence: 0.93,
+        extractedEntities: {
+          displayName: 'Mario Delingo',
+          address: '412 Oak Street, Scottsdale, 85254',
+        },
+      })
+    );
+    const classification = await classifyIntent(transcript, { tenantId: TENANT }, gateway);
+
+    const out = await handler.run({
+      tenantId: TENANT,
+      message: transcript,
+      conversationId: SESSION,
+      userId: SYSTEM_USER,
+      existingEntities: {
+        ...(classification.extractedEntities as Record<string, unknown>),
+        classifierConfidence: classification.confidence,
+      },
+    });
+
+    expect(out.proposal!.payload.address).toBe('412 Oak Street, Scottsdale, 85254');
+    expect(out.proposal!.payload.name).toBe('Mario Delingo');
+  });
+
+  it('surfaces the address in the proposal summary so the approver sees it on the card', async () => {
+    const out = await handler.run({
+      tenantId: TENANT,
+      message: "Add Jimmy Hartlett as a new customer. He's at 34 Quarry Street.",
+      conversationId: SESSION,
+      userId: SYSTEM_USER,
+      existingEntities: { displayName: 'Jimmy Hartlett', address: '34 Quarry Street' },
+    });
+    expect(out.proposal!.summary).toContain('34 Quarry Street');
+  });
+
+  it('accepts `serviceAddress` as a fallback key on a create_customer turn', async () => {
+    // The same spoken sentence sometimes lands on the add_service_location
+    // vocabulary; on a create_customer turn it means the new customer's
+    // address, and dropping it is the bug.
+    const out = await handler.run({
+      tenantId: TENANT,
+      message: 'Add a new customer, Sam Costello, 91 Fairway Avenue.',
+      conversationId: SESSION,
+      userId: SYSTEM_USER,
+      existingEntities: {
+        displayName: 'Sam Costello',
+        serviceAddress: '91 Fairway Avenue',
+      },
+    });
+    expect(out.proposal!.payload.address).toBe('91 Fairway Avenue');
+  });
+
+  it('omits address entirely when the caller stated none (shape unchanged)', async () => {
+    const out = await handler.run({
+      tenantId: TENANT,
+      message: "I'd like to sign up as a new customer",
+      conversationId: SESSION,
+      userId: SYSTEM_USER,
+      existingEntities: { displayName: 'Alex Smith', callerIdPhone: '+15551230100' },
+    });
+    expect(out.proposal!.payload.address).toBeUndefined();
+    expect('address' in out.proposal!.payload).toBe(false);
+  });
+
+  it('drops a whitespace-only address rather than writing an empty string', async () => {
+    const out = await handler.run({
+      tenantId: TENANT,
+      message: 'Add a new customer, Pat Jones.',
+      conversationId: SESSION,
+      userId: SYSTEM_USER,
+      existingEntities: { displayName: 'Pat Jones', address: '   ' },
+    });
+    expect(out.proposal!.payload.address).toBeUndefined();
+  });
+
+  it('does not change entity handling for other intents (add_service_location untouched)', async () => {
+    const gateway = mockGateway(
+      JSON.stringify({
+        intentType: 'add_service_location',
+        confidence: 0.9,
+        extractedEntities: {
+          serviceAddress: '91 Fairway Avenue',
+          customerName: 'Sam Costello',
+        },
+      })
+    );
+    const result = await classifyIntent(
+      'New address for Sam Costello: 91 Fairway Avenue',
+      { tenantId: TENANT },
+      gateway
+    );
+    expect(result.intentType).toBe('add_service_location');
+    expect(result.extractedEntities?.serviceAddress).toBe('91 Fairway Avenue');
+    expect(result.extractedEntities?.address).toBeUndefined();
+  });
+});
+
+describe('voice field capture — spoken-name capitalisation', () => {
+  it('capitalises an all-lowercase spoken name', () => {
+    expect(capitalizeSpokenName('nguyen')).toBe('Nguyen');
+    expect(capitalizeSpokenName('mario delingo')).toBe('Mario Delingo');
+  });
+
+  it('leaves names the transcriber already cased alone', () => {
+    // Conservative by design: never re-case a token that has any capital.
+    expect(capitalizeSpokenName('Mario Delingo')).toBe('Mario Delingo');
+    expect(capitalizeSpokenName('McDonald')).toBe('McDonald');
+    expect(capitalizeSpokenName("O'Brien")).toBe("O'Brien");
+    expect(capitalizeSpokenName('Acme Corp LLC')).toBe('Acme Corp LLC');
+    expect(capitalizeSpokenName('IBM')).toBe('IBM');
+  });
+
+  it('trims and returns undefined for a missing or blank name', () => {
+    expect(capitalizeSpokenName('  Alex Smith  ')).toBe('Alex Smith');
+    expect(capitalizeSpokenName('   ')).toBeUndefined();
+    expect(capitalizeSpokenName(undefined)).toBeUndefined();
+  });
+
+  it('stores anything that is not name-shaped verbatim (audit trail intact)', () => {
+    // Path 9's injection string must round-trip byte-for-byte — the
+    // capitaliser must never rewrite what the caller actually said.
+    expect(capitalizeSpokenName("Robert'); DROP TABLE customers;--")).toBe(
+      "Robert'); DROP TABLE customers;--"
+    );
+    expect(capitalizeSpokenName('robert); drop table customers;--')).toBe(
+      'robert); drop table customers;--'
+    );
+    expect(capitalizeSpokenName('unit 4b')).toBe('unit 4b');
   });
 });

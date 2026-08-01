@@ -7,14 +7,17 @@ vi.mock('../lib/useApiClient', () => ({ useApiClient: () => h.api }));
 
 // eslint-disable-next-line import/first
 import { useProposalReview } from './useProposalReview';
+// The REAL server edit schema — pins the PUT wire shape (see the U2 test).
+// eslint-disable-next-line import/first
+import { editProposalBodySchema } from '../../../api/src/proposals/proposal-contracts';
 
 const T0 = Date.UTC(2026, 5, 20, 0, 0, 0);
 
 function okJson(body: unknown) {
   return { ok: true, status: 200, json: async () => body };
 }
-function err(status: number) {
-  return { ok: false, status, json: async () => ({}) };
+function err(status: number, body: unknown = {}) {
+  return { ok: false, status, json: async () => body };
 }
 function proposal(over: Record<string, unknown> = {}) {
   return {
@@ -62,7 +65,7 @@ describe('useProposalReview', () => {
     h.api.mockImplementation((url: string) => {
       if (url === '/api/proposals/p1/approve') {
         return Promise.resolve(
-          okJson({ approved: [proposal({ status: 'approved', approvedAt: new Date(T0).toISOString() })] }),
+          okJson(proposal({ status: 'approved', approvedAt: new Date(T0).toISOString() })),
         );
       }
       return Promise.resolve(okJson(proposal()));
@@ -93,7 +96,7 @@ describe('useProposalReview', () => {
     h.api.mockImplementation((url: string) => {
       if (url === '/api/proposals/p1/approve') {
         return Promise.resolve(
-          okJson({ approved: [proposal({ status: 'approved', approvedAt: new Date(T0).toISOString() })] }),
+          okJson(proposal({ status: 'approved', approvedAt: new Date(T0).toISOString() })),
         );
       }
       if (url === '/api/proposals/p1/undo') {
@@ -118,7 +121,7 @@ describe('useProposalReview', () => {
     h.api.mockImplementation((url: string) => {
       if (url === '/api/proposals/p1/approve') {
         return Promise.resolve(
-          okJson({ approved: [proposal({ status: 'approved', approvedAt: new Date(T0).toISOString() })] }),
+          okJson(proposal({ status: 'approved', approvedAt: new Date(T0).toISOString() })),
         );
       }
       if (url === '/api/proposals/p1/undo') return Promise.resolve(err(409));
@@ -136,11 +139,213 @@ describe('useProposalReview', () => {
     expect(result.current.phase).toBe('committed');
   });
 
-  it('surfaces a load error', async () => {
-    h.api.mockResolvedValue(err(500));
+  it('surfaces a load error with the backend message', async () => {
+    h.api.mockResolvedValue(err(500, { error: 'INTERNAL_ERROR', message: 'Load failed' }));
     const { result } = renderHook(() => useProposalReview('p1'));
     await settle();
     expect(result.current.phase).toBe('error');
-    expect(result.current.error).toBe('HTTP 500');
+    expect(result.current.error).toBe('Load failed');
+  });
+
+  it('rejects with reason and lands in the terminal undone phase', async () => {
+    h.api.mockImplementation((url: string, opts?: { method?: string; body?: string }) => {
+      if (url === '/api/proposals/p1/reject' && opts?.method === 'POST') {
+        expect(JSON.parse(opts.body ?? '{}')).toEqual({
+          reason: 'wrong customer',
+          details: 'not Acme',
+        });
+        return Promise.resolve(okJson(proposal({ status: 'rejected' })));
+      }
+      return Promise.resolve(okJson(proposal()));
+    });
+
+    const { result } = renderHook(() => useProposalReview('p1'));
+    await settle();
+    await act(async () => {
+      await result.current.reject('wrong customer', 'not Acme');
+    });
+    expect(result.current.phase).toBe('undone');
+    expect(result.current.proposal?.status).toBe('rejected');
+  });
+
+  it('resolve-line patches the proposal and keeps review open when still draft', async () => {
+    h.api.mockImplementation((url: string, opts?: { method?: string; body?: string }) => {
+      if (url === '/api/proposals/p1/resolve-line' && opts?.method === 'POST') {
+        expect(JSON.parse(opts.body ?? '{}')).toEqual({
+          lineIndex: 0,
+          catalogItemId: 'cat-b',
+        });
+        return Promise.resolve(
+          okJson(
+            proposal({
+              status: 'ready_for_review',
+              payload: { lineItems: [{ description: 'Flush valve', pricingSource: 'catalog' }] },
+              sourceContext: { catalogResolution: {} },
+            }),
+          ),
+        );
+      }
+      return Promise.resolve(
+        okJson(
+          proposal({
+            status: 'draft',
+            payload: {
+              lineItems: [{ description: 'Flush valve', pricingSource: 'ambiguous' }],
+            },
+            sourceContext: {
+              catalogResolution: {
+                '0': [{ id: 'cat-b', name: 'Premium valve', unitPriceCents: 8200, score: 0.6 }],
+              },
+            },
+          }),
+        ),
+      );
+    });
+
+    const { result } = renderHook(() => useProposalReview('p1'));
+    await settle();
+    await act(async () => {
+      await result.current.resolveLine(0, 'cat-b');
+    });
+    expect(result.current.phase).toBe('review');
+    expect(result.current.proposal?.status).toBe('ready_for_review');
+  });
+
+  it('surfaces resolve-line failures in the error phase', async () => {
+    h.api.mockImplementation((url: string, opts?: { method?: string }) => {
+      if (url === '/api/proposals/p1/resolve-line' && opts?.method === 'POST') {
+        return Promise.resolve(err(400, { error: 'VALIDATION_ERROR', message: 'Bad catalog pick' }));
+      }
+      return Promise.resolve(okJson(proposal()));
+    });
+
+    const { result } = renderHook(() => useProposalReview('p1'));
+    await settle();
+    await act(async () => {
+      await result.current.resolveLine(0, 'cat-b');
+    });
+    expect(result.current.phase).toBe('error');
+    expect(result.current.error).toBe('Bad catalog pick');
+  });
+
+  it('resolve-entity POSTs the candidate and merges the re-drafted proposal (review stays open, never approves)', async () => {
+    h.api.mockImplementation((url: string, opts?: { method?: string; body?: string }) => {
+      if (url === '/api/proposals/p1/resolve-entity' && opts?.method === 'POST') {
+        expect(JSON.parse(opts.body ?? '{}')).toEqual({ candidateId: 'cust-b' });
+        return Promise.resolve(
+          okJson(
+            proposal({
+              proposalType: 'voice_clarification',
+              status: 'ready_for_review',
+              payload: { customerId: 'cust-b' },
+            }),
+          ),
+        );
+      }
+      return Promise.resolve(
+        okJson(
+          proposal({
+            proposalType: 'voice_clarification',
+            status: 'draft',
+            payload: {
+              reason: 'ambiguous_entity',
+              entityCandidates: [
+                { id: 'cust-a', label: 'Bob Smith' },
+                { id: 'cust-b', label: 'Bob Jones' },
+              ],
+            },
+          }),
+        ),
+      );
+    });
+
+    const { result } = renderHook(() => useProposalReview('p1'));
+    await settle();
+    await act(async () => {
+      await result.current.resolveEntity('cust-b');
+    });
+    expect(result.current.phase).toBe('review'); // ready_for_review → review, NOT approved
+    expect(result.current.proposal?.status).toBe('ready_for_review');
+    expect(h.api).toHaveBeenCalledWith(
+      '/api/proposals/p1/resolve-entity',
+      expect.objectContaining({ method: 'POST' }),
+    );
+  });
+
+  it('surfaces resolve-entity failures in the error phase', async () => {
+    h.api.mockImplementation((url: string, opts?: { method?: string }) => {
+      if (url === '/api/proposals/p1/resolve-entity' && opts?.method === 'POST') {
+        return Promise.resolve(err(400, { error: 'VALIDATION_ERROR', message: 'Bad candidate' }));
+      }
+      return Promise.resolve(okJson(proposal()));
+    });
+
+    const { result } = renderHook(() => useProposalReview('p1'));
+    await settle();
+    await act(async () => {
+      await result.current.resolveEntity('nope');
+    });
+    expect(result.current.phase).toBe('error');
+    expect(result.current.error).toBe('Bad candidate');
+  });
+
+  // U2 (F4) — edit before approving.
+  it('edit PUTs a body the real server schema accepts and merges the envelope', async () => {
+    h.api.mockImplementation((url: string, opts?: { method?: string; body?: string }) => {
+      if (url === '/api/proposals/p1' && opts?.method === 'PUT') {
+        return Promise.resolve(
+          okJson({
+            // editProposal returns { proposal, editedFields }, not the bare row.
+            proposal: proposal({ payload: { customerName: 'Acme Corp', amountCents: 129950 } }),
+            editedFields: ['customerName', 'amountCents'],
+          }),
+        );
+      }
+      return Promise.resolve(okJson(proposal()));
+    });
+
+    const { result } = renderHook(() => useProposalReview('p1'));
+    await settle();
+
+    let ok = false;
+    await act(async () => {
+      ok = await result.current.edit({ customerName: 'Acme Corp', amountCents: 129950 });
+    });
+    expect(ok).toBe(true);
+
+    const putCall = h.api.mock.calls.find(
+      (c: unknown[]) => (c[1] as { method?: string } | undefined)?.method === 'PUT',
+    )!;
+    expect(putCall[0]).toBe('/api/proposals/p1');
+    // Pin the wire shape against the REAL server Zod schema — a mocked client
+    // shape alone masked a server rejection before
+    // (docs/solutions/test-failures/mocked-client-shape-masks-server-schema-rejection.md).
+    const body = JSON.parse((putCall[1] as { body: string }).body);
+    expect(editProposalBodySchema.safeParse(body).success).toBe(true);
+    expect(body).toEqual({ edits: { customerName: 'Acme Corp', amountCents: 129950 } });
+
+    // Envelope merged: fresh payload rendered, still reviewable.
+    expect(result.current.proposal?.payload?.customerName).toBe('Acme Corp');
+    expect(result.current.phase).toBe('review');
+  });
+
+  it('edit failure keeps the review phase (draft intact server-side) and reports the message', async () => {
+    h.api.mockImplementation((url: string, opts?: { method?: string }) => {
+      if (opts?.method === 'PUT') {
+        return Promise.resolve(err(400, { error: 'VALIDATION_ERROR', message: 'Invalid payload after edit' }));
+      }
+      return Promise.resolve(okJson(proposal()));
+    });
+
+    const { result } = renderHook(() => useProposalReview('p1'));
+    await settle();
+
+    let ok = true;
+    await act(async () => {
+      ok = await result.current.edit({ amountCents: -1 });
+    });
+    expect(ok).toBe(false);
+    expect(result.current.phase).toBe('review'); // NOT the error phase
+    expect(result.current.error).toBe('Invalid payload after edit');
   });
 });

@@ -36,6 +36,7 @@ import type { AppointmentRepository } from '../../src/appointments/appointment';
 import type { ProposalRepository } from '../../src/proposals/proposal';
 import type { CustomerRepository } from '../../src/customers/customer';
 import type { FeedbackResponseRepository } from '../../src/feedback/feedback-response';
+import type { CorrectionLessonRepository } from '../../src/learning/corrections/correction-lesson';
 import type { SettingsRepository } from '../../src/settings/settings';
 import { createLogger } from '../../src/logging/logger';
 
@@ -61,13 +62,22 @@ function emptyComputeDeps(settingsRepo: SettingsRepository): DigestComputeDeps {
       findByTenant: async () => [],
       findByJobs: async () => [],
     } as unknown as InvoiceRepository,
-    estimateRepo: { findByJobs: async () => [] } as unknown as EstimateRepository,
-    proposalRepo: { findByStatus: async () => [] } as unknown as ProposalRepository,
+    estimateRepo: {
+      findByJobs: async () => [],
+      findByTenant: async () => [],
+    } as unknown as EstimateRepository,
+    proposalRepo: {
+      findByStatus: async () => [],
+      findConfidenceMarkedForDay: async () => [],
+    } as unknown as ProposalRepository,
     customerRepo: { findById: async () => null } as unknown as CustomerRepository,
     settingsRepo,
     feedbackResponseRepo: {
       countByRatingInRange: async () => ({ 1: 0, 2: 0, 3: 0, 4: 0, 5: 0 }),
     } as unknown as FeedbackResponseRepository,
+    correctionLessonRepo: {
+      findAppliedForDay: async () => [],
+    } as unknown as CorrectionLessonRepository,
   };
 }
 
@@ -156,22 +166,25 @@ describe('Postgres integration — daily-digest worker', () => {
     expect(stored!.payload.timezone).toBe(TZ);
     expect(stored!.smsDispatchId).not.toBeUndefined();
 
-    // Dispatch row exists and carries the daily_digest:<date> idempotency key.
+    // Dispatch row exists and carries the per-segment idempotency key (a small
+    // empty-day digest is a single segment → 1of1).
     const dispatches = await dispatchRepo.findByEntity(
       tenant.tenantId,
       'daily_digest',
       stored!.id,
     );
     expect(dispatches).toHaveLength(1);
-    expect(dispatches[0].idempotencyKey).toBe(`daily_digest:${LOCAL_DATE}`);
+    expect(dispatches[0].idempotencyKey).toBe(`daily_digest:${LOCAL_DATE}:1of1`);
     expect(dispatches[0].recipient).toBe(ownerPhone);
     expect(stored!.smsDispatchId).toBe(dispatches[0].id);
+    // Retry cap counter recorded exactly one send pass.
+    expect(stored!.sendAttempts).toBe(1);
 
     // Capturing delivery saw exactly the one SMS this tenant should fire.
     const ourCalls = calls.filter((c) => c.tenantId === tenant.tenantId);
     expect(ourCalls).toHaveLength(1);
     expect(ourCalls[0].to).toBe(ownerPhone);
-    expect(ourCalls[0].idempotencyKey).toBe(`daily_digest:${LOCAL_DATE}`);
+    expect(ourCalls[0].idempotencyKey).toBe(`daily_digest:${LOCAL_DATE}:1of1`);
   });
 
   it('does not duplicate the digest or re-send on a second sweep (UNIQUE + IS NULL guards)', async () => {

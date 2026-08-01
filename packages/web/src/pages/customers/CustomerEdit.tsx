@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { apiFetch } from '../../utils/api-fetch';
+import { Field, Input, Select, Textarea, Button } from '../../components/ui';
 
 const CHANNELS = ['email', 'sms', 'phone', 'mail'] as const;
 
@@ -18,6 +19,8 @@ interface FormState {
   email: string;
   preferredChannel: typeof CHANNELS[number];
   communicationNotes: string;
+  // D4: SMS consent capture
+  smsConsent: boolean;
 }
 
 const empty: FormState = {
@@ -29,6 +32,7 @@ const empty: FormState = {
   email: '',
   preferredChannel: 'email',
   communicationNotes: '',
+  smsConsent: false,
 };
 
 /**
@@ -72,6 +76,7 @@ export function CustomerEdit({ customerId, onSaved, onCancel }: CustomerEditProp
             ? data.preferredChannel
             : 'email') as FormState['preferredChannel'],
           communicationNotes: data.communicationNotes ?? '',
+          smsConsent: data.smsConsent ?? false,
         });
       } catch (err) {
         if (!cancelled) {
@@ -96,15 +101,21 @@ export function CustomerEdit({ customerId, onSaved, onCancel }: CustomerEditProp
         return;
       }
 
+      // Cleared optionals serialize as '' — never a dropped key. The server
+      // only SETs columns for keys present in the body, so `|| undefined`
+      // (which JSON.stringify drops) silently kept the previous value while
+      // the form claimed the save succeeded.
       const body = {
-        firstName: form.firstName.trim() || undefined,
-        lastName: form.lastName.trim() || undefined,
-        companyName: form.companyName.trim() || undefined,
-        primaryPhone: form.primaryPhone.trim() || undefined,
-        secondaryPhone: form.secondaryPhone.trim() || undefined,
-        email: form.email.trim() || undefined,
+        firstName: form.firstName.trim(),
+        lastName: form.lastName.trim(),
+        companyName: form.companyName.trim(),
+        primaryPhone: form.primaryPhone.trim(),
+        secondaryPhone: form.secondaryPhone.trim(),
+        email: form.email.trim(),
         preferredChannel: form.preferredChannel,
-        communicationNotes: form.communicationNotes.trim() || '',
+        communicationNotes: form.communicationNotes.trim(),
+        // D4: Include SMS consent in update
+        smsConsent: form.smsConsent,
       };
 
       setSubmitting(true);
@@ -127,8 +138,6 @@ export function CustomerEdit({ customerId, onSaved, onCancel }: CustomerEditProp
     [form, customerId, onSaved]
   );
 
-  const inputCls = 'w-full rounded-lg border border-slate-200 px-3 py-2 text-sm';
-
   if (loading) {
     return (
       <div className="p-4 md:p-6 max-w-2xl mx-auto" data-testid="customer-edit-loading">
@@ -139,110 +148,110 @@ export function CustomerEdit({ customerId, onSaved, onCancel }: CustomerEditProp
 
   return (
     <form onSubmit={handleSubmit} className="p-4 md:p-6 max-w-2xl mx-auto" data-testid="customer-edit-form">
-      <h1 className="text-lg text-slate-900 mb-4">Edit Customer</h1>
+      <h1 className="text-lg text-foreground mb-4">Edit Customer</h1>
 
       {error && (
-        <div role="alert" className="mb-3 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+        <div role="alert" className="mb-3 rounded-lg border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">
           {error}
         </div>
       )}
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-        <label className="text-xs text-slate-500">
-          First name
-          <input
+        <Field label="First name">
+          <Input
             aria-label="firstName"
             value={form.firstName}
             onChange={(e) => setField('firstName', e.target.value)}
-            className={inputCls}
+            className="min-h-11"
           />
-        </label>
-        <label className="text-xs text-slate-500">
-          Last name
-          <input
+        </Field>
+        <Field label="Last name">
+          <Input
             aria-label="lastName"
             value={form.lastName}
             onChange={(e) => setField('lastName', e.target.value)}
-            className={inputCls}
+            className="min-h-11"
           />
-        </label>
-        <label className="text-xs text-slate-500 md:col-span-2">
-          Company
-          <input
+        </Field>
+        <Field label="Company" className="md:col-span-2">
+          <Input
             aria-label="companyName"
             value={form.companyName}
             onChange={(e) => setField('companyName', e.target.value)}
-            className={inputCls}
+            className="min-h-11"
           />
-        </label>
-        <label className="text-xs text-slate-500">
-          Primary phone
-          <input
+        </Field>
+        <Field label="Primary phone">
+          <Input
             aria-label="primaryPhone"
             value={form.primaryPhone}
             onChange={(e) => setField('primaryPhone', e.target.value)}
-            className={inputCls}
+            className="min-h-11"
           />
-        </label>
-        <label className="text-xs text-slate-500">
-          Secondary phone
-          <input
+        </Field>
+        <Field label="Secondary phone">
+          <Input
             aria-label="secondaryPhone"
             value={form.secondaryPhone}
             onChange={(e) => setField('secondaryPhone', e.target.value)}
-            className={inputCls}
+            className="min-h-11"
           />
-        </label>
-        <label className="text-xs text-slate-500">
-          Email
-          <input
+        </Field>
+        <Field label="Email">
+          <Input
             aria-label="email"
             type="email"
             value={form.email}
             onChange={(e) => setField('email', e.target.value)}
-            className={inputCls}
+            className="min-h-11"
           />
-        </label>
-        <label className="text-xs text-slate-500">
-          Preferred channel
-          <select
+        </Field>
+        <Field label="Preferred channel">
+          <Select
             aria-label="preferredChannel"
             value={form.preferredChannel}
             onChange={(e) => setField('preferredChannel', e.target.value as FormState['preferredChannel'])}
-            className={inputCls}
+            className="min-h-11"
           >
             {CHANNELS.map((c) => (
               <option key={c} value={c}>{c}</option>
             ))}
-          </select>
-        </label>
-        <label className="text-xs text-slate-500 md:col-span-2">
-          Customer notes
-          <textarea
+          </Select>
+        </Field>
+        {/* D4: SMS consent checkbox */}
+        <div className="md:col-span-2 flex items-start gap-3 rounded-lg border border-border bg-secondary/30 p-3">
+          <input
+            type="checkbox"
+            id="smsConsent"
+            checked={form.smsConsent}
+            onChange={(e) => setField('smsConsent', e.target.checked)}
+            className="mt-0.5 h-4 w-4 rounded border-border text-primary focus:ring-primary"
+          />
+          <label htmlFor="smsConsent" className="flex-1 cursor-pointer">
+            <span className="text-sm text-foreground">SMS messaging consent</span>
+            <p className="text-xs text-muted-foreground mt-0.5">
+              Customer has consented to receive SMS messages including appointment reminders, estimates, and invoices.
+            </p>
+          </label>
+        </div>
+        <Field label="Customer notes" className="md:col-span-2">
+          <Textarea
             aria-label="communicationNotes"
             value={form.communicationNotes}
             onChange={(e) => setField('communicationNotes', e.target.value)}
             rows={4}
-            className={inputCls}
+            className="min-h-11"
           />
-        </label>
+        </Field>
       </div>
 
       <div className="mt-4 flex gap-2">
-        <button
-          type="submit"
-          disabled={submitting}
-          className="rounded-lg bg-slate-900 text-white text-sm px-4 py-2 hover:bg-slate-800 disabled:opacity-50"
-        >
+        <Button type="submit" disabled={submitting} className="min-h-11">
           {submitting ? 'Saving…' : 'Save'}
-        </button>
-        <button
-          type="button"
-          onClick={onCancel}
-          className="rounded-lg border border-slate-200 text-slate-700 text-sm px-4 py-2 hover:bg-slate-50"
-        >
+        </Button>
+        <Button type="button" variant="outline" onClick={onCancel} className="min-h-11">
           Cancel
-        </button>
+        </Button>
       </div>
     </form>
   );

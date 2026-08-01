@@ -23,6 +23,10 @@ function basicAuth(sid: string, token: string): string {
   return 'Basic ' + Buffer.from(`${sid}:${token}`).toString('base64');
 }
 
+// fetch has no default timeout — a Twilio stall would hang the provisioning
+// worker mid-subaccount-setup with no upper bound.
+const TWILIO_PROVISIONING_TIMEOUT_MS = 20_000;
+
 async function twilioPost<T>(
   url: string,
   accountSid: string,
@@ -37,6 +41,7 @@ async function twilioPost<T>(
       Accept: 'application/json',
     },
     body: body.toString(),
+    signal: AbortSignal.timeout(TWILIO_PROVISIONING_TIMEOUT_MS),
   });
   if (!res.ok) {
     const text = await res.text();
@@ -55,6 +60,7 @@ async function twilioGet<T>(
       Authorization: basicAuth(accountSid, authToken),
       Accept: 'application/json',
     },
+    signal: AbortSignal.timeout(TWILIO_PROVISIONING_TIMEOUT_MS),
   });
   if (!res.ok) {
     const text = await res.text();
@@ -74,6 +80,7 @@ async function twilioDelete(
       Authorization: basicAuth(accountSid, authToken),
       Accept: 'application/json',
     },
+    signal: AbortSignal.timeout(TWILIO_PROVISIONING_TIMEOUT_MS),
   });
   // 404 → already released; treat as success so deprovision is idempotent.
   if (!res.ok && res.status !== 404) {

@@ -1,19 +1,28 @@
 import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import { useUser } from '@clerk/clerk-react';
 import { apiFetch } from '../../utils/api-fetch';
+import { getLocalFlag, setLocalFlag } from '../../lib/uiFlags';
 import { firstNameFromUser } from '../../utils/greeting';
 import {
   Send, Mic, Paperclip, Sparkles, Check, Zap,
   Square, Image, FileText, X, ThumbsUp, ThumbsDown,
-  Copy, ChevronDown, Clock, Briefcase, Receipt, Calendar,
+  Copy, ChevronDown, Briefcase, Receipt, Calendar,
   AlertCircle, Volume2, VolumeX, PhoneCall,
 } from 'lucide-react';
+import { toast } from 'sonner';
 import { VoiceSessionPanel } from './VoiceSessionPanel';
-import { useSearchParams } from 'react-router';
-import { type Message, type AIProposal } from '../../data/mock-data';
+import { useNavigate, useSearchParams } from 'react-router';
+import type { Message, AIProposal } from '../../types/assistant-ui';
 import { AIProposalCard } from '../shared/AIProposalCard';
+import { UndoToast } from '../common/UndoToast';
 import { useDetailQuery } from '../../hooks/useDetailQuery';
 import { useTTS } from '../../hooks/useTTS';
+import { useConversationVoice } from '../../hooks/useConversationVoice';
+import { useUndoableApproval, type StartUndoInput, type ApproveResponseLike } from '../../hooks/useUndoableApproval';
+import { emitProposalsChanged } from '../../lib/proposal-events';
+import { reportError, toSafeErrorShape } from '../../lib/errorReporter';
+import { track } from '../../lib/analytics';
+import { matchVoiceCommand } from '../../hooks/useVoiceCommands';
 
 interface ApiMessage {
   id: string;
@@ -40,42 +49,45 @@ function mapApiMessage(msg: ApiMessage): Message {
 let msgId = 200;
 const uid = () => `m${++msgId}`;
 
-// ─── Context strip data ─────────────────────────────────────────
-const TODAY_CONTEXT = [
-  { icon: Briefcase, label: '3 active', sub: 'jobs today',   color: 'text-green-600', bg: 'bg-green-50',  border: 'border-green-100' },
-  { icon: Receipt,   label: '$1,850',   sub: 'pending invoice', color: 'text-blue-600',  bg: 'bg-blue-50',   border: 'border-blue-100' },
-  { icon: AlertCircle,label: '2 items', sub: 'need attention',  color: 'text-amber-600', bg: 'bg-amber-50',  border: 'border-amber-100' },
-  { icon: Calendar,  label: '2 jobs',   sub: 'tomorrow',       color: 'text-violet-600',bg: 'bg-violet-50', border: 'border-violet-100' },
-];
-
 // ─── Suggestion chips ───────────────────────────────────────────
+// Generic, tenant-safe starter prompts. Each maps to a real assistant
+// capability (schedule/invoice/estimate queries, create-customer) and names
+// no specific customer or job. The earlier hard-coded prompts referenced
+// seed-data customers (Rodriguez/Thompson/Davis) that don't exist for a real
+// tenant, so they read as broken suggestions in production.
 const SUGGESTIONS = [
-  { text: 'Invoice the Rodriguez job',        icon: Receipt },
-  { text: 'Schedule Thompson exterior paint', icon: Calendar },
-  { text: 'Send follow-up to Davis',          icon: Send },
-  { text: "What's on tomorrow's schedule?",   icon: Clock },
-  { text: 'Who\'s free Thursday morning?',    icon: Briefcase },
-  { text: 'Any overdue invoices?',            icon: AlertCircle },
+  { text: "What's on today's schedule?",     icon: Calendar },
+  { text: 'Any overdue invoices?',           icon: Receipt },
+  { text: 'Which estimates are still open?', icon: FileText },
+  { text: 'Draft an estimate',               icon: Zap },
+  { text: 'Add a new customer',              icon: Briefcase },
 ];
 
 // ─── AI Conversation API ────────────────────────────────────────
 // Send user messages to the backend conversation API and receive real AI responses.
 // Falls back to a simple echo if the API is unavailable.
 async function sendToConversationAPI(
-  _conversationId: string | null,
+  conversationId: string | null,
   text: string,
   history: Array<{ role: 'user' | 'assistant'; content: string }>,
-): Promise<{ content: string; reasoning?: string; proposal?: AIProposal; autoApplied?: boolean; newConversationId?: string }> {
+  inputMode?: 'voice',
+): Promise<{ content: string; reasoning?: string; proposal?: AIProposal; autoApplied?: boolean; newConversationId?: string; failed?: boolean }> {
   try {
     // AST-01b: chat → /api/assistant/chat. The server runs intent
     // classification first; recognized actions (e.g. create_customer)
     // come back as a proposal the UI renders inline instead of as free
     // text. Everything else falls through to the generic LLM reply.
+    // Story 3.11 — pin the running conversation so each turn persists to the
+    // same thread (server opens one on the first turn and echoes its id).
+    // UB-B3 — voice-originating turns carry inputMode so the server can
+    // refuse voice approval intents deterministically.
     const res = await apiFetch('/api/assistant/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         messages: [...history, { role: 'user', content: text }],
+        ...(conversationId ? { conversationId } : {}),
+        ...(inputMode ? { inputMode } : {}),
       }),
     });
 
@@ -90,14 +102,21 @@ async function sendToConversationAPI(
       reasoning: msg.reasoning,
       proposal: msg.proposal,
       autoApplied: msg.autoApplied,
+      newConversationId: data.conversationId,
     };
   } catch (err) {
     // Network/auth failure reaching the assistant API. Surface an accurate,
-    // non-misleading message and log the real cause for debugging.
-    console.error('AI chat request failed:', err);
+    // non-misleading message. OBS-41 — log/report only a safe {name,
+    // message} shape, never the raw error object: `err` can be a fetch
+    // Response-derived Error whose message embeds the API response body
+    // (customer data) or, via apiFetch's 401 retry path, a token.
+    const safe = toSafeErrorShape(err);
+    console.error('AI chat request failed:', safe);
+    reportError(err, 'assistant-chat');
     return {
       content: 'Unable to connect to AI service — please try again or contact support.',
       reasoning: 'Could not reach the AI service.',
+      failed: true,
     };
   }
 }
@@ -162,7 +181,17 @@ function VoiceWaveform({ duration }: { duration: number }) {
 }
 
 // ─── Message Bubble ─────────────────────────────────────────────
-function MessageBubble({ msg, isLast }: { msg: Message; isLast: boolean }) {
+function MessageBubble({
+  msg,
+  isLast,
+  onApproved,
+}: {
+  msg: Message;
+  isLast: boolean;
+  // Finding 2 — invoked after a proposal approve succeeds so the page can raise
+  // the shared undo toast (same affordance as the inbox).
+  onApproved?: (input: StartUndoInput) => void;
+}) {
   const [reaction, setReaction] = useState<'up' | 'down' | null>(null);
   const [showActions, setShowActions] = useState(false);
   const isUser = msg.role === 'user';
@@ -253,18 +282,42 @@ function MessageBubble({ msg, isLast }: { msg: Message; isLast: boolean }) {
           <div className="mt-2">
             <AIProposalCard
               proposal={msg.proposal}
-              onApprove={async () => {
+              onApprove={async (edits) => {
+                const proposalId = msg.proposal!.id;
+                // If the operator edited fields in the card, persist them
+                // first via the edit endpoint — the approve endpoint takes
+                // no payload and applies the proposal as stored, so without
+                // this the edits are silently discarded. Throw on failure so
+                // AIProposalCard reverts its optimistic "Approved" state.
+                if (edits && Object.keys(edits).length > 0) {
+                  const editRes = await apiFetch(`/api/proposals/${proposalId}`, {
+                    method: 'PUT',
+                    body: JSON.stringify({ edits }),
+                  });
+                  if (!editRes.ok) {
+                    throw new Error(`Saving edits failed: ${editRes.status} ${editRes.statusText}`);
+                  }
+                }
                 // Use apiFetch so the Clerk bearer token is attached — a
                 // bare fetch() sends no Authorization header and the
                 // backend rejects it with 401. Throw on a non-OK response
                 // so AIProposalCard reverts its optimistic "Approved"
                 // state and shows an error instead of faking success.
-                const response = await apiFetch(`/api/proposals/${msg.proposal!.id}/approve`, {
+                const response = await apiFetch(`/api/proposals/${proposalId}/approve`, {
                   method: 'POST',
                 });
                 if (!response.ok) {
                   throw new Error(`Approve failed: ${response.status} ${response.statusText}`);
                 }
+                // Finding 2 — parity with the inbox: raise the undo toast,
+                // anchored to the server's real window (approvedAt /
+                // undoExpiresAt ride the approve response).
+                const body = (await response.json().catch(() => null)) as ApproveResponseLike | null;
+                onApproved?.({
+                  proposalId,
+                  summary: msg.proposal!.title,
+                  response: body,
+                });
               }}
               onReject={async () => {
                 // Same authenticated client + throw-on-failure contract as
@@ -724,6 +777,12 @@ export function AssistantPage() {
   );
 
   const [messages, setMessages]       = useState<Message[]>([]);
+  // Keep the latest messages in a ref so the memoized `send` callback reads
+  // the current history, not the snapshot from the render that created it —
+  // otherwise from the third turn on, the history POSTed to the assistant is
+  // stale and the model loses recent context.
+  const messagesRef = useRef<Message[]>([]);
+  useEffect(() => { messagesRef.current = messages; }, [messages]);
   const [input, setInput]             = useState('');
   const [typing, setTyping]           = useState(false);
   const [typingReason, setTypingReason] = useState('');
@@ -732,34 +791,67 @@ export function AssistantPage() {
   const [attachPickerOpen, setAttachPickerOpen] = useState(false);
   const [pendingAttachment, setPendingAttachment] = useState<Message['attachments']>([]);
   const [showScrollBtn, setShowScrollBtn] = useState(false);
-  const [ttsEnabled, setTtsEnabled]   = useState(() => localStorage.getItem('rivet:tts-enabled') === 'true');
+  // Story 3.12 — when a turn fails (model/tool/network), keep the failed input
+  // so the operator can RETRY in one tap instead of re-typing. Cleared on the
+  // next attempt and on success.
+  const [failedSend, setFailedSend] = useState<{
+    text: string;
+    opts?: { inputMode?: 'voice' | 'photo'; voiceDuration?: number; attachments?: Message['attachments'] };
+  } | null>(null);
+  const [ttsEnabled, setTtsEnabled]   = useState(() => getLocalFlag('rivet:tts-enabled') === 'true');
   const { speak, stop: stopTTS, isSpeaking } = useTTS({ rate: 1.0 });
+
+  // Finding 2 — approval-undo toast, identical to the inbox affordance and
+  // driven by the same server-anchored countdown. Fixes the assistant surface
+  // approving with NO undo path at all.
+  const undoToast = useUndoableApproval({
+    requestUndo: (proposalId) =>
+      apiFetch(`/api/proposals/${proposalId}/undo`, { method: 'POST' }),
+    // Keep the inbox (and any other live surface) in sync after an undo.
+    onUndone: () => emitProposalsChanged(),
+    onError: (message) => toast.error(message),
+  });
   const lastInputWasVoiceRef = useRef(false);
+  // UB-B2 — conversation mode. Populated after `send` is defined (the hook
+  // needs `send`; `send` needs the session to speak replies through the
+  // conversation's TTS so barge-in can cut them off).
+  const conversationRef = useRef<{ active: boolean; speak: (text: string) => void } | null>(null);
 
   const endRef    = useRef<HTMLDivElement>(null);
   const inputRef  = useRef<HTMLTextAreaElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
 
   // Derive conversationId from URL param or localStorage
-  const conversationId = searchParams.get('conversationId') || localStorage.getItem('conversationId') || null;
+  const conversationId = searchParams.get('conversationId') || getLocalFlag('conversationId') || null;
   const { data: conversation, isLoading: convLoading, error: convError } =
     useDetailQuery<ApiConversation>('/api/conversations', conversationId);
 
-  // Seed messages from API — show empty state if no conversation exists yet
+  // Seed messages from API — show the welcome bubble if no conversation
+  // exists yet. Journey QA 2026-07-02 (bug 11): this effect re-runs right
+  // after every turn (the reply pins newConversationId → refetch), and it
+  // used to REPLACE local state unconditionally — a server response with an
+  // empty/partial thread wiped the reply the user was reading. Defensive
+  // rule (belt-and-braces with the API fix that now returns `messages`):
+  // only adopt the server thread when it is AHEAD of what's on screen;
+  // never downgrade local messages to an emptier server copy.
   useEffect(() => {
     if (convLoading) return;
-    if (conversation?.messages?.length) {
-      setMessages(conversation.messages.map(mapApiMessage));
-    } else {
-      // No mock data — start with an empty conversation or a welcome message
-      setMessages([{
+    const serverMessages = conversation?.messages ?? [];
+    setMessages((prev) => {
+      const localTurns = prev.filter((m) => m.id !== 'welcome');
+      if (serverMessages.length > localTurns.length) {
+        return serverMessages.map(mapApiMessage);
+      }
+      if (localTurns.length > 0) return prev;
+      return [{
         id: 'welcome',
         role: 'assistant' as const,
         content: welcomeMessage,
         time: new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }),
-      }]);
-    }
+      }];
+    });
   }, [convLoading, conversation, convError, welcomeMessage]);
 
   // Auto-submit from voice bar ?q= param
@@ -787,6 +879,16 @@ export function AssistantPage() {
 
   const send = useCallback(async (text: string, opts?: { inputMode?: 'voice' | 'photo'; voiceDuration?: number; attachments?: Message['attachments'] }) => {
     if (!text.trim() && !opts?.attachments?.length) return;
+
+    // assistant_message_sent (U6) — every assistant turn funnels through here
+    // (typed, voice, suggestion chip, retry). Enums/counts only — never the
+    // message text.
+    track('assistant_message_sent', {
+      input_mode: opts?.inputMode ?? 'text',
+      length: text.trim().length,
+      has_attachment: (opts?.attachments?.length ?? 0) > 0,
+    });
+
     const t = now();
     lastInputWasVoiceRef.current = opts?.inputMode === 'voice';
 
@@ -802,21 +904,43 @@ export function AssistantPage() {
 
     // Snapshot prior chat (before the new user message) to send as
     // context — the server expects the current message appended at
-    // the end of `messages`, not duplicated.
-    const history = messages.map((m) => ({ role: m.role, content: m.content }));
+    // the end of `messages`, not duplicated. Read from the ref so the
+    // history is current even when this memoized callback was created
+    // several turns ago.
+    const history = messagesRef.current.map((m) => ({ role: m.role, content: m.content }));
 
     setMessages(prev => [...prev, userMsg]);
     setInput('');
     setPendingAttachment([]);
+    setFailedSend(null); // a fresh attempt clears any prior retry affordance
+
+    const command = opts?.attachments?.length ? null : matchVoiceCommand(text);
+    if (command) {
+      setMessages(prev => [...prev, {
+        id: uid(),
+        role: 'assistant',
+        content: `${command.label}.`,
+        time: now(),
+      }]);
+      navigate(command.route);
+      return;
+    }
+
     setTyping(true);
     setTypingReason('Thinking…');
 
     try {
-      const reply = await sendToConversationAPI(conversationId, text, history);
+      const reply = await sendToConversationAPI(
+        conversationId,
+        text,
+        history,
+        opts?.inputMode === 'voice' ? 'voice' : undefined,
+      );
 
-      // If a new conversation was created, store it
-      if (reply.newConversationId && !conversationId) {
-        localStorage.setItem('conversationId', reply.newConversationId);
+      // Story 3.11 — pin the server's conversation id so the next turn appends
+      // to the same persisted thread (and survives reload).
+      if (reply.newConversationId) {
+        setLocalFlag('conversationId', reply.newConversationId);
       }
 
       const aiMsg: Message = {
@@ -829,22 +953,52 @@ export function AssistantPage() {
       };
       setMessages(prev => [...prev, aiMsg]);
 
-      // Speak the response if TTS enabled or input was via voice
-      if ((ttsEnabled || lastInputWasVoiceRef.current) && reply.content) {
+      // Story 3.12 — the assistant API swallows transport failures into a
+      // degraded reply (failed:true) so the error renders inline; surface a
+      // one-tap RETRY for the failed input alongside it.
+      if (reply.failed) {
+        setFailedSend({ text, opts });
+      }
+
+      // Speak the response. In conversation mode the reply goes through the
+      // session's TTS (markdown stripped, barge-in interruptible); otherwise
+      // keep the existing behavior (TTS toggle or voice-note input).
+      if (conversationRef.current?.active && reply.content) {
+        conversationRef.current.speak(reply.content);
+      } else if ((ttsEnabled || lastInputWasVoiceRef.current) && reply.content) {
         speak(reply.content);
       }
     } catch {
       setMessages(prev => [...prev, {
         id: uid(),
         role: 'assistant',
-        content: 'Sorry, something went wrong. Please try again.',
+        content: 'Sorry, something went wrong.',
         time: now(),
       }]);
+      // Keep the failed input so the operator can retry in one tap (3.12) —
+      // never a silent partial write: nothing was persisted on this turn.
+      setFailedSend({ text, opts });
     } finally {
       setTyping(false);
       setTypingReason('');
     }
-  }, [conversationId, ttsEnabled, speak]);
+  }, [conversationId, navigate, ttsEnabled, speak]);
+
+  // UB-B2 — conversational voice session: continuous STT, per-utterance
+  // auto-submit through the SAME chat path as typed input (inputMode: 'voice'
+  // rides the request so the server's voice-approval guard applies), spoken
+  // replies, barge-in, 60s silence timeout.
+  const voiceConversation = useConversationVoice({
+    onSubmit: (text) => { void send(text, { inputMode: 'voice' }); },
+  });
+  conversationRef.current = voiceConversation;
+
+  const retryFailed = useCallback(() => {
+    if (!failedSend) return;
+    const { text, opts } = failedSend;
+    setFailedSend(null);
+    void send(text, opts);
+  }, [failedSend, send]);
 
   function handleSend() {
     if (pendingAttachment && pendingAttachment.length > 0) {
@@ -903,7 +1057,7 @@ export function AssistantPage() {
               onClick={() => {
                 const next = !ttsEnabled;
                 setTtsEnabled(next);
-                localStorage.setItem('rivet:tts-enabled', String(next));
+                setLocalFlag('rivet:tts-enabled', String(next));
                 if (!next) stopTTS();
               }}
               className={`flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-xs transition-colors ${
@@ -915,6 +1069,21 @@ export function AssistantPage() {
             >
               {ttsEnabled ? <Volume2 size={12} /> : <VolumeX size={12} />}
               {isSpeaking && <span className="size-1.5 rounded-full bg-indigo-400 animate-pulse" />}
+            </button>
+            {/* UB-B2 — conversation-mode toggle (≥44px tap target) */}
+            <button
+              onClick={() => (voiceConversation.active ? voiceConversation.stop() : void voiceConversation.start())}
+              title={voiceConversation.active ? 'End conversation mode' : 'Start conversation mode'}
+              aria-pressed={voiceConversation.active}
+              disabled={!voiceConversation.supported}
+              className={`flex items-center gap-1.5 min-h-11 rounded-lg border px-3 text-xs transition-colors disabled:opacity-40 ${
+                voiceConversation.active
+                  ? 'border-green-300 bg-green-50 text-green-700'
+                  : 'border-slate-200 bg-white text-slate-500 hover:bg-slate-50'
+              }`}
+            >
+              <Mic size={12} /> {voiceConversation.active ? 'Listening' : 'Conversation'}
+              {voiceConversation.active && <span className="size-1.5 rounded-full bg-green-500 animate-pulse" />}
             </button>
             <button
               onClick={() => setLiveSessionOpen(v => !v)}
@@ -934,22 +1103,6 @@ export function AssistantPage() {
         </div>
       </div>
 
-      {/* ── Today context strip ─────────────────────────────── */}
-      <div className="shrink-0 border-b border-slate-100 bg-white/80 px-4 md:px-6 py-2.5 backdrop-blur-sm">
-        <div className="max-w-3xl mx-auto flex gap-2 overflow-x-auto" style={{ scrollbarWidth: 'none' }}>
-          {TODAY_CONTEXT.map(({ icon: Icon, label, sub, color, bg, border }) => (
-            <div
-              key={sub}
-              className={`shrink-0 flex items-center gap-2 rounded-lg border px-2.5 py-1.5 ${bg} ${border}`}
-            >
-              <Icon size={12} className={color} />
-              <span className={`text-xs ${color}`}>{label}</span>
-              <span className="text-xs text-slate-400">{sub}</span>
-            </div>
-          ))}
-        </div>
-      </div>
-
       {/* ── Messages ────────────────────────────────────────── */}
       <div
         ref={scrollRef}
@@ -962,7 +1115,12 @@ export function AssistantPage() {
           <DateSep label={`Today · ${new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}`} />
 
           {messages.map((msg, i) => (
-            <MessageBubble key={msg.id} msg={msg} isLast={i === messages.length - 1} />
+            <MessageBubble
+              key={msg.id}
+              msg={msg}
+              isLast={i === messages.length - 1}
+              onApproved={undoToast.start}
+            />
           ))}
 
           {typing && <TypingIndicator reasoning={typingReason} />}
@@ -1000,6 +1158,27 @@ export function AssistantPage() {
         </div>
       )}
 
+      {/* ── Retry strip (Story 3.12) — surfaced when a turn fails ── */}
+      {failedSend && !typing && (
+        <div className="shrink-0 bg-white border-t border-slate-100 px-4 md:px-6 py-2">
+          <div className="max-w-3xl mx-auto flex items-center justify-between gap-3 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2">
+            <div className="flex items-center gap-2 min-w-0">
+              <AlertCircle size={14} className="text-amber-600 shrink-0" />
+              <span className="text-sm text-amber-800 truncate">
+                Couldn’t reach the assistant.
+              </span>
+            </div>
+            <button
+              type="button"
+              onClick={retryFailed}
+              className="flex items-center gap-1.5 min-h-11 rounded-lg bg-amber-600 px-3 text-sm text-white hover:bg-amber-700 transition-colors shrink-0"
+            >
+              Retry
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* ── Input area ───────────────────────────────────────── */}
       {voiceMode ? (
         <VoiceRecordingBar
@@ -1009,6 +1188,34 @@ export function AssistantPage() {
       ) : (
         <div className="shrink-0 bg-white border-t border-slate-100 px-4 md:px-6 py-3">
           <div className="max-w-3xl mx-auto">
+
+            {/* UB-B2 — live partial transcript while conversation mode listens */}
+            {voiceConversation.active && (
+              <div
+                data-testid="conversation-live-partial"
+                className="flex items-center gap-2 mb-2 rounded-xl border border-green-200 bg-green-50 px-3 py-2.5"
+              >
+                <Mic size={13} className="text-green-600 shrink-0" />
+                <span className="text-sm text-green-800 italic truncate">
+                  {voiceConversation.partial || 'Listening…'}
+                </span>
+                {voiceConversation.isSpeaking && (
+                  <span className="ml-auto flex items-center gap-1 text-xs text-green-600 shrink-0">
+                    <Volume2 size={12} /> Speaking — talk to interrupt
+                  </span>
+                )}
+              </div>
+            )}
+
+            {voiceConversation.error && (
+              <p
+                role="alert"
+                data-testid="conversation-voice-error"
+                className="mb-2 rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700"
+              >
+                {voiceConversation.error}
+              </p>
+            )}
 
             {/* Pending attachment preview */}
             {pendingAttachment && pendingAttachment.length > 0 && (
@@ -1111,6 +1318,18 @@ export function AssistantPage() {
         <div className="fixed bottom-24 right-6 z-50 w-96">
           <VoiceSessionPanel />
         </div>
+      )}
+
+      {/* Finding 2 — approval-undo toast (same component + server-driven window
+          as the inbox), so approving in the assistant is undoable too. */}
+      {undoToast.isActive && (
+        <UndoToast
+          summary={undoToast.summary}
+          remainingMs={undoToast.remainingMs}
+          windowMs={undoToast.windowMs}
+          onUndo={() => void undoToast.undo()}
+          onDismiss={undoToast.dismiss}
+        />
       )}
 
       <style>{`

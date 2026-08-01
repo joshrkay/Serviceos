@@ -114,6 +114,11 @@ const THRESHOLDS: Record<string, number> = {
   '08-ambiguity': 0.7,
   '09-concurrency': 0.7,
   '10-adversarial': 0.7,
+  // 11-spanish pins the "Spanish ≥90%" launch requirement explicitly rather
+  // than leaning on the overall-0.9 fallback — so a regression that drops the
+  // Spanish bucket is named as its own launch-gate blocker, not silently
+  // absorbed into the overall rate.
+  '11-spanish': 0.9,
 };
 
 const OVERALL_THRESHOLD = 0.9;

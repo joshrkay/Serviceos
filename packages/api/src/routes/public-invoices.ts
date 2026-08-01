@@ -1,7 +1,7 @@
 import { Router, Request, Response } from 'express';
 import { z } from 'zod';
 import { PublicInvoiceService } from '../invoices/public-invoice-service';
-import { toErrorResponse } from '../shared/errors';
+import { asyncRoute } from '../middleware/async-route';
 
 const MIN_TOKEN_LENGTH = 16;
 
@@ -20,31 +20,21 @@ export function createPublicInvoicesRouter(service: PublicInvoiceService): Route
    * GET /public/invoices/:token
    * Returns the public invoice view for the given view token.
    */
-  router.get('/:token', async (req: Request, res: Response) => {
+  router.get('/:token', asyncRoute(async (req: Request, res: Response) => {
     if (!tokenGuard(req.params.token, res)) return;
-    try {
-      const view = await service.getByToken(req.params.token);
-      res.json(view);
-    } catch (err) {
-      const { statusCode, body } = toErrorResponse(err);
-      res.status(statusCode).json(body);
-    }
-  });
+    const view = await service.getByToken(req.params.token);
+    res.json(view);
+  }));
 
   /**
    * POST /public/invoices/:token/view
    * Records a page view (increments viewCount, sets firstViewedAt).
    */
-  router.post('/:token/view', async (req: Request, res: Response) => {
+  router.post('/:token/view', asyncRoute(async (req: Request, res: Response) => {
     if (!tokenGuard(req.params.token, res)) return;
-    try {
-      const result = await service.recordView(req.params.token);
-      res.json(result);
-    } catch (err) {
-      const { statusCode, body } = toErrorResponse(err);
-      res.status(statusCode).json(body);
-    }
-  });
+    const result = await service.recordView(req.params.token);
+    res.json(result);
+  }));
 
   /**
    * POST /public/invoices/:token/checkout
@@ -54,17 +44,12 @@ export function createPublicInvoicesRouter(service: PublicInvoiceService): Route
    */
   const checkoutSchema = z.object({}).passthrough();
 
-  router.post('/:token/checkout', async (req: Request, res: Response) => {
+  router.post('/:token/checkout', asyncRoute(async (req: Request, res: Response) => {
     if (!tokenGuard(req.params.token, res)) return;
-    try {
-      checkoutSchema.parse(req.body);
-      const result = await service.getOrCreateCheckoutUrl(req.params.token);
-      res.json(result);
-    } catch (err) {
-      const { statusCode, body } = toErrorResponse(err);
-      res.status(statusCode).json(body);
-    }
-  });
+    checkoutSchema.parse(req.body);
+    const result = await service.getOrCreateCheckoutUrl(req.params.token);
+    res.json(result);
+  }));
 
   return router;
 }

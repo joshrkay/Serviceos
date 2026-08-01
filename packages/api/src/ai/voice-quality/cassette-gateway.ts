@@ -102,6 +102,33 @@ export interface CassetteLLMGatewayOptions {
   realGateway?: LLMGateway;
   /** Defaults to 'v1'. */
   rubricVersion?: string;
+  /**
+   * Opt-in for the loose drift fallback on a replay hash miss. When false
+   * (the default), a hash miss is a HARD FAILURE with an actionable message
+   * — a green gate then actually proves cassettes match the current prompts.
+   * When true, a hash miss falls back to a (schema, system-prompt
+   * first-sentence, last-user-message) match and serves the recorded response
+   * (the pre-strict behavior, useful for local iteration). Defaults to
+   * {@link cassetteFallbackAllowedFromEnv} (`VOICE_QUALITY_ALLOW_CASSETTE_FALLBACK=1`).
+   */
+  allowFallback?: boolean;
+}
+
+/**
+ * Reads `VOICE_QUALITY_ALLOW_CASSETTE_FALLBACK` from the environment. When set
+ * to `1`/`true`, a replay hash miss may fall back to the loose drift match
+ * (the pre-strict behavior). Default (unset) is strict: a hash miss throws.
+ *
+ * Rationale: since `a6a480cb` the loose fallback silently served the recorded
+ * response on any hash miss, so a green Layer-1 gate no longer proved cassettes
+ * matched the current prompts (a changed response contract could serve a stale,
+ * wrong response). Making the fallback opt-in restores "green gate ⇒ cassettes
+ * in sync"; local iteration re-enables it explicitly. See
+ * docs/solutions/test-failures/voice-quality-cassette-drift-serves-stale-response.md.
+ */
+export function cassetteFallbackAllowedFromEnv(): boolean {
+  const raw = process.env.VOICE_QUALITY_ALLOW_CASSETTE_FALLBACK;
+  return raw === '1' || raw === 'true';
 }
 
 const CASSETTE_VERSION = 1;
@@ -135,17 +162,9 @@ export class CassetteLLMGateway extends LLMGateway {
   private readonly mode: CassetteMode;
   private readonly realGateway?: LLMGateway;
   private readonly rubricVersion: string;
+  private readonly allowFallback: boolean;
   /** Throttle the drift warning to once per gateway instance. */
   private driftWarned = false;
-  /**
-   * Per-(schema, system-fp, user) consumption counter — when the
-   * fingerprint key has N matching cassette entries, the Kth fallback
-   * hit returns the Kth entry in recorded order rather than always
-   * the first. Preserves call-order semantics for scripts that issue
-   * the same logical request multiple times across turns (e.g. an
-   * intent classifier called once per user turn).
-   */
-  private fallbackCounts: Map<string, number> = new Map();
 
   constructor(opts: CassetteLLMGatewayOptions) {
     // We never call into the parent's provider machinery — `complete()` is
@@ -159,6 +178,7 @@ export class CassetteLLMGateway extends LLMGateway {
     this.mode = opts.mode;
     this.realGateway = opts.realGateway;
     this.rubricVersion = opts.rubricVersion ?? 'v1';
+    this.allowFallback = opts.allowFallback ?? cassetteFallbackAllowedFromEnv();
   }
 
   override async complete(request: LLMRequest): Promise<LLMResponse> {
@@ -186,30 +206,34 @@ export class CassetteLLMGateway extends LLMGateway {
     const entry = cassette.entries.find((e) => e.requestHash === hash);
     if (entry) return entry.response;
 
-    // Hash miss — fall back to a stable signature based on the schema +
-    // last user message. The recorded responses are still correct for
-    // the same user input even after a system-prompt extension (e.g.
-    // adding intents to the classifier rubric), and this lets the CI
-    // gate keep working without an unrecorded LLM round-trip. A full
-    // refresh via VOICE_QUALITY_CASSETTE_MODE=record/refresh remains
-    // the canonical fix.
-    const fallback = this.findFallbackEntry(request, cassette);
-    if (fallback) {
-      if (!this.driftWarned) {
-        this.driftWarned = true;
-        // eslint-disable-next-line no-console
-        console.warn(
-          `cassette drift: scriptId=${this.scriptId} hash=${hash} — ` +
-            `falling back to user-content match. Refresh with ` +
-            `VOICE_QUALITY_CASSETTE_MODE=refresh when convenient.`
-        );
+    // Hash miss. Strict by default (allowFallback=false): a miss is a HARD
+    // FAILURE so a green gate proves cassettes match the current prompts. The
+    // loose drift fallback (schema + system-prompt first-sentence + last-user
+    // message) is opt-in — it silently served the recorded response on ANY
+    // miss, which masks drift and can serve a stale, wrong response after a
+    // response-contract change. Re-enable it only for local iteration via
+    // VOICE_QUALITY_ALLOW_CASSETTE_FALLBACK=1.
+    if (this.allowFallback) {
+      const fallback = this.findFallbackEntry(request, cassette);
+      if (fallback) {
+        if (!this.driftWarned) {
+          this.driftWarned = true;
+          // eslint-disable-next-line no-console
+          console.warn(
+            `cassette drift: scriptId=${this.scriptId} hash=${hash} — ` +
+              `falling back to user-content match (VOICE_QUALITY_ALLOW_CASSETTE_FALLBACK=1). ` +
+              `Refresh with VOICE_QUALITY_CASSETTE_MODE=refresh when convenient.`
+          );
+        }
+        return fallback.response;
       }
-      return fallback.response;
     }
 
     throw new Error(
-      `cassette stale, refresh needed for scriptId=${this.scriptId} requestHash=${hash} ` +
-        `(re-run with VOICE_QUALITY_CASSETTE_MODE=record or refresh)`
+      `cassette drift: scriptId=${this.scriptId} requestHash=${hash} — no entry matches the ` +
+        `current request. The prompt/model likely changed since this cassette was recorded. ` +
+        `Run 'npm run voice-quality:refresh' to re-record (offline; no API key needed). ` +
+        `To tolerate drift locally instead, set VOICE_QUALITY_ALLOW_CASSETTE_FALLBACK=1.`
     );
   }
 
@@ -261,14 +285,13 @@ export class CassetteLLMGateway extends LLMGateway {
       else return null; // matches exist but none with right fp — give up
     }
 
-    // Stage 3 — walk the matches in recorded order. The Kth fallback
-    // for the same (schema, system-fp, user) triple returns the Kth
-    // recorded entry; if we run out, repeat the last one (degrades but
-    // never crashes).
-    const key = `${liveSchema}::${liveSystemFp ?? ''}::${liveUser}`;
-    const prevCount = this.fallbackCounts.get(key) ?? 0;
-    this.fallbackCounts.set(key, prevCount + 1);
-    return matches[Math.min(prevCount, matches.length - 1)];
+    // Stage 3 — the match set is now the refresh history of a single
+    // logical call (same schema + system fingerprint + last user message);
+    // replay the most recently recorded entry, which carries current
+    // behavior. See pickNewestRecording for why `recordedAt` — not a
+    // prompt-prefix proxy or implicit file order — is the robust,
+    // drift-shape-independent key.
+    return pickNewestRecording(matches);
   }
 
   private async recordOrRefresh(
@@ -496,7 +519,7 @@ function firstSentence(text: string): string {
   return hardCap.slice(0, Math.min(...stops));
 }
 
-function systemFingerprintFromPromptString(prompt: string): string | null {
+export function systemFingerprintFromPromptString(prompt: string): string | null {
   let parsed: unknown;
   try {
     parsed = JSON.parse(prompt);
@@ -514,7 +537,7 @@ function systemFingerprintFromPromptString(prompt: string): string | null {
  * (see snapshotRequest below). Parse it defensively and extract the
  * same canonical last-user-message key the live-request side uses.
  */
-function lastUserContentFromPromptString(prompt: string): string | null {
+export function lastUserContentFromPromptString(prompt: string): string | null {
   let parsed: unknown;
   try {
     parsed = JSON.parse(prompt);
@@ -525,6 +548,43 @@ function lastUserContentFromPromptString(prompt: string): string | null {
   return lastUserContentFromMessages(
     parsed as ReadonlyArray<{ role: string; content?: unknown; parts?: unknown }>
   );
+}
+
+/**
+ * Deterministically pick the most recently recorded entry among fallback
+ * matches.
+ *
+ * By the time we reach here the match set has already been narrowed to a
+ * single logical call — same schema, same system-prompt fingerprint, same
+ * last user message (see {@link CassetteLLMGateway.findFallbackEntry}
+ * stages 1-2). Multiple entries for that one call are refresh history
+ * accreted over the cassette's life as the system prompt grew or was
+ * re-recorded; the newest carries current behavior.
+ *
+ * Ranking by `recordedAt` is drift-shape-independent: `recordedAt` is an
+ * ISO-8601 instant from `Date.toISOString()` (fixed-width UTC, so a
+ * lexicographic `>=` is also chronological — verified across the corpus),
+ * and it stays correct whether drift was a suffix append, a head/middle
+ * edit, or an in-place refresh (which keeps the array index but bumps the
+ * timestamp). A prompt-prefix/length proxy, by contrast, silently degrades
+ * the moment drift is not a pure append. On an equal timestamp
+ * (same-millisecond batch record) the later array entry wins, so the result
+ * is a pure function of the match set: identical input always yields the
+ * same entry, on every call and across reused gateway instances.
+ *
+ * `matches` is non-empty by construction at the call site.
+ */
+export function pickNewestRecording(matches: CassetteEntry[]): CassetteEntry {
+  let best = matches[0]!;
+  for (let i = 1; i < matches.length; i++) {
+    const candidate = matches[i]!;
+    // `>=` so that on an equal recordedAt the later (higher-index, i.e.
+    // appended/refreshed later) entry wins — a deterministic tie-break.
+    if (candidate.recordedAt >= best.recordedAt) {
+      best = candidate;
+    }
+  }
+  return best;
 }
 
 function canonicalize(value: unknown): unknown {

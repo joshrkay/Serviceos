@@ -1,11 +1,7 @@
 /**
- * Tier 4 (Payment methods — PR 1: Stripe Connect onboarding).
- *
- * Closes the "Payment methods" stub on Settings. Lets the operator
- * onboard onto Stripe Connect (tenant's own Stripe account) so
- * customer-facing payments route into their bank. The actual
- * payment-routing wire-up is PR 2; PR 1 ships the connect lifecycle +
- * status surfacing + manual disconnect.
+ * Payment methods — Stripe Connect onboarding so customer-facing
+ * payments route into the tenant's bank. Connect lifecycle, status,
+ * and manual disconnect.
  */
 import { useEffect, useState } from 'react';
 import { X, CreditCard, AlertCircle } from 'lucide-react';

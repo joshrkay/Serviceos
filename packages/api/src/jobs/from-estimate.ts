@@ -30,12 +30,20 @@ import {
   AppointmentAssignment,
   AssignmentRepository,
   assignTechnician,
+  assertTechnicianAvailability,
   syncJobAssignment,
 } from '../appointments/assignment';
 import { UserRepository, User } from '../users/user';
 import { InvoiceRepository } from '../invoices/invoice';
 import { RefreshJobMoneyStateDeps } from './job-money-state';
-import { findBookableSlots, isSlotFree } from '../scheduling/booking-availability';
+import {
+  findBookableSlots,
+  isSlotFree,
+  schedulingConfigFromSettings,
+} from '../scheduling/booking-availability';
+import { SettingsRepository } from '../settings/settings';
+import { WorkingHoursRepository } from '../availability/working-hours';
+import { UnavailableBlockRepository } from '../availability/unavailable-block';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
 import { NotFoundError, ConflictError, ValidationError } from '../shared/errors';
 import { isValidTenantId } from '../db/schema';
@@ -53,6 +61,14 @@ export interface ConvertEstimateToScheduledJobDeps {
   /** Needed to roll up job.money_state when the estimate is accepted. */
   invoiceRepo: InvoiceRepository;
   auditRepo?: AuditRepository;
+  /**
+   * When wired, tenant scheduling settings (timezone, business hours, travel
+   * buffer) constrain auto-picked slots instead of the hardcoded defaults.
+   */
+  settingsRepo?: SettingsRepository;
+  /** F2 — assignment refuses windows outside modeled tech hours / during time-off. */
+  workingHoursRepo?: WorkingHoursRepository;
+  unavailableBlockRepo?: UnavailableBlockRepository;
 }
 
 export interface ConvertEstimateToScheduledJobInput {
@@ -88,6 +104,13 @@ interface ChosenSlot {
   technicianRole: string;
   scheduledStart: Date;
   scheduledEnd: Date;
+  /**
+   * The timezone slot selection ran in (input override → tenant settings →
+   * UTC). The appointment MUST store this same zone: a divergent zone both
+   * persists wrong display metadata and makes the assignment-level
+   * working-hours guard interpret the instant in the wrong local day.
+   */
+  timezone: string;
 }
 
 async function chooseTechnicianAndSlot(
@@ -96,9 +119,22 @@ async function chooseTechnicianAndSlot(
 ): Promise<ChosenSlot> {
   const { tenantId } = input;
   const durationMin = input.durationMin ?? DEFAULT_DURATION_MIN;
-  const timezone = input.timezone ?? DEFAULT_TIMEZONE;
+  const settings = deps.settingsRepo
+    ? await deps.settingsRepo.findByTenant(tenantId).catch(() => null)
+    : null;
+  const schedulingConfig = schedulingConfigFromSettings(settings);
+  const timezone = input.timezone ?? schedulingConfig.timezone ?? DEFAULT_TIMEZONE;
   const now = input.now ?? new Date();
-  const slotDeps = { appointmentRepo: deps.appointmentRepo, assignmentRepo: deps.assignmentRepo };
+  // Same repos the assignTechnician guard uses — slot selection and
+  // assignment must enforce identical constraints, or auto-pick chooses a
+  // slot the guard then rejects and the conversion fails instead of trying
+  // the next valid slot.
+  const slotDeps = {
+    appointmentRepo: deps.appointmentRepo,
+    assignmentRepo: deps.assignmentRepo,
+    workingHoursRepo: deps.workingHoursRepo,
+    unavailableBlockRepo: deps.unavailableBlockRepo,
+  };
 
   async function requireTechnician(id: string): Promise<User> {
     const user = await deps.userRepo.findById(tenantId, id);
@@ -127,10 +163,24 @@ async function chooseTechnicianAndSlot(
     for (const tech of candidates) {
       const free = await isSlotFree(slotDeps, {
         tenantId, start: scheduledStart, end: scheduledEnd, technicianId: tech.id,
+        bufferMinutes: schedulingConfig.bufferMinutes,
       });
-      if (free) {
-        return { technicianId: tech.id, technicianRole: tech.role, scheduledStart, scheduledEnd };
+      if (!free) continue;
+      // isSlotFree covers calendar conflicts only — screen the candidate's
+      // modeled working hours / time off with the SAME rule the assignment
+      // guard applies, so an off-duty tech is skipped here instead of
+      // failing the whole conversion at assignTechnician.
+      try {
+        await assertTechnicianAvailability(
+          tenantId,
+          tech.id,
+          { start: scheduledStart, end: scheduledEnd, timezone },
+          { workingHoursRepo: deps.workingHoursRepo, unavailableBlockRepo: deps.unavailableBlockRepo },
+        );
+      } catch {
+        continue;
       }
+      return { technicianId: tech.id, technicianRole: tech.role, scheduledStart, scheduledEnd, timezone };
     }
     throw new ConflictError('Requested start time is not available for any technician');
   }
@@ -141,6 +191,8 @@ async function chooseTechnicianAndSlot(
   for (const tech of candidates) {
     const slots = await findBookableSlots(slotDeps, {
       tenantId, fromDate, toDate, timezone, durationMin, technicianId: tech.id, maxSlots: 1, now,
+      weeklyHours: schedulingConfig.weeklyHours,
+      bufferMinutes: schedulingConfig.bufferMinutes,
     });
     if (slots.length > 0) {
       return {
@@ -148,6 +200,7 @@ async function chooseTechnicianAndSlot(
         technicianRole: tech.role,
         scheduledStart: slots[0].start,
         scheduledEnd: slots[0].end,
+        timezone,
       };
     }
   }
@@ -162,7 +215,6 @@ export async function convertEstimateToScheduledJob(
   input: ConvertEstimateToScheduledJobInput,
 ): Promise<ConvertEstimateToScheduledJobResult> {
   const { tenantId, estimateId, actorId } = input;
-  const timezone = input.timezone ?? DEFAULT_TIMEZONE;
 
   // 0. Validate UUIDs up front so a malformed id can't reach a tenant-scoped
   //    query / setTenantContext (which casts to uuid) before failing.
@@ -266,7 +318,9 @@ export async function convertEstimateToScheduledJob(
     jobId: job.id,
     scheduledStart: chosen.scheduledStart,
     scheduledEnd: chosen.scheduledEnd,
-    timezone,
+    // The zone slot selection ran in — a divergent zone here would make the
+    // assignment guard evaluate the window in the wrong local day.
+    timezone: chosen.timezone,
     createdBy: actorId,
     idempotencyKey,
   };
@@ -324,7 +378,13 @@ export async function convertEstimateToScheduledJob(
         assignedBy: actorId,
       },
       deps.assignmentRepo,
-      { appointmentRepo: deps.appointmentRepo, auditRepo: deps.auditRepo, actorRole: input.actorRole },
+      {
+        appointmentRepo: deps.appointmentRepo,
+        auditRepo: deps.auditRepo,
+        actorRole: input.actorRole,
+        workingHoursRepo: deps.workingHoursRepo,
+        unavailableBlockRepo: deps.unavailableBlockRepo,
+      },
     );
   } catch (err) {
     // Compensate ONLY when we created a fresh appointment (no prior assignments);

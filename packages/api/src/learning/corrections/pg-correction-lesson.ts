@@ -134,4 +134,34 @@ export class PgCorrectionLessonRepository
       return result.rows[0] ? mapRow(result.rows[0]) : null;
     });
   }
+
+  async countByTarget(
+    tenantId: string,
+    lessonType: CorrectionLessonType,
+    targetKey: string,
+  ): Promise<number> {
+    // The JSONB target field is chosen from a fixed allowlist keyed by
+    // lessonType (never user input), so the field name is safe to interpolate.
+    // part_price_changed → payload->>'catalogItemId' (exact);
+    // banned_phrase      → payload->>'phrase' (case-insensitive, trimmed).
+    let expr: string;
+    let arg: string;
+    if (lessonType === 'part_price_changed') {
+      expr = `payload->>'catalogItemId'`;
+      arg = targetKey;
+    } else if (lessonType === 'banned_phrase') {
+      expr = `LOWER(TRIM(payload->>'phrase'))`;
+      arg = targetKey.trim().toLowerCase();
+    } else {
+      return 0; // no single-target concept for labor_rate / scope_reclassified
+    }
+    return this.withTenant(tenantId, async (client) => {
+      const result = await client.query(
+        `SELECT COUNT(*)::int AS n FROM correction_lessons
+         WHERE tenant_id = $1 AND lesson_type = $2 AND ${expr} = $3`,
+        [tenantId, lessonType, arg],
+      );
+      return (result.rows[0]?.n as number) ?? 0;
+    });
+  }
 }

@@ -21,7 +21,7 @@ import {
 import { JobPhotoService } from '../jobs/job-photo-service';
 import { isValidJobPhotoCategory } from '../jobs/job-photo';
 import { requireAuth, requirePermission, requireTenant } from '../middleware/auth';
-import { toErrorResponse } from '../shared/errors';
+import { asyncRoute } from '../middleware/async-route';
 
 // Photos are bounded tighter than the generic 100MB file limit:
 // mobile cameras commonly emit 4–8MB JPEGs; 10MB is a comfortable
@@ -68,82 +68,77 @@ export function createJobPhotosRouter(deps: JobPhotosRouterDeps): Router {
     requireAuth,
     requireTenant,
     requirePermission('jobs:update'),
-    async (req: AuthenticatedRequest, res: Response) => {
-      try {
-        const body = (req.body ?? {}) as PresignBody;
-        const jobId = req.params.id;
-        const tenantId = req.auth!.tenantId;
+    asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
+      const body = (req.body ?? {}) as PresignBody;
+      const jobId = req.params.id;
+      const tenantId = req.auth!.tenantId;
 
-        const uploadRequest = {
-          tenantId,
-          uploadedBy: req.auth!.userId,
-          filename: body.filename ?? '',
-          contentType: body.contentType ?? '',
-          sizeBytes: Number(body.sizeBytes ?? 0),
-          entityType: 'job' as const,
-          entityId: jobId,
-        };
+      const uploadRequest = {
+        tenantId,
+        uploadedBy: req.auth!.userId,
+        filename: body.filename ?? '',
+        contentType: body.contentType ?? '',
+        sizeBytes: Number(body.sizeBytes ?? 0),
+        entityType: 'job' as const,
+        entityId: jobId,
+      };
 
-        const errors = validateUpload(uploadRequest);
-        if (errors.length > 0) {
-          res.status(400).json({ error: 'VALIDATION_ERROR', message: errors.join(', ') });
-          return;
-        }
-
-        const normalized = normalizeContentType(uploadRequest.contentType);
-        if (!ALLOWED_PHOTO_CONTENT_TYPES.has(normalized)) {
-          res.status(400).json({
-            error: 'VALIDATION_ERROR',
-            message: `Photo content type not allowed: ${uploadRequest.contentType}`,
-          });
-          return;
-        }
-
-        if (isNaN(uploadRequest.sizeBytes) || uploadRequest.sizeBytes <= 0 || uploadRequest.sizeBytes > MAX_JOB_PHOTO_SIZE) {
-          res.status(400).json({
-            error: 'VALIDATION_ERROR',
-            message: uploadRequest.sizeBytes > MAX_JOB_PHOTO_SIZE
-              ? 'Photo exceeds maximum allowed size of ' + MAX_JOB_PHOTO_SIZE + ' bytes'
-              : 'Photo size must be a positive number',
-          });
-          return;
-        }
-
-        const fileRecord = createFileRecord(uploadRequest, bucket);
-        const created = await fileRepo.create(fileRecord);
-        const uploadUrl = await storage.generateUploadUrl(
-          created.storageBucket,
-          created.storageKey,
-          created.contentType
-        );
-
-        await auditRepo.create(
-          createAuditEvent({
-            tenantId,
-            actorId: req.auth!.userId,
-            actorRole: req.auth!.role,
-            eventType: 'job.photo.upload_requested',
-            entityType: 'job',
-            entityId: jobId,
-            metadata: {
-              fileId: created.id,
-              filename: created.filename,
-              contentType: created.contentType,
-              sizeBytes: created.sizeBytes,
-            },
-          })
-        );
-
-        res.status(201).json({
-          fileId: created.id,
-          uploadUrl,
-          fileRecord: created,
-        });
-      } catch (err) {
-        const { statusCode, body } = toErrorResponse(err);
-        res.status(statusCode).json(body);
+      const errors = validateUpload(uploadRequest);
+      if (errors.length > 0) {
+        res.status(400).json({ error: 'VALIDATION_ERROR', message: errors.join(', ') });
+        return;
       }
-    }
+
+      const normalized = normalizeContentType(uploadRequest.contentType);
+      if (!ALLOWED_PHOTO_CONTENT_TYPES.has(normalized)) {
+        res.status(400).json({
+          error: 'VALIDATION_ERROR',
+          message: `Photo content type not allowed: ${uploadRequest.contentType}`,
+        });
+        return;
+      }
+
+      if (isNaN(uploadRequest.sizeBytes) || uploadRequest.sizeBytes <= 0 || uploadRequest.sizeBytes > MAX_JOB_PHOTO_SIZE) {
+        res.status(400).json({
+          error: 'VALIDATION_ERROR',
+          message: uploadRequest.sizeBytes > MAX_JOB_PHOTO_SIZE
+            ? 'Photo exceeds maximum allowed size of ' + MAX_JOB_PHOTO_SIZE + ' bytes'
+            : 'Photo size must be a positive number',
+        });
+        return;
+      }
+
+      const fileRecord = createFileRecord(uploadRequest, bucket);
+      const created = await fileRepo.create(fileRecord);
+      const uploadUrl = await storage.generateUploadUrl(
+        created.storageBucket,
+        created.storageKey,
+        created.contentType
+      );
+
+      await auditRepo.create(
+        createAuditEvent({
+          tenantId,
+          actorId: req.auth!.userId,
+          actorRole: req.auth!.role,
+          eventType: 'job.photo.upload_requested',
+          entityType: 'job',
+          entityId: jobId,
+          metadata: {
+            fileId: created.id,
+            filename: created.filename,
+            contentType: created.contentType,
+            sizeBytes: created.sizeBytes,
+          },
+        })
+      );
+
+      res.status(201).json({
+        fileId: created.id,
+        uploadUrl,
+        fileRecord: created,
+      });
+    })
   );
 
   // Step 2 of upload: client confirms the S3 PUT succeeded and asks
@@ -153,62 +148,57 @@ export function createJobPhotosRouter(deps: JobPhotosRouterDeps): Router {
     requireAuth,
     requireTenant,
     requirePermission('jobs:update'),
-    async (req: AuthenticatedRequest, res: Response) => {
-      try {
-        const body = (req.body ?? {}) as AttachBody;
-        const jobId = req.params.id;
-        const tenantId = req.auth!.tenantId;
+    asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
+      const body = (req.body ?? {}) as AttachBody;
+      const jobId = req.params.id;
+      const tenantId = req.auth!.tenantId;
 
-        if (!body.fileId) {
-          res.status(400).json({ error: 'VALIDATION_ERROR', message: 'fileId is required' });
-          return;
-        }
-        if (!isValidJobPhotoCategory(body.category)) {
-          res.status(400).json({
-            error: 'VALIDATION_ERROR',
-            message: `Invalid category: ${String(body.category)}`,
-          });
-          return;
-        }
-
-        const takenAt = body.takenAt ? new Date(body.takenAt) : undefined;
-        if (takenAt && Number.isNaN(takenAt.getTime())) {
-          res.status(400).json({ error: 'VALIDATION_ERROR', message: 'takenAt is invalid' });
-          return;
-        }
-
-        const photo = await service.attachPhotoToJob(
-          tenantId,
-          jobId,
-          body.fileId,
-          body.category,
-          body.notes,
-          takenAt,
-          req.auth!.userId
-        );
-
-        await auditRepo.create(
-          createAuditEvent({
-            tenantId,
-            actorId: req.auth!.userId,
-            actorRole: req.auth!.role,
-            eventType: 'job.photo.attached',
-            entityType: 'job',
-            entityId: jobId,
-            metadata: {
-              photoId: photo.id,
-              fileId: photo.fileId,
-              category: photo.category,
-            },
-          })
-        );
-
-        res.status(201).json(photo);
-      } catch (err) {
-        const { statusCode, body } = toErrorResponse(err);
-        res.status(statusCode).json(body);
+      if (!body.fileId) {
+        res.status(400).json({ error: 'VALIDATION_ERROR', message: 'fileId is required' });
+        return;
       }
-    }
+      if (!isValidJobPhotoCategory(body.category)) {
+        res.status(400).json({
+          error: 'VALIDATION_ERROR',
+          message: `Invalid category: ${String(body.category)}`,
+        });
+        return;
+      }
+
+      const takenAt = body.takenAt ? new Date(body.takenAt) : undefined;
+      if (takenAt && Number.isNaN(takenAt.getTime())) {
+        res.status(400).json({ error: 'VALIDATION_ERROR', message: 'takenAt is invalid' });
+        return;
+      }
+
+      const photo = await service.attachPhotoToJob(
+        tenantId,
+        jobId,
+        body.fileId,
+        body.category,
+        body.notes,
+        takenAt,
+        req.auth!.userId
+      );
+
+      await auditRepo.create(
+        createAuditEvent({
+          tenantId,
+          actorId: req.auth!.userId,
+          actorRole: req.auth!.role,
+          eventType: 'job.photo.attached',
+          entityType: 'job',
+          entityId: jobId,
+          metadata: {
+            photoId: photo.id,
+            fileId: photo.fileId,
+            category: photo.category,
+          },
+        })
+      );
+
+      res.status(201).json(photo);
+    })
   );
 
   router.get(
@@ -216,16 +206,11 @@ export function createJobPhotosRouter(deps: JobPhotosRouterDeps): Router {
     requireAuth,
     requireTenant,
     requirePermission('jobs:view'),
-    async (req: AuthenticatedRequest, res: Response) => {
-      try {
-        const tenantId = req.auth!.tenantId;
-        const photos = await service.listJobPhotos(tenantId, req.params.id);
-        res.json(photos);
-      } catch (err) {
-        const { statusCode, body } = toErrorResponse(err);
-        res.status(statusCode).json(body);
-      }
-    }
+    asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
+      const tenantId = req.auth!.tenantId;
+      const photos = await service.listJobPhotos(tenantId, req.params.id);
+      res.json(photos);
+    })
   );
 
   // Removes only the join row: the underlying file + S3 object
@@ -237,33 +222,28 @@ export function createJobPhotosRouter(deps: JobPhotosRouterDeps): Router {
     requireAuth,
     requireTenant,
     requirePermission('jobs:update'),
-    async (req: AuthenticatedRequest, res: Response) => {
-      try {
-        const tenantId = req.auth!.tenantId;
-        const removed = await service.deleteJobPhoto(tenantId, req.params.id, req.params.photoId);
-        if (!removed) {
-          res.status(404).json({ error: 'NOT_FOUND', message: 'Job photo not found' });
-          return;
-        }
-
-        await auditRepo.create(
-          createAuditEvent({
-            tenantId,
-            actorId: req.auth!.userId,
-            actorRole: req.auth!.role,
-            eventType: 'job.photo.deleted',
-            entityType: 'job',
-            entityId: req.params.id,
-            metadata: { photoId: req.params.photoId },
-          })
-        );
-
-        res.status(204).send();
-      } catch (err) {
-        const { statusCode, body } = toErrorResponse(err);
-        res.status(statusCode).json(body);
+    asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
+      const tenantId = req.auth!.tenantId;
+      const removed = await service.deleteJobPhoto(tenantId, req.params.id, req.params.photoId);
+      if (!removed) {
+        res.status(404).json({ error: 'NOT_FOUND', message: 'Job photo not found' });
+        return;
       }
-    }
+
+      await auditRepo.create(
+        createAuditEvent({
+          tenantId,
+          actorId: req.auth!.userId,
+          actorRole: req.auth!.role,
+          eventType: 'job.photo.deleted',
+          entityType: 'job',
+          entityId: req.params.id,
+          metadata: { photoId: req.params.photoId },
+        })
+      );
+
+      res.status(204).send();
+    })
   );
 
   return router;

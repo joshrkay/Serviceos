@@ -140,3 +140,66 @@ describe('P4-004 — Estimate Templates', () => {
     expect(updated!.name).toBe('Updated Name');
   });
 });
+
+import { buildTemplateInputFromEstimate } from '../../src/templates/estimate-template';
+import { buildLineItem } from '../../src/shared/billing-engine';
+
+describe('7.9 — buildTemplateInputFromEstimate', () => {
+  const estimate = {
+    lineItems: [
+      buildLineItem('a', 'Diagnostic', 1, 8900, 0, true, 'labor'),
+      { ...buildLineItem('b', 'Refrigerant', 2, 7500, 1, true, 'material'), isOptional: true },
+      buildLineItem('c', 'Misc', 1, 1000, 2, false), // no category → 'other'
+    ],
+    totals: { discountCents: 500, taxRateBps: 825 },
+    customerMessage: 'Thanks for your business',
+  };
+
+  it('maps line items, discount, tax, and message into a CreateTemplateInput', () => {
+    const input = buildTemplateInputFromEstimate(estimate, {
+      tenantId: 'tenant-1',
+      name: 'AC Repair',
+      verticalType: 'hvac',
+      categoryId: 'hvac-repair-ac',
+      description: 'Common AC repair',
+      createdBy: 'user-1',
+    });
+
+    expect(input.tenantId).toBe('tenant-1');
+    expect(input.name).toBe('AC Repair');
+    expect(input.verticalType).toBe('hvac');
+    expect(input.categoryId).toBe('hvac-repair-ac');
+    expect(input.defaultDiscountCents).toBe(500);
+    expect(input.defaultTaxRateBps).toBe(825);
+    expect(input.defaultCustomerMessage).toBe('Thanks for your business');
+    expect(input.lineItemTemplates).toHaveLength(3);
+    expect(input.lineItemTemplates[0]).toMatchObject({
+      description: 'Diagnostic',
+      category: 'labor',
+      defaultQuantity: 1,
+      defaultUnitPriceCents: 8900,
+      taxable: true,
+      sortOrder: 0,
+      isOptional: false,
+    });
+    expect(input.lineItemTemplates[1].isOptional).toBe(true);
+    // A line with no category defaults to 'other'.
+    expect(input.lineItemTemplates[2].category).toBe('other');
+  });
+
+  it('produces input that passes createTemplate validation and round-trips', async () => {
+    const repo = new InMemoryEstimateTemplateRepository();
+    const input = buildTemplateInputFromEstimate(estimate, {
+      tenantId: 'tenant-1',
+      name: 'AC Repair',
+      verticalType: 'hvac',
+      categoryId: 'hvac-repair-ac',
+      createdBy: 'user-1',
+    });
+    const template = await createTemplate(input, repo);
+    expect(template.id).toBeTruthy();
+    const seeded = instantiateTemplate(template);
+    // Optional lines are excluded when seeding a new estimate.
+    expect(seeded.lineItems).toHaveLength(2);
+  });
+});

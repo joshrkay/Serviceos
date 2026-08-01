@@ -1,17 +1,20 @@
 import { Router, Request, Response } from 'express';
-import { getDispatchBoardData, BoardQueryDependencies, PendingChangeKind } from './board-query';
+import { getDispatchBoardData, getDayBoundaries, BoardQueryDependencies, PendingChangeKind } from './board-query';
 import { AppointmentRepository, listAppointmentsWithMeta } from '../appointments/appointment';
 import { AssignmentRepository } from '../appointments/assignment';
 import { JobRepository } from '../jobs/job';
 import { CustomerRepository } from '../customers/customer';
 import { LocationRepository } from '../locations/location';
 import { ProposalRepository } from '../proposals/proposal';
+import { UserRepository } from '../users/user';
+import { SettingsRepository } from '../settings/settings';
 import { resolvePendingChangeRequests } from './pending-changes';
-import { requireAuth, requireTenant } from '../middleware/auth';
+import { requireAuth, requireRole, requireTenant } from '../middleware/auth';
 import { AuthenticatedRequest } from '../auth/clerk';
 import { toErrorResponse } from '../shared/errors';
 import { createBoardEventsRouter, BoardEventsRouteDeps } from './board-events-route';
 import { createPresenceRouter } from './presence-routes';
+import { AuditRepository, createAuditEvent } from '../audit/audit';
 
 export interface EnRouteEnqueuer {
   enqueueEnRouteNotice(input: {
@@ -21,7 +24,7 @@ export interface EnRouteEnqueuer {
   }): Promise<string | null>;
 }
 
-export function createDispatchRoutes(deps: {
+interface DispatchRouteDeps {
   appointmentRepo: AppointmentRepository;
   assignmentRepo: AssignmentRepository;
   jobRepo?: JobRepository;
@@ -30,17 +33,110 @@ export function createDispatchRoutes(deps: {
   boardEventsDeps?: BoardEventsRouteDeps;
   enRouteCoordinator?: EnRouteEnqueuer;
   proposalRepo?: ProposalRepository;
-}): Router {
+  userRepo?: UserRepository;
+  settingsRepo?: SettingsRepository;
+  auditRepo?: AuditRepository;
+}
+
+/**
+ * Minimal actor shape `triggerEnRoute` needs for the audit event — deliberately
+ * NOT `AuthenticatedRequest['auth']` so this stays callable from non-HTTP
+ * callers (the voice and SMS-keyword legs) that never have an Express request.
+ */
+export interface EnRouteActor {
+  tenantId: string;
+  userId: string;
+  role: string;
+}
+
+async function emitEnRouteAudit(
+  deps: Pick<DispatchRouteDeps, 'auditRepo'>,
+  actor: EnRouteActor,
+  appointmentId: string,
+  idempotencyKey: string | null,
+): Promise<void> {
+  if (!deps.auditRepo) return;
+  await deps.auditRepo.create(
+    createAuditEvent({
+      tenantId: actor.tenantId,
+      actorId: actor.userId,
+      actorRole: actor.role,
+      eventType: 'appointment.en_route_triggered',
+      entityType: 'appointment',
+      entityId: appointmentId,
+      correlationId: idempotencyKey ?? undefined,
+    }),
+  );
+}
+
+export interface TriggerEnRouteInput {
+  tenantId: string;
+  appointmentId: string;
+  technicianName?: string;
+  actor: EnRouteActor;
+}
+
+export interface TriggerEnRouteResult {
+  notified: boolean;
+  idempotencyKey: string | null;
+}
+
+/**
+ * B5.5 / Part F decision F-3 — the ONE audited direct status act behind
+ * "on my way": enqueue the branded ETA SMS via the en-route coordinator, then
+ * emit the `appointment.en_route_triggered` audit event. The app button (the
+ * POST /appointments/:id/en-route handler below), the voice leg
+ * (workers/voice-action-router.ts → dispatch/en-route-voice.ts), and the
+ * SMS-keyword leg (sms/tech-status/*) all call this SAME function — voice/SMS
+ * "on my way" is the human acting directly, not an AI proposal, so it reuses
+ * the exact act the shipped button already executes rather than a parallel
+ * implementation that could drift from it.
+ */
+export async function triggerEnRoute(
+  deps: Pick<DispatchRouteDeps, 'enRouteCoordinator' | 'auditRepo'>,
+  input: TriggerEnRouteInput,
+): Promise<TriggerEnRouteResult> {
+  if (!deps.enRouteCoordinator) {
+    throw new Error('En-route notifications are not configured');
+  }
+  const idempotencyKey = await deps.enRouteCoordinator.enqueueEnRouteNotice({
+    tenantId: input.tenantId,
+    appointmentId: input.appointmentId,
+    technicianName: input.technicianName,
+  });
+  await emitEnRouteAudit(deps, input.actor, input.appointmentId, idempotencyKey);
+  return { notified: idempotencyKey !== null, idempotencyKey };
+}
+
+/**
+ * Resolve a technician's `users.id` to a human display name for the board.
+ * Prefers "First Last", then email, then the raw id when no user row exists
+ * (deactivated tech still referenced by a past assignment).
+ */
+export async function resolveTechnicianName(
+  userRepo: UserRepository,
+  tenantId: string,
+  technicianId: string
+): Promise<string> {
+  const user = await userRepo.findById(tenantId, technicianId);
+  if (!user) return technicianId;
+  const fullName = [user.firstName, user.lastName].filter(Boolean).join(' ').trim();
+  return fullName || user.email || technicianId;
+}
+
+export function createDispatchRoutes(deps: DispatchRouteDeps): Router {
   const router = Router();
 
-  router.get('/board', async (req: Request, res: Response) => {
+  router.get('/board', requireAuth, requireTenant, async (req: AuthenticatedRequest, res: Response) => {
     try {
-      const authReq = req as AuthenticatedRequest;
-      const tenantId =
-        authReq.auth?.tenantId ?? (req.headers['x-tenant-id'] as string | undefined);
-      if (!tenantId) {
-        return res.status(400).json({ error: 'x-tenant-id header is required' });
-      }
+      // SEC-21 — tenant is derived exclusively from the verified session
+      // (req.auth.tenantId), never a client-supplied header. requireAuth +
+      // requireTenant above already 401/403 when it's absent; the old
+      // `?? x-tenant-id header` fallback let a forged header resolve the
+      // board for an arbitrary tenant on any future remount that skipped
+      // (or reordered) the global auth middleware.
+      const authReq = req;
+      const tenantId = authReq.auth!.tenantId;
 
       const date = req.query.date as string;
       if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
@@ -50,6 +146,7 @@ export function createDispatchRoutes(deps: {
       const timezone = req.query.timezone as string | undefined;
 
       const proposalRepo = deps.proposalRepo;
+      const userRepo = deps.userRepo;
       const boardDeps: BoardQueryDependencies = {
         appointmentRepo: deps.appointmentRepo,
         assignmentRepo: deps.assignmentRepo,
@@ -58,6 +155,15 @@ export function createDispatchRoutes(deps: {
           ? {
               getPendingChangeRequests: (appointmentIds: string[]) =>
                 resolvePendingChangeRequests(proposalRepo, tenantId, appointmentIds),
+            }
+          : {}),
+        // Resolve technician UUIDs to display names so the board shows people,
+        // not bare ids. Falls back to the id (in board-query) when the lookup
+        // returns nothing — e.g. a deactivated tech still on a past assignment.
+        ...(userRepo
+          ? {
+              getTechnicianName: (technicianId: string) =>
+                resolveTechnicianName(userRepo, tenantId, technicianId),
             }
           : {}),
       };
@@ -86,18 +192,55 @@ export function createDispatchRoutes(deps: {
     '/technician/:id/appointments',
     requireAuth,
     requireTenant,
+    requireRole('owner', 'dispatcher', 'technician'),
     async (req: AuthenticatedRequest, res: Response) => {
       try {
         const tenantId = req.auth!.tenantId;
         const technicianId = req.params.id;
+        // Guard before the query: a non-UUID id (e.g. a stale client's
+        // hardcoded 'tech-1') previously reached Postgres and 500'd on the
+        // uuid cast (QA 2026-07-02). Bad input is the caller's error.
+        if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(technicianId)) {
+          return res.status(400).json({ error: 'VALIDATION_ERROR', message: 'technician id must be a UUID' });
+        }
+
+        // SEC-22 — same-tenant IDOR guard. Mirrors the gate in
+        // routes/technician-location.ts:47: owner/dispatcher may read any
+        // technician's day; a technician-role caller may only read their
+        // OWN day. req.auth.userId is the Clerk subject, while the URL and
+        // assignment rows use canonical users.id UUIDs; resolveAuthorization
+        // places that UUID in canonicalUserId. Absence fails closed.
+        // Without this, any authenticated tenant member — including a
+        // plain technician — could pass an arbitrary technician UUID and
+        // read that technician's customer names, addresses, lat/long, and
+        // job summaries for the day.
+        if (
+          req.auth!.role === 'technician' &&
+          technicianId !== req.auth!.canonicalUserId
+        ) {
+          return res.status(403).json({
+            error: 'FORBIDDEN',
+            message: 'Technicians may only view their own appointments',
+          });
+        }
 
         const dateStr = req.query.date as string | undefined;
         if (!dateStr || !/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) {
           return res.status(400).json({ error: 'VALIDATION_ERROR', message: 'date query parameter is required (YYYY-MM-DD)' });
         }
 
-        const fromDate = new Date(`${dateStr}T00:00:00.000Z`);
-        const toDate = new Date(`${dateStr}T23:59:59.999Z`);
+        // Bucket the technician's day in the TENANT timezone, not UTC. The old
+        // hardcoded `${dateStr}T00:00:00.000Z`..`T23:59:59.999Z` window dropped
+        // appointments whose tenant-local day maps onto a different UTC day
+        // (e.g. a 23:00 America/Los_Angeles appointment lands on the NEXT UTC
+        // day). Reuses the board's established getDayBoundaries helper.
+        const settings = deps.settingsRepo
+          ? await deps.settingsRepo.findByTenant(tenantId)
+          : null;
+        const { start: fromDate, end: toDate } = getDayBoundaries(
+          dateStr,
+          settings?.timezone,
+        );
 
         const result = await listAppointmentsWithMeta(tenantId, deps.appointmentRepo, {
           technicianId,
@@ -145,6 +288,7 @@ export function createDispatchRoutes(deps: {
               scheduledEnd: appt.scheduledEnd.toISOString(),
               status: appt.status,
               jobSummary,
+              updatedAt: appt.updatedAt.toISOString(),
             };
           }),
         );
@@ -169,6 +313,7 @@ export function createDispatchRoutes(deps: {
     '/appointments/:id/en-route',
     requireAuth,
     requireTenant,
+    requireRole('owner', 'dispatcher', 'technician'),
     async (req: AuthenticatedRequest, res: Response) => {
       try {
         if (!deps.enRouteCoordinator) {
@@ -184,20 +329,34 @@ export function createDispatchRoutes(deps: {
           return res.status(404).json({ error: 'NOT_FOUND', message: 'Appointment not found' });
         }
 
+        if (req.auth!.role === 'technician') {
+          const canonicalUserId = req.auth!.canonicalUserId;
+          const assignments = canonicalUserId
+            ? await deps.assignmentRepo.findByAppointment(tenantId, appointmentId)
+            : [];
+          if (!assignments.some((assignment) => assignment.technicianId === canonicalUserId)) {
+            return res.status(403).json({
+              error: 'FORBIDDEN',
+              message: 'Only an assigned technician can send an en-route notice',
+            });
+          }
+        }
+
         const technicianName =
           typeof req.body?.technicianName === 'string' && req.body.technicianName.trim()
             ? req.body.technicianName.trim()
             : undefined;
 
-        const idempotencyKey = await deps.enRouteCoordinator.enqueueEnRouteNotice({
+        const { notified, idempotencyKey } = await triggerEnRoute(deps, {
           tenantId,
           appointmentId,
           technicianName,
+          actor: { tenantId, userId: req.auth!.userId, role: req.auth!.role },
         });
 
         return res.status(202).json({
           accepted: true,
-          notified: idempotencyKey !== null,
+          notified,
           idempotencyKey,
         });
       } catch (err) {

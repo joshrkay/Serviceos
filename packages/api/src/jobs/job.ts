@@ -2,8 +2,25 @@ import { v4 as uuidv4 } from 'uuid';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
 import { ValidationError } from '../shared/errors';
 import { buildOriginationMetadata } from '../leads/attribution-metadata';
+import { type DepositStatus, deriveDepositStatus } from './deposit-rule';
 
-export type JobStatus = 'new' | 'scheduled' | 'in_progress' | 'completed' | 'canceled';
+/**
+ * Epic 5.1 — canonical job lifecycle. Stored identifiers; the product labels
+ * `new` as "Requested" and `completed` as "Complete" (tenant labels may
+ * override). `dispatched`, `invoiced`, and `closed` complete the canonical
+ * progression; `canceled` is a lateral terminal state. Kept in lockstep with
+ * jobStatusSchema (packages/shared) and the jobs.status CHECK (schema.ts);
+ * status.test.ts fails CI on drift.
+ */
+export type JobStatus =
+  | 'new'
+  | 'scheduled'
+  | 'dispatched'
+  | 'in_progress'
+  | 'completed'
+  | 'invoiced'
+  | 'closed'
+  | 'canceled';
 export type JobPriority = 'low' | 'normal' | 'high' | 'urgent';
 
 /**
@@ -99,6 +116,13 @@ export interface Job {
    * so existing completed rows don't trigger a backlog of texts.
    */
   thankYouSmsSentAt?: Date;
+  /**
+   * Idempotency stamp for the 24h post-completion review request (PRD US-345).
+   * Non-null means "already handled" (sent or suppressed). Backfilled to
+   * COALESCE(completed_at, updated_at) by migration 214 so existing completed
+   * rows don't trigger a backlog of review requests.
+   */
+  reviewRequestSentAt?: Date;
   createdBy: string;
   createdAt: Date;
   updatedAt: Date;
@@ -122,6 +146,22 @@ export interface UpdateJobInput {
   problemDescription?: string;
   priority?: JobPriority;
   assignedTechnicianId?: string;
+  /**
+   * B7 (feat: voice-transcript-and-agent-paths) — raw status field write,
+   * exposed for the `update_job` proposal's capture-class field edit
+   * (proposals/execution/update-job-handler.ts). Mirrors the existing (if
+   * previously untyped) capability of `PUT /api/jobs/:id` — routes/jobs.ts
+   * already forwards `req.body` verbatim into `updateJob`, so a client
+   * could already set `status` this way; this just types what was already
+   * possible. This is NOT the governed lifecycle transition
+   * (`transitionJobStatus` in job-lifecycle.ts, used by
+   * `POST /api/jobs/:id/transition`): no forward/backward-move validation,
+   * no timeline entry, no completion side effects (auto-invoice, milestone
+   * billing, feedback sweep). Reserved for a human-approved correction a
+   * proposal review card already vetted — never a substitute for the
+   * governed transition endpoint.
+   */
+  status?: JobStatus;
 }
 
 export interface JobListOptions {
@@ -171,6 +211,22 @@ export interface JobRepository {
     opts?: JobFindByCustomerOptions,
   ): Promise<Job[]>;
   update(tenantId: string, id: string, updates: Partial<Job>): Promise<Job | null>;
+  /**
+   * Atomically credit `amountCents` to the job's paid deposit in a SINGLE
+   * UPDATE, clamped at deposit_required_cents and recomputing deposit_status
+   * from the row's own values — never a caller snapshot. Closes the deposit
+   * double-credit race: two distinct `checkout.session.completed` events for the
+   * same job (e.g. a double-tapped "Pay Deposit" minting two Checkout Sessions)
+   * otherwise each read the same deposit_paid and blind-set it, dropping one.
+   * Returns the new paid amount + status, or null if the job is absent / has no
+   * required deposit.
+   */
+  creditDepositAtomic(
+    tenantId: string,
+    id: string,
+    amountCents: number,
+    now: Date,
+  ): Promise<{ depositPaidCents: number; depositStatus: DepositStatus } | null>;
   getNextJobNumber(tenantId: string): Promise<number>;
   /**
    * Tier 4 (Deposit rules — PR 3c follow-up). Atomic claim of a job's
@@ -397,6 +453,22 @@ export class InMemoryJobRepository implements JobRepository {
     const updated = { ...j, ...updates };
     this.jobs.set(id, updated);
     return { ...updated };
+  }
+
+  async creditDepositAtomic(
+    tenantId: string,
+    id: string,
+    amountCents: number,
+    now: Date,
+  ): Promise<{ depositPaidCents: number; depositStatus: DepositStatus } | null> {
+    const j = this.jobs.get(id);
+    if (!j || j.tenantId !== tenantId) return null;
+    const required = j.depositRequiredCents ?? 0;
+    if (required <= 0) return null;
+    const newPaid = Math.min((j.depositPaidCents ?? 0) + amountCents, required);
+    const depositStatus = deriveDepositStatus(required, newPaid);
+    this.jobs.set(id, { ...j, depositPaidCents: newPaid, depositStatus, updatedAt: now });
+    return { depositPaidCents: newPaid, depositStatus };
   }
 
   async getNextJobNumber(tenantId: string): Promise<number> {

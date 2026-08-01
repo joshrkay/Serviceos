@@ -1,4 +1,5 @@
 import { Proposal, CreateProposalInput, createProposal, ProposalType } from '../../proposals/proposal';
+import type { InjectedStandingInstruction } from '../standing-instructions-context';
 
 export interface TaskContext {
   tenantId: string;
@@ -56,6 +57,51 @@ export interface TaskContext {
    * `new Date()` at point of use. Injectable so scheduling is testable.
    */
   now?: Date;
+  /**
+   * Story 7.2 — how many clarification loops the Estimate Agent has already
+   * run for this estimate (0 on the first pass). Threaded from conversation
+   * state by the voice/orchestration entry-point so the draft handler can
+   * enforce the hard 3-loop cap and flag the final draft for review. Absent
+   * (undefined) → treated as 0 (first pass).
+   */
+  clarificationCount?: number;
+  /**
+   * Tenant business-hours schedule (tenant_settings.business_hours),
+   * resolved once per request by the entry-point alongside `timezone`
+   * (voice-action-router's tenantSchedulingResolver). The held-slot booking
+   * path uses it to decide whether the proposed slot falls inside business
+   * hours for the autonomous lane (UB-D). Absent/empty is treated as "no
+   * schedule configured" — fail-open, per D-015.
+   */
+  businessHours?: Record<string, { open: string; close: string } | null> | null;
+  /**
+   * UB-D / D-015 — autonomous booking lane inputs, threaded by the
+   * entry-point ONLY for booking-classified segments (never a settings read
+   * on other intents). `inboundReceptionistSource` is true ONLY when the
+   * request originated from an inbound customer call with a verified caller
+   * (caller-ID match); owner memos and assistant chat are always false, so
+   * the lane can never engage for them. `pendingReferenceCount` carries the
+   * router's unresolved free-text reference count (annotation
+   * .pendingReferences) — any pending reference blocks the lane.
+   * `platformDisabled` (D-015 amendment) carries the AUTONOMOUS_BOOKING_DISABLED
+   * platform kill switch — checked before tenant opt-in by the evaluator.
+   */
+  autonomousBooking?: {
+    settings: { enabled: boolean; threshold?: number };
+    inboundReceptionistSource: boolean;
+    pendingReferenceCount: number;
+    platformDisabled?: boolean;
+  };
+  /**
+   * UB-A3 — owner standing instructions applicable to this task, resolved
+   * best-effort ONCE per request by the entry point (voice-action-router /
+   * assistant chat) via `listActive` → `selectApplicableInstructions` (≤5)
+   * keyed on the classified intent. Drafting handlers inject them as a
+   * delimited system-message section that adjusts draft CONTENT only —
+   * never approvals, confidence, or pricing grounding. Resolver failure
+   * leaves this undefined and never blocks the task.
+   */
+  standingInstructions?: InjectedStandingInstruction[];
 }
 
 export interface TaskResult {
@@ -128,30 +174,6 @@ export class CreateAppointmentTaskHandler implements TaskHandler {
         date: '',
         time: '',
         customerId: '',
-      },
-      summary: context.message,
-      sourceContext: context.conversationId ? { conversationId: context.conversationId } : undefined,
-      createdBy: context.userId,
-      ...(context.tenantThresholdOverride
-        ? { tenantThresholdOverride: context.tenantThresholdOverride }
-        : {}),
-    };
-
-    const proposal = createProposal(input);
-    return { proposal, taskType: this.taskType };
-  }
-}
-
-export class DraftEstimateTaskHandler implements TaskHandler {
-  readonly taskType: ProposalType = 'draft_estimate';
-
-  async handle(context: TaskContext): Promise<TaskResult> {
-    const input: CreateProposalInput = {
-      tenantId: context.tenantId,
-      proposalType: this.taskType,
-      payload: context.existingEntities ?? {
-        lineItems: [],
-        total: 0,
       },
       summary: context.message,
       sourceContext: context.conversationId ? { conversationId: context.conversationId } : undefined,

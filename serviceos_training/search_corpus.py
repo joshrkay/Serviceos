@@ -24,6 +24,7 @@ from collections import Counter
 from pathlib import Path
 
 from local_embed import vectorize
+import posthog_client as ph
 
 HERE = Path(__file__).resolve().parent
 EMB = HERE / "sample_embeddings.json"
@@ -92,6 +93,11 @@ def selftest() -> int:
         print(f"  {'✅' if ok else '❌'} {query!r} -> {ids} (want {expected})")
     print(f"\nSemantic search self-test over {len(QUERY_FIXTURES)} queries: "
           f"{'PASS' if failures == 0 else f'FAIL ({failures})'}")
+    ph.capture("semantic_search_selftest_completed", {
+        "query_count": len(QUERY_FIXTURES),
+        "failure_count": failures,
+        "passed": failures == 0,
+    })
     return 1 if failures else 0
 
 
@@ -107,8 +113,14 @@ def main() -> int:
     if not args.query:
         print("usage: search_corpus.py <query> | --selftest", file=sys.stderr)
         return 2
-    for score, row in search(args.query, args.k):
+    results = search(args.query, args.k)
+    for score, row in results:
         print(f"  {score:.3f}  [{row['trade']}/{row['triage']}] {row['id']}: {row['text'][:90]}")
+    ph.capture("corpus_search_queried", {
+        "query_length": len(args.query),
+        "top_k": args.k,
+        "result_count": len(results),
+    })
     return 0
 
 

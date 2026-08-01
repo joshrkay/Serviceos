@@ -24,6 +24,12 @@ import type { VoiceQualityScript } from '../../src/ai/voice-quality/schema';
 import { InMemoryOnCallRepository } from '../../src/oncall/rotation';
 import { InMemoryDncRepository, normalizePhone } from '../../src/compliance/dnc';
 import type { SettingsRepository, TenantSettings } from '../../src/settings/settings';
+import {
+  hashVoiceApprovalPin,
+  isEnrollablePin,
+  normalizeEnrollmentPin,
+  resolveVoiceApprovalPinSecret,
+} from '../../src/settings/voice-approval-pin';
 
 const JUDGE_PASS_JSON = JSON.stringify({
   answerMeaningMatches: true,
@@ -104,13 +110,47 @@ function classifierJsonForTurn(script: VoiceQualityScript, turnIndex: number): s
   const slots = (turn.expected.slots ?? {}) as Record<string, unknown>;
   const entities: Record<string, unknown> = {};
   if (intent === 'create_customer') {
-    const name = displayNameFromCaller(turn.caller);
+    // Slots are the source of truth (same convention as proposalReference /
+    // lineItemDescriptions below): the utterance-regex fallback only matches
+    // "name is / I am / this is <Name>" phrasings, and an operator-style
+    // "Add a new customer, <Name>, <address>" sentence defeats it — which
+    // silently emitted a nameless classify response and made the handler
+    // decline to draft (needs_name) on a scenario that pins create_customer.
+    const name =
+      (typeof slots.name === 'string' ? slots.name : undefined) ??
+      displayNameFromCaller(turn.caller);
     if (name) entities.displayName = name;
+    const address = typeof slots.address === 'string' ? slots.address : undefined;
+    if (address) entities.address = address;
     if (script.callerId) entities.phone = script.callerId;
   }
   if (intent === 'cancel_appointment') {
     entities.cancellationType = 'customer_request';
     entities.appointmentReference = 'the appointment';
+  }
+  // WS21b — owner approval / reject / edit. The classifier surfaces a
+  // proposalReference (verbatim phrase) the approval dialogue resolves against
+  // the pending set; edits additionally carry an editInstruction. The batch
+  // walk is triggered deterministically by the utterance ("what's waiting"),
+  // so no special entity is needed for it.
+  if (intent === 'approve_proposal' || intent === 'reject_proposal') {
+    entities.proposalReference =
+      typeof slots.proposalReference === 'string' ? slots.proposalReference : turn.caller;
+  }
+  if (intent === 'edit_proposal') {
+    entities.proposalReference =
+      typeof slots.proposalReference === 'string' ? slots.proposalReference : 'the estimate';
+    entities.editInstruction =
+      typeof slots.editInstruction === 'string' ? slots.editInstruction : turn.caller;
+  }
+  // WS21b — grounded quoting. Voice carries line descriptions only (never an
+  // LLM price); the catalog sets every price. A quantity variant ("three smoke
+  // detectors") is recovered downstream by parseLeadingQuantity.
+  if (intent === 'draft_estimate' || intent === 'create_invoice') {
+    const descs = slots.lineItemDescriptions;
+    if (Array.isArray(descs)) {
+      entities.lineItemDescriptions = descs.filter((d): d is string => typeof d === 'string');
+    }
   }
   if (intent === 'reschedule_appointment') {
     entities.appointmentReference = 'the appointment';
@@ -178,6 +218,20 @@ function classifierJsonForTurn(script: VoiceQualityScript, turnIndex: number): s
   if (intent === 'request_feedback') {
     if (typeof slots.jobReference === 'string') entities.jobReference = slots.jobReference;
   }
+  // B8.10 — send_estimate_nudge's reference resolution reads
+  // customerName/jobReference off entitiesFrom(context) exactly like
+  // send_estimate/send_invoice. `slots.customerName` is NOT reused here for
+  // the extraction hint (unlike most other branches) because the disposition-
+  // structured grader (graders/disposition-structured.ts) diffs
+  // `expected.slots` against the drafted proposal's PAYLOAD — a short,
+  // whitespace-free string counts as a hard slot (`looksLikeEnum`), so a
+  // script pinning `customerName` there would spuriously require it on the
+  // payload, which SendEstimateNudgeTaskHandler resolves INTO `estimateId`
+  // and never carries verbatim. Mirrors `add_service_location`'s
+  // slots-optional-with-a-fixed-fallback convention just above.
+  if (intent === 'send_estimate_nudge') {
+    entities.customerName = typeof slots.customerReference === 'string' ? slots.customerReference : 'Khan';
+  }
   return JSON.stringify({
     intentType: intent,
     confidence: 0.95,
@@ -215,13 +269,23 @@ function appointmentJsonForTurn(script: VoiceQualityScript, turnIndex: number): 
   return JSON.stringify(out);
 }
 
-/** Reschedule-extraction JSON: new ISO datetimes from the turn's expected slots. */
-function rescheduleJsonForTurn(script: VoiceQualityScript, turnIndex: number): string {
-  const slots = (script.turns[turnIndex].expected.slots ?? {}) as Record<string, unknown>;
-  const out: Record<string, unknown> = { confidence_score: 0.95 };
-  if (typeof slots.newScheduledStart === 'string') out.newScheduledStart = slots.newScheduledStart;
-  if (typeof slots.newScheduledEnd === 'string') out.newScheduledEnd = slots.newScheduledEnd;
-  return JSON.stringify(out);
+/**
+ * WS21b — estimate-extraction JSON for the grounded-quote scenarios. The LLM
+ * only ever emits line DESCRIPTIONS (+ a placeholder unitPrice the catalog
+ * overrides); the fixture's `slots.lineItemDescriptions` are the source, so a
+ * quantity variant ("three smoke detectors") flows through verbatim for
+ * `parseLeadingQuantity` to recover downstream.
+ */
+function draftEstimateJsonForTurn(script: VoiceQualityScript, turnIndex: number): string {
+  const slots = (script.turns[turnIndex]?.expected.slots ?? {}) as Record<string, unknown>;
+  const descs = Array.isArray(slots.lineItemDescriptions)
+    ? slots.lineItemDescriptions.filter((d): d is string => typeof d === 'string')
+    : [];
+  return JSON.stringify({
+    summary: 'Voice estimate',
+    confidence_score: 0.9,
+    lineItems: descs.map((description) => ({ description, unitPrice: 1 })),
+  });
 }
 
 /**
@@ -271,11 +335,16 @@ export class ScriptAwareMockGateway extends LLMGateway {
       };
     }
 
-    if (request.taskType === 'reschedule_appointment') {
+    // WS21b — grounded-quote extraction. The estimate handler asks the LLM to
+    // turn the caller's spoken descriptions into line items; the catalog then
+    // OVERRIDES every price (voice never trusts an LLM number). We emit the
+    // fixture's line descriptions with a placeholder unitPrice so the catalog
+    // grounding is what sets the real price.
+    if (request.taskType === 'draft_estimate') {
       const userLine = request.messages.find((m) => m.role === 'user')?.content ?? '';
       const idx = turnIndexForUserMessage(this.script, userLine);
       return {
-        content: rescheduleJsonForTurn(this.script, idx),
+        content: draftEstimateJsonForTurn(this.script, idx),
         model: request.model ?? 'mock-model',
         provider: 'mock',
         latencyMs: 1,
@@ -339,12 +408,38 @@ export function makeVoiceQualityDriverFactory(
     // timezone, so the scheduling resolver can thread the tenant zone even
     // for booker fixtures that pin only `tenant.timezone`.
     const tenantTz = typeof tenant.timezone === 'string' ? tenant.timezone : undefined;
+    // WS21b — owner-approval wiring. The owner phone lets the driver stamp an
+    // ownerSession via the production caller-ID match; the (optional) PIN is
+    // hashed at rest exactly as the settings route does (HMAC, tenant-salted)
+    // so a money-class approval script exercises the real challenge.
+    const ownerPhone = typeof tenant.ownerPhone === 'string' ? tenant.ownerPhone : undefined;
+    const voiceApprovalPin =
+      typeof tenant.voiceApprovalPin === 'string' ? tenant.voiceApprovalPin : undefined;
+    let escalationSettings: { voice_approval_pin_hash: string } | undefined;
+    if (voiceApprovalPin && isEnrollablePin(voiceApprovalPin)) {
+      // The runtime verify seam (readChallengeState) resolves the HMAC key
+      // from env, so the hash MUST use that same key. Default a harness key
+      // when none is configured so the challenge verifies deterministically.
+      if (!resolveVoiceApprovalPinSecret()) {
+        process.env.TENANT_ENCRYPTION_KEY = 'vq-harness-pin-secret';
+      }
+      const pinSecret = resolveVoiceApprovalPinSecret()!;
+      escalationSettings = {
+        voice_approval_pin_hash: hashVoiceApprovalPin(
+          normalizeEnrollmentPin(voiceApprovalPin),
+          fctx.tenantId,
+          pinSecret,
+        ),
+      };
+    }
     const settingsRow =
-      businessHours || tenantTz
+      businessHours || tenantTz || ownerPhone || escalationSettings
         ? ({
             tenantId: fctx.tenantId,
             timezone: businessHours?.timezone ?? tenantTz ?? 'America/Los_Angeles',
             businessHoursSchedule: businessHours?.schedule ?? [],
+            ...(ownerPhone ? { ownerPhone } : {}),
+            ...(escalationSettings ? { escalationSettings } : {}),
           } as unknown as TenantSettings)
         : null;
     const settingsRepo: SettingsRepository = {
@@ -367,6 +462,19 @@ export function makeVoiceQualityDriverFactory(
       now = () => fixed;
     }
 
+    // WS21b — seed the tenant catalog from `fixtures.catalog` so a
+    // grounded-quote script resolves spoken line items against real catalog
+    // prices (closes the WS17 quoting-scenario gap). Empty when the fixture
+    // declares none — the estimate path then falls back to the generic
+    // confirmation, exactly as before.
+    const catalogRepo = new InMemoryCatalogItemRepository();
+    const catalogFixtures = (script.fixtures as { catalog?: unknown[] }).catalog;
+    if (Array.isArray(catalogFixtures)) {
+      for (const item of catalogFixtures) {
+        void catalogRepo.create(item as Parameters<InMemoryCatalogItemRepository['create']>[0]);
+      }
+    }
+
     const driver = new TextModeDriver({
       voiceSessionStore: store,
       bus: fctx.bus,
@@ -380,7 +488,7 @@ export function makeVoiceQualityDriverFactory(
       leadRepo: fctx.repos.leadRepo,
       auditRepo: fctx.repos.auditRepo,
       moneyDashboardRepo: new InMemoryMoneyDashboardRepository(),
-      catalogRepo: new InMemoryCatalogItemRepository(),
+      catalogRepo,
       availabilityFinder: new DefaultAvailabilityFinder({
         appointmentRepo: fctx.repos.appointmentRepo,
       }),

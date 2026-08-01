@@ -13,6 +13,7 @@ import {
   createCatalogItem,
   InMemoryCatalogItemRepository,
 } from '../../../src/catalog/catalog-item';
+import { UNCATALOGUED_CONFIDENCE_CAP } from '../../../src/ai/resolution/catalog-resolver';
 
 function createMockGateway(responseContent: string): LLMGateway {
   return {
@@ -25,6 +26,23 @@ function createMockGateway(responseContent: string): LLMGateway {
     } as LLMResponse),
   } as unknown as LLMGateway;
 }
+
+/**
+ * QA-2026-07-28 — the customer/job on a drafted invoice now come from the
+ * RESOLVER (context.customerId / existingEntities.customerId|jobId), never
+ * from the model's JSON. So the default context carries the verified ids these
+ * fixtures used to feed through the stubbed LLM response. The ids are still
+ * present on `validAiOutput` on purpose: they prove the model's copies are
+ * ignored rather than merely absent.
+ */
+// NOTE: real v4-shaped uuids, NOT the '00000000-…-0001' placeholders these
+// fixtures used before. Those placeholders do not satisfy `z.string().uuid()`
+// (the version/variant nibbles are 0, and only the all-zero NIL uuid is
+// special-cased), so they never satisfied draftInvoicePayloadSchema either —
+// which nothing here noticed, because this suite never invoked the contract
+// gate. Adding `assertValidProposalPayload` to the handler surfaced it.
+const RESOLVED_CUSTOMER_ID = '7c9e6679-7425-40de-944b-e07fc1f90ae7';
+const RESOLVED_JOB_ID = '9b2c4d6e-1f3a-4b5c-8d7e-0a1b2c3d4e5f';
 
 const validAiOutput = {
   customerId: '00000000-0000-0000-0000-000000000001',
@@ -45,6 +63,8 @@ const baseContext: TaskContext = {
   message: 'Generate invoice for AC repair job',
   conversationId: 'conv-1',
   userId: 'user-1',
+  customerId: RESOLVED_CUSTOMER_ID,
+  existingEntities: { jobId: RESOLVED_JOB_ID },
 };
 
 describe('P5-003A — Invoice draft generation from work context', () => {
@@ -59,8 +79,10 @@ describe('P5-003A — Invoice draft generation from work context', () => {
       expect(result.proposal.proposalType).toBe('draft_invoice');
       expect(result.proposal.status).toBe('draft');
       expect(result.proposal.tenantId).toBe('tenant-1');
-      expect(result.proposal.payload.customerId).toBe('00000000-0000-0000-0000-000000000001');
-      expect(result.proposal.payload.jobId).toBe('00000000-0000-0000-0000-000000000002');
+      // The RESOLVED ids, not the model's — validAiOutput carries different
+      // ones (QA-2026-07-28).
+      expect(result.proposal.payload.customerId).toBe(RESOLVED_CUSTOMER_ID);
+      expect(result.proposal.payload.jobId).toBe(RESOLVED_JOB_ID);
       expect(Array.isArray(result.proposal.payload.lineItems)).toBe(true);
       expect((result.proposal.payload.lineItems as unknown[]).length).toBe(2);
       expect(result.proposal.payload.discountCents).toBe(500);
@@ -143,7 +165,9 @@ describe('P5-003A — Invoice draft generation from work context', () => {
 
       const result = await handler.handle(baseContext);
 
-      expect(result.proposal.payload.customerId).toBe('cust-1');
+      // QA-2026-07-28: 'cust-1' was the MODEL's value and is now discarded —
+      // the resolved id is authored instead.
+      expect(result.proposal.payload.customerId).toBe(RESOLVED_CUSTOMER_ID);
       expect(result.proposal.payload.lineItems).toEqual([]);
     });
 
@@ -202,6 +226,9 @@ describe('P5-003A — Invoice draft generation from work context', () => {
         tenantId: 'tenant-1',
         message: 'Invoice',
         userId: 'user-1',
+        // A resolved customer is required for sourceContext to be empty: an
+        // unresolved one now stamps missingFields there (QA-2026-07-28).
+        customerId: RESOLVED_CUSTOMER_ID,
       });
 
       expect(result.proposal.sourceContext).toBeUndefined();
@@ -229,8 +256,6 @@ describe('P5-003A — Invoice draft generation from work context', () => {
   describe('buildPartialInvoicePayload', () => {
     it('builds payload from parsed AI output', () => {
       const result = buildPartialInvoicePayload(validAiOutput as unknown as Record<string, unknown>);
-      expect(result.customerId).toBe('00000000-0000-0000-0000-000000000001');
-      expect(result.jobId).toBe('00000000-0000-0000-0000-000000000002');
       expect(result.lineItems).toHaveLength(2);
       expect(result.discountCents).toBe(500);
     });
@@ -246,9 +271,23 @@ describe('P5-003A — Invoice draft generation from work context', () => {
       expect(result.lineItems).toEqual([]);
     });
 
-    it('ignores non-string customerId', () => {
-      const result = buildPartialInvoicePayload({ customerId: 123, lineItems: [] });
+    /**
+     * QA-2026-07-28 — the entity ids are no longer copied out of the model's
+     * JSON AT ALL, well-formed or not. This is the unit-level pin on that:
+     * `buildPartialInvoicePayload` is where the copy used to happen
+     * (`if (typeof parsed.customerId === 'string') payload.customerId = …`),
+     * so a future refactor that reinstates it fails here.
+     */
+    it('never copies customerId / jobId / estimateId out of the model output', () => {
+      const result = buildPartialInvoicePayload({
+        customerId: '123e4567-e89b-12d3-a456-426614174000',
+        jobId: '00000000-0000-0000-0000-000000000002',
+        estimateId: '7c9e6679-7425-40de-944b-e07fc1f90ae7',
+        lineItems: [],
+      });
       expect(result.customerId).toBeUndefined();
+      expect(result.jobId).toBeUndefined();
+      expect(result.estimateId).toBeUndefined();
     });
   });
 });
@@ -305,7 +344,10 @@ describe('P22 — InvoiceTaskHandler catalog grounding', () => {
   it('catalog match OVERRIDES the LLM-invented price and recomputes totalCents', async () => {
     const { repo, heater } = seededCatalog();
     const gateway = createMockGateway(
-      aiOutput([{ description: 'Water Heater Install', quantity: 2, unitPrice: 99_900 }]),
+      // 183_000 is within PRICE_CONFLICT tolerance (~1.1% deviation) of the
+      // catalog's 185_000 — close enough that this is a snap/overwrite, not
+      // a "did you mean" price conflict.
+      aiOutput([{ description: 'Water Heater Install', quantity: 2, unitPrice: 183_000 }]),
     );
     const handler = new InvoiceTaskHandler(gateway, repo);
 
@@ -320,6 +362,50 @@ describe('P22 — InvoiceTaskHandler catalog grounding', () => {
     expect(proposal.confidenceFactors).toContain('catalog_priced');
     // Catalog-grounded, unambiguous, 0.95 confidence → still auto-approves.
     expect(proposal.status).toBe('approved');
+  });
+
+  it('a drafted price that conflicts with an exact catalog match keeps the spoken price and forces review', async () => {
+    const { repo, heater } = seededCatalog();
+    const gateway = createMockGateway(
+      // 99_900 vs the catalog's 185_000 is a "did you mean" price conflict
+      // (well past both PRICE_CONFLICT thresholds), not a mishear — the
+      // operator may have deliberately quoted a custom price.
+      aiOutput([{ description: 'Water Heater Install', quantity: 1, unitPrice: 99_900 }]),
+    );
+    const handler = new InvoiceTaskHandler(gateway, repo);
+
+    const { proposal } = await handler.handle(baseContext);
+
+    const line = (proposal.payload.lineItems as Array<Record<string, unknown>>)[0];
+    // Spoken price kept verbatim — never silently overwritten.
+    expect(line.unitPriceCents).toBe(99_900);
+    expect(line.pricingSource).toBe('ambiguous');
+    expect(line.needsPricing).toBe(true);
+    // Never approved, even at model confidence 0.95.
+    expect(proposal.status).toBe('draft');
+
+    const ctx = proposal.sourceContext as Record<string, unknown>;
+    expect(ctx.missingFields).toEqual(['lineItems[0].catalogItemId']);
+    const candidates = (
+      ctx.catalogResolution as Record<
+        number,
+        Array<{ id: string; name: string; unitPriceCents: number; score: number }>
+      >
+    )[0];
+    const ids = candidates.map((c) => c.id).sort();
+    expect(ids).toEqual([heater.id, 'spoken:0'].sort());
+    const catalogCandidate = candidates.find((c) => c.id === heater.id);
+    expect(catalogCandidate?.unitPriceCents).toBe(185_000);
+    expect(catalogCandidate?.score).toBe(1);
+    const spokenCandidate = candidates.find((c) => c.id === 'spoken:0');
+    expect(spokenCandidate?.unitPriceCents).toBe(99_900);
+    expect(spokenCandidate?.score).toBe(0);
+
+    // The conflict gates via missingFields (cleared by one-tap resolution),
+    // NOT a persisted 'low' stamp — that stamp is never lifted by resolution
+    // and would keep blocking chain-set/SMS approval after the pick.
+    const meta = proposal.payload._meta as Record<string, unknown>;
+    expect(meta.overallConfidence).toBe('high');
   });
 
   it('ambiguous match keeps the LLM price, forces draft, and surfaces candidates', async () => {
@@ -391,7 +477,7 @@ describe('P22 — InvoiceTaskHandler catalog grounding', () => {
     expect(lines[0].description).toBe('Water Heater Install');
   });
 
-  it('degrades to LLM pricing when the catalog read throws', async () => {
+  it('degrades to LLM pricing but flags uncatalogued + caps when the catalog read throws', async () => {
     const failingRepo = {
       listByTenant: vi.fn().mockRejectedValue(new Error('db down')),
     } as unknown as CatalogItemRepository;
@@ -403,12 +489,16 @@ describe('P22 — InvoiceTaskHandler catalog grounding', () => {
     const { proposal } = await handler.handle(baseContext);
 
     const line = (proposal.payload.lineItems as Array<Record<string, unknown>>)[0];
+    // A read failure must not block drafting — the LLM price is kept…
     expect(line.unitPriceCents).toBe(99_900);
-    expect(line.pricingSource).toBeUndefined();
-    expect(proposal.confidenceFactors).not.toContain('uncatalogued_line_item');
+    // …but an ungrounded price must still be flagged + capped, never silently
+    // auto-approvable (money-safety regression).
+    expect(line.pricingSource).toBe('uncatalogued');
+    expect(proposal.confidenceFactors).toContain('uncatalogued_line_item');
+    expect(proposal.confidenceScore).toBeLessThanOrEqual(UNCATALOGUED_CONFIDENCE_CAP);
   });
 
-  it('without a catalog repo, behavior is unchanged (regression pin)', async () => {
+  it('without a catalog repo, LLM price is kept but flagged uncatalogued + capped', async () => {
     const gateway = createMockGateway(
       aiOutput([{ description: 'Water Heater Install', quantity: 1, unitPrice: 99_900 }]),
     );
@@ -418,24 +508,109 @@ describe('P22 — InvoiceTaskHandler catalog grounding', () => {
 
     const line = (proposal.payload.lineItems as Array<Record<string, unknown>>)[0];
     expect(line.unitPriceCents).toBe(99_900);
-    expect(line).not.toHaveProperty('pricingSource');
+    // No catalog to ground against → uncatalogued, capped, human-reviewed.
+    // (Previously the outcome was left undefined and the cap was skipped.)
+    expect(line.pricingSource).toBe('uncatalogued');
     expect(line).not.toHaveProperty('catalogItemId');
+    expect(proposal.confidenceScore).toBeLessThanOrEqual(UNCATALOGUED_CONFIDENCE_CAP);
+  });
+
+  /**
+   * B7.5 (AC-7) — defect found while adding C1 unit coverage
+   * (voice-payload-contract.test.ts): the line-item normalization step
+   * above (invoice-task.ts) reconstructed each line item from an explicit
+   * field whitelist that OMITTED `unit`, so a voice-drafted invoice line
+   * lost its unit of measure BEFORE catalog grounding ever ran — no
+   * catalog match, no ungrounded-unit strip, just silent loss on every
+   * draft_invoice line, catalogued or not. estimate-task.ts's equivalent
+   * step forwards the raw parsed line item unchanged and never had this
+   * gap. Fixed by adding `unit` to the whitelist; `groundLineItemPricing` /
+   * `normalizeDraftLineItems` (execution/handlers.ts) still validate it
+   * against `catalogUnitSchema` downstream, so this passthrough trusts
+   * nothing on its own.
+   */
+  describe('unit of measure passthrough (B7.5 AC-7)', () => {
+    it('a catalog-matched line gets the CATALOG unit, not whatever the LLM emitted', async () => {
+      const { repo, heater } = seededCatalog();
+      const gateway = createMockGateway(
+        aiOutput([
+          { description: 'Water Heater Install', quantity: 1, unit: 'hour', unitPrice: 185_000 },
+        ]),
+      );
+      const handler = new InvoiceTaskHandler(gateway, repo);
+
+      const { proposal } = await handler.handle(baseContext);
+
+      const line = (proposal.payload.lineItems as Array<Record<string, unknown>>)[0];
+      expect(line.catalogItemId).toBe(heater.id);
+      expect(line.unit).toBe('each');
+    });
+
+    it('an UNCATALOGUED line KEEPS a vocabulary-valid unit — it now reaches grounding at all', async () => {
+      const { repo } = seededCatalog();
+      const gateway = createMockGateway(
+        aiOutput([
+          { description: '45-microfarad capacitor', quantity: 3, unit: 'each', unitPrice: 4_250 },
+        ]),
+      );
+      const handler = new InvoiceTaskHandler(gateway, repo);
+
+      const { proposal } = await handler.handle(baseContext);
+
+      const line = (proposal.payload.lineItems as Array<Record<string, unknown>>)[0];
+      expect(line.pricingSource).toBe('uncatalogued');
+      expect(line.unit).toBe('each');
+      // Price/confidence path is unaffected by the unit surviving.
+      expect(proposal.confidenceFactors).toContain('uncatalogued_line_item');
+    });
+
+    it('an UNCATALOGUED line still drops an out-of-vocabulary unit', async () => {
+      const { repo } = seededCatalog();
+      const gateway = createMockGateway(
+        aiOutput([
+          {
+            description: '45-microfarad capacitor',
+            quantity: 3,
+            unit: 'microfarads',
+            unitPrice: 4_250,
+          },
+        ]),
+      );
+      const handler = new InvoiceTaskHandler(gateway, repo);
+
+      const { proposal } = await handler.handle(baseContext);
+
+      const line = (proposal.payload.lineItems as Array<Record<string, unknown>>)[0];
+      expect(line.pricingSource).toBe('uncatalogued');
+      expect(line).not.toHaveProperty('unit');
+    });
   });
 });
 
 // ─── RV-007 (F-4): Confidence Marker `_meta` ─────────────────────────────
 describe('RV-007 — InvoiceTaskHandler populates payload._meta', () => {
-  it('sets overallConfidence from the task confidence score (overall-only without catalog signals)', async () => {
-    const gateway = createMockGateway(JSON.stringify(validAiOutput)); // 0.85
+  it('with no catalog wired, every priced line is flagged uncatalogued in _meta', async () => {
+    const gateway = createMockGateway(JSON.stringify(validAiOutput)); // 0.85, 2 lines
     const handler = new InvoiceTaskHandler(gateway);
 
     const { proposal } = await handler.handle(baseContext);
 
-    const meta = proposal.payload._meta as Record<string, unknown>;
+    const meta = proposal.payload._meta as {
+      overallConfidence: string;
+      fieldConfidence?: Record<string, string>;
+      markers?: Array<{ path: string; reason: string }>;
+    };
     expect(meta).toBeDefined();
-    expect(meta.overallConfidence).toBe('high'); // 0.85 ≥ 0.8
-    expect(meta.fieldConfidence).toBeUndefined();
-    expect(meta.markers).toBeUndefined();
+    // Any uncatalogued line forces overall 'low' so the RV-007 marker guard
+    // hard-blocks auto-approval regardless of the numeric score or a tenant
+    // threshold override (not just the 0.85 numeric cap).
+    expect(meta.overallConfidence).toBe('low');
+    // No catalog to ground against → both LLM-priced lines flagged low.
+    expect(meta.fieldConfidence).toEqual({
+      'lineItems[0].unitPriceCents': 'low',
+      'lineItems[1].unitPriceCents': 'low',
+    });
+    expect(meta.markers).toHaveLength(2);
   });
 
   it('uncatalogued line → fieldConfidence low on its unitPriceCents + a marker with reason', async () => {
@@ -453,7 +628,10 @@ describe('RV-007 — InvoiceTaskHandler populates payload._meta', () => {
       JSON.stringify({
         ...validAiOutput,
         lineItems: [
-          { description: 'Water Heater Install', quantity: 1, unitPrice: 999 },
+          // 183_000 is within PRICE_CONFLICT tolerance of the catalog's
+          // 185_000 — this line must ground cleanly so only the flux
+          // capacitor line (uncatalogued) carries a low-confidence signal.
+          { description: 'Water Heater Install', quantity: 1, unitPrice: 183_000 },
           { description: 'mystery flux capacitor', quantity: 1, unitPrice: 42_000 },
         ],
         confidence_score: 0.95,
@@ -493,10 +671,17 @@ describe('RV-007 — InvoiceTaskHandler populates payload._meta', () => {
 
     const lines = proposal.payload.lineItems as Array<Record<string, unknown>>;
     expect(lines).toHaveLength(1); // unpriced line dropped
-    const meta = proposal.payload._meta as Record<string, unknown>;
-    // Empty catalog → no pricingSource stamped → overall-only meta, and
-    // crucially no marker pointing at a dropped index.
-    expect(meta.overallConfidence).toBe('high');
-    expect(meta.fieldConfidence).toBeUndefined();
+    const meta = proposal.payload._meta as {
+      overallConfidence: string;
+      fieldConfidence?: Record<string, string>;
+      markers?: Array<{ path: string; reason: string }>;
+    };
+    // Surviving line is uncatalogued → overall 'low' hard-blocks auto-approve.
+    expect(meta.overallConfidence).toBe('low');
+    // Empty catalog → the surviving priced line is uncatalogued, and its
+    // marker path indexes the FINAL array (index 0), NOT the pre-drop index 1.
+    expect(meta.fieldConfidence).toEqual({ 'lineItems[0].unitPriceCents': 'low' });
+    expect(meta.markers).toHaveLength(1);
+    expect(meta.markers![0].path).toBe('lineItems[0].unitPriceCents');
   });
 });

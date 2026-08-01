@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   buildApprovalLinks,
+  batchApprovableProposalIds,
   type DailyDigestWorkerDeps,
 } from '../../src/workers/daily-digest-worker';
 import type {
@@ -62,5 +63,39 @@ describe('buildApprovalLinks — money-gating', () => {
     expect(links).toHaveLength(1);
     expect(links[0].approval.proposalId).toBe('cap');
     expect(links[0].url).toContain('https://api.test/approve?token=');
+  });
+
+  it('mints no one-tap link for a draft capture proposal with unresolved missingFields', () => {
+    // approveProposal rejects proposals with missingFields, so a one-tap link
+    // would always fail. It must still appear in the digest for in-app review
+    // (pendingApprovals.top), but carry no bare approve affordance.
+    const top: DigestPendingApproval[] = [
+      { proposalId: 'incomplete', proposalType: 'draft_estimate', summary: 'Draft estimate', hasMissingFields: true },
+      { proposalId: 'complete', proposalType: 'draft_estimate', summary: 'Draft estimate' },
+    ];
+
+    const links = buildApprovalLinks('tenant-1', payloadWithTop(top), deps);
+
+    expect(links.map((l) => l.approval.proposalId)).toEqual(['complete']);
+  });
+});
+
+describe('batchApprovableProposalIds — APPROVE ALL set', () => {
+  it('excludes draft capture proposals with unresolved missingFields; keeps complete ones', () => {
+    const top: DigestPendingApproval[] = [
+      { proposalId: 'incomplete', proposalType: 'draft_estimate', summary: 'Draft estimate', hasMissingFields: true },
+      { proposalId: 'complete', proposalType: 'draft_estimate', summary: 'Draft estimate' },
+    ];
+
+    // Incomplete draft is dropped from APPROVE ALL, complete one stays.
+    expect(batchApprovableProposalIds(payloadWithTop(top))).toEqual(['complete']);
+  });
+
+  it('a complete capture proposal (no missing fields, non-blocking confidence) is still batch-approvable', () => {
+    const top: DigestPendingApproval[] = [
+      { proposalId: 'complete', proposalType: 'draft_estimate', summary: 'Draft estimate', overallConfidence: 'high' },
+    ];
+
+    expect(batchApprovableProposalIds(payloadWithTop(top))).toEqual(['complete']);
   });
 });

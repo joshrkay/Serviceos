@@ -1,26 +1,38 @@
 import express from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
-import rateLimit from 'express-rate-limit';
+import rateLimit, { ipKeyGenerator } from 'express-rate-limit';
+import { createRateLimitStore } from './middleware/rate-limit-store';
 import swaggerUi from 'swagger-ui-express';
 import { openApiSpec } from './swagger/spec';
 import { createHealthRouter, HealthCheck } from './health/health';
 import { toErrorResponse } from './shared/errors';
-import { createPool } from './db/pool';
-import { loadConfig } from './shared/config';
+import { createPool, createDirectPool } from './db/pool';
+import { verifyRlsRuntimeRole } from './db/rls-runtime-role';
+import { loadConfig, resolveMediaStreamsEnabled } from './shared/config';
+import { resolveWebDistDir } from './web-static-path';
+import { registerMarketingRedirects } from './marketing-redirects';
 import { createWebhookRouter } from './webhooks/routes';
-import { createIntegrationResolver } from './webhooks/integration-resolver';
+import { createIntegrationResolver, createVapiSecretResolver } from './webhooks/integration-resolver';
 import { createTelephonyRouter } from './routes/telephony';
+import { createCallsRouter, createCallBridgeRouter } from './routes/calls';
 import { TwilioGatherAdapter } from './telephony/twilio-adapter';
+import {
+  createEmergencyPageWorker,
+  createEmergencyPageResolvedCheck,
+} from './telephony/emergency-page-retry';
 import { DefaultTwilioCallControl } from './telephony/twilio-call-control';
 import { createUserPhoneDispatcherResolver, createBusinessPhoneFallback } from './telephony/dispatcher-phone-resolver';
 import { PgPhoneNumberRepository } from './integrations/twilio/phone-number-repository';
 import { attachMediaStreamServer } from './telephony/media-streams';
+import { createTwilioCallRedirector } from './telephony/twilio-call-redirect';
+import { RealtimeHealthCircuit } from './telephony/realtime-health-circuit';
 import { attachClientGateway, setChannelGate } from './ws/client-gateway';
+import { setDraining, isDraining as isDrainingFlag } from './ws/drain-state';
+import { createConnectionRegistry } from './ws/connection-registry';
 import {
   decodeClerkToken,
-  verifyRs256Token,
-} from './auth/clerk';
+  verifyRs256Token, type AuthenticatedRequest } from './auth/clerk';
 import { RESILIENCE_FLAG_NAMES } from './flags/resilience-flags';
 import { DeepgramStreamingProvider } from './voice/transcription-providers';
 import { PgTenantRepository } from './auth/pg-tenant';
@@ -74,7 +86,28 @@ import { createBillingRouter } from './routes/billing';
 import { StripeConnectService } from './billing/stripe-connect';
 import { BillingService } from './billing/subscription';
 import { createPaymentRouter } from './routes/payments';
+import { createTerminalRouter } from './routes/terminal';
 import { createNoteRouter } from './routes/notes';
+import { createDevicesRouter } from './routes/devices';
+import { InMemoryDeviceTokenRepository } from './push/device-token-service';
+import { PgDeviceTokenRepository } from './push/pg-device-token-repository';
+import { ExpoPushDeliveryProvider } from './notifications/expo-push-service';
+import {
+  approverUserIdsResolver,
+  notifyExecuted as notifyExecutedPush_,
+  notifyNeedsApproval as notifyNeedsApprovalPush_,
+} from './notifications/proposal-push-notifier';
+import { OwnerNotificationService } from './notifications/owner-notification-service';
+import { InMemoryNotificationPreferenceRepository } from './notifications/notification-preferences-service';
+import { PgNotificationPreferenceRepository } from './notifications/pg-notification-preferences-repository';
+import { createNotificationPreferencesRouter } from './routes/notification-preferences';
+import { userIdsWithPermissionResolver } from './notifications/user-targeting';
+import { setOwnerNotifications } from './notifications/owner-notifications-instance';
+import { setOwnerNotificationNameResolvers } from './notifications/owner-notification-name-resolver';
+import {
+  TechnicianAssignmentNotifier,
+  setTechnicianAssignmentNotifier,
+} from './appointments/assignment-notifications';
 import {
   createMeRouter,
   DEFAULT_TENANT_TIMEZONE,
@@ -98,6 +131,9 @@ import {
 } from './ai/supervisor-presence';
 import { createConversationRouter } from './routes/conversations';
 import { createSettingsRouter } from './routes/settings';
+import { createBrandVoiceRouter } from './tenants/brand/brand-voice-router';
+import { PgBrandVoiceRepository } from './tenants/brand/pg-brand-voice-repository';
+import { InMemoryBrandVoiceRepository } from './tenants/brand/in-memory-brand-voice-repository';
 import { createDncRouter } from './routes/dnc';
 import { createVerticalRouter } from './routes/verticals';
 import { createVerticalTrainingAssetsRouter } from './routes/vertical-training-assets';
@@ -119,6 +155,7 @@ import {
 } from './db/onboarding-session-repository';
 import { createAssistantRouter } from './routes/assistant';
 import { createProposalsRouter } from './routes/proposals';
+import { createRedraftHandlerFactory } from './proposals/redraft-handler-factory';
 import { createTechnicianLocationRouter } from './routes/technician-location';
 import { createCatalogItemsRouter } from './routes/catalog-items';
 import { createFilesRouter, createDevStorageRouter } from './routes/files';
@@ -132,12 +169,22 @@ import { AttachmentService } from './attachments/attachment-service';
 import { InMemoryAttachmentRepository } from './attachments/attachment';
 import { PgAttachmentRepository } from './attachments/pg-attachment';
 import { createDispatchRoutes } from './dispatch/routes';
+import { initDispatchPresenceStore } from './dispatch/presence-store';
+import { initDispatchBoardFanout } from './dispatch/board-event-bus';
+import { createDispatchPresenceGatewayDeps } from './dispatch/presence-gateway';
 import { createPublicFeedbackRouter } from './routes/public-feedback';
 import { createPublicIntakeRouter } from './routes/public-intake';
 import { createPublicBookingRouter } from './routes/public-booking';
 import { createReportsRouter } from './routes/reports';
 import { createDigestsRouter } from './routes/digests';
 import { RepoBackedTimeGivenBackReporter } from './reports/time-given-back';
+import { RepoBackedVoiceRoiReporter } from './analytics/voice-roi';
+import { createVoiceRoiRouter } from './analytics/voice-roi-router';
+import { PgJobsBookedReporter } from './analytics/jobs-booked';
+import { createJobsBookedRouter } from './analytics/jobs-booked-router';
+import { RepoBackedActivityFeedReporter } from './analytics/activity-feed';
+import { createActivityFeedRouter } from './analytics/activity-feed-router';
+import { loadTenantBusinessHours } from './telephony/business-hours-loader';
 import { createTimeEntriesRouter } from './routes/time-entries';
 import { InMemoryTimeEntryRepository } from './time-tracking/time-entry';
 import { PgTimeEntryRepository } from './time-tracking/pg-time-entry';
@@ -150,6 +197,21 @@ import { PgMoneyDashboardRepository } from './reports/pg-money-dashboard';
 import { createFeedbackResponsesRouter } from './routes/feedback';
 import { createInteractionsRouter } from './routes/interactions';
 import { initSentry, setSentryClient } from './monitoring/sentry';
+import { dbPoolConnections, pgQueueDepth, voiceTurnLatencyMs } from './monitoring/metrics';
+// WS15 — platform SLO monitor + drain-abandonment alarm.
+import { createAlertOperator, emitDrainAbandonment } from './monitoring/alert-operator';
+import { recordSweepSuccess, sweepLastSuccessMs } from './monitoring/sweep-heartbeats';
+import { PgPlatformSloRepository } from './monitoring/pg-platform-slo';
+import {
+  runSloMonitor,
+  SLO_MONITOR_INTERVAL_MS,
+  estimateTurnLatencyP95,
+} from './workers/slo-monitor';
+import { PgFailureMonitorRepository } from './monitoring/pg-failure-monitor';
+import {
+  runFailureRateMonitor,
+  FAILURE_MONITOR_INTERVAL_MS,
+} from './workers/failure-rate-monitor';
 
 // In-memory repositories (fallback for dev without DATABASE_URL)
 import { InMemoryCustomerRepository } from './customers/customer';
@@ -159,7 +221,31 @@ import { InMemoryTagRepository } from './customers/tag';
 import { PgTagRepository } from './customers/pg-tag';
 import { InMemoryCustomFieldRepository } from './customers/custom-field';
 import { PgCustomFieldRepository } from './customers/pg-custom-field';
+import { InMemoryCustomerMergeRepository } from './customers/merge';
+import { PgCustomerMergeRepository } from './customers/pg-merge';
 import { createCustomerCustomFieldRouter } from './routes/customer-custom-fields';
+import { InMemoryJobFormRepository } from './job-forms/job-form';
+import { PgJobFormRepository } from './job-forms/pg-job-form';
+import { createJobFormRouter } from './routes/job-forms';
+import { InMemoryRecurringJobRepository } from './recurring-jobs/recurring-job';
+import { PgRecurringJobRepository } from './recurring-jobs/pg-recurring-job';
+import { createRecurringJobRouter } from './routes/recurring-jobs';
+import { InMemoryJobCustomFieldRepository } from './jobs/job-custom-field';
+import { PgJobCustomFieldRepository } from './jobs/pg-job-custom-field';
+import { createJobCustomFieldRouter } from './routes/job-custom-fields';
+import { InMemoryFinancingRepository } from './financing/financing';
+import { PgFinancingRepository } from './financing/pg-financing';
+import { createFinancingProvider } from './financing/financing-provider';
+import { createFinancingRouter, createFinancingWebhookRouter } from './routes/financing';
+import { InMemoryCampaignRepository } from './marketing/campaign';
+import { PgCampaignRepository } from './marketing/pg-campaign';
+import { createMarketingRouter } from './routes/marketing';
+import { InMemoryCustomerGroupRepository } from './customers/customer-group';
+import { PgCustomerGroupRepository } from './customers/pg-customer-group';
+import { createCustomerGroupRouter } from './routes/customer-groups';
+import { InMemoryStandingInstructionRepository } from './instructions/standing-instructions';
+import { PgStandingInstructionRepository } from './instructions/pg-standing-instructions';
+import { createStandingInstructionRouter } from './routes/standing-instructions';
 import { InMemoryLeadRepository } from './leads/lead';
 import { InMemoryLocationRepository } from './locations/location';
 import { InMemoryJobRepository } from './jobs/job';
@@ -195,6 +281,7 @@ import {
 } from './verticals/in-memory-training-assets';
 import { TrainingAssetRedactionService } from './verticals/training-asset-redaction';
 import { TrainingAssetService } from './verticals/training-asset-service';
+import { createPresidioAnonymizer } from './ai/privacy/presidio-adapter';
 import { InMemoryQualityMetricsRepository } from './quality/metrics';
 import { InMemoryVoiceRepository, createTranscribeAudioFn } from './voice/voice-service';
 import { createWhisperTranscriptionProvider } from './voice/transcription-providers';
@@ -215,7 +302,7 @@ import {
   InMemoryTechnicianLocationAuthorizer,
   PgTechnicianLocationAuthorizer,
 } from './telemetry/technician-location-authz';
-import { InMemoryQueue, processMessage } from './queues/queue';
+import { InMemoryQueue, processMessage, type QueueMessage } from './queues/queue';
 import { createProvisionTwilioWorker, PROVISION_TWILIO_JOB_TYPE } from './workers/provision-twilio';
 import { createDeprovisionTenantWorker } from './workers/deprovision-tenant';
 import { createVerifyAiWorker } from './workers/verify-ai';
@@ -224,6 +311,7 @@ import { InMemoryEditDeltaRepository } from './estimates/edit-delta';
 import { InMemoryPackActivationRepository } from './settings/pack-activation';
 import { buildVerticalPromptResolver } from './verticals/resolve-active-pack';
 import { VerticalTerminologyProvider } from './voice/vertical-terminology-provider';
+import { TenantGlossaryProvider } from './voice/tenant-glossary-provider';
 import { FillerEngine } from './ai/agents/customer-calling/filler-engine';
 import { FillerAudioCache } from './ai/agents/customer-calling/filler-audio-cache';
 import { classifyTurnSentiment } from './ai/agents/customer-calling/sentiment-classifier';
@@ -265,6 +353,8 @@ import { PgNoteRepository } from './notes/pg-note';
 import { PgConversationRepository } from './conversations/pg-conversation';
 import { PgSettingsRepository } from './settings/pg-settings';
 import { PgAuditRepository } from './audit/pg-audit';
+import { ForwardingAuditRepository } from './audit/forwarding-audit-repository';
+import { recordApiError } from './analytics/posthog';
 import { PgEstimateTemplateRepository } from './templates/pg-estimate-template';
 import { PgServiceBundleRepository } from './verticals/pg-bundles';
 import {
@@ -308,13 +398,10 @@ import {
 } from './feedback/feedback-response';
 import { PgFeedbackRequestRepository } from './feedback/pg-feedback-request';
 import { PgFeedbackResponseRepository } from './feedback/pg-feedback-response';
-import { NoopFeedbackDispatcher, SmsProviderFeedbackDispatcher } from './feedback/dispatcher';
-import {
-  MessageDeliveryProvider,
-  InMemoryDeliveryProvider,
-} from './notifications/delivery-provider';
-import { TwilioDeliveryProvider } from './notifications/twilio-delivery-provider';
-import { PerTenantTwilioDeliveryProvider } from './notifications/per-tenant-twilio-delivery-provider';
+import { NoopFeedbackDispatcher, MessageDeliveryFeedbackDispatcher } from './feedback/dispatcher';
+import { MessageDeliveryProvider } from './notifications/delivery-provider';
+import { createMessageDeliveryProvider } from './notifications/delivery-provider-factory';
+import { GatedMessageDelivery } from './notifications/gated-message-delivery';
 import { SendService } from './notifications/send-service';
 import {
   InMemoryDispatchRepository,
@@ -326,6 +413,7 @@ import { PublicInvoiceService } from './invoices/public-invoice-service';
 import { createPublicInvoicesRouter } from './routes/public-invoices';
 import { createPublicPaymentsRouter } from './routes/public-payments';
 import { createOneTapApproveRouter } from './routes/one-tap-approve';
+import { createOneTapUndoRouter } from './routes/one-tap-undo';
 import { createFeedbackSendWorker } from './workers/feedback-send';
 import { runRecurringAgreementsSweep } from './workers/recurring-agreements-worker';
 import { runDailyDigestSweep, DIGEST_SWEEP_INTERVAL_MS } from './workers/daily-digest-worker';
@@ -334,20 +422,28 @@ import { InMemoryDailyDigestRepository, type DailyDigestPayload } from './digest
 import { composeBrandVoiceMessage } from './ai/brand-voice/composer';
 import { runOverdueInvoiceSweep } from './workers/overdue-invoice-worker';
 import { runHfcrWeeklySendSweep } from './workers/hfcr-weekly-send-worker';
+import { runWeeklyFeedbackSweep } from './workers/weekly-feedback-worker';
+import { buildWeeklyFeedbackSnapshot } from './digest/weekly-feedback-builder';
+import { buildSuggestionsPrompt, parseSuggestions } from './digest/weekly-feedback';
 import {
   PgHfcrWeeklySendRepository,
   InMemoryHfcrWeeklySendRepository,
 } from './metrics/hfcr-weekly-send';
 import { runGoogleReviewsSweep } from './workers/google-reviews';
 import { runThankYouSmsSweep } from './workers/thank-you-sms-worker';
+import { runReviewRequestSweep } from './workers/review-request-worker';
+import { createLifecycleEmailWorker } from './workers/lifecycle-email-worker';
+import { runSetupReminderSweep } from './workers/setup-reminder-sweep';
+import { runTrialReminderSweep } from './workers/trial-reminder-sweep';
 import { PgReviewRepository } from './reputation/pg-review';
 import { PgReviewPollStateRepository } from './reputation/poll-state';
 import { PgServiceCreditRepository } from './reputation/pg-service-credit';
 import { PgGoogleBusinessReplyResolver } from './reputation/pg-google-business-reply-resolver';
 import { MessageDeliveryReviewPrivateMessageSender } from './reputation/private-message-sender-adapter';
-import { NoopBrandVoiceLoader } from './reputation/brand-voice';
+import { SettingsBrandVoiceLoader } from './reputation/settings-brand-voice-loader';
 import { PgCustomerLoader } from './reputation/match-customer';
-import { createCredentialResolver } from './integrations/credentials';
+import { createCredentialResolver, getTenantTwilioCreds } from './integrations/credentials';
+import { checkOutboundConsent, type OutboundConsentContext } from './voice/outbound-consent';
 import { InMemoryAgreementRepository } from './agreements/agreement';
 import { PgAgreementRepository } from './agreements/pg-agreement';
 import { InMemoryCustomerPaymentMethodRepository } from './payments/customer-payment-method';
@@ -359,6 +455,11 @@ import { InMemoryAgreementRunRepository } from './agreements/agreement-run';
 import { PgAgreementRunRepository } from './agreements/pg-agreement-run';
 import { createAgreementsRouter } from './routes/agreements';
 import { createMaintenanceContractsRouter } from './routes/maintenance-contracts';
+import { PgMaintenanceContractRepository } from './maintenance-contracts/pg-maintenance-contract';
+import { InMemoryMaintenanceContractRepository } from './maintenance-contracts/maintenance-contract';
+import { createMessageTemplateRouter } from './messaging/message-template-router';
+import { PgMessageTemplateRepository } from './messaging/pg-message-template';
+import { InMemoryMessageTemplateRepository } from './messaging/message-template';
 import {
   InMemoryPortalSessionRepository,
   PortalSessionRepository,
@@ -385,6 +486,9 @@ import {
 import { PgCorrectionLessonRepository } from './learning/corrections/pg-correction-lesson';
 import type { ConfigPorts } from './learning/corrections/lesson-applicator';
 import { recordCorrectionLessonsOnExecution } from './learning/corrections/record-on-execution';
+// Story 3.9 — raw per-field proposal-edit corrections log.
+import { InMemoryCorrectionRepository } from './proposals/corrections/correction';
+import { PgCorrectionRepository } from './proposals/corrections/pg-correction';
 import {
   runRecordingRetentionSweep,
   PgRecordingRetentionRepository,
@@ -396,6 +500,11 @@ import type { RetrieveAdapter } from './ai/orchestration/context-builder';
 // future channel adapters) can resolve a session's language from the
 // customer override + tenant default + STT hint.
 export { detectLanguage } from './ai/orchestration/language-detector';
+// UB-C1 — the media-stream adapter's initialLanguageResolver composes the
+// identified caller's preferredLanguage with the tenant's language settings
+// through detectLanguage (which applies the supported_languages gate).
+import { detectLanguage as detectInitialCallLanguage } from './ai/orchestration/language-detector';
+import { identifyCaller } from './ai/skills/identify-caller';
 import {
   PgKnowledgeChunkRepository,
   InMemoryKnowledgeChunkRepository,
@@ -409,25 +518,32 @@ import { InMemoryCallTranscriptTurnRepository } from './voice/call-transcript-tu
 import type { EmbeddingProvider } from './ai/providers/openai-compatible';
 import { createVoiceActionRouterWorker, VoiceActionRouterPayload, INTENT_TO_PROPOSAL_TYPE } from './workers/voice-action-router';
 import { PgEntityResolver } from './ai/resolution/pg-entity-resolver';
+import { AliasFirstEntityResolver } from './ai/resolution/alias-first-entity-resolver';
+import { PgEntityAliasRepository } from './learning/entity-aliases/pg-entity-alias';
+import { createEntityAliasCandidateService } from './learning/entity-aliases/candidate-service';
+import { createEntityAliasesRouter } from './routes/entity-aliases';
 import { DefaultSlotConflictChecker } from './ai/tasks/slot-conflict-checker';
 import { DefaultAvailabilityFinder } from './ai/tasks/availability-finder';
 import { runExecutionSweep } from './workers/execution-worker';
 import {
   createLLMGateway,
-  createMockLLMGateway,
+  createHermeticMockLLMGateway,
   createEmbeddingProvider,
   shutdownCacheStores,
 } from './ai/gateway/factory';
 import * as gatewayFactory from './ai/gateway/factory';
+import { shutdownRedisClients } from './redis/redis-client';
 import { createAiHealthRouter } from './routes/ai-health';
 import { InMemoryAiRunRepository } from './ai/ai-run';
 import { PgAiRunRepository } from './ai/pg-ai-run';
 import { createEvaluationRouter } from './routes/evaluation';
 import { PgShadowComparisonStore } from './ai/evaluation/pg-shadow-comparison';
 import { InMemoryShadowComparisonStore } from './ai/evaluation/shadow-comparison';
-import { createTtsProvider } from './ai/tts/tts-provider';
+import { createTtsProvider, assertTtsProviderSupportsMediaStreams } from './ai/tts/tts-provider';
 import { InAppVoiceAdapter } from './ai/agents/customer-calling/inapp-adapter';
+import { lookupDayOverview } from './ai/skills/lookup-day-overview';
 import { VoiceSessionStore } from './ai/agents/customer-calling/voice-session-store';
+import { createVoiceEventTransport } from './ai/agents/customer-calling/voice-event-transport';
 import { createVoiceSessionsRouter } from './routes/voice-sessions';
 import { escalationOutcomeRouter } from './escalations/outcome-route';
 import { escalationEventsRouter } from './escalations/events-route';
@@ -459,6 +575,23 @@ import {
   runSupervisorAnnotationSweep,
   SUPERVISOR_ANNOTATE_SWEEP_INTERVAL_MS,
 } from './workers/supervisor-review-worker';
+// N-004 (P2-037) — Supervisor Agent review pass (four-check pre-dispatch gate).
+import { configureSupervisorReviewGate } from './ai/supervisor/review-gate';
+import { createSupervisorReviewGate } from './ai/supervisor/reviewer';
+import {
+  InMemorySupervisorReviewRepository,
+  PgSupervisorReviewRepository,
+} from './ai/supervisor/reviews-repo';
+import { PgPricingBaselineResolver } from './ai/supervisor/pricing-baseline';
+import {
+  DEFAULT_SUPERVISOR_REVIEW_MODE,
+  type SupervisorReviewMode,
+} from './ai/supervisor/types';
+import {
+  DEFAULT_AI_ROUTING_CONFIG,
+  resolveModelForTaskType,
+  assertSupervisorReviewModelDistinct,
+} from './config/ai-routing';
 import { ProposalExecutor } from './proposals/execution/executor';
 import { IdempotencyGuard } from './proposals/execution/idempotency';
 import {
@@ -498,6 +631,7 @@ import { runAppointmentReminderSweep } from './workers/appointment-reminder-work
 import { runHoldReaperSweep } from './workers/hold-reaper-worker';
 import { runEstimateReminderSweep } from './workers/estimate-reminder-worker';
 import { runEstimateExpirySweep } from './workers/estimate-expiry-worker';
+import { runProposalExpirySweep } from './workers/proposal-expiry-worker';
 import { PgDncRepository, InMemoryDncRepository } from './compliance/dnc';
 import { buildStopKeywordHandler, buildStartKeywordHandler } from './compliance/stop-reply';
 import {
@@ -518,6 +652,17 @@ import {
   InMemoryDroppedCallRecoveryRepository,
 } from './sms/recovery/scheduler';
 import { createDroppedCallResumeHandler } from './sms/recovery/resume-handler';
+// P8-015 — production deps for the dropped-call recovery sweep.
+import type { DroppedCallHandlerDeps } from './sms/recovery/dropped-call-handler';
+import { createRecoveryRateLimiter } from './sms/recovery/recovery-rate-limiter';
+import { createDroppedCallResolvedSince } from './sms/recovery/resolved-since';
+import { createRecoveryComposer } from './sms/recovery/recovery-composer';
+import { createRecoveryThreader } from './sms/recovery/recovery-threader';
+import {
+  runDroppedCallRecoverySweep,
+  DROPPED_CALL_RECOVERY_FLAG,
+} from './workers/dropped-call-worker';
+import { PgConversationLinkRepository } from './conversations/pg-conversation-link';
 import {
   PgConsentEventRepository,
   InMemoryConsentEventRepository,
@@ -534,8 +679,16 @@ import {
   registerTechStatusKeywords,
   PgTechStatusTodayRepository,
   InMemoryTechStatusTodayRepository,
+  // B5.5 — the en-route ('omw' / 'on my way') SMS keyword leg.
+  registerEnRouteSmsKeyword,
 } from './sms/tech-status';
 import { createMmsIngestWorker } from './workers/mms-ingest-worker';
+import { PhoneRateLimiter } from './shared/rate-limit/phone-rate-limit';
+import {
+  CUSTOMER_MMS_RATE_SCOPE,
+  CUSTOMER_MMS_RATE_LIMIT,
+  CUSTOMER_MMS_RATE_WINDOW_MS,
+} from './sms/customer-mms/customer-mms-intake';
 import {
   registerProposalReplySms,
   PgProposalSmsEventRepository,
@@ -553,7 +706,8 @@ import {
   isDevAuthBypassEnabled,
   DevInMemoryTenantRepository,
 } from './auth/dev-auth-bypass';
-import { requireAuth } from './middleware/auth';
+import { requireAuth, resolveAuthorization, setAuthorizationLoader } from './middleware/auth';
+import { createAuthorizationLoader } from './auth/authorization-loader';
 import { withTenantTransaction } from './middleware/tenant-context';
 import type { TenantIntegrationStatus } from './integrations/status-machine';
 // In-memory dev fallback for the WebhookEvent idempotency repo. Extracted from
@@ -570,7 +724,32 @@ import { buildHelmetOptions } from './bootstrap/helmet-options';
 import { checkMetricsAuth, type MetricsAuthResult } from './bootstrap/metrics-auth';
 export { buildHelmetOptions, checkMetricsAuth, type MetricsAuthResult };
 
-export function createApp(): express.Express {
+// ARCH-02: the graceful-drain sequence (flip /ready to 503, reject new WS
+// upgrades, wait DRAIN_TIMEOUT_MS for live voice/WS sessions, then tear down
+// background loops/Redis/pool) must run for BOTH a clean SIGTERM/SIGINT and a
+// fatal in-process error (uncaughtException) — index.ts's fatal handler calls
+// `app.gracefulDrain(reason)` directly instead of duplicating this sequence
+// so a sync throw can no longer bypass the drain and drop live calls.
+export type AppWithLifecycle = express.Express & {
+  /**
+   * Idempotent, bounded drain-before-teardown. Safe to call more than once
+   * (e.g. a SIGTERM arriving while a fatal-error drain is already in
+   * flight) — every caller after the first gets the SAME in-flight promise
+   * instead of re-running teardown (double-closing the pool/Redis clients).
+   * `reason` is for logging only; it is not necessarily a POSIX signal name.
+   */
+  gracefulDrain: (reason: string) => Promise<void>;
+  /**
+   * WS2 — number of background worker intervals this instance registered.
+   * Snapshot taken at construction time. Zero when PROCESS_ROLE=web or
+   * PROCESS_ROLE=voice (the HTTP/voice surface runs no background loops);
+   * nonzero for 'worker'/'all'. Read-only observability seam so tests can
+   * assert the process-role split without exporting createApp() internals.
+   */
+  readonly backgroundIntervalCount: number;
+};
+
+export function createApp(): AppWithLifecycle {
   // §11 H3: Initialize Sentry FIRST so any error thrown during startup
   // or in handler construction below is captured. initSentry() is a no-op
   // when SENTRY_DSN is unset (dev/test), so this is safe in every env.
@@ -613,11 +792,31 @@ export function createApp(): express.Express {
   // req.body fields (used for signature verification + AccountSid match).
   app.use('/webhooks/twilio', express.urlencoded({ extended: false }));
 
-  // Body parsing for all other routes
-  app.use(express.json());
+  // FIN — Wisetack financing webhook needs the raw body for HMAC verification.
+  // Register the raw parser BEFORE global express.json() (like Stripe); the
+  // handler router is mounted later once repos are constructed.
+  app.use('/webhooks/wisetack', express.raw({ type: '*/*' }));
 
-  // Serve static frontend files from the built React app
-  const frontendPath = require('path').join(__dirname, '../../web/dist');
+  // SEC-40 — SendGrid's Event Webhook signs `timestamp + payload` (ECDSA over
+  // the EXACT delivered bytes). Capture the raw Buffer here BEFORE global
+  // express.json() so handleSendGrid verifies over the bytes SendGrid signed —
+  // same treatment as Stripe/Vapi. Without this the global json() consumes and
+  // re-parses the body; the handler's JSON.stringify() fallback re-serializes a
+  // different byte sequence (key order / whitespace), so verifySendGridSignature
+  // rejects every genuine signed delivery and the webhook is non-functional.
+  app.use('/webhooks/sendgrid', express.raw({ type: 'application/json' }));
+
+  // Body parsing for all other routes. Explicit ceiling (default is an
+  // implicit 100kb): large-but-bounded so no client can buffer unbounded
+  // JSON into the process, and the limit is visible here rather than
+  // buried in body-parser defaults.
+  app.use(express.json({ limit: '1mb' }));
+
+  // Serve static frontend files from the built React app.
+  // resolveWebDistDir anchors on the packages/api boundary so it points at
+  // <repoRoot>/packages/web/dist in both dev (__dirname=.../api/src) and the
+  // built image (__dirname=.../api/dist/src). See web-static-path.ts.
+  const frontendPath = resolveWebDistDir(__dirname);
   app.use(express.static(frontendPath));
 
   // Load validated config — must happen before CORS so validateProductionConfig()
@@ -664,31 +863,87 @@ export function createApp(): express.Express {
   const isProd = process.env.NODE_ENV === 'production' || process.env.NODE_ENV === 'prod';
   app.use(helmet(buildHelmetOptions(isProd)));
 
-  // CORS — use explicit origin in prod/staging (validated by config), wildcard in dev/test.
+  // CORS — use explicit origin(s) in prod/staging (validated by config),
+  // wildcard in dev/test. Comma-separated CORS_ORIGIN lets Railway host
+  // both the custom domain and the *.up.railway.app alias.
+  const corsOrigin = config.CORS_ORIGIN
+    ? config.CORS_ORIGIN.split(',').map((o) => o.trim()).filter(Boolean)
+    : true;
   app.use(cors({
-    origin: config.CORS_ORIGIN ?? true,
+    origin: Array.isArray(corsOrigin) && corsOrigin.length === 1
+      ? corsOrigin[0]
+      : corsOrigin,
     credentials: true,
   }));
 
   // Rate limiting — applied before auth to protect all routes
   // In dev mode, use a much higher limit to allow QA testing
   const isDev = process.env.NODE_ENV === 'dev' || process.env.NODE_ENV === 'development';
+  const redisUrl = process.env.REDIS_URL;
+  // T4-F02: this per-IP limiter is a DoS guard, not the fairness control — a
+  // shared-NAT office can exhaust a low per-IP cap with normal multi-user
+  // traffic. The per-tenant limiter below (API_TENANT_RATE_LIMIT_MAX,
+  // :4372-4384) is the actual fairness/abuse control. Env-configurable so the
+  // ceiling can be tightened without a code change if abuse patterns emerge.
+  const ipRateMax = Math.max(1, Number(process.env.API_IP_RATE_LIMIT_MAX) || 2000);
   app.use('/api', rateLimit({
     windowMs: 15 * 60 * 1000, // 15 minutes
-    max: isDev ? 10000 : 100, // per IP — relaxed in dev for QA testing
+    max: isDev ? 10000 : ipRateMax, // per IP — relaxed in dev for QA testing
     standardHeaders: true,
     legacyHeaders: false,
     skip: () => isDev && process.env.DEV_AUTH_BYPASS === 'true',
+    // P3/U-P3c: shared Redis counter so the per-IP cap is cluster-wide (else N
+    // replicas = N× the limit). undefined ⇒ default per-process MemoryStore.
+    store: createRateLimitStore(redisUrl, 'api:'),
+  }));
+  // T4-F02: the six signature-verified provider webhook prefixes need
+  // materially higher throughput than unknown/junk /webhooks/* paths — this
+  // limiter must stay in sync with the raw-body parsers above (:760-790); a
+  // seventh provider added there without a matching prefix here just falls
+  // back to the general /webhooks limit below (fails safe, not open).
+  // Mounted BEFORE the general /webhooks limiter so legitimate provider
+  // bursts aren't 429'd ahead of signature verification (webhook router,
+  // mounted later) at realistic callback volume.
+  const webhookProviderPrefixes = [
+    '/webhooks/stripe',
+    '/webhooks/clerk',
+    '/webhooks/vapi',
+    '/webhooks/twilio',
+    '/webhooks/wisetack',
+    '/webhooks/sendgrid',
+  ];
+  // Segment-boundary match on the SAME string Express used for mount
+  // matching (req.baseUrl + req.path — no query string, same non-
+  // normalization of dot-segments), so "skipped by the general limiter"
+  // and "covered by the provider limiter above" can never diverge:
+  // '/webhooks/stripefake' is neither, '/webhooks/stripe/../x' is both.
+  const isProviderWebhookPath = (url: string) =>
+    webhookProviderPrefixes.some(
+      (prefix) => url === prefix || url.startsWith(`${prefix}/`),
+    );
+  const webhookProviderRateMax = Math.max(1, Number(process.env.WEBHOOK_PROVIDER_RATE_LIMIT_MAX) || 600);
+  app.use(webhookProviderPrefixes, rateLimit({
+    windowMs: 60 * 1000,      // 1 minute
+    max: webhookProviderRateMax,
+    store: createRateLimitStore(redisUrl, 'webhooks-provider:'),
   }));
   app.use('/webhooks', rateLimit({
     windowMs: 60 * 1000,      // 1 minute
     max: 30,
+    // Only governs unknown/junk /webhooks/* paths — the six provider
+    // prefixes are already rate-limited (at higher throughput) above.
+    // NB: req.path is relative to this middleware's '/webhooks' mount point
+    // (e.g. '/stripe'); baseUrl + path reconstructs the full mount-matched
+    // path without the query string.
+    skip: (req) => isProviderWebhookPath(req.baseUrl + req.path),
+    store: createRateLimitStore(redisUrl, 'webhooks:'),
   }));
   // Public invoice/estimate pages are unauthenticated but token-gated.
   // Limit aggressively to slow token brute-force and view-count inflation.
   app.use('/public', rateLimit({
     windowMs: 60 * 1000,      // 1 minute
     max: 30,                  // per IP
+    store: createRateLimitStore(redisUrl, 'public:'),
   }));
 
   const requestLogger = createLogger({
@@ -700,10 +955,31 @@ export function createApp(): express.Express {
   // Initialize repositories — use Postgres when DATABASE_URL is set, otherwise
   // fall back to in-memory for local development without a database.
   const pool = process.env.DATABASE_URL ? createPool() : undefined;
+  // Direct (session-mode) pool for state that is unsafe under PgBouncer
+  // transaction pooling — session advisory locks (leader election, the proposal
+  // idempotency lock) and LISTEN/NOTIFY. `createDirectPool()` returns null when
+  // DATABASE_DIRECT_URL is unset, so we fall back to the main pool — identical
+  // behavior to before for dev / any deployment without PgBouncer.
+  const directPool = pool ? (createDirectPool() ?? pool) : undefined;
+  // U3b — WS per-tenant connection cap: cluster-wide via Redis when REDIS_URL is
+  // set (lease-TTL so a crashed replica's slots self-expire), else process-local.
+  const connectionRegistry = createConnectionRegistry(process.env.REDIS_URL);
 
   // In production, in-memory repositories lose all data on restart — crash fast.
   if (!pool && (config.NODE_ENV === 'prod' || config.NODE_ENV === 'staging')) {
     throw new Error('DATABASE_URL is required in production and staging environments');
+  }
+
+  // RLS runtime-role guard: when RLS_RUNTIME_ROLE=true, refuse to run unless the
+  // rls_app_runtime role is actually assumable — never serve with the flag on but
+  // enforcement silently absent. No-op when the flag is off.
+  if (pool) {
+    void verifyRlsRuntimeRole(pool).catch((err) => {
+      process.stderr.write(
+        `FATAL ${err instanceof Error ? err.message : String(err)}\n`
+      );
+      process.exit(1);
+    });
   }
 
   // Health checks — no auth required. Reuse the main pool (no duplicate connections).
@@ -723,14 +999,22 @@ export function createApp(): express.Express {
       },
     });
   }
+  // P4/U-P4a: while draining for shutdown, /ready (which fails on any `down`
+  // check) returns 503 so the load balancer stops routing NEW traffic here while
+  // active calls finish. /health (liveness) is unaffected.
+  checks.push({
+    name: 'drain',
+    check: async () => (isDrainingFlag() ? { status: 'down', message: 'draining' } : { status: 'ok' }),
+  });
   const healthRouter = createHealthRouter('1.0.0', process.env.NODE_ENV || 'development', checks);
   app.use('/', healthRouter);
 
-  // P2-029 — AI provider health endpoint. Public, no auth required.
-  // Uses the shared breaker registry populated by createLLMGateway().
-  // Reading gatewayFactory.sharedBreakerRegistry at request time (not at
-  // mount time) ensures the registry is populated after createLLMGateway()
-  // is called later in the boot sequence.
+  // P2-029 — AI provider health endpoint. Public listing (/ai) needs no auth.
+  // U4 completion probe (/ai/completion) is gated like /metrics.
+  // Uses the shared breaker registry + gateway populated by createLLMGateway()
+  // later in boot — read at request time, not mount time.
+  // Assigned after createLLMGateway() below — request handlers read it lazily.
+  let aiHealthGateway: import('./ai/gateway/gateway').LLMGateway | undefined;
   app.use('/api/health', (req, res, next) => {
     const registry = gatewayFactory.sharedBreakerRegistry;
     if (!registry) {
@@ -739,10 +1023,17 @@ export function createApp(): express.Express {
         res.status(200).json({ providers: [] });
         return;
       }
+      if (req.path === '/ai/completion') {
+        res.status(503).json({
+          error: 'AI_GATEWAY_UNAVAILABLE',
+          message: 'LLM gateway is not configured (AI_PROVIDER_API_KEY missing).',
+        });
+        return;
+      }
       next();
       return;
     }
-    createAiHealthRouter(registry)(req, res, next);
+    createAiHealthRouter(registry, [], { gateway: aiHealthGateway })(req, res, next);
   });
 
   // Prometheus metrics — gated by `checkMetricsAuth` (METRICS_TOKEN bearer).
@@ -786,12 +1077,16 @@ export function createApp(): express.Express {
   // path and the dev-auth-bypass middleware end up with disjoint
   // tenant maps and customers created on one side don't resolve on
   // the other.
+  // Same for settings: InMemorySettingsRepository is stateful — the
+  // Clerk webhook seeder and /api/settings must share one map or
+  // hermetic/dev boots 404 on Settings after a successful bootstrap.
   const tenantRepo = pool
     ? new PgTenantRepository(pool)
     : new DevInMemoryTenantRepository();
-  const webhookSettingsRepo = pool
+  const settingsRepo = pool
     ? new PgSettingsRepository(pool)
     : new InMemorySettingsRepository();
+  const webhookSettingsRepo = settingsRepo;
   // Constructed early so the Stripe webhook handler can record payments.
   const webhookInvoiceRepo = pool ? new PgInvoiceRepository(pool) : new InMemoryInvoiceRepository();
   const webhookEstimateRepo = pool ? new PgEstimateRepository(pool) : new InMemoryEstimateRepository();
@@ -836,7 +1131,14 @@ export function createApp(): express.Express {
   // Queue constructed here (before webhook router) so new-tenant webhooks can
   // enqueue provisioning jobs synchronously during the request.
   const queue = pool ? new PgQueue(pool) : new InMemoryQueue();
-  const webhookAuditRepo = pool ? new PgAuditRepository(pool) : new InMemoryAuditRepository();
+  // Wrap the single audit-repo instance in the PostHog forwarding decorator at
+  // the composition root: every mutation's audit write (~270 sites, all
+  // domains) is threaded through `auditRepo`, so this one wrap gives full
+  // in-app product-event coverage. Off-by-default — a no-op forward until
+  // POSTHOG_API_KEY is set, and it can never break a mutation.
+  const webhookAuditRepo = new ForwardingAuditRepository(
+    pool ? new PgAuditRepository(pool) : new InMemoryAuditRepository(),
+  );
   const webhookEventRepo = pool ? new PgWebhookEventRepository(pool) : new InMemoryWebhookEventRepository();
   // Blocker 1 — durable idempotency store for the Stripe/Clerk dedup path
   // (handleWebhookEvent). Postgres-backed in real deploys; left undefined
@@ -849,13 +1151,18 @@ export function createApp(): express.Express {
   // handlers, which mutate tenant_dnc_list. Suppression at outbound-send
   // time is layered on top in send-service / appointment-confirmation-notifier.
   const dncRepo = pool ? new PgDncRepository(pool) : new InMemoryDncRepository();
-  registerKeywordHandler(buildStopKeywordHandler({ dncRepo }), { overwrite: true });
-  registerKeywordHandler(buildStartKeywordHandler({ dncRepo }), { overwrite: true });
+  // STOP/START handler registration is deferred until the consent ledger and
+  // customer repos exist (Story 10.6 unifies DNC + consent_events + the
+  // customers.consent_status rollup) — see registration below.
 
   // Resolves per-tenant integration credentials for inbound webhook signature
   // verification. Returns null when no row exists or the integration provider
   // doesn't match — recordTwilio / recordSendGrid then 403 with audit.
   const integrationResolver = pool ? createIntegrationResolver(pool) : undefined;
+  // Per-tenant Vapi webhook secret resolver (closes the cross-tenant forgery
+  // the single global secret allowed). The /vapi handler falls back to the
+  // global secret when this returns null (tenant not yet re-provisioned).
+  const vapiSecretResolver = pool ? createVapiSecretResolver(pool) : undefined;
 
   const webhookRouterDeps: import('./webhooks/routes').WebhookRouterDeps = {
     tenantRepo,
@@ -883,12 +1190,22 @@ export function createApp(): express.Express {
     webhookEventRepo,
     webhookRepo,
     integrationResolver,
+    vapiSecretResolver,
     // #6 phase 4 — persist saved cards on setup_intent.succeeded.
     // customerPaymentMethodRepo is wired in after its instantiation below.
     stripeConfig: process.env.STRIPE_SECRET_KEY
       ? { apiKey: process.env.STRIPE_SECRET_KEY }
       : undefined,
   };
+  // SEC-41 — canonical webhook surface is `/webhooks/*` (every external
+  // provider config in docs/launch/GO-LIVE-RUNBOOK.md + docs/third-party-services
+  // points there). The former `/api/webhooks` alias was mounted WITHOUT the
+  // per-provider raw-body middleware above (only registered for `/webhooks/*`),
+  // so `/api/webhooks/stripe|vapi` reached the handler with a JSON-parsed body:
+  // the Stripe handler throws synchronously when req.body isn't a Buffer, which
+  // in Express 4 becomes an unhandled rejection and HANGS the request. The alias
+  // is unreferenced by any test, e2e spec, doc, or provider config, so it is
+  // removed rather than duplicated — smaller surface, no divergent behavior.
   app.use('/webhooks', createWebhookRouter(config, webhookRouterDeps));
 
   // Dev-only storage PUT receiver for DevStorageProvider upload URLs.
@@ -905,6 +1222,23 @@ export function createApp(): express.Express {
   // U2 (CRM Jobber parity) — customer tags + tenant-defined custom fields.
   const customerTagRepo     = pool ? new PgTagRepository(pool)           : new InMemoryTagRepository();
   const customerCustomFieldRepo = pool ? new PgCustomFieldRepository(pool) : new InMemoryCustomFieldRepository();
+  const jobFormRepo = pool ? new PgJobFormRepository(pool) : new InMemoryJobFormRepository();
+  const recurringJobRepo = pool ? new PgRecurringJobRepository(pool) : new InMemoryRecurringJobRepository();
+  const jobCustomFieldRepo = pool ? new PgJobCustomFieldRepository(pool) : new InMemoryJobCustomFieldRepository();
+  const financingRepo = pool ? new PgFinancingRepository(pool) : new InMemoryFinancingRepository();
+  const financingProvider = createFinancingProvider();
+  const campaignRepo = pool ? new PgCampaignRepository(pool) : new InMemoryCampaignRepository();
+  const customerGroupRepo = pool ? new PgCustomerGroupRepository(pool) : new InMemoryCustomerGroupRepository();
+  // UB-A1 — standing instructions the AI agents apply when drafting.
+  const standingInstructionRepo = pool
+    ? new PgStandingInstructionRepository(pool)
+    : new InMemoryStandingInstructionRepository();
+  const entityAliasRepo = pool ? new PgEntityAliasRepository(pool) : undefined;
+  // Story 4.6 — customer merge. Pg re-parents child rows + archives the loser
+  // in one transaction; the no-DB dev path only archives (no child tables).
+  const customerMergeRepo = pool
+    ? new PgCustomerMergeRepository(pool)
+    : new InMemoryCustomerMergeRepository(customerRepo);
   // N-003 (P2-036) — caller LTV/recency for the negotiation guardrail callback.
   const customerNegotiationContextProvider = pool
     ? new PgCustomerNegotiationContextProvider(pool)
@@ -919,6 +1253,10 @@ export function createApp(): express.Express {
   // Declared here (ahead of its first router use) so the jobs router's
   // from-estimate scheduling deps can reference it.
   const userRepo = pool ? new PgUserRepository(pool) : new InMemoryUserRepository();
+  // Hermetic / DEV_AUTH_BYPASS path: share one InMemoryUserModeService so
+  // bootstrap can upsert the owner row (with internal_user_id) before
+  // /api/me mounts. Pg-backed mode still builds its service later.
+  const inMemoryUserModeService = pool ? null : new InMemoryUserModeService();
   // Working hours are now Pg-backed in production (migration 137 added
   // technician_working_hours), so the dispatch feasibility composer and the
   // inbound-AI availability search enforce real working-hours rows instead of
@@ -945,13 +1283,35 @@ export function createApp(): express.Express {
   // STRIPE_SECRET_KEY (or STRIPE_API_KEY) is missing while NODE_ENV=production,
   // and emits a loud dev-mode warning when the mock is used.
   const paymentLinkProvider = createPaymentLinkProvider(process.env);
-  // Reference the variable so TS doesn't drop it; the provider will be
-  // wired into routes/workers in a follow-up. The factory call itself is
-  // load-bearing — it asserts the production guard at boot time.
-  void paymentLinkProvider;
+  // Tier 4 (Payment methods — PR 2). When the connectService is wired AND the
+  // tenant has an active Connect account with charges enabled, payments route
+  // directly to the tenant's account via the Stripe-Account header. Without
+  // it, payments stay on the legacy platform path. Shared by the invoice
+  // service, the portal save-card flow (#6 phase 4), the webhook stale-link
+  // cleanup, and the execution-handler registry — all must scope Stripe calls
+  // to the same connected account. Defined HERE (not later, next to the
+  // public invoice service) because the registry construction below consumes
+  // it.
+  const connectAccountResolver = connectService
+    ? {
+        resolveTenantConnectAccount: async (tenantId: string) => {
+          const view = await connectService.getAccount(tenantId);
+          if (!view.accountId) return null;
+          return {
+            accountId: view.accountId,
+            chargesEnabled: view.chargesEnabled,
+          };
+        },
+      }
+    : undefined;
+  // P0-9 — lets the Stripe webhook deactivate a stale hosted payment link as
+  // soon as a credit settles/reprices its invoice (same late-wiring pattern
+  // as customerPaymentMethodRepo: the router reads deps lazily).
+  webhookRouterDeps.paymentLinkProvider = paymentLinkProvider;
+  webhookRouterDeps.connectAccountResolver = connectAccountResolver;
   const noteRepo           = pool ? new PgNoteRepository(pool)           : new InMemoryNoteRepository();
   const conversationRepo   = pool ? new PgConversationRepository(pool)   : new InMemoryConversationRepository();
-  const settingsRepo       = pool ? new PgSettingsRepository(pool)       : new InMemorySettingsRepository();
+  // settingsRepo is constructed once above (webhook + /api/settings share it).
   // P2-036 V2 — resolves the customer's current live quote for the discount engine.
   const negotiationQuoteResolver = new DefaultCurrentQuoteResolver({ jobRepo, estimateRepo });
   // Voice-parity (Feature 7) — call_me_back tasks (failed-transfer callbacks).
@@ -978,14 +1338,26 @@ export function createApp(): express.Express {
   // of a hardcoded one. A 60s cache mirrors thresholdResolver/voicePersona
   // so a multi-segment chain doesn't re-query settings per segment. Best-
   // effort: the router falls back to the product default when undefined.
-  const schedulingTzCache = new Map<string, { timezone?: string; expiresAt: number }>();
+  const schedulingTzCache = new Map<
+    string,
+    {
+      timezone?: string;
+      businessHours?: Record<string, { open: string; close: string } | null> | null;
+      expiresAt: number;
+    }
+  >();
   const tenantSchedulingResolver = async (tenantId: string) => {
     const hit = schedulingTzCache.get(tenantId);
-    if (hit && hit.expiresAt > Date.now()) return { timezone: hit.timezone };
+    if (hit && hit.expiresAt > Date.now()) {
+      return { timezone: hit.timezone, businessHours: hit.businessHours };
+    }
     const settings = await settingsRepo.findByTenant(tenantId);
     const timezone = settings?.timezone;
-    schedulingTzCache.set(tenantId, { timezone, expiresAt: Date.now() + 60_000 });
-    return { timezone };
+    // UB-D — business hours ride the same cached read so the autonomous
+    // booking lane's in-hours gate costs no extra settings query.
+    const businessHours = settings?.businessHours;
+    schedulingTzCache.set(tenantId, { timezone, businessHours, expiresAt: Date.now() + 60_000 });
+    return { timezone, businessHours };
   };
   // B1 — per-tenant voice persona. 60-second LRU cache; shared by
   // both the Twilio and in-app adapters.
@@ -1009,6 +1381,7 @@ export function createApp(): express.Express {
   // setup_intent.succeeded can persist the card — mirrors paymentReceiptNotifier.
   webhookRouterDeps.customerPaymentMethodRepo = customerPaymentMethodRepo;
   const templateRepo       = pool ? new PgEstimateTemplateRepository(pool) : new InMemoryEstimateTemplateRepository();
+  const messageTemplateRepo = pool ? new PgMessageTemplateRepository(pool) : new InMemoryMessageTemplateRepository();
   const bundleRepo         = pool ? new PgServiceBundleRepository(pool)  : new InMemoryServiceBundleRepository();
   const qualityMetricsRepo = pool ? new PgQualityMetricsRepository(pool) : new InMemoryQualityMetricsRepository();
   const voiceRepo          = pool ? new PgVoiceRepository(pool)          : new InMemoryVoiceRepository();
@@ -1059,11 +1432,20 @@ export function createApp(): express.Express {
       ? voiceExtendedIntentsFlagResolver(tenantId)
       : false;
   };
+  // WS5 — Presidio-first redaction. When both analyzer + anonymizer URLs are
+  // configured we run a real Presidio pass ahead of the deterministic scrub and
+  // fail closed (quarantine) if it is unreachable. Unset ⇒ local-only scrub.
+  const presidioAnonymizer = createPresidioAnonymizer(config);
   const trainingAssetService = new TrainingAssetService({
     assetRepo: trainingAssetRepo,
     privacyAuditRepo,
     auditRepo,
-    redaction: new TrainingAssetRedactionService(),
+    redaction: new TrainingAssetRedactionService(
+      presidioAnonymizer ? { presidio: presidioAnonymizer } : {},
+    ),
+    // Transactional persistence for the asset + privacy_audit + audit writes
+    // when a real Postgres pool is present (compensating deletes otherwise).
+    pool: pool ?? undefined,
     invalidatePromptCache: (tenantId) => invalidateVerticalPromptCache?.(tenantId),
   });
   const fileRepo           = pool ? new PgFileRepository(pool)           : new InMemoryFileRepository();
@@ -1117,11 +1499,15 @@ export function createApp(): express.Express {
 
   // LLM gateway — single instance shared across intent classifier,
   // voice-action-router task handlers, and future AI features.
-  // Falls back to a MockLLMProvider in dev/test so the app boots
-  // without an AI_PROVIDER_API_KEY.
+  // Falls back to a hermetic MockLLMProvider in dev/test so the app boots
+  // without an AI_PROVIDER_API_KEY and Assistant can still draft proposals
+  // (fixed "unknown" mock permanently degraded the chat path).
   const llmGateway = config.AI_PROVIDER_API_KEY
     ? createLLMGateway(config, { aiRunRepo, shadowStore })
-    : createMockLLMGateway('{"intentType":"unknown","confidence":0}').gateway;
+    : createHermeticMockLLMGateway().gateway;
+  // Wire completion probe for GET /api/health/ai/completion (even hermetic mock
+  // — probe then proves the mock path responds, which is useful in local boot).
+  aiHealthGateway = llmGateway;
 
   // Phase 4a-1: dedicated EmbeddingProvider for the RAG corpus. The
   // gateway routes chat completions through shadow/router logic that
@@ -1151,6 +1537,19 @@ export function createApp(): express.Express {
   const correctionLessonRepo = pool
     ? new PgCorrectionLessonRepository(pool)
     : new InMemoryCorrectionLessonRepository();
+  // WS6 — supervisor_reviews repo, hoisted here (rather than constructed
+  // inline inside the review-gate config further down) so the daily-digest
+  // worker deps can reuse the SAME instance for its "Checked: N proposals,
+  // M flagged" reflection line instead of standing up a second repo.
+  const supervisorReviewsRepo = pool
+    ? new PgSupervisorReviewRepository(pool)
+    : new InMemorySupervisorReviewRepository();
+  // Story 3.9 — raw per-field proposal-edit log (intent + field + before/after),
+  // queryable per tenant and per intent; the training signal for prompt/routing
+  // improvement. Distinct from correction_lessons (cascading config above).
+  const correctionRepo = pool
+    ? new PgCorrectionRepository(pool)
+    : new InMemoryCorrectionRepository();
   const correctionConfigPorts: ConfigPorts = {
     async setLaborRateCents(tenantId, cents) {
       await settingsRepo.update(tenantId, { laborRateCentsPerHour: cents });
@@ -1175,57 +1574,83 @@ export function createApp(): express.Express {
     ? new PgCallTranscriptTurnRepository(pool)
     : new InMemoryCallTranscriptTurnRepository();
 
-  const feedbackDispatcher =
-    process.env.TWILIO_ACCOUNT_SID && process.env.TWILIO_AUTH_TOKEN && process.env.TWILIO_FROM_NUMBER
-      ? new SmsProviderFeedbackDispatcher({
-          accountSid: process.env.TWILIO_ACCOUNT_SID,
-          authToken: process.env.TWILIO_AUTH_TOKEN,
-          fromNumber: process.env.TWILIO_FROM_NUMBER,
-        })
-      : new NoopFeedbackDispatcher();
-
   // Customer-facing message delivery for estimates and invoices.
-  // Production wires Twilio (SMS) + Twilio SendGrid (email). Without
-  // the env vars, falls back to InMemoryDeliveryProvider so the app
-  // boots in dev without delivery credentials. Send routes return
+  // prod/staging wire Twilio (SMS) + Twilio-native email or SendGrid; every
+  // other environment gets InMemoryDeliveryProvider so the app boots without
+  // delivery credentials AND cannot send real messages. Send routes return
   // 503 when sendService is undefined.
   const dispatchRepo = pool ? new PgDispatchRepository(pool) : new InMemoryDispatchRepository();
-  let messageDelivery: MessageDeliveryProvider | null;
-  if (
-    process.env.TWILIO_ACCOUNT_SID &&
-    process.env.TWILIO_AUTH_TOKEN &&
-    process.env.TWILIO_FROM_NUMBER &&
-    process.env.SENDGRID_API_KEY &&
-    process.env.SENDGRID_FROM_EMAIL
-  ) {
-    // The global Twilio/SendGrid provider handles email and any send that
-    // carries no tenantId; the global Twilio SMS creds also serve as the
-    // dev/test fallback inside getTenantTwilioCreds.
-    const baseDelivery = new TwilioDeliveryProvider({
-      sms: {
-        accountSid: process.env.TWILIO_ACCOUNT_SID,
-        authToken: process.env.TWILIO_AUTH_TOKEN,
-        fromNumber: process.env.TWILIO_FROM_NUMBER,
-      },
-      email: {
-        apiKey: process.env.SENDGRID_API_KEY,
-        fromEmail: process.env.SENDGRID_FROM_EMAIL,
-        fromName: process.env.SENDGRID_FROM_NAME,
-        replyToEmail: process.env.SENDGRID_REPLY_TO_EMAIL,
-      },
-    });
-    // Feature 7 — when a Postgres pool is available, route per-tenant SMS
-    // through each tenant's own Twilio subaccount (failing closed when a
-    // tenant has no credentials). Without a pool we cannot resolve per-tenant
-    // creds, so keep the global provider.
-    messageDelivery = pool
-      ? new PerTenantTwilioDeliveryProvider({ pool, base: baseDelivery })
-      : baseDelivery;
-  } else if (config.NODE_ENV === 'prod' || config.NODE_ENV === 'staging') {
-    messageDelivery = null;
-  } else {
-    messageDelivery = new InMemoryDeliveryProvider();
-  }
+  // Provider selection lives in notifications/delivery-provider-factory.ts so
+  // it is unit-testable without booting createApp(). The invariant it enforces:
+  // ONLY prod/staging (or an explicit DELIVERY_ALLOW_REAL_PROVIDERS=true
+  // opt-in) may construct a real Twilio/SendGrid provider — a non-production
+  // environment is structurally incapable of sending, not merely flagged off.
+  // Inside prod/staging the SMS and email credential legs stay INDEPENDENT
+  // (36d30807), so SMS works with no email credentials at all. The chosen mode
+  // is logged at boot so a silent promotion can never happen unnoticed again.
+  const deliveryWiring = createMessageDeliveryProvider({
+    nodeEnv: config.NODE_ENV,
+    env: process.env,
+    pool,
+    logger: createLogger({
+      service: 'notifications-delivery',
+      environment: process.env.NODE_ENV || 'development',
+    }),
+  });
+  const rawMessageDelivery: MessageDeliveryProvider | null = deliveryWiring.provider;
+  // RV-130 — consent ledger (append-only consent_events). Constructed here —
+  // before the SMS gate — because WS12 makes it the cross-channel source of
+  // truth both outbound gates consult; the STOP/START keyword handlers and
+  // the voice adapter (registered further down) append to the same instance.
+  const consentEventRepo = pool
+    ? new PgConsentEventRepository(pool)
+    : new InMemoryConsentEventRepository();
+
+  // WS1 safety rails — wrap the single delivery object in the consent+DNC gate
+  // so EVERY outbound SMS passes exactly one gate. Owner-class sends bypass;
+  // customer-class sends are gated per `config.TCPA_CONSENT_ENFORCEMENT` (the
+  // SAME value that drives the voice consent gate). Wrapping here — the single
+  // construction site — is what makes the guarantee hold for all three
+  // provider branches (per-tenant, global, and in-memory dev).
+  // WS12 — the gate also consults the consent ledger so a revocation arriving
+  // on ANY channel (voice, portal, manual, STOP) suppresses customer SMS.
+  const messageDelivery: MessageDeliveryProvider | null = rawMessageDelivery
+    ? new GatedMessageDelivery({
+        base: rawMessageDelivery,
+        dnc: dncRepo,
+        auditRepo,
+        enforcement: config.TCPA_CONSENT_ENFORCEMENT,
+        consentLedger: consentEventRepo,
+      })
+    : null;
+
+  // WS1 — resolve a customer's SMS consent by phone for send sites that only
+  // hold the recipient's number (dropped-call recovery + negotiation replies).
+  // A single customer match yields the consent snapshot; zero or many matches →
+  // undefined, which makes the central gate fail closed (missing_consent_context)
+  // rather than silently guess.
+  const resolveCustomerConsentByPhone = async (
+    tenantId: string,
+    phone: string,
+  ): Promise<{ smsConsent: boolean; customerId?: string } | undefined> => {
+    try {
+      const matches = await customerRepo.findByPhoneNormalized(
+        tenantId,
+        normalizePhone(phone),
+      );
+      if (matches.length !== 1) return undefined;
+      return { smsConsent: matches[0].smsConsent === true, customerId: matches[0].id };
+    } catch {
+      return undefined;
+    }
+  };
+
+  // WS1 — feedback-request SMS now flows through the single messageDelivery
+  // object (customer-class) instead of a raw Twilio fetch. Noop without a
+  // provider so dev/CI boot without SMS creds.
+  const feedbackDispatcher = messageDelivery
+    ? new MessageDeliveryFeedbackDispatcher(messageDelivery)
+    : new NoopFeedbackDispatcher();
   const publicBaseUrl = process.env.APP_PUBLIC_URL ?? 'http://localhost:5173';
   const sendService = messageDelivery
     ? new SendService({
@@ -1236,7 +1661,6 @@ export function createApp(): express.Express {
         customerRepo,
         settingsRepo,
         dispatchRepo,
-        dncRepo,
         publicBaseUrl,
       })
     : undefined;
@@ -1266,11 +1690,23 @@ export function createApp(): express.Express {
     );
     return receipt.inserted;
   };
+  // UB-D / D3 — same durable receipt store, DISTINCT source: undo nonces
+  // and approve nonces can never collide or cross-consume.
+  const consumeOneTapUndoNonce = async (nonce: string): Promise<boolean> => {
+    const receipt = await webhookEventRepo.recordReceipt(
+      'one_tap_undo',
+      nonce,
+      'one_tap_undo_nonce',
+      {},
+    );
+    return receipt.inserted;
+  };
   // Capture as const so the SMS closure narrows (messageDelivery is a let).
   const oneTapDelivery = messageDelivery;
   const oneTapSmsSender = oneTapDelivery
     ? async (to: string, body: string): Promise<void> => {
-        await oneTapDelivery.sendSms({ to, body });
+        // One-tap approval link → owner/operator. Never gated by customer consent.
+        await oneTapDelivery.sendSms({ to, body, recipientClass: 'owner' });
       }
     : undefined;
   // Owner/backup-supervisor phone for the unsupervised SMS: tenant_settings
@@ -1291,10 +1727,45 @@ export function createApp(): express.Express {
     level: process.env.LOG_LEVEL === 'debug' ? 'debug' : 'info',
   });
 
+  // A1 — tenant-scoped vocabulary (catalog item names, active customer
+  // names, technician/user names) for the transcription-correction pass.
+  // Reuses the same catalogRepo/customerRepo/userRepo already constructed
+  // above for the rest of the app; best-effort (never throws — see
+  // TenantGlossaryProvider's own doc comment).
+  const transcriptionGlossaryProvider = new TenantGlossaryProvider({
+    catalogRepo,
+    customerRepo,
+    userRepo,
+  });
+
   const transcriptionWorker = createTranscriptionWorker(
     voiceRepo,
     transcriptionProvider,
     {
+      // Wires the correction pass (workers/transcription.ts's
+      // `if (options.gateway …)` block) live — previously only
+      // onTranscribed + rawTranscriptEncryptionKey were passed here, so
+      // correction never ran regardless of AI_PROVIDER_API_KEY.
+      //
+      // llmGateway is NOT always the real provider — it falls back to a
+      // hermetic MockLLMProvider when AI_PROVIDER_API_KEY is unset (see its
+      // construction above). But transcriptionProvider (Whisper, via
+      // createWhisperTranscriptionProvider) is gated on a DIFFERENT env var
+      // (OPENAI_API_KEY alone) and runs for REAL regardless of
+      // AI_PROVIDER_API_KEY. That asymmetry meant a deployment with
+      // OPENAI_API_KEY but no AI_PROVIDER_API_KEY got real Whisper
+      // transcripts silently replaced: the hermetic mock's scripted
+      // catch-all response for transcription_correction is an ~84-char JSON
+      // blob (`{"ok":true,"mock":true,...}`) that clears the 40%-length
+      // floor in transcription.ts's correctTranscript() for any real
+      // transcript ≤210 chars — corrupting genuine voice-memo transcripts
+      // with mock JSON before downstream intent classification ever runs
+      // (observed live). Only pass gateway/glossary when the REAL gateway
+      // was built, so correction is skipped cleanly (raw transcript kept)
+      // for keyless-gateway deployments — matching pre-branch behavior.
+      ...(config.AI_PROVIDER_API_KEY
+        ? { gateway: llmGateway, glossary: transcriptionGlossaryProvider }
+        : {}),
       onTranscribed: async (event, hookLogger) => {
         // Enqueue the downstream voice-action-router job. A separate
         // poll loop (below) picks it up and runs intent classification.
@@ -1308,6 +1779,7 @@ export function createApp(): express.Express {
           transcript: event.transcript,
           conversationId: event.conversationId,
           recordingId: event.recordingId,
+          ...(event.jobId ? { jobId: event.jobId } : {}),
         };
         await queue.send(
           'voice_action_router',
@@ -1395,6 +1867,29 @@ export function createApp(): express.Express {
     imagePostProcessWorker as import('./queues/queue').WorkerHandler<unknown>
   );
 
+  // ── Onboarding lifecycle emails. The frontend origin backs the CTA links
+  // (/onboarding, /settings) and the support address backs the footer ask;
+  // shared by the welcome worker (below) and the setup/trial sweeps.
+  const lifecycleEmailAppBaseUrl = process.env.APP_PUBLIC_URL ?? 'http://localhost:5173';
+  const lifecycleEmailSupportEmail =
+    process.env.SUPPORT_EMAIL ?? process.env.SENDGRID_REPLY_TO_EMAIL ?? 'support@rivet.ai';
+  const lifecycleEmailWorker = createLifecycleEmailWorker({
+    delivery: messageDelivery,
+    pool: pool ?? null,
+    settingsRepo,
+    auditRepo,
+    appBaseUrl: lifecycleEmailAppBaseUrl,
+    supportEmail: lifecycleEmailSupportEmail,
+    logger: createLogger({
+      service: 'lifecycle-email-worker',
+      environment: process.env.NODE_ENV || 'development',
+    }),
+  });
+  workerRegistry.set(
+    lifecycleEmailWorker.type,
+    lifecycleEmailWorker as import('./queues/queue').WorkerHandler<unknown>
+  );
+
   // ── Auto-delivery worker: sweeps approved proposals past the 5-second
   // undo window and hands them to the executor. Closes the operational
   // question from the D9 undo-window slice: "who kicks execution after
@@ -1448,8 +1943,9 @@ export function createApp(): express.Express {
         customerRepo,
         // Brand-voice customer SMS drafts route through the shared LLM gateway
         // (CLAUDE.md: all AI calls go through the gateway); tone is read from
-        // tenant_settings via settingsRepo.
-        brandVoiceDeps: { gateway: llmGateway, settingsRepo },
+        // tenant_settings via settingsRepo. UB-A3: owner standing instructions
+        // (keyed on the brand-voice intent) adjust draft content.
+        brandVoiceDeps: { gateway: llmGateway, settingsRepo, standingInstructionRepo },
       },
     },
     { overwrite: true },
@@ -1504,18 +2000,28 @@ export function createApp(): express.Express {
   // Voice intents (add_note, send_invoice, record_payment) execute
   // against real domain repositories. Invoice delivery routes through
   // SendService when configured; resolveInvoiceDeliveryProvider throws at
-  // boot in prod/staging without credentials; dev/test uses Noop.
+  // boot in prod/staging without credentials unless delivery is explicitly
+  // opted out (EMAIL_ENABLED=false + TELEPHONY_ENABLED=false); otherwise
+  // dev/test uses Noop.
+  const deliveryOptedOut =
+    process.env.EMAIL_ENABLED === 'false' && process.env.TELEPHONY_ENABLED === 'false';
   const invoiceDeliveryProvider = resolveInvoiceDeliveryProvider({
     nodeEnv: config.NODE_ENV,
     sendService,
+    allowNoopInProduction: deliveryOptedOut,
   });
   const estimateDeliveryProvider = resolveEstimateDeliveryProvider({
     nodeEnv: config.NODE_ENV,
     sendService,
+    allowNoopInProduction: deliveryOptedOut,
   });
   const dispatchAnalyticsRepo = pool
     ? new PgDispatchAnalyticsRepository(pool)
     : new InMemoryDispatchAnalyticsRepository();
+  const transactionalCommsLogger = createLogger({
+    service: 'transactional-comms',
+    environment: process.env.NODE_ENV || 'development',
+  });
   const transactionalComms = messageDelivery
     ? new TransactionalCommsService({
         delivery: messageDelivery,
@@ -1525,7 +2031,9 @@ export function createApp(): express.Express {
         settingsRepo,
         invoiceRepo,
         dispatchRepo,
-        dncRepo,
+        // T4-F01 — claim-before-send pool for sendCustomerMessage's gate.
+        pool: pool ?? null,
+        logger: transactionalCommsLogger,
       })
     : undefined;
   if (transactionalComms) {
@@ -1552,9 +2060,18 @@ export function createApp(): express.Express {
     ? new PgReviewPollStateRepository(pool)
     : null;
   const googleReviewsCredResolver = pool
-    ? createCredentialResolver({ pool })
+    ? createCredentialResolver({ pool, directPool })
     : null;
   const serviceCreditRepo = pool ? new PgServiceCreditRepository(pool) : undefined;
+  // Reviewer→customer matcher + brand voice for review-response drafting.
+  // Hoisted here (was next to the polling worker at the bottom of createApp)
+  // because the voice-action-router's respond_to_review on-ramp (U3) needs
+  // the same instances; the polling worker below reuses them.
+  const googleReviewsCustomerLoader = pool ? new PgCustomerLoader(pool) : null;
+  // Real tenant-tone loader (was NoopBrandVoiceLoader — a P4-015 placeholder
+  // that shipped but was never swapped, so review responses ignored the shop's
+  // voice + banned_phrases). Reads tenant_settings.brand_voice, failure-soft.
+  const googleReviewsBrandVoiceLoader = new SettingsBrandVoiceLoader(settingsRepo);
   const googleReplyResolver =
     googleReviewsReviewRepo && googleReviewsCredResolver
       ? new PgGoogleBusinessReplyResolver(
@@ -1571,11 +2088,21 @@ export function createApp(): express.Express {
   // Built ahead of the execution registry so the notify_delay handler can
   // send a real delay notice; reused by the delay-notification worker below.
   const delayNotificationService = messageDelivery
-    ? new TwilioDelayNotificationService(messageDelivery, dispatchRepo)
+    ? new TwilioDelayNotificationService(messageDelivery, dispatchRepo, customerRepo)
     : new NoopDelayNotificationService();
+  // B1.18 — hoisted ahead of the execution registry (was declared next to the
+  // brand-voice router further down) so update_brand_voice's execution
+  // handler can be wired with the SAME repo instance the sheet's router uses.
+  const brandVoiceRepo = pool
+    ? new PgBrandVoiceRepository(pool)
+    : new InMemoryBrandVoiceRepository();
   const executionHandlers = createExecutionHandlerRegistry({
     customerRepo,
     jobRepo,
+    // B7 (money-loss fix) — update_job routes status changes through
+    // transitionJobStatus (timeline + completedAt) and runs completion effects.
+    timelineRepo,
+    timeEntryRepo,
     locationRepo,
     appointmentRepo,
     assignmentRepo,
@@ -1584,10 +2111,14 @@ export function createApp(): express.Express {
     settingsRepo,
     scheduleRepo: invoiceScheduleRepo,
     proposalRepo,
+    // Collections cadence — dunning ledger for MANUAL reminder execution dedup.
+    dunningEventRepo,
     docRevisionRepo: documentRevisionRepo,
     editDeltaRepo: deltaRepo,
     noteRepo,
     paymentRepo,
+    // P0-9 — record_payment execution kills a link its credit made stale.
+    paymentLinkCleanup: { provider: paymentLinkProvider, connectAccountResolver },
     invoiceDeliveryProvider,
     estimateDeliveryProvider,
     analyticsRepo: dispatchAnalyticsRepo,
@@ -1612,12 +2143,44 @@ export function createApp(): express.Express {
     // RV-086 — send_estimate_nudge: re-send via the unified SendService
     // path; message_dispatches backs the 48h cooldown.
     ...(sendService ? { sendService } : {}),
+    // T4-F01 — claim-before-send pool for send_estimate_nudge's
+    // dispatchEstimateNudge call (see estimates/estimate-nudge.ts).
+    pool: pool ?? null,
     dispatchRepo,
+    // UB-A2 — create_standing_instruction inserts via the UB-A1 repo
+    // (in-memory fallback when no pool, same as the routes above).
+    standingInstructionRepo,
+    // WS20 — update_catalog_item writes the owner-ratified SKU price.
+    catalogRepo,
+    entityAliasRepo,
+    // WS3 — voice update_customer consent parity: a spoken smsConsent toggle
+    // appends to the consent ledger in the same transaction as the customer
+    // update + audit event (matching the authenticated route path).
+    consentEventRepo,
+    // B1.19 — conversational onboarding_* handlers write through the same
+    // pack-activation/seed + template-creation deps the onboarding + template
+    // routes already use (packActivationRepo, catalogRepo/templateRepo below).
+    packActivationRepo,
+    templateRepo,
+    packSeedDeps: { catalogRepo, templateRepo },
+    // B1.19 — an approved onboarding_team_member issues a real invitation
+    // through the same service POST /api/users/invitations calls, so the gate
+    // the operator fills on the review card actually reaches the teammate
+    // instead of failing at execution or recording intent that never sends.
+    pendingInvitationRepo,
+    clerkInvitationConfig: {
+      clerkSecretKey: process.env.CLERK_SECRET_KEY,
+      appBaseUrl: process.env.APP_PUBLIC_URL ?? 'http://localhost:3000',
+    },
+    // B1.18 — update_brand_voice writes through the SAME versioned path
+    // (tenants/brand/brand-voice-service.ts updateBrandVoice) the
+    // Brand-Voice Configurator sheet's PUT /api/settings/brand-voice uses.
+    brandVoiceRepo,
   });
-  // U5 — fail boot loudly if a voice-reachable persist handler is degraded
-  // (would return success without saving). Only the persist-critical
-  // handlers (invoice / job / appointment) report isFullyWired today; the
-  // rest are treated as wired until they opt in.
+  // U5 / WS3 — fail boot loudly if a voice-reachable persist handler is
+  // degraded (would return success without saving). Every voice-reachable
+  // persistence handler now reports isFullyWired (WS3), so a missing repo for
+  // any of them aborts boot rather than silently no-opping voice traffic.
   assertVoiceHandlersWired(
     executionHandlers,
     Object.values(INTENT_TO_PROPOSAL_TYPE),
@@ -1626,7 +2189,7 @@ export function createApp(): express.Express {
   // §11 H1: IdempotencyGuard + advisory lock per (tenant, key). Keys
   // default to `proposal-run:{tenant}:{id}` when callers omit one.
   const proposalIdempotencyLock = pool
-    ? new PgIdempotencyLockProvider(pool)
+    ? new PgIdempotencyLockProvider(directPool ?? pool)
     : new NoOpIdempotencyLockProvider();
   const proposalIdempotencyGuard = new IdempotencyGuard(
     proposalExecutionRepo,
@@ -1647,10 +2210,26 @@ export function createApp(): express.Express {
   let supervisorSpendRecorder:
     | ((tenantId: string, proposalId: string) => Promise<void>)
     | null = null;
+  // U7 — push the owner a "done" notification when an approved proposal
+  // executes. Late-bound: the device-token repo + push provider are built
+  // further down. Null until then, and the notifier swallows its own errors,
+  // so this can never break the execution path.
+  let notifyExecutedPush:
+    | ((tenantId: string, proposalId: string) => Promise<void>)
+    | null = null;
+  // U7 — "needs approval" push, wired into the voice-action-router worker's
+  // unsupervised-routing deps (built above the device-token repo). Same
+  // late-bound pattern; the worker reads it through a stable wrapper.
+  let notifyNeedsApprovalPush:
+    | ((args: { tenantId: string; proposal: { id: string; summary: string } }) => Promise<void>)
+    | null = null;
   const proposalExecutor = new ProposalExecutor(
     executionHandlers,
     proposalRepo,
     proposalIdempotencyGuard,
+    // WS11 — execution outcomes write proposal.executed/execution_failed
+    // audit events atomically with the state change (executeAudited).
+    auditRepo,
     {
       executionRepo: proposalExecutionRepo,
       onExecuted: async (event) => {
@@ -1660,6 +2239,11 @@ export function createApp(): express.Express {
         // never throws, and the executor's onExecuted is failure-soft.
         if (supervisorSpendRecorder) {
           await supervisorSpendRecorder(event.tenantId, event.proposalId);
+        }
+        // U7 — "done" push to the owner's devices. The notifier is
+        // failure-isolated internally; onExecuted is failure-soft too.
+        if (notifyExecutedPush) {
+          await notifyExecutedPush(event.tenantId, event.proposalId);
         }
         try {
           await queue.send(
@@ -1694,6 +2278,7 @@ export function createApp(): express.Express {
               proposalExecutionRepo,
               settingsRepo,
               lessonRepo: correctionLessonRepo,
+              catalogRepo,
               ports: correctionConfigPorts,
               auditRepo,
             },
@@ -1755,6 +2340,27 @@ export function createApp(): express.Express {
     queue,
     new NextCustomerSelector(appointmentRepo, assignmentRepo, jobRepo, customerRepo),
     delayNoticeStateRepo,
+    undefined, // internalAlertSink — keep the default no-op sink
+    dncRepo, // Story 10.3 — DNC suppression on the SMS delay/en-route path
+  );
+  // B5.5 / Part F decision F-3 — 'omw' / "on my way" from a registered tech
+  // phone fires the SAME audited direct status act as the app en-route
+  // button and the voice leg: `delayNotificationCoordinator` is the exact
+  // same instance createDispatchRoutes wires below as `enRouteCoordinator`.
+  // `overwrite: true` mirrors every other keyword bootstrap in this file so
+  // re-running createApp() (multiple test files / bootstraps in one
+  // process) re-registers without tripping the duplicate-keyword guard.
+  registerEnRouteSmsKeyword(
+    {
+      userRepo,
+      settingsRepo,
+      assignmentRepo,
+      appointmentRepo,
+      jobRepo,
+      enRouteCoordinator: delayNotificationCoordinator,
+      auditRepo,
+    },
+    { overwrite: true },
   );
   const delayNotificationWorker = createDelayNotificationWorker({
     service: delayNotificationService,
@@ -1786,6 +2392,39 @@ export function createApp(): express.Express {
     backgroundIntervals.push(handle);
     return handle;
   };
+  // WS2 — process-role split. A PROCESS_ROLE=web (or, WS14, PROCESS_ROLE=voice)
+  // deploy serves the HTTP/voice/WS surface with ZERO background worker loops
+  // so it can never be coupled to (or blocked by) the sweeps/queue drain;
+  // 'worker' and 'all' run them. Every worker interval registration below
+  // (and the worker-object constructions that exist solely to feed them) is
+  // gated on this. Cheap observability intervals (samplePoolMetrics /
+  // sampleQueueDepth) stay in ALL roles — a web/voice deploy must still
+  // expose its own pool + queue-depth metrics. Leader locks (runAsLeader)
+  // make it safe if two instances ever both run 'all'.
+  // Explicit allowlist (not `!== 'web'`) so a THIRD non-worker role can
+  // never accidentally start running background sweeps by falling through
+  // an exclusion list — 'voice' must land here, not in shouldRunWorkers.
+  const shouldRunWorkers =
+    config.PROCESS_ROLE === 'worker' || config.PROCESS_ROLE === 'all';
+
+  // scale-to-1000 U2c — sample Postgres pool occupancy into /metrics so the
+  // saturation signal (waiting climbing while total is pinned at the pool max)
+  // is observable. Reads cheap counters off pg.Pool every 5s; cleared on
+  // shutdown via registerInterval.
+  if (pool) {
+    const samplePoolMetrics = () => {
+      dbPoolConnections.set({ pool: 'main', state: 'total' }, pool.totalCount);
+      dbPoolConnections.set({ pool: 'main', state: 'idle' }, pool.idleCount);
+      dbPoolConnections.set({ pool: 'main', state: 'waiting' }, pool.waitingCount);
+      if (directPool && directPool !== pool) {
+        dbPoolConnections.set({ pool: 'direct', state: 'total' }, directPool.totalCount);
+        dbPoolConnections.set({ pool: 'direct', state: 'idle' }, directPool.idleCount);
+        dbPoolConnections.set({ pool: 'direct', state: 'waiting' }, directPool.waitingCount);
+      }
+    };
+    samplePoolMetrics();
+    registerInterval(setInterval(samplePoolMetrics, 5000));
+  }
   const SWEEP_LOCK = {
     recurringAgreements: 590001,
     overdueInvoice: 590002,
@@ -1807,15 +2446,44 @@ export function createApp(): express.Express {
     hfcrWeeklySend: 590014,
     holdReaper: 590015,
     thankYouSms: 590016,
+    setupReminder: 590017,
+    trialReminder: 590018,
+    // §5.5 — schedule proposal cards expire after 48h.
+    proposalExpiry: 590019,
+    // Epic 12.6 — weekly feedback email sweep (590019 taken by proposalExpiry on main).
+    weeklyFeedback: 590020,
+    // PRD US-345 — 24h post-completion review-request sweep.
+    reviewRequest: 590021,
+    // P8-015 — dropped-call recovery drain. NOTE the collision discipline:
+    // every key here must be unique (590014 was once shared by two sweeps —
+    // an advisory-lock collision that silently serialized them); 590010
+    // remains reserved by a parallel track.
+    droppedCallRecovery: 590022,
+    // scale-to-1000 C1 — durable job-queue depth sampler (one replica queries
+    // the shared _queue_messages/_queue_dlq tables per tick).
+    queueDepth: 590023,
+    // WS15 — platform SLO monitor (evaluates completion rate / queue
+    // staleness / sweep lag and pages the operator on breach).
+    sloMonitor: 590024,
+    // FAIL-VIS — silent-failure monitor (ai_runs non-completion rate per task
+    // type + stalled/reasonless proposal executions). DISTINCT key: sharing
+    // 590024 with sloMonitor would silently serialize the two monitors behind
+    // one advisory lock — the exact 590014 collision called out above.
+    failureMonitor: 590025,
   } as const;
   const runAsLeader = async (lockKey: number, work: () => Promise<void>): Promise<void> => {
     if (shuttingDown) return;
     if (!pool) {
       // In-memory dev: no coordination needed (sweeps no-op with no tenants).
       await work();
+      // WS15 — sweep heartbeat (see below for the pool path).
+      recordSweepSuccess(String(lockKey));
       return;
     }
-    const client = await pool.connect();
+    // Leader election holds a SESSION advisory lock across work(), so it must
+    // run on a direct (non-PgBouncer) connection — see createDirectPool. `pool`
+    // is non-null here (guarded above), so `directPool ?? pool` is defined.
+    const client = await (directPool ?? pool).connect();
     try {
       const res = await client.query<{ locked: boolean }>(
         'SELECT pg_try_advisory_lock($1) AS locked',
@@ -1824,6 +2492,12 @@ export function createApp(): express.Express {
       if (!res.rows[0]?.locked) return; // another instance owns this tick
       try {
         await work();
+        // WS15 — record the sweep heartbeat on SUCCESS only (a throwing
+        // work() must read as lag). Keyed by lock key; the SLO monitor reads
+        // the queue-depth sampler's heartbeat as its worker-loop liveness
+        // canary. In-process registry — see monitoring/sweep-heartbeats.ts
+        // for the multi-replica caveat.
+        recordSweepSuccess(String(lockKey));
       } finally {
         await client.query('SELECT pg_advisory_unlock($1)', [lockKey]);
       }
@@ -1832,23 +2506,199 @@ export function createApp(): express.Express {
     }
   };
 
+  // scale-to-1000 C1 — sample the durable job-queue backlog into /metrics so the
+  // committed SLO (PgQueue depth < 1,000 sustained) and the P2 queue-depth alert
+  // are observable. Leader-elected: exactly one replica runs the COUNT per tick
+  // (the value is global, so N replicas querying would just be waste). Every
+  // 15s; failure-soft (a transient DB blip must not crash the interval).
+  {
+    let queueDepthInFlight = false;
+    const sampleQueueDepth = async () => {
+      if (queueDepthInFlight) return;
+      queueDepthInFlight = true;
+      try {
+        await runAsLeader(SWEEP_LOCK.queueDepth, async () => {
+          const { pending, deadLetter } = await queue.depth();
+          pgQueueDepth.set({ queue: 'pending' }, pending);
+          pgQueueDepth.set({ queue: 'dead_letter' }, deadLetter);
+        });
+      } catch {
+        // Best-effort telemetry — never let a sampling error break the loop.
+      } finally {
+        queueDepthInFlight = false;
+      }
+    };
+    void sampleQueueDepth();
+    registerInterval(setInterval(() => void sampleQueueDepth(), 15000));
+  }
+
+  // WS2 — baseline for the process-role split. samplePoolMetrics +
+  // sampleQueueDepth are the only intervals registered above and are cheap
+  // observability that runs in EVERY role (incl. PROCESS_ROLE=web); every
+  // interval registered after this point is a gated background WORKER loop.
+  // `backgroundIntervalCount` (exposed on the returned app) is the count of
+  // those worker loops — length minus this baseline — so it is 0 in web role.
+  const observabilityIntervalCount = backgroundIntervals.length;
+
+  // WS15 — platform SLO monitor. Evaluates call completion rate (last 60min,
+  // voice_sessions terminal outcomes, cross-tenant), queue staleness (pending
+  // jobs older than SLO_QUEUE_STALE_MIN), and sweep lag (queue-depth sampler
+  // heartbeat age) every 5 minutes, and ALERTS A HUMAN on breach: always a
+  // Sentry error event (docs/runbooks/alerting.md routes those to Slack/DM),
+  // plus an operator SMS when ALERT_SMS_TO is set (owner-class — bypasses the
+  // consent gate). Leader-locked so exactly one replica evaluates/pages per
+  // tick; per-rule cooldown (SLO_ALERT_COOLDOWN_MIN) inside alertOperator.
+  // Runbook: docs/runbooks/slo-alerts.md.
+  if (shouldRunWorkers) {
+    const sloLogger = createLogger({
+      service: 'slo-monitor',
+      environment: process.env.NODE_ENV || 'development',
+    });
+    const alertOperator = createAlertOperator({
+      sentry: sentryClient,
+      delivery: messageDelivery,
+      alertSmsTo: config.ALERT_SMS_TO,
+      cooldownMs: config.SLO_ALERT_COOLDOWN_MIN * 60 * 1000,
+      logger: sloLogger,
+    });
+    const platformSloRepo = pool ? new PgPlatformSloRepository(pool) : null;
+    let sloMonitorInFlight = false;
+    registerInterval(setInterval(() => {
+      if (sloMonitorInFlight) return;
+      sloMonitorInFlight = true;
+      void runAsLeader(SWEEP_LOCK.sloMonitor, async () => {
+        await runSloMonitor({
+          // In-memory dev (no pool): zero counts — the completion rule's
+          // sample floor keeps it quiet.
+          getCallOutcomeCounts: (windowStart) =>
+            platformSloRepo
+              ? platformSloRepo.endedCallOutcomeCounts(windowStart)
+              : Promise.resolve({ total: 0, completedish: 0 }),
+          getStalePendingCount: (olderThanSeconds) => queue.stalePendingCount(olderThanSeconds),
+          getSweepLastSuccessMs: () => sweepLastSuccessMs(String(SWEEP_LOCK.queueDepth)),
+          // WS26 — turn-latency snapshot from the in-process histogram. Only
+          // consulted when PROCESS_ROLE=all (the rule's role guard); reading the
+          // metric is failure-soft so a prom error never aborts the tick.
+          processRole: config.PROCESS_ROLE,
+          getTurnLatencySnapshot: async () => {
+            try {
+              const snap = await voiceTurnLatencyMs.get();
+              return estimateTurnLatencyP95(snap.values);
+            } catch {
+              return null;
+            }
+          },
+          alert: alertOperator,
+          thresholds: {
+            callCompletionMin: config.SLO_CALL_COMPLETION_MIN,
+            callCompletionMinSample: config.SLO_CALL_COMPLETION_MIN_SAMPLE,
+            queueStaleMin: config.SLO_QUEUE_STALE_MIN,
+            sweepLagMin: config.SLO_SWEEP_LAG_MIN,
+            turnLatencyP95Ms: config.SLO_TURN_LATENCY_P95_MS,
+            turnLatencyMinSample: config.SLO_TURN_LATENCY_MIN_SAMPLE,
+          },
+          logger: sloLogger,
+        });
+      }).catch((err) => {
+        sloLogger.error('SLO monitor sweep failed', {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }).finally(() => {
+        sloMonitorInFlight = false;
+      });
+    }, SLO_MONITOR_INTERVAL_MS));
+
+    // FAIL-VIS — silent-failure monitor. Every defect found in the 2026-07
+    // investigation was silent while the evidence sat in tables nothing read:
+    // `supervisor_annotate` ran 26,894 times and completed ZERO times, and
+    // estimate executions terminal-failed for weeks with `execution_error`
+    // NULL. This sweep reads `ai_runs` (non-completion rate per task_type over
+    // a settled window, behind a volume floor) and `proposals` (stuck in
+    // `executing`; `execution_failed` with no reason) every 10 minutes and
+    // pages through the SAME alertOperator seam as the SLO monitor above —
+    // Sentry error event always, owner-class operator SMS when ALERT_SMS_TO is
+    // set — reusing its per-rule cooldown so a persistent condition pages once
+    // per SLO_ALERT_COOLDOWN_MIN, not every tick.
+    //
+    // Safety: distinct advisory lock (SWEEP_LOCK.failureMonitor), in-flight
+    // guard, indexed bounded aggregates only, NO LLM gateway call, and
+    // runFailureRateMonitor never rejects — the .catch() here is belt-and-
+    // braces. Runbook: docs/runbooks/failure-rate-monitor.md.
+    const failureMonitorLogger = createLogger({
+      service: 'failure-rate-monitor',
+      environment: process.env.NODE_ENV || 'development',
+    });
+    const failureMonitorRepo = pool ? new PgFailureMonitorRepository(pool) : null;
+    let failureMonitorInFlight = false;
+    registerInterval(setInterval(() => {
+      if (failureMonitorInFlight) return;
+      failureMonitorInFlight = true;
+      void runAsLeader(SWEEP_LOCK.failureMonitor, async () => {
+        await runFailureRateMonitor({
+          // In-memory dev (no pool): empty aggregates — the volume floor and
+          // zero counts keep every rule quiet.
+          getTaskRunCounts: (windowStart, windowEnd) =>
+            failureMonitorRepo
+              ? failureMonitorRepo.taskRunCounts(windowStart, windowEnd)
+              : Promise.resolve([]),
+          getProposalExecutionCounts: (stalledBefore, failedSince) =>
+            failureMonitorRepo
+              ? failureMonitorRepo.proposalExecutionCounts(stalledBefore, failedSince)
+              : Promise.resolve({
+                  stalledExecuting: 0,
+                  failedWithoutError: 0,
+                  stalledSampleIds: [],
+                  failedSampleIds: [],
+                }),
+          alert: alertOperator,
+          thresholds: {
+            windowMin: config.FAILURE_MONITOR_WINDOW_MIN,
+            settleMin: config.FAILURE_MONITOR_SETTLE_MIN,
+            rateMax: config.FAILURE_MONITOR_RATE_MAX,
+            minRuns: config.FAILURE_MONITOR_MIN_RUNS,
+            maxTaskAlerts: config.FAILURE_MONITOR_MAX_TASK_ALERTS,
+            proposalStaleMin: config.FAILURE_MONITOR_PROPOSAL_STALE_MIN,
+            proposalLookbackHours: config.FAILURE_MONITOR_PROPOSAL_LOOKBACK_HOURS,
+          },
+          logger: failureMonitorLogger,
+        });
+      }).catch((err) => {
+        failureMonitorLogger.error('Failure monitor sweep failed', {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }).finally(() => {
+        failureMonitorInFlight = false;
+      });
+    }, FAILURE_MONITOR_INTERVAL_MS));
+  }
+
   const executionWorkerLogger = createLogger({
     service: 'execution-worker',
     environment: process.env.NODE_ENV || 'development',
   });
-  registerInterval(setInterval(async () => {
-    try {
-      await runExecutionSweep({
-        proposalRepo,
-        executor: proposalExecutor,
-        logger: executionWorkerLogger,
-      });
-    } catch (err) {
-      executionWorkerLogger.error('Execution sweep failed', {
-        error: err instanceof Error ? err.message : String(err),
-      });
-    }
-  }, 1000));
+  // In-flight guard (same shape as the queue poll loop's pollInFlight): on a
+  // 1s cadence a slow executor otherwise stacks overlapping sweeps, each
+  // re-running resetStaleExecuting against the same rows.
+  let executionSweepInFlight = false;
+  if (shouldRunWorkers) {
+    registerInterval(setInterval(async () => {
+      if (executionSweepInFlight) return;
+      executionSweepInFlight = true;
+      try {
+        await runExecutionSweep({
+          proposalRepo,
+          executor: proposalExecutor,
+          logger: executionWorkerLogger,
+        });
+      } catch (err) {
+        executionWorkerLogger.error('Execution sweep failed', {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      } finally {
+        executionSweepInFlight = false;
+      }
+    }, 1000));
+  }
 
   // voice-action-router — consumes transcripts enqueued by the
   // transcription worker's onTranscribed hook, classifies intent,
@@ -1873,9 +2723,89 @@ export function createApp(): express.Express {
     appointmentRepo,
     assignmentRepo,
   });
+  // Owner-scoped revenue lookup (voice `lookup_revenue`) shares the same
+  // money-dashboard repo the /api/reports router uses below. Constructed
+  // here (rather than next to the telephony wiring) because the U3 memo
+  // answer path needs it in the worker deps a few lines down.
+  const moneyDashboardRepo = new PgMoneyDashboardRepository(
+    invoiceRepo,
+    paymentRepo,
+    expenseRepo,
+  );
+  // RV-062 — shared by the digest worker (writes) and the /api/digests
+  // web-view router (reads). Created once here so both wire to the same
+  // instance (Pg-backed in prod, in-memory in dev where the sweep no-ops).
+  const dailyDigestRepo = pool
+    ? new PgDailyDigestRepository(pool)
+    : new InMemoryDailyDigestRepository();
+  // U3 — DB-authoritative role of a memo's creator for the owner-grade
+  // lookup gate (revenue / job profit / pending items / digest). The
+  // recording's created_by is the Clerk subject, so the Pg path reuses the
+  // SAME membership lookup resolveAuthorization gates requests with; the
+  // in-memory dev path matches the users roster by clerk id or row id.
+  // A null / inactive membership fails closed to a refusal in the adapter.
+  const voiceMemoMembershipLoader = pool ? createAuthorizationLoader(pool) : undefined;
+  const resolveVoiceMemberRole = async (
+    tenantId: string,
+    userId: string,
+  ): Promise<string | null> => {
+    if (voiceMemoMembershipLoader) {
+      const membership = await voiceMemoMembershipLoader(userId, tenantId);
+      if (!membership || membership.deleted || membership.status !== 'active') return null;
+      return membership.role;
+    }
+    const users = await userRepo.findByTenant(tenantId);
+    const user = users.find((u) => u.clerkUserId === userId || u.id === userId);
+    return user?.role ?? null;
+  };
+
+  // P8 — ONE alias-first entity resolver shared by every surface that has to
+  // turn a free-text reference ("the Rodriguez job", "Bob") into a verified
+  // tenant id: the voice-action-router worker, the inbound telephony FSM, and
+  // the assistant-chat lookup path. Previously constructed inline at each
+  // call site; hoisted so a third surface adds a reference, not a fourth copy.
+  // In-memory mode (no pool) leaves it undefined — resolution is skipped, as
+  // it always has been.
+  const sharedEntityResolver = pool
+    ? entityAliasRepo
+      ? new AliasFirstEntityResolver(entityAliasRepo, new PgEntityResolver(pool), pool)
+      : new PgEntityResolver(pool)
+    : undefined;
+
+  // U3 — the per-skill lookup dispatch deps. Built ONCE and handed to BOTH
+  // the recorded-memo worker (below) and the assistant-chat router
+  // (createAssistantRouter, further down), so the two surfaces physically
+  // cannot be wired with different repos.
+  const lookupAnswerDeps = {
+    invoiceRepo,
+    estimateRepo,
+    agreementRepo,
+    moneyDashboardRepo,
+    dailyDigestRepo,
+    dunningConfigRepo,
+    timeEntryRepo,
+    expenseRepo,
+    settingsRepo,
+    // Mirrors the telephony adapter wiring: every surface writes the same
+    // lookup_events analytics rows.
+    lookupEvents: lookupEventService,
+    resolveMemberRole: resolveVoiceMemberRole,
+  };
+
   const voiceActionRouterWorker = createVoiceActionRouterWorker({
     gateway: llmGateway,
     proposalRepo,
+    // B8 — create_customer draft-time duplicate detection parity: the SAME
+    // customerRepo the telephony FSM (twilio-adapter.ts) already uses to
+    // build its duplicateLoader, so the worker's create_customer proposals
+    // get the identical dedup-aware handler.
+    customerRepo,
+    // Draft-time bookability gate for create_appointment — the SAME repo the
+    // execution handler uses to find a job's location, so the draft-time
+    // check and the execution-time precondition cannot disagree. Without it
+    // `detectServiceLocationGap` no-ops and an unbookable customer's booking
+    // auto-approves at confidence 1 and fails in a log.
+    locationRepo,
     ...(customerNegotiationContextProvider ? { customerNegotiationContextProvider } : {}),
     // P2-036 V2 — additive discount engine; fail-closed (dormant until a tenant
     // configures a discount policy via settings).
@@ -1885,6 +2815,24 @@ export function createApp(): express.Express {
     availabilityFinder,
     thresholdResolver,
     tenantSchedulingResolver,
+    // UB-D / D-015 — best-effort sink for `autonomous_booking_lane_evaluated`
+    // (also serves the U5b negotiation discount audit when that path engages).
+    auditRepo,
+    // UB-D / D-015 — lane settings; the router consults this ONLY for
+    // booking-classified segments.
+    autonomousBookingResolver: async (tenantId: string) => {
+      const s = await settingsRepo.findByTenant(tenantId);
+      if (!s) return undefined;
+      return {
+        enabled: s.autonomousBookingEnabled ?? false,
+        ...(s.autonomousBookingThreshold !== undefined
+          ? { threshold: s.autonomousBookingThreshold }
+          : {}),
+      };
+    },
+    // D-015 amendment — platform-wide kill switch, checked before tenant
+    // opt-in by evaluateAutonomousBookingLane.
+    autonomousBookingPlatformDisabled: config.AUTONOMOUS_BOOKING_DISABLED === 'true',
     appointmentRepo,
     // RV-042 — lets update_estimate proposals stamp the acceptance-void
     // marker at creation when they target a currently accepted estimate.
@@ -1896,11 +2844,14 @@ export function createApp(): express.Express {
     // jobs (findJobsRequiringInvoicing) so "invoice all my completed jobs"
     // mints one batch_invoice proposal. Same repos the batch sweep + digest use.
     invoicingDeps: { jobRepo, invoiceRepo, estimateRepo },
+    // Layer 3 — draft-time duplicate-reminder marker for the voice
+    // send_payment_reminder on-ramp (best-effort; advisory only).
+    dunningEventRepo,
     // P8 — "three Bobs": free-text customer/job references resolve to
     // verified tenant IDs (pg_trgm) before drafting; ambiguous matches
     // become one-tap clarifications. In-memory mode (no pool) skips
     // resolution, same as before.
-    ...(pool ? { entityResolver: new PgEntityResolver(pool) } : {}),
+    ...(sharedEntityResolver ? { entityResolver: sharedEntityResolver } : {}),
     // Lets reschedule/cancel/confirm scope appointment resolution to the
     // verified caller's own appointments (appointment → job → customerId).
     jobRepo,
@@ -1911,7 +2862,26 @@ export function createApp(): express.Express {
     // constructed, `operatorVerticalPromptResolver` is assigned and the
     // shim starts returning live data on the next classifier call.
     verticalPromptResolver: operatorVerticalResolverShim,
+    // UB-A3 — owner standing instructions injected into drafting prompts.
+    // Active list resolved once per request; selection per classified intent
+    // happens inside the router. Failure-soft (a repo error drafts without).
+    standingInstructionsResolver: (tenantId: string) =>
+      standingInstructionRepo.listActive(tenantId),
     extendedIntentsEnabled: voiceExtendedIntentsFlagShim,
+    // U3 — respond_to_review on-ramp: recent-review lookup + the SAME
+    // build-proposal dep bundle the google-reviews polling worker wires, so
+    // voice-initiated drafts are identical to poll-initiated ones.
+    ...(googleReviewsReviewRepo ? { reviewRepo: googleReviewsReviewRepo } : {}),
+    ...(serviceCreditRepo && googleReviewsCustomerLoader
+      ? {
+          reviewResponseDraftDeps: {
+            llmGateway,
+            customerLoader: googleReviewsCustomerLoader,
+            brandVoiceLoader: googleReviewsBrandVoiceLoader,
+            serviceCreditRepo,
+          },
+        }
+      : {}),
     // P12-004 — unsupervised proposal routing: when no supervisor is
     // present and the tenant routing is queue_and_sms (default), send the
     // owner a one-tap approve SMS with a signed single-use link. Audit
@@ -1919,9 +2889,18 @@ export function createApp(): express.Express {
     unsupervisedRouting: {
       auditRepo,
       ...(oneTapSmsSender ? { sendSms: oneTapSmsSender } : {}),
+      // U7 — stable wrapper reads the late-bound notifier at call time (the
+      // device-token repo + push provider are built further down).
+      notifyPush: async (args) => {
+        await notifyNeedsApprovalPush?.(args);
+      },
       ...(oneTapSecret ? { secret: oneTapSecret } : {}),
       buildApproveUrl: (token: string) =>
         `${oneTapApiBaseUrl}/public/proposals/one-tap-approve?token=${encodeURIComponent(token)}`,
+      // UB-D / D3 — one-tap UNDO link for lane auto-approved bookings
+      // (minted with the same one-tap secret).
+      buildUndoUrl: (token: string) =>
+        `${oneTapApiBaseUrl}/public/proposals/one-tap-undo?token=${encodeURIComponent(token)}`,
       resolveOwnerPhone: resolveUnsupervisedOwnerPhone,
       resolveRouting: async (tenantId: string) =>
         (await settingsRepo.findByTenant(tenantId))?.unsupervisedProposalRouting,
@@ -1929,6 +2908,22 @@ export function createApp(): express.Express {
       // can resolve which proposal the owner is answering.
       recordSmsEvent: recordProposalSmsRender,
     },
+    // U3 — E-lane answers on the recorded-memo path: the routed outcome
+    // (answer_status) is stamped on the recording row, and lookup intents
+    // execute their skill instead of skipping. `voiceRepo` doubles as the
+    // memo-creator resolver for the owner-grade authorization gate.
+    voiceRepo,
+    // Same object the assistant-chat router gets — see `lookupAnswerDeps`.
+    lookupAnswers: lookupAnswerDeps,
+    // B5.5 — en_route ("on my way") voice leg: userRepo resolves the memo
+    // creator's canonical technician id, assignmentRepo scopes appointment
+    // resolution to that technician's OWN assignments, and
+    // enRouteCoordinator is the SAME coordinator instance the app button
+    // (createDispatchRoutes below) uses, so both legs fire the identical
+    // audited act.
+    userRepo,
+    assignmentRepo,
+    enRouteCoordinator: delayNotificationCoordinator,
   });
   workerRegistry.set(
     voiceActionRouterWorker.type,
@@ -1941,7 +2936,6 @@ export function createApp(): express.Express {
     settingsRepo,
     feedbackRequestRepo,
     dispatcher: feedbackDispatcher,
-    dncRepo,
     publicBaseUrl: process.env.APP_PUBLIC_URL ?? 'http://localhost:5173',
   });
   workerRegistry.set(
@@ -1956,7 +2950,12 @@ export function createApp(): express.Express {
       provisionTwilioWorker as import('./queues/queue').WorkerHandler<unknown>
     );
 
-    const deprovisionTenantWorker = createDeprovisionTenantWorker({ pool });
+    const deprovisionTenantWorker = createDeprovisionTenantWorker({
+      pool,
+      // C6 — the purge also deletes the tenant's stored objects (recording
+      // audio, photos) instead of orphaning them in S3.
+      storage: storageProvider,
+    });
     workerRegistry.set(
       deprovisionTenantWorker.type,
       deprovisionTenantWorker as import('./queues/queue').WorkerHandler<unknown>
@@ -1981,38 +2980,73 @@ export function createApp(): express.Express {
   // (e.g. the image pipeline holding large in-memory buffers) can stack up
   // unbounded concurrent ticks → OOM. The boolean flag ensures at most one
   // tick body runs at a time; overlapping ticks are silently skipped.
-  let pollInFlight = false;
-  registerInterval(setInterval(async () => {
-    if (pollInFlight) return;
-    pollInFlight = true;
+  //
+  // Scale-to-1000 (P3): claim a BATCH of up to QUEUE_POLL_BATCH_SIZE messages per
+  // tick and process them CONCURRENTLY, lifting the single-process ceiling from
+  // ~1 msg/250ms (~4/s) to ~batch/250ms while staying multi-replica-safe (each
+  // tick claims a disjoint set via FOR UPDATE SKIP LOCKED). The pollInFlight
+  // guard still serializes ticks, so peak in-flight work is bounded by the batch
+  // size — backpressure unchanged, just wider per tick.
+  const QUEUE_POLL_BATCH_SIZE = Math.max(
+    1,
+    Number(process.env.QUEUE_POLL_BATCH_SIZE) || 10,
+  );
+  // Process one claimed message end-to-end. Self-contained error handling so one
+  // message's failure never rejects the batch (Promise.all below stays settled).
+  const handleQueueMessage = async (message: QueueMessage): Promise<void> => {
     try {
-      const message = await queue.receive();
-      if (!message) return;
       const handler = workerRegistry.get(message.type);
       if (!handler) {
         workerLogger.warn('No worker registered for message type', { type: message.type });
         await queue.delete(message.id);
         return;
       }
-      const processed = await processMessage(message, handler, workerLogger);
-      if (processed) {
+      const result = await processMessage(message, handler, workerLogger);
+      if (result.success) {
         await queue.delete(message.id);
-      } else if (message.attempts >= message.maxAttempts) {
-        await queue.moveToDeadLetter(message, 'max attempts exceeded');
-        workerLogger.error('Message moved to DLQ', {
-          messageId: message.id,
-          type: message.type,
-          attempts: message.attempts,
-        });
+      } else {
+        // T4-F10 — persist the real failure reason on every failed attempt
+        // (not only the final one), so an operator inspecting a still-retrying
+        // message can see why without digging through logs.
+        await queue.recordFailure(message.id, result.error ?? 'unknown error');
+        if (message.attempts >= message.maxAttempts) {
+          // Fallback string should not normally trigger — processMessage
+          // always populates `error` on a failure — but guards moveToDeadLetter
+          // against ever receiving undefined.
+          await queue.moveToDeadLetter(message, result.error ?? 'max attempts exceeded');
+          workerLogger.error('Message moved to DLQ', {
+            messageId: message.id,
+            type: message.type,
+            attempts: message.attempts,
+          });
+        }
       }
     } catch (err) {
-      workerLogger.error('Queue poll failed', {
+      workerLogger.error('Queue message processing failed', {
+        messageId: message.id,
+        type: message.type,
         error: err instanceof Error ? err.message : String(err),
       });
-    } finally {
-      pollInFlight = false;
     }
-  }, 250));
+  };
+  let pollInFlight = false;
+  if (shouldRunWorkers) {
+    registerInterval(setInterval(async () => {
+      if (pollInFlight) return;
+      pollInFlight = true;
+      try {
+        const messages = await queue.receiveBatch(QUEUE_POLL_BATCH_SIZE);
+        if (messages.length === 0) return;
+        await Promise.all(messages.map((message) => handleQueueMessage(message)));
+      } catch (err) {
+        workerLogger.error('Queue poll failed', {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      } finally {
+        pollInFlight = false;
+      }
+    }, 250));
+  }
 
   // Cross-entity tenant ownership guard. Routes pass parent ids (e.g.
   // jobs.customerId) through validation against the requesting tenant
@@ -2065,6 +3099,10 @@ export function createApp(): express.Express {
     customerRepo,
     locationRepo,
     settingsRepo,
+    // EE-4 — resolve each line's frozen image_file_id to a signed URL
+    // (tenant-scoped via fileRepo.findById). Absent → no thumbnails.
+    fileRepo,
+    storage: storageProvider,
     stripeConfig: process.env.STRIPE_SECRET_KEY
       ? { apiKey: process.env.STRIPE_SECRET_KEY }
       : null,
@@ -2074,6 +3112,15 @@ export function createApp(): express.Express {
     // Roll up job money state when a lapsed estimate is auto-expired on the
     // public path, so the job doesn't stay stuck in 'estimate_sent'.
     moneyStateDeps: { jobRepo, estimateRepo, invoiceRepo, auditRepo, logger: requestLogger },
+    connectAccountResolver: connectService
+      ? {
+          resolveTenantConnectAccount: async (tenantId: string) => {
+            const view = await connectService.getAccount(tenantId);
+            if (!view.accountId) return null;
+            return { accountId: view.accountId, chargesEnabled: view.chargesEnabled };
+          },
+        }
+      : undefined,
   });
   app.use('/public/estimates', createPublicEstimatesRouter(publicEstimateService));
 
@@ -2099,27 +3146,38 @@ export function createApp(): express.Express {
     }),
   );
 
+  // UB-D / D3 — public one-tap UNDO for autonomous-lane bookings. Same
+  // token-gated posture as the approve route above; still-approved
+  // proposals go through undoProposal, executed ones get a compensating
+  // cancel + fixed-template, consent/DNC-gated customer apology SMS.
+  app.use(
+    '/public/proposals',
+    createOneTapUndoRouter({
+      proposalRepo,
+      appointmentRepo,
+      auditRepo,
+      ...(oneTapSecret ? { secret: oneTapSecret } : {}),
+      consumeNonce: consumeOneTapUndoNonce,
+      jobRepo,
+      customerRepo,
+      ...(messageDelivery
+        ? {
+            customerMessageDeps: {
+              delivery: messageDelivery,
+              dispatchRepo,
+              // T4-F01 — claim-before-send pool for the apology SMS.
+              pool: pool ?? null,
+              logger: transactionalCommsLogger,
+            },
+          }
+        : {}),
+    }),
+  );
+
   // Public unauthenticated invoice payment flow (token-authenticated).
   // Stripe Payment Link creation is enabled when STRIPE_SECRET_KEY is set.
-  // Tier 4 (Payment methods — PR 2). When the connectService is
-  // wired AND the tenant has an active Connect account with charges
-  // enabled, payments route directly to the tenant's account via
-  // the Stripe-Account header. Without it, payments stay on the
-  // legacy platform path. Shared by the invoice service and the portal
-  // save-card flow (#6 phase 4) — both must scope Stripe calls to the
-  // same connected account.
-  const connectAccountResolver = connectService
-    ? {
-        resolveTenantConnectAccount: async (tenantId: string) => {
-          const view = await connectService.getAccount(tenantId);
-          if (!view.accountId) return null;
-          return {
-            accountId: view.accountId,
-            chargesEnabled: view.chargesEnabled,
-          };
-        },
-      }
-    : undefined;
+  // (connectAccountResolver is defined earlier, alongside paymentLinkProvider,
+  // so the execution-handler registry can consume both.)
   const publicInvoiceService = new PublicInvoiceService({
     paymentLinkProvider,
     invoiceRepo,
@@ -2147,6 +3205,9 @@ export function createApp(): express.Express {
     createPublicPortalRouter({
       portalRepo: portalSessionRepo,
       customerRepo,
+      // C2/I14 — contact-bound sessions derive entitlement from the
+      // contact's current role at token resolution.
+      contactRepo: customerContactRepo,
       estimateRepo,
       invoiceRepo,
       jobRepo,
@@ -2215,6 +3276,7 @@ export function createApp(): express.Express {
       stripeConfig: process.env.STRIPE_SECRET_KEY
         ? { apiKey: process.env.STRIPE_SECRET_KEY }
         : null,
+      connectAccountResolver,
     }),
   );
 
@@ -2319,7 +3381,14 @@ export function createApp(): express.Express {
   // Single shared voice session store: in-app and telephony both create
   // sessions in the same VoiceSessionStore so the FSM/cost-tracker pool
   // is uniform across channels. Process-local; idle-reaped via setInterval.
-  const voiceSessionStore = new VoiceSessionStore();
+  // U3d — voice event fan-out across replicas. Double-gated: REDIS_URL must be
+  // set AND VOICE_FANOUT_ENABLED=true (dark-launch switch); otherwise a no-op
+  // transport preserves single-replica behavior. Additive + best-effort: the
+  // in-process EventEmitter stays the synchronous same-replica path.
+  const voiceEventTransport = createVoiceEventTransport(
+    process.env.VOICE_FANOUT_ENABLED === 'true' ? process.env.REDIS_URL : undefined,
+  );
+  const voiceSessionStore = new VoiceSessionStore({ transport: voiceEventTransport });
   // F6b: Process-local whisper TwiML cache. Shared between:
   //   - whisperRouter (serves TwiML to Twilio when dispatcher answers)
   //   - MediaStreamAdapter (stores whisper text after escalation_started)
@@ -2378,19 +3447,9 @@ export function createApp(): express.Express {
     return sharedRichPackByType.get(base)?.repairTemplates ?? [];
   };
   const telephonyCallControl = new DefaultTwilioCallControl();
-  // Owner-scoped revenue lookup (voice `lookup_revenue`) shares the same
-  // money-dashboard repo the /api/reports router uses below.
-  const moneyDashboardRepo = new PgMoneyDashboardRepository(
-    invoiceRepo,
-    paymentRepo,
-    expenseRepo,
-  );
-  // RV-062 — shared by the digest worker (writes) and the /api/digests
-  // web-view router (reads). Created once here so both wire to the same
-  // instance (Pg-backed in prod, in-memory in dev where the sweep no-ops).
-  const dailyDigestRepo = pool
-    ? new PgDailyDigestRepository(pool)
-    : new InMemoryDailyDigestRepository();
+  // moneyDashboardRepo / dailyDigestRepo are constructed further up (U3 —
+  // the voice-action-router worker's E-lane answer deps need them before
+  // this telephony wiring block).
   // RV-115/RV-116 — durable dropped-call recovery: the scheduler persists
   // the FSM context snapshot at termination; the resume handler picks the
   // thread back up when the caller replies to the recovery SMS.
@@ -2410,8 +3469,20 @@ export function createApp(): express.Express {
         recoveryRepo: droppedCallRecoveryRepo,
         proposalRepo,
         callMeBackRepo,
-        sendSms: (args: { to: string; body: string }) =>
-          messageDelivery.sendSms({ to: args.to, body: args.body }),
+        // Customer-class: recovery reply to the dropped caller. Resolve the
+        // caller's consent by phone; unknown/ambiguous → fail closed via the gate.
+        sendSms: async (args: { to: string; body: string; tenantId?: string }) => {
+          const consent = args.tenantId
+            ? await resolveCustomerConsentByPhone(args.tenantId, args.to)
+            : undefined;
+          return messageDelivery.sendSms({
+            to: args.to,
+            body: args.body,
+            ...(args.tenantId ? { tenantId: args.tenantId } : {}),
+            recipientClass: 'customer',
+            ...(consent ? { consent } : {}),
+          });
+        },
         auditRepo,
         businessName: process.env.TWILIO_BUSINESS_NAME ?? 'our team',
       }),
@@ -2457,8 +3528,19 @@ export function createApp(): express.Express {
         proposalRepo,
         resolveCustomerContext: resolveNegotiationCustomerContext,
         evaluateDiscount: evaluateNegotiationDiscountForPhone,
-        sendSms: (args: { to: string; body: string }) =>
-          messageDelivery.sendSms({ to: args.to, body: args.body }),
+        // Customer-class: holding-line reply to the negotiating customer.
+        sendSms: async (args: { to: string; body: string; tenantId?: string }) => {
+          const consent = args.tenantId
+            ? await resolveCustomerConsentByPhone(args.tenantId, args.to)
+            : undefined;
+          return messageDelivery.sendSms({
+            to: args.to,
+            body: args.body,
+            ...(args.tenantId ? { tenantId: args.tenantId } : {}),
+            recipientClass: 'customer',
+            ...(consent ? { consent } : {}),
+          });
+        },
         auditRepo,
         resolveBrandContext: async (tenantId: string) => {
           const settings = await settingsRepo.findByTenant(tenantId);
@@ -2488,12 +3570,20 @@ export function createApp(): express.Express {
     { overwrite: true },
   );
 
-  // RV-130 — consent ledger + recording control. The ledger appends
-  // implicit recording consent at disclosure and revocations on a
-  // "stop recording" objection; the control pauses the live recording.
-  const consentEventRepo = pool
-    ? new PgConsentEventRepository(pool)
-    : new InMemoryConsentEventRepository();
+  // RV-130 — the consent ledger (constructed above, before the SMS gate)
+  // appends implicit recording consent at disclosure and revocations on a
+  // "stop recording" objection; the recording control pauses the live
+  // recording.
+  // Story 10.6 — register STOP/START now that DNC, the consent ledger, and the
+  // customer repo all exist, so an opt-out updates every store at once.
+  registerKeywordHandler(
+    buildStopKeywordHandler({ dncRepo, consentRepo: consentEventRepo, customerRepo, pool }),
+    { overwrite: true },
+  );
+  registerKeywordHandler(
+    buildStartKeywordHandler({ dncRepo, consentRepo: consentEventRepo, customerRepo, pool }),
+    { overwrite: true },
+  );
   const twilioRecordingControl =
     process.env.TWILIO_ACCOUNT_SID && process.env.TWILIO_AUTH_TOKEN
       ? new TwilioRecordingControl(
@@ -2508,18 +3598,58 @@ export function createApp(): express.Express {
     ? new PgFeatureFlagRepository(pool)
     : new InMemoryFeatureFlagRepository();
   const featureFlagStore = new InMemoryFeatureFlagStore();
+  const featureFlagLogger = createLogger({
+    service: 'feature-flags',
+    environment: process.env.NODE_ENV ?? 'development',
+  });
   // Hydration is fire-and-forget on boot — the store starts empty and is
   // refilled from the repo asynchronously. isFeatureEnabled returns false
   // for missing flags, so the worst case during the hydration window is
   // that a flag reads as disabled for a few ms.
+  //
+  // EVERY await in this IIFE must be individually guarded. The IIFE is
+  // void'd, so nothing is awaiting it and nothing can catch what it throws:
+  // a single unguarded rejection escapes as an unhandled rejection, which
+  // Node terminates on under --unhandled-rejections=throw and which Vitest
+  // reports as a run-level error regardless of how many tests pass.
   void (async () => {
-    const { seedResilienceFlags } = await import('./flags/resilience-flags');
     try {
+      const { seedResilienceFlags } = await import('./flags/resilience-flags');
       await seedResilienceFlags(featureFlagRepo);
     } catch {
       /* fire-and-forget — admin flags surface via the admin API */
     }
-    await hydrateStoreFromRepository(featureFlagStore, featureFlagRepo);
+    // N-011 — dark-launch the Brand-Voice Configurator. Default OFF; seeded so
+    // it appears in the admin UI. Idempotent (only seeds when missing).
+    try {
+      const { BRAND_VOICE_CONFIGURATOR_FLAG } = await import('./tenants/brand/brand-voice');
+      if (!(await featureFlagRepo.get(BRAND_VOICE_CONFIGURATOR_FLAG))) {
+        await featureFlagRepo.upsert({
+          name: BRAND_VOICE_CONFIGURATOR_FLAG,
+          enabled: false,
+          description:
+            'N-011 Brand-Voice Configurator: six-field brand voice capture, ' +
+            'versioning/rollback, and version-tagged utterances.',
+        });
+      }
+    } catch {
+      /* fire-and-forget */
+    }
+    // Hydration is the one call that reaches the database on the happy path,
+    // so it is the one most likely to reject — with no reachable Postgres the
+    // pg pool's connect fails with ECONNREFUSED. Degrade gracefully: the store
+    // stays empty and isFeatureEnabled falls back to false for every flag, the
+    // same state boot already tolerates during the hydration window. Log at
+    // warn so a real production hydration failure stays visible instead of
+    // being silently swallowed like the best-effort seeds above.
+    try {
+      await hydrateStoreFromRepository(featureFlagStore, featureFlagRepo);
+    } catch (err) {
+      featureFlagLogger.warn(
+        'Feature-flag hydration failed; flags fall back to disabled until the next boot',
+        { error: err instanceof Error ? err.message : String(err) },
+      );
+    }
   })();
   // RV-001 follow-up #8 / RV-122 — per-tenant feature-flag resolution
   // (tenant_feature_flags override → platform flag → false). This is the
@@ -2545,7 +3675,14 @@ export function createApp(): express.Express {
   voiceExtendedIntentsFlagResolver = (tenantId: string) =>
     isFlagEnabledForTenant(tenantId, 'voice_extended_intents');
 
-  const twilioAdapter = new TwilioGatherAdapter({
+  // WS18d — assembled as a VARIABLE (not an inline literal) deliberately: the
+  // adapter spreads its deps into createVoiceTurnProcessor, and the processor-
+  // only WS18 keys below (consentEventRepo, autonomousClose) are not part of
+  // TwilioAdapterDeps — a literal would trip TS excess-property checking. The
+  // clean fix (extending TwilioAdapterDeps) belongs to the WS16 owner of
+  // twilio-adapter.ts; this keeps that file untouched while the processor
+  // receives its full dep surface at runtime.
+  const twilioAdapterDeps = {
     store: voiceSessionStore,
     gateway: llmGateway,
     ...(pool ? { pool } : {}),
@@ -2579,8 +3716,9 @@ export function createApp(): express.Express {
     ...(messageDelivery
       ? {
           deliveryProvider: {
+            // Owner/dispatcher patch + on-call notify SMS — never customer-gated.
             sendSms: (args: { to: string; body: string }) =>
-              messageDelivery.sendSms({ to: args.to, body: args.body }),
+              messageDelivery.sendSms({ to: args.to, body: args.body, recipientClass: 'owner' }),
           },
         }
       : {}),
@@ -2590,6 +3728,10 @@ export function createApp(): express.Express {
     // ANS-001 — E1 alerts also push to the tenant's registered devices.
     deviceTokenRepo: deviceTokenService,
     ...(expoPushSender ? { expoPushSender } : {}),
+    // UC-5a — the ladder itself is durable: each page is a delayed job on
+    // the shared queue, consumed by the telephony.emergency_page worker
+    // registered below.
+    queue,
     // RV-115 — FSM context snapshot into dropped_call_recoveries.context.
     droppedCallScheduler,
     // RV-130 — consent ledger + live recording pause on objection.
@@ -2605,6 +3747,11 @@ export function createApp(): express.Express {
     invoiceRepo,
     estimateRepo,
     customerRepo,
+    // Handoff context pack — tags hydrate into escalate whisper/SMS/panel.
+    tagRepo: customerTagRepo,
+    // Inbound-call timeline logging — an identified caller's call is threaded
+    // onto their conversation, mirroring the outbound click-to-call log.
+    conversationRepo,
     agreementRepo,
     moneyDashboardRepo,
     catalogRepo,
@@ -2613,6 +3760,15 @@ export function createApp(): express.Express {
     droppedCallRecoveryRepo,
     availabilityFinder,
     lookupEvents: lookupEventService,
+    // P0 voice-safety — the inbound PHONE path resolves free-text references
+    // through the SAME resolver stack the voice-action-router uses above
+    // (alias-first, then pg_trgm), NOT the bare PgEntityResolver the in-app
+    // adapter self-constructs — an inbound caller saying a tenant's own alias
+    // for a job deserves the same alias hit an operator gets. Without this the
+    // phone path echoed classifier free text back as "resolved" refs, so every
+    // spoken appointment/job reference and spoken time reached the proposal
+    // unresolved and the payload could never satisfy its execution contract.
+    ...(sharedEntityResolver ? { entityResolver: sharedEntityResolver } : {}),
     extendedIntentsEnabled: voiceExtendedIntentsFlagShim,
     systemActorId: 'system:inbound-call',
     businessName: process.env.TWILIO_BUSINESS_NAME ?? 'our team',
@@ -2629,6 +3785,14 @@ export function createApp(): express.Express {
     voiceSessionRepo,
     voiceRepo,
     voicePersonaResolver,
+    // U3 — share the same TenantGlossaryProvider instance (and its per-
+    // tenant TTL cache) between the Gather-hints path and the
+    // transcription-correction worker, instead of the adapter lazily
+    // building its own fallback provider. No LLM dependency here (unlike
+    // the correction pass above, which is gated on AI_PROVIDER_API_KEY) —
+    // wired unconditionally so Gather hints work even in a keyless-gateway
+    // deployment.
+    sttHintsResolver: (tenantId: string) => transcriptionGlossaryProvider.termsForTenant(tenantId),
     // §10 onboarding — fire the 30-minute upgrade nudge after every
     // inbound call ends. Pool-gated (no-op when running in-memory).
     ...(pool
@@ -2674,12 +3838,80 @@ export function createApp(): express.Express {
           },
         }
       : {}),
+    // ── WS18 processor-only deps (flow through the adapter's spread into
+    //    createVoiceTurnProcessor; see the variable-assembly note above) ──
+    // WS18b — on-call SMS consent capture (ledger + customers.sms_consent).
+    consentEventRepo,
+    // QUALITY-2026-07-12 WS2 — on-call close PREPARATION (supersedes the D-018
+    // autonomous close): both platform kill switches and the owner SMS/one-tap
+    // approve wiring for the staged owner-approval chain. No executor — nothing
+    // is approved or executed by the system; the owner's one-tap is the only
+    // approval.
+    autonomousClose: {
+      platformDisabled: config.AUTONOMOUS_CLOSE_DISABLED === 'true',
+      bookingPlatformDisabled: config.AUTONOMOUS_BOOKING_DISABLED === 'true',
+      ownerPhoneResolver: resolveUnsupervisedOwnerPhone,
+      ...(oneTapSmsSender ? { sendOwnerSms: oneTapSmsSender } : {}),
+      ...(oneTapSecret ? { oneTapSecret } : {}),
+      buildApproveUrl: (token: string) =>
+        `${oneTapApiBaseUrl}/public/proposals/one-tap-approve?token=${encodeURIComponent(token)}`,
+    },
+  };
+  const twilioAdapter = new TwilioGatherAdapter(twilioAdapterDeps);
+
+  // UC-5a — consumer half of the durable emergency page-retry ladder: the
+  // adapter above enqueues delayed `telephony.emergency_page` jobs; this
+  // worker (dispatched by the unified queue poll loop) re-checks resolution
+  // against the live store and then the persisted voice_sessions row (so a
+  // transfer answered on another replica still cancels the ladder), pages
+  // the owner, and lands the durable call_me_back tail on exhaustion.
+  // Registered only when an SMS provider exists — the adapter's arm gate
+  // mirrors this, so no job is ever enqueued without its consumer.
+  if (messageDelivery) {
+    const emergencyPageWorker = createEmergencyPageWorker({
+      queue,
+      // Emergency page → owner / on-call. Never customer-gated.
+      sendSms: (args: { to: string; body: string }) =>
+        messageDelivery.sendSms({ to: args.to, body: args.body, recipientClass: 'owner' }),
+      resolvePagePhone: async (tenantId: string) => {
+        try {
+          const settings = await settingsRepo.findByTenant(tenantId);
+          return settings?.ownerPhone ?? settings?.transferNumber ?? null;
+        } catch {
+          return null;
+        }
+      },
+      isResolved: createEmergencyPageResolvedCheck({
+        store: voiceSessionStore,
+        voiceSessionRepo,
+      }),
+      callMeBackRepo,
+      auditRepo,
+    });
+    workerRegistry.set(
+      emergencyPageWorker.type,
+      emergencyPageWorker as import('./queues/queue').WorkerHandler<unknown>,
+    );
+  }
+
+  // P8-012 / WS7: feature flag the Media Streams (live audio) path. `'false'`
+  // (kill switch) → the existing Gather adapter is the only telephony surface.
+  // `'true'` → forced on (validated stack). Unset/`'auto'` → on iff the full
+  // ElevenLabs+Deepgram streaming stack is present. When on, /voice returns a
+  // <Connect><Stream/> TwiML and audio flows over the WebSocket attached below.
+  const mediaStreamsEnabled = resolveMediaStreamsEnabled(process.env);
+
+  // WS3 (voice ingestion resilience) — shared realtime health signals. The
+  // /voice TwiML branch reads the circuit (isOpen) and prereq probe to decide
+  // Stream vs Gather; the mediastream adapter feeds the same circuit instance.
+  // `realtimeCapabilities` is the single source the /health canary AND the
+  // route's prereq gate both derive from (STT + TTS configured), so they never
+  // drift.
+  const realtimeCapabilities = (): { ttsEnabled: boolean; sttEnabled: boolean } => ({
+    ttsEnabled: !!process.env.ELEVENLABS_API_KEY || !!config.AI_PROVIDER_API_KEY,
+    sttEnabled: !!process.env.DEEPGRAM_API_KEY,
   });
-  // P8-012: feature flag the Media Streams (live audio) path. Default
-  // off — when off, the existing Gather adapter remains the only
-  // telephony surface. When on, /voice returns a <Connect><Stream/>
-  // TwiML and audio flows over the WebSocket attached below.
-  const mediaStreamsEnabled = process.env.TWILIO_MEDIA_STREAMS_ENABLED === 'true';
+  const realtimeHealthCircuit = new RealtimeHealthCircuit();
 
   // Per-tenant Twilio token + tenant-id resolvers, keyed off
   // tenant_integrations. Falls back to the legacy single-account env
@@ -2714,6 +3946,12 @@ export function createApp(): express.Express {
         await client.query('COMMIT');
         const enc = result.rows[0]?.auth_token_primary_enc;
         return enc ? decrypt(enc, encKey) : process.env.TWILIO_AUTH_TOKEN;
+      } catch (err) {
+        // Roll back before release: the outer catch swallows the error to a
+        // fallback, so without this the connection would silently return to
+        // the pool with the transaction (and system_lookup GUC) still open.
+        await client.query('ROLLBACK').catch(() => {});
+        throw err;
       } finally {
         client.release();
       }
@@ -2740,6 +3978,10 @@ export function createApp(): express.Express {
         );
         await client.query('COMMIT');
         return result.rows[0]?.tenant_id ?? process.env.TWILIO_DEFAULT_TENANT_ID;
+      } catch (err) {
+        // Same dirty-connection guard as resolveTwilioAuthTokenForSubaccount.
+        await client.query('ROLLBACK').catch(() => {});
+        throw err;
       } finally {
         client.release();
       }
@@ -2763,7 +4005,17 @@ export function createApp(): express.Express {
       publicBaseUrl: process.env.PUBLIC_API_URL,
       ...(phoneNumberRepo ? { phoneNumberRepo } : {}),
       resolveTenantId: ({ to }) => resolveTenantIdByPhoneNumber(to),
-      mediaStreamsEnabled,
+      // WS8 — a worker-role process never attaches the media-streams WS
+      // handler (see the role gate on attachMediaStreamServer below), so its
+      // /voice must never emit <Connect><Stream/> pointing at a socket this
+      // process will reject — degrade to Gather instead. WS14 — 'voice' is
+      // NOT excluded here (only 'worker' is): the dedicated voice service
+      // attaches the WS the same as 'web' does, so its /voice keeps emitting
+      // <Connect><Stream/> normally.
+      mediaStreamsEnabled: mediaStreamsEnabled && config.PROCESS_ROLE !== 'worker',
+      // WS7 — mid-call degrade to Gather: /voice/gather-fallback resolves the
+      // live session by CallSid to continue the SAME FSM state on Gather.
+      voiceSessionStore,
       // P8-014: mount the recording webhook in production. Without this
       // block the route is unreachable and Twilio's recordingStatusCallback
       // POSTs 404 — call recordings would be lost. Pool / Twilio creds are
@@ -2832,10 +4084,17 @@ export function createApp(): express.Express {
             }
           : {}),
       },
+      // WS3 — per-tenant staged rollout of the realtime path (default ON) and
+      // the pre-connect health signals. tenantFeatureFlags is null in
+      // in-memory dev, in which case the global flag alone decides.
+      ...(tenantFeatureFlags ? { tenantFeatureFlags } : {}),
+      realtimeCircuit: realtimeHealthCircuit,
+      realtimePrerequisitesMet: () => {
+        const c = realtimeCapabilities();
+        return c.sttEnabled && c.ttsEnabled;
+      },
       getHealth: () => {
-        const ttsEnabled =
-          !!process.env.ELEVENLABS_API_KEY || !!config.AI_PROVIDER_API_KEY;
-        const sttEnabled = !!process.env.DEEPGRAM_API_KEY;
+        const { ttsEnabled, sttEnabled } = realtimeCapabilities();
         const recordingEnabled =
           !!process.env.TWILIO_ACCOUNT_SID &&
           !!process.env.TWILIO_AUTH_TOKEN &&
@@ -2902,13 +4161,71 @@ export function createApp(): express.Express {
     whisperRouter({ whisperCache: sharedWhisperCache }),
   );
 
+  // Owner→customer click-to-call. The authed POST /api/calls is wired only when
+  // the structural prerequisites are present — a Postgres pool (per-tenant cred
+  // + repo access) and PUBLIC_API_URL; without them POST /api/calls returns 503.
+  // We do NOT gate on a global TWILIO_ACCOUNT_SID: Twilio creds are resolved
+  // per-tenant at call time by getTenantTwilioCreds, which fails closed (→ 503
+  // not_configured) for a tenant with no active integration. Prod multi-tenant
+  // deployments use per-tenant tenant_integrations and often have NO global SID,
+  // so gating on it left click-to-call dark for every tenant on that path.
+  // The bridge TwiML callback is mounted HERE — before the global
+  // /api Clerk-auth chain — because Twilio carries no Clerk JWT (same reason the
+  // telephony webhooks above are). The authed POST /api/calls is mounted after
+  // auth, further down. Both share these deps.
+  // Click-to-call requires PUBLIC_API_URL: it is the host Twilio calls back for
+  // the bridge TwiML. Without it we'd build the callback against the frontend
+  // origin (APP_PUBLIC_URL), which doesn't serve /api/calls/bridge, so the call
+  // would ring the owner but never connect. Gate the feature on it instead.
+  const callDeps =
+    pool && process.env.PUBLIC_API_URL
+      ? {
+          customerRepo,
+          conversationRepo,
+          dncRepo,
+          auditRepo,
+          logger: requestLogger,
+          getCreds: (tid: string) => getTenantTwilioCreds(tid, pool),
+          publicApiUrl: process.env.PUBLIC_API_URL,
+          // TCPA express-consent gate — off by default (prod behavior unchanged).
+          // The gate must NOT emit its own audit event; initiateOutboundCall owns
+          // the consent-decision audit, so bind checkOutboundConsent WITHOUT an
+          // auditRepo (otherwise 'warn' mode would record a false "blocked").
+          consentEnforcement: config.TCPA_CONSENT_ENFORCEMENT,
+          checkConsent: (ctx: OutboundConsentContext) => checkOutboundConsent({ pool }, ctx),
+        }
+      : undefined;
+  app.use(
+    '/api/calls',
+    createCallBridgeRouter({
+      ...(callDeps ? { callDeps } : {}),
+      twilioAuthTokenGetter: ({ accountSid }) => resolveTwilioAuthTokenForSubaccount(accountSid),
+      // Verify the signature against the SAME base the bridge URL is built from
+      // (outbound-call-service uses PUBLIC_API_URL ?? publicBaseUrl); otherwise
+      // the signed URL and the reconstructed URL diverge when PUBLIC_API_URL is
+      // unset and every callback 403s.
+      publicBaseUrl: process.env.PUBLIC_API_URL ?? publicBaseUrl,
+    }),
+  );
+
   // P8-012: attach the Media Streams WebSocketServer to the http.Server
   // returned by app.listen(). We override `app.listen` so the bare
   // `index.ts` entry point doesn't need any new wiring — when the
   // server starts listening, the upgrade handler is already attached.
   // The flag also gates whether DeepgramStreamingProvider is constructed
   // (no DEEPGRAM_API_KEY required when the feature is disabled).
-  if (mediaStreamsEnabled) {
+  //
+  // WS8 — a PROCESS_ROLE=worker deploy never accepts voice WS upgrades:
+  // Twilio can't reach it anyway (private networking, no public ingress),
+  // so constructing the Deepgram streaming provider, the shared TTS
+  // provider, and wrapping app.listen would be dead weight — and would
+  // boot-warn/crash the worker on a misconfigured TTS_PROVIDER for a
+  // surface it never serves. /health stays role-agnostic (index.ts listens
+  // in every role); only this voice-WS attach is role-gated.
+  // WS14 — PROCESS_ROLE=voice attaches this exactly like 'web' does (only
+  // 'worker' is excluded); it's the intended home for the WS upgrade in the
+  // three-service topology.
+  if (mediaStreamsEnabled && config.PROCESS_ROLE !== 'worker') {
     const deepgramKey = process.env.DEEPGRAM_API_KEY;
     if (!deepgramKey) {
       // eslint-disable-next-line no-console
@@ -2923,7 +4240,24 @@ export function createApp(): express.Express {
     const sharedTtsProvider = createTtsProvider({
       TTS_PROVIDER: process.env.TTS_PROVIDER,
       ELEVENLABS_API_KEY: process.env.ELEVENLABS_API_KEY,
+      // UB-C2 — same voice id scripts/render-fillers.ts renders with, so
+      // filler clips and live TTS speak with one voice.
+      ELEVENLABS_VOICE_ID: process.env.ELEVENLABS_VOICE_ID,
       AI_PROVIDER_API_KEY: config.AI_PROVIDER_API_KEY,
+    });
+    // P0 voice-output fail-fast: Twilio Media Streams requires raw PCM16
+    // audio (mediastream-adapter.ts encodes it to mu-law itself via
+    // streamPcmAsMedia). A TtsProvider that only implements synthesize()
+    // (OpenAI tts-1, ElevenLabs' non-streaming call) returns compressed
+    // audio (mp3) with no transcoder in the media-streams path — feeding
+    // that into streamPcmAsMedia produces inaudible static on every call.
+    // Only synthesizeStream() implementations (currently ElevenLabs) emit
+    // raw PCM. Crash at boot rather than ship a silent voice outage — same
+    // fail-fast posture as the DATABASE_URL check above.
+    assertTtsProviderSupportsMediaStreams({
+      mediaStreamsEnabled,
+      provider: sharedTtsProvider,
+      ttsProviderEnv: process.env.TTS_PROVIDER,
     });
     const streamingProvider = deepgramKey
       ? new DeepgramStreamingProvider(deepgramKey)
@@ -2995,6 +4329,10 @@ export function createApp(): express.Express {
                 complete: async ({ prompt }: { prompt: string }) => {
                   const res = await llmGateway.complete({
                     taskType: 'call_sentiment',
+                    // Top-level tenantId so the gateway keys this tenant's
+                    // concurrency quota / cache bucket correctly (never the
+                    // shared SYSTEM_TENANT_ID).
+                    tenantId: input.tenantId,
                     messages: [{ role: 'user' as const, content: prompt }],
                   });
                   return { text: res.content };
@@ -3017,6 +4355,19 @@ export function createApp(): express.Express {
         ? new PgTriageEventRepository(pool)
         : new InMemoryTriageEventRepository();
       const mediaStreamPublicBase = (process.env.PUBLIC_API_URL ?? '').replace(/\/+$/, '');
+      // WS7 — mid-call REST redirector: on a terminal realtime failure the
+      // mediastream adapter steers the LIVE call back to the Gather-fallback
+      // webhook instead of hanging up. Wired only when PUBLIC_API_URL is set
+      // (Twilio must POST an absolute URL); absent → adapter keeps 1011-close.
+      const twilioCallRedirector = process.env.PUBLIC_API_URL
+        ? createTwilioCallRedirector({
+            resolveAuthToken: (accountSid) => resolveTwilioAuthTokenForSubaccount(accountSid),
+            ...(process.env.TWILIO_ACCOUNT_SID
+              ? { defaultAccountSid: process.env.TWILIO_ACCOUNT_SID }
+              : {}),
+            publicBaseUrl: process.env.PUBLIC_API_URL,
+          })
+        : undefined;
       const vulnerabilityTriageHookDep = llmGateway
         ? createVulnerabilityTriageHook({
             isEnabledForTenant: isFlagEnabledForTenant,
@@ -3026,6 +4377,10 @@ export function createApp(): express.Express {
                   complete: async ({ prompt }: { prompt: string }) => {
                     const res = await llmGateway.complete({
                       taskType: 'grade_vulnerability',
+                      // Top-level tenantId so the gateway keys this tenant's
+                      // concurrency quota / cache bucket correctly (never the
+                      // shared SYSTEM_TENANT_ID).
+                      tenantId: input.tenantId,
                       messages: [{ role: 'user' as const, content: prompt }],
                     });
                     return { text: res.content };
@@ -3055,8 +4410,9 @@ export function createApp(): express.Express {
                   businessPhoneFallbackResolver: createBusinessPhoneFallback(settingsRepo),
                   ...(messageDelivery
                     ? {
+                        // Patch-owner-through page → owner. Never customer-gated.
                         sendSms: (args: { to: string; body: string }) =>
-                          messageDelivery.sendSms({ to: args.to, body: args.body }),
+                          messageDelivery.sendSms({ to: args.to, body: args.body, recipientClass: 'owner' }),
                       }
                     : {}),
                   callMeBackRepo,
@@ -3123,9 +4479,51 @@ export function createApp(): express.Express {
           server,
           {
             store: voiceSessionStore,
+            connectionRegistry,
             streamingProvider,
+            // WS3 — feed the shared realtime health circuit (the /voice branch
+            // reads it) and emit the alertable resilience audit events
+            // (session_failed / disclosure.init_failed).
+            realtimeCircuit: realtimeHealthCircuit,
+            ...(twilioCallRedirector ? { restRedirect: twilioCallRedirector } : {}),
+            ...(auditRepo ? { auditRepo } : {}),
             ...(sharedTtsProvider ? { ttsProvider: sharedTtsProvider } : {}),
             terminologyProvider,
+            // UB-C1 — resolve the language the call OPENS in, before the
+            // Deepgram socket is created: identified caller's
+            // preferredLanguage > tenant default, both gated by the
+            // tenant's supported_languages opt-in (detectLanguage applies
+            // the gate internally). Failure-soft: any error falls back to
+            // the tenant default / English rather than blocking audio.
+            initialLanguageResolver: async (
+              tenantId: string,
+              ctx: { callSid: string; sessionId: string },
+            ) => {
+              const settings = await settingsRepo.findByTenant(tenantId).catch(() => null);
+              let customerPreferred: 'en' | 'es' | null = null;
+              const callerPhone = twilioAdapter.getCallerPhone(ctx.sessionId);
+              if (pool && callerPhone) {
+                try {
+                  const identified = await identifyCaller({
+                    tenantId,
+                    fromPhone: callerPhone,
+                    pool,
+                  });
+                  if (identified.status === 'matched') {
+                    const customer = await customerRepo.findById(tenantId, identified.customerId);
+                    const pref = customer?.preferredLanguage;
+                    if (pref === 'en' || pref === 'es') customerPreferred = pref;
+                  }
+                } catch {
+                  /* failure-soft — fall through to the tenant default */
+                }
+              }
+              return detectInitialCallLanguage({
+                customerPreferredLanguage: customerPreferred,
+                tenantDefaultLanguage: settings?.defaultLanguage === 'es' ? 'es' : 'en',
+                supportedLanguages: settings?.supportedLanguages ?? ['en'],
+              });
+            },
             fillerEngine,
             fillerCache,
             speechTurn: async ({ session, speechResult, callSid, tenantId }) =>
@@ -3137,12 +4535,17 @@ export function createApp(): express.Express {
               }),
             // RV-130 (CRITICAL) — greeting + recording-disclosure bootstrap
             // once Deepgram opens. initializeStreamSession speaks the
-            // greeting/disclosure via the stream TTS path AND appends the
-            // implicit recording-consent event to the ledger (the gather
-            // adapter carries consentEvents). Without this hook wired,
-            // flag-enabled streaming calls start silent and ledger nothing.
+            // greeting/disclosure via the stream TTS path. Without this hook
+            // wired, flag-enabled streaming calls start silent.
             initializeSession: ({ callSid, tenantId }) =>
               twilioAdapter.initializeStreamSession({ callSid, tenantId }),
+            // C5 — the implicit recording-consent ledger write, split out of
+            // initializeSession so it lands only once the caller has actually
+            // HEARD the disclosure. The gather adapter carries consentEvents
+            // and parks the write; this adapter decides whether it happened.
+            // Without this hook wired, streaming calls ledger nothing.
+            commitRecordingConsent: ({ callSid }) =>
+              twilioAdapter.commitRecordingConsent({ callSid }),
             // RV-140 (interim) — emergency keywords escalate on interim
             // transcripts (keywords only; objection scan stays finals-only).
             interimEmergencyScan: ({ session, speechResult, tenantId }) =>
@@ -3160,6 +4563,14 @@ export function createApp(): express.Express {
             // for non-hangup terminations.
             finalizeOnClose: (session, reason, sideEffects) =>
               twilioAdapter.finalizeTerminatedSession(session, sideEffects, reason),
+            // Codex P2 (PR #702) — T2-F05 silence-timer parity with the
+            // Gather/WS-finals pending-approval (RV-071) / SMS-consent
+            // (WS18) handling: a silent caller mid-dialogue gets
+            // keep-pending / fail-closed semantics instead of being
+            // reprompted and (on a second silence) escalated+end-sessioned
+            // with the dialogue stranded.
+            handlePendingDialogueSilence: (session, tenantId) =>
+              twilioAdapter.handlePendingDialogueSilence(session, tenantId),
             // WS upgrades don't carry AccountSid; fall back to the master
             // token. Per-tenant subaccount auth for media streams is a
             // future-phase change (auth at first `start` message).
@@ -3215,6 +4626,10 @@ export function createApp(): express.Express {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const server = (origListen as any)(...args);
       attachClientGateway(server, {
+        registry: connectionRegistry,
+        // UC-3 — dispatch presence heartbeats/reads ride this socket
+        // instead of a 5s HTTP PUT per board user.
+        dispatchPresence: createDispatchPresenceGatewayDeps(),
         // Runtime kill switch: consult the persisted feature flag on
         // every upgrade so flipping ws.client_gateway_enabled off
         // immediately disables /api/ws without redeploy. The env-var
@@ -3276,17 +4691,34 @@ export function createApp(): express.Express {
   const clerkSecret = process.env.CLERK_SECRET_KEY ?? '';
   app.use('/api', verifyClerkSession(clerkSecret));
 
-  // DEV ONLY — hard-gated on NODE_ENV=dev + DEV_AUTH_BYPASS=true.
-  // Accepts Clerk tokens without RS256/JWKS verification and
-  // auto-bootstraps a tenant per Clerk user. Exists because
-  // verifyClerkSession uses HMAC-SHA256 (not Clerk's real signing
-  // algorithm) — tracked as a production bug. No-op in non-dev.
+  // DEV ONLY — hard-gated on NODE_ENV=dev + DEV_AUTH_BYPASS=true, and a
+  // no-op otherwise. Accepts a Clerk token without verifying its signature
+  // and auto-bootstraps a tenant per Clerk user, so a local frontend can
+  // authenticate without a Clerk instance.
+  //
+  // This is a convenience, NOT a workaround for missing verification:
+  // verifyClerkSession above authenticates production traffic via RS256 +
+  // JWKS (P0-033, see auth/clerk.ts). HMAC-SHA256 survives only as a
+  // dev/test fallback behind CLERK_DEV_HMAC_TOKENS=true, and is refused in
+  // production at both boot (shared/config.ts) and request time
+  // (isHmacDevModeEnabled in auth/clerk.ts).
+  //
+  // Both flags are rejected by validateEnvSchema when NODE_ENV is
+  // production/prod, so neither can reach a deployed environment.
   if (isDevAuthBypassEnabled()) {
     // BUG-2 — share the single tenantRepo constructed at the top of
     // this module. Previously this branch instantiated its own
     // DevInMemoryTenantRepository, leaving the dev-bypass and intake
     // paths with disjoint tenant maps.
-    app.use('/api', devAuthBypass({ tenantRepo }));
+    app.use(
+      '/api',
+      devAuthBypass({
+        tenantRepo,
+        settingsRepo,
+        userRepo,
+        ...(inMemoryUserModeService ? { userModeService: inMemoryUserModeService } : {}),
+      }),
+    );
     // eslint-disable-next-line no-console
     console.warn(
       '[app] ⚠️  DEV_AUTH_BYPASS=true — accepting Clerk tokens WITHOUT signature verification. ' +
@@ -3301,6 +4733,36 @@ export function createApp(): express.Express {
   // to opt into the per-route gate. The decisions test suite guards this
   // invariant in packages/api/test/decisions/decisions.test.ts (D6).
   app.use('/api', requireAuth);
+
+  // QUALITY-2026-07-12 WS4 — DB-authoritative authorization. Runs immediately
+  // after requireAuth (so req.auth is populated) and BEFORE any route or the
+  // per-tenant limiter, so every /api/* request has its role re-resolved from
+  // the DB and deleted/suspended/non-member callers are rejected regardless of
+  // what their (still-valid) Clerk token claims. The loader is wired below only
+  // when a Pool exists and dev-auth-bypass is off; otherwise this is a no-op
+  // pass-through that keeps the JWT claim (see resolveAuthorization).
+  app.use('/api', resolveAuthorization);
+
+  // P3/U-P3c: per-tenant fairness limiter. The pre-auth /api limiter above is a
+  // coarse per-IP DoS guard; this one runs AFTER requireAuth (so req.auth is
+  // populated) and caps requests PER TENANT cluster-wide, so one tenant's
+  // dashboards/integrations can't monopolize a replica's capacity. Keyed by
+  // tenantId (fallback userId, then the IPv6-safe client IP for the rare
+  // authenticated-but-tenantless request). Shared Redis store; per-process
+  // MemoryStore when REDIS_URL is unset.
+  const tenantRateMax = Math.max(1, Number(process.env.API_TENANT_RATE_LIMIT_MAX) || 1000);
+  app.use('/api', rateLimit({
+    windowMs: 60 * 1000, // 1 minute
+    max: isDev ? 100_000 : tenantRateMax,
+    standardHeaders: true,
+    legacyHeaders: false,
+    keyGenerator: (req) => {
+      const auth = (req as AuthenticatedRequest).auth;
+      return auth?.tenantId ?? auth?.userId ?? ipKeyGenerator(req.ip ?? '');
+    },
+    skip: () => isDev && process.env.DEV_AUTH_BYPASS === 'true',
+    store: createRateLimitStore(process.env.REDIS_URL, 'tenant:'),
+  }));
 
   // P0-024: open a request-scoped transaction with `app.current_tenant_id`
   // set LOCAL so every query in the request reuses the same client and
@@ -3318,15 +4780,81 @@ export function createApp(): express.Express {
     createCustomerRouter(
       customerRepo,
       auditRepo,
-      undefined,
+      // P9-002 / Story 4.9 — wire the unified customer timeline so
+      // GET /api/customers/:id/timeline (consumed by the web
+      // CommunicationTimeline) resolves instead of quietly 404ing.
+      {
+        noteRepo,
+        jobRepo,
+        jobTimelineRepo: timelineRepo,
+        estimateRepo,
+        invoiceRepo,
+        paymentRepo,
+        conversationRepo,
+        appointmentRepo,
+      },
       customerContactRepo,
       customerTagRepo,
-      customerCustomFieldRepo
+      customerCustomFieldRepo,
+      customerMergeRepo,
+      // WS12 — manual sms_consent toggles ledger to consent_events so a
+      // dashboard opt-out suppresses BOTH outbound channels.
+      consentEventRepo
     )
   );
   app.use(
     '/api/customer-custom-fields',
     createCustomerCustomFieldRouter(customerCustomFieldRepo, auditRepo)
+  );
+  app.use('/api/job-forms', createJobFormRouter(jobFormRepo, auditRepo, jobRepo));
+  app.use('/api/job-custom-fields', createJobCustomFieldRouter(jobCustomFieldRepo, auditRepo, jobRepo));
+  app.use('/api/customer-groups', createCustomerGroupRouter(customerGroupRepo, auditRepo));
+  app.use(
+    '/api/standing-instructions',
+    createStandingInstructionRouter(standingInstructionRepo, auditRepo)
+  );
+  app.use(
+    '/api/marketing',
+    createMarketingRouter({
+      campaignRepo,
+      customerRepo,
+      tagRepo: customerTagRepo,
+      delivery: messageDelivery,
+      groupMemberIds: (tid, gid) => customerGroupRepo.listMemberIds(tid, gid),
+      auditRepo,
+    })
+  );
+  app.use(
+    '/api/financing',
+    createFinancingRouter({
+      financingRepo,
+      invoiceRepo,
+      jobRepo,
+      customerRepo,
+      provider: financingProvider,
+      auditRepo,
+    })
+  );
+  app.use(
+    '/webhooks/wisetack',
+    createFinancingWebhookRouter({
+      financingRepo,
+      auditRepo,
+      webhookSecret: process.env.WISETACK_WEBHOOK_SECRET,
+    })
+  );
+  app.use(
+    '/api/recurring-jobs',
+    createRecurringJobRouter(recurringJobRepo, auditRepo, {
+      jobRepo,
+      appointmentRepo,
+      locationRepo,
+      resolveTimezone: async (tenantId: string) => {
+        const s = await settingsRepo.findByTenant(tenantId);
+        return s?.timezone ?? 'America/New_York';
+      },
+    },
+    customerRepo)
   );
   app.use('/api/time-entries', createTimeEntriesRouter(timeEntryRepo, auditRepo));
   // P10-001: portal session creation/revocation. Mounted at
@@ -3338,9 +4866,14 @@ export function createApp(): express.Express {
     '/api/portal-sessions',
     // D2-1d: portal tokens are bearer credentials; both mint and
     // revoke emit portal_session.{created,revoked} via auditRepo.
-    createPortalRouter({ portalRepo: portalSessionRepo, customerRepo, auditRepo }),
+    createPortalRouter({
+      portalRepo: portalSessionRepo,
+      customerRepo,
+      contactRepo: customerContactRepo,
+      auditRepo,
+    }),
   );
-  app.use('/api/leads', createLeadsRouter(leadRepo, customerRepo, auditRepo));
+  app.use('/api/leads', createLeadsRouter(leadRepo, customerRepo, auditRepo, locationRepo));
   app.use('/api/locations', createLocationRouter(locationRepo, ownership, auditRepo));
   app.use('/api/jobs', createJobRouter(jobRepo, timelineRepo, auditRepo, ownership, queue, feedbackDispatcher, customerRepo, locationRepo, {
     estimateRepo,
@@ -3358,6 +4891,16 @@ export function createApp(): express.Express {
     userRepo,
     invoiceRepo,
     auditRepo,
+    settingsRepo,
+    workingHoursRepo,
+    unavailableBlockRepo,
+  }, {
+    appointmentRepo,
+    assignmentRepo,
+    userRepo,
+    workingHoursRepo,
+    unavailableBlockRepo,
+    settingsRepo,
   }));
   app.use(
     '/api/jobs',
@@ -3410,6 +4953,9 @@ export function createApp(): express.Express {
   // by the worker through the same MessageDelivery transport. Webhook
   // latency stays in the ms; failures ride the queue retry/DLQ semantics.
   registerMmsIngestHandler({ queue }, { overwrite: true });
+  // U6 — inbound MMS cost/abuse guard (per-sender photo-quote cap). One limiter
+  // instance reused across calls; absent without a pool (dev/in-memory).
+  const customerMmsRateLimiter = pool ? new PhoneRateLimiter(pool) : undefined;
   const mmsIngestWorker = createMmsIngestWorker({
     userRepo,
     timeEntries: new TimeEntryService(timeEntryRepo, auditRepo),
@@ -3444,7 +4990,9 @@ export function createApp(): express.Express {
     ...(messageDelivery
       ? {
           sendReply: async (tenantId: string, to: string, body: string) => {
-            await messageDelivery!.sendSms({ to, body, tenantId });
+            // Reply to an inbound tech MMS — the sender is a registered tech
+            // (owner-side), not a customer.
+            await messageDelivery!.sendSms({ to, body, tenantId, recipientClass: 'owner' });
           },
         }
       : {}),
@@ -3485,9 +5033,21 @@ export function createApp(): express.Express {
             notifyOwner: async (tenantId: string, body: string) => {
               const ownerPhone = await resolveUnsupervisedOwnerPhone(tenantId);
               if (ownerPhone) {
-                await messageDelivery!.sendSms({ to: ownerPhone, body, tenantId });
+                await messageDelivery!.sendSms({ to: ownerPhone, body, tenantId, recipientClass: 'owner' });
               }
             },
+          }
+        : {}),
+      ...(customerMmsRateLimiter
+        ? {
+            checkRateLimit: (tenantId: string, fromPhone: string) =>
+              customerMmsRateLimiter.tryConsume(
+                tenantId,
+                CUSTOMER_MMS_RATE_SCOPE,
+                fromPhone,
+                CUSTOMER_MMS_RATE_LIMIT,
+                CUSTOMER_MMS_RATE_WINDOW_MS,
+              ),
           }
         : {}),
     },
@@ -3503,6 +5063,15 @@ export function createApp(): express.Express {
       delayNotificationCoordinator,
     }, auditRepo)
   );
+  // UC-3 — presence store goes cluster-wide when REDIS_URL is set (in-memory
+  // and byte-identical to single-replica behavior otherwise).
+  initDispatchPresenceStore(process.env.REDIS_URL);
+  // UC-4 — dispatch-board event/revision fan-out across replicas. Double-gated
+  // like the voice fan-out (U3d): REDIS_URL must be set AND
+  // DISPATCH_FANOUT_ENABLED=true; otherwise the bus stays process-local.
+  initDispatchBoardFanout(
+    process.env.DISPATCH_FANOUT_ENABLED === 'true' ? process.env.REDIS_URL : undefined,
+  );
   app.use(
     '/api/dispatch',
     createDispatchRoutes({
@@ -3513,6 +5082,9 @@ export function createApp(): express.Express {
       locationRepo,
       enRouteCoordinator: delayNotificationCoordinator,
       proposalRepo,
+      userRepo,
+      settingsRepo,
+      auditRepo,
       boardEventsDeps: {
         authUserIdFromRequest: async (req) =>
           (req as { auth?: { userId?: string } }).auth?.userId ?? null,
@@ -3529,11 +5101,13 @@ export function createApp(): express.Express {
       auditRepo,
       ownership,
       sendService,
-      { gateway: llmGateway, proposalRepo },
+      { gateway: llmGateway, proposalRepo, catalogRepo },
       { jobRepo, invoiceRepo },
       { docRevisionRepo: documentRevisionRepo, editDeltaRepo: deltaRepo },
       paymentRepo,
       agreementRepo,
+      templateRepo,
+      customerRepo,
     ),
   );
   app.use(
@@ -3549,8 +5123,17 @@ export function createApp(): express.Express {
       estimateRepo,
       paymentLinkProvider,
       agreementRepo,
+      customerRepo,
+      connectAccountResolver,
     ),
   );
+
+  // Mobile push-token registration store (also consumed by account deletion
+  // below and the /api/devices router mounted later). Pg-backed when a DB is
+  // configured; in-memory otherwise.
+  const deviceTokenRepo = pool
+    ? new PgDeviceTokenRepository(pool)
+    : new InMemoryDeviceTokenRepository();
 
   // Tier 4 (Team members — PR 1+2+3). User roster, role editing, and
   // invitation flow. Tenant scoping is enforced by the route's
@@ -3568,6 +5151,8 @@ export function createApp(): express.Express {
         pendingInvitationRepo,
         clerkSecretKey: process.env.CLERK_SECRET_KEY,
         appBaseUrl: process.env.APP_PUBLIC_URL ?? 'http://localhost:3000',
+        // Account deletion purges the user's push tokens server-side.
+        deviceTokenRepo,
       },
       // D2-1c — audit-log user role / name edits + invitations.
       auditRepo,
@@ -3590,7 +5175,7 @@ export function createApp(): express.Express {
 
   // billingService is hoisted earlier so the Stripe webhook can use
   // the same instance.
-  app.use('/api/billing', createBillingRouter({ billingService, connectService, auditRepo }));
+  app.use('/api/billing', createBillingRouter({ billingService, connectService, auditRepo, pool: pool ?? undefined }));
 
   // Tenant-scoped reporting (revenue by lead source / UTM, money dashboard, tax export).
   const revenueBySourceRepo = pool
@@ -3634,6 +5219,29 @@ export function createApp(): express.Express {
       },
     }),
   );
+
+  // Epic 12.5 — Voice ROI headline (inbound / answered / booked / after-hours /
+  // would-have-hit-voicemail). Composes the existing voice-session + proposal
+  // repos with the tenant business-hours loader (after-hours attribution). The
+  // loader is only wired when a pool exists; the in-memory boot path leaves it
+  // undefined, so after-hours fails open (counts as zero) rather than erroring.
+  const voiceRoiReporter = new RepoBackedVoiceRoiReporter(
+    voiceSessionRepo,
+    proposalRepo,
+    pool ? (tenantId: string) => loadTenantBusinessHours(pool, tenantId) : undefined,
+  );
+  app.use('/api/analytics/voice-roi', createVoiceRoiRouter({ voiceRoiReporter }));
+
+  // Epic 12.4 — jobs-booked KPI (this month vs last). Pool-backed RLS-scoped
+  // counts; left unwired (→ 503) on the in-memory boot path that has no pool.
+  const jobsBookedReporter = pool ? new PgJobsBookedReporter(pool) : undefined;
+  app.use('/api/analytics/jobs-booked', createJobsBookedRouter({ jobsBookedReporter }));
+
+  // Epic 12.7 — tenant-wide activity feed over the audit log (both the Pg and
+  // in-memory audit repos support findRecentByTenant).
+  const activityFeedReporter = new RepoBackedActivityFeedReporter(auditRepo);
+  app.use('/api/analytics/activity', createActivityFeedRouter({ activityFeedReporter }));
+
   // RV-062 — end-of-day digest web view (SMS deep link target).
   app.use('/api/digests', createDigestsRouter({ digestRepo: dailyDigestRepo }));
   app.use(
@@ -3645,7 +5253,38 @@ export function createApp(): express.Express {
       estimateRepo,
       auditRepo,
       transactionalComms,
+      paymentLinkProvider,
+      connectAccountResolver,
     ),
+  );
+  // Stripe Terminal — field card-present collect (Connect direct charges).
+  app.use(
+    '/api/terminal',
+    createTerminalRouter({
+      invoiceRepo,
+      connectAccountResolver,
+      stripeApiKey: process.env.STRIPE_SECRET_KEY ?? null,
+      auditRepo,
+      terminalLocation: connectService
+        ? {
+            getExistingLocationId: async (tenantId) => {
+              const view = await connectService.getAccount(tenantId);
+              return view.terminalLocationId;
+            },
+            persistLocationId: (tenantId, locationId) =>
+              connectService.setTerminalLocationId(tenantId, locationId),
+            resolveDisplayName: async (tenantId) => {
+              if (!pool) return 'Field location';
+              const { rows } = await pool.query(
+                `SELECT name FROM tenants WHERE id = $1`,
+                [tenantId],
+              );
+              const name = rows[0]?.name as string | undefined;
+              return name?.trim() || 'Field location';
+            },
+          }
+        : undefined,
+    }),
   );
   app.use('/api/notes', createNoteRouter(noteRepo, ownership, auditRepo));
 
@@ -3664,7 +5303,7 @@ export function createApp(): express.Express {
           // downstream callers (the API surface) stay aligned with
           // the auth-layer identity.
           const r = await pool.query(
-            `SELECT clerk_user_id, tenant_id, role,
+            `SELECT id, clerk_user_id, tenant_id, role,
                     COALESCE(can_field_serve, false) AS can_field_serve,
                     COALESCE(current_mode, 'supervisor') AS current_mode,
                     mode_changed_at
@@ -3677,6 +5316,10 @@ export function createApp(): express.Express {
           const row = r.rows[0] as Record<string, unknown>;
           const rec: MeUserRecord = {
             user_id: String(row.clerk_user_id),
+            // Sweep-2 S5 — internal users.id UUID; this is what
+            // appointment_assignments.technician_id references, so the
+            // web technician surfaces resolve THIS, not the Clerk sub.
+            internal_user_id: String(row.id),
             tenant_id: String(row.tenant_id),
             role: String(row.role),
             can_field_serve: Boolean(row.can_field_serve),
@@ -3739,7 +5382,7 @@ export function createApp(): express.Express {
           return { modeChangedAt: now };
         },
       }
-    : new InMemoryUserModeService();
+    : inMemoryUserModeService!;
 
   // Wire the middleware-side mode loader. Reuses the same service so
   // we don't drift between read paths.
@@ -3751,6 +5394,19 @@ export function createApp(): express.Express {
       return null;
     }
   });
+
+  // QUALITY-2026-07-12 WS4 — wire the DB-authoritative authorization loader.
+  // Only when a real Pool exists AND dev-auth-bypass is off: dev-bypass already
+  // trusts unsigned tokens by design, and the no-DB dev path has no membership
+  // table to be authoritative over — both keep the JWT claim (resolveAuthorization
+  // no-ops when no loader is wired). `userId` here is the Clerk subject
+  // (req.auth.userId = payload.sub), so the lookup matches on clerk_user_id,
+  // exactly like userModeService.getUser. Errors are DELIBERATELY allowed to
+  // propagate (not caught) so resolveAuthorization fails closed on a DB blip
+  // instead of falling back to the token's role claim.
+  if (pool && !isDevAuthBypassEnabled()) {
+    setAuthorizationLoader(createAuthorizationLoader(pool));
+  }
 
   // Phase 12 — wire the tenant-wide supervisor-presence loader. The
   // proposal auto-approve threshold and the emergency-immediate-Dial
@@ -3767,6 +5423,80 @@ export function createApp(): express.Express {
   // is configured — PgBaseRepository.withTenant, so every statement really does
   // join the per-request tenant transaction and RLS scopes every row.
   app.use('/api/devices', createDevicesRouter(deviceTokenService, auditRepo));
+  app.use(
+    '/api/me',
+    createMeRouter(userModeService, auditRepo, {
+      // N-011 — surface the brand_voice_configurator flag so the web gates the
+      // onboarding step + settings sheet. Tenant-aware (tenant override →
+      // platform flag → false) so a per-tenant dark launch actually exposes
+      // the UI; default off.
+      isBrandVoiceConfiguratorEnabled: (tenantId: string) =>
+        isFlagEnabledForTenant(tenantId, 'brand_voice_configurator'),
+    }),
+  );
+
+  app.use('/api/devices', createDevicesRouter(deviceTokenRepo, auditRepo));
+
+  // U10 — per-user notification preferences (opt-out by category).
+  const notificationPreferenceRepo = pool
+    ? new PgNotificationPreferenceRepository(pool)
+    : new InMemoryNotificationPreferenceRepository();
+  app.use(
+    '/api/notification-preferences',
+    createNotificationPreferencesRouter(notificationPreferenceRepo, auditRepo),
+  );
+
+  // U7 — bind the push notifiers into the late-bound slots now that the
+  // device-token repo exists.
+  const expoPushProvider = new ExpoPushDeliveryProvider(fetch, process.env.EXPO_ACCESS_TOKEN);
+  // Only the approver/owner devices should receive proposal pushes — never a
+  // technician who happens to have signed into the app.
+  const resolveApproverUserIds = approverUserIdsResolver(userRepo);
+  notifyExecutedPush = (tenantId, proposalId) =>
+    notifyExecutedPush_(
+      { deviceTokenRepo, provider: expoPushProvider, resolveApproverUserIds },
+      { tenantId, proposalId },
+    );
+  notifyNeedsApprovalPush = (args) =>
+    notifyNeedsApprovalPush_(
+      { deviceTokenRepo, provider: expoPushProvider, resolveApproverUserIds },
+      args,
+    );
+  // Register the generic owner-notification fan-out used by the non-proposal
+  // producer seams (inbound call/SMS, appointment reminder/cancellation,
+  // payment, lead, escalation). Each type targets the permission its descriptor
+  // declares (owner+dispatcher, never a technician device).
+  setOwnerNotifications(
+    new OwnerNotificationService({
+      deviceTokenRepo,
+      provider: expoPushProvider,
+      resolveUserIds: userIdsWithPermissionResolver(userRepo),
+      // U10 — honor per-user category opt-outs before sending.
+      resolveMutedUserIds: (tenantId, type) =>
+        notificationPreferenceRepo.listMutedUserIds(tenantId, type),
+    }),
+  );
+  // Render the real customer name in payment/cancellation pushes (best-effort;
+  // falls back to "A customer" on any miss) without threading a resolver
+  // through every recordPayment / cancellation call site.
+  setOwnerNotificationNameResolvers({
+    invoiceCustomerName: async (tid, invoiceId) => {
+      const invoice = await invoiceRepo.findById(tid, invoiceId);
+      if (!invoice?.jobId) return undefined;
+      const job = await jobRepo.findById(tid, invoice.jobId);
+      if (!job?.customerId) return undefined;
+      const customer = await customerRepo.findById(tid, job.customerId);
+      return customer?.displayName;
+    },
+    appointmentCustomerName: async (tid, appointmentId) => {
+      const appointment = await appointmentRepo.findById(tid, appointmentId);
+      if (!appointment?.jobId) return undefined;
+      const job = await jobRepo.findById(tid, appointment.jobId);
+      if (!job?.customerId) return undefined;
+      const customer = await customerRepo.findById(tid, job.customerId);
+      return customer?.displayName;
+    },
+  });
   app.use('/api/feedback/responses', createFeedbackResponsesRouter(feedbackResponseRepo));
   app.use(
     '/api/conversations',
@@ -3776,6 +5506,8 @@ export function createApp(): express.Express {
       {
         gateway: llmGateway,
         settingsRepo,
+        // UB-A3 — owner standing instructions injected into suggested replies.
+        standingInstructionRepo,
       },
       // U6 — owner reply send path. Only wired when a delivery provider exists
       // (prod/dev with creds); otherwise POST /:id/reply returns 503.
@@ -3789,9 +5521,16 @@ export function createApp(): express.Express {
             settingsRepo,
           }
         : undefined,
+      // Lets POST /customer/:customerId 404 unknown customers before creating.
+      customerRepo,
     ),
   );
   app.use('/api/dnc', createDncRouter({ dncRepo, auditRepo }));
+
+  // Owner→customer click-to-call (authed POST). Mounted after the global /api
+  // auth chain; the unauthenticated Twilio /bridge callback was mounted earlier
+  // (before auth). Shares callDeps built above; 503 when Twilio is unconfigured.
+  app.use('/api/calls', createCallsRouter(callDeps ? { callDeps } : {}));
 
   app.use(
     '/api/settings',
@@ -3805,10 +5544,19 @@ export function createApp(): express.Express {
       auditRepo,
     ),
   );
-  app.use('/api/settings/packs', createPackActivationRouter(packActivationRepo, canonicalPackRegistry, auditRepo));
+  // N-011 — Brand-Voice Configurator (behind the brand_voice_configurator flag,
+  // enforced at the web surface; the API is permission-gated as normal).
+  // brandVoiceRepo is constructed earlier (B1.18) so the voice execution
+  // handler and this router share the same instance.
+  app.use(
+    '/api/settings/brand-voice',
+    createBrandVoiceRouter(brandVoiceRepo, settingsRepo, auditRepo),
+  );
+  app.use('/api/settings/packs', createPackActivationRouter(packActivationRepo, canonicalPackRegistry, auditRepo, settingsRepo));
   app.use('/api/verticals', createVerticalRouter(canonicalPackRegistry));
   app.use('/api/vertical-training-assets', createVerticalTrainingAssetsRouter(trainingAssetService));
   app.use('/api/templates', createTemplateRouter(templateRepo, auditRepo));
+  app.use('/api/message-templates', createMessageTemplateRouter(messageTemplateRepo, settingsRepo, auditRepo));
   app.use('/api/bundles', createBundleRouter(bundleRepo, auditRepo));
   app.use('/api/quality', createQualityRouter({ metricsRepo: qualityMetricsRepo, approvalRepo, deltaRepo }));
 
@@ -3828,6 +5576,7 @@ export function createApp(): express.Express {
       // dangling S3 404 after the retention worker deletes the object).
       fileRepo,
       storage: storageProvider,
+      jobRepo,
     }),
   );
   app.use(
@@ -3858,6 +5607,14 @@ export function createApp(): express.Express {
         sessionRepo: onboardingSessionRepo,
         proposalRepo,
         auditRepo,
+        // Read-only, and only so a tenant who ALREADY chose a timezone (a
+        // partly-completed form wizard) is not asked for it again on the
+        // gated tenant-settings card. Never a source of a guessed zone.
+        settingsRepo,
+        // Review finding #4 — session-scoped advisory lock so two browser
+        // tabs racing the same persisted sessionId can't clobber each
+        // other's turn (see OnboardingConversationDeps.pool doc).
+        pool: pool ?? undefined,
       }),
     }),
   );
@@ -3867,6 +5624,11 @@ export function createApp(): express.Express {
       repository: technicianLocationPingRepo,
       canSubmitForTechnician: (auth, technicianId) =>
         technicianLocationAuthorizer.canSubmitForTechnician(auth, technicianId),
+      isAppointmentAssignedToTechnician: async (tenantId, appointmentId, technicianId) => {
+        const assignments = await assignmentRepo.findByAppointment(tenantId, appointmentId);
+        return assignments.some((assignment) => assignment.technicianId === technicianId);
+      },
+      auditRepo,
     })
   );
   app.use('/api/catalog/items', createCatalogItemsRouter(catalogRepo, auditRepo));
@@ -3885,14 +5647,66 @@ export function createApp(): express.Express {
       estimateRepo,
       // P22 — catalog grounding for assistant-drafted invoices/estimates.
       catalogRepo,
+      // B5 — the scheduling / invoice-follow-up intents wired into the
+      // assistant surface need the same repos the voice worker passes so
+      // their handlers resolve concrete ids instead of degrading to gated.
+      appointmentRepo,
+      jobRepo,
+      dunningEventRepo,
+      // B8 — create_customer draft-time duplicate detection parity, same
+      // customerRepo the voice worker and telephony FSM already use.
+      customerRepo,
+      // Draft-time bookability gate for create_appointment. `jobs.location_id`
+      // is NOT NULL, so a customer with zero `service_locations` rows cannot
+      // be booked — without this repo the drafting handler cannot see the gap
+      // and the proposal auto-approves into a guaranteed execution failure.
+      locationRepo,
+      // The tenant's IANA zone for the scheduling handlers this route
+      // dispatches. NOTE: `lookups.tenantTimezoneResolver` below is a
+      // DIFFERENT field consumed by the read-only lookup skills — it does not
+      // reach the drafting TaskContext. Before this line, `create_appointment`
+      // drafted from assistant chat received NO timezone at all.
+      tenantTimezoneResolver: async (tenantId: string) =>
+        (await tenantSchedulingResolver(tenantId))?.timezone,
       // §3B/3D/3E — assistant chat shares the operator-side resolver
       // shim with the voice-action-router so the same vertical context
       // reaches both text and voice classification paths.
       verticalPromptResolver: operatorVerticalResolverShim,
+      // UB-A3 — owner standing instructions injected into assistant-drafted
+      // estimates/invoices (same resolver contract as the voice router).
+      standingInstructionsResolver: (tenantId: string) =>
+        standingInstructionRepo.listActive(tenantId),
+      // Story 3.11 — persist each chat turn so the running conversation
+      // survives reload and is searchable.
+      conversationRepo,
+      auditRepo,
+      // Read-only `lookup_*` dispatch. `answers` is the SAME object the
+      // recorded-memo worker is wired with (see `lookupAnswerDeps`), and
+      // `shared` carries the repos the skills reuse — so the chat surface
+      // and the memo surface cannot drift on which repos a skill gets.
+      // Before this, every lookup question typed OR spoken into the app fell
+      // through to a generic LLM with no DB access.
+      lookups: {
+        answers: lookupAnswerDeps,
+        shared: {
+          jobRepo,
+          appointmentRepo,
+          customerRepo,
+          proposalRepo,
+          availabilityFinder,
+        },
+        ...(sharedEntityResolver ? { entityResolver: sharedEntityResolver } : {}),
+        tenantTimezoneResolver: async (tenantId: string) =>
+          (await tenantSchedulingResolver(tenantId))?.timezone,
+      },
     }),
   );
   // D2-1c — audit-log proposal approve / reject / edit / undo.
-  app.use('/api/dispatch', createSchedulingRouter(feasibilityDeps, userRepo));
+  app.use('/api/dispatch', createSchedulingRouter(feasibilityDeps, userRepo, settingsRepo ?? undefined));
+  const entityAliasCandidateCapture =
+    entityAliasRepo && auditRepo
+      ? createEntityAliasCandidateService({ proposalRepo, auditRepo })
+      : undefined;
   app.use(
     '/api/proposals',
     createProposalsRouter(
@@ -3905,10 +5719,23 @@ export function createApp(): express.Express {
       correctionLessonRepo
         ? { lessonRepo: correctionLessonRepo, ports: correctionConfigPorts }
         : undefined,
+      // Story 3.9 — editing a proposal logs each changed field to the
+      // corrections training table (intent + field + before/after).
+      correctionRepo,
+      // U1 (E9) — re-draft handler factory: resolving an entity-disambiguation
+      // clarification re-runs the original task handler (catalog-grounded for
+      // invoice/estimate) with the chosen id and replaces the voice_clarification
+      // with the drafted, executable proposal. Same gateway + catalog the voice
+      // router uses, so grounding/summary/confidence stay identical.
+      createRedraftHandlerFactory({ gateway: llmGateway, catalogRepo }),
+      entityAliasCandidateCapture,
     ),
   );
+  if (entityAliasRepo) {
+    app.use('/api/entity-aliases', createEntityAliasesRouter(entityAliasRepo));
+  }
   if (pool) {
-    app.use('/api/interactions', createInteractionsRouter({ pool }));
+    app.use('/api/interactions', createInteractionsRouter({ pool, dispatchRepo }));
   }
 
   // ── Service agreements (P9-003) ─────────────────────────────────────────
@@ -3986,8 +5813,16 @@ export function createApp(): express.Express {
 
   // BUG-6 — backs the Contracts page (`MaintenanceContractsPage`,
   // `ContractDetailPage`, `CreateContractSheet`). Distinct surface
-  // from /api/agreements; in-memory only.
-  app.use('/api/maintenance-contracts', createMaintenanceContractsRouter(auditRepo));
+  // from /api/agreements; persisted via PgMaintenanceContractRepository.
+  app.use(
+    '/api/maintenance-contracts',
+    createMaintenanceContractsRouter(
+      pool
+        ? new PgMaintenanceContractRepository(pool)
+        : new InMemoryMaintenanceContractRepository(),
+      auditRepo,
+    ),
+  );
 
   // Recurring agreements sweep (P9-003). Runs every 60s. Uses the same
   // setInterval driver pattern as the execution-worker (P0-009). The
@@ -4024,6 +5859,10 @@ export function createApp(): express.Express {
         undefined,
         undefined,
         auditRepo,
+        undefined,
+        undefined,
+        // P0-9 — the dues credit reprices the invoice; kill a stale link.
+        { provider: paymentLinkProvider, connectAccountResolver },
       );
     },
   };
@@ -4037,32 +5876,35 @@ export function createApp(): express.Express {
           // (set at save time from the webhook's event.account).
         })
       : undefined;
-  registerInterval(setInterval(() => {
-    void runAsLeader(SWEEP_LOCK.recurringAgreements, async () => {
-      await runRecurringAgreementsSweep({
-        agreementRepo,
-        runRepo: agreementRunRepo,
-        jobsService: agreementsJobsService,
-        invoicesService: agreementsInvoicesService,
-        listTenantIds: async () => {
-          if (!pool) return [];
-          const r = await pool.query('SELECT id FROM tenants');
-          return r.rows.map((row: { id: string }) => row.id);
-        },
-        auditRepo,
-        duesCollector,
-        logger: agreementsLogger,
+  if (shouldRunWorkers) {
+    registerInterval(setInterval(() => {
+      void runAsLeader(SWEEP_LOCK.recurringAgreements, async () => {
+        await runRecurringAgreementsSweep({
+          agreementRepo,
+          runRepo: agreementRunRepo,
+          jobsService: agreementsJobsService,
+          invoicesService: agreementsInvoicesService,
+          listTenantIds: async () => {
+            if (!pool) return [];
+            const r = await pool.query('SELECT id FROM tenants');
+            return r.rows.map((row: { id: string }) => row.id);
+          },
+          auditRepo,
+          duesCollector,
+          logger: agreementsLogger,
+        });
+      }).catch((err) => {
+        agreementsLogger.error('Recurring-agreements sweep failed', {
+          error: err instanceof Error ? err.message : String(err),
+        });
       });
-    }).catch((err) => {
-      agreementsLogger.error('Recurring-agreements sweep failed', {
-        error: err instanceof Error ? err.message : String(err),
-      });
-    });
-  }, 60_000));
+    }, 60_000));
+  }
 
   // RV-132 — recording retention purge. Hourly; pool-gated (the Pg repo is
   // the only implementation that can see the cross-tenant horizon query).
-  if (pool) {
+  // WS2: worker-only — the repo/logger below exist solely to feed this sweep.
+  if (pool && shouldRunWorkers) {
     const retentionPool = pool;
     const recordingRetentionLogger = createLogger({
       service: 'recording-retention-worker',
@@ -4092,33 +5934,149 @@ export function createApp(): express.Express {
     service: 'call-me-back-worker',
     environment: process.env.NODE_ENV || 'development',
   });
-  registerInterval(setInterval(() => {
-    void runAsLeader(SWEEP_LOCK.callMeBack, async () => {
-      await runCallMeBackSweep({
-        callMeBackRepo,
-        settingsRepo,
-        ...(messageDelivery
-          ? {
-              deliveryProvider: {
-                sendSms: (args: { to: string; body: string }) =>
-                  messageDelivery.sendSms({ to: args.to, body: args.body }),
-              },
-            }
-          : {}),
-        listTenantIds: async () => {
-          if (!pool) return [];
-          const r = await pool.query('SELECT id FROM tenants');
-          return r.rows.map((row: { id: string }) => row.id);
-        },
-        auditRepo,
-        logger: callMeBackLogger,
+  if (shouldRunWorkers) {
+    registerInterval(setInterval(() => {
+      void runAsLeader(SWEEP_LOCK.callMeBack, async () => {
+        await runCallMeBackSweep({
+          callMeBackRepo,
+          settingsRepo,
+          ...(messageDelivery
+            ? {
+                deliveryProvider: {
+                  // Callback notice → CSR/transfer number (owner-side).
+                  sendSms: (args: { to: string; body: string }) =>
+                    messageDelivery.sendSms({ to: args.to, body: args.body, recipientClass: 'owner' }),
+                },
+              }
+            : {}),
+          listTenantIds: async () => {
+            if (!pool) return [];
+            const r = await pool.query('SELECT id FROM tenants');
+            return r.rows.map((row: { id: string }) => row.id);
+          },
+          auditRepo,
+          logger: callMeBackLogger,
+        });
+      }).catch((err) => {
+        callMeBackLogger.error('call_me_back sweep failed', {
+          error: err instanceof Error ? err.message : String(err),
+        });
       });
-    }).catch((err) => {
-      callMeBackLogger.error('call_me_back sweep failed', {
-        error: err instanceof Error ? err.message : String(err),
-      });
+    }, 60_000));
+  }
+
+  // P8-015 — dropped-call recovery drain. The scheduler (wired above) has
+  // been inserting durable dropped_call_recoveries rows since RV-115; this
+  // sweep is what actually sends the ~60s recovery SMS. Dark by default:
+  // every row is gated per-tenant on the DROPPED_CALL_RECOVERY_FLAG
+  // (tenant override → platform flag → false), so enabling is an explicit
+  // per-tenant action and the flag doubles as the kill switch.
+  //
+  // CORRECTNESS NOTE: findDue has no FOR UPDATE SKIP LOCKED row claiming —
+  // the runAsLeader advisory lock is the only thing preventing two replicas
+  // from sending the same row in the same tick. Never un-gate this sweep
+  // without adding claiming; the per-row Twilio Idempotency-Key
+  // (dropped_call_recovery:{row.id}) and markSent's sent_at IS NULL guard
+  // are the second and third lines of defense.
+  //
+  // 30s cadence (not 60s): the product promise is "~60s after the drop";
+  // rows are scheduled 60s out, so a 30s tick keeps worst-case latency
+  // ≈90s instead of ≈2× the promise.
+  // Gated on `pool` too, not just messageDelivery: with Twilio creds set but
+  // no DATABASE_URL, messageDelivery is the REAL provider while the sweep would
+  // otherwise install an always-allow rate-limiter stub — sending recovery SMS
+  // with the one-per-caller cap silently disabled. No pool ⇒ no cross-process
+  // limiter ⇒ don't run the sweep at all (matches PhoneRateLimiter's
+  // no-in-memory-fallback rule).
+  // WS2: worker-only — recoveryHandlerDeps below is built solely for this sweep.
+  if (messageDelivery && pool && shouldRunWorkers) {
+    const droppedCallLogger = createLogger({
+      service: 'dropped-call-worker',
+      environment: process.env.NODE_ENV || 'development',
     });
-  }, 60_000));
+    const conversationLinkRepo = new PgConversationLinkRepository(pool);
+    const recoveryHandlerDeps: Omit<DroppedCallHandlerDeps, 'repo'> = {
+      audit: auditRepo,
+      logger: droppedCallLogger,
+      rateLimit: createRecoveryRateLimiter(new PhoneRateLimiter(pool), droppedCallLogger),
+      resolvedSince: createDroppedCallResolvedSince({
+        voiceSessionRepo,
+        proposalRepo,
+        logger: droppedCallLogger,
+      }),
+      // Compliance gate: a caller who texted STOP between the drop and the
+      // send must never receive the recovery SMS. WS1 — also fail closed on
+      // consent here (terminal markSuppressed) rather than at send time, so an
+      // unknown/ambiguous caller under enforcement is suppressed once instead
+      // of poison-pilling the sweep with a retryable SmsSuppressedError. The
+      // central gate remains the send-time backstop.
+      preSendSuppress: async (row) => {
+        if (await dncRepo.isOnDnc(row.tenantId, normalizePhone(row.callerE164))) {
+          return 'opted_out';
+        }
+        if (config.TCPA_CONSENT_ENFORCEMENT !== 'off') {
+          const consent = await resolveCustomerConsentByPhone(row.tenantId, row.callerE164);
+          if (!consent || consent.smsConsent !== true) return 'no_consent';
+        }
+        return null;
+      },
+      compose: createRecoveryComposer({
+        composerDeps: { gateway: llmGateway, settingsRepo, standingInstructionRepo },
+        businessName: process.env.TWILIO_BUSINESS_NAME ?? 'our team',
+        // Brand-voice only with a real provider key — the mock gateway's
+        // canned output must never reach a customer (digest precedent).
+        aiEnabled: Boolean(config.AI_PROVIDER_API_KEY),
+        logger: droppedCallLogger,
+      }),
+      // Unlike the callMeBack adapter above, this passes tenantId (per-tenant
+      // Twilio subaccount routing) and the idempotency key (Twilio-side
+      // double-send defense).
+      // Customer-class: the ~60s recovery SMS to the dropped caller. preSendSuppress
+      // above already blocks DNC'd numbers; the gate additionally enforces consent
+      // (resolved by phone — unknown/ambiguous caller → fail closed).
+      sendSms: async ({ tenantId, to, body, idempotencyKey }) => {
+        const consent = await resolveCustomerConsentByPhone(tenantId, to);
+        return (
+          await messageDelivery.sendSms({
+            to,
+            body,
+            tenantId,
+            idempotencyKey,
+            recipientClass: 'customer',
+            ...(consent ? { consent } : {}),
+          })
+        ).providerMessageId;
+      },
+      // NOTE: no leadRepo — the dropped CALL is the lead-generating event and
+      // is captured (source 'phone_call') by the inbound-call path. Passing
+      // leadRepo here would make the OUTBOUND recovery SMS mint a lead with
+      // inbound-text provenance ('system:sms-capture', source 'sms') and fire a
+      // misleading "new text lead" owner push. Unknown callers thread under
+      // sms_unmatched instead — still visible in the inbox, correct provenance.
+      thread: createRecoveryThreader({
+        conversationRepo,
+        conversationLinkRepo,
+        customerRepo,
+        auditRepo,
+        logger: droppedCallLogger,
+      }),
+    };
+    registerInterval(setInterval(() => {
+      void runAsLeader(SWEEP_LOCK.droppedCallRecovery, async () => {
+        await runDroppedCallRecoverySweep({
+          repo: droppedCallRecoveryRepo,
+          handlerDeps: recoveryHandlerDeps,
+          logger: droppedCallLogger,
+          isEnabledForTenant: (tenantId) =>
+            isFlagEnabledForTenant(tenantId, DROPPED_CALL_RECOVERY_FLAG),
+        });
+      }).catch((err) => {
+        droppedCallLogger.error('dropped-call recovery sweep failed', {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      });
+    }, 30_000));
+  }
 
   // P21-003 — batch-invoice sweep. Daily-grained work; an hourly tick surfaces
   // newly-completed jobs promptly. Opt-in per tenant (settings.batchInvoiceEnabled);
@@ -4127,30 +6085,32 @@ export function createApp(): express.Express {
     service: 'batch-invoice-worker',
     environment: process.env.NODE_ENV || 'development',
   });
-  registerInterval(setInterval(() => {
-    void runAsLeader(SWEEP_LOCK.batchInvoice, async () => {
-      await runBatchInvoiceSweep({
-        jobRepo,
-        invoiceRepo,
-        estimateRepo,
-        proposalRepo,
-        settingsRepo,
-        runRepo: batchInvoiceRunRepo,
-        txRunner: batchInvoiceTxRunner,
-        listTenantIds: async () => {
-          if (!pool) return [];
-          const r = await pool.query('SELECT id FROM tenants');
-          return r.rows.map((row: { id: string }) => row.id);
-        },
-        auditRepo,
-        logger: batchInvoiceLogger,
+  if (shouldRunWorkers) {
+    registerInterval(setInterval(() => {
+      void runAsLeader(SWEEP_LOCK.batchInvoice, async () => {
+        await runBatchInvoiceSweep({
+          jobRepo,
+          invoiceRepo,
+          estimateRepo,
+          proposalRepo,
+          settingsRepo,
+          runRepo: batchInvoiceRunRepo,
+          txRunner: batchInvoiceTxRunner,
+          listTenantIds: async () => {
+            if (!pool) return [];
+            const r = await pool.query('SELECT id FROM tenants');
+            return r.rows.map((row: { id: string }) => row.id);
+          },
+          auditRepo,
+          logger: batchInvoiceLogger,
+        });
+      }).catch((err) => {
+        batchInvoiceLogger.error('Batch-invoice sweep failed', {
+          error: err instanceof Error ? err.message : String(err),
+        });
       });
-    }).catch((err) => {
-      batchInvoiceLogger.error('Batch-invoice sweep failed', {
-        error: err instanceof Error ? err.message : String(err),
-      });
-    });
-  }, 3_600_000));
+    }, 3_600_000));
+  }
 
   // RV-061 (F-9) — end-of-day digest sweep. Every 15 minutes, tenants whose
   // tenant-local digest_time fell in the just-passed bucket get their digest
@@ -4165,90 +6125,100 @@ export function createApp(): express.Express {
   });
   // Capture as const so the closure narrows (messageDelivery is a let).
   const digestDelivery = messageDelivery;
-  registerInterval(setInterval(() => {
-    void runAsLeader(SWEEP_LOCK.dailyDigest, async () => {
-      await runDailyDigestSweep({
-        settingsRepo,
-        digestRepo: dailyDigestRepo,
-        computeDeps: {
-          paymentRepo,
-          invoiceRepo,
-          estimateRepo,
-          jobRepo,
-          appointmentRepo,
-          proposalRepo,
-          customerRepo,
+  if (shouldRunWorkers) {
+    registerInterval(setInterval(() => {
+      void runAsLeader(SWEEP_LOCK.dailyDigest, async () => {
+        await runDailyDigestSweep({
           settingsRepo,
-          feedbackResponseRepo,
-        },
-        listTenantIds: async () => {
-          if (!pool) return [];
-          const r = await pool.query('SELECT id FROM tenants');
-          return r.rows.map((row: { id: string }) => row.id);
-        },
-        // Narrative through the brand-voice composer ONLY when a real LLM
-        // provider is configured — the mock gateway's canned JSON must not
-        // become an owner-facing narrative. Composer failures fall back to
-        // the deterministic template inside the worker.
-        ...(config.AI_PROVIDER_API_KEY
-          ? {
-              composeNarrative: async (tenantId: string, payload: DailyDigestPayload) => {
-                const result = await composeBrandVoiceMessage(
-                  {
-                    tenantId,
-                    intent: 'digest_narrative',
-                    // PII opt-in: counts only — no customer names or amounts
-                    // beyond the aggregate figures the owner already sees.
-                    context: {
-                      moneyInCents: payload.revenueCents,
-                      jobsCompleted: payload.jobsCompletedCount,
-                      tomorrowVisits: payload.tomorrow.appointmentCount,
-                      tomorrowFirstStart: payload.tomorrow.firstStartIso ?? 'none scheduled',
-                      approvalsWaiting: payload.pendingApprovals.totalCount,
-                      overdueInvoices: payload.overdueInvoicesCount,
-                      unbilledCompletedJobs: payload.unbilledJobs.length,
+          digestRepo: dailyDigestRepo,
+          computeDeps: {
+            paymentRepo,
+            invoiceRepo,
+            estimateRepo,
+            jobRepo,
+            appointmentRepo,
+            proposalRepo,
+            customerRepo,
+            settingsRepo,
+            feedbackResponseRepo,
+            // N-005 — "what I learned today" (correction-loop lessons).
+            correctionLessonRepo,
+            // WS6 — "Checked: N proposals, M flagged" (supervisor reviews).
+            supervisorReviewRepo: supervisorReviewsRepo,
+            // WS22 — "K fixed" (flagged proposal edited after review).
+            auditRepo,
+          },
+          listTenantIds: async () => {
+            if (!pool) return [];
+            const r = await pool.query('SELECT id FROM tenants');
+            return r.rows.map((row: { id: string }) => row.id);
+          },
+          // Narrative through the brand-voice composer ONLY when a real LLM
+          // provider is configured — the mock gateway's canned JSON must not
+          // become an owner-facing narrative. Composer failures fall back to
+          // the deterministic template inside the worker.
+          ...(config.AI_PROVIDER_API_KEY
+            ? {
+                composeNarrative: async (tenantId: string, payload: DailyDigestPayload) => {
+                  const result = await composeBrandVoiceMessage(
+                    {
+                      tenantId,
+                      intent: 'digest_narrative',
+                      // PII opt-in: counts only — no customer names or amounts
+                      // beyond the aggregate figures the owner already sees.
+                      context: {
+                        moneyInCents: payload.revenueCents,
+                        jobsCompleted: payload.jobsCompletedCount,
+                        tomorrowVisits: payload.tomorrow.appointmentCount,
+                        tomorrowFirstStart: payload.tomorrow.firstStartIso ?? 'none scheduled',
+                        approvalsWaiting: payload.pendingApprovals.totalCount,
+                        overdueInvoices: payload.overdueInvoicesCount,
+                        unbilledCompletedJobs: payload.unbilledJobs.length,
+                      },
+                      maxChars: 420,
                     },
-                    maxChars: 420,
-                  },
-                  { gateway: llmGateway, settingsRepo },
-                );
-                return result.text;
-              },
-            }
-          : {}),
-        ...(digestDelivery ? { delivery: digestDelivery } : {}),
-        dispatchRepo,
-        ...(oneTapSecret ? { oneTapSecret } : {}),
-        buildApproveUrl: (token: string) =>
-          `${oneTapApiBaseUrl}/public/proposals/one-tap-approve?token=${encodeURIComponent(token)}`,
-        publicBaseUrl,
-        // U5 (JTBD #7) — record the "APPROVE ALL" anchor over the P2-034
-        // transport. proposal_id is NOT NULL (FK), so the row uses the first
-        // batch-approvable id as its representative; the full ordered set is
-        // encoded in the body and read back by the reply handler.
-        recordApproveAllAnchor: async ({ tenantId, proposalIds, body }) => {
-          await proposalSmsEventRepo.create(
-            createProposalSmsEvent({
-              tenantId,
-              proposalId: proposalIds[0]!,
-              direction: 'outbound',
-              kind: 'digest_approve_all_rendered',
-              body: encodeDigestApproveAllBody(proposalIds),
-            }),
-          );
-          // `body` is the rendered digest SMS; intentionally not stored on the
-          // anchor (the id set is what the reply path needs, and the dispatch
-          // row already records the send). Referenced to satisfy the seam.
-          void body;
-        },
-        logger: dailyDigestLogger,
+                    // UB-A3 — owner standing instructions (keyed on the
+                    // digest_narrative intent) adjust the narrative content.
+                    { gateway: llmGateway, settingsRepo, standingInstructionRepo },
+                  );
+                  return result.text;
+                },
+              }
+            : {}),
+          ...(digestDelivery ? { delivery: digestDelivery } : {}),
+          dispatchRepo,
+          ...(oneTapSecret ? { oneTapSecret } : {}),
+          buildApproveUrl: (token: string) =>
+            `${oneTapApiBaseUrl}/public/proposals/one-tap-approve?token=${encodeURIComponent(token)}`,
+          publicBaseUrl,
+          // U5 (JTBD #7) — record the "APPROVE ALL" anchor over the P2-034
+          // transport. proposal_id is NOT NULL (FK), so the row uses the first
+          // batch-approvable id as its representative; the full ordered set is
+          // encoded in the body and read back by the reply handler.
+          recordApproveAllAnchor: async ({ tenantId, proposalIds, body }) => {
+            await proposalSmsEventRepo.create(
+              createProposalSmsEvent({
+                tenantId,
+                proposalId: proposalIds[0]!,
+                direction: 'outbound',
+                kind: 'digest_approve_all_rendered',
+                body: encodeDigestApproveAllBody(proposalIds),
+              }),
+            );
+            // `body` is the rendered digest SMS; intentionally not stored on the
+            // anchor (the id set is what the reply path needs, and the dispatch
+            // row already records the send). Referenced to satisfy the seam.
+            void body;
+          },
+          logger: dailyDigestLogger,
+        });
+      }).catch((err) => {
+        dailyDigestLogger.error('Daily-digest sweep failed', {
+          error: err instanceof Error ? err.message : String(err),
+        });
       });
-    }).catch((err) => {
-      dailyDigestLogger.error('Daily-digest sweep failed', {
-        error: err instanceof Error ? err.message : String(err),
-      });
-    });
-  }, DIGEST_SWEEP_INTERVAL_MS));
+    }, DIGEST_SWEEP_INTERVAL_MS));
+  }
 
   // §6 Time-to-Cash: overdue-invoice sweep. Hourly — invoice due dates
   // have day granularity, so an hourly check surfaces newly-overdue
@@ -4259,32 +6229,36 @@ export function createApp(): express.Express {
     service: 'overdue-invoice-worker',
     environment: process.env.NODE_ENV || 'development',
   });
-  registerInterval(setInterval(() => {
-    void runAsLeader(SWEEP_LOCK.overdueInvoice, async () => {
-      await runOverdueInvoiceSweep({
-        jobRepo,
-        estimateRepo,
-        invoiceRepo,
-        auditRepo,
-        // §7 Collections cadence — raise owner-approved dunning proposals
-        // (send_payment_reminder / apply_late_fee) per the tenant's dunning
-        // policy, gated for idempotency by the dunning event ledger.
-        proposalRepo,
-        dunningConfigRepo,
-        dunningEventRepo,
-        listTenantIds: async () => {
-          if (!pool) return [];
-          const r = await pool.query('SELECT id FROM tenants');
-          return r.rows.map((row: { id: string }) => row.id);
-        },
-        logger: overdueInvoiceLogger,
+  if (shouldRunWorkers) {
+    registerInterval(setInterval(() => {
+      void runAsLeader(SWEEP_LOCK.overdueInvoice, async () => {
+        await runOverdueInvoiceSweep({
+          jobRepo,
+          estimateRepo,
+          invoiceRepo,
+          auditRepo,
+          // §7 Collections cadence — raise owner-approved dunning proposals
+          // (send_payment_reminder / apply_late_fee) per the tenant's dunning
+          // policy, gated for idempotency by the dunning event ledger.
+          proposalRepo,
+          dunningConfigRepo,
+          dunningEventRepo,
+          // Owner `invoice_overdue` push dep (U6) — without it the push no-ops.
+          customerRepo,
+          listTenantIds: async () => {
+            if (!pool) return [];
+            const r = await pool.query('SELECT id FROM tenants');
+            return r.rows.map((row: { id: string }) => row.id);
+          },
+          logger: overdueInvoiceLogger,
+        });
+      }).catch((err) => {
+        overdueInvoiceLogger.error('Overdue-invoice sweep failed', {
+          error: err instanceof Error ? err.message : String(err),
+        });
       });
-    }).catch((err) => {
-      overdueInvoiceLogger.error('Overdue-invoice sweep failed', {
-        error: err instanceof Error ? err.message : String(err),
-      });
-    });
-  }, Number(process.env.OVERDUE_SWEEP_INTERVAL_MS) > 0 ? Number(process.env.OVERDUE_SWEEP_INTERVAL_MS) : 60 * 60_000));
+    }, Number(process.env.OVERDUE_SWEEP_INTERVAL_MS) > 0 ? Number(process.env.OVERDUE_SWEEP_INTERVAL_MS) : 60 * 60_000));
+  }
   // QA-2026-06-05: interval is env-tunable (OVERDUE_SWEEP_INTERVAL_MS) so dev/QA
   // can observe the sweep inside a test window; default stays hourly.
 
@@ -4297,7 +6271,7 @@ export function createApp(): express.Express {
   // on every redeploy (Railway redeploys far more often than weekly) and could
   // never elapse. The per-week hfcr_weekly_sends gate makes a daily run send
   // exactly one summary per tenant per completed week — restart-safe.
-  if (oneTapSmsSender) {
+  if (oneTapSmsSender && shouldRunWorkers) {
     const oneTapOwnerSms = oneTapSmsSender;
     const hfcrWeeklyLogger = createLogger({
       service: 'hfcr-weekly-send-worker',
@@ -4329,8 +6303,84 @@ export function createApp(): express.Express {
     );
   }
 
+  // Epic 12.6 — weekly feedback email. One advisor email per tenant per
+  // completed week (performance snapshot + wins/misses/actions), idempotent
+  // via a `weekly_feedback_email` audit event. Daily tick for restart-safety
+  // (like the HFCR weekly sweep). Needs email delivery + a pool; suggestions
+  // go through the LLM gateway only when a real provider is configured (the
+  // mock gateway must not produce owner-facing text), else deterministic.
+  if (messageDelivery && pool && shouldRunWorkers) {
+    const weeklyFeedbackPool = pool;
+    const weeklyFeedbackDelivery = messageDelivery;
+    const weeklyFeedbackLogger = createLogger({
+      service: 'weekly-feedback-worker',
+      environment: process.env.NODE_ENV || 'development',
+    });
+    const runWeeklyFeedback = () => {
+        void runAsLeader(SWEEP_LOCK.weeklyFeedback, async () => {
+          await runWeeklyFeedbackSweep({
+            auditRepo,
+            // WS22 — "same mistake twice" weekly rate (repeatCorrections).
+            buildSnapshot: (tenantId, weekStart, weekEnd) =>
+              buildWeeklyFeedbackSnapshot(weeklyFeedbackPool, tenantId, weekStart, weekEnd, correctionRepo),
+            resolveOwnerEmail: async (tenantId) => {
+              const r = await weeklyFeedbackPool.query(
+                'SELECT owner_email FROM tenants WHERE id = $1',
+                [tenantId],
+              );
+              return (r.rows[0]?.owner_email as string | undefined) ?? null;
+            },
+            isFeedbackEnabled: async (tenantId) => {
+              const s = await settingsRepo.findByTenant(tenantId);
+              return s?.weeklyFeedbackEnabled !== false;
+            },
+            resolveBusinessName: async (tenantId) => {
+              const s = await settingsRepo.findByTenant(tenantId);
+              return s?.businessName ?? null;
+            },
+            sendEmail: (args) =>
+              weeklyFeedbackDelivery.sendEmail({
+                to: args.to,
+                subject: args.subject,
+                text: args.text,
+                html: args.html,
+              }),
+            listTenantIds: async () => {
+              const r = await weeklyFeedbackPool.query('SELECT id FROM tenants');
+              return r.rows.map((row: { id: string }) => row.id);
+            },
+            logger: weeklyFeedbackLogger,
+            ...(config.AI_PROVIDER_API_KEY
+              ? {
+                  composeSuggestions: async (tenantId, snapshot) => {
+                    const res = await llmGateway.complete({
+                      taskType: 'weekly_feedback_suggestions',
+                      messages: [{ role: 'user', content: buildSuggestionsPrompt(snapshot) }],
+                      responseFormat: 'json',
+                      temperature: 0.4,
+                      maxTokens: 400,
+                      tenantId,
+                    });
+                    return parseSuggestions(res.content);
+                  },
+                }
+              : {}),
+          });
+        }).catch((err) => {
+          weeklyFeedbackLogger.error('Weekly feedback sweep failed', {
+            error: err instanceof Error ? err.message : String(err),
+          });
+        });
+    };
+    // Run once on boot so frequent redeploys don't postpone the weekly send
+    // indefinitely (a pure 24h setInterval never elapses if the process keeps
+    // restarting). The per-week audit gate keeps this to one email per week.
+    runWeeklyFeedback();
+    registerInterval(setInterval(runWeeklyFeedback, 24 * 60 * 60_000));
+  }
+
   // F17 — push paid invoices + customers to QuickBooks every 5 minutes.
-  if (qboConfig) {
+  if (qboConfig && shouldRunWorkers) {
     const accountingSyncLogger = createLogger({
       service: 'accounting-sync-worker',
       environment: process.env.NODE_ENV || 'development',
@@ -4358,12 +6408,19 @@ export function createApp(): express.Express {
     service: 'appointment-reminder-worker',
     environment: process.env.NODE_ENV || 'development',
   });
-  if (transactionalComms) {
+  if (transactionalComms && shouldRunWorkers) {
     registerInterval(setInterval(() => {
       void runAsLeader(SWEEP_LOCK.appointmentReminder, async () => {
         await runAppointmentReminderSweep({
           appointmentRepo,
           transactionalComms,
+          // Owner `appointment_reminder` push deps (U4) — without all four the
+          // owner push no-ops; message_dispatches gives it an independent
+          // idempotency key from the customer SMS.
+          jobRepo,
+          customerRepo,
+          settingsRepo,
+          dispatchRepo,
           listTenantIds: async () => {
             if (!pool) return [];
             const r = await pool.query('SELECT id FROM tenants');
@@ -4434,9 +6491,26 @@ export function createApp(): express.Express {
     }).catch((err) => {
       holdReaperLogger.error('Hold-reaper sweep failed', {
         error: err instanceof Error ? err.message : String(err),
+  if (shouldRunWorkers) {
+    registerInterval(setInterval(() => {
+      void runAsLeader(SWEEP_LOCK.holdReaper, async () => {
+        await runHoldReaperSweep({
+          appointmentRepo,
+          auditRepo,
+          listTenantIds: async () => {
+            if (!pool) return [];
+            const r = await pool.query('SELECT id FROM tenants');
+            return r.rows.map((row: { id: string }) => row.id);
+          },
+          logger: holdReaperLogger,
+        });
+      }).catch((err) => {
+        holdReaperLogger.error('Hold-reaper sweep failed', {
+          error: err instanceof Error ? err.message : String(err),
+        });
       });
-    });
-  }, 15 * 60_000));
+    }, 15 * 60_000));
+  }
 
   // Estimate-reminder worker — nudges customers on estimates sent but
   // unviewed/unaccepted after 3 days (1 reminder, capped). Only runs when
@@ -4445,13 +6519,14 @@ export function createApp(): express.Express {
     service: 'estimate-reminder-worker',
     environment: process.env.NODE_ENV || 'development',
   });
-  if (sendService) {
+  if (sendService && shouldRunWorkers) {
     registerInterval(setInterval(() => {
       void runAsLeader(SWEEP_LOCK.estimateReminder, async () => {
         await runEstimateReminderSweep({
           estimateRepo,
           sendService,
           auditRepo,
+          pool: pool ?? null,
           listTenantIds: async () => {
             if (!pool) return [];
             const r = await pool.query('SELECT id FROM tenants');
@@ -4475,25 +6550,57 @@ export function createApp(): express.Express {
     service: 'estimate-expiry-worker',
     environment: process.env.NODE_ENV || 'development',
   });
-  registerInterval(setInterval(() => {
-    void runAsLeader(SWEEP_LOCK.estimateExpiry, async () => {
-      await runEstimateExpirySweep({
-        estimateRepo,
-        auditRepo,
-        moneyStateDeps: { jobRepo, estimateRepo, invoiceRepo, auditRepo, logger: estimateExpiryLogger },
-        listTenantIds: async () => {
-          if (!pool) return [];
-          const r = await pool.query('SELECT id FROM tenants');
-          return r.rows.map((row: { id: string }) => row.id);
-        },
-        logger: estimateExpiryLogger,
+  if (shouldRunWorkers) {
+    registerInterval(setInterval(() => {
+      void runAsLeader(SWEEP_LOCK.estimateExpiry, async () => {
+        await runEstimateExpirySweep({
+          estimateRepo,
+          auditRepo,
+          moneyStateDeps: { jobRepo, estimateRepo, invoiceRepo, auditRepo, logger: estimateExpiryLogger },
+          listTenantIds: async () => {
+            if (!pool) return [];
+            const r = await pool.query('SELECT id FROM tenants');
+            return r.rows.map((row: { id: string }) => row.id);
+          },
+          logger: estimateExpiryLogger,
+        });
+      }).catch((err) => {
+        estimateExpiryLogger.error('Estimate-expiry sweep failed', {
+          error: err instanceof Error ? err.message : String(err),
+        });
       });
-    }).catch((err) => {
-      estimateExpiryLogger.error('Estimate-expiry sweep failed', {
-        error: err instanceof Error ? err.message : String(err),
+    }, 60 * 60_000));
+  }
+
+  // §5.5 Proposal-expiry worker — transitions schedule proposal cards
+  // (create_appointment / create_booking / reschedule_appointment) past their
+  // 48h `expiresAt` to 'expired' so stale bookings don't linger in the inbox.
+  // Every other proposal type carries no expiry and is untouched. Hourly; no
+  // SendService dependency (it only changes status).
+  const proposalExpiryLogger = createLogger({
+    service: 'proposal-expiry-worker',
+    environment: process.env.NODE_ENV || 'development',
+  });
+  if (shouldRunWorkers) {
+    registerInterval(setInterval(() => {
+      void runAsLeader(SWEEP_LOCK.proposalExpiry, async () => {
+        await runProposalExpirySweep({
+          proposalRepo,
+          auditRepo,
+          listTenantIds: async () => {
+            if (!pool) return [];
+            const r = await pool.query('SELECT id FROM tenants');
+            return r.rows.map((row: { id: string }) => row.id);
+          },
+          logger: proposalExpiryLogger,
+        });
+      }).catch((err) => {
+        proposalExpiryLogger.error('Proposal-expiry sweep failed', {
+          error: err instanceof Error ? err.message : String(err),
+        });
       });
-    });
-  }, 60 * 60_000));
+    }, 60 * 60_000));
+  }
 
   // P7-026 PR a: Google Business reviews polling. Every 15 minutes
   // we sweep every tenant with an active `google_business`
@@ -4516,8 +6623,8 @@ export function createApp(): express.Express {
   // immediately produce a draft review_response_proposal. When any are
   // missing, we log a one-shot warning so ops can see "ingestion only,
   // no proposals being created" without grepping the per-tick logs.
-  const googleReviewsCustomerLoader = pool ? new PgCustomerLoader(pool) : null;
-  const googleReviewsBrandVoiceLoader = new NoopBrandVoiceLoader();
+  // (Loader instances are constructed next to serviceCreditRepo above and
+  // shared with the voice respond_to_review on-ramp — U3.)
   const googleReviewsProposalEmission =
     serviceCreditRepo && googleReviewsCustomerLoader
       ? {
@@ -4540,35 +6647,37 @@ export function createApp(): express.Express {
       },
     );
   }
-  registerInterval(setInterval(() => {
-    if (
-      !googleReviewsReviewRepo ||
-      !googleReviewsPollStateRepo ||
-      !googleReviewsCredResolver
-    ) {
-      return;
-    }
-    void runAsLeader(SWEEP_LOCK.googleReviews, async () => {
-      await runGoogleReviewsSweep({
-        reviewRepo: googleReviewsReviewRepo,
-        pollStateRepo: googleReviewsPollStateRepo,
-        credentialResolver: googleReviewsCredResolver,
-        listTenantIds: async () => {
-          if (!pool) return [];
-          const r = await pool.query('SELECT id FROM tenants');
-          return r.rows.map((row: { id: string }) => row.id);
-        },
-        logger: googleReviewsLogger,
-        ...(googleReviewsProposalEmission
-          ? { proposalEmission: googleReviewsProposalEmission }
-          : {}),
+  if (shouldRunWorkers) {
+    registerInterval(setInterval(() => {
+      if (
+        !googleReviewsReviewRepo ||
+        !googleReviewsPollStateRepo ||
+        !googleReviewsCredResolver
+      ) {
+        return;
+      }
+      void runAsLeader(SWEEP_LOCK.googleReviews, async () => {
+        await runGoogleReviewsSweep({
+          reviewRepo: googleReviewsReviewRepo,
+          pollStateRepo: googleReviewsPollStateRepo,
+          credentialResolver: googleReviewsCredResolver,
+          listTenantIds: async () => {
+            if (!pool) return [];
+            const r = await pool.query('SELECT id FROM tenants');
+            return r.rows.map((row: { id: string }) => row.id);
+          },
+          logger: googleReviewsLogger,
+          ...(googleReviewsProposalEmission
+            ? { proposalEmission: googleReviewsProposalEmission }
+            : {}),
+        });
+      }).catch((err) => {
+        googleReviewsLogger.error('Google reviews sweep failed', {
+          error: err instanceof Error ? err.message : String(err),
+        });
       });
-    }).catch((err) => {
-      googleReviewsLogger.error('Google reviews sweep failed', {
-        error: err instanceof Error ? err.message : String(err),
-      });
-    });
-  }, 15 * 60_000));
+    }, 15 * 60_000));
+  }
 
   // Post-job thank-you SMS sweep (PRD §7.2). Same P0-009 sweep idiom as
   // google-reviews / overdue-invoice / appointment-reminder. The pool
@@ -4577,24 +6686,97 @@ export function createApp(): express.Express {
     service: 'thank-you-sms-worker',
     environment: process.env.NODE_ENV || 'development',
   });
-  registerInterval(setInterval(() => {
-    void runAsLeader(SWEEP_LOCK.thankYouSms, async () => {
-      await runThankYouSmsSweep({
-        pool: pool ?? null,
-        jobRepo,
-        customerRepo,
-        settingsRepo,
-        dncRepo,
-        dispatcher: feedbackDispatcher,
-        auditRepo,
-        logger: thankYouSmsLogger,
+  if (shouldRunWorkers) {
+    registerInterval(setInterval(() => {
+      void runAsLeader(SWEEP_LOCK.thankYouSms, async () => {
+        await runThankYouSmsSweep({
+          pool: pool ?? null,
+          jobRepo,
+          customerRepo,
+          settingsRepo,
+          dncRepo,
+          dispatcher: feedbackDispatcher,
+          auditRepo,
+          logger: thankYouSmsLogger,
+        });
+      }).catch((err) => {
+        thankYouSmsLogger.error('Thank-you SMS sweep failed', {
+          error: err instanceof Error ? err.message : String(err),
+        });
       });
-    }).catch((err) => {
-      thankYouSmsLogger.error('Thank-you SMS sweep failed', {
-        error: err instanceof Error ? err.message : String(err),
+    }, 10 * 60_000));
+  }
+
+  // Post-job review request (PRD US-345) — fires 24h after completion via the
+  // same P0-009 leader-locked sweep idiom; reuses the feedback_send worker for
+  // gated delivery (the immediate on-completion enqueue was removed).
+  const reviewRequestLogger = createLogger({
+    service: 'review-request-worker',
+    environment: process.env.NODE_ENV || 'development',
+  });
+  if (shouldRunWorkers) {
+    registerInterval(setInterval(() => {
+      void runAsLeader(SWEEP_LOCK.reviewRequest, async () => {
+        await runReviewRequestSweep({
+          pool: pool ?? null,
+          jobRepo,
+          queue,
+          logger: reviewRequestLogger,
+        });
+      }).catch((err) => {
+        reviewRequestLogger.error('Review-request sweep failed', {
+          error: err instanceof Error ? err.message : String(err),
+        });
       });
-    });
-  }, 10 * 60_000));
+    }, 10 * 60_000));
+  }
+
+  // Onboarding lifecycle email sweeps (setup reminder + trial-ending). Same
+  // P0-009 sweep idiom; the pool guard inside each no-ops when running
+  // in-memory, and each send claims the lifecycle_emails ledger so a re-tick
+  // never double-sends.
+  const lifecycleSweepLogger = createLogger({
+    service: 'lifecycle-email-sweep',
+    environment: process.env.NODE_ENV || 'development',
+  });
+  if (shouldRunWorkers) {
+    registerInterval(setInterval(() => {
+      void runAsLeader(SWEEP_LOCK.setupReminder, async () => {
+        await runSetupReminderSweep({
+          pool: pool ?? null,
+          settingsRepo,
+          delivery: messageDelivery,
+          auditRepo,
+          appBaseUrl: lifecycleEmailAppBaseUrl,
+          supportEmail: lifecycleEmailSupportEmail,
+          logger: lifecycleSweepLogger,
+        });
+      }).catch((err) => {
+        lifecycleSweepLogger.error('Setup-reminder sweep failed', {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      });
+    }, 60 * 60_000));
+  }
+  if (shouldRunWorkers) {
+    registerInterval(setInterval(() => {
+      void runAsLeader(SWEEP_LOCK.trialReminder, async () => {
+        await runTrialReminderSweep({
+          pool: pool ?? null,
+          settingsRepo,
+          delivery: messageDelivery,
+          auditRepo,
+          appBaseUrl: lifecycleEmailAppBaseUrl,
+          supportEmail: lifecycleEmailSupportEmail,
+          logger: lifecycleSweepLogger,
+        });
+      }).catch((err) => {
+        lifecycleSweepLogger.error('Trial-reminder sweep failed', {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      });
+    }, 60 * 60_000));
+  }
 
   // U5 — the redundant P5-020 hourly digest worker was removed; the daily
   // digest (RV-063 runDailyDigestSweep, scheduled above on the dailyDigest
@@ -4608,6 +6790,7 @@ export function createApp(): express.Express {
   const ttsProvider = createTtsProvider({
     TTS_PROVIDER: process.env.TTS_PROVIDER,
     ELEVENLABS_API_KEY: process.env.ELEVENLABS_API_KEY,
+    ELEVENLABS_VOICE_ID: process.env.ELEVENLABS_VOICE_ID,
     AI_PROVIDER_API_KEY: config.AI_PROVIDER_API_KEY,
   });
   const inAppVoiceAdapter = new InAppVoiceAdapter({
@@ -4624,6 +6807,13 @@ export function createApp(): express.Express {
     repairTemplatesResolver,
     voiceSessionRepo,
     voicePersonaResolver,
+    // QA-2026-07-26 — grounds voice-drafted estimate line items
+    // (entities.lineItemDescriptions) against the tenant's real catalog.
+    catalogRepo,
+    // QA-2026-07-26 — resolves an optional session-start `callerPhone` to a
+    // CRM customer (exactly one findByPhoneNormalized match) so a later
+    // generic reference like "our customer" still attaches correctly.
+    customerRepo,
     // RV-115 — durable dropped-call recovery with the FSM context snapshot.
     // (In-app sessions rarely have a caller phone; the scheduler's own
     // detection rejects rows without a usable E.164.)
@@ -4634,6 +6824,20 @@ export function createApp(): express.Express {
     supportedLanguagesResolver: async (tenantId: string) => {
       const s = await settingsRepo.findByTenant(tenantId);
       return s?.supportedLanguages;
+    },
+    extendedIntentsEnabled: voiceExtendedIntentsFlagShim,
+    ownerLookupResolver: async (tenantId, sessionId, intentType) => {
+      if (intentType !== 'lookup_day_overview') return undefined;
+      const result = await lookupDayOverview(
+        { tenantId, sessionId },
+        {
+          appointmentRepo,
+          jobRepo,
+          proposalRepo,
+          userRepo,
+        },
+      );
+      return result.summary;
     },
   });
   app.use(
@@ -4735,6 +6939,69 @@ export function createApp(): express.Express {
   // Never uninstalled on shutdown — benign: fail-open + fire-and-forget.
   // Tests must reset via configureSupervisorCreationHook(null).
   configureSupervisorCreationHook(supervisorService);
+
+  // N-004 (P2-037) — install the four-check pre-dispatch review gate.
+  // Default mode is shadow (compute + log + mark, never hold) — the safe
+  // default given alert-fatigue is the named risk; SUPERVISOR_REVIEW_MODE can
+  // promote a deploy to 'enforce' (holds active on customer-harm criticals) or
+  // 'off'. Boot-time invariant: the reviewer model must differ from the primary
+  // drafting model (a same-model reviewer is degraded, not broken — warn + run).
+  const supervisorReviewModel = resolveModelForTaskType(
+    DEFAULT_AI_ROUTING_CONFIG,
+    'supervisor_review',
+  );
+  const modelCollision = assertSupervisorReviewModelDistinct(DEFAULT_AI_ROUTING_CONFIG);
+  if (modelCollision) {
+    supervisorLogger.warn(
+      'supervisor-review: reviewer model equals a primary drafting model (degraded)',
+      modelCollision,
+    );
+  }
+  const envReviewMode = (process.env.SUPERVISOR_REVIEW_MODE ?? '').trim();
+  const supervisorReviewMode: SupervisorReviewMode =
+    envReviewMode === 'off' || envReviewMode === 'shadow' || envReviewMode === 'enforce'
+      ? envReviewMode
+      : DEFAULT_SUPERVISOR_REVIEW_MODE;
+  const supervisorPricingBaseline = pool ? new PgPricingBaselineResolver(pool) : null;
+  configureSupervisorReviewGate(
+    createSupervisorReviewGate({
+      gateway: llmGateway,
+      aiRunRepo,
+      // WS6 — reuse the hoisted instance (the digest worker deps share it).
+      reviewsRepo: supervisorReviewsRepo,
+      proposalRepo,
+      supervisorModel: supervisorReviewModel,
+      resolveMode: async () => supervisorReviewMode,
+      ...(supervisorPricingBaseline
+        ? { resolveBaseline: (p) => supervisorPricingBaseline.resolve(p.tenantId) }
+        : {}),
+      resolveAccountType: async (p) => {
+        const payload = (p.payload ?? {}) as Record<string, unknown>;
+        const src = (p.sourceContext ?? {}) as Record<string, unknown>;
+        const customerId =
+          (typeof payload.customerId === 'string' && payload.customerId) ||
+          (typeof src.customerId === 'string' && src.customerId) ||
+          null;
+        if (!customerId) return null;
+        try {
+          const customer = await customerRepo.findById(p.tenantId, customerId);
+          return customer?.accountType ?? null;
+        } catch {
+          return null;
+        }
+      },
+      resolveBannedPhrases: async (tenantId) => {
+        try {
+          const settings = await settingsRepo.findByTenant(tenantId);
+          return settings?.brandVoice?.banned_phrases ?? [];
+        } catch {
+          return [];
+        }
+      },
+      logger: supervisorLogger,
+    }),
+  );
+
   // Close the executed-spend loop declared next to the ProposalExecutor.
   supervisorSpendRecorder = (tenantId, proposalId) =>
     recordExecutedProposalSpend({
@@ -4751,7 +7018,7 @@ export function createApp(): express.Express {
   // is passed through, so a tenant with no flag set is swept and only an
   // explicitly opted-out tenant is skipped. Stays advisory — never a status
   // change.
-  if (config.AI_PROVIDER_API_KEY) {
+  if (config.AI_PROVIDER_API_KEY && shouldRunWorkers) {
     registerInterval(setInterval(() => {
       void runAsLeader(SWEEP_LOCK.supervisorAnnotate, async () => {
         await runSupervisorAnnotationSweep({
@@ -4792,17 +7059,49 @@ export function createApp(): express.Express {
   app.use(captureRequestError());
 
   // Global error handler
-  app.use((err: Error, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
+  app.use((err: Error, req: express.Request, res: express.Response, _next: express.NextFunction) => {
     const { statusCode, body } = toErrorResponse(err);
+    // OBS — surface server 5xx in PostHog (api_error), attributable to the
+    // already-redacted route + tenant, so "where are customers hitting bugs"
+    // covers the backend too. Off-by-default; wrapped so analytics can never
+    // turn an error response into a thrown handler. No body/headers/message.
+    if (statusCode >= 500) {
+      try {
+        const anyReq = req as unknown as {
+          safeRequestLog?: { route?: string };
+          auth?: { tenantId?: string; userId?: string };
+        };
+        recordApiError({
+          route: anyReq.safeRequestLog?.route ?? req.path,
+          status: statusCode,
+          tenantId: anyReq.auth?.tenantId ?? null,
+          userId: anyReq.auth?.userId ?? null,
+        });
+      } catch {
+        // analytics must never break the error response
+      }
+    }
     res.status(statusCode).json(body);
   });
 
+  // Marketing/legal pages moved to the standalone marketing site — forward
+  // the retired in-app paths (/pricing, /privacy, …) there before the SPA
+  // catch-all can serve index.html for them.
+  registerMarketingRedirects(app);
+
   // Catch-all route for client-side routing — serves index.html for all non-API routes
-  // This allows the React SPA to handle routing on the client side
+  // This allows the React SPA to handle routing on the client side.
+  // This route sits AFTER the global error handler, so sendFile's next(err)
+  // would fall through to Express's default handler (stack trace in dev) —
+  // handle the error in the callback instead.
   app.get('*', (req, res) => {
-    const frontendPath = require('path').join(__dirname, '../../web/dist');
+    const frontendPath = resolveWebDistDir(__dirname);
     const indexPath = require('path').join(frontendPath, 'index.html');
-    res.sendFile(indexPath);
+    res.sendFile(indexPath, (err) => {
+      if (err && !res.headersSent) {
+        res.status(500).json({ error: 'INTERNAL_ERROR', message: 'Frontend assets unavailable' });
+      }
+    });
   });
 
   // P0-023: Graceful shutdown — close the Postgres pool on SIGTERM/SIGINT so
@@ -4811,18 +7110,60 @@ export function createApp(): express.Express {
   // don't stack handlers, and we exit only when the pool finishes draining
   // (or after a 5s safety timeout). Server lifecycle is owned by index.ts —
   // this handler only takes responsibility for the DB pool.
-  const shutdown = async (signal: NodeJS.Signals) => {
+  //
+  // ARCH-02: wrapped in a memoized promise so it is idempotent — index.ts's
+  // fatal-error handler and this module's own SIGTERM/SIGINT listeners can
+  // all reach this function, and only the FIRST caller actually runs
+  // teardown; every subsequent caller (concurrent SIGTERM during a fatal
+  // drain, or vice versa) awaits the same in-flight drain instead of
+  // re-entering it (which would double-close the pool/Redis clients).
+  let shutdownPromise: Promise<void> | null = null;
+  const shutdown = (reason: string): Promise<void> => {
+    if (shutdownPromise) return shutdownPromise;
+    shutdownPromise = runShutdown(reason);
+    return shutdownPromise;
+  };
+  const runShutdown = async (signal: string) => {
     try {
       // eslint-disable-next-line no-console
       console.log(`[app] ${signal} received — stopping background loops, closing voice sessions and pg pool`);
+      // P4/U-P4a — flip the drain flag so /ready 503s and new WS upgrades
+      // (dashboards + Twilio media streams) are rejected.
+      setDraining(true);
       // Blocker 5 — stop all background setInterval loops (sweeps, queue poll,
-      // execution worker) BEFORE the pg pool drains. `shuttingDown` also
-      // prevents an already-scheduled leader-gated sweep tick from starting
-      // new work. Without this, a tick fires mid-teardown and throws on a
-      // closed pool. In-flight queue jobs are bounded by the pool-drain race
-      // below.
+      // execution worker) and set `shuttingDown` IMMEDIATELY, BEFORE the voice
+      // drain wait below. The drain wait can run for the full DRAIN_TIMEOUT_MS
+      // (~25s); if the queue poller and leader-gated sweeps kept ticking through
+      // it they would claim fresh DB/Redis work right up to the deadline, then
+      // get torn down with jobs in flight. `shuttingDown` also prevents an
+      // already-scheduled leader sweep tick from starting new work. Voice
+      // sessions are in-memory FSMs and don't depend on these loops, so halting
+      // them first does not impede the drain. (Codex review on PR #628.)
       shuttingDown = true;
       for (const handle of backgroundIntervals) clearInterval(handle);
+      // Now DRAIN: wait (bounded) for in-flight voice sessions to finish before
+      // tearing down the pool/Redis/sessions. The window must be shorter than
+      // index.ts's force-exit and Railway's stop grace period; calls still live
+      // at the deadline are closed by the teardown below (Twilio ends the call).
+      const drainDeadline = Date.now() + (Number(process.env.DRAIN_TIMEOUT_MS) || 25_000);
+      while (voiceSessionStore.liveCount() > 0 && Date.now() < drainDeadline) {
+        await new Promise((resolve) => setTimeout(resolve, 500));
+      }
+      console.log(`[app] drain complete — ${voiceSessionStore.liveCount()} live session(s) still active at teardown`);
+      // WS15 — drain-abandonment alarm: the window expired with live calls
+      // remaining, so teardown below hangs up on real callers (Twilio ends
+      // them). emitDrainAbandonment is synchronous fire-and-forget (Sentry
+      // captureMessage enqueues into the client's transport buffer — no await
+      // that could eat into the force-exit backstop) and never throws. The
+      // Prometheus counter it increments dies with this process; the Sentry
+      // error event is the durable alarm.
+      if (voiceSessionStore.liveCount() > 0) {
+        emitDrainAbandonment(
+          voiceSessionStore.liveCount(),
+          voiceSessionStore.liveCallSids(),
+          { sentry: sentryClient, logger: requestLogger },
+        );
+      }
       // Stop the voice-session-store reaper interval so the process can
       // exit cleanly even when no DB pool is wired (dev / in-memory mode).
       voiceSessionStore.dispose();
@@ -4836,9 +7177,21 @@ export function createApp(): express.Express {
       // Disconnect Redis cache store(s) before draining the DB pool so Railway
       // shutdown is not slowed by lingering Redis connections.
       await shutdownCacheStores();
+      // scale-to-1000 U3a — close shared Redis clients (WS connection cap, voice
+      // fan-out, quota, and the refactored cache) after the cache flush and
+      // BEFORE the pg pool drains, in the same shutdown slot as the cache.
+      await shutdownRedisClients();
       if (pool) {
         await Promise.race([
           pool.end(),
+          new Promise((resolve) => setTimeout(resolve, 5000)),
+        ]);
+      }
+      // Close the direct pool too when it's a SEPARATE pool (DATABASE_DIRECT_URL
+      // set). When it falls back to the main pool it was already drained above.
+      if (directPool && directPool !== pool) {
+        await Promise.race([
+          directPool.end(),
           new Promise((resolve) => setTimeout(resolve, 5000)),
         ]);
       }
@@ -4850,5 +7203,17 @@ export function createApp(): express.Express {
   process.once('SIGTERM', shutdown);
   process.once('SIGINT', shutdown);
 
-  return app;
+  // ARCH-02: share the exact same (idempotent, bounded) drain sequence with
+  // index.ts's fatal-error handler — see AppWithLifecycle above.
+  const appWithLifecycle = app as AppWithLifecycle;
+  appWithLifecycle.gracefulDrain = shutdown;
+  // WS2 — snapshot the registered interval count for the process-role split.
+  // All registrations happen above, so this is final at return time.
+  Object.defineProperty(appWithLifecycle, 'backgroundIntervalCount', {
+    value: backgroundIntervals.length - observabilityIntervalCount,
+    writable: false,
+    enumerable: false,
+  });
+
+  return appWithLifecycle;
 }

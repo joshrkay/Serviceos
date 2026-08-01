@@ -109,6 +109,14 @@ function scrubAuthToken(err: unknown, authToken: string | undefined): string {
  * to transcode the WAV master into MP3 on the fly — our S3 key uses
  * `.mp3` to match.
  */
+// Media transfers get a generous but bounded window — without a signal a
+// stalled Twilio CDN / S3 endpoint hangs the webhook handler while Twilio
+// retries pile more hung handlers on top.
+const MEDIA_TRANSFER_TIMEOUT_MS = 30_000;
+// Cap the recording we're willing to buffer in memory (~1 hour of 32kbps
+// MP3 is ~14MB; 50MB covers any real call while bounding a rogue payload).
+const MAX_RECORDING_BYTES = 50 * 1024 * 1024;
+
 async function fetchRecordingBytes(
   recordingUrl: string,
   accountSid: string,
@@ -119,6 +127,7 @@ async function fetchRecordingBytes(
   const res = await fetch(url, {
     method: 'GET',
     headers: { Authorization: `Basic ${basic}`, Accept: 'audio/mpeg' },
+    signal: AbortSignal.timeout(MEDIA_TRANSFER_TIMEOUT_MS),
   });
   if (!res.ok) {
     // Throw with body text for visibility — but the caller scrubs the
@@ -126,7 +135,14 @@ async function fetchRecordingBytes(
     const bodyText = await res.text().catch(() => '');
     throw new Error(`Twilio recording fetch failed ${res.status}: ${bodyText.slice(0, 200)}`);
   }
+  const contentLength = Number(res.headers.get('content-length'));
+  if (Number.isFinite(contentLength) && contentLength > MAX_RECORDING_BYTES) {
+    throw new Error(`Twilio recording too large to buffer: ${contentLength} bytes`);
+  }
   const arrayBuf = await res.arrayBuffer();
+  if (arrayBuf.byteLength > MAX_RECORDING_BYTES) {
+    throw new Error(`Twilio recording too large to buffer: ${arrayBuf.byteLength} bytes`);
+  }
   return Buffer.from(arrayBuf);
 }
 
@@ -139,6 +155,7 @@ async function uploadToS3(
     method: 'PUT',
     headers: { 'Content-Type': contentType },
     body: bytes,
+    signal: AbortSignal.timeout(MEDIA_TRANSFER_TIMEOUT_MS),
   });
   if (!res.ok) {
     const bodyText = await res.text().catch(() => '');

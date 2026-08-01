@@ -128,6 +128,16 @@ export class PerTenantTwilioDeliveryProvider implements MessageDeliveryProvider 
         providerBody: err instanceof Error ? err.message : String(err),
       });
     }
+    const response = await this.fetchImpl(
+      `${this.apiBaseUrl}/Accounts/${creds.accountSid}/Messages.json`,
+      {
+        method: 'POST',
+        headers,
+        body: body.toString(),
+        // fetch has NO default timeout — a Twilio stall would hang the send.
+        signal: AbortSignal.timeout(15_000),
+      },
+    );
 
     if (!response.ok) {
       const text = await response.text().catch(() => '');

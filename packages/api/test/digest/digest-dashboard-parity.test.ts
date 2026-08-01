@@ -18,6 +18,7 @@ import type { ProposalRepository } from '../../src/proposals/proposal';
 import type { CustomerRepository } from '../../src/customers/customer';
 import type { SettingsRepository, TenantSettings } from '../../src/settings/settings';
 import type { FeedbackResponseRepository } from '../../src/feedback/feedback-response';
+import type { CorrectionLessonRepository } from '../../src/learning/corrections/correction-lesson';
 
 const TENANT = 'tenant-parity';
 const TZ = 'America/Los_Angeles';
@@ -104,8 +105,14 @@ function deps(): DigestComputeDeps {
         invoices.filter((i) => i.status === opts?.status),
       findByJobs: async () => [],
     } as unknown as InvoiceRepository,
-    estimateRepo: { findByJobs: async () => [] } as unknown as EstimateRepository,
-    proposalRepo: { findByStatus: async () => [] } as unknown as ProposalRepository,
+    estimateRepo: {
+      findByJobs: async () => [],
+      findByTenant: async () => [],
+    } as unknown as EstimateRepository,
+    proposalRepo: {
+      findByStatus: async () => [],
+      findConfidenceMarkedForDay: async () => [],
+    } as unknown as ProposalRepository,
     customerRepo: { findById: async () => null } as unknown as CustomerRepository,
     settingsRepo: {
       findByTenant: async () => ({ timezone: TZ } as TenantSettings),
@@ -113,6 +120,9 @@ function deps(): DigestComputeDeps {
     feedbackResponseRepo: {
       countByRatingInRange: async () => ({ 1: 0, 2: 0, 3: 0, 4: 0, 5: 0 }),
     } as unknown as FeedbackResponseRepository,
+    correctionLessonRepo: {
+      findAppliedForDay: async () => [],
+    } as unknown as CorrectionLessonRepository,
     now: () => NOW,
   };
 }

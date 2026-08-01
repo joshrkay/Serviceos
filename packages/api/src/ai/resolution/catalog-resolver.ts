@@ -9,14 +9,33 @@
  * against the tenant's active catalog items:
  *
  *   - 'exact' / 'high'  → the catalog item's `unitPriceCents` is
- *     authoritative; the LLM's number is overwritten.
+ *     authoritative and the LLM's number is overwritten — UNLESS the
+ *     drafted line carries its own positive integer price that deviates
+ *     from the catalog price by more than BOTH `PRICE_CONFLICT_MIN_REL`
+ *     and `PRICE_CONFLICT_MIN_ABS_CENTS` (see `applyCatalogPricing`). A
+ *     deviation that large is a "did you mean" price CONFLICT, not a
+ *     mishear — the owner may have deliberately quoted a custom or
+ *     discounted price ("do it for Mrs. Henderson at half price"). That
+ *     case is surfaced exactly like an 'ambiguous' match instead of being
+ *     silently snapped: the drafted price is kept, `pricingSource:
+ *     'ambiguous'`, and two candidates are recorded — the real catalog
+ *     item and a synthetic "keep spoken price" choice — for the operator
+ *     to pick via the same one-tap resolution as any other ambiguity.
  *   - 'ambiguous'       → two-plus plausible items (or one weak match).
  *     The LLM price is kept but the proposal is forced to 'draft' via
  *     missingFields so the operator picks the right item — an uncertain
  *     match must never silently set a price.
  *   - 'none'            → not in the catalog. The LLM price is kept but
- *     flagged `uncatalogued` and the proposal confidence is capped below
- *     the auto-approve threshold, so a human always reviews it.
+ *     flagged `uncatalogued`, `requiresReview` is forced true, and the
+ *     proposal confidence is capped below the auto-approve threshold — the
+ *     cap is defense in depth, `requiresReview` is the hard, threshold-
+ *     independent gate (a tenant can override the numeric threshold; it
+ *     cannot override this). Consumers thread `requiresReview` into
+ *     `payload._meta.overallConfidence = 'low'`, which `decideInitialStatus`
+ *     (proposals/proposal.ts) blocks on via `confidenceMetaBlocksAutoApprove`
+ *     BEFORE resolving any tenant threshold override — so a human always
+ *     reviews an AI-invented price, no matter how the auto-approve threshold
+ *     is configured.
  *
  * Pure and deterministic — no I/O, no LLM. Operates on a preloaded
  * tenant catalog array (1-5 person shops have small catalogs; one
@@ -25,6 +44,7 @@
  */
 import type { CatalogItem } from '../../catalog/catalog-item';
 import type { ConfidenceLevel } from '../guardrails/confidence';
+import { catalogUnitSchema } from '@ai-service-os/shared';
 
 export type CatalogMatchTier = 'exact' | 'high' | 'ambiguous' | 'none';
 export type CatalogMatchType = 'exact' | 'prefix' | 'token_overlap' | 'fuzzy';
@@ -52,6 +72,21 @@ export const TAU_HIGH = 0.85;
 export const MARGIN = 0.15;
 /** Scores below this are not candidates at all. */
 export const TAU_FLOOR = 0.6;
+/**
+ * Minimum relative deviation (as a fraction of the catalog price) between
+ * a drafted line's own price and its exact/high catalog match before it's
+ * treated as a "did you mean" price conflict rather than a mishear.
+ */
+export const PRICE_CONFLICT_MIN_REL = 0.1;
+/**
+ * Minimum absolute deviation (integer cents) between a drafted line's own
+ * price and its exact/high catalog match before it's treated as a "did
+ * you mean" price conflict. Paired with `PRICE_CONFLICT_MIN_REL` — BOTH
+ * must be exceeded (a few cents of rounding noise on a $2,000 job is a
+ * huge relative miss but zero real-money risk; a $200 miss on a $5 line
+ * is a huge relative miss AND real money).
+ */
+export const PRICE_CONFLICT_MIN_ABS_CENTS = 100;
 /** Description matches are weaker evidence than name matches. */
 export const DESCRIPTION_WEIGHT = 0.6;
 /** Max candidates surfaced on an ambiguous result. */
@@ -94,7 +129,7 @@ export function singularizeToken(token: string): string {
  * strip combining marks), lowercase, punctuation → spaces, drop
  * stopwords and sub-2-char tokens, singularize.
  */
-export function normalizeForMatch(raw: string): string[] {
+function foldAndSplit(raw: string): string[] {
   const folded = raw
     .trim()
     .normalize('NFKD')
@@ -103,14 +138,41 @@ export function normalizeForMatch(raw: string): string[] {
     .replace(/[^a-z0-9]+/g, ' ')
     .trim();
   if (folded.length === 0) return [];
+  return folded.split(/\s+/);
+}
+
+/**
+ * Normalize free text to comparable tokens: trim, accent-fold (NFKD +
+ * strip combining marks), lowercase, punctuation → spaces, drop
+ * stopwords and sub-2-char tokens, singularize.
+ */
+export function normalizeForMatch(raw: string): string[] {
   return (
-    folded
-      .split(/\s+/)
+    foldAndSplit(raw)
       // Digit-only tokens are quantities ("2 hours labor"), not item
       // identity — quantity already rides the line item's own field.
       .filter((t) => t.length >= 2 && !STOPWORDS.has(t) && !/^\d+$/.test(t))
       .map(singularizeToken)
   );
+}
+
+/**
+ * Like {@link normalizeForMatch} but KEEPS digit-only tokens. Numbered
+ * catalog families ('Part 001'..'Part 180') carry their identity in the
+ * SKU number: dropping the digit token as a "quantity" collapses the whole
+ * family to 'part', making the item the operator actually named
+ * ('part 120') unreachable — it becomes ambiguous against every sibling.
+ * Here the digit token stays, so 'part 120' → ['part', '120'] stays
+ * distinct from 'part 121'. Used only by the digit-aware EXACT pass in
+ * {@link resolveLineItemToCatalog}, which requires the FULL normalized
+ * strings to be equal — so a quantity phrase ('add 12 hvac filters' →
+ * ['add','12','hvac','filter']) can never full-string-equal a bare item
+ * name ('HVAC Filter' → ['hvac','filter']).
+ */
+export function normalizeForMatchKeepDigits(raw: string): string[] {
+  return foldAndSplit(raw)
+    .filter((t) => t.length >= 2 && !STOPWORDS.has(t))
+    .map(singularizeToken);
 }
 
 /**
@@ -276,6 +338,31 @@ export function resolveLineItemToCatalog(
     return { query, tier: 'none' };
   }
 
+  // Digit-aware EXACT pass — runs BEFORE the digit-dropping logic below.
+  // The main path drops digit-only tokens as quantities, so a numbered
+  // catalog family ('Part 001'..'Part 180') all collapses to 'part' and
+  // the item the operator actually named ('part 120') is unreachable —
+  // it lands in a MAX_CANDIDATES=3 alphabetical ambiguity, and the gate
+  // can only be cleared by picking a WRONG sibling. Here, when the query
+  // carries a SKU number, we keep digit tokens and require the FULL
+  // normalized name string to be equal. Exactly one hit → tier 'exact'
+  // with that item; the price-conflict carve-out still applies downstream
+  // (applyCatalogPricing / edit-action-grounding re-check the drafted
+  // price against `match.unitPriceCents`, so a digit-exact match with a
+  // ≥10%+≥$1 deviation still surfaces the "did you mean" candidates rather
+  // than snapping). Zero or multiple hits fall through to the
+  // quantity-robust digit-dropping behavior unchanged.
+  const digitTokens = normalizeForMatchKeepDigits(query);
+  if (digitTokens.some((t) => /\d/.test(t))) {
+    const digitKey = digitTokens.join(' ');
+    const digitExact = activeItems.filter(
+      (item) => normalizeForMatchKeepDigits(item.name).join(' ') === digitKey,
+    );
+    if (digitExact.length === 1) {
+      return { query, tier: 'exact', match: digitExact[0] };
+    }
+  }
+
   const candidates = activeItems
     .map((item) => scoreCandidate(queryTokens, item))
     .filter((c): c is CatalogCandidate => c !== null)
@@ -337,15 +424,113 @@ export interface CatalogPricingOutcome {
   /** Ambiguous-line candidates keyed by line index, for the review UI. */
   catalogResolution?: Record<
     number,
-    Array<{ id: string; name: string; unitPriceCents: number; score: number }>
+    Array<{
+      id: string;
+      name: string;
+      unitPriceCents: number;
+      score: number;
+      /**
+       * Contract category ('labor' | 'material') of the catalog item this
+       * candidate represents. Absent on the synthetic `spoken:` "keep
+       * spoken price" candidate — it has no catalog identity, so picking
+       * it must leave the line's own category untouched (resolve-line.ts).
+       */
+      category?: string;
+      /**
+       * B7.5 — the candidate catalog item's unit of measure, recorded so a
+       * one-tap resolution (resolve-line.ts) lands the SAME unit a direct
+       * exact/high match would have. Absent on the synthetic `spoken:`
+       * candidate (no catalog identity) and on candidates recorded before
+       * this field existed; either way resolution leaves the line's unit
+       * alone rather than clobbering it with undefined.
+       */
+      unit?: string;
+    }>
   >;
   anyUncatalogued: boolean;
   anyCatalogPriced: boolean;
+  /**
+   * Structural, threshold-independent hard gate: true whenever ANY line in
+   * this outcome carries an AI-invented (uncatalogued) or operator-unpicked
+   * (ambiguous) price. `true` here means "this outcome must never
+   * auto-approve" — full stop, regardless of confidence score or any tenant
+   * `auto_approve_threshold` override.
+   *
+   * Deliberately NOT folded into `missingFields`: `missingFields` is cleared
+   * only via `resolveProposalLine` (proposals/resolve-line.ts), which
+   * requires a recorded candidate set (only 'ambiguous' lines get one) — an
+   * uncatalogued line has no candidates to pick from, so putting it in
+   * `missingFields` would permanently deadlock approval instead of merely
+   * blocking auto-approval. `requiresReview` is the numeric-cap's structural
+   * companion, not a replacement for `missingFields`: it is `true` whenever
+   * `anyUncatalogued` or `missingFields.length > 0`.
+   *
+   * NOTE for consumers: use this for STATUS gates (force 'draft' /
+   * groundedClean checks). Do NOT drive the persisted
+   * `payload._meta.overallConfidence = 'low'` stamp from it — that stamp is
+   * never lifted by line resolution, so stamping ambiguous-only outcomes
+   * 'low' would keep blocking chain-set/SMS approval after the operator
+   * resolves the ambiguity. Drive the stamp from `anyUncatalogued` (an
+   * uncatalogued line has nothing to resolve, so its block is rightly
+   * permanent); ambiguity is gated by `missingFields`, which resolution
+   * clears.
+   */
+  requiresReview: boolean;
 }
 
 /** Catalog categories → the proposal contract's line-item vocabulary. */
 function contractCategory(item: CatalogItem): string {
   return item.category === 'Labor' ? 'labor' : 'material';
+}
+
+/**
+ * B7.5 — drop a `unit` the LLM emitted ONLY when it is not a member of the
+ * catalog's own vocabulary (`catalogUnitSchema`). A unit and a price are
+ * NOT the same kind of claim: a price is a number the model can invent
+ * without limit, so an ungrounded line's price is always untrusted
+ * (contracts.ts `unit: catalogUnitSchema.optional()` — "DESCRIPTIVE ONLY:
+ * no billing arithmetic reads it"). A unit, by contrast, is a value drawn
+ * from a small closed enum. When the model's spoken/drafted unit parses
+ * as `catalogUnitSchema` it is not invention — it's a real member of a
+ * bounded vocabulary the tenant's catalog also draws from — so it survives
+ * onto a line this pass could not ground to a specific catalog item (e.g.
+ * "three 45-microfarad capacitors" when that part isn't catalogued: name
+ * and quantity would otherwise persist with the unit silently dropped).
+ * Anything that does NOT parse against the enum (a hallucinated or
+ * malformed string) is still dropped — that case remains indistinguishable
+ * from invention. This does not touch price/confidence/requiresReview:
+ * an uncatalogued line's PRICE stays untrusted and `anyUncatalogued` still
+ * drives `requiresReview` and the confidence cap exactly as before —
+ * only the descriptive `unit` field's fate changes.
+ *
+ * Returns the SAME object when there is no unit to touch, so the common
+ * path allocates nothing.
+ */
+export function dropOutOfVocabularyUnit(
+  li: Record<string, unknown>,
+): Record<string, unknown> {
+  if (li.unit === undefined) return li;
+  if (catalogUnitSchema.safeParse(li.unit).success) return li;
+  const next = { ...li };
+  delete next.unit;
+  return next;
+}
+
+/**
+ * True when a drafted line's own price and its exact/high catalog match
+ * disagree enough to be a "did you mean" conflict rather than noise.
+ * Requires BOTH the absolute (integer cents) and relative (fraction of
+ * the catalog price) thresholds to be exceeded — the absolute check is
+ * plain integer comparison; the ratio is computed with division (the
+ * clearly-safe use of float per the money-safety invariant: only ever
+ * compared against a fixed threshold, never itself stored or summed as
+ * money).
+ */
+export function isPriceConflict(draftedCents: number, catalogCents: number): boolean {
+  const diffCents = Math.abs(draftedCents - catalogCents);
+  if (diffCents < PRICE_CONFLICT_MIN_ABS_CENTS) return false;
+  if (catalogCents <= 0) return true; // abs threshold alone already cleared
+  return diffCents / catalogCents >= PRICE_CONFLICT_MIN_REL;
 }
 
 /**
@@ -373,6 +558,44 @@ export function applyCatalogPricing(
     }
     if ((resolution.tier === 'exact' || resolution.tier === 'high') && resolution.match) {
       const item = resolution.match;
+      const draftedRaw = li[priceField];
+      // Zero is a REAL drafted price (a comped/free line — the contract's
+      // unitPriceCents is min(0)), so it must be conflict-eligible rather
+      // than silently snapped back to the full catalog price.
+      const draftedPrice =
+        typeof draftedRaw === 'number' && Number.isInteger(draftedRaw) && draftedRaw >= 0
+          ? draftedRaw
+          : null;
+
+      if (draftedPrice !== null && isPriceConflict(draftedPrice, item.unitPriceCents)) {
+        // "Did you mean" — don't overwrite. Keep the drafted line exactly
+        // as spoken and surface the conflict as a one-tap ambiguity: the
+        // real catalog item vs. a synthetic "keep the spoken price"
+        // choice. Nothing is priced yet, so `anyCatalogPriced` stays
+        // false for this line.
+        out.push({
+          ...dropOutOfVocabularyUnit(li),
+          pricingSource: 'ambiguous' satisfies PricingSource,
+          needsPricing: true,
+        });
+        missingFields.push(`lineItems[${idx}].catalogItemId`);
+        catalogResolution[idx] = [
+          {
+            id: item.id,
+            name: item.name,
+            unitPriceCents: item.unitPriceCents,
+            score: 1,
+            category: contractCategory(item),
+            ...(item.unit ? { unit: item.unit } : {}),
+          },
+          // Synthetic "keep spoken price" choice has no catalog identity —
+          // no category is stamped, so picking it leaves the line's own
+          // category untouched (see resolve-line.ts).
+          { id: `spoken:${idx}`, name: 'Keep spoken price', unitPriceCents: draftedPrice, score: 0 },
+        ];
+        return;
+      }
+
       const next: Record<string, unknown> = {
         ...li,
         description: item.name,
@@ -381,6 +604,16 @@ export function applyCatalogPricing(
         pricingSource: 'catalog' satisfies PricingSource,
         needsPricing: false,
         category: contractCategory(item),
+        // B7.5 — carry the catalog item's unit of measure onto the grounded
+        // line. It was previously dropped here, so a spoken "three
+        // capacitors" lost the fact that the catalog prices them per each.
+        // Descriptive only: the price above is still the authoritative one
+        // and no total is derived from this.
+        ...(item.unit ? { unit: item.unit } : {}),
+        // EE-4 — carry the catalog item's photo onto the grounded line so
+        // AI-drafted estimates show images with no separate AI code path.
+        // Only when the item has one (else leave absent = no image).
+        ...(item.imageFileId ? { imageFileId: item.imageFileId } : {}),
       };
       if (priceField === 'unitPriceCents') {
         // Invoice contract carries totalCents per line; recompute it from
@@ -395,7 +628,7 @@ export function applyCatalogPricing(
     }
     if (resolution.tier === 'ambiguous' && resolution.candidates) {
       out.push({
-        ...li,
+        ...dropOutOfVocabularyUnit(li),
         pricingSource: 'ambiguous' satisfies PricingSource,
         needsPricing: true,
       });
@@ -405,11 +638,13 @@ export function applyCatalogPricing(
         name: c.item.name,
         unitPriceCents: c.item.unitPriceCents,
         score: c.score,
+        category: contractCategory(c.item),
+        ...(c.item.unit ? { unit: c.item.unit } : {}),
       }));
       return;
     }
     out.push({
-      ...li,
+      ...dropOutOfVocabularyUnit(li),
       pricingSource: 'uncatalogued' satisfies PricingSource,
       needsPricing: true,
     });
@@ -422,7 +657,98 @@ export function applyCatalogPricing(
     ...(missingFields.length > 0 ? { catalogResolution } : {}),
     anyUncatalogued,
     anyCatalogPriced,
+    // Structural hard gate — see CatalogPricingOutcome doc. Ambiguous lines
+    // already force 'draft' via missingFields; uncatalogued lines have no
+    // missingFields entry (nothing to resolve to), so requiresReview is the
+    // signal that blocks their auto-approval instead.
+    requiresReview: anyUncatalogued || missingFields.length > 0,
   };
+}
+
+/**
+ * Stamp every priced line as `uncatalogued` — used when there is no catalog
+ * to ground against at all (repo unwired, empty catalog, or a read error). An
+ * LLM-invented price that was NEVER checked against a catalog is exactly as
+ * uncertain as an explicit 'none' match, so it must flip `anyUncatalogued`
+ * (→ confidence cap) and stamp `pricingSource` (→ `_meta` low-confidence
+ * markers). A line with no numeric price carries no money risk and is left
+ * untouched (the handler drops it downstream).
+ */
+function markAllUncatalogued(
+  lineItems: Array<Record<string, unknown>>,
+  priceField: 'unitPriceCents' | 'unitPrice',
+): CatalogPricingOutcome {
+  let anyUncatalogued = false;
+  const out = lineItems.map((li) => {
+    if (typeof li[priceField] === 'number') {
+      anyUncatalogued = true;
+      return {
+        ...dropOutOfVocabularyUnit(li),
+        pricingSource: 'uncatalogued' satisfies PricingSource,
+        needsPricing: true,
+      };
+    }
+    // B7.5 — no catalog was consulted at all, so even an unpriced line's
+    // unit is ungrounded. (A line with no price carries no money risk and
+    // is dropped downstream, but it must not smuggle an invented unit
+    // through in the meantime.)
+    return dropOutOfVocabularyUnit(li);
+  });
+  return {
+    lineItems: out,
+    missingFields: [],
+    anyUncatalogued,
+    anyCatalogPriced: false,
+    requiresReview: anyUncatalogued,
+  };
+}
+
+/**
+ * Ground drafted line items against the tenant catalog, ALWAYS returning a
+ * `CatalogPricingOutcome`. This is the single grounding entry point for the
+ * invoice / estimate / MMS-estimate task handlers.
+ *
+ * The bug this closes: the handlers previously left the outcome `undefined`
+ * whenever the catalog could not be consulted — repo unwired, a `listByTenant`
+ * error, or (the common case) an EMPTY catalog on a brand-new tenant — and an
+ * undefined outcome silently skipped the uncatalogued confidence cap, letting a
+ * draft priced entirely by the LLM auto-approve at the autonomous tier. Here
+ * every such case funnels through `markAllUncatalogued`, so an ungrounded price
+ * always caps confidence and surfaces to a human, per the module contract.
+ *
+ * Pass `loadActiveCatalog = null` when no catalog repo is wired.
+ */
+export async function groundLineItemPricing(
+  lineItems: Array<Record<string, unknown>>,
+  priceField: 'unitPriceCents' | 'unitPrice',
+  loadActiveCatalog: (() => Promise<CatalogItem[]>) | null,
+): Promise<CatalogPricingOutcome> {
+  if (lineItems.length === 0) {
+    return {
+      lineItems,
+      missingFields: [],
+      anyUncatalogued: false,
+      anyCatalogPriced: false,
+      requiresReview: false,
+    };
+  }
+  if (!loadActiveCatalog) return markAllUncatalogued(lineItems, priceField);
+
+  let activeItems: CatalogItem[] = [];
+  try {
+    // A catalog read failure must never block drafting — degrade to
+    // treating every line as uncatalogued (capped, human-reviewed).
+    activeItems = (await loadActiveCatalog()).filter((i) => i.archivedAt === null);
+  } catch {
+    return markAllUncatalogued(lineItems, priceField);
+  }
+  if (activeItems.length === 0) return markAllUncatalogued(lineItems, priceField);
+
+  const resolutions = resolveLineItems(
+    lineItems.map((li) => String(li.description ?? '')),
+    activeItems,
+  );
+  return applyCatalogPricing(lineItems, resolutions, priceField);
 }
 
 /**

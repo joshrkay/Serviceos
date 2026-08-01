@@ -1,5 +1,10 @@
 import { z } from 'zod';
-import { appointmentTypeSchema } from '@ai-service-os/shared';
+import {
+  appointmentTypeSchema,
+  jobStatusSchema,
+  jobPrioritySchema,
+  catalogUnitSchema,
+} from '@ai-service-os/shared';
 import { ProposalType } from './proposal';
 import { ValidationError } from '../shared/errors';
 import { reassignAppointmentPayloadSchema } from './contracts/reassignment';
@@ -15,6 +20,10 @@ import { createInvoiceSchedulePayloadSchema } from './contracts/create-invoice-s
 import { batchInvoicePayloadSchema } from './contracts/batch-invoice';
 import { sendPaymentReminderPayloadSchema } from './contracts/send-payment-reminder';
 import { applyLateFeePayloadSchema } from './contracts/apply-late-fee';
+import { createStandingInstructionPayloadSchema } from './contracts/standing-instruction';
+import { updateCatalogItemPayloadSchema } from './contracts/update-catalog-item';
+import { adoptEntityAliasPayloadSchema } from './contracts/adopt-entity-alias';
+import { updateBrandVoicePayloadSchema } from './contracts/brand-voice';
 import {
   onboardingTenantSettingsPayloadSchema,
   onboardingServiceCategoryPayloadSchema,
@@ -31,6 +40,11 @@ import { reviewResponseProposalPayloadSchema } from '@ai-service-os/shared';
 // proposal-layer consumers don't reach into src/ai for the type.
 import { CONFIDENCE_LEVELS } from '../ai/guardrails/confidence';
 export type { ConfidenceLevel } from '../ai/guardrails/confidence';
+// RV-MMS (§6.4-B) — severity markers reuse the canonical urgency-tier
+// vocabulary that drives voice triage, so a photo-sourced draft and a voice
+// call speak the same severity language. (proposals already depends on ../ai
+// for the confidence vocabulary above.)
+import { TIER_KEYS } from '../ai/skills/triage-rules.schema';
 
 // ───────────────────────────────────────────────────────────────────────────
 // RV-007 (F-4) — Confidence Marker `_meta` on proposal payloads.
@@ -57,6 +71,19 @@ export const confidenceLevelSchema = z.enum(CONFIDENCE_LEVELS);
 
 export const proposalConfidenceMetaSchema = z.object({
   overallConfidence: confidenceLevelSchema,
+  /**
+   * N-011 — the tenant brand-voice CONFIG version that produced any AI-drafted
+   * text on this proposal (0 = neutral/unconfigured). Stamped by the composer
+   * chokepoint so every AI-generated message carries the version used. Optional
+   * so pre-N-011 payloads keep validating.
+   */
+  brandVoiceVersion: z.number().int().nonnegative().optional(),
+  /**
+   * §6.4-B severity marker — how urgent the visible problem is, on the same
+   * urgency-tier scale as voice triage. Optional; today set by the MMS-to-quote
+   * vision draft and surfaced to the owner in the review UI / SMS.
+   */
+  severity: z.enum(TIER_KEYS).optional(),
   /** Per-field certainty keyed by payload path, e.g. "lineItems[0].unitPrice". */
   fieldConfidence: z.record(confidenceLevelSchema).optional(),
   /** Human-readable callouts the review UI / SMS / voice readback render. */
@@ -65,6 +92,21 @@ export const proposalConfidenceMetaSchema = z.object({
       z.object({
         path: z.string().min(1),
         reason: z.string().min(1),
+      }),
+    )
+    .optional(),
+  /**
+   * UB-A3 — owner standing instructions the drafting model reported applying,
+   * intersected by the handler with what was actually injected (a model-
+   * invented id can never land here). Presentation-only: the review UI renders
+   * a "Standing instruction applied" chip; `decideInitialStatus` ignores it
+   * (guard-tested byte-identical with/without). Omitted entirely when empty.
+   */
+  appliedStandingInstructions: z
+    .array(
+      z.object({
+        id: z.string().min(1),
+        text: z.string().min(1),
       }),
     )
     .optional(),
@@ -77,11 +119,44 @@ const confidenceMetaEnvelopeSchema = z
   .object({ _meta: proposalConfidenceMetaSchema.optional() })
   .passthrough();
 
+/**
+ * `create_customer`.
+ *
+ * `address` is the technician's VERBATIM spoken words ("1207 Riverbell
+ * Drive") and stays free text — it is evidence of what was said, never a
+ * structured record.
+ *
+ * The structured fields below are what an APPROVER supplies on the review
+ * card before approving, and they mirror the free-text address columns of
+ * `service_locations` exactly (db/schema.ts migration 015): `street1`,
+ * `city`, `state`, `postal_code` are NOT NULL; `street2` is nullable;
+ * `country` is NOT NULL DEFAULT 'US'. Geo (`latitude`/`longitude`), `label`,
+ * `access_notes` and `address_type` are intentionally absent — nothing in a
+ * spoken utterance or a review card supplies them, and the table defaults
+ * cover `address_type`/`country`.
+ *
+ * Every one is INDIVIDUALLY optional, on purpose. The lead schemas gate the
+ * same four columns with an all-or-nothing refine
+ * (`refineCompleteAddress`, leads/enums.ts); doing that here would make a
+ * half-completed review card unapprovable, and a blocked approve button on a
+ * job site is worse than an incomplete record. Completeness is enforced where
+ * the write happens instead — `resolveSpokenAddress` in the execution handler
+ * either has all four (→ a `service_location` row) or preserves the address
+ * verbatim on the customer (→ a durable note). Strictly widening: every
+ * payload that validated before this change still validates.
+ */
 export const createCustomerPayloadSchema = z.object({
   name: z.string().min(1),
   email: z.string().email().optional(),
   phone: z.string().optional(),
+  /** Verbatim spoken address. Never parsed destructively; never discarded. */
   address: z.string().optional(),
+  street1: z.string().min(1).optional(),
+  street2: z.string().min(1).optional(),
+  city: z.string().min(1).optional(),
+  state: z.string().min(1).optional(),
+  postalCode: z.string().min(1).optional(),
+  country: z.string().min(1).optional(),
   notes: z.string().optional(),
 });
 
@@ -102,15 +177,73 @@ export const createJobPayloadSchema = z.object({
   priority: z.enum(['low', 'medium', 'high', 'urgent']).optional(),
 });
 
-export const createAppointmentPayloadSchema = z
+// B7 (feat: voice-transcript-and-agent-paths) — update_job: a bounded,
+// SAFE field edit to an EXISTING job. `jobId` mirrors the update_estimate /
+// update_invoice pattern (required uuid; a free-text `jobReference` the
+// task handler couldn't resolve to a UUID stays gated via
+// sourceContext.missingFields — see ai/tasks/job-edit-task.ts
+// resolveJobIdGate — so this schema is deliberately NOT consulted by
+// createProposal, only by editProposal / the assistant Edit form, exactly
+// like its update_estimate/update_invoice siblings). `status` and
+// `priority` reuse the canonical shared enums (jobStatusSchema /
+// jobPrioritySchema) so this contract can never drift from the Job domain
+// type or the jobs table CHECK constraint. Deliberately excludes money
+// (deposit/pricing) and schedule (appointment) fields — those have their
+// own proposal paths (draft_estimate/draft_invoice edits,
+// reschedule_appointment).
+export const updateJobPayloadSchema = z
   .object({
     jobId: z.string().uuid(),
+    /** Free-text hint carried for review-card context; never trusted as an id. */
+    jobReference: z.string().min(1).optional(),
+    status: jobStatusSchema.optional(),
+    priority: jobPrioritySchema.optional(),
+    title: z.string().min(1).optional(),
+    description: z.string().optional(),
+  })
+  .refine(
+    (v) =>
+      v.status !== undefined ||
+      v.priority !== undefined ||
+      v.title !== undefined ||
+      v.description !== undefined,
+    { message: 'update_job requires at least one field to change: status, priority, title, or description' },
+  );
+
+export const createAppointmentPayloadSchema = z
+  .object({
+    // Optional-with-a-refine (see the `jobId || customerId` rule at the bottom
+    // of this schema) rather than required. `CreateAppointmentExecutionHandler`
+    // (proposals/execution/handlers.ts, SCH-02) deliberately AUTO-OPENS a job
+    // when a caller describes NEW work: an inbound `create_appointment` is
+    // classified with `jobTitle` and no resolvable job — `create_appointment`
+    // is excluded from entity-resolution.ts's JOB_REF_INTENTS on purpose — and
+    // the handler opens the job from `jobTitle` (falling back to
+    // `proposal.summary`) against `customerId`. Pinning `jobId` as REQUIRED
+    // here made this contract stricter than the executor it describes, so
+    // enforcing it at the voice emit site would have rejected exactly the
+    // booking SCH-02 exists to serve. Strictly widening: every payload that
+    // validated before still validates.
+    jobId: z.string().uuid().optional(),
     // RV-081 — revisit linkage. When present, this appointment is a REVISIT
     // booked against an EXISTING job (no new job is created): the execution
     // handler validates the job exists in-tenant and attaches the
     // appointment to it, overriding `jobId`. Audit metadata marks the
     // appointment as a revisit.
     linkedJobId: z.string().uuid().optional(),
+    /**
+     * The `service_locations` row the auto-opened job should be sited at.
+     *
+     * `jobs.location_id` is NOT NULL, so a customer with no location cannot
+     * have a job — and therefore cannot be booked. When the drafting handler
+     * detects that (`detectServiceLocationGap`) it gates the proposal with
+     * `missingFields: ['locationId']`; the operator fills THIS field to clear
+     * the gate, and `CreateAppointmentExecutionHandler` sites the new job on
+     * it. Optional and additive: a customer who already has a primary
+     * location never needs it, and the executor's existing lookup is unchanged
+     * when it is absent.
+     */
+    locationId: z.string().uuid().optional(),
     scheduledStart: z.string().min(1),
     scheduledEnd: z.string().min(1),
     technicianId: z.string().uuid().optional(),
@@ -126,11 +259,26 @@ export const createAppointmentPayloadSchema = z
     customerId: z.string().optional(),
     customerName: z.string().optional(),
     summary: z.string().optional(),
+    // Declared (not merely tolerated by strip-mode) because the `jobId ||
+    // customerId` refine below and the SCH-02 executor fallback both read it:
+    // it is the NAME of the job the handler opens when no jobId resolved.
+    jobTitle: z.string().optional(),
     // Typed visit kind (estimate/repair/install/maintenance/diagnostic),
     // emitted enum-validated by the appointment task. Optional: inbound-caller
     // DRAFTs built at classify time carry none, and legacy payloads predate it.
     appointmentType: appointmentTypeSchema.optional(),
   })
+  // An appointment must attach to SOMETHING real: either an already-resolved
+  // job (`jobId` / `linkedJobId`) or the customer the executor will open a new
+  // job for (SCH-02). Neither present means nothing downstream can book it —
+  // that stays a hard contract failure.
+  .refine(
+    (v) => Boolean(v.jobId) || Boolean(v.linkedJobId) || Boolean(v.customerId),
+    {
+      message:
+        'create_appointment requires jobId (or linkedJobId), or a customerId the executor can open a job for',
+    },
+  )
   .refine(
     (v) => {
       const s = Date.parse(v.scheduledStart);
@@ -165,53 +313,192 @@ const lineItemSchema = z
   .object({
     description: z.string().min(1),
     quantity: z.number(),
+    // B7.5 — descriptive unit of measure for a spoken part ("three
+    // capacitors", "two hours of labor"). Declared explicitly for the same
+    // reason imageFileId is: assertValidProposalPayload would otherwise strip
+    // it and the unit would vanish on the AI path only. Never used in money
+    // math — price stays in the unitPrice/unitPriceCents fields below.
+    unit: catalogUnitSchema.optional(),
     unitPrice: z.number().optional(),
     unitPriceCents: z.number().int().min(0).nullable().optional(),
     category: z.string().optional(),
     catalogItemId: z.string().uuid().optional(),
     pricingSource: z.enum(['catalog', 'ambiguous', 'uncatalogued', 'manual']).optional(),
     needsPricing: z.boolean().optional(),
+    // Good-better-best grouping (estimates only; inert on invoices). Items
+    // sharing a non-null groupKey are mutually exclusive tiers; isOptional
+    // lines without a groupKey are standalone add-ons. Mirrors the persisted
+    // shape in packages/shared/src/contracts/money.ts. Declared here so the
+    // fields validate explicitly rather than surviving by non-stripping luck.
+    groupKey: z.string().optional(),
+    groupLabel: z.string().optional(),
+    isOptional: z.boolean().optional(),
+    isDefaultSelected: z.boolean().optional(),
+    // EE-4 — catalog image snapshot stamped by the catalog resolver. Must be
+    // declared here or assertValidProposalPayload would strip/reject it and the
+    // image would vanish on the AI path only.
+    imageFileId: z.string().optional(),
   })
   .refine((li) => li.unitPrice !== undefined || li.unitPriceCents != null, {
     message: 'line item requires unitPrice or unitPriceCents',
   });
 
-export const draftEstimatePayloadSchema = z.object({
-  customerId: z.string().uuid(),
-  jobId: z.string().uuid().optional(),
-  lineItems: z.array(lineItemSchema).min(1),
-  notes: z.string().optional(),
-  validUntil: z.string().optional(),
-});
+/**
+ * Structural invariants for good-better-best tier groups on a drafted
+ * estimate, returned as human-readable messages (empty = valid). The
+ * drafting handlers coerce output to satisfy these via
+ * `normalizeTierStructure` (ai/resolution/tier-structure.ts); this is the
+ * backstop that keeps a hand-built or future-refactored payload from
+ * persisting a malformed group. The two MUST agree — a stricter check here
+ * than the normalizer produces would 400 a live draft.
+ *
+ * Invariants: each non-empty `groupKey` group has >= 2 options and exactly
+ * one `isDefaultSelected`; `isDefaultSelected` appears only on a selectable
+ * line (a tier option or an `isOptional` add-on), never on an always-billed
+ * line where it would be meaningless.
+ */
+export function tierStructureIssues(
+  lineItems: ReadonlyArray<{
+    groupKey?: string;
+    isOptional?: boolean;
+    isDefaultSelected?: boolean;
+  }>,
+): string[] {
+  const issues: string[] = [];
+  const groups = new Map<string, number[]>();
 
-// Edit-action schema for update_estimate proposals. Same discriminated
-// union shape as invoiceEditActionSchema below. Voice-driven estimate
-// edits = add / remove / update a single line item; notes/wording edits
-// stay at draft_estimate creation time.
-export const estimateEditActionSchema = z.discriminatedUnion('type', [
-  z.object({
-    type: z.literal('add_line_item'),
-    lineItem: lineItemSchema,
-  }),
-  z.object({
-    type: z.literal('remove_line_item'),
-    index: z.number().int().min(0),
-  }),
-  z.object({
-    type: z.literal('update_line_item'),
-    index: z.number().int().min(0),
-    lineItem: lineItemSchema,
-  }),
-]);
+  lineItems.forEach((li, i) => {
+    const gk = typeof li.groupKey === 'string' && li.groupKey.length > 0 ? li.groupKey : undefined;
+    if (gk) {
+      const arr = groups.get(gk) ?? [];
+      arr.push(i);
+      groups.set(gk, arr);
+    } else if (li.isDefaultSelected === true && li.isOptional !== true) {
+      issues.push(
+        `Line ${i} is default-selected but is neither a tier option nor an optional add-on`,
+      );
+    }
+  });
+
+  for (const [gk, indices] of groups) {
+    if (indices.length < 2) {
+      issues.push(`Tier group "${gk}" has only one option — a tier group needs at least two`);
+      continue;
+    }
+    const defaults = indices.filter((i) => lineItems[i].isDefaultSelected === true);
+    if (defaults.length !== 1) {
+      issues.push(`Tier group "${gk}" must have exactly one default option (found ${defaults.length})`);
+    }
+  }
+
+  return issues;
+}
+
+// QA-2026-07-27 — `customerId` on a drafted estimate is authored by the ENTITY
+// RESOLVER (a verified, tenant-scoped uuid), never by the drafting model. The
+// live bug this shape closes: the estimate prompt handed the model a
+// `"customerId": "<uuid>"` template and told it to "ensure customerId is
+// present", so it invented ids — observed in Development as "unknown",
+// "<uuid>", and the RFC 4122 EXAMPLE uuid 123e4567-e89b-12d3-a456-426614174000
+// (twice). That last one is syntactically valid, so `z.string().uuid()` alone
+// waves it through; format validation is NOT sufficient and the id is
+// existence-checked against the tenant by DraftEstimateExecutionHandler before
+// any write.
+//
+// When nothing resolves, the draft must NOT carry a fake id: it carries the
+// spoken `customerReference` instead and is gated with
+// `missingFields: ['customerId']` so it can never auto-approve. Shape mirrors
+// addServiceLocationPayloadSchema / convertLeadPayloadSchema (resolved id OR
+// free-text reference, enforced by a `.refine`) rather than inventing a new
+// convention.
+export const draftEstimatePayloadSchema = z
+  .object({
+    customerId: z.string().uuid().optional(),
+    customerReference: z.string().min(1).optional(),
+    jobId: z.string().uuid().optional(),
+    lineItems: z.array(lineItemSchema).min(1),
+    notes: z.string().optional(),
+    validUntil: z.string().optional(),
+  })
+  // Backstop for good-better-best structure. Attached at the array level on
+  // the DRAFT schema only — the edit-action schema (updateEstimatePayloadSchema)
+  // validates one line at a time and has no group-level view, so it stays off
+  // that path.
+  .superRefine((val, ctx) => {
+    for (const message of tierStructureIssues(val.lineItems)) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message, path: ['lineItems'] });
+    }
+  })
+  .refine((v) => Boolean(v.customerId || v.customerReference), {
+    message: 'customerId or customerReference is required',
+  });
+
+// remove_line_item / update_line_item target an existing line item by
+// EITHER a numeric index (preferred, e.g. a re-draft carrying a prior
+// resolution) OR a free-text description (what the edit-task LLM prompt
+// actually emits — see ai/tasks/estimate-edit-task.ts). At least one is
+// required; estimates/estimate-editor.ts's resolveActionIndex resolves
+// whichever is present to a concrete index (or throws a clear execution
+// error — no silent guessing). Note: z.discriminatedUnion requires each
+// branch to be a plain ZodObject (not a `.and()`/`.refine()`-wrapped
+// schema — that breaks its discriminant introspection), so the
+// index-or-description invariant is enforced with a `.refine` on the
+// FINISHED union below rather than folded into each branch.
+export const estimateEditActionSchema = z
+  .discriminatedUnion('type', [
+    z.object({
+      type: z.literal('add_line_item'),
+      lineItem: lineItemSchema,
+    }),
+    z.object({
+      type: z.literal('remove_line_item'),
+      index: z.number().int().min(0).optional(),
+      description: z.string().min(1).optional(),
+    }),
+    z.object({
+      type: z.literal('update_line_item'),
+      index: z.number().int().min(0).optional(),
+      description: z.string().min(1).optional(),
+      lineItem: lineItemSchema,
+    }),
+  ])
+  .refine(
+    (action) =>
+      action.type === 'add_line_item' ||
+      action.index !== undefined ||
+      action.description !== undefined,
+    { message: 'remove_line_item/update_line_item requires index or description' }
+  );
 
 export const updateEstimatePayloadSchema = z.object({
   estimateId: z.string().uuid(),
   editActions: z.array(estimateEditActionSchema).min(1),
 });
 
+// QA-2026-07-28 — same shape, and the same reasoning, as
+// draftEstimatePayloadSchema above; see that comment for the live evidence.
+// This path is the WORSE of the two: `customerId` here was a REQUIRED
+// `z.string().uuid()` while INVOICE_SYSTEM_PROMPT handed the model a
+// `"customerId": "<uuid>"` template and closed with "Ensure customerId and
+// jobId are present" — so the model was *obliged* to produce an id it could
+// not possibly know, and an invoice is a money proposal.
+//
+// `customerId` is now authored by the ENTITY RESOLVER (ai/tasks/invoice-task.ts
+// `authorCustomerId`), so it is optional here and an unresolved draft carries
+// the spoken `customerReference` plus `missingFields: ['customerId']` instead
+// of a fabricated uuid. Format validation is NOT sufficient — the RFC 4122
+// example uuid 123e4567-e89b-12d3-a456-426614174000 passes `.uuid()` — so both
+// `customerId` and `jobId` are existence-checked against THIS tenant by
+// CreateInvoiceExecutionHandler before any write.
 export const draftInvoicePayloadSchema = z.object({
-  customerId: z.string().uuid(),
-  jobId: z.string().uuid(),
+  customerId: z.string().uuid().optional(),
+  customerReference: z.string().min(1).optional(),
+  // B6 — jobId is optional, mirroring draftEstimatePayloadSchema: a
+  // resolved customer with no resolvable job reference (e.g. "invoice the
+  // Smith account") should still draft for review instead of stalling.
+  // CreateInvoiceExecutionHandler auto-opens a job at execution when this
+  // is absent, matching DraftEstimateExecutionHandler's job auto-create.
+  jobId: z.string().uuid().optional(),
   estimateId: z.string().uuid().optional(),
   invoiceNumber: z.string().min(1).optional(),
   lineItems: z.array(lineItemSchema).min(1),
@@ -219,28 +506,50 @@ export const draftInvoicePayloadSchema = z.object({
   taxRateBps: z.number().int().min(0).max(10000).optional(),
   customerMessage: z.string().optional(),
   internalNotes: z.string().optional(),
-});
+})
+  // Precedent: addServiceLocationPayloadSchema / convertLeadPayloadSchema —
+  // a resolved id OR a free-text reference, enforced on the finished object.
+  // NOTE: jobId deliberately does NOT satisfy this. VOX-07 lets the execution
+  // handler proceed on a jobId alone, but a DRAFT that names nobody must still
+  // record who was asked for, and `missingFields: ['customerId']` is what keeps
+  // an unattributed money proposal out of auto-approval.
+  .refine((v) => Boolean(v.customerId || v.customerReference), {
+    message: 'customerId or customerReference is required',
+  });
 
 // Edit-action schema for update_invoice proposals. Mirrors the
 // estimate-editor pattern but scoped to invoice line items: Phase-2
 // voice flows only add, remove, or replace a line item. Notes/wording
 // edits are out of scope for this iteration — the draft_invoice path
 // still owns those at creation time.
-export const invoiceEditActionSchema = z.discriminatedUnion('type', [
-  z.object({
-    type: z.literal('add_line_item'),
-    lineItem: lineItemSchema,
-  }),
-  z.object({
-    type: z.literal('remove_line_item'),
-    index: z.number().int().min(0),
-  }),
-  z.object({
-    type: z.literal('update_line_item'),
-    index: z.number().int().min(0),
-    lineItem: lineItemSchema,
-  }),
-]);
+// See estimateEditActionSchema above for why the index-or-description
+// invariant is a `.refine` on the finished union rather than folded into
+// each discriminatedUnion branch.
+export const invoiceEditActionSchema = z
+  .discriminatedUnion('type', [
+    z.object({
+      type: z.literal('add_line_item'),
+      lineItem: lineItemSchema,
+    }),
+    z.object({
+      type: z.literal('remove_line_item'),
+      index: z.number().int().min(0).optional(),
+      description: z.string().min(1).optional(),
+    }),
+    z.object({
+      type: z.literal('update_line_item'),
+      index: z.number().int().min(0).optional(),
+      description: z.string().min(1).optional(),
+      lineItem: lineItemSchema,
+    }),
+  ])
+  .refine(
+    (action) =>
+      action.type === 'add_line_item' ||
+      action.index !== undefined ||
+      action.description !== undefined,
+    { message: 'remove_line_item/update_line_item requires index or description' }
+  );
 
 export const updateInvoicePayloadSchema = z.object({
   invoiceId: z.string().uuid(),
@@ -257,14 +566,33 @@ export const issueInvoicePayloadSchema = z.object({
 // handler carries `leadReference` and flags `leadId` missing until the
 // review UI / execution handler resolves a concrete lead. Either a
 // resolved `leadId` (uuid) or a `leadReference` must be present.
+// Optional address fields supply a primary service location when the
+// lead has none (QA-MANUAL-0730).
 export const convertLeadPayloadSchema = z
   .object({
     leadId: z.string().uuid().optional(),
     leadReference: z.string().min(1).optional(),
+    street1: z.string().trim().min(1).max(200).optional(),
+    street2: z.string().trim().max(200).optional(),
+    city: z.string().trim().min(1).max(100).optional(),
+    state: z.string().trim().min(1).max(50).optional(),
+    postalCode: z.string().trim().min(1).max(20).optional(),
+    country: z.string().trim().min(1).max(50).optional(),
+    accessNotes: z.string().trim().max(2000).optional(),
+    label: z.string().trim().max(100).optional(),
   })
   .refine((v) => Boolean(v.leadId || v.leadReference), {
     message: 'leadId or leadReference is required',
-  });
+  })
+  .refine(
+    (v) => {
+      const any =
+        Boolean(v.street1) || Boolean(v.city) || Boolean(v.state) || Boolean(v.postalCode);
+      if (!any) return true;
+      return Boolean(v.street1 && v.city && v.state && v.postalCode);
+    },
+    { message: 'street1, city, state, and postalCode are required together' }
+  );
 
 // confirm_appointment: mark an existing appointment confirmed. Resolved
 // appointmentId (uuid) by execution time; appointmentReference carries
@@ -313,10 +641,14 @@ export const addServiceLocationPayloadSchema = z
 // log_time_entry: clock a technician in on a job/task. userId comes from
 // the execution context (the speaking technician). jobReference is
 // optional — break/admin time may not attach to a job.
+// durationMinutes is set only on the RETROACTIVE path ("put me down for two
+// hours") — a completed amount of worked time in the same unit the
+// time_entries.duration_minutes column stores. Absent means "clock in now".
 export const logTimeEntryPayloadSchema = z.object({
   entryType: z.enum(['job', 'drive', 'break', 'admin']),
   jobId: z.string().uuid().optional(),
   jobReference: z.string().optional(),
+  durationMinutes: z.number().int().positive().optional(),
   notes: z.string().optional(),
 });
 
@@ -390,6 +722,11 @@ export const voiceClarificationPayloadSchema = z.object({
     // amount couldn't be parsed ("knock some off"); the discount evaluator
     // emits this instead of silently guessing a discount.
     'ambiguous_discount_target',
+    // RIVET P4 — an unauthenticated (S1) caller's intent resolved to an
+    // operator-only proposal type ("send me the Henderson invoice"). The
+    // request is preserved for the operator as a non-actionable
+    // clarification; the S2 op itself is never minted from an S1 session.
+    'surface_restricted',
   ]),
   suggestedIntents: z.array(z.string()).optional(),
   classifierReasoning: z.string().optional(),
@@ -415,6 +752,7 @@ export const PROPOSAL_TYPE_SCHEMAS: Record<ProposalType, z.ZodSchema> = {
   create_customer: createCustomerPayloadSchema,
   update_customer: updateCustomerPayloadSchema,
   create_job: createJobPayloadSchema,
+  update_job: updateJobPayloadSchema,
   create_appointment: createAppointmentPayloadSchema,
   create_booking: createBookingPayloadSchema,
   // A callback request captured when the agent cannot complete an action
@@ -467,6 +805,10 @@ export const PROPOSAL_TYPE_SCHEMAS: Record<ProposalType, z.ZodSchema> = {
   review_response_proposal: reviewResponseProposalPayloadSchema,
   send_payment_reminder: sendPaymentReminderPayloadSchema,
   apply_late_fee: applyLateFeePayloadSchema,
+  create_standing_instruction: createStandingInstructionPayloadSchema,
+  update_catalog_item: updateCatalogItemPayloadSchema,
+  adopt_entity_alias: adoptEntityAliasPayloadSchema,
+  update_brand_voice: updateBrandVoicePayloadSchema,
 };
 
 export function validateProposalPayload(

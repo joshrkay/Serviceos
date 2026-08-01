@@ -10,12 +10,12 @@ export type BadgeVariant =
   | 'info';
 
 const VARIANT_CLASSES: Record<BadgeVariant, string> = {
-  neutral: 'bg-slate-100 text-slate-600 border-slate-200',
-  primary: 'bg-slate-900 text-white border-slate-900',
-  success: 'bg-green-50 text-green-700 border-green-100',
-  warning: 'bg-amber-50 text-amber-700 border-amber-100',
-  danger: 'bg-red-50 text-red-700 border-red-100',
-  info: 'bg-blue-50 text-blue-700 border-blue-100',
+  neutral: 'bg-secondary text-muted-foreground border-border',
+  primary: 'bg-primary text-primary-foreground border-primary',
+  success: 'bg-success/10 text-success border-success/20',
+  warning: 'bg-warning/10 text-warning border-warning/20',
+  danger: 'bg-destructive/10 text-destructive border-destructive/20',
+  info: 'bg-primary/10 text-primary border-primary/20',
 };
 
 export interface BadgeProps extends React.HTMLAttributes<HTMLSpanElement> {

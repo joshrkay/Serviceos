@@ -1,4 +1,5 @@
 import { vi } from 'vitest';
+import type { ListQueryResult } from '../hooks/useListQuery';
 
 /**
  * Builds a default ListQueryResult shape for mocking useListQuery in tests.
@@ -7,7 +8,11 @@ import { vi } from 'vitest';
  * error, refetch, setPage, setSearch, setFilters }; tests rarely need
  * anything but `data`, so this helper fills in stable defaults for the rest.
  */
-export function listQueryResult<T>(data: T[]) {
+// Explicit return type: pins the portable `ListQueryResult<T>` name so the
+// declaration does not try to reference vitest's nested `@vitest/spy` Mock type
+// (TS2742 under vitest 4's hoisting), and contextually types the `vi.fn()`
+// fillers to the concrete callback signatures.
+export function listQueryResult<T>(data: T[]): ListQueryResult<T> {
   return {
     data,
     total: data.length,

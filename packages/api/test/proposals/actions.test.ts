@@ -57,6 +57,97 @@ describe('P2-005 — Approve / reject / edit interactions', () => {
     expect(result.status).toBe('approved');
   });
 
+  it('adopt_entity_alias approval is owner-only and preserves the owner actor for execution', async () => {
+    const repo = makeRepo();
+    const proposal = await createReadyProposal(repo, {
+      proposalType: 'adopt_entity_alias',
+      payload: {
+        alias: 'Khan',
+        entityKind: 'customer',
+        entityId: '550e8400-e29b-41d4-a716-446655440000',
+        source: 'entity_picker',
+        groundedProposalId: '660e8400-e29b-41d4-a716-446655440000',
+      },
+    });
+
+    await expect(
+      approveProposal(repo, tenantId, proposal.id, 'dispatcher-1', 'dispatcher'),
+    ).rejects.toThrow(ForbiddenError);
+    expect((await repo.findById(tenantId, proposal.id))?.status).toBe('ready_for_review');
+
+    const approved = await approveProposal(
+      repo,
+      tenantId,
+      proposal.id,
+      actorId,
+      'owner',
+    );
+    expect(approved.status).toBe('approved');
+    expect(approved.executedBy).toBe(actorId);
+  });
+
+  // Raised in PR review: a dispatcher holds `proposals:approve` but NOT
+  // `settings:update`. Without a type-specific guard the approval queue became
+  // a way around the route permission model — approving one of these cards
+  // rewrites tenant identity, seeds the price book, or replaces the locked
+  // brand voice, all of which routes/onboarding.ts and brand-voice-router.ts
+  // deliberately withhold from dispatchers.
+  it.each([
+    ['onboarding_tenant_settings', { businessName: 'Acme', verticalPacks: ['plumbing'] }],
+    ['update_brand_voice', { register: 'friendly' }],
+  ])('config-writing type %s cannot be approved without settings:update', async (type, payload) => {
+    const repo = makeRepo();
+    const proposal = await createReadyProposal(repo, {
+      proposalType: type as never,
+      payload: payload as Record<string, unknown>,
+    });
+
+    await expect(
+      approveProposal(repo, tenantId, proposal.id, 'dispatcher-1', 'dispatcher'),
+    ).rejects.toThrow(ForbiddenError);
+    // Refused, not silently left half-approved.
+    expect((await repo.findById(tenantId, proposal.id))?.status).toBe('ready_for_review');
+
+    // An owner (who does hold settings:update) still gets through.
+    const approved = await approveProposal(repo, tenantId, proposal.id, actorId, 'owner');
+    expect(approved.status).toBe('approved');
+  });
+
+  // Also raised in PR review: gating the approval is only half the job. The
+  // execution sweep runs detached from this request and attributes work to
+  // `createdBy` — the DRAFTER — so a technician-drafted config proposal
+  // approved by an owner executed and audited as the technician, with the role
+  // defaulted to 'owner'. Both halves wrong, in opposite directions. The
+  // approver's identity AND role are stamped here because nothing downstream
+  // can recover them.
+  it.each([
+    ['onboarding_tenant_settings', { businessName: 'Acme', verticalPacks: ['plumbing'] }],
+    ['update_brand_voice', { register: 'friendly' }],
+  ])('config-writing type %s stamps the approver, not the drafter', async (type, payload) => {
+    const repo = makeRepo();
+    const proposal = await createReadyProposal(repo, {
+      proposalType: type as never,
+      payload: payload as Record<string, unknown>,
+      createdBy: 'technician-7',
+    });
+
+    const approved = await approveProposal(repo, tenantId, proposal.id, actorId, 'owner');
+
+    expect(approved.createdBy).toBe('technician-7');
+    expect(approved.executedBy).toBe(actorId);
+    expect(approved.executedByRole).toBe('owner');
+  });
+
+  it('leaves the drafter as the executor for a non-config type', async () => {
+    const repo = makeRepo();
+    const proposal = await createReadyProposal(repo, { createdBy: 'technician-7' });
+
+    const approved = await approveProposal(repo, tenantId, proposal.id, actorId, 'owner');
+
+    expect(approved.executedBy).toBeUndefined();
+    expect(approved.executedByRole).toBeUndefined();
+  });
+
   it('approves a draft directly (inbox surfaces drafts)', async () => {
     const repo = makeRepo();
     const proposal = createProposal(baseInput); // lands in 'draft'
@@ -85,6 +176,39 @@ describe('P2-005 — Approve / reject / edit interactions', () => {
     await expect(
       approveProposal(repo, tenantId, proposal.id, actorId, 'technician')
     ).rejects.toThrow(ForbiddenError);
+  });
+
+  it('§5.5 — refuses to approve a schedule proposal past its 48h expiry, and flips it to expired', async () => {
+    const repo = makeRepo();
+    // A schedule proposal whose expiresAt is already in the past — the state a
+    // card is in during the gap after 48h but before the hourly sweep runs.
+    const proposal = createProposal({
+      ...baseInput,
+      proposalType: 'create_appointment',
+      expiresAt: new Date(Date.now() - 60_000),
+    });
+    await repo.create(proposal);
+    await repo.updateStatus(tenantId, proposal.id, 'ready_for_review');
+
+    await expect(
+      approveProposal(repo, tenantId, proposal.id, actorId, 'owner'),
+    ).rejects.toThrow(ValidationError);
+    // The approval path itself closed the gap: the row is now 'expired'.
+    expect((await repo.findById(tenantId, proposal.id))!.status).toBe('expired');
+  });
+
+  it('§5.5 — a schedule proposal still within its window approves normally', async () => {
+    const repo = makeRepo();
+    const proposal = createProposal({
+      ...baseInput,
+      proposalType: 'create_appointment',
+      expiresAt: new Date(Date.now() + 60 * 60_000), // 1h out
+    });
+    await repo.create(proposal);
+    await repo.updateStatus(tenantId, proposal.id, 'ready_for_review');
+
+    const result = await approveProposal(repo, tenantId, proposal.id, actorId, 'owner');
+    expect(result.status).toBe('approved');
   });
 
   it('security — technician cannot reject proposal', async () => {
@@ -154,6 +278,247 @@ describe('P2-005 — Approve / reject / edit interactions', () => {
     await expect(
       editProposal(repo, tenantId, proposal.id, actorId, 'owner', { name: 'New Name' })
     ).rejects.toThrow(ValidationError);
+  });
+
+  // B1 — resolution-loop foundation: editProposal must clear a satisfied
+  // missingFields gate on fill, and never via a schema recompute (see
+  // proposals/missing-fields.ts for why a recompute reopens the doomed-
+  // approval bug this branch's gates exist to close).
+  describe('B1 — editProposal clears satisfied missingFields', () => {
+    function gatedSendInvoice() {
+      return createProposal({
+        tenantId,
+        proposalType: 'send_invoice',
+        payload: { invoiceReference: 'Henderson', channel: 'email' },
+        summary: 'Send the Henderson invoice',
+        createdBy: actorId,
+        missingFields: ['invoiceId'],
+      });
+    }
+
+    it('edit that fills the gated invoiceId clears the gate and unblocks approval', async () => {
+      const repo = makeRepo();
+      const proposal = gatedSendInvoice();
+      await repo.create(proposal);
+
+      const { proposal: updated } = await editProposal(
+        repo, tenantId, proposal.id, actorId, 'owner',
+        { invoiceId: '550e8400-e29b-41d4-a716-446655440000' },
+      );
+
+      expect(updated.sourceContext?.missingFields).toEqual([]);
+      const approved = await approveProposal(repo, tenantId, proposal.id, actorId, 'owner');
+      expect(approved.status).toBe('approved');
+    });
+
+    it('edit of an unrelated field leaves the gate intact and approval still blocked', async () => {
+      const repo = makeRepo();
+      const proposal = gatedSendInvoice();
+      await repo.create(proposal);
+
+      const { proposal: updated } = await editProposal(
+        repo, tenantId, proposal.id, actorId, 'owner',
+        { channel: 'sms' },
+      );
+
+      expect(updated.sourceContext?.missingFields).toEqual(['invoiceId']);
+      await expect(
+        approveProposal(repo, tenantId, proposal.id, actorId, 'owner')
+      ).rejects.toThrow(/unfilled required fields/);
+    });
+
+    // Pins the exact trap the B1 plan calls out: send_invoice's Zod schema
+    // (`sendInvoicePayloadSchema`) is satisfied by `invoiceReference` ALONE
+    // (its `.refine` accepts either field) — a schema-recompute-based clear
+    // would see the edited payload validate cleanly and wrongly drop the
+    // invoiceId gate even though no id was ever resolved, reopening the
+    // doomed-approval bug (approve succeeds, execution then fails on the
+    // unresolved reference). Editing invoiceReference itself — still no
+    // invoiceId — must leave the gate untouched.
+    it('editing invoiceReference (schema-satisfied, execution-gated) does NOT wrongly clear the invoiceId gate', async () => {
+      const repo = makeRepo();
+      const proposal = gatedSendInvoice();
+      await repo.create(proposal);
+
+      const { proposal: updated } = await editProposal(
+        repo, tenantId, proposal.id, actorId, 'owner',
+        { invoiceReference: 'Henderson Plumbing Co' },
+      );
+
+      // The edit itself succeeds — proving this really is a "schema
+      // satisfied" case, not a validation failure — yet the gate survives.
+      expect(updated.payload.invoiceReference).toBe('Henderson Plumbing Co');
+      expect(updated.sourceContext?.missingFields).toEqual(['invoiceId']);
+      await expect(
+        approveProposal(repo, tenantId, proposal.id, actorId, 'owner')
+      ).rejects.toThrow(/unfilled required fields/);
+    });
+
+    it('records clearedMissingFields in the proposal.edited audit metadata', async () => {
+      const repo = makeRepo();
+      const auditRepo = new InMemoryAuditRepository();
+      const proposal = gatedSendInvoice();
+      await repo.create(proposal);
+
+      await editProposal(
+        repo, tenantId, proposal.id, actorId, 'owner',
+        { invoiceId: '550e8400-e29b-41d4-a716-446655440000' },
+        auditRepo,
+      );
+
+      const editEvent = auditRepo.getAll().find((e) => e.eventType === 'proposal.edited');
+      expect(editEvent?.metadata).toMatchObject({ clearedMissingFields: ['invoiceId'] });
+    });
+
+    it('clears a documented pendingReference and emits a proposal-edit alias signal', async () => {
+      const repo = makeRepo();
+      const proposal = createProposal({
+        ...baseInput,
+        proposalType: 'send_invoice',
+        payload: { invoiceReference: 'invoice forty two', channel: 'email' },
+        sourceContext: {
+          pendingReference: [{ kind: 'invoice', reference: 'invoice forty two' }],
+        },
+      });
+      await repo.create(proposal);
+      const captures: unknown[] = [];
+
+      const { proposal: updated } = await editProposal(
+        repo,
+        tenantId,
+        proposal.id,
+        actorId,
+        'owner',
+        { invoiceId: '550e8400-e29b-41d4-a716-446655440000' },
+        undefined,
+        undefined,
+        {
+          capture: async (input) => {
+            captures.push(input);
+            return [];
+          },
+        },
+      );
+
+      expect(updated.sourceContext).not.toHaveProperty('pendingReference');
+      expect(captures).toHaveLength(1);
+      expect(captures[0]).toMatchObject({
+        source: 'proposal_edit',
+        tenantId,
+        actorId,
+        editedFields: ['invoiceId'],
+        groundingProposal: { id: proposal.id },
+        updatedProposal: { id: proposal.id },
+      });
+    });
+
+    it('keeps candidate capture failure-soft after a successful pending-reference edit', async () => {
+      const repo = makeRepo();
+      const proposal = createProposal({
+        ...baseInput,
+        proposalType: 'send_invoice',
+        payload: { invoiceReference: 'invoice forty two', channel: 'email' },
+        sourceContext: {
+          pendingReference: [{ kind: 'invoice', reference: 'invoice forty two' }],
+        },
+      });
+      await repo.create(proposal);
+
+      const result = await editProposal(
+        repo,
+        tenantId,
+        proposal.id,
+        actorId,
+        'owner',
+        { invoiceId: '550e8400-e29b-41d4-a716-446655440000' },
+        undefined,
+        undefined,
+        {
+          capture: async () => {
+            throw new Error('candidate capture unavailable');
+          },
+        },
+      );
+
+      expect(result.proposal.payload.invoiceId).toBe(
+        '550e8400-e29b-41d4-a716-446655440000',
+      );
+      expect(result.proposal.sourceContext).not.toHaveProperty('pendingReference');
+    });
+
+    it('omits clearedMissingFields from audit metadata when nothing was cleared', async () => {
+      const repo = makeRepo();
+      const auditRepo = new InMemoryAuditRepository();
+      const proposal = gatedSendInvoice();
+      await repo.create(proposal);
+
+      await editProposal(
+        repo, tenantId, proposal.id, actorId, 'owner',
+        { channel: 'sms' },
+        auditRepo,
+      );
+
+      const editEvent = auditRepo.getAll().find((e) => e.eventType === 'proposal.edited');
+      expect(editEvent?.metadata).not.toHaveProperty('clearedMissingFields');
+    });
+
+    // Documented, not a surprise (per the B1 plan): update_invoice's
+    // contract requires invoiceId as a non-optional UUID (unlike
+    // send_invoice, whose `.refine` accepts invoiceReference alone) — an
+    // edit that leaves invoiceId unset still fails schema validation before
+    // the missingFields clear logic even runs.
+    it('update_invoice: an edit that never supplies invoiceId 400s on the required-uuid schema', async () => {
+      const repo = makeRepo();
+      const proposal = createProposal({
+        tenantId,
+        proposalType: 'update_invoice',
+        payload: {
+          invoiceReference: 'INV-0042',
+          editActions: [
+            { type: 'add_line_item', lineItem: { description: 'Trip fee', quantity: 1, unitPrice: 7500 } },
+          ],
+        },
+        summary: 'Add a trip fee to invoice INV-0042',
+        createdBy: actorId,
+        missingFields: ['invoiceId'],
+      });
+      await repo.create(proposal);
+
+      await expect(
+        editProposal(repo, tenantId, proposal.id, actorId, 'owner', {
+          editActions: [
+            { type: 'add_line_item', lineItem: { description: 'Second trip fee', quantity: 1, unitPrice: 5000 } },
+          ],
+        }),
+      ).rejects.toThrow(ValidationError);
+    });
+
+    it('a path-shaped missingFields entry is never cleared by a flat edit', async () => {
+      const repo = makeRepo();
+      const proposal = createProposal({
+        tenantId,
+        proposalType: 'update_invoice',
+        payload: {
+          invoiceId: '550e8400-e29b-41d4-a716-446655440000',
+          editActions: [
+            { type: 'update_line_item', index: 0, lineItem: { description: 'Repair', quantity: 1, unitPrice: 100 } },
+          ],
+        },
+        summary: 'Edit invoice line item',
+        createdBy: actorId,
+        missingFields: ['editActions[0].lineItem.catalogItemId'],
+      });
+      await repo.create(proposal);
+
+      const { proposal: updated } = await editProposal(
+        repo, tenantId, proposal.id, actorId, 'owner',
+        { 'editActions[0].lineItem.catalogItemId': 'cat-123' },
+      );
+
+      expect(updated.sourceContext?.missingFields).toEqual([
+        'editActions[0].lineItem.catalogItemId',
+      ]);
+    });
   });
 
   it('validation — proposal not found returns error', async () => {

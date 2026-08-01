@@ -83,6 +83,7 @@ describe('RV-116 — dropped-call resume handler', () => {
     expect(sendSms).toHaveBeenCalledWith({
       to: CALLER,
       body: composeBookingStatusReply('Acme'),
+      tenantId: TENANT,
     });
     expect(
       auditRepo.getAll().some(
@@ -116,7 +117,7 @@ describe('RV-116 — dropped-call resume handler', () => {
     expect(pending[0].reason).toBe('dropped_call_resume');
     expect(pending[0].callerPhone).toBe(CALLER);
     expect(pending[0].intentSummary).toBe('plumbing');
-    expect(sendSms).toHaveBeenCalledWith({ to: CALLER, body: composeCallbackReply('Acme') });
+    expect(sendSms).toHaveBeenCalledWith({ to: CALLER, body: composeCallbackReply('Acme'), tenantId: TENANT });
   });
 
   it('resolved proposal (executed) falls through to the callback path', async () => {

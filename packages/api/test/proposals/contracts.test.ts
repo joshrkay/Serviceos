@@ -6,11 +6,16 @@ import {
   PROPOSAL_TYPE_SCHEMAS,
   createCustomerPayloadSchema,
   createJobPayloadSchema,
+  updateJobPayloadSchema,
   createAppointmentPayloadSchema,
   draftEstimatePayloadSchema,
   updateCustomerPayloadSchema,
   updateEstimatePayloadSchema,
+  invoiceEditActionSchema,
+  estimateEditActionSchema,
+  tierStructureIssues,
 } from '../../src/proposals/contracts';
+import { normalizeTierStructure } from '../../src/ai/resolution/tier-structure';
 import { ValidationError } from '../../src/shared/errors';
 
 describe('P2-002 — Typed proposal contracts', () => {
@@ -112,6 +117,176 @@ describe('P2-002 — Typed proposal contracts', () => {
     });
     expect(result.valid).toBe(true);
     expect(result.errors).toBeUndefined();
+  });
+
+  // B7 (feat: voice-transcript-and-agent-paths) — update_job.
+  describe('update_job payload contract', () => {
+    it('happy path — status only', () => {
+      const result = validateProposalPayload('update_job', {
+        jobId: validJobId,
+        status: 'in_progress',
+      });
+      expect(result.valid).toBe(true);
+      expect(result.errors).toBeUndefined();
+    });
+
+    it('happy path — every editable field together', () => {
+      const result = validateProposalPayload('update_job', {
+        jobId: validJobId,
+        jobReference: 'JOB-0001',
+        status: 'completed',
+        priority: 'urgent',
+        title: 'Renamed job',
+        description: 'Updated notes',
+      });
+      expect(result.valid).toBe(true);
+    });
+
+    it('rejects a payload missing jobId', () => {
+      const result = validateProposalPayload('update_job', { status: 'completed' });
+      expect(result.valid).toBe(false);
+    });
+
+    it('rejects a non-uuid jobId', () => {
+      const result = validateProposalPayload('update_job', {
+        jobId: 'not-a-uuid',
+        status: 'completed',
+      });
+      expect(result.valid).toBe(false);
+    });
+
+    it('rejects a payload with jobId but no editable field (the refine gate)', () => {
+      const result = updateJobPayloadSchema.safeParse({ jobId: validJobId });
+      expect(result.success).toBe(false);
+    });
+
+    it('rejects an invalid status enum value', () => {
+      const result = validateProposalPayload('update_job', {
+        jobId: validJobId,
+        status: 'super_urgent',
+      });
+      expect(result.valid).toBe(false);
+    });
+
+    it('rejects an invalid priority enum value', () => {
+      // 'medium' is create_job's (mismatched, pre-existing) priority enum —
+      // NOT a valid Job domain priority (low/normal/high/urgent).
+      const result = validateProposalPayload('update_job', {
+        jobId: validJobId,
+        priority: 'medium',
+      });
+      expect(result.valid).toBe(false);
+    });
+
+    it('accepts an empty-string description (clearing the field is allowed)', () => {
+      const result = validateProposalPayload('update_job', {
+        jobId: validJobId,
+        description: '',
+      });
+      expect(result.valid).toBe(true);
+    });
+
+    it('rejects an empty-string title (min length 1 — use description to clear, not title)', () => {
+      const result = validateProposalPayload('update_job', {
+        jobId: validJobId,
+        title: '',
+      });
+      expect(result.valid).toBe(false);
+    });
+  });
+
+  // P1 fix — remove_line_item/update_line_item must accept EITHER a
+  // numeric index OR a free-text description (the edit-task LLM prompt
+  // emits description-only actions; see
+  // ai/tasks/invoice-edit-task.ts / estimate-edit-task.ts), but reject a
+  // payload that carries neither — the exact shape that used to reach
+  // the editor as `action.index === undefined` and silently corrupt the
+  // first line item.
+  describe('invoiceEditActionSchema / estimateEditActionSchema — index-or-description', () => {
+    it('invoice: index-only remove_line_item is valid', () => {
+      expect(invoiceEditActionSchema.safeParse({ type: 'remove_line_item', index: 0 }).success).toBe(
+        true,
+      );
+    });
+
+    it('invoice: description-only remove_line_item is valid', () => {
+      expect(
+        invoiceEditActionSchema.safeParse({ type: 'remove_line_item', description: 'gasket' }).success,
+      ).toBe(true);
+    });
+
+    it('invoice: remove_line_item with neither index nor description is invalid', () => {
+      expect(invoiceEditActionSchema.safeParse({ type: 'remove_line_item' }).success).toBe(false);
+    });
+
+    it('invoice: update_line_item with neither index nor description is invalid', () => {
+      expect(
+        invoiceEditActionSchema.safeParse({
+          type: 'update_line_item',
+          lineItem: { description: 'Gasket', quantity: 1, unitPrice: 450 },
+        }).success,
+      ).toBe(false);
+    });
+
+    it('invoice: update_line_item with description (no index) is valid', () => {
+      expect(
+        invoiceEditActionSchema.safeParse({
+          type: 'update_line_item',
+          description: 'gasket',
+          lineItem: { description: 'Gasket', quantity: 1, unitPrice: 450 },
+        }).success,
+      ).toBe(true);
+    });
+
+    it('estimate: index-only remove_line_item is valid', () => {
+      expect(
+        estimateEditActionSchema.safeParse({ type: 'remove_line_item', index: 0 }).success,
+      ).toBe(true);
+    });
+
+    it('estimate: description-only remove_line_item is valid', () => {
+      expect(
+        estimateEditActionSchema.safeParse({ type: 'remove_line_item', description: 'disposal fee' })
+          .success,
+      ).toBe(true);
+    });
+
+    it('estimate: remove_line_item with neither index nor description is invalid', () => {
+      expect(estimateEditActionSchema.safeParse({ type: 'remove_line_item' }).success).toBe(false);
+    });
+
+    it('estimate: update_line_item with neither index nor description is invalid', () => {
+      expect(
+        estimateEditActionSchema.safeParse({
+          type: 'update_line_item',
+          lineItem: { description: 'Tankless heater', quantity: 1, unitPrice: 145000 },
+        }).success,
+      ).toBe(false);
+    });
+
+    it('add_line_item never requires index or description', () => {
+      expect(
+        invoiceEditActionSchema.safeParse({
+          type: 'add_line_item',
+          lineItem: { description: 'Trip fee', quantity: 1, unitPrice: 7500 },
+        }).success,
+      ).toBe(true);
+      expect(
+        estimateEditActionSchema.safeParse({
+          type: 'add_line_item',
+          lineItem: { description: 'Trip fee', quantity: 1, unitPrice: 7500 },
+        }).success,
+      ).toBe(true);
+    });
+
+    it('update_estimate payload with a description-based remove_line_item validates end to end', () => {
+      const result = validateProposalPayload('update_estimate', {
+        estimateId: validEstimateId,
+        editActions: [{ type: 'remove_line_item', description: 'disposal fee' }],
+      });
+      expect(result.valid).toBe(true);
+      expect(result.errors).toBeUndefined();
+    });
   });
 
   it('validation — rejects invalid create_customer payload', () => {
@@ -479,5 +654,107 @@ describe('PROPOSAL_TYPE_SCHEMAS — no strict-mode schemas', () => {
       }
     }
     expect(strictSchemas).toEqual([]);
+  });
+});
+
+describe('EE-1 — good-better-best tier structure', () => {
+  const customerId = uuidv4();
+
+  function draft(lineItems: Array<Record<string, unknown>>) {
+    return { customerId, lineItems };
+  }
+
+  describe('tierStructureIssues', () => {
+    it('accepts a flat payload (no groups) as valid', () => {
+      expect(tierStructureIssues([{ description: 'Labor' }, { description: 'Parts' }])).toEqual([]);
+    });
+
+    it('accepts a well-formed tier group (>=2 options, exactly one default)', () => {
+      expect(
+        tierStructureIssues([
+          { groupKey: 'wh', isOptional: true, isDefaultSelected: true },
+          { groupKey: 'wh', isOptional: true, isDefaultSelected: false },
+        ]),
+      ).toEqual([]);
+    });
+
+    it('flags a singleton group', () => {
+      const issues = tierStructureIssues([{ groupKey: 'solo', isOptional: true, isDefaultSelected: true }]);
+      expect(issues).toHaveLength(1);
+      expect(issues[0]).toMatch(/only one option/);
+    });
+
+    it('flags a group with two defaults', () => {
+      const issues = tierStructureIssues([
+        { groupKey: 'g', isOptional: true, isDefaultSelected: true },
+        { groupKey: 'g', isOptional: true, isDefaultSelected: true },
+      ]);
+      expect(issues).toHaveLength(1);
+      expect(issues[0]).toMatch(/exactly one default/);
+    });
+
+    it('flags a group with zero defaults', () => {
+      const issues = tierStructureIssues([
+        { groupKey: 'g', isOptional: true },
+        { groupKey: 'g', isOptional: true },
+      ]);
+      expect(issues[0]).toMatch(/exactly one default/);
+    });
+
+    it('flags isDefaultSelected on an always-billed line', () => {
+      const issues = tierStructureIssues([{ description: 'Labor', isDefaultSelected: true }]);
+      expect(issues).toHaveLength(1);
+      expect(issues[0]).toMatch(/neither a tier option nor an optional add-on/);
+    });
+
+    it('allows a pre-checked optional add-on (isDefaultSelected on isOptional line)', () => {
+      expect(tierStructureIssues([{ description: 'Membership', isOptional: true, isDefaultSelected: true }])).toEqual([]);
+    });
+  });
+
+  describe('draftEstimatePayloadSchema refine', () => {
+    it('accepts a valid tiered draft via validateProposalPayload', () => {
+      const result = validateProposalPayload(
+        'draft_estimate',
+        draft([
+          { description: 'Builder heater', quantity: 1, unitPrice: 90000, groupKey: 'wh', isOptional: true, isDefaultSelected: true },
+          { description: 'Premium heater', quantity: 1, unitPrice: 140000, groupKey: 'wh', isOptional: true },
+        ]),
+      );
+      expect(result.valid).toBe(true);
+    });
+
+    it('rejects a malformed tiered draft (two defaults)', () => {
+      const result = validateProposalPayload(
+        'draft_estimate',
+        draft([
+          { description: 'A', quantity: 1, unitPrice: 100, groupKey: 'g', isOptional: true, isDefaultSelected: true },
+          { description: 'B', quantity: 1, unitPrice: 200, groupKey: 'g', isOptional: true, isDefaultSelected: true },
+        ]),
+      );
+      expect(result.valid).toBe(false);
+    });
+
+    it('leaves the flat draft path valid (backstop is inert without groups)', () => {
+      const result = validateProposalPayload(
+        'draft_estimate',
+        draft([{ description: 'Labor', quantity: 2, unitPrice: 7500 }]),
+      );
+      expect(result.valid).toBe(true);
+    });
+  });
+
+  it('agreement — normalizeTierStructure output always passes tierStructureIssues', () => {
+    // A deliberately malformed draft: a group with no default + extra default,
+    // a singleton group, and a pre-checked add-on with no request.
+    const messy: Array<Record<string, unknown>> = [
+      { description: 'Good', quantity: 1, unitPrice: 100, groupKey: 'g' },
+      { description: 'Better', quantity: 1, unitPrice: 200, groupKey: 'g', isDefaultSelected: true },
+      { description: 'Best', quantity: 1, unitPrice: 300, groupKey: 'g', isDefaultSelected: true },
+      { description: 'Solo', quantity: 1, unitPrice: 50, groupKey: 'solo' },
+      { description: 'Add-on', quantity: 1, unitPrice: 25, isOptional: true, isDefaultSelected: true },
+    ];
+    const normalized = normalizeTierStructure(messy);
+    expect(tierStructureIssues(normalized)).toEqual([]);
   });
 });

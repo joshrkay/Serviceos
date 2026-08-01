@@ -1,5 +1,7 @@
-import React, { useCallback, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { apiFetch } from '../../utils/api-fetch';
+import { useTenantTimezone } from '../../hooks/useTenantTimezone';
+import { tenantWallClockToUtc, utcToTenantWallClock } from '../../utils/formatInTenantTz';
 
 export interface RescheduleDialogProps {
   appointmentId: string;
@@ -9,13 +11,10 @@ export interface RescheduleDialogProps {
   onCancel?: () => void;
 }
 
-function toLocalInputValue(iso?: string): string {
+/** Render a UTC instant as the tenant-local 'YYYY-MM-DDTHH:mm' for the input. */
+function toLocalInputValue(iso: string | undefined, timezone: string): string {
   if (!iso) return '';
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return '';
-  // 'YYYY-MM-DDTHH:mm' for <input type="datetime-local">.
-  const pad = (n: number) => String(n).padStart(2, '0');
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  return utcToTenantWallClock(iso, timezone);
 }
 
 /**
@@ -31,10 +30,20 @@ export function RescheduleDialog({
   onSaved,
   onCancel,
 }: RescheduleDialogProps) {
-  const [start, setStart] = useState(() => toLocalInputValue(initialStart));
-  const [end, setEnd] = useState(() => toLocalInputValue(initialEnd));
+  const tz = useTenantTimezone();
+  const [start, setStart] = useState(() => toLocalInputValue(initialStart, tz));
+  const [end, setEnd] = useState(() => toLocalInputValue(initialEnd, tz));
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
+
+  // `useTenantTimezone` returns a fallback synchronously and resolves the real
+  // tenant tz after /api/me. Re-seed the wall-clock inputs when the tz (or the
+  // target appointment) changes, so the displayed time and the tz used at
+  // submit can't disagree if the dialog opened before the tz settled.
+  useEffect(() => {
+    setStart(toLocalInputValue(initialStart, tz));
+    setEnd(toLocalInputValue(initialEnd, tz));
+  }, [tz, initialStart, initialEnd]);
 
   const valid = useMemo(() => {
     if (!start || !end) return false;
@@ -54,11 +63,16 @@ export function RescheduleDialog({
 
       setSubmitting(true);
       try {
+        // The entered wall-clock times are TENANT-local (core pattern: stored
+        // UTC, rendered in tenant tz). `new Date(start)` interpreted them in
+        // the BROWSER tz, posting the wrong instant when the two zones differ.
+        const [startDate, startTime] = start.split('T');
+        const [endDate, endTime] = end.split('T');
         const res = await apiFetch(`/api/appointments/${appointmentId}`, {
           method: 'PUT',
           body: JSON.stringify({
-            scheduledStart: new Date(start).toISOString(),
-            scheduledEnd: new Date(end).toISOString(),
+            scheduledStart: tenantWallClockToUtc(startDate, startTime, tz).toISOString(),
+            scheduledEnd: tenantWallClockToUtc(endDate, endTime, tz).toISOString(),
           }),
         });
         if (!res.ok) {
@@ -72,7 +86,7 @@ export function RescheduleDialog({
         setSubmitting(false);
       }
     },
-    [appointmentId, start, end, valid, onSaved]
+    [appointmentId, start, end, valid, onSaved, tz]
   );
 
   const inputCls = 'w-full rounded-lg border border-slate-200 px-3 py-2 text-sm';

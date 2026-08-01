@@ -1,0 +1,73 @@
+{
+  "goal": "comms",
+  "spec": "spec/RIVET_COMMS_SPEC.md",
+  "contracts": ".rivet/RIVET_OPERATION_CONTRACTS.md",
+  "state_version": 1,
+  "updated": "2026-07-24",
+  "iteration": 1,
+  "phase": "iteration_1_remediations",
+  "migration": {
+    "status": "done",
+    "detail": "Spec §8 applied to RIVET_OPERATION_CONTRACTS.md before the loop: customer_ref split into account/contact/location refs, I1 deepened to tenant→Account→Contact/Location, new I14 read-time entitlement, CUS-001/002 three-way dedupe + per-entity edit scope, #6 merge gated on D16 (Account-level merge forbidden by voice), #7 first-class Location, INB-002 Location resolution, MSG-001/002 contact resolution + entitlement + explicit cross-channel selection, INV/EST/PAY billing-contact recipient, vectors V19–V23 added."
+  },
+  "gates": {
+    "C1": {
+      "status": "pass",
+      "detail": "Timeline reads pinned to tenant_id + single customerId (customers/timeline-service.ts); no parent/sub-account merge on reads; shared inbound phone routes to sms_unmatched thread, never attributed by ranking (sms/inbound-capture.ts); portal exposes no timeline route."
+    },
+    "C2": {
+      "status": "remediated",
+      "detail": "Was FAIL: portal sessions were customer-level bearer tokens; contact roles never consulted; any token holder could read invoices/balances/payment methods. Now: portal_sessions.contact_id (migration 262), entitlement derived from the contact's CURRENT role at token resolution (portal/portal-entitlement.ts — primary/billing→billing surface, site/other→service surface, D19 default-deny), contact-bound tokens fail closed on missing/archived/moved contact, billing routes (invoices, estimates, agreements, payment-methods) gated via requirePortalEntitlement. Residual: contacts are not yet Location-scoped, so a service-entitled contact sees all of the customer's jobs/appointments, not just their property — needs the full Account/Contact/Location schema (D19)."
+    },
+    "C3": {
+      "status": "remediated",
+      "detail": "Was FAIL: reply channel defaulted from customer.preferredChannel (not the thread), with silent cross-channel flips when the preferred address was missing; recipient always customer-level primaryPhone/email. Now: replies resolve within their own channel thread (bounded findLatestInboundChannel lookup), thread-derived channel switches require explicit selection (channel_selection_required / HTTP 409), preference-derived defaults may fall through only to the single deliverable channel (deterministic, not a guess). Residual: sends still target customer-record primaryPhone/email — per-Contact recipient targeting (V19) needs the full Contact model on the send path."
+    },
+    "C4": {
+      "status": "fail_not_built",
+      "detail": "No commitment extraction exists. summarize-session produces prose summary + intent only; call_summaries has no action-item field; no task creation from transcripts; no low-confidence review queue. Build plan: extend summarize-session extraction with confidence-scored commitments, commitments table linked to source timeline entry, high-confidence→task, low-confidence→operator review queue, nothing silently discarded (V23)."
+    },
+    "C5": {
+      "status": "remediated",
+      "detail": "Was FAIL on ordering: Gather TwiML prepended <Start><Record> before the disclosure <Say>; media-streams opened Deepgram ASR before the disclosure played. Now: Gather emits the record block AFTER the first <Say> (disclosure is inside it; <Gather> ASR already followed); media-streams gates frame-forwarding to ASR behind captureEnabled, set on the greeting turn's end-of-utterance mark ack (disclosure fully played), with a 30s lost-ack fallback and fail-open on disclosure-init failure (existing never-hang-up policy; DISCLOSURE_INIT_FAILED alert is the compliance signal). Residual: caller barge-in during the greeting is no longer transcribed on the stream path (pre-consent audio is dropped by design); disclosure copy still flagged 'legal review required' (D15)."
+    },
+    "C6": {
+      "status": "remediated",
+      "detail": "Was FAIL: retention sweep deleted only audio (kept transcripts/summaries/embeddings); tenant deprovision deleted DB rows but orphaned S3 audio; no per-customer erasure. Now: retention sweep purges all four classes per recording in one tenant-scoped transaction (call_transcript_turns, call_summaries, knowledge_chunks incl. :window ids, transcript columns nulled) before the tombstone, counts audited; deprovision captures files keys pre-purge and deletes stored objects post-commit (counts in platform log). Residual: no customer-level DSAR/right-to-erasure entry point yet — deletion currently reaches everything only via retention clock or full tenant purge (D17)."
+    },
+    "C7": {
+      "status": "fail_not_built",
+      "detail": "Inbound email does not exist: no inbound-parse webhook, no Message-ID/In-Reply-To/References threading, no From-address matching, no unmatched-sender review queue, no attachment scanning/caps. Outbound email sends via SendGrid but has no suppression-list enforcement, and no bounce/complaint processing ('bounced' status is dead schema). I13 provenance would apply automatically IF inbound email lands as messages rows with senderRole='customer' — must be pinned when built (V21)."
+    },
+    "C8": {
+      "status": "pass",
+      "detail": "Voice/AI history reads go through reducing skills (summarize-customer-history caps + counts; voice-lookup-answer emits counts/highlights). The enumerating getCustomerTimeline (200-event cap) is reachable only from the Clerk-authed staff route, not voice. Structural caveat: reduction is per-skill, not a single enforced choke point."
+    }
+  },
+  "iteration_log": [
+    {
+      "iteration": 1,
+      "date": "2026-07-24",
+      "actions": [
+        "§8 contract migration (pre-loop, per spec note)",
+        "Isolation sweep + full C1–C8 baseline with file:line evidence",
+        "C2/C3/C5 remediations (commit 1f1f1d5, PR #742)",
+        "C6 remediation + PR #742 review fixes: thread-vs-fallback channel defaults, bounded latest-inbound-channel query"
+      ],
+      "verification": "tsc build clean; reply-service/portal/retention suites 60/60 locally; telephony+mediastream suites and PR CI failure investigation pending (run interrupted)"
+    }
+  ],
+  "open_decisions": {
+    "D14": "Email sending domain — shared vs per-tenant (blocks C7 build)",
+    "D15": "Consent posture — announce-always vs geo-conditional; current implementation announces always with two-party fail-safe copy; legal review of copy outstanding",
+    "D16": "Merge semantics under Account/Contact/Location — contracts currently permit Contact-level only, Account-level merge forbidden by voice",
+    "D17": "Retention period + deletion SLA; customer-level DSAR entry point not built",
+    "D18": "After-hours response SLA and E2 on-call routing",
+    "D19": "Tenant-role entitlement defaults — current code default-denies billing surface to site/other roles"
+  },
+  "residual_risks": [
+    "Full Account/Contact/Location schema (Contact↔multiple Accounts, Location-scoped contacts) not yet modeled — C2/C3 residuals and V19 depend on it",
+    "PR #742 CI 'test' check failed on 1f1f1d5 — failing suite in the api section of the run log, not yet diagnosed",
+    "No handler-level tests yet for the C2 entitlement gate, C5 capture gate, or C6 purge (required by repo hygiene before the loop can mark these gates verified)"
+  ]
+}

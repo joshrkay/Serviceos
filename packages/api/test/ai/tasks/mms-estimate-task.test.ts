@@ -103,6 +103,40 @@ describe('U2 — MmsEstimateTaskHandler', () => {
     expect(result.proposal.payload.notes).toContain('corroded');
   });
 
+  it('stamps §6.4-B severity from the vision model into _meta (U2)', async () => {
+    const stub = new StubProvider('stub');
+    stub.setResponse({
+      content: JSON.stringify({
+        lineItems: [{ description: 'Burst pipe repair', quantity: 1, unitPrice: 35000 }],
+        severity: 'TIER_2_EMERGENCY_DISPATCH',
+        confidence_score: 0.8,
+      }),
+    });
+    const handler = new MmsEstimateTaskHandler(makeGateway(stub));
+
+    const result = await handler.handle(makeInput());
+    if (result.status !== 'drafted') throw new Error('expected drafted');
+    const meta = result.proposal.payload._meta as { severity?: string };
+    expect(meta.severity).toBe('TIER_2_EMERGENCY_DISPATCH');
+  });
+
+  it('drops an unknown severity tier — still drafts (U2)', async () => {
+    const stub = new StubProvider('stub');
+    stub.setResponse({
+      content: JSON.stringify({
+        lineItems: [{ description: 'Faucet swap', quantity: 1, unitPrice: 12000 }],
+        severity: 'SUPER_DUPER_URGENT',
+        confidence_score: 0.7,
+      }),
+    });
+    const handler = new MmsEstimateTaskHandler(makeGateway(stub));
+
+    const result = await handler.handle(makeInput());
+    if (result.status !== 'drafted') throw new Error('expected drafted');
+    const meta = result.proposal.payload._meta as { severity?: string };
+    expect(meta.severity).toBeUndefined();
+  });
+
   it('sends the photo as an image_url block on a multimodal user message', async () => {
     const stub = new StubProvider('stub');
     stub.setResponse({ content: validVisionJson });
@@ -131,10 +165,14 @@ describe('U2 — MmsEstimateTaskHandler', () => {
   it('catalog grounding — overrides the model price with the matched catalog price', async () => {
     const stub = new StubProvider('stub');
     stub.setResponse({ content: validVisionJson });
-    // Catalog priced at 95000c; the model emitted 120000c — catalog wins.
+    // validVisionJson drafts the heater at 120000c and the valve at 4500c.
+    // Catalog prices below are within PRICE_CONFLICT tolerance of those
+    // drafted prices (< 100¢ or < 10% deviation) so both lines snap to the
+    // catalog instead of tripping the "did you mean" price-conflict path —
+    // catalog still wins over the model's number.
     const catalogRepo = await catalogWith([
-      { name: 'Water heater replacement', unitPriceCents: 95000, category: 'Labor' },
-      { name: 'Pressure relief valve', unitPriceCents: 4000, category: 'Parts' },
+      { name: 'Water heater replacement', unitPriceCents: 119000, category: 'Labor' },
+      { name: 'Pressure relief valve', unitPriceCents: 4450, category: 'Parts' },
     ]);
     const handler = new MmsEstimateTaskHandler(makeGateway(stub), catalogRepo);
 
@@ -143,7 +181,7 @@ describe('U2 — MmsEstimateTaskHandler', () => {
 
     const lineItems = result.proposal.payload.lineItems as Array<Record<string, unknown>>;
     const heater = lineItems.find((li) => String(li.description).includes('Water heater'));
-    expect(heater?.unitPrice).toBe(95000);
+    expect(heater?.unitPrice).toBe(119000);
     expect(heater?.pricingSource).toBe('catalog');
     expect(result.proposal.confidenceFactors).toContain('catalog_priced');
   });
@@ -206,6 +244,13 @@ describe('U2 — MmsEstimateTaskHandler', () => {
     expect(result.proposal.status).toBe('draft');
     const lineItems = result.proposal.payload.lineItems as Array<Record<string, unknown>>;
     expect(lineItems[0].pricingSource).toBe('ambiguous');
+    // Ambiguous-only: confidence stays score-derived ('high' at 0.9) — the
+    // structural gate is missingFields, which one-tap resolution clears. A
+    // persisted 'low' stamp would never be lifted and would keep blocking
+    // chain-set/SMS approval after the operator picks.
+    expect(result.proposal.confidenceFactors).not.toContain('uncatalogued_line_item');
+    const meta = result.proposal.payload._meta as { overallConfidence?: string };
+    expect(meta.overallConfidence).toBe('high');
   });
 
   it('vision parse failure — non-JSON content → safe fallback (no proposal, no crash)', async () => {
@@ -258,5 +303,60 @@ describe('U2 — MmsEstimateTaskHandler', () => {
     expect(result.status).toBe('parse_failed');
     if (result.status !== 'parse_failed') throw new Error('expected parse_failed');
     expect(result.reason).toBe('invalid_payload');
+  });
+});
+
+// ─── EE-1: good-better-best from a photo ─────────────────────────────────
+describe('EE-1 — MMS good-better-best tier drafting', () => {
+  const tieredVisionJson = JSON.stringify({
+    lineItems: [
+      { description: 'Standard water heater', quantity: 1, unitPrice: 90000, groupKey: 'wh', groupLabel: 'Water heater' },
+      { description: 'Premium water heater', quantity: 1, unitPrice: 140000, groupKey: 'wh', groupLabel: 'Water heater', isDefaultSelected: true },
+    ],
+    notes: 'Corroded tank — offering replacement tiers.',
+    confidence_score: 0.9,
+  });
+
+  it('drafts a normalized, catalog-grounded tier group from a photo when options are requested', async () => {
+    const stub = new StubProvider('stub');
+    stub.setResponse({ content: tieredVisionJson });
+    const repo = await catalogWith([
+      { name: 'Standard water heater', unitPriceCents: 90000, category: 'Materials' },
+      { name: 'Premium water heater', unitPriceCents: 140000, category: 'Materials' },
+    ]);
+    const handler = new MmsEstimateTaskHandler(makeGateway(stub), repo);
+
+    const result = await handler.handle(
+      makeInput({ message: 'give me good, better, best options to fix this' }),
+    );
+    // 'drafted' proves the normalized structure passed assertValidProposalPayload
+    // (the U2 refine) — a malformed group would have fallen back to parse_failed.
+    expect(result.status).toBe('drafted');
+    if (result.status !== 'drafted') return;
+
+    const items = result.proposal.payload.lineItems as Array<Record<string, unknown>>;
+    expect(items).toHaveLength(2);
+    expect(items.every((li) => li.groupKey === 'wh')).toBe(true);
+    expect(items.every((li) => li.isOptional === true)).toBe(true);
+    expect(items.map((li) => li.isDefaultSelected)).toEqual([false, true]);
+    expect(items.every((li) => li.pricingSource === 'catalog')).toBe(true);
+  });
+
+  it('injects tier guidance only when the customer text asks for options', async () => {
+    const stub = new StubProvider('stub');
+    stub.setResponse({ content: validVisionJson });
+    const handler = new MmsEstimateTaskHandler(makeGateway(stub));
+
+    // Bare photo, no cue → base MMS prompt only (byte-identical path).
+    await handler.handle(makeInput());
+    const flat = stub.getLastRequest()!.messages;
+    expect(flat.filter((m) => m.role === 'system')).toHaveLength(1);
+    expect(flat.some((m) => m.content.includes('groupKey'))).toBe(false);
+
+    // Cued text → guidance injected as a second system message.
+    await handler.handle(makeInput({ message: 'can you give me a few options?' }));
+    const cued = stub.getLastRequest()!.messages;
+    expect(cued.filter((m) => m.role === 'system')).toHaveLength(2);
+    expect(cued.some((m) => m.role === 'system' && m.content.includes('groupKey'))).toBe(true);
   });
 });

@@ -46,7 +46,9 @@ function gatewayReturning(content: string): LLMGateway {
 
 const visionJson = JSON.stringify({
   lineItems: [
-    { description: 'Drywall patch', quantity: 1, unitPrice: 22000, category: 'labor' },
+    // Within PRICE_CONFLICT tolerance of the 15000¢ catalog price — a larger
+    // deviation is a "did you mean" conflict, not a silent snap.
+    { description: 'Drywall patch', quantity: 1, unitPrice: 15600, category: 'labor' },
     { description: 'Bespoke trim work', quantity: 1, unitPrice: 7500, category: 'material' },
   ],
   notes: 'Hole near the window.',
@@ -102,6 +104,7 @@ describe('Postgres integration — MMS-to-quote (U2)', () => {
       gateway: gatewayReturning(visionJson),
       catalogRepo,
       auditRepo,
+      notifyOwner: vi.fn(async () => {}),
     };
   });
 
@@ -151,6 +154,12 @@ describe('Postgres integration — MMS-to-quote (U2)', () => {
     const files = await fileRepo.findByEntity(tenant.tenantId, 'customer', result.customerId!);
     expect(files.length).toBeGreaterThanOrEqual(1);
     expect(files[0].tenantId).toBe(tenant.tenantId);
+
+    // U3 — a successful draft surfaces to the owner (heads-up SMS via notifyOwner).
+    expect(deps.notifyOwner).toHaveBeenCalledWith(
+      tenant.tenantId,
+      expect.stringContaining('photo quote'),
+    );
   });
 
   it('known customer MMS → drafts against the resolved customer (no duplicate created)', async () => {

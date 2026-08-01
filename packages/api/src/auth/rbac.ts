@@ -25,9 +25,9 @@ export type Permission =
   | 'audit:view'
   | 'reports:view'
   | 'proposals:approve'
+  | 'proposals:create'
   | 'proposals:edit'
   | 'proposals:view'
-  | 'proposals:edit'
   // Phase 1 permissions
   | 'customers:create'
   | 'customers:view'
@@ -94,6 +94,7 @@ const ROLE_PERMISSIONS: Record<Role, Permission[]> = {
     'audit:view',
     'reports:view',
     'proposals:approve',
+    'proposals:create',
     'proposals:edit',
     'proposals:view',
     // Phase 1
@@ -148,6 +149,7 @@ const ROLE_PERMISSIONS: Record<Role, Permission[]> = {
     'ai:run',
     'reports:view',
     'proposals:approve',
+    'proposals:create',
     'proposals:edit',
     'proposals:view',
     // Phase 1
@@ -185,13 +187,54 @@ const ROLE_PERMISSIONS: Record<Role, Permission[]> = {
     'conversations:create',
     'files:upload',
     'files:view',
+    // Owner decision, 2026-07-27: technicians DO quote and bill, and reach the
+    // assistant like anyone else. `ai:run` unlocks POST /api/assistant/chat
+    // (and the voice-session routes) — nothing more; every downstream write is
+    // still gated by its own permission, so RBAC does the limiting.
+    //
+    // This is deliberately the ONLY grant needed to deliver that decision. The
+    // chat route creates PROPOSALS (draft-and-approve), which requires
+    // `proposals:create` — already held below — and no estimates:*/invoices:*
+    // at all. A technician speaks an estimate into existence; a permission
+    // holder approves it. See the billing-isolation note below for why the
+    // direct office permissions stay withheld.
+    'ai:run',
+    // Technicians deliberately lack appointments:update — the day-view
+    // reschedule flow (TechnicianDayView.saveAppointmentTimes) routes edits
+    // through the human-approval-gated proposal path instead, so creating a
+    // proposal is the LOW-privilege action here and must stay available.
+    'proposals:create',
     'proposals:view',
     // Phase 1
     'customers:view',
     'locations:view',
-    'estimates:view',
-    'invoices:view',
-    'payments:view',
+    // Epic 6's "technicians must not see office/billing surfaces" stance was
+    // OVERTURNED by the owner on 2026-07-27: technicians do quote and bill.
+    // That is delivered via `ai:run` + the existing `proposals:create`
+    // draft-and-approve path above, NOT by granting direct office permissions
+    // — which stay withheld for reasons that survive the overturn:
+    //
+    //   invoices:view  — guards far more than invoices. It gates all of
+    //     routes/reports.ts (/money-dashboard, /tax-export, /hfcr,
+    //     /job-profit, /customer-profit and /technician-profit/:technicianId
+    //     — i.e. one technician reading another's profitability), plus
+    //     routes/financing.ts and the voice-ROI analytics router. Granting it
+    //     for "read back my own invoice" would hand over whole-business
+    //     financials. Split that permission before revisiting.
+    //   estimates:view — additionally opens bundles/templates/quality routes.
+    //   payments:view / payments:create / invoices:update — the write-side
+    //     pair are what actually drive billing PUSH NOTIFICATIONS to a
+    //     device: NOTIFICATION_DESCRIPTORS maps payment_received →
+    //     'payments:create' and invoice_overdue → 'invoices:update' (NOT the
+    //     :view permissions). Withholding them is what keeps billing pushes
+    //     off a technician's phone — see notifications/user-targeting.ts.
+    //
+    // Note also packages/web Shell.tsx gates the Estimates/Invoices nav on
+    // exactly estimates:view / invoices:view, so granting either would surface
+    // office nav in the field UI.
+    //
+    // The field surfaces (TechJobView, TechnicianDayView) read only
+    // jobs/notes/appointments.
     'appointments:view',
     'notes:create',
     'notes:view',

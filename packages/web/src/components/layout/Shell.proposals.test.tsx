@@ -12,6 +12,7 @@
  * Clerk + voice/camera mocks mirror `Shell-mode.test.tsx` so the Shell
  * renders cleanly under jsdom.
  */
+import { _resetPendingProposalsCacheForTests } from '../../hooks/usePendingProposals';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, waitFor, act, fireEvent } from '@testing-library/react';
 import { MemoryRouter, Routes, Route } from 'react-router';
@@ -140,6 +141,7 @@ function renderShell() {
 
 describe('P2-033 — Shell proposal notification integration', () => {
   beforeEach(() => {
+    _resetPendingProposalsCacheForTests();
     toastInfo.mockReset();
     vi.restoreAllMocks();
   });

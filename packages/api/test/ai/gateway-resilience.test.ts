@@ -24,6 +24,7 @@ import {
   TenantConcurrencyExceededError,
   DEFAULT_TIER_CONFIG,
 } from '../../src/ai/gateway/tenant-quota';
+import type { QuotaStore } from '../../src/ai/gateway/tenant-quota';
 import {
   createDeadlineContext,
   DeadlineExceededError,
@@ -135,6 +136,26 @@ describe('ProviderBreakerWrapper', () => {
     await expect(wrapped.complete(req)).rejects.toBeInstanceOf(BreakerOpenError);
   });
 
+  it('skips breaker enforcement for SYSTEM_TENANT_ID readiness probes', async () => {
+    const failErr = new Error('Request was aborted.');
+    const inner = new AlwaysFailProvider('p', failErr);
+    const reg = new CircuitBreakerRegistry({
+      ...DEFAULT_BREAKER,
+      consecutiveFailureThreshold: 2,
+      countThreshold: 100,
+      cooldownMs: 50,
+    });
+    const wrapped = new ProviderBreakerWrapper(inner, reg);
+    const req = { ...makeRequest(), tenantId: 'system' };
+
+    for (let i = 0; i < 10; i++) {
+      await expect(wrapped.complete(req)).rejects.toThrow('Request was aborted.');
+    }
+    // Still the original error — breaker never opened on system probes.
+    await expect(wrapped.complete(req)).rejects.toThrow('Request was aborted.');
+    await expect(wrapped.complete(req)).rejects.not.toBeInstanceOf(BreakerOpenError);
+  });
+
   it('does NOT count 4xx errors toward breaker open', async () => {
     const clientErr = Object.assign(new Error('bad request'), { status: 400 });
     const inner = new AlwaysFailProvider('p', clientErr);
@@ -155,6 +176,131 @@ describe('ProviderBreakerWrapper', () => {
     // Should still be throwable as the original 4xx, not BreakerOpenError
     await expect(wrapped.complete(req)).rejects.toThrow('bad request');
     await expect(wrapped.complete(req)).rejects.not.toBeInstanceOf(BreakerOpenError);
+  });
+
+  it('does NOT count Request-was-aborted / DeadlineExceeded toward breaker open (FM-01)', async () => {
+    const abortErr = new Error('Request was aborted.');
+    const inner = new AlwaysFailProvider('p', abortErr);
+    const reg = new CircuitBreakerRegistry({
+      ...DEFAULT_BREAKER,
+      consecutiveFailureThreshold: 2,
+      countThreshold: 100,
+      cooldownMs: 50,
+    });
+    const wrapped = new ProviderBreakerWrapper(inner, reg);
+    const req = makeRequest();
+
+    for (let i = 0; i < 20; i++) {
+      await expect(wrapped.complete(req)).rejects.toThrow('Request was aborted.');
+    }
+    await expect(wrapped.complete(req)).rejects.toThrow('Request was aborted.');
+    await expect(wrapped.complete(req)).rejects.not.toBeInstanceOf(BreakerOpenError);
+
+    // Typed deadline similarly
+    const deadlineInner = new AlwaysFailProvider('p2', new DeadlineExceededError(100));
+    const deadlineWrapped = new ProviderBreakerWrapper(deadlineInner, reg);
+    for (let i = 0; i < 10; i++) {
+      await expect(deadlineWrapped.complete(makeRequest())).rejects.toBeInstanceOf(
+        DeadlineExceededError,
+      );
+    }
+    await expect(deadlineWrapped.complete(makeRequest())).rejects.not.toBeInstanceOf(
+      BreakerOpenError,
+    );
+  });
+
+  it('still opens breaker on 503 provider failures', async () => {
+    const failErr = Object.assign(new Error('upstream 503'), { status: 503 });
+    const inner = new AlwaysFailProvider('p503', failErr);
+    const reg = new CircuitBreakerRegistry({
+      ...DEFAULT_BREAKER,
+      consecutiveFailureThreshold: 3,
+      countThreshold: 100,
+      cooldownMs: 50,
+    });
+    const wrapped = new ProviderBreakerWrapper(inner, reg);
+    const req = makeRequest();
+    for (let i = 0; i < 3; i++) {
+      await expect(wrapped.complete(req)).rejects.toThrow('upstream 503');
+    }
+    await expect(wrapped.complete(req)).rejects.toBeInstanceOf(BreakerOpenError);
+  });
+
+  it('isolates classify_intent breaker cell from assistant traffic (FM-02)', async () => {
+    const failErr = Object.assign(new Error('assistant boom'), { status: 503 });
+    let calls = 0;
+    const inner: LLMProvider = {
+      name: 'iso',
+      complete: async (req) => {
+        calls++;
+        if (req.taskType !== 'classify_intent') {
+          throw failErr;
+        }
+        return {
+          content: 'ok',
+          model: 'gpt-4o-mini',
+          provider: 'iso',
+          tokenUsage: { input: 1, output: 1, total: 2 },
+          latencyMs: 1,
+        };
+      },
+      isAvailable: async () => true,
+    };
+    const reg = new CircuitBreakerRegistry({
+      ...DEFAULT_BREAKER,
+      consecutiveFailureThreshold: 2,
+      countThreshold: 100,
+      cooldownMs: 50,
+    });
+    const wrapped = new ProviderBreakerWrapper(inner, reg);
+
+    for (let i = 0; i < 2; i++) {
+      await expect(
+        wrapped.complete(makeRequest({ taskType: 'assistant.general', model: 'gpt-4o-mini' })),
+      ).rejects.toThrow('assistant boom');
+    }
+    // Assistant cell is open…
+    await expect(
+      wrapped.complete(makeRequest({ taskType: 'assistant.general', model: 'gpt-4o-mini' })),
+    ).rejects.toBeInstanceOf(BreakerOpenError);
+
+    // …but classify cell stays closed and succeeds.
+    const classify = await wrapped.complete(
+      makeRequest({ taskType: 'classify_intent', model: 'gpt-4o-mini' }),
+    );
+    expect(classify.content).toBe('ok');
+    expect(calls).toBeGreaterThanOrEqual(3);
+  });
+
+  it('half-open deadline abort does not reopen the breaker (FM-04)', async () => {
+    const failErr = Object.assign(new Error('boom'), { status: 503 });
+    const reg = new CircuitBreakerRegistry({
+      ...DEFAULT_BREAKER,
+      consecutiveFailureThreshold: 2,
+      countThreshold: 100,
+      cooldownMs: 20,
+      halfOpenProbeCount: 2,
+      halfOpenSuccessRatio: 1.0,
+    });
+    const failWrapped = new ProviderBreakerWrapper(new AlwaysFailProvider('p', failErr), reg);
+    const req = makeRequest();
+    for (let i = 0; i < 2; i++) {
+      await expect(failWrapped.complete(req)).rejects.toThrow('boom');
+    }
+    await expect(failWrapped.complete(req)).rejects.toBeInstanceOf(BreakerOpenError);
+    await new Promise((r) => setTimeout(r, 30));
+
+    // Half-open: local abort must not count as health failure / reopen.
+    const abortWrapped = new ProviderBreakerWrapper(
+      new AlwaysFailProvider('p', new Error('Request was aborted.')),
+      reg,
+      'p',
+    );
+    await expect(abortWrapped.complete(req)).rejects.toThrow('Request was aborted.');
+    // Still half-open (not re-opened) — success probe can proceed.
+    const successWrapped = new ProviderBreakerWrapper(new AlwaysSuccessProvider(), reg, 'p');
+    const result = await successWrapped.complete(req);
+    expect(result.content).toBe('ok');
   });
 
   it('half-opens after cooldown and recovers on success', async () => {
@@ -347,6 +493,19 @@ describe('ProviderFailoverWrapper', () => {
     expect(result.providerPath?.length).toBeGreaterThanOrEqual(1);
   });
 
+  it('fails over to next provider on local abort (dual-provider path)', async () => {
+    const abortErr = Object.assign(new Error('Request was aborted.'), { name: 'AbortError' });
+    const primary = new AlwaysFailProvider('primary', abortErr);
+    const fallback = new AlwaysSuccessProvider();
+    const wrapped = new ProviderFailoverWrapper([primary, fallback]);
+    const result = await wrapped.complete(makeRequest());
+    expect(result.provider).toBe('always-success');
+    expect(result.providerPath).toEqual([
+      'primary:undefined',
+      'always-success:undefined',
+    ]);
+  });
+
   it('does NOT fail over on 4xx errors — throws original error', async () => {
     const err4xx = Object.assign(new Error('bad request'), { status: 400 });
     const primary = new AlwaysFailProvider('primary', err4xx);
@@ -396,7 +555,7 @@ describe('ProviderTenantQuotaWrapper', () => {
     const wrapped = new ProviderTenantQuotaWrapper(inner, reg);
 
     // Manually hold a lease to saturate concurrency
-    reg.acquire({ tenantId: 'tenant-1', tenantTier: 'standard', estimatedTokens: 10 });
+    await reg.acquire({ tenantId: 'tenant-1', tenantTier: 'standard', estimatedTokens: 10 });
 
     await expect(
       wrapped.complete(makeRequest({ tenantId: 'tenant-1', tenantTier: 'standard' })),
@@ -429,6 +588,28 @@ describe('ProviderTenantQuotaWrapper', () => {
     await expect(wrapped.complete(req)).rejects.toThrow('boom');
     // After failure, lease should be released — second call should be allowed
     await expect(wrapped.complete(req)).rejects.toThrow('boom');
+  });
+
+  it('isolates full-taxonomy classification from ordinary tenant traffic', async () => {
+    const inner = new AlwaysSuccessProvider();
+    const acquire = vi.fn(async () => ({ release: vi.fn(async () => undefined) }));
+    const quota: QuotaStore = { acquire };
+    const wrapped = new ProviderTenantQuotaWrapper(inner, quota);
+
+    await wrapped.complete(
+      makeRequest({
+        taskType: 'classify_intent',
+        tenantId: 'tenant-voice',
+        tenantTier: 'standard',
+      }),
+    );
+
+    expect(acquire).toHaveBeenCalledWith(
+      expect.objectContaining({
+        tenantId: 'tenant-voice:classify_intent',
+        tenantTier: 'classifier_standard',
+      }),
+    );
   });
 });
 
@@ -577,6 +758,36 @@ describe('composeResilienceStack', () => {
     expect((err as AppError).statusCode).toBe(503);
   });
 
+  it('dual-provider abort then success does not open the primary breaker', async () => {
+    const abortErr = Object.assign(new Error('Request was aborted.'), { name: 'AbortError' });
+    const primary = new AlwaysFailProvider('primary', abortErr);
+    const fallback = new AlwaysSuccessProvider();
+    const breakerReg = new CircuitBreakerRegistry({
+      ...DEFAULT_BREAKER,
+      consecutiveFailureThreshold: 3,
+      countThreshold: 3,
+    });
+    const quotaReg = new TenantQuotaRegistry();
+
+    const composed = composeResilienceStack(primary, {
+      breakers: breakerReg,
+      quota: quotaReg,
+      fallbackProviders: [fallback],
+    });
+
+    for (let i = 0; i < 5; i++) {
+      const result = await composed.complete(makeRequest({ model: 'gpt-4o-mini' }));
+      expect(result.provider).toBe('always-success');
+      expect(result.providerPath?.length).toBeGreaterThanOrEqual(2);
+    }
+
+    const states = breakerReg.getProviderStates();
+    expect(states.length).toBeGreaterThan(0);
+    for (const cell of states) {
+      expect(cell.breakerState).toBe('closed');
+    }
+  });
+
   it('does NOT propagate LLM_PROVIDER_UNAVAILABLE for 4xx', async () => {
     const err4xx = Object.assign(new Error('bad request'), { status: 400 });
     const primary = new AlwaysFailProvider('primary', err4xx);
@@ -674,7 +885,9 @@ describe('gateway_breaker_state metric (spec gap 1)', () => {
     reg.cell(parts); // create the cell
 
     const m = await metricsRegistry.metrics();
-    expect(m).toMatch(/breaker_state\{key="test-legacy\|model1\|default\|default"\}/);
+    expect(m).toMatch(
+      /breaker_state\{key="test-legacy\|model1\|default\|default\|default"\}/,
+    );
     expect(m).toMatch(/gateway_breaker_state\{provider="test-legacy"/);
   });
 });

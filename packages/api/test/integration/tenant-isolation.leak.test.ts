@@ -60,6 +60,12 @@ import { PgTenantBudgetCounterRepository } from '../../src/proposals/supervisor/
 import { InMemoryFeatureFlagRepository } from '../../src/flags/feature-flags';
 import { PgTriageEventRepository } from '../../src/ai/agents/customer-calling/pg-triage-events';
 import { PgConsentEventRepository } from '../../src/compliance/consent-events';
+import { PgUserRepository } from '../../src/users/pg-user';
+import { PgPendingInvitationRepository } from '../../src/users/pg-pending-invitation';
+import {
+  PgOnboardingSessionRepository,
+  type OnboardingSession,
+} from '../../src/db/onboarding-session-repository';
 import { buildLineItem, calculateDocumentTotals } from '../../src/shared/billing-engine';
 
 const APP_ROLE = 'rls_app_runtime';
@@ -112,6 +118,14 @@ describe('repository-layer cross-tenant leak (RV-003)', () => {
   let proposalB: string;
   let fileB: string;
   let attachmentB: string;
+
+  // pending invitations + onboarding sessions (RV-003 follow-up: these repo
+  // methods previously lacked a tenant_id predicate — see pg-user.ts,
+  // pg-pending-invitation.ts, onboarding-session-repository.ts).
+  let invitationA: string;
+  let invitationB: string;
+  let onboardingA: string;
+  let onboardingB: string;
 
   beforeAll(async () => {
     pool = await getSharedTestDb();
@@ -381,6 +395,30 @@ describe('repository-layer cross-tenant leak (RV-003)', () => {
       source: 'app',
     });
     attachmentB = createdAttachmentB.id;
+
+    // ── pending_invitations + onboarding_session fixtures ──────────────────
+    const invitationRepo = new PgPendingInvitationRepository(pool);
+    const onboardingRepo = new PgOnboardingSessionRepository(pool);
+
+    const invA = await invitationRepo.create({
+      tenantId: tenantA.tenantId,
+      email: 'invitee-a@example.com',
+      role: 'technician',
+      invitedBy: tenantA.userId,
+    });
+    invitationA = invA.id;
+    const invB = await invitationRepo.create({
+      tenantId: tenantB.tenantId,
+      email: 'invitee-b@example.com',
+      role: 'technician',
+      invitedBy: tenantB.userId,
+    });
+    invitationB = invB.id;
+
+    const onbA = await onboardingRepo.create(tenantA.tenantId);
+    onboardingA = onbA.id;
+    const onbB = await onboardingRepo.create(tenantB.tenantId);
+    onboardingB = onbB.id;
   });
 
   afterAll(async () => {
@@ -850,6 +888,87 @@ describe('repository-layer cross-tenant leak (RV-003)', () => {
         return res.rows[0].n;
       });
       expect(n).toBe(0);
+    });
+  });
+
+  // ── users (RV-003 follow-up: findByTenant lacked a tenant_id predicate) ────
+  //
+  // These run through the SUPERUSER pool, which bypasses RLS — so the ONLY
+  // thing preventing a cross-tenant leak is the repo's own `WHERE tenant_id`
+  // clause. Before the fix, findByTenant returned every tenant's rows and
+  // these `.not.toContain` assertions would fail.
+  describe('PgUserRepository', () => {
+    it('findByTenant(A) returns A owner and NOT B owner', async () => {
+      const repo = new PgUserRepository(pool);
+      const ids = (await repo.findByTenant(tenantA.tenantId)).map((r) => r.id);
+      expect(ids).toContain(tenantA.userId);
+      expect(ids).not.toContain(tenantB.userId);
+    });
+
+    it('findByTenant(B) returns B owner and NOT A owner', async () => {
+      const repo = new PgUserRepository(pool);
+      const ids = (await repo.findByTenant(tenantB.tenantId)).map((r) => r.id);
+      expect(ids).toContain(tenantB.userId);
+      expect(ids).not.toContain(tenantA.userId);
+    });
+
+    it('findByTenant(A) with a role filter still excludes B rows', async () => {
+      const repo = new PgUserRepository(pool);
+      const ids = (await repo.findByTenant(tenantA.tenantId, { role: 'owner' })).map((r) => r.id);
+      expect(ids).toContain(tenantA.userId);
+      expect(ids).not.toContain(tenantB.userId);
+    });
+  });
+
+  // ── pending_invitations (RV-003 follow-up: findByTenant lacked tenant_id) ──
+  describe('PgPendingInvitationRepository', () => {
+    it('findByTenant(A) returns A invite and NOT B invite', async () => {
+      const repo = new PgPendingInvitationRepository(pool);
+      const ids = (await repo.findByTenant(tenantA.tenantId)).map((r) => r.id);
+      expect(ids).toContain(invitationA);
+      expect(ids).not.toContain(invitationB);
+    });
+
+    it('findByTenant(B) returns B invite and NOT A invite', async () => {
+      const repo = new PgPendingInvitationRepository(pool);
+      const ids = (await repo.findByTenant(tenantB.tenantId)).map((r) => r.id);
+      expect(ids).toContain(invitationB);
+      expect(ids).not.toContain(invitationA);
+    });
+
+    it('findByTenant(A, includeAccepted) still excludes B invites', async () => {
+      const repo = new PgPendingInvitationRepository(pool);
+      const ids = (
+        await repo.findByTenant(tenantA.tenantId, { includeAccepted: true })
+      ).map((r) => r.id);
+      expect(ids).toContain(invitationA);
+      expect(ids).not.toContain(invitationB);
+    });
+  });
+
+  // ── onboarding_session (RV-003 follow-up: findById/update lacked tenant_id) ─
+  describe('PgOnboardingSessionRepository', () => {
+    it('findById scoped to A cannot retrieve B session', async () => {
+      const repo = new PgOnboardingSessionRepository(pool);
+      expect(await repo.findById(tenantA.tenantId, onboardingB)).toBeNull();
+    });
+
+    it('findById scoped to A can retrieve own session', async () => {
+      const repo = new PgOnboardingSessionRepository(pool);
+      const found = await repo.findById(tenantA.tenantId, onboardingA);
+      expect(found?.id).toBe(onboardingA);
+    });
+
+    it('update scoped to A cannot mutate B session and leaves it intact', async () => {
+      const repo = new PgOnboardingSessionRepository(pool);
+      const result = await repo.update(tenantA.tenantId, onboardingB, {
+        fsmState: 'completed' as OnboardingSession['fsmState'],
+      });
+      expect(result).toBeNull();
+      // B's session is untouched.
+      const intact = await repo.findById(tenantB.tenantId, onboardingB);
+      expect(intact).not.toBeNull();
+      expect(intact!.fsmState).not.toBe('completed');
     });
   });
 

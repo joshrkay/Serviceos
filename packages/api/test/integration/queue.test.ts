@@ -105,4 +105,167 @@ describe('Postgres integration — PgQueue', () => {
     const dlq = await queue.listDeadLetter();
     expect(dlq.filter((d) => d.messageId === msg!.id)).toHaveLength(1);
   });
+
+  it('receiveBatch claims up to N oldest messages, disjointly (P3)', async () => {
+    for (let i = 0; i < 5; i++) await queue.send('batch.job', { i }, `b-${i}`);
+
+    const first = await queue.receiveBatch<{ i: number }>(3);
+    expect(first.map((m) => m.payload.i)).toEqual([0, 1, 2]); // oldest-first
+
+    // The remaining batch is disjoint — no message is delivered twice.
+    const second = await queue.receiveBatch<{ i: number }>(3);
+    expect(second.map((m) => m.payload.i)).toEqual([3, 4]);
+    const ids = new Set([...first, ...second].map((m) => m.id));
+    expect(ids.size).toBe(5);
+
+    expect(await queue.receiveBatch(3)).toEqual([]); // all claimed (now invisible)
+  });
+
+  it('two concurrent receiveBatch calls split the work with no overlap (SKIP LOCKED)', async () => {
+    for (let i = 0; i < 6; i++) await queue.send('concurrent.job', { i });
+
+    // Two batches racing on one table must partition the rows, never double-claim.
+    const [a, b] = await Promise.all([queue.receiveBatch(6), queue.receiveBatch(6)]);
+    const ids = [...a, ...b].map((m) => m.id);
+    expect(ids.length).toBe(6);
+    expect(new Set(ids).size).toBe(6); // disjoint
+  });
+
+  // scale-to-1000 C1 — depth() feeds the pg_queue_depth gauge + P2 alert.
+  it('depth() counts the pending backlog and the dead-letter queue', async () => {
+    expect(await queue.depth()).toEqual({ pending: 0, deadLetter: 0 });
+
+    for (let i = 0; i < 4; i++) await queue.send('depth.job', { i }, `d-${i}`);
+    // Claiming does NOT remove rows (they stay in the table, invisible), so they
+    // remain part of the backlog until delete()/DLQ — depth still counts them.
+    const claimed = await queue.receiveBatch<{ i: number }>(2);
+    expect((await queue.depth()).pending).toBe(4);
+
+    // Move one claimed message to the DLQ: pending drops by one, deadLetter rises.
+    await queue.moveToDeadLetter(claimed[0], 'boom');
+    const d = await queue.depth();
+    expect(d).toEqual({ pending: 3, deadLetter: 1 });
+
+    // delete() removes from the backlog entirely.
+    await queue.delete(claimed[1].id);
+    expect((await queue.depth()).pending).toBe(2);
+  });
+
+  describe('T4-F10 — recordFailure persists the real handler error', () => {
+    it('recordFailure sets last_error on the real _queue_messages row', async () => {
+      const id = await queue.send('flaky.job', { n: 1 }, 'flaky-key-1');
+      await queue.receive(); // attempts 0 -> 1
+
+      await queue.recordFailure(id, 'handler threw: connection refused');
+
+      const { rows } = await pool.query<{ last_error: string | null }>(
+        'SELECT last_error FROM _queue_messages WHERE id = $1',
+        [id],
+      );
+      expect(rows[0].last_error).toBe('handler threw: connection refused');
+    });
+
+    it('recordFailure is a no-op (never throws) once the message row is gone', async () => {
+      const id = await queue.send('one.shot.fail', {}, 'one-shot-fail-key');
+      await queue.delete(id);
+      await expect(queue.recordFailure(id, 'too late')).resolves.toBeUndefined();
+    });
+
+    it('end-to-end: fail-then-exhaust-then-DLQ ends with the DLQ error matching the real thrown message, not a hardcoded constant', async () => {
+      // maxRetries: 1 + a normal (nonzero) visibilityTimeout so the single
+      // receive() below both claims the message AND exhausts it in one
+      // step, without racing PgQueue's own crash-orphan reaper (which runs
+      // inside every receiveBatch call and would otherwise reap an
+      // already-exhausted, immediately-revisible row before this test gets
+      // to call recordFailure/moveToDeadLetter on it — a visibilityTimeout:
+      // 0 artifact unrelated to what this test is proving).
+      const singleAttemptQueue = new PgQueue(pool, { maxRetries: 1, visibilityTimeout: 30 });
+      const id = await singleAttemptQueue.send('exhausting.job', { n: 1 }, 'exhaust-key-1');
+
+      const msg = await singleAttemptQueue.receive();
+      expect(msg).not.toBeNull();
+      expect(msg!.attempts).toBe(1);
+      expect(msg!.maxAttempts).toBe(1);
+
+      // Mirrors app.ts's handleQueueMessage: processMessage's real error is
+      // persisted via recordFailure BEFORE the maxAttempts check.
+      const realError = 'ECONNRESET: handler threw on the only attempt';
+      await singleAttemptQueue.recordFailure(id, realError);
+
+      const row = await pool.query<{ last_error: string | null }>(
+        'SELECT last_error FROM _queue_messages WHERE id = $1',
+        [id],
+      );
+      expect(row.rows[0].last_error).toBe(realError);
+
+      // attempts (1) >= maxAttempts (1) — the real caller now passes the
+      // real error into moveToDeadLetter instead of a hardcoded string.
+      await singleAttemptQueue.moveToDeadLetter(msg!, realError);
+
+      const dlq = await singleAttemptQueue.listDeadLetter();
+      const ours = dlq.find((d) => d.messageId === id);
+      expect(ours?.error).toBe(realError);
+      expect(ours?.error).not.toBe('max attempts exceeded');
+
+      // The message row is gone — no lingering _queue_messages entry.
+      const remaining = await pool.query('SELECT 1 FROM _queue_messages WHERE id = $1', [id]);
+      expect(remaining.rows).toHaveLength(0);
+    });
+  });
+
+  // Codex P2 (PR #705, round 3) — the crash-orphan reaper must carry the real
+  // recorded failure to the DLQ, not overwrite it with the hardcoded orphan
+  // text. The exact crash it handles is "worker persisted last_error on its
+  // final attempt, then died before moveToDeadLetter".
+  describe('crash-orphan reaper preserves the recorded failure', () => {
+    it('reaps an orphan with its real last_error (not the hardcoded orphan text)', async () => {
+      const singleAttemptQueue = new PgQueue(pool, { maxRetries: 1, visibilityTimeout: 30 });
+      const id = await singleAttemptQueue.send('orphan.job', { n: 1 }, 'orphan-key-1');
+
+      const msg = await singleAttemptQueue.receive(); // attempts 0 -> 1 (== max)
+      expect(msg!.attempts).toBe(1);
+
+      // Worker records the real failure on its final attempt, then CRASHES
+      // before moveToDeadLetter — the row is orphaned in _queue_messages.
+      const realError = 'ETIMEDOUT: handler died on the final attempt';
+      await singleAttemptQueue.recordFailure(id, realError);
+
+      // Simulate the visibility timeout elapsing so the reaper considers it.
+      await pool.query(
+        "UPDATE _queue_messages SET visible_at = NOW() - INTERVAL '1 minute' WHERE id = $1",
+        [id],
+      );
+
+      // Any receiveBatch runs the reaper; the orphan lands in the DLQ carrying
+      // the real handler error.
+      await singleAttemptQueue.receive();
+
+      const dlq = await singleAttemptQueue.listDeadLetter();
+      const ours = dlq.find((d) => d.messageId === id);
+      expect(ours?.error).toBe(realError);
+      expect(ours?.error).not.toMatch(/orphaned: attempts exhausted/);
+
+      // Row is gone from _queue_messages (reaped, not left stuck).
+      const remaining = await pool.query('SELECT 1 FROM _queue_messages WHERE id = $1', [id]);
+      expect(remaining.rows).toHaveLength(0);
+    });
+
+    it('falls back to the hardcoded orphan text when no last_error was ever recorded', async () => {
+      const singleAttemptQueue = new PgQueue(pool, { maxRetries: 1, visibilityTimeout: 30 });
+      const id = await singleAttemptQueue.send('orphan.job.nofail', {}, 'orphan-key-2');
+
+      const msg = await singleAttemptQueue.receive(); // attempts -> 1, no recordFailure
+      expect(msg!.attempts).toBe(1);
+
+      await pool.query(
+        "UPDATE _queue_messages SET visible_at = NOW() - INTERVAL '1 minute' WHERE id = $1",
+        [id],
+      );
+      await singleAttemptQueue.receive(); // reaper runs
+
+      const dlq = await singleAttemptQueue.listDeadLetter();
+      const ours = dlq.find((d) => d.messageId === id);
+      expect(ours?.error).toMatch(/orphaned: attempts exhausted without completion/);
+    });
+  });
 });

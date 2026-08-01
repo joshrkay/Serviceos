@@ -1,8 +1,9 @@
-import { Proposal, ProposalRepository, missingFieldsFor, actionClassForProposalType } from './proposal';
+import { Proposal, ProposalRepository, missingFieldsFor, actionClassForProposalType, createProposal, isScheduleProposalType } from './proposal';
 import { transitionProposal, isInUndoWindow, UNDO_WINDOW_MS } from './lifecycle';
+import { isProposalExpired } from '../workers/proposal-expiry-worker';
 import { validateProposalPayload } from './contracts';
 import { Role, hasPermission } from '../auth/rbac';
-import { AppError, ForbiddenError, ValidationError, NotFoundError } from '../shared/errors';
+import { AppError, ConflictError, ForbiddenError, ValidationError, NotFoundError } from '../shared/errors';
 import { AppointmentRepository, updateAppointment } from '../appointments/appointment';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
 import { logProposalEvent } from './audit';
@@ -11,6 +12,36 @@ import { chainMetaFor } from './chain';
 import { undoCorrectionLesson } from '../learning/corrections/apply-undo';
 import type { CorrectionLessonRepository } from '../learning/corrections/correction-lesson';
 import type { ConfigPorts } from '../learning/corrections/lesson-applicator';
+import { createLogger } from '../logging/logger';
+import { computeCorrections } from './corrections/correction';
+import type { CorrectionRepository } from './corrections/correction';
+import { clearSatisfiedMissingFields } from './missing-fields';
+import {
+  clearPendingReferencesForEdit,
+  type EntityAliasCandidateCapture,
+} from '../learning/entity-aliases/candidate-service';
+
+const logger = createLogger({
+  service: 'proposals.actions',
+  environment: process.env.NODE_ENV || 'development',
+});
+
+/**
+ * Proposal types whose execution writes TENANT CONFIGURATION — the same
+ * surface `routes/onboarding.ts` (owner-only) and
+ * `tenants/brand/brand-voice-router.ts` (`settings:update`) protect at the
+ * HTTP layer. Approving one of these is equivalent to calling those routes,
+ * so it demands the same authority rather than the generic
+ * `proposals:approve` that every dispatcher holds.
+ */
+const CONFIG_WRITING_PROPOSAL_TYPES: ReadonlySet<string> = new Set([
+  'onboarding_tenant_settings',
+  'onboarding_service_category',
+  'onboarding_estimate_template',
+  'onboarding_team_member',
+  'onboarding_schedule',
+  'update_brand_voice',
+]);
 
 /**
  * N-009 / P2-038 — optional correction-loop reversal wired into `undoProposal`.
@@ -126,6 +157,17 @@ export async function approveProposalsBatch(
 
   for (const id of proposalIds) {
     try {
+      // U1 lane backstop — batch approval is the bulk lane and must only ever
+      // sweep capture-class proposals. Comms / money / irreversible types
+      // require individual review (CLAUDE.md "Never auto-execute"), so a
+      // non-capture id fails per-id here instead of relying on the client
+      // filter alone. The single-approve path is deliberately untouched: an
+      // owner can still explicitly approve a money proposal one at a time.
+      const existing = await proposalRepo.findById(tenantId, id);
+      if (existing && actionClassForProposalType(existing.proposalType) !== 'capture') {
+        failed.push({ id, reason: 'BATCH_NON_CAPTURE' });
+        continue;
+      }
       await approveProposal(proposalRepo, tenantId, id, actorId, actorRole, auditRepo, channel);
       approved.push(id);
     } catch (err) {
@@ -162,6 +204,40 @@ export async function approveProposal(
   if (!proposal) {
     throw new NotFoundError('Proposal', proposalId);
   }
+  if (proposal.proposalType === 'adopt_entity_alias' && actorRole !== 'owner') {
+    throw new ForbiddenError('Only an owner may approve an entity alias');
+  }
+
+  // Config-writing proposal types need the SAME authority their HTTP routes
+  // demand, not merely `proposals:approve`. Without this a dispatcher — who
+  // holds `proposals:approve` but not `settings:update` — could approve a
+  // card that rewrites tenant identity, activates a vertical pack (seeding
+  // the price book), or replaces the locked brand voice: authority the
+  // routes deliberately withhold from them
+  // (routes/onboarding.ts and tenants/brand/brand-voice-router.ts both gate
+  // on owner / settings:update). The approval queue must not become a way
+  // around the route's permission model.
+  if (
+    CONFIG_WRITING_PROPOSAL_TYPES.has(proposal.proposalType) &&
+    !hasPermission(actorRole, 'settings:update')
+  ) {
+    throw new ForbiddenError(
+      `Approving ${proposal.proposalType} requires permission to update settings`,
+    );
+  }
+
+  // §5.5 — a schedule proposal's 48h window is enforced by an HOURLY sweep, so
+  // there is a window after expiresAt but before the sweep where the row still
+  // reads ready_for_review. Guard the approval path directly (same predicate the
+  // sweep uses) so an expired card can't be tapped-approved into execution in
+  // that gap. Flip it to expired here too, idempotent with the sweep.
+  if (isProposalExpired(proposal, new Date())) {
+    await proposalRepo.updateStatus(tenantId, proposalId, 'expired');
+    throw new ValidationError(
+      'Cannot approve a proposal whose 48-hour window has expired',
+      { proposalId, expiresAt: proposal.expiresAt },
+    );
+  }
 
   // A proposal with unfilled required fields can't be approved — the
   // operator must resolve the gaps (via editProposal) first. This guard
@@ -184,6 +260,21 @@ export async function approveProposal(
   // executor and undoProposal can agree on when the window opened.
   const updated = await proposalRepo.updateStatus(tenantId, proposalId, 'approved', {
     approvedAt: transitioned.approvedAt,
+    // The execution worker normally attributes work to proposal.createdBy —
+    // the DRAFTER. For anything where the approver is the one exercising
+    // authority, that is the wrong human, so carry the real approver through.
+    //
+    // Alias candidates may be raised by a dispatcher, but activation must use
+    // the canonical OWNER who approved. Config-writing types join for the same
+    // reason and one more: the sweep runs detached from this request, so if
+    // the approver's role isn't stamped here it cannot be recovered later, and
+    // the audit falls back to asserting 'owner' regardless of who acted.
+    ...(proposal.proposalType === 'adopt_entity_alias'
+      ? { executedBy: actorId }
+      : {}),
+    ...(CONFIG_WRITING_PROPOSAL_TYPES.has(proposal.proposalType)
+      ? { executedBy: actorId, executedByRole: actorRole }
+      : {}),
   });
   if (!updated) {
     throw new NotFoundError('Proposal', proposalId);
@@ -425,8 +516,7 @@ export async function undoProposal(
             { repository: correctionLoop.lessonRepo, ports: correctionLoop.ports, auditRepo },
           );
         } catch (err) {
-          // eslint-disable-next-line no-console
-          console.error('undoProposal: individual undoCorrectionLesson reversal failed', {
+          logger.error('undoProposal: individual undoCorrectionLesson reversal failed', {
             proposalId,
             lessonId: lesson.id,
             error: err instanceof Error ? err.message : String(err),
@@ -434,8 +524,7 @@ export async function undoProposal(
         }
       }
     } catch (err) {
-      // eslint-disable-next-line no-console
-      console.error('undoProposal: findBySourceProposal failed', {
+      logger.error('undoProposal: findBySourceProposal failed', {
         proposalId,
         error: err instanceof Error ? err.message : String(err),
       });
@@ -521,7 +610,7 @@ export async function rejectProposal(
       // rejected, and the hold will auto-release at expiry (Task 3's
       // read-time release). Surface it so a stuck-looking calendar slot
       // after a rejection is diagnosable.
-      console.warn(
+      logger.warn(
         `Held appointment ${updated.payload.appointmentId} not found when releasing hold for rejected proposal ${proposalId}; it will auto-release at expiry.`
       );
     }
@@ -538,6 +627,11 @@ export async function editProposal(
   actorRole: Role,
   edits: Record<string, unknown>,
   auditRepo?: AuditRepository,
+  // Story 3.9 — when supplied, every changed field is logged to the corrections
+  // table (intent + field + before/after) as the training signal for prompt/
+  // routing improvement. Capture is failure-soft (see below).
+  correctionRepo?: CorrectionRepository,
+  entityAliasCandidateCapture?: EntityAliasCandidateCapture,
 ): Promise<{ proposal: Proposal; editedFields: string[] }> {
   if (!hasPermission(actorRole, 'proposals:edit')) {
     throw new ForbiddenError();
@@ -563,8 +657,43 @@ export async function editProposal(
     (key) => JSON.stringify(proposal.payload[key]) !== JSON.stringify(edits[key])
   );
 
+  // B1 — clear-on-fill: lift only the missingFields entries this edit
+  // actually satisfied (exact flat key edited + now non-empty). See
+  // missing-fields.ts for why this is not a full schema recompute.
+  const currentMissingFields = missingFieldsFor(proposal);
+  let clearedMissingFields: string[] = [];
+  let nextSourceContext: Record<string, unknown> = { ...(proposal.sourceContext ?? {}) };
+  if (currentMissingFields.length > 0) {
+    const remainingMissingFields = clearSatisfiedMissingFields(
+      currentMissingFields,
+      editedFields,
+      updatedPayload,
+    );
+    clearedMissingFields = currentMissingFields.filter(
+      (field) => !remainingMissingFields.includes(field),
+    );
+    if (clearedMissingFields.length > 0) {
+      nextSourceContext.missingFields = remainingMissingFields;
+    }
+  }
+
+  const pendingReferenceClear = clearPendingReferencesForEdit(
+    nextSourceContext,
+    editedFields,
+    updatedPayload,
+  );
+  if (pendingReferenceClear.cleared) {
+    nextSourceContext = pendingReferenceClear.sourceContext;
+  }
+
+  const sourceContextUpdate =
+    clearedMissingFields.length > 0 || pendingReferenceClear.cleared
+      ? nextSourceContext
+      : undefined;
+
   const updated = await proposalRepo.update(tenantId, proposalId, {
     payload: updatedPayload,
+    ...(sourceContextUpdate ? { sourceContext: sourceContextUpdate } : {}),
   });
   if (!updated) {
     throw new NotFoundError('Proposal', proposalId);
@@ -586,10 +715,132 @@ export async function editProposal(
           proposalType: updated.proposalType,
           status: updated.status,
           editedFields,
+          // B1 — which missingFields gate entries this edit lifted, if
+          // any. Omitted (not an empty array) when nothing was cleared,
+          // matching the RV-073 "omit rather than default" convention
+          // used elsewhere in this file's audit metadata.
+          ...(clearedMissingFields.length > 0 ? { clearedMissingFields } : {}),
         },
       }),
     );
   }
 
+  // Story 3.9 — capture each changed field as a correction row keyed by intent
+  // (the proposal type). Failure-soft: the payload is already written, so a
+  // capture failure is logged and swallowed rather than 500-ing the edit after
+  // a successful write (corrections are an analytics signal, not user state).
+  if (correctionRepo && editedFields.length > 0) {
+    try {
+      const corrections = computeCorrections({
+        tenantId,
+        proposalId: updated.id,
+        intent: updated.proposalType,
+        actorId,
+        fields: editedFields,
+        before: proposal.payload,
+        after: updatedPayload,
+      });
+      if (corrections.length > 0) {
+        await correctionRepo.recordMany(corrections);
+      }
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.error('editProposal: correction capture failed', {
+        proposalId: updated.id,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  if (entityAliasCandidateCapture && pendingReferenceClear.cleared) {
+    try {
+      await entityAliasCandidateCapture.capture({
+        source: 'proposal_edit',
+        tenantId,
+        actorId,
+        actorRole,
+        groundingProposal: proposal,
+        updatedProposal: updated,
+        editedFields,
+      });
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.error('editProposal: alias candidate capture failed', {
+        proposalId: updated.id,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
   return { proposal: updated, editedFields };
+}
+
+/**
+ * §5.5 Re-propose an expired schedule proposal. Expired is terminal, so the
+ * operator doesn't revive the old card — they mint a fresh draft carrying the
+ * same intent (proposalType + payload + summary + target), which gets a new
+ * 48h expiry from `createProposal`'s schedule default and re-enters the inbox
+ * for approval. Tenant-scoped; the source must be an expired schedule proposal;
+ * audited as `proposal.reproposed` against the new proposal.
+ */
+export async function reproposeProposal(
+  proposalRepo: ProposalRepository,
+  tenantId: string,
+  id: string,
+  actorId: string,
+  actorRole: Role,
+  auditRepo?: AuditRepository,
+): Promise<Proposal> {
+  const source = await proposalRepo.findById(tenantId, id);
+  if (!source) throw new NotFoundError('Proposal', id);
+  if (source.status !== 'expired') {
+    throw new ConflictError(
+      `Only an expired proposal can be re-proposed (current status: '${source.status}')`,
+    );
+  }
+  if (!isScheduleProposalType(source.proposalType)) {
+    // Defensive: only schedule proposals ever carry an expiry, so a
+    // non-schedule expired proposal would be an anomaly — never re-propose it.
+    throw new ValidationError('Only schedule proposals can be re-proposed');
+  }
+
+  const replacement = createProposal({
+    tenantId,
+    proposalType: source.proposalType,
+    // Deep-clone so the new draft's payload doesn't alias the expired source's
+    // (a later edit to one must not mutate the other). Payloads are JSON values
+    // — the same shape that round-trips through the JSONB column — so a
+    // structured clone is faithful.
+    payload: structuredClone(source.payload),
+    summary: source.summary,
+    explanation: source.explanation,
+    targetEntityType: source.targetEntityType,
+    targetEntityId: source.targetEntityId,
+    createdBy: actorId,
+    // Carry the source's unfilled required fields forward so a re-proposed
+    // draft that was incomplete stays gated — approveProposal refuses a draft
+    // with outstanding missingFields, and dropping them here would let the
+    // clone be approved with the same incomplete payload.
+    missingFields: missingFieldsFor(source),
+    // A fresh 48h expiry is applied by createProposal's schedule-type default.
+    // chainId is intentionally NOT carried: a re-proposal is a standalone card
+    // (the original chain's siblings have also expired), so it must not link
+    // back into a dead chain.
+  });
+  const created = await proposalRepo.create(replacement);
+
+  if (auditRepo) {
+    await auditRepo.create(
+      createAuditEvent({
+        tenantId,
+        actorId,
+        actorRole,
+        eventType: 'proposal.reproposed',
+        entityType: 'proposal',
+        entityId: created.id,
+        metadata: { sourceProposalId: source.id, proposalType: source.proposalType },
+      }),
+    );
+  }
+  return created;
 }

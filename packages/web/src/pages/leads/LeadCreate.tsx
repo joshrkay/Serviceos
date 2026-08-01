@@ -27,6 +27,11 @@ interface FormState {
   sourceDetail: string;
   estimatedValueDollars: string;
   notes: string;
+  street1: string;
+  street2: string;
+  city: string;
+  state: string;
+  postalCode: string;
 }
 
 const empty: FormState = {
@@ -39,6 +44,11 @@ const empty: FormState = {
   sourceDetail: '',
   estimatedValueDollars: '',
   notes: '',
+  street1: '',
+  street2: '',
+  city: '',
+  state: '',
+  postalCode: '',
 };
 
 function parseDollarCents(value: string): number | undefined {
@@ -72,6 +82,19 @@ export function LeadCreate({ onCreated, onCancel }: LeadCreateProps) {
         return;
       }
 
+      const hasAnyAddress =
+        Boolean(form.street1.trim()) ||
+        Boolean(form.city.trim()) ||
+        Boolean(form.state.trim()) ||
+        Boolean(form.postalCode.trim());
+      if (
+        hasAnyAddress &&
+        !(form.street1.trim() && form.city.trim() && form.state.trim() && form.postalCode.trim())
+      ) {
+        setError('Street, city, state, and postal code are required together.');
+        return;
+      }
+
       let cents: number | undefined;
       try {
         cents = parseDollarCents(form.estimatedValueDollars);
@@ -90,6 +113,15 @@ export function LeadCreate({ onCreated, onCancel }: LeadCreateProps) {
         sourceDetail: form.sourceDetail.trim() || undefined,
         estimatedValueCents: cents,
         notes: form.notes.trim() || undefined,
+        ...(hasAnyAddress
+          ? {
+              street1: form.street1.trim(),
+              street2: form.street2.trim() || undefined,
+              city: form.city.trim(),
+              state: form.state.trim(),
+              postalCode: form.postalCode.trim(),
+            }
+          : {}),
       };
 
       setSubmitting(true);
@@ -181,6 +213,42 @@ export function LeadCreate({ onCreated, onCancel }: LeadCreateProps) {
             onChange={(e) => setField('estimatedValueDollars', e.target.value)}
             inputMode="decimal"
             placeholder="0.00"
+          />
+        </Field>
+        <Field label="Street address" className="md:col-span-2">
+          <Input
+            value={form.street1}
+            onChange={(e) => setField('street1', e.target.value)}
+            placeholder="Service address (optional)"
+            aria-label="Street address"
+          />
+        </Field>
+        <Field label="Street line 2" className="md:col-span-2">
+          <Input
+            value={form.street2}
+            onChange={(e) => setField('street2', e.target.value)}
+            aria-label="Street line 2"
+          />
+        </Field>
+        <Field label="City">
+          <Input
+            value={form.city}
+            onChange={(e) => setField('city', e.target.value)}
+            aria-label="City"
+          />
+        </Field>
+        <Field label="State">
+          <Input
+            value={form.state}
+            onChange={(e) => setField('state', e.target.value)}
+            aria-label="State"
+          />
+        </Field>
+        <Field label="Postal code" className="md:col-span-2">
+          <Input
+            value={form.postalCode}
+            onChange={(e) => setField('postalCode', e.target.value)}
+            aria-label="Postal code"
           />
         </Field>
         <Field label="Notes" className="md:col-span-2">

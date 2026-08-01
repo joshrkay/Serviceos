@@ -12,15 +12,15 @@ export type ButtonSize = 'sm' | 'md' | 'lg';
 
 const VARIANT_CLASSES: Record<ButtonVariant, string> = {
   primary:
-    'bg-slate-900 text-white hover:bg-slate-700 active:bg-slate-800 disabled:hover:bg-slate-900',
+    'bg-primary text-primary-foreground hover:bg-primary/90 active:bg-primary/80 disabled:hover:bg-primary',
   secondary:
-    'bg-slate-100 text-slate-800 hover:bg-slate-200 active:bg-slate-200 disabled:hover:bg-slate-100',
+    'bg-secondary text-secondary-foreground hover:bg-secondary/80 active:bg-secondary/70 disabled:hover:bg-secondary',
   outline:
-    'border border-slate-200 bg-white text-slate-700 hover:border-slate-300 hover:bg-slate-50 active:bg-slate-100',
+    'border border-border bg-card text-foreground hover:bg-accent hover:text-accent-foreground active:bg-accent/80',
   ghost:
-    'bg-transparent text-slate-500 hover:bg-slate-100 hover:text-slate-700 active:bg-slate-100',
+    'bg-transparent text-muted-foreground hover:bg-secondary hover:text-foreground active:bg-secondary',
   danger:
-    'bg-red-600 text-white hover:bg-red-700 active:bg-red-700 disabled:hover:bg-red-600',
+    'bg-destructive text-destructive-foreground hover:bg-destructive/90 active:bg-destructive/80 disabled:hover:bg-destructive',
 };
 
 const SIZE_CLASSES: Record<ButtonSize, string> = {
@@ -75,7 +75,7 @@ export const Button = React.forwardRef<HTMLButtonElement, ButtonProps>(
         className={cn(
           'inline-flex items-center justify-center font-medium whitespace-nowrap',
           'transition-colors cursor-pointer select-none',
-          'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/40 focus-visible:ring-offset-1',
+          'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50 focus-visible:ring-offset-1',
           'disabled:cursor-not-allowed disabled:opacity-50',
           VARIANT_CLASSES[variant],
           SIZE_CLASSES[size],

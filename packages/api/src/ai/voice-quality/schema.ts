@@ -24,6 +24,10 @@ export const VOICE_QUALITY_BUCKETS = [
   '08-ambiguity',
   '09-concurrency',
   '10-adversarial',
+  // UB-C4 — Spanish streaming-path corpus: es booking happy path,
+  // first-utterance language switch, explicit mid-call switch back to
+  // English, and es emergency escalation.
+  '11-spanish',
 ] as const;
 
 export const VoiceQualityScriptSchema = z.object({
@@ -34,9 +38,49 @@ export const VoiceQualityScriptSchema = z.object({
     customers: z.array(z.unknown()),
     appointments: z.array(z.unknown()).optional(),
     invoices: z.array(z.unknown()).optional(),
+    /**
+     * B8.10 — jobs to seed so a script can carry a real job for an estimate
+     * (below) to reference, or for a job-reference intent to resolve
+     * against. Previously accepted by convention in a few scripts
+     * (`lookup-jobs-known-customer.json`) but silently stripped by this
+     * schema and never actually seeded (runner.ts's `seedFixtures` had no
+     * read for it) — both are now wired.
+     */
+    jobs: z.array(z.unknown()).optional(),
+    /**
+     * B8.10 — estimates to seed so a reference-resolution script
+     * (`send_estimate_nudge`'s unique-nudgeable-match ladder) has a real,
+     * findable row instead of an always-empty in-memory repo. Same
+     * previously-dead-fixture situation as `jobs` above
+     * (`lookup-estimates-recent.json`), now wired.
+     */
+    estimates: z.array(z.unknown()).optional(),
+    /**
+     * WS21b — pending proposals to seed so an owner-approval script has
+     * something to approve/reject. Rows are passed to `proposalRepo.create`
+     * verbatim (already-shaped `Proposal` objects, `unknown` for
+     * forward-compat like the other fixture arrays). The tenant's owner PIN
+     * (for money-class challenges) rides on `fixtures.tenant.voiceApprovalPin`
+     * and is hashed into the settings row by the driver factory.
+     */
+    proposals: z.array(z.unknown()).optional(),
+    /**
+     * WS21b — tenant catalog items to seed so a grounded-quote script resolves
+     * spoken line items against real catalog prices (closes the WS17
+     * quoting-scenario gap). Seeded into the driver factory's catalog repo.
+     */
+    catalog: z.array(z.unknown()).optional(),
   }),
   callerId: z.string().nullable(),
   callerIdBlocked: z.boolean().default(false),
+  /**
+   * WS21b — when true, the caller is stamped as an RV-070 `ownerSession` at
+   * startSession (mirrors `isApproverPhone`), unlocking the owner-only
+   * approval/edit dialogue. A fixture may instead set
+   * `fixtures.tenant.ownerPhone` equal to `callerId` to reach the same state
+   * via the production caller-ID match. Defaults false (non-owner caller).
+   */
+  callerIsOwner: z.boolean().default(false),
   turns: z.array(
     z.object({
       caller: z.string(),
@@ -64,12 +108,6 @@ export const VoiceQualityScriptSchema = z.object({
    * via `loadLayer2Corpus()`.
    */
   layer2Only: z.boolean().default(false),
-  expectedCallerMetrics: z
-    .object({
-      ttfaMaxMs: z.number().optional(),
-      reprompMaxRatio: z.number().optional(),
-    })
-    .optional(),
 });
 
 export type VoiceQualityScript = z.infer<typeof VoiceQualityScriptSchema>;

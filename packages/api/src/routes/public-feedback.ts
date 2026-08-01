@@ -29,6 +29,15 @@ export function createPublicFeedbackRouter(
   const router = Router();
 
   router.get('/:token', async (req: Request, res: Response) => {
+    // Browser navigations (e.g. stale SMS links to /public/feedback/:token)
+    // must land on the SPA page at /feedback/:token, not raw JSON. Redirect
+    // unconditionally — even for unknown tokens — so the page owns the
+    // invalid-token UX; JSON clients send Accept: application/json and are
+    // unaffected.
+    if ((req.headers.accept ?? '').includes('text/html')) {
+      res.redirect(302, `/feedback/${encodeURIComponent(req.params.token)}`);
+      return;
+    }
     try {
       const request = await requestRepo.findByToken(req.params.token);
       if (!request) {

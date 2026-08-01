@@ -28,7 +28,7 @@
  *   eval "$(npx tsx scripts/qa-mint-tokens.ts)"
  */
 
-import * as crypto from 'node:crypto';
+import { mintHmacJwt } from './qa-hmac-mint';
 
 function requireEnv(name: string): string {
   const v = process.env[name];
@@ -43,32 +43,13 @@ function requireEnv(name: string): string {
   return v;
 }
 
-function b64urlEncode(buf: Buffer | string): string {
-  return Buffer.from(buf).toString('base64url');
-}
-
-function mintToken(secret: string, tenantId: string, label: string, role = 'owner'): string {
-  const header = { alg: 'HS256', typ: 'JWT' };
-  const payload = {
-    sub: `qa-runbook-user-${label}`,
-    sid: `qa-runbook-session-${label}-${Date.now()}`,
-    tenant_id: tenantId,
-    role,
-    exp: Math.floor(Date.now() / 1000) + 60 * 60, // 1h
-    iat: Math.floor(Date.now() / 1000),
-  };
-  const input = `${b64urlEncode(JSON.stringify(header))}.${b64urlEncode(JSON.stringify(payload))}`;
-  const sig = crypto.createHmac('sha256', secret).update(input).digest('base64url');
-  return `${input}.${sig}`;
-}
-
 function main(): void {
   const secret = requireEnv('E2E_CLERK_HMAC_SECRET');
   const tenantAId = requireEnv('E2E_TENANT_A_ID');
   const tenantBId = requireEnv('E2E_TENANT_B_ID');
 
-  const tokenA = mintToken(secret, tenantAId, 'A');
-  const tokenB = mintToken(secret, tenantBId, 'B');
+  const tokenA = mintHmacJwt(secret, tenantAId, 'A');
+  const tokenB = mintHmacJwt(secret, tenantBId, 'B');
 
   // Lines the qa-runner expects (see qa-runner/config/env.example).
   // We re-export the seed's E2E_TENANT_A_*_ID values under the names

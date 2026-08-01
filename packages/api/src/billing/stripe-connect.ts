@@ -1,5 +1,5 @@
 import type { Pool } from 'pg';
-import { ValidationError, NotFoundError } from '../shared/errors';
+import { ValidationError, NotFoundError, AppError } from '../shared/errors';
 
 /**
  * Tier 4 (Payment methods — PR 1). Stripe Connect onboarding service.
@@ -34,6 +34,8 @@ export interface ConnectAccountView {
   status: ConnectStatus;
   chargesEnabled: boolean;
   payoutsEnabled: boolean;
+  /** Stripe Terminal Location id on the connected account, when created. */
+  terminalLocationId: string | null;
 }
 
 export interface StripeConnectServiceDeps {
@@ -153,6 +155,48 @@ export function deriveConnectStatus(
   });
 }
 
+/**
+ * Turns a failed Stripe Connect REST call into an operator-facing
+ * AppError while preserving the full Stripe reason in the server logs.
+ *
+ * The onboarding routes catch service errors through `toErrorResponse`,
+ * which collapses any plain `Error` into a flat 500 "An unexpected error
+ * occurred" and logs nothing — so a live-mode Stripe rejection (e.g.
+ * "complete your platform profile before creating accounts") was
+ * invisible on both ends: the operator saw a generic error and the
+ * reason never reached the logs. Instead we:
+ *   - log the full Stripe body/code server-side (Railway), and
+ *   - surface Stripe's own `error.message` to the operator. This is
+ *     their own account's configuration error — safe and actionable —
+ *     and the route is already gated behind `tenant:manage`.
+ * Mapped to 502 (upstream failure), not 500, so it reads as "Stripe
+ * rejected this", not "our server broke".
+ */
+function connectStripeFailure(context: string, status: number, rawBody: string): AppError {
+  let stripeMessage: string | undefined;
+  let stripeCode: string | undefined;
+  try {
+    const parsed = JSON.parse(rawBody) as { error?: { message?: string; code?: string } };
+    stripeMessage = parsed.error?.message?.trim() || undefined;
+    stripeCode = parsed.error?.code?.trim() || undefined;
+  } catch {
+    /* Stripe normally returns JSON; keep the raw body for the log below. */
+  }
+  // eslint-disable-next-line no-console
+  console.error(`[stripe-connect] ${context} failed (${status})`, {
+    stripeCode,
+    stripeMessage,
+    ...(stripeMessage ? {} : { rawBody: rawBody.slice(0, 500) }),
+  });
+  const clientMessage = stripeMessage
+    ? `Stripe couldn't start onboarding: ${stripeMessage}`
+    : `Stripe couldn't start onboarding (HTTP ${status}). Check the API logs for details.`;
+  return new AppError('CONNECT_ONBOARDING_FAILED', clientMessage, 502, {
+    stripeStatus: status,
+    ...(stripeCode ? { stripeCode } : {}),
+  });
+}
+
 export class StripeConnectService {
   constructor(private deps: StripeConnectServiceDeps) {}
 
@@ -161,7 +205,8 @@ export class StripeConnectService {
       `SELECT stripe_connect_account_id,
               stripe_connect_charges_enabled,
               stripe_connect_payouts_enabled,
-              stripe_connect_status
+              stripe_connect_status,
+              stripe_terminal_location_id
        FROM tenants WHERE id = $1`,
       [tenantId],
     );
@@ -172,7 +217,18 @@ export class StripeConnectService {
       chargesEnabled: Boolean(row.stripe_connect_charges_enabled),
       payoutsEnabled: Boolean(row.stripe_connect_payouts_enabled),
       status: (row.stripe_connect_status as ConnectStatus) ?? 'pending',
+      terminalLocationId: (row.stripe_terminal_location_id as string | null) ?? null,
     };
+  }
+
+  async setTerminalLocationId(tenantId: string, locationId: string): Promise<void> {
+    const { rowCount } = await this.deps.pool.query(
+      `UPDATE tenants
+          SET stripe_terminal_location_id = $2
+        WHERE id = $1 AND stripe_connect_account_id IS NOT NULL`,
+      [tenantId, locationId],
+    );
+    if (!rowCount) throw new NotFoundError('Tenant', tenantId);
   }
 
   /**
@@ -215,8 +271,7 @@ export class StripeConnectService {
         }),
       });
       if (!accountRes.ok) {
-        const body = await accountRes.text();
-        throw new Error(`Stripe Connect account create failed (${accountRes.status}): ${body}`);
+        throw connectStripeFailure('account create', accountRes.status, await accountRes.text());
       }
       const account = (await accountRes.json()) as { id?: string };
       if (!account.id) throw new Error('Stripe Connect returned no account id');
@@ -246,8 +301,7 @@ export class StripeConnectService {
       }),
     });
     if (!linkRes.ok) {
-      const body = await linkRes.text();
-      throw new Error(`Stripe Account Link create failed (${linkRes.status}): ${body}`);
+      throw connectStripeFailure('account link', linkRes.status, await linkRes.text());
     }
     const link = (await linkRes.json()) as { url?: string };
     if (!link.url) throw new Error('Stripe Account Link returned no url');

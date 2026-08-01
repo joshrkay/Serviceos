@@ -57,7 +57,7 @@ export function TimeGivenBackCard() {
 
   if (isLoading) {
     return (
-      <div className="mx-4 md:mx-6 mt-4 h-20 rounded-xl bg-slate-100 animate-pulse" />
+      <div className="mx-4 md:mx-6 mt-4 h-20 rounded-xl bg-secondary animate-pulse" />
     );
   }
 
@@ -82,18 +82,18 @@ export function TimeGivenBackCard() {
   }
 
   return (
-    <div className="mx-4 md:mx-6 mt-4 rounded-xl border border-blue-100 bg-blue-50 px-4 py-3.5">
-      <p className="text-xs text-blue-600 uppercase tracking-wide">This week</p>
-      <p className="text-xl font-semibold text-blue-900 mt-1">{headline}</p>
+    <div className="mx-4 md:mx-6 mt-4 rounded-xl border border-primary/20 bg-primary/10 px-4 py-3.5">
+      <p className="text-xs text-primary uppercase tracking-wide">This week</p>
+      <p className="text-xl font-semibold text-primary mt-1">{headline}</p>
       {receiptParts.length > 0 ? (
-        <p className="text-sm text-blue-700 mt-1">{receiptParts.join(' · ')}</p>
+        <p className="text-sm text-primary mt-1">{receiptParts.join(' · ')}</p>
       ) : (
-        <p className="text-sm text-blue-700/70 mt-1">
+        <p className="text-sm text-primary/70 mt-1">
           Your time-saved tally will grow as the AI handles calls and work for you.
         </p>
       )}
       {dollarValueCents == null && totalHours > 0 && (
-        <p className="text-xs text-blue-600/70 mt-1">
+        <p className="text-xs text-primary/70 mt-1">
           Set your hourly rate in Settings to see the dollar value.
         </p>
       )}

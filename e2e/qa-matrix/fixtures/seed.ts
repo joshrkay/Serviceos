@@ -16,6 +16,13 @@
 import { Client } from 'pg';
 import { randomUUID } from 'node:crypto';
 
+/**
+ * Shared phone for the ambiguous-match pair seeded per tenant below (VOX-13).
+ * Must stay distinct from the primary customer's '555-0100' so that number
+ * keeps resolving to exactly one customer for SCH-02/SMS-01's callerPhone.
+ */
+const AMBIGUOUS_PHONE = '555-0200';
+
 async function main() {
   const connectionString = process.env.E2E_DB_URL_READWRITE;
   if (!connectionString) {
@@ -74,7 +81,50 @@ async function ensureTenantFixture(client: Client, slug: string): Promise<Fixtur
       )
       .then((r) => r.rows[0].id));
 
+  // QA identity — a `users` row for the HMAC-minted token's `sub` claim.
+  // Required since QUALITY-2026-07-12 WS4 added DB-authoritative authorization
+  // (packages/api/src/auth/authorization-loader.ts): a validly-signed JWT with
+  // a tenant_id claim is no longer sufficient by itself — the API requires a
+  // matching `users` row (tenant_id, clerk_user_id) with status='active', or
+  // every authenticated request 403s "No active membership for this tenant".
+  // e2e/qa-matrix/fixtures/tokens.ts mints `qa-matrix-user-${label}`; label is
+  // the slug's trailing A/B (e.g. "qa-matrix-A" -> "A").
+  const qaUserLabel = slug.slice(-1);
+  await client.query(
+    `INSERT INTO users (id, tenant_id, clerk_user_id, email, role, status, created_at, updated_at)
+     VALUES ($1, $2, $3, $4, 'owner', 'active', now(), now())
+     ON CONFLICT (tenant_id, clerk_user_id) DO NOTHING`,
+    [randomUUID(), tenantId, `qa-matrix-user-${qaUserLabel}`, `${slug}-matrix-owner@qa.serviceos.local`]
+  );
+
   // Customer: display_name is the idempotency handle here.
+  //
+  // QA-2026-07-26 — sms_consent MUST be true for this primary customer.
+  // SMS-01 drives the voice booking with callerPhone='555-0100', so
+  // InAppVoiceAdapter resolves the caller to THIS row, and placeAppointmentHold's
+  // ownership guard (packages/api/src/ai/scheduling/place-hold.ts) rejects any
+  // job whose customerId !== the resolved caller — pinning the booked
+  // appointment to this customer's job. The confirmation SMS is therefore
+  // necessarily addressed to this customer; with sms_consent=false the consent
+  // gate suppresses it and returns before recordDispatch(), so zero rows land in
+  // message_dispatches and SMS-01 can never pass. The negative case (SMS-02)
+  // does not depend on this row — it creates its own non-consenting customer
+  // via chain(h, false, '02'). The ambiguous pair below stays non-consenting;
+  // its consent is irrelevant to what it tests.
+  //
+  // QA-2026-07-26 — email MUST be set on this primary customer. VOX-06 speaks
+  // "send estimate <number> to the customer by email"; the estimate is seeded
+  // against h.tenantA.jobId, which is THIS customer's job, so SendService
+  // resolves the recipient from this row. resolveTargets()
+  // (packages/api/src/notifications/send-service.ts) throws
+  // "Cannot send email — no email provided and customer has no email on file"
+  // when customers.email is NULL, and it throws BEFORE the status:'sent' write
+  // — so the proposal lands in execution_failed and the estimate stays 'draft',
+  // failing VOX-06 for a fixture reason rather than a product one. The address
+  // is deliberately non-routable (.local is reserved by RFC 6762 and never
+  // resolves publicly); non-prod is also structurally incapable of real
+  // delivery (b7e3a8e9), so this is belt-and-braces. Do NOT add an email to the
+  // ambiguous pair below — VOX-12/VOX-13 test phone ambiguity and need neither.
   const customerDisplay = `${slug}-customer`;
   const existingCustomer = await client.query(
     `SELECT id FROM customers WHERE tenant_id = $1 AND display_name = $2 LIMIT 1`,
@@ -85,13 +135,45 @@ async function ensureTenantFixture(client: Client, slug: string): Promise<Fixtur
     (await client
       .query(
         `INSERT INTO customers
-           (id, tenant_id, first_name, last_name, display_name, primary_phone, preferred_channel,
-            sms_consent, is_archived, created_by, created_at, updated_at)
-         VALUES ($1, $2, $3, $4, $5, $6, 'none', false, false, $7, now(), now())
+           (id, tenant_id, first_name, last_name, display_name, primary_phone, email,
+            preferred_channel, sms_consent, is_archived, created_by, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, 'none', true, false, $8, now(), now())
          RETURNING id`,
-        [randomUUID(), tenantId, 'QA', slug, customerDisplay, '555-0100', systemUser]
+        [
+          randomUUID(),
+          tenantId,
+          'QA',
+          slug,
+          customerDisplay,
+          '555-0100',
+          `${customerDisplay}@qa.serviceos.local`,
+          systemUser,
+        ]
       )
       .then((r) => r.rows[0].id));
+
+  // Ambiguous-phone pair (VOX-13): two customers on the SAME tenant sharing
+  // one phone number, distinct from the primary customer's '555-0100' above
+  // (that number must stay a single match for SCH-02/SMS-01's callerPhone
+  // resolution). Exercises the "0 or 2+ matches are left unresolved" branch
+  // of InAppVoiceAdapter.startSession — the adapter must never guess between
+  // them. display_name is the idempotency handle, same pattern as above.
+  for (const suffix of ['ambiguous-1', 'ambiguous-2']) {
+    const display = `${slug}-${suffix}`;
+    const existingAmbiguous = await client.query(
+      `SELECT id FROM customers WHERE tenant_id = $1 AND display_name = $2 LIMIT 1`,
+      [tenantId, display]
+    );
+    if (!existingAmbiguous.rows[0]) {
+      await client.query(
+        `INSERT INTO customers
+           (id, tenant_id, first_name, last_name, display_name, primary_phone, preferred_channel,
+            sms_consent, is_archived, created_by, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, 'none', false, false, $7, now(), now())`,
+        [randomUUID(), tenantId, 'QA', suffix, display, AMBIGUOUS_PHONE, systemUser]
+      );
+    }
+  }
 
   // Service location (jobs require a location_id).
   const locationLabel = `${slug}-location`;

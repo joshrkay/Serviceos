@@ -22,10 +22,22 @@ import type { TtsProvider } from '../../tts/tts-provider';
 import type { ProposalRepository } from '../../../proposals/proposal';
 import { createProposal as buildProposal } from '../../../proposals/proposal';
 import type { ProposalType } from '../../../proposals/proposal';
+import type { ProposalSurface } from '../../../proposals/surface';
+// THE shared voice → proposal payload contract, also used by the real Twilio
+// path (ai/voice-turn/create-voice-turn-processor.ts). Exactly one copy of the
+// promotion / alias / line-item translation exists, and it lives next to the
+// per-type contracts it has to satisfy.
+import { buildVoiceProposalPayload } from '../../../proposals/voice-payload';
+import {
+  intentToProposalType,
+  voiceProposalSummary,
+} from '../../../proposals/voice-intent-map';
+import { buildVoiceClarificationPayload } from '../../../proposals/voice-clarification';
 import type { AuditRepository } from '../../../audit/audit';
 import { createAuditEvent } from '../../../audit/audit';
 import type { OnCallRepository } from '../../../oncall/rotation';
-import { classifyIntent, CLASSIFIER_CONFIDENCE_THRESHOLD } from '../../orchestration/intent-classifier';
+import { classifyIntent } from '../../orchestration/intent-classifier';
+import { isDeadlineExceeded } from '../../gateway/deadline';
 import { escalateToHuman } from '../../skills/escalate-to-human';
 import type { EscalationReason } from '../../skills/escalate-to-human';
 import { summarizeSession } from '../../skills/summarize-session';
@@ -36,12 +48,28 @@ import {
   sessionTerminatedEvent,
 } from '../../voice-quality/events';
 import { TAU_INT } from './transitions';
-import type { CallingAgentEvent, SideEffect } from './types';
+import type { CallingAgentContext, CallingAgentEvent, SideEffect } from './types';
 import type { VoiceSession, VoiceSessionStore } from './voice-session-store';
 import type { VoiceSessionRepository } from '../../../voice/voice-session';
 import type { CallOutcome } from '../../../voice/voice-service';
 import { deriveCallOutcome } from './outcome-mapper';
-import { resolveSchedulingEntities } from './entity-resolution';
+import { resolveSchedulingEntities, requiresExistingEntity } from './entity-resolution';
+import type { SchedulingEntityResolution } from './entity-resolution';
+import {
+  MAX_DISAMBIGUATION_ATTEMPTS,
+  refKeyForEntityKind,
+  resolveDisambiguationFollowUp,
+} from './entity-resolution';
+import type { PendingEntityAmbiguity } from './entity-resolution';
+import { withTenantConnection } from '../../../db/tenant-transaction';
+import { PgEntityResolver } from '../../resolution/pg-entity-resolver';
+import type { EntityCandidate, EntityResolver } from '../../resolution/entity-resolver';
+import {
+  groundLineItemPricing,
+  UNCATALOGUED_CONFIDENCE_CAP,
+} from '../../resolution/catalog-resolver';
+import type { CatalogPricingOutcome } from '../../resolution/catalog-resolver';
+import type { CatalogItemRepository } from '../../../catalog/catalog-item';
 import { detectLanguage, renderTtsText } from './tts-copy';
 import type { Language } from '../../i18n/i18n';
 import { isLanguageSupported } from '../../orchestration/language-detector';
@@ -49,6 +77,8 @@ import type { VoicePersona, VoicePersonaResolver } from '../../../settings/voice
 import type { RepairTemplate } from '../../../verticals/registry';
 import type { DroppedCallScheduler } from '../../../sms/recovery/scheduler';
 import { buildRecoveryContext } from '../../../sms/recovery/scheduler';
+import type { CustomerRepository } from '../../../customers/customer';
+import { normalizePhone } from '../../../customers/dedup';
 
 export interface InAppAdapterDeps {
   store: VoiceSessionStore;
@@ -60,8 +90,25 @@ export interface InAppAdapterDeps {
   /**
    * Postgres pool — when present, end-of-call summaries are persisted to
    * call_summaries. Optional so dev mode (no DB) still works.
+   *
+   * Also used to self-construct the entity resolver (see `entityResolver`)
+   * when one isn't injected, so production wiring needs no change.
    */
   pool?: Pool;
+  /**
+   * P0 voice-safety — shared, tenant-scoped entity resolver (production:
+   * `PgEntityResolver`, pg_trgm, τ_ent=0.80). Free-text
+   * customer/job/appointment references on the scheduling path resolve
+   * through this so ambiguity becomes a one-tap voice_clarification instead
+   * of a silent "newest match" guess (CLAUDE.md invariant).
+   *
+   * Optional and self-constructed from `pool` when omitted (see
+   * `getEntityResolver`), so app.ts needs no wiring change; tests inject a
+   * mock resolver directly (no DB required). When neither a resolver nor a
+   * pool is present, resolution is skipped and references pass through
+   * unresolved (proposal surfaces for operator review) — never guessed.
+   */
+  entityResolver?: EntityResolver;
   /** Used for `actorId` on proposal/audit rows. */
   systemActorId?: string;
   /**
@@ -143,6 +190,40 @@ export interface InAppAdapterDeps {
    * (legacy behavior), so existing fixtures keep working unchanged.
    */
   supportedLanguagesResolver?: (tenantId: string) => Promise<Language[] | undefined>;
+  extendedIntentsEnabled?: (tenantId: string) => Promise<boolean>;
+  /**
+   * Read-only owner/operator lookups bypass the mutation confirmation FSM.
+   * The authenticated in-app route supplies a tenant-scoped resolver.
+   */
+  ownerLookupResolver?: (
+    tenantId: string,
+    sessionId: string,
+    intentType: string,
+  ) => Promise<string | undefined>;
+  /**
+   * QA-2026-07-26 — catalog item repository used to ground voice-drafted
+   * estimate line items (entities.lineItemDescriptions on a draft_estimate
+   * intent) against the tenant's real price book via the SAME
+   * `groundLineItemPricing` pass the non-voice draft_estimate task
+   * (ai/tasks/estimate-task.ts) already runs. Optional: when absent, the
+   * grounding call's `loadActiveCatalog` is `null`, which
+   * `groundLineItemPricing` treats identically to "catalog read failed" —
+   * every drafted line is stamped `uncatalogued` / `requiresReview: true`
+   * rather than silently keeping an ungrounded guess.
+   */
+  catalogRepo?: CatalogItemRepository;
+  /**
+   * QA-2026-07-26 — tenant-scoped customer repository, consulted at
+   * `startSession` when the caller supplies a `callerPhone`: exactly one
+   * `findByPhoneNormalized` match resolves the session's caller identity the
+   * SAME way telephony/text-mode sessions do (see `TextModeDriver.startSession`
+   * and `TwilioGatherAdapter` caller-ID resolution) — via a `caller_known`
+   * FSM dispatch instead of `operator_session`. Optional: when absent (or when
+   * `callerPhone` is omitted, or the match count isn't exactly 1), the adapter
+   * falls back to the existing `operator_session` path unchanged. Never
+   * guesses — 0 or 2+ matches are left unresolved for the operator to specify.
+   */
+  customerRepo?: CustomerRepository;
 }
 
 export interface StartSessionResult {
@@ -163,6 +244,85 @@ export interface HandleInputResult {
 
 const DEFAULT_GREETING_INAPP = 'Hi, this is your assistant. How can I help today?';
 
+type ClassifierFailureClass =
+  | 'parse_failed'
+  | 'deadline'
+  | 'quota'
+  | 'rate_limited'
+  | 'provider';
+
+const CLASSIFIER_FAILURE_EVENT: Record<ClassifierFailureClass, string> = {
+  parse_failed: 'classifier_parse_failure',
+  deadline: 'classifier_deadline_failure',
+  quota: 'classifier_quota_failure',
+  rate_limited: 'classifier_rate_limit_failure',
+  provider: 'classifier_provider_failure',
+};
+
+const CLASSIFIER_QUOTA_CODES = new Set([
+  'TENANT_CONCURRENCY_EXCEEDED',
+  'TENANT_TOKEN_BUDGET_EXCEEDED',
+]);
+
+/**
+ * Upstream provider throttles. Distinct from `CLASSIFIER_QUOTA_CODES` (which
+ * are OUR per-tenant caps) and from `provider` (which means the AI is
+ * genuinely broken): a throttle is transient and self-healing, and an operator
+ * looking at the audit trail needs to be able to tell the three apart.
+ * `LLM_RATE_LIMITED` is what the failover layer raises; `PROVIDER_RATE_LIMITED`
+ * is the raw adapter error, which reaches here when only one attempt ran.
+ */
+const CLASSIFIER_RATE_LIMIT_CODES = new Set([
+  'LLM_RATE_LIMITED',
+  'PROVIDER_RATE_LIMITED',
+]);
+
+function classifierErrorCode(error: unknown): string | undefined {
+  if (typeof error !== 'object' || error === null) return undefined;
+  const code = (error as { code?: unknown }).code;
+  return typeof code === 'string' ? code : undefined;
+}
+
+function classifierFailureFromError(
+  error: unknown,
+): { failureClass: ClassifierFailureClass; errorCode?: string } {
+  const code = classifierErrorCode(error);
+  if (code === 'DEADLINE_EXCEEDED') {
+    return { failureClass: 'deadline', errorCode: code };
+  }
+  if (code && CLASSIFIER_QUOTA_CODES.has(code)) {
+    return { failureClass: 'quota', errorCode: code };
+  }
+  // Upstream throttle — checked BEFORE the provider-failure branch so a 429
+  // is never audited as "the AI is broken".
+  if (code && CLASSIFIER_RATE_LIMIT_CODES.has(code)) {
+    return { failureClass: 'rate_limited', errorCode: code };
+  }
+  // Breaker / failover exhaustion can wrap a prior abort message
+  // ("Last error: Request was aborted.") — keep those as provider, not deadline.
+  if (code === 'BREAKER_OPEN' || code === 'LLM_PROVIDER_UNAVAILABLE') {
+    return { failureClass: 'provider', errorCode: code };
+  }
+  if (isDeadlineExceeded(error)) {
+    return { failureClass: 'deadline', errorCode: code ?? 'DEADLINE_EXCEEDED' };
+  }
+  return { failureClass: 'provider' };
+}
+
+function classifierFailureAuditEffect(
+  failureClass: ClassifierFailureClass,
+  errorCode?: string,
+): SideEffect {
+  return {
+    type: 'audit_log',
+    payload: {
+      eventType: CLASSIFIER_FAILURE_EVENT[failureClass],
+      failureClass,
+      ...(errorCode ? { errorCode } : {}),
+    },
+  };
+}
+
 export function buildInappGreeting(persona?: VoicePersona | null): string {
   if (persona?.greeting) return persona.greeting;
   if (persona?.agentName) return `Hi, I'm ${persona.agentName}. How can I help today?`;
@@ -172,23 +332,22 @@ export function buildInappGreeting(persona?: VoicePersona | null): string {
 /**
  * Map a classifier intent + entities into the FSM event shape.
  *
- * Two thresholds in play here on purpose:
- *  - CLASSIFIER_CONFIDENCE_THRESHOLD (0.6) — below this the classifier
- *    has already coerced intentType to 'unknown'; the threshold value
- *    is reported back to the FSM only for audit/log purposes.
- *  - TAU_INT (0.75) — the FSM's "act on this intent" gate, applied
- *    in transitionIntentCapture. Confidence in the [0.6, 0.75) band
- *    will be classified but reprompted by the FSM. Both adapters
- *    rely on this same FSM gate, so behavior is now consistent.
+ * Always emits `intent_classified` (including unknown) so the FSM uses the
+ * `low_intent_confidence` repair path. STT/empty-speech paths emit
+ * `confidence_low` separately for `low_audio_confidence` copy.
+ *
+ * TAU_INT (0.75) is the FSM's "act on this intent" gate in
+ * transitionIntentCapture — confidence below that band is reprompted.
  */
 export function classifierToFsmEvent(
   intentType: string,
   confidence: number,
   entities: Record<string, unknown> | undefined
 ): CallingAgentEvent {
-  if (intentType === 'unknown') {
-    return { type: 'confidence_low', threshold: CLASSIFIER_CONFIDENCE_THRESHOLD, score: confidence };
-  }
+  // Unknown / below-threshold intent stays on the intent_classified path so
+  // the FSM fires `low_intent_confidence` repair copy — not
+  // `low_audio_confidence` ("trouble hearing you"), which is reserved for
+  // STT/empty-speech `confidence_low` events.
   return {
     type: 'intent_classified',
     intentType,
@@ -197,47 +356,15 @@ export function classifierToFsmEvent(
   };
 }
 
-function summaryFor(intent: string | undefined, entities: Record<string, unknown> | undefined): string {
-  const name = entities && typeof entities.customerName === 'string' ? entities.customerName : undefined;
-  const ref = entities && typeof entities.jobReference === 'string' ? entities.jobReference : undefined;
-  if (intent === 'create_invoice') return `Draft invoice${name ? ` for ${name}` : ''}`;
-  if (intent === 'draft_estimate') return `Draft estimate${name ? ` for ${name}` : ''}`;
-  if (intent === 'create_appointment') return `Schedule appointment${name ? ` for ${name}` : ''}`;
-  if (intent === 'emergency_dispatch') return 'Emergency dispatch — escalate to on-call';
-  if (intent) return `Voice intent: ${intent}${ref ? ` (${ref})` : ''}`;
-  return 'Voice clarification needed';
-}
-
-export function intentToProposalType(intent: string | undefined): ProposalType {
-  switch (intent) {
-    case 'create_invoice': return 'draft_invoice';
-    case 'update_invoice': return 'update_invoice';
-    case 'issue_invoice': return 'issue_invoice';
-    case 'send_invoice': return 'send_invoice';
-    case 'send_estimate': return 'send_estimate';
-    case 'record_payment': return 'record_payment';
-    case 'draft_estimate': return 'draft_estimate';
-    case 'update_estimate': return 'update_estimate';
-    case 'create_appointment': return 'create_appointment';
-    case 'reschedule_appointment': return 'reschedule_appointment';
-    case 'cancel_appointment': return 'cancel_appointment';
-    case 'reassign_appointment': return 'reassign_appointment';
-    case 'create_customer': return 'create_customer';
-    case 'create_job': return 'create_job';
-    case 'add_note': return 'add_note';
-    case 'emergency_dispatch': return 'emergency_dispatch';
-    case 'update_customer': return 'update_customer';
-    case 'log_expense': return 'log_expense';
-    case 'convert_lead': return 'convert_lead';
-    case 'confirm_appointment': return 'confirm_appointment';
-    case 'mark_lead_lost': return 'mark_lead_lost';
-    case 'add_service_location': return 'add_service_location';
-    case 'log_time_entry': return 'log_time_entry';
-    case 'notify_delay': return 'notify_delay';
-    case 'request_feedback': return 'request_feedback';
-    default: return 'voice_clarification';
-  }
-}
+// `intentToProposalType` (this file's 25-case copy) and `summaryFor` moved to
+// `proposals/voice-intent-map.ts` as `intentToProposalType` /
+// `voiceProposalSummary`. The summary template was always the better of the
+// two implementations and is now what the real phone path uses as well; the
+// map gains the 10 cases the router carried and this copy had not (update_job,
+// batch_invoice, the crew pair, the collections trio, and the taxonomy-1.2.0
+// on-ramp trio), each of which previously degraded a real OPERATOR request
+// into a clarification card. In-app is surface S2, so no allowlist applies —
+// these now mint the proposal the operator actually asked for.
 
 /**
  * Map FSM escalation reasons to the strict EscalationReason union the
@@ -262,8 +389,296 @@ export function toEscalationReason(reason: string | undefined): EscalationReason
   }
 }
 
+/**
+ * Whole-utterance affirmations recognized when the caller answers the
+ * intent_confirm readback ("...Is that right?"). Kept deterministic so the
+ * confirm turn needs no LLM round-trip. Anything NOT clearly affirmative is
+ * treated as a correction (safe default: re-capture rather than queue the
+ * wrong proposal) — mirrors the confirm-intent skill's "ambiguous → no" rule.
+ */
+const AFFIRMATION_PHRASES = new Set([
+  'yes', 'yeah', 'yep', 'yup', 'yea', 'sure', 'correct', 'right', 'ok', 'okay',
+  'confirm', 'confirmed', 'go ahead', 'sounds good', 'that works', 'looks good',
+  'do it', 'please do', 'affirmative', 'of course', 'absolutely', 'perfect',
+  "that's right", 'thats right', 'that is right', 'exactly', 'yes please',
+  // es
+  'si', 'sí', 'claro', 'correcto', 'de acuerdo', 'está bien', 'esta bien',
+  'adelante', 'perfecto', 'así es', 'asi es',
+]);
+
+/** Leading affirmative tokens ("yes, that's the one" / "sí, adelante"). */
+const AFFIRMATION_LEAD_TOKENS = new Set([
+  'yes', 'yeah', 'yep', 'yup', 'yea', 'sure', 'correct', 'confirm', 'confirmed',
+  'ok', 'okay', 'absolutely', 'affirmative', 'si', 'sí', 'claro', 'correcto',
+  'adelante', 'perfecto',
+]);
+
+/**
+ * True when the caller's readback response is a clear affirmation. Default is
+ * FALSE (→ correction) for anything ambiguous, so we never queue a proposal
+ * off an unclear "yes".
+ */
+export function isAffirmation(text: string): boolean {
+  const normalized = text.trim().toLowerCase().replace(/[.!?,]+$/g, '').trim();
+  if (!normalized) return false;
+  if (AFFIRMATION_PHRASES.has(normalized)) return true;
+  const first = normalized.split(/\s+/)[0].replace(/[.!?,]+$/g, '');
+  return AFFIRMATION_LEAD_TOKENS.has(first);
+}
+
 export class InAppVoiceAdapter {
   constructor(private readonly deps: InAppAdapterDeps) {}
+
+  /**
+   * Lazily-constructed PgEntityResolver when `pool` is wired but no explicit
+   * resolver was injected. Cached so we don't allocate one per turn.
+   */
+  private pgResolver?: EntityResolver;
+
+  /**
+   * Resolve the entity resolver to use: an explicitly injected one (tests),
+   * else a PgEntityResolver built from the pool (production), else undefined
+   * (dev/no-DB — resolution is skipped, never guessed).
+   */
+  private getEntityResolver(): EntityResolver | undefined {
+    if (this.deps.entityResolver) return this.deps.entityResolver;
+    if (this.pgResolver) return this.pgResolver;
+    if (this.deps.pool) {
+      this.pgResolver = new PgEntityResolver(this.deps.pool);
+      return this.pgResolver;
+    }
+    return undefined;
+  }
+
+  /**
+   * Resolve scheduling entity references, translating the resolver outcome
+   * into the FSM event the transition table expects. Resolution failure is
+   * non-fatal: we fall back to a best-effort "resolved with no refs" (the
+   * proposal then surfaces for operator review) rather than escalating on an
+   * infra hiccup — but we NEVER guess an id.
+   */
+  private async resolveEntities(
+    tenantId: string,
+    intent: string,
+    entities: Record<string, unknown>,
+    // SCH-03 — the FSM's sticky context.jobId (set whenever a job was
+    // resolved on any earlier turn this call). Only consulted by
+    // resolveSchedulingEntities for cancel/reschedule/reassign_appointment
+    // when the appointment reference isn't a date phrase.
+    stickyJobId?: string,
+  ): Promise<SchedulingEntityResolution> {
+    const resolver = this.getEntityResolver();
+    try {
+      return await resolveSchedulingEntities(resolver, tenantId, intent, entities, stickyJobId);
+    } catch {
+      return { status: 'resolved', refs: {} };
+    }
+  }
+
+  /**
+   * Map a resolution outcome to the FSM event. The disambiguation TTS expects
+   * candidates shaped `{ id, name, score }`, so the resolver's EntityCandidate
+   * `label` is mapped to `name`.
+   */
+  private async toResolutionEvent(
+    tenantId: string,
+    intent: string,
+    resolution: SchedulingEntityResolution,
+  ): Promise<CallingAgentEvent> {
+    if (resolution.status === 'ambiguous' && resolution.ambiguous) {
+      const refKey = refKeyForEntityKind(resolution.ambiguous.entityKind);
+      if (!refKey) {
+        return { type: 'entity_resolved', refs: resolution.refs };
+      }
+      const candidates = await this.enrichCandidatesForDisambiguation(
+        tenantId,
+        resolution.ambiguous.entityKind,
+        resolution.ambiguous.candidates,
+      );
+      return {
+        type: 'entity_ambiguous',
+        candidates,
+        entityKind: resolution.ambiguous.entityKind,
+        reference: resolution.ambiguous.reference,
+        refKey,
+        partialRefs: resolution.refs,
+      };
+    }
+    // Middle confidence band: exactly one candidate, but not confident
+    // enough to act on silently. Ask the caller to confirm it (entity_confirm)
+    // rather than either guessing (resolved) or giving up (not_found).
+    if (resolution.status === 'low_confidence' && resolution.lowConfidence) {
+      const refKey = refKeyForEntityKind(resolution.lowConfidence.entityKind);
+      if (!refKey) {
+        return { type: 'entity_resolved', refs: resolution.refs };
+      }
+      return {
+        type: 'entity_confirm_candidate',
+        entityKind: resolution.lowConfidence.entityKind,
+        candidate: resolution.lowConfidence.candidate,
+        reference: resolution.lowConfidence.reference,
+        refKey,
+        partialRefs: resolution.refs,
+      };
+    }
+    // No candidate reached even the lower confidence band. For intents that
+    // operate on a record that must ALREADY exist (send_estimate,
+    // record_payment, cancel_appointment, …) the request cannot proceed, so
+    // escalate rather than silently falling through to entity_resolved with
+    // no refs — that previously masked a not_found as a "success" (46a954e1).
+    if (resolution.status === 'not_found' && requiresExistingEntity(intent)) {
+      return { type: 'entity_not_found' };
+    }
+    // Everything else — including CREATION intents (create_appointment,
+    // create_job, create_customer, draft_estimate), where "no such record"
+    // is the normal, expected outcome — proceeds to intent_confirm with the
+    // partial refs. The proposal surfaces pendingReference for operator
+    // review instead of escalating to on-call (matches voice-action-router
+    // policy), and create_appointment auto-opens a job from jobTitle at
+    // execution time (95a260cd).
+    return { type: 'entity_resolved', refs: resolution.refs };
+  }
+
+  /**
+   * Attach service-location addresses to customer candidates so address-style
+   * follow-ups ("104 Cedar") can be matched deterministically.
+   */
+  private async enrichCandidatesForDisambiguation(
+    tenantId: string,
+    entityKind: EntityCandidate['kind'],
+    candidates: EntityCandidate[],
+  ): Promise<Array<{ id: string; name: string; score: number; hint?: string }>> {
+    if (entityKind !== 'customer' || !this.deps.pool || candidates.length === 0) {
+      return candidates.map((candidate) => ({
+        id: candidate.id,
+        name: candidate.label,
+        score: candidate.score,
+        hint: candidate.hint,
+      }));
+    }
+
+    const customerIds = candidates.map((candidate) => candidate.id);
+    const rows = await withTenantConnection(this.deps.pool, tenantId, (client) =>
+      client
+        .query<{ customer_id: string; street1: string; city: string }>(
+          `SELECT customer_id, street1, city
+             FROM service_locations
+            WHERE tenant_id = $1
+              AND customer_id = ANY($2::uuid[])
+              AND is_archived = false`,
+          [tenantId, customerIds],
+        )
+        .then((result) => result.rows),
+    );
+    const addressByCustomer = new Map(
+      rows.map((row) => [row.customer_id, `${row.street1}, ${row.city}`]),
+    );
+
+    return candidates.map((candidate) => {
+      const address = addressByCustomer.get(candidate.id);
+      const hintParts = [candidate.hint, address].filter(
+        (part): part is string => typeof part === 'string' && part.length > 0,
+      );
+      return {
+        id: candidate.id,
+        name: candidate.label,
+        score: candidate.score,
+        hint: hintParts.length > 0 ? hintParts.join(' · ') : undefined,
+      };
+    });
+  }
+
+  private buildDisambiguationRetryEvent(
+    pending: NonNullable<CallingAgentContext['pendingEntityAmbiguity']>,
+  ): CallingAgentEvent {
+    return {
+      type: 'entity_ambiguous',
+      candidates: pending.candidates,
+      entityKind: pending.entityKind,
+      reference: pending.reference,
+      refKey: pending.refKey,
+      partialRefs: pending.partialRefs,
+      retry: true,
+    };
+  }
+
+  /**
+   * Rehydrate pending ambiguity from the parked intent + entities when the FSM
+   * is still in entity_resolution (e.g. session context dropped between HTTP
+   * turns). Never guesses — re-runs the same resolver lookups as turn 1.
+   */
+  private async resolvePendingForDisambiguation(
+    tenantId: string,
+    context: CallingAgentContext,
+  ): Promise<PendingEntityAmbiguity | undefined> {
+    if (context.pendingEntityAmbiguity) {
+      return context.pendingEntityAmbiguity;
+    }
+    const intent = context.currentIntent;
+    const entities = context.extractedEntities;
+    if (!intent || !entities || typeof entities !== 'object') {
+      return undefined;
+    }
+
+    const resolution = await this.resolveEntities(
+      tenantId,
+      intent,
+      entities as Record<string, unknown>,
+      context.jobId,
+    );
+    if (resolution.status !== 'ambiguous' || !resolution.ambiguous) {
+      return undefined;
+    }
+
+    const refKey = refKeyForEntityKind(resolution.ambiguous.entityKind);
+    if (!refKey) return undefined;
+
+    const candidates = await this.enrichCandidatesForDisambiguation(
+      tenantId,
+      resolution.ambiguous.entityKind,
+      resolution.ambiguous.candidates,
+    );
+
+    return {
+      entityKind: resolution.ambiguous.entityKind,
+      reference: resolution.ambiguous.reference,
+      refKey,
+      candidates,
+      partialRefs: resolution.refs,
+      attemptCount: 0,
+    };
+  }
+
+  private async classifyIntentWithRetry(
+    text: string,
+    context: Parameters<typeof classifyIntent>[1],
+  ): Promise<Awaited<ReturnType<typeof classifyIntent>>> {
+    try {
+      return await classifyIntent(text, context, this.deps.gateway);
+    } catch (error) {
+      const failure = classifierFailureFromError(error);
+      const code = failure.errorCode;
+      // Quota / rate-limit / breaker-open / failover exhaustion: retrying
+      // burns load and cannot succeed until the cell recovers (FM-06).
+      //
+      // `rate_limited` belongs in this set for the same reason: the gateway
+      // has ALREADY waited out any retry-after that fit inside the deadline
+      // (see gateway/retry.ts planRateLimitWait). A second full-budget attempt
+      // from here would just re-queue against the same exhausted quota and
+      // hold another per-tenant concurrency lease while doing it — the exact
+      // pile-up that tripped `Per-tenant concurrency cap exceeded`.
+      if (
+        failure.failureClass === 'quota' ||
+        failure.failureClass === 'rate_limited' ||
+        code === 'BREAKER_OPEN' ||
+        code === 'LLM_PROVIDER_UNAVAILABLE'
+      ) {
+        throw error;
+      }
+      // One fresh-budget retry for transient provider/deadline aborts.
+      return classifyIntent(text, context, this.deps.gateway);
+    }
+  }
 
   /**
    * Open a new in-app session. Drives the FSM through the
@@ -273,12 +688,25 @@ export class InAppVoiceAdapter {
    * Recording disclosure is intentionally skipped for the inapp channel
    * (consent is captured at account creation; see disclose_recording).
    */
-  async startSession(tenantId: string, userId: string, conversationId?: string): Promise<StartSessionResult> {
+  async startSession(
+    tenantId: string,
+    userId: string,
+    conversationId?: string,
+    role?: string,
+    callerPhone?: string,
+  ): Promise<StartSessionResult> {
     const repairTemplates = this.deps.repairTemplatesResolver
       ? await this.deps.repairTemplatesResolver(tenantId).catch(() => [])
       : [];
+    const ownerSession = role === 'owner';
+    const extendedIntents =
+      ownerSession && this.deps.extendedIntentsEnabled
+        ? await this.deps.extendedIntentsEnabled(tenantId).catch(() => false)
+        : false;
     const session = this.deps.store.create(tenantId, 'inapp', {
       ...(repairTemplates.length > 0 ? { repairTemplates } : {}),
+      ...(ownerSession ? { ownerSession: true } : {}),
+      ...(extendedIntents ? { extendedIntents: true } : {}),
     });
     const convId = conversationId ?? session.id;
 
@@ -322,11 +750,48 @@ export class InAppVoiceAdapter {
     const greetedEffects = session.machine.dispatch({ type: 'greeted_ok' });
     await this.executeSideEffects(session, greetedEffects);
 
-    const callerKnownEffects = session.machine.dispatch({
-      type: 'caller_known',
-      customerId: userId,
-    });
-    await this.executeSideEffects(session, callerKnownEffects);
+    // QA-2026-07-26 — when the caller supplies a phone number at session
+    // start (e.g. the operator is on a call with a customer and starts the
+    // assistant with that number in hand) and it matches EXACTLY ONE
+    // existing tenant customer, resolve it now via the same
+    // findByPhoneNormalized path telephony/text-mode sessions use for
+    // caller-ID identification (see TextModeDriver.startSession). This is
+    // NOT the operator-as-customerId antipattern the comment below warns
+    // about — it's a real, resolver-matched CRM customer — so a later
+    // generic reference like "our customer" (GENERIC_CUSTOMER_REFS in
+    // entity-resolution.ts skips ANY name-based lookup for these phrases)
+    // still attaches to the right customer via the transitionIntentConfirm
+    // entities bridge. 0 or 2+ matches are left unresolved — never guessed.
+    let resolvedCustomerId: string | undefined;
+    if (callerPhone && this.deps.customerRepo?.findByPhoneNormalized) {
+      try {
+        const matches = await this.deps.customerRepo.findByPhoneNormalized(
+          tenantId,
+          normalizePhone(callerPhone),
+        );
+        if (matches.length === 1) {
+          resolvedCustomerId = matches[0].id;
+        }
+      } catch {
+        resolvedCustomerId = undefined;
+      }
+    }
+
+    if (resolvedCustomerId) {
+      session.callerPhone = callerPhone;
+      session.customerId = resolvedCustomerId;
+      const callerKnownEffects = session.machine.dispatch({
+        type: 'caller_known',
+        customerId: resolvedCustomerId,
+      });
+      await this.executeSideEffects(session, callerKnownEffects);
+    } else {
+      // An authenticated operator is the proposal actor, not a CRM caller.
+      // Treating their Clerk user id as customerId poisoned downstream entity
+      // resolution and caller-plan lookups for every in-app session.
+      const operatorSessionEffects = session.machine.dispatch({ type: 'operator_session' });
+      await this.executeSideEffects(session, operatorSessionEffects);
+    }
 
     // B1 — resolve per-tenant voice persona (best-effort).
     let persona: VoicePersona | null | undefined;
@@ -387,165 +852,244 @@ export class InAppVoiceAdapter {
       session.language = 'en';
     }
 
-    // §3B + §3D: vertical + intake-question prompt section.
-    // §3C: caller-plan prompt section (only when caller is identified).
-    // Both best-effort: a resolver that throws or returns undefined
-    // silently degrades to base-prompt classification rather than
-    // failing the turn (callers don't lose voice service over a
-    // contextual lookup hiccup).
-    let verticalPromptSection: string | undefined;
-    if (this.deps.verticalPromptResolver) {
-      try {
-        verticalPromptSection = await this.deps.verticalPromptResolver(session.tenantId);
-      } catch {
-        verticalPromptSection = undefined;
-      }
-    }
-    let planPromptSection: string | undefined;
-    if (this.deps.callerPlanResolver && session.customerId) {
-      try {
-        planPromptSection = await this.deps.callerPlanResolver(
-          session.tenantId,
-          session.customerId,
-        );
-      } catch {
-        planPromptSection = undefined;
-      }
-    }
-
-    // Classify intent. Failures fall back to a low-confidence event so
-    // the FSM still progresses (and the operator gets a clarification
-    // prompt) instead of silently dropping the turn.
+    // Decide the primary FSM event for this turn:
+    //  A) intent_confirm — yes/no readback answer (no classifier).
+    //  A2) entity_confirm — yes/no middle-confidence-candidate answer (no classifier).
+    //  B) entity_resolution — disambiguation follow-up (no classifier).
+    //  C) everything else — classify the utterance as an intent.
+    const stateBeforeTurn: string = session.machine.currentState;
     let fsmEvent: CallingAgentEvent;
-    let classifierUsage: { input: number; output: number } | undefined;
-    try {
-      const classification = await classifyIntent(
-        text,
-        {
-          tenantId: session.tenantId,
-          verticalPromptSection,
-          planPromptSection,
-        },
-        this.deps.gateway
-      );
-      classifierUsage = classification.tokenUsage
-        ? { input: classification.tokenUsage.input, output: classification.tokenUsage.output }
-        : undefined;
-      // VQ-003: announce the classifier outcome on the session bus so
-      // the harness can grade intent-recognition independently of the
-      // FSM transition that follows.
-      session.events.emit(
-        'voice-event',
-        intentClassifiedEvent({
-          intentType: classification.intentType,
-          confidence: classification.confidence,
-          tokenUsage: classifierUsage,
-        }),
-      );
-      fsmEvent = classifierToFsmEvent(
-        classification.intentType,
-        classification.confidence,
-        classification.extractedEntities as Record<string, unknown> | undefined
-      );
-    } catch {
-      fsmEvent = { type: 'confidence_low', threshold: CLASSIFIER_CONFIDENCE_THRESHOLD, score: 0 };
-    }
+    let classifierFailureEffect: SideEffect | undefined;
+    let ownerLookupText: string | undefined;
 
-    // Wire the classifier's token usage into the cost tracker. If the
-    // cap is exceeded, dispatch the global cost_cap_exceeded event so
-    // the FSM escalates instead of finishing the turn normally.
-    if (classifierUsage) {
-      const cents = estimateCostCents(classifierUsage.input, classifierUsage.output);
-      const capEvents = session.costTracker.recordUsage({
-        inputTokens: classifierUsage.input,
-        outputTokens: classifierUsage.output,
-        costCents: cents,
-      });
-      // VQ-003: emit cost_incurred for the harness's running tally.
-      // deltaCents is the just-recorded turn; totalCents is read off
-      // the tracker so it stays in lockstep.
-      session.events.emit(
-        'voice-event',
-        costIncurredEvent(cents, session.costTracker.totals.costCents),
+    if (stateBeforeTurn === 'intent_confirm') {
+      fsmEvent = isAffirmation(text)
+        ? { type: 'confirmed' }
+        : { type: 'correction', newTranscript: text };
+    } else if (stateBeforeTurn === 'entity_confirm') {
+      fsmEvent = isAffirmation(text)
+        ? { type: 'entity_confirm_affirmed' }
+        : { type: 'entity_confirm_declined' };
+    } else if (stateBeforeTurn === 'entity_resolution') {
+      const pending = await this.resolvePendingForDisambiguation(
+        session.tenantId,
+        session.machine.currentContext,
       );
-      const exceeded = capEvents.find((e) => e.type === 'cost_cap_exceeded');
-      if (exceeded) {
-        // Override the classifier's event — escalation supersedes the
-        // intent dispatch for the current turn.
-        fsmEvent = { type: 'cost_cap_exceeded' };
-        // VQ-003: surface session_terminated so graders see WHY the
-        // session is ending without inferring it from FSM transitions.
-        session.events.emit('voice-event', sessionTerminatedEvent('cap_exceeded'));
+      if (!pending) {
+        fsmEvent = { type: 'correction', newTranscript: text };
+      } else {
+        const match = await resolveDisambiguationFollowUp(
+          this.getEntityResolver(),
+          session.tenantId,
+          text,
+          pending,
+        );
+        if (match.status === 'resolved') {
+          fsmEvent = {
+            type: 'entity_resolved',
+            refs: {
+              ...pending.partialRefs,
+              [pending.refKey]: match.candidateId,
+            },
+          };
+        } else if (pending.attemptCount >= MAX_DISAMBIGUATION_ATTEMPTS) {
+          fsmEvent = { type: 'entity_resolved', refs: pending.partialRefs };
+        } else {
+          fsmEvent = this.buildDisambiguationRetryEvent(pending);
+        }
+      }
+    } else {
+      // §3B + §3D: vertical + intake-question prompt section.
+      // §3C: caller-plan prompt section (only when caller is identified).
+      // Both best-effort: a resolver that throws or returns undefined
+      // silently degrades to base-prompt classification rather than
+      // failing the turn (callers don't lose voice service over a
+      // contextual lookup hiccup).
+      let verticalPromptSection: string | undefined;
+      if (this.deps.verticalPromptResolver) {
+        try {
+          verticalPromptSection = await this.deps.verticalPromptResolver(session.tenantId);
+        } catch {
+          verticalPromptSection = undefined;
+        }
+      }
+      let planPromptSection: string | undefined;
+      if (this.deps.callerPlanResolver && session.customerId) {
+        try {
+          planPromptSection = await this.deps.callerPlanResolver(
+            session.tenantId,
+            session.customerId,
+          );
+        } catch {
+          planPromptSection = undefined;
+        }
+      }
+
+      // Classify intent. Failures fall back to a low-confidence event so
+      // the FSM still progresses (and the operator gets a clarification
+      // prompt) instead of silently dropping the turn.
+      let classifierUsage: { input: number; output: number } | undefined;
+      try {
+        const classification = await this.classifyIntentWithRetry(
+          text,
+          {
+            tenantId: session.tenantId,
+            verticalPromptSection,
+            planPromptSection,
+            ...(session.machine.currentContext.ownerSession ? { ownerSession: true } : {}),
+            ...(session.machine.currentContext.extendedIntents ? { extendedIntents: true } : {}),
+          },
+        );
+        classifierUsage = classification.tokenUsage
+          ? { input: classification.tokenUsage.input, output: classification.tokenUsage.output }
+          : undefined;
+        if (classification.unknownReason === 'parse_failed') {
+          classifierFailureEffect = classifierFailureAuditEffect('parse_failed');
+        }
+        // VQ-003: announce the classifier outcome on the session bus so
+        // the harness can grade intent-recognition independently of the
+        // FSM transition that follows.
+        session.events.emit(
+          'voice-event',
+          intentClassifiedEvent({
+            intentType: classification.intentType,
+            confidence: classification.confidence,
+            tokenUsage: classifierUsage,
+          }),
+        );
+        fsmEvent = classifierToFsmEvent(
+          classification.intentType,
+          classification.confidence,
+          classification.extractedEntities as Record<string, unknown> | undefined
+        );
+        if (
+          classification.confidence >= TAU_INT &&
+          session.machine.currentContext.ownerSession === true &&
+          classification.intentType.startsWith('lookup_') &&
+          this.deps.ownerLookupResolver
+        ) {
+          ownerLookupText = await this.deps.ownerLookupResolver(
+            session.tenantId,
+            session.id,
+            classification.intentType,
+          );
+        }
+      } catch (error) {
+        const failure = classifierFailureFromError(error);
+        classifierFailureEffect = classifierFailureAuditEffect(
+          failure.failureClass,
+          failure.errorCode,
+        );
+        // Prefer intent_classified/unknown over confidence_low so repair
+        // templates use low_intent_confidence (text path), not low_audio.
+        fsmEvent = {
+          type: 'intent_classified',
+          intentType: 'unknown',
+          entities: {},
+          confidence: 0,
+        };
+      }
+
+      // Wire the classifier's token usage into the cost tracker. If the
+      // cap is exceeded, dispatch the global cost_cap_exceeded event so
+      // the FSM escalates instead of finishing the turn normally.
+      if (classifierUsage) {
+        const cents = estimateCostCents(classifierUsage.input, classifierUsage.output);
+        const capEvents = session.costTracker.recordUsage({
+          inputTokens: classifierUsage.input,
+          outputTokens: classifierUsage.output,
+          costCents: cents,
+        });
+        // VQ-003: emit cost_incurred for the harness's running tally.
+        // deltaCents is the just-recorded turn; totalCents is read off
+        // the tracker so it stays in lockstep.
+        session.events.emit(
+          'voice-event',
+          costIncurredEvent(cents, session.costTracker.totals.costCents),
+        );
+        const exceeded = capEvents.find((e) => e.type === 'cost_cap_exceeded');
+        if (exceeded) {
+          // Override the classifier's event — escalation supersedes the
+          // intent dispatch for the current turn.
+          fsmEvent = { type: 'cost_cap_exceeded' };
+          // VQ-003: surface session_terminated so graders see WHY the
+          // session is ending without inferring it from FSM transitions.
+          session.events.emit('voice-event', sessionTerminatedEvent('cap_exceeded'));
+        }
       }
     }
 
     const allSideEffects: SideEffect[] = [];
-
-    // Dispatch the classifier-derived event.
-    const effects1 = session.machine.dispatch(fsmEvent);
-    allSideEffects.push(...effects1);
-    const aggregate1 = await this.executeSideEffects(session, effects1);
-
-    // For high-confidence intents we expect the FSM to land in
-    // entity_resolution; auto-resolve to keep the flow progressing
-    // without a separate entity-resolution skill (P8 wave 8B simplified
-    // path). For phase-1 inapp the entities supplied by the classifier
-    // are treated as resolved.
-    const stateAfterClassify: string = session.machine.currentState;
-    if (
-      stateAfterClassify === 'entity_resolution' &&
-      fsmEvent.type === 'intent_classified'
-    ) {
-      const refs: Record<string, string> = {};
-      for (const [k, v] of Object.entries(fsmEvent.entities)) {
-        if (typeof v === 'string') refs[k] = v;
-      }
-      // QA-2026-06-05 (SCH-02/03): REAL resolution before entity_resolved —
-      // turn customer/job/appointment references and natural-language times
-      // into concrete ids/timestamps so the execution contract is satisfied.
-      // Best-effort: failures leave refs as-is and the proposal surfaces for
-      // operator review.
-      if (this.deps.pool) {
-        try {
-          const concrete = await resolveSchedulingEntities(
-            this.deps.pool,
-            session.tenantId,
-            fsmEvent.intentType,
-            fsmEvent.entities,
-          );
-          Object.assign(refs, concrete);
-        } catch {
-          // Resolution must never break the call flow.
-        }
-      }
-      const effects2 = session.machine.dispatch({ type: 'entity_resolved', refs });
-      allSideEffects.push(...effects2);
-      const aggregate2 = await this.executeSideEffects(session, effects2);
-
-      // FSM is now in intent_confirm; auto-confirm in phase-1 (we drive
-      // confirmation later when readback is wired into the UI).
-      const effects3 = session.machine.dispatch({ type: 'confirmed' });
-      allSideEffects.push(...effects3);
-      const aggregate3 = await this.executeSideEffects(session, effects3);
-
-      // proposal_draft is the state immediately after `confirmed`. If a
-      // proposal was created in aggregate3, push proposal_queued so the
-      // FSM proceeds to closing.
-      const lastProposalId = aggregate3.lastProposalId
-        ?? aggregate2.lastProposalId
-        ?? aggregate1.lastProposalId;
-      const stateAfterConfirm: string = session.machine.currentState;
-      if (stateAfterConfirm === 'proposal_draft' && lastProposalId) {
-        const effects4 = session.machine.dispatch({
-          type: 'proposal_queued',
-          proposalId: lastProposalId,
-        });
-        allSideEffects.push(...effects4);
-        await this.executeSideEffects(session, effects4);
-      }
+    if (classifierFailureEffect) {
+      allSideEffects.push(classifierFailureEffect);
+      await this.executeSideEffects(session, [classifierFailureEffect]);
     }
 
-    const last = allSideEffects[allSideEffects.length - 1];
+    // Dispatch the primary event (classifier-derived, or the confirm/correct
+    // event from the intent_confirm branch).
+    // Read-only owner lookups answer immediately and leave the FSM ready for
+    // the next request. They must never enter intent_confirm, which is the
+    // safety gate for proposal-producing mutations.
+    const effects1: SideEffect[] = ownerLookupText
+      ? [{ type: 'tts_play', payload: { text: ownerLookupText } }]
+      : session.machine.dispatch(fsmEvent);
+    allSideEffects.push(...effects1);
+    const aggregate1 = await this.executeSideEffects(session, effects1);
+    let lastProposalId = aggregate1.lastProposalId;
+
+    // Path A — a freshly classified intent landed us in entity_resolution.
+    // Resolve the customer/job/appointment references through the shared
+    // tenant-scoped resolver (τ_ent=0.80). THREE outcomes, NEVER a silent
+    // guess (CLAUDE.md invariant):
+    //   resolved  → entity_resolved → intent_confirm readback. We STOP here:
+    //               the caller confirms on the NEXT turn (we no longer
+    //               synthesize `confirmed`), so a wrong match can be caught.
+    //   ambiguous → entity_ambiguous with the candidate set — the FSM asks a
+    //               one-tap disambiguation question and stays in
+    //               entity_resolution.
+    //   not_found → VOX-02: split by intent family (requiresExistingEntity).
+    //               Record-OPERATING intents (send_estimate, record_payment,
+    //               cancel_appointment, …) → entity_not_found → escalate to
+    //               on-call: the request can never execute without the record.
+    //               CREATION intents (create_appointment, create_job,
+    //               create_customer, draft_estimate) → entity_resolved with
+    //               partial refs — intent_confirm readback; the proposal
+    //               carries pendingReference for operator review. A caller
+    //               booking NEW work must never be escalated for it.
+    if (
+      session.machine.currentState === 'entity_resolution' &&
+      fsmEvent.type === 'intent_classified'
+    ) {
+      const resolution = await this.resolveEntities(
+        session.tenantId,
+        fsmEvent.intentType,
+        fsmEvent.entities,
+        session.machine.currentContext.jobId,
+      );
+      const resolutionEvent = await this.toResolutionEvent(
+        session.tenantId,
+        fsmEvent.intentType,
+        resolution,
+      );
+      const effects2 = session.machine.dispatch(resolutionEvent);
+      allSideEffects.push(...effects2);
+      const aggregate2 = await this.executeSideEffects(session, effects2);
+      lastProposalId = aggregate2.lastProposalId ?? lastProposalId;
+    }
+
+    // Path B — the caller confirmed at intent_confirm, so the FSM created the
+    // proposal and moved to proposal_draft. Queue it so the flow proceeds to
+    // closing. Reached only via a GENUINE `confirmed` event from the caller —
+    // never a synthesized one.
+    if (session.machine.currentState === 'proposal_draft' && lastProposalId) {
+      const effects3 = session.machine.dispatch({
+        type: 'proposal_queued',
+        proposalId: lastProposalId,
+      });
+      allSideEffects.push(...effects3);
+      await this.executeSideEffects(session, effects3);
+    }
+
     const ttsLast = [...allSideEffects].reverse().find((e) => e.type === 'tts_play');
     let ttsAudio: Buffer | undefined;
     let ttsText: string | undefined;
@@ -719,6 +1263,12 @@ export class InAppVoiceAdapter {
         outcome,
         state: session.machine.currentState,
         channel: 'inapp_voice',
+        ...(session.transcript.length > 0
+          ? { transcript: [...session.transcript] }
+          : {}),
+        ...(session.customerId !== undefined
+          ? { customerId: session.customerId }
+          : {}),
       });
     } catch {
       /* swallow — outcome stamping is best-effort */
@@ -819,6 +1369,59 @@ export class InAppVoiceAdapter {
     }
   }
 
+  /**
+   * QA-2026-07-26 — build a draft line-items array from voice-classified
+   * `entities.lineItemDescriptions`, then ground it through the shared
+   * `groundLineItemPricing` pass (ai/resolution/catalog-resolver.ts) — the
+   * SAME function `ai/tasks/estimate-task.ts` already calls for the
+   * non-voice draft_estimate path — before it reaches the proposal payload.
+   *
+   * `amount` (when present) is `entities.amount`: the caller-quoted TOTAL
+   * across every drafted line (integer cents — see intent-classifier.ts
+   * `ExtractedEntities`), split evenly as each line's STARTING guess (the
+   * remainder folded into the last line so the guesses always sum back to
+   * the quoted total exactly). A catalog match still overwrites that guess
+   * outright; a >=10%-and->=$1 conflict between the guess and a catalog
+   * match surfaces as a one-tap "did you mean" instead of silently snapping
+   * (see catalog-resolver.ts `isPriceConflict`).
+   *
+   * When `amount` is absent there is no number to guess from, so the
+   * starting price is left UNSET rather than invented. `groundLineItemPricing`
+   * still resolves the real price when there's a catalog match (its
+   * exact/high tier sets `[priceField]` unconditionally); when there isn't,
+   * the line is stamped `uncatalogued` / folds into `requiresReview: true`
+   * instead of getting a fabricated number.
+   */
+  private async buildVoiceDraftLineItems(
+    tenantId: string,
+    descriptions: string[],
+    amount: unknown,
+  ): Promise<CatalogPricingOutcome> {
+    const totalCents =
+      typeof amount === 'number' && Number.isFinite(amount) && amount > 0
+        ? Math.round(amount)
+        : undefined;
+    const perItemCents =
+      totalCents !== undefined ? Math.floor(totalCents / descriptions.length) : undefined;
+    const draftLineItems: Array<Record<string, unknown>> = descriptions.map((description, idx) => ({
+      description,
+      quantity: 1,
+      ...(perItemCents !== undefined
+        ? {
+            unitPrice:
+              idx === descriptions.length - 1
+                ? totalCents! - perItemCents * (descriptions.length - 1)
+                : perItemCents,
+          }
+        : {}),
+    }));
+    return groundLineItemPricing(
+      draftLineItems,
+      'unitPrice',
+      this.deps.catalogRepo ? () => this.deps.catalogRepo!.listByTenant(tenantId) : null,
+    );
+  }
+
   private async handleCreateProposal(
     session: VoiceSession,
     effect: SideEffect
@@ -829,7 +1432,7 @@ export class InAppVoiceAdapter {
       ? payload.entities as Record<string, unknown>
       : {};
     const proposalType = intentToProposalType(intent);
-    const summary = summaryFor(intent, entities);
+    const summary = voiceProposalSummary(intent, entities);
 
     try {
       // PR B — load tenant threshold override so the Settings UI value
@@ -845,45 +1448,179 @@ export class InAppVoiceAdapter {
           tenantThresholdOverride = undefined;
         }
       }
-      // QA-2026-06-05: execution handlers read the FLAT task contract
-      // (create_customer wants payload.name; create_appointment wants
-      // payload.jobId/scheduledStart/... — see proposals/execution/*), but
-      // this adapter only nested the raw classifier entities, so EVERY
-      // voice execution failed its handler validation (live:
-      // 'Payload must include a non-empty name' / 'a valid jobId').
-      // Promote primitive entity values to the payload top level — the
-      // classifier's entity keys ARE the task-contract field names — while
-      // keeping `entities` intact for audit/rendering. Reserved envelope
-      // keys are never clobbered, and create_customer's displayName→name
-      // alias mirrors the assistant route's translation.
-      const RESERVED = new Set(['intent', 'entities', 'sessionId', 'conversationId', 'callSid', 'customerId', 'confidence']);
-      const flat: Record<string, unknown> = {};
-      for (const [k, v] of Object.entries(entities)) {
-        if (RESERVED.has(k)) continue;
-        if (typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean') flat[k] = v;
+      // QA-2026-06-05 / QA-2026-07-26 — THE PAYLOAD CONTRACT. Execution
+      // handlers read the FLAT task contract (create_customer wants
+      // payload.name; create_appointment wants payload.jobId/scheduledStart —
+      // see proposals/execution/*), but the FSM hands this adapter a NESTED
+      // `{intent, entities, …}` envelope, so every voice execution used to
+      // fail its handler validation.
+      //
+      // That promotion / alias / line-item translation is no longer written
+      // here: it is owned by `buildVoiceProposalPayload`
+      // (proposals/voice-payload.ts), which was modelled on this very
+      // function and is now SHARED with the real Twilio phone path
+      // (ai/voice-turn/create-voice-turn-processor.ts) so the two voice
+      // surfaces can never drift apart again. Every QA-2026-* fix this block
+      // used to carry — displayName→name, sendChannel→channel, the resolved
+      // customerId, and grounded lineItems for draft_estimate AND
+      // draft_invoice — lives there now, next to the contract it satisfies.
+      //
+      // What stays HERE is what the module deliberately does not own:
+      // session/FSM concerns, the summary, status decisions, sourceContext,
+      // and the in-app line-item grounding wrapper injected below.
+      const rawConfidence = typeof payload.confidence === 'number' ? payload.confidence : undefined;
+      const built = await buildVoiceProposalPayload(
+        {
+          intent,
+          proposalType,
+          // POST-resolution entities: the FSM's `entity_resolved` handler has
+          // already folded resolver-validated refs (including a validated
+          // customerId) into `extractedEntities` before this side effect is
+          // emitted (transitions.ts).
+          entities,
+          envelope: {
+            sessionId: session.id,
+            ...(typeof payload.conversationId === 'string'
+              ? { conversationId: payload.conversationId }
+              : {}),
+          },
+          ...(rawConfidence !== undefined ? { confidence: rawConfidence } : {}),
+          // DELIBERATELY NO `callerCustomerId`. On the telephony path that
+          // argument is the IDENTIFIED CALLER's customer id. In-app is the
+          // other way round: this envelope's top-level `payload.customerId`
+          // is context.customerId — the AUTHENTICATED OPERATOR's identity
+          // (used only for `createdBy` below, and undefined for every in-app
+          // session by design; see the operator_session comment earlier in
+          // this file). Passing it here would write an OPERATOR id into
+          // `payload.customerId`, which every record-linking execution
+          // handler reads as the CRM CUSTOMER. The only customer id an in-app
+          // payload may carry is the resolved `entities.customerId`, which
+          // the module already prefers on its own.
+          //
+          // QA-2026-07-26: that resolved id is what makes voice estimates
+          // executable at all — DraftEstimateExecutionHandler
+          // (proposals/execution/handlers.ts) reads payload.customerId
+          // directly and otherwise throws "Estimate draft has neither a
+          // customerId nor a jobId" (the live VOX-05 / create_booking /
+          // SMS-01 QA-matrix failures).
+        },
+        {
+          tenantId: session.tenantId,
+          // The catalog grounding is INJECTED (proposals/ must not import
+          // ai/resolution/* — the catalog resolver imports back through the
+          // proposal contracts). This is the IN-APP wrapper
+          // (`buildVoiceDraftLineItems`); the telephony path injects its own
+          // (`groundVoiceQuote`), which additionally produces the spoken
+          // read-back. Both bottom out in the same `groundLineItemPricing`;
+          // unifying the two wrappers is a separate step.
+          //
+          // An uncatalogued (LLM/heuristic-priced) line must never ride the
+          // raw classifier confidence into auto-approval — cap it exactly
+          // like estimate-task.ts's UNCATALOGUED_CONFIDENCE_CAP, and stamp
+          // the RV-007 `_meta.overallConfidence = 'low'` hard block
+          // (proposals/auto-approve.ts confidenceMetaBlocksAutoApprove) so
+          // decideInitialStatus can never return 'approved' for it,
+          // regardless of any tenant threshold override.
+          groundLineItems: async (descriptions) => {
+            const outcome = await this.buildVoiceDraftLineItems(
+              session.tenantId,
+              descriptions,
+              entities.amount,
+            );
+            return {
+              lineItems: outcome.lineItems,
+              ...(outcome.anyUncatalogued
+                ? { meta: { overallConfidence: 'low' as const } }
+                : {}),
+              missingFields: outcome.missingFields,
+              ...(outcome.anyUncatalogued && rawConfidence !== undefined
+                ? { confidenceScore: Math.min(rawConfidence, UNCATALOGUED_CONFIDENCE_CAP) }
+                : {}),
+            };
+          },
+        },
+      );
+      // The module gates every payload on its type's own schema. The inbound
+      // CALLER path ACTS on a failure (persist the real type with the unmet
+      // keys as `missingFields`, or degrade to a clarification card) because
+      // nobody is watching a live phone call. In-app is an AUTHENTICATED
+      // OPERATOR (surface S2) who reads and can edit the proposal card before
+      // approving, and `approveProposal` re-validates at the execution
+      // boundary regardless — so a contract gap here does NOT change what is
+      // persisted. It must still be diagnosable, hence the audit row.
+      //
+      // ONE exception, and only one: `voice_clarification` itself. That is
+      // the map's DEFAULT for an intent nobody mapped (a `lookup_*`, or
+      // anything outside the shared map), and unlike every real type it has
+      // NO execution handler and no review-completion path — so there is no
+      // editable draft to preserve and nothing an operator could complete.
+      // The raw `{intent, entities}` envelope simply fails
+      // `voiceClarificationPayloadSchema` (transcript + reason) and lands in
+      // the queue as a malformed card. Degrade it to the CANONICAL
+      // clarification instead — the same shape, from the same shared module,
+      // that the phone path already degrades to.
+      //
+      // Deliberately NOT applied to real proposal types: those keep the
+      // persist-unchanged behaviour above, because destroying an operator's
+      // editable draft would be strictly worse than handing them one with a
+      // gap in it.
+      let effectivePayload = built.payload;
+      if (!built.ok) {
+        const degradeToClarification = proposalType === 'voice_clarification';
+        if (degradeToClarification) {
+          effectivePayload = buildVoiceClarificationPayload({
+            transcript: session.transcript,
+            intent,
+            entities,
+            requestedProposalType: proposalType,
+            sessionId: session.id,
+          });
+        }
+        await this.handleAuditLog(session, {
+          type: 'audit_log',
+          payload: {
+            eventType: 'voice.payload_contract_failed',
+            intent,
+            proposalType,
+            outcome: degradeToClarification
+              ? 'degraded_to_clarification'
+              : 'persisted_unchanged',
+            errors: built.errors,
+            missingFields: built.missingFieldPaths,
+            sessionId: session.id,
+          },
+        } as SideEffect);
       }
-      if (typeof entities.displayName === 'string' && flat.name === undefined) flat.name = entities.displayName;
+      const voiceLineItemOutcome = built.lineItemOutcome;
+      const confidenceScore = built.confidence;
       const proposal = buildProposal({
         tenantId: session.tenantId,
         proposalType,
-        payload: {
-          ...flat,
-          intent,
-          entities,
-          sessionId: session.id,
-          conversationId: typeof payload.conversationId === 'string' ? payload.conversationId : undefined,
-        },
+        // Flat, contract-checked, built by the shared module above (or the
+        // canonical clarification, for the unmapped-intent fall-through).
+        payload: effectivePayload,
         summary,
         // QA-2026-06-04: mirror the AI task handlers (create-appointment-task
         // et al.) — calling-agent proposals are capture-class from the
         // autonomous tier with a real classifier confidence. Without these,
         // initialProposalStatus always returned 'draft', which the approval
         // guard correctly refuses to approve — voice proposals were stuck.
-        ...(typeof payload.confidence === 'number' ? { confidenceScore: payload.confidence } : {}),
+        ...(confidenceScore !== undefined ? { confidenceScore } : {}),
+        // Ambiguous catalog matches (two-plus plausible items, or a
+        // price-conflict "did you mean") require the operator to pick —
+        // forces 'draft' regardless of trust tier / confidence, same as
+        // estimate-task.ts.
+        ...(voiceLineItemOutcome?.missingFields && voiceLineItemOutcome.missingFields.length > 0
+          ? { missingFields: voiceLineItemOutcome.missingFields }
+          : {}),
         sourceTrustTier: 'autonomous',
         sourceContext: {
           source: 'calling-agent',
           channel: session.channel,
+          voiceMutation: true,
+          // RIVET P4 — in-app voice is an AUTHENTICATED operator (surface S2);
+          // stamp it explicitly so the execution boundary never has to infer.
+          surface: 'S2' as ProposalSurface,
           sessionId: session.id,
         },
         // QA-2026-06-04: do NOT fabricate an aiRunId. proposals.ai_run_id has
@@ -977,6 +1714,10 @@ export class InAppVoiceAdapter {
         gateway: this.deps.gateway,
         ...(intentDetected ? { intentDetected } : {}),
         ...(this.deps.pool ? { pool: this.deps.pool } : {}),
+        // RIVET I13 — this is an authenticated in-app OPERATOR session. The
+        // adapter stores the operator's own turns with a `caller:` prefix, so
+        // they must NOT be fenced as untrusted caller content.
+        inboundCallerSession: false,
       });
     } catch {
       // Summary is best-effort — the call still ended successfully.

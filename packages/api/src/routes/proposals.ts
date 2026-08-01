@@ -2,14 +2,16 @@ import { Router, Response } from 'express';
 import { z } from 'zod';
 import { AuthenticatedRequest } from '../auth/clerk';
 import { requireAuth, requireTenant, requirePermission } from '../middleware/auth';
+import { asyncRoute } from '../middleware/async-route';
 import { toErrorResponse } from '../shared/errors';
 import { validate } from '../shared/validation';
 import { Role } from '../auth/rbac';
-import { ProposalRepository } from '../proposals/proposal';
+import { ProposalRepository, isScheduleProposalType, SCHEDULE_PROPOSAL_TYPES } from '../proposals/proposal';
 import { AppointmentRepository } from '../appointments/appointment';
 import { AuditRepository } from '../audit/audit';
 import { ProposalFilter } from '../proposals/proposal-contracts';
 import { buildInboxPayload } from '../proposals/inbox';
+import { undoExpiresAt } from '../proposals/lifecycle';
 import { listProposals, getProposalDetail } from '../proposals/routes';
 import {
   approveProposal,
@@ -17,9 +19,13 @@ import {
   rejectProposal,
   editProposal,
   undoProposal,
+  reproposeProposal,
   type UndoCorrectionLoopDeps,
 } from '../proposals/actions';
 import { resolveProposalLine } from '../proposals/resolve-line';
+import { resolveProposalEntity } from '../proposals/resolve-entity';
+import type { RedraftHandlerFactory } from '../proposals/redraft-handler-factory';
+import type { EntityAliasCandidateCapture } from '../learning/entity-aliases/candidate-service';
 import {
   proposalFilterSchema,
   rejectProposalBodySchema,
@@ -27,6 +33,8 @@ import {
 } from '../proposals/proposal-contracts';
 import { FeasibilityDependencies } from '../scheduling/feasibility-types';
 import { createSchedulingProposal } from '../proposals/create-scheduling';
+import { assertValidProposalPayload } from '../proposals/contracts';
+import type { CorrectionRepository } from '../proposals/corrections/correction';
 
 // P2-035 — Batch approval body schema. Lives inline rather than in
 // proposal-contracts.ts so this story stays within its allowed-files
@@ -38,11 +46,31 @@ const approveBatchBodySchema = z.object({
   proposalIds: z.array(z.string().uuid()).min(1).max(50),
 });
 
+// §5.5 — how far back the inbox surfaces expired schedule cards. Operators
+// re-propose recent lapses; bounding the window keeps the response from growing
+// as expired history accumulates (the cards are still re-proposable via the
+// list endpoint by id).
+const EXPIRED_INBOX_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
+const EXPIRED_INBOX_LIMIT = 20;
+
+// Journey QA 2026-07-02 (bug 10) — surface recently execution-failed proposals
+// so an approval that later failed to execute doesn't just vanish from the
+// inbox with no trace. Same bounding rationale as the expired section.
+const FAILED_INBOX_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
+const FAILED_INBOX_LIMIT = 20;
+
 // U2 (P2-035) — resolve an ambiguous catalog line by picking one of the
 // line's surfaced candidates. Patches the draft; never approves (D-004).
 const resolveLineBodySchema = z.object({
   lineIndex: z.number().int().min(0),
   catalogItemId: z.string().min(1),
+});
+
+// U8 (E9) — resolve an ambiguous entity reference ("which Bob?") by picking
+// one of the proposal's surfaced candidates. Re-drafts the original action with
+// the chosen id; never approves (D-004).
+const resolveEntityBodySchema = z.object({
+  candidateId: z.string().min(1),
 });
 
 export function createProposalsRouter(
@@ -53,6 +81,17 @@ export function createProposalsRouter(
   // N-009 / P2-038 — when supplied, undoing a proposal also reverses the
   // structured correction lessons it recorded (and the config each cascaded).
   undoCorrectionLoop?: UndoCorrectionLoopDeps,
+  // Story 3.9 — when supplied, editing a proposal logs each changed field
+  // (intent + field + before/after) to the corrections training table.
+  correctionRepo?: CorrectionRepository,
+  // U1 (E9) — when supplied, resolving an entity-disambiguation clarification
+  // re-runs the ORIGINAL task handler with the chosen id and replaces the
+  // (non-executable) voice_clarification with the drafted, executable proposal.
+  // Absent → resolution falls back to the annotate-only behavior.
+  redraftHandlerFactory?: RedraftHandlerFactory,
+  // Tenant learning loop — grounded picker/edit flows emit deduped alias review
+  // proposals. Failure-soft inside the action layer.
+  entityAliasCandidateCapture?: EntityAliasCandidateCapture,
 ): Router {
   const router = Router();
 
@@ -64,63 +103,75 @@ export function createProposalsRouter(
     '/',
     requireAuth,
     requireTenant,
-    async (req: AuthenticatedRequest, res: Response) => {
-      try {
-        const body = req.body as { proposalType?: string; payload?: any; summary?: string; appointmentVersion?: string };
-        const SUPPORTED_TYPES = [
-          'reschedule_appointment',
-          'reassign_appointment',
-          'add_crew_member',
-          'remove_crew_member',
-        ] as const;
-        type SupportedType = (typeof SUPPORTED_TYPES)[number];
-        if (!SUPPORTED_TYPES.includes(body.proposalType as SupportedType)) {
-          res.status(400).json({ error: 'UNSUPPORTED_PROPOSAL_TYPE', proposalType: body.proposalType });
-          return;
-        }
-        if (!appointmentRepo || !feasibilityDeps) {
-          res.status(500).json({ error: 'SCHEDULING_DEPS_UNCONFIGURED' });
-          return;
-        }
-        // If-Match header takes precedence over body.appointmentVersion, consistent
-        // with HTTP semantics. The client hook (useCreateScheduleProposal) sends
-        // the header; the body field is a fallback for non-browser callers.
-        const headerVersion = req.header('If-Match') ?? null;
-        const expectedVersion = headerVersion ?? body.appointmentVersion ?? null;
-
-        const result = await createSchedulingProposal(
-          {
-            tenantId: req.auth!.tenantId,
-            actorId: req.auth!.userId,
-            proposalType: body.proposalType as SupportedType,
-            payload: body.payload,
-            summary: body.summary,
-            expectedVersion,
-          },
-          proposalRepo, appointmentRepo, feasibilityDeps,
-        );
-
-        switch (result.kind) {
-          case 'created': res.status(200).json(result.proposal); return;
-          case 'missing_version': res.status(400).json({ error: 'MISSING_VERSION' }); return;
-          case 'invalid_version': res.status(400).json({ error: 'INVALID_VERSION' }); return;
-          case 'missing_technician': res.status(400).json({ error: 'MISSING_TECHNICIAN', proposalType: result.proposalType }); return;
-          case 'not_found': res.status(404).json({ error: 'APPOINTMENT_NOT_FOUND' }); return;
-          case 'stale': res.status(409).json({
-            error: 'STALE_APPOINTMENT',
-            currentVersion: result.currentVersion,
-            providedVersion: result.providedVersion,
-          }); return;
-          case 'infeasible': res.status(422).json({
-            error: 'INFEASIBLE',
-            ...result.feasibility,
-          }); return;
-        }
-      } catch (err) {
-        const { statusCode, body } = toErrorResponse(err);
-        res.status(statusCode).json(body);
+    requirePermission('proposals:create'),
+    asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
+      const body = req.body as { proposalType?: string; payload?: any; summary?: string; appointmentVersion?: string };
+      const SUPPORTED_TYPES = [
+        'reschedule_appointment',
+        'reassign_appointment',
+        'add_crew_member',
+        'remove_crew_member',
+      ] as const;
+      type SupportedType = (typeof SUPPORTED_TYPES)[number];
+      if (!SUPPORTED_TYPES.includes(body.proposalType as SupportedType)) {
+        res.status(400).json({ error: 'UNSUPPORTED_PROPOSAL_TYPE', proposalType: body.proposalType });
+        return;
       }
-    },
+      const proposalType = body.proposalType as SupportedType;
+      // Technicians hold proposals:create ONLY for the day-view reschedule
+      // flow (TechnicianDayView); reassign/crew-management are dispatcher/
+      // owner actions. Scope the broad create grant to reschedules for techs
+      // so a crafted reassign/add-crew/remove-crew payload can't ride the
+      // permission that exists purely for the reschedule request.
+      if (req.auth!.role === 'technician' && proposalType !== 'reschedule_appointment') {
+        res.status(403).json({ error: 'FORBIDDEN', proposalType });
+        return;
+      }
+      // P2-002 AI-safety gate, reused here for the operator-initiated
+      // creation path: validate the payload against its per-type Zod schema
+      // before it reaches createSchedulingProposal. Throws ValidationError,
+      // mapped to 400 by asyncRoute's toErrorResponse (same convention every
+      // other proposal-mutating route in this file relies on).
+      assertValidProposalPayload(proposalType, body.payload);
+      if (!appointmentRepo || !feasibilityDeps) {
+        res.status(500).json({ error: 'SCHEDULING_DEPS_UNCONFIGURED' });
+        return;
+      }
+      // If-Match header takes precedence over body.appointmentVersion, consistent
+      // with HTTP semantics. The client hook (useCreateScheduleProposal) sends
+      // the header; the body field is a fallback for non-browser callers.
+      const headerVersion = req.header('If-Match') ?? null;
+      const expectedVersion = headerVersion ?? body.appointmentVersion ?? null;
+
+      const result = await createSchedulingProposal(
+        {
+          tenantId: req.auth!.tenantId,
+          actorId: req.auth!.userId,
+          proposalType,
+          payload: body.payload,
+          summary: body.summary,
+          expectedVersion,
+        },
+        proposalRepo, appointmentRepo, feasibilityDeps,
+      );
+
+      switch (result.kind) {
+        case 'created': res.status(200).json(result.proposal); return;
+        case 'missing_version': res.status(400).json({ error: 'MISSING_VERSION' }); return;
+        case 'invalid_version': res.status(400).json({ error: 'INVALID_VERSION' }); return;
+        case 'missing_technician': res.status(400).json({ error: 'MISSING_TECHNICIAN', proposalType: result.proposalType }); return;
+        case 'not_found': res.status(404).json({ error: 'APPOINTMENT_NOT_FOUND' }); return;
+        case 'stale': res.status(409).json({
+          error: 'STALE_APPOINTMENT',
+          currentVersion: result.currentVersion,
+          providedVersion: result.providedVersion,
+        }); return;
+        case 'infeasible': res.status(422).json({
+          error: 'INFEASIBLE',
+          ...result.feasibility,
+        }); return;
+      }
+    }),
   );
 
   router.get(
@@ -128,21 +179,16 @@ export function createProposalsRouter(
     requireAuth,
     requireTenant,
     requirePermission('proposals:view'),
-    async (req: AuthenticatedRequest, res: Response) => {
-      try {
-        const filter = validate(proposalFilterSchema, req.query) as ProposalFilter;
-        const result = await listProposals(
-          proposalRepo,
-          req.auth!.tenantId,
-          filter,
-          req.auth!.role as Role
-        );
-        res.json(result);
-      } catch (err) {
-        const { statusCode, body } = toErrorResponse(err);
-        res.status(statusCode).json(body);
-      }
-    }
+    asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
+      const filter = validate(proposalFilterSchema, req.query) as ProposalFilter;
+      const result = await listProposals(
+        proposalRepo,
+        req.auth!.tenantId,
+        filter,
+        req.auth!.role as Role
+      );
+      res.json(result);
+    })
   );
 
   router.get(
@@ -160,12 +206,66 @@ export function createProposalsRouter(
         // both need to be approvable from the inbox. The 100-item cap keeps
         // the payload small; for a solo operator the inbox is single-digit
         // dozens, not hundreds.
-        const [drafts, ready] = await Promise.all([
+        // §5.5 — surface recently-expired schedule proposal cards so the operator
+        // can see what lapsed and re-propose it. Bounded in the DB (WHERE on type
+        // + a recent window, ORDER BY recency, LIMIT) so the inbox can't degrade
+        // as expired history accumulates; operators re-propose recent lapses, not
+        // ancient ones. Falls back to an in-memory trim for repos that predate
+        // the bounded query.
+        // Journey QA 2026-07-02 (bug 10) — approved proposals whose execution
+        // FAILED previously disappeared without a trace (the inbox only served
+        // draft/ready/expired). Surface recent failures with their
+        // executionError so the operator learns the approval didn't land.
+        // 'execution_failed' is terminal and has no dedicated failure
+        // timestamp, so updatedAt approximates the failure time (the same
+        // convention inbox.ts overnightEvents uses).
+        const since = new Date(Date.now() - EXPIRED_INBOX_WINDOW_MS);
+        const failedSince = new Date(Date.now() - FAILED_INBOX_WINDOW_MS);
+        const [drafts, ready, failedRows, expiredRows] = await Promise.all([
           proposalRepo.findByStatus(req.auth!.tenantId, 'draft'),
           proposalRepo.findByStatus(req.auth!.tenantId, 'ready_for_review'),
+          proposalRepo.findByStatus(req.auth!.tenantId, 'execution_failed').then((all) =>
+            all
+              .filter((p) => p.updatedAt.getTime() >= failedSince.getTime())
+              .sort((a, b) => b.updatedAt.getTime() - a.updatedAt.getTime())
+              .slice(0, FAILED_INBOX_LIMIT),
+          ),
+          proposalRepo.findExpiredScheduleProposals
+            ? proposalRepo.findExpiredScheduleProposals(
+                req.auth!.tenantId,
+                SCHEDULE_PROPOSAL_TYPES,
+                since,
+                EXPIRED_INBOX_LIMIT,
+              )
+            : proposalRepo.findByStatus(req.auth!.tenantId, 'expired').then((all) =>
+                all
+                  .filter(
+                    (p) =>
+                      isScheduleProposalType(p.proposalType) &&
+                      (p.expiresAt?.getTime() ?? 0) >= since.getTime(),
+                  )
+                  .sort((a, b) => (b.expiresAt?.getTime() ?? 0) - (a.expiresAt?.getTime() ?? 0))
+                  .slice(0, EXPIRED_INBOX_LIMIT),
+              ),
         ]);
         const inbox = buildInboxPayload([...ready, ...drafts], 100);
-        res.json(inbox);
+        const expired = expiredRows.map((p) => ({
+          id: p.id,
+          proposalType: p.proposalType,
+          summary: p.summary,
+          status: p.status,
+          expiresAt: p.expiresAt?.toISOString(),
+          createdAt: p.createdAt.toISOString(),
+        }));
+        const failed = failedRows.map((p) => ({
+          id: p.id,
+          proposalType: p.proposalType,
+          summary: p.summary,
+          status: p.status,
+          executionError: p.executionError,
+          failedAt: p.updatedAt.toISOString(),
+        }));
+        res.json({ ...inbox, expired, failed });
       } catch (err) {
         const { statusCode, body } = toErrorResponse(err);
         res.status(statusCode).json(body);
@@ -178,20 +278,15 @@ export function createProposalsRouter(
     requireAuth,
     requireTenant,
     requirePermission('proposals:view'),
-    async (req: AuthenticatedRequest, res: Response) => {
-      try {
-        const result = await getProposalDetail(
-          proposalRepo,
-          req.auth!.tenantId,
-          req.params.id,
-          req.auth!.role as Role
-        );
-        res.json(result);
-      } catch (err) {
-        const { statusCode, body } = toErrorResponse(err);
-        res.status(statusCode).json(body);
-      }
-    }
+    asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
+      const result = await getProposalDetail(
+        proposalRepo,
+        req.auth!.tenantId,
+        req.params.id,
+        req.auth!.role as Role
+      );
+      res.json(result);
+    })
   );
 
   // P2-035 — POST /api/proposals/approve-batch. MUST be declared before the
@@ -201,24 +296,19 @@ export function createProposalsRouter(
     requireAuth,
     requireTenant,
     requirePermission('proposals:approve'),
-    async (req: AuthenticatedRequest, res: Response) => {
-      try {
-        const parsed = validate(approveBatchBodySchema, req.body);
-        const result = await approveProposalsBatch(
-          proposalRepo,
-          req.auth!.tenantId,
-          parsed.proposalIds,
-          req.auth!.userId,
-          req.auth!.role as Role,
-          auditRepo,
-          'ui', // RV-073 — batch approvals come from the inbox screen
-        );
-        res.json(result);
-      } catch (err) {
-        const { statusCode, body } = toErrorResponse(err);
-        res.status(statusCode).json(body);
-      }
-    },
+    asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
+      const parsed = validate(approveBatchBodySchema, req.body);
+      const result = await approveProposalsBatch(
+        proposalRepo,
+        req.auth!.tenantId,
+        parsed.proposalIds,
+        req.auth!.userId,
+        req.auth!.role as Role,
+        auditRepo,
+        'ui', // RV-073 — batch approvals come from the inbox screen
+      );
+      res.json(result);
+    }),
   );
 
   router.post(
@@ -226,23 +316,28 @@ export function createProposalsRouter(
     requireAuth,
     requireTenant,
     requirePermission('proposals:approve'),
-    async (req: AuthenticatedRequest, res: Response) => {
-      try {
-        const result = await approveProposal(
-          proposalRepo,
-          req.auth!.tenantId,
-          req.params.id,
-          req.auth!.userId,
-          req.auth!.role as Role,
-          auditRepo,
-          'ui', // RV-073 — dashboard screen-tap approval
-        );
-        res.json(result);
-      } catch (err) {
-        const { statusCode, body } = toErrorResponse(err);
-        res.status(statusCode).json(body);
-      }
-    }
+    asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
+      const result = await approveProposal(
+        proposalRepo,
+        req.auth!.tenantId,
+        req.params.id,
+        req.auth!.userId,
+        req.auth!.role as Role,
+        auditRepo,
+        'ui', // RV-073 — dashboard screen-tap approval
+      );
+      // Finding 2 — surface the undo window honestly. `approvedAt` already
+      // serializes to an ISO string; derive `undoExpiresAt` (= approvedAt +
+      // UNDO_WINDOW_MS) so the client can drive its countdown from the
+      // SERVER's real window instead of a fresh 5s that ignores the
+      // round-trip latency already spent. Both fields are additive — every
+      // existing proposal field is preserved.
+      const undoAt = undoExpiresAt(result);
+      res.json({
+        ...result,
+        ...(undoAt ? { undoExpiresAt: undoAt.toISOString() } : {}),
+      });
+    })
   );
 
   router.post(
@@ -250,26 +345,47 @@ export function createProposalsRouter(
     requireAuth,
     requireTenant,
     requirePermission('proposals:approve'),
-    async (req: AuthenticatedRequest, res: Response) => {
-      try {
-        const parsed = validate(resolveLineBodySchema, req.body);
-        const result = await resolveProposalLine(
-          {
-            tenantId: req.auth!.tenantId,
-            proposalId: req.params.id,
-            lineIndex: parsed.lineIndex,
-            catalogItemId: parsed.catalogItemId,
-            actorId: req.auth!.userId,
-            actorRole: req.auth!.role as Role,
-          },
-          { proposalRepo, ...(auditRepo ? { auditRepo } : {}) },
-        );
-        res.json(result);
-      } catch (err) {
-        const { statusCode, body } = toErrorResponse(err);
-        res.status(statusCode).json(body);
-      }
-    }
+    asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
+      const parsed = validate(resolveLineBodySchema, req.body);
+      const result = await resolveProposalLine(
+        {
+          tenantId: req.auth!.tenantId,
+          proposalId: req.params.id,
+          lineIndex: parsed.lineIndex,
+          catalogItemId: parsed.catalogItemId,
+          actorId: req.auth!.userId,
+          actorRole: req.auth!.role as Role,
+        },
+        { proposalRepo, ...(auditRepo ? { auditRepo } : {}) },
+      );
+      res.json(result);
+    })
+  );
+
+  router.post(
+    '/:id/resolve-entity',
+    requireAuth,
+    requireTenant,
+    requirePermission('proposals:approve'),
+    asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
+      const parsed = validate(resolveEntityBodySchema, req.body);
+      const result = await resolveProposalEntity(
+        {
+          tenantId: req.auth!.tenantId,
+          proposalId: req.params.id,
+          candidateId: parsed.candidateId,
+          actorId: req.auth!.userId,
+          actorRole: req.auth!.role as Role,
+        },
+        {
+          proposalRepo,
+          ...(auditRepo ? { auditRepo } : {}),
+          ...(redraftHandlerFactory ? { redraftHandlerFactory } : {}),
+          ...(entityAliasCandidateCapture ? { entityAliasCandidateCapture } : {}),
+        },
+      );
+      res.json(result);
+    })
   );
 
   router.post(
@@ -277,27 +393,22 @@ export function createProposalsRouter(
     requireAuth,
     requireTenant,
     requirePermission('proposals:approve'),
-    async (req: AuthenticatedRequest, res: Response) => {
-      try {
-        const parsed = validate(rejectProposalBodySchema, req.body);
-        const result = await rejectProposal(
-          proposalRepo,
-          req.auth!.tenantId,
-          req.params.id,
-          req.auth!.userId,
-          req.auth!.role as Role,
-          parsed.reason,
-          parsed.details,
-          appointmentRepo,
-          auditRepo,
-          'ui', // RV-073 — dashboard screen-tap rejection
-        );
-        res.json(result);
-      } catch (err) {
-        const { statusCode, body } = toErrorResponse(err);
-        res.status(statusCode).json(body);
-      }
-    }
+    asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
+      const parsed = validate(rejectProposalBodySchema, req.body);
+      const result = await rejectProposal(
+        proposalRepo,
+        req.auth!.tenantId,
+        req.params.id,
+        req.auth!.userId,
+        req.auth!.role as Role,
+        parsed.reason,
+        parsed.details,
+        appointmentRepo,
+        auditRepo,
+        'ui', // RV-073 — dashboard screen-tap rejection
+      );
+      res.json(result);
+    })
   );
 
   router.post(
@@ -305,23 +416,43 @@ export function createProposalsRouter(
     requireAuth,
     requireTenant,
     requirePermission('proposals:approve'),
+    asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
+      const result = await undoProposal(
+        proposalRepo,
+        req.auth!.tenantId,
+        req.params.id,
+        req.auth!.userId,
+        req.auth!.role as Role,
+        auditRepo,
+        undoCorrectionLoop,
+      );
+      res.json(result);
+    })
+  );
+
+  // §5.5 — re-propose an expired schedule proposal card. Mints a fresh draft
+  // (new 48h clock) carrying the same intent; the expired source is untouched.
+  router.post(
+    '/:id/re-propose',
+    requireAuth,
+    requireTenant,
+    requirePermission('proposals:approve'),
     async (req: AuthenticatedRequest, res: Response) => {
       try {
-        const result = await undoProposal(
+        const result = await reproposeProposal(
           proposalRepo,
           req.auth!.tenantId,
           req.params.id,
           req.auth!.userId,
           req.auth!.role as Role,
           auditRepo,
-          undoCorrectionLoop,
         );
-        res.json(result);
+        res.status(201).json(result);
       } catch (err) {
         const { statusCode, body } = toErrorResponse(err);
         res.status(statusCode).json(body);
       }
-    }
+    },
   );
 
   router.put(
@@ -340,6 +471,8 @@ export function createProposalsRouter(
           req.auth!.role as Role,
           parsed.edits,
           auditRepo,
+          correctionRepo,
+          entityAliasCandidateCapture,
         );
         res.json(result);
       } catch (err) {

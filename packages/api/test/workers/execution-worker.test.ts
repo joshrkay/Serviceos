@@ -13,6 +13,7 @@ import { transitionProposal, UNDO_WINDOW_MS } from '../../src/proposals/lifecycl
 import { ProposalExecutor } from '../../src/proposals/execution/executor';
 import { IdempotencyGuard } from '../../src/proposals/execution/idempotency';
 import { InMemoryProposalExecutionRepository } from '../../src/proposals/proposal-execution';
+import { InMemoryAuditRepository } from '../../src/audit/audit';
 import { createExecutionHandlerRegistry } from '../../src/proposals/execution/handlers';
 import { runExecutionSweep, ExecutionWorkerDeps } from '../../src/workers/execution-worker';
 import { createLogger } from '../../src/logging/logger';
@@ -30,7 +31,7 @@ const logger = createLogger({ service: 'test', environment: 'test', level: 'erro
 function makeDeps(repo: InMemoryProposalRepository): ExecutionWorkerDeps {
   const handlers = createExecutionHandlerRegistry();
   const guard = new IdempotencyGuard(new InMemoryProposalExecutionRepository(), repo);
-  const executor = new ProposalExecutor(handlers, repo, guard);
+  const executor = new ProposalExecutor(handlers, repo, guard, new InMemoryAuditRepository());
   return { proposalRepo: repo, executor, logger };
 }
 
@@ -87,9 +88,16 @@ describe('Execution auto-delivery worker (D9 undo window complement)', () => {
 
   it('handles execution failure without crashing the sweep', async () => {
     // Create a proposal with a type that has no execution handler.
+    // 'update_invoice' is only registered when createExecutionHandlerRegistry
+    // is given an invoiceRepo (see handlers.ts); makeDeps() above calls it
+    // with no deps at all, so this always throws HANDLER_NOT_FOUND. (Was
+    // 'onboarding_schedule' — B1.19 registered a real handler for that type,
+    // so it stopped throwing and started resolving with a failed
+    // ExecutionResult instead, which the sweep counts as `executed`, not
+    // `failed` — see the throw/catch below.)
     let proposal = createProposal({
       ...baseInput,
-      proposalType: 'onboarding_schedule',
+      proposalType: 'update_invoice',
     });
     proposal = transitionProposal(proposal, 'ready_for_review', 'user-1');
     proposal = transitionProposal(proposal, 'approved', 'user-1');
@@ -169,5 +177,67 @@ describe('Execution auto-delivery worker (D9 undo window complement)', () => {
 
     const { executed } = await runExecutionSweep(makeDeps(repo));
     expect(executed).toBe(1);
+  });
+
+  // Raised in PR review: the sweep attributed every type but
+  // `adopt_entity_alias` to `createdBy` — the DRAFTER — and passed no role at
+  // all. A technician-drafted config proposal approved by an owner therefore
+  // executed as the technician, and the audit fell back to asserting 'owner'.
+  // Both halves are stamped at approval precisely because this sweep runs
+  // detached from that request and cannot recover them.
+  describe('execution attribution', () => {
+    function capturingDeps(repo: InMemoryProposalRepository) {
+      const contexts: Array<Record<string, unknown>> = [];
+      const executor = {
+        execute: async (_p: unknown, context: Record<string, unknown>) => {
+          contexts.push(context);
+        },
+      } as unknown as ExecutionWorkerDeps['executor'];
+      return { deps: { proposalRepo: repo, executor, logger }, contexts };
+    }
+
+    async function seedApproved(overrides: Partial<CreateProposalInput> & { executedBy?: string; executedByRole?: string }) {
+      const { executedBy, executedByRole, ...input } = overrides;
+      let proposal = createProposal({ ...baseInput, ...input });
+      proposal = transitionProposal(proposal, 'ready_for_review', 'user-1');
+      proposal = transitionProposal(proposal, 'approved', 'user-1');
+      proposal = {
+        ...proposal,
+        approvedAt: new Date(Date.now() - UNDO_WINDOW_MS - 100),
+        ...(executedBy ? { executedBy } : {}),
+        ...(executedByRole ? { executedByRole } : {}),
+      };
+      await repo.create(proposal);
+      return proposal;
+    }
+
+    it('passes the stamped approver and role, not the drafter', async () => {
+      await seedApproved({
+        proposalType: 'update_brand_voice',
+        payload: { register: 'friendly' },
+        createdBy: 'technician-7',
+        executedBy: 'owner-1',
+        executedByRole: 'owner',
+        idempotencyKey: 'attrib-config',
+      });
+
+      const { deps, contexts } = capturingDeps(repo);
+      await runExecutionSweep(deps);
+
+      expect(contexts).toHaveLength(1);
+      expect(contexts[0].executedBy).toBe('owner-1');
+      expect(contexts[0].executedByRole).toBe('owner');
+    });
+
+    it('falls back to the drafter when no approver was stamped', async () => {
+      await seedApproved({ createdBy: 'technician-7', idempotencyKey: 'attrib-plain' });
+
+      const { deps, contexts } = capturingDeps(repo);
+      await runExecutionSweep(deps);
+
+      expect(contexts).toHaveLength(1);
+      expect(contexts[0].executedBy).toBe('technician-7');
+      expect(contexts[0].executedByRole).toBeUndefined();
+    });
   });
 });

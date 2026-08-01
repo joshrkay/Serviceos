@@ -1,0 +1,957 @@
+{
+  "goal": "production",
+  "spec": ".rivet/RIVET_GOAL_PRODUCTION_v2.md",
+  "contracts": ".rivet/RIVET_OPERATION_CONTRACTS.md",
+  "registry": ".rivet/operation_registry.json",
+  "registry_status": "provisional",
+  "state_version": 1,
+  "updated": "2026-07-24",
+  "iteration": 1,
+  "phase": "gate_report_iteration_1",
+  "gates": {
+    "P1": {
+      "status": "fail",
+      "detail": "Registry is NOT a complete/reconciled inventory: 22 of 62 ops have no voice on-ramp (missing), 8 partial; and the code taxonomy carries ~14 speakable ops with no registry id. Registry status left 'provisional' pending human re-ratification. See reconciliation."
+    },
+    "P2": {
+      "status": "partial",
+      "detail": "32/62 ops execute end-to-end by voice and are covered by handler/integration tests + the 50-case operator corpus. 8 partial, 22 missing (no on-ramp) \u2014 cannot pass T1 on a path that does not exist."
+    },
+    "P3": {
+      "status": "pass_with_caveats",
+      "detail": "Interactive R2 (send/money) confirmation discipline holds structurally: every R2 proposal type is non-capture, decideInitialStatus only returns 'approved' for autonomous+capture, and voiceMutation/S1-surface strips trust. Readback restates resolved entities. Caveats fixed this PR: I10 paid-invoice send-time re-check added; dead voice channel clause replaced by voiceMutation + S1-surface guard. Residual: I11 recipient-timezone quiet-hours not enforced (documented gap)."
+    },
+    "P4": {
+      "status": "remediated",
+      "detail": "Was FAIL (no S1 allowlist, no execution-time surface check, no I13 provenance). Now: enumerated S1 allowlist (proposals/surface.ts), surface stamped at inbound proposal creation, S1 non-allowlisted intents coerced to voice_clarification + audited, execution-boundary surface enforcement (I6) in ProposalExecutor (fail-safe S1 inference for non-system-authored inbound-telephony proposals), AND I13 untrusted-content provenance: caller-authored text is rendered into operator (S2) agent prompts only inside a hardened untrusted-content fence (ai/untrusted-content.ts) at the two highest-risk read-back sites (suggest-reply, summarize-session), with fence-breakout neutralization. Residual: extend the I13 fence to the remaining lower-risk read-back sites (context-builder recentMessages) and add an explicit untrusted column at the transcript/message ingest layer (currently derived from senderRole/speaker at read time)."
+    },
+    "P5": {
+      "status": "partial",
+      "detail": "T2 resolution: entity/ambiguity/elicitation covered by entity-resolver + voice-quality ambiguity corpus (all green). Not a full T2 sweep across all 62 ops; several ops have no path (see P2)."
+    },
+    "P6": {
+      "status": "partial",
+      "detail": "T3 composite chains: autonomous-close-chain + create/draft/webhook integration tests pass with terminal assertions. Not all journeys re-derived from the registry."
+    }
+  },
+  "tiers": {
+    "T0": {
+      "status": "in_progress"
+    },
+    "T1": {
+      "status": "pending"
+    },
+    "T2": {
+      "status": "pending"
+    },
+    "T3": {
+      "status": "pending"
+    },
+    "T4": {
+      "status": "pending"
+    }
+  },
+  "evidence": {
+    "local_suites_2026_07_24": {
+      "operator_ops_loop": "41/41 passed (test/voice/operator-ops-loop.test.ts)",
+      "voice_fixtures": "13/13 passed",
+      "voice_ai_dirs": "306 files / 3523 tests passed, 3 files skipped",
+      "tsc_build": "clean (tsconfig.build.json)"
+    },
+    "prior_production_probes": {
+      "operator_voice_50_v3_prod_2026_07_23": "best 30/50 voice-only, 28/50 full (env: AI_CLASSIFY_INTENT_DEADLINE_MS=12000); dev baseline 50/50",
+      "reference": "docs/verification-runs/operator-voice-50-v3-prod-2026-07-23.md"
+    },
+    "local_suites_2026_07_24_full": {
+      "voice_ai_proposals_telephony_notifications_workers": "5823 passed / 486 files (8 skipped)",
+      "surface_enforcement": "8 passed (new)",
+      "i10_paid_suppression": "4 passed (new)",
+      "executor_reminder_chain_integration": "24 passed (Docker)",
+      "tsc_build": "clean (tsconfig.build.json)"
+    }
+  },
+  "operations": {
+    "1": {
+      "domain": "customer",
+      "verb": "create",
+      "tier": "R1",
+      "surfaces": [
+        "S1_self",
+        "S2"
+      ],
+      "priority": "P2",
+      "recon_status": "implemented",
+      "voice_mechanism": "create_customer proposal + CreateCustomerVoiceTaskHandler; S1+S2",
+      "corpus_coverage": true
+    },
+    "2": {
+      "domain": "customer",
+      "verb": "edit",
+      "tier": "R1",
+      "surfaces": [
+        "S2"
+      ],
+      "priority": "P3",
+      "recon_status": "implemented",
+      "voice_mechanism": "update_customer proposal + UpdateCustomerTaskHandler; phone edit elevates R2",
+      "corpus_coverage": true
+    },
+    "3": {
+      "domain": "customer",
+      "verb": "lookup",
+      "tier": "R0",
+      "surfaces": [
+        "S2"
+      ],
+      "priority": "P2",
+      "recon_status": "implemented",
+      "voice_mechanism": "lookup_customer read skill (S1 twilio + S2 memo)",
+      "corpus_coverage": true
+    },
+    "4": {
+      "domain": "customer",
+      "verb": "add_note",
+      "tier": "R1",
+      "surfaces": [
+        "S2"
+      ],
+      "priority": "P3",
+      "recon_status": "implemented",
+      "voice_mechanism": "add_note proposal (noteTargetKind=customer)",
+      "corpus_coverage": true
+    },
+    "5": {
+      "domain": "customer",
+      "verb": "view_history",
+      "tier": "R0",
+      "surfaces": [
+        "S2"
+      ],
+      "priority": "P3",
+      "recon_status": "partial",
+      "voice_mechanism": "no dedicated history skill; composed from lookup_customer/jobs/account-summary",
+      "corpus_coverage": false
+    },
+    "6": {
+      "domain": "customer",
+      "verb": "merge_duplicates",
+      "tier": "R2",
+      "surfaces": [
+        "S2"
+      ],
+      "priority": "P4",
+      "recon_status": "missing",
+      "voice_mechanism": "customers/merge exists but no voice intent/proposal (touch-primary by design)",
+      "corpus_coverage": false
+    },
+    "7": {
+      "domain": "customer",
+      "verb": "add_service_location",
+      "tier": "R1",
+      "surfaces": [
+        "S2"
+      ],
+      "priority": "P3",
+      "recon_status": "partial",
+      "voice_mechanism": "add_service_location proposal but always gates structured address fields",
+      "corpus_coverage": false
+    },
+    "8": {
+      "domain": "job",
+      "verb": "create",
+      "tier": "R1",
+      "surfaces": [
+        "S2"
+      ],
+      "priority": "P2",
+      "recon_status": "implemented",
+      "voice_mechanism": "create_job proposal + CreateJobVoiceTaskHandler",
+      "corpus_coverage": true
+    },
+    "9": {
+      "domain": "job",
+      "verb": "create_scheduled",
+      "tier": "R1",
+      "surfaces": [
+        "S2"
+      ],
+      "priority": "P1",
+      "recon_status": "implemented",
+      "voice_mechanism": "create_appointment + SlotConflictChecker double-book hard fail",
+      "corpus_coverage": true
+    },
+    "10": {
+      "domain": "job",
+      "verb": "edit",
+      "tier": "R1",
+      "surfaces": [
+        "S2"
+      ],
+      "priority": "P3",
+      "recon_status": "implemented",
+      "voice_mechanism": "update_job proposal (safe fields; raw write, not governed transition)",
+      "corpus_coverage": true
+    },
+    "11": {
+      "domain": "job",
+      "verb": "reschedule",
+      "tier": "R1",
+      "surfaces": [
+        "S2"
+      ],
+      "priority": "P1",
+      "recon_status": "implemented",
+      "voice_mechanism": "reschedule_appointment proposal + handler",
+      "corpus_coverage": true
+    },
+    "12": {
+      "domain": "job",
+      "verb": "assign_tech",
+      "tier": "R1",
+      "surfaces": [
+        "S2"
+      ],
+      "priority": "P2",
+      "recon_status": "implemented",
+      "voice_mechanism": "tech set at booking via create_appointment (no standalone assign-existing)",
+      "corpus_coverage": true
+    },
+    "13": {
+      "domain": "job",
+      "verb": "reassign_tech",
+      "tier": "R1",
+      "surfaces": [
+        "S2"
+      ],
+      "priority": "P2",
+      "recon_status": "implemented",
+      "voice_mechanism": "reassign_appointment proposal; U1 tech entity resolver",
+      "corpus_coverage": true
+    },
+    "14": {
+      "domain": "job",
+      "verb": "cancel",
+      "tier": "R1",
+      "surfaces": [
+        "S2"
+      ],
+      "priority": "P3",
+      "recon_status": "partial",
+      "voice_mechanism": "no dedicated job-cancel; only via update_job raw write or cancel_appointment",
+      "corpus_coverage": false
+    },
+    "15": {
+      "domain": "job",
+      "verb": "complete",
+      "tier": "R1",
+      "surfaces": [
+        "S2"
+      ],
+      "priority": "P2",
+      "recon_status": "partial",
+      "voice_mechanism": "only via update_job raw write; invoicing-trigger side effect does NOT fire",
+      "corpus_coverage": true
+    },
+    "16": {
+      "domain": "job",
+      "verb": "add_note",
+      "tier": "R1",
+      "surfaces": [
+        "S2"
+      ],
+      "priority": "P2",
+      "recon_status": "implemented",
+      "voice_mechanism": "add_note proposal (noteTargetKind=job); most-used tech op",
+      "corpus_coverage": true
+    },
+    "17": {
+      "domain": "job",
+      "verb": "attach_photo",
+      "tier": "R1",
+      "surfaces": [
+        "S2"
+      ],
+      "priority": "P4",
+      "recon_status": "missing",
+      "voice_mechanism": "job-photo-service exists but no voice intent/proposal",
+      "corpus_coverage": false
+    },
+    "18": {
+      "domain": "job",
+      "verb": "create_recurring",
+      "tier": "R1",
+      "surfaces": [
+        "S2"
+      ],
+      "priority": "P3",
+      "recon_status": "missing",
+      "voice_mechanism": "no create_recurring job intent; recurring only under agreements",
+      "corpus_coverage": false
+    },
+    "19": {
+      "domain": "estimate",
+      "verb": "create",
+      "tier": "R1",
+      "surfaces": [
+        "S2"
+      ],
+      "priority": "P2",
+      "recon_status": "implemented",
+      "voice_mechanism": "draft_estimate proposal + EstimateTaskHandler (catalog-grounded)",
+      "corpus_coverage": true
+    },
+    "20": {
+      "domain": "estimate",
+      "verb": "edit",
+      "tier": "R1",
+      "surfaces": [
+        "S2"
+      ],
+      "priority": "P3",
+      "recon_status": "implemented",
+      "voice_mechanism": "update_estimate proposal + EstimateEditTaskHandler",
+      "corpus_coverage": true
+    },
+    "21": {
+      "domain": "estimate",
+      "verb": "send",
+      "tier": "R2",
+      "surfaces": [
+        "S2"
+      ],
+      "priority": "P1",
+      "recon_status": "implemented",
+      "voice_mechanism": "send_estimate R2 proposal; gates estimateId; comms never auto-approves",
+      "corpus_coverage": true
+    },
+    "22": {
+      "domain": "estimate",
+      "verb": "convert_to_job",
+      "tier": "R1",
+      "surfaces": [
+        "S2"
+      ],
+      "priority": "P3",
+      "recon_status": "missing",
+      "voice_mechanism": "no convert_to_job intent/proposal/function",
+      "corpus_coverage": false
+    },
+    "23": {
+      "domain": "estimate",
+      "verb": "convert_to_invoice",
+      "tier": "R1",
+      "surfaces": [
+        "S2"
+      ],
+      "priority": "P3",
+      "recon_status": "missing",
+      "voice_mechanism": "no convert_to_invoice intent/proposal/function",
+      "corpus_coverage": false
+    },
+    "24": {
+      "domain": "estimate",
+      "verb": "follow_up",
+      "tier": "R2-A",
+      "surfaces": [
+        "S2"
+      ],
+      "priority": "P3",
+      "recon_status": "implemented",
+      "voice_mechanism": "send_estimate_nudge (FUP-002); 48h cooldown, must be sent",
+      "corpus_coverage": true
+    },
+    "25": {
+      "domain": "invoice",
+      "verb": "create",
+      "tier": "R1",
+      "surfaces": [
+        "S2"
+      ],
+      "priority": "P2",
+      "recon_status": "implemented",
+      "voice_mechanism": "draft_invoice proposal + InvoiceTaskHandler",
+      "corpus_coverage": true
+    },
+    "26": {
+      "domain": "invoice",
+      "verb": "edit",
+      "tier": "R1",
+      "surfaces": [
+        "S2"
+      ],
+      "priority": "P3",
+      "recon_status": "implemented",
+      "voice_mechanism": "update_invoice proposal + InvoiceEditTaskHandler",
+      "corpus_coverage": true
+    },
+    "27": {
+      "domain": "invoice",
+      "verb": "send",
+      "tier": "R2",
+      "surfaces": [
+        "S2"
+      ],
+      "priority": "P1",
+      "recon_status": "implemented",
+      "voice_mechanism": "send_invoice R2 proposal; gates invoiceId; comms gate",
+      "corpus_coverage": true
+    },
+    "28": {
+      "domain": "invoice",
+      "verb": "void",
+      "tier": "R1",
+      "surfaces": [
+        "S2"
+      ],
+      "priority": "P3",
+      "recon_status": "missing",
+      "voice_mechanism": "no void_invoice proposal type/intent",
+      "corpus_coverage": false
+    },
+    "29": {
+      "domain": "invoice",
+      "verb": "query_payment_status",
+      "tier": "R0",
+      "surfaces": [
+        "S2"
+      ],
+      "priority": "P2",
+      "recon_status": "implemented",
+      "voice_mechanism": "lookup_invoices read skill (per-invoice status)",
+      "corpus_coverage": false
+    },
+    "30": {
+      "domain": "invoice",
+      "verb": "send_payment_reminder",
+      "tier": "R2-A",
+      "surfaces": [
+        "S2"
+      ],
+      "priority": "P2",
+      "recon_status": "implemented",
+      "voice_mechanism": "send_payment_reminder (FUP-001); owner-approved; NOW I10 send-time paid re-check",
+      "corpus_coverage": true
+    },
+    "31": {
+      "domain": "invoice",
+      "verb": "apply_discount",
+      "tier": "R1",
+      "surfaces": [
+        "S2"
+      ],
+      "priority": "P3",
+      "recon_status": "missing",
+      "voice_mechanism": "update_invoice editActions have no discount type; no apply_discount",
+      "corpus_coverage": false
+    },
+    "32": {
+      "domain": "invoice",
+      "verb": "record_manual_payment",
+      "tier": "R1",
+      "surfaces": [
+        "S2"
+      ],
+      "priority": "P2",
+      "recon_status": "implemented",
+      "voice_mechanism": "record_payment proposal + RecordPaymentTaskHandler (money class)",
+      "corpus_coverage": true
+    },
+    "33": {
+      "domain": "payment",
+      "verb": "take_card_payment",
+      "tier": "R2",
+      "surfaces": [
+        "S2"
+      ],
+      "priority": "P1",
+      "recon_status": "missing",
+      "voice_mechanism": "no take_card_payment intent/proposal (charge-stored-method unbuilt; PCI D13)",
+      "corpus_coverage": false
+    },
+    "34": {
+      "domain": "payment",
+      "verb": "send_payment_link",
+      "tier": "R2",
+      "surfaces": [
+        "S2"
+      ],
+      "priority": "P2",
+      "recon_status": "missing",
+      "voice_mechanism": "stripe-payment-link exists but no send_payment_link intent/proposal",
+      "corpus_coverage": false
+    },
+    "35": {
+      "domain": "payment",
+      "verb": "refund",
+      "tier": "R2",
+      "surfaces": [
+        "S2"
+      ],
+      "priority": "P1",
+      "recon_status": "missing",
+      "voice_mechanism": "no refund intent/proposal (D7 defer-to-parked, intentionally unbuilt)",
+      "corpus_coverage": false
+    },
+    "36": {
+      "domain": "payment",
+      "verb": "query_outstanding_balance",
+      "tier": "R0",
+      "surfaces": [
+        "S2"
+      ],
+      "priority": "P2",
+      "recon_status": "implemented",
+      "voice_mechanism": "lookup_balance read skill (reconciled state)",
+      "corpus_coverage": true
+    },
+    "37": {
+      "domain": "schedule",
+      "verb": "view_today",
+      "tier": "R0",
+      "surfaces": [
+        "S2"
+      ],
+      "priority": "P2",
+      "recon_status": "implemented",
+      "voice_mechanism": "lookup_day_overview read skill; I9 reduction",
+      "corpus_coverage": true
+    },
+    "38": {
+      "domain": "schedule",
+      "verb": "view_week",
+      "tier": "R0",
+      "surfaces": [
+        "S2"
+      ],
+      "priority": "P4",
+      "recon_status": "missing",
+      "voice_mechanism": "no view_week lookup skill/intent",
+      "corpus_coverage": false
+    },
+    "39": {
+      "domain": "schedule",
+      "verb": "move_appointment",
+      "tier": "R1",
+      "surfaces": [
+        "S2"
+      ],
+      "priority": "P1",
+      "recon_status": "implemented",
+      "voice_mechanism": "move_appointment == reschedule_appointment (dup of op 11)",
+      "corpus_coverage": true
+    },
+    "40": {
+      "domain": "schedule",
+      "verb": "check_availability",
+      "tier": "R0",
+      "surfaces": [
+        "S2"
+      ],
+      "priority": "P2",
+      "recon_status": "implemented",
+      "voice_mechanism": "lookup_availability read skill (AvailabilityFinder)",
+      "corpus_coverage": false
+    },
+    "41": {
+      "domain": "schedule",
+      "verb": "mark_en_route",
+      "tier": "R1",
+      "surfaces": [
+        "S2"
+      ],
+      "priority": "P2",
+      "recon_status": "missing",
+      "voice_mechanism": "mark_en_route is REST-only (dispatch route); no voice intent",
+      "corpus_coverage": false
+    },
+    "42": {
+      "domain": "schedule",
+      "verb": "mark_arrived",
+      "tier": "R1",
+      "surfaces": [
+        "S2"
+      ],
+      "priority": "P2",
+      "recon_status": "missing",
+      "voice_mechanism": "mark_arrived unbuilt (no REST/intent/proposal)",
+      "corpus_coverage": false
+    },
+    "43": {
+      "domain": "schedule",
+      "verb": "optimize_route",
+      "tier": "R1",
+      "surfaces": [
+        "S2"
+      ],
+      "priority": "P4",
+      "recon_status": "missing",
+      "voice_mechanism": "optimize_route not present anywhere in api",
+      "corpus_coverage": false
+    },
+    "44": {
+      "domain": "messaging",
+      "verb": "send_to_customer",
+      "tier": "R2",
+      "surfaces": [
+        "S2"
+      ],
+      "priority": "P1",
+      "recon_status": "missing",
+      "voice_mechanism": "no generic send_to_customer intent (suggest-reply is draft-only)",
+      "corpus_coverage": false
+    },
+    "45": {
+      "domain": "messaging",
+      "verb": "respond_to_inbound",
+      "tier": "R2",
+      "surfaces": [
+        "S2"
+      ],
+      "priority": "P1",
+      "recon_status": "missing",
+      "voice_mechanism": "respond_to_inbound: suggest-reply-task is draft-only, not voice/proposal",
+      "corpus_coverage": false
+    },
+    "46": {
+      "domain": "messaging",
+      "verb": "send_appointment_reminder",
+      "tier": "R2-A",
+      "surfaces": [
+        "S2"
+      ],
+      "priority": "P3",
+      "recon_status": "missing",
+      "voice_mechanism": "send_appointment_reminder is cron worker only; no voice intent",
+      "corpus_coverage": false
+    },
+    "47": {
+      "domain": "messaging",
+      "verb": "send_on_my_way",
+      "tier": "R2-A",
+      "surfaces": [
+        "S2"
+      ],
+      "priority": "P2",
+      "recon_status": "missing",
+      "voice_mechanism": "send_on_my_way is REST-only (en-route); notify_delay is distinct",
+      "corpus_coverage": false
+    },
+    "48": {
+      "domain": "messaging",
+      "verb": "call_customer",
+      "tier": "R1",
+      "surfaces": [
+        "S2"
+      ],
+      "priority": "P3",
+      "recon_status": "missing",
+      "voice_mechanism": "call_customer: outbound-call-service exists but no voice intent",
+      "corpus_coverage": false
+    },
+    "49": {
+      "domain": "pricebook",
+      "verb": "lookup_price",
+      "tier": "R0",
+      "surfaces": [
+        "S2"
+      ],
+      "priority": "P2",
+      "recon_status": "partial",
+      "voice_mechanism": "lookup_catalog read skill but search term not extracted from utterance",
+      "corpus_coverage": false
+    },
+    "50": {
+      "domain": "pricebook",
+      "verb": "add_line_item",
+      "tier": "R1",
+      "surfaces": [
+        "S2"
+      ],
+      "priority": "P2",
+      "recon_status": "implemented",
+      "voice_mechanism": "add_line_item via update_estimate/update_invoice editActions (catalog-grounded)",
+      "corpus_coverage": true
+    },
+    "51": {
+      "domain": "pricebook",
+      "verb": "create_edit_service",
+      "tier": "R1",
+      "surfaces": [
+        "S2"
+      ],
+      "priority": "P4",
+      "recon_status": "missing",
+      "voice_mechanism": "update_catalog_item exists but intentionally never voice-reachable",
+      "corpus_coverage": false
+    },
+    "52": {
+      "domain": "reporting",
+      "verb": "revenue_period",
+      "tier": "R0",
+      "surfaces": [
+        "S2"
+      ],
+      "priority": "P3",
+      "recon_status": "implemented",
+      "voice_mechanism": "lookup_revenue read skill; role-gated reports:view",
+      "corpus_coverage": true
+    },
+    "53": {
+      "domain": "reporting",
+      "verb": "outstanding_invoices",
+      "tier": "R0",
+      "surfaces": [
+        "S2"
+      ],
+      "priority": "P2",
+      "recon_status": "implemented",
+      "voice_mechanism": "lookup_pending_items read skill (outstanding invoices subset)",
+      "corpus_coverage": false
+    },
+    "54": {
+      "domain": "reporting",
+      "verb": "job_status_query",
+      "tier": "R0",
+      "surfaces": [
+        "S2"
+      ],
+      "priority": "P2",
+      "recon_status": "implemented",
+      "voice_mechanism": "lookup_jobs read skill (customer-scoped via entity resolver)",
+      "corpus_coverage": true
+    },
+    "55": {
+      "domain": "reporting",
+      "verb": "tech_utilization",
+      "tier": "R0",
+      "surfaces": [
+        "S2"
+      ],
+      "priority": "P4",
+      "recon_status": "missing",
+      "voice_mechanism": "no tech_utilization skill/report",
+      "corpus_coverage": false
+    },
+    "56": {
+      "domain": "reporting",
+      "verb": "customer_balance",
+      "tier": "R0",
+      "surfaces": [
+        "S2"
+      ],
+      "priority": "P3",
+      "recon_status": "implemented",
+      "voice_mechanism": "lookup_balance (dup of op 36)",
+      "corpus_coverage": true
+    },
+    "57": {
+      "domain": "inbound",
+      "verb": "answer_identify_caller",
+      "tier": "R0",
+      "surfaces": [
+        "S1"
+      ],
+      "priority": "P1",
+      "recon_status": "implemented",
+      "voice_mechanism": "identify-caller skill drives S1 FSM tenant/caller resolution",
+      "corpus_coverage": false
+    },
+    "58": {
+      "domain": "inbound",
+      "verb": "auto_schedule",
+      "tier": "R1",
+      "surfaces": [
+        "S1"
+      ],
+      "priority": "P1",
+      "recon_status": "partial",
+      "voice_mechanism": "create_appointment on S1 path; no trust-differentiated create_booking on-ramp",
+      "corpus_coverage": false
+    },
+    "59": {
+      "domain": "inbound",
+      "verb": "take_message",
+      "tier": "R1",
+      "surfaces": [
+        "S1"
+      ],
+      "priority": "P2",
+      "recon_status": "partial",
+      "voice_mechanism": "after-hours voicemail-fallback only; no live in-call take_message intent (I13 gap)",
+      "corpus_coverage": false
+    },
+    "60": {
+      "domain": "inbound",
+      "verb": "transfer_to_human",
+      "tier": "R0",
+      "surfaces": [
+        "S1"
+      ],
+      "priority": "P2",
+      "recon_status": "implemented",
+      "voice_mechanism": "operator_request -> escalate-to-human skill (on-call walk, fallbacks)",
+      "corpus_coverage": false
+    },
+    "61": {
+      "domain": "team",
+      "verb": "clock_in_out",
+      "tier": "R1",
+      "surfaces": [
+        "S2"
+      ],
+      "priority": "P3",
+      "recon_status": "partial",
+      "voice_mechanism": "log_time_entry clocks IN only; no voice clock-OUT path",
+      "corpus_coverage": true
+    },
+    "62": {
+      "domain": "team",
+      "verb": "view_tech_schedule",
+      "tier": "R0",
+      "surfaces": [
+        "S2"
+      ],
+      "priority": "P3",
+      "recon_status": "missing",
+      "voice_mechanism": "no technician-scoped schedule lookup skill",
+      "corpus_coverage": false
+    }
+  },
+  "proposed_reclassifications": [
+    {
+      "op": 19,
+      "field": "surfaces",
+      "current": [
+        "S2"
+      ],
+      "proposed": [
+        "S1_create_draft",
+        "S2"
+      ],
+      "direction": "surface WIDENING (S1 gains draft-estimate creation only \u2014 not edit/send)",
+      "status": "pending_human_ratification",
+      "rationale": "The shipped inbound receptionist intentionally quotes callers on live calls (WS5/WS17/WS18 grounded quoting; D-019 owner-approval close). draft_estimate is R1-reversible, catalog-grounded, born draft, and an operator must approve before anything external happens. Blocking it at the S1 allowlist breaks the designed close-the-sale flow and its test suites. Raised by Codex review on PR #739.",
+      "interim_behavior": "draft_estimate remains on the S1 creation/execution allowlist pending Josh's ratify call; if ratification rejects, remove it from S1_ALLOWED_PROPOSAL_TYPES (proposals/surface.ts) and rework the WS18 flow."
+    },
+    {
+      "op": 21,
+      "field": "surface_exception",
+      "current": "send_estimate strictly S2",
+      "proposed": "documented exception: D-019 owner-approval close chain may stamp its send_estimate member S2-by-execution-authority",
+      "direction": "narrow EXCEPTION, not a tier/surface change",
+      "status": "pending_human_ratification",
+      "rationale": "The chain member is authored by trusted server code (autonomous-close-execution.ts, actor system:autonomous-close), its payload is server-derived (recipient = the caller's own phone; estimate = the quote drafted on that call), it is born blocked, and only a human owner one-tap approval can release it. This is NOT approval promoting a caller-minted proposal: the S1 intent path cannot mint send_estimate at all (coerced to voice_clarification at creation). The S2 stamp asserts the authoring/execution authority, which a transcript cannot influence. Raised by Codex review on PR #739.",
+      "interim_behavior": "Stamp retained with justification comment; if ratification rejects, the alternative is an executor-level exception keyed on the D-019 autonomousCloseStamp evidence instead of a surface stamp."
+    }
+  ],
+  "history": [],
+  "reconciliation": {
+    "method": "Explore agent walked packages/api voice intent surface (orchestration handler-registry, voice-turn processor, customer-calling agent, lookup skills) and reconciled each of the 62 registry ops; cross-checked against test-pinned docs/reference/voice-action-catalog.md.",
+    "summary": {
+      "implemented": 32,
+      "partial": 8,
+      "missing": 22
+    },
+    "implemented_ids": [
+      1,
+      2,
+      3,
+      4,
+      8,
+      9,
+      10,
+      11,
+      12,
+      13,
+      16,
+      19,
+      20,
+      21,
+      24,
+      25,
+      26,
+      27,
+      29,
+      30,
+      32,
+      36,
+      37,
+      39,
+      40,
+      50,
+      52,
+      53,
+      54,
+      56,
+      57,
+      60
+    ],
+    "partial_ids": [
+      5,
+      7,
+      14,
+      15,
+      49,
+      58,
+      59,
+      61
+    ],
+    "missing_ids": [
+      6,
+      17,
+      18,
+      22,
+      23,
+      28,
+      31,
+      33,
+      34,
+      35,
+      38,
+      41,
+      42,
+      43,
+      44,
+      45,
+      46,
+      47,
+      48,
+      51,
+      55,
+      62
+    ],
+    "registry_vs_catalog_delta": {
+      "note": "The code-pinned voice-action-catalog.md contains speakable operator actions with NO registry id: issue_invoice, emergency_dispatch, log_expense, batch_invoice, apply_late_fee, request_feedback, create_standing_instruction, confirm_appointment, notify_delay, convert_lead, mark_lead_lost, log_time_entry, create_invoice_schedule, respond_to_review. The 62-op registry and the code taxonomy are NOT the same set. The registry cannot be treated as a complete inventory of the voice surface until reconciled and re-ratified by a human (spec \u00a77 ratify is human-only).",
+      "raised_by": [
+        "xhawk-ai review",
+        "chatgpt-codex-connector review"
+      ]
+    },
+    "serialization_fixes_applied": [
+      "Normalized tier string R2A -> R2-A on ops 24,30,46,47 (canonical, matches spec/contracts \u00a74). No tier/surface/coverage change.",
+      "Declared vector sentinels ALL and ALL_EXCEPT_V6 in registry.vector_sentinels so a literal verifier can expand them (ops 9,11,21,27,33,35,39,44,45,58 used ALL/ALL_EXCEPT_V6)."
+    ]
+  },
+  "p3_r2a_scope": {
+    "note": "Resolving reviewer point (chatgpt-codex): P3 as written ('zero unconfirmed R2 across all tiers') is literally unsatisfiable for R2-A (automated, no human at send time). Operative interpretation for this gate: P3 is scoped to INTERACTIVE R2 (a human hears a readback). R2-A ops (24,30,46,47) are governed by a SEPARATE two-part check \u2014 (a) configuration-time confirmation of template/cadence/trigger, and (b) send-time state re-evaluation against live state (I10/I11). Op 30's send-time paid-invoice re-check is implemented and tested in this PR; appointment reminders already re-evaluate cancel/consent at send. This scoping should be reflected in the spec at human re-ratification."
+  },
+  "remediations_this_pr": [
+    "P4: packages/api/src/proposals/surface.ts \u2014 ProposalSurface type + S1 allowlist + isProposalTypeAllowedOnSurface.",
+    "P4: ProposalExecutor.execute rejects S1-surface proposals whose type is off the allowlist (403 SURFACE_VIOLATION) \u2014 invariant I6 at the execution boundary.",
+    "P4: create-voice-turn-processor stamps surface (ownerSession -> S2 else S1) and coerces S1 non-allowlisted intents to voice_clarification + audits voice.surface_violation_blocked.",
+    "P3: proposal.createProposal strips trust tier on S1 surface (in addition to voiceMutation); removed dead 'inapp_voice'/'telephony_voice' channel clause.",
+    "P3/I10: transactional-comms notifyInvoiceOverdue suppresses reminders on paid/void/zero-balance invoices at send time.",
+    "Tests: surface-enforcement.test.ts, invoice-overdue-paid-suppression.test.ts, and S1-block cases in voice-turn-processor.test.ts.",
+    "I13: ai/untrusted-content.ts renders caller-authored (S1) text into operator (S2) prompts inside a hardened BEGIN/END fence with a data-not-instruction hardening line and fence-breakout neutralization; applied at suggest-reply-task and summarize-session (their own system message).",
+    "P4 refinement: resolveSurface infers S1 only for NON-system-authored inbound-telephony proposals (system: actors \u2014 e.g. vulnerability-triage update_customer \u2014 stay trusted), fixing a false SURFACE_VIOLATION on server-generated proposals.",
+    "P3/I10: reminder suppression now deletes the dunning ledger claim for BOTH manual and cadence steps, so a suppressed step on a later-reopened invoice can be re-raised."
+  ],
+  "open_blockers": [
+    "I13 (partial): the untrusted-content fence is applied at the two highest-risk S2 read-back sites (suggest-reply, summarize-session). Extend it to context-builder.recentMessages (RAG query + prompt) and add an explicit `untrusted` provenance column at the transcript/message ingest layer (currently derived from senderRole/speaker at read time).",
+    "Registry reconciliation + human re-ratification: registry is not a complete voice-surface inventory (P1 fail).",
+    "22 registry ops have no voice on-ramp; 8 partial (P2).",
+    "I11 recipient-timezone quiet-hours enforcement on customer sends.",
+    "Decisions D1-D13 remain open per launch orchestrator; D11 (10DLC) and D13 (PCI on #33) are blocking.",
+    "RIVET_GOAL_SHIPGATE.md referenced by launch orchestrator is not in-repo (separate track; out of scope for this production-gate run)."
+  ]
+}

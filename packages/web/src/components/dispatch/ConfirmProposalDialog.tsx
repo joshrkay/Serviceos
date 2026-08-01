@@ -1,6 +1,8 @@
 import React, { useMemo, useState } from 'react';
 import { ConflictDisplay, ConflictInfo } from './ConflictDisplay';
 import type { FeasibilityResult } from './feasibility-types';
+import { useTenantTimezone } from '../../hooks/useTenantTimezone';
+import { formatTimeInTenantTz } from '../../utils/formatInTenantTz';
 
 /**
  * P6-025 — Confirmation dialog shown before a drag-drop schedule change is
@@ -51,9 +53,11 @@ const PROPOSAL_DESCRIPTION: Record<ProposedProposalType, string> = {
     'A cancel-assignment proposal will be created. The appointment stays assigned until a teammate approves the proposal.',
 };
 
-function formatTime(iso: string): string {
+// Journey QA 2026-07-02 (bug 4) — render in the TENANT tz (core pattern:
+// stored UTC, rendered in tenant timezone), matching the schedule page.
+function formatTime(iso: string, tz: string): string {
   if (!iso) return '—';
-  return new Date(iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  return formatTimeInTenantTz(iso, tz);
 }
 
 function feasibilityToConflicts(result: FeasibilityResult): ConflictInfo[] {
@@ -89,6 +93,7 @@ export function ConfirmProposalDialog({
   onConfirm,
   onCancel,
 }: ConfirmProposalDialogProps) {
+  const tz = useTenantTimezone();
   const [warningsAcknowledged, setWarningsAcknowledged] = useState(false);
 
   React.useEffect(() => {
@@ -168,9 +173,9 @@ export function ConfirmProposalDialog({
             {timeRange && (
               <div data-testid="confirm-time-range">
                 <span className="font-medium">Time:</span>{' '}
-                {formatTime(timeRange.fromStart)}–{formatTime(timeRange.fromEnd)}
+                {formatTime(timeRange.fromStart, tz)}–{formatTime(timeRange.fromEnd, tz)}
                 {' → '}
-                {formatTime(timeRange.toStart)}–{formatTime(timeRange.toEnd)}
+                {formatTime(timeRange.toStart, tz)}–{formatTime(timeRange.toEnd, tz)}
               </div>
             )}
           </div>

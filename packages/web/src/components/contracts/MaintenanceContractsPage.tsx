@@ -59,7 +59,9 @@ export function MaintenanceContractsPage() {
           ))}
         </div>
 
-        {isLoading && <div className="py-16 text-center text-sm text-slate-500">Loading contracts…</div>}
+        {isLoading && data.length === 0 && (
+          <div className="py-16 text-center text-sm text-slate-500">Loading contracts…</div>
+        )}
         {error && (
           <div className="py-16 text-center">
             <p className="text-sm text-red-500">Failed to load contracts</p>
@@ -67,7 +69,7 @@ export function MaintenanceContractsPage() {
           </div>
         )}
 
-        {!isLoading && !error && (
+        {!(isLoading && data.length === 0) && !error && (
           <div className="flex flex-col gap-2">
             {normalized.map(contract => (
                 <button

@@ -74,6 +74,25 @@ export const wsServerVoiceEventSchema = z.object({
   payload: z.record(z.unknown()).optional(),
 });
 
+/** UC-3 — dispatch presence read. Pushed to connections subscribed to the
+ *  `dispatch` channel (targetId = board date) whenever presence changes for
+ *  that (tenant, date), and once on subscribe. Carries the FULL active list —
+ *  a state snapshot, so a coalesced/dropped frame is self-healing. */
+export const wsServerDispatchPresenceSchema = z.object({
+  kind: z.literal('dispatch.presence'),
+  ...baseFields,
+  channel: z.literal('dispatch'),
+  date: z.string(),
+  entries: z.array(
+    z.object({
+      userId: z.string(),
+      displayName: z.string(),
+      appointmentId: z.string().nullable(),
+      mode: z.enum(['viewing', 'dragging']),
+    }),
+  ),
+});
+
 export const wsServerFrameSchema = z.discriminatedUnion('kind', [
   wsServerHelloSchema,
   wsServerHeartbeatSchema,
@@ -82,22 +101,27 @@ export const wsServerFrameSchema = z.discriminatedUnion('kind', [
   wsServerAssistantTokenSchema,
   wsServerAssistantDoneSchema,
   wsServerVoiceEventSchema,
+  wsServerDispatchPresenceSchema,
 ]);
 export type WsServerFrame = z.infer<typeof wsServerFrameSchema>;
 
 // ---------- Client → Server ----------
 
+/** Channels a client can subscribe to. `dispatch` targets a board date. */
+export const wsChannelSchema = z.enum(['assistant', 'voice', 'dispatch']);
+export type WsChannel = z.infer<typeof wsChannelSchema>;
+
 export const wsClientSubscribeSchema = z.object({
   kind: z.literal('subscribe'),
   ...baseFields,
-  channel: z.enum(['assistant', 'voice']),
+  channel: wsChannelSchema,
   targetId: z.string().optional(),
 });
 
 export const wsClientUnsubscribeSchema = z.object({
   kind: z.literal('unsubscribe'),
   ...baseFields,
-  channel: z.enum(['assistant', 'voice']),
+  channel: wsChannelSchema,
   targetId: z.string().optional(),
 });
 
@@ -106,10 +130,30 @@ export const wsClientPingSchema = z.object({
   ...baseFields,
 });
 
+/** UC-3 — presence heartbeat over the already-open gateway socket. Replaces
+ *  the 5s HTTP PUT (which cost an RLS transaction per beat); the HTTP route
+ *  remains as the ≥30s fallback for clients without a live WS. */
+export const wsClientPresenceUpdateSchema = z.object({
+  kind: z.literal('presence.update'),
+  ...baseFields,
+  date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+  mode: z.enum(['viewing', 'dragging']),
+  appointmentId: z.string().nullable().optional(),
+  displayName: z.string().max(200).optional(),
+});
+
+export const wsClientPresenceClearSchema = z.object({
+  kind: z.literal('presence.clear'),
+  ...baseFields,
+  date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+});
+
 export const wsClientFrameSchema = z.discriminatedUnion('kind', [
   wsClientSubscribeSchema,
   wsClientUnsubscribeSchema,
   wsClientPingSchema,
+  wsClientPresenceUpdateSchema,
+  wsClientPresenceClearSchema,
 ]);
 export type WsClientFrame = z.infer<typeof wsClientFrameSchema>;
 
@@ -123,6 +167,7 @@ export function priorityForFrame(frame: WsServerFrame): WsPriority {
       return 'control';
     case 'assistant.token':
     case 'voice.event':
+    case 'dispatch.presence':
       return 'delta';
     case 'heartbeat':
       return 'telemetry';

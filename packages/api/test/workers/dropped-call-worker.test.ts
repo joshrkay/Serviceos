@@ -52,7 +52,7 @@ describe('P8-015 dropped-call recovery worker sweep', () => {
       logger,
       now: () => NOW,
     });
-    expect(result).toEqual({ due: 1, sent: 1, suppressed: 0, failed: 0 });
+    expect(result).toEqual({ due: 1, sent: 1, suppressed: 0, skipped: 0, expired: 0, failed: 0 });
     expect(deps.sendSms).toHaveBeenCalledTimes(1);
   });
 
@@ -80,7 +80,7 @@ describe('P8-015 dropped-call recovery worker sweep', () => {
       logger,
       now: () => NOW,
     });
-    expect(result).toEqual({ due: 1, sent: 0, suppressed: 1, failed: 0 });
+    expect(result).toEqual({ due: 1, sent: 0, suppressed: 1, skipped: 0, expired: 0, failed: 0 });
     expect(deps.sendSms).not.toHaveBeenCalled();
   });
 
@@ -115,11 +115,15 @@ describe('P8-015 dropped-call recovery worker sweep', () => {
     expect(deps.sendSms).toHaveBeenCalledTimes(1);
   });
 
-  it('returns zeroed counts (no throw) when findDue fails', async () => {
+  it('returns zeroed counts (no throw) when the repo fetches fail', async () => {
     const brokenRepo = {
-      findDue: vi.fn(async () => {
+      findExpired: vi.fn(async () => {
         throw new Error('db down');
       }),
+      findDueTenantIds: vi.fn(async () => {
+        throw new Error('db down');
+      }),
+      findDueForTenants: vi.fn(async () => []),
       schedule: vi.fn(),
       markSent: vi.fn(),
       markSuppressed: vi.fn(),
@@ -130,6 +134,149 @@ describe('P8-015 dropped-call recovery worker sweep', () => {
       logger,
       now: () => NOW,
     });
-    expect(result).toEqual({ due: 0, sent: 0, suppressed: 0, failed: 0 });
+    expect(result).toEqual({ due: 0, sent: 0, suppressed: 0, skipped: 0, expired: 0, failed: 0 });
+  });
+
+  it('skips (leaves pending) a due row whose tenant flag is disabled', async () => {
+    await seedRow(repo, 'sess-flagged-off', new Date(NOW.getTime() - 1000));
+    const deps = handlerDeps(repo);
+    const result = await runDroppedCallRecoverySweep({
+      repo,
+      handlerDeps: deps,
+      logger,
+      isEnabledForTenant: vi.fn(async () => false),
+      now: () => NOW,
+    });
+    // The disabled tenant is skipped and its row is never fetched into the
+    // send batch (due=0); skipped counts the tenant.
+    expect(result).toEqual({ due: 0, sent: 0, suppressed: 0, skipped: 1, expired: 0, failed: 0 });
+    expect(deps.sendSms).not.toHaveBeenCalled();
+    // Skipped, NOT suppressed: enabling the flag within the freshness window
+    // lets a later sweep send it.
+    const row = repo.rows.find((r) => r.voiceSessionId === 'sess-flagged-off');
+    expect(row?.sentAt).toBeFalsy();
+    expect(row?.suppressedReason).toBeFalsy();
+  });
+
+  it('does not starve an enabled tenant behind a large disabled-tenant backlog', async () => {
+    // The starvation guard: a disabled tenant with more rows than the batch
+    // limit must not prevent an enabled tenant's fresh row from sending.
+    const disabledTenant = '00000000-0000-0000-0000-0000000000d1';
+    for (let i = 0; i < 150; i++) {
+      // Older than the enabled row so oldest-first would surface these first.
+      await repo.schedule({
+        tenantId: disabledTenant,
+        voiceSessionId: `dis-${i}`,
+        callerE164: E164,
+        scheduledFor: new Date(NOW.getTime() - 2000),
+      });
+    }
+    await seedRow(repo, 'sess-enabled', new Date(NOW.getTime() - 1000));
+    const deps = handlerDeps(repo);
+    const result = await runDroppedCallRecoverySweep({
+      repo,
+      handlerDeps: deps,
+      logger,
+      batchSize: 100,
+      isEnabledForTenant: vi.fn(async (t: string) => t === TENANT),
+      now: () => NOW,
+    });
+    // The enabled tenant's row sends despite 150 older disabled rows.
+    expect(result.sent).toBe(1);
+    expect(result.skipped).toBe(1); // the one disabled tenant
+    expect(deps.sendSms).toHaveBeenCalledTimes(1);
+    expect(repo.rows.find((r) => r.voiceSessionId === 'sess-enabled')?.sentAt).toBeTruthy();
+  });
+
+  it('processes normally when the flag gate reports enabled', async () => {
+    await seedRow(repo, 'sess-flagged-on', new Date(NOW.getTime() - 1000));
+    const deps = handlerDeps(repo);
+    const isEnabledForTenant = vi.fn(async () => true);
+    const result = await runDroppedCallRecoverySweep({
+      repo,
+      handlerDeps: deps,
+      logger,
+      isEnabledForTenant,
+      now: () => NOW,
+    });
+    expect(result.sent).toBe(1);
+    expect(isEnabledForTenant).toHaveBeenCalledWith(TENANT);
+  });
+
+  it('terminally expires a row older than maxAgeMs — even for a disabled tenant', async () => {
+    const audit = new InMemoryAuditRepository();
+    // Scheduled 31 minutes ago (default DROPPED_CALL_MAX_AGE_MS = 30min).
+    await seedRow(repo, 'sess-stale', new Date(NOW.getTime() - 31 * 60_000));
+    const deps = handlerDeps(repo, { audit });
+    const result = await runDroppedCallRecoverySweep({
+      repo,
+      handlerDeps: deps,
+      logger,
+      isEnabledForTenant: vi.fn(async () => false),
+      now: () => NOW,
+    });
+    // Stale rows are reaped in Phase 1 (not the send batch) → expired=1,
+    // due=0, and the flag is never consulted for them.
+    expect(result).toEqual({ due: 0, sent: 0, suppressed: 0, skipped: 0, expired: 1, failed: 0 });
+    const row = repo.rows.find((r) => r.voiceSessionId === 'sess-stale');
+    expect(row?.suppressedReason).toBe('expired');
+    // Expiry routes through the shared suppress path → same audit contract.
+    const event = audit.events.find(
+      (e) => e.eventType === 'dropped_call_recovery.suppressed',
+    );
+    expect(event?.metadata?.reason).toBe('expired');
+  });
+
+  it('a throwing flag gate isolates that tenant (skipped, left pending) without blocking others', async () => {
+    const badTenant = '00000000-0000-0000-0000-0000000000e1';
+    // Gate throws for badTenant, resolves true for TENANT.
+    await repo.schedule({
+      tenantId: badTenant,
+      voiceSessionId: 'sess-gate-err',
+      callerE164: E164,
+      scheduledFor: new Date(NOW.getTime() - 2000),
+    });
+    await seedRow(repo, 'sess-gate-ok', new Date(NOW.getTime() - 1000));
+    const isEnabledForTenant = vi.fn(async (t: string) => {
+      if (t === badTenant) throw new Error('flag store down');
+      return true;
+    });
+    const deps = handlerDeps(repo);
+    const result = await runDroppedCallRecoverySweep({
+      repo,
+      handlerDeps: deps,
+      logger,
+      isEnabledForTenant,
+      now: () => NOW,
+    });
+    // badTenant's flag check threw → skipped (row pending); TENANT still sends.
+    expect(result.skipped).toBe(1);
+    expect(result.sent).toBe(1);
+    const errRow = repo.rows.find((r) => r.voiceSessionId === 'sess-gate-err');
+    expect(errRow?.sentAt).toBeFalsy();
+    expect(errRow?.suppressedReason).toBeFalsy();
+  });
+
+  it('mixed batch counts every disposition correctly', async () => {
+    const flaggedTenant = '00000000-0000-0000-0000-000000000002';
+    await seedRow(repo, 'sess-mixed-send', new Date(NOW.getTime() - 1000));
+    await seedRow(repo, 'sess-mixed-stale', new Date(NOW.getTime() - 45 * 60_000));
+    await repo.schedule({
+      tenantId: flaggedTenant,
+      voiceSessionId: 'sess-mixed-skip',
+      callerE164: E164,
+      scheduledFor: new Date(NOW.getTime() - 1000),
+    });
+    const deps = handlerDeps(repo);
+    const result = await runDroppedCallRecoverySweep({
+      repo,
+      handlerDeps: deps,
+      logger,
+      isEnabledForTenant: vi.fn(async (tenantId: string) => tenantId === TENANT),
+      now: () => NOW,
+    });
+    // send batch = 1 fresh enabled row (due=1); flaggedTenant skipped (1);
+    // the 45-min-old row reaped as expired (1).
+    expect(result).toEqual({ due: 1, sent: 1, suppressed: 0, skipped: 1, expired: 1, failed: 0 });
   });
 });

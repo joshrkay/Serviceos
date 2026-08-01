@@ -41,9 +41,11 @@ import {
   pcm16ToMulaw,
 } from './mulaw-codec';
 import { BoundedSendQueue, type Priority } from '../../ws/bounded-send-queue';
-import { wsDisconnectTotal } from '../../monitoring/metrics';
+import { wsDisconnectTotal, voiceTurnLatencyMs } from '../../monitoring/metrics';
+import { recordVoiceError } from '../../analytics/posthog';
 import {
   ConnectionRegistry,
+  ConnectionLease,
   globalConnectionRegistry,
 } from '../../ws/connection-registry';
 import {
@@ -54,13 +56,30 @@ import {
   fillerCancelledEvent,
   escalationStartedEvent,
   escalationSummaryBuiltEvent,
+  languageSwitchedEvent,
+  type LanguageSwitchedEvent,
 } from '../../ai/voice-quality/events';
+import {
+  detectLanguageFromTranscript,
+  detectLanguageSwitchIntent,
+  isLanguageSupported,
+} from '../../ai/orchestration/language-detector';
+import {
+  renderTtsText,
+  LANGUAGE_SWITCH_ACK,
+  SPEECH_TURN_FAILURE_REPROMPT_COPY,
+  SPEECH_TURN_FAILURE_ESCALATION_COPY,
+  LOW_STT_CONFIDENCE_REPROMPT_COPY,
+  type SessionLanguage,
+} from '../../ai/agents/customer-calling/tts-copy';
+import { detectEmergency } from '../../ai/agents/customer-calling/emergency-detector';
 import { VOICE_EVENT_CHANNEL } from '../../ai/voice-quality/event-bus';
 import type { WhisperCache } from '../whisper-cache';
 import type { TwilioCallControl } from '../twilio-call-control';
 import type { EscalationSettings } from '../../settings/settings';
 import type { SentimentInput, SentimentResult, SentimentBudget } from '../../ai/agents/customer-calling/sentiment-classifier';
 import type { PanelData } from '../../ai/agents/customer-calling/escalation-summary-builder';
+import { createAuditEvent } from '../../audit/audit';
 
 const logger = createLogger({
   service: 'telephony.media-streams',
@@ -142,6 +161,20 @@ export interface MediaStreamAdapterDeps {
     tenantId: string;
   }) => Promise<SideEffect[]>;
   /**
+   * C5 — commit the implicit recording-consent ledger row for this call.
+   * `initializeSession` GENERATES the disclosure copy but deliberately does
+   * not ledger it: the ledger's `recording/implicit` means "the disclosure
+   * PLAYED and the caller stayed on the line", which is not yet true when the
+   * copy is generated. This adapter is the only component that knows whether
+   * the caller actually heard it, so it owns the commit — invoked exactly
+   * once, at the point the disclosure TURN is validated as played to
+   * completion. Every fail-closed branch returns without calling it, so a
+   * hang-up leaves no row claiming consent. Best-effort: never rejects, and
+   * a ledger outage must not sink an otherwise-disclosed call.
+   * Wired in production to `TwilioGatherAdapter.commitRecordingConsent`.
+   */
+  commitRecordingConsent?: (opts: { callSid: string }) => Promise<void>;
+  /**
    * RV-140 (interim) — emergency-keyword scan over INTERIM transcripts so a
    * caller saying "gas leak" escalates the moment the words are recognized,
    * not seconds later when Deepgram finalizes the utterance. Keywords ONLY —
@@ -159,6 +192,27 @@ export interface MediaStreamAdapterDeps {
   }) => Promise<SideEffect[] | null>;
   /** Audio inactivity teardown (ms). Default 30 minutes. */
   audioIdleTimeoutMs?: number;
+  /** T2-F05 — caller-silence reprompt window after an agent turn ends (ms). Default 8 s. */
+  silenceRepromptTimeoutMs?: number;
+  /**
+   * Codex P2 (PR #702) — pending-approval/consent parity for the T2-F05
+   * silence timer. Called from the silence-expiry callback BEFORE falling
+   * through to the low-STT-confidence reprompt/escalation ladder. Drives
+   * an empty-utterance turn through the SAME `handlePendingVoiceApproval` /
+   * `handlePendingConsentCapture` handlers `speechTurn` runs (same order),
+   * so a caller who goes silent mid owner-approval readback or mid
+   * SMS-consent capture gets keep-pending / fail-closed semantics instead
+   * of being reprompted and — on a second consecutive silence — escalated
+   * and end-sessioned with the dialogue stranded. Returns the side effects
+   * to render when a dialogue consumed the turn, or null when neither is
+   * pending (the timer proceeds with its normal recovery). Optional —
+   * when omitted, behavior is unchanged (always falls through). Wired in
+   * production via `TwilioGatherAdapter.handlePendingDialogueSilence`.
+   */
+  handlePendingDialogueSilence?: (
+    session: VoiceSession,
+    tenantId: string,
+  ) => Promise<SideEffect[] | null>;
   /**
    * Per-tenant connection registry. Defaults to the process-wide singleton.
    * Override for tests to keep counters isolated between cases.
@@ -188,10 +242,27 @@ export interface MediaStreamAdapterDeps {
   /**
    * Resolves Deepgram keyword-boost tokens for the tenant. Optional —
    * when omitted, Deepgram opens without keyword boost.
+   *
+   * UB-C1 — the boost list is suppressed whenever the live STT language
+   * is 'es': the tokens are English trade terms and degrade Nova-3's
+   * Spanish recognition. It is re-applied on a switch back to 'en'.
    */
   terminologyProvider?: {
     getKeywords(tenantId: string): Promise<ReadonlyArray<string>>;
   };
+  /**
+   * UB-C1 — resolves the language the call OPENS in, before the Deepgram
+   * session is created. Composed in app.ts from the identified caller's
+   * `customer.preferredLanguage` + `tenant_settings.default_language` /
+   * `supported_languages` via `detectLanguage` (which applies the
+   * tenant's opt-in gate internally). Optional — when omitted the call
+   * opens with the provider's default language (English), preserving
+   * pre-UB-C behavior.
+   */
+  initialLanguageResolver?: (
+    tenantId: string,
+    callContext: { callSid: string; sessionId: string },
+  ) => Promise<'en' | 'es'>;
   /**
    * Optional filler engine + cache. When both are present, the adapter
    * wraps each `tts_play` turn with a 250ms timer: if the real TTS has
@@ -199,7 +270,7 @@ export interface MediaStreamAdapterDeps {
    * cache. Omitting either turns the feature off entirely.
    */
   fillerEngine?: {
-    selectNext(ctx?: { skipFillers?: boolean }): { id: string; text: string; approxDurationMs: number } | undefined;
+    selectNext(ctx?: { skipFillers?: boolean; language?: 'en' | 'es' }): { id: string; text: string; approxDurationMs: number } | undefined;
   };
   fillerCache?: {
     get(id: string): Buffer | undefined;
@@ -301,18 +372,137 @@ export interface MediaStreamAdapterDeps {
     priorTurns: ReadonlyArray<{ role: 'caller' | 'ai'; text: string }>;
     tenantId: string;
   }) => Promise<void>;
+  /**
+   * WS3/WS16a (voice ingestion resilience) — in-process realtime health
+   * circuit, shared with the /voice TwiML branch (which reads `isOpen()`). The
+   * adapter votes it AT MOST ONCE per call leg (see
+   * {@link RuntimeState.circuitRecorded}) from REAL call outcomes:
+   *   - `recordFailure` on a terminal realtime failure — Deepgram open failure,
+   *     recording-disclosure bootstrap failure, an unexpected mid-call Deepgram
+   *     close (even when the call then degrades to Gather — realtime still
+   *     died), a failed language-switch reopen, or an ESTABLISHED session that
+   *     closes on a transport_failure-class reason.
+   *   - `recordSuccess` only when an ESTABLISHED session closes on a clean /
+   *     caller-driven reason (twilio_stop, end_session, audio_idle_timeout) —
+   *     the transport survived the whole call.
+   * Success is NOT recorded at establishment: doing so reset the consecutive-
+   * failure counter and let a clean-establish-then-die-mid-call leg never trip
+   * the breaker (the establish-then-die trap). Pre-establishment closes never
+   * vote. Optional; when absent the adapter behaves exactly as before.
+   */
+  realtimeCircuit?: {
+    recordFailure(kind: string): void;
+    recordSuccess(): void;
+  };
+  /**
+   * WS3 — audit sink for the realtime resilience events
+   * (`voice.realtime.session_failed`, `voice.disclosure.init_failed`). Emitted
+   * best-effort (never blocks or throws into the WS handler) so a failed
+   * realtime session and — critically — an undisclosed recording are countable
+   * and alertable rather than a log scrape. Optional; when absent the events
+   * are skipped (test/dev path).
+   */
+  auditRepo?: import('../../audit/audit').AuditRepository;
+  /**
+   * WS7 — mid-call REST redirect to the Gather-only fallback webhook. When
+   * wired, a terminal realtime failure (Deepgram open failure, unexpected
+   * mid-call Deepgram close) attempts to steer the LIVE call back to `<Gather>`
+   * via Twilio's Calls REST resource instead of hanging up. Returns `true` when
+   * Twilio accepted the redirect; on `false`/absent the adapter falls back to
+   * today's WS-close behavior. Never throws. `accountSid` is the value Twilio
+   * sent in the `start` frame.
+   */
+  restRedirect?: (args: { callSid: string; accountSid?: string }) => Promise<boolean>;
 }
 
 const TWILIO_SURFACE = 'twilio_media_streams';
+/** Connection-cap lease TTL for telephony — no registry heartbeat, so it must
+ *  exceed any call's duration; it only serves as the crashed-replica backstop. */
+const TELEPHONY_LEASE_TTL_MS = 2 * 60 * 60 * 1000;
 
 // Skip the LLM sentiment call once the session has consumed this fraction of
 // its cost cap, so frustration classification can't blow a tenant's budget.
 const SENTIMENT_MAX_BUDGET_RATIO = 0.8;
 
+/**
+ * UB-C1 — flap guard: maximum Deepgram finish+reopen cycles per call.
+ * Two covers the legitimate shapes (wrong opening language → correct one,
+ * plus one explicit switch back); anything more is flapping on the
+ * revenue path and is refused.
+ */
+const MAX_LANGUAGE_SWITCHES_PER_CALL = 2;
+
+/**
+ * VOX-35c — after this many CONSECUTIVE `speechTurn` failures the adapter
+ * stops apologizing and hands the caller off gracefully (spoken escalation
+ * line + clean end) instead of looping "my apologies, let me try again"
+ * forever. A single successful turn resets the counter. Two mirrors the
+ * language-switch flap budget: one transient blip earns a retry, a second
+ * back-to-back failure is a real outage and the caller should not stay
+ * trapped talking to a broken agent.
+ */
+const MAX_CONSECUTIVE_SPEECH_TURN_FAILURES = 2;
+
+/**
+ * A3 — minimum Deepgram acoustic `confidence` (0..1, on FINAL transcripts
+ * only) the adapter requires before treating a transcript as heard correctly
+ * and dispatching it into the FSM. Below this, the turn is NOT dispatched —
+ * the caller is asked to repeat instead (see {@link LOW_STT_CONFIDENCE_REPROMPT_COPY}).
+ * A misheard turn acted on as if correct is worse than one extra reprompt
+ * (e.g. "cancel" dispatched from a misheard "confirm").
+ *
+ * 0.5 is a conservative default: Deepgram Nova-3's acoustic confidence for
+ * ordinary, clearly-heard speech is typically well above 0.7-0.8, while a
+ * genuinely garbled/crosstalk/very-noisy-line utterance tends to fall well
+ * below 0.5. A conservative (low) floor means we mostly catch the clearly-bad
+ * tail rather than second-guessing ordinary accented or slightly-quiet audio.
+ * Env-overridable per deployment (e.g. a noisier vertical may want it lower).
+ * Invalid/out-of-range overrides fall back to the default rather than
+ * disabling or over-triggering the gate.
+ */
+// Exported (not just module-local) so the Gather/PSTN fallback adapter
+// (twilio-adapter.ts `_handleGatherLocked`) gates Twilio's `Confidence` field
+// against the SAME threshold and cap as the media-streams/Deepgram path —
+// one env var, one number, for both surfaces.
+export const MIN_STT_CONFIDENCE = ((): number => {
+  const raw = process.env.VOICE_MIN_STT_CONFIDENCE;
+  if (raw === undefined) return 0.5;
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed >= 0 && parsed <= 1 ? parsed : 0.5;
+})();
+
+/**
+ * A3 — after this many CONSECUTIVE low-acoustic-confidence finals the
+ * adapter stops reprompting and hands the caller off gracefully, mirroring
+ * {@link MAX_CONSECUTIVE_SPEECH_TURN_FAILURES}: a caller on a persistently
+ * noisy/unintelligible line should not be trapped in a "could you repeat
+ * that" loop forever. Exported for the same cross-surface reason as
+ * {@link MIN_STT_CONFIDENCE}.
+ */
+export const MAX_CONSECUTIVE_LOW_CONFIDENCE_TURNS = 2;
+
 interface RuntimeState {
   ws: WsLike;
   streamSid: string | null;
   callSid: string | null;
+  /**
+   * Comms C5 — consent gate on the capture pipeline (the single flag
+   * `handleMedia` reads). Inbound media frames are NOT forwarded to ASR until
+   * the recording disclosure (spoken inside the greeting turn) has actually
+   * finished playing to the caller — parity with the Gather path's blocking
+   * <Say>. Set true by: the greeting turn's end-of-utterance `silence-arm-`
+   * mark ack (normal path), sessions with no `initializeSession` wired or no
+   * audio to play (no disclosure will ever play), and a safety timeout so a
+   * lost mark ack can't leave the agent permanently deaf. A disclosure FAILURE
+   * (init threw, or the disclosure TTS produced no playback) does NOT set this
+   * — it hangs up the leg (DISCLOSURE_INIT_FAILED), so audio is never captured
+   * on an undisclosed call.
+   */
+  captureEnabled: boolean;
+  /** C5 — safety timer backing `captureEnabled`; cleared once enabled. */
+  captureEnableTimer: NodeJS.Timeout | null;
+  /** WS7 — Twilio AccountSid from the `start` frame, for the mid-call REST redirect. */
+  accountSid: string | null;
   tenantId: string | null;
   session: VoiceSession | null;
   deepgram: StreamingSession | null;
@@ -335,6 +525,40 @@ interface RuntimeState {
   /** Last time we received an inbound `media` frame. */
   lastMediaAt: number;
   audioIdleTimer: NodeJS.Timeout | null;
+  /**
+   * T2-F05 — per-turn caller-silence reprompt timer. Armed when the
+   * dedicated end-of-utterance `silence-arm-${turnId}` mark of an agent
+   * (non-filler) TTS turn is ACKed by Twilio; cleared by any transcript
+   * event, barge-in, and close. See
+   * {@link TwilioMediaStreamAdapter.armSilenceRepromptTimer}.
+   */
+  silenceRepromptTimer: NodeJS.Timeout | null;
+  /**
+   * Turn whose dedicated `silence-arm-${turnId}` mark is enqueued but not
+   * yet acked by Twilio; the silence timer arms only when THAT mark's ack
+   * arrives (playback of the WHOLE turn's audio actually finished), not at
+   * enqueue — otherwise a long prompt, a send backlog, or (for a
+   * multi-chunk streaming TTS turn) an earlier chunk's own `turn-${turnId}`
+   * mark would start the countdown before the caller has heard the agent
+   * finish. This mark is emitted exactly once per turn, by
+   * `runTurnWithFiller()`, after ALL of that turn's audio has been enqueued
+   * — never by `streamPcmAsMedia()` itself, which may run multiple times
+   * per turn (once per streamed chunk).
+   */
+  pendingSilenceRepromptTurnId: number | null;
+  /**
+   * Codex P2 (PR #702) — monotonic counter bumped on EVERY caller transcript
+   * (interim or final), the same "any caller audio means not-silent" signal
+   * that clears the silence timer. `armSilenceRepromptTimer` captures its value
+   * at arm time; the expiry's locked body bails if it changed. This closes the
+   * window the `outboundTurnId`/`agentSpeaking` guards miss: a final transcript
+   * that fires between the timeout callback starting and its lock body running
+   * consumes the pending dialogue inside `onTranscriptEvent`'s `speechTurn`
+   * lock, but the new outbound turn (which bumps `outboundTurnId` / sets
+   * `agentSpeaking`) only happens AFTER that lock releases — so those guards
+   * still read stale and would let the expiry double-consume the answer.
+   */
+  callerActivityGeneration: number;
   /** Outbound queue (bounded, priority-aware). */
   queue: BoundedSendQueue;
   draining: boolean;
@@ -344,6 +568,8 @@ interface RuntimeState {
   slowConsumerTimer: NodeJS.Timeout | null;
   /** True after we've released our slot in the connection registry. */
   registryReleased: boolean;
+  /** Connection-cap lease (U3b); released on teardown, refreshed by no loop. */
+  connectionLease: ConnectionLease | null;
   /** Guards against calling ws.close() more than once. */
   wsCloseInitiated: boolean;
   /**
@@ -364,11 +590,79 @@ interface RuntimeState {
    */
   awaitingFirstAudioFrame: boolean;
   /**
+   * WS26 — epoch-ms stamped when a FINAL transcript arms the turn (paired with
+   * `awaitingFirstAudioFrame`). Read once when the first non-filler outbound
+   * chunk is enqueued to observe `voice_turn_latency_ms`, then cleared. `null`
+   * between turns. Overwritten each turn, so a barge-in that killed the prior
+   * turn before any audio never leaks a stale start into the next measurement.
+   */
+  turnLatencyStartMs: number | null;
+  /**
    * True while a filler clip is actively streaming. Cleared when real
    * TTS preempts it or when barge-in kills it. Used to gate
    * TTFA emission and to coordinate filler/real-TTS cancellation.
    */
   fillerActive: boolean;
+  /**
+   * Consent ordering — per-TURN completion flag. Set true ONLY where a turn
+   * finished playing its COMPLETE real (non-filler) TTS: the streaming loop
+   * running to its end, the buffered synth success, or the recovery path's
+   * buffered re-synth of the full text. Deliberately NOT set per audio frame:
+   * a stream that emitted one chunk and then died into filler/dead-air
+   * recovery played only a fragment, and must not count. Left false on the
+   * filler and dead-air paths — a filler clip is not the recording notice.
+   * Reset before each turn by `emitSideEffects`.
+   */
+  turnRealAudioComplete: boolean;
+  /**
+   * Consent ordering — real (non-filler) PCM bytes enqueued for the CURRENT
+   * turn. Reset per turn by `emitSideEffects` and snapshotted into
+   * {@link disclosureAudioBytes} for the disclosure turn, so the lost-ack
+   * backstop can wait out the audio's real playback duration instead of a
+   * constant that a long custom greeting could out-run.
+   */
+  turnAudioBytes: number;
+  /** Consent ordering — {@link turnAudioBytes} as of the disclosure turn. */
+  disclosureAudioBytes: number;
+  /**
+   * Consent ordering — true only while the establishment (disclosure/greeting)
+   * side effects are being emitted, so `emitSideEffects` records
+   * {@link disclosureTurnComplete} for THAT turn alone and never for a later
+   * prompt. Set around the init `emitSideEffects` call in `handleStart`.
+   */
+  awaitingDisclosureTurn: boolean;
+  /**
+   * Consent ordering — whether the turn carrying the recording disclosure
+   * played its complete real TTS. Captured from {@link turnRealAudioComplete}
+   * for the FIRST `tts_play` of the establishment effects (the greeting, into
+   * which `buildTelephonyGreeting` merges the disclosure copy) and never
+   * overwritten by a later prompt, so a fully-failed greeting can't be masked
+   * by a caller-identification line that streamed fine. `null` until that turn
+   * runs. `handleStart` fails closed on anything other than `true`.
+   */
+  disclosureTurnComplete: boolean | null;
+  /**
+   * Consent ordering — the outbound turn id of the disclosure turn, so the
+   * mark handler can recognise THAT turn's `silence-arm-` ack specifically. A
+   * filler's mark, or a later prompt's mark, must never open capture.
+   */
+  disclosureTurnId: number | null;
+  /**
+   * Consent ordering — set when the disclosure turn's own `silence-arm-` mark
+   * is acked by Twilio. WS frames are handled concurrently with `handleStart`,
+   * so the ack can land BEFORE validation finishes; recording it lets
+   * `handleStart` open capture itself once it has validated, closing the race
+   * in both directions.
+   */
+  disclosureMarkAcked: boolean;
+  /**
+   * Consent ordering — the latch. False until `handleStart` has confirmed the
+   * disclosure turn played to completion. While false the mark handler will
+   * NOT open capture for any ack, so a filler mark (or a healthy follow-up
+   * prompt's mark) landing mid-validation — or during the async audit/close of
+   * a FAILED disclosure — cannot let inbound media reach the ASR.
+   */
+  disclosureValidated: boolean;
   /**
    * @deprecated DO NOT USE — use `deps.setPendingTransferTwiml` to write
    * into the TwilioGatherAdapter's shared pendingTransferTwiml Map. This
@@ -394,6 +688,77 @@ interface RuntimeState {
    * round-trips on subsequent interims.
    */
   interimEmergencyFired: boolean;
+  /**
+   * UB-C1 — the language the LIVE Deepgram session is listening in.
+   * Distinct from `session.language` (the spoken/TTS language, which the
+   * host may also set from tenant defaults): this field tracks what the
+   * STT socket was actually opened with, so the switch triggers compare
+   * against reality. `switchLanguage` keeps both in sync.
+   */
+  language: 'en' | 'es';
+  /**
+   * UB-C1 — keyword-boost tokens resolved at `start`. Kept so a
+   * language switch back to 'en' can re-apply them ('es' suppresses
+   * them — English trade terms degrade Nova-3 on Spanish).
+   */
+  sttKeywords: ReadonlyArray<string>;
+  /** UB-C1 — flap guard. Hard cap on Deepgram reopen cycles per call. */
+  languageSwitchCount: number;
+  /**
+   * WS7 — monotonic Deepgram session generation. Bumped on every
+   * `openSession` call AND before discarding the old session in
+   * `switchLanguage`, so a stale session's `onClose` (fired by the
+   * deliberate finish/reopen cycle) can be told apart from the LIVE
+   * session closing unexpectedly. The degrade-to-Gather hook bails when
+   * its captured generation is no longer current — a healthy
+   * language-switched call must never be REST-redirected.
+   */
+  deepgramGeneration: number;
+  /**
+   * WS7 — set once a mid-call REST redirect to Gather was ACCEPTED by
+   * Twilio. `handleClose` then skips `finalizeOnClose`: the session is
+   * still live (the caller continues on the Gather leg), so stamping a
+   * terminal CallOutcome here would mark it ended mid-call, block the
+   * Gather leg's own finalization (terminalOutcome early-return), and
+   * schedule dropped-call recovery SMS to a caller who is still on the
+   * phone. The Gather path owns finalization from this point.
+   */
+  degradedToGather: boolean;
+  /**
+   * UB-C1 — set once the first FINAL transcript has been through the
+   * one-shot language-detection trigger, so utterance #2+ can only
+   * switch via the explicit-request path.
+   */
+  firstFinalLanguageChecked: boolean;
+  /**
+   * WS16a — realtime-circuit latch. One WebSocket == one realtime call leg,
+   * so the leg votes the circuit at most ONCE (`recordFailure` OR
+   * `recordSuccess`). The FIRST, most-precise signal wins: a mid-call
+   * `deepgram_unexpected_close` recorded at its onClose site suppresses the
+   * blunt `ws_closed` that follows it through `handleClose`, and a disclosure
+   * failure suppresses the clean terminal `twilio_stop` (letting a clean end
+   * erase an establishment failure would resurrect the establish-then-die
+   * trap). Init false in the constructor.
+   */
+  circuitRecorded: boolean;
+  /**
+   * VOX-35c — number of CONSECUTIVE `speechTurn` failures on this leg. Bumped
+   * each time the dispatch throws inside the session lock; reset to 0 after
+   * any successful turn. When it reaches
+   * {@link MAX_CONSECUTIVE_SPEECH_TURN_FAILURES} the adapter escalates/hands
+   * off instead of speaking another apology, so a persistently broken turn
+   * pipeline can't trap the caller in an apology loop. Init 0.
+   */
+  consecutiveSpeechTurnFailures: number;
+  /**
+   * A3 — number of CONSECUTIVE FINAL transcripts on this leg whose Deepgram
+   * acoustic `confidence` fell below {@link MIN_STT_CONFIDENCE}. Bumped each
+   * time a final is reprompted instead of dispatched; reset to 0 by any
+   * dispatched (high-enough-confidence, or confidence-absent) turn. When it
+   * reaches {@link MAX_CONSECUTIVE_LOW_CONFIDENCE_TURNS} the adapter hands
+   * off gracefully instead of reprompting again. Init 0.
+   */
+  consecutiveLowConfidenceTurns: number;
 }
 
 const TWILIO_QUEUE_MAX_MSGS = 200;
@@ -401,10 +766,51 @@ const TWILIO_QUEUE_MAX_BYTES = 4 * 1024 * 1024;
 const TWILIO_QUEUE_HIGH_WATERMARK = 0.7;
 /** Pause TTS pull when this many marks are unacked. */
 const TWILIO_MAX_UNACKED_MARKS = 3;
+
+/**
+ * C5 — FLOOR for the lost-ack backstop on the capture consent gate. This is a
+ * floor, never the whole story: a fixed timeout cannot establish playback
+ * completion, and a tenant custom greeting may be up to 500 chars
+ * (`VoiceConfigInputSchema`) with the disclosure appended AFTER it, which can
+ * out-run any constant. The effective delay is this floor or the DURATION OF
+ * THE AUDIO WE ACTUALLY ENQUEUED for the disclosure turn plus
+ * {@link CAPTURE_ENABLE_FALLBACK_MARGIN_MS}, whichever is longer — see
+ * `armCaptureEnableFallback`. So a fire means the mark ack was lost after the
+ * audio had time to play, not that the disclosure is still mid-sentence.
+ */
+const CAPTURE_ENABLE_FALLBACK_MS = 30_000;
+/**
+ * Slack added on top of the enqueued disclosure audio's real playback duration
+ * before the lost-ack backstop may open capture, covering Twilio-side buffering
+ * and network jitter.
+ */
+const CAPTURE_ENABLE_FALLBACK_MARGIN_MS = 5_000;
+/**
+ * Outbound PCM16 @ 16 kHz mono → bytes per millisecond of playback
+ * (16000 samples/s × 2 bytes ÷ 1000). Used to convert the disclosure turn's
+ * enqueued byte count into how long that audio actually takes to play.
+ */
+const OUTBOUND_PCM_BYTES_PER_MS = 32;
 /** Slow-consumer grace window before disconnect. */
 const TWILIO_SLOW_CONSUMER_GRACE_MS = 8_000;
 /** Slow-consumer EWMA send latency threshold. */
 const TWILIO_SLOW_CONSUMER_EWMA_THRESHOLD_MS = 250;
+
+/**
+ * P0 voice-output fix — MIME types that `streamPcmAsMedia` can safely
+ * consume. That method treats its input as raw, unencoded PCM16 samples
+ * (it does the PCM16 → mu-law encoding itself via `encodeTwilioOutboundFrame`)
+ * — it has no decoder for compressed formats. A `TtsProvider.synthesize()`
+ * result is only safe to hand to it when `contentType` is one of these; any
+ * compressed format (e.g. OpenAI/ElevenLabs' default 'audio/mpeg') would be
+ * streamed out as static with no error otherwise.
+ */
+const RAW_PCM_CONTENT_TYPES = new Set(['audio/pcm', 'audio/l16', 'audio/x-raw', 'audio/raw']);
+
+function isRawPcmContentType(contentType: string): boolean {
+  const base = contentType.split(';')[0]?.trim().toLowerCase() ?? '';
+  return RAW_PCM_CONTENT_TYPES.has(base);
+}
 
 /**
  * B2 — map handleClose's `reason` into a CallOutcome-compatible
@@ -428,11 +834,33 @@ function mapCloseReasonToFinalize(reason: string): string {
     reason === 'ws_error' ||
     reason === 'ws_closed' ||
     reason === 'slow_consumer' ||
-    reason === 'queue_overflow_terminal'
+    reason === 'queue_overflow_terminal' ||
+    // WS16a — a failed Deepgram reopen (language switch) with no recovery
+    // leaves the live call with no STT: a transport failure, not the
+    // caller_hangup default it previously fell through to. Both the CallOutcome
+    // (`failed`) and the realtime-circuit vote depend on this classification.
+    reason === 'deepgram_reopen_failed'
   ) {
     return 'transport_failure';
   }
   return 'caller_hangup';
+}
+
+/**
+ * WS26 — best-effort observation of voice turn latency (STT-final → first TTS
+ * chunk) into the `voice_turn_latency_ms` histogram. Wrapped so a metrics-layer
+ * failure (a throwing prom registry) can NEVER propagate into the outbound audio
+ * loop — the same posture as the adapter's other best-effort emitters. A `null`
+ * start (no armed turn) or a negative delta (clock skew) is silently ignored.
+ */
+function observeTurnLatency(startMs: number | null): void {
+  if (startMs === null) return;
+  try {
+    const deltaMs = Date.now() - startMs;
+    if (deltaMs >= 0) voiceTurnLatencyMs.observe(deltaMs);
+  } catch {
+    /* metrics must never throw into the audio pipeline */
+  }
 }
 
 // ─── Adapter ─────────────────────────────────────────────────────────────────
@@ -443,6 +871,14 @@ function mapCloseReasonToFinalize(reason: string): string {
  * `media` frames doesn't leak past the FSM session.
  */
 export const DEFAULT_AUDIO_IDLE_TIMEOUT_MS = 30 * 60 * 1000;
+
+/**
+ * T2-F05 — how long after the agent finishes speaking a totally silent caller
+ * waits before the reprompt fires. Default 8 s: long enough for a caller
+ * checking a calendar or conferring with a spouse, short enough that the line
+ * never feels dead. Dep-injectable via `deps.silenceRepromptTimeoutMs`.
+ */
+export const DEFAULT_SILENCE_REPROMPT_MS = 8_000;
 
 export class TwilioMediaStreamAdapter {
   private readonly state: RuntimeState;
@@ -455,6 +891,9 @@ export class TwilioMediaStreamAdapter {
       ws,
       streamSid: null,
       callSid: null,
+      captureEnabled: false,
+      captureEnableTimer: null,
+      accountSid: null,
       tenantId: null,
       session: null,
       deepgram: null,
@@ -464,6 +903,9 @@ export class TwilioMediaStreamAdapter {
       closed: false,
       lastMediaAt: Date.now(),
       audioIdleTimer: null,
+      silenceRepromptTimer: null,
+      pendingSilenceRepromptTurnId: null,
+      callerActivityGeneration: 0,
       queue: new BoundedSendQueue({
         surface: 'twilio_media_streams',
         maxMsgs: TWILIO_QUEUE_MAX_MSGS,
@@ -474,14 +916,50 @@ export class TwilioMediaStreamAdapter {
       unackedMarks: 0,
       slowConsumerTimer: null,
       registryReleased: true,
+      connectionLease: null,
       wsCloseInitiated: false,
       pendingFinalizeEffects: [],
       awaitingFirstAudioFrame: false,
+      turnLatencyStartMs: null,
       fillerActive: false,
+      turnRealAudioComplete: false,
+      turnAudioBytes: 0,
+      disclosureAudioBytes: 0,
+      awaitingDisclosureTurn: false,
+      disclosureTurnComplete: null,
+      disclosureTurnId: null,
+      disclosureMarkAcked: false,
+      disclosureValidated: false,
       pendingTransferTwiml: null,
       resolvedEscalationSettings: null,
       interimEmergencyFired: false,
+      language: 'en',
+      sttKeywords: [],
+      languageSwitchCount: 0,
+      deepgramGeneration: 0,
+      degradedToGather: false,
+      firstFinalLanguageChecked: false,
+      circuitRecorded: false,
+      consecutiveSpeechTurnFailures: 0,
+      consecutiveLowConfidenceTurns: 0,
     };
+  }
+
+  /**
+   * WS16a — feed the realtime health circuit AT MOST ONCE per call leg. The
+   * first signal latches; every later signal for the same WS is suppressed so
+   * a single dying call (deepgram close → accepted degrade → ws close) casts
+   * exactly one vote, and the earliest (most precise) reason wins. No-ops when
+   * no circuit is wired (test/dev). See {@link RuntimeState.circuitRecorded}.
+   */
+  private recordCircuitOutcomeOnce(kind: 'success' | 'failure', reason: string): void {
+    if (this.state.circuitRecorded || !this.deps.realtimeCircuit) return;
+    this.state.circuitRecorded = true;
+    if (kind === 'failure') {
+      this.deps.realtimeCircuit.recordFailure(reason);
+    } else {
+      this.deps.realtimeCircuit.recordSuccess();
+    }
   }
 
   /** Wire WS event listeners. Idempotent — call once per connection. */
@@ -520,7 +998,48 @@ export class TwilioMediaStreamAdapter {
         await this.handleMedia(frame);
         return;
       case 'mark':
-        if (this.state.unackedMarks > 0) this.state.unackedMarks--;
+        // The dedicated `silence-arm-${turnId}` mark is never counted in
+        // unackedMarks (it isn't part of streamPcmAsMedia's backpressure
+        // accounting), so decrementing on its ack would underflow the
+        // counter. Only decrement for the marks that incremented it.
+        const isSilenceArmMark = frame.mark?.name?.startsWith('silence-arm-') ?? false;
+        if (!isSilenceArmMark && this.state.unackedMarks > 0) this.state.unackedMarks--;
+        // C5 / consent ordering — capture may open ONLY on the disclosure
+        // turn's own end-of-utterance ack, and only once handleStart has
+        // validated that the turn played to completion. Any other mark (a
+        // filler's, or a healthy follow-up prompt's) is ignored here, and an
+        // ack that races ahead of validation just records itself — handleStart
+        // opens capture when it validates. Both directions of the race are
+        // covered, and a FAILED disclosure never opens capture at all because
+        // `disclosureValidated` stays false through its async audit + close.
+        if (
+          isSilenceArmMark &&
+          this.state.disclosureTurnId !== null &&
+          frame.mark?.name === `silence-arm-${this.state.disclosureTurnId}`
+        ) {
+          this.state.disclosureMarkAcked = true;
+          if (this.state.disclosureValidated) {
+            this.enableCapture('disclosure_played');
+          }
+        }
+        // The dedicated end-of-utterance mark's ack means the caller has
+        // actually heard the whole agent turn finish — NOW start the
+        // no-response countdown (T2-F05). This mark is emitted exactly once
+        // per (non-filler) turn, after ALL of the turn's audio has been
+        // enqueued — unlike the per-chunk `turn-${turnId}` marks emitted
+        // inside streamPcmAsMedia(), which fire once per streamed chunk and
+        // must not arm the countdown early on a multi-chunk utterance.
+        if (
+          this.state.pendingSilenceRepromptTurnId !== null &&
+          frame.mark?.name === `silence-arm-${this.state.pendingSilenceRepromptTurnId}`
+        ) {
+          const turnId = this.state.pendingSilenceRepromptTurnId;
+          this.state.pendingSilenceRepromptTurnId = null;
+          // Consent gate opening is handled above: the same silence-arm ack
+          // calls enableCapture('disclosure_played') on the first turn. Here we
+          // only arm the T2-F05 silence countdown.
+          this.armSilenceRepromptTimer(turnId);
+        }
         // Mark-ack is the cue to drain any backpressured outbound work.
         void this.flushQueue();
         return;
@@ -566,7 +1085,16 @@ export class TwilioMediaStreamAdapter {
 
     // Per-tenant connection cap.
     const registry = this.deps.connectionRegistry ?? globalConnectionRegistry;
-    if (!registry.tryAcquire(TWILIO_SURFACE, session.tenantId)) {
+    // Telephony has no registry heartbeat loop, so use a long lease TTL that
+    // covers any call; the slot is released on teardown and the TTL is only the
+    // crashed-replica backstop. (Gateway connections refresh on their heartbeat.)
+    const lease = await registry.acquire(
+      TWILIO_SURFACE,
+      session.tenantId,
+      'standard',
+      TELEPHONY_LEASE_TTL_MS,
+    );
+    if (!lease) {
       this.logSecurityEvent('tenant_connection_cap_exceeded', {
         callSid,
         tenantId: session.tenantId,
@@ -574,10 +1102,12 @@ export class TwilioMediaStreamAdapter {
       this.closeWs(1013, 'tenant_connection_cap');
       return;
     }
+    this.state.connectionLease = lease;
     this.state.registryReleased = false;
 
     this.state.streamSid = frame.start.streamSid;
     this.state.callSid = callSid;
+    this.state.accountSid = frame.start.accountSid ?? null;
     this.state.session = session;
     this.state.tenantId = session.tenantId;
 
@@ -599,8 +1129,36 @@ export class TwilioMediaStreamAdapter {
     const keywords = this.deps.terminologyProvider
       ? await this.deps.terminologyProvider.getKeywords(session.tenantId).catch(() => [])
       : [];
+    this.state.sttKeywords = keywords;
+
+    // UB-C1 — resolve the language the call opens in (customer
+    // preferredLanguage + tenant supported_languages, composed in app.ts).
+    // Failure-soft: a resolver error opens the call in English rather than
+    // blocking audio. Only pin session.language when a resolver is wired so
+    // the host's own tenant-default resolution keeps pre-UB-C behavior in
+    // test/dev fixtures that don't inject one.
+    let initialLanguage: 'en' | 'es' | undefined;
+    if (this.deps.initialLanguageResolver) {
+      try {
+        initialLanguage = await this.deps.initialLanguageResolver(session.tenantId, {
+          callSid,
+          sessionId: session.id,
+        });
+      } catch (err) {
+        logger.warn('mediastream: initialLanguageResolver failed — opening in English', {
+          tenantId: session.tenantId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+        initialLanguage = 'en';
+      }
+      this.state.language = initialLanguage;
+      // Pin the spoken language too — initializeStreamSession honors a
+      // pre-pinned session.language (greeting/disclosure/TTS all follow it).
+      session.language = initialLanguage;
+    }
 
     try {
+      const dgGeneration = ++this.state.deepgramGeneration;
       this.state.deepgram = await this.deps.streamingProvider.openSession(
         (event) => {
           this.onTranscriptEvent(event).catch((err) => {
@@ -613,18 +1171,54 @@ export class TwilioMediaStreamAdapter {
           logger.warn('mediastream deepgram error', { error: err.message });
         },
         () => {
-          // Deepgram closed independently — we can still drain Twilio
-          // until it sends `stop`. No-op.
+          // WS7 — Deepgram closed independently mid-call. Attempt to steer the
+          // live call back to Gather so the caller isn't talking into dead
+          // transcription. Generation-guarded: a deliberate finish/reopen
+          // cycle (switchLanguage) closes THIS session on purpose — only the
+          // current generation's close is an unexpected failure. On redirect
+          // failure / absent dep (or during normal teardown, which
+          // attemptDegradeToGather guards against) this keeps today's
+          // behavior: drain Twilio until it sends `stop`.
+          if (dgGeneration !== this.state.deepgramGeneration) return;
+          // WS16a — a deliberate teardown (twilio `stop`, idle timeout, WS
+          // close) calls deepgram.finish(), whose real provider fires THIS
+          // hook on the follow-on ws close. That is not a transport failure,
+          // so bail before voting once the leg is already tearing down; the
+          // clean-close success is recorded by handleClose instead.
+          if (this.state.closed || this.state.wsCloseInitiated) return;
+          // An unexpected mid-call close on the LIVE generation IS a realtime
+          // transport failure. Vote BEFORE the degrade attempt — a successful
+          // degrade-to-Gather still means realtime died mid-call, so it counts
+          // as a failure of the realtime transport (the latch then suppresses
+          // the blunt `ws_closed` that the degrade's closeWs produces).
+          this.recordCircuitOutcomeOnce('failure', 'deepgram_unexpected_close');
+          void this.attemptDegradeToGather('deepgram_unexpected_close');
         },
-        undefined, // language defaults
-        keywords.length > 0 ? { keywords } : undefined
+        initialLanguage, // undefined → provider default (English)
+        // UB-C1 — suppress the English trade-term boost on Spanish opens.
+        this.deepgramKeywordOptions(initialLanguage ?? 'en')
       );
     } catch (err) {
       logger.error('mediastream: failed to open Deepgram session', {
         error: err instanceof Error ? err.message : String(err),
         callSid,
       });
-      this.closeWs(1011, 'deepgram_open_failed');
+      // WS3/WS7 — terminal pre-conversation failure. Trip the realtime health
+      // circuit and emit an alertable audit event before ending the leg, so
+      // repeated Deepgram outages steer subsequent calls to Gather. WS7: also
+      // attempt a REST redirect of THIS live call to the Gather webhook; on
+      // success the caller continues on Gather (close 1000) instead of being
+      // hung up. When no redirector is wired or the redirect fails, closeWs(1011)
+      // ends the leg exactly as before and Twilio ends the call.
+      this.recordCircuitOutcomeOnce('failure', 'deepgram_open_failed');
+      await this.emitRealtimeResilienceAudit('voice.realtime.session_failed', {
+        callSid,
+        tenantId: session.tenantId,
+        reason: 'deepgram_open_failed',
+      });
+      if (!(await this.attemptDegradeToGather('deepgram_open_failed'))) {
+        this.closeWs(1011, 'deepgram_open_failed');
+      }
       return;
     }
 
@@ -641,31 +1235,298 @@ export class TwilioMediaStreamAdapter {
             tenantId: session.tenantId,
           }),
         );
-        await this.emitSideEffects(initEffects);
+        // Scope the disclosure verdict to the greeting turn: emitSideEffects
+        // records it for the FIRST tts_play only, while this window is open.
+        this.state.disclosureTurnComplete = null;
+        this.state.awaitingDisclosureTurn = true;
+        try {
+          await this.emitSideEffects(initEffects);
+        } finally {
+          this.state.awaitingDisclosureTurn = false;
+        }
+        // Consent ordering — capture opens only once the caller has actually
+        // HEARD the COMPLETE recording disclosure, matching the Gather path
+        // where a blocking <Say> fully plays before <Record> arms.
+        if (this.disclosureWasSpoken(initEffects)) {
+          if (this.state.disclosureTurnComplete !== true) {
+            // A disclosure turn WAS expected to play (ttsProvider wired + a
+            // non-empty greeting tts_play) but did not play to completion: the
+            // stream died part-way or closed prematurely without a final chunk,
+            // recovery fell back to a generic filler clip or dead air, or the
+            // buffered synth returned non-PCM. A partial notice is not a
+            // disclosure — FAIL CLOSED (hang up), mirroring the
+            // initializeSession-threw branch below. `disclosureValidated` stays
+            // false, so no mark acked during the async audit/close below can
+            // open capture behind us.
+            await this.failDisclosureClosed(callSid, session, 'disclosure_incomplete_playback');
+            return;
+          }
+          // Validated: the disclosure turn played in full, so its (and only
+          // its) end-of-utterance ack may open capture. The ack may already
+          // have landed while we were validating — WS frames are handled
+          // concurrently — in which case open now; otherwise the mark handler
+          // opens it, with armCaptureEnableFallback as the lost-ack backstop so
+          // a dropped mark frame can't leave the agent deaf for the whole call.
+          this.state.disclosureValidated = true;
+          // C5 — point of evidence: the disclosure turn played to completion,
+          // which is exactly what the ledger's `recording/implicit` asserts.
+          // Only reachable here; every fail-closed branch above and below
+          // returns first, so a hang-up never ledgers consent.
+          //
+          // NOT awaited: the insert is explicitly best-effort, and capture is
+          // armed immediately below. Blocking on it would let a slow or
+          // saturated database hold capture closed past the disclosure, so the
+          // caller's first words after the notice would be dropped — trading a
+          // compliance record for lost audio. Fire-and-forget, log on failure.
+          if (this.deps.commitRecordingConsent) {
+            void this.deps.commitRecordingConsent({ callSid }).catch((err: unknown) => {
+              logger.warn('mediastream: recording-consent ledger commit failed', {
+                error: err instanceof Error ? err.message : String(err),
+                callSid,
+              });
+            });
+          }
+          if (this.state.disclosureMarkAcked) {
+            this.enableCapture('disclosure_played');
+          } else {
+            this.armCaptureEnableFallback();
+          }
+        } else {
+          // Nothing to play (no ttsProvider / empty greeting) — no disclosure
+          // audio to gate on, so open capture immediately rather than wait for
+          // an ACK that will never come and leave the call deaf.
+          this.enableCapture('no_disclosure_audio');
+        }
+        // WS16a — establishment success is deliberately NOT recorded here. The
+        // old recordSuccess() at this site reset the circuit's consecutive-
+        // failure counter, so a call that established cleanly then died mid-call
+        // (Deepgram dropped, transport failure) never counted — the
+        // "establish-then-die" trap that let the breaker never trip under the
+        // most common realtime outage mode. Success is now voted once at close
+        // time (handleClose) and only on a clean/caller-driven end reason; a
+        // transport-failure close votes failure instead.
       } catch (err) {
-        logger.warn('mediastream: initializeSession failed — continuing without greeting', {
+        logger.warn('mediastream: initializeSession threw — hanging up (undisclosed)', {
           error: err instanceof Error ? err.message : String(err),
           callSid,
         });
-        // DISCLOSURE_INIT_FAILED — the call continues but the caller was never
-        // given the recording-consent disclosure and the session is unledgered.
-        // This is a compliance gap that must be countable/alertable.
-        // TODO(follow-up): emit a voice.disclosure_init_failed audit/quality event
-        // once a session-scoped event type is added to VoiceSessionEvent so ops
-        // dashboards can count & alert on this failure mode without a log scrape.
-        logger.error('DISCLOSURE_INIT_FAILED', {
-          callSid,
-          tenantId: session.tenantId,
-          error: err instanceof Error ? err.message : String(err),
-        });
+        // DISCLOSURE_INIT_FAILED — the caller was never given the recording-
+        // consent disclosure and the session is unledgered. Capturing/recording
+        // an undisclosed caller is a compliance violation, so we HANG UP rather
+        // than continue (captureEnabled stays false so handleMedia drops any
+        // frames).
+        await this.failDisclosureClosed(callSid, session, 'disclosure_init_threw', err);
+        return;
       }
+    } else {
+      // No initializeSession wired (test/dev): there is no disclosure step to
+      // gate on, so open capture immediately — preserving the pre-consent-gate
+      // behavior where the adapter starts listening right after Deepgram opens
+      // and waits for the first utterance.
+      this.enableCapture('no_initialize_session');
     }
+    // WS16a — the no-`initializeSession` branch no longer records success here
+    // either: like the wired path, a clean session votes success only at close
+    // time. Recording success at establishment is the establish-then-die trap.
+  }
+
+  /**
+   * True when the disclosure/greeting turn was EXPECTED to play audio — a TTS
+   * provider is wired AND the init side effects carry a non-empty `tts_play`.
+   * Used to tell an intentionally-silent init (no provider / empty greeting,
+   * nothing to disclose) apart from a disclosure turn whose TTS failed to
+   * produce any playback: the latter must fail closed rather than open capture.
+   */
+  private disclosureWasSpoken(initEffects: ReadonlyArray<SideEffect>): boolean {
+    if (!this.deps.ttsProvider) return false;
+    return initEffects.some(
+      (fx) =>
+        fx.type === 'tts_play' &&
+        typeof fx.payload.text === 'string' &&
+        fx.payload.text.length > 0,
+    );
+  }
+
+  /**
+   * DISCLOSURE_INIT_FAILED — hang up an undisclosed leg. Recording/capturing a
+   * caller who never heard the recording notice is a compliance violation, so
+   * `captureEnabled` stays false (handleMedia drops frames) and the WS is
+   * closed 1011. WS3 — still trip the realtime health circuit and emit the
+   * alertable audit event so repeated disclosure failures are countable and
+   * steer subsequent calls to Gather. Shared by the init-threw and the
+   * disclosure-TTS-produced-no-playback paths.
+   */
+  private async failDisclosureClosed(
+    callSid: string,
+    session: VoiceSession,
+    reason: string,
+    err?: unknown,
+  ): Promise<void> {
+    logger.error('DISCLOSURE_INIT_FAILED', {
+      callSid,
+      tenantId: session.tenantId,
+      reason,
+      ...(err !== undefined
+        ? { error: err instanceof Error ? err.message : String(err) }
+        : {}),
+    });
+    this.recordCircuitOutcomeOnce('failure', 'disclosure_init_failed');
+    await this.emitRealtimeResilienceAudit('voice.disclosure.init_failed', {
+      callSid,
+      tenantId: session.tenantId,
+      reason: 'disclosure_init_failed',
+    });
+    this.closeWs(1011, 'disclosure_init_failed');
+  }
+
+  /**
+   * C5 — open the capture pipeline (see RuntimeState.captureEnabled).
+   * Idempotent; clears the lost-ack fallback timer.
+   */
+  private enableCapture(reason: string): void {
+    if (this.state.captureEnableTimer) {
+      clearTimeout(this.state.captureEnableTimer);
+      this.state.captureEnableTimer = null;
+    }
+    if (this.state.captureEnabled) return;
+    this.state.captureEnabled = true;
+    logger.debug('mediastream: capture enabled', {
+      reason,
+      callSid: this.state.callSid,
+    });
+  }
+
+  /**
+   * C5 — lost-ack backstop for the capture gate. The greeting turn's
+   * `silence-arm-` mark ack is the normal enable signal; if that frame is
+   * never delivered, this timer opens capture after the greeting must have
+   * finished so the agent isn't deaf for the rest of the call.
+   */
+  private armCaptureEnableFallback(): void {
+    if (this.state.captureEnabled || this.state.captureEnableTimer) return;
+    // A constant cannot establish playback completion — a tenant custom
+    // greeting (up to 500 chars, with the disclosure appended after it) can
+    // out-run any fixed value. Wait at least as long as the audio we actually
+    // enqueued takes to play, plus margin, so the backstop can only fire once
+    // the disclosure has genuinely had time to be heard.
+    const playbackMs = Math.ceil(this.state.disclosureAudioBytes / OUTBOUND_PCM_BYTES_PER_MS);
+    const delayMs = Math.max(
+      CAPTURE_ENABLE_FALLBACK_MS,
+      playbackMs + CAPTURE_ENABLE_FALLBACK_MARGIN_MS,
+    );
+    this.state.captureEnableTimer = setTimeout(() => {
+      this.state.captureEnableTimer = null;
+      this.enableCapture('fallback_timeout');
+    }, delayMs);
+    if (typeof this.state.captureEnableTimer.unref === 'function') {
+      this.state.captureEnableTimer.unref();
+    }
+  }
+
+  /**
+   * WS3 — best-effort audit emit for the realtime resilience events. Never
+   * throws into the WS handler and never blocks the audio path on a failed
+   * Postgres write; a persistence error is logged and swallowed. No-ops when
+   * no `auditRepo` is wired (test/dev). The event is tenant-scoped and
+   * correlated by callSid so ops can count & alert on realtime session
+   * failures and undisclosed recordings.
+   */
+  private async emitRealtimeResilienceAudit(
+    eventType:
+      | 'voice.realtime.session_failed'
+      | 'voice.disclosure.init_failed'
+      | 'voice.realtime.degraded_to_gather',
+    args: { callSid: string; tenantId: string; reason: string },
+  ): Promise<void> {
+    if (!this.deps.auditRepo) return;
+    try {
+      await this.deps.auditRepo.create(
+        createAuditEvent({
+          tenantId: args.tenantId,
+          actorId: 'system:media-streams',
+          actorRole: 'system',
+          eventType,
+          entityType: 'voice_session',
+          entityId: args.callSid,
+          correlationId: args.callSid,
+          metadata: {
+            callSid: args.callSid,
+            reason: args.reason,
+            surface: TWILIO_SURFACE,
+          },
+        }),
+      );
+    } catch (err) {
+      logger.warn('mediastream: realtime resilience audit persist failed', {
+        eventType,
+        callSid: args.callSid,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  /**
+   * WS7 — attempt to steer the LIVE call back to Gather via the Twilio REST
+   * redirect (`deps.restRedirect`). On success emit the
+   * `voice.realtime.degraded_to_gather` audit and close the WS with 1000 —
+   * Twilio then re-requests TwiML from the Gather-fallback webhook and the
+   * caller continues on Gather instead of hearing dead air. Returns `true` when
+   * the redirect was accepted; on `false`/absent dep the caller keeps its
+   * existing terminal behavior. Never throws.
+   */
+  private async attemptDegradeToGather(reason: string): Promise<boolean> {
+    const { restRedirect } = this.deps;
+    const callSid = this.state.callSid;
+    if (!restRedirect || !callSid || this.state.wsCloseInitiated || this.state.closed) {
+      return false;
+    }
+    let redirected = false;
+    try {
+      redirected = await restRedirect({
+        callSid,
+        ...(this.state.accountSid ? { accountSid: this.state.accountSid } : {}),
+      });
+    } catch {
+      redirected = false;
+    }
+    if (!redirected) return false;
+    if (this.state.session) {
+      await this.emitRealtimeResilienceAudit('voice.realtime.degraded_to_gather', {
+        callSid,
+        tenantId: this.state.session.tenantId,
+        reason,
+      });
+    }
+    // The session stays LIVE — the caller continues on the Gather leg, which
+    // owns finalization from here. handleClose reads this flag and skips
+    // finalizeOnClose (a terminal outcome stamped now would be mid-call).
+    this.state.degradedToGather = true;
+    this.closeWs(1000, 'degraded_to_gather');
+    // OBS — fire-and-forget after the degrade has actually happened; never
+    // alters the redirect/close behavior above.
+    recordVoiceError({
+      errorKind: 'degraded_to_gather',
+      channel: 'media_streams',
+      callSid,
+      tenantId: this.state.tenantId,
+    });
+    return true;
   }
 
   private async handleMedia(frame: Extract<TwilioInboundFrame, { event: 'media' }>): Promise<void> {
     if (!this.state.deepgram) return;
     this.state.lastMediaAt = Date.now();
     this.armIdleTimer();
+    // Consent gate (comms C5): never feed caller audio into STT until the
+    // recording disclosure has finished PLAYING. Frames arriving while the
+    // disclosure is still playing (or after a disclosure failure that hangs up
+    // the leg) are dropped rather than transcribed — the idle-timer bookkeeping
+    // above still runs so a slow disclosure can't trip the inactivity teardown.
+    if (!this.state.captureEnabled) return;
+    // The caller said "stop recording". Pausing the Twilio recording does
+    // nothing on this transport — the capture IS this socket — so honour the
+    // revocation here or the agent's "I've paused the recording" is a lie.
+    if (this.state.session?.captureRevoked) return;
     try {
       const pcm16 = decodeTwilioInboundFrame(frame.media.payload);
       this.state.deepgram.send(pcm16);
@@ -693,6 +1554,13 @@ export class TwilioMediaStreamAdapter {
     confidence: number;
     isFinal: boolean;
   }): Promise<void> {
+    // T2-F05 — any caller audio (interim or final) means not-silent.
+    // Bump the activity generation FIRST (Codex P2, PR #702): clearing the
+    // timer can't stop a silence expiry whose timeout callback already fired
+    // and is now queued behind this turn's `speechTurn` lock, so the arm-time
+    // generation this bump invalidates is what makes that expiry a no-op.
+    this.state.callerActivityGeneration++;
+    this.clearSilenceRepromptTimer();
     // Barge-in: any interim transcript while we're playing TTS aborts
     // the current agent utterance. Empty interim transcripts are
     // already filtered by DeepgramStreamingProvider.
@@ -713,12 +1581,58 @@ export class TwilioMediaStreamAdapter {
     const tenantId = this.state.tenantId;
     if (!session || !callSid || !tenantId) return;
 
+    // UB-C1 trigger (b) — explicit language request ("hablo español" /
+    // "switch to english"). Deterministic pre-scan; when it performs a
+    // switch it CONSUMES the turn with a localized acknowledgment (the
+    // recording-objection pattern) — "hablo español" is not a booking
+    // utterance. Emergency keywords always win the turn: an utterance
+    // that contains both is never consumed here.
+    if (await this.maybeHandleExplicitLanguageSwitch(event.transcript)) {
+      return;
+    }
+
+    // UB-C1 trigger (a) — one-shot first-final detection. If the caller's
+    // first utterance disagrees with the language Deepgram opened in
+    // (gated by the tenant's supported_languages opt-in), switch BEFORE
+    // dispatching the turn so the agent's reply renders in the caller's
+    // language. Does NOT consume the turn.
+    await this.maybeRunFirstFinalLanguageDetection(event.transcript);
+
+    // A3 — low acoustic STT confidence gate. Runs AFTER the life-safety
+    // (interim emergency scan, above) and explicit-language-switch checks —
+    // neither must ever be suppressed by a shaky confidence score — but
+    // BEFORE the turn is dispatched into the FSM. A FINAL Deepgram
+    // transcript whose acoustic `confidence` is below MIN_STT_CONFIDENCE is
+    // likely mis-heard; dispatching it risks acting on the WRONG intent
+    // (e.g. "cancel" dispatched from a misheard "confirm"), so it is
+    // reprompted instead. `confidence` is non-optional on
+    // StreamingTranscriptEvent and DeepgramStreamingProvider always supplies
+    // a number (defaulting to 1 when Deepgram omits it — see
+    // transcription-providers.ts), but the check is still defensive: a
+    // missing/non-finite value is treated as HIGH so it can never block a
+    // turn on absent data (requirement: never block on absent confidence).
+    if (
+      typeof event.confidence === 'number' &&
+      Number.isFinite(event.confidence) &&
+      event.confidence < MIN_STT_CONFIDENCE
+    ) {
+      await this.recoverFromLowSttConfidence(session);
+      return;
+    }
+    // A dispatched (high-confidence, or confidence-absent) final resets the
+    // low-confidence streak — mirrors consecutiveSpeechTurnFailures being
+    // cleared after a successful turn below.
+    this.state.consecutiveLowConfidenceTurns = 0;
+
     // VQ2-004: TTFA-start. Stamp the moment the STT provider returned a
     // final transcript on the session bus and arm the per-turn
     // first-frame guard so the next outbound chunk emits
     // `audio_frame_emitted`. Emitted BEFORE speechTurn to capture the
     // full agent-thinking window.
     this.state.awaitingFirstAudioFrame = true;
+    // WS26 — stamp the turn-latency start (STT-final). Plain assignment; a
+    // metrics failure can only happen at observe() time, which is wrapped.
+    this.state.turnLatencyStartMs = Date.now();
     session.events.emit(VOICE_EVENT_CHANNEL, transcriptReceivedEvent());
 
     let sideEffects: SideEffect[] = [];
@@ -736,10 +1650,44 @@ export class TwilioMediaStreamAdapter {
         error: err instanceof Error ? err.message : String(err),
         sessionId: session.id,
       });
+      // VOX-35c — the turn threw inside the session lock. The old code just
+      // returned, so the caller heard pure silence for this turn (the
+      // inbound analogue of the VOX-35b mid-stream dead-air bug). Speak a
+      // language-aware apology + reprompt through the normal outbound-turn
+      // path instead, and after repeated back-to-back failures hand the
+      // caller off gracefully rather than looping apologies forever.
+      await this.recoverFromSpeechTurnFailure(session);
       return;
     }
 
+    // speechTurn succeeded — clear the consecutive-failure counter so a
+    // later isolated blip still gets its own apology+reprompt (not an
+    // immediate escalation off a stale count).
+    this.state.consecutiveSpeechTurnFailures = 0;
+
     await this.emitSideEffects(sideEffects);
+
+    // UB-C1 trigger (b), classifier fallback — the LLM classifier caught a
+    // `language_switch` intent the deterministic pre-scan missed (e.g.
+    // "¿Puedo continuar en español?"). Classified intents flow back to the
+    // adapter via the turn's audit_log side effect (same channel the
+    // sentiment hook reads). The target is the utterance's requested
+    // language when the heuristic can extract it, else the other language
+    // of the en/es pair. Gated + flap-guarded inside switchLanguage; the
+    // FSM's own effects for this turn were already rendered above.
+    const classifiedIntent = (
+      sideEffects.find((fx) => fx.type === 'audit_log')?.payload as
+        | { intentType?: string }
+        | undefined
+    )?.intentType;
+    if (classifiedIntent === 'language_switch') {
+      const target =
+        detectLanguageSwitchIntent(event.transcript) ??
+        (this.state.language === 'es' ? 'en' : 'es');
+      if (isLanguageSupported(target, session.supportedLanguages ?? null)) {
+        await this.switchLanguage(target, 'classified_intent');
+      }
+    }
 
     // B3.3 — async LLM sentiment classifier. Gated by per-tenant settings.
     // Fire-and-forget so it never blocks the audio response path.
@@ -847,6 +1795,446 @@ export class TwilioMediaStreamAdapter {
   }
 
   /**
+   * VOX-35c — recover a caller turn whose `speechTurn` dispatch threw inside
+   * the session lock. Before this the catch simply `return`ed and the caller
+   * heard dead air for the whole turn.
+   *
+   * Failure 1 (and any isolated blip): speak a language-aware apology +
+   * reprompt through the SAME outbound-turn path as any agent line
+   * (`emitSideEffects` → `runTurnWithFiller`). That reuse is deliberate — it
+   * bumps `outboundTurnId`, consumes the dangling `awaitingFirstAudioFrame`/
+   * TTFA markers armed before the failed dispatch, and makes barge-in during
+   * the apology behave exactly like barge-in during any other agent speech.
+   *
+   * Failure {@link MAX_CONSECUTIVE_SPEECH_TURN_FAILURES} (back-to-back): the
+   * turn pipeline is really down, so stop apologizing — speak the FSM's own
+   * system-failure hand-off line and end the call gracefully via the existing
+   * `end_session` close path (which finalizes the leg as a `failed` outcome
+   * and arms the durable dropped-call recovery follow-up) rather than trapping
+   * the caller in an apology loop.
+   *
+   * The counter is bumped here and reset to 0 by any successful turn.
+   */
+  private async recoverFromSpeechTurnFailure(session: VoiceSession): Promise<void> {
+    this.state.consecutiveSpeechTurnFailures += 1;
+
+    if (
+      this.state.consecutiveSpeechTurnFailures >= MAX_CONSECUTIVE_SPEECH_TURN_FAILURES
+    ) {
+      await this.speakAndEndAfterRepeatedSpeechTurnFailures(session);
+      // OBS — fired after the hand-off is spoken/the call is torn down;
+      // never alters the recovery behavior above.
+      recordVoiceError({
+        errorKind: 'speech_turn_repeated_failure',
+        channel: 'media_streams',
+        callSid: this.state.callSid,
+        tenantId: this.state.tenantId,
+      });
+      return;
+    }
+
+    await this.speakRecoveryLine(session, SPEECH_TURN_FAILURE_REPROMPT_COPY);
+    // OBS — fired after the apology/reprompt is spoken; never alters the
+    // recovery behavior above.
+    recordVoiceError({
+      errorKind: 'speech_turn_failed',
+      channel: 'media_streams',
+      callSid: this.state.callSid,
+      tenantId: this.state.tenantId,
+    });
+  }
+
+  /**
+   * VOX-35c — repeated-failure branch: speak the localized hand-off line then
+   * tear the call down through the normal `end_session` path. The synthetic
+   * `end_session` effect is stashed so `finalizeOnClose` reads its
+   * `payload.reason` (system_failure:* → `failed` outcome) exactly as it would
+   * for an FSM-emitted end_session.
+   *
+   * A3 reuses this exact hand-off (speak the escalation line, stash a
+   * synthetic `end_session`, close) for repeated low-STT-confidence turns —
+   * same graceful-hand-off shape, different root cause — so it takes an
+   * optional `endSessionReason` to keep `voice_sessions.terminal_reason`
+   * accurate for each caller rather than mislabeling a noisy-line hand-off
+   * as a pipeline failure. `deriveCallOutcome` doesn't special-case either
+   * string beyond the shared `system_failure:` prefix check (which neither
+   * of these calls exercises — finalState here is never `escalating`), so
+   * both fall through to the same `failed` outcome; the string only affects
+   * the persisted reason.
+   */
+  private async speakAndEndAfterRepeatedSpeechTurnFailures(
+    session: VoiceSession,
+    endSessionReason: string = 'system_failure:speech_turn_repeated_failure',
+  ): Promise<void> {
+    await this.speakRecoveryLine(session, SPEECH_TURN_FAILURE_ESCALATION_COPY);
+    if (this.state.closed) return;
+    this.state.pendingFinalizeEffects = [
+      {
+        type: 'end_session',
+        payload: { reason: endSessionReason },
+      },
+    ];
+    this.handleClose('end_session');
+  }
+
+  /**
+   * A3 — recover a FINAL transcript whose Deepgram acoustic `confidence`
+   * came back below {@link MIN_STT_CONFIDENCE}. Unlike
+   * {@link recoverFromSpeechTurnFailure} (the turn PIPELINE threw), here the
+   * pipeline is healthy but the STT engine itself flagged the audio as
+   * likely mis-heard — dispatching it risks acting on the WRONG intent
+   * (e.g. "cancel" dispatched from a misheard "confirm").
+   *
+   * Streak 1 (and any isolated blip): speak a distinct, language-aware
+   * "didn't catch that" reprompt ({@link LOW_STT_CONFIDENCE_REPROMPT_COPY})
+   * through the SAME outbound-turn path VOX-35c uses
+   * ({@link speakRecoveryLine}) — barge-in/TTFA/transcript bookkeeping
+   * behave identically to any other agent line.
+   *
+   * Streak {@link MAX_CONSECUTIVE_LOW_CONFIDENCE_TURNS} (back-to-back): the
+   * line itself is the problem (noisy/crosstalk/bad connection), not a
+   * one-off blip — stop reprompting and hand off through the SAME
+   * escalation/`end_session` path VOX-35c uses for a persistently broken
+   * turn pipeline ({@link speakAndEndAfterRepeatedSpeechTurnFailures}),
+   * rather than trapping the caller in a "could you repeat that" loop.
+   *
+   * The streak is bumped here and reset to 0 by any dispatched
+   * (high-confidence, or confidence-absent) final.
+   */
+  private async recoverFromLowSttConfidence(session: VoiceSession): Promise<void> {
+    this.state.consecutiveLowConfidenceTurns += 1;
+
+    if (
+      this.state.consecutiveLowConfidenceTurns >= MAX_CONSECUTIVE_LOW_CONFIDENCE_TURNS
+    ) {
+      await this.speakAndEndAfterRepeatedSpeechTurnFailures(
+        session,
+        'low_stt_confidence_max_retries',
+      );
+      // OBS — fired after the hand-off is spoken/the call is torn down;
+      // never alters the recovery behavior above.
+      recordVoiceError({
+        errorKind: 'low_stt_confidence_repeated',
+        channel: 'media_streams',
+        callSid: this.state.callSid,
+        tenantId: this.state.tenantId,
+      });
+      return;
+    }
+
+    await this.speakRecoveryLine(session, LOW_STT_CONFIDENCE_REPROMPT_COPY);
+    // OBS — fired after the reprompt is spoken; never alters the recovery
+    // behavior above.
+    recordVoiceError({
+      errorKind: 'low_stt_confidence',
+      channel: 'media_streams',
+      callSid: this.state.callSid,
+      tenantId: this.state.tenantId,
+    });
+  }
+
+  /**
+   * Codex P2 (PR #702) — T2-F05 silence-timer entry point. Gives a pending
+   * owner-approval readback (RV-071) or SMS-consent capture (WS18) first
+   * crack at a silence-timer expiry, exactly as `processSpeechTurn` does
+   * for a real empty-utterance turn, BEFORE falling through to the shared
+   * low-STT-confidence reprompt/escalation ladder. Without this, a caller
+   * who went silent mid-dialogue was reprompted by
+   * {@link recoverFromLowSttConfidence} and — on a second consecutive
+   * silence — escalated and end-sessioned with the dialogue stranded
+   * (never cleared, never resolved).
+   *
+   * `deps.handlePendingDialogueSilence` (wired to
+   * `TwilioGatherAdapter.handlePendingDialogueSilence` in production) owns
+   * both the pending-check and the handler dispatch — this method only
+   * renders whatever side effects come back (through the same
+   * `emitSideEffects` + `end_session` check the main turn path uses) and,
+   * when nothing was pending, falls through unchanged to
+   * `recoverFromLowSttConfidence`. Optional dep: omitting it (as every
+   * pre-existing test fixture does) reproduces the exact prior behavior.
+   */
+  private async recoverFromSilenceExpiry(session: VoiceSession): Promise<void> {
+    if (this.state.closed) return;
+    if (this.deps.handlePendingDialogueSilence) {
+      let consumed: SideEffect[] | null = null;
+      try {
+        consumed = await this.deps.handlePendingDialogueSilence(session, session.tenantId);
+      } catch (err) {
+        logger.warn('mediastream: pending-dialogue silence handler failed', {
+          error: err instanceof Error ? err.message : String(err),
+          sessionId: session.id,
+        });
+      }
+      if (consumed) {
+        await this.emitSideEffects(consumed);
+        // Mirrors the main turn path: a pending-dialogue side effect that
+        // itself ends the session (e.g. a challenge-lockout hand-off)
+        // must still close the call.
+        if (consumed.some((fx) => fx.type === 'end_session')) {
+          this.state.pendingFinalizeEffects = consumed;
+          this.handleClose('end_session');
+        }
+        return;
+      }
+    }
+    await this.recoverFromLowSttConfidence(session);
+  }
+
+  /**
+   * VOX-35c — render one recovery line through the normal outbound-turn path
+   * and keep the transcript faithful by appending the spoken (localized) copy
+   * as an agent line. `rawText` is an English catalog key that
+   * `renderTtsText` localizes to the session's active language (en/es).
+   */
+  private async speakRecoveryLine(session: VoiceSession, rawText: string): Promise<void> {
+    if (this.state.closed) return;
+    await this.emitSideEffects([{ type: 'tts_play', payload: { text: rawText } }]);
+    this.deps.store.appendTranscript(session.id, {
+      speaker: 'agent',
+      text: renderTtsText(rawText, {}, this.currentSpokenLanguage()),
+      ts: Date.now(),
+    });
+  }
+
+  // ─── UB-C1 — live language switching ───────────────────────────────────────
+
+  /**
+   * Keyword-boost options for a Deepgram open/reopen in `lang`.
+   *
+   * A2 — previously this returned `undefined` on Spanish sessions (the
+   * boost list was assumed to be English-only trade terminology that would
+   * degrade Nova-3's Spanish recognition), which silently dropped boosting
+   * for every es caller. The terms themselves (catalog items, proper nouns,
+   * codeswitched trade jargon like "PEX" or model numbers) are frequently
+   * spoken as-is by Spanish speakers too, so suppressing them cost more
+   * than it protected. Boosting is now sent for both languages; the
+   * 50-term cap (`VerticalTerminologyProvider.MAX_KEYWORDS`) still bounds
+   * the list upstream.
+   */
+  private deepgramKeywordOptions(
+    _lang: 'en' | 'es',
+  ): { keywords: ReadonlyArray<string> } | undefined {
+    return this.state.sttKeywords.length > 0
+      ? { keywords: this.state.sttKeywords }
+      : undefined;
+  }
+
+  /**
+   * The language the agent SPEAKS in. Prefers `session.language` (which
+   * the host may pin from tenant defaults even when no
+   * initialLanguageResolver is wired) over the adapter's STT language.
+   */
+  private currentSpokenLanguage(): SessionLanguage {
+    const sessionLang = this.state.session?.language;
+    if (sessionLang === 'en' || sessionLang === 'es') return sessionLang;
+    return this.state.language;
+  }
+
+  /**
+   * UB-C1 trigger (b) — deterministic explicit-switch scan on a final
+   * transcript. Returns true when the turn was CONSUMED (a switch actually
+   * happened and the localized ack was spoken); false lets the caller's
+   * words flow into the normal turn pipeline. Never consumes when:
+   *   - the utterance carries an emergency keyword (life-safety wins),
+   *   - the requested language is already active,
+   *   - the tenant hasn't opted into the target language,
+   *   - the flap guard has been exhausted (switchLanguage refuses).
+   */
+  private async maybeHandleExplicitLanguageSwitch(transcript: string): Promise<boolean> {
+    const session = this.state.session;
+    if (!session) return false;
+    const target = detectLanguageSwitchIntent(transcript);
+    if (!target) return false;
+    if (target === this.state.language) {
+      // STT already listens in `target`; the SPOKEN language can still
+      // disagree when the host pinned a different tenant default (no
+      // resolver wired). Align TTS without burning a reopen/flap-budget
+      // slot — and don't consume the turn.
+      if (
+        (session.language === 'en' || session.language === 'es') &&
+        session.language !== target
+      ) {
+        session.language = target;
+      }
+      return false;
+    }
+    // detectLanguageSwitchIntent is an ungated heuristic — the tenant
+    // opt-in gate is applied here (only detectLanguage gates internally).
+    if (!isLanguageSupported(target, session.supportedLanguages ?? null)) return false;
+    // Life-safety first: "hay una fuga de gas, en español por favor" must
+    // run the emergency pipeline, not be consumed by a language ack.
+    if (detectEmergency(transcript).matched) return false;
+
+    const switched = await this.switchLanguage(target, 'explicit_request');
+    if (!switched) return false;
+
+    // The consumed turn bypasses processCallerUtterance (which normally
+    // appends the caller line) — keep the transcript faithful ourselves.
+    this.deps.store.appendTranscript(session.id, {
+      speaker: 'caller',
+      text: transcript,
+      ts: Date.now(),
+    });
+    const ack = LANGUAGE_SWITCH_ACK[target];
+    await this.emitSideEffects([{ type: 'tts_play', payload: { text: ack } }]);
+    this.deps.store.appendTranscript(session.id, {
+      speaker: 'agent',
+      text: ack,
+      ts: Date.now(),
+    });
+    return true;
+  }
+
+  /**
+   * UB-C1 trigger (a) — one-shot detection on the FIRST final transcript.
+   * When the caller's opening words disagree with the language Deepgram
+   * opened in (and the tenant opted into the detected language), switch
+   * once before the turn is dispatched. `detectLanguageFromTranscript` is
+   * an ungated heuristic — the supported-languages gate is applied here.
+   */
+  private async maybeRunFirstFinalLanguageDetection(transcript: string): Promise<void> {
+    if (this.state.firstFinalLanguageChecked) return;
+    this.state.firstFinalLanguageChecked = true;
+    const session = this.state.session;
+    if (!session) return;
+    const detected = detectLanguageFromTranscript(transcript);
+    if (!detected || detected === this.state.language) return;
+    if (!isLanguageSupported(detected, session.supportedLanguages ?? null)) return;
+    await this.switchLanguage(detected, 'first_utterance');
+  }
+
+  /**
+   * UB-C1 — finish + reopen the live Deepgram session in `target`.
+   *
+   * Serialized under the SAME per-session lock the speech-turn dispatch
+   * uses (`store.withSessionLock`) so a reopen can never interleave with
+   * an in-flight FSM turn. NOTE the lock is a non-reentrant promise chain
+   * — this method must never be called from inside another lock body.
+   *
+   * Flap guard: hard cap of {@link MAX_LANGUAGE_SWITCHES_PER_CALL}
+   * reopen cycles per call; the 3rd request is refused (audio keeps
+   * flowing in the current language).
+   *
+   * Media frames that arrive during the reopen window are dropped
+   * (state.deepgram is null) — the gap is one WS round-trip.
+   *
+   * Returns true when the switch happened.
+   */
+  async switchLanguage(
+    target: 'en' | 'es',
+    trigger: LanguageSwitchedEvent['trigger'],
+  ): Promise<boolean> {
+    const session = this.state.session;
+    if (!session || this.state.closed) return false;
+    return this.deps.store.withSessionLock(session.id, async () => {
+      // Re-validate under the lock — a queued concurrent switch may have
+      // already flipped the language or spent the flap budget.
+      if (this.state.closed) return false;
+      if (target === this.state.language) return false;
+      if (this.state.languageSwitchCount >= MAX_LANGUAGE_SWITCHES_PER_CALL) {
+        logger.info('mediastream: language switch refused — flap guard', {
+          callSid: this.state.callSid,
+          target,
+          switchCount: this.state.languageSwitchCount,
+        });
+        return false;
+      }
+
+      const from = this.state.language;
+      const old = this.state.deepgram;
+      // Null out first so handleMedia drops frames instead of feeding a
+      // finishing socket. Bump the generation BEFORE finishing so the old
+      // session's onClose (fired by this deliberate teardown) is stale and
+      // never mistaken for an unexpected mid-call failure (WS7).
+      this.state.deepgram = null;
+      this.state.deepgramGeneration++;
+      try {
+        old?.finish();
+      } catch {
+        /* swallow — the old session is being discarded either way */
+      }
+
+      const openWith = async (lang: 'en' | 'es') => {
+        const dgGeneration = ++this.state.deepgramGeneration;
+        return this.deps.streamingProvider.openSession(
+          (event) => {
+            this.onTranscriptEvent(event).catch((err) => {
+              logger.warn('mediastream transcript handler threw', {
+                error: err instanceof Error ? err.message : String(err),
+              });
+            });
+          },
+          (err) => {
+            logger.warn('mediastream deepgram error', { error: err.message });
+          },
+          () => {
+            // WS7 — same unexpected-close degrade as the initial open, so a
+            // language-switched call keeps mid-call failure coverage.
+            // Generation-guarded like the initial open's hook.
+            if (dgGeneration !== this.state.deepgramGeneration) return;
+            // WS16a — same latch + teardown guard + vote-before-degrade as the
+            // initial open's hook (see there): don't vote on a deliberate
+            // teardown; an unexpected live-generation close is a failure.
+            if (this.state.closed || this.state.wsCloseInitiated) return;
+            this.recordCircuitOutcomeOnce('failure', 'deepgram_unexpected_close');
+            void this.attemptDegradeToGather('deepgram_unexpected_close');
+          },
+          lang,
+          this.deepgramKeywordOptions(lang),
+        );
+      };
+
+      try {
+        this.state.deepgram = await openWith(target);
+      } catch (err) {
+        logger.error('mediastream: Deepgram reopen failed on language switch', {
+          callSid: this.state.callSid,
+          target,
+          error: err instanceof Error ? err.message : String(err),
+        });
+        // Recovery: try to restore STT in the previous language. A call
+        // with no STT at all is dead air — tear down if that fails too.
+        try {
+          this.state.deepgram = await openWith(from);
+          return false;
+        } catch {
+          // WS16a — both the target reopen and the same-language recovery
+          // failed: the live call now has no STT at all. That is a realtime
+          // transport failure — vote it here (the most precise reason) so the
+          // latch suppresses the blunt `ws_closed`/transport_failure that the
+          // handleClose below produces. mapCloseReasonToFinalize now classifies
+          // `deepgram_reopen_failed` as transport_failure so the CallOutcome is
+          // stamped `failed`, not the caller_hangup default.
+          this.recordCircuitOutcomeOnce('failure', 'deepgram_reopen_failed');
+          this.handleClose('deepgram_reopen_failed');
+          return false;
+        }
+      }
+
+      this.state.language = target;
+      session.language = target;
+      this.state.languageSwitchCount++;
+      session.events.emit(
+        VOICE_EVENT_CHANNEL,
+        languageSwitchedEvent({
+          from,
+          to: target,
+          trigger,
+          switchCount: this.state.languageSwitchCount,
+        }),
+      );
+      logger.info('mediastream: language switched', {
+        callSid: this.state.callSid,
+        from,
+        to: target,
+        trigger,
+        switchCount: this.state.languageSwitchCount,
+      });
+      return true;
+    });
+  }
+
+  /**
    * B3.3 — Run the async LLM sentiment classifier and, if the score
    * meets or exceeds the per-tenant threshold, dispatch
    * `frustration_detected` out-of-band into the FSM and execute the
@@ -869,6 +2257,7 @@ export class TwilioMediaStreamAdapter {
         transcript,
         priorTurns,
         intent,
+        tenantId: session.tenantId,
       },
       {
         costTracker: session.costTracker,
@@ -957,14 +2346,38 @@ export class TwilioMediaStreamAdapter {
         continue;
       }
       if (fx.type !== 'tts_play') continue;
-      const text = typeof fx.payload.text === 'string' ? fx.payload.text : '';
-      if (!text) continue;
+      const rawText = typeof fx.payload.text === 'string' ? fx.payload.text : '';
+      if (!rawText) continue;
+      // UB-C2 — render template keys + the fixed-sentence es catalog with
+      // the session language before synthesis (parity with the in-app
+      // adapter, which routes every spoken line through renderTtsText).
+      //
+      // Greeting exception: initializeStreamSession SUBSTITUTES the
+      // 'greeting' placeholder with the real greeting + the RECORDING
+      // DISCLOSURE legal copy (already localized). Re-rendering via the
+      // surviving `template` hint would replace that with the generic
+      // template line and silently drop the disclosure — so the hint is
+      // stripped once the text is no longer the placeholder. The
+      // 'confirm_intent' hint stays: its payload carries `intent`, making
+      // the re-render lossless (and it's what localizes the confirm).
+      const lang = this.currentSpokenLanguage();
+      const templateHint = (fx.payload as { template?: unknown }).template;
+      const isSubstitutedGreeting =
+        (templateHint === 'greeting' || templateHint === 'greeting_with_disclosure') &&
+        rawText !== 'greeting';
+      const renderPayload = isSubstitutedGreeting
+        ? { ...(fx.payload as Record<string, unknown>), template: undefined }
+        : (fx.payload as Record<string, unknown>);
+      const text = renderTtsText(rawText, renderPayload, lang);
       let turnId = ++this.state.outboundTurnId;
       this.state.agentSpeaking = true;
+      // Consent ordering — scope the completion flag + byte count to THIS turn.
+      this.state.turnRealAudioComplete = false;
+      this.state.turnAudioBytes = 0;
       try {
         // runTurnWithFiller returns the final turnId — it may have been
         // bumped if a filler was preempted by the real TTS arrival.
-        turnId = await this.runTurnWithFiller(ttsProvider, text, turnId);
+        turnId = await this.runTurnWithFiller(ttsProvider, text, turnId, lang);
       } catch (err) {
         logger.warn('mediastream: TTS turn failed', {
           error: err instanceof Error ? err.message : String(err),
@@ -973,6 +2386,18 @@ export class TwilioMediaStreamAdapter {
         if (turnId === this.state.outboundTurnId) {
           this.state.agentSpeaking = false;
         }
+      }
+      // Consent ordering — bind the disclosure verdict to the FIRST spoken
+      // turn of establishment (the greeting, which carries the recording
+      // notice). Recorded once: a later prompt that streams fine must never
+      // mask a greeting that didn't play.
+      if (this.state.awaitingDisclosureTurn && this.state.disclosureTurnComplete === null) {
+        this.state.disclosureTurnComplete = this.state.turnRealAudioComplete;
+        this.state.disclosureAudioBytes = this.state.turnAudioBytes;
+        // Pin the turn id the disclosure's end-of-utterance mark carries (the
+        // post-runTurnWithFiller value, which a preempted filler may have
+        // bumped) so the mark handler can recognise that ack and only that one.
+        this.state.disclosureTurnId = turnId;
       }
     }
   }
@@ -1108,6 +2533,14 @@ export class TwilioMediaStreamAdapter {
     ttsProvider: TtsProvider,
     text: string,
     turnIdIn: number,
+    /**
+     * UB-C2 — session language for this turn. Threads into the synth call
+     * (es → eleven_multilingual_v2 in the provider) and keys filler
+     * selection so a Spanish call never hears an English filler. When the
+     * selected clip is missing from the cache the turn simply gets no
+     * filler (silence) — never a clip from the other language.
+     */
+    lang: SessionLanguage = 'en',
   ): Promise<number> {
     const delayMs = this.deps.fillerDelayMs ?? 250;
     const engine = this.deps.fillerEngine;
@@ -1142,9 +2575,12 @@ export class TwilioMediaStreamAdapter {
           if (realStarted || turnId !== this.state.outboundTurnId || !this.state.agentSpeaking) {
             return;
           }
-          const filler = engine.selectNext();
+          const filler = engine.selectNext({ language: lang });
           if (!filler) return;
           const pcm = cache.get(filler.id);
+          // Missing clip (e.g. Spanish clips not yet rendered at deploy
+          // time) → SILENCE for this turn. Never substitute a clip from
+          // the other language.
           if (!pcm) return;
           // Mark filler as active BEFORE starting the stream so that the
           // real-TTS first-chunk handler can see the flag synchronously.
@@ -1164,42 +2600,121 @@ export class TwilioMediaStreamAdapter {
 
     try {
       if (typeof ttsProvider.synthesizeStream === 'function') {
-        const stream = ttsProvider.synthesizeStream({
-          text,
-          tenantId: this.state.tenantId ?? undefined,
-          signal: controller.signal,
-        });
-        let first = true;
-        for await (const chunk of stream) {
-          if (turnId !== this.state.outboundTurnId || !this.state.agentSpeaking) {
-            controller.abort();
-            break;
+        try {
+          const stream = ttsProvider.synthesizeStream({
+            text,
+            tenantId: this.state.tenantId ?? undefined,
+            signal: controller.signal,
+            language: lang,
+          });
+          let first = true;
+          // Consent ordering — a normally-completing iterator is NOT proof the
+          // utterance finished: the ElevenLabs stream's `close` listener calls
+          // finish() unconditionally, so a premature WS close ends the loop
+          // cleanly without ever yielding `isFinal`. Require BOTH an explicit
+          // final chunk and at least one non-empty PCM frame before treating
+          // the turn as complete.
+          let sawFinalChunk = false;
+          let streamedRealAudio = false;
+          for await (const chunk of stream) {
+            if (turnId !== this.state.outboundTurnId || !this.state.agentSpeaking) {
+              controller.abort();
+              break;
+            }
+            if (first && chunk.pcm.length > 0) {
+              realStarted = true;
+              if (fillerTimer) clearTimeout(fillerTimer);
+              // If a filler clip is mid-stream, terminate it cleanly by
+              // bumping outboundTurnId (exits its streamPcmAsMedia loop)
+              // and rebinding our local turnId to the new value.
+              cancelActiveFiller();
+              first = false;
+            }
+            if (chunk.pcm.length > 0) {
+              streamedRealAudio = true;
+              await this.streamPcmAsMedia(chunk.pcm, turnId);
+            }
+            if (chunk.isFinal) {
+              sawFinalChunk = true;
+              break;
+            }
           }
-          if (first && chunk.pcm.length > 0) {
-            realStarted = true;
+          // Consent ordering — complete ONLY when the provider explicitly
+          // signalled the end of the utterance AND real audio actually
+          // streamed. A clean-but-premature close (no isFinal) or an
+          // isFinal-only stream carrying zero PCM is a truncated/absent turn,
+          // so the flag stays false and the disclosure gate fails closed.
+          if (sawFinalChunk && streamedRealAudio) {
+            this.state.turnRealAudioComplete = true;
+          }
+          // T2-F05 — all of this turn's audio is now enqueued. Arm the
+          // silence countdown on a single dedicated end-of-utterance mark,
+          // not the per-chunk `turn-${turnId}` marks emitted inside
+          // streamPcmAsMedia() above (one per chunk for a multi-chunk stream).
+          this.armSilenceOnTurnEnd(turnId);
+        } catch (streamErr) {
+          // VOX-35b — a WS blip or a VOX-33 inactivity stall surfaces here
+          // as a thrown rejection. The old caller only logged.warn, so the
+          // utterance was cut off mid-sentence → dead air. Recover once via
+          // the buffered REST synth (or a short filler) instead of silently
+          // ending the turn. A clean barge-in does NOT reach this path: it
+          // aborts the controller, which closes the WS and ends the stream
+          // normally (done, not error).
+          logger.warn('mediastream: TTS stream failed mid-turn, attempting recovery', {
+            error: streamErr instanceof Error ? streamErr.message : String(streamErr),
+            realStarted,
+            callSid: this.state.callSid,
+          });
+          // Only recover if this turn still owns the floor (no barge-in, no
+          // newer turn superseded it).
+          if (turnId === this.state.outboundTurnId && this.state.agentSpeaking) {
             if (fillerTimer) clearTimeout(fillerTimer);
-            // If a filler clip is mid-stream, terminate it cleanly by
-            // bumping outboundTurnId (exits its streamPcmAsMedia loop)
-            // and rebinding our local turnId to the new value.
             cancelActiveFiller();
-            first = false;
+            await this.recoverTurnAfterStreamFailure(ttsProvider, text, lang, turnId);
+            // OBS — fired after the recovery attempt (buffered synth /
+            // filler / dead-air-avoided) has already run; never alters it.
+            recordVoiceError({
+              errorKind: 'tts_stream_recovered',
+              channel: 'media_streams',
+              callSid: this.state.callSid,
+              tenantId: this.state.tenantId,
+            });
           }
-          if (chunk.pcm.length > 0) {
-            await this.streamPcmAsMedia(chunk.pcm, turnId);
-          }
-          if (chunk.isFinal) break;
         }
       } else {
         const result = await ttsProvider.synthesize({
           text,
           tenantId: this.state.tenantId ?? undefined,
+          language: lang,
         });
         realStarted = true;
         if (fillerTimer) clearTimeout(fillerTimer);
         // Same cancellation logic for buffered (non-streaming) TTS.
         cancelActiveFiller();
-        if (turnId === this.state.outboundTurnId && this.state.agentSpeaking) {
+        // P0 defense-in-depth: streamPcmAsMedia() assumes raw PCM16 @ 16kHz
+        // (it mu-law-encodes the bytes itself) and does NOT decode
+        // compressed formats. synthesize() results are only PCM-safe when
+        // contentType says so — feeding compressed audio (e.g. OpenAI's
+        // default 'audio/mpeg') into it produces inaudible static with no
+        // error surfaced to the caller. The app.ts boot guard should
+        // prevent a non-streaming, non-PCM provider from ever being wired
+        // when Media Streams is enabled; this check is the belt-and-
+        // suspenders so a future provider swap can't silently regress.
+        if (!isRawPcmContentType(result.contentType)) {
+          logger.error(
+            'mediastream: synthesize() returned non-PCM audio, dropping instead of streaming as static',
+            { contentType: result.contentType, provider: result.provider, tenantId: this.state.tenantId ?? undefined },
+          );
+        } else if (turnId === this.state.outboundTurnId && this.state.agentSpeaking) {
           await this.streamPcmAsMedia(result.audio, turnId);
+          // Consent ordering — the full buffered synth of this turn's text
+          // streamed, so the caller heard the COMPLETE real TTS. A zero-length
+          // buffer emits no media frames at all (streamPcmAsMedia loops zero
+          // times), so it is silence, not a played turn.
+          if (result.audio.length > 0) this.state.turnRealAudioComplete = true;
+          // T2-F05 — same single end-of-utterance arm as the streaming path,
+          // for the buffered (non-streaming) TTS fallback.
+          this.armSilenceOnTurnEnd(turnId);
         }
       }
     } finally {
@@ -1211,6 +2726,94 @@ export class TwilioMediaStreamAdapter {
     // Return the (possibly rebounded) turnId so emitSideEffects can
     // compare it against outboundTurnId for the agentSpeaking reset.
     return turnId;
+  }
+
+  /**
+   * VOX-35b — recover a voice turn whose streaming TTS failed mid-flight
+   * (WS error, or a VOX-33 inactivity stall). Preference order, all bounded:
+   *
+   *  1. Buffered REST `synthesize()` — but ONLY stream it when the result is
+   *     raw PCM (same guard the non-streaming branch uses). ElevenLabs REST
+   *     returns mp3, which streamPcmAsMedia would emit as inaudible static —
+   *     worse than silence — so a non-PCM result is dropped, not played.
+   *  2. A short filler/apology clip from the cache, so the caller hears an
+   *     acknowledgement rather than dead air while the turn ends cleanly.
+   *
+   * If neither is available we still return normally: the throw is now
+   * caught, so `agentSpeaking` resets in the caller's finally and the call
+   * proceeds to listen again — never the 30-minute idle hang.
+   *
+   * All writes are re-guarded on turn ownership because `synthesize()` can
+   * take time and the caller may barge in during the fallback.
+   */
+  private async recoverTurnAfterStreamFailure(
+    ttsProvider: TtsProvider,
+    text: string,
+    lang: SessionLanguage,
+    turnId: number,
+  ): Promise<void> {
+    let result: Awaited<ReturnType<TtsProvider['synthesize']>> | null = null;
+    try {
+      result = await ttsProvider.synthesize({
+        text,
+        tenantId: this.state.tenantId ?? undefined,
+        language: lang,
+      });
+    } catch (err) {
+      logger.warn('mediastream: buffered TTS fallback also failed', {
+        error: err instanceof Error ? err.message : String(err),
+        callSid: this.state.callSid,
+      });
+    }
+
+    if (
+      result &&
+      isRawPcmContentType(result.contentType) &&
+      turnId === this.state.outboundTurnId &&
+      this.state.agentSpeaking
+    ) {
+      await this.streamPcmAsMedia(result.audio, turnId);
+      // Consent ordering — recovery re-synthesized and streamed the WHOLE
+      // turn text, so the caller heard the complete real TTS (after a hiccup).
+      // A zero-length buffer emits no media frames, so it is silence rather
+      // than a played turn. The filler fallback below never sets this at all.
+      if (result.audio.length > 0) this.state.turnRealAudioComplete = true;
+      // T2-F05 — recovery still played a full agent turn, so a silent caller
+      // after it must still get the bounded reprompt (handleMessage ignores
+      // the per-chunk turn-* marks for arming).
+      this.armSilenceOnTurnEnd(turnId);
+      return;
+    }
+    if (result && !isRawPcmContentType(result.contentType)) {
+      logger.warn(
+        'mediastream: buffered TTS fallback returned non-PCM audio, cannot stream — trying filler',
+        { contentType: result.contentType, provider: result.provider, callSid: this.state.callSid },
+      );
+    }
+
+    // Last resort: a short filler clip so the caller hears something.
+    const engine = this.deps.fillerEngine;
+    const cache = this.deps.fillerCache;
+    if (
+      engine &&
+      cache &&
+      turnId === this.state.outboundTurnId &&
+      this.state.agentSpeaking
+    ) {
+      const filler = engine.selectNext({ language: lang });
+      const pcm = filler ? cache.get(filler.id) : undefined;
+      if (pcm) {
+        await this.streamPcmAsMedia(pcm, turnId, /* isFiller */ true);
+        // T2-F05 — the apology filler is the last thing the caller hears on
+        // this turn; arm so their silence after it still reprompts/escalates.
+        this.armSilenceOnTurnEnd(turnId);
+        return;
+      }
+    }
+
+    logger.warn('mediastream: TTS turn ended without audio after stream failure', {
+      callSid: this.state.callSid,
+    });
   }
 
   /**
@@ -1248,6 +2851,10 @@ export class TwilioMediaStreamAdapter {
         streamSid: this.state.streamSid,
         media: { payload },
       });
+      // Consent ordering — accumulate the real (non-filler) audio actually
+      // enqueued for this turn, so the lost-ack backstop can wait out its true
+      // playback duration rather than a fixed constant.
+      if (!isFiller) this.state.turnAudioBytes += chunk.length;
       // VQ2-004: TTFA-stop. Emit `audio_frame_emitted` ONCE per turn,
       // on the first chunk that lands on the queue. The flag is armed
       // by `onTranscriptEvent` and disarmed here so subsequent chunks
@@ -1256,6 +2863,12 @@ export class TwilioMediaStreamAdapter {
       // thinking gap and would otherwise poison the TTFA metric.
       if (!isFiller && this.state.awaitingFirstAudioFrame && this.state.session) {
         this.state.awaitingFirstAudioFrame = false;
+        // WS26 — observe voice turn latency at the first real (non-filler)
+        // outbound chunk. Best-effort + exception-proof (observeTurnLatency
+        // swallows any metrics error); done BEFORE the event emit so a
+        // metrics failure can't disturb the existing TTFA telemetry either.
+        observeTurnLatency(this.state.turnLatencyStartMs);
+        this.state.turnLatencyStartMs = null;
         this.state.session.events.emit(
           VOICE_EVENT_CHANNEL,
           audioFrameEmittedEvent({ byteCount: chunk.length }),
@@ -1281,6 +2894,14 @@ export class TwilioMediaStreamAdapter {
         streamSid: this.state.streamSid,
         mark: { name: `turn-${turnId}` },
       });
+      // NOTE: this per-chunk `turn-${turnId}` mark is emitted once per
+      // streamPcmAsMedia() call — and runTurnWithFiller() calls this once
+      // PER streaming TTS chunk. It must NOT arm the silence countdown: for
+      // a multi-chunk utterance the first chunk's mark-ack would fire while
+      // later audio is still buffered/playing. Arming instead happens on a
+      // single dedicated `silence-arm-${turnId}` mark emitted once by
+      // runTurnWithFiller() after ALL of the turn's audio has been enqueued
+      // — see runTurnWithFiller and handleMessage's 'mark' case.
     }
   }
 
@@ -1309,6 +2930,7 @@ export class TwilioMediaStreamAdapter {
    * Called when an interim transcript arrives during agent TTS.
    */
   private bargeIn(): void {
+    this.clearSilenceRepromptTimer();
     this.state.ttsController?.abort();
     // If a filler clip was mid-stream when barge-in fires, emit the
     // cancellation event and clear the flag before bumping the turn.
@@ -1349,11 +2971,142 @@ export class TwilioMediaStreamAdapter {
     }
   }
 
+  /**
+   * T2-F05 — per-turn caller-silence reprompt. The 30-minute audioIdleTimer
+   * can NEVER catch a silent caller: Twilio Media Streams delivers `media`
+   * frames continuously (comfort-noise/silent mu-law) for the whole call, so
+   * `lastMediaAt` keeps refreshing and that timer only fires when the
+   * transport itself stalls. This timer instead measures caller-turn silence:
+   * armed when Twilio ACKs the agent (non-filler) TTS turn's dedicated,
+   * single, end-of-utterance `silence-arm-${turnId}` mark — emitted once by
+   * `runTurnWithFiller()` after ALL of that turn's audio has been enqueued —
+   * i.e. the caller has actually heard the WHOLE turn end, NOT when the mark
+   * was merely enqueued (a long prompt or send backlog would otherwise start
+   * the countdown early) and NOT on an earlier chunk's own per-chunk
+   * `turn-${turnId}` mark from `streamPcmAsMedia()` (which runs once per
+   * streamed chunk for a multi-chunk streaming TTS turn — acking that mark
+   * early must not start the countdown while later audio is still
+   * buffered/playing). Cleared by any transcript event
+   * (interim or final), by barge-in, and by close. Expiry routes through
+   * {@link recoverFromSilenceExpiry}, which gives a pending owner-approval
+   * or SMS-consent dialogue first crack at the turn (Codex P2, PR #702)
+   * before funneling into `recoverFromLowSttConfidence` deliberately:
+   * silence shares the `consecutiveLowConfidenceTurns` streak, reprompt
+   * copy, and MAX_CONSECUTIVE_LOW_CONFIDENCE_TURNS escalation with mumbled
+   * turns, so a caller cannot alternate silence and mumbling to stay on
+   * the line indefinitely and the ladder stays single-sourced. Re-arming
+   * after the reprompt is natural — the reprompt renders through the same
+   * `streamPcmAsMedia` path and enqueues its own end-of-turn mark. The
+   * captured `turnId` + agentSpeaking guards make a stale expiry (a newer
+   * outbound turn started without a transcript, e.g. an async sentiment
+   * escalation) a no-op.
+   */
+  private armSilenceRepromptTimer(turnId: number): void {
+    if (this.state.closed) return;
+    this.clearSilenceRepromptTimer();
+    const ms = this.deps.silenceRepromptTimeoutMs ?? DEFAULT_SILENCE_REPROMPT_MS;
+    // Snapshot the caller-activity generation at arm time. Any transcript that
+    // arrives before the expiry's locked body runs bumps this, marking the
+    // expiry stale (Codex P2, PR #702).
+    const armedGeneration = this.state.callerActivityGeneration;
+    this.state.silenceRepromptTimer = setTimeout(() => {
+      this.state.silenceRepromptTimer = null;
+      const session = this.state.session;
+      if (!session) return;
+      // Codex P2 (PR #702) — serialize the expiry with concurrent turns.
+      // A final transcript that races this timer runs its `speechTurn` under
+      // `withSessionLock` and mutates the SAME `pendingVoiceApproval` /
+      // `pendingConsentCapture` this expiry may consume. Clearing the timer
+      // can't stop a callback already inside the awaited hook, so take the
+      // lock and RE-CHECK the guards inside it: if the racing turn ran first
+      // the expiry is now stale → no-op. The `callerActivityGeneration` check
+      // is the load-bearing one for the transcript race: `speechTurn` consumes
+      // the dialogue under its OWN lock hold and the new outbound turn only
+      // bumps `outboundTurnId` / sets `agentSpeaking` AFTER that lock releases,
+      // so those two guards still read stale when this queued body runs — but
+      // the transcript already bumped the generation, so we bail correctly.
+      void this.deps.store
+        .withSessionLock(session.id, async () => {
+          if (
+            this.state.closed ||
+            turnId !== this.state.outboundTurnId ||
+            this.state.agentSpeaking ||
+            this.state.callerActivityGeneration !== armedGeneration
+          ) {
+            return;
+          }
+          await this.recoverFromSilenceExpiry(session);
+        })
+        .catch((err) => {
+          logger.warn('mediastream: silence reprompt failed', {
+            error: err instanceof Error ? err.message : String(err),
+            callSid: this.state.callSid,
+          });
+        });
+    }, ms);
+    if (typeof this.state.silenceRepromptTimer.unref === 'function') {
+      this.state.silenceRepromptTimer.unref();
+    }
+  }
+
+  /**
+   * T2-F05 — enqueue the single end-of-utterance `silence-arm-${turnId}` mark
+   * (once all of this turn's audio is queued) so its ack starts the silence
+   * countdown. Every path that finishes playing an agent turn's audio must
+   * call this — streaming success, buffered fallback, AND stream-failure
+   * recovery — or a silent caller after that turn gets no bounded reprompt.
+   * Re-guarded on turn ownership: a barge-in / newer turn must not arm.
+   */
+  private armSilenceOnTurnEnd(turnId: number): void {
+    if (turnId !== this.state.outboundTurnId || !this.state.agentSpeaking) return;
+    this.enqueueOutbound('control', {
+      event: 'mark',
+      streamSid: this.state.streamSid,
+      mark: { name: `silence-arm-${turnId}` },
+    });
+    this.state.pendingSilenceRepromptTurnId = turnId;
+  }
+
+  private clearSilenceRepromptTimer(): void {
+    // Also drop a not-yet-armed pending turn: a transcript/barge-in/close
+    // before the end-of-turn ack means the caller spoke or the call ended,
+    // so the ack must not arm a stale countdown.
+    this.state.pendingSilenceRepromptTurnId = null;
+    if (this.state.silenceRepromptTimer) {
+      clearTimeout(this.state.silenceRepromptTimer);
+      this.state.silenceRepromptTimer = null;
+    }
+  }
+
   // ─── Close / cleanup ───────────────────────────────────────────────────────
 
   private handleClose(reason: string): void {
     if (this.state.closed) return;
     this.state.closed = true;
+    // C5 — drop the capture-gate fallback timer with the leg.
+    if (this.state.captureEnableTimer) {
+      clearTimeout(this.state.captureEnableTimer);
+      this.state.captureEnableTimer = null;
+    }
+    // WS16a — vote the realtime health circuit from the TERMINAL close outcome,
+    // but ONLY for an ESTABLISHED session: state.session assigned AND at least
+    // one Deepgram open attempted (deepgramGeneration > 0). Pre-establishment
+    // security closes (invalid start, unknown CallSid, tenant mismatch,
+    // connection cap) all close before state.session is set — they are
+    // caller/config noise, not transport health, and must not vote. A
+    // transport_failure-class reason votes failure; a clean/caller-driven end
+    // (twilio_stop, end_session, audio_idle_timeout) votes success — the
+    // transport survived the whole call. The once-per-leg latch means an
+    // earlier, more precise signal (deepgram_unexpected_close,
+    // disclosure_init_failed, deepgram_reopen_failed) already recorded and this
+    // blunt terminal signal is suppressed.
+    if (this.state.session && this.state.deepgramGeneration > 0) {
+      if (mapCloseReasonToFinalize(reason) === 'transport_failure') {
+        this.recordCircuitOutcomeOnce('failure', reason);
+      } else {
+        this.recordCircuitOutcomeOnce('success', reason);
+      }
+    }
     // B2: stash the outcome BEFORE we tear down. The host's
     // `finalizeOnClose` is sync (sets session.terminalOutcome and
     // kicks off the DB write in the background), so close stays
@@ -1361,7 +3114,12 @@ export class TwilioMediaStreamAdapter {
     // dispatch's effects (with `end_session.payload.reason`) when the
     // close was triggered by an FSM end_session — empty otherwise, in
     // which case the host falls back to the mapped close reason.
-    if (this.deps.finalizeOnClose && this.state.session) {
+    // WS7 — skipped after a successful degrade-to-Gather: the call is NOT
+    // over (Twilio is re-requesting TwiML from /voice/gather-fallback), so a
+    // terminal stamp here would misrecord a live call as transport_failure,
+    // block the Gather leg's real finalization (terminalOutcome early-return)
+    // and schedule dropped-call recovery SMS to a caller still on the phone.
+    if (!this.state.degradedToGather && this.deps.finalizeOnClose && this.state.session) {
       try {
         this.deps.finalizeOnClose(
           this.state.session,
@@ -1376,6 +3134,7 @@ export class TwilioMediaStreamAdapter {
       clearTimeout(this.state.audioIdleTimer);
       this.state.audioIdleTimer = null;
     }
+    this.clearSilenceRepromptTimer();
     if (this.state.slowConsumerTimer) {
       clearTimeout(this.state.slowConsumerTimer);
       this.state.slowConsumerTimer = null;
@@ -1386,9 +3145,10 @@ export class TwilioMediaStreamAdapter {
       /* swallow */
     }
     this.state.deepgram = null;
-    if (!this.state.registryReleased && this.state.tenantId) {
-      const registry = this.deps.connectionRegistry ?? globalConnectionRegistry;
-      registry.release(TWILIO_SURFACE, this.state.tenantId);
+    if (!this.state.registryReleased && this.state.connectionLease) {
+      // Fire-and-forget: teardown can't await; idempotent + TTL backstop.
+      void this.state.connectionLease.release().catch(() => {});
+      this.state.connectionLease = null;
       this.state.registryReleased = true;
     }
     wsDisconnectTotal.inc({ surface: TWILIO_SURFACE, reason });
@@ -1493,12 +3253,16 @@ export class TwilioMediaStreamAdapter {
     agentSpeaking: boolean;
     outboundTurnId: number;
     closed: boolean;
+    language: 'en' | 'es';
+    languageSwitchCount: number;
   }> {
     return {
       streamSid: this.state.streamSid,
       agentSpeaking: this.state.agentSpeaking,
       outboundTurnId: this.state.outboundTurnId,
       closed: this.state.closed,
+      language: this.state.language,
+      languageSwitchCount: this.state.languageSwitchCount,
     };
   }
 }

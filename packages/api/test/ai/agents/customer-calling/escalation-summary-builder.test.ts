@@ -118,4 +118,20 @@ describe('buildEscalationSummary', () => {
     // Bonus: confirm $189.00 cents formatting (not $189 rounded).
     expect(eastern.panel.lastInteraction).toContain('$189.00');
   });
+
+  it('appends communication notes to panel lastInteraction', () => {
+    const result = buildEscalationSummary(
+      baseCtx({
+        customer: {
+          lastService: {
+            date: new Date('2026-01-10T00:00:00Z'),
+            type: 'tune-up',
+          },
+          communicationNotes: 'Prefers mornings.',
+        },
+      }),
+    );
+    expect(result.panel.lastInteraction).toContain('Last service:');
+    expect(result.panel.lastInteraction).toContain('Notes: Prefers mornings.');
+  });
 });

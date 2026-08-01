@@ -113,6 +113,9 @@ Rules:
   // Throws on timeout/provider error — callers must handle retry/escalation.
   const response = await gateway.complete({
     taskType: 'classify_intent',
+    // Top-level tenantId — the quota/cache resilience wrappers key on
+    // this, not metadata.tenantId (see gateway.ts's tenant-id guard).
+    tenantId,
     messages: [
       { role: 'user', content: classifyPrompt },
     ],

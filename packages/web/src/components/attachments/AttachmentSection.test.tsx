@@ -138,4 +138,70 @@ describe('AttachmentSection', () => {
     // After reload, the grid should show the presigned URL
     await waitFor(() => expect(screen.getByRole('img')).toHaveAttribute('src', 'https://cdn.test/a1.jpg'));
   });
+
+  it('keeps the attachment grid mounted during background reload after capture (no flicker)', async () => {
+    // Initialised to a no-op (not null) so TS keeps the type callable — the
+    // real resolver is assigned inside the mockImplementationOnce executor,
+    // which control-flow analysis can't see, and a `| null` union would
+    // narrow to `null` at the call site below.
+    let resolveReload: (value: Response) => void = () => {};
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(
+        jsonResponse([
+          {
+            id: 'a1',
+            fileId: 'f1',
+            entityType: 'estimate',
+            entityId: 'e1',
+            kind: 'photo',
+            caption: 'Before',
+            downloadUrl: 'https://cdn.test/a1.jpg',
+          },
+        ]),
+      )
+      .mockImplementationOnce(
+        () =>
+          new Promise<Response>((resolve) => {
+            resolveReload = resolve;
+          }),
+      );
+
+    render(<AttachmentSection entityType="estimate" entityId="e1" />);
+    expect(await screen.findByTestId('attachment-grid')).toBeInTheDocument();
+    expect(screen.getByAltText('Before')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: /add photo/i }));
+    await waitFor(() => expect(screen.getByTestId('mock-capture-sheet')).toBeInTheDocument());
+    capturedOnClose?.();
+
+    // While the background reload is in flight the grid must stay mounted —
+    // previously load() set loading=true and hid the grid behind "Loading…".
+    await waitFor(() => expect(vi.mocked(fetch)).toHaveBeenCalledTimes(2));
+    expect(screen.getByTestId('attachment-grid')).toBeInTheDocument();
+    expect(screen.queryByText('Loading attachments…')).not.toBeInTheDocument();
+
+    resolveReload(
+      jsonResponse([
+        {
+          id: 'a1',
+          fileId: 'f1',
+          entityType: 'estimate',
+          entityId: 'e1',
+          kind: 'photo',
+          caption: 'Before',
+          downloadUrl: 'https://cdn.test/a1.jpg',
+        },
+        {
+          id: 'a2',
+          fileId: 'f2',
+          entityType: 'estimate',
+          entityId: 'e1',
+          kind: 'photo',
+          caption: 'After',
+          downloadUrl: 'https://cdn.test/a2.jpg',
+        },
+      ]),
+    );
+    await waitFor(() => expect(screen.getByAltText('After')).toBeInTheDocument());
+  });
 });

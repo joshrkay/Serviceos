@@ -2,6 +2,7 @@
 // response, the critical-urgency test, and the baseline/diff that fires
 // new/critical events exactly once. Ported from web's usePendingProposals;
 // kept pure so it unit-tests without a React renderer.
+import { isCaptureProposalType } from '@ai-service-os/shared';
 
 export interface PendingProposalSummary {
   id: string;
@@ -9,6 +10,8 @@ export interface PendingProposalSummary {
   proposalType: string;
   createdAt: string;
   expiresAt?: string;
+  /** 0–1 AI confidence, when the proposal carries one (drives the inbox badge). */
+  confidenceScore?: number;
 }
 
 export const CRITICAL_WINDOW_MS = 2 * 60 * 60 * 1000;
@@ -20,12 +23,44 @@ export function isCriticalProposal(p: PendingProposalSummary, now: number = Date
   return ms > 0 && ms <= CRITICAL_WINDOW_MS;
 }
 
+/** Whole hours until `iso`, clamped at 0; null when there's no expiry to show.
+ *  Shared by the Home dashboard preview and the Approvals cards. */
+export function hoursUntilExpiry(iso: string | undefined, now: number = Date.now()): number | null {
+  if (!iso) return null;
+  const ms = new Date(iso).getTime() - now;
+  if (Number.isNaN(ms)) return null;
+  return Math.max(0, Math.round(ms / 3_600_000));
+}
+
+export type ConfidenceBand = 'high' | 'medium' | 'low';
+
+/** Bucket a 0–1 confidence score for display; null when there's no score. */
+export function confidenceBand(score: number | undefined): ConfidenceBand | null {
+  if (score === undefined || Number.isNaN(score)) return null;
+  if (score >= 0.85) return 'high';
+  if (score >= 0.6) return 'medium';
+  return 'low';
+}
+
+/**
+ * Safe for one-tap BATCH approval: the auto-safe (capture) action lane AND high
+ * confidence. Money / customer-comms / irreversible proposals, and anything
+ * below high confidence, are excluded — they must be reviewed individually
+ * (CLAUDE.md "Never auto-execute"). `isCaptureProposalType` comes from the
+ * shared taxonomy that's parity-tested against the API's authoritative switch,
+ * so the safe lane can't drift; the server re-checks every id on approve.
+ */
+export function isBatchEligible(p: PendingProposalSummary): boolean {
+  return isCaptureProposalType(p.proposalType) && confidenceBand(p.confidenceScore) === 'high';
+}
+
 interface RawProposal {
   id: string;
   summary: string;
   proposalType: string;
   createdAt: string | number | Date;
   expiresAt?: string | number | Date;
+  confidenceScore?: number;
 }
 
 /** `GET /api/proposals/inbox` wraps each proposal in a prioritized envelope. */
@@ -45,6 +80,7 @@ function toSummary(p: RawProposal): PendingProposalSummary {
         : typeof p.expiresAt === 'string'
           ? p.expiresAt
           : new Date(p.expiresAt).toISOString(),
+    confidenceScore: p.confidenceScore,
   };
 }
 

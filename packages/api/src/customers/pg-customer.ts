@@ -24,7 +24,11 @@ function mapRow(row: Record<string, unknown>): Customer {
     email: (row.email as string) ?? undefined,
     preferredChannel: row.preferred_channel as Customer['preferredChannel'],
     smsConsent: row.sms_consent as boolean,
+    consentStatus:
+      (row.consent_status as 'granted' | 'revoked' | 'unknown' | null | undefined) ??
+      undefined,
     communicationNotes: (row.communication_notes as string) ?? undefined,
+    source: (row.source as Customer['source']) ?? undefined,
     isArchived: row.is_archived as boolean,
     archivedAt: row.archived_at ? new Date(row.archived_at as string) : undefined,
     originatingLeadId: (row.originating_lead_id as string) ?? undefined,
@@ -105,9 +109,9 @@ export class PgCustomerRepository extends PgBaseRepository implements CustomerRe
           primary_phone, secondary_phone, email, preferred_channel, sms_consent,
           communication_notes, is_archived, archived_at, originating_lead_id,
           date_of_birth, account_type, parent_account_id, preferred_language,
-          created_by, created_at, updated_at
+          source, created_by, created_at, updated_at
         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14,
-                  $15, $16, $17, $18, $19, $20, $21, $22)
+                  $15, $16, $17, $18, $19, $20, $21, $22, $23)
         RETURNING *`,
         [
           customer.id,
@@ -129,6 +133,7 @@ export class PgCustomerRepository extends PgBaseRepository implements CustomerRe
           customer.accountType ?? null,
           customer.parentAccountId ?? null,
           customer.preferredLanguage ?? null,
+          customer.source ?? null,
           customer.createdBy,
           customer.createdAt,
           customer.updatedAt,
@@ -171,6 +176,20 @@ export class PgCustomerRepository extends PgBaseRepository implements CustomerRe
         `(display_name ILIKE $${paramIndex} OR company_name ILIKE $${paramIndex} OR email ILIKE $${paramIndex} OR primary_phone ILIKE $${paramIndex})`
       );
       params.push(searchParam);
+      paramIndex++;
+    }
+
+    // U2 (4.8) — tag filter. EXISTS against customer_tags keeps the data and
+    // count queries in agreement; tenant_id is bound inside the subquery too
+    // (defense-in-depth alongside RLS). The index idx_customer_tags_customer
+    // serves the correlated lookup.
+    if (options?.tag) {
+      conditions.push(
+        `EXISTS (SELECT 1 FROM customer_tags ct
+                 WHERE ct.tenant_id = $1 AND ct.customer_id = customers.id
+                   AND ct.tag = $${paramIndex})`
+      );
+      params.push(options.tag);
       paramIndex++;
     }
 
@@ -237,6 +256,7 @@ export class PgCustomerRepository extends PgBaseRepository implements CustomerRe
         preferredChannel: 'preferred_channel',
         smsConsent: 'sms_consent',
         communicationNotes: 'communication_notes',
+        source: 'source',
         isArchived: 'is_archived',
         archivedAt: 'archived_at',
         originatingLeadId: 'originating_lead_id',
@@ -305,6 +325,16 @@ export class PgCustomerRepository extends PgBaseRepository implements CustomerRe
    * — callers decide whether to ask "which person?". Archived rows are
    * included so the skill can confirm record info even on archived
    * customers.
+   *
+   * U7 (4.7 multi-channel) — caller-ID is matched against ALL of a
+   * customer's phones, not just the primary: `phone_normalized` (the
+   * indexed generated column from `primary_phone`), `secondary_phone`,
+   * and every non-archived `customer_contacts.phone`. Secondary/contact
+   * numbers aren't pre-normalized in a generated column, so they're
+   * stripped inline; the predicate is bounded to a single tenant (RLS +
+   * the explicit `tenant_id = $1` first predicate), which keeps it
+   * tractable for v1 row counts. A 7-digit floor on the stored value
+   * avoids the empty-suffix `LIKE '%'` over-match.
    */
   async findByPhoneNormalized(
     tenantId: string,
@@ -313,17 +343,36 @@ export class PgCustomerRepository extends PgBaseRepository implements CustomerRe
     if (!phoneNormalized || phoneNormalized.length < 7) return [];
     const tail = phoneNormalized.slice(-10);
     return this.withTenant(tenantId, async (client) => {
-      // Match either:
-      //   (a) phone_normalized ends with the supplied tail (caller said
+      // For each stored phone, match either:
+      //   (a) the stored value ends with the supplied tail (caller said
       //       a 10-digit number; record stored with country prefix), or
-      //   (b) the supplied tail ends with phone_normalized (caller had
+      //   (b) the supplied tail ends with the stored value (caller had
       //       a country prefix; record stored without).
       const result = await client.query(
-        `SELECT * FROM customers
-         WHERE tenant_id = $1
-           AND phone_normalized IS NOT NULL
-           AND phone_normalized <> ''
-           AND (right(phone_normalized, 10) = $2 OR $2 LIKE '%' || phone_normalized)`,
+        `SELECT DISTINCT c.* FROM customers c
+         LEFT JOIN customer_contacts cc
+           ON cc.tenant_id = c.tenant_id
+          AND cc.customer_id = c.id
+          AND cc.is_archived = false
+         WHERE c.tenant_id = $1
+           AND (
+             (c.phone_normalized IS NOT NULL AND length(c.phone_normalized) >= 7
+               AND (right(c.phone_normalized, 10) = $2 OR $2 LIKE '%' || c.phone_normalized))
+             OR (
+               length(regexp_replace(coalesce(c.secondary_phone, ''), '\\D', '', 'g')) >= 7
+               AND (
+                 right(regexp_replace(c.secondary_phone, '\\D', '', 'g'), 10) = $2
+                 OR $2 LIKE '%' || regexp_replace(c.secondary_phone, '\\D', '', 'g')
+               )
+             )
+             OR (
+               length(regexp_replace(coalesce(cc.phone, ''), '\\D', '', 'g')) >= 7
+               AND (
+                 right(regexp_replace(cc.phone, '\\D', '', 'g'), 10) = $2
+                 OR $2 LIKE '%' || regexp_replace(cc.phone, '\\D', '', 'g')
+               )
+             )
+           )`,
         [tenantId, tail]
       );
       return result.rows.map(mapRow);
@@ -380,21 +429,32 @@ export class PgCustomerRepository extends PgBaseRepository implements CustomerRe
    * Email matching strategy:
    *   `lower(trim(...))` on both sides, parameterized.
    *
+   * Name matching strategy (P4-004 — fuzzy dedup):
+   *   `display_name % $name` uses the pg_trgm `%` operator, accelerated by
+   *   the GIN index `idx_customers_name_trgm`. It returns rows whose name is
+   *   above pg_trgm's similarity threshold (default 0.3) — a superset of what
+   *   `nameSimilarity()` (threshold 0.4) ultimately flags as a "possible
+   *   duplicate", so the deterministic scorer stays authoritative.
+   *
    * All variables are bound via $N — never concatenated.
    */
   async findDuplicates(
     tenantId: string,
-    criteria: { phone?: string; email?: string }
+    criteria: { phone?: string; email?: string; name?: string }
   ): Promise<Customer[]> {
     const normalizedPhone = criteria.phone ? normalizePhone(criteria.phone) : '';
     const normalizedEmail = criteria.email ? normalizeEmail(criteria.email) : '';
+    const name = criteria.name ? criteria.name.trim() : '';
 
     // Phone shorter than 7 digits is too ambiguous for a high-confidence
     // match — skip the predicate (mirrors checkCustomerDuplicates).
     const includePhone = normalizedPhone.length >= 7;
     const includeEmail = normalizedEmail.length > 0;
+    // A name needs at least one trigram's worth of signal to be worth a
+    // fuzzy scan; 2 chars is the practical floor.
+    const includeName = name.length >= 2;
 
-    if (!includePhone && !includeEmail) return [];
+    if (!includePhone && !includeEmail && !includeName) return [];
 
     return this.withTenant(tenantId, async (client) => {
       const conditions: string[] = ['tenant_id = $1', 'is_archived = false'];
@@ -413,6 +473,11 @@ export class PgCustomerRepository extends PgBaseRepository implements CustomerRe
       if (includeEmail) {
         matchClauses.push(`lower(trim(coalesce(email, ''))) = $${paramIndex}`);
         params.push(normalizedEmail);
+        paramIndex++;
+      }
+      if (includeName) {
+        matchClauses.push(`coalesce(display_name, '') % $${paramIndex}`);
+        params.push(name);
         paramIndex++;
       }
 

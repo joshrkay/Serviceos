@@ -112,7 +112,7 @@ async function build() {
   });
   app.use('/api/portal-sessions', createPortalRouter({ portalRepo, customerRepo }));
 
-  return { app, customer, location, customerRepo, jobRepo, appointmentRepo, proposalRepo, auditRepo, agreementRepo };
+  return { app, customer, location, customerRepo, jobRepo, appointmentRepo, proposalRepo, auditRepo, agreementRepo, settingsRepo };
 }
 
 function captureBoardEvents(date: string): { events: DispatchBoardEvent[]; stop: () => void } {
@@ -593,5 +593,35 @@ describe('POST /:token/appointments/:id/reschedule', () => {
     expect(res.status).toBe(409);
     expect(res.body.error).toBe('SLOT_TAKEN');
     expect(Array.isArray(res.body.alternatives)).toBe(true);
+  });
+});
+
+// Foundation gate F2 term 5 (Codex round 4) — the portal book path enforces
+// the same ZIP allowlist as public booking; an existing customer's saved
+// address can be out of area after the tenant shrinks the list.
+describe('POST /:token/book — service area', () => {
+  it('rejects a booking whose resolved location is outside the configured ZIP allowlist', async () => {
+    const h = await build();
+    await h.settingsRepo.update(TENANT, { serviceAreaZips: ['85001'] }); // location is 10001
+    const token = await mintToken(h.app, h.customer.id);
+
+    const res = await request(h.app)
+      .post(`/api/public/portal/${token}/book`)
+      .send({ slotStart: NEAR_SLOT_START, slotEnd: NEAR_SLOT_END, summary: 'Leaky faucet' });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('OUT_OF_SERVICE_AREA');
+  });
+
+  it('accepts a booking when the location ZIP is on the allowlist', async () => {
+    const h = await build();
+    await h.settingsRepo.update(TENANT, { serviceAreaZips: ['10001'] });
+    const token = await mintToken(h.app, h.customer.id);
+
+    const res = await request(h.app)
+      .post(`/api/public/portal/${token}/book`)
+      .send({ slotStart: NEAR_SLOT_START, slotEnd: NEAR_SLOT_END, summary: 'Leaky faucet' });
+
+    expect(res.status).toBe(201);
   });
 });

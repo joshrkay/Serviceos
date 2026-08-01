@@ -55,8 +55,10 @@ describe('VQ-009 — vitest config + corpus entry plumbing', () => {
     const configPath = path.resolve(__dirname, '../../vitest.voice-quality.config.ts');
     const src = fs.readFileSync(configPath, 'utf-8');
     expect(src).toMatch(/pool:\s*['"]forks['"]/);
-    expect(src).toMatch(/maxForks:\s*1/);
-    expect(src).toMatch(/minForks:\s*1/);
+    // Vitest 4 removed poolOptions.forks.{maxForks,minForks}; the single-fork
+    // sequential-corpus guarantee is now expressed as maxWorkers/minWorkers: 1.
+    expect(src).toMatch(/maxWorkers:\s*1/);
+    expect(src).toMatch(/minWorkers:\s*1/);
   });
 
   it('VQ-009 — corpus runner entry handles empty corpus gracefully', () => {

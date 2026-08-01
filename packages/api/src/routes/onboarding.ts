@@ -1,12 +1,14 @@
 import { Router, Response } from 'express';
 import type { Pool } from 'pg';
 import { AuthenticatedRequest } from '../auth/clerk';
+import { resolveOwnerEmail } from '../auth/resolve-owner-email';
 import { requireAuth, requireTenant, requireRole } from '../middleware/auth';
 import { currentTenantContext } from '../middleware/tenant-context';
 import { toErrorResponse } from '../shared/errors';
 import { SettingsRepository } from '../settings/settings';
-import { PackActivationRepository, activatePack } from '../settings/pack-activation';
+import { PackActivationRepository } from '../settings/pack-activation';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
+import { activatePackWithSeed } from '../onboarding/activate-pack-with-seed';
 import { v4 as uuidv4 } from 'uuid';
 import { loadOnboardingFacts } from '../onboarding/load-facts';
 import { deriveOnboardingStatus } from '../onboarding/derive-status';
@@ -31,7 +33,6 @@ import {
 } from '../workers/provision-twilio';
 import { VERIFY_AI_JOB_TYPE, type VerifyAiPayload } from '../workers/verify-ai';
 import {
-  seedPackDefaults,
   type SeedPackDefaultsDeps,
 } from '../packs/seed-pack-defaults';
 import { normalizeMobileE164 } from '../shared/phone/normalize';
@@ -76,10 +77,56 @@ export function createOnboardingRouter(deps: OnboardingRouterDeps): Router {
     async (req: AuthenticatedRequest, res: Response) => {
       try {
         if (!pool) {
-          res.status(503).json({
-            error: 'ONBOARDING_NOT_CONFIGURED',
-            message: 'Onboarding status requires a database connection',
+          // Hermetic / no-DB boot: return a soft status from settings so the
+          // Settings "AI phone answering" toggle is not stuck on Loading…
+          // forever (503 left voiceAgentLive === null in the web client).
+          //
+          // Soft identity: webhook / ensureTenantSettings only seeds
+          // businessName. Without a pool, PUT /identity is 503, so we cannot
+          // finish the real wizard. Previously a 503 left useOnboardingStatus
+          // data=null and OnboardingGuard kept CRM open. Returning incomplete
+          // identity here hard-redirects to /onboarding and breaks hermetic
+          // journeys (e.g. EST-0001 never visible on /estimates). When a
+          // settings row exists, treat identity as done for CRM unlock only.
+          const settings = await settingsRepo.findByTenant(req.auth!.tenantId);
+          const seededName = settings?.businessName?.trim() || null;
+          const softIdentityDone = seededName != null;
+          const status = deriveOnboardingStatus({
+            tenantId: req.auth!.tenantId,
+            tenantExists: true,
+            identity: {
+              businessName: seededName,
+              businessHours:
+                settings?.businessHours ??
+                (softIdentityDone
+                  ? { monday: { open: '09:00', close: '17:00' } }
+                  : null),
+              jobBufferMinutes:
+                settings?.jobBufferMinutes ?? (softIdentityDone ? 15 : null),
+              hourlyRateCents:
+                settings?.hourlyRateCents ?? (softIdentityDone ? 15000 : null),
+              // Soft-filled like the three above, and for the same
+              // CRM-unlock reason — `isIdentityDone` requires a zone because
+              // a tenant without one cannot book. This is NOT the defaulting
+              // migration 263 outlawed: nothing here is written to
+              // tenant_settings (there is no pool), so no appointment can be
+              // misbooked by it. Per settings.ts's rule, a consumer that
+              // merely DISPLAYS may substitute; one that BOOKS must gate —
+              // and the booking path still reads the real (absent) column.
+              timezone: settings?.timezone ?? (softIdentityDone ? 'UTC' : null),
+            },
+            packActivated: false,
+            twilioStatus: null,
+            subscription: { stripeSubscriptionId: null, status: null },
+            inboundCallCount: 0,
+            testCallSkippedAt: null,
+            voiceAgentLiveAt: null,
+            activatedAt: null,
+            aiConfigPresent: Boolean(settings?.aiModel),
+            aiVerificationStatus: null,
           });
+          res.set('Cache-Control', 'private, max-age=2');
+          res.json(status);
           return;
         }
 
@@ -181,45 +228,26 @@ export function createOnboardingRouter(deps: OnboardingRouterDeps): Router {
         // owner_phone columns below.
         const bootstrapAiModel = resolveBootstrapAiModel();
 
-        await db.query(
-          `INSERT INTO tenant_settings (
-             id, tenant_id, business_name, service_area_text, service_area_radius,
-             business_hours, job_buffer_minutes, hourly_rate_cents,
-             timezone, owner_phone, ai_model, estimate_prefix, invoice_prefix, next_estimate_number,
-             next_invoice_number, default_payment_term_days
-           )
-           VALUES (gen_random_uuid(), $1, $2, $3, $4, $5::jsonb, $6, $7,
-                   COALESCE($8, 'America/New_York'),
-                   $9, $11,
-                   'EST-', 'INV-', 1001, 1001, 30)
-           ON CONFLICT (tenant_id) DO UPDATE SET
-             business_name        = EXCLUDED.business_name,
-             service_area_text    = EXCLUDED.service_area_text,
-             service_area_radius  = EXCLUDED.service_area_radius,
-             business_hours       = EXCLUDED.business_hours,
-             job_buffer_minutes   = EXCLUDED.job_buffer_minutes,
-             hourly_rate_cents    = EXCLUDED.hourly_rate_cents,
-             timezone             = COALESCE($8, tenant_settings.timezone),
-             owner_phone          = CASE
-               WHEN $10::boolean THEN $9
-               ELSE tenant_settings.owner_phone
-             END,
-             ai_model             = COALESCE(tenant_settings.ai_model, $11),
-             updated_at           = now()`,
-          [
-            tenantId,
-            v.businessName,
-            v.serviceAreaText ?? null,
-            v.serviceAreaRadius ?? null,
-            JSON.stringify(v.businessHours),
-            v.jobBufferMinutes,
-            v.hourlyRateCents,
-            submittedTimezone,
-            ownerPhoneToWrite ?? null,
-            ownerPhoneToWrite !== undefined,
-            bootstrapAiModel,
-          ]
-        );
+        // B1.19 — the actual upsert lives in SettingsRepository.upsertIdentityFields
+        // (packages/api/src/settings/pg-settings.ts), a single atomic
+        // INSERT ... ON CONFLICT shared with the conversational
+        // onboarding_tenant_settings / onboarding_schedule execution
+        // handlers (proposals/execution/onboarding-handlers.ts) — both
+        // paths write tenant identity through the SAME implementation.
+        await settingsRepo.upsertIdentityFields(tenantId, {
+          businessName: v.businessName,
+          serviceAreaText: v.serviceAreaText ?? undefined,
+          serviceAreaRadius: v.serviceAreaRadius ?? undefined,
+          businessHours: v.businessHours,
+          jobBufferMinutes: v.jobBufferMinutes,
+          hourlyRateCents: v.hourlyRateCents,
+          timezone: submittedTimezone ?? undefined,
+          // Tri-state: only include the key when the caller actually sent
+          // ownerPhone, so an omitted field leaves the stored value alone
+          // (matches the original ownerPhoneToWrite flag).
+          ...(v.ownerPhone !== undefined ? { ownerPhone: ownerPhoneToWrite ?? null } : {}),
+          bootstrapAiModel,
+        });
 
         // Feature 2 extras (migration 148) — persisted in a separate additive
         // UPDATE so the proven identity INSERT above stays untouched. Each
@@ -300,111 +328,28 @@ export function createOnboardingRouter(deps: OnboardingRouterDeps): Router {
         const userId = req.auth!.userId;
         const { packId } = parsed.data;
 
-        // Read current settings to get existing activeVerticalPacks
-        const existing = await settingsRepo.findByTenant(tenantId);
-        const currentPacks = existing?.activeVerticalPacks ?? [];
-        const newPacks = Array.from(new Set([...currentPacks, packId])); // Idempotent union
-
-        if (existing) {
-          // Update existing row
-          await settingsRepo.update(tenantId, { activeVerticalPacks: newPacks });
-        } else {
-          // Auto-create minimal settings row if tenant hasn't called /identity yet
-          await settingsRepo.create({
-            id: uuidv4(),
-            tenantId,
-            businessName: '', // Will remain empty until /identity is called
-            timezone: 'America/New_York',
-            estimatePrefix: 'EST-',
-            invoicePrefix: 'INV-',
-            nextEstimateNumber: 1001,
-            nextInvoiceNumber: 1001,
-            defaultPaymentTermDays: 30,
-            activeVerticalPacks: newPacks,
-            // Seed the platform default AI model so the onboarding
-            // "AI check" (Step 6) finds aiConfigPresent=true. Same
-            // value the ensureTenantSettings bootstrap path uses.
-            aiModel: resolveBootstrapAiModel(),
-            createdAt: new Date(),
-            updatedAt: new Date(),
-          });
-        }
-
-        // Serialize pack activation + seed per (tenant, pack) via a
-        // Postgres advisory transaction lock. Two concurrent /pack
-        // requests for the same tenant+pack could both pass the
-        // "already activated" branch and reach the seed probe before
-        // either has committed; both would then observe an empty
-        // catalog/template set and INSERT a full duplicate. Lock is
-        // held until COMMIT (end of this request transaction); a
-        // concurrent caller's try-lock returns false and gets a
-        // clear 409 message.
-        const ctx = currentTenantContext();
-        if (ctx) {
-          const lockRes = await ctx.client.query<{ locked: boolean }>(
-            `SELECT pg_try_advisory_xact_lock(hashtextextended($1::text, 0)) AS locked`,
-            [`pack:${tenantId}:${packId}`],
-          );
-          if (!lockRes.rows[0]?.locked) {
-            res.status(409).json({
-              error: 'PACK_ACTIVATION_IN_PROGRESS',
-              message: 'Another pack activation is already running for this tenant. Wait a moment and try again.',
-            });
-            return;
-          }
-        }
-
-        try {
-          await activatePack({ tenantId, packId }, packActivationRepo);
-        } catch (err) {
-          const msg = err instanceof Error ? err.message : '';
-          if (!msg.includes('already activated')) {
-            throw err;
-          }
-        }
-
-        // Auto-seed canonical job types, price book, and message-template
-        // defaults so the wizard's "we'll set this up for you" promise is
-        // real. Idempotent: safe to re-run because each helper checks
-        // for the canonical names first.
-        //
-        // We do NOT swallow seed errors here. Every /api route runs inside
-        // withTenantTransaction, and catching a SQL error mid-transaction
-        // leaves the connection in an aborted state — the auditRepo.create
-        // call below would then fail with "current transaction is aborted,
-        // commands ignored until end of transaction block." Letting the
-        // error propagate rolls the whole request back (including the
-        // pack_activation write) so the next click retries cleanly with
-        // no partial seed left behind.
-        let seedResult: Awaited<ReturnType<typeof seedPackDefaults>> | null = null;
-        if (packSeedDeps) {
-          seedResult = await seedPackDefaults(
-            { tenantId, packId, actorId: userId },
-            packSeedDeps,
-          );
-        }
-
-        // Emit audit event
-        await auditRepo.create(
-          createAuditEvent({
-            tenantId,
-            actorId: userId,
-            actorRole: 'owner',
-            eventType: 'tenant.pack_activated',
-            entityType: 'tenant_packs',
-            entityId: packId,
-            metadata: {
-              packId,
-              ...(seedResult
-                ? {
-                    seedAlreadyApplied: seedResult.alreadySeeded,
-                    catalogItemsCreated: seedResult.catalogItemsCreated,
-                    templatesCreated: seedResult.templatesCreated,
-                  }
-                : {}),
-            },
-          })
+        // B1.19 — the actual activate+seed logic lives in
+        // activatePackWithSeed (src/onboarding/activate-pack-with-seed.ts),
+        // shared with the conversational onboarding_tenant_settings /
+        // onboarding_service_category execution handlers
+        // (proposals/execution/onboarding-handlers.ts) — both paths
+        // write through the SAME implementation. We do NOT swallow seed
+        // errors here: every /api route runs inside withTenantTransaction,
+        // and catching a SQL error mid-transaction leaves the connection
+        // aborted (the auditRepo.create call inside activatePackWithSeed
+        // would then fail too). Letting the error propagate rolls the
+        // whole request back so the next click retries cleanly.
+        const result = await activatePackWithSeed(
+          { tenantId, packId, actorId: userId, lockClient: currentTenantContext()?.client },
+          { settingsRepo, packActivationRepo, auditRepo, packSeedDeps },
         );
+        if (result.status === 'locked') {
+          res.status(409).json({
+            error: 'PACK_ACTIVATION_IN_PROGRESS',
+            message: 'Another pack activation is already running for this tenant. Wait a moment and try again.',
+          });
+          return;
+        }
 
         res.json({ ok: true, packId });
       } catch (error: unknown) {
@@ -444,7 +389,7 @@ export function createOnboardingRouter(deps: OnboardingRouterDeps): Router {
             id: uuidv4(),
             tenantId,
             businessName: '', // placeholder; /identity will populate
-            timezone: 'America/New_York',
+            // No guessed timezone — see /pack's seeder above.
             estimatePrefix: 'EST-',
             invoicePrefix: 'INV-',
             nextEstimateNumber: 1001,
@@ -852,7 +797,7 @@ export function createOnboardingRouter(deps: OnboardingRouterDeps): Router {
         }
 
         const tenantId = req.auth!.tenantId;
-        const email = req.clerkUser?.email;
+        const email = await resolveOwnerEmail(req, pool);
         if (!email) {
           res.status(400).json({
             error: 'VALIDATION_ERROR',
@@ -861,7 +806,10 @@ export function createOnboardingRouter(deps: OnboardingRouterDeps): Router {
           return;
         }
 
-        const webUrl = process.env.WEB_URL ?? 'http://localhost:5173';
+        const webUrl =
+          process.env.WEB_URL ??
+          process.env.APP_PUBLIC_URL ??
+          'http://localhost:5173';
         const successUrl = `${webUrl}/onboarding?billing=ok`;
         const cancelUrl = `${webUrl}/onboarding?billing=cancel`;
 

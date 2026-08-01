@@ -18,9 +18,12 @@ voice-load-report.json
 .env.*
 !.env.example
 !.env.qa.example
+!.env.production.example
+
+# Browser-captured production Clerk serviceos JWT (60s; never commit)
+.tmp-prod-serviceos.jwt
 *.tsbuildinfo
 coverage/
-
 # Training corpus pipeline (local venv)
 serviceos_training/.venv/
 serviceos_training/.pytest_cache/
@@ -44,6 +47,7 @@ e2e/fixtures/.journey-fixtures.env
 # Voice Quality v1 corpus runner — generated JSON report (VQ-009)
 packages/api/voice-quality-report.json
 packages/api/voice-quality-vitest.json
+packages/api/voice-quality-cassette-staleness.json
 packages/api/.voice-quality-verdicts/
 # Voice Quality v1 Layer 2 corpus runner — generated reports (VQ2-016)
 packages/api/voice-quality-layer2-report.json

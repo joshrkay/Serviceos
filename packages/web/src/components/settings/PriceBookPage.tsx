@@ -1,8 +1,9 @@
 import { useMemo, useRef, useState, type ChangeEvent, type FormEvent } from 'react';
-import { Archive, Pencil, Upload, X } from 'lucide-react';
+import { Archive, ImageIcon, Pencil, Upload, X } from 'lucide-react';
 import { useListQuery } from '../../hooks/useListQuery';
 import { formatCurrency } from '../../utils/currency';
 import { apiFetch } from '../../utils/api-fetch';
+import { uploadCatalogImage, type CatalogImageUploadResult } from '../../api/catalog-image';
 
 interface PriceBookItem {
   id: string;
@@ -11,6 +12,15 @@ interface PriceBookItem {
   unitPriceCents: number;
   unit?: string;
   category?: string;
+  /** EE-4 — catalog photo reference (UUID into the files table), or null. */
+  imageFileId?: string | null;
+  /** Optional signed preview URL, when the API resolves one (forward-compatible). */
+  imageUrl?: string;
+}
+
+/** Injectable so tests can drive the upload without a real presign/S3 round-trip. */
+export interface PriceBookPageProps {
+  uploadImage?: (file: File) => Promise<CatalogImageUploadResult>;
 }
 
 interface CatalogImportPayload {
@@ -38,6 +48,10 @@ interface PriceBookFormState {
   unitPrice: string;
   unit: string;
   category: string;
+  /** EE-4 — attached photo file id (null = no photo). */
+  imageFileId: string | null;
+  /** Preview URL for the attached photo (session-local; never persisted). */
+  imagePreviewUrl: string | null;
 }
 
 const DEFAULT_FORM_STATE: PriceBookFormState = {
@@ -46,6 +60,8 @@ const DEFAULT_FORM_STATE: PriceBookFormState = {
   unitPrice: '',
   unit: 'each',
   category: 'Labor',
+  imageFileId: null,
+  imagePreviewUrl: null,
 };
 
 
@@ -131,7 +147,7 @@ const EMPTY_RESULT = {
   refetch: () => undefined,
 };
 
-export function PriceBookPage() {
+export function PriceBookPage({ uploadImage = uploadCatalogImage }: PriceBookPageProps = {}) {
   const listQuery = useListQuery<PriceBookItem>('/api/catalog/items', { pageSize: 200 });
   const {
     data = [],
@@ -150,7 +166,13 @@ export function PriceBookPage() {
   const [actionError, setActionError] = useState<string | null>(null);
   const [editingItemId, setEditingItemId] = useState<string | null>(null);
   const [formState, setFormState] = useState<PriceBookFormState>(DEFAULT_FORM_STATE);
+  const [isUploadingImage, setIsUploadingImage] = useState(false);
+  const [imageError, setImageError] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const imageInputRef = useRef<HTMLInputElement | null>(null);
+  // The photo the form opened with, so save only sends imageFileId when it
+  // actually changed (keeps untouched edits byte-identical on the wire).
+  const originalImageFileIdRef = useRef<string | null>(null);
 
   const sortedItems = useMemo(() => [...data].sort((a, b) => a.name.localeCompare(b.name)), [data]);
   const categoryChips = useMemo(() => {
@@ -175,6 +197,8 @@ export function PriceBookPage() {
   const openCreateForm = () => {
     setEditingItemId(null);
     setFormState(DEFAULT_FORM_STATE);
+    originalImageFileIdRef.current = null;
+    setImageError(null);
     setFormError(null);
     setActionError(null);
     setIsFormOpen(true);
@@ -182,16 +206,43 @@ export function PriceBookPage() {
 
   const openEditForm = (item: PriceBookItem) => {
     setEditingItemId(item.id);
+    const imageFileId = item.imageFileId ?? null;
     setFormState({
       name: item.name ?? '',
       description: item.description ?? '',
       unitPrice: ((item.unitPriceCents ?? 0) / 100).toFixed(2),
       unit: item.unit ?? '',
       category: item.category ?? '',
+      imageFileId,
+      imagePreviewUrl: item.imageUrl ?? null,
     });
+    originalImageFileIdRef.current = imageFileId;
+    setImageError(null);
     setFormError(null);
     setActionError(null);
     setIsFormOpen(true);
+  };
+
+  const handleImageSelect = async (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    event.target.value = ''; // allow re-picking the same file
+    if (!file) return;
+    setImageError(null);
+    setIsUploadingImage(true);
+    try {
+      const result = await uploadImage(file);
+      setFormState(prev => ({ ...prev, imageFileId: result.fileId, imagePreviewUrl: result.downloadUrl }));
+    } catch (err) {
+      // A failed upload must never leave a dangling id on the item.
+      setImageError(err instanceof Error ? err.message : 'Photo upload failed.');
+    } finally {
+      setIsUploadingImage(false);
+    }
+  };
+
+  const handleRemoveImage = () => {
+    setFormState(prev => ({ ...prev, imageFileId: null, imagePreviewUrl: null }));
+    setImageError(null);
   };
 
   const closeForm = () => {
@@ -241,13 +292,25 @@ export function PriceBookPage() {
     }
 
     setIsSaving(true);
-    const payload = {
+    const payload: {
+      name: string;
+      description: string;
+      unitPriceCents: number;
+      unit: string;
+      category: string;
+      imageFileId?: string | null;
+    } = {
       name: formState.name.trim(),
       description: formState.description.trim(),
       unitPriceCents,
       unit: formState.unit,
       category: formState.category,
     };
+    // Only send imageFileId when the photo actually changed (attach or remove),
+    // so untouched edits stay identical and a create with no photo omits it.
+    if (formState.imageFileId !== originalImageFileIdRef.current) {
+      payload.imageFileId = formState.imageFileId;
+    }
 
     try {
       const endpoint = editingItemId ? `/api/catalog/items/${editingItemId}` : '/api/catalog/items';
@@ -504,7 +567,25 @@ export function PriceBookPage() {
               <tbody>
                 {filteredItems.map(item => (
                   <tr key={item.id} className="border-t border-slate-100">
-                    <td className="px-3 py-2 text-slate-800">{item.name}</td>
+                    <td className="px-3 py-2 text-slate-800">
+                      <span className="inline-flex items-center gap-2">
+                        {item.imageUrl ? (
+                          <img
+                            src={item.imageUrl}
+                            alt=""
+                            aria-hidden="true"
+                            className="h-6 w-6 shrink-0 rounded object-cover"
+                          />
+                        ) : item.imageFileId ? (
+                          <ImageIcon
+                            size={14}
+                            aria-hidden="true"
+                            className="shrink-0 text-slate-400"
+                          />
+                        ) : null}
+                        {item.name}
+                      </span>
+                    </td>
                     <td className="px-3 py-2">
                       <span className="inline-flex rounded-full bg-slate-100 px-2 py-0.5 text-xs text-slate-700">
                         {item.category || '—'}
@@ -633,6 +714,59 @@ export function PriceBookPage() {
                   ))}
                 </select>
               </label>
+
+              <div className="block text-sm text-slate-700">
+                <span className="mb-1 block">Photo</span>
+                <div className="flex items-center gap-3">
+                  {formState.imagePreviewUrl ? (
+                    <img
+                      src={formState.imagePreviewUrl}
+                      alt="Catalog item"
+                      className="h-16 w-16 shrink-0 rounded-lg border border-slate-200 object-cover"
+                    />
+                  ) : formState.imageFileId ? (
+                    <div
+                      className="flex h-16 w-16 shrink-0 items-center justify-center rounded-lg border border-slate-200 bg-slate-50 text-slate-400"
+                      aria-label="Photo attached"
+                    >
+                      <ImageIcon size={20} />
+                    </div>
+                  ) : null}
+                  <div className="flex min-w-0 flex-wrap items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => imageInputRef.current?.click()}
+                      disabled={isUploadingImage}
+                      className="inline-flex min-h-11 items-center gap-2 rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60"
+                    >
+                      <Upload size={14} />
+                      {isUploadingImage
+                        ? 'Uploading…'
+                        : formState.imageFileId
+                          ? 'Replace photo'
+                          : 'Add photo'}
+                    </button>
+                    {formState.imageFileId && !isUploadingImage && (
+                      <button
+                        type="button"
+                        onClick={handleRemoveImage}
+                        className="inline-flex min-h-11 items-center rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-600 hover:bg-slate-50"
+                      >
+                        Remove
+                      </button>
+                    )}
+                  </div>
+                </div>
+                <input
+                  ref={imageInputRef}
+                  type="file"
+                  className="hidden"
+                  accept="image/*"
+                  data-testid="catalog-image-input"
+                  onChange={handleImageSelect}
+                />
+                {imageError && <p className="mt-1 text-sm text-red-600">{imageError}</p>}
+              </div>
 
               {formError && <p className="text-sm text-red-600">{formError}</p>}
 

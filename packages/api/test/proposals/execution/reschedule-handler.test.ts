@@ -1,6 +1,7 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { RescheduleAppointmentExecutionHandler } from '../../../src/proposals/execution/reschedule-handler';
 import { Proposal } from '../../../src/proposals/proposal';
+import type { TransactionalCommsService } from '../../../src/notifications/transactional-comms-service';
 import { InMemoryAppointmentRepository, createAppointment } from '../../../src/appointments/appointment';
 import { FeasibilityDependencies } from '../../../src/scheduling/feasibility-types';
 import { StubSkillMatcher } from '../../../src/scheduling/skill-matcher';
@@ -55,6 +56,35 @@ describe('P6-013 — Execution for reschedule proposals', () => {
     const updated = await appointmentRepo.findById(tenantId, appt.id);
     expect(updated!.scheduledStart.toISOString()).toBe('2026-03-15T10:00:00.000Z');
     expect(updated!.scheduledEnd.toISOString()).toBe('2026-03-15T12:00:00.000Z');
+  });
+
+  it('Codex P2 (PR #705) — passes the proposal id (not the destination timestamp) as the reschedule notification occurrence token', async () => {
+    const appt = await createAppointment({
+      tenantId, jobId: 'job-1',
+      scheduledStart: new Date('2026-03-14T09:00:00Z'),
+      scheduledEnd: new Date('2026-03-14T11:00:00Z'),
+      timezone: 'America/New_York', createdBy: 'user-1',
+    }, appointmentRepo);
+
+    const notifyRescheduled = vi.fn().mockResolvedValue(undefined);
+    const comms = { notifyRescheduled } as unknown as TransactionalCommsService;
+    const handlerWithComms = new RescheduleAppointmentExecutionHandler(
+      appointmentRepo, undefined, undefined, undefined, undefined, comms,
+    );
+
+    const proposal = makeProposal({
+      appointmentId: appt.id,
+      newScheduledStart: '2026-03-15T10:00:00Z',
+      newScheduledEnd: '2026-03-15T12:00:00Z',
+    });
+
+    const result = await handlerWithComms.execute(proposal, context);
+    expect(result.success).toBe(true);
+    // Per-ACTION token = proposal id, NOT the destination timestamp: moving to
+    // a slot, away, then back reuses the timestamp and would drop the final
+    // notification as a duplicate against the prior claim's tombstone.
+    expect(notifyRescheduled).toHaveBeenCalledWith(tenantId, appt.id, 'prop-1');
+    expect(notifyRescheduled).not.toHaveBeenCalledWith(tenantId, appt.id, '2026-03-15T10:00:00Z');
   });
 
   it('refreshes both the old and new day boards on a cross-day move', async () => {
@@ -228,7 +258,7 @@ describe('P6-013 — Execution for reschedule proposals', () => {
       assignmentRepo, appointmentRepo,
       jobRepo: { findById: async () => null } as any,
       locationRepo: { findById: async () => null } as any,
-      workingHoursRepo: { findByTechnicianAndDay: async () => null } as any,
+      workingHoursRepo: { findByTechnician: async () => [] } as any,
       unavailableBlockRepo: { findByTechnicianAndDateRange: async () => [] } as any,
       travelTimeProvider: new HaversineFallbackProvider(),
       skillMatcher: new StubSkillMatcher(),
@@ -248,7 +278,9 @@ describe('P6-013 — Execution for reschedule proposals', () => {
     expect(result.error).toMatch(/Overlaps with/);
   });
 
-  it('passes feasibility (warnings only) and surfaces them on the result', async () => {
+  // Foundation gate F2 / contract #12-#13: out-of-hours is a PRECONDITION
+  // violation, so it now blocks the reschedule instead of warning.
+  it('rejects a reschedule outside the modeled working hours', async () => {
     const assignmentRepo = new InMemoryAssignmentRepository();
     const appt = await createAppointment({
       tenantId, jobId: 'job-1',
@@ -261,13 +293,14 @@ describe('P6-013 — Execution for reschedule proposals', () => {
       technicianId: 'tech-1', isPrimary: true, assignedBy: 'user-1', assignedAt: new Date(),
     });
 
-    // Inject a working-hours mock that triggers an "outside working hours" warning.
+    // Working-hours row for the target weekday (2026-05-17 is a Sunday,
+    // dayOfWeek 0) whose window excludes the proposed 12:00 UTC slot.
     const workingHoursRepo: any = {
-      findByTechnicianAndDay: async () => ({
+      findByTechnician: async () => [{
         id: 'wh', tenantId, technicianId: 'tech-1',
         dayOfWeek: 0, startTime: '14:00', endTime: '17:00', isActive: true,
         createdAt: new Date(), updatedAt: new Date(),
-      }),
+      }],
     };
     const feasibilityDeps: FeasibilityDependencies = {
       assignmentRepo, appointmentRepo,
@@ -289,8 +322,181 @@ describe('P6-013 — Execution for reschedule proposals', () => {
     });
     // No sourceContext on proposal so freshness passes automatically.
     const result = await handler.execute(proposal, context) as any;
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/working hours/i);
+  });
+
+  // ── RIVET P4 — S1 ownership binding ("reschedule OWN appointment" only) ──
+
+  function s1Proposal(payload: Record<string, unknown>, callerCustomerId?: string): Proposal {
+    return {
+      ...makeProposal(payload),
+      sourceContext: {
+        source: 'calling-agent',
+        channel: 'telephony',
+        surface: 'S1',
+        ...(callerCustomerId ? { callerCustomerId } : {}),
+      },
+    };
+  }
+
+  function feasibilityWithJobCustomer(customerId: string | null): FeasibilityDependencies {
+    return {
+      assignmentRepo: new InMemoryAssignmentRepository(),
+      appointmentRepo,
+      jobRepo: {
+        findById: async () =>
+          customerId ? ({ id: 'job-1', tenantId, customerId } as any) : null,
+      } as any,
+      locationRepo: { findById: async () => null } as any,
+      workingHoursRepo: { findByTechnician: async () => [] } as any,
+      unavailableBlockRepo: { findByTechnicianAndDateRange: async () => [] } as any,
+      travelTimeProvider: new HaversineFallbackProvider(),
+      skillMatcher: new StubSkillMatcher(),
+    };
+  }
+
+  const S1_TIMES = {
+    newScheduledStart: '2026-03-15T10:00:00Z',
+    newScheduledEnd: '2026-03-15T12:00:00Z',
+  };
+
+  it("S1: REFUSES to move an appointment that is not the caller's own", async () => {
+    const appt = await createAppointment({
+      tenantId, jobId: 'job-1',
+      scheduledStart: new Date('2026-03-14T09:00:00Z'),
+      scheduledEnd: new Date('2026-03-14T11:00:00Z'),
+      timezone: 'UTC', createdBy: 'user-1',
+    }, appointmentRepo);
+    const s1Handler = new RescheduleAppointmentExecutionHandler(
+      appointmentRepo, undefined, undefined, undefined,
+      feasibilityWithJobCustomer('cust-somebody-else'),
+    );
+
+    const result = await s1Handler.execute(
+      s1Proposal({ appointmentId: appt.id, ...S1_TIMES }, 'cust-caller'),
+      context,
+    );
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/does not belong to the caller/);
+    // The appointment did NOT move.
+    const unchanged = await appointmentRepo.findById(tenantId, appt.id);
+    expect(unchanged!.scheduledStart.toISOString()).toBe('2026-03-14T09:00:00.000Z');
+  });
+
+  it("S1: allows moving the caller's OWN appointment", async () => {
+    const appt = await createAppointment({
+      tenantId, jobId: 'job-1',
+      scheduledStart: new Date('2026-03-14T09:00:00Z'),
+      scheduledEnd: new Date('2026-03-14T11:00:00Z'),
+      timezone: 'UTC', createdBy: 'user-1',
+    }, appointmentRepo);
+    const s1Handler = new RescheduleAppointmentExecutionHandler(
+      appointmentRepo, undefined, undefined, undefined,
+      feasibilityWithJobCustomer('cust-caller'),
+    );
+
+    const result = await s1Handler.execute(
+      s1Proposal({ appointmentId: appt.id, ...S1_TIMES }, 'cust-caller'),
+      context,
+    );
     expect(result.success).toBe(true);
-    expect(result.warnings).toBeDefined();
-    expect(result.warnings.some((w: any) => w.check === 'working_hours')).toBe(true);
+    const moved = await appointmentRepo.findById(tenantId, appt.id);
+    expect(moved!.scheduledStart.toISOString()).toBe('2026-03-15T10:00:00.000Z');
+  });
+
+  it('S1: fails closed when the caller was never identified (no callerCustomerId)', async () => {
+    const appt = await createAppointment({
+      tenantId, jobId: 'job-1',
+      scheduledStart: new Date('2026-03-14T09:00:00Z'),
+      scheduledEnd: new Date('2026-03-14T11:00:00Z'),
+      timezone: 'UTC', createdBy: 'user-1',
+    }, appointmentRepo);
+    const s1Handler = new RescheduleAppointmentExecutionHandler(
+      appointmentRepo, undefined, undefined, undefined,
+      feasibilityWithJobCustomer('cust-caller'),
+    );
+
+    const result = await s1Handler.execute(
+      s1Proposal({ appointmentId: appt.id, ...S1_TIMES }),
+      context,
+    );
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/identity was not verified/);
+  });
+
+  it('S1: fails closed when ownership cannot be verified (no job lookup / no job)', async () => {
+    const appt = await createAppointment({
+      tenantId, jobId: 'job-1',
+      scheduledStart: new Date('2026-03-14T09:00:00Z'),
+      scheduledEnd: new Date('2026-03-14T11:00:00Z'),
+      timezone: 'UTC', createdBy: 'user-1',
+    }, appointmentRepo);
+
+    // No feasibilityDeps at all → no jobRepo to verify with.
+    const noDeps = new RescheduleAppointmentExecutionHandler(appointmentRepo);
+    const r1 = await noDeps.execute(
+      s1Proposal({ appointmentId: appt.id, ...S1_TIMES }, 'cust-caller'),
+      context,
+    );
+    expect(r1.success).toBe(false);
+    expect(r1.error).toMatch(/Cannot verify appointment ownership/);
+
+    // jobRepo wired but the job row is missing → also refused.
+    const missingJob = new RescheduleAppointmentExecutionHandler(
+      appointmentRepo, undefined, undefined, undefined,
+      feasibilityWithJobCustomer(null),
+    );
+    const r2 = await missingJob.execute(
+      s1Proposal({ appointmentId: appt.id, ...S1_TIMES }, 'cust-caller'),
+      context,
+    );
+    expect(r2.success).toBe(false);
+    expect(r2.error).toMatch(/does not belong to the caller/);
+  });
+
+  it('INFERRED S1 (unstamped telephony + non-system author) is ownership-checked too (Codex)', async () => {
+    // A legacy/unstamped inbound proposal: channel telephony, created by a
+    // customer id, NO surface stamp. The executor's fail-safe inference
+    // treats it as S1 and lets reschedule_appointment through the allowlist —
+    // so the ownership guard must key on the SAME inference, not just the
+    // explicit stamp, or this path bypasses every ownership check.
+    const appt = await createAppointment({
+      tenantId, jobId: 'job-1',
+      scheduledStart: new Date('2026-03-14T09:00:00Z'),
+      scheduledEnd: new Date('2026-03-14T11:00:00Z'),
+      timezone: 'UTC', createdBy: 'user-1',
+    }, appointmentRepo);
+    const s1Handler = new RescheduleAppointmentExecutionHandler(
+      appointmentRepo, undefined, undefined, undefined,
+      feasibilityWithJobCustomer('cust-somebody-else'),
+    );
+
+    const inferred: Proposal = {
+      ...makeProposal({ appointmentId: appt.id, ...S1_TIMES }),
+      createdBy: 'cust-caller',
+      sourceContext: { source: 'calling-agent', channel: 'telephony' }, // no surface stamp
+    };
+    const result = await s1Handler.execute(inferred, context);
+    expect(result.success).toBe(false);
+    // No callerCustomerId on a legacy row → fails closed on identity.
+    expect(result.error).toMatch(/identity was not verified/);
+    const unchanged = await appointmentRepo.findById(tenantId, appt.id);
+    expect(unchanged!.scheduledStart.toISOString()).toBe('2026-03-14T09:00:00.000Z');
+  });
+
+  it('S2/unstamped proposals are unaffected by the ownership guard', async () => {
+    const appt = await createAppointment({
+      tenantId, jobId: 'job-1',
+      scheduledStart: new Date('2026-03-14T09:00:00Z'),
+      scheduledEnd: new Date('2026-03-14T11:00:00Z'),
+      timezone: 'UTC', createdBy: 'user-1',
+    }, appointmentRepo);
+    // Plain handler with no feasibility deps — the pre-existing operator path.
+    const result = await handler.execute(
+      makeProposal({ appointmentId: appt.id, ...S1_TIMES }),
+      context,
+    );
+    expect(result.success).toBe(true);
   });
 });

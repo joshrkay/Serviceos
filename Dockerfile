@@ -1,4 +1,4 @@
-FROM node:20-alpine AS base
+FROM node:20.20.2-alpine AS base
 WORKDIR /app
 
 # Install dependencies. `--ignore-scripts` skips the prepare hook in
@@ -28,15 +28,29 @@ FROM shared-build AS api-build
 COPY packages/api/ packages/api/
 ARG RAILWAY_GIT_COMMIT_SHA=unknown
 RUN echo "build: $RAILWAY_GIT_COMMIT_SHA" && cd packages/api && npx tsc --project tsconfig.build.json
+# Provider credentials are runtime-only. Never declare them as Docker ARGs or
+# interpolate them in RUN instructions: builders persist expanded commands in
+# logs and image history. Optional filler PCM files are generated offline and
+# checked into a release artifact; when absent, the existing runtime cache
+# degrades gracefully without exposing a production credential.
 
 # Web static files (served by nginx) — used by @serviceos/web
-FROM nginx:alpine AS web
+#
+# Pinned by digest, not just tag. `nginx:alpine` is a floating tag: an upstream
+# push silently changes the image serving the SPA between two deploys of
+# identical source, with nothing in the repo recording that it moved. The tag
+# is kept alongside the digest for human readability — at time of pinning
+# `alpine`, `1.31.3-alpine`, and `1.31.3-alpine3.24` all resolved to this same
+# digest, so this is the image that was already shipping. Dependabot's `docker`
+# ecosystem (.github/dependabot.yml) bumps it; do not replace it with a bare
+# tag to avoid the bump.
+FROM nginx:1.31.3-alpine@sha256:4a73073bd557c65b759505da037898b61f1be6cbcc3c2c3aeac22d2a470c1752 AS web
 COPY --from=web-build /app/packages/web/dist /usr/share/nginx/html
 COPY packages/web/nginx.conf /etc/nginx/conf.d/default.conf
 EXPOSE 80
 
 # API production image — used by @serviceos/api (last stage = Railway default)
-FROM node:20-alpine AS api
+FROM node:20.20.2-alpine AS api
 WORKDIR /app
 ENV NODE_ENV=production
 COPY package.json package-lock.json ./

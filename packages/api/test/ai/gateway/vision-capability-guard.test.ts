@@ -12,6 +12,12 @@ const imagePart = { type: 'image' as const, url: 'https://example.com/leak.jpg' 
 function imageReq(model: string, taskType = 'draft_estimate'): LLMRequest {
   return {
     taskType,
+    // Both default and override taskTypes here are in the canonical
+    // tenant-scoped TASK_TYPES set (config/ai-routing.ts) — the gateway's
+    // strict-mode tenant-id guard (default-on outside production, see
+    // gateway.ts) throws without this even though tenant scoping is
+    // orthogonal to what this file actually tests (vision routing).
+    tenantId: 'tenant-vision-test',
     model,
     messages: [{ role: 'user', content: 'what work?', parts: [imagePart] }],
   };
@@ -77,6 +83,7 @@ describe('LLMGateway vision-capability guard', () => {
     const { gateway, provider } = createMockLLMGateway('ok');
     const res = await gateway.complete({
       taskType: 'draft_estimate',
+      tenantId: 'tenant-vision-test',
       model: 'text-only-model',
       messages: [{ role: 'user', content: 'hi' }],
     });
@@ -101,6 +108,7 @@ describe('CachingGatewayWrapper — image requests bypass the cache', () => {
     const { cached, provider } = wrap();
     const req: LLMRequest = {
       taskType: 'intent_classification',
+      tenantId: 'tenant-vision-test',
       model: 'gpt-4o',
       messages: [{ role: 'user', content: 'x', parts: [imagePart] }],
     };
@@ -114,6 +122,7 @@ describe('CachingGatewayWrapper — image requests bypass the cache', () => {
     const { cached, provider } = wrap();
     const req: LLMRequest = {
       taskType: 'intent_classification',
+      tenantId: 'tenant-vision-test',
       model: 'gpt-4o',
       messages: [{ role: 'user', content: 'x' }],
     };

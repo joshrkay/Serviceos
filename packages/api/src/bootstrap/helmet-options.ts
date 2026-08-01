@@ -37,6 +37,9 @@ export function buildHelmetOptions(isProd: boolean): Parameters<typeof helmet>[0
               'https://clerk.com',
               'https://sdk.twilio.com',
               'https://media.twiliocdn.com',
+              // PostHog analytics: posthog-js lazy-loads optional modules
+              // (surveys, web-vitals, exception capture) from the assets host.
+              'https://us-assets.i.posthog.com',
             ],
             styleSrc: [
               "'self'",
@@ -53,8 +56,23 @@ export function buildHelmetOptions(isProd: boolean): Parameters<typeof helmet>[0
               'https://*.clerk.accounts.dev',
               'wss://*.twilio.com',
               'https://*.twilio.com',
+              // Live voice dictation streams mic audio from the browser
+              // straight to Deepgram's realtime STT WebSocket (see the web
+              // useDeepgramDictation hook — it opens wss://api.deepgram.com/v1/
+              // listen with a short-lived grant token). Without this in
+              // connect-src, production CSP blocks that WebSocket and the
+              // assistant's conversation/dictation mode fails with "Lost the
+              // dictation connection. Please try again."
+              'wss://api.deepgram.com',
               'https://*.ingest.sentry.io',
               'https://*.ingest.us.sentry.io',
+              // PostHog analytics (US cloud): event ingestion + remote config.
+              // Without these, posthog-js is silently blocked by CSP in prod
+              // and no browser events reach PostHog even with the key set.
+              // Matches the default VITE_POSTHOG_HOST (us.i.posthog.com); a
+              // custom host would need to be added here too.
+              'https://us.i.posthog.com',
+              'https://us-assets.i.posthog.com',
             ],
             frameSrc: [
               "'self'",

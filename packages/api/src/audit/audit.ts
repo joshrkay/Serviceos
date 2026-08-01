@@ -28,6 +28,16 @@ export interface AuditRepository {
   create(event: AuditEvent): Promise<AuditEvent>;
   findByEntity(tenantId: string, entityType: string, entityId: string): Promise<AuditEvent[]>;
   findByCorrelation(tenantId: string, correlationId: string): Promise<AuditEvent[]>;
+  /**
+   * Epic 12.7 — tenant-wide chronological read (newest first) backing the
+   * activity feed. Optional on the interface (matching findByCustomer /
+   * listWithMeta elsewhere) so existing in-memory fakes stay valid; the
+   * activity reporter 503s when an implementation doesn't provide it.
+   */
+  findRecentByTenant?(
+    tenantId: string,
+    opts?: { limit?: number },
+  ): Promise<AuditEvent[]>;
 }
 
 export function createAuditEvent(input: AuditEventInput): AuditEvent {
@@ -69,6 +79,18 @@ export class InMemoryAuditRepository implements AuditRepository {
     return this.events.filter(
       (e) => e.tenantId === tenantId && e.correlationId === correlationId
     );
+  }
+
+  async findRecentByTenant(
+    tenantId: string,
+    opts: { limit?: number } = {},
+  ): Promise<AuditEvent[]> {
+    const limit = opts.limit ?? 50;
+    return this.events
+      .filter((e) => e.tenantId === tenantId)
+      .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())
+      .slice(0, limit)
+      .map((e) => ({ ...e }));
   }
 
   getAll(): AuditEvent[] {

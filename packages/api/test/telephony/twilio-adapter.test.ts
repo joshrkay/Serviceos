@@ -7,6 +7,11 @@ import {
   injectSafetySayLines,
 } from '../../src/telephony/twilio-adapter';
 import { VoiceSessionStore } from '../../src/ai/agents/customer-calling/voice-session-store';
+import {
+  renderTtsText,
+  LOW_STT_CONFIDENCE_REPROMPT_COPY,
+  SPEECH_TURN_FAILURE_ESCALATION_COPY,
+} from '../../src/ai/agents/customer-calling/tts-copy';
 import type { LLMGateway, LLMResponse } from '../../src/ai/gateway/gateway';
 import { DefaultTwilioCallControl } from '../../src/telephony/twilio-call-control';
 import {
@@ -32,6 +37,13 @@ import {
   EMERGENCY_PAGE_INTERVAL_MS,
   __clearEmergencyPageLaddersForTests,
 } from '../../src/telephony/emergency-page-retry';
+import { InMemoryConversationRepository } from '../../src/conversations/conversation-service';
+import { OwnerNotificationService } from '../../src/notifications/owner-notification-service';
+import { InMemoryPushDeliveryProvider } from '../../src/notifications/push-delivery-provider';
+import { InMemoryDeviceTokenRepository } from '../../src/push/device-token-service';
+import { setOwnerNotifications } from '../../src/notifications/owner-notifications-instance';
+import type { Pool } from 'pg';
+import { InMemoryConsentEventRepository } from '../../src/compliance/consent-events';
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -54,6 +66,8 @@ function makeAdapter(opts: {
   store?: VoiceSessionStore;
   leadRepo?: InMemoryLeadRepository;
   auditRepo?: InMemoryAuditRepository;
+  pool?: Pool;
+  conversationRepo?: InMemoryConversationRepository;
 } = {}) {
   const store = opts.store ?? new VoiceSessionStore();
   const gateway =
@@ -68,8 +82,21 @@ function makeAdapter(opts: {
     publicBaseUrl: 'https://example.com',
     ...(leadRepo ? { leadRepo } : {}),
     ...(auditRepo ? { auditRepo } : {}),
+    ...(opts.pool ? { pool: opts.pool } : {}),
+    ...(opts.conversationRepo ? { conversationRepo: opts.conversationRepo } : {}),
   });
   return { adapter, store, gateway, leadRepo, auditRepo };
+}
+
+/** Fake pool whose only query — identifyCaller's customers lookup — returns one
+ *  matched customer, so handleInbound takes the known-caller branch. */
+function matchedCallerPool(customerId: string, displayName: string): Pool {
+  return {
+    query: async (sql: string) =>
+      typeof sql === 'string' && sql.includes('FROM customers')
+        ? { rows: [{ id: customerId, display_name: displayName }] }
+        : { rows: [] },
+  } as unknown as Pool;
 }
 
 // ─── xmlEscape ───────────────────────────────────────────────────────────────
@@ -134,6 +161,15 @@ describe('buildTwiML', () => {
     expect(xml).not.toContain('<Hangup');
   });
 
+  it('T2-F03: emits actionOnEmptyResult="true" alongside the pinned Gather attributes', () => {
+    // Without it, Twilio's no-speech timeout falls through the document and
+    // hangs up instead of POSTing an empty SpeechResult back to the action URL.
+    const xml = buildTwiML([], { gatherActionUrl: '/g' });
+    expect(xml).toContain(
+      '<Gather input="speech" speechTimeout="auto" language="en-US" speechModel="phone_call" action="/g" method="POST" actionOnEmptyResult="true"/>'
+    );
+  });
+
   it('P11-002: language=es uses the Spanish Polly voice + es-US Gather locale', () => {
     const xml = buildTwiML(
       [{ type: 'tts_play', payload: { text: 'Hola' } }],
@@ -160,6 +196,50 @@ describe('buildTwiML', () => {
     );
     expect(xml).not.toContain('"><Hangup/>');
     expect(xml).toContain('a&quot;&gt;&lt;Hangup/&gt;');
+  });
+
+  // ─── A2: Gather hints + speechModel ────────────────────────────────────────
+
+  describe('A2 — Gather hints + speechModel', () => {
+    it('always emits speechModel="phone_call" on the <Gather>', () => {
+      const xml = buildTwiML([], { gatherActionUrl: '/g' });
+      expect(xml).toContain('speechModel="phone_call"');
+    });
+
+    it('renders a comma-separated hints attribute when hints are provided', () => {
+      const xml = buildTwiML([], { gatherActionUrl: '/g', hints: ['furnace', 'Henderson HOA'] });
+      expect(xml).toContain('hints="furnace,Henderson HOA"');
+    });
+
+    it('omits the hints attribute when hints is absent or empty', () => {
+      const withoutOpt = buildTwiML([], { gatherActionUrl: '/g' });
+      expect(withoutOpt).not.toContain('hints=');
+      const withEmpty = buildTwiML([], { gatherActionUrl: '/g', hints: [] });
+      expect(withEmpty).not.toContain('hints=');
+    });
+
+    it('caps hints at 50 terms even if the caller passes more', () => {
+      const many = Array.from({ length: 60 }, (_, i) => `term${i}`);
+      const xml = buildTwiML([], { gatherActionUrl: '/g', hints: many });
+      const match = /hints="([^"]*)"/.exec(xml);
+      expect(match).not.toBeNull();
+      expect(match![1].split(',')).toHaveLength(50);
+    });
+
+    it('XML-escapes hints so a malformed term cannot break TwiML', () => {
+      const xml = buildTwiML([], { gatherActionUrl: '/g', hints: ['a"><Hangup/>'] });
+      expect(xml).not.toContain('"><Hangup/>');
+      expect(xml).toContain('a&quot;&gt;&lt;Hangup/&gt;');
+    });
+
+    it('omits the hints attribute (but still ends the call cleanly) when the turn ends', () => {
+      const xml = buildTwiML(
+        [{ type: 'end_session', payload: { reason: 'normal_close' } }],
+        { gatherActionUrl: '/g', hints: ['furnace'] },
+      );
+      expect(xml).not.toContain('<Gather');
+      expect(xml).not.toContain('hints=');
+    });
   });
 
   // ─── P8-014: recordingStatusCallback wiring ────────────────────────────────
@@ -237,6 +317,42 @@ describe('TwilioGatherAdapter.handleInbound', () => {
     expect(xml).toMatch(/recorded/i);
     expect(xml).toContain('<Gather input="speech"');
     expect(xml).toContain('action="https://example.com/api/telephony/gather?sid=');
+  });
+
+  it('logs an identified inbound caller on their conversation timeline', async () => {
+    const conversationRepo = new InMemoryConversationRepository();
+    const { adapter } = makeAdapter({
+      pool: matchedCallerPool('cust-known', 'Jane Smith'),
+      conversationRepo,
+    });
+
+    await adapter.handleInbound({
+      callSid: 'CA-known',
+      from: '+15125550100',
+      to: '+15125550999',
+      tenantId: 'tenant-abc',
+    });
+
+    const threads = await conversationRepo.findByEntity('tenant-abc', 'customer', 'cust-known');
+    expect(threads).toHaveLength(1);
+    const msgs = await conversationRepo.getMessages('tenant-abc', threads[0].id);
+    const callLog = msgs.find((m) => m.source === 'inbound_call');
+    expect(callLog).toBeTruthy();
+    expect(callLog!.metadata).toMatchObject({ direction: 'inbound', channel: 'call', callSid: 'CA-known' });
+    expect(callLog!.content).toMatch(/^Inbound call from/);
+  });
+
+  it('does not log a call timeline for an unknown caller', async () => {
+    const conversationRepo = new InMemoryConversationRepository();
+    const { adapter } = makeAdapter({ conversationRepo }); // no pool → caller unknown
+    await adapter.handleInbound({
+      callSid: 'CA-unknown',
+      from: '+15125550100',
+      to: '+15125550999',
+      tenantId: 'tenant-abc',
+    });
+    const threads = await conversationRepo.findByEntity('tenant-abc', 'customer', 'cust-known');
+    expect(threads).toHaveLength(0);
   });
 
   it('P8-014: handleInbound emits <Start><Record/></Start> when recordingCallbackPath is set', async () => {
@@ -448,6 +564,276 @@ describe('TwilioGatherAdapter.handleInbound', () => {
     );
     const snap = store.snapshot(ids[0] as string);
     expect(snap?.leadId).toBeUndefined();
+  });
+});
+
+// ─── A2 — Gather hints wiring (sttHintsResolver + TenantGlossaryProvider fallback) ─
+
+describe('A2 — TwilioGatherAdapter Gather hints wiring', () => {
+  it('uses sttHintsResolver when wired, and threads its output into <Gather hints>', async () => {
+    const store = new VoiceSessionStore();
+    const gateway = makeGatewayReturning('{"intentType":"unknown","confidence":0,"reasoning":"x"}');
+    const sttHintsResolver = vi.fn(async (tenantId: string) => {
+      expect(tenantId).toBe('tenant-abc');
+      return ['furnace', 'compressor'];
+    });
+    const adapter = new TwilioGatherAdapter({
+      store,
+      gateway,
+      businessName: 'Acme Plumbing',
+      publicBaseUrl: 'https://example.com',
+      sttHintsResolver,
+    });
+    const xml = await adapter.handleInbound({
+      callSid: 'CA-hints-resolver',
+      from: '+15125550100',
+      to: '+15125550999',
+      tenantId: 'tenant-abc',
+    });
+    expect(sttHintsResolver).toHaveBeenCalledWith('tenant-abc');
+    expect(xml).toContain('hints="furnace,compressor"');
+    expect(xml).toContain('speechModel="phone_call"');
+  });
+
+  it('falls back to a TenantGlossaryProvider built from catalogRepo/customerRepo/userRepo when no sttHintsResolver is wired', async () => {
+    const store = new VoiceSessionStore();
+    const gateway = makeGatewayReturning('{"intentType":"unknown","confidence":0,"reasoning":"x"}');
+    const catalogRepo = {
+      listByTenant: vi.fn(async () => [{ name: 'Widget Deluxe' }]),
+    } as unknown as import('../../src/catalog/catalog-item').CatalogItemRepository;
+    const customerRepo = {
+      findByTenant: vi.fn(async () => [{ displayName: 'Henderson HOA' }]),
+    } as unknown as import('../../src/customers/customer').CustomerRepository;
+    const userRepo = {
+      findByTenant: vi.fn(async () => [{ firstName: 'Sam', lastName: 'Lee' }]),
+    } as unknown as import('../../src/users/user').UserRepository;
+    const adapter = new TwilioGatherAdapter({
+      store,
+      gateway,
+      businessName: 'Acme Plumbing',
+      publicBaseUrl: 'https://example.com',
+      catalogRepo,
+      customerRepo,
+      userRepo,
+    });
+    const xml = await adapter.handleInbound({
+      callSid: 'CA-hints-glossary',
+      from: '+15125550100',
+      to: '+15125550999',
+      tenantId: 'tenant-abc',
+    });
+    expect(xml).toContain('hints="Widget Deluxe,Henderson HOA,Sam Lee"');
+  });
+
+  it('omits hints (but still emits a valid <Gather>) when neither sttHintsResolver nor the three glossary repos are wired', async () => {
+    const { adapter } = makeAdapter();
+    const xml = await adapter.handleInbound({
+      callSid: 'CA-no-hints',
+      from: '+15125550100',
+      to: '+15125550999',
+      tenantId: 'tenant-abc',
+    });
+    expect(xml).not.toContain('hints=');
+    expect(xml).toContain('<Gather input="speech"');
+  });
+
+  it('failure-soft: an sttHintsResolver error never blocks the Gather turn — hints just omitted', async () => {
+    const store = new VoiceSessionStore();
+    const gateway = makeGatewayReturning('{"intentType":"unknown","confidence":0,"reasoning":"x"}');
+    const adapter = new TwilioGatherAdapter({
+      store,
+      gateway,
+      businessName: 'Acme Plumbing',
+      publicBaseUrl: 'https://example.com',
+      sttHintsResolver: async () => {
+        throw new Error('boom');
+      },
+    });
+    const xml = await adapter.handleInbound({
+      callSid: 'CA-hints-fail',
+      from: '+15125550100',
+      to: '+15125550999',
+      tenantId: 'tenant-abc',
+    });
+    expect(xml).not.toContain('hints=');
+    expect(xml).toContain('<Gather input="speech"');
+  });
+
+  // U3 — app.ts now wires a shared TenantGlossaryProvider's termsForTenant
+  // as sttHintsResolver unconditionally (no LLM dependency). Pin: the
+  // wired resolver is preferred over the catalogRepo/customerRepo/userRepo
+  // fallback (the fallback repos are never queried when a resolver is
+  // wired), and the resolver is invoked once per Gather turn.
+  it('prefers a wired sttHintsResolver over the glossary-repo fallback, and calls it once per Gather turn', async () => {
+    const store = new VoiceSessionStore();
+    const gateway = makeGatewayReturning('{"intentType":"unknown","confidence":0,"reasoning":"x"}');
+    const sttHintsResolver = vi.fn(async () => ['furnace', 'compressor']);
+    const catalogRepo = {
+      listByTenant: vi.fn(async () => [{ name: 'Should not be used' }]),
+    } as unknown as import('../../src/catalog/catalog-item').CatalogItemRepository;
+    const customerRepo = {
+      findByTenant: vi.fn(async () => [{ displayName: 'Should not be used' }]),
+    } as unknown as import('../../src/customers/customer').CustomerRepository;
+    const userRepo = {
+      findByTenant: vi.fn(async () => [{ firstName: 'Should', lastName: 'NotBeUsed' }]),
+    } as unknown as import('../../src/users/user').UserRepository;
+    const adapter = new TwilioGatherAdapter({
+      store,
+      gateway,
+      businessName: 'Acme Plumbing',
+      publicBaseUrl: 'https://example.com',
+      sttHintsResolver,
+      catalogRepo,
+      customerRepo,
+      userRepo,
+    });
+
+    const xml1 = await adapter.handleInbound({
+      callSid: 'CA-hints-preferred',
+      from: '+15125550100',
+      to: '+15125550999',
+      tenantId: 'tenant-abc',
+    });
+    expect(xml1).toContain('hints="furnace,compressor"');
+    expect(xml1).not.toContain('Should not be used');
+    expect(sttHintsResolver).toHaveBeenCalledTimes(1);
+
+    const ids = Array.from(
+      (store as unknown as { sessions: Map<string, unknown> }).sessions.keys()
+    );
+    const sessionId = ids[0] as string;
+    const session = await store.get(sessionId);
+    if (session && session.machine.currentState === 'ask_caller') {
+      session.machine.dispatch({ type: 'caller_known', customerId: 'cust-1' });
+    }
+
+    const xml2 = await adapter.handleGather({
+      sessionId,
+      callSid: 'CA-hints-preferred',
+      speechResult: 'I need service',
+      confidence: 0.9,
+      tenantId: 'tenant-abc',
+    });
+    expect(xml2).toContain('hints="furnace,compressor"');
+    expect(sttHintsResolver).toHaveBeenCalledTimes(2);
+
+    // The TenantGlossaryProvider fallback (built from
+    // catalogRepo/customerRepo/userRepo inside resolveGatherHints) is never
+    // consulted while a resolver is wired — customerRepo.findByTenant and
+    // userRepo.findByTenant are ONLY reachable via that fallback in this
+    // minimal dep set (catalogRepo.listByTenant is also legitimately called
+    // by the unrelated session-catalog preload on inbound, so it's not a
+    // useful signal here).
+    expect(customerRepo.findByTenant).not.toHaveBeenCalled();
+    expect(userRepo.findByTenant).not.toHaveBeenCalled();
+  });
+});
+
+// ─── WS16c — transport convergence (stream gains Gather-parity features) ──────
+
+describe('WS16c — inbound establishment convergence (Media Streams ↔ Gather)', () => {
+  it('owner "incoming call" push fires on stream establishment (divergence #5 converged)', async () => {
+    const repo = new InMemoryDeviceTokenRepository();
+    const provider = new InMemoryPushDeliveryProvider();
+    await repo.register({
+      tenantId: 'tenant-abc',
+      userId: 'owner-1',
+      expoPushToken: 'ExponentPushToken[a]',
+      platform: 'ios',
+    });
+    setOwnerNotifications(new OwnerNotificationService({ deviceTokenRepo: repo, provider }));
+    try {
+      const { adapter } = makeAdapter({ pool: matchedCallerPool('cust-known', 'Jane Smith') });
+      // Phase A (webhook) then Phase B (post-WS-start bootstrap).
+      await adapter.handleInboundForStream({
+        callSid: 'CA-stream-push',
+        from: '+15125550100',
+        tenantId: 'tenant-abc',
+      });
+      await adapter.initializeStreamSession({ callSid: 'CA-stream-push', tenantId: 'tenant-abc' });
+
+      // Exactly one owner push — realtime callers used to get NONE.
+      expect(provider.sent).toHaveLength(1);
+      expect(provider.sent[0].data?.type).toBe('incoming_call');
+      expect(provider.sent[0].data?.screen).toBe('/customers/cust-known');
+      expect(provider.sent[0].body).toContain('Jane Smith');
+    } finally {
+      setOwnerNotifications(undefined);
+    }
+  });
+
+  it('inbound call is logged on the customer timeline on stream establishment (divergence #4 converged)', async () => {
+    const conversationRepo = new InMemoryConversationRepository();
+    const { adapter } = makeAdapter({
+      pool: matchedCallerPool('cust-known', 'Jane Smith'),
+      conversationRepo,
+    });
+    await adapter.handleInboundForStream({
+      callSid: 'CA-stream-log',
+      from: '+15125550100',
+      tenantId: 'tenant-abc',
+    });
+    await adapter.initializeStreamSession({ callSid: 'CA-stream-log', tenantId: 'tenant-abc' });
+
+    const threads = await conversationRepo.findByEntity('tenant-abc', 'customer', 'cust-known');
+    expect(threads).toHaveLength(1);
+    const msgs = await conversationRepo.getMessages('tenant-abc', threads[0].id);
+    const callLog = msgs.find((m) => m.source === 'inbound_call');
+    expect(callLog).toBeTruthy();
+    expect(callLog!.metadata).toMatchObject({
+      direction: 'inbound',
+      channel: 'call',
+      callSid: 'CA-stream-log',
+    });
+  });
+
+  it('identify-guard parity: a blocked/empty caller-id skips identifyCaller on BOTH transports (divergence #3 converged)', async () => {
+    // Count identifyCaller's customers lookup on a shared spy pool.
+    let customersQueries = 0;
+    const pool = {
+      query: async (sql: string) => {
+        if (typeof sql === 'string' && sql.includes('FROM customers')) customersQueries += 1;
+        return { rows: [] };
+      },
+    } as unknown as Pool;
+
+    // Gather, blocked From ('') — previously ran identifyCaller('') anyway.
+    const gather = makeAdapter({ pool });
+    await gather.adapter.handleInbound({
+      callSid: 'CA-blk-g',
+      from: '',
+      to: '+15125550999',
+      tenantId: 'tenant-abc',
+    });
+
+    // Stream, blocked From ('') — already required `from`; stays skipped.
+    const stream = makeAdapter({ pool });
+    await stream.adapter.handleInboundForStream({
+      callSid: 'CA-blk-s',
+      from: '',
+      tenantId: 'tenant-abc',
+    });
+    await stream.adapter.initializeStreamSession({ callSid: 'CA-blk-s', tenantId: 'tenant-abc' });
+
+    // Neither transport hits the DB for a caller with no phone to key on.
+    expect(customersQueries).toBe(0);
+  });
+
+  it('identify-guard parity: a present caller-id DOES identify on the stream transport', async () => {
+    // Positive control so the parity assertion above can't pass by identify
+    // being dead-wired off. A matched pool + real From → known caller push.
+    const { adapter, store } = makeAdapter({ pool: matchedCallerPool('cust-known', 'Jane Smith') });
+    await adapter.handleInboundForStream({
+      callSid: 'CA-stream-known',
+      from: '+15125550100',
+      tenantId: 'tenant-abc',
+    });
+    await adapter.initializeStreamSession({ callSid: 'CA-stream-known', tenantId: 'tenant-abc' });
+
+    const session = store.findByCallSid('CA-stream-known');
+    expect(session?.customerId).toBe('cust-known');
+    // WS16c #2 — callerPhone is now pinned on the stream session too.
+    expect(session?.callerPhone).toBe('+15125550100');
   });
 });
 
@@ -894,17 +1280,284 @@ describe('TwilioGatherAdapter.handleGather', () => {
       sess.machine.dispatch({ type: 'caller_known', customerId: 'c1' });
     }
 
+    // A3 — Gather `Confidence` (acoustic) is intentionally HIGH here so this
+    // test exercises the CLASSIFIER low-confidence reprompt path (the
+    // gateway mock above returns intentType 'unknown' with confidence 0.2).
+    // A low acoustic Confidence would instead trip the acoustic-confidence
+    // gate before the classifier even runs — see
+    // "low acoustic Gather Confidence" tests below for that path.
     const xml = await a2.handleGather({
       sessionId: sid,
       callSid: 'CA-low',
       speechResult: 'mmm uh',
-      confidence: 0.2,
+      confidence: 0.95,
       tenantId: 'tenant-abc',
     });
 
     const snap = await s2.snapshot(sid);
     expect(snap?.state).toBe('intent_capture'); // reprompt, not escalated yet
     expect(xml).toContain('<Gather');
+  });
+
+  // ─── A3 — low acoustic Gather `Confidence` gate ────────────────────────────
+  //
+  // Before this fix, Twilio's Gather `Confidence` was parsed and completely
+  // ignored — a low-confidence recognition was classified and dispatched
+  // exactly like a clean one. These pin the gate: a low-confidence non-empty
+  // utterance is reprompted WITHOUT running the classifier, a normal/missing
+  // Confidence is processed as before, and repeated low confidence hands the
+  // caller off instead of looping.
+  describe('low acoustic Gather Confidence', () => {
+    it('reprompts without running the classifier when Confidence is below the floor', async () => {
+      const xml = await adapter.handleGather({
+        sessionId,
+        callSid: 'CA-gx',
+        speechResult: 'mumbled garbage',
+        confidence: 0.3,
+        tenantId: 'tenant-abc',
+      });
+
+      expect((gateway.complete as ReturnType<typeof vi.fn>)).not.toHaveBeenCalled();
+      expect(xml).toContain('<Gather');
+      expect(xml).toContain(
+        xmlEscape(renderTtsText(LOW_STT_CONFIDENCE_REPROMPT_COPY, {}, 'en')),
+      );
+      const snap = await store.snapshot(sessionId);
+      expect(snap?.state).toBe('intent_capture');
+    });
+
+    it('processes the turn normally when Confidence is high', async () => {
+      const xml = await adapter.handleGather({
+        sessionId,
+        callSid: 'CA-gx',
+        speechResult: 'Create an invoice for Acme for 450 dollars',
+        confidence: 0.95,
+        tenantId: 'tenant-abc',
+      });
+
+      expect((gateway.complete as ReturnType<typeof vi.fn>)).toHaveBeenCalledTimes(1);
+      const snap = await store.snapshot(sessionId);
+      expect(snap?.state).toBe('intent_confirm');
+      expect(xml).toMatch(/<Say.*confirm/i);
+    });
+
+    it('treats a missing Confidence as HIGH — processes the turn normally, never blocks it', async () => {
+      const xml = await adapter.handleGather({
+        sessionId,
+        callSid: 'CA-gx',
+        speechResult: 'Create an invoice for Acme for 450 dollars',
+        confidence: undefined,
+        tenantId: 'tenant-abc',
+      });
+
+      expect((gateway.complete as ReturnType<typeof vi.fn>)).toHaveBeenCalledTimes(1);
+      const snap = await store.snapshot(sessionId);
+      expect(snap?.state).toBe('intent_confirm');
+      expect(xml).toMatch(/<Say.*confirm/i);
+    });
+
+    it('two consecutive low-Confidence turns hand off gracefully instead of looping', async () => {
+      const xml1 = await adapter.handleGather({
+        sessionId,
+        callSid: 'CA-gx',
+        speechResult: 'mumbled one',
+        confidence: 0.3,
+        tenantId: 'tenant-abc',
+      });
+      expect(xml1).toContain('<Gather');
+      let snap = await store.snapshot(sessionId);
+      expect(snap?.state).toBe('intent_capture');
+
+      const session = await store.get(sessionId);
+      expect(session?.ended).toBe(false);
+
+      const xml2 = await adapter.handleGather({
+        sessionId,
+        callSid: 'CA-gx',
+        speechResult: 'mumbled two',
+        confidence: 0.2,
+        tenantId: 'tenant-abc',
+      });
+
+      // The classifier never ran for either low-confidence turn.
+      expect((gateway.complete as ReturnType<typeof vi.fn>)).not.toHaveBeenCalled();
+      expect(xml2).toContain(
+        xmlEscape(renderTtsText(SPEECH_TURN_FAILURE_ESCALATION_COPY, {}, 'en')),
+      );
+      expect(xml2).toContain('<Hangup');
+      expect(xml2).not.toContain('<Gather');
+      expect(session?.ended).toBe(true);
+      expect(session?.terminalOutcome).toBeDefined();
+    });
+
+    it('resets the low-confidence streak after a good (classified) turn', async () => {
+      // Turn 1: low confidence → reprompt, streak = 1.
+      await adapter.handleGather({
+        sessionId,
+        callSid: 'CA-gx',
+        speechResult: 'mumbled one',
+        confidence: 0.3,
+        tenantId: 'tenant-abc',
+      });
+
+      // Turn 2: clean, high-confidence turn → classified normally, and
+      // resets the streak. Advances to intent_confirm.
+      await adapter.handleGather({
+        sessionId,
+        callSid: 'CA-gx',
+        speechResult: 'Create an invoice for Acme for 450 dollars',
+        confidence: 0.95,
+        tenantId: 'tenant-abc',
+      });
+      expect((gateway.complete as ReturnType<typeof vi.fn>)).toHaveBeenCalledTimes(1);
+      const midSnap = await store.snapshot(sessionId);
+      expect(midSnap?.state).toBe('intent_confirm');
+
+      // Turn 3: low confidence again — because the streak reset on turn 2,
+      // this is a fresh 1st low-confidence turn → another REPROMPT, not an
+      // escalation. The gate runs regardless of FSM state (a misheard
+      // confirm reply is just as unsafe to act on as a misheard intent), so
+      // the confirmIntent skill (which would otherwise fire in
+      // intent_confirm) is never reached — gateway.complete stays at 1 call.
+      const xml3 = await adapter.handleGather({
+        sessionId,
+        callSid: 'CA-gx',
+        speechResult: 'huh what',
+        confidence: 0.3,
+        tenantId: 'tenant-abc',
+      });
+      expect((gateway.complete as ReturnType<typeof vi.fn>)).toHaveBeenCalledTimes(1);
+      expect(xml3).toContain('<Gather');
+      expect(xml3).not.toContain('<Hangup');
+      const finalSnap = await store.snapshot(sessionId);
+      expect(finalSnap?.state).toBe('intent_confirm'); // untouched by the gate
+    });
+  });
+
+  // ─── T2-F03 — silent caller (empty SpeechResult via actionOnEmptyResult) ──
+  //
+  // actionOnEmptyResult="true" re-delivers a no-speech timeout here as an
+  // empty-SpeechResult POST, so silence re-enters this loop every timeout.
+  // These pin that silence shares the SAME bounded ladder as low acoustic
+  // confidence: reprompt below the cap, escalation + hangup at it, and a
+  // single combined streak for mixed silence/mumble sequences.
+  describe('silent caller (empty SpeechResult) shares the low-confidence ladder', () => {
+    it('first silent turn reprompts with a new <Gather> and no <Hangup/>', async () => {
+      const xml = await adapter.handleGather({
+        sessionId,
+        callSid: 'CA-gx',
+        speechResult: '',
+        confidence: undefined,
+        tenantId: 'tenant-abc',
+      });
+
+      expect((gateway.complete as ReturnType<typeof vi.fn>)).not.toHaveBeenCalled();
+      expect(xml).toContain(
+        xmlEscape(renderTtsText(LOW_STT_CONFIDENCE_REPROMPT_COPY, {}, 'en')),
+      );
+      expect(xml).toContain('<Gather');
+      expect(xml).not.toContain('<Hangup');
+      const session = await store.get(sessionId);
+      expect(session?.ended).toBe(false);
+      // A no-speech timeout must NOT record an empty `caller:` transcript
+      // line — deriveCallOutcome reads any caller line as caller speech and
+      // would classify a fully silent call as a spoken no-intent call.
+      expect(session?.transcript.some((t) => t.speaker === 'caller' && t.text.trim() === '')).toBe(
+        false,
+      );
+    });
+
+    it('two consecutive silent turns escalate gracefully and end the session', async () => {
+      const xml1 = await adapter.handleGather({
+        sessionId,
+        callSid: 'CA-gx',
+        speechResult: '',
+        confidence: undefined,
+        tenantId: 'tenant-abc',
+      });
+      expect(xml1).toContain('<Gather');
+
+      const xml2 = await adapter.handleGather({
+        sessionId,
+        callSid: 'CA-gx',
+        speechResult: '   ',
+        confidence: undefined,
+        tenantId: 'tenant-abc',
+      });
+
+      expect((gateway.complete as ReturnType<typeof vi.fn>)).not.toHaveBeenCalled();
+      expect(xml2).toContain(
+        xmlEscape(renderTtsText(SPEECH_TURN_FAILURE_ESCALATION_COPY, {}, 'en')),
+      );
+      expect(xml2).toContain('<Hangup');
+      expect(xml2).not.toContain('<Gather');
+      const session = await store.get(sessionId);
+      expect(session?.ended).toBe(true);
+      expect(session?.terminalOutcome).toBeDefined();
+    });
+
+    it('mixed ladder: a silent turn then a low-Confidence turn terminate at combined streak 2', async () => {
+      await adapter.handleGather({
+        sessionId,
+        callSid: 'CA-gx',
+        speechResult: '',
+        confidence: undefined,
+        tenantId: 'tenant-abc',
+      });
+
+      const xml2 = await adapter.handleGather({
+        sessionId,
+        callSid: 'CA-gx',
+        speechResult: 'mumbled garbage',
+        confidence: 0.3,
+        tenantId: 'tenant-abc',
+      });
+
+      expect((gateway.complete as ReturnType<typeof vi.fn>)).not.toHaveBeenCalled();
+      expect(xml2).toContain(
+        xmlEscape(renderTtsText(SPEECH_TURN_FAILURE_ESCALATION_COPY, {}, 'en')),
+      );
+      expect(xml2).toContain('<Hangup');
+      const session = await store.get(sessionId);
+      expect(session?.ended).toBe(true);
+    });
+
+    it('a confident turn between silences resets the streak — third turn reprompts, not escalates', async () => {
+      // Turn 1: silence → reprompt, streak = 1.
+      await adapter.handleGather({
+        sessionId,
+        callSid: 'CA-gx',
+        speechResult: '',
+        confidence: undefined,
+        tenantId: 'tenant-abc',
+      });
+
+      // Turn 2: clean, high-confidence turn → classified normally, streak cleared.
+      await adapter.handleGather({
+        sessionId,
+        callSid: 'CA-gx',
+        speechResult: 'Create an invoice for Acme for 450 dollars',
+        confidence: 0.95,
+        tenantId: 'tenant-abc',
+      });
+      expect((gateway.complete as ReturnType<typeof vi.fn>)).toHaveBeenCalledTimes(1);
+
+      // Turn 3: silence again — a fresh 1st strike → reprompt, not escalation.
+      const xml3 = await adapter.handleGather({
+        sessionId,
+        callSid: 'CA-gx',
+        speechResult: '',
+        confidence: undefined,
+        tenantId: 'tenant-abc',
+      });
+      expect(xml3).toContain(
+        xmlEscape(renderTtsText(LOW_STT_CONFIDENCE_REPROMPT_COPY, {}, 'en')),
+      );
+      expect(xml3).toContain('<Gather');
+      expect(xml3).not.toContain('<Hangup');
+      const session = await store.get(sessionId);
+      expect(session?.ended).toBe(false);
+    });
   });
 
   it('flag-off live calls omit extendedIntents from classifier context and resolve the flag once per call', async () => {
@@ -2233,5 +2886,86 @@ describe('NIT — detectPromptInjection runs FIRST in runDeterministicSafetyScan
     const tts = effects.filter((fx) => fx.type === 'tts_play');
     expect((tts[0]?.payload as { text: string }).text).toContain('911');
     expect(session.machine.currentState).toBe('terminated');
+  });
+});
+
+// ─── Comms C5 — consent announcement precedes capture (Gather transport) ─────
+
+describe('C5 buildTwiML: <Start><Record> placement', () => {
+  it('emits the record block AFTER the first <Say> so the disclosure is spoken before capture', () => {
+    const xml = buildTwiML(
+      [
+        { type: 'tts_play', payload: { text: 'Greeting with disclosure inside' } },
+        { type: 'tts_play', payload: { text: 'Second line' } },
+      ],
+      {
+        gatherActionUrl: '/g',
+        recordingStatusCallback: 'https://api.test/api/telephony/recording',
+      },
+    );
+    const firstSay = xml.indexOf('<Say');
+    const record = xml.indexOf('<Start><Record');
+    const firstSayClose = xml.indexOf('</Say>');
+    expect(firstSay).toBeGreaterThanOrEqual(0);
+    expect(record).toBeGreaterThan(firstSayClose);
+    // ASR (<Gather>) also comes after the disclosure.
+    expect(xml.indexOf('<Gather')).toBeGreaterThan(firstSayClose);
+  });
+
+  it('with no <Say> at all the record block leads the document (nothing to disclose first)', () => {
+    const xml = buildTwiML([], {
+      gatherActionUrl: '/g',
+      recordingStatusCallback: 'https://api.test/recording',
+    });
+    expect(xml.indexOf('<Start><Record')).toBeLessThan(xml.indexOf('<Gather'));
+  });
+});
+
+// ─── C5 — parked consent-thunk lifetime ─────────────────────────────────────
+
+/**
+ * The deferred consent commit parks a closure per bootstrapped session. Paths
+ * that deliberately never commit — the `<Dial>` transfer short-circuit and
+ * every Media Streams fail-closed hang-up — would otherwise retain that
+ * closure forever, so a TTS outage or a run of transfer-at-bootstrap calls
+ * would grow the map without bound. Lifetime is instead bounded to sessions
+ * the store still has.
+ */
+describe('C5 — pending consent commits do not outlive their sessions', () => {
+  it('sweeps thunks for reaped sessions instead of retaining them forever', async () => {
+    const store = new VoiceSessionStore({ startInterval: false });
+    const consentEvents = new InMemoryConsentEventRepository();
+    const adapter = new TwilioGatherAdapter({
+      store,
+      gateway: makeGatewayReturning('{"intentType":"unknown","confidence":0,"reasoning":"x"}'),
+      businessName: 'Acme Plumbing',
+      publicBaseUrl: 'https://example.com',
+      consentEvents,
+    });
+
+    // Call 1 bootstraps and never commits — the Media Streams fail-closed
+    // shape, where the disclosure did not play so no row may be written.
+    await adapter.handleInboundForStream({
+      callSid: 'CA-leak-1',
+      from: '+15125550101',
+      tenantId: 't1',
+    });
+    await adapter.initializeStreamSession({ callSid: 'CA-leak-1', tenantId: 't1' });
+    expect(adapter._pendingConsentCommitSize).toBe(1);
+    expect(consentEvents.rows).toHaveLength(0);
+
+    // The store reaps the finished session.
+    store.reapIdle(Date.now() + 24 * 60 * 60 * 1000);
+    expect(store.get(store.findByCallSidIncludingEnded('CA-leak-1')?.id ?? 'gone')).toBeUndefined();
+
+    // Call 2 bootstraps: the sweep drops call 1's orphaned thunk, so the map
+    // tracks live sessions only rather than growing per undisclosed call.
+    await adapter.handleInboundForStream({
+      callSid: 'CA-leak-2',
+      from: '+15125550102',
+      tenantId: 't1',
+    });
+    await adapter.initializeStreamSession({ callSid: 'CA-leak-2', tenantId: 't1' });
+    expect(adapter._pendingConsentCommitSize).toBe(1);
   });
 });

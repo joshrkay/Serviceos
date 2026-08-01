@@ -9,6 +9,7 @@ import { validateProposalPayload } from '../../../../src/proposals/contracts';
 import { UpdateCustomerExecutionHandler } from '../../../../src/proposals/execution/handlers';
 import { InMemoryCustomerRepository } from '../../../../src/customers/customer';
 import { createCustomer } from '../../../../src/customers/customer';
+import { InMemoryAuditRepository } from '../../../../src/audit/audit';
 import type { Proposal } from '../../../../src/proposals/proposal';
 import type { TriageDecision } from '@ai-service-os/shared';
 
@@ -65,7 +66,7 @@ describe('RV-123 — buildMarkCustomerVulnerablePayload', () => {
       repo,
     );
     const payload = buildMarkCustomerVulnerablePayload(customer.id, DECISION, undefined, NOW)!;
-    const handler = new UpdateCustomerExecutionHandler(repo);
+    const handler = new UpdateCustomerExecutionHandler(repo, new InMemoryAuditRepository());
     const proposal = {
       id: 'p1',
       tenantId: 't1',

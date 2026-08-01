@@ -27,7 +27,9 @@ import {
   createDeadlineContext,
   DeadlineExceededError,
   isDeadlineExceeded,
+  isLocalDeadlineOrAbort,
 } from '../../src/ai/gateway/deadline';
+import { isBreakerHealthFailure } from '../../src/ai/gateway/breaker';
 
 describe('retry classifyError', () => {
   it('treats 429 as rate_limited', () => {
@@ -50,6 +52,34 @@ describe('retry classifyError', () => {
   });
   it('treats DeadlineExceededError as timeout', () => {
     expect(classifyError(new DeadlineExceededError(100))).toBe('timeout');
+  });
+  it('treats OpenAI Request-was-aborted as timeout (deadline signal)', () => {
+    expect(classifyError(new Error('Request was aborted.'))).toBe('timeout');
+    const abortErr = new Error('The operation was aborted');
+    abortErr.name = 'AbortError';
+    expect(classifyError(abortErr)).toBe('timeout');
+  });
+});
+
+describe('local deadline vs breaker health (FM-01)', () => {
+  it('isLocalDeadlineOrAbort matches AbortSignal surfaces but not ETIMEDOUT', () => {
+    expect(isLocalDeadlineOrAbort(new Error('Request was aborted.'))).toBe(true);
+    expect(isLocalDeadlineOrAbort(new DeadlineExceededError(50))).toBe(true);
+    expect(isLocalDeadlineOrAbort(new Error('connect ETIMEDOUT'))).toBe(false);
+    // Broad timeout strings still count as deadline for retry classification;
+    // ETIMEDOUT is handled as transient network in classifyError separately.
+    expect(isDeadlineExceeded(new Error('socket timeout'))).toBe(true);
+    expect(isDeadlineExceeded(new Error('connect ETIMEDOUT'))).toBe(false);
+  });
+
+  it('isBreakerHealthFailure excludes local aborts and 4xx', () => {
+    expect(isBreakerHealthFailure(new Error('Request was aborted.'))).toBe(false);
+    expect(
+      isBreakerHealthFailure(Object.assign(new Error('bad'), { status: 400 })),
+    ).toBe(false);
+    expect(
+      isBreakerHealthFailure(Object.assign(new Error('upstream'), { status: 503 })),
+    ).toBe(true);
   });
 });
 
@@ -174,10 +204,55 @@ describe('CircuitBreakerRegistry', () => {
     expect(ok2).toBe('ok');
     expect(reg.cell(parts).getState()).toBe('closed');
   });
+
+  it('caps CONCURRENT half-open probes at halfOpenProbeCount (no stampede)', async () => {
+    const reg = new CircuitBreakerRegistry({
+      ...DEFAULT_BREAKER,
+      consecutiveFailureThreshold: 2,
+      cooldownMs: 20,
+      halfOpenProbeCount: 2,
+      halfOpenSuccessRatio: 0.5,
+    });
+    const parts = { provider: 'p3', modelFamily: 'm' };
+    for (let i = 0; i < 2; i++) {
+      await expect(
+        reg.run(parts, async () => {
+          throw new Error('e');
+        }),
+      ).rejects.toThrow();
+    }
+    await new Promise((r) => setTimeout(r, 30));
+    expect(reg.cell(parts).getState()).toBe('half-open');
+
+    // Fire 5 requests at once while half-open, each op held open until we
+    // release it. run() must reserve a probe slot atomically — only 2 ops
+    // may start; the rest reject with BreakerOpenError instead of flooding
+    // the recovering provider.
+    let started = 0;
+    let release: () => void = () => {};
+    const gate = new Promise<void>((r) => {
+      release = r;
+    });
+    const results = await Promise.allSettled(
+      Array.from({ length: 5 }, () =>
+        reg.run(parts, async () => {
+          started++;
+          await gate;
+          return 'ok';
+        }).finally(() => release()),
+      ),
+    );
+    expect(started).toBe(2);
+    const rejected = results.filter((r) => r.status === 'rejected');
+    expect(rejected).toHaveLength(3);
+    for (const r of rejected) {
+      expect((r as PromiseRejectedResult).reason).toBeInstanceOf(BreakerOpenError);
+    }
+  });
 });
 
 describe('TenantQuotaRegistry', () => {
-  it('rejects when concurrency cap is full', () => {
+  it('rejects when concurrency cap is full', async () => {
     const reg = new TenantQuotaRegistry({
       standard: {
         maxConcurrency: 1,
@@ -186,13 +261,13 @@ describe('TenantQuotaRegistry', () => {
         hardUpperBoundTokens: 1000,
       },
     });
-    reg.acquire({ tenantId: 't1', estimatedTokens: 10 });
-    expect(() => reg.acquire({ tenantId: 't1', estimatedTokens: 10 })).toThrow(
+    await reg.acquire({ tenantId: 't1', estimatedTokens: 10 });
+    await expect(reg.acquire({ tenantId: 't1', estimatedTokens: 10 })).rejects.toBeInstanceOf(
       TenantConcurrencyExceededError,
     );
   });
 
-  it('rejects when token bucket is empty', () => {
+  it('rejects when token bucket is empty', async () => {
     const reg = new TenantQuotaRegistry({
       standard: {
         maxConcurrency: 5,
@@ -201,12 +276,12 @@ describe('TenantQuotaRegistry', () => {
         hardUpperBoundTokens: 1000,
       },
     });
-    expect(() =>
+    await expect(
       reg.acquire({ tenantId: 't2', estimatedTokens: 100 }),
-    ).toThrow(TenantTokenBudgetExceededError);
+    ).rejects.toBeInstanceOf(TenantTokenBudgetExceededError);
   });
 
-  it('refunds unused tokens on release', () => {
+  it('refunds unused tokens on release', async () => {
     const reg = new TenantQuotaRegistry({
       standard: {
         maxConcurrency: 5,
@@ -215,11 +290,11 @@ describe('TenantQuotaRegistry', () => {
         hardUpperBoundTokens: 1000,
       },
     });
-    const lease = reg.acquire({ tenantId: 't3', estimatedTokens: 50 });
-    lease.release(10, 5); // actual = 15, refund 35
+    const lease = await reg.acquire({ tenantId: 't3', estimatedTokens: 50 });
+    await lease.release(10, 5); // actual = 15, refund 35
     // Should be able to acquire another 80 tokens now.
-    const lease2 = reg.acquire({ tenantId: 't3', estimatedTokens: 80 });
-    lease2.release();
+    const lease2 = await reg.acquire({ tenantId: 't3', estimatedTokens: 80 });
+    await lease2.release();
   });
 });
 

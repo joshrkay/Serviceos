@@ -63,12 +63,12 @@ export function HfcrHeroCard() {
   if (hfcrCents <= 0) {
     // Onboarding payoff: set the goal rather than showing a deflating $0.
     return (
-      <section data-testid="hfcr-hero" className="px-4 md:px-6 py-5 border-b border-slate-100">
-        <div className="rounded-2xl border border-dashed border-emerald-300 bg-emerald-50/60 px-5 py-5">
-          <p className="text-xs font-medium uppercase tracking-wide text-emerald-700 flex items-center gap-1.5">
+      <section data-testid="hfcr-hero" className="px-4 md:px-6 py-5 border-b border-border">
+        <div className="rounded-2xl border border-dashed border-success/40 bg-success/10 px-5 py-5">
+          <p className="text-xs font-medium uppercase tracking-wide text-success flex items-center gap-1.5">
             <Sparkles size={13} /> Hands-free collected
           </p>
-          <p className="mt-1.5 text-sm text-emerald-800">
+          <p className="mt-1.5 text-sm text-muted-foreground">
             Your first hands-free dollar will land here — collected while you never opened the app.
           </p>
         </div>
@@ -77,15 +77,15 @@ export function HfcrHeroCard() {
   }
 
   return (
-    <section data-testid="hfcr-hero" className="px-4 md:px-6 py-5 border-b border-slate-100">
-      <div className="rounded-2xl bg-gradient-to-br from-emerald-600 to-emerald-700 px-5 py-5 text-white">
-        <p className="text-xs font-medium uppercase tracking-wide text-emerald-100 flex items-center gap-1.5">
+    <section data-testid="hfcr-hero" className="px-4 md:px-6 py-5 border-b border-border">
+      <div className="rounded-2xl bg-success px-5 py-5 text-primary-foreground">
+        <p className="text-xs font-medium uppercase tracking-wide text-primary-foreground/80 flex items-center gap-1.5">
           <Sparkles size={13} /> Collected hands-free this month
         </p>
         <p data-testid="hfcr-amount" className="mt-1.5 text-3xl font-semibold tabular-nums break-words">
           {formatCurrency(hfcrCents)}
         </p>
-        <p className="mt-1 text-sm text-emerald-50">
+        <p className="mt-1 text-sm text-primary-foreground/80">
           {recoveredCallCount > 0
             ? `${recoveredCallCount} ${recoveredCallCount === 1 ? 'call' : 'calls'} recovered · zero app taps`
             : 'Collected without opening the app.'}

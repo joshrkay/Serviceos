@@ -149,10 +149,9 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['089_drop_vertical_packs_type_check', 'dd41709b4300eb0ed03b2a477bdbe163440c76a557d5c07cdbe3e02910a803b8'],
   ['090_tenant_settings_voice_persona', '95805b86eb94d010c5c231ae4ab641e05debba20464a61888a42ac4809b0dcfb'],
   ['091_voice_session_outcome', '6fea1ddb8c3725191aff36013b7134fe7bf91af7392cc815da7f9c041fcfc59c'],
-  // 092_extend_dispatch_entity_types: added 'appointment_reminder' to the entity_type CHECK
-  // constraint — 11 rows in message_dispatches had this value, causing pg error 23514 on every
-  // deploy (runner re-runs all migrations on every boot, DROP+re-ADD re-validates all rows).
-  ['092_extend_dispatch_entity_types', 'cc5d07bbf11a26fb95ec6dc93a8344b24fa44472f89e167e4023bb60da603435'],
+  // 092_extend_dispatch_entity_types: replay-safe on populated databases; the intermediate
+  // CHECK constraint is added NOT VALID so rows permitted by later migrations do not block boot.
+  ['092_extend_dispatch_entity_types', 'd4d118f29fcb6ce2ba6b8dfe03681647cd4b1b77478d9081b14955662b311e28'],
   ['092_voice_session_transcript', 'f06ebad750ef6b1a8540d27aa14516f6db350b6debda0ec5cc444ad3a6e37f48'],
   ['093_users_deleted_at', '7d2ed611ca7751641c8cff049b55617e4af203b43257528e7c46c15bd80c127f'],
   ['094_add_held_appointment_fields', 'e71d08dc59d35a7c70c245572de551d7a4f48d4b7a5fcfd9164d39705a6f6607'],
@@ -186,7 +185,8 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['122_estimate_reminders', '5f6c29e7825508f8e4a1d62e889fc93d5dfca96af26e9d0a1f8ae613a56d0cd2'],
   ['123_platform_deprovision_log', 'c05fefacd43c39abd95305589cc12404e46f2a3c2a85b556a7ecd15dae283e3a'],
   ['124_tenant_settings_review_urls', '889419f461a2e292ff89c910528927715eee23435bf69e74c4fac832fe8ef3b2'],
-  ['125_dispatch_entity_en_route', '113fdf2a2aaba8da7250518612817363ffa77110f1d8c60ace32fcc255f55dc6'],
+  // Replay-safe on populated databases: the intermediate CHECK is added NOT VALID.
+  ['125_dispatch_entity_en_route', 'f65d91a77a4723a7bb7fb9bb1f77dc4399940d83848c1b1978e9ac3b6a406d7f'],
   ['125_estimates_deleted_at', '45ded6b32cd90fe40623332dafa7932ee33afbf6a8abb7df2afa117e04f72eec'],
   ['126_invoices_estimate_unique', 'b85be06a1ce1aa7d739ce2700e5a7fed6d08b757e6c58be92d136eea77846e44'],
   ['127_estimate_line_item_options', 'b6c373ef8aa306b24a1ea4c12f17fd5432446c00c3f1bd761050ff4dc7185ea5'],
@@ -235,7 +235,8 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['162_create_daily_digests', '2a55425f1609477624a0de73d215b33cff416a1aab7ad2e053619f41c76a702d'],
   // RV-063: per-tenant digest delivery settings (enabled/time/channel)
   ['163_tenant_settings_digest', '3fb34512c152ba262d2e21e4aa84608374156f89c07d5f71e3cd43d38b718836'],
-  ['164_dispatch_entity_daily_digest', '4d3ad093b4319cf786bfd047df3d5898720a4d6712e5037704c5a06fffc492e9'],
+  // Replay-safe on populated databases: the intermediate CHECK is added NOT VALID.
+  ['164_dispatch_entity_daily_digest', 'ec48142ffff3ffd510be3e05e7a21381ec2d8314a37056a29d758ea004ce5676'],
   // RV-074: widen proposal_sms_events kind CHECK for 'review_required_rendered'
   ['165_proposal_sms_events_review_required_kind', '0a1ccd582e840a57ec622344a0a41a690229bfd30b7b9e87b0265c255b1dff56'],
   // RV-120: per-call vulnerability triage outcomes (turn-batch grader log)
@@ -309,6 +310,168 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   // ANS-001: call_me_back idempotency key gains `reason` so an E1 call's
   // life-safety alert task is no longer swallowed by its booking task.
   ['198_call_me_back_session_reason_idempotency', '7807073281dad9a454020843788c85953d0a30f2b047b6ca05812ef3da2c7253'],
+  ['196_create_device_tokens', '5bfc2853156c6d14fcc313d8ad51c0b010499a205838a042c19941ae8d61b29a'],
+  // Token-exclusive device ownership: widen device_tokens RLS with the
+  // app.system_lookup escape hatch so register() can cross-tenant-delete a token.
+  ['197_device_tokens_system_lookup_rls', '2aff868a1307b6afe4398eb50141fa60fdf55a682fe8eb08c2d26bc854a20ba2'],
+  // One OPEN conversation per (tenant, customer): pre-index dedup + partial
+  // unique index that makes the customer get-or-create thread path race-safe.
+  ['198_conversations_one_open_thread_per_customer', '88e49474bf50962a612e2a2294d1901c91c0d2267430447e30c9315d22953ddc'],
+  // Null-safe (missing_ok) device_tokens system-lookup policy — avoids a UUID
+  // cast error on a connection with no app.current_tenant_id set.
+  ['199_device_tokens_system_lookup_null_safe', '23cd9a92fdccdc0bca9367833c2f1ce66463b60db925a49e73af0cdfabbf345a'],
+  // Extend the one-open-thread guarantee to 'lead' and 'sms_unmatched' so the
+  // inbound-capture 23505 recovery is atomic for every SMS target type, not
+  // just customer (migration 198).
+  ['200_conversations_one_open_thread_noncustomer', '9af90c1b55544fe8451246c42a6c7cd80dd8ed6fae054050bcc070548e253a0f'],
+  // Jobber-parity CRM: customer acquisition channel (additive nullable column).
+  ['201_customers_source', '2add8937ddc606a7bfe86b59be879b3dceeb6a9730d6ff414f3798a47c362a05'],
+  // Jobber-parity invoice processing-fee surcharge (additive nullable columns).
+  ['202_invoices_processing_fee', '3f1dd0227fd3b18342e06e1bda51f60e83b8a8ab5057da78d2b72986e4cd72cf'],
+  // Graduate maintenance contracts to a real tenant-scoped table.
+  ['203_create_maintenance_contracts', 'f0f77a5ba2060be02849eccd0f75066a43813c2f0004c3fb591a8a5f76ca78a6'],
+  // Onboarding email lifecycle (welcome / setup-reminder / trial-ending).
+  ['204_lifecycle_emails_and_trial_ends', '1fc6cc3a631858d987771d9db0c268c355995cfe19effa726018d6dd13445f45'],
+  // Story 15.2 — speed-to-lead first-response opt-in settings (renumbered 204→205 on a main-merge collision).
+  ['205_tenant_settings_speed_to_lead', '571411ab97bf29e4992cf08bb54555d0916e35fd1bc60f5f1c0f783b227bac21'],
+  // Add tenant_integrations.auth_token_{primary,secondary}_enc, never created on
+  // fresh DBs because a duplicate 070 CREATE shadowed the _enc definition (the
+  // column all provisioning/webhook code uses). Additive ALTER, no-op on prod.
+  ['206_tenant_integrations_auth_token_enc_columns', '21416ab18ca77cd08ca4f1d76d2f13f756f586b36fe90f1dd7adb2b9041fff28'],
+  ['207_jobs_status_canonical_lifecycle', '6e4e921973b79047ed517efbb629b80c293cb1586698464551a09324c718bba5'],
+  // Per-user owner-notification opt-outs (U10).
+  ['208_create_notification_preferences', 'df14c6514d98aaaadb7b320f9c3834029057841068c7d03ec707300c1f913048'],
+  // Story 3.9: raw per-field proposal-edit corrections log (intent + field +
+  // before/after), queryable per tenant and per intent; FORCE RLS. Renumbered
+  // 207 -> 208 -> 209 across successive main-merge collisions (SQL unchanged → hash preserved).
+  ['209_create_corrections', '37eac96b01f69d24106801716fbc9e5ed12d9b708e66877bcda4e7f3781e66d9'],
+  // Story 10.5 — tenant-scoped customer message templates (renumbered to clear
+  // migration-number collisions with main on merge; SQL value unchanged).
+  ['210_create_message_templates', 'a38dc2fba90473aec17537126a25c71fbf8461b012531c94ea55c858aa85f71d'],
+  // Story 10.2 — tenant-configurable reminder cadence/offsets (renumbered).
+  ['211_tenant_settings_reminder_offsets', '7043e4a221b59d530abd0a9d74ac8dd1a7f13379eeefb9b1749cc2b98368442a'],
+  // Epic 12.6 — weekly feedback email opt-out (renumbered 204→207→212; body unchanged → hash preserved).
+  ['212_tenant_settings_weekly_feedback', '3e78d143c8b22d97a2db02d551166f3ffaa23e12bb8c15b90dbc79340b6ef70f'],
+  // PRD US-340+US-341 — reminder cadence column default → [24, 2].
+  ['213_tenant_settings_reminder_offsets_default', '451325d4c247a81f0b0d60b015b7af26329f38918bde6b579d40bb94e3a26668'],
+  // PRD US-345 — 24h post-completion review-request sweep columns + backfill.
+  ['214_review_request_sweep', '3a843fa5148f8a2ce89fd5ea37647c2e29f0c0fa9d74d821c3f1b5a1afc37fc2'],
+  // Beta-verify fix — proposals.claimed_by UUID→TEXT (worker label, not a uuid);
+  // the type mismatch broke proposal execution entirely.
+  ['215_proposals_claimed_by_text', '35ffa973504fd016a63c3ef2e333de24070808889cf2c7159b34ee3c09857afa'],
+  // Beta-verify fix — create the missing delay_notice_state table the wired
+  // PgDelayNoticeStateRepository depends on (running-late SMS idempotency).
+  ['216_create_delay_notice_state', 'bad2c6a2b2b80e3bfc18beaf43b48a59b0064f031794a3400d2db8dc02d4c3d3'],
+  // RLS runtime-role enforcement — provision the least-privilege rls_app_runtime role.
+  ['217_create_rls_app_runtime_role', '15f26f56c0515ebce37164d9c4757fc5017c242a8b331b73018d870d9ebc3b78'],
+  // RLS runtime-role enforcement — document the two RLS exemptions (oauth_states,
+  // platform_deprovision_log) as table comments; both are intentionally policy-free.
+  ['218_rls_coverage_oauth_states', '44a800f4db0502f69e57ff66c865e9a63ddaac669d5d3026a683d7bb4f3fc7f9'],
+  // RLS hardening — revoke rls_app_runtime grants on tenant_id tables that lack RLS.
+  ['219_rls_app_runtime_revoke_exempt', '0d19b84a142cd9f69d5f90d3bd8b1125969163026fd3a323cde2442dad915ecf'],
+  // RLS hardening — named rls_cross_tenant (BYPASSRLS) role for auditable cross-tenant sweeps.
+  ['220_create_rls_cross_tenant_role', 'ff8057f1f7cad211e77e7655b7a1204cbaffe2f263a823e8e5fc759b0fc37a28'],
+  ['221_proposals_status_created_index', '6af8a977d5a649844c58f97c3e8aa68e5beb1d51b9a499a913b0170e99508ddf'],
+  // Jobber-parity pass — job forms, recurring jobs (+materialization), job custom
+  // fields, consumer financing, marketing campaigns, customer groups.
+  ['221_create_job_forms', '813a7e1bfd1c7140a91fbc6ca54cf381b74a5b36b9959385d0630cc42b1f528d'],
+  ['222_create_recurring_jobs', '2ce277b37d9b12b7ae00a7b4b87debb4887b7d26a9ff4accb9464e13685dccbc'],
+  ['223_recurring_job_materialization', '5c4b2253a9abac06b2f78b6150435cc77cd477522ddcba43c575d12ced5f9d33'],
+  ['224_create_job_custom_fields', '65412cbeca763526715dabb0877a86879584b68b273ccfc71f44f2ccb2719e21'],
+  ['225_create_financing_applications', '17a9f061c2728f957ae3256a9c624ad073a7ea1ec834d3f76d894ef3efeea5c4'],
+  ['226_create_marketing_campaigns', '731467814951e56ebe330c61334c70db40ad08a43a1d996f62705abe0d275e45'],
+  ['227_create_customer_groups', 'b130abe18b855d3f4d24e4781c9f36221489d22f0b8149b4c2ebe466c66d1ab5'],
+  ['228_marketing_campaign_segment_group', '8e795768b41848627679a6cc34d2dd89f6a5ce88355a3c732988aeadf44ce48f'],
+  ['229_create_standing_instructions', '21d0ee846bbf78ddfbdb78b061b41ae30f2ec289e89472aea60f4025c45d8bac'],
+  // U1 (agent wave): trigram index for the technician entity-resolver kind.
+  ['230_users_fullname_trgm_index', '8e9b0477e3a4700b45fc73a3a24d2680176df263d2cc5a05d02a0b2397011fff'],
+  ['231_tenant_settings_autonomous_booking', '1a9b505aeabfeda419fb0d3e579f42815463ec80d02abd36dd6c5bb6863e24ef'],
+  // Duplicate-Stripe-payment backstop: partial unique index on
+  // (tenant_id, reference_number) for credit_card/bank_transfer, with a
+  // non-destructive preflight that quarantines pre-existing duplicates.
+  // Renumbered 229→232 to follow this branch's 229-231 migrations.
+  ['232_payments_stripe_reference_unique', 'e04f90015062af2dc152c0298799291f58f84d39b80621543cb09330c1d9c6ab'],
+  // P8-015/P0-037 — conversation_links table backing PgConversationLinkRepository.
+  ['233_conversation_links', 'aecf003e1b316b3deb9972598952698ff7345c922362f1e3a7340c3a441daa93'],
+  ['234_tenant_settings_vapi_webhook_secret', 'd9830667a9f29069849b286cc3d59430cee4920af72a83f9fea6eb706aeaab36'],
+  // Fix — reconcile the tenant_settings._activeVerticalPacks mirror with the
+  // authoritative pack_activations table (kill the dual-source drift). 235 is
+  // reserved for a sibling fix landing separately.
+  ['236_reconcile_active_vertical_packs_mirror', '161871a3a57eb99f2c0b0d1173fa082483923c06210f122faa2a901f0ba24a46'],
+  // N-011 / P4-015 — Brand-Voice Configurator: append-only version history table.
+  ['237_brand_voice_versions', 'e6fbbd8bd25d5b6f50ae30146c0d5d93d8716907d150dfeb3f5bfa4ef4e227d7'],
+  // N-011 / P4-015 — brand-voice version/lock/cool-down bookkeeping columns.
+  ['238_tenant_settings_brand_voice_meta', '5ca3ab678c6330db38f857ac5966e9a963f898781fe4d33652751af03c1f6582'],
+  // N-005 / P5-020 — End-of-Day Digest completion: SMS retry-cap counter.
+  ['239_daily_digests_send_attempts', '324b3cadc3702a6ea87969856bcdfc010ac5112b8f6ae66db3cd8ac1dd23b18f'],
+  // N-005 — partial index backing findConfidenceMarkedForDay ("what I wasn't sure about").
+  ['240_proposals_confidence_marker_index', '8627c35efe348224146ddf0d18f4372f7de6a7bc510a28fa50df1cef12ad2307'],
+  // N-005 — partial index backing the "quotes sent today" sent_at range scan.
+  ['241_estimates_tenant_sent_at_index', 'f4c9cb40bd945e3bbab16bfa4b5a8180279919384343c4a153a607cc7b35c630'],
+  ['242_create_supervisor_reviews', '9f7aba0a44dac7e8b03a8d2fa1c9c882bbdf72aa8688385acc9b022151374c25'],
+  ['243_brand_voice_versions_changed_by_text', 'cfbe7e3a622aec7a34f86d3a3cb159edad53183794086e00cce557d1daa8fc79'],
+  // DATA-01 — jobs(tenant_id, assigned_technician_id) covering index.
+  ['244_jobs_tenant_assigned_technician_index', '6ec31bae8e5a854d824f9b702f78abf085542989e1fb6ed3b0ec9a4ac841d902'],
+  // DATA-02 — audit_events(tenant_id, created_at DESC) covering index.
+  ['245_audit_events_tenant_created_at_index', '570afac2db19bba1e0a9f1a7dea4f86392b962055de5dcdbbc1be629f9f6c83a'],
+  // WS10 — proposals partial index for the appliedStandingInstructions digest query.
+  ['246_proposals_applied_instructions_index', '4cd48dc77845dfb212f6097ec3ff19a292bf2d920ad4aab2bdb30003fca0ea12'],
+  // D-018 (WS18) — autonomous close lane: per-tenant opt-in + close cap columns.
+  ['247_tenant_settings_autonomous_close', 'e619fd69ae718ae2298a4ceddbc37ead5e93e5b8406bb739f8bbc4c16d5833ca'],
+  ['248_users_status', '4db13faea1417601ec58108546e7a222d19224a9ebbf32106170fa868f198206'],
+  ['249_backfill_owner_memberships', '469b396524bded1559614c2c091bb48c70a36c7769230e77ae9b96cad5e8025d'],
+  // Stripe Terminal Location id on tenants (Connect Tap to Pay).
+  ['250_tenants_stripe_terminal_location', '95a128f94a94231772731bdf6a583bd1f6f6c03c20b3615c162adc5ddaa2d8e7'],
+  ['251_leads_service_address', '0033dc709e9d1fb22584a20873826d59fa2430c6554c0846e4f9c86e60c4f82b'],
+  ['252_technician_location_ping_idempotency', '5f309f1a77d6c208f6a8eb5ca0fe34eb8db2c86f7ebe47a814275d3ba4d9ed5d'],
+  ['253_users_tenant_clerk_unique', 'b96f4d052f79ac1b8a30a9073fb42d323ee98a72193e3c9206ffc14c40bb864b'],
+  // Per-call LLM cost accounting — ai_runs.cost_micro_cents (nullable BIGINT).
+  ['254_ai_runs_cost_micro_cents', '7de878660d668a14ee98e68d2b1f8d4911c73940706909cbc6d7f056c67ea150'],
+  // invoice_line_items.pricing_source (mirrors 179 on invoice lines).
+  ['255_invoice_line_items_pricing_source', 'ca9cd1c13a324f59c5c67de5abb650f658aa3ef182033a3882be663b4b3134e4'],
+  // EE-4 (visual proposals): optional image_file_id on catalog_items — the
+  // catalog-side reference an equipment photo is uploaded against. Renumbered
+  // 254→256 on the main merge (PR #696 claimed 254/255); SQL value unchanged →
+  // hash preserved.
+  ['256_catalog_items_image_file_id', 'f6b2878b3de9e8b189c405fe4f68ca864484ed853b67126416383b9d3f0c5ced'],
+  // EE-4 (visual proposals): frozen image_file_id snapshot on
+  // estimate_line_items — carries the photo onto the customer-facing proposal
+  // for both manual and AI-drafted lines. Renumbered 255→257; hash preserved.
+  ['257_estimate_line_items_image_file_id', 'e72794dcb73addfe34c11844cb7f8bd1bd00314266b246dcaeb97fcebd9dae93'],
+  // T4-F01 — shared claim-before-send ledger (send_claims). New migration,
+  // not a rename/mutation of an existing one.
+  // Edited in place (PR #705 Codex P1 review, pre-merge — 258 has not shipped
+  // to any environment yet) to widen the status CHECK with a third state,
+  // 'sending', closing the post-send crash window; hash regenerated.
+  ['258_send_claims', '60e4d9f4b7fb85c5f3feecb518d1cc2df16cb72d2c8b4b6e9ace1fb0f4b981b5'],
+  // U3 (iOS blueprint) — E-lane answer back-channel: nullable answer_status
+  // (CHECK-guarded routed-outcome enum) + answer JSONB on voice_recordings.
+  // New migration, additive no-op for existing rows.
+  ['259_voice_recordings_answer', '11e20969ea0f4802487fd9ecadd779cce909e9251d18b61b8b0611665228e0d7'],
+  // U11 (iOS blueprint) — client idempotency key on the in-app voice-note
+  // create path: nullable idempotency_key column + partial unique index
+  // (tenant_id, idempotency_key) WHERE NOT NULL. New migration, additive
+  // no-op for existing rows.
+  ['260_voice_recordings_idempotency_key', '4d3a00f1a88309a306ca3dfdcba5b09da74493b3a4170e6a8824c4f846349c53'],
+  // Tenant-scoped, RLS-enforced learned entity aliases. New table with no
+  // dependency on pre-existing tenant rows beyond normal foreign keys.
+  ['261_create_tenant_entity_aliases', 'f355ecfc94bf9a067c28ba86988832801bc2357a0ab1b2b5db5e3baa3d04bfe0'],
+  ['262_portal_sessions_contact_id', '31af90200a435cb285e39c6c180da71a09f82562759fb28844641dc47409b85b'],
+  ['263_tenant_settings_timezone_no_silent_default', '79215e9f7e13a00ba8f29a41d20a9b22c003df5483666c2e1471951fb505313a'],
+  // FAIL-VIS — read-path indexes for the silent-failure monitor: one INCLUDE
+  // index on ai_runs(created_at) and two partial indexes on proposals. Index
+  // creation only; no columns, constraints, or data touched.
+  ['263_failure_monitor_indexes', 'bb6aeb2d17dca2c8c7b3959155b642d2018a7df5063b3acb88a3f82cc22ae872'],
+  // D2-4a / P0-4 — per-refund idempotency ledger (payment_refunds table +
+  // unique claim index + RLS). New table only; nothing existing touched.
+  ['264_create_payment_refunds', '529b0d8cef10288a44c01c3065e815ed3b666b5d8ca47a312defa93861530376'],
+  // B7.5 — nullable, descriptive-only `unit` column on both line-item
+  // tables. Additive ALTER only; nothing existing touched.
+  ['265_line_items_unit', '6780eeea0dfeb24582c84b206e8cbdaf4ceaa21678ff849b58fa698e3b118f14'],
+  // Nullable `executed_by_role` on proposals — the approver's role at
+  // approval time, so a config write's audit names who authorized it.
+  // Additive ALTER only; nothing existing touched.
+  ['266_proposals_executed_by_role', '75a8f66b03c36528111b5a5743a1d03ab8676a9d6647a345fa0d44aa9f564727'],
 ];
 
 function hashMigration(value: string): string {

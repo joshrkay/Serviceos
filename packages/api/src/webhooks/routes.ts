@@ -1,7 +1,8 @@
 import { Router, Request, Response } from 'express';
 import { AppConfig } from '../shared/config';
 import {
-  verifyWebhookSignature,
+  parseWebhookSecrets,
+  verifyWebhookSignatureAny,
   handleWebhookEvent,
   InMemoryWebhookRepository,
   WebhookRepository,
@@ -9,9 +10,16 @@ import {
 import { createLogger } from '../logging/logger';
 import { isValidTenantId } from '../db/schema';
 import { bootstrapTenant, TenantRepository } from '../auth/clerk';
+import { LIFECYCLE_EMAIL_JOB_TYPE } from '../workers/lifecycle-email-worker';
 import { SettingsRepository } from '../settings/settings';
 import { InvoiceRepository } from '../invoices/invoice';
-import { PaymentRepository, recordPayment, PaymentReceiptNotifier, PaymentMethod } from '../invoices/payment';
+import {
+  PaymentRepository,
+  recordPayment,
+  notifyOwnerPaymentReceived,
+  PaymentReceiptNotifier,
+  PaymentMethod,
+} from '../invoices/payment';
 import {
   recordRefund,
   reversePayment,
@@ -19,12 +27,11 @@ import {
   recordProcessingPayment,
   settleProcessingPayment,
 } from '../payments/payment-service';
-import { randomUUID } from 'crypto';
+import { randomUUID, createHmac, timingSafeEqual } from 'crypto';
 import { CustomerPaymentMethodRepository } from '../payments/customer-payment-method';
 import { retrievePaymentMethod } from '../payments/stripe-saved-card';
 import { StripeFetch } from '../payments/stripe-payment-intent';
 import { JobRepository } from '../jobs/job';
-import { deriveDepositStatus } from '../jobs/deposit-rule';
 import { PendingInvitationRepository } from '../users/pending-invitation';
 import { BillingService } from '../billing/subscription';
 import { StripeConnectService } from '../billing/stripe-connect';
@@ -44,8 +51,11 @@ import { verifySendGridSignature } from './sendgrid-signature';
 import { createAuditEvent, AuditRepository } from '../audit/audit';
 import { EstimateRepository } from '../estimates/estimate';
 import { RefreshJobMoneyStateDeps } from '../jobs/job-money-state';
+import { deactivateInvoicePaymentLink } from '../invoices/invoice-payment-link';
+import type { Invoice } from '../invoices/invoice';
+import type { PaymentLinkProvider } from '../payments/payment-link-provider';
+import type { ConnectAccountResolver } from '../invoices/public-invoice-service';
 import { dispatchInboundSms } from '../sms/inbound-dispatch';
-import { lookupDroppedCallSession } from '../telephony/dropped-call-session-bridge';
 
 const logger = createLogger({ service: 'webhooks', environment: process.env.NODE_ENV || 'dev' });
 
@@ -150,11 +160,20 @@ export interface WebhookRouterDeps {
    * fakes that don't track users).
    */
   pool?: import('pg').Pool;
+  /**
+   * Stripe webhook signing secret(s). Accepts a COMMA-SEPARATED list so both
+   * the platform and connected-accounts endpoints (each with its own Stripe
+   * secret) can be verified; a single value behaves as before. Parsed by
+   * `parseWebhookSecrets`.
+   */
   stripeWebhookSecret?: string;
   queue?: Queue;
   appBaseUrl?: string;
   webhookEventRepo?: {
-    recordReceipt(provider: string, eventId: string, eventType: string, payload: Record<string, unknown>): Promise<{ inserted: boolean }>;
+    // `record` carries the existing row on conflict (PgWebhookEventRepository
+    // always returns it); optional so lightweight fakes can omit it — an
+    // absent record is treated as "not yet processed" (reprocess).
+    recordReceipt(provider: string, eventId: string, eventType: string, payload: Record<string, unknown>): Promise<{ inserted: boolean; record?: { processedAt?: Date | null } }>;
     markProcessed(provider: string, eventId: string): Promise<void>;
   };
   auditRepo?: AuditRepository;
@@ -174,6 +193,17 @@ export interface WebhookRouterDeps {
     authTokenSecondary?: string;
     sendgridPublicKeyPem?: string;
   } | null>;
+  /**
+   * Resolves a tenant's per-tenant Vapi webhook secret
+   * (`tenant_settings.vapi_webhook_secret`) for the `/vapi/:tenantId` handler.
+   * Each tenant's assistant is provisioned with its OWN random secret, so a
+   * body signed for tenant A fails verification at tenant B (closes the
+   * cross-tenant forgery the single global secret allowed). Returns null for a
+   * not-yet-provisioned tenant → the handler fails CLOSED (403). The former
+   * global `VAPI_WEBHOOK_SECRET` fallback was removed in WS4: a tenant with no
+   * per-tenant secret is rejected rather than verified against a shared secret.
+   */
+  vapiSecretResolver?: (tenantId: string) => Promise<string | null>;
   provisioningQueue?: {
     send<T>(type: string, payload: T, idempotencyKey?: string): Promise<string>;
   };
@@ -191,6 +221,15 @@ export interface WebhookRouterDeps {
    * production when this is absent.
    */
   webhookRepo?: WebhookRepository;
+  /**
+   * P0-9 — when wired, a hosted payment link is deactivated (and its
+   * columns cleared) as soon as a credit settles or reprices the invoice it
+   * was minted against, so a stale link can't capture its original amount
+   * later. Optional: without it the audit trail below still surfaces every
+   * unapplied capture.
+   */
+  paymentLinkProvider?: PaymentLinkProvider;
+  connectAccountResolver?: ConnectAccountResolver;
 }
 
 export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps = {}): Router {
@@ -211,6 +250,75 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
     );
   }
   const webhookRepo: WebhookRepository = deps.webhookRepo ?? new InMemoryWebhookRepository();
+
+  /**
+   * P0-9 — every branch that keeps Stripe's money without a matching local
+   * credit must say so durably. `capturedCents` is what Stripe took,
+   * `creditedCents` what the invoice absorbed; the difference is money that
+   * exists only at Stripe. Best-effort (a failed audit write must not turn a
+   * correctly-handled event into a 500 retry loop), but always logged.
+   */
+  const auditUnappliedCapture = async (params: {
+    tenantId: string;
+    invoiceId: string;
+    eventId: string;
+    providerReference: string;
+    capturedCents: number;
+    creditedCents: number;
+    invoiceStatus: string;
+    reason: string;
+  }): Promise<void> => {
+    logger.warn('Stripe capture exceeds recorded credit (unapplied capture)', { ...params });
+    if (!deps.auditRepo) return;
+    await deps.auditRepo
+      .create(
+        createAuditEvent({
+          tenantId: params.tenantId,
+          actorId: 'system:stripe_webhook',
+          actorRole: 'system',
+          eventType: 'payment.unapplied_capture',
+          entityType: 'invoice',
+          entityId: params.invoiceId,
+          correlationId: params.providerReference,
+          metadata: {
+            stripeEventId: params.eventId,
+            capturedCents: params.capturedCents,
+            creditedCents: params.creditedCents,
+            unappliedCents: params.capturedCents - params.creditedCents,
+            invoiceStatus: params.invoiceStatus,
+            reason: params.reason,
+          },
+        }),
+      )
+      .catch((err) =>
+        logger.error('Failed to audit unapplied capture', {
+          eventId: params.eventId,
+          error: err instanceof Error ? err.message : String(err),
+        }),
+      );
+  };
+
+  /**
+   * P0-9 — a hosted payment link is priced at mint time and never re-priced,
+   * so once a credit lands the link is stale: settled invoices must not keep
+   * a live charge vector, and a repriced balance would capture its ORIGINAL
+   * amount with the excess silently discarded. Deactivate + clear whenever a
+   * credit touches an invoice that still carries a link. Best-effort; the
+   * pay-now flows mint a fresh link at the current balance on demand.
+   */
+  const killStaleInvoiceLink = async (tenantId: string, invoice: Invoice): Promise<void> => {
+    if (!deps.paymentLinkProvider || !deps.invoiceRepo) return;
+    if (!invoice.stripePaymentLinkId) return;
+    await deactivateInvoicePaymentLink({
+      tenantId,
+      invoice,
+      reason: invoice.amountDueCents <= 0 ? 'settled' : 'repriced',
+      invoiceRepo: deps.invoiceRepo,
+      provider: deps.paymentLinkProvider,
+      connectAccountResolver: deps.connectAccountResolver,
+      auditRepo: deps.auditRepo,
+    });
+  };
 
   /**
    * POST /webhooks/clerk
@@ -238,6 +346,33 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
       return res.status(400).json({ error: 'Missing svix headers' });
     }
 
+    // QUALITY-2026-07-12 WS4 — replay-window enforcement. Svix signs
+    // `${id}.${timestamp}.${body}` and expects verifiers to reject deliveries
+    // whose timestamp is outside a tolerance (Svix's own libraries use 5
+    // minutes; the Stripe path here already enforces the same). Without this a
+    // captured-but-valid signed payload could be replayed indefinitely — the
+    // event-id idempotency below only dedups the SAME id, not a fresh capture.
+    // Parse as unix seconds; reject malformed / non-integer and > 5-min skew
+    // (either direction). Runs BEFORE signature verification so a replayed body
+    // is cheap to reject; signature + event-id idempotency below are unchanged.
+    const SVIX_TOLERANCE_SECONDS = 300;
+    const svixTs = Number(svixTimestamp);
+    if (!Number.isInteger(svixTs)) {
+      logger.warn('Clerk webhook rejected — malformed svix-timestamp', {
+        svixId,
+        svixTimestamp,
+      });
+      return res.status(400).json({ error: 'Invalid svix-timestamp' });
+    }
+    const nowSeconds = Math.floor(Date.now() / 1000);
+    if (Math.abs(nowSeconds - svixTs) > SVIX_TOLERANCE_SECONDS) {
+      logger.warn('Clerk webhook rejected — timestamp outside tolerance', {
+        svixId,
+        skewSeconds: nowSeconds - svixTs,
+      });
+      return res.status(400).json({ error: 'Timestamp outside tolerance' });
+    }
+
     // Verify over the RAW request bytes svix signed. Production mounts
     // express.raw() before the global express.json() for this path, so req.body
     // is a Buffer — verify over those exact bytes rather than re-serializing a
@@ -259,7 +394,7 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
     const secret = Buffer.from(signingSecret.replace(/^whsec_/, ''), 'base64');
 
     const isValid = signatures.some((sig) =>
-      verifyWebhookSignature(signedContent, `t=${svixTimestamp},v1=${sig}`, secret.toString('hex'))
+      (() => { const e = createHmac('sha256', secret).update(signedContent).digest('base64'); const a = Buffer.from(sig); const b = Buffer.from(e); return a.length === b.length && timingSafeEqual(a, b); })()
     );
 
     if (!isValid) {
@@ -402,7 +537,8 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
               try {
                 await client.query('BEGIN');
                 await client.query(
-                  `SET LOCAL app.current_tenant_id = '${pending.tenantId}'`,
+                  "SELECT set_config('app.current_tenant_id', $1, true)",
+                  [pending.tenantId],
                 );
                 await client.query(
                   `INSERT INTO users (
@@ -444,6 +580,9 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
                     body: JSON.stringify({
                       public_metadata: { tenant_id: pending.tenantId, role: pending.role },
                     }),
+                    // Bounded: a Clerk stall would otherwise hang this
+                    // already-committed webhook while Clerk retries pile up.
+                    signal: AbortSignal.timeout(10_000),
                   });
                 } catch (err) {
                   logger.error('Clerk public_metadata sync failed (invitee path)', {
@@ -472,11 +611,11 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
               await webhookRepo.updateStatus(webhookEvent.id, 'processed');
               return res.status(200).json({ received: true, joined: pending.tenantId });
             } catch (joinErr) {
-              logger.error('Invitee join failed; falling back to bootstrap', {
+              logger.error('Invitee join failed; failing webhook for Clerk retry', {
                 userId, email: primaryEmail, tenantId: pending.tenantId,
                 error: joinErr instanceof Error ? joinErr.message : String(joinErr),
               });
-              // Fall through to the bootstrap path below; the
+              await webhookRepo.updateStatus(webhookEvent.id, 'failed'); return res.status(500).json({ error: 'Invitee join failed' });
               // operator can manually clean up if needed.
             }
           }
@@ -486,6 +625,7 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
           const result = await bootstrapTenant(userId, primaryEmail, deps.tenantRepo, {
             settingsRepository: deps.settingsRepo,
           });
+
           const signupCorrelationId = `signup:${svixId}`;
           logger.info('Tenant bootstrap complete', {
             tenantId: result.tenantId,
@@ -534,6 +674,27 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
               `provision-twilio-${result.tenantId}`
             );
             logger.info('Twilio provisioning job enqueued', { tenantId: result.tenantId, region });
+          }
+
+          // Welcome email — enqueue for brand-new tenants only. The worker
+          // claims the lifecycle_emails ledger before sending, so a webhook
+          // replay (same idempotency key) never double-sends.
+          if (result.created && deps.queue && primaryEmail) {
+            try {
+              await deps.queue.send(
+                LIFECYCLE_EMAIL_JOB_TYPE,
+                { tenantId: result.tenantId, ownerEmail: primaryEmail, kind: 'welcome' },
+                `lifecycle-welcome-${result.tenantId}`,
+              );
+              logger.info('Welcome email job enqueued', { tenantId: result.tenantId });
+            } catch (err) {
+              // Never fail the signup webhook over the welcome email — the
+              // tenant is already bootstrapped; the email is best-effort.
+              logger.warn('Welcome email enqueue failed', {
+                tenantId: result.tenantId,
+                error: err instanceof Error ? err.message : String(err),
+              });
+            }
           }
 
           if (deps.auditRepo) {
@@ -597,6 +758,65 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
             });
           }
 
+          // QUALITY-2026-07-12 WS4 (+ PR #669 review) — create the OWNER's
+          // membership row. Authorization is DB-authoritative
+          // (resolveAuthorization): a caller with no `users` row is rejected,
+          // so a bootstrapped owner without this row is locked out of /api.
+          // Insert idempotently under the tenant's RLS context (`users` has no
+          // unique (tenant_id, clerk_user_id) constraint, so WHERE NOT EXISTS
+          // instead of ON CONFLICT — safe on webhook replay).
+          //
+          // A failure here RETHROWS and fails the webhook (500 → Clerk
+          // retries; the catch below marks the event 'failed' so dedup lets
+          // the retry re-execute). That is safe BECAUSE this block runs AFTER
+          // every `result.created`-gated side effect above: on the retry,
+          // created=false skips the already-done funnel/Twilio/welcome/
+          // provisioning work and this idempotent insert simply re-attempts.
+          // Logging-only was the previous behavior and left the owner locked
+          // out with no retry (Clerk got a 200). Migration 249 backfills any
+          // rows missed before this change.
+          if (deps.pool) {
+            const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+            if (UUID_RE.test(result.tenantId)) {
+              const ownerClient = await deps.pool.connect();
+              try {
+                await ownerClient.query('BEGIN');
+                await ownerClient.query(
+                  "SELECT set_config('app.current_tenant_id', $1, true)",
+                  [result.tenantId],
+                );
+                await ownerClient.query(
+                  `INSERT INTO users (
+                     id, tenant_id, clerk_user_id, email, role,
+                     first_name, last_name, created_at, updated_at
+                   )
+                   SELECT gen_random_uuid(), $1, $2, $3, 'owner', $4, $5, NOW(), NOW()
+                   WHERE NOT EXISTS (
+                     SELECT 1 FROM users WHERE tenant_id = $1 AND clerk_user_id = $2
+                   )`,
+                  [
+                    result.tenantId,
+                    userId,
+                    primaryEmail,
+                    (userData.first_name as string | null) ?? null,
+                    (userData.last_name as string | null) ?? null,
+                  ],
+                );
+                await ownerClient.query('COMMIT');
+              } catch (ownerErr) {
+                await ownerClient.query('ROLLBACK').catch(() => undefined);
+                logger.error('Owner users-row insert failed — failing webhook so Clerk retries', {
+                  tenantId: result.tenantId,
+                  userId,
+                  error: ownerErr instanceof Error ? ownerErr.message : String(ownerErr),
+                });
+                throw ownerErr;
+              } finally {
+                ownerClient.release();
+              }
+            }
+          }
+
           // Write tenant_id back to Clerk user's public_metadata (best-effort)
           if (config.CLERK_SECRET_KEY) {
             try {
@@ -607,8 +827,10 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
                   'Content-Type': 'application/json',
                 },
                 body: JSON.stringify({
-                  public_metadata: { tenant_id: result.tenantId },
+                  public_metadata: { tenant_id: result.tenantId, role: 'owner' },
                 }),
+                // Bounded like the invitee-path sync above.
+                signal: AbortSignal.timeout(10_000),
               });
               if (!clerkRes.ok) {
                 const errBody = await clerkRes.text();
@@ -661,9 +883,13 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
             // We use the system-level pattern (no SET LOCAL) with an explicit
             // WHERE on clerk_user_id. The UPDATE only touches the matched row,
             // so cross-tenant leakage is not possible.
+            // mobile_number is cleared for the same reason softDeleteSelf
+            // (pg-user.ts) clears it: deleted rows are hidden from reads and
+            // rejected by writes, so a retained number would hold its
+            // users_mobile_unique slot forever with no API escape hatch.
             const result = await deps.pool.query<{ id: string; tenant_id: string }>(
               `UPDATE users
-               SET deleted_at = NOW(), updated_at = NOW()
+               SET deleted_at = NOW(), mobile_number = NULL, updated_at = NOW()
                WHERE clerk_user_id = $1 AND deleted_at IS NULL
                RETURNING id, tenant_id`,
               [userId],
@@ -734,8 +960,12 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
    *   checkout.session.completed → recordPayment() to mark invoice paid
    */
   router.post('/stripe', async (req: Request, res: Response) => {
-    const secret = deps.stripeWebhookSecret;
-    if (!secret) {
+    // STRIPE_WEBHOOK_SECRET may hold MULTIPLE secrets (comma-separated) — one
+    // per Stripe endpoint. Full Connect coverage needs a platform-scoped and a
+    // connected-accounts-scoped endpoint, and Stripe issues a distinct secret
+    // per endpoint, so we verify against each. A single value is unchanged.
+    const secrets = parseWebhookSecrets(deps.stripeWebhookSecret);
+    if (secrets.length === 0) {
       logger.warn('STRIPE_WEBHOOK_SECRET not configured — rejecting Stripe webhook');
       return res.status(500).json({ error: 'Stripe webhook not configured' });
     }
@@ -752,9 +982,10 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
       ? req.body.toString('utf8')
       : (() => { throw new Error('Body pre-parsed; mount /webhooks/stripe before express.json()'); })();
 
-    // Re-use the existing verifyWebhookSignature() utility — handles timing-safe
-    // comparison and the 5-minute timestamp tolerance.
-    if (!verifyWebhookSignature(rawBodyStr, signatureHeader, secret)) {
+    // Re-use the existing verify utility — handles timing-safe comparison and
+    // the 5-minute timestamp tolerance — trying each configured secret so an
+    // event from either the platform or connected-accounts endpoint verifies.
+    if (!verifyWebhookSignatureAny(rawBodyStr, signatureHeader, secrets)) {
       logger.warn('Stripe webhook signature verification failed');
       return res.status(401).json({ error: 'Invalid signature' });
     }
@@ -893,6 +1124,8 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
 
       if (event.type === 'checkout.session.completed') {
         const session = event.data.object as {
+          /** Checkout session id (cs_...) — unique per checkout. */
+          id?: string;
           metadata?: {
             tenant_id?: string;
             invoice_id?: string;
@@ -958,12 +1191,16 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
             await webhookRepo.updateStatus(webhookEvent.id, 'processed');
             return res.status(200).json({ received: true, skipped: true });
           }
-          const newPaid = Math.min(previouslyPaid + amountTotal, required);
-          await deps.jobRepo.update(tenantId, depositForJobId, {
-            depositPaidCents: newPaid,
-            depositStatus: deriveDepositStatus(required, newPaid),
-            updatedAt: new Date(),
-          });
+          // Atomic credit: two distinct checkout.session.completed events for
+          // the same job (e.g. a double-tapped "Pay Deposit" minting two
+          // sessions) must both count. The old read-then-blind-set dropped one.
+          const credited = await deps.jobRepo.creditDepositAtomic(
+            tenantId,
+            depositForJobId,
+            amountTotal,
+            new Date(),
+          );
+          const newPaid = credited?.depositPaidCents ?? previouslyPaid;
           logger.info('Deposit credited via Stripe checkout', {
             tenantId, depositForJobId, amountTotal, newPaid, required,
           });
@@ -990,9 +1227,15 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
         // Stripe creation paths attach tenant_id+invoice_id metadata
         // but NEVER payment_id, so without this the refund handler had
         // no way to find the originating row and silently ACKed every
-        // real refund as 'skipped'. Fall back to the previous literal
-        // for the edge case where payment_intent is absent (preserves
-        // legacy behavior for any pre-existing fixtures).
+        // real refund as 'skipped'.
+        //
+        // P0-5 — when payment_intent is absent, fall back to the SESSION id
+        // (cs_..., unique per checkout), then the event id. The old literal
+        // 'stripe_checkout' collided tenant-wide: the second intent-less
+        // checkout in a tenant hit the (tenant, provider_reference) unique
+        // index against a DIFFERENT invoice, recordPayment surfaced a
+        // conflict the catch below doesn't match, and the 500 made Stripe
+        // redeliver the same collision forever.
         const paymentIntentRef: string =
           typeof session.payment_intent === 'string'
             ? session.payment_intent
@@ -1000,7 +1243,7 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
                 session.payment_intent !== null &&
                 typeof session.payment_intent.id === 'string')
               ? session.payment_intent.id
-              : 'stripe_checkout';
+              : (session.id ?? event.id);
 
         // §6 Time-to-Cash. Refresh deps for the post-payment job
         // money-state rollup. Undefined unless all three repos are
@@ -1017,7 +1260,7 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
             : undefined;
 
         try {
-          await recordPayment(
+          const { invoice: creditedInvoice } = await recordPayment(
             {
               tenantId,
               invoiceId,
@@ -1032,21 +1275,42 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
             deps.paymentReceiptNotifier,
             deps.auditRepo,
             { actorRole: 'system', correlationId: paymentIntentRef },
+            undefined,
+            // The link that produced this capture is consumed (and any other
+            // stored link is now mispriced) — recordPayment kills it.
+            deps.paymentLinkProvider
+              ? { provider: deps.paymentLinkProvider, connectAccountResolver: deps.connectAccountResolver }
+              : undefined,
           );
           logger.info('Invoice marked paid via Stripe checkout', { tenantId, invoiceId, amountTotal });
         } catch (payErr) {
           if (payErr instanceof ValidationError) {
             if (payErr.message.includes('exceeds amount due')) {
-              // Overpayment: cap to whatever is still owed and retry.
+              // Overpayment: cap the INVOICE CREDIT to whatever is still owed
+              // (over-crediting would be worse) — but never silently. The
+              // uncredited remainder is real money sitting at Stripe with no
+              // local row; audit it so reconciliation can find it (P0-9).
               const invoice = await deps.invoiceRepo.findById(tenantId, invoiceId);
               if (!invoice || invoice.amountDueCents <= 0) {
                 logger.info('Invoice already fully paid (overpayment scenario)', { tenantId, invoiceId });
+                if (invoice) {
+                  await auditUnappliedCapture({
+                    tenantId, invoiceId, eventId: event.id,
+                    providerReference: paymentIntentRef,
+                    capturedCents: amountTotal,
+                    creditedCents: 0,
+                    invoiceStatus: invoice.status,
+                    reason: 'zero_balance',
+                  });
+                  await killStaleInvoiceLink(tenantId, invoice);
+                }
               } else {
-                await recordPayment(
+                const capped = invoice.amountDueCents;
+                const { invoice: creditedInvoice } = await recordPayment(
                   {
                     tenantId,
                     invoiceId,
-                    amountCents: invoice.amountDueCents,
+                    amountCents: capped,
                     method: 'credit_card',
                     providerReference: paymentIntentRef,
                     processedBy: 'stripe_webhook',
@@ -1057,14 +1321,41 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
                   deps.paymentReceiptNotifier,
                   deps.auditRepo,
                   { actorRole: 'system', correlationId: paymentIntentRef },
+                  undefined,
+                  deps.paymentLinkProvider
+                    ? { provider: deps.paymentLinkProvider, connectAccountResolver: deps.connectAccountResolver }
+                    : undefined,
                 );
                 logger.info('Invoice paid at capped amount', {
-                  tenantId, invoiceId, requested: amountTotal, paid: invoice.amountDueCents,
+                  tenantId, invoiceId, requested: amountTotal, paid: capped,
+                });
+                await auditUnappliedCapture({
+                  tenantId, invoiceId, eventId: event.id,
+                  providerReference: paymentIntentRef,
+                  capturedCents: amountTotal,
+                  creditedCents: capped,
+                  invoiceStatus: creditedInvoice.status,
+                  reason: 'capped_to_balance',
                 });
               }
             } else if (payErr.message.includes('status')) {
-              // Invoice already settled (paid/void/canceled) — idempotent success.
+              // Invoice already settled (paid/void/canceled) — idempotent for
+              // the EVENT, but the capture itself is unapplied money (P0-9):
+              // audit it, and make sure no live link survives on the dead
+              // invoice (a failed void-time deactivation gets retried here).
               logger.info('Invoice already settled, ignoring Stripe payment', { tenantId, invoiceId });
+              const invoice = await deps.invoiceRepo.findById(tenantId, invoiceId);
+              if (invoice) {
+                await auditUnappliedCapture({
+                  tenantId, invoiceId, eventId: event.id,
+                  providerReference: paymentIntentRef,
+                  capturedCents: amountTotal,
+                  creditedCents: 0,
+                  invoiceStatus: invoice.status,
+                  reason: 'not_payable',
+                });
+                await killStaleInvoiceLink(tenantId, invoice);
+              }
             } else {
               throw payErr;
             }
@@ -1127,7 +1418,7 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
         }
 
         try {
-          await recordProcessingPayment(
+          const { invoice: creditedInvoice } = await recordProcessingPayment(
             {
               tenantId,
               invoiceId,
@@ -1145,6 +1436,9 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
           logger.info('Recorded in-flight ACH payment via payment_intent.processing', {
             tenantId, invoiceId, amountCents, paymentIntentId: piId,
           });
+          // P0-9 — the in-flight credit repriced (or settled) the invoice; a
+          // hosted link minted at the old balance must not stay live.
+          await killStaleInvoiceLink(tenantId, creditedInvoice);
         } catch (payErr) {
           if (
             payErr instanceof ValidationError &&
@@ -1232,12 +1526,70 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
           logger.info('Settled in-flight ACH payment via payment_intent.succeeded', {
             tenantId, invoiceId, paymentIntentId: piId, settled: result.settled,
           });
+
+          // The ACH payer's receipt. The card / immediate-capture path below
+          // fires this inside recordPayment (applyPostPaymentSideEffects);
+          // settling bypasses recordPayment entirely, so without this an ACH
+          // invoice went to 'paid' in silence while card payers got a receipt.
+          // Sent HERE and not at payment_intent.processing because this is
+          // when the money actually cleared — recordProcessingPayment
+          // deliberately fires no customer comms.
+          //
+          // Amount comes from the SETTLED ROW, not the PaymentIntent: the
+          // in-flight credit was capped to the invoice balance at processing
+          // time, so the row is what the customer was actually charged
+          // against this invoice.
+          //
+          // Idempotent on four independent levels: the webhook-event-id dedup,
+          // the `existing.status === 'completed'` early return above (a
+          // redelivered succeeded never reaches this branch once settled),
+          // `settleProcessingPaymentAtomic` returning falsy on a second flip
+          // (so `result.settled` is true exactly once per payment), and the
+          // notifier's own `payment-receipt:{invoiceId}:{paymentId}` send
+          // claim. Gating on `settled` also keeps a REVERSED row (ACH return)
+          // from ever triggering a receipt.
+          //
+          // Failure-isolated: the settle already COMMITTED, so letting a
+          // notifier throw bubble would 500 the webhook, make Stripe redeliver
+          // an already-settled payment, and lose the receipt permanently (the
+          // redelivery takes the 'completed' early return). That is the one
+          // place this path must NOT mirror the card path, where a throw makes
+          // Stripe retry a recordPayment whose side effects have not committed.
+          if (result.settled && result.payment) {
+            const settledPayment = result.payment;
+            try {
+              if (deps.paymentReceiptNotifier) {
+                await deps.paymentReceiptNotifier.notifyPaymentReceived(
+                  tenantId,
+                  invoiceId,
+                  settledPayment.amountCents,
+                  settledPayment.id,
+                );
+              }
+              // U6 — the owner `payment_received` push, the other half of what
+              // applyPostPaymentSideEffects gives the card path.
+              await notifyOwnerPaymentReceived(
+                tenantId,
+                invoiceId,
+                settledPayment.amountCents,
+              );
+            } catch (notifyErr) {
+              logger.warn('ACH settlement receipt failed to send', {
+                tenantId,
+                invoiceId,
+                paymentIntentId: piId,
+                paymentId: settledPayment.id,
+                error: notifyErr instanceof Error ? notifyErr.message : String(notifyErr),
+              });
+            }
+          }
+
           await webhookRepo.updateStatus(webhookEvent.id, 'processed');
           return res.status(200).json({ received: true, settled: result.settled });
         }
 
         try {
-          await recordPayment(
+          const { invoice: creditedInvoice } = await recordPayment(
             {
               tenantId,
               invoiceId,
@@ -1252,6 +1604,12 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
             deps.paymentReceiptNotifier,
             deps.auditRepo,
             { actorRole: 'system', correlationId: piId },
+            undefined,
+            // P0-9 — recordPayment kills any link still priced at the
+            // pre-credit balance.
+            deps.paymentLinkProvider
+              ? { provider: deps.paymentLinkProvider, connectAccountResolver: deps.connectAccountResolver }
+              : undefined,
           );
           logger.info('Invoice marked paid via payment_intent.succeeded (async settlement)', {
             tenantId, invoiceId, amountCents, paymentIntentId: piId,
@@ -1261,12 +1619,32 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
             payErr instanceof ValidationError &&
             (payErr.message.includes('status') || payErr.message.includes('exceeds amount due'))
           ) {
-            // Invoice already settled (e.g. checkout.session.completed used
-            // the 'stripe_checkout' provider_reference fallback so the dedup
-            // above missed) — idempotent success.
+            // Invoice already settled — idempotent for the EVENT, but this is
+            // still a succeeded capture with no intent-keyed payment row
+            // (P0-9): either the same money was recorded under the checkout
+            // session-id fallback reference (benign; the audit row is a
+            // reviewable false positive), or a genuinely stale/direct intent
+            // captured against a settled/void invoice (real unapplied money).
+            // Audit it either way and retry the stale-link kill — the
+            // reconciliation trail must not depend on which Stripe event
+            // shape happened to arrive.
             logger.info('Invoice already settled, ignoring payment_intent.succeeded', {
               tenantId, invoiceId,
             });
+            const invoice = await deps.invoiceRepo.findById(tenantId, invoiceId);
+            if (invoice) {
+              await auditUnappliedCapture({
+                tenantId, invoiceId, eventId: event.id,
+                providerReference: piId,
+                capturedCents: amountCents,
+                creditedCents: 0,
+                invoiceStatus: invoice.status,
+                reason: payErr.message.includes('exceeds amount due')
+                  ? 'exceeds_balance_payment_intent'
+                  : 'not_payable_payment_intent',
+              });
+              await killStaleInvoiceLink(tenantId, invoice);
+            }
           } else {
             throw payErr;
           }
@@ -1382,9 +1760,16 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
           id?: string;
           customer?: string;
           status?: string;
+          trial_end?: number | null;
           metadata?: { tenant_id?: string };
         };
         if (sub.id && sub.customer && sub.status) {
+          // Mirror the Stripe trial_end (epoch seconds) into trial_ends_at so
+          // the trial-reminder sweep can compute the 3d/1d/day-of windows. When
+          // the trial converts to active, Stripe drops trial_end → null, which
+          // clears our cached value and stops the sweep.
+          const trialEndsAt =
+            typeof sub.trial_end === 'number' ? new Date(sub.trial_end * 1000) : null;
           // Trial-checkout sessions stamp subscription.metadata.tenant_id
           // (see createTrialCheckoutSession), but Stripe doesn't echo our
           // tenants.stripe_customer_id back to us — so for a brand-new
@@ -1478,9 +1863,10 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
                   `UPDATE tenants
                       SET stripe_subscription_id = $1,
                           subscription_status = $2,
+                          trial_ends_at = $3,
                           updated_at = NOW()
-                    WHERE id = $3`,
-                  [sub.id, sub.status, row.id],
+                    WHERE id = $4`,
+                  [sub.id, sub.status, trialEndsAt, row.id],
                 );
               }
               await client.query('COMMIT');
@@ -1503,6 +1889,7 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
               customerId: sub.customer,
               subscriptionId: sub.id,
               status: sub.status,
+              trialEndsAt,
             });
           }
 
@@ -2085,14 +2472,21 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
     if (!eventId) return res.status(400).json({ error: 'Missing MessageSid/CallSid' });
     if (deps.webhookEventRepo) {
       const rec = await deps.webhookEventRepo.recordReceipt('twilio', eventId, kind, req.body ?? {});
-      if (!rec.inserted) return res.status(200).json({ received: true, duplicate: true });
-      await deps.webhookEventRepo.markProcessed('twilio', eventId);
+      // Short-circuit ONLY on a fully-processed duplicate. A row that exists
+      // but was never marked processed means an earlier delivery died between
+      // receipt and dispatch (process crash) — Twilio's retry is our only
+      // chance to run the handler, so it must fall through. markProcessed is
+      // stamped AFTER dispatch (bottom of this handler) for the same reason:
+      // stamping first turned crashes into permanently-lost messages
+      // (a STOP/HELP keyword or booking reply silently dropped).
+      if (!rec.inserted && rec.record?.processedAt) {
+        return res.status(200).json({ received: true, duplicate: true });
+      }
     }
 
     // P2-034 — Inbound SMS keyword dispatcher. Runs only for inbound SMS
-    // (voice/status callbacks have no body to route on) and only AFTER
-    // markProcessed succeeds, so a duplicate delivery short-circuits before
-    // dispatch. The dispatcher contract guarantees no throw — we still
+    // (voice/status callbacks have no body to route on). The dispatcher
+    // contract guarantees no throw — we still
     // wrap so an unexpected programming error here can never turn into a
     // Twilio 5xx (which would trigger a retry of an already-acknowledged
     // message and re-fire any handler side-effects).
@@ -2127,34 +2521,12 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
         });
         dispatchResult = { handled: false, reason: 'handler_error' };
       }
-      if (!dispatchResult.handled) {
-        const voiceSessionId = lookupDroppedCallSession(tenantId, fromE164);
-        if (voiceSessionId) {
-          dispatchResult = {
-            handled: true,
-            handler: 'dropped_call_resume',
-            reason: 'voice_session_linked',
-          };
-          if (deps.auditRepo) {
-            await deps.auditRepo.create(
-              createAuditEvent({
-                tenantId,
-                actorId: 'system:twilio_inbound_sms',
-                actorRole: 'system',
-                eventType: 'sms.dropped_call_resume',
-                entityType: 'voice_session',
-                entityId: voiceSessionId,
-                metadata: {
-                  messageSid: eventId,
-                  fromE164,
-                  bodyLength: body.length,
-                },
-              }),
-            );
-          }
-        }
-      }
-
+      // UC-5b — dropped-call resume matching is handled INSIDE the
+      // dispatcher by the RV-116 resume handler, which matches the caller
+      // against the durable dropped_call_recoveries table (works on any
+      // replica / after a restart). The old in-memory phone→session bridge
+      // fallback that used to run here was deleted with the superseded B5
+      // MVP (telephony/dropped-call-session-bridge.ts).
       if (deps.auditRepo) {
         await deps.auditRepo.create(
           createAuditEvent({
@@ -2176,11 +2548,29 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
       }
     }
 
+    // Processing complete (dispatch + audit) — only now stamp the event so a
+    // crash anywhere above leaves the row 'received' and the retry reprocesses.
+    if (deps.webhookEventRepo) {
+      await deps.webhookEventRepo.markProcessed('twilio', eventId);
+    }
+
     return res.status(200).json({ received: true });
   };
-  router.post('/twilio/voice/:tenantId', (req: Request, res: Response) => void recordTwilio('voice', req, res));
-  router.post('/twilio/sms/:tenantId', (req: Request, res: Response) => void recordTwilio('sms', req, res));
-  router.post('/twilio/status/:tenantId', (req: Request, res: Response) => void recordTwilio('status', req, res));
+  // Catch-all around the async handler: recordTwilio pre-guards the known
+  // throw paths, but an unexpected rejection in a void-dispatched promise
+  // would otherwise leave the request hanging (Twilio waits, times out,
+  // retries) and surface only as a swallowed unhandledRejection.
+  const twilioRoute = (kind: string) => (req: Request, res: Response) =>
+    void recordTwilio(kind, req, res).catch((err) => {
+      logger.error('Twilio webhook handler failed unexpectedly', {
+        kind,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      if (!res.headersSent) res.status(500).json({ error: 'Internal error' });
+    });
+  router.post('/twilio/voice/:tenantId', twilioRoute('voice'));
+  router.post('/twilio/sms/:tenantId', twilioRoute('sms'));
+  router.post('/twilio/status/:tenantId', twilioRoute('status'));
 
   // Vapi inbound-call webhook. Signature-verified (fails closed → 403),
   // idempotent on call id, records the inbound session (drives test-call
@@ -2197,13 +2587,33 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
     const rawBody = Buffer.isBuffer(req.body)
       ? req.body.toString('utf8')
       : JSON.stringify(req.body ?? {});
+    // QUALITY-2026-07-12 WS4 — fail CLOSED. The per-tenant secret is the ONLY
+    // credential accepted here: a body signed for tenant A verifies only at
+    // tenant A. The previous global VAPI_WEBHOOK_SECRET fallback is removed —
+    // it let anyone holding the shared secret forge call events for ANY tenant.
+    // When the resolver returns null (tenant not yet provisioned) or throws
+    // (DB error), the secret stays empty and verifyVapiSignature rejects with
+    // 403. There is no tenant-less Vapi endpoint (the only route is
+    // /vapi/:tenantId), so no global secret is legitimate anywhere.
+    let vapiSecret = '';
+    if (deps.vapiSecretResolver) {
+      try {
+        vapiSecret = (await deps.vapiSecretResolver(tenantId)) ?? '';
+      } catch (err) {
+        logger.warn('Vapi per-tenant secret resolve failed; failing closed', {
+          tenantId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+        vapiSecret = '';
+      }
+    }
     try {
       const result = await handleVapiCallEvent(
         {
           pool: deps.pool,
           auditRepo: deps.auditRepo,
           webhookRepo: deps.webhookEventRepo,
-          secret: process.env.VAPI_WEBHOOK_SECRET ?? '',
+          secret: vapiSecret,
           ...(deps.sendEmail ? { sendEmail: deps.sendEmail } : {}),
         },
         {
@@ -2242,8 +2652,16 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
       await rejectBound(tenantId, 'invalid_signature', { kind: 'sendgrid' });
       return res.status(403).json({ error: 'Forbidden' });
     }
-    const body = Buffer.isBuffer(req.body) ? JSON.parse(req.body.toString('utf8')) : req.body;
-    const first = Array.isArray(body) ? body[0] : body;
+    // Guarded like the Stripe/Clerk routes: a malformed (though correctly
+    // signed) body must 400, not reject the async handler and hang the
+    // request with no response.
+    let body: unknown;
+    try {
+      body = Buffer.isBuffer(req.body) ? JSON.parse(req.body.toString('utf8')) : req.body;
+    } catch {
+      return res.status(400).json({ error: 'Invalid JSON payload' });
+    }
+    const first = (Array.isArray(body) ? body[0] : body) as Record<string, unknown> | undefined;
     const eventId = (first?.sg_event_id as string | undefined) ?? (first?.sg_message_id as string | undefined);
     if (deps.webhookEventRepo && eventId) {
       const rec = await deps.webhookEventRepo.recordReceipt('sendgrid', eventId, 'event', { events: req.body });

@@ -102,6 +102,36 @@ describe('Postgres integration — invoices', () => {
       expect(found!.lineItems).toHaveLength(1);
     });
 
+    it('round-trips the processing-fee surcharge columns (migration 202)', async () => {
+      const lineItems = [
+        buildLineItem(crypto.randomUUID(), 'Labor', 1, 10000, 1, true, 'labor'),
+      ];
+      // 3% surcharge → fee folded into total_cents + the dedicated columns.
+      const totals = calculateDocumentTotals(lineItems, 0, 0, 300);
+      expect(totals.processingFeeCents).toBe(300);
+
+      const invoice = await invoiceRepo.create({
+        id: crypto.randomUUID(),
+        tenantId: tenant.tenantId,
+        jobId,
+        invoiceNumber: 'INV-FEE-1',
+        status: 'draft',
+        lineItems,
+        totals,
+        amountPaidCents: 0,
+        amountDueCents: totals.totalCents,
+        createdBy: tenant.userId,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      });
+
+      const found = await invoiceRepo.findById(tenant.tenantId, invoice.id);
+      expect(found!.totals.processingFeeBps).toBe(300);
+      expect(found!.totals.processingFeeCents).toBe(300);
+      expect(found!.totals.totalCents).toBe(10300);
+      expect(found!.amountDueCents).toBe(10300);
+    });
+
     it('updates invoice and reflects in findById', async () => {
       const lineItems = [
         buildLineItem(crypto.randomUUID(),'Labor', 1, 5000, 1, true, 'labor'),

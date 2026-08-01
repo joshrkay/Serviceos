@@ -150,7 +150,10 @@ export class FailoverGateway {
         deadlineMs: deadline.remainingMs(),
       };
       const op = async () => {
-        path.push('fallback');
+        // Mirror the primary stage's `primary:${model}` format so the
+        // serving model is recorded on providerPath even when the ai_runs
+        // row's `model` column can't be resolved (e.g. repo write failed).
+        path.push(`fallback:${request.model ?? 'default'}`);
         const startTime = Date.now();
         try {
           const response = await this.fallback.complete(localReq);

@@ -21,7 +21,7 @@ function deps(matcher: SkillMatcher): FeasibilityDependencies {
     appointmentRepo: { findById: async () => null } as any,
     jobRepo: { findById: async () => null } as any,
     locationRepo: { findById: async () => null } as any,
-    workingHoursRepo: { findByTechnicianAndDay: async () => null } as any,
+    workingHoursRepo: { findByTechnician: async () => [] } as any,
     unavailableBlockRepo: { findByTechnicianAndDateRange: async () => [] } as any,
     travelTimeProvider: new HaversineFallbackProvider(),
     skillMatcher: matcher,
@@ -38,7 +38,9 @@ describe('checkFeasibility — skill match sub-check', () => {
     expect(r.warnings.some((w) => w.check === 'skill_match')).toBe(false);
   });
 
-  it('warns when the technician is missing a required skill', async () => {
+  // Contract #12-#13: "holds required skill if skills are modeled" is a
+  // precondition -> blocking (foundation gate F2 term 6).
+  it('blocks when the technician is missing a required skill', async () => {
     const matcher: SkillMatcher = {
       requiredSkillsForJob: async () => ['hvac', 'electrical'],
       skillsForTechnician: async () => ['hvac'],
@@ -48,9 +50,10 @@ describe('checkFeasibility — skill match sub-check', () => {
         proposedScheduledStart: appt().scheduledStart, proposedScheduledEnd: appt().scheduledEnd },
       deps(matcher),
     );
-    const issue = r.warnings.find((w) => w.check === 'skill_match');
+    expect(r.feasible).toBe(false);
+    const issue = r.blocking.find((w) => w.check === 'skill_match');
     expect(issue).toBeDefined();
-    expect(issue?.severity).toBe('warning');
+    expect(issue?.severity).toBe('blocking');
     expect((issue?.metadata as any).missingSkills).toEqual(['electrical']);
   });
 });

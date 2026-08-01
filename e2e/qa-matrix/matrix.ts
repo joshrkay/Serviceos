@@ -356,6 +356,22 @@ export const MATRIX: MatrixRow[] = [
       'Voice utterance creates a proposal; GET /api/proposals/inbox includes that proposal id for the tenant',
     expected: 'pass',
   },
+  {
+    id: 'VOX-12',
+    module: 'VOX',
+    feature: 'callerPhone with no matching customer falls through unchanged (regression guard)',
+    passCriteria:
+      'startVoiceSession with a callerPhone matching NO tenant customer leaves the caller unresolved; a generic "our customer" scheduling utterance still fails to produce a proposal (fallback behavior unchanged from before the callerPhone fix)',
+    expected: 'pass',
+  },
+  {
+    id: 'VOX-13',
+    module: 'VOX',
+    feature: 'callerPhone matching two customers falls through unchanged (no guessing)',
+    passCriteria:
+      'startVoiceSession with a callerPhone matching TWO tenant customers (ambiguous) leaves the caller unresolved rather than guessing; a generic "our customer" scheduling utterance still fails to produce a proposal, same as the no-match case',
+    expected: 'pass',
+  },
 
   // ----- Proposals / human-approval engine -----
   {

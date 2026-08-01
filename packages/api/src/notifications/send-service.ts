@@ -1,17 +1,17 @@
 import { randomBytes } from 'crypto';
 import { CustomerRepository } from '../customers/customer';
 import { EstimateRepository } from '../estimates/estimate';
-import { InvoiceRepository } from '../invoices/invoice';
+import { InvoiceRepository, InvoiceStatus } from '../invoices/invoice';
 import { JobRepository } from '../jobs/job';
 import { SettingsRepository } from '../settings/settings';
-import { ValidationError, NotFoundError } from '../shared/errors';
+import { ValidationError, NotFoundError, ConflictError } from '../shared/errors';
 import { DispatchRepository } from './dispatch-repository';
-import { DncRepository, normalizePhone } from '../compliance/dnc';
 import {
   EmailMessage,
   MessageDeliveryProvider,
   SmsMessage,
 } from './delivery-provider';
+import { EmailSuppressedError, SmsSuppressedError } from './gated-message-delivery';
 import {
   renderEstimateEmail,
   renderEstimateSms,
@@ -42,6 +42,47 @@ export interface SendInvoiceInput {
   customMessage?: string;
 }
 
+/**
+ * Invoices in these statuses cannot be usefully sent to a customer for
+ * payment. 'draft' hasn't been issued yet (no issuedAt/dueDate), and both
+ * payment-link paths reject anything outside ['open', 'partially_paid'];
+ * 'void'/'canceled' are dead invoices with nothing to collect. See the
+ * sendInvoice() guard below.
+ */
+const UNSENDABLE_INVOICE_STATUSES: ReadonlySet<InvoiceStatus> = new Set([
+  'draft',
+  'void',
+  'canceled',
+]);
+
+/**
+ * Codex P1 #2 follow-up. Callers that wrap `sendEstimate`/`sendInvoice` in
+ * `withSendClaim` (see estimates/estimate-nudge.ts) thread `withSendClaim`'s
+ * `markProviderAccepted` signal in as `onProviderAccepted`. This method calls
+ * it the instant the customer has actually received the message — i.e. right
+ * after the channel dispatch succeeds, before the entity-write bookkeeping
+ * below (estimate.sentAt / lastDispatchId / status, invoice.sentAt, etc.). If
+ * that bookkeeping write then throws, `withSendClaim` finalizes the claim to
+ * 'sent' instead of releasing it: the provider already accepted the message,
+ * so releasing would let a retry duplicate the send. Callers that don't wrap
+ * this in a claim (the direct "Send Estimate/Invoice" routes, the proposal
+ * delivery adapters) simply omit this option — a no-op.
+ */
+export interface SendEntityOptions {
+  onProviderAccepted?: () => void;
+  /**
+   * Codex P1 (PR #705) — awaited immediately before the provider dispatch,
+   * AFTER all pre-provider prep (repo lookups, view-token persistence). A
+   * claim wrapper threads `withSendClaim`'s `markProviderStarting` here so the
+   * `claimed → sending` transition only happens once the provider is actually
+   * about to be called — keeping the claim reclaimable if the process crashes
+   * during prep. May reject (the deferred CAS lost to a concurrent reclaimer);
+   * that rejection propagates out un-caught so the send is aborted before
+   * dispatch. Callers that don't wrap this in a claim omit it — a no-op.
+   */
+  onProviderStarting?: () => void | Promise<void>;
+}
+
 export interface SendResult {
   estimateId?: string;
   invoiceId?: string;
@@ -64,13 +105,6 @@ export interface SendServiceDeps {
   customerRepo: CustomerRepository;
   settingsRepo: SettingsRepository;
   dispatchRepo: DispatchRepository;
-  /**
-   * §7 Phase 1 compliance gate. SMS sends consult this to suppress
-   * delivery when the recipient is on the tenant DNC list or has
-   * sms_consent=false on the customer record. Email sends are
-   * unaffected.
-   */
-  dncRepo: DncRepository;
   publicBaseUrl: string;
 }
 
@@ -93,7 +127,7 @@ export interface SendServiceDeps {
 export class SendService {
   constructor(private readonly deps: SendServiceDeps) {}
 
-  async sendEstimate(input: SendEstimateInput): Promise<SendResult> {
+  async sendEstimate(input: SendEstimateInput, options?: SendEntityOptions): Promise<SendResult> {
     const estimate = await this.deps.estimateRepo.findById(
       input.tenantId,
       input.estimateId
@@ -141,6 +175,13 @@ export class SendService {
       recipientPhone: input.recipientPhone,
       recipientEmail: input.recipientEmail,
     });
+
+    // Codex P1 (PR #705) — the provider dispatch begins NOW. Signal any claim
+    // wrapper so it flips its claim to 'sending' at this instant (not before
+    // the prep above). May reject if the deferred claim CAS was lost to a
+    // concurrent reclaimer, in which case we must NOT dispatch — the rejection
+    // propagates out un-caught and aborts the send before any channel is hit.
+    await options?.onProviderStarting?.();
 
     // Run all channels in parallel — halves p50 latency for channel: 'both'.
     // Any individual channel failure is recorded as a failed dispatch row in
@@ -205,6 +246,12 @@ export class SendService {
       );
     }
 
+    // Codex P1 #2 follow-up — the customer has now actually received this
+    // estimate on at least one channel. Signal any claim wrapper BEFORE the
+    // entity write below, so a throw from that write finalizes the claim
+    // instead of releasing it (see SendEntityOptions doc).
+    options?.onProviderAccepted?.();
+
     const now = new Date();
     await this.deps.estimateRepo.update(input.tenantId, estimate.id, {
       viewToken,
@@ -228,13 +275,34 @@ export class SendService {
     };
   }
 
-  async sendInvoice(input: SendInvoiceInput): Promise<SendResult> {
+  async sendInvoice(input: SendInvoiceInput, options?: SendEntityOptions): Promise<SendResult> {
     const invoice = await this.deps.invoiceRepo.findById(
       input.tenantId,
       input.invoiceId
     );
     if (!invoice) {
       throw new NotFoundError('Invoice', input.invoiceId);
+    }
+
+    // QA 2026-07-19 — "Send payment link" on a still-draft invoice used to
+    // 202 and silently do nothing: this method only ever stamps
+    // sentAt/viewToken/lastDispatchId (see the status-transition note below),
+    // it never issues the invoice. A 'draft' invoice has no issuedAt/dueDate,
+    // and both payment-link paths (createInvoicePaymentLink in
+    // invoices/invoice-payment-link.ts and
+    // PublicInvoiceService.getOrCreateCheckoutUrl) refuse anything outside
+    // ['open', 'partially_paid'] — so the "view" link we'd email/text the
+    // customer could never produce a working payment link, and nothing told
+    // the operator. 'void'/'canceled' are dead invoices with nothing to
+    // collect — sending a payment prompt for one is actively wrong, not just
+    // ineffective. Fail fast, before attempting any delivery, with a message
+    // that tells the operator exactly what to do next.
+    if (UNSENDABLE_INVOICE_STATUSES.has(invoice.status)) {
+      throw new ConflictError(
+        invoice.status === 'draft'
+          ? `Invoice ${invoice.invoiceNumber} is still a draft — issue it (POST /:id/issue, which sets a due date) before sending a payment link to the customer.`
+          : `Invoice ${invoice.invoiceNumber} is ${invoice.status} — there is nothing to collect, so it cannot be sent to the customer for payment.`
+      );
     }
 
     const job = await this.deps.jobRepo.findById(input.tenantId, invoice.jobId);
@@ -339,6 +407,12 @@ export class SendService {
       );
     }
 
+    // Codex P1 #2 follow-up — see the matching call in sendEstimate above.
+    // No current caller wraps sendInvoice in withSendClaim (the direct send
+    // routes/adapters are one-shot, not claim-guarded), but this keeps the
+    // method safe to compose that way later without a silent gap.
+    options?.onProviderAccepted?.();
+
     const now = new Date();
     await this.deps.invoiceRepo.update(input.tenantId, invoice.id, {
       viewToken,
@@ -364,27 +438,6 @@ export class SendService {
       businessName: settings?.businessName ?? 'Your service team',
       tenantDefaultLanguage: settings?.defaultLanguage ?? null,
     };
-  }
-
-  /**
-   * Returns null when SMS is allowed; otherwise a human-readable reason
-   * suitable for the dispatch row's error_message. The reason is also
-   * surfaced into the thrown Error so client-facing error mapping has
-   * the same string.
-   */
-  private async assertSmsAllowed(
-    tenantId: string,
-    customerSmsConsent: boolean | undefined,
-    recipient: string,
-  ): Promise<string | null> {
-    if (customerSmsConsent !== true) {
-      return 'customer sms_consent is not granted';
-    }
-    const onDnc = await this.deps.dncRepo.isOnDnc(tenantId, normalizePhone(recipient));
-    if (onDnc) {
-      return 'phone on DNC list (opted out)';
-    }
-    return null;
   }
 
   private buildViewUrl(prefix: 'e' | 'pay', token: string): string {
@@ -413,7 +466,7 @@ export class SendService {
     ctx: Parameters<typeof renderEstimateSms>[0]
   ): SmsMessage {
     const { body } = renderEstimateSms(ctx);
-    return { to, body };
+    return { to, body, recipientClass: 'customer' };
   }
 
   private renderEstimateEmailMessage(
@@ -429,7 +482,7 @@ export class SendService {
     ctx: Parameters<typeof renderInvoiceSms>[0]
   ): SmsMessage {
     const { body } = renderInvoiceSms(ctx);
-    return { to, body };
+    return { to, body, recipientClass: 'customer' };
   }
 
   private renderInvoiceEmailMessage(
@@ -454,40 +507,14 @@ export class SendService {
      */
     customerSmsConsent?: boolean;
   }): Promise<SendResult['channelsSent'][number]> {
-    // §7 phase 1: SMS suppression gate. Two conditions block SMS:
-    //   1. The customer's stored sms_consent is false (or never captured).
-    //   2. The recipient phone appears on the tenant DNC list (from STOP).
-    // On block, we audit a failed dispatch row with provider="suppressed" so
-    // the audit trail records the attempt + reason, then throw so the
-    // Promise.allSettled in sendEstimate/sendInvoice surfaces it as a
-    // partial failure rather than a silent skip.
-    if (args.target.channel === 'sms') {
-      const reason = await this.assertSmsAllowed(
-        args.tenantId,
-        args.customerSmsConsent,
-        args.target.recipient,
-      );
-      if (reason) {
-        const errorMessage = `SMS suppressed: ${reason}`;
-        await this.deps.dispatchRepo
-          .create({
-            tenantId: args.tenantId,
-            entityType: args.entityType,
-            entityId: args.entityId,
-            channel: 'sms',
-            recipient: args.target.recipient,
-            provider: 'suppressed',
-            status: 'failed',
-            errorMessage,
-            idempotencyKey: args.idempotencyKey,
-          })
-          .catch(() => {
-            // Best-effort audit; never let an audit failure mask suppression.
-          });
-        throw new Error(errorMessage);
-      }
-    }
-
+    // §7 / WS1: the consent + DNC gate now lives in the single
+    // GatedMessageDelivery wrapper (notifications/gated-message-delivery.ts).
+    // SMS sends here just declare the audience (customer) and forward the
+    // stored consent flag; a suppressed send throws SmsSuppressedError, which
+    // we translate below into the SAME provider='suppressed' failed dispatch
+    // row + re-throw the assertion path previously produced inline — so the
+    // Promise.allSettled in sendEstimate/sendInvoice still surfaces it as a
+    // partial failure rather than a silent skip, and the UX contract is intact.
     const message = args.render();
     let providerMessageId: string;
     let provider: string;
@@ -498,6 +525,8 @@ export class SendService {
           ...(message as SmsMessage),
           tenantId: args.tenantId,
           idempotencyKey: args.idempotencyKey,
+          recipientClass: 'customer',
+          consent: { smsConsent: args.customerSmsConsent === true },
         });
         providerMessageId = result.providerMessageId;
         provider = result.provider;
@@ -512,7 +541,15 @@ export class SendService {
       }
     } catch (err) {
       // Audit the failed attempt before propagating, so support has a
-      // record of every channel attempt (success or failure).
+      // record of every channel attempt (success or failure). A gate
+      // suppression is recorded with provider='suppressed' (as before);
+      // any other transport failure stays provider='unknown'.
+      // A kill-switch suppression (either channel) is a suppression, not a
+      // transport failure — label it the same way the consent gate already is,
+      // so `provider='suppressed'` stays the one query an operator runs to see
+      // what did not go out.
+      const suppressed =
+        err instanceof SmsSuppressedError || err instanceof EmailSuppressedError;
       await this.deps.dispatchRepo
         .create({
           tenantId: args.tenantId,
@@ -520,7 +557,7 @@ export class SendService {
           entityId: args.entityId,
           channel: args.target.channel,
           recipient: args.target.recipient,
-          provider: 'unknown',
+          provider: suppressed ? 'suppressed' : 'unknown',
           status: 'failed',
           errorMessage: err instanceof Error ? err.message : 'unknown error',
           idempotencyKey: args.idempotencyKey,

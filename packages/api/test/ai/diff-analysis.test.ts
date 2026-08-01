@@ -252,12 +252,14 @@ describe('P0-018 — Async diff-analysis worker foundation', () => {
       const rows = await diffRepo.findByDocument('tenant-1', 'estimate', 'doc-1');
       expect(rows).toHaveLength(1);
 
-      // Both queue messages carry the same idempotency key; PgQueue's unique
-      // index on idempotency_key is the production-level dedupe.
+      // Exactly ONE message is delivered: since UC-5 the in-memory queue
+      // mirrors PgQueue's ON CONFLICT (idempotency_key) DO NOTHING, so the
+      // duplicate enqueue is a silent no-op — the same dedupe production
+      // applies via the unique index on idempotency_key.
       const m1 = await queue.receive();
       const m2 = await queue.receive();
       expect(m1!.idempotencyKey).toBe(first.id);
-      expect(m2!.idempotencyKey).toBe(first.id);
+      expect(m2).toBeNull();
     });
 
     it('different revision pairs produce different deterministic ids', async () => {

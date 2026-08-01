@@ -10,7 +10,8 @@ import {
   useElements,
   useStripe,
 } from '@stripe/react-stripe-js';
-import { loadStripe, Stripe } from '@stripe/stripe-js';
+import { Stripe, type PaymentIntentResult } from '@stripe/stripe-js';
+import { loadStripeForAccount } from '../../lib/stripeConnect';
 import { useInvoiceStatus } from '../../hooks/useInvoiceStatus';
 import { getRuntimeConfigValue } from '../../lib/runtimeConfig';
 import { formatCurrencyAmount } from '../../utils/currency';
@@ -20,6 +21,12 @@ import { formatCurrencyAmount } from '../../utils/currency';
 interface LineItem {
   description: string;
   quantity: number;
+  /**
+   * B7.5 — descriptive unit of measure shown beside the quantity so the
+   * customer can tell what the rate they're paying measures. Never used
+   * in any money calculation on this page.
+   */
+  unit?: string;
   unitPriceCents: number;
   totalCents: number;
 }
@@ -37,6 +44,7 @@ interface PublicInvoiceView {
   subtotalCents: number;
   taxCents: number;
   discountCents: number;
+  processingFeeCents?: number;
   amountPaidCents: number;
   amountDueCents: number;
   dueDate?: string;
@@ -45,7 +53,7 @@ interface PublicInvoiceView {
   viewCount: number;
   stripePaymentLinkUrl?: string;
   /**
-   * Tier 4 (Deposit rules — PR 3c). Total deposit credit applied to
+   * Total deposit credit applied to
    * this invoice. Surfaced as a discrete totals row so the customer
    * can see the credit explicitly; the credit is also baked into
    * amountPaidCents so amountDueCents already reflects the reduction.
@@ -111,7 +119,10 @@ async function pingView(token: string) {
   await fetch(`/public/invoices/${token}/view`, { method: 'POST' }).catch(() => undefined);
 }
 
-async function createPaymentIntent(invoiceId: string, viewToken: string): Promise<string> {
+async function createPaymentIntent(
+  invoiceId: string,
+  viewToken: string,
+): Promise<{ clientSecret: string; stripeAccountId: string | null }> {
   const res = await fetch('/api/public-payments/create-payment-intent', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -124,8 +135,14 @@ async function createPaymentIntent(invoiceId: string, viewToken: string): Promis
     }
     throw new Error(body.message ?? `Error ${res.status}`);
   }
-  const data = await res.json() as { clientSecret: string };
-  return data.clientSecret;
+  const data = await res.json() as {
+    clientSecret: string;
+    stripeAccountId?: string | null;
+  };
+  return {
+    clientSecret: data.clientSecret,
+    stripeAccountId: data.stripeAccountId ?? null,
+  };
 }
 
 // ─── Success screen ────────────────────────────────────────────────────────
@@ -229,13 +246,25 @@ function PaymentForm({
     if (!stripe || !elements || status === 'processing') return;
     setStatus('processing');
     setErrorMessage(null);
-    const result = await stripe.confirmPayment({
-      elements,
-      confirmParams: {
-        return_url: `${window.location.origin}${window.location.pathname}?success=true`,
-      },
-      redirect: 'if_required',
-    });
+    // confirmPayment normally resolves with { error }, but it can REJECT on a
+    // network drop or Stripe.js internal failure — without this catch the
+    // status stays 'processing' and the Pay button locks forever.
+    let result: PaymentIntentResult;
+    try {
+      result = await stripe.confirmPayment({
+        elements,
+        confirmParams: {
+          return_url: `${window.location.origin}${window.location.pathname}?success=true`,
+        },
+        redirect: 'if_required',
+      });
+    } catch {
+      setStatus('failed');
+      setErrorMessage(
+        'Payment could not be processed. Please check your connection and try again.',
+      );
+      return;
+    }
     if (result.error) {
       setStatus('failed');
       setErrorMessage(
@@ -321,7 +350,7 @@ function PaymentForm({
         className={`w-full flex items-center justify-center gap-2 rounded-2xl py-4 text-sm transition-all ${
           disabled
             ? 'bg-slate-100 text-slate-400 cursor-not-allowed'
-            : 'bg-slate-900 text-white hover:bg-slate-700 active:scale-[0.98] shadow-lg shadow-slate-900/20'
+            : 'bg-primary text-primary-foreground hover:opacity-90 active:scale-[0.98] shadow-lg'
         }`}
       >
         {status === 'processing'
@@ -349,6 +378,7 @@ export function InvoicePaymentPage() {
 
   // Stripe PaymentIntent state — fetched once after the invoice loads.
   const [clientSecret, setClientSecret] = useState<string | null>(null);
+  const [stripeAccountId, setStripeAccountId] = useState<string | null>(null);
   const [intentError, setIntentError] = useState<string | null>(null);
   const [stripeNotConfigured, setStripeNotConfigured] = useState(false);
 
@@ -357,13 +387,14 @@ export function InvoicePaymentPage() {
   // "Payment received" once the webhook reconciliation lands.
   const [processingAsync, setProcessingAsync] = useState(false);
 
-  // Built per mount so vitest can stub the publishable key. `loadStripe`
-  // de-dupes internally so this still results in a single network call
-  // per key over the page lifecycle.
+  // Built after the PaymentIntent response so Connect direct charges
+  // init Stripe.js with the matching `stripeAccount` option.
   const stripePromise = useMemo<Promise<Stripe | null>>(() => {
+    if (!clientSecret) return Promise.resolve(null);
     const key = getPublishableKey();
-    return key ? loadStripe(key) : Promise.resolve(null);
-  }, []);
+    if (!key) return Promise.resolve(null);
+    return loadStripeForAccount(key, stripeAccountId);
+  }, [clientSecret, stripeAccountId]);
 
   // Stripe redirects back with ?success=true after a completed checkout.
   const paymentSucceeded = searchParams.get('success') === 'true';
@@ -382,12 +413,16 @@ export function InvoicePaymentPage() {
       });
   }, [token]);
 
-  // P2 review fix: detect missing FRONTEND publishable key by awaiting
-  // `stripePromise`. When `loadStripe` resolves to null (or no key is
-  // configured), show the same not-configured fallback we use for the
-  // backend 503 path — otherwise <Elements> would render a permanently
-  // disabled form with no actionable message.
+  // Detect missing FRONTEND publishable key before minting a PaymentIntent.
   useEffect(() => {
+    if (!getPublishableKey()) {
+      setStripeNotConfigured(true);
+    }
+  }, []);
+
+  // After intent loads, also catch loadStripe resolving to null.
+  useEffect(() => {
+    if (!clientSecret) return;
     let cancelled = false;
     stripePromise.then((stripe) => {
       if (!cancelled && !stripe) setStripeNotConfigured(true);
@@ -395,7 +430,7 @@ export function InvoicePaymentPage() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [clientSecret, stripePromise]);
 
   // After the invoice loads, request a PaymentIntent client_secret for
   // payable invoices. Skip when already paid or success-redirect.
@@ -405,7 +440,11 @@ export function InvoicePaymentPage() {
     if (stripeNotConfigured) return;
     let cancelled = false;
     createPaymentIntent(invoice.id, token)
-      .then((secret) => { if (!cancelled) setClientSecret(secret); })
+      .then((result) => {
+        if (cancelled) return;
+        setStripeAccountId(result.stripeAccountId);
+        setClientSecret(result.clientSecret);
+      })
       .catch((err: Error) => {
         if (cancelled) return;
         if (err.message === 'STRIPE_NOT_CONFIGURED') {
@@ -482,7 +521,7 @@ export function InvoicePaymentPage() {
   }
 
   return (
-    <div className="min-h-screen bg-slate-50">
+    <div className="min-h-screen bg-background">
       {/* Header */}
       <div className="bg-white border-b border-slate-200 px-5 py-4">
         <div className="max-w-lg mx-auto flex items-center justify-between">
@@ -564,7 +603,21 @@ export function InvoicePaymentPage() {
             {visItems.map((item, i) => (
               <div key={i} className="grid grid-cols-[1fr_40px_72px_72px] gap-x-2 px-5 py-3 items-start">
                 <p className="text-sm text-slate-800">{item.description}</p>
-                <p className="text-sm text-slate-500 text-right">{item.quantity}</p>
+                {/* B7.5 — the descriptive unit sits UNDER the quantity as a
+                    block child of the SAME fixed 40px track, not a new
+                    column, so it can only add height, never width: it
+                    wraps (break-words) inside the existing Qty cell. */}
+                <p className="text-sm text-slate-500 text-right">
+                  {item.quantity}
+                  {item.unit && (
+                    <span
+                      data-testid={`line-item-unit-${i}`}
+                      className="block min-w-0 break-words text-[10px] leading-tight text-slate-400"
+                    >
+                      {item.unit}
+                    </span>
+                  )}
+                </p>
                 <p className="text-sm text-slate-500 text-right">${formatMoney(item.unitPriceCents)}</p>
                 <p className="text-sm text-slate-800 text-right">${formatMoney(item.totalCents)}</p>
               </div>
@@ -589,6 +642,15 @@ export function InvoicePaymentPage() {
             <div className="flex justify-between px-5 py-2 border-t border-slate-100">
               <span className="text-sm text-slate-500">Tax</span>
               <span className="text-sm text-slate-500">${formatMoney(inv.taxCents)}</span>
+            </div>
+          )}
+          {(inv.processingFeeCents ?? 0) > 0 && (
+            <div
+              data-testid="invoice-processing-fee-row"
+              className="flex justify-between px-5 py-2 border-t border-slate-100"
+            >
+              <span className="text-sm text-slate-500">Processing fee</span>
+              <span className="text-sm text-slate-500">${formatMoney(inv.processingFeeCents ?? 0)}</span>
             </div>
           )}
           {(inv.depositCreditCents ?? 0) > 0 && (

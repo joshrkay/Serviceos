@@ -7,6 +7,7 @@ function mapRow(row: Record<string, unknown>): TechnicianLocationPing {
     id: row.id as string,
     tenantId: row.tenant_id as string,
     technicianId: row.technician_id as string,
+    clientPingId: row.client_ping_id as string,
     appointmentId: (row.appointment_id as string) ?? undefined,
     lat: Number(row.lat),
     lng: Number(row.lng),
@@ -31,14 +32,15 @@ export class PgTechnicianLocationPingRepository extends PgBaseRepository impleme
       const placeholders: string[] = [];
 
       for (const [i, ping] of pings.entries()) {
-        const base = i * 11;
+        const base = i * 12;
         placeholders.push(
-          `($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5}, $${base + 6}, $${base + 7}, $${base + 8}, $${base + 9}, $${base + 10}, $${base + 11})`
+          `($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5}, $${base + 6}, $${base + 7}, $${base + 8}, $${base + 9}, $${base + 10}, $${base + 11}, $${base + 12})`
         );
         values.push(
           ping.id,
-          ping.tenantId,
+          tenantId,
           ping.technicianId,
+          ping.clientPingId,
           ping.appointmentId ?? null,
           ping.lat,
           ping.lng,
@@ -46,15 +48,16 @@ export class PgTechnicianLocationPingRepository extends PgBaseRepository impleme
           ping.speedMps ?? null,
           ping.heading ?? null,
           ping.recordedAt,
-          ping.source
+          ping.source,
         );
       }
 
       const result = await client.query(
         `INSERT INTO technician_location_pings (
-          id, tenant_id, technician_id, appointment_id, lat, lng,
+          id, tenant_id, technician_id, client_ping_id, appointment_id, lat, lng,
           accuracy_meters, speed_mps, heading, recorded_at, source
         ) VALUES ${placeholders.join(', ')}
+        ON CONFLICT (tenant_id, client_ping_id) DO NOTHING
         RETURNING *`,
         values
       );

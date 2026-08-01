@@ -13,6 +13,11 @@
 
 import { EventEmitter } from 'events';
 import { v4 as uuidv4 } from 'uuid';
+import {
+  REPLICA_ID,
+  type VoiceEventTransport,
+  type VoiceEventEnvelope,
+} from './voice-event-transport';
 import { CallingAgentStateMachine } from './state-machine';
 import type {
   CallingAgentChannel,
@@ -146,6 +151,12 @@ export interface VoiceSession {
   channel: CallingAgentChannel;
   /** Twilio CallSid for telephony sessions; undefined for in-app. */
   callSid?: string;
+  /**
+   * Caller's phone number (Twilio `From`), set by the inbound adapter. Lets a
+   * later gather turn create/resolve a CUSTOMER for an unknown caller who books
+   * (the ask_caller → caller_known wire in the voice-turn processor).
+   */
+  callerPhone?: string;
   /** Linked conversation row for persisting transcript / proposals. */
   conversationId?: string;
   machine: CallingAgentStateMachine;
@@ -161,6 +172,26 @@ export interface VoiceSession {
   leadId?: string;
   /** Set when `identifyCaller` matched an existing customer. */
   customerId?: string;
+  /**
+   * True once the recording disclosure has actually been emitted to the caller
+   * on this call (set by `bootstrapCallEstablishment`, which is the only
+   * caller of `discloseRecording`). Any path that resumes or re-arms audio
+   * capture on a live call — notably the realtime→Gather degrade — must speak
+   * the disclosure first when this is falsy, rather than assume an earlier
+   * turn covered it. The realtime transport can degrade BEFORE establishment
+   * ever runs (e.g. the STT socket fails to open), leaving a session that
+   * exists but has heard nothing.
+   */
+  recordingDisclosed?: boolean;
+  /**
+   * Set when the caller objected to being recorded. The Twilio recording is
+   * paused via the REST API, but that only covers `<Start><Record>` — the
+   * realtime transport's capture is the STT socket, which no REST call
+   * touches. The media-streams frame gate reads this so "stop recording"
+   * actually stops capture on both transports rather than only on the one
+   * that happens to have a Twilio recording attached.
+   */
+  captureRevoked?: boolean;
   /**
    * U4 — B2B priority routing context, assembled at caller identification when
    * the matched customer is a business / property-manager account (parent +
@@ -211,6 +242,39 @@ export interface VoiceSession {
    * turn's `VoiceApprovalTurnResult.sessionState`.
    */
   voiceApprovalState?: import('../../tasks/proposal-approval-task').VoiceApprovalSessionState;
+  /**
+   * WS18 — in-flight on-call SMS consent capture. Set when the close flow asks
+   * the caller for permission to text the quote + booking link; the NEXT turn's
+   * answer is evaluated by strict confirmIntent (ambiguous → no). Adapter-side
+   * state like `pendingVoiceApproval` (the FSM never reads it); consumed and
+   * cleared at the top of the speech turn. Carries no secrets.
+   *
+   * WS2 — `close` is set when the capture was initiated by the close flow: a
+   * grant then continues into hold placement + owner-approval chain staging
+   * instead of the plain acknowledgment. `strictConfirmed` records that the
+   * authoritative confirmIntent gate already passed on the affirmative turn (an
+   * input to evaluateAutonomousCloseLane).
+   */
+  pendingConsentCapture?: {
+    customerId: string;
+    phone: string;
+    close?: { proposalId: string; strictConfirmed: boolean };
+  };
+  /**
+   * WS2 — terminal close-flow state for this session. 'fallback' after the
+   * owner-approval chain was staged (nothing is confirmed until the owner
+   * taps approve). Guards a repeated "yes, book it" from re-staging the chain /
+   * re-texting the owner.
+   */
+  closeState?: 'fallback';
+  /**
+   * WS5 — in-flight tenant-catalog load, kicked off once at session
+   * establishment (both voice transports) so in-call estimate grounding has
+   * the active catalog in hand synchronously at quote time. Managed by
+   * `ai/voice-turn/session-catalog.ts`; the FSM never reads it. Resolves to
+   * `[]` on a read failure (never rejects). GC'd with the session.
+   */
+  catalogPreload?: Promise<import('../../../catalog/catalog-item').CatalogItem[]>;
   /** Set after `endSession()` to short-circuit further input. */
   ended: boolean;
   /**
@@ -254,6 +318,17 @@ export interface VoiceSessionStoreOptions {
   /** When false, do not start the cleanup interval (for tests that
    *  drive cleanup manually via reapIdle()). Defaults to true. */
   startInterval?: boolean;
+  /** U3d — this store's replica identity for cross-instance self-origin dedup.
+   *  Defaults to the per-process REPLICA_ID; tests override it to simulate
+   *  multiple replicas within one process. */
+  replicaId?: string;
+  /**
+   * U3d — cross-instance voice-event transport. When provided (and not the no-op
+   * InProcess one), local events are mirrored to other replicas and remote
+   * events are injected into this store's global + gateway sinks. Omitted ⇒ no
+   * mirror (single-replica behavior unchanged).
+   */
+  transport?: VoiceEventTransport;
 }
 
 export class VoiceSessionStore {
@@ -286,10 +361,13 @@ export class VoiceSessionStore {
    */
   private readonly locks = new Map<string, Promise<void>>();
   private readonly idleTtlMs: number;
+  private readonly transport?: VoiceEventTransport;
+  private readonly replicaId: string;
   private readonly sweepHandle: ReturnType<typeof setInterval> | null;
 
   constructor(options: VoiceSessionStoreOptions = {}) {
     this.idleTtlMs = options.idleTtlMs ?? DEFAULT_IDLE_TTL_MS;
+    this.replicaId = options.replicaId ?? REPLICA_ID;
     const sweepIntervalMs = options.sweepIntervalMs ?? DEFAULT_SWEEP_INTERVAL_MS;
     const startInterval = options.startInterval ?? true;
     this.sweepHandle = startInterval
@@ -299,6 +377,65 @@ export class VoiceSessionStore {
     if (this.sweepHandle && typeof this.sweepHandle.unref === 'function') {
       this.sweepHandle.unref();
     }
+
+    this.transport = options.transport;
+    if (this.transport) {
+      const transport = this.transport;
+      // Mirror every local session event to the transport for cross-instance
+      // fan-out; attach to each new session (and any already present).
+      const attachMirror = (session: VoiceSession): void => {
+        session.events.on(STORE_VOICE_EVENT_CHANNEL, (evt: VoiceSessionEvent) => {
+          transport.publish({
+            replicaId: this.replicaId,
+            tenantId: session.tenantId,
+            sessionId: session.id,
+            callSid: session.callSid,
+            event: evt,
+          });
+        });
+      };
+      this.sessionCreatedListeners.add(attachMirror);
+      for (const session of this.sessions.values()) attachMirror(session);
+      // Inject events published by OTHER replicas into this store's sinks.
+      transport.subscribe((env) => {
+        if (env.replicaId === this.replicaId) return; // drop our own (no double-fire)
+        this.injectRemoteEvent(env);
+      });
+    }
+  }
+
+  /**
+   * Inject an event published by another replica into the local sinks: the
+   * global subscribers (escalation / supervisor wall via subscribeGlobal) and
+   * the client WS gateway (so a dashboard watching this voice session on a
+   * NON-owning replica still receives frames). Best-effort — one failing sink
+   * must not starve the others, and the gateway publish is a no-op when disabled.
+   */
+  private injectRemoteEvent(env: VoiceEventEnvelope): void {
+    for (const listener of this.globalListeners) {
+      try {
+        listener(env.event);
+      } catch {
+        /* one bad sink mustn't block the rest */
+      }
+    }
+    void import('../../../ws/client-gateway')
+      .then(({ publish }) => {
+        publish(
+          'voice',
+          env.sessionId,
+          {
+            kind: 'voice.event',
+            channel: 'voice',
+            sessionId: env.sessionId,
+            event: env.event.type,
+            state: 'state' in env.event ? (env.event as { state?: string }).state : undefined,
+            payload: env.event as unknown as Record<string, unknown>,
+          },
+          env.tenantId,
+        );
+      })
+      .catch(() => {});
   }
 
   /** Create a new session and return it. */
@@ -539,6 +676,34 @@ export class VoiceSessionStore {
   }
 
   /**
+   * Number of LIVE (non-ended) sessions. Ended telephony sessions are retained
+   * in the map for post-call lookups until the idle reaper removes them, so
+   * `size()` overcounts for shutdown purposes. The SIGTERM drain waits on THIS
+   * so a deploy with no live call tears down immediately instead of burning the
+   * full DRAIN_TIMEOUT_MS on already-ended sessions. (Codex P2, PR #628.)
+   */
+  liveCount(): number {
+    let n = 0;
+    for (const session of this.sessions.values()) if (!session.ended) n += 1;
+    return n;
+  }
+
+  /**
+   * WS15 — callSids of LIVE (non-ended) sessions, for the drain-abandonment
+   * alarm: when the shutdown drain window expires with live calls remaining,
+   * the Sentry event names the abandoned callSids so the operator can match
+   * them to Twilio call logs. Sessions without a callSid (web/test channels)
+   * are skipped — liveCount() remains the authoritative count.
+   */
+  liveCallSids(): string[] {
+    const sids: string[] = [];
+    for (const session of this.sessions.values()) {
+      if (!session.ended && session.callSid) sids.push(session.callSid);
+    }
+    return sids;
+  }
+
+  /**
    * X10/PR#398 — supervisor wall discovery. Returns non-ended sessions
    * for the given tenant so the wall can seed its local state and send
    * per-session WS `subscribe` frames (the gateway rejects voice subs
@@ -561,10 +726,21 @@ export class VoiceSessionStore {
     for (const [id, session] of this.sessions) {
       const idleMs = now - session.lastActivityAt.getTime();
       if (idleMs >= this.idleTtlMs) {
-        session.events.emit('voice-event', {
-          type: 'ended',
-          reason: 'idle_timeout',
-        } satisfies VoiceSessionEvent);
+        // emit() runs listeners synchronously on this timer's stack — with
+        // no request context around it, a throwing listener (SSE write to a
+        // half-closed socket, transport publish) would escape the interval
+        // callback as an uncaughtException and kill the process. One bad
+        // sink must not stop the sweep or take down other tenants' calls.
+        try {
+          session.events.emit('voice-event', {
+            type: 'ended',
+            reason: 'idle_timeout',
+          } satisfies VoiceSessionEvent);
+        } catch (err) {
+          process.stderr.write(
+            `voice-session reap listener failed: ${err instanceof Error ? err.message : String(err)}\n`
+          );
+        }
         this.delete(id);
         reaped.push(id);
       }
@@ -578,6 +754,7 @@ export class VoiceSessionStore {
    */
   dispose(): void {
     if (this.sweepHandle) clearInterval(this.sweepHandle);
+    void this.transport?.close().catch(() => {});
     for (const session of this.sessions.values()) {
       session.events.removeAllListeners();
     }

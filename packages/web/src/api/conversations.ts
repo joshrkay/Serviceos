@@ -50,6 +50,43 @@ export async function listInboxThreads(
   return data.threads ?? [];
 }
 
+/** Story 3.11 — one history-search hit: the matched message plus the minimal
+ *  conversation context needed to label it and deep-link into the thread.
+ *  Mirrors the API's `MessageSearchHit`. */
+export interface MessageSearchHit {
+  message: Message;
+  conversation: {
+    id: string;
+    title?: string;
+    entityType?: string;
+    entityId?: string;
+  };
+}
+
+/**
+ * Search conversation history by free text (and/or a linked entity). Powers the
+ * inbox search box. Returns matched messages newest-first; an empty/whitespace
+ * query short-circuits to no results rather than hitting the server.
+ */
+export async function searchConversations(
+  query: string,
+  opts: { customerId?: string; jobId?: string; limit?: number } = {},
+): Promise<MessageSearchHit[]> {
+  const q = query.trim();
+  if (!q && !opts.customerId && !opts.jobId) return [];
+  const qs = new URLSearchParams();
+  if (q) qs.set('q', q);
+  if (opts.customerId) qs.set('customerId', opts.customerId);
+  if (opts.jobId) qs.set('jobId', opts.jobId);
+  if (opts.limit) qs.set('limit', String(opts.limit));
+  const res = await apiFetch(`/api/conversations/search?${qs.toString()}`);
+  if (!res.ok) {
+    throw new Error(`Search failed (${res.status})`);
+  }
+  const data = (await res.json()) as { results?: MessageSearchHit[] };
+  return data.results ?? [];
+}
+
 /** Fetch the full message history of one conversation. */
 export async function getConversationMessages(
   conversationId: string,

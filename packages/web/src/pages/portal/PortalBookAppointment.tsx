@@ -9,6 +9,8 @@
 import { useState } from 'react';
 import { portalApi, PortalSlot } from '../../api/portal';
 import { PortalSlotPicker, SlotPickerOutcome } from './PortalSlotPicker';
+import { Textarea } from '../../components/ui';
+import { PORTAL_FIELD } from '../../components/customer/portalField';
 
 export function PortalBookAppointment({ token }: { token: string }) {
   const [summary, setSummary] = useState('');
@@ -35,25 +37,25 @@ export function PortalBookAppointment({ token }: { token: string }) {
 
   if (confirmation) {
     return (
-      <div className="bg-emerald-50 border border-emerald-200 rounded-2xl p-6 text-center">
-        <div className="text-lg font-semibold text-emerald-900">Request received</div>
-        <div className="mt-2 text-sm text-emerald-800">{confirmation}</div>
+      <div className="bg-success/10 border border-success/20 rounded-2xl p-6 text-center">
+        <div className="text-lg font-semibold text-success">Request received</div>
+        <div className="mt-2 text-sm text-success">{confirmation}</div>
       </div>
     );
   }
 
   return (
-    <div className="bg-white rounded-2xl border border-slate-200 p-4 sm:p-6 space-y-4">
+    <div className="bg-card rounded-2xl border border-border p-4 sm:p-6 space-y-4">
       <div>
-        <label htmlFor="book-summary" className="block text-sm font-medium text-slate-700">
+        <label htmlFor="book-summary" className="block text-sm font-medium text-foreground">
           What do you need help with?
         </label>
-        <textarea
+        <Textarea
           id="book-summary"
           rows={2}
           value={summary}
           onChange={(e) => setSummary(e.target.value)}
-          className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm focus:border-slate-500 focus:outline-none"
+          className={`mt-1 ${PORTAL_FIELD}`}
           placeholder="e.g. Annual furnace tune-up"
         />
       </div>

@@ -29,7 +29,7 @@ function jsonResponse(body: unknown, init: { ok?: boolean; status?: number } = {
   } as unknown as Response;
 }
 
-describe('PaymentMethodsSheet — Tier 4 Payment methods (PR 1)', () => {
+describe('PaymentMethodsSheet', () => {
   beforeEach(() => {
     apiFetchMock.mockReset();
     toastSuccess.mockReset();

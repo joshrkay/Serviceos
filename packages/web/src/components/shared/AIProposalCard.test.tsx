@@ -1,11 +1,19 @@
-import { describe, it, expect, vi } from 'vitest';
-import { render, screen, within } from '@testing-library/react';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { render, screen, within, fireEvent } from '@testing-library/react';
 import { AIProposalCard } from './AIProposalCard';
-import type { AIProposal, ProposalConfidenceLevel } from '../../data/mock-data';
+import type { AIProposal, ProposalConfidenceLevel } from '../../types/assistant-ui';
 
 // sonner's <Toaster> isn't mounted in unit tests — the card imports
 // `toast` at module scope, so stub it to keep the render side-effect-free.
 vi.mock('sonner', () => ({ toast: { error: vi.fn(), success: vi.fn() } }));
+
+// The card calls useNavigate (Story 3.11 deep-link). Mock it so renders need
+// no Router wrapper and the navigation target is assertable.
+const navigateMock = vi.fn();
+vi.mock('react-router', async (orig) => {
+  const actual = await (orig() as Promise<typeof import('react-router')>);
+  return { ...actual, useNavigate: () => navigateMock };
+});
 
 function makeProposal(overrides: Partial<AIProposal> = {}): AIProposal {
   return {
@@ -45,6 +53,25 @@ describe('P2-035 (U2) AIProposalCard confidence markers', () => {
     // No `meta` → the card uses the legacy `confidence` field ('Medium').
     render(<AIProposalCard proposal={makeProposal({ confidence: 'High' })} />);
     expect(screen.getByText('High confidence')).toBeInTheDocument();
+  });
+
+  // §6.4-B (U5) — severity badge from `_meta.severity` (MMS photo drafts).
+  it('renders the §6.4-B severity badge from _meta.severity', () => {
+    render(
+      <AIProposalCard
+        proposal={makeProposal({
+          meta: { overallConfidence: 'medium', severity: 'TIER_2_EMERGENCY_DISPATCH' },
+        })}
+      />,
+    );
+    expect(screen.getByTestId('severity-badge')).toHaveTextContent('Emergency');
+  });
+
+  it('omits the severity badge when _meta has no severity', () => {
+    render(
+      <AIProposalCard proposal={makeProposal({ meta: { overallConfidence: 'medium' } })} />,
+    );
+    expect(screen.queryByTestId('severity-badge')).toBeNull();
   });
 
   it('does not crash when _meta carries an unknown overallConfidence', () => {
@@ -101,5 +128,79 @@ describe('P2-035 (U2) AIProposalCard confidence markers', () => {
       />,
     );
     expect(screen.queryByTestId('pricing-source-badges')).toBeNull();
+  });
+
+  // UB-A3 — "Standing instruction applied" chips from
+  // `_meta.appliedStandingInstructions` (server-side intersected ids).
+  it('renders a "Standing instruction applied" chip per applied instruction (UB-A3)', () => {
+    render(
+      <AIProposalCard
+        proposal={makeProposal({
+          meta: {
+            overallConfidence: 'high',
+            appliedStandingInstructions: [
+              { id: 'si-1', text: 'Always add a $50 trip fee' },
+              { id: 'si-2', text: 'Mention the referral discount' },
+            ],
+          },
+        })}
+      />,
+    );
+
+    const chips = screen.getAllByTestId('standing-instruction-chip');
+    expect(chips).toHaveLength(2);
+    expect(chips[0]).toHaveTextContent('Standing instruction applied: Always add a $50 trip fee');
+    expect(chips[1]).toHaveTextContent('Standing instruction applied: Mention the referral discount');
+  });
+
+  it('omits the standing-instruction chips when _meta carries none (UB-A3)', () => {
+    render(
+      <AIProposalCard proposal={makeProposal({ meta: { overallConfidence: 'high' } })} />,
+    );
+    expect(screen.queryByTestId('standing-instruction-chips')).toBeNull();
+  });
+});
+
+describe('Story 3.11 — approved proposal deep-links to the created entity', () => {
+  beforeEach(() => navigateMock.mockReset());
+
+  it.each([
+    ['Invoice', 'inv-1', '/invoices/inv-1'],
+    ['Send', 'inv-9', '/invoices/inv-9'],
+    ['Estimate', 'est-2', '/estimates/est-2'],
+    ['Customer', 'cus-3', '/customers/cus-3'],
+  ] as const)('navigates a %s card to its entity', (type, relatedId, route) => {
+    render(
+      <AIProposalCard
+        proposal={makeProposal({ status: 'Approved', type, relatedId })}
+      />,
+    );
+    fireEvent.click(screen.getByRole('button', { name: /view/i }));
+    expect(navigateMock).toHaveBeenCalledWith(route);
+  });
+
+  it('shows no View button for a type without a detail route', () => {
+    render(
+      <AIProposalCard
+        proposal={makeProposal({ status: 'Approved', type: 'Schedule', relatedId: 'appt-1' })}
+      />,
+    );
+    expect(screen.queryByRole('button', { name: /view/i })).toBeNull();
+  });
+
+  it('shows no View button when relatedId is absent', () => {
+    render(
+      <AIProposalCard proposal={makeProposal({ status: 'Approved', type: 'Invoice' })} />,
+    );
+    expect(screen.queryByRole('button', { name: /view/i })).toBeNull();
+  });
+
+  it('keeps the View tap target ≥44px (min-h-11)', () => {
+    render(
+      <AIProposalCard
+        proposal={makeProposal({ status: 'Approved', type: 'Invoice', relatedId: 'inv-1' })}
+      />,
+    );
+    expect(screen.getByRole('button', { name: /view/i }).className).toContain('min-h-11');
   });
 });

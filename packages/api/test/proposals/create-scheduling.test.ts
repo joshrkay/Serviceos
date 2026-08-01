@@ -65,7 +65,7 @@ function makeDeps(appts: Record<string, Appointment>, techAssignments: Record<st
     appointmentRepo,
     jobRepo: { findById: async () => null },
     locationRepo: { findById: async () => null },
-    workingHoursRepo: { findByTechnicianAndDay: async () => [] },
+    workingHoursRepo: { findByTechnician: async () => [] },
     unavailableBlockRepo: { findByTechnicianAndDateRange: async () => [] },
     travelTimeProvider: { estimateDriveTime: async () => ({ seconds: 0, source: 'unknown', degraded: false }) },
     skillMatcher: { requiredSkillsForJob: async () => [], skillsForTechnician: async () => [] },

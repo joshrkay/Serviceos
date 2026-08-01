@@ -29,7 +29,7 @@ function jsonResponse(body: unknown, init: { ok?: boolean; status?: number } = {
   } as unknown as Response;
 }
 
-describe('TerminologySheet — Tier 4 stub closure', () => {
+describe('TerminologySheet', () => {
   beforeEach(() => {
     apiFetchMock.mockReset();
     toastSuccess.mockReset();

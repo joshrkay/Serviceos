@@ -19,7 +19,8 @@ Rules:
  */
 export async function generateAIClarificationQuestions(
   gateway: LLMGateway,
-  extraction: Partial<OnboardingExtraction>
+  extraction: Partial<OnboardingExtraction>,
+  tenantId: string,
 ): Promise<string[]> {
   const contextParts: string[] = ['Extraction status:'];
 
@@ -58,6 +59,9 @@ export async function generateAIClarificationQuestions(
 
   const response = await gateway.complete({
     taskType: 'generate_clarification_questions',
+    // Top-level tenantId so the gateway keys this tenant's concurrency
+    // quota / cache bucket correctly (never the shared SYSTEM_TENANT_ID).
+    tenantId,
     messages: [
       { role: 'system', content: SYSTEM_PROMPT },
       { role: 'user', content: userMessage },

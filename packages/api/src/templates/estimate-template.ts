@@ -155,6 +155,57 @@ export async function updateTemplate(
   return updated;
 }
 
+/**
+ * Story 7.9 — "save this estimate as a template". Maps an estimate's line
+ * items, discount, tax rate, and customer message into a CreateTemplateInput
+ * so the server fills the template from the estimate (the caller only supplies
+ * the template's name + classification). Pure; the canonical estimate is
+ * untouched. `verticalType`/`categoryId` aren't carried by the estimate, so
+ * the caller provides them.
+ */
+export interface TemplateFromEstimateMeta {
+  tenantId: string;
+  name: string;
+  verticalType: VerticalType;
+  categoryId: string;
+  description?: string;
+  createdBy: string;
+}
+
+export function buildTemplateInputFromEstimate(
+  estimate: {
+    lineItems: LineItem[];
+    totals: { discountCents: number; taxRateBps: number };
+    customerMessage?: string;
+  },
+  meta: TemplateFromEstimateMeta,
+): CreateTemplateInput {
+  const lineItemTemplates: LineItemTemplate[] = estimate.lineItems.map((li, index) => ({
+    description: li.description,
+    // LineItem.category is already the labor|material|equipment|other union;
+    // default to 'other' when a line carries none.
+    category: li.category ?? 'other',
+    defaultQuantity: li.quantity,
+    defaultUnitPriceCents: li.unitPriceCents,
+    taxable: li.taxable,
+    sortOrder: li.sortOrder ?? index,
+    isOptional: li.isOptional ?? false,
+  }));
+
+  return {
+    tenantId: meta.tenantId,
+    verticalType: meta.verticalType,
+    categoryId: meta.categoryId,
+    name: meta.name,
+    description: meta.description,
+    lineItemTemplates,
+    defaultDiscountCents: estimate.totals.discountCents,
+    defaultTaxRateBps: estimate.totals.taxRateBps,
+    defaultCustomerMessage: estimate.customerMessage,
+    createdBy: meta.createdBy,
+  };
+}
+
 export function instantiateTemplate(template: EstimateTemplate): {
   lineItems: LineItem[];
   totals: DocumentTotals;

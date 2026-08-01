@@ -1,5 +1,6 @@
 // Shared billing engine for estimates and invoices
 // All money values are integer cents. Tax rate in basis points (bps).
+import type { CatalogUnitValue } from '@ai-service-os/shared';
 
 export type LineItemCategory = 'labor' | 'material' | 'equipment' | 'other';
 
@@ -7,10 +8,11 @@ export type LineItemCategory = 'labor' | 'material' | 'equipment' | 'other';
  * Where a line item's price came from, carried from proposal drafting
  * (the catalog resolver stamps it — see
  * ai/resolution/catalog-resolver.ts) through to persistence on
- * estimate_line_items.pricing_source. ESTIMATES ONLY: invoices never set
- * this (the column lives on estimate_line_items), so it stays optional
- * and reads back undefined on invoice lines. A later step uses it to
- * decide whether an estimate's pricing is catalog-grounded enough to
+ * estimate_line_items.pricing_source AND invoice_line_items.pricing_source
+ * (migration 254). Stays optional: legacy rows and manual-create paths
+ * that don't set it read back undefined (treated as NOT grounded). Used
+ * to show a price's provenance in the review UI / audit trail and to
+ * decide whether a document's pricing is catalog-grounded enough to
  * auto-allow a discount.
  */
 export type PricingSource = 'catalog' | 'ambiguous' | 'uncatalogued' | 'manual';
@@ -20,15 +22,23 @@ export interface LineItem {
   description: string;
   category?: LineItemCategory;
   quantity: number;
+  /**
+   * B7.5 — descriptive unit of measure ('each', 'hour', …), carried from a
+   * catalog match or a spoken part. Nothing in this file reads it: totals are
+   * quantity × unitPriceCents regardless, so a unit can never move money.
+   * Optional — legacy rows and every non-voice path leave it absent.
+   */
+  unit?: CatalogUnitValue;
   unitPriceCents: number;
   totalCents: number;
   sortOrder: number;
   taxable: boolean;
   /**
-   * Catalog-grounding signal (estimates only). Set by the catalog
-   * resolver during proposal drafting and persisted on estimate line
-   * items; undefined/absent on invoice lines and on legacy estimate rows
-   * (treated as NOT grounded — see isEstimateCatalogGrounded).
+   * Catalog-grounding signal. Set by the catalog resolver during proposal
+   * drafting and persisted on estimate_line_items.pricing_source and
+   * invoice_line_items.pricing_source (migration 254);
+   * undefined/absent on legacy rows and manual-create paths that don't set
+   * it (treated as NOT grounded — see isEstimateCatalogGrounded).
    */
   pricingSource?: PricingSource;
   /**
@@ -47,6 +57,12 @@ export interface LineItem {
   isOptional?: boolean;
   /** Pre-selected on first view (default tier / pre-checked add-on). */
   isDefaultSelected?: boolean;
+  /**
+   * EE-4 — frozen image snapshot: the catalog item's `image_file_id` stamped
+   * onto the line at draft/create (estimates only; invoice lines have no such
+   * column). Resolved to a signed URL only at the public edge.
+   */
+  imageFileId?: string;
 }
 
 export interface DocumentTotals {
@@ -55,11 +71,39 @@ export interface DocumentTotals {
   taxRateBps: number;
   taxableSubtotalCents: number;
   taxCents: number;
+  /**
+   * Optional processing-fee surcharge (Jobber parity). Basis points applied to
+   * the chargeable amount (subtotal − discount + tax) to pass card/ACH
+   * processing costs through to the customer. Absent/0 ⇒ no surcharge.
+   * Invoice-only today (estimates never pass a fee); the fields are optional so
+   * every existing DocumentTotals literal stays valid.
+   */
+  processingFeeBps?: number;
+  processingFeeCents?: number;
   totalCents: number;
 }
 
 export function calculateLineItemTotal(quantity: number, unitPriceCents: number): number {
   return Math.round(quantity * unitPriceCents);
+}
+
+/**
+ * P0-2 — recompute every line's totalCents server-side from
+ * `quantity × unitPriceCents`, discarding whatever the client sent. The web
+ * write path round-trips money through float dollars (`rate = cents / 100`,
+ * then `round(qty * rate * 100)`), which diverges from the server formula by
+ * a cent on fractional quantities (e.g. 0.5 × 29¢: server 15, client 14) —
+ * and the REST create/update paths used to persist the client's number
+ * verbatim, so the wrong value flowed into subtotal → total → amount_due →
+ * the Stripe unit_amount. Normalizing at the domain layer makes L1
+ * (`line.total == round(qty × unit)`) hold no matter what the client
+ * computed. Idempotent on lines already built by `buildLineItem`.
+ */
+export function normalizeLineItemTotals(lineItems: LineItem[]): LineItem[] {
+  return lineItems.map((item) => ({
+    ...item,
+    totalCents: calculateLineItemTotal(item.quantity, item.unitPriceCents),
+  }));
 }
 
 /**
@@ -76,7 +120,8 @@ export function applyBps(amountCents: number, bps: number): number {
 export function calculateDocumentTotals(
   lineItems: LineItem[],
   discountCents: number,
-  taxRateBps: number
+  taxRateBps: number,
+  processingFeeBps: number = 0
 ): DocumentTotals {
   const subtotalCents = lineItems.reduce((sum, item) => sum + item.totalCents, 0);
   const taxableSubtotalCents = lineItems
@@ -86,7 +131,12 @@ export function calculateDocumentTotals(
   // Apply discount to taxable amount before computing tax
   const effectiveTaxableAmount = Math.max(0, taxableSubtotalCents - discountCents);
   const taxCents = applyBps(effectiveTaxableAmount, taxRateBps);
-  const totalCents = subtotalCents - discountCents + taxCents;
+  // Processing fee passes card/ACH costs through on the amount actually charged
+  // (subtotal − discount + tax), so it compounds nothing and never goes
+  // negative even under a total-clearing discount.
+  const chargeableBeforeFeeCents = Math.max(0, subtotalCents - discountCents + taxCents);
+  const processingFeeCents = applyBps(chargeableBeforeFeeCents, processingFeeBps);
+  const totalCents = subtotalCents - discountCents + taxCents + processingFeeCents;
 
   return {
     subtotalCents,
@@ -94,6 +144,8 @@ export function calculateDocumentTotals(
     taxRateBps,
     taxableSubtotalCents,
     taxCents,
+    processingFeeBps,
+    processingFeeCents,
     totalCents: Math.max(0, totalCents),
   };
 }
@@ -154,6 +206,32 @@ export function resolveSelectedLineItems(
  */
 export function defaultSelectionIds(lineItems: LineItem[]): string[] {
   return resolveSelectedLineItems(lineItems).map((li) => li.id);
+}
+
+/**
+ * EE-1 — headline document totals for an ESTIMATE that may carry
+ * good-better-best tiers / optional add-ons. Totals the DEFAULT selection
+ * (each group's default tier + pre-checked add-ons + always-billed lines)
+ * rather than the sum of every option. Identical to `calculateDocumentTotals`
+ * for a flat document (no selectable lines → all items selected). Use this at
+ * EVERY estimate headline-total site (create / update / revise / duplicate /
+ * voice-edit) so a tiered estimate stays consistent — computing raw
+ * `calculateDocumentTotals` over all lines re-inflates the headline. The
+ * accept path stays separate: it resolves the customer's chosen selection, not
+ * the default.
+ */
+export function calculateSelectedDocumentTotals(
+  lineItems: LineItem[],
+  discountCents: number,
+  taxRateBps: number,
+  processingFeeBps: number = 0,
+): DocumentTotals {
+  return calculateDocumentTotals(
+    resolveSelectedLineItems(lineItems),
+    discountCents,
+    taxRateBps,
+    processingFeeBps,
+  );
 }
 
 /**
@@ -220,6 +298,10 @@ export function validateDocumentTotals(totals: DocumentTotals): string[] {
   if (totals.discountCents < 0) errors.push('discountCents must be non-negative');
   if (totals.taxRateBps < 0) errors.push('taxRateBps must be non-negative');
   if (totals.taxRateBps > 10000) errors.push('taxRateBps must not exceed 10000 (100%)');
+  if ((totals.processingFeeBps ?? 0) < 0) errors.push('processingFeeBps must be non-negative');
+  if ((totals.processingFeeBps ?? 0) > 10000) {
+    errors.push('processingFeeBps must not exceed 10000 (100%)');
+  }
   return errors;
 }
 
@@ -230,7 +312,13 @@ export function buildLineItem(
   unitPriceCents: number,
   sortOrder: number,
   taxable: boolean = true,
-  category?: LineItemCategory
+  category?: LineItemCategory,
+  // Catalog-grounding provenance (see PricingSource doc comment above).
+  // Optional trailing param so existing callers (seed-runner,
+  // estimate-template, schedule-completion, apply-late-fee-handler,
+  // invoice-schedule-handler) are unaffected — they simply don't pass it
+  // and the line persists with NULL provenance, same as before.
+  pricingSource?: PricingSource
 ): LineItem {
   return {
     id,
@@ -241,5 +329,6 @@ export function buildLineItem(
     totalCents: calculateLineItemTotal(quantity, unitPriceCents),
     sortOrder,
     taxable,
+    ...(pricingSource !== undefined ? { pricingSource } : {}),
   };
 }

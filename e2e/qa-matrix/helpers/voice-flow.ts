@@ -17,11 +17,16 @@ export interface ProposalOutcome {
   proposalType?: string;
 }
 
-export async function startVoiceSession(h: RowHarness, token: string, label: string): Promise<string | undefined> {
+export async function startVoiceSession(
+  h: RowHarness,
+  token: string,
+  label: string,
+  callerPhone?: string
+): Promise<string | undefined> {
   const res = await h.api.call({
     method: 'POST',
     path: '/api/voice/sessions',
-    body: {},
+    body: callerPhone ? { callerPhone } : {},
     token,
     label: `${label}-vstart`,
     expectStatus: [200, 201, 400, 403, 404],
@@ -45,7 +50,54 @@ export async function voiceInput(
     label: `${label}-vinput`,
     expectStatus: [200, 400, 403, 404],
   });
-  return (res.response.body as { proposalIds?: string[] }).proposalIds ?? [];
+  const body = res.response.body as { proposalIds?: string[]; state?: string };
+  const proposalIds = body.proposalIds ?? [];
+  if (proposalIds.length > 0) return proposalIds;
+
+  // A free-text entity reference that lands in the middle confidence band
+  // (τ_ent_confirm_low <= score < τ_ent) surfaces an `entity_confirm` HITL
+  // readback turn — "I found a job 'X' — is that the one you mean?" — before
+  // the FSM ever reaches `intent_confirm`. Answer it the same way, then fall
+  // through to the intent_confirm handling below (packages/api/src/ai/agents/
+  // customer-calling/transitions.ts: entity_confirm -> intent_confirm on an
+  // affirmative reply).
+  if (body.state === 'entity_confirm') {
+    const entityConfirmRes = await h.api.call({
+      method: 'POST',
+      path: `/api/voice/sessions/${sessionId}/input`,
+      body: { text: "Yes, that's correct." },
+      token,
+      label: `${label}-vinput-entity-confirm`,
+      expectStatus: [200, 400, 403, 404],
+    });
+    const entityConfirmBody = entityConfirmRes.response.body as { proposalIds?: string[]; state?: string };
+    const entityConfirmProposalIds = entityConfirmBody.proposalIds ?? [];
+    if (entityConfirmProposalIds.length > 0) return entityConfirmProposalIds;
+    if (entityConfirmBody.state !== 'intent_confirm') return entityConfirmProposalIds;
+    // Fall through with the post-entity_confirm response body so the
+    // intent_confirm handling below completes the second HITL turn.
+    body.state = entityConfirmBody.state;
+  }
+
+  // Non-emergency intents land in `intent_confirm` first (a deliberate HITL
+  // readback turn — "...is that right?") and only create the proposal after
+  // an explicit yes on the NEXT turn (packages/api/src/ai/agents/customer-calling/
+  // transitions.ts: intent_confirm -> proposal_draft on confirmation). A single
+  // utterance never produces a proposal for these intents — treating that as
+  // "AI pipeline broken" was a QA-harness bug, not a product one. Complete the
+  // confirmation turn here so the row exercises the real multi-turn flow.
+  if (body.state === 'intent_confirm') {
+    const confirmRes = await h.api.call({
+      method: 'POST',
+      path: `/api/voice/sessions/${sessionId}/input`,
+      body: { text: "Yes, that's correct." },
+      token,
+      label: `${label}-vinput-confirm`,
+      expectStatus: [200, 400, 403, 404],
+    });
+    return (confirmRes.response.body as { proposalIds?: string[] }).proposalIds ?? [];
+  }
+  return proposalIds;
 }
 
 export async function approveAndAwaitExecution(

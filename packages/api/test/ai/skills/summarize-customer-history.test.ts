@@ -234,6 +234,29 @@ describe('summarizeCustomerHistory', () => {
     expect(result.flags.hasOverdueBalance).toBe(true);
   });
 
+  it('aggregates invoices in ONE batched read, not a per-job fan-out (no N+1)', async () => {
+    const jobRepo = new InMemoryJobRepository();
+    await jobRepo.create(makeJob({ id: 'job-1', createdAt: new Date('2026-04-01') }));
+    await jobRepo.create(makeJob({ id: 'job-2', createdAt: new Date('2026-04-15') }));
+    await jobRepo.create(makeJob({ id: 'job-3', createdAt: new Date('2026-04-20') }));
+    const invoiceRepo = new InMemoryInvoiceRepository();
+    const byJobs = vi.spyOn(invoiceRepo, 'findByJobs');
+    const byJob = vi.spyOn(invoiceRepo, 'findByJob');
+    const agreementRepo = new InMemoryAgreementRepository();
+
+    await summarizeCustomerHistory(
+      { tenantId: TENANT, customerId: CUSTOMER },
+      { jobRepo, invoiceRepo, agreementRepo },
+    );
+
+    expect(byJob).not.toHaveBeenCalled();
+    expect(byJobs).toHaveBeenCalledTimes(1);
+    expect(byJobs).toHaveBeenCalledWith(
+      TENANT,
+      expect.arrayContaining(['job-1', 'job-2', 'job-3']),
+    );
+  });
+
   it('filters agreements to customer-scoped active rows (relies on repo, no client-side re-filter)', async () => {
     const jobRepo = new InMemoryJobRepository();
     const invoiceRepo = new InMemoryInvoiceRepository();
@@ -287,13 +310,13 @@ describe('summarizeCustomerHistory', () => {
     expect(result.lastTechnicianId).toBe('tech-mike');
   });
 
-  it('failure-soft: any per-job invoice fetch failure marks balance unavailable + suppresses overdue flag', async () => {
+  it('failure-soft: a batched invoice fetch failure marks balance unavailable + suppresses overdue flag', async () => {
     const jobRepo = new InMemoryJobRepository();
     await jobRepo.create(
       makeJob({ id: 'job-1', createdAt: new Date('2026-05-01') }),
     );
     const invoiceRepo = new InMemoryInvoiceRepository();
-    vi.spyOn(invoiceRepo, 'findByJob').mockRejectedValue(
+    vi.spyOn(invoiceRepo, 'findByJobs').mockRejectedValue(
       new Error('db connection lost'),
     );
     const agreementRepo = new InMemoryAgreementRepository();

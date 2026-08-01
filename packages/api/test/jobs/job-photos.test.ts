@@ -129,6 +129,14 @@ describe('job-photo router (P12-001)', () => {
     expect(attach.body.fileId).toBe(fileId);
     expect(attach.body.category).toBe('after');
     expect(attach.body.notes).toBe('all done');
+    // Sweep-2 S2: the POST response must carry the same serialized shape
+    // as the list endpoint — the web page optimistically appends it to the
+    // gallery, and a bare row (no contentType/downloadUrl) crashed
+    // JobPhotoGallery's `contentType.startsWith(...)` after every upload.
+    expect(attach.body.contentType).toBe('image/png');
+    expect(attach.body.filename).toBe('after.png');
+    expect(attach.body.downloadUrl).toContain('/get/');
+    expect(attach.body.sizeBytes).toBe(2048);
 
     const list = await request(app).get(`/api/jobs/${jobId}/photos`);
     expect(list.status).toBe(200);

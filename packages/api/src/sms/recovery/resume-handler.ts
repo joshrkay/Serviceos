@@ -45,8 +45,12 @@ export interface DroppedCallResumeDeps {
   recoveryRepo: Pick<DroppedCallRecoveryRepository, 'findRecentByPhone'>;
   proposalRepo?: Pick<ProposalRepository, 'findById'>;
   callMeBackRepo?: CallMeBackRepository;
-  /** Reply transport (same delivery provider the recovery SMS used). */
-  sendSms: (args: { to: string; body: string }) => Promise<unknown>;
+  /**
+   * Reply transport (same delivery provider the recovery SMS used). tenantId is
+   * forwarded so the central consent+DNC gate can resolve the caller's customer
+   * record + per-tenant DNC (WS1).
+   */
+  sendSms: (args: { to: string; body: string; tenantId?: string }) => Promise<unknown>;
   auditRepo?: AuditRepository;
   logger?: Logger;
   businessName?: string;
@@ -131,6 +135,7 @@ export function createDroppedCallResumeHandler(
           await deps.sendSms({
             to: ctx.fromE164,
             body: composeBookingStatusReply(businessName),
+            tenantId: ctx.tenantId,
           });
           await audit(ctx, 'booking_status_sent', {
             voiceSessionId: row.voiceSessionId,
@@ -166,6 +171,7 @@ export function createDroppedCallResumeHandler(
       await deps.sendSms({
         to: ctx.fromE164,
         body: composeCallbackReply(businessName),
+        tenantId: ctx.tenantId,
       });
       await audit(ctx, 'callback_scheduled', {
         voiceSessionId: row.voiceSessionId,

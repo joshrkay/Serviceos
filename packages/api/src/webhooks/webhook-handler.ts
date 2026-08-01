@@ -22,6 +22,18 @@ export interface WebhookRepository {
   findByIdempotencyKey(source: string, idempotencyKey: string): Promise<WebhookEvent | null>;
   create(event: WebhookEvent): Promise<WebhookEvent>;
   updateStatus(id: string, status: WebhookEvent['status'], error?: string): Promise<void>;
+  /**
+   * P0-8 — atomically CLAIM an existing row for retry execution. The
+   * (source, idempotency_key) unique index arbitrates only the FIRST
+   * delivery; once a row exists, deciding "this failed/stale row may re-run"
+   * from a pure read lets two concurrent retries both run the handler. This
+   * compare-and-swap flips the row to 'processing' — and refreshes
+   * `createdAt`, the in-flight staleness anchor — ONLY when it is still
+   * retry-eligible (status 'failed', or 'received'/'processing' older than
+   * `stalenessMs`). Exactly one concurrent caller gets the row back; the
+   * rest get null and must treat the event as an in-flight duplicate.
+   */
+  claimForRetry(id: string, stalenessMs: number): Promise<WebhookEvent | null>;
 }
 
 export function verifyWebhookSignature(
@@ -34,15 +46,20 @@ export function verifyWebhookSignature(
 
   const parts = signature.split(',');
   const timestampPart = parts.find((p) => p.startsWith('t='));
-  const signaturePart = parts.find((p) => p.startsWith('v1='));
+  // Stripe's `Stripe-Signature` header can carry MULTIPLE `v1=` signatures for
+  // the same payload — notably during endpoint secret rotation, when events are
+  // signed with both the old and new secret. Check EVERY v1 against the expected
+  // signature, not just the first: if the first v1 belongs to the other secret
+  // and a later v1 matches `secret`, a legitimate event would otherwise 401.
+  const providedSigs = parts
+    .filter((p) => p.startsWith('v1='))
+    .map((p) => p.substring(3))
+    .filter((s) => s.length > 0);
 
-  if (!timestampPart || !signaturePart) return false;
+  if (!timestampPart || providedSigs.length === 0) return false;
 
   const timestamp = parseInt(timestampPart.substring(2), 10);
   if (isNaN(timestamp)) return false;
-
-  const providedSig = signaturePart.substring(3);
-  if (!providedSig) return false;
 
   const now = Math.floor(Date.now() / 1000);
   if (Math.abs(now - timestamp) > toleranceSeconds) return false;
@@ -51,15 +68,51 @@ export function verifyWebhookSignature(
     .createHmac('sha256', secret)
     .update(`${timestamp}.${payload}`)
     .digest('hex');
+  const expectedBuf = Buffer.from(expectedSig, 'hex');
 
-  try {
-    const providedBuf = Buffer.from(providedSig, 'hex');
-    const expectedBuf = Buffer.from(expectedSig, 'hex');
-    if (providedBuf.length !== expectedBuf.length) return false;
-    return crypto.timingSafeEqual(providedBuf, expectedBuf);
-  } catch {
-    return false;
-  }
+  return providedSigs.some((providedSig) => {
+    try {
+      const providedBuf = Buffer.from(providedSig, 'hex');
+      if (providedBuf.length !== expectedBuf.length) return false;
+      return crypto.timingSafeEqual(providedBuf, expectedBuf);
+    } catch {
+      return false;
+    }
+  });
+}
+
+/**
+ * Parse a webhook signing-secret env value into the list of secrets to accept.
+ *
+ * Stripe issues a DISTINCT signing secret per webhook endpoint, and full
+ * coverage requires two endpoints — one platform-scoped (SaaS subscriptions,
+ * platform `account.updated`) and one connected-accounts-scoped (the customer
+ * payment events that settle invoices as Connect direct charges). Verifying
+ * against a single secret would 401 every event from the other endpoint. So
+ * `STRIPE_WEBHOOK_SECRET` accepts a COMMA-SEPARATED list of secrets; a single
+ * value is the common case and behaves exactly as before. See
+ * docs/runbooks/stripe-go-live.md and docs/ops/stripe-connect-webhooks.md.
+ */
+export function parseWebhookSecrets(raw: string | undefined): string[] {
+  if (!raw) return [];
+  return raw
+    .split(',')
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
+}
+
+/**
+ * True if `signature` verifies against ANY of `secrets` (see
+ * `parseWebhookSecrets` for why more than one is accepted). Short-circuits on
+ * the first match; an empty list can never verify.
+ */
+export function verifyWebhookSignatureAny(
+  payload: string,
+  signature: string,
+  secrets: string[],
+  toleranceSeconds: number = 300,
+): boolean {
+  return secrets.some((secret) => verifyWebhookSignature(payload, signature, secret, toleranceSeconds));
 }
 
 export function createWebhookSignature(payload: string, secret: string, timestamp?: number): string {
@@ -138,7 +191,7 @@ export async function handleWebhookEvent(
   // retries.
   const existing = await repository.findByIdempotencyKey(source, idempotencyKey);
   if (existing) {
-    return classifyExisting(existing);
+    return claimIfRetry(repository, classifyExisting(existing));
   }
 
   const event: WebhookEvent = {
@@ -163,10 +216,33 @@ export async function handleWebhookEvent(
   // (The in-memory repo always returns the row we passed, so id matches
   // and this branch is a no-op there.)
   if (created.id !== event.id) {
-    return classifyExisting(created);
+    return claimIfRetry(repository, classifyExisting(created));
   }
 
   return { event: created, duplicate: false };
+}
+
+/**
+ * P0-8 — turn a "retry-eligible" classification into an EXCLUSIVE claim.
+ * `classifyExisting` is a pure read: two concurrent retries of the same
+ * failed/stale row both see duplicate=false and would both execute the
+ * handler (defeating every downstream check-then-act idempotency guard by
+ * timing — e.g. two refund retries both reading the pre-increment state).
+ * The repository CAS lets exactly one retry proceed; every loser is
+ * reported as an in-flight duplicate, which the routes ACK with 200 so the
+ * provider's later redelivery (well past the staleness window) can recover
+ * if the winner crashes.
+ */
+async function claimIfRetry(
+  repository: WebhookRepository,
+  classified: { event: WebhookEvent; duplicate: boolean },
+): Promise<{ event: WebhookEvent; duplicate: boolean }> {
+  if (classified.duplicate) return classified;
+  const claimed = await repository.claimForRetry(classified.event.id, INFLIGHT_STALENESS_MS);
+  if (!claimed) {
+    return { event: classified.event, duplicate: true };
+  }
+  return { event: claimed, duplicate: false };
 }
 
 export class InMemoryWebhookRepository implements WebhookRepository {
@@ -193,5 +269,25 @@ export class InMemoryWebhookRepository implements WebhookRepository {
       if (error) event.errorMessage = error;
       if (status === 'processed') event.processedAt = new Date();
     }
+  }
+
+  /**
+   * Mirror of the Pg compare-and-swap claim. Yields to the microtask queue
+   * once so two concurrent claimers actually interleave under the in-memory
+   * repo; the check+flip block itself is synchronous, matching the atomicity
+   * of the single SQL UPDATE.
+   */
+  async claimForRetry(id: string, stalenessMs: number): Promise<WebhookEvent | null> {
+    await Promise.resolve();
+    const event = this.events.get(id);
+    if (!event) return null;
+    const stale = Date.now() - event.createdAt.getTime() >= stalenessMs;
+    const eligible =
+      event.status === 'failed' ||
+      ((event.status === 'received' || event.status === 'processing') && stale);
+    if (!eligible) return null;
+    event.status = 'processing';
+    event.createdAt = new Date();
+    return { ...event };
   }
 }

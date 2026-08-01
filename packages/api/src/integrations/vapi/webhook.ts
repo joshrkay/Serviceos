@@ -12,6 +12,21 @@
  *      the browser fire test_call_succeeded).
  *   4. Runs identity-based activation: if the caller is NOT one of the
  *      tenant's verified phones, fires first_real_call_received exactly once.
+ *
+ * VOX-04 — the dedup receipt (step 2) is committed to `webhook_events`
+ * BEFORE steps 3/4 run, but it must not be treated as "done" until steps
+ * 3/4 actually succeed. Otherwise a transient failure in step 3/4 (e.g. a
+ * DB blip) leaves the receipt row present-but-unprocessed; Vapi's retry
+ * would see `inserted:false` and short-circuit to a 200 duplicate ack,
+ * permanently swallowing the voice_sessions write and the activation.
+ * We mirror the Twilio webhook's recordReceipt/markProcessed pattern
+ * (see `recordTwilio` in webhooks/routes.ts): short-circuit ONLY when the
+ * existing receipt is already marked `processedAt` (genuine duplicate —
+ * the work already ran); an unprocessed receipt falls through and
+ * reprocesses. `markProcessed` is stamped only after steps 3/4 both
+ * succeed. `recordInboundSession` is itself made idempotent (checks for
+ * an existing row before inserting) so a reprocess after a step-3-success/
+ * step-4-failure split can't double-insert a voice_sessions row.
  */
 import type { Pool } from 'pg';
 import type { AuditRepository } from '../../audit/audit';
@@ -25,14 +40,25 @@ export interface VapiWebhookRepository {
     eventId: string,
     eventType: string,
     payload: Record<string, unknown>,
-  ): Promise<{ inserted: boolean }>;
+  ): Promise<{ inserted: boolean; record?: { processedAt?: Date | null } }>;
+  /**
+   * Stamps the receipt as fully processed. Called only after steps 3/4
+   * both succeed, so a crash/error anywhere before this point leaves the
+   * receipt unprocessed and a retry reprocesses (see file header).
+   */
+  markProcessed(provider: string, eventId: string): Promise<void>;
 }
 
 export interface VapiWebhookDeps {
   pool: Pool;
   auditRepo: AuditRepository;
   webhookRepo: VapiWebhookRepository;
-  /** VAPI_WEBHOOK_SECRET — the serverUrlSecret configured on the assistant. */
+  /**
+   * The tenant's per-tenant Vapi `serverUrlSecret` (from
+   * `tenant_settings.vapi_webhook_secret`). Empty string when the tenant has no
+   * provisioned secret — verification then fails closed (403). The global
+   * `VAPI_WEBHOOK_SECRET` fallback was removed in QUALITY-2026-07-12 WS4.
+   */
   secret: string;
   sendEmail?: SendEmailFn;
 }
@@ -86,17 +112,34 @@ function parseVapiEvent(rawBody: string): ParsedCall {
   return { callId, fromE164, ended };
 }
 
-/** Record an ended inbound voice_session, tenant-scoped (RLS-safe). */
+/**
+ * Record an ended inbound voice_session, tenant-scoped (RLS-safe).
+ *
+ * Idempotent by (tenant_id, channel, external_id): the dedup receipt in
+ * `handleVapiCallEvent` is only committed-as-done AFTER this succeeds, so a
+ * retry that reprocesses (step 3/4 failed the first time) would otherwise
+ * insert a second voice_sessions row for the same call. `voice_sessions`
+ * has no unique constraint on external_id, so we guard here rather than via
+ * ON CONFLICT.
+ */
 async function recordInboundSession(pool: Pool, tenantId: string, callId: string): Promise<void> {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
     await client.query("SELECT set_config('app.current_tenant_id', $1, true)", [tenantId]);
-    await client.query(
-      `INSERT INTO voice_sessions (tenant_id, channel, state, external_id, ended_at)
-         VALUES ($1, 'voice_inbound', 'ended', $2, now())`,
+    const existing = await client.query(
+      `SELECT 1 FROM voice_sessions
+        WHERE tenant_id = $1 AND channel = 'voice_inbound' AND external_id = $2
+        LIMIT 1`,
       [tenantId, callId],
     );
+    if (existing.rowCount === 0) {
+      await client.query(
+        `INSERT INTO voice_sessions (tenant_id, channel, state, external_id, ended_at)
+           VALUES ($1, 'voice_inbound', 'ended', $2, now())`,
+        [tenantId, callId],
+      );
+    }
     await client.query('COMMIT');
   } catch (err) {
     await client.query('ROLLBACK').catch(() => undefined);
@@ -127,14 +170,20 @@ export async function handleVapiCallEvent(
     return { status: 200, body: { ignored: true } };
   }
 
-  // 2. Idempotency — dedup on call id.
-  const { inserted } = await deps.webhookRepo.recordReceipt(
+  // 2. Idempotency — dedup on call id. Short-circuit ONLY on a fully-processed
+  // duplicate; a receipt row that exists but was never marked processed means
+  // an earlier delivery died between receipt and dispatch (crash, transient
+  // DB error in step 3/4) — Vapi's retry is our only chance to run the
+  // handler, so it must fall through and reprocess. Mirrors the Twilio
+  // webhook's recordReceipt/markProcessed pattern (see `recordTwilio` in
+  // webhooks/routes.ts).
+  const receipt = await deps.webhookRepo.recordReceipt(
     'vapi',
     callId,
     'call.ended',
     { tenantId: req.tenantId, fromE164 },
   );
-  if (!inserted) {
+  if (!receipt.inserted && receipt.record?.processedAt) {
     return { status: 200, body: { duplicate: true } };
   }
 
@@ -146,6 +195,10 @@ export async function handleVapiCallEvent(
     { pool: deps.pool, auditRepo: deps.auditRepo, ...(deps.sendEmail ? { sendEmail: deps.sendEmail } : {}) },
     { tenantId: req.tenantId, fromE164 },
   );
+
+  // Processing complete — stamp the receipt so a crash anywhere above leaves
+  // it unprocessed and a retry reprocesses (see step 2).
+  await deps.webhookRepo.markProcessed('vapi', callId);
 
   return {
     status: 200,

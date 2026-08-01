@@ -54,4 +54,21 @@ describe('catalogItemToDraft', () => {
     const item = { id: 'cat-3', name: 'Filter', unitPriceCents: 950 };
     expect(catalogItemToDraft(item).id).not.toBe(catalogItemToDraft(item).id);
   });
+
+  it('EE-4 — carries the catalog imageFileId onto the draft', () => {
+    const draft = catalogItemToDraft({
+      id: 'cat-4',
+      name: 'Premium heater',
+      unitPriceCents: 500000,
+      imageFileId: 'file-hero',
+    });
+    expect(draft.imageFileId).toBe('file-hero');
+  });
+
+  it('EE-4 — an item with no image yields no imageFileId (undefined, not null)', () => {
+    const draft = catalogItemToDraft({ id: 'cat-5', name: 'Basic', unitPriceCents: 100, imageFileId: null });
+    expect(draft.imageFileId).toBeUndefined();
+    const draft2 = catalogItemToDraft({ id: 'cat-6', name: 'Basic', unitPriceCents: 100 });
+    expect(draft2.imageFileId).toBeUndefined();
+  });
 });

@@ -1,0 +1,59 @@
+{
+  "id": "ws21b-quantity-variant-quote",
+  "bucket": "02-happy-booker",
+  "callerId": "+15125550133",
+  "callerIdBlocked": false,
+  "fixtures": {
+    "tenant": {
+      "id": "t_ws21b_qty",
+      "display_name": "WS21b Qty Co",
+      "timezone": "America/Los_Angeles"
+    },
+    "customers": [
+      {
+        "id": "cust_ws21b_qty",
+        "tenantId": "t_ws21b_qty",
+        "firstName": "Sam",
+        "lastName": "Nolan",
+        "displayName": "Sam Nolan",
+        "primaryPhone": "+15125550133",
+        "preferredChannel": "phone",
+        "smsConsent": true,
+        "isArchived": false,
+        "createdBy": "seed",
+        "createdAt": "2026-01-01T00:00:00.000Z",
+        "updatedAt": "2026-01-01T00:00:00.000Z"
+      }
+    ],
+    "catalog": [
+      {
+        "id": "cat_ws21b_smoke",
+        "tenantId": "t_ws21b_qty",
+        "name": "Smoke detector",
+        "description": "Hardwired smoke detector, installed",
+        "category": "product",
+        "unit": "each",
+        "unitPriceCents": 8500,
+        "productServiceType": "product",
+        "archivedAt": null,
+        "createdAt": "2026-01-01T00:00:00.000Z",
+        "updatedAt": "2026-01-01T00:00:00.000Z"
+      }
+    ]
+  },
+  "turns": [
+    {
+      "caller": "Quote three smoke detectors.",
+      "expected": {
+        "intent": "draft_estimate",
+        "proposalType": "draft_estimate",
+        "slots": { "lineItemDescriptions": ["three smoke detectors"] },
+        "escalates": false
+      }
+    }
+  ],
+  "grading": {
+    "appliesFloor": [1, 2, 3],
+    "appliesDisposition": [9, 12]
+  }
+}

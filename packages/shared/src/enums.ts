@@ -32,8 +32,11 @@ export enum PreferredChannel {
 export enum JobStatus {
   NEW = 'new',
   SCHEDULED = 'scheduled',
+  DISPATCHED = 'dispatched',
   IN_PROGRESS = 'in_progress',
   COMPLETED = 'completed',
+  INVOICED = 'invoiced',
+  CLOSED = 'closed',
   CANCELED = 'canceled',
 }
 
@@ -164,6 +167,9 @@ export enum ProposalType {
   CREATE_CUSTOMER = 'create_customer',
   UPDATE_CUSTOMER = 'update_customer',
   CREATE_JOB = 'create_job',
+  // B7 — safe job field edits (status/priority/title/description) via the
+  // propose→approve→execute chain; mirrors the API's update_job proposal type.
+  UPDATE_JOB = 'update_job',
   CREATE_APPOINTMENT = 'create_appointment',
   CREATE_BOOKING = 'create_booking',
   CALLBACK = 'callback',
@@ -202,6 +208,20 @@ export enum ProposalType {
   REVIEW_RESPONSE_PROPOSAL = 'review_response_proposal',
   SEND_PAYMENT_REMINDER = 'send_payment_reminder',
   APPLY_LATE_FEE = 'apply_late_fee',
+  // UB-A2 (agent wave) — voice-captured persistent directive; on approval the
+  // API inserts a standing_instructions row (source 'proposal').
+  CREATE_STANDING_INSTRUCTION = 'create_standing_instruction',
+  // WS20 — correction-repetition meta-proposal. Emitted by the correction
+  // loop (not voice) once the owner has corrected the same catalog SKU's price
+  // N times; on approval the execution handler updates the catalog item's
+  // unit price. Config/capture-class, reversible, never auto-executed (D-004).
+  UPDATE_CATALOG_ITEM = 'update_catalog_item',
+  // U4 — owner-approved tenant alias activation after voice entity correction.
+  ADOPT_ENTITY_ALIAS = 'adopt_entity_alias',
+  // B1.18 — brand voice captured by voice. Manual action class: it never
+  // auto-approves at any trust tier, and its payload cannot express the lock
+  // (locking stays tap-only, same theory as the D-013 approval exception).
+  UPDATE_BRAND_VOICE = 'update_brand_voice',
 }
 
 export enum RejectionCategory {

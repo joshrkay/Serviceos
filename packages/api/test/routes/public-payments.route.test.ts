@@ -68,6 +68,12 @@ async function build(opts: {
   invoiceOverrides?: Partial<Invoice>;
   stripeConfigured?: boolean;
   stripeFetch?: StripeFetch;
+  connectAccountResolver?: {
+    resolveTenantConnectAccount: (tenantId: string) => Promise<{
+      accountId: string;
+      chargesEnabled: boolean;
+    } | null>;
+  };
 } = {}): Promise<Harness> {
   const invoiceRepo = new InMemoryInvoiceRepository();
   const invoice = makeInvoice(opts.invoiceOverrides);
@@ -81,6 +87,7 @@ async function build(opts: {
       invoiceRepo,
       stripeConfig: opts.stripeConfigured === false ? null : { apiKey: 'sk_test' },
       stripeFetch: opts.stripeFetch ?? makeStripeFetch(),
+      connectAccountResolver: opts.connectAccountResolver,
     }),
   );
 
@@ -100,6 +107,64 @@ describe('P5-016 routes/public-payments — POST /create-payment-intent', () => 
     expect(res.status).toBe(200);
     expect(res.body.clientSecret).toBe('pi_test_123_secret_abc');
     expect(res.body.paymentIntentId).toBe('pi_test_123');
+    expect(res.body.stripeAccountId).toBeNull();
+  });
+
+  it('routes PaymentIntent to Connect when charges are enabled', async () => {
+    const seenHeaders: Array<Record<string, string>> = [];
+    const fetcher: StripeFetch = (async (_url: string | URL | Request, init?: RequestInit) => {
+      seenHeaders.push((init?.headers ?? {}) as Record<string, string>);
+      return {
+        ok: true,
+        status: 200,
+        text: async () => '',
+        json: async () => ({ id: 'pi_connect', client_secret: 'pi_connect_secret' }),
+      };
+    }) as unknown as StripeFetch;
+    const { app, invoice } = await build({
+      stripeFetch: fetcher,
+      connectAccountResolver: {
+        resolveTenantConnectAccount: async () => ({
+          accountId: 'acct_tenant_pay',
+          chargesEnabled: true,
+        }),
+      },
+    });
+    const res = await request(app)
+      .post('/api/public-payments/create-payment-intent')
+      .send({ invoiceId: invoice.id, viewToken: VIEW_TOKEN });
+    expect(res.status).toBe(200);
+    expect(res.body.stripeAccountId).toBe('acct_tenant_pay');
+    expect(seenHeaders[0]['Stripe-Account']).toBe('acct_tenant_pay');
+    expect(seenHeaders[0]['Idempotency-Key']).toContain('acct_tenant_pay');
+  });
+
+  it('keeps platform PaymentIntent when Connect charges are not enabled', async () => {
+    const seenHeaders: Array<Record<string, string>> = [];
+    const fetcher: StripeFetch = (async (_url: string | URL | Request, init?: RequestInit) => {
+      seenHeaders.push((init?.headers ?? {}) as Record<string, string>);
+      return {
+        ok: true,
+        status: 200,
+        text: async () => '',
+        json: async () => ({ id: 'pi_plat', client_secret: 'pi_plat_secret' }),
+      };
+    }) as unknown as StripeFetch;
+    const { app, invoice } = await build({
+      stripeFetch: fetcher,
+      connectAccountResolver: {
+        resolveTenantConnectAccount: async () => ({
+          accountId: 'acct_pending',
+          chargesEnabled: false,
+        }),
+      },
+    });
+    const res = await request(app)
+      .post('/api/public-payments/create-payment-intent')
+      .send({ invoiceId: invoice.id, viewToken: VIEW_TOKEN });
+    expect(res.status).toBe(200);
+    expect(res.body.stripeAccountId).toBeNull();
+    expect(seenHeaders[0]['Stripe-Account']).toBeUndefined();
   });
 
   it('forwards invoice amountDueCents to Stripe', async () => {
@@ -150,6 +215,34 @@ describe('P5-016 routes/public-payments — POST /create-payment-intent', () => 
     const res = await request(app)
       .post('/api/public-payments/create-payment-intent')
       .send({ invoiceId: 'other-invoice-id', viewToken: VIEW_TOKEN });
+    expect(res.status).toBe(404);
+    expect(res.body.error).toBe('NOT_FOUND');
+  });
+
+  it('404s when the view token is expired (route enforces expiry, not the SQL fn)', async () => {
+    // The real find_invoice_by_view_token SECURITY DEFINER fn does NOT filter
+    // on expiry (only view_token), so the route must. InMemoryInvoiceRepository
+    // filters expiry itself and would mask this — use a repo stub that mimics
+    // the real DB (returns the expired invoice).
+    const expired = makeInvoice({
+      viewTokenExpiresAt: new Date(Date.now() - 60_000),
+    });
+    const app = express();
+    app.use(express.json());
+    app.use(
+      '/api/public-payments',
+      createPublicPaymentsRouter({
+        invoiceRepo: {
+          findByViewToken: async () => expired,
+        } as unknown as InMemoryInvoiceRepository,
+        stripeConfig: { apiKey: 'sk_test' },
+        stripeFetch: makeStripeFetch(),
+      }),
+    );
+
+    const res = await request(app)
+      .post('/api/public-payments/create-payment-intent')
+      .send({ invoiceId: expired.id, viewToken: VIEW_TOKEN });
     expect(res.status).toBe(404);
     expect(res.body.error).toBe('NOT_FOUND');
   });

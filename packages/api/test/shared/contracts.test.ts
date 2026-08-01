@@ -8,6 +8,13 @@ import {
   createMessageSchema,
   delayAcknowledgmentSchema,
   updateSettingsSchema,
+  createJobSchema,
+  scheduleJobSchema,
+  reassignJobSchema,
+  unscheduleJobSchema,
+  updateInvoiceSchema,
+  updateEstimateSchema,
+  createEstimateSchema,
 } from '../../src/shared/contracts';
 import { validate } from '../../src/shared/validation';
 import { AppError, ValidationError, toErrorResponse } from '../../src/shared/errors';
@@ -196,5 +203,89 @@ describe('P0-005 — Backend service skeleton and shared contracts', () => {
       delayMinutes: 10,
     });
     expect(result.success).toBe(false);
+  });
+});
+
+describe('direct job scheduling contracts', () => {
+  const TECH = '11111111-1111-1111-1111-111111111111';
+  const baseCreate = {
+    customerId: 'cust-1',
+    locationId: 'loc-1',
+    summary: 'Fix the sink',
+  };
+
+  it('createJobSchema accepts a job with no schedule (legacy unscheduled)', () => {
+    expect(createJobSchema.safeParse(baseCreate).success).toBe(true);
+  });
+
+  it('createJobSchema accepts an inline schedule block', () => {
+    const result = createJobSchema.safeParse({
+      ...baseCreate,
+      scheduledStart: '2026-07-01T15:00:00.000Z',
+      technicianId: TECH,
+      durationMin: 90,
+      timezone: 'America/New_York',
+    });
+    expect(result.success).toBe(true);
+  });
+
+  it('createJobSchema rejects a non-ISO scheduledStart', () => {
+    const result = createJobSchema.safeParse({ ...baseCreate, scheduledStart: 'tomorrow 2pm' });
+    expect(result.success).toBe(false);
+  });
+
+  it('createJobSchema rejects a non-positive durationMin', () => {
+    const result = createJobSchema.safeParse({ ...baseCreate, scheduledStart: '2026-07-01T15:00:00.000Z', durationMin: 0 });
+    expect(result.success).toBe(false);
+  });
+
+  it('scheduleJobSchema requires scheduledStart and rejects unknown keys', () => {
+    expect(scheduleJobSchema.safeParse({ scheduledStart: '2026-07-01T15:00:00.000Z' }).success).toBe(true);
+    expect(scheduleJobSchema.safeParse({}).success).toBe(false);
+    expect(
+      scheduleJobSchema.safeParse({ scheduledStart: '2026-07-01T15:00:00.000Z', bogus: true }).success,
+    ).toBe(false);
+  });
+
+  it('reassignJobSchema accepts a uuid or explicit null, rejects absent/garbage', () => {
+    expect(reassignJobSchema.safeParse({ technicianId: TECH }).success).toBe(true);
+    expect(reassignJobSchema.safeParse({ technicianId: null }).success).toBe(true);
+    expect(reassignJobSchema.safeParse({}).success).toBe(false);
+    expect(reassignJobSchema.safeParse({ technicianId: 'not-a-uuid' }).success).toBe(false);
+  });
+
+  it('unscheduleJobSchema accepts an optional reason and rejects unknown keys', () => {
+    expect(unscheduleJobSchema.safeParse({}).success).toBe(true);
+    expect(unscheduleJobSchema.safeParse({ reason: 'customer canceled' }).success).toBe(true);
+    expect(unscheduleJobSchema.safeParse({ nope: 1 }).success).toBe(false);
+  });
+});
+
+describe('EE-4 — createEstimateSchema preserves imageFileId on line items', () => {
+  const line = (over: Record<string, unknown> = {}) => ({
+    id: 'li-1',
+    description: 'Tankless water heater',
+    quantity: 1,
+    unitPriceCents: 250000,
+    totalCents: 250000,
+    sortOrder: 0,
+    taxable: true,
+    ...over,
+  });
+
+  it('keeps imageFileId when present (would otherwise be stripped at the HTTP boundary)', () => {
+    const result = createEstimateSchema.safeParse({
+      jobId: 'job-1',
+      lineItems: [line({ imageFileId: 'file-123' })],
+    });
+    expect(result.success).toBe(true);
+    // The manual-path image must survive validation and reach persistence.
+    expect(result.success && result.data.lineItems[0].imageFileId).toBe('file-123');
+  });
+
+  it('a line without imageFileId parses and leaves it undefined', () => {
+    const result = createEstimateSchema.safeParse({ jobId: 'job-1', lineItems: [line()] });
+    expect(result.success).toBe(true);
+    expect(result.success && result.data.lineItems[0].imageFileId).toBeUndefined();
   });
 });

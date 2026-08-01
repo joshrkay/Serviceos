@@ -32,7 +32,7 @@ export function createIntegrationResolver(pool: Pool): IntegrationResolver {
     // can't reach setTenantContext's throw on a checked-out client.
     if (!isValidTenantId(tenantId)) return null;
     const { decrypt } = await import('../integrations/crypto');
-    const { setTenantContext } = await import('../db/schema');
+    const { applyTenantContext } = await import('../db/rls-runtime-role');
     const encKey = process.env.TENANT_ENCRYPTION_KEY;
 
     const client = await pool.connect();
@@ -44,7 +44,7 @@ export function createIntegrationResolver(pool: Pool): IntegrationResolver {
     }> = [];
     try {
       await client.query('BEGIN');
-      await client.query(setTenantContext(tenantId));
+      await applyTenantContext(client, tenantId, { transactional: true });
       const result = await client.query<{
         subaccount_sid: string | null;
         auth_token_primary_enc: string | null;
@@ -89,5 +89,40 @@ export function createIntegrationResolver(pool: Pool): IntegrationResolver {
         : undefined,
       sendgridPublicKeyPem: (row.provider_data?.sendgridPublicKeyPem as string | undefined),
     };
+  };
+}
+
+/**
+ * Pg-backed resolver for a tenant's per-tenant Vapi webhook secret
+ * (`tenant_settings.vapi_webhook_secret`). Mirrors createIntegrationResolver's
+ * tenant-context discipline: reads under the tenant's own RLS context on a
+ * dedicated client and RESETs the GUC on release. Returns null when the id is
+ * malformed, the row is absent, or the secret hasn't been provisioned yet — the
+ * /vapi handler then fails CLOSED (403). There is no global-secret fallback
+ * (removed in QUALITY-2026-07-12 WS4).
+ */
+export function createVapiSecretResolver(
+  pool: Pool,
+): (tenantId: string) => Promise<string | null> {
+  return async (tenantId) => {
+    if (!isValidTenantId(tenantId)) return null;
+    const { applyTenantContext } = await import('../db/rls-runtime-role');
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      await applyTenantContext(client, tenantId, { transactional: true });
+      const { rows } = await client.query<{ vapi_webhook_secret: string | null }>(
+        `SELECT vapi_webhook_secret FROM tenant_settings WHERE tenant_id = $1`,
+        [tenantId],
+      );
+      await client.query('COMMIT');
+      return rows[0]?.vapi_webhook_secret ?? null;
+    } catch (err) {
+      try { await client.query('ROLLBACK'); } catch { /* best-effort */ }
+      throw err;
+    } finally {
+      try { await client.query('RESET app.current_tenant_id'); } catch { /* ignore */ }
+      client.release();
+    }
   };
 }

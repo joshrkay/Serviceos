@@ -1,14 +1,20 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { Link } from 'react-router';
-import { MapPin } from 'lucide-react';
+import { Link, useNavigate } from 'react-router';
+import { MapPin, CalendarPlus, FileText, MessageSquare } from 'lucide-react';
 import { toast } from 'sonner';
 import { DetailPage } from '../../components/DetailPage';
 import { useDetailQuery } from '../../hooks/useDetailQuery';
 import { CommunicationTimeline } from '../../components/customers/CommunicationTimeline';
+import { CustomerProfitCard } from '../../components/customers/CustomerProfitCard';
+import { toTitleCase } from '../../utils/string';
 import { LanguageBadge } from '../../components/customers/LanguageBadge';
 import { ContactsPanel } from '../../components/customers/ContactsPanel';
 import { TagsPanel } from '../../components/customers/TagsPanel';
 import { CustomFieldsPanel } from '../../components/customers/CustomFieldsPanel';
+import { RecurringJobsPanel } from '../../components/customers/RecurringJobsPanel';
+import { CustomerGroupsPanel } from '../../components/customers/CustomerGroupsPanel';
+import { CustomerRecordsPanel } from '../../components/customers/CustomerRecordsPanel';
+import { MergeCustomerPanel } from '../../components/customers/MergeCustomerPanel';
 import { apiFetch } from '../../utils/api-fetch';
 import {
   Badge,
@@ -29,9 +35,14 @@ interface Customer {
   primaryPhone?: string;
   secondaryPhone?: string;
   preferredChannel: string;
+  smsConsent?: boolean;
+  /** Derived opt-out rollup (Story 10.6). 'revoked' => opted out. */
+  consentStatus?: 'granted' | 'revoked' | 'unknown';
   communicationNotes?: string;
   isArchived: boolean;
   originatingLeadId?: string;
+  /** Jobber-parity acquisition channel ("How did you hear about us?"). */
+  source?: string;
   /** P11-002: optional spoken-language preference. */
   preferredLanguage?: 'en' | 'es' | null;
 }
@@ -92,6 +103,7 @@ export function CustomerDetail({
   onEdit,
   onArchived,
 }: CustomerDetailProps) {
+  const navigate = useNavigate();
   const { data, isLoading, error, refetch } = useDetailQuery<Customer>(
     '/api/customers',
     customerId,
@@ -284,31 +296,94 @@ export function CustomerDetail({
       ]}
       sections={[
         {
+          // 4.5 — quick actions: schedule, estimate, message. Each deep-links
+          // into the matching create/compose flow with this customer attached.
+          title: 'Quick Actions',
+          content: (
+            <div className="grid grid-cols-3 gap-2" data-testid="customer-quick-actions">
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() =>
+                  navigate(`/jobs/new?customerId=${encodeURIComponent(customerId)}`)
+                }
+              >
+                <CalendarPlus size={14} className="mr-1.5" />
+                Schedule
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() =>
+                  navigate(`/estimates/new?customerId=${encodeURIComponent(customerId)}`)
+                }
+              >
+                <FileText size={14} className="mr-1.5" />
+                Estimate
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() =>
+                  navigate(`/comms-inbox?customerId=${encodeURIComponent(customerId)}`)
+                }
+              >
+                <MessageSquare size={14} className="mr-1.5" />
+                Message
+              </Button>
+            </div>
+          ),
+        },
+        {
+          // US-069 — the customer's Jobs / Estimates / Invoices + lifetime
+          // revenue. Messages are in the Activity section's CommunicationTimeline.
+          title: 'Records',
+          content: <CustomerRecordsPanel customerId={customerId} />,
+        },
+        {
           title: 'Contact Information',
           content: (
             <dl className="flex flex-col gap-2 text-sm">
               <div className="flex justify-between gap-4">
-                <dt className="text-slate-400">Email</dt>
-                <dd className="text-slate-800">{data.email || '—'}</dd>
+                <dt className="text-muted-foreground">Email</dt>
+                <dd className="text-foreground">{data.email || '—'}</dd>
               </div>
               <div className="flex justify-between gap-4">
-                <dt className="text-slate-400">Phone</dt>
-                <dd className="text-slate-800">{data.primaryPhone || '—'}</dd>
+                <dt className="text-muted-foreground">Phone</dt>
+                <dd className="text-foreground">{data.primaryPhone || '—'}</dd>
               </div>
               <div className="flex justify-between gap-4">
-                <dt className="text-slate-400">Secondary</dt>
-                <dd className="text-slate-800">{data.secondaryPhone || '—'}</dd>
+                <dt className="text-muted-foreground">Secondary</dt>
+                <dd className="text-foreground">{data.secondaryPhone || '—'}</dd>
               </div>
               <div className="flex justify-between gap-4">
-                <dt className="text-slate-400">Preferred channel</dt>
-                <dd className="text-slate-800 capitalize">
+                <dt className="text-muted-foreground">Preferred channel</dt>
+                <dd className="text-foreground capitalize">
                   {data.preferredChannel}
+                </dd>
+              </div>
+              <div className="flex items-center justify-between gap-4">
+                <dt className="text-muted-foreground">Messaging</dt>
+                <dd>
+                  {data.consentStatus === 'revoked' ? (
+                    <Badge variant="danger">Opted out</Badge>
+                  ) : data.smsConsent === false ? (
+                    <Badge variant="warning">No SMS consent</Badge>
+                  ) : (
+                    <Badge variant="success">Subscribed</Badge>
+                  )}
+                </dd>
+              </div>
+              <div className="flex justify-between gap-4">
+                <dt className="text-muted-foreground">Source</dt>
+                <dd className="text-foreground">
+                  {data.source ? toTitleCase(data.source) : '—'}
                 </dd>
               </div>
               {/* P11-002: spoken-language preference, now persisted on change
                   so dispatchers can route Spanish callers correctly. */}
               <div className="flex items-center justify-between gap-4 pt-1">
-                <dt className="flex items-center gap-2 text-slate-400">
+                <dt className="flex items-center gap-2 text-muted-foreground">
                   Language
                   <LanguageBadge
                     language={(language || null) as 'en' | 'es' | null}
@@ -339,11 +414,11 @@ export function CustomerDetail({
           content: (
             <div className="flex flex-col gap-3">
               {note.trim() ? (
-                <p className="whitespace-pre-wrap text-sm text-slate-700">
+                <p className="whitespace-pre-wrap text-sm text-foreground">
                   {note}
                 </p>
               ) : (
-                <p className="text-sm text-slate-400">No customer notes yet.</p>
+                <p className="text-sm text-muted-foreground">No customer notes yet.</p>
               )}
               <Field label="Edit customer notes" error={noteError}>
                 <Textarea
@@ -370,15 +445,34 @@ export function CustomerDetail({
           content: <TagsPanel customerId={customerId} />,
         },
         {
+          title: 'Groups',
+          content: <CustomerGroupsPanel customerId={customerId} />,
+        },
+        {
+          title: 'Recurring Jobs',
+          content: <RecurringJobsPanel customerId={customerId} />,
+        },
+        {
           title: 'Custom Fields',
           content: <CustomFieldsPanel customerId={customerId} />,
+        },
+        {
+          // 4.6 — merge a duplicate into this (surviving) record.
+          title: 'Merge Duplicate',
+          content: (
+            <MergeCustomerPanel
+              survivingId={customerId}
+              survivingName={data.displayName}
+              onMerged={refetch}
+            />
+          ),
         },
         {
           title: 'Service Locations',
           content: (
             <div className="flex flex-col gap-4">
               {locationsError && (
-                <p role="alert" className="text-sm text-red-600">
+                <p role="alert" className="text-sm text-destructive">
                   {locationsError}
                 </p>
               )}
@@ -386,11 +480,11 @@ export function CustomerDetail({
                 {locations.map((location) => (
                   <div
                     key={location.id}
-                    className="rounded-xl border border-slate-200 p-3"
+                    className="rounded-xl border border-border p-3"
                   >
                     <div className="flex flex-wrap items-center gap-2">
-                      <MapPin size={13} className="shrink-0 text-slate-400" />
-                      <p className="text-sm text-slate-900">
+                      <MapPin size={13} className="shrink-0 text-muted-foreground" />
+                      <p className="text-sm text-foreground">
                         {location.label || 'Service location'}
                       </p>
                       {location.isPrimary && (
@@ -412,18 +506,18 @@ export function CustomerDetail({
                           </Button>
                         )}
                     </div>
-                    <p className="mt-1 pl-5 text-sm text-slate-600">
+                    <p className="mt-1 pl-5 text-sm text-foreground">
                       {formatLocation(location)}
                     </p>
                     {location.accessNotes && (
-                      <p className="mt-1 pl-5 text-xs text-amber-700">
+                      <p className="mt-1 pl-5 text-xs text-warning">
                         {location.accessNotes}
                       </p>
                     )}
                   </div>
                 ))}
                 {locations.length === 0 && (
-                  <p className="text-sm text-slate-400">
+                  <p className="text-sm text-muted-foreground">
                     No service locations yet.
                   </p>
                 )}
@@ -510,17 +604,18 @@ export function CustomerDetail({
           content: (
             <div className="space-y-3">
               {data.originatingLeadId ? (
-                <p className="text-sm text-slate-700">
+                <p className="text-sm text-foreground">
                   Converted from lead{' '}
                   <Link
                     to={`/leads/${data.originatingLeadId}`}
-                    className="text-blue-600 hover:underline"
+                    className="text-primary hover:underline"
                   >
                     {data.originatingLeadId}
                   </Link>
                   .
                 </p>
               ) : null}
+              <CustomerProfitCard customerId={customerId} />
               <CommunicationTimeline customerId={customerId} />
             </div>
           ),

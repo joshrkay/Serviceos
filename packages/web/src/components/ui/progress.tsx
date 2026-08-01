@@ -12,11 +12,11 @@ export interface ProgressProps extends React.HTMLAttributes<HTMLDivElement> {
 }
 
 const TONE_CLASSES: Record<NonNullable<ProgressProps['tone']>, string> = {
-  neutral: 'bg-slate-900',
-  success: 'bg-green-500',
-  warning: 'bg-amber-500',
-  danger: 'bg-red-500',
-  info: 'bg-blue-500',
+  neutral: 'bg-primary',
+  success: 'bg-success',
+  warning: 'bg-warning',
+  danger: 'bg-destructive',
+  info: 'bg-primary',
 };
 
 /**
@@ -44,7 +44,7 @@ export function Progress({
       // impossible state (e.g. now=150 with max=100).
       aria-valuenow={clampedValue}
       aria-label={label}
-      className={cn('h-1.5 w-full overflow-hidden rounded-full bg-slate-100', className)}
+      className={cn('h-1.5 w-full overflow-hidden rounded-full bg-secondary', className)}
       {...rest}
     >
       <div

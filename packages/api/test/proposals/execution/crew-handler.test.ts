@@ -24,7 +24,7 @@ function makeProposal(proposalType: ProposalType, payload: Record<string, unknow
 function feasibilityDeps(
   appointmentRepo: InMemoryAppointmentRepository,
   assignmentRepo: InMemoryAssignmentRepository,
-  workingHoursRepo: any = { findByTechnicianAndDay: async () => null },
+  workingHoursRepo: any = { findByTechnician: async () => [] },
 ): FeasibilityDependencies {
   return {
     assignmentRepo, appointmentRepo,
@@ -124,19 +124,23 @@ describe('AddCrewMemberExecutionHandler', () => {
     expect((await assignmentRepo.findByAppointment(tenantId, appt.id))).toHaveLength(0);
   });
 
-  it('passes feasibility with warnings and surfaces them on the result', async () => {
+  // Foundation gate F2 / contract #12-#13: out-of-hours is a PRECONDITION
+  // violation, so it now blocks the crew add instead of warning.
+  it('rejects a crew add outside the modeled working hours', async () => {
     const appt = await createAppointment({
       tenantId, jobId: 'job-1',
       scheduledStart: new Date('2026-05-17T10:00:00Z'),
       scheduledEnd: new Date('2026-05-17T11:00:00Z'),
       timezone: 'UTC', createdBy: 'user-1',
     }, appointmentRepo);
+    // Row for the appointment's weekday (2026-05-17 is a Sunday, dayOfWeek 0)
+    // whose window excludes the 10:00 UTC slot.
     const workingHoursRepo = {
-      findByTechnicianAndDay: async () => ({
+      findByTechnician: async () => [{
         id: 'wh', tenantId, technicianId: 'tech-crew',
         dayOfWeek: 0, startTime: '14:00', endTime: '17:00', isActive: true,
         createdAt: new Date(), updatedAt: new Date(),
-      }),
+      }],
     };
     const handler = new AddCrewMemberExecutionHandler(
       appointmentRepo, assignmentRepo, undefined,
@@ -146,8 +150,8 @@ describe('AddCrewMemberExecutionHandler', () => {
       makeProposal('add_crew_member', { appointmentId: appt.id, technicianId: 'tech-crew' }),
       context,
     ) as any;
-    expect(result.success).toBe(true);
-    expect(result.warnings.some((w: any) => w.check === 'working_hours')).toBe(true);
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/working hours/i);
   });
 
   it('rejects a missing technicianId', async () => {

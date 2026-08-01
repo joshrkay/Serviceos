@@ -75,7 +75,7 @@ export class JobPhotoService {
     notes: string | undefined,
     takenAt: Date | undefined,
     uploadedByUserId: string
-  ): Promise<JobPhoto> {
+  ): Promise<JobPhotoWithUrl> {
     if (!tenantId) throw new ValidationError('tenantId is required');
     if (!jobId) throw new ValidationError('jobId is required');
     if (!fileId) throw new ValidationError('fileId is required');
@@ -141,7 +141,22 @@ export class JobPhotoService {
       }
     }
 
-    return photo;
+    // Sweep-2 S2: return the same serialized shape as listJobPhotos. The
+    // route 201s this straight to the client, which optimistically appends
+    // it to the gallery — a bare job_photos row (no contentType /
+    // downloadUrl / filename) crashed JobPhotoGallery's
+    // `photo.contentType.startsWith(...)` right after every upload.
+    const downloadUrl = await this.storage.generateDownloadUrl(
+      file.storageBucket,
+      file.storageKey
+    );
+    return {
+      ...photo,
+      downloadUrl,
+      filename: file.filename,
+      contentType: file.contentType,
+      sizeBytes: file.sizeBytes,
+    };
   }
 
   async listJobPhotos(tenantId: string, jobId: string): Promise<JobPhotoWithUrl[]> {

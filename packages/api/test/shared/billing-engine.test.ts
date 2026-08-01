@@ -1,9 +1,11 @@
 import {
   calculateLineItemTotal,
   calculateDocumentTotals,
+  calculateSelectedDocumentTotals,
   validateLineItem,
   validateDocumentTotals,
   buildLineItem,
+  type LineItem,
 } from '../../src/shared/billing-engine';
 
 describe('P1-009A — Shared line-item validation + calculation engine', () => {
@@ -122,5 +124,78 @@ describe('P1-009A — Shared line-item validation + calculation engine', () => {
     });
     expect(errors).toContain('discountCents must be non-negative');
     expect(errors).toContain('taxRateBps must not exceed 10000 (100%)');
+  });
+
+  describe('processing-fee surcharge', () => {
+    it('defaults to no fee when the 4th arg is omitted', () => {
+      const items = [buildLineItem('1', 'Service', 1, 10000, 1, true)];
+      const totals = calculateDocumentTotals(items, 0, 0);
+      expect(totals.processingFeeBps).toBe(0);
+      expect(totals.processingFeeCents).toBe(0);
+      expect(totals.totalCents).toBe(10000);
+    });
+
+    it('applies the fee to the chargeable amount (subtotal − discount + tax)', () => {
+      const items = [
+        buildLineItem('1', 'Labor', 2, 5000, 1, true, 'labor'),
+        buildLineItem('2', 'Material', 1, 3000, 2, true, 'material'),
+        buildLineItem('3', 'Non-tax', 1, 2000, 3, false),
+      ];
+      // subtotal 15000, taxable 13000, tax = round(13000*825/10000) = 1073,
+      // chargeable = 15000 + 1073 = 16073, fee 3% = round(16073*300/10000) = 482
+      const totals = calculateDocumentTotals(items, 0, 825, 300);
+      expect(totals.taxCents).toBe(1073);
+      expect(totals.processingFeeBps).toBe(300);
+      expect(totals.processingFeeCents).toBe(482);
+      expect(totals.totalCents).toBe(16555); // 16073 + 482
+    });
+
+    it('computes the fee after the discount (on the net charged)', () => {
+      const items = [buildLineItem('1', 'Service', 1, 10000, 1, true)];
+      // chargeable = 10000 − 2000 + 800 = 8800, fee 3% = 264
+      const totals = calculateDocumentTotals(items, 2000, 1000, 300);
+      expect(totals.processingFeeCents).toBe(264);
+      expect(totals.totalCents).toBe(9064);
+    });
+
+    it('never charges a negative fee under a total-clearing discount', () => {
+      const items = [buildLineItem('1', 'Service', 1, 10000, 1, true)];
+      const totals = calculateDocumentTotals(items, 20000, 0, 300);
+      expect(totals.processingFeeCents).toBe(0);
+      expect(totals.totalCents).toBe(0);
+    });
+
+    it('validateDocumentTotals rejects an out-of-range fee', () => {
+      const base = calculateDocumentTotals([buildLineItem('1', 's', 1, 100, 1, true)], 0, 0);
+      expect(validateDocumentTotals({ ...base, processingFeeBps: -1 })).toContain(
+        'processingFeeBps must be non-negative',
+      );
+      expect(validateDocumentTotals({ ...base, processingFeeBps: 10001 })).toContain(
+        'processingFeeBps must not exceed 10000 (100%)',
+      );
+    });
+  });
+});
+
+// ─── EE-1: calculateSelectedDocumentTotals ───────────────────────────────
+describe('EE-1 — calculateSelectedDocumentTotals', () => {
+  const tiered: LineItem[] = [
+    { id: 'a', description: 'Diagnostic', quantity: 1, unitPriceCents: 5000, totalCents: 5000, sortOrder: 0, taxable: false },
+    { id: 'b', description: 'Builder', quantity: 1, unitPriceCents: 90000, totalCents: 90000, sortOrder: 1, taxable: false, groupKey: 'wh', isOptional: true, isDefaultSelected: true },
+    { id: 'c', description: 'Premium', quantity: 1, unitPriceCents: 140000, totalCents: 140000, sortOrder: 2, taxable: false, groupKey: 'wh', isOptional: true },
+    { id: 'd', description: 'Add-on', quantity: 1, unitPriceCents: 8000, totalCents: 8000, sortOrder: 3, taxable: false, isOptional: true },
+  ];
+
+  it('totals only the default selection for a tiered document', () => {
+    // Diagnostic (5000, always billed) + Builder default tier (90000).
+    expect(calculateSelectedDocumentTotals(tiered, 0, 0).totalCents).toBe(95000);
+  });
+
+  it('matches calculateDocumentTotals for a flat document', () => {
+    const flat: LineItem[] = [
+      buildLineItem('1', 'Labor', 2, 5000, 1, true, 'labor'),
+      buildLineItem('2', 'Material', 1, 3000, 2, true, 'material'),
+    ];
+    expect(calculateSelectedDocumentTotals(flat, 0, 825)).toEqual(calculateDocumentTotals(flat, 0, 825));
   });
 });

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useAuth } from '@clerk/clerk-react';
+import { fetchWithAuthRetry, isAuthRejectedStatus } from '../lib/streamAuth';
 
 export interface EscalationPanelData {
   header?: { title: string; callerName: string; callerPhone: string };
@@ -43,6 +44,17 @@ export function useEscalationStream(): UseEscalationStream {
     let cancelled = false;
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 
+    // Backoff floor for a persistent auth rejection — slower than the
+    // ordinary reconnect so a wrong/expired token doesn't hammer the API.
+    // ARCH-30 — a persistent rejection now also goes through
+    // fetchWithAuthRetry's handleAuthFailure() (Clerk sign-out / login
+    // redirect), so this is a fallback in case that navigation hasn't
+    // completed yet (e.g. latched behind a concurrent 401 elsewhere) rather
+    // than the sole recovery path — the previous code retried forever here
+    // and never signed the user out.
+    const AUTH_RETRY_MS = 60_000;
+    const backoff = (attempt: number) => Math.min(1000 * Math.pow(2, attempt), 30_000);
+
     const subscribe = async (attempt = 0): Promise<void> => {
       if (cancelled) return;
       sseAbortRef.current?.abort();
@@ -50,18 +62,15 @@ export function useEscalationStream(): UseEscalationStream {
       sseAbortRef.current = controller;
 
       try {
-        const token = await getToken();
-        const headers: Record<string, string> = { Accept: 'text/event-stream' };
-        if (token) headers.Authorization = `Bearer ${token}`;
+        const response = await fetchWithAuthRetry(
+          (opts) => getToken({ template: 'serviceos', ...opts }),
+          '/api/escalations/events',
+          { method: 'GET', headers: { Accept: 'text/event-stream' }, signal: controller.signal },
+        );
+        if (cancelled) return;
 
-        const response = await fetch('/api/escalations/events', {
-          method: 'GET',
-          headers,
-          signal: controller.signal,
-        });
-
-        if (response.status === 401 || response.status === 403) {
-          // Auth failure — don't keep retrying.
+        if (isAuthRejectedStatus(response.status)) {
+          reconnectTimer = setTimeout(() => void subscribe(attempt + 1), AUTH_RETRY_MS);
           return;
         }
         if (!response.ok || !response.body) {
@@ -98,15 +107,15 @@ export function useEscalationStream(): UseEscalationStream {
           // aborted or stream broken — fall through to reconnect
         }
 
-        // Stream closed cleanly — reconnect with backoff.
+        // Stream closed after a SUCCESSFUL connection — reset the backoff so
+        // routine server-side stream recycling reconnects fast, instead of
+        // creeping toward the 30s cap over a long-lived session.
         if (!cancelled) {
-          const delay = Math.min(1000 * Math.pow(2, attempt), 30_000);
-          reconnectTimer = setTimeout(() => void subscribe(attempt + 1), delay);
+          reconnectTimer = setTimeout(() => void subscribe(0), backoff(0));
         }
       } catch {
         if (cancelled) return;
-        const delay = Math.min(1000 * Math.pow(2, attempt), 30_000);
-        reconnectTimer = setTimeout(() => void subscribe(attempt + 1), delay);
+        reconnectTimer = setTimeout(() => void subscribe(attempt + 1), backoff(attempt));
       }
     };
 

@@ -1,6 +1,5 @@
 export { LLMGateway } from './gateway';
 export { createLLMGateway, createMockLLMGateway } from './factory';
-export { DEFAULT_GATEWAY_CONFIG } from './routing-config';
 export type {
   LLMRequest,
   LLMResponse,
@@ -10,4 +9,4 @@ export type {
   LLMProvider,
   LLMGatewayConfig,
 } from './gateway';
-export type { GatewayConfig, TaskRouteConfig } from './routing-config';
+export type { TaskRouteConfig } from './routing-config';

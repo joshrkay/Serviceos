@@ -81,16 +81,73 @@ export function reminderStepKey(step: ReminderStep): string {
 export const LATE_FEE_ONE_TIME_KEY = 'initial';
 
 /**
- * A tenant with no configured cadence gets this conservative default: a
- * single 3-day SMS nudge and no late fee. The overdue sweep falls back to
- * it so dunning is never silently off for an overdue invoice.
+ * Minimum spacing between MANUAL (voice/on-demand) payment reminders for one
+ * invoice, enforced at execution time by SendPaymentReminderExecutionHandler.
+ * 72h is deliberately STRICTLY BELOW the default cadence's smallest inter-step
+ * gap (defaultDunningConfig fires at 3/7/14 days → min gap 4 days), so this
+ * manual cooldown never suppresses a legitimately-due cadence reminder — it
+ * only stops a manual send from stacking on a very recent reminder (from
+ * either the sweep or a prior manual send).
+ */
+export const PAYMENT_REMINDER_COOLDOWN_MS = 72 * 60 * 60 * 1000;
+
+/**
+ * Look-back window for the DRAFT-TIME duplicate-reminder marker (Layer 3).
+ * When a resolved customer already received a reminder within this window, the
+ * voice draft is annotated (confidence 'medium' + a marker) so the owner sees
+ * "already reminded N days ago" before approving another. Advisory only — it
+ * never blocks drafting or sending; the authoritative dedup is the 72h
+ * execution-time cooldown above.
+ */
+export const DUNNING_MARKER_WINDOW_MS = 14 * 24 * 60 * 60 * 1000;
+
+/**
+ * Prefix for a manual reminder's dunning-ledger step key. Cadence reminders key
+ * on `reminderStepKey` (`'<offsetDays>:<channel>'`); a manual/voice send keys on
+ * `manualReminderStepKey(proposalId)` so the ledger row is unique per proposal
+ * (making re-execution of the same approved proposal idempotent) yet still
+ * distinguishable from a cadence step for the sweep's deferral check.
+ */
+export const MANUAL_REMINDER_STEP_PREFIX = 'manual:';
+
+/**
+ * The dunning-ledger step key for a manual reminder raised by proposal
+ * `proposalId` (`'manual:<proposalId>'`). Unique per proposal so the
+ * record-first ledger write is the idempotency anchor for a single approved
+ * manual send.
+ */
+export function manualReminderStepKey(proposalId: string): string {
+  return `${MANUAL_REMINDER_STEP_PREFIX}${proposalId}`;
+}
+
+/**
+ * True when `stepKey` is a manual reminder ledger key (`manualReminderStepKey`
+ * output). Used by the sweep to identify prior MANUAL reminders when deciding
+ * whether to defer raising cadence reminders this pass. A cadence step key
+ * (`'3:sms'`) or the payload discriminator `'manual'` (no colon) return false.
+ */
+export function isManualReminderStepKey(stepKey: string): boolean {
+  return stepKey.startsWith(MANUAL_REMINDER_STEP_PREFIX);
+}
+
+/**
+ * A tenant with no configured cadence gets this default: SMS reminders at
+ * 3, 7, and 14 days overdue (PRD US-370), no late fee. Every step is raised
+ * as an owner-approved `send_payment_reminder` proposal (the overdue sweep's
+ * proposal-first design), so the day-14 reminder is already owner-reviewed
+ * per US-372 — no separate auto-send path is introduced. The overdue sweep
+ * falls back to this so dunning is never silently off for an overdue invoice.
  */
 export function defaultDunningConfig(tenantId: string, now: Date = new Date()): DunningConfig {
   return {
     id: uuidv4(),
     tenantId,
     enabled: true,
-    reminderSteps: [{ offsetDays: 3, channel: 'sms' }],
+    reminderSteps: [
+      { offsetDays: 3, channel: 'sms' },
+      { offsetDays: 7, channel: 'sms' },
+      { offsetDays: 14, channel: 'sms' },
+    ],
     lateFeeType: 'none',
     lateFeeValueCents: 0,
     lateFeeGraceDays: 0,
@@ -114,6 +171,19 @@ export interface DunningEventRepository {
    */
   create(event: DunningEvent): Promise<DunningEvent>;
   findByInvoice(tenantId: string, invoiceId: string): Promise<DunningEvent[]>;
+  /**
+   * Remove a specific ledger row by its natural key. Used to undo a
+   * record-first reminder write when the send was suppressed at fire time
+   * (I10 — the invoice was paid/void/zero-balance), so a suppressed reminder
+   * never leaves a false "sent" row that would block a later legitimate
+   * reminder inside the 72h cooldown. A no-op when no matching row exists.
+   */
+  deleteByInvoiceStep(
+    tenantId: string,
+    invoiceId: string,
+    kind: DunningEvent['kind'],
+    stepKey: string,
+  ): Promise<void>;
 }
 
 export class InMemoryDunningConfigRepository implements DunningConfigRepository {
@@ -161,6 +231,24 @@ export class InMemoryDunningEventRepository implements DunningEventRepository {
       .filter((r) => r.tenantId === tenantId && r.invoiceId === invoiceId)
       .sort((a, b) => a.sentAt.getTime() - b.sentAt.getTime())
       .map((r) => this.clone(r));
+  }
+
+  async deleteByInvoiceStep(
+    tenantId: string,
+    invoiceId: string,
+    kind: DunningEvent['kind'],
+    stepKey: string,
+  ): Promise<void> {
+    for (const [id, r] of this.rows) {
+      if (
+        r.tenantId === tenantId &&
+        r.invoiceId === invoiceId &&
+        r.kind === kind &&
+        r.stepKey === stepKey
+      ) {
+        this.rows.delete(id);
+      }
+    }
   }
 
   /** Deep-copy including the sentAt Date so stored state can't be mutated via a returned reference. */

@@ -80,6 +80,8 @@ export const es: Record<keyof EnglishCatalog, string> = {
     'Lo siento, no pude comunicarme con nadie en este momento. Dígame brevemente qué necesita y el mejor número para llamarle, y alguien le devolverá la llamada en seguida.',
   'callback.ack':
     'Gracias. Alguien de {{business}} le devolverá la llamada lo antes posible. Hasta luego.',
+  // WS7 — repair prompt when a live call degrades from realtime to Gather.
+  'realtime.degraded_repair': 'Disculpe la interrupción — sigo aquí. ¿En qué puedo ayudarle?',
 
   // ── Recording disclosure ─────────────────────────────────────────────
   'disclose.two_party':

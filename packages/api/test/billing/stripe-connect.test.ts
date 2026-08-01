@@ -3,6 +3,7 @@ import {
   StripeConnectService,
   deriveConnectStatus,
 } from '../../src/billing/stripe-connect';
+import { AppError } from '../../src/shared/errors';
 
 const TENANT = '22222222-2222-4222-8222-222222222222';
 
@@ -12,6 +13,7 @@ function makePool(initial: Record<string, unknown> = {}) {
     chargesEnabled: Boolean(initial.stripe_connect_charges_enabled),
     payoutsEnabled: Boolean(initial.stripe_connect_payouts_enabled),
     status: (initial.stripe_connect_status as string) ?? 'pending',
+    terminalLocationId: (initial.stripe_terminal_location_id as string | null) ?? null,
   };
   const queryMock = vi.fn(async (sql: string, params?: unknown[]) => {
     if (sql.includes('SELECT stripe_connect_account_id')) {
@@ -22,9 +24,14 @@ function makePool(initial: Record<string, unknown> = {}) {
             stripe_connect_charges_enabled: state.chargesEnabled,
             stripe_connect_payouts_enabled: state.payoutsEnabled,
             stripe_connect_status: state.status,
+            stripe_terminal_location_id: state.terminalLocationId,
           },
         ],
       };
+    }
+    if (sql.includes('stripe_terminal_location_id = $2')) {
+      state.terminalLocationId = params?.[1] as string;
+      return { rows: [], rowCount: state.accountId ? 1 : 0 };
     }
     // Order matters — the disconnect UPDATE sets BOTH
     // stripe_connect_status = 'disconnected' AND
@@ -103,11 +110,23 @@ describe('StripeConnectService (PR 1)', () => {
       stripe_connect_charges_enabled: true,
       stripe_connect_payouts_enabled: true,
       stripe_connect_status: 'active',
+      stripe_terminal_location_id: 'tml_1',
     });
     const svc = new StripeConnectService({ pool });
     const view = await svc.getAccount(TENANT);
     expect(view.accountId).toBe('acct_existing');
     expect(view.status).toBe('active');
+    expect(view.terminalLocationId).toBe('tml_1');
+  });
+
+  it('setTerminalLocationId persists the location id', async () => {
+    const { pool, state } = makePool({
+      stripe_connect_account_id: 'acct_existing',
+      stripe_connect_status: 'active',
+    });
+    const svc = new StripeConnectService({ pool });
+    await svc.setTerminalLocationId(TENANT, 'tml_persisted');
+    expect(state.terminalLocationId).toBe('tml_persisted');
   });
 
   it('createOnboardingLink throws when not configured', async () => {
@@ -179,6 +198,88 @@ describe('StripeConnectService (PR 1)', () => {
     expect(result.accountId).toBe('acct_existing');
     // Only one fetch — the Account create call was skipped.
     expect(fetchFn).toHaveBeenCalledTimes(1);
+  });
+
+  it('createOnboardingLink surfaces the Stripe reason when account create fails', async () => {
+    // Live-mode regression: an incomplete platform profile makes Stripe
+    // reject POST /v1/accounts. This used to throw a plain Error that
+    // toErrorResponse flattened to a generic 500 with nothing logged.
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const { pool, state } = makePool({});
+    const fetchFn = vi.fn(async (input: string | URL | Request) => {
+      const url = String(input);
+      if (url.includes('/v1/accounts') && !url.includes('/account_links')) {
+        return jsonErr(400, {
+          error: {
+            message: 'Please complete your platform profile before creating accounts.',
+            code: 'account_invalid',
+          },
+        });
+      }
+      return jsonErr(404, {});
+    });
+    const svc = new StripeConnectService({
+      pool,
+      config: { apiKey: 'sk_test' },
+      fetchFn: fetchFn as unknown as typeof fetch,
+    });
+
+    const err = await svc
+      .createOnboardingLink({
+        tenantId: TENANT,
+        ownerEmail: 'o@example.com',
+        returnUrl: 'https://app.example.com/settings',
+        refreshUrl: 'https://app.example.com/settings',
+      })
+      .catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(AppError);
+    expect((err as AppError).statusCode).toBe(502);
+    expect((err as AppError).code).toBe('CONNECT_ONBOARDING_FAILED');
+    // The operator sees Stripe's actual, actionable reason — not "unexpected error".
+    expect((err as AppError).message).toMatch(/complete your platform profile/i);
+    expect((err as AppError).details).toMatchObject({ stripeStatus: 400, stripeCode: 'account_invalid' });
+    // Full detail is logged server-side, and no half-created account id is persisted.
+    expect(errorSpy).toHaveBeenCalledOnce();
+    expect(state.accountId).toBeNull();
+    // The account link call is never attempted after the create fails.
+    expect(fetchFn).toHaveBeenCalledTimes(1);
+    errorSpy.mockRestore();
+  });
+
+  it('createOnboardingLink surfaces the Stripe reason when the account link fails', async () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const { pool } = makePool({});
+    const fetchFn = vi.fn(async (input: string | URL | Request) => {
+      const url = String(input);
+      if (url.includes('/v1/account_links')) {
+        return jsonErr(400, { error: { message: 'return_url must be a valid URL', code: 'url_invalid' } });
+      }
+      if (url.includes('/v1/accounts')) {
+        return jsonOk({ id: 'acct_new123' });
+      }
+      return jsonErr(404, {});
+    });
+    const svc = new StripeConnectService({
+      pool,
+      config: { apiKey: 'sk_test' },
+      fetchFn: fetchFn as unknown as typeof fetch,
+    });
+
+    const err = await svc
+      .createOnboardingLink({
+        tenantId: TENANT,
+        ownerEmail: 'o@example.com',
+        returnUrl: 'https://app.example.com/settings',
+        refreshUrl: 'https://app.example.com/settings',
+      })
+      .catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(AppError);
+    expect((err as AppError).statusCode).toBe(502);
+    expect((err as AppError).message).toMatch(/return_url must be a valid URL/);
+    expect(errorSpy).toHaveBeenCalledOnce();
+    errorSpy.mockRestore();
   });
 
   it('applyAccountUpdated mirrors charges + payouts flags onto the tenant row', async () => {

@@ -35,6 +35,59 @@ describe('P0-003 — RBAC for owner / dispatcher / technician', () => {
     expect(hasPermission('technician', 'jobs:delete')).toBe(false);
   });
 
+  // Owner decision, 2026-07-27: technicians reach the assistant like anyone
+  // else — "if you allow somebody to speak something rather than type
+  // something, you're gonna have a lot better user experience". `ai:run` is
+  // the ONLY grant that decision needed: /api/assistant/chat creates
+  // PROPOSALS (draft-and-approve), which needs `proposals:create` — already
+  // held — and no billing permission at all.
+  it('assistant access — technician holds ai:run and proposals:create', () => {
+    expect(hasPermission('technician', 'ai:run')).toBe(true);
+    expect(hasPermission('technician', 'proposals:create')).toBe(true);
+    // But NOT the approval side: a technician drafts, a permission holder
+    // approves. That asymmetry is what makes the grant safe.
+    expect(hasPermission('technician', 'proposals:approve')).toBe(false);
+    // And still not the AI *configuration* surface.
+    expect(hasPermission('technician', 'ai:configure')).toBe(false);
+  });
+
+  // Epic 6's "do not expose office/billing surfaces to the technician role"
+  // non-goal was OVERTURNED by the owner on 2026-07-27 — technicians DO quote
+  // and bill. That is delivered through the draft-and-approve proposal path
+  // (see the ai:run test above), NOT by granting direct office permissions,
+  // so this isolation contract deliberately still holds. `invoices:view` in
+  // particular still gates all of routes/reports.ts — including
+  // /reports/technician-profit/:technicianId — so it is not a "read back my
+  // own invoice" permission and must be split before it is ever granted.
+  it('billing isolation — technician has no estimates/invoices/payments view', () => {
+    const billing: Permission[] = ['estimates:view', 'invoices:view', 'payments:view'];
+    for (const perm of billing) {
+      expect(hasPermission('technician', perm)).toBe(false);
+      expect(getPermissions('technician')).not.toContain(perm);
+    }
+    // Owner and dispatcher run the office and keep billing visibility.
+    for (const perm of billing) {
+      expect(hasPermission('owner', perm)).toBe(true);
+      expect(hasPermission('dispatcher', perm)).toBe(true);
+    }
+  });
+
+  it('billing isolation — technician keeps the field surfaces it needs on site', () => {
+    const fieldPerms: Permission[] = [
+      'jobs:view',
+      'jobs:update',
+      'customers:view',
+      'locations:view',
+      'appointments:view',
+      'notes:create',
+      'notes:view',
+      'availability:view',
+    ];
+    for (const perm of fieldPerms) {
+      expect(hasPermission('technician', perm)).toBe(true);
+    }
+  });
+
   it('role escalation test — dispatcher cannot manage tenant', () => {
     expect(hasPermission('dispatcher', 'tenant:manage')).toBe(false);
     expect(hasPermission('dispatcher', 'users:invite')).toBe(false);

@@ -7,6 +7,7 @@ import {
   Proposal,
   decideInitialStatus,
   actionClassForProposalType,
+  VALID_PROPOSAL_TYPES,
 } from '../../src/proposals/proposal';
 import { ConflictError } from '../../src/shared/errors';
 
@@ -126,6 +127,30 @@ describe('P2-001 — Proposal entity and core schema', () => {
 
     const patched = await repo.update('other-tenant', proposal.id, { summary: 'hacked' });
     expect(patched).toBeNull();
+  });
+
+  it('findByStatusSince — windows by created_at, newest-first, honours limit (P3)', async () => {
+    const repo = new InMemoryProposalRepository();
+    const now = Date.now();
+    const mk = (over: Partial<Proposal>): Proposal => ({
+      ...createProposal({ ...validInput, idempotencyKey: undefined }),
+      ...over,
+    });
+    await repo.create(mk({ id: 'p-recent', status: 'ready_for_review', createdAt: new Date(now - 10 * 60_000) }));
+    await repo.create(mk({ id: 'p-2h', status: 'ready_for_review', createdAt: new Date(now - 2 * 3_600_000) }));
+    await repo.create(mk({ id: 'p-48h', status: 'ready_for_review', createdAt: new Date(now - 48 * 3_600_000) }));
+    await repo.create(mk({ id: 'p-draft', status: 'draft', createdAt: new Date(now - 10 * 60_000) }));
+
+    const since = new Date(now - 24 * 3_600_000);
+    const within = await repo.findByStatusSince('tenant-1', 'ready_for_review', since);
+    // 48h row is outside the window; the draft is a different status. Newest first.
+    expect(within.map((p) => p.id)).toEqual(['p-recent', 'p-2h']);
+
+    const limited = await repo.findByStatusSince('tenant-1', 'ready_for_review', since, 1);
+    expect(limited.map((p) => p.id)).toEqual(['p-recent']);
+
+    // Tenant-scoped.
+    expect(await repo.findByStatusSince('other-tenant', 'ready_for_review', since)).toHaveLength(0);
   });
 
   it('createMany persists every member and is atomic on idempotency conflict', async () => {
@@ -299,6 +324,16 @@ describe('actionClassForProposalType — D3 action-class registry', () => {
   it('classifies apply_late_fee as money (raises amount due)', () => {
     expect(actionClassForProposalType('apply_late_fee')).toBe('money');
   });
+
+  it('classifies adopt_entity_alias as manual and registers it as a proposal type', () => {
+    expect(VALID_PROPOSAL_TYPES).toContain('adopt_entity_alias');
+    expect(actionClassForProposalType('adopt_entity_alias')).toBe('manual');
+  });
+
+  it('B1.18 — classifies update_brand_voice as manual and registers it as a proposal type', () => {
+    expect(VALID_PROPOSAL_TYPES).toContain('update_brand_voice');
+    expect(actionClassForProposalType('update_brand_voice')).toBe('manual');
+  });
 });
 
 describe('decideInitialStatus — D3 trust-tier decision', () => {
@@ -387,6 +422,40 @@ describe('decideInitialStatus — D3 trust-tier decision', () => {
     ).toBe('draft');
   });
 
+  it('adopt_entity_alias can never auto-approve even at autonomous trust and maximum confidence', () => {
+    expect(
+      decideInitialStatus({
+        proposalType: 'adopt_entity_alias',
+        sourceTrustTier: 'autonomous',
+        confidenceScore: 1,
+      }),
+    ).toBe('draft');
+  });
+
+  // B1.18 AC-1 — the manual action class makes "never auto-approves"
+  // STRUCTURAL, not threshold-dependent: decideInitialStatus's only
+  // auto-approve branch requires `sourceTrustTier === 'autonomous' AND`
+  // action class `=== 'capture'`, so a manual-class type is unreachable from
+  // it at ANY trust tier — asserted across the full tier set, not just
+  // 'autonomous', so this can't regress if a future tier is added.
+  it('B1.18 — update_brand_voice can never auto-approve at ANY trust tier, even at maximum confidence', () => {
+    const ALL_TIERS = ['autonomous', 'graduates_fast', 'graduates_slowly', 'always_asks'] as const;
+    for (const sourceTrustTier of ALL_TIERS) {
+      expect(
+        decideInitialStatus({
+          proposalType: 'update_brand_voice',
+          sourceTrustTier,
+          confidenceScore: 1,
+        }),
+        `sourceTrustTier=${sourceTrustTier} must never auto-approve update_brand_voice`,
+      ).toBe('draft');
+    }
+    // No trust tier at all (the common voice-drafted case) also stays draft.
+    expect(
+      decideInitialStatus({ proposalType: 'update_brand_voice', confidenceScore: 1 }),
+    ).toBe('draft');
+  });
+
   it('graduates_fast + capture + high confidence → draft (gated until trust ledger lands)', () => {
     expect(
       decideInitialStatus({
@@ -447,6 +516,73 @@ describe('decideInitialStatus — D3 trust-tier decision', () => {
   });
 });
 
+// ─────────────────────────────────────────────────────────────────────────
+// UB-A3 guard — `_meta.appliedStandingInstructions` is a PRESENTATION-ONLY
+// marker. It must be invisible to decideInitialStatus: for every input the
+// function can see, the output with the marker present is byte-identical to
+// the output without it. If this test ever fails, someone has wired standing
+// instructions into approval decisions — which the feature contract forbids
+// ("they adjust CONTENT only, never approvals").
+// ─────────────────────────────────────────────────────────────────────────
+describe('decideInitialStatus — UB-A3 appliedStandingInstructions marker is inert', () => {
+  const MARKER = [
+    { id: 'si-1', text: 'Always add a fuel surcharge line' },
+    { id: 'si-2', text: 'Mention the referral discount' },
+  ];
+
+  const TIERS = [undefined, 'autonomous', 'graduates_fast', 'graduates_slowly', 'always_asks'] as const;
+  const CONFIDENCES = [undefined, 0.5, 0.89, 0.95] as const;
+  const SUPERVISOR_PRESENT = [undefined, true, false] as const;
+  const OVERALL = [undefined, 'high', 'low'] as const;
+
+  it('output is byte-identical with/without the marker across the full input matrix', () => {
+    for (const proposalType of VALID_PROPOSAL_TYPES) {
+      for (const sourceTrustTier of TIERS) {
+        for (const confidenceScore of CONFIDENCES) {
+          for (const supervisorPresent of SUPERVISOR_PRESENT) {
+            for (const overallConfidence of OVERALL) {
+              const baseMeta = overallConfidence ? { overallConfidence } : {};
+              const without = decideInitialStatus({
+                proposalType,
+                sourceTrustTier,
+                confidenceScore,
+                supervisorPresent,
+                payload: { _meta: baseMeta },
+              });
+              const withMarker = decideInitialStatus({
+                proposalType,
+                sourceTrustTier,
+                confidenceScore,
+                supervisorPresent,
+                payload: { _meta: { ...baseMeta, appliedStandingInstructions: MARKER } },
+              });
+              expect(withMarker).toBe(without);
+            }
+          }
+        }
+      }
+    }
+  });
+
+  it('marker alone (no other _meta keys, payload otherwise empty) never changes the no-_meta result', () => {
+    for (const proposalType of VALID_PROPOSAL_TYPES) {
+      const without = decideInitialStatus({
+        proposalType,
+        sourceTrustTier: 'autonomous',
+        confidenceScore: 0.95,
+        payload: {},
+      });
+      const withMarker = decideInitialStatus({
+        proposalType,
+        sourceTrustTier: 'autonomous',
+        confidenceScore: 0.95,
+        payload: { _meta: { appliedStandingInstructions: MARKER } },
+      });
+      expect(withMarker).toBe(without);
+    }
+  });
+});
+
 describe('createProposal — D3 trust-tier integration', () => {
   it('without sourceTrustTier, status is draft (backward compatible)', () => {
     const proposal = createProposal({
@@ -471,6 +607,22 @@ describe('createProposal — D3 trust-tier integration', () => {
       createdBy: 'agent-capture',
     });
     expect(proposal.status).toBe('approved');
+  });
+
+  it('never auto-approves a voice-originated mutation from conversational confirmation', () => {
+    const proposal = createProposal({
+      tenantId: 'tenant-1',
+      proposalType: 'create_customer',
+      payload: { name: 'QA Browser Validation Customer' },
+      summary: 'Create QA customer from in-app voice',
+      sourceTrustTier: 'autonomous',
+      confidenceScore: 0.99,
+      sourceContext: { voiceMutation: true, channel: 'inapp_voice' },
+      createdBy: 'agent-voice',
+    });
+
+    expect(proposal.status).toBe('draft');
+    expect(proposal.approvedAt).toBeUndefined();
   });
 
   it('forwards supervisorPresent=false: autonomous + capture + 0.95 → ready_for_review, not approved', () => {
@@ -626,5 +778,92 @@ describe('InMemoryProposalRepository.findByRecordingId — voice dedup lookup', 
     const repo = new InMemoryProposalRepository();
     await seed(repo, { id: 'p4', tenantId: 'other-tenant', idempotencyKey: 'voice:rec-4' } as Partial<Proposal> & { id: string });
     expect(await repo.findByRecordingId(TENANT, 'rec-4', 'voice:rec-4')).toBeNull();
+  });
+});
+
+describe('§5.5 — schedule proposals carry a 48h expiry at creation', () => {
+  const FORTY_EIGHT_H_MS = 48 * 60 * 60 * 1000;
+
+  it.each(['create_appointment', 'create_booking', 'reschedule_appointment'] as const)(
+    'defaults expiresAt to ~48h for %s',
+    (proposalType) => {
+      const before = Date.now();
+      const p = createProposal({
+        tenantId: 'tenant-1',
+        proposalType,
+        payload: {},
+        summary: 's',
+        createdBy: 'u1',
+      });
+      expect(p.expiresAt).toBeInstanceOf(Date);
+      const delta = p.expiresAt!.getTime() - before;
+      // generous window to absorb test-clock jitter
+      expect(delta).toBeGreaterThanOrEqual(FORTY_EIGHT_H_MS - 5000);
+      expect(delta).toBeLessThanOrEqual(FORTY_EIGHT_H_MS + 5000);
+    },
+  );
+
+  it('leaves expiresAt unset for non-schedule proposal types (they persist)', () => {
+    for (const proposalType of ['draft_estimate', 'send_invoice', 'create_customer', 'record_payment'] as const) {
+      const p = createProposal({
+        tenantId: 'tenant-1',
+        proposalType,
+        payload: {},
+        summary: 's',
+        createdBy: 'u1',
+      });
+      expect(p.expiresAt, `${proposalType} should persist`).toBeUndefined();
+    }
+  });
+
+  it('honors an explicit expiresAt over the 48h default', () => {
+    const explicit = new Date('2030-01-01T00:00:00Z');
+    const p = createProposal({
+      tenantId: 'tenant-1',
+      proposalType: 'create_appointment',
+      payload: {},
+      summary: 's',
+      createdBy: 'u1',
+      expiresAt: explicit,
+    });
+    expect(p.expiresAt).toEqual(explicit);
+  });
+});
+
+describe('§5.5 — InMemoryProposalRepository.findExpiredScheduleProposals', () => {
+  const NOW = Date.now();
+  const types = ['create_appointment', 'create_booking', 'reschedule_appointment'] as const;
+
+  async function seedExpired(repo: InMemoryProposalRepository, opts: { type: ProposalType; ageMs: number; tenantId?: string }) {
+    const p = createProposal({
+      tenantId: opts.tenantId ?? 'tenant-1',
+      proposalType: opts.type,
+      payload: {},
+      summary: `${opts.type}@${opts.ageMs}`,
+      createdBy: 'u1',
+      expiresAt: new Date(NOW - opts.ageMs),
+    });
+    await repo.create({ ...p, status: 'expired' });
+    return p;
+  }
+
+  it('returns only schedule, in-window, this-tenant expired rows, newest-first and capped', async () => {
+    const repo = new InMemoryProposalRepository();
+    const since = new Date(NOW - 7 * 24 * 60 * 60 * 1000);
+    await seedExpired(repo, { type: 'create_appointment', ageMs: 60 * 60 * 1000 }); // 1h ago (recent)
+    await seedExpired(repo, { type: 'create_booking', ageMs: 2 * 60 * 60 * 1000 }); // 2h ago
+    await seedExpired(repo, { type: 'reschedule_appointment', ageMs: 8 * 24 * 60 * 60 * 1000 }); // 8d ago (out of window)
+    await seedExpired(repo, { type: 'create_appointment', ageMs: 30 * 60 * 1000, tenantId: 'other' }); // other tenant
+
+    const rows = await repo.findExpiredScheduleProposals('tenant-1', types, since, 10);
+    expect(rows.map((r) => r.summary)).toEqual([
+      'create_appointment@3600000', // 1h ago first (newest expiresAt)
+      'create_booking@7200000',     // 2h ago second
+    ]);
+
+    // limit is honored
+    const capped = await repo.findExpiredScheduleProposals('tenant-1', types, since, 1);
+    expect(capped).toHaveLength(1);
+    expect(capped[0].summary).toBe('create_appointment@3600000');
   });
 });

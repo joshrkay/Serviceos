@@ -1,12 +1,14 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router';
 import { useUser } from '@clerk/clerk-react';
 import {
   AlertCircle, Clock, ChevronRight, ArrowRight,
   DollarSign, FileText, Send, Eye, Briefcase,
-  CheckCircle2, Mic, TrendingUp, Bell,
+  CheckCircle2, Mic, TrendingUp, MessageSquare,
+  UserPlus, CalendarPlus,
 } from 'lucide-react';
 import { useListQuery } from '../../hooks/useListQuery';
+import { listInboxThreads, type InboxThread } from '../../api/conversations';
 import { StatCard } from '../ui';
 import {
   normalizeJobStatus,
@@ -19,14 +21,23 @@ import { StatusBadge } from '../shared/StatusBadge';
 import { TimeGivenBackCard } from './TimeGivenBackCard';
 import { MoneyLoopHomeCard } from './MoneyLoopHomeCard';
 import { HfcrHeroCard } from './HfcrHeroCard';
+import { VoiceRoiCard } from './VoiceRoiCard';
+import { CoreKpisCard } from './CoreKpisCard';
+import { ActivityFeedCard } from './ActivityFeedCard';
+import { HomeConversationPanel } from './HomeConversationPanel';
 import { ErrorState } from '../ErrorState';
+import { EmptyState } from '../EmptyState';
 import { useTenantTimezone } from '../../hooks/useTenantTimezone';
 import {
   formatDateInTenantTz,
   formatInTenantTz,
   formatTimeInTenantTz,
+  todayInTz,
+  dateKeyInTz,
+  dayWindowUtc,
 } from '../../utils/formatInTenantTz';
 import { firstNameFromUser, homeGreetingHeading } from '../../utils/greeting';
+import { getEstimateTotalCents } from '../../utils/estimateMoney';
 
 // ─── API Types ────────────────────────────────────────────────────────────
 interface ApiJob {
@@ -46,7 +57,9 @@ interface ApiEstimate {
   id: string;
   estimateNumber: string;
   status: string;
-  totalCents: number;
+  totals?: { totalCents?: number } | null;
+  /** Compatibility with pre-document-totals API fixtures. */
+  totalCents?: number;
   customer?: { id: string; displayName?: string; firstName?: string; lastName?: string };
   sentAt?: string;
   viewedAt?: string;
@@ -72,11 +85,23 @@ interface ApiInvoice {
   dueDate?: string;
 }
 
+// Appointments carry the actual scheduled work for a day. GET /api/jobs
+// ignores scheduledDate, so "today's jobs" is sourced from the appointments
+// API (which supports a fromDate/toDate window) and joined to job display
+// data by jobId.
+interface ApiAppointment {
+  jobId: string;
+  /** UTC ISO instant. */
+  scheduledStart: string;
+  /** Appointment lifecycle status; canceled/no_show visits are excluded. */
+  status: string;
+}
+
 // ─── Static helpers ───────────────────────────────────────────────────────
 const SVC: Record<string, { emoji: string; color: string }> = {
-  HVAC:     { emoji: '❄️', color: 'bg-blue-100'   },
-  Plumbing: { emoji: '🔧', color: 'bg-green-100'  },
-  Painting: { emoji: '🎨', color: 'bg-violet-100' },
+  HVAC:     { emoji: '❄️', color: 'bg-primary/10'   },
+  Plumbing: { emoji: '🔧', color: 'bg-success/10'  },
+  Painting: { emoji: '🎨', color: 'bg-primary/10' },
 };
 
 function initials(name: string) {
@@ -96,10 +121,6 @@ function formatTime(iso: string | undefined, timezone: string): string | null {
 function formatDate(iso: string | undefined, timezone: string): string {
   if (!iso) return '';
   return formatDateInTenantTz(iso, timezone);
-}
-
-function todayIso(): string {
-  return new Date().toISOString().split('T')[0];
 }
 
 function buildWeek(timezone: string): { day: string; date: string; isToday: boolean }[] {
@@ -122,13 +143,13 @@ function SectionHead({
   return (
     <div className={`flex items-center justify-between mb-2.5 ${className}`}>
       <div className="flex items-center gap-2">
-        <p className="text-sm text-slate-700">{label}</p>
+        <p className="text-sm text-foreground">{label}</p>
         {count !== undefined && (
-          <span className="flex items-center justify-center min-w-[18px] h-[18px] rounded-full bg-slate-200 text-xs text-slate-600 px-1.5">{count}</span>
+          <span className="flex items-center justify-center min-w-[18px] h-[18px] rounded-full bg-secondary text-xs text-muted-foreground px-1.5">{count}</span>
         )}
       </div>
       {onAll && (
-        <button onClick={onAll} className="flex items-center gap-0.5 text-xs text-blue-600 hover:text-blue-700 transition-colors">
+        <button onClick={onAll} className="flex items-center gap-0.5 text-xs text-primary hover:text-primary transition-colors">
           View all <ArrowRight size={11} />
         </button>
       )}
@@ -148,13 +169,13 @@ function AttentionRow({
     <div className="flex items-center gap-3 px-4 py-3">
       <Icon size={14} className={`shrink-0 ${iconClass}`} />
       <div className="flex-1 min-w-0">
-        <p className="text-sm text-slate-800 truncate">{message}</p>
-        {sub && <p className="text-xs text-slate-400 mt-0.5">{sub}</p>}
+        <p className="text-sm text-foreground truncate">{message}</p>
+        {sub && <p className="text-xs text-muted-foreground mt-0.5">{sub}</p>}
       </div>
       {action && (
         <button
           onClick={onAction}
-          className={`text-xs shrink-0 hover:underline transition-colors ${actionClass ?? 'text-blue-600'}`}
+          className={`text-xs shrink-0 hover:underline transition-colors ${actionClass ?? 'text-primary'}`}
         >{action} →</button>
       )}
     </div>
@@ -175,25 +196,25 @@ function JobRow({ job, onClick }: { job: ApiJob; onClick: () => void }) {
   const moneyState = normalizeJobMoneyState(job.moneyState);
   const moneyLabel = moneyState ? JOB_MONEY_STATE_LABEL[moneyState] : null;
   const moneyBadgeClasses: Record<string, string> = {
-    overdue: 'bg-red-100 text-red-700',
-    paid: 'bg-green-100 text-green-700',
-    invoiced: 'bg-amber-100 text-amber-800',
-    estimate_sent: 'bg-amber-100 text-amber-800',
+    overdue: 'bg-destructive/10 text-destructive',
+    paid: 'bg-success/10 text-success',
+    invoiced: 'bg-warning/10 text-warning',
+    estimate_sent: 'bg-warning/10 text-warning',
   };
   const moneyBadgeClass =
-    (moneyState && moneyBadgeClasses[moneyState]) ?? 'bg-violet-100 text-violet-700';
+    (moneyState && moneyBadgeClasses[moneyState]) ?? 'bg-primary/10 text-primary';
 
   return (
     <button
       onClick={onClick}
-      className="flex items-center gap-3 w-full px-4 py-3.5 text-left hover:bg-slate-50 transition-colors group"
+      className="flex items-center gap-3 w-full px-4 py-3.5 text-left hover:bg-secondary transition-colors group"
     >
       <span className={`flex size-8 shrink-0 items-center justify-center rounded-xl text-base ${svc.color}`}>
         {svc.emoji}
       </span>
       <div className="flex-1 min-w-0">
         <div className="flex items-center justify-between gap-2">
-          <p className="text-sm text-slate-900 truncate">{name}</p>
+          <p className="text-sm text-foreground truncate">{name}</p>
           <div className="flex items-center gap-1.5 shrink-0">
             {moneyLabel && (
               <span className={`text-[10px] font-medium px-1.5 py-0.5 rounded-md ${moneyBadgeClass}`}>
@@ -205,26 +226,26 @@ function JobRow({ job, onClick }: { job: ApiJob; onClick: () => void }) {
         </div>
         <div className="flex items-center gap-2 mt-0.5">
           {scheduledTime && (
-            <span className="flex items-center gap-1 text-xs text-slate-400">
+            <span className="flex items-center gap-1 text-xs text-muted-foreground">
               <Clock size={10} /> {scheduledTime}
             </span>
           )}
           {techName && (
             <span
-              className="flex size-4 shrink-0 items-center justify-center rounded-full text-white"
+              className="flex size-4 shrink-0 items-center justify-center rounded-full text-primary-foreground"
               style={{ backgroundColor: techColor, fontSize: 9 }}
             >
               {initials(techName)}
             </span>
           )}
           {job.priority === 'urgent' && (
-            <span className="flex items-center gap-0.5 text-xs text-red-500">
+            <span className="flex items-center gap-0.5 text-xs text-destructive">
               <AlertCircle size={10} /> Urgent
             </span>
           )}
         </div>
       </div>
-      <ChevronRight size={13} className="shrink-0 text-slate-300 group-hover:text-slate-400 transition-colors" />
+      <ChevronRight size={13} className="shrink-0 text-muted-foreground group-hover:text-muted-foreground transition-colors" />
     </button>
   );
 }
@@ -235,26 +256,26 @@ function WeekStrip({ todayCount }: { todayCount: number }) {
   const WEEK = buildWeek(tz);
   return (
     <div className="flex gap-2 overflow-x-auto pb-1" style={{ scrollbarWidth: 'none' }}>
-      {WEEK.map((d, i) => {
+      {WEEK.map((d) => {
         const n = d.isToday ? todayCount : 0;
         return (
           <div
             key={d.date}
             className={`flex flex-col items-center rounded-xl px-3 py-3 min-w-[60px] shrink-0 transition-all ${
-              d.isToday ? 'bg-slate-900 text-white' : 'bg-white border border-slate-200'
+              d.isToday ? 'bg-primary text-primary-foreground' : 'bg-card border border-border'
             }`}
           >
-            <p className={`text-xs mb-0.5 ${d.isToday ? 'text-slate-400' : 'text-slate-400'}`}>{d.day}</p>
-            <p className={`leading-none mb-1 ${d.isToday ? 'text-white' : 'text-slate-800'}`} style={{ fontSize: '1.15rem' }}>
+            <p className={`text-xs mb-0.5 ${d.isToday ? 'text-muted-foreground' : 'text-muted-foreground'}`}>{d.day}</p>
+            <p className={`leading-none mb-1 ${d.isToday ? 'text-primary-foreground' : 'text-foreground'}`} style={{ fontSize: '1.15rem' }}>
               {n > 0 ? n : '—'}
             </p>
-            <p className={`text-center ${d.isToday ? 'text-slate-400' : 'text-slate-400'}`} style={{ fontSize: 9 }}>
+            <p className={`text-center ${d.isToday ? 'text-muted-foreground' : 'text-muted-foreground'}`} style={{ fontSize: 9 }}>
               {d.isToday ? 'TODAY' : d.date.split(' ')[1]}
             </p>
             {n > 0 && !d.isToday && (
               <div className="flex gap-0.5 mt-1">
                 {Array.from({ length: Math.min(n, 3) }).map((_, j) => (
-                  <span key={j} className="size-1 rounded-full bg-blue-400" />
+                  <span key={j} className="size-1 rounded-full bg-primary" />
                 ))}
               </div>
             )}
@@ -278,16 +299,79 @@ export function HomePage() {
   );
   const greetingHeading = homeGreetingHeading(ownerFirstName, new Date(), tz);
 
-  const today = todayIso();
+  // "Today" is the tenant's local calendar day, not the viewer's UTC date:
+  // for an evening appointment in a non-UTC tenant the UTC date has already
+  // rolled to tomorrow. `todayInTz` keys off the tenant IANA zone.
+  const today = todayInTz(tz);
   const todayDate = new Date(); todayDate.setHours(0, 0, 0, 0);
 
-  const jobsQuery = useListQuery<ApiJob>('/api/jobs', { filters: { scheduledDate: today } });
-  const estimatesQuery = useListQuery<ApiEstimate>('/api/estimates', { filters: { status: 'sent' } });
-  const invoicesQuery = useListQuery<ApiInvoice>('/api/invoices', { filters: { status: 'open' } });
-  const leadsQuery = useListQuery<ApiLead>('/api/leads', { filters: { limit: '50' } });
+  // Story 10.7 — surface unread customer replies (newest message inbound) on
+  // the home page so two-way threads needing a response aren't missed.
+  const [unreadThreads, setUnreadThreads] = useState<InboxThread[]>([]);
+  useEffect(() => {
+    let active = true;
+    listInboxThreads({ needsReplyOnly: true, limit: 20 })
+      .then((threads) => { if (active) setUnreadThreads(threads); })
+      .catch(() => { if (active) setUnreadThreads([]); });
+    return () => { active = false; };
+  }, []);
+
+  // Epic 12.2 — the home dashboard auto-refreshes the "today" panels so the
+  // owner sees new jobs/estimates/invoices/leads without a manual reload.
+  const LIVE_REFETCH_MS = 60_000;
+  // Today's scheduled work: the appointments API supports a fromDate/toDate
+  // day window (GET /api/jobs does not — it ignores scheduledDate). Bound the
+  // query by the tenant-local day expressed as UTC instants.
+  const { startUtc, endUtc } = dayWindowUtc(today, tz);
+  const appointmentsQuery = useListQuery<ApiAppointment>('/api/appointments', {
+    // Explicit limit: fromDate/toDate put the route on its paginated path,
+    // which otherwise defaults to 50 and ignores useListQuery's pageSize —
+    // silently truncating the day for busy tenants. 200 is the API max.
+    filters: { fromDate: startUtc, toDate: endUtc, limit: '200' },
+    refetchInterval: LIVE_REFETCH_MS,
+  });
+  // Jobs are fetched for card display data only (customer/technician/status);
+  // the "today" set is derived from appointments below and joined by jobId.
+  const jobsQuery = useListQuery<ApiJob>('/api/jobs', { refetchInterval: LIVE_REFETCH_MS });
+  const estimatesQuery = useListQuery<ApiEstimate>('/api/estimates', { filters: { status: 'sent' }, refetchInterval: LIVE_REFETCH_MS });
+  const invoicesQuery = useListQuery<ApiInvoice>('/api/invoices', { filters: { status: 'open' }, refetchInterval: LIVE_REFETCH_MS });
+  const leadsQuery = useListQuery<ApiLead>('/api/leads', { filters: { limit: '50' }, refetchInterval: LIVE_REFETCH_MS });
   const leads = leadsQuery.data ?? [];
 
-  const todayJobs    = jobsQuery.data.filter(j => normalizeJobStatus(j.status) !== 'Canceled');
+  // Join today's appointments to job display data. Bucket each appointment by
+  // its tenant-tz calendar day (defensive against the appointments route's
+  // inclusive upper bound) and dedupe by jobId, keeping the earliest visit's
+  // start time so the row shows when the tech is first due.
+  const jobsById = new Map(jobsQuery.data.map((j) => [j.id, j] as const));
+  const todayJobsById = new Map<string, ApiJob>();
+  for (const appt of [...appointmentsQuery.data].sort(
+    (a, b) => a.scheduledStart.localeCompare(b.scheduledStart),
+  )) {
+    if (appt.status === 'canceled' || appt.status === 'no_show') continue;
+    if (dateKeyInTz(appt.scheduledStart, tz) !== today) continue;
+    const job = jobsById.get(appt.jobId);
+    if (!job || todayJobsById.has(job.id)) continue;
+    todayJobsById.set(job.id, { ...job, scheduledStart: appt.scheduledStart });
+  }
+  const todayJobs = Array.from(todayJobsById.values())
+    .filter((j) => normalizeJobStatus(j.status) !== 'Canceled');
+  // Epic 12.2 — unassigned work for today (no technician on the job).
+  const unassignedToday = todayJobs.filter(j => !j.technician);
+
+  // The "today" panel depends on both queries; surface loading/errors from
+  // either and retry both.
+  // Only treat as "loading" when we have nothing to show yet. Background
+  // polls (60s refetchInterval) keep isLoading false once data has landed,
+  // so these sections no longer flash spinners every minute.
+  const todayLoading =
+    (appointmentsQuery.isLoading && appointmentsQuery.data.length === 0) ||
+    (jobsQuery.isLoading && jobsQuery.data.length === 0);
+  const estimatesLoading =
+    estimatesQuery.isLoading && estimatesQuery.data.length === 0;
+  const invoicesLoading =
+    invoicesQuery.isLoading && invoicesQuery.data.length === 0;
+  const todayError = appointmentsQuery.error ?? jobsQuery.error;
+  const refetchToday = () => { appointmentsQuery.refetch(); jobsQuery.refetch(); };
   const pendingEsts  = estimatesQuery.data.filter(e => {
     const uiStatus = normalizeEstimateStatus(e.status);
     return uiStatus === 'Sent';
@@ -304,6 +388,12 @@ export function HomePage() {
 
   // Build attention items
   const attentionItems = [
+    ...unreadThreads.map(t => ({
+      id: `reply-${t.conversation.id}`, type: 'reply' as const,
+      message: `${t.customerName ?? 'Customer'} replied`,
+      sub: t.lastMessagePreview || 'New message',
+      action: 'Reply', to: '/comms-inbox',
+    })),
     ...overdueInvs.map(i => ({
       id: `inv-${i.id}`, type: 'overdue' as const,
       message: `${customerName(i.customer)} — invoice overdue`,
@@ -313,31 +403,34 @@ export function HomePage() {
     ...pendingEsts.filter(e => !dismissed.has(`est-${e.id}`)).map(e => ({
       id: `est-${e.id}`, type: 'followup' as const,
       message: `${customerName(e.customer)} estimate not yet opened`,
-      sub: `${e.estimateNumber} · ${centsToDisplay(e.totalCents)}${e.sentAt ? ` · Sent ${formatDate(e.sentAt, tz)}` : ''}`,
+      sub: `${e.estimateNumber} · ${
+        getEstimateTotalCents(e) === null ? '—' : centsToDisplay(getEstimateTotalCents(e)!)
+      }${e.sentAt ? ` · Sent ${formatDate(e.sentAt, tz)}` : ''}`,
       action: 'Follow up', to: `/estimates/${e.id}`,
     })),
   ].filter(item => !dismissed.has(item.id));
 
   const ATTN_STYLE = {
-    overdue:  { icon: AlertCircle,  ic: 'text-red-500',    border: 'border-red-100',   bg: 'bg-red-50'    },
-    followup: { icon: Eye,          ic: 'text-violet-500', border: 'border-violet-100',bg: 'bg-violet-50/50' },
+    overdue:  { icon: AlertCircle,  ic: 'text-destructive',    border: 'border-destructive/20',   bg: 'bg-destructive/10'    },
+    followup: { icon: Eye,          ic: 'text-primary', border: 'border-primary/20',bg: 'bg-primary/10' },
+    reply:    { icon: MessageSquare,ic: 'text-primary',   border: 'border-primary/20',  bg: 'bg-primary/10'   },
   };
 
   return (
     <div className="h-full overflow-y-auto pb-20 md:pb-0">
       <div className="max-w-6xl mx-auto">
         {/* ── Header ── */}
-        <div className="px-4 md:px-6 pt-5 pb-4 border-b border-slate-100">
+        <div className="px-4 md:px-6 pt-5 pb-4 border-b border-border">
           <div className="flex items-start justify-between">
             <div>
-              <h1 className="text-slate-900">{greetingHeading}</h1>
-              <p className="text-sm text-slate-400 mt-0.5">
+              <h1 className="text-foreground">{greetingHeading}</h1>
+              <p className="text-sm text-muted-foreground mt-0.5">
                 {formatInTenantTz(new Date(), tz, { weekday: 'long', month: 'long', day: 'numeric' })}
               </p>
             </div>
             <button
               onClick={() => navigate('/assistant')}
-              className="flex items-center gap-1.5 rounded-xl bg-slate-900 text-white px-3.5 py-2.5 text-sm hover:bg-slate-700 transition-colors shrink-0"
+              className="flex items-center gap-1.5 rounded-xl bg-primary text-primary-foreground px-3.5 py-2.5 text-sm hover:bg-primary/90 transition-colors shrink-0"
             >
               <Mic size={13} /> Ask AI
             </button>
@@ -350,7 +443,7 @@ export function HomePage() {
             <button
               type="button"
               onClick={() => navigate('/jobs')}
-              className="rounded-2xl text-left transition-shadow hover:shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/40"
+              className="rounded-2xl text-left transition-shadow hover:shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
             >
               <StatCard
                 className="h-full"
@@ -365,7 +458,7 @@ export function HomePage() {
               type="button"
               onClick={() => navigate('/reports/money')}
               data-testid="home-stat-outstanding"
-              className="rounded-2xl text-left transition-shadow hover:shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/40"
+              className="rounded-2xl text-left transition-shadow hover:shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
             >
               <StatCard
                 className="h-full"
@@ -380,7 +473,7 @@ export function HomePage() {
               type="button"
               onClick={() => navigate(attentionItems.length > 0 ? '/invoices' : '/inbox')}
               data-testid="home-stat-attention"
-              className="rounded-2xl text-left transition-shadow hover:shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/40"
+              className="rounded-2xl text-left transition-shadow hover:shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
             >
               <StatCard
                 className="h-full"
@@ -394,39 +487,71 @@ export function HomePage() {
           </div>
         </div>
 
+        {/* Story 3.1 — the running conversation, surfaced prominently on Home
+            (alongside the dashboard, not replacing it). */}
+        <HomeConversationPanel />
+
         <HfcrHeroCard />
 
+        <VoiceRoiCard />
+
         <MoneyLoopHomeCard />
+
+        {/* ── Core KPIs (revenue, receivables, MoM) ── */}
+        <CoreKpisCard />
 
         {/* ── Time given back ── */}
         <TimeGivenBackCard />
 
         {/* ── Two-column layout ── */}
-        <div className="flex flex-col md:grid md:grid-cols-[1fr_320px] md:items-start divide-y md:divide-y-0 md:divide-x divide-slate-100">
+        <div className="flex flex-col md:grid md:grid-cols-[1fr_320px] md:items-start divide-y md:divide-y-0 md:divide-x divide-border">
 
           {/* ─── Left: Operational ─── */}
-          <div className="flex flex-col divide-y divide-slate-100">
+          <div className="flex flex-col divide-y divide-border">
 
             {/* Today's jobs */}
             <section className="px-4 md:px-6 py-5">
               <SectionHead label="Today's jobs" count={todayJobs.length} onAll={() => navigate('/jobs')} />
-              {jobsQuery.isLoading ? (
+              {todayLoading ? (
                 <div className="flex items-center justify-center py-8">
-                  <div className="h-5 w-5 animate-spin rounded-full border-2 border-slate-900 border-t-transparent" />
+                  <div className="h-5 w-5 animate-spin rounded-full border-2 border-primary border-t-transparent" />
                 </div>
-              ) : jobsQuery.error ? (
+              ) : todayError ? (
                 <ErrorState
-                  message={jobsQuery.error.includes('401') ? "Session expired — please reload" : "Couldn't load jobs — please try again"}
-                  onRetry={() => jobsQuery.refetch()}
+                  message={todayError.includes('401') ? "Session expired — please reload" : "Couldn't load jobs — please try again"}
+                  onRetry={refetchToday}
                 />
               ) : todayJobs.length === 0 ? (
-                <p className="text-sm text-slate-400 py-4 text-center">No jobs scheduled today</p>
+                <EmptyState
+                  title="No jobs scheduled today"
+                  description="Schedule your first job and it'll show up right here."
+                  actionLabel="Schedule a job"
+                  onAction={() => navigate(`/assistant?q=${encodeURIComponent('Schedule a new job')}`)}
+                  icon={<Briefcase size={20} />}
+                />
               ) : (
-                <div className="rounded-xl bg-white border border-slate-200 overflow-hidden divide-y divide-slate-100">
-                  {todayJobs.map(job => (
-                    <JobRow key={job.id} job={job} onClick={() => navigate(`/jobs/${job.id}`)} />
-                  ))}
-                </div>
+                <>
+                  {/* Epic 12.2 — unassigned work surfaces with a one-tap path to
+                      the dispatch board where it can be assigned. */}
+                  {unassignedToday.length > 0 && (
+                    <button
+                      onClick={() => navigate('/dispatch')}
+                      data-testid="home-unassigned"
+                      className="mb-2 flex min-h-11 w-full items-center gap-2 rounded-xl border border-warning/30 bg-warning/10 px-4 text-left text-sm text-warning transition-colors hover:bg-warning/20"
+                    >
+                      <AlertCircle size={14} className="shrink-0 text-warning" />
+                      <span className="flex-1">
+                        {unassignedToday.length} unassigned {unassignedToday.length === 1 ? 'job' : 'jobs'} — assign on the dispatch board
+                      </span>
+                      <ArrowRight size={13} className="shrink-0" />
+                    </button>
+                  )}
+                  <div className="rounded-xl bg-card border border-border overflow-hidden divide-y divide-border">
+                    {todayJobs.map(job => (
+                      <JobRow key={job.id} job={job} onClick={() => navigate(`/jobs/${job.id}`)} />
+                    ))}
+                  </div>
+                </>
               )}
             </section>
 
@@ -438,16 +563,16 @@ export function HomePage() {
           </div>
 
           {/* ─── Right: Financial & Attention ─── */}
-          <div className="flex flex-col divide-y divide-slate-100">
+          <div className="flex flex-col divide-y divide-border">
 
             {/* Leads pipeline widget */}
             <section className="px-4 py-5">
               <div className="flex items-center justify-between mb-2.5">
                 <div className="flex items-center gap-2">
-                  <TrendingUp size={14} className="text-blue-500" />
-                  <p className="text-sm text-slate-700">Lead pipeline</p>
+                  <TrendingUp size={14} className="text-primary" />
+                  <p className="text-sm text-foreground">Lead pipeline</p>
                 </div>
-                <button onClick={() => navigate('/leads')} className="flex items-center gap-0.5 text-xs text-blue-600 hover:text-blue-700 transition-colors">
+                <button onClick={() => navigate('/leads')} className="flex items-center gap-0.5 text-xs text-primary hover:text-primary transition-colors">
                   View all <ArrowRight size={11} />
                 </button>
               </div>
@@ -463,26 +588,26 @@ export function HomePage() {
                   || l.companyName
                   || 'Lead';
                 return (
-                  <div className="rounded-xl bg-white border border-slate-200 overflow-hidden">
-                    <div className="flex divide-x divide-slate-100">
+                  <div className="rounded-xl bg-card border border-border overflow-hidden">
+                    <div className="flex divide-x divide-border">
                       {[
-                        { label: 'New', count: leads.filter((l) => l.stage === 'new').length, color: 'text-blue-600', dot: 'bg-blue-500' },
-                        { label: 'Contacted', count: leads.filter((l) => l.stage === 'contacted').length, color: 'text-amber-600', dot: 'bg-amber-500' },
-                        { label: 'Quoted', count: leads.filter((l) => l.stage === 'quoted').length, color: 'text-violet-600', dot: 'bg-violet-500' },
+                        { label: 'New', count: leads.filter((l) => l.stage === 'new').length, color: 'text-primary', dot: 'bg-primary' },
+                        { label: 'Contacted', count: leads.filter((l) => l.stage === 'contacted').length, color: 'text-warning', dot: 'bg-warning' },
+                        { label: 'Quoted', count: leads.filter((l) => l.stage === 'quoted').length, color: 'text-primary', dot: 'bg-primary' },
                       ].map(({ label, count, color, dot }) => (
-                        <button key={label} onClick={() => navigate('/leads')} className="flex-1 flex flex-col items-center py-3.5 hover:bg-slate-50 transition-colors">
+                        <button key={label} onClick={() => navigate('/leads')} className="flex-1 flex flex-col items-center py-3.5 hover:bg-secondary transition-colors">
                           <span className={`flex size-1.5 rounded-full mb-1.5 ${dot}`} />
                           <p className={`text-xs ${color}`}>{count}</p>
-                          <p className="text-xs text-slate-400 mt-0.5">{label}</p>
+                          <p className="text-xs text-muted-foreground mt-0.5">{label}</p>
                         </button>
                       ))}
                     </div>
                     {newLeads.length > 0 && (
-                      <div className="border-t border-slate-100 px-4 py-3">
+                      <div className="border-t border-border px-4 py-3">
                         <button onClick={() => navigate('/leads')} className="flex items-center gap-2.5 w-full text-left hover:opacity-80 transition-opacity">
-                          <span className="size-1.5 rounded-full bg-blue-500 shrink-0 animate-pulse" />
-                          <p className="text-xs text-slate-600 flex-1">
-                            <span className="text-slate-900">{leadDisplayName(newLeads[0]!)}</span>
+                          <span className="size-1.5 rounded-full bg-primary shrink-0 animate-pulse" />
+                          <p className="text-xs text-muted-foreground flex-1">
+                            <span className="text-foreground">{leadDisplayName(newLeads[0]!)}</span>
                             {newLeads[0]!.sourceDetail && (
                               <>
                                 {' '}— {newLeads[0]!.sourceDetail!.slice(0, 45)}
@@ -490,12 +615,12 @@ export function HomePage() {
                               </>
                             )}
                           </p>
-                          <ChevronRight size={12} className="text-slate-300 shrink-0" />
+                          <ChevronRight size={12} className="text-muted-foreground shrink-0" />
                         </button>
                       </div>
                     )}
-                    <div className="border-t border-slate-100 px-4 py-2.5 bg-slate-50">
-                      <p className="text-xs text-slate-400">
+                    <div className="border-t border-border px-4 py-2.5 bg-secondary">
+                      <p className="text-xs text-muted-foreground">
                         ${(pipelineValueCents / 100).toLocaleString()} est. pipeline value · {pipeline.length} active
                       </p>
                     </div>
@@ -522,7 +647,7 @@ export function HomePage() {
                           message={item.message}
                           sub={item.sub}
                           action={item.action}
-                          actionClass={item.type === 'overdue' ? 'text-red-600' : 'text-blue-600'}
+                          actionClass={item.type === 'overdue' ? 'text-destructive' : 'text-primary'}
                           onAction={() => navigate(item.to)}
                         />
                       </div>
@@ -533,12 +658,12 @@ export function HomePage() {
             )}
 
             {/* Pending estimates */}
-            {(estimatesQuery.isLoading || estimatesQuery.error || pendingEsts.length > 0) && (
+            {(estimatesLoading || estimatesQuery.error || pendingEsts.length > 0) && (
               <section className="px-4 py-5">
                 <SectionHead label="Pending estimates" count={pendingEsts.length} onAll={() => navigate('/estimates')} />
-                {estimatesQuery.isLoading ? (
+                {estimatesLoading ? (
                   <div className="flex items-center justify-center py-6">
-                    <div className="h-5 w-5 animate-spin rounded-full border-2 border-slate-900 border-t-transparent" />
+                    <div className="h-5 w-5 animate-spin rounded-full border-2 border-primary border-t-transparent" />
                   </div>
                 ) : estimatesQuery.error ? (
                   <ErrorState
@@ -546,24 +671,28 @@ export function HomePage() {
                     onRetry={() => estimatesQuery.refetch()}
                   />
                 ) : (
-                  <div className="rounded-xl bg-white border border-slate-200 divide-y divide-slate-100 overflow-hidden">
+                  <div className="rounded-xl bg-card border border-border divide-y divide-border overflow-hidden">
                     {pendingEsts.map(est => (
                       <button
                         key={est.id}
                         onClick={() => navigate(`/estimates/${est.id}`)}
-                        className="flex items-center gap-3 w-full px-4 py-3.5 text-left hover:bg-slate-50 transition-colors group"
+                        className="flex items-center gap-3 w-full px-4 py-3.5 text-left hover:bg-secondary transition-colors group"
                       >
-                        <div className="flex size-8 items-center justify-center rounded-xl shrink-0 bg-blue-100">
-                          <Send size={14} className="text-blue-500" />
+                        <div className="flex size-8 items-center justify-center rounded-xl shrink-0 bg-primary/10">
+                          <Send size={14} className="text-primary" />
                         </div>
                         <div className="flex-1 min-w-0">
-                          <p className="text-sm text-slate-800 truncate">{customerName(est.customer)}</p>
-                          <p className="text-xs text-slate-400 mt-0.5">
+                          <p className="text-sm text-foreground truncate">{customerName(est.customer)}</p>
+                          <p className="text-xs text-muted-foreground mt-0.5">
                             {est.estimateNumber}{est.sentAt ? ` · Sent ${formatDate(est.sentAt, tz)}` : ''}
                           </p>
                         </div>
                         <div className="flex flex-col items-end gap-1 shrink-0">
-                          <p className="text-sm text-slate-700">{centsToDisplay(est.totalCents)}</p>
+                          <p className="text-sm text-foreground">
+                            {getEstimateTotalCents(est) === null
+                              ? '—'
+                              : centsToDisplay(getEstimateTotalCents(est)!)}
+                          </p>
                           <StatusBadge status={normalizeEstimateStatus(est.status)} size="sm" />
                         </div>
                       </button>
@@ -574,23 +703,23 @@ export function HomePage() {
             )}
 
             {/* Unpaid invoices */}
-            {(invoicesQuery.isLoading || invoicesQuery.error || unpaidInvs.length > 0) && (
+            {(invoicesLoading || invoicesQuery.error || unpaidInvs.length > 0) && (
               <section className="px-4 py-5">
                 <div className="flex items-center justify-between mb-2.5">
                   <div className="flex items-center gap-2">
-                    <p className="text-sm text-slate-700">Outstanding invoices</p>
-                    <span className="flex items-center justify-center min-w-[18px] h-[18px] rounded-full bg-slate-200 text-xs text-slate-600 px-1.5">{unpaidInvs.length}</span>
+                    <p className="text-sm text-foreground">Outstanding invoices</p>
+                    <span className="flex items-center justify-center min-w-[18px] h-[18px] rounded-full bg-secondary text-xs text-muted-foreground px-1.5">{unpaidInvs.length}</span>
                   </div>
                   <div className="flex items-center gap-2">
-                    <span className="text-sm text-amber-700">${totalOut.toLocaleString()}</span>
-                    <button onClick={() => navigate('/reports/money')} className="flex items-center gap-0.5 text-xs text-blue-600 hover:text-blue-700">
+                    <span className="text-sm text-warning">${totalOut.toLocaleString()}</span>
+                    <button onClick={() => navigate('/reports/money')} className="flex items-center gap-0.5 text-xs text-primary hover:text-primary">
                       Money summary <ArrowRight size={11} />
                     </button>
                   </div>
                 </div>
-                {invoicesQuery.isLoading ? (
+                {invoicesLoading ? (
                   <div className="flex items-center justify-center py-6">
-                    <div className="h-5 w-5 animate-spin rounded-full border-2 border-slate-900 border-t-transparent" />
+                    <div className="h-5 w-5 animate-spin rounded-full border-2 border-primary border-t-transparent" />
                   </div>
                 ) : invoicesQuery.error ? (
                   <ErrorState
@@ -598,29 +727,29 @@ export function HomePage() {
                     onRetry={() => invoicesQuery.refetch()}
                   />
                 ) : (
-                  <div className="rounded-xl bg-white border border-slate-200 divide-y divide-slate-100 overflow-hidden">
+                  <div className="rounded-xl bg-card border border-border divide-y divide-border overflow-hidden">
                     {unpaidInvs.map(inv => {
                       const overdue = isOverdue(inv);
                       return (
                         <button
                           key={inv.id}
                           onClick={() => navigate(`/invoices/${inv.id}`)}
-                          className="flex items-center gap-3 w-full px-4 py-3.5 text-left hover:bg-slate-50 transition-colors"
+                          className="flex items-center gap-3 w-full px-4 py-3.5 text-left hover:bg-secondary transition-colors"
                         >
                           <div className={`flex size-8 items-center justify-center rounded-xl shrink-0 ${
-                            overdue ? 'bg-red-100' : 'bg-amber-100'
+                            overdue ? 'bg-destructive/10' : 'bg-warning/10'
                           }`}>
-                            <DollarSign size={14} className={overdue ? 'text-red-500' : 'text-amber-600'} />
+                            <DollarSign size={14} className={overdue ? 'text-destructive' : 'text-warning'} />
                           </div>
                           <div className="flex-1 min-w-0">
-                            <p className="text-sm text-slate-800 truncate">{customerName(inv.customer)}</p>
-                            <p className={`text-xs mt-0.5 ${overdue ? 'text-red-500' : 'text-slate-400'}`}>
+                            <p className="text-sm text-foreground truncate">{customerName(inv.customer)}</p>
+                            <p className={`text-xs mt-0.5 ${overdue ? 'text-destructive' : 'text-muted-foreground'}`}>
                               {inv.invoiceNumber}
                               {overdue ? ` · OVERDUE since ${inv.dueDate ?? ''}` : inv.dueDate ? ` · Due ${inv.dueDate}` : ''}
                             </p>
                           </div>
                           <div className="flex flex-col items-end gap-1 shrink-0">
-                            <p className="text-sm text-slate-700">{centsToDisplay(inv.totalCents)}</p>
+                            <p className="text-sm text-foreground">{centsToDisplay(inv.totalCents)}</p>
                             <StatusBadge status={overdue ? 'Overdue' : 'Unpaid'} size="sm" />
                           </div>
                         </button>
@@ -631,36 +760,41 @@ export function HomePage() {
               </section>
             )}
 
-            {/* Quick actions */}
+            {/* Quick actions — each opens the conversational flow (Epic 12.8):
+                the assistant auto-submits the prefilled `q` and drafts a
+                proposal for approval, so creates stay proposal-first. */}
             <section className="px-4 py-5">
               <SectionHead label="Quick actions" />
               <div className="grid grid-cols-2 gap-2">
                 {[
-                  { label: 'Approval inbox', icon: Bell,         color: 'text-blue-600',   bg: 'bg-blue-50',   to: '/inbox'          },
-                  { label: 'Money summary',  icon: TrendingUp,   color: 'text-amber-700',  bg: 'bg-amber-50',  to: '/reports/money'  },
-                  { label: 'New estimate',   icon: FileText,     color: 'text-indigo-600', bg: 'bg-indigo-50', to: '/estimates'      },
-                  { label: 'New invoice',    icon: DollarSign,   color: 'text-amber-600',  bg: 'bg-amber-50',  to: '/invoices'       },
-                ].map(({ label, icon: Icon, color, bg, to }) => (
+                  { label: 'Add customer',  icon: UserPlus,     color: 'text-primary',   bg: 'bg-primary/10',   q: 'Add a new customer'    },
+                  { label: 'Schedule',      icon: CalendarPlus, color: 'text-primary', bg: 'bg-primary/10', q: 'Schedule a new job'    },
+                  { label: 'New estimate',  icon: FileText,     color: 'text-primary', bg: 'bg-primary/10', q: 'Create a new estimate' },
+                  { label: 'New invoice',   icon: DollarSign,   color: 'text-warning',  bg: 'bg-warning/10',  q: 'Create a new invoice'  },
+                ].map(({ label, icon: Icon, color, bg, q }) => (
                   <button
                     key={label}
-                    onClick={() => navigate(to)}
-                    className="flex items-center gap-2 rounded-xl bg-white border border-slate-200 px-3.5 py-3 text-left hover:border-slate-300 hover:shadow-sm transition-all"
+                    onClick={() => navigate(`/assistant?q=${encodeURIComponent(q)}`)}
+                    className="flex min-h-11 items-center gap-2 rounded-xl bg-card border border-border px-3.5 py-3 text-left hover:border-border hover:shadow-sm transition-all"
                   >
                     <span className={`flex size-7 items-center justify-center rounded-lg ${bg} shrink-0`}>
                       <Icon size={14} className={color} />
                     </span>
-                    <span className="text-sm text-slate-700">{label}</span>
+                    <span className="text-sm text-foreground">{label}</span>
                   </button>
                 ))}
               </div>
             </section>
 
+            {/* Recent activity feed (Epic 12.7) */}
+            <ActivityFeedCard />
+
             {/* All clear */}
-            {attentionItems.length === 0 && unpaidInvs.length === 0 && pendingEsts.length === 0 && !jobsQuery.isLoading && !estimatesQuery.isLoading && !invoicesQuery.isLoading && !jobsQuery.error && !estimatesQuery.error && !invoicesQuery.error && (
+            {attentionItems.length === 0 && unpaidInvs.length === 0 && pendingEsts.length === 0 && !todayLoading && !estimatesLoading && !invoicesLoading && !todayError && !estimatesQuery.error && !invoicesQuery.error && (
               <section className="px-4 py-8 flex flex-col items-center gap-2">
-                <CheckCircle2 size={28} className="text-green-500" />
-                <p className="text-sm text-slate-600">All clear — nothing urgent</p>
-                <p className="text-xs text-slate-400">You're on top of everything today</p>
+                <CheckCircle2 size={28} className="text-success" />
+                <p className="text-sm text-muted-foreground">All clear — nothing urgent</p>
+                <p className="text-xs text-muted-foreground">You're on top of everything today</p>
               </section>
             )}
           </div>

@@ -17,6 +17,7 @@
  * flags. The web client opts in based on a runtime flag.
  */
 import type { IncomingMessage, Server as HttpServer } from 'http';
+import { isDraining } from './drain-state';
 import type { Socket } from 'net';
 import { WebSocketServer, WebSocket, type RawData } from 'ws';
 import { createLogger } from '../logging/logger';
@@ -24,6 +25,7 @@ import { BoundedSendQueue, type Priority } from './bounded-send-queue';
 import {
   globalConnectionRegistry,
   ConnectionRegistry,
+  ConnectionLease,
 } from './connection-registry';
 import {
   ReconnectGuard,
@@ -35,6 +37,7 @@ import {
   WS_IDLE_TIMEOUT_MS,
   priorityForFrame,
   wsClientFrameSchema,
+  type WsChannel,
   type WsClientFrame,
   type WsServerFrame,
 } from './protocol';
@@ -63,6 +66,42 @@ export interface AuthResult {
   tenantTier?: string;
 }
 
+/** Presence entry as sent to clients on the dispatch channel. */
+export interface DispatchPresenceEntry {
+  userId: string;
+  displayName: string;
+  appointmentId: string | null;
+  mode: 'viewing' | 'dragging';
+}
+
+/**
+ * UC-3 — dispatch presence seam, injected from app.ts (the ws layer stays
+ * decoupled from the dispatch modules; see dispatch/presence-gateway.ts for
+ * the production wiring against the presence store + board event bus).
+ */
+export interface DispatchPresenceGatewayDeps {
+  /** Record a heartbeat; implementation publishes presence_updated on change. */
+  update(input: {
+    tenantId: string;
+    userId: string;
+    displayName: string;
+    date: string;
+    mode: 'viewing' | 'dragging';
+    appointmentId: string | null;
+  }): Promise<void>;
+  /** Drop a user's presence; implementation publishes on change. */
+  clear(input: { tenantId: string; userId: string; date: string }): Promise<void>;
+  /** Active presence for a board date (the WS "presence read"). */
+  list(tenantId: string, date: string): Promise<DispatchPresenceEntry[]>;
+  /** Board event feed for (tenant, date) — fires for local AND (via the UC-4
+   *  Redis mirror) remote-replica events. Returns an unsubscribe fn. */
+  subscribeBoard(
+    tenantId: string,
+    date: string,
+    listener: (event: { type: string; date: string }) => void,
+  ): () => void;
+}
+
 export interface ClientGatewayDeps {
   auth: AuthResolver;
   registry?: ConnectionRegistry;
@@ -72,6 +111,8 @@ export interface ClientGatewayDeps {
   /** Per-connection queue caps. */
   queueMaxMsgs?: number;
   queueMaxBytes?: number;
+  /** UC-3 — enables the dispatch presence channel when provided. */
+  dispatchPresence?: DispatchPresenceGatewayDeps;
   /**
    * Runtime kill switch — consulted on every upgrade. When this returns
    * false, the upgrade is rejected with 503 even if the gateway was
@@ -96,21 +137,29 @@ export class ClientGatewayConnection {
   private subscriptions: Set<string> = new Set();
   private closed = false;
   private draining = false;
+  private readonly dispatchPresence?: DispatchPresenceGatewayDeps;
+  /** Board dates this connection heartbeated presence for — cleared on close
+   *  (WS parity with the HTTP client's DELETE-on-unmount; TTL is the backstop). */
+  private readonly presenceDates: Set<string> = new Set();
+  /** Per-date board-event-bus subscriptions feeding dispatch.presence pushes. */
+  private readonly dispatchBoardSubs: Map<string, () => void> = new Map();
 
   constructor(
     private readonly ws: WebSocket,
     auth: AuthResult,
-    private readonly registry: ConnectionRegistry,
+    private readonly lease: ConnectionLease,
     cfg: {
       heartbeatIntervalMs: number;
       idleTimeoutMs: number;
       queueMaxMsgs: number;
       queueMaxBytes: number;
+      dispatchPresence?: DispatchPresenceGatewayDeps;
     },
   ) {
     this.tenantId = auth.tenantId;
     this.userId = auth.userId;
     this.tenantTier = auth.tenantTier ?? 'standard';
+    this.dispatchPresence = cfg.dispatchPresence;
 
     this.queue = new BoundedSendQueue({
       surface: SURFACE,
@@ -135,6 +184,9 @@ export class ClientGatewayConnection {
 
     this.heartbeatTimer = setInterval(() => {
       if (this.closed) return;
+      // U3b — re-up the connection-cap lease so a long-lived connection isn't
+      // reclaimed by its TTL on the Redis registry; no-op for the in-memory one.
+      void this.lease.refresh().catch(() => {});
       this.send({
         kind: 'heartbeat',
         serverTimeMs: Date.now(),
@@ -165,10 +217,15 @@ export class ClientGatewayConnection {
     } as WsServerFrame;
     const priority: Priority = priorityForFrame(sized);
     const data = JSON.stringify(sized);
+    // dispatch.presence frames are full-state snapshots, so under queue
+    // pressure keeping only the latest per date is lossless (the gateway
+    // coalesce fn returns the newer frame when there is no delta to merge).
     const coalesceKey =
       sized.kind === 'assistant.token'
         ? `assistant:${sized.correlationId ?? 'default'}`
-        : undefined;
+        : sized.kind === 'dispatch.presence'
+          ? `presence:${sized.date}`
+          : undefined;
 
     const accepted = this.queue.enqueue({ priority, data, coalesceKey });
     if (!accepted && priority === 'terminal') {
@@ -187,7 +244,7 @@ export class ClientGatewayConnection {
    * leakage on the assistant channel where tokens are published per
    * userId.
    */
-  isSubscribed(channel: 'assistant' | 'voice', targetId?: string): boolean {
+  isSubscribed(channel: WsChannel, targetId?: string): boolean {
     const key = `${channel}:${targetId ?? '*'}`;
     return this.subscriptions.has(key);
   }
@@ -277,17 +334,83 @@ export class ClientGatewayConnection {
         const key = `${parsed.channel}:${parsed.targetId ?? '*'}`;
         this.subscriptions.add(key);
         this.send({ kind: 'subscribed', channel: parsed.channel });
+        if (parsed.channel === 'dispatch' && parsed.targetId) {
+          this.armDispatchSubscription(parsed.targetId);
+        }
         return;
       }
       case 'unsubscribe': {
         const key = `${parsed.channel}:${parsed.targetId ?? '*'}`;
         this.subscriptions.delete(key);
+        if (parsed.channel === 'dispatch' && parsed.targetId) {
+          this.dispatchBoardSubs.get(parsed.targetId)?.();
+          this.dispatchBoardSubs.delete(parsed.targetId);
+        }
         return;
       }
       case 'ping': {
         this.send({ kind: 'heartbeat', serverTimeMs: Date.now() });
         return;
       }
+      case 'presence.update': {
+        if (!this.dispatchPresence || !this.userId) {
+          this.send({
+            kind: 'error',
+            code: 'PRESENCE_UNSUPPORTED',
+            message: 'dispatch presence is not available on this connection',
+          });
+          return;
+        }
+        this.presenceDates.add(parsed.date);
+        // Fire-and-forget, mirroring the HTTP PUT's 204-no-body contract —
+        // the TTL lease self-heals a lost beat.
+        void this.dispatchPresence
+          .update({
+            tenantId: this.tenantId,
+            userId: this.userId,
+            displayName: parsed.displayName || this.userId,
+            date: parsed.date,
+            mode: parsed.mode,
+            appointmentId: parsed.appointmentId ?? null,
+          })
+          .catch(() => {});
+        return;
+      }
+      case 'presence.clear': {
+        if (!this.dispatchPresence || !this.userId) return;
+        this.presenceDates.delete(parsed.date);
+        void this.dispatchPresence
+          .clear({ tenantId: this.tenantId, userId: this.userId, date: parsed.date })
+          .catch(() => {});
+        return;
+      }
+    }
+  }
+
+  /**
+   * Wire a board-event-bus subscription for a dispatch-channel date so this
+   * connection receives presence pushes (the same trigger the SSE route uses;
+   * with the UC-4 mirror it fires for changes made on any replica). Pushes the
+   * current state immediately so a late subscriber doesn't wait for the next
+   * change.
+   */
+  private armDispatchSubscription(date: string): void {
+    if (!this.dispatchPresence || this.dispatchBoardSubs.has(date)) return;
+    const unsubscribe = this.dispatchPresence.subscribeBoard(this.tenantId, date, (event) => {
+      if (event.type === 'presence_updated') void this.pushDispatchPresence(date);
+    });
+    this.dispatchBoardSubs.set(date, unsubscribe);
+    void this.pushDispatchPresence(date);
+  }
+
+  private async pushDispatchPresence(date: string): Promise<void> {
+    if (!this.dispatchPresence || this.closed) return;
+    try {
+      const entries = await this.dispatchPresence.list(this.tenantId, date);
+      if (this.closed) return;
+      this.send({ kind: 'dispatch.presence', channel: 'dispatch', date, entries });
+    } catch {
+      // best-effort — the next presence_updated retries.
     }
   }
 
@@ -299,7 +422,7 @@ export class ClientGatewayConnection {
    * see isSubscribed for the matching policy.
    */
   private authorizeSubscribe(
-    channel: 'assistant' | 'voice',
+    channel: WsChannel,
     targetId: string | undefined,
   ): string | null {
     if (channel === 'assistant') {
@@ -313,6 +436,16 @@ export class ClientGatewayConnection {
       if (!targetId) return 'voice subscriptions require a session id';
       return null;
     }
+    if (channel === 'dispatch') {
+      // Target is a board date; presence is tenant-scoped by the connection's
+      // auth (the store/list are always keyed on this.tenantId), so any
+      // authenticated tenant member may observe their own tenant's presence.
+      if (!targetId || !/^\d{4}-\d{2}-\d{2}$/.test(targetId)) {
+        return 'dispatch subscriptions require a board date targetId (YYYY-MM-DD)';
+      }
+      if (!this.dispatchPresence) return 'dispatch channel is not available';
+      return null;
+    }
     return 'unsupported channel';
   }
 
@@ -324,7 +457,20 @@ export class ClientGatewayConnection {
     this.idleTimer = null;
     this.subscriptions.clear();
     this.queue.clear();
-    this.registry.release(SURFACE, this.tenantId, this.tenantTier);
+    for (const unsubscribe of this.dispatchBoardSubs.values()) unsubscribe();
+    this.dispatchBoardSubs.clear();
+    // WS parity with the HTTP client's DELETE-on-unmount: a closed tab's
+    // presence disappears immediately instead of lingering until the TTL.
+    if (this.dispatchPresence && this.userId) {
+      for (const date of this.presenceDates) {
+        void this.dispatchPresence
+          .clear({ tenantId: this.tenantId, userId: this.userId, date })
+          .catch(() => {});
+      }
+    }
+    this.presenceDates.clear();
+    // Fire-and-forget: socket teardown can't await; idempotent + TTL backstop.
+    void this.lease.release().catch(() => {});
     wsDisconnectTotal.inc({ surface: SURFACE, reason });
   }
 
@@ -345,7 +491,7 @@ export interface ClientGatewayHandle {
   dispose: () => void;
   /** Broadcast to every connection subscribed to (channel, targetId). */
   broadcast: (
-    channel: 'assistant' | 'voice',
+    channel: WsChannel,
     targetId: string | undefined,
     frame: WsServerFrame,
     tenantId?: string,
@@ -367,10 +513,10 @@ export interface ClientGatewayHandle {
  * publishing without a redeploy.
  */
 let activePublisher: ClientGatewayHandle['broadcast'] | null = null;
-let channelGate: ((channel: 'assistant' | 'voice', tenantId?: string) => boolean) | null = null;
+let channelGate: ((channel: WsChannel, tenantId?: string) => boolean) | null = null;
 
 export function publish(
-  channel: 'assistant' | 'voice',
+  channel: WsChannel,
   targetId: string | undefined,
   frame: WsServerFrame,
   tenantId?: string,
@@ -381,7 +527,7 @@ export function publish(
 }
 
 export function setChannelGate(
-  gate: ((channel: 'assistant' | 'voice', tenantId?: string) => boolean) | null,
+  gate: ((channel: WsChannel, tenantId?: string) => boolean) | null,
 ): void {
   channelGate = gate;
 }
@@ -420,12 +566,28 @@ export function attachClientGateway(
     idleTimeoutMs: deps.idleTimeoutMs ?? WS_IDLE_TIMEOUT_MS,
     queueMaxMsgs: deps.queueMaxMsgs ?? 200,
     queueMaxBytes: deps.queueMaxBytes ?? 4 * 1024 * 1024,
+    dispatchPresence: deps.dispatchPresence,
   };
 
   const upgradeHandler = (req: IncomingMessage, socket: Socket, head: Buffer): void => {
     const url = req.url ?? '';
     const pathOnly = url.split('?')[0];
     if (pathOnly !== CLIENT_GATEWAY_PATH) return;
+
+    // On 'upgrade' Node hands over a raw net.Socket and stops managing its
+    // errors. Until handleUpgrade attaches ws-level handling, a peer reset
+    // during the async auth/lease window below would emit 'error' with no
+    // listener → uncaughtException → process exit. Swallow it; the
+    // rejection/cleanup paths handle the dead socket.
+    socket.on('error', () => {});
+
+    // P4/U-P4a: while this replica is draining for shutdown, reject new upgrades
+    // with Retry-After so the client reconnects to a live replica instead of
+    // attaching to one that's about to exit.
+    if (isDraining()) {
+      rejectUpgrade(socket, 503, 5_000);
+      return;
+    }
 
     // Runtime kill switch: if the operator has flipped
     // ws.client_gateway_enabled off, reject the upgrade. We still own
@@ -441,7 +603,7 @@ export function attachClientGateway(
       'unknown';
 
     Promise.resolve(deps.auth.authenticate(req))
-      .then((auth) => {
+      .then(async (auth) => {
         if (!auth) {
           rejectUpgrade(socket, 401);
           return;
@@ -457,13 +619,14 @@ export function attachClientGateway(
           return;
         }
 
-        if (!registry.tryAcquire(SURFACE, auth.tenantId, auth.tenantTier ?? 'standard')) {
+        const lease = await registry.acquire(SURFACE, auth.tenantId, auth.tenantTier ?? 'standard');
+        if (!lease) {
           rejectUpgrade(socket, 429, 1_000);
           return;
         }
 
         wss.handleUpgrade(req, socket, head, (ws) => {
-          const conn = new ClientGatewayConnection(ws, auth, registry, cfg);
+          const conn = new ClientGatewayConnection(ws, auth, lease, cfg);
           conns.add(conn);
           let bucket = byTenant.get(auth.tenantId);
           if (!bucket) {

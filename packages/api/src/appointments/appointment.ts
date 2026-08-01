@@ -1,7 +1,7 @@
 import { v4 as uuidv4 } from 'uuid';
 import { validateAppointmentTimes, validateAppointmentUpdateInput } from './validation';
 import { assertValidAppointmentTransition } from './appointment-lifecycle';
-import { VALID_TIMEZONES } from '../settings/settings';
+import { isValidIanaTimezone } from '../settings/settings';
 import { toUtcDate } from './time';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
 import { AppointmentTypeValue } from '@ai-service-os/shared';
@@ -40,8 +40,13 @@ export interface Appointment {
    * voice message). Unique per tenant via a partial index; when set, a
    * second create with the same key returns the existing appointment
    * instead of inserting a duplicate.
+   *
+   * Explicit `null` is a write-time signal to RELEASE the key (set the
+   * column to SQL NULL) — used when an appointment is canceled so a later
+   * write can reuse the same canonical key without deduping back into the
+   * canceled row. Reads still surface `undefined` for an unset column.
    */
-  idempotencyKey?: string;
+  idempotencyKey?: string | null;
   notes?: string;
   /**
    * Typed visit kind (estimate/repair/install/maintenance/diagnostic).
@@ -105,6 +110,11 @@ export interface UpdateAppointmentInput {
   status?: AppointmentStatus;
   holdPendingApproval?: boolean;
   holdExpiryAt?: Date;
+  /**
+   * Pass `null` to release the dedup key (e.g. on cancel); `string` to set
+   * it. The pg repo maps this onto the `idempotency_key` column.
+   */
+  idempotencyKey?: string | null;
 }
 
 export interface AppointmentListOptions {
@@ -168,7 +178,7 @@ export function validateAppointmentInput(input: CreateAppointmentInput): string[
   if (!input.scheduledStart) errors.push('scheduledStart is required');
   if (!input.scheduledEnd) errors.push('scheduledEnd is required');
   if (!input.timezone) errors.push('timezone is required');
-  if (input.timezone && !VALID_TIMEZONES.includes(input.timezone)) errors.push('Invalid timezone');
+  if (input.timezone && !isValidIanaTimezone(input.timezone)) errors.push('Invalid timezone');
   if (!input.createdBy) errors.push('createdBy is required');
   return errors;
 }
@@ -277,7 +287,7 @@ export async function updateAppointment(
   actorId?: string,
   actorRole?: string,
 ): Promise<Appointment | null> {
-  if (input.timezone && !VALID_TIMEZONES.includes(input.timezone)) {
+  if (input.timezone && !isValidIanaTimezone(input.timezone)) {
     throw new Error('Validation failed: Invalid timezone');
   }
 
@@ -285,7 +295,7 @@ export async function updateAppointment(
   if (!existing) return null;
 
   const errors: string[] = [];
-  if (input.timezone && !VALID_TIMEZONES.includes(input.timezone)) errors.push('Invalid timezone');
+  if (input.timezone && !isValidIanaTimezone(input.timezone)) errors.push('Invalid timezone');
   if (errors.length > 0) throw new Error(`Validation failed: ${errors.join(', ')}`);
 
   const validation = validateAppointmentUpdateInput(existing, input);

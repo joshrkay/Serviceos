@@ -61,6 +61,18 @@ describe('BillingService — trial flows', () => {
       // letting Stripe mint a new customer per session.
       expect(body).toContain('customer=cus_test_abc');
       expect(body).not.toContain('customer_email=');
+
+      // U9 invariant (SaaS side): the Rivet SaaS subscription is billed on the
+      // PLATFORM account and must NEVER carry a Stripe-Account header — that
+      // header would route the platform's own subscription revenue onto a
+      // tenant's connected account. Neither the customer-create nor the
+      // checkout-session call may set it. (Connect direct charges — the
+      // customer-facing invoice/deposit surfaces — are the ONLY paths that do;
+      // see connect-routing-audit.test.ts.)
+      for (const call of fetchMock.mock.calls) {
+        const headers = ((call[1] as RequestInit).headers ?? {}) as Record<string, string>;
+        expect(headers['Stripe-Account']).toBeUndefined();
+      }
       delete process.env.STRIPE_PRICE_ID;
     });
 
