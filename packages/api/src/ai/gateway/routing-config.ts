@@ -1,15 +1,12 @@
 /**
- * Task-to-model routing table.
+ * TaskRouteConfig — the per-task model + generation-defaults shape.
  *
- * Model identifiers use the OpenRouter namespaced format by default.
- * Override per-environment via AI_DEFAULT_MODEL and AI_PROVIDER_BASE_URL env vars.
+ * Used by the complexity classifier (complexity-classifier.ts: ComplexityRoute
+ * extends this). The live gateway routing is `LLMGatewayConfig.taskRouting`
+ * (gateway.ts), assembled by the factory from env vars — not from a static
+ * table here.
  *
- * System prompts are intentionally generic — they reference "service businesses"
- * rather than specific verticals so the same routing works for HVAC, plumbing,
- * painting, electrical, or any service type the tenant configures.
- *
- * GatewayConfig and TaskRouteConfig were moved here from the deleted types.ts
- * (P2-027 Gap 2) since routing-config.ts is their natural home.
+ * Moved here from the deleted types.ts (P2-027 Gap 2).
  */
 
 export interface TaskRouteConfig {
@@ -18,145 +15,3 @@ export interface TaskRouteConfig {
   temperature?: number;
   maxTokens?: number;
 }
-
-export interface GatewayConfig {
-  /** Per-task routing: taskType → model + defaults */
-  routes: Record<string, TaskRouteConfig>;
-  /** Fallback model when taskType has no route */
-  defaultModel: string;
-}
-
-const defaultModel = process.env.AI_DEFAULT_MODEL || 'openai/gpt-4o-mini';
-const advancedModel = process.env.AI_ADVANCED_MODEL || 'openai/gpt-4o';
-
-export const DEFAULT_GATEWAY_CONFIG: GatewayConfig = {
-  defaultModel,
-  routes: {
-    draft_estimate: {
-      model: advancedModel,
-      temperature: 0.2,
-      maxTokens: 2048,
-      systemPrompt:
-        'You are an expert estimator for service businesses. ' +
-        'Generate accurate, detailed job estimates in structured JSON. ' +
-        'Adapt terminology and line items to the tenant\'s configured service vertical. ' +
-        'Use integer cents for all money values.',
-    },
-    classify_intent: {
-      model: defaultModel,
-      temperature: 0.0,
-      maxTokens: 256,
-      systemPrompt:
-        'Classify the user intent from the provided text. ' +
-        'Respond only with valid JSON matching the IntentClassification schema.',
-    },
-    // Multi-action chaining: split a multi-action utterance into ordered
-    // atomic sub-utterances. Cheap model (same tier as classify_intent);
-    // each segment is re-classified separately afterward.
-    decompose_transcript: {
-      model: defaultModel,
-      temperature: 0.0,
-      maxTokens: 512,
-      systemPrompt:
-        'Split a service-business voice command into ordered atomic actions. ' +
-        'Respond only with valid JSON. Be conservative — most commands are a single action.',
-    },
-    extract_job_details: {
-      model: defaultModel,
-      temperature: 0.1,
-      maxTokens: 1024,
-      systemPrompt:
-        'Extract structured job details from the provided text or transcript. ' +
-        'Respond only with valid JSON. Use integer cents for money.',
-    },
-    generate_proposal: {
-      model: advancedModel,
-      temperature: 0.1,
-      maxTokens: 4096,
-      systemPrompt:
-        'You generate human-review proposals for a service business OS. ' +
-        'Output strictly valid JSON matching the proposal payload schema. ' +
-        'Never include personally identifiable information in reasoning fields.',
-    },
-    transcription_correction: {
-      model: defaultModel,
-      temperature: 0.1,
-      maxTokens: 2048,
-      systemPrompt:
-        'Correct errors in voice transcriptions for a service business context. ' +
-        'Fix technical terminology, trade-specific terms, names, and numbers. ' +
-        'Return corrected text only — no commentary.',
-    },
-    summarize_conversation: {
-      model: defaultModel,
-      temperature: 0.3,
-      maxTokens: 512,
-    },
-    extract_business_profile: {
-      model: advancedModel,
-      temperature: 0.1,
-      maxTokens: 1024,
-      systemPrompt:
-        'Extract structured business profile data from an onboarding voice transcript. ' +
-        'Return valid JSON. Identify the business vertical (e.g., HVAC, plumbing, ' +
-        'painting, electrical, contracting, or any service trade described).',
-    },
-    extract_categories: {
-      model: advancedModel,
-      temperature: 0.1,
-      maxTokens: 1024,
-      systemPrompt:
-        'Extract service categories from an onboarding voice transcript. ' +
-        'Match against the canonical category taxonomy when possible, ' +
-        'but also capture custom categories the business describes. Return valid JSON.',
-    },
-    extract_pricing: {
-      model: advancedModel,
-      temperature: 0.1,
-      maxTokens: 1024,
-      systemPrompt:
-        'Extract pricing information from an onboarding voice transcript. ' +
-        'All amounts in integer cents. Return valid JSON.',
-    },
-    extract_team: {
-      model: defaultModel,
-      temperature: 0.1,
-      maxTokens: 1024,
-      systemPrompt:
-        'Extract team member information from an onboarding voice transcript. ' +
-        'Distinguish technician, dispatcher, and owner roles. Return valid JSON.',
-    },
-    extract_schedule: {
-      model: defaultModel,
-      temperature: 0.1,
-      maxTokens: 1024,
-      systemPrompt:
-        'Extract working hours and SLA expectations from an onboarding voice transcript. ' +
-        'Use 24-hour time format. Return valid JSON.',
-    },
-    generate_clarification_questions: {
-      model: defaultModel,
-      temperature: 0.3,
-      maxTokens: 512,
-      systemPrompt:
-        'Generate targeted follow-up questions for incomplete onboarding data. ' +
-        'Questions should be specific, not generic. Return valid JSON.',
-    },
-    // Rivet P2 F-1 — Supervisor Agent advisory annotator. Cheap model
-    // (same tier as classify_intent): the output is a short risk note
-    // attached to proposals already awaiting human review. It NEVER
-    // approves, blocks, or changes status — advisory only.
-    supervisor_annotate: {
-      model: defaultModel,
-      temperature: 0.0,
-      maxTokens: 512,
-      systemPrompt:
-        'You annotate pending proposals in a service-business review queue with ' +
-        'a short advisory risk note for the human reviewer. ' +
-        'Respond ONLY with valid JSON: {"riskSummary": string, "flags": string[]}. ' +
-        'riskSummary is one or two plain sentences; flags are short snake_case ' +
-        'labels (e.g. "high_amount", "irreversible"). You are advisory only — ' +
-        'never instruct approval or rejection.',
-    },
-  },
-};

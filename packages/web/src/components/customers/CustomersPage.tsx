@@ -1,23 +1,28 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router';
+import { toast } from 'sonner';
 import {
   Search, Plus, ChevronRight, MapPin, X, Check,
   AlertTriangle, FileText, Briefcase, ArrowLeft,
   User, Phone, Mail,
 } from 'lucide-react';
-import type { ServiceType } from '../../data/mock-data';
+import type { ServiceType } from '../../types/job-ui';
 import type { Customer, CustomerListItem } from '@ai-service-os/shared';
 import { useListQuery } from '../../hooks/useListQuery';
 import { useMutation } from '../../hooks/useMutation';
+import { nameSimilarity, FUZZY_NAME_THRESHOLD } from '../../utils/name-similarity';
 import { Spinner, EmptyState } from '../ui';
 import { ErrorState } from '../ErrorState';
+import { track } from '../../lib/analytics';
 import { NewEstimateFlow } from '../estimates/NewEstimateFlow';
 import { NewJobFlow } from '../jobs/NewJobFlow';
 
+// Service type is a category, not a status — Path A keeps the chip calm and
+// neutral; the emoji (SVC_ICON) + label carry the per-type distinction.
 const SVC_CHIP: Record<ServiceType, string> = {
-  HVAC:     'bg-blue-50 text-blue-700 border-blue-100',
-  Plumbing: 'bg-green-50 text-green-700 border-green-100',
-  Painting: 'bg-violet-50 text-violet-700 border-violet-100',
+  HVAC:     'bg-secondary text-foreground border-border',
+  Plumbing: 'bg-secondary text-foreground border-border',
+  Painting: 'bg-secondary text-foreground border-border',
 };
 const SVC_ICON: Record<ServiceType, string> = { HVAC: '❄️', Plumbing: '🔧', Painting: '🎨' };
 
@@ -39,6 +44,18 @@ type SheetStep = 'contact' | 'location' | 'done';
 
 function normalizePhone(p: string) { return p.replace(/\D/g, ''); }
 
+// Acquisition channels ("How did you hear about us?") — must mirror the API's
+// CUSTOMER_SOURCES enum (packages/api/src/customers/customer.ts).
+const CUSTOMER_SOURCE_OPTIONS: { value: string; label: string }[] = [
+  { value: 'website', label: 'Website' },
+  { value: 'referral', label: 'Referral' },
+  { value: 'google', label: 'Google' },
+  { value: 'social_media', label: 'Social media' },
+  { value: 'advertising', label: 'Advertising' },
+  { value: 'repeat_client', label: 'Repeat client' },
+  { value: 'other', label: 'Other' },
+];
+
 interface AddCustomerSheetProps {
   onClose: () => void;
   onNewEstimate: () => void;
@@ -54,11 +71,17 @@ function AddCustomerSheet({ onClose, onNewEstimate, onNewJob, existingCustomers,
 
   const [step, setStep] = useState<SheetStep>('contact');
   const [form, setForm] = useState({
-    name: '', phone: '', email: '',
+    name: '', phone: '', email: '', source: '',
     locNickname: 'Home', locAddress: '', locServiceTypes: [] as ServiceType[],
     locNotes: '', locAccessCode: '',
+    // D4: SMS consent capture
+    smsConsent: false,
   });
   const [dismissedDupe, setDismissedDupe] = useState(false);
+  const [saving, setSaving] = useState(false);
+  // If createCustomer succeeded but createLocation failed, remember the new
+  // customer id so a retry POSTs only the location — never a second customer.
+  const createdCustomerIdRef = useRef<string | null>(null);
 
   // ── Live duplicate detection ─────────────────────────────────────
   const phoneDigits = normalizePhone(form.phone);
@@ -69,8 +92,22 @@ function AddCustomerSheet({ onClose, onNewEstimate, onNewJob, existingCustomers,
   const emailMatch = !dismissedDupe && emailNorm.length >= 5 && emailNorm.includes('@')
     ? existingCustomers.find(c => (c.email ?? '').toLowerCase() === emailNorm)
     : null;
-  const duplicate = phoneMatch ?? emailMatch;
-  const matchReason = phoneMatch ? 'Same phone number' : 'Same email address';
+  // 4.4 — fuzzy name match (pg_trgm parity). Only a fallback when phone/email
+  // didn't already pin an exact match, so the card surfaces the strongest
+  // signal. The server re-checks on save (authoritative).
+  const nameTrim = form.name.trim();
+  const nameMatch = !dismissedDupe && !phoneMatch && !emailMatch && nameTrim.length >= 3
+    ? existingCustomers.find(c => nameSimilarity(nameTrim, customerDisplayName(c)) >= FUZZY_NAME_THRESHOLD)
+    : null;
+  const duplicate = phoneMatch ?? emailMatch ?? nameMatch;
+  const matchReason = phoneMatch
+    ? 'Same phone number'
+    : emailMatch
+      ? 'Same email address'
+      : 'Similar name';
+  // A fuzzy name hit is a "possible" duplicate; an exact phone/email hit is
+  // definite.
+  const isFuzzyMatch = !phoneMatch && !emailMatch && !!nameMatch;
 
   function toggleSvc(s: ServiceType) {
     setForm(f => ({
@@ -95,25 +132,61 @@ function AddCustomerSheet({ onClose, onNewEstimate, onNewJob, existingCustomers,
     };
   }
 
+  async function handleAddCustomer() {
+    if (saving) return; // in-flight guard — a double-tap must not double-POST
+    setSaving(true);
+    try {
+      let customerId = createdCustomerIdRef.current;
+      if (!customerId) {
+        const nameParts = form.name.trim().split(' ');
+        const createdCustomer = await createCustomer({
+          firstName: nameParts[0] || 'New',
+          lastName: nameParts.slice(1).join(' ') || 'Customer',
+          primaryPhone: form.phone || undefined,
+          email: form.email || undefined,
+          source: form.source || undefined,
+          // D4: Include SMS consent in create
+          smsConsent: form.smsConsent,
+        });
+        customerId = createdCustomer.id;
+        createdCustomerIdRef.current = customerId;
+      }
+      const address = splitAddress(form.locAddress);
+      await createLocation({
+        customerId,
+        label: form.locNickname || 'Primary',
+        ...address,
+        accessNotes: form.locNotes || undefined,
+        isPrimary: true,
+      });
+      onCreate();
+      setStep('done');
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Failed to add customer');
+    } finally {
+      setSaving(false);
+    }
+  }
+
   const stepDots: SheetStep[] = ['contact', 'location'];
   const stepIdx = stepDots.indexOf(step);
 
   return (
     <div className="fixed inset-0 z-50 flex flex-col justify-end bg-black/40" onClick={onClose}>
       <div
-        className="bg-white rounded-t-3xl max-h-[94vh] overflow-hidden flex flex-col"
+        className="bg-card rounded-t-3xl max-h-[94vh] overflow-hidden flex flex-col"
         style={{ animation: 'slideUp 0.25s cubic-bezier(0.32,0.72,0,1)' }}
         onClick={e => e.stopPropagation()}
       >
         {/* Handle */}
         <div className="flex justify-center pt-3 pb-1 shrink-0">
-          <div className="w-9 h-1 rounded-full bg-slate-200" />
+          <div className="w-9 h-1 rounded-full bg-border" />
         </div>
 
         {/* Header */}
-        <div className="flex items-center gap-3 px-5 py-3 border-b border-slate-100 shrink-0">
+        <div className="flex items-center gap-3 px-5 py-3 border-b border-border shrink-0">
           {step === 'location' && (
-            <button onClick={() => setStep('contact')} className="text-slate-400 hover:text-slate-600 transition-colors">
+            <button onClick={() => setStep('contact')} className="text-muted-foreground hover:text-foreground transition-colors">
               <ArrowLeft size={16} />
             </button>
           )}
@@ -121,17 +194,17 @@ function AddCustomerSheet({ onClose, onNewEstimate, onNewJob, existingCustomers,
             <div className="flex gap-1.5">
               {stepDots.map((_, i) => (
                 <div key={i} className={`rounded-full transition-all duration-200 ${
-                  i < stepIdx  ? 'w-2 h-2 bg-blue-400' :
-                  i === stepIdx ? 'w-5 h-2 bg-slate-900' : 'w-2 h-2 bg-slate-200'
+                  i < stepIdx  ? 'w-2 h-2 bg-primary' :
+                  i === stepIdx ? 'w-5 h-2 bg-primary' : 'w-2 h-2 bg-border'
                 }`} />
               ))}
             </div>
           )}
-          <p className="text-sm text-slate-600 flex-1">
+          <p className="text-sm text-foreground flex-1">
             {step === 'contact'  ? 'Contact info' :
              step === 'location' ? 'Service location' : 'Customer added'}
           </p>
-          <button onClick={onClose} className="text-slate-400 hover:text-slate-600 transition-colors">
+          <button onClick={onClose} className="text-muted-foreground hover:text-foreground transition-colors">
             <X size={16} />
           </button>
         </div>
@@ -142,26 +215,28 @@ function AddCustomerSheet({ onClose, onNewEstimate, onNewJob, existingCustomers,
           {/* ── Step 1: Contact ── */}
           {step === 'contact' && (
             <div className="flex flex-col gap-4">
-              <p className="text-xs text-slate-500">Customer name and contact details.</p>
+              <p className="text-xs text-muted-foreground">Customer name and contact details.</p>
 
               <div className="flex flex-col gap-2.5">
                 {/* Name */}
                 <div className="relative">
-                  <div className="absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400">
+                  <div className="absolute left-3.5 top-1/2 -translate-y-1/2 text-muted-foreground">
                     <User size={14} />
                   </div>
                   <input
                     value={form.name}
-                    onChange={e => setForm(f => ({ ...f, name: e.target.value }))}
+                    onChange={e => { setDismissedDupe(false); setForm(f => ({ ...f, name: e.target.value })); }}
                     placeholder="Full name *"
                     autoFocus
-                    className="w-full rounded-xl border border-slate-200 pl-10 pr-4 py-3 text-sm focus:outline-none focus:border-blue-400 transition-colors"
+                    className={`w-full rounded-xl border pl-10 pr-4 py-3 text-sm focus:outline-none transition-colors ${
+                      nameMatch && !dismissedDupe ? 'border-warning/30 bg-warning/5 focus:border-warning' : 'border-border focus:border-primary'
+                    }`}
                   />
                 </div>
 
                 {/* Phone */}
                 <div className="relative">
-                  <div className="absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400">
+                  <div className="absolute left-3.5 top-1/2 -translate-y-1/2 text-muted-foreground">
                     <Phone size={14} />
                   </div>
                   <input
@@ -170,14 +245,14 @@ function AddCustomerSheet({ onClose, onNewEstimate, onNewJob, existingCustomers,
                     placeholder="Phone number"
                     type="tel"
                     className={`w-full rounded-xl border pl-10 pr-4 py-3 text-sm focus:outline-none transition-colors ${
-                      phoneMatch && !dismissedDupe ? 'border-amber-300 bg-amber-50/50 focus:border-amber-400' : 'border-slate-200 focus:border-blue-400'
+                      phoneMatch && !dismissedDupe ? 'border-warning/30 bg-warning/5 focus:border-warning' : 'border-border focus:border-primary'
                     }`}
                   />
                 </div>
 
                 {/* Email */}
                 <div className="relative">
-                  <div className="absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400">
+                  <div className="absolute left-3.5 top-1/2 -translate-y-1/2 text-muted-foreground">
                     <Mail size={14} />
                   </div>
                   <input
@@ -186,49 +261,64 @@ function AddCustomerSheet({ onClose, onNewEstimate, onNewJob, existingCustomers,
                     placeholder="Email address"
                     type="email"
                     className={`w-full rounded-xl border pl-10 pr-4 py-3 text-sm focus:outline-none transition-colors ${
-                      emailMatch && !dismissedDupe ? 'border-amber-300 bg-amber-50/50 focus:border-amber-400' : 'border-slate-200 focus:border-blue-400'
+                      emailMatch && !dismissedDupe ? 'border-warning/30 bg-warning/5 focus:border-warning' : 'border-border focus:border-primary'
                     }`}
                   />
                 </div>
               </div>
 
+              {/* ── How did you hear about us? ── */}
+              <select
+                aria-label="How did you hear about us?"
+                value={form.source}
+                onChange={e => setForm(f => ({ ...f, source: e.target.value }))}
+                className="w-full rounded-xl border border-border px-4 py-3 text-sm text-foreground focus:outline-none focus:border-primary transition-colors min-h-11"
+              >
+                <option value="">How did you hear about us? (optional)</option>
+                {CUSTOMER_SOURCE_OPTIONS.map(o => (
+                  <option key={o.value} value={o.value}>{o.label}</option>
+                ))}
+              </select>
+
               {/* ── Duplicate match card ── */}
               {duplicate && (
                 <div
-                  className="flex flex-col gap-3 rounded-2xl border border-amber-200 bg-amber-50 p-4"
+                  className="flex flex-col gap-3 rounded-2xl border border-warning/30 bg-warning/10 p-4"
                   style={{ animation: 'fadeUp 0.2s ease' }}
                 >
                   <div className="flex items-start gap-2.5">
-                    <div className="flex size-7 items-center justify-center rounded-full bg-amber-200 shrink-0">
-                      <AlertTriangle size={13} className="text-amber-700" />
+                    <div className="flex size-7 items-center justify-center rounded-full bg-warning/20 shrink-0">
+                      <AlertTriangle size={13} className="text-warning" />
                     </div>
                     <div>
-                      <p className="text-sm text-amber-900">Already in your system</p>
-                      <p className="text-xs text-amber-600 mt-0.5">{matchReason} matches an existing customer</p>
+                      <p className="text-sm text-warning">
+                        {isFuzzyMatch ? 'Possible duplicate' : 'Already in your system'}
+                      </p>
+                      <p className="text-xs text-warning mt-0.5">{matchReason} matches an existing customer</p>
                     </div>
                   </div>
 
                   {/* Matched customer card */}
-                  <div className="flex items-center gap-3 bg-white rounded-xl border border-amber-200 px-3.5 py-3">
-                    <span className="flex size-9 items-center justify-center rounded-full bg-slate-800 text-white text-xs shrink-0">
+                  <div className="flex items-center gap-3 bg-card rounded-xl border border-warning/30 px-3.5 py-3">
+                    <span className="flex size-9 items-center justify-center rounded-full bg-primary text-primary-foreground text-xs shrink-0">
                       {customerDisplayName(duplicate).split(' ').map(n => n[0]).join('')}
                     </span>
                     <div className="flex-1 min-w-0">
-                      <p className="text-sm text-slate-800">{customerDisplayName(duplicate)}</p>
-                      <p className="text-xs text-slate-400 mt-0.5 truncate">{duplicate.primaryPhone}</p>
+                      <p className="text-sm text-foreground">{customerDisplayName(duplicate)}</p>
+                      <p className="text-xs text-muted-foreground mt-0.5 truncate">{duplicate.primaryPhone}</p>
                     </div>
                   </div>
 
                   <div className="flex gap-2">
                     <button
                       onClick={() => { navigate(`/customers/${duplicate.id}`); onClose(); }}
-                      className="flex-1 rounded-xl border border-amber-300 bg-white text-amber-800 py-2.5 text-sm hover:bg-amber-50 transition-colors"
+                      className="flex-1 rounded-xl border border-warning/30 bg-card text-warning py-2.5 text-sm hover:bg-warning/10 transition-colors"
                     >
                       View {customerDisplayName(duplicate).split(' ')[0]}
                     </button>
                     <button
                       onClick={() => setDismissedDupe(true)}
-                      className="flex-1 rounded-xl bg-amber-500 text-white py-2.5 text-sm hover:bg-amber-600 transition-colors"
+                      className="flex-1 rounded-xl bg-warning text-primary-foreground py-2.5 text-sm hover:bg-warning transition-colors"
                     >
                       Continue creating
                     </button>
@@ -239,7 +329,7 @@ function AddCustomerSheet({ onClose, onNewEstimate, onNewJob, existingCustomers,
               <button
                 onClick={() => setStep('location')}
                 disabled={!canGoToLocation}
-                className="w-full rounded-xl bg-slate-900 text-white py-3.5 text-sm disabled:opacity-40 hover:bg-slate-700 transition-colors mt-1"
+                className="w-full rounded-xl bg-primary text-primary-foreground py-3.5 text-sm disabled:opacity-40 hover:bg-primary/90 transition-colors mt-1"
               >
                 Next: Add location →
               </button>
@@ -249,33 +339,33 @@ function AddCustomerSheet({ onClose, onNewEstimate, onNewJob, existingCustomers,
           {/* ── Step 2: Location ── */}
           {step === 'location' && (
             <div className="flex flex-col gap-4">
-              <p className="text-xs text-slate-500">Where do you service <span className="text-slate-700">{form.name}</span>?</p>
+              <p className="text-xs text-muted-foreground">Where do you service <span className="text-foreground">{form.name}</span>?</p>
 
               <div className="flex flex-col gap-2.5">
                 <input
                   value={form.locNickname}
                   onChange={e => setForm(f => ({ ...f, locNickname: e.target.value }))}
                   placeholder="Location name (e.g. Home, Office)"
-                  className="w-full rounded-xl border border-slate-200 px-4 py-3 text-sm focus:outline-none focus:border-blue-400 transition-colors"
+                  className="w-full rounded-xl border border-border px-4 py-3 text-sm focus:outline-none focus:border-primary transition-colors"
                 />
                 <input
                   value={form.locAddress}
                   onChange={e => setForm(f => ({ ...f, locAddress: e.target.value }))}
                   placeholder="Street address *"
-                  className={`w-full rounded-xl border px-4 py-3 text-sm focus:outline-none focus:border-blue-400 transition-colors ${
-                    !form.locAddress && form.locNickname ? 'border-slate-300' : 'border-slate-200'
+                  className={`w-full rounded-xl border px-4 py-3 text-sm focus:outline-none focus:border-primary transition-colors ${
+                    !form.locAddress && form.locNickname ? 'border-border' : 'border-border'
                   }`}
                 />
 
                 <div>
-                  <p className="text-xs text-slate-500 mb-2">Service type *</p>
+                  <p className="text-xs text-muted-foreground mb-2">Service type *</p>
                   <div className="flex gap-2">
                     {SERVICE_OPTIONS.map(s => (
                       <button key={s} onClick={() => toggleSvc(s)}
                         className={`flex items-center gap-1.5 rounded-full border px-3.5 py-2 text-sm transition-all flex-1 justify-center ${
                           form.locServiceTypes.includes(s)
                             ? `${SVC_CHIP[s]} border-current shadow-sm`
-                            : 'border-slate-200 text-slate-500 hover:border-slate-300 bg-white'
+                            : 'border-border text-muted-foreground hover:border-border bg-card'
                         }`}>
                         {SVC_ICON[s]} {s}
                       </button>
@@ -287,40 +377,39 @@ function AddCustomerSheet({ onClose, onNewEstimate, onNewJob, existingCustomers,
                   value={form.locNotes}
                   onChange={e => setForm(f => ({ ...f, locNotes: e.target.value }))}
                   placeholder="Access notes (optional)"
-                  className="w-full rounded-xl border border-slate-200 px-4 py-3 text-sm focus:outline-none focus:border-blue-400 transition-colors"
+                  className="w-full rounded-xl border border-border px-4 py-3 text-sm focus:outline-none focus:border-primary transition-colors"
                 />
                 <input
                   value={form.locAccessCode}
                   onChange={e => setForm(f => ({ ...f, locAccessCode: e.target.value }))}
                   placeholder="Gate / lockbox code (optional)"
-                  className="w-full rounded-xl border border-slate-200 px-4 py-3 text-sm focus:outline-none focus:border-blue-400 transition-colors"
+                  className="w-full rounded-xl border border-border px-4 py-3 text-sm focus:outline-none focus:border-primary transition-colors"
                 />
               </div>
 
+              {/* D4: SMS consent checkbox */}
+              <div className="flex items-start gap-3 rounded-xl border border-border bg-secondary/30 p-3">
+                <input
+                  type="checkbox"
+                  id="smsConsentCreate"
+                  checked={form.smsConsent}
+                  onChange={(e) => setForm(f => ({ ...f, smsConsent: e.target.checked }))}
+                  className="mt-0.5 h-4 w-4 rounded border-border text-primary focus:ring-primary"
+                />
+                <label htmlFor="smsConsentCreate" className="flex-1 cursor-pointer">
+                  <span className="text-sm text-foreground">SMS consent</span>
+                  <p className="text-xs text-muted-foreground mt-0.5">
+                    Customer agrees to receive text messages for appointments, estimates, and invoices.
+                  </p>
+                </label>
+              </div>
+
               <button
-                onClick={async () => {
-                  const nameParts = form.name.trim().split(' ');
-                  const createdCustomer = await createCustomer({
-                    firstName: nameParts[0] || 'New',
-                    lastName: nameParts.slice(1).join(' ') || 'Customer',
-                    primaryPhone: form.phone || undefined,
-                    email: form.email || undefined,
-                  });
-                  const address = splitAddress(form.locAddress);
-                  await createLocation({
-                    customerId: createdCustomer.id,
-                    label: form.locNickname || 'Primary',
-                    ...address,
-                    accessNotes: form.locNotes || undefined,
-                    isPrimary: true,
-                  });
-                  onCreate();
-                  setStep('done');
-                }}
-                disabled={!canSave}
-                className="w-full rounded-xl bg-slate-900 text-white py-3.5 text-sm disabled:opacity-40 hover:bg-slate-700 transition-colors mt-1"
+                onClick={handleAddCustomer}
+                disabled={!canSave || saving}
+                className="w-full rounded-xl bg-primary text-primary-foreground py-3.5 text-sm disabled:opacity-40 hover:bg-primary/90 transition-colors mt-1"
               >
-                Add customer
+                {saving ? 'Adding…' : 'Add customer'}
               </button>
             </div>
           )}
@@ -331,14 +420,14 @@ function AddCustomerSheet({ onClose, onNewEstimate, onNewJob, existingCustomers,
               {/* Success */}
               <div className="flex flex-col items-center gap-3 text-center">
                 <div className="relative flex size-16 items-center justify-center">
-                  <div className="absolute inset-0 rounded-full bg-green-100 animate-pulse" style={{ animationDuration: '1.2s', animationIterationCount: 1 }} />
-                  <div className="relative flex size-16 items-center justify-center rounded-full bg-green-100">
-                    <Check size={28} className="text-green-600" />
+                  <div className="absolute inset-0 rounded-full bg-success/15 animate-pulse" style={{ animationDuration: '1.2s', animationIterationCount: 1 }} />
+                  <div className="relative flex size-16 items-center justify-center rounded-full bg-success/15">
+                    <Check size={28} className="text-success" />
                   </div>
                 </div>
                 <div>
-                  <p className="text-slate-900" style={{ fontSize: '1.05rem' }}>{form.name} added</p>
-                  <p className="text-sm text-slate-400 mt-0.5">
+                  <p className="text-foreground" style={{ fontSize: '1.05rem' }}>{form.name} added</p>
+                  <p className="text-sm text-muted-foreground mt-0.5">
                     {form.locNickname} · {form.locAddress.split(',')[0]}
                   </p>
                   {form.locServiceTypes.length > 0 && (
@@ -355,31 +444,31 @@ function AddCustomerSheet({ onClose, onNewEstimate, onNewJob, existingCustomers,
 
               {/* What's next */}
               <div className="w-full">
-                <p className="text-xs text-slate-400 text-center mb-3">What would you like to do next?</p>
+                <p className="text-xs text-muted-foreground text-center mb-3">What would you like to do next?</p>
                 <div className="grid grid-cols-2 gap-3">
                   <button
                     onClick={onNewEstimate}
-                    className="flex flex-col items-center gap-2.5 rounded-2xl border-2 border-slate-200 bg-white py-5 px-3 hover:border-indigo-300 hover:bg-indigo-50/60 active:scale-[0.97] transition-all group"
+                    className="flex flex-col items-center gap-2.5 rounded-2xl border-2 border-border bg-card py-5 px-3 hover:border-primary/40 hover:bg-primary/10 active:scale-[0.97] transition-all group"
                   >
-                    <div className="flex size-11 items-center justify-center rounded-xl bg-indigo-100 group-hover:bg-indigo-200 transition-colors">
-                      <FileText size={20} className="text-indigo-600" />
+                    <div className="flex size-11 items-center justify-center rounded-xl bg-primary/15 group-hover:bg-primary/20 transition-colors">
+                      <FileText size={20} className="text-primary" />
                     </div>
                     <div className="text-center">
-                      <p className="text-sm text-slate-800">New estimate</p>
-                      <p className="text-xs text-slate-400 mt-0.5">Build a quote</p>
+                      <p className="text-sm text-foreground">New estimate</p>
+                      <p className="text-xs text-muted-foreground mt-0.5">Build a quote</p>
                     </div>
                   </button>
 
                   <button
                     onClick={onNewJob}
-                    className="flex flex-col items-center gap-2.5 rounded-2xl border-2 border-slate-200 bg-white py-5 px-3 hover:border-blue-300 hover:bg-blue-50/60 active:scale-[0.97] transition-all group"
+                    className="flex flex-col items-center gap-2.5 rounded-2xl border-2 border-border bg-card py-5 px-3 hover:border-primary/40 hover:bg-primary/10 active:scale-[0.97] transition-all group"
                   >
-                    <div className="flex size-11 items-center justify-center rounded-xl bg-blue-100 group-hover:bg-blue-200 transition-colors">
-                      <Briefcase size={20} className="text-blue-600" />
+                    <div className="flex size-11 items-center justify-center rounded-xl bg-primary/15 group-hover:bg-primary/20 transition-colors">
+                      <Briefcase size={20} className="text-primary" />
                     </div>
                     <div className="text-center">
-                      <p className="text-sm text-slate-800">New job</p>
-                      <p className="text-xs text-slate-400 mt-0.5">Schedule work</p>
+                      <p className="text-sm text-foreground">New job</p>
+                      <p className="text-xs text-muted-foreground mt-0.5">Schedule work</p>
                     </div>
                   </button>
                 </div>
@@ -387,7 +476,7 @@ function AddCustomerSheet({ onClose, onNewEstimate, onNewJob, existingCustomers,
 
               <button
                 onClick={onClose}
-                className="text-sm text-slate-400 hover:text-slate-600 transition-colors"
+                className="text-sm text-muted-foreground hover:text-foreground transition-colors"
               >
                 Done for now
               </button>
@@ -410,16 +499,38 @@ type Filter = 'All' | ServiceType;
 export function CustomersPage() {
   const navigate = useNavigate();
   const [filter,       setFilter]       = useState<Filter>('All');
+  const [tagFilter,    setTagFilter]    = useState<string>('');
   const [showAdd,      setShowAdd]      = useState(false);
   const [showEstimate, setShowEstimate] = useState(false);
   const [showJob,      setShowJob]      = useState(false);
+  const [searchTerm,   setSearchTerm]   = useState('');
 
   const { data, total, isLoading, error, setSearch, refetch } = useListQuery<CustomerListItem>('/api/customers');
 
+  // customer_search_run (U6) — a debounced "search executed" signal, once the
+  // term settles (and again after the fetch updates `total`). PII GUARDRAIL:
+  // never the query text — only whether a query is present and how many
+  // results it returned.
+  useEffect(() => {
+    if (!searchTerm.trim()) return;
+    const id = setTimeout(() => {
+      track('customer_search_run', { has_query: true, result_count: total });
+    }, 500);
+    return () => clearTimeout(id);
+  }, [searchTerm, total]);
+
+  // 4.8 — tags filterable in the list. Distinct tags across the loaded set
+  // drive the chips; selection narrows the list (client-side, mirroring the
+  // service-type filter above).
+  const availableTags = [...new Set(data.flatMap(c => c.tags ?? []))].sort();
+
   // Client-side service type filter (API doesn't support this filter)
-  const filtered = filter === 'All'
+  let filtered = filter === 'All'
     ? data
     : data.filter(c => customerServiceTypes(c).includes(filter));
+  if (tagFilter) {
+    filtered = filtered.filter(c => (c.tags ?? []).includes(tagFilter));
+  }
 
   const totalLocations = data.reduce((n, c) => n + (c.locations?.length ?? 0), 0);
 
@@ -430,25 +541,25 @@ export function CustomersPage() {
         {/* header */}
         <div className="flex items-center justify-between mb-1">
           <div>
-            <h1 className="text-slate-900">Customers</h1>
-            <p className="text-xs text-slate-400 mt-0.5">
+            <h1 className="text-foreground">Customers</h1>
+            <p className="text-xs text-muted-foreground mt-0.5">
               {total} customers · {totalLocations} locations
             </p>
           </div>
           <button
             onClick={() => setShowAdd(true)}
-            className="flex items-center gap-1.5 rounded-xl bg-slate-900 text-white px-3.5 py-2.5 text-sm hover:bg-slate-700 transition-colors">
+            className="flex items-center gap-1.5 rounded-xl bg-primary text-primary-foreground px-3.5 py-2.5 text-sm hover:bg-primary/90 transition-colors">
             <Plus size={14} /> Add customer
           </button>
         </div>
 
         {/* search */}
-        <div className="flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-3.5 py-2.5 mt-4">
-          <Search size={15} className="text-slate-400 shrink-0" />
+        <div className="flex items-center gap-2 rounded-xl border border-border bg-card px-3.5 py-2.5 mt-4">
+          <Search size={15} className="text-muted-foreground shrink-0" />
           <input
-            onChange={e => setSearch(e.target.value)}
+            onChange={e => { setSearchTerm(e.target.value); setSearch(e.target.value); }}
             placeholder="Search name, address, phone…"
-            className="flex-1 text-sm text-slate-700 placeholder-slate-400 outline-none bg-transparent"
+            className="flex-1 text-sm text-foreground placeholder:text-muted-foreground outline-none bg-transparent"
           />
         </div>
 
@@ -458,8 +569,8 @@ export function CustomersPage() {
             <button key={f} onClick={() => setFilter(f)}
               className={`flex items-center gap-1.5 rounded-full border px-3.5 py-1.5 text-xs whitespace-nowrap transition-all shrink-0 ${
                 filter === f
-                  ? 'bg-slate-900 border-slate-900 text-white'
-                  : 'border-slate-200 text-slate-500 hover:border-slate-400'
+                  ? 'bg-primary border-primary text-primary-foreground'
+                  : 'border-border text-muted-foreground hover:border-border'
               }`}>
               {f !== 'All' && <span>{SVC_ICON[f as ServiceType]}</span>}
               {f}
@@ -467,16 +578,49 @@ export function CustomersPage() {
           ))}
         </div>
 
-        {/* list */}
-        {isLoading && (
+        {/* 4.8 — tag filter chips (only shown when the loaded set has tags) */}
+        {availableTags.length > 0 && (
+          <div
+            className="flex gap-2 mt-2 overflow-x-auto pb-1"
+            style={{ scrollbarWidth: 'none' }}
+            data-testid="tag-filters"
+          >
+            <button
+              onClick={() => setTagFilter('')}
+              className={`rounded-full border px-3.5 py-1.5 text-xs whitespace-nowrap transition-all shrink-0 ${
+                tagFilter === ''
+                  ? 'bg-primary border-primary text-primary-foreground'
+                  : 'border-border text-muted-foreground hover:border-border'
+              }`}
+            >
+              All tags
+            </button>
+            {availableTags.map(tag => (
+              <button
+                key={tag}
+                onClick={() => setTagFilter(t => (t === tag ? '' : tag))}
+                className={`rounded-full border px-3.5 py-1.5 text-xs whitespace-nowrap transition-all shrink-0 ${
+                  tagFilter === tag
+                    ? 'bg-primary border-primary text-primary-foreground'
+                    : 'border-border text-muted-foreground hover:border-border'
+                }`}
+              >
+                #{tag}
+              </button>
+            ))}
+          </div>
+        )}
+
+        {/* list — keep cards mounted during background refresh */}
+        {isLoading && data.length === 0 && (
           <div className="flex items-center justify-center py-16">
-            <Spinner size="md" className="text-slate-900" label="Loading customers" />
+            <Spinner size="md" className="text-foreground" label="Loading customers" />
           </div>
         )}
         {error && (
           <ErrorState message="Failed to load customers" onRetry={refetch} />
         )}
-        {!isLoading && !error && (
+        {!(isLoading && data.length === 0) && !error && (
           <div className="flex flex-col gap-2.5 mt-4">
             {filtered.map(c => {
               const svcTypes = customerServiceTypes(c);
@@ -487,27 +631,33 @@ export function CustomersPage() {
                 <button
                   key={c.id}
                   onClick={() => navigate(`/customers/${c.id}`)}
-                  className="flex items-center gap-3.5 rounded-2xl bg-white border border-slate-200 px-4 py-3.5 text-left hover:border-slate-300 hover:shadow-sm transition-all active:scale-[0.99]"
+                  className="flex items-center gap-3.5 rounded-2xl bg-card border border-border px-4 py-3.5 text-left hover:border-border hover:shadow-sm transition-all active:scale-[0.99]"
                 >
-                  <span className="flex size-10 shrink-0 items-center justify-center rounded-full bg-slate-800 text-white text-xs">
+                  <span className="flex size-10 shrink-0 items-center justify-center rounded-full bg-primary text-primary-foreground text-xs">
                     {name.split(' ').map(n => n[0]).join('')}
                   </span>
 
                   <div className="flex-1 min-w-0">
                     <div className="flex items-center gap-2 flex-wrap">
-                      <p className="text-sm text-slate-900">{name}</p>
+                      <p className="text-sm text-foreground">{name}</p>
                       {c.tags?.includes('VIP') && (
-                        <span className="text-xs bg-amber-100 text-amber-700 rounded-full px-2 py-0.5">VIP</span>
+                        <span className="text-xs bg-warning/15 text-warning rounded-full px-2 py-0.5">VIP</span>
                       )}
                       {(c.openJobs ?? 0) > 0 && (
-                        <span className="text-xs bg-blue-50 text-blue-700 border border-blue-100 rounded-full px-2 py-0.5">
+                        <span className="text-xs bg-primary/10 text-primary border border-primary/20 rounded-full px-2 py-0.5">
                           {c.openJobs} open
                         </span>
                       )}
                     </div>
+                    {c.primaryPhone && (
+                      <div className="flex items-center gap-1.5 mt-0.5">
+                        <Phone size={10} className="text-muted-foreground shrink-0" />
+                        <p className="text-xs text-muted-foreground truncate">{c.primaryPhone}</p>
+                      </div>
+                    )}
                     <div className="flex items-center gap-1.5 mt-0.5">
-                      <MapPin size={10} className="text-slate-400 shrink-0" />
-                      <p className="text-xs text-slate-400 truncate">
+                      <MapPin size={10} className="text-muted-foreground shrink-0" />
+                      <p className="text-xs text-muted-foreground truncate">
                         {locCount > 1 ? `${locCount} locations` : (c.locations?.[0]?.street1 ?? '')}
                       </p>
                     </div>
@@ -518,12 +668,12 @@ export function CustomersPage() {
                         </span>
                       ))}
                       {c.lastService && (
-                        <span className="text-xs text-slate-400 ml-auto shrink-0">{c.lastService}</span>
+                        <span className="text-xs text-muted-foreground ml-auto shrink-0">{c.lastService}</span>
                       )}
                     </div>
                   </div>
 
-                  <ChevronRight size={15} className="shrink-0 text-slate-300" />
+                  <ChevronRight size={15} className="shrink-0 text-muted-foreground" />
                 </button>
               );
             })}

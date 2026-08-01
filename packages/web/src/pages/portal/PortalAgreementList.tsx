@@ -45,10 +45,10 @@ export function PortalAgreementList({ token }: { token: string }) {
     };
   }, [token]);
 
-  if (!loaded) return <div className="text-slate-500">Loading agreements…</div>;
-  if (error) return <div className="text-rose-600 text-sm">{error}</div>;
+  if (!loaded) return <div className="text-muted-foreground">Loading agreements…</div>;
+  if (error) return <div className="text-destructive text-sm">{error}</div>;
   if (agreements.length === 0) {
-    return <div className="text-slate-500 text-sm">No agreements yet.</div>;
+    return <div className="text-muted-foreground text-sm">No agreements yet.</div>;
   }
 
   return (
@@ -59,15 +59,15 @@ export function PortalAgreementList({ token }: { token: string }) {
           title={a.name}
           subtitle={`Status: ${a.status.replace(/_/g, ' ')}`}
           trailing={
-            <span className="text-base font-semibold text-slate-900">
+            <span className="text-base font-semibold text-foreground">
               {formatPortalCents(a.priceCents)}
             </span>
           }
         >
           {a.description ? (
-            <div className="text-sm text-slate-700">{a.description}</div>
+            <div className="text-sm text-foreground">{a.description}</div>
           ) : null}
-          <div className="mt-2 text-xs text-slate-500">
+          <div className="mt-2 text-xs text-muted-foreground">
             Next service {instantDateFmt.format(new Date(a.nextRunAt))}
             {' · '}
             {formatDateOnly(a.startsOn)} →{' '}

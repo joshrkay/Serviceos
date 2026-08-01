@@ -375,6 +375,44 @@ describe('QuickBooks accounting sync — integration', () => {
     expect(receiptCalls).toHaveLength(2);
   });
 
+  it('pagination: syncs EVERY paid invoice, not just one page (backlog > pageSize is never dropped)', async () => {
+    await seedActiveIntegration(tenantA.tenantId);
+    const { jobId } = await seedCustomerJobLocation(tenantA, 'Paula');
+    // 5 paid invoices with a page size of 2 → 3 pages (2 + 2 + 1). Before the
+    // pagination fix, a fixed single fetch of `pageSize` would sync only 2 and
+    // permanently drop the other 3.
+    for (let i = 1; i <= 5; i++) {
+      await seedPaidInvoice(tenantA, jobId, `INV-P-00${i}`, 10000 + i);
+    }
+    const { fetchFn, calls } = makeQboFetch();
+
+    const result = await runAccountingSyncSweep({
+      integrationRepo,
+      syncLogRepo,
+      invoiceRepo,
+      customerRepo,
+      jobRepo,
+      qboConfig: QBO_CONFIG,
+      fetchFn,
+      logger,
+      invoicePageSize: 2,
+    });
+
+    expect(result.pushed).toBe(5); // all five, across three pages
+    const receiptCalls = calls.filter((c) => c.url.includes('/salesreceipt'));
+    expect(receiptCalls).toHaveLength(5);
+    const docNumbers = receiptCalls
+      .map((c) => (c.body as Record<string, unknown>).DocNumber)
+      .sort();
+    expect(docNumbers).toEqual([
+      'INV-P-001',
+      'INV-P-002',
+      'INV-P-003',
+      'INV-P-004',
+      'INV-P-005',
+    ]);
+  });
+
   it('failure path: QuickBooks 4xx on the receipt is captured as a failed sync_log row (caller is never thrown to)', async () => {
     const integrationId = await seedActiveIntegration(tenantA.tenantId);
     const { jobId } = await seedCustomerJobLocation(tenantA, 'Dan');

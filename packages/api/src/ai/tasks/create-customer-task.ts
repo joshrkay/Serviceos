@@ -33,6 +33,42 @@ import {
 } from '../../proposals/contracts/create-customer-contract';
 import { assertValidProposalPayload } from '../../proposals/contracts';
 import { getConfidenceLevel } from '../guardrails/confidence';
+import {
+  checkCustomerDuplicatesPg,
+  CustomerDuplicateLoader,
+  DuplicateWarning,
+} from '../../customers/dedup';
+
+/**
+ * Optional dependencies for the create_customer voice handler.
+ */
+export interface CreateCustomerTaskDeps {
+  /**
+   * Read-only duplicate loader. When wired (4.3 / 4.4), the handler runs a
+   * dedup check against existing customers BEFORE the proposal card is
+   * drafted and embeds any matches in `sourceContext.duplicateWarnings` so
+   * the human-approval card can offer "merge" vs "keep both". The query is
+   * read-only — the handler still mutates no state and never auto-executes.
+   */
+  duplicateLoader?: CustomerDuplicateLoader;
+  /**
+   * B8 (feat: voice-transcript-and-agent-paths) — whether a missing phone
+   * escalates to `needs_callback`. Defaults to `true`, preserving the
+   * telephony FSM's original behavior (`twilio-adapter.ts`): on a live
+   * call, the caller's phone IS the point — if caller-ID is blocked and
+   * they didn't state a callback, the FSM must ask for one.
+   *
+   * The voice worker (pre-recorded memos) and assistant chat have no
+   * caller-ID concept at all, so that same gate would reject perfectly
+   * valid phone-less create_customer proposals (e.g. "add customer Sarah",
+   * name + email only) that the thin passthrough handler always allowed.
+   * The shared handler-registry (`ai/orchestration/handler-registry.ts`)
+   * constructs this handler with `requirePhone: false` for exactly that
+   * reason — a missing phone there just means the proposal omits it,
+   * same as before.
+   */
+  requirePhone?: boolean;
+}
 
 /**
  * Voice-call signals the FSM forwards into TaskContext.existingEntities.
@@ -41,6 +77,7 @@ import { getConfidenceLevel } from '../guardrails/confidence';
  *   displayName        — caller's stated name from the LLM
  *   email              — caller's stated email
  *   phone              — caller's stated callback (rare; usually missing)
+ *   address            — caller's stated street address (free text, verbatim)
  *   callerIdPhone      — Twilio "from" header (caller-id)
  *   phoneBlocked       — true when caller-id was withheld / 'restricted'
  *   sessionId          — voice session uuid for proposal->session join
@@ -55,6 +92,7 @@ export interface CreateCustomerEntities {
   displayName?: string;
   email?: string;
   phone?: string;
+  address?: string;
   callerIdPhone?: string;
   phoneBlocked?: boolean;
   sessionId?: string;
@@ -78,6 +116,15 @@ export interface CreateCustomerTaskOutcome {
  */
 export const CREATE_CUSTOMER_CONFIRMATION_TTS =
   "Got it, I've sent your info to the office; we'll send you a confirmation.";
+
+/**
+ * B8 (feat: voice-transcript-and-agent-paths) — synthetic `_meta.markers`
+ * path for the advisory duplicate-customer warning. The warning concerns
+ * the whole proposal (name/phone/email jointly), not one payload field, so
+ * it uses a synthetic path — same convention as
+ * `proposals/supervisor/marker.ts`'s `SUPERVISOR_MARKER_PATH`.
+ */
+export const DUPLICATE_CUSTOMER_MARKER_PATH = '_duplicate';
 
 /**
  * Resolve the canonical phone for a new-customer proposal: prefer the
@@ -107,6 +154,41 @@ export function resolvePhone(input: {
 }
 
 /**
+ * Normalise a spoken name for the proposal payload. Speech-to-text
+ * frequently returns an all-lowercase token for names it does not
+ * recognise ("add a new customer, nguyen" → `nguyen`), which then
+ * lands in the CRM verbatim.
+ *
+ * Deliberately narrow — it fires only when BOTH hold:
+ *   1. the name contains no capital at all, so anything the transcriber
+ *      already cased (`McDonald`, `O'Brien`, `IBM`) is left byte-for-byte;
+ *   2. the name is made purely of name-shaped characters (letters, spaces,
+ *      hyphens, apostrophes, periods), so anything unusual — an injection
+ *      string, a handle, a payload probe — is stored verbatim exactly as
+ *      the caller said it, preserving the audit trail.
+ *
+ * Returns `undefined` for a missing/blank name so the caller's
+ * `needs_name` gate is unchanged.
+ */
+const NAME_SHAPED = /^[\p{Ll}\s'’.-]+$/u;
+
+export function capitalizeSpokenName(name: string | undefined): string | undefined {
+  const trimmed = name?.trim();
+  if (!trimmed || trimmed.length === 0) return undefined;
+  // Any capital, digit, or punctuation beyond ordinary name characters →
+  // leave it exactly as spoken.
+  if (!NAME_SHAPED.test(trimmed)) return trimmed;
+  return trimmed
+    .split(/(\s+)/) // keep separators so internal spacing round-trips
+    .map((token) =>
+      /\s/.test(token) || token.length === 0
+        ? token
+        : token.replace(/\p{Ll}/u, (ch) => ch.toUpperCase())
+    )
+    .join('');
+}
+
+/**
  * Build a CreateCustomerEntities object from a TaskContext.
  * Tolerant of missing fields — the caller passes whatever the FSM
  * accumulated.
@@ -130,6 +212,13 @@ function readEntities(context: TaskContext): CreateCustomerEntities {
     displayName: str('displayName') ?? str('customerName') ?? str('name'),
     email: str('email'),
     phone: str('phone'),
+    // The classifier emits `address` for create_customer. `serviceAddress`
+    // is accepted as a fallback because the same spoken sentence sometimes
+    // lands on that key when the model leans toward the add_service_location
+    // vocabulary — on a create_customer turn it means the same thing (the
+    // NEW customer's address), and silently dropping it is the bug this
+    // fallback closes.
+    address: str('address') ?? str('serviceAddress'),
     callerIdPhone: str('callerIdPhone'),
     phoneBlocked: bool('phoneBlocked'),
     sessionId: str('sessionId') ?? context.conversationId,
@@ -144,6 +233,13 @@ function readEntities(context: TaskContext): CreateCustomerEntities {
 
 export class CreateCustomerVoiceTaskHandler implements TaskHandler {
   readonly taskType: ProposalType = 'create_customer';
+  private readonly duplicateLoader?: CustomerDuplicateLoader;
+  private readonly requirePhone: boolean;
+
+  constructor(deps: CreateCustomerTaskDeps = {}) {
+    this.duplicateLoader = deps.duplicateLoader;
+    this.requirePhone = deps.requirePhone ?? true;
+  }
 
   async handle(context: TaskContext): Promise<TaskResult> {
     const outcome = await this.run(context);
@@ -198,8 +294,12 @@ export class CreateCustomerVoiceTaskHandler implements TaskHandler {
 
     const { phone, phoneSource } = resolvePhone(ents);
     // Path 4: phone blocked and no spoken callback — escalate via
-    // needs_callback so the FSM asks for a callback number.
-    if (!phone) {
+    // needs_callback so the FSM asks for a callback number. Only the
+    // telephony surface requires this (see CreateCustomerTaskDeps.requirePhone
+    // doc comment) — the voice worker and assistant chat have no caller-ID
+    // concept and allow a phone-less proposal, same as the pre-B8 thin
+    // passthrough handler did.
+    if (!phone && this.requirePhone) {
       return {
         status: 'needs_callback',
         message: 'Caller-ID is blocked and no callback number was provided',
@@ -212,7 +312,7 @@ export class CreateCustomerVoiceTaskHandler implements TaskHandler {
     // missing AND the only signal is caller-id, raise needs_name so
     // the FSM can prompt for the name. The contract requires `name` —
     // we never produce a contract-violating proposal.
-    const name = ents.displayName?.trim();
+    const name = capitalizeSpokenName(ents.displayName);
     if (!name || name.length === 0) {
       return {
         status: 'needs_name',
@@ -238,11 +338,34 @@ export class CreateCustomerVoiceTaskHandler implements TaskHandler {
       name,
       email: ents.email,
       phone,
+      address: ents.address,
       voice: Object.keys(voice).length > 0 ? voice : undefined,
       smsConsent: false, // tenant default; never auto-opt-in
     });
 
     const correlationId = ents.correlationId ?? context.conversationId;
+
+    // 4.3 / 4.4 — run the duplicate check BEFORE the proposal card is drafted
+    // so the approver sees "possible duplicate — merge or keep both" rather
+    // than discovering it after the write. Read-only and advisory: a match
+    // never blocks the draft (the human decides on the card). Best-effort —
+    // a loader failure must not sink the create flow.
+    let duplicateWarnings: DuplicateWarning[] = [];
+    if (this.duplicateLoader) {
+      try {
+        duplicateWarnings = await checkCustomerDuplicatesPg(
+          {
+            tenantId: context.tenantId,
+            firstName: name,
+            email: ents.email,
+            primaryPhone: phone,
+          },
+          this.duplicateLoader
+        );
+      } catch {
+        duplicateWarnings = [];
+      }
+    }
 
     const sourceContext: Record<string, unknown> = {
       source: 'voice',
@@ -254,10 +377,15 @@ export class CreateCustomerVoiceTaskHandler implements TaskHandler {
       ...(ents.callSid ? { callSid: ents.callSid } : {}),
       ...(ents.existingLeadId ? { existingLeadId: ents.existingLeadId, suggestLeadConversion: true } : {}),
       ...(context.conversationId ? { conversationId: context.conversationId } : {}),
+      ...(duplicateWarnings.length > 0
+        ? { duplicateWarnings, hasPossibleDuplicates: true }
+        : {}),
     };
 
+    const summaryPhone = phone ? ` (${phone})` : '';
     const summaryEmail = payload.email ? `, ${payload.email}` : '';
-    const summary = `New customer from inbound call: ${payload.name} (${phone})${summaryEmail}`;
+    const summaryAddress = payload.address ? `, ${payload.address}` : '';
+    const summary = `New customer from inbound call: ${payload.name}${summaryPhone}${summaryEmail}${summaryAddress}`;
     const explanation = ents.existingLeadId
       ? `Caller phone matches lead ${ents.existingLeadId}. Approve to convert to customer; reject to keep as lead.`
       : 'Caller asked to sign up as a new customer. Approve to add them to the CRM.';
@@ -273,6 +401,43 @@ export class CreateCustomerVoiceTaskHandler implements TaskHandler {
         ? { _meta: { overallConfidence: getConfidenceLevel(ents.classifierConfidence) } }
         : {}),
     };
+
+    // B8 (feat: voice-transcript-and-agent-paths) — draft-time duplicate
+    // detection parity: the FSM already produced `sourceContext.
+    // duplicateWarnings` above, but nothing renders that channel — the
+    // review card (AIProposalCard / InboxPage, both web and mobile) reads
+    // `payload._meta.markers` (RV-007). Stamp the SAME advisory here, once,
+    // so every surface that routes through this handler (telephony FSM,
+    // voice worker, assistant chat) shows "possible duplicate" on the draft
+    // BEFORE approval. Advisory only — never blocks; `decideInitialStatus`
+    // and `approveProposal` never inspect `_meta.markers`.
+    if (duplicateWarnings.length > 0) {
+      const existingMeta =
+        payloadRecord._meta && typeof payloadRecord._meta === 'object' && !Array.isArray(payloadRecord._meta)
+          ? (payloadRecord._meta as Record<string, unknown>)
+          : {};
+      const existingMarkers = Array.isArray(existingMeta.markers)
+        ? (existingMeta.markers as unknown[])
+        : [];
+      const CONFIDENCE_LEVEL_VALUES = new Set(['high', 'medium', 'low', 'very_low']);
+      const overallConfidence =
+        typeof existingMeta.overallConfidence === 'string' &&
+        CONFIDENCE_LEVEL_VALUES.has(existingMeta.overallConfidence)
+          ? existingMeta.overallConfidence
+          : 'medium'; // synthesized envelope; the advisory layer only asserts the neutral level
+      const sorted = [...duplicateWarnings].sort((a, b) => b.score - a.score);
+      const top = sorted[0];
+      const extra = sorted.length - 1;
+      const reason =
+        extra > 0
+          ? `${top.message} (+${extra} more possible match${extra > 1 ? 'es' : ''})`
+          : top.message;
+      payloadRecord._meta = {
+        ...existingMeta,
+        overallConfidence,
+        markers: [...existingMarkers, { path: DUPLICATE_CUSTOMER_MARKER_PATH, reason }],
+      };
+    }
 
     const input: CreateProposalInput = {
       tenantId: context.tenantId,

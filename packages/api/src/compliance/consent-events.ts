@@ -150,23 +150,30 @@ export class InMemoryConsentEventRepository implements ConsentEventRepository {
  *   - 'implicit' recording consent never upgrades a customer to 'granted' —
  *     consent_status gates OUTBOUND contact under the TCPA; staying on an
  *     inbound line is not prior express consent for outbound calls.
- *   - explicit 'granted'/'revoked' (any kind) move the rollup. A recording
+ *   - 'revoked' (any kind) rolls the customer to 'revoked'. A recording
  *     objection is treated as a revocation signal too: the safest posture is
  *     to stop outbound automation for a caller who objected on a call.
+ *   - WS12 (one consent model, D-017): 'granted' never moves the rollup.
+ *     `consent_status` is the VOICE channel's affirmative TCPA signal; a
+ *     ledger grant is always channel-scoped (sms/marketing opt-in), and an
+ *     SMS START must not manufacture consent for autodialed voice calls.
+ *     Affirmative voice consent is written only by the voice channel's own
+ *     capture flow (recordCustomerConsent). Grants still clear a standing
+ *     SAME-KIND revocation at the gates via the ledger itself (see
+ *     resolve-outbound-consent.ts).
  */
 export function deriveConsentStatus(
   event: Pick<ConsentEventInput, 'state'>,
-): 'granted' | 'revoked' | null {
-  if (event.state === 'granted') return 'granted';
-  if (event.state === 'revoked') return 'revoked';
-  return null;
+): 'revoked' | null {
+  return event.state === 'revoked' ? 'revoked' : null;
 }
 
 /**
- * Roll the latest explicit ledger event up onto the customer row. No-op when
- * the event is implicit or no customer was matched. Uses a direct UPDATE with
- * explicit tenant predicate (the customers repo has no consent-field surface;
- * consent columns are owned by the compliance layer).
+ * Roll the latest ledger REVOCATION up onto the customer row. No-op when the
+ * event is a grant or implicit (see deriveConsentStatus — grants never move
+ * the voice rollup) or when no customer was matched. Uses a direct UPDATE
+ * with explicit tenant predicate (the customers repo has no consent-field
+ * surface; consent columns are owned by the compliance layer).
  */
 export async function updateDerivedConsentStatus(
   pool: Pool,

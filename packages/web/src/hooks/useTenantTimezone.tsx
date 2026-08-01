@@ -1,5 +1,7 @@
 import React, { createContext, useContext, useEffect, useState, type ReactNode } from 'react';
+import { useAuth } from '@clerk/clerk-react';
 import { apiFetch } from '../utils/api-fetch';
+import { fetchMeShared } from './useMe';
 
 /**
  * Tenant timezone context.
@@ -32,10 +34,6 @@ const TenantTimezoneContext = createContext<TenantTimezoneContextValue>({
   loading: true,
 });
 
-interface MeResponse {
-  timezone?: string;
-}
-
 export interface TenantTimezoneProviderProps {
   children: ReactNode;
   /**
@@ -50,6 +48,7 @@ export function TenantTimezoneProvider({
   children,
   overrideTimezone,
 }: TenantTimezoneProviderProps): React.ReactElement {
+  const { isLoaded, isSignedIn } = useAuth();
   const [timezone, setTimezone] = useState<string>(overrideTimezone ?? FALLBACK_TZ);
   const [loading, setLoading] = useState<boolean>(!overrideTimezone);
 
@@ -59,11 +58,23 @@ export function TenantTimezoneProvider({
       setLoading(false);
       return;
     }
+    // This provider mounts outside the router (main.tsx), so an ungated
+    // fetch fires on /login too — feeding the 401 loop when the API is
+    // rejecting tokens. Wait for Clerk to settle, skip while signed out,
+    // and re-run when isSignedIn flips true so a session that starts on
+    // /login still picks up the tenant timezone after login (previously
+    // it kept the America/New_York fallback for the whole session).
+    if (!isLoaded) return;
+    if (!isSignedIn) {
+      setLoading(false);
+      return;
+    }
     let cancelled = false;
-    apiFetch('/api/me')
-      .then(async (res) => {
-        if (!res.ok) throw new Error(`/api/me returned ${res.status}`);
-        const body = (await res.json()) as MeResponse;
+    // Piggyback on useMe's module cache — this provider previously issued
+    // its own GET /api/me on every mount, duplicating the useMe fetch on
+    // every page load (QA sweep 2026-07-02).
+    fetchMeShared(apiFetch)
+      .then((body) => {
         if (!cancelled && typeof body.timezone === 'string' && body.timezone) {
           setTimezone(body.timezone);
         }
@@ -80,7 +91,7 @@ export function TenantTimezoneProvider({
     return () => {
       cancelled = true;
     };
-  }, [overrideTimezone]);
+  }, [overrideTimezone, isLoaded, isSignedIn]);
 
   return (
     <TenantTimezoneContext.Provider value={{ timezone, loading }}>

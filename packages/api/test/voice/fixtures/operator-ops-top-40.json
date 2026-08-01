@@ -1,0 +1,994 @@
+{
+  "version": 1,
+  "title": "Operator money/CRM top-40 closed loop",
+  "description": "Forty highest-leverage operator voice utterances across the ten core ops: create/edit client, job, estimate, invoice + send invoice/estimate. Scripted LLM responses drive the real voice-action-router so CI proves utterance → proposal type → missingFields/action-class gates without a live model.",
+  "ops": [
+    "create_client",
+    "edit_client",
+    "create_job",
+    "edit_job",
+    "create_estimate",
+    "edit_estimate",
+    "create_invoice",
+    "edit_invoice",
+    "send_invoice",
+    "send_estimate"
+  ],
+  "cases": [
+    {
+      "id": "create-client-01",
+      "op": "create_client",
+      "utterance": "New customer Maria Alvarez, 480-555-0102",
+      "llmResponses": [
+        {
+          "intentType": "create_customer",
+          "confidence": 0.94,
+          "extractedEntities": {
+            "displayName": "Maria Alvarez",
+            "phone": "+14805550102"
+          }
+        }
+      ],
+      "expect": {
+        "proposalType": "create_customer",
+        "status": "draft",
+        "actionClass": "capture",
+        "payloadContains": { "name": "Maria Alvarez" }
+      }
+    },
+    {
+      "id": "create-client-02",
+      "op": "create_client",
+      "utterance": "Add a customer named James Patel, email james@patel.co",
+      "llmResponses": [
+        {
+          "intentType": "create_customer",
+          "confidence": 0.91,
+          "extractedEntities": {
+            "displayName": "James Patel",
+            "email": "james@patel.co"
+          }
+        }
+      ],
+      "expect": {
+        "proposalType": "create_customer",
+        "status": "draft",
+        "actionClass": "capture",
+        "payloadContains": { "name": "James Patel", "email": "james@patel.co" }
+      }
+    },
+    {
+      "id": "create-client-03",
+      "op": "create_client",
+      "utterance": "Create client Sarah Chen at 12 Lakeshore Drive",
+      "llmResponses": [
+        {
+          "intentType": "create_customer",
+          "confidence": 0.9,
+          "extractedEntities": {
+            "displayName": "Sarah Chen",
+            "address": "12 Lakeshore Drive"
+          }
+        }
+      ],
+      "expect": {
+        "proposalType": "create_customer",
+        "status": "draft",
+        "actionClass": "capture"
+      }
+    },
+    {
+      "id": "create-client-04",
+      "op": "create_client",
+      "utterance": "Onboard Greenfield Property Management as a new customer",
+      "llmResponses": [
+        {
+          "intentType": "create_customer",
+          "confidence": 0.88,
+          "extractedEntities": { "displayName": "Greenfield Property Management" }
+        }
+      ],
+      "expect": {
+        "proposalType": "create_customer",
+        "status": "draft",
+        "actionClass": "capture"
+      }
+    },
+    {
+      "id": "edit-client-01",
+      "op": "edit_client",
+      "utterance": "Update Alvarez's phone number to 480-555-0199",
+      "llmResponses": [
+        {
+          "intentType": "update_customer",
+          "confidence": 0.92,
+          "extractedEntities": {
+            "customerName": "Alvarez",
+            "updatedPhone": "+14805550199"
+          }
+        }
+      ],
+      "expect": {
+        "proposalType": "update_customer",
+        "status": "draft",
+        "actionClass": "capture",
+        "missingFieldsContains": ["customerId"],
+        "payloadContains": { "customerReference": "Alvarez", "phone": "+14805550199" }
+      }
+    },
+    {
+      "id": "edit-client-02",
+      "op": "edit_client",
+      "utterance": "Change the Khan email to office@khan.com",
+      "llmResponses": [
+        {
+          "intentType": "update_customer",
+          "confidence": 0.9,
+          "extractedEntities": {
+            "customerName": "Khan",
+            "updatedEmail": "office@khan.com"
+          }
+        }
+      ],
+      "expect": {
+        "proposalType": "update_customer",
+        "status": "draft",
+        "actionClass": "capture",
+        "missingFieldsContains": ["customerId"],
+        "payloadContains": { "email": "office@khan.com" }
+      }
+    },
+    {
+      "id": "edit-client-03",
+      "op": "edit_client",
+      "utterance": "Fix Mrs Lee's address to 88 Palm Court",
+      "llmResponses": [
+        {
+          "intentType": "update_customer",
+          "confidence": 0.89,
+          "extractedEntities": {
+            "customerName": "Mrs Lee",
+            "updatedAddress": "88 Palm Court"
+          }
+        }
+      ],
+      "expect": {
+        "proposalType": "update_customer",
+        "status": "draft",
+        "actionClass": "capture",
+        "missingFieldsContains": ["customerId"]
+      }
+    },
+    {
+      "id": "edit-client-04",
+      "op": "edit_client",
+      "utterance": "Rename the Smith account to Smith Family Trust",
+      "llmResponses": [
+        {
+          "intentType": "update_customer",
+          "confidence": 0.87,
+          "extractedEntities": {
+            "customerName": "Smith",
+            "updatedName": "Smith Family Trust"
+          }
+        }
+      ],
+      "expect": {
+        "proposalType": "update_customer",
+        "status": "draft",
+        "actionClass": "capture",
+        "missingFieldsContains": ["customerId"],
+        "payloadContains": { "name": "Smith Family Trust" }
+      }
+    },
+    {
+      "id": "create-job-01",
+      "op": "create_job",
+      "utterance": "Open a job for Alvarez, no AC",
+      "llmResponses": [
+        {
+          "intentType": "create_job",
+          "confidence": 0.93,
+          "extractedEntities": {
+            "customerName": "Alvarez",
+            "jobTitle": "No AC",
+            "problemDescription": "no AC"
+          }
+        }
+      ],
+      "expect": {
+        "proposalType": "create_job",
+        "status": "draft",
+        "actionClass": "capture",
+        "missingFieldsContains": ["customerId"],
+        "payloadContains": { "customerReference": "Alvarez" }
+      }
+    },
+    {
+      "id": "create-job-02",
+      "op": "create_job",
+      "utterance": "Start a new job for Smith — kitchen drain replacement",
+      "llmResponses": [
+        {
+          "intentType": "create_job",
+          "confidence": 0.91,
+          "extractedEntities": {
+            "customerName": "Smith",
+            "jobTitle": "Kitchen drain replacement"
+          }
+        }
+      ],
+      "expect": {
+        "proposalType": "create_job",
+        "status": "draft",
+        "actionClass": "capture",
+        "missingFieldsContains": ["customerId"],
+        "payloadContains": { "title": "Kitchen drain replacement" }
+      }
+    },
+    {
+      "id": "create-job-03",
+      "op": "create_job",
+      "utterance": "Create a job for the Henderson furnace not lighting",
+      "llmResponses": [
+        {
+          "intentType": "create_job",
+          "confidence": 0.9,
+          "extractedEntities": {
+            "customerName": "Henderson",
+            "jobTitle": "Furnace not lighting",
+            "problemDescription": "furnace not lighting"
+          }
+        }
+      ],
+      "expect": {
+        "proposalType": "create_job",
+        "status": "draft",
+        "actionClass": "capture",
+        "missingFieldsContains": ["customerId"]
+      }
+    },
+    {
+      "id": "create-job-04",
+      "op": "create_job",
+      "utterance": "New work order for Patel, water heater install",
+      "llmResponses": [
+        {
+          "intentType": "create_job",
+          "confidence": 0.88,
+          "extractedEntities": {
+            "customerName": "Patel",
+            "jobTitle": "Water heater install"
+          }
+        }
+      ],
+      "expect": {
+        "proposalType": "create_job",
+        "status": "draft",
+        "actionClass": "capture",
+        "missingFieldsContains": ["customerId"]
+      }
+    },
+    {
+      "id": "edit-job-01",
+      "op": "edit_job",
+      "utterance": "Mark the Henderson job in progress",
+      "llmResponses": [
+        {
+          "intentType": "update_job",
+          "confidence": 0.92,
+          "extractedEntities": { "jobReference": "the Henderson job" }
+        },
+        {
+          "jobReference": "the Henderson job",
+          "status": "in_progress",
+          "confidence_score": 0.92
+        }
+      ],
+      "expect": {
+        "proposalType": "update_job",
+        "status": "draft",
+        "actionClass": "capture",
+        "missingFieldsContains": ["jobId"],
+        "payloadContains": { "status": "in_progress" }
+      }
+    },
+    {
+      "id": "edit-job-02",
+      "op": "edit_job",
+      "utterance": "Set the Garcia job priority to urgent",
+      "llmResponses": [
+        {
+          "intentType": "update_job",
+          "confidence": 0.9,
+          "extractedEntities": { "jobReference": "Garcia" }
+        },
+        {
+          "jobReference": "Garcia",
+          "priority": "urgent",
+          "confidence_score": 0.9
+        }
+      ],
+      "expect": {
+        "proposalType": "update_job",
+        "status": "draft",
+        "actionClass": "capture",
+        "missingFieldsContains": ["jobId"],
+        "payloadContains": { "priority": "urgent" }
+      }
+    },
+    {
+      "id": "edit-job-03",
+      "op": "edit_job",
+      "utterance": "Rename the Smith job to water heater replacement second unit",
+      "llmResponses": [
+        {
+          "intentType": "update_job",
+          "confidence": 0.89,
+          "extractedEntities": { "jobReference": "Smith" }
+        },
+        {
+          "jobReference": "Smith",
+          "title": "water heater replacement — 2nd unit",
+          "confidence_score": 0.89
+        }
+      ],
+      "expect": {
+        "proposalType": "update_job",
+        "status": "draft",
+        "actionClass": "capture",
+        "missingFieldsContains": ["jobId"]
+      }
+    },
+    {
+      "id": "edit-job-04",
+      "op": "edit_job",
+      "utterance": "Mark JOB-0012 completed",
+      "llmResponses": [
+        {
+          "intentType": "update_job",
+          "confidence": 0.93,
+          "extractedEntities": { "jobReference": "JOB-0012" }
+        },
+        {
+          "jobReference": "JOB-0012",
+          "status": "completed",
+          "confidence_score": 0.93
+        }
+      ],
+      "expect": {
+        "proposalType": "update_job",
+        "status": "draft",
+        "actionClass": "capture",
+        "missingFieldsContains": ["jobId"],
+        "payloadContains": { "status": "completed" }
+      }
+    },
+    {
+      "id": "create-estimate-01",
+      "op": "create_estimate",
+      "utterance": "Quote the Khan install, 3-ton condenser",
+      "llmResponses": [
+        {
+          "intentType": "draft_estimate",
+          "confidence": 0.91,
+          "extractedEntities": { "customerName": "Khan" }
+        },
+        {
+          "customerId": "cust-khan",
+          "jobId": "job-khan",
+          "lineItems": [
+            { "description": "3-ton condenser install", "quantity": 1, "unitPrice": 480000 }
+          ],
+          "confidence_score": 0.91
+        }
+      ],
+      "expect": {
+        "proposalType": "draft_estimate",
+        "status": "draft",
+        "actionClass": "capture"
+      }
+    },
+    {
+      "id": "create-estimate-02",
+      "op": "create_estimate",
+      "utterance": "Draft an estimate for the Johnson water heater replacement",
+      "llmResponses": [
+        {
+          "intentType": "draft_estimate",
+          "confidence": 0.9,
+          "extractedEntities": { "customerName": "Johnson" }
+        },
+        {
+          "customerId": "cust-johnson",
+          "jobId": "job-johnson",
+          "lineItems": [
+            { "description": "Water heater replacement", "quantity": 1, "unitPrice": 250000 }
+          ],
+          "confidence_score": 0.9
+        }
+      ],
+      "expect": {
+        "proposalType": "draft_estimate",
+        "status": "draft",
+        "actionClass": "capture"
+      }
+    },
+    {
+      "id": "create-estimate-03",
+      "op": "create_estimate",
+      "utterance": "Write up a quote for Mrs Lee AC diagnostic",
+      "llmResponses": [
+        {
+          "intentType": "draft_estimate",
+          "confidence": 0.88,
+          "extractedEntities": { "customerName": "Mrs Lee" }
+        },
+        {
+          "customerId": "cust-lee",
+          "jobId": "job-lee",
+          "lineItems": [
+            { "description": "AC diagnostic", "quantity": 1, "unitPrice": 8900 }
+          ],
+          "confidence_score": 0.88
+        }
+      ],
+      "expect": {
+        "proposalType": "draft_estimate",
+        "status": "draft",
+        "actionClass": "capture"
+      }
+    },
+    {
+      "id": "create-estimate-04",
+      "op": "create_estimate",
+      "utterance": "Estimate for the Garcia duct sealing job",
+      "llmResponses": [
+        {
+          "intentType": "draft_estimate",
+          "confidence": 0.87,
+          "extractedEntities": { "customerName": "Garcia" }
+        },
+        {
+          "customerId": "cust-garcia",
+          "jobId": "job-garcia",
+          "lineItems": [
+            { "description": "Duct sealing", "quantity": 1, "unitPrice": 120000 }
+          ],
+          "confidence_score": 0.87
+        }
+      ],
+      "expect": {
+        "proposalType": "draft_estimate",
+        "status": "draft",
+        "actionClass": "capture"
+      }
+    },
+    {
+      "id": "edit-estimate-01",
+      "op": "edit_estimate",
+      "utterance": "Change the Khan quote to a 3-ton",
+      "llmResponses": [
+        {
+          "intentType": "update_estimate",
+          "confidence": 0.9,
+          "extractedEntities": { "jobReference": "Khan" }
+        },
+        {
+          "estimateReference": "Khan",
+          "editActions": [
+            {
+              "type": "add_line_item",
+              "lineItem": {
+                "description": "3-ton condenser",
+                "quantity": 1,
+                "unitPrice": 320000
+              }
+            }
+          ],
+          "confidence_score": 0.9
+        }
+      ],
+      "expect": {
+        "proposalType": "update_estimate",
+        "status": "draft",
+        "actionClass": "capture",
+        "missingFieldsContains": ["estimateId"]
+      }
+    },
+    {
+      "id": "edit-estimate-02",
+      "op": "edit_estimate",
+      "utterance": "Add duct sealing to the Khan estimate",
+      "llmResponses": [
+        {
+          "intentType": "update_estimate",
+          "confidence": 0.91,
+          "extractedEntities": { "jobReference": "Khan" }
+        },
+        {
+          "estimateReference": "Khan",
+          "editActions": [
+            {
+              "type": "add_line_item",
+              "lineItem": {
+                "description": "Duct sealing",
+                "quantity": 1,
+                "unitPrice": 45000
+              }
+            }
+          ],
+          "confidence_score": 0.91
+        }
+      ],
+      "expect": {
+        "proposalType": "update_estimate",
+        "status": "draft",
+        "actionClass": "capture",
+        "missingFieldsContains": ["estimateId"]
+      }
+    },
+    {
+      "id": "edit-estimate-03",
+      "op": "edit_estimate",
+      "utterance": "Add a trip fee to estimate EST-0001",
+      "llmResponses": [
+        {
+          "intentType": "update_estimate",
+          "confidence": 0.92,
+          "extractedEntities": { "jobReference": "EST-0001" }
+        },
+        {
+          "estimateReference": "EST-0001",
+          "editActions": [
+            {
+              "type": "add_line_item",
+              "lineItem": {
+                "description": "Trip fee",
+                "quantity": 1,
+                "unitPrice": 7500
+              }
+            }
+          ],
+          "confidence_score": 0.92
+        }
+      ],
+      "expect": {
+        "proposalType": "update_estimate",
+        "status": "draft",
+        "actionClass": "capture",
+        "missingFieldsContains": ["estimateId"]
+      }
+    },
+    {
+      "id": "edit-estimate-04",
+      "op": "edit_estimate",
+      "utterance": "Bump the Johnson water heater quote labor by a hundred",
+      "llmResponses": [
+        {
+          "intentType": "update_estimate",
+          "confidence": 0.86,
+          "extractedEntities": { "jobReference": "Johnson" }
+        },
+        {
+          "estimateReference": "Johnson",
+          "editActions": [
+            {
+              "type": "add_line_item",
+              "lineItem": {
+                "description": "Additional labor",
+                "quantity": 1,
+                "unitPrice": 10000
+              }
+            }
+          ],
+          "confidence_score": 0.86
+        }
+      ],
+      "expect": {
+        "proposalType": "update_estimate",
+        "status": "draft",
+        "actionClass": "capture",
+        "missingFieldsContains": ["estimateId"]
+      }
+    },
+    {
+      "id": "create-invoice-01",
+      "op": "create_invoice",
+      "utterance": "Invoice the Johnson job, 450 dollars capacitor plus labor",
+      "llmResponses": [
+        {
+          "intentType": "create_invoice",
+          "confidence": 0.93,
+          "extractedEntities": { "customerName": "Johnson", "amount": 45000 }
+        },
+        {
+          "customerId": "cust-johnson",
+          "jobId": "job-johnson",
+          "lineItems": [
+            { "description": "Capacitor + labor", "quantity": 1, "unitPrice": 45000 }
+          ],
+          "confidence_score": 0.93
+        }
+      ],
+      "expect": {
+        "proposalType": "draft_invoice",
+        "status": "draft",
+        "actionClass": "capture"
+      }
+    },
+    {
+      "id": "create-invoice-02",
+      "op": "create_invoice",
+      "utterance": "Create an invoice for Mrs Lee for 450 dollars cash",
+      "llmResponses": [
+        {
+          "intentType": "create_invoice",
+          "confidence": 0.92,
+          "extractedEntities": { "customerName": "Mrs Lee", "amount": 45000 }
+        },
+        {
+          "customerId": "cust-lee",
+          "jobId": "job-lee",
+          "lineItems": [
+            { "description": "Diagnostic + repair", "quantity": 1, "unitPrice": 45000 }
+          ],
+          "confidence_score": 0.92
+        }
+      ],
+      "expect": {
+        "proposalType": "draft_invoice",
+        "status": "draft",
+        "actionClass": "capture"
+      }
+    },
+    {
+      "id": "create-invoice-03",
+      "op": "create_invoice",
+      "utterance": "Bill Patel for the contactor swap, two hundred",
+      "llmResponses": [
+        {
+          "intentType": "create_invoice",
+          "confidence": 0.9,
+          "extractedEntities": { "customerName": "Patel", "amount": 20000 }
+        },
+        {
+          "customerId": "cust-patel",
+          "jobId": "job-patel",
+          "lineItems": [
+            { "description": "Contactor swap", "quantity": 1, "unitPrice": 20000 }
+          ],
+          "confidence_score": 0.9
+        }
+      ],
+      "expect": {
+        "proposalType": "draft_invoice",
+        "status": "draft",
+        "actionClass": "capture"
+      }
+    },
+    {
+      "id": "create-invoice-04",
+      "op": "create_invoice",
+      "utterance": "Write an invoice for the Garcia service call",
+      "llmResponses": [
+        {
+          "intentType": "create_invoice",
+          "confidence": 0.88,
+          "extractedEntities": { "customerName": "Garcia" }
+        },
+        {
+          "customerId": "cust-garcia",
+          "jobId": "job-garcia",
+          "lineItems": [
+            { "description": "Service call", "quantity": 1, "unitPrice": 12500 }
+          ],
+          "confidence_score": 0.88
+        }
+      ],
+      "expect": {
+        "proposalType": "draft_invoice",
+        "status": "draft",
+        "actionClass": "capture"
+      }
+    },
+    {
+      "id": "edit-invoice-01",
+      "op": "edit_invoice",
+      "utterance": "Add a ninety dollar contactor to the Smith invoice",
+      "llmResponses": [
+        {
+          "intentType": "update_invoice",
+          "confidence": 0.92,
+          "extractedEntities": {
+            "jobReference": "Smith",
+            "lineItemDescriptions": ["contactor"]
+          }
+        },
+        {
+          "invoiceReference": "Smith",
+          "editActions": [
+            {
+              "type": "add_line_item",
+              "lineItem": {
+                "description": "Contactor",
+                "quantity": 1,
+                "unitPrice": 9000
+              }
+            }
+          ],
+          "confidence_score": 0.92
+        }
+      ],
+      "expect": {
+        "proposalType": "update_invoice",
+        "status": "draft",
+        "actionClass": "capture",
+        "missingFieldsContains": ["invoiceId"]
+      }
+    },
+    {
+      "id": "edit-invoice-02",
+      "op": "edit_invoice",
+      "utterance": "Add a trip fee to invoice INV-0042",
+      "llmResponses": [
+        {
+          "intentType": "update_invoice",
+          "confidence": 0.93,
+          "extractedEntities": { "jobReference": "INV-0042" }
+        },
+        {
+          "invoiceReference": "INV-0042",
+          "editActions": [
+            {
+              "type": "add_line_item",
+              "lineItem": {
+                "description": "Trip fee",
+                "quantity": 1,
+                "unitPrice": 7500
+              }
+            }
+          ],
+          "confidence_score": 0.93
+        }
+      ],
+      "expect": {
+        "proposalType": "update_invoice",
+        "status": "draft",
+        "actionClass": "capture",
+        "missingFieldsContains": ["invoiceId"]
+      }
+    },
+    {
+      "id": "edit-invoice-03",
+      "op": "edit_invoice",
+      "utterance": "Add twenty five dollar late fee line to the Henderson invoice",
+      "llmResponses": [
+        {
+          "intentType": "update_invoice",
+          "confidence": 0.88,
+          "extractedEntities": { "jobReference": "Henderson" }
+        },
+        {
+          "invoiceReference": "Henderson",
+          "editActions": [
+            {
+              "type": "add_line_item",
+              "lineItem": {
+                "description": "Late fee",
+                "quantity": 1,
+                "unitPrice": 2500
+              }
+            }
+          ],
+          "confidence_score": 0.88
+        }
+      ],
+      "expect": {
+        "proposalType": "update_invoice",
+        "status": "draft",
+        "actionClass": "capture",
+        "missingFieldsContains": ["invoiceId"]
+      }
+    },
+    {
+      "id": "edit-invoice-04",
+      "op": "edit_invoice",
+      "utterance": "Put a filter charge on the Lee invoice",
+      "llmResponses": [
+        {
+          "intentType": "update_invoice",
+          "confidence": 0.87,
+          "extractedEntities": { "jobReference": "Lee" }
+        },
+        {
+          "invoiceReference": "Lee",
+          "editActions": [
+            {
+              "type": "add_line_item",
+              "lineItem": {
+                "description": "Replacement filter",
+                "quantity": 1,
+                "unitPrice": 3500
+              }
+            }
+          ],
+          "confidence_score": 0.87
+        }
+      ],
+      "expect": {
+        "proposalType": "update_invoice",
+        "status": "draft",
+        "actionClass": "capture",
+        "missingFieldsContains": ["invoiceId"]
+      }
+    },
+    {
+      "id": "send-invoice-01",
+      "op": "send_invoice",
+      "utterance": "Send the Johnson invoice",
+      "llmResponses": [
+        {
+          "intentType": "send_invoice",
+          "confidence": 0.94,
+          "extractedEntities": {
+            "customerName": "Johnson",
+            "sendChannel": "email"
+          }
+        }
+      ],
+      "expect": {
+        "proposalType": "send_invoice",
+        "status": "draft",
+        "actionClass": "comms",
+        "missingFieldsContains": ["invoiceId"],
+        "payloadContains": { "invoiceReference": "Johnson", "channel": "email" }
+      }
+    },
+    {
+      "id": "send-invoice-02",
+      "op": "send_invoice",
+      "utterance": "Email invoice INV-0042",
+      "llmResponses": [
+        {
+          "intentType": "send_invoice",
+          "confidence": 0.95,
+          "extractedEntities": {
+            "jobReference": "INV-0042",
+            "sendChannel": "email"
+          }
+        }
+      ],
+      "expect": {
+        "proposalType": "send_invoice",
+        "status": "draft",
+        "actionClass": "comms",
+        "missingFieldsContains": ["invoiceId"],
+        "payloadContains": { "invoiceReference": "INV-0042" }
+      }
+    },
+    {
+      "id": "send-invoice-03",
+      "op": "send_invoice",
+      "utterance": "Text the Smith invoice to the customer",
+      "llmResponses": [
+        {
+          "intentType": "send_invoice",
+          "confidence": 0.91,
+          "extractedEntities": {
+            "customerName": "Smith",
+            "sendChannel": "sms"
+          }
+        }
+      ],
+      "expect": {
+        "proposalType": "send_invoice",
+        "status": "draft",
+        "actionClass": "comms",
+        "missingFieldsContains": ["invoiceId"],
+        "payloadContains": { "channel": "sms" }
+      }
+    },
+    {
+      "id": "send-invoice-04",
+      "op": "send_invoice",
+      "utterance": "Send the invoice",
+      "llmResponses": [
+        {
+          "intentType": "send_invoice",
+          "confidence": 0.8,
+          "extractedEntities": {}
+        }
+      ],
+      "expect": {
+        "proposalType": "send_invoice",
+        "status": "draft",
+        "actionClass": "comms",
+        "missingFieldsContains": ["invoiceId"]
+      }
+    },
+    {
+      "id": "send-estimate-01",
+      "op": "send_estimate",
+      "utterance": "Send the Khan estimate",
+      "llmResponses": [
+        {
+          "intentType": "send_estimate",
+          "confidence": 0.94,
+          "extractedEntities": {
+            "customerName": "Khan",
+            "sendChannel": "email"
+          }
+        }
+      ],
+      "expect": {
+        "proposalType": "send_estimate",
+        "status": "draft",
+        "actionClass": "comms",
+        "missingFieldsContains": ["estimateId"],
+        "payloadContains": { "estimateReference": "Khan", "channel": "email" }
+      }
+    },
+    {
+      "id": "send-estimate-02",
+      "op": "send_estimate",
+      "utterance": "Text estimate EST-0042 to the customer",
+      "llmResponses": [
+        {
+          "intentType": "send_estimate",
+          "confidence": 0.95,
+          "extractedEntities": {
+            "jobReference": "EST-0042",
+            "sendChannel": "sms"
+          }
+        }
+      ],
+      "expect": {
+        "proposalType": "send_estimate",
+        "status": "draft",
+        "actionClass": "comms",
+        "missingFieldsContains": ["estimateId"],
+        "payloadContains": { "estimateReference": "EST-0042", "channel": "sms" }
+      }
+    },
+    {
+      "id": "send-estimate-03",
+      "op": "send_estimate",
+      "utterance": "Email the Johnson water heater quote",
+      "llmResponses": [
+        {
+          "intentType": "send_estimate",
+          "confidence": 0.9,
+          "extractedEntities": {
+            "customerName": "Johnson",
+            "sendChannel": "email"
+          }
+        }
+      ],
+      "expect": {
+        "proposalType": "send_estimate",
+        "status": "draft",
+        "actionClass": "comms",
+        "missingFieldsContains": ["estimateId"]
+      }
+    },
+    {
+      "id": "send-estimate-04",
+      "op": "send_estimate",
+      "utterance": "Send the estimate",
+      "llmResponses": [
+        {
+          "intentType": "send_estimate",
+          "confidence": 0.78,
+          "extractedEntities": {}
+        }
+      ],
+      "expect": {
+        "proposalType": "send_estimate",
+        "status": "draft",
+        "actionClass": "comms",
+        "missingFieldsContains": ["estimateId"]
+      }
+    }
+  ]
+}

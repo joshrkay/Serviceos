@@ -13,6 +13,7 @@
  *   - No markdown, no HTML entities, no trailing punctuation added here
  *     (the caller's sentence owns punctuation).
  */
+import { formatUsdCentsPlain } from '@ai-service-os/shared';
 
 /**
  * Simple pluralisation helper.
@@ -28,12 +29,15 @@ export function plural(n: number, singular: string, pluralForm?: string): string
 
 /**
  * Format an integer-cents amount as a USD dollar string suitable for TTS.
+ * Delegates to the cross-package `formatUsdCentsPlain` (bare `$N.NN`, no
+ * thousands separators) — separators confuse Polly's number heuristic, which
+ * is exactly the terse contract that helper provides.
  *
  * formatCents(45000) → '$450.00'
  * formatCents(0)     → '$0.00'
  */
 export function formatCents(cents: number): string {
-  return `$${(cents / 100).toFixed(2)}`;
+  return formatUsdCentsPlain(cents);
 }
 
 /**

@@ -194,7 +194,13 @@ describe('CreateAppointmentAITaskHandler', () => {
     expect(call.messages[1].content).toContain('Mrs Lee');
   });
 
-  it('falls back to the product-default timezone when the context omits one', async () => {
+  // This test used to assert the OPPOSITE: that a context with no timezone
+  // "falls back to the product default" of America/New_York. That default is
+  // exactly the defect — an operator in America/Phoenix had every spoken
+  // booking stored three hours early and auto-executed at confidence 1,
+  // because a US-East timestamp is indistinguishable from a correct one.
+  // There is no default zone any more; an unresolvable tenant timezone gates.
+  it('gates instead of booking at a guessed zone when the context omits a timezone', async () => {
     const gateway = mockGateway(
       JSON.stringify({ dateTimePhrase: 'tomorrow at 2pm', confidence_score: 0.9 })
     );
@@ -204,11 +210,34 @@ describe('CreateAppointmentAITaskHandler', () => {
       userId,
       message: 'schedule it tomorrow at 2pm',
       now: NOW,
-      // no timezone — must default to America/New_York, never a hardcoded zone
+      // no timezone — must NOT book at a guessed zone
     });
+
+    expect(result.taskType).toBe('voice_clarification');
+    expect(result.proposal.proposalType).toBe('voice_clarification');
+    expect(result.proposal.sourceContext?.reason).toBe('tenant_timezone_unconfigured');
+    // Nothing is booked, and nothing spoken is lost.
     const payload = result.proposal.payload as Record<string, unknown>;
-    expect(payload.timezone).toBe('America/New_York');
-    expect(payload.scheduledStart).toBe('2026-06-02T18:00:00.000Z');
+    expect(payload.scheduledStart).toBeUndefined();
+    expect(payload.transcript).toBe('schedule it tomorrow at 2pm');
+    // A clarification carries no trust tier, so it can never auto-approve.
+    expect(result.proposal.status).toBe('draft');
+  });
+
+  it('gates on a timezone the runtime does not recognize', async () => {
+    const gateway = mockGateway(
+      JSON.stringify({ dateTimePhrase: 'tomorrow at 2pm', confidence_score: 0.9 })
+    );
+    const handler = new CreateAppointmentAITaskHandler(gateway);
+    const result = await handler.handle({
+      tenantId,
+      userId,
+      message: 'schedule it tomorrow at 2pm',
+      now: NOW,
+      timezone: 'Foo/Bar',
+    });
+    expect(result.proposal.proposalType).toBe('voice_clarification');
+    expect(result.proposal.sourceContext?.reason).toBe('tenant_timezone_unconfigured');
   });
 });
 

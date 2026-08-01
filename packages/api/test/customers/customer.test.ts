@@ -11,6 +11,7 @@ import {
   InMemoryCustomerRepository,
 } from '../../src/customers/customer';
 import { InMemoryAuditRepository } from '../../src/audit/audit';
+import { InMemoryConsentEventRepository } from '../../src/compliance/consent-events';
 
 describe('P1-001 — Customer entity + CRUD', () => {
   let repo: InMemoryCustomerRepository;
@@ -74,6 +75,155 @@ describe('P1-001 — Customer entity + CRUD', () => {
 
     expect(updated!.firstName).toBe('Jane');
     expect(updated!.displayName).toBe('Jane Doe');
+  });
+
+  it("update — '' clears optional fields (blank coerced to unset, never stored)", async () => {
+    const customer = await createCustomer(
+      {
+        tenantId: 'tenant-1',
+        firstName: 'John',
+        lastName: 'Doe',
+        companyName: 'Acme Co',
+        primaryPhone: '5125550100',
+        secondaryPhone: '5125550101',
+        email: 'john@example.com',
+        communicationNotes: 'gate code 1234',
+        createdBy: 'user-1',
+      },
+      repo
+    );
+
+    // The web edit form serializes cleared optionals as '' (CustomerEdit.tsx);
+    // '' must not trip the phone/email format validators and must persist as
+    // unset — NULL in Pg, undefined in-memory — not as an empty string.
+    const updated = await updateCustomer(
+      'tenant-1',
+      customer.id,
+      {
+        lastName: '',
+        companyName: '',
+        primaryPhone: '',
+        secondaryPhone: '',
+        email: '',
+        communicationNotes: '',
+      },
+      repo
+    );
+
+    expect(updated!.companyName).toBeUndefined();
+    expect(updated!.primaryPhone).toBeUndefined();
+    expect(updated!.secondaryPhone).toBeUndefined();
+    expect(updated!.email).toBeUndefined();
+    expect(updated!.communicationNotes).toBeUndefined();
+    // lastName is a required string on the entity — '' is its cleared value.
+    expect(updated!.lastName).toBe('');
+    expect(updated!.displayName).toBe('John');
+
+    const found = await getCustomer('tenant-1', customer.id, repo);
+    expect(found!.email).toBeUndefined();
+  });
+
+  it('WS12 — a manual sms_consent toggle appends a consent_events row (kind sms, source manual)', async () => {
+    const ledger = new InMemoryConsentEventRepository();
+    const customer = await createCustomer(
+      {
+        tenantId: 'tenant-1',
+        firstName: 'John',
+        lastName: 'Doe',
+        primaryPhone: '+15125550100',
+        smsConsent: true,
+        createdBy: 'user-1',
+      },
+      repo
+    );
+
+    await updateCustomer(
+      'tenant-1',
+      customer.id,
+      { smsConsent: false },
+      repo,
+      'user-1',
+      auditRepo,
+      ledger
+    );
+    let events = await ledger.listByPhone('tenant-1', '+15125550100');
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      kind: 'sms',
+      state: 'revoked',
+      source: 'manual',
+      customerId: customer.id,
+    });
+
+    // Re-grant appends a second (granted) event — the ledger is append-only.
+    await updateCustomer(
+      'tenant-1',
+      customer.id,
+      { smsConsent: true },
+      repo,
+      'user-1',
+      auditRepo,
+      ledger
+    );
+    events = await ledger.listByPhone('tenant-1', '+15125550100');
+    expect(events).toHaveLength(2);
+    expect(events[0].state).toBe('granted'); // newest first
+  });
+
+  it('WS12 — no ledger row when sms_consent is unchanged or absent from the update', async () => {
+    const ledger = new InMemoryConsentEventRepository();
+    const customer = await createCustomer(
+      {
+        tenantId: 'tenant-1',
+        firstName: 'John',
+        lastName: 'Doe',
+        primaryPhone: '+15125550100',
+        smsConsent: true,
+        createdBy: 'user-1',
+      },
+      repo
+    );
+
+    // Same value → no event; unrelated field → no event.
+    await updateCustomer('tenant-1', customer.id, { smsConsent: true }, repo, 'user-1', auditRepo, ledger);
+    await updateCustomer('tenant-1', customer.id, { firstName: 'Jane' }, repo, 'user-1', auditRepo, ledger);
+    expect(ledger.rows).toHaveLength(0);
+  });
+
+  it('WS3 — a consent-bearing ledger append failure FAILS the customer update (no longer best-effort)', async () => {
+    // WS3 reverses the WS12 best-effort posture: a consent-bearing update whose
+    // ledger write fails must NOT report success, so the sms_consent column and
+    // the immutable ledger can never silently disagree. In production this runs
+    // inside the executor / request transaction, so the whole update rolls back
+    // atomically (proven in test/integration/ws3-consent-audit-atomicity.test.ts);
+    // here we pin that the failure propagates rather than being swallowed.
+    const ledger = new InMemoryConsentEventRepository();
+    ledger.append = async () => {
+      throw new Error('pg down');
+    };
+    const customer = await createCustomer(
+      {
+        tenantId: 'tenant-1',
+        firstName: 'John',
+        lastName: 'Doe',
+        primaryPhone: '+15125550100',
+        smsConsent: true,
+        createdBy: 'user-1',
+      },
+      repo
+    );
+
+    await expect(
+      updateCustomer(
+        'tenant-1',
+        customer.id,
+        { smsConsent: false },
+        repo,
+        'user-1',
+        auditRepo,
+        ledger
+      )
+    ).rejects.toThrow('pg down');
   });
 
   it('validation — rejects invalid customer update before write', async () => {
@@ -379,6 +529,23 @@ describe('P1-019 — createCustomer attaches dedup warnings (advisory, never blo
       const matches = await repo.findByPhoneNormalized('tenant-1', '12345');
       expect(matches).toEqual([]);
     });
+
+    it('matches the secondary phone, not just the primary (4.7)', async () => {
+      await createCustomer(
+        {
+          tenantId: 'tenant-1',
+          firstName: 'Two',
+          lastName: 'Lines',
+          primaryPhone: '(555) 111-2222',
+          secondaryPhone: '+1 555-333-4444',
+          createdBy: 'u-1',
+        },
+        repo
+      );
+      const matches = await repo.findByPhoneNormalized('tenant-1', '5553334444');
+      expect(matches).toHaveLength(1);
+      expect(matches[0].displayName).toBe('Two Lines');
+    });
   });
 
   it('createCustomer.duplicate — creation is NEVER blocked (advisory only)', async () => {
@@ -400,5 +567,56 @@ describe('P1-019 — createCustomer attaches dedup warnings (advisory, never blo
     const after = await repo.findByTenant('tenant-1');
     expect(after.length).toBe(beforeCount + 1);
     expect(created.warnings!.length).toBeGreaterThan(0);
+  });
+});
+
+describe('Customer source (acquisition channel — Jobber parity)', () => {
+  let repo: InMemoryCustomerRepository;
+
+  beforeEach(() => {
+    repo = new InMemoryCustomerRepository();
+  });
+
+  it('persists a valid source on create', async () => {
+    const created = await createCustomer(
+      { tenantId: 't1', firstName: 'Pat', lastName: 'Lee', createdBy: 'u1', source: 'referral' },
+      repo,
+    );
+    expect(created.source).toBe('referral');
+    const read = await getCustomer('t1', created.id, repo);
+    expect(read?.source).toBe('referral');
+  });
+
+  it('leaves source undefined when not provided', async () => {
+    const created = await createCustomer(
+      { tenantId: 't1', firstName: 'Pat', lastName: 'Lee', createdBy: 'u1' },
+      repo,
+    );
+    expect(created.source).toBeUndefined();
+  });
+
+  it('accepts every documented source value', () => {
+    for (const source of ['website', 'referral', 'google', 'social_media', 'advertising', 'repeat_client', 'other'] as const) {
+      const errors = validateCustomerInput({ tenantId: 't1', firstName: 'A', lastName: 'B', createdBy: 'u1', source });
+      expect(errors).toHaveLength(0);
+    }
+  });
+
+  it('rejects an unknown source value', () => {
+    const errors = validateCustomerInput({
+      tenantId: 't1', firstName: 'A', lastName: 'B', createdBy: 'u1',
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      source: 'tiktok' as any,
+    });
+    expect(errors).toContain('Invalid source');
+  });
+
+  it('updates the source on an existing customer', async () => {
+    const created = await createCustomer(
+      { tenantId: 't1', firstName: 'Pat', lastName: 'Lee', createdBy: 'u1', source: 'website' },
+      repo,
+    );
+    const updated = await updateCustomer('t1', created.id, { source: 'google' }, repo);
+    expect(updated?.source).toBe('google');
   });
 });

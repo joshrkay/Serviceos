@@ -43,8 +43,12 @@ import type { SettingsRepository } from '../../settings/settings';
 import { AuditRepository, createAuditEvent } from '../../audit/audit';
 import { AppointmentRepository, createAppointment } from '../../appointments/appointment';
 import type { AssignmentRepository } from '../../appointments/assignment';
-import { findBookableSlots } from '../../scheduling/booking-availability';
+import {
+  findBookableSlots,
+  schedulingConfigFromSettings,
+} from '../../scheduling/booking-availability';
 import { isValidTimezone } from '../../shared/timezone';
+import { notifyOwner } from '../../notifications/owner-notifications-instance';
 
 /** Duration of the tentatively-held emergency slot. */
 const EMERGENCY_SLOT_DURATION_MIN = 60;
@@ -64,6 +68,9 @@ export interface EmergencySmsSender {
     body: string;
     tenantId?: string;
     idempotencyKey?: string;
+    // WS1 — required on MessageDeliveryProvider.sendSms; emergency pages are
+    // owner/on-call, so the call site sets 'owner' (never customer-gated).
+    recipientClass: 'customer' | 'owner';
   }): Promise<unknown>;
 }
 
@@ -134,6 +141,9 @@ export function composeEmergencyPageSms(opts: {
 
 export class EmergencyDispatchExecutionHandler implements ExecutionHandler {
   proposalType: ProposalType = 'emergency_dispatch';
+  // Awaits smsSender.sendSms (owner page) and notifyOwner (owner push) —
+  // external network I/O alongside the urgent-job + appointment-hold DB writes.
+  performsExternalIo = true;
 
   constructor(
     private readonly jobRepo?: JobRepository,
@@ -260,6 +270,7 @@ export class EmergencyDispatchExecutionHandler implements ExecutionHandler {
     if (jobId && this.appointmentRepo) {
       try {
         const now = new Date();
+        const schedulingConfig = schedulingConfigFromSettings(settings);
         const slots = await findBookableSlots(
           { appointmentRepo: this.appointmentRepo, assignmentRepo: this.assignmentRepo },
           {
@@ -272,6 +283,8 @@ export class EmergencyDispatchExecutionHandler implements ExecutionHandler {
               .slice(0, 10),
             timezone,
             durationMin: EMERGENCY_SLOT_DURATION_MIN,
+            weeklyHours: schedulingConfig.weeklyHours,
+            bufferMinutes: schedulingConfig.bufferMinutes,
             maxSlots: 1,
             now,
           },
@@ -320,6 +333,7 @@ export class EmergencyDispatchExecutionHandler implements ExecutionHandler {
         if (ownerPhone) {
           await this.smsSender.sendSms({
             to: ownerPhone,
+            recipientClass: 'owner',
             body: composeEmergencyPageSms({
               businessName: settings?.businessName ?? 'Your shop',
               emergencyDescription: fields.emergencyDescription,
@@ -383,6 +397,15 @@ export class EmergencyDispatchExecutionHandler implements ExecutionHandler {
         error: `Emergency dispatch could not act: job=${jobSkipReason ?? 'skipped'}, page=${pageError ?? 'skipped'}`,
       };
     }
+
+    // U6 — owner `emergency` push alongside the SMS page. Best-effort and
+    // failure-isolated by the notifier; never blocks the life-safety dispatch.
+    await notifyOwner(context.tenantId, 'emergency', {
+      reason: fields.emergencyDescription,
+      proposalId: proposal.id,
+      ...(fields.customerId ? { customerId: fields.customerId } : {}),
+    });
+
     return { success: true, ...(jobId ? { resultEntityId: jobId } : {}) };
   }
 }

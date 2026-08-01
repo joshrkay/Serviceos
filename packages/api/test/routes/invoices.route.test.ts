@@ -7,7 +7,8 @@
  */
 import request from 'supertest';
 import { describe, it, expect, beforeEach } from 'vitest';
-import { buildTestApp } from './test-app';
+import { buildTestApp, TEST_TENANT_ID, TEST_USER_ID } from './test-app';
+import { createJob } from '../../src/jobs/job';
 import type { Express } from 'express';
 
 const SAMPLE_LINE_ITEMS = [
@@ -246,6 +247,66 @@ describe('P1-018 — listInvoices filter + pagination', () => {
     expect(res.status).toBe(200);
     expect(Array.isArray(res.body)).toBe(true);
     expect(res.body).toHaveLength(1);
+  });
+});
+
+describe('US-069 — GET /api/invoices?customerId=', () => {
+  let h: Awaited<ReturnType<typeof buildTestApp>>;
+
+  beforeEach(async () => {
+    h = await buildTestApp();
+  });
+
+  // Invoices carry only job_id; the route translates customerId → the
+  // customer's jobIds (via jobRepo.findByCustomer) → invoices (findByJobs).
+  async function seedJob(customerId: string): Promise<string> {
+    const job = await createJob(
+      {
+        tenantId: TEST_TENANT_ID,
+        customerId,
+        locationId: 'loc-1',
+        summary: 'Service',
+        createdBy: TEST_USER_ID,
+      },
+      h.jobRepo,
+      h.auditRepo,
+    );
+    return job.id;
+  }
+
+  it("returns only the customer's invoices (bare array)", async () => {
+    const jobA = await seedJob('cust-A');
+    const jobB = await seedJob('cust-B');
+    await createInvoice(h.app, { jobId: jobA });
+    await createInvoice(h.app, { jobId: jobB });
+
+    const res = await request(h.app).get('/api/invoices?customerId=cust-A');
+    expect(res.status).toBe(200);
+    expect(Array.isArray(res.body)).toBe(true);
+    expect(res.body).toHaveLength(1);
+    expect(res.body[0].jobId).toBe(jobA);
+  });
+
+  it('returns an empty array for a customer with no jobs/invoices', async () => {
+    const res = await request(h.app).get('/api/invoices?customerId=nobody');
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual([]);
+  });
+
+  it('respects the status filter alongside customerId', async () => {
+    const jobA = await seedJob('cust-A');
+    const created = await createInvoice(h.app, { jobId: jobA });
+    await request(h.app).post(`/api/invoices/${created.body.id}/issue`).send({});
+
+    const drafts = await request(h.app).get(
+      '/api/invoices?customerId=cust-A&status=draft',
+    );
+    expect(drafts.body).toHaveLength(0);
+    const open = await request(h.app).get(
+      '/api/invoices?customerId=cust-A&status=open',
+    );
+    expect(open.body).toHaveLength(1);
+    expect(open.body[0].status).toBe('open');
   });
 });
 

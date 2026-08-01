@@ -28,8 +28,10 @@ import { createMockLLMGateway } from '../../src/ai/gateway/factory';
 import {
   runScript,
   makeRepoBundle,
+  coerceProposalDates,
   type DriverFactoryContext,
 } from '../../src/ai/voice-quality/runner';
+import type { Proposal } from '../../src/proposals/proposal';
 import { loadCorpus, loadScript, loadLayer2Corpus } from '../../src/ai/voice-quality/corpus/loader';
 import type { VoiceQualityScript } from '../../src/ai/voice-quality/schema';
 import type { AgentDriver } from '../../src/ai/voice-quality/text-mode-driver';
@@ -243,8 +245,43 @@ describe('VQ-008 — runner', () => {
     expect(bLookups).toHaveLength(1);
   });
 
-  it("VQ-008 — runScript respects repoMode='pg' is not yet supported", () => {
-    expect(() => makeRepoBundle('pg')).toThrow(/not yet supported/);
+  it('WS1 — coerceProposalDates converts JSON-fixture ISO strings to real Date objects', () => {
+    // JSON fixtures carry createdAt/updatedAt as ISO strings, but Proposal
+    // types them as Date and the pending-proposal resolver sorts by
+    // createdAt.getTime() — a batch owner-approval over ≥2 proposals threw
+    // "createdAt.getTime is not a function" until this coercion.
+    const raw = {
+      id: 'p1',
+      tenantId: 't1',
+      proposalType: 'draft_estimate',
+      status: 'ready_for_review',
+      payload: {},
+      summary: 's',
+      createdBy: 'seed',
+      createdAt: '2026-01-01T00:00:00.000Z',
+      updatedAt: '2026-01-02T00:00:00.000Z',
+    } as unknown as Proposal;
+
+    const coerced = coerceProposalDates(raw);
+
+    expect(coerced.createdAt).toBeInstanceOf(Date);
+    expect(coerced.updatedAt).toBeInstanceOf(Date);
+    expect(coerced.createdAt.getTime()).toBe(Date.parse('2026-01-01T00:00:00.000Z'));
+    // Idempotent: a Date passes straight through.
+    const already = coerceProposalDates(coerced);
+    expect(already.createdAt).toBeInstanceOf(Date);
+    expect(already.createdAt.getTime()).toBe(coerced.createdAt.getTime());
+  });
+
+  it('WS1 — makeRepoBundle builds a complete in-memory bundle (Layer 1 is memory-only; no pg mode)', () => {
+    // The pg option was a throwing stub the nightly ran behind
+    // continue-on-error — decorative, never a real Postgres run. It was
+    // removed (QUALITY-2026-07-12 WS1); Layer 1 is memory-only.
+    const bundle = makeRepoBundle('memory');
+    expect(bundle.customerRepo).toBeDefined();
+    expect(bundle.appointmentRepo).toBeDefined();
+    expect(bundle.proposalRepo).toBeDefined();
+    expect(bundle.auditRepo).toBeDefined();
   });
 
   it('PR#265 review — runScript on a happy-path script emits session_terminated{completed} so observation.sessionEndedAs === completed', async () => {

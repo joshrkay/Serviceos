@@ -83,13 +83,17 @@ export class PgPendingInvitationRepository
     options?: PendingInvitationListOptions,
   ): Promise<PendingInvitation[]> {
     return this.withTenant(tenantId, async (client) => {
+      // Explicit tenant scoping: RLS is a runtime no-op unless
+      // RLS_RUNTIME_ROLE is enabled (see db/rls-runtime-role.ts), so this
+      // predicate is what isolates tenants — not withTenant's GUC.
       const where = options?.includeAccepted
-        ? ''
-        : 'WHERE accepted_at IS NULL';
+        ? 'WHERE tenant_id = $1'
+        : 'WHERE tenant_id = $1 AND accepted_at IS NULL';
       const result = await client.query(
         `SELECT * FROM pending_invitations
          ${where}
          ORDER BY created_at ASC`,
+        [tenantId],
       );
       return result.rows.map((r) => mapRow(r as Record<string, unknown>));
     });

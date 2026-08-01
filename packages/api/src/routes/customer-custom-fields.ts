@@ -1,7 +1,7 @@
 import { Router, Response } from 'express';
 import { AuthenticatedRequest } from '../auth/clerk';
+import { asyncRoute } from '../middleware/async-route';
 import { requireAuth, requireTenant, requirePermission } from '../middleware/auth';
-import { toErrorResponse } from '../shared/errors';
 import { AuditRepository } from '../audit/audit';
 import {
   CustomFieldRepository,
@@ -28,16 +28,11 @@ export function createCustomerCustomFieldRouter(
     requireAuth,
     requireTenant,
     requirePermission('customers:view'),
-    async (req: AuthenticatedRequest, res: Response) => {
-      try {
-        const includeArchived = req.query.includeArchived === 'true';
-        const defs = await customFieldRepo.listDefs(req.auth!.tenantId, includeArchived);
-        res.json(defs);
-      } catch (err) {
-        const { statusCode, body } = toErrorResponse(err);
-        res.status(statusCode).json(body);
-      }
-    }
+    asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
+      const includeArchived = req.query.includeArchived === 'true';
+      const defs = await customFieldRepo.listDefs(req.auth!.tenantId, includeArchived);
+      res.json(defs);
+    })
   );
 
   router.post(
@@ -45,25 +40,20 @@ export function createCustomerCustomFieldRouter(
     requireAuth,
     requireTenant,
     requirePermission('customers:update'),
-    async (req: AuthenticatedRequest, res: Response) => {
-      try {
-        const parsed = createCustomFieldDefSchema.parse(req.body);
-        const def = await createCustomFieldDef(
-          {
-            ...parsed,
-            tenantId: req.auth!.tenantId,
-            createdBy: req.auth!.userId,
-            actorRole: req.auth!.role,
-          },
-          customFieldRepo,
-          auditRepo
-        );
-        res.status(201).json(def);
-      } catch (err) {
-        const { statusCode, body } = toErrorResponse(err);
-        res.status(statusCode).json(body);
-      }
-    }
+    asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
+      const parsed = createCustomFieldDefSchema.parse(req.body);
+      const def = await createCustomFieldDef(
+        {
+          ...parsed,
+          tenantId: req.auth!.tenantId,
+          createdBy: req.auth!.userId,
+          actorRole: req.auth!.role,
+        },
+        customFieldRepo,
+        auditRepo
+      );
+      res.status(201).json(def);
+    })
   );
 
   router.post(
@@ -71,22 +61,17 @@ export function createCustomerCustomFieldRouter(
     requireAuth,
     requireTenant,
     requirePermission('customers:update'),
-    async (req: AuthenticatedRequest, res: Response) => {
-      try {
-        const archived = await customFieldRepo.archiveDef(
-          req.auth!.tenantId,
-          req.params.fieldDefId
-        );
-        if (!archived) {
-          res.status(404).json({ error: 'NOT_FOUND', message: 'Custom field not found' });
-          return;
-        }
-        res.json(archived);
-      } catch (err) {
-        const { statusCode, body } = toErrorResponse(err);
-        res.status(statusCode).json(body);
+    asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
+      const archived = await customFieldRepo.archiveDef(
+        req.auth!.tenantId,
+        req.params.fieldDefId
+      );
+      if (!archived) {
+        res.status(404).json({ error: 'NOT_FOUND', message: 'Custom field not found' });
+        return;
       }
-    }
+      res.json(archived);
+    })
   );
 
   return router;

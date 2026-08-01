@@ -23,6 +23,8 @@ export interface StorageProviderEnv {
   STORAGE_ACCESS_KEY_ID?: string;
   STORAGE_SECRET_ACCESS_KEY?: string;
   STORAGE_PUBLIC_URL?: string;
+  /** Explicit opt-out aligned with validateFeatureRequiredConfig. */
+  STORAGE_ENABLED?: string;
   API_PORT?: string;
   PORT?: string;
   NODE_ENV?: string;
@@ -144,6 +146,12 @@ export function signS3Request(input: SignS3RequestInput): string {
   return `${scheme}://${host}${canonicalPath}?${canonicalQuery}&X-Amz-Signature=${signature}`;
 }
 
+// fetch has no default timeout — a stalled S3 endpoint would hang the
+// image/voice pipelines and recording uploads indefinitely. Metadata ops get
+// a short bound; object transfers a generous one.
+const S3_METADATA_TIMEOUT_MS = 10_000;
+const S3_TRANSFER_TIMEOUT_MS = 60_000;
+
 export class S3StorageProvider implements StorageProvider {
   private readonly config: Required<Omit<S3StorageConfig, 'publicUrlBase' | 'pathStyle'>> &
     Pick<S3StorageConfig, 'publicUrlBase' | 'pathStyle'>;
@@ -165,7 +173,7 @@ export class S3StorageProvider implements StorageProvider {
 
   async getObjectMetadata(bucket: string, key: string): Promise<ObjectMetadata | null> {
     const url = this.presign('HEAD', bucket, key, 60);
-    const res = await fetch(url, { method: 'HEAD' });
+    const res = await fetch(url, { method: 'HEAD', signal: AbortSignal.timeout(S3_METADATA_TIMEOUT_MS) });
     if (res.status === 404) return null;
     if (!res.ok) {
       throw new Error(`S3 HEAD failed ${res.status}: ${await res.text().catch(() => '')}`);
@@ -180,7 +188,7 @@ export class S3StorageProvider implements StorageProvider {
     // Always a presigned GET (never publicUrlBase) — pipeline reads must
     // work for private buckets.
     const url = this.presign('GET', bucket, key, 60);
-    const res = await fetch(url);
+    const res = await fetch(url, { signal: AbortSignal.timeout(S3_TRANSFER_TIMEOUT_MS) });
     if (res.status === 404) return null;
     if (!res.ok) {
       throw new Error(`S3 GET failed ${res.status}: ${await res.text().catch(() => '')}`);
@@ -197,6 +205,7 @@ export class S3StorageProvider implements StorageProvider {
       method: 'PUT',
       headers: { 'content-type': contentType },
       body: new Uint8Array(body),
+      signal: AbortSignal.timeout(S3_TRANSFER_TIMEOUT_MS),
     });
     if (!res.ok) {
       throw new Error(`S3 PUT failed ${res.status}: ${await res.text().catch(() => '')}`);
@@ -205,7 +214,7 @@ export class S3StorageProvider implements StorageProvider {
 
   async deleteObject(bucket: string, key: string): Promise<void> {
     const url = this.presign('DELETE', bucket, key, 60);
-    const res = await fetch(url, { method: 'DELETE' });
+    const res = await fetch(url, { method: 'DELETE', signal: AbortSignal.timeout(S3_METADATA_TIMEOUT_MS) });
     if (!res.ok && res.status !== 204 && res.status !== 404) {
       throw new Error(`S3 delete failed ${res.status}: ${await res.text()}`);
     }
@@ -296,6 +305,7 @@ export function createStorageProvider(env: StorageProviderEnv = process.env): {
     STORAGE_ACCESS_KEY_ID,
     STORAGE_SECRET_ACCESS_KEY,
     STORAGE_PUBLIC_URL,
+    STORAGE_ENABLED,
     NODE_ENV,
   } = env;
 
@@ -321,7 +331,10 @@ export function createStorageProvider(env: StorageProviderEnv = process.env): {
     };
   }
 
-  if (isProductionLikeEnv(NODE_ENV)) {
+  // Match validateFeatureRequiredConfig: STORAGE_ENABLED=false opts out of
+  // object storage in prod/staging (recordings/uploads stay unavailable).
+  const storageOptedOut = STORAGE_ENABLED === 'false';
+  if (isProductionLikeEnv(NODE_ENV) && !storageOptedOut) {
     throw new Error(
       'Storage configuration missing: set STORAGE_BUCKET, STORAGE_ENDPOINT, STORAGE_REGION, STORAGE_ACCESS_KEY_ID, STORAGE_SECRET_ACCESS_KEY'
     );

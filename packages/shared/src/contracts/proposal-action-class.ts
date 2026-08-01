@@ -1,0 +1,127 @@
+import { ProposalType } from '../enums.js';
+
+/**
+ * Capture-class proposal types — the auto/one-tap-safe lane.
+ *
+ * A capture-class action records an operator-stated fact, moves no money, sends
+ * no customer-facing message, and is reversible. The other action classes
+ * (comms / money / irreversible) are deliberately NOT here: per CLAUDE.md
+ * "Never auto-execute", they must be reviewed and approved individually, never
+ * swept up by a bulk "approve all".
+ *
+ * This is the single source consumers outside the API use to know the safe
+ * lane — notably the mobile inbox's "approve all eligible". It is kept in EXACT
+ * lockstep with the API's authoritative `actionClassForProposalType` switch
+ * (packages/api/src/proposals/proposal.ts) by a parity test
+ * (proposal-action-class.test.ts), so a new capture type can't be added in one
+ * place and silently forgotten in the other.
+ */
+export const CAPTURE_PROPOSAL_TYPES: ReadonlySet<string> = new Set<string>([
+  ProposalType.CREATE_CUSTOMER,
+  ProposalType.UPDATE_CUSTOMER,
+  ProposalType.CREATE_JOB,
+  // B7 — safe job field edits; capture-class in the API's
+  // actionClassForProposalType.
+  ProposalType.UPDATE_JOB,
+  ProposalType.CREATE_APPOINTMENT,
+  ProposalType.CREATE_BOOKING,
+  ProposalType.CALLBACK,
+  ProposalType.DRAFT_ESTIMATE,
+  ProposalType.UPDATE_ESTIMATE,
+  ProposalType.DRAFT_INVOICE,
+  ProposalType.UPDATE_INVOICE,
+  ProposalType.CREATE_INVOICE_SCHEDULE,
+  ProposalType.BATCH_INVOICE,
+  ProposalType.REASSIGN_APPOINTMENT,
+  ProposalType.RESCHEDULE_APPOINTMENT,
+  ProposalType.ADD_CREW_MEMBER,
+  ProposalType.REMOVE_CREW_MEMBER,
+  ProposalType.ADD_NOTE,
+  ProposalType.ONBOARDING_TENANT_SETTINGS,
+  ProposalType.ONBOARDING_SERVICE_CATEGORY,
+  ProposalType.ONBOARDING_ESTIMATE_TEMPLATE,
+  ProposalType.ONBOARDING_TEAM_MEMBER,
+  ProposalType.ONBOARDING_SCHEDULE,
+  ProposalType.LOG_EXPENSE,
+  ProposalType.CONVERT_LEAD,
+  ProposalType.CONFIRM_APPOINTMENT,
+  ProposalType.MARK_LEAD_LOST,
+  ProposalType.ADD_SERVICE_LOCATION,
+  ProposalType.LOG_TIME_ENTRY,
+  ProposalType.VOICE_CLARIFICATION,
+  // UB-A2 — writes a tenant directive row; no money, no customer contact.
+  // The voice task handler omits sourceTrustTier, so despite being
+  // capture-class the instruction proposal always lands for review in v1.
+  ProposalType.CREATE_STANDING_INSTRUCTION,
+  // WS20 — updates a catalog item's unit price. Config change: moves no money
+  // (future pricing only), sends no customer message, reversible (edit the
+  // price back). The correction loop creates it with no trust tier, so it
+  // always lands for review — never auto-executed (D-004).
+  ProposalType.UPDATE_CATALOG_ITEM,
+]);
+
+/**
+ * True when a proposal type is capture-class (the auto-safe lane). Accepts a
+ * raw string so API (union) and mobile (JSON string) callers use it the same
+ * way; unknown types are non-capture (safe default — excluded from bulk
+ * approval).
+ */
+export function isCaptureProposalType(type: string): boolean {
+  return CAPTURE_PROPOSAL_TYPES.has(type);
+}
+
+/**
+ * The non-capture lanes, mirrored from the same authoritative API switch and
+ * held in lockstep by the per-lane parity test. Consumers (the mobile review
+ * screen's approve gate) use these to pick the explicit-confirm treatment:
+ * comms sends a customer-facing message, money moves money, irreversible
+ * cannot be walked back after execution.
+ */
+export const COMMS_PROPOSAL_TYPES: ReadonlySet<string> = new Set<string>([
+  ProposalType.NOTIFY_DELAY,
+  ProposalType.REQUEST_FEEDBACK,
+  ProposalType.SEND_INVOICE,
+  ProposalType.SEND_ESTIMATE,
+  ProposalType.SEND_ESTIMATE_NUDGE,
+  ProposalType.REVIEW_RESPONSE_PROPOSAL,
+  ProposalType.SEND_PAYMENT_REMINDER,
+]);
+
+export const MONEY_PROPOSAL_TYPES: ReadonlySet<string> = new Set<string>([
+  ProposalType.ISSUE_INVOICE,
+  ProposalType.RECORD_PAYMENT,
+  ProposalType.APPLY_LATE_FEE,
+]);
+
+export const IRREVERSIBLE_PROPOSAL_TYPES: ReadonlySet<string> = new Set<string>([
+  ProposalType.CANCEL_APPOINTMENT,
+  ProposalType.EMERGENCY_DISPATCH,
+]);
+
+/** Owner-only learning/config proposals — never auto-executed or batch-approved. */
+export const MANUAL_PROPOSAL_TYPES: ReadonlySet<string> = new Set<string>([
+  ProposalType.ADOPT_ENTITY_ALIAS,
+  // B1.18 — a spoken brand-voice capture. Manual rather than capture: brand
+  // voice is the tenant's locked outbound identity, so a wrong extraction
+  // poisons every outbound message. 'manual' makes non-auto-approval
+  // structural at every trust tier instead of threshold-dependent.
+  ProposalType.UPDATE_BRAND_VOICE,
+]);
+
+/** Mirrors the API's ActionClass union (packages/api/src/proposals/proposal.ts). */
+export type ActionClass = 'capture' | 'comms' | 'money' | 'irreversible' | 'manual';
+
+/**
+ * Total classifier over raw type strings. Returns 'unknown' for any type this
+ * build has not classified — consumers MUST fail closed on 'unknown': treat it
+ * as review-required (explicit confirm), never one-tap, never batch-eligible.
+ * Kept in lockstep with the API switch by the per-lane parity test.
+ */
+export function actionClassForProposalType(type: string): ActionClass | 'unknown' {
+  if (CAPTURE_PROPOSAL_TYPES.has(type)) return 'capture';
+  if (COMMS_PROPOSAL_TYPES.has(type)) return 'comms';
+  if (MONEY_PROPOSAL_TYPES.has(type)) return 'money';
+  if (IRREVERSIBLE_PROPOSAL_TYPES.has(type)) return 'irreversible';
+  if (MANUAL_PROPOSAL_TYPES.has(type)) return 'manual';
+  return 'unknown';
+}

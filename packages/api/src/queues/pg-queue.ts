@@ -1,7 +1,13 @@
 import { Pool } from 'pg';
 import { PgBaseRepository } from '../db/pg-base';
-import { Queue, QueueConfig, QueueMessage, DeadLetterEntry, redactForSink, toEnvelopeMeta } from './queue';
+import { Queue, QueueConfig, QueueDepth, QueueMessage, DeadLetterEntry, SendOptions, redactForSink, toEnvelopeMeta } from './queue';
 import { randomUUID } from 'crypto';
+
+/**
+ * Ceiling for the exponential visibility backoff in receiveBatch — a failed
+ * message is never hidden longer than this between retries (15 min).
+ */
+const MAX_VISIBILITY_SECONDS = 900;
 
 /**
  * Lightweight Postgres-backed queue using SELECT ... FOR UPDATE SKIP LOCKED.
@@ -52,6 +58,16 @@ export class PgQueue extends PgBaseRepository implements Queue {
           failed_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         )
       `);
+      // T4-F10 — the real handler failure, persisted on every failed attempt
+      // (not just the final one) so operators can see WHY a message is still
+      // retrying before it ever reaches the DLQ. _queue_messages/_queue_dlq
+      // are bootstrapped entirely inside this method (never added to
+      // schema.ts's MIGRATIONS registry) — this follows that same existing,
+      // deliberate convention rather than introducing a second path for the
+      // same two tables.
+      await client.query(`
+        ALTER TABLE _queue_messages ADD COLUMN IF NOT EXISTS last_error TEXT;
+      `);
     })();
     try {
       await this.initPromise;
@@ -62,60 +78,146 @@ export class PgQueue extends PgBaseRepository implements Queue {
     }
   }
 
-  async send<T>(type: string, payload: T, idempotencyKey?: string): Promise<string> {
+  async send<T>(
+    type: string,
+    payload: T,
+    idempotencyKey?: string,
+    options?: SendOptions,
+  ): Promise<string> {
     return this.withClient(async (client) => {
       await this.ensureTable(client);
       const id = randomUUID();
       const key = idempotencyKey ?? id;
+      // Delayed delivery (UC-5 durable timers): visible_at = NOW() + delay so
+      // receive/receiveBatch skip the row until the delay elapses. Delay 0 is
+      // the pre-existing immediate path.
+      const delaySeconds = Math.max(0, options?.delaySeconds ?? 0);
       await client.query(
         `INSERT INTO _queue_messages (id, type, payload, attempts, max_attempts, idempotency_key, visible_at, created_at)
-         VALUES ($1, $2, $3, $4, $5, $6, NOW(), NOW())
+         VALUES ($1, $2, $3, $4, $5, $6, NOW() + ($7 || ' seconds')::interval, NOW())
          ON CONFLICT (idempotency_key) DO NOTHING`,
-        [id, type, JSON.stringify(payload), 0, this.config.maxRetries, key]
+        [id, type, JSON.stringify(payload), 0, this.config.maxRetries, key, String(delaySeconds)]
       );
       return id;
     });
   }
 
   async receive<T>(): Promise<QueueMessage<T> | null> {
+    const [msg] = await this.receiveBatch<T>(1);
+    return msg ?? null;
+  }
+
+  async receiveBatch<T>(max: number): Promise<QueueMessage<T>[]> {
+    if (max <= 0) return [];
     return this.withClient(async (client) => {
       await this.ensureTable(client);
 
       await client.query('BEGIN');
       try {
+        // Claim up to `max` oldest visible messages atomically. FOR UPDATE SKIP
+        // LOCKED means concurrent ticks/replicas each grab a DISJOINT set — no
+        // message is processed twice.
+        //
+        // visible_at scales with the (pre-increment) attempt count:
+        // base * 2^attempts, capped. This gives failed messages exponential
+        // retry backoff instead of hammering a struggling downstream every
+        // `visibilityTimeout` seconds, and gives later attempts of slow jobs
+        // a longer processing window before another replica re-claims them.
         const result = await client.query(
           `UPDATE _queue_messages
            SET attempts = attempts + 1,
-               visible_at = NOW() + ($1 || ' seconds')::interval
-           WHERE id = (
+               visible_at = NOW() + (LEAST($1::float * POWER(2, attempts), $2)::int || ' seconds')::interval
+           WHERE id IN (
              SELECT id FROM _queue_messages
              WHERE visible_at <= NOW()
                AND attempts < max_attempts
              ORDER BY created_at ASC
              FOR UPDATE SKIP LOCKED
-             LIMIT 1
+             LIMIT $3
            )
            RETURNING *`,
-          [String(this.config.visibilityTimeout)]
+          [String(this.config.visibilityTimeout), String(MAX_VISIBILITY_SECONDS), max]
         );
+
+        // Reap crash-orphans: a worker that died mid-processing on the FINAL
+        // attempt leaves attempts == max_attempts in _queue_messages; the
+        // claim filter (attempts < max_attempts) then skips the row forever
+        // and it never reaches the DLQ — a silently stuck message. Move any
+        // such expired rows to the DLQ (same redaction as moveToDeadLetter),
+        // bounded per tick; SKIP LOCKED + ON CONFLICT keep concurrent
+        // replicas idempotent.
+        const orphans = await client.query(
+          `DELETE FROM _queue_messages
+           WHERE id IN (
+             SELECT id FROM _queue_messages
+             WHERE visible_at <= NOW()
+               AND attempts >= max_attempts
+             ORDER BY created_at ASC
+             FOR UPDATE SKIP LOCKED
+             LIMIT 10
+           )
+           RETURNING *`
+        );
+        for (const row of orphans.rows) {
+          const orphan: QueueMessage = {
+            id: row.id as string,
+            type: row.type as string,
+            payload: typeof row.payload === 'string' ? JSON.parse(row.payload) : row.payload,
+            attempts: Number(row.attempts),
+            maxAttempts: Number(row.max_attempts),
+            idempotencyKey: row.idempotency_key as string,
+            createdAt: (row.created_at as Date).toISOString(),
+          };
+          // Prefer the real handler failure the worker persisted on its last
+          // attempt (T4-F10's last_error, present on `RETURNING *`) — the
+          // crash this reaper handles is precisely "worker recorded the final
+          // failure, then died before moveToDeadLetter". The hardcoded orphan
+          // text is only a fallback for the rarer case where no last_error was
+          // ever written (e.g. a crash before the first failure was recorded).
+          const orphanError =
+            typeof row.last_error === 'string' && row.last_error.length > 0
+              ? row.last_error
+              : 'orphaned: attempts exhausted without completion (worker died mid-processing)';
+          await client.query(
+            `INSERT INTO _queue_dlq (message_id, type, payload, attempts, idempotency_key, error)
+             VALUES ($1, $2, $3, $4, $5, $6)
+             ON CONFLICT (message_id) DO NOTHING`,
+            [
+              orphan.id,
+              orphan.type,
+              JSON.stringify(
+                redactForSink(
+                  { envelope: toEnvelopeMeta(orphan), payload: orphan.payload },
+                  'dlq'
+                )
+              ),
+              orphan.attempts,
+              orphan.idempotencyKey,
+              orphanError,
+            ]
+          );
+        }
+
         await client.query('COMMIT');
 
-        if (result.rows.length === 0) return null;
-
-        const row = result.rows[0];
-        return {
-          id: row.id as string,
-          type: row.type as string,
-          payload: (typeof row.payload === 'string'
-            ? JSON.parse(row.payload)
-            : row.payload) as T,
-          attempts: Number(row.attempts),
-          maxAttempts: Number(row.max_attempts),
-          idempotencyKey: row.idempotency_key as string,
-          createdAt: (row.created_at as Date).toISOString(),
-        };
+        return result.rows
+          .map((row) => ({
+            id: row.id as string,
+            type: row.type as string,
+            payload: (typeof row.payload === 'string'
+              ? JSON.parse(row.payload)
+              : row.payload) as T,
+            attempts: Number(row.attempts),
+            maxAttempts: Number(row.max_attempts),
+            idempotencyKey: row.idempotency_key as string,
+            createdAt: (row.created_at as Date).toISOString(),
+          }))
+          // RETURNING order is unspecified; restore oldest-first claim order.
+          .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
       } catch (err) {
-        await client.query('ROLLBACK');
+        // Guarded: on a broken connection the ROLLBACK itself rejects and
+        // would replace `err`, hiding the real failure on the queue path.
+        await client.query('ROLLBACK').catch(() => {});
         throw err;
       }
     });
@@ -127,6 +229,24 @@ export class PgQueue extends PgBaseRepository implements Queue {
       await client.query(
         `DELETE FROM _queue_messages WHERE id = $1`,
         [messageId]
+      );
+    });
+  }
+
+  /**
+   * T4-F10 — persist the real handler failure onto the still-retrying row,
+   * so `_queue_dlq.error` (populated from this same value at exhaustion) is
+   * the actual thrown message/stack, not a hardcoded 'max attempts exceeded'.
+   * A no-op (never throws) if the row was already deleted (e.g. a
+   * concurrent successful retry raced this write) — recording a failure
+   * reason is diagnostic, never load-bearing.
+   */
+  async recordFailure(messageId: string, error: string): Promise<void> {
+    await this.withClient(async (client) => {
+      await this.ensureTable(client);
+      await client.query(
+        `UPDATE _queue_messages SET last_error = $2 WHERE id = $1`,
+        [messageId, error],
       );
     });
   }
@@ -160,7 +280,8 @@ export class PgQueue extends PgBaseRepository implements Queue {
         await client.query(`DELETE FROM _queue_messages WHERE id = $1`, [message.id]);
         await client.query('COMMIT');
       } catch (err) {
-        await client.query('ROLLBACK');
+        // Guarded for the same reason as receiveBatch above.
+        await client.query('ROLLBACK').catch(() => {});
         throw err;
       }
     });
@@ -184,6 +305,44 @@ export class PgQueue extends PgBaseRepository implements Queue {
         error: row.error as string,
         failedAt: (row.failed_at as Date).toISOString(),
       }));
+    });
+  }
+
+  /**
+   * Backlog snapshot for the scale-to-1000 depth SLO. Single round-trip: two
+   * correlated COUNTs (main queue + DLQ). Cheap enough to sample on an interval;
+   * never call it on the hot path.
+   */
+  async depth(): Promise<QueueDepth> {
+    return this.withClient(async (client) => {
+      await this.ensureTable(client);
+      const res = await client.query<{ pending: string; dead_letter: string }>(
+        `SELECT
+           (SELECT COUNT(*) FROM _queue_messages) AS pending,
+           (SELECT COUNT(*) FROM _queue_dlq)      AS dead_letter`,
+      );
+      return {
+        pending: Number(res.rows[0].pending),
+        deadLetter: Number(res.rows[0].dead_letter),
+      };
+    });
+  }
+
+  /**
+   * WS15 — pending messages older than `olderThanSeconds` (see Queue
+   * interface). Filters on created_at, not visible_at: a message mid-backoff
+   * is still "sitting in the queue" from the SLO's point of view.
+   */
+  async stalePendingCount(olderThanSeconds: number): Promise<number> {
+    return this.withClient(async (client) => {
+      await this.ensureTable(client);
+      const res = await client.query<{ stale: string }>(
+        `SELECT COUNT(*) AS stale
+           FROM _queue_messages
+          WHERE created_at < NOW() - ($1 || ' seconds')::interval`,
+        [String(Math.max(0, olderThanSeconds))],
+      );
+      return Number(res.rows[0].stale);
     });
   }
 

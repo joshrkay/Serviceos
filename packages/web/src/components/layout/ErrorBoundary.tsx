@@ -1,4 +1,5 @@
 import React from 'react';
+import { reportError } from '../../lib/errorReporter';
 
 /**
  * ErrorBoundary — top-level React error boundary for ServiceOS.
@@ -32,11 +33,13 @@ export class ErrorBoundary extends React.Component<
   }
 
   componentDidCatch(error: Error, info: React.ErrorInfo): void {
-    // Log without swallowing so dev tools / Sentry / Datadog can surface this.
-    // We intentionally do not pull in a new dependency — if a global error
-    // reporter is installed elsewhere it will already be patched into console.
+    // Log without swallowing so dev tools can surface this locally.
     // eslint-disable-next-line no-console
     console.error('[ErrorBoundary] render error:', error, info);
+    // ARCH-31 / OBS-43 — also report through the shared PostHog-backed
+    // error reporter so a render error surfaces in production, not just a
+    // devtools console no one is watching.
+    reportError(error, 'error-boundary');
   }
 
   handleReload = (): void => {

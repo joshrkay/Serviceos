@@ -15,12 +15,21 @@ import {
 } from '../../src/leads/lead-service';
 import { InMemoryCustomerRepository } from '../../src/customers/customer';
 import { InMemoryAuditRepository } from '../../src/audit/audit';
+import { InMemoryLocationRepository } from '../../src/locations/location';
 import { createLeadSchema, loseLeadSchema, updateLeadSchema } from '../../src/leads/enums';
+
+const SAMPLE_ADDRESS = {
+  street1: '100 Main St',
+  city: 'Austin',
+  state: 'TX',
+  postalCode: '78701',
+} as const;
 
 describe('P9-001 — leads repository + service', () => {
   let leadRepo: InMemoryLeadRepository;
   let customerRepo: InMemoryCustomerRepository;
   let auditRepo: InMemoryAuditRepository;
+  let locationRepo: InMemoryLocationRepository;
   const tenantA = '00000000-0000-4000-8000-00000000000a';
   const tenantB = '00000000-0000-4000-8000-00000000000b';
 
@@ -28,6 +37,7 @@ describe('P9-001 — leads repository + service', () => {
     leadRepo = new InMemoryLeadRepository();
     customerRepo = new InMemoryCustomerRepository();
     auditRepo = new InMemoryAuditRepository();
+    locationRepo = new InMemoryLocationRepository();
   });
 
   it('creates a lead with required fields', async () => {
@@ -135,7 +145,7 @@ describe('P9-001 — leads repository + service', () => {
     ).rejects.toThrow(/loseLead/);
   });
 
-  it('convertToCustomer creates customer, sets converted id, transitions to won, audits both sides', async () => {
+  it('convertToCustomer creates customer, primary location, sets converted id, transitions to won, audits both sides', async () => {
     const lead = await createLead(
       {
         tenantId: tenantA,
@@ -145,6 +155,7 @@ describe('P9-001 — leads repository + service', () => {
         email: 'carla@example.com',
         source: 'referral',
         createdBy: 'user-1',
+        ...SAMPLE_ADDRESS,
       },
       leadRepo,
       auditRepo
@@ -158,7 +169,8 @@ describe('P9-001 — leads repository + service', () => {
       customerRepo,
       'user-2',
       'owner',
-      auditRepo
+      auditRepo,
+      locationRepo
     );
 
     expect(result).not.toBeNull();
@@ -167,21 +179,78 @@ describe('P9-001 — leads repository + service', () => {
     expect(result!.customer.firstName).toBe('Carla');
     expect(result!.customer.email).toBe('carla@example.com');
     expect(result!.customer.preferredChannel).toBe('email');
+    expect(result!.location.customerId).toBe(result!.customer.id);
+    expect(result!.location.isPrimary).toBe(true);
+    expect(result!.location.street1).toBe('100 Main St');
+    expect(result!.location.city).toBe('Austin');
+
+    const locations = await locationRepo.findByCustomer(tenantA, result!.customer.id);
+    expect(locations).toHaveLength(1);
 
     // Both audit events written, sharing the same correlation id.
     const events = auditRepo.getAll();
     const leadEvent = events.find((e) => e.eventType === 'lead.converted');
     const customerEvent = events.find((e) => e.eventType === 'customer.created_from_lead');
+    const locationEvent = events.find((e) => e.eventType === 'location.created');
     expect(leadEvent).toBeTruthy();
     expect(customerEvent).toBeTruthy();
+    expect(locationEvent).toBeTruthy();
     expect(leadEvent!.correlationId).toBe(customerEvent!.correlationId);
     expect(leadEvent!.metadata).toMatchObject({ customerId: result!.customer.id });
     expect(customerEvent!.metadata).toMatchObject({ leadId: lead.id });
   });
 
+  it('convertToCustomer uses body address override when lead has none', async () => {
+    const lead = await createLead(
+      { tenantId: tenantA, firstName: 'NoAddr', source: 'referral', createdBy: 'u' },
+      leadRepo
+    );
+
+    const result = await convertToCustomer(
+      tenantA,
+      lead.id,
+      leadRepo,
+      customerRepo,
+      'user-2',
+      'owner',
+      auditRepo,
+      locationRepo,
+      { street1: '9 Override Ave', city: 'Dallas', state: 'TX', postalCode: '75201' }
+    );
+
+    expect(result!.location.street1).toBe('9 Override Ave');
+    expect(result!.location.city).toBe('Dallas');
+  });
+
+  it('convertToCustomer rejects when neither lead nor body has a complete address', async () => {
+    const lead = await createLead(
+      { tenantId: tenantA, firstName: 'Missing', source: 'referral', createdBy: 'u' },
+      leadRepo
+    );
+
+    await expect(
+      convertToCustomer(
+        tenantA,
+        lead.id,
+        leadRepo,
+        customerRepo,
+        'user-2',
+        'owner',
+        auditRepo,
+        locationRepo
+      )
+    ).rejects.toThrow(/service location address is required/i);
+  });
+
   it("convertToCustomer carries the lead's preferred language onto the customer", async () => {
     const lead = await createLead(
-      { tenantId: tenantA, firstName: 'Sofia', source: 'phone_call', createdBy: 'u' },
+      {
+        tenantId: tenantA,
+        firstName: 'Sofia',
+        source: 'phone_call',
+        createdBy: 'u',
+        ...SAMPLE_ADDRESS,
+      },
       leadRepo
     );
     await updateLead(tenantA, lead.id, { preferredLanguage: 'es' }, leadRepo);
@@ -193,7 +262,8 @@ describe('P9-001 — leads repository + service', () => {
       customerRepo,
       'user-2',
       'owner',
-      auditRepo
+      auditRepo,
+      locationRepo
     );
 
     expect(result!.customer.preferredLanguage).toBe('es');
@@ -201,7 +271,13 @@ describe('P9-001 — leads repository + service', () => {
 
   it('convertToCustomer rolls back when customer create fails', async () => {
     const lead = await createLead(
-      { tenantId: tenantA, firstName: 'D', source: 'walk_in', createdBy: 'u' },
+      {
+        tenantId: tenantA,
+        firstName: 'D',
+        source: 'walk_in',
+        createdBy: 'u',
+        ...SAMPLE_ADDRESS,
+      },
       leadRepo
     );
 
@@ -212,7 +288,16 @@ describe('P9-001 — leads repository + service', () => {
     };
 
     await expect(
-      convertToCustomer(tenantA, lead.id, leadRepo, failingCustomerRepo, 'u', 'owner', auditRepo)
+      convertToCustomer(
+        tenantA,
+        lead.id,
+        leadRepo,
+        failingCustomerRepo,
+        'u',
+        'owner',
+        auditRepo,
+        locationRepo
+      )
     ).rejects.toThrow(/simulated db failure/);
 
     const after = await leadRepo.findById(tenantA, lead.id);
@@ -227,12 +312,36 @@ describe('P9-001 — leads repository + service', () => {
 
   it('convertToCustomer refuses to re-convert an already-converted lead', async () => {
     const lead = await createLead(
-      { tenantId: tenantA, firstName: 'D', source: 'walk_in', createdBy: 'u' },
+      {
+        tenantId: tenantA,
+        firstName: 'D',
+        source: 'walk_in',
+        createdBy: 'u',
+        ...SAMPLE_ADDRESS,
+      },
       leadRepo
     );
-    await convertToCustomer(tenantA, lead.id, leadRepo, customerRepo, 'u', 'owner');
+    await convertToCustomer(
+      tenantA,
+      lead.id,
+      leadRepo,
+      customerRepo,
+      'u',
+      'owner',
+      undefined,
+      locationRepo
+    );
     await expect(
-      convertToCustomer(tenantA, lead.id, leadRepo, customerRepo, 'u', 'owner')
+      convertToCustomer(
+        tenantA,
+        lead.id,
+        leadRepo,
+        customerRepo,
+        'u',
+        'owner',
+        undefined,
+        locationRepo
+      )
     ).rejects.toThrow(/already been converted/);
   });
 
@@ -321,6 +430,27 @@ describe('P9-001 — leads repository + service', () => {
       expect(loseLeadSchema.safeParse({}).success).toBe(false);
       expect(loseLeadSchema.safeParse({ reason: '' }).success).toBe(false);
       expect(loseLeadSchema.safeParse({ reason: 'No reply' }).success).toBe(true);
+    });
+
+    it('createLeadSchema rejects incomplete address fields', () => {
+      const r = createLeadSchema.safeParse({
+        firstName: 'A',
+        source: 'web_form',
+        street1: '100 Main St',
+      });
+      expect(r.success).toBe(false);
+    });
+
+    it('createLeadSchema accepts a complete address', () => {
+      const r = createLeadSchema.safeParse({
+        firstName: 'A',
+        source: 'web_form',
+        street1: '100 Main St',
+        city: 'Austin',
+        state: 'TX',
+        postalCode: '78701',
+      });
+      expect(r.success).toBe(true);
     });
   });
 });

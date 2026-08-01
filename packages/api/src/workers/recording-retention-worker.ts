@@ -1,16 +1,21 @@
 /**
- * RV-132 — recording retention sweep.
+ * RV-132 + comms C6 — recording retention sweep.
  *
  * Purges call recordings older than the tenant's
- * `tenant_settings.recording_retention_days` (migration 169; default 365):
+ * `tenant_settings.recording_retention_days` (migration 169; default 365).
+ * C6 (spec/RIVET_COMMS_SPEC.md §6): a deletion that misses derived data is
+ * not a deletion — the sweep reaches all four data classes:
  *
- *   1. delete the stored object via the StorageProvider (when the joined
- *      files row carries a bucket/key);
- *   2. tombstone the voice_recordings row (`purged_at`, migration 169 —
- *      the 007 status CHECK has no 'deleted' value, so the dedicated
- *      nullable marker is the non-destructive tombstone; the row, its
- *      transcript, and every audit event are KEPT);
- *   3. emit a `voice_recording.purged` audit event.
+ *   1. audio — delete the stored object via the StorageProvider (when the
+ *      joined files row carries a bucket/key);
+ *   2. transcript — null `voice_recordings.transcript` /
+ *      `transcript_metadata` and delete the `call_transcript_turns` rows;
+ *   3. derived — delete the recording's `call_summaries` row;
+ *   4. embeddings — delete the `knowledge_chunks` rows ingested from this
+ *      recording (`call_summary` + `call_transcript_window` source types);
+ *   then tombstone the voice_recordings row (`purged_at` — the row itself
+ *   and every audit event are KEPT for the audit trail) and emit a
+ *   `voice_recording.purged` audit event with per-class counts.
  *
  * `legal_hold = true` rows are exempt unconditionally (excluded by the
  * repo's due-query, mirroring the migration's partial index).
@@ -39,6 +44,13 @@ export interface PurgeableRecording {
   createdAt: Date;
 }
 
+/** C6 — per-class row counts removed by `purgeDerived`, for the audit row. */
+export interface PurgedDerivedCounts {
+  transcriptTurns: number;
+  callSummaries: number;
+  knowledgeChunks: number;
+}
+
 export interface RecordingRetentionRepository {
   /**
    * Cross-tenant: recordings past their tenant's retention horizon that are
@@ -46,6 +58,12 @@ export interface RecordingRetentionRepository {
    * inside the query (`tenant_settings.recording_retention_days`).
    */
   findDue(now: Date, limit: number): Promise<PurgeableRecording[]>;
+  /**
+   * C6 — delete the recording's transcript (column + turn rows), summary,
+   * and embedding chunks in one tenant-scoped transaction. Idempotent:
+   * re-running on an already-purged recording deletes nothing.
+   */
+  purgeDerived(tenantId: string, id: string): Promise<PurgedDerivedCounts>;
   /** Stamp the tombstone. Idempotent (`purged_at IS NULL` guard). */
   markPurged(tenantId: string, id: string, purgedAt: Date): Promise<void>;
 }
@@ -59,10 +77,10 @@ export class PgRecordingRetentionRepository
   }
 
   async findDue(now: Date, limit: number): Promise<PurgeableRecording[]> {
-    // Cross-tenant drain: documented use of withClient (same convention as
-    // PgDroppedCallRecoveryRepository.findDue); the subsequent tombstone is
-    // tenant-scoped.
-    return this.withClient(async (client) => {
+    // Cross-tenant drain: withCrossTenantSweep (named rls_cross_tenant role when
+    // enforcement is on; same convention as PgDroppedCallRecoveryRepository.findDue);
+    // the subsequent tombstone is tenant-scoped.
+    return this.withCrossTenantSweep(async (client) => {
       const { rows } = await client.query(
         `SELECT vr.id, vr.tenant_id, vr.call_sid,
                 f.s3_bucket, f.s3_key, vr.created_at
@@ -98,12 +116,54 @@ export class PgRecordingRetentionRepository
       );
     });
   }
+
+  async purgeDerived(tenantId: string, id: string): Promise<PurgedDerivedCounts> {
+    // One tenant-scoped transaction so a partial purge can't leave the
+    // recording looking clean while embeddings survive (I4). knowledge_chunks
+    // source ids are the recording id (call_summary) and `<id>:<n>` windows
+    // (call_transcript_window) — see transcript-ingestion-worker.ts.
+    return this.withTenantTransaction(tenantId, async (client) => {
+      const turns = await client.query(
+        `DELETE FROM call_transcript_turns
+          WHERE tenant_id = $1 AND voice_recording_id = $2`,
+        [tenantId, id],
+      );
+      const summaries = await client.query(
+        `DELETE FROM call_summaries
+          WHERE tenant_id = $1 AND call_id = $2`,
+        [tenantId, id],
+      );
+      const chunks = await client.query(
+        `DELETE FROM knowledge_chunks
+          WHERE tenant_id = $1
+            AND source_type IN ('call_summary', 'call_transcript_window')
+            AND (source_id = $2 OR source_id LIKE $2 || ':%')`,
+        [tenantId, id],
+      );
+      await client.query(
+        `UPDATE voice_recordings
+            SET transcript = NULL, transcript_metadata = '{}'::jsonb, updated_at = now()
+          WHERE tenant_id = $1 AND id = $2`,
+        [tenantId, id],
+      );
+      return {
+        transcriptTurns: turns.rowCount ?? 0,
+        callSummaries: summaries.rowCount ?? 0,
+        knowledgeChunks: chunks.rowCount ?? 0,
+      };
+    });
+  }
 }
 
 /** In-memory implementation for unit tests. */
 export class InMemoryRecordingRetentionRepository
   implements RecordingRetentionRepository
 {
+  /** C6 — recording ids purgeDerived was called for, in call order. */
+  public derivedPurged: Array<{ tenantId: string; id: string }> = [];
+  /** C6 — per-recording counts to return from purgeDerived (default zeros). */
+  public derivedCounts = new Map<string, PurgedDerivedCounts>();
+
   constructor(
     public rows: Array<
       PurgeableRecording & {
@@ -113,6 +173,17 @@ export class InMemoryRecordingRetentionRepository
       }
     > = [],
   ) {}
+
+  async purgeDerived(tenantId: string, id: string): Promise<PurgedDerivedCounts> {
+    this.derivedPurged.push({ tenantId, id });
+    return (
+      this.derivedCounts.get(id) ?? {
+        transcriptTurns: 0,
+        callSummaries: 0,
+        knowledgeChunks: 0,
+      }
+    );
+  }
 
   async findDue(now: Date, limit: number): Promise<PurgeableRecording[]> {
     return this.rows
@@ -179,15 +250,21 @@ export async function runRecordingRetentionSweep(
   let failed = 0;
   for (const row of due) {
     try {
-      // 1. Delete the stored bytes. Rows without a files join (no object on
-      //    record) skip straight to the tombstone — there is nothing to
-      //    delete but the metadata is still past retention.
+      // 1. Delete the stored bytes (class 1: audio). Rows without a files
+      //    join (no object on record) skip straight to the derived purge —
+      //    there is nothing to delete but the metadata is still past
+      //    retention.
       if (row.storageBucket && row.storageKey) {
         await deps.storage.deleteObject(row.storageBucket, row.storageKey);
       }
-      // 2. Tombstone — the row + transcript + audit trail are KEPT.
+      // 2. C6 — classes 2–4: transcript (column + turns), summaries,
+      //    embedding chunks. Runs BEFORE the tombstone so a failure here
+      //    leaves the row unpurged and retried next sweep, never a
+      //    tombstoned recording with surviving derived data.
+      const derived = await deps.repo.purgeDerived(row.tenantId, row.id);
+      // 3. Tombstone — the row itself + audit trail are KEPT.
       await deps.repo.markPurged(row.tenantId, row.id, now());
-      // 3. Audit.
+      // 4. Audit.
       if (deps.auditRepo) {
         try {
           await deps.auditRepo.create(
@@ -202,6 +279,7 @@ export async function runRecordingRetentionSweep(
                 callSid: row.callSid,
                 hadStoredObject: Boolean(row.storageBucket && row.storageKey),
                 recordedAt: row.createdAt.toISOString(),
+                derivedPurged: derived,
               },
             }),
           );

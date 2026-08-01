@@ -101,10 +101,15 @@ describe('createLLMGateway — cache wiring', () => {
     const wrapper = gateway as unknown as { config: { deterministicTaskTypes: string[] } };
     const taskTypes = wrapper.config.deterministicTaskTypes;
 
-    expect(taskTypes).toContain('intent_classification');
-    expect(taskTypes).toContain('entity_extraction');
-    expect(taskTypes).toContain('transcript_normalization');
+    expect(taskTypes).toContain('classify_intent');
     expect(taskTypes).toContain('extract_categories');
+
+    // Reconciled (follow-up #2): the idealized names that matched no real
+    // gateway taskType were removed, and intent_classification → classify_intent
+    // (the live classifier's actual taskType).
+    expect(taskTypes).not.toContain('intent_classification');
+    expect(taskTypes).not.toContain('entity_extraction');
+    expect(taskTypes).not.toContain('transcript_normalization');
 
     // Non-deterministic types must NOT be in the list
     expect(taskTypes).not.toContain('draft_estimate');

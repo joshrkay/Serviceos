@@ -11,7 +11,7 @@ import {
 import type { AppConfig } from '../../shared/config';
 import type { AiRunRepository } from '../ai-run';
 import { CircuitBreakerRegistry, DEFAULT_BREAKER } from './breaker';
-import { TenantQuotaRegistry, DEFAULT_TIER_CONFIG } from './tenant-quota';
+import { createTenantQuotaStore, DEFAULT_TIER_CONFIG } from './tenant-quota';
 import { composeResilienceStack, type ResilienceStackOptions } from './compose-resilience';
 import {
   CachingGatewayWrapper,
@@ -19,21 +19,33 @@ import {
   type CacheConfig,
 } from './cache';
 import { createRedisCacheStore } from './redis-cache-store';
+import { findProviderModelMismatch } from './provider-model-compat';
+import { DEFAULT_AI_ROUTING_CONFIG } from '../../config/ai-routing';
+import {
+  FallbackModelMapProvider,
+  resolveFallbackTierModelsFromEnv,
+} from './fallback-model-map';
 
 /**
  * Create the LLM gateway from application config.
  *
- * Switching providers is purely a .env change:
+ * Switching providers is purely a .env change.
  *
- *   OpenAI:
+ *   OpenAI primary (Profile A — production default):
  *     AI_PROVIDER_BASE_URL=https://api.openai.com/v1
  *     AI_PROVIDER_API_KEY=sk-...
  *     AI_DEFAULT_MODEL=gpt-4o-mini
  *
- *   OpenRouter:
+ *   Optional OpenRouter fallback (dual-provider — NOT a Profile B swap):
+ *     AI_FALLBACK_PROVIDER_BASE_URL=https://openrouter.ai/api/v1
+ *     AI_FALLBACK_PROVIDER_API_KEY=sk-or-...
+ *     AI_FALLBACK_LIGHTWEIGHT_MODEL=meta-llama/llama-3.1-8b-instruct
+ *     See docs/runbooks/live-ai-restore.md ("Profile A + OpenRouter fallback")
+ *
+ *   OpenRouter-only primary (Profile B swap — different from failover):
  *     AI_PROVIDER_BASE_URL=https://openrouter.ai/api/v1
  *     AI_PROVIDER_API_KEY=sk-or-...
- *     AI_DEFAULT_MODEL=openai/gpt-4o-mini
+ *     See docs/runbooks/openrouter-ai-provider.md
  *
  *   Any other OpenAI-compatible endpoint works the same way.
  */
@@ -105,6 +117,34 @@ export function createLLMGateway(
 
   const baseURL = config.AI_PROVIDER_BASE_URL ?? 'https://api.openai.com/v1';
 
+  // Static mismatch check (no network). Surfaces the 2026-07-20 failure mode
+  // where Claude model ids were sent to api.openai.com while health stayed green.
+  // Only check models that will actually be used for tenant traffic.
+  const allPerTierSetForCheck =
+    Boolean(process.env.AI_LIGHTWEIGHT_MODEL) &&
+    Boolean(process.env.AI_STANDARD_MODEL) &&
+    Boolean(process.env.AI_COMPLEX_MODEL);
+  const modelsToCheck =
+    config.AI_DEFAULT_MODEL && !allPerTierSetForCheck
+      ? [config.AI_DEFAULT_MODEL]
+      : [
+          DEFAULT_AI_ROUTING_CONFIG.tiers.lightweight.model,
+          DEFAULT_AI_ROUTING_CONFIG.tiers.standard.model,
+          DEFAULT_AI_ROUTING_CONFIG.tiers.complex.model,
+        ];
+  const mismatch = findProviderModelMismatch(baseURL, modelsToCheck);
+  if (mismatch) {
+    const logger = opts.logger;
+    logger?.error('AI provider/model mismatch — completions will fail until env is aligned', {
+      providerHost: mismatch.providerHost,
+      model: mismatch.model,
+      modelFamily: mismatch.modelFamily,
+      reason: mismatch.reason,
+    });
+    // Also stderr so Railway logs show it even without a structured logger.
+    process.stderr.write(`[ERROR] ${mismatch.reason}\n`);
+  }
+
   const primaryProvider = new OpenAICompatibleProvider({
     apiKey: config.AI_PROVIDER_API_KEY,
     baseURL,
@@ -131,15 +171,28 @@ export function createLLMGateway(
   // The breaker registry is shared and exported for the /api/health/ai endpoint.
   const breakerRegistry = opts.resilience?.breakers ??
     new CircuitBreakerRegistry(opts.resilience?.breakerConfig ?? DEFAULT_BREAKER);
-  const quotaRegistry = opts.resilience?.quota ?? new TenantQuotaRegistry(DEFAULT_TIER_CONFIG);
+  // U3c — cluster-wide per-tenant quota when REDIS_URL is set (sync-return +
+  // async Redis upgrade); per-replica in-memory registry otherwise. Identical
+  // semantics; the seam is the same as the WS cap / gateway cache.
+  const quotaRegistry =
+    opts.resilience?.quota ?? createTenantQuotaStore(process.env.REDIS_URL, DEFAULT_TIER_CONFIG);
 
   // Publish the breaker registry for the health endpoint.
   sharedBreakerRegistry = breakerRegistry;
+
+  // FM-03 — dual-provider failover. When both AI_FALLBACK_PROVIDER_* vars
+  // are set, primary abort/5xx advances to OpenRouter (or any second host)
+  // instead of sole-provider LLM_PROVIDER_UNAVAILABLE. Missing either var
+  // keeps today's single-provider behavior (staged rollout safe).
+  const fallbackProviders =
+    opts.resilience?.fallbackProviders ??
+    buildFallbackProvidersFromEnv(opts.logger);
 
   const resilientProvider = composeResilienceStack(shadowWrappedProvider, {
     ...opts.resilience,
     breakers: breakerRegistry,
     quota: quotaRegistry,
+    fallbackProviders,
   });
 
   const providers = new Map<string, LLMProvider>([[resilientProvider.name, resilientProvider]]);
@@ -160,11 +213,15 @@ export function createLLMGateway(
   return maybeBuildCacheWrapper(bareGateway, opts);
 }
 
-/** Default cache-eligible task types for P2-031. */
+/**
+ * Default cache-eligible task types for P2-031 — deterministic tasks whose
+ * identical inputs yield identical outputs. Reconciled to the real gateway
+ * taskTypes (follow-up #2): the live classifier emits `classify_intent`, not
+ * `intent_classification`, so the old entry never matched a real call; and
+ * `entity_extraction` / `transcript_normalization` matched no call site at all.
+ */
 const DEFAULT_DETERMINISTIC_TASK_TYPES: readonly string[] = [
-  'intent_classification',
-  'entity_extraction',
-  'transcript_normalization',
+  'classify_intent',
   'extract_categories',
 ];
 
@@ -233,14 +290,17 @@ function maybeBuildCacheWrapper(
 }
 
 /**
- * Build the LLMGatewayConfig, wiring AI_DEFAULT_MODEL as a system-tenant
- * fallback when per-tier env vars are not all explicitly set.
+ * Build the LLMGatewayConfig, wiring AI_DEFAULT_MODEL as the global default
+ * when per-tier env vars are not all explicitly set.
  *
  * Precedence:
  * 1. Per-tier env vars (AI_LIGHTWEIGHT_MODEL, AI_STANDARD_MODEL, AI_COMPLEX_MODEL)
- *    — take full precedence when all three are explicitly set.
- * 2. AI_DEFAULT_MODEL — applies to all tiers via tenantOverrides[SYSTEM_TENANT_ID]
- *    when set and NOT all per-tier env vars are provided.
+ *    — take full precedence when all three are explicitly set (via
+ *    DEFAULT_AI_ROUTING_CONFIG, which reads those env vars at module load).
+ * 2. AI_DEFAULT_MODEL — stored under tenantOverrides[SYSTEM_TENANT_ID] and
+ *    applied to EVERY tenant that has no explicit override (see
+ *    LLMGateway.complete fallthrough). Without that fallthrough, only
+ *    tenantId=system would see AI_DEFAULT_MODEL — the 2026-07-20 bug.
  * 3. Built-in defaults in DEFAULT_AI_ROUTING_CONFIG.
  *
  * A one-time INFO log is emitted at construction time describing what was wired.
@@ -270,9 +330,18 @@ function buildGatewayConfig(
       tenantOverrides: {
         [SYSTEM_TENANT_ID]: {
           tiers: {
-            lightweight: { model: defaultModel!, provider: providerName },
-            standard: { model: defaultModel!, provider: providerName },
-            complex: { model: defaultModel!, provider: providerName },
+            lightweight: {
+              ...DEFAULT_AI_ROUTING_CONFIG.tiers.lightweight,
+              model: defaultModel!,
+            },
+            standard: {
+              ...DEFAULT_AI_ROUTING_CONFIG.tiers.standard,
+              model: defaultModel!,
+            },
+            complex: {
+              ...DEFAULT_AI_ROUTING_CONFIG.tiers.complex,
+              model: defaultModel!,
+            },
           },
         },
       },
@@ -293,6 +362,61 @@ function buildGatewayConfig(
   }
 
   return { defaultProvider: providerName };
+}
+
+/**
+ * Build zero-or-one fallback providers from env. Exported for unit tests.
+ * Requires BOTH key and base URL; partial config is ignored (no boot crash).
+ */
+export function buildFallbackProvidersFromEnv(
+  logger?: LLMGatewayLogger,
+  env: NodeJS.ProcessEnv = process.env,
+): LLMProvider[] {
+  const apiKey = env.AI_FALLBACK_PROVIDER_API_KEY?.trim();
+  const baseURL = env.AI_FALLBACK_PROVIDER_BASE_URL?.trim();
+  if (!apiKey || !baseURL) {
+    if ((apiKey && !baseURL) || (!apiKey && baseURL)) {
+      logger?.info(
+        'AI_FALLBACK_PROVIDER_* partially set — ignoring fallback (need both API_KEY and BASE_URL)',
+        {
+          hasKey: Boolean(apiKey),
+          hasBaseURL: Boolean(baseURL),
+        },
+      );
+    }
+    return [];
+  }
+
+  let parsedHost = 'fallback';
+  try {
+    parsedHost = new URL(baseURL).hostname;
+  } catch {
+    logger?.error('AI_FALLBACK_PROVIDER_BASE_URL is not a valid URL — ignoring fallback', {
+      baseURL,
+    });
+    return [];
+  }
+
+  const raw = new OpenAICompatibleProvider({
+    apiKey,
+    baseURL,
+    defaultHeaders: baseURL.includes('openrouter.ai')
+      ? {
+          'HTTP-Referer': 'https://rivet.ai',
+          'X-Title': 'Rivet',
+        }
+      : undefined,
+  });
+
+  const tiers = resolveFallbackTierModelsFromEnv(env);
+  logger?.info('AI fallback provider wired', {
+    host: parsedHost,
+    lightweightModel: tiers.lightweight,
+    standardModel: tiers.standard,
+    complexModel: tiers.complex,
+  });
+
+  return [new FallbackModelMapProvider(raw, tiers)];
 }
 
 function maybeWrapWithShadow(
@@ -331,6 +455,25 @@ export function createMockLLMGateway(defaultResponse = '{"mock": true}'): {
   provider: MockLLMProvider;
 } {
   const provider = new MockLLMProvider(defaultResponse);
+  const providers = new Map<string, LLMProvider>([['mock', provider]]);
+  const gatewayConfig: LLMGatewayConfig = { defaultProvider: 'mock' };
+  const gateway = new LLMGateway(gatewayConfig, providers);
+  return { gateway, provider };
+}
+
+/**
+ * Hermetic / local-demo gateway used when `AI_PROVIDER_API_KEY` is unset.
+ * Scripts intent classification + free-text drafting so Assistant can create
+ * real proposals without a paid provider key. Unit tests that need a fixed
+ * JSON reply should keep using {@link createMockLLMGateway}.
+ */
+export function createHermeticMockLLMGateway(): {
+  gateway: LLMGateway;
+  provider: MockLLMProvider;
+} {
+  const provider = new MockLLMProvider('{"intentType":"unknown","confidence":0}', {
+    hermetic: true,
+  });
   const providers = new Map<string, LLMProvider>([['mock', provider]]);
   const gatewayConfig: LLMGatewayConfig = { defaultProvider: 'mock' };
   const gateway = new LLMGateway(gatewayConfig, providers);

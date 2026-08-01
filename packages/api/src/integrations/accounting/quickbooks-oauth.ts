@@ -37,6 +37,10 @@ export interface ExchangedQuickBooksTokens {
   realmId: string;
 }
 
+// fetch has no default timeout — a stalled Intuit token endpoint would hang
+// the connect/refresh path indefinitely.
+const INTUIT_TOKEN_TIMEOUT_MS = 15_000;
+
 interface TokenResponseBody {
   access_token?: string;
   refresh_token?: string;
@@ -66,11 +70,15 @@ export async function exchangeQuickBooksAuthorizationCode(
       Accept: 'application/json',
     },
     body: body.toString(),
+    signal: AbortSignal.timeout(INTUIT_TOKEN_TIMEOUT_MS),
   });
-  const json = (await res.json()) as TokenResponseBody;
+  // Parse defensively: an Intuit edge proxy can answer 502/503 with an HTML
+  // body, where res.json() throws a raw SyntaxError and the actionable
+  // ValidationError below never surfaces.
+  const json = (await res.json().catch(() => ({}))) as TokenResponseBody;
   if (!res.ok || !json.access_token || !json.refresh_token) {
     throw new ValidationError(
-      json.error_description ?? json.error ?? 'QuickBooks token exchange failed',
+      json.error_description ?? json.error ?? `QuickBooks token exchange failed (HTTP ${res.status})`,
     );
   }
   if (!realmId) {
@@ -102,11 +110,13 @@ export async function refreshQuickBooksTokens(
       Accept: 'application/json',
     },
     body: body.toString(),
+    signal: AbortSignal.timeout(INTUIT_TOKEN_TIMEOUT_MS),
   });
-  const json = (await res.json()) as TokenResponseBody;
+  // Same defensive parse as the code exchange above.
+  const json = (await res.json().catch(() => ({}))) as TokenResponseBody;
   if (!res.ok || !json.access_token) {
     throw new ValidationError(
-      json.error_description ?? json.error ?? 'QuickBooks token refresh failed',
+      json.error_description ?? json.error ?? `QuickBooks token refresh failed (HTTP ${res.status})`,
     );
   }
   return {

@@ -205,6 +205,66 @@ describe('CalendarIntegration repos + Google OAuth helpers (PR 1)', () => {
         ),
       ).rejects.toThrow(/access \+ refresh tokens/);
     });
+
+    // OBS-01: a stalled Google endpoint must not hang the OAuth callback
+    // route indefinitely — both calls are bound by AbortSignal.timeout.
+    it('passes an AbortSignal to the token exchange and userinfo fetch calls', async () => {
+      const signals: Array<AbortSignal | undefined> = [];
+      const fakeFetch = async (
+        input: string | URL | Request,
+        init?: RequestInit,
+      ): Promise<Response> => {
+        signals.push(init?.signal ?? undefined);
+        if (String(input).includes('/token')) {
+          return jsonRes({ access_token: 'AT', refresh_token: 'RT', expires_in: 3600 });
+        }
+        return jsonRes({ email: 'user@example.com' });
+      };
+
+      await exchangeAuthorizationCode(
+        { clientId: 'cid', clientSecret: 'csec', redirectUri: 'http://x' },
+        'code',
+        fakeFetch as typeof fetch,
+      );
+
+      expect(signals).toHaveLength(2);
+      for (const signal of signals) {
+        expect(signal).toBeInstanceOf(AbortSignal);
+        expect(signal!.aborted).toBe(false);
+      }
+    });
+
+    it('a hung fetch, once aborted by the timeout signal, rejects with a descriptive error instead of hanging forever', async () => {
+      // A real hung fetch never resolves on its own; the only way it ever
+      // settles is the AbortSignal.timeout passed in `init` firing and the
+      // underlying implementation rejecting with a DOMException named
+      // 'AbortError'. We reproduce exactly that terminal state here rather
+      // than waiting out the real 15s timeout, keeping the test fast while
+      // still exercising the translation from AbortError to a clear message.
+      let observedSignal: AbortSignal | undefined;
+      const fakeFetch = async (
+        _input: string | URL | Request,
+        init?: RequestInit,
+      ): Promise<Response> => {
+        observedSignal = init?.signal ?? undefined;
+        throw new DOMException('The operation was aborted.', 'AbortError');
+      };
+
+      const start = Date.now();
+      await expect(
+        exchangeAuthorizationCode(
+          { clientId: 'cid', clientSecret: 'csec', redirectUri: 'http://x' },
+          'code',
+          fakeFetch as typeof fetch,
+        ),
+      ).rejects.toThrow(/Google token exchange timed out after \d+ms/);
+
+      // Confirms the failure surfaced immediately rather than the caller
+      // hanging until some external timeout — this is the actual P1 being
+      // fixed (OAuth callback route / calendar-sync worker no longer hang).
+      expect(Date.now() - start).toBeLessThan(1000);
+      expect(observedSignal).toBeInstanceOf(AbortSignal);
+    });
   });
 
   describe('getValidAccessToken', () => {
@@ -284,6 +344,77 @@ describe('CalendarIntegration repos + Google OAuth helpers (PR 1)', () => {
 
       const after = await repo.findByUser('t', 'u', 'google');
       expect(after?.status).toBe('expired');
+    });
+
+    // OBS-01: getValidAccessToken's refresh call runs inside the
+    // calendar-sync worker — an un-timed-out fetch here piles up hung
+    // workers rather than blocking a single HTTP request.
+    it('passes an AbortSignal to the token refresh fetch call', async () => {
+      const repo = new InMemoryCalendarIntegrationRepository();
+      const row = await repo.upsert({
+        tenantId: 't', userId: 'u', provider: 'google',
+        accessToken: 'old-tok',
+        refreshToken: 'r-tok',
+        accessTokenExpiresAt: new Date(Date.now() + 30_000),
+        externalAccountEmail: 'user@example.com',
+      });
+      let observedSignal: AbortSignal | undefined;
+      const fakeFetch = async (
+        _input: string | URL | Request,
+        init?: RequestInit,
+      ): Promise<Response> => {
+        observedSignal = init?.signal ?? undefined;
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ access_token: 'new-tok', expires_in: 3600 }),
+          text: async () => '',
+        } as unknown as Response;
+      };
+
+      await getValidAccessToken(
+        row,
+        { clientId: 'c', clientSecret: 'cs', redirectUri: 'http://x' },
+        repo,
+        fakeFetch as typeof fetch,
+      );
+
+      expect(observedSignal).toBeInstanceOf(AbortSignal);
+      expect(observedSignal!.aborted).toBe(false);
+    });
+
+    it('a hung refresh fetch, once aborted by the timeout signal, rejects fast with a descriptive error (worker fails fast instead of piling up)', async () => {
+      const repo = new InMemoryCalendarIntegrationRepository();
+      const row = await repo.upsert({
+        tenantId: 't', userId: 'u', provider: 'google',
+        accessToken: 'old-tok',
+        refreshToken: 'r-tok',
+        accessTokenExpiresAt: new Date(Date.now() + 30_000),
+        externalAccountEmail: 'user@example.com',
+      });
+      // Reproduces the terminal state of a hung fetch once its
+      // AbortSignal.timeout fires — see the matching exchangeAuthorizationCode
+      // test above for why we simulate this instead of waiting the real
+      // timeout duration.
+      const fakeFetch = async (): Promise<Response> => {
+        throw new DOMException('The operation was aborted.', 'AbortError');
+      };
+
+      const start = Date.now();
+      await expect(
+        getValidAccessToken(
+          row,
+          { clientId: 'c', clientSecret: 'cs', redirectUri: 'http://x' },
+          repo,
+          fakeFetch as typeof fetch,
+        ),
+      ).rejects.toThrow(/Google token refresh timed out after \d+ms/);
+      expect(Date.now() - start).toBeLessThan(1000);
+
+      // The integration must NOT be flipped to 'expired' on a timeout —
+      // that path is reserved for actual invalid_grant (revoked) responses.
+      const after = await repo.findByUser('t', 'u', 'google');
+      expect(after?.status).toBe('active');
     });
   });
 });

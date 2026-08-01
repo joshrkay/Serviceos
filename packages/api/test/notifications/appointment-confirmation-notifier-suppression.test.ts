@@ -2,6 +2,8 @@ import { describe, expect, it, beforeEach } from 'vitest';
 import { v4 as uuidv4 } from 'uuid';
 import { AppointmentConfirmationNotifier } from '../../src/notifications/appointment-confirmation-notifier';
 import { InMemoryDeliveryProvider } from '../../src/notifications/delivery-provider';
+import { GatedMessageDelivery } from '../../src/notifications/gated-message-delivery';
+import { InMemoryAuditRepository } from '../../src/audit/audit';
 import { InMemoryDispatchRepository } from '../../src/notifications/dispatch-repository';
 import { InMemoryCustomerRepository, Customer } from '../../src/customers/customer';
 import { InMemoryJobRepository, Job } from '../../src/jobs/job';
@@ -99,14 +101,20 @@ async function buildHarness(): Promise<Harness> {
     updatedAt: new Date(),
   });
 
+  // WS1 — consent/DNC gate now lives in the delivery wrapper (enforcement 'block').
+  const gated = new GatedMessageDelivery({
+    base: delivery,
+    dnc,
+    auditRepo: new InMemoryAuditRepository(),
+    enforcement: 'block',
+  });
   const notifier = new AppointmentConfirmationNotifier({
-    delivery,
+    delivery: gated,
     appointmentRepo: appointment,
     jobRepo: job,
     customerRepo: customer,
     settingsRepo: settings,
     dispatchRepo: dispatch,
-    dncRepo: dnc,
   });
 
   return { notifier, delivery, dispatch, customer, job, appointment, settings, dnc };

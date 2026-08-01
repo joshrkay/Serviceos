@@ -13,6 +13,7 @@ import {
   ProposalExecutionRepository,
 } from '../../src/proposals/proposal-execution';
 import { IdempotencyGuard } from '../../src/proposals/execution/idempotency';
+import { InMemoryAuditRepository } from '../../src/audit/audit';
 import { transitionProposal } from '../../src/proposals/lifecycle';
 
 // §11 H1: the executor now requires an IdempotencyGuard. Proposals
@@ -78,7 +79,7 @@ describe('ProposalExecutor — Phase 4a-1 onExecuted + proposal_executions row',
     const proposal = approvedProposal();
     await repo.create(proposal);
 
-    const executor = new ProposalExecutor(handlers, repo, makeGuard(executionRepo, repo), {
+    const executor = new ProposalExecutor(handlers, repo, makeGuard(executionRepo, repo), new InMemoryAuditRepository(), {
       executionRepo,
       onExecuted,
     });
@@ -105,7 +106,7 @@ describe('ProposalExecutor — Phase 4a-1 onExecuted + proposal_executions row',
     const proposal = approvedProposal();
     await repo.create(proposal);
 
-    const executor = new ProposalExecutor(handlers, repo, makeGuard(executionRepo, repo), {
+    const executor = new ProposalExecutor(handlers, repo, makeGuard(executionRepo, repo), new InMemoryAuditRepository(), {
       executionRepo,
       onExecuted,
     });
@@ -131,7 +132,7 @@ describe('ProposalExecutor — Phase 4a-1 onExecuted + proposal_executions row',
       throw new Error('downstream queue is down');
     });
     const executionRepo = new InMemoryProposalExecutionRepository();
-    const executor = new ProposalExecutor(handlers, repo, makeGuard(executionRepo, repo), { onExecuted });
+    const executor = new ProposalExecutor(handlers, repo, makeGuard(executionRepo, repo), new InMemoryAuditRepository(), { onExecuted });
 
     // Despite the callback throwing, the executor should resolve cleanly.
     const result = await executor.execute(proposal, { tenantId: TENANT_A, executedBy: 'user-1' });
@@ -147,7 +148,7 @@ describe('ProposalExecutor — Phase 4a-1 onExecuted + proposal_executions row',
     const onExecuted = vi.fn(async (_event: ProposalExecutionEvent) => undefined);
 
     const executionRepo = new InMemoryProposalExecutionRepository();
-    const executor = new ProposalExecutor(handlers, repo, makeGuard(executionRepo, repo), { onExecuted });
+    const executor = new ProposalExecutor(handlers, repo, makeGuard(executionRepo, repo), new InMemoryAuditRepository(), { onExecuted });
     await executor.execute(proposal, { tenantId: TENANT_A, executedBy: 'user-1' });
 
     expect(onExecuted).toHaveBeenCalledTimes(1);
@@ -162,7 +163,7 @@ describe('ProposalExecutor — Phase 4a-1 onExecuted + proposal_executions row',
     proposal.idempotencyKey = 'idem-7';
     await repo.create(proposal);
 
-    const executor = new ProposalExecutor(handlers, repo, makeGuard(executionRepo, repo), { executionRepo });
+    const executor = new ProposalExecutor(handlers, repo, makeGuard(executionRepo, repo), new InMemoryAuditRepository(), { executionRepo });
     await executor.execute(proposal, { tenantId: TENANT_A, executedBy: 'user-1' });
 
     const rows = await executionRepo.listByProposal(TENANT_A, proposal.id);
@@ -188,7 +189,7 @@ describe('ProposalExecutor — Phase 4a-1 onExecuted + proposal_executions row',
     const handlers = new Map<ProposalType, ExecutionHandler>([
       ['create_customer', passingHandler('entity-replay')],
     ]);
-    const executor = new ProposalExecutor(handlers, repo, makeGuard(executionRepo, repo), {
+    const executor = new ProposalExecutor(handlers, repo, makeGuard(executionRepo, repo), new InMemoryAuditRepository(), {
       executionRepo,
       onExecuted,
     });

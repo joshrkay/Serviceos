@@ -169,11 +169,11 @@ export function BookingPage() {
   }
 
   return (
-    <div className="min-h-screen bg-slate-50 flex flex-col">
+    <div className="min-h-screen bg-background flex flex-col">
       {/* Business header */}
       <div className="bg-white border-b border-slate-100 px-5 py-4 flex items-center gap-3">
         <div
-          className="flex size-9 items-center justify-center rounded-xl bg-slate-900 shrink-0 text-sm font-medium text-white"
+          className="flex size-9 items-center justify-center rounded-xl bg-primary shrink-0 text-sm font-medium text-primary-foreground"
           aria-hidden
         >
           {businessInitial(tenantInfo?.businessName)}
@@ -363,7 +363,7 @@ export function BookingPage() {
                 (step === 'slot' && !selected) ||
                 (step === 'details' && (!canSubmit || submitting))
               }
-              className="w-full flex min-h-11 items-center justify-center gap-2 rounded-xl bg-slate-900 py-4 text-sm text-white hover:bg-slate-800 active:scale-[0.98] transition-all disabled:opacity-40 disabled:cursor-not-allowed"
+              className="w-full flex min-h-11 items-center justify-center gap-2 rounded-xl bg-primary py-4 text-sm text-primary-foreground hover:opacity-90 active:scale-[0.98] transition-all disabled:opacity-40 disabled:cursor-not-allowed"
             >
               {submitting ? (
                 <span className="animate-spin size-4 border-2 border-white/30 border-t-white rounded-full" />

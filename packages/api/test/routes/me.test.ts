@@ -31,7 +31,10 @@ interface FakeAuth {
   role: 'owner' | 'dispatcher' | 'technician';
 }
 
-function buildApp(fakeAuth: FakeAuth) {
+function buildApp(
+  fakeAuth: FakeAuth,
+  meOptions?: Parameters<typeof createMeRouter>[2],
+) {
   const service = new InMemoryUserModeService();
   const audit = new InMemoryAuditRepository();
   const app = express();
@@ -45,7 +48,7 @@ function buildApp(fakeAuth: FakeAuth) {
     };
     next();
   });
-  app.use('/api/me', createMeRouter(service, audit));
+  app.use('/api/me', createMeRouter(service, audit, meOptions));
   return { app, service, audit };
 }
 
@@ -86,6 +89,83 @@ describe('P12-001 — /api/me', () => {
     // Permissions sourced from rbac.ts — read-only verification.
     expect(Array.isArray(res.body.permissions)).toBe(true);
     expect(res.body.permissions).toEqual(getPermissions('owner'));
+  });
+
+  // N-011 — the brand-voice flag resolver is tenant-aware and may be async
+  // (tenant override → platform flag). /api/me must AWAIT it so a per-tenant
+  // dark launch actually surfaces `brand_voice_configurator_enabled: true`.
+  it('GET /api/me awaits an async brand-voice resolver (tenant override enabled)', async () => {
+    const seen: string[] = [];
+    const { app, service } = buildApp(
+      { userId: 'user-owner', role: 'owner' },
+      {
+        isBrandVoiceConfiguratorEnabled: async (tenantId: string) => {
+          seen.push(tenantId);
+          return Promise.resolve(true);
+        },
+      },
+    );
+    service.setTenantSettings(TENANT, {
+      backup_supervisor_user_id: null,
+      unsupervised_proposal_routing: 'queue_and_sms',
+    });
+    const res = await request(app).get('/api/me');
+    expect(res.status).toBe(200);
+    // Awaited to the resolved boolean, not a pending Promise (which would
+    // serialize to {}), and the resolver was called with the tenant id.
+    expect(res.body.brand_voice_configurator_enabled).toBe(true);
+    expect(seen).toEqual([TENANT]);
+  });
+
+  it('GET /api/me brand_voice_configurator_enabled is false when the resolver says so or is absent', async () => {
+    const off = buildApp(
+      { userId: 'user-owner', role: 'owner' },
+      { isBrandVoiceConfiguratorEnabled: async () => false },
+    );
+    off.service.setTenantSettings(TENANT, {
+      backup_supervisor_user_id: null,
+      unsupervised_proposal_routing: 'queue_and_sms',
+    });
+    const resOff = await request(off.app).get('/api/me');
+    expect(resOff.body.brand_voice_configurator_enabled).toBe(false);
+
+    const absent = buildApp({ userId: 'user-owner', role: 'owner' });
+    absent.service.setTenantSettings(TENANT, {
+      backup_supervisor_user_id: null,
+      unsupervised_proposal_routing: 'queue_and_sms',
+    });
+    const resAbsent = await request(absent.app).get('/api/me');
+    expect(resAbsent.body.brand_voice_configurator_enabled).toBe(false);
+  });
+
+  // Sweep-2 S5 — /api/me additively exposes the internal users.id UUID.
+  // `user_id` is the AUTH identity (Clerk sub, non-UUID in production);
+  // appointment assignments store users.id, so technician surfaces need
+  // this field to resolve "which technician am I".
+  it('GET /api/me returns internal_user_id when the users row carries one', async () => {
+    const { app, service } = buildApp({ userId: 'user_2clerkSub', role: 'technician' });
+    service.upsertUser({
+      user_id: 'user_2clerkSub',
+      internal_user_id: '7e0d3f0a-2b1c-4a5d-9e8f-3c6b7a1d2e4f',
+      tenant_id: TENANT,
+      role: 'technician',
+      can_field_serve: true,
+      current_mode: 'tech',
+      mode_changed_at: null,
+    });
+
+    const res = await request(app).get('/api/me');
+    expect(res.status).toBe(200);
+    expect(res.body.user_id).toBe('user_2clerkSub');
+    expect(res.body.internal_user_id).toBe('7e0d3f0a-2b1c-4a5d-9e8f-3c6b7a1d2e4f');
+  });
+
+  it('GET /api/me returns internal_user_id: null when no users row exists (no technician mapping)', async () => {
+    const { app } = buildApp({ userId: 'user_demo_owner', role: 'owner' });
+    // No upsertUser — fresh tenant / dev-bypass principal.
+    const res = await request(app).get('/api/me');
+    expect(res.status).toBe(200);
+    expect(res.body.internal_user_id).toBeNull();
   });
 
   it("POST /api/me/mode accepts 'tech' for an owner and writes an audit row", async () => {

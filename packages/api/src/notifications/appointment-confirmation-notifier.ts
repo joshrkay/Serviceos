@@ -8,7 +8,6 @@ import { CustomerRepository } from '../customers/customer';
 import { SettingsRepository } from '../settings/settings';
 import { MessageDeliveryProvider } from './delivery-provider';
 import { DispatchRepository } from './dispatch-repository';
-import { DncRepository, normalizePhone } from '../compliance/dnc';
 
 export interface AppointmentConfirmationNotifierDeps {
   delivery: MessageDeliveryProvider;
@@ -17,12 +16,6 @@ export interface AppointmentConfirmationNotifierDeps {
   customerRepo: CustomerRepository;
   settingsRepo: SettingsRepository;
   dispatchRepo: DispatchRepository;
-  /**
-   * §7 Phase 1 compliance gate. When set, SMS sends are suppressed if
-   * the recipient phone appears on the tenant DNC list. The customer's
-   * sms_consent flag is also enforced here.
-   */
-  dncRepo: DncRepository;
 }
 
 function formatAppointmentDate(date: Date, timezone: string): string {
@@ -74,15 +67,11 @@ export class AppointmentConfirmationNotifier implements SchedulingConfirmationNo
     const channels = request.channels;
 
     if (channels.includes('sms') && customer.primaryPhone) {
-      // §7 phase 1 — best-effort compliance gate (don't throw, just skip).
-      // sms_consent must be explicitly true; phone must not be on DNC.
-      if (customer.smsConsent !== true) {
-        // Skip SMS silently; email path below still runs if requested.
-      } else if (await this.deps.dncRepo.isOnDnc(request.tenantId, normalizePhone(customer.primaryPhone))) {
-        // Same — suppression is silent here because this notifier is
-        // fire-and-forget from the booking flow; failures must not
-        // surface to the customer or block the scheduling proposal.
-      } else {
+      // §7 / WS1 — the consent + DNC gate is applied centrally by the
+      // GatedMessageDelivery wrapper. This notifier is fire-and-forget from the
+      // booking flow, so a suppressed send throws inside sendSms and is
+      // swallowed here (email path below still runs). Declares customer class +
+      // the stored consent flag.
       const idempotencyKey = `appt-confirm:${request.appointmentId}:sms`;
       try {
         const result = await this.deps.delivery.sendSms({
@@ -90,6 +79,8 @@ export class AppointmentConfirmationNotifier implements SchedulingConfirmationNo
           body: smsBody,
           tenantId: request.tenantId,
           idempotencyKey,
+          recipientClass: 'customer',
+          consent: { smsConsent: customer.smsConsent === true, customerId: customer.id },
         });
         await this.deps.dispatchRepo.create({
           tenantId: request.tenantId,
@@ -103,8 +94,8 @@ export class AppointmentConfirmationNotifier implements SchedulingConfirmationNo
           idempotencyKey,
         });
       } catch {
-        // Best-effort — confirmation send failure must not block scheduling.
-      }
+        // Best-effort — confirmation send failure (or gate suppression) must
+        // not block scheduling.
       }
     }
 

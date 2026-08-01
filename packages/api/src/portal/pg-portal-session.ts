@@ -15,6 +15,7 @@ function mapRow(row: Record<string, unknown>): PortalSession {
     id: row.id as string,
     tenantId: row.tenant_id as string,
     customerId: row.customer_id as string,
+    contactId: (row.contact_id as string | null) ?? undefined,
     tokenHash: row.token_hash as string,
     expiresAt: new Date(row.expires_at as string),
     revokedAt: row.revoked_at ? new Date(row.revoked_at as string) : undefined,
@@ -38,14 +39,15 @@ export class PgPortalSessionRepository
     return this.withTenant(session.tenantId, async (client) => {
       const result = await client.query(
         `INSERT INTO portal_sessions (
-          id, tenant_id, customer_id, token_hash, expires_at,
+          id, tenant_id, customer_id, contact_id, token_hash, expires_at,
           revoked_at, last_accessed_at, created_by, created_at
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
         RETURNING *`,
         [
           session.id,
           session.tenantId,
           session.customerId,
+          session.contactId ?? null,
           session.tokenHash,
           session.expiresAt,
           session.revokedAt ?? null,
@@ -59,14 +61,28 @@ export class PgPortalSessionRepository
   }
 
   async findByTokenHash(tokenHash: string): Promise<PortalSession | null> {
-    // System-level: token-hash lookup uses app.portal_token_lookup (migration 106).
+    // System-level: token-hash lookup relies on the app.portal_token_lookup
+    // escape-hatch RLS policy (migration 107). The GUC MUST be set with SET LOCAL
+    // (set_config is_local=true) inside the SAME explicit transaction as the
+    // SELECT: a set_config(..., true) issued OUTSIDE a BEGIN applies only to the
+    // implicit transaction of that one statement and is discarded before the next
+    // query — so under an RLS-enforcing role (RLS_RUNTIME_ROLE=true) the policy
+    // would evaluate false and the SELECT would return ZERO rows, breaking the
+    // customer portal. Mirrors integrations/twilio/phone-number-repository.ts.
     return this.withClient(async (client) => {
-      await client.query("SELECT set_config('app.portal_token_lookup', 'true', true)");
-      const result = await client.query(
-        'SELECT * FROM portal_sessions WHERE token_hash = $1',
-        [tokenHash],
-      );
-      return result.rows.length > 0 ? mapRow(result.rows[0]) : null;
+      await client.query('BEGIN');
+      try {
+        await client.query("SELECT set_config('app.portal_token_lookup', 'true', true)");
+        const result = await client.query(
+          'SELECT * FROM portal_sessions WHERE token_hash = $1',
+          [tokenHash],
+        );
+        await client.query('COMMIT');
+        return result.rows.length > 0 ? mapRow(result.rows[0]) : null;
+      } catch (err) {
+        await client.query('ROLLBACK');
+        throw err;
+      }
     });
   }
 

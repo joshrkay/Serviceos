@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect } from 'react';
 import { useParams } from 'react-router';
 import {
-  Check, Phone, Mail, ChevronDown, ChevronUp, CheckCircle2, X,
+  Check, Phone, ChevronDown, ChevronUp, CheckCircle2, X,
   MapPin, FileText, Calendar, Clock, User, Download,
 } from 'lucide-react';
 import { apiFetch } from '../../utils/api-fetch';
@@ -40,10 +40,18 @@ interface PublicEstimateView {
   businessName: string;
   businessPhone?: string;
   businessEmail?: string;
+  /** Tenant's document word (Quote/Bid/Estimate). Defaults to 'Estimate'. */
+  estimateLabel?: string;
   lineItems: Array<{
     id: string;
     description: string;
     quantity: number;
+    /**
+     * B7.5 — descriptive unit of measure shown beside the quantity so the
+     * customer can tell what the approved rate measures. Never used in any
+     * money calculation on this page.
+     */
+    unit?: string;
     unitPriceCents: number;
     totalCents: number;
     taxable?: boolean;
@@ -51,6 +59,8 @@ interface PublicEstimateView {
     groupLabel?: string;
     isOptional?: boolean;
     isDefaultSelected?: boolean;
+    /** EE-4 — signed thumbnail URL resolved by the public service (U6), or absent. */
+    imageUrl?: string;
   }>;
   /** True when the estimate has tier options or optional add-ons to choose. */
   hasSelectableItems?: boolean;
@@ -73,7 +83,7 @@ interface PublicEstimateView {
   /** ISO timestamp the estimate was last revised after sending. */
   lastRevisedAt?: string;
   /**
-   * Tier 4 (Deposit rules — PR 3a). Required deposit cents derived
+   * Required deposit cents derived
    * from the linked job. 0 when no rule applies; >0 means the
    * customer must pay this much before work begins. The UI surfaces
    * the figure on the approval card today; PR 3b adds the
@@ -89,7 +99,7 @@ interface PublicEstimateView {
    */
   depositPayable?: boolean;
   /**
-   * Tier 4 (Deposit rules — PR 3b). Tenant policy controlling whether
+   * Tenant policy controlling whether
    * the deposit must be paid BEFORE the customer can approve the
    * estimate. The page replaces the Accept CTA with a Pay deposit
    * CTA when this is `'before_approval'` and the deposit is unpaid.
@@ -319,10 +329,10 @@ function ApprovalSheet({
             <p className="text-xs text-red-600 mb-3 bg-red-50 rounded-lg px-3 py-2">{error}</p>
           )}
 
-          {/* Date */}
+          {/* Date — the customer is signing now, so this is today. */}
           <div className="flex items-center justify-between text-xs text-slate-400 mb-6">
             <span>Accepted on</span>
-            <span>March 10, 2026</span>
+            <span>{fmtFriendlyDate(new Date().toISOString())}</span>
           </div>
 
           {/* Button */}
@@ -352,15 +362,20 @@ function ApprovalSheet({
 
 // ─── Success screen ────────────────────────────────────────────────────────
 function SuccessScreen({
-  customer, estimateNumber, description, address, total,
+  customer, businessName, businessPhone,
+  estimateNumber, description, address, total, acceptedAt,
   token, depositPayable, depositDueCents = 0, depositPaid = false,
   depositCheckoutUrl, depositCheckoutExpiresAt,
 }: {
   customer: string;
+  businessName: string;
+  businessPhone?: string;
   estimateNumber: string;
   description: string;
   address: string;
   total: number;
+  /** ISO timestamp the estimate was accepted; drives the "Accepted" date row. */
+  acceptedAt?: string;
   /** Token + deposit context so an after_approval deposit can be paid here. */
   token?: string;
   depositPayable?: boolean;
@@ -369,28 +384,29 @@ function SuccessScreen({
   depositCheckoutUrl?: string;
   depositCheckoutExpiresAt?: string;
 }) {
-  // Mock auto-created job number
-  const jobNumber = 'JOB-1053';
   const firstName = customer.split(' ')[0];
+  const acceptedOn = fmtFriendlyDate(acceptedAt);
 
   return (
-    <div className="min-h-screen bg-slate-50">
+    <div className="min-h-screen bg-background">
       {/* Branded header */}
       <div className="bg-white border-b border-slate-200 px-5 py-4">
         <div className="max-w-lg mx-auto flex items-center justify-between">
           <div className="flex items-center gap-2">
             <div className="flex size-8 items-center justify-center rounded-xl bg-slate-900">
-              <span className="text-white" style={{ fontSize: 13 }}>F</span>
+              <span data-testid="tenant-initial" className="text-white" style={{ fontSize: 13 }}>{businessName.charAt(0).toUpperCase()}</span>
             </div>
             <div>
-              <p className="text-sm text-slate-800">Fieldly Pro Services</p>
-              <p className="text-xs text-slate-400">Austin, TX</p>
+              <p className="text-sm text-slate-800">{businessName}</p>
+              {businessPhone && <p className="text-xs text-slate-400">{businessPhone}</p>}
             </div>
           </div>
           <div className="flex items-center gap-3">
-            <a href="tel:5125550000" className="flex size-8 items-center justify-center rounded-full bg-slate-100 hover:bg-slate-200 transition-colors">
-              <Phone size={14} className="text-slate-600" />
-            </a>
+            {businessPhone && (
+              <a href={`tel:${businessPhone.replace(/\D/g, '')}`} className="flex size-8 items-center justify-center rounded-full bg-slate-100 hover:bg-slate-200 transition-colors">
+                <Phone size={14} className="text-slate-600" />
+              </a>
+            )}
           </div>
         </div>
       </div>
@@ -413,7 +429,7 @@ function SuccessScreen({
           </div>
         </div>
 
-        {/* Deposit prompt — Tier 4 (after_approval). The estimate is
+        {/* Deposit prompt — after_approval. The estimate is
             accepted; if a deposit is still owed, this is the "you'll be
             prompted to pay after approving" step. Pays via the same Stripe
             link as before_approval; the settlement poll swaps this for the
@@ -457,9 +473,9 @@ function SuccessScreen({
             <div className="flex items-center justify-between mb-2">
               <div className="flex items-center gap-2">
                 <div className="size-6 rounded-lg bg-white/10 flex items-center justify-center">
-                  <span className="text-white" style={{ fontSize: 11 }}>F</span>
+                  <span data-testid="tenant-initial" className="text-white" style={{ fontSize: 11 }}>{businessName.charAt(0).toUpperCase()}</span>
                 </div>
-                <p className="text-sm text-white">Fieldly Pro Services</p>
+                <p className="text-sm text-white">{businessName}</p>
               </div>
               <div className="flex items-center gap-1.5">
                 <span className="size-2 rounded-full bg-green-400 animate-pulse" />
@@ -470,7 +486,6 @@ function SuccessScreen({
             <p className="text-white" style={{ fontSize: '1.5rem', lineHeight: 1 }}>
               ${fmtUsd(total)}
             </p>
-            <p className="text-xs text-slate-500 mt-1">{jobNumber}</p>
           </div>
 
           {/* Detail rows */}
@@ -495,7 +510,9 @@ function SuccessScreen({
               <Check size={14} className="text-green-500 shrink-0" />
               <div className="flex-1">
                 <p className="text-xs text-slate-400 mb-0.5">Accepted</p>
-                <p className="text-sm text-slate-800">March 10, 2026 · Estimate approved</p>
+                <p className="text-sm text-slate-800">
+                  {acceptedOn ? `${acceptedOn} · Estimate approved` : 'Estimate approved'}
+                </p>
               </div>
             </div>
 
@@ -550,23 +567,22 @@ function SuccessScreen({
           </div>
         </div>
 
-        {/* Contact footer */}
-        <div className="flex flex-col items-center gap-3 text-center"
-          style={{ animation: 'fadeUp 0.4s ease 0.5s both' }}>
-          <p className="text-xs text-slate-400">
-            Questions? Reach us any time.
-          </p>
-          <div className="flex items-center gap-3">
-            <a href="tel:5125550000"
-              className="flex items-center gap-2 rounded-full border border-slate-200 bg-white px-4 py-2 text-sm text-slate-700 hover:border-slate-300 hover:bg-slate-50 transition-colors">
-              <Phone size={13} className="text-slate-500" /> (512) 555-0000
-            </a>
-            <a href="mailto:info@fieldly.pro"
-              className="flex items-center gap-2 rounded-full border border-slate-200 bg-white px-4 py-2 text-sm text-slate-700 hover:border-slate-300 hover:bg-slate-50 transition-colors">
-              <Mail size={13} className="text-slate-500" /> Email us
-            </a>
+        {/* Contact footer — shown only when the tenant has a reachable phone.
+            No tenant email is exposed by the API, so we don't render one. */}
+        {businessPhone && (
+          <div className="flex flex-col items-center gap-3 text-center"
+            style={{ animation: 'fadeUp 0.4s ease 0.5s both' }}>
+            <p className="text-xs text-slate-400">
+              Questions? Reach us any time.
+            </p>
+            <div className="flex items-center gap-3">
+              <a href={`tel:${businessPhone.replace(/\D/g, '')}`}
+                className="flex items-center gap-2 rounded-full border border-slate-200 bg-white px-4 py-2 text-sm text-slate-700 hover:border-slate-300 hover:bg-slate-50 transition-colors">
+                <Phone size={13} className="text-slate-500" /> {businessPhone}
+              </a>
+            </div>
           </div>
-        </div>
+        )}
 
       </div>
 
@@ -765,6 +781,7 @@ export function EstimateApprovalPage() {
   // from the real public API, never from fixtures.
   const estimateNumber  = apiView.estimateNumber;
   const businessName    = apiView.businessName;
+  const estimateLabel   = apiView.estimateLabel?.trim() || 'Estimate';
   const businessPhone   = apiView.businessPhone ?? '';
   const customerName    = apiView.customerName;
   const customerAddress = apiView.customerAddress ?? '';
@@ -828,7 +845,11 @@ export function EstimateApprovalPage() {
   const lineItems       = billedApiItems.map(li => ({
     description: li.description,
     qty: li.quantity,
+    // B7.5 — descriptive only. Deliberately NOT fed into `total` below or
+    // into any fmtUsd call; the money is qty × rate exactly as before.
+    unit: li.unit,
     rate: li.unitPriceCents / 100,
+    imageUrl: li.imageUrl,
   }));
   const visItems = showAllItems ? lineItems : lineItems.slice(0, 3);
   const total           = (hasSelectable ? previewTotalCents : apiView.totalCents) / 100;
@@ -842,6 +863,9 @@ export function EstimateApprovalPage() {
   if (accepted) return (
     <SuccessScreen
       customer={customerName}
+      businessName={businessName}
+      businessPhone={businessPhone}
+      acceptedAt={apiView.acceptedAt}
       estimateNumber={estimateNumber}
       description={description}
       address={customerAddress}
@@ -862,7 +886,7 @@ export function EstimateApprovalPage() {
 
   return (
     <>
-      <div className="min-h-screen bg-slate-50">
+      <div className="min-h-screen bg-background">
         {revised && (
           <div className="bg-amber-50 border-b border-amber-200 px-5 py-3 text-center">
             <p className="text-sm text-amber-800 max-w-lg mx-auto">
@@ -895,7 +919,7 @@ export function EstimateApprovalPage() {
         <div className="max-w-lg mx-auto px-5 py-6 pb-32">
           {/* Estimate badge */}
           <div className="flex items-center justify-between mb-1">
-            <span className="text-xs text-slate-500 uppercase tracking-widest">Estimate</span>
+            <span className="text-xs text-slate-500 uppercase tracking-widest">{estimateLabel}</span>
             <span className="text-xs text-slate-500">{estimateNumber}</span>
           </div>
 
@@ -985,6 +1009,14 @@ export function EstimateApprovalPage() {
                             <span className={`flex size-4 shrink-0 items-center justify-center rounded-full border ${isSel ? 'border-blue-600 bg-blue-600' : 'border-slate-300'}`}>
                               {isSel && <span className="size-1.5 rounded-full bg-white" />}
                             </span>
+                            {item.imageUrl && (
+                              <img
+                                src={item.imageUrl}
+                                alt=""
+                                loading="lazy"
+                                className="h-9 w-9 shrink-0 rounded-md border border-slate-100 object-cover"
+                              />
+                            )}
                             <span className="text-sm text-slate-800 truncate">{item.description}</span>
                           </span>
                           <span className="text-sm text-slate-900 shrink-0">${(item.totalCents / 100).toLocaleString()}</span>
@@ -1014,6 +1046,14 @@ export function EstimateApprovalPage() {
                             <span className={`flex size-4 shrink-0 items-center justify-center rounded border ${isSel ? 'border-blue-600 bg-blue-600' : 'border-slate-300'}`}>
                               {isSel && <Check size={11} className="text-white" />}
                             </span>
+                            {item.imageUrl && (
+                              <img
+                                src={item.imageUrl}
+                                alt=""
+                                loading="lazy"
+                                className="h-9 w-9 shrink-0 rounded-md border border-slate-100 object-cover"
+                              />
+                            )}
                             <span className="text-sm text-slate-800 truncate">{item.description}</span>
                           </span>
                           <span className="text-sm text-slate-900 shrink-0">+${(item.totalCents / 100).toLocaleString()}</span>
@@ -1033,7 +1073,7 @@ export function EstimateApprovalPage() {
                 forced horizontal overflow on ≤390px phones). Narrower fixed
                 columns below the sm breakpoint; tabular-nums keeps money
                 digits stable and right-aligned. */}
-            <div className="grid grid-cols-[minmax(0,1fr)_2rem_4rem_4.5rem] sm:grid-cols-[minmax(0,1fr)_40px_72px_72px] gap-x-2 px-5 py-2.5 bg-slate-50 border-b border-slate-100">
+            <div className="grid grid-cols-[minmax(0,1fr)_2rem_4rem_4.5rem] sm:grid-cols-[minmax(0,1fr)_56px_72px_72px] gap-x-2 px-5 py-2.5 bg-slate-50 border-b border-slate-100">
               <p className="text-xs text-slate-400">Item</p>
               <p className="text-xs text-slate-400 text-right">Qty</p>
               <p className="text-xs text-slate-400 text-right">Rate</p>
@@ -1041,9 +1081,51 @@ export function EstimateApprovalPage() {
             </div>
             <div className="divide-y divide-slate-50">
               {visItems.map((item, i) => (
-                <div key={i} className="grid grid-cols-[minmax(0,1fr)_2rem_4rem_4.5rem] sm:grid-cols-[minmax(0,1fr)_40px_72px_72px] gap-x-2 px-5 py-3 items-start">
-                  <p className="text-sm text-slate-800 min-w-0 break-words">{item.description}</p>
-                  <p className="text-sm text-slate-500 text-right tabular-nums">{item.qty}</p>
+                <div key={i} className="grid grid-cols-[minmax(0,1fr)_2rem_4rem_4.5rem] sm:grid-cols-[minmax(0,1fr)_56px_72px_72px] gap-x-2 px-5 py-3 items-start">
+                  {/* flex-wrap: at the narrowest widths the line's item column
+                      is only ~46px, so a fixed 40px thumbnail beside the text
+                      would starve the description to ~0 width (one char per
+                      line). Wrapping lets the description drop to its own line
+                      under the thumbnail and reclaim the full column width — the
+                      thumbnail becomes purely additive (adds height, not steals
+                      width). At ≥sm the column is wide enough that they sit
+                      side by side without wrapping. */}
+                  <div className="flex min-w-0 flex-wrap items-start gap-2">
+                    {item.imageUrl && (
+                      <img
+                        src={item.imageUrl}
+                        alt=""
+                        loading="lazy"
+                        data-testid={`line-item-thumb-${i}`}
+                        className="h-10 w-10 shrink-0 rounded-md border border-slate-100 object-cover"
+                      />
+                    )}
+                    <p className="text-sm text-slate-800 min-w-0 break-words">{item.description}</p>
+                  </div>
+                  {/* B7.5 — the descriptive unit sits UNDER the quantity, not
+                      beside it, and the MOBILE Qty track stays 2rem.
+                      At 320px the budget is exact: 320 − 40 (page px-5) − 2
+                      (card border) − 40 (row px-5) − 24 (3 × gap-x-2) = 238px
+                      of tracks, so a 2rem Qty leaves the description 46px.
+                      Widening Qty to 3rem for the unit would cut that to
+                      exactly 30px and starve the description the way the EE-4
+                      thumbnail once did (e2e asserts descBox.width > 30).
+                      Instead the unit is a block child with break-words: it
+                      wraps INSIDE the existing 2rem track — "per gal", the
+                      longest value in catalogUnitSchema, breaks over two lines
+                      — so it adds height, never width. The sm: breakpoint has
+                      room to spare, so Qty widens to 56px there for one line. */}
+                  <p className="text-sm text-slate-500 text-right tabular-nums">
+                    {item.qty}
+                    {item.unit && (
+                      <span
+                        data-testid={`line-item-unit-${i}`}
+                        className="block min-w-0 break-words text-[10px] leading-tight text-slate-400"
+                      >
+                        {item.unit}
+                      </span>
+                    )}
+                  </p>
                   <p className="text-sm text-slate-500 text-right tabular-nums">${fmtUsd(item.rate)}</p>
                   <p className="text-sm text-slate-800 text-right tabular-nums">${fmtUsd(item.qty * item.rate)}</p>
                 </div>
@@ -1071,7 +1153,7 @@ export function EstimateApprovalPage() {
               businessContact: businessPhone,
               description,
               validUntil: validUntilText,
-              lineItems: lineItems.map((i) => ({ description: i.description, qty: i.qty, rate: i.rate })),
+              lineItems: lineItems.map((i) => ({ description: i.description, qty: i.qty, unit: i.unit, rate: i.rate, imageUrl: i.imageUrl })),
               totalDollars: total,
             })}
             className="mb-4 flex min-h-11 items-center justify-center gap-1.5 w-full rounded-xl border border-slate-200 bg-white py-2.5 text-xs text-slate-500 hover:bg-slate-50 transition-colors"
@@ -1079,7 +1161,7 @@ export function EstimateApprovalPage() {
             <Download size={12} /> Download PDF
           </button>
 
-          {/* Deposit notice — Tier 4 (Deposit rules — PR 3a). When the
+          {/* Deposit notice. When the
               tenant has a deposit rule and the estimate qualifies, the
               backend writes depositRequiredCents onto the linked job;
               the public view surfaces it. PR 3b adds the actual
@@ -1126,7 +1208,7 @@ export function EstimateApprovalPage() {
         {(() => {
           if (isExpired || isAlreadyDeclined) return null;
 
-          // Tier 4 (Deposit rules). Show the Pay-deposit CTA whenever the
+          // Show the Pay-deposit CTA whenever the
           // deposit is payable (policy-agnostic, computed server-side). For
           // before_approval this is the sent+pending estimate — the Accept
           // CTA stays hidden until the deposit is paid (the backend's
@@ -1162,9 +1244,9 @@ export function EstimateApprovalPage() {
               <div className="max-w-lg mx-auto">
                 <button
                   onClick={() => setAppr(true)}
-                  className="w-full flex items-center justify-center gap-2 rounded-2xl bg-slate-900 text-white py-4 text-sm hover:bg-slate-700 active:scale-[0.98] transition-all shadow-xl shadow-slate-900/20"
+                  className="w-full flex items-center justify-center gap-2 rounded-2xl bg-primary text-primary-foreground py-4 text-sm hover:opacity-90 active:scale-[0.98] transition-all shadow-xl"
                 >
-                  <Check size={16} /> Accept this estimate
+                  <Check size={16} /> Accept this {estimateLabel.toLowerCase()}
                 </button>
                 {id && (
                   <DeclineButton
@@ -1203,7 +1285,7 @@ export function EstimateApprovalPage() {
 }
 
 // ─── Decline button ────────────────────────────────────────────────────────
-// Tier 4 (Deposit rules — PR 3b). Pay-deposit CTA shown when the
+// Pay-deposit CTA shown when the
 // tenant policy is 'before_approval'. On click, mints (or reuses) a
 // Stripe Payment Link via POST /public/estimates/:token/deposit-checkout
 // and redirects the customer there. After payment Stripe redirects
@@ -1224,8 +1306,13 @@ function PayDepositButton({ token, initialUrl, expiresAt }: {
     setError(null);
     try {
       // Reuse a previously-minted link to avoid an unnecessary Stripe
-      // round-trip on a returning customer.
-      if (initialUrl) {
+      // round-trip on a returning customer — but only while it's still
+      // live. Past expiresAt the server deactivates the Payment Link, so
+      // fall through and mint a fresh one instead of sending the
+      // customer to a dead URL. (No expiresAt means no known deadline;
+      // an unparseable one re-mints, the safe side.)
+      const linkIsLive = !expiresAt || (depositDays !== null && depositDays > 0);
+      if (initialUrl && linkIsLive) {
         window.location.assign(initialUrl);
         return;
       }

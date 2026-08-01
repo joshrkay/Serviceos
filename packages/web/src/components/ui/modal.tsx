@@ -62,7 +62,7 @@ export function Modal({
       data-testid="modal"
     >
       <div
-        className="absolute inset-0 bg-slate-900/40 backdrop-blur-sm"
+        className="absolute inset-0 bg-foreground/40 backdrop-blur-sm"
         onClick={onClose}
         aria-hidden="true"
       />
@@ -74,7 +74,7 @@ export function Modal({
         aria-describedby={description ? descId : undefined}
         tabIndex={-1}
         className={cn(
-          'relative z-10 flex w-full flex-col rounded-2xl border border-slate-200 bg-white shadow-xl outline-none',
+          'relative z-10 flex w-full flex-col rounded-2xl border border-border bg-card shadow-xl outline-none',
           'max-h-[calc(100vh-2rem)]',
           SIZE_CLASSES[size],
           className,
@@ -86,13 +86,13 @@ export function Modal({
               {title && (
                 <h2
                   id={labelId}
-                  className="text-base font-semibold text-slate-900"
+                  className="text-base font-semibold text-foreground"
                 >
                   {title}
                 </h2>
               )}
               {description && (
-                <p id={descId} className="mt-0.5 text-sm text-slate-500">
+                <p id={descId} className="mt-0.5 text-sm text-muted-foreground">
                   {description}
                 </p>
               )}
@@ -102,7 +102,7 @@ export function Modal({
                 type="button"
                 onClick={onClose}
                 aria-label="Close"
-                className="-mr-1 -mt-1 flex size-8 shrink-0 items-center justify-center rounded-lg text-slate-400 hover:bg-slate-100 hover:text-slate-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/40"
+                className="-mr-1 -mt-1 flex size-8 shrink-0 items-center justify-center rounded-lg text-muted-foreground hover:bg-secondary hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
               >
                 <X size={18} />
               </button>

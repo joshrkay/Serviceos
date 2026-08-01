@@ -34,6 +34,16 @@ export type Mode = 'supervisor' | 'tech' | 'both';
  */
 export interface MeResponse {
   user_id: string;
+  /**
+   * Internal `users.id` UUID for the signed-in principal — the id that
+   * appointment assignments, audit actors, and technician surfaces
+   * reference. `user_id` above is the AUTH identity (Clerk sub, e.g.
+   * `user_2abc…`, never a UUID in production). Null when the principal
+   * has no users row yet (fresh tenant bootstrap, dev-bypass account);
+   * consumers must treat that as "no technician profile", not an error.
+   * Optional so existing fixtures without it stay valid.
+   */
+  internal_user_id?: string | null;
   tenant_id: string;
   role: string;
   can_field_serve: boolean;
@@ -41,8 +51,20 @@ export interface MeResponse {
   mode_changed_at: string | null;
   permissions: string[];
   backup_supervisor_user_id: string | null;
+  /**
+   * IANA business timezone from tenant_settings (the API always includes
+   * it, defaulting server-side when unset). Optional here so existing
+   * fixtures without it stay valid; consumers must handle absence.
+   */
+  timezone?: string;
   unsupervised_proposal_routing:
     | 'queue_and_sms'
     | 'queue_only'
     | 'escalate_to_oncall';
+  /**
+   * N-011 — whether the Brand-Voice Configurator feature flag is on for this
+   * principal. Gates the onboarding brand-voice step + the settings sheet on
+   * the web. Optional (default off) so existing fixtures stay valid.
+   */
+  brand_voice_configurator_enabled?: boolean;
 }

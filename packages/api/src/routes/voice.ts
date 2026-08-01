@@ -1,6 +1,9 @@
 import { Router, Request, Response } from 'express';
+import rateLimit, { ipKeyGenerator } from 'express-rate-limit';
 import type { Pool } from 'pg';
+import { z } from 'zod';
 import { AuthenticatedRequest } from '../auth/clerk';
+import { createRateLimitStore } from '../middleware/rate-limit-store';
 import { asyncRoute } from '../middleware/async-route';
 import { requireAuth, requireTenant, requirePermission } from '../middleware/auth';
 import {
@@ -15,22 +18,39 @@ import {
   TranscribeAudioFn,
 } from '../voice/voice-service';
 import { Queue } from '../queues/queue';
+import {
+  mintDeepgramStreamToken,
+  DeepgramTokenUnavailableError,
+  DeepgramTokenPermissionError,
+} from '../voice/deepgram-token';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
 import { Logger } from '../logging/logger';
 import type { FileRepository, StorageProvider } from '../files/file-service';
+import type { JobRepository } from '../jobs/job';
 
 interface CreateVoiceRecordingBody {
   fileId: string;
   conversationId?: string;
   audioUrl: string;
+  jobId?: string;
+  /**
+   * U11 — optional client idempotency key. When present, a replayed create
+   * (same tenant+key) returns the ORIGINAL recording instead of minting a
+   * duplicate. Bounded to keep it index-friendly; the mobile client mints a
+   * UUID today (U12 will make it stable across offline-flush retries).
+   */
+  idempotencyKey?: string;
 }
+
+/** U11 — bound on the client idempotency key length (UUID today; generous headroom). */
+const MAX_IDEMPOTENCY_KEY_LENGTH = 255;
 
 interface RetryTranscriptionBody {
   audioUrl: string;
 }
 
 const MAX_AUDIO_SIZE = 25 * 1024 * 1024; // 25 MB
-const MAX_DURATION_SECONDS = 300; // 5 minute max recording
+const JOB_ID_SCHEMA = z.string().uuid();
 
 const ALLOWED_MIME_TYPES = new Set([
   'audio/webm', 'audio/ogg', 'audio/wav', 'audio/mpeg',
@@ -54,6 +74,8 @@ export interface VoiceRouterOpts {
    */
   fileRepo?: FileRepository;
   storage?: StorageProvider;
+  /** Tenant-scoped job lookup for optional mobile job-context verification. */
+  jobRepo?: Pick<JobRepository, 'findById'>;
 }
 
 export function createVoiceRouter(
@@ -65,6 +87,145 @@ export function createVoiceRouter(
   opts?: VoiceRouterOpts,
 ): Router {
   const router = Router();
+
+  // UB-B1 — dedicated per-tenant mint limiter. The global /api per-tenant
+  // limiter (1000 req/min, app.ts) still applies; conversation mode mints a
+  // token per session start, far more often than dictation, so token minting
+  // gets its own tighter bucket. Same store/keying conventions as the global
+  // limiter (Redis-backed when REDIS_URL is set, per-process MemoryStore
+  // otherwise).
+  const mintLimitPerMin = Math.max(
+    1,
+    Number(process.env.VOICE_STREAM_TOKEN_MINTS_PER_MIN) || 30,
+  );
+  const mintLimiter = rateLimit({
+    windowMs: 60 * 1000,
+    max: mintLimitPerMin,
+    standardHeaders: true,
+    legacyHeaders: false,
+    // requireTenant runs first, so auth.tenantId is always present; the IP
+    // fallback mirrors the global per-tenant limiter's defensive keying.
+    keyGenerator: (req) =>
+      (req as AuthenticatedRequest).auth?.tenantId ?? ipKeyGenerator(req.ip ?? ''),
+    handler: (_req, res) => {
+      res.status(429).json({
+        error: 'RATE_LIMITED',
+        message: 'Too many live-transcription starts. Please wait a minute and try again.',
+      });
+    },
+    store: createRateLimitStore(process.env.REDIS_URL, 'voice-mint:'),
+  });
+
+  /**
+   * POST /stream-token — Story 3.2: mint a 30s Deepgram grant token for the
+   * browser dictation client. The long-lived DEEPGRAM_API_KEY never leaves the
+   * server; the browser opens the streaming WebSocket with this short-lived
+   * token. Authenticated + tenant-scoped like every other voice route.
+   */
+  router.post(
+    '/stream-token',
+    requireAuth,
+    requireTenant,
+    mintLimiter,
+    asyncRoute(async (req: Request, res: Response) => {
+      const authReq = req as AuthenticatedRequest;
+      const tenantId = authReq.auth!.tenantId;
+      const actorId = authReq.auth!.userId;
+      const routeName = 'POST /api/voice/stream-token';
+      // A2 — session/tenant language hint for the dictation WS, same
+      // `?language=` query-param convention as /transcribe's languageHint
+      // below. Not used to alter minting (the Deepgram grant token is not
+      // language-scoped) — recorded on the audit trail only, so a future
+      // per-surface WER/keyterm rollup can attribute mints by language.
+      // The browser threads the same value onto the Deepgram WS URL itself
+      // (see useDeepgramDictation.ts) independently of this audit record.
+      const languageParam = typeof req.query.language === 'string' ? req.query.language : undefined;
+      const language = languageParam === 'en' || languageParam === 'es' ? languageParam : undefined;
+
+      // UB-B1 — audit trail for every mint attempt (mirrors the
+      // voice.transcription.completed/.failed emission in /transcribe below):
+      // conversation mode makes token minting a high-frequency surface, so
+      // both successful mints AND mint failures must be attributable per
+      // tenant/actor. Failure-soft: an audit-write error never blocks the
+      // response, but it is logged at warn level so a silently-broken audit
+      // sink is observable instead of swallowed.
+      async function auditMint(eventType: string, metadata: Record<string, unknown>) {
+        if (!auditRepo) return;
+        try {
+          await auditRepo.create(createAuditEvent({
+            tenantId,
+            actorId,
+            actorRole: 'user',
+            eventType,
+            entityType: 'voice_stream_token',
+            entityId: `mint-${Date.now()}`,
+            metadata,
+          }));
+        } catch (auditErr) {
+          logger?.warn('voice.stream-token: audit write failed', {
+            route: routeName,
+            tenantId,
+            eventType,
+            error: auditErr instanceof Error ? auditErr.message : String(auditErr),
+          });
+        }
+      }
+
+      try {
+        const minted = await mintDeepgramStreamToken({ apiKey: process.env.DEEPGRAM_API_KEY });
+        await auditMint('voice.stream_token_minted', {
+          model: minted.model,
+          expiresInSeconds: minted.expiresInSeconds,
+          ...(language ? { language } : {}),
+        });
+        res.json({
+          token: minted.token,
+          expiresIn: minted.expiresInSeconds,
+          model: minted.model,
+        });
+      } catch (err) {
+        if (err instanceof DeepgramTokenUnavailableError) {
+          await auditMint('voice.stream_token_mint_failed', {
+            reason: 'not_configured',
+            ...(language ? { language } : {}),
+          });
+          res.status(503).json({
+            error: 'NOT_CONFIGURED',
+            message: 'Live transcription is not configured',
+          });
+          return;
+        }
+        if (err instanceof DeepgramTokenPermissionError) {
+          // Key is set but cannot mint browser grant tokens (needs Member+).
+          // Same operator-facing posture as NOT_CONFIGURED: not a transient retry.
+          logger?.error('voice.stream-token: key lacks grant permissions', {
+            error: err.message,
+          });
+          await auditMint('voice.stream_token_mint_failed', {
+            reason: 'permission_denied',
+            ...(language ? { language } : {}),
+          });
+          res.status(503).json({
+            error: 'NOT_CONFIGURED',
+            message:
+              'Live transcription is misconfigured: Deepgram API key needs Member permissions',
+          });
+          return;
+        }
+        const errMsg = err instanceof Error ? err.message : String(err);
+        logger?.error('voice.stream-token: mint failed', { error: errMsg });
+        await auditMint('voice.stream_token_mint_failed', {
+          reason: 'provider_error',
+          error: errMsg,
+          ...(language ? { language } : {}),
+        });
+        res.status(502).json({
+          error: 'TOKEN_MINT_FAILED',
+          message: 'Could not start live transcription. Please try again.',
+        });
+      }
+    }),
+  );
 
   /**
    * POST /transcribe — Synchronous transcription.
@@ -83,12 +244,14 @@ export function createVoiceRouter(
       const contentType = req.headers['content-type'] || '';
 
       const authReq = req as AuthenticatedRequest;
-      const tenantId = authReq.auth?.tenantId ?? 'unknown';
-      const actorId = authReq.auth?.userId ?? 'unknown';
+      const tenantId = authReq.auth!.tenantId;
+      const actorId = authReq.auth!.userId;
       // Optional language hint (ISO 639-1 code) via query param, e.g. ?language=es
       const languageHint = typeof req.query.language === 'string' ? req.query.language : undefined;
 
-      // Helper: emit transcription audit event
+      // Helper: emit transcription audit event. Failure-soft: an audit-write
+      // error never blocks transcription, but it is logged at warn level so
+      // a silently-broken audit sink is observable instead of swallowed.
       async function emitAudit(eventType: string, metadata: Record<string, unknown>) {
         if (!auditRepo) return;
         try {
@@ -101,8 +264,13 @@ export function createVoiceRouter(
             entityId: `txn-${Date.now()}`,
             metadata,
           }));
-        } catch {
-          // Audit failures should not block transcription
+        } catch (auditErr) {
+          logger?.warn('voice.transcribe: audit write failed', {
+            route: 'POST /api/voice/transcribe',
+            tenantId,
+            eventType,
+            error: auditErr instanceof Error ? auditErr.message : String(auditErr),
+          });
         }
       }
 
@@ -227,6 +395,25 @@ export function createVoiceRouter(
         return;
       }
 
+      // U11 — optional client idempotency key. Reject a malformed value up
+      // front (before any repo/queue work); a missing key stays valid and
+      // keeps today's "always mint a new recording" behavior.
+      let idempotencyKey: string | undefined;
+      if (body.idempotencyKey !== undefined) {
+        if (
+          typeof body.idempotencyKey !== 'string' ||
+          body.idempotencyKey.length === 0 ||
+          body.idempotencyKey.length > MAX_IDEMPOTENCY_KEY_LENGTH
+        ) {
+          res.status(400).json({
+            error: 'VALIDATION_ERROR',
+            message: `idempotencyKey must be a non-empty string of at most ${MAX_IDEMPOTENCY_KEY_LENGTH} characters`,
+          });
+          return;
+        }
+        idempotencyKey = body.idempotencyKey;
+      }
+
       const errors = validateVoiceIngest({
         tenantId: req.auth!.tenantId,
         fileId: body.fileId,
@@ -238,25 +425,85 @@ export function createVoiceRouter(
         return;
       }
 
+      let verifiedJobId: string | undefined;
+      if (body.jobId !== undefined) {
+        const parsedJobId = JOB_ID_SCHEMA.safeParse(body.jobId);
+        if (!parsedJobId.success) {
+          res.status(400).json({
+            error: 'VALIDATION_ERROR',
+            message: 'jobId must be a valid UUID',
+          });
+          return;
+        }
+        if (!opts?.jobRepo) {
+          res.status(503).json({
+            error: 'NOT_CONFIGURED',
+            message: 'Job verification is not configured',
+          });
+          return;
+        }
+        const job = await opts.jobRepo.findById(req.auth!.tenantId, parsedJobId.data);
+        if (!job) {
+          res.status(404).json({ error: 'NOT_FOUND', message: 'Job not found' });
+          return;
+        }
+        verifiedJobId = parsedJobId.data;
+      }
+
+      // Enqueue the transcription job under the recording's STABLE create
+      // dedupe key. Reused on the replay path below: re-sending with the same
+      // key is a no-op if the original job is still queued, but rescues a
+      // create-then-crash (row written, request died before enqueue) — the
+      // queue's own idempotency makes the re-send safe.
+      const enqueueTranscription = (recordingId: string, conversationId?: string) =>
+        queue.send(
+          'transcription',
+          {
+            tenantId: req.auth!.tenantId,
+            recordingId,
+            audioUrl: body.audioUrl,
+            conversationId,
+            ...(verifiedJobId ? { jobId: verifiedJobId } : {}),
+          },
+          `${req.auth!.tenantId}:${recordingId}:transcription:create`,
+        );
+
+      // U11 — replay guard. A repeated create carrying an idempotency key that
+      // already resolves to a recording in this tenant MUST return the ORIGINAL
+      // recording (never a duplicate) AND re-issue the queue send: if the first
+      // request died between voiceRepo.create and the enqueue, the row would
+      // otherwise be stranded in 'pending' forever (the ~90s client poll times
+      // out). The re-send is dedupe-safe. Not a fresh create, so nothing new to
+      // audit here.
+      if (idempotencyKey) {
+        const existing = await voiceRepo.findByIdempotencyKey(
+          req.auth!.tenantId,
+          idempotencyKey,
+        );
+        if (existing) {
+          const queueMessageId = await enqueueTranscription(
+            existing.id,
+            existing.conversationId,
+          );
+          res.status(202).json({
+            recording: existing,
+            queueMessageId,
+          });
+          return;
+        }
+      }
+
       const recording = await voiceRepo.create(
         createVoiceRecording({
           tenantId: req.auth!.tenantId,
           fileId: body.fileId,
           conversationId: body.conversationId,
           createdBy: req.auth!.userId,
+          idempotencyKey,
         })
       );
 
-      const queueMessageId = await queue.send(
-        'transcription',
-        {
-          tenantId: req.auth!.tenantId,
-          recordingId: recording.id,
-          audioUrl: body.audioUrl,
-          conversationId: body.conversationId,
-        },
-        `${req.auth!.tenantId}:${recording.id}:transcription:create`
-      );
+      const queueMessageId = await enqueueTranscription(recording.id, body.conversationId);
 
       res.status(202).json({
         recording,

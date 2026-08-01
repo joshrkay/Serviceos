@@ -9,6 +9,8 @@ export interface TranscriptionJobPayload {
   recordingId: string;
   audioUrl: string;
   conversationId?: string;
+  /** Tenant-verified job context supplied by the recording route. */
+  jobId?: string;
   /**
    * The user whose session produced the voice recording. Required when
    * downstream consumers (voice-action-router) need to create proposals
@@ -24,6 +26,7 @@ export interface TranscriptionCompletionEvent {
   transcript: string;
   conversationId?: string;
   userId?: string;
+  jobId?: string;
 }
 
 /**
@@ -126,11 +129,42 @@ export interface CreateTranscriptionWorkerOptions {
 }
 
 /**
+ * System prompt for the transcription-correction pass. Restored from the
+ * (removed) DEFAULT_GATEWAY_CONFIG, which defined this prompt for
+ * `transcription_correction` but was never wired into the live gateway — so
+ * the correction call had been running with no system instruction at all.
+ */
+const TRANSCRIPTION_CORRECTION_SYSTEM_PROMPT =
+  'Correct errors in voice transcriptions for a service business context. ' +
+  'Fix technical terminology, trade-specific terms, names, and numbers. ' +
+  'Return corrected text only — no commentary.';
+
+/**
+ * Defense-in-depth against a misconfigured/mock gateway silently replacing
+ * a prose transcript with structured output. Genuine correction of a voice
+ * transcript is still prose — it should never parse as JSON unless the raw
+ * input already did. Used to reject cases like a hermetic mock's scripted
+ * catch-all (`{"ok":true,"mock":true,...}`) that happens to clear the
+ * length-floor guard below but is obviously not a transcription.
+ */
+function looksLikeJson(text: string): boolean {
+  const trimmed = text.trim();
+  if (!trimmed || (trimmed[0] !== '{' && trimmed[0] !== '[')) return false;
+  try {
+    JSON.parse(trimmed);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Best-effort transcription correction. Calls the gateway with
- * `taskType: 'transcription_correction'` (system prompt configured in
- * ai/gateway/routing-config.ts) passing the tenant glossary as context.
- * Returns `{ corrected, glossary }`; on ANY failure, returns the raw
- * transcript unchanged — this is a quality upgrade, not a gate.
+ * `taskType: 'transcription_correction'`, sending the system prompt above
+ * plus the tenant glossary + raw transcript as the user message. (This
+ * taskType isn't in ai-routing.ts `taskTierMapping`, so it resolves to the
+ * standard tier.) Returns `{ corrected, glossary }`; on ANY failure, returns
+ * the raw transcript unchanged — this is a quality upgrade, not a gate.
  */
 async function correctTranscript(input: {
   raw: string;
@@ -160,11 +194,37 @@ async function correctTranscript(input: {
 
     const response = await gateway.complete({
       taskType: 'transcription_correction',
-      messages: [{ role: 'user', content: userPrompt }],
+      // Top-level tenantId — the quota/cache resilience wrappers key on
+      // this, not metadata.tenantId (see gateway.ts's tenant-id guard).
+      tenantId,
+      messages: [
+        { role: 'system', content: TRANSCRIPTION_CORRECTION_SYSTEM_PROMPT },
+        { role: 'user', content: userPrompt },
+      ],
+      // transcription_correction routes to the lightweight tier (cheap model);
+      // its 1024-token default can truncate the correction of a long call. Pin
+      // the budget explicitly (matches the original gateway-config intent of
+      // 2048) so the corrected output is never silently cut off.
+      maxTokens: 2048,
       metadata: { tenantId },
     });
 
     const corrected = response.content.trim();
+
+    // Defense-in-depth: reject a "corrected" result that parses as JSON
+    // when the raw transcript did not. This catches ANY future
+    // misconfigured/wrong gateway (e.g. a hermetic mock wired in by
+    // mistake) injecting structured garbage as a transcript, independent
+    // of the length-floor check below — a short JSON blob can easily clear
+    // that floor for a short-to-medium raw transcript.
+    if (looksLikeJson(corrected) && !looksLikeJson(raw)) {
+      logger.warn(
+        'Transcription correction returned JSON for prose input; keeping raw transcript',
+        { rawLen: raw.length, correctedLen: corrected.length }
+      );
+      return { corrected: raw, glossary: terms };
+    }
+
     // Guardrail: correction should not silently truncate. Fall back
     // to the raw transcript when the correction is either
     // proportionally too short (< 40% of raw length, catching obvious
@@ -201,7 +261,7 @@ export function createTranscriptionWorker(
   return {
     type: 'transcription',
     async handle(message: QueueMessage<TranscriptionJobPayload>, logger: Logger): Promise<void> {
-      const { tenantId, recordingId, audioUrl, conversationId, userId } = message.payload;
+      const { tenantId, recordingId, audioUrl, conversationId, userId, jobId } = message.payload;
 
       logger.info('Starting transcription', { recordingId, conversationId });
 
@@ -254,6 +314,28 @@ export function createTranscriptionWorker(
           },
         });
 
+        // RIVET I13 — stamp provenance for the AUTHENTICATED in-app path.
+        // This worker is the only place operator memos (source='inapp_voice',
+        // created by the authenticated POST /voice/recordings routes) get
+        // transcribed; the telephony path runs through transcript-ingestion-
+        // worker, which stamps caller/mixed/operator from per-turn speakers.
+        // Without this, an operator memo's row stays unstamped and
+        // classifyRecordingProvenance (fail-closed) would treat the operator's
+        // own recording as untrusted. Guarded on source + failure-soft.
+        if (voiceRepository.stampProvenance) {
+          try {
+            const rec = await voiceRepository.findById(tenantId, recordingId);
+            if (rec?.source === 'inapp_voice') {
+              await voiceRepository.stampProvenance(tenantId, recordingId, 'operator');
+            }
+          } catch (err) {
+            logger.warn('stampProvenance (transcription) failed', {
+              recordingId,
+              error: err instanceof Error ? err.message : String(err),
+            });
+          }
+        }
+
         logger.info('Transcription completed', {
           recordingId,
           correctionApplied: correctionMetadata.correctionApplied ?? false,
@@ -268,6 +350,7 @@ export function createTranscriptionWorker(
                 transcript: sanitizedTranscript,
                 conversationId,
                 userId,
+                ...(jobId ? { jobId } : {}),
               },
               logger
             );

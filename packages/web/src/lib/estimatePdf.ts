@@ -8,8 +8,16 @@
 export interface EstimatePrintLineItem {
   description: string;
   qty: number;
+  /**
+   * B7.5 — descriptive unit of measure ('each', 'hour', 'sq ft', …) printed
+   * next to the quantity so the document says what the rate measures.
+   * DESCRIPTIVE ONLY: the row and document totals below never read it.
+   */
+  unit?: string;
   /** Unit price in dollars. */
   rate: number;
+  /** EE-4 — optional signed thumbnail URL shown beside the description. */
+  imageUrl?: string;
 }
 
 export interface EstimatePrintData {
@@ -22,6 +30,12 @@ export interface EstimatePrintData {
   lineItems: EstimatePrintLineItem[];
   /** Optional override total in dollars; defaults to sum of line items. */
   totalDollars?: number;
+  /**
+   * Tenant-facing document label (e.g. 'Quote', 'Bid'). Defaults to
+   * 'Estimate'. The canonical entity is unchanged — this only relabels the
+   * printed document so it matches how the tenant talks to customers.
+   */
+  documentLabel?: string;
 }
 
 function escapeHtml(value: string): string {
@@ -44,13 +58,14 @@ function usd(amount: number): string {
  */
 export function printEstimateDocument(data: EstimatePrintData): boolean {
   const total = data.totalDollars ?? data.lineItems.reduce((s, i) => s + i.qty * i.rate, 0);
+  const documentLabel = data.documentLabel?.trim() || 'Estimate';
 
   const rows = data.lineItems
     .map(
       (item) => `
         <tr>
-          <td class="desc">${escapeHtml(item.description)}</td>
-          <td class="num">${item.qty}</td>
+          <td class="desc">${item.imageUrl ? `<img class="thumb" src="${escapeHtml(item.imageUrl)}" alt="" />` : ''}${escapeHtml(item.description)}</td>
+          <td class="num">${item.qty}${item.unit ? ` <span class="unit">${escapeHtml(item.unit)}</span>` : ''}</td>
           <td class="num">${usd(item.rate)}</td>
           <td class="num">${usd(item.qty * item.rate)}</td>
         </tr>`,
@@ -64,7 +79,7 @@ export function printEstimateDocument(data: EstimatePrintData): boolean {
 <html>
 <head>
   <meta charset="utf-8" />
-  <title>Estimate ${escapeHtml(data.estimateNumber)}</title>
+  <title>${escapeHtml(documentLabel)} ${escapeHtml(data.estimateNumber)}</title>
   <style>
     * { box-sizing: border-box; }
     body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; color: #0f172a; margin: 0; padding: 40px; }
@@ -81,6 +96,9 @@ export function printEstimateDocument(data: EstimatePrintData): boolean {
     th.num, td.num { text-align: right; }
     td { font-size: 13px; padding: 10px 6px; border-bottom: 1px solid #f1f5f9; }
     td.desc { width: 60%; }
+    .thumb { width: 40px; height: 40px; object-fit: cover; border-radius: 4px; vertical-align: middle; margin-right: 8px; }
+    /* B7.5 — descriptive unit beside the quantity; muted so the number reads first. */
+    .unit { color: #64748b; font-size: 11px; }
     .total { display: flex; justify-content: space-between; align-items: center; background: #0f172a; color: #fff; padding: 14px 16px; border-radius: 10px; font-size: 15px; }
     @media print { body { padding: 24px; } @page { margin: 16mm; } }
   </style>
@@ -92,7 +110,7 @@ export function printEstimateDocument(data: EstimatePrintData): boolean {
       ${data.businessContact ? `<div class="muted">${escapeHtml(data.businessContact)}</div>` : ''}
     </div>
     <div class="doc-meta">
-      <div class="label">Estimate</div>
+      <div class="label">${escapeHtml(documentLabel)}</div>
       <div class="num">${escapeHtml(data.estimateNumber)}</div>
       ${data.validUntil ? `<div class="muted">Valid until ${escapeHtml(data.validUntil)}</div>` : ''}
     </div>

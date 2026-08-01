@@ -11,6 +11,7 @@ describe('P7-telemetry — technician location ping domain', () => {
   const validInput = {
     tenantId: '550e8400-e29b-41d4-a716-446655440000',
     technicianId: 'tech-1',
+    clientPingId: '770e8400-e29b-41d4-a716-446655440001',
     appointmentId: '660e8400-e29b-41d4-a716-446655440001',
     lat: 37.7749,
     lng: -122.4194,
@@ -32,6 +33,7 @@ describe('P7-telemetry — technician location ping domain', () => {
     expect(ping.id).toBeDefined();
     expect(ping.tenantId).toBe(validInput.tenantId);
     expect(ping.technicianId).toBe(validInput.technicianId);
+    expect(ping.clientPingId).toBe(validInput.clientPingId);
     expect(ping.lat).toBe(validInput.lat);
     expect(ping.lng).toBe(validInput.lng);
   });
@@ -44,6 +46,15 @@ describe('P7-telemetry — technician location ping domain', () => {
 
     expect(errors).toContain('lat must be a finite number between -90 and 90');
     expect(errors).toContain('lng must be a finite number between -180 and 180');
+  });
+
+  it('rejects a non-UUID client ping id', () => {
+    const errors = validateTechnicianLocationPingInput(
+      { ...validInput, clientPingId: 'retry-1' },
+      { now },
+    );
+
+    expect(errors).toContain('clientPingId must be a valid UUID');
   });
 
   it('rejects stale timestamps', () => {
@@ -75,13 +86,45 @@ describe('P7-telemetry — technician location ping domain', () => {
     expect(hidden).toHaveLength(0);
   });
 
+  it('accepts each tenant-scoped client ping id only once across retries', async () => {
+    const ping = createTechnicianLocationPing(validInput, { now });
+
+    const first = await repo.insertMany(validInput.tenantId, [ping]);
+    const retry = await repo.insertMany(validInput.tenantId, [ping]);
+
+    expect(first).toHaveLength(1);
+    expect(retry).toHaveLength(0);
+    await expect(
+      repo.listByTechnician(validInput.tenantId, validInput.technicianId),
+    ).resolves.toHaveLength(1);
+  });
+
+  it('allows the same client ping id in a different tenant', async () => {
+    const otherTenantId = '550e8400-e29b-41d4-a716-446655440099';
+    const first = createTechnicianLocationPing(validInput, { now });
+    const otherTenant = createTechnicianLocationPing(
+      { ...validInput, tenantId: otherTenantId },
+      { now },
+    );
+
+    await expect(repo.insertMany(validInput.tenantId, [first])).resolves.toHaveLength(1);
+    await expect(repo.insertMany(otherTenantId, [otherTenant])).resolves.toHaveLength(1);
+    await expect(
+      repo.listByTechnician(otherTenantId, validInput.technicianId),
+    ).resolves.toHaveLength(1);
+  });
+
   it('returns pings ordered by recordedAt descending', async () => {
     const older = createTechnicianLocationPing(
       { ...validInput, recordedAt: new Date('2026-04-20T11:00:00.000Z') },
       { now }
     );
     const newer = createTechnicianLocationPing(
-      { ...validInput, recordedAt: new Date('2026-04-20T11:58:00.000Z') },
+      {
+        ...validInput,
+        clientPingId: '770e8400-e29b-41d4-a716-446655440002',
+        recordedAt: new Date('2026-04-20T11:58:00.000Z'),
+      },
       { now }
     );
 

@@ -1,9 +1,25 @@
 import { Proposal, ProposalType } from './proposal';
+import { TIER_KEYS, type TierKey } from '../ai/skills/triage-rules.schema';
 
 export interface PrioritizedProposal {
   proposal: Proposal;
   urgency: 'critical' | 'high' | 'normal' | 'low';
   reason?: string;
+}
+
+/**
+ * Read the §6.4-B emergency severity tier a draft carries, if any. The MMS
+ * vision task (and voice triage) persist it at `payload._meta.severity` as
+ * an optional {@link TierKey}; `payload` is an untyped bag, so read it
+ * defensively and ignore anything that isn't a known tier.
+ */
+function severityTier(proposal: Proposal): TierKey | undefined {
+  const meta = (proposal.payload as { _meta?: { severity?: unknown } })._meta;
+  const severity = meta?.severity;
+  return typeof severity === 'string' &&
+    (TIER_KEYS as readonly string[]).includes(severity)
+    ? (severity as TierKey)
+    : undefined;
 }
 
 const TYPE_PRIORITY: Record<ProposalType, number> = {
@@ -21,6 +37,9 @@ const TYPE_PRIORITY: Record<ProposalType, number> = {
   // After-hours callback requests surface alongside booking work.
   callback: 2,
   create_job: 3,
+  // B7 — a safe field edit (status/priority/title/description) to an
+  // existing job is the same priority tier as opening one.
+  update_job: 3,
   create_customer: 4,
   update_customer: 5,
   reassign_appointment: 1,
@@ -43,6 +62,11 @@ const TYPE_PRIORITY: Record<ProposalType, number> = {
   send_estimate_nudge: 1,
   // Notes are low priority — they never gate other work.
   add_note: 5,
+  // B1.18 — a spoken brand-voice capture is tenant configuration, not
+  // customer-facing work: nothing downstream waits on it and it has no
+  // same-day relevance. Same low tier as notes and the other back-office
+  // captures, and well below the CRM follow-ups.
+  update_brand_voice: 5,
   // Expense logging is informational — captured after the fact, never
   // gates any other work.
   log_expense: 5,
@@ -74,6 +98,14 @@ const TYPE_PRIORITY: Record<ProposalType, number> = {
   // Same tier as record_payment / send_invoice.
   send_payment_reminder: 1,
   apply_late_fee: 1,
+  // UB-A2 — standing instructions are back-office policy capture; they gate
+  // no same-day work. Same low tier as notes.
+  create_standing_instruction: 5,
+  // WS20 — correction-repetition catalog update is back-office config capture;
+  // it gates no same-day work. Same low tier as notes / standing instructions.
+  update_catalog_item: 5,
+  // Tenant alias learning is reversible back-office config — never same-day critical.
+  adopt_entity_alias: 5,
 };
 
 export function getUrgency(proposal: Proposal): { urgency: PrioritizedProposal['urgency']; reason: string } {
@@ -84,6 +116,20 @@ export function getUrgency(proposal: Proposal): { urgency: PrioritizedProposal['
     if (timeUntilExpiry <= twoHoursMs) {
       return { urgency: 'critical', reason: 'Expiring within 2 hours' };
     }
+  }
+
+  // §6.4-B — a photo/voice-sourced emergency must surface at the top of the
+  // queue even at normal confidence. getUrgency is the inbox's only ordering
+  // signal, so without this an emergency draft (e.g. a burst-pipe photo quote)
+  // would sit at 'low' behind routine work. TIER_1 (evacuate / life-safety) is
+  // critical; TIER_2 (emergency dispatch) is high. TIER_3/4 (same-day/routine)
+  // do not elevate — they fall through to the confidence/status rules below.
+  const severity = severityTier(proposal);
+  if (severity === 'TIER_1_EVACUATE') {
+    return { urgency: 'critical', reason: 'Emergency severity — evacuate' };
+  }
+  if (severity === 'TIER_2_EMERGENCY_DISPATCH') {
+    return { urgency: 'high', reason: 'Emergency severity — dispatch' };
   }
 
   if (proposal.confidenceScore !== undefined && proposal.confidenceScore < 0.5) {

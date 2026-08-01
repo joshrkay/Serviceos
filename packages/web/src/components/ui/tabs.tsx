@@ -83,8 +83,8 @@ export function Tabs({
       aria-label={ariaLabel}
       className={cn(
         variant === 'underline'
-          ? 'flex gap-1 border-b border-slate-200'
-          : 'inline-flex gap-1 rounded-xl bg-slate-100 p-1',
+          ? 'flex gap-1 border-b border-border'
+          : 'inline-flex gap-1 rounded-xl bg-secondary p-1',
         className,
       )}
     >
@@ -107,20 +107,20 @@ export function Tabs({
             onKeyDown={(e) => handleKeyDown(e, item.value)}
             className={cn(
               'inline-flex items-center gap-1.5 whitespace-nowrap text-sm font-medium transition-colors',
-              'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/40',
+              'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40',
               'disabled:cursor-not-allowed disabled:opacity-40',
               variant === 'underline'
                 ? cn(
                     '-mb-px border-b-2 px-3 py-2',
                     selected
-                      ? 'border-slate-900 text-slate-900'
-                      : 'border-transparent text-slate-500 hover:text-slate-700',
+                      ? 'border-primary text-foreground'
+                      : 'border-transparent text-muted-foreground hover:text-foreground',
                   )
                 : cn(
                     'rounded-lg px-3 py-1.5',
                     selected
-                      ? 'bg-white text-slate-900 shadow-sm'
-                      : 'text-slate-500 hover:text-slate-700',
+                      ? 'bg-card text-foreground shadow-sm'
+                      : 'text-muted-foreground hover:text-foreground',
                   ),
             )}
           >
@@ -130,8 +130,8 @@ export function Tabs({
                 className={cn(
                   'ml-0.5 inline-flex min-w-4 items-center justify-center rounded-full px-1 text-xs',
                   selected
-                    ? 'bg-slate-900 text-white'
-                    : 'bg-slate-200 text-slate-600',
+                    ? 'bg-primary text-primary-foreground'
+                    : 'bg-secondary text-muted-foreground',
                 )}
               >
                 {item.badge}

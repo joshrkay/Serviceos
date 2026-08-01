@@ -33,6 +33,7 @@ import type { LLMGateway, LLMResponse } from '../../src/ai/gateway/gateway';
 import type { IntentClassification } from '../../src/ai/orchestration/intent-classifier';
 import type { QueueMessage } from '../../src/queues/queue';
 import type { Logger } from '../../src/logging/logger';
+import { guardVoiceProposalContract } from './helpers/voice-proposal-contract';
 
 const TENANT = 't-launch-hvac';
 const USER = 'u-launch-tech';
@@ -107,7 +108,7 @@ describe('Operator voice golden path — HVAC tenant', () => {
   let verticalPromptResolver: (tenantId: string) => Promise<string | undefined>;
 
   beforeEach(async () => {
-    proposalRepo = new InMemoryProposalRepository();
+    proposalRepo = guardVoiceProposalContract(new InMemoryProposalRepository());
     verticalPromptResolver = await buildHvacResolver();
   });
 
@@ -142,7 +143,10 @@ describe('Operator voice golden path — HVAC tenant', () => {
         confidence_score: 0.92,
       }),
     ]);
-    const worker = createVoiceActionRouterWorker({ gateway, proposalRepo, verticalPromptResolver });
+    const worker = createVoiceActionRouterWorker({
+    // Production always resolves a tenant zone; a booking without one now
+    // asks the operator instead of guessing at US-Eastern.
+    tenantSchedulingResolver: async () => ({ timezone: 'America/Phoenix' }), gateway, proposalRepo, verticalPromptResolver });
 
     await worker.handle(
       msg({
@@ -182,7 +186,10 @@ describe('Operator voice golden path — HVAC tenant', () => {
         confidence_score: 0.9,
       }),
     ]);
-    const worker = createVoiceActionRouterWorker({ gateway, proposalRepo, verticalPromptResolver });
+    const worker = createVoiceActionRouterWorker({
+    // Production always resolves a tenant zone; a booking without one now
+    // asks the operator instead of guessing at US-Eastern.
+    tenantSchedulingResolver: async () => ({ timezone: 'America/Phoenix' }), gateway, proposalRepo, verticalPromptResolver });
 
     await worker.handle(
       msg({
@@ -217,7 +224,10 @@ describe('Operator voice golden path — HVAC tenant', () => {
         },
       } satisfies IntentClassification),
     ]);
-    const worker = createVoiceActionRouterWorker({ gateway, proposalRepo, verticalPromptResolver });
+    const worker = createVoiceActionRouterWorker({
+    // Production always resolves a tenant zone; a booking without one now
+    // asks the operator instead of guessing at US-Eastern.
+    tenantSchedulingResolver: async () => ({ timezone: 'America/Phoenix' }), gateway, proposalRepo, verticalPromptResolver });
 
     await worker.handle(
       msg({
@@ -248,7 +258,10 @@ describe('Operator voice golden path — HVAC tenant', () => {
         },
       } satisfies IntentClassification),
     ]);
-    const worker = createVoiceActionRouterWorker({ gateway, proposalRepo, verticalPromptResolver });
+    const worker = createVoiceActionRouterWorker({
+    // Production always resolves a tenant zone; a booking without one now
+    // asks the operator instead of guessing at US-Eastern.
+    tenantSchedulingResolver: async () => ({ timezone: 'America/Phoenix' }), gateway, proposalRepo, verticalPromptResolver });
 
     await worker.handle(
       msg({
@@ -278,7 +291,10 @@ describe('Operator voice golden path — HVAC tenant', () => {
         confidence_score: 0.9,
       }),
     ]);
-    const worker = createVoiceActionRouterWorker({ gateway, proposalRepo, verticalPromptResolver });
+    const worker = createVoiceActionRouterWorker({
+    // Production always resolves a tenant zone; a booking without one now
+    // asks the operator instead of guessing at US-Eastern.
+    tenantSchedulingResolver: async () => ({ timezone: 'America/Phoenix' }), gateway, proposalRepo, verticalPromptResolver });
 
     await worker.handle(
       msg({
@@ -306,7 +322,10 @@ describe('Operator voice golden path — HVAC tenant', () => {
         confidence: 0.93,
       } satisfies IntentClassification),
     ]);
-    const worker = createVoiceActionRouterWorker({ gateway, proposalRepo, verticalPromptResolver });
+    const worker = createVoiceActionRouterWorker({
+    // Production always resolves a tenant zone; a booking without one now
+    // asks the operator instead of guessing at US-Eastern.
+    tenantSchedulingResolver: async () => ({ timezone: 'America/Phoenix' }), gateway, proposalRepo, verticalPromptResolver });
 
     await worker.handle(
       msg({

@@ -22,14 +22,13 @@ Use Supabase **only as managed Postgres** for `packages/api` + `packages/web`. A
 
 ## Do not
 
-- Run [supabase_migration.sql](../experiments/supabase_migration.sql) on this database.
+- Run the old `service-os-app` prototype's `supabase_migration.sql` on this database — the prototype and its migration file were removed in 2026-07 (see `docs/decisions.md` D-016); only `packages/api/src/db/schema.ts` migrations apply here.
 - Expose `SUPABASE_SERVICE_ROLE_KEY` to the browser.
 - Expect `@supabase/supabase-js` in `packages/api` — it is intentionally absent.
 
 ## Training / legacy
 
 - [serviceos_training](../serviceos_training/) may use a **separate** Supabase project and `training_corpus` table.
-- [service-os-app](../experiments/service-os-app/) is legacy; route tenant data through the Express API when possible.
 
 ## Portal token lookup
 

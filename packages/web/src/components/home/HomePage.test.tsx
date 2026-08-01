@@ -1,16 +1,29 @@
 import React from 'react';
-import { render, screen } from '@testing-library/react';
+import { render, screen, within } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { MemoryRouter } from 'react-router';
 import { HomePage } from './HomePage';
+import { todayInTz, tenantWallClockToUtc } from '../../utils/formatInTenantTz';
 
 vi.mock('../../hooks/useListQuery', () => ({ useListQuery: vi.fn() }));
+
+// U10 — "today" must be the tenant-tz calendar day. Mock the tz so the tests
+// are deterministic regardless of the CI browser's zone.
+vi.mock('../../hooks/useTenantTimezone', () => ({ useTenantTimezone: vi.fn(() => 'UTC') }));
 
 vi.mock('./MoneyLoopHomeCard', () => ({
   MoneyLoopHomeCard: () => <div data-testid="money-loop-home-card" />,
 }));
 
+// Story 10.7 — unread replies surfacing. Default to none so existing tests are
+// unaffected; individual tests override the resolved value.
+vi.mock('../../api/conversations', () => ({
+  listInboxThreads: vi.fn().mockResolvedValue([]),
+}));
+
 import { useListQuery } from '../../hooks/useListQuery';
+import { useTenantTimezone } from '../../hooks/useTenantTimezone';
+import { listInboxThreads } from '../../api/conversations';
 
 const today = new Date().toISOString().split('T')[0];
 const pastDate = '2026-01-01';
@@ -89,6 +102,13 @@ const mockInvoices = [
   },
 ];
 
+// U10 — today's scheduled work comes from the appointments API (GET /api/jobs
+// ignores scheduledDate). One appointment per mock job, dated today (UTC).
+const mockAppointments = [
+  { jobId: 'j1', scheduledStart: `${today}T09:00:00Z` },
+  { jobId: 'j2', scheduledStart: `${today}T11:00:00Z` },
+];
+
 const makeListResult = (data: unknown[]) => ({
   data,
   total: data.length,
@@ -103,7 +123,9 @@ const makeListResult = (data: unknown[]) => ({
 });
 
 beforeEach(() => {
+  vi.mocked(useTenantTimezone).mockReturnValue('UTC');
   vi.mocked(useListQuery).mockImplementation((path: string) => {
+    if (path === '/api/appointments') return makeListResult(mockAppointments) as ReturnType<typeof useListQuery>;
     if (path === '/api/jobs')      return makeListResult(mockJobs) as ReturnType<typeof useListQuery>;
     if (path === '/api/estimates') return makeListResult(mockEstimates) as ReturnType<typeof useListQuery>;
     if (path === '/api/invoices')  return makeListResult(mockInvoices) as ReturnType<typeof useListQuery>;
@@ -125,6 +147,28 @@ describe('HomePage', () => {
     renderPage();
     expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent(/Ada/);
     expect(screen.queryByText(/Mike/)).toBeNull();
+  });
+
+  it('surfaces an unread customer reply as an attention item (Story 10.7)', async () => {
+    vi.mocked(listInboxThreads).mockResolvedValueOnce([
+      {
+        conversation: {
+          id: 'conv-1',
+          status: 'open',
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        },
+        lastMessageAt: new Date().toISOString(),
+        lastMessagePreview: 'Is 2pm still good?',
+        lastMessageDirection: 'inbound',
+        needsReply: true,
+        messageCount: 3,
+        customerName: 'Dana Rivera',
+      },
+    ]);
+    renderPage();
+    expect(await screen.findByText('Dana Rivera replied')).toBeInTheDocument();
+    expect(screen.getByText('Is 2pm still good?')).toBeInTheDocument();
   });
 
   it("renders today's jobs section", () => {
@@ -173,21 +217,34 @@ describe('HomePage', () => {
     expect(screen.getAllByText('$1,250').length).toBeGreaterThan(0);
   });
 
-  it('renders money loop hub and quick actions', () => {
+  it('renders money loop hub and conversational quick actions', () => {
     renderPage();
     expect(screen.getByTestId('money-loop-home-card')).toBeInTheDocument();
-    expect(screen.getByText('Approval inbox')).toBeInTheDocument();
-    expect(screen.getAllByText('Money summary').length).toBeGreaterThan(0);
+    // Epic 12.8 — quick actions open the conversational flow.
+    expect(screen.getByText('Add customer')).toBeInTheDocument();
+    expect(screen.getByText('Schedule')).toBeInTheDocument();
     expect(screen.getByText('New estimate')).toBeInTheDocument();
     expect(screen.getByText('New invoice')).toBeInTheDocument();
+    const addCustomer = screen.getByText('Add customer').closest('button')!;
+    expect(addCustomer).toBeInTheDocument();
   });
 
-  it('queries /api/jobs with today scheduledDate filter', () => {
+  it('queries /api/appointments with a fromDate/toDate day window (not the ignored jobs scheduledDate)', () => {
     renderPage();
+    // U10 — GET /api/jobs ignores scheduledDate, so "today" is driven by the
+    // appointments API's day window, keyed off the tenant tz.
     expect(vi.mocked(useListQuery)).toHaveBeenCalledWith(
-      '/api/jobs',
-      expect.objectContaining({ filters: expect.objectContaining({ scheduledDate: expect.any(String) }) })
+      '/api/appointments',
+      expect.objectContaining({
+        filters: expect.objectContaining({
+          fromDate: expect.any(String),
+          toDate: expect.any(String),
+        }),
+      }),
     );
+    // The jobs query no longer carries a (silently ignored) scheduledDate filter.
+    const jobsCall = vi.mocked(useListQuery).mock.calls.find(([p]) => p === '/api/jobs');
+    expect(jobsCall?.[1]?.filters ?? {}).not.toHaveProperty('scheduledDate');
   });
 
   it('queries /api/estimates with sent filter', () => {
@@ -238,7 +295,98 @@ describe('HomePage', () => {
       return makeListResult([]) as ReturnType<typeof useListQuery>;
     });
     renderPage();
+    // Epic 12.9 — the empty state points to a first action (no dead end).
     expect(screen.getByText('No jobs scheduled today')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /schedule a job/i })).toBeInTheDocument();
+  });
+
+  it('[12.2] surfaces unassigned work with a path to the dispatch board', () => {
+    // mockJobs j2 (Bob Jones) has no technician → counts as unassigned today.
+    renderPage();
+    const unassigned = screen.getByTestId('home-unassigned');
+    expect(unassigned).toHaveTextContent(/1 unassigned job/i);
+  });
+
+  it('[12.2] passes a live refetch interval to the today queries', () => {
+    renderPage();
+    expect(vi.mocked(useListQuery)).toHaveBeenCalledWith(
+      '/api/jobs',
+      expect.objectContaining({ refetchInterval: expect.any(Number) }),
+    );
+    expect(vi.mocked(useListQuery)).toHaveBeenCalledWith(
+      '/api/appointments',
+      expect.objectContaining({ refetchInterval: expect.any(Number) }),
+    );
+  });
+
+  // ── U10: today's jobs sourced from the appointments day window (tz-correct) ─
+
+  it('[U10] renders a job in the today panel when its appointment is inside today (tenant tz)', () => {
+    vi.mocked(useTenantTimezone).mockReturnValue('UTC');
+    vi.mocked(useListQuery).mockImplementation((path: string) => {
+      if (path === '/api/appointments') {
+        return makeListResult([
+          { jobId: 'j1', scheduledStart: `${todayInTz('UTC')}T14:00:00Z` },
+        ]) as ReturnType<typeof useListQuery>;
+      }
+      if (path === '/api/jobs')      return makeListResult(mockJobs) as ReturnType<typeof useListQuery>;
+      if (path === '/api/estimates') return makeListResult([]) as ReturnType<typeof useListQuery>;
+      if (path === '/api/invoices')  return makeListResult([]) as ReturnType<typeof useListQuery>;
+      return makeListResult([]) as ReturnType<typeof useListQuery>;
+    });
+    renderPage();
+    const section = screen.getByText("Today's jobs").closest('section')!;
+    expect(within(section).getByText('Alice Smith')).toBeInTheDocument();
+    // j2 has no appointment today → it must not leak into the panel.
+    expect(within(section).queryByText('Bob Jones')).toBeNull();
+    expect(screen.queryByText('No jobs scheduled today')).toBeNull();
+  });
+
+  it('[U10] counts a 23:30 tenant-local appointment on the correct day when the browser tz differs', () => {
+    // A late-evening appointment in a west-of-UTC tenant lands on the NEXT
+    // calendar day in UTC. Keying "today" off the tenant tz (not the UTC date)
+    // must still place it on the tenant's today.
+    const zone = 'America/Los_Angeles';
+    vi.mocked(useTenantTimezone).mockReturnValue(zone);
+    const localToday = todayInTz(zone);
+    const lateInstant = tenantWallClockToUtc(localToday, '23:30', zone).toISOString();
+    // Sanity: the UTC calendar date of this instant is NOT the tenant's today —
+    // a naive `toISOString().split('T')[0]` implementation would drop it.
+    expect(lateInstant.slice(0, 10)).not.toBe(localToday);
+
+    vi.mocked(useListQuery).mockImplementation((path: string) => {
+      if (path === '/api/appointments') {
+        return makeListResult([
+          { jobId: 'j1', scheduledStart: lateInstant },
+        ]) as ReturnType<typeof useListQuery>;
+      }
+      if (path === '/api/jobs')      return makeListResult(mockJobs) as ReturnType<typeof useListQuery>;
+      if (path === '/api/estimates') return makeListResult([]) as ReturnType<typeof useListQuery>;
+      if (path === '/api/invoices')  return makeListResult([]) as ReturnType<typeof useListQuery>;
+      return makeListResult([]) as ReturnType<typeof useListQuery>;
+    });
+    renderPage();
+    const section = screen.getByText("Today's jobs").closest('section')!;
+    expect(within(section).getByText('Alice Smith')).toBeInTheDocument();
+    expect(screen.queryByText('No jobs scheduled today')).toBeNull();
+  });
+
+  it('[U10] shows the empty state (not the full jobs list) when there are no appointments today', () => {
+    vi.mocked(useTenantTimezone).mockReturnValue('UTC');
+    vi.mocked(useListQuery).mockImplementation((path: string) => {
+      // Jobs exist, but none are scheduled today (no appointments in window).
+      if (path === '/api/appointments') return makeListResult([]) as ReturnType<typeof useListQuery>;
+      if (path === '/api/jobs')      return makeListResult(mockJobs) as ReturnType<typeof useListQuery>;
+      if (path === '/api/estimates') return makeListResult([]) as ReturnType<typeof useListQuery>;
+      if (path === '/api/invoices')  return makeListResult([]) as ReturnType<typeof useListQuery>;
+      return makeListResult([]) as ReturnType<typeof useListQuery>;
+    });
+    renderPage();
+    const section = screen.getByText("Today's jobs").closest('section')!;
+    expect(within(section).getByText('No jobs scheduled today')).toBeInTheDocument();
+    // The full jobs list must NOT render just because /api/jobs returned rows.
+    expect(within(section).queryByText('Alice Smith')).toBeNull();
+    expect(within(section).queryByText('Bob Jones')).toBeNull();
   });
 
   // ── P20-004: Error states for authenticated data panels ──────────────────
@@ -321,6 +469,7 @@ describe('HomePage', () => {
 
   it('shows money-state badge on today job rows', () => {
     vi.mocked(useListQuery).mockImplementation((path: string) => {
+      if (path === '/api/appointments') return makeListResult(mockAppointments) as ReturnType<typeof useListQuery>;
       if (path === '/api/jobs') {
         return makeListResult([
           { ...mockJobs[0], moneyState: 'estimate_sent' },
@@ -334,5 +483,14 @@ describe('HomePage', () => {
     renderPage();
     expect(screen.getByText('Estimate sent')).toBeInTheDocument();
     expect(screen.getAllByText('Overdue').length).toBeGreaterThanOrEqual(1);
+  });
+
+  it('renders the populated dashboard on Path A tokens — no raw palette leaks', () => {
+    const { container } = renderPage();
+    // The today/estimates/invoices sections use divide-y between rows; pins
+    // those (and everything else) to semantic tokens, not the slate palette.
+    expect(container.innerHTML).not.toMatch(
+      /(bg|text|border|border-l|border-t|placeholder|ring|divide|shadow)-(slate|gray|zinc|neutral|stone|red|orange|amber|yellow|lime|green|emerald|teal|cyan|sky|blue|indigo|violet|purple|fuchsia|pink|rose)-\d{2,3}/,
+    );
   });
 });

@@ -1,5 +1,11 @@
 import { v4 as uuidv4 } from 'uuid';
-import { appointmentTypeSchema, type AppointmentTypeValue } from '@ai-service-os/shared';
+import type { Pool } from 'pg';
+import {
+  appointmentTypeSchema,
+  catalogUnitSchema,
+  type AppointmentTypeValue,
+  type CatalogUnitValue,
+} from '@ai-service-os/shared';
 import { Proposal, ProposalType, ProposalRepository } from '../proposal';
 import { CreateInvoiceExecutionHandler } from './invoice-execution-handler';
 import { CreateInvoiceScheduleExecutionHandler } from './invoice-schedule-handler';
@@ -10,6 +16,7 @@ import { IssueInvoiceExecutionHandler } from './issue-invoice-handler';
 import { SendPaymentReminderExecutionHandler } from './send-payment-reminder-handler';
 import { ApplyLateFeeExecutionHandler } from './apply-late-fee-handler';
 import { UpdateEstimateExecutionHandler } from './update-estimate-handler';
+import { UpdateJobExecutionHandler } from './update-job-handler';
 import { ReassignAppointmentExecutionHandler } from './reassignment-handler';
 import { RescheduleAppointmentExecutionHandler } from './reschedule-handler';
 import { AddCrewMemberExecutionHandler, RemoveCrewMemberExecutionHandler } from './crew-handler';
@@ -30,15 +37,24 @@ import {
 } from './review-response-handler';
 import { ServiceCreditRepository } from '../../reputation/service-credit';
 import { NoteRepository } from '../../notes/note';
-import { PaymentRepository } from '../../invoices/payment';
+import { PaymentRepository, PaymentLinkCleanupDeps } from '../../invoices/payment';
 import { ExpenseRepository } from '../../expenses/expense';
-import { AuditRepository, createAuditEvent } from '../../audit/audit';
-import { ConflictError } from '../../shared/errors';
+import { AuditRepository, InMemoryAuditRepository, createAuditEvent } from '../../audit/audit';
+import type { ConsentEventRepository } from '../../compliance/consent-events';
+import { ConflictError, ValidationError } from '../../shared/errors';
 import { JobRepository, createJob } from '../../jobs/job';
+import { JobTimelineRepository } from '../../jobs/job-lifecycle';
+import { JobCompletionEffectsDeps } from '../../jobs/completion-effects';
+import { TimeEntryRepository } from '../../time-tracking/time-entry';
 import { RefreshJobMoneyStateDeps } from '../../jobs/job-money-state';
 import { AppointmentRepository, createAppointment } from '../../appointments/appointment';
-import { AssignmentRepository, assignTechnician } from '../../appointments/assignment';
+import {
+  AssignmentRepository,
+  assignTechnician,
+  assertTechnicianAvailability,
+} from '../../appointments/assignment';
 import { InvoiceRepository } from '../../invoices/invoice';
+import { DunningEventRepository } from '../../invoices/dunning-config';
 import {
   EstimateRepository,
   createEstimate,
@@ -75,7 +91,8 @@ import {
 import { TimeEntryService } from '../../time-tracking/time-entry-service';
 import { FeedbackRequestRepository } from '../../feedback/feedback-request';
 import { DelayNotificationService } from '../../notifications/delay-notifications';
-import { LineItem } from '../../shared/billing-engine';
+import { LineItem, LineItemCategory, buildLineItem } from '../../shared/billing-engine';
+import type { PricingSource } from '../../ai/resolution/catalog-resolver';
 import {
   EmergencyDispatchExecutionHandler,
   EmergencySmsSender,
@@ -83,10 +100,38 @@ import {
 import { dispatchEstimateNudge } from '../../estimates/estimate-nudge';
 import type { SendService } from '../../notifications/send-service';
 import type { DispatchRepository } from '../../notifications/dispatch-repository';
+import { CreateStandingInstructionExecutionHandler } from './standing-instruction-handler';
+import { UpdateCatalogItemExecutionHandler } from './update-catalog-item-handler';
+import { CatalogItemRepository } from '../../catalog/catalog-item';
+import type { StandingInstructionRepository } from '../../instructions/standing-instructions';
+import type { EntityAliasRepository } from '../../learning/entity-aliases/entity-alias';
+import { EntityAliasExecutionHandler } from './entity-alias-handler';
+import {
+  OnboardingTenantSettingsExecutionHandler,
+  OnboardingServiceCategoryExecutionHandler,
+  OnboardingEstimateTemplateExecutionHandler,
+  OnboardingTeamMemberExecutionHandler,
+  OnboardingScheduleExecutionHandler,
+} from './onboarding-handlers';
+import { PackActivationRepository } from '../../settings/pack-activation';
+import type { PendingInvitationRepository } from '../../users/pending-invitation';
+import type { ClerkInvitationConfig } from '../../users/invite-team-member';
+import { EstimateTemplateRepository } from '../../templates/estimate-template';
+import { SeedPackDefaultsDeps } from '../../packs/seed-pack-defaults';
+import { UpdateBrandVoiceExecutionHandler } from './brand-voice-handler';
+import type { BrandVoiceRepository } from '../../tenants/brand/brand-voice';
 
 export interface ExecutionContext {
   tenantId: string;
   executedBy: string;
+  /**
+   * Role of the human whose approval authorized this execution, when the
+   * caller knows it. Config-writing handlers stamp it on their audit event
+   * instead of asserting 'owner', so the trail records who actually acted.
+   * Optional: the background execution sweep runs detached from the approving
+   * request and legitimately may not have it.
+   */
+  executedByRole?: string;
 }
 
 export interface ExecutionResult {
@@ -99,6 +144,21 @@ export interface ExecutionHandler {
   proposalType: ProposalType;
   execute(proposal: Proposal, context: ExecutionContext): Promise<ExecutionResult>;
   /**
+   * True when `execute()` performs synchronous external network I/O — email /
+   * SMS / push / 3rd-party API — so the executor runs it OUTSIDE the DB
+   * transaction; the domain DB writes then commit in their own per-call
+   * transactions and only the idempotency record + status transition are
+   * wrapped in the executor's transaction. Absent/false = DB-only = fully
+   * atomic per DATA-31.
+   *
+   * Rationale (PR #666, Gemini HIGH): a handler that awaits an external send
+   * while its domain mutation's row locks are held inside the executor's
+   * transaction pins a pooled connection AND holds those locks for the whole
+   * network round-trip — a pool-exhaustion + long-lived-lock risk. Marking it
+   * here moves the send (and its DB writes) out of the executor transaction.
+   */
+  performsExternalIo?: boolean;
+  /**
    * Optional capability signal for the boot-time wiring guard
    * (proposals/execution/wiring-assertions.ts). Returns false when the
    * handler is missing a dependency it needs to PERSIST — i.e. it would
@@ -109,17 +169,31 @@ export interface ExecutionHandler {
   isFullyWired?(): boolean;
 }
 
-/**
- * @deprecated Use {@link CreateCustomerVoiceExecutionHandler}. Kept as an
- * alias so legacy imports/tests keep compiling; registry always wires the
- * voice handler.
- */
-export class CreateCustomerExecutionHandler extends CreateCustomerVoiceExecutionHandler {}
-
 export class UpdateCustomerExecutionHandler implements ExecutionHandler {
   proposalType: ProposalType = 'update_customer';
 
-  constructor(private readonly customerRepo?: CustomerRepository) {}
+  constructor(
+    private readonly customerRepo: CustomerRepository | undefined,
+    // WS3 — auditRepo is structurally REQUIRED (not optional): update_customer
+    // is a consent-bearing mutation and must always emit its customer.updated
+    // audit event. A non-optional constructor param makes it impossible to
+    // wire this handler without an audit sink. updateCustomer forwards it.
+    private readonly auditRepo: AuditRepository,
+    // WS3/WS12 — voice consent parity: a spoken smsConsent toggle must append
+    // to the consent ledger exactly like the authenticated route does
+    // (routes/customers.ts). Optional only so pool-less unit tests can omit
+    // it. When a consent-bearing field changes and the ledger is wired, an
+    // append failure FAILS the update (see customer.ts updateCustomer) — the
+    // whole mutation rolls back atomically via the ambient tenant transaction.
+    private readonly consentLedger?: ConsentEventRepository,
+  ) {}
+
+  // WS3 — degrades to nothing without the customer repo. The boot-time guard
+  // (wiring-assertions.ts) fails boot when a pool is configured but this is
+  // false, so the synthetic-success no-op can never run in production.
+  isFullyWired(): boolean {
+    return Boolean(this.customerRepo);
+  }
 
   async execute(proposal: Proposal, context: ExecutionContext): Promise<ExecutionResult> {
     const { payload } = proposal;
@@ -128,7 +202,9 @@ export class UpdateCustomerExecutionHandler implements ExecutionHandler {
     }
 
     if (!this.customerRepo) {
-      return { success: true };
+      // WS3 — no synthetic success: a missing repo is a wiring fault, never a
+      // silent no-op that reports success while persisting nothing.
+      return { success: false, error: 'handler_not_wired:customerRepo' };
     }
 
     const input: UpdateCustomerInput = {};
@@ -160,6 +236,12 @@ export class UpdateCustomerExecutionHandler implements ExecutionHandler {
         input,
         this.customerRepo,
         context.executedBy,
+        // WS3 — thread audit + consent ledger through the voice path so
+        // updateCustomer emits customer.updated and appends the consent event
+        // (all three writes join one transaction via the ambient tenant
+        // context established by the executor / request middleware).
+        this.auditRepo,
+        this.consentLedger,
       );
       if (!updated) {
         return { success: false, error: 'Customer not found' };
@@ -267,6 +349,13 @@ export class CreateJobExecutionHandler implements ExecutionHandler {
 
 export class CreateAppointmentExecutionHandler implements ExecutionHandler {
   proposalType: ProposalType = 'create_appointment';
+  // Awaits confirmationNotifier.enqueue — in production this is
+  // TransactionalCommsService, which sends the customer confirmation SMS/email
+  // synchronously via the delivery provider — external network I/O alongside the
+  // appointment + assignment DB writes. Those writes already tolerate
+  // per-connection commits (assignment-failure compensation), so running out of
+  // the executor tx is safe.
+  performsExternalIo = true;
 
   constructor(
     private readonly appointmentRepo?: AppointmentRepository,
@@ -276,6 +365,31 @@ export class CreateAppointmentExecutionHandler implements ExecutionHandler {
     // RV-081 — revisit linkage: validates payload.linkedJobId exists
     // (tenant-scoped) before attaching the appointment to it.
     private readonly jobRepo?: JobRepository,
+    /**
+     * Foundation gate F2 (contract #12/#13) — when wired, a technician on
+     * the payload is validated against modeled working hours / time-off
+     * BEFORE the appointment is created, and again inside assignTechnician.
+     * Without this the voice/proposal path was the one assignment surface
+     * that skipped the availability preconditions.
+     */
+    private readonly availabilityRepos?: {
+      workingHoursRepo?: import('../../availability/working-hours').WorkingHoursRepository;
+      unavailableBlockRepo?: import('../../availability/unavailable-block').UnavailableBlockRepository;
+    },
+    /** Tenant-timezone fallback for payloads that omit `timezone`. */
+    private readonly settingsRepo?: Pick<SettingsRepository, 'findByTenant'>,
+    /**
+     * SCH-02 — auto-open-a-job fallback. A caller describing NEW work
+     * ("book an appointment for a furnace tune-up") is classified with
+     * entities.jobTitle and no resolvable jobId (see entity-resolution.ts's
+     * JOB_REF_INTENTS comment — jobTitle documents "title of new job",
+     * deliberately never fuzzy-searched as an existing-job reference for
+     * create_appointment). Mirrors DraftEstimateExecutionHandler /
+     * CreateJobExecutionHandler's own customer-location lookup so the new
+     * job lands somewhere real. Absent → the jobTitle fallback is skipped
+     * and the handler keeps its original hard-fail behavior.
+     */
+    private readonly locationRepo?: LocationRepository,
   ) {}
 
   // Degrades to a synthetic-id passthrough (saves nothing) without the
@@ -293,8 +407,96 @@ export class CreateAppointmentExecutionHandler implements ExecutionHandler {
       typeof payload.linkedJobId === 'string' && payload.linkedJobId.length > 0
         ? payload.linkedJobId
         : undefined;
-    const targetJobId =
+    let targetJobId =
       linkedJobId ?? (typeof payload.jobId === 'string' && payload.jobId.length > 0 ? payload.jobId : undefined);
+
+    // SCH-02 — a caller describing NEW work ("book an appointment for a
+    // furnace tune-up") is classified with entities.jobTitle (documented as
+    // "title of new job on create_job" — a NAME for work being CREATED, not
+    // a lookup target) and no resolvable jobId, because create_appointment
+    // is deliberately excluded from entity-resolution.ts's JOB_REF_INTENTS
+    // fuzzy job search. Without this fallback every such call hard-failed
+    // below. Whenever an already-resolved customerId is present, auto-open a
+    // new job (reusing the same createJob domain fn + customer-location
+    // lookup CreateJobExecutionHandler and DraftEstimateExecutionHandler
+    // already use) and book against it — matching how a human dispatcher
+    // would actually handle the call. A linkedJobId revisit never reaches
+    // here (targetJobId is already set).
+    //
+    // The job NAME cascades jobTitle → proposal.summary. Gating the whole
+    // block on jobTitle made the booking nondeterministic: jobTitle is an
+    // LLM-extracted entity that the classifier emits only MOST of the time
+    // (measured 39/40 on the SMS-01 utterance), so an unlucky phrasing
+    // dropped the caller's booking with "Payload must include a valid
+    // jobId". `proposal.summary` is an always-present terminator — it is
+    // non-optional on Proposal, buildProposal rejects an empty one, and BOTH
+    // voice surfaces fill it from the shared `voiceProposalSummary()` template
+    // (proposals/voice-intent-map.ts) — at minimum "Schedule appointment",
+    // well inside createJob's 500-char limit. That sharing is recent: this
+    // comment used to claim the in-app template covered the voice path, but
+    // the real Twilio path passed a bare `Voice intent: ${intent}`, so a job
+    // auto-opened for a phone caller was named "Voice intent:
+    // create_appointment". Same shape DraftEstimateExecutionHandler and
+    // CreateInvoiceExecutionHandler already use for their job names.
+    if (!targetJobId) {
+      const jobTitle = typeof payload.jobTitle === 'string' ? payload.jobTitle.trim() : '';
+      const customerId =
+        typeof payload.customerId === 'string' && payload.customerId.length > 0
+          ? payload.customerId
+          : undefined;
+      if (customerId && this.jobRepo && this.locationRepo) {
+        const locations = await this.locationRepo.findByCustomer(context.tenantId, customerId);
+        // An operator-supplied `locationId` wins: it is how the
+        // `missingFields: ['locationId']` gate (drafted by
+        // `detectServiceLocationGap`) gets cleared for a customer who had no
+        // location at draft time. Validated against THIS customer's own
+        // non-archived rows, so a stale or cross-customer id can never site a
+        // job at someone else's address.
+        const supplied =
+          typeof payload.locationId === 'string' && payload.locationId.length > 0
+            ? locations.find((loc) => loc.id === payload.locationId && !loc.isArchived)
+            : undefined;
+        if (typeof payload.locationId === 'string' && payload.locationId.length > 0 && !supplied) {
+          return {
+            success: false,
+            error: `Service location ${payload.locationId} does not belong to this customer (or is archived)`,
+          };
+        }
+        const primary = locations.find((loc) => loc.isPrimary && !loc.isArchived);
+        const fallback = locations.find((loc) => !loc.isArchived);
+        const locationId = supplied?.id ?? primary?.id ?? fallback?.id;
+        if (!locationId) {
+          return {
+            success: false,
+            error: 'Customer has no service location — add one before booking a new job',
+          };
+        }
+        try {
+          const job = await createJob(
+            {
+              tenantId: context.tenantId,
+              customerId,
+              locationId,
+              summary: jobTitle || proposal.summary,
+              createdBy: context.executedBy,
+            },
+            this.jobRepo,
+            this.auditRepo,
+          );
+          targetJobId = job.id;
+        } catch (err) {
+          return {
+            success: false,
+            error: err instanceof Error ? err.message : String(err),
+          };
+        }
+      }
+    }
+
+    // customerId ALSO missing in the jobTitle-no-jobId scenario is a
+    // distinct, expected failure — can't open a job without a customer to
+    // own it. Falls through to the same original error as any other
+    // unresolved jobId so callers see one consistent message.
     if (!targetJobId) {
       return { success: false, error: 'Payload must include a valid jobId' };
     }
@@ -333,7 +535,18 @@ export class CreateAppointmentExecutionHandler implements ExecutionHandler {
       return { success: false, error: 'Payload contains invalid appointment times' };
     }
 
-    const timezone = typeof payload.timezone === 'string' ? payload.timezone : 'UTC';
+    // Payload override → tenant settings → UTC. Voice/calling-agent proposal
+    // payloads routinely omit timezone; defaulting straight to UTC made the
+    // availability check evaluate the window in the wrong local day for
+    // non-UTC tenants (and stamped wrong display metadata on the row).
+    let timezone = typeof payload.timezone === 'string' ? payload.timezone : null;
+    if (!timezone && this.settingsRepo) {
+      const settings = await this.settingsRepo
+        .findByTenant(context.tenantId)
+        .catch(() => null);
+      timezone = settings?.timezone ?? null;
+    }
+    timezone = timezone ?? 'UTC';
 
     // Optional customer-facing arrival window (e.g. "we'll be there 8–12").
     const arrivalWindowStart =
@@ -365,6 +578,23 @@ export class CreateAppointmentExecutionHandler implements ExecutionHandler {
       if (blocking) {
         return { success: false, error: blocking.message };
       }
+      // Availability preconditions (contract #12/#13) BEFORE creating the
+      // appointment — a cheap early rejection beats create-then-compensate.
+      if (this.availabilityRepos) {
+        try {
+          await assertTechnicianAvailability(
+            context.tenantId,
+            payload.technicianId,
+            { start: scheduledStart, end: scheduledEnd, timezone },
+            this.availabilityRepos,
+          );
+        } catch (err) {
+          return {
+            success: false,
+            error: err instanceof Error ? err.message : String(err),
+          };
+        }
+      }
     }
 
     const appointment = await createAppointment({
@@ -376,25 +606,35 @@ export class CreateAppointmentExecutionHandler implements ExecutionHandler {
         ? { arrivalWindowStart, arrivalWindowEnd }
         : {}),
       timezone,
-      // Reason-for-visit persistence: voice proposals carry the spoken work
-      // description in `summary` (the LLM-extracted "one-line description of
-      // the work requested"), while programmatic callers set `notes`. Persist
-      // whichever is present — `notes` wins when both exist — so an inbound
-      // cold-call create_appointment (no jobId → skips the held-slot path that
-      // already maps summary→notes) never drops the caller's reason.
+      // Reason-for-visit persistence: programmatic callers set `notes`;
+      // `payload.summary` is kept for any caller that sets it. Neither is
+      // ever present on the VOICE path — `ExtractedEntities` has no
+      // `summary` field (see intent-classifier.ts's extraction whitelist)
+      // and inapp-adapter passes the proposal summary to buildProposal's
+      // `summary`, never onto the payload — so voice bookings silently
+      // persisted no reason at all. Extend the cascade to the two values
+      // voice DOES carry: `payload.jobTitle`, the LLM-extracted spoken work
+      // description ("furnace tune-up") and by far the most useful reason,
+      // then `proposal.summary`, the always-present terminator (same
+      // guarantee relied on for the job name above). `notes` is an
+      // internal dispatcher/tech field — it is not read by any customer
+      // -facing notification or portal route — so the generic
+      // "Schedule appointment for X" terminator is safe as a last resort.
       notes:
         typeof payload.notes === 'string'
           ? payload.notes
           : typeof payload.summary === 'string'
             ? payload.summary
-            : undefined,
+            : typeof payload.jobTitle === 'string' && payload.jobTitle.trim().length > 0
+              ? payload.jobTitle.trim()
+              : proposal.summary,
       // Typed visit kind — enum-validate before persisting. The payload was
       // Zod-checked upstream, but never forward a raw value unguarded.
       appointmentType: appointmentTypeSchema.safeParse(payload.appointmentType).success
         ? (payload.appointmentType as AppointmentTypeValue)
         : undefined,
       createdBy: context.executedBy,
-    }, this.appointmentRepo);
+    }, this.appointmentRepo, undefined, this.auditRepo, 'system');
 
     if (this.assignmentRepo && payload.technicianId && typeof payload.technicianId === 'string') {
       try {
@@ -404,7 +644,12 @@ export class CreateAppointmentExecutionHandler implements ExecutionHandler {
           technicianId: payload.technicianId,
           technicianRole: 'technician',
           assignedBy: context.executedBy,
-        }, this.assignmentRepo, { appointmentRepo: this.appointmentRepo, auditRepo: this.auditRepo });
+        }, this.assignmentRepo, {
+          appointmentRepo: this.appointmentRepo,
+          auditRepo: this.auditRepo,
+          workingHoursRepo: this.availabilityRepos?.workingHoursRepo,
+          unavailableBlockRepo: this.availabilityRepos?.unavailableBlockRepo,
+        });
       } catch (err) {
         // Atomicity guard: the pre-flight feasibility check above is subject
         // to a TOCTOU race; the authoritative protection is the DB EXCLUDE
@@ -494,27 +739,185 @@ export class CreateAppointmentExecutionHandler implements ExecutionHandler {
   }
 }
 
+const VALID_LINE_ITEM_CATEGORIES: readonly LineItemCategory[] = [
+  'labor',
+  'material',
+  'equipment',
+  'other',
+];
+
+const VALID_PRICING_SOURCES: readonly PricingSource[] = [
+  'catalog',
+  'ambiguous',
+  'uncatalogued',
+  'manual',
+];
+
+function isPricingSource(value: unknown): value is PricingSource {
+  return typeof value === 'string' && (VALID_PRICING_SOURCES as readonly string[]).includes(value);
+}
+
+/**
+ * Normalize AI-drafted line items (contracts.ts `lineItemSchema`:
+ * `{description, quantity, unitPrice? | unitPriceCents?, …}` — no `totalCents`,
+ * no `id`/`sortOrder`/`taxable`) into the billing engine's `LineItem` shape.
+ *
+ * Journey QA 2026-07-02 (bug 10): the executor previously blind-cast the
+ * payload to `LineItem[]`, so a drafted line without `totalCents` produced
+ * NaN totals and the approved proposal died in Postgres with
+ * `invalid input syntax for type integer: "NaN"`.
+ *
+ * - `totalCents` is derived from `quantity × unitPriceCents` when absent.
+ * - `unitPrice` (the estimate-draft emitter's field, integer cents) is
+ *   accepted as a fallback for `unitPriceCents`.
+ * - A line that cannot be priced/parsed is reported in `malformed` with a
+ *   human-readable reason — callers fail the execution with that reason
+ *   instead of silently dropping money lines or writing NaN.
+ * - Preserves catalog-grounding + tier metadata (pricingSource, groupKey,
+ *   groupLabel, isOptional, isDefaultSelected) from main's normalizeEstimateLineItems.
+ */
+export function normalizeDraftLineItems(raw: unknown[]): {
+  lineItems: LineItem[];
+  malformed: string[];
+} {
+  const lineItems: LineItem[] = [];
+  const malformed: string[] = [];
+
+  raw.forEach((entry, index) => {
+    const label = `Line ${index + 1}`;
+    if (typeof entry !== 'object' || entry === null) {
+      malformed.push(`${label} is not an object`);
+      return;
+    }
+    const li = entry as Record<string, unknown>;
+    const description = typeof li.description === 'string' ? li.description.trim() : '';
+    if (!description) {
+      malformed.push(`${label} is missing a description`);
+      return;
+    }
+    const quantity =
+      typeof li.quantity === 'number' && Number.isFinite(li.quantity) && li.quantity > 0
+        ? li.quantity
+        : undefined;
+    if (quantity === undefined) {
+      malformed.push(`${label} ("${description}") has no valid quantity`);
+      return;
+    }
+    const rawPrice =
+      typeof li.unitPriceCents === 'number' && Number.isFinite(li.unitPriceCents)
+        ? li.unitPriceCents
+        : typeof li.unitPrice === 'number' && Number.isFinite(li.unitPrice)
+          ? li.unitPrice
+          : undefined;
+    if (rawPrice === undefined || rawPrice < 0) {
+      malformed.push(`${label} ("${description}") has no usable unit price`);
+      return;
+    }
+    const unitPriceCents = Math.round(rawPrice);
+    const totalCents =
+      typeof li.totalCents === 'number' && Number.isFinite(li.totalCents)
+        ? Math.round(li.totalCents)
+        : Math.round(quantity * unitPriceCents);
+
+    const rawCategory = typeof li.category === 'string' ? li.category.toLowerCase() : '';
+
+    lineItems.push({
+      id: typeof li.id === 'string' && li.id.length > 0 ? li.id : uuidv4(),
+      description,
+      quantity,
+      unitPriceCents,
+      totalCents,
+      sortOrder: lineItems.length,
+      taxable: typeof li.taxable === 'boolean' ? li.taxable : true,
+      ...(VALID_LINE_ITEM_CATEGORIES.includes(rawCategory as LineItemCategory)
+        ? { category: rawCategory as LineItemCategory }
+        : {}),
+      ...(isPricingSource(li.pricingSource) ? { pricingSource: li.pricingSource } : {}),
+      ...(typeof li.groupKey === 'string' ? { groupKey: li.groupKey } : {}),
+      ...(typeof li.groupLabel === 'string' ? { groupLabel: li.groupLabel } : {}),
+      ...(typeof li.isOptional === 'boolean' ? { isOptional: li.isOptional } : {}),
+      ...(typeof li.isDefaultSelected === 'boolean'
+        ? { isDefaultSelected: li.isDefaultSelected }
+        : {}),
+      // EE-4 — forward the frozen catalog image snapshot; this whitelist would
+      // otherwise drop it between the approved proposal and the persisted line
+      // (the parity bug this unit exists to prevent).
+      ...(typeof li.imageFileId === 'string' ? { imageFileId: li.imageFileId } : {}),
+      // B7.5 — forward the catalog-grounded unit of measure. Same parity bug
+      // as imageFileId above: `applyCatalogPricing` stamps `unit` from the
+      // matched catalog item and `lineItemSchema` (contracts.ts) validates it,
+      // but this whitelist dropped it, so the unit vanished between the
+      // approved proposal and `estimate_line_items.unit`. Re-validated against
+      // the enum here rather than trusted as a bare string — the persisted
+      // column is plain TEXT with no CHECK, so this whitelist is the last
+      // gate before the row. DESCRIPTIVE ONLY: totalCents above is computed
+      // from quantity × unitPriceCents and never reads this.
+      ...(catalogUnitSchema.safeParse(li.unit).success
+        ? { unit: li.unit as CatalogUnitValue }
+        : {}),
+    });
+  });
+
+  return { lineItems, malformed };
+}
+
 export class DraftEstimateExecutionHandler implements ExecutionHandler {
   proposalType: ProposalType = 'draft_estimate';
 
   constructor(
     private readonly estimateRepo?: EstimateRepository,
     private readonly settingsRepo?: SettingsRepository,
+    // Journey QA 2026-07-02 (bug 10) — voice/assistant-drafted payloads carry a
+    // customerId but often no jobId (jobId is optional in
+    // draftEstimatePayloadSchema), while the estimate domain requires a job
+    // container. When these two repos are wired the handler opens a job for
+    // the customer (mirroring CreateJobExecutionHandler's location fallback)
+    // instead of refusing the canonical drafted payload.
+    private readonly jobRepo?: JobRepository,
+    private readonly locationRepo?: LocationRepository,
+    private readonly auditRepo?: AuditRepository,
+    // QA-2026-07-27 — tenant-scoped EXISTENCE check for the drafted
+    // customerId. See the guard in execute(); optional so the existing
+    // partially-wired unit fixtures keep their current behavior.
+    private readonly customerRepo?: CustomerRepository,
   ) {}
+
+  // WS3 — degrades to a synthetic-id passthrough (saves nothing) without both
+  // the estimate repo and the settings repo (estimate numbering). Boot fails
+  // when a pool is configured but this is false.
+  isFullyWired(): boolean {
+    return Boolean(this.estimateRepo) && Boolean(this.settingsRepo);
+  }
 
   async execute(proposal: Proposal, context: ExecutionContext): Promise<ExecutionResult> {
     const { payload } = proposal;
-    if (!payload.customerId || typeof payload.customerId !== 'string') {
-      return { success: false, error: 'Payload must include a valid customerId' };
-    }
-    if (!payload.jobId || typeof payload.jobId !== 'string') {
+    const customerId =
+      typeof payload.customerId === 'string' && payload.customerId.length > 0
+        ? payload.customerId
+        : undefined;
+    let jobId =
+      typeof payload.jobId === 'string' && payload.jobId.length > 0 ? payload.jobId : undefined;
+    if (!customerId && !jobId) {
       return {
         success: false,
-        error: 'Estimate requires a jobId — pick a job before drafting',
+        error:
+          'Estimate draft has neither a customerId nor a jobId — link a customer before approving',
       };
     }
     if (!Array.isArray(payload.lineItems) || payload.lineItems.length === 0) {
       return { success: false, error: 'Payload must include at least one lineItem' };
+    }
+    const { lineItems, malformed } = normalizeDraftLineItems(payload.lineItems);
+    if (malformed.length > 0) {
+      return {
+        success: false,
+        error: `Estimate draft has line items that can't be priced: ${malformed.join('; ')}`,
+      };
+    }
+    const validUntil =
+      typeof payload.validUntil === 'string' ? new Date(payload.validUntil) : undefined;
+    if (validUntil && isNaN(validUntil.getTime())) {
+      return { success: false, error: 'Payload contains an invalid validUntil date' };
     }
 
     if (proposal.resultEntityId) {
@@ -525,19 +928,74 @@ export class DraftEstimateExecutionHandler implements ExecutionHandler {
       return { success: true, resultEntityId: uuidv4() };
     }
 
-    try {
-      const estimateNumber = await getNextEstimateNumber(context.tenantId, this.settingsRepo);
-      const validUntil =
-        typeof payload.validUntil === 'string' ? new Date(payload.validUntil) : undefined;
-      if (validUntil && isNaN(validUntil.getTime())) {
-        return { success: false, error: 'Payload contains an invalid validUntil date' };
+    // QA-2026-07-27 — EXISTENCE check, not a format check. A drafted
+    // customerId can be perfectly well-formed and still reference nothing:
+    // the estimate prompt used to hand the model a `"customerId": "<uuid>"`
+    // template, and it invented ids — including the RFC 4122 EXAMPLE uuid
+    // 123e4567-e89b-12d3-a456-426614174000, which sails through
+    // `z.string().uuid()`. Left unchecked it either violates a foreign key
+    // deep inside createJob/createEstimate or, worse, resolves to nothing at
+    // all. So confirm the id names a real customer IN THIS TENANT before any
+    // write, and fail the proposal with a reason the operator can act on.
+    // Skipped when the repo isn't wired, matching this handler's existing
+    // degradation (unit fixtures construct it with estimate+settings only).
+    if (customerId && this.customerRepo) {
+      const customer = await this.customerRepo.findById(context.tenantId, customerId);
+      if (!customer) {
+        return {
+          success: false,
+          error:
+            `Estimate draft references customer '${customerId}', which does not exist in this ` +
+            `tenant — link a real customer before approving`,
+        };
       }
+    }
+
+    try {
+      // Estimates require a job container (estimate.ts validateEstimateInput).
+      // A drafted payload without one gets a job opened for the customer.
+      if (!jobId) {
+        if (!this.jobRepo || !this.locationRepo) {
+          return {
+            success: false,
+            error:
+              'Estimate draft has no jobId and job auto-creation is not configured — pick a job before approving',
+          };
+        }
+        const locations = await this.locationRepo.findByCustomer(context.tenantId, customerId!);
+        const location =
+          locations.find((loc) => loc.isPrimary && !loc.isArchived) ??
+          locations.find((loc) => !loc.isArchived);
+        if (!location) {
+          return {
+            success: false,
+            error: 'Customer has no service location — add one before approving this estimate',
+          };
+        }
+        const job = await createJob(
+          {
+            tenantId: context.tenantId,
+            customerId: customerId!,
+            locationId: location.id,
+            summary:
+              typeof payload.summary === 'string' && payload.summary.trim().length > 0
+                ? payload.summary.trim()
+                : proposal.summary || lineItems[0].description,
+            createdBy: context.executedBy,
+          },
+          this.jobRepo,
+          this.auditRepo,
+        );
+        jobId = job.id;
+      }
+
+      const estimateNumber = await getNextEstimateNumber(context.tenantId, this.settingsRepo);
 
       const input: CreateEstimateInput = {
         tenantId: context.tenantId,
-        jobId: payload.jobId,
+        jobId,
         estimateNumber,
-        lineItems: payload.lineItems as LineItem[],
+        lineItems,
         discountCents:
           typeof payload.discountCents === 'number' ? payload.discountCents : undefined,
         taxRateBps: typeof payload.taxRateBps === 'number' ? payload.taxRateBps : undefined,
@@ -552,7 +1010,7 @@ export class DraftEstimateExecutionHandler implements ExecutionHandler {
               : undefined,
         createdBy: context.executedBy,
       };
-      const estimate = await createEstimate(input, this.estimateRepo);
+      const estimate = await createEstimate(input, this.estimateRepo, this.auditRepo);
       return { success: true, resultEntityId: estimate.id };
     } catch (err) {
       return {
@@ -580,6 +1038,10 @@ export const ESTIMATE_NUDGE_COOLDOWN_MS = 48 * 60 * 60 * 1000;
 
 export class SendEstimateNudgeExecutionHandler implements ExecutionHandler {
   proposalType: ProposalType = 'send_estimate_nudge';
+  // Awaits dispatchEstimateNudge → sendService.sendEstimate (outbound estimate
+  // re-send via the send service) — external network I/O alongside the
+  // estimate reminder-bookkeeping DB write.
+  performsExternalIo = true;
 
   constructor(
     private readonly estimateRepo?: EstimateRepository,
@@ -588,6 +1050,12 @@ export class SendEstimateNudgeExecutionHandler implements ExecutionHandler {
     private readonly auditRepo?: AuditRepository,
     /** Injectable clock for deterministic cooldown tests. */
     private readonly now: () => Date = () => new Date(),
+    /**
+     * T4-F01 claim ledger pool, threaded into dispatchEstimateNudge's
+     * claim-before-send gate. Undefined/null in dev/test without a DB —
+     * the claim wrapper no-ops and the send proceeds directly.
+     */
+    private readonly pool?: Pool | null,
   ) {}
 
   async execute(proposal: Proposal, context: ExecutionContext): Promise<ExecutionResult> {
@@ -673,6 +1141,7 @@ export class SendEstimateNudgeExecutionHandler implements ExecutionHandler {
         {
           estimateRepo: this.estimateRepo,
           sendService: this.sendService,
+          pool: this.pool ?? null,
           ...(this.auditRepo ? { auditRepo: this.auditRepo } : {}),
         },
         {
@@ -699,6 +1168,12 @@ export class SendEstimateNudgeExecutionHandler implements ExecutionHandler {
 export function createExecutionHandlerRegistry(deps?: {
   customerRepo?: CustomerRepository;
   jobRepo?: JobRepository;
+  // B7 (money-loss fix) — required so update_job routes a status change through
+  // the governed transitionJobStatus (timeline entry + completedAt).
+  timelineRepo?: JobTimelineRepository;
+  // B7 — recompute the labor line from logged time before auto-invoicing on
+  // completion (mirrors the route's autoInvoiceDeps.timeEntryRepo).
+  timeEntryRepo?: TimeEntryRepository;
   locationRepo?: LocationRepository;
   appointmentRepo?: AppointmentRepository;
   assignmentRepo?: AssignmentRepository;
@@ -709,6 +1184,10 @@ export function createExecutionHandlerRegistry(deps?: {
   scheduleRepo?: InvoiceScheduleRepository;
   // P21-003 — batch_invoice fans out draft_invoice proposals via this repo.
   proposalRepo?: ProposalRepository;
+  // Collections cadence — dunning-event ledger. When wired, MANUAL (voice)
+  // send_payment_reminder proposals are deduped at execution time (72h
+  // cooldown + record-first idempotency). Absent → legacy send behavior.
+  dunningEventRepo?: DunningEventRepository;
   // Estimate edit history — when wired, voice update_estimate snapshots a
   // revision + edit delta, matching the authenticated edit path.
   docRevisionRepo?: DocumentRevisionRepository;
@@ -717,6 +1196,8 @@ export function createExecutionHandlerRegistry(deps?: {
   transactionalComms?: TransactionalCommsService;
   noteRepo?: NoteRepository;
   paymentRepo?: PaymentRepository;
+  /** P0-9 — record_payment execution deactivates a link its credit made stale. */
+  paymentLinkCleanup?: PaymentLinkCleanupDeps;
   invoiceDeliveryProvider?: InvoiceDeliveryProvider;
   estimateDeliveryProvider?: EstimateDeliveryProvider;
   analyticsRepo?: DispatchAnalyticsRepository;
@@ -744,7 +1225,54 @@ export function createExecutionHandlerRegistry(deps?: {
   // documented on the handler.
   sendService?: Pick<SendService, 'sendEstimate'>;
   dispatchRepo?: DispatchRepository;
+  // T4-F01 — claim-before-send pool for send_estimate_nudge's
+  // dispatchEstimateNudge call. Absent/null → the claim wrapper no-ops.
+  pool?: Pool | null;
+  // UB-A2 — create_standing_instruction inserts via the UB-A1 repo.
+  // Absent → the handler degrades to a synthetic-id passthrough.
+  standingInstructionRepo?: StandingInstructionRepository;
+  // WS20 — update_catalog_item writes the new SKU price via the catalog repo.
+  // Absent → the handler degrades to a synthetic passthrough.
+  catalogRepo?: CatalogItemRepository;
+  // Tenant entity aliases activate only through an owner-approved proposal.
+  // Absent fails closed inside the handler.
+  entityAliasRepo?: EntityAliasRepository;
+  // WS3 — voice update_customer consent parity. When wired, a spoken smsConsent
+  // toggle appends to the consent ledger (kind 'sms', source 'manual') in the
+  // SAME transaction as the customer update + audit event.
+  consentEventRepo?: ConsentEventRepository;
+  // B1.19 — onboarding_* execution handlers. packActivationRepo/templateRepo
+  // mirror the deps POST /api/onboarding/pack and POST /api/templates already
+  // take; packSeedDeps threads the same catalog+template seeder the pack
+  // route uses. Absent → the corresponding handler(s) report isFullyWired()
+  // false and refuse to execute rather than passthrough.
+  packActivationRepo?: PackActivationRepository;
+  /**
+   * B1.19 — target for an approved `onboarding_team_member`. Exists since
+   * migration 082; the handler was previously refusing on the false premise
+   * that no persistence target existed.
+   */
+  pendingInvitationRepo?: PendingInvitationRepository;
+  /**
+   * Clerk config for that invitation, same values POST /api/users/invitations
+   * gets. Without it the teammate never receives an email — the local row on
+   * its own is intent, not an invitation.
+   */
+  clerkInvitationConfig?: ClerkInvitationConfig;
+  templateRepo?: EstimateTemplateRepository;
+  packSeedDeps?: SeedPackDefaultsDeps;
+  // B1.18 — update_brand_voice writes through the SAME versioned path the
+  // Brand-Voice Configurator sheet uses (tenants/brand/brand-voice-service.ts
+  // updateBrandVoice). Absent → the handler reports isFullyWired() false and
+  // refuses to execute (WS3 convention) rather than a synthetic passthrough.
+  brandVoiceRepo?: BrandVoiceRepository;
 }): Map<ProposalType, ExecutionHandler> {
+  // WS3 — audit is a structural invariant for the consent/entity mutation
+  // handlers below (their constructors take a non-optional AuditRepository).
+  // Production always passes deps.auditRepo (app.ts); an in-memory fallback
+  // keeps `createExecutionHandlerRegistry({})` unit-test call sites valid
+  // without letting a handler skip auditing entirely.
+  const requiredAuditRepo: AuditRepository = deps?.auditRepo ?? new InMemoryAuditRepository();
   // §6 Time-to-Cash. Built once; passed to the handlers that call the
   // widened money-mutation domain functions (recordPayment, issueInvoice).
   // `logger` is intentionally omitted — the registry has no ambient logger
@@ -763,13 +1291,52 @@ export function createExecutionHandlerRegistry(deps?: {
       : undefined;
 
   const handlers: ExecutionHandler[] = [
-    new CreateCustomerVoiceExecutionHandler(deps?.customerRepo, deps?.auditRepo),
-    new UpdateCustomerExecutionHandler(deps?.customerRepo),
+    // `noteRepo` is the never-lose-it net: a spoken address that can't satisfy
+    // service_locations' NOT NULL columns is preserved as a pinned customer
+    // note instead of being discarded. Absent → the handler falls back to
+    // `customers.communication_notes`, which it writes atomically anyway.
+    new CreateCustomerVoiceExecutionHandler(
+      deps?.customerRepo,
+      deps?.auditRepo,
+      deps?.locationRepo,
+      deps?.noteRepo,
+    ),
+    new UpdateCustomerExecutionHandler(deps?.customerRepo, requiredAuditRepo, deps?.consentEventRepo),
     new CreateJobExecutionHandler(deps?.jobRepo, deps?.locationRepo, deps?.auditRepo),
-    new CreateAppointmentExecutionHandler(deps?.appointmentRepo, deps?.assignmentRepo, deps?.schedulingNotifier, deps?.auditRepo, deps?.jobRepo),
-    new CreateBookingExecutionHandler(deps?.appointmentRepo, deps?.auditRepo),
-    new DraftEstimateExecutionHandler(deps?.estimateRepo, deps?.settingsRepo),
-    new CreateInvoiceExecutionHandler(deps?.invoiceRepo, deps?.settingsRepo, deps?.auditRepo),
+    new CreateAppointmentExecutionHandler(
+      deps?.appointmentRepo,
+      deps?.assignmentRepo,
+      deps?.schedulingNotifier,
+      deps?.auditRepo,
+      deps?.jobRepo,
+      // feasibilityDeps carries the availability repos — the same wiring the
+      // reassign/crew/reschedule handlers already consume.
+      deps?.feasibilityDeps,
+      deps?.settingsRepo,
+      // SCH-02 — jobTitle-no-jobId auto-open-a-job fallback needs the same
+      // customer-location lookup CreateJobExecutionHandler/DraftEstimateExecutionHandler use.
+      deps?.locationRepo,
+    ),
+    new CreateBookingExecutionHandler(deps?.appointmentRepo, deps?.auditRepo, deps?.transactionalComms),
+    new DraftEstimateExecutionHandler(
+      deps?.estimateRepo,
+      deps?.settingsRepo,
+      deps?.jobRepo,
+      deps?.locationRepo,
+      deps?.auditRepo,
+      // QA-2026-07-27 — enables the tenant-scoped customer existence check.
+      deps?.customerRepo,
+    ),
+    new CreateInvoiceExecutionHandler(
+      deps?.invoiceRepo,
+      deps?.settingsRepo,
+      deps?.auditRepo,
+      deps?.jobRepo,
+      deps?.locationRepo,
+      // QA-2026-07-28 — enables the tenant-scoped customer existence check
+      // (the jobId check uses jobRepo, already threaded above).
+      deps?.customerRepo,
+    ),
     new CreateInvoiceScheduleExecutionHandler(deps?.scheduleRepo, deps?.invoiceRepo, deps?.settingsRepo, deps?.estimateRepo),
     new BatchInvoiceExecutionHandler(deps?.proposalRepo),
     new ReassignAppointmentExecutionHandler(deps?.appointmentRepo, deps?.assignmentRepo, deps?.analyticsRepo, deps?.feasibilityDeps, deps?.auditRepo),
@@ -793,7 +1360,7 @@ export function createExecutionHandlerRegistry(deps?: {
     // handler degrades to a synthetic-id passthrough when its dep is
     // absent (used by in-memory tests that don't exercise the
     // mutation path). Production wires the real deps in app.ts.
-    new AddNoteExecutionHandler(deps?.noteRepo),
+    new AddNoteExecutionHandler(deps?.noteRepo, requiredAuditRepo),
     new SendInvoiceExecutionHandler(deps?.invoiceDeliveryProvider),
     new SendEstimateExecutionHandler(deps?.estimateDeliveryProvider),
     // RV-086 — comms-class nudge for aging sent estimates; 48h cooldown
@@ -803,6 +1370,8 @@ export function createExecutionHandlerRegistry(deps?: {
       deps?.sendService,
       deps?.dispatchRepo,
       deps?.auditRepo,
+      undefined,
+      deps?.pool,
     ),
     new RecordPaymentExecutionHandler(
       deps?.paymentRepo,
@@ -810,10 +1379,11 @@ export function createExecutionHandlerRegistry(deps?: {
       moneyStateDeps,
       deps?.transactionalComms,
       deps?.auditRepo,
+      deps?.paymentLinkCleanup,
     ),
     new LogExpenseExecutionHandler(deps?.expenseRepo, deps?.auditRepo),
-    new ConvertLeadExecutionHandler(deps?.leadRepo, deps?.customerRepo, deps?.auditRepo),
-    new ConfirmAppointmentExecutionHandler(deps?.appointmentRepo),
+    new ConvertLeadExecutionHandler(deps?.leadRepo, deps?.customerRepo, deps?.auditRepo, deps?.locationRepo),
+    new ConfirmAppointmentExecutionHandler(deps?.appointmentRepo, requiredAuditRepo),
     new MarkLeadLostExecutionHandler(deps?.leadRepo, deps?.auditRepo),
     new AddServiceLocationExecutionHandler(deps?.locationRepo, deps?.auditRepo),
     new LogTimeEntryExecutionHandler(deps?.timeEntryService),
@@ -823,7 +1393,7 @@ export function createExecutionHandlerRegistry(deps?: {
       deps?.jobRepo,
       deps?.customerRepo,
     ),
-    new RequestFeedbackExecutionHandler(deps?.feedbackRepo),
+    new RequestFeedbackExecutionHandler(deps?.feedbackRepo, requiredAuditRepo),
     // P7-026 PR c — review-response handler. Wired with optional deps;
     // see ReviewResponseExecutionHandler constructor for per-dep
     // degraded behavior. Action class 'comms' guarantees the proposal
@@ -853,7 +1423,53 @@ export function createExecutionHandlerRegistry(deps?: {
     new SendPaymentReminderExecutionHandler(
       deps?.transactionalComms,
       deps?.auditRepo,
+      deps?.dunningEventRepo,
     ),
+    // UB-A2 — create_standing_instruction: inserts the approved directive via
+    // the UB-A1 domain service (500-char cap, scope validation, 20-active
+    // cap, standing_instruction.created audit). Capture-class, but the voice
+    // task never passes a trust tier, so it only ever runs after a human tap.
+    new CreateStandingInstructionExecutionHandler(
+      deps?.standingInstructionRepo,
+      deps?.auditRepo,
+    ),
+    // WS20 — update_catalog_item: applies the owner-ratified catalog price via
+    // the catalog domain fn (which emits catalog_item.updated). Capture-class,
+    // but the correction loop creates it with no trust tier, so it only ever
+    // runs after a human tap.
+    new UpdateCatalogItemExecutionHandler(deps?.catalogRepo, deps?.auditRepo),
+    new EntityAliasExecutionHandler(deps?.entityAliasRepo),
+    // B1.19 — conversational onboarding execution handlers. Each writes
+    // through the SAME shared function the form wizard's routes use
+    // (see proposals/execution/onboarding-handlers.ts doc comment).
+    new OnboardingTenantSettingsExecutionHandler(
+      deps?.settingsRepo,
+      deps?.packActivationRepo,
+      requiredAuditRepo,
+      deps?.packSeedDeps,
+      deps?.pool ?? undefined,
+    ),
+    new OnboardingServiceCategoryExecutionHandler(
+      deps?.settingsRepo,
+      deps?.packActivationRepo,
+      requiredAuditRepo,
+      deps?.packSeedDeps,
+      deps?.pool ?? undefined,
+    ),
+    new OnboardingEstimateTemplateExecutionHandler(deps?.templateRepo, requiredAuditRepo),
+    // No repo dep: this handler never persists (see its class doc) —
+    // always reports isFullyWired() === false.
+    new OnboardingTeamMemberExecutionHandler(
+      deps?.pendingInvitationRepo,
+      requiredAuditRepo,
+      deps?.clerkInvitationConfig,
+    ),
+    new OnboardingScheduleExecutionHandler(deps?.settingsRepo, requiredAuditRepo),
+    // B1.18 — update_brand_voice: writes through the SAME versioned
+    // read→cool-down-check→merge→bump path the Brand-Voice Configurator
+    // sheet uses (never re-implemented here — see brand-voice-handler.ts).
+    // manual action class, so it only ever runs after an explicit owner tap.
+    new UpdateBrandVoiceExecutionHandler(deps?.brandVoiceRepo, requiredAuditRepo),
   ];
 
   // Handlers that mutate existing entities take a repo dep. Registered
@@ -889,6 +1505,36 @@ export function createExecutionHandlerRegistry(deps?: {
       // Fail-closed inside the handler when the repo is absent.
       deps.jobRepo,
     ));
+  }
+  // B7 — update_job mutates an EXISTING job; only registered when the job
+  // repo is wired (mirrors update_estimate/update_invoice above — no
+  // synthetic-id passthrough for an edit to a real, already-created entity).
+  if (deps?.jobRepo) {
+    // Completion side effects (auto-invoice + milestone minting) fire when a
+    // voice-approved update_job marks a job completed — the SAME effects the
+    // route runs. Built only when the invoice/estimate/proposal/settings deps
+    // are present; scheduleRepo/timeEntryRepo are optional (milestone minting /
+    // labor-from-time-entries degrade off when absent).
+    const jobCompletionDeps: JobCompletionEffectsDeps | undefined =
+      deps.estimateRepo && deps.invoiceRepo && deps.proposalRepo && deps.settingsRepo
+        ? {
+            estimateRepo: deps.estimateRepo,
+            invoiceRepo: deps.invoiceRepo,
+            proposalRepo: deps.proposalRepo,
+            settingsRepo: deps.settingsRepo,
+            ...(deps.auditRepo ? { auditRepo: deps.auditRepo } : {}),
+            ...(deps.scheduleRepo ? { scheduleRepo: deps.scheduleRepo } : {}),
+            ...(deps.timeEntryRepo ? { timeEntryRepo: deps.timeEntryRepo } : {}),
+          }
+        : undefined;
+    handlers.push(
+      new UpdateJobExecutionHandler(
+        deps.jobRepo,
+        deps.auditRepo,
+        deps.timelineRepo,
+        jobCompletionDeps,
+      ),
+    );
   }
 
   const registry = new Map<ProposalType, ExecutionHandler>();

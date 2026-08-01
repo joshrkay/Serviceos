@@ -18,7 +18,6 @@
  * - No real-time / streaming work happens here. That's P8-012.
  */
 
-import { v4 as uuidv4 } from 'uuid';
 import type { Pool } from 'pg';
 import {
   classifyIntent,
@@ -43,7 +42,11 @@ import { lookupEstimates } from '../ai/skills/lookup-estimates';
 import { lookupLeads } from '../ai/skills/lookup-leads';
 import { lookupRevenue } from '../ai/skills/lookup-revenue';
 import { lookupCatalog } from '../ai/skills/lookup-catalog';
-import { lookupAvailability } from '../ai/skills/lookup-availability';
+import {
+  lookupAvailability,
+  lookupBookableAvailability,
+} from '../ai/skills/lookup-availability';
+import { schedulingConfigFromSettings } from '../scheduling/booking-availability';
 import { lookupDayOverview } from '../ai/skills/lookup-day-overview';
 import { lookupDigest } from '../ai/skills/lookup-digest';
 import { lookupPendingItems } from '../ai/skills/lookup-pending-items';
@@ -56,6 +59,8 @@ import type { InvoiceRepository } from '../invoices/invoice';
 import type { DunningConfigRepository } from '../invoices/dunning-config';
 import type { AgreementRepository } from '../agreements/agreement';
 import type { CustomerRepository } from '../customers/customer';
+import type { TagRepository } from '../customers/tag';
+import { isCustomerDuplicateLoader } from '../customers/dedup';
 import type { EstimateRepository } from '../estimates/estimate';
 import type { DailyDigestRepository } from '../digest/digest-service';
 import type { LookupEventService } from '../lookup-events/lookup-event-service';
@@ -64,6 +69,9 @@ import { discloseRecording } from '../ai/skills/disclose-recording';
 import { t, type Language } from '../ai/i18n/i18n';
 import { identifyCaller } from '../ai/skills/identify-caller';
 import { findOrCreateLeadByPhone } from '../ai/skills/find-or-create-lead';
+import type { ConversationRepository } from '../conversations/conversation-service';
+import { logInboundCallOnCustomerTimeline } from './inbound-call-log';
+import { notifyOwner } from '../notifications/owner-notifications-instance';
 import { assembleB2bAccountContext } from '../ai/agents/customer-calling/b2b-account-context';
 import { confirmIntent } from '../ai/skills/confirm-intent';
 import { summarizeSession } from '../ai/skills/summarize-session';
@@ -87,7 +95,7 @@ import { extractPriorTurns } from '../ai/agents/customer-calling/transcript-turn
 // that got reverted in a subsequent merge to main.
 import { deriveCallOutcome as deriveCallOutcomeFromState } from '../ai/agents/customer-calling/outcome-mapper';
 import type { VoiceSessionRepository } from '../voice/voice-session';
-import type { ProposalRepository, ProposalType } from '../proposals/proposal';
+import type { ProposalRepository } from '../proposals/proposal';
 import { createProposal as buildProposal } from '../proposals/proposal';
 import type { LeadRepository } from '../leads/lead';
 import type { AuditRepository } from '../audit/audit';
@@ -105,7 +113,9 @@ import type { WhisperCache } from './whisper-cache';
 import {
   createVoiceTurnProcessor,
   appendAgentTts,
+  preloadSessionCatalog,
   type VoiceTurnProcessor,
+  type VoiceTurnProcessorDeps,
 } from '../ai/voice-turn';
 import type { CustomerNegotiationContextProvider } from '../customers/customer-negotiation-context';
 import type { CurrentQuoteResolver } from '../conversations/negotiation/current-quote-resolver';
@@ -113,7 +123,17 @@ import type { RepairTemplate } from '../verticals/registry';
 import { detectFrustration } from '../ai/agents/customer-calling/frustration-detector';
 import { classifyCallerSafety } from '../ai/agents/customer-calling/emergency-tier';
 import { detectPromptInjection } from '../ai/agents/customer-calling/untrusted-content';
-import { renderTtsText, type SessionLanguage } from '../ai/agents/customer-calling/tts-copy';
+import {
+  renderTtsText,
+  LOW_STT_CONFIDENCE_REPROMPT_COPY,
+  SPEECH_TURN_FAILURE_ESCALATION_COPY,
+  type SessionLanguage,
+} from '../ai/agents/customer-calling/tts-copy';
+import {
+  MIN_STT_CONFIDENCE,
+  MAX_CONSECUTIVE_LOW_CONFIDENCE_TURNS,
+} from './media-streams/mediastream-adapter';
+import { recordVoiceError } from '../analytics/posthog';
 import {
   detectRecordingObjection,
   RECORDING_OBJECTION_ACK,
@@ -123,10 +143,11 @@ import {
   type ConsentEventRepository,
 } from '../compliance/consent-events';
 import type { RecordingControl } from './recording-control';
-import { armEmergencyPageLadder, resolveEmergencyPageLadder } from './emergency-page-retry';
+import { armEmergencyPageLadder } from './emergency-page-retry';
+import type { Queue } from '../queues/queue';
 import type { CallMeBackRepository } from '../voice/call-me-back/call-me-back';
-import type { DeviceTokenService } from '../devices/device-token';
-import type { ExpoPushSender } from '../notifications/expo-push-sender';
+import type { DeviceTokenRepository } from '../push/device-token-service';
+import type { PushDeliveryProvider } from '../notifications/push-delivery-provider';
 import type {
   DroppedCallRecoveryRepository,
   DroppedCallScheduler,
@@ -135,8 +156,10 @@ import { buildRecoveryContext } from '../sms/recovery/scheduler';
 import type { SettingsRepository } from '../settings/settings';
 import type { UserRepository } from '../users/user';
 import { isApproverPhone } from '../proposals/approver-identity';
+import type { EntityResolver } from '../ai/resolution/entity-resolver';
 import type { ProposalSmsEventRepository } from '../proposals/sms/sms-event';
 import type { OneTapFallbackDeps } from '../ai/tasks/proposal-approval-task';
+import { TenantGlossaryProvider } from '../voice/tenant-glossary-provider';
 
 const logger = createLogger({
   service: 'telephony.twilio-adapter',
@@ -173,6 +196,13 @@ export interface TwilioAdapterDeps {
    * unknown callers are deduped by normalized phone.
    */
   leadRepo?: LeadRepository;
+  /**
+   * P0 voice-safety — tenant-scoped entity resolver, spread straight into
+   * `createVoiceTurnProcessor` by the constructor below. Declared here (rather
+   * than relying on the untyped runtime spread from app.ts) so the Gather
+   * path's `resolveTurnEntities` call is type-checked against a real dep.
+   */
+  entityResolver?: EntityResolver;
   /** Used as actorId on proposal/audit rows when none is in scope. */
   systemActorId?: string;
   /** Business name used in recording disclosure copy. */
@@ -230,6 +260,15 @@ export interface TwilioAdapterDeps {
   agreementRepo?: AgreementRepository;
   /** VQ-006: read-only customer + estimate lookups. */
   customerRepo?: CustomerRepository;
+  /** Customer tags for escalation CRM hydration (handoff context pack). */
+  tagRepo?: TagRepository;
+  /**
+   * When wired, an identified inbound caller's call is logged on their
+   * conversation timeline (channel=call, direction=inbound) — the inbound
+   * mirror of the outbound click-to-call log, so the customer's history shows
+   * both directions. Best-effort: a logging failure never fails the call.
+   */
+  conversationRepo?: ConversationRepository;
   /**
    * N-003 (P2-036) — threaded through to the voice-turn processor so a live-call
    * negotiation callback can carry the caller's LTV/recency.
@@ -326,6 +365,18 @@ export interface TwilioAdapterDeps {
    */
   repairTemplatesResolver?: (tenantId: string) => Promise<ReadonlyArray<RepairTemplate>>;
   /**
+   * A2 — resolves the `<Gather hints="...">` boost terms for a tenant
+   * (e.g. vertical `sttKeywords` in addition to the tenant glossary).
+   * Optional override: when unset, the adapter falls back to a
+   * `TenantGlossaryProvider` built from `catalogRepo`/`customerRepo`/
+   * `userRepo` (below) when all three are wired, so Gather still gets
+   * tenant-specific hints (catalog items, customer/technician names)
+   * without requiring this resolver. Vertical `sttKeywords` are not
+   * reachable from this adapter today (no vertical-pack dep here) — a
+   * caller can wire this resolver to add them; see A2 follow-up notes.
+   */
+  sttHintsResolver?: (tenantId: string) => Promise<ReadonlyArray<string>>;
+  /**
    * F8 — per-tenant escalation settings repository. When wired, the
    * processor loads channel preferences before each `escalateToHuman`
    * call. Optional so existing test fixtures continue to work.
@@ -365,11 +416,20 @@ export interface TwilioAdapterDeps {
   callMeBackRepo?: CallMeBackRepository;
   /**
    * ANS-001 — E1 push fan-out. Pass-through to the voice-turn processor:
-   * the tenant's registered mobile devices + the Expo transport. Optional;
-   * without them the E1 alert is SMS-only.
+   * the tenant's registered mobile devices + the push transport (main's
+   * Expo-backed PushDeliveryProvider). Optional; without them the E1 alert
+   * is SMS-only.
    */
-  deviceTokenRepo?: Pick<DeviceTokenService, 'listByTenant'>;
-  expoPushSender?: ExpoPushSender;
+  deviceTokenRepo?: Pick<DeviceTokenRepository, 'listByTenant'>;
+  pushDeliveryProvider?: PushDeliveryProvider;
+  /**
+   * UC-5a — the shared durable queue (PgQueue in production) backing the
+   * emergency page-retry ladder. Each ladder step is a delayed job, so a
+   * restart or a replica race can neither drop nor double-fire a page.
+   * Optional for test fixtures; without it (or without a deliveryProvider)
+   * the ladder is not armed.
+   */
+  queue?: Queue;
   /**
    * RV-115 — durable dropped-call recovery scheduler. When wired, every
    * telephony termination runs through it with the FSM context snapshot;
@@ -388,6 +448,22 @@ export interface TwilioAdapterDeps {
    * recording itself can't be paused — logged loudly).
    */
   recordingControl?: RecordingControl;
+  /**
+   * WS18b — append-only consent ledger for the on-call SMS consent capture
+   * (grant kind:'sms', source:'voice' + customers.sms_consent flip).
+   * Processor-only pass-through: the adapter never reads this itself — it
+   * flows through the `...this.deps` spread into createVoiceTurnProcessor.
+   * Distinct from `consentEvents` above (RV-130 recording consent).
+   */
+  consentEventRepo?: ConsentEventRepository;
+  /**
+   * WS18d (D-018) — the sanctioned on-call close wiring (production
+   * executor, platform kill switches, owner UNDO/one-tap SMS). Processor-
+   * only pass-through: consumed exclusively by createVoiceTurnProcessor's
+   * close-chain gating; typed by reference so the adapter surface can never
+   * drift from VoiceTurnProcessorDeps.
+   */
+  autonomousClose?: VoiceTurnProcessorDeps['autonomousClose'];
 }
 
 /**
@@ -435,37 +511,6 @@ export function buildTelephonyGreeting(
   return assembled.endsWith('?') ? assembled : `${assembled} ${t('greeting.cta', language)}`;
 }
 
-function intentToProposalType(intent: string | undefined): ProposalType {
-  switch (intent) {
-    case 'create_invoice': return 'draft_invoice';
-    case 'update_invoice': return 'update_invoice';
-    case 'issue_invoice': return 'issue_invoice';
-    case 'send_invoice': return 'send_invoice';
-    case 'send_estimate': return 'send_estimate';
-    case 'record_payment': return 'record_payment';
-    case 'draft_estimate': return 'draft_estimate';
-    case 'update_estimate': return 'update_estimate';
-    case 'create_appointment': return 'create_appointment';
-    case 'reschedule_appointment': return 'reschedule_appointment';
-    case 'cancel_appointment': return 'cancel_appointment';
-    case 'reassign_appointment': return 'reassign_appointment';
-    case 'create_customer': return 'create_customer';
-    case 'create_job': return 'create_job';
-    case 'add_note': return 'add_note';
-    case 'emergency_dispatch': return 'emergency_dispatch';
-    case 'update_customer': return 'update_customer';
-    case 'log_expense': return 'log_expense';
-    case 'convert_lead': return 'convert_lead';
-    case 'confirm_appointment': return 'confirm_appointment';
-    case 'mark_lead_lost': return 'mark_lead_lost';
-    case 'add_service_location': return 'add_service_location';
-    case 'log_time_entry': return 'log_time_entry';
-    case 'notify_delay': return 'notify_delay';
-    case 'request_feedback': return 'request_feedback';
-    default: return 'voice_clarification';
-  }
-}
-
 // ─── XML helpers ─────────────────────────────────────────────────────────────
 
 /**
@@ -488,6 +533,37 @@ export function isBlockedCallerId(from: string | undefined): boolean {
     v === 'anonymous' ||
     v === 'unavailable'
   );
+}
+
+/**
+ * Fire exactly one `incoming_call` owner push for an inbound call (best-effort).
+ *
+ * Known caller → deep-links to their customer record with their name; an
+ * unknown caller has only a CRM lead (a separate id space with no mobile detail
+ * route), so the push omits the customer id and the client routes to the
+ * customers list (never a dead `/customers/<leadId>` link). Blocked/withheld
+ * caller-id degrades to a generic "New caller". Always fires — an inbound call
+ * is always worth surfacing. Never throws — `notifyOwner` is itself
+ * failure-isolated; this wrapper only assembles the typed context.
+ */
+export async function notifyOwnerOfIncomingCall(opts: {
+  tenantId: string;
+  /** Resolved customer id (known caller only). Omitted for unknown callers. */
+  customerId?: string;
+  /** Known caller's display name, when matched. */
+  customerName?: string;
+  /** Raw caller phone (Twilio `From`); may be blocked/withheld. */
+  fromPhone?: string;
+}): Promise<void> {
+  const callerLabel = opts.customerName?.trim()
+    ? opts.customerName.trim()
+    : isBlockedCallerId(opts.fromPhone) || !opts.fromPhone?.trim()
+      ? 'New caller'
+      : `New caller: ${opts.fromPhone.trim()}`;
+  await notifyOwner(opts.tenantId, 'incoming_call', {
+    ...(opts.customerId ? { customerId: opts.customerId } : {}),
+    callerLabel,
+  });
 }
 
 /** Escape a string for safe inclusion in TwiML. */
@@ -526,6 +602,16 @@ interface BuildTwimlOpts {
    * `language`.
    */
   voiceOverride?: string;
+  /**
+   * A2 — STT boost terms (vertical + tenant glossary) rendered as
+   * `<Gather hints="term1,term2,...">`. Twilio's built-in recognizer uses
+   * `hints` as a single comma-separated phrase list (unlike Deepgram's
+   * repeated `keyterm=`/`keywords=` params) — a plain term list works for
+   * both languages so no per-language filtering is applied here. Omitted
+   * entirely when empty/absent, same fail-open posture as the rest of
+   * this builder.
+   */
+  hints?: ReadonlyArray<string>;
 }
 
 /**
@@ -540,6 +626,10 @@ const GATHER_VOICE_EN = 'Polly.Joanna';
 const GATHER_VOICE_ES = 'Polly.Mia-Neural';
 const GATHER_LOCALE_EN = 'en-US';
 const GATHER_LOCALE_ES = 'es-US';
+/** A2 — mirrors VerticalTerminologyProvider/TenantGlossaryProvider's caps; protects Gather URL/TwiML size. */
+const GATHER_HINTS_MAX = 50;
+/** Twilio speech recognition tuned for phone-quality audio (vs. the default model). */
+const GATHER_SPEECH_MODEL = 'phone_call';
 
 /**
  * Translate FSM side effects into a TwiML string.
@@ -563,19 +653,6 @@ export function buildTwiML(
   const parts: string[] = [];
   let ended = false;
 
-  // P8-014: when present, prepend a <Start><Record/></Start> block so
-  // Twilio records the entire call asynchronously and POSTs metadata to
-  // /api/telephony/recording on completion. Only emitted on the initial
-  // inbound TwiML — subsequent <Gather> turns must NOT re-emit it (would
-  // start a second concurrent recording).
-  if (opts.recordingStatusCallback) {
-    parts.push(
-      `<Start><Record recordingStatusCallback="${xmlEscape(
-        opts.recordingStatusCallback,
-      )}" recordingStatusCallbackMethod="POST"/></Start>`,
-    );
-  }
-
   for (const fx of sideEffects) {
     if (fx.type === 'tts_play') {
       const text = typeof fx.payload.text === 'string' ? fx.payload.text : '';
@@ -590,7 +667,9 @@ export function buildTwiML(
         opts.voiceOverride ?? (opts.language === 'es' ? GATHER_VOICE_ES : GATHER_VOICE_EN);
       parts.push(`<Say voice="${xmlEscape(voice)}">${xmlEscape(sayText)}</Say>`);
     } else if (fx.type === 'end_session') {
-      parts.push('<Hangup/>');
+      // The <Hangup/> is appended below; the recording block is spliced in
+      // right after the first <Say> (see the comms C5 block), so a
+      // recording-notice <Say> always precedes any <Start><Record>.
       ended = true;
     } else if (fx.type === 'notify_oncall') {
       // P8-013: the adapter's `handleNotifyOncall` consumes this side
@@ -605,16 +684,45 @@ export function buildTwiML(
     // Media Streams is active).
   }
 
-  if (!ended) {
+  if (ended) {
+    parts.push('<Hangup/>');
+  } else {
     // Loop back to <Gather> so the caller can speak the next turn.
     // P11-002: thread the session language to Twilio's built-in STT so
     // Spanish callers don't get transcribed against the English model.
     const gatherLang = opts.language === 'es' ? GATHER_LOCALE_ES : GATHER_LOCALE_EN;
+    // A2 — hints= biases Twilio's recognizer toward tenant/vertical terms,
+    // same intent as Deepgram's keyterm boosting on the other transports.
+    // Capped defensively even though callers are expected to cap upstream.
+    const hints = opts.hints && opts.hints.length > 0 ? opts.hints.slice(0, GATHER_HINTS_MAX) : undefined;
+    const hintsAttr = hints ? ` hints="${xmlEscape(hints.join(','))}"` : '';
+    // T2-F03: actionOnEmptyResult makes a no-speech timeout POST back to the
+    // action URL with an empty SpeechResult (reaching the bounded silence
+    // ladder) instead of falling through the document and hanging up.
     parts.push(
-      `<Gather input="speech" speechTimeout="auto" language="${gatherLang}" action="${xmlEscape(
+      `<Gather input="speech" speechTimeout="auto" language="${gatherLang}" speechModel="${GATHER_SPEECH_MODEL}"${hintsAttr} action="${xmlEscape(
         opts.gatherActionUrl
-      )}" method="POST"/>`
+      )}" method="POST" actionOnEmptyResult="true"/>`
     );
+  }
+
+  // P8-014 + comms C5: the async <Start><Record/></Start> block POSTs
+  // metadata to /api/telephony/recording on completion. Only emitted on the
+  // initial inbound TwiML — subsequent <Gather> turns must NOT re-emit it
+  // (would start a second concurrent recording). Placement is a consent
+  // requirement, not a style choice: the recording disclosure is merged
+  // into the first <Say> (buildTelephonyGreeting), and <Start> begins
+  // capture immediately while later verbs execute — so the record block
+  // goes AFTER the first <Say>, guaranteeing the announcement is spoken
+  // before any audio is captured. Caller ASR (<Gather>) already follows
+  // the greeting.
+  if (opts.recordingStatusCallback) {
+    const recordBlock = `<Start><Record recordingStatusCallback="${xmlEscape(
+      opts.recordingStatusCallback,
+    )}" recordingStatusCallbackMethod="POST"/></Start>`;
+    const firstSay = parts.findIndex((p) => p.startsWith('<Say'));
+    if (firstSay >= 0) parts.splice(firstSay + 1, 0, recordBlock);
+    else parts.unshift(recordBlock);
   }
 
   return `<?xml version="1.0" encoding="UTF-8"?><Response>${parts.join('')}</Response>`;
@@ -684,6 +792,82 @@ export class TwilioGatherAdapter {
    * "missing" (never recorded) from "explicitly blocked".
    */
   private readonly callerIdBySession = new Map<string, string>();
+
+  /**
+   * RV-130 / C5 — pending implicit recording-consent ledger writes, keyed by
+   * sessionId. `bootstrapCallEstablishment` generates the disclosure copy but
+   * no longer ledgers it on the spot: the ledger's `recording/implicit` means
+   * "the disclosure PLAYED and the caller stayed on the line", which is not
+   * yet true when the copy is generated. Each transport commits at its own
+   * point of evidence via {@link commitRecordingConsent} — so a fail-closed
+   * hang-up (truncated / non-PCM / zero-length / filler-only disclosure)
+   * leaves NO row claiming a caller consented to a call we terminated
+   * precisely because they were never told.
+   *
+   * Lifetime is bounded to LIVE sessions, not to commits. Entries are taken
+   * on commit, but several paths deliberately never commit — the `<Dial>`
+   * transfer short-circuit (no disclosure rendered, no recording armed) and
+   * every Media Streams fail-closed branch (the whole point is that no row is
+   * written). Those would otherwise park a closure forever, so
+   * {@link sweepPendingConsentCommits} drops entries whose session the store
+   * no longer has. A TTS outage or a run of transfer-at-bootstrap calls
+   * therefore cannot grow this map without bound.
+   */
+  private readonly pendingConsentCommit = new Map<string, () => Promise<void>>();
+
+  /**
+   * Drop parked consent thunks for sessions the store has already reaped.
+   * Runs on each park, so the map stays bounded by concurrent live sessions —
+   * the same lifetime the store itself enforces — without needing a hook on
+   * every close path (`finalizeTerminatedSession` early-returns on an
+   * already-stamped outcome, so it is not a reliable single choke point).
+   */
+  private sweepPendingConsentCommits(): void {
+    for (const sessionId of this.pendingConsentCommit.keys()) {
+      if (!this.deps.store.get(sessionId)) {
+        this.pendingConsentCommit.delete(sessionId);
+      }
+    }
+  }
+
+  /**
+   * Test-only view of the parked-thunk count, so the leak regression can be
+   * asserted directly rather than inferred.
+   */
+  get _pendingConsentCommitSize(): number {
+    return this.pendingConsentCommit.size;
+  }
+
+  /**
+   * A3 — consecutive-low-Gather-`Confidence`-turn streak, keyed by
+   * sessionId. Each `/gather` POST is a stateless HTTP request, so this
+   * can't live on the request; `VoiceSession` (the DB-backed session
+   * object) also has no field for it, so — same lifetime/leak posture as
+   * {@link callerIdBySession} above — it's tracked in-memory on the adapter.
+   * Bumped when a Gather turn's `Confidence` is below
+   * {@link MIN_STT_CONFIDENCE} — or when the turn is an empty
+   * `SpeechResult` (silence via `actionOnEmptyResult`; T2-F03) — and
+   * cleared by any turn that clears the gate (high confidence OR
+   * confidence absent). Reaching
+   * {@link MAX_CONSECUTIVE_LOW_CONFIDENCE_TURNS} hands the caller off
+   * instead of reprompting again (see `maybeHandleLowSttConfidenceGather`).
+   * Limitation: this streak is process-local — a mid-call replica
+   * restart/redeploy silently resets it to 0. Acceptable for a short,
+   * bounded reprompt budget (2 turns) rather than a durable guarantee.
+   */
+  private readonly lowConfidenceGatherStreak = new Map<string, number>();
+
+  /**
+   * A2 — lazily-constructed fallback source for `<Gather hints="...">`
+   * when `deps.sttHintsResolver` is not wired. Built once (not per-call)
+   * from `catalogRepo`/`customerRepo`/`userRepo` — the same three repos
+   * `TenantGlossaryProvider` (A1) already reads for the transcription-
+   * correction pass — so Gather gets tenant-specific hints (catalog item
+   * names, customer/technician names) purely from deps this adapter
+   * already carries. `undefined` (checked, never rebuilt) when any of
+   * the three repos is missing.
+   */
+  private glossaryProvider: TenantGlossaryProvider | undefined | null = null;
 
   /**
    * Closure-captured agent loop (P38-FOLLOWUP). Owns `speechTurn`,
@@ -821,15 +1005,24 @@ export class TwilioGatherAdapter {
    */
   private async resolveTenantLanguage(
     tenantId: string,
+    /**
+     * UB-C1 — a language already pinned on the session by the media-stream
+     * adapter's initialLanguageResolver (customer preferredLanguage +
+     * supported_languages gate, resolved BEFORE Deepgram opened). When set
+     * it wins over the tenant default so the greeting/TTS voice match the
+     * language the STT socket is actually listening in.
+     */
+    pinned?: Language,
   ): Promise<{ language: Language; ttsVoice?: string; supportedLanguages?: Language[] }> {
-    if (!this.deps.settingsRepo) return { language: 'en' };
+    if (!this.deps.settingsRepo) return { language: pinned ?? 'en' };
     try {
       const settings = await this.deps.settingsRepo.findByTenant(tenantId);
       // The tenant's explicit default_language is always honored — it IS the
       // tenant's opt-in. The supported_languages stack gates CALLER auto-
       // detection (a Spanish-speaking caller on an English-only tenant), not
       // the tenant's own configured greeting language.
-      const language: Language = settings?.defaultLanguage === 'es' ? 'es' : 'en';
+      const language: Language =
+        pinned ?? (settings?.defaultLanguage === 'es' ? 'es' : 'en');
       const ttsVoice =
         (language === 'es' ? settings?.ttsVoiceEs : settings?.ttsVoiceEn) ?? undefined;
       // Thread the opt-in stack for the auto-detect gate, always including the
@@ -840,7 +1033,7 @@ export class TwilioGatherAdapter {
         : [...baseStack, language];
       return { language, ttsVoice, supportedLanguages };
     } catch {
-      return { language: 'en' };
+      return { language: pinned ?? 'en' };
     }
   }
 
@@ -866,33 +1059,17 @@ export class TwilioGatherAdapter {
     from: string;
     tenantId: string;
   }): Promise<string> {
-    const existing = this.deps.store.findByCallSid(opts.callSid);
-    if (existing && existing.tenantId === opts.tenantId) {
-      return this.buildStreamTwiML({ sessionId: existing.id, callSid: opts.callSid });
-    }
-    const repairTemplates = this.deps.repairTemplatesResolver
-      ? await this.deps.repairTemplatesResolver(opts.tenantId).catch(() => [])
-      : [];
-    const escalationTriggers = await this.resolveEscalationTriggers(opts.tenantId);
-    const extendedIntentsFlag = await this.resolveExtendedIntents(opts.tenantId);
-    // RV-070 — owner-line recognition happens at session establishment:
-    // recognized owner line (caller-ID match; see approver-identity.ts).
-    const ownerSession = await this.resolveOwnerSession(opts.tenantId, opts.from);
-    // Live-call customer complaint handling is unwired today; revisit this AND
-    // when the FSM complaint path ships.
-    const extendedIntents = extendedIntentsFlag && ownerSession;
-    const session = this.deps.store.create(opts.tenantId, 'telephony', {
+    // WS16b — Phase A only (shared). WS5's deliberate rule: NO FSM greeting
+    // before the WS `start` frame — Phase B (`bootstrapCallEstablishment`) runs
+    // later via `initializeStreamSession`, under the mediastream adapter's
+    // session lock. Replay and fresh construction both return the same
+    // <Connect><Stream> keyed on session.id, so no replay branch is needed here
+    // (establishInboundSession skips construction on replay).
+    const { session } = await this.establishInboundSession({
       callSid: opts.callSid,
-      ...(repairTemplates.length > 0 ? { repairTemplates } : {}),
-      ...(escalationTriggers ? { escalationTriggers } : {}),
-      ...(ownerSession ? { ownerSession: true } : {}),
-      ...(extendedIntents ? { extendedIntents: true } : {}),
+      from: opts.from,
+      tenantId: opts.tenantId,
     });
-    // initializeStreamSession reads callerIdBySession to drive
-    // identifyCaller/lead creation; without this, every media-stream
-    // inbound silently falls through to unknown-caller behavior.
-    this.callerIdBySession.set(session.id, opts.from ?? '');
-    this.persistVoiceSessionRow(session, opts.callSid);
     return this.buildStreamTwiML({ sessionId: session.id, callSid: opts.callSid });
   }
 
@@ -915,6 +1092,334 @@ export class TwilioGatherAdapter {
       });
   }
 
+  // ─── WS16b — shared inbound establishment cores ────────────────────────────
+
+  /**
+   * WS16b Phase A — webhook-time session construction, shared by BOTH voice
+   * transports (Gather and Media Streams). Replay-detects by CallSid (the
+   * replay RESPONSE rendering stays in each caller), resolves the per-tenant
+   * context, creates the session, preloads the catalog, captures the caller-id,
+   * and fire-and-forgets the voice_sessions row. Returns `replayed: true` (with
+   * the existing session) when this CallSid is a Twilio retry so the caller can
+   * re-render without re-running construction or firing duplicate side effects.
+   *
+   * The Phase-A ops after `store.create` are order-independent (all
+   * fire-and-forget or pure writes with no inter-dependency), so a single
+   * canonical order serves both transports byte-identically.
+   */
+  private async establishInboundSession(opts: {
+    callSid: string;
+    from: string;
+    tenantId: string;
+  }): Promise<{ session: VoiceSession; replayed: boolean }> {
+    // WS16c — fully converged across transports (no per-transport branch here):
+    // the caller-id is pinned on the session for both Gather and Media Streams.
+    // CallSid replay protection: Twilio retries the /voice webhook if it does
+    // not get a 2xx in time. Without this, every retry creates a fresh session
+    // AND fires duplicate audit/notify_oncall side effects.
+    const existing = this.deps.store.findByCallSid(opts.callSid);
+    if (existing && existing.tenantId === opts.tenantId) {
+      return { session: existing, replayed: true };
+    }
+
+    const repairTemplates = this.deps.repairTemplatesResolver
+      ? await this.deps.repairTemplatesResolver(opts.tenantId).catch(() => [])
+      : [];
+    const escalationTriggers = await this.resolveEscalationTriggers(opts.tenantId);
+    const extendedIntentsFlag = await this.resolveExtendedIntents(opts.tenantId);
+    // RV-070 — owner-line recognition happens at session establishment:
+    // recognized owner line (caller-ID match; see approver-identity.ts).
+    const ownerSession = await this.resolveOwnerSession(opts.tenantId, opts.from);
+    // Live-call customer complaint handling is unwired today; revisit this AND
+    // when the FSM complaint path ships.
+    const extendedIntents = extendedIntentsFlag && ownerSession;
+    const session = this.deps.store.create(opts.tenantId, 'telephony', {
+      callSid: opts.callSid,
+      ...(repairTemplates.length > 0 ? { repairTemplates } : {}),
+      ...(escalationTriggers ? { escalationTriggers } : {}),
+      ...(ownerSession ? { ownerSession: true } : {}),
+      ...(extendedIntents ? { extendedIntents: true } : {}),
+    });
+    // WS5 — kick off the tenant-catalog load ONCE at session establishment so
+    // in-call estimate grounding has the active catalog in hand synchronously
+    // at quote time (both voice transports). Non-blocking: fire-and-stash.
+    preloadSessionCatalog(session, this.deps.catalogRepo);
+    // P18-001 — record the caller-id (or "" when blocked/withheld) so the
+    // create_customer voice flow can reuse it without re-prompting; the stream
+    // bootstrap also reads it back to drive identify/lead creation.
+    this.callerIdBySession.set(session.id, opts.from ?? '');
+    // B2 — fire-and-forget the voice_sessions row (state is the freshly-created
+    // initial FSM state on both transports — no bootstrap has run yet).
+    this.persistVoiceSessionRow(session, opts.callSid);
+    // WS16c (divergence #2, CONVERGED) — pin the caller-id on the session for
+    // BOTH transports so the ask_caller wire can find-or-create a customer by
+    // phone without re-prompting. Previously Gather-only; the stream path
+    // leaned on the voice-turn processor's callerPhoneResolver fallback, which
+    // stays as defense-in-depth but is no longer the sole source.
+    if (opts.from) session.callerPhone = opts.from;
+    return { session, replayed: false };
+  }
+
+  /**
+   * WS16b Phase B — establishment bootstrap, shared by BOTH voice transports.
+   * Runs synchronously in the webhook for Gather (from `handleInbound`) and
+   * post-`start`/post-Deepgram-open under `withSessionLock` for Media Streams
+   * (from `initializeStreamSession`, whose call site the mediastream adapter
+   * owns — this core is timing-agnostic; WHEN it runs stays owned by each
+   * transport's orchestrator). Pins the spoken language, discloses recording,
+   * identifies the caller, drives the FSM through the greeting + known / failed
+   * / unknown branches, substitutes the real greeting, fires the owner push +
+   * customer-timeline log, runs `executeSideEffects`, and returns the fully-
+   * substituted side-effect array.
+   *
+   * WS16c CONVERGED this core across transports — owner push (#5), timeline log
+   * (#4), identify guard (#3), lead guard (#6), callerPhone (#2), greeting
+   * substitution (#9), and language pin (#8) are now identical for Gather and
+   * Media Streams. The only remaining per-transport differences live in the
+   * ORCHESTRATORS by genuine mechanics, not policy: the replay renderer (#1),
+   * the `to` value ('' post-WS on stream, #7), the stream missing-session
+   * fallback (#10), and the Gather-only terminated-finalize step (#11).
+   */
+  private async bootstrapCallEstablishment(opts: {
+    session: VoiceSession;
+    callSid: string;
+    from: string;
+    to: string;
+    tenantId: string;
+  }): Promise<SideEffect[]> {
+    const { session, from } = opts;
+
+    // P11-002 / UB-C1 — resolve + pin the spoken language + TTS voice. Honor a
+    // pre-pinned session.language (the stream adapter's initialLanguageResolver
+    // sets it before Deepgram opens); a freshly-created Gather session is never
+    // pre-pinned, so `pinned` is undefined there → tenant default, byte-identical
+    // to the pre-WS16 handleInbound. (Divergence #8 unified.)
+    const pinnedLanguage =
+      session.language === 'en' || session.language === 'es' ? session.language : undefined;
+    const { language, ttsVoice, supportedLanguages } = await this.resolveTenantLanguage(
+      opts.tenantId,
+      pinnedLanguage,
+    );
+    session.language = language;
+    session.ttsVoice = ttsVoice;
+    if (supportedLanguages) session.supportedLanguages = supportedLanguages;
+
+    // 1. Recording disclosure (text only — Gather <Say> / stream TTS speak it).
+    const disclosure = await discloseRecording({
+      tenantId: opts.tenantId,
+      channel: 'telephony',
+      businessName: this.deps.businessName,
+      language,
+      // RV-130 — ledger the implicit recording consent against the session.
+      ...(this.deps.consentEvents ? { consentLedger: this.deps.consentEvents } : {}),
+      ...(from ? { callerPhone: from } : {}),
+      voiceSessionId: session.id,
+    });
+    // C5 — the ledger write is DEFERRED, not skipped. Generating the copy is
+    // not evidence the caller heard it, so the thunk is parked here and each
+    // transport commits at its own point of evidence (see
+    // {@link commitRecordingConsent}). Overwrites any prior entry for this
+    // session — a re-bootstrap supersedes an uncommitted thunk. Swept first so
+    // the never-committed paths (transfer short-circuit, fail-closed hang-ups)
+    // cannot accumulate closures across calls.
+    this.sweepPendingConsentCommits();
+    this.pendingConsentCommit.set(session.id, disclosure.commitConsentLedger);
+
+    // 2. Identify caller by phone number.
+    // WS16c (divergence #3, CONVERGED) — identify-guard parity: BOTH transports
+    // now require `pool && from`. Previously Gather ran identifyCaller even on a
+    // blocked/empty From (it always came back unmatched → unknown_caller), which
+    // was a wasted lookup; skipping it reaches the identical FSM outcome.
+    let callerKnown: { customerId: string; customerName: string } | null = null;
+    let identifyFailed = false;
+    if (this.deps.pool && from) {
+      try {
+        const result = await identifyCaller({
+          tenantId: opts.tenantId,
+          fromPhone: from,
+          pool: this.deps.pool,
+        });
+        if (result.status === 'matched') {
+          callerKnown = { customerId: result.customerId, customerName: result.customerName };
+        }
+      } catch (err) {
+        logger.error('identifyCaller failed', {
+          error: err instanceof Error ? err.message : String(err),
+          callSid: opts.callSid,
+        });
+        identifyFailed = true;
+      }
+    }
+
+    // 3. Dispatch incoming_call → greeting state.
+    // Divergence #7 stays per-transport by MECHANICS, not policy: Gather passes
+    // the real `to` from the webhook; the stream path has no To at WS-start, so
+    // it passes '' (the caller supplies it — the shared core just carries `to`).
+    const sideEffects: SideEffect[] = [];
+    sideEffects.push(
+      ...session.machine.dispatch({
+        type: 'incoming_call',
+        callSid: opts.callSid,
+        from,
+        to: opts.to,
+        tenantId: opts.tenantId,
+      }),
+    );
+
+    // 4. Replace the placeholder 'greeting' tts_play with the actual greeting +
+    // disclosure copy. B1: resolve per-tenant persona first (best-effort).
+    // Divergence #9 unified on an immutable `.map` copy — the payload text is
+    // identical and the in-place mutation the stream path used aliased nothing
+    // either consumer observes.
+    let persona: VoicePersona | null | undefined;
+    if (this.deps.voicePersonaResolver) {
+      try {
+        persona = await this.deps.voicePersonaResolver(opts.tenantId);
+      } catch {
+        persona = undefined;
+      }
+    }
+    const greetingText = buildTelephonyGreeting(
+      this.deps.businessName,
+      disclosure.disclosureText,
+      persona,
+      language,
+    );
+    // Latch it on the session: the greeting carrying the disclosure is now
+    // committed to this call's TwiML / TTS side effects. Anything that later
+    // resumes capture on this leg (the realtime→Gather degrade) reads this
+    // instead of assuming establishment ran.
+    session.recordingDisclosed = true;
+    const expanded = sideEffects.map((fx) =>
+      fx.type === 'tts_play' && fx.payload.text === 'greeting'
+        ? { ...fx, payload: { ...fx.payload, text: greetingText } }
+        : fx,
+    );
+
+    // 5. Drive FSM forward: greeted_ok → caller_known / caller_identification_
+    // failed / unknown_caller. Escalate on identifyFailed (DB error) instead of
+    // falling through to anonymous, which would target the wrong customer.
+    expanded.push(...session.machine.dispatch({ type: 'greeted_ok' }));
+
+    if (callerKnown) {
+      session.customerId = callerKnown.customerId;
+      // WS16c (divergence #4, CONVERGED) — log the inbound call on the customer
+      // timeline for BOTH transports (realtime callers previously never showed
+      // up in the unified inbox / conversation history). Best-effort; a logging
+      // failure never fails the call.
+      if (this.deps.conversationRepo) {
+        try {
+          await logInboundCallOnCustomerTimeline({
+            conversationRepo: this.deps.conversationRepo,
+            tenantId: opts.tenantId,
+            customerId: callerKnown.customerId,
+            fromPhone: from,
+            callSid: opts.callSid,
+            actorId: this.deps.systemActorId ?? 'system:inbound-call',
+            ...(this.deps.auditRepo ? { auditRepo: this.deps.auditRepo } : {}),
+          });
+        } catch (err) {
+          logger.error('inbound call timeline log failed', {
+            callSid: opts.callSid,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+      }
+      // U4 — assemble B2B priority routing context for a business / property-
+      // manager caller before driving the FSM forward.
+      await this.loadB2bAccountContext(session, opts.tenantId, callerKnown.customerId);
+      expanded.push(
+        ...session.machine.dispatch({ type: 'caller_known', customerId: callerKnown.customerId }),
+      );
+    } else if (identifyFailed) {
+      expanded.push(
+        ...session.machine.dispatch({
+          type: 'caller_identification_failed',
+          reason: 'identify_caller_threw',
+        }),
+      );
+    } else {
+      // Unknown caller: best-effort find-or-create a CRM lead so the call lands
+      // in the kanban. Failure here must NOT fail the call — we log and fall
+      // through to the FSM's unknown_caller path either way.
+      // WS16c (divergence #6, CONVERGED) — lead-guard parity: BOTH transports
+      // require `leadRepo && from` (a blocked/empty From has no phone to key a
+      // lead on).
+      if (this.deps.leadRepo && from) {
+        try {
+          const result = await findOrCreateLeadByPhone({
+            tenantId: opts.tenantId,
+            fromPhone: from,
+            leadRepo: this.deps.leadRepo,
+            ...(this.deps.auditRepo ? { auditRepo: this.deps.auditRepo } : {}),
+            systemActorId: this.deps.systemActorId ?? 'system:inbound-call',
+          });
+          session.leadId = result.leadId;
+          logger.info('inbound call lead resolved', {
+            callSid: opts.callSid,
+            sessionId: session.id,
+            leadStatus: result.status,
+          });
+        } catch (err) {
+          logger.error('findOrCreateLeadByPhone failed', {
+            callSid: opts.callSid,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+      }
+      expanded.push(...session.machine.dispatch({ type: 'unknown_caller' }));
+    }
+
+    // WS16c (divergence #5, CONVERGED) — fire ONE owner "incoming call" push per
+    // inbound call on BOTH transports (realtime callers previously never
+    // triggered the owner push). Known caller deep-links to their customer with
+    // their name; an unknown caller routes to the customers list. Failure-
+    // isolated inside notifyOwner.
+    await notifyOwnerOfIncomingCall({
+      tenantId: opts.tenantId,
+      ...(callerKnown
+        ? { customerId: callerKnown.customerId, customerName: callerKnown.customerName }
+        : {}),
+      ...(from ? { fromPhone: from } : {}),
+    });
+
+    // 6. Execute non-TwiML side effects (audit_log, create_proposal,
+    // notify_oncall) against the wired repos.
+    await this.processor.executeSideEffects(session, expanded, opts.tenantId);
+    return expanded;
+  }
+
+  /**
+   * C5 — commit the implicit recording-consent ledger row parked by
+   * `bootstrapCallEstablishment`, at the transport's point of evidence that
+   * the caller actually HEARD the notice.
+   *
+   * The ledger defines `recording/implicit` as "the disclosure PLAYED and the
+   * caller stayed on the line" (consent-events.ts). Committing at disclosure-
+   * GENERATION time asserted that before any audio went out, so a fail-closed
+   * hang-up left a row saying the caller consented to a call we terminated
+   * precisely because they were never told. Callers:
+   *
+   *   - Gather/PSTN — `handleInbound`, once the TwiML carrying `<Say>` before
+   *     `<Start><Record>` is built; the ordering is structural in that
+   *     document, and it is the strongest signal that transport offers.
+   *   - Media Streams — the WS adapter, once the disclosure TURN is validated
+   *     as played to completion. Every fail-closed branch returns WITHOUT
+   *     calling this, so no row is written.
+   *
+   * Taking the thunk makes the commit single-shot; the underlying thunk is
+   * itself idempotent and never rejects. A session with nothing parked (no
+   * ledger wired, blocked caller-id, in-app) is a silent no-op.
+   */
+  async commitRecordingConsent(opts: { callSid: string }): Promise<void> {
+    const session = this.deps.store.findByCallSid(opts.callSid);
+    if (!session) return;
+    const commit = this.pendingConsentCommit.get(session.id);
+    if (!commit) return;
+    this.pendingConsentCommit.delete(session.id);
+    await commit();
+  }
+
   /**
    * P8-012 — Run greeting initialization for the Media Streams path.
    *
@@ -930,124 +1435,25 @@ export class TwilioGatherAdapter {
   }): Promise<SideEffect[]> {
     const session = this.deps.store.findByCallSid(opts.callSid);
     if (!session) {
+      // Missing-session fallback (divergence #10) stays owned by the stream
+      // orchestrator: a canned greeting when the WS `start` referenced a
+      // CallSid the store no longer knows about.
       return [
         { type: 'tts_play', payload: { text: `Thank you for calling ${this.deps.businessName}. How can I help you today?` } },
       ];
     }
-
+    // WS16b — the stream transport's `from` was captured at webhook time into
+    // callerIdBySession (Phase A); replay it into the shared Phase B bootstrap.
+    // The mediastream adapter invokes this under withSessionLock, so the timing
+    // asymmetry and lock discipline are preserved by construction.
     const from = this.callerIdBySession.get(session.id) ?? '';
-
-    // P11-002: resolve + pin the spoken language + TTS voice (tenant default).
-    const { language, ttsVoice, supportedLanguages } = await this.resolveTenantLanguage(opts.tenantId);
-    session.language = language;
-    session.ttsVoice = ttsVoice;
-    if (supportedLanguages) session.supportedLanguages = supportedLanguages;
-
-    // 1. Recording disclosure (text only — TTS synthesizes the audio).
-    const disclosure = await discloseRecording({
+    return this.bootstrapCallEstablishment({
+      session,
+      callSid: opts.callSid,
+      from,
+      to: '',
       tenantId: opts.tenantId,
-      channel: 'telephony',
-      businessName: this.deps.businessName,
-      language,
-      // RV-130 — ledger the implicit recording consent against the session.
-      ...(this.deps.consentEvents ? { consentLedger: this.deps.consentEvents } : {}),
-      ...(from ? { callerPhone: from } : {}),
-      voiceSessionId: session.id,
     });
-
-    // 2. Identify caller by phone number.
-    let callerKnown: { customerId: string; customerName: string } | null = null;
-    let identifyFailed = false;
-    if (this.deps.pool && from) {
-      try {
-        const result = await identifyCaller({
-          tenantId: opts.tenantId,
-          fromPhone: from,
-          pool: this.deps.pool,
-        });
-        if (result.status === 'matched') {
-          callerKnown = { customerId: result.customerId, customerName: result.customerName };
-        }
-      } catch (err) {
-        logger.error('initializeStreamSession: identifyCaller failed', {
-          error: err instanceof Error ? err.message : String(err),
-          callSid: opts.callSid,
-        });
-        identifyFailed = true;
-      }
-    }
-
-    // 3. FSM bootstrap: incoming_call → greeting → identifying.
-    const sideEffects: SideEffect[] = [];
-    sideEffects.push(
-      ...session.machine.dispatch({
-        type: 'incoming_call',
-        callSid: opts.callSid,
-        from,
-        to: '',
-        tenantId: opts.tenantId,
-      }),
-    );
-
-    // 4. Replace 'greeting' placeholder with real greeting + disclosure text.
-    let persona: VoicePersona | null | undefined;
-    if (this.deps.voicePersonaResolver) {
-      try {
-        persona = await this.deps.voicePersonaResolver(opts.tenantId);
-      } catch {
-        persona = undefined;
-      }
-    }
-    const greetingText = buildTelephonyGreeting(
-      this.deps.businessName,
-      disclosure.disclosureText,
-      persona,
-      language,
-    );
-    for (const fx of sideEffects) {
-      if (fx.type === 'tts_play' && fx.payload.text === 'greeting') {
-        fx.payload.text = greetingText;
-      }
-    }
-
-    // 5. Drive FSM forward: greeted_ok → caller_known / unknown_caller.
-    sideEffects.push(...session.machine.dispatch({ type: 'greeted_ok' }));
-
-    if (callerKnown) {
-      session.customerId = callerKnown.customerId;
-      // U4 — assemble B2B priority routing context for a business / property-
-      // manager caller before driving the FSM forward.
-      await this.loadB2bAccountContext(session, opts.tenantId, callerKnown.customerId);
-      sideEffects.push(
-        ...session.machine.dispatch({ type: 'caller_known', customerId: callerKnown.customerId }),
-      );
-    } else if (identifyFailed) {
-      sideEffects.push(
-        ...session.machine.dispatch({ type: 'caller_identification_failed', reason: 'identify_caller_threw' }),
-      );
-    } else {
-      if (this.deps.leadRepo && from) {
-        try {
-          const result = await findOrCreateLeadByPhone({
-            tenantId: opts.tenantId,
-            fromPhone: from,
-            leadRepo: this.deps.leadRepo,
-            ...(this.deps.auditRepo ? { auditRepo: this.deps.auditRepo } : {}),
-            systemActorId: this.deps.systemActorId ?? 'system:inbound-call',
-          });
-          session.leadId = result.leadId;
-        } catch (err) {
-          logger.error('initializeStreamSession: findOrCreateLeadByPhone failed', {
-            callSid: opts.callSid,
-            error: err instanceof Error ? err.message : String(err),
-          });
-        }
-      }
-      sideEffects.push(...session.machine.dispatch({ type: 'unknown_caller' }));
-    }
-
-    await this.processor.executeSideEffects(session, sideEffects, opts.tenantId);
-    return sideEffects;
   }
 
   /**
@@ -1239,13 +1645,13 @@ export class TwilioGatherAdapter {
       // "I smell gas") left the ladder running: it would keep firing
       // "transfer unanswered — Call back NOW" pages and eventually land an
       // 'emergency_unanswered' exhaustion task, both of which directly
-      // contradict the E1 alert the tenant just received. `isResolved()`
-      // only recognizes `terminalReason === 'transferred'` — an E1 close
-      // stamps 'life_safety_e1', which the ladder would never treat as
-      // resolved on its own. Safe to call even when nothing is armed
-      // (resolveEmergencyPageLadder is a no-op then). Synchronous — cancel
-      // before any awaits below so there is no race with a pending page.
-      resolveEmergencyPageLadder(tenantId, session.id);
+      // contradict the E1 alert the tenant just received. With the durable
+      // queue ladder (UC-5a) the cancellation lives in the worker's
+      // isResolved() check: LADDER_RESOLVED_REASONS (emergency-page-retry.ts)
+      // recognizes the 'life_safety_e1' terminal reason this close stamps on
+      // the live session and the persisted voice_sessions row, so the next
+      // ladder step cancels silently on every replica — no in-process cancel
+      // call to race with.
 
       // ANS-001 — NOTHING slow may sit between the E1 keyword hit and the
       // TwiML that speaks the 911 script. Only `audit_log` is awaited (the
@@ -1360,9 +1766,17 @@ export class TwilioGatherAdapter {
     keyword: string,
   ): Promise<void> {
     const callSid = session.callSid;
+    // Revoke capture on the session FIRST and unconditionally. This is what
+    // stops the realtime transport, where the capture is the STT socket and
+    // no REST pause call reaches it; it costs nothing on the Gather transport.
+    // Doing it before the awaits means a slow or failing provider call cannot
+    // leave frames flowing in the meantime.
+    session.captureRevoked = true;
+    let recordingPaused = false;
     if (this.deps.recordingControl && callSid) {
       try {
         await this.deps.recordingControl.pauseRecording(callSid);
+        recordingPaused = true;
       } catch (err) {
         logger.error('recording objection: pauseRecording failed', {
           tenantId,
@@ -1413,7 +1827,11 @@ export class TwilioGatherAdapter {
             entityType: 'voice_session',
             entityId: session.id,
             correlationId: session.id,
-            metadata: { keyword, paused: Boolean(this.deps.recordingControl && callSid) },
+            // `paused` records what actually happened, not what was wired: a
+            // pauseRecording that threw used to be audited as paused=true.
+            // `captureRevoked` is the transport-independent fact — the STT
+            // feed is cut regardless of whether a Twilio recording existed.
+            metadata: { keyword, paused: recordingPaused, captureRevoked: true },
           }),
         );
       } catch {
@@ -1423,23 +1841,28 @@ export class TwilioGatherAdapter {
   }
 
   /**
-   * RV-143 — arm the owner page-retry ladder the moment an emergency
-   * escalation starts. Each tick (2-minute intervals, ×3) re-checks whether
-   * the transfer was answered (the /dial-result success branch stamps
-   * `terminalReason === 'transferred'`); unanswered ticks page the owner
-   * and the exhausted ladder lands a durable URGENT call_me_back task.
-   * No-op without an SMS provider.
+   * RV-143 / UC-5a — arm the owner page-retry ladder the moment an
+   * emergency escalation starts. Each step (2-minute intervals, ×3) is a
+   * DELAYED job on the shared durable queue: the registered
+   * `telephony.emergency_page` worker (app.ts) re-checks whether the
+   * transfer was answered (live store, then the persisted
+   * voice_sessions.ended_reason the /dial-result success branch stamps),
+   * pages the owner when not, and the exhausted ladder lands a durable
+   * URGENT call_me_back task. Arming is idempotent per (tenant, session)
+   * via the attempt-1 idempotency key, so a re-dispatched scan or a second
+   * replica can't double-arm. No-op without an SMS provider or a queue
+   * (mirrors the legacy in-memory gate).
    */
   private armEmergencyPageLadder(
     session: VoiceSession,
     utterance: string,
     tenantId: string,
   ): void {
-    const deliveryProvider = this.deps.deliveryProvider;
-    if (!deliveryProvider) return;
+    const queue = this.deps.queue;
+    if (!this.deps.deliveryProvider || !queue) return;
     const callerPhone = this.callerIdBySession.get(session.id) || undefined;
     const sessionId = session.id;
-    armEmergencyPageLadder(
+    void armEmergencyPageLadder(
       {
         tenantId,
         sessionId,
@@ -1448,29 +1871,15 @@ export class TwilioGatherAdapter {
         emergencyDescription: utterance.slice(0, 160),
         businessName: this.deps.businessName,
       },
-      {
-        sendSms: (args) => deliveryProvider.sendSms(args),
-        resolvePagePhone: async () => {
-          if (!this.deps.settingsRepo) return null;
-          try {
-            const settings = await this.deps.settingsRepo.findByTenant(tenantId);
-            return settings?.ownerPhone ?? settings?.transferNumber ?? null;
-          } catch {
-            return null;
-          }
-        },
-        // Resolved when the dispatcher transfer was ANSWERED. A reaped /
-        // missing session is treated as unresolved — bias toward paging on
-        // an emergency.
-        isResolved: () => {
-          const live = this.deps.store.peek(sessionId);
-          if (!live) return false;
-          return live.terminalReason === 'transferred';
-        },
-        ...(this.deps.callMeBackRepo ? { callMeBackRepo: this.deps.callMeBackRepo } : {}),
-        ...(this.deps.auditRepo ? { auditRepo: this.deps.auditRepo } : {}),
-      },
-    );
+      { queue },
+    ).catch((err) => {
+      // Loud: a failed arm means no pages will fire for this escalation.
+      logger.error('failed to arm durable emergency page ladder', {
+        tenantId,
+        sessionId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    });
   }
 
   async processCallerUtterance(opts: {
@@ -1553,6 +1962,44 @@ export class TwilioGatherAdapter {
   }
 
   /**
+   * Codex P2 (PR #702) — pending-approval/consent parity for the
+   * Media-Streams T2-F05 silence-reprompt timer. Before this, a silent
+   * caller mid owner-approval readback (RV-071) or mid SMS-consent capture
+   * (WS18) got reprompted — and, on a second consecutive silence, ESCALATED
+   * AND END-SESSIONED — by `recoverFromLowSttConfidence`, stranding the
+   * pending dialogue uncleared. The Gather transport and the WS-finals
+   * `speechTurn` path never have this problem: they run
+   * `handlePendingVoiceApproval` (and `speechTurn` also runs
+   * `handlePendingConsentCapture`) BEFORE the empty-speech/low-confidence
+   * branch, so a silent turn is "keep it pending", not a reprompt.
+   *
+   * Drives an EMPTY-utterance turn through the SAME two handlers,
+   * in the SAME order `processSpeechTurn` uses (approval, then consent),
+   * and — mirroring that function — executes each handler's side effects
+   * and records the agent's line on the transcript before returning them.
+   * Returns null when NEITHER dialogue is pending, telling the caller (the
+   * silence timer) to fall through to its normal low-confidence recovery.
+   */
+  async handlePendingDialogueSilence(
+    session: VoiceSession,
+    tenantId: string,
+  ): Promise<SideEffect[] | null> {
+    const approvalTurn = await this.processor.handlePendingVoiceApproval(session, '', tenantId);
+    if (approvalTurn) {
+      await this.processor.executeSideEffects(session, approvalTurn, tenantId);
+      appendAgentTts(this.deps.store, session.id, approvalTurn);
+      return approvalTurn;
+    }
+    const consentTurn = await this.processor.handlePendingConsentCapture(session, '', tenantId);
+    if (consentTurn) {
+      await this.processor.executeSideEffects(session, consentTurn, tenantId);
+      appendAgentTts(this.deps.store, session.id, consentTurn);
+      return consentTurn;
+    }
+    return null;
+  }
+
+  /**
    * Handle the initial `POST /api/telephony/voice` webhook.
    * Creates a session, runs the disclose_recording + identify_caller
    * skills, drives the FSM through `incoming_call`, and returns TwiML.
@@ -1563,189 +2010,44 @@ export class TwilioGatherAdapter {
     to: string;
     tenantId: string;
   }): Promise<string> {
-    // CallSid replay protection: Twilio retries the /voice webhook if it
-    // doesn't get a 2xx in time. Without this, every retry creates a
-    // fresh session AND fires duplicate audit/notify_oncall side effects.
-    // We rebuild the same greeting TwiML for the existing session.
-    const existing = this.deps.store.findByCallSid(opts.callSid);
-    if (existing && existing.tenantId === opts.tenantId) {
+    // WS16b — Phase A (shared). CallSid replay protection: Twilio retries the
+    // /voice webhook if it doesn't get a 2xx in time. Without this, every retry
+    // creates a fresh session AND fires duplicate audit/notify_oncall side
+    // effects. On replay we rebuild the same greeting TwiML for the existing
+    // session (renderer stays here — divergence #1).
+    const { session, replayed } = await this.establishInboundSession({
+      callSid: opts.callSid,
+      from: opts.from,
+      tenantId: opts.tenantId,
+    });
+    if (replayed) {
       logger.info('handleInbound: replay for existing CallSid — reusing session', {
         callSid: opts.callSid,
-        sessionId: existing.id,
+        sessionId: session.id,
       });
+      const replayHints = await this.resolveGatherHints(opts.tenantId);
       return buildTwiML(
-        [{ type: 'tts_play', payload: { text: t('greeting.one_moment', existing.language ?? 'en') } }],
+        [{ type: 'tts_play', payload: { text: t('greeting.one_moment', session.language ?? 'en') } }],
         {
-          gatherActionUrl: this.gatherUrl(existing.id),
-          ...(existing.language ? { language: existing.language } : {}),
-          ...(existing.ttsVoice ? { voiceOverride: existing.ttsVoice } : {}),
+          gatherActionUrl: this.gatherUrl(session.id),
+          ...(session.language ? { language: session.language } : {}),
+          ...(session.ttsVoice ? { voiceOverride: session.ttsVoice } : {}),
+          ...(replayHints ? { hints: replayHints } : {}),
         },
       );
     }
 
-    const repairTemplatesForInbound = this.deps.repairTemplatesResolver
-      ? await this.deps.repairTemplatesResolver(opts.tenantId).catch(() => [])
-      : [];
-    const escalationTriggers = await this.resolveEscalationTriggers(opts.tenantId);
-    const extendedIntentsFlag = await this.resolveExtendedIntents(opts.tenantId);
-    // RV-070 — owner-line recognition happens at session establishment:
-    // recognized owner line (caller-ID match; see approver-identity.ts).
-    const ownerSession = await this.resolveOwnerSession(opts.tenantId, opts.from);
-    // Live-call customer complaint handling is unwired today; revisit this AND
-    // when the FSM complaint path ships.
-    const extendedIntents = extendedIntentsFlag && ownerSession;
-    const session = this.deps.store.create(opts.tenantId, 'telephony', {
+    // WS16b — Phase B (shared): language pin + disclosure + identify + FSM
+    // bootstrap + greeting substitution + owner push + timeline log +
+    // executeSideEffects. Returns the fully-substituted effect array that steps
+    // 7–8 render + finalize below.
+    const expanded = await this.bootstrapCallEstablishment({
+      session,
       callSid: opts.callSid,
-      ...(repairTemplatesForInbound.length > 0 ? { repairTemplates: repairTemplatesForInbound } : {}),
-      ...(escalationTriggers ? { escalationTriggers } : {}),
-      ...(ownerSession ? { ownerSession: true } : {}),
-      ...(extendedIntents ? { extendedIntents: true } : {}),
-    });
-    this.persistVoiceSessionRow(session, opts.callSid);
-
-    // P18-001: record the caller-id (or "" when blocked/withheld) so
-    // the create_customer voice flow can use it as the new customer's
-    // primaryPhone without re-prompting.
-    this.callerIdBySession.set(session.id, opts.from ?? '');
-
-    // P11-002: resolve spoken language + TTS voice (tenant default) and pin
-    // them on the session so the greeting, disclosure, and every TwiML build
-    // speak it in the right language/voice.
-    const { language, ttsVoice, supportedLanguages } = await this.resolveTenantLanguage(opts.tenantId);
-    session.language = language;
-    session.ttsVoice = ttsVoice;
-    if (supportedLanguages) session.supportedLanguages = supportedLanguages;
-
-    // 1. Disclose recording (text generation; no TTS — Twilio <Say> handles audio).
-    const disclosure = await discloseRecording({
+      from: opts.from,
+      to: opts.to,
       tenantId: opts.tenantId,
-      channel: 'telephony',
-      businessName: this.deps.businessName,
-      language,
-      // RV-130 — ledger the implicit recording consent against the session.
-      ...(this.deps.consentEvents ? { consentLedger: this.deps.consentEvents } : {}),
-      ...(opts.from ? { callerPhone: opts.from } : {}),
-      voiceSessionId: session.id,
     });
-
-    // 2. Identify caller. Skill requires a Pool; if we don't have one (dev),
-    //    skip and treat as unknown_caller below.
-    let callerKnown: { customerId: string; customerName: string } | null = null;
-    let identifyFailed = false;
-    if (this.deps.pool) {
-      try {
-        const result = await identifyCaller({
-          tenantId: opts.tenantId,
-          fromPhone: opts.from,
-          pool: this.deps.pool,
-        });
-        if (result.status === 'matched') {
-          callerKnown = {
-            customerId: result.customerId,
-            customerName: result.customerName,
-          };
-        }
-      } catch (err) {
-        logger.error('identifyCaller failed', {
-          error: err instanceof Error ? err.message : String(err),
-          callSid: opts.callSid,
-        });
-        identifyFailed = true;
-      }
-    }
-
-    // 3. Dispatch incoming_call → greeting state.
-    const sideEffectsAll: SideEffect[] = [];
-    sideEffectsAll.push(
-      ...session.machine.dispatch({
-        type: 'incoming_call',
-        callSid: opts.callSid,
-        from: opts.from,
-        to: opts.to,
-        tenantId: opts.tenantId,
-      })
-    );
-
-    // 4. Replace the placeholder 'greeting' tts_play with the actual greeting
-    //    + disclosure copy. B1: resolve per-tenant persona first (best-effort).
-    let persona: VoicePersona | null | undefined;
-    if (this.deps.voicePersonaResolver) {
-      try {
-        persona = await this.deps.voicePersonaResolver(opts.tenantId);
-      } catch {
-        persona = undefined;
-      }
-    }
-    const greetingText = buildTelephonyGreeting(
-      this.deps.businessName,
-      disclosure.disclosureText,
-      persona,
-      language,
-    );
-
-    const expanded = sideEffectsAll.map((fx) => {
-      if (fx.type === 'tts_play' && fx.payload.text === 'greeting') {
-        return { ...fx, payload: { ...fx.payload, text: greetingText } };
-      }
-      return fx;
-    });
-
-    // 5. Drive FSM forward: greeted_ok → identifying, then caller_known,
-    //    caller_identification_failed, or unknown_caller. We escalate on
-    //    identifyFailed (DB error) instead of falling through to anonymous,
-    //    which would create proposals against the wrong customer.
-    expanded.push(...session.machine.dispatch({ type: 'greeted_ok' }));
-
-    if (callerKnown) {
-      session.customerId = callerKnown.customerId;
-      // U4 — assemble B2B priority routing context for a business / property-
-      // manager caller before driving the FSM forward.
-      await this.loadB2bAccountContext(session, opts.tenantId, callerKnown.customerId);
-      expanded.push(
-        ...session.machine.dispatch({
-          type: 'caller_known',
-          customerId: callerKnown.customerId,
-        })
-      );
-    } else if (identifyFailed) {
-      expanded.push(
-        ...session.machine.dispatch({
-          type: 'caller_identification_failed',
-          reason: 'identify_caller_threw',
-        })
-      );
-    } else {
-      // Unknown caller: best-effort find-or-create a CRM lead so the call
-      // lands in the kanban. Failure here must NOT fail the call — we log
-      // and fall through to the FSM's unknown_caller path either way.
-      if (this.deps.leadRepo) {
-        try {
-          const result = await findOrCreateLeadByPhone({
-            tenantId: opts.tenantId,
-            fromPhone: opts.from,
-            leadRepo: this.deps.leadRepo,
-            ...(this.deps.auditRepo ? { auditRepo: this.deps.auditRepo } : {}),
-            systemActorId: this.deps.systemActorId ?? 'system:inbound-call',
-          });
-          session.leadId = result.leadId;
-          logger.info('inbound call lead resolved', {
-            callSid: opts.callSid,
-            sessionId: session.id,
-            leadStatus: result.status,
-          });
-        } catch (err) {
-          logger.error('findOrCreateLeadByPhone failed', {
-            callSid: opts.callSid,
-            error: err instanceof Error ? err.message : String(err),
-          });
-        }
-      }
-      expanded.push(...session.machine.dispatch({ type: 'unknown_caller' }));
-    }
-
-    // 6. Execute non-TwiML side effects (audit_log, create_proposal,
-    //    notify_oncall) against the wired repos.
-    await this.processor.executeSideEffects(session, expanded, opts.tenantId);
 
     // 7. Build TwiML — P8-013 may have produced a <Dial> transfer for
     //    the rare case where notify_oncall fires during the inbound
@@ -1754,6 +2056,7 @@ export class TwilioGatherAdapter {
     //    set on the initial inbound response so Twilio doesn't start a
     //    second concurrent recording on each <Gather> turn (P8-014).
     const transferTwiml = this.takePendingTransferTwiml(session.id);
+    const inboundHints = transferTwiml ? undefined : await this.resolveGatherHints(opts.tenantId);
     const twiml =
       transferTwiml ??
       buildTwiML(expanded, {
@@ -1763,7 +2066,28 @@ export class TwilioGatherAdapter {
         ...(this.deps.recordingCallbackPath
           ? { recordingStatusCallback: this.recordingCallbackUrl() }
           : {}),
+        ...(inboundHints ? { hints: inboundHints } : {}),
       });
+
+    // C5 — Gather's point of evidence for the recording disclosure: the TwiML
+    // we are about to return carries `<Say>` before `<Start><Record>`, so
+    // Twilio speaks the notice before it arms capture.
+    //
+    // NOT awaited: the ledger insert is explicitly best-effort, so blocking on
+    // it would let a slow or saturated database delay the disclosure response
+    // itself. `commitRecordingConsent` takes the entry from the map
+    // synchronously before awaiting the insert, so the fire-and-forget still
+    // releases the parked closure immediately.
+    if (transferTwiml) {
+      // A `<Dial>` renders no disclosure and arms no recording, so ledgering
+      // implicit consent here would assert a notice that was never rendered.
+      // Discard the parked thunk rather than leaving it for the sweep.
+      this.pendingConsentCommit.delete(session.id);
+    } else {
+      void this.commitRecordingConsent({ callSid: opts.callSid }).catch(() => {
+        /* swallow — the thunk already swallows; this guards the lookup */
+      });
+    }
 
     // 8. If the FSM drove straight to 'terminated' (escalation chain
     //    that emits end_session), kick off the summary so call_summaries
@@ -1787,7 +2111,7 @@ export class TwilioGatherAdapter {
     sessionId: string;
     callSid: string;
     speechResult: string;
-    confidence: number;
+    confidence: number | undefined;
     tenantId: string;
   }): Promise<string> {
     // Per-session lock: Twilio retries (or duplicate webhook deliveries)
@@ -1800,7 +2124,7 @@ export class TwilioGatherAdapter {
     sessionId: string;
     callSid: string;
     speechResult: string;
-    confidence: number;
+    confidence: number | undefined;
     tenantId: string;
   }): Promise<string> {
     const session = this.deps.store.get(opts.sessionId);
@@ -1816,12 +2140,18 @@ export class TwilioGatherAdapter {
     }
 
     // 1. Append caller utterance to transcript first — must happen before
-    //    any early-exit path so the utterance is never lost.
-    this.deps.store.appendTranscript(opts.sessionId, {
-      speaker: 'caller',
-      text: opts.speechResult,
-      ts: Date.now(),
-    });
+    //    any early-exit path so the utterance is never lost. EXCEPT an empty
+    //    SpeechResult (actionOnEmptyResult no-speech timeout): an empty
+    //    `caller:` line would make deriveCallOutcome read a fully silent
+    //    call as caller speech and classify/summarize it as a spoken
+    //    no-intent call instead of a silent one.
+    if (opts.speechResult.trim().length > 0) {
+      this.deps.store.appendTranscript(opts.sessionId, {
+        speaker: 'caller',
+        text: opts.speechResult,
+        ts: Date.now(),
+      });
+    }
 
     // RV-140 — shared deterministic safety scan (see
     // runDeterministicSafetyScan). Runs after the transcript append so the
@@ -1866,19 +2196,29 @@ export class TwilioGatherAdapter {
     const sideEffectsAll: SideEffect[] = [];
     const currentState = session.machine.currentState;
 
-    // Empty SpeechResult (silent caller / Twilio timeout) maps to a
-    // confidence_low so the bounded reprompt path kicks in instead of
-    // running the classifier on an empty string.
+    // Empty SpeechResult (silent caller — delivered here by the <Gather>'s
+    // actionOnEmptyResult on the no-speech timeout). T2-F03: silence MUST
+    // join the same streak as low-confidence turns — it re-enters this loop
+    // every timeout, so without the shared cap a silent line would be
+    // reprompted forever. Same caller experience as a low-confidence turn:
+    // reprompt below the cap, graceful escalation + hangup at it.
     if (opts.speechResult.trim().length === 0) {
-      sideEffectsAll.push(
-        ...session.machine.dispatch({
-          type: 'confidence_low',
-          threshold: TAU_INT,
-          score: 0,
-        }),
-      );
-      await this.processor.executeSideEffects(session, sideEffectsAll, opts.tenantId);
-      return this.finalizeTwiml(session, sideEffectsAll, opts.sessionId);
+      return this.runLowSttConfidenceGatherLadder(session, opts.sessionId);
+    }
+
+    // A3 — low acoustic STT confidence gate. Twilio's Gather `Confidence` on
+    // a NON-empty utterance below MIN_STT_CONFIDENCE means Twilio itself is
+    // flagging the recognition as unreliable — dispatching it (running the
+    // classifier / advancing FSM state) risks acting on words the caller
+    // didn't say. Return a reprompt (or, after repeated low-confidence
+    // turns, a graceful hand-off) directly, bypassing classification and
+    // state-branching entirely, same as the empty-SpeechResult early return
+    // above. Runs AFTER the deterministic safety scan / frustration check /
+    // pending-approval-turn handling above — none of those must ever be
+    // suppressed by a shaky confidence score.
+    const lowConfidenceTwiml = await this.maybeHandleLowSttConfidenceGather(session, opts);
+    if (lowConfidenceTwiml !== null) {
+      return lowConfidenceTwiml;
     }
 
     // U4 — per-turn vulnerability triage on the Gather path, fire-and-forget
@@ -1995,12 +2335,18 @@ export class TwilioGatherAdapter {
             intentType: classification.intentType,
             entities: (classification.extractedEntities ?? {}) as Record<string, unknown>,
             confidence: classification.confidence,
+            // Thread the classify call's REAL ai_runs id so a proposal born
+            // from this intent links to its run row (proposals.ai_run_id FK).
+            ...(classification.aiRunId ? { aiRunId: classification.aiRunId } : {}),
           };
         } else {
+          // Low / unknown intent → intent_classified so FSM uses
+          // low_intent_confidence repair (not low_audio / "trouble hearing").
           classifierEvent = {
-            type: 'confidence_low',
-            threshold: TAU_INT,
-            score: classification.confidence,
+            type: 'intent_classified',
+            intentType: classification.intentType === 'unknown' ? 'unknown' : classification.intentType,
+            entities: (classification.extractedEntities ?? {}) as Record<string, unknown>,
+            confidence: classification.confidence,
           };
         }
       } catch (err) {
@@ -2008,7 +2354,12 @@ export class TwilioGatherAdapter {
           error: err instanceof Error ? err.message : String(err),
           sessionId: opts.sessionId,
         });
-        classifierEvent = { type: 'confidence_low', threshold: TAU_INT, score: 0 };
+        classifierEvent = {
+          type: 'intent_classified',
+          intentType: 'unknown',
+          entities: {},
+          confidence: 0,
+        };
       }
 
       // P11-001: lookup intents bypass the proposal-draft path. Route
@@ -2103,28 +2454,39 @@ export class TwilioGatherAdapter {
       sideEffectsAll.push(...session.machine.dispatch(classifierEvent));
 
       // After intent_classified, the FSM is in 'entity_resolution' (unless
-      // emergency_dispatch fast-path took us to 'escalating'). For Gather
-      // mode we don't run a separate entity-resolver — auto-advance with
-      // entity_resolved using whatever entities the classifier extracted
-      // so the FSM proceeds to intent_confirm.
+      // emergency_dispatch fast-path took us to 'escalating'). Gather mode
+      // used to skip resolution entirely and auto-advance with a verbatim
+      // ECHO of the classifier entities — which resolved nothing (the FSM
+      // already holds those entities from `intent_classified`), so no spoken
+      // reference became an id and no spoken time became an ISO instant. Run
+      // the SAME real resolution the media-streams `speechTurn` runs, via the
+      // shared processor helper.
       if (
         classifierEvent.type === 'intent_classified' &&
         session.machine.currentState === 'entity_resolution'
       ) {
-        // Forward classifier-extracted string entities (customerName,
-        // jobReference, etc.) into the FSM context. Without this, the
-        // entities pulled from the caller's utterance would be lost
-        // before intent_confirm and any downstream proposal builder
-        // would see an empty extractedEntities map.
-        const refs: Record<string, string> = {};
-        for (const [k, v] of Object.entries(classifierEvent.entities)) {
-          if (typeof v === 'string') refs[k] = v;
-        }
+        const refs = await this.processor.resolveTurnEntities(
+          session,
+          opts.tenantId,
+          classifierEvent.intentType,
+          classifierEvent.entities as Record<string, unknown>,
+        );
         sideEffectsAll.push(
           ...session.machine.dispatch({ type: 'entity_resolved', refs }),
         );
         this.processor.expandIntentConfirmTemplate(sideEffectsAll, classifierEvent.intentType);
       }
+    } else if (currentState === 'ask_caller') {
+      // Unknown caller on the PSTN/Gather path just gave their info. Reuse the
+      // SAME find-or-create-customer + advance-to-intake logic the media-
+      // streams adapter runs (shared handleAskCaller). Without this branch the
+      // turn fell to the generic `else` below → confidence_low, which the
+      // ask_caller state ignores, so unknown callers looped forever on a bare
+      // <Gather> reprompt. Now they advance (caller_known → intent_capture) and
+      // the FSM's own reprompt/escalate handles a still-unresolved caller.
+      sideEffectsAll.push(
+        ...(await this.processor.handleAskCaller(session, opts.tenantId)),
+      );
     } else {
       // Other states: log and reprompt with a generic message. Treat as a
       // confidence_low so the FSM's normal retry/escalate logic applies.
@@ -2143,6 +2505,131 @@ export class TwilioGatherAdapter {
 
     await this.processor.executeSideEffects(session, sideEffectsAll, opts.tenantId);
     return this.finalizeTwiml(session, sideEffectsAll, opts.sessionId);
+  }
+
+  /**
+   * A3 — gate a Gather turn on Twilio's acoustic `Confidence`. Returns the
+   * reprompt/hand-off TwiML string when the gate fires (caller: return it
+   * directly, do NOT fall through to classification), or `null` when the
+   * turn should proceed normally (confidence high enough, or absent —
+   * absent is treated as HIGH so a turn is never blocked on missing data;
+   * Twilio omits `Confidence` for some valid recognitions).
+   *
+   * Mirrors the media-streams adapter's `recoverFromLowSttConfidence`
+   * shape: reprompt on an isolated low-confidence turn using
+   * {@link LOW_STT_CONFIDENCE_REPROMPT_COPY}; after
+   * {@link MAX_CONSECUTIVE_LOW_CONFIDENCE_TURNS} back-to-back, speak the
+   * SAME escalation line VOX-35c uses
+   * ({@link SPEECH_TURN_FAILURE_ESCALATION_COPY}) and end the call
+   * gracefully via a synthetic `end_session` side effect + explicit
+   * `finalizeTerminatedSession` call (this path never touches the FSM, so
+   * `finalizeTwiml`'s own `currentState === 'terminated'` finalize check
+   * would never fire — the manual call here is required, same pattern
+   * `/dial-result`'s successful-transfer branch already uses).
+   */
+  private async maybeHandleLowSttConfidenceGather(
+    session: VoiceSession,
+    opts: { sessionId: string; confidence: number | undefined },
+  ): Promise<string | null> {
+    const { confidence } = opts;
+    if (typeof confidence !== 'number' || !Number.isFinite(confidence) || confidence >= MIN_STT_CONFIDENCE) {
+      // High confidence (or no signal at all) clears the streak so a later
+      // isolated blip on this session gets its own reprompt budget.
+      this.lowConfidenceGatherStreak.delete(opts.sessionId);
+      return null;
+    }
+
+    return this.runLowSttConfidenceGatherLadder(session, opts.sessionId);
+  }
+
+  /**
+   * The bounded reprompt→escalate ladder shared by the two Gather-turn
+   * failure modes: low acoustic `Confidence` (via
+   * {@link maybeHandleLowSttConfidenceGather}) and an empty `SpeechResult`
+   * (silence, delivered by `actionOnEmptyResult`). One streak for both, so
+   * a caller alternating silence and mumbling still terminates at
+   * {@link MAX_CONSECUTIVE_LOW_CONFIDENCE_TURNS} — matching the
+   * media-streams ladder semantics.
+   */
+  private async runLowSttConfidenceGatherLadder(
+    session: VoiceSession,
+    sessionId: string,
+  ): Promise<string> {
+    const lang: SessionLanguage = session.language === 'es' ? 'es' : 'en';
+    const streak = (this.lowConfidenceGatherStreak.get(sessionId) ?? 0) + 1;
+
+    if (streak >= MAX_CONSECUTIVE_LOW_CONFIDENCE_TURNS) {
+      this.lowConfidenceGatherStreak.delete(sessionId);
+      const effects: SideEffect[] = [
+        {
+          type: 'tts_play',
+          payload: { text: renderTtsText(SPEECH_TURN_FAILURE_ESCALATION_COPY, {}, lang) },
+        },
+        { type: 'end_session', payload: { reason: 'low_stt_confidence_max_retries' } },
+      ];
+      const twiml = await this.finalizeTwiml(session, effects, sessionId);
+      if (!session.ended) {
+        session.ended = true;
+        this.finalizeTerminatedSession(session, effects, 'low_stt_confidence_max_retries');
+      }
+      recordVoiceError({
+        errorKind: 'low_stt_confidence_repeated',
+        channel: 'gather',
+        callSid: session.callSid ?? undefined,
+        tenantId: session.tenantId,
+      });
+      return twiml;
+    }
+
+    this.lowConfidenceGatherStreak.set(sessionId, streak);
+    const effects: SideEffect[] = [
+      {
+        type: 'tts_play',
+        payload: { text: renderTtsText(LOW_STT_CONFIDENCE_REPROMPT_COPY, {}, lang) },
+      },
+    ];
+    const twiml = await this.finalizeTwiml(session, effects, sessionId);
+    recordVoiceError({
+      errorKind: 'low_stt_confidence',
+      channel: 'gather',
+      callSid: session.callSid ?? undefined,
+      tenantId: session.tenantId,
+    });
+    return twiml;
+  }
+
+  /**
+   * A2 — resolve the `<Gather hints="...">` boost terms for `tenantId`.
+   * Prefers `deps.sttHintsResolver` (a caller-supplied source, e.g. one
+   * that also merges vertical `sttKeywords`); falls back to a
+   * `TenantGlossaryProvider` built from `catalogRepo`/`customerRepo`/
+   * `userRepo` when all three are wired. Failure-soft like every other
+   * boost source in this branch — a lookup error never blocks a Gather
+   * turn, it just omits hints.
+   */
+  private async resolveGatherHints(tenantId: string): Promise<ReadonlyArray<string> | undefined> {
+    try {
+      if (this.deps.sttHintsResolver) {
+        const hints = await this.deps.sttHintsResolver(tenantId);
+        return hints.length > 0 ? hints : undefined;
+      }
+      if (this.glossaryProvider === null) {
+        const { catalogRepo, customerRepo, userRepo } = this.deps;
+        this.glossaryProvider =
+          catalogRepo && customerRepo && userRepo
+            ? new TenantGlossaryProvider({ catalogRepo, customerRepo, userRepo })
+            : undefined;
+      }
+      if (!this.glossaryProvider) return undefined;
+      const terms = await this.glossaryProvider.termsForTenant(tenantId);
+      return terms.length > 0 ? terms : undefined;
+    } catch (err) {
+      logger.warn('twilio-adapter: gather hints resolution failed — proceeding without hints', {
+        tenantId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return undefined;
+    }
   }
 
   /**
@@ -2175,10 +2662,12 @@ export class TwilioGatherAdapter {
       });
     }
 
+    const hints = await this.resolveGatherHints(session.tenantId);
     const twiml = buildTwiML(sideEffects, {
       gatherActionUrl: this.gatherUrl(sessionId),
       ...(session.language ? { language: session.language } : {}),
       ...(session.ttsVoice ? { voiceOverride: session.ttsVoice } : {}),
+      ...(hints ? { hints } : {}),
     });
     // Capture the agent's reply so summarizeSession sees both sides
     // of the conversation, not just the caller turns.
@@ -2237,6 +2726,41 @@ export class TwilioGatherAdapter {
         return this.lookupNotWiredFallback();
       }
       return this.runOwnerLookupSkill(session, intentType, tenantId);
+    }
+    // WS5 — `lookup_catalog` (browsing the price book) is OWNER-ONLY and
+    // tenant-scoped (no customerId needed). A customer asking about prices now
+    // flows through the grounded estimate path, which speaks catalog-grounded
+    // prices safely; they must never get a raw catalog recital. Gated on the
+    // RV-070 ownerSession flag (caller-ID identity), never utterance content —
+    // same identity source as the owner lookups above, without the
+    // extended-intents tenant opt-in. Handled here, BEFORE the customer-scoped
+    // gate, because the owner line is not itself a customer.
+    if (intentType === 'lookup_catalog') {
+      if (!ownerSession || !this.deps.catalogRepo) {
+        return this.lookupNotWiredFallback();
+      }
+      const catalogStart = Date.now();
+      try {
+        const result = await lookupCatalog(
+          { tenantId, sessionId: session.id },
+          {
+            catalogRepo: this.deps.catalogRepo,
+            ...(this.deps.lookupEvents ? { lookupEvents: this.deps.lookupEvents } : {}),
+          },
+        );
+        session.events.emit(
+          'voice-event',
+          lookupExecutedEvent(intentType, Date.now() - catalogStart, true),
+        );
+        return result.summary;
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        session.events.emit(
+          'voice-event',
+          lookupExecutedEvent(intentType, Date.now() - catalogStart, false, message),
+        );
+        return this.lookupNotWiredFallback();
+      }
     }
     if (!customerId) {
       // Lookups are customer-scoped. An anonymous caller doesn't have
@@ -2428,37 +2952,44 @@ export class TwilioGatherAdapter {
           );
           return result.summary;
         }
-        case 'lookup_catalog': {
-          if (!this.deps.catalogRepo) {
-            return this.lookupNotWiredFallback();
-          }
-          const result = await lookupCatalog(
-            { tenantId, sessionId: session.id },
-            {
-              catalogRepo: this.deps.catalogRepo,
-              ...(this.deps.lookupEvents ? { lookupEvents: this.deps.lookupEvents } : {}),
-            },
-          );
-          session.events.emit(
-            'voice-event',
-            lookupExecutedEvent(intentType, Date.now() - startMs, true),
-          );
-          return result.summary;
-        }
         case 'lookup_availability': {
-          if (!this.deps.availabilityFinder) {
+          const from = new Date();
+          let result;
+          if (this.deps.appointmentRepo) {
+            // Business-hours-aware path (F2): only offer slots the tenant
+            // could honor, spoken in the tenant timezone. Settings failures
+            // degrade to defaults, never block the call.
+            const settings = this.deps.settingsRepo
+              ? await this.deps.settingsRepo.findByTenant(tenantId).catch(() => null)
+              : null;
+            const config = schedulingConfigFromSettings(settings);
+            result = await lookupBookableAvailability(
+              {
+                tenantId,
+                timezone: config.timezone ?? 'America/New_York',
+                searchFrom: from,
+                searchDays: 14,
+                durationMs: 2 * 60 * 60 * 1000,
+                weeklyHours: config.weeklyHours,
+                bufferMinutes: config.bufferMinutes,
+              },
+              { appointmentRepo: this.deps.appointmentRepo },
+            );
+          } else if (this.deps.availabilityFinder) {
+            // Legacy raw-finder fallback for wirings without an appointment
+            // repo (calendar-gap walk, no hours awareness).
+            result = await lookupAvailability(
+              {
+                tenantId,
+                searchFrom: from,
+                searchTo: new Date(from.getTime() + 14 * 24 * 60 * 60 * 1000),
+                durationMs: 2 * 60 * 60 * 1000,
+              },
+              this.deps.availabilityFinder,
+            );
+          } else {
             return this.lookupNotWiredFallback();
           }
-          const from = new Date();
-          const result = await lookupAvailability(
-            {
-              tenantId,
-              searchFrom: from,
-              searchTo: new Date(from.getTime() + 14 * 24 * 60 * 60 * 1000),
-              durationMs: 2 * 60 * 60 * 1000,
-            },
-            this.deps.availabilityFinder,
-          );
           session.events.emit(
             'voice-event',
             lookupExecutedEvent(intentType, Date.now() - startMs, true),
@@ -2630,7 +3161,13 @@ export class TwilioGatherAdapter {
     const phoneBlocked = isBlockedCallerId(callerIdRaw);
     const callerIdPhone = phoneBlocked ? undefined : callerIdRaw;
 
-    const handler = new CreateCustomerVoiceTaskHandler();
+    // 4.3 — wire the read-only dedup loader so the proposal card surfaces
+    // "possible duplicate" before a human approves the write.
+    const duplicateLoader =
+      this.deps.customerRepo && isCustomerDuplicateLoader(this.deps.customerRepo)
+        ? this.deps.customerRepo
+        : undefined;
+    const handler = new CreateCustomerVoiceTaskHandler({ duplicateLoader });
     const outcome = await handler.run({
       tenantId: opts.tenantId,
       message: opts.speechResult,
@@ -2784,7 +3321,12 @@ export class TwilioGatherAdapter {
           sessionId: session.id,
           escalationReason: reason,
         },
-        aiRunId: uuidv4(),
+        // QA-2026-07-10: do NOT fabricate an aiRunId. proposals.ai_run_id has
+        // an FK to ai_runs(id); a random uuid violates it and the swallowed
+        // insert error silently dropped EVERY inbound-voice proposal on
+        // Postgres-backed envs (in-memory repos don't enforce the FK, which
+        // is why tests passed). This callback proposal is generated internally
+        // with no associated ai_runs row, so ai_run_id stays null.
         createdBy: this.deps.systemActorId ?? 'calling-agent',
         ...(tenantThresholdOverride ? { tenantThresholdOverride } : {}),
       });
@@ -3022,6 +3564,9 @@ export class TwilioGatherAdapter {
             gateway: this.deps.gateway,
             ...(intentDetected ? { intentDetected } : {}),
             ...(this.deps.pool ? { pool: this.deps.pool } : {}),
+            // RIVET I13 — inbound telephony: the caller is an unauthenticated
+            // homeowner (S1); their turns are fenced as untrusted.
+            inboundCallerSession: true,
           });
           lastErr = null;
           break;

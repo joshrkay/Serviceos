@@ -18,8 +18,8 @@ import { InMemoryAuditRepository } from '../../../src/audit/audit';
 import { InMemoryProposalRepository, createProposal } from '../../../src/proposals/proposal';
 import { InMemoryVoiceSessionRepository } from '../../../src/voice/voice-session';
 import { InMemoryCallMeBackRepository } from '../../../src/voice/call-me-back/call-me-back';
-import { InMemoryDeviceTokenService } from '../../../src/devices/device-token';
-import type { ExpoPushMessage } from '../../../src/notifications/expo-push-sender';
+import { InMemoryDeviceTokenRepository } from '../../../src/push/device-token-service';
+import type { PushMessage, PushSendResult } from '../../../src/notifications/push-delivery-provider';
 import { InMemoryAppointmentRepository, createAppointment } from '../../../src/appointments/appointment';
 import { maskPhone } from '../../../src/telephony/twilio-call-control';
 import type { LLMGateway, LLMResponse } from '../../../src/ai/gateway/gateway';
@@ -104,6 +104,14 @@ function makeCtx(opts: {
   negotiationQuoteResolver?: CurrentQuoteResolver;
   /** I6 — override the session's channel (defaults to the telephony surface). */
   channel?: CallingAgentChannel;
+  /**
+   * RV-070 owner session = RIVET surface S2. When false/absent the session is
+   * an unauthenticated inbound caller (surface S1), which the P4 allowlist
+   * restricts to the S1 op set. Operator-grade intents (update_job,
+   * draft_invoice, …) are only legitimate on an owner session, so tests that
+   * pin that intent→proposal mapping run with `ownerSession: true`.
+   */
+  ownerSession?: boolean;
 } = {
   gateway: makeGatewayReturning('{}'),
   withRepos: true,
@@ -114,6 +122,7 @@ function makeCtx(opts: {
   const voiceSessionRepo = new InMemoryVoiceSessionRepository();
   const session = store.create('tenant-abc', opts.channel ?? 'telephony', {
     callSid: 'CA-test',
+    ...(opts.ownerSession ? { ownerSession: true } : {}),
   });
   // Drive the FSM forward to `intent_capture`. handleInbound's
   // unknown_caller path lands in `ask_caller`; we use `caller_known`
@@ -276,10 +285,155 @@ describe('createVoiceTurnProcessor.speechTurn', () => {
     for (const p of proposals) {
       expect(p.proposalType).toBe('voice_clarification');
     }
-    // The denial was audited.
+    // The denial was audited. (main's surface-violation event superseded this
+    // branch's agent.calling.i6_s1_denied_s2_op on the merge — same I6 gate,
+    // one canonical event.)
     expect(
-      auditRepo.getAll().some((e) => e.eventType === 'agent.calling.i6_s1_denied_s2_op'),
+      auditRepo.getAll().some((e) => e.eventType === 'voice.surface_violation_blocked'),
     ).toBe(true);
+  });
+
+  it('maps an update_job intent to an update_job proposal (not the voice_clarification dead-end)', async () => {
+    // Sequence: classifier (turn 1) → confirmIntent (turn 2). Pins
+    // intentToProposalType's 'update_job' case — this surface previously
+    // fell through to the `default: voice_clarification` branch, unlike
+    // the worker (INTENT_TO_PROPOSAL_TYPE) and assistant (registry) maps,
+    // which already draft real update_job proposals.
+    const gateway = makeGatewayWithSequence([
+      JSON.stringify({
+        intentType: 'update_job',
+        confidence: 0.95,
+        reasoning: 'matches keywords',
+        extractedEntities: { jobRef: 'Henderson', status: 'in_progress' },
+      }),
+      JSON.stringify({ answer: 'yes', reasoning: 'caller said yes' }),
+    ]);
+    const { processor, session, proposalRepo } = makeCtx({
+      gateway,
+      withRepos: true,
+      ownerSession: true,
+    });
+
+    await processor.speechTurn({
+      session,
+      speechResult: 'mark the Henderson job in progress',
+      callSid: 'CA-test',
+      tenantId: 'tenant-abc',
+    });
+    expect(session.machine.currentState).toBe('intent_confirm');
+
+    await processor.speechTurn({
+      session,
+      speechResult: 'yes that is correct',
+      callSid: 'CA-test',
+      tenantId: 'tenant-abc',
+    });
+
+    const proposals = await proposalRepo.findByTenant('tenant-abc');
+    expect(proposals.length).toBe(1);
+    expect(proposals[0]!.proposalType).toBe('update_job');
+    expect(session.proposalIds).toEqual([proposals[0]!.id]);
+  });
+
+  // ─── Part A — real ai_run_id threads classify → event → payload → proposal ──
+
+  it("links the persisted proposal to the classify call's REAL ai_run_id", async () => {
+    const AI_RUN_ID = '11111111-1111-4111-8111-111111111111';
+    // Turn 1 = classify (surfaces the persisted ai_runs id, exactly as the
+    // real LLMGateway does after writing the row); turn 2 = confirmIntent
+    // "yes" and deliberately carries NO aiRunId — the proposal must reuse the
+    // classify turn's id captured in FSM context (lastAiRunId), not the
+    // confirm turn's.
+    const classify: LLMResponse = {
+      content: JSON.stringify({
+        intentType: 'create_invoice',
+        confidence: 0.95,
+        reasoning: 'matches keywords',
+        extractedEntities: { customerName: 'Acme' },
+      }),
+      model: 'mock-model',
+      provider: 'mock',
+      tokenUsage: { input: 1, output: 1, total: 2 },
+      latencyMs: 1,
+      aiRunId: AI_RUN_ID,
+    };
+    const confirm: LLMResponse = {
+      content: JSON.stringify({ answer: 'yes', reasoning: 'caller said yes' }),
+      model: 'mock-model',
+      provider: 'mock',
+      tokenUsage: { input: 1, output: 1, total: 2 },
+      latencyMs: 1,
+    };
+    let i = 0;
+    const seq = [classify, confirm];
+    const gateway = {
+      complete: vi.fn().mockImplementation(async () => seq[Math.min(i++, seq.length - 1)]),
+    } as unknown as LLMGateway;
+
+    const { processor, session, proposalRepo } = makeCtx({
+      gateway,
+      withRepos: true,
+      ownerSession: true,
+    });
+
+    await processor.speechTurn({
+      session,
+      speechResult: 'I need an invoice for Acme',
+      callSid: 'CA-test',
+      tenantId: 'tenant-abc',
+    });
+    await processor.speechTurn({
+      session,
+      speechResult: 'yes that is correct',
+      callSid: 'CA-test',
+      tenantId: 'tenant-abc',
+    });
+
+    const proposals = await proposalRepo.findByTenant('tenant-abc');
+    expect(proposals.length).toBe(1);
+    // The proposal carries the REAL run id (not null, not a fabricated uuid).
+    expect(proposals[0]!.aiRunId).toBe(AI_RUN_ID);
+    // …and findByAiRun links back to it (the auditability invariant).
+    const linked = await proposalRepo.findByAiRun('tenant-abc', AI_RUN_ID);
+    expect(linked.map((p) => p.id)).toContain(proposals[0]!.id);
+  });
+
+  it('leaves ai_run_id null (never fabricated) when the classify call surfaced no run id', async () => {
+    // Gateway persists no ai_runs row → no aiRunId on the response. The
+    // proposal must be born with a null ai_run_id, NOT a random uuid (a
+    // fabricated id violates proposals.ai_run_id's FK and silently drops the
+    // proposal on Postgres — the P0 this thread supersedes).
+    const gateway = makeGatewayWithSequence([
+      JSON.stringify({
+        intentType: 'create_invoice',
+        confidence: 0.95,
+        reasoning: 'matches keywords',
+        extractedEntities: { customerName: 'Acme' },
+      }),
+      JSON.stringify({ answer: 'yes', reasoning: 'caller said yes' }),
+    ]);
+    const { processor, session, proposalRepo } = makeCtx({
+      gateway,
+      withRepos: true,
+      ownerSession: true,
+    });
+
+    await processor.speechTurn({
+      session,
+      speechResult: 'I need an invoice for Acme',
+      callSid: 'CA-test',
+      tenantId: 'tenant-abc',
+    });
+    await processor.speechTurn({
+      session,
+      speechResult: 'yes that is correct',
+      callSid: 'CA-test',
+      tenantId: 'tenant-abc',
+    });
+
+    const proposals = await proposalRepo.findByTenant('tenant-abc');
+    expect(proposals.length).toBe(1);
+    expect(proposals[0]!.aiRunId).toBeUndefined();
   });
 
   it('treats empty speech as confidence_low and does not call the gateway', async () => {
@@ -400,6 +554,181 @@ describe('createVoiceTurnProcessor.executeSideEffects', () => {
     await expect(
       processorNoRepo.executeSideEffects(session, sideEffects, 'tenant-abc'),
     ).resolves.toBeUndefined();
+  });
+
+  it('does not fabricate an aiRunId on create_proposal (FK-safe)', async () => {
+    // Regression (QA-2026-07-10): the telephony create_proposal path set
+    // aiRunId to a random uuidv4, violating proposals.ai_run_id →
+    // ai_runs(id). The swallowed FK error silently dropped EVERY voice
+    // proposal on Postgres. The in-memory repo doesn't enforce the FK, so
+    // this asserts the built proposal never carries a fabricated id — the
+    // real-DB proof lives in
+    // test/integration/voice-proposal-ai-run-fk.test.ts.
+    // Owner session (S2) so the FK-safety assertion exercises the real
+    // draft_invoice path, not the S1-coerced voice_clarification.
+    const { processor, session, proposalRepo } = makeCtx({
+      gateway: makeGatewayReturning('{}'),
+      withRepos: true,
+      ownerSession: true,
+    });
+    await processor.executeSideEffects(
+      session,
+      [
+        {
+          type: 'create_proposal',
+          payload: { intent: 'create_invoice', entities: {} },
+        },
+      ],
+      'tenant-abc',
+    );
+    const proposals = await proposalRepo.findByTenant('tenant-abc');
+    expect(proposals.length).toBe(1);
+    expect(proposals[0]!.aiRunId).toBeUndefined();
+  });
+
+  it('threads a real aiRunId through create_proposal when the side effect provides one', async () => {
+    const { processor, session, proposalRepo } = makeCtx({
+      gateway: makeGatewayReturning('{}'),
+      withRepos: true,
+      ownerSession: true,
+    });
+    const realRunId = '11111111-2222-3333-4444-555555555555';
+    await processor.executeSideEffects(
+      session,
+      [
+        {
+          type: 'create_proposal',
+          payload: { intent: 'create_invoice', entities: {}, aiRunId: realRunId },
+        },
+      ],
+      'tenant-abc',
+    );
+    const proposals = await proposalRepo.findByTenant('tenant-abc');
+    expect(proposals.length).toBe(1);
+    expect(proposals[0]!.aiRunId).toBe(realRunId);
+  });
+});
+
+// ─── RIVET P4 — S1 surface allowlist at proposal creation ────────────────────
+
+describe('createVoiceTurnProcessor — S1 surface enforcement (P4)', () => {
+  it('coerces an S2-only intent (send_invoice) to voice_clarification on an unauthenticated S1 caller', async () => {
+    // The default makeCtx session is a caller-known but NOT ownerSession
+    // caller — i.e. surface S1. "Send the Henderson invoice to me" spoken by a
+    // caller is an attack, not a request: it must never mint an S2 send.
+    const { processor, session, proposalRepo, auditRepo } = makeCtx({
+      gateway: makeGatewayReturning('{}'),
+      withRepos: true,
+    });
+    await processor.executeSideEffects(
+      session,
+      [
+        {
+          type: 'create_proposal',
+          payload: { intent: 'send_invoice', entities: { invoiceNumber: '1043' } },
+        },
+      ],
+      'tenant-abc',
+    );
+    const proposals = await proposalRepo.findByTenant('tenant-abc');
+    expect(proposals).toHaveLength(1);
+    // The S2-only send is neutralized to a non-actionable clarification…
+    expect(proposals[0]!.proposalType).toBe('voice_clarification');
+    // …whose payload is CANONICAL (voiceClarificationPayloadSchema requires
+    // transcript + reason — a generic {intent, entities} payload would be a
+    // malformed, approve-to-fail card since clarifications have no handler).
+    const payload = proposals[0]!.payload as Record<string, unknown>;
+    expect(typeof payload.transcript).toBe('string');
+    expect((payload.transcript as string).length).toBeGreaterThan(0);
+    expect(payload.reason).toBe('surface_restricted');
+    expect(payload.requestedProposalType).toBe('send_invoice');
+    // The classifier's structured entities survive (Codex): the operator can
+    // see WHICH invoice the caller asked to have sent — the fallback
+    // transcript carries the details and the raw entities ride alongside.
+    expect(payload.transcript as string).toContain('invoiceNumber=1043');
+    expect((payload.requestedEntities as Record<string, unknown>).invoiceNumber).toBe('1043');
+    // …and stamped with the S1 surface so the execution boundary re-checks it.
+    expect((proposals[0]!.sourceContext as Record<string, unknown>).surface).toBe('S1');
+    // …and the block is audited.
+    const audits = auditRepo.getAll();
+    expect(audits.some((a) => a.eventType === 'voice.surface_violation_blocked')).toBe(true);
+  });
+
+  it('allows an S1-allowlisted intent (create_customer, self-signup) and stamps surface S1', async () => {
+    const { processor, session, proposalRepo, auditRepo } = makeCtx({
+      gateway: makeGatewayReturning('{}'),
+      withRepos: true,
+    });
+    await processor.executeSideEffects(
+      session,
+      [
+        {
+          type: 'create_proposal',
+          payload: { intent: 'create_customer', entities: { name: 'Elena Ruiz' } },
+        },
+      ],
+      'tenant-abc',
+    );
+    const proposals = await proposalRepo.findByTenant('tenant-abc');
+    expect(proposals).toHaveLength(1);
+    expect(proposals[0]!.proposalType).toBe('create_customer');
+    expect((proposals[0]!.sourceContext as Record<string, unknown>).surface).toBe('S1');
+    const audits = auditRepo.getAll();
+    expect(audits.some((a) => a.eventType === 'voice.surface_violation_blocked')).toBe(false);
+  });
+
+  it('does NOT coerce a system-detected emergency_dispatch on an S1 caller (Codex): mints the real proposal + safety marker', async () => {
+    const { processor, session, proposalRepo, auditRepo } = makeCtx({
+      gateway: makeGatewayReturning('{}'),
+      withRepos: true,
+    });
+    // Mirrors the deterministic emergency-keyword side effect (transitions.ts):
+    // systemDetected marks it as a server-side safety detection, not a
+    // transcript-classified operator action.
+    await processor.executeSideEffects(
+      session,
+      [
+        {
+          type: 'create_proposal',
+          payload: {
+            intent: 'emergency_dispatch',
+            systemDetected: true,
+            entities: { emergencyDescription: 'gas leak in the kitchen' },
+          },
+        },
+      ],
+      'tenant-abc',
+    );
+    const proposals = await proposalRepo.findByTenant('tenant-abc');
+    expect(proposals).toHaveLength(1);
+    // The emergency proposal is minted for real — NOT coerced to a
+    // non-executable clarification — so the dispatch handler can open the job.
+    expect(proposals[0]!.proposalType).toBe('emergency_dispatch');
+    const sc = proposals[0]!.sourceContext as Record<string, unknown>;
+    expect(sc.surface).toBe('S1');
+    // The safety marker travels to the executor so I6 honors the same exemption.
+    expect(sc.systemDetectedSafety).toBe(true);
+    const audits = auditRepo.getAll();
+    expect(audits.some((a) => a.eventType === 'voice.surface_violation_blocked')).toBe(false);
+  });
+
+  it('STILL coerces emergency_dispatch WITHOUT the systemDetected marker (transcript-classified) to a clarification', async () => {
+    const { processor, session, proposalRepo } = makeCtx({
+      gateway: makeGatewayReturning('{}'),
+      withRepos: true,
+    });
+    await processor.executeSideEffects(
+      session,
+      [
+        {
+          type: 'create_proposal',
+          payload: { intent: 'emergency_dispatch', entities: {} }, // no systemDetected
+        },
+      ],
+      'tenant-abc',
+    );
+    const proposals = await proposalRepo.findByTenant('tenant-abc');
+    expect(proposals[0]!.proposalType).toBe('voice_clarification');
   });
 });
 
@@ -858,8 +1187,10 @@ describe('I6 — untrusted-surface predicate is a trusted-channel allowlist', ()
 
     const proposals = await proposalRepo.findByTenant('tenant-abc');
     expect(proposals.some((p) => p.proposalType === 'send_invoice')).toBe(false);
+    // main's surface-violation event superseded agent.calling.i6_s1_denied_s2_op
+    // on the merge — same I6 gate, one canonical event.
     expect(
-      auditRepo.getAll().some((e) => e.eventType === 'agent.calling.i6_s1_denied_s2_op'),
+      auditRepo.getAll().some((e) => e.eventType === 'voice.surface_violation_blocked'),
     ).toBe(true);
   });
 
@@ -930,8 +1261,8 @@ async function makeE1Ctx(opts: {
   settings?: Partial<TenantSettings>;
   proposalRepo?: InMemoryProposalRepository;
   deliveryProvider?: { sendSms(args: { to: string; body: string }): Promise<unknown> };
-  deviceTokenRepo?: InMemoryDeviceTokenService;
-  expoPushSender?: { send(messages: ExpoPushMessage[]): Promise<void> };
+  deviceTokenRepo?: InMemoryDeviceTokenRepository;
+  pushDeliveryProvider?: { sendPush(messages: PushMessage[]): Promise<PushSendResult[]> };
   appointmentRepo?: InMemoryAppointmentRepository;
 } = {}) {
   const store = new VoiceSessionStore({ startInterval: false });
@@ -953,7 +1284,7 @@ async function makeE1Ctx(opts: {
     callerPhoneResolver: () => '+15125550100',
     ...(opts.deliveryProvider ? { deliveryProvider: opts.deliveryProvider } : {}),
     ...(opts.deviceTokenRepo ? { deviceTokenRepo: opts.deviceTokenRepo } : {}),
-    ...(opts.expoPushSender ? { expoPushSender: opts.expoPushSender } : {}),
+    ...(opts.pushDeliveryProvider ? { pushDeliveryProvider: opts.pushDeliveryProvider } : {}),
     ...(opts.appointmentRepo ? { appointmentRepo: opts.appointmentRepo } : {}),
   });
   return { processor, store, session, auditRepo, callMeBackRepo, proposalRepo };
@@ -1316,17 +1647,28 @@ describe('ANS-001 — E1 tenant alert (owner cell, durable fallback, push fan-ou
   });
 
   it('pushes the alert to every device the tenant registered', async () => {
-    const deviceTokenRepo = new InMemoryDeviceTokenService();
-    await deviceTokenRepo.upsert('tenant-e1', 'user-1', 'ExponentPushToken[aaa]', 'ios');
-    await deviceTokenRepo.upsert('tenant-e1', 'user-2', 'ExponentPushToken[bbb]', 'android');
-    const pushed: ExpoPushMessage[] = [];
+    const deviceTokenRepo = new InMemoryDeviceTokenRepository();
+    await deviceTokenRepo.register({
+      tenantId: 'tenant-e1',
+      userId: 'user-1',
+      expoPushToken: 'ExponentPushToken[aaa]',
+      platform: 'ios',
+    });
+    await deviceTokenRepo.register({
+      tenantId: 'tenant-e1',
+      userId: 'user-2',
+      expoPushToken: 'ExponentPushToken[bbb]',
+      platform: 'android',
+    });
+    const pushed: PushMessage[] = [];
     const { processor, session } = await makeE1Ctx({
       settings: { ownerPhone: '+15125550111' },
       deliveryProvider: { sendSms: async () => ({}) },
       deviceTokenRepo,
-      expoPushSender: {
-        send: async (messages) => {
+      pushDeliveryProvider: {
+        sendPush: async (messages) => {
           pushed.push(...messages);
+          return messages.map((m) => ({ to: m.to, ok: true, deviceNotRegistered: false }));
         },
       },
     });
@@ -1342,8 +1684,13 @@ describe('ANS-001 — E1 tenant alert (owner cell, durable fallback, push fan-ou
   });
 
   it('still texts the owner when the push fan-out throws', async () => {
-    const deviceTokenRepo = new InMemoryDeviceTokenService();
-    await deviceTokenRepo.upsert('tenant-e1', 'user-1', 'ExponentPushToken[aaa]', 'ios');
+    const deviceTokenRepo = new InMemoryDeviceTokenRepository();
+    await deviceTokenRepo.register({
+      tenantId: 'tenant-e1',
+      userId: 'user-1',
+      expoPushToken: 'ExponentPushToken[aaa]',
+      platform: 'ios',
+    });
     const sent: Array<{ to: string; body: string }> = [];
     const { processor, session } = await makeE1Ctx({
       settings: { ownerPhone: '+15125550111' },
@@ -1354,8 +1701,8 @@ describe('ANS-001 — E1 tenant alert (owner cell, durable fallback, push fan-ou
         },
       },
       deviceTokenRepo,
-      expoPushSender: {
-        send: async () => {
+      pushDeliveryProvider: {
+        sendPush: async () => {
           throw new Error('expo down');
         },
       },

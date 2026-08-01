@@ -31,6 +31,7 @@ import {
 import type { Observation } from '../observation';
 import type { VoiceQualityScript } from '../schema';
 import type { LLMGateway } from '../../gateway/gateway';
+import { SYSTEM_TENANT_ID } from '../../gateway/gateway';
 
 export interface CallerExperienceThresholds {
   /** P95 cap on per-turn TTFA. Default 800ms (spec §6.2). */
@@ -261,6 +262,9 @@ async function judgeOneTurn(input: RepromptDetectionInput, turnIdx: number): Pro
 
   const response = await input.gateway.complete({
     taskType: 'voice_quality_reprompt_judge',
+    // Harness-internal grader with no real tenant; the gateway enforces a
+    // top-level tenantId in strict (test/CI) mode, so use the system bucket.
+    tenantId: SYSTEM_TENANT_ID,
     messages: [
       { role: 'system', content: REPROMPT_JUDGE_SYSTEM_PROMPT },
       { role: 'user', content: userPrompt },

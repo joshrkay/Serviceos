@@ -273,16 +273,61 @@ export interface StreamingTranscriptionProvider {
  * P8-012 wires this into the Twilio Media Streams WebSocket handler.
  * Whisper stays in place for the existing async technician voice path.
  */
+
+/**
+ * VOX-01 — upper bound on the Deepgram WS handshake. Deliberately far
+ * tighter than the blocking-request bounds (TTS/Whisper 30s, Vapi 20s):
+ * this runs on the live-call hot path with caller audio already bridged,
+ * so a stall here is immediate dead air. A WS upgrade that hasn't
+ * completed in a few seconds is not going to; fail fast to the
+ * closeWs('deepgram_open_failed') path instead of hanging the call.
+ */
+export const DEEPGRAM_OPEN_TIMEOUT_MS = 5_000;
+
+/**
+ * A2 — true for any Nova-3 variant (`nova-3`, `nova-3-general`, etc.).
+ * Nova-3 models understand Deepgram's `keyterm` prompting param; everything
+ * else (Nova-2 pins, base/enhanced) falls back to the legacy `keywords`
+ * param that `buildWsUrl` used unconditionally before this fix.
+ */
+function isNova3ModelFamily(model: string): boolean {
+  return model.toLowerCase().startsWith('nova-3');
+}
+
+/**
+ * A2 follow-up — strip a trailing `:<digits>` weight suffix before a term
+ * is emitted under Deepgram's `keyterm` param. `term:weight` is the legacy
+ * `keywords` (Nova-2) boost format; Deepgram's Nova-3 `keyterm` prompting
+ * docs do not describe weight-suffix support, so passing 'P-trap:3' through
+ * unchanged risks sending the literal junk phrase "P-trap:3" instead of
+ * boosting "P-trap". Only a FINAL ':<digits>' is stripped, so a term with a
+ * legitimate internal colon (none in today's packs, but handled
+ * defensively) keeps everything except a trailing numeric suffix.
+ * `keywords` (Nova-2 path) is untouched — Nova-2 documents weights.
+ */
+function stripKeytermWeightSuffix(term: string): string {
+  return term.replace(/:\d+$/, '');
+}
+
 export class DeepgramStreamingProvider implements StreamingTranscriptionProvider {
   private readonly defaultLanguage: 'en' | 'es';
+  /** A2 — Deepgram model pin; drives which boost param buildWsUrl emits. */
+  private readonly model: string;
 
   constructor(
     private readonly apiKey: string,
     /** P11-002: per-session default; openSession() can override per-call. */
-    defaultLanguage: 'en' | 'es' = 'en'
+    defaultLanguage: 'en' | 'es' = 'en',
+    /**
+     * A2 — Deepgram model pin. Defaults to 'nova-3' (this provider's only
+     * supported model until now). Exposed so a future Nova-2 pin can still
+     * request term boosting through the param it actually supports.
+     */
+    model: string = 'nova-3'
   ) {
     if (!apiKey) throw new Error('DeepgramStreamingProvider requires DEEPGRAM_API_KEY');
     this.defaultLanguage = defaultLanguage;
+    this.model = model;
   }
 
   /** Build the Deepgram WS URL for a given language. Exposed for testing. */
@@ -293,11 +338,37 @@ export class DeepgramStreamingProvider implements StreamingTranscriptionProvider
     const endpointing = options.endpointingMs ?? 600;
     let url =
       'wss://api.deepgram.com/v1/listen' +
-      `?model=nova-3&language=${language}&encoding=linear16&sample_rate=16000` +
+      `?model=${this.model}&language=${language}&encoding=linear16&sample_rate=16000` +
       `&channels=1&interim_results=true&smart_format=true&endpointing=${endpointing}`;
     if (options.keywords && options.keywords.length > 0) {
+      // A2 — Nova-3 replaced Deepgram's legacy `keywords` boost param with
+      // `keyterm` prompting; `keywords` is a Nova-2-era feature that Nova-3
+      // silently ignores (no error, no boost — a no-op worse than sending
+      // nothing, since it looks wired but does nothing). Detect the model
+      // family so a future Nova-2 pin still boosts through the param IT
+      // supports.
+      //
+      // Term format is NOT unchanged across the flip: callers (vertical
+      // packs) supply `term:weight` (e.g. 'P-trap:3'), which is `keywords`'
+      // documented weighted-boost format on Nova-2. `keyterm` prompting on
+      // Nova-3 does not document weight-suffix support, so a trailing
+      // `:<digits>` is stripped for the keyterm path only — see
+      // stripKeytermWeightSuffix. `keywords` keeps the weight suffix as-is
+      // since Nova-2 supports it. URL-encoding is unchanged either way.
+      //
+      // NOTE: keyterm prompting's Deepgram docs describe it as English-only
+      // support at this time; this provider still sends the same boost
+      // terms on `language=es` sessions (deliberate on this branch — no
+      // Spanish-specific term list exists yet). TODO: live-check against
+      // Deepgram whether es keyterm requests are silently ignored (mirroring
+      // the keywords no-op above) or rejected, and gate/translate
+      // accordingly once confirmed.
+      const paramName = isNova3ModelFamily(this.model) ? 'keyterm' : 'keywords';
       const params = options.keywords
-        .map((k) => `keywords=${encodeURIComponent(k)}`)
+        .map((k) => {
+          const term = paramName === 'keyterm' ? stripKeytermWeightSuffix(k) : k;
+          return `${paramName}=${encodeURIComponent(term)}`;
+        })
         .join('&');
       url += `&${params}`;
     }
@@ -318,9 +389,54 @@ export class DeepgramStreamingProvider implements StreamingTranscriptionProvider
 
     // Attach message listener BEFORE awaiting open to avoid missing frames
     // that Deepgram sends immediately on connection.
+    //
+    // VOX-01 — bound the handshake. Twilio has already bridged caller audio
+    // by the time we open Deepgram, so if the WS upgrade stalls (no 'open',
+    // no 'error') an unbounded `await openPromise` would leave `deepgram`
+    // null and silently drop every inbound frame until the 30-minute idle
+    // timer — dead air for the whole call. Every other provider bounds its
+    // calls (TTS/Whisper 30s, Vapi 20s); a few seconds is ample for a WS
+    // upgrade. On expiry we reject (and close the socket) so the caller's
+    // existing catch path (closeWs(1011,'deepgram_open_failed')) runs. This
+    // bound lives inside openSession, so BOTH call sites — the initial open
+    // and the language-switch reopen in mediastream-adapter — inherit it.
     const openPromise = new Promise<void>((resolve, reject) => {
-      ws.addEventListener('open', () => resolve(), { once: true });
-      ws.addEventListener('error', (e) => reject(new Error(String(e))), { once: true });
+      let settled = false;
+      const timer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        try {
+          ws.close();
+        } catch {
+          /* swallow — we are already failing the open */
+        }
+        reject(
+          new Error(
+            `deepgram_open_timeout: no open/error within ${DEEPGRAM_OPEN_TIMEOUT_MS}ms`,
+          ),
+        );
+      }, DEEPGRAM_OPEN_TIMEOUT_MS);
+      if (typeof timer.unref === 'function') timer.unref();
+      ws.addEventListener(
+        'open',
+        () => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          resolve();
+        },
+        { once: true },
+      );
+      ws.addEventListener(
+        'error',
+        (e) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          reject(new Error(String(e)));
+        },
+        { once: true },
+      );
     });
 
     ws.addEventListener('message', (msg) => {

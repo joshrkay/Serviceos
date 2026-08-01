@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type KeyboardEvent } from 'react';
 import { Plus, Search } from 'lucide-react';
 import { useListQuery } from '../../hooks/useListQuery';
 import { formatCurrency } from '../../utils/currency';
+import { Input, Button } from '../ui';
 import type { CatalogPickItem } from './catalogToLineItem';
 
 export interface CatalogPickerProps {
@@ -80,40 +81,43 @@ export function CatalogPicker({ onPick }: CatalogPickerProps) {
 
   return (
     <div ref={containerRef} className="relative inline-block" onKeyDown={handleKeyDown}>
-      <button
+      <Button
         ref={triggerRef}
         type="button"
+        variant="outline"
+        size="sm"
+        leftIcon={<Plus size={12} />}
         data-testid="catalog-picker-trigger"
         onClick={() => setOpen((value) => !value)}
-        className="flex items-center gap-1 text-xs rounded-md border border-slate-200 px-2 py-1 hover:bg-slate-50"
+        className="min-h-11"
       >
-        <Plus size={12} /> Add from Price Book
-      </button>
+        Add from Price Book
+      </Button>
 
       {open && (
         <div
           data-testid="catalog-picker-popover"
-          className="absolute right-0 z-20 mt-1 w-72 rounded-lg border border-slate-200 bg-white shadow-lg"
+          className="absolute right-0 z-20 mt-1 w-72 rounded-lg border border-border bg-card shadow-lg"
         >
-          <div className="flex items-center gap-2 border-b border-slate-100 px-3 py-2">
-            <Search size={14} className="text-slate-400 shrink-0" />
-            <input
+          <div className="border-b border-border p-2">
+            <Input
               autoFocus
               aria-label="search-price-book"
+              leftIcon={<Search size={14} />}
               value={query}
               onChange={(event) => setQuery(event.target.value)}
               placeholder="Search price book…"
-              className="w-full text-sm outline-none placeholder:text-slate-400"
+              className="min-h-11"
             />
           </div>
 
           <div className="max-h-64 overflow-y-auto py-1">
-            {isLoading && <p className="px-3 py-2 text-xs text-slate-500">Searching…</p>}
+            {isLoading && <p className="px-3 py-2 text-xs text-muted-foreground">Searching…</p>}
             {!isLoading && error && (
-              <p className="px-3 py-2 text-xs text-red-600">Couldn’t load the price book.</p>
+              <p className="px-3 py-2 text-xs text-destructive">Couldn’t load the price book.</p>
             )}
             {!isLoading && !error && hasLoaded && items.length === 0 && (
-              <p className="px-3 py-2 text-xs text-slate-500">No matching items.</p>
+              <p className="px-3 py-2 text-xs text-muted-foreground">No matching items.</p>
             )}
             {!isLoading &&
               !error &&
@@ -122,15 +126,15 @@ export function CatalogPicker({ onPick }: CatalogPickerProps) {
                   key={item.id}
                   type="button"
                   onClick={() => handlePick(item)}
-                  className="flex w-full items-center gap-2 px-3 py-2 text-left hover:bg-slate-50"
+                  className="flex w-full items-center gap-2 px-3 py-2 text-left hover:bg-secondary"
                 >
-                  <span className="flex-1 min-w-0 truncate text-sm text-slate-800">{item.name}</span>
+                  <span className="flex-1 min-w-0 truncate text-sm text-foreground">{item.name}</span>
                   {item.category && (
-                    <span className="shrink-0 rounded-full bg-slate-100 px-1.5 py-0.5 text-[10px] text-slate-600">
+                    <span className="shrink-0 rounded-full bg-secondary px-1.5 py-0.5 text-[10px] text-muted-foreground">
                       {item.category}
                     </span>
                   )}
-                  <span className="shrink-0 text-sm text-slate-600">
+                  <span className="shrink-0 text-sm text-muted-foreground">
                     {formatCurrency(item.unitPriceCents)}
                   </span>
                 </button>

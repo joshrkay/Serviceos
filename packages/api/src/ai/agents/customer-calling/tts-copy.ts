@@ -78,6 +78,50 @@ function intentLabel(intent: string | undefined, lang: SessionLanguage): string 
   return (intent && table[intent]) || table._default;
 }
 
+/**
+ * Human-readable noun for an entity kind, used by the `entity_confirm`
+ * readback ("I found a job 'HVAC Repair' — is that the one you mean?").
+ */
+const ENTITY_KIND_LABELS: Record<SessionLanguage, Record<string, string>> = {
+  en: {
+    customer: 'customer',
+    job: 'job',
+    invoice: 'invoice',
+    estimate: 'estimate',
+    appointment: 'appointment',
+    technician: 'technician',
+    pending_proposal: 'record',
+    _default: 'record',
+  },
+  es: {
+    customer: 'cliente',
+    job: 'trabajo',
+    invoice: 'factura',
+    estimate: 'presupuesto',
+    appointment: 'cita',
+    technician: 'técnico',
+    pending_proposal: 'registro',
+    _default: 'registro',
+  },
+};
+
+/** Indefinite article for the es entity-kind nouns above ("un cliente", "una factura"). */
+const ENTITY_KIND_ARTICLE_ES: Record<string, string> = {
+  invoice: 'una',
+  estimate: 'un',
+  appointment: 'una',
+  _default: 'un',
+};
+
+function entityKindLabel(entityKind: string | undefined, lang: SessionLanguage): string {
+  const table = ENTITY_KIND_LABELS[lang];
+  return (entityKind && table[entityKind]) || table._default;
+}
+
+function entityKindArticleEs(entityKind: string | undefined): string {
+  return (entityKind && ENTITY_KIND_ARTICLE_ES[entityKind]) || ENTITY_KIND_ARTICLE_ES._default;
+}
+
 const TEMPLATE_KEYS = new Set(['intent_confirm', 'greeting', 'confirm_intent', 'greeting_with_disclosure']);
 
 /**
@@ -86,11 +130,48 @@ const TEMPLATE_KEYS = new Set(['intent_confirm', 'greeting', 'confirm_intent', '
  */
 
 /**
+ * VOX-35c — spoken copy for the media-stream/Gather adapters' speechTurn-
+ * failure recovery. The reprompt is spoken after a single transient
+ * speechTurn failure (apology + reprompt instead of dead air); the hand-off
+ * line is spoken before a graceful end after repeated failures. Both are
+ * lines the FSM already emits (a retry reprompt and its system-failure
+ * escalation), so they are NOT new copy — they are named here, and used as
+ * the exact-match keys in the es catalog below, so the English and Spanish
+ * forms can never drift.
+ */
+export const SPEECH_TURN_FAILURE_REPROMPT_COPY =
+  'My apologies — let me try again. What would you like to do?';
+export const SPEECH_TURN_FAILURE_ESCALATION_COPY =
+  "I'm having trouble completing that. Let me connect you with a team member.";
+
+/**
+ * A3 — spoken when a FINAL transcript's STT acoustic confidence (Deepgram
+ * `confidence` on media-streams; Twilio Gather `Confidence`) comes back
+ * below the configured floor. Distinct from
+ * {@link SPEECH_TURN_FAILURE_REPROMPT_COPY} on purpose: that line covers the
+ * turn PIPELINE throwing (something broke); this one covers the STT ENGINE
+ * itself flagging the audio as likely mis-heard (nothing broke — the words
+ * probably weren't the ones acted on). Acting on a misheard transcript risks
+ * the wrong intent (e.g. "cancel" heard from "confirm"), so the caller is
+ * asked to repeat rather than having the turn dispatched. The repeated-low-
+ * confidence hand-off reuses {@link SPEECH_TURN_FAILURE_ESCALATION_COPY} —
+ * "trouble completing that" reads naturally for "I can't reliably hear you"
+ * too, and keeping one escalation line avoids a second string to translate
+ * and keep in sync.
+ */
+export const LOW_STT_CONFIDENCE_REPROMPT_COPY =
+  "I didn't quite catch that — could you say that again?";
+
+/**
  * es translations for the FSM's hardcoded sentences (exact-match). Kept
  * small and literal — anything not listed passes through in English rather
  * than risking a bad machine paraphrase.
+ *
+ * Exported so the QA matrix's VOX-02 language oracle can assert against the
+ * SHIPPED Spanish copy instead of a hand-rolled marker word list (which went
+ * stale the moment a new sentence was added and failed correct responses).
  */
-const SENTENCE_CATALOG_ES: Record<string, string> = {
+export const SENTENCE_CATALOG_ES: Record<string, string> = {
   "Great, I've got that taken care of. You'll receive a confirmation shortly. Is there anything else I can help you with?":
     'Perfecto, ya quedó registrado. Recibirá una confirmación en breve. ¿Hay algo más en lo que pueda ayudarle?',
   'How can I help you today?': '¿En qué puedo ayudarle hoy?',
@@ -103,7 +184,7 @@ const SENTENCE_CATALOG_ES: Record<string, string> = {
     'Por supuesto — le comunico con una persona ahora mismo.',
   'I understand. Let me get a person on the line for you right away.':
     'Entiendo. Enseguida le paso con una persona.',
-  "I'm having trouble completing that. Let me connect you with a team member.":
+  [SPEECH_TURN_FAILURE_ESCALATION_COPY]:
     'Tengo dificultades para completar eso. Le comunico con un miembro del equipo.',
   "I'm having trouble pulling up your account. Let me connect you with a team member.":
     'Tengo dificultades para acceder a su cuenta. Le comunico con un miembro del equipo.',
@@ -112,7 +193,80 @@ const SENTENCE_CATALOG_ES: Record<string, string> = {
     'Si alguien está en peligro inmediato, cuelgue y llame al 911.',
   "This sounds like an emergency. I'm connecting you with our on-call dispatcher immediately.":
     'Esto parece una emergencia. Le comunico de inmediato con nuestro despachador de guardia.',
+  // UB-C2 — remaining fixed FSM sentences (audit against transitions.ts's
+  // ttsPlay literals; a Spanish call must never flip to English mid-flow).
+  "I wasn't able to find the record you're referring to. Let me connect you with a team member.":
+    'No pude encontrar el registro al que se refiere. Le comunico con un miembro del equipo.',
+  "I'm having trouble understanding your request. Let me connect you with a team member.":
+    'Tengo dificultades para entender su solicitud. Le comunico con un miembro del equipo.',
+  "I'm having trouble verifying your identity. Let me connect you with a team member.":
+    'Tengo dificultades para verificar su identidad. Le comunico con un miembro del equipo.',
+  "I'm sorry, I couldn't find your account. Can you please provide your full name and service address?":
+    'Lo siento, no pude encontrar su cuenta. ¿Me puede dar su nombre completo y la dirección de servicio?',
+  'Let me make sure I understand — what would you like to do?':
+    'Permítame asegurarme de entender — ¿qué le gustaría hacer?',
+  [SPEECH_TURN_FAILURE_REPROMPT_COPY]:
+    'Mis disculpas — intentemos de nuevo. ¿Qué le gustaría hacer?',
+  // A3 — low acoustic STT confidence reprompt.
+  [LOW_STT_CONFIDENCE_REPROMPT_COPY]:
+    'No alcancé a escuchar bien eso — ¿podría repetirlo, por favor?',
+  'Of course! What else can I help you with?':
+    '¡Por supuesto! ¿En qué más puedo ayudarle?',
+  'This call has been terminated due to policy violations.':
+    'Esta llamada ha sido terminada por violaciones a nuestras políticas.',
+  "I'm still having trouble understanding. Could you describe what you need in a few words?":
+    'Sigo teniendo dificultades para entenderle. ¿Podría describir en pocas palabras lo que necesita?',
+  'I can help with scheduling and service questions. What do you need help with today?':
+    'Puedo ayudarle con citas y preguntas de servicio. ¿En qué necesita ayuda hoy?',
 };
+
+/**
+ * UB-C1 — spoken acknowledgment after the media-stream adapter flips the
+ * live call language on an explicit caller request ("hablo español" /
+ * "switch to english"). Always spoken in the language being switched TO —
+ * the caller just told us that's the one they understand.
+ */
+export const LANGUAGE_SWITCH_ACK: Record<SessionLanguage, string> = {
+  en: "Okay, let's continue in English. How can I help you?",
+  es: 'De acuerdo, continuemos en español. ¿En qué puedo ayudarle?',
+};
+
+/**
+ * VOX-52 — voice a disambiguation prompt for an ambiguous entity reference.
+ * `candidates` is the resolver's candidate set mapped to `{ id, name, score }`.
+ * Speaks the distinct candidate names so the caller can choose; when the names
+ * are indistinguishable (e.g. two customers both "Bob Smith"), reading them
+ * back helps nobody, so we ask for a distinguishing detail instead. Never
+ * picks for the caller.
+ */
+function renderDisambiguation(candidates: unknown, lang: SessionLanguage): string {
+  const names = Array.isArray(candidates)
+    ? candidates
+        .map((c) =>
+          c && typeof c === 'object' && typeof (c as { name?: unknown }).name === 'string'
+            ? ((c as { name: string }).name).trim()
+            : '',
+        )
+        .filter((n) => n.length > 0)
+    : [];
+  const distinct = [...new Set(names)].slice(0, 3);
+
+  // Identical or missing names → ask for a distinguishing detail rather than
+  // reading the same name back.
+  if (distinct.length < 2) {
+    return lang === 'es'
+      ? 'Encontré más de un registro con ese nombre. ¿Me puede dar la dirección de servicio para elegir el correcto?'
+      : 'I found more than one record under that name. Could you give me the service address so I can pick the right one?';
+  }
+
+  const list =
+    lang === 'es'
+      ? distinct.slice(0, -1).join(', ') + ' o ' + distinct[distinct.length - 1]
+      : distinct.slice(0, -1).join(', ') + ' or ' + distinct[distinct.length - 1];
+  return lang === 'es'
+    ? `Encontré varias coincidencias — ¿se refiere a ${list}? ¿Cuál de ellas?`
+    : `I found a few matches — did you mean ${list}? Which one?`;
+}
 
 export function renderTtsText(
   rawText: string,
@@ -139,6 +293,22 @@ export function renderTtsText(
       return lang === 'es'
         ? `Para confirmar: usted desea ${intentLabel(intent, 'es')}. ¿Es correcto?`
         : `Just to confirm — you'd like to ${intentLabel(intent, 'en')}. Is that right?`;
+    case 'disambiguate':
+      // VOX-52 — a free-text reference matched more than one record above the
+      // resolver threshold. Voice the distinct candidate names so the caller
+      // can pick; if the names are identical (the "two Bobs" case) listing them
+      // helps nobody, so ask for a distinguishing detail instead. Never guess.
+      return renderDisambiguation(payload.candidates, lang);
+    case 'confirm_entity': {
+      // Middle confidence band (τ_ent_confirm_low <= score < τ_ent): a single
+      // candidate was found but isn't confident enough to act on silently.
+      // Read back its label and ask for a one-tap yes/no before using it.
+      const entityKind = typeof payload.entityKind === 'string' ? payload.entityKind : undefined;
+      const summary = typeof payload.summary === 'string' ? payload.summary : '';
+      return lang === 'es'
+        ? `Encontré ${entityKindArticleEs(entityKind)} ${entityKindLabel(entityKind, 'es')} "${summary}" — ¿es a la que se refiere?`
+        : `I found a ${entityKindLabel(entityKind, 'en')} "${summary}" — is that the one you mean?`;
+    }
     case 'greeting':
       return lang === 'es'
         ? '¡Hola! ¿En qué puedo ayudarle hoy?'

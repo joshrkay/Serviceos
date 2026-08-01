@@ -23,7 +23,12 @@
  */
 
 /** Action-class vocabulary mirrored (type-only) from proposals/proposal.ts. */
-export type SupervisorActionClass = 'capture' | 'comms' | 'money' | 'irreversible';
+export type SupervisorActionClass =
+  | 'capture'
+  | 'comms'
+  | 'money'
+  | 'irreversible'
+  | 'manual';
 
 /**
  * Per-tenant supervisor rule set, persisted as `supervisor_policies.rules`

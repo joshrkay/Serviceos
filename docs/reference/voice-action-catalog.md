@@ -26,7 +26,7 @@ exist today.
 
 ## A) Speakable today — intent + proposal + execution handler all exist
 
-These 31 actions can be spoken, drafted as a proposal, approved, and executed.
+These 36 actions can be spoken, drafted as a proposal, approved, and executed.
 "Persistence proof" = a Docker-gated integration test that proves the row +
 audit event actually land in Postgres (vs. mocked-DB-only coverage, which cannot
 catch schema drift or a missing dependency).
@@ -42,6 +42,7 @@ catch schema drift or a missing dependency).
 | "Invoice all my completed jobs" | `batch_invoice` | `batch_invoice` | capture | handler-level |
 | "New customer Maria Alvarez, 480-555-0102" | `create_customer` | `create_customer` | capture | integration (`integration/voice-create-customer.test.ts`) |
 | "Open a job for Alvarez, no AC" | `create_job` | `create_job` | capture | integration (`integration/create-job-execution.test.ts`) |
+| "Mark the Henderson job in progress" | `update_job` | `update_job` | capture | integration (`integration/update-job-execution.test.ts`) |
 | "Move the Garcia job to Thursday 10" | `reschedule_appointment` | `reschedule_appointment` | capture | unit |
 | "Cancel Tuesday's Garcia appointment" | `cancel_appointment` | `cancel_appointment` | irreversible | unit |
 | "Put Carlos on the Garcia job instead of me" | `reassign_appointment` | `reassign_appointment` | capture | unit |
@@ -64,6 +65,78 @@ catch schema drift or a missing dependency).
 | "Clock 2 hours on the Patel job" | `log_time_entry` | `log_time_entry` | capture | unit |
 | "Text the Garcia customer I'm 20 min late" | `notify_delay` | `notify_delay` | comms | unit |
 | "Ask the Smith customer for a review" | `request_feedback` | `request_feedback` | comms | unit |
+| "Set up 50% deposit, 50% on completion for the Hendersons" | `create_invoice_schedule` | `create_invoice_schedule` | capture | unit + handler-level (schedule execution: `proposals/invoice-schedule-handler.test.ts`) |
+| "Respond to that 1-star review" | `respond_to_review` | `review_response_proposal` | comms | unit |
+| "From now on always add a $79 diagnostic fee to AC calls" | `create_standing_instruction` | `create_standing_instruction` | capture | unit (table: integration via UB-A1 `integration/standing-instructions.test.ts`) |
+| "Set my brand voice: friendly, plain-spoken, no slang, always sign off 'Thanks — Bob's HVAC'" | `update_brand_voice` | `update_brand_voice` | manual | integration (`integration/update-brand-voice-voice-execution.test.ts`) |
+
+> **Voice technician resolution (U1, taxonomy 1.2.0):** `reassign_appointment`,
+> `add_crew_member`, and `remove_crew_member` now resolve the spoken technician
+> name via the entity resolver (`kind: 'technician'`, pg_trgm over the `users`
+> full-name expression, roles technician/dispatcher/owner, τ_ent 0.8). A unique
+> match lands on the payload as a verified `toTechnicianId` / `technicianId`;
+> an ambiguous name ("two Carloses") becomes a one-tap `voice_clarification`
+> picker; an unmatched name keeps the pre-U1 behavior — the id stays in
+> `missingFields` and the review UI resolves it before approval.
+
+Notes on the taxonomy-1.3.0 row:
+
+- `update_job` — deliberately scoped to SAFE field edits (status, priority,
+  title/description) — never money or schedule (those keep their own
+  intents/paths). The `jobId` target resolves the SAME way
+  `update_estimate`/`update_invoice` resolve their reference: a literal UUID
+  ungates the proposal; a free-text reference is best-effort resolved via a
+  jobRepo search (stamped for review-card context, candidates offered) but
+  ALWAYS stays gated behind `missingFields: ['jobId']`. Execution is a raw
+  field write via the `updateJob` domain function (jobs/job.ts) — NOT the
+  governed lifecycle transition (`transitionJobStatus`) POST
+  `/api/jobs/:id/transition` uses, which adds forward/backward-move
+  validation, a timeline entry, and completion side effects. Emits
+  `job.updated` (not a new audit event type).
+
+Notes on the taxonomy-1.2.0 rows:
+
+- `create_invoice_schedule` — the spoken milestone sentence is parsed by a
+  deterministic grammar (`invoices/milestone-sentence-parser.ts`), never the
+  LLM; an unparseable plan holds in draft with the verbatim sentence preserved
+  for the reviewer. Milestone maths mirror `validateMilestones` (integer
+  cents, bps, exactly one remainder).
+- `respond_to_review` — resolves "that 1-star review" against recent
+  `google_reviews` rows (stated star count, else rating ≤ 3, last 14 days):
+  zero matches → clarification; several → candidate picker; a pending draft
+  already auto-created by the polling worker → "already in your inbox"
+  clarification (never a duplicate). Comms class — never auto-approves.
+- `create_standing_instruction` — v1 rule: the task handler omits
+  `sourceTrustTier`, so the instruction itself ALWAYS lands for human review
+  even though the type is capture-class. On approval the execution handler
+  inserts a `standing_instructions` row (source `proposal`, UB-A1 table).
+
+B1.18 — `update_brand_voice` (taxonomy 1.5.0):
+
+- **Action class is `manual`, not `capture`.** Brand voice is the tenant's
+  locked outbound identity — a wrong extraction poisons every future
+  customer message, so it is structurally excluded from auto-approval:
+  `decideInitialStatus`'s only auto-approve branch requires
+  `sourceTrustTier === 'autonomous' AND` action class `=== 'capture'`, which a
+  `manual`-class type can never satisfy at any trust tier or confidence.
+- **Reuses the versioned write path, never re-implements it.** The execution
+  handler calls `updateBrandVoice`
+  (`tenants/brand/brand-voice-service.ts`) — the SAME TOCTOU-safe
+  read→cool-down-check→merge→version-bump the Brand-Voice Configurator
+  sheet's `PUT /api/settings/brand-voice` uses. A cool-down violation
+  surfaces as an honest failed-execution reason (`brand_voice_cooldown: …`),
+  never a silent skip.
+- **Lock stays tap-only (Part F decision F-2).** The payload
+  (`proposals/contracts/brand-voice.ts`) has NO field capable of expressing
+  `brand_voice_locked` — a spoken "lock my brand voice" cannot set that
+  column through this proposal type no matter how it classifies. Pinned by
+  a regression test (`test/ai/tasks/brand-voice-task.test.ts`).
+- **Nothing spoken is dropped.** The six `brandVoiceSchema` fields
+  (register, opening_lines, signoff, banned_phrases, persona_name, pronoun)
+  are reused verbatim from the form surface; an additive `freeText` field
+  carries any instruction the extraction pass couldn't map to a field, and
+  a total extraction failure falls back to the verbatim transcript — same
+  fallback shape as `create_standing_instruction`.
 
 Two further intents are special-cased in the router (they reuse existing
 proposal types and live outside `INTENT_TO_PROPOSAL_TYPE`):
@@ -85,9 +158,13 @@ migration).
 
 | Spoken example a tradesperson would expect to work | Proposal type | Class | Plan |
 |---|---|---|---|
-| "Set up 50% deposit, 50% on completion for Garcia" | `create_invoice_schedule` | capture | deferred (complex payload) |
-| "Respond to that 1-star review" | `review_response_proposal` | comms | deferred (review-monitoring driven) |
 | "Book this caller for Thursday" | `create_booking` | capture | deferred (customer-call FSM path) |
+| _(none — system-generated, not spoken)_ | `update_catalog_item` | capture | WS20: the correction loop emits this after N same-SKU price corrections; intentionally never voice-reachable (no on-ramp by design) |
+| _(none — minted after entity resolution, not spoken)_ | `adopt_entity_alias` | manual | U4: alias-learning lifecycle mints this when an operator resolves an ambiguous reference; owner-only approval, never voice-reachable |
+| _(none — conversational onboarding, not the voice intent classifier)_ | `onboarding_tenant_settings`, `onboarding_service_category`, `onboarding_estimate_template`, `onboarding_team_member`, `onboarding_schedule` | capture | B1.19: emitted by the onboarding FSM (`ai/orchestration/onboarding-conversation.ts`), a separate conversation surface from the voice intent classifier — never mapped through `INTENT_TO_PROPOSAL_TYPE`, so by design there is no spoken on-ramp for these. Execution handlers registered in `proposals/execution/onboarding-handlers.ts`; `onboarding_team_member` always reports `handler_not_wired` (no persistence target — see that file's doc comment). |
+
+(`create_invoice_schedule` and `review_response_proposal` graduated to
+section A in taxonomy 1.2.0 — U2/U3 of the agent build wave.)
 
 ## C) Not completable from speech yet — no proposal type/handler (white-space)
 
@@ -112,6 +189,42 @@ approves by screen/SMS tap).
 `lookup_catalog`, `lookup_day_overview`, `lookup_digest`, `lookup_pending_items`
 — routed to read-only skills, never to a proposal (correct by design).
 
+## F) Direct status acts — audited directly, never a proposal (B5.5, Part F decision F-3)
+
+`en_route` ("on my way") is neither read-only (E, above) nor proposal-driving
+(A, above) — it's a technician acting DIRECTLY. A5.2's invariant governs
+**AI-proposed** actions; a technician saying "on my way" is the human acting
+themselves, the same precedent PRD B10.10 already blesses for the owner.
+Both the voice leg and the SMS-keyword leg call the exact same audited act
+the shipped app en-route button already executes
+(`dispatch/routes.ts triggerEnRoute` → `appointment.en_route_triggered`
+audit event, tech actor, + the existing branded ETA SMS via
+`DelayNotificationCoordinator.enqueueEnRouteNotice`) — never a drafted
+proposal a human has to tap.
+
+| Spoken/texted example | Intent / trigger | What fires | Persistence proof |
+|---|---|---|---|
+| "On my way to the Garcia job" | `en_route` (voice) | `triggerEnRoute` (same act as the app button) | integration (`integration/en-route-voice.test.ts`) |
+| "Heading to my next one now" | `en_route` (voice, bare — resolves to the tech's next upcoming appointment today) | `triggerEnRoute` | integration (`integration/en-route-voice.test.ts`) |
+| "OMW" / "on my way" texted from a registered tech phone | SMS keyword (joins `TECH_STATUS_KEYWORDS`) | `triggerEnRoute` | handler-suite |
+
+Because misclassification risk is real on the voice leg (unlike a tap), a
+low-confidence `en_route` classification gates to clarification instead of
+firing — the standard `CLASSIFIER_CONFIDENCE_THRESHOLD` floor in
+`ai/orchestration/intent-classifier.ts` covers this generically, pinned by a
+dedicated regression test for this intent. Resolution is speaker-scoped: the
+voice leg resolves the appointment within the ACTING technician's OWN
+assignments only (`dispatch/en-route-voice.ts resolveEnRouteAppointment`) —
+a technician's "on my way" can never target another tech's appointment. A
+named job resolves to that appointment; a bare "on my way" resolves to the
+tech's next upcoming appointment today; two candidates clarify; zero yields
+an explicit "no upcoming appointment" answer (never silent).
+
+`en_route` is intentionally absent from `INTENT_TO_PROPOSAL_TYPE` — see the
+comment block in `proposals/voice-intent-map.ts` (next to the `lookup_*`
+exclusion) — so the intent-map drift test reads its absence as deliberate,
+not a gap. No new `JobStatus` value was introduced for this.
+
 ---
 
 <!-- BEGIN machine-readable: voice-action-catalog -->
@@ -127,6 +240,7 @@ approves by screen/SMS tap).
     { "intent": "batch_invoice", "proposalType": "batch_invoice", "actionClass": "capture" },
     { "intent": "create_customer", "proposalType": "create_customer", "actionClass": "capture" },
     { "intent": "create_job", "proposalType": "create_job", "actionClass": "capture" },
+    { "intent": "update_job", "proposalType": "update_job", "actionClass": "capture" },
     { "intent": "reschedule_appointment", "proposalType": "reschedule_appointment", "actionClass": "capture" },
     { "intent": "cancel_appointment", "proposalType": "cancel_appointment", "actionClass": "irreversible" },
     { "intent": "reassign_appointment", "proposalType": "reassign_appointment", "actionClass": "capture" },
@@ -148,12 +262,21 @@ approves by screen/SMS tap).
     { "intent": "add_service_location", "proposalType": "add_service_location", "actionClass": "capture" },
     { "intent": "log_time_entry", "proposalType": "log_time_entry", "actionClass": "capture" },
     { "intent": "notify_delay", "proposalType": "notify_delay", "actionClass": "comms" },
-    { "intent": "request_feedback", "proposalType": "request_feedback", "actionClass": "comms" }
+    { "intent": "request_feedback", "proposalType": "request_feedback", "actionClass": "comms" },
+    { "intent": "create_invoice_schedule", "proposalType": "create_invoice_schedule", "actionClass": "capture" },
+    { "intent": "respond_to_review", "proposalType": "review_response_proposal", "actionClass": "comms" },
+    { "intent": "create_standing_instruction", "proposalType": "create_standing_instruction", "actionClass": "capture" },
+    { "intent": "update_brand_voice", "proposalType": "update_brand_voice", "actionClass": "manual" }
   ],
   "handlerNoOnramp": [
-    "create_invoice_schedule",
-    "review_response_proposal",
-    "create_booking"
+    "create_booking",
+    "update_catalog_item",
+    "adopt_entity_alias",
+    "onboarding_tenant_settings",
+    "onboarding_service_category",
+    "onboarding_estimate_template",
+    "onboarding_team_member",
+    "onboarding_schedule"
   ],
   "gated": ["approve_proposal", "reject_proposal", "edit_proposal"]
 }

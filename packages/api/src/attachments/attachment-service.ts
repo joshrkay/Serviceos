@@ -30,6 +30,12 @@ import {
   IMAGE_POST_PROCESS_TYPE,
   imagePostProcessIdempotencyKey,
 } from '../workers/image-post-process-worker';
+import { createLogger } from '../logging/logger';
+
+const logger = createLogger({
+  service: 'attachments.attachment-service',
+  environment: process.env.NODE_ENV || 'development',
+});
 
 /** RV-006: window for the attach-time content-hash dedupe. */
 const DEDUPE_WINDOW_MS = 24 * 60 * 60 * 1000;
@@ -160,10 +166,10 @@ export class AttachmentService {
           imagePostProcessIdempotencyKey(attachment.fileId)
         );
       } catch (err) {
-        console.error(
-          `RV-006 image post-process enqueue failed for file ${attachment.fileId}:`,
-          err
-        );
+        logger.error('RV-006 image post-process enqueue failed', {
+          fileId: attachment.fileId,
+          error: err instanceof Error ? err.message : String(err),
+        });
       }
     }
 
@@ -197,6 +203,12 @@ export class AttachmentService {
     entityId: string,
     options?: ListByEntityOptions
   ): Promise<AttachmentWithUrl[]> {
+    // Repositories correctly scope attachment rows by tenant, but an empty
+    // result alone cannot distinguish an empty in-tenant entity from an ID
+    // owned by another tenant. Validate the parent first so the listing
+    // endpoint cannot be used as a cross-tenant existence oracle.
+    await this.assertEntityExists(tenantId, entityType, entityId);
+
     // Fetch attachments and all files for this entity in two queries (not N+1).
     // findByEntity returns all file rows for the entity in a single query;
     // we build a lookup map so each attachment can resolve its file in O(1).

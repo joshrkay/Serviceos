@@ -10,10 +10,14 @@ import { CustomerRepository } from '../customers/customer';
 import { JobRepository } from '../jobs/job';
 import { LocationRepository } from '../locations/location';
 import { SettingsRepository } from '../settings/settings';
+import { FileRepository, StorageProvider } from '../files/file-service';
 import { evaluateDepositRule, deriveDepositStatus, isDepositPayable } from '../jobs/deposit-rule';
 import { ValidationError, NotFoundError, ConflictError } from '../shared/errors';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
+import { estimateApprovedProps } from '../analytics/estimate-event-props';
 import { publicActorFromToken } from '../feedback/feedback-response';
+import type { ConnectAccountResolver } from '../invoices/public-invoice-service';
+import type { CatalogUnitValue } from '@ai-service-os/shared';
 
 /**
  * Service layer for the unauthenticated customer-facing estimate
@@ -45,10 +49,25 @@ export interface PublicEstimateView {
   businessName: string;
   businessPhone?: string;
   businessEmail?: string;
+  /**
+   * Tenant's customer-facing document word (e.g. 'Quote', 'Bid'), resolved
+   * from terminologyPreferences.estimateTerm. Defaults to 'Estimate'. The
+   * canonical entity is unchanged — this only relabels what the customer
+   * sees on the public approval page (Story 7.4).
+   */
+  estimateLabel: string;
   lineItems: Array<{
     id: string;
     description: string;
     quantity: number;
+    /**
+     * B7.5 — descriptive unit of measure ('each' | 'hour' | 'sq ft' | ...)
+     * so the customer can tell what the quantity and rate measure ("2 hour"
+     * vs "2 each"). Absent on legacy lines and any path that states no unit.
+     * DESCRIPTIVE ONLY: no total on this view is derived from it — the money
+     * stays quantity × unitPriceCents in integer cents.
+     */
+    unit?: CatalogUnitValue;
     unitPriceCents: number;
     totalCents: number;
     /** Whether this line is taxed — lets the client preview tax exactly. */
@@ -61,6 +80,12 @@ export interface PublicEstimateView {
     isOptional?: boolean;
     /** Pre-selected on first view. */
     isDefaultSelected?: boolean;
+    /**
+     * EE-4 — signed URL for this line's equipment photo, minted fresh per read
+     * from the frozen `image_file_id` (absent when the line has no image or the
+     * file can't be resolved for this tenant).
+     */
+    imageUrl?: string;
   }>;
   /** True when the estimate has tier options or optional add-ons to choose. */
   hasSelectableItems: boolean;
@@ -194,6 +219,11 @@ export interface PublicEstimateServiceDeps {
   stripeConfig?: DepositStripeConfig | null;
   stripeFetch?: DepositStripeFetch;
   /**
+   * When present and charges are enabled, deposit Payment Links are
+   * minted as Connect direct charges on the tenant's Express account.
+   */
+  connectAccountResolver?: ConnectAccountResolver;
+  /**
    * D2-1d — audit logging for token-scoped customer approval / decline.
    * Optional so older harnesses still build the service.
    */
@@ -204,6 +234,14 @@ export interface PublicEstimateServiceDeps {
    * pipeline reflects the lapsed quote. Optional so legacy harnesses build.
    */
   moneyStateDeps?: RefreshJobMoneyStateDeps;
+  /**
+   * EE-4 — resolve a line's frozen `image_file_id` to a signed URL on the
+   * public view. Both optional so legacy harnesses build without image
+   * resolution (then no thumbnails). `fileRepo.findById` is tenant-scoped, so
+   * a foreign/bogus file id can never mint a URL to another tenant's object.
+   */
+  fileRepo?: FileRepository;
+  storage?: StorageProvider;
 }
 
 const TERMINAL_STATUSES = new Set(['accepted', 'rejected', 'expired']);
@@ -322,7 +360,14 @@ export class PublicEstimateService {
     const settings = await this.deps.settingsRepo.findByTenant(estimate.tenantId);
     const policy = settings?.depositTimingPolicy ?? 'after_approval';
     if (policy === 'before_approval' && settings) {
-      const requiredFromRule = evaluateDepositRule(settings, acceptedTotals.totalCents);
+      // EE-1 — gate on the deposit the customer was actually QUOTED at
+      // checkout, which is computed from the stored `estimate.totals`
+      // (toView, below). With good-better-best, `acceptedTotals` can exceed
+      // `estimate.totals` when the customer picks a pricier tier; requiring the
+      // higher post-selection figure here would trap a customer who paid the
+      // quoted deposit and then upgraded — the premium delta settles in the
+      // final invoice, not this pre-approval gate.
+      const requiredFromRule = evaluateDepositRule(settings, estimate.totals.totalCents);
       if (requiredFromRule > 0) {
         const job = await this.deps.jobRepo.findById(estimate.tenantId, estimate.jobId);
         const paid = job?.depositPaidCents ?? 0;
@@ -414,6 +459,14 @@ export class PublicEstimateService {
             totalCents: updated.totals.totalCents,
             ipAddress: input.ip,
             userAgent: input.userAgent,
+            // EE-4 images + EE-1 tiers/upsell: booleans forwarded to PostHog by
+            // the mapper. `upsoldAboveDefault` compares the server-resolved
+            // accepted total to the stored (default-selection) quoted total.
+            ...estimateApprovedProps({
+              lineItems: estimate.lineItems,
+              quotedTotalCents: estimate.totals.totalCents,
+              acceptedTotalCents: acceptedTotals.totalCents,
+            }),
           },
         }),
       );
@@ -586,6 +639,30 @@ export class PublicEstimateService {
       depositPaidCents < computedRequired;
     const isActionable = baseActionable && !blockedByDeposit;
 
+    // EE-4 — resolve each line's frozen image_file_id to a signed URL, scoped
+    // to THIS estimate's tenant (findById enforces the tenant match, so a
+    // foreign or bogus file id yields no image). Batched; a missing file or a
+    // storage error degrades to "no image" and never breaks the view.
+    const imageUrlByLine = new Map<string, string>();
+    const { fileRepo, storage } = this.deps;
+    if (fileRepo && storage) {
+      await Promise.all(
+        displayItems.map(async (li) => {
+          if (!li.imageFileId) return;
+          try {
+            const file = await fileRepo.findById(estimate.tenantId, li.imageFileId);
+            if (!file) return;
+            imageUrlByLine.set(
+              li.id,
+              await storage.generateDownloadUrl(file.storageBucket, file.thumbnailS3Key ?? file.storageKey),
+            );
+          } catch {
+            // A file/storage failure must never break the estimate view.
+          }
+        }),
+      );
+    }
+
     return {
       id: estimate.id,
       estimateNumber: estimate.estimateNumber,
@@ -599,10 +676,18 @@ export class PublicEstimateService {
       // that surfaces a null value.
       businessPhone: settings?.businessPhone ?? undefined,
       businessEmail: settings?.businessEmail ?? undefined,
+      // Story 7.4 — flow the tenant's document word into the customer-facing
+      // page. `settings` is already loaded above (businessName), so this adds
+      // no extra query. Falls back to the canonical 'Estimate'.
+      estimateLabel: settings?.terminologyPreferences?.estimateTerm?.trim() || 'Estimate',
       lineItems: displayItems.map((li) => ({
         id: li.id,
         description: li.description,
         quantity: li.quantity,
+        // B7.5 — carry the descriptive unit to the customer-facing view.
+        // `?? undefined` because a persisted row with no unit arrives as
+        // null from the row mapper, and the DTO field is optional.
+        unit: li.unit ?? undefined,
         unitPriceCents: li.unitPriceCents,
         totalCents: li.totalCents,
         taxable: li.taxable,
@@ -610,6 +695,7 @@ export class PublicEstimateService {
         groupLabel: li.groupLabel,
         isOptional: li.isOptional,
         isDefaultSelected: li.isDefaultSelected,
+        imageUrl: imageUrlByLine.get(li.id),
       })),
       // Only offer the picker before acceptance. Once accepted, the line
       // items are already narrowed to the chosen set (above) and the total
@@ -737,14 +823,23 @@ export class PublicEstimateService {
       // leave a live charge vector the customer could still reach via an
       // old email. Best-effort — a Stripe hiccup here must not block the
       // customer from getting a fresh, payable link.
+      const deactivateHeaders: Record<string, string> = {
+        Authorization: `Bearer ${this.deps.stripeConfig.apiKey}`,
+        'Content-Type': 'application/x-www-form-urlencoded',
+      };
+      const connectForDeactivate = this.deps.connectAccountResolver
+        ? await this.deps.connectAccountResolver
+            .resolveTenantConnectAccount(job.tenantId)
+            .catch(() => null)
+        : null;
+      if (connectForDeactivate?.chargesEnabled) {
+        deactivateHeaders['Stripe-Account'] = connectForDeactivate.accountId;
+      }
       await fetchFn(
         `https://api.stripe.com/v1/payment_links/${job.depositStripePaymentLinkId}`,
         {
           method: 'POST',
-          headers: {
-            Authorization: `Bearer ${this.deps.stripeConfig.apiKey}`,
-            'Content-Type': 'application/x-www-form-urlencoded',
-          },
+          headers: deactivateHeaders,
           body: new URLSearchParams({ active: 'false' }),
         },
       ).catch(() => undefined);
@@ -758,12 +853,23 @@ export class PublicEstimateService {
       customer ? ` — ${customer.displayName}` : ''
     }`;
 
+    const connect = this.deps.connectAccountResolver
+      ? await this.deps.connectAccountResolver
+          .resolveTenantConnectAccount(job.tenantId)
+          .catch(() => null)
+      : null;
+    const useConnect = connect && connect.chargesEnabled;
+    const headers: Record<string, string> = {
+      Authorization: `Bearer ${this.deps.stripeConfig.apiKey}`,
+      'Content-Type': 'application/x-www-form-urlencoded',
+    };
+    if (useConnect && connect) {
+      headers['Stripe-Account'] = connect.accountId;
+    }
+
     const res = await fetchFn('https://api.stripe.com/v1/payment_links', {
       method: 'POST',
-      headers: {
-        Authorization: `Bearer ${this.deps.stripeConfig.apiKey}`,
-        'Content-Type': 'application/x-www-form-urlencoded',
-      },
+      headers,
       body: new URLSearchParams({
         'line_items[0][price_data][currency]': 'usd',
         'line_items[0][price_data][product_data][name]': description,
@@ -808,12 +914,16 @@ export class PublicEstimateService {
         updatedAt: new Date(),
       });
     } catch (dbErr) {
+      const rollbackHeaders: Record<string, string> = {
+        Authorization: `Bearer ${this.deps.stripeConfig.apiKey}`,
+        'Content-Type': 'application/x-www-form-urlencoded',
+      };
+      if (useConnect && connect) {
+        rollbackHeaders['Stripe-Account'] = connect.accountId;
+      }
       await fetchFn(`https://api.stripe.com/v1/payment_links/${data.id}`, {
         method: 'POST',
-        headers: {
-          Authorization: `Bearer ${this.deps.stripeConfig.apiKey}`,
-          'Content-Type': 'application/x-www-form-urlencoded',
-        },
+        headers: rollbackHeaders,
         body: new URLSearchParams({ active: 'false' }),
       }).catch(() => undefined);
       const msg = dbErr instanceof Error ? dbErr.message : String(dbErr);

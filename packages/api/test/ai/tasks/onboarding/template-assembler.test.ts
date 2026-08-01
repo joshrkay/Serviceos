@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { assembleEstimateTemplates } from '../../../../src/ai/tasks/onboarding/template-assembler';
+import { missingFieldsFor } from '../../../../src/proposals/proposal';
 import {
   ServiceCategoryExtraction,
   PricingExtraction,
@@ -67,7 +68,7 @@ describe('P4-EXT-007 — Estimate template assembly from voice description', () 
     expect(materialItem!.defaultUnitPriceCents).toBe(2500);
   });
 
-  it('creates placeholder template when no pricing is available', () => {
+  it('creates placeholder template when no pricing is available, GATED so the $0 price cannot be approved (review finding #1)', () => {
     const categories: ServiceCategoryExtraction = {
       categories: [
         { verticalType: 'hvac', categoryId: 'repair', name: 'AC Repair', confidence: 0.9, sourceText: '' },
@@ -79,10 +80,53 @@ describe('P4-EXT-007 — Estimate template assembly from voice description', () 
     const result = assembleEstimateTemplates(tenantId, userId, categories, pricing);
 
     expect(result.proposals).toHaveLength(1);
-    const payload = result.proposals[0].payload as Record<string, unknown>;
+    const proposal = result.proposals[0];
+    const payload = proposal.payload as Record<string, unknown>;
     const lineItems = payload.lineItems as Array<Record<string, unknown>>;
     expect(lineItems).toHaveLength(1);
     expect(lineItems[0].defaultUnitPriceCents).toBe(0);
+    // `lineItems` is a real top-level key of
+    // `onboardingEstimateTemplatePayloadSchema` — the gate `editProposal`'s
+    // flat-key clear-on-fill can actually lift once the operator supplies a
+    // priced array.
+    expect(missingFieldsFor(proposal)).toEqual(['lineItems']);
+    expect(proposal.status).toBe('draft');
+  });
+
+  it('a category with a lexically non-matching price (reviewer example: "AC Repair" vs. spoken "labor") is ALSO gated — a $0 line hiding behind an unrelated captured price is the same defect', () => {
+    const categories: ServiceCategoryExtraction = {
+      categories: [
+        { verticalType: 'hvac', categoryId: 'repair', name: 'AC Repair', confidence: 0.9, sourceText: '' },
+      ],
+    };
+    const pricing: PricingExtraction = {
+      prices: [
+        { serviceRef: 'labor', amountCents: 8500, priceType: 'hourly_rate', confidence: 0.9, sourceText: '$85 per hour' },
+      ],
+    };
+
+    const result = assembleEstimateTemplates(tenantId, userId, categories, pricing);
+
+    expect(result.proposals).toHaveLength(1);
+    const proposal = result.proposals[0];
+    expect(missingFieldsFor(proposal)).toEqual(['lineItems']);
+  });
+
+  it('does NOT gate when a real match sets a non-zero price (parity — T3-014 stays fully approvable)', () => {
+    const categories: ServiceCategoryExtraction = {
+      categories: [
+        { verticalType: 'hvac', categoryId: 'maintenance', name: 'Maintenance Tune-up', confidence: 0.9, sourceText: '' },
+      ],
+    };
+    const pricing: PricingExtraction = {
+      prices: [
+        { serviceRef: 'Maintenance Tune-up', amountCents: 14900, priceType: 'exact', confidence: 0.9, sourceText: '$149' },
+      ],
+    };
+
+    const result = assembleEstimateTemplates(tenantId, userId, categories, pricing);
+
+    expect(missingFieldsFor(result.proposals[0])).toEqual([]);
   });
 
   it('creates one template per category', () => {

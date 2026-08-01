@@ -63,6 +63,32 @@ describe('JobPhotoGallery (P12-001)', () => {
     expect(onChange).toHaveBeenCalledWith('after');
   });
 
+  it('renders a <video> for video/* content (not an <img>)', () => {
+    const photos = [
+      makePhoto({
+        id: 'v1',
+        category: 'other',
+        contentType: 'video/webm',
+        downloadUrl: 'https://cdn.example/v1.webm',
+        filename: 'v1.webm',
+      }),
+    ];
+    const { container } = render(<JobPhotoGallery photos={photos} />);
+    const video = screen.getByTestId('job-photo-video-v1') as HTMLVideoElement;
+    expect(video.tagName.toLowerCase()).toBe('video');
+    expect(video).toHaveAttribute('src', 'https://cdn.example/v1.webm');
+    expect(video.controls).toBe(true);
+    // No <img> is rendered for the video tile.
+    expect(container.querySelector('img')).toBeNull();
+  });
+
+  it('still renders an <img> for image/* content', () => {
+    const photos = [makePhoto({ id: 'p1', contentType: 'image/jpeg' })];
+    render(<JobPhotoGallery photos={photos} />);
+    expect(screen.getByRole('img')).toBeInTheDocument();
+    expect(screen.queryByTestId('job-photo-video-p1')).not.toBeInTheDocument();
+  });
+
   it('invokes onDelete when the delete button is clicked', () => {
     const onDelete = vi.fn();
     const photo = makePhoto({ id: 'p1' });
@@ -74,5 +100,35 @@ describe('JobPhotoGallery (P12-001)', () => {
   it('shows a loading indicator when loading', () => {
     render(<JobPhotoGallery photos={[]} loading />);
     expect(screen.getByTestId('job-photo-loading')).toBeInTheDocument();
+  });
+
+  // Sweep-2 S2 — a photo without contentType (e.g. an optimistic append of
+  // a partial API response) must render a card, never throw. The old code
+  // dereferenced photo.contentType.startsWith(...) → TypeError → the whole
+  // page fell into the error boundary right after a successful upload.
+  describe('Sweep-2 S2 — missing contentType never crashes the gallery', () => {
+    it('renders an <img> tile when contentType is missing but downloadUrl exists', () => {
+      const photo = makePhoto({ id: 'p1' });
+      delete (photo as Partial<JobPhoto>).contentType;
+      expect(() => render(<JobPhotoGallery photos={[photo]} />)).not.toThrow();
+      expect(screen.getByTestId('job-photo-card-p1')).toBeInTheDocument();
+      expect(screen.getByRole('img')).toBeInTheDocument();
+      expect(screen.queryByTestId('job-photo-video-p1')).not.toBeInTheDocument();
+    });
+
+    it('renders a generic placeholder tile when downloadUrl is missing too', () => {
+      const photo = makePhoto({ id: 'p1', downloadUrl: '' });
+      delete (photo as Partial<JobPhoto>).contentType;
+      expect(() => render(<JobPhotoGallery photos={[photo]} />)).not.toThrow();
+      expect(screen.getByTestId('job-photo-card-p1')).toBeInTheDocument();
+      expect(screen.getByTestId('job-photo-placeholder-p1')).toBeInTheDocument();
+      expect(screen.queryByRole('img')).not.toBeInTheDocument();
+    });
+
+    it('empty-string contentType (orphaned-file placeholder from list) renders as image tile', () => {
+      const photo = makePhoto({ id: 'p1', contentType: '' });
+      expect(() => render(<JobPhotoGallery photos={[photo]} />)).not.toThrow();
+      expect(screen.getByRole('img')).toBeInTheDocument();
+    });
   });
 });

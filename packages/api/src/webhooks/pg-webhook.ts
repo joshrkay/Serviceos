@@ -80,6 +80,36 @@ export class PgWebhookRepository extends PgBaseRepository implements WebhookRepo
     });
   }
 
+  /**
+   * P0-8 — exclusive retry claim as a single compare-and-swap UPDATE. The
+   * WHERE re-checks retry eligibility (failed, or stale in-flight) against
+   * the row's LIVE state, so of N concurrent retries exactly one gets a row
+   * back; the others match 0 rows (the winner already flipped the status
+   * and refreshed created_at) and return null. `created_at` doubles as the
+   * in-flight staleness anchor — bumping it on claim is what closes the
+   * window where a third retry could still see the row as stale while the
+   * winner is mid-execution.
+   */
+  async claimForRetry(id: string, stalenessMs: number): Promise<WebhookEvent | null> {
+    return this.withClient(async (client) => {
+      const result = await client.query(
+        `UPDATE webhook_events
+         SET status = 'processing',
+             created_at = NOW()
+         WHERE id = $1
+           AND (
+             status = 'failed'
+             OR (status IN ('received', 'processing')
+                 AND created_at <= NOW() - ($2::bigint * interval '1 millisecond'))
+           )
+         RETURNING *`,
+        [id, stalenessMs]
+      );
+      if (result.rows.length === 0) return null;
+      return mapRow(result.rows[0]);
+    });
+  }
+
   async updateStatus(id: string, status: WebhookEvent['status'], error?: string): Promise<void> {
     await this.withClient(async (client) => {
       await client.query(

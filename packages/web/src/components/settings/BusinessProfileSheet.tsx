@@ -1,11 +1,8 @@
 /**
- * Tier 4 (Settings stubs) — Business Profile editor.
+ * Business Profile editor — name, phone, email, timezone.
  *
- * Closes the first of the 13 `action: () => {}` stubs in SettingsPage:
- * Business profile (Name, phone, email, timezone). The fields here
- * mirror what the backend already accepts at PUT /api/settings — name,
- * phone, email, timezone. Address + logo are tracked as a follow-up
- * because they need a backend schema extension first.
+ * Fields mirror what the backend accepts at PUT /api/settings.
+ * Address + logo are a follow-up (need a backend schema extension).
  *
  * Pattern: GET on open, PUT on save, Sonner toast on success/failure.
  */

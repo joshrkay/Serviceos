@@ -4,11 +4,11 @@ import { cn } from './utils';
 export type StatTone = 'neutral' | 'success' | 'warning' | 'danger' | 'info';
 
 const TONE_ICON_CLASSES: Record<StatTone, string> = {
-  neutral: 'bg-slate-100 text-slate-500',
-  success: 'bg-green-50 text-green-600',
-  warning: 'bg-amber-50 text-amber-600',
-  danger: 'bg-red-50 text-red-600',
-  info: 'bg-blue-50 text-blue-600',
+  neutral: 'bg-secondary text-muted-foreground',
+  success: 'bg-success/10 text-success',
+  warning: 'bg-warning/10 text-warning',
+  danger: 'bg-destructive/10 text-destructive',
+  info: 'bg-primary/10 text-primary',
 };
 
 export interface StatCardProps extends React.HTMLAttributes<HTMLDivElement> {
@@ -40,7 +40,7 @@ export function StatCard({
   return (
     <div
       className={cn(
-        'flex items-start gap-3 rounded-2xl border border-slate-200 bg-white p-4',
+        'flex items-start gap-3 rounded-2xl border border-border bg-card p-4',
         className,
       )}
       {...rest}
@@ -56,11 +56,11 @@ export function StatCard({
         </span>
       )}
       <div className="min-w-0">
-        <p className="text-xs font-medium text-slate-500">{label}</p>
-        <p className="mt-0.5 text-xl font-semibold tabular-nums text-slate-900">
+        <p className="text-xs font-medium text-muted-foreground">{label}</p>
+        <p className="mt-0.5 text-xl font-semibold tabular-nums text-foreground">
           {value}
         </p>
-        {hint && <p className="mt-0.5 text-xs text-slate-400">{hint}</p>}
+        {hint && <p className="mt-0.5 text-xs text-muted-foreground">{hint}</p>}
       </div>
     </div>
   );

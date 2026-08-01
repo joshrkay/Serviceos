@@ -36,11 +36,15 @@ import { ProposalRepository, createProposal } from '../proposals/proposal';
 import { createLead } from '../leads/lead-service';
 import {
   findBookableSlots,
+  isWithinBusinessHours,
+  WeeklyBusinessHours,
+  schedulingConfigFromSettings,
   isSlotFree,
   clampBookingHorizon,
   STANDARD_BOOKING_HORIZON_DAYS,
   PRIORITY_BOOKING_HORIZON_DAYS,
 } from '../scheduling/booking-availability';
+import { checkServiceArea } from '../scheduling/service-area';
 import { customerHasPriorityBooking } from '../agreements/member-pricing';
 import { CustomerPaymentMethodRepository } from '../payments/customer-payment-method';
 import { createSetupIntent } from '../payments/stripe-saved-card';
@@ -59,12 +63,20 @@ import { PortalSessionRepository } from '../portal/portal-session';
 import {
   PortalRequest,
   createPortalTokenMiddleware,
+  requirePortalEntitlement,
   PortalTokenMiddlewareOptions,
 } from '../portal/portal-token-middleware';
+import { ContactRepository } from '../customers/contact';
 
 export interface PublicPortalDeps {
   portalRepo: PortalSessionRepository;
   customerRepo: CustomerRepository;
+  /**
+   * C2/I14 — resolves contact-bound sessions to their current role so
+   * entitlement is derived at read time. Without it, contact-bound tokens
+   * fail closed (401); legacy account-holder tokens are unaffected.
+   */
+  contactRepo?: ContactRepository;
   estimateRepo: EstimateRepository;
   invoiceRepo: InvoiceRepository;
   jobRepo: JobRepository;
@@ -140,13 +152,63 @@ const rescheduleSchema = z.object({
   slotEnd: z.string().datetime(),
 });
 
-async function resolveTenantTimezone(
+interface ResolvedScheduling {
+  timezone: string;
+  /**
+   * True when the timezone came from an explicit tenant choice. The seeders
+   * deliberately leave the zone unset until the tenant picks one, so an
+   * unchosen zone must GATE self-service booking rather than fall back to
+   * Eastern — a guessed clock books customers hours off.
+   */
+  timezoneChosen: boolean;
+  weeklyHours: WeeklyBusinessHours | null;
+  bufferMinutes: number | null;
+  serviceAreaZips: string[] | null;
+}
+
+/**
+ * Load the tenant's scheduling configuration once per request: timezone,
+ * per-day business hours, and travel buffer. All three propagate into slot
+ * generation AND slot validation so a POST can only book what GET offers.
+ */
+async function resolveTenantScheduling(
   deps: PublicPortalDeps,
   tenantId: string,
-): Promise<string> {
-  if (!deps.settingsRepo) return DEFAULT_BOOKING_TIMEZONE;
+): Promise<ResolvedScheduling> {
+  if (!deps.settingsRepo) {
+    return {
+      timezone: DEFAULT_BOOKING_TIMEZONE,
+      timezoneChosen: true, // dev harness without a settings repo — not tenant data
+      weeklyHours: null,
+      bufferMinutes: null,
+      serviceAreaZips: null,
+    };
+  }
   const settings = await deps.settingsRepo.findByTenant(tenantId);
-  return settings?.timezone || DEFAULT_BOOKING_TIMEZONE;
+  const config = schedulingConfigFromSettings(settings);
+  return {
+    timezone: config.timezone || DEFAULT_BOOKING_TIMEZONE,
+    timezoneChosen: Boolean(config.timezone),
+    weeklyHours: config.weeklyHours,
+    bufferMinutes: config.bufferMinutes,
+    serviceAreaZips: settings?.serviceAreaZips ?? null,
+  };
+}
+
+/**
+ * Self-service booking is gated on a CHOSEN tenant timezone: availability and
+ * holds are computed/validated in the tenant zone, and substituting Eastern
+ * for an unset zone silently books non-Eastern tenants hours off (the exact
+ * guess the scheduling gate exists to prevent). 409 so clients surface a
+ * clear "not bookable yet" state rather than a server error.
+ */
+function requireChosenTimezone(res: Response, scheduling: ResolvedScheduling): boolean {
+  if (scheduling.timezoneChosen) return true;
+  res.status(409).json({
+    error: 'TIMEZONE_NOT_CONFIGURED',
+    message: 'Online booking is unavailable until the business sets its timezone',
+  });
+  return false;
 }
 
 /**
@@ -157,7 +219,13 @@ async function resolveTenantTimezone(
 async function respondSlotTaken(
   deps: PublicPortalDeps,
   res: Response,
-  args: { tenantId: string; slotStart: Date; slotEnd: Date; timezone: string; message: string },
+  args: {
+    tenantId: string;
+    slotStart: Date;
+    slotEnd: Date;
+    scheduling: ResolvedScheduling;
+    message: string;
+  },
 ): Promise<void> {
   const durationMin = Math.round((args.slotEnd.getTime() - args.slotStart.getTime()) / 60000);
   const alternatives = await findBookableSlots(
@@ -166,8 +234,10 @@ async function respondSlotTaken(
       tenantId: args.tenantId,
       fromDate: args.slotStart.toISOString().slice(0, 10),
       toDate: new Date(args.slotStart.getTime() + 7 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10),
-      timezone: args.timezone,
+      timezone: args.scheduling.timezone,
       durationMin,
+      weeklyHours: args.scheduling.weeklyHours,
+      bufferMinutes: args.scheduling.bufferMinutes,
     },
   );
   res.status(409).json({
@@ -190,10 +260,10 @@ function ensurePortal(req: PortalRequest, res: Response): boolean {
 
 export function createPublicPortalRouter(deps: PublicPortalDeps): Router {
   const router = Router({ mergeParams: true });
-  const tokenMw = createPortalTokenMiddleware(
-    deps.portalRepo,
-    deps.middlewareOptions,
-  );
+  const tokenMw = createPortalTokenMiddleware(deps.portalRepo, {
+    ...deps.middlewareOptions,
+    contactRepo: deps.middlewareOptions?.contactRepo ?? deps.contactRepo,
+  });
 
   // Active-customer guard: a valid token alone isn't enough — the customer
   // it points at must still be reachable. Archiving the customer (or
@@ -241,6 +311,12 @@ export function createPublicPortalRouter(deps: PublicPortalDeps): Router {
         res.status(404).json({ error: 'NOT_FOUND', message: 'Customer not found' });
         return;
       }
+      // WS6 (QUALITY-2026-07-12) — the portal is a customer-facing surface with
+      // no Clerk /api/me, so it can't reach the tenant timezone the way the
+      // authed SPA does. Include it in the bootstrap response (resolved from
+      // tenant settings, tenant-scoped) so every portal date renders in the
+      // business's timezone per the "render in tenant timezone" core pattern.
+      const { timezone } = await resolveTenantScheduling(deps, tenantId);
       // Strip internal-only fields. The portal user only needs identity.
       res.json({
         id: customer.id,
@@ -252,6 +328,7 @@ export function createPublicPortalRouter(deps: PublicPortalDeps): Router {
         secondaryPhone: customer.secondaryPhone,
         email: customer.email,
         preferredChannel: customer.preferredChannel,
+        timezone,
       });
     } catch (err) {
       const { statusCode, body } = toErrorResponse(err);
@@ -261,6 +338,7 @@ export function createPublicPortalRouter(deps: PublicPortalDeps): Router {
 
   router.get('/:token/estimates', async (req: PortalRequest, res: Response) => {
     if (!ensurePortal(req, res)) return;
+    if (!requirePortalEntitlement(req, res, 'billing')) return;
     try {
       const { tenantId, customerId } = req.portal!;
       const jobs = await deps.jobRepo.findByTenant(tenantId, { customerId });
@@ -317,6 +395,7 @@ export function createPublicPortalRouter(deps: PublicPortalDeps): Router {
 
   router.get('/:token/invoices', async (req: PortalRequest, res: Response) => {
     if (!ensurePortal(req, res)) return;
+    if (!requirePortalEntitlement(req, res, 'billing')) return;
     try {
       const { tenantId, customerId } = req.portal!;
       const jobs = await deps.jobRepo.findByTenant(tenantId, { customerId });
@@ -368,6 +447,7 @@ export function createPublicPortalRouter(deps: PublicPortalDeps): Router {
 
   router.get('/:token/agreements', async (req: PortalRequest, res: Response) => {
     if (!ensurePortal(req, res)) return;
+    if (!requirePortalEntitlement(req, res, 'billing')) return;
     try {
       const { tenantId, customerId } = req.portal!;
       const agreements = await deps.agreementRepo.findByTenant(tenantId, { customerId });
@@ -493,7 +573,9 @@ export function createPublicPortalRouter(deps: PublicPortalDeps): Router {
     try {
       const { tenantId, customerId } = req.portal!;
       const parsed = availabilityQuerySchema.parse(req.query);
-      const timezone = await resolveTenantTimezone(deps, tenantId);
+      const scheduling = await resolveTenantScheduling(deps, tenantId);
+      if (!requireChosenTimezone(res, scheduling)) return;
+      const timezone = scheduling.timezone;
 
       // Priority-booking members (#6) can book further out; everyone else is
       // capped at the standard horizon. Clamp the requested window so the
@@ -517,6 +599,8 @@ export function createPublicPortalRouter(deps: PublicPortalDeps): Router {
               toDate: window.to,
               timezone,
               durationMin: parsed.durationMin,
+              weeklyHours: scheduling.weeklyHours,
+              bufferMinutes: scheduling.bufferMinutes,
             },
           )
         : [];
@@ -572,7 +656,17 @@ export function createPublicPortalRouter(deps: PublicPortalDeps): Router {
       // Defense in depth: the availability GET already clamps the horizon, but
       // a client can POST any slot — re-check it against the customer's horizon
       // (priority members get the extended one) so it can't be bypassed.
-      const timezone = await resolveTenantTimezone(deps, tenantId);
+      const scheduling = await resolveTenantScheduling(deps, tenantId);
+      if (!requireChosenTimezone(res, scheduling)) return;
+      const timezone = scheduling.timezone;
+      // Same defense for business hours: only what GET would offer is bookable.
+      if (!isWithinBusinessHours(slotStart, slotEnd, timezone, scheduling.weeklyHours)) {
+        res.status(400).json({
+          error: 'VALIDATION_ERROR',
+          message: 'Selected time is outside booking hours',
+        });
+        return;
+      }
       const priorityBooking = await customerHasPriorityBooking(tenantId, customerId, deps.agreementRepo);
       const horizonDays = priorityBooking
         ? PRIORITY_BOOKING_HORIZON_DAYS
@@ -602,6 +696,24 @@ export function createPublicPortalRouter(deps: PublicPortalDeps): Router {
         return;
       }
 
+      // Service area (F2 term 5) — same rule as public booking: when a ZIP
+      // allowlist is configured, the resolved location must be inside it. An
+      // existing customer's saved address can still be out of area (the list
+      // may have shrunk since they were added), and a held appointment the
+      // truck can't reach helps nobody.
+      if (scheduling.serviceAreaZips && scheduling.serviceAreaZips.length > 0 && deps.locationRepo) {
+        const location = await deps.locationRepo.findById(tenantId, locationId);
+        const postalCode = location?.postalCode ?? '';
+        if (!checkServiceArea(scheduling.serviceAreaZips, postalCode).inArea) {
+          res.status(400).json({
+            error: 'OUT_OF_SERVICE_AREA',
+            message:
+              'That address is outside our current service area. Call us and we may still be able to help.',
+          });
+          return;
+        }
+      }
+
       const finderDeps = {
         appointmentRepo: deps.appointmentRepo,
         assignmentRepo: deps.assignmentRepo,
@@ -628,6 +740,9 @@ export function createPublicPortalRouter(deps: PublicPortalDeps): Router {
           tenantId,
           start: slotStart,
           end: slotEnd,
+          // Tenant travel buffer — a crafted POST must not land a slot the
+          // buffered availability (GET) would never have offered.
+          bufferMinutes: scheduling.bufferMinutes,
         });
         if (!stillFree) {
           return { ok: false as const };
@@ -697,7 +812,7 @@ export function createPublicPortalRouter(deps: PublicPortalDeps): Router {
           tenantId,
           slotStart,
           slotEnd,
-          timezone,
+          scheduling,
           message: 'That time was just booked. Here are the next available slots.',
         });
         return;
@@ -705,7 +820,7 @@ export function createPublicPortalRouter(deps: PublicPortalDeps): Router {
 
       // Post-commit side effect: the tentative hold should appear on any open
       // dispatch board for that day immediately, flagged pending approval.
-      notifyDispatchBoardChanged(tenantId, outcome.held.scheduledStart);
+      notifyDispatchBoardChanged(tenantId, outcome.held.scheduledStart, outcome.held.timezone);
 
       res.status(201).json({
         status: 'pending_confirmation',
@@ -765,7 +880,7 @@ export function createPublicPortalRouter(deps: PublicPortalDeps): Router {
       });
       // Surface the "change requested" badge live on any open board for the
       // appointment's day, even though nothing has moved spatially yet.
-      notifyDispatchBoardChanged(tenantId, owned.scheduledStart);
+      notifyDispatchBoardChanged(tenantId, owned.scheduledStart, owned.timezone);
 
       res.status(201).json({
         status: 'pending_confirmation',
@@ -804,15 +919,34 @@ export function createPublicPortalRouter(deps: PublicPortalDeps): Router {
         return;
       }
 
-      const timezone = await resolveTenantTimezone(deps, tenantId);
+      const scheduling = await resolveTenantScheduling(deps, tenantId);
+      if (!requireChosenTimezone(res, scheduling)) return;
+      const timezone = scheduling.timezone;
+      // A reschedule is a new commitment — hold it to the same business-hours
+      // discipline as a fresh booking.
+      if (!isWithinBusinessHours(slotStart, slotEnd, timezone, scheduling.weeklyHours)) {
+        res.status(400).json({
+          error: 'VALIDATION_ERROR',
+          message: 'Selected time is outside booking hours',
+        });
+        return;
+      }
       const finderDeps = { appointmentRepo: deps.appointmentRepo, assignmentRepo: deps.assignmentRepo };
-      const free = await isSlotFree(finderDeps, { tenantId, start: slotStart, end: slotEnd });
+      const free = await isSlotFree(finderDeps, {
+        tenantId,
+        start: slotStart,
+        end: slotEnd,
+        // Buffered like GET availability, but the appointment being moved
+        // must not block its own target slot.
+        bufferMinutes: scheduling.bufferMinutes,
+        excludeAppointmentIds: [owned.id],
+      });
       if (!free) {
         await respondSlotTaken(deps, res, {
           tenantId,
           slotStart,
           slotEnd,
-          timezone,
+          scheduling,
           message: 'That time is no longer available. Here are other open times.',
         });
         return;
@@ -841,7 +975,7 @@ export function createPublicPortalRouter(deps: PublicPortalDeps): Router {
         metadata: { proposalId: persisted.id },
       });
       // Surface the "change requested" badge live on the current day's board.
-      notifyDispatchBoardChanged(tenantId, owned.scheduledStart);
+      notifyDispatchBoardChanged(tenantId, owned.scheduledStart, owned.timezone);
 
       res.status(201).json({
         status: 'pending_confirmation',
@@ -865,6 +999,7 @@ export function createPublicPortalRouter(deps: PublicPortalDeps): Router {
    */
   router.post('/:token/payment-methods/setup', async (req: PortalRequest, res: Response) => {
     if (!ensurePortal(req, res)) return;
+    if (!requirePortalEntitlement(req, res, 'billing')) return;
     try {
       const { tenantId, customerId } = req.portal!;
       if (!deps.customerPaymentMethodRepo || !deps.stripeConfig) {
@@ -891,7 +1026,11 @@ export function createPublicPortalRouter(deps: PublicPortalDeps): Router {
         },
         deps.stripeFetch,
       );
-      res.status(200).json({ clientSecret: result.clientSecret, setupIntentId: result.setupIntentId });
+      res.status(200).json({
+        clientSecret: result.clientSecret,
+        setupIntentId: result.setupIntentId,
+        stripeAccountId: connect && connect.chargesEnabled ? connect.accountId : null,
+      });
     } catch (err) {
       const { statusCode, body } = toErrorResponse(err);
       res.status(statusCode).json(body);
@@ -905,6 +1044,7 @@ export function createPublicPortalRouter(deps: PublicPortalDeps): Router {
    */
   router.get('/:token/payment-methods', async (req: PortalRequest, res: Response) => {
     if (!ensurePortal(req, res)) return;
+    if (!requirePortalEntitlement(req, res, 'billing')) return;
     try {
       const { tenantId, customerId } = req.portal!;
       if (!deps.customerPaymentMethodRepo) {

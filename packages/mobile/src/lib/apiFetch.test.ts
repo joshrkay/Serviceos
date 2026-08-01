@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { createApiFetch, type TokenGetter } from './apiFetch';
+import { createApiFetch, DEFAULT_TIMEOUT_MS, type TokenGetter } from './apiFetch';
 
 const BASE = 'https://api.example.test';
 
@@ -14,11 +14,14 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-function makeClient(over: { getToken?: TokenGetter; onUnauthenticated?: () => void } = {}) {
+function makeClient(
+  over: { getToken?: TokenGetter; onUnauthenticated?: () => void; timeoutMs?: number } = {},
+) {
   return createApiFetch({
     baseUrl: BASE,
     getToken: over.getToken ?? (async () => 'tok'),
     onUnauthenticated: over.onUnauthenticated,
+    timeoutMs: over.timeoutMs,
   });
 }
 
@@ -97,5 +100,64 @@ describe('createApiFetch', () => {
     expect(onUnauthenticated).not.toHaveBeenCalled();
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(headers(lastCall()[1]).Authorization).toBe('Bearer tok');
+  });
+
+  it('passes an AbortSignal to fetch so a request can be timed out', async () => {
+    fetchMock.mockResolvedValue(new Response(null, { status: 200 }));
+
+    await makeClient()('/api/me');
+
+    expect(lastCall()[1].signal).toBeInstanceOf(AbortSignal);
+  });
+
+  it('rejects with a TimeoutError when the request outlives the timeout', async () => {
+    vi.useFakeTimers();
+    try {
+      // A fetch that hangs until its abort signal fires — the real socket-hang case.
+      fetchMock.mockImplementation(
+        (_url: string, init: RequestInit) =>
+          new Promise((_resolve, reject) => {
+            init.signal?.addEventListener('abort', () => {
+              const err = new Error('Aborted');
+              err.name = 'AbortError';
+              reject(err);
+            });
+          }),
+      );
+
+      const pending = makeClient({ timeoutMs: 50 })('/api/me');
+      const assertion = expect(pending).rejects.toMatchObject({ name: 'TimeoutError' });
+      await vi.advanceTimersByTimeAsync(50);
+      await assertion;
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not set a timeout when timeoutMs is 0', async () => {
+    fetchMock.mockResolvedValue(new Response(null, { status: 200 }));
+
+    await makeClient({ timeoutMs: 0 })('/api/me');
+
+    expect(lastCall()[1].signal).toBeUndefined();
+  });
+
+  it('returns the non-2xx response with its body intact for the caller to decode', async () => {
+    fetchMock.mockResolvedValue(
+      new Response(JSON.stringify({ error: 'NOT_FOUND', message: 'No such job' }), {
+        status: 404,
+        headers: { 'Content-Type': 'application/json' },
+      }),
+    );
+
+    const res = await makeClient()('/api/jobs/missing');
+
+    expect(res.status).toBe(404);
+    // The body must survive so callers can `decodeError(res)` it.
+    await expect(res.json()).resolves.toEqual({ error: 'NOT_FOUND', message: 'No such job' });
+  });
+
+  it('defaults the timeout to DEFAULT_TIMEOUT_MS', () => {
+    expect(DEFAULT_TIMEOUT_MS).toBeGreaterThan(0);
   });
 });

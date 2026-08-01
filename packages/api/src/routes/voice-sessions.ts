@@ -17,7 +17,7 @@ import { Router, Response } from 'express';
 import { z } from 'zod';
 import { AuthenticatedRequest } from '../auth/clerk';
 import { requireAuth, requireTenant, requirePermission } from '../middleware/auth';
-import { toErrorResponse } from '../shared/errors';
+import { asyncRoute } from '../middleware/async-route';
 import { InAppVoiceAdapter } from '../ai/agents/customer-calling/inapp-adapter';
 import type { VoiceSessionStore, VoiceSessionEvent } from '../ai/agents/customer-calling/voice-session-store';
 
@@ -28,6 +28,15 @@ export interface VoiceSessionsRouterDeps {
 
 const startSchema = z.object({
   conversationId: z.string().min(1).optional(),
+  /**
+   * QA-2026-07-26 — caller's phone number, optionally supplied by the
+   * in-app client at session start (e.g. the operator is on a call with a
+   * customer and starts the assistant with that number in hand). When it
+   * matches EXACTLY ONE tenant customer, the adapter resolves it immediately
+   * so a later generic reference like "our customer" still attaches to the
+   * right customer. See InAppVoiceAdapter.startSession.
+   */
+  callerPhone: z.string().optional(),
 });
 
 const inputSchema = z.object({
@@ -63,27 +72,24 @@ export function createVoiceSessionsRouter(deps: VoiceSessionsRouterDeps): Router
     requireAuth,
     requireTenant,
     requirePermission('ai:run'),
-    async (req: AuthenticatedRequest, res: Response) => {
-      try {
-        const parsed = startSchema.parse(req.body ?? {});
-        const result = await deps.adapter.startSession(
-          req.auth!.tenantId,
-          req.auth!.userId,
-          parsed.conversationId
-        );
-        res.status(201).json({
-          sessionId: result.sessionId,
-          state: result.state,
-          greetingText: result.greetingText,
-          greetingAudio: result.greetingAudio
-            ? result.greetingAudio.toString('base64')
-            : undefined,
-        });
-      } catch (err) {
-        const { statusCode, body } = toErrorResponse(err);
-        res.status(statusCode).json(body);
-      }
-    }
+    asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
+      const parsed = startSchema.parse(req.body ?? {});
+      const result = await deps.adapter.startSession(
+        req.auth!.tenantId,
+        req.auth!.userId,
+        parsed.conversationId,
+        req.auth!.role,
+        parsed.callerPhone,
+      );
+      res.status(201).json({
+        sessionId: result.sessionId,
+        state: result.state,
+        greetingText: result.greetingText,
+        greetingAudio: result.greetingAudio
+          ? result.greetingAudio.toString('base64')
+          : undefined,
+      });
+    })
   );
 
   router.post(
@@ -91,35 +97,30 @@ export function createVoiceSessionsRouter(deps: VoiceSessionsRouterDeps): Router
     requireAuth,
     requireTenant,
     requirePermission('ai:run'),
-    async (req: AuthenticatedRequest, res: Response) => {
-      try {
-        const session = deps.store.peek(req.params.id);
-        if (!session || session.tenantId !== req.auth!.tenantId) {
-          res.status(404).json({ error: 'NOT_FOUND', message: 'Voice session not found' });
-          return;
-        }
-        if (session.ended) {
-          // 410 Gone is the right status here — the resource existed but
-          // is permanently terminated. Lets the frontend stop polling
-          // without confusing it with a 404.
-          res.status(410).json({ error: 'GONE', message: 'Session ended' });
-          return;
-        }
-        const parsed = inputSchema.parse(req.body ?? {});
-        const result = await deps.adapter.handleInput(req.params.id, parsed.text);
-        res.json({
-          state: result.state,
-          sideEffects: result.sideEffects,
-          ttsText: result.ttsText,
-          ttsAudio: result.ttsAudio ? result.ttsAudio.toString('base64') : undefined,
-          proposalIds: result.proposalIds,
-          ended: result.ended,
-        });
-      } catch (err) {
-        const { statusCode, body } = toErrorResponse(err);
-        res.status(statusCode).json(body);
+    asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
+      const session = deps.store.peek(req.params.id);
+      if (!session || session.tenantId !== req.auth!.tenantId) {
+        res.status(404).json({ error: 'NOT_FOUND', message: 'Voice session not found' });
+        return;
       }
-    }
+      if (session.ended) {
+        // 410 Gone is the right status here — the resource existed but
+        // is permanently terminated. Lets the frontend stop polling
+        // without confusing it with a 404.
+        res.status(410).json({ error: 'GONE', message: 'Session ended' });
+        return;
+      }
+      const parsed = inputSchema.parse(req.body ?? {});
+      const result = await deps.adapter.handleInput(req.params.id, parsed.text);
+      res.json({
+        state: result.state,
+        sideEffects: result.sideEffects,
+        ttsText: result.ttsText,
+        ttsAudio: result.ttsAudio ? result.ttsAudio.toString('base64') : undefined,
+        proposalIds: result.proposalIds,
+        ended: result.ended,
+      });
+    })
   );
 
   router.get(
@@ -139,34 +140,57 @@ export function createVoiceSessionsRouter(deps: VoiceSessionsRouterDeps): Router
       res.setHeader('Connection', 'keep-alive');
       res.flushHeaders?.();
 
+      // A half-closed socket can make res.write()/res.end() throw
+      // synchronously. onEvent runs inside EventEmitter.emit from store
+      // timers (e.g. reapIdle), where an uncaught throw escapes to
+      // uncaughtException and kills the whole process — a dead SSE
+      // client must never propagate past this handler.
+      const safeWrite = (chunk: string): void => {
+        try {
+          res.write(chunk);
+        } catch {
+          // dead socket — the req 'close' handler detaches us
+        }
+      };
+
       // Send the current state immediately so the client renders
       // something even if no transition has fired yet.
-      res.write(
+      safeWrite(
         `data: ${JSON.stringify({ type: 'snapshot', state: session.machine.currentState })}\n\n`
       );
 
       const onEvent = (event: VoiceSessionEvent) => {
-        res.write(`data: ${JSON.stringify(event)}\n\n`);
+        safeWrite(`data: ${JSON.stringify(event)}\n\n`);
         // Mirror SSE events onto the client WS gateway. publish() is a
         // no-op when the gateway is disabled, so SSE remains the source
         // of truth during ramp.
-        void import('../ws/client-gateway').then(({ publish }) => {
-          publish(
-            'voice',
-            session.id,
-            {
-              kind: 'voice.event',
-              channel: 'voice',
-              sessionId: session.id,
-              event: event.type,
-              state: 'state' in event ? (event as { state?: string }).state : undefined,
-              payload: event as unknown as Record<string, unknown>,
-            },
-            session.tenantId,
-          );
-        });
+        void import('../ws/client-gateway')
+          .then(({ publish }) => {
+            publish(
+              'voice',
+              session.id,
+              {
+                kind: 'voice.event',
+                channel: 'voice',
+                sessionId: session.id,
+                event: event.type,
+                state: 'state' in event ? (event as { state?: string }).state : undefined,
+                payload: event as unknown as Record<string, unknown>,
+              },
+              session.tenantId,
+            );
+          })
+          .catch((err) => {
+            process.stderr.write(
+              `voice SSE→WS mirror failed: ${err instanceof Error ? err.message : String(err)}\n`
+            );
+          });
         if (event.type === 'ended') {
-          res.end();
+          try {
+            res.end();
+          } catch {
+            // already closed
+          }
         }
       };
       session.events.on('voice-event', onEvent);
@@ -174,7 +198,7 @@ export function createVoiceSessionsRouter(deps: VoiceSessionsRouterDeps): Router
       // Heartbeat keeps proxies / Cloudflare from killing the stream
       // during long idle stretches. Unrefed so it doesn't block exit.
       const heartbeat = setInterval(() => {
-        res.write(': hb\n\n');
+        safeWrite(': hb\n\n');
       }, 25000);
       heartbeat.unref?.();
 
@@ -190,20 +214,15 @@ export function createVoiceSessionsRouter(deps: VoiceSessionsRouterDeps): Router
     requireAuth,
     requireTenant,
     requirePermission('ai:run'),
-    async (req: AuthenticatedRequest, res: Response) => {
-      try {
-        const session = deps.store.peek(req.params.id);
-        if (!session || session.tenantId !== req.auth!.tenantId) {
-          res.status(404).json({ error: 'NOT_FOUND', message: 'Voice session not found' });
-          return;
-        }
-        await deps.adapter.endSession(req.params.id);
-        res.status(204).end();
-      } catch (err) {
-        const { statusCode, body } = toErrorResponse(err);
-        res.status(statusCode).json(body);
+    asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
+      const session = deps.store.peek(req.params.id);
+      if (!session || session.tenantId !== req.auth!.tenantId) {
+        res.status(404).json({ error: 'NOT_FOUND', message: 'Voice session not found' });
+        return;
       }
-    }
+      await deps.adapter.endSession(req.params.id);
+      res.status(204).end();
+    })
   );
 
   return router;

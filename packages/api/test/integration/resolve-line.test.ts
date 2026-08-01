@@ -93,3 +93,107 @@ describe('Postgres integration — resolve ambiguous catalog line (U2)', () => {
     expect(audits.some((a) => a.eventType === 'proposal.line_resolved')).toBe(true);
   });
 });
+
+/**
+ * B3 integration — the editActions counterpart: an update_invoice proposal
+ * (editActions, not lineItems) round-trips through real Postgres jsonb the
+ * same way. Pins that `sourceContext.catalogResolution` + `missingFields`
+ * (both keyed by edit-action index / path) and the stamped `unitPrice` +
+ * `unitPriceCents` (both fields, per the edit-action price-field doctrine)
+ * survive the jsonb column, and the proposal moves draft → ready_for_review
+ * (never approved) once the editAction gate clears.
+ */
+describe('Postgres integration — resolve ambiguous editAction line (B3)', () => {
+  let pool: Pool;
+  let tenant: { tenantId: string; userId: string };
+  let proposalRepo: PgProposalRepository;
+  let auditRepo: PgAuditRepository;
+  const proposalId = crypto.randomUUID();
+
+  beforeAll(async () => {
+    pool = await getSharedTestDb();
+    tenant = await createTestTenant(pool);
+    proposalRepo = new PgProposalRepository(pool);
+    auditRepo = new PgAuditRepository(pool);
+
+    const draft = createProposal({
+      tenantId: tenant.tenantId,
+      proposalType: 'update_invoice',
+      payload: {
+        invoiceId: crypto.randomUUID(),
+        editActions: [
+          {
+            type: 'add_line_item',
+            lineItem: {
+              description: 'water heater install',
+              quantity: 1,
+              unitPrice: 7_500,
+              unitPriceCents: null,
+              pricingSource: 'ambiguous',
+              needsPricing: true,
+            },
+          },
+        ],
+        _meta: {
+          overallConfidence: 'high',
+          markers: [
+            {
+              path: 'editActions[0].lineItem.unitPrice',
+              reason: 'price differs from the catalog price for "Water Heater Install"',
+            },
+          ],
+        },
+      },
+      summary: 'Edit invoice — add a water heater install',
+      createdBy: tenant.userId,
+      missingFields: ['editActions[0].lineItem.catalogItemId'],
+      sourceContext: {
+        catalogResolution: {
+          0: [
+            { id: 'cat-heater', name: 'Water Heater Install', unitPriceCents: 15_000, score: 1, category: 'labor' },
+            { id: 'spoken:0', name: 'Keep spoken price', unitPriceCents: 7_500, score: 0 },
+          ],
+        },
+      },
+    });
+    await proposalRepo.create({ ...draft, id: proposalId, status: 'draft' });
+  });
+
+  afterAll(async () => {
+    await closeSharedTestDb();
+  });
+
+  it('stamps BOTH price fields + catalogItemId into jsonb, clears the editAction gate, and moves to ready_for_review', async () => {
+    const result = await resolveProposalLine(
+      {
+        tenantId: tenant.tenantId,
+        proposalId,
+        lineIndex: 0,
+        catalogItemId: 'cat-heater',
+        actorId: tenant.userId,
+        actorRole: 'owner',
+      },
+      { proposalRepo, auditRepo },
+    );
+
+    expect(result.status).toBe('ready_for_review'); // never 'approved'
+
+    // Re-read from Postgres to prove the jsonb merge persisted.
+    const stored = await proposalRepo.findById(tenant.tenantId, proposalId);
+    expect(stored?.status).toBe('ready_for_review');
+    const line = (stored!.payload.editActions as Array<Record<string, unknown>>)[0]
+      .lineItem as Record<string, unknown>;
+    expect(line.unitPrice).toBe(15_000);
+    expect(line.unitPriceCents).toBe(15_000);
+    expect(line.pricingSource).toBe('catalog');
+    expect(line.catalogItemId).toBe('cat-heater');
+    const ctx = stored!.sourceContext as Record<string, unknown>;
+    expect(ctx.missingFields).toEqual([]);
+    expect((ctx.catalogResolution as Record<string, unknown>)['0']).toBeUndefined();
+
+    const audits = await auditRepo.findByEntity(tenant.tenantId, 'proposal', proposalId);
+    const resolved = audits.find((a) => a.eventType === 'proposal.line_resolved');
+    expect(resolved).toBeDefined();
+    expect(resolved?.metadata?.target).toBe('editAction');
+  });
+});

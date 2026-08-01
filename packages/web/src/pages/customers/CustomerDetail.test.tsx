@@ -13,6 +13,9 @@ vi.mock('../../utils/api-fetch', () => ({
 vi.mock('../../components/customers/CommunicationTimeline', () => ({
   CommunicationTimeline: () => <div>Timeline</div>,
 }));
+vi.mock('../../components/customers/CustomerProfitCard', () => ({
+  CustomerProfitCard: () => <div>Profit</div>,
+}));
 // U1/U2 panels are self-contained (they fetch their own data); mock them here
 // so this suite stays focused on CustomerDetail and its locations fetch order.
 vi.mock('../../components/customers/ContactsPanel', () => ({
@@ -23,6 +26,24 @@ vi.mock('../../components/customers/TagsPanel', () => ({
 }));
 vi.mock('../../components/customers/CustomFieldsPanel', () => ({
   CustomFieldsPanel: () => <div>CustomFieldsPanel</div>,
+}));
+// Recurring jobs panel fires its own apiFetch calls on mount; mock it like the
+// other self-contained panels so this suite's one-shot location mocks survive.
+vi.mock('../../components/customers/RecurringJobsPanel', () => ({
+  RecurringJobsPanel: () => <div>RecurringJobsPanel</div>,
+}));
+vi.mock('../../components/customers/CustomerGroupsPanel', () => ({
+  CustomerGroupsPanel: () => <div>CustomerGroupsPanel</div>,
+}));
+// US-069 Records panel fires its own apiFetch calls on mount (revenue +
+// records). As a child its effects run before CustomerDetail's loadLocations,
+// so leaving it real would let it swallow this suite's one-shot location mocks.
+// Mock it like the other self-contained panels to keep the locations fetch order intact.
+vi.mock('../../components/customers/CustomerRecordsPanel', () => ({
+  CustomerRecordsPanel: () => <div>CustomerRecordsPanel</div>,
+}));
+vi.mock('../../components/customers/MergeCustomerPanel', () => ({
+  MergeCustomerPanel: () => <div>MergeCustomerPanel</div>,
 }));
 
 import { useDetailQuery } from '../../hooks/useDetailQuery';
@@ -69,6 +90,18 @@ describe('CustomerDetail', () => {
     renderCustomerDetail();
     expect(screen.getByText('Alice')).toBeInTheDocument();
     expect(screen.getByText('Contact Information')).toBeInTheDocument();
+    await waitFor(() => {
+      expect(vi.mocked(apiFetch)).toHaveBeenCalledWith('/api/locations?customerId=1');
+    });
+  });
+
+  it('offers schedule / estimate / message quick actions (4.5)', async () => {
+    renderCustomerDetail();
+    const quickActions = screen.getByTestId('customer-quick-actions');
+    expect(quickActions).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Schedule/ })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Estimate/ })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Message/ })).toBeInTheDocument();
     await waitFor(() => {
       expect(vi.mocked(apiFetch)).toHaveBeenCalledWith('/api/locations?customerId=1');
     });

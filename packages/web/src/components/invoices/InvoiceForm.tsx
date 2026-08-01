@@ -1,5 +1,4 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { FileText, Loader } from 'lucide-react';
 import { apiFetch } from '../../utils/api-fetch';
 import { formatCurrency } from '../../utils/currency';
 import {
@@ -10,6 +9,7 @@ import {
   totalCents,
 } from '../forms/LineItemEditor';
 import { useListQuery } from '../../hooks/useListQuery';
+import { Field, Input, Select, Textarea, Button } from '../ui';
 
 export interface InvoiceFormProps {
   onCreated?: (invoiceId: string) => void;
@@ -63,8 +63,6 @@ interface State {
   taxRatePercent: string;
   items: LineItemDraft[];
 }
-
-const inputCls = 'w-full rounded-lg border border-slate-200 px-3 py-2 text-sm';
 
 function makeId() {
   return `li-${Math.random().toString(36).slice(2, 10)}-${Date.now().toString(36)}`;
@@ -217,11 +215,11 @@ export function InvoiceForm({ onCreated, onCancel }: InvoiceFormProps) {
 
   return (
     <form onSubmit={handleSubmit} className="p-4 md:p-6 max-w-3xl mx-auto">
-      <h1 className="text-lg text-slate-900 mb-4">New Invoice</h1>
+      <h1 className="text-lg text-foreground mb-4">New Invoice</h1>
       {error && (
         <div
           role="alert"
-          className="mb-3 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700"
+          className="mb-3 rounded-lg border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive"
         >
           {error}
         </div>
@@ -229,14 +227,14 @@ export function InvoiceForm({ onCreated, onCancel }: InvoiceFormProps) {
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
         {/* Estimate picker (optional — auto-populates job and line items) */}
-        <div className="md:col-span-2">
-          <label className="text-xs text-slate-500">
-            From estimate (optional — auto-populates job &amp; line items)
-          </label>
-          <select
+        <Field
+          className="md:col-span-2"
+          label="From estimate (optional — auto-populates job & line items)"
+        >
+          <Select
             value={form.estimateId}
             onChange={(e) => handleEstimateChange(e.target.value)}
-            className={inputCls}
+            className="min-h-11"
           >
             <option value="">— create from scratch —</option>
             {eligibleEstimates.map(e => (
@@ -244,16 +242,15 @@ export function InvoiceForm({ onCreated, onCancel }: InvoiceFormProps) {
                 {e.estimateNumber} ({e.totals ? formatCurrency(e.totals.totalCents) : '—'}) — {e.status}
               </option>
             ))}
-          </select>
-        </div>
+          </Select>
+        </Field>
 
         {/* Job picker */}
-        <div className="md:col-span-2">
-          <label className="text-xs text-slate-500">Job *</label>
-          <select
+        <Field className="md:col-span-2" label="Job *">
+          <Select
             value={form.jobId}
             onChange={(e) => setForm(p => ({ ...p, jobId: e.target.value }))}
-            className={inputCls}
+            className="min-h-11"
             required
           >
             <option value="">— select a job —</option>
@@ -262,61 +259,58 @@ export function InvoiceForm({ onCreated, onCancel }: InvoiceFormProps) {
                 {j.jobNumber} — {j.summary}
               </option>
             ))}
-          </select>
-        </div>
+          </Select>
+        </Field>
 
         {/* Customer & service location (auto-populated) */}
         {selectedJob && (
-          <div className="md:col-span-2 rounded-lg bg-slate-50 border border-slate-200 px-3 py-2.5 text-sm text-slate-700 space-y-0.5">
+          <div className="md:col-span-2 rounded-lg bg-secondary border border-border px-3 py-2.5 text-sm text-foreground space-y-0.5">
             {customerName && (
-              <p><span className="text-xs text-slate-500">Customer:</span> {customerName}</p>
+              <p><span className="text-xs text-muted-foreground">Customer:</span> {customerName}</p>
             )}
             {serviceAddress && (
-              <p><span className="text-xs text-slate-500">Service address:</span> {serviceAddress}</p>
+              <p><span className="text-xs text-muted-foreground">Service address:</span> {serviceAddress}</p>
             )}
           </div>
         )}
 
-        <label className="text-xs text-slate-500">
-          Due date
-          <input
+        <Field label="Due date">
+          <Input
             type="date"
             value={form.dueDate}
             onChange={(e) => setForm((p) => ({ ...p, dueDate: e.target.value }))}
-            className={inputCls}
+            className="min-h-11"
           />
-        </label>
-        <label className="text-xs text-slate-500">
-          Tax rate (%)
-          <input
+        </Field>
+        <Field label="Tax rate (%)">
+          <Input
             value={form.taxRatePercent}
             onChange={(e) => setForm((p) => ({ ...p, taxRatePercent: e.target.value }))}
             inputMode="decimal"
             placeholder="0"
-            className={inputCls}
+            className="min-h-11"
           />
-        </label>
-        <label className="text-xs text-slate-500 md:col-span-2">
-          Discount ($)
-          <input
+        </Field>
+        <Field className="md:col-span-2" label="Discount ($)">
+          <Input
             value={form.discountDollars}
             onChange={(e) => setForm((p) => ({ ...p, discountDollars: e.target.value }))}
             inputMode="decimal"
             placeholder="0.00"
-            className={inputCls}
+            className="min-h-11"
           />
-        </label>
+        </Field>
       </div>
 
       <div className="mt-4">
-        <p className="text-xs text-slate-500 font-medium mb-2">Line items</p>
+        <p className="text-xs text-muted-foreground font-medium mb-2">Line items</p>
         <LineItemEditor
           items={form.items}
           onChange={(items) => setForm((p) => ({ ...p, items }))}
         />
         {total > 0 && (
           <div className="mt-3 flex justify-end">
-            <p className="text-sm font-medium text-slate-900">
+            <p className="text-sm font-medium text-foreground">
               Total: <span className="text-lg">{totalDisplay}</span>
             </p>
           </div>
@@ -324,32 +318,23 @@ export function InvoiceForm({ onCreated, onCancel }: InvoiceFormProps) {
       </div>
 
       <div className="grid grid-cols-1 gap-3 mt-4">
-        <label className="text-xs text-slate-500">
-          Customer message
-          <textarea
+        <Field label="Customer message">
+          <Textarea
             value={form.customerMessage}
             onChange={(e) => setForm((p) => ({ ...p, customerMessage: e.target.value }))}
             rows={3}
-            className={inputCls}
+            className="min-h-11"
           />
-        </label>
+        </Field>
       </div>
 
       <div className="mt-4 flex gap-2">
-        <button
-          type="submit"
-          disabled={submitting}
-          className="rounded-lg bg-slate-900 text-white text-sm px-4 py-2 hover:bg-slate-800 disabled:opacity-50"
-        >
+        <Button type="submit" disabled={submitting} className="min-h-11">
           {submitting ? 'Creating...' : 'Create invoice'}
-        </button>
-        <button
-          type="button"
-          onClick={onCancel}
-          className="rounded-lg border border-slate-200 text-slate-700 text-sm px-4 py-2 hover:bg-slate-50"
-        >
+        </Button>
+        <Button type="button" variant="outline" onClick={onCancel} className="min-h-11">
           Cancel
-        </button>
+        </Button>
       </div>
     </form>
   );

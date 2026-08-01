@@ -1,6 +1,12 @@
 import { v4 as uuidv4 } from 'uuid';
-import { LineItem, DocumentTotals, calculateDocumentTotals } from '../shared/billing-engine';
+import {
+  LineItem,
+  DocumentTotals,
+  calculateSelectedDocumentTotals,
+  normalizeLineItemTotals,
+} from '../shared/billing-engine';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
+import { estimateCreatedProps } from '../analytics/estimate-event-props';
 import { ValidationError, ConflictError } from '../shared/errors';
 import { RefreshJobMoneyStateDeps, refreshJobMoneyStateSafe } from '../jobs/job-money-state';
 import { DocumentRevisionRepository, createRevision } from '../ai/document-revision';
@@ -135,6 +141,13 @@ export interface EstimateMutationDeps {
 export interface EstimateListOptions {
   status?: EstimateStatus;
   jobId?: string;
+  /**
+   * Restrict to estimates on any of these jobs. Used by the list route to
+   * filter by customer: the route resolves a customerId to the customer's
+   * jobIds (jobs carry customer_id; estimates only carry job_id) and passes
+   * them here. An empty array matches nothing.
+   */
+  jobIds?: string[];
   /** ILIKE search on estimate_number / customer_message. */
   search?: string;
   /** Pagination cap. Default 50, hard-capped server-side at 200. */
@@ -146,6 +159,10 @@ export interface EstimateListOptions {
   /** Only estimates whose `sentAt` is strictly before this. Used by the
    *  estimate-reminder worker to find aging sent estimates. */
   sentBefore?: Date;
+  /** N-005 — lower bound (inclusive) on `sentAt`; digest "quotes sent today". */
+  sentFrom?: Date;
+  /** N-005 — upper bound (exclusive) on `sentAt`; digest "quotes sent today". */
+  sentTo?: Date;
 }
 
 export interface EstimateListResult {
@@ -243,8 +260,17 @@ export async function createEstimate(
   const errors = validateEstimateInput(input);
   if (errors.length > 0) throw new ValidationError(`Validation failed: ${errors.join(', ')}`);
 
-  const totals = calculateDocumentTotals(
-    input.lineItems,
+  // P0-2 — the client's totalCents is never persisted; every line total is
+  // recomputed from quantity × unitPriceCents (the web UI computes it in
+  // float dollars and can be off by a cent on fractional quantities).
+  const lineItems = normalizeLineItemTotals(input.lineItems);
+  // EE-1 — a tiered estimate's headline total reflects the DEFAULT selection
+  // (each group's default tier + pre-checked add-ons + always-billed lines),
+  // not the sum of every option; a flat estimate's total is byte-identical
+  // (all lines selected). Every line item is still persisted (lineItems
+  // below); only the headline total narrows. See calculateSelectedDocumentTotals.
+  const totals = calculateSelectedDocumentTotals(
+    lineItems,
     input.discountCents ?? 0,
     input.taxRateBps ?? 0
   );
@@ -255,7 +281,7 @@ export async function createEstimate(
     jobId: input.jobId,
     estimateNumber: input.estimateNumber,
     status: 'draft',
-    lineItems: input.lineItems,
+    lineItems,
     totals,
     validUntil: input.validUntil,
     customerMessage: input.customerMessage,
@@ -276,6 +302,9 @@ export async function createEstimate(
       eventType: 'estimate.created',
       entityType: 'estimate',
       entityId: created.id,
+      // EE-4 images + EE-1 tiers: counts/booleans forwarded to PostHog by the
+      // audit→product-event mapper (never URLs, ids, or line text).
+      metadata: { ...estimateCreatedProps(created.lineItems) },
     });
     await auditRepo.create(event);
   }
@@ -492,10 +521,18 @@ export async function updateEstimate(
   });
   assertVersionMatch(existing, input.expectedVersion);
 
-  const lineItems = input.lineItems ?? existing.lineItems;
+  // P0-2 — client totals are recomputed, never trusted (see createEstimate).
+  // Only INCOMING lines are normalized: a metadata-only edit (e.g. just
+  // customerMessage) must not shift a sent estimate's customer-visible total
+  // by re-normalizing legacy persisted lines the customer already saw.
+  const lineItems = input.lineItems
+    ? normalizeLineItemTotals(input.lineItems)
+    : existing.lineItems;
   const discountCents = input.discountCents ?? existing.totals.discountCents;
   const taxRateBps = input.taxRateBps ?? existing.totals.taxRateBps;
-  const totals = calculateDocumentTotals(lineItems, discountCents, taxRateBps);
+  // EE-1 — headline over the default selection so a tiered estimate isn't
+  // re-inflated on edit (flat estimates are unaffected).
+  const totals = calculateSelectedDocumentTotals(lineItems, discountCents, taxRateBps);
   const now = new Date();
 
   // RV-042 — acceptance invalidation: the content the customer accepted is
@@ -592,10 +629,16 @@ export async function reviseEstimate(
   assertEstimateEditable(existing, { allowSent: true, depositPaidCents: deps?.depositPaidCents });
   assertVersionMatch(existing, input.expectedVersion);
 
-  const lineItems = input.lineItems ?? existing.lineItems;
+  // P0-2 — client totals are recomputed, never trusted (see createEstimate).
+  // Incoming lines only — see updateEstimate for why persisted lines are
+  // left untouched on a metadata-only revision.
+  const lineItems = input.lineItems
+    ? normalizeLineItemTotals(input.lineItems)
+    : existing.lineItems;
   const discountCents = input.discountCents ?? existing.totals.discountCents;
   const taxRateBps = input.taxRateBps ?? existing.totals.taxRateBps;
-  const totals = calculateDocumentTotals(lineItems, discountCents, taxRateBps);
+  // EE-1 — headline over the default selection (see calculateSelectedDocumentTotals).
+  const totals = calculateSelectedDocumentTotals(lineItems, discountCents, taxRateBps);
   const now = new Date();
 
   const updated = await repository.update(tenantId, id, {
@@ -755,7 +798,8 @@ export async function cloneEstimate(
     estimateNumber: newEstimateNumber,
     status: 'draft',
     lineItems: existing.lineItems.map((li) => ({ ...li, id: uuidv4() })),
-    totals: calculateDocumentTotals(
+    // EE-1 — headline over the default selection (see calculateSelectedDocumentTotals).
+    totals: calculateSelectedDocumentTotals(
       existing.lineItems,
       existing.totals.discountCents,
       existing.totals.taxRateBps,
@@ -823,9 +867,21 @@ export class InMemoryEstimateRepository implements EstimateRepository {
     let results = Array.from(this.estimates.values()).filter((e) => e.tenantId === tenantId && !e.deletedAt);
     if (options?.status) results = results.filter((e) => e.status === options.status);
     if (options?.jobId) results = results.filter((e) => e.jobId === options.jobId);
+    if (options?.jobIds) {
+      const wanted = new Set(options.jobIds);
+      results = results.filter((e) => wanted.has(e.jobId));
+    }
     if (options?.sentBefore) {
       const cutoff = options.sentBefore.getTime();
       results = results.filter((e) => e.sentAt !== undefined && e.sentAt.getTime() < cutoff);
+    }
+    if (options?.sentFrom) {
+      const from = options.sentFrom.getTime();
+      results = results.filter((e) => e.sentAt !== undefined && e.sentAt.getTime() >= from);
+    }
+    if (options?.sentTo) {
+      const to = options.sentTo.getTime();
+      results = results.filter((e) => e.sentAt !== undefined && e.sentAt.getTime() < to);
     }
     if (options?.search) {
       const q = options.search.toLowerCase();

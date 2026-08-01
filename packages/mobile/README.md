@@ -60,10 +60,30 @@ needed yet.
 ### Web preview / screenshot (no device)
 ```
 npm install
-npx expo export --platform web --output-dir web-dist
-npx serve web-dist            # or any static server, then open in a browser
+cp .env.example .env          # EXPO_PUBLIC_API_URL + Clerk publishable key
+# Inline env at export time — Expo bakes EXPO_PUBLIC_* into the bundle:
+EXPO_PUBLIC_API_URL=https://your-api.example.com \
+EXPO_PUBLIC_CLERK_PUBLISHABLE_KEY=pk_test_... \
+  npx expo export --platform web --output-dir web-dist
+npx serve web-dist -s -l 8788  # -s = SPA fallback (required for /messages etc.)
 ```
 The app renders via React-Native-Web (approximates iOS, not pixel-identical).
+
+### QA against a live API (Railway preview)
+
+Signed-in flows need a Clerk user **with tenant bootstrap** (`tenant_id` in JWT
+`public_metadata`). API-created users skip the `user.created` webhook, so run:
+
+```
+DATABASE_URL='postgres://...' \
+CLERK_SECRET_KEY='sk_test_...' \
+  npx ts-node packages/api/scripts/bootstrap-mobile-qa-user.ts \
+    --email 'mobile-qa+clerk_test@serviceos-test.com' \
+    --password 'MobileQATest!123'
+```
+
+Use a `+clerk_test` email (Clerk testing mode) and re-export the web bundle
+pointing at the preview API. Sign in with the printed credentials.
 
 ### TestFlight (real iOS beta) — via EAS Build
 Prereqs: an **Apple Developer Program** membership ($99/yr) and a free **Expo** account.
@@ -79,3 +99,18 @@ internal build. Fill in the `submit.production.ios` placeholders in `eas.json` (
 ASC app id, team id). The build runs on Expo's servers — trigger it from your machine or a
 CI job with an `EXPO_TOKEN`, not from this repo's cloud env. Replace `assets/icon.png` (a
 solid-brand placeholder) with real branding before shipping.
+
+## Testing
+
+- **Unit / hook / screen** — `npm test` (root-hoisted Vitest). Pure logic, hooks,
+  and jsdom screen contract tests (tap targets, navigation). Runs in PR CI; see
+  `vitest.config.ts`. Coverage is gated (`--coverage`).
+- **Viewport (Playwright)** — `npm run e2e:viewport`. Builds the web export to
+  `.e2e-web` and runs `e2e/mobile-viewport.spec.ts` against it: the CLAUDE.md
+  "no horizontal overflow at 320px" invariant that jsdom can't measure, plus
+  ≥44px tap targets against real layout. The app is Clerk-gated, so the
+  tap-target checks only run when `EXPO_PUBLIC_CLERK_PUBLISHABLE_KEY` points at a
+  reachable Clerk instance (provided in CI); without it the export serves a blank
+  shell and those checks skip while the no-overflow invariant still asserts. In a
+  sandbox without Playwright's bundled browser, set `PW_EXECUTABLE_PATH` to a
+  chromium binary.

@@ -128,7 +128,7 @@ describe('PgTenantFeatureFlagRepository.isEnabledForTenant', () => {
     await repo.isEnabledForTenant(TENANT, 'my-flag');
     const contextCall = calls.find((c) => c.sql.includes('app.current_tenant_id'));
     expect(contextCall).toBeDefined();
-    expect(contextCall!.sql).toContain(TENANT);
+    expect(contextCall!.params).toContain(TENANT); // U2b-2: tenant is a set_config param
   });
 
   it('RV-001-07: uses composite PK lookup for tenant override read (tenant_id = $1 AND flag_key = $2)', async () => {
@@ -241,6 +241,38 @@ describe('PgTenantFeatureFlagRepository cache', () => {
     // next read must re-query DB
     await repo.isEnabledForTenant(TENANT, 'my-flag');
     expect(tenantSelectCount).toBe(2);
+  });
+
+  it('U3e-2: FIFO size bound evicts the oldest tenant past maxEntries', async () => {
+    const T1 = '11111111-1111-1111-1111-111111111111';
+    const T2 = '22222222-2222-2222-2222-222222222222';
+    const T3 = '33333333-3333-3333-3333-333333333333';
+    const selectsByTenant = new Map<string, number>();
+    const { pool } = makeMockPool((sql, params) => {
+      if (isContext(sql) || sql.includes('RESET')) return { rows: [] };
+      if (sql.includes('tenant_feature_flags') && sql.includes('SELECT')) {
+        const tid = String(params[0]);
+        selectsByTenant.set(tid, (selectsByTenant.get(tid) ?? 0) + 1);
+        return { rows: [] }; // no override → falls to platform repo
+      }
+      return { rows: [] };
+    });
+    const platformRepo = makePlatformRepo({ name: 'my-flag', enabled: true });
+    // Cap of 2 → the 3rd distinct tenant evicts the 1st (FIFO).
+    const repo = new PgTenantFeatureFlagRepository(pool, platformRepo, 2);
+
+    await repo.isEnabledForTenant(T1, 'my-flag'); // cache {T1}
+    await repo.isEnabledForTenant(T2, 'my-flag'); // cache {T1,T2}
+    await repo.isEnabledForTenant(T3, 'my-flag'); // inserts T3 → evicts T1 → {T2,T3}
+    expect(selectsByTenant.get(T1)).toBe(1);
+
+    // T3 is the most-recent entry → still cached (no new DB read).
+    await repo.isEnabledForTenant(T3, 'my-flag');
+    expect(selectsByTenant.get(T3)).toBe(1);
+
+    // T1 was evicted → must re-resolve against the DB.
+    await repo.isEnabledForTenant(T1, 'my-flag');
+    expect(selectsByTenant.get(T1)).toBe(2);
   });
 
   it('RV-001-14: cache expires after 30 s — re-queries DB past TTL', async () => {

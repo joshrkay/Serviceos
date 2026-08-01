@@ -5,6 +5,7 @@ import { JobRepository } from '../jobs/job';
 import { Customer, CustomerRepository } from '../customers/customer';
 import { DispatchAnalyticsRepository, captureDispatchEvent } from '../dispatch/analytics';
 import { DispatchEntityType } from './dispatch-repository';
+import { DncRepository, normalizePhone } from '../compliance/dnc';
 import { Logger } from '../logging/logger';
 
 export type DelayNotificationChannel = 'sms' | 'email' | 'in_app';
@@ -317,11 +318,33 @@ export class DelayNotificationCoordinator {
     private readonly selector: NextCustomerSelector,
     private readonly stateRepo: DelayNoticeStateRepository,
     private readonly internalAlertSink: InternalAlertSink = new NoopInternalAlertSink(),
+    /**
+     * Story 10.3 — DNC suppression. When wired, an SMS delay/en-route notice
+     * to a number on the tenant DNC list is suppressed (never enqueued),
+     * matching the consent/DNC gate the confirmation/reminder path already
+     * enforces. SMS-only: in-app owner alerts and email are unaffected.
+     */
+    private readonly dncRepo?: DncRepository,
   ) {}
+
+  /** True when the resolved channel is SMS and the destination is on DNC. */
+  private async isSmsSuppressed(
+    tenantId: string,
+    channel: DelayNotificationChannel,
+    destination?: string,
+  ): Promise<boolean> {
+    if (channel !== 'sms' || !this.dncRepo || !destination) return false;
+    return this.dncRepo.isOnDnc(tenantId, normalizePhone(destination));
+  }
 
   async enqueueDelayNotice(input: EnqueueDelayNoticeInput): Promise<string | null> {
     const target = await this.selector.select(input.tenantId, input.currentAppointmentId);
     if (!target) return null;
+
+    // Story 10.3 — honor DNC: never text a number that opted out.
+    if (await this.isSmsSuppressed(input.tenantId, target.channel, target.destination)) {
+      return null;
+    }
 
     const idempotencyKey = `${target.appointment.id}:${input.delayVersion}`;
     const existing = await this.stateRepo.findByKey(idempotencyKey);
@@ -400,6 +423,11 @@ export class DelayNotificationCoordinator {
   }): Promise<string | null> {
     const target = await this.selector.selectCurrent(input.tenantId, input.appointmentId);
     if (!target) return null;
+
+    // Story 10.3 — honor DNC: a tech's "on my way" never texts an opted-out number.
+    if (await this.isSmsSuppressed(input.tenantId, target.channel, target.destination)) {
+      return null;
+    }
 
     const idempotencyKey = `${target.appointment.id}:en_route`;
     const existing = await this.stateRepo.findByKey(idempotencyKey);

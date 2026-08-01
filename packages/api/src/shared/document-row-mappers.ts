@@ -10,6 +10,10 @@ export function mapLineItemRow(row: Record<string, any>): LineItem {
     description: row.description,
     category: row.category,
     quantity: Number(row.quantity),
+    // B7.5 — descriptive unit of measure (migration 265, both line-item
+    // tables). NULL on every row written before it and on any path that
+    // states no unit → undefined here. Never used in money math.
+    unit: row.unit ?? undefined,
     unitPriceCents: Number(row.unit_price_cents),
     totalCents: Number(row.total_cents),
     sortOrder: Number(row.sort_order),
@@ -19,10 +23,14 @@ export function mapLineItemRow(row: Record<string, any>): LineItem {
     groupLabel: row.group_label ?? undefined,
     isOptional: row.is_optional ?? undefined,
     isDefaultSelected: row.is_default_selected ?? undefined,
-    // Catalog-grounding signal (estimate_line_items only; the column does
-    // not exist on invoice_line_items, so row.pricing_source is undefined
-    // there → undefined here, leaving invoice lines untouched).
+    // Catalog-grounding signal — persisted on BOTH estimate_line_items
+    // (migration 179) and invoice_line_items (migration 255). NULL on
+    // legacy rows and manual creates → undefined here (treated as NOT
+    // grounded).
     pricingSource: row.pricing_source ?? undefined,
+    // EE-4 — frozen image snapshot (estimate_line_items only; the column does
+    // not exist on invoice_line_items → undefined there).
+    imageFileId: row.image_file_id ?? undefined,
   };
 }
 
@@ -33,6 +41,14 @@ export function mapDocumentTotalsRow(row: Record<string, any>): DocumentTotals {
     discountCents: Number(row.discount_cents),
     taxRateBps: Number(row.tax_rate_bps),
     taxCents: Number(row.tax_cents),
+    // Processing-fee surcharge is invoice-only; estimate rows have no such
+    // column (row.processing_fee_* is undefined there → fields stay unset).
+    ...(row.processing_fee_bps !== undefined && row.processing_fee_bps !== null
+      ? { processingFeeBps: Number(row.processing_fee_bps) }
+      : {}),
+    ...(row.processing_fee_cents !== undefined && row.processing_fee_cents !== null
+      ? { processingFeeCents: Number(row.processing_fee_cents) }
+      : {}),
     totalCents: Number(row.total_cents),
   };
 }

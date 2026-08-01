@@ -266,21 +266,33 @@ steps:
 
 ### Seed Data (introduced in P0-005)
 
-Create a `seed` command that populates a development environment with:
-- 1 tenant with owner, dispatcher, and 3 technicians
-- 20 customers with 30 service locations
-- 40 jobs across various statuses
-- 60 appointments across past week and next week
-- 15 estimates (5 draft, 5 sent, 3 accepted, 2 rejected)
-- 10 invoices (3 draft, 3 open, 2 partially paid, 2 paid)
-- 5 payments
-- 10 conversations with mixed message types
+The `seed` command (`packages/api/scripts/seed.ts`) populates a database via the
+production repositories — every row passes the same validation and RLS as live
+data. The plan is computed by `src/seed/seed-plan.ts` and inserted by
+`src/seed/seed-runner.ts`. Defaults (10 tenants × 20 customers) create, per
+tenant, a customer → service location → job → estimate → appointment chain:
+
+- **10 tenants**, each with an owner user
+- **200 customers** (20 per tenant), each with a service location
+- **200 jobs** (one per customer)
+- **200 estimates** (one per customer)
+- **200 appointments** — every one on a **separate calendar day at a separate
+  time** (no two share a start instant or a date), so the demo schedule is
+  spread out rather than stacked
 
 ```bash
-npm run seed                    # Seed dev environment
-npm run seed:clean               # Reset seed data
-npm run seed -- --tenant-count=3 # Multi-tenant seed for isolation testing
+DATABASE_URL=… npm run seed                       # 10 tenants × 20 → 200 of each
+DATABASE_URL=… npm run seed -- --tenant-count=3   # smaller multi-tenant set
+DATABASE_URL=… npm run seed -- --per-tenant=50    # 10 × 50 → 500 of each
+DATABASE_URL=… npm run seed -- --timezone=America/Chicago
+DATABASE_URL=… npm run seed:clean                 # remove seeded demo tenants
 ```
+
+`seed:clean` removes only tenants this seeder created (matched by their
+`owner@seed-tenant-*` owner email), child rows first, so real data is untouched.
+The headline guarantee is unit-tested in `test/seed/seed-plan.test.ts` and the
+DB insertion (counts, tenant isolation, day-distinct appointments) in the
+Docker-gated `test/integration/seed-runner.test.ts`.
 
 ### Fixture Data for AI Testing
 

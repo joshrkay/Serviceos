@@ -22,6 +22,13 @@ export const proposalResponseSchema = z.object({
   targetEntityType: z.string().optional(),
   targetEntityId: z.string().optional(),
   resultEntityId: z.string().optional(),
+  // Finding 2 — undo-window honesty. `approvedAt` is the server-stamped
+  // approval instant; `undoExpiresAt` = approvedAt + UNDO_WINDOW_MS. Both are
+  // ISO strings, both optional (present only on the approve response / an
+  // approved proposal), so this stays backward compatible with every existing
+  // inbox/list consumer that never reads them.
+  approvedAt: z.string().optional(),
+  undoExpiresAt: z.string().optional(),
   createdBy: z.string(),
   createdAt: z.string(),
   updatedAt: z.string(),

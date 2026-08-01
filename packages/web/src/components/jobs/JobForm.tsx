@@ -1,6 +1,10 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { apiFetch } from '../../utils/api-fetch';
 import { CustomerPicker, CustomerOption } from '../forms/CustomerPicker';
+import { Input, Textarea, Select, Field, Button } from '../ui';
+import { useTechnicianRoster } from '../../hooks/useTechnicianRoster';
+import { useTenantTimezone } from '../../hooks/useTenantTimezone';
+import { datetimeLocalToUtc } from '../../utils/formatInTenantTz';
 
 const PRIORITIES = ['low', 'normal', 'high', 'urgent'] as const;
 
@@ -15,6 +19,10 @@ interface State {
   summary: string;
   problemDescription: string;
   priority: typeof PRIORITIES[number];
+  /** datetime-local value; when set, the job is scheduled on create. */
+  scheduledStart: string;
+  technicianId: string;
+  durationMin: string;
 }
 
 interface ServiceLocationOption {
@@ -33,9 +41,10 @@ const initial: State = {
   summary: '',
   problemDescription: '',
   priority: 'normal',
+  scheduledStart: '',
+  technicianId: '',
+  durationMin: '60',
 };
-
-const inputCls = 'w-full rounded-lg border border-slate-200 px-3 py-2 text-sm';
 
 export function JobForm({ onCreated, onCancel }: JobFormProps) {
   const [form, setForm] = useState<State>(initial);
@@ -43,6 +52,8 @@ export function JobForm({ onCreated, onCancel }: JobFormProps) {
   const [locationsLoading, setLocationsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  const { technicians } = useTechnicianRoster();
+  const timezone = useTenantTimezone();
 
   useEffect(() => {
     let cancelled = false;
@@ -96,13 +107,25 @@ export function JobForm({ onCreated, onCancel }: JobFormProps) {
         return;
       }
 
-      const body = {
+      const body: Record<string, unknown> = {
         customerId: form.customer.id,
         locationId: form.locationId.trim(),
         summary: form.summary.trim(),
         problemDescription: form.problemDescription.trim() || undefined,
         priority: form.priority,
       };
+
+      // Optional schedule-on-create. Only sent when a start time is set; the
+      // API creates a linked appointment so the job reaches the dispatch board.
+      // The datetime-local wall clock is interpreted in the TENANT tz (not the
+      // browser's), so the slot books at the time the dispatcher intended.
+      if (form.scheduledStart) {
+        body.scheduledStart = datetimeLocalToUtc(form.scheduledStart, timezone).toISOString();
+        body.timezone = timezone;
+        const dur = parseInt(form.durationMin, 10);
+        if (!Number.isNaN(dur) && dur > 0) body.durationMin = dur;
+        if (form.technicianId) body.technicianId = form.technicianId;
+      }
 
       setSubmitting(true);
       try {
@@ -122,39 +145,39 @@ export function JobForm({ onCreated, onCancel }: JobFormProps) {
         setSubmitting(false);
       }
     },
-    [form, onCreated]
+    [form, onCreated, timezone]
   );
 
   return (
     <form onSubmit={handleSubmit} className="p-4 md:p-6 max-w-2xl mx-auto">
-      <h1 className="text-lg text-slate-900 mb-4">New Job</h1>
+      <h1 className="text-lg text-foreground mb-4">New Job</h1>
       {error && (
         <div
           role="alert"
-          className="mb-3 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700"
+          className="mb-3 rounded-lg border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive"
         >
           {error}
         </div>
       )}
 
       <div className="grid grid-cols-1 gap-3">
-        <div>
-          <label className="text-xs text-slate-500">Customer *</label>
+        {/* Customer is a composite control, so it carries its own label
+            rather than a Field-injected id. */}
+        <div className="flex flex-col gap-1.5">
+          <label className="text-xs font-medium text-muted-foreground">Customer *</label>
           <CustomerPicker
             value={form.customer}
             onChange={(c) => setForm((p) => ({ ...p, customer: c, locationId: '' }))}
             required
           />
         </div>
-        <label className="text-xs text-slate-500">
-          Service location *
-          <select
+
+        <Field label="Service location *">
+          <Select
             value={form.locationId}
-            onChange={(e) =>
-              setForm((p) => ({ ...p, locationId: e.target.value }))
-            }
+            onChange={(e) => setForm((p) => ({ ...p, locationId: e.target.value }))}
             disabled={!form.customer || locationsLoading}
-            className={inputCls}
+            className="min-h-11"
           >
             <option value="">
               {locationsLoading ? 'Loading locations...' : 'Select a service location'}
@@ -165,30 +188,30 @@ export function JobForm({ onCreated, onCancel }: JobFormProps) {
                 {location.isPrimary ? ' (Primary)' : ''} - {location.street1}, {location.city}, {location.state} {location.postalCode}
               </option>
             ))}
-          </select>
-        </label>
-        <label className="text-xs text-slate-500">
-          Summary *
-          <input
+          </Select>
+        </Field>
+
+        <Field label="Summary *">
+          <Input
             value={form.summary}
             onChange={(e) => setForm((p) => ({ ...p, summary: e.target.value }))}
-            className={inputCls}
+            className="min-h-11"
           />
-        </label>
-        <label className="text-xs text-slate-500">
-          Problem description
-          <textarea
+        </Field>
+
+        <Field label="Problem description">
+          <Textarea
             value={form.problemDescription}
             onChange={(e) =>
               setForm((p) => ({ ...p, problemDescription: e.target.value }))
             }
             rows={4}
-            className={inputCls}
+            className="min-h-11"
           />
-        </label>
-        <label className="text-xs text-slate-500">
-          Priority
-          <select
+        </Field>
+
+        <Field label="Priority">
+          <Select
             value={form.priority}
             onChange={(e) =>
               setForm((p) => ({
@@ -196,32 +219,68 @@ export function JobForm({ onCreated, onCancel }: JobFormProps) {
                 priority: e.target.value as State['priority'],
               }))
             }
-            className={inputCls}
+            className="min-h-11"
           >
             {PRIORITIES.map((p) => (
               <option key={p} value={p}>
                 {p}
               </option>
             ))}
-          </select>
-        </label>
+          </Select>
+        </Field>
+
+        {/* Optional scheduling — when a start time is set, the job is placed
+            on the dispatch board on create. */}
+        <fieldset className="rounded-lg border border-border p-3 flex flex-col gap-3">
+          <legend className="px-1 text-xs font-medium text-muted-foreground">Schedule (optional)</legend>
+
+          <Field label="Start time">
+            <Input
+              type="datetime-local"
+              value={form.scheduledStart}
+              onChange={(e) => setForm((p) => ({ ...p, scheduledStart: e.target.value }))}
+              className="min-h-11"
+            />
+          </Field>
+
+          {form.scheduledStart && (
+            <>
+              <Field label="Technician">
+                <Select
+                  value={form.technicianId}
+                  onChange={(e) => setForm((p) => ({ ...p, technicianId: e.target.value }))}
+                  className="min-h-11"
+                >
+                  <option value="">Unassigned</option>
+                  {technicians.map((t) => (
+                    <option key={t.id} value={t.id}>
+                      {t.name}
+                    </option>
+                  ))}
+                </Select>
+              </Field>
+
+              <Field label="Duration (minutes)">
+                <Input
+                  type="number"
+                  min={1}
+                  value={form.durationMin}
+                  onChange={(e) => setForm((p) => ({ ...p, durationMin: e.target.value }))}
+                  className="min-h-11"
+                />
+              </Field>
+            </>
+          )}
+        </fieldset>
       </div>
 
       <div className="mt-4 flex gap-2">
-        <button
-          type="submit"
-          disabled={submitting}
-          className="rounded-lg bg-slate-900 text-white text-sm px-4 py-2 hover:bg-slate-800 disabled:opacity-50"
-        >
+        <Button type="submit" disabled={submitting} className="min-h-11">
           {submitting ? 'Creating...' : 'Create job'}
-        </button>
-        <button
-          type="button"
-          onClick={onCancel}
-          className="rounded-lg border border-slate-200 text-slate-700 text-sm px-4 py-2 hover:bg-slate-50"
-        >
+        </Button>
+        <Button type="button" variant="outline" onClick={onCancel} className="min-h-11">
           Cancel
-        </button>
+        </Button>
       </div>
     </form>
   );

@@ -91,6 +91,21 @@ describe('persistCatalogItem audit emission', () => {
     expect(auditRepo.getAll()).toHaveLength(0);
     expect(await repo.findById(TENANT, item.id)).not.toBeNull();
   });
+
+  it('EE-4: catalog_item.created carries has_image reflecting the photo state', async () => {
+    // No image → hasImage: false.
+    await persistCatalogItem(repo, makeItem(), ACTOR, auditRepo);
+    expect(auditRepo.getAll()[0].metadata).toMatchObject({ hasImage: false });
+
+    // With an image_file_id → hasImage: true (the file id itself is NEVER in
+    // the audit metadata — only the boolean).
+    auditRepo = new InMemoryAuditRepository();
+    const withImage = makeItem({ imageFileId: '11111111-2222-3333-4444-555555555555' });
+    await persistCatalogItem(repo, withImage, ACTOR, auditRepo);
+    const meta = auditRepo.getAll()[0].metadata!;
+    expect(meta).toMatchObject({ hasImage: true });
+    expect(Object.values(meta)).not.toContain('11111111-2222-3333-4444-555555555555');
+  });
 });
 
 describe('updateCatalogItem', () => {
@@ -110,7 +125,9 @@ describe('updateCatalogItem', () => {
     const events = auditRepo.getAll();
     expect(events).toHaveLength(1);
     expect(events[0].eventType).toBe('catalog_item.updated');
-    expect(events[0].metadata).toEqual({ changes: ['unitPriceCents', 'name'] });
+    // EE-4: `hasImage` reflects the item's photo state after the update (here
+    // the makeItem() fixture has no image and the patch didn't add one).
+    expect(events[0].metadata).toEqual({ changes: ['unitPriceCents', 'name'], hasImage: false });
     // name is trimmed through the patch.
     expect((await repo.findById(TENANT, item.id))!.name).toBe('New');
   });
@@ -186,6 +203,45 @@ describe('InMemoryCatalogItemRepository.listByTenant filters', () => {
     await repo.create(makeItem({ id: 'x', tenantId: 'tenant-2', name: 'Foreign' }));
     expect((await repo.listByTenant('tenant-2')).map((i) => i.id)).toEqual(['x']);
     expect((await repo.listByTenant(TENANT)).some((i) => i.id === 'x')).toBe(false);
+  });
+});
+
+describe('InMemoryCatalogItemRepository.listByTenant limit', () => {
+  let repo: InMemoryCatalogItemRepository;
+
+  beforeEach(async () => {
+    repo = new InMemoryCatalogItemRepository();
+    // Names chosen to sort predictably (name ASC): item-0 .. item-4.
+    for (let i = 0; i < 5; i++) {
+      await repo.create(makeItem({ id: `i${i}`, name: `item-${i}`, category: 'Parts' }));
+    }
+  });
+
+  it('returns N of M rows when a limit is given', async () => {
+    const result = await repo.listByTenant(TENANT, { limit: 2 });
+    expect(result.map((i) => i.id)).toEqual(['i0', 'i1']);
+  });
+
+  it('returns every row when limit is omitted (backward compat)', async () => {
+    const result = await repo.listByTenant(TENANT);
+    expect(result).toHaveLength(5);
+  });
+
+  it('composes with category and search filters', async () => {
+    await repo.create(makeItem({ id: 'other-cat', name: 'item-x', category: 'Materials' }));
+    const result = await repo.listByTenant(TENANT, { category: 'Parts', search: 'item', limit: 2 });
+    expect(result.map((i) => i.id)).toEqual(['i0', 'i1']);
+    expect(result.every((i) => i.category === 'Parts')).toBe(true);
+  });
+
+  it('limit 0 returns no rows', async () => {
+    const result = await repo.listByTenant(TENANT, { limit: 0 });
+    expect(result).toEqual([]);
+  });
+
+  it('limit greater than the row count returns all rows', async () => {
+    const result = await repo.listByTenant(TENANT, { limit: 1000 });
+    expect(result).toHaveLength(5);
   });
 });
 

@@ -238,3 +238,66 @@ with write access via proposals.
 Two vulnerabilities to manage: the native-app gap (the PWA buys time, not
 parity) and the trust deficit of being new — which is why approval + undo +
 audit belongs front-and-center in marketing, not buried in docs.
+
+---
+
+## 6. Shipped since this analysis (Jobber-parity pass, 2026-06-28)
+
+Closing named Jobber gaps. Each landed full-stack with unit + Docker-gated
+integration tests and a production `tsc` build gate.
+
+- **Job Forms & Checklists** (was Tier 3 "custom forms builder", de-prioritized
+  in §2 — now built, not just canned checklists). Tenant-defined form/checklist
+  templates + per-job submissions that snapshot the template so a completed
+  record is immutable history. Backend: `packages/api/src/job-forms/`,
+  migration 221, `/api/job-forms`. Web: template builder in Settings →
+  AI & Automation → "Forms & checklists" (`JobFormTemplatesSheet`) + a
+  fill/complete panel on the job detail (`JobFormsPanel`).
+- **Installable PWA + offline app shell** (R4 — the native-mobile gap in §5
+  "Where Jobber still wins"). `packages/web/public/manifest.webmanifest` +
+  `sw.js` (network-first navigations → offline fallback; `/api` always
+  bypasses cache) + `src/pwa/register-sw.ts`. Buys time on native, not parity.
+- **Recurring jobs** (Jobber flagship for maintenance/cleaning/lawn shops;
+  previously only a `maintenance_contracts` record with a free-text cadence).
+  Pure recurrence engine (daily/weekly/biweekly/monthly, interval, count/until,
+  month-end clamping) + series CRUD + computed visit-date preview. Backend:
+  `packages/api/src/recurring-jobs/`, migration 222, `/api/recurring-jobs`.
+  Web: `RecurringJobsPanel` on the customer detail.
+- **Recurring-job materialization** (completes the above to full parity).
+  Series now carry per-visit scheduling intent (time-of-day, duration, visit
+  kind). `materializeRecurringJob` (`recurring-jobs/materialize.ts`) generates
+  a real Job + Appointment for each due occurrence in a horizon, placing the
+  time-of-day in the tenant timezone (luxon, DST-correct) at the customer's
+  primary service location. Idempotent via a `recurring_job_occurrences` ledger
+  (UNIQUE per series+date, claim-before-create), migration 223,
+  `POST /api/recurring-jobs/:id/generate` + a "Schedule visits" action on the
+  panel. **Follow-up:** a scheduled worker to auto-run generation, and surface
+  the upcoming series on the dispatch calendar.
+- **Job custom fields** (multi-entity custom fields — Jobber supports custom
+  fields on jobs/quotes/clients; we had clients only). Tenant-defined,
+  structured/reportable fields on the job record (PO #, permit #, gate code),
+  distinct from Job Forms (fillable per-visit checklists). Backend reuses the
+  generic field-type validators (`jobs/job-custom-field.ts`), migration 224,
+  `/api/job-custom-fields`. Web: values panel on the job detail +
+  definition manager in Settings → AI & Automation → "Job custom fields".
+- **Consumer financing** (Jobber bundles Wisetack "buy now / pay over time").
+  A FinancingApplication tied to an invoice, created through a provider
+  abstraction (`financing/financing-provider.ts`): a live, env-gated
+  `WisetackFinancingProvider` (HTTP, fetch-injectable, idempotency key, cents→
+  dollars, status mapping) and a `ManualFinancingProvider` fallback when no
+  key is configured. Orchestration (`financing/financing.ts`) is provider-
+  agnostic with an amount floor and monotonic status transitions; a signed
+  provider webhook (`/webhooks/wisetack`, raw-body HMAC, carries tenant +
+  application id) drives the application to its terminal state. migration 225,
+  `/api/financing`, "Offer financing" panel on the invoice detail. The live
+  Wisetack leg ships behind `WISETACK_API_KEY` / `WISETACK_WEBHOOK_SECRET`;
+  all orchestration + the client's request/response shaping are unit-tested
+  against a mocked fetch (the partner sandbox needs credentials to exercise
+  live).
+- **Customer email campaigns** (Jobber's marketing suite). Compose a message,
+  target all active customers or a tag segment, and send via the existing
+  delivery provider. Recipient resolution is a pure, tested function
+  (drops archived / no-email, de-dupes); sending fans out per-recipient with
+  failure counts and is campaign-level idempotent (no double-send). Backend:
+  `marketing/campaign.ts` + `pg-campaign.ts`, migration 226, `/api/marketing`.
+  Web: an "Email campaigns" manager in Settings → Customer experience.

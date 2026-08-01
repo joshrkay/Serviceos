@@ -56,6 +56,7 @@ import { t, type Language } from '../ai/i18n/i18n';
 import type { CallMeBackRepository } from '../voice/call-me-back/call-me-back';
 import { createAuditEvent } from '../audit/audit';
 import { isValidTenantId } from '../db/schema';
+import { recordVoiceError } from '../analytics/posthog';
 
 const logger = createLogger({
   service: 'routes.telephony',
@@ -149,6 +150,44 @@ export interface TelephonyRouterDeps {
    */
   mediaStreamsEnabled?: boolean;
   /**
+   * WS3 (voice ingestion resilience) — per-tenant staged rollout of the
+   * realtime (media-streams) path. When `mediaStreamsEnabled` (the global
+   * master switch) is on, the /voice branch additionally consults the
+   * `voice_realtime` tenant flag via `isEnabledForTenantWithDefault(tenantId,
+   * 'voice_realtime', true)`. Default-ON means an unconfigured tenant still
+   * gets the realtime path (the global env is the true master switch); a
+   * per-tenant override of `enabled=false` is a kill switch that pins that
+   * tenant to Gather. A flag-read failure falls toward Gather (the proven
+   * path), never toward Stream.
+   *
+   * When unwired (in-memory dev without a tenant_feature_flags table), the
+   * per-tenant gate is skipped and the global flag alone decides.
+   */
+  tenantFeatureFlags?: {
+    isEnabledForTenantWithDefault(
+      tenantId: string,
+      flagKey: string,
+      defaultEnabled: boolean,
+    ): Promise<boolean>;
+  };
+  /**
+   * WS3 — pre-connect health circuit for the realtime path. When present and
+   * `isOpen()` returns true (the realtime transport has failed repeatedly),
+   * the /voice branch returns Gather TwiML even if the flag + prereqs pass.
+   * The mediastream adapter feeds this same instance via recordFailure/
+   * recordSuccess. Unwired → treated as always-closed (no extra gating).
+   */
+  realtimeCircuit?: { isOpen(): boolean };
+  /**
+   * WS3 — realtime prerequisites probe. Returns false when the realtime path
+   * can't physically work (STT/TTS not configured), so the /voice branch
+   * degrades to Gather rather than emitting a Stream that hangs on connect.
+   * Wired in app.ts from the SAME capability computation the /health canary
+   * uses (deepgram + TTS configured). Unwired → treated as met (legacy
+   * behavior: the global flag alone decides).
+   */
+  realtimePrerequisitesMet?: () => boolean;
+  /**
    * §10 onboarding — optional pre-flight gate run after tenant
    * resolution and before AI routing. Composes the subscription
    * status check (Gate A) and trial usage caps (Gate B). When
@@ -180,6 +219,13 @@ export interface TelephonyRouterDeps {
    * rotation-cascade + voicemail behavior.
    */
   callMeBackRepo?: CallMeBackRepository;
+  /**
+   * WS7 — session store consulted by `POST /voice/gather-fallback` to continue
+   * the SAME session on Gather after a mid-call realtime degrade. Looked up by
+   * CallSid. When unwired, the fallback route treats every CallSid as unknown
+   * and starts a fresh inbound Gather session.
+   */
+  voiceSessionStore?: VoiceSessionStore;
 }
 
 export interface TelephonyHealthReport {
@@ -234,6 +280,10 @@ export function createTelephonyRouter(deps: TelephonyRouterDeps): Router {
         pool: deps.pool,
         leadRepo: deps.leadRepo,
         auditRepo: deps.auditRepo,
+        // Public Twilio callback — mounts its own urlencoded parser +
+        // signature check (it sits before the shared middleware below).
+        authTokenGetter: deps.authTokenGetter,
+        ...(deps.publicBaseUrl ? { publicBaseUrl: deps.publicBaseUrl } : {}),
       }),
     );
   }
@@ -332,10 +382,26 @@ export function createTelephonyRouter(deps: TelephonyRouterDeps): Router {
 
     // §10 voice gates — subscription, go-live, trial caps. Voicemail on block.
     if (deps.voiceGate) {
+      // Point at /recording, NOT /voicemail-status. Only /recording actually
+      // persists: it downloads RecordingUrl, uploads to storage and inserts
+      // the files + voice_recordings rows, which is what makes the audio
+      // visible to the audit trail and reachable by deprovision's key harvest.
+      // /voicemail-status only mints a lead — and it resolves the tenant from
+      // store.findByCallSid, which finds nothing here because this gate
+      // returns before any voice session is created, so it would log "missing
+      // tenant" and drop the callback. /recording has a To/From tenant
+      // fallback for exactly this no-session case.
+      const gateBase = (deps.publicBaseUrl ?? '').replace(/\/+$/, '');
+      const gateCallback = gateBase
+        ? `${gateBase}/api/telephony/recording`
+        : '/api/telephony/recording';
       try {
         const gate = await deps.voiceGate({ tenantId, callSid });
         if (!gate.allowed) {
-          res.status(200).type('text/xml').send(voicemailTwimlForGateReason(gate.reason));
+          res
+            .status(200)
+            .type('text/xml')
+            .send(voicemailTwimlForGateReason(gate.reason, gateCallback));
           return;
         }
       } catch (err) {
@@ -343,7 +409,10 @@ export function createTelephonyRouter(deps: TelephonyRouterDeps): Router {
           callSid,
           error: err instanceof Error ? err.message : String(err),
         });
-        res.status(200).type('text/xml').send(voicemailTwimlForGateReason('not_live'));
+        res
+          .status(200)
+          .type('text/xml')
+          .send(voicemailTwimlForGateReason('not_live', gateCallback));
         return;
       }
     }
@@ -375,7 +444,14 @@ export function createTelephonyRouter(deps: TelephonyRouterDeps): Router {
     }
 
     try {
-      const twiml = deps.mediaStreamsEnabled
+      // WS3 — the realtime (media-streams) path is only chosen when the global
+      // master switch is on AND the per-tenant flag, prerequisites, and health
+      // circuit all pass. Any failure (including a flag-read throw) degrades to
+      // the proven Gather path — never dead air, never a silent hangup.
+      const useStream =
+        !!deps.mediaStreamsEnabled &&
+        (await shouldUseRealtimeStream({ tenantId, callSid, deps }));
+      const twiml = useStream
         ? await deps.adapter.handleInboundForStream({ callSid, from, tenantId })
         : await deps.adapter.handleInbound({ callSid, from, to, tenantId });
       res.status(200).type('text/xml').send(twiml);
@@ -393,6 +469,84 @@ export function createTelephonyRouter(deps: TelephonyRouterDeps): Router {
         .send(
           `<?xml version="1.0" encoding="UTF-8"?><Response><Say voice="Polly.Joanna">We're experiencing technical difficulties. Please try again later.</Say><Hangup/></Response>`
         );
+      // OBS — this handler never 5xxs by design (see comment above), so it's
+      // otherwise invisible to recordApiError. Fired after the graceful
+      // hangup TwiML is already queued; never alters the response.
+      recordVoiceError({
+        errorKind: 'inbound_handler_failed',
+        channel: 'gather',
+        callSid,
+        tenantId,
+      });
+    }
+  });
+
+  /**
+   * WS7 — POST /api/telephony/voice/gather-fallback
+   *
+   * Target of the mid-call REST redirect (`telephony/twilio-call-redirect.ts`).
+   * Twilio re-requests TwiML here after the realtime transport degraded on a
+   * live call. A KNOWN CallSid continues the SAME session on Gather (tenant +
+   * FSM state preserved) via `action=/api/telephony/gather?sid=<sessionId>`; an
+   * UNKNOWN CallSid starts a fresh inbound Gather session. This endpoint NEVER
+   * emits `<Stream>` — it can't loop back into the realtime path by construction.
+   * Signature verification is inherited from the router-level middleware above.
+   */
+  router.post('/voice/gather-fallback', async (req: Request, res: Response) => {
+    const body = req.body as Record<string, string | undefined>;
+    const callSid = body.CallSid ?? '';
+    const session = callSid ? deps.voiceSessionStore?.findByCallSid(callSid) : undefined;
+
+    if (session) {
+      const base = (deps.publicBaseUrl ?? '').replace(/\/+$/, '');
+      const action = `${base}/api/telephony/gather?sid=${encodeURIComponent(session.id)}`;
+      const lang: Language = session.language === 'es' ? 'es' : 'en';
+      if (!session.recordingDisclosed) {
+        logger.info('telephony/gather-fallback: disclosure spoken on undisclosed degrade', {
+          callSid,
+          sessionId: session.id,
+        });
+      }
+      res
+        .status(200)
+        .type('text/xml')
+        .send(buildDegradeFallbackTwiml(session, action, lang));
+      return;
+    }
+
+    // Unknown CallSid — no live session to continue. Start a fresh inbound
+    // Gather session (never Stream). Mirrors /voice's tenant resolution.
+    const from = body.From ?? '';
+    const to = body.To ?? '';
+    if (!from || !to) {
+      logger.warn('telephony/gather-fallback: missing From/To for fresh session', { callSid });
+      res.status(200).type('text/xml').send(technicalDifficultiesTwiml());
+      return;
+    }
+    let tenantId: string | undefined;
+    try {
+      tenantId = await resolveInboundTenantId({ to, from, callSid, deps });
+    } catch (err) {
+      logger.error('telephony/gather-fallback: tenant lookup failed', {
+        callSid,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      res.status(503).type('text/plain').send('Service temporarily unavailable');
+      return;
+    }
+    if (!tenantId) {
+      res.status(200).type('text/xml').send(numberNotInServiceTwiml());
+      return;
+    }
+    try {
+      const twiml = await deps.adapter.handleInbound({ callSid, from, to, tenantId });
+      res.status(200).type('text/xml').send(twiml);
+    } catch (err) {
+      logger.error('telephony/gather-fallback: handleInbound failed', {
+        callSid,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      res.status(200).type('text/xml').send(technicalDifficultiesTwiml());
     }
   });
 
@@ -407,7 +561,13 @@ export function createTelephonyRouter(deps: TelephonyRouterDeps): Router {
     const body = req.body as Record<string, string | undefined>;
     const callSid = body.CallSid ?? '';
     const speechResult = body.SpeechResult ?? '';
-    const confidence = body.Confidence ? Number(body.Confidence) : 0;
+    // A3 — Twilio omits `Confidence` when it has no opinion (e.g. very
+    // short/silent utterances); that must read as "no signal", NOT as a
+    // confidently-zero score — a `0` here fed into the low-confidence gate
+    // would reprompt every such turn. `undefined` flows through as HIGH
+    // confidence (never blocks a turn on absent data) per handleGather's
+    // acoustic-confidence gate.
+    const confidence = body.Confidence ? Number(body.Confidence) : undefined;
 
     const sessionId = (req.query.sid as string | undefined) ?? '';
     if (!sessionId) {
@@ -448,7 +608,7 @@ export function createTelephonyRouter(deps: TelephonyRouterDeps): Router {
         sessionId,
         callSid,
         speechResult,
-        confidence: Number.isFinite(confidence) ? confidence : 0,
+        confidence: confidence !== undefined && Number.isFinite(confidence) ? confidence : undefined,
         tenantId,
       });
       res.status(200).type('text/xml').send(twiml);
@@ -822,22 +982,134 @@ export function createTelephonyRouter(deps: TelephonyRouterDeps): Router {
  * `<Redirect>` re-POSTs to the same action on silence so a `call_me_back` task
  * is still scheduled (with an empty message) rather than dropping the caller.
  */
+/**
+ * TwiML that resumes a degraded realtime call on the Gather transport.
+ *
+ * The realtime transport can degrade BEFORE call establishment ever ran — the
+ * STT socket failing to open is exactly that case, and `<Connect><Stream>`
+ * speaks nothing, so the caller has heard silence up to this point. This
+ * document arms speech recognition, which makes it an audio-capture entry
+ * point in its own right: it must carry the recording disclosure itself
+ * whenever the session has never been disclosed, rather than assume an
+ * earlier turn covered it.
+ *
+ * Uses the two-party copy, matching the unknown-caller-state default in
+ * disclose-recording.ts (no caller state is available here). Latches
+ * `recordingDisclosed` so a caller who degrades more than once is not
+ * re-read the notice every turn.
+ */
+export function buildDegradeFallbackTwiml(
+  session: { recordingDisclosed?: boolean },
+  actionUrl: string,
+  lang: Language,
+): string {
+  // The disclosure must be a standalone <Say> BEFORE the <Gather>, not the
+  // Gather's nested prompt: `<Gather input="speech">` starts recognizing at
+  // the first millisecond, so a notice nested inside it plays while capture
+  // is already armed — the exact ordering this gate exists to prevent.
+  const preambleText = session.recordingDisclosed ? undefined : t('disclose.two_party', lang);
+  session.recordingDisclosed = true;
+  return buildCallbackGatherTwiml({
+    promptText: t('realtime.degraded_repair', lang),
+    actionUrl,
+    lang,
+    ...(preambleText ? { preambleText } : {}),
+  });
+}
+
 function buildCallbackGatherTwiml(opts: {
   promptText: string;
   actionUrl: string;
   lang: Language;
+  /**
+   * Spoken BEFORE the `<Gather>` opens, for copy that must finish playing
+   * while nothing is listening (the recording disclosure). Copy nested in the
+   * Gather's own `<Say>` plays with speech recognition already armed.
+   */
+  preambleText?: string;
 }): string {
   const locale = opts.lang === 'es' ? 'es-MX' : 'en-US';
   const action = xmlEscape(opts.actionUrl);
   const prompt = xmlEscape(opts.promptText);
+  const preamble = opts.preambleText ? `<Say>${xmlEscape(opts.preambleText)}</Say>` : '';
   return (
     `<?xml version="1.0" encoding="UTF-8"?><Response>` +
+    preamble +
     `<Gather input="speech" action="${action}" method="POST" speechTimeout="auto" language="${locale}">` +
     `<Say>${prompt}</Say>` +
     `</Gather>` +
     `<Redirect method="POST">${action}</Redirect>` +
     `</Response>`
   );
+}
+
+/**
+ * WS3 — decide whether an inbound call should take the realtime
+ * (media-streams) path. Called only when the global `mediaStreamsEnabled`
+ * master switch is on. Returns true only when EVERY gate passes:
+ *
+ *   (a) realtime prerequisites present (STT + TTS configured), AND
+ *   (b) the pre-connect health circuit is not open, AND
+ *   (c) the per-tenant `voice_realtime` flag is enabled (default ON).
+ *
+ * Any gate failing — including a flag-read throw — returns false so the caller
+ * falls back to Gather (the proven path). The cheap synchronous checks run
+ * first so a fallback decision avoids the flag DB read entirely.
+ */
+async function shouldUseRealtimeStream(opts: {
+  tenantId: string;
+  callSid: string;
+  deps: TelephonyRouterDeps;
+}): Promise<boolean> {
+  const { tenantId, callSid, deps } = opts;
+
+  // (a) prerequisites — STT/TTS must be configured or the Stream would connect
+  // to a socket that can't transcribe/speak. Unwired probe → treat as met.
+  if (deps.realtimePrerequisitesMet && !deps.realtimePrerequisitesMet()) {
+    logger.warn('telephony/voice: realtime prerequisites missing → Gather fallback', {
+      callSid,
+    });
+    return false;
+  }
+
+  // (b) health circuit — recent realtime session failures pin new calls to Gather.
+  if (deps.realtimeCircuit?.isOpen()) {
+    logger.warn('telephony/voice: realtime circuit open → Gather fallback', { callSid });
+    // OBS — fired after the Gather-fallback decision is already made; never
+    // alters it.
+    recordVoiceError({
+      errorKind: 'realtime_circuit_open',
+      channel: 'gather',
+      callSid,
+      tenantId,
+    });
+    return false;
+  }
+
+  // (c) per-tenant flag (default ON). Fail toward Gather on a read error.
+  if (deps.tenantFeatureFlags) {
+    try {
+      const enabled = await deps.tenantFeatureFlags.isEnabledForTenantWithDefault(
+        tenantId,
+        'voice_realtime',
+        true,
+      );
+      if (!enabled) {
+        logger.info('telephony/voice: voice_realtime tenant flag off → Gather fallback', {
+          callSid,
+        });
+        return false;
+      }
+    } catch (err) {
+      logger.warn('telephony/voice: voice_realtime flag read failed → Gather fallback', {
+        callSid,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return false;
+    }
+  }
+
+  return true;
 }
 
 /**
@@ -1005,12 +1277,23 @@ async function resolveInboundTenantId(opts: {
 }
 
 /** Voicemail TwiML when inbound voice gates block AI routing. */
-export function voicemailTwimlForGateReason(reason: GateReason | undefined): string {
+export function voicemailTwimlForGateReason(
+  reason: GateReason | undefined,
+  recordingStatusCallback?: string,
+): string {
   const say =
     reason === 'not_live'
       ? "This line isn't using our AI assistant yet. Please leave a message after the tone."
       : reason === 'no_billing'
         ? "We're finishing account setup. Please leave a message after the tone."
         : 'This number is being set up. Please leave a message after the tone.';
-  return `<?xml version="1.0" encoding="UTF-8"?><Response><Say voice="Polly.Joanna">${xmlEscape(say)}</Say><Record maxLength="120" playBeep="true"/><Hangup/></Response>`;
+  // The callback is what makes the recording EXIST for us: without it nothing
+  // reaches recording-webhook, so no files/voice_recordings row is created —
+  // and an object with no row is invisible to the audit trail and survives
+  // tenant deprovisioning, which harvests keys from `files`. Every sibling
+  // voicemail path passes one; this branch used to be the exception.
+  const callbackAttr = recordingStatusCallback
+    ? ` recordingStatusCallback="${xmlEscape(recordingStatusCallback)}" recordingStatusCallbackMethod="POST"`
+    : '';
+  return `<?xml version="1.0" encoding="UTF-8"?><Response><Say voice="Polly.Joanna">${xmlEscape(say)}</Say><Record maxLength="120" playBeep="true"${callbackAttr}/><Hangup/></Response>`;
 }

@@ -7,8 +7,15 @@
  * with exact-text dedup. Reproducible: same seeds => same output.
  *
  * Output:
- *   data/corpus/utterances.jsonl       (English)
- *   data/corpus/utterances_es.jsonl    (Spanish + code-switch)
+ *   data/corpus/utterances.generated.jsonl   (English — staging, gitignored)
+ *   data/corpus/utterances_es.jsonl          (Spanish + code-switch)
+ *
+ * The EN output is a staging file, not the corpus of record: utterances.jsonl
+ * also carries frozen `legacy-*`-id rows from the T6-F01 migration that this
+ * generator knows nothing about. `merge-corpus.ts` combines this file's fresh
+ * `utt_en_*` rows with those frozen legacy rows into the real
+ * data/corpus/utterances.jsonl — run `corpus:merge` (or the `corpus:build`
+ * chain) after this script, not in place of it.
  *
  * Run: pnpm corpus:generate   (or  npx tsx scripts/data-pipeline/generate-utterances.ts)
  */
@@ -132,7 +139,7 @@ function main(): void {
   const enRows = generate('en', en, fillers, PREFIXES_EN, EN_TARGET_PER_INTENT, 0x5e_70_01);
   const esRows = generate('es', es, fillers, PREFIXES_ES, ES_TARGET_PER_INTENT, 0x5e_70_02);
 
-  writeJsonl(join(CORPUS_DIR, 'utterances.jsonl'), enRows);
+  writeJsonl(join(CORPUS_DIR, 'utterances.generated.jsonl'), enRows);
   writeJsonl(join(CORPUS_DIR, 'utterances_es.jsonl'), esRows);
 
   const enReviewed = enRows.filter((r) => r.reviewed_by_human).length;

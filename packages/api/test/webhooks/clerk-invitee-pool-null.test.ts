@@ -2,9 +2,10 @@
  * Pins the PR 319 (P2) guard in the Clerk `user.created` invitee-join path:
  * when a pending invitation matches but `deps.pool` is not wired, the join must
  * NOT consume the invitation (no markAccepted). The handler logs the failure and
- * falls through to the normal bootstrap path, so the invitee can be retried once
- * the pool is configured — rather than being left with an accepted-but-unjoined
- * invitation and no access.
+ * fails the webhook with a 500 so Clerk retries once the pool is configured —
+ * rather than consuming the invitation (accepted-but-unjoined, no access) or
+ * silently bootstrapping a brand-new tenant for an invitee who should join an
+ * existing one.
  */
 import express from 'express';
 import request from 'supertest';
@@ -20,9 +21,8 @@ const WEBHOOK_SECRET = 'whsec_dGVzdC1zZWNyZXQ=';
 function signSvixPayload(body: object, svixId: string, svixTimestamp: string) {
   const rawBody = JSON.stringify(body);
   const secretBytes = Buffer.from(WEBHOOK_SECRET.replace(/^whsec_/, ''), 'base64');
-  const hexKey = secretBytes.toString('hex');
   const signedContent = `${svixId}.${svixTimestamp}.${rawBody}`;
-  const sig = crypto.createHmac('sha256', hexKey).update(`${svixTimestamp}.${signedContent}`).digest('hex');
+  const sig = crypto.createHmac('sha256', secretBytes).update(signedContent).digest('base64');
   return { rawBody, signature: `v1,${sig}` };
 }
 
@@ -81,7 +81,7 @@ describe('Clerk user.created — invitee join with pool not wired (PR 319 P2)', 
     );
   });
 
-  it('does not mark the invitation accepted and falls through to bootstrap', async () => {
+  it('fails the webhook for Clerk retry without consuming the invitation or bootstrapping', async () => {
     const payload = {
       type: 'user.created',
       data: { id: 'user_new', email_addresses: [{ email_address: 'invitee@example.com' }] },
@@ -98,11 +98,14 @@ describe('Clerk user.created — invitee join with pool not wired (PR 319 P2)', 
       .set('content-type', 'application/json')
       .send(payload);
 
-    // The join failed (no pool) but was caught and fell through to bootstrap.
-    expect(res.status).toBe(200);
+    // Pool not wired → the invitee join can't complete. The handler FAILS the
+    // webhook (500) so Clerk re-delivers once the pool is available (see
+    // webhooks/routes.ts "failing webhook for Clerk retry"), rather than
+    // consuming the invitation or bootstrapping a separate tenant.
+    expect(res.status).toBe(500);
     // Critical invariant: the invitation was NOT consumed.
     expect(markAccepted).not.toHaveBeenCalled();
-    // Fell through to the bootstrap path (a tenant was created for the user).
-    expect(tenantRepo.created).toHaveLength(1);
+    // Did NOT bootstrap a (wrong) standalone tenant for the invited user.
+    expect(tenantRepo.created).toHaveLength(0);
   });
 });

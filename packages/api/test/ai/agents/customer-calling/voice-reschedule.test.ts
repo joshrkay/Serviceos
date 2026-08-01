@@ -84,10 +84,14 @@ describe('P18-006 voice-reschedule — reschedule_appointment FSM voice flow', (
     const adapter = makeAdapter(gateway);
     const { sessionId } = await adapter.startSession(TENANT, USER);
 
-    const result = await adapter.handleInput(
+    // Turn 1 parks at the intent_confirm readback; the caller's "yes" on
+    // turn 2 is what actually confirms and queues the proposal (auto-confirm
+    // was removed — no proposal without a real caller confirmation).
+    await adapter.handleInput(
       sessionId,
       'reschedule the Miller appointment to tomorrow at 3pm'
     );
+    const result = await adapter.handleInput(sessionId, 'yes');
 
     // FSM landed at closing, 1 proposal queued.
     expect(result.state).toBe('closing');
@@ -138,10 +142,11 @@ describe('P18-006 voice-reschedule — reschedule_appointment FSM voice flow', (
     ]);
     const adapter = makeAdapter(gateway);
     const { sessionId } = await adapter.startSession(TENANT, USER);
-    const result = await adapter.handleInput(
+    await adapter.handleInput(
       sessionId,
       'move APT-0099 to Friday at 9am'
     );
+    const result = await adapter.handleInput(sessionId, 'yes');
 
     expect(result.state).toBe('closing');
     expect(result.proposalIds.length).toBe(1);
@@ -235,7 +240,9 @@ describe('P18-006 voice-reschedule — reschedule_appointment FSM voice flow', (
     const { sessionId: sa } = await adapterA.startSession('tenant-A', 'user-A');
     const { sessionId: sb } = await adapterB.startSession('tenant-B', 'user-B');
     await adapterA.handleInput(sa, 'reschedule APT-A to next Monday 10am');
+    await adapterA.handleInput(sa, 'yes');
     await adapterB.handleInput(sb, 'reschedule APT-B to next Tuesday 2pm');
+    await adapterB.handleInput(sb, 'yes');
 
     const propsA = await proposalRepo.findByTenant('tenant-A');
     const propsB = await proposalRepo.findByTenant('tenant-B');
@@ -298,10 +305,12 @@ describe('P18-006 voice-reschedule — reschedule_appointment FSM voice flow', (
     ]);
     const adapter = makeAdapter(gateway);
     const { sessionId } = await adapter.startSession(TENANT, USER);
-    const result = await adapter.handleInput(
+    await adapter.handleInput(
       sessionId,
       'cambia la cita de González para mañana a las tres'
     );
+    // Spanish caller confirms the readback ("sí") → proposal queued.
+    const result = await adapter.handleInput(sessionId, 'sí');
     expect(result.state).toBe('closing');
     const [p] = await proposalRepo.findByTenant(TENANT);
     expect(p.proposalType).toBe('reschedule_appointment');

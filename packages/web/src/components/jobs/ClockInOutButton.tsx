@@ -108,7 +108,7 @@ export function ClockInOutButton({
       <button
         type="button"
         disabled
-        className="rounded bg-slate-200 px-4 py-2 text-slate-500"
+        className="rounded bg-border px-4 py-2 text-muted-foreground"
         data-testid="clock-loading"
       >
         Loading…
@@ -124,13 +124,13 @@ export function ClockInOutButton({
         <button
           type="button"
           disabled
-          className="rounded bg-amber-200 px-4 py-2 text-amber-900"
+          className="rounded bg-warning/15 px-4 py-2 text-warning"
           data-testid="clock-busy-elsewhere"
           title={`Active on another job (${active.jobId.slice(0, 8)}…)`}
         >
           Clocked in on another job
         </button>
-        {error && <span className="text-sm text-red-600">{error}</span>}
+        {error && <span className="text-sm text-destructive">{error}</span>}
       </div>
     );
   }
@@ -142,12 +142,12 @@ export function ClockInOutButton({
           type="button"
           onClick={handleClockOut}
           disabled={busy}
-          className="rounded bg-red-600 px-4 py-2 text-white disabled:opacity-50"
+          className="rounded bg-destructive px-4 py-2 text-primary-foreground disabled:opacity-50"
           data-testid="clock-out-button"
         >
           Clock Out ({formatElapsed(active, now)})
         </button>
-        {error && <span className="text-sm text-red-600">{error}</span>}
+        {error && <span className="text-sm text-destructive">{error}</span>}
       </div>
     );
   }
@@ -158,12 +158,12 @@ export function ClockInOutButton({
         type="button"
         onClick={handleClockIn}
         disabled={busy}
-        className="rounded bg-emerald-600 px-4 py-2 text-white disabled:opacity-50"
+        className="rounded bg-success px-4 py-2 text-primary-foreground disabled:opacity-50"
         data-testid="clock-in-button"
       >
         Clock In
       </button>
-      {error && <span className="text-sm text-red-600">{error}</span>}
+      {error && <span className="text-sm text-destructive">{error}</span>}
     </div>
   );
 }

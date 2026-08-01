@@ -15,6 +15,7 @@ import {
 } from '../../src/verticals/pg-training-assets';
 import { TrainingAssetRedactionService } from '../../src/verticals/training-asset-redaction';
 import { TrainingAssetService } from '../../src/verticals/training-asset-service';
+import { tenantContextStore } from '../../src/middleware/tenant-context';
 import type {
   PrivacyAuditEntry,
   PrivacyAuditRepository,
@@ -23,6 +24,9 @@ import type {
 
 vi.mock('../../src/db/schema', () => ({
   setTenantContext: (tenantId: string) => `SET app.current_tenant_id = '${tenantId}'`,
+  // U2b-2: the transactional tenant path validates via isValidTenantId; these
+  // tests use simple ids (not UUIDs) on purpose, so accept them.
+  isValidTenantId: () => true,
 }));
 
 function makeAsset(overrides: Partial<VerticalTrainingAsset> = {}): VerticalTrainingAsset {
@@ -116,6 +120,23 @@ class FakeTrainingAssetClient {
     if (normalizedSql.startsWith('SET app.current_tenant_id')) {
       const tenantId = normalizedSql.match(/'([^']+)'/)?.[1];
       if (tenantId) this.tenantContexts.push(tenantId);
+      return { rows: [] };
+    }
+
+    // U2b-2: the tenant path is now a SET LOCAL transaction. Treat the framing
+    // (BEGIN/COMMIT/ROLLBACK/RESET) as no-ops and capture the tenant from the
+    // set_config param (it moved out of the SQL string into $1).
+    if (
+      normalizedSql === 'BEGIN' ||
+      normalizedSql === 'COMMIT' ||
+      normalizedSql === 'ROLLBACK' ||
+      normalizedSql.startsWith('RESET')
+    ) {
+      return { rows: [] };
+    }
+    if (normalizedSql.startsWith('SELECT set_config')) {
+      const tenantId = values[0];
+      if (typeof tenantId === 'string') this.tenantContexts.push(tenantId);
       return { rows: [] };
     }
 
@@ -446,7 +467,7 @@ describe('TrainingAssetRepository', () => {
       'tenant-1',
     ]);
     const selectValues = pool.client.queries
-      .filter((query) => query.sql.startsWith('SELECT') && !query.sql.startsWith('SELECT 1'))
+      .filter((query) => query.sql.startsWith('SELECT') && !query.sql.startsWith('SELECT 1') && !query.sql.startsWith('SELECT set_config'))
       .map((query) => query.values);
     expect(selectValues).toEqual([
       ['tenant-1', 'hvac'],
@@ -1542,5 +1563,83 @@ describe('TrainingAssetService', () => {
     await expect(assetRepo.findById('tenant-1', 'asset-activate-audit-fail')).resolves.toMatchObject({
       status: 'approved',
     });
+  });
+});
+
+describe('TrainingAssetService — request-transaction reuse (PR #669 review)', () => {
+  function makeInput(title: string) {
+    return {
+      verticalType: 'hvac' as const,
+      assetKind: 'prompt_context' as const,
+      title,
+      rawText: 'Caller has no heat.',
+      labels: {},
+      provenance: { source: 'tenant_admin' as const, sourceVersion: '1' },
+    };
+  }
+
+  it('reuses the ambient tenant transaction instead of opening a second pool client', async () => {
+    // /api routes mount withTenantTransaction(pool): the request already holds
+    // a client in tenantContextStore. A second pool.connect() here would let N
+    // concurrent requests starve a size-N pool (outer clients held, all
+    // blocking on inner connects).
+    const pool = new FakeTrainingAssetPool();
+    const service = new TrainingAssetService({
+      assetRepo: new InMemoryTrainingAssetRepository(),
+      privacyAuditRepo: new InMemoryPrivacyAuditRepository(),
+      auditRepo: new InMemoryAuditRepository(),
+      redaction: new TrainingAssetRedactionService(),
+      pool: pool as unknown as Pool,
+      idGenerator: () => 'asset-ambient-1',
+      now: () => new Date('2026-07-12T00:00:00Z'),
+    });
+
+    const ambientClient = { query: async () => ({ rows: [] }) } as unknown as PoolClient;
+    const asset = await tenantContextStore.run(
+      { client: ambientClient, tenantId: 'tenant-1' },
+      () => service.create({ tenantId: 'tenant-1', actorId: 'user-1', input: makeInput('Ambient reuse') }),
+    );
+
+    expect(asset.id).toBe('asset-ambient-1');
+    expect(pool.connectCount).toBe(0); // no second client — ambient tx reused
+  });
+
+  it('still opens its own transaction when no ambient tenant context exists', async () => {
+    const pool = new FakeTrainingAssetPool();
+    const service = new TrainingAssetService({
+      assetRepo: new InMemoryTrainingAssetRepository(),
+      privacyAuditRepo: new InMemoryPrivacyAuditRepository(),
+      auditRepo: new InMemoryAuditRepository(),
+      redaction: new TrainingAssetRedactionService(),
+      pool: pool as unknown as Pool,
+      idGenerator: () => 'asset-own-tx-1',
+      now: () => new Date('2026-07-12T00:00:00Z'),
+    });
+
+    await service.create({ tenantId: 'tenant-1', actorId: 'user-1', input: makeInput('Own transaction') });
+    expect(pool.connectCount).toBe(1);
+    expect(pool.client.releaseCount).toBe(1);
+  });
+
+  it('does not adopt an ambient context belonging to a DIFFERENT tenant', async () => {
+    const pool = new FakeTrainingAssetPool();
+    const service = new TrainingAssetService({
+      assetRepo: new InMemoryTrainingAssetRepository(),
+      privacyAuditRepo: new InMemoryPrivacyAuditRepository(),
+      auditRepo: new InMemoryAuditRepository(),
+      redaction: new TrainingAssetRedactionService(),
+      pool: pool as unknown as Pool,
+      idGenerator: () => 'asset-cross-tenant-1',
+      now: () => new Date('2026-07-12T00:00:00Z'),
+    });
+
+    const ambientClient = { query: async () => ({ rows: [] }) } as unknown as PoolClient;
+    await tenantContextStore.run(
+      { client: ambientClient, tenantId: 'tenant-OTHER' },
+      () => service.create({ tenantId: 'tenant-1', actorId: 'user-1', input: makeInput('Cross tenant') }),
+    );
+    // Wrong-tenant ambient context must NOT be reused — a fresh, correctly
+    // scoped transaction is opened instead.
+    expect(pool.connectCount).toBe(1);
   });
 });

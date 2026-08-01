@@ -82,6 +82,18 @@ export interface ReviewRepository {
    * supplied tenant.
    */
   findById(tenantId: string, reviewId: string): Promise<Review | null>;
+
+  /**
+   * U3 (agent wave) — recent reviews, newest first by createTime. The
+   * respond_to_review voice task resolves "that 1-star review" against this
+   * list: `maxRating` filters to ratings at or below the stated star count,
+   * `since` bounds recency (the voice path uses a 14-day window), `limit`
+   * caps the candidate list handed to the disambiguation clarification.
+   */
+  findRecent(
+    tenantId: string,
+    opts: { maxRating?: number; limit: number; since?: Date },
+  ): Promise<Review[]>;
 }
 
 /**
@@ -134,6 +146,21 @@ export class InMemoryReviewRepository implements ReviewRepository {
       }
     }
     return null;
+  }
+
+  async findRecent(
+    tenantId: string,
+    opts: { maxRating?: number; limit: number; since?: Date },
+  ): Promise<Review[]> {
+    return [...this.store.values()]
+      .filter(
+        (r) =>
+          r.tenantId === tenantId &&
+          (opts.maxRating === undefined || r.rating <= opts.maxRating) &&
+          (opts.since === undefined || r.createTime.getTime() >= opts.since.getTime()),
+      )
+      .sort((a, b) => b.createTime.getTime() - a.createTime.getTime())
+      .slice(0, opts.limit);
   }
 
   /** Test-only helper. */

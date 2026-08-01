@@ -8,9 +8,10 @@
  */
 import { useEffect, useMemo, useState } from 'react';
 import { Elements, PaymentElement, useElements, useStripe } from '@stripe/react-stripe-js';
-import { loadStripe, Stripe } from '@stripe/stripe-js';
+import type { Stripe } from '@stripe/stripe-js';
 import { portalApi, PortalPaymentMethod } from '../../api/portal';
 import { getRuntimeConfigValue } from '../../lib/runtimeConfig';
+import { loadStripeForAccount } from '../../lib/stripeConnect';
 
 function getPublishableKey(): string | undefined {
   return getRuntimeConfigValue('VITE_STRIPE_PUBLISHABLE_KEY');
@@ -38,12 +39,12 @@ function AddCardForm({ onSaved }: { onSaved: () => void }): JSX.Element {
   return (
     <div className="space-y-3" data-testid="add-card-form">
       <PaymentElement />
-      {error && <p className="text-sm text-rose-600">{error}</p>}
+      {error && <p className="text-sm text-destructive">{error}</p>}
       <button
         type="button"
         onClick={submit}
         disabled={!stripe || submitting}
-        className="rounded-lg bg-slate-900 text-white px-4 py-2 text-sm disabled:opacity-50"
+        className="min-h-11 rounded-lg bg-primary text-white px-4 py-2 text-sm disabled:opacity-50"
       >
         {submitting ? 'Saving…' : 'Save card'}
       </button>
@@ -55,13 +56,16 @@ export function PortalPaymentMethods({ token }: { token: string }): JSX.Element 
   const [cards, setCards] = useState<PortalPaymentMethod[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [clientSecret, setClientSecret] = useState<string | null>(null);
+  const [stripeAccountId, setStripeAccountId] = useState<string | null>(null);
   const [starting, setStarting] = useState(false);
   const [savedNotice, setSavedNotice] = useState(false);
 
   const stripePromise = useMemo<Promise<Stripe | null>>(() => {
+    if (!clientSecret) return Promise.resolve(null);
     const key = getPublishableKey();
-    return key ? loadStripe(key) : Promise.resolve(null);
-  }, []);
+    if (!key) return Promise.resolve(null);
+    return loadStripeForAccount(key, stripeAccountId);
+  }, [clientSecret, stripeAccountId]);
 
   const load = () => {
     portalApi
@@ -82,8 +86,9 @@ export function PortalPaymentMethods({ token }: { token: string }): JSX.Element 
     setStarting(true);
     setError(null);
     try {
-      const { clientSecret: secret } = await portalApi.startCardSetup(token);
-      setClientSecret(secret);
+      const result = await portalApi.startCardSetup(token);
+      setStripeAccountId(result.stripeAccountId ?? null);
+      setClientSecret(result.clientSecret);
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Could not start card setup.');
     } finally {
@@ -93,22 +98,23 @@ export function PortalPaymentMethods({ token }: { token: string }): JSX.Element 
 
   const onSaved = () => {
     setClientSecret(null);
+    setStripeAccountId(null);
     setSavedNotice(true);
     // The webhook persists the card asynchronously; refetch so it shows once it lands.
     load();
   };
 
   return (
-    <div className="bg-white rounded-2xl border border-slate-200 p-5 space-y-4">
-      <div className="text-lg font-semibold text-slate-900">Payment methods</div>
-      <p className="text-sm text-slate-500">
+    <div className="bg-card rounded-2xl border border-border p-5 space-y-4">
+      <div className="text-lg font-semibold text-foreground">Payment methods</div>
+      <p className="text-sm text-muted-foreground">
         Save a card so membership dues can be charged automatically.
       </p>
-      {error && <p className="text-sm text-rose-600">{error}</p>}
+      {error && <p className="text-sm text-destructive">{error}</p>}
 
-      {cards === null && !error && <p className="text-sm text-slate-500">Loading…</p>}
+      {cards === null && !error && <p className="text-sm text-muted-foreground">Loading…</p>}
       {cards !== null && cards.length === 0 && (
-        <p className="text-sm text-slate-500" data-testid="no-cards">
+        <p className="text-sm text-muted-foreground" data-testid="no-cards">
           No card on file yet.
         </p>
       )}
@@ -117,14 +123,14 @@ export function PortalPaymentMethods({ token }: { token: string }): JSX.Element 
           <li
             key={c.id}
             data-testid="saved-card"
-            className="flex items-center justify-between rounded-lg border border-slate-200 px-3 py-2 text-sm"
+            className="flex items-center justify-between rounded-lg border border-border px-3 py-2 text-sm"
           >
-            <span className="text-slate-800">
+            <span className="text-foreground">
               {c.brand ?? 'Card'} •••• {c.last4 ?? '????'}
               {c.expMonth && c.expYear ? ` · ${c.expMonth}/${c.expYear}` : ''}
             </span>
             {c.isDefault && (
-              <span className="text-xs rounded-full bg-slate-100 px-2 py-0.5 text-slate-600">
+              <span className="text-xs rounded-full bg-secondary px-2 py-0.5 text-foreground">
                 Default
               </span>
             )}
@@ -133,7 +139,7 @@ export function PortalPaymentMethods({ token }: { token: string }): JSX.Element 
       </ul>
 
       {savedNotice && !clientSecret && (
-        <p className="text-sm text-green-600" data-testid="card-saved-notice">
+        <p className="text-sm text-success" data-testid="card-saved-notice">
           Card saved — it&apos;ll appear here once confirmed.
         </p>
       )}
@@ -148,7 +154,7 @@ export function PortalPaymentMethods({ token }: { token: string }): JSX.Element 
           onClick={startAddCard}
           disabled={starting}
           data-testid="add-card-button"
-          className="rounded-lg border border-slate-300 px-4 py-2 text-sm text-slate-700 hover:bg-slate-50 disabled:opacity-50"
+          className="min-h-11 rounded-lg border border-border px-4 py-2 text-sm text-foreground hover:bg-muted disabled:opacity-50"
         >
           {starting ? 'Starting…' : 'Add a card'}
         </button>

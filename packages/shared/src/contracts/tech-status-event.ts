@@ -66,5 +66,36 @@ export const TechStatusEventSchema = z.object({
 
 export type TechStatusEvent = z.infer<typeof TechStatusEventSchema>;
 
-/** The keyword set this feature registers with the P2-034 dispatcher. */
-export const TECH_STATUS_KEYWORDS = ['out', 'sick', 'unavailable'] as const;
+/**
+ * The three availability-status keywords (OUT/SICK/UNAVAILABLE), each
+ * mapping 1:1 to a `TechStatus` via `techStatusForKeyword`. Kept as its own
+ * constant so `TechStatusKeywordHandler` (sms/tech-status/keyword-router.ts)
+ * registers EXACTLY these with the P2-034 dispatcher — the en-route keywords
+ * below route to a DIFFERENT handler and must never fall through to the
+ * status-claim flow (which would just decline them as 'unrecognized_keyword').
+ */
+export const TECH_STATUS_AVAILABILITY_KEYWORDS = ['out', 'sick', 'unavailable'] as const;
+
+/**
+ * B5.5 / Part F decision F-3 — the en-route ACT keyword(s). Deliberately NOT
+ * part of `TECH_STATUS_VALUES` (the status enum above) or of
+ * `techStatusForKeyword`: "on my way" is an ACT (the technician is departing
+ * right now), not a day-long availability status — it never claims
+ * `tech_status_today` and never creates an `unavailable_blocks` row. Routed
+ * by a dedicated dispatcher registration
+ * (sms/tech-status/en-route-keyword.ts) to the SAME audited direct status
+ * act the app en-route button and the voice leg use
+ * (dispatch/routes.ts `triggerEnRoute`).
+ */
+export const EN_ROUTE_SMS_KEYWORDS = ['omw', 'on my way'] as const;
+
+/**
+ * The full keyword set this feature area registers with the P2-034
+ * dispatcher — availability-status keywords PLUS the en-route act
+ * keyword(s). Two different `KeywordHandler`s consume their own subset (see
+ * the doc comments above); nothing consumes the union directly.
+ */
+export const TECH_STATUS_KEYWORDS = [
+  ...TECH_STATUS_AVAILABILITY_KEYWORDS,
+  ...EN_ROUTE_SMS_KEYWORDS,
+] as const;

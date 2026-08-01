@@ -10,6 +10,12 @@ import {
 } from '../voice-quality/events';
 import { VOICE_EVENT_CHANNEL } from '../voice-quality/event-bus';
 import type { EscalationSummary, EscalationContext } from '../agents/customer-calling/escalation-summary-builder';
+import { createLogger } from '../../logging/logger';
+
+const logger = createLogger({
+  service: 'ai.skills.escalate-to-human',
+  environment: process.env.NODE_ENV || 'development',
+});
 
 /**
  * Phase 12 — emergency-intent immediate-Dial decision.
@@ -387,8 +393,7 @@ export async function escalateToHuman(input: EscalateToHumanInput): Promise<Esca
       } catch (err) {
         // Degrade gracefully — the transfer still happens; only the
         // dispatcher context is lost. Mirror the rotation branch.
-        // eslint-disable-next-line no-console
-        console.warn('[escalate] buildSummary threw — proceeding without summary', {
+        logger.warn('[escalate] buildSummary threw — proceeding without summary', {
           tenantId,
           sessionId,
           error: err instanceof Error ? err.message : String(err),
@@ -501,8 +506,7 @@ export async function escalateToHuman(input: EscalateToHumanInput): Promise<Esca
         // shouldn't strand the call on a single bad row. Log so the
         // misconfiguration is debuggable; userId is fine to log,
         // phone numbers are not (and we don't have one here anyway).
-        // eslint-disable-next-line no-console
-        console.warn('[escalate] dispatcherPhoneResolver failed for user', {
+        logger.warn('[escalate] dispatcherPhoneResolver failed for user', {
           tenantId,
           userId: entry.userId,
           rotationIndex: i,
@@ -628,8 +632,7 @@ export async function escalateToHuman(input: EscalateToHumanInput): Promise<Esca
         // buildSummary threw (e.g. missing template). Log and proceed
         // without a summary — the telephony transfer still succeeds;
         // only the dispatcher context is degraded.
-        // eslint-disable-next-line no-console
-        console.warn('[escalate] buildSummary threw — proceeding without summary', {
+        logger.warn('[escalate] buildSummary threw — proceeding without summary', {
           tenantId,
           sessionId,
           error: err instanceof Error ? err.message : String(err),

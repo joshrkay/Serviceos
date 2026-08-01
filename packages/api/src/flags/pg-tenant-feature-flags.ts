@@ -24,6 +24,15 @@ import {
 
 const CACHE_TTL_MS = 30_000;
 
+/**
+ * U3e-2 — hard size cap (FIFO-on-insert) so a process serving many tenants can't
+ * grow the cache without limit. Generous headroom over 1000 tenants × the
+ * code-constant flag set, so eviction is a pure safety net: an evicted entry is
+ * just a cache-miss → DB read, identical to a TTL expiry. Mirrors the bound in
+ * auth/platform-admin.ts and ai/gateway/cache.ts.
+ */
+const FEATURE_FLAG_CACHE_MAX_ENTRIES = 50_000;
+
 interface CacheEntry {
   value: boolean;
   expiresAt: number;
@@ -43,8 +52,13 @@ export class PgTenantFeatureFlagRepository extends PgBaseRepository {
   /**
    * @param pool          Pool used for tenant-scoped reads (withTenant sets RLS context)
    * @param platformFlags Repository used for global _feature_flags reads
+   * @param maxEntries    Hard cap on cached (tenant,flag) entries (FIFO-evicted)
    */
-  constructor(pool: Pool, platformFlags: FeatureFlagRepository) {
+  constructor(
+    pool: Pool,
+    platformFlags: FeatureFlagRepository,
+    private readonly maxEntries: number = FEATURE_FLAG_CACHE_MAX_ENTRIES,
+  ) {
     super(pool);
     this.platformRepo = platformFlags;
   }
@@ -68,8 +82,18 @@ export class PgTenantFeatureFlagRepository extends PgBaseRepository {
     if (cached && cached.expiresAt > now) {
       return cached.value;
     }
+    if (cached) {
+      // Stale — drop so the re-insertion below counts as a fresh entry for
+      // FIFO eviction order (mirrors auth/platform-admin.ts).
+      this.cache.delete(key);
+    }
 
     const value = await this._resolve(tenantId, flagKey);
+    // FIFO size bound: evict the oldest entry before inserting at capacity.
+    if (this.cache.size >= this.maxEntries) {
+      const oldest = this.cache.keys().next().value;
+      if (oldest !== undefined) this.cache.delete(oldest);
+    }
     this.cache.set(key, { value, expiresAt: now + CACHE_TTL_MS });
     return value;
   }

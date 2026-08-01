@@ -52,6 +52,9 @@ export interface OnboardingStatusResponse {
   /** ISO-8601 timestamp of the activation milestone (first real inbound call).
    * Drives the one-time celebration banner. Absent until activation fires. */
   activatedAt?: string;
+  /** ISO-8601 timestamp of tenants.created_at. Lets the client tell a brand-new
+   * account (welcome tour) from an established user (what's-new changelog). */
+  accountCreatedAt?: string;
 }
 
 export interface DayHours {
@@ -81,4 +84,41 @@ export interface BusinessIdentityInput {
 export type PackId = 'hvac' | 'plumbing';
 export interface PackPickInput {
   packId: PackId;
+}
+
+/**
+ * B1.19 — conversational onboarding ("talk it through").
+ * Mirrors packages/api/src/ai/orchestration/onboarding-conversation.ts
+ * (TurnRequest/TurnResponse) and packages/api/src/ai/agents/onboarding/types.ts
+ * (OnboardingState). `state` is typed as a plain string rather than a
+ * literal union: the backend FSM is gaining a `tools_capture` state in the
+ * same B1.19 run (owned by a parallel agent) and may add further capture
+ * states later — this client only needs the value for display/labeling, so
+ * widening avoids a compile break on either side landing first.
+ */
+export interface OnboardingConversationTurnRequest {
+  /** Omit to create a new session. */
+  sessionId?: string;
+  /** Omit only for the very first call of a new session (surfaces the
+   *  opening prompt) or to replay the last assistant message on resume. */
+  userMessage?: string;
+}
+
+export interface OnboardingConversationTurnResponse {
+  sessionId: string;
+  assistantMessage: string;
+  /** FSM state name, e.g. 'profile_capture' | 'category_capture' |
+   *  'pricing_capture' | 'team_capture' | 'schedule_capture' |
+   *  'tools_capture' | 'review' | 'completed' | 'capped'. */
+  state: string;
+  turnCount: number;
+  completed: boolean;
+  proposalIds: string[];
+}
+
+export interface OnboardingConversationTranscriptTurn {
+  role: 'user' | 'assistant';
+  text: string;
+  /** ISO-8601. Client-stamped — the turn endpoint doesn't echo timestamps. */
+  at: string;
 }

@@ -5,17 +5,37 @@ import { assessConfidence, getConfidenceLevel } from '../guardrails/confidence';
 import type { ProposalConfidenceMeta } from '../../proposals/contracts';
 import { SlotConflictChecker, SlotConflictResult } from './slot-conflict-checker';
 import { AvailabilityFinder, OpenSlot } from './availability-finder';
-import { AppointmentRepository, createAppointment } from '../../appointments/appointment';
+import { AppointmentRepository } from '../../appointments/appointment';
 import { JobRepository } from '../../jobs/job';
+import { placeAppointmentHold } from '../scheduling/place-hold';
 import {
   resolveDateTime,
   formatForReadback,
   formatTimeForReadback,
-  DEFAULT_TENANT_TIMEZONE,
   ResolveDateTimeFailureReason,
 } from '../scheduling/resolve-datetime';
 import { voiceHoldIdempotencyKey } from '../../voice/voice-audit';
-import { appointmentTypeSchema, type AppointmentTypeValue } from '@ai-service-os/shared';
+import { isRuntimeTimezone } from '../../shared/timezone';
+import type { LocationRepository } from '../../locations/location';
+import type { CustomerRepository } from '../../customers/customer';
+import {
+  appointmentTypeSchema,
+  type AppointmentTypeValue,
+  parseSpokenAddressParts,
+  formatStructuredAddress,
+  REQUIRED_LOCATION_FIELDS,
+} from '@ai-service-os/shared';
+import {
+  buildStandingInstructionsSection,
+  intersectAppliedStandingInstructions,
+} from '../standing-instructions-context';
+import {
+  evaluateAutonomousBookingLane,
+  autonomousLaneStamp,
+  type AutonomousLaneEvaluation,
+} from '../../proposals/autonomous-lane';
+import { checkBusinessHours } from '../../compliance/business-hours';
+import { parseOnboardingBusinessHours } from '../../telephony/business-hours-loader';
 
 /**
  * LLM-backed CreateAppointmentTaskHandler.
@@ -33,6 +53,22 @@ import { appointmentTypeSchema, type AppointmentTypeValue } from '@ai-service-os
  * instant. Ambiguous phrases ("sometime Tuesday") and invalid results
  * (past times, inverted ranges) become a `voice_clarification` instead of
  * a silently mis-booked appointment.
+ *
+ * NO DEFAULT TIMEZONE (2026-07-28). This handler used to read
+ * `context.timezone ?? DEFAULT_TENANT_TIMEZONE`, i.e. it silently booked
+ * every tenant whose entry point failed to resolve a zone at
+ * `America/New_York`. An operator in `America/Phoenix` had every spoken
+ * booking landed three hours early — "Friday morning" became 5:00 AM — and
+ * because these proposals arrive at confidence 1 on the autonomous capture
+ * lane, they auto-approved and executed with no human ever seeing them.
+ *
+ * A default zone is unfixable-by-inspection: a US-East timestamp is a
+ * perfectly plausible value, so nothing downstream can tell a resolved
+ * Eastern tenant from an unresolved one. The zone is therefore REQUIRED
+ * input now. When the entry point cannot resolve one from
+ * `tenant_settings.timezone`, this handler emits a `voice_clarification`
+ * (which carries the transcript verbatim and can never auto-approve)
+ * rather than guessing. Nothing spoken is lost; nothing wrong is booked.
  *
  * Produces the same proposal type (`create_appointment`) so the downstream
  * CreateAppointmentExecutionHandler doesn't care which task handler built
@@ -72,9 +108,6 @@ Rules:
 
 /** A tentative hold survives 24h before the availability finder treats it as free. */
 const HOLD_WINDOW_MS = 24 * 60 * 60 * 1000;
-
-/** RFC-4122 UUID matcher — validates the LLM-extracted jobId before any DB read. */
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 function tryParseJson(content: string): Record<string, unknown> | null {
   try {
@@ -192,6 +225,48 @@ function buildTimeClarificationProposal(
   });
 }
 
+/**
+ * Emit a clarification when the TENANT's timezone could not be resolved.
+ *
+ * Distinct from the unresolved-datetime clarification above: nothing is wrong
+ * with what was said, so the message is aimed at the operator (fix the
+ * business timezone in Settings) rather than asking the caller to repeat a
+ * time they already gave clearly. The transcript rides `sourceContext` and
+ * `payload.transcript` verbatim, so re-saying the booking after setting the
+ * zone costs one tap, not a re-dictation.
+ *
+ * `voice_clarification` carries no `sourceTrustTier`, so this can never
+ * auto-approve — which is the entire point. Booking at a guessed zone is the
+ * one outcome that is worse than not booking.
+ */
+function buildTimezoneClarificationProposal(context: TaskContext): Proposal {
+  const explanation =
+    "I can't schedule this yet — this business has no time zone set, so I don't know what " +
+    'time was actually meant. Set the business time zone in Settings, then say the booking ' +
+    'again and I\'ll put it on the calendar.';
+  const sourceContext: Record<string, unknown> = {
+    source: 'voice',
+    transcript: context.message,
+    reason: 'tenant_timezone_unconfigured',
+    ...(context.conversationId ? { conversationId: context.conversationId } : {}),
+  };
+  const payload: Record<string, unknown> = {
+    transcript: context.message,
+    reason: 'missing_entities',
+    ...(context.conversationId ? { conversationId: context.conversationId } : {}),
+  };
+  return createProposal({
+    tenantId: context.tenantId,
+    proposalType: 'voice_clarification',
+    payload,
+    summary: 'Cannot book — the business time zone is not set',
+    explanation,
+    sourceContext,
+    createdBy: context.userId,
+    // No sourceTrustTier — a clarification is never auto-approved.
+  });
+}
+
 function buildClarificationProposal(
   context: TaskContext,
   conflict: Exclude<SlotConflictResult, { ok: true }>,
@@ -292,6 +367,121 @@ function serializeConflict(
   };
 }
 
+/** Repos the draft-time bookability check needs. Both optional-by-absence. */
+export interface ServiceLocationGapDeps {
+  locationRepo?: Pick<LocationRepository, 'findByCustomer'>;
+  /** Reads `communication_notes`, where an incomplete spoken address is preserved. */
+  customerRepo?: Pick<CustomerRepository, 'findById'>;
+}
+
+/**
+ * What the review card needs to close a missing-service-location gap without
+ * anyone opening a database client. Rides `sourceContext.serviceLocationGap`.
+ */
+export interface ServiceLocationGap {
+  customerId: string;
+  /** The preserved address text, verbatim, when one is recoverable. */
+  recoveredAddress?: string;
+  /** Where it was recovered from — for the card's provenance line. */
+  recoveredFrom?: 'communication_notes' | 'transcript';
+  /** Best-effort structured prefill for the card's address inputs. */
+  prefill?: Record<string, string>;
+  /** Required `service_locations` columns still empty after parsing. */
+  stillMissing?: string[];
+}
+
+/**
+ * `jobs.location_id` is NOT NULL, so a customer with no `service_locations`
+ * row cannot have a job created — and therefore cannot have an appointment.
+ * `CreateAppointmentExecutionHandler` discovers this at EXECUTION time and
+ * returns "Customer has no service location — add one before booking a new
+ * job". On the autonomous capture lane that failure is terminal and invisible:
+ * the proposal auto-approved at confidence 1, executed, and failed, with the
+ * spoken booking left nowhere.
+ *
+ * Detecting the same condition at DRAFT time turns a guaranteed execution
+ * failure into a reviewable gap. The caller stamps `missingFields:
+ * ['locationId']`, which `decideInitialStatus` turns into 'draft' — so the
+ * proposal can never auto-approve into the failure — and `approveProposal`
+ * blocks until the field is filled. `editProposal` +
+ * `clearSatisfiedMissingFields` is the existing, tested unblock path.
+ *
+ * Deliberately mirrors the executor's precondition EXACTLY: the location is
+ * only required when the executor must AUTO-OPEN a job (no `jobId` /
+ * `linkedJobId`) against a known `customerId`. A booking against an existing
+ * job already has a location, so that path is untouched.
+ *
+ * Failure-soft: any repo error returns `undefined` (no gate). A lookup hiccup
+ * must not block a booking that would have succeeded.
+ */
+export async function detectServiceLocationGap(
+  deps: ServiceLocationGapDeps | undefined,
+  args: { tenantId: string; customerId: string; transcript?: string },
+): Promise<ServiceLocationGap | undefined> {
+  const locationRepo = deps?.locationRepo;
+  if (!locationRepo) return undefined;
+
+  try {
+    const locations = await locationRepo.findByCustomer(args.tenantId, args.customerId);
+    // Same predicate the executor uses to pick a location: any non-archived
+    // row makes the customer bookable.
+    if (locations.some((loc) => !loc.isArchived)) return undefined;
+  } catch {
+    return undefined;
+  }
+
+  const gap: ServiceLocationGap = { customerId: args.customerId };
+
+  // The address the voice path preserved rather than discarded. `customers
+  // .communication_notes` is where CreateCustomerExecutionHandler writes an
+  // address too incomplete to become a service_location (see
+  // `unstructuredAddressNote`), so it is the first place to look.
+  let recovered: string | undefined;
+  try {
+    const customer = await deps?.customerRepo?.findById(args.tenantId, args.customerId);
+    recovered = extractPreservedAddress(customer?.communicationNotes);
+    if (recovered) gap.recoveredFrom = 'communication_notes';
+  } catch {
+    recovered = undefined;
+  }
+
+  // Ashia's case: created before the address fix shipped, so nothing was
+  // preserved on the customer at all. The utterance that is booking her now
+  // is the last place an address can still be read from.
+  if (!recovered && args.transcript) {
+    const fromTranscript = parseSpokenAddressParts(args.transcript);
+    if (fromTranscript.street1) {
+      recovered = formatStructuredAddress(fromTranscript);
+      gap.recoveredFrom = 'transcript';
+    }
+  }
+
+  if (recovered) {
+    gap.recoveredAddress = recovered;
+    const parts = parseSpokenAddressParts(recovered);
+    if (Object.keys(parts).length > 0) gap.prefill = { ...parts } as Record<string, string>;
+    const stillMissing = REQUIRED_LOCATION_FIELDS.filter((f) => !parts[f]);
+    if (stillMissing.length > 0) gap.stillMissing = [...stillMissing];
+  }
+
+  return gap;
+}
+
+/**
+ * Pull the address back out of the note `unstructuredAddressNote` wrote:
+ *   Address from voice: "1207 Riverbell Drive". Saved as a note, not a
+ *   service location — still needs city, state, ZIP.
+ *
+ * Matched against that exact producer format (create-customer-handler.ts) so
+ * the two stay coupled. Returns undefined for notes that aren't address notes.
+ */
+export function extractPreservedAddress(notes: string | undefined): string | undefined {
+  if (typeof notes !== 'string' || notes.length === 0) return undefined;
+  const m = /Address from voice:\s*"([^"]+)"/.exec(notes);
+  const value = m?.[1]?.trim();
+  return value && value.length > 0 ? value : undefined;
+}
+
 export class CreateAppointmentAITaskHandler implements TaskHandler {
   readonly taskType = 'create_appointment' as const;
   private readonly gateway: LLMGateway;
@@ -299,31 +489,67 @@ export class CreateAppointmentAITaskHandler implements TaskHandler {
   private readonly availabilityFinder?: AvailabilityFinder;
   private readonly appointmentRepo?: AppointmentRepository;
   private readonly jobRepo?: JobRepository;
+  private readonly bookabilityRepos?: ServiceLocationGapDeps;
 
   constructor(
     gateway: LLMGateway,
     slotConflictChecker?: SlotConflictChecker,
     availabilityFinder?: AvailabilityFinder,
     appointmentRepo?: AppointmentRepository,
-    jobRepo?: JobRepository
+    jobRepo?: JobRepository,
+    /**
+     * Draft-time bookability check — see `detectServiceLocationGap`. Optional:
+     * absent ⇒ no gate, byte-identical to the pre-gate handler.
+     */
+    bookabilityRepos?: ServiceLocationGapDeps,
   ) {
     this.gateway = gateway;
     this.slotConflictChecker = slotConflictChecker;
     this.availabilityFinder = availabilityFinder;
     this.appointmentRepo = appointmentRepo;
     this.jobRepo = jobRepo;
+    this.bookabilityRepos = bookabilityRepos;
   }
 
   async handle(context: TaskContext): Promise<TaskResult> {
-    const timezone = context.timezone ?? DEFAULT_TENANT_TIMEZONE;
+    // REQUIRED input — see the "NO DEFAULT TIMEZONE" note in the class doc
+    // above. The entry point resolves this from `tenant_settings.timezone`;
+    // an unresolvable zone gates the booking instead of guessing one.
+    const timezone = typeof context.timezone === 'string' ? context.timezone.trim() : '';
+    // A garbage zone takes the SAME gate as a missing one. `resolveDateTime`
+    // would otherwise fall back to the product default internally — the same
+    // silent-US-East guess, one layer down.
+    if (!timezone || !isRuntimeTimezone(timezone)) {
+      return {
+        proposal: buildTimezoneClarificationProposal(context),
+        taskType: 'voice_clarification',
+      };
+    }
     const now = context.now ?? new Date();
+
+    // UB-A3 — owner standing instructions ride a SEPARATE, delimited system
+    // message (mirroring the classifier's vertical-context injection) so the
+    // base prompt stays byte-identical when none apply. Content-only: the
+    // section itself forbids approval/confidence/schema/pricing overrides.
+    const systemMessages: Array<{ role: 'system'; content: string }> = [
+      { role: 'system', content: APPOINTMENT_SYSTEM_PROMPT },
+    ];
+    const injectedInstructions = context.standingInstructions ?? [];
+    if (injectedInstructions.length > 0) {
+      systemMessages.push({
+        role: 'system',
+        content: buildStandingInstructionsSection(injectedInstructions, {
+          requestAppliedIds: true,
+        }),
+      });
+    }
 
     const llmResponse = await this.gateway.complete({
       taskType: 'create_appointment',
-      messages: [
-        { role: 'system', content: APPOINTMENT_SYSTEM_PROMPT },
-        { role: 'user', content: this.buildUserMessage(context) },
-      ],
+      // Top-level tenantId so the gateway keys this tenant's concurrency
+      // quota / cache bucket correctly (never the shared SYSTEM_TENANT_ID).
+      tenantId: context.tenantId,
+      messages: [...systemMessages, { role: 'user', content: this.buildUserMessage(context) }],
       responseFormat: 'json',
     });
 
@@ -367,8 +593,17 @@ export class CreateAppointmentAITaskHandler implements TaskHandler {
     // RV-007 — Confidence Marker `_meta`: the task confidence score
     // mapped onto the shared level vocabulary. This handler has no
     // per-field certainty signal, so overall-only is correct.
+    // UB-A3 — applied-instruction marker: the model's claimed ids are
+    // INTERSECTED with what was injected (never trust invented ids) and the
+    // field is dropped entirely when empty. The held-slot create_booking
+    // path below reuses this same meta object, so the marker rides both.
+    const appliedStandingInstructions = intersectAppliedStandingInstructions(
+      parsed?.appliedStandingInstructions,
+      injectedInstructions,
+    );
     const meta: ProposalConfidenceMeta = {
       overallConfidence: getConfidenceLevel(confidence.score),
+      ...(appliedStandingInstructions.length > 0 ? { appliedStandingInstructions } : {}),
     };
     payload._meta = meta;
 
@@ -420,6 +655,25 @@ export class CreateAppointmentAITaskHandler implements TaskHandler {
       }
     }
 
+    // Draft-time bookability. `jobs.location_id` is NOT NULL, so booking a
+    // customer with no `service_locations` row is a GUARANTEED execution
+    // failure ("Customer has no service location — add one before booking a
+    // new job"). Detect it here so the proposal carries the gap as
+    // `missingFields` and lands in 'draft' instead of auto-approving into
+    // that failure. Only checked on the branch the executor actually needs a
+    // location for: no jobId/linkedJobId (it must auto-open a job) and a
+    // known customerId. See `detectServiceLocationGap`.
+    const needsAutoOpenedJob =
+      typeof payload.jobId !== 'string' && typeof payload.linkedJobId !== 'string';
+    const serviceLocationGap =
+      needsAutoOpenedJob && customerId
+        ? await detectServiceLocationGap(this.bookabilityRepos, {
+            tenantId: context.tenantId,
+            customerId,
+            ...(context.message ? { transcript: context.message } : {}),
+          })
+        : undefined;
+
     const input: CreateProposalInput = {
       tenantId: context.tenantId,
       proposalType: this.taskType,
@@ -427,7 +681,19 @@ export class CreateAppointmentAITaskHandler implements TaskHandler {
       summary,
       confidenceScore: confidence.score,
       confidenceFactors: confidence.factors,
-      sourceContext: context.conversationId ? { conversationId: context.conversationId } : undefined,
+      sourceContext:
+        context.conversationId || serviceLocationGap
+          ? {
+              ...(context.conversationId ? { conversationId: context.conversationId } : {}),
+              // Everything the review card needs to close the gap in place —
+              // the preserved address and where it came from — so the operator
+              // never has to go looking for it in the database.
+              ...(serviceLocationGap ? { serviceLocationGap } : {}),
+            }
+          : undefined,
+      // Blocks auto-approval (decideInitialStatus → 'draft') and blocks
+      // approveProposal until the operator supplies the location.
+      ...(serviceLocationGap ? { missingFields: ['locationId'] } : {}),
       createdBy: context.userId,
       // Appointments are capture-class — schedule changes are reversible
       // and the undo window provides the human-in-the-loop check. See D3.
@@ -465,75 +731,116 @@ export class CreateAppointmentAITaskHandler implements TaskHandler {
       // the approval-gated create_appointment proposal rather than writing a
       // hold against an unverified job. (No jobRepo → cannot check → the legacy
       // held path is unchanged.)
-      if (this.jobRepo) {
-        // Fallback for every case where we cannot positively attribute the
-        // LLM-supplied jobId to the verified caller. It MUST NOT auto-execute:
-        // `input` carries sourceTrustTier:'autonomous', so for a supervised,
-        // high-confidence tenant the create_appointment would auto-approve and
-        // CreateAppointmentExecutionHandler (which only checks jobId is a
-        // string) would book against the unverified job. Dropping the trust
-        // tier lands it in 'draft' so a human reviews the booking first.
-        const reviewGatedFallback = (): TaskResult => ({
-          proposal: createProposal({ ...input, sourceTrustTier: undefined }),
-          taskType: this.taskType,
+      // Fallback for every case where we cannot positively attribute the
+      // LLM-supplied jobId to the verified caller. It MUST NOT auto-execute:
+      // `input` carries sourceTrustTier:'autonomous', so for a supervised,
+      // high-confidence tenant the create_appointment would auto-approve and
+      // CreateAppointmentExecutionHandler (which only checks jobId is a string)
+      // would book against the unverified job. Dropping the trust tier lands it
+      // in 'draft' so a human reviews the booking first.
+      const reviewGatedFallback = (): TaskResult => ({
+        proposal: createProposal({ ...input, sourceTrustTier: undefined }),
+        taskType: this.taskType,
+      });
+      // WS18 — the ownership guard + tentative-hold write now live in the shared
+      // placeAppointmentHold helper (ai/scheduling/place-hold.ts) so the live
+      // call close flow places the identical hold. Behavior-preserving.
+      const holdResult = await placeAppointmentHold(
+        {
+          appointmentRepo: repo,
+          ...(this.jobRepo ? { jobRepo: this.jobRepo } : {}),
+        },
+        {
+          tenantId: context.tenantId,
+          jobId: payload.jobId,
+          ...(context.customerId ? { customerId: context.customerId } : {}),
+          scheduledStart: new Date(scheduledStart),
+          scheduledEnd: new Date(scheduledEnd),
+          // FIX: persist the tenant's real display timezone, not 'UTC'.
+          timezone: resolved.timezone,
+          ...(arrival ? { arrival } : {}),
+          ...(typeof payload.summary === 'string' ? { notes: payload.summary } : {}),
+          // buildPayload only sets appointmentType to an enum-valid value.
+          ...(payload.appointmentType
+            ? { appointmentType: payload.appointmentType as AppointmentTypeValue }
+            : {}),
+          createdBy: context.userId,
+          holdWindowMs: HOLD_WINDOW_MS,
+          // Deterministic per-recording key: a redelivered voice message returns
+          // the existing hold instead of inserting a second one.
+          ...(context.recordingId
+            ? { idempotencyKey: voiceHoldIdempotencyKey(context.recordingId) }
+            : {}),
+        },
+      );
+      if (!holdResult.ok) {
+        // job_not_owned → the review-gated create_appointment (unverified job,
+        // reachable only with a jobRepo wired); hold_write_failed → the legacy
+        // create_appointment (repo/validation error), rather than failing the call.
+        return holdResult.failed === 'job_not_owned'
+          ? reviewGatedFallback()
+          : { proposal: createProposal(input), taskType: this.taskType };
+      }
+      const holdExpiryAt = holdResult.holdExpiryAt;
+      // Same confidence marker as the create_appointment payload — the booking
+      // proposal can auto-approve on the same score.
+      const bookingPayload: Record<string, unknown> = {
+        appointmentId: holdResult.appointmentId,
+        _meta: meta,
+      };
+
+      // UB-D / D-015 — autonomous booking lane. When the entry-point threaded
+      // lane inputs, evaluate EVERY gate against the real values from the
+      // hold just placed. BOTH outcomes are stamped on sourceContext (audit
+      // trail: why a booking did or did not take the lane); the evaluation is
+      // handed to createProposal ONLY when eligible, where
+      // decideInitialStatus consults it solely inside the unsupervised
+      // autonomous+capture branch. No lane inputs ⇒ byte-identical behavior.
+      let laneEvaluation: AutonomousLaneEvaluation | undefined;
+      if (context.autonomousBooking) {
+        // No configured hours parses to null and checkBusinessHours fails
+        // OPEN ('no_schedule_configured') — absence of configuration is not
+        // a lane blocker (D-015).
+        const slotWithinBusinessHours = checkBusinessHours(
+          parseOnboardingBusinessHours(context.businessHours, resolved.timezone),
+          new Date(scheduledStart),
+        ).isOpen;
+        laneEvaluation = evaluateAutonomousBookingLane({
+          platformDisabled: context.autonomousBooking.platformDisabled,
+          settings: context.autonomousBooking.settings,
+          proposalType: 'create_booking',
+          inboundReceptionistSource: context.autonomousBooking.inboundReceptionistSource,
+          confidenceScore: confidence.score,
+          payload: bookingPayload,
+          pendingReferenceCount: context.autonomousBooking.pendingReferenceCount,
+          customerId: context.customerId,
+          holdPlaced: true,
+          holdExpiryAt,
+          now: context.now ?? new Date(),
+          slotWithinBusinessHours,
+          // No vulnerability/emergency/negotiation signal exists on this
+          // recorded-transcript path — those flags ride live-call sessions
+          // (the FSM call site, a later PR).
+          flags: {},
         });
-        if (!UUID_RE.test(payload.jobId) || !context.customerId) {
-          return reviewGatedFallback();
-        }
-        const ownedJob = await this.jobRepo
-          .findById(context.tenantId, payload.jobId)
-          .catch(() => null);
-        if (!ownedJob || ownedJob.customerId !== context.customerId) {
-          return reviewGatedFallback();
-        }
       }
-      const holdExpiryAt = new Date(Date.now() + HOLD_WINDOW_MS);
-      let held;
-      try {
-        held = await createAppointment(
-          {
-            tenantId: context.tenantId,
-            jobId: payload.jobId,
-            scheduledStart: new Date(scheduledStart),
-            scheduledEnd: new Date(scheduledEnd),
-            // FIX: persist the tenant's real display timezone, not 'UTC'.
-            timezone: resolved.timezone,
-            ...(arrival
-              ? {
-                  arrivalWindowStart: new Date(arrival.startUtc),
-                  arrivalWindowEnd: new Date(arrival.endUtc),
-                }
-              : {}),
-            notes: typeof payload.summary === 'string' ? payload.summary : undefined,
-            // buildPayload only sets appointmentType to an enum-valid value.
-            appointmentType: payload.appointmentType as AppointmentTypeValue | undefined,
-            createdBy: context.userId,
-            holdPendingApproval: true,
-            holdExpiryAt,
-            // Deterministic per-recording key: a redelivered voice message
-            // returns the existing hold instead of inserting a second one
-            // (closes the concurrent-redelivery double-booking window).
-            ...(context.recordingId
-              ? { idempotencyKey: voiceHoldIdempotencyKey(context.recordingId) }
-              : {}),
-          },
-          repo,
-        );
-      } catch {
-        // Repo error or validation failure — degrade to the legacy
-        // create_appointment proposal rather than failing the call.
-        return { proposal: createProposal(input), taskType: this.taskType };
-      }
+      const laneStamp = laneEvaluation ? autonomousLaneStamp(laneEvaluation) : undefined;
+      const bookingSourceContext =
+        context.conversationId || laneStamp
+          ? {
+              ...(context.conversationId ? { conversationId: context.conversationId } : {}),
+              ...(laneStamp ?? {}),
+            }
+          : undefined;
+
       const bookingInput: CreateProposalInput = {
         tenantId: context.tenantId,
         proposalType: 'create_booking',
-        // Same confidence marker as the create_appointment payload — the
-        // booking proposal can auto-approve on the same score.
-        payload: { appointmentId: held.id, _meta: meta },
+        payload: bookingPayload,
         summary,
         confidenceScore: confidence.score,
         confidenceFactors: confidence.factors,
-        sourceContext: context.conversationId ? { conversationId: context.conversationId } : undefined,
+        sourceContext: bookingSourceContext,
         createdBy: context.userId,
         sourceTrustTier: 'autonomous',
         expiresAt: holdExpiryAt,
@@ -545,6 +852,10 @@ export class CreateAppointmentAITaskHandler implements TaskHandler {
           ? { supervisorPresent: context.supervisorPresent }
           : {}),
         ...(context.supervisorMode ? { supervisorMode: context.supervisorMode } : {}),
+        // UB-D — the lane result reaches decideInitialStatus ONLY when every
+        // gate passed; ineligible evaluations ride the sourceContext stamp
+        // alone.
+        ...(laneEvaluation?.eligible ? { autonomousLane: laneEvaluation } : {}),
       };
       return { proposal: createProposal(bookingInput), taskType: 'create_booking' };
     }

@@ -11,6 +11,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import type { AppConfig } from '../../../src/shared/config';
 import type { LLMGatewayLogger } from '../../../src/ai/gateway/gateway';
 import { SYSTEM_TENANT_ID } from '../../../src/ai/gateway/gateway';
+import { DEFAULT_AI_ROUTING_CONFIG } from '../../../src/config/ai-routing';
 
 function cfg(overrides: Partial<AppConfig> = {}): AppConfig {
   return {
@@ -85,6 +86,26 @@ describe('createLLMGateway — AI_DEFAULT_MODEL wiring', () => {
     expect(log?.message).toContain('gpt-4o-mini');
   });
 
+  it('preserves tier deadlines when AI_DEFAULT_MODEL overrides the models', async () => {
+    const { createLLMGateway } = await import('../../../src/ai/gateway/factory');
+    const { logger } = makeCapturingLogger();
+
+    const gateway = createLLMGateway(cfg({ AI_DEFAULT_MODEL: 'gpt-4o-mini' }), { logger });
+    const internalConfig = (gateway as unknown as {
+      config: {
+        tenantOverrides?: Record<
+          string,
+          { tiers: Record<string, { model: string; deadlineMs?: number }> }
+        >;
+      };
+    }).config;
+    const tiers = internalConfig.tenantOverrides?.[SYSTEM_TENANT_ID]?.tiers;
+
+    expect(tiers?.lightweight.deadlineMs).toBe(DEFAULT_AI_ROUTING_CONFIG.tiers.lightweight.deadlineMs);
+    expect(tiers?.standard.deadlineMs).toBe(DEFAULT_AI_ROUTING_CONFIG.tiers.standard.deadlineMs);
+    expect(tiers?.complex.deadlineMs).toBe(DEFAULT_AI_ROUTING_CONFIG.tiers.complex.deadlineMs);
+  });
+
   it('per-tier env vars win when all three are set, even if AI_DEFAULT_MODEL is also set', async () => {
     process.env.AI_LIGHTWEIGHT_MODEL = 'lightweight-override';
     process.env.AI_STANDARD_MODEL = 'standard-override';
@@ -123,3 +144,39 @@ describe('createLLMGateway — AI_DEFAULT_MODEL wiring', () => {
     expect(log).toBeUndefined();
   });
 });
+
+describe('LLMGateway — AI_DEFAULT_MODEL applies to real tenants (2026-07-20 fix)', () => {
+  it('system-tenant AI_DEFAULT_MODEL override is used for a normal tenantId', async () => {
+    const { LLMGateway, SYSTEM_TENANT_ID: sys } = await import(
+      '../../../src/ai/gateway/gateway'
+    );
+    const { StubProvider } = await import('../../../src/ai/gateway/providers');
+
+    const stub = new StubProvider('stub');
+    stub.setResponse({ content: 'ok', tokenUsage: { input: 1, output: 1, total: 2 } });
+    const gateway = new LLMGateway(
+      {
+        defaultProvider: 'stub',
+        tenantOverrides: {
+          [sys]: {
+            tiers: {
+              lightweight: { model: 'gpt-4o-mini' },
+              standard: { model: 'gpt-4o-mini' },
+              complex: { model: 'gpt-4o-mini' },
+            },
+          },
+        },
+      },
+      new Map([['stub', stub]]),
+    );
+
+    await gateway.complete({
+      taskType: 'create_customer',
+      tenantId: 'tenant-real',
+      messages: [{ role: 'user', content: 'hi' }],
+    });
+
+    expect(stub.getLastRequest()?.model).toBe('gpt-4o-mini');
+  });
+});
+

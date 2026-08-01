@@ -38,6 +38,9 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
+QA_REPO_ROOT="$REPO_ROOT"
+# shellcheck disable=SC1091
+source "$REPO_ROOT/scripts/qa-env.sh"
 
 section() {
   echo ""
@@ -46,25 +49,12 @@ section() {
   echo "=========================================================="
 }
 
-require_env() {
-  local name="$1"
-  if [ -z "${!name:-}" ]; then
-    echo "ERROR: required env var '$name' is not set." >&2
-    echo "       See header of $0 for where to obtain it." >&2
-    exit 1
-  fi
-}
+load_qa_env
+apply_qa_defaults
 
-# ── 0. Defaults + sanity ─────────────────────────────────────────────────
-export E2E_BASE_URL="${E2E_BASE_URL:-https://serviceosweb-development.up.railway.app}"
-export E2E_API_URL="${E2E_API_URL:-https://serviceosapi-development.up.railway.app}"
-export BASE_URL="${BASE_URL:-$E2E_BASE_URL}"
-export API_URL="${API_URL:-$E2E_API_URL}"
-export E2E_DB_URL_READONLY="${E2E_DB_URL_READONLY:-${E2E_DB_URL_READWRITE:-}}"
-
-require_env E2E_DB_URL_READWRITE
-require_env E2E_DB_URL_READONLY
-require_env E2E_CLERK_HMAC_SECRET
+require_qa_env E2E_DB_URL_READWRITE
+require_qa_env E2E_DB_URL_READONLY
+require_qa_env E2E_CLERK_HMAC_SECRET
 
 # ── 1. Seed Tenant A + Tenant B (idempotent on owner_id) ─────────────────
 section "Step 1/4 — seed Tenant A + Tenant B against staging Postgres"

@@ -24,7 +24,13 @@ export const BusinessIdentityInputSchema = z.object({
   hourlyRateCents: z.number().int().min(100).max(100_000),
   // IANA timezone name (e.g. "America/Phoenix"). Optional — the client
   // sends browser-detected tz so the AI books at the operator's local
-  // time. Omit to keep whatever's already stored; first-write defaults to ET.
+  // time. Omit to keep whatever's already stored.
+  //
+  // A first write with no zone now stores NULL rather than defaulting to
+  // Eastern. The old ET default is what made a Phoenix operator's spoken
+  // bookings land three hours early: the stored value was a valid IANA zone,
+  // so no consumer could tell it had been guessed. An unset zone makes the
+  // scheduling handlers ASK (voice_clarification) instead of booking wrong.
   timezone: z.string().min(1).max(64).optional(),
   // P8-016 — owner's personal cell phone for emergency patch-through.
   // Accepts raw user input ("(512) 555-1234", "+15125551234", "512.555.1234")
@@ -109,5 +115,8 @@ export const OnboardingStatusResponseSchema = z.object({
   /** ISO-8601 timestamp of the activation milestone (first real inbound call).
    * Drives the one-time celebration banner. Absent until activation fires. */
   activatedAt: z.string().datetime().optional(),
+  /** ISO-8601 timestamp of tenants.created_at. Lets the client tell a brand-new
+   * account (welcome tour) from an established user (what's-new changelog). */
+  accountCreatedAt: z.string().datetime().optional(),
 });
 export type OnboardingStatusResponse = z.infer<typeof OnboardingStatusResponseSchema>;

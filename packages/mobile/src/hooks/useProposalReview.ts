@@ -1,5 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { isCaptureProposalType } from '@ai-service-os/shared';
 import { useApiClient } from '../lib/useApiClient';
+import { isCurrentlyOnline } from '../lib/connectivity';
+import { decodeError } from '../lib/appError';
+import { getOfflineQueue } from '../offline/offlineQueue';
 import { type ReviewProposal, undoSecondsLeft } from '../proposals/proposalReview';
 
 export type { ReviewProposal };
@@ -11,7 +15,11 @@ export type ReviewPhase =
   | 'approved' // within the undo window
   | 'undoing'
   | 'undone'
+  | 'rejecting'
   | 'committed' // undo window elapsed; the action will execute
+  // U12 — approved offline: queued (capture-class only), flushes on reconnect.
+  // No fake countdown — the real 5s undo anchors on the server approvedAt at flush.
+  | 'queued'
   | 'error';
 
 export interface UseProposalReviewResult {
@@ -21,6 +29,14 @@ export interface UseProposalReviewResult {
   /** Whole seconds left in the undo window (0 outside 'approved'). */
   secondsLeft: number;
   approve: () => Promise<void>;
+  /** U12 — cancel a still-queued offline approval (before it flushes). */
+  cancelQueued: () => Promise<void>;
+  reject: (reason: string, details?: string) => Promise<void>;
+  resolveLine: (lineIndex: number, catalogItemId: string) => Promise<void>;
+  resolveEntity: (candidateId: string) => Promise<void>;
+  /** U2 (F4) — edit the draft payload before approving. Resolves true on
+   *  success, false on failure (error state is set); never throws. */
+  edit: (edits: Record<string, unknown>) => Promise<boolean>;
   undo: () => Promise<void>;
   reload: () => Promise<void>;
 }
@@ -37,12 +53,46 @@ function normalize(raw: Record<string, unknown>): ReviewProposal {
       raw.payload && typeof raw.payload === 'object'
         ? (raw.payload as Record<string, unknown>)
         : undefined,
+    sourceContext:
+      raw.sourceContext && typeof raw.sourceContext === 'object'
+        ? (raw.sourceContext as Record<string, unknown>)
+        : undefined,
     approvedAt: typeof raw.approvedAt === 'string' ? raw.approvedAt : null,
+    targetEntityType:
+      typeof raw.targetEntityType === 'string' ? raw.targetEntityType : undefined,
+    targetEntityId:
+      typeof raw.targetEntityId === 'string' ? raw.targetEntityId : undefined,
   };
 }
 
 function message(e: unknown): string {
   return e instanceof Error ? e.message : 'Something went wrong. Please retry.';
+}
+
+/**
+ * Initial phase for a freshly-fetched proposal. A terminal proposal (already
+ * approved/executed/undone/rejected) — e.g. opened via the "Done" push deep-link
+ * — must NOT render as 'review', or the owner sees an Approve button that just
+ * re-posts an approve the API rejects.
+ */
+export function phaseForStatus(
+  status: string,
+  approvedAt: string | null,
+  now: number = Date.now(),
+): ReviewPhase {
+  switch (status) {
+    case 'approved':
+      // Still inside the undo window → show the countdown; past it → committed.
+      return undoSecondsLeft(approvedAt, now) > 0 ? 'approved' : 'committed';
+    case 'executed':
+      return 'committed';
+    case 'undone':
+    case 'rejected':
+    case 'expired':
+      return 'undone'; // terminal, nothing executed / reverted
+    default:
+      return 'review'; // draft, ready_for_review (the normal inbox cases)
+  }
 }
 
 /**
@@ -58,15 +108,20 @@ export function useProposalReview(id: string): UseProposalReviewResult {
   const [error, setError] = useState<string | null>(null);
   const [secondsLeft, setSecondsLeft] = useState(0);
   const approvedAtRef = useRef<string | null>(null);
+  const queuedItemIdRef = useRef<string | null>(null);
 
   const reload = useCallback(async () => {
     setPhase('loading');
     setError(null);
     try {
       const res = await api(`/api/proposals/${id}`);
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      setProposal(normalize(await res.json()));
-      setPhase('review');
+      if (!res.ok) throw new Error((await decodeError(res)).message);
+      const p = normalize(await res.json());
+      setProposal(p);
+      const initial = phaseForStatus(p.status, p.approvedAt ?? null);
+      // Keep the undo countdown anchored when we land mid-window.
+      if (initial === 'approved') approvedAtRef.current = p.approvedAt ?? null;
+      setPhase(initial);
     } catch (e) {
       setError(message(e));
       setPhase('error');
@@ -80,13 +135,37 @@ export function useProposalReview(id: string): UseProposalReviewResult {
   const approve = useCallback(async () => {
     setPhase('approving');
     setError(null);
+    // U12 — offline + capture-class: queue the approval instead of failing. The
+    // shared classifier is the ONLY lane source; anything non-capture (comms /
+    // money / irreversible, edits, resolve, batch, reject, undo) never queues —
+    // it falls through to the normal online path (and errors if offline).
+    if (!isCurrentlyOnline() && proposal && isCaptureProposalType(proposal.proposalType)) {
+      try {
+        const item = await getOfflineQueue().enqueueApproval({
+          proposalId: id,
+          proposalType: proposal.proposalType,
+          summary: proposal.summary,
+        });
+        queuedItemIdRef.current = item.id;
+        setPhase('queued');
+      } catch (e) {
+        setError(message(e));
+        setPhase('error');
+      }
+      return;
+    }
     try {
       const res = await api(`/api/proposals/${id}/approve`, { method: 'POST' });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const body = (await res.json()) as { approved?: Record<string, unknown>[] };
-      const approved = body.approved?.[0];
-      if (!approved) throw new Error('This proposal could not be approved.');
-      const p = normalize(approved);
+      if (!res.ok) throw new Error((await decodeError(res)).message);
+      // POST /:id/approve returns the approved Proposal directly (res.json of
+      // approveProposal's result). Support a { approved: [...] } wrapper too in
+      // case a chained/batch path is ever routed here.
+      const body = (await res.json()) as Record<string, unknown>;
+      const approvedRaw = Array.isArray(body.approved) ? body.approved[0] : body;
+      if (!approvedRaw || typeof approvedRaw !== 'object') {
+        throw new Error('This proposal could not be approved.');
+      }
+      const p = normalize(approvedRaw as Record<string, unknown>);
       setProposal(p);
       approvedAtRef.current = p.approvedAt ?? new Date().toISOString();
       setPhase('approved');
@@ -94,7 +173,119 @@ export function useProposalReview(id: string): UseProposalReviewResult {
       setError(message(e));
       setPhase('error');
     }
-  }, [api, id]);
+  }, [api, id, proposal]);
+
+  // U12 — cancel a still-queued offline approval. Cancellable until the flush
+  // machine picks it up; the queue refuses a cancel once the item is inflight.
+  const cancelQueued = useCallback(async () => {
+    const itemId = queuedItemIdRef.current;
+    if (!itemId) return;
+    await getOfflineQueue().cancel(itemId);
+    queuedItemIdRef.current = null;
+    setPhase(proposal ? phaseForStatus(proposal.status, proposal.approvedAt ?? null) : 'review');
+  }, [proposal]);
+
+  const reject = useCallback(
+    async (reason: string, details?: string) => {
+      setPhase('rejecting');
+      setError(null);
+      try {
+        const res = await api(`/api/proposals/${id}/reject`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ reason, ...(details ? { details } : {}) }),
+        });
+        if (!res.ok) throw new Error((await decodeError(res)).message);
+        setProposal(normalize(await res.json()));
+        setPhase('undone');
+      } catch (e) {
+        setError(message(e));
+        setPhase('error');
+      }
+    },
+    [api, id],
+  );
+
+  const resolveLine = useCallback(
+    async (lineIndex: number, catalogItemId: string) => {
+      setError(null);
+      try {
+        const res = await api(`/api/proposals/${id}/resolve-line`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ lineIndex, catalogItemId }),
+        });
+        if (!res.ok) throw new Error((await decodeError(res)).message);
+        const p = normalize(await res.json());
+        setProposal(p);
+        setPhase(phaseForStatus(p.status, p.approvedAt ?? null));
+      } catch (e) {
+        setError(message(e));
+        setPhase('error');
+      }
+    },
+    [api, id],
+  );
+
+  // U8 (E9) — resolve an ambiguous entity reference ("which Bob?") by picking
+  // one of the surfaced candidates. POSTs to the resolve-entity endpoint, which
+  // re-drafts the original action with the chosen id and may move it to
+  // ready_for_review — but NEVER approves (D-004). Replaces the old
+  // reject('entity_selected', id) dead-end that discarded the command.
+  const resolveEntity = useCallback(
+    async (candidateId: string) => {
+      setError(null);
+      try {
+        const res = await api(`/api/proposals/${id}/resolve-entity`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ candidateId }),
+        });
+        if (!res.ok) throw new Error((await decodeError(res)).message);
+        const p = normalize(await res.json());
+        setProposal(p);
+        setPhase(phaseForStatus(p.status, p.approvedAt ?? null));
+      } catch (e) {
+        setError(message(e));
+        setPhase('error');
+      }
+    },
+    [api, id],
+  );
+
+  // U2 (F4) — edit before approving. PUT /api/proposals/:id shallow-merges
+  // `edits` into the payload server-side (revalidated by the type's Zod
+  // contract, audited, corrections captured). Response is the
+  // { proposal, editedFields } envelope from editProposal. Editing never
+  // changes the approval gate server-side — the owner still approves after.
+  const edit = useCallback(
+    async (edits: Record<string, unknown>): Promise<boolean> => {
+      setError(null);
+      try {
+        const res = await api(`/api/proposals/${id}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ edits }),
+        });
+        if (!res.ok) throw new Error((await decodeError(res)).message);
+        const body = (await res.json()) as Record<string, unknown>;
+        const raw =
+          body.proposal && typeof body.proposal === 'object'
+            ? (body.proposal as Record<string, unknown>)
+            : body;
+        const p = normalize(raw);
+        setProposal(p);
+        setPhase(phaseForStatus(p.status, p.approvedAt ?? null));
+        return true;
+      } catch (e) {
+        setError(message(e));
+        // Stay on the review screen (not the error phase): the draft is
+        // intact server-side and the owner can retry or approve as-is.
+        return false;
+      }
+    },
+    [api, id],
+  );
 
   const undo = useCallback(async () => {
     setPhase('undoing');
@@ -107,7 +298,7 @@ export function useProposalReview(id: string): UseProposalReviewResult {
           setPhase('committed');
           return;
         }
-        throw new Error(`HTTP ${res.status}`);
+        throw new Error((await decodeError(res)).message);
       }
       setProposal(normalize(await res.json()));
       setPhase('undone');
@@ -130,5 +321,5 @@ export function useProposalReview(id: string): UseProposalReviewResult {
     return () => clearInterval(interval);
   }, [phase]);
 
-  return { proposal, phase, error, secondsLeft, approve, undo, reload };
+  return { proposal, phase, error, secondsLeft, approve, cancelQueued, reject, resolveLine, resolveEntity, edit, undo, reload };
 }

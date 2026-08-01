@@ -1,4 +1,5 @@
 import { useTenantTimezone } from '../../hooks/useTenantTimezone';
+import { TierBreakdown, hasTierBreakdown, TierLine } from './TierBreakdown';
 
 /**
  * ProposalChainCard — renders a multi-action chain (several proposals
@@ -25,16 +26,19 @@ export interface ChainRow {
     expiresAt?: string;
     chainId?: string;
     sourceContext?: Record<string, unknown>;
+    // EE-1 — the full serialized payload rides through on the chain rows; the
+    // step renderer reads its line items to show good-better-best tiers/add-ons.
+    payload?: { lineItems?: TierLine[] };
   };
   urgency: Urgency;
   reason?: string;
 }
 
 const URGENCY_BADGE: Record<Urgency, { label: string; classes: string }> = {
-  critical: { label: 'Critical', classes: 'bg-red-100 text-red-800 border-red-200' },
-  high: { label: 'High', classes: 'bg-amber-100 text-amber-800 border-amber-200' },
-  normal: { label: 'Normal', classes: 'bg-slate-100 text-slate-700 border-slate-200' },
-  low: { label: 'Low', classes: 'bg-slate-50 text-slate-500 border-slate-200' },
+  critical: { label: 'Critical', classes: 'bg-destructive/10 text-destructive border-destructive/30' },
+  high: { label: 'High', classes: 'bg-warning/10 text-warning border-warning/30' },
+  normal: { label: 'Normal', classes: 'bg-secondary text-foreground border-border' },
+  low: { label: 'Low', classes: 'bg-secondary text-muted-foreground border-border' },
 };
 
 function chainIndexOf(row: ChainRow): number {
@@ -74,7 +78,7 @@ export function ProposalChainCard({ rows, onApproveChain, onRejectChain }: Propo
   return (
     <li
       data-testid="inbox-chain"
-      className="rounded-xl border border-indigo-200 bg-indigo-50/40 px-4 py-3"
+      className="rounded-xl border border-primary/30 bg-primary/5 px-4 py-3"
     >
       <div className="flex items-start justify-between gap-3 mb-2">
         <div className="min-w-0 flex-1">
@@ -82,24 +86,24 @@ export function ProposalChainCard({ rows, onApproveChain, onRejectChain }: Propo
             <span className={`text-[10px] font-medium px-1.5 py-0.5 rounded border ${badge.classes}`}>
               {badge.label}
             </span>
-            <span className="text-xs font-medium text-indigo-700">
+            <span className="text-xs font-medium text-primary">
               {ordered.length} linked actions
             </span>
           </div>
-          <p className="text-xs text-slate-500">One request, approved together in order.</p>
+          <p className="text-xs text-muted-foreground">One request, approved together in order.</p>
         </div>
         <div className="flex items-center gap-2 shrink-0">
           <button
             type="button"
             onClick={() => onRejectChain(ids)}
-            className="rounded-lg border border-slate-200 bg-white text-slate-700 text-sm px-3 py-1.5 hover:bg-slate-50"
+            className="rounded-lg border border-border bg-card text-foreground text-sm px-3 py-1.5 hover:bg-secondary"
           >
             Reject all
           </button>
           <button
             type="button"
             onClick={() => onApproveChain(ids)}
-            className="rounded-lg bg-slate-900 text-white text-sm px-3 py-1.5 hover:bg-slate-700"
+            className="rounded-lg bg-primary text-primary-foreground text-sm px-3 py-1.5 hover:bg-primary/90"
           >
             Approve all
           </button>
@@ -113,20 +117,28 @@ export function ProposalChainCard({ rows, onApproveChain, onRejectChain }: Propo
             <li
               key={row.proposal.id}
               data-testid="inbox-chain-step"
-              className="rounded-lg border border-slate-200 bg-white px-3 py-2"
+              className="rounded-lg border border-border bg-card px-3 py-2"
             >
               <div className="flex items-center gap-2">
-                <span className="flex size-5 shrink-0 items-center justify-center rounded-full bg-indigo-100 text-[10px] font-semibold text-indigo-700">
+                <span className="flex size-5 shrink-0 items-center justify-center rounded-full bg-primary/10 text-[10px] font-semibold text-primary">
                   {i + 1}
                 </span>
-                <span className="text-xs text-slate-500">{row.proposal.proposalType}</span>
+                <span className="text-xs text-muted-foreground">{row.proposal.proposalType}</span>
               </div>
-              <p className="text-sm text-slate-900 mt-0.5 truncate">{row.proposal.summary}</p>
+              <p className="text-sm text-foreground mt-0.5 truncate">{row.proposal.summary}</p>
               {deps.length > 0 && (
-                <p className="text-xs text-indigo-600 mt-0.5">
+                <p className="text-xs text-primary mt-0.5">
                   Uses what step {deps.map((d) => d + 1).join(', ')} creates
                 </p>
               )}
+              {/* EE-1 — surface a chained tiered estimate's options so the
+                  operator sees them before approving the whole chain. */}
+              {row.proposal.payload?.lineItems &&
+                hasTierBreakdown(row.proposal.payload.lineItems) && (
+                  <div className="mt-1.5 space-y-1.5">
+                    <TierBreakdown lineItems={row.proposal.payload.lineItems} />
+                  </div>
+                )}
             </li>
           );
         })}

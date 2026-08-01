@@ -340,3 +340,90 @@ describe('P18-004 lookup_availability — TTS / tenant isolation / repo wiring',
     expect(elapsed).toBeLessThan(500);
   });
 });
+
+describe('lookupBookableAvailability — business-hours-aware voice variant (F2)', () => {
+  const HOUR = 60 * 60 * 1000;
+
+  async function run(overrides: Record<string, unknown> = {}) {
+    const { lookupBookableAvailability } = await import(
+      '../../../src/ai/skills/lookup-availability'
+    );
+    const { InMemoryAppointmentRepository } = await import(
+      '../../../src/appointments/in-memory-appointment'
+    );
+    const appointmentRepo = new InMemoryAppointmentRepository();
+    const result = await lookupBookableAvailability(
+      {
+        tenantId,
+        timezone: 'America/New_York',
+        searchFrom: new Date('2026-06-14T00:00:00Z'), // well before Monday's open
+        searchDays: 2,
+        durationMs: 2 * HOUR,
+        ...overrides,
+      },
+      { appointmentRepo },
+    );
+    return result;
+  }
+
+  it('never offers a slot outside business hours (raw finder would offer searchFrom itself)', async () => {
+    const result = await run();
+    expect(result.status).toBe('ok');
+    if (result.status !== 'ok') return;
+    for (const s of result.slots) {
+      const hourEt = Number(
+        new Intl.DateTimeFormat('en-US', {
+          timeZone: 'America/New_York',
+          hour: 'numeric',
+          hourCycle: 'h23',
+        }).format(s.start),
+      );
+      expect(hourEt).toBeGreaterThanOrEqual(8);
+      expect(hourEt).toBeLessThan(17);
+    }
+  });
+
+  it('respects tenant per-day hours — a closed Sunday yields Monday slots only', async () => {
+    const result = await run({
+      weeklyHours: { mon: { open: '10:00', close: '16:00' }, sun: null },
+    });
+    expect(result.status).toBe('ok');
+    if (result.status !== 'ok') return;
+    // 2026-06-14 is a Sunday (closed); first offer must be Monday 10:00 ET = 14:00Z.
+    expect(result.slots[0].start.toISOString()).toBe('2026-06-15T14:00:00.000Z');
+  });
+
+  it('speaks the summary in the tenant timezone', async () => {
+    const result = await run({
+      weeklyHours: { mon: { open: '10:00', close: '16:00' }, sun: null },
+    });
+    expect(result.status).toBe('ok');
+    if (result.status !== 'ok') return;
+    expect(result.message).toContain('Monday at 10 AM');
+  });
+
+  it('degrades to unavailable (not a crash) on a repo failure', async () => {
+    const { lookupBookableAvailability } = await import(
+      '../../../src/ai/skills/lookup-availability'
+    );
+    const result = await lookupBookableAvailability(
+      {
+        tenantId,
+        timezone: 'America/New_York',
+        searchFrom: new Date('2026-06-14T00:00:00Z'),
+        searchDays: 2,
+        durationMs: 2 * HOUR,
+      },
+      {
+        appointmentRepo: {
+          findByDateRange: async () => {
+            throw new Error('db down');
+          },
+        } as never,
+      },
+    );
+    // The finder itself fails open with ok:false -> zero slots surface as
+    // no_slots; a thrown error above the finder surfaces as unavailable.
+    expect(['no_slots', 'unavailable']).toContain(result.status);
+  });
+});

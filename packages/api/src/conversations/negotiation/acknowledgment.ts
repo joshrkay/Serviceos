@@ -13,6 +13,7 @@
  * scripted in the pure state machine.)
  */
 import type { BrandVoiceSettings } from '../../settings/settings';
+import { resolveRegister } from '../../ai/brand-voice/prompts';
 
 export interface NegotiationAcknowledgmentInput {
   /** Owner's first name for the "let me check with X" line. */
@@ -46,7 +47,8 @@ export function composeNegotiationAcknowledgment(
   const person = resolvePerson(input);
   const window = (input.callbackWindow ?? '').trim() || 'within the hour';
   // Professional register mirrors suggest-reply-task's brand-voice read.
-  if (input.brandVoice?.formality === 'professional') {
+  // N-011 — register is authoritative; legacy `formality` maps forward.
+  if (input.brandVoice && resolveRegister(input.brandVoice) === 'formal') {
     return `Thanks for asking — I'll need to confirm that with ${person} before I can give you an answer. I'll follow up ${window}.`;
   }
   return `Good question — let me check with ${person} on that and I'll get right back to you ${window}.`;

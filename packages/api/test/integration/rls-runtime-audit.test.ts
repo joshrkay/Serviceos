@@ -16,6 +16,7 @@
 import { describe, it, expect, afterAll } from 'vitest';
 import { Pool } from 'pg';
 import { getSharedTestDb, closeSharedTestDb } from './shared';
+import { MIGRATIONS } from '../../src/db/schema';
 
 // Tables that legitimately carry a tenant_id column but are exempt from
 // per-tenant RLS. Add here ONLY with a documented reason.
@@ -83,6 +84,39 @@ describe('runtime RLS audit — live pg catalog', () => {
 
     const missing = tables.filter((t) => !withPolicy.has(t));
     expect(missing, `tenant tables with NO RLS policy: ${missing.join(', ')}`).toEqual([]);
+  });
+
+  it('migration 219 revokes every rls_app_runtime grant on a tenant_id table that lacks RLS (deny-list)', async () => {
+    // The exempt tables carry tenant_id but have no policy to scope them, so the
+    // RLS-subject role must not be able to reach them at all — otherwise a
+    // tenant-path query under the role would read EVERY tenant's rows. In
+    // production, migration 217 grants rls_app_runtime ON ALL TABLES and then
+    // migration 219 revokes it from exactly these RLS-less tables.
+    //
+    // We assert migration 219's EFFECT rather than the ambient grant state,
+    // because this DB is shared and several sibling suites deliberately
+    // `GRANT rls_app_runtime ON ALL TABLES` (to exercise RLS policies under the
+    // role), which re-adds the very grants 219 removed. So reproduce that dirty
+    // state, replay the REAL migration 219 SQL (imported, not copied — no drift),
+    // and prove its discovery+revoke clears the exempt tables. This is
+    // order-independent: it never depends on which sibling ran first.
+    const pool = await getSharedTestDb();
+    await pool.query(
+      `GRANT SELECT, INSERT, UPDATE, DELETE ON oauth_states, platform_deprovision_log TO rls_app_runtime`,
+    );
+    await pool.query(MIGRATIONS['219_rls_app_runtime_revoke_exempt']);
+
+    const res = await pool.query(
+      `SELECT table_name, privilege_type
+       FROM information_schema.role_table_grants
+       WHERE grantee = 'rls_app_runtime' AND table_schema = 'public'
+         AND table_name = ANY($1)`,
+      [EXEMPT_TABLES],
+    );
+    expect(
+      res.rows.map((r: { table_name: string; privilege_type: string }) => `${r.table_name}:${r.privilege_type}`),
+      `migration 219 must leave rls_app_runtime with NO grant on the tenant_id-without-RLS tables, found: ${JSON.stringify(res.rows)}`,
+    ).toEqual([]);
   });
 
   it('cross-tenant SELECT through the tenant GUC returns zero rows for a non-superuser', async () => {

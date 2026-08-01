@@ -1,4 +1,6 @@
 import { z } from 'zod';
+import { catalogUnitSchema } from '@ai-service-os/shared';
+import { CUSTOMER_SOURCES } from '../customers/customer';
 
 export const tenantIdHeader = 'x-tenant-id';
 export const correlationIdHeader = 'x-correlation-id';
@@ -109,15 +111,34 @@ const lineItemSchema = z.object({
   description: z.string().min(1),
   category: z.enum(['labor', 'material', 'equipment', 'other']).optional(),
   quantity: z.number().nonnegative(),
+  // B7.5 — descriptive unit of measure. Must be declared here or Zod strips it
+  // on create/update/revise, exactly like pricingSource and imageFileId below:
+  // both repositories DELETE and re-INSERT every line-item row on a lineItems
+  // update, so a unit stripped at the HTTP boundary is persisted as NULL even
+  // on lines the operator never touched. `catalogUnitSchema` (shared money.ts)
+  // is the vocabulary — the DB column is a plain nullable TEXT with no CHECK,
+  // so this parse is what keeps an out-of-vocabulary unit out of the column.
+  // DESCRIPTIVE ONLY: no billing arithmetic reads it.
+  unit: catalogUnitSchema.optional(),
   unitPriceCents: z.number().int().nonnegative(),
   totalCents: z.number().int().nonnegative(),
   sortOrder: z.number().int(),
   taxable: z.boolean(),
+  // Catalog-grounding signal (estimates). Must be declared here or Zod strips
+  // it on update/revise, making a catalog-priced estimate look ungrounded
+  // (PgEstimateRepository persists pricingSource; isEstimateCatalogGrounded
+  // treats null as NOT grounded).
+  pricingSource: z.enum(['catalog', 'ambiguous', 'uncatalogued', 'manual']).optional(),
   // Good-better-best tiers + optional add-ons (estimates only).
   groupKey: z.string().min(1).max(120).optional(),
   groupLabel: z.string().min(1).max(200).optional(),
   isOptional: z.boolean().optional(),
   isDefaultSelected: z.boolean().optional(),
+  // EE-4 — frozen catalog photo reference. Must be declared here or Zod strips
+  // it on the estimate create/update/revise routes, so a manually-picked
+  // catalog line's image would silently vanish at the HTTP boundary (the same
+  // trap as pricingSource above). PgEstimateRepository persists image_file_id.
+  imageFileId: z.string().optional(),
 });
 
 export const createCustomerSchema = z.object({
@@ -130,6 +151,7 @@ export const createCustomerSchema = z.object({
   preferredChannel: z.enum(['phone', 'email', 'sms', 'none']).optional(),
   smsConsent: z.boolean().optional(),
   communicationNotes: z.string().optional(),
+  source: z.enum(CUSTOMER_SOURCES).optional(),
 });
 
 // U1 (CRM Jobber parity) — request bodies for the nested customer-contacts
@@ -205,7 +227,53 @@ export const createJobSchema = z.object({
    * a new ad campaign).
    */
   originatingLeadId: z.string().uuid().optional(),
+  /**
+   * Optional direct scheduling. When `scheduledStart` is present the job is
+   * scheduled in the same request: a linked appointment (+ optional primary
+   * technician assignment) is created so it reaches the dispatch board, and
+   * the job advances new → scheduled. Absent ⇒ an unscheduled job (legacy
+   * behavior). `durationMin` defaults to 60; `timezone` is display context
+   * only (times persist UTC).
+   */
+  scheduledStart: z.string().datetime().optional(),
+  technicianId: z.string().uuid().optional(),
+  durationMin: z.number().int().positive().optional(),
+  timezone: z.string().min(1).optional(),
 });
+
+/**
+ * Body for `POST /api/jobs/:id/schedule` — initial schedule OR reschedule of
+ * an existing job (idempotent upsert of the canonical `job-schedule:` visit).
+ */
+export const scheduleJobSchema = z
+  .object({
+    scheduledStart: z.string().datetime(),
+    technicianId: z.string().uuid().optional(),
+    durationMin: z.number().int().positive().optional(),
+    timezone: z.string().min(1).optional(),
+  })
+  .strict();
+
+/**
+ * Body for `POST /api/jobs/:id/reassign` — change or CLEAR (null) the primary
+ * technician on the job's appointment, keeping the slot. `null` moves the
+ * appointment to the dispatch board's unassigned queue.
+ */
+export const reassignJobSchema = z
+  .object({
+    technicianId: z.string().uuid().nullable(),
+  })
+  .strict();
+
+/**
+ * Body for `POST /api/jobs/:id/unschedule` — cancel the job's appointment and
+ * revert the job scheduled → new. `reason` is recorded on the audit trail.
+ */
+export const unscheduleJobSchema = z
+  .object({
+    reason: z.string().min(1).optional(),
+  })
+  .strict();
 
 export const createEstimateSchema = z.object({
   jobId: z.string().min(1),
@@ -223,7 +291,41 @@ export const createInvoiceSchema = z.object({
   lineItems: z.array(lineItemSchema).min(1),
   discountCents: z.number().int().nonnegative().optional(),
   taxRateBps: z.number().int().min(0).max(10000).optional(),
+  processingFeeBps: z.number().int().min(0).max(10000).optional(),
   customerMessage: z.string().optional(),
+});
+
+// Update/revise payloads — the PUT/PATCH routes previously passed req.body
+// straight to updateInvoice/updateEstimate with NO validation (create routes
+// validate). That let a caller persist negative discounts, fractional cents,
+// or an out-of-range tax rate, corrupting the stored money. These mirror the
+// create schemas but make every field optional (partial update) and, being
+// plain z.object, strip unknown keys so `status`/`tenantId`/etc. can't be
+// injected via the body.
+export const updateInvoiceSchema = z.object({
+  lineItems: z.array(lineItemSchema).min(1).optional(),
+  discountCents: z.number().int().nonnegative().optional(),
+  taxRateBps: z.number().int().min(0).max(10000).optional(),
+  processingFeeBps: z.number().int().min(0).max(10000).optional(),
+  customerMessage: z.string().max(2000).optional(),
+});
+
+export const updateEstimateSchema = z.object({
+  lineItems: z.array(lineItemSchema).min(1).optional(),
+  discountCents: z.number().int().nonnegative().optional(),
+  taxRateBps: z.number().int().min(0).max(10000).optional(),
+  // Accept an ISO string (JSON has no Date) and coerce to the Date that
+  // UpdateEstimateInput expects. Preprocess null → undefined FIRST: a bare
+  // z.coerce.date() turns null into Date(0) (1970-01-01), which updateEstimate
+  // would persist as valid_until and silently expire the estimate. Treating
+  // null as absent preserves the prior `?? existing.validUntil` no-op.
+  validUntil: z.preprocess(
+    (v) => (v === null ? undefined : v),
+    z.coerce.date().optional(),
+  ),
+  customerMessage: z.string().max(2000).optional(),
+  internalNotes: z.string().max(5000).optional(),
+  expectedVersion: z.number().int().positive().optional(),
 });
 
 export const recordPaymentSchema = z.object({
@@ -289,6 +391,8 @@ export const createCatalogItemSchema = z.object({
   category: z.enum(['Labor', 'Parts', 'Materials']),
   unit: z.enum(['each', 'hour', 'sq ft', 'per lb', 'per gal']),
   unitPriceCents: z.number().int().nonnegative(),
+  // EE-4 — hero photo, a file id from the upload flow. `null` clears it.
+  imageFileId: z.string().uuid().nullish(),
 });
 
 export const updateCatalogItemSchema = createCatalogItemSchema.partial();
@@ -334,6 +438,39 @@ export const updateSettingsSchema = z.object({
   // explicit null clears the value; omit to leave untouched.
   ownerPhone: z.string().max(40).nullable().optional(),
   timezone: z.string().nullable().optional(),
+  // Foundation gate (I12/V17) — per-day booking hours and travel buffer.
+  // Previously writable only through the onboarding identity route; without
+  // these keys z.object STRIPS them, so a settings-surface write silently
+  // no-oped and the scheduler kept the stale values. Each day is
+  // { open: 'HH:MM', close: 'HH:MM' } or null (closed); {} / null clears
+  // back to "not configured" (scheduler falls back to defaults).
+  businessHours: z
+    .record(
+      z.enum(['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun']),
+      z
+        .object({
+          open: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/, 'expected HH:MM'),
+          close: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/, 'expected HH:MM'),
+        })
+        // An inverted window would persist fine and then read as "closed all
+        // day" downstream — reject it at the boundary instead. HH:MM compares
+        // correctly as a string.
+        .refine((w) => w.open < w.close, { message: 'open must be before close' })
+        .nullable(),
+    )
+    .nullable()
+    .optional(),
+  // No `.nullable()`: the column is NOT NULL DEFAULT 30 (migration 098), so a
+  // null write would bounce off Postgres as a 500 instead of clearing. "Back
+  // to default" is an explicit `30`.
+  jobBufferMinutes: z.number().int().min(0).max(240).optional(),
+  // F2 term 5 — ZIP allowlist bounding the service area. [] or null clears
+  // to unbounded (the explicit "no restriction" state, never a guess).
+  serviceAreaZips: z
+    .array(z.string().regex(/^\d{5}$/, 'expected a 5-digit ZIP'))
+    .max(100)
+    .nullable()
+    .optional(),
   estimatePrefix: z.string().min(1).optional(),
   invoicePrefix: z.string().min(1).optional(),
   defaultPaymentTermDays: z.number().int().nonnegative().optional(),
@@ -413,9 +550,13 @@ export const updateSettingsSchema = z.object({
       // RV-071 — spoken challenge (PIN/passphrase) gating money/
       // irreversible VOICE approvals on the recognized owner line
       // (caller-ID match; see approver-identity.ts).
-      // Interim home in this JSONB (no new migration); min length keeps
-      // out trivially guessable one-digit codes. Unset → those voice
-      // approvals are refused with a one-tap SMS fallback (fail-safe).
+      // DEPRECATED (WS21a) — plaintext-at-rest. Enroll via
+      // `PUT /api/settings/voice-approval-pin` instead, which hashes the PIN
+      // (HMAC) and stores only `voice_approval_pin_hash`. This field is kept
+      // for back-compat (the verify seam falls back to it) but should not be
+      // written by new clients. `voice_approval_pin_hash` is intentionally
+      // NOT in this schema, so a raw hash can never be injected via the
+      // generic settings PUT (unknown keys are stripped by `.partial()`).
       voice_approval_challenge: z.string().min(4).max(64),
     })
     .partial()
@@ -442,6 +583,10 @@ export const updateSettingsSchema = z.object({
     .regex(/^([01]\d|2[0-3]):[0-5]\d$/, "digestTime must be 'HH:MM' (24-hour)")
     .optional(),
   digestChannel: z.enum(['sms', 'none']).optional(),
+  // UB-D / D-015 — autonomous booking lane (migration 231). Threshold bounds
+  // mirror the DB CHECK (NUMERIC(3,2) in [0.90, 0.99]).
+  autonomousBookingEnabled: z.boolean().optional(),
+  autonomousBookingThreshold: z.number().min(0.9).max(0.99).optional(),
 }).superRefine((val, ctx) => {
   if (val.depositStrategy === 'percentage') {
     if (val.depositPercentageBps == null) {
@@ -493,6 +638,14 @@ export const createTemplateSchema = z.object({
   defaultCustomerMessage: z.string().max(2000).optional(),
 });
 
+// PUT payloads: same field rules as create (money stays integer cents,
+// taxRateBps bounded), everything optional. Without these the update routes
+// persisted raw req.body — float/negative money straight to the DB.
+export const updateTemplateSchema = createTemplateSchema
+  .omit({ verticalType: true, categoryId: true })
+  .partial()
+  .extend({ isActive: z.boolean().optional() });
+
 export const createBundleSchema = z.object({
   verticalType: verticalTypeSchema,
   name: z.string().min(1).max(255),
@@ -502,6 +655,11 @@ export const createBundleSchema = z.object({
   triggerKeywords: z.array(z.string().min(1)).min(1),
 });
 
+export const updateBundleSchema = createBundleSchema
+  .omit({ verticalType: true })
+  .partial()
+  .extend({ isActive: z.boolean().optional() });
+
 export const createWordingPreferenceSchema = z.object({
   verticalType: verticalTypeSchema.optional(),
   scope: z.enum(['line_item_description', 'customer_message', 'internal_note', 'estimate_header', 'estimate_footer']),
@@ -510,3 +668,133 @@ export const createWordingPreferenceSchema = z.object({
   avoidWordings: z.array(z.string().min(1)).optional(),
   context: z.string().max(500).optional(),
 });
+
+// J-FORM (Jobber parity) — job forms & checklists. Kept in lockstep with
+// JOB_FORM_FIELD_TYPES (packages/api/src/job-forms/job-form.ts).
+export const jobFormFieldTypeSchema = z.enum([
+  'text',
+  'textarea',
+  'number',
+  'date',
+  'checkbox',
+  'select',
+]);
+
+export const jobFormFieldInputSchema = z.object({
+  id: z.string().max(100).optional(),
+  label: z.string().min(1).max(200),
+  fieldType: jobFormFieldTypeSchema.optional(),
+  options: z.array(z.string().min(1).max(200)).optional(),
+  required: z.boolean().optional(),
+});
+
+export const createJobFormTemplateSchema = z.object({
+  name: z.string().min(1).max(200),
+  description: z.string().max(2000).nullable().optional(),
+  fields: z.array(jobFormFieldInputSchema).min(1),
+  sortOrder: z.number().int().optional(),
+});
+
+export const updateJobFormTemplateSchema = z
+  .object({
+    name: z.string().min(1).max(200).optional(),
+    description: z.string().max(2000).nullable().optional(),
+    fields: z.array(jobFormFieldInputSchema).min(1).optional(),
+    sortOrder: z.number().int().optional(),
+  })
+  .refine((v) => Object.keys(v).length > 0, { message: 'no fields to update' });
+
+export const jobFormAnswerSchema = z.object({
+  fieldId: z.string().min(1).max(100),
+  value: z.string().max(10000).nullable(),
+});
+
+export const createJobFormSubmissionSchema = z.object({
+  templateId: z.string().min(1),
+  answers: z.array(jobFormAnswerSchema).optional(),
+  complete: z.boolean().optional(),
+});
+
+export const updateJobFormSubmissionSchema = z.object({
+  answers: z.array(jobFormAnswerSchema).optional(),
+  complete: z.boolean().optional(),
+});
+
+// U8 (CRM Jobber parity) — customer groups / segmentation.
+const hexColor = z.string().regex(/^#[0-9a-fA-F]{6}$/, 'color must be a hex value like #3b82f6');
+
+export const createCustomerGroupSchema = z.object({
+  name: z.string().min(1).max(100),
+  description: z.string().max(2000).nullable().optional(),
+  color: hexColor.nullable().optional(),
+});
+
+export const updateCustomerGroupSchema = z
+  .object({
+    name: z.string().min(1).max(100).optional(),
+    description: z.string().max(2000).nullable().optional(),
+    color: hexColor.nullable().optional(),
+  })
+  .refine((v) => Object.keys(v).length > 0, { message: 'no fields to update' });
+
+// MKT (Jobber parity) — customer email campaigns.
+export const createCampaignSchema = z
+  .object({
+    name: z.string().min(1).max(200),
+    subject: z.string().min(1).max(300),
+    bodyText: z.string().min(1).max(20000),
+    bodyHtml: z.string().max(50000).nullable().optional(),
+    segmentTag: z.string().min(1).max(50).nullable().optional(),
+    segmentGroupId: z.string().uuid().nullable().optional(),
+  })
+  .refine((v) => !(v.segmentTag && v.segmentGroupId), {
+    message: 'target a tag or a group, not both',
+  });
+
+// FIN (Jobber parity) — consumer financing on invoices.
+export const offerFinancingSchema = z.object({
+  // Defaults to the invoice's amount due when omitted.
+  amountCents: z.number().int().positive().optional(),
+  returnUrl: z.string().url().max(2000).optional(),
+});
+
+// R-JOB (Jobber parity) — recurring job series. Kept in lockstep with
+// RECURRENCE_FREQUENCIES (packages/api/src/recurring-jobs/recurrence.ts).
+const isoDate = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'must be a date (YYYY-MM-DD)');
+
+export const recurrenceRuleSchema = z
+  .object({
+    frequency: z.enum(['daily', 'weekly', 'biweekly', 'monthly']),
+    interval: z.number().int().min(1).max(365).default(1),
+    count: z.number().int().min(1).max(1000).optional(),
+    until: isoDate.optional(),
+  })
+  .refine((r) => !(r.count !== undefined && r.until !== undefined), {
+    message: 'set either count or until, not both',
+  });
+
+const timeOfDay = z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/, 'must be HH:MM (24-hour)');
+const appointmentTypeValue = z.enum(['estimate', 'repair', 'install', 'maintenance', 'diagnostic']);
+
+export const createRecurringJobSchema = z.object({
+  customerId: z.string().min(1),
+  title: z.string().min(1).max(200),
+  anchorDate: isoDate,
+  anchorTime: timeOfDay.optional(),
+  durationMinutes: z.number().int().min(15).max(480).optional(),
+  appointmentType: appointmentTypeValue.nullable().optional(),
+  rule: recurrenceRuleSchema,
+  notes: z.string().max(2000).nullable().optional(),
+});
+
+export const updateRecurringJobSchema = z
+  .object({
+    title: z.string().min(1).max(200).optional(),
+    anchorDate: isoDate.optional(),
+    anchorTime: timeOfDay.optional(),
+    durationMinutes: z.number().int().min(15).max(480).optional(),
+    appointmentType: appointmentTypeValue.nullable().optional(),
+    rule: recurrenceRuleSchema.optional(),
+    notes: z.string().max(2000).nullable().optional(),
+  })
+  .refine((v) => Object.keys(v).length > 0, { message: 'no fields to update' });

@@ -96,6 +96,19 @@ export interface FindOpenSlotsInput {
    * (no buffer) for backward compatibility.
    */
   bufferMs?: number;
+  /**
+   * Additional busy intervals from sources other than appointments —
+   * technician time-off blocks, holds external to the calendar. Treated
+   * as hard-busy but WITHOUT the travel buffer: `bufferMs` models drive
+   * time between jobs, which doesn't apply to a PTO boundary.
+   */
+  extraBusy?: { start: Date; end: Date }[];
+  /**
+   * Appointment ids to ignore when building busy intervals. A reschedule
+   * re-check must not let the appointment BEING MOVED block its own target
+   * slot — with a travel buffer that false-blocks every nearby window.
+   */
+  excludeAppointmentIds?: string[];
 }
 
 export interface AvailabilityFinder {
@@ -155,9 +168,6 @@ export class DefaultAvailabilityFinder implements AvailabilityFinder {
       return { ok: false, reason: 'durationMs must be positive' };
     }
     if (granularityMs <= 0) {
-      return { ok: false, reason: 'granularityMs must be positive' };
-    }
-    if (granularityMs <= 0) {
       // snapUp() reduces to NaN on a non-positive granularity, which
       // would silently return zero slots OR loop indefinitely depending
       // on which arithmetic happens first. Fail loudly instead.
@@ -173,17 +183,26 @@ export class DefaultAvailabilityFinder implements AvailabilityFinder {
     let candidates: Appointment[];
     try {
       const fetchFrom = new Date(input.searchFrom.getTime() - SEARCH_BUFFER_MS);
+      // Fetch through the trailing buffer too: an appointment starting just
+      // AFTER searchTo still pushes its buffered interval back into the
+      // window. Without this a slot ending five minutes before the next job
+      // passes a 60-minute buffer check because that job is never fetched.
+      const fetchTo = new Date(
+        input.searchTo.getTime() + Math.max(0, input.bufferMs ?? 0),
+      );
       candidates = await this.deps.appointmentRepo.findByDateRange(
         input.tenantId,
         fetchFrom,
-        input.searchTo,
+        fetchTo,
       );
     } catch (err) {
       return { ok: false, reason: err instanceof Error ? err.message : String(err) };
     }
 
     const now = Date.now();
+    const excluded = new Set(input.excludeAppointmentIds ?? []);
     let blocking = candidates.filter((a) => {
+      if (excluded.has(a.id)) return false;
       if (!ACTIVE_APPOINTMENT_STATUSES.has(a.status)) return false;
       // An expired hold has released its slot — treat it as free. A
       // live hold (or a non-hold appointment) still blocks.
@@ -222,12 +241,16 @@ export class DefaultAvailabilityFinder implements AvailabilityFinder {
     }
 
     const bufferMs = Math.max(0, input.bufferMs ?? 0);
-    const busy = mergeIntervals(
-      blocking.map((a) => ({
+    const busy = mergeIntervals([
+      ...blocking.map((a) => ({
         start: a.scheduledStart.getTime() - bufferMs,
         end: a.scheduledEnd.getTime() + bufferMs,
       })),
-    );
+      ...(input.extraBusy ?? []).map((b) => ({
+        start: b.start.getTime(),
+        end: b.end.getTime(),
+      })),
+    ]);
 
     const windowStart = input.searchFrom.getTime();
     const windowEnd = input.searchTo.getTime();
@@ -236,10 +259,15 @@ export class DefaultAvailabilityFinder implements AvailabilityFinder {
     let cursor = snapUp(windowStart, windowStart, granularityMs);
     for (const interval of busy) {
       if (cursor + input.durationMs <= interval.start) {
-        // There is at least one full slot before this busy interval.
+        // There is at least one full slot before this busy interval. Cap the
+        // fill at windowEnd as well: a busy interval can lie BEYOND the
+        // search window (a later-day time-off block in extraBusy, or an
+        // appointment fetched through the trailing buffer), and walking
+        // toward it must never emit slots past the window's close.
+        const fillEnd = Math.min(interval.start, windowEnd);
         let slotStart = cursor;
         while (
-          slotStart + input.durationMs <= interval.start &&
+          slotStart + input.durationMs <= fillEnd &&
           slots.length < count
         ) {
           slots.push({

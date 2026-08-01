@@ -17,6 +17,8 @@ import {
   InMemoryJobRepository,
 } from '../../src/jobs/job';
 import { InMemorySettingsRepository } from '../../src/settings/settings';
+import { InMemoryAuditRepository } from '../../src/audit/audit';
+import type { FileRepository, StorageProvider } from '../../src/files/file-service';
 
 const TENANT = 'tenant-test-1';
 
@@ -72,6 +74,7 @@ interface Harness {
   customer: InMemoryCustomerRepository;
   job: InMemoryJobRepository;
   settings: InMemorySettingsRepository;
+  audit: InMemoryAuditRepository;
 }
 
 async function buildHarness(): Promise<Harness> {
@@ -79,6 +82,7 @@ async function buildHarness(): Promise<Harness> {
   const customer = new InMemoryCustomerRepository();
   const job = new InMemoryJobRepository();
   const settings = new InMemorySettingsRepository();
+  const audit = new InMemoryAuditRepository();
 
   await settings.create({
     id: uuidv4(),
@@ -133,9 +137,10 @@ async function buildHarness(): Promise<Harness> {
     customerRepo: customer,
     jobRepo: job,
     settingsRepo: settings,
+    auditRepo: audit,
   });
 
-  return { service, estimate, customer, job, settings };
+  return { service, estimate, customer, job, settings, audit };
 }
 
 describe('PublicEstimateService.getByToken', () => {
@@ -157,6 +162,29 @@ describe('PublicEstimateService.getByToken', () => {
     expect(view.lineItems).toHaveLength(1);
     expect(view.totalCents).toBe(12500);
     expect(view.isActionable).toBe(true);
+  });
+
+  it('defaults estimateLabel to "Estimate" when no terminology is configured', async () => {
+    const j = (await h.job.findByTenant(TENANT))[0];
+    const est = makeEstimate(j.id);
+    await h.estimate.create(est);
+
+    const view = await h.service.getByToken(est.viewToken!);
+    expect(view.estimateLabel).toBe('Estimate');
+  });
+
+  it('surfaces the tenant terminology label (Quote) on the customer view', async () => {
+    // Story 7.4 — the tenant's word flows into the customer-facing page.
+    await h.settings.update(TENANT, {
+      terminologyPreferences: { estimateTerm: 'Quote' },
+      updatedAt: new Date(),
+    });
+    const j = (await h.job.findByTenant(TENANT))[0];
+    const est = makeEstimate(j.id);
+    await h.estimate.create(est);
+
+    const view = await h.service.getByToken(est.viewToken!);
+    expect(view.estimateLabel).toBe('Quote');
   });
 
   it('throws NotFoundError for unknown token', async () => {
@@ -614,6 +642,43 @@ describe('PublicEstimateService — Tier 4 deposit (PR 3b: before_approval gate 
     expect(after.depositStatus).toBe('paid');
   });
 
+  it('does not trap a paying customer who upgrades to a pricier tier (before_approval + good-better-best)', async () => {
+    await h.settings.update(TENANT, {
+      depositStrategy: 'percentage',
+      depositPercentageBps: 2500,
+      depositTimingPolicy: 'before_approval',
+    });
+    // Tiered estimate: the default (Good, 10,000) is the stored headline total,
+    // so the customer is QUOTED a 25% deposit of 2,500.
+    const j = (await h.job.findByTenant(TENANT))[0];
+    const est = makeEstimate(j.id, {
+      totals: {
+        subtotalCents: 10000, taxableSubtotalCents: 10000, discountCents: 0,
+        taxRateBps: 0, taxCents: 0, totalCents: 10000,
+      },
+      lineItems: [
+        { id: 'good', description: 'Good', quantity: 1, unitPriceCents: 10000, totalCents: 10000, sortOrder: 1, taxable: true, groupKey: 'tier', groupLabel: 'Plan', isOptional: true, isDefaultSelected: true },
+        { id: 'better', description: 'Better', quantity: 1, unitPriceCents: 20000, totalCents: 20000, sortOrder: 2, taxable: true, groupKey: 'tier', groupLabel: 'Plan', isOptional: true },
+      ],
+    });
+    await h.estimate.create(est);
+
+    // Customer paid exactly the quoted deposit (2,500), then upgrades to Better.
+    await h.job.update(TENANT, j.id, {
+      depositRequiredCents: 2500, depositPaidCents: 2500, depositStatus: 'paid',
+    });
+
+    // Must NOT block just because 25% of the selected 20,000 (5,000) exceeds the
+    // quoted 2,500 — the premium delta settles in the final invoice.
+    const view = await h.service.approve({
+      token: est.viewToken!,
+      acceptedByName: 'Sarah J',
+      selectedLineItemIds: ['better'],
+    });
+    expect(view.status).toBe('accepted');
+    expect(view.totalCents).toBe(20000); // accepted total still reflects the premium tier
+  });
+
   it('after_approval policy permits approve before any deposit is paid', async () => {
     await h.settings.update(TENANT, {
       depositStrategy: 'percentage',
@@ -886,6 +951,70 @@ describe('PublicEstimateService — good-better-best selection', () => {
   });
 });
 
+describe('PublicEstimateService — EE-4/EE-1 approve audit metadata (PostHog props)', () => {
+  let h: Harness;
+  beforeEach(async () => {
+    h = await buildHarness();
+  });
+
+  // A tiered estimate whose stored total matches the DEFAULT selection
+  // (base 5000 + good 10000 = 15000) so `upsoldAboveDefault` is meaningful.
+  function tieredEstimate(jobId: string, token: string): Estimate {
+    return makeEstimate(jobId, {
+      viewToken: token,
+      lineItems: [
+        { id: 'base', description: 'Diagnostic', quantity: 1, unitPriceCents: 5000, totalCents: 5000, sortOrder: 0, taxable: true, imageFileId: 'file-hero' },
+        { id: 'good', description: 'Good', quantity: 1, unitPriceCents: 10000, totalCents: 10000, sortOrder: 1, taxable: true, groupKey: 'tier', groupLabel: 'Plan', isOptional: true, isDefaultSelected: true },
+        { id: 'better', description: 'Better', quantity: 1, unitPriceCents: 20000, totalCents: 20000, sortOrder: 2, taxable: true, groupKey: 'tier', groupLabel: 'Plan', isOptional: true },
+      ],
+      totals: { subtotalCents: 15000, taxableSubtotalCents: 15000, discountCents: 0, taxRateBps: 0, taxCents: 0, totalCents: 15000 },
+    });
+  }
+
+  function approvedMeta(): Record<string, unknown> {
+    const ev = h.audit.getAll().find((e) => e.eventType === 'public_estimate.approved');
+    expect(ev).toBeDefined();
+    return ev!.metadata as Record<string, unknown>;
+  }
+
+  it('picking a pricier tier records had_tiers + had_line_item_images + upsold', async () => {
+    const j = (await h.job.findByTenant(TENANT))[0];
+    const est = tieredEstimate(j.id, 'token-upsell-eeeeeeeeeeeeee');
+    await h.estimate.create(est);
+
+    await h.service.approve({ token: est.viewToken!, acceptedByName: 'Sarah', selectedLineItemIds: ['better'] });
+    expect(approvedMeta()).toMatchObject({
+      hadTiers: true,
+      hadLineItemImages: true,
+      upsoldAboveDefault: true,
+    });
+    // the file id is never in the audit metadata (only the boolean).
+    expect(Object.values(approvedMeta())).not.toContain('file-hero');
+  });
+
+  it('picking the default tier records upsoldAboveDefault: false', async () => {
+    const j = (await h.job.findByTenant(TENANT))[0];
+    const est = tieredEstimate(j.id, 'token-default-ffffffffffff');
+    await h.estimate.create(est);
+
+    await h.service.approve({ token: est.viewToken!, acceptedByName: 'Sarah', selectedLineItemIds: ['good'] });
+    expect(approvedMeta()).toMatchObject({ hadTiers: true, upsoldAboveDefault: false });
+  });
+
+  it('a flat, image-less estimate records all EE flags false', async () => {
+    const j = (await h.job.findByTenant(TENANT))[0];
+    const est = makeEstimate(j.id, { viewToken: 'token-flat-gggggggggggggg' });
+    await h.estimate.create(est);
+
+    await h.service.approve({ token: est.viewToken!, acceptedByName: 'Sarah' });
+    expect(approvedMeta()).toMatchObject({
+      hadTiers: false,
+      hadLineItemImages: false,
+      upsoldAboveDefault: false,
+    });
+  });
+});
+
 describe('PublicEstimateService — validity expiry precedence', () => {
   let h: Harness;
   beforeEach(async () => {
@@ -960,5 +1089,160 @@ describe('PublicEstimateService — accepted view narrows to selection', () => {
     expect(view.hasSelectableItems).toBe(false);
     expect(view.lineItems.map((li) => li.description).sort()).toEqual(['Better', 'Diagnostic']);
     expect(view.totalCents).toBe(25000);
+  });
+});
+
+// ─── EE-4: line image resolution (tenant-scoped signed URLs) ─────────────
+describe('PublicEstimateService — EE-4 line images', () => {
+  let h: Harness;
+  beforeEach(async () => {
+    h = await buildHarness();
+  });
+
+  function serviceWithFiles(
+    files: Array<{ id: string; tenantId: string; storageBucket: string; storageKey: string; thumbnailS3Key?: string }>,
+  ): PublicEstimateService {
+    const fileRepo = {
+      findById: async (tenantId: string, id: string) =>
+        files.find((f) => f.id === id && f.tenantId === tenantId) ?? null,
+    } as unknown as FileRepository;
+    const storage = {
+      generateDownloadUrl: async (bucket: string, key: string) => `https://signed.example/${bucket}/${key}`,
+    } as unknown as StorageProvider;
+    return new PublicEstimateService({
+      estimateRepo: h.estimate,
+      customerRepo: h.customer,
+      jobRepo: h.job,
+      settingsRepo: h.settings,
+      fileRepo,
+      storage,
+    });
+  }
+
+  async function seedWithImage(imageFileId?: string): Promise<Estimate> {
+    const j = (await h.job.findByTenant(TENANT))[0];
+    const est = makeEstimate(j.id, {
+      lineItems: [
+        {
+          id: uuidv4(),
+          description: 'Water heater',
+          quantity: 1,
+          unitPriceCents: 90000,
+          totalCents: 90000,
+          sortOrder: 0,
+          taxable: true,
+          ...(imageFileId ? { imageFileId } : {}),
+        },
+      ],
+    });
+    await h.estimate.create(est);
+    return est;
+  }
+
+  it('resolves a tenant-owned image_file_id to a signed URL (prefers the thumbnail)', async () => {
+    const est = await seedWithImage('file-1');
+    const svc = serviceWithFiles([
+      { id: 'file-1', tenantId: TENANT, storageBucket: 'bucket', storageKey: 'full-k', thumbnailS3Key: 'thumb-k' },
+    ]);
+    const view = await svc.getByToken(est.viewToken!);
+    expect(view.lineItems[0].imageUrl).toBe('https://signed.example/bucket/thumb-k');
+  });
+
+  it('SECURITY — never mints a URL for a file id owned by another tenant', async () => {
+    const est = await seedWithImage('file-foreign');
+    // The file exists, but under a DIFFERENT tenant — findById(TENANT, …) misses.
+    const svc = serviceWithFiles([
+      { id: 'file-foreign', tenantId: 'other-tenant-999', storageBucket: 'bucket', storageKey: 'k' },
+    ]);
+    const view = await svc.getByToken(est.viewToken!);
+    expect(view.lineItems[0].imageUrl).toBeUndefined();
+  });
+
+  it('leaves imageUrl absent for a line with no image and for an unresolvable file id', async () => {
+    const noImg = await seedWithImage(undefined);
+    const svc = serviceWithFiles([]);
+    expect((await svc.getByToken(noImg.viewToken!)).lineItems[0].imageUrl).toBeUndefined();
+
+    const dangling = await seedWithImage('file-missing');
+    expect((await svc.getByToken(dangling.viewToken!)).lineItems[0].imageUrl).toBeUndefined();
+  });
+});
+
+/**
+ * B7.5 (PR review, FINDING B) — the descriptive unit reaches the customer.
+ *
+ * toView rebuilt each line by hand and omitted `unit`, so a customer looking
+ * at an approved quote saw a bare "240" with no way to tell whether the rate
+ * was per square foot, per hour, or per unit. The field is DESCRIPTIVE: these
+ * tests also pin that adding it changes no money on the view.
+ */
+describe('PublicEstimateService.toView — B7.5 descriptive unit', () => {
+  let h: Harness;
+  beforeEach(async () => {
+    h = await buildHarness();
+  });
+
+  async function seedWithUnits() {
+    const j = (await h.job.findByTenant(TENANT))[0];
+    const est = makeEstimate(j.id, {
+      lineItems: [
+        {
+          id: 'li-sqft',
+          description: 'Deck staining',
+          quantity: 240,
+          unit: 'sq ft',
+          unitPriceCents: 375,
+          totalCents: 90000,
+          sortOrder: 0,
+          taxable: true,
+        },
+        {
+          id: 'li-plain',
+          description: 'Prep labor',
+          quantity: 3,
+          unitPriceCents: 8500,
+          totalCents: 25500,
+          sortOrder: 1,
+          taxable: true,
+        },
+      ],
+      totals: {
+        subtotalCents: 115500,
+        taxableSubtotalCents: 115500,
+        discountCents: 0,
+        taxRateBps: 0,
+        taxCents: 0,
+        totalCents: 115500,
+      },
+    });
+    await h.estimate.create(est);
+    return est;
+  }
+
+  it('carries the unit onto the public line-item DTO', async () => {
+    const est = await seedWithUnits();
+    const view = await h.service.getByToken(est.viewToken!);
+    const byId = new Map(view.lineItems.map((li) => [li.id, li]));
+    expect(byId.get('li-sqft')!.unit).toBe('sq ft');
+  });
+
+  it('a line with no unit reads back undefined, not null', async () => {
+    const est = await seedWithUnits();
+    const view = await h.service.getByToken(est.viewToken!);
+    const byId = new Map(view.lineItems.map((li) => [li.id, li]));
+    expect(byId.get('li-plain')!.unit).toBeUndefined();
+  });
+
+  it('the unit changes no money on the view — totals are unaffected', async () => {
+    const est = await seedWithUnits();
+    const view = await h.service.getByToken(est.viewToken!);
+    // Same integer cents as the seeded totals; nothing derived from `unit`.
+    expect(view.totalCents).toBe(115500);
+    expect(view.subtotalCents).toBe(115500);
+    expect(view.taxCents).toBe(0);
+    const sqft = view.lineItems.find((li) => li.id === 'li-sqft')!;
+    expect(sqft.unitPriceCents).toBe(375);
+    expect(sqft.totalCents).toBe(90000);
+    expect(sqft.quantity * sqft.unitPriceCents).toBe(sqft.totalCents);
   });
 });

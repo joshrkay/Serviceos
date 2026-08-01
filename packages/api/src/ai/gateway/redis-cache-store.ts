@@ -7,6 +7,7 @@
  */
 import type { Redis } from 'ioredis';
 import type { CacheEntry, CacheStore } from './cache';
+import { createRedisClient } from '../../redis/redis-client';
 
 export class RedisCacheStore implements CacheStore {
   private readonly redis: Redis;
@@ -60,23 +61,12 @@ export class RedisCacheStore implements CacheStore {
 export async function createRedisCacheStore(
   redisUrl?: string,
 ): Promise<RedisCacheStore | null> {
-  if (!redisUrl) return null;
-
-  try {
-    // Lazy import so ioredis is only loaded when Redis is actually configured.
-    const { default: Redis } = await import('ioredis');
-    const client = new Redis(redisUrl, {
-      // Prevent ioredis from retrying forever if Redis is unavailable at startup.
-      maxRetriesPerRequest: 3,
-      enableReadyCheck: false,
-      // Fail fast on connect — cache unavailability must not stall boot.
-      connectTimeout: 3000,
-      lazyConnect: true,
-    });
-
-    await client.connect();
-    return new RedisCacheStore(client);
-  } catch {
-    return null;
-  }
+  // U3a — reuse the shared client factory (proven fail-fast options, lazy
+  // ioredis import). Returns null on unset URL or connect failure; the factory
+  // then keeps the InMemoryCacheStore. The cache keeps its own shutdown
+  // registration (factory.ts _cacheStoresToShutdown via RedisCacheStore.quit()),
+  // so it is NOT double-registered with shutdownRedisClients.
+  const client = await createRedisClient(redisUrl);
+  if (!client) return null;
+  return new RedisCacheStore(client);
 }

@@ -2,7 +2,7 @@ import { Pool, PoolClient } from 'pg';
 import { v4 as uuidv4 } from 'uuid';
 import { ConflictError } from '../shared/errors';
 import { PgBaseRepository } from '../db/pg-base';
-import { Proposal, ProposalRepository, ProposalStatus } from './proposal';
+import { Proposal, ProposalRepository, ProposalStatus, ProposalType } from './proposal';
 
 function mapRow(row: Record<string, unknown>): Proposal {
   return {
@@ -29,6 +29,7 @@ function mapRow(row: Record<string, unknown>): Proposal {
     approvedAt: row.approved_at ? new Date(row.approved_at as string) : undefined,
     executedAt: row.executed_at ? new Date(row.executed_at as string) : undefined,
     executedBy: (row.executed_by as string) ?? undefined,
+    executedByRole: (row.executed_by_role as string) ?? undefined,
     claimedBy: (row.claimed_by as string) ?? undefined,
     claimedAt: row.claimed_at ? new Date(row.claimed_at as string) : undefined,
     executionRetryCount:
@@ -178,6 +179,106 @@ export class PgProposalRepository extends PgBaseRepository implements ProposalRe
     });
   }
 
+  async findByStatusSince(
+    tenantId: string,
+    status: ProposalStatus,
+    since: Date,
+    limit?: number,
+  ): Promise<Proposal[]> {
+    return this.withTenant(tenantId, async (client) => {
+      const result = await client.query(
+        `SELECT * FROM proposals
+           WHERE tenant_id = $1 AND status = $2 AND created_at >= $3
+           ORDER BY created_at DESC
+           ${typeof limit === 'number' ? 'LIMIT $4' : ''}`,
+        typeof limit === 'number' ? [tenantId, status, since, limit] : [tenantId, status, since]
+      );
+      return result.rows.map(mapRow);
+    });
+  }
+
+  async findConfidenceMarkedForDay(
+    tenantId: string,
+    from: Date,
+    to: Date,
+    limit?: number,
+  ): Promise<Proposal[]> {
+    return this.withTenant(tenantId, async (client) => {
+      const result = await client.query(
+        `SELECT * FROM proposals
+           WHERE tenant_id = $1
+             AND created_at >= $2 AND created_at < $3
+             AND payload->'_meta'->>'overallConfidence' IN ('low','very_low')
+           ORDER BY created_at DESC
+           ${typeof limit === 'number' ? 'LIMIT $4' : ''}`,
+        typeof limit === 'number' ? [tenantId, from, to, limit] : [tenantId, from, to],
+      );
+      return result.rows.map(mapRow);
+    });
+  }
+
+  async findAutonomousLaneApprovedForDay(
+    tenantId: string,
+    from: Date,
+    to: Date,
+    limit?: number,
+  ): Promise<Proposal[]> {
+    return this.withTenant(tenantId, async (client) => {
+      const result = await client.query(
+        `SELECT * FROM proposals
+           WHERE tenant_id = $1
+             AND created_at >= $2 AND created_at < $3
+             AND source_context->'autonomousLaneEvaluation'->>'eligible' = 'true'
+           ORDER BY created_at DESC
+           ${typeof limit === 'number' ? 'LIMIT $4' : ''}`,
+        typeof limit === 'number' ? [tenantId, from, to, limit] : [tenantId, from, to],
+      );
+      return result.rows.map(mapRow);
+    });
+  }
+
+  async findAppliedInstructionsForDay(
+    tenantId: string,
+    from: Date,
+    to: Date,
+    limit?: number,
+  ): Promise<Proposal[]> {
+    return this.withTenant(tenantId, async (client) => {
+      const result = await client.query(
+        `SELECT * FROM proposals
+           WHERE tenant_id = $1
+             AND created_at >= $2 AND created_at < $3
+             AND payload->'_meta' ? 'appliedStandingInstructions'
+             AND jsonb_array_length(payload->'_meta'->'appliedStandingInstructions') > 0
+           ORDER BY created_at DESC
+           ${typeof limit === 'number' ? 'LIMIT $4' : ''}`,
+        typeof limit === 'number' ? [tenantId, from, to, limit] : [tenantId, from, to],
+      );
+      return result.rows.map(mapRow);
+    });
+  }
+
+  async findExpiredScheduleProposals(
+    tenantId: string,
+    proposalTypes: readonly ProposalType[],
+    since: Date,
+    limit: number,
+  ): Promise<Proposal[]> {
+    return this.withTenant(tenantId, async (client) => {
+      const result = await client.query(
+        `SELECT * FROM proposals
+           WHERE tenant_id = $1
+             AND status = 'expired'
+             AND proposal_type = ANY($2::text[])
+             AND expires_at >= $3
+           ORDER BY expires_at DESC
+           LIMIT $4`,
+        [tenantId, proposalTypes as readonly string[], since, limit]
+      );
+      return result.rows.map(mapRow);
+    });
+  }
+
   async findByAiRun(tenantId: string, aiRunId: string): Promise<Proposal[]> {
     return this.withTenant(tenantId, async (client) => {
       const result = await client.query(
@@ -185,6 +286,22 @@ export class PgProposalRepository extends PgBaseRepository implements ProposalRe
         [tenantId, aiRunId]
       );
       return result.rows.map(mapRow);
+    });
+  }
+
+  async findByIdempotencyKey(
+    tenantId: string,
+    idempotencyKey: string,
+  ): Promise<Proposal | null> {
+    return this.withTenant(tenantId, async (client) => {
+      const result = await client.query(
+        `SELECT *
+           FROM proposals
+          WHERE tenant_id = $1 AND idempotency_key = $2
+          LIMIT 1`,
+        [tenantId, idempotencyKey],
+      );
+      return result.rows.length > 0 ? mapRow(result.rows[0]) : null;
     });
   }
 
@@ -223,6 +340,52 @@ export class PgProposalRepository extends PgBaseRepository implements ProposalRe
     });
   }
 
+  async findByConversation(tenantId: string, conversationId: string): Promise<Proposal[]> {
+    return this.withTenant(tenantId, async (client) => {
+      // Filter in SQL on source_context->>'conversationId' (same JSONB-extraction
+      // pattern as findByRecordingId) so we never pull a tenant-wide proposal set
+      // into app memory to count per-conversation state. Tenant-scoped by RLS +
+      // the explicit tenant_id predicate.
+      const result = await client.query(
+        `SELECT * FROM proposals
+         WHERE tenant_id = $1 AND source_context->>'conversationId' = $2
+         ORDER BY created_at ASC`,
+        [tenantId, conversationId]
+      );
+      return result.rows.map(mapRow);
+    });
+  }
+
+  async findByCorrectionTarget(
+    tenantId: string,
+    proposalType: ProposalType,
+    target: { kind: string; key: string },
+    statuses?: readonly ProposalStatus[],
+  ): Promise<Proposal[]> {
+    return this.withTenant(tenantId, async (client) => {
+      // JSONB-extract the WS20 correction-target stamp
+      // (source_context.correctionTarget = { kind, key }); filter in SQL so a
+      // tenant-wide proposal set is never pulled into memory. Optional status
+      // filter via ANY($5). Tenant-scoped by RLS + the explicit predicate.
+      const params: unknown[] = [tenantId, proposalType, target.kind, target.key];
+      let statusClause = '';
+      if (statuses && statuses.length > 0) {
+        params.push([...statuses]);
+        statusClause = ` AND status = ANY($5)`;
+      }
+      const result = await client.query(
+        `SELECT * FROM proposals
+         WHERE tenant_id = $1
+           AND proposal_type = $2
+           AND source_context->'correctionTarget'->>'kind' = $3
+           AND source_context->'correctionTarget'->>'key' = $4${statusClause}
+         ORDER BY created_at DESC`,
+        params
+      );
+      return result.rows.map(mapRow);
+    });
+  }
+
   async updateStatus(
     tenantId: string,
     id: string,
@@ -236,6 +399,7 @@ export class PgProposalRepository extends PgBaseRepository implements ProposalRe
         | 'approvedAt'
         | 'executedAt'
         | 'executedBy'
+        | 'executedByRole'
         | 'executionError'
         | 'undoneAt'
         | 'undoneBy'
@@ -259,6 +423,7 @@ export class PgProposalRepository extends PgBaseRepository implements ProposalRe
       if (updates?.approvedAt !== undefined)        { setClauses.push(`approved_at = $${p++}`);      params.push(updates.approvedAt); }
       if (updates?.executedAt !== undefined)        { setClauses.push(`executed_at = $${p++}`);      params.push(updates.executedAt); }
       if (updates?.executedBy !== undefined)        { setClauses.push(`executed_by = $${p++}`);      params.push(updates.executedBy); }
+      if (updates?.executedByRole !== undefined)    { setClauses.push(`executed_by_role = $${p++}`); params.push(updates.executedByRole); }
       if (updates?.executionError !== undefined)    { setClauses.push(`execution_error = $${p++}`);  params.push(updates.executionError); }
       if (updates?.undoneAt !== undefined)          { setClauses.push(`undone_at = $${p++}`);        params.push(updates.undoneAt); }
       if (updates?.undoneBy !== undefined)          { setClauses.push(`undone_by = $${p++}`);        params.push(updates.undoneBy); }
@@ -357,8 +522,14 @@ export class PgProposalRepository extends PgBaseRepository implements ProposalRe
         approvedAt: 'approved_at',
         executedAt: 'executed_at',
         executedBy: 'executed_by',
+        executedByRole: 'executed_by_role',
         undoneAt: 'undone_at',
         undoneBy: 'undone_by',
+        // WS18 (D-018) — the live close flow retrofits an EXISTING drafted
+        // estimate proposal as the head of the close chain, so the indexed
+        // chain_id column must be writable post-create (findByChain queries
+        // the column, not sourceContext).
+        chainId: 'chain_id',
       };
 
       const setClauses: string[] = ['updated_at = NOW()'];
@@ -390,10 +561,11 @@ export class PgProposalRepository extends PgBaseRepository implements ProposalRe
   }
 
   async findReadyForExecution(windowMs: number): Promise<Proposal[]> {
-    // Privileged cross-tenant sweep — uses withClient() intentionally.
-    // withTenant() would arm RLS and silently filter to a single tenant,
-    // causing the auto-delivery worker to miss proposals from all others.
-    return this.withClient(async (client) => {
+    // Intentional cross-tenant sweep — withCrossTenantSweep() runs it under the
+    // named, auditable rls_cross_tenant role when enforcement is on. withTenant()
+    // would arm RLS and silently filter to a single tenant, causing the
+    // auto-delivery worker to miss proposals from all others.
+    return this.withCrossTenantSweep(async (client) => {
       const result = await client.query(
         `SELECT * FROM proposals
          WHERE status = 'approved'
@@ -409,7 +581,7 @@ export class PgProposalRepository extends PgBaseRepository implements ProposalRe
   }
 
   async claimForExecution(proposalId: string, workerId: string): Promise<Proposal | null> {
-    return this.withClient(async (client) => {
+    return this.withCrossTenantSweep(async (client) => {
       const result = await client.query(
         `UPDATE proposals
          SET status = 'executing', claimed_by = $2, claimed_at = NOW(), updated_at = NOW()
@@ -425,7 +597,7 @@ export class PgProposalRepository extends PgBaseRepository implements ProposalRe
     staleMinutes: number,
     maxRetries: number
   ): Promise<{ resetToApproved: number; movedToFailed: number }> {
-    return this.withClient(async (client) => {
+    return this.withCrossTenantSweep(async (client) => {
       const failed = await client.query(
         `UPDATE proposals
          SET status = 'execution_failed', updated_at = NOW()

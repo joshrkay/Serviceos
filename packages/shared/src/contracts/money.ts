@@ -17,6 +17,21 @@ import { z } from 'zod';
 export const lineItemCategorySchema = z.enum(['labor', 'material', 'equipment', 'other']);
 export type LineItemCategoryValue = z.infer<typeof lineItemCategorySchema>;
 
+/**
+ * B7.5 — unit of measure for a spoken part ("three 45-microfarad capacitors",
+ * "two hours of labor"). DESCRIPTIVE ONLY: price stays integer cents and
+ * `quantity × unitPriceCents = totalCents` never consults this field, so no
+ * billing arithmetic can be changed by it.
+ *
+ * Mirrors `CatalogUnit` (packages/api/src/catalog/catalog-item.ts) and is kept
+ * in lockstep with it by money.test.ts, the same way the category enum is. The
+ * DB column (migration 265) is a plain nullable TEXT with no CHECK: this enum
+ * is the validation boundary, so adding a unit later stays a code change
+ * rather than another migration.
+ */
+export const catalogUnitSchema = z.enum(['each', 'hour', 'sq ft', 'per lb', 'per gal']);
+export type CatalogUnitValue = z.infer<typeof catalogUnitSchema>;
+
 export const lineItemSchema = z.object({
   id: z.string(),
   description: z.string(),
@@ -27,6 +42,10 @@ export const lineItemSchema = z.object({
   category: lineItemCategorySchema.nullish(),
   // quantity is NUMERIC server-side and may be fractional (e.g. 1.5 hrs).
   quantity: z.number(),
+  // B7.5 — descriptive unit of measure. Optional/nullish: every line written
+  // before migration 265, and every path that doesn't state a unit, reads back
+  // absent. Never participates in money math.
+  unit: catalogUnitSchema.nullish(),
   unitPriceCents: z.number().int(),
   totalCents: z.number().int(),
   sortOrder: z.number().int(),
@@ -41,6 +60,9 @@ export const lineItemSchema = z.object({
   // estimate_line_items.pricing_source. Optional/nullish: invoice lines
   // and legacy estimate rows have no signal and serialize it as absent.
   pricingSource: z.enum(['catalog', 'ambiguous', 'uncatalogued', 'manual']).optional(),
+  // EE-4 — frozen image snapshot (estimates only): the catalog item's file id
+  // at draft/create time. Resolved to a signed URL only at the public edge.
+  imageFileId: z.string().optional(),
 });
 export type LineItem = z.infer<typeof lineItemSchema>;
 
@@ -65,4 +87,47 @@ export function formatUsdCents(cents: number): string {
   const dollars = Math.floor(abs / 100).toLocaleString('en-US');
   const rem = abs % 100;
   return rem === 0 ? `${sign}$${dollars}` : `${sign}$${dollars}.${String(rem).padStart(2, '0')}`;
+}
+
+const USD_FIXED_FORMATTER = new Intl.NumberFormat('en-US', {
+  style: 'currency',
+  currency: 'USD',
+});
+
+const USD_WHOLE_FORMATTER = new Intl.NumberFormat('en-US', {
+  style: 'currency',
+  currency: 'USD',
+  minimumFractionDigits: 0,
+  maximumFractionDigits: 0,
+});
+
+/**
+ * Format integer cents as a user-facing currency string that always keeps the
+ * two-digit cents (`123450 → "$1,234.50"`, `5000 → "$50.00"`). Thousands
+ * separators and correct negative placement (`-$5.00`, never `$-5.00`) come
+ * from `Intl.NumberFormat`. Use this where trailing zero cents must show; use
+ * `formatUsdCents` where whole dollars should drop the decimals.
+ */
+export function formatUsdCentsFixed(cents: number): string {
+  return USD_FIXED_FORMATTER.format(cents / 100);
+}
+
+/**
+ * Format integer cents as whole dollars, rounded, with thousands separators and
+ * no cents (`125050 → "$1,251"`). For dashboard/summary tiles where cents are
+ * noise. Rounds (not floors) to match the prior `maximumFractionDigits: 0`
+ * call sites this replaces.
+ */
+export function formatUsdCentsWhole(cents: number): string {
+  return USD_WHOLE_FORMATTER.format(cents / 100);
+}
+
+/**
+ * Format integer cents as a bare `$N.NN` with two-digit cents and NO thousands
+ * separators (`123450 → "$1234.50"`). For terse contexts — spoken prompts, SMS
+ * bodies — where separators add noise. Prefer `formatUsdCentsFixed` for
+ * on-screen display.
+ */
+export function formatUsdCentsPlain(cents: number): string {
+  return `$${(cents / 100).toFixed(2)}`;
 }

@@ -119,6 +119,28 @@ describe('VQ-023 — report aggregator', () => {
     expect(adv?.meetsThreshold).toBe(false); // 3/5 = 0.6 < 0.7
   });
 
+  it('WS1/F — 11-spanish is pinned at 0.9 in the threshold table (Spanish ≥90% launch requirement)', () => {
+    // 4 Spanish scripts, 1 failing → 0.75 < 0.90 must NOT meet threshold and
+    // must be named as its own bucket blocker (not absorbed into overall).
+    const verdicts: PerScriptVerdict[] = [
+      makeVerdict({ scriptId: 'es1', bucket: '11-spanish', passed: true }),
+      makeVerdict({ scriptId: 'es2', bucket: '11-spanish', passed: true }),
+      makeVerdict({ scriptId: 'es3', bucket: '11-spanish', passed: true }),
+      makeVerdict({
+        scriptId: 'es4',
+        bucket: '11-spanish',
+        passed: false,
+        dispositionStructuredResult: makeStructured(false),
+      }),
+    ];
+    const report = aggregate(verdicts);
+    const es = report.perBucket.find((b) => b.bucket === '11-spanish');
+    expect(es?.threshold).toBe(0.9);
+    expect(es?.meetsThreshold).toBe(false); // 3/4 = 0.75 < 0.90
+    expect(report.launchGate.pass).toBe(false);
+    expect(report.launchGate.blockers).toContain('11-spanish below threshold (0.75 < 0.90)');
+  });
+
   it('VQ-023 — launchGate.pass is false when any floor failure exists, even if overall pass rate ≥ 90%', () => {
     // 19 passing + 1 floor-failing → overall = 95% but floor breaks gate.
     const verdicts: PerScriptVerdict[] = [

@@ -78,6 +78,8 @@ export const en = {
     "I'm sorry, I couldn't reach anyone right now. Please tell me briefly what you need and the best number to reach you, and someone will call you right back.",
   'callback.ack':
     'Thank you. Someone from {{business}} will call you back as soon as possible. Goodbye.',
+  // WS7 — repair prompt when a live call degrades from realtime to Gather.
+  'realtime.degraded_repair': "Sorry about that — I'm still here. How can I help?",
 
   // ── Recording disclosure ─────────────────────────────────────────────
   'disclose.two_party':

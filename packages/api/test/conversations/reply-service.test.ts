@@ -6,6 +6,7 @@ import {
 } from '../../src/conversations/reply-service';
 import { InMemoryConversationRepository } from '../../src/conversations/conversation-service';
 import { UNMATCHED_SMS_ENTITY_TYPE } from '../../src/sms/inbound-capture';
+import { normalizePhone } from '../../src/compliance/dnc';
 import type { Customer } from '../../src/customers/customer';
 
 const TENANT = 'tenant-1';
@@ -140,7 +141,7 @@ describe('U6 — sendConversationReply', () => {
     });
   });
 
-  it('passes a stable idempotency key (conversation + channel + minute) to the provider', async () => {
+  it('passes a stable idempotency key (conversation + channel + minute + body) to the provider', async () => {
     const id = await customerThread(h.conversationRepo, {
       entityType: 'customer',
       entityId: 'cust-1',
@@ -155,6 +156,53 @@ describe('U6 — sendConversationReply', () => {
     const key = h.delivery.sendSms.mock.calls[0][0].idempotencyKey as string;
     expect(key).toContain(`conversation_reply:${id}:sms:`);
     expect(h.dispatchRepo.create.mock.calls[0][0].idempotencyKey).toBe(key);
+  });
+
+  it('an exact re-tap of the same reply text in the same minute dedupes (identical key)', async () => {
+    const id = await customerThread(h.conversationRepo, {
+      entityType: 'customer',
+      entityId: 'cust-1',
+    });
+    const send = () =>
+      sendConversationReply(h.deps, {
+        tenantId: TENANT,
+        conversationId: id,
+        body: 'On our way!',
+        actorId: 'owner-1',
+        actorRole: 'owner',
+      });
+    await send();
+    await send();
+    const k1 = h.delivery.sendSms.mock.calls[0][0].idempotencyKey;
+    const k2 = h.delivery.sendSms.mock.calls[1][0].idempotencyKey;
+    expect(k1).toBe(k2); // double-tap collapses at the provider/ledger
+  });
+
+  it('two DIFFERENT replies in the same minute get distinct keys (no dispatch-unique collision)', async () => {
+    const id = await customerThread(h.conversationRepo, {
+      entityType: 'customer',
+      entityId: 'cust-1',
+    });
+    await sendConversationReply(h.deps, {
+      tenantId: TENANT,
+      conversationId: id,
+      body: 'On our way!',
+      actorId: 'owner-1',
+      actorRole: 'owner',
+    });
+    await sendConversationReply(h.deps, {
+      tenantId: TENANT,
+      conversationId: id,
+      body: 'Actually, running 10 min late.',
+      actorId: 'owner-1',
+      actorRole: 'owner',
+    });
+    const k1 = h.delivery.sendSms.mock.calls[0][0].idempotencyKey;
+    const k2 = h.delivery.sendSms.mock.calls[1][0].idempotencyKey;
+    // Both fall in the same 1-minute window (mocked `now`), but the body hash
+    // separates them so the second send does not collide on the dispatch
+    // unique (tenant_id, idempotency_key) and get dropped/mis-threaded.
+    expect(k1).not.toBe(k2);
   });
 
   it('sends by email when the customer prefers email', async () => {
@@ -326,5 +374,192 @@ describe('U6 — sendConversationReply', () => {
         actorRole: 'owner',
       }),
     ).rejects.toMatchObject({ code: 'empty_body' });
+  });
+});
+
+// ─── Comms C3 — reply resolves within its own channel thread ─────────────────
+
+describe('C3 channel selection', () => {
+  async function inbound(
+    repo: InMemoryConversationRepository,
+    conversationId: string,
+    channel: 'sms' | 'email',
+    at: Date,
+  ): Promise<void> {
+    await repo.addMessage({
+      tenantId: TENANT,
+      conversationId,
+      messageType: 'text',
+      content: 'inbound',
+      senderId: 'cust-1',
+      senderRole: 'customer',
+      source: channel,
+      metadata: { direction: 'inbound', channel, createdAtOverride: at.toISOString() },
+    });
+  }
+
+  const input = (conversationId: string, channel?: 'sms' | 'email') => ({
+    tenantId: TENANT,
+    conversationId,
+    body: 'On my way',
+    actorId: 'user-1',
+    actorRole: 'owner',
+    ...(channel ? { channel } : {}),
+  });
+
+  it('defaults to the thread channel (customer texted in) even when preference says email', async () => {
+    const h = harness({ customer: customer({ preferredChannel: 'email' }) });
+    const convId = await customerThread(h.conversationRepo, {
+      entityType: 'customer',
+      entityId: 'cust-1',
+    });
+    await inbound(h.conversationRepo, convId, 'sms', new Date('2026-06-17T11:00:00Z'));
+    const result = await sendConversationReply(h.deps, input(convId));
+    expect(result.channel).toBe('sms');
+    expect(h.delivery.sendSms).toHaveBeenCalledTimes(1);
+    expect(h.delivery.sendEmail).not.toHaveBeenCalled();
+  });
+
+  it('thread-derived channel with no address on file asks — never silently flips', async () => {
+    // Customer emailed in, but the email has since been removed from the record.
+    const h = harness({ customer: customer({ email: undefined }) });
+    const convId = await customerThread(h.conversationRepo, {
+      entityType: 'customer',
+      entityId: 'cust-1',
+    });
+    await inbound(h.conversationRepo, convId, 'email', new Date('2026-06-17T11:00:00Z'));
+    await expect(sendConversationReply(h.deps, input(convId))).rejects.toMatchObject({
+      code: 'channel_selection_required',
+    });
+    expect(h.delivery.sendSms).not.toHaveBeenCalled();
+    expect(h.delivery.sendEmail).not.toHaveBeenCalled();
+  });
+
+  it('preference-derived default with no address falls through to the sole deliverable channel', async () => {
+    // Preference says email but only a phone exists and the thread has no
+    // inbound traffic — one deliverable channel is deterministic, not a guess.
+    const h = harness({
+      customer: customer({ preferredChannel: 'email', email: undefined }),
+    });
+    const convId = await customerThread(h.conversationRepo, {
+      entityType: 'customer',
+      entityId: 'cust-1',
+    });
+    const result = await sendConversationReply(h.deps, input(convId));
+    expect(result.channel).toBe('sms');
+    expect(h.delivery.sendSms).toHaveBeenCalledTimes(1);
+  });
+
+  it('both channels deliverable with no thread channel and no usable preference asks', async () => {
+    const h = harness({ customer: customer({ preferredChannel: 'none' }) });
+    const convId = await customerThread(h.conversationRepo, {
+      entityType: 'customer',
+      entityId: 'cust-1',
+    });
+    await expect(sendConversationReply(h.deps, input(convId))).rejects.toMatchObject({
+      code: 'channel_selection_required',
+    });
+  });
+
+  it('explicit channel selection performs a cross-channel reply', async () => {
+    const h = harness();
+    const convId = await customerThread(h.conversationRepo, {
+      entityType: 'customer',
+      entityId: 'cust-1',
+    });
+    await inbound(h.conversationRepo, convId, 'sms', new Date('2026-06-17T11:00:00Z'));
+    const result = await sendConversationReply(h.deps, input(convId, 'email'));
+    expect(result.channel).toBe('email');
+    expect(h.delivery.sendEmail).toHaveBeenCalledTimes(1);
+  });
+
+  // ─── The reply goes to the human who wrote, not to the account ───────────
+  // A customer's phone lookup also matches secondary phones and
+  // customer_contacts rows, so on a landlord/tenant/property-manager account
+  // the sender is routinely NOT primaryPhone. Replying to the account sends
+  // it to a different person (spec §4 — a privacy failure, not a UX one).
+
+  async function inboundFrom(
+    repo: InMemoryConversationRepository,
+    conversationId: string,
+    fromE164: string,
+    at: Date,
+  ): Promise<void> {
+    await repo.addMessage({
+      tenantId: TENANT,
+      conversationId,
+      messageType: 'text',
+      content: 'the tech never showed',
+      senderId: fromE164,
+      senderRole: 'customer',
+      source: 'sms',
+      metadata: {
+        direction: 'inbound',
+        channel: 'sms',
+        fromE164,
+        createdAtOverride: at.toISOString(),
+      },
+    });
+  }
+
+  it('replies to the contact number that texted, not the account primary phone', async () => {
+    const h = harness(); // primaryPhone is +15555550123 (the landlord)
+    const convId = await customerThread(h.conversationRepo, {
+      entityType: 'customer',
+      entityId: 'cust-1',
+    });
+    // A site contact on the same account texts from their own number.
+    await inboundFrom(h.conversationRepo, convId, '+15125550142', new Date('2026-06-17T11:00:00Z'));
+
+    const result = await sendConversationReply(h.deps, input(convId));
+
+    expect(result.channel).toBe('sms');
+    expect(h.delivery.sendSms).toHaveBeenCalledTimes(1);
+    expect(h.delivery.sendSms.mock.calls[0][0]).toMatchObject({ to: '+15125550142' });
+    expect(h.delivery.sendSms.mock.calls[0][0].to).not.toBe('+15555550123');
+  });
+
+  it('falls back to the account phone when the thread has no captured sender', async () => {
+    const h = harness();
+    const convId = await customerThread(h.conversationRepo, {
+      entityType: 'customer',
+      entityId: 'cust-1',
+    });
+    // Owner-initiated thread: no inbound message, so nothing to inherit.
+    const result = await sendConversationReply(h.deps, input(convId));
+    expect(result.channel).toBe('sms');
+    expect(h.delivery.sendSms.mock.calls[0][0]).toMatchObject({ to: '+15555550123' });
+  });
+
+  it('DNC is checked against the contact who texted, not the account primary', async () => {
+    const h = harness();
+    // The contact's own number is on the DNC list; the account primary is not.
+    h.dncRepo.isOnDnc.mockImplementation(async (_t: string, phone: string) =>
+      normalizePhone(phone) === normalizePhone('+15125550142'),
+    );
+    const convId = await customerThread(h.conversationRepo, {
+      entityType: 'customer',
+      entityId: 'cust-1',
+    });
+    await inboundFrom(h.conversationRepo, convId, '+15125550142', new Date('2026-06-17T11:00:00Z'));
+
+    await expect(sendConversationReply(h.deps, input(convId))).rejects.toMatchObject({
+      code: 'dnc_blocked',
+    });
+    expect(h.delivery.sendSms).not.toHaveBeenCalled();
+  });
+
+  it('uses the bounded findLatestInbound lookup instead of scanning getMessages', async () => {
+    const h = harness();
+    const convId = await customerThread(h.conversationRepo, {
+      entityType: 'customer',
+      entityId: 'cust-1',
+    });
+    await inbound(h.conversationRepo, convId, 'sms', new Date('2026-06-17T11:00:00Z'));
+    const bounded = vi.spyOn(h.conversationRepo, 'findLatestInbound');
+    const scan = vi.spyOn(h.conversationRepo, 'getMessages');
+    await sendConversationReply(h.deps, input(convId));
+    expect(bounded).toHaveBeenCalledTimes(1);
+    expect(scan).not.toHaveBeenCalled();
   });
 });

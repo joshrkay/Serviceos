@@ -191,3 +191,43 @@ describe('POST /api/onboarding/phone/claim', () => {
     expect(await queue.receive()).toBeNull();
   });
 });
+
+describe('POST /api/onboarding/pack — no guessed timezone on the auto-created settings row', () => {
+  it('a /pack call before /identity seeds settings with timezone UNSET', async () => {
+    const settingsRepo = new InMemorySettingsRepository();
+    const app = express();
+    app.use(express.json());
+    app.use((req: Request, _res: Response, next: NextFunction) => {
+      (req as AuthenticatedRequest).auth = {
+        userId: USER_ID,
+        sessionId: 'session-test-1',
+        tenantId: TENANT_ID,
+        role: 'owner' as NonNullable<AuthenticatedRequest['auth']>['role'],
+      };
+      next();
+    });
+    app.use(
+      '/api/onboarding',
+      createOnboardingRouter({
+        settingsRepo,
+        packActivationRepo: new InMemoryPackActivationRepository(),
+        auditRepo: new InMemoryAuditRepository(),
+        // Minimal pool stub: /pack 503s without one; the catalog/template
+        // seeding SQL tolerates empty result sets.
+        pool: { query: vi.fn(async () => ({ rows: [], rowCount: 0 })) } as unknown as Pool,
+      }),
+    );
+
+    const res = await request(app)
+      .post('/api/onboarding/pack')
+      .send({ packId: 'hvac' });
+    expect(res.status).toBeLessThan(300);
+
+    // The auto-created first row must not claim Eastern time — a seeded zone
+    // is indistinguishable from a chosen one, and the scheduling gate keys
+    // off the absence (same invariant as createSettings/ensureTenantSettings).
+    const seeded = await settingsRepo.findByTenant(TENANT_ID);
+    expect(seeded).not.toBeNull();
+    expect(seeded!.timezone).toBeUndefined();
+  });
+});

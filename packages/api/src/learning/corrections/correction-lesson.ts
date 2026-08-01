@@ -54,6 +54,40 @@ export interface CorrectionLessonRepository {
   findBySourceProposal(tenantId: string, sourceProposalId: string): Promise<CorrectionLesson[]>;
   /** Mark a lesson reverted; returns the updated row or null if not found. */
   markReverted(tenantId: string, id: string, revertedAt: Date): Promise<CorrectionLesson | null>;
+  /**
+   * WS20 — count lessons of `lessonType` whose TARGET identity equals
+   * `targetKey`, across ALL statuses (applied + reverted). The repetition
+   * signal counts every correction event, including within-day cascades the
+   * owner later undid. Target identity per type:
+   *   - part_price_changed → payload.catalogItemId (exact match)
+   *   - banned_phrase      → payload.phrase (case-insensitive, trimmed)
+   * Other lesson types have no single-target concept and return 0.
+   * Drives the correction-repetition threshold that emits a meta-proposal.
+   */
+  countByTarget(
+    tenantId: string,
+    lessonType: CorrectionLessonType,
+    targetKey: string,
+  ): Promise<number>;
+}
+
+/**
+ * Extract the TARGET identity a repetition is counted by, from a lesson's
+ * payload. Shared by the in-memory + Pg repos (and the detector) so the two
+ * never drift on what "the same correction" means. Returns null for lesson
+ * types that have no single-target concept.
+ */
+export function correctionLessonTargetKey(
+  payload: CorrectionLessonPayload,
+): { lessonType: CorrectionLessonType; key: string } | null {
+  switch (payload.kind) {
+    case 'part_price_changed':
+      return { lessonType: 'part_price_changed', key: payload.catalogItemId };
+    case 'banned_phrase':
+      return { lessonType: 'banned_phrase', key: payload.phrase.trim().toLowerCase() };
+    default:
+      return null;
+  }
 }
 
 /**
@@ -130,4 +164,29 @@ export class InMemoryCorrectionLessonRepository implements CorrectionLessonRepos
     this.lessons.set(id, updated);
     return structuredClone(updated);
   }
+
+  async countByTarget(
+    tenantId: string,
+    lessonType: CorrectionLessonType,
+    targetKey: string,
+  ): Promise<number> {
+    let count = 0;
+    for (const l of this.lessons.values()) {
+      if (l.tenantId !== tenantId || l.lessonType !== lessonType) continue;
+      const target = correctionLessonTargetKey(l.payload);
+      if (target && target.lessonType === lessonType && target.key === normalizeTargetKey(lessonType, targetKey)) {
+        count++;
+      }
+    }
+    return count;
+  }
+}
+
+/**
+ * Normalize a caller-supplied target key to match `correctionLessonTargetKey`'s
+ * stored form: banned-phrase targets are compared case-insensitively + trimmed;
+ * catalog SKU ids are exact.
+ */
+export function normalizeTargetKey(lessonType: CorrectionLessonType, key: string): string {
+  return lessonType === 'banned_phrase' ? key.trim().toLowerCase() : key;
 }

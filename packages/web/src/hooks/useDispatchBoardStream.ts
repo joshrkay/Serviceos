@@ -1,5 +1,6 @@
 import { useEffect, useRef } from 'react';
 import { useAuth } from '@clerk/clerk-react';
+import { fetchWithAuthRetry } from '../lib/streamAuth';
 
 export interface DispatchBoardStreamEvent {
   type: 'board_updated' | 'presence_updated';
@@ -7,15 +8,29 @@ export interface DispatchBoardStreamEvent {
   boardRevision?: string;
 }
 
+export interface DispatchBoardStreamOptions {
+  /**
+   * UC-3 — when presence rides the WS gateway (useDispatchPresence transport
+   * === 'ws'), presence state arrives as dispatch.presence pushes, so a
+   * presence_updated SSE event doesn't need a full board refetch here.
+   * board_updated always refetches.
+   */
+  presenceViaWs?: boolean;
+}
+
 export function useDispatchBoardStream(
   dateParam: string,
   currentRevision: string | undefined,
   onStale: () => void,
+  options: DispatchBoardStreamOptions = {},
 ): void {
   const { getToken } = useAuth();
   const lastRevisionRef = useRef(currentRevision);
   const sseFailedAtRef = useRef<number | null>(null);
   const sseAbortRef = useRef<AbortController | null>(null);
+  // Ref-backed so toggling the flag never tears down the SSE connection.
+  const presenceViaWsRef = useRef(options.presenceViaWs ?? false);
+  presenceViaWsRef.current = options.presenceViaWs ?? false;
 
   useEffect(() => {
     lastRevisionRef.current = currentRevision;
@@ -34,7 +49,7 @@ export function useDispatchBoardStream(
         }
         lastRevisionRef.current = evt.boardRevision;
       }
-      if (evt.type === 'presence_updated') {
+      if (evt.type === 'presence_updated' && !presenceViaWsRef.current) {
         onStale();
       }
     };
@@ -46,16 +61,19 @@ export function useDispatchBoardStream(
       sseAbortRef.current = controller;
 
       try {
-        const token = await getToken();
-        const headers: Record<string, string> = { Accept: 'text/event-stream' };
-        if (token) headers.Authorization = `Bearer ${token}`;
-
-        const response = await fetch(
+        // ARCH-30 — shared 401/403 handling (retry once with a
+        // force-refreshed token, then handleAuthFailure() on the request
+        // layer's terminal exit) instead of the old bare `return`, which
+        // left the board silently dead until the operator navigated away
+        // and back. A still-rejected response falls through to the
+        // `!response.ok` branch below, which throws into the catch block's
+        // existing exponential-backoff reconnect.
+        const response = await fetchWithAuthRetry(
+          (opts) => getToken({ template: 'serviceos', ...opts }),
           `/api/dispatch/board/events?date=${encodeURIComponent(dateParam)}`,
-          { method: 'GET', headers, signal: controller.signal },
+          { method: 'GET', headers: { Accept: 'text/event-stream' }, signal: controller.signal },
         );
 
-        if (response.status === 401 || response.status === 403) return;
         if (!response.ok || !response.body) throw new Error(`SSE ${response.status}`);
 
         sseFailedAtRef.current = null;

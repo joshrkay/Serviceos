@@ -95,4 +95,40 @@ describe('users — Tier 4 Team members (PR 1: read + role-edit primitives)', ()
     const updated = await updateUser(TENANT, a.id, { role: 'dispatcher' }, repo);
     expect(updated?.role).toBe('dispatcher');
   });
+
+  describe('findByTenant limit', () => {
+    beforeEach(async () => {
+      // createdAt ascending u0..u4 — findByTenant sorts by createdAt ASC.
+      for (let i = 0; i < 5; i++) {
+        await seedUser(repo, { id: `u${i}`, email: `u${i}@example.com` });
+      }
+    });
+
+    it('returns N of M rows when a limit is given', async () => {
+      const list = await listUsers(TENANT, repo, { limit: 2 });
+      expect(list.map((u) => u.id)).toEqual(['u0', 'u1']);
+    });
+
+    it('returns every row when limit is omitted (backward compat)', async () => {
+      const list = await listUsers(TENANT, repo);
+      expect(list).toHaveLength(5);
+    });
+
+    it('composes with the role filter', async () => {
+      await seedUser(repo, { id: 'owner-1', role: 'owner' });
+      const list = await listUsers(TENANT, repo, { role: 'technician', limit: 2 });
+      expect(list.map((u) => u.id)).toEqual(['u0', 'u1']);
+      expect(list.every((u) => u.role === 'technician')).toBe(true);
+    });
+
+    it('limit 0 returns no rows', async () => {
+      const list = await listUsers(TENANT, repo, { limit: 0 });
+      expect(list).toEqual([]);
+    });
+
+    it('limit greater than the row count returns all rows', async () => {
+      const list = await listUsers(TENANT, repo, { limit: 1000 });
+      expect(list).toHaveLength(5);
+    });
+  });
 });

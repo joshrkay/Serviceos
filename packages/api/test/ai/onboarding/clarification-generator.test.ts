@@ -40,7 +40,7 @@ describe('P4-EXT-009 — Onboarding clarification and follow-up flow', () => {
     const { gateway, provider } = createMockLLMGateway();
     provider.setDefaultResponse(JSON.stringify({ questions: [] }));
 
-    const questions = await generateAIClarificationQuestions(gateway, completeExtraction);
+    const questions = await generateAIClarificationQuestions(gateway, completeExtraction, 'tenant-1');
 
     expect(Array.isArray(questions)).toBe(true);
   });
@@ -55,7 +55,7 @@ describe('P4-EXT-009 — Onboarding clarification and follow-up flow', () => {
       ...completeExtraction,
       businessProfile: undefined,
     };
-    const questions = await generateAIClarificationQuestions(gateway, partial);
+    const questions = await generateAIClarificationQuestions(gateway, partial, 'tenant-1');
 
     expect(questions.length).toBeGreaterThan(0);
     // Verify the context sent to the LLM mentions missing profile
@@ -74,7 +74,7 @@ describe('P4-EXT-009 — Onboarding clarification and follow-up flow', () => {
       ...completeExtraction,
       pricing: undefined,
     };
-    const questions = await generateAIClarificationQuestions(gateway, partial);
+    const questions = await generateAIClarificationQuestions(gateway, partial, 'tenant-1');
 
     expect(questions.length).toBeGreaterThan(0);
     const calls = provider.getCalls();
@@ -92,7 +92,7 @@ describe('P4-EXT-009 — Onboarding clarification and follow-up flow', () => {
       ...completeExtraction,
       schedule: undefined,
     };
-    const questions = await generateAIClarificationQuestions(gateway, partial);
+    const questions = await generateAIClarificationQuestions(gateway, partial, 'tenant-1');
 
     expect(questions.length).toBeGreaterThan(0);
     const calls = provider.getCalls();
@@ -110,7 +110,7 @@ describe('P4-EXT-009 — Onboarding clarification and follow-up flow', () => {
       businessProfile: completeExtraction.businessProfile,
       // categories, pricing, team, schedule all missing
     };
-    const questions = await generateAIClarificationQuestions(gateway, partial);
+    const questions = await generateAIClarificationQuestions(gateway, partial, 'tenant-1');
 
     expect(questions.length).toBeGreaterThan(0);
 
@@ -128,7 +128,7 @@ describe('P4-EXT-009 — Onboarding clarification and follow-up flow', () => {
       questions: ['Valid question?', 42, null, 'Another valid question?'],
     }));
 
-    const questions = await generateAIClarificationQuestions(gateway, {});
+    const questions = await generateAIClarificationQuestions(gateway, {}, 'tenant-1');
 
     expect(questions).toHaveLength(2);
     expect(questions[0]).toBe('Valid question?');
@@ -139,7 +139,7 @@ describe('P4-EXT-009 — Onboarding clarification and follow-up flow', () => {
     const { gateway, provider } = createMockLLMGateway();
     provider.setDefaultResponse('Not valid JSON {{{');
 
-    const questions = await generateAIClarificationQuestions(gateway, {});
+    const questions = await generateAIClarificationQuestions(gateway, {}, 'tenant-1');
 
     expect(questions).toEqual([]);
   });
@@ -148,7 +148,7 @@ describe('P4-EXT-009 — Onboarding clarification and follow-up flow', () => {
     const { gateway, provider } = createMockLLMGateway();
     provider.setDefaultResponse(JSON.stringify({ result: 'no questions key' }));
 
-    const questions = await generateAIClarificationQuestions(gateway, {});
+    const questions = await generateAIClarificationQuestions(gateway, {}, 'tenant-1');
 
     expect(questions).toEqual([]);
   });

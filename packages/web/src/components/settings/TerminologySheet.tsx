@@ -1,9 +1,6 @@
 /**
- * Tier 4 (Settings stubs) — Terminology editor.
- *
- * Closes the "Terminology" stub in SettingsPage — lets the tenant
- * customize how ServiceOS refers to common CRM entities (e.g. "Quote"
- * instead of "Estimate", "Project" instead of "Job").
+ * Terminology editor — customize CRM entity labels for the tenant
+ * (e.g. "Quote" instead of "Estimate", "Project" instead of "Job").
  *
  * Backend: PUT /api/settings { terminologyPreferences: {...} }. The
  * validator accepts an entity-label allowlist

@@ -14,6 +14,9 @@ for, and why.** It is the product-level reference for every team:
 engineering, design, sales, support, and leadership.
 
 **Companion documents** (treat as authoritative for their domain):
+- `docs/PRD-rivet-master.md` — consolidated positioning and voice-interaction
+  spec (personas, competitive positioning, voice architecture, the honest
+  gap list, open decisions D-020 through D-022).
 - `docs/strategy/day-in-the-life.md` — the emotional and operational spine;
   the personas; the bad-day failure modes.
 - `docs/strategy/roadmap-audit.md` — how the current build maps against

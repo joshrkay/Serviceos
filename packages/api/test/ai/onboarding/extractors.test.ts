@@ -256,6 +256,69 @@ describe('P4-EXT-003 — Pricing extraction from voice transcript', () => {
     expect(result.needsClarification).toBe(true);
     expect(result.clarificationQuestions).toBeDefined();
   });
+
+  // ── B1.20 — "some prices" is not a complete pricing capture ────────────
+  //
+  // The hourly labor rate is the one price the identity step hard-requires
+  // (onboarding/derive-status.ts `isIdentityDone` needs a non-null
+  // hourly_rate_cents). Advancing on a price list that has none is what let
+  // a service-call-fee-only conversation produce settings with the column
+  // NULL — the owner finishes, approves, sees no error, and is sent back to
+  // the identity form. Ask in the conversation, where money is already the
+  // topic; the proposal's `hourlyRateCents` gate is the backstop for owners
+  // who never answer.
+
+  it('a service-call fee with no hourly rate triggers clarification for the rate specifically', async () => {
+    const { gateway, provider } = createMockLLMGateway();
+    provider.setDefaultResponse(
+      mockPricingResponse({
+        prices: [
+          { service_ref: 'service call', amount_cents: 9500, price_type: 'exact', confidence: 0.9, source_text: '$95 to come out' },
+        ],
+      })
+    );
+    const extractor = new PricingExtractor(gateway);
+
+    const result = await extractor.extract(contextWithCategories());
+
+    // The price the owner DID give is kept — nothing is discarded or invented.
+    expect(result.data.prices).toHaveLength(1);
+    expect(result.data.prices[0].amountCents).toBe(9500);
+    expect(result.data.prices.some((p) => p.priceType === 'hourly_rate')).toBe(false);
+
+    expect(result.needsClarification).toBe(true);
+    expect(result.clarificationQuestions!.join(' ').toLowerCase()).toContain('hourly');
+  });
+
+  it('flat-rate-only pricing (ranges + components, no hourly entry) also triggers clarification', async () => {
+    const { gateway, provider } = createMockLLMGateway();
+    provider.setDefaultResponse(mockPricingResponse()); // exact + exact + range_start
+    const extractor = new PricingExtractor(gateway);
+
+    const result = await extractor.extract(contextWithCategories());
+
+    expect(result.data.prices.length).toBeGreaterThan(1);
+    expect(result.needsClarification).toBe(true);
+    expect(result.clarificationQuestions!.join(' ').toLowerCase()).toContain('hourly');
+  });
+
+  it('positive control — a captured hourly rate completes the capture (no clarification)', async () => {
+    const { gateway, provider } = createMockLLMGateway();
+    provider.setDefaultResponse(
+      mockPricingResponse({
+        prices: [
+          { service_ref: 'service call', amount_cents: 9500, price_type: 'exact', confidence: 0.9, source_text: '$95 to come out' },
+          { service_ref: 'labor', amount_cents: 12000, price_type: 'hourly_rate', confidence: 0.9, source_text: '$120 an hour' },
+        ],
+      })
+    );
+    const extractor = new PricingExtractor(gateway);
+
+    const result = await extractor.extract(contextWithCategories());
+
+    expect(result.needsClarification).toBe(false);
+    expect(result.clarificationQuestions).toBeUndefined();
+  });
 });
 
 // ─── TeamExtractor ───────────────────────────────────────────────────────────

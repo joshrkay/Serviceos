@@ -20,7 +20,7 @@ import type {
 } from './digest-service';
 
 const COLUMNS =
-  'id, tenant_id, digest_date::text AS digest_date, payload, narrative, sms_dispatch_id, generated_at';
+  'id, tenant_id, digest_date::text AS digest_date, payload, narrative, sms_dispatch_id, send_attempts, generated_at';
 
 function mapRow(row: Record<string, unknown>): DailyDigestRecord {
   return {
@@ -30,6 +30,8 @@ function mapRow(row: Record<string, unknown>): DailyDigestRecord {
     payload: row.payload as DailyDigestPayload,
     ...(row.narrative != null ? { narrative: row.narrative as string } : {}),
     ...(row.sms_dispatch_id != null ? { smsDispatchId: row.sms_dispatch_id as string } : {}),
+    // send_attempts is NOT NULL DEFAULT 0 (migration 239); coerce defensively.
+    sendAttempts: Number(row.send_attempts ?? 0),
     generatedAt: new Date(row.generated_at as string),
   };
 }
@@ -129,6 +131,19 @@ export class PgDailyDigestRepository extends PgBaseRepository implements DailyDi
         [tenantId, digestDate, smsDispatchId],
       );
       return rows.length > 0 ? mapRow(rows[0]) : null;
+    });
+  }
+
+  async incrementSendAttempts(tenantId: string, digestDate: string): Promise<number | null> {
+    return this.withTenant(tenantId, async (client) => {
+      const { rows } = await client.query(
+        `UPDATE daily_digests
+         SET send_attempts = send_attempts + 1
+         WHERE tenant_id = $1 AND digest_date = $2::date
+         RETURNING send_attempts`,
+        [tenantId, digestDate],
+      );
+      return rows.length > 0 ? Number(rows[0].send_attempts) : null;
     });
   }
 }

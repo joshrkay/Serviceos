@@ -1,5 +1,5 @@
-import { useState, useEffect, useRef, useCallback } from 'react';
-import { NavLink, Outlet, useLocation, useNavigate } from 'react-router';
+import { useState, useEffect, useRef, useCallback, useContext } from 'react';
+import { NavLink, Outlet, useLocation, useNavigate, UNSAFE_DataRouterStateContext } from 'react-router';
 import {
   Home, MessageSquare, Briefcase, Calendar,
   Users, FileText, Receipt, Settings, Zap, Bell, Layers, TrendingUp, LogOut,
@@ -23,17 +23,30 @@ import {
 } from '../../hooks/useActiveSessions';
 import { UpgradeNudgeBanner } from '../onboarding/v2/UpgradeNudgeBanner';
 import { ActivationCelebrationBanner } from '../onboarding/v2/ActivationCelebrationBanner';
+import { WelcomeWalkthrough } from '../walkthrough/WelcomeWalkthrough';
+import { WhatsNewModal } from '../walkthrough/WhatsNewModal';
 import { PastDueBanner } from '../billing/PastDueBanner';
 import { EscalationPanelHost } from '../dispatch/EscalationPanelHost';
 import {
   usePendingProposals,
   type PendingProposalSummary,
 } from '../../hooks/usePendingProposals';
+import { useTenantTimezone } from '../../hooks/useTenantTimezone';
+import { formatTimeInTenantTz } from '../../utils/formatInTenantTz';
 
 interface NavItem {
   to: string;
   label: string;
   icon: typeof Home;
+  /**
+   * Permission required to see this item. Office/billing surfaces are tagged
+   * so a viewer who lacks the permission (notably the technician role, which
+   * holds no invoices/estimates/payments view) never sees the nav entry — in
+   * ANY mode, including the supervisor default an unset technician falls back
+   * to. The RBAC removal is the real gate; this keeps the UI consistent so a
+   * tagged item never deep-links to a 403. Untagged items are always shown.
+   */
+  requires?: string;
 }
 
 /**
@@ -48,16 +61,15 @@ interface NavItem {
 function getNav(mode: Mode): NavItem[] {
   switch (mode) {
     case 'tech':
+      // Field view — stripped of office/billing surfaces (Epic 6 non-goal:
+      // "do not expose office/billing surfaces to the technician role").
       return [
         { to: '/technician/day', label: 'Today',     icon: Wrench   },
         { to: '/jobs',           label: 'My jobs',   icon: Briefcase },
         { to: '/customers',      label: 'Customers', icon: Users    },
         { to: '/comms-inbox',    label: 'Messages',  icon: Mail     },
-        { to: '/estimates',      label: 'Estimates', icon: FileText },
-        { to: '/invoices',       label: 'Invoices',  icon: Receipt  },
         { to: '/inbox',          label: 'Inbox',     icon: Bell     },
-        { to: '/reports/money',  label: 'Money',     icon: TrendingUp },
-        { to: '/settings',       label: 'Settings',  icon: Settings },
+        { to: '/settings',       label: 'Settings',  icon: Settings, requires: 'settings:view' },
       ];
     case 'both':
       // Supervisor + field-tech power view. Trimmed to the calm core
@@ -69,9 +81,9 @@ function getNav(mode: Mode): NavItem[] {
         { to: '/jobs',           label: 'My jobs',      icon: Briefcase     },
         { to: '/schedule',       label: 'Schedule',     icon: Calendar      },
         { to: '/customers',      label: 'Customers',    icon: Users         },
-        { to: '/estimates',      label: 'Estimates',    icon: FileText      },
-        { to: '/invoices',       label: 'Invoices',     icon: Receipt       },
-        { to: '/settings',       label: 'Settings',     icon: Settings      },
+        { to: '/estimates',      label: 'Estimates',    icon: FileText, requires: 'estimates:view' },
+        { to: '/invoices',       label: 'Invoices',     icon: Receipt, requires: 'invoices:view' },
+        { to: '/settings',       label: 'Settings',     icon: Settings, requires: 'settings:view' },
       ];
     case 'supervisor':
     default:
@@ -88,10 +100,10 @@ function getNav(mode: Mode): NavItem[] {
         { to: '/customers',     label: 'Customers',    icon: Users         },
         { to: '/comms-inbox',   label: 'Messages',     icon: Mail          },
         { to: '/leads',         label: 'Leads',        icon: TrendingUp    },
-        { to: '/estimates',     label: 'Estimates',    icon: FileText      },
-        { to: '/invoices',      label: 'Invoices',     icon: Receipt       },
+        { to: '/estimates',     label: 'Estimates',    icon: FileText, requires: 'estimates:view' },
+        { to: '/invoices',      label: 'Invoices',     icon: Receipt, requires: 'invoices:view' },
         { to: '/interactions',  label: 'Interactions', icon: Layers        },
-        { to: '/settings',      label: 'Settings',     icon: Settings      },
+        { to: '/settings',      label: 'Settings',     icon: Settings, requires: 'settings:view' },
       ];
   }
 }
@@ -99,19 +111,20 @@ function getNav(mode: Mode): NavItem[] {
 function getBottomNav(mode: Mode): NavItem[] {
   switch (mode) {
     case 'tech':
+      // Field view — no Money/Bills/Quotes (Epic 6 non-goal).
       return [
-        { to: '/technician/day', label: 'Today',  icon: Wrench     },
-        { to: '/inbox',          label: 'Inbox',  icon: Bell       },
-        { to: '/reports/money',  label: 'Money',  icon: TrendingUp },
-        { to: '/invoices',       label: 'Bills',  icon: Receipt    },
-        { to: '/estimates',      label: 'Quotes', icon: FileText   },
+        { to: '/technician/day', label: 'Today',     icon: Wrench     },
+        { to: '/jobs',           label: 'My jobs',   icon: Briefcase  },
+        { to: '/customers',      label: 'Customers', icon: Users      },
+        { to: '/comms-inbox',    label: 'Messages',  icon: Mail       },
+        { to: '/inbox',          label: 'Inbox',     icon: Bell       },
       ];
     case 'both':
       return [
         { to: '/technician/day', label: 'Today',  icon: Wrench        },
         { to: '/inbox',          label: 'Inbox',  icon: Bell          },
-        { to: '/reports/money',  label: 'Money',  icon: TrendingUp    },
-        { to: '/invoices',       label: 'Bills',  icon: Receipt       },
+        { to: '/reports/money',  label: 'Money',  icon: TrendingUp, requires: 'invoices:view' },
+        { to: '/invoices',       label: 'Bills',  icon: Receipt, requires: 'invoices:view' },
         { to: '/assistant',      label: 'AI',     icon: MessageSquare },
       ];
     case 'supervisor':
@@ -123,7 +136,7 @@ function getBottomNav(mode: Mode): NavItem[] {
         { to: '/jobs',       label: 'Jobs',      icon: Briefcase     },
         { to: '/leads',      label: 'Leads',     icon: TrendingUp    },
         { to: '/customers',  label: 'Customers', icon: Users         },
-        { to: '/invoices',   label: 'Invoices',  icon: Receipt       },
+        { to: '/invoices',   label: 'Invoices',  icon: Receipt, requires: 'invoices:view' },
       ];
   }
 }
@@ -195,7 +208,7 @@ function ModeToggle({ current, onSwitch, variant }: ModeToggleProps) {
       role="radiogroup"
       aria-label="Operator mode"
       data-testid="mode-toggle"
-      className="flex rounded-md border border-slate-200 bg-slate-50 overflow-hidden"
+      className="flex rounded-md border border-border bg-secondary overflow-hidden"
     >
       {options.map(({ mode, label, fullLabel }) => {
         const active = current === mode;
@@ -212,8 +225,8 @@ function ModeToggle({ current, onSwitch, variant }: ModeToggleProps) {
             onClick={() => handleClick(mode)}
             className={`${sizeClass} flex-1 transition-colors ${
               active
-                ? 'bg-white text-slate-900 shadow-sm'
-                : 'text-slate-500 hover:text-slate-700'
+                ? 'bg-card text-foreground shadow-sm'
+                : 'text-muted-foreground hover:text-foreground'
             } ${isPending ? 'opacity-60' : ''}`}
           >
             {label}
@@ -239,6 +252,12 @@ export function Shell() {
 
 function ShellInner() {
   const location = useLocation();
+  // Route-level lazy() holds the transition while a page's chunk loads; the
+  // data-router navigation state reports 'loading' during that window. Read it
+  // from context (not useNavigation()) so Shell still renders when mounted in a
+  // plain MemoryRouter — as component tests do — instead of throwing.
+  const dataRouterState = useContext(UNSAFE_DataRouterStateContext);
+  const isNavigating = dataRouterState?.navigation?.state === 'loading';
   const [cameraOpen, setCameraOpen] = useState(false);
   const voiceBarRef = useRef<VoiceBarHandle>(null);
   const isExact = (to: string) =>
@@ -264,6 +283,7 @@ function ShellInner() {
   const { me, switchMode } = useMe();
   const { sessions, pendingProposalCount: liveSessionPendingCount } = useActiveSessions();
   const navigate = useNavigate();
+  const timezone = useTenantTimezone();
 
   // P2-033 — toast on each genuinely new pending proposal. Sonner's
   // action.onClick doesn't auto-navigate, so we drive it through
@@ -285,7 +305,7 @@ function ShellInner() {
   const handleCriticalProposal = useCallback(
     (proposal: PendingProposalSummary) => {
       const expiry = proposal.expiresAt
-        ? new Date(proposal.expiresAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
+        ? formatTimeInTenantTz(proposal.expiresAt, timezone)
         : 'soon';
       toast.warning(`Hold expiring ${expiry}: ${proposal.summary}`, {
         action: {
@@ -294,7 +314,7 @@ function ShellInner() {
         },
       });
     },
-    [navigate],
+    [navigate, timezone],
   );
 
   const {
@@ -340,8 +360,15 @@ function ShellInner() {
   const showModeToggle = isOwner || canFieldServe;
   const roleLabel = formatRoleLabel(role) || 'Owner';
 
-  const nav = getNav(currentMode);
-  const bottomNav = getBottomNav(currentMode);
+  // Permission-gate nav items. Office/billing entries carry `requires`; a
+  // viewer who lacks the permission (notably the technician role) never sees
+  // them — in any mode, including the supervisor default an unset technician
+  // falls back to. Untagged items are always shown.
+  const grantedPermissions = new Set(me?.permissions ?? []);
+  const visibleItems = (items: NavItem[]): NavItem[] =>
+    items.filter((item) => !item.requires || grantedPermissions.has(item.requires));
+  const nav = visibleItems(getNav(currentMode));
+  const bottomNav = visibleItems(getBottomNav(currentMode));
 
   // The mode toggle calls this; if the destination crosses out of
   // supervisor coverage, we surface the confirmation modal instead of
@@ -370,7 +397,7 @@ function ShellInner() {
 
   return (
     <ErrorBoundary>
-    <div className="flex flex-col h-screen bg-slate-50 overflow-hidden">
+    <div className="flex flex-col h-screen bg-background overflow-hidden">
 
       {/* Payment problem — renders only when the Stripe subscription is
           past_due. Blocking, not dismissible. */}
@@ -385,6 +412,12 @@ function ShellInner() {
           complete). */}
       <UpgradeNudgeBanner />
 
+      {/* First-run product tour (new accounts) + what's-new changelog
+          (existing users). Both portal to <body>; gated so a brand-new
+          account sees only the welcome tour on day one. */}
+      <WelcomeWalkthrough />
+      <WhatsNewModal />
+
       <div className="flex flex-1 overflow-hidden">
 
       {/* Toast portal — mounted at the layout root so toasts surface
@@ -393,19 +426,19 @@ function ShellInner() {
       <Toaster richColors position="top-right" />
 
       {/* ── Desktop Sidebar ── */}
-      <aside className="hidden md:flex flex-col w-56 shrink-0 bg-white border-r border-slate-100 z-10">
+      <aside className="hidden md:flex flex-col w-56 shrink-0 bg-card border-r border-border z-10">
         {/* Logo */}
-        <div className="flex items-center gap-2 px-5 pt-5 pb-4 border-b border-slate-100">
-          <span className="flex size-7 items-center justify-center rounded-lg bg-slate-900">
-            <Zap size={14} className="text-white" />
+        <div className="flex items-center gap-2 px-5 pt-5 pb-4 border-b border-border">
+          <span className="flex size-7 items-center justify-center rounded-lg bg-primary">
+            <Zap size={14} className="text-primary-foreground" />
           </span>
-          <span className="text-sm text-slate-900 tracking-tight">Rivet</span>
+          <span className="text-sm text-foreground tracking-tight">Rivet</span>
           {pendingProposalCount > 0 && (
             <NavLink
               to="/inbox"
               aria-label={`${pendingProposalCount} pending proposal${pendingProposalCount === 1 ? '' : 's'} — open inbox`}
               data-testid="pending-proposal-badge"
-              className="ml-auto flex size-5 items-center justify-center rounded-full bg-blue-600 text-white"
+              className="ml-auto flex size-5 items-center justify-center rounded-full bg-primary text-primary-foreground"
               style={{ fontSize: 10 }}
             >
               {pendingProposalCount > 9 ? '9+' : pendingProposalCount}
@@ -423,15 +456,15 @@ function ShellInner() {
                 to={to}
                 className={`flex items-center gap-3 rounded-lg px-3 py-2 mb-0.5 text-sm transition-colors ${
                   active
-                    ? 'bg-slate-100 text-slate-900'
-                    : 'text-slate-500 hover:bg-slate-50 hover:text-slate-700'
+                    ? 'bg-secondary text-foreground'
+                    : 'text-muted-foreground hover:bg-secondary hover:text-foreground'
                 }`}
               >
-                <Icon size={16} className={active ? 'text-blue-600' : ''} />
+                <Icon size={16} className={active ? 'text-primary' : ''} />
                 {label}
                 {to === '/inbox' && pendingProposalCount > 0 && (
                   <span
-                    className="ml-auto flex min-w-[18px] h-[18px] items-center justify-center rounded-full bg-blue-600 text-white px-1"
+                    className="ml-auto flex min-w-[18px] h-[18px] items-center justify-center rounded-full bg-primary text-primary-foreground px-1"
                     style={{ fontSize: 9 }}
                     data-testid="sidebar-inbox-badge"
                   >
@@ -466,16 +499,16 @@ function ShellInner() {
         )}
 
         {/* User */}
-        <div className="border-t border-slate-100 px-4 py-3">
+        <div className="border-t border-border px-4 py-3">
           <div className="flex items-center gap-2.5">
-            <span className="flex size-7 shrink-0 items-center justify-center rounded-full bg-slate-800 text-white text-xs">{initials}</span>
+            <span className="flex size-7 shrink-0 items-center justify-center rounded-full bg-secondary text-secondary-foreground text-xs">{initials}</span>
             <div className="min-w-0">
-              <p className="text-xs text-slate-800 truncate">{displayName}</p>
-              <p className="text-xs text-slate-400 truncate">{roleLabel}</p>
+              <p className="text-xs text-foreground truncate">{displayName}</p>
+              <p className="text-xs text-muted-foreground truncate">{roleLabel}</p>
             </div>
             <button
               onClick={() => signOut({ redirectUrl: '/login' })}
-              className="ml-auto shrink-0 text-slate-400 hover:text-slate-600 cursor-pointer"
+              className="ml-auto shrink-0 text-muted-foreground hover:text-foreground cursor-pointer"
               title="Sign out"
             >
               <LogOut size={15} />
@@ -488,12 +521,12 @@ function ShellInner() {
       <main className="flex-1 flex flex-col min-w-0 overflow-hidden">
 
         {/* Mobile top bar */}
-        <div className="md:hidden flex items-center justify-between px-4 py-3 bg-white border-b border-slate-100 shrink-0">
+        <div className="md:hidden flex items-center justify-between px-4 py-3 bg-card border-b border-border shrink-0">
           <div className="flex items-center gap-2">
-            <span className="flex size-6 items-center justify-center rounded-lg bg-slate-900">
-              <Zap size={12} className="text-white" />
+            <span className="flex size-6 items-center justify-center rounded-lg bg-primary">
+              <Zap size={12} className="text-primary-foreground" />
             </span>
-            <span className="text-sm text-slate-900">Rivet</span>
+            <span className="text-sm text-foreground">Rivet</span>
           </div>
           <div className="flex items-center gap-3">
             {showModeToggle && (
@@ -519,13 +552,13 @@ function ShellInner() {
                   : 'Open approval inbox'
               }
               data-testid="mobile-inbox-bell"
-              className="relative flex items-center justify-center text-slate-500"
+              className="relative flex items-center justify-center text-muted-foreground"
             >
               <Bell size={18} />
               {pendingProposalCount > 0 && (
                 <span
                   data-testid="mobile-inbox-badge"
-                  className="absolute -top-1.5 -right-1.5 flex size-3.5 min-w-3.5 items-center justify-center rounded-full bg-blue-600 px-0.5 text-white"
+                  className="absolute -top-1.5 -right-1.5 flex size-3.5 min-w-3.5 items-center justify-center rounded-full bg-primary px-0.5 text-primary-foreground"
                   style={{ fontSize: 9 }}
                 >
                   {pendingProposalCount > 9 ? '9+' : pendingProposalCount}
@@ -535,13 +568,13 @@ function ShellInner() {
             <NavLink to="/settings" className="relative flex items-center justify-center">
               <span className={`flex size-7 items-center justify-center rounded-full text-xs transition-all ${
                 location.pathname.startsWith('/settings')
-                  ? 'bg-blue-600 text-white ring-2 ring-blue-200'
-                  : 'bg-slate-800 text-white'
+                  ? 'bg-primary text-primary-foreground ring-2 ring-primary/30'
+                  : 'bg-secondary text-secondary-foreground'
               }`}>{initials}</span>
-              <span className={`absolute -bottom-0.5 -right-0.5 flex size-3.5 items-center justify-center rounded-full border border-white ${
-                location.pathname.startsWith('/settings') ? 'bg-blue-600' : 'bg-slate-600'
+              <span className={`absolute -bottom-0.5 -right-0.5 flex size-3.5 items-center justify-center rounded-full border border-card ${
+                location.pathname.startsWith('/settings') ? 'bg-primary' : 'bg-muted-foreground'
               }`}>
-                <Settings size={8} className="text-white" />
+                <Settings size={8} className="text-primary-foreground" />
               </span>
             </NavLink>
           </div>
@@ -554,7 +587,16 @@ function ShellInner() {
         {currentMode === 'both' && <CompressedSessionStrip />}
 
         {/* Page (fills remaining space, scrolls internally) */}
-        <div className="flex-1 overflow-hidden">
+        <div className="relative flex-1 overflow-hidden">
+          {/* Lazy-route chunk is fetching — a thin top bar signals progress
+              while the router keeps the prior page visible. */}
+          {isNavigating && (
+            <div
+              className="absolute inset-x-0 top-0 z-20 h-0.5 animate-pulse bg-primary"
+              role="status"
+              aria-label="Loading page"
+            />
+          )}
           <Outlet />
         </div>
 
@@ -564,7 +606,7 @@ function ShellInner() {
         </div>
 
         {/* ── Mobile bottom tab bar (in flow, not fixed) ── */}
-        <div className="md:hidden shrink-0 bg-white border-t border-slate-200">
+        <div className="md:hidden shrink-0 bg-card border-t border-border">
           <div className="flex">
             {bottomNav.map(({ to, label, icon: Icon }) => {
               const active = isExact(to);
@@ -574,13 +616,13 @@ function ShellInner() {
                   key={to}
                   to={to}
                   className={`relative flex flex-1 flex-col items-center justify-center gap-0.5 py-2 transition-colors ${
-                    active ? 'text-blue-600' : 'text-slate-400 hover:text-slate-600'
+                    active ? 'text-primary' : 'text-muted-foreground hover:text-foreground'
                   }`}
                 >
                   <Icon size={18} />
                   {showInboxBadge && (
                     <span
-                      className="absolute top-1 right-[calc(50%-18px)] flex size-4 items-center justify-center rounded-full bg-blue-600 text-white"
+                      className="absolute top-1 right-[calc(50%-18px)] flex size-4 items-center justify-center rounded-full bg-primary text-primary-foreground"
                       style={{ fontSize: 8 }}
                       data-testid="mobile-inbox-badge"
                     >

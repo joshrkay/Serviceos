@@ -24,7 +24,14 @@ import {
   runSupervisorAnnotationSweep,
   type SupervisorAnnotationSweepDeps,
 } from '../../src/workers/supervisor-review-worker';
-import { hasSupervisorAnnotation } from '../../src/proposals/supervisor/marker';
+import {
+  annotationAttemptCount,
+  hasSupervisorAnnotation,
+  MAX_ANNOTATION_ATTEMPTS,
+} from '../../src/proposals/supervisor/marker';
+// The REAL provider-side predicate, so this suite pins the worker against the
+// same precondition OpenAI enforces rather than a restated copy of it.
+import { messagesMentionJson } from '../../src/ai/providers/openai-compatible';
 import { SUPERVISOR_DISABLED_FLAG } from '../../src/proposals/supervisor/hook';
 
 const TENANT_A = '11111111-1111-1111-1111-111111111111';
@@ -133,7 +140,8 @@ describe('runSupervisorAnnotationSweep', () => {
     expect(req.tenantId).toBe(TENANT_A);
     expect(req.responseFormat).toBe('json');
     // PII discipline: the prompt carries the summary, not the raw payload.
-    expect(req.messages[0].content).toContain('Issue invoice for $1,250.00');
+    const userMessage = req.messages.find((m) => m.role === 'user');
+    expect(userMessage!.content).toContain('Issue invoice for $1,250.00');
   });
 
   it('skips proposals that already carry an annotation (no second gateway call)', async () => {
@@ -156,6 +164,34 @@ describe('runSupervisorAnnotationSweep', () => {
     const result = await runSupervisorAnnotationSweep(deps);
     expect(result.annotated).toBe(0);
     expect(deps.complete).not.toHaveBeenCalled();
+  });
+
+  it('P3: bounds the working set in the DB via findByStatusSince (now - 24h), not a full scan', async () => {
+    const repo = new InMemoryProposalRepository();
+    await seedReadyProposal(repo, TENANT_A, { createdAt: new Date(NOW.getTime() - 60_000) });
+    const sinceCalls: Array<{ status: string; since: Date }> = [];
+    let fullScans = 0;
+    const deps = makeDeps(repo, {
+      proposalRepo: {
+        findByStatus: async (tid, status) => {
+          fullScans += 1;
+          return repo.findByStatus(tid, status);
+        },
+        findByStatusSince: async (tid, status, since, limit) => {
+          sinceCalls.push({ status, since });
+          return repo.findByStatusSince(tid, status, since, limit);
+        },
+        findById: (tid, id) => repo.findById(tid, id),
+        update: (tid, id, u) => repo.update(tid, id, u),
+      },
+    });
+
+    await runSupervisorAnnotationSweep(deps);
+
+    expect(fullScans).toBe(0); // never the unbounded findByStatus path
+    expect(sinceCalls).toHaveLength(1);
+    expect(sinceCalls[0].status).toBe('ready_for_review');
+    expect(sinceCalls[0].since.getTime()).toBe(NOW.getTime() - 24 * 60 * 60 * 1000);
   });
 
   it('LLM failure skips silently — proposal intact, sweep continues to siblings', async () => {
@@ -334,6 +370,169 @@ describe('annotateProposal — narrow merge (concurrent-edit safety)', () => {
     const stored = await repo.findById(TENANT_A, proposal.id);
     expect(hasSupervisorAnnotation(stored!.payload)).toBe(false);
     expect(stored!.status).toBe('approved');
+  });
+});
+
+describe('annotateProposal — JSON-mode provider precondition', () => {
+  /**
+   * REGRESSION. The annotator shipped with `responseFormat: 'json'` (which the
+   * OpenAI-compatible adapters translate to
+   * `response_format: { type: 'json_object' }`) and messages consisting of one
+   * prose line plus a `JSON.stringify`'d fact object. Neither is guaranteed to
+   * contain the literal substring "json", so OpenAI rejected EVERY call with
+   *
+   *   'messages' must contain the word 'json' in some form, to use
+   *   'response_format' of type 'json_object'
+   *
+   * before generating a single token. The advisory catch swallowed the 400, so
+   * the sweep re-issued it every 60s for 24h and drained the AI quota.
+   */
+  it('sends messages that satisfy the word-"json" precondition', async () => {
+    const repo = new InMemoryProposalRepository();
+    await seedReadyProposal(repo, TENANT_A);
+    const deps = makeDeps(repo);
+
+    await runSupervisorAnnotationSweep(deps);
+
+    const req = deps.complete.mock.calls[0][0] as LLMRequest;
+    expect(req.responseFormat).toBe('json'); // structured output NOT dropped
+    expect(messagesMentionJson(req.messages)).toBe(true);
+  });
+
+  it('asks for the shape parseAnnotationResponse accepts, in a system message', async () => {
+    const repo = new InMemoryProposalRepository();
+    await seedReadyProposal(repo, TENANT_A);
+    const deps = makeDeps(repo);
+
+    await runSupervisorAnnotationSweep(deps);
+
+    const req = deps.complete.mock.calls[0][0] as LLMRequest;
+    const system = req.messages.find((m) => m.role === 'system');
+    expect(system).toBeDefined();
+    // The instruction names JSON explicitly AND both required fields, so the
+    // precondition holds even if the per-proposal facts change shape.
+    expect(system!.content.toLowerCase()).toContain('json');
+    expect(system!.content).toContain('riskSummary');
+    expect(system!.content).toContain('flags');
+  });
+
+  /**
+   * The precondition must survive a proposal whose own facts contain no
+   * "json"-ish text at all — the original bug was precisely that the payload
+   * was the only thing carrying content.
+   */
+  it('holds for a proposal whose summary contains no "json" text', async () => {
+    const repo = new InMemoryProposalRepository();
+    await seedReadyProposal(repo, TENANT_A, {
+      summary: 'Replace kitchen faucet, parts and labour',
+      payload: { totalCents: 42_000 },
+    });
+    const deps = makeDeps(repo);
+
+    await runSupervisorAnnotationSweep(deps);
+
+    const req = deps.complete.mock.calls[0][0] as LLMRequest;
+    expect(messagesMentionJson(req.messages)).toBe(true);
+  });
+});
+
+describe('annotation attempt budget — retry-storm brake', () => {
+  /**
+   * Independent of the prompt bug: ANY persistently failing proposal used to be
+   * retried once per 60s sweep for the whole 24h window with no backoff and no
+   * failure marker. The attempt counter caps that at MAX_ANNOTATION_ATTEMPTS
+   * gateway calls, without ever touching proposal status.
+   */
+  it('stops retrying a proposal that keeps failing, after MAX_ANNOTATION_ATTEMPTS', async () => {
+    const repo = new InMemoryProposalRepository();
+    const proposal = await seedReadyProposal(repo, TENANT_A);
+    const complete = vi
+      .fn<[LLMRequest], Promise<LLMResponse>>()
+      .mockRejectedValue(new Error("'messages' must contain the word 'json' in some form"));
+    const deps = makeDeps(repo, { gateway: { complete } });
+
+    // Many more sweeps than the budget — as the 60s interval would deliver.
+    for (let i = 0; i < 10; i++) {
+      const result = await runSupervisorAnnotationSweep(deps);
+      expect(result.annotated).toBe(0);
+    }
+
+    expect(complete).toHaveBeenCalledTimes(MAX_ANNOTATION_ATTEMPTS);
+
+    const stored = await repo.findById(TENANT_A, proposal.id);
+    expect(annotationAttemptCount(stored!.payload)).toBe(MAX_ANNOTATION_ATTEMPTS);
+    // Contract: `_meta` only — status untouched, no annotation invented.
+    expect(stored!.status).toBe('ready_for_review');
+    expect(hasSupervisorAnnotation(stored!.payload)).toBe(false);
+  });
+
+  it('counts unparseable model output against the budget too', async () => {
+    const repo = new InMemoryProposalRepository();
+    const proposal = await seedReadyProposal(repo, TENANT_A);
+    const complete = vi.fn(async () => okResponse('not json at all'));
+    const deps = makeDeps(repo, { gateway: { complete } });
+
+    for (let i = 0; i < 6; i++) await runSupervisorAnnotationSweep(deps);
+
+    expect(complete).toHaveBeenCalledTimes(MAX_ANNOTATION_ATTEMPTS);
+    const stored = await repo.findById(TENANT_A, proposal.id);
+    expect(stored!.status).toBe('ready_for_review');
+  });
+
+  it('a transient failure inside the budget still gets annotated on a later sweep', async () => {
+    const repo = new InMemoryProposalRepository();
+    const proposal = await seedReadyProposal(repo, TENANT_A);
+    const complete = vi
+      .fn<[LLMRequest], Promise<LLMResponse>>()
+      .mockRejectedValueOnce(new Error('provider down'))
+      .mockResolvedValue(okResponse(GOOD_JSON));
+    const deps = makeDeps(repo, { gateway: { complete } });
+
+    const first = await runSupervisorAnnotationSweep(deps);
+    expect(first.annotated).toBe(0);
+    const second = await runSupervisorAnnotationSweep(deps);
+    expect(second.annotated).toBe(1);
+
+    const stored = await repo.findById(TENANT_A, proposal.id);
+    expect(hasSupervisorAnnotation(stored!.payload)).toBe(true);
+  });
+
+  it('a benign skip (status left ready_for_review) does NOT burn the budget', async () => {
+    const repo = new InMemoryProposalRepository();
+    const proposal = await seedReadyProposal(repo, TENANT_A);
+    const complete = vi.fn(async (_req: LLMRequest) => {
+      await repo.update(TENANT_A, proposal.id, { status: 'approved' });
+      return okResponse(GOOD_JSON);
+    });
+    const deps = makeDeps(repo, { gateway: { complete } });
+
+    const result = await runSupervisorAnnotationSweep(deps);
+    expect(result.skipped).toBe(1);
+
+    const stored = await repo.findById(TENANT_A, proposal.id);
+    expect(annotationAttemptCount(stored!.payload)).toBe(0);
+  });
+
+  it('the attempt marker is a narrow _meta merge — concurrent payload edits survive', async () => {
+    const repo = new InMemoryProposalRepository();
+    const proposal = await seedReadyProposal(repo, TENANT_A, {
+      payload: { totalCents: 125_000, notes: 'original note' },
+    });
+    const complete = vi.fn(async (_req: LLMRequest) => {
+      await repo.update(TENANT_A, proposal.id, {
+        payload: { totalCents: 200_000, notes: 'edited by dispatcher' },
+      });
+      throw new Error('provider down');
+    });
+    const deps = makeDeps(repo, { gateway: { complete } });
+
+    await runSupervisorAnnotationSweep(deps);
+
+    const stored = await repo.findById(TENANT_A, proposal.id);
+    const payload = stored!.payload as Record<string, unknown>;
+    expect(payload.totalCents).toBe(200_000);
+    expect(payload.notes).toBe('edited by dispatcher');
+    expect(annotationAttemptCount(payload)).toBe(1);
   });
 });
 

@@ -15,11 +15,14 @@ import {
   CLASSIFIER_CONFIDENCE_THRESHOLD,
   parseClassifierJson,
   isLookupIntent,
+  isInventoryLoggingPhrasing,
+  INTENT_TAXONOMY_VERSION,
 } from '../../../src/ai/orchestration/intent-classifier';
 import { LLMGateway, LLMResponse } from '../../../src/ai/gateway/gateway';
 import { formatVerticalForCallerPrompt } from '../../../src/verticals/context-assembly';
 import { createHvacPack } from '../../../src/verticals/packs/hvac';
 import { createPlumbingPack } from '../../../src/verticals/packs/plumbing';
+import { TAU_INT } from '../../../src/ai/agents/customer-calling/transitions';
 
 function mockGateway(jsonContent: string): LLMGateway {
   const gateway = {
@@ -241,6 +244,34 @@ describe('intent-classifier — classifyIntent', () => {
     );
     await classifyIntent('create an invoice', { tenantId: 'tenant-xyz' }, gateway);
     const call = (gateway.complete as ReturnType<typeof vi.fn>).mock.calls[0][0];
+    expect(call.metadata).toEqual({ tenantId: 'tenant-xyz' });
+  });
+
+  it('uses the dedicated voice-safe classifier deadline instead of the lightweight tier deadline', async () => {
+    const gateway = mockGateway(
+      JSON.stringify({ intentType: 'create_invoice', confidence: 0.9 })
+    );
+
+    await classifyIntent('create an invoice', { tenantId: 'tenant-xyz' }, gateway);
+
+    const call = (gateway.complete as ReturnType<typeof vi.fn>).mock.calls[0][0];
+    expect(call.deadlineMs).toBe(4_000);
+  });
+
+  // P0 scaling bug regression: the resilience wrappers (ProviderTenantQuotaWrapper /
+  // CachingGatewayWrapper) read request.tenantId at the TOP LEVEL of the LLMRequest,
+  // not metadata.tenantId. Nesting it only in metadata collapsed every tenant's
+  // classify_intent calls onto the shared "system" quota bucket (concurrency 8 for
+  // the whole platform) and, if the gateway cache is ever enabled, onto a shared
+  // cache key (cross-tenant leak of classification + extracted entities).
+  it('passes tenantId as a TOP-LEVEL field on the LLMRequest (not only in metadata)', async () => {
+    const gateway = mockGateway(
+      JSON.stringify({ intentType: 'create_invoice', confidence: 0.9 })
+    );
+    await classifyIntent('create an invoice', { tenantId: 'tenant-xyz' }, gateway);
+    const call = (gateway.complete as ReturnType<typeof vi.fn>).mock.calls[0][0];
+    expect(call.tenantId).toBe('tenant-xyz');
+    // Still present in metadata for any downstream reader that expects it there.
     expect(call.metadata).toEqual({ tenantId: 'tenant-xyz' });
   });
 
@@ -570,6 +601,130 @@ describe('intent-classifier — classifyIntent', () => {
   });
 });
 
+describe('U2 — deterministic owner operator commands', () => {
+  const tenantId = 'tenant-1';
+  const sinkResponse = JSON.stringify({ intentType: 'unknown', confidence: 0.9 });
+  const cases: Array<{
+    transcript: string;
+    intentType: IntentType;
+    entities: Record<string, unknown>;
+  }> = [
+    {
+      transcript: 'New customer Maria Alvarez, phone 480-555-0102',
+      intentType: 'create_customer',
+      entities: { displayName: 'Maria Alvarez', phone: '480-555-0102' },
+    },
+    {
+      transcript: 'Add customer James Patel, email james@patel.co',
+      intentType: 'create_customer',
+      entities: { displayName: 'James Patel', email: 'james@patel.co' },
+    },
+    {
+      transcript: "Update Alvarez's phone number to 480-555-0199",
+      intentType: 'update_customer',
+      entities: { customerName: 'Alvarez', updatedPhone: '480-555-0199' },
+    },
+    {
+      transcript: "Fix Mrs Lee's address to 88 Palm Court",
+      intentType: 'update_customer',
+      entities: { customerName: 'Mrs Lee', updatedAddress: '88 Palm Court' },
+    },
+    {
+      transcript: 'Look up the Khan account',
+      intentType: 'lookup_customer',
+      entities: { customerName: 'Khan' },
+    },
+    {
+      transcript: 'Convert the Greenfield lead to a customer',
+      intentType: 'convert_lead',
+      entities: { leadReference: 'Greenfield' },
+    },
+    {
+      transcript: 'Open a job for Alvarez, no AC',
+      intentType: 'create_job',
+      entities: { customerName: 'Alvarez', jobTitle: 'no AC' },
+    },
+    {
+      transcript: 'Add a trip fee to invoice INV-0042',
+      intentType: 'update_invoice',
+      entities: {
+        jobReference: 'INV-0042',
+        lineItemDescriptions: ['trip fee'],
+      },
+    },
+    {
+      transcript: 'Quote Khan for a three-ton condenser replacement',
+      intentType: 'draft_estimate',
+      entities: {
+        customerName: 'Khan',
+        jobReference: 'three-ton condenser replacement',
+      },
+    },
+    {
+      transcript: "Line item ninety dollar contactor on Smith's bill",
+      intentType: 'update_invoice',
+      entities: {
+        customerName: 'Smith',
+        lineItemDescriptions: ['ninety dollar contactor'],
+      },
+    },
+    {
+      transcript: 'SMS Smith the invoice link',
+      intentType: 'send_invoice',
+      entities: { customerName: 'Smith' },
+    },
+  ];
+
+  for (const testCase of cases) {
+    it(`short-circuits "${testCase.transcript}" with downstream references`, async () => {
+      const gateway = mockGateway(sinkResponse);
+
+      const result = await classifyIntent(
+        testCase.transcript,
+        { tenantId, ownerSession: true },
+        gateway,
+      );
+
+      expect(result.intentType).toBe(testCase.intentType);
+      expect(result.confidence).toBeGreaterThan(TAU_INT);
+      expect(result.extractedEntities).toMatchObject(testCase.entities);
+      expect(gateway.complete).not.toHaveBeenCalled();
+    });
+  }
+
+  it.each([
+    ['appointment setup', 'Set up an account for my appointment tomorrow at 2pm', 'create_appointment'],
+    ['generic add', 'Add Jordan', 'unknown'],
+    ['invoice creation', 'Create an invoice for Alvarez', 'create_invoice'],
+  ])('does not capture owner input for %s', async (_label, transcript, modelIntent) => {
+    const gateway = mockGateway(
+      JSON.stringify({ intentType: modelIntent, confidence: 0.9 }),
+    );
+
+    const result = await classifyIntent(
+      transcript,
+      { tenantId, ownerSession: true },
+      gateway,
+    );
+
+    expect(result.intentType).toBe(modelIntent);
+    expect(gateway.complete).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not capture the operator job command outside an owner session', async () => {
+    const gateway = mockGateway(sinkResponse);
+
+    const result = await classifyIntent(
+      'Open a job for Alvarez, no AC',
+      { tenantId, ownerSession: false },
+      gateway,
+    );
+
+    expect(result.intentType).toBe('unknown');
+    expect(gateway.complete).toHaveBeenCalledTimes(1);
+  });
+});
+
 // ─── RV-071 — owner approval intents ─────────────────────────────────────────
 
 import { OWNER_APPROVAL_PROMPT_SECTION, isVoiceApprovalIntent, isVoiceEditIntent } from '../../../src/ai/orchestration/intent-classifier';
@@ -820,10 +975,23 @@ describe('Phase-2 Track A — extended operator intents', () => {
     expect(matchExtendedIntentPhrase('what does my day look like')).toBe('lookup_day_overview');
     expect(matchExtendedIntentPhrase("how's my day looking?")).toBe('lookup_day_overview');
     expect(matchExtendedIntentPhrase('Give me my morning overview')).toBe('lookup_day_overview');
+    expect(matchExtendedIntentPhrase('What appointments are scheduled today?')).toBe('lookup_day_overview');
+    expect(matchExtendedIntentPhrase("Show me today's schedule")).toBe('lookup_day_overview');
     // Ordinary commands never collapse into a lookup.
     expect(matchExtendedIntentPhrase('Create an invoice for Acme for 450 dollars')).toBeNull();
     expect(matchExtendedIntentPhrase('Schedule my day off next Tuesday')).toBeNull();
     expect(matchExtendedIntentPhrase('')).toBeNull();
+  });
+
+  it('owner schedule questions bypass feature-flag and provider drift', async () => {
+    const gateway = mockGateway('{"intentType":"unknown","confidence":0.2}');
+    const result = await classifyIntent(
+      'What appointments are scheduled today?',
+      { ownerSession: true },
+      gateway,
+    );
+    expect(result.intentType).toBe('lookup_day_overview');
+    expect(result.confidence).toBeGreaterThanOrEqual(0.9);
   });
 
   it('extendedIntents: deterministic phrase short-circuits WITHOUT an LLM call', async () => {
@@ -921,5 +1089,296 @@ describe('intent-classifier — lookup_job_profit (P22-005)', () => {
       expect(result.intentType).toBe('lookup_job_profit');
       expect(result.confidence).toBeGreaterThanOrEqual(CLASSIFIER_CONFIDENCE_THRESHOLD);
     }
+  });
+});
+
+describe('Story 3.4 — versioned intent taxonomy', () => {
+  const tenantId = 'tenant-1';
+
+  it('exposes a semver-shaped taxonomy version', () => {
+    expect(INTENT_TAXONOMY_VERSION).toMatch(/^\d+\.\d+\.\d+$/);
+  });
+
+  it('stamps the taxonomy version on a successful classification', async () => {
+    const gateway = mockGateway(
+      JSON.stringify({ intentType: 'create_invoice', confidence: 0.92 }),
+    );
+    const result = await classifyIntent('invoice Acme for $200', { tenantId }, gateway);
+    expect(result.intentType).toBe('create_invoice');
+    expect(result.taxonomyVersion).toBe(INTENT_TAXONOMY_VERSION);
+  });
+
+  it('stamps the version on the empty-transcript short-circuit (no gateway call)', async () => {
+    const gateway = mockGateway('{}');
+    const result = await classifyIntent('   ', { tenantId }, gateway);
+    expect(result.intentType).toBe('unknown');
+    expect(result.taxonomyVersion).toBe(INTENT_TAXONOMY_VERSION);
+    expect((gateway.complete as ReturnType<typeof vi.fn>)).not.toHaveBeenCalled();
+  });
+
+  it('stamps the version on the low-confidence → unknown path', async () => {
+    const gateway = mockGateway(
+      JSON.stringify({ intentType: 'create_invoice', confidence: 0.2 }),
+    );
+    const result = await classifyIntent('mumble mumble', { tenantId }, gateway);
+    expect(result.intentType).toBe('unknown');
+    expect(result.unknownReason).toBe('low_confidence');
+    expect(result.taxonomyVersion).toBe(INTENT_TAXONOMY_VERSION);
+  });
+});
+
+describe('Story 3.4 — "log inventory" maps to expense logging', () => {
+  const tenantId = 'tenant-1';
+
+  it('recognizes inventory-LOGGING phrasings but not stock QUERIES', () => {
+    expect(isInventoryLoggingPhrasing('log inventory: 20 feet of copper pipe')).toBe(true);
+    expect(isInventoryLoggingPhrasing('record stock intake from the supply run')).toBe(true);
+    expect(isInventoryLoggingPhrasing('received new stock today')).toBe(true);
+    expect(isInventoryLoggingPhrasing('add this to inventory')).toBe(true);
+    // Queries must NOT be treated as logging.
+    expect(isInventoryLoggingPhrasing('how much stock is left')).toBe(false);
+    expect(isInventoryLoggingPhrasing('check inventory for the Smith job')).toBe(false);
+    expect(isInventoryLoggingPhrasing("what's in stock")).toBe(false);
+    expect(isInventoryLoggingPhrasing('create an invoice for Acme')).toBe(false);
+  });
+
+  it('maps an inventory-logging utterance to log_expense even when the LLM punts', async () => {
+    const gateway = mockGateway(JSON.stringify({ intentType: 'unknown', confidence: 0.4 }));
+    const result = await classifyIntent('log inventory: 20 feet of copper pipe', { tenantId }, gateway);
+    expect(result.intentType).toBe('log_expense');
+    expect(result.confidence).toBeGreaterThanOrEqual(CLASSIFIER_CONFIDENCE_THRESHOLD);
+    expect(result.extractedEntities?.expenseCategory).toBe('materials');
+    expect(result.taxonomyVersion).toBe(INTENT_TAXONOMY_VERSION);
+  });
+
+  it('preserves an LLM-extracted amount and existing category when mapping', async () => {
+    const gateway = mockGateway(
+      JSON.stringify({
+        intentType: 'add_note',
+        confidence: 0.7,
+        extractedEntities: { amount: 5500, expenseCategory: 'tools' },
+      }),
+    );
+    const result = await classifyIntent('record stock intake — a new drill, 55 dollars', { tenantId }, gateway);
+    expect(result.intentType).toBe('log_expense');
+    expect(result.extractedEntities?.amount).toBe(5500);
+    // Pre-existing category is respected, not overwritten with 'materials'.
+    expect(result.extractedEntities?.expenseCategory).toBe('tools');
+  });
+
+  it('does not override a stock QUERY', async () => {
+    const gateway = mockGateway(JSON.stringify({ intentType: 'lookup_catalog', confidence: 0.9 }));
+    const result = await classifyIntent('how much copper stock is left', { tenantId }, gateway);
+    expect(result.intentType).toBe('lookup_catalog');
+  });
+
+  it('leaves a genuine log_expense classification untouched', async () => {
+    const gateway = mockGateway(
+      JSON.stringify({ intentType: 'log_expense', confidence: 0.95, extractedEntities: { amount: 4000 } }),
+    );
+    const result = await classifyIntent('add a 40 dollar fuel expense', { tenantId }, gateway);
+    expect(result.intentType).toBe('log_expense');
+    // Not remapped through the inventory override (which stamps an inventory reason).
+    expect(result.reasoning ?? '').not.toMatch(/inventory/i);
+    expect(result.extractedEntities?.amount).toBe(4000);
+  });
+});
+
+// ─── Taxonomy 1.2.0 (agent wave, Track A) ──────────────────────────────────
+//
+// The three new proposal-driving intents parse with their flat entity fields
+// (scheduleDescription / reviewReference / instructionText / scopeIntentHint)
+// and the version stamp reflects the coordinated bump.
+describe('taxonomy 1.2.0 — new intents + entities', () => {
+  // B7 (feat: voice-transcript-and-agent-paths) bumped the taxonomy again to
+  // 1.3.0 (update_job); B5.5 (Part F decision F-3) bumped it again to 1.4.0
+  // (en_route); B1.18 bumped it again to 1.5.0 (update_brand_voice).
+  // classifyIntent always stamps the CURRENT constant regardless of which
+  // intent, so this pin tracks the live value.
+  it('taxonomy version reflects the latest coordinated bump (1.5.0)', () => {
+    expect(INTENT_TAXONOMY_VERSION).toBe('1.5.0');
+  });
+
+  it('parses create_invoice_schedule with the verbatim milestone sentence', () => {
+    const result = parseClassifierJson(
+      JSON.stringify({
+        intentType: 'create_invoice_schedule',
+        confidence: 0.9,
+        extractedEntities: {
+          jobReference: 'the Hendersons',
+          scheduleDescription: '50% deposit, 50% on completion',
+          amount: 400000,
+        },
+      }),
+    );
+    expect(result?.intentType).toBe('create_invoice_schedule');
+    expect(result?.extractedEntities?.scheduleDescription).toBe('50% deposit, 50% on completion');
+    expect(result?.extractedEntities?.jobReference).toBe('the Hendersons');
+    expect(result?.extractedEntities?.amount).toBe(400000);
+  });
+
+  it('parses respond_to_review with the free-text review reference', () => {
+    const result = parseClassifierJson(
+      JSON.stringify({
+        intentType: 'respond_to_review',
+        confidence: 0.9,
+        extractedEntities: { reviewReference: 'the 1-star from yesterday' },
+      }),
+    );
+    expect(result?.intentType).toBe('respond_to_review');
+    expect(result?.extractedEntities?.reviewReference).toBe('the 1-star from yesterday');
+  });
+
+  it('parses create_standing_instruction with instructionText + scopeIntentHint', () => {
+    const result = parseClassifierJson(
+      JSON.stringify({
+        intentType: 'create_standing_instruction',
+        confidence: 0.95,
+        extractedEntities: {
+          instructionText: 'from now on always add a $79 diagnostic fee to AC calls',
+          scopeIntentHint: 'invoices',
+          amount: 7900,
+        },
+      }),
+    );
+    expect(result?.intentType).toBe('create_standing_instruction');
+    expect(result?.extractedEntities?.instructionText).toBe(
+      'from now on always add a $79 diagnostic fee to AC calls',
+    );
+    expect(result?.extractedEntities?.scopeIntentHint).toBe('invoices');
+  });
+
+  it('non-string values for the new fields are dropped (flat strings only)', () => {
+    const result = parseClassifierJson(
+      JSON.stringify({
+        intentType: 'create_invoice_schedule',
+        confidence: 0.9,
+        extractedEntities: {
+          scheduleDescription: { milestones: [] }, // nested object → dropped
+          reviewReference: 42,
+          instructionText: null,
+        },
+      }),
+    );
+    expect(result?.extractedEntities?.scheduleDescription).toBeUndefined();
+    expect(result?.extractedEntities?.reviewReference).toBeUndefined();
+    expect(result?.extractedEntities?.instructionText).toBeUndefined();
+  });
+
+  it('classifyIntent stamps the current taxonomy version on a new-intent classification end-to-end', async () => {
+    const gateway = mockGateway(
+      JSON.stringify({
+        intentType: 'respond_to_review',
+        confidence: 0.9,
+        extractedEntities: { reviewReference: 'that bad review' },
+      }),
+    );
+    const result = await classifyIntent('Respond to that bad review', { tenantId: 't-1' }, gateway);
+    expect(result.intentType).toBe('respond_to_review');
+    expect(result.taxonomyVersion).toBe(INTENT_TAXONOMY_VERSION);
+  });
+
+  // B1.18 — update_brand_voice (taxonomy 1.5.0).
+  it('parses update_brand_voice with the verbatim brandVoiceInstruction', () => {
+    const result = parseClassifierJson(
+      JSON.stringify({
+        intentType: 'update_brand_voice',
+        confidence: 0.91,
+        extractedEntities: {
+          brandVoiceInstruction:
+            "friendly, plain-spoken, no slang, always sign off 'Thanks — Bob's HVAC'",
+        },
+      }),
+    );
+    expect(result?.intentType).toBe('update_brand_voice');
+    expect(result?.extractedEntities?.brandVoiceInstruction).toBe(
+      "friendly, plain-spoken, no slang, always sign off 'Thanks — Bob's HVAC'",
+    );
+  });
+
+  it('a nested-object brandVoiceInstruction is dropped (flat string only)', () => {
+    const result = parseClassifierJson(
+      JSON.stringify({
+        intentType: 'update_brand_voice',
+        confidence: 0.9,
+        extractedEntities: { brandVoiceInstruction: { register: 'friendly' } },
+      }),
+    );
+    expect(result?.extractedEntities?.brandVoiceInstruction).toBeUndefined();
+  });
+
+  it('classifyIntent end-to-end for update_brand_voice stamps the current taxonomy version', async () => {
+    const gateway = mockGateway(
+      JSON.stringify({
+        intentType: 'update_brand_voice',
+        confidence: 0.91,
+        extractedEntities: { brandVoiceInstruction: 'friendly, always sign off Thanks Bob' },
+      }),
+    );
+    const result = await classifyIntent(
+      "Set my brand voice: friendly, always sign off 'Thanks — Bob's HVAC'",
+      { tenantId: 't-1' },
+      gateway,
+    );
+    expect(result.intentType).toBe('update_brand_voice');
+    expect(result.taxonomyVersion).toBe(INTENT_TAXONOMY_VERSION);
+    expect(result.extractedEntities?.brandVoiceInstruction).toBe(
+      'friendly, always sign off Thanks Bob',
+    );
+  });
+});
+
+// ─── Part A — ai_run_id threading (classify → classification) ─────────────────
+
+describe('intent-classifier — ai_run_id surfacing', () => {
+  function mockGatewayWithAiRun(jsonContent: string, aiRunId?: string): LLMGateway {
+    return {
+      complete: vi.fn(async () => ({
+        content: jsonContent,
+        model: 'mock-model',
+        provider: 'mock',
+        tokenUsage: { input: 100, output: 50, total: 150 },
+        latencyMs: 42,
+        ...(aiRunId ? { aiRunId } : {}),
+      } satisfies LLMResponse)),
+    } as unknown as LLMGateway;
+  }
+
+  it("surfaces the gateway's persisted ai_runs id onto the classification", async () => {
+    const AI_RUN_ID = '22222222-2222-4222-8222-222222222222';
+    const gateway = mockGatewayWithAiRun(
+      JSON.stringify({
+        intentType: 'create_invoice',
+        confidence: 0.95,
+        extractedEntities: { customerName: 'Acme' },
+      }),
+      AI_RUN_ID,
+    );
+    const result = await classifyIntent('Create an invoice for Acme', { tenantId: 't-1' }, gateway);
+    expect(result.intentType).toBe('create_invoice');
+    expect(result.aiRunId).toBe(AI_RUN_ID);
+  });
+
+  it('omits aiRunId when the gateway response carries none (null fallback)', async () => {
+    const gateway = mockGatewayWithAiRun(
+      JSON.stringify({ intentType: 'create_invoice', confidence: 0.95 }),
+    );
+    const result = await classifyIntent('Create an invoice for Acme', { tenantId: 't-1' }, gateway);
+    expect(result.aiRunId).toBeUndefined();
+  });
+
+  it('passes the tenantId to the gateway so the ai_runs row persists under the real tenant', async () => {
+    const gateway = mockGatewayWithAiRun(
+      JSON.stringify({ intentType: 'create_invoice', confidence: 0.95 }),
+      '33333333-3333-4333-8333-333333333333',
+    );
+    await classifyIntent('Create an invoice for Acme', { tenantId: 'tenant-real' }, gateway);
+    const call = (gateway.complete as ReturnType<typeof vi.fn>).mock.calls[0]![0] as {
+      tenantId?: string;
+    };
+    // Top-level tenantId is what LLMGateway reads to scope the ai_runs row;
+    // without it the run persists under the 'system' fallback and fails the
+    // tenants FK on Postgres (aiRunId would come back undefined → null link).
+    expect(call.tenantId).toBe('tenant-real');
   });
 });

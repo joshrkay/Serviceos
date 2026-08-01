@@ -124,9 +124,16 @@ export class PerTenantTwilioDeliveryProvider implements MessageDeliveryProvider 
         },
       );
     } catch (err) {
-      throw new DeliveryError('PROVIDER_FAILED', 'SMS provider timed out', {
-        providerBody: err instanceof Error ? err.message : String(err),
-      });
+      if (err instanceof DeliveryError) throw err;
+      const message = err instanceof Error ? err.message : String(err);
+      const aborted =
+        err instanceof Error && (err.name === 'TimeoutError' || err.name === 'AbortError');
+      // Non-abort throws keep their original message (see the base provider).
+      throw new DeliveryError(
+        'PROVIDER_FAILED',
+        aborted ? 'SMS provider timed out' : `SMS provider failed: ${message}`,
+        { providerBody: message },
+      );
     }
 
     if (!response.ok) {

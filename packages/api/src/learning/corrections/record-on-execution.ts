@@ -14,17 +14,21 @@
  * thing is failure-soft at the call site — a lesson-record error must never
  * break execution.
  *
- * Note: proposal line items don't carry a catalog SKU binding, so
- * `part_price_changed` lessons can't be grounded here (skuPriceCents stays
- * empty); the labor-rate and banned-phrase lessons are what this surfaces.
- * scope_reclassified is intentionally off (no template-weight store yet → no
- * resolveTemplate passed).
+ * Note: catalog-bound line items DO carry a SKU binding now (P22 added
+ * `catalogItemId` + `pricingSource` to the line-item schema; the AI resolver
+ * and the owner one-tap `resolveLine` both populate it). We project that
+ * binding into the extractor's line view and pre-load the current tenant SKU
+ * price from the catalog, so `part_price_changed` lessons fire with real
+ * target identity — the labor-rate, banned-phrase, AND part-price lessons are
+ * all surfaced. scope_reclassified is intentionally off (no template-weight
+ * store yet → no resolveTemplate passed).
  */
 import type { LineItem } from '../../shared/billing-engine';
 import { computeInvoiceDeltas } from '../../ai/evaluation/invoice-edit-delta';
 import type { ProposalRepository } from '../../proposals/proposal';
 import type { ProposalExecutionRepository } from '../../proposals/proposal-execution';
 import type { SettingsRepository } from '../../settings/settings';
+import type { CatalogItemRepository } from '../../catalog/catalog-item';
 import type { AuditRepository } from '../../audit/audit';
 import {
   extractCorrectionLessons,
@@ -33,6 +37,7 @@ import {
 } from './correction-extractor';
 import { recordCorrectionLessons } from './apply-undo';
 import { localDateFor, type CorrectionLesson, type CorrectionLessonRepository } from './correction-lesson';
+import { detectCorrectionRepetition } from './correction-repetition';
 import type { ConfigPorts } from './lesson-applicator';
 
 const DEFAULT_TIMEZONE = 'America/New_York';
@@ -47,6 +52,13 @@ export interface RecordOnExecutionDeps {
   proposalExecutionRepo: ProposalExecutionRepository;
   settingsRepo: SettingsRepository;
   lessonRepo: CorrectionLessonRepository;
+  /**
+   * Reads the current tenant SKU price so a `part_price_changed` lesson's
+   * `beforeCents` is grounded in the catalog (not guessed). Required now that
+   * catalog-bound line items carry `catalogItemId` — without it a material
+   * price edit produces no lesson.
+   */
+  catalogRepo: CatalogItemRepository;
   ports: ConfigPorts;
   auditRepo: AuditRepository;
 }
@@ -115,19 +127,48 @@ export async function recordCorrectionLessonsOnExecution(
   if (deltas.length === 0) return [];
 
   const settings = await deps.settingsRepo.findByTenant(tenantId);
+
+  // Pre-load the current catalog price for every SKU bound to an executed
+  // line, keyed by catalogItemId. This is the `beforeCents` the extractor
+  // diffs the edited price against — a material line whose catalog-bound price
+  // was changed produces a `part_price_changed` lesson only when we can ground
+  // its prior price here. Read BEFORE recordCorrectionLessons cascades, so the
+  // snapshot reflects the pre-correction catalog.
+  const boundCatalogItemIds = Array.from(
+    new Set(
+      executedItems
+        .map((li) => (li as unknown as Record<string, unknown>).catalogItemId)
+        .filter((v): v is string => typeof v === 'string' && v.length > 0),
+    ),
+  );
+  const skuPriceCents: Record<string, number> = {};
+  for (const catalogItemId of boundCatalogItemIds) {
+    const item = await deps.catalogRepo.findById(tenantId, catalogItemId);
+    if (item) skuPriceCents[catalogItemId] = item.unitPriceCents;
+  }
+
   const config: ExtractorConfigSnapshot = {
     laborRateCents: settings?.laborRateCentsPerHour ?? null,
-    // Line items don't carry catalogItemId, so part-price lessons stay dormant.
-    skuPriceCents: {},
+    skuPriceCents,
     bannedPhrases: settings?.brandVoice?.banned_phrases ?? [],
     templateWeights: {},
   };
 
-  const lineItems: ExtractorLineItem[] = executedItems.map((li) => ({
-    id: li.id,
-    ...(li.category ? { category: li.category } : {}),
-    ...(li.description ? { description: li.description } : {}),
-  }));
+  // Project the SKU binding (catalogItemId / sku) into the extractor's line
+  // view so a catalog-bound material price edit resolves to `part_price_changed`
+  // with target identity. billing-engine's LineItem type doesn't declare these
+  // fields (they ride on the persisted payload), so read them via a raw cast —
+  // the same projection build-correction-drafts.ts does.
+  const lineItems: ExtractorLineItem[] = executedItems.map((li) => {
+    const rec = li as unknown as Record<string, unknown>;
+    return {
+      id: li.id,
+      ...(li.category ? { category: li.category } : {}),
+      ...(typeof rec.catalogItemId === 'string' ? { catalogItemId: rec.catalogItemId } : {}),
+      ...(typeof rec.sku === 'string' ? { sku: rec.sku } : {}),
+      ...(li.description ? { description: li.description } : {}),
+    };
+  });
 
   const drafts = extractCorrectionLessons({ deltas, lineItems, config });
   if (drafts.length === 0) return [];
@@ -135,7 +176,7 @@ export async function recordCorrectionLessonsOnExecution(
   const tz = settings?.timezone || DEFAULT_TIMEZONE;
   const localDate = localDateFor(execution.executedAt, tz);
 
-  return recordCorrectionLessons(
+  const recorded = await recordCorrectionLessons(
     {
       tenantId,
       sourceProposalId: proposalId,
@@ -145,4 +186,21 @@ export async function recordCorrectionLessonsOnExecution(
     },
     { repository: deps.lessonRepo, ports: deps.ports, auditRepo: deps.auditRepo },
   );
+
+  // WS20 — after persisting the fresh lessons, check whether the owner has now
+  // corrected the same target enough times that the AI should PROPOSE the
+  // durable fix itself (a reviewed update_catalog_item / create_standing_
+  // instruction). Never throws; a detection failure must not lose the recorded
+  // lessons this function returns.
+  await detectCorrectionRepetition(
+    { tenantId, recordedLessons: recorded },
+    {
+      lessonRepo: deps.lessonRepo,
+      proposalRepo: deps.proposalRepo,
+      catalogRepo: deps.catalogRepo,
+      auditRepo: deps.auditRepo,
+    },
+  );
+
+  return recorded;
 }

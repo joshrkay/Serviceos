@@ -337,21 +337,28 @@ export class PgAccountingIntegrationRepository
   }
 
   async findAllActive(): Promise<AccountingIntegration[]> {
-    const client = await this.pool.connect();
-    try {
-      await client.query("SELECT set_config('app.system_lookup', 'true', true)");
-      const result = await client.query(
-        `SELECT * FROM accounting_integrations WHERE status = 'active'`,
-      );
-      return result.rows.map((row) => mapIntegration(row as Record<string, unknown>));
-    } finally {
+    // System-level cross-tenant read: relies on the app.system_lookup escape-hatch
+    // RLS policy (migration 172). The GUC MUST be set with SET LOCAL
+    // (set_config is_local=true) inside the SAME explicit transaction as the
+    // SELECT: a set_config(..., true) issued OUTSIDE a BEGIN applies only to the
+    // implicit transaction of that one statement and is discarded before the next
+    // query — so under an RLS-enforcing role (RLS_RUNTIME_ROLE=true) the policy
+    // would evaluate false and this would silently return ZERO integrations,
+    // breaking accounting sync. Mirrors integrations/twilio/phone-number-repository.ts.
+    return this.withClient(async (client) => {
+      await client.query('BEGIN');
       try {
-        await client.query("RESET app.system_lookup");
-      } catch {
-        // ignore — connection release handles broken clients
+        await client.query("SELECT set_config('app.system_lookup', 'true', true)");
+        const result = await client.query(
+          `SELECT * FROM accounting_integrations WHERE status = 'active'`,
+        );
+        await client.query('COMMIT');
+        return result.rows.map((row) => mapIntegration(row as Record<string, unknown>));
+      } catch (err) {
+        await client.query('ROLLBACK');
+        throw err;
       }
-      client.release();
-    }
+    });
   }
 
   async updateLastSyncedAt(tenantId: string, id: string, at: Date): Promise<void> {

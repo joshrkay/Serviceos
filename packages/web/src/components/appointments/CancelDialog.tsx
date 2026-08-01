@@ -33,8 +33,11 @@ export function CancelDialog({ appointmentId, onSaved, onCancel }: CancelDialogP
         const res = await apiFetch(`/api/appointments/${appointmentId}`, {
           method: 'PUT',
           body: JSON.stringify({
-            status: 'cancelled',
-            cancelReason: reason.trim(),
+            // API canonical status is 'canceled' (single L) — 'cancelled'
+            // 400'd every submit. cancelReason isn't an updatable field;
+            // persist the reason via the supported `notes` field instead.
+            status: 'canceled',
+            notes: reason.trim(),
           }),
         });
         if (!res.ok) {

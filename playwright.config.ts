@@ -32,11 +32,44 @@ const webServerEnv: NodeJS.ProcessEnv = {
   VITE_CLERK_PUBLISHABLE_KEY:
     process.env.VITE_CLERK_PUBLISHABLE_KEY ?? process.env.E2E_CLERK_PUBLISHABLE_KEY,
 };
+
+// Hermetic webhook secret for the always-on browser Journey-1
+// (e2e/journeys/signup-to-first-estimate.hermetic.spec.ts). A base64 `whsec_`
+// TEST value — NOT a real Clerk secret — so the spec's signed `user.created`
+// webhook verifies against the in-process API on every PR runner. The spec
+// reads the same constant (E2E_CLERK_WEBHOOK_SECRET, same default).
+const E2E_CLERK_WEBHOOK_SECRET =
+  process.env.E2E_CLERK_WEBHOOK_SECRET ??
+  'whsec_dGVzdC1zaWdudXAtY3JpdGljYWwtcGF0aA==';
+
+// The API webServer runs in DEV_AUTH_BYPASS mode (NODE_ENV=dev) so the hermetic
+// journey's browser session — an UNSIGNED JWT minted by the Clerk stub — is
+// accepted and resolved to the webhook-bootstrapped tenant
+// (packages/api/src/auth/dev-auth-bypass.ts). NODE_ENV/DEV_AUTH_BYPASS are set
+// firmly (not `?? inherited`) because dev-auth-bypass fails CLOSED — an
+// inherited NODE_ENV=test would silently disable it and the always-on journey
+// would go red. This is confined to the API process and invisible to every
+// other e2e spec: the offline money-loop / no-401 specs mock all `/api/*` at
+// the browser via page.route, so the real API's auth mode never runs for them.
+// It is also additive to any real-Clerk path — verifyClerkSession runs FIRST,
+// and the bypass no-ops (`if (req.auth) return next()`) for genuinely
+// authenticated requests, so it never weakens a real session's assertions.
+// CLERK_WEBHOOK_SECRET enables the real /webhooks/clerk route (overridable so a
+// real Clerk dev instance's secret still wins).
+const apiWebServerEnv: NodeJS.ProcessEnv = {
+  ...webServerEnv,
+  NODE_ENV: 'dev',
+  DEV_AUTH_BYPASS: 'true',
+  CLERK_WEBHOOK_SECRET: process.env.CLERK_WEBHOOK_SECRET ?? E2E_CLERK_WEBHOOK_SECRET,
+};
 const includeQaMatrix = process.env.QA_MATRIX === '1';
 // Lever 3 of the QA strategy — see qa/reports/2026-05-11/coverage-sweep-runbook.md.
 // Opt-in to avoid running it on every PR; it visits every authenticated route
 // and requires a real running stack (or E2E_BASE_URL pointing at one).
 const includeCoverageSweep = process.env.COVERAGE_SWEEP === '1';
+// UI flow capture — screenshots every screen for docs/ui-flows. Opt-in via
+// UI_FLOW=1 (set by `npm run ui-flow:capture`) so the default e2e run skips it.
+const includeUiFlow = !!process.env.UI_FLOW;
 
 export default defineConfig({
   testDir: './e2e',
@@ -71,7 +104,7 @@ export default defineConfig({
       // Exclude both the qa-matrix specs (their own project) and the
       // coverage-sweep spec (opt-in via the dedicated project below) so
       // the default `npm run e2e` does not run them.
-      testIgnore: ['**/qa-matrix/**', '**/coverage-sweep.spec.ts'],
+      testIgnore: ['**/qa-matrix/**', '**/coverage-sweep.spec.ts', '**/ui-flow-capture*.spec.ts'],
       use: {
         ...devices['Desktop Chrome'],
         // Same escape hatch the qa-matrix project has: runners whose
@@ -163,6 +196,19 @@ export default defineConfig({
           },
         ]
       : []),
+    ...(includeUiFlow
+      ? [
+          {
+            // UI flow capture — screenshots every screen into docs/ui-flows.
+            // Opt-in via UI_FLOW=1 (`npm run ui-flow:capture`).
+            name: 'ui-flow',
+            testDir: './e2e',
+            testMatch: ['ui-flow-capture.spec.ts', 'ui-flow-capture-mobile.spec.ts'],
+            testIgnore: [],
+            use: { ...devices['Desktop Chrome'] },
+          },
+        ]
+      : []),
   ],
 
   // globalTeardown is the mirror of globalSetup — handles both the ephemeral
@@ -180,7 +226,7 @@ export default defineConfig({
           timeout: 120_000,
           stdout: 'pipe',
           stderr: 'pipe',
-          env: webServerEnv,
+          env: apiWebServerEnv,
         },
         {
           command: 'cd packages/web && npm run dev',

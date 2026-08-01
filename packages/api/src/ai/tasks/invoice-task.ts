@@ -2,24 +2,25 @@ import { TaskHandler, TaskContext, TaskResult } from './task-handlers';
 import { createProposal, CreateProposalInput } from '../../proposals/proposal';
 import { LLMGateway } from '../gateway/gateway';
 import { assessConfidence, getConfidenceLevel } from '../guardrails/confidence';
+import { assertValidProposalPayload } from '../../proposals/contracts';
 import type { ProposalConfidenceMeta } from '../../proposals/contracts';
 import type { CatalogItem, CatalogItemRepository } from '../../catalog/catalog-item';
 import {
-  applyCatalogPricing,
   CatalogPricingOutcome,
+  groundLineItemPricing,
   lineItemConfidenceSignals,
-  resolveLineItems,
   UNCATALOGUED_CONFIDENCE_CAP,
 } from '../resolution/catalog-resolver';
 import { buildCatalogPromptSection } from './catalog-resolution';
+import {
+  buildStandingInstructionsSection,
+  intersectAppliedStandingInstructions,
+} from '../standing-instructions-context';
 
 const INVOICE_SYSTEM_PROMPT = `You are an invoice generation assistant for a field service company.
 Given the job context, customer information, and completed work details, generate a structured invoice.
 Return valid JSON with the following shape:
 {
-  "customerId": "<uuid>",
-  "jobId": "<uuid>",
-  "estimateId": "<uuid, optional>",
   "lineItems": [
     { "description": "<string>", "quantity": <number>, "unitPrice": <number>, "category": "<string, optional>" }
   ],
@@ -29,7 +30,10 @@ Return valid JSON with the following shape:
   "internalNotes": "<string, optional>",
   "confidence_score": <number between 0 and 1>
 }
-Always include at least one line item. Ensure customerId and jobId are present.`;
+Always include at least one line item.
+Never output a "customerId", "jobId", or "estimateId" field. The customer, job
+and estimate are attached by the system from verified tenant records — any id
+you write would be invented and is discarded.`;
 
 function tryParseInvoiceJson(content: string): Record<string, unknown> | null {
   try {
@@ -43,15 +47,115 @@ function tryParseInvoiceJson(content: string): Record<string, unknown> | null {
   }
 }
 
+/**
+ * Confidence ceiling for a payload that failed the contract gate. Well below
+ * every auto-approve threshold (0.90 supervisor / 0.92 both / 0.95 tech) and
+ * below the 0.85 uncatalogued cap, matching estimate-task.ts's
+ * CLARIFICATION_REVIEW_CONFIDENCE_CAP.
+ */
+const CONTRACT_VIOLATION_CONFIDENCE_CAP = 0.5;
+
+/**
+ * Zod's `z.string().uuid()` regex, mirrored so a value this module accepts is
+ * one `draftInvoicePayloadSchema` also accepts. Deliberately NOT a "does it
+ * look like an id" heuristic — see `authorCustomerId`.
+ */
+const UUID_PATTERN =
+  /^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000)$/;
+
+function asUuid(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  const trimmed = value.trim();
+  return UUID_PATTERN.test(trimmed) ? trimmed : undefined;
+}
+
+/**
+ * QA-2026-07-28 — the VERIFIED customer for this draft, or undefined.
+ *
+ * `context.customerId` is the resolved caller identity (caller-ID match) and
+ * `existingEntities.customerId` is what voice-action-router's
+ * `annotateResolvedEntities` resolved the spoken name to against tenant-scoped
+ * records. Both are verified; the model's `parsed.customerId` is NOT and is
+ * never consulted. Same shape as estimate-task.ts (commit 7fd370e4).
+ */
+function authorCustomerId(context: TaskContext): string | undefined {
+  const entities = context.existingEntities as Record<string, unknown> | undefined;
+  return asUuid(context.customerId) ?? asUuid(entities?.customerId);
+}
+
+/**
+ * QA-2026-07-28 — the VERIFIED job / estimate for this draft, or undefined.
+ *
+ * `TaskContext` has no top-level jobId; voice-action-router places the
+ * resolver's `jobId`/`estimateId` (and, on the mobile job-detail path, the
+ * route-verified jobId) onto `existingEntities`. The model's values are never
+ * consulted — the invoice prompt used to hand it a `"jobId": "<uuid>"`
+ * template too, and a fabricated jobId is WORSE than a fabricated customerId:
+ * CreateInvoiceExecutionHandler writes it straight onto the invoice as the job
+ * container and skips the auto-open-a-job path entirely.
+ */
+function authorResolvedId(
+  context: TaskContext,
+  key: 'jobId' | 'estimateId',
+): string | undefined {
+  const entities = context.existingEntities as Record<string, unknown> | undefined;
+  return asUuid(entities?.[key]);
+}
+
+/**
+ * The spoken customer name to carry when nothing resolved, so the draft
+ * records WHO was asked for without fabricating an id.
+ */
+function customerReferenceFrom(context: TaskContext): string | undefined {
+  const entities = context.existingEntities as Record<string, unknown> | undefined;
+  const raw = entities?.customerName ?? entities?.customerReference;
+  if (typeof raw !== 'string') return undefined;
+  const trimmed = raw.trim();
+  return trimmed.length > 0 ? trimmed.slice(0, 200) : undefined;
+}
+
+/**
+ * Pull the Zod paths off a `ValidationError` thrown by
+ * `assertValidProposalPayload` (it stores them as `details.errors`, each
+ * formatted `"<path>: <message>"`). Falls back to the error message so a
+ * future error shape still leaves a breadcrumb on the proposal.
+ */
+function contractErrorsFrom(err: unknown): string[] {
+  const details = (err as { details?: { errors?: unknown } } | undefined)?.details;
+  const errors = details?.errors;
+  if (Array.isArray(errors)) {
+    return errors.filter((e): e is string => typeof e === 'string');
+  }
+  return [err instanceof Error ? err.message : String(err)];
+}
+
+/**
+ * Map contract errors onto operator-facing `missingFields` entries: the
+ * leading path segment of each Zod issue. Object-level issues carry an EMPTY
+ * path, so they map to 'customerId' — the gap the operator has to fill on
+ * this contract.
+ */
+function contractGapFields(errors: string[]): string[] {
+  const fields = new Set<string>();
+  for (const error of errors) {
+    const path = error.split(':')[0]?.trim() ?? '';
+    const head = path.split(/[.[]/)[0];
+    fields.add(head.length > 0 ? head : 'customerId');
+  }
+  return [...fields];
+}
+
 function buildPartialInvoicePayload(parsed: Record<string, unknown> | null): Record<string, unknown> {
   if (!parsed) {
     return { lineItems: [], notes: 'AI output could not be parsed' };
   }
 
   const payload: Record<string, unknown> = {};
-  if (typeof parsed.customerId === 'string') payload.customerId = parsed.customerId;
-  if (typeof parsed.jobId === 'string') payload.jobId = parsed.jobId;
-  if (typeof parsed.estimateId === 'string') payload.estimateId = parsed.estimateId;
+  // NOTE: `parsed.customerId`, `parsed.jobId` and `parsed.estimateId` are
+  // deliberately NOT copied. The model has no access to tenant records, so
+  // anything it writes there is invented (live: "unknown", "<uuid>", and the
+  // RFC 4122 example uuid). The resolver's verified ids are attached in
+  // `handle()` instead.
   if (Array.isArray(parsed.lineItems)) {
     payload.lineItems = parsed.lineItems;
   } else {
@@ -110,17 +214,67 @@ export class InvoiceTaskHandler implements TaskHandler {
     const catalogItems = await this.fetchCatalog(context.tenantId);
     const userMessage = this.buildUserMessage(context, catalogItems);
 
+    // UB-A3 — owner standing instructions ride a SEPARATE, delimited system
+    // message (mirroring the classifier's vertical-context injection) so the
+    // base prompt stays byte-identical when none apply. Content-only: the
+    // section itself forbids approval/confidence/schema/pricing overrides.
+    const systemMessages: Array<{ role: 'system'; content: string }> = [
+      { role: 'system', content: INVOICE_SYSTEM_PROMPT },
+    ];
+    const injectedInstructions = context.standingInstructions ?? [];
+    if (injectedInstructions.length > 0) {
+      systemMessages.push({
+        role: 'system',
+        content: buildStandingInstructionsSection(injectedInstructions, {
+          requestAppliedIds: true,
+        }),
+      });
+    }
+
     const llmResponse = await this.gateway.complete({
       taskType: 'draft_invoice',
-      messages: [
-        { role: 'system', content: INVOICE_SYSTEM_PROMPT },
-        { role: 'user', content: userMessage },
-      ],
+      // Top-level tenantId so the gateway keys this tenant's concurrency
+      // quota / cache bucket correctly (never the shared SYSTEM_TENANT_ID).
+      tenantId: context.tenantId,
+      messages: [...systemMessages, { role: 'user', content: userMessage }],
       responseFormat: 'json',
     });
 
     const parsed = tryParseInvoiceJson(llmResponse.content);
     const payload = buildPartialInvoicePayload(parsed);
+
+    // QA-2026-07-28 — author every entity id from the RESOLVER, never the
+    // model. Mirrors estimate-task.ts (commit 7fd370e4); this path matters
+    // more because `draftInvoicePayloadSchema.customerId` was REQUIRED, so the
+    // model was forced to produce something, and an invoice is a money
+    // proposal. With no resolved customer the draft carries the spoken
+    // reference instead of a fabricated id, and `missingFields: ['customerId']`
+    // forces 'draft' (decideInitialStatus) so an unattributed invoice can never
+    // auto-approve.
+    const missingFields: string[] = [];
+    const resolvedCustomerId = authorCustomerId(context);
+    if (resolvedCustomerId) {
+      payload.customerId = resolvedCustomerId;
+    } else {
+      const reference = customerReferenceFrom(context);
+      if (reference) payload.customerReference = reference;
+      missingFields.push('customerId');
+    }
+    // jobId / estimateId are OPTIONAL on the contract and deliberately NOT
+    // gated into missingFields when unresolved: B6 designed
+    // CreateInvoiceExecutionHandler to auto-open a job for the resolved
+    // customer when the payload has none ("invoice the Smith account"), so
+    // requiring one here would force every job-reference-free invoice to
+    // 'draft' — a behavior regression unrelated to this bug. What must not
+    // happen is an INVENTED one riding through, because a present jobId
+    // bypasses the auto-open path and is written straight onto the invoice.
+    // Absence is safe and recoverable; fabrication is neither. The id is
+    // existence-checked again at execution.
+    const resolvedJobId = authorResolvedId(context, 'jobId');
+    if (resolvedJobId) payload.jobId = resolvedJobId;
+    const resolvedEstimateId = authorResolvedId(context, 'estimateId');
+    if (resolvedEstimateId) payload.estimateId = resolvedEstimateId;
+
     // QA-2026-06-05: normalize line items to the execution contract — the
     // LLM emits `unitPrice` (cents per the system prompt) while the executor
     // reads `unitPriceCents`; the mismatch produced NaN money casts in live
@@ -129,6 +283,17 @@ export class InvoiceTaskHandler implements TaskHandler {
     // when no catalog price rescued them. Entity-id trust is enforced at
     // the entry points that accept free text (the assistant route) —
     // pipeline callers feed verified context ids.
+    //
+    // B7.5 — this whitelist used to omit `unit` entirely, so a voice-drafted
+    // INVOICE line lost its unit of measure before catalog grounding ever ran
+    // (draft_estimate's equivalent step, estimate-task.ts, forwards the raw
+    // parsed line item unchanged and never had this gap). Passed through
+    // here as an untyped string — `groundLineItemPricing` below still stamps
+    // the catalog's own unit on a matched line and drops one that fails
+    // `catalogUnitSchema` on an ungrounded line (dropOutOfVocabularyUnit),
+    // and `normalizeDraftLineItems` (execution/handlers.ts) re-validates
+    // against the enum again before the row is ever written — so nothing
+    // downstream trusts this raw value on its own.
     if (Array.isArray(payload.lineItems)) {
       payload.lineItems = (payload.lineItems as Array<Record<string, unknown>>).map((li, idx) => {
         const qty = Number(li.quantity ?? 1) || 1;
@@ -151,6 +316,7 @@ export class InvoiceTaskHandler implements TaskHandler {
           ...(unitPriceCents !== undefined
             ? { unitPriceCents, totalCents: Math.round(unitPriceCents * qty) }
             : {}),
+          ...(typeof li.unit === 'string' ? { unit: li.unit } : {}),
           sortOrder: idx,
           taxable: typeof li.taxable === 'boolean' ? li.taxable : false,
         };
@@ -165,22 +331,17 @@ export class InvoiceTaskHandler implements TaskHandler {
     // (which the proposal gate still reviews).
     let catalogOutcome: CatalogPricingOutcome | undefined;
     const lineItems = payload.lineItems as Array<Record<string, unknown>>;
-    if (this.catalogRepo && Array.isArray(lineItems) && lineItems.length > 0) {
-      try {
-        const items = (await this.catalogRepo.listByTenant(context.tenantId)).filter(
-          (i) => i.archivedAt === null,
-        );
-        if (items.length > 0) {
-          const resolutions = resolveLineItems(
-            lineItems.map((li) => String(li.description ?? '')),
-            items,
-          );
-          catalogOutcome = applyCatalogPricing(lineItems, resolutions, 'unitPriceCents');
-          payload.lineItems = catalogOutcome.lineItems;
-        }
-      } catch {
-        catalogOutcome = undefined;
-      }
+    if (Array.isArray(lineItems) && lineItems.length > 0) {
+      // Always resolve to an outcome — even with no catalog wired, an empty
+      // catalog, or a read error, every LLM price is treated as uncatalogued
+      // so the confidence cap below still fires (previously an undefined
+      // outcome silently skipped the cap for new/empty-catalog tenants).
+      catalogOutcome = await groundLineItemPricing(
+        lineItems,
+        'unitPriceCents',
+        this.catalogRepo ? () => this.catalogRepo!.listByTenant(context.tenantId) : null,
+      );
+      payload.lineItems = catalogOutcome.lineItems;
     }
 
     // Drop lines still lacking a valid price (LLM emitted garbage and the
@@ -215,14 +376,57 @@ export class InvoiceTaskHandler implements TaskHandler {
         : [],
       'unitPriceCents',
     );
+    // UB-A3 — applied-instruction marker: the model's claimed ids are
+    // INTERSECTED with what was injected (never trust invented ids) and the
+    // field is dropped entirely when empty.
+    const appliedStandingInstructions = intersectAppliedStandingInstructions(
+      parsed?.appliedStandingInstructions,
+      injectedInstructions,
+    );
     const meta: ProposalConfidenceMeta = {
-      overallConfidence: getConfidenceLevel(confidenceScore),
+      // Hard-block auto-approval for any ungrounded (LLM-priced) line via the
+      // RV-007 confidence-marker guard — independent of the numeric score AND
+      // of any tenant `auto_approve_threshold` override (a threshold ≤ the 0.85
+      // uncatalogued cap would otherwise still auto-approve an AI-invented
+      // price). An uncatalogued price must always reach a human.
+      // Deliberately `anyUncatalogued`, NOT `requiresReview`: ambiguous lines
+      // are gated by `missingFields`, which one-tap resolution CLEARS — a
+      // persisted 'low' stamp would keep blocking chain-set/SMS approval
+      // after the ambiguity is resolved.
+      overallConfidence: catalogOutcome?.anyUncatalogued
+        ? 'low'
+        : getConfidenceLevel(confidenceScore),
       ...(Object.keys(signals.fieldConfidence).length > 0
         ? { fieldConfidence: signals.fieldConfidence }
         : {}),
       ...(signals.markers.length > 0 ? { markers: signals.markers } : {}),
+      ...(appliedStandingInstructions.length > 0 ? { appliedStandingInstructions } : {}),
     };
     payload._meta = meta;
+
+    // P2-002 — the MANDATORY payload contract gate (proposals/contracts.ts
+    // documents `assertValidProposalPayload` as required before every
+    // `createProposal` on an AI-authored path; this handler did not call it).
+    //
+    // Enforced as a hard block on APPROVAL rather than as an exception: this
+    // handler runs on the live voice path, where a model response that doesn't
+    // satisfy the contract must still surface a reviewable draft (the 'AI
+    // output could not be parsed' path above) instead of throwing the turn
+    // away. A rejected payload is stamped into `missingFields` — which
+    // `decideInitialStatus` turns into a forced 'draft' — and capped below
+    // every auto-approve threshold, so it can never auto-approve, and
+    // CreateInvoiceExecutionHandler refuses it again at execution.
+    let payloadContractErrors: string[] | undefined;
+    try {
+      assertValidProposalPayload(this.taskType, payload);
+    } catch (err) {
+      payloadContractErrors = contractErrorsFrom(err);
+      for (const field of contractGapFields(payloadContractErrors)) {
+        if (!missingFields.includes(field)) missingFields.push(field);
+      }
+      confidenceScore = Math.min(confidenceScore, CONTRACT_VIOLATION_CONFIDENCE_CAP);
+      confidenceFactors.push('payload_contract_violation');
+    }
 
     const sourceContext: Record<string, unknown> = {
       ...(context.conversationId ? { conversationId: context.conversationId } : {}),
@@ -232,6 +436,7 @@ export class InvoiceTaskHandler implements TaskHandler {
       ...(catalogOutcome?.catalogResolution
         ? { catalogResolution: catalogOutcome.catalogResolution }
         : {}),
+      ...(payloadContractErrors ? { payloadContractErrors } : {}),
     };
 
     const input: CreateProposalInput = {
@@ -244,9 +449,11 @@ export class InvoiceTaskHandler implements TaskHandler {
       sourceContext: Object.keys(sourceContext).length > 0 ? sourceContext : undefined,
       createdBy: context.userId,
       // Ambiguous catalog matches require the operator to pick the item —
-      // forces 'draft' regardless of trust tier / confidence.
-      ...(catalogOutcome && catalogOutcome.missingFields.length > 0
-        ? { missingFields: catalogOutcome.missingFields }
+      // forces 'draft' regardless of trust tier / confidence. QA-2026-07-28
+      // adds the unresolved-customer / contract-violation gates to the same
+      // list, so an invoice with no verified customer lands there too.
+      ...(missingFields.length > 0 || (catalogOutcome && catalogOutcome.missingFields.length > 0)
+        ? { missingFields: [...(catalogOutcome?.missingFields ?? []), ...missingFields] }
         : {}),
       // D3: draft_invoice is capture-class — drafting moves no money.
       // Sending an invoice is a separate proposal (and would be

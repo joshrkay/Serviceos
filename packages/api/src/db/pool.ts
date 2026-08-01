@@ -40,3 +40,33 @@ export function createPool(): Pool {
 
   return pool;
 }
+
+/**
+ * Direct (session-mode) pool for Postgres state that is UNSAFE under PgBouncer
+ * transaction-mode pooling, because it relies on a stable backend across
+ * statements: SESSION advisory locks (leader election in `app.ts` `runAsLeader`,
+ * and `PgIdempotencyLockProvider`) and `LISTEN`/`NOTIFY` (`integrations/credentials.ts`).
+ *
+ * `DATABASE_DIRECT_URL` is a DSN that connects straight to Postgres, bypassing
+ * PgBouncer. Returns `null` when it is unset — the caller then reuses the main
+ * pool, which is correct for dev / any deployment without PgBouncer (identical
+ * behavior to before this split). In production `DATABASE_URL` points at
+ * PgBouncer (transaction mode) and `DATABASE_DIRECT_URL` at Postgres directly.
+ */
+export function createDirectPool(): Pool | null {
+  const url = process.env.DATABASE_DIRECT_URL;
+  if (!url) return null;
+
+  const pool = new Pool({
+    connectionString: url,
+    ssl: process.env.DB_SSL === 'false' ? false : { rejectUnauthorized: false },
+    // Small — only the session-lock holders and the LISTEN client use it.
+    max: parseInt(process.env.DB_DIRECT_MAX_CONNECTIONS || '10', 10),
+    idleTimeoutMillis: 30000,
+    connectionTimeoutMillis: 5000,
+  });
+  pool.on('error', (err) => {
+    process.stderr.write(`pg direct pool background error: ${err.message}\n`);
+  });
+  return pool;
+}

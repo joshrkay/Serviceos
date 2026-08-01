@@ -11,6 +11,7 @@ import {
   PaymentMethod,
   recordPayment,
   PaymentReceiptNotifier,
+  PaymentLinkCleanupDeps,
 } from '../../invoices/payment';
 import { InvoiceRepository } from '../../invoices/invoice';
 import { RefreshJobMoneyStateDeps } from '../../jobs/job-money-state';
@@ -55,7 +56,19 @@ function isUuid(value: unknown): value is string {
 export class AddNoteExecutionHandler implements ExecutionHandler {
   proposalType: ProposalType = 'add_note';
 
-  constructor(private readonly noteRepo?: NoteRepository) {}
+  constructor(
+    private readonly noteRepo: NoteRepository | undefined,
+    // WS3 — auditRepo is structurally REQUIRED: a persisted note must always
+    // emit its note.created audit event (createNote forwards it). Non-optional
+    // so a call site cannot wire this handler without an audit sink.
+    private readonly auditRepo: AuditRepository,
+  ) {}
+
+  // WS3 — degrades to nothing without the note repo; boot fails when a pool is
+  // configured but this is false.
+  isFullyWired(): boolean {
+    return Boolean(this.noteRepo);
+  }
 
   async execute(proposal: Proposal, context: ExecutionContext): Promise<ExecutionResult> {
     const { payload } = proposal;
@@ -84,10 +97,9 @@ export class AddNoteExecutionHandler implements ExecutionHandler {
     }
 
     if (!this.noteRepo) {
-      // Dev/test wiring without a repo — return a synthetic id so
-      // legacy callers that haven't injected the repo still work.
-      // Production wires the real repo in app.ts.
-      return { success: true, resultEntityId: uuidv4() };
+      // WS3 — no synthetic success: a missing repo is a wiring fault, never a
+      // silent no-op that reports success while persisting nothing.
+      return { success: false, error: 'handler_not_wired:noteRepo' };
     }
 
     try {
@@ -103,7 +115,10 @@ export class AddNoteExecutionHandler implements ExecutionHandler {
           // the notes UI groups by.
           authorRole: 'voice',
         },
-        this.noteRepo
+        this.noteRepo,
+        // WS3 — emit the note.created audit event (joins the ambient tenant
+        // transaction established by the executor / request middleware).
+        this.auditRepo,
       );
       return { success: true, resultEntityId: note.id };
     } catch (err) {
@@ -137,6 +152,12 @@ const VOICE_PAYMENT_METHOD_MAP: Record<string, PaymentMethod> = {
 
 export class RecordPaymentExecutionHandler implements ExecutionHandler {
   proposalType: ProposalType = 'record_payment';
+  // recordPayment() awaits paymentReceiptNotifier.notifyPaymentReceived (customer
+  // SMS/email receipt via the delivery provider) and an owner push — external
+  // network I/O. Its DB writes are already crash-safe outside a shared executor
+  // tx (atomic invoice credit + ledger reconciliation backstop), so run it out
+  // of the executor transaction.
+  performsExternalIo = true;
 
   constructor(
     private readonly paymentRepo?: PaymentRepository,
@@ -144,7 +165,16 @@ export class RecordPaymentExecutionHandler implements ExecutionHandler {
     private readonly moneyStateDeps?: RefreshJobMoneyStateDeps,
     private readonly paymentReceiptNotifier?: PaymentReceiptNotifier,
     private readonly auditRepo?: AuditRepository,
+    /** P0-9 — lets recordPayment kill a link the credit made stale. */
+    private readonly paymentLinkCleanup?: PaymentLinkCleanupDeps,
   ) {}
+
+  // WS3 — degrades to a synthetic-id passthrough (records no payment) without
+  // both the payment repo and the invoice repo. Boot fails when a pool is
+  // configured but this is false.
+  isFullyWired(): boolean {
+    return Boolean(this.paymentRepo) && Boolean(this.invoiceRepo);
+  }
 
   async execute(proposal: Proposal, context: ExecutionContext): Promise<ExecutionResult> {
     const { payload } = proposal;
@@ -186,6 +216,8 @@ export class RecordPaymentExecutionHandler implements ExecutionHandler {
         this.paymentReceiptNotifier,
         this.auditRepo,
         { actorRole: 'system', correlationId: proposal.id },
+        undefined,
+        this.paymentLinkCleanup,
       );
       return { success: true, resultEntityId: payment.id };
     } catch (err) {
@@ -263,6 +295,8 @@ export class NoopEstimateDeliveryProvider implements EstimateDeliveryProvider {
 
 export class SendEstimateExecutionHandler implements ExecutionHandler {
   proposalType: ProposalType = 'send_estimate';
+  // Awaits provider.send() — outbound estimate email/SMS delivery.
+  performsExternalIo = true;
 
   constructor(private readonly provider?: EstimateDeliveryProvider) {}
 
@@ -275,7 +309,15 @@ export class SendEstimateExecutionHandler implements ExecutionHandler {
         error: 'Payload must include a valid estimateId UUID (resolve estimateReference at review time first)',
       };
     }
-    if (payload.channel !== 'email' && payload.channel !== 'sms') {
+    // QA-2026-07-26 (VOX-06): the intent classifier emits `sendChannel`
+    // while this task contract reads `channel` — accept either key here as
+    // belt-and-braces behind the inapp-adapter alias that now translates it
+    // (ai/agents/customer-calling/inapp-adapter.ts), so a payload persisted
+    // by any other producer isn't rejected on a naming mismatch alone. The
+    // validation itself is unchanged: anything that isn't email or sms is
+    // still refused.
+    const channel = payload.channel ?? payload.sendChannel;
+    if (channel !== 'email' && channel !== 'sms') {
       return { success: false, error: 'Payload must specify channel as email or sms' };
     }
 
@@ -287,7 +329,7 @@ export class SendEstimateExecutionHandler implements ExecutionHandler {
     const dispatch: EstimateDispatch = {
       tenantId: context.tenantId,
       estimateId: payload.estimateId,
-      channel: payload.channel,
+      channel,
       recipient: typeof payload.recipient === 'string' ? payload.recipient : undefined,
       customMessage: typeof payload.customMessage === 'string' ? payload.customMessage : undefined,
     };
@@ -306,6 +348,8 @@ export class SendEstimateExecutionHandler implements ExecutionHandler {
 
 export class SendInvoiceExecutionHandler implements ExecutionHandler {
   proposalType: ProposalType = 'send_invoice';
+  // Awaits provider.send() — outbound invoice email/SMS delivery.
+  performsExternalIo = true;
 
   constructor(private readonly provider?: InvoiceDeliveryProvider) {}
 
@@ -318,7 +362,13 @@ export class SendInvoiceExecutionHandler implements ExecutionHandler {
         error: 'Payload must include a valid invoiceId UUID (resolve invoiceReference at review time first)',
       };
     }
-    if (payload.channel !== 'email' && payload.channel !== 'sms') {
+    // QA-2026-07-26 (VOX-06): same sendChannel/channel key mismatch as
+    // SendEstimateExecutionHandler above — latent here only because the
+    // passing QA row uses issue_invoice (no channel gate) rather than
+    // send_invoice. Resolve from either key; the email/sms validation below
+    // is unchanged.
+    const channel = payload.channel ?? payload.sendChannel;
+    if (channel !== 'email' && channel !== 'sms') {
       return { success: false, error: 'Payload must specify channel as email or sms' };
     }
 
@@ -330,7 +380,7 @@ export class SendInvoiceExecutionHandler implements ExecutionHandler {
     const dispatch: InvoiceDispatch = {
       tenantId: context.tenantId,
       invoiceId: payload.invoiceId,
-      channel: payload.channel,
+      channel,
       recipient: typeof payload.recipient === 'string' ? payload.recipient : undefined,
       customMessage: typeof payload.customMessage === 'string' ? payload.customMessage : undefined,
     };

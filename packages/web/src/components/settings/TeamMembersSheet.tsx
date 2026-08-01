@@ -1,11 +1,6 @@
 /**
- * Tier 4 (Team members — PR 1 + PR 2 + PR 3).
- *
- * Closes the "Team members" stub on Settings. PR 1 surfaced the
- * tenant's roster (read-only); PR 2 added inline role editing for
- * owners; PR 3 adds the invite flow with a pending-invitations
- * section that drops off rows as each invitee accepts and the Clerk
- * webhook joins them to the tenant.
+ * Team members — roster, role editing (owners), and invite flow with
+ * pending invitations that clear as Clerk webhooks join invitees.
  */
 import { useEffect, useState } from 'react';
 import { X, Users, Pencil, UserPlus } from 'lucide-react';
@@ -73,7 +68,7 @@ export function TeamMembersSheet({ onClose, canEditRoles }: TeamMembersSheetProp
    * in edit mode for retry.
    */
   const [saveError, setSaveError] = useState<string>('');
-  // Tier 4 (Team members — PR 3) — pending invitations + invite dialog state.
+  // Pending invitations + invite dialog state.
   const [pending, setPending] = useState<PendingInvitation[]>([]);
   const [showInviteDialog, setShowInviteDialog] = useState(false);
   const [inviteEmail, setInviteEmail] = useState('');

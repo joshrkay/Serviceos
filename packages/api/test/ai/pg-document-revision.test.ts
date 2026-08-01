@@ -27,8 +27,18 @@ function makeMockPool(rowsByCallIndex: Array<Record<string, unknown>[] | undefin
   const calls: CapturedCall[] = [];
   let releaseCount = 0;
 
+  // U2b-2: the standalone tenant path is now a SET LOCAL transaction. Skip the
+  // transaction-control framing (BEGIN/COMMIT/ROLLBACK/RESET/SET ROLE) from both
+  // the recorded calls and the row-index, so positional row arrays and the
+  // calls[0]=context / calls[1]=business assertions are unchanged. The context
+  // statement is now `set_config('app.current_tenant_id',$1,true)` (tenant in
+  // params, not the SQL string).
+  const CONTROL = /^\s*(BEGIN|COMMIT|ROLLBACK|RESET\b|SET\s+(LOCAL\s+)?ROLE\b)/i;
   const client: Partial<PoolClient> = {
     query: vi.fn(async (sql: string, params?: unknown[]) => {
+      if (CONTROL.test(typeof sql === 'string' ? sql : '')) {
+        return { rows: [], rowCount: 0, command: '', oid: 0, fields: [] } as unknown as QueryResult;
+      }
       calls.push({ sql, params: params ?? [] });
       const rows = rowsByCallIndex[calls.length - 1] ?? [];
       return {
@@ -105,9 +115,10 @@ describe('P0-021 PgDocumentRevisionRepository.create', () => {
     const repo = new PgDocumentRevisionRepository(pool);
     const result = await repo.create(rev);
 
-    // First call sets tenant context for RLS.
+    // First call sets tenant context for RLS (set_config binds the tenant as a
+    // parameter under the SET LOCAL transaction — no longer in the SQL string).
     expect(calls[0].sql).toContain('app.current_tenant_id');
-    expect(calls[0].sql).toContain(TENANT_A);
+    expect(calls[0].params).toContain(TENANT_A);
 
     // Second call is the INSERT — must be parameterized.
     expect(calls[1].sql).toContain('INSERT INTO document_revisions');

@@ -3,7 +3,7 @@
  * consistency.
  *
  * Drives the in-app voice adapter (and the underlying CallingAgentStateMachine)
- * end-to-end for 10 Spanish-language inbound-CSR fixtures
+ * end-to-end for 12 Spanish-language inbound-CSR fixtures
  * (fixtures/voice/es/booking-fixtures.json), with the tenant opted into Spanish
  * (supported_languages = ['en', 'es']). For each fixture it asserts:
  *
@@ -29,6 +29,7 @@ import { InMemoryProposalRepository } from '../../src/proposals/proposal';
 import { InMemoryAuditRepository } from '../../src/audit/audit';
 import { InMemoryOnCallRepository } from '../../src/oncall/rotation';
 import type { LLMGateway, LLMResponse } from '../../src/ai/gateway/gateway';
+import { guardVoiceProposalContract } from './helpers/voice-proposal-contract';
 
 interface SpanishFixture {
   id: string;
@@ -86,7 +87,49 @@ describe('Voice-parity Feature 6 — Spanish booking rate + language consistency
 
   beforeEach(() => {
     store = new VoiceSessionStore({ startInterval: false });
-    proposalRepo = new InMemoryProposalRepository();
+    proposalRepo = guardVoiceProposalContract(new InMemoryProposalRepository(), {
+      // PRE-EXISTING, DELIBERATELY OUT OF SCOPE for the payload-contract PR
+      // that added this guard. All five reduce to ONE root cause:
+      //
+      //   NO ENTITY RESOLVER IS WIRED IN THIS SUITE.
+      //
+      // `InAppVoiceAdapter.getEntityResolver()` returns an injected resolver
+      // (tests), else a `PgEntityResolver` built from `deps.pool`, else
+      // UNDEFINED — and resolution is then skipped rather than guessed. This
+      // suite wires neither, so the classifier's raw entities reach the shared
+      // payload builder untouched: `customerName` arrives where `customerId`
+      // is required, `dateTimeDescription` where `scheduledStart` is.
+      //
+      // So this is a FIXTURE gap, not proof of a production defect — a
+      // pool-backed deployment does resolve. What it does prove is that the
+      // unresolved case degrades badly: the payload fails its contract with no
+      // `missingFields` gate, i.e. an approve-to-fail card. The honest fix is
+      // for the in-app adapter to gate on its own contract failures the way
+      // the phone path does; that is its own change.
+      //
+      // Not silent either way: the adapter emits a
+      // `voice.payload_contract_failed` audit row for each, and in-app is an
+      // authenticated S2 operator who reads and edits the card before
+      // approving (`approveProposal` re-validates at the execution boundary).
+      knownGaps: [
+        { proposalType: 'draft_estimate', reason: 'customerName never resolved → customerId absent' },
+        { proposalType: 'update_customer', reason: 'customerName never resolved → customerId absent' },
+        {
+          proposalType: 'create_appointment',
+          reason: 'dateTimeDescription never resolved → scheduledStart/scheduledEnd absent',
+        },
+        {
+          proposalType: 'reschedule_appointment',
+          reason:
+            'appointmentReference/newDateTimeDescription never resolved → ' +
+            'appointmentId/newScheduledStart/newScheduledEnd absent',
+        },
+        {
+          proposalType: 'cancel_appointment',
+          reason: 'appointmentReference never resolved → appointmentId absent',
+        },
+      ],
+    });
     auditRepo = new InMemoryAuditRepository();
     onCallRepo = new InMemoryOnCallRepository();
   });
@@ -107,9 +150,9 @@ describe('Voice-parity Feature 6 — Spanish booking rate + language consistency
     });
   }
 
-  it('loads exactly 10 Spanish fixtures across the booking/capture intents', () => {
+  it('loads exactly 12 Spanish fixtures across the booking/capture intents', () => {
     const fixtures = loadFixtures();
-    expect(fixtures.length).toBe(10);
+    expect(fixtures.length).toBe(12);
     // "Across all intents" — at least 5 distinct intent types represented.
     const intents = new Set(fixtures.map((f) => f.intent));
     expect(intents.size).toBeGreaterThanOrEqual(5);
@@ -129,23 +172,35 @@ describe('Voice-parity Feature 6 — Spanish booking rate + language consistency
       const { sessionId } = await adapter.startSession(TENANT, USER);
       const result = await adapter.handleInput(sessionId, fx.callerUtterance);
 
+      // Auto-confirm was removed: a booking intent parks at the intent_confirm
+      // readback, so the caller confirms with a Spanish "sí" on a second turn.
+      // The proposal is only queued after that genuine confirmation.
+      let confirmResult: Awaited<ReturnType<typeof adapter.handleInput>> | undefined;
+      if (result.state === 'intent_confirm') {
+        confirmResult = await adapter.handleInput(sessionId, 'sí');
+      }
+      const finalResult = confirmResult ?? result;
+
       // (1) Auto-detection — the Spanish first utterance pinned the session.
       const session = store.get(sessionId);
       if (session?.language !== 'es') {
         failures.push(`${fx.id}: session.language=${session?.language} (expected es)`);
       }
 
-      // (2) Booking/capture — did the call draft a proposal?
+      // (2) Booking/capture — did the call draft a proposal (post-confirm)?
       if (fx.expectsBooking) {
         bookingEligible++;
-        if (result.proposalIds.length >= 1) booked++;
+        if (finalResult.proposalIds.length >= 1) booked++;
       }
 
-      // (3) Language consistency — the agent's spoken response is Spanish.
-      const spoken = result.ttsText ?? '';
-      for (const tell of ENGLISH_TELLS) {
-        if (spoken.includes(tell)) {
-          failures.push(`${fx.id}: English bleed in agent copy ("${tell}"): ${spoken}`);
+      // (3) Language consistency — the agent's spoken copy on BOTH the
+      // readback and the confirm/close turn must stay Spanish.
+      const spokenTurns = [result.ttsText ?? '', confirmResult?.ttsText ?? ''];
+      for (const spoken of spokenTurns) {
+        for (const tell of ENGLISH_TELLS) {
+          if (spoken.includes(tell)) {
+            failures.push(`${fx.id}: English bleed in agent copy ("${tell}"): ${spoken}`);
+          }
         }
       }
     }

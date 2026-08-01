@@ -25,11 +25,14 @@
  * exercise this function directly with in-memory repos and a fixed clock.
  */
 import { v4 as uuidv4 } from 'uuid';
+import { formatUsdCents } from '@ai-service-os/shared';
 import { Logger } from '../logging/logger';
 import { JobRepository } from '../jobs/job';
 import { EstimateRepository } from '../estimates/estimate';
 import { Invoice, InvoiceRepository } from '../invoices/invoice';
+import { CustomerRepository } from '../customers/customer';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
+import { notifyOwner } from '../notifications/owner-notifications-instance';
 import { refreshJobMoneyStateSafe } from '../jobs/job-money-state';
 import { ProposalRepository, createProposal } from '../proposals/proposal';
 import {
@@ -37,7 +40,9 @@ import {
   DunningConfigRepository,
   DunningEventRepository,
   defaultDunningConfig,
+  isManualReminderStepKey,
   LATE_FEE_ONE_TIME_KEY,
+  PAYMENT_REMINDER_COOLDOWN_MS,
 } from '../invoices/dunning-config';
 import { selectDueReminderSteps } from '../invoices/dunning-schedule';
 import { computeLateFeeCents } from '../invoices/late-fee';
@@ -68,6 +73,61 @@ export interface OverdueInvoiceWorkerDeps {
   proposalRepo?: ProposalRepository;
   dunningEventRepo?: DunningEventRepository;
   dunningConfigRepo?: DunningConfigRepository;
+  /**
+   * U6 owner `invoice_overdue` push. When wired, the owner's devices get a
+   * best-effort push the first time a job crosses INTO `overdue` (the same
+   * transition tick that emits the `invoice.overdue` audit — so the existing
+   * money-state transition guard is the idempotency anchor: a re-sweep reports
+   * `changed:false` and never re-pushes). Used to resolve the customer name;
+   * omit → no owner push (the sweep is otherwise unchanged).
+   */
+  customerRepo?: CustomerRepository;
+}
+
+/** Owner-facing display name (mirrors the transactional-comms customer label). */
+function overdueCustomerName(customer: {
+  firstName?: string;
+  lastName?: string;
+  displayName?: string;
+}): string {
+  return (
+    customer.displayName ||
+    [customer.firstName, customer.lastName].filter(Boolean).join(' ') ||
+    'A customer'
+  );
+}
+
+/**
+ * Fire the owner `invoice_overdue` push for one invoice (best-effort).
+ * amountLabel is formatted from INTEGER CENTS via the shared money formatter.
+ * Never throws — the push must never disturb the sweep. Gated by the caller at
+ * the transition-into-overdue tick, so it inherits that dispatch idempotency.
+ * Exported for focused unit testing.
+ */
+export async function notifyOwnerInvoiceOverdue(
+  tenantId: string,
+  invoice: Invoice,
+  deps: OverdueInvoiceWorkerDeps,
+): Promise<void> {
+  const { jobRepo, customerRepo } = deps;
+  if (!customerRepo) return;
+  try {
+    const job = await jobRepo.findById(tenantId, invoice.jobId);
+    if (!job) return;
+    const customer = await customerRepo.findById(tenantId, job.customerId);
+    if (!customer) return;
+    await notifyOwner(tenantId, 'invoice_overdue', {
+      invoiceId: invoice.id,
+      customerName: overdueCustomerName(customer),
+      amountLabel: formatUsdCents(invoice.amountDueCents),
+    });
+  } catch (err) {
+    deps.logger.warn('Overdue-invoice sweep: owner push failed', {
+      tenantId,
+      invoiceId: invoice.id,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
 }
 
 export async function runOverdueInvoiceSweep(
@@ -152,6 +212,9 @@ export async function runOverdueInvoiceSweep(
               },
             }),
           );
+          // U6 — owner push on the transition INTO overdue. Idempotent by the
+          // same guard as the audit above (a re-sweep reports changed:false).
+          await notifyOwnerInvoiceOverdue(tenantId, invoice, deps);
         }
 
         // §7 Collections cadence — raise owner-approved dunning proposals for
@@ -223,7 +286,29 @@ async function raiseDunningProposals(
     .reduce((sum, e) => sum + (e.amountCents ?? 0), 0);
 
   // 1. Reminder cadence — one comms proposal per newly-due step.
-  const dueSteps = selectDueReminderSteps(config, { dueDate, now, sentStepKeys });
+  //
+  // Layer 2 (deferral) — if a MANUAL reminder went to this invoice within the
+  // manual cooldown, skip raising cadence reminder proposals THIS sweep so the
+  // owner's on-demand send and the autonomous sweep don't stack a duplicate.
+  // This is deferral, not cancellation: no step key is recorded, so any
+  // still-due step is re-offered by selectDueReminderSteps on the next sweep
+  // once the window clears. Late-fee raising below is unaffected.
+  const manualReminderSentAt = priorEvents
+    .filter((e) => e.kind === 'reminder' && isManualReminderStepKey(e.stepKey))
+    .map((e) => e.sentAt.getTime());
+  const manualCooldownActive =
+    manualReminderSentAt.length > 0 &&
+    now.getTime() - Math.max(...manualReminderSentAt) < PAYMENT_REMINDER_COOLDOWN_MS;
+
+  const dueSteps = manualCooldownActive
+    ? []
+    : selectDueReminderSteps(config, { dueDate, now, sentStepKeys });
+  if (manualCooldownActive) {
+    deps.logger.info('Overdue-invoice sweep: deferring cadence reminders (recent manual send)', {
+      tenantId,
+      invoiceId: invoice.id,
+    });
+  }
   for (const { stepKey, step } of dueSteps) {
     // Ledger gate: record the step BEFORE creating the proposal so a
     // concurrent/re-run sweep that loses the UNIQUE race (23505) skips it.

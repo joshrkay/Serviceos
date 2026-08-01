@@ -56,6 +56,104 @@ describe('createInvoicePaymentLink (INV-04)', () => {
     expect(updated?.stripePaymentLinkUrl).toBe(result.url);
   });
 
+  it('passes stripeAccountId to the provider when Connect charges are enabled', async () => {
+    const repo = new InMemoryInvoiceRepository();
+    const invoice = await repo.create({
+      id: '00000000-0000-4000-8000-000000000013',
+      tenantId,
+      jobId,
+      invoiceNumber: 'INV-0004',
+      status: 'open',
+      lineItems: [{ description: 'Labor', quantity: 1, unitPriceCents: 2000, taxable: true }],
+      totals: calculateDocumentTotals([{ description: 'Labor', quantity: 1, unitPriceCents: 2000, taxable: true }]),
+      amountPaidCents: 0,
+      amountDueCents: 2000,
+      createdBy: 'user-1',
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+
+    const seen: Array<{ stripeAccountId?: string }> = [];
+    const provider = {
+      generateLink: async (req: { stripeAccountId?: string }) => {
+        seen.push({ stripeAccountId: req.stripeAccountId });
+        return {
+          linkId: 'plink_1',
+          linkUrl: 'https://pay.mock.com/plink_1',
+          providerReference: 'mock_plink_1',
+        };
+      },
+      deactivateLink: async () => undefined,
+    };
+
+    await createInvoicePaymentLink(tenantId, invoice.id, repo, provider, {
+      resolveTenantConnectAccount: async () => ({
+        accountId: 'acct_op_link',
+        chargesEnabled: true,
+      }),
+    });
+
+    expect(seen[0]?.stripeAccountId).toBe('acct_op_link');
+  });
+
+  // U9 invariant (absent side): the operator link must NOT route to Connect
+  // unless charges are enabled — otherwise a half-onboarded tenant's operator
+  // link would 500 (Connect account can't accept charges) or, worse, a stale
+  // account id would misroute funds. Mirrors the platform-fallback guard the
+  // public invoice link already proves in public-invoice-connect.test.ts.
+  async function seenAccountFor(
+    resolver: Parameters<typeof createInvoicePaymentLink>[4],
+  ): Promise<string | undefined> {
+    const repo = new InMemoryInvoiceRepository();
+    const invoice = await repo.create({
+      id: '00000000-0000-4000-8000-000000000014',
+      tenantId,
+      jobId,
+      invoiceNumber: 'INV-0005',
+      status: 'open',
+      lineItems: [{ description: 'Labor', quantity: 1, unitPriceCents: 3000, taxable: true }],
+      totals: calculateDocumentTotals([{ description: 'Labor', quantity: 1, unitPriceCents: 3000, taxable: true }]),
+      amountPaidCents: 0,
+      amountDueCents: 3000,
+      createdBy: 'user-1',
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+    const seen: Array<{ stripeAccountId?: string }> = [];
+    const provider = {
+      generateLink: async (req: { stripeAccountId?: string }) => {
+        seen.push({ stripeAccountId: req.stripeAccountId });
+        return { linkId: 'plink_x', linkUrl: 'https://pay.mock.com/plink_x', providerReference: 'mock_x' };
+      },
+      deactivateLink: async () => undefined,
+    };
+    await createInvoicePaymentLink(tenantId, invoice.id, repo, provider, resolver);
+    return seen[0]?.stripeAccountId;
+  }
+
+  it('does NOT pass stripeAccountId when Connect charges are not enabled (KYC incomplete)', async () => {
+    const account = await seenAccountFor({
+      resolveTenantConnectAccount: async () => ({ accountId: 'acct_pending', chargesEnabled: false }),
+    });
+    expect(account).toBeUndefined();
+  });
+
+  it('does NOT pass stripeAccountId when the tenant has no Connect account (resolver returns null)', async () => {
+    const account = await seenAccountFor({
+      resolveTenantConnectAccount: async () => null,
+    });
+    expect(account).toBeUndefined();
+  });
+
+  it('falls back to platform (no stripeAccountId) when the resolver throws', async () => {
+    const account = await seenAccountFor({
+      resolveTenantConnectAccount: async () => {
+        throw new Error('db hiccup');
+      },
+    });
+    expect(account).toBeUndefined();
+  });
+
   it('rejects draft invoice with 409-class error', async () => {
     const repo = new InMemoryInvoiceRepository();
     const invoice = await repo.create({
@@ -77,5 +175,532 @@ describe('createInvoicePaymentLink (INV-04)', () => {
     await expect(
       createInvoicePaymentLink(tenantId, invoice.id, repo, provider),
     ).rejects.toMatchObject({ statusCode: 409 });
+  });
+});
+
+describe('P0-1 — void/cancel deactivates the hosted payment link', () => {
+  const TENANT = 'tenant-1';
+
+  async function setup() {
+    const { InMemoryInvoiceRepository, createInvoice, issueInvoice, transitionInvoiceStatus } =
+      await import('../../src/invoices/invoice');
+    const { InMemoryAuditRepository } = await import('../../src/audit/audit');
+    const { buildLineItem } = await import('../../src/shared/billing-engine');
+
+    const invoiceRepo = new InMemoryInvoiceRepository();
+    const auditRepo = new InMemoryAuditRepository();
+    const invoice = await createInvoice(
+      {
+        tenantId: TENANT,
+        jobId: 'job-1',
+        invoiceNumber: 'INV-LINK-1',
+        lineItems: [buildLineItem('1', 'Service', 1, 10000, 1, true)],
+        createdBy: 'u-1',
+      },
+      invoiceRepo,
+    );
+    await issueInvoice(TENANT, invoice.id, 30, invoiceRepo);
+    await invoiceRepo.update(TENANT, invoice.id, {
+      stripePaymentLinkId: 'plink_void_1',
+      stripePaymentLinkUrl: 'https://pay.stripe.com/plink_void_1',
+      updatedAt: new Date(),
+    });
+    return { invoiceRepo, auditRepo, invoiceId: invoice.id, transitionInvoiceStatus };
+  }
+
+  it('voiding an invoice deactivates its link, clears the columns, and audits both', async () => {
+    const { invoiceRepo, auditRepo, invoiceId, transitionInvoiceStatus } = await setup();
+    const deactivated: Array<{ linkId: string; account?: string }> = [];
+    const provider = {
+      generateLink: async () => { throw new Error('not used'); },
+      deactivateLink: async (linkId: string, account?: string) => {
+        deactivated.push({ linkId, account });
+      },
+    };
+
+    const result = await transitionInvoiceStatus(TENANT, invoiceId, 'void', invoiceRepo, undefined, {
+      auditRepo,
+      actor: { actorId: 'u-1', actorRole: 'owner' },
+      paymentLink: { provider },
+    });
+
+    expect(result!.status).toBe('void');
+    expect(deactivated).toEqual([{ linkId: 'plink_void_1', account: undefined }]);
+
+    const reloaded = await invoiceRepo.findById(TENANT, invoiceId);
+    expect(reloaded!.stripePaymentLinkId).toBeUndefined();
+    expect(reloaded!.stripePaymentLinkUrl).toBeUndefined();
+
+    const events = auditRepo.getAll().map((e) => e.eventType);
+    expect(events).toContain('invoice.status_changed');
+    expect(events).toContain('invoice.payment_link_deactivated');
+  });
+
+  it('a Stripe deactivation failure keeps the link columns (exposure stays visible) and audits the failure', async () => {
+    const { invoiceRepo, auditRepo, invoiceId, transitionInvoiceStatus } = await setup();
+    const provider = {
+      generateLink: async () => { throw new Error('not used'); },
+      deactivateLink: async () => { throw new Error('stripe 500'); },
+    };
+
+    const result = await transitionInvoiceStatus(TENANT, invoiceId, 'void', invoiceRepo, undefined, {
+      auditRepo,
+      actor: { actorId: 'u-1', actorRole: 'owner' },
+      paymentLink: { provider },
+    });
+
+    // The void itself is never blocked…
+    expect(result!.status).toBe('void');
+    // …but the live-link exposure is not hidden, and the failure is audited.
+    const reloaded = await invoiceRepo.findById(TENANT, invoiceId);
+    expect(reloaded!.stripePaymentLinkId).toBe('plink_void_1');
+    const events = auditRepo.getAll().map((e) => e.eventType);
+    expect(events).toContain('invoice.payment_link_deactivation_failed');
+    expect(events).not.toContain('invoice.payment_link_deactivated');
+  });
+
+  it('a Connect-minted link is deactivated with the tenant account header', async () => {
+    const { invoiceRepo, auditRepo, invoiceId, transitionInvoiceStatus } = await setup();
+    const deactivated: Array<{ linkId: string; account?: string }> = [];
+    const provider = {
+      generateLink: async () => { throw new Error('not used'); },
+      deactivateLink: async (linkId: string, account?: string) => {
+        deactivated.push({ linkId, account });
+      },
+    };
+
+    await transitionInvoiceStatus(TENANT, invoiceId, 'void', invoiceRepo, undefined, {
+      auditRepo,
+      paymentLink: {
+        provider,
+        connectAccountResolver: {
+          resolveTenantConnectAccount: async () => ({ accountId: 'acct_123', chargesEnabled: true }),
+        },
+      },
+    });
+
+    expect(deactivated).toEqual([{ linkId: 'plink_void_1', account: 'acct_123' }]);
+  });
+
+  it('an invoice with no link voids cleanly with no provider call', async () => {
+    const { invoiceRepo, auditRepo, invoiceId, transitionInvoiceStatus } = await setup();
+    await invoiceRepo.update(TENANT, invoiceId, {
+      stripePaymentLinkId: null,
+      stripePaymentLinkUrl: null,
+      updatedAt: new Date(),
+    });
+    let calls = 0;
+    const provider = {
+      generateLink: async () => { throw new Error('not used'); },
+      deactivateLink: async () => { calls += 1; },
+    };
+
+    const result = await transitionInvoiceStatus(TENANT, invoiceId, 'void', invoiceRepo, undefined, {
+      auditRepo,
+      paymentLink: { provider },
+    });
+
+    expect(result!.status).toBe('void');
+    expect(calls).toBe(0);
+  });
+});
+
+describe('R2/R3 — deactivation scope fallback and CAS-guarded clear', () => {
+  const TENANT = 'tenant-1';
+
+  it('falls back to the platform scope when the Connect-scoped call fails (mint-time scope drift)', async () => {
+    const { InMemoryInvoiceRepository, createInvoice, issueInvoice } =
+      await import('../../src/invoices/invoice');
+    const { deactivateInvoicePaymentLink } = await import('../../src/invoices/invoice-payment-link');
+
+    const invoiceRepo = new InMemoryInvoiceRepository();
+    const invoice = await createInvoice(
+      {
+        tenantId: TENANT,
+        jobId: 'job-1',
+        invoiceNumber: 'INV-R2',
+        lineItems: [(await import('../../src/shared/billing-engine')).buildLineItem('1', 'S', 1, 1000, 1, true)],
+        createdBy: 'u-1',
+      },
+      invoiceRepo,
+    );
+    await issueInvoice(TENANT, invoice.id, 30, invoiceRepo);
+    await invoiceRepo.update(TENANT, invoice.id, {
+      stripePaymentLinkId: 'plink_platform_minted',
+      stripePaymentLinkUrl: 'https://pay.stripe.com/x',
+      updatedAt: new Date(),
+    });
+
+    // Link was minted on the PLATFORM before the tenant onboarded to
+    // Connect; the current resolution is Connect-scoped and fails.
+    const attempts: Array<string | undefined> = [];
+    const provider = {
+      generateLink: async () => { throw new Error('not used'); },
+      deactivateLink: async (_id: string, account?: string) => {
+        attempts.push(account);
+        if (account) throw new Error('resource_missing');
+      },
+    };
+
+    const fresh = await invoiceRepo.findById(TENANT, invoice.id);
+    const result = await deactivateInvoicePaymentLink({
+      tenantId: TENANT,
+      invoice: fresh!,
+      reason: 'voided',
+      invoiceRepo,
+      provider,
+      connectAccountResolver: {
+        resolveTenantConnectAccount: async () => ({ accountId: 'acct_now', chargesEnabled: true }),
+      },
+    });
+
+    expect(result.deactivated).toBe(true);
+    expect(attempts).toEqual(['acct_now', undefined]); // Connect first, then platform fallback
+    expect((await invoiceRepo.findById(TENANT, invoice.id))!.stripePaymentLinkId).toBeUndefined();
+  });
+
+  it('a deactivation holding a stale snapshot never clears a re-minted link (CAS)', async () => {
+    const { InMemoryInvoiceRepository, createInvoice, issueInvoice } =
+      await import('../../src/invoices/invoice');
+    const { deactivateInvoicePaymentLink } = await import('../../src/invoices/invoice-payment-link');
+    const { buildLineItem } = await import('../../src/shared/billing-engine');
+
+    const invoiceRepo = new InMemoryInvoiceRepository();
+    const invoice = await createInvoice(
+      {
+        tenantId: TENANT,
+        jobId: 'job-1',
+        invoiceNumber: 'INV-R3',
+        lineItems: [buildLineItem('1', 'S', 1, 1000, 1, true)],
+        createdBy: 'u-1',
+      },
+      invoiceRepo,
+    );
+    await issueInvoice(TENANT, invoice.id, 30, invoiceRepo);
+    await invoiceRepo.update(TENANT, invoice.id, {
+      stripePaymentLinkId: 'plink_L1',
+      stripePaymentLinkUrl: 'https://pay.stripe.com/L1',
+      updatedAt: new Date(),
+    });
+    const staleSnapshot = await invoiceRepo.findById(TENANT, invoice.id);
+
+    // Concurrent flow: L1 deactivated+cleared, then L2 re-minted.
+    await invoiceRepo.update(TENANT, invoice.id, {
+      stripePaymentLinkId: 'plink_L2',
+      stripePaymentLinkUrl: 'https://pay.stripe.com/L2',
+      updatedAt: new Date(),
+    });
+
+    // Our late deactivation still holds the L1 snapshot; Stripe's
+    // deactivate on the already-dead L1 succeeds idempotently.
+    const provider = {
+      generateLink: async () => { throw new Error('not used'); },
+      deactivateLink: async () => {},
+    };
+    await deactivateInvoicePaymentLink({
+      tenantId: TENANT,
+      invoice: staleSnapshot!,
+      reason: 'repriced',
+      invoiceRepo,
+      provider,
+    });
+
+    // L2's columns survive — no invisible live link.
+    const fresh = await invoiceRepo.findById(TENANT, invoice.id);
+    expect(fresh!.stripePaymentLinkId).toBe('plink_L2');
+    expect(fresh!.stripePaymentLinkUrl).toBe('https://pay.stripe.com/L2');
+  });
+});
+
+describe('Codex P1 — a failed column clear after successful deactivation is audited, not hidden', () => {
+  it('emits payment_link_clear_failed (never the success event) when the DB clear throws', async () => {
+    const { InMemoryInvoiceRepository, createInvoice, issueInvoice } =
+      await import('../../src/invoices/invoice');
+    const { deactivateInvoicePaymentLink } = await import('../../src/invoices/invoice-payment-link');
+    const { InMemoryAuditRepository } = await import('../../src/audit/audit');
+    const { buildLineItem } = await import('../../src/shared/billing-engine');
+
+    const inner = new InMemoryInvoiceRepository();
+    const auditRepo = new InMemoryAuditRepository();
+    const invoice = await createInvoice(
+      {
+        tenantId: 'tenant-1',
+        jobId: 'job-1',
+        invoiceNumber: 'INV-CLR-1',
+        lineItems: [buildLineItem('1', 'S', 1, 1000, 1, true)],
+        createdBy: 'u-1',
+      },
+      inner,
+    );
+    await issueInvoice('tenant-1', invoice.id, 30, inner);
+    await inner.update('tenant-1', invoice.id, {
+      stripePaymentLinkId: 'plink_clr_1',
+      stripePaymentLinkUrl: 'https://pay.stripe.com/clr1',
+      updatedAt: new Date(),
+    });
+
+    // Stripe deactivation succeeds; the DB clear throws (transient outage).
+    const failingClear = new Proxy(inner, {
+      get(target, prop, receiver) {
+        if (prop === 'clearPaymentLinkIfMatches') {
+          return async () => { throw new Error('db down'); };
+        }
+        return Reflect.get(target, prop, receiver);
+      },
+    });
+    const provider = {
+      generateLink: async () => { throw new Error('not used'); },
+      deactivateLink: async () => {},
+    };
+
+    const fresh = await inner.findById('tenant-1', invoice.id);
+    const result = await deactivateInvoicePaymentLink({
+      tenantId: 'tenant-1',
+      invoice: fresh!,
+      reason: 'repriced',
+      invoiceRepo: failingClear,
+      provider,
+      auditRepo,
+    });
+
+    // The link IS dead at Stripe...
+    expect(result.deactivated).toBe(true);
+    // ...but the stranded column is surfaced as its own actionable event,
+    // never masked by the success event.
+    const events = auditRepo.getAll().map((e) => e.eventType);
+    expect(events).toContain('invoice.payment_link_clear_failed');
+    expect(events).not.toContain('invoice.payment_link_deactivated');
+  });
+});
+
+describe('P0-9 mint leg — link persist is guarded against concurrent invoice mutations', () => {
+  const TENANT = 'tenant-1';
+
+  async function setupOpenInvoice() {
+    const { InMemoryInvoiceRepository, createInvoice, issueInvoice } =
+      await import('../../src/invoices/invoice');
+    const { buildLineItem } = await import('../../src/shared/billing-engine');
+    const invoiceRepo = new InMemoryInvoiceRepository();
+    const invoice = await createInvoice(
+      {
+        tenantId: TENANT,
+        jobId: 'job-1',
+        invoiceNumber: 'INV-MINT-1',
+        lineItems: [buildLineItem('1', 'S', 1, 10000, 1, true)],
+        createdBy: 'u-1',
+      },
+      invoiceRepo,
+    );
+    await issueInvoice(TENANT, invoice.id, 30, invoiceRepo);
+    return { invoiceRepo, invoiceId: invoice.id };
+  }
+
+  it('a link minted while a void lands is deactivated, never attached', async () => {
+    const { invoiceRepo, invoiceId } = await setupOpenInvoice();
+    const { createInvoicePaymentLink } = await import('../../src/invoices/invoice-payment-link');
+    const { transitionInvoiceStatus } = await import('../../src/invoices/invoice');
+
+    const deactivated: string[] = [];
+    const provider = {
+      // The void commits while Stripe is minting the link.
+      generateLink: async () => {
+        await transitionInvoiceStatus(TENANT, invoiceId, 'void', invoiceRepo);
+        return {
+          linkId: 'plink_mint_race',
+          linkUrl: 'https://pay.stripe.com/mint-race',
+          expiresAt: null as unknown as Date,
+          providerReference: 'stripe_plink_mint_race',
+        };
+      },
+      deactivateLink: async (linkId: string) => { deactivated.push(linkId); },
+    };
+
+    await expect(
+      createInvoicePaymentLink(TENANT, invoiceId, invoiceRepo, provider),
+    ).rejects.toThrow(/Invoice changed while the payment link was being created/);
+
+    // The fresh link died and nothing was attached to the voided invoice.
+    expect(deactivated).toEqual(['plink_mint_race']);
+    const reloaded = await invoiceRepo.findById(TENANT, invoiceId);
+    expect(reloaded!.stripePaymentLinkId).toBeUndefined();
+    expect(reloaded!.stripePaymentLinkUrl).toBeUndefined();
+  });
+
+  it('a link minted while a credit reprices the invoice is deactivated, never attached', async () => {
+    const { invoiceRepo, invoiceId } = await setupOpenInvoice();
+    const { createInvoicePaymentLink } = await import('../../src/invoices/invoice-payment-link');
+
+    const deactivated: string[] = [];
+    const provider = {
+      generateLink: async () => {
+        // A partial payment lands mid-mint: the balance the link was priced
+        // at (10000) no longer matches the live due (6000).
+        await invoiceRepo.incrementAmountPaidAtomic(TENANT, invoiceId, 4000, new Date());
+        return {
+          linkId: 'plink_reprice_race',
+          linkUrl: 'https://pay.stripe.com/reprice-race',
+          expiresAt: null as unknown as Date,
+          providerReference: 'stripe_plink_reprice_race',
+        };
+      },
+      deactivateLink: async (linkId: string) => { deactivated.push(linkId); },
+    };
+
+    await expect(
+      createInvoicePaymentLink(TENANT, invoiceId, invoiceRepo, provider),
+    ).rejects.toThrow(/Invoice changed while the payment link was being created/);
+    expect(deactivated).toEqual(['plink_reprice_race']);
+    const reloaded = await invoiceRepo.findById(TENANT, invoiceId);
+    expect(reloaded!.stripePaymentLinkId).toBeUndefined();
+  });
+
+  it('losing to a COMPETING mint serves the winner link instead of erroring', async () => {
+    const { invoiceRepo, invoiceId } = await setupOpenInvoice();
+    const { createInvoicePaymentLink } = await import('../../src/invoices/invoice-payment-link');
+
+    const deactivated: string[] = [];
+    const provider = {
+      generateLink: async () => {
+        // The competing mint persists its link first (same balance).
+        await invoiceRepo.setPaymentLinkIfPayable(
+          TENANT,
+          invoiceId,
+          { linkId: 'plink_winner', linkUrl: 'https://pay.stripe.com/winner' },
+          10000,
+          new Date(),
+        );
+        return {
+          linkId: 'plink_loser',
+          linkUrl: 'https://pay.stripe.com/loser',
+          expiresAt: null as unknown as Date,
+          providerReference: 'stripe_plink_loser',
+        };
+      },
+      deactivateLink: async (linkId: string) => { deactivated.push(linkId); },
+    };
+
+    const result = await createInvoicePaymentLink(TENANT, invoiceId, invoiceRepo, provider);
+
+    expect(result.url).toBe('https://pay.stripe.com/winner');
+    expect(deactivated).toEqual(['plink_loser']); // the loser's link died
+    const reloaded = await invoiceRepo.findById(TENANT, invoiceId);
+    expect(reloaded!.stripePaymentLinkId).toBe('plink_winner');
+  });
+});
+
+describe('Codex P1 — a loser-link cleanup miss is audited with the link id', () => {
+  it('deactivation failure on the mint-guard loser lands the link id on the audit trail', async () => {
+    const { InMemoryInvoiceRepository, createInvoice, issueInvoice, transitionInvoiceStatus } =
+      await import('../../src/invoices/invoice');
+    const { createInvoicePaymentLink } = await import('../../src/invoices/invoice-payment-link');
+    const { InMemoryAuditRepository } = await import('../../src/audit/audit');
+    const { buildLineItem } = await import('../../src/shared/billing-engine');
+
+    const invoiceRepo = new InMemoryInvoiceRepository();
+    const auditRepo = new InMemoryAuditRepository();
+    const invoice = await createInvoice(
+      {
+        tenantId: 'tenant-1',
+        jobId: 'job-1',
+        invoiceNumber: 'INV-LOSER-1',
+        lineItems: [buildLineItem('1', 'S', 1, 10000, 1, true)],
+        createdBy: 'u-1',
+      },
+      invoiceRepo,
+    );
+    await issueInvoice('tenant-1', invoice.id, 30, invoiceRepo);
+
+    const provider = {
+      generateLink: async () => {
+        // Void lands mid-mint AND the loser cleanup will fail at Stripe.
+        await transitionInvoiceStatus('tenant-1', invoice.id, 'void', invoiceRepo);
+        return {
+          linkId: 'plink_orphan_1',
+          linkUrl: 'https://pay.stripe.com/orphan',
+          expiresAt: null as unknown as Date,
+          providerReference: 'stripe_plink_orphan_1',
+        };
+      },
+      deactivateLink: async () => { throw new Error('stripe 500'); },
+    };
+
+    await expect(
+      createInvoicePaymentLink('tenant-1', invoice.id, invoiceRepo, provider, undefined, auditRepo),
+    ).rejects.toThrow(/Invoice changed/);
+
+    // The orphaned-but-live link id is durably traceable.
+    const events = auditRepo
+      .getAll()
+      .filter((e) => e.eventType === 'invoice.payment_link_deactivation_failed');
+    expect(events).toHaveLength(1);
+    expect(events[0].metadata).toMatchObject({
+      stripePaymentLinkId: 'plink_orphan_1',
+      reason: 'mint_guard_lost',
+    });
+  });
+});
+
+describe('Codex P1 — void deactivation uses the POST-transition snapshot', () => {
+  it('kills a link that won its mint guard between the transition read and the status commit', async () => {
+    const { InMemoryInvoiceRepository, createInvoice, issueInvoice, transitionInvoiceStatus } =
+      await import('../../src/invoices/invoice');
+    const { InMemoryAuditRepository } = await import('../../src/audit/audit');
+    const { buildLineItem } = await import('../../src/shared/billing-engine');
+
+    const inner = new InMemoryInvoiceRepository();
+    const auditRepo = new InMemoryAuditRepository();
+    const invoice = await createInvoice(
+      {
+        tenantId: 'tenant-1',
+        jobId: 'job-1',
+        invoiceNumber: 'INV-SNAP-1',
+        lineItems: [buildLineItem('1', 'S', 1, 10000, 1, true)],
+        createdBy: 'u-1',
+      },
+      inner,
+    );
+    await issueInvoice('tenant-1', invoice.id, 30, inner);
+
+    // The mint lands AFTER the transition's read (invoice had no link) but
+    // BEFORE the status update commits — its payable guard legitimately
+    // passes. The deactivation must therefore work from the POST-update
+    // snapshot, which carries the fresh link.
+    let mintInjected = false;
+    const racingRepo = new Proxy(inner, {
+      get(target, prop, receiver) {
+        if (prop === 'update' && !mintInjected) {
+          return async (tenantId: string, id: string, updates: unknown) => {
+            mintInjected = true;
+            await inner.setPaymentLinkIfPayable(
+              tenantId,
+              id,
+              { linkId: 'plink_mid_transition', linkUrl: 'https://pay.stripe.com/mid' },
+              10000,
+              new Date(),
+            );
+            return inner.update(tenantId, id, updates as never);
+          };
+        }
+        return Reflect.get(target, prop, receiver);
+      },
+    });
+
+    const deactivated: string[] = [];
+    const provider = {
+      generateLink: async () => { throw new Error('not used'); },
+      deactivateLink: async (linkId: string) => { deactivated.push(linkId); },
+    };
+
+    const result = await transitionInvoiceStatus('tenant-1', invoice.id, 'void', racingRepo, undefined, {
+      auditRepo,
+      paymentLink: { provider },
+    });
+
+    expect(result!.status).toBe('void');
+    // The pre-transition snapshot had NO link; only the post-update snapshot
+    // sees plink_mid_transition — and it must die.
+    expect(deactivated).toEqual(['plink_mid_transition']);
+    const reloaded = await inner.findById('tenant-1', invoice.id);
+    expect(reloaded!.stripePaymentLinkId).toBeUndefined();
   });
 });

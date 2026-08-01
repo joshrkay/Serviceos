@@ -1,4 +1,5 @@
 import { LLMGateway } from '../gateway/gateway';
+import { resolveClassifyIntentDeadlineMs } from '../../config/ai-routing';
 
 /**
  * Voice-to-action intent classifier.
@@ -24,6 +25,10 @@ export type IntentType =
   | 'batch_invoice'
   | 'create_customer'
   | 'create_job'
+  // B7 (feat: voice-transcript-and-agent-paths) — bounded, safe field edit
+  // to an EXISTING job: status/priority/title/description. NOT money, NOT
+  // schedule — those keep their own intents.
+  | 'update_job'
   | 'reschedule_appointment'
   | 'cancel_appointment'
   | 'reassign_appointment'
@@ -50,6 +55,48 @@ export type IntentType =
   | 'log_time_entry'
   | 'notify_delay'
   | 'request_feedback'
+  // Taxonomy 1.2.0 (agent wave, Track A) — three proposal-driving on-ramps:
+  //   create_invoice_schedule    — U2: milestone/progress billing plan for a
+  //                                job; the verbatim milestone sentence rides
+  //                                extractedEntities.scheduleDescription and a
+  //                                deterministic parser (invoices/
+  //                                milestone-sentence-parser.ts) turns it into
+  //                                typed milestones — never the LLM.
+  //   respond_to_review          — U3: owner asks to reply to a customer
+  //                                review; the free-text review reference rides
+  //                                extractedEntities.reviewReference and is
+  //                                resolved against recent google_reviews rows
+  //                                (ambiguity → voice_clarification).
+  //   create_standing_instruction — UB-A2: "from now on…"/"always…" persistent
+  //                                directives; extractedEntities.instructionText
+  //                                carries the verbatim rule. The instruction
+  //                                itself ALWAYS lands for review (the task
+  //                                handler omits sourceTrustTier).
+  | 'create_invoice_schedule'
+  | 'respond_to_review'
+  | 'create_standing_instruction'
+  // B1.18 — the owner captures/edits the tenant's brand voice by speaking
+  // ("Set my brand voice: friendly, plain-spoken, always sign off 'Thanks —
+  // Bob's HVAC'"). PROPOSAL-DRIVING but deliberately `manual` action class
+  // (proposals/proposal.ts) — never auto-approves at any trust tier, because
+  // a wrong extraction poisons every future outbound message. Scope
+  // decision (Part F entry F-2): capture is speakable; LOCKING the brand
+  // voice stays tap-only — this intent's payload has no field capable of
+  // expressing `brand_voice_locked` (see proposals/contracts/brand-voice.ts).
+  | 'update_brand_voice'
+  // B5.5 / Part F decision F-3 — a technician announcing they're headed to
+  // an appointment ("on my way"). NOT proposal-driving: the router fires
+  // the SAME audited direct status act the app en-route button already
+  // executes (dispatch/routes.ts triggerEnRoute) — the human is acting
+  // directly, the exact precedent PRD B10.10 already blesses. Deliberately
+  // absent from INTENT_TO_PROPOSAL_TYPE; see proposals/voice-intent-map.ts
+  // for the documented non-proposal registration. jobReference carries a
+  // named job ("the Garcia job"); absent ⇒ the tech's next upcoming
+  // appointment today. Distinct from notify_delay (the crew is running
+  // LATE, not departing now) — a low-confidence classification here still
+  // gates to clarification via the standard CLASSIFIER_CONFIDENCE_THRESHOLD
+  // floor below, same as every other intent.
+  | 'en_route'
   // P11-001: voice lookup-skill family. Read-only intents — the
   // adapter routes these straight to the `lookup_*` skill instead
   // of the proposal-draft path.
@@ -136,6 +183,7 @@ export const SUPPORTED_INTENTS: readonly IntentType[] = [
   'batch_invoice',
   'create_customer',
   'create_job',
+  'update_job',
   'reschedule_appointment',
   'cancel_appointment',
   'reassign_appointment',
@@ -158,6 +206,11 @@ export const SUPPORTED_INTENTS: readonly IntentType[] = [
   'log_time_entry',
   'notify_delay',
   'request_feedback',
+  'create_invoice_schedule',
+  'respond_to_review',
+  'create_standing_instruction',
+  'update_brand_voice',
+  'en_route',
   'lookup_appointments',
   'lookup_invoices',
   'lookup_balance',
@@ -184,6 +237,44 @@ export const SUPPORTED_INTENTS: readonly IntentType[] = [
   'edit_proposal',
   'unknown',
 ] as const;
+
+/**
+ * Story 3.4 — versioned intent taxonomy. Every classification is stamped with
+ * this version (see `classifyIntent`) so downstream consumers — correction
+ * analytics (story 3.9), routing observability, evaluation snapshots — can tell
+ * which taxonomy produced an intent and detect drift across deploys.
+ *
+ * BUMP THIS whenever `SUPPORTED_INTENTS` changes (an intent added, removed, or
+ * its meaning materially changed) or a deterministic intent mapping changes.
+ * Semantics: MAJOR = an intent removed or its meaning changed (consumers must
+ * re-map); MINOR = an intent added or coverage extended (additive,
+ * backward-compatible).
+ *
+ * Changelog:
+ *   1.0.0 — initial versioned taxonomy.
+ *   1.1.0 — "log inventory" phrasings recognized and mapped to log_expense
+ *           (no inventory domain; see isInventoryLoggingPhrasing).
+ *   1.2.0 — agent-wave Track A on-ramps (additive): create_invoice_schedule
+ *           (U2, milestone billing), respond_to_review (U3, review reply
+ *           drafting), create_standing_instruction (UB-A2, persistent
+ *           directives). One coordinated bump — see
+ *           docs/reference/voice-action-catalog.md.
+ *   1.3.0 — B7 (feat: voice-transcript-and-agent-paths): update_job
+ *           (additive) — a bounded, safe field edit (status/priority/
+ *           title/description) to an existing job, distinct from
+ *           create_job / reschedule_appointment / add_note.
+ *   1.4.0 — B5.5 (Part F decision F-3): en_route (additive) — a technician
+ *           announcing "on my way". Not proposal-driving (see the IntentType
+ *           doc comment); a technician's own recorded memo fires the SAME
+ *           audited direct status act the app en-route button executes.
+ *   1.5.0 — B1.18: update_brand_voice (additive) — the owner captures/edits
+ *           the tenant's brand voice by speaking. Proposal-driving,
+ *           `manual` action class (never auto-approves at any trust tier).
+ *           Locking the brand voice stays tap-only — this intent's payload
+ *           structurally cannot express `brand_voice_locked` (Part F
+ *           entry F-2).
+ */
+export const INTENT_TAXONOMY_VERSION = '1.5.0';
 
 /**
  * P11-001: convenience predicate the FSM adapter uses to route
@@ -243,6 +334,19 @@ export interface ExtractedEntities {
   displayName?: string;
   email?: string;
   phone?: string;
+  // create_customer: the service/street address the caller stated as part
+  // of signing up ("Add a new customer, Mario Delingo, 412 Oak Street,
+  // Scottsdale, 85254"). Free text, verbatim — the customers table has no
+  // address column, so this rides on the proposal payload for the approver
+  // and is only promoted to a linked service_location row on execution when
+  // it parses into a COMPLETE address (street1 + city + state + postalCode),
+  // matching the completeness gate used by add_service_location / leads.
+  //
+  // Deliberately distinct from `serviceAddress` (add_service_location — a
+  // new address for an EXISTING customer) and `updatedAddress`
+  // (update_customer — a corrected address on an existing record), so a
+  // signup can never be mistaken for an edit to somebody else's account.
+  address?: string;
   // Scheduling-edit intents (reschedule / cancel / reassign). Either
   // an appointment reference ("tomorrow's 3pm", "the Miller job",
   // "APT-0012") or a newDateTimeDescription for reschedule. Target
@@ -298,6 +402,10 @@ export interface ExtractedEntities {
   serviceAddress?: string;
   // log_time_entry: which kind of time is being logged.
   timeEntryType?: 'job' | 'drive' | 'break' | 'admin';
+  // log_time_entry: a COMPLETED amount of worked time stated after the
+  // fact ("put me down for two hours"), in whole MINUTES — the unit
+  // time_entries.duration_minutes stores. Absent on a plain clock-in.
+  durationMinutes?: number;
   // notify_delay: how many minutes late the crew is running.
   delayMinutes?: number;
   // RV-071 — approve_proposal / reject_proposal (owner sessions only):
@@ -314,6 +422,29 @@ export interface ExtractedEntities {
   // $50 off?", "throw in the trip fee", "refund or I'll leave a 1-star"). The
   // guardrail handler refines it into a specific ask type deterministically.
   negotiationAsk?: string;
+  // create_invoice_schedule (U2): the VERBATIM milestone/billing-plan sentence
+  // ("50% deposit, rest on completion"). Flat string by design —
+  // sanitizeExtractedEntities drops nested objects, so the deterministic
+  // milestone-sentence-parser (never the LLM) turns this into typed milestones.
+  scheduleDescription?: string;
+  // respond_to_review (U3): the owner's words identifying WHICH review ("the
+  // 1-star from yesterday"). Resolved downstream against recent
+  // google_reviews rows — never trusted as an id.
+  reviewReference?: string;
+  // create_standing_instruction (UB-A2): the verbatim persistent directive
+  // ("from now on always add a $79 diagnostic fee to AC calls").
+  instructionText?: string;
+  // create_standing_instruction: the intent the rule applies to, when the
+  // speaker scoped it (e.g. "on invoices" → create_invoice). Free text — the
+  // task handler normalizes it into the structured scope.
+  scopeIntentHint?: string;
+  // B1.18 — update_brand_voice: the VERBATIM spoken brand-voice instruction
+  // ("friendly, plain-spoken, no slang, always sign off 'Thanks — Bob's
+  // HVAC'"). Flat string by design, mirroring instructionText/
+  // scheduleDescription — the task handler's own (separate) LLM pass maps it
+  // onto the six brandVoiceSchema fields + a freeText catch-all; the
+  // classifier itself never emits structured tone fields.
+  brandVoiceInstruction?: string;
 }
 
 /**
@@ -361,6 +492,22 @@ export interface IntentClassification {
    * short-circuits without an LLM call.
    */
   tokenUsage?: { input: number; output: number };
+  /**
+   * Id of the persisted `ai_runs` row for the underlying LLM classify call
+   * (from `LLMResponse.aiRunId`). Surfaced so the voice path can thread a
+   * REAL run id into the FSM `intent_classified` event → `create_proposal`
+   * side-effect payload, letting the resulting proposal satisfy
+   * `proposals.ai_run_id`'s FK with an actual row instead of null. Omitted
+   * when the classifier short-circuits without an LLM call (empty transcript,
+   * deterministic phrase match) or when no AiRunRepository is wired.
+   */
+  aiRunId?: string;
+  /**
+   * Story 3.4 — the intent-taxonomy version that produced this classification
+   * (`INTENT_TAXONOMY_VERSION`). Stamped on every result by `classifyIntent`;
+   * lets observability / correction analytics detect taxonomy drift.
+   */
+  taxonomyVersion?: string;
 }
 
 export interface ClassifyContext {
@@ -443,15 +590,33 @@ export const CLASSIFIER_CONFIDENCE_THRESHOLD = 0.6;
  */
 export const SIGNUP_INTENT_ACT_THRESHOLD = 0.75;
 
-const SYSTEM_PROMPT = `You are an intent classifier for a field service operating system.
+// Exported (not just module-private) so the live-eval cost preflight
+// (packages/voice-eval/live-support.ts EST_SYSTEM_PROMPT_TOKENS) can be pinned
+// against the real prompt size in a test — see
+// packages/api/test/voice-quality/voice-eval-live.test.ts. Never trim this
+// export back to unexported without checking that test doesn't need it.
+export const SYSTEM_PROMPT = `You are an intent classifier for a field service operating system.
 Given a voice transcript from a field service operator, decide which action they intend to take.
 
 Supported intents (return exactly ONE):
 - "create_invoice"      — user wants to draft a NEW invoice for work completed.
-                           Example: "Create an invoice for Acme for 450 dollars"
+                           Extract lineItemDescriptions (one short entry per
+                           distinct piece of work billed — an invoice with no
+                           line items cannot be created), amount (stated total,
+                           integer cents), customerName, and jobReference when
+                           a job is referenced. Never invent lines; one
+                           described job is ONE line.
+                           Examples: "Create an invoice for Acme for 450 dollars"
+                                     "Invoice the Smith job for the completed
+                                      furnace repair, $350 total" →
+                                      lineItemDescriptions ["completed furnace repair"]
 - "draft_estimate"      — user wants to draft a new estimate/quote before work starts.
                            Example: "Draft an estimate for the Johnson water heater"
 - "create_appointment"  — user wants to schedule a new appointment or follow-up.
+                           Extract jobTitle (a short name for the new work
+                           being scheduled), dateTimeDescription (when they
+                           want it scheduled), and customerName if a specific
+                           customer is named.
                            Example: "Schedule a follow-up for Mrs Lee next Tuesday at 2pm"
 - "update_invoice"      — user wants to ADD or REMOVE a line item on an EXISTING
                            draft invoice. Requires an explicit invoice reference
@@ -504,17 +669,29 @@ Supported intents (return exactly ONE):
                            and any natural caller-side phrasing for
                            establishing a new account.
                            Extract the customer's displayName plus any stated
-                           email or phone. When only the name is given (or even
-                           no name at all — the caller-id phone is captured
-                           upstream), still classify as create_customer so the
-                           downstream flow can ask a clarifying question — do
-                           NOT fall back to "unknown" just because email/phone
-                           or even displayName are missing.
+                           email, phone, or address. When only the name is given
+                           (or even no name at all — the caller-id phone is
+                           captured upstream), still classify as create_customer
+                           so the downstream flow can ask a clarifying question
+                           — do NOT fall back to "unknown" just because
+                           email/phone or even displayName are missing.
+                           When the speaker states a street address as part of
+                           the signup ("..., 412 Oak Street, Scottsdale, 85254",
+                           "She's over at 1207 Riverbell Drive", "He's at 34
+                           Quarry Street"), put it VERBATIM in "address" — do
+                           NOT drop it and do NOT reclassify as
+                           add_service_location. A NEW customer stating their
+                           own address is still create_customer; the address is
+                           an entity on that intent, not a competing intent.
                            Examples: "Create a new customer named Alex"
                                      "Add customer Acme Corp, email alex@acme.com"
                                      "New customer: Sarah, phone 555-0100"
                                      "Add a customer called Jordan Lee"
                                      "Create customer Maria Gomez at maria@gomez.co"
+                                     "Add a new customer, Mario Delingo, 412 Oak Street, Scottsdale, 85254."
+                                        → displayName "Mario Delingo", address "412 Oak Street, Scottsdale, 85254"
+                                     "Add Jimmy Hartlett as a new customer. He's at 34 Quarry Street."
+                                        → displayName "Jimmy Hartlett", address "34 Quarry Street"
                                      "I'd like to sign up as a new customer"
                                      "I'm a new customer"
                                      "Can you set up an account for me?"
@@ -527,6 +704,25 @@ Supported intents (return exactly ONE):
                            and jobTitle.
                            Examples: "Start a new job for Bob's water heater"
                                      "Create a job for Smith plumbing — kitchen drain"
+- "update_job"          — user wants to change a SAFE field on an EXISTING
+                           job: its status, priority, or title/description.
+                           NOT money (estimates/invoices/pricing — those are
+                           update_estimate/update_invoice) and NOT the
+                           appointment/visit time (that's
+                           reschedule_appointment). A freeform annotation
+                           that doesn't change a tracked field is add_note,
+                           not this. Extract jobReference (the job number or
+                           customer/job descriptor).
+                           Examples: "Mark the Henderson job in progress"
+                                     "Change JOB-0012's priority to urgent"
+                                     "Rename the Smith job to water heater replacement"
+                                     "Set the Davis job back to scheduled"
+                           NOT update_job: "Start a new job for Bob's water
+                           heater" (create_job — no existing job referenced);
+                           "Move the Miller job to Thursday at 2pm"
+                           (reschedule_appointment — a time, not a job
+                           field); "Add a trip fee to the Smith invoice"
+                           (update_invoice — money).
 - "reschedule_appointment" — user wants to move an EXISTING appointment to a
                            different time. Extract appointmentReference
                            (the old slot or the job/customer identifier)
@@ -541,14 +737,26 @@ Supported intents (return exactly ONE):
                            Examples: "Cancel tomorrow's 3pm, the customer called out"
                                      "Kill the Johnson appointment"
                                      "Cancel the Wilson job — weather closed us down"
-- "reassign_appointment" — user wants to assign an EXISTING appointment to a
-                           different technician. Extract appointmentReference
-                           and targetTechnicianName.
-                           Examples: "Give Tuesday's Davis job to Mike"
+- "reassign_appointment" — user wants an EXISTING appointment's PRIMARY
+                           technician REPLACED by someone else — the named
+                           person becomes the (sole) one doing the work; who
+                           was on it before comes off. Extract
+                           appointmentReference and targetTechnicianName.
+                           "Assign NAME to JOB" is a replace, not an add — the
+                           verb "assign" hands the whole job to that person.
+                           "instead of" / "instead of me" is an explicit
+                           replacement signal. Examples:
+                                     "Give Tuesday's Davis job to Mike"
                                      "Reassign the 2pm to Sarah"
-- "add_crew_member"     — user wants to ADD a second/helper technician to an
-                           EXISTING appointment (the primary tech stays on).
-                           Extract appointmentReference and targetTechnicianName.
+                                     "Assign Carlos to the Johnson job"
+                                     "Put Carlos on the Garcia job instead of me"
+- "add_crew_member"     — user wants to ADD a second/helper technician
+                           ALONGSIDE the existing one on an EXISTING
+                           appointment — an ATTACH, not a replace: the
+                           primary tech stays on, the named person joins as
+                           help. "Add NAME to JOB" (no replacement language)
+                           is this, not reassign_appointment. Extract
+                           appointmentReference and targetTechnicianName.
                            Examples: "Add Carlos to the Garcia appointment"
                                      "Put Mike on Tuesday's Davis job too"
 - "remove_crew_member"  — user wants to REMOVE a helper/crew technician from an
@@ -559,9 +767,14 @@ Supported intents (return exactly ONE):
 - "add_note"            — user wants to attach a note to an existing record.
                            Extract noteTargetKind (job / customer / invoice /
                            estimate / appointment) and noteBody.
+                           An observation, instruction or finding with NO
+                           stated amount of worked time. If the sentence
+                           states how long the work took ("two hours"), it
+                           is log_time_entry, not add_note.
                            Examples: "Note on the Rodriguez job: customer
                                       wants a call before we arrive"
                                      "Add a note to Smith's file: prefers SMS"
+                                     "Add a note that I found flue liner corrosion"
 - "send_invoice"        — user wants to SEND/DELIVER an existing invoice to a
                            customer (email or SMS). Send = deliver to the
                            customer; issue = make official/payable (see
@@ -579,7 +792,10 @@ Supported intents (return exactly ONE):
                            customer (email or SMS). This is a customer
                            comms action — never auto-execute, always
                            require a screen-tap approval. Extract the
-                           estimate reference and sendChannel.
+                           estimate number or description into jobReference
+                           (the shared reference field used to look up
+                           estimates/invoices/jobs), and sendChannel (email
+                           or sms).
                            Examples: "Send estimate EST-0042 to Sarah"
                                      "Email the Jones estimate"
                                      "Text the Miller estimate to them"
@@ -672,12 +888,34 @@ Supported intents (return exactly ONE):
                            Examples: "Add a service location for Sarah at 412 Oak Street"
                                      "New address for the Acme account: 88 Industrial Way, Denver CO"
                                      "Add a second property for Jordan — 12 Pine Lane"
-- "log_time_entry"      — technician wants to start tracking time (clock
-                           in) on a job or task. Extract jobReference and
-                           timeEntryType (job / drive / break / admin).
+- "log_time_entry"      — technician wants to record work time — EITHER to
+                           START tracking it (clock in) OR to record an
+                           already-COMPLETED amount of time after the fact.
+                           Extract jobReference, timeEntryType (job / drive
+                           / break / admin), and — whenever a fixed amount
+                           of time is stated — durationMinutes, in whole
+                           MINUTES ("two hours" = 120, "an hour and a half"
+                           = 90, "forty five minutes" = 45).
+                           CORRECTIONS: when the speaker states a duration
+                           and then corrects it ("two hours not one hour",
+                           "this took two hours, did not take one hour"),
+                           keep ONLY the corrected value — durationMinutes
+                           is 120, never 60 and never both.
+                           NOT add_note: a stated amount of WORKED TIME is
+                           log_time_entry even when phrased as "put down" /
+                           "write down" / "make a note". Use add_note only
+                           when the content is an observation carrying no
+                           worked duration ("add a note that I found flue
+                           liner corrosion").
                            Examples: "Clock me in on the Miller job"
                                      "Start my drive time"
                                      "Log time on the Rodriguez install"
+                                     "Put me down for two hours on this one"
+                                     "Put down that this was two hours"
+                                     "Put down that this was two hours not one hour for this one"
+                                     "Log two hours on the Miller job"
+                                     "This took two hours"
+                                     "This took two hours, did not take one hour"
 - "notify_delay"        — user wants to tell a customer the crew is
                            running late. Customer-facing comms — never
                            auto-execute. Extract appointmentReference and
@@ -685,6 +923,24 @@ Supported intents (return exactly ONE):
                            Examples: "Let the 10am know we're running 30 minutes behind"
                                      "Tell the Miller job we're delayed about an hour"
                                      "Text the customer that we'll be 20 minutes late"
+                           NOT en_route: a stated LATE amount of time is
+                           notify_delay even when the technician is also
+                           about to leave — "I'm running 20 minutes late" is
+                           notify_delay, never en_route.
+- "en_route"            — a TECHNICIAN announces they are DEPARTING NOW for
+                           an appointment ("on my way", "heading out",
+                           "leaving now") — not a delay, not a schedule
+                           change. Extract jobReference ONLY when a specific
+                           job/customer is named; omit it for a bare "on my
+                           way" (the next upcoming appointment today).
+                           Examples: "On my way to the Garcia job"
+                                     "Heading to my next one now"
+                                     "I'm leaving for the Patel install"
+                                     "En route to the 2pm"
+                           NOT en_route: "I'm running 20 minutes late" (a
+                           stated delay, not a departure — notify_delay);
+                           "Move the Garcia job to Thursday" (a schedule
+                           change — reschedule_appointment).
 - "request_feedback"    — user wants to send a post-job feedback / review
                            request to a customer. Customer-facing comms —
                            never auto-execute. Extract the jobReference or
@@ -692,6 +948,67 @@ Supported intents (return exactly ONE):
                            Examples: "Send a feedback request for the Johnson job"
                                      "Ask Sarah to leave a review"
                                      "Request feedback on the completed Miller work"
+- "create_invoice_schedule" — user wants to set up a MILESTONE / PROGRESS
+                           billing plan for a job: a deposit up front and the
+                           rest later, or a percentage split across stages.
+                           Extract jobReference (the job or customer the plan
+                           is for), put the VERBATIM milestone sentence in
+                           scheduleDescription (do NOT compute amounts or
+                           restate it), and amount (integer cents) only when
+                           an explicit job total is stated. Distinct from
+                           create_invoice (one bill now) and update_invoice
+                           (edit an existing bill).
+                           Examples: "Set up 50% deposit, 50% on completion for the Hendersons"
+                                     "Bill the Garcia install 30/30/40"
+                                     "Take a $500 deposit up front on the Miller job, rest when we finish"
+                                     "Progress-bill the Patel remodel — half to start, balance on completion"
+- "respond_to_review"   — owner/operator wants to REPLY to a customer review
+                           (e.g. a Google review). Put the words identifying
+                           WHICH review in reviewReference, verbatim ("the
+                           1-star from yesterday", "that review Maria left").
+                           Distinct from request_feedback (asking a customer
+                           to leave a review).
+                           Examples: "Respond to that 1-star review"
+                                     "Reply to the bad review from yesterday"
+                                     "Answer the review Maria Alvarez left us"
+- "create_standing_instruction" — user states a PERSISTENT rule for how the
+                           business should run from now on, not a one-off
+                           command. Trigger phrasings: "from now on…",
+                           "always…", "never…", "whenever…", "every time…".
+                           Put the full spoken directive VERBATIM in
+                           instructionText, the kind of work it applies to (if
+                           stated) in scopeIntentHint, and a stated dollar
+                           amount in amount (integer cents).
+                           Examples: "From now on always add a $79 diagnostic fee to AC calls"
+                                     "Always include a fuel surcharge on invoices"
+                                     "Whenever we quote a water heater, include a permit line"
+                                     "Never offer weekend slots to new customers"
+                           NOT create_standing_instruction: a one-off edit
+                           ("add a $79 fee to the Smith invoice" =
+                           update_invoice).
+- "update_brand_voice"  — the OWNER sets or edits how the AI sounds in
+                           outbound customer messages: register/tone,
+                           opening lines, sign-off, banned phrases, persona
+                           name, or which pronoun the business uses ("we"
+                           vs "I"). Put the FULL spoken instruction
+                           VERBATIM in brandVoiceInstruction — do not try to
+                           split it into fields yourself; a separate pass
+                           maps it onto the structured fields. Distinct from
+                           create_standing_instruction (a persistent
+                           business RULE about pricing/scheduling, not how
+                           the AI talks) and from update_customer (edits a
+                           CUSTOMER record, not the tenant's own voice).
+                           Never classify a request to LOCK/finalize the
+                           brand voice any differently — locking is a
+                           tap-only action with no voice path; still extract
+                           whatever tone instruction was spoken, if any.
+                           Examples: "Set my brand voice: friendly,
+                                      plain-spoken, no slang, always sign
+                                      off 'Thanks — Bob's HVAC'"
+                                     "Make our tone more formal and never
+                                      say 'no problem'"
+                                     "From now on our texts should refer to
+                                      the business as 'I', not 'we'"
 - "operator_request"   — caller explicitly asks to speak with a person,
                           dispatcher, owner, or asks to leave the AI agent.
                           Skip normal intent confirmation — escalate
@@ -807,7 +1124,12 @@ Supported intents (return exactly ONE):
                                      "What's our revenue so far?"
                                      "How much is still outstanding?"
 - "lookup_catalog"      — owner/dispatcher is ASKING what's in the
-                           service catalog / price book. Read-only.
+                           service catalog / price book. Read-only, and
+                           OWNER-ONLY at runtime (gated on the recognized
+                           owner line; a customer's spoken catalog browse
+                           falls back to a human). A CUSTOMER asking what
+                           something costs is NOT this — it is a draft_estimate
+                           (the estimate path speaks a catalog-grounded price).
                            Examples: "What services do we offer?"
                                      "What's in our catalog?"
                                      "Do we have a catalog item for a water heater?"
@@ -862,6 +1184,7 @@ Return valid JSON with exactly this shape (no prose, no markdown fences):
     "displayName": "<string, optional — NEW customer's name on create_customer>",
     "email": "<string, optional — NEW customer's email on create_customer>",
     "phone": "<string, optional — NEW customer's phone on create_customer>",
+    "address": "<string, optional — NEW customer's street address, verbatim, on create_customer>",
     "appointmentReference": "<string, optional — existing appointment reference>",
     "newDateTimeDescription": "<string, optional — new time for reschedule_appointment>",
     "targetTechnicianName": "<string, optional — target technician on reassign_appointment>",
@@ -872,7 +1195,7 @@ Return valid JSON with exactly this shape (no prose, no markdown fences):
     "sendChannel": "<email|sms, optional — on send_invoice>",
     "paymentMethod": "<cash|check|card|other, optional — on record_payment>",
     "paymentReference": "<string, optional — check number or memo on record_payment>",
-    "jobTitle": "<string, optional — title of new job on create_job>",
+    "jobTitle": "<string, optional — title of new job on create_job; also the short name of the new work being scheduled on create_appointment>",
     "updatedName": "<string, optional — new name on update_customer>",
     "updatedEmail": "<string, optional — new email on update_customer>",
     "updatedPhone": "<string, optional — new phone on update_customer>",
@@ -884,7 +1207,13 @@ Return valid JSON with exactly this shape (no prose, no markdown fences):
     "lostReason": "<string, optional — why the lead was lost on mark_lead_lost>",
     "serviceAddress": "<string, optional — full address on add_service_location>",
     "timeEntryType": "<job|drive|break|admin, optional — on log_time_entry>",
-    "delayMinutes": <integer minutes, optional — on notify_delay>
+    "durationMinutes": <integer MINUTES of completed work time, optional — on log_time_entry; "two hours" is 120>,
+    "delayMinutes": <integer minutes, optional — on notify_delay>,
+    "scheduleDescription": "<string, optional — VERBATIM milestone sentence on create_invoice_schedule>",
+    "reviewReference": "<string, optional — which review, verbatim, on respond_to_review>",
+    "instructionText": "<string, optional — verbatim standing rule on create_standing_instruction>",
+    "scopeIntentHint": "<string, optional — what work the standing rule applies to>",
+    "brandVoiceInstruction": "<string, optional — VERBATIM spoken tone/sign-off/persona instruction on update_brand_voice>"
   }
 }
 
@@ -990,6 +1319,117 @@ Notes:
   price is "negotiation".
 - Do not change the JSON output schema.`;
 
+interface OwnerOperatorCommandPattern {
+  intentType: IntentType;
+  pattern: RegExp;
+  extract: (match: RegExpExecArray) => ExtractedEntities;
+}
+
+/**
+ * U2 — narrow, deterministic coverage for the operator corpus commands that
+ * repeatedly fail closed when the provider is degraded. These patterns are
+ * consulted only on an authenticated owner session. They are anchored and
+ * entity-bounded so nearby appointment, account-setup, generic "add", and
+ * invoice-creation language still reaches the normal classifier.
+ */
+const OWNER_OPERATOR_COMMAND_PATTERNS: ReadonlyArray<OwnerOperatorCommandPattern> = [
+  {
+    intentType: 'lookup_day_overview',
+    pattern:
+      /^\s*(?:(?:what|which|show me|list)\s+(?:appointments?|jobs?)\s+(?:are\s+)?scheduled\s+(?:for\s+)?today|(?:show me|what(?:'s| is))\s+today(?:'s)?\s+schedule)\s*[?.!]?\s*$/i,
+    extract: () => ({}),
+  },
+  {
+    intentType: 'create_customer',
+    pattern:
+      /^\s*(?:new\s+customer|add\s+(?:a\s+)?customer)\s+([a-z][a-z.'-]*(?:\s+[a-z][a-z.'-]*){0,3})\s*,\s*phone(?:\s+number)?\s*(?::|is)?\s*(\+?[\d(][\d\s().-]{5,20}\d)\s*[.!?]?\s*$/i,
+    extract: (match) => ({ displayName: match[1].trim(), phone: match[2].trim() }),
+  },
+  {
+    intentType: 'create_customer',
+    pattern:
+      /^\s*(?:new\s+customer|add\s+(?:a\s+)?customer)\s+([a-z][a-z.'-]*(?:\s+[a-z][a-z.'-]*){0,3})\s*,\s*email\s*(?::|is)?\s*([a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,})\s*[.!?]?\s*$/i,
+    extract: (match) => ({ displayName: match[1].trim(), email: match[2].trim() }),
+  },
+  {
+    intentType: 'update_customer',
+    pattern:
+      /^\s*(?:update|change|fix)\s+([a-z][a-z .'-]{0,58}?)['’]s\s+phone(?:\s+number)?\s+(?:to|as)\s+(\+?[\d(][\d\s().-]{5,20}\d)\s*[.!?]?\s*$/i,
+    extract: (match) => ({ customerName: match[1].trim(), updatedPhone: match[2].trim() }),
+  },
+  {
+    intentType: 'update_customer',
+    pattern:
+      /^\s*(?:update|change|fix)\s+([a-z][a-z .'-]{0,58}?)['’]s\s+address\s+(?:to|as)\s+(.{3,120}?)\s*[.!?]?\s*$/i,
+    extract: (match) => ({ customerName: match[1].trim(), updatedAddress: match[2].trim() }),
+  },
+  {
+    intentType: 'lookup_customer',
+    pattern:
+      /^\s*(?:look\s+up|lookup)\s+(?:the\s+)?([a-z][a-z .'-]{0,58}?)\s+account\s*[.!?]?\s*$/i,
+    extract: (match) => ({ customerName: match[1].trim() }),
+  },
+  {
+    intentType: 'convert_lead',
+    pattern:
+      /^\s*convert\s+(?:the\s+)?([a-z][a-z .'-]{0,58}?)\s+lead\s+(?:to|into)\s+(?:a\s+)?customer\s*[.!?]?\s*$/i,
+    extract: (match) => ({ leadReference: match[1].trim() }),
+  },
+  {
+    intentType: 'create_job',
+    pattern:
+      /^\s*(?:open|create|start)\s+(?:a\s+)?(?:new\s+)?job\s+for\s+([^,\n]{1,60}?)\s*,\s*([^.!?\n]{2,100}?)\s*[.!?]?\s*$/i,
+    extract: (match) => ({ customerName: match[1].trim(), jobTitle: match[2].trim() }),
+  },
+  {
+    intentType: 'update_invoice',
+    pattern:
+      /^\s*add\s+([a-z0-9][a-z0-9 /&.'-]{0,98}?)\s+to\s+(?:the\s+)?invoice\s+(INV-\d{1,12})\s*[.!?]?\s*$/i,
+    extract: (match) => ({
+      jobReference: match[2].toUpperCase(),
+      lineItemDescriptions: [match[1].trim().replace(/^(?:a|an|the)\s+/i, '')],
+    }),
+  },
+  {
+    intentType: 'draft_estimate',
+    pattern:
+      /^\s*quote\s+([a-z][a-z .'-]{0,58}?)\s+for\s+(?:a\s+)?(.{3,120}?)\s*[.!?]?\s*$/i,
+    extract: (match) => ({
+      customerName: match[1].trim(),
+      jobReference: match[2].trim(),
+    }),
+  },
+  {
+    intentType: 'update_invoice',
+    pattern:
+      /^\s*(?:add\s+)?(?:a\s+)?line\s+item\s+(.{3,80}?)\s+on\s+([a-z][a-z .'-]{0,58}?)['’]s\s+bill\s*[.!?]?\s*$/i,
+    extract: (match) => ({
+      customerName: match[2].trim(),
+      lineItemDescriptions: [match[1].trim()],
+    }),
+  },
+  {
+    intentType: 'send_invoice',
+    pattern:
+      /^\s*(?:sms|text)\s+([a-z][a-z .'-]{0,58}?)\s+(?:the\s+)?invoice\s+link\s*[.!?]?\s*$/i,
+    extract: (match) => ({ customerName: match[1].trim() }),
+  },
+];
+
+function matchOwnerOperatorCommand(transcript: string): IntentClassification | null {
+  for (const entry of OWNER_OPERATOR_COMMAND_PATTERNS) {
+    const match = entry.pattern.exec(transcript);
+    if (!match) continue;
+    return {
+      intentType: entry.intentType,
+      confidence: 0.95,
+      reasoning: 'matched deterministic owner operator command',
+      extractedEntities: entry.extract(match),
+    };
+  }
+  return null;
+}
+
 /**
  * Deterministic short-circuit for the stereotyped extended-intent
  * phrasings (the P18-001 signup-override pattern). Consulted ONLY when
@@ -1016,6 +1456,8 @@ const EXTENDED_INTENT_PHRASES: ReadonlyArray<{ intent: IntentType; patterns: Rea
       /\bwhat(?:'s| is| does)\s+my\s+day\s+look(?:ing)?\s+like\b/i,
       /\b(?:give me |what's )?my morning overview\b/i,
       /\bhow(?:'s| is)\s+my\s+day\s+looking\b/i,
+      /^\s*(?:what|which|show me|list)\s+(?:appointments?|jobs?)\s+(?:are\s+)?scheduled\s+(?:for\s+)?today\s*[?.!]?\s*$/i,
+      /^\s*(?:show me|what(?:'s| is))\s+today(?:'s)?\s+schedule\s*[?.!]?\s*$/i,
     ],
   },
   {
@@ -1163,6 +1605,7 @@ export function parseClassifierJson(content: string): IntentClassification | nul
     if (typeof ee.displayName === 'string') extracted.displayName = ee.displayName;
     if (typeof ee.email === 'string') extracted.email = ee.email;
     if (typeof ee.phone === 'string') extracted.phone = ee.phone;
+    if (typeof ee.address === 'string') extracted.address = ee.address;
     // Scheduling-edit fields
     if (typeof ee.appointmentReference === 'string') extracted.appointmentReference = ee.appointmentReference;
     if (typeof ee.newDateTimeDescription === 'string') extracted.newDateTimeDescription = ee.newDateTimeDescription;
@@ -1202,6 +1645,12 @@ export function parseClassifierJson(content: string): IntentClassification | nul
     // log_time_entry fields
     const timeEntryType = pickEnum(ee, 'timeEntryType', TIME_ENTRY_TYPES);
     if (timeEntryType) extracted.timeEntryType = timeEntryType;
+    // A completed duration must be a positive whole number of minutes —
+    // the LLM occasionally answers "2" (hours) as a float or a negative,
+    // and time_entries.duration_minutes is an INTEGER column.
+    if (typeof ee.durationMinutes === 'number' && Number.isFinite(ee.durationMinutes) && ee.durationMinutes > 0) {
+      extracted.durationMinutes = Math.round(ee.durationMinutes);
+    }
     // notify_delay fields
     if (typeof ee.delayMinutes === 'number') extracted.delayMinutes = ee.delayMinutes;
     // approve_proposal / reject_proposal fields (RV-071)
@@ -1210,6 +1659,15 @@ export function parseClassifierJson(content: string): IntentClassification | nul
     if (typeof ee.editInstruction === 'string') extracted.editInstruction = ee.editInstruction;
     // negotiation fields (N-003)
     if (typeof ee.negotiationAsk === 'string') extracted.negotiationAsk = ee.negotiationAsk;
+    // create_invoice_schedule fields (U2)
+    if (typeof ee.scheduleDescription === 'string') extracted.scheduleDescription = ee.scheduleDescription;
+    // respond_to_review fields (U3)
+    if (typeof ee.reviewReference === 'string') extracted.reviewReference = ee.reviewReference;
+    // create_standing_instruction fields (UB-A2)
+    if (typeof ee.instructionText === 'string') extracted.instructionText = ee.instructionText;
+    if (typeof ee.scopeIntentHint === 'string') extracted.scopeIntentHint = ee.scopeIntentHint;
+    // update_brand_voice fields (B1.18)
+    if (typeof ee.brandVoiceInstruction === 'string') extracted.brandVoiceInstruction = ee.brandVoiceInstruction;
     if (Object.keys(extracted).length > 0) {
       result.extractedEntities = extracted;
     }
@@ -1279,7 +1737,41 @@ export function isCreateCustomerSignupPhrasing(transcript: string): boolean {
   return CREATE_CUSTOMER_SIGNUP_PATTERNS.some((rx) => rx.test(transcript));
 }
 
+/**
+ * Story 3.4 — "log inventory" is recognized but, per product decision, mapped
+ * to expense logging (the app has no inventory/stock domain; recording
+ * material/stock intake is an expense). This guard fires ONLY for clear
+ * inventory-LOGGING phrasings, never for a stock QUERY ("how much stock is
+ * left", "check inventory") — those stay on their own path.
+ */
+const INVENTORY_LOG_QUERY_GUARD =
+  /\b(?:check|how\s+much|how\s+many|what(?:'s|\s+is)|do\s+we\s+have|is\s+there|level|remaining|left|in\s+stock)\b/i;
+const INVENTORY_LOGGING_PATTERNS: ReadonlyArray<RegExp> = [
+  /\b(?:log|record|enter|add|update|track|adjust)\b[^.?!]{0,40}\b(?:inventory|stock)\b/i,
+  /\b(?:inventory|stock)\b[^.?!]{0,24}\b(?:count|log|update|adjustment|intake|received)\b/i,
+  /\b(?:received|restocked|bought|purchased|picked\s+up)\b[^.?!]{0,40}\b(?:inventory|stock|materials|supplies|parts)\b/i,
+];
+
+export function isInventoryLoggingPhrasing(transcript: string): boolean {
+  if (!transcript) return false;
+  if (INVENTORY_LOG_QUERY_GUARD.test(transcript)) return false;
+  return INVENTORY_LOGGING_PATTERNS.some((rx) => rx.test(transcript));
+}
+
 export async function classifyIntent(
+  transcript: string,
+  context: ClassifyContext,
+  gateway: LLMGateway
+): Promise<IntentClassification> {
+  // Story 3.4 — single choke point that stamps the taxonomy version on every
+  // classification, regardless of which of classifyIntentRaw's return paths
+  // (short-circuit, override, low-confidence, unknown, success) produced it.
+  const result = await classifyIntentRaw(transcript, context, gateway);
+  result.taxonomyVersion = INTENT_TAXONOMY_VERSION;
+  return result;
+}
+
+async function classifyIntentRaw(
   transcript: string,
   context: ClassifyContext,
   gateway: LLMGateway
@@ -1287,6 +1779,11 @@ export async function classifyIntent(
   // Cheap short-circuit: empty / whitespace transcripts never trigger an LLM call.
   if (!transcript || transcript.trim().length === 0) {
     return unknownResult('empty transcript', 'empty_transcript');
+  }
+
+  if (context.ownerSession === true) {
+    const matched = matchOwnerOperatorCommand(transcript);
+    if (matched) return matched;
   }
 
   // Phase-2 Track A — deterministic extended-intent phrasings. Only on
@@ -1341,21 +1838,37 @@ export async function classifyIntent(
 
   const response = await gateway.complete({
     taskType: 'classify_intent',
+    // The taxonomy prompt is substantially larger than typical lightweight
+    // requests. A dedicated budget prevents the in-app voice FSM from
+    // misreporting a provider abort as low audio confidence.
+    deadlineMs: resolveClassifyIntentDeadlineMs(),
     messages: [
       ...systemMessages,
       { role: 'user', content: transcript },
     ],
     responseFormat: 'json',
-    // Pass tenantId so gateway-layer features (per-tenant cache keys,
-    // cost accounting, future routing) can scope correctly. Without
-    // this, a cached response for tenant A could be returned to
-    // tenant B if two transcripts collide on the content hash.
+    // Top-level tenantId is what the resilience wrappers key on
+    // (ProviderTenantQuotaWrapper / CachingGatewayWrapper both read
+    // request.tenantId, not metadata.tenantId). Without it every tenant's
+    // classify_intent calls collapsed onto the shared SYSTEM_TENANT_ID
+    // quota bucket (concurrency 8 for the WHOLE platform) and, were the
+    // gateway cache ever enabled, onto a shared cache key (cross-tenant
+    // leak of classification + extracted entities).
+    tenantId: context.tenantId,
+    // Kept in metadata too: some downstream logging/consumers still read
+    // tenantId from here (see gateway.ts correlationId/promptVersionId
+    // metadata reads for the pattern this follows).
     metadata: { tenantId: context.tenantId },
   });
 
   const tokenUsage = response.tokenUsage
     ? { input: response.tokenUsage.input, output: response.tokenUsage.output }
     : undefined;
+  // The persisted ai_runs id for THIS classify call. Threaded onto every
+  // post-gateway return path (mirroring tokenUsage) so the voice path can
+  // link the eventual proposal to a REAL ai_runs row. Undefined when no
+  // AiRunRepository is wired or the best-effort run create failed.
+  const aiRunId = response.aiRunId;
 
   const parsed = parseClassifierJson(response.content);
   // P18-001: deterministic create_customer fallback. When the
@@ -1378,13 +1891,16 @@ export async function classifyIntent(
         reasoning: 'sign-up phrasing matched deterministic pattern',
       };
       if (tokenUsage) result.tokenUsage = tokenUsage;
+      if (aiRunId) result.aiRunId = aiRunId;
       return result;
     }
     const result = unknownResult('could not parse classifier output', 'parse_failed');
     if (tokenUsage) result.tokenUsage = tokenUsage;
+    if (aiRunId) result.aiRunId = aiRunId;
     return result;
   }
   if (tokenUsage) parsed.tokenUsage = tokenUsage;
+  if (aiRunId) parsed.aiRunId = aiRunId;
   if (
     signupOverride &&
     (parsed.intentType === 'unknown' ||
@@ -1400,7 +1916,30 @@ export async function classifyIntent(
       extractedEntities: parsed.extractedEntities,
     };
     if (tokenUsage) overridden.tokenUsage = tokenUsage;
+    if (aiRunId) overridden.aiRunId = aiRunId;
     return overridden;
+  }
+
+  // Story 3.4 — "log inventory" maps to expense logging (product decision: no
+  // inventory domain exists; material/stock intake is recorded as an expense).
+  // Deterministic, post-parse: when the transcript is a clear inventory-LOGGING
+  // phrasing (not a stock query) and the LLM did not already land on
+  // log_expense, map it to log_expense — preserving any amount/vendor the LLM
+  // extracted and defaulting the category to 'materials'. Result is a DRAFT
+  // proposal a human approves; nothing is auto-executed. No prompt bytes
+  // change, so classify_intent cassettes / cache keys are unaffected.
+  if (parsed.intentType !== 'log_expense' && isInventoryLoggingPhrasing(transcript)) {
+    const entities: ExtractedEntities = { ...(parsed.extractedEntities ?? {}) };
+    if (!entities.expenseCategory) entities.expenseCategory = 'materials';
+    const mapped: IntentClassification = {
+      intentType: 'log_expense',
+      confidence: Math.max(parsed.confidence, 0.8),
+      reasoning: 'inventory-logging phrasing mapped to expense (no inventory domain)',
+      extractedEntities: entities,
+    };
+    if (tokenUsage) mapped.tokenUsage = tokenUsage;
+    if (aiRunId) mapped.aiRunId = aiRunId;
+    return mapped;
   }
 
   // Final guardrail: low confidence → unknown, even if the LLM picked an intent.
@@ -1420,6 +1959,7 @@ export async function classifyIntent(
         parsed.intentType !== 'unknown' ? parsed.intentType : undefined,
     };
     if (tokenUsage) lowConf.tokenUsage = tokenUsage;
+    if (aiRunId) lowConf.aiRunId = aiRunId;
     return lowConf;
   }
 

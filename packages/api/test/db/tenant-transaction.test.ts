@@ -3,6 +3,7 @@ import type { Pool } from 'pg';
 import {
   PgTenantTransactionRunner,
   InMemoryTransactionRunner,
+  withTenantConnection,
 } from '../../src/db/tenant-transaction';
 import { tenantContextStore } from '../../src/middleware/tenant-context';
 
@@ -125,6 +126,42 @@ describe('PgTenantTransactionRunner', () => {
     expect(texts).toContain('RELEASE SAVEPOINT sp_2');
     expect(texts[texts.length - 1]).toBe('COMMIT'); // whole tx still commits
     expect(texts).not.toContain('ROLLBACK'); // the OUTER tx never rolled back
+  });
+});
+
+describe('withTenantConnection', () => {
+  it('wraps work in BEGIN / set_config / COMMIT, returns the value, and releases', async () => {
+    const { pool, calls, released } = fakePool();
+
+    const result = await withTenantConnection(pool, tenantId, async (client) => {
+      await client.query('SELECT 1');
+      return 'value';
+    });
+
+    expect(result).toBe('value');
+    const texts = calls.map((c) => c.text);
+    expect(texts[0]).toBe('BEGIN');
+    expect(texts[1]).toContain("set_config('app.current_tenant_id'");
+    expect(calls[1].params).toEqual([tenantId]);
+    expect(texts).toContain('SELECT 1');
+    expect(texts[texts.length - 1]).toBe('COMMIT');
+    expect(texts).not.toContain('ROLLBACK');
+    expect(released()).toBe(1);
+  });
+
+  it('rolls back, rethrows, and still releases when the work throws', async () => {
+    const { pool, calls, released } = fakePool();
+
+    await expect(
+      withTenantConnection(pool, tenantId, async () => {
+        throw new Error('query failed');
+      }),
+    ).rejects.toThrow('query failed');
+
+    const texts = calls.map((c) => c.text);
+    expect(texts).toContain('ROLLBACK');
+    expect(texts).not.toContain('COMMIT');
+    expect(released()).toBe(1);
   });
 });
 

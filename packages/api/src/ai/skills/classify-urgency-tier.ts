@@ -55,6 +55,12 @@ import {
   STATIC_ATOMS,
   type StaticAtom,
 } from './condition-grammar';
+import { createLogger } from '../../logging/logger';
+
+const logger = createLogger({
+  service: 'ai.skills.classify-urgency-tier',
+  environment: process.env.NODE_ENV || 'development',
+});
 
 /**
  * Phase 4d-1 review carryover (Issue #1): explicit ambiguous tier so
@@ -397,8 +403,7 @@ function evaluateAtom(atom: string, ctx: UrgencyContext): boolean {
   // so we treat reaching here as a defect rather than a silent false.
   // Defensive: still return false so a hot-path bug doesn't crash a
   // call, but log via the eval-trail when one's wired in 4d-2.
-  // eslint-disable-next-line no-console
-  console.warn('classify-urgency-tier: unknown atom at runtime', { atom: a });
+  logger.warn('classify-urgency-tier: unknown atom at runtime', { atom: a });
   return false;
 }
 

@@ -1,0 +1,50 @@
+{
+  "id": "es-emergency-escalation",
+  "bucket": "11-spanish",
+  "callerId": "+15555551104",
+  "callerIdBlocked": false,
+  "fixtures": {
+    "tenant": {
+      "id": "t_11_es_emergency",
+      "display_name": "Test HVAC Co",
+      "timezone": "America/Los_Angeles",
+      "default_language": "en",
+      "supported_languages": ["en", "es"]
+    },
+    "customers": [
+      {
+        "id": "cust_11_es_roberto",
+        "tenantId": "t_11_es_emergency",
+        "firstName": "Roberto",
+        "lastName": "Martínez",
+        "displayName": "Roberto Martínez",
+        "companyName": null,
+        "primaryPhone": "+15555551104",
+        "secondaryPhone": null,
+        "email": "roberto.martinez@example.com",
+        "preferredChannel": "phone",
+        "smsConsent": false,
+        "communicationNotes": null,
+        "isArchived": false,
+        "createdBy": "user_seed",
+        "createdAt": "2026-02-01T10:00:00.000Z",
+        "updatedAt": "2026-04-01T10:00:00.000Z"
+      }
+    ]
+  },
+  "turns": [
+    {
+      "caller": "¡Hay una fuga de gas en mi casa, se siente el olor a gas muy fuerte!",
+      "expected": {
+        "escalates": true,
+        "spokenAnswerMatches": "Si alguien está en peligro inmediato, cuelgue y llame al 911."
+      },
+      "hangupAfter": false
+    }
+  ],
+  "grading": {
+    "appliesFloor": [1, 2, 3, 4, 5, 7],
+    "appliesDisposition": [9, 11, 12]
+  },
+  "layer2Eligible": false
+}

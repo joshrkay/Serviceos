@@ -16,9 +16,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@v7
         with:
-          node-version: '20'
+          node-version-file: '.nvmrc'
           cache: 'npm'
       - run: npm ci
 
@@ -33,11 +33,69 @@ jobs:
       - name: Lint
         run: npm run lint
 
-      # infra/ moved to experiments/infra (B9): not deployed, removed
-      # from CI builds. See experiments/README.md.
+      # ESLint deliberately does NOT run here.
+      #
+      # `eslint.config.mjs` and `npm run lint:eslint` exist and work locally.
+      # A full type-aware run takes 178s and reports 3,367 findings, and it was
+      # wired here as a `continue-on-error` step producing an artifact. Measured
+      # against what it bought: ~3 minutes on this job's critical path for every
+      # PR, in exchange for a report nobody reads and a step that cannot fail.
+      # It changed no behaviour, so it was removed.
+      #
+      # The path back is deliberate, not a re-enable: block on the four
+      # tractable rules — await-thenable (6), no-fallthrough (12),
+      # no-floating-promises (75), require-atomic-updates (63), 156 findings
+      # total — scoped to packages/api/src and packages/web/src, and leave the
+      # 900+-finding rules off entirely. Counts and rationale in
+      # docs/quality/engineering-baseline-2026-07-25.md. Re-adding a
+      # report-only pass over everything would recreate the same 3-minute
+      # no-op.
+
+      # Records the measured quality baseline so later work diffs against an
+      # artifact instead of recollection. Cheap: reads files only, never runs a
+      # linter. With no ESLint report produced here, `staticAnalysis.eslint.*`
+      # is null while `eslintConfigPresent` / `suppressionComments` still
+      # populate — run `npm run lint:eslint:report` locally and pass
+      # `--eslint-report` to fill in the counts.
+      - name: Collect quality metrics
+        if: always()
+        run: npm run quality:metrics -- --out quality-metrics.json
+
+      - name: Upload quality metrics
+        if: always()
+        uses: actions/upload-artifact@v5
+        with:
+          name: quality-metrics
+          path: quality-metrics.json
+          if-no-files-found: warn
+
+      # infra/ (AWS CDK, D-001) was quarantined to experiments/infra (B9)
+      # as not deployed/not in CI, then removed entirely in 2026-07 along
+      # with the rest of experiments/. See docs/decisions.md D-016.
 
       - name: AI gateway guard
         run: npm run check:ai-gateway-guard --workspace=packages/api
+
+      - name: FK-path coverage guard
+        run: npm run check:fk-paths --workspace=packages/api
+
+      # FAIL-VIS — env-coverage guard.
+      #
+      # A sweep of the running services found 85 environment variables read by
+      # the API and set in NEITHER Railway environment — including
+      # GOOGLE_MAPS_API_KEY (travel time silently degrades to straight-line
+      # distance), SENTRY_DSN (no crash reporting), and three
+      # SUPERVISOR_DEFAULT_* spend caps. Every one is read with `?? default`,
+      # so nothing ever failed loudly.
+      #
+      # This gate makes "a var the code reads that nobody declared" a build
+      # error. CI cannot query Railway, so the contract it enforces is the
+      # checked-in .env.production.example plus scripts/env-allowlist.json.
+      # It BLOCKS on genuinely undeclared vars and on stale allowlist entries;
+      # the seeded `unreviewed` backlog prints loudly but does not fail (run
+      # `npm run check:env-coverage:strict` locally to see the strict verdict).
+      - name: Env-coverage guard
+        run: npm run check:env-coverage
 
       - name: Unit tests
         run: npm test -- --reporter=verbose
@@ -89,13 +147,19 @@ jobs:
     timeout-minutes: 8
     steps:
       - uses: actions/checkout@v5
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@v7
         with:
-          node-version: '20'
+          node-version-file: '.nvmrc'
           cache: 'npm'
       - run: npm ci
       - name: Run voice quality suite
         run: npm run voice-quality --workspace=packages/api
+        # WS1 (QUALITY-2026-07-12) — enforce the launch gate: the merge step
+        # exits non-zero when launchGate.pass is false (floor break, a bucket
+        # under threshold incl. Spanish ≥90%, or overall <90%). Without this
+        # the corpus could regress while the job stayed green.
+        env:
+          VOICE_QUALITY_ENFORCE_LAUNCH_GATE: 'true'
       - name: Upload report artifact
         if: always()
         uses: actions/upload-artifact@v5
@@ -111,3 +175,182 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPORT_PATH: packages/api/voice-quality-report.json
+
+  # WS7 — Mobile typecheck gate.
+  #
+  # packages/mobile is an isolated Expo project (intentionally NOT a root npm
+  # workspace — see packages/mobile/package.json), so the root `npm ci` in the
+  # `test` job never installs it and its `tsc --noEmit` never ran in CI. This
+  # dedicated job installs the mobile tree and gates its typecheck, catching
+  # type regressions in the mobile client on every PR.
+  #
+  # RN component tests (`npm run test:rn`, jest-expo) remain INTENTIONALLY
+  # UNGATED: the `jest` command currently globs the Vitest `*.test.ts` specs
+  # (which import from 'vitest' and set `@vitest-environment jsdom`) and fails
+  # to load all 84 suites — jest has no config scoping it to jest-expo specs.
+  # Gating it today would be a permanent red. Wiring a jest.config that selects
+  # only jest-expo specs (and excludes the Vitest suites) is the prerequisite,
+  # tracked separately. The Vitest mobile suite (logic/hooks/jsdom screen
+  # contracts) already gates in the `test` job's "Mobile unit tests" step.
+  mobile-typecheck:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: '.nvmrc'
+          cache: 'npm'
+          cache-dependency-path: |
+            package-lock.json
+            packages/mobile/package-lock.json
+      # BOTH installs are required: mobile's own npm ci provides expo/RN types
+      # (mobile is not a root workspace), while the ROOT npm ci provides the
+      # deps its ../shared imports resolve against (zod) and the hoisted
+      # @testing-library/react its vitest specs type against. With only the
+      # isolated install, tsc fails on every ../shared contract (TS2307).
+      - name: Install root workspace deps
+        run: npm ci
+      - name: Install mobile deps
+        run: npm ci
+        working-directory: packages/mobile
+      # Run inside the package dir — mobile is not a root npm workspace, so
+      # `--workspace=packages/mobile` would not resolve.
+      - name: Type check Mobile
+        run: npm run typecheck
+        working-directory: packages/mobile
+
+  # T6-F02 — corpus-integrity gate.
+  #
+  # Nothing in CI ever ran the corpus schema/dedup/PII checks before this
+  # job (grepping `.github/workflows/` for `corpus:|test:dedup|pii-leakage`
+  # returned nothing) — that's exactly how the PR #609 mixed-schema merge
+  # went undetected. Sibling job to `mobile-typecheck`: its own checkout +
+  # setup-node + `npm ci`, no `needs:`, no Docker/Postgres, so it runs in
+  # parallel and stays fast.
+  #
+  # Known pre-existing findings surfaced by fixing these scripts (see
+  # docs/plans/2026-07-18-003-fix-corpus-integrity-plan.md), tracked
+  # separately from this gate's own correctness:
+  #   - `test:corpus-schema` fails today: 1,184 migrated legacy rows use 16
+  #     intents absent from behaviors.yaml's 35-behavior taxonomy — T6-F03
+  #     (taxonomy drift), not a schema bug.
+  #   - `corpus:dedup` fails today: ~600 near-duplicate pairs already existed
+  #     in the original generated EN rows (generate-utterances.ts's
+  #     discourse-prefix augmentation produces near-identical variants of
+  #     templates with no fill slots) — pre-existing, independent of the
+  #     PR #609 schema merge this gate targets; needs its own follow-up.
+  # The PII guard blocks now (green today, highest stakes). The two steps
+  # red on pre-existing defects run continue-on-error with loud names so
+  # their signal stays visible without training everyone to ignore a red
+  # check; flip each to blocking in the commit that fixes its follow-up.
+  corpus-integrity:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: '.nvmrc'
+          cache: 'npm'
+      - run: npm ci
+      - name: Corpus PII guard (blocking)
+        run: npm run test:pii-leakage
+      - name: Corpus schema + floors (non-blocking until T6-F03 relabel)
+        continue-on-error: true
+        run: npm run test:corpus-schema
+      - name: Corpus duplicate gate (non-blocking until generator dedup follow-up)
+        continue-on-error: true
+        run: npm run corpus:dedup
+
+  # Voice-quality cassette-drift guard.
+  #
+  # WHY THIS EXISTS SEPARATELY FROM THE `voice-quality` JOB
+  #
+  # The cassette lookup key is sha256({model, prompt, schema}) where `prompt`
+  # is the full messages array — so a SINGLE BYTE anywhere in the ~37KB
+  # classifier SYSTEM_PROMPT re-keys every entry in every cassette at once.
+  # When that happens the corpus suite goes ~64-red, but each failure surfaces
+  # as a rubric assertion ("expected intent 'draft_estimate', got '<none>'")
+  # because the drift error is thrown inside a turn and swallowed by the
+  # runner. The actionable "run voice-quality:refresh" line is buried in
+  # stderr. Commit d39e5708 (an 8-line DOC-COMMENT addition inside the
+  # classifier prompt) did exactly this and went unfixed.
+  #
+  # Two things made that invisible, and this job fixes both:
+  #   1. `voice-quality` has `needs: [test]`, so while `test` is red this
+  #      signal never runs at all. This job has NO `needs:` — sibling to
+  #      `corpus-integrity` — so drift reports even on a red-test PR.
+  #   2. The message was buried. This job reports ONLY drift, in one line.
+  #
+  # WHY IT CHECKS THE REAL CONDITION, NOT A PATH HEURISTIC
+  #
+  # The tempting cheap guard is "prompt file changed && cassettes didn't".
+  # That has a false-positive trap with no escape hatch: editing a comment
+  # OUTSIDE the prompt string changes no hash, so `voice-quality:refresh`
+  # would produce an EMPTY diff and the author could never satisfy the guard.
+  # A false positive that blocks PRs is worse than no guard. Since the whole
+  # replay suite runs offline in ~3s, this job just runs it and looks for the
+  # actual drift error — zero false positives by construction.
+  #
+  # SCOPE: this job fails ONLY on cassette drift. Genuine rubric/agent
+  # regressions are the `voice-quality` job's business and are deliberately
+  # NOT failed here, so a red mark on this job always means exactly one
+  # thing and always has exactly one fix.
+  voice-quality-cassette-drift:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: '.nvmrc'
+          cache: 'npm'
+      - run: npm ci
+      # Replay mode is the default. Never set
+      # VOICE_QUALITY_ALLOW_CASSETTE_FALLBACK here — the strict default is
+      # what makes a green gate PROVE cassettes match the current prompts.
+      # `|| true` keeps non-drift failures from failing THIS job; the grep
+      # below is the only thing that decides its verdict.
+      - name: Replay voice-quality corpus (drift detection only)
+        run: |
+          set -o pipefail
+          npx vitest run -c vitest.voice-quality.config.ts 2>&1 \
+            | tee /tmp/vq-replay.log || true
+        working-directory: packages/api
+      - name: Fail on cassette drift
+        run: |
+          if grep -q "cassette drift" /tmp/vq-replay.log; then
+            echo "::error title=Voice-quality cassette drift::Cassettes are stale — run 'npm run voice-quality:refresh' in packages/api and commit the cassette diff."
+            echo ""
+            echo "================================================================"
+            echo " VOICE-QUALITY CASSETTE DRIFT"
+            echo "================================================================"
+            echo ""
+            echo "A prompt used by the voice agent changed without the cassettes"
+            echo "being re-recorded. The cassette key is a sha256 over the FULL"
+            echo "system prompt, so one changed byte invalidates every entry —"
+            echo "expect the whole corpus red, not one test."
+            echo ""
+            echo "FIX (offline, ~3 seconds, no API key, costs \$0):"
+            echo ""
+            echo "    cd packages/api"
+            echo "    npm run voice-quality:refresh"
+            echo "    git add src/ai/voice-quality/corpus/cassettes"
+            echo ""
+            echo "Re-recording uses the deterministic in-repo ScriptAwareMockGateway,"
+            echo "NOT a live LLM. It makes no network calls."
+            echo ""
+            echo "Runbook: docs/superpowers/runbooks/voice-quality-cassette-refresh.md"
+            echo ""
+            echo "Do NOT set VOICE_QUALITY_ALLOW_CASSETTE_FALLBACK=1 to silence this."
+            echo "That re-introduces the documented silent-stale-response hazard:"
+            echo "docs/solutions/test-failures/voice-quality-cassette-drift-serves-stale-response.md"
+            echo ""
+            echo "Drifted scripts:"
+            grep -o "cassette drift: scriptId=[A-Za-z0-9_-]*" /tmp/vq-replay.log \
+              | sed 's/.*scriptId=/  - /' | sort -u
+            echo "================================================================"
+            exit 1
+          fi
+          echo "No cassette drift detected."

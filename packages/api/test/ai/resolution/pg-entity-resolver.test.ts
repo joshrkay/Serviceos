@@ -26,25 +26,37 @@ interface MockRow {
   summary?: string;
   status?: string | null;
   invoice_number?: string;
+  doc_number?: string;
   scheduled_start?: string;
+  job_id?: string;
   score?: number;
 }
 
 function makeMockPool(rowsBySlot: Array<MockRow[] | undefined>) {
   const calls: CapturedCall[] = [];
   let releaseCount = 0;
+  let businessQueryIndex = 0;
 
   // Each resolve() runs in a transaction: BEGIN → set_config(tenant) →
-  // business SELECT → COMMIT (ROLLBACK on error). Slot 0 is the canned result
-  // for the RLS-context statements (always empty); slot 1 holds the business
-  // rows returned by the single data query.
+  // business SELECT(s) → COMMIT (ROLLBACK on error). Slot 0 is the canned result
+  // for the RLS-context statements (always empty); slots 1+ hold business rows
+  // returned in order (exact-match query, then trigram fallback, etc.).
   const isContextStatement = (sql: string) =>
     /^\s*(BEGIN|COMMIT|ROLLBACK|SET\b)/i.test(sql) || /set_config/i.test(sql);
+
+  const businessSlots = rowsBySlot.slice(1);
 
   const client: Partial<PoolClient> = {
     query: vi.fn(async (sql: string, params?: unknown[]) => {
       calls.push({ sql, params: params ?? [] });
-      const rows = (isContextStatement(sql) ? rowsBySlot[0] : rowsBySlot[1]) ?? [];
+      let rows: MockRow[];
+      if (isContextStatement(sql)) {
+        rows = rowsBySlot[0] ?? [];
+      } else {
+        const slot = businessSlots[businessQueryIndex] ?? businessSlots[businessSlots.length - 1];
+        businessQueryIndex += 1;
+        rows = slot ?? [];
+      }
       return {
         rows,
         rowCount: rows.length,
@@ -215,6 +227,75 @@ describe('PgEntityResolver — customer', () => {
 });
 
 // ---------------------------------------------------------------------------
+// toResult confidence bands (τ_ent = 0.80 / τ_ent_confirm_low = 0.60)
+// ---------------------------------------------------------------------------
+
+describe('PgEntityResolver — toResult confidence bands', () => {
+  async function resolveWithScore(score: number) {
+    const { pool } = makeMockPool([
+      undefined,
+      [{ id: 'cust-1', display_name: 'Boundary Corp', primary_phone: null, score }],
+    ]);
+    const resolver = new PgEntityResolver(pool);
+    return resolver.resolve({ tenantId: TENANT_ID, reference: 'Boundary', kind: 'customer' });
+  }
+
+  it('0.85 (above τ_ent) → resolved', async () => {
+    const result = await resolveWithScore(0.85);
+    expect(result.kind).toBe('resolved');
+  });
+
+  it('0.80 (at τ_ent) → resolved', async () => {
+    const result = await resolveWithScore(0.80);
+    expect(result.kind).toBe('resolved');
+  });
+
+  it('0.70 (regression case: mid-band) → low_confidence, NOT resolved or not_found', async () => {
+    const result = await resolveWithScore(0.70);
+    expect(result.kind).toBe('low_confidence');
+    if (result.kind === 'low_confidence') {
+      expect(result.candidate.id).toBe('cust-1');
+      expect(result.candidate.score).toBe(0.70);
+    }
+  });
+
+  it('0.60 (at τ_ent_confirm_low) → low_confidence', async () => {
+    const result = await resolveWithScore(0.60);
+    expect(result.kind).toBe('low_confidence');
+  });
+
+  it('0.59 (just below τ_ent_confirm_low) → not_found', async () => {
+    const result = await resolveWithScore(0.59);
+    expect(result.kind).toBe('not_found');
+  });
+
+  it('0.30 (well below τ_ent_confirm_low) → not_found', async () => {
+    const result = await resolveWithScore(0.30);
+    expect(result.kind).toBe('not_found');
+  });
+
+  it('two candidates in the mid-band → ambiguous', async () => {
+    const { pool } = makeMockPool([
+      undefined,
+      [
+        { id: 'cust-1', display_name: 'Rodriguez Plumbing', primary_phone: null, score: 0.72 },
+        { id: 'cust-2', display_name: 'Rodriguez HVAC', primary_phone: null, score: 0.65 },
+      ],
+    ]);
+    const resolver = new PgEntityResolver(pool);
+    const result = await resolver.resolve({
+      tenantId: TENANT_ID,
+      reference: 'Rodriguez',
+      kind: 'customer',
+    });
+    expect(result.kind).toBe('ambiguous');
+    if (result.kind === 'ambiguous') {
+      expect(result.candidates).toHaveLength(2);
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Empty / null input → skipped
 // ---------------------------------------------------------------------------
 
@@ -298,9 +379,34 @@ describe('PgEntityResolver — job', () => {
 // ---------------------------------------------------------------------------
 
 describe('PgEntityResolver — invoice', () => {
-  it('matching invoice number returns resolved', async () => {
+  it('exact invoice number match returns resolved before trigram', async () => {
     const { pool, calls } = makeMockPool([
       undefined,
+      [{ id: 'inv-exact', doc_number: 'INV-0042', status: 'sent' }],
+    ]);
+
+    const resolver = new PgEntityResolver(pool);
+    const result = await resolver.resolve({
+      tenantId: TENANT_ID,
+      reference: 'inv-0042',
+      kind: 'invoice',
+    });
+
+    expect(result.kind).toBe('resolved');
+    if (result.kind === 'resolved') {
+      expect(result.candidate.id).toBe('inv-exact');
+      expect(result.candidate.score).toBe(1.0);
+    }
+
+    const exactQuery = calls.find((c) => c.sql.includes('FROM invoices'));
+    expect(exactQuery!.sql).toMatch(/UPPER\(invoice_number\)\s*=\s*UPPER\(\$2\)/);
+    expect(exactQuery!.params[1]).toBe('inv-0042');
+  });
+
+  it('matching invoice number returns resolved via trigram when no exact row', async () => {
+    const { pool, calls } = makeMockPool([
+      undefined,
+      [], // exact match miss
       [{ id: 'inv-1', invoice_number: 'INV-0042', status: 'sent', score: 1.0 }],
     ]);
 
@@ -316,9 +422,12 @@ describe('PgEntityResolver — invoice', () => {
       expect(result.candidate.label).toBe('INV-0042');
     }
 
-    const businessQuery = calls.find((c) => c.sql.includes('FROM invoices'));
-    expect(businessQuery!.sql).toMatch(/tenant_id\s*=\s*\$1/);
-    expect(businessQuery!.params[0]).toBe(TENANT_ID);
+    const businessQueries = calls.filter((c) => c.sql.includes('FROM invoices'));
+    expect(businessQueries).toHaveLength(2);
+    expect(businessQueries[0]!.sql).toMatch(/UPPER\(invoice_number\)/);
+    expect(businessQueries[1]!.sql).toMatch(/similarity\(invoice_number/);
+    expect(businessQueries[1]!.sql).toMatch(/tenant_id\s*=\s*\$1/);
+    expect(businessQueries[1]!.params[0]).toBe(TENANT_ID);
   });
 
   it('two invoice candidates above τ_ent returns ambiguous', async () => {
@@ -435,21 +544,362 @@ describe('PgEntityResolver — appointment', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Estimate kind → skipped (no index defined)
+// SCH-03 — job-scoped appointment fallback ("that job" isn't a date phrase)
 // ---------------------------------------------------------------------------
 
-describe('PgEntityResolver — estimate', () => {
-  it('estimate kind always returns skipped', async () => {
-    const { pool } = makeMockPool([]);
+describe('PgEntityResolver — appointment job-scoped fallback (SCH-03)', () => {
+  const JOB_ID = 'job-42';
+
+  it('unparseable reference + jobId + one upcoming appointment → resolved', async () => {
+    const futureDate = new Date();
+    futureDate.setUTCDate(futureDate.getUTCDate() + 3);
+
+    const { pool, calls } = makeMockPool([
+      undefined,
+      [
+        {
+          id: 'appt-job-1',
+          job_id: JOB_ID,
+          scheduled_start: futureDate.toISOString(),
+          status: 'scheduled',
+        },
+      ],
+    ]);
+
+    const resolver = new PgEntityResolver(pool);
+    const result = await resolver.resolve({
+      tenantId: TENANT_ID,
+      reference: 'that job',
+      kind: 'appointment',
+      jobId: JOB_ID,
+    });
+
+    expect(result.kind).toBe('resolved');
+    if (result.kind === 'resolved') {
+      expect(result.candidate.id).toBe('appt-job-1');
+      expect(result.candidate.kind).toBe('appointment');
+    }
+
+    const businessQuery = calls.find((c) => c.sql.includes('FROM appointments'));
+    expect(businessQuery).toBeDefined();
+    expect(businessQuery!.sql).toMatch(/tenant_id\s*=\s*\$1/);
+    expect(businessQuery!.sql).toMatch(/job_id\s*=\s*\$2/);
+    expect(businessQuery!.sql).toMatch(/status\s*<>\s*'canceled'/);
+    expect(businessQuery!.sql).toMatch(/scheduled_start\s*>=\s*now\(\)/);
+    expect(businessQuery!.params).toEqual([TENANT_ID, JOB_ID]);
+  });
+
+  it('unparseable reference + jobId + two upcoming appointments → ambiguous', async () => {
+    const futureDate = new Date();
+    futureDate.setUTCDate(futureDate.getUTCDate() + 3);
+
+    const { pool } = makeMockPool([
+      undefined,
+      [
+        { id: 'appt-1', job_id: JOB_ID, scheduled_start: futureDate.toISOString(), status: 'scheduled' },
+        { id: 'appt-2', job_id: JOB_ID, scheduled_start: futureDate.toISOString(), status: 'scheduled' },
+      ],
+    ]);
+
+    const resolver = new PgEntityResolver(pool);
+    const result = await resolver.resolve({
+      tenantId: TENANT_ID,
+      reference: 'that job',
+      kind: 'appointment',
+      jobId: JOB_ID,
+    });
+
+    expect(result.kind).toBe('ambiguous');
+    if (result.kind === 'ambiguous') {
+      expect(result.candidates).toHaveLength(2);
+      expect(result.candidates.map((c) => c.id)).toEqual(['appt-1', 'appt-2']);
+    }
+  });
+
+  it('unparseable reference + jobId + zero upcoming appointments → not_found', async () => {
+    const { pool } = makeMockPool([undefined, []]);
+
+    const resolver = new PgEntityResolver(pool);
+    const result = await resolver.resolve({
+      tenantId: TENANT_ID,
+      reference: 'that job',
+      kind: 'appointment',
+      jobId: JOB_ID,
+    });
+
+    expect(result.kind).toBe('not_found');
+    if (result.kind === 'not_found') {
+      expect(result.reference).toBe('that job');
+    }
+  });
+
+  it('unparseable reference WITHOUT jobId now falls through to the tenant-scoped lookup', async () => {
+    // Previously this asserted the resolver gave up WITHOUT touching the DB.
+    // That early return was the SCH-03 bug: it made a first-turn cancel
+    // escalate even when the tenant had exactly one upcoming appointment.
+    const { pool, calls } = makeMockPool([undefined, []]);
+
+    const resolver = new PgEntityResolver(pool);
+    const result = await resolver.resolve({
+      tenantId: TENANT_ID,
+      reference: 'that job',
+      kind: 'appointment',
+    });
+
+    expect(result.kind).toBe('not_found');
+    const apptQueries = calls.filter((c) => c.sql.includes('FROM appointments'));
+    expect(apptQueries).toHaveLength(1);
+    expect(apptQueries[0].sql).not.toMatch(/job_id/);
+  });
+
+  it('a PARSEABLE reference still uses the date-range query even when jobId is present (date wins)', async () => {
+    const futureDate = new Date();
+    futureDate.setUTCDate(futureDate.getUTCDate() + 1);
+
+    const { pool, calls } = makeMockPool([
+      undefined,
+      [{ id: 'appt-date', scheduled_start: futureDate.toISOString(), status: 'scheduled' }],
+    ]);
+
+    const resolver = new PgEntityResolver(pool);
+    const result = await resolver.resolve({
+      tenantId: TENANT_ID,
+      reference: 'tomorrow',
+      kind: 'appointment',
+      jobId: JOB_ID,
+    });
+
+    expect(result.kind).toBe('resolved');
+    if (result.kind === 'resolved') {
+      expect(result.candidate.id).toBe('appt-date');
+    }
+    const businessQuery = calls.find((c) => c.sql.includes('FROM appointments'));
+    expect(businessQuery!.sql).not.toMatch(/job_id/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// SCH-03 — tenant-scoped upcoming-appointment fallback (no date, no jobId)
+//
+// The caller's FIRST sentence is "Cancel the upcoming appointment for that
+// job." `context.jobId` is only ever written by a PRIOR turn that resolved a
+// job (transitions.ts), so on turn one there is no job anchor, and "the
+// upcoming appointment for that job" parses as no date. Before the fallback
+// the resolver returned not_found here and inapp-adapter.ts's
+// requiresExistingEntity guard escalated the caller to on-call.
+// ---------------------------------------------------------------------------
+
+describe('PgEntityResolver — tenant-scoped upcoming appointment fallback (SCH-03)', () => {
+  function upcoming(id: string, daysOut: number) {
+    const d = new Date();
+    d.setUTCDate(d.getUTCDate() + daysOut);
+    return { id, scheduled_start: d.toISOString(), status: 'scheduled' };
+  }
+
+  it('reference="that job", no jobId, ONE upcoming tenant appointment → resolved', async () => {
+    const { pool, calls } = makeMockPool([undefined, [upcoming('appt-only', 2)]]);
     const resolver = new PgEntityResolver(pool);
 
     const result = await resolver.resolve({
       tenantId: TENANT_ID,
-      reference: 'EST-001',
+      reference: 'that job',
+      kind: 'appointment',
+    });
+
+    expect(result.kind).toBe('resolved');
+    if (result.kind === 'resolved') {
+      expect(result.candidate.id).toBe('appt-only');
+      expect(result.candidate.kind).toBe('appointment');
+    }
+
+    // Same shape as resolveAppointmentByJob, minus job_id — and tenant-scoped.
+    const businessQuery = calls.find((c) => c.sql.includes('FROM appointments'));
+    expect(businessQuery).toBeDefined();
+    expect(businessQuery!.sql).toMatch(/tenant_id\s*=\s*\$1/);
+    expect(businessQuery!.sql).toMatch(/status\s*<>\s*'canceled'/);
+    expect(businessQuery!.sql).toMatch(/scheduled_start\s*>=\s*now\(\)/);
+    expect(businessQuery!.sql).toMatch(/ORDER BY scheduled_start ASC/);
+    expect(businessQuery!.sql).not.toMatch(/job_id/);
+    expect(businessQuery!.params).toEqual([TENANT_ID]);
+  });
+
+  it('reference="that job", no jobId, THREE upcoming tenant appointments → ambiguous', async () => {
+    const { pool } = makeMockPool([
+      undefined,
+      [upcoming('appt-1', 1), upcoming('appt-2', 2), upcoming('appt-3', 3)],
+    ]);
+    const resolver = new PgEntityResolver(pool);
+
+    const result = await resolver.resolve({
+      tenantId: TENANT_ID,
+      reference: 'that job',
+      kind: 'appointment',
+    });
+
+    // Routed into the FSM's existing entity_ambiguous one-tap disambiguation
+    // by inapp-adapter.ts toResolutionEvent — never a silent pick.
+    expect(result.kind).toBe('ambiguous');
+    if (result.kind === 'ambiguous') {
+      expect(result.candidates.map((c) => c.id)).toEqual(['appt-1', 'appt-2', 'appt-3']);
+    }
+  });
+
+  it('reference="that job", no jobId, NO upcoming tenant appointments → not_found', async () => {
+    const { pool } = makeMockPool([undefined, []]);
+    const resolver = new PgEntityResolver(pool);
+
+    const result = await resolver.resolve({
+      tenantId: TENANT_ID,
+      reference: 'that job',
+      kind: 'appointment',
+    });
+
+    // Still not_found — the 46a954e1 escalation guard must keep firing when a
+    // record-operating intent has genuinely nothing to resolve.
+    expect(result.kind).toBe('not_found');
+    if (result.kind === 'not_found') {
+      expect(result.reference).toBe('that job');
+    }
+  });
+
+  it('more candidates than the disambiguation cap → not_found, never a 5-of-many readback', async () => {
+    const { pool, calls } = makeMockPool([
+      undefined,
+      [
+        upcoming('appt-1', 1),
+        upcoming('appt-2', 2),
+        upcoming('appt-3', 3),
+        upcoming('appt-4', 4),
+        upcoming('appt-5', 5),
+        upcoming('appt-6', 6),
+      ],
+    ]);
+    const resolver = new PgEntityResolver(pool);
+
+    const result = await resolver.resolve({
+      tenantId: TENANT_ID,
+      reference: 'that job',
+      kind: 'appointment',
+    });
+
+    expect(result.kind).toBe('not_found');
+    // LIMIT 6 exists purely to detect "more than the 5 we can read back".
+    const businessQuery = calls.find((c) => c.sql.includes('FROM appointments'));
+    expect(businessQuery!.sql).toMatch(/LIMIT 6/);
+  });
+
+  it('a jobId anchor still wins over the tenant-wide fallback', async () => {
+    const { pool, calls } = makeMockPool([undefined, [upcoming('appt-job', 2)]]);
+    const resolver = new PgEntityResolver(pool);
+
+    const result = await resolver.resolve({
+      tenantId: TENANT_ID,
+      reference: 'that job',
+      kind: 'appointment',
+      jobId: 'job-99',
+    });
+
+    expect(result.kind).toBe('resolved');
+    const businessQuery = calls.find((c) => c.sql.includes('FROM appointments'));
+    expect(businessQuery!.sql).toMatch(/job_id\s*=\s*\$2/);
+    expect(businessQuery!.params).toEqual([TENANT_ID, 'job-99']);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Estimate kind — exact document number, then customer → jobs → estimates
+//
+// SQL SHAPE ONLY. The Pool is mocked here, so these tests can say which query
+// runs with which parameters and nothing more; whether the traversal actually
+// finds an estimate is pinned against real Postgres in
+// test/integration/entity-resolution.test.ts ("kind: estimate"), per the repo
+// rule that a mocked-DB test is never the only proof a query works.
+// ---------------------------------------------------------------------------
+
+describe('PgEntityResolver — estimate', () => {
+  it('exact estimate number returns resolved with score 1.0', async () => {
+    const { pool, calls } = makeMockPool([
+      undefined,
+      [{ id: 'est-1', doc_number: 'EST-0042', status: 'draft' }],
+    ]);
+
+    const resolver = new PgEntityResolver(pool);
+    const result = await resolver.resolve({
+      tenantId: TENANT_ID,
+      reference: 'EST-0042',
       kind: 'estimate',
     });
 
-    expect(result.kind).toBe('skipped');
+    expect(result.kind).toBe('resolved');
+    if (result.kind === 'resolved') {
+      expect(result.candidate.id).toBe('est-1');
+      expect(result.candidate.label).toBe('EST-0042');
+      expect(result.candidate.score).toBe(1.0);
+    }
+
+    const businessQuery = calls.find((c) => c.sql.includes('FROM estimates'));
+    expect(businessQuery!.sql).toMatch(/tenant_id\s*=\s*\$1/);
+    expect(businessQuery!.sql).toMatch(/UPPER\(estimate_number\)\s*=\s*UPPER\(\$2\)/);
+    expect(businessQuery!.params[0]).toBe(TENANT_ID);
+  });
+
+  it('unknown estimate number returns not_found', async () => {
+    const { pool } = makeMockPool([undefined, []]);
+    const resolver = new PgEntityResolver(pool);
+
+    const result = await resolver.resolve({
+      tenantId: TENANT_ID,
+      reference: 'EST-9999',
+      kind: 'estimate',
+    });
+
+    expect(result.kind).toBe('not_found');
+  });
+
+  it('a spoken reference falls back to the customer → jobs → estimates traversal, with the document noun stripped from the needle', async () => {
+    const { pool, calls } = makeMockPool([undefined, []]);
+    const resolver = new PgEntityResolver(pool);
+
+    await resolver.resolve({
+      tenantId: TENANT_ID,
+      reference: 'the Garcia estimate',
+      kind: 'estimate',
+    });
+
+    const traversal = calls.find((c) => c.sql.includes('JOIN customers'));
+    expect(traversal).toBeDefined();
+    expect(traversal!.sql).toMatch(/FROM estimates e/);
+    expect(traversal!.sql).toMatch(/JOIN jobs j\s+ON j\.id = e\.job_id/);
+    expect(traversal!.sql).toMatch(/JOIN customers c\s+ON c\.id = j\.customer_id/);
+    expect(traversal!.sql).toMatch(/e\.tenant_id\s*=\s*\$1/);
+    expect(traversal!.sql).toMatch(/e\.deleted_at IS NULL/);
+    expect(traversal!.sql).toMatch(/c\.is_archived = false/);
+    expect(traversal!.sql).toMatch(/strict_word_similarity\(\$2, c\.display_name\)/);
+    // "the" is a shared stopword; "estimate" is the document noun. Both are
+    // out of the needle — keeping either leaves the score under the confirm
+    // floor (measurements in ESTIMATE_DOC_STOPWORDS' doc comment).
+    expect(traversal!.params[1]).toBe('garcia');
+    // The estimate row's OWN free text is never searched: matching
+    // customer_message is the arrangement that made the nudge suite a false
+    // green (docs/solutions/test-failures/a-fixture-arranged-to-pass-proves-
+    // nothing.md).
+    expect(traversal!.sql).not.toMatch(/customer_message/);
+  });
+
+  it('a reference naming nobody ("the estimate") never issues the traversal query at all', async () => {
+    const { pool, calls } = makeMockPool([undefined, []]);
+    const resolver = new PgEntityResolver(pool);
+
+    const result = await resolver.resolve({
+      tenantId: TENANT_ID,
+      reference: 'the estimate',
+      kind: 'estimate',
+    });
+
+    expect(result.kind).toBe('not_found');
+    // An empty needle must not fan out across the tenant — the traversal is
+    // skipped entirely rather than run with ''.
+    expect(calls.find((c) => c.sql.includes('JOIN customers'))).toBeUndefined();
   });
 });
 

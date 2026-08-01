@@ -87,7 +87,7 @@ export class InMemoryCallMeBackRepository implements CallMeBackRepository {
 
   async create(input: CreateCallMeBackInput): Promise<CallMeBackTask> {
     // Idempotent on (tenantId, sessionId, reason) — mirrors the pg unique
-    // index (migration 198) so a retried /callback-message returns the existing
+    // index (migration 268) so a retried /callback-message returns the existing
     // callback instead of a dup, while two DIFFERENT problems on one call each
     // keep their own task (ANS-001: the E1 alert task must not be swallowed by
     // the E1 booking task).

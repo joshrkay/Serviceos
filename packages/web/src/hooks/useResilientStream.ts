@@ -48,6 +48,18 @@ export type WsServerFrame =
       state?: string;
       payload?: Record<string, unknown>;
       seq?: number;
+    }
+  | {
+      kind: 'dispatch.presence';
+      channel: 'dispatch';
+      date: string;
+      entries: Array<{
+        userId: string;
+        displayName: string;
+        appointmentId: string | null;
+        mode: 'viewing' | 'dragging';
+      }>;
+      seq?: number;
     };
 
 export interface UseResilientStreamOptions {

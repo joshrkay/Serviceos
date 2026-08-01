@@ -5,13 +5,22 @@ import {
   SmsMessage,
 } from "./delivery-provider";
 import { DeliveryError } from "./notification-errors";
+import {
+  TwilioEmailConfig,
+  TwilioEmailDeliveryProvider,
+} from "./twilio-email-delivery-provider";
 
 /**
  * Production message delivery via Twilio.
  *
  * SMS uses Twilio Programmable Messaging (the same API the existing
- * feedback dispatcher uses). Email uses Twilio SendGrid v3. Both
- * channels share account credentials via the parent Twilio billing
+ * feedback dispatcher uses). Email has TWO possible backends, selected
+ * by which credentials the deployment actually has:
+ *   - `twilioEmail` — Twilio's native Email API (comms.twilio.com), which
+ *     reuses the SMS Account SID + Auth Token. See
+ *     twilio-email-delivery-provider.ts.
+ *   - `email` — Twilio SendGrid v3, which needs its own `SG.` API key.
+ * Both channels share account credentials via the parent Twilio billing
  * relationship — operationally we want one vendor to manage, not two.
  *
  * The provider performs the HTTP calls directly with `fetch`. We
@@ -27,6 +36,7 @@ import { DeliveryError } from "./notification-errors";
 export interface TwilioSmsConfig {
   accountSid: string;
   authToken: string;
+  secondaryAuthToken?: string;
   fromNumber: string;
   /** Override for tests. Defaults to Twilio's REST API host. */
   apiBaseUrl?: string;
@@ -47,9 +57,31 @@ export interface SendGridConfig {
   fetchImpl?: typeof fetch;
 }
 
+/**
+ * The two legs are INDEPENDENT and each is optional.
+ *
+ * Previously both were required, so a deployment with Twilio credentials but
+ * no SendGrid credentials could not send SMS at all — the constructor threw,
+ * app.ts fell through to `rawMessageDelivery = null`, and every SMS path went
+ * dark for want of an *email* key. Omitting a leg now configures a
+ * single-channel provider; the unconfigured channel fails loudly at send time
+ * (`DeliveryError('AUTH_FAILED', ...)`, the same error shape a rejected
+ * credential produces) rather than silently dropping the message.
+ *
+ * Supplying a leg with blank/partial credentials still throws at construction:
+ * that is a misconfiguration, not an intentional opt-out.
+ */
 export interface TwilioDeliveryProviderConfig {
-  sms: TwilioSmsConfig;
-  email: SendGridConfig;
+  sms?: TwilioSmsConfig;
+  /** SendGrid email leg. Needs its own `SG.` API key. */
+  email?: SendGridConfig;
+  /**
+   * Twilio-native email leg (comms.twilio.com/v1/Emails). Reuses the SMS
+   * Account SID + Auth Token — no new credential. Takes precedence over
+   * `email` if both are somehow supplied; app.ts picks exactly one and logs
+   * the choice at boot, so this is only a deterministic tiebreak.
+   */
+  twilioEmail?: TwilioEmailConfig;
 }
 
 interface TwilioMessageResponse {
@@ -122,56 +154,95 @@ function classifySendgridError(response: Response, providerBody: string): Normal
   };
 }
 
+// fetch has NO default timeout — a Twilio/SendGrid latency spike would hang
+// every notification send and delivery worker with no upper bound.
+const DELIVERY_REQUEST_TIMEOUT_MS = 15_000;
+
 export class TwilioDeliveryProvider implements MessageDeliveryProvider {
-  private readonly sms: Required<Omit<TwilioSmsConfig, "fetchImpl">> & {
+  private readonly smsConfig?: Required<
+    Omit<TwilioSmsConfig, "fetchImpl" | "secondaryAuthToken">
+  > & {
     fetchImpl: typeof fetch;
+    secondaryAuthToken?: string;
   };
-  private readonly email: Required<
+  private readonly emailConfig?: Required<
     Omit<SendGridConfig, "fetchImpl" | "fromName" | "replyToEmail">
   > & {
     fromName?: string;
     replyToEmail?: string;
     fetchImpl: typeof fetch;
   };
+  /** Twilio-native email leg. Mutually exclusive with `emailConfig` in practice. */
+  private readonly twilioEmailProvider?: TwilioEmailDeliveryProvider;
 
   constructor(config: TwilioDeliveryProviderConfig) {
-    if (
-      !config.sms.accountSid ||
-      !config.sms.authToken ||
-      !config.sms.fromNumber
-    ) {
-      throw new Error("TwilioDeliveryProvider: missing SMS credentials");
+    if (config.sms) {
+      if (
+        !config.sms.accountSid ||
+        !config.sms.authToken ||
+        !config.sms.fromNumber
+      ) {
+        throw new Error("TwilioDeliveryProvider: missing SMS credentials");
+      }
+      this.smsConfig = {
+        accountSid: config.sms.accountSid,
+        authToken: config.sms.authToken,
+        secondaryAuthToken: config.sms.secondaryAuthToken,
+        fromNumber: config.sms.fromNumber,
+        apiBaseUrl: config.sms.apiBaseUrl ?? "https://api.twilio.com/2010-04-01",
+        fetchImpl: config.sms.fetchImpl ?? fetch,
+      };
     }
-    if (!config.email.apiKey || !config.email.fromEmail) {
-      throw new Error("TwilioDeliveryProvider: missing SendGrid credentials");
+    if (config.email) {
+      if (!config.email.apiKey || !config.email.fromEmail) {
+        throw new Error("TwilioDeliveryProvider: missing SendGrid credentials");
+      }
+      this.emailConfig = {
+        apiKey: config.email.apiKey,
+        fromEmail: config.email.fromEmail,
+        fromName: config.email.fromName,
+        replyToEmail: config.email.replyToEmail,
+        apiBaseUrl: config.email.apiBaseUrl ?? "https://api.sendgrid.com/v3",
+        fetchImpl: config.email.fetchImpl ?? fetch,
+      };
     }
+    if (config.twilioEmail) {
+      // Throws on blank/partial creds — same misconfiguration-vs-opt-out rule
+      // the sms/email legs use.
+      this.twilioEmailProvider = new TwilioEmailDeliveryProvider(config.twilioEmail);
+    }
+    if (!this.smsConfig && !this.emailConfig && !this.twilioEmailProvider) {
+      throw new Error(
+        "TwilioDeliveryProvider: at least one of sms/email must be configured",
+      );
+    }
+  }
 
-    this.sms = {
-      accountSid: config.sms.accountSid,
-      authToken: config.sms.authToken,
-      fromNumber: config.sms.fromNumber,
-      apiBaseUrl: config.sms.apiBaseUrl ?? "https://api.twilio.com/2010-04-01",
-      fetchImpl: config.sms.fetchImpl ?? fetch,
-    };
-    this.email = {
-      apiKey: config.email.apiKey,
-      fromEmail: config.email.fromEmail,
-      fromName: config.email.fromName,
-      replyToEmail: config.email.replyToEmail,
-      apiBaseUrl: config.email.apiBaseUrl ?? "https://api.sendgrid.com/v3",
-      fetchImpl: config.email.fetchImpl ?? fetch,
-    };
+  /** True when this provider can actually send on the given channel. */
+  supports(channel: "sms" | "email"): boolean {
+    return channel === "sms"
+      ? !!this.smsConfig
+      : !!this.twilioEmailProvider || !!this.emailConfig;
   }
 
   async sendSms(message: SmsMessage): Promise<DeliveryResult> {
+    const sms = this.smsConfig;
+    if (!sms) {
+      // Loud, not silent: an SMS attempted on an email-only deployment is a
+      // wiring bug, and a swallowed no-op would look like a delivered message.
+      throw new DeliveryError(
+        "AUTH_FAILED",
+        "SMS is not configured (TWILIO_ACCOUNT_SID / TWILIO_AUTH_TOKEN / TWILIO_FROM_NUMBER)",
+      );
+    }
     const body = new URLSearchParams({
       To: message.to,
-      From: this.sms.fromNumber,
+      From: sms.fromNumber,
       Body: message.body,
     });
 
     const auth = Buffer.from(
-      `${this.sms.accountSid}:${this.sms.authToken}`,
+      `${sms.accountSid}:${sms.authToken}`,
     ).toString("base64");
     const headers: Record<string, string> = {
       Authorization: `Basic ${auth}`,
@@ -182,15 +253,17 @@ export class TwilioDeliveryProvider implements MessageDeliveryProvider {
       headers["Idempotency-Key"] = message.idempotencyKey;
     }
 
-    // An AbortSignal timeout rejects with a DOMException, not a DeliveryError,
-    // so callers branching on `instanceof DeliveryError` (send-service's
-    // mapDeliveryErrorForClient, retry classification) would see an
-    // unclassified error. Normalize it here so the timeout stays a first-class,
-    // retriable provider failure.
+    // SMS_SEND_TIMEOUT_MS (4s), not the generic 15s delivery ceiling: the E1
+    // life-safety tenant alert rides this path and must never park behind a
+    // hung Twilio socket. An AbortSignal timeout rejects with a DOMException,
+    // not a DeliveryError, so callers branching on `instanceof DeliveryError`
+    // (send-service's mapDeliveryErrorForClient, retry classification) would
+    // see an unclassified error. Normalize it here so the timeout stays a
+    // first-class, retriable provider failure.
     let response: Response;
     try {
-      response = await this.sms.fetchImpl(
-        `${this.sms.apiBaseUrl}/Accounts/${this.sms.accountSid}/Messages.json`,
+      response = await sms.fetchImpl(
+        `${sms.apiBaseUrl}/Accounts/${sms.accountSid}/Messages.json`,
         {
           method: "POST",
           headers,
@@ -199,9 +272,18 @@ export class TwilioDeliveryProvider implements MessageDeliveryProvider {
         },
       );
     } catch (err) {
-      throw new DeliveryError("PROVIDER_FAILED", "SMS provider timed out", {
-        providerBody: err instanceof Error ? err.message : String(err),
-      });
+      if (err instanceof DeliveryError) throw err;
+      const message = err instanceof Error ? err.message : String(err);
+      const aborted =
+        err instanceof Error && (err.name === "TimeoutError" || err.name === "AbortError");
+      // Other throws (DNS failure, a test tripwire fetch, …) stay a
+      // DeliveryError too, but KEEP their original message — callers and
+      // tests must be able to see what actually failed.
+      throw new DeliveryError(
+        "PROVIDER_FAILED",
+        aborted ? "SMS provider timed out" : `SMS provider failed: ${message}`,
+        { providerBody: message },
+      );
     }
 
     if (!response.ok) {
@@ -227,8 +309,23 @@ export class TwilioDeliveryProvider implements MessageDeliveryProvider {
   }
 
   async sendEmail(message: EmailMessage): Promise<DeliveryResult> {
-    const fromEmail = message.from ?? this.email.fromEmail;
-    const replyToEmail = message.replyTo ?? this.email.replyToEmail;
+    // Twilio-native email wins deterministically when both legs are present.
+    // app.ts selects exactly one and logs it, so this only decides the
+    // pathological both-configured case.
+    if (this.twilioEmailProvider) {
+      return this.twilioEmailProvider.sendEmail(message);
+    }
+    const email = this.emailConfig;
+    if (!email) {
+      // Loud, not silent — same rationale as sendSms above.
+      throw new DeliveryError(
+        "AUTH_FAILED",
+        "Email is not configured (set TWILIO_EMAIL_FROM_ADDRESS for Twilio-native email, " +
+          "or SENDGRID_API_KEY / SENDGRID_FROM_EMAIL for SendGrid)",
+      );
+    }
+    const fromEmail = message.from ?? email.fromEmail;
+    const replyToEmail = message.replyTo ?? email.replyToEmail;
 
     const content: Array<{ type: string; value: string }> = [
       { type: "text/plain", value: message.text },
@@ -239,8 +336,8 @@ export class TwilioDeliveryProvider implements MessageDeliveryProvider {
 
     const payload: Record<string, unknown> = {
       personalizations: [{ to: [{ email: message.to }] }],
-      from: this.email.fromName
-        ? { email: fromEmail, name: this.email.fromName }
+      from: email.fromName
+        ? { email: fromEmail, name: email.fromName }
         : { email: fromEmail },
       subject: message.subject,
       content,
@@ -253,7 +350,7 @@ export class TwilioDeliveryProvider implements MessageDeliveryProvider {
     }
 
     const headers: Record<string, string> = {
-      Authorization: `Bearer ${this.email.apiKey}`,
+      Authorization: `Bearer ${email.apiKey}`,
       "Content-Type": "application/json",
     };
     if (message.idempotencyKey) {
@@ -261,12 +358,13 @@ export class TwilioDeliveryProvider implements MessageDeliveryProvider {
       headers["X-Message-Id"] = message.idempotencyKey;
     }
 
-    const response = await this.email.fetchImpl(
-      `${this.email.apiBaseUrl}/mail/send`,
+    const response = await email.fetchImpl(
+      `${email.apiBaseUrl}/mail/send`,
       {
         method: "POST",
         headers,
         body: JSON.stringify(payload),
+        signal: AbortSignal.timeout(DELIVERY_REQUEST_TIMEOUT_MS),
       },
     );
 

@@ -15,6 +15,7 @@ import { PhoneStep } from './steps/PhoneStep';
 import { BillingStep } from './steps/BillingStep';
 import { AiCheckStep } from './steps/AiCheckStep';
 import { TestCallStep } from './steps/TestCallStep';
+import { ConversationStep } from './steps/ConversationStep';
 import type { OnboardingStepId } from '../../../types/onboarding';
 
 /**
@@ -49,12 +50,70 @@ export function OnboardingShell() {
   const [override, setOverride] = useState<OnboardingStepId | null>(null);
   const billingToastShown = useRef(false);
 
+  // B1.19 — "talk it through" conversational alternative to the form
+  // wizard. The engine (onboarding-conversation FSM) captures business
+  // profile, category, pricing, team, schedule, and tools in one running
+  // conversation — it doesn't map onto a single wizard step, so it's only
+  // offered while the user is on the two form steps it substitutes for
+  // (identity, pack); later steps are infra (phone/billing/AI/test-call)
+  // the FSM never touches. The form wizard remains the default and the
+  // only edit surface — this is purely an alternate capture path.
+  const [voiceMode, setVoiceMode] = useState(false);
+
   // The step the user is currently looking at. Derived the same way as the
   // render-time activeId below, but computed up here (before the early
   // returns) so the funnel effects can depend on it without breaking the
   // rules-of-hooks ordering. null until the first status load.
   const activeStepId: OnboardingStepId | null = override ?? data?.currentStep ?? null;
   const tenantId = data?.tenantId ?? null;
+
+  // B1.19 AC-2 — persist voiceMode itself (not just the conversation
+  // session/history, which live in useOnboardingConversation) so a
+  // mid-conversation refresh lands the user back in the conversation panel
+  // rather than silently dropping them into the form. Best-effort:
+  // localStorage failures degrade to "always reopen the form," never throw.
+  //
+  // The hydration guard is keyed BY the storage key (i.e. by tenant), not a
+  // bare "have we hydrated once" boolean. Same family as P-9: a tenant switch
+  // that doesn't remount this shell used to leave the guard latched true, so
+  // the new tenant's persisted mode was never read and the persistence effect
+  // below wrote the PREVIOUS tenant's voiceMode into the new tenant's key —
+  // either forcing the conversation open for a tenant that never chose it, or
+  // erasing that tenant's saved in-progress mode.
+  //
+  // `voiceModeHydratedFor` is state, not a ref, on purpose. Both effects run
+  // in the same commit as the key change; a ref written by the first would
+  // already read as "hydrated" to the second, which would then persist the
+  // stale mode under the new key before the reset landed. As state, the
+  // persistence effect still sees the OLD key in that commit and correctly
+  // skips, then runs on the next render with the reconciled mode.
+  const voiceModeKey = tenantId ? `serviceos.onboarding_conversation_mode.${tenantId}` : null;
+  const [voiceModeHydratedFor, setVoiceModeHydratedFor] = useState<string | null>(null);
+  useEffect(() => {
+    if (!voiceModeKey || voiceModeHydratedFor === voiceModeKey) return;
+    let stored = false;
+    try {
+      stored = window.localStorage.getItem(voiceModeKey) === '1';
+    } catch {
+      // Storage unavailable — fall back to the form, same as a fresh session.
+    }
+    // Assign, don't just set-true: on a tenant switch the mode must be RESET
+    // to what this tenant actually saved, otherwise tenant A's open
+    // conversation carries over into tenant B.
+    setVoiceMode(stored);
+    setVoiceModeHydratedFor(voiceModeKey);
+  }, [voiceModeKey, voiceModeHydratedFor]);
+  useEffect(() => {
+    // Suppresses only the stale WRITE — no UI flag is held down by this guard,
+    // and it clears on the very next render once hydration resolves.
+    if (!voiceModeKey || voiceModeHydratedFor !== voiceModeKey) return;
+    try {
+      if (voiceMode) window.localStorage.setItem(voiceModeKey, '1');
+      else window.localStorage.removeItem(voiceModeKey);
+    } catch {
+      // Best-effort — worst case a refresh reopens the form instead.
+    }
+  }, [voiceMode, voiceModeKey, voiceModeHydratedFor]);
 
   useEffect(() => {
     const billing = searchParams.get('billing');
@@ -204,15 +263,55 @@ export function OnboardingShell() {
   }
 
   const activeId: OnboardingStepId = activeStepId ?? 'test_call';
+  const voiceAvailable = activeId === 'identity' || activeId === 'pack';
+  const inConversationMode = voiceMode && voiceAvailable;
+
+  // Selecting a different step from the sidebar/mobile strip always drops
+  // back to the form — the conversation panel is scoped to the step it was
+  // opened from, not a standing mode that follows the user around.
+  const handleSelect = (id: OnboardingStepId) => {
+    setVoiceMode(false);
+    setOverride(id);
+  };
 
   return (
     <div className="flex min-h-screen bg-white">
-      <Sidebar status={data} activeId={activeId} onSelect={setOverride} />
+      <Sidebar
+        status={data}
+        activeId={activeId}
+        onSelect={handleSelect}
+        voiceAvailable={voiceAvailable}
+        voiceMode={inConversationMode}
+        onToggleVoice={() => setVoiceMode((v) => !v)}
+      />
       <main className="flex-1">
-        <MobileProgress status={data} activeId={activeId} />
+        <MobileProgress
+          status={data}
+          activeId={activeId}
+          voiceAvailable={voiceAvailable}
+          voiceMode={inConversationMode}
+          onToggleVoice={() => setVoiceMode((v) => !v)}
+        />
         <div className="p-6 md:p-8 max-w-3xl">
-          {activeId === 'identity' && <IdentityStep onSaved={() => void refetch()} />}
-          {activeId === 'pack' && <PackStep onSaved={() => void refetch()} />}
+          {inConversationMode && (
+            <ConversationStep
+              tenantId={data.tenantId}
+              // Refetch only — do NOT leave conversation mode here. This fires
+              // from an effect the moment the FSM goes terminal, so exiting
+              // would unmount the completion panel (and its Continue button)
+              // in the same tick it rendered, dropping the owner back on an
+              // unfinished form with no sign that proposals were created.
+              // Leaving is the explicit Continue action below.
+              onCompleted={() => {
+                void refetch();
+              }}
+              onExit={() => setVoiceMode(false)}
+            />
+          )}
+          {!inConversationMode && activeId === 'identity' && (
+            <IdentityStep onSaved={() => void refetch()} />
+          )}
+          {!inConversationMode && activeId === 'pack' && <PackStep onSaved={() => void refetch()} />}
           {activeId === 'phone' && (
             <PhoneStep
               status={data}

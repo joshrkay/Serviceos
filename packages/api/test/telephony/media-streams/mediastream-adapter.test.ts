@@ -12,25 +12,43 @@
  *    the store closes the WS instead of attaching.
  */
 
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+
+// OBS — capture recordVoiceError calls without touching the real PostHog
+// SDK. Mirrors the vi.mock pattern already used in test/voice/activation.test.ts.
+const recordVoiceErrorMock = vi.fn();
+vi.mock('../../../src/analytics/posthog', () => ({
+  recordVoiceError: (...args: unknown[]) => recordVoiceErrorMock(...args),
+}));
+
 import {
   TwilioMediaStreamAdapter,
+  DEFAULT_SILENCE_REPROMPT_MS,
   type WsLike,
 } from '../../../src/telephony/media-streams/mediastream-adapter';
 import { VoiceSessionStore } from '../../../src/ai/agents/customer-calling/voice-session-store';
+import type { VoiceSession } from '../../../src/ai/agents/customer-calling/voice-session-store';
 import type {
   StreamingSession,
   StreamingTranscriptionProvider,
   StreamingTranscriptCallback,
   StreamingTranscriptEvent,
 } from '../../../src/voice/transcription-providers';
-import type { TtsProvider, TtsSynthesizeResult } from '../../../src/ai/tts/tts-provider';
+import type { TtsProvider, TtsSynthesizeInput, TtsSynthesizeResult } from '../../../src/ai/tts/tts-provider';
+import {
+  renderTtsText,
+  SPEECH_TURN_FAILURE_REPROMPT_COPY,
+  SPEECH_TURN_FAILURE_ESCALATION_COPY,
+  LOW_STT_CONFIDENCE_REPROMPT_COPY,
+} from '../../../src/ai/agents/customer-calling/tts-copy';
 import type { SideEffect, EscalateWithContextPayload } from '../../../src/ai/agents/customer-calling/types';
 import { escalateWithContextPayloadSchema } from '../../../src/ai/agents/customer-calling/types';
 import { decodeTwilioInboundFrame } from '../../../src/telephony/media-streams/mulaw-codec';
 import { VOICE_EVENT_CHANNEL } from '../../../src/ai/voice-quality/event-bus';
 import { WhisperCache } from '../../../src/telephony/whisper-cache';
 import { DEFAULT_ESCALATION_SETTINGS } from '../../../src/settings/settings';
+import { voiceTurnLatencyMs } from '../../../src/monitoring/metrics';
+import { InMemoryConnectionRegistry } from '../../../src/ws/connection-registry';
 
 // ─── Fakes ─────────────────────────────────────────────────────────────────────────────
 
@@ -107,7 +125,7 @@ function makeTtsProvider(): TtsProvider {
   return {
     synthesize: vi.fn(async (): Promise<TtsSynthesizeResult> => ({
       audio: Buffer.alloc(640),
-      contentType: 'audio/mulaw',
+      contentType: 'audio/pcm',
       provider: 'test',
     })),
   };
@@ -119,6 +137,7 @@ let store: VoiceSessionStore;
 
 beforeEach(() => {
   store = new VoiceSessionStore({ startInterval: false });
+  recordVoiceErrorMock.mockClear();
 });
 
 describe('P8-012 TwilioMediaStreamAdapter', () => {
@@ -200,6 +219,50 @@ describe('P8-012 TwilioMediaStreamAdapter', () => {
 
     const mediaFrames = ws.sent.filter((m) => (m as Record<string, unknown>).event === 'media');
     expect(mediaFrames.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it('P0: does NOT stream synthesize() output as PCM when contentType is compressed audio (e.g. mp3)', async () => {
+    // Regression pin for the silent-voice-output bug: a non-streaming
+    // TtsProvider (OpenAI tts-1 in production) returns 'audio/mpeg' — MP3
+    // bytes streamPcmAsMedia has no decoder for. Feeding it through
+    // previously produced inaudible static with no error. The adapter must
+    // now refuse to treat non-PCM contentType as raw PCM and log instead.
+    store.create('t', 'telephony', { callSid: 'CA-mp3' });
+    const ws = new FakeWs();
+    const { provider, handle } = makeStreamingProvider();
+    const mp3OnlyTts: TtsProvider = {
+      synthesize: vi.fn(async (): Promise<TtsSynthesizeResult> => ({
+        audio: Buffer.from('ID3-fake-mp3-bytes'),
+        contentType: 'audio/mpeg',
+        provider: 'openai-tts-1',
+      })),
+      // Deliberately no synthesizeStream — exercises the buffered branch.
+    };
+    const adapter = new TwilioMediaStreamAdapter(
+      {
+        store,
+        streamingProvider: provider,
+        speechTurn: async () => [],
+        ttsProvider: mp3OnlyTts,
+        initializeSession: async () => [{ type: 'tts_play', payload: { text: 'Hello!' } }],
+      },
+      ws,
+    );
+    adapter.start();
+
+    ws.inboundJson({
+      event: 'start',
+      streamSid: 'MZ-mp3',
+      start: { callSid: 'CA-mp3', accountSid: 'AC', streamSid: 'MZ-mp3', tracks: ['inbound'] },
+    });
+    await new Promise((r) => setImmediate(r));
+    handle.emit({ type: 'final', isFinal: true, transcript: 'hello', confidence: 0.95 });
+    await new Promise((r) => setImmediate(r));
+
+    expect(mp3OnlyTts.synthesize).toHaveBeenCalledTimes(1);
+    // No media frames were emitted — the mp3 bytes never reached streamPcmAsMedia.
+    const mediaFrames = ws.sent.filter((m) => (m as Record<string, unknown>).event === 'media');
+    expect(mediaFrames.length).toBe(0);
   });
 
   it('closes WS with 1008 when start frame has empty callSid (invalid_start_payload)', async () => {
@@ -609,6 +672,10 @@ describe('P8-012 TwilioMediaStreamAdapter', () => {
     publicBaseUrl?: string;
     callControl?: { dialDispatcher(callSid: string, phone: string, opts: { actionUrl: string; whisperUrl?: string; timeoutSeconds?: number }): string };
     setPendingTransferTwiml?: (sessionId: string, twiml: string) => void;
+    // Isolate from the process-wide connection registry (perTenantMax 50)
+    // when a test adds capacity the shared singleton would otherwise leak
+    // across the file.
+    connectionRegistry?: InMemoryConnectionRegistry;
   } = {}): {
     adapter: TwilioMediaStreamAdapter;
     ws: FakeWs;
@@ -634,6 +701,7 @@ describe('P8-012 TwilioMediaStreamAdapter', () => {
         publicBaseUrl: opts.publicBaseUrl,
         callControl: opts.callControl as never,
         setPendingTransferTwiml: opts.setPendingTransferTwiml,
+        ...(opts.connectionRegistry ? { connectionRegistry: opts.connectionRegistry } : {}),
       },
       ws,
     );
@@ -953,6 +1021,157 @@ describe('P8-012 TwilioMediaStreamAdapter', () => {
     // After full await, both chunks have flowed.
     expect(secondChunkYielded).toBe(true);
     expect(streamingProvider.synthesizeStream).toHaveBeenCalledTimes(1);
+  });
+
+  describe('VOX-35b: streaming TTS failure recovery', () => {
+    it('falls back to buffered REST synth (PCM) when the stream throws, instead of dead air', async () => {
+      // synthesizeStream opens then throws before any chunk (models a VOX-33
+      // inactivity stall / WS blip). synthesize() returns raw PCM, so the
+      // fallback should stream it out — the caller must hear the utterance.
+      const synthesize = vi.fn(
+        async (): Promise<TtsSynthesizeResult> => ({
+          audio: Buffer.alloc(640 * 2),
+          contentType: 'audio/pcm',
+          provider: 'fallback-rest',
+        }),
+      );
+      const failingStreamProvider: TtsProvider = {
+        synthesize,
+        synthesizeStream: vi.fn(() => ({
+          // eslint-disable-next-line require-yield
+          async *[Symbol.asyncIterator]() {
+            throw new Error('ElevenLabs stream inactivity timeout after 4000ms');
+          },
+        })),
+      };
+
+      const { adapter, ws } = setupAdapter({
+        ttsProvider: failingStreamProvider,
+        callSid: 'CA-fallback-pcm',
+      });
+      ws.inboundJson({
+        event: 'start',
+        streamSid: 'MZ-fallback-pcm',
+        start: { callSid: 'CA-fallback-pcm', accountSid: 'AC', streamSid: 'MZ-fallback-pcm', tracks: ['inbound'] },
+      });
+      await new Promise((r) => setImmediate(r));
+
+      await (adapter as unknown as { emitSideEffects: (fx: unknown[]) => Promise<void> }).emitSideEffects([
+        { type: 'tts_play', payload: { text: 'Your appointment is confirmed for Tuesday.' } },
+      ]);
+
+      // The REST fallback ran…
+      expect(synthesize).toHaveBeenCalledTimes(1);
+      // …and its PCM reached the wire (no dead air).
+      const mediaFrames = ws.sent.filter((f: unknown) => (f as { event?: string }).event === 'media');
+      expect(mediaFrames.length).toBeGreaterThan(0);
+      // OBS — fired after the recovery already ran (PCM already on the wire).
+      expect(recordVoiceErrorMock).toHaveBeenCalledWith(
+        expect.objectContaining({
+          errorKind: 'tts_stream_recovered',
+          channel: 'media_streams',
+          callSid: 'CA-fallback-pcm',
+          tenantId: 't',
+        }),
+      );
+    });
+
+    it('drops a non-PCM buffered fallback and plays a filler clip instead of static', async () => {
+      // ElevenLabs REST returns mp3 — feeding that to streamPcmAsMedia would
+      // be inaudible static, so the PCM guard must reject it and fall through
+      // to a short filler clip (audible acknowledgement, not dead air).
+      const synthesize = vi.fn(
+        async (): Promise<TtsSynthesizeResult> => ({
+          audio: Buffer.from([0xff, 0xfb, 0x00]),
+          contentType: 'audio/mpeg',
+          provider: 'elevenlabs',
+        }),
+      );
+      const failingStreamProvider: TtsProvider = {
+        synthesize,
+        synthesizeStream: vi.fn(() => ({
+          // eslint-disable-next-line require-yield
+          async *[Symbol.asyncIterator]() {
+            throw new Error('ElevenLabs WS error');
+          },
+        })),
+      };
+      const fillerCache = makeFakeFillerCache(['okay']);
+      const fillerEngine = {
+        selectNext: () => ({ id: 'okay', text: 'One moment.', approxDurationMs: 260 }),
+      };
+
+      const { adapter, ws } = setupAdapter({
+        ttsProvider: failingStreamProvider,
+        fillerCache,
+        fillerEngine,
+        callSid: 'CA-fallback-mp3',
+      });
+      ws.inboundJson({
+        event: 'start',
+        streamSid: 'MZ-fallback-mp3',
+        start: { callSid: 'CA-fallback-mp3', accountSid: 'AC', streamSid: 'MZ-fallback-mp3', tracks: ['inbound'] },
+      });
+      await new Promise((r) => setImmediate(r));
+
+      await (adapter as unknown as { emitSideEffects: (fx: unknown[]) => Promise<void> }).emitSideEffects([
+        { type: 'tts_play', payload: { text: 'Give me a second.' } },
+      ]);
+
+      expect(synthesize).toHaveBeenCalledTimes(1);
+      // The mp3 was NOT streamed as static, but the filler clip WAS played.
+      const mediaFrames = ws.sent.filter((f: unknown) => (f as { event?: string }).event === 'media');
+      expect(mediaFrames.length).toBeGreaterThan(0);
+    });
+
+    it('T2-F05: arms the silence countdown after a recovered (buffered PCM) turn', async () => {
+      // handleMessage arms only on silence-arm-* marks, so the recovery path
+      // must emit one too — else a silent caller after a recovered TTS blip
+      // never gets the bounded reprompt.
+      const synthesize = vi.fn(
+        async (): Promise<TtsSynthesizeResult> => ({
+          audio: Buffer.alloc(640 * 2),
+          contentType: 'audio/pcm',
+          provider: 'fallback-rest',
+        }),
+      );
+      const failingStreamProvider: TtsProvider = {
+        synthesize,
+        synthesizeStream: vi.fn(() => ({
+          // eslint-disable-next-line require-yield
+          async *[Symbol.asyncIterator]() {
+            throw new Error('ElevenLabs WS error');
+          },
+        })),
+      };
+      const { adapter, ws } = setupAdapter({
+        ttsProvider: failingStreamProvider,
+        callSid: 'CA-recover-arm',
+        connectionRegistry: new InMemoryConnectionRegistry(),
+      });
+      ws.inboundJson({
+        event: 'start',
+        streamSid: 'MZ-recover-arm',
+        start: { callSid: 'CA-recover-arm', accountSid: 'AC', streamSid: 'MZ-recover-arm', tracks: ['inbound'] },
+      });
+      await new Promise((r) => setImmediate(r));
+
+      await (adapter as unknown as { emitSideEffects: (fx: unknown[]) => Promise<void> }).emitSideEffects([
+        { type: 'tts_play', payload: { text: 'Your appointment is confirmed for Tuesday.' } },
+      ]);
+
+      // Recovery must have enqueued a silence-arm mark and recorded the pending turn.
+      const pendingTurn = (
+        adapter as unknown as { state: { pendingSilenceRepromptTurnId: number | null } }
+      ).state.pendingSilenceRepromptTurnId;
+      expect(pendingTurn).not.toBeNull();
+      const armMark = ws.sent.find(
+        (f: unknown) =>
+          (f as { event?: string }).event === 'mark' &&
+          (f as { mark?: { name?: string } }).mark?.name === `silence-arm-${pendingTurn}`,
+      );
+      expect(armMark).toBeDefined();
+    });
   });
 
   describe('escalate_with_context fan-out', () => {
@@ -1307,6 +1526,12 @@ describe('production-shaped wiring (app.ts hooks)', () => {
           }),
         initializeSession: ({ callSid, tenantId }) =>
           gatherAdapter.initializeStreamSession({ callSid, tenantId }),
+        // C5 — mirrors app.ts: the implicit recording-consent write is split
+        // out of initializeSession so it lands only once the disclosure turn
+        // is validated as played. Without this hook a streaming call ledgers
+        // nothing, so the harness must wire it to stay production-shaped.
+        commitRecordingConsent: ({ callSid }) =>
+          gatherAdapter.commitRecordingConsent({ callSid }),
         interimEmergencyScan: ({ session, speechResult, tenantId }) =>
           gatherAdapter.scanInterimForEmergency({
             sessionId: session.id,
@@ -1356,7 +1581,12 @@ describe('production-shaped wiring (app.ts hooks)', () => {
     });
 
     // RV-130 — the implicit recording-consent event landed in the ledger.
-    expect(consentEvents.rows).toHaveLength(1);
+    // C5 — the commit is deliberately NOT awaited on the capture critical
+    // path (a slow ledger must not hold capture closed past the disclosure),
+    // so poll rather than asserting synchronously.
+    await vi.waitFor(() => {
+      expect(consentEvents.rows).toHaveLength(1);
+    });
     expect(consentEvents.rows[0]).toMatchObject({
       kind: 'recording',
       state: 'implicit',
@@ -1454,13 +1684,1704 @@ describe('production-shaped wiring (app.ts hooks)', () => {
     const errorOutput = stderrSpy.mock.calls.map((c) => String(c[0])).join('');
     expect(errorOutput).toContain('CA-disclose-fail');
 
-    // The adapter must NOT have closed the WS — call continues undisclosed
-    // rather than dropping the caller.
-    expect(ws.closed).toBe(false);
+    // The adapter must HANG UP — recording an undisclosed caller is a
+    // compliance violation, so a disclosure-init failure ends the leg rather
+    // than continuing to capture audio.
+    expect(ws.closed).toBe(true);
+    expect(ws.closeReason).toBe('disclosure_init_failed');
 
     // Adapter variable is used above; reference it to satisfy unused-var lint.
     void adapter;
 
     stderrSpy.mockRestore();
+  });
+});
+
+// ─── UB-C1/C2 — Spanish on the streaming call path ────────────────────────────
+
+describe('UB-C1 — language threading + live switching', () => {
+  let store: VoiceSessionStore;
+
+  beforeEach(() => {
+    store = new VoiceSessionStore({ startInterval: false });
+  });
+
+  /**
+   * Streaming-provider double that supports MULTIPLE openSession calls
+   * (initial open + finish/reopen cycles). Each call records its args and
+   * returns a fresh session mock; `emit` targets the callback of the most
+   * recent open so post-switch finals flow through the new session.
+   */
+  function makeReopenableProvider(): {
+    provider: StreamingTranscriptionProvider;
+    openCalls: Array<{ language: unknown; options: unknown }>;
+    sessions: Array<{ send: ReturnType<typeof vi.fn>; finish: ReturnType<typeof vi.fn>; destroy: ReturnType<typeof vi.fn> }>;
+    emit: (evt: StreamingTranscriptEvent) => void;
+  } {
+    const callbacks: StreamingTranscriptCallback[] = [];
+    const openCalls: Array<{ language: unknown; options: unknown }> = [];
+    const sessions: Array<{ send: ReturnType<typeof vi.fn>; finish: ReturnType<typeof vi.fn>; destroy: ReturnType<typeof vi.fn> }> = [];
+    const provider: StreamingTranscriptionProvider = {
+      openSession: vi.fn(async (onEvent, _onError, _onClose, language, options) => {
+        callbacks.push(onEvent);
+        openCalls.push({ language, options });
+        const session = { send: vi.fn(), finish: vi.fn(), destroy: vi.fn() };
+        sessions.push(session);
+        return session;
+      }),
+    };
+    return {
+      provider,
+      openCalls,
+      sessions,
+      emit: (evt) => callbacks[callbacks.length - 1]?.(evt),
+    };
+  }
+
+  function makeSpyTts() {
+    return {
+      synthesize: vi.fn(async (_input: TtsSynthesizeInput): Promise<TtsSynthesizeResult> => ({
+        audio: Buffer.alloc(640),
+        contentType: 'audio/pcm',
+        provider: 'test',
+      })),
+    };
+  }
+
+  function startFrame(callSid: string, streamSid: string) {
+    return {
+      event: 'start',
+      streamSid,
+      start: { callSid, accountSid: 'AC', streamSid, tracks: ['inbound'] },
+    };
+  }
+
+  async function flush(times = 4): Promise<void> {
+    for (let i = 0; i < times; i++) {
+      await new Promise((r) => setImmediate(r));
+    }
+  }
+
+  it('A2: opens Deepgram with the resolved language and no longer suppresses keywords on es', async () => {
+    store.create('t', 'telephony', { callSid: 'CA-es-open' });
+    const ws = new FakeWs();
+    const { provider, openCalls } = makeReopenableProvider();
+    const adapter = new TwilioMediaStreamAdapter(
+      {
+        store,
+        streamingProvider: provider,
+        speechTurn: async () => [],
+        terminologyProvider: { getKeywords: async () => ['furnace:3', 'compressor:3'] },
+        initialLanguageResolver: async () => 'es',
+      },
+      ws,
+    );
+    adapter.start();
+    ws.inboundJson(startFrame('CA-es-open', 'MZ-es-open'));
+    await flush();
+
+    expect(openCalls).toHaveLength(1);
+    expect(openCalls[0].language).toBe('es');
+    // A2 — es sessions used to silently drop the boost list; they now get
+    // the same keyterms as en (the 50-term cap still bounds the list
+    // upstream in VerticalTerminologyProvider).
+    expect(openCalls[0].options).toEqual({ keywords: ['furnace:3', 'compressor:3'] });
+    expect(store.findByCallSid('CA-es-open')?.language).toBe('es');
+    expect(adapter._debugState().language).toBe('es');
+  });
+
+  it('opens with en + keywords when the resolver yields en', async () => {
+    store.create('t', 'telephony', { callSid: 'CA-en-open' });
+    const ws = new FakeWs();
+    const { provider, openCalls } = makeReopenableProvider();
+    const adapter = new TwilioMediaStreamAdapter(
+      {
+        store,
+        streamingProvider: provider,
+        speechTurn: async () => [],
+        terminologyProvider: { getKeywords: async () => ['furnace:3'] },
+        initialLanguageResolver: async () => 'en',
+      },
+      ws,
+    );
+    adapter.start();
+    ws.inboundJson(startFrame('CA-en-open', 'MZ-en-open'));
+    await flush();
+
+    expect(openCalls[0].language).toBe('en');
+    expect(openCalls[0].options).toEqual({ keywords: ['furnace:3'] });
+  });
+
+  it('without a resolver, opens with undefined language (pre-UB-C behavior) and does not pin session.language', async () => {
+    store.create('t', 'telephony', { callSid: 'CA-legacy' });
+    const ws = new FakeWs();
+    const { provider, openCalls } = makeReopenableProvider();
+    const adapter = new TwilioMediaStreamAdapter(
+      { store, streamingProvider: provider, speechTurn: async () => [] },
+      ws,
+    );
+    adapter.start();
+    ws.inboundJson(startFrame('CA-legacy', 'MZ-legacy'));
+    await flush();
+
+    expect(openCalls[0].language).toBeUndefined();
+    expect(store.findByCallSid('CA-legacy')?.language).toBeUndefined();
+  });
+
+  it('first Spanish final switches ONCE: finish+reopen es, event emitted, turn still dispatched', async () => {
+    const session = store.create('t', 'telephony', { callSid: 'CA-first-es' });
+    session.supportedLanguages = ['en', 'es'];
+    const ws = new FakeWs();
+    const { provider, openCalls, sessions, emit } = makeReopenableProvider();
+    const speechTurn = vi.fn(async (_args: { speechResult: string }): Promise<SideEffect[]> => []);
+    const adapter = new TwilioMediaStreamAdapter(
+      {
+        store,
+        streamingProvider: provider,
+        speechTurn,
+        initialLanguageResolver: async () => 'en',
+        terminologyProvider: { getKeywords: async () => ['furnace:3'] },
+      },
+      ws,
+    );
+    adapter.start();
+    ws.inboundJson(startFrame('CA-first-es', 'MZ-first-es'));
+    await flush();
+
+    const events: unknown[] = [];
+    session.events.on(VOICE_EVENT_CHANNEL, (evt: { type: string }) => {
+      if (evt.type === 'language_switched') events.push(evt);
+    });
+
+    emit({ type: 'final', isFinal: true, transcript: 'Hola, necesito una cita por favor', confidence: 0.9 });
+    await flush(8);
+
+    // Old session finished, new one opened in es. A2 — the keyword boost is
+    // no longer suppressed on the es reopen.
+    expect(sessions[0].finish).toHaveBeenCalled();
+    expect(openCalls).toHaveLength(2);
+    expect(openCalls[1].language).toBe('es');
+    expect(openCalls[1].options).toEqual({ keywords: ['furnace:3'] });
+    expect(session.language).toBe('es');
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({ type: 'language_switched', from: 'en', to: 'es', trigger: 'first_utterance', switchCount: 1 });
+    // Trigger (a) does NOT consume the turn — the FSM still processes it.
+    expect(speechTurn).toHaveBeenCalledTimes(1);
+    expect(speechTurn.mock.calls[0][0]).toMatchObject({ speechResult: 'Hola, necesito una cita por favor' });
+  });
+
+  it('first-final detection is GATED on the tenant supported_languages opt-in', async () => {
+    const session = store.create('t', 'telephony', { callSid: 'CA-en-only' });
+    session.supportedLanguages = ['en']; // tenant never opted into Spanish
+    const ws = new FakeWs();
+    const { provider, openCalls, emit } = makeReopenableProvider();
+    const speechTurn = vi.fn(async (_args: { speechResult: string }): Promise<SideEffect[]> => []);
+    const adapter = new TwilioMediaStreamAdapter(
+      { store, streamingProvider: provider, speechTurn, initialLanguageResolver: async () => 'en' },
+      ws,
+    );
+    adapter.start();
+    ws.inboundJson(startFrame('CA-en-only', 'MZ-en-only'));
+    await flush();
+
+    emit({ type: 'final', isFinal: true, transcript: 'Hola, necesito una cita por favor', confidence: 0.9 });
+    await flush(8);
+
+    expect(openCalls).toHaveLength(1); // no reopen
+    expect(session.language).toBe('en');
+    expect(adapter._debugState().languageSwitchCount).toBe(0);
+    expect(speechTurn).toHaveBeenCalledTimes(1);
+  });
+
+  it('the one-shot first-final trigger does not fire on utterance #2+', async () => {
+    const session = store.create('t', 'telephony', { callSid: 'CA-oneshot' });
+    session.supportedLanguages = ['en', 'es'];
+    const ws = new FakeWs();
+    const { provider, openCalls, emit } = makeReopenableProvider();
+    const adapter = new TwilioMediaStreamAdapter(
+      { store, streamingProvider: provider, speechTurn: async () => [], initialLanguageResolver: async () => 'en' },
+      ws,
+    );
+    adapter.start();
+    ws.inboundJson(startFrame('CA-oneshot', 'MZ-oneshot'));
+    await flush();
+
+    emit({ type: 'final', isFinal: true, transcript: 'I need to book an appointment', confidence: 0.9 });
+    await flush(8);
+    // Spanish markers on the SECOND final must not auto-switch.
+    emit({ type: 'final', isFinal: true, transcript: 'Hola, gracias, quiero una cita', confidence: 0.9 });
+    await flush(8);
+
+    expect(openCalls).toHaveLength(1);
+    expect(session.language).toBe('en');
+  });
+
+  it('explicit "hablo español" CONSUMES the turn: localized ack, no speechTurn, transcript kept', async () => {
+    const session = store.create('t', 'telephony', { callSid: 'CA-explicit' });
+    session.supportedLanguages = ['en', 'es'];
+    const ws = new FakeWs();
+    const { provider, openCalls, emit } = makeReopenableProvider();
+    const speechTurn = vi.fn(async (_args: { speechResult: string }): Promise<SideEffect[]> => []);
+    const tts = makeSpyTts();
+    const adapter = new TwilioMediaStreamAdapter(
+      {
+        store,
+        streamingProvider: provider,
+        speechTurn,
+        ttsProvider: tts,
+        initialLanguageResolver: async () => 'en',
+      },
+      ws,
+    );
+    adapter.start();
+    ws.inboundJson(startFrame('CA-explicit', 'MZ-explicit'));
+    await flush();
+
+    const events: unknown[] = [];
+    session.events.on(VOICE_EVENT_CHANNEL, (evt: { type: string }) => {
+      if (evt.type === 'language_switched') events.push(evt);
+    });
+
+    emit({ type: 'final', isFinal: true, transcript: 'Hablo español, por favor', confidence: 0.9 });
+    await flush(8);
+
+    expect(openCalls).toHaveLength(2);
+    expect(openCalls[1].language).toBe('es');
+    expect(session.language).toBe('es');
+    expect(events[0]).toMatchObject({ trigger: 'explicit_request', to: 'es' });
+    // Consumed: the switch utterance never reaches the FSM.
+    expect(speechTurn).not.toHaveBeenCalled();
+    // Localized ack synthesized in the NEW language.
+    expect(tts.synthesize).toHaveBeenCalledWith(
+      expect.objectContaining({ language: 'es', text: expect.stringContaining('continuemos en español') }),
+    );
+    // Transcript stays faithful for summarization.
+    expect(session.transcript.join('\n')).toContain('caller: Hablo español, por favor');
+    expect(session.transcript.join('\n')).toContain('continuemos en español');
+  });
+
+  it('flap guard: the 3rd switch is refused; keywords are re-applied on the switch back to en', async () => {
+    const session = store.create('t', 'telephony', { callSid: 'CA-flap' });
+    session.supportedLanguages = ['en', 'es'];
+    const ws = new FakeWs();
+    const { provider, openCalls, emit } = makeReopenableProvider();
+    const speechTurn = vi.fn(async (_args: { speechResult: string }): Promise<SideEffect[]> => []);
+    const adapter = new TwilioMediaStreamAdapter(
+      {
+        store,
+        streamingProvider: provider,
+        speechTurn,
+        initialLanguageResolver: async () => 'en',
+        terminologyProvider: { getKeywords: async () => ['furnace:3'] },
+      },
+      ws,
+    );
+    adapter.start();
+    ws.inboundJson(startFrame('CA-flap', 'MZ-flap'));
+    await flush();
+
+    // Switch 1: en → es (explicit).
+    emit({ type: 'final', isFinal: true, transcript: 'hablo español por favor', confidence: 0.9 });
+    await flush(8);
+    // Switch 2: es → en (explicit).
+    emit({ type: 'final', isFinal: true, transcript: 'switch to english please', confidence: 0.9 });
+    await flush(8);
+    // Switch 3: refused by the flap guard; the utterance flows to the FSM.
+    emit({ type: 'final', isFinal: true, transcript: 'hablo español otra vez', confidence: 0.9 });
+    await flush(8);
+
+    expect(openCalls).toHaveLength(3); // initial + 2 switches, NOT 4
+    expect(adapter._debugState().languageSwitchCount).toBe(2);
+    expect(adapter._debugState().language).toBe('en');
+    expect(session.language).toBe('en');
+    // A2 — keyword boost is present on every reopen (en and es alike).
+    expect(openCalls[2].language).toBe('en');
+    expect(openCalls[2].options).toEqual({ keywords: ['furnace:3'] });
+    // The blocked 3rd request was NOT consumed.
+    expect(speechTurn).toHaveBeenCalledTimes(1);
+    expect(speechTurn.mock.calls[0][0]).toMatchObject({ speechResult: 'hablo español otra vez' });
+  });
+
+  it('an utterance carrying an emergency keyword is NEVER consumed by the language switch', async () => {
+    const session = store.create('t', 'telephony', { callSid: 'CA-emergency-es' });
+    session.supportedLanguages = ['en', 'es'];
+    const ws = new FakeWs();
+    const { provider, openCalls, emit } = makeReopenableProvider();
+    const speechTurn = vi.fn(async (_args: { speechResult: string }): Promise<SideEffect[]> => []);
+    const adapter = new TwilioMediaStreamAdapter(
+      { store, streamingProvider: provider, speechTurn, initialLanguageResolver: async () => 'en' },
+      ws,
+    );
+    adapter.start();
+    ws.inboundJson(startFrame('CA-emergency-es', 'MZ-emergency-es'));
+    await flush();
+
+    const events: Array<{ trigger?: string }> = [];
+    session.events.on(VOICE_EVENT_CHANNEL, (evt: { type: string; trigger?: string }) => {
+      if (evt.type === 'language_switched') events.push(evt);
+    });
+
+    emit({
+      type: 'final',
+      isFinal: true,
+      transcript: 'Hay una fuga de gas, hablo español',
+      confidence: 0.9,
+    });
+    await flush(8);
+
+    // Life-safety wins the turn: the explicit-switch path bailed out and the
+    // utterance reaches the host pipeline (where the deterministic safety
+    // scan runs) — it is NEVER consumed by a language ack.
+    expect(speechTurn).toHaveBeenCalledTimes(1);
+    expect(speechTurn.mock.calls[0][0]).toMatchObject({
+      speechResult: 'Hay una fuga de gas, hablo español',
+    });
+    // The non-consuming first-final detection still switches STT to Spanish
+    // (the caller IS speaking Spanish) — as trigger (a), not an explicit ack.
+    expect(openCalls).toHaveLength(2);
+    expect(openCalls[1].language).toBe('es');
+    expect(events[0]).toMatchObject({ trigger: 'first_utterance' });
+  });
+
+  it('a classified language_switch intent (audit_log) flips the language as a fallback', async () => {
+    const session = store.create('t', 'telephony', { callSid: 'CA-classified' });
+    session.supportedLanguages = ['en', 'es'];
+    const ws = new FakeWs();
+    const { provider, openCalls, emit } = makeReopenableProvider();
+    // The classifier caught a phrasing the deterministic heuristic misses.
+    const speechTurn = vi.fn(async () => [
+      {
+        type: 'audit_log' as const,
+        payload: { intentType: 'language_switch', confidence: 0.92 },
+      },
+    ]);
+    const adapter = new TwilioMediaStreamAdapter(
+      { store, streamingProvider: provider, speechTurn, initialLanguageResolver: async () => 'en' },
+      ws,
+    );
+    adapter.start();
+    ws.inboundJson(startFrame('CA-classified', 'MZ-classified'));
+    await flush();
+
+    const events: unknown[] = [];
+    session.events.on(VOICE_EVENT_CHANNEL, (evt: { type: string }) => {
+      if (evt.type === 'language_switched') events.push(evt);
+    });
+
+    emit({ type: 'final', isFinal: true, transcript: 'Podemos continuar en el otro idioma', confidence: 0.9 });
+    await flush(8);
+
+    expect(speechTurn).toHaveBeenCalledTimes(1); // normal turn ran
+    expect(openCalls).toHaveLength(2); // then the fallback reopened in es
+    expect(openCalls[1].language).toBe('es');
+    expect(events[0]).toMatchObject({ trigger: 'classified_intent', to: 'es' });
+  });
+});
+
+describe('UB-C2 — streaming TTS language + copy rendering', () => {
+  let store: VoiceSessionStore;
+
+  beforeEach(() => {
+    store = new VoiceSessionStore({ startInterval: false });
+  });
+
+  async function setupSpanishSession(opts: {
+    ttsProvider: TtsProvider;
+    fillerEngine?: {
+      selectNext(
+        ctx?: { skipFillers?: boolean; language?: 'en' | 'es' },
+      ): { id: string; text: string; approxDurationMs: number } | undefined;
+    };
+    fillerCache?: { get: (id: string) => Buffer | undefined };
+    fillerDelayMs?: number;
+  }): Promise<{ adapter: TwilioMediaStreamAdapter; ws: FakeWs }> {
+    const session = store.create('t', 'telephony', { callSid: 'CA-es-tts' });
+    session.language = 'es';
+    session.supportedLanguages = ['en', 'es'];
+    const ws = new FakeWs();
+    const provider: StreamingTranscriptionProvider = {
+      openSession: vi.fn(async () => ({ send: vi.fn(), finish: vi.fn(), destroy: vi.fn() })),
+    };
+    const adapter = new TwilioMediaStreamAdapter(
+      {
+        store,
+        streamingProvider: provider,
+        speechTurn: async () => [],
+        ttsProvider: opts.ttsProvider,
+        fillerEngine: opts.fillerEngine,
+        fillerCache: opts.fillerCache,
+        fillerDelayMs: opts.fillerDelayMs,
+      },
+      ws,
+    );
+    adapter.start();
+    ws.inboundJson({
+      event: 'start',
+      streamSid: 'MZ-es-tts',
+      start: { callSid: 'CA-es-tts', accountSid: 'AC', streamSid: 'MZ-es-tts', tracks: ['inbound'] },
+    });
+    await new Promise((r) => setImmediate(r));
+    return { adapter, ws };
+  }
+
+  it('renders template keys with the session language and threads language into synthesize', async () => {
+    const tts = {
+      synthesize: vi.fn(async (_input: TtsSynthesizeInput): Promise<TtsSynthesizeResult> => ({
+        audio: Buffer.alloc(640),
+        contentType: 'audio/pcm',
+        provider: 'test',
+      })),
+    };
+    const { adapter } = await setupSpanishSession({ ttsProvider: tts });
+
+    await (adapter as unknown as { emitSideEffects: (fx: unknown[]) => Promise<void> }).emitSideEffects([
+      {
+        type: 'tts_play',
+        payload: { text: 'intent_confirm', template: 'confirm_intent', intent: 'create_appointment' },
+      },
+    ]);
+
+    expect(tts.synthesize).toHaveBeenCalledTimes(1);
+    const arg = tts.synthesize.mock.calls[0][0];
+    expect(arg.language).toBe('es');
+    // The template key was rendered to Spanish copy — the caller never
+    // hears the literal string "intent_confirm".
+    expect(arg.text).toContain('Para confirmar');
+    expect(arg.text).toContain('agendar una cita');
+  });
+
+  it('threads language into synthesizeStream on the streaming path', async () => {
+    const synthesizeStream = vi.fn((input: { text: string; language?: string }) => ({
+      async *[Symbol.asyncIterator]() {
+        void input;
+        yield { pcm: Buffer.alloc(640), isFinal: true };
+      },
+    }));
+    const tts = {
+      synthesize: vi.fn(),
+      synthesizeStream,
+    } as unknown as TtsProvider;
+    const { adapter } = await setupSpanishSession({ ttsProvider: tts });
+
+    await (adapter as unknown as { emitSideEffects: (fx: unknown[]) => Promise<void> }).emitSideEffects([
+      { type: 'tts_play', payload: { text: 'Perfecto, un momento.' } },
+    ]);
+
+    expect(synthesizeStream).toHaveBeenCalledTimes(1);
+    expect(synthesizeStream.mock.calls[0][0]).toMatchObject({ language: 'es' });
+  });
+
+  it('keys filler selection by session language and degrades to SILENCE when the es clip is missing', async () => {
+    // TTS delays past the filler threshold so the filler path fires.
+    const tts = {
+      synthesize: vi.fn(),
+      synthesizeStream: vi.fn(() => ({
+        async *[Symbol.asyncIterator]() {
+          await new Promise((r) => setTimeout(r, 200));
+          yield { pcm: Buffer.alloc(640), isFinal: true };
+        },
+      })),
+    } as unknown as TtsProvider;
+    const fillerEngine = {
+      selectNext: vi.fn(() => ({ id: 'es-un-momento', text: 'Un momento.', approxDurationMs: 480 })),
+    };
+    // Cache only holds ENGLISH clips — the Spanish clip is unrendered.
+    const englishOnlyCache = { get: (id: string) => (id === 'okay' ? Buffer.alloc(320) : undefined) };
+    const { adapter, ws } = await setupSpanishSession({
+      ttsProvider: tts,
+      fillerEngine,
+      fillerCache: englishOnlyCache,
+      fillerDelayMs: 30,
+    });
+
+    const done = (adapter as unknown as { emitSideEffects: (fx: unknown[]) => Promise<void> }).emitSideEffects([
+      { type: 'tts_play', payload: { text: 'Déjeme revisar su cuenta.' } },
+    ]);
+    // Wait past the filler delay but before the real TTS chunk lands.
+    await new Promise((r) => setTimeout(r, 100));
+
+    // Selection was keyed by the session language…
+    expect(fillerEngine.selectNext).toHaveBeenCalledWith({ language: 'es' });
+    // …and the missing es clip produced SILENCE (no media frames), never
+    // the English 'okay' clip.
+    const mediaFrames = ws.sent.filter((f) => (f as Record<string, unknown>).event === 'media');
+    expect(mediaFrames).toHaveLength(0);
+
+    await done;
+    // Real TTS still played after the silent-gap turn.
+    const framesAfter = ws.sent.filter((f) => (f as Record<string, unknown>).event === 'media');
+    expect(framesAfter.length).toBeGreaterThan(0);
+  });
+});
+
+// ─── WS26 — voice turn latency (STT-final → first TTS chunk) ──────────────────
+
+describe('WS26 voice_turn_latency_ms', () => {
+  /** Read the histogram's cumulative sample count from its prom export. */
+  async function turnLatencyCount(): Promise<number> {
+    const snap = await voiceTurnLatencyMs.get();
+    return (
+      snap.values.find((v) => v.metricName === 'voice_turn_latency_ms_count')?.value ?? 0
+    );
+  }
+
+  beforeEach(() => {
+    // Isolated from other tests + reruns — this metric is a module singleton.
+    voiceTurnLatencyMs.reset();
+  });
+
+  it('observes exactly one sample per driven turn (final transcript → first TTS chunk)', async () => {
+    store.create('t', 'telephony', { callSid: 'CA-ws26' });
+    const ws = new FakeWs();
+    const { provider, handle } = makeStreamingProvider();
+    const tts = makeTtsProvider();
+    const adapter = new TwilioMediaStreamAdapter(
+      {
+        store,
+        streamingProvider: provider,
+        // The turn's reply is what produces outbound audio AFTER the final
+        // transcript arms the latency timer (the greeting would not count).
+        speechTurn: async () => [{ type: 'tts_play', payload: { text: 'Sure, one moment.' } }],
+        ttsProvider: tts,
+      },
+      ws,
+    );
+    adapter.start();
+
+    ws.inboundJson({
+      event: 'start',
+      streamSid: 'MZ-ws26',
+      start: { callSid: 'CA-ws26', accountSid: 'AC', streamSid: 'MZ-ws26', tracks: ['inbound'] },
+    });
+    await new Promise((r) => setImmediate(r));
+
+    expect(await turnLatencyCount()).toBe(0);
+
+    handle.emit({ type: 'final', isFinal: true, transcript: 'do you have a slot', confidence: 0.95 });
+    await new Promise((r) => setImmediate(r));
+
+    // Audio actually flowed…
+    const mediaFrames = ws.sent.filter((m) => (m as Record<string, unknown>).event === 'media');
+    expect(mediaFrames.length).toBeGreaterThanOrEqual(1);
+    // …and the turn was measured exactly once, no matter how many chunks.
+    expect(await turnLatencyCount()).toBe(1);
+  });
+
+  it('does not throw into the audio path when the metrics registry throws', async () => {
+    // Simulate a broken prom registry: observe() throws. The turn must still
+    // complete and stream audio — the timing capture is best-effort only.
+    const observeSpy = vi
+      .spyOn(voiceTurnLatencyMs, 'observe')
+      .mockImplementation(() => {
+        throw new Error('registry exploded');
+      });
+    try {
+      store.create('t', 'telephony', { callSid: 'CA-ws26-throw' });
+      const ws = new FakeWs();
+      const { provider, handle } = makeStreamingProvider();
+      const tts = makeTtsProvider();
+      const adapter = new TwilioMediaStreamAdapter(
+        {
+          store,
+          streamingProvider: provider,
+          speechTurn: async () => [{ type: 'tts_play', payload: { text: 'Of course.' } }],
+          ttsProvider: tts,
+        },
+        ws,
+      );
+      adapter.start();
+
+      ws.inboundJson({
+        event: 'start',
+        streamSid: 'MZ-ws26-throw',
+        start: {
+          callSid: 'CA-ws26-throw',
+          accountSid: 'AC',
+          streamSid: 'MZ-ws26-throw',
+          tracks: ['inbound'],
+        },
+      });
+      await new Promise((r) => setImmediate(r));
+      handle.emit({ type: 'final', isFinal: true, transcript: 'hi there', confidence: 0.95 });
+      await new Promise((r) => setImmediate(r));
+
+      // observe() was reached (proving the seam is wired) and it threw…
+      expect(observeSpy).toHaveBeenCalled();
+      // …yet the outbound audio path was unaffected.
+      const mediaFrames = ws.sent.filter((m) => (m as Record<string, unknown>).event === 'media');
+      expect(mediaFrames.length).toBeGreaterThanOrEqual(1);
+    } finally {
+      observeSpy.mockRestore();
+    }
+  });
+});
+
+// ─── VOX-35c — speechTurn-failure recovery (no silent dead-air turn) ──────────
+//
+// Before this fix, when `speechTurn` threw inside the session lock the catch
+// only logged a warn and returned — the caller heard pure silence for the
+// whole turn (the inbound analogue of the VOX-35b mid-stream dead-air bug).
+// These pins assert the recovery: an apology+reprompt is spoken through the
+// normal outbound-turn path, the counter resets on a good turn, and repeated
+// back-to-back failures hand the caller off gracefully instead of looping
+// apologies forever.
+describe('VOX-35c speechTurn-failure recovery', () => {
+  /** TTS double that records the (already-localized) text handed to synthesize. */
+  function makeCapturingTts(): { tts: TtsProvider; texts: string[] } {
+    const texts: string[] = [];
+    const tts: TtsProvider = {
+      synthesize: vi.fn(async (input: TtsSynthesizeInput): Promise<TtsSynthesizeResult> => {
+        texts.push(input.text);
+        return { audio: Buffer.alloc(640), contentType: 'audio/pcm', provider: 'test' };
+      }),
+    };
+    return { tts, texts };
+  }
+
+  it('speaks an apology+reprompt (not silence) when speechTurn throws once, and resets the counter after a good turn', async () => {
+    store.create('t', 'telephony', { callSid: 'CA-recover-1' });
+    const ws = new FakeWs();
+    const { provider, handle } = makeStreamingProvider();
+    const { tts, texts } = makeCapturingTts();
+    // Throw on the 1st + 3rd turns, succeed on the 2nd. If the counter did
+    // NOT reset after the good 2nd turn, the 3rd throw would be the "2nd
+    // consecutive" and escalate+close instead of apologizing again.
+    const speechTurn = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('gateway 500'))
+      .mockResolvedValueOnce([])
+      .mockRejectedValueOnce(new Error('gateway 500 again'));
+    const finalizeOnClose = vi.fn();
+    const adapter = new TwilioMediaStreamAdapter(
+      { store, streamingProvider: provider, speechTurn, ttsProvider: tts, finalizeOnClose },
+      ws,
+    );
+    adapter.start();
+    ws.inboundJson({
+      event: 'start',
+      streamSid: 'MZ-recover-1',
+      start: { callSid: 'CA-recover-1', accountSid: 'AC', streamSid: 'MZ-recover-1', tracks: ['inbound'] },
+    });
+    await new Promise((r) => setImmediate(r));
+
+    // Turn 1: speechTurn throws → apology audio (not silence).
+    handle.emit({ type: 'final', isFinal: true, transcript: 'hello', confidence: 0.95 });
+    await new Promise((r) => setImmediate(r));
+    let mediaFrames = ws.sent.filter((m) => (m as Record<string, unknown>).event === 'media');
+    expect(mediaFrames.length).toBeGreaterThanOrEqual(1);
+    expect(texts).toEqual([renderTtsText(SPEECH_TURN_FAILURE_REPROMPT_COPY, {}, 'en')]);
+    expect(ws.closed).toBe(false);
+    // OBS — a single speechTurn failure fires voice_error(speech_turn_failed),
+    // AFTER the apology was already spoken above.
+    expect(recordVoiceErrorMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        errorKind: 'speech_turn_failed',
+        channel: 'media_streams',
+        callSid: 'CA-recover-1',
+        tenantId: 't',
+      }),
+    );
+
+    // Turn 2: speechTurn succeeds → resets the consecutive-failure counter.
+    handle.emit({ type: 'final', isFinal: true, transcript: 'i need an appointment', confidence: 0.95 });
+    await new Promise((r) => setImmediate(r));
+
+    // Turn 3: speechTurn throws again — because the counter reset, this is
+    // treated as a fresh 1st failure → another APOLOGY, not an escalation.
+    handle.emit({ type: 'final', isFinal: true, transcript: 'still there?', confidence: 0.95 });
+    await new Promise((r) => setImmediate(r));
+
+    expect(texts).toEqual([
+      renderTtsText(SPEECH_TURN_FAILURE_REPROMPT_COPY, {}, 'en'),
+      renderTtsText(SPEECH_TURN_FAILURE_REPROMPT_COPY, {}, 'en'),
+    ]);
+    // Never escalated/closed — the call is still live for the caller to retry.
+    expect(ws.closed).toBe(false);
+    expect(finalizeOnClose).not.toHaveBeenCalled();
+  });
+
+  it('speaks the apology in the session active language (es)', async () => {
+    const session = store.create('t', 'telephony', { callSid: 'CA-recover-es' });
+    session.language = 'es';
+    const ws = new FakeWs();
+    const { provider, handle } = makeStreamingProvider();
+    const { tts, texts } = makeCapturingTts();
+    const speechTurn = vi.fn().mockRejectedValue(new Error('gateway 500'));
+    const adapter = new TwilioMediaStreamAdapter(
+      { store, streamingProvider: provider, speechTurn, ttsProvider: tts },
+      ws,
+    );
+    adapter.start();
+    ws.inboundJson({
+      event: 'start',
+      streamSid: 'MZ-recover-es',
+      start: { callSid: 'CA-recover-es', accountSid: 'AC', streamSid: 'MZ-recover-es', tracks: ['inbound'] },
+    });
+    await new Promise((r) => setImmediate(r));
+
+    handle.emit({ type: 'final', isFinal: true, transcript: 'hola necesito ayuda', confidence: 0.95 });
+    await new Promise((r) => setImmediate(r));
+
+    const esReprompt = renderTtsText(SPEECH_TURN_FAILURE_REPROMPT_COPY, {}, 'es');
+    expect(texts).toEqual([esReprompt]);
+    // Sanity: the es rendering actually differs from the raw English key.
+    expect(esReprompt).not.toBe(SPEECH_TURN_FAILURE_REPROMPT_COPY);
+  });
+
+  it('escalates + ends gracefully after two consecutive failures (no third apology loop)', async () => {
+    store.create('t', 'telephony', { callSid: 'CA-recover-2' });
+    const ws = new FakeWs();
+    const { provider, handle } = makeStreamingProvider();
+    const { tts, texts } = makeCapturingTts();
+    const speechTurn = vi.fn().mockRejectedValue(new Error('gateway down'));
+    const finalizeOnClose = vi.fn();
+    const adapter = new TwilioMediaStreamAdapter(
+      { store, streamingProvider: provider, speechTurn, ttsProvider: tts, finalizeOnClose },
+      ws,
+    );
+    adapter.start();
+    ws.inboundJson({
+      event: 'start',
+      streamSid: 'MZ-recover-2',
+      start: { callSid: 'CA-recover-2', accountSid: 'AC', streamSid: 'MZ-recover-2', tracks: ['inbound'] },
+    });
+    await new Promise((r) => setImmediate(r));
+
+    // Failure 1 → apology; call stays live.
+    handle.emit({ type: 'final', isFinal: true, transcript: 'hello', confidence: 0.95 });
+    await new Promise((r) => setImmediate(r));
+    expect(ws.closed).toBe(false);
+
+    // Failure 2 (consecutive) → spoken hand-off line + graceful end.
+    handle.emit({ type: 'final', isFinal: true, transcript: 'anyone there', confidence: 0.95 });
+    await new Promise((r) => setImmediate(r));
+
+    // Exactly two turns were attempted — no third apology loop.
+    expect(speechTurn).toHaveBeenCalledTimes(2);
+    // The two spoken lines: apology, then the escalation hand-off.
+    expect(texts).toEqual([
+      renderTtsText(SPEECH_TURN_FAILURE_REPROMPT_COPY, {}, 'en'),
+      renderTtsText(SPEECH_TURN_FAILURE_ESCALATION_COPY, {}, 'en'),
+    ]);
+    // Graceful end through the existing end_session close path.
+    expect(ws.closed).toBe(true);
+    expect(finalizeOnClose).toHaveBeenCalledTimes(1);
+    const [, reason, sideEffects] = finalizeOnClose.mock.calls[0];
+    expect(reason).toBe('session_ended');
+    expect(sideEffects).toEqual([
+      { type: 'end_session', payload: { reason: 'system_failure:speech_turn_repeated_failure' } },
+    ]);
+    // OBS — the repeated-failure hand-off fires its own distinct error_kind,
+    // AFTER the hand-off line was spoken and the call torn down above.
+    expect(recordVoiceErrorMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        errorKind: 'speech_turn_repeated_failure',
+        channel: 'media_streams',
+        callSid: 'CA-recover-2',
+        tenantId: 't',
+      }),
+    );
+  });
+
+  it('barge-in during the recovery apology behaves like normal barge-in', async () => {
+    store.create('t', 'telephony', { callSid: 'CA-recover-barge' });
+    const ws = new FakeWs();
+    const { provider, handle } = makeStreamingProvider();
+    // Hang the apology synth so it is in-flight when the caller barges in.
+    const tts: TtsProvider = {
+      synthesize: vi.fn(
+        () =>
+          new Promise(() => {
+            /* never resolves */
+          }),
+      ),
+    };
+    const speechTurn = vi.fn().mockRejectedValue(new Error('gateway 500'));
+    const adapter = new TwilioMediaStreamAdapter(
+      { store, streamingProvider: provider, speechTurn, ttsProvider: tts },
+      ws,
+    );
+    adapter.start();
+    ws.inboundJson({
+      event: 'start',
+      streamSid: 'MZ-recover-barge',
+      start: { callSid: 'CA-recover-barge', accountSid: 'AC', streamSid: 'MZ-recover-barge', tracks: ['inbound'] },
+    });
+    await new Promise((r) => setImmediate(r));
+
+    // Final → speechTurn throws → apology synth starts and hangs (agentSpeaking).
+    handle.emit({ type: 'final', isFinal: true, transcript: 'hello', confidence: 0.95 });
+    await new Promise((r) => setImmediate(r));
+
+    // Caller barges in over the apology.
+    handle.emit({ type: 'partial', isFinal: false, transcript: 'wait', confidence: 0.5 });
+    await new Promise((r) => setImmediate(r));
+
+    const clearFrames = ws.sent.filter((m) => (m as Record<string, unknown>).event === 'clear');
+    expect(clearFrames.length).toBeGreaterThanOrEqual(1);
+    const mediaFrames = ws.sent.filter((m) => (m as Record<string, unknown>).event === 'media');
+    expect(mediaFrames.length).toBe(0);
+  });
+});
+
+// ─── A3 — low acoustic STT confidence gate ─────────────────────────────────
+//
+// Before this fix, Deepgram's `confidence` on a FINAL transcript was received
+// and completely ignored — a mumbled/misheard turn was dispatched into the
+// FSM exactly like a clean one. These pins assert the gate: a low-confidence
+// final is reprompted (not dispatched), the reprompt is localized, the
+// consecutive-low-confidence streak resets on a good turn, repeated low
+// confidence hands the caller off gracefully instead of looping, and a
+// missing confidence value is never treated as low.
+describe('A3 low acoustic STT confidence gate', () => {
+  /** TTS double that records the (already-localized) text handed to synthesize. */
+  function makeCapturingTts(): { tts: TtsProvider; texts: string[] } {
+    const texts: string[] = [];
+    const tts: TtsProvider = {
+      synthesize: vi.fn(async (input: TtsSynthesizeInput): Promise<TtsSynthesizeResult> => {
+        texts.push(input.text);
+        return { audio: Buffer.alloc(640), contentType: 'audio/pcm', provider: 'test' };
+      }),
+    };
+    return { tts, texts };
+  }
+
+  it('a low-confidence final is reprompted (localized), not dispatched as a speechTurn', async () => {
+    store.create('t', 'telephony', { callSid: 'CA-lowconf-1' });
+    const ws = new FakeWs();
+    const { provider, handle } = makeStreamingProvider();
+    const { tts, texts } = makeCapturingTts();
+    const speechTurn = vi.fn().mockResolvedValue([]);
+    const adapter = new TwilioMediaStreamAdapter(
+      { store, streamingProvider: provider, speechTurn, ttsProvider: tts },
+      ws,
+    );
+    adapter.start();
+    ws.inboundJson({
+      event: 'start',
+      streamSid: 'MZ-lowconf-1',
+      start: { callSid: 'CA-lowconf-1', accountSid: 'AC', streamSid: 'MZ-lowconf-1', tracks: ['inbound'] },
+    });
+    await new Promise((r) => setImmediate(r));
+
+    // Below the default 0.5 floor — mumbled/misheard.
+    handle.emit({ type: 'final', isFinal: true, transcript: 'mmuh unh', confidence: 0.35 });
+    await new Promise((r) => setImmediate(r));
+
+    expect(speechTurn).not.toHaveBeenCalled();
+    expect(texts).toEqual([renderTtsText(LOW_STT_CONFIDENCE_REPROMPT_COPY, {}, 'en')]);
+    expect(ws.closed).toBe(false);
+    expect(recordVoiceErrorMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        errorKind: 'low_stt_confidence',
+        channel: 'media_streams',
+        callSid: 'CA-lowconf-1',
+        tenantId: 't',
+      }),
+    );
+  });
+
+  it('speaks the low-confidence reprompt in the session active language (es)', async () => {
+    const session = store.create('t', 'telephony', { callSid: 'CA-lowconf-es' });
+    session.language = 'es';
+    const ws = new FakeWs();
+    const { provider, handle } = makeStreamingProvider();
+    const { tts, texts } = makeCapturingTts();
+    const speechTurn = vi.fn().mockResolvedValue([]);
+    const adapter = new TwilioMediaStreamAdapter(
+      { store, streamingProvider: provider, speechTurn, ttsProvider: tts },
+      ws,
+    );
+    adapter.start();
+    ws.inboundJson({
+      event: 'start',
+      streamSid: 'MZ-lowconf-es',
+      start: { callSid: 'CA-lowconf-es', accountSid: 'AC', streamSid: 'MZ-lowconf-es', tracks: ['inbound'] },
+    });
+    await new Promise((r) => setImmediate(r));
+
+    handle.emit({ type: 'final', isFinal: true, transcript: 'mmuh unh', confidence: 0.35 });
+    await new Promise((r) => setImmediate(r));
+
+    const esReprompt = renderTtsText(LOW_STT_CONFIDENCE_REPROMPT_COPY, {}, 'es');
+    expect(texts).toEqual([esReprompt]);
+    // Sanity: the es rendering actually differs from the raw English key.
+    expect(esReprompt).not.toBe(LOW_STT_CONFIDENCE_REPROMPT_COPY);
+    expect(speechTurn).not.toHaveBeenCalled();
+  });
+
+  it('two consecutive low-confidence finals hand off gracefully instead of looping', async () => {
+    store.create('t', 'telephony', { callSid: 'CA-lowconf-2' });
+    const ws = new FakeWs();
+    const { provider, handle } = makeStreamingProvider();
+    const { tts, texts } = makeCapturingTts();
+    const speechTurn = vi.fn().mockResolvedValue([]);
+    const finalizeOnClose = vi.fn();
+    const adapter = new TwilioMediaStreamAdapter(
+      { store, streamingProvider: provider, speechTurn, ttsProvider: tts, finalizeOnClose },
+      ws,
+    );
+    adapter.start();
+    ws.inboundJson({
+      event: 'start',
+      streamSid: 'MZ-lowconf-2',
+      start: { callSid: 'CA-lowconf-2', accountSid: 'AC', streamSid: 'MZ-lowconf-2', tracks: ['inbound'] },
+    });
+    await new Promise((r) => setImmediate(r));
+
+    // Low-confidence final 1 → reprompt; call stays live.
+    handle.emit({ type: 'final', isFinal: true, transcript: 'mmuh', confidence: 0.35 });
+    await new Promise((r) => setImmediate(r));
+    expect(ws.closed).toBe(false);
+
+    // Low-confidence final 2 (consecutive) → spoken hand-off + graceful end.
+    handle.emit({ type: 'final', isFinal: true, transcript: 'unh', confidence: 0.2 });
+    await new Promise((r) => setImmediate(r));
+
+    // speechTurn was never dispatched for either low-confidence turn.
+    expect(speechTurn).not.toHaveBeenCalled();
+    expect(texts).toEqual([
+      renderTtsText(LOW_STT_CONFIDENCE_REPROMPT_COPY, {}, 'en'),
+      renderTtsText(SPEECH_TURN_FAILURE_ESCALATION_COPY, {}, 'en'),
+    ]);
+    expect(ws.closed).toBe(true);
+    expect(finalizeOnClose).toHaveBeenCalledTimes(1);
+    const [, reason, sideEffects] = finalizeOnClose.mock.calls[0];
+    expect(reason).toBe('session_ended');
+    expect(sideEffects).toEqual([
+      { type: 'end_session', payload: { reason: 'low_stt_confidence_max_retries' } },
+    ]);
+    expect(recordVoiceErrorMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        errorKind: 'low_stt_confidence_repeated',
+        channel: 'media_streams',
+        callSid: 'CA-lowconf-2',
+        tenantId: 't',
+      }),
+    );
+  });
+
+  it('resets the low-confidence streak after a good (dispatched) turn', async () => {
+    store.create('t', 'telephony', { callSid: 'CA-lowconf-3' });
+    const ws = new FakeWs();
+    const { provider, handle } = makeStreamingProvider();
+    const { tts, texts } = makeCapturingTts();
+    const speechTurn = vi.fn().mockResolvedValue([]);
+    const finalizeOnClose = vi.fn();
+    const adapter = new TwilioMediaStreamAdapter(
+      { store, streamingProvider: provider, speechTurn, ttsProvider: tts, finalizeOnClose },
+      ws,
+    );
+    adapter.start();
+    ws.inboundJson({
+      event: 'start',
+      streamSid: 'MZ-lowconf-3',
+      start: { callSid: 'CA-lowconf-3', accountSid: 'AC', streamSid: 'MZ-lowconf-3', tracks: ['inbound'] },
+    });
+    await new Promise((r) => setImmediate(r));
+
+    // Low-confidence 1 → reprompt.
+    handle.emit({ type: 'final', isFinal: true, transcript: 'mmuh', confidence: 0.35 });
+    await new Promise((r) => setImmediate(r));
+
+    // A clean, high-confidence turn → dispatched normally, resets the streak.
+    handle.emit({ type: 'final', isFinal: true, transcript: 'book an appointment', confidence: 0.95 });
+    await new Promise((r) => setImmediate(r));
+
+    // Low-confidence again → because the streak reset, this is a fresh 1st
+    // low-confidence turn → another REPROMPT, not an escalation.
+    handle.emit({ type: 'final', isFinal: true, transcript: 'unh', confidence: 0.35 });
+    await new Promise((r) => setImmediate(r));
+
+    expect(speechTurn).toHaveBeenCalledTimes(1);
+    expect(texts).toEqual([
+      renderTtsText(LOW_STT_CONFIDENCE_REPROMPT_COPY, {}, 'en'),
+      renderTtsText(LOW_STT_CONFIDENCE_REPROMPT_COPY, {}, 'en'),
+    ]);
+    expect(ws.closed).toBe(false);
+    expect(finalizeOnClose).not.toHaveBeenCalled();
+  });
+
+  it('a missing confidence value is treated as HIGH — dispatched normally, never blocks the turn', async () => {
+    store.create('t', 'telephony', { callSid: 'CA-lowconf-missing' });
+    const ws = new FakeWs();
+    const { provider, handle } = makeStreamingProvider();
+    const speechTurn = vi.fn().mockResolvedValue([]);
+    const adapter = new TwilioMediaStreamAdapter(
+      { store, streamingProvider: provider, speechTurn },
+      ws,
+    );
+    adapter.start();
+    ws.inboundJson({
+      event: 'start',
+      streamSid: 'MZ-lowconf-missing',
+      start: {
+        callSid: 'CA-lowconf-missing',
+        accountSid: 'AC',
+        streamSid: 'MZ-lowconf-missing',
+        tracks: ['inbound'],
+      },
+    });
+    await new Promise((r) => setImmediate(r));
+
+    // No `confidence` field at all (some providers/fixtures omit it).
+    handle.emit({ type: 'final', isFinal: true, transcript: 'book an appointment' } as unknown as StreamingTranscriptEvent);
+    await new Promise((r) => setImmediate(r));
+
+    expect(speechTurn).toHaveBeenCalledTimes(1);
+    expect(recordVoiceErrorMock).not.toHaveBeenCalledWith(
+      expect.objectContaining({ errorKind: 'low_stt_confidence' }),
+    );
+  });
+});
+
+// ─── T2-F05 — caller-silence reprompt timer ─────────────────────────────────
+//
+// Before this fix a Media-Streams caller who simply said NOTHING after the
+// agent finished speaking was stranded forever: Twilio streams silence frames
+// continuously, so the 30-minute audio-idle timer never fires mid-call, and no
+// transcript ever arrives to drive the turn loop. These pins assert the
+// per-turn silence timer: armed at the agent's end-of-turn mark, cleared by
+// any caller audio / barge-in / close, and expiring into the EXISTING
+// low-STT-confidence ladder (shared streak, shared cap, shared escalation).
+describe('T2-F05 caller-silence reprompt timer', () => {
+  const flush = () => new Promise((r) => setImmediate(r));
+
+  beforeEach(() => {
+    // setImmediate stays real so the existing flush() pattern keeps working.
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  /** TTS double that records the (already-localized) text handed to synthesize. */
+  function makeCapturingTts(): { tts: TtsProvider; texts: string[] } {
+    const texts: string[] = [];
+    const tts: TtsProvider = {
+      synthesize: vi.fn(async (input: TtsSynthesizeInput): Promise<TtsSynthesizeResult> => {
+        texts.push(input.text);
+        return { audio: Buffer.alloc(640), contentType: 'audio/pcm', provider: 'test' };
+      }),
+    };
+    return { tts, texts };
+  }
+
+  const AGENT_LINE = 'How can I help you today?';
+
+  async function setupSilenceCall(
+    callSid: string,
+    opts: {
+      silenceRepromptTimeoutMs?: number;
+      handlePendingDialogueSilence?: (
+        session: VoiceSession,
+        tenantId: string,
+      ) => Promise<SideEffect[] | null>;
+    } = {},
+  ) {
+    const session = store.create('t', 'telephony', { callSid });
+    const ws = new FakeWs();
+    const { provider, handle } = makeStreamingProvider();
+    const { tts, texts } = makeCapturingTts();
+    const speechTurn = vi
+      .fn()
+      .mockResolvedValue([{ type: 'tts_play', payload: { text: AGENT_LINE } }]);
+    const finalizeOnClose = vi.fn();
+    const adapter = new TwilioMediaStreamAdapter(
+      {
+        store,
+        streamingProvider: provider,
+        speechTurn,
+        ttsProvider: tts,
+        finalizeOnClose,
+        // Isolated registry: the process-wide singleton is saturated for
+        // tenant 't' by the many earlier adapters in this file.
+        connectionRegistry: new InMemoryConnectionRegistry(),
+        ...(opts.silenceRepromptTimeoutMs !== undefined
+          ? { silenceRepromptTimeoutMs: opts.silenceRepromptTimeoutMs }
+          : {}),
+        ...(opts.handlePendingDialogueSilence
+          ? { handlePendingDialogueSilence: opts.handlePendingDialogueSilence }
+          : {}),
+      },
+      ws,
+    );
+    adapter.start();
+    ws.inboundJson({
+      event: 'start',
+      streamSid: `MZ-${callSid}`,
+      start: { callSid, accountSid: 'AC', streamSid: `MZ-${callSid}`, tracks: ['inbound'] },
+    });
+    await flush();
+    return { adapter, ws, handle, texts, speechTurn, finalizeOnClose, session };
+  }
+
+  /**
+   * Drive one confident caller turn so the agent speaks, then ack the
+   * dedicated end-of-utterance `silence-arm-${turnId}` mark — the silence
+   * timer arms on THAT mark's ack (emitted once, after all of the turn's
+   * audio is enqueued), not on the per-chunk `turn-${turnId}` marks that
+   * streamPcmAsMedia() emits once per streamed chunk.
+   */
+  async function completeAgentTurn(
+    adapter: TwilioMediaStreamAdapter,
+    ws: FakeWs,
+    handle: StreamHandle,
+  ): Promise<void> {
+    handle.emit({ type: 'final', isFinal: true, transcript: 'hello there', confidence: 0.95 });
+    await flush();
+    await flush();
+    const pendingTurn = (
+      adapter as unknown as { state: { pendingSilenceRepromptTurnId: number | null } }
+    ).state.pendingSilenceRepromptTurnId;
+    if (pendingTurn !== null) {
+      ws.inboundJson({ event: 'mark', streamSid: 'MZ', mark: { name: `silence-arm-${pendingTurn}` } });
+      await flush();
+    }
+  }
+
+  /** White-box read of the private streak counter. */
+  const streak = (adapter: TwilioMediaStreamAdapter): number =>
+    (adapter as unknown as { state: { consecutiveLowConfidenceTurns: number } }).state
+      .consecutiveLowConfidenceTurns;
+
+  it('reprompts a silent caller 8s after the agent turn ends and bumps the shared streak', async () => {
+    const { adapter, ws, handle, texts } = await setupSilenceCall('CA-sil-1');
+    await completeAgentTurn(adapter, ws, handle);
+    expect(texts).toEqual([AGENT_LINE]);
+
+    // Just short of the default window: still silent, still no reprompt.
+    await vi.advanceTimersByTimeAsync(DEFAULT_SILENCE_REPROMPT_MS - 1);
+    expect(texts).toEqual([AGENT_LINE]);
+
+    await vi.advanceTimersByTimeAsync(1);
+    await flush();
+
+    expect(texts).toEqual([AGENT_LINE, renderTtsText(LOW_STT_CONFIDENCE_REPROMPT_COPY, {}, 'en')]);
+    expect(streak(adapter)).toBe(1);
+    expect(ws.closed).toBe(false);
+    expect(recordVoiceErrorMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        errorKind: 'low_stt_confidence',
+        channel: 'media_streams',
+        callSid: 'CA-sil-1',
+        tenantId: 't',
+      }),
+    );
+  });
+
+  it('does not start the countdown until Twilio acks the end-of-turn mark (no early reprompt on send backlog)', async () => {
+    const { adapter, handle, texts } = await setupSilenceCall('CA-sil-ack');
+    // Agent turn plays but the end-of-turn mark has NOT been acked yet
+    // (backlogged playback). Advancing well past the window must not reprompt.
+    handle.emit({ type: 'final', isFinal: true, transcript: 'hello there', confidence: 0.95 });
+    await flush();
+    await flush();
+    expect(texts).toEqual([AGENT_LINE]);
+    await vi.advanceTimersByTimeAsync(DEFAULT_SILENCE_REPROMPT_MS * 2);
+    await flush();
+    expect(texts).toEqual([AGENT_LINE]); // still no reprompt — timer never armed
+    const pendingTurn = (
+      adapter as unknown as { state: { pendingSilenceRepromptTurnId: number | null } }
+    ).state.pendingSilenceRepromptTurnId;
+    expect(pendingTurn).not.toBeNull();
+  });
+
+  it('a multi-chunk streaming TTS turn only arms the countdown after the LAST chunk, not an earlier chunk mark', async () => {
+    // Regression pin for the Codex P2 finding: streamPcmAsMedia() emits a
+    // `turn-${turnId}` mark at the end of EVERY call, and runTurnWithFiller()
+    // calls streamPcmAsMedia() once PER streamed chunk. If acking any one of
+    // those per-chunk marks armed the countdown, a multi-chunk utterance
+    // could start the 8s window while later audio is still buffered/playing.
+    const { provider: sttProvider, handle } = makeStreamingProvider();
+    let releaseChunk2: () => void = () => undefined;
+    const chunk2Gate = new Promise<void>((resolve) => {
+      releaseChunk2 = resolve;
+    });
+    const texts: string[] = [];
+    const streamingTts: TtsProvider = {
+      synthesize: vi.fn(async (): Promise<TtsSynthesizeResult> => ({
+        audio: Buffer.alloc(640),
+        contentType: 'audio/pcm',
+        provider: 'test',
+      })),
+      synthesizeStream: vi.fn((input: TtsSynthesizeInput) => {
+        texts.push(input.text);
+        return {
+          async *[Symbol.asyncIterator]() {
+            // Chunk 1 of 2 — real audio, not yet the end of the turn.
+            yield { pcm: Buffer.alloc(640), isFinal: false };
+            // Held open until the test explicitly releases it, so the test
+            // can ack chunk 1's mark while chunk 2 is still outstanding.
+            await chunk2Gate;
+            // Chunk 2 of 2 — the actual end of the turn.
+            yield { pcm: Buffer.alloc(640), isFinal: true };
+          },
+        };
+      }),
+    };
+    const speechTurn = vi
+      .fn()
+      .mockResolvedValue([{ type: 'tts_play', payload: { text: AGENT_LINE } }]);
+    const finalizeOnClose = vi.fn();
+    const ws = new FakeWs();
+    store.create('t', 'telephony', { callSid: 'CA-sil-multichunk' });
+    const adapter = new TwilioMediaStreamAdapter(
+      {
+        store,
+        streamingProvider: sttProvider,
+        speechTurn,
+        ttsProvider: streamingTts,
+        finalizeOnClose,
+        connectionRegistry: new InMemoryConnectionRegistry(),
+      },
+      ws,
+    );
+    adapter.start();
+    ws.inboundJson({
+      event: 'start',
+      streamSid: 'MZ-CA-sil-multichunk',
+      start: {
+        callSid: 'CA-sil-multichunk',
+        accountSid: 'AC',
+        streamSid: 'MZ-CA-sil-multichunk',
+        tracks: ['inbound'],
+      },
+    });
+    await flush();
+
+    handle.emit({ type: 'final', isFinal: true, transcript: 'hello there', confidence: 0.95 });
+    await flush();
+    await flush();
+    expect(texts).toEqual([AGENT_LINE]);
+
+    const state = (
+      adapter as unknown as {
+        state: { outboundTurnId: number; pendingSilenceRepromptTurnId: number | null };
+      }
+    ).state;
+    const turnId = state.outboundTurnId;
+
+    // Chunk 1 has been streamed and its per-chunk `turn-${turnId}` mark
+    // enqueued; chunk 2 is still gated. Acking chunk 1's mark must NOT arm
+    // the countdown.
+    expect(state.pendingSilenceRepromptTurnId).toBeNull();
+    ws.inboundJson({ event: 'mark', streamSid: 'MZ', mark: { name: `turn-${turnId}` } });
+    await flush();
+    expect(state.pendingSilenceRepromptTurnId).toBeNull();
+
+    await vi.advanceTimersByTimeAsync(DEFAULT_SILENCE_REPROMPT_MS * 2);
+    await flush();
+    expect(texts).toEqual([AGENT_LINE]); // still no reprompt — never armed
+
+    // Release chunk 2 — the turn's audio is now fully enqueued, which fires
+    // the single dedicated end-of-utterance `silence-arm-${turnId}` mark.
+    releaseChunk2();
+    await flush();
+    await flush();
+    await flush();
+    expect(state.pendingSilenceRepromptTurnId).toBe(turnId);
+
+    ws.inboundJson({ event: 'mark', streamSid: 'MZ', mark: { name: `silence-arm-${turnId}` } });
+    await flush();
+
+    await vi.advanceTimersByTimeAsync(DEFAULT_SILENCE_REPROMPT_MS);
+    await flush();
+
+    expect(texts).toEqual([AGENT_LINE, renderTtsText(LOW_STT_CONFIDENCE_REPROMPT_COPY, {}, 'en')]);
+  });
+
+  it('a second consecutive silence expiry escalates and ends the session (low_stt_confidence_max_retries)', async () => {
+    // Non-default timeout also pins the deps.silenceRepromptTimeoutMs seam.
+    const { adapter, ws, handle, texts, finalizeOnClose } = await setupSilenceCall('CA-sil-2', {
+      silenceRepromptTimeoutMs: 1_000,
+    });
+    await completeAgentTurn(adapter, ws, handle);
+
+    // Expiry 1 → reprompt. The reprompt renders through streamPcmAsMedia and
+    // enqueues its own end-of-turn mark, which must be acked to re-arm.
+    await vi.advanceTimersByTimeAsync(1_000);
+    await flush();
+    expect(texts).toEqual([AGENT_LINE, renderTtsText(LOW_STT_CONFIDENCE_REPROMPT_COPY, {}, 'en')]);
+    expect(ws.closed).toBe(false);
+    const repromptTurn = (
+      adapter as unknown as { state: { pendingSilenceRepromptTurnId: number | null } }
+    ).state.pendingSilenceRepromptTurnId;
+    expect(repromptTurn).not.toBeNull();
+    ws.inboundJson({ event: 'mark', streamSid: 'MZ', mark: { name: `silence-arm-${repromptTurn}` } });
+    await flush();
+
+    // Expiry 2 → cap reached → spoken hand-off + graceful end.
+    await vi.advanceTimersByTimeAsync(1_000);
+    await flush();
+
+    expect(texts).toEqual([
+      AGENT_LINE,
+      renderTtsText(LOW_STT_CONFIDENCE_REPROMPT_COPY, {}, 'en'),
+      renderTtsText(SPEECH_TURN_FAILURE_ESCALATION_COPY, {}, 'en'),
+    ]);
+    expect(ws.closed).toBe(true);
+    expect(finalizeOnClose).toHaveBeenCalledTimes(1);
+    const [, reason, sideEffects] = finalizeOnClose.mock.calls[0];
+    expect(reason).toBe('session_ended');
+    expect(sideEffects).toEqual([
+      { type: 'end_session', payload: { reason: 'low_stt_confidence_max_retries' } },
+    ]);
+    expect(recordVoiceErrorMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        errorKind: 'low_stt_confidence_repeated',
+        channel: 'media_streams',
+        callSid: 'CA-sil-2',
+        tenantId: 't',
+      }),
+    );
+  });
+
+  it('an interim transcript at 5s disarms the timer — advancing past 8s produces NO reprompt', async () => {
+    const { adapter, ws, handle, texts } = await setupSilenceCall('CA-sil-3');
+    await completeAgentTurn(adapter, ws, handle);
+    expect(texts).toEqual([AGENT_LINE]);
+
+    await vi.advanceTimersByTimeAsync(5_000);
+    handle.emit({ type: 'partial', isFinal: false, transcript: 'um let me check', confidence: 0.6 });
+    await flush();
+
+    await vi.advanceTimersByTimeAsync(10_000);
+    await flush();
+
+    expect(texts).toEqual([AGENT_LINE]);
+    expect(streak(adapter)).toBe(0);
+    expect(ws.closed).toBe(false);
+  });
+
+  it('after close, an armed silence timer never fires (no reprompt, no double finalize)', async () => {
+    const { adapter, handle, ws, texts, finalizeOnClose } = await setupSilenceCall('CA-sil-4');
+    await completeAgentTurn(adapter, ws, handle);
+
+    ws.inboundJson({ event: 'stop', streamSid: 'MZ-CA-sil-4' });
+    await flush();
+    expect(finalizeOnClose).toHaveBeenCalledTimes(1);
+    expect(finalizeOnClose.mock.calls[0][1]).toBe('caller_hangup');
+
+    await vi.advanceTimersByTimeAsync(DEFAULT_SILENCE_REPROMPT_MS * 3);
+    await flush();
+
+    expect(texts).toEqual([AGENT_LINE]);
+    expect(finalizeOnClose).toHaveBeenCalledTimes(1);
+    expect(recordVoiceErrorMock).not.toHaveBeenCalledWith(
+      expect.objectContaining({ errorKind: 'low_stt_confidence' }),
+    );
+  });
+
+  it('expiry while a newer outbound turn is in flight is a no-op', async () => {
+    const { adapter, ws, handle, texts } = await setupSilenceCall('CA-sil-5');
+    await completeAgentTurn(adapter, ws, handle);
+
+    // Simulate a transcript-less new outbound turn racing the armed timer
+    // (e.g. an async sentiment-escalation line): the captured turnId is stale
+    // and the agent is speaking again.
+    const state = (
+      adapter as unknown as { state: { outboundTurnId: number; agentSpeaking: boolean } }
+    ).state;
+    state.outboundTurnId += 1;
+    state.agentSpeaking = true;
+
+    await vi.advanceTimersByTimeAsync(DEFAULT_SILENCE_REPROMPT_MS * 2);
+    await flush();
+
+    expect(texts).toEqual([AGENT_LINE]);
+    expect(streak(adapter)).toBe(0);
+    expect(ws.closed).toBe(false);
+  });
+
+  it('timer silence then a low-confidence final terminates at combined streak 2', async () => {
+    const { adapter, handle, ws, texts, speechTurn, finalizeOnClose } = await setupSilenceCall('CA-sil-6');
+    await completeAgentTurn(adapter, ws, handle);
+
+    // Silence expiry → streak 1 via the shared ladder.
+    await vi.advanceTimersByTimeAsync(DEFAULT_SILENCE_REPROMPT_MS);
+    await flush();
+    expect(texts).toEqual([AGENT_LINE, renderTtsText(LOW_STT_CONFIDENCE_REPROMPT_COPY, {}, 'en')]);
+
+    // Then a mumbled final → streak 2 → hand-off, NOT another reprompt.
+    handle.emit({ type: 'final', isFinal: true, transcript: 'mmuh', confidence: 0.2 });
+    await flush();
+    await flush();
+
+    expect(speechTurn).toHaveBeenCalledTimes(1); // only the initial confident turn
+    expect(texts).toEqual([
+      AGENT_LINE,
+      renderTtsText(LOW_STT_CONFIDENCE_REPROMPT_COPY, {}, 'en'),
+      renderTtsText(SPEECH_TURN_FAILURE_ESCALATION_COPY, {}, 'en'),
+    ]);
+    expect(ws.closed).toBe(true);
+    expect(finalizeOnClose).toHaveBeenCalledTimes(1);
+    const [, reason, sideEffects] = finalizeOnClose.mock.calls[0];
+    expect(reason).toBe('session_ended');
+    expect(sideEffects).toEqual([
+      { type: 'end_session', payload: { reason: 'low_stt_confidence_max_retries' } },
+    ]);
+  });
+
+  // ─── Codex P2 (PR #702) — pending-approval/consent parity ────────────────
+  //
+  // Before this fix, a silent caller mid owner-approval readback (RV-071) or
+  // mid SMS-consent capture (WS18) got reprompted by the shared low-STT
+  // ladder — and, on a second consecutive silence, ESCALATED AND ENDED THE
+  // SESSION — stranding the pending dialogue uncleared. These pins assert
+  // the T2-F05 silence timer now defers to `deps.handlePendingDialogueSilence`
+  // first, mirroring `processSpeechTurn`'s handler ordering, and only falls
+  // through to the reprompt/escalation ladder when nothing is pending.
+
+  const PENDING_APPROVAL_COPY = 'Still there? Just say yes to confirm the approval.';
+  const PENDING_CONSENT_COPY = 'Still there? Is it okay to text you the quote?';
+
+  /**
+   * A realistic double: like the production
+   * `TwilioGatherAdapter.handlePendingDialogueSilence`, it inspects the
+   * session's own pending-dialogue fields and returns a distinct copy per
+   * dialogue, or null when neither is pending — so the "no pending dialogue"
+   * regression case exercises the exact same fall-through branch a real
+   * wiring would take.
+   */
+  function makePendingDialogueSilenceHandler() {
+    return vi.fn(async (session: VoiceSession) => {
+      if (session.pendingVoiceApproval) {
+        return [{ type: 'tts_play', payload: { text: PENDING_APPROVAL_COPY } }];
+      }
+      if (session.pendingConsentCapture) {
+        return [{ type: 'tts_play', payload: { text: PENDING_CONSENT_COPY } }];
+      }
+      return null;
+    });
+  }
+
+  it('a pending owner voice-approval consumes the silence expiry — no reprompt, no escalation, session stays open', async () => {
+    const handlePendingDialogueSilence = makePendingDialogueSilenceHandler();
+    const { adapter, ws, handle, texts, finalizeOnClose, session } = await setupSilenceCall(
+      'CA-sil-approval',
+      { handlePendingDialogueSilence },
+    );
+    await completeAgentTurn(adapter, ws, handle);
+    session.pendingVoiceApproval = { action: 'approve', stage: 'confirm' };
+
+    await vi.advanceTimersByTimeAsync(DEFAULT_SILENCE_REPROMPT_MS);
+    await flush();
+
+    expect(handlePendingDialogueSilence).toHaveBeenCalledWith(session, 't');
+    // The pending-approval handler's own copy is spoken — NOT the
+    // low-confidence reprompt.
+    expect(texts).toEqual([AGENT_LINE, PENDING_APPROVAL_COPY]);
+    expect(texts).not.toContain(renderTtsText(LOW_STT_CONFIDENCE_REPROMPT_COPY, {}, 'en'));
+    expect(streak(adapter)).toBe(0);
+    expect(ws.closed).toBe(false);
+    expect(finalizeOnClose).not.toHaveBeenCalled();
+    expect(recordVoiceErrorMock).not.toHaveBeenCalledWith(
+      expect.objectContaining({ errorKind: 'low_stt_confidence' }),
+    );
+  });
+
+  it('a pending SMS-consent capture consumes the silence expiry — no reprompt, no escalation, session stays open', async () => {
+    const handlePendingDialogueSilence = makePendingDialogueSilenceHandler();
+    const { adapter, ws, handle, texts, finalizeOnClose, session } = await setupSilenceCall(
+      'CA-sil-consent',
+      { handlePendingDialogueSilence },
+    );
+    await completeAgentTurn(adapter, ws, handle);
+    session.pendingConsentCapture = { customerId: 'cust-1', phone: '+15551234567' };
+
+    await vi.advanceTimersByTimeAsync(DEFAULT_SILENCE_REPROMPT_MS);
+    await flush();
+
+    expect(handlePendingDialogueSilence).toHaveBeenCalledWith(session, 't');
+    expect(texts).toEqual([AGENT_LINE, PENDING_CONSENT_COPY]);
+    expect(texts).not.toContain(renderTtsText(LOW_STT_CONFIDENCE_REPROMPT_COPY, {}, 'en'));
+    expect(streak(adapter)).toBe(0);
+    expect(ws.closed).toBe(false);
+    expect(finalizeOnClose).not.toHaveBeenCalled();
+    expect(recordVoiceErrorMock).not.toHaveBeenCalledWith(
+      expect.objectContaining({ errorKind: 'low_stt_confidence' }),
+    );
+  });
+
+  it('regression: with NO pending dialogue, the silence expiry still reprompts as before even with the hook wired', async () => {
+    const handlePendingDialogueSilence = makePendingDialogueSilenceHandler();
+    const { adapter, ws, handle, texts } = await setupSilenceCall('CA-sil-nopending', {
+      handlePendingDialogueSilence,
+    });
+    await completeAgentTurn(adapter, ws, handle);
+    // Neither session.pendingVoiceApproval nor session.pendingConsentCapture
+    // is set — the hook returns null and the timer must fall through to the
+    // existing low-STT-confidence reprompt exactly as before this change.
+
+    await vi.advanceTimersByTimeAsync(DEFAULT_SILENCE_REPROMPT_MS);
+    await flush();
+
+    expect(handlePendingDialogueSilence).toHaveBeenCalledTimes(1);
+    expect(texts).toEqual([AGENT_LINE, renderTtsText(LOW_STT_CONFIDENCE_REPROMPT_COPY, {}, 'en')]);
+    expect(streak(adapter)).toBe(1);
+    expect(ws.closed).toBe(false);
+  });
+
+  it('serialization: a racing turn holding the session lock makes the expiry a stale no-op (no double-consume)', async () => {
+    // Codex P2 — a final transcript that races the silence timer runs under
+    // withSessionLock and could mutate the same pending dialogue the expiry
+    // consumes. Simulate that: hold the lock and advance the outbound turn
+    // while held; the expiry must acquire the lock AFTER, re-check, see the
+    // stale turnId, and no-op — never invoking the pending-dialogue handler.
+    const handlePendingDialogueSilence = makePendingDialogueSilenceHandler();
+    const { adapter, ws, handle, texts, session } = await setupSilenceCall('CA-sil-race', {
+      handlePendingDialogueSilence,
+    });
+    await completeAgentTurn(adapter, ws, handle);
+    session.pendingVoiceApproval = { action: 'approve', stage: 'confirm' };
+
+    let release!: () => void;
+    const held = new Promise<void>((r) => {
+      release = r;
+    });
+    const racingTurn = store.withSessionLock(session.id, async () => {
+      // A newer outbound turn started under the lock — invalidates the expiry.
+      (adapter as unknown as { state: { outboundTurnId: number } }).state.outboundTurnId += 1;
+      await held;
+    });
+
+    // Fire the timer: its callback queues behind the racing turn on the lock.
+    await vi.advanceTimersByTimeAsync(DEFAULT_SILENCE_REPROMPT_MS);
+    release();
+    await racingTurn;
+    await flush();
+
+    expect(handlePendingDialogueSilence).not.toHaveBeenCalled();
+    expect(texts).toEqual([AGENT_LINE]); // no reprompt, no dialogue copy
+    expect(session.pendingVoiceApproval).toBeDefined(); // left intact for the real turn
+    expect(ws.closed).toBe(false);
+  });
+
+  it('serialization (transcript race): a caller answer consumed under the lock bumps the activity generation, so the queued expiry no-ops even though outboundTurnId/agentSpeaking still read the armed turn', async () => {
+    // Codex P2 (round 2) — the load-bearing guard for the transcript race.
+    // onTranscriptEvent → speechTurn consumes the pending dialogue under ITS
+    // OWN lock hold; the next outbound turn only bumps outboundTurnId / sets
+    // agentSpeaking AFTER that lock releases. So when the expiry's queued lock
+    // body runs, those two guards STILL read the armed turn — only the caller-
+    // activity generation has moved. Prove the expiry bails on the generation
+    // alone (the pre-fix guards would have let it double-consume).
+    const handlePendingDialogueSilence = makePendingDialogueSilenceHandler();
+    const { adapter, ws, handle, texts, session } = await setupSilenceCall('CA-sil-txn-race', {
+      handlePendingDialogueSilence,
+    });
+    await completeAgentTurn(adapter, ws, handle);
+    session.pendingVoiceApproval = { action: 'approve', stage: 'confirm' };
+
+    const armedState = (
+      adapter as unknown as {
+        state: { outboundTurnId: number; agentSpeaking: boolean; callerActivityGeneration: number };
+      }
+    ).state;
+    const armedTurnId = armedState.outboundTurnId;
+    const armedSpeaking = armedState.agentSpeaking;
+
+    let release!: () => void;
+    const held = new Promise<void>((r) => {
+      release = r;
+    });
+    const racingTurn = store.withSessionLock(session.id, async () => {
+      // Model onTranscriptEvent → speechTurn: the caller's real answer bumps
+      // the activity generation and consumes the pending approval, WITHOUT yet
+      // starting the next outbound turn (that would happen after this lock
+      // releases). outboundTurnId / agentSpeaking are deliberately untouched.
+      armedState.callerActivityGeneration += 1;
+      session.pendingVoiceApproval = undefined;
+      await held;
+    });
+
+    // Fire the timer: its callback queues behind the racing turn on the lock.
+    await vi.advanceTimersByTimeAsync(DEFAULT_SILENCE_REPROMPT_MS);
+    release();
+    await racingTurn;
+    await flush();
+
+    // The two pre-fix guards are unchanged from arm time — only the generation
+    // moved, so it is the sole reason the expiry stood down.
+    expect(armedState.outboundTurnId).toBe(armedTurnId);
+    expect(armedState.agentSpeaking).toBe(armedSpeaking);
+    expect(handlePendingDialogueSilence).not.toHaveBeenCalled();
+    expect(texts).toEqual([AGENT_LINE]); // no stale reprompt over the real answer
+    expect(ws.closed).toBe(false);
+  });
+});
+
+// ─── Comms C5 — consent gate on the capture pipeline (stream transport) ──────
+
+describe('C5 capture gate', () => {
+  it('drops inbound media until the greeting turn (disclosure) mark is acked, then forwards', async () => {
+    store.create('tenant-c5', 'telephony', { callSid: 'CA-c5' });
+    const ws = new FakeWs();
+    const { provider } = makeStreamingProvider();
+    const tts = makeTtsProvider();
+    const adapter = new TwilioMediaStreamAdapter(
+      {
+        store,
+        streamingProvider: provider,
+        speechTurn: async () => [],
+        ttsProvider: tts,
+        initializeSession: async () => [
+          { type: 'tts_play', payload: { text: 'Greeting including the recording disclosure.' } },
+        ],
+      },
+      ws,
+    );
+    adapter.start();
+
+    ws.inboundJson({
+      event: 'start',
+      streamSid: 'MZ-c5',
+      start: { callSid: 'CA-c5', accountSid: 'AC', streamSid: 'MZ-c5', tracks: ['inbound'] },
+    });
+    await new Promise((r) => setImmediate(r));
+    await new Promise((r) => setImmediate(r));
+
+    const deepgramSession = (provider.openSession as ReturnType<typeof vi.fn>).mock.results[0]
+      .value as Promise<StreamingSession>;
+    const session = await deepgramSession;
+
+    // Caller audio during the greeting/disclosure: dropped, never forwarded.
+    ws.inboundJson({ event: 'media', media: { payload: 'AAAA' } });
+    expect(session.send).not.toHaveBeenCalled();
+
+    // The greeting turn's end-of-utterance mark ack = disclosure fully played.
+    const markFrame = ws.sent.find(
+      (m) =>
+        (m as { event?: string }).event === 'mark' &&
+        String((m as { mark?: { name?: string } }).mark?.name ?? '').startsWith('silence-arm-'),
+    ) as { mark: { name: string } } | undefined;
+    expect(markFrame).toBeDefined();
+    ws.inboundJson({ event: 'mark', mark: { name: markFrame!.mark.name } });
+    await new Promise((r) => setImmediate(r));
+
+    ws.inboundJson({ event: 'media', media: { payload: 'AAAA' } });
+    expect(session.send).toHaveBeenCalledTimes(1);
+  });
+
+  it('capture opens immediately when no initializeSession is wired (no disclosure will play)', async () => {
+    store.create('tenant-c5b', 'telephony', { callSid: 'CA-c5b' });
+    const ws = new FakeWs();
+    const { provider } = makeStreamingProvider();
+    const adapter = new TwilioMediaStreamAdapter(
+      { store, streamingProvider: provider, speechTurn: async () => [] },
+      ws,
+    );
+    adapter.start();
+    ws.inboundJson({
+      event: 'start',
+      streamSid: 'MZ-c5b',
+      start: { callSid: 'CA-c5b', accountSid: 'AC', streamSid: 'MZ-c5b', tracks: ['inbound'] },
+    });
+    await new Promise((r) => setImmediate(r));
+
+    const session = await ((provider.openSession as ReturnType<typeof vi.fn>).mock.results[0]
+      .value as Promise<StreamingSession>);
+    ws.inboundJson({ event: 'media', media: { payload: 'AAAA' } });
+    expect(session.send).toHaveBeenCalledTimes(1);
   });
 });

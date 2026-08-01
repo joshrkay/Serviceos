@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { AppState } from 'react-native';
 import { useApiClient } from '../lib/useApiClient';
+import { decodeError } from '../lib/appError';
 import {
   computeProposalEvents,
   mapInboxResponse,
@@ -76,7 +77,7 @@ export function usePendingProposals(
     setError(null);
     try {
       const res = await apiRef.current('/api/proposals/inbox');
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      if (!res.ok) throw new Error((await decodeError(res)).message);
       const list = mapInboxResponse(await res.json());
       const diff = computeProposalEvents(knownIdsRef.current, criticalIdsRef.current, list);
       knownIdsRef.current = diff.nextIds;

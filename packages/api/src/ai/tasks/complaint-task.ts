@@ -96,11 +96,17 @@ export class ComplaintTaskHandler implements TaskHandler {
       notePayload.targetKind = 'customer';
       notePayload.targetId = resolvedCustomerId;
     } else if (ee.jobReference) {
+      // B7.4 — a free-text reference is NOT a resolved target. Without the
+      // gate this proposal was approvable and then refused by
+      // AddNoteExecutionHandler's targetId UUID check, losing the complaint
+      // note silently (the same defect fixed on AddNoteTaskHandler).
       notePayload.targetKind = 'job';
       notePayload.targetReference = ee.jobReference;
+      missing.push('targetId');
     } else if (ee.customerName) {
       notePayload.targetKind = 'customer';
       notePayload.targetReference = ee.customerName;
+      missing.push('targetId');
     } else {
       notePayload.targetKind = 'customer';
       missing.push('targetId');

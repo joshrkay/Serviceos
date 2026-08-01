@@ -25,8 +25,21 @@ describe('T7 — End-to-End Integration Tests', () => {
     orchestrator = new OnboardingOrchestrator(gateway);
   });
 
-  // T7-001: HVAC owner records 3min describing business
-  it('T7-001 — full HVAC onboarding produces complete tenant configuration', async () => {
+  // T7-001: HVAC owner records 3min describing business.
+  //
+  // This fixture quotes a diagnostic fee, a tune-up price and a replacement
+  // range — and never states an hourly labour rate. That is a realistic
+  // transcript, and it is precisely why this case previously asserted
+  // `needsClarification === false`: the extractor advanced on any nonempty
+  // price list. But `isIdentityDone` (onboarding/derive-status.ts) requires a
+  // non-null `hourly_rate_cents`, so "complete tenant configuration" was never
+  // reachable from this transcript — the owner sailed through and got bounced
+  // back to the identity form. The assertion was encoding that bug.
+  //
+  // The fixture is deliberately NOT edited to add a rate the speaker never
+  // said. Everything the transcript DOES support is still asserted below;
+  // the one thing it cannot support is now asserted as a question asked.
+  it('T7-001 — full HVAC onboarding extracts everything said, and asks for the hourly rate it did not', async () => {
     provider.setDefaultResponse(JSON.stringify({
       business_name: 'Comfort Zone HVAC',
       city: 'Scottsdale',
@@ -79,7 +92,12 @@ describe('T7 — End-to-End Integration Tests', () => {
 
     // Verify proposals generated
     expect(result.proposalIds.length).toBeGreaterThan(0);
-    expect(result.needsClarification).toBe(false);
+
+    // The transcript states no hourly rate, so the run asks for one rather
+    // than completing into a NULL column. Asserted by its question, not just
+    // the boolean, so an unrelated extractor going uncertain can't satisfy it.
+    expect(result.needsClarification).toBe(true);
+    expect(result.clarificationQuestions.join(' ')).toMatch(/hourly/i);
   });
 
   // T7-002: Plumber describes business

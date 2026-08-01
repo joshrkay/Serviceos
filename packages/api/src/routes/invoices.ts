@@ -2,7 +2,7 @@ import { Router, Response } from 'express';
 import { z } from 'zod';
 import { AuthenticatedRequest } from '../auth/clerk';
 import { requireAuth, requireTenant, requirePermission } from '../middleware/auth';
-import { createInvoiceSchema } from '../shared/contracts';
+import { createInvoiceSchema, updateInvoiceSchema } from '../shared/contracts';
 import { toErrorResponse } from '../shared/errors';
 import { TenantOwnership } from '../shared/tenant-ownership';
 import {
@@ -24,6 +24,7 @@ import { PaymentRepository, recordPayment } from '../invoices/payment';
 import { applyDepositCreditToInvoice } from '../invoices/deposit-credit';
 import { SendService } from '../notifications/send-service';
 import { Job, JobRepository } from '../jobs/job';
+import { Customer, CustomerRepository } from '../customers/customer';
 import { EstimateRepository } from '../estimates/estimate';
 import { RefreshJobMoneyStateDeps } from '../jobs/job-money-state';
 import { applyBps } from '../shared/billing-engine';
@@ -32,6 +33,7 @@ import { getCustomerMemberDiscountBps } from '../agreements/member-pricing';
 import { createLogger } from '../logging/logger';
 import { PaymentLinkProvider } from '../payments/payment-link-provider';
 import { createInvoicePaymentLink } from '../invoices/invoice-payment-link';
+import { ConnectAccountResolver } from '../invoices/public-invoice-service';
 
 const logger = createLogger({
   service: 'invoices-route',
@@ -65,8 +67,69 @@ export function createInvoiceRouter(
   // converted from an estimate, which already carries the discount) for a
   // member has that discount folded in. Optional so legacy harnesses build.
   agreementRepo?: AgreementRepository,
+  // WS6 (QUALITY-2026-07-12) — customer enrichment. When wired (with jobRepo),
+  // list/detail responses embed a `customer` summary so the UI renders a real
+  // name instead of the literal "Customer" fallback. Optional so legacy
+  // harnesses build; unenriched responses still validate (customer optional).
+  customerRepo?: CustomerRepository,
+  /** Routes operator payment links to Connect when charges are enabled. */
+  connectAccountResolver?: ConnectAccountResolver,
 ): Router {
   const router = Router();
+
+  /**
+   * WS6 — attach a customer summary to invoice rows. Invoices carry only
+   * job_id, so this resolves invoice → job → customer with deduplicated,
+   * page-bounded batches (mirrors the estimates route's enrichment). Best
+   * effort: missing repos or rows leave the invoice unenriched.
+   */
+  const attachCustomerSummaries = async <T extends { jobId: string }>(
+    tenantId: string,
+    invoices: T[],
+  ): Promise<Array<T & { customer?: Record<string, unknown> }>> => {
+    if (!jobRepo || !customerRepo || invoices.length === 0) return invoices;
+    const jobIds = [...new Set(invoices.map((i) => i.jobId).filter(Boolean))];
+    const jobs = await Promise.all(
+      jobIds.map((id) => jobRepo.findById(tenantId, id).catch(() => null)),
+    );
+    const jobById = new Map(jobs.filter((j) => j !== null).map((j) => [j!.id, j!]));
+    const customerIds = [
+      ...new Set(
+        [...jobById.values()].map((j) => j.customerId).filter((id): id is string => !!id),
+      ),
+    ];
+    const customers = await Promise.all(
+      customerIds.map((id) => customerRepo.findById(tenantId, id).catch(() => null)),
+    );
+    const customerById = new Map(
+      customers.filter((c): c is Customer => c !== null).map((c) => [c.id, c]),
+    );
+    return invoices.map((inv) => {
+      const job = jobById.get(inv.jobId);
+      const c = job?.customerId ? customerById.get(job.customerId) : undefined;
+      return c
+        ? {
+            ...inv,
+            customer: {
+              id: c.id,
+              displayName: c.displayName,
+              firstName: c.firstName,
+              lastName: c.lastName,
+              primaryPhone: c.primaryPhone,
+              email: c.email,
+            },
+          }
+        : inv;
+    });
+  };
+
+  const attachOneCustomerSummary = async <T extends { jobId: string }>(
+    tenantId: string,
+    invoice: T,
+  ): Promise<T & { customer?: Record<string, unknown> }> => {
+    const [enriched] = await attachCustomerSummaries(tenantId, [invoice]);
+    return enriched;
+  };
 
   // §6 Time-to-Cash. Built once at factory time — the rollup needs the
   // job, estimate and invoice repos plus the audit repo for the
@@ -234,11 +297,39 @@ export function createInvoiceRouter(
           return;
         }
 
+        // Customer filter (US-069). Invoices carry only job_id, so translate a
+        // customerId into the customer's jobIds and return invoices for those
+        // jobs. Uses existing repo methods (findByCustomer + findByJobs) — no
+        // new SQL. Returns the bare-array shape like the legacy jobId lookup;
+        // the CustomerDetail records panel consumes it directly. Optional
+        // status filter is applied in-memory; results sorted newest-first.
+        const customerId = typeof req.query.customerId === 'string' ? req.query.customerId : undefined;
+        if (customerId) {
+          if (!jobRepo?.findByCustomer) {
+            res.status(400).json({
+              error: 'VALIDATION_ERROR',
+              message: 'Customer filtering is not available in this environment',
+            });
+            return;
+          }
+          const customerJobs = await jobRepo.findByCustomer(req.auth!.tenantId, customerId);
+          const jobIds = customerJobs.map((j) => j.id);
+          if (jobIds.length === 0) {
+            res.json([]);
+            return;
+          }
+          let invoices = await invoiceRepo.findByJobs(req.auth!.tenantId, jobIds);
+          if (status) invoices = invoices.filter((inv) => inv.status === status);
+          invoices.sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
+          res.json(await attachCustomerSummaries(req.auth!.tenantId, invoices));
+          return;
+        }
+
         // Legacy single-job lookup still returns the bare array shape so
         // existing UI code continues to work without an opt-in.
         if (jobId && req.query.paginated !== 'true' && req.query.limit === undefined && req.query.offset === undefined) {
           const result = await invoiceRepo.findByJob(req.auth!.tenantId, jobId);
-          res.json(result);
+          res.json(await attachCustomerSummaries(req.auth!.tenantId, result));
           return;
         }
 
@@ -274,12 +365,15 @@ export function createInvoiceRouter(
             limit,
             offset,
           });
-          res.json(result);
+          res.json({
+            ...result,
+            data: await attachCustomerSummaries(req.auth!.tenantId, result.data),
+          });
           return;
         }
 
         const result = await listInvoices(req.auth!.tenantId, invoiceRepo, baseOptions);
-        res.json(result);
+        res.json(await attachCustomerSummaries(req.auth!.tenantId, result));
       } catch (err) {
         const { statusCode, body } = toErrorResponse(err);
         res.status(statusCode).json(body);
@@ -299,7 +393,7 @@ export function createInvoiceRouter(
           res.status(404).json({ error: 'NOT_FOUND', message: 'Invoice not found' });
           return;
         }
-        res.json(result);
+        res.json(await attachOneCustomerSummary(req.auth!.tenantId, result));
       } catch (err) {
         const { statusCode, body } = toErrorResponse(err);
         res.status(statusCode).json(body);
@@ -309,7 +403,8 @@ export function createInvoiceRouter(
 
   const updateHandler = async (req: AuthenticatedRequest, res: Response) => {
     try {
-      const result = await updateInvoice(req.auth!.tenantId, req.params.id, req.body, invoiceRepo);
+      const input = updateInvoiceSchema.parse(req.body);
+      const result = await updateInvoice(req.auth!.tenantId, req.params.id, input, invoiceRepo);
       if (!result) {
         res.status(404).json({ error: 'NOT_FOUND', message: 'Invoice not found' });
         return;
@@ -356,6 +451,8 @@ export function createInvoiceRouter(
           req.params.id,
           invoiceRepo,
           paymentLinkProvider,
+          connectAccountResolver,
+          auditRepo,
         );
         res.json(result);
       } catch (err) {
@@ -372,7 +469,23 @@ export function createInvoiceRouter(
     requirePermission('invoices:update'),
     async (req: AuthenticatedRequest, res: Response) => {
       try {
-        const paymentTermDays = req.body.paymentTermDays ?? 30;
+        // Guarded: a non-numeric value flows into calculateDueDate's
+        // setDate(NaN) and persists an Invalid Date due_date, which then
+        // breaks the overdue/late-fee sweeps.
+        const rawTermDays = req.body?.paymentTermDays;
+        const paymentTermDays =
+          rawTermDays === undefined || rawTermDays === null ? 30 : Number(rawTermDays);
+        if (
+          !Number.isInteger(paymentTermDays) ||
+          paymentTermDays < 0 ||
+          paymentTermDays > 365
+        ) {
+          res.status(400).json({
+            error: 'VALIDATION_ERROR',
+            message: 'paymentTermDays must be an integer between 0 and 365',
+          });
+          return;
+        }
         const result = await issueInvoice(
           req.auth!.tenantId,
           req.params.id,
@@ -420,6 +533,11 @@ export function createInvoiceRouter(
           undefined,
           auditRepo,
           { actorRole: req.auth!.role },
+          undefined,
+          // P0-9 — recordPayment deactivates any link the credit made stale.
+          paymentLinkProvider
+            ? { provider: paymentLinkProvider, connectAccountResolver }
+            : undefined,
         );
         res.status(201).json(result);
       } catch (err) {
@@ -447,6 +565,15 @@ export function createInvoiceRouter(
           status,
           invoiceRepo,
           refreshDeps,
+          {
+            auditRepo,
+            actor: { actorId: req.auth!.userId, actorRole: req.auth!.role },
+            // P0-1 — voiding/canceling must kill any hosted payment link so a
+            // stale link can't capture money against a dead invoice.
+            paymentLink: paymentLinkProvider
+              ? { provider: paymentLinkProvider, connectAccountResolver }
+              : undefined,
+          },
         );
         if (!result) {
           res.status(404).json({ error: 'NOT_FOUND', message: 'Invoice not found' });
@@ -476,11 +603,15 @@ export function createInvoiceRouter(
             });
           return;
         }
+        // ''→undefined mirrors the estimates send route: the send sheet posts
+        // empty strings for untouched fields, and SendService must fall back
+        // to the customer's contact on file instead of failing on ''
+        // (journey QA 2026-07-02, bug 2).
         const parsed = z.object({
           channel: z.enum(['sms', 'email', 'both']).default('sms'),
-          recipientPhone: z.string().optional(),
-          recipientEmail: z.string().optional(),
-          customMessage: z.string().optional(),
+          recipientPhone: z.string().optional().transform(v => v || undefined),
+          recipientEmail: z.string().optional().transform(v => v || undefined),
+          customMessage: z.string().optional().transform(v => v || undefined),
         }).safeParse(req.body ?? {});
         if (!parsed.success) {
           res.status(400).json({ error: 'VALIDATION_ERROR', message: parsed.error.issues[0]?.message ?? 'Invalid request body' });

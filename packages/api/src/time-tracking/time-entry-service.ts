@@ -166,6 +166,63 @@ export class TimeEntryService {
   }
 
   /**
+   * Record an ALREADY-COMPLETED block of work time ("put me down for two
+   * hours on this one"). Distinct from clockIn/clockOut: the row is born
+   * closed, so it never touches the one-open-entry-per-user invariant and
+   * never auto-closes a shift the tech still has running. The window ends
+   * at `endedAt` (default now) and starts durationMinutes earlier, which is
+   * what the weekly rollup and per-job profit both sum over.
+   */
+  async logCompleted(
+    tenantId: string,
+    userId: string,
+    opts: ClockInOpts & { durationMinutes: number; endedAt?: Date }
+  ): Promise<TimeEntry> {
+    const durationMinutes = Math.round(opts.durationMinutes);
+    if (!Number.isFinite(durationMinutes) || durationMinutes <= 0) {
+      throw new Error('durationMinutes must be a positive number of minutes');
+    }
+    const clockedOutAt = opts.endedAt ?? new Date();
+    const clockedInAt =
+      opts.clockedInAt ?? new Date(clockedOutAt.getTime() - durationMinutes * 60_000);
+
+    const now = new Date();
+    const created = await this.repo.create({
+      id: uuidv4(),
+      tenantId,
+      userId,
+      jobId: opts.jobId,
+      entryType: opts.entryType,
+      clockedInAt,
+      clockedOutAt,
+      durationMinutes,
+      notes: opts.notes,
+      createdAt: now,
+      updatedAt: now,
+    });
+
+    if (this.auditRepo) {
+      await this.auditRepo.create(
+        createAuditEvent({
+          tenantId,
+          actorId: userId,
+          actorRole: opts.actorRole ?? 'unknown',
+          eventType: 'time_entry.logged_completed',
+          entityType: 'time_entry',
+          entityId: created.id,
+          metadata: {
+            jobId: created.jobId,
+            entryType: created.entryType,
+            durationMinutes: created.durationMinutes,
+          },
+        })
+      );
+    }
+
+    return created;
+  }
+
+  /**
    * Close the active entry for this user. Returns null when there is no
    * active entry. Idempotent on a re-close of the SAME entry id (route
    * layer can pass id explicitly via findById path; the lookup here is

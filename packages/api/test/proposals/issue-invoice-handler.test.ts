@@ -23,6 +23,9 @@ import {
   calculateDocumentTotals,
   LineItem,
 } from '../../src/shared/billing-engine';
+import { createJob, InMemoryJobRepository } from '../../src/jobs/job';
+import { InMemoryEstimateRepository } from '../../src/estimates/estimate';
+import type { RefreshJobMoneyStateDeps } from '../../src/jobs/job-money-state';
 
 const TENANT = 't-1';
 const OTHER_TENANT = 't-2';
@@ -287,6 +290,29 @@ describe('P22-002 — issue-invoice execution handler', () => {
       const result = await bare.execute(makeProposal(), ctx);
       expect(result.success).toBe(true);
       expect(result.resultEntityId).toBeTruthy();
+    });
+  });
+
+  describe('§6 Time-to-Cash — job money-state rollup', () => {
+    it('rolls the job to invoiced when constructed with money-state deps', async () => {
+      const jobRepo = new InMemoryJobRepository();
+      const estimateRepo = new InMemoryEstimateRepository();
+      const job = await createJob(
+        { tenantId: TENANT, customerId: 'c1', locationId: 'l1', summary: 'Job', createdBy: 'u-1' },
+        jobRepo,
+      );
+      const rollupInvoiceId = 'bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb';
+      await invoiceRepo.create(makeInvoice({ id: rollupInvoiceId, jobId: job.id }));
+      const deps: RefreshJobMoneyStateDeps = { jobRepo, estimateRepo, invoiceRepo, auditRepo };
+      const rollupHandler = new IssueInvoiceExecutionHandler(invoiceRepo, settingsRepo, auditRepo, deps);
+
+      const result = await rollupHandler.execute(
+        makeProposal({ payload: { invoiceId: rollupInvoiceId } }),
+        ctx,
+      );
+
+      expect(result.success).toBe(true);
+      expect((await jobRepo.findById(TENANT, job.id))!.moneyState).toBe('invoiced');
     });
   });
 });

@@ -21,6 +21,36 @@ export const ScrollView = host('div');
 export const ActivityIndicator = host('div');
 export const RefreshControl = host('div');
 
+// Maps an RN <Image source={{ uri }}/> to an <img src> so screen tests can
+// assert the persisted gallery renders the server download URL.
+export const Image = ({ source, accessibilityLabel, className }: Props) => {
+  const uri =
+    source && typeof source === 'object' ? (source as { uri?: string }).uri : undefined;
+  return createElement('img', {
+    className,
+    src: uri,
+    alt: (accessibilityLabel as string) ?? '',
+  });
+};
+
+// Surfaces `behavior` as a data attribute so screen tests can assert the
+// composer is wrapped in a keyboard-avoiding container with the right
+// platform behavior (the native runtime can't be exercised under jsdom).
+export const KeyboardAvoidingView = ({ children, className, behavior }: Props) =>
+  createElement('div', { className, 'data-behavior': behavior as string }, children as ReactNode);
+
+// Minimal Platform: tests run as iOS so `Platform.OS === 'ios'` branches are
+// the rendered default. (`select` is intentionally omitted — no screen under
+// test uses it; add it when one does.)
+export const Platform = {
+  OS: 'ios' as 'ios' | 'android' | 'web',
+};
+
+// Renders children only while `visible` — enough for sheet/dialog flows
+// (LineItemSheet) to be exercised as plain DOM in screen tests.
+export const Modal = ({ children, visible }: Props) =>
+  visible ? createElement('div', { 'data-modal': 'true' }, children as ReactNode) : null;
+
 export const TextInput = ({ onChangeText, value, className, placeholder }: Props) =>
   createElement('input', {
     className,
@@ -28,6 +58,20 @@ export const TextInput = ({ onChangeText, value, className, placeholder }: Props
     value: value ?? '',
     onChange: (e: { target: { value: string } }) =>
       typeof onChangeText === 'function' ? (onChangeText as (t: string) => void)(e.target.value) : undefined,
+  });
+
+// Maps an RN <Switch value onValueChange/> to a checkbox so screen tests can
+// assert (and drive) a boolean toggle — e.g. the customer note "pin to top".
+export const Switch = ({ value, onValueChange, accessibilityLabel, className }: Props) =>
+  createElement('input', {
+    type: 'checkbox',
+    className,
+    'aria-label': accessibilityLabel as string,
+    checked: Boolean(value),
+    onChange: (e: { target: { checked: boolean } }) =>
+      typeof onValueChange === 'function'
+        ? (onValueChange as (v: boolean) => void)(e.target.checked)
+        : undefined,
   });
 
 export const Pressable = ({ children, onPress, onPressIn, onPressOut, disabled, className }: Props) => {
@@ -74,4 +118,16 @@ export const AppState = {
 export function __emitAppState(state: string): void {
   AppState.currentState = state;
   for (const cb of listeners) cb(state);
+}
+
+// Minimal Linking: screens open video download URLs through it. Tests spy on
+// openURL via __setLinkingOpenURL; the default is a resolved no-op.
+let openURLImpl: (url: string) => Promise<unknown> = async () => undefined;
+export const Linking = {
+  openURL: (url: string) => openURLImpl(url),
+};
+
+/** Test-only: swap the Linking.openURL implementation (e.g. a vi.fn spy). */
+export function __setLinkingOpenURL(fn: (url: string) => Promise<unknown>): void {
+  openURLImpl = fn;
 }

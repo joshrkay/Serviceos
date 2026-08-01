@@ -148,8 +148,9 @@ describe('PgEstimateRepository.findById', () => {
     expect(result?.lineItems).toHaveLength(1);
     expect(result?.lineItems[0].unitPriceCents).toBe(5000);
 
-    const ctx = calls[0];
-    expect(ctx.sql).toContain('app.current_tenant_id');
+    // U2b-2: context is now set_config under a SET LOCAL transaction (calls[0] is BEGIN).
+    const ctx = calls.find((c) => c.sql.includes('app.current_tenant_id'));
+    expect(ctx).toBeDefined();
     const select = calls.find((c) => c.sql.includes('SELECT * FROM estimates'))!;
     expect(select.sql).toMatch(/WHERE\s+id\s*=\s*\$1\s+AND\s+tenant_id\s*=\s*\$2/);
     expect(select.sql).not.toContain(TENANT);
@@ -242,6 +243,17 @@ describe('PgEstimateRepository list filters + pagination', () => {
     expect(q.sql).toMatch(/WHERE\s+tenant_id\s*=\s*\$1\s+AND\s+deleted_at\s+IS\s+NULL\s+AND\s+status\s*=\s*\$2\s+AND\s+job_id\s*=\s*\$3\s+AND/);
     expect(q.sql).toContain('ILIKE');
     expect(q.params).toEqual([TENANT, 'sent', JOB_ID, '%roof%']);
+  });
+
+  it('builds a job_id = ANY(...) predicate for the customer (jobIds) filter', async () => {
+    const { pool, calls } = makeMockPool((sql) => (isContext(sql) ? [] : []));
+    await new PgEstimateRepository(pool).findByTenant(TENANT, {
+      status: 'sent',
+      jobIds: ['job-a', 'job-b'],
+    });
+    const q = calls.find((c) => c.sql.includes('FROM estimates'))!;
+    expect(q.sql).toMatch(/job_id\s*=\s*ANY\(\$3\)/);
+    expect(q.params).toEqual([TENANT, 'sent', ['job-a', 'job-b']]);
   });
 
   it('applies ascending sort when sort=asc', async () => {

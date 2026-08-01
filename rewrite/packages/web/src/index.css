@@ -1,9 +1,0 @@
-@import 'tailwindcss';
-
-:root {
-  font-family: 'Inter', ui-sans-serif, system-ui, sans-serif;
-}
-
-body {
-  @apply bg-stone-100 text-stone-900 antialiased;
-}

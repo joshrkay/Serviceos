@@ -17,10 +17,10 @@ Out of scope for this tranche unless explicitly re-prioritized:
 **Track 1 + partial Track 2:**
 
 1. **Supabase as Postgres host** — use `DATABASE_URL` pointing at Supabase Postgres; run canonical migrations via `packages/api` only (`npm --prefix packages/api run migrate:apply`).
-2. **Do not** apply [supabase_migration.sql](../../experiments/supabase_migration.sql) on the production database (incompatible with [schema.ts](../../packages/api/src/db/schema.ts)).
+2. **Do not** apply the old prototype's `supabase_migration.sql` on the production database — it targeted the `service-os-app` prototype's schema and is incompatible with [schema.ts](../../packages/api/src/db/schema.ts). The prototype and its migration file were removed entirely in 2026-07 (see [`docs/decisions.md`](../decisions.md) D-016); this note is kept as a historical warning in case it resurfaces from git history.
 3. **RLS hardening** — tighten `portal_sessions` policy to `app.portal_token_lookup` instead of permissive unset-tenant reads.
 4. **Documentation** — [docs/supabase-host-setup.md](../supabase-host-setup.md) for operators.
-5. **Legacy `service-os-app`** — defer full deprecation; document split-brain risk only.
+5. **Legacy `service-os-app`** — removed 2026-07 along with the rest of `/experiments`; split-brain risk is moot.
 
 **Not in scope:** Supabase Auth replacing Clerk, Realtime, Storage, or replacing `pg` with `@supabase/supabase-js` in the canonical API/web.
 

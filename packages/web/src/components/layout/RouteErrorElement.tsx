@@ -1,5 +1,6 @@
 import React from 'react';
 import { useRouteError, isRouteErrorResponse, useNavigate } from 'react-router';
+import { reportSafeError } from '../../lib/errorReporter';
 
 /**
  * Router-level error element.
@@ -18,7 +19,7 @@ import { useRouteError, isRouteErrorResponse, useNavigate } from 'react-router';
  * and renders the same visual shape.
  *
  * Public-pages note: the customer-facing /e/:id, /pay/:id, /intake,
- * /public/feedback/:token, and /portal/:token routes each get this element
+ * /feedback/:token, and /portal/:token routes each get this element
  * directly. The authenticated branch (/ → ProtectedRoute → Shell → …) gets it
  * once at the outermost level — descendant errors bubble up to it.
  */
@@ -52,6 +53,23 @@ export function RouteErrorElement(): React.ReactElement {
     console.error('[RouteErrorElement] unexpected error shape:', error);
     errMessage = String(error);
   }
+
+  // ARCH-31 / OBS-43 — report through the shared PostHog-backed error
+  // reporter (see ErrorBoundary for the render-error counterpart). Router
+  // loader/action errors and non-Error throws never reach
+  // ErrorBoundary.componentDidCatch, so without this they were invisible in
+  // production. We report the already-computed display-safe errName /
+  // errMessage (not the raw `error`) so a RouteErrorResponse's `.data` —
+  // which may echo a server response body — goes through the same
+  // redaction + truncation as every other capture site before it leaves
+  // the device. Runs once per distinct error object, not on every
+  // re-render (e.g. the "Try again" / "Go back" buttons).
+  React.useEffect(() => {
+    if (error !== undefined && error !== null) {
+      reportSafeError(errName, errMessage, 'route-error');
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [error]);
 
   const handleReload = (): void => {
     if (typeof window !== 'undefined' && window.location) {

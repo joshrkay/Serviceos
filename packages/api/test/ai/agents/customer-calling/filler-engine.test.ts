@@ -22,3 +22,55 @@ describe('FillerEngine.selectNext', () => {
     expect(f).toBeUndefined();
   });
 });
+
+// ─── UB-C2 — language-keyed selection ────────────────────────────────────────
+
+describe('FillerEngine.selectNext — language keying (UB-C2)', () => {
+  it('defaults to the English pool when no language is given', () => {
+    const engine = new FillerEngine();
+    for (let i = 0; i < 20; i++) {
+      const f = engine.selectNext();
+      expect(f?.language).toBe('en');
+    }
+  });
+
+  it('returns ONLY Spanish fillers for language es', () => {
+    const engine = new FillerEngine();
+    for (let i = 0; i < 20; i++) {
+      const f = engine.selectNext({ language: 'es' });
+      expect(f?.language).toBe('es');
+      expect(f?.id.startsWith('es-')).toBe(true);
+    }
+  });
+
+  it('the manifest carries at least 8 fillers per language', () => {
+    const en = FILLER_LIBRARY.filter((f) => f.language === 'en');
+    const es = FILLER_LIBRARY.filter((f) => f.language === 'es');
+    expect(en.length).toBeGreaterThanOrEqual(8);
+    expect(es.length).toBeGreaterThanOrEqual(8);
+  });
+
+  it('never repeats back-to-back within a language', () => {
+    const engine = new FillerEngine();
+    let last: string | undefined;
+    for (let i = 0; i < 20; i++) {
+      const f = engine.selectNext({ language: 'es' });
+      expect(f?.id).not.toBe(last);
+      last = f?.id;
+    }
+  });
+
+  it('keeps independent rotation state per language (interleaved calls stay language-pure)', () => {
+    const engine = new FillerEngine();
+    const a = engine.selectNext({ language: 'en' });
+    const b = engine.selectNext({ language: 'es' });
+    const c = engine.selectNext({ language: 'en' });
+    const d = engine.selectNext({ language: 'es' });
+    expect(a?.language).toBe('en');
+    expect(c?.language).toBe('en');
+    expect(b?.language).toBe('es');
+    expect(d?.language).toBe('es');
+    expect(a?.id).not.toBe(c?.id);
+    expect(b?.id).not.toBe(d?.id);
+  });
+});

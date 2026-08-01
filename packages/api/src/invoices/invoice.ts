@@ -1,10 +1,18 @@
 import { v4 as uuidv4 } from 'uuid';
-import { LineItem, DocumentTotals, calculateDocumentTotals } from '../shared/billing-engine';
+import {
+  LineItem,
+  DocumentTotals,
+  calculateDocumentTotals,
+  normalizeLineItemTotals,
+} from '../shared/billing-engine';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
 import { ValidationError } from '../shared/errors';
 import { SettingsRepository, getNextInvoiceNumber } from '../settings/settings';
 import { buildOriginationMetadata } from '../leads/attribution-metadata';
 import { RefreshJobMoneyStateDeps, refreshJobMoneyStateSafe } from '../jobs/job-money-state';
+import { deactivateInvoicePaymentLink } from './invoice-payment-link';
+import type { PaymentLinkProvider } from '../payments/payment-link-provider';
+import type { ConnectAccountResolver } from './public-invoice-service';
 
 export type InvoiceStatus = 'draft' | 'open' | 'partially_paid' | 'paid' | 'void' | 'canceled';
 
@@ -57,6 +65,8 @@ export interface CreateInvoiceInput {
   lineItems: LineItem[];
   discountCents?: number;
   taxRateBps?: number;
+  /** Processing-fee surcharge in basis points (Jobber parity). 0/omitted ⇒ none. */
+  processingFeeBps?: number;
   customerMessage?: string;
   /** Optional override; routes auto-populate from job when omitted. */
   originatingLeadId?: string;
@@ -70,6 +80,7 @@ export interface UpdateInvoiceInput {
   lineItems?: LineItem[];
   discountCents?: number;
   taxRateBps?: number;
+  processingFeeBps?: number;
   customerMessage?: string;
 }
 
@@ -96,6 +107,21 @@ export interface InvoiceListResult {
   total: number;
 }
 
+/**
+ * Update patch for `InvoiceRepository.update`. Identical to Partial<Invoice>
+ * except the payment-link columns also accept `null`, which CLEARS the
+ * column — needed when a link is deactivated (P0-1): `undefined` means
+ * "leave unchanged", so without null there was no way to remove a dead
+ * link, and every write path could only ever set the columns.
+ */
+export type InvoiceUpdate = Omit<
+  Partial<Invoice>,
+  'stripePaymentLinkId' | 'stripePaymentLinkUrl'
+> & {
+  stripePaymentLinkId?: string | null;
+  stripePaymentLinkUrl?: string | null;
+};
+
 export const DEFAULT_INVOICE_LIMIT = 50;
 export const MAX_INVOICE_LIMIT = 200;
 
@@ -112,7 +138,98 @@ export interface InvoiceRepository {
   findByTenant(tenantId: string, options?: InvoiceListOptions): Promise<Invoice[]>;
   /** P1-018: paginated `{ data, total }` form for list UIs. */
   listWithMeta?(tenantId: string, options?: InvoiceListOptions): Promise<InvoiceListResult>;
-  update(tenantId: string, id: string, updates: Partial<Invoice>): Promise<Invoice | null>;
+  update(tenantId: string, id: string, updates: InvoiceUpdate): Promise<Invoice | null>;
+  /**
+   * Atomically credit `deltaCents` to the paid balance in a SINGLE UPDATE,
+   * recomputing amount_due and status from the row's own current values — never
+   * from a caller's stale snapshot. Closes the recordPayment lost-update race:
+   * two concurrent legitimate payments (e.g. a manual cash entry and a Stripe/ACH
+   * webhook) otherwise each read the same amount_paid and blind-set it, silently
+   * dropping one credit.
+   *
+   * The write itself is guarded (P0-3 / P0-6): it applies ONLY when the row is
+   * currently payable ('open' / 'partially_paid') AND the credit fits the
+   * remaining balance (`amount_paid + delta <= total`). A voided invoice can
+   * therefore never be flipped to 'paid' by a racing credit, and two concurrent
+   * full-balance credits cannot overpay — the loser gets null. Returns the
+   * updated invoice, or null when the row is missing, not payable, or the
+   * credit would exceed the total; callers must re-read to distinguish and
+   * compensate for any payment row they already committed.
+   */
+  incrementAmountPaidAtomic(
+    tenantId: string,
+    id: string,
+    deltaCents: number,
+    now: Date,
+  ): Promise<Invoice | null>;
+  /**
+   * Atomically DECREMENT the paid balance by `deltaCents` in a SINGLE UPDATE,
+   * recomputing amount_due and status from the row's OWN current values — the
+   * reversal-side analog of `incrementAmountPaidAtomic`. Closes the
+   * `reversePayment` / in-flight-reversal lost-update race: the old path read
+   * amount_paid into a JS snapshot and blind-set `snapshot − delta`, so a
+   * concurrent credit (or a second reversal) clobbered it. Paid is clamped at 0
+   * (GREATEST) and the reopened status is derived in-SQL: 'open' (nothing left
+   * paid), 'paid' (still fully covered — e.g. one of several payments reversed),
+   * else 'partially_paid'. Guarded to REOPENABLE statuses
+   * ('open','partially_paid','paid') only, so a void/canceled/draft invoice is
+   * left untouched (returns null, exactly as the read-modify-write path skipped
+   * it). Returns the updated invoice, or null if not found OR not reopenable.
+   */
+  decrementAmountPaidAtomic(
+    tenantId: string,
+    id: string,
+    deltaCents: number,
+    now: Date,
+  ): Promise<Invoice | null>;
+  /**
+   * P0-3 (reconciler leg) — absolute balance repair guarded in the SAME
+   * statement: writes amountPaid/amountDue/status ONLY while the row's
+   * current status is in `guardStatuses`. The crash-repair reconcilers
+   * previously read a payable/reopenable status and then wrote the repaired
+   * balance unconditionally, so a void committing between the read and the
+   * write was resurrected to 'paid'/'partially_paid' — the same
+   * check-then-act hole the atomic increment closes for credits. Returns
+   * the updated invoice, or null when the row is missing or its live status
+   * left the guarded set (the caller treats that as "nothing repaired").
+   */
+  reconcileBalanceAtomic(
+    tenantId: string,
+    id: string,
+    balance: { amountPaidCents: number; amountDueCents: number; status: InvoiceStatus },
+    guardStatuses: InvoiceStatus[],
+    now: Date,
+  ): Promise<Invoice | null>;
+  /**
+   * P0-9 (mint leg) — persist a freshly minted payment link ONLY while the
+   * invoice is still payable, still owes exactly the balance the link was
+   * priced at, and carries no other link. Minting spans a slow Stripe call:
+   * a void or a credit can land between the mint-time read and the persist,
+   * and an unguarded write would then attach a live link (priced at the
+   * OLD balance) to a dead or repriced invoice — the unapplied-capture path
+   * again, from the other side. Returns null when the guard loses; the
+   * caller must deactivate the link it just minted.
+   */
+  setPaymentLinkIfPayable(
+    tenantId: string,
+    id: string,
+    link: { linkId: string; linkUrl: string },
+    expectedAmountDueCents: number,
+    now: Date,
+  ): Promise<Invoice | null>;
+  /**
+   * P0-9 — clear the payment-link columns ONLY while they still hold
+   * `expectedLinkId` (single compare-and-swap UPDATE). Deactivation flows
+   * hold an invoice snapshot that may predate a concurrent
+   * deactivate-and-re-mint; a blind clear would wipe the NEW link's columns
+   * while it stays live at Stripe. Returns true when the clear applied.
+   * Optional: callers fall back to read-compare-clear.
+   */
+  clearPaymentLinkIfMatches?(
+    tenantId: string,
+    id: string,
+    expectedLinkId: string,
+  ): Promise<boolean>;
   /** Look up by unauthenticated view token — no tenant isolation needed (token is the secret). */
   findByViewToken?(token: string): Promise<Invoice | null>;
   /**
@@ -163,7 +280,9 @@ export function recalculateBalance(invoice: Invoice): Invoice {
 
 export function calculateDueDate(issuedAt: Date, paymentTermDays: number): Date {
   const dueDate = new Date(issuedAt);
-  dueDate.setDate(dueDate.getDate() + paymentTermDays);
+  // Invoice terms are calendar-day arithmetic. Use UTC consistently so a
+  // server's local timezone (or a DST transition) cannot shift the due date.
+  dueDate.setUTCDate(dueDate.getUTCDate() + paymentTermDays);
   return dueDate;
 }
 
@@ -175,10 +294,15 @@ export async function createInvoice(
   const errors = validateInvoiceInput(input);
   if (errors.length > 0) throw new ValidationError(`Validation failed: ${errors.join(', ')}`);
 
+  // P0-2 — the client's totalCents is never persisted; every line total is
+  // recomputed here from quantity × unitPriceCents (the web UI computes it
+  // in float dollars and can be off by a cent on fractional quantities).
+  const lineItems = normalizeLineItemTotals(input.lineItems);
   const totals = calculateDocumentTotals(
-    input.lineItems,
+    lineItems,
     input.discountCents || 0,
-    input.taxRateBps || 0
+    input.taxRateBps || 0,
+    input.processingFeeBps || 0
   );
 
   const invoice: Invoice = {
@@ -188,7 +312,7 @@ export async function createInvoice(
     estimateId: input.estimateId,
     invoiceNumber: input.invoiceNumber,
     status: 'draft',
-    lineItems: input.lineItems,
+    lineItems,
     totals,
     amountPaidCents: 0,
     amountDueCents: totals.totalCents,
@@ -315,10 +439,17 @@ export async function updateInvoice(
     throw new ValidationError(`Cannot edit invoice in '${existing.status}' status`);
   }
 
-  const lineItems = input.lineItems ?? existing.lineItems;
+  // P0-2 — client totals are recomputed, never trusted (see createInvoice).
+  // Only INCOMING lines are normalized: a metadata-only edit must not
+  // silently rewrite persisted totals the tenant has already seen.
+  const lineItems = input.lineItems
+    ? normalizeLineItemTotals(input.lineItems)
+    : existing.lineItems;
   const discountCents = input.discountCents ?? existing.totals.discountCents;
   const taxRateBps = input.taxRateBps ?? existing.totals.taxRateBps;
-  const totals = calculateDocumentTotals(lineItems, discountCents, taxRateBps);
+  const processingFeeBps =
+    input.processingFeeBps ?? existing.totals.processingFeeBps ?? 0;
+  const totals = calculateDocumentTotals(lineItems, discountCents, taxRateBps, processingFeeBps);
 
   const updated = await repository.update(tenantId, id, {
     lineItems,
@@ -363,12 +494,30 @@ export async function issueInvoice(
   return updated;
 }
 
+/**
+ * Optional wiring for `transitionInvoiceStatus`. `auditRepo` + `actor` put
+ * the status change on the audit trail (previously the status route emitted
+ * NO event, so a void left no durable timestamp). `paymentLink` arms the
+ * P0-1 fix: a void/cancel deactivates the invoice's hosted Stripe payment
+ * link, closing the path where a customer pays a stale link on a dead
+ * invoice and Stripe captures money the system refuses to credit.
+ */
+export interface TransitionInvoiceStatusOptions {
+  auditRepo?: AuditRepository;
+  actor?: { actorId: string; actorRole: string };
+  paymentLink?: {
+    provider: PaymentLinkProvider;
+    connectAccountResolver?: ConnectAccountResolver;
+  };
+}
+
 export async function transitionInvoiceStatus(
   tenantId: string,
   id: string,
   newStatus: InvoiceStatus,
   repository: InvoiceRepository,
   moneyStateDeps?: RefreshJobMoneyStateDeps,
+  opts?: TransitionInvoiceStatusOptions,
 ): Promise<Invoice | null> {
   const invoice = await repository.findById(tenantId, id);
   if (!invoice) return null;
@@ -381,6 +530,42 @@ export async function transitionInvoiceStatus(
     status: newStatus,
     updatedAt: new Date(),
   });
+
+  if (updated && opts?.auditRepo) {
+    await opts.auditRepo.create(
+      createAuditEvent({
+        tenantId,
+        actorId: opts.actor?.actorId ?? 'system',
+        actorRole: opts.actor?.actorRole ?? 'system',
+        eventType: 'invoice.status_changed',
+        entityType: 'invoice',
+        entityId: id,
+        metadata: { oldStatus: invoice.status, newStatus },
+      }),
+    );
+  }
+
+  // P0-1 — an invoice leaving the payable world must take its hosted
+  // payment link with it. The link was priced at mint and is never
+  // re-priced; left live, a customer can still pay it after the void and
+  // Stripe captures money no local record will hold. Best-effort with an
+  // audit trail either way; never blocks the transition itself.
+  if (updated && (newStatus === 'void' || newStatus === 'canceled') && opts?.paymentLink) {
+    // Deactivate from the POST-transition snapshot, not the read at the top:
+    // a mint can legitimately win its payable guard between that read and the
+    // status update committing, so the pre-transition snapshot may be missing
+    // the very link that must now die on the voided invoice.
+    await deactivateInvoicePaymentLink({
+      tenantId,
+      invoice: updated,
+      reason: newStatus === 'void' ? 'voided' : 'canceled',
+      invoiceRepo: repository,
+      provider: opts.paymentLink.provider,
+      connectAccountResolver: opts.paymentLink.connectAccountResolver,
+      auditRepo: opts.auditRepo,
+      actor: opts.actor,
+    });
+  }
 
   // §6 Time-to-Cash. Best-effort job money-state rollup.
   if (updated && moneyStateDeps) {
@@ -460,12 +645,149 @@ export class InMemoryInvoiceRepository implements InvoiceRepository {
     return { data, total: totalRows.length };
   }
 
-  async update(tenantId: string, id: string, updates: Partial<Invoice>): Promise<Invoice | null> {
+  async update(tenantId: string, id: string, updates: InvoiceUpdate): Promise<Invoice | null> {
     const i = this.invoices.get(id);
     if (!i || i.tenantId !== tenantId) return null;
-    const updated = { ...i, ...updates };
+    // null on the link columns means CLEAR (Pg writes SQL NULL); the domain
+    // object represents an absent link as undefined.
+    const { stripePaymentLinkId, stripePaymentLinkUrl, ...rest } = updates;
+    const updated: Invoice = { ...i, ...rest };
+    if (stripePaymentLinkId !== undefined) {
+      updated.stripePaymentLinkId = stripePaymentLinkId ?? undefined;
+    }
+    if (stripePaymentLinkUrl !== undefined) {
+      updated.stripePaymentLinkUrl = stripePaymentLinkUrl ?? undefined;
+    }
     this.invoices.set(id, updated);
     return { ...updated, lineItems: [...updated.lineItems] };
+  }
+
+  async incrementAmountPaidAtomic(
+    tenantId: string,
+    id: string,
+    deltaCents: number,
+    now: Date,
+  ): Promise<Invoice | null> {
+    const i = this.invoices.get(id);
+    if (!i || i.tenantId !== tenantId) return null;
+    // Mirror the Pg WHERE guards (P0-3 / P0-6): only a payable invoice takes a
+    // credit, and only a credit that fits the remaining balance applies. A
+    // void/canceled/draft row and an overpaying credit both return null,
+    // exactly as the SQL returns 0 rows.
+    if (i.status !== 'open' && i.status !== 'partially_paid') return null;
+    if (i.amountPaidCents + deltaCents > i.totals.totalCents) return null;
+    // JS is single-threaded, so read-modify-write here is already atomic; the
+    // Pg impl uses a single UPDATE to get the same guarantee under real
+    // concurrency. Recompute from the stored row, never a caller snapshot.
+    const newPaid = i.amountPaidCents + deltaCents;
+    const newDue = Math.max(0, i.totals.totalCents - newPaid);
+    const status: InvoiceStatus = newDue === 0 ? 'paid' : 'partially_paid';
+    const updated: Invoice = {
+      ...i,
+      amountPaidCents: newPaid,
+      amountDueCents: newDue,
+      status,
+      updatedAt: now,
+    };
+    this.invoices.set(id, updated);
+    return { ...updated, lineItems: [...updated.lineItems] };
+  }
+
+  async decrementAmountPaidAtomic(
+    tenantId: string,
+    id: string,
+    deltaCents: number,
+    now: Date,
+  ): Promise<Invoice | null> {
+    const i = this.invoices.get(id);
+    if (!i || i.tenantId !== tenantId) return null;
+    // Only reopenable invoices are decremented; a void/canceled/draft row is
+    // left untouched (null), mirroring the Pg WHERE guard and the prior
+    // read-modify-write, which never touched a terminal invoice on reversal.
+    const REOPENABLE: InvoiceStatus[] = ['open', 'partially_paid', 'paid'];
+    if (!REOPENABLE.includes(i.status)) return null;
+    // JS is single-threaded, so read-modify-write here is already atomic; the
+    // Pg impl uses a single UPDATE to get the same guarantee under real
+    // concurrency. Recompute from the stored row, never a caller snapshot.
+    const newPaid = Math.max(0, i.amountPaidCents - deltaCents);
+    const newDue = Math.max(0, i.totals.totalCents - newPaid);
+    let status: InvoiceStatus;
+    if (newPaid <= 0) status = 'open';
+    else if (newPaid >= i.totals.totalCents) status = 'paid';
+    else status = 'partially_paid';
+    const updated: Invoice = {
+      ...i,
+      amountPaidCents: newPaid,
+      amountDueCents: newDue,
+      status,
+      updatedAt: now,
+    };
+    this.invoices.set(id, updated);
+    return { ...updated, lineItems: [...updated.lineItems] };
+  }
+
+  async reconcileBalanceAtomic(
+    tenantId: string,
+    id: string,
+    balance: { amountPaidCents: number; amountDueCents: number; status: InvoiceStatus },
+    guardStatuses: InvoiceStatus[],
+    now: Date,
+  ): Promise<Invoice | null> {
+    const i = this.invoices.get(id);
+    if (!i || i.tenantId !== tenantId) return null;
+    // Mirror the Pg WHERE guard: the repair applies only while the live
+    // status is still in the guarded set — a concurrently voided invoice is
+    // left untouched (null), never resurrected.
+    if (!guardStatuses.includes(i.status)) return null;
+    const updated: Invoice = {
+      ...i,
+      amountPaidCents: balance.amountPaidCents,
+      amountDueCents: balance.amountDueCents,
+      status: balance.status,
+      updatedAt: now,
+    };
+    this.invoices.set(id, updated);
+    return { ...updated, lineItems: [...updated.lineItems] };
+  }
+
+  async setPaymentLinkIfPayable(
+    tenantId: string,
+    id: string,
+    link: { linkId: string; linkUrl: string },
+    expectedAmountDueCents: number,
+    now: Date,
+  ): Promise<Invoice | null> {
+    const i = this.invoices.get(id);
+    if (!i || i.tenantId !== tenantId) return null;
+    // Mirror the Pg WHERE guard: payable, unchanged balance, no other link.
+    if (i.status !== 'open' && i.status !== 'partially_paid') return null;
+    if (i.amountDueCents !== expectedAmountDueCents) return null;
+    if (i.stripePaymentLinkId !== undefined) return null;
+    const updated: Invoice = {
+      ...i,
+      stripePaymentLinkId: link.linkId,
+      stripePaymentLinkUrl: link.linkUrl,
+      updatedAt: now,
+    };
+    this.invoices.set(id, updated);
+    return { ...updated, lineItems: [...updated.lineItems] };
+  }
+
+  async clearPaymentLinkIfMatches(
+    tenantId: string,
+    id: string,
+    expectedLinkId: string,
+  ): Promise<boolean> {
+    const i = this.invoices.get(id);
+    if (!i || i.tenantId !== tenantId) return false;
+    if (i.stripePaymentLinkId !== expectedLinkId) return false;
+    this.invoices.set(id, {
+      ...i,
+      stripePaymentLinkId: undefined,
+      stripePaymentLinkUrl: undefined,
+      updatedAt: new Date(),
+    });
+    return true;
   }
 
   async findByViewToken(token: string): Promise<Invoice | null> {

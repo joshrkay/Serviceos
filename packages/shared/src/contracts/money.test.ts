@@ -3,7 +3,16 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
 import { LineItemCategory } from '../enums.js';
-import { lineItemSchema, documentTotalsSchema, lineItemCategorySchema, formatUsdCents } from './money.js';
+import {
+  lineItemSchema,
+  documentTotalsSchema,
+  lineItemCategorySchema,
+  catalogUnitSchema,
+  formatUsdCents,
+  formatUsdCentsFixed,
+  formatUsdCentsWhole,
+  formatUsdCentsPlain,
+} from './money.js';
 import { resolveDbCheckSet } from './db-check.js';
 
 const schemaSource = readFileSync(
@@ -46,6 +55,39 @@ describe('lineItemSchema', () => {
     expect([...lineItemCategorySchema.options].sort()).toEqual([...Object.values(LineItemCategory)].sort());
     const dbSet = resolveDbCheckSet(schemaSource, 'estimate_line_items', 'category');
     expect([...lineItemCategorySchema.options].sort()).toEqual([...dbSet].sort());
+  });
+
+  // B7.5 — `unit` is descriptive only, so these pin the two things that could
+  // silently go wrong: the enum drifting from CatalogUnit, and the field
+  // leaking into money math.
+  it('catalogUnitSchema stays in lockstep with the API CatalogUnit union', () => {
+    // CatalogUnit is a type-only union in packages/api, so it cannot be
+    // reflected at runtime — read its literals from the source of truth
+    // instead, the same technique resolveDbCheckSet uses for the DB CHECK.
+    const catalogSource = readFileSync(
+      resolve(dirname(fileURLToPath(import.meta.url)), '../../../api/src/catalog/catalog-item.ts'),
+      'utf8',
+    );
+    const match = catalogSource.match(/export type CatalogUnit\s*=\s*([^;]+);/);
+    expect(match).not.toBeNull();
+    const declared = [...match![1].matchAll(/'([^']+)'/g)].map((m) => m[1]);
+    expect([...catalogUnitSchema.options].sort()).toEqual([...declared].sort());
+  });
+
+  it('accepts a line with a unit, and a unit never changes the money fields', () => {
+    const withUnit = lineItemSchema.parse({ ...baseLineItem, unit: 'hour' });
+    const withoutUnit = lineItemSchema.parse(baseLineItem);
+    expect(withUnit.unit).toBe('hour');
+    // Same money, unit or no unit.
+    expect(withUnit.quantity).toBe(withoutUnit.quantity);
+    expect(withUnit.unitPriceCents).toBe(withoutUnit.unitPriceCents);
+    expect(withUnit.totalCents).toBe(withoutUnit.totalCents);
+    // Legacy/absent rows still parse.
+    expect(lineItemSchema.safeParse({ ...baseLineItem, unit: null }).success).toBe(true);
+    expect(lineItemSchema.safeParse({ ...baseLineItem, unit: undefined }).success).toBe(true);
+    // An invented unit is refused — this enum is the validation boundary,
+    // since the DB column deliberately carries no CHECK.
+    expect(lineItemSchema.safeParse({ ...baseLineItem, unit: 'furlong' }).success).toBe(false);
   });
 });
 
@@ -92,5 +134,40 @@ describe('formatUsdCents', () => {
 
   it('handles negatives without float drift', () => {
     expect(formatUsdCents(-2550)).toBe('-$25.50');
+  });
+});
+
+describe('formatUsdCentsFixed', () => {
+  it('always keeps two-digit cents with thousands separators', () => {
+    expect(formatUsdCentsFixed(0)).toBe('$0.00');
+    expect(formatUsdCentsFixed(5000)).toBe('$50.00');
+    expect(formatUsdCentsFixed(123450)).toBe('$1,234.50');
+    expect(formatUsdCentsFixed(2505)).toBe('$25.05');
+  });
+
+  it('places the sign before the symbol for negatives', () => {
+    expect(formatUsdCentsFixed(-500)).toBe('-$5.00');
+    expect(formatUsdCentsFixed(-125050)).toBe('-$1,250.50');
+  });
+});
+
+describe('formatUsdCentsWhole', () => {
+  it('rounds to whole dollars with thousands separators and no cents', () => {
+    expect(formatUsdCentsWhole(0)).toBe('$0');
+    expect(formatUsdCentsWhole(125000)).toBe('$1,250');
+    expect(formatUsdCentsWhole(125050)).toBe('$1,251');
+    expect(formatUsdCentsWhole(125049)).toBe('$1,250');
+  });
+
+  it('handles negatives', () => {
+    expect(formatUsdCentsWhole(-125050)).toBe('-$1,251');
+  });
+});
+
+describe('formatUsdCentsPlain', () => {
+  it('emits bare $N.NN with no thousands separators', () => {
+    expect(formatUsdCentsPlain(0)).toBe('$0.00');
+    expect(formatUsdCentsPlain(123450)).toBe('$1234.50');
+    expect(formatUsdCentsPlain(2505)).toBe('$25.05');
   });
 });

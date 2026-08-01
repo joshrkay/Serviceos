@@ -14,6 +14,8 @@ import {
   setSupervisorPresenceLoader,
   _resetSupervisorPresenceCache,
 } from '../../src/ai/supervisor-presence';
+import { configureSupervisorReviewGate } from '../../src/ai/supervisor/review-gate';
+import { payloadWithSupervisorMarker } from '../../src/proposals/supervisor/marker';
 import type { LLMGateway, LLMResponse } from '../../src/ai/gateway/gateway';
 import type { IntentClassification } from '../../src/ai/orchestration/intent-classifier';
 import type { QueueMessage } from '../../src/queues/queue';
@@ -88,11 +90,15 @@ describe('voice-action-router — P12-004 unsupervised routing', () => {
   afterEach(() => {
     _resetSupervisorPresenceCache();
     setSupervisorPresenceLoader(null);
+    configureSupervisorReviewGate(null);
   });
 
   it('queue_and_sms: sends the owner a one-tap approve SMS and audits the routing', async () => {
     const sendSms = vi.fn(async (_to: string, _body: string) => {});
     const worker = createVoiceActionRouterWorker({
+    // Production always resolves a tenant zone; a booking without one now
+    // asks the operator instead of guessing at US-Eastern.
+    tenantSchedulingResolver: async () => ({ timezone: 'America/Phoenix' }),
       gateway: bookingGateway(),
       proposalRepo,
       unsupervisedRouting: {
@@ -133,9 +139,61 @@ describe('voice-action-router — P12-004 unsupervised routing', () => {
     });
   });
 
+  it('queue_and_sms: a non-holding supervisor review attaches an N-002 marker that reaches the rendered SMS', async () => {
+    // N-004 regression: the gate writes supervisor markers to the proposal via
+    // proposalRepo but historically returned only `{ hold }`, leaving the
+    // router's in-memory `outcome.proposal` stale — so the queued one-tap SMS
+    // omitted the freshly-attached supervisor warning. The gate now returns the
+    // updated proposal and the router renders THAT. Shadow (non-holding) verdict
+    // + queue_and_sms: the marker must appear in the SMS body.
+    const supervisorReason = 'pricing 40% above catalog';
+    configureSupervisorReviewGate({
+      review: async ({ proposal }) => {
+        // Mirror the real gate: force a medium _meta so the marker renders as a
+        // `Check:` line, attach the supervisor marker, do NOT hold.
+        const marked = payloadWithSupervisorMarker(
+          { ...proposal.payload, _meta: { overallConfidence: 'medium' } },
+          [supervisorReason],
+        );
+        return { hold: false, proposal: { ...proposal, payload: marked } };
+      },
+    });
+
+    const sendSms = vi.fn(async (_to: string, _body: string) => {});
+    const worker = createVoiceActionRouterWorker({
+    // Production always resolves a tenant zone; a booking without one now
+    // asks the operator instead of guessing at US-Eastern.
+    tenantSchedulingResolver: async () => ({ timezone: 'America/Phoenix' }),
+      gateway: bookingGateway(),
+      proposalRepo,
+      unsupervisedRouting: {
+        auditRepo,
+        sendSms,
+        secret: 'test-secret',
+        buildApproveUrl: (token) => `https://api.example.com/approve?token=${token}`,
+        resolveOwnerPhone: async () => '+15125550100',
+        resolveRouting: async () => 'queue_and_sms',
+      },
+    });
+
+    await worker.handle(
+      msg({ tenantId: 't-unsup', userId: 'u-1', transcript: 'Book Mrs Lee next Tuesday at 2pm' }),
+      silentLogger(),
+    );
+
+    expect(sendSms).toHaveBeenCalledTimes(1);
+    const [, body] = sendSms.mock.calls[0];
+    // The supervisor warning rendered from the gate-updated payload, not the
+    // stale outcome.proposal (which had no marker).
+    expect(body).toContain(`supervisor: ${supervisorReason}`);
+  });
+
   it('queue_only: no SMS is sent, routing decision is still audited', async () => {
     const sendSms = vi.fn(async (_to: string, _body: string) => {});
     const worker = createVoiceActionRouterWorker({
+    // Production always resolves a tenant zone; a booking without one now
+    // asks the operator instead of guessing at US-Eastern.
+    tenantSchedulingResolver: async () => ({ timezone: 'America/Phoenix' }),
       gateway: bookingGateway(),
       proposalRepo,
       unsupervisedRouting: {
@@ -163,6 +221,9 @@ describe('voice-action-router — P12-004 unsupervised routing', () => {
     setSupervisorPresenceLoader(async () => true);
     const sendSms = vi.fn(async (_to: string, _body: string) => {});
     const worker = createVoiceActionRouterWorker({
+    // Production always resolves a tenant zone; a booking without one now
+    // asks the operator instead of guessing at US-Eastern.
+    tenantSchedulingResolver: async () => ({ timezone: 'America/Phoenix' }),
       gateway: bookingGateway(),
       proposalRepo,
       unsupervisedRouting: {

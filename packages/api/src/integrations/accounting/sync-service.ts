@@ -29,6 +29,13 @@ export interface AccountingSyncServiceDeps {
   qboConfig: QuickBooksOAuthConfig;
   fetchFn?: QuickBooksFetch;
   logger: Logger;
+  /**
+   * Paid-invoice page size for the sync sweep. The sweep paginates through
+   * EVERY paid invoice (already-synced ones are skipped cheaply via the sync
+   * log) — a fixed single fetch would permanently drop a tenant's invoices
+   * beyond this many. Default 200; overridable for tests.
+   */
+  invoicePageSize?: number;
 }
 
 export interface TenantSyncResult {
@@ -70,17 +77,31 @@ export class AccountingSyncService {
       return result;
     }
 
-    const invoices = await this.deps.invoiceRepo.findByTenant(tenantId, {
-      status: 'paid',
-      limit: MAX_INVOICE_LIMIT,
-    });
+    // Paginate through EVERY paid invoice. A single fixed fetch silently
+    // dropped every invoice beyond the newest page (a tenant that connects QBO
+    // with a backlog > pageSize never syncs the older ones). Already-synced
+    // invoices are skipped cheaply via the sync log, so re-walking the set each
+    // sweep is inexpensive in steady state.
+    const pageSize = Math.max(1, this.deps.invoicePageSize ?? MAX_INVOICE_LIMIT);
+    let offset = 0;
+    for (;;) {
+      const invoices = await this.deps.invoiceRepo.findByTenant(tenantId, {
+        status: 'paid',
+        limit: pageSize,
+        offset,
+      });
+      if (invoices.length === 0) break;
 
-    for (const invoice of invoices) {
-      const outcome = await this.pushPaidInvoice(integration, tokens, invoice);
-      tokens = outcome.tokens;
-      if (outcome.skipped) result.skippedInvoices += 1;
-      else if (outcome.pushed) result.pushedInvoices += 1;
-      else result.failedInvoices += 1;
+      for (const invoice of invoices) {
+        const outcome = await this.pushPaidInvoice(integration, tokens, invoice);
+        tokens = outcome.tokens;
+        if (outcome.skipped) result.skippedInvoices += 1;
+        else if (outcome.pushed) result.pushedInvoices += 1;
+        else result.failedInvoices += 1;
+      }
+
+      if (invoices.length < pageSize) break;
+      offset += pageSize;
     }
 
     await this.deps.integrationRepo.updateLastSyncedAt(tenantId, integration.id, new Date());

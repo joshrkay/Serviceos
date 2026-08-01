@@ -1,5 +1,6 @@
 import { v4 as uuidv4 } from 'uuid';
 import { Proposal, ProposalType } from '../proposal';
+import { resolveSurface } from '../surface';
 import { ExecutionHandler, ExecutionContext, ExecutionResult } from './handlers';
 import { AppointmentRepository, updateAppointment } from '../../appointments/appointment';
 import { AssignmentRepository } from '../../appointments/assignment';
@@ -18,6 +19,11 @@ import { boardDateFromAppointment } from '../../dispatch/board-revision';
 
 export class RescheduleAppointmentExecutionHandler implements ExecutionHandler {
   proposalType: ProposalType = 'reschedule_appointment';
+  // Awaits transactionalComms.notifyRescheduled (customer SMS/email) — external
+  // network I/O alongside the appointment-reschedule DB write.
+  // (notifyDispatchBoardChanged is a non-awaited in-process SSE signal and does
+  // not count.)
+  performsExternalIo = true;
 
   constructor(
     private readonly appointmentRepo?: AppointmentRepository,
@@ -65,10 +71,66 @@ export class RescheduleAppointmentExecutionHandler implements ExecutionHandler {
       return { success: false, error: validation.errors.join(', ') };
     }
 
+    // RIVET P4 — S1 ownership binding. The spec's allowlist grants an
+    // unauthenticated caller "reschedule OWN appointment" only, but the voice
+    // entity resolver searches appointments tenant-wide, so a caller naming
+    // ANOTHER customer's appointment would otherwise sail through creation,
+    // look routine in the owner's queue, and move a stranger's visit on
+    // approval. Enforce OWN here, at execution, against the identity the
+    // session stamped (caller-ID / self-signup — never transcript content).
+    // Uses the SAME resolveSurface the executor enforces with — explicit
+    // stamp OR the fail-safe inference (unstamped telephony + non-system
+    // author) — so a legacy/unstamped inbound proposal cannot slip past the
+    // ownership check that the executor's inference let through the
+    // allowlist. Fail closed: an S1 reschedule with no verifiable caller
+    // identity, or without the repos needed to verify, is refused.
+    const isS1 =
+      resolveSurface(
+        proposal.sourceContext as Record<string, unknown> | undefined,
+        proposal.createdBy,
+      ) === 'S1';
+    const callerCustomerId = proposal.sourceContext?.callerCustomerId;
+    if (isS1 && (typeof callerCustomerId !== 'string' || callerCustomerId.length === 0)) {
+      return {
+        success: false,
+        error:
+          'Caller identity was not verified on this call — an S1 reschedule can only move ' +
+          "the caller's own appointment. Handle this one manually.",
+      };
+    }
+    if (isS1 && !this.appointmentRepo) {
+      // Dev/passthrough wiring has no way to verify ownership — never let an
+      // S1 reschedule through unverified.
+      return {
+        success: false,
+        error:
+          'Cannot verify appointment ownership for an S1 caller reschedule (no appointment repo wired) — refusing.',
+      };
+    }
+
     if (this.appointmentRepo) {
       const appointment = await this.appointmentRepo.findById(context.tenantId, appointmentId);
       if (!appointment) {
         return { success: false, error: `Appointment ${appointmentId} not found` };
+      }
+
+      if (isS1) {
+        const jobRepo = this.feasibilityDeps?.jobRepo;
+        if (!jobRepo) {
+          return {
+            success: false,
+            error:
+              'Cannot verify appointment ownership for an S1 caller reschedule (no job lookup wired) — refusing.',
+          };
+        }
+        const job = await jobRepo.findById(context.tenantId, appointment.jobId);
+        if (!job || job.customerId !== callerCustomerId) {
+          return {
+            success: false,
+            error:
+              "This appointment does not belong to the caller — an S1 reschedule can only move the caller's own appointment.",
+          };
+        }
       }
 
       // Staleness check
@@ -194,18 +256,33 @@ export class RescheduleAppointmentExecutionHandler implements ExecutionHandler {
       }
 
       if (this.transactionalComms) {
-        await this.transactionalComms.notifyRescheduled(context.tenantId, appointmentId);
+        // The proposal id is the per-ACTION claim token so a later reschedule
+        // of the SAME appointment isn't silently suppressed by an earlier
+        // one's tombstone. The destination timestamp (newScheduledStart) is
+        // NOT safe here: moving to slot B, then elsewhere, then back to B
+        // reuses the same appt-reschedule:{id}:B claim, so the final move-back
+        // notification would be dropped as a duplicate. Each approved
+        // reschedule is a distinct proposal, so proposal.id is unique per
+        // occurrence (Codex P2, PR #705).
+        await this.transactionalComms.notifyRescheduled(
+          context.tenantId,
+          appointmentId,
+          proposal.id,
+        );
       }
 
       // Spatial board sync. When a reschedule crosses calendar days, BOTH
       // boards must refresh: the new day (appointment appears) and the old
       // day (appointment leaves). Notifying only the new day would leave a
       // stale card on a dispatcher viewing the original day.
-      notifyDispatchBoardChanged(context.tenantId, updated.scheduledStart);
-      const oldDate = boardDateFromAppointment(appointment.scheduledStart);
-      const newDate = boardDateFromAppointment(updated.scheduledStart);
+      notifyDispatchBoardChanged(context.tenantId, updated.scheduledStart, updated.timezone);
+      // Compare the tenant-LOCAL days (not UTC) — a move within the same tenant
+      // day that straddles UTC midnight must not spuriously notify a second
+      // board, and a cross-tenant-day move that stays within one UTC day must.
+      const oldDate = boardDateFromAppointment(appointment.scheduledStart, appointment.timezone);
+      const newDate = boardDateFromAppointment(updated.scheduledStart, updated.timezone);
       if (oldDate !== newDate) {
-        notifyDispatchBoardChanged(context.tenantId, appointment.scheduledStart);
+        notifyDispatchBoardChanged(context.tenantId, appointment.scheduledStart, appointment.timezone);
       }
 
       return {

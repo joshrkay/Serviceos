@@ -118,10 +118,14 @@ describe('InMemoryDunningEventRepository', () => {
 });
 
 describe('defaultDunningConfig', () => {
-  it('is a single 3-day SMS nudge with no late fee', () => {
+  it('is the 3/7/14-day SMS cadence with no late fee (PRD US-370)', () => {
     const cfg = defaultDunningConfig(TENANT);
     expect(cfg.enabled).toBe(true);
-    expect(cfg.reminderSteps).toEqual([{ offsetDays: 3, channel: 'sms' }]);
+    expect(cfg.reminderSteps).toEqual([
+      { offsetDays: 3, channel: 'sms' },
+      { offsetDays: 7, channel: 'sms' },
+      { offsetDays: 14, channel: 'sms' },
+    ]);
     expect(cfg.lateFeeType).toBe('none');
     // id must be a real UUID so it can be persisted via PgDunningConfigRepository.upsert
     expect(cfg.id).toMatch(

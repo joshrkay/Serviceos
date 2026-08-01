@@ -31,6 +31,7 @@ const CORPUS_ROOT = path.resolve(
 const SCRIPT_IDS = [
   'find-or-create-lead-unknown-caller',
   'create-customer-new-signup',
+  'create-customer-with-address',
   'known-customer-no-signup',
 ] as const;
 

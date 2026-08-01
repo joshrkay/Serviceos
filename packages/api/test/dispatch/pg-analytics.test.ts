@@ -11,6 +11,12 @@ function makeMockPool(rowsByCallIndex: Array<Record<string, unknown>[] | undefin
 
   const client: Partial<PoolClient> = {
     query: vi.fn(async (sql: string, params?: unknown[]) => {
+      // U2b-2: skip the SET LOCAL transaction framing (BEGIN/COMMIT/ROLLBACK/
+      // RESET/SET ROLE) so positional row arrays + calls[0]=context/calls[1]=
+      // business assertions are unchanged. Tenant is now a set_config param.
+      if (/^\s*(BEGIN|COMMIT|ROLLBACK|RESET\b|SET\s+(LOCAL\s+)?ROLE\b)/i.test(sql)) {
+        return { rows: [], rowCount: 0, command: '', oid: 0, fields: [] } as unknown as QueryResult;
+      }
       calls.push({ sql, params: params ?? [] });
       const rows = rowsByCallIndex[calls.length - 1] ?? [];
       return {
@@ -79,7 +85,7 @@ describe('P0-022 — PgDispatchAnalyticsRepository', () => {
 
       // First call sets tenant context for RLS.
       expect(calls[0].sql).toContain('app.current_tenant_id');
-      expect(calls[0].sql).toContain(TENANT_A);
+      expect(calls[0].params).toContain(TENANT_A);
 
       // Second call is the INSERT — must be parameterized; tenantId never inlined.
       expect(calls[1].sql).toContain('INSERT INTO dispatch_analytics');

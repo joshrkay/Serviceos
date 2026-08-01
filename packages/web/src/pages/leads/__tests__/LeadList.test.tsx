@@ -121,6 +121,58 @@ describe('Leads — LeadList kanban (P9-001)', () => {
       .mocked(apiFetch)
       .mock.calls.filter((c) => (c[1] as RequestInit | undefined)?.method === 'PATCH');
     expect(patchCalls.length).toBe(0);
-    expect(screen.getByRole('alert')).toHaveTextContent(/Convert action/i);
+    // Won column is not a drop target — no alert needed when drop is ignored.
+    expect(wonColumn).toHaveAttribute('data-droppable', 'false');
+  });
+
+  it('does not navigate when a card is clicked after a drag', async () => {
+    mockListOnce();
+    // PATCH for the drop
+    vi.mocked(apiFetch).mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => ({}),
+    } as unknown as Response);
+
+    const onSelectLead = vi.fn();
+    render(<LeadList onSelectLead={onSelectLead} />);
+    const card = await screen.findByTestId('lead-card-lead-1');
+    const targetColumn = screen.getByTestId('lead-column-contacted');
+
+    const dataTransfer = {
+      data: {} as Record<string, string>,
+      effectAllowed: '',
+      dropEffect: '',
+      setData(this: { data: Record<string, string> }, key: string, value: string) {
+        this.data[key] = value;
+      },
+      getData(this: { data: Record<string, string> }, key: string) {
+        return this.data[key] ?? '';
+      },
+    };
+
+    await act(async () => {
+      fireEvent.mouseDown(card);
+      fireEvent.dragStart(card, { dataTransfer });
+      fireEvent.dragOver(targetColumn, { dataTransfer });
+      fireEvent.drop(targetColumn, { dataTransfer });
+      fireEvent.dragEnd(card);
+      // Browser often fires a click on the drag source after dragend.
+      fireEvent.click(card);
+    });
+
+    expect(onSelectLead).not.toHaveBeenCalled();
+  });
+
+  it('still navigates on a plain click without drag', async () => {
+    mockListOnce();
+    const onSelectLead = vi.fn();
+    render(<LeadList onSelectLead={onSelectLead} />);
+    const card = await screen.findByTestId('lead-card-lead-1');
+
+    fireEvent.mouseDown(card);
+    fireEvent.click(card);
+
+    expect(onSelectLead).toHaveBeenCalledWith('lead-1');
   });
 });

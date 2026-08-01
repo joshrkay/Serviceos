@@ -1,6 +1,7 @@
 import { DelayNotificationService } from './delay-notifications';
 import { MessageDeliveryProvider } from './delivery-provider';
 import { DispatchEntityType, DispatchRepository } from './dispatch-repository';
+import type { CustomerRepository } from '../customers/customer';
 
 /**
  * Real implementation of DelayNotificationService that routes delay notices
@@ -11,6 +12,12 @@ export class TwilioDelayNotificationService implements DelayNotificationService 
   constructor(
     private readonly delivery: MessageDeliveryProvider,
     private readonly dispatchRepo: DispatchRepository,
+    /**
+     * WS1 — used to load the recipient customer's sms_consent so the central
+     * gate can enforce it on the SMS channel. Optional: when absent, a customer
+     * SMS carries no consent context and the gate fails closed in 'block' mode.
+     */
+    private readonly customerRepo?: Pick<CustomerRepository, 'findById'>,
   ) {}
 
   async sendDelayNotice(request: {
@@ -30,11 +37,20 @@ export class TwilioDelayNotificationService implements DelayNotificationService 
     const entityType: DispatchEntityType = request.entityType ?? 'delay_notice';
 
     if (request.channel === 'sms') {
+      // WS1 — delay notices are customer-facing; load the stored consent flag
+      // so the central gate can enforce consent + DNC.
+      const customer = this.customerRepo
+        ? await this.customerRepo.findById(request.tenantId, request.customerId)
+        : null;
       const result = await this.delivery.sendSms({
         to: request.destination,
         body: request.message,
         tenantId: request.tenantId,
         idempotencyKey: request.idempotencyKey,
+        recipientClass: 'customer',
+        ...(customer
+          ? { consent: { smsConsent: customer.smsConsent === true, customerId: customer.id } }
+          : {}),
       });
       await this.dispatchRepo.create({
         tenantId: request.tenantId,

@@ -1,0 +1,77 @@
+{
+  "id": "ws21b-owner-batch-approval",
+  "bucket": "02-happy-booker",
+  "callerId": "+15125550111",
+  "callerIdBlocked": false,
+  "callerIsOwner": true,
+  "fixtures": {
+    "tenant": {
+      "id": "t_ws21b_batch",
+      "display_name": "WS21b Batch Co",
+      "timezone": "America/Los_Angeles",
+      "ownerPhone": "+15125550111"
+    },
+    "customers": [
+      {
+        "id": "cust_ws21b_batch_owner",
+        "tenantId": "t_ws21b_batch",
+        "firstName": "Owner",
+        "lastName": "Line",
+        "displayName": "Owner Line",
+        "primaryPhone": "+15125550111",
+        "preferredChannel": "phone",
+        "smsConsent": false,
+        "isArchived": false,
+        "createdBy": "seed",
+        "createdAt": "2026-01-01T00:00:00.000Z",
+        "updatedAt": "2026-01-01T00:00:00.000Z"
+      }
+    ],
+    "proposals": [
+      {
+        "id": "prop_ws21b_batch_1",
+        "tenantId": "t_ws21b_batch",
+        "proposalType": "draft_estimate",
+        "status": "ready_for_review",
+        "payload": { "customerName": "Henderson Family LLC", "totalCents": 45000 },
+        "summary": "Estimate for Henderson — water heater replacement",
+        "createdBy": "seed",
+        "createdAt": "2026-01-01T00:00:00.000Z",
+        "updatedAt": "2026-01-01T00:00:00.000Z"
+      },
+      {
+        "id": "prop_ws21b_batch_2",
+        "tenantId": "t_ws21b_batch",
+        "proposalType": "draft_estimate",
+        "status": "ready_for_review",
+        "payload": { "customerName": "Rivera Plumbing", "totalCents": 32000 },
+        "summary": "Estimate for Rivera — drain line",
+        "createdBy": "seed",
+        "createdAt": "2026-01-01T00:00:00.000Z",
+        "updatedAt": "2026-01-01T00:00:00.000Z"
+      }
+    ]
+  },
+  "turns": [
+    {
+      "caller": "What's waiting for me?",
+      "expected": {
+        "intent": "approve_proposal",
+        "slots": { "proposalReference": "what's waiting" },
+        "escalates": false
+      }
+    },
+    {
+      "caller": "Yes, approve it.",
+      "expected": { "escalates": false }
+    },
+    {
+      "caller": "Skip that one, that's all.",
+      "expected": { "escalates": false }
+    }
+  ],
+  "grading": {
+    "appliesFloor": [1, 2, 3],
+    "appliesDisposition": [9, 12]
+  }
+}

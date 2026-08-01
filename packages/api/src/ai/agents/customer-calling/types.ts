@@ -8,6 +8,9 @@
 import { z } from 'zod';
 import type { RepairTemplate } from '../../../verticals/registry';
 import type { EscalationSummary } from './escalation-summary-builder';
+import type { QuoteReadbackLine } from '../../voice-turn/quote-readback';
+import type { PendingEntityAmbiguity } from './entity-resolution';
+import type { EntityCandidate, EntityKind } from '../../resolution/entity-resolver';
 
 // ─── States ──────────────────────────────────────────────────────────────────
 
@@ -18,6 +21,13 @@ export type CallingAgentState =
   | 'ask_caller'
   | 'intent_capture'
   | 'entity_resolution'
+  /**
+   * Middle confidence band (τ_ent_confirm_low <= score < τ_ent): a single
+   * candidate was found but isn't confident enough to act on silently. The
+   * FSM asks a one-tap voice confirmation before merging it into
+   * extractedEntities and proceeding as if it had resolved normally.
+   */
+  | 'entity_confirm'
   | 'intent_confirm'
   | 'proposal_draft'
   | 'closing'
@@ -40,17 +50,82 @@ export type CallingAgentEvent =
   | { type: 'caller_hangup' }
   | { type: 'call_status_updated'; status: string }
   | { type: 'recording_completed'; recordingUrl: string }
-  // In-app voice adapter events (frontend AssistantPage / VoiceUpdatePage → API)
+  // In-app voice adapter events (frontend AssistantPage → API)
   | { type: 'session_started'; userId: string; tenantId: string; conversationId: string }
   | { type: 'text_input'; text: string }
   | { type: 'session_ended' }
   // Internal events (produced by skills, consumed by the state machine)
-  | { type: 'intent_classified'; intentType: string; entities: Record<string, unknown>; confidence: number }
+  | { type: 'intent_classified'; intentType: string; entities: Record<string, unknown>; confidence: number; aiRunId?: string }
   | { type: 'entity_resolved'; refs: Record<string, string> }
-  | { type: 'entity_ambiguous'; candidates: Array<{ id: string; name: string; score: number }> }
+  | {
+      type: 'entity_ambiguous';
+      candidates: Array<{ id: string; name: string; score: number; hint?: string }>;
+      entityKind: string;
+      reference: string;
+      refKey: string;
+      partialRefs: Record<string, string>;
+      /** True when the caller's follow-up did not resolve the ambiguity. */
+      retry?: boolean;
+    }
   | { type: 'entity_not_found' }
+  /**
+   * A free-text entity reference resolved to exactly one candidate in the
+   * middle confidence band [τ_ent_confirm_low, τ_ent) — probably right, but
+   * confirmed with the caller before use rather than acted on silently.
+   * `refKey`/`partialRefs` mirror `entity_ambiguous` so the FSM can merge
+   * the confirmed id alongside any refs already resolved this turn.
+   */
+  | {
+      type: 'entity_confirm_candidate';
+      entityKind: EntityKind;
+      candidate: EntityCandidate;
+      reference: string;
+      refKey: string;
+      partialRefs: Record<string, string>;
+    }
+  /** Caller affirmed the `entity_confirm` readback ("yes, that's the one"). */
+  | { type: 'entity_confirm_affirmed' }
+  /** Caller declined, was unclear, or timed out on the `entity_confirm` readback. */
+  | { type: 'entity_confirm_declined' }
   | { type: 'confidence_low'; threshold: number; score: number }
-  | { type: 'proposal_queued'; proposalId: string }
+  // WS5 — `utterance` carries the grounded quote read-back computed by the
+  // voice-turn processor (handleCreateProposal) so the FSM speaks a catalog-
+  // grounded price acknowledgment for a drafted estimate instead of the fixed
+  // confirmation line. Absent for every non-estimate proposal (fixed line).
+  //
+  // WS18 — when the queued proposal is a grounded estimate, the processor also
+  // carries the read-back's structured lines + cleanliness + total so the FSM
+  // can stash a `pendingQuote` on the context. This is what lets the caller
+  // refine the quote ("actually, make it two") or close the sale ("yes, book
+  // it") mid-call without discarding the draft. Absent for every non-estimate
+  // proposal → `pendingQuote` stays undefined and `closing` behaves as before.
+  | {
+      type: 'proposal_queued';
+      proposalId: string;
+      utterance?: string;
+      groundedLines?: QuoteReadbackLine[];
+      groundedClean?: boolean;
+      totalCents?: number;
+    }
+  // WS18 — deterministic post-quote signals produced by the voice-turn
+  // processor's pre-check (state === 'closing' && a pendingQuote is set),
+  // BEFORE the LLM classifier runs. They never originate from the classifier.
+  //
+  //  - post_quote_affirmative: the caller assented to book ("yes, book it").
+  //    Begins the D-018 close flow in the processor; the FSM keeps pendingQuote
+  //    (the flow may fall back to the owner) and never discards the draft.
+  //  - refine_pending_quote: the caller edited the quote ("make it two", "also
+  //    add a gasket"). The processor has already re-grounded + edited the draft
+  //    proposal in place; the FSM speaks the fresh read-back and stays closing.
+  | { type: 'post_quote_affirmative' }
+  | {
+      type: 'refine_pending_quote';
+      proposalId: string;
+      groundedLines: QuoteReadbackLine[];
+      groundedClean: boolean;
+      totalCents: number;
+      utterance: string;
+    }
   | { type: 'cost_cap_approached'; remainingPct: number }
   | { type: 'cost_cap_exceeded' }
   | { type: 'abuse_detected'; category: string }
@@ -58,6 +133,8 @@ export type CallingAgentEvent =
   | { type: 'compliance_violation_detected'; rule: string }
   | { type: 'greeted_ok' }
   | { type: 'caller_known'; customerId: string }
+  /** Authenticated in-app operator; not a CRM customer identity. */
+  | { type: 'operator_session' }
   | { type: 'unknown_caller' }
   | { type: 'caller_identification_failed'; reason: string }
   | { type: 'system_failure'; reason: string }
@@ -105,6 +182,18 @@ export interface CallingAgentContext {
   conversationId?: string;    // in-app only
   customerId?: string;        // set after identifying
   /**
+   * SCH-03 — sticky job anchor, set whenever a job gets resolved for ANY
+   * intent (entity_resolved / entity_confirm_affirmed in transitions.ts).
+   * Mirrors `customerId`'s persistence semantics exactly: it survives the
+   * `correction` / `intent_classified`-as-correction / `second_intent` /
+   * `second_intent_via_classify` resets that clear `extractedEntities`, so
+   * a later turn's "cancel the appointment for that job" can fall back to
+   * it even though the classifier can't re-derive a job from that single
+   * utterance. Never set from anywhere but a genuine resolver hit — a
+   * fresh session/call always starts with this undefined.
+   */
+  jobId?: string;
+  /**
    * QA-2026-06-04: classifier confidence captured at intent_classified so the
    * eventual create_proposal side-effect can thread a REAL confidenceScore
    * into the proposal (auto-approve thresholds). Without it the calling-agent
@@ -112,9 +201,38 @@ export interface CallingAgentContext {
    * draft guard landed.
    */
   lastIntentConfidence?: number;
+  /**
+   * The persisted `ai_runs` id of the classify call that produced the current
+   * intent (from the `intent_classified` event's `aiRunId`). Captured at
+   * intent_classified alongside `lastIntentConfidence` so the eventual
+   * `create_proposal` side-effect can thread a REAL run id into the proposal
+   * (proposals.ai_run_id FK). Undefined when the classifier short-circuited
+   * without an LLM call or no AiRunRepository is wired — the proposal builder
+   * then leaves ai_run_id null rather than fabricating one.
+   */
+  lastAiRunId?: string;
   customerName?: string;
   currentIntent?: string;
   extractedEntities?: Record<string, unknown>;
+  /**
+   * Set when a free-text entity reference matched more than one record. The
+   * next caller turn is interpreted as a disambiguation answer (address,
+   * ordinal, phone hint) rather than a fresh intent classification.
+   */
+  pendingEntityAmbiguity?: PendingEntityAmbiguity;
+  /**
+   * Set when a free-text entity reference resolved to exactly one candidate
+   * in the middle confidence band (τ_ent_confirm_low <= score < τ_ent). The
+   * next caller turn is interpreted as a yes/no answer to the `entity_confirm`
+   * readback rather than a fresh intent classification.
+   */
+  pendingEntityConfirmation?: {
+    entityKind: EntityKind;
+    candidate: EntityCandidate;
+    reference: string;
+    refKey: string;
+    partialRefs: Record<string, string>;
+  };
   pendingProposalId?: string;
   retryCount: number;
   /**
@@ -177,6 +295,28 @@ export interface CallingAgentContext {
    * context. Only the prompt_injection_detected global guard writes it.
    */
   injectionFlagged?: boolean;
+  /**
+   * WS18 — the drafted, catalog-grounded estimate the caller is currently being
+   * quoted on the live call. Set in `proposal_draft` when a `proposal_queued`
+   * event carries grounded estimate data; consumed in `closing` so the caller
+   * can refine the quote in place ("actually, make it two") or close the sale
+   * ("yes, book it") without discarding the draft. Undefined for every
+   * non-estimate proposal, so `closing` behaves exactly as it did pre-WS18.
+   *
+   *  - `groundedClean`: every line resolved to a clean catalog match (the
+   *    D-018 lane requires this before an autonomous close is even eligible).
+   *  - `totalCents`: integer cents, the spoken total; never floating point.
+   *  - `refinementCount`: bounded by MAX_REFINEMENTS_PER_CALL so a caller can't
+   *    loop the agent editing the quote forever — past the cap the FSM defers
+   *    to the owner.
+   */
+  pendingQuote?: {
+    proposalId: string;
+    groundedLines: QuoteReadbackLine[];
+    groundedClean: boolean;
+    totalCents: number;
+    refinementCount: number;
+  };
 }
 
 // ─── Side effects ─────────────────────────────────────────────────────────────

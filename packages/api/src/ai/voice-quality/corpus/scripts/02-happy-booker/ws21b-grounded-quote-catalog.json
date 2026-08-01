@@ -1,0 +1,59 @@
+{
+  "id": "ws21b-grounded-quote-catalog",
+  "bucket": "02-happy-booker",
+  "callerId": "+15125550122",
+  "callerIdBlocked": false,
+  "fixtures": {
+    "tenant": {
+      "id": "t_ws21b_quote",
+      "display_name": "WS21b Quote Co",
+      "timezone": "America/Los_Angeles"
+    },
+    "customers": [
+      {
+        "id": "cust_ws21b_quote",
+        "tenantId": "t_ws21b_quote",
+        "firstName": "Dana",
+        "lastName": "Reed",
+        "displayName": "Dana Reed",
+        "primaryPhone": "+15125550122",
+        "preferredChannel": "phone",
+        "smsConsent": true,
+        "isArchived": false,
+        "createdBy": "seed",
+        "createdAt": "2026-01-01T00:00:00.000Z",
+        "updatedAt": "2026-01-01T00:00:00.000Z"
+      }
+    ],
+    "catalog": [
+      {
+        "id": "cat_ws21b_wh",
+        "tenantId": "t_ws21b_quote",
+        "name": "Water heater install",
+        "description": "Standard 40-gallon water heater installation",
+        "category": "service",
+        "unit": "each",
+        "unitPriceCents": 185000,
+        "productServiceType": "service",
+        "archivedAt": null,
+        "createdAt": "2026-01-01T00:00:00.000Z",
+        "updatedAt": "2026-01-01T00:00:00.000Z"
+      }
+    ]
+  },
+  "turns": [
+    {
+      "caller": "Can you draft an estimate for a water heater install?",
+      "expected": {
+        "intent": "draft_estimate",
+        "proposalType": "draft_estimate",
+        "slots": { "lineItemDescriptions": ["Water heater install"] },
+        "escalates": false
+      }
+    }
+  ],
+  "grading": {
+    "appliesFloor": [1, 2, 3],
+    "appliesDisposition": [9, 12]
+  }
+}

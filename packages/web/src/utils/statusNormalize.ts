@@ -1,4 +1,5 @@
-import type { JobStatus, EstimateStatus, InvoiceStatus } from '../data/mock-data';
+import type { JobStatus, EstimateStatus, InvoiceStatus } from '../types/job-ui';
+import { isInvoiceOverdue } from '@ai-service-os/shared';
 import { formatCurrency } from './currency';
 
 // Re-export the canonical money formatter so existing imports of this
@@ -10,8 +11,11 @@ export { formatCurrency } from './currency';
 export const JOB_STATUS_MAP: Record<string, string> = {
   new:          'New',
   scheduled:    'Scheduled',
+  dispatched:   'Dispatched',
   in_progress:  'In Progress',
   completed:    'Completed',
+  invoiced:     'Invoiced',
+  closed:       'Closed',
   canceled:     'Canceled',
 };
 
@@ -43,6 +47,23 @@ export function normalizeEstimateStatus(apiStatus: string): EstimateStatus {
 
 export function normalizeInvoiceStatus(apiStatus: string): InvoiceStatus {
   return (INVOICE_STATUS_MAP[apiStatus] ?? apiStatus) as InvoiceStatus;
+}
+
+/**
+ * UI invoice status including the DERIVED 'Overdue'. The canonical API has no
+ * `overdue` status (see InvoiceStatus enum), so a plain `normalizeInvoiceStatus`
+ * can never produce 'Overdue' — callers that have the `dueDate` use this to
+ * surface it. An open / partially-paid invoice past due reads 'Overdue';
+ * otherwise the direct mapping. Uses the shared `isInvoiceOverdue` rule so web
+ * and mobile derive overdue identically. `now` is injectable for tests.
+ */
+export function deriveInvoiceUiStatus(
+  apiStatus: string,
+  dueDate?: string,
+  now: number = Date.now(),
+): InvoiceStatus {
+  if (isInvoiceOverdue(apiStatus, dueDate, now)) return 'Overdue';
+  return normalizeInvoiceStatus(apiStatus);
 }
 
 /**

@@ -3,7 +3,6 @@ import {
   CreateCustomerTaskHandler,
   CreateJobTaskHandler,
   CreateAppointmentTaskHandler,
-  DraftEstimateTaskHandler,
 } from '../../src/ai/tasks/task-handlers';
 import type { TaskContext } from '../../src/ai/tasks/task-handlers';
 import { AppError } from '../../src/shared/errors';
@@ -68,22 +67,19 @@ describe('P2-007 — AI task orchestration baseline', () => {
     expect(result.proposal.sourceContext).toEqual({ conversationId: 'conv-1' });
   });
 
-  it('happy path — routes to draft_estimate handler', async () => {
+  it('validation — draft_estimate is not registered on the default router (no ungrounded stub)', async () => {
+    // DraftEstimateTaskHandler was a no-LLM, no-catalog stub that echoed
+    // context.existingEntities straight into the proposal payload — a
+    // money-path hazard (AI-priced lines never went through catalog
+    // grounding). It has been removed; createDefaultTaskRouter also has no
+    // production callers (routes/assistant.ts and workers/voice-action-router.ts
+    // wire the real, catalog-grounded EstimateTaskHandler for draft_estimate
+    // instead). This pins that draft_estimate can no longer route to an
+    // ungrounded stub via this router.
     const router = createDefaultTaskRouter();
-    const context = makeContext({
-      message: 'Draft estimate for HVAC installation',
-      existingEntities: { lineItems: [{ item: 'HVAC Unit', price: 5000 }], total: 5000 },
-    });
+    const context = makeContext({ message: 'Draft estimate for HVAC installation' });
 
-    const result = await router.route('draft_estimate', context);
-
-    expect(result.taskType).toBe('draft_estimate');
-    expect(result.proposal.proposalType).toBe('draft_estimate');
-    expect(result.proposal.status).toBe('draft');
-    expect(result.proposal.payload).toEqual({
-      lineItems: [{ item: 'HVAC Unit', price: 5000 }],
-      total: 5000,
-    });
+    await expect(router.route('draft_estimate', context)).rejects.toThrow(AppError);
   });
 
   it('validation — rejects unsupported task type', async () => {
@@ -111,9 +107,9 @@ describe('P2-007 — AI task orchestration baseline', () => {
     expect(tasks).toContain('create_customer');
     expect(tasks).toContain('create_job');
     expect(tasks).toContain('create_appointment');
-    expect(tasks).toContain('draft_estimate');
+    expect(tasks).not.toContain('draft_estimate');
     expect(tasks).toContain('issue_invoice');
-    expect(tasks).toHaveLength(5);
+    expect(tasks).toHaveLength(4);
   });
 
   it('mock provider test — handler creates valid proposal', async () => {

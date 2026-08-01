@@ -17,12 +17,14 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import { AuthenticatedRequest } from '../../src/auth/clerk';
 import { InMemoryAuditRepository } from '../../src/audit/audit';
 import { InMemoryPackActivationRepository } from '../../src/settings/pack-activation';
+import { InMemorySettingsRepository } from '../../src/settings/settings';
 import {
   InMemoryVerticalPackRegistry,
   registerPack,
 } from '../../src/shared/vertical-pack-registry';
 import { createPackActivationRouter } from '../../src/routes/pack-activation';
 import { createMaintenanceContractsRouter } from '../../src/routes/maintenance-contracts';
+import { InMemoryMaintenanceContractRepository } from '../../src/maintenance-contracts/maintenance-contract';
 
 interface Harness {
   app: express.Express;
@@ -66,11 +68,11 @@ async function buildHarness(): Promise<Harness> {
 
   app.use(
     '/api/pack-activation',
-    createPackActivationRouter(packActivationRepo, verticalPackRegistry, auditRepo)
+    createPackActivationRouter(packActivationRepo, verticalPackRegistry, auditRepo, new InMemorySettingsRepository())
   );
   app.use(
     '/api/maintenance-contracts',
-    createMaintenanceContractsRouter(auditRepo)
+    createMaintenanceContractsRouter(new InMemoryMaintenanceContractRepository(), auditRepo)
   );
 
   return { app, auditRepo, tenantId };

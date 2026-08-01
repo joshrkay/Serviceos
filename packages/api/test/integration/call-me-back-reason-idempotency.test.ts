@@ -1,5 +1,5 @@
 /**
- * Postgres integration — `call_me_back_tasks` idempotency key (migration 198).
+ * Postgres integration — `call_me_back_tasks` idempotency key (migration 268).
  *
  * The key was `(tenant_id, session_id)`, which collapsed DISTINCT follow-ups
  * for one call into a single row. On an E1 life-safety call the FSM emits
@@ -85,7 +85,7 @@ describe('Postgres integration — call_me_back (tenant, session, reason) idempo
   });
 
   it('the superseded (tenant_id, session_id) index is gone', async () => {
-    // Migration 198 drops it; if it survived, the reason-keyed insert above
+    // Migration 268 drops it; if it survived, the reason-keyed insert above
     // would still conflict in a fresh database.
     const r = await pool.query(
       `SELECT indexname FROM pg_indexes

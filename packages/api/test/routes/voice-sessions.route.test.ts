@@ -87,9 +87,17 @@ describe('voice-sessions routes', () => {
     const app = buildApp('tenant-a', 'user-a', store, adapter);
     const startRes = await request(app).post('/api/voice/sessions').send({});
     const id = startRes.body.sessionId;
-    const inputRes = await request(app)
+    // Turn 1 parks at the intent_confirm readback (no proposal yet).
+    const readbackRes = await request(app)
       .post(`/api/voice/sessions/${id}/input`)
       .send({ text: 'Invoice Acme for 450' });
+    expect(readbackRes.status).toBe(200);
+    expect(readbackRes.body.state).toBe('intent_confirm');
+    expect(readbackRes.body.proposalIds.length).toBe(0);
+    // Turn 2: caller confirms → proposal queued → closing.
+    const inputRes = await request(app)
+      .post(`/api/voice/sessions/${id}/input`)
+      .send({ text: 'yes' });
     expect(inputRes.status).toBe(200);
     expect(inputRes.body.state).toBe('closing');
     expect(inputRes.body.proposalIds.length).toBe(1);
@@ -161,6 +169,36 @@ describe('voice-sessions routes', () => {
 
     await new Promise<void>((resolve) => server.close(() => resolve()));
   }, 10_000);
+
+  // U13 — the mobile assistant streams SSE with the Clerk token in the
+  // Authorization header (`expo/fetch`). The server's `?token=` query fallback
+  // was removed on purpose (it leaked tokens into URL logs / referer). This
+  // pins that: with no header-based auth populated, a `?token=` query is
+  // ignored and the SSE route rejects with 401 — it is header-auth-only.
+  function buildUnauthedApp(s: VoiceSessionStore, a: InAppVoiceAdapter) {
+    const app = express();
+    app.use(express.json());
+    // No auth-injecting middleware — only the router's own requireAuth runs.
+    app.use('/api/voice/sessions', createVoiceSessionsRouter({ adapter: a, store: s }));
+    return app;
+  }
+
+  it('SSE GET /:id/events is header-auth-only — a ?token= query is not honored', async () => {
+    const app = buildUnauthedApp(store, adapter);
+    const res = await request(app).get(
+      '/api/voice/sessions/any-session/events?token=fake-jwt',
+    );
+    expect(res.status).toBe(401);
+    expect(res.body.error).toBe('UNAUTHORIZED');
+  });
+
+  it('POST /:id/input likewise ignores a ?token= query (header-auth-only)', async () => {
+    const app = buildUnauthedApp(store, adapter);
+    const res = await request(app)
+      .post('/api/voice/sessions/any-session/input?token=fake-jwt')
+      .send({ text: 'hi' });
+    expect(res.status).toBe(401);
+  });
 
   it('GET /active returns only the calling tenant\'s non-ended sessions', async () => {
     const appA = buildApp('tenant-a', 'user-a', store, adapter);

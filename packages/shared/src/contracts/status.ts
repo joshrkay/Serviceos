@@ -14,11 +14,24 @@ import { z } from 'zod';
  * instead of shipping.
  */
 
+/**
+ * Epic 5.1 — canonical job lifecycle. The seven canonical states the product
+ * speaks in are Requested → Scheduled → Dispatched → In-progress → Complete →
+ * Invoiced → Closed (tenant display labels may override these). The stored
+ * identifiers keep the long-standing `new` (≡ Requested) and `completed`
+ * (≡ Complete) spellings so the change is a pure superset — no existing row
+ * needs rewriting — while `dispatched`, `invoiced`, and `closed` are the three
+ * states that were genuinely missing. `canceled` remains a lateral terminal
+ * state outside the linear progression.
+ */
 export const jobStatusSchema = z.enum([
   'new',
   'scheduled',
+  'dispatched',
   'in_progress',
   'completed',
+  'invoiced',
+  'closed',
   'canceled',
 ]);
 export type JobStatusValue = z.infer<typeof jobStatusSchema>;

@@ -16,6 +16,8 @@ import * as crypto from 'crypto';
 import { v4 as uuidv4 } from 'uuid';
 import { PortalSession, PortalSessionRepository } from './portal-session';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
+import type { ContactRepository } from '../customers/contact';
+import { PortalEntitlement, entitlementForContact } from './portal-entitlement';
 
 export interface CreatePortalSessionResult {
   id: string;
@@ -30,6 +32,14 @@ export interface ResolvedPortalSession {
   tenantId: string;
   customerId: string;
   sessionId: string;
+  /** Set when the session is bound to a specific customer contact (C2/I14). */
+  contactId?: string;
+  /**
+   * What this session may read, derived at resolution time — 'billing' for
+   * account-holder sessions and billing-role contacts, 'service' for
+   * site/other-role contacts. See `portal-entitlement.ts`.
+   */
+  entitlement: PortalEntitlement;
 }
 
 export const DEFAULT_PORTAL_TTL_DAYS = 30;
@@ -65,6 +75,16 @@ export interface CreatePortalSessionAuditContext {
   userAgent?: string;
 }
 
+export interface CreatePortalSessionOptions {
+  /**
+   * C2/I14 — bind the session to a specific customer contact. The caller
+   * (route layer) is responsible for verifying the contact exists in the
+   * tenant AND belongs to `customerId` before minting. Entitlement is NOT
+   * stored — it is derived from the contact's role on every resolution.
+   */
+  contactId?: string;
+}
+
 export async function createPortalSession(
   tenantId: string,
   customerId: string,
@@ -73,6 +93,7 @@ export async function createPortalSession(
   ttlDays: number = DEFAULT_PORTAL_TTL_DAYS,
   auditRepo?: AuditRepository,
   auditContext?: CreatePortalSessionAuditContext,
+  options?: CreatePortalSessionOptions,
 ): Promise<CreatePortalSessionResult> {
   if (!tenantId) throw new Error('tenantId is required');
   if (!customerId) throw new Error('customerId is required');
@@ -89,6 +110,7 @@ export async function createPortalSession(
     id: uuidv4(),
     tenantId,
     customerId,
+    contactId: options?.contactId,
     tokenHash,
     expiresAt,
     revokedAt: undefined,
@@ -113,6 +135,7 @@ export async function createPortalSession(
         entityId: created.id,
         metadata: {
           customerId,
+          contactId: options?.contactId,
           expiresAt: created.expiresAt.toISOString(),
           ttlDays,
           ipAddress: auditContext?.ipAddress,
@@ -130,8 +153,14 @@ export async function createPortalSession(
 }
 
 /**
- * Resolves a plaintext token into the underlying tenant + customer.
- * Returns `null` for any failure (unknown / expired / revoked).
+ * Resolves a plaintext token into the underlying tenant + customer +
+ * entitlement. Returns `null` for any failure (unknown / expired /
+ * revoked / unresolvable contact binding).
+ *
+ * C2/I14 — entitlement is derived HERE, at read time, from the bound
+ * contact's current role. A contact-bound session fails closed: if the
+ * contact is missing, archived, moved to another customer, or no
+ * `contactRepo` is wired to verify it, the token does not resolve at all.
  *
  * Side effect: bumps `last_accessed_at` on success. Failures here
  * are swallowed so a transient write error doesn't 500 the read.
@@ -140,6 +169,7 @@ export async function resolvePortalToken(
   token: string,
   repo: PortalSessionRepository,
   now: Date = new Date(),
+  contactRepo?: ContactRepository,
 ): Promise<ResolvedPortalSession | null> {
   if (!token || typeof token !== 'string') return null;
   // Token shape: 64 hex chars from crypto.randomBytes(32).toString('hex').
@@ -158,6 +188,18 @@ export async function resolvePortalToken(
   if (session.revokedAt) return null;
   if (session.expiresAt.getTime() <= now.getTime()) return null;
 
+  // Contact-bound sessions derive entitlement from the contact's CURRENT
+  // role — never from mint-time state. Every failure path rejects the
+  // token outright rather than granting a broader default.
+  let entitlement: PortalEntitlement = 'billing';
+  if (session.contactId) {
+    if (!contactRepo) return null;
+    const contact = await contactRepo.findById(session.tenantId, session.contactId);
+    if (!contact || contact.isArchived) return null;
+    if (contact.customerId !== session.customerId) return null;
+    entitlement = entitlementForContact(contact);
+  }
+
   // Best-effort touch — never fail the resolve over a transient write.
   try {
     await repo.touchLastAccessed(session.id, now);
@@ -169,6 +211,8 @@ export async function resolvePortalToken(
     tenantId: session.tenantId,
     customerId: session.customerId,
     sessionId: session.id,
+    contactId: session.contactId,
+    entitlement,
   };
 }
 

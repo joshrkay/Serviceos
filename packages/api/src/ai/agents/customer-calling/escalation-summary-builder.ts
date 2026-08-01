@@ -36,6 +36,8 @@ export interface EscalationContext {
     lastService?: { date: Date; type: string; amountCents?: number };
     isMember?: boolean;
     memberTier?: string;
+    /** Free-form CRM notes (e.g. "prefers mornings") — panel only. */
+    communicationNotes?: string;
   };
   intent: {
     type: string;
@@ -173,11 +175,19 @@ function formatPhone(phone: string): string {
 }
 
 function lastInteractionText(customer?: EscalationContext['customer'], timeZone = 'UTC'): string | null {
-  if (!customer?.lastService) return null;
-  const { date, type, amountCents } = customer.lastService;
-  const dateStr = date.toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone });
-  const amount = amountCents != null ? `, $${(amountCents / 100).toFixed(2)}` : '';
-  return `Last service: ${dateStr} — ${type}${amount}`;
+  const parts: string[] = [];
+  if (customer?.lastService) {
+    const { date, type, amountCents } = customer.lastService;
+    const dateStr = date.toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone });
+    const amount = amountCents != null ? `, $${(amountCents / 100).toFixed(2)}` : '';
+    parts.push(`Last service: ${dateStr} — ${type}${amount}`);
+  }
+  const notes = customer?.communicationNotes?.trim();
+  if (notes) {
+    const clipped = notes.length > 120 ? `${notes.slice(0, 117)}…` : notes;
+    parts.push(`Notes: ${clipped}`);
+  }
+  return parts.length > 0 ? parts.join(' · ') : null;
 }
 
 function entitiesAsList(entities: Record<string, unknown>): ReadonlyArray<{ key: string; value: string }> {

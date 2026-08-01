@@ -1,5 +1,14 @@
 import { expect, matrixTest, test, type RowHarness } from './helpers/matrix-test';
 import { startVoiceSession, voiceInput, approveAndAwaitExecution } from './helpers/voice-flow';
+// QA-2026-07-26 — VOX-11 asserts against the SHIPPED inbox response type, not a
+// hand-written structural cast. GET /api/proposals/inbox returns
+// `data: PrioritizedProposal[]`, i.e. the proposal is NESTED at `.proposal`.
+// The previous inline `Array<{ id: string }>` cast type-checked fine and made
+// every `p.id` `undefined`, so the row failed 100% of the time regardless of
+// product behaviour. Importing the real type makes that class of drift a
+// compile error instead of a silent false negative. (Same cross-package
+// type-import convention as voice-extras.spec.ts.)
+import type { PrioritizedProposal } from '../../packages/api/src/proposals/prioritization';
 
 /**
  * VOX-05..VOX-11 — voice-triggered billing funnel + inbox/timeline/session linkage.
@@ -12,9 +21,19 @@ async function voiceProposal(
   h: RowHarness,
   utterance: string,
   label: string,
+  // QA-2026-07-26 (VOX-07) — optional caller-ID phone, forwarded to
+  // POST /api/voice/sessions. InAppVoiceAdapter.startSession resolves it via
+  // findByPhoneNormalized and stashes the matched CRM customer on the session
+  // (context.customerId), which transitionIntentConfirm then bridges into the
+  // proposal `entities`. Rows whose utterance references the customer only by
+  // a fuzzy display name the classifier will not reproduce verbatim (VOX-07
+  // says "the QA Matrix job"; the seeded customer is "qa-matrix-A-customer")
+  // have no other way to reach a resolved customerId. Same mechanism SCH-02
+  // (scheduling.spec.ts) and SMS-01 (sms.spec.ts) already rely on.
+  callerPhone?: string,
 ): Promise<{ sessionId: string; proposalId: string } | null> {
   const { token } = h.tenantA;
-  const sessionId = await startVoiceSession(h, token, label);
+  const sessionId = await startVoiceSession(h, token, label, callerPhone);
   if (!sessionId) {
     h.evidence.fail('Voice session could not be started.');
     return null;
@@ -29,9 +48,16 @@ async function voiceProposal(
 
 matrixTest('VOX-05', 'Voice-triggered estimate draft creation', async (h) => {
   const { token, tenantId, jobId } = h.tenantA;
+  // Job entity resolution (packages/api/src/ai/resolution/pg-entity-resolver.ts
+  // resolveJob) is pg_trgm SIMILARITY against jobs.summary — there is no
+  // exact-id or job-number path for jobs (unlike invoices/estimates, which
+  // match an exact document number). A real caller never reads a job UUID
+  // aloud, so speaking the raw jobId here can never resolve; reference it the
+  // way a caller actually would — by the job's own summary text (seeded as
+  // "QA Matrix job for <slug>" in e2e/qa-matrix/fixtures/seed.ts).
   const flow = await voiceProposal(
     h,
-    `Draft an estimate for job ${jobId} with one diagnostic labor line for $150.`,
+    `Draft an estimate for the QA Matrix job with one diagnostic labor line for $150.`,
     '05',
   );
   if (!flow) return;
@@ -82,11 +108,15 @@ matrixTest('VOX-06', 'Voice-triggered estimate send transition', async (h) => {
     label: '06-seed-estimate',
     expectStatus: 201,
   });
-  const estimateId = (seed.response.body as { id: string }).id;
-
+  const seedBody = seed.response.body as { id: string; estimateNumber: string };
+  const estimateId = seedBody.id;
+  // resolveEstimate (pg-entity-resolver.ts) only matches the exact
+  // estimate_number document number (e.g. "EST-0094") — a real caller reads
+  // that off a document, never the internal UUID, so reference it the same
+  // way here.
   const flow = await voiceProposal(
     h,
-    `Please send estimate ${estimateId} to the customer by email.`,
+    `Please send estimate ${seedBody.estimateNumber} to the customer by email.`,
     '06',
   );
   if (!flow) return;
@@ -110,10 +140,19 @@ matrixTest('VOX-06', 'Voice-triggered estimate send transition', async (h) => {
 
 matrixTest('VOX-07', 'Voice-triggered invoice creation from sold work', async (h) => {
   const { token, tenantId, jobId } = h.tenantA;
+  // See VOX-05 — job resolution is fuzzy-matched against jobs.summary, not
+  // an id lookup, so reference the job the way a caller actually would.
   const flow = await voiceProposal(
     h,
-    `Create an invoice for job ${jobId} for the completed furnace repair, $350 total.`,
+    `Create an invoice for the QA Matrix job for the completed furnace repair, $350 total.`,
     '07',
+    // Seeded primary customer's phone (fixtures/seed.ts: '555-0100').
+    // "the QA Matrix job" is a job-summary reference, not the customer's
+    // display name ("qa-matrix-A-customer"), so name-based customer
+    // resolution can never hit — caller-ID resolution is what supplies the
+    // customerId CreateInvoiceExecutionHandler needs. Same argument SCH-02
+    // and SMS-01 already make.
+    '555-0100',
   );
   if (!flow) return;
 
@@ -134,6 +173,12 @@ matrixTest('VOX-07', 'Voice-triggered invoice creation from sold work', async (h
     params: [entityId],
   });
   expect(db.rowCount, 'voice-created invoice must exist').toBe(1);
+  // The row's pass criteria says "invoice row LINKED TO JOB" — assert the
+  // linkage, not just the row's existence. invoices.job_id is NOT NULL at the
+  // schema level, so a null here would mean we read the wrong row; asserting
+  // it keeps the criterion honest if the column ever loosens.
+  const invoiceRow = db.rows[0] as { job_id?: string | null };
+  expect(invoiceRow?.job_id, 'voice-created invoice must be linked to a job').toBeTruthy();
   h.evidence.pass();
 });
 
@@ -163,11 +208,13 @@ matrixTest('VOX-08', 'Voice-triggered invoice issue transition', async (h) => {
     label: '08-seed-invoice',
     expectStatus: 201,
   });
-  const invoiceId = (created.response.body as { id: string }).id;
-
+  const createdBody = created.response.body as { id: string; invoiceNumber: string };
+  const invoiceId = createdBody.id;
+  // See VOX-06 — invoice resolution matches the exact invoice_number document
+  // number (e.g. "INV-0042"), not the internal UUID.
   const flow = await voiceProposal(
     h,
-    `Issue invoice ${invoiceId} so the customer can pay.`,
+    `Issue invoice ${createdBody.invoiceNumber} so the customer can pay.`,
     '08',
   );
   if (!flow) return;
@@ -262,8 +309,8 @@ matrixTest('VOX-11', 'Voice-created proposal appears in proposal inbox', async (
     label: '11-inbox',
     expectStatus: 200,
   });
-  const data = (inbox.response.body as { data?: Array<{ id: string }> }).data ?? [];
-  const found = data.some((p) => p.id === flow.proposalId);
+  const data = (inbox.response.body as { data?: PrioritizedProposal[] }).data ?? [];
+  const found = data.some((p) => p.proposal.id === flow.proposalId);
   if (!found) {
     h.evidence.fail(`Proposal ${flow.proposalId} not found in GET /api/proposals/inbox.`);
     return;

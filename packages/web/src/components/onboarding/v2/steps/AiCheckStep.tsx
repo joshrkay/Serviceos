@@ -3,6 +3,7 @@ import { Check } from 'lucide-react';
 import { useApiClient } from '../../../../lib/apiClient';
 import { Button } from '../../../ui';
 import { VoiceConfigPanel } from '../VoiceConfigPanel';
+import { VoiceApprovalPinPanel } from '../VoiceApprovalPinPanel';
 import type { OnboardingStatusResponse } from '../../../../types/onboarding';
 
 interface AiCheckStepProps {
@@ -40,6 +41,7 @@ export function AiCheckStep({ status, onRetryComplete }: AiCheckStepProps) {
           </p>
         </div>
         <VoiceConfigPanel />
+        <VoiceApprovalPinPanel />
       </div>
     );
   }
@@ -101,6 +103,7 @@ export function AiCheckStep({ status, onRetryComplete }: AiCheckStepProps) {
       </div>
       <p className="text-xs text-slate-500">This page refreshes automatically when the check completes.</p>
       <VoiceConfigPanel />
+      <VoiceApprovalPinPanel />
     </div>
   );
 }

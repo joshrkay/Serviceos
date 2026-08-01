@@ -5,6 +5,7 @@ import {
   Proposal,
 } from '../../src/proposals/proposal';
 import { InMemoryProposalExecutionRepository } from '../../src/proposals/proposal-execution';
+import { InMemoryAuditRepository } from '../../src/audit/audit';
 import { transitionProposal, UNDO_WINDOW_MS } from '../../src/proposals/lifecycle';
 import { ProposalExecutor } from '../../src/proposals/execution/executor';
 import { IdempotencyGuard } from '../../src/proposals/execution/idempotency';
@@ -50,7 +51,7 @@ describe('P2-010 — Deterministic proposal execution engine', () => {
     const executionRepo = new InMemoryProposalExecutionRepository();
     const handlers = createExecutionHandlerRegistry();
     const guard = new IdempotencyGuard(executionRepo, repo);
-    const executor = new ProposalExecutor(handlers, repo, guard);
+    const executor = new ProposalExecutor(handlers, repo, guard, new InMemoryAuditRepository());
     return { repo, handlers, executor };
   }
 
@@ -110,7 +111,7 @@ describe('P2-010 — Deterministic proposal execution engine', () => {
     const emptyHandlers = new Map();
     const executionRepo = new InMemoryProposalExecutionRepository();
     const guard = new IdempotencyGuard(executionRepo, repo);
-    const executor = new ProposalExecutor(emptyHandlers, repo, guard);
+    const executor = new ProposalExecutor(emptyHandlers, repo, guard, new InMemoryAuditRepository());
     const proposal = makeApprovedProposal();
     await repo.create(proposal);
 
@@ -228,7 +229,9 @@ describe('P2-010 — Deterministic proposal execution engine', () => {
       const executionRepo = new InMemoryProposalExecutionRepository();
       const handlers = createExecutionHandlerRegistry();
       const guard = new IdempotencyGuard(executionRepo, repo);
-      const executor = new ProposalExecutor(handlers, repo, guard, { executionRepo });
+      const executor = new ProposalExecutor(handlers, repo, guard, new InMemoryAuditRepository(), {
+        executionRepo,
+      });
 
       // First proposal executes cleanly under idem-key-42.
       const first = makeApprovedProposal({ idempotencyKey: 'idem-key-42' });

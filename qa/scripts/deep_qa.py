@@ -15,6 +15,7 @@ import urllib.error
 import sys
 import os
 from typing import Any
+import posthog_client as ph
 
 # ─── CONFIG ──────────────────────────────────────────────────────────────────
 CLERK_SECRET = os.environ.get("CLERK_SECRET", "sk_test_y3Pg3Qrtv3lezUiItnRsCHePDxOYD4o6f1zWCGmrdB")
@@ -498,3 +499,12 @@ output = {
 with open("/Users/macmini/Serviceos/qa/reports/deep-qa-results.json", "w") as f:
     json.dump(output, f, indent=2)
 print(f"\n  Report saved to qa/reports/deep-qa-results.json")
+
+ph.capture("qa_suite_run_completed", {
+    "pass_count": PASS,
+    "fail_count": FAIL,
+    "warn_count": WARN,
+    "total": total,
+    "pass_rate": round(PASS / total, 4) if total > 0 else 0.0,
+    "api_url": API_URL,
+})

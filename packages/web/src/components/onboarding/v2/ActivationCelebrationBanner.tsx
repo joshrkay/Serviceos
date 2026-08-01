@@ -3,6 +3,7 @@ import { PartyPopper } from 'lucide-react';
 import { useAuth } from '@clerk/clerk-react';
 import { useOnboardingStatus } from '../../../hooks/useOnboardingStatus';
 import { trackFunnel } from '../../../lib/analytics';
+import { hasLocalFlag, setLocalFlag } from '../../../lib/uiFlags';
 
 const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
 const DISMISS_KEY = 'onboarding.activation.dismissedAt';
@@ -24,10 +25,7 @@ const DISMISS_KEY = 'onboarding.activation.dismissedAt';
 export function ActivationCelebrationBanner() {
   const { userId } = useAuth();
   const { data } = useOnboardingStatus(60_000);
-  const [dismissed, setDismissed] = useState(() => {
-    if (typeof window === 'undefined') return false;
-    return !!window.localStorage.getItem(DISMISS_KEY);
-  });
+  const [dismissed, setDismissed] = useState(() => hasLocalFlag(DISMISS_KEY));
   const celebratedRef = useRef(false);
 
   const activatedAt = data?.activatedAt;
@@ -44,9 +42,7 @@ export function ActivationCelebrationBanner() {
   }, [visible, data?.tenantId, userId]);
 
   function dismiss() {
-    if (typeof window !== 'undefined') {
-      window.localStorage.setItem(DISMISS_KEY, new Date().toISOString());
-    }
+    setLocalFlag(DISMISS_KEY);
     setDismissed(true);
   }
 

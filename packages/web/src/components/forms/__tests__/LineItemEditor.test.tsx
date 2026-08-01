@@ -39,6 +39,15 @@ describe('LineItemEditor (P11-006)', () => {
     expect(screen.getByTestId('line-item-row-1')).toBeInTheDocument();
   });
 
+  it('renders kit inputs/buttons that meet the 44px tap target (U8b)', () => {
+    render(<Harness initial={[emptyDraft()]} />);
+    // Row controls and the add/remove actions are kit components at ≥44px.
+    expect(screen.getByLabelText('description-0').className).toContain('min-h-11');
+    expect(screen.getByLabelText('unit-price-0').className).toContain('min-h-11');
+    expect(screen.getByText('+ Add row').className).toContain('min-h-11');
+    expect(screen.getByLabelText('remove-line-0').className).toContain('min-h-11');
+  });
+
   it('removes a row when the × button is clicked', () => {
     const initial: LineItemDraft[] = [emptyDraft(), emptyDraft()];
     render(<Harness initial={initial} />);
@@ -86,5 +95,26 @@ describe('LineItemEditor (P11-006)', () => {
         { id: 'c', description: '', quantity: '2', unitPriceDollars: '1.00', taxable: true },
       ])
     ).toBe(200);
+  });
+
+  it('EE-4 — toLineItemPayload forwards imageFileId (and omits it when absent)', () => {
+    const withImage: LineItemDraft = {
+      id: 'x',
+      description: 'Heater',
+      quantity: '1',
+      unitPriceDollars: '2500.00',
+      taxable: true,
+      imageFileId: 'file-hero',
+    };
+    expect(toLineItemPayload(withImage, 0).imageFileId).toBe('file-hero');
+
+    const withoutImage: LineItemDraft = {
+      id: 'y',
+      description: 'Labor',
+      quantity: '1',
+      unitPriceDollars: '100.00',
+      taxable: true,
+    };
+    expect(toLineItemPayload(withoutImage, 0).imageFileId).toBeUndefined();
   });
 });

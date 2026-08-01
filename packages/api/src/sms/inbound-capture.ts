@@ -33,8 +33,47 @@ import type {
   Conversation,
   ConversationRepository,
 } from '../conversations/conversation-service';
+import {
+  createConversationWithAudit,
+  isUniqueViolation,
+} from '../conversations/conversation-service';
 import type { FallbackHandler, InboundSmsContext, HandlerResult } from './inbound-dispatch';
 import type { Logger } from '../logging/logger';
+import { notifyOwner } from '../notifications/owner-notifications-instance';
+
+/** Max characters of the inbound text shown in the owner push preview. */
+const SMS_PREVIEW_MAX = 80;
+
+/** STOP/HELP-class compliance keywords. These normally short-circuit far
+ *  upstream (compliance/stop-reply.ts) and never reach capture, but guard here
+ *  so a compliance message never produces an owner "new text" push. */
+const COMPLIANCE_KEYWORDS = new Set([
+  'stop',
+  'stopall',
+  'unsubscribe',
+  'cancel',
+  'end',
+  'quit',
+  'start',
+  'unstop',
+  'help',
+  'info',
+]);
+
+/** True when the message's first token is a carrier compliance keyword. */
+export function isComplianceKeywordMessage(body: string): boolean {
+  const firstToken = body.trim().split(/\s+/, 1)[0] ?? '';
+  const normalized = firstToken.toLowerCase().replace(/^[^a-z0-9]+|[^a-z0-9]+$/g, '');
+  return COMPLIANCE_KEYWORDS.has(normalized);
+}
+
+/** Single-line, ≤80-char preview of an inbound text for the owner push body. */
+export function buildSmsPreview(body: string): string {
+  const collapsed = body.replace(/\s+/g, ' ').trim();
+  return collapsed.length > SMS_PREVIEW_MAX
+    ? `${collapsed.slice(0, SMS_PREVIEW_MAX)}…`
+    : collapsed;
+}
 
 /** Conversation entity type used for inbound texts we could not pin to a
  *  single customer (and could not land on a lead — e.g. ambiguous existing
@@ -64,13 +103,31 @@ export interface InboundCaptureDeps {
   logger?: Logger;
 }
 
-interface ThreadTarget {
+export interface ThreadTarget {
   entityType: string;
   entityId: string;
   title: string;
   customerId?: string;
   leadId?: string;
 }
+
+/**
+ * Minimal input for phone→thread resolution, shared by inbound capture and
+ * the outbound dropped-call recovery threader. Identical resolution on both
+ * directions is what guarantees the caller's reply lands in the same thread
+ * as the recovery SMS.
+ */
+export interface ThreadResolutionInput {
+  tenantId: string;
+  fromE164: string;
+  /** For log correlation only. */
+  messageSid?: string;
+}
+
+export type ThreadTargetDeps = Pick<
+  InboundCaptureDeps,
+  'customerRepo' | 'leadRepo' | 'auditRepo' | 'logger'
+>;
 
 function leadName(firstName: string, lastName: string, companyName?: string): string {
   const full = `${firstName} ${lastName}`.trim();
@@ -86,10 +143,10 @@ function leadName(firstName: string, lastName: string, companyName?: string): st
  *     thread onto it; fall back to an unmatched thread if no lead repo is wired
  *     or lead creation fails, so a text is never dropped.
  */
-async function resolveThreadTarget(
-  ctx: InboundSmsContext,
+export async function resolveThreadTarget(
+  ctx: ThreadResolutionInput,
   phoneNormalized: string,
-  deps: InboundCaptureDeps,
+  deps: ThreadTargetDeps,
 ): Promise<ThreadTarget> {
   const unmatched: ThreadTarget = {
     entityType: UNMATCHED_SMS_ENTITY_TYPE,
@@ -151,12 +208,22 @@ async function resolveThreadTarget(
   }
 }
 
-/** Most-recent OPEN conversation for the target, or open a fresh one. */
-async function openOrAppendConversation(
-  ctx: InboundSmsContext,
+/** Most-recent OPEN conversation for the target, or open a fresh one.
+ *  Exported for the dropped-call recovery threader — one implementation of
+ *  the open-thread reuse + 23505 race recovery for both directions. The
+ *  optional audit deps let outbound callers emit conversation.created
+ *  (inbound capture's existing no-audit behavior is unchanged). */
+export async function openOrAppendConversation(
+  ctx: { tenantId: string },
   target: ThreadTarget,
-  deps: InboundCaptureDeps,
+  deps: Pick<InboundCaptureDeps, 'conversationRepo'>,
+  opts: {
+    createdBy?: string;
+    auditRepo?: AuditRepository;
+    actorRole?: string;
+  } = {},
 ): Promise<Conversation> {
+  const createdBy = opts.createdBy ?? 'system:sms-capture';
   const existing = await deps.conversationRepo.findByEntity(
     ctx.tenantId,
     target.entityType,
@@ -166,13 +233,42 @@ async function openOrAppendConversation(
   // back-and-forth lands on one conversation instead of spawning one per text.
   const openThread = existing.find((c) => c.status === 'open');
   if (openThread) return openThread;
-  return deps.conversationRepo.createConversation({
-    tenantId: ctx.tenantId,
-    title: target.title,
-    entityType: target.entityType,
-    entityId: target.entityId,
-    createdBy: 'system:sms-capture',
-  });
+  try {
+    const input = {
+      tenantId: ctx.tenantId,
+      title: target.title,
+      entityType: target.entityType,
+      entityId: target.entityId,
+      createdBy,
+    };
+    if (opts.auditRepo) {
+      return await createConversationWithAudit(
+        input,
+        deps.conversationRepo,
+        opts.auditRepo,
+        opts.actorRole ?? 'system',
+      );
+    }
+    return await deps.conversationRepo.createConversation(input);
+  } catch (err) {
+    // The one-open-thread partial unique indexes — uq_conversations_open_customer
+    // (migration 198) and uq_conversations_open_noncustomer (migration 200,
+    // covering 'lead' and 'sms_unmatched') — reject a concurrent insert with
+    // 23505 when another inbound text or a Message-tap opened the thread first.
+    // Re-read and reuse the winner so the inbound message threads onto it
+    // instead of erroring (which would bounce the Twilio webhook). Every SMS
+    // capture target type is now indexed, so this recovery is atomic for all of
+    // them, not just customer.
+    if (!isUniqueViolation(err)) throw err;
+    const after = await deps.conversationRepo.findByEntity(
+      ctx.tenantId,
+      target.entityType,
+      target.entityId,
+    );
+    const winner = after.find((c) => c.status === 'open');
+    if (winner) return winner;
+    throw err;
+  }
 }
 
 export function createInboundCaptureHandler(
@@ -236,6 +332,18 @@ export function createInboundCaptureHandler(
           } catch {
             /* audit is best-effort — never fail capture on a ledger write */
           }
+        }
+
+        // U3 — fire an owner "new text" push (best-effort). Skip carrier
+        // compliance keywords (STOP/HELP) — those are not conversational and
+        // must never page the owner. notifyOwner is failure-isolated, so a push
+        // failure can never break SMS capture.
+        if (!isComplianceKeywordMessage(ctx.body)) {
+          await notifyOwner(ctx.tenantId, 'inbound_sms', {
+            conversationId: conversation.id,
+            customerName: target.title,
+            preview: buildSmsPreview(ctx.body),
+          });
         }
 
         return { handled: true, handler: 'sms-capture' };

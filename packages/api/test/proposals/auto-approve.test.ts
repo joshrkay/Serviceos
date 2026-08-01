@@ -475,6 +475,38 @@ describe('P12-004 — routeUnsupervisedProposal', () => {
     });
   });
 
+  it('queue_and_sms pushes a needs_approval notification to the registered devices', async () => {
+    const d = deps();
+    const pushes: Array<{ tenantId: string; proposal: { id: string; summary: string } }> = [];
+    await routeUnsupervisedProposal(
+      { ...d.routeDeps, notifyPush: async (args) => { pushes.push(args); } },
+      { ...base, summaryText: 'New booking for Jane D.' },
+    );
+    expect(pushes).toEqual([
+      { tenantId: 'tenant-1', proposal: { id: 'prop-1', summary: 'New booking for Jane D.' } },
+    ]);
+  });
+
+  it('queue_and_sms with no phone still pushes (push is independent of the SMS seam)', async () => {
+    const d = deps();
+    const pushes: unknown[] = [];
+    await routeUnsupervisedProposal(
+      { ...d.routeDeps, notifyPush: async (args) => { pushes.push(args); } },
+      { ...base, ownerPhone: null },
+    );
+    expect(pushes).toHaveLength(1);
+  });
+
+  it('queue_only does not push (respects the no-active-notify preference)', async () => {
+    const d = deps();
+    const pushes: unknown[] = [];
+    await routeUnsupervisedProposal(
+      { ...d.routeDeps, notifyPush: async (args) => { pushes.push(args); } },
+      { ...base, routing: 'queue_only' },
+    );
+    expect(pushes).toHaveLength(0);
+  });
+
   it('queue_only sends no SMS but still audits', async () => {
     const d = deps();
     const result = await routeUnsupervisedProposal(d.routeDeps, {

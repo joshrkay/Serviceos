@@ -6,7 +6,10 @@
  * invoices), invalid payload, dev-wiring passthrough, and tenant isolation.
  */
 import { describe, it, expect, beforeEach } from 'vitest';
-import { ApplyLateFeeExecutionHandler } from '../../src/proposals/execution/apply-late-fee-handler';
+import {
+  ApplyLateFeeExecutionHandler,
+  lateFeeLineId,
+} from '../../src/proposals/execution/apply-late-fee-handler';
 import { InMemoryInvoiceRepository, Invoice } from '../../src/invoices/invoice';
 import { InMemoryAuditRepository } from '../../src/audit/audit';
 import { Proposal } from '../../src/proposals/proposal';
@@ -77,7 +80,7 @@ describe('apply_late_fee execution handler', () => {
     expect(result.resultEntityId).toBe(INVOICE_ID);
 
     const updated = await invoiceRepo.findById(TENANT, INVOICE_ID);
-    const fee = updated!.lineItems.find((li) => li.id === 'late-fee:initial');
+    const fee = updated!.lineItems.find((li) => li.id === lateFeeLineId(INVOICE_ID, 'initial'));
     expect(fee).toBeDefined();
     expect(fee!.unitPriceCents).toBe(2500);
     expect(fee!.taxable).toBe(false);
@@ -108,9 +111,29 @@ describe('apply_late_fee execution handler', () => {
 
     expect(second.success).toBe(true); // no-op success
     const updated = await invoiceRepo.findById(TENANT, INVOICE_ID);
-    const feeLines = updated!.lineItems.filter((li) => li.id === 'late-fee:initial');
+    const feeLines = updated!.lineItems.filter((li) => li.id === lateFeeLineId(INVOICE_ID, 'initial'));
     expect(feeLines).toHaveLength(1);
     expect(updated!.amountDueCents).toBe(17500); // not 20000
+  });
+
+  it('the fee line id is a valid UUID (so PgInvoiceRepository will not rewrite it)', () => {
+    // Root cause of the double-charge: pg-invoice.insertLineItems replaces any
+    // non-UUID line-item id with a random uuidv4, so the old human-readable
+    // `late-fee:<stepKey>` never survived a reload and the idempotency guard
+    // could not match. The id MUST match the exact regex that repo uses.
+    // (InMemoryInvoiceRepository preserves ids, so only this format assertion
+    // catches the real-DB behavior.)
+    const PG_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    const other = '99999999-9999-4999-8999-999999999999';
+    expect(lateFeeLineId(INVOICE_ID, 'initial')).toMatch(PG_UUID_RE);
+    expect(lateFeeLineId(INVOICE_ID, 'manual')).toMatch(PG_UUID_RE);
+    // Deterministic per (invoice, step) → the guard matches across executions.
+    expect(lateFeeLineId(INVOICE_ID, 'initial')).toBe(lateFeeLineId(INVOICE_ID, 'initial'));
+    // Different step → different id.
+    expect(lateFeeLineId(INVOICE_ID, 'initial')).not.toBe(lateFeeLineId(INVOICE_ID, 'second'));
+    // Different INVOICE, same step → different id. invoice_line_items.id is a
+    // global PK, so two invoices' 'initial' fees must not collide (P1).
+    expect(lateFeeLineId(INVOICE_ID, 'initial')).not.toBe(lateFeeLineId(other, 'initial'));
   });
 
   it('refuses to fee a non-overdue invoice (paid) — clean failure, no mutation', async () => {
@@ -123,7 +146,7 @@ describe('apply_late_fee execution handler', () => {
     expect(result.error).toMatch(/not overdue/i);
 
     const untouched = await invoiceRepo.findById(TENANT, INVOICE_ID);
-    expect(untouched!.lineItems.some((li) => li.id === 'late-fee:initial')).toBe(false);
+    expect(untouched!.lineItems.some((li) => li.id === lateFeeLineId(INVOICE_ID, 'initial'))).toBe(false);
   });
 
   it('applies to a partially_paid invoice and nets against the amount already paid', async () => {
@@ -165,7 +188,7 @@ describe('apply_late_fee execution handler', () => {
     expect(result.error).toMatch(/not found/i);
 
     const untouched = await invoiceRepo.findById(TENANT, INVOICE_ID);
-    expect(untouched!.lineItems.some((li) => li.id === 'late-fee:initial')).toBe(false);
+    expect(untouched!.lineItems.some((li) => li.id === lateFeeLineId(INVOICE_ID, 'initial'))).toBe(false);
     expect(untouched!.amountDueCents).toBe(15000);
   });
 });

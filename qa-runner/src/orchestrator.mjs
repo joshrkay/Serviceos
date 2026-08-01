@@ -154,7 +154,7 @@ async function smoke() {
   const ui = await runUiCheck({
     baseUrl,
     testId: 'SMOKE-UI',
-    check: { path: '/login', expect_text: 'Fieldly' },
+    check: { path: '/login', expect_text: 'Rivet' },
     artifactDir: path.join(root, 'artifacts', 'ui'),
   });
 

@@ -4,6 +4,7 @@ import { useNavigate } from 'react-router';
 import { apiFetch } from '../../utils/api-fetch';
 import { matchVoiceCommand } from '../../hooks/useVoiceCommands';
 import { useTTS } from '../../hooks/useTTS';
+import { pickExamples } from './voice-examples';
 
 type BarPhase = 'idle' | 'listening' | 'transcribing' | 'transcript' | 'sending';
 
@@ -41,6 +42,16 @@ function Waveform() {
 
 const VOICE_POLL_INTERVAL_MS = 1500;
 const VOICE_POLL_TIMEOUT_MS = 90000;
+
+// U7 — "you can say…" idle hint cadence.
+const EXAMPLE_ROTATE_MS = 5000;
+const EXAMPLE_FADE_MS = 200;
+const EXAMPLES_PER_MOUNT = 4;
+
+function prefersReducedMotion(): boolean {
+  if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return false;
+  return window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+}
 
 function isIOSSafari(): boolean {
   if (typeof navigator === 'undefined') return false;
@@ -131,6 +142,28 @@ export const VoiceBar = forwardRef<VoiceBarHandle, VoiceBarProps>(function Voice
   const streamRef = useRef<MediaStream | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
   const { speak } = useTTS({ rate: 1.05 });
+
+  // U7 — rotating "Try: …" discoverability hint (idle state). A few examples
+  // are drawn once per mount and cycled with a short fade; users who prefer
+  // reduced motion get ONE static example and no rotation. The hint lives
+  // INSIDE the existing idle button, so tapping it starts listening and the
+  // bar keeps a single ≥44px tap target.
+  const reducedMotion = useRef(prefersReducedMotion()).current;
+  const [examples] = useState(() => pickExamples(EXAMPLES_PER_MOUNT));
+  const [exampleIndex, setExampleIndex] = useState(0);
+  const [exampleVisible, setExampleVisible] = useState(true);
+
+  useEffect(() => {
+    if (reducedMotion || phase !== 'idle' || examples.length < 2) return;
+    const interval = window.setInterval(() => {
+      setExampleVisible(false);
+      window.setTimeout(() => {
+        setExampleIndex((i) => (i + 1) % examples.length);
+        setExampleVisible(true);
+      }, EXAMPLE_FADE_MS);
+    }, EXAMPLE_ROTATE_MS);
+    return () => window.clearInterval(interval);
+  }, [reducedMotion, phase, examples.length]);
 
   // Expose imperative handle so parent (Shell) can trigger via keyboard shortcut
   useImperativeHandle(ref, () => ({
@@ -351,7 +384,7 @@ export const VoiceBar = forwardRef<VoiceBarHandle, VoiceBarProps>(function Voice
         <button
           onClick={startListening}
           className={`
-            flex items-center gap-3 w-full text-left transition-all
+            flex items-center gap-3 w-full min-h-11 text-left transition-all
             rounded-2xl border border-slate-200 bg-slate-50 px-4
             hover:border-blue-300 hover:bg-blue-50/40 active:scale-[0.99]
             group
@@ -361,8 +394,21 @@ export const VoiceBar = forwardRef<VoiceBarHandle, VoiceBarProps>(function Voice
           <span className="flex shrink-0 size-7 items-center justify-center rounded-full bg-blue-600 shadow-sm group-hover:bg-blue-700 transition-colors">
             <Mic size={14} className="text-white" />
           </span>
-          <span className="text-sm text-slate-400 flex-1">Ask Rivet AI anything…</span>
-          <span className="text-xs text-slate-300">tap to speak</span>
+          <span className="flex-1 min-w-0">
+            <span className="block text-sm text-slate-400 truncate">Ask Rivet AI anything…</span>
+            {/* U7 — rotating speakable-action example; tap anywhere to speak. */}
+            <span
+              data-testid="voice-example-hint"
+              className={`block text-xs text-slate-300 truncate transition-opacity duration-200 ${
+                exampleVisible ? 'opacity-100' : 'opacity-0'
+              }`}
+            >
+              Try: “{examples[exampleIndex].example}”
+            </span>
+          </span>
+          {/* The affix crushed the label into one-word-per-line wrapping in
+              the narrow desktop sidebar (QA 2026-07-02) — mobile only. */}
+          {!isDesktop && <span className="text-xs text-slate-300 shrink-0">tap to speak</span>}
         </button>
       )}
 

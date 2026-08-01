@@ -78,6 +78,44 @@ describe('InboxPage — multi-action chains', () => {
     expect(screen.getByText('3 linked actions')).toBeInTheDocument();
   });
 
+  it('surfaces good-better-best tiers inside a chained draft estimate step (EE-1)', async () => {
+    // The autonomous voice close stages draft_estimate → send_estimate →
+    // create_booking, so a tiered estimate is approved inside a chain; the
+    // operator must still see the options before Approve all.
+    const estStep: ReturnType<typeof chainProposal> & {
+      proposal: { payload?: unknown };
+    } = chainProposal('p-est', 'draft_estimate', 'Water heater options for Jane', 1, [0]);
+    estStep.proposal.payload = {
+      lineItems: [
+        { id: 'l1', description: 'Builder heater', unitPrice: 90000, groupKey: 'wh', groupLabel: 'Water heater', isOptional: true, isDefaultSelected: true },
+        { id: 'l2', description: 'Premium heater', unitPrice: 140000, groupKey: 'wh', groupLabel: 'Water heater', isOptional: true },
+        { id: 'l3', description: 'Surge protector', unitPrice: 8000, isOptional: true },
+      ],
+    };
+
+    apiFetch.mockResolvedValueOnce(
+      jsonResponse({
+        data: [
+          chainProposal('p-cust', 'create_customer', 'Create customer Jane Doe', 0, []),
+          estStep,
+        ],
+        summary: { totalCount: 2, criticalCount: 0, highCount: 0, normalCount: 2, lowCount: 0, truncated: false },
+      }),
+    );
+
+    render(<InboxPage />);
+    await waitFor(() => screen.getByTestId('inbox-chain'));
+
+    // The tier group (label + both options, default marked) and the add-on
+    // render inside the chain step, not just the flat summary.
+    const group = screen.getByTestId('tier-group');
+    expect(group).toHaveTextContent('Water heater');
+    expect(group).toHaveTextContent('Builder heater');
+    expect(group).toHaveTextContent('Premium heater');
+    expect(screen.getByTestId('tier-default')).toBeInTheDocument();
+    expect(screen.getByTestId('tier-addons')).toHaveTextContent('Surge protector');
+  });
+
   it('approve-all calls the batch endpoint with every chain member id', async () => {
     apiFetch.mockResolvedValueOnce(
       jsonResponse({

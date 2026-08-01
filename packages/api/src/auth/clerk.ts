@@ -17,7 +17,15 @@ export interface ClerkUser {
 
 export interface AuthenticatedRequest extends Request {
   auth?: {
+    /** Clerk subject (`sub`) from the verified session token. */
     userId: string;
+    /**
+     * Tenant-scoped canonical `users.id`, populated by the DB authorization
+     * loader after it resolves the Clerk subject. Security-sensitive routes
+     * must fail closed when this is absent rather than treating `userId` as a
+     * canonical entity id.
+     */
+    canonicalUserId?: string;
     sessionId: string;
     tenantId: string;
     role: string;
@@ -30,11 +38,19 @@ export interface AuthenticatedRequest extends Request {
 // P0-033 — RS256 + JWKS verification
 //
 // Real Clerk session tokens are signed RS256 with a per-instance keypair
-// published at https://{frontend_api_host}/.well-known/jwks.json. The legacy
-// HMAC-SHA256 path can no longer verify a real production token; it remains
-// available behind the explicit CLERK_DEV_HMAC_TOKENS=true flag (refused in
-// production by validateEnvSchema in shared/config.ts) so existing
-// synthetic dev tokens keep working during the transition.
+// published at https://{frontend_api_host}/.well-known/jwks.json.
+//
+// Dispatch order (verifyClerkSession):
+// 1. If CLERK_PUBLISHABLE_KEY is configured, attempt RS256 verification FIRST.
+// 2. If RS256 fails (or no publishable key) AND isHmacDevModeEnabled(env) is
+//    true (dev/test only), fall back to legacy HMAC-SHA256 verification.
+// 3. If both fail (or RS256 fails with the flag off), reject — req.auth stays
+//    unset, requireAuth downstream returns the same 401.
+//
+// The HMAC path remains behind the explicit CLERK_DEV_HMAC_TOKENS=true flag
+// (refused in production by validateEnvSchema in shared/config.ts and
+// isHmacDevModeEnabled at runtime) so existing synthetic dev/QA tokens keep
+// working during real Clerk migration.
 //
 // IMPORTANT — return shape contract: every middleware downstream depends on
 // `{ userId, tenantId, role }` (with the additional `sessionId` we set on
@@ -67,6 +83,12 @@ export interface JwksResolver {
 
 const JWKS_TTL_MS = 10 * 60 * 1000; // 10 minutes per the story spec
 const JWKS_FETCH_TIMEOUT_MS = 5_000; // 5 second hard cap on every JWKS fetch
+/**
+ * U3e-2 — hard size cap (FIFO-on-insert) on the per-host JWKS cache. Host
+ * cardinality is ~1 in practice (number of distinct Clerk instances), so this is
+ * pure insurance against unbounded growth. Mirrors auth/platform-admin.ts.
+ */
+const JWKS_CACHE_MAX_ENTRIES = 1_000;
 
 interface JwksCacheEntry {
   keys: JwksKey[];
@@ -82,9 +104,11 @@ interface JwksCacheEntry {
  * the same host await a single network round-trip instead of stampeding
  * the JWKS endpoint (Gemini PR #197 review).
  */
-class HttpsJwksResolver implements JwksResolver {
+export class HttpsJwksResolver implements JwksResolver {
   private readonly cache = new Map<string, JwksCacheEntry>();
   private readonly inflight = new Map<string, Promise<JwksKey[]>>();
+
+  constructor(private readonly maxEntries: number = JWKS_CACHE_MAX_ENTRIES) {}
 
   async getKeys(host: string, forceRefresh = false): Promise<JwksKey[]> {
     const now = Date.now();
@@ -99,6 +123,12 @@ class HttpsJwksResolver implements JwksResolver {
     const promise = (async () => {
       try {
         const keys = await this.fetchJwks(host);
+        // FIFO size bound: evict the oldest host before inserting at capacity.
+        // (`inflight` is intentionally unbounded — it self-empties below.)
+        if (!this.cache.has(host) && this.cache.size >= this.maxEntries) {
+          const oldest = this.cache.keys().next().value;
+          if (oldest !== undefined) this.cache.delete(oldest);
+        }
         this.cache.set(host, { keys, expiresAt: Date.now() + JWKS_TTL_MS });
         return keys;
       } finally {
@@ -117,7 +147,7 @@ class HttpsJwksResolver implements JwksResolver {
    * Hard 5-second timeout via AbortController so a Clerk network stall can't
    * become an auth-latency amplifier (Codex PR #197 review).
    */
-  private async fetchJwks(host: string): Promise<JwksKey[]> {
+  protected async fetchJwks(host: string): Promise<JwksKey[]> {
     const url = `https://${host}/.well-known/jwks.json`;
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), JWKS_FETCH_TIMEOUT_MS);
@@ -183,6 +213,8 @@ export interface ClerkTokenPayload {
   tenant_id: string;
   role: string;
   exp: number;
+  /** Optional — present when the JWT template includes an email claim. */
+  email?: string;
 }
 
 const VALID_ROLES = ['owner', 'dispatcher', 'technician'];
@@ -238,7 +270,7 @@ function validateClerkClaims(
     throw new Error("Missing or invalid 'sub' (subject) claim");
   }
   if (typeof payload.sid !== 'string' || !payload.sid) {
-    throw new Error("Missing or invalid 'sid' (session ID) claim");
+    payload.sid = '';
   }
   if (typeof payload.exp !== 'number') {
     throw new Error('Token missing expiration claim');
@@ -255,12 +287,21 @@ function validateClerkClaims(
   if (typeof payload.role !== 'string' || !VALID_ROLES.includes(payload.role)) {
     throw new Error('Token missing or invalid role claim');
   }
+  const emailClaim =
+    typeof payload.email === 'string' && payload.email.trim()
+      ? payload.email.trim()
+      : typeof payload.primary_email_address === 'string' &&
+          payload.primary_email_address.trim()
+        ? payload.primary_email_address.trim()
+        : undefined;
+
   return {
     sub: payload.sub,
-    sid: payload.sid,
+    sid: typeof payload.sid === 'string' ? payload.sid : '',
     tenant_id: typeof payload.tenant_id === 'string' ? payload.tenant_id : '',
     role: payload.role,
     exp: payload.exp,
+    ...(emailClaim ? { email: emailClaim } : {}),
   };
 }
 
@@ -371,29 +412,69 @@ export function verifyClerkSession(
     }
 
     const env = deps.env ?? process.env;
+    const pubKey = deps.publishableKey ?? env.CLERK_PUBLISHABLE_KEY;
+    const hmacEnabled = isHmacDevModeEnabled(env);
 
     try {
-      let payload: ClerkTokenPayload;
-      if (isHmacDevModeEnabled(env)) {
-        // Legacy dev path — only active with explicit CLERK_DEV_HMAC_TOKENS=true
-        // and never in production.
-        payload = decodeClerkToken(token, clerkSecretKey);
-      } else {
-        const pubKey = deps.publishableKey ?? env.CLERK_PUBLISHABLE_KEY;
-        if (!pubKey) {
-          throw new Error('CLERK_PUBLISHABLE_KEY is required for RS256 verification');
+      let payload: ClerkTokenPayload | undefined;
+      let rs256Error: Error | undefined;
+
+      // ── Dispatch order ─────────────────────────────────────────────────
+      // 1. Try RS256 first if a publishable key is available.
+      // 2. On RS256 failure (or no pubKey) + HMAC flag ON, try HMAC fallback.
+      // 3. Both fail (or RS256 fails with HMAC flag OFF) → reject.
+      // ────────────────────────────────────────────────────────────────────
+
+      if (pubKey) {
+        try {
+          payload = await verifyRs256Token(token, {
+            pubKey,
+            resolver: deps.jwksResolver,
+          });
+        } catch (err) {
+          rs256Error = err instanceof Error ? err : new Error(String(err));
+          // Fall through to HMAC fallback if enabled.
         }
-        payload = await verifyRs256Token(token, {
-          pubKey,
-          resolver: deps.jwksResolver,
-        });
       }
+
+      // If RS256 didn't produce a payload, try HMAC if enabled.
+      if (!payload && hmacEnabled) {
+        try {
+          payload = decodeClerkToken(token, clerkSecretKey);
+        } catch (hmacErr) {
+          // Both paths failed. Prefer reporting the RS256 error if we had one,
+          // otherwise report the HMAC error.
+          throw rs256Error ?? hmacErr;
+        }
+      }
+
+      // If still no payload, we either had no pubKey (with HMAC off) or RS256 failed (with HMAC off).
+      if (!payload) {
+        if (rs256Error) {
+          throw rs256Error;
+        }
+        throw new Error('CLERK_PUBLISHABLE_KEY is required for RS256 verification');
+      }
+
       req.auth = {
         userId: payload.sub,
         sessionId: payload.sid,
         tenantId: payload.tenant_id,
         role: payload.role,
       };
+      // Populate clerkUser when the JWT carries an email claim so billing /
+      // onboarding routes can mint Stripe sessions without a DB round-trip.
+      // Absent claim → routes fall back to resolveOwnerEmail(pool).
+      if (payload.email) {
+        req.clerkUser = {
+          id: payload.sub,
+          email: payload.email,
+          publicMetadata: {
+            tenant_id: payload.tenant_id,
+            role: payload.role,
+          },
+        };
+      }
       next();
     } catch (err) {
       // Do NOT set req.auth. Do NOT short-circuit here — the global

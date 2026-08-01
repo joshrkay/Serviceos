@@ -43,6 +43,14 @@ export interface Lead {
    * tenant default at session time.
    */
   preferredLanguage?: 'en' | 'es';
+  /** Optional structured service address — promoted to a primary location on convert. */
+  street1?: string;
+  street2?: string;
+  city?: string;
+  state?: string;
+  postalCode?: string;
+  country?: string;
+  accessNotes?: string;
   createdBy: string;
   createdAt: Date;
   updatedAt: Date;
@@ -64,6 +72,13 @@ export interface CreateLeadInput {
   estimatedValueCents?: number;
   notes?: string;
   assignedUserId?: string;
+  street1?: string;
+  street2?: string;
+  city?: string;
+  state?: string;
+  postalCode?: string;
+  country?: string;
+  accessNotes?: string;
   createdBy: string;
   actorRole?: string;
 }
@@ -87,6 +102,13 @@ export interface UpdateLeadInput {
   lostReason?: string | null;
   convertedCustomerId?: string | null;
   preferredLanguage?: 'en' | 'es' | null;
+  street1?: string | null;
+  street2?: string | null;
+  city?: string | null;
+  state?: string | null;
+  postalCode?: string | null;
+  country?: string | null;
+  accessNotes?: string | null;
 }
 
 export interface LeadListOptions {

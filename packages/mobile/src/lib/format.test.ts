@@ -1,0 +1,130 @@
+import { describe, expect, it } from 'vitest';
+import {
+  centsToInputValue,
+  deriveDurationSeconds,
+  formatDuration,
+  formatMoneyCents,
+  formatMoneyShort,
+  formatShortDate,
+  formatWeekdayDate,
+  parseMoneyToCents,
+} from './format';
+
+describe('formatMoneyCents', () => {
+  it('renders integer cents as dollars with thousands separators', () => {
+    expect(formatMoneyCents(0)).toBe('$0.00');
+    expect(formatMoneyCents(5)).toBe('$0.05');
+    expect(formatMoneyCents(12345)).toBe('$123.45');
+    expect(formatMoneyCents(123456789)).toBe('$1,234,567.89');
+    expect(formatMoneyCents(-2000)).toBe('-$20.00');
+  });
+});
+
+describe('formatMoneyShort', () => {
+  it('rounds integer cents to whole dollars for dashboard figures', () => {
+    expect(formatMoneyShort(0)).toBe('$0');
+    expect(formatMoneyShort(12345)).toBe('$123'); // 123.45 → 123
+    expect(formatMoneyShort(12999)).toBe('$130'); // rounds up
+    expect(formatMoneyShort(123456789)).toBe('$1,234,568');
+    expect(formatMoneyShort(-20000)).toBe('-$200');
+    expect(formatMoneyShort(-40)).toBe('$0'); // sub-dollar: no "-$0"
+    expect(formatMoneyShort(40)).toBe('$0');
+  });
+});
+
+describe('formatWeekdayDate', () => {
+  it('renders a long weekday + short date in the given timezone', () => {
+    expect(formatWeekdayDate('2026-06-20T12:00:00Z', 'UTC')).toBe('Saturday, Jun 20');
+  });
+
+  it('returns empty for null/invalid input', () => {
+    expect(formatWeekdayDate(null)).toBe('');
+    expect(formatWeekdayDate('not-a-date')).toBe('');
+  });
+});
+
+describe('formatShortDate', () => {
+  it('renders a date in the given timezone', () => {
+    // 2026-06-20T02:00:00Z is still Jun 19 in America/New_York (UTC-4).
+    expect(formatShortDate('2026-06-20T02:00:00Z', 'America/New_York')).toBe('Jun 19, 2026');
+    expect(formatShortDate('2026-06-20T12:00:00Z', 'America/New_York')).toBe('Jun 20, 2026');
+  });
+
+  it('returns empty for null/invalid input', () => {
+    expect(formatShortDate(null)).toBe('');
+    expect(formatShortDate(undefined)).toBe('');
+    expect(formatShortDate('not-a-date')).toBe('');
+  });
+});
+
+describe('tenant timezone independence', () => {
+  // A fixed UTC instant must render in the tenant's timezone regardless of the
+  // device/process zone. This suite is run twice in CI (TZ=UTC and
+  // TZ=America/Los_Angeles) to prove the output does not depend on process.env.TZ.
+  const instant = '2026-06-20T02:00:00Z'; // 22:00 Jun 19 in New York (UTC-4)
+
+  it('renders a short date in the tenant zone, not the ambient zone', () => {
+    expect(formatShortDate(instant, 'America/New_York')).toBe('Jun 19, 2026');
+    // Same instant, a different tenant zone → a different local date, proving the
+    // explicit param (not the process TZ) drives the result.
+    expect(formatShortDate(instant, 'Asia/Tokyo')).toBe('Jun 20, 2026');
+  });
+
+  it('renders a weekday date in the tenant zone, not the ambient zone', () => {
+    expect(formatWeekdayDate(instant, 'America/New_York')).toBe('Friday, Jun 19');
+    expect(formatWeekdayDate(instant, 'Asia/Tokyo')).toBe('Saturday, Jun 20');
+  });
+});
+
+describe('formatDuration', () => {
+  it('renders minutes and seconds or seconds only', () => {
+    expect(formatDuration(null)).toBe('—');
+    expect(formatDuration(45)).toBe('45s');
+    expect(formatDuration(125)).toBe('2m 5s');
+  });
+});
+
+describe('deriveDurationSeconds', () => {
+  it('prefers server-provided durationSeconds', () => {
+    expect(deriveDurationSeconds(90, '2026-06-20T10:00:00Z', '2026-06-20T10:05:00Z')).toBe(90);
+  });
+
+  it('derives from startedAt and endedAt when durationSeconds is null', () => {
+    expect(
+      deriveDurationSeconds(null, '2026-06-20T10:00:00Z', '2026-06-20T10:05:30Z'),
+    ).toBe(330);
+  });
+
+  it('returns null when timestamps are missing or invalid', () => {
+    expect(deriveDurationSeconds(null, '2026-06-20T10:00:00Z', null)).toBeNull();
+    expect(deriveDurationSeconds(null, null, '2026-06-20T10:05:00Z')).toBeNull();
+    expect(deriveDurationSeconds(null, 'bad', '2026-06-20T10:05:00Z')).toBeNull();
+    expect(deriveDurationSeconds(null, '2026-06-20T10:05:00Z', '2026-06-20T10:00:00Z')).toBeNull();
+  });
+});
+
+describe('parseMoneyToCents / centsToInputValue (U2 edit inputs)', () => {
+  it('parses plain and formatted amounts to integer cents via string math', () => {
+    expect(parseMoneyToCents('80')).toBe(8000);
+    expect(parseMoneyToCents('123.45')).toBe(12345);
+    expect(parseMoneyToCents('123.4')).toBe(12340);
+    expect(parseMoneyToCents('$1,299.50')).toBe(129950);
+    expect(parseMoneyToCents(' 0.29 ')).toBe(29); // the classic float trap
+  });
+
+  it('rejects anything that is not a plain non-negative money amount', () => {
+    expect(parseMoneyToCents('')).toBeNull();
+    expect(parseMoneyToCents('twelve')).toBeNull();
+    expect(parseMoneyToCents('-5')).toBeNull();
+    expect(parseMoneyToCents('1.234')).toBeNull(); // sub-cent precision
+    expect(parseMoneyToCents('1.2.3')).toBeNull();
+  });
+
+  it('centsToInputValue is the exact inverse rendering', () => {
+    expect(centsToInputValue(12345)).toBe('123.45');
+    expect(centsToInputValue(8000)).toBe('80.00');
+    expect(centsToInputValue(29)).toBe('0.29');
+    expect(centsToInputValue(-2000)).toBe('-20.00');
+    expect(parseMoneyToCents(centsToInputValue(129950))).toBe(129950);
+  });
+});

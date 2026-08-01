@@ -10,14 +10,14 @@ export interface InputProps
 }
 
 const BASE_FIELD =
-  'w-full rounded-xl border bg-white text-sm text-slate-800 placeholder-slate-400 ' +
-  'transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/30 ' +
-  'disabled:cursor-not-allowed disabled:bg-slate-50 disabled:text-slate-400';
+  'w-full rounded-xl border bg-card text-sm text-foreground placeholder-muted-foreground ' +
+  'transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-ring/30 ' +
+  'disabled:cursor-not-allowed disabled:bg-muted disabled:text-muted-foreground';
 
 function fieldStateClasses(invalid?: boolean): string {
   return invalid
-    ? 'border-red-300 focus:border-red-400 focus-visible:ring-red-500/30'
-    : 'border-slate-200 focus:border-blue-400';
+    ? 'border-destructive/50 focus:border-destructive focus-visible:ring-destructive/30'
+    : 'border-border focus:border-primary';
 }
 
 export const Input = React.forwardRef<HTMLInputElement, InputProps>(
@@ -39,7 +39,7 @@ export const Input = React.forwardRef<HTMLInputElement, InputProps>(
     if (!leftIcon) return control;
     return (
       <div className="relative">
-        <span className="pointer-events-none absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400">
+        <span className="pointer-events-none absolute left-3.5 top-1/2 -translate-y-1/2 text-muted-foreground">
           {leftIcon}
         </span>
         {control}
@@ -96,7 +96,7 @@ export const Select = React.forwardRef<HTMLSelectElement, SelectProps>(
           aria-hidden="true"
           viewBox="0 0 20 20"
           fill="none"
-          className="pointer-events-none absolute right-3 top-1/2 size-4 -translate-y-1/2 text-slate-400"
+          className="pointer-events-none absolute right-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground"
         >
           <path
             d="M6 8l4 4 4-4"

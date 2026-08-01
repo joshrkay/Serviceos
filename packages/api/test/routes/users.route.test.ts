@@ -270,3 +270,352 @@ describe('POST/GET /api/users/invitations — Tier 4 Team members (PR 3)', () =>
     expect(res.body.data).toEqual([]);
   });
 });
+
+describe('DELETE /api/users/me — in-app account deletion (guideline 5.1.1(v))', () => {
+  let repo: InMemoryUserRepository;
+  let ownerId: string;
+  let techId: string;
+  const audited: Array<{ eventType: string; entityId: string; metadata?: unknown }> = [];
+  const auditRepo = {
+    create: async (e: { eventType: string; entityId: string; metadata?: unknown }) => {
+      audited.push(e);
+      return e as never;
+    },
+  };
+
+  // Captures res.locals.forceCommit at response time — the middleware's
+  // rollback-on->=400 contract keys off it, so the 502 compensation path
+  // must set it or the restore would be rolled back in production.
+  let lastForceCommit: unknown;
+
+  function buildDeleteApp(
+    clerkUserId: string,
+    role: 'owner' | 'dispatcher' | 'technician',
+    deps: UsersRouteDeps = {},
+  ) {
+    const app = express();
+    app.use(express.json());
+    app.use((req: Request, res: Response, next: NextFunction) => {
+      (req as AuthenticatedRequest).auth = {
+        userId: clerkUserId,
+        sessionId: 'sess-1',
+        tenantId: TENANT,
+        role,
+      };
+      res.on('finish', () => {
+        lastForceCommit = res.locals.forceCommit;
+      });
+      next();
+    });
+    app.use('/api/users', createUsersRouter(repo, deps, auditRepo as never));
+    return app;
+  }
+
+  beforeEach(async () => {
+    repo = new InMemoryUserRepository();
+    audited.length = 0;
+    lastForceCommit = undefined;
+    ownerId = uuidv4();
+    techId = uuidv4();
+    await repo.create!({
+      id: ownerId, tenantId: TENANT, email: 'owner@example.com',
+      role: 'owner', canFieldServe: true, clerkUserId: 'clerk_owner',
+    });
+    await repo.create!({
+      id: techId, tenantId: TENANT, email: 'tech@example.com',
+      role: 'technician', canFieldServe: false, clerkUserId: 'clerk_tech',
+    });
+  });
+
+  it('soft-deletes the caller, hides them from reads, and emits an audit event', async () => {
+    const app = buildDeleteApp('clerk_tech', 'technician');
+    const res = await request(app).delete('/api/users/me');
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ deleted: true });
+
+    const remaining = await repo.findByTenant(TENANT);
+    expect(remaining.map((u) => u.id)).toEqual([ownerId]);
+    expect(await repo.findById(TENANT, techId)).toBeNull();
+
+    expect(audited).toHaveLength(1);
+    expect(audited[0].eventType).toBe('user.account_deleted');
+    expect(audited[0].entityId).toBe(techId);
+  });
+
+  it('deletes the Clerk user first when a secret key is configured', async () => {
+    const clerkFetch = vi.fn().mockResolvedValue({ ok: true, status: 200 });
+    const app = buildDeleteApp('clerk_tech', 'technician', {
+      clerkSecretKey: 'sk_test',
+      clerkFetch: clerkFetch as unknown as typeof fetch,
+    });
+    const res = await request(app).delete('/api/users/me');
+    expect(res.status).toBe(200);
+    expect(clerkFetch).toHaveBeenCalledWith(
+      'https://api.clerk.com/v1/users/clerk_tech',
+      expect.objectContaining({ method: 'DELETE' }),
+    );
+  });
+
+  it('restores the account on a DEFINITE Clerk failure (4xx) with 502', async () => {
+    // Give the tech a mobile number so the compensation path is fully pinned:
+    // softDeleteSelf clears it, restoreAccount must bring it back.
+    await repo.setMobileNumber(TENANT, techId, '+15550002222');
+    const clerkFetch = vi.fn().mockResolvedValue({ ok: false, status: 403 });
+    const app = buildDeleteApp('clerk_tech', 'technician', {
+      clerkSecretKey: 'sk_test',
+      clerkFetch: clerkFetch as unknown as typeof fetch,
+    });
+    const res = await request(app).delete('/api/users/me');
+    expect(res.status).toBe(502);
+    expect(res.body.error).toBe('ACCOUNT_DELETE_FAILED');
+    // Definite 4xx → no verification GET needed, one Clerk call only.
+    expect(clerkFetch).toHaveBeenCalledTimes(1);
+    // The account must remain intact and usable — including the mobile number.
+    const restored = await repo.findById(TENANT, techId);
+    expect(restored).not.toBeNull();
+    expect(restored!.mobileNumber).toBe('+15550002222');
+    expect(audited).toHaveLength(0);
+    // The stamp was durably committed before Clerk, so the compensating
+    // restore must survive the >=400 response under the /api middleware.
+    expect(lastForceCommit).toBe(true);
+  });
+
+  it('verifies via GET on an ambiguous failure and proceeds when Clerk shows 404', async () => {
+    // DELETE times out, but Clerk actually processed it — the verification
+    // GET finds the user gone, so the deletion completes successfully and
+    // no ghost account is restored.
+    const removeAllForUser = vi.fn().mockResolvedValue(1);
+    const clerkFetch = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('ETIMEDOUT'))
+      .mockResolvedValueOnce({ ok: false, status: 404 });
+    const app = buildDeleteApp('clerk_tech', 'technician', {
+      clerkSecretKey: 'sk_test',
+      clerkFetch: clerkFetch as unknown as typeof fetch,
+      deviceTokenRepo: { removeAllForUser },
+    });
+    const res = await request(app).delete('/api/users/me');
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ deleted: true });
+    expect(clerkFetch).toHaveBeenCalledTimes(2);
+    // Second call is the verification GET, not another DELETE.
+    const [, checkOpts] = clerkFetch.mock.calls[1] as [string, { method?: string }];
+    expect(checkOpts.method).toBeUndefined();
+    expect(await repo.findById(TENANT, techId)).toBeNull();
+    expect(removeAllForUser).toHaveBeenCalledWith(TENANT, 'clerk_tech');
+  });
+
+  it('restores the account when the verification GET finds the Clerk user alive', async () => {
+    const clerkFetch = vi
+      .fn()
+      .mockResolvedValueOnce({ ok: false, status: 500 })
+      .mockResolvedValueOnce({ ok: true, status: 200 });
+    const app = buildDeleteApp('clerk_tech', 'technician', {
+      clerkSecretKey: 'sk_test',
+      clerkFetch: clerkFetch as unknown as typeof fetch,
+    });
+    const res = await request(app).delete('/api/users/me');
+    expect(res.status).toBe(502);
+    expect(res.body.error).toBe('ACCOUNT_DELETE_FAILED');
+    expect(await repo.findById(TENANT, techId)).not.toBeNull();
+    expect(lastForceCommit).toBe(true);
+  });
+
+  it('leaves the account deactivated when Clerk state cannot be confirmed', async () => {
+    // Both the DELETE and the verification GET fail: restoring blindly
+    // could resurrect a ghost account whose Clerk identity is gone, so the
+    // durable stamp stays and the response directs the user to support.
+    const clerkFetch = vi.fn().mockRejectedValue(new Error('ECONNRESET'));
+    const app = buildDeleteApp('clerk_tech', 'technician', {
+      clerkSecretKey: 'sk_test',
+      clerkFetch: clerkFetch as unknown as typeof fetch,
+    });
+    const res = await request(app).delete('/api/users/me');
+    expect(res.status).toBe(502);
+    expect(res.body.error).toBe('ACCOUNT_DELETE_FAILED');
+    expect(res.body.message).toMatch(/contact support/);
+    expect(await repo.findById(TENANT, techId)).toBeNull();
+    // The terminal deactivation leaves an audit trail for support even
+    // though the webhook may never fire (and would no-op if it did).
+    expect(audited).toHaveLength(1);
+    expect(audited[0].eventType).toBe('user.account_deletion_unconfirmed');
+    expect(audited[0].entityId).toBe(techId);
+  });
+
+  it('reserves the local deletion BEFORE calling Clerk (serialization order)', async () => {
+    // At the moment Clerk is called, the local row must already be stamped —
+    // this is what prevents two racing owners from both revoking Clerk users.
+    let deletedAtClerkCallTime: unknown = 'not-checked';
+    const clerkFetch = vi.fn().mockImplementation(async () => {
+      deletedAtClerkCallTime = await repo.findById(TENANT, techId);
+      return { ok: true, status: 200 };
+    });
+    const app = buildDeleteApp('clerk_tech', 'technician', {
+      clerkSecretKey: 'sk_test',
+      clerkFetch: clerkFetch as unknown as typeof fetch,
+    });
+    const res = await request(app).delete('/api/users/me');
+    expect(res.status).toBe(200);
+    expect(clerkFetch).toHaveBeenCalled();
+    expect(deletedAtClerkCallTime).toBeNull();
+  });
+
+  it('bounds the Clerk delete with an abort signal (stalled upstream must not pin the request)', async () => {
+    const clerkFetch = vi.fn().mockResolvedValue({ ok: true, status: 200 });
+    const app = buildDeleteApp('clerk_tech', 'technician', {
+      clerkSecretKey: 'sk_test',
+      clerkFetch: clerkFetch as unknown as typeof fetch,
+    });
+    const res = await request(app).delete('/api/users/me');
+    expect(res.status).toBe(200);
+    const [, options] = clerkFetch.mock.calls[0] as [string, { signal?: unknown }];
+    expect(options.signal).toBeInstanceOf(AbortSignal);
+  });
+
+  it('does not fail a completed deletion when the audit write throws', async () => {
+    const app = buildDeleteApp('clerk_tech', 'technician');
+    const originalCreate = auditRepo.create;
+    auditRepo.create = async () => {
+      throw new Error('audit store down');
+    };
+    try {
+      const res = await request(app).delete('/api/users/me');
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ deleted: true });
+      expect(await repo.findById(TENANT, techId)).toBeNull();
+    } finally {
+      auditRepo.create = originalCreate;
+    }
+  });
+
+  it('purges the user device tokens after a successful deletion', async () => {
+    const removeAllForUser = vi.fn().mockResolvedValue(2);
+    const app = buildDeleteApp('clerk_tech', 'technician', {
+      deviceTokenRepo: { removeAllForUser },
+    });
+    const res = await request(app).delete('/api/users/me');
+    expect(res.status).toBe(200);
+    expect(removeAllForUser).toHaveBeenCalledWith(TENANT, 'clerk_tech');
+  });
+
+  it('does NOT purge device tokens when the account is restored (definite Clerk failure)', async () => {
+    const removeAllForUser = vi.fn();
+    const clerkFetch = vi.fn().mockResolvedValue({ ok: false, status: 403 });
+    const app = buildDeleteApp('clerk_tech', 'technician', {
+      clerkSecretKey: 'sk_test',
+      clerkFetch: clerkFetch as unknown as typeof fetch,
+      deviceTokenRepo: { removeAllForUser },
+    });
+    const res = await request(app).delete('/api/users/me');
+    expect(res.status).toBe(502);
+    // Account restored and fully usable — its tokens must stay registered.
+    expect(await repo.findById(TENANT, techId)).not.toBeNull();
+    expect(removeAllForUser).not.toHaveBeenCalled();
+  });
+
+  it('DOES purge device tokens on the unconfirmable terminal path', async () => {
+    // The account stays durably deactivated, so its device must stop
+    // receiving tenant pushes exactly like the success path.
+    const removeAllForUser = vi.fn().mockResolvedValue(1);
+    const clerkFetch = vi.fn().mockRejectedValue(new Error('ECONNRESET'));
+    const app = buildDeleteApp('clerk_tech', 'technician', {
+      clerkSecretKey: 'sk_test',
+      clerkFetch: clerkFetch as unknown as typeof fetch,
+      deviceTokenRepo: { removeAllForUser },
+    });
+    const res = await request(app).delete('/api/users/me');
+    expect(res.status).toBe(502);
+    expect(await repo.findById(TENANT, techId)).toBeNull();
+    expect(removeAllForUser).toHaveBeenCalledWith(TENANT, 'clerk_tech');
+  });
+
+  it('clears the mobile number on deletion so the slot is reusable', async () => {
+    await repo.setMobileNumber(TENANT, techId, '+15550003333');
+    const app = buildDeleteApp('clerk_tech', 'technician');
+    const res = await request(app).delete('/api/users/me');
+    expect(res.status).toBe(200);
+    // The number is free for another teammate immediately.
+    const owner = await repo.setMobileNumber(TENANT, ownerId, '+15550003333');
+    expect(owner).not.toBeNull();
+    expect(owner!.mobileNumber).toBe('+15550003333');
+  });
+
+  it('proceeds locally when Clerk returns 404 (already deleted upstream)', async () => {
+    const clerkFetch = vi.fn().mockResolvedValue({ ok: false, status: 404 });
+    const app = buildDeleteApp('clerk_tech', 'technician', {
+      clerkSecretKey: 'sk_test',
+      clerkFetch: clerkFetch as unknown as typeof fetch,
+    });
+    const res = await request(app).delete('/api/users/me');
+    expect(res.status).toBe(200);
+    expect(await repo.findById(TENANT, techId)).toBeNull();
+  });
+
+  it('returns idempotent 200 when an OWNER double-tap raced the first deletion', async () => {
+    // Both requests loaded the actor before the first commit; the second
+    // gets null from softDeleteSelf because the row is ALREADY deleted —
+    // that must not be misread as the last-owner guard (409).
+    await repo.create!({
+      id: uuidv4(), tenantId: TENANT, email: 'owner2@example.com',
+      role: 'owner', canFieldServe: true, clerkUserId: 'clerk_owner2',
+    });
+    const staleRoster = await repo.findByTenant(TENANT);
+    // First request's deletion commits.
+    expect(await repo.softDeleteSelf(TENANT, ownerId)).not.toBeNull();
+    // Second request sees the stale roster (actor still listed as live).
+    const findByTenantSpy = vi
+      .spyOn(repo, 'findByTenant')
+      .mockResolvedValueOnce(staleRoster);
+    const app = buildDeleteApp('clerk_owner', 'owner');
+    const res = await request(app).delete('/api/users/me');
+    findByTenantSpy.mockRestore();
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ deleted: true });
+  });
+
+  it('blocks the last owner with 409 and touches nothing', async () => {
+    const clerkFetch = vi.fn();
+    const app = buildDeleteApp('clerk_owner', 'owner', {
+      clerkSecretKey: 'sk_test',
+      clerkFetch: clerkFetch as unknown as typeof fetch,
+    });
+    const res = await request(app).delete('/api/users/me');
+    expect(res.status).toBe(409);
+    expect(res.body.error).toBe('LAST_OWNER');
+    expect(clerkFetch).not.toHaveBeenCalled();
+    expect(await repo.findById(TENANT, ownerId)).not.toBeNull();
+    expect(audited).toHaveLength(0);
+  });
+
+  it('blocks deletion when the only other owner is SUSPENDED (cannot act)', async () => {
+    // resolveAuthorization rejects non-active memberships, so a suspended
+    // owner must not satisfy the last-owner guard.
+    await repo.create!({
+      id: uuidv4(), tenantId: TENANT, email: 'owner2@example.com',
+      role: 'owner', canFieldServe: true, clerkUserId: 'clerk_owner2',
+      status: 'suspended',
+    });
+    const app = buildDeleteApp('clerk_owner', 'owner');
+    const res = await request(app).delete('/api/users/me');
+    expect(res.status).toBe(409);
+    expect(res.body.error).toBe('LAST_OWNER');
+    expect(await repo.findById(TENANT, ownerId)).not.toBeNull();
+  });
+
+  it('lets an owner delete their account when another owner exists', async () => {
+    await repo.create!({
+      id: uuidv4(), tenantId: TENANT, email: 'owner2@example.com',
+      role: 'owner', canFieldServe: true, clerkUserId: 'clerk_owner2',
+    });
+    const app = buildDeleteApp('clerk_owner', 'owner');
+    const res = await request(app).delete('/api/users/me');
+    expect(res.status).toBe(200);
+    expect(await repo.findById(TENANT, ownerId)).toBeNull();
+  });
+
+  it('404s when the caller has no membership row in this tenant', async () => {
+    const app = buildDeleteApp('clerk_stranger', 'technician');
+    const res = await request(app).delete('/api/users/me');
+    expect(res.status).toBe(404);
+  });
+});

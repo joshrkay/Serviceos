@@ -62,6 +62,34 @@ describe('Postgres integration — customer tags + custom fields (migration 187)
     expect(await tags.listForCustomer(tenant.tenantId, fresh)).toEqual(['net 30']);
   });
 
+  // 4.8 — the customer list is filterable by tag. Pins the EXISTS join in
+  // PgCustomerRepository.buildListWhere (data + count) against real Postgres.
+  it('filters the customer list by tag (findByTenant + listWithMeta)', async () => {
+    const filterTenant = await createTestTenant(pool);
+    const tagged = (await customers.create(baseCustomer(filterTenant.tenantId, filterTenant.userId))).id;
+    const untagged = (await customers.create(baseCustomer(filterTenant.tenantId, filterTenant.userId))).id;
+    await tags.addTag(filterTenant.tenantId, tagged, 'commercial');
+
+    const rows = await customers.findByTenant(filterTenant.tenantId, { tag: 'commercial' });
+    const ids = rows.map((c) => c.id);
+    expect(ids).toContain(tagged);
+    expect(ids).not.toContain(untagged);
+
+    const meta = await customers.listWithMeta(filterTenant.tenantId, { tag: 'commercial' });
+    expect(meta.total).toBe(1);
+    expect(meta.data.map((c) => c.id)).toEqual([tagged]);
+  });
+
+  it('tag filter is tenant-isolated', async () => {
+    const tenantA = await createTestTenant(pool);
+    const tenantB = await createTestTenant(pool);
+    const a = (await customers.create(baseCustomer(tenantA.tenantId, tenantA.userId))).id;
+    await tags.addTag(tenantA.tenantId, a, 'shared-label');
+
+    const fromB = await customers.findByTenant(tenantB.tenantId, { tag: 'shared-label' });
+    expect(fromB).toHaveLength(0);
+  });
+
   it('persists a typed custom-field def + value and upserts in place', async () => {
     const def = await createCustomFieldDef(
       {

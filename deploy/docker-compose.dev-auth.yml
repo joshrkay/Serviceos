@@ -1,0 +1,31 @@
+# Dev-auth override for LOCAL multi-tenant testing (layer over the prod base).
+# Flips api/migrate to NODE_ENV=development + DEV_AUTH_BYPASS so the stack boots
+# without real Clerk/Stripe and accepts per-tenant dev tokens (the bypass decodes
+# the JWT `sub` and bootstraps an RLS-scoped tenant per user), and exposes
+# Postgres so a host-side seeder/psql can reach it.
+#
+# VALIDATED 2026-06-27 on Colima (Docker 29, Ubuntu 24.04 guest): 6 services
+# healthy, migrate exit 0 ("Migrations completed successfully" via the DIRECT
+# DSN), /health 200 (database ok) through the nginx LB, PgBouncer transaction
+# pooling on :6432, 3 tenants concurrent login+create (201 each), and a 9/9
+# cross-tenant isolation matrix (own=200 / cross=404). See docs/deployment.md.
+#
+# Run:
+#   cp deploy/.env.example deploy/.env
+#   docker compose -f deploy/docker-compose.prod.yml \
+#     -f deploy/docker-compose.dev-auth.yml --env-file deploy/.env up -d --build
+#   curl http://localhost:3000/health
+services:
+  migrate:
+    environment:
+      NODE_ENV: development
+
+  api:
+    environment:
+      NODE_ENV: development
+      DEV_AUTH_BYPASS: 'true'
+      CLERK_DEV_HMAC_TOKENS: 'false'
+
+  postgres:
+    ports:
+      - '5433:5432'

@@ -41,19 +41,31 @@ import {
   DEFAULT_BREAKER,
   type BreakerConfig,
 } from './breaker';
-import { runWithRetry, DEFAULT_RETRY, type RetryPolicy } from './retry';
+import {
+  runWithRetry,
+  DEFAULT_RETRY,
+  isRateLimitError,
+  retryAfterMsFromError,
+  type RetryPolicy,
+} from './retry';
 import { adoptDeadline, STAGE_BUDGETS } from './deadline';
 import {
   TenantQuotaRegistry,
   estimateTokens,
   DEFAULT_TIER_CONFIG,
   type TenantTier,
+  type QuotaStore,
 } from './tenant-quota';
 import {
   gatewayRetryAttemptsTotal,
   gatewayFailoverTotal,
 } from '../../monitoring/metrics';
-import type { LLMProvider, LLMRequest, LLMResponse } from './gateway';
+import {
+  SYSTEM_TENANT_ID,
+  type LLMProvider,
+  type LLMRequest,
+  type LLMResponse,
+} from './gateway';
 
 // ─── Helper: classify whether an error should trigger failover ────────────────
 
@@ -142,17 +154,29 @@ export class ProviderBreakerWrapper implements LLMProvider {
   }
 
   async complete(request: LLMRequest): Promise<LLMResponse> {
+    // Readiness / platform probes use SYSTEM_TENANT_ID. Counting their
+    // deadline aborts toward the shared provider breaker was opening the
+    // circuit for real tenant voice traffic after health scrape loops.
+    if (request.tenantId === SYSTEM_TENANT_ID) {
+      return this.inner.complete(request);
+    }
+
     const modelFamily = (request.model ?? 'unknown').split(/[/-]/, 1)[0] || 'unknown';
+    // Isolate classify_intent so assistant chat load cannot open the
+    // breaker that voice classification needs (FM-02).
+    const taskClass = request.taskType === 'classify_intent' ? 'classify' : 'default';
     const parts: BreakerKeyParts = this.cellKeyOverride
       ? {
           provider: this.cellKeyOverride,
           modelFamily,
           tenantTier: request.tenantTier,
+          taskClass,
         }
       : {
           provider: this.inner.name,
           modelFamily,
           tenantTier: request.tenantTier,
+          taskClass,
         };
 
     return this.registry.run(parts, () => this.inner.complete(request));
@@ -173,7 +197,11 @@ export class ProviderBreakerWrapper implements LLMProvider {
  * provider — they indicate bad input, not provider health.
  *
  * On full exhaustion (all providers failed with failover-eligible errors),
- * throws AppError with code LLM_PROVIDER_UNAVAILABLE (HTTP 503).
+ * throws AppError with code LLM_PROVIDER_UNAVAILABLE (HTTP 503) — EXCEPT when
+ * the last error was a provider throttle, which gets its own
+ * LLM_RATE_LIMITED (HTTP 429) carrying `retryAfterMs` and the provider's own
+ * error type/code. A 429 means "come back shortly", not "the AI is broken",
+ * and the two need to be distinguishable all the way up to the operator.
  *
  * `providerPath` is populated on the response with the ordered list of
  * provider:model entries that were attempted.
@@ -216,7 +244,42 @@ export class ProviderFailoverWrapper implements LLMProvider {
       }
     }
 
-    // All providers exhausted
+    // All providers exhausted.
+    //
+    // A throttle is NOT an outage, and saying "all providers failed" for one
+    // is what left the owner staring at an error that named neither the cause
+    // nor the remedy. Surface it as its own typed 429 carrying the provider's
+    // own error type/code/message and the wait hint, so the caller (and the
+    // operator in the UI) can tell "we're rate limited, try again shortly"
+    // from "the AI is broken".
+    if (isRateLimitError(lastErr)) {
+      const rl = lastErr as {
+        providerErrorType?: string;
+        providerErrorCode?: string;
+        message?: string;
+      };
+      const retryAfterMs = retryAfterMsFromError(lastErr);
+      const label = [rl.providerErrorType, rl.providerErrorCode]
+        .filter((v): v is string => typeof v === 'string' && v.length > 0)
+        .join('/');
+      const providerMessage =
+        lastErr instanceof Error ? lastErr.message : String(lastErr);
+      throw new AppError(
+        'LLM_RATE_LIMITED',
+        `AI provider rate limit reached${label ? ` (${label})` : ''}` +
+          `${retryAfterMs !== undefined ? `; retry after ${(retryAfterMs / 1000).toFixed(1)}s` : ''}. ` +
+          `Provider said: ${providerMessage}`,
+        429,
+        {
+          providerPath: path,
+          rateLimited: true,
+          ...(retryAfterMs !== undefined ? { retryAfterMs } : {}),
+          ...(rl.providerErrorType ? { providerErrorType: rl.providerErrorType } : {}),
+          ...(rl.providerErrorCode ? { providerErrorCode: rl.providerErrorCode } : {}),
+        },
+      );
+    }
+
     const retryAfterMs =
       lastErr instanceof BreakerOpenError ? lastErr.retryAfterMs : 1_000;
 
@@ -253,7 +316,7 @@ export class ProviderTenantQuotaWrapper implements LLMProvider {
 
   constructor(
     private readonly inner: LLMProvider,
-    private readonly registry: TenantQuotaRegistry,
+    private readonly registry: QuotaStore,
   ) {
     this.name = inner.name;
   }
@@ -261,6 +324,14 @@ export class ProviderTenantQuotaWrapper implements LLMProvider {
   async complete(request: LLMRequest): Promise<LLMResponse> {
     const tenantId = request.tenantId ?? 'system';
     const tenantTier: TenantTier = request.tenantTier ?? 'standard';
+    const classifierRequest = request.taskType === 'classify_intent';
+    // The taxonomy classifier has a much larger prompt than ordinary
+    // lightweight tasks. Isolate its bounded quota state so an operator burst
+    // cannot starve proposal drafting, while preserving per-tenant limits.
+    const quotaTenantId = classifierRequest ? `${tenantId}:classify_intent` : tenantId;
+    const quotaTenantTier: TenantTier = classifierRequest
+      ? `classifier_${tenantTier}`
+      : tenantTier;
 
     // Estimate tokens from message text
     const estimatedTokens = request.messages.reduce(
@@ -268,13 +339,17 @@ export class ProviderTenantQuotaWrapper implements LLMProvider {
       0,
     );
 
-    const lease = this.registry.acquire({ tenantId, tenantTier, estimatedTokens });
+    const lease = await this.registry.acquire({
+      tenantId: quotaTenantId,
+      tenantTier: quotaTenantTier,
+      estimatedTokens,
+    });
     try {
       const response = await this.inner.complete(request);
-      lease.release(response.tokenUsage.input, response.tokenUsage.output);
+      await lease.release(response.tokenUsage.input, response.tokenUsage.output);
       return response;
     } catch (err) {
-      lease.release();
+      await lease.release();
       throw err;
     }
   }
@@ -294,16 +369,16 @@ export interface ResilienceStackOptions {
   breakers?: CircuitBreakerRegistry;
   breakerConfig?: BreakerConfig;
 
-  /** Per-tenant quota registry. */
-  quota?: TenantQuotaRegistry;
+  /** Per-tenant quota store (in-memory registry or the cluster-wide Redis store). */
+  quota?: QuotaStore;
 
   /** Retry policy override. */
   retryPolicy?: RetryPolicy;
 
   /**
    * Additional fallback providers tried in order after the primary fails.
-   * For P2-029 this is always empty — the failover *wiring* is in place for
-   * when a real second provider is provisioned in a follow-up.
+   * Populated by createLLMGateway() when AI_FALLBACK_PROVIDER_API_KEY +
+   * AI_FALLBACK_PROVIDER_BASE_URL are both set (FM-03 dual-provider).
    */
   fallbackProviders?: LLMProvider[];
 

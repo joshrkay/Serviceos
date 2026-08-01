@@ -1,0 +1,65 @@
+# Railway build config — voice service. Same image as the web service
+# (railway.toml); the split is a deploy-topology choice (which process role
+# runs where), not a different build. Link this file to the voice Railway
+# service via its "Config-as-code" service setting (Settings → Config File
+# Path). See docs/deployment.md "Deploy topology (web + worker)" (the voice
+# service is documented there as the optional third leg).
+[build]
+dockerfilePath = "Dockerfile"
+dockerfileTarget = "api"
+
+[deploy]
+# NO preDeployCommand here. Migrations run exactly once, on the web service
+# (railway.toml's preDeployCommand) — running the same migration twice from
+# two services on every deploy is redundant at best and a race at worst.
+# Same rule as railway.worker.toml: the web service must deploy first
+# whenever a release contains a migration.
+startCommand = "node packages/api/dist/src/index.js"
+# Liveness probe — /health is always 200 when the server is up. Same
+# rationale as railway.toml: not /ready, since /ready 503s on a
+# cold/unreachable DB and would roll back an otherwise-healthy deploy.
+healthcheckPath = "/health"
+healthcheckTimeout = 60
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 3
+# Single voice replica. Unlike the worker service, this one DOES need a
+# stable public domain (Twilio's phone-number webhooks point at it), so
+# scale it up only alongside the same Redis/PgBouncer prerequisites called
+# out in railway.toml — WS-caps / voice fan-out / rate limits need
+# cluster-wide state before numReplicas > 1 is safe here.
+numReplicas = 1
+# Zero-downtime rollout: keep the old replica serving until the new one is
+# healthy. THIS SERVICE DOES drain live calls — that is the entire point of
+# giving voice its own deploy: web/worker deploys never touch it, so calls
+# only ever have to survive a voice-service deploy, which should be rare.
+# Same drain mechanics as railway.toml: on SIGTERM the app flips /ready to
+# 503, rejects new WS upgrades, then waits DRAIN_TIMEOUT_MS (25s) for active
+# calls before tearing down, with a SHUTDOWN_FORCE_EXIT_MS (30s) backstop.
+# Railway's stop grace period must exceed the backstop (>= 35s) or live
+# calls are SIGKILLed mid-drain.
+overlapSeconds = 35
+# Port routing is intentionally NOT pinned here — same rationale as
+# railway.toml. The app honors Railway's injected PORT and listens on it,
+# so Railway's edge routes to that same port automatically.
+
+# PROCESS_ROLE=voice is set as a dashboard service variable on this service
+# (not here — Railway config-as-code does not set service env vars). The web
+# service sets PROCESS_ROLE=web (or leaves it unset for the two-service
+# topology); the worker service sets PROCESS_ROLE=worker. A single- or
+# two-service deploy that never sets PROCESS_ROLE=voice never creates this
+# service — the three-service voice split is opt-in, and 'web' keeps
+# serving telephony/media-streams unchanged until you do.
+#
+# Twilio phone-number webhooks (Voice URL / status callback / recording
+# callback) must point at THIS service's public domain, not the web
+# service's. That is the whole mechanism — there is no code-level routing
+# involved; Railway and the API both treat 'voice' as just another HTTP+WS
+# surface, and it is Twilio's per-number webhook configuration that decides
+# whose /health-adjacent drain window a live call is exposed to. This
+# service's own PUBLIC_API_URL must also be set to ITS OWN domain (not the
+# web domain) so Twilio signature validation reconstructs the URL it
+# actually signed, and so any <Connect><Stream/> URLs the app emits point
+# back at itself. Additionally, set VOICE_PUBLIC_URL (this service's public
+# base URL) on the WEB and WORKER services so the number-provisioning
+# worker points newly-provisioned numbers' voice webhooks at this domain
+# automatically. See docs/deployment.md and docs/prod-env-checklist.md.
