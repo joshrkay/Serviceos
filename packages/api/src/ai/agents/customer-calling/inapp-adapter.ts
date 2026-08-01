@@ -776,6 +776,18 @@ export class InAppVoiceAdapter {
           // (SMS, whisper, in-app panel) in the telephony adapter.
           // No-op here until the in-app channel gets escalation support.
           break;
+        case 'revoke_pending_bookings':
+          // ANS-001 — E1 life-safety booking revocation. The in-app AssistantPage
+          // is the authenticated operator (S2) channel; a caller E1 hazard is an
+          // S1/telephony concept and does not arise here, so there is no caller
+          // booking to revoke. The shared audit_log records the E1 event. If the
+          // in-app channel ever surfaces caller hazards, wire the telephony
+          // processor's handleRevokePendingBookings equivalent here.
+          break;
+        case 'notify_tenant_emergency':
+          // ANS-001 — E1 tenant alert. Telephony-only (no in-app SMS fan-out
+          // path); the shared audit_log is the durable E1 record on this channel.
+          break;
         default: {
           // Exhaustiveness guard: future SideEffectType additions
           // surface as a typecheck error here.

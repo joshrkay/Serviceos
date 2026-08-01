@@ -111,7 +111,8 @@ import type { CustomerNegotiationContextProvider } from '../customers/customer-n
 import type { CurrentQuoteResolver } from '../conversations/negotiation/current-quote-resolver';
 import type { RepairTemplate } from '../verticals/registry';
 import { detectFrustration } from '../ai/agents/customer-calling/frustration-detector';
-import { detectEmergency } from '../ai/agents/customer-calling/emergency-detector';
+import { classifyCallerSafety } from '../ai/agents/customer-calling/emergency-tier';
+import { detectPromptInjection } from '../ai/agents/customer-calling/untrusted-content';
 import { renderTtsText, type SessionLanguage } from '../ai/agents/customer-calling/tts-copy';
 import {
   detectRecordingObjection,
@@ -1124,6 +1125,20 @@ export class TwilioGatherAdapter {
           { type: 'tts_play', payload: { text: RECORDING_OBJECTION_ACK } },
         ];
       }
+
+      // I13 — flag (do NOT consume) a caller prompt-injection attempt. The
+      // words still flow to the classifier as ordinary DATA; we only record
+      // provenance (audit + session flag) so anything read back into an agent
+      // context downstream is known-untrusted and gets neutralized/fenced.
+      const injection = detectPromptInjection(speechResult);
+      if (injection.matched) {
+        const injectionEffects = session.machine.dispatch({
+          type: 'prompt_injection_detected',
+        });
+        if (injectionEffects.length > 0) {
+          await this.processor.executeSideEffects(session, injectionEffects, tenantId);
+        }
+      }
     }
     return null;
   }
@@ -1145,18 +1160,38 @@ export class TwilioGatherAdapter {
     speechResult: string,
     tenantId: string,
   ): Promise<{ matched: boolean; effects: SideEffect[] | null }> {
-    const emergency = detectEmergency(speechResult);
-    if (!emergency.matched) return { matched: false, effects: null };
+    // ANS-001 — classify the safety TIER (embedded E1 table + detectEmergency
+    // backstop; corpus rules are not shipped at runtime so none are passed).
+    // E1 = life safety (terminal safety path, never book, no bridge); E2 =
+    // urgent dispatch (existing escalation + page ladder); E3 = not an emergency.
+    const safety = classifyCallerSafety(speechResult, {});
+    if (safety.tier === 'E3') return { matched: false, effects: null };
+
     const effects = session.machine.dispatch({
       type: 'emergency_detected',
-      keyword: emergency.keyword ?? 'unknown',
+      keyword: safety.keyword,
       utterance: speechResult,
+      tier: safety.tier,
+      ...(safety.responseScript ? { responseScript: safety.responseScript } : {}),
     });
-    if (effects.length === 0 || session.machine.currentState !== 'escalating') {
+    if (effects.length === 0) {
+      // Idempotent-skip (already escalating for E2, or terminated) — fall
+      // through to the normal pipeline so no double-page / double-close.
+      return { matched: true, effects: null };
+    }
+
+    // The guard fired. E1 → terminated (life-safety close); E2 → escalating.
+    const escalated = session.machine.currentState === 'escalating';
+    const lifeSafetyClosed =
+      safety.tier === 'E1' && session.machine.currentState === 'terminated';
+    if (!escalated && !lifeSafetyClosed) {
       return { matched: true, effects: null };
     }
     await this.processor.executeSideEffects(session, effects, tenantId);
-    this.armEmergencyPageLadder(session, speechResult, tenantId);
+    // Page ladder ONLY for E2 — E1 never bridges to the contractor's dispatcher.
+    if (escalated && safety.tier === 'E2') {
+      this.armEmergencyPageLadder(session, speechResult, tenantId);
+    }
     return { matched: true, effects };
   }
 

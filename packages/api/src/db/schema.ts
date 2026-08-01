@@ -4872,6 +4872,31 @@ export const MIGRATIONS = {
     CREATE POLICY tenant_isolation_onboarding_session ON onboarding_session
       USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
   `,
+
+  // Mobile push notifications — the owner's device registers its Expo push
+  // token after sign-in so the app can notify on proposal execution. Keyed by
+  // the Clerk subject (clerk_user_id, matching users) and unique per token so
+  // re-registration is an idempotent upsert; a user may have several devices.
+  '196_device_push_tokens': `
+    CREATE TABLE IF NOT EXISTS device_push_tokens (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+      clerk_user_id TEXT NOT NULL,
+      expo_push_token TEXT NOT NULL,
+      platform TEXT NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS device_push_tokens_unique
+      ON device_push_tokens (tenant_id, clerk_user_id, expo_push_token);
+    CREATE INDEX IF NOT EXISTS idx_device_push_tokens_user
+      ON device_push_tokens (tenant_id, clerk_user_id);
+    ALTER TABLE device_push_tokens ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE device_push_tokens FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_device_push_tokens ON device_push_tokens;
+    CREATE POLICY tenant_isolation_device_push_tokens ON device_push_tokens
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

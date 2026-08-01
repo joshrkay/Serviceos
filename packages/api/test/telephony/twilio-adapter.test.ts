@@ -1075,10 +1075,15 @@ describe('TwilioGatherAdapter.handleGather', () => {
       sess.machine.dispatch({ type: 'caller_known', customerId: 'c1' });
     }
 
+    // Phrase carries no deterministic E1/E2 safety keyword, so the pre-LLM
+    // scan (classifyCallerSafety) does NOT preempt — this exercises the LLM
+    // `emergency_dispatch` INTENT path, which still fast-paths to escalating
+    // (E2-style dispatcher bridge). ANS-001 only re-tiers the deterministic
+    // keyword scan; the LLM emergency_dispatch intent is unchanged.
     const xml = await a3.handleGather({
       sessionId: sid,
       callSid: 'CA-emerg',
-      speechResult: "I smell gas in my house",
+      speechResult: "I've got a really serious problem and I need help right now",
       confidence: 0.97,
       tenantId: 'tenant-abc',
     });
@@ -1490,7 +1495,7 @@ describe('TwilioGatherAdapter.processCallerUtterance — frustration detector', 
 // ─── RV-140/RV-142 — emergency keyword interrupt (shared safety scan) ────────
 
 describe('RV-140 — deterministic emergency scan (both transcript entry points)', () => {
-  it('processCallerUtterance (media-streams path): escalates on emergency keyword without any LLM call, 911 line first', async () => {
+  it('processCallerUtterance (media-streams path): an E1 keyword closes to life safety without any LLM call, 911 line first', async () => {
     const { adapter, store, gateway } = makeAdapter();
     const session = store.create('tenant-t1', 'telephony', { callSid: 'CA-em-1' });
 
@@ -1503,12 +1508,17 @@ describe('RV-140 — deterministic emergency scan (both transcript entry points)
 
     // No LLM call of any kind happened (scan runs BEFORE the classifier).
     expect((gateway.complete as ReturnType<typeof vi.fn>)).not.toHaveBeenCalled();
-    expect(session.machine.currentState).toBe('escalating');
+    // ANS-001 — a gas leak is E1 life safety: the caller is directed to 911 and
+    // the call CLOSES (terminated). It is NOT bridged to the contractor's
+    // dispatcher (that would keep the caller on the line — forbidden for E1).
+    expect(session.machine.currentState).toBe('terminated');
     const tts = sideEffects.filter((fx) => fx.type === 'tts_play');
     expect((tts[0]?.payload as { text: string }).text).toContain('911');
+    // Never bridged: no dispatcher transfer side effect on an E1 turn.
+    expect(sideEffects.some((fx) => fx.type === 'notify_oncall')).toBe(false);
   });
 
-  it('handleGather (PSTN path): the same shared scan fires and the TwiML speaks the 911 line', async () => {
+  it('handleGather (PSTN path): the same shared scan fires on an E1 hazard and the TwiML speaks the 911 line then hangs up', async () => {
     const { adapter, store, gateway } = makeAdapter();
     const session = store.create('tenant-t1', 'telephony', { callSid: 'CA-em-2' });
 
@@ -1520,26 +1530,35 @@ describe('RV-140 — deterministic emergency scan (both transcript entry points)
       tenantId: 'tenant-t1',
     });
 
-    expect((gateway.complete as ReturnType<typeof vi.fn>)).not.toHaveBeenCalled();
-    expect(session.machine.currentState).toBe('escalating');
+    // The deterministic scan consumed the turn BEFORE the intent classifier.
+    // E1 ends the call, so the only permitted LLM call is the post-close call
+    // summary — never the intent classifier.
+    for (const [arg] of (gateway.complete as ReturnType<typeof vi.fn>).mock.calls) {
+      expect(JSON.stringify(arg)).toMatch(/Summarize the following/i);
+    }
+    // ANS-001 — sparking/electrical burning is E1: direct to 911 and close.
+    expect(session.machine.currentState).toBe('terminated');
     expect(twiml).toContain('call 911');
+    expect(twiml).toContain('<Hangup/>');
   });
 
-  it('emergency utterance while already escalating falls through (no double-page)', async () => {
+  it('E2 emergency utterance while already escalating falls through (no double-page)', async () => {
     const { adapter, store } = makeAdapter();
     const session = store.create('tenant-t1', 'telephony', { callSid: 'CA-em-3' });
-    // First hit moves the FSM to escalating.
+    // First hit moves the FSM to escalating. Uses an E2 hazard (flooding) —
+    // E2 bridges to the dispatcher (escalating), which is the state whose
+    // idempotency this test guards. (An E1 hazard would instead close the call.)
     await adapter.processCallerUtterance({
       sessionId: session.id,
       callSid: 'CA-em-3',
-      speechResult: 'gas leak',
+      speechResult: 'the basement is flooding',
       tenantId: 'tenant-t1',
     });
     const dispatchSpy = vi.spyOn(session.machine, 'dispatch');
     await adapter.processCallerUtterance({
       sessionId: session.id,
       callSid: 'CA-em-3',
-      speechResult: 'I said there is a gas leak',
+      speechResult: 'I said the basement is still flooding',
       tenantId: 'tenant-t1',
     });
     // The second emergency dispatch is idempotent (empty effects) and the
@@ -1617,7 +1636,7 @@ describe('RV-142 — injectSafetySayLines', () => {
 // ─── RV-140 (interim) — streaming interim emergency scan ────────────────────
 
 describe('RV-140 — scanInterimForEmergency (streaming interims)', () => {
-  it('an interim "gas leak" escalates immediately — before any final transcript', async () => {
+  it('an interim "gas leak" (E1) fires immediately — 911 line, close — before any final transcript', async () => {
     const { adapter, store, gateway } = makeAdapter();
     const session = store.create('tenant-t1', 'telephony', { callSid: 'CA-int-1' });
 
@@ -1628,7 +1647,8 @@ describe('RV-140 — scanInterimForEmergency (streaming interims)', () => {
     });
 
     expect((gateway.complete as ReturnType<typeof vi.fn>)).not.toHaveBeenCalled();
-    expect(session.machine.currentState).toBe('escalating');
+    // E1 life safety — 911 direction then close (not a dispatcher bridge).
+    expect(session.machine.currentState).toBe('terminated');
     expect(effects).not.toBeNull();
     const tts = (effects ?? []).filter((fx) => fx.type === 'tts_play');
     expect((tts[0]?.payload as { text: string }).text).toContain('911');
@@ -1656,9 +1676,11 @@ describe('RV-140 — scanInterimForEmergency (streaming interims)', () => {
     const { adapter, store } = makeAdapter();
     const session = store.create('tenant-t1', 'telephony', { callSid: 'CA-int-3' });
 
+    // E2 hazard (flooding) → dispatcher escalation; the page-idempotency this
+    // test guards lives in the escalating state. (An E1 hazard would close.)
     await adapter.scanInterimForEmergency({
       sessionId: session.id,
-      speechResult: 'gas leak',
+      speechResult: 'the basement is flooding',
       tenantId: 'tenant-t1',
     });
     expect(session.machine.currentState).toBe('escalating');
@@ -1667,7 +1689,7 @@ describe('RV-140 — scanInterimForEmergency (streaming interims)', () => {
     await adapter.processCallerUtterance({
       sessionId: session.id,
       callSid: 'CA-int-3',
-      speechResult: 'I said there is a gas leak in the basement',
+      speechResult: 'I said the basement is still flooding',
       tenantId: 'tenant-t1',
     });
 
@@ -1837,6 +1859,8 @@ describe('RV-130 — "stop recording" objection in the shared safety scan', () =
     // Emergency consumed the turn (911 line first); objection deferred.
     expect((effects.find((e) => e.type === 'tts_play')?.payload as { text: string }).text).toContain('911');
     expect(pauseRecording).not.toHaveBeenCalled();
-    expect(session.machine.currentState).toBe('escalating');
+    // ANS-001 — gas leak is E1: 911 direction then close (life safety wins the
+    // turn over the recording objection AND over a dispatcher bridge).
+    expect(session.machine.currentState).toBe('terminated');
   });
 });

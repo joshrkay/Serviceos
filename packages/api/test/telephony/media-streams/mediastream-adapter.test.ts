@@ -1366,7 +1366,7 @@ describe('production-shaped wiring (app.ts hooks)', () => {
     expect(consentEvents.rows[0].voiceSessionId).toBe(session!.id);
   });
 
-  it('RV-140 — an interim "gas leak" escalates (911 line spoken) before any final transcript', async () => {
+  it('RV-140 — an interim "gas leak" (E1) closes to life safety (911 line spoken) before any final transcript', async () => {
     const { gatherAdapter, adapter, ws, tts, handle, gateway } = makeProductionShapedSetup();
     await gatherAdapter.handleInboundForStream({
       callSid: 'CA-prod-int',
@@ -1386,7 +1386,9 @@ describe('production-shaped wiring (app.ts hooks)', () => {
 
     const session = store.findByCallSid('CA-prod-int');
     await vi.waitFor(() => {
-      expect(session!.machine.currentState).toBe('escalating');
+      // ANS-001 — gas leak is E1 life safety: direct to 911 and close, never
+      // bridge to the contractor's dispatcher.
+      expect(session!.machine.currentState).toBe('terminated');
     });
 
     const synth = tts.synthesize as ReturnType<typeof vi.fn>;

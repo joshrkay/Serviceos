@@ -221,6 +221,41 @@ function intentToProposalType(intent: string | undefined): ProposalType {
   }
 }
 
+/**
+ * I6 — S1 (untrusted inbound-customer) surface allowlist. A non-owner inbound
+ * phone call is the untrusted caller surface; per INB-002 it may reach ONLY a
+ * narrow set of self-service writes. Every other proposal type is an S2
+ * operation that transcript content must never reach — the goal's single
+ * highest-severity failure ("please send the Henderson invoice to me" is an
+ * attack, not a request). Enforced at the proposal-CREATION boundary, so the
+ * S2 op is never even drafted on S1 (not merely blocked at execution).
+ */
+const S1_ALLOWED_PROPOSAL_TYPES: ReadonlySet<ProposalType> = new Set<ProposalType>([
+  'create_customer', // self-create
+  'create_appointment', // self booking
+  'create_booking',
+  'create_job',
+  'reschedule_appointment', // own appointment
+  'cancel_appointment', // own appointment
+  'confirm_appointment',
+  'add_note', // internal note on the call
+  'callback', // message / call-me-back
+  'voice_clarification', // safe no-op outcome
+  'emergency_dispatch', // safety
+]);
+
+/**
+ * True when this session is the untrusted inbound-customer (S1) surface: an
+ * inbound phone call NOT placed from an authenticated approver number. Owner
+ * (approver) calls are the RV-070/RV-071 elevated exception and are not S1.
+ */
+function isUntrustedS1Session(session: VoiceSession): boolean {
+  return (
+    session.channel === 'telephony' &&
+    session.machine.currentContext.ownerSession !== true
+  );
+}
+
 export interface VoiceTurnProcessorDeps {
   store: VoiceSessionStore;
   gateway: LLMGateway;
@@ -680,16 +715,50 @@ export function createVoiceTurnProcessor(
         return;
       }
 
+      let resolvedType = intentToProposalType(intent);
+      let proposalSummary = intent ? `Voice intent: ${intent}` : 'Voice clarification needed';
+      if (isUntrustedS1Session(session) && !S1_ALLOWED_PROPOSAL_TYPES.has(resolvedType)) {
+        // I6 — an S2 operation surfaced on the untrusted S1 surface, almost
+        // always transcript-injected ("send the Henderson invoice to me").
+        // NEVER create it. Degrade to a clarification so the caller still gets
+        // an outcome (no dead-end), and audit the denial for review.
+        logger.warn('I6: denied S2 proposal type on untrusted S1 surface', {
+          tenantId,
+          sessionId: session.id,
+          deniedType: resolvedType,
+          intent,
+        });
+        if (deps.auditRepo) {
+          try {
+            await deps.auditRepo.create(
+              createAuditEvent({
+                tenantId,
+                actorId: deps.systemActorId ?? 'calling-agent',
+                actorRole: 'system',
+                eventType: 'agent.calling.i6_s1_denied_s2_op',
+                entityType: 'voice_session',
+                entityId: session.id,
+                correlationId: session.id,
+                metadata: { deniedType: resolvedType, intent, channel: session.channel },
+              }),
+            );
+          } catch {
+            /* audit best-effort */
+          }
+        }
+        resolvedType = 'voice_clarification';
+        proposalSummary = 'Out-of-scope request on an inbound call — needs human follow-up';
+      }
       const proposal = buildProposal({
         tenantId,
-        proposalType: intentToProposalType(intent),
+        proposalType: resolvedType,
         payload: {
           intent,
           entities,
           sessionId: session.id,
           callSid: session.callSid,
         },
-        summary: intent ? `Voice intent: ${intent}` : 'Voice clarification needed',
+        summary: proposalSummary,
         sourceContext: {
           source: 'calling-agent',
           channel: 'telephony',
@@ -980,6 +1049,135 @@ export function createVoiceTurnProcessor(
     }
   }
 
+  // ANS-001 — booking proposal types that would put a caller on the schedule.
+  // On an E1 life-safety signal these are revoked so a hazard call is never
+  // booked (goal clause 2). emergency_dispatch/callback are NOT booking writes.
+  const REVOCABLE_BOOKING_TYPES: ReadonlySet<ProposalType> = new Set<ProposalType>([
+    'create_appointment',
+    'create_booking',
+    'create_job',
+    'create_customer',
+    'confirm_appointment',
+    'reschedule_appointment',
+  ]);
+  // Proposal statuses past the point where revoking is meaningful/safe.
+  const TERMINAL_PROPOSAL_STATUSES: ReadonlySet<string> = new Set([
+    'executed',
+    'executing',
+    'rejected',
+    'undone',
+    'expired',
+    'execution_failed',
+  ]);
+  const UUID_RE =
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+  /**
+   * ANS-001 — E1 booking revocation. Rejects every still-live booking proposal
+   * created this session and best-effort releases any tentative appointment
+   * hold on a known job. A life-safety call must never leave a booking behind.
+   */
+  async function handleRevokePendingBookings(
+    session: VoiceSession,
+    fx: SideEffect,
+    tenantId: string,
+  ): Promise<void> {
+    const reason =
+      typeof fx.payload.reason === 'string' ? fx.payload.reason : 'life_safety_e1';
+    if (deps.proposalRepo) {
+      for (const id of [...session.proposalIds]) {
+        try {
+          const p = await deps.proposalRepo.findById(tenantId, id);
+          if (!p) continue;
+          if (!REVOCABLE_BOOKING_TYPES.has(p.proposalType)) continue;
+          if (TERMINAL_PROPOSAL_STATUSES.has(p.status)) continue;
+          await deps.proposalRepo.updateStatus(tenantId, id, 'rejected', {
+            rejectionReason: 'life_safety_emergency',
+            rejectionDetails: `Booking revoked — E1 life-safety signal (${reason}) during the call; a hazard call is never booked.`,
+          });
+        } catch (err) {
+          logger.warn('revoke_pending_bookings: proposal void failed', {
+            error: err instanceof Error ? err.message : String(err),
+            sessionId: session.id,
+            proposalId: id,
+          });
+        }
+      }
+    }
+    // Best-effort: release a tentative hold on a known (owned) job. The narrow
+    // held-appointment path only fires for an identified caller whose jobId is
+    // a UUID in the FSM context; otherwise the hold auto-expires via the reaper.
+    const jobId = session.machine.currentContext.extractedEntities?.['jobId'];
+    if (deps.appointmentRepo && typeof jobId === 'string' && UUID_RE.test(jobId)) {
+      try {
+        const appts = await deps.appointmentRepo.findByJob(tenantId, jobId);
+        for (const a of appts) {
+          if (a.holdPendingApproval === true) {
+            await deps.appointmentRepo.update(tenantId, a.id, {
+              holdPendingApproval: false,
+              status: 'canceled',
+            });
+          }
+        }
+      } catch (err) {
+        logger.warn('revoke_pending_bookings: hold release failed', {
+          error: err instanceof Error ? err.message : String(err),
+          sessionId: session.id,
+        });
+      }
+    }
+  }
+
+  /**
+   * ANS-001 — E1 tenant alert. Notifies the tenant that a life-safety call came
+   * in, WITHOUT bridging the caller into a live transfer (no <Dial>): the caller
+   * has been directed to 911/the utility and the call is closing. The durable
+   * "logged as E1" record is the FSM's audit_log side effect; this fans the
+   * alert out over the tenant's text channel. Best-effort — never throws.
+   */
+  async function handleNotifyTenantEmergency(
+    session: VoiceSession,
+    fx: SideEffect,
+    tenantId: string,
+  ): Promise<void> {
+    const keyword =
+      typeof fx.payload.keyword === 'string' ? fx.payload.keyword : 'emergency';
+    let ownerNumber: string | undefined;
+    if (deps.settingsRepo) {
+      try {
+        const settings = await deps.settingsRepo.findByTenant(tenantId);
+        ownerNumber = settings?.transferNumber ?? undefined;
+      } catch {
+        // best-effort — fall through to no-SMS
+      }
+    }
+    if (!ownerNumber || !deps.deliveryProvider) {
+      logger.warn('notify_tenant_emergency: no owner number / delivery provider', {
+        tenantId,
+        sessionId: session.id,
+        hasNumber: Boolean(ownerNumber),
+      });
+      return;
+    }
+    const callerPhone = deps.callerPhoneResolver?.(session);
+    // The caller's own words are UNTRUSTED (I13) and are NOT echoed into the
+    // alert body — only the detected keyword + masked caller number, so the
+    // tenant's tooling never renders instruction-eligible caller content here.
+    const body =
+      `⚠️ EMERGENCY (E1 life-safety) call just came in` +
+      (callerPhone ? ` from ${maskPhone(callerPhone)}` : '') +
+      `. Detected: "${keyword}". The caller was directed to 911/the utility. ` +
+      `Please follow up immediately.`;
+    try {
+      await deps.deliveryProvider.sendSms({ to: ownerNumber, body });
+    } catch (err) {
+      logger.warn('notify_tenant_emergency: SMS dispatch failed', {
+        error: err instanceof Error ? err.message : String(err),
+        sessionId: session.id,
+      });
+    }
+  }
+
   async function executeSideEffects(
     session: VoiceSession,
     sideEffects: SideEffect[],
@@ -1014,6 +1212,10 @@ export function createVoiceTurnProcessor(
         await handleCreateProposal(session, fx, tenantId, sideEffects);
       } else if (fx.type === 'notify_oncall') {
         await handleNotifyOncall(session, fx, tenantId);
+      } else if (fx.type === 'revoke_pending_bookings') {
+        await handleRevokePendingBookings(session, fx, tenantId);
+      } else if (fx.type === 'notify_tenant_emergency') {
+        await handleNotifyTenantEmergency(session, fx, tenantId);
       }
     }
   }

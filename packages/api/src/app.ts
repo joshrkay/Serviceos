@@ -83,6 +83,11 @@ import {
   type MeTenantSettings,
   type UserModeService,
 } from './routes/me';
+import {
+  createDevicesRouter,
+  InMemoryDeviceTokenService,
+  type DeviceTokenService,
+} from './routes/devices';
 import { setUserModeLoader } from './middleware/auth';
 import {
   setSupervisorPresenceLoader,
@@ -3711,6 +3716,31 @@ export function createApp(): express.Express {
   }
 
   app.use('/api/me', createMeRouter(userModeService, auditRepo));
+
+  // Device push-token registration. Pg-backed when a DB is configured (runs
+  // inside the per-request tenant transaction, so RLS scopes every row);
+  // in-memory otherwise. Keyed by the Clerk subject like the users table.
+  const deviceTokenService: DeviceTokenService = pool
+    ? {
+        async upsert(tenantId, clerkUserId, expoPushToken, platform) {
+          await pool.query(
+            `INSERT INTO device_push_tokens (tenant_id, clerk_user_id, expo_push_token, platform)
+             VALUES ($1, $2, $3, $4)
+             ON CONFLICT (tenant_id, clerk_user_id, expo_push_token)
+             DO UPDATE SET platform = EXCLUDED.platform, updated_at = NOW()`,
+            [tenantId, clerkUserId, expoPushToken, platform],
+          );
+        },
+        async remove(tenantId, clerkUserId, expoPushToken) {
+          await pool.query(
+            `DELETE FROM device_push_tokens
+             WHERE tenant_id = $1 AND clerk_user_id = $2 AND expo_push_token = $3`,
+            [tenantId, clerkUserId, expoPushToken],
+          );
+        },
+      }
+    : new InMemoryDeviceTokenService();
+  app.use('/api/devices', createDevicesRouter(deviceTokenService, auditRepo));
   app.use('/api/feedback/responses', createFeedbackResponsesRouter(feedbackResponseRepo));
   app.use(
     '/api/conversations',
