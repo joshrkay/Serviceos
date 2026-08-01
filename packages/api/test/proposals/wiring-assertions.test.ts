@@ -163,3 +163,53 @@ describe('U8: each newly probed handler is DETECTED when its effect dep is dropp
     expect(warn).toHaveBeenCalledTimes(1);
   });
 });
+
+describe('U8 commit 2: a MISSING isFullyWired() probe counts as degraded (fail closed)', () => {
+  // A synthetic voice-reachable handler that ships without the probe — the
+  // exact shape the old default ("no probe = assume wired") let through.
+  function registryWithProbelessHandler() {
+    const registry = createExecutionHandlerRegistry(fullDeps());
+    registry.set('draft_invoice', {
+      proposalType: 'draft_invoice',
+      execute: async () => ({ success: true, resultEntityId: 'synthetic' }),
+      // no isFullyWired
+    });
+    return registry;
+  }
+
+  it('findDegradedVoiceHandlers flags a probe-less voice-reachable handler', () => {
+    expect(
+      findDegradedVoiceHandlers(registryWithProbelessHandler(), VOICE_REACHABLE),
+    ).toEqual(['draft_invoice']);
+  });
+
+  it('boot fails closed on the missing probe when a pool is configured', () => {
+    expect(() =>
+      assertVoiceHandlersWired(registryWithProbelessHandler(), VOICE_REACHABLE, {
+        poolConfigured: true,
+      }),
+    ).toThrow(/draft_invoice.*isFullyWired|isFullyWired.*draft_invoice/s);
+  });
+
+  it('pool-less dev boot still skips cleanly (warns, never throws)', () => {
+    const warn = vi.fn();
+    expect(() =>
+      assertVoiceHandlersWired(registryWithProbelessHandler(), VOICE_REACHABLE, {
+        poolConfigured: false,
+        logger: { warn },
+      }),
+    ).not.toThrow();
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn.mock.calls[0][1]).toEqual({ degraded: ['draft_invoice'] });
+  });
+
+  it('a probe that exists but returns false is still degraded (flip did not weaken the old path)', () => {
+    const registry = createExecutionHandlerRegistry(fullDeps());
+    registry.set('draft_invoice', {
+      proposalType: 'draft_invoice',
+      execute: async () => ({ success: true }),
+      isFullyWired: () => false,
+    });
+    expect(findDegradedVoiceHandlers(registry, VOICE_REACHABLE)).toEqual(['draft_invoice']);
+  });
+});

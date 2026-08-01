@@ -159,12 +159,17 @@ export interface ExecutionHandler {
    */
   performsExternalIo?: boolean;
   /**
-   * Optional capability signal for the boot-time wiring guard
+   * Capability signal for the boot-time wiring guard
    * (proposals/execution/wiring-assertions.ts). Returns false when the
-   * handler is missing a dependency it needs to PERSIST — i.e. it would
-   * fall back to a synthetic-id passthrough that returns success without
-   * saving anything. Handlers that always persist (or have no degraded
-   * path) omit this; the guard treats absence as "fully wired".
+   * handler is missing a dependency it needs for its core effect — i.e. it
+   * would fall back to a synthetic-id/echo passthrough (or an ok:true skip)
+   * that returns success without persisting/sending anything.
+   *
+   * U8 (C2) — structurally optional (non-voice-reachable handlers may omit
+   * it), but the guard FAILS CLOSED: every voice-reachable handler MUST
+   * implement it, and a missing probe counts as DEGRADED at boot. The
+   * registry-enumeration test (test/proposals/wiring-assertions.test.ts)
+   * pins full coverage of Object.values(INTENT_TO_PROPOSAL_TYPE).
    */
   isFullyWired?(): boolean;
 }
