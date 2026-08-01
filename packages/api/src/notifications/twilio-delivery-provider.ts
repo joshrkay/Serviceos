@@ -36,6 +36,7 @@ import {
 export interface TwilioSmsConfig {
   accountSid: string;
   authToken: string;
+  secondaryAuthToken?: string;
   fromNumber: string;
   /** Override for tests. Defaults to Twilio's REST API host. */
   apiBaseUrl?: string;
@@ -158,8 +159,11 @@ function classifySendgridError(response: Response, providerBody: string): Normal
 const DELIVERY_REQUEST_TIMEOUT_MS = 15_000;
 
 export class TwilioDeliveryProvider implements MessageDeliveryProvider {
-  private readonly sms: Required<Omit<TwilioSmsConfig, "fetchImpl">> & {
+  private readonly smsConfig?: Required<
+    Omit<TwilioSmsConfig, "fetchImpl" | "secondaryAuthToken">
+  > & {
     fetchImpl: typeof fetch;
+    secondaryAuthToken?: string;
   };
   private readonly emailConfig?: Required<
     Omit<SendGridConfig, "fetchImpl" | "fromName" | "replyToEmail">
@@ -214,21 +218,6 @@ export class TwilioDeliveryProvider implements MessageDeliveryProvider {
     }
   }
 
-    this.sms = {
-      accountSid: config.sms.accountSid,
-      authToken: config.sms.authToken,
-      fromNumber: config.sms.fromNumber,
-      apiBaseUrl: config.sms.apiBaseUrl ?? "https://api.twilio.com/2010-04-01",
-      fetchImpl: config.sms.fetchImpl ?? fetch,
-    };
-    this.email = {
-      apiKey: config.email.apiKey,
-      fromEmail: config.email.fromEmail,
-      fromName: config.email.fromName,
-      replyToEmail: config.email.replyToEmail,
-      apiBaseUrl: config.email.apiBaseUrl ?? "https://api.sendgrid.com/v3",
-      fetchImpl: config.email.fetchImpl ?? fetch,
-    };
   /** True when this provider can actually send on the given channel. */
   supports(channel: "sms" | "email"): boolean {
     return channel === "sms"
@@ -264,15 +253,17 @@ export class TwilioDeliveryProvider implements MessageDeliveryProvider {
       headers["Idempotency-Key"] = message.idempotencyKey;
     }
 
-    // An AbortSignal timeout rejects with a DOMException, not a DeliveryError,
-    // so callers branching on `instanceof DeliveryError` (send-service's
-    // mapDeliveryErrorForClient, retry classification) would see an
-    // unclassified error. Normalize it here so the timeout stays a first-class,
-    // retriable provider failure.
+    // SMS_SEND_TIMEOUT_MS (4s), not the generic 15s delivery ceiling: the E1
+    // life-safety tenant alert rides this path and must never park behind a
+    // hung Twilio socket. An AbortSignal timeout rejects with a DOMException,
+    // not a DeliveryError, so callers branching on `instanceof DeliveryError`
+    // (send-service's mapDeliveryErrorForClient, retry classification) would
+    // see an unclassified error. Normalize it here so the timeout stays a
+    // first-class, retriable provider failure.
     let response: Response;
     try {
-      response = await this.sms.fetchImpl(
-        `${this.sms.apiBaseUrl}/Accounts/${this.sms.accountSid}/Messages.json`,
+      response = await sms.fetchImpl(
+        `${sms.apiBaseUrl}/Accounts/${sms.accountSid}/Messages.json`,
         {
           method: "POST",
           headers,
@@ -281,19 +272,19 @@ export class TwilioDeliveryProvider implements MessageDeliveryProvider {
         },
       );
     } catch (err) {
-      throw new DeliveryError("PROVIDER_FAILED", "SMS provider timed out", {
-        providerBody: err instanceof Error ? err.message : String(err),
-      });
+      if (err instanceof DeliveryError) throw err;
+      const message = err instanceof Error ? err.message : String(err);
+      const aborted =
+        err instanceof Error && (err.name === "TimeoutError" || err.name === "AbortError");
+      // Other throws (DNS failure, a test tripwire fetch, …) stay a
+      // DeliveryError too, but KEEP their original message — callers and
+      // tests must be able to see what actually failed.
+      throw new DeliveryError(
+        "PROVIDER_FAILED",
+        aborted ? "SMS provider timed out" : `SMS provider failed: ${message}`,
+        { providerBody: message },
+      );
     }
-    const response = await sms.fetchImpl(
-      `${sms.apiBaseUrl}/Accounts/${sms.accountSid}/Messages.json`,
-      {
-        method: "POST",
-        headers,
-        body: body.toString(),
-        signal: AbortSignal.timeout(DELIVERY_REQUEST_TIMEOUT_MS),
-      },
-    );
 
     if (!response.ok) {
       const text = await response.text().catch(() => "");

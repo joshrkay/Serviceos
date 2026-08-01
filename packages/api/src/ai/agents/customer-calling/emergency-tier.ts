@@ -307,7 +307,7 @@ export interface E1ScriptReadiness {
  * never read, so a placeholder life-safety script could ship to production
  * completely silently. `app.ts` calls this once at boot and logs the result;
  * per-tenant overrides ride `tenant_settings.e1_reviewed_script` (migration
- * 197) via the `emergency_detected.responseScript` seam — see
+ * 267) via the `emergency_detected.responseScript` seam — see
  * `runEmergencyScan` in `telephony/twilio-adapter.ts`.
  *
  * Deliberately pure/free of I/O so it can NEVER be the reason boot fails —

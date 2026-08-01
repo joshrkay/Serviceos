@@ -295,6 +295,28 @@ export interface CallingAgentContext {
    * context. Only the prompt_injection_detected global guard writes it.
    */
   injectionFlagged?: boolean;
+  /**
+   * WS18 — the drafted, catalog-grounded estimate the caller is currently being
+   * quoted on the live call. Set in `proposal_draft` when a `proposal_queued`
+   * event carries grounded estimate data; consumed in `closing` so the caller
+   * can refine the quote in place ("actually, make it two") or close the sale
+   * ("yes, book it") without discarding the draft. Undefined for every
+   * non-estimate proposal, so `closing` behaves exactly as it did pre-WS18.
+   *
+   *  - `groundedClean`: every line resolved to a clean catalog match (the
+   *    D-018 lane requires this before an autonomous close is even eligible).
+   *  - `totalCents`: integer cents, the spoken total; never floating point.
+   *  - `refinementCount`: bounded by MAX_REFINEMENTS_PER_CALL so a caller can't
+   *    loop the agent editing the quote forever — past the cap the FSM defers
+   *    to the owner.
+   */
+  pendingQuote?: {
+    proposalId: string;
+    groundedLines: QuoteReadbackLine[];
+    groundedClean: boolean;
+    totalCents: number;
+    refinementCount: number;
+  };
 }
 
 // ─── Side effects ─────────────────────────────────────────────────────────────

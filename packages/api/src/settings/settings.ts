@@ -529,9 +529,11 @@ export interface TenantSettings {
    * `e1ScriptReadiness()`. When set, `runEmergencyScan` (twilio-adapter.ts)
    * passes this as `responseScript` on the `emergency_detected` event for
    * E1 turns ONLY, overriding the placeholder with no code change. Null /
-   * undefined = placeholder still in effect. Migration 197.
+   * undefined = placeholder still in effect. Migration 267 (renumbered
+   * from 197 on merge).
    */
   e1ReviewedScript?: string | null;
+  /**
    * Epic 12.6 — weekly feedback email. Opt-OUT (column defaults true,
    * migration 204), so pilots receive it unless they turn it off. Optional
    * on the type so pre-migration rows / legacy fixtures read as "on" via

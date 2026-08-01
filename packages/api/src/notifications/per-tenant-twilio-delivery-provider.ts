@@ -124,20 +124,17 @@ export class PerTenantTwilioDeliveryProvider implements MessageDeliveryProvider 
         },
       );
     } catch (err) {
-      throw new DeliveryError('PROVIDER_FAILED', 'SMS provider timed out', {
-        providerBody: err instanceof Error ? err.message : String(err),
-      });
+      if (err instanceof DeliveryError) throw err;
+      const message = err instanceof Error ? err.message : String(err);
+      const aborted =
+        err instanceof Error && (err.name === 'TimeoutError' || err.name === 'AbortError');
+      // Non-abort throws keep their original message (see the base provider).
+      throw new DeliveryError(
+        'PROVIDER_FAILED',
+        aborted ? 'SMS provider timed out' : `SMS provider failed: ${message}`,
+        { providerBody: message },
+      );
     }
-    const response = await this.fetchImpl(
-      `${this.apiBaseUrl}/Accounts/${creds.accountSid}/Messages.json`,
-      {
-        method: 'POST',
-        headers,
-        body: body.toString(),
-        // fetch has NO default timeout — a Twilio stall would hang the send.
-        signal: AbortSignal.timeout(15_000),
-      },
-    );
 
     if (!response.ok) {
       const text = await response.text().catch(() => '');

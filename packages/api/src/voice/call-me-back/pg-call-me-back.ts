@@ -48,7 +48,7 @@ export class PgCallMeBackRepository
       // same call (which would notify the CSR twice). On conflict we DO
       // NOTHING and read the existing row back below.
       //
-      // ANS-001 — `reason` is part of the key (migration 198). Keying on the
+      // ANS-001 — `reason` is part of the key (migration 268). Keying on the
       // session alone meant two DIFFERENT problems on one call collapsed into
       // one row, and the loser was silently discarded: an E1 call that both
       // left a live booking AND couldn't reach the tenant filed the booking

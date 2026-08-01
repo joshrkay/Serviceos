@@ -152,6 +152,23 @@ export interface EmergencyPageWorkerDeps {
 }
 
 /**
+ * Terminal reasons that RESOLVE a page ladder (stop paging):
+ *
+ *  - `transferred` — the emergency transfer was ANSWERED; the pages served
+ *    their purpose.
+ *  - `life_safety_e1` (ANS-001 FIX 6) — an E1 life-safety close superseded
+ *    the E2 escalation that armed this ladder ("the basement is flooding"
+ *    followed by "I smell gas"). The tenant has already received the E1
+ *    alert; letting the ladder keep firing "transfer unanswered — call back
+ *    NOW" pages (and eventually land an 'emergency_unanswered' exhaustion
+ *    task) would directly contradict that alert.
+ */
+const LADDER_RESOLVED_REASONS: ReadonlySet<string> = new Set([
+  'transferred',
+  'life_safety_e1',
+]);
+
+/**
  * Production `isResolved` wiring: prefer the live in-process session (fast
  * path when this replica still holds it), then the persisted
  * voice_sessions row — the cross-replica / post-restart source of truth.
@@ -165,12 +182,17 @@ export function createEmergencyPageResolvedCheck(deps: {
 }): (tenantId: string, sessionId: string) => Promise<boolean> {
   return async (tenantId, sessionId) => {
     try {
-      if (deps.store?.peek(sessionId)?.terminalReason === 'transferred') {
+      const liveReason = deps.store?.peek(sessionId)?.terminalReason;
+      if (liveReason !== undefined && LADDER_RESOLVED_REASONS.has(liveReason)) {
         return true;
       }
       if (deps.voiceSessionRepo) {
         const row = await deps.voiceSessionRepo.findById(tenantId, sessionId);
-        return row?.endedReason === 'transferred';
+        return (
+          row?.endedReason !== undefined &&
+          row.endedReason !== null &&
+          LADDER_RESOLVED_REASONS.has(row.endedReason)
+        );
       }
     } catch {
       /* indeterminate — bias toward paging on an emergency */

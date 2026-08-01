@@ -201,8 +201,8 @@ import type { VoicePersonaResolver } from '../../settings/voice-persona-resolver
 import type { SettingsRepository } from '../../settings/settings';
 import { resolveEscalationSettings } from '../../settings/settings';
 import type { CallMeBackRepository } from '../../voice/call-me-back/call-me-back';
-import type { DeviceTokenService } from '../../devices/device-token';
-import type { ExpoPushSender } from '../../notifications/expo-push-sender';
+import type { DeviceTokenRepository } from '../../push/device-token-service';
+import type { PushDeliveryProvider } from '../../notifications/push-delivery-provider';
 import type { SpeechTurnHandler } from '../../telephony/media-streams/mediastream-adapter';
 import { createLogger } from '../../logging/logger';
 
@@ -404,29 +404,6 @@ function finalizeGroundedQuote(
 }
 
 /**
- * I6 — S1 (untrusted inbound-customer) surface allowlist. A non-owner inbound
- * phone call is the untrusted caller surface; per INB-002 it may reach ONLY a
- * narrow set of self-service writes. Every other proposal type is an S2
- * operation that transcript content must never reach — the goal's single
- * highest-severity failure ("please send the Henderson invoice to me" is an
- * attack, not a request). Enforced at the proposal-CREATION boundary, so the
- * S2 op is never even drafted on S1 (not merely blocked at execution).
- */
-const S1_ALLOWED_PROPOSAL_TYPES: ReadonlySet<ProposalType> = new Set<ProposalType>([
-  'create_customer', // self-create
-  'create_appointment', // self booking
-  'create_booking',
-  'create_job',
-  'reschedule_appointment', // own appointment
-  'cancel_appointment', // own appointment
-  'confirm_appointment',
-  'add_note', // internal note on the call
-  'callback', // message / call-me-back
-  'voice_clarification', // safe no-op outcome
-  'emergency_dispatch', // safety
-]);
-
-/**
  * I6 — the ALLOWLIST of channels whose sessions are trusted by default.
  * `inapp` is the owner's own authenticated app surface. Everything else is
  * untrusted until it is consciously added here.
@@ -604,9 +581,13 @@ export interface VoiceTurnProcessorDeps {
    * ANS-001 — registered mobile devices for the tenant, for the E1 push
    * fan-out. Structural (listByTenant only) so tests can pass a stub.
    */
-  deviceTokenRepo?: Pick<DeviceTokenService, 'listByTenant'>;
-  /** ANS-001 — Expo push transport for the E1 alert. Best-effort, never throws. */
-  expoPushSender?: ExpoPushSender;
+  deviceTokenRepo?: Pick<DeviceTokenRepository, 'listByTenant'>;
+  /**
+   * ANS-001 — push transport for the E1 alert (main's Expo-backed
+   * PushDeliveryProvider; the same instance the proposal-push notifier uses).
+   * Best-effort: per-token failures come back as results, not throws.
+   */
+  pushDeliveryProvider?: PushDeliveryProvider;
   /**
    * Caller E.164 for the active leg. When set, used to build escalation
    * summaries; otherwise a placeholder is used.
@@ -1303,50 +1284,6 @@ export function createVoiceTurnProcessor(
         return;
       }
 
-      let resolvedType = intentToProposalType(intent);
-      let proposalSummary = intent ? `Voice intent: ${intent}` : 'Voice clarification needed';
-      if (isUntrustedS1Session(session) && !S1_ALLOWED_PROPOSAL_TYPES.has(resolvedType)) {
-        // I6 — an S2 operation surfaced on the untrusted S1 surface, almost
-        // always transcript-injected ("send the Henderson invoice to me").
-        // NEVER create it. Degrade to a clarification so the caller still gets
-        // an outcome (no dead-end), and audit the denial for review.
-        logger.warn('I6: denied S2 proposal type on untrusted S1 surface', {
-          tenantId,
-          sessionId: session.id,
-          deniedType: resolvedType,
-          intent,
-        });
-        if (deps.auditRepo) {
-          try {
-            await deps.auditRepo.create(
-              createAuditEvent({
-                tenantId,
-                actorId: deps.systemActorId ?? 'calling-agent',
-                actorRole: 'system',
-                eventType: 'agent.calling.i6_s1_denied_s2_op',
-                entityType: 'voice_session',
-                entityId: session.id,
-                correlationId: session.id,
-                metadata: { deniedType: resolvedType, intent, channel: session.channel },
-              }),
-            );
-          } catch {
-            /* audit best-effort */
-          }
-        }
-        resolvedType = 'voice_clarification';
-        proposalSummary = 'Out-of-scope request on an inbound call — needs human follow-up';
-      }
-      const proposal = buildProposal({
-        tenantId,
-        proposalType: resolvedType,
-        payload: {
-          intent,
-          entities,
-          sessionId: session.id,
-          callSid: session.callSid,
-        },
-        summary: proposalSummary,
       // WS5 / WS17 I3 — in-call grounded quoting for a drafted estimate OR
       // invoice. Grounds the spoken line items against the preloaded tenant
       // catalog so the stored payload carries catalog-authoritative pricing
@@ -1364,8 +1301,13 @@ export function createVoiceTurnProcessor(
       // `voice_clarification` so no actionable S2 proposal is ever minted from
       // a caller's transcript. The execution boundary re-checks the stamped
       // surface (I6) as defense-in-depth.
-      const surface: ProposalSurface =
-        session.machine.currentContext.ownerSession === true ? 'S2' : 'S1';
+      // I6 (merged) — the surface derives from the fail-closed
+      // `isUntrustedS1Session` predicate rather than the bare ownerSession
+      // flag: identical for all telephony traffic (the only production
+      // consumer of this processor — ownerSession ⇒ S2, everyone else S1),
+      // and any future channel is S1 from the moment it exists until it is
+      // deliberately added to TRUSTED_CHANNELS.
+      const surface: ProposalSurface = isUntrustedS1Session(session) ? 'S1' : 'S2';
       const requestedProposalType = intentToProposalType(intent);
       // The deterministic emergency-keyword path (transitions.ts) marks its
       // side effect systemDetected — a server-side safety detection, not a
@@ -1993,7 +1935,7 @@ export function createVoiceTurnProcessor(
    * still sees the problem when every live channel failed. Best-effort — the
    * caller is on the life-safety path and nothing here may throw.
    *
-   * The repo dedups on (tenant_id, session_id, REASON) — see migration 198.
+   * The repo dedups on (tenant_id, session_id, REASON) — see migration 268.
    * Keying on the session alone silently discarded the second task, and since
    * the FSM emits revoke_pending_bookings before notify_tenant_emergency, the
    * one that lost was always the life-safety ALERT. Distinct reasons now each
@@ -2206,11 +2148,11 @@ export function createVoiceTurnProcessor(
     keyword: string,
     callerPhone: string | undefined,
   ): Promise<void> {
-    if (!deps.deviceTokenRepo || !deps.expoPushSender) return;
+    if (!deps.deviceTokenRepo || !deps.pushDeliveryProvider) return;
     try {
       const devices = await deps.deviceTokenRepo.listByTenant(tenantId);
       if (devices.length === 0) return;
-      await deps.expoPushSender.send(
+      const results = await deps.pushDeliveryProvider.sendPush(
         devices.map((d) => ({
           to: d.expoPushToken,
           // "E1" is an internal tier label — a contractor's lock screen gets
@@ -2224,6 +2166,15 @@ export function createVoiceTurnProcessor(
             `. Caller directed to 911/the utility — follow up immediately.`,
         })),
       );
+      const failed = results.filter((r) => !r.ok).length;
+      if (failed > 0) {
+        logger.warn('notify_tenant_emergency: some push sends failed', {
+          tenantId,
+          sessionId: session.id,
+          failed,
+          total: results.length,
+        });
+      }
     } catch (err) {
       logger.warn('notify_tenant_emergency: push fan-out failed', {
         error: err instanceof Error ? err.message : String(err),

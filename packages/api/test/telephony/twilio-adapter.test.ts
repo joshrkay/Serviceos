@@ -33,10 +33,7 @@ import { InMemoryInvoiceRepository, type Invoice } from '../../src/invoices/invo
 import type { DocumentTotals } from '../../src/shared/billing-engine';
 import { InMemoryDroppedCallRecoveryRepository } from '../../src/sms/recovery/scheduler';
 import { InMemoryCallMeBackRepository } from '../../src/voice/call-me-back/call-me-back';
-import {
-  EMERGENCY_PAGE_INTERVAL_MS,
-  __clearEmergencyPageLaddersForTests,
-} from '../../src/telephony/emergency-page-retry';
+import { createEmergencyPageResolvedCheck } from '../../src/telephony/emergency-page-retry';
 import { InMemoryConversationRepository } from '../../src/conversations/conversation-service';
 import { OwnerNotificationService } from '../../src/notifications/owner-notification-service';
 import { InMemoryPushDeliveryProvider } from '../../src/notifications/push-delivery-provider';
@@ -2192,7 +2189,11 @@ describe('RV-140 — deterministic emergency scan (both transcript entry points)
     // E1 ends the call, so the only permitted LLM call is the post-close call
     // summary — never the intent classifier.
     for (const [arg] of (gateway.complete as ReturnType<typeof vi.fn>).mock.calls) {
-      expect(JSON.stringify(arg)).toMatch(/Summarize the following/i);
+      // main's summarizer copy ("Summarize the customer service call in the
+      // quoted transcript…") superseded the old "Summarize the following" on
+      // the merge; the assertion's point is unchanged — every gateway call on
+      // this turn is the summarizer, never the intent classifier.
+      expect(JSON.stringify(arg)).toMatch(/Summarize the customer service call/i);
     }
     // ANS-001 — sparking/electrical burning is E1: direct to 911 and close.
     expect(session.machine.currentState).toBe('terminated');
@@ -2306,15 +2307,16 @@ describe('RV-140 — deterministic emergency scan (both transcript entry points)
 // ─── FIX 6 — an E1 close cancels an in-flight E2 page ladder ────────────────
 
 describe('FIX 6 (ANS-001/RV-143) — E1 close cancels an in-flight E2 page ladder', () => {
-  beforeEach(() => {
-    vi.useFakeTimers();
-  });
-  afterEach(() => {
-    __clearEmergencyPageLaddersForTests();
-    vi.useRealTimers();
-  });
-
-  it('an E2 utterance arms the ladder; a subsequent E1 utterance on the SAME call cancels it — zero further pages, no emergency_unanswered task', async () => {
+  // The ladder is queue-backed now (UC-5a): pages fire from the
+  // telephony.emergency_page worker, whose isResolved() check silently
+  // cancels a resolved ladder. The worker-side half (a 'life_safety_e1'
+  // session cancels the step — no page, no continuation, no
+  // emergency_unanswered task) is pinned in emergency-page-retry.test.ts.
+  // THIS test pins the adapter-side half of the contract: an E1 close on a
+  // call that was mid-E2-escalation stamps terminalReason 'life_safety_e1'
+  // on the live session, which the PRODUCTION resolved-check recognizes as
+  // resolved — so an armed ladder can never keep paging past an E1 close.
+  it("an E1 utterance mid-E2-escalation closes the call with terminalReason 'life_safety_e1', which the production resolved-check treats as resolved", async () => {
     const auditRepo = new InMemoryAuditRepository();
     const callMeBackRepo = new InMemoryCallMeBackRepository();
     const settingsRepo = new InMemorySettingsRepository();
@@ -2333,7 +2335,6 @@ describe('FIX 6 (ANS-001/RV-143) — E1 close cancels an in-flight E2 page ladde
       createdAt: now,
       updatedAt: now,
     });
-    const sent: Array<{ to: string; body: string }> = [];
     const store = new VoiceSessionStore();
     const adapter = new TwilioGatherAdapter({
       store,
@@ -2344,15 +2345,9 @@ describe('FIX 6 (ANS-001/RV-143) — E1 close cancels an in-flight E2 page ladde
       settingsRepo,
       callMeBackRepo,
       deliveryProvider: {
-        sendSms: async (args) => {
-          sent.push(args);
-          return {};
-        },
+        sendSms: async () => ({}),
       },
     });
-    // handleInboundForStream (not a bare store.create) so callerIdBySession
-    // is populated — the page ladder's exhaustion fallback requires a
-    // resolvable caller phone to file the call_me_back task.
     await adapter.handleInboundForStream({
       callSid: 'CA-fix6',
       from: '+15125550111',
@@ -2360,7 +2355,7 @@ describe('FIX 6 (ANS-001/RV-143) — E1 close cancels an in-flight E2 page ladde
     });
     const session = store.findByCallSid('CA-fix6')!;
 
-    // E2 hazard arms the ladder (dispatcher escalation).
+    // E2 hazard escalates (this is the state in which the ladder is armed).
     await adapter.processCallerUtterance({
       sessionId: session.id,
       callSid: 'CA-fix6',
@@ -2370,82 +2365,28 @@ describe('FIX 6 (ANS-001/RV-143) — E1 close cancels an in-flight E2 page ladde
     expect(session.machine.currentState).toBe('escalating');
 
     // E1 hazard arrives mid-escalation and closes the call.
-    await adapter.processCallerUtterance({
+    const effects = await adapter.processCallerUtterance({
       sessionId: session.id,
       callSid: 'CA-fix6',
       speechResult: 'I smell gas',
       tenantId: 'tenant-fix6',
     });
     expect(session.machine.currentState).toBe('terminated');
+    // The media-streams close hook finalizes with the turn's effects — the
+    // same call finalizeOnClose makes in production. This is what stamps
+    // terminalReason from the end_session effect.
+    adapter.finalizeTerminatedSession(session, effects, 'session_ended');
+    expect(session.terminalReason).toBe('life_safety_e1');
 
-    // Advance past all 3 page intervals (2 min each) plus slack.
-    await vi.advanceTimersByTimeAsync(EMERGENCY_PAGE_INTERVAL_MS * 4);
+    // The production resolved-check wired over this store cancels the ladder.
+    const isResolved = createEmergencyPageResolvedCheck({
+      store: { peek: (id: string) => store.get(id) },
+    });
+    expect(await isResolved('tenant-fix6', session.id)).toBe(true);
 
-    // Zero page-ladder SMSes (the ladder's own distinctive copy) — the E1
-    // tenant-alert SMS ("EMERGENCY (E1 life-safety) call just came in...")
-    // is a separate, legitimate one-time message and is not what this
-    // guards against.
-    expect(sent.filter((s) => s.body.includes('EMERGENCY page'))).toHaveLength(0);
+    // And no contradictory exhaustion task was filed by the close itself.
     const tasks = await callMeBackRepo.listPending('tenant-fix6');
     expect(tasks.some((t) => t.reason === 'emergency_unanswered')).toBe(false);
-  });
-
-  it('without an E1 close, the SAME armed ladder DOES exhaust into pages + an emergency_unanswered task (control — proves the ladder/harness actually works)', async () => {
-    const auditRepo = new InMemoryAuditRepository();
-    const callMeBackRepo = new InMemoryCallMeBackRepository();
-    const settingsRepo = new InMemorySettingsRepository();
-    const now = new Date();
-    await settingsRepo.create({
-      id: 's-fix6b',
-      tenantId: 'tenant-fix6b',
-      businessName: 'Acme Plumbing',
-      transferNumber: '+15125550999',
-      timezone: 'America/Chicago',
-      estimatePrefix: 'EST-',
-      invoicePrefix: 'INV-',
-      nextEstimateNumber: 1,
-      nextInvoiceNumber: 1,
-      defaultPaymentTermDays: 30,
-      createdAt: now,
-      updatedAt: now,
-    });
-    const sent: Array<{ to: string; body: string }> = [];
-    const store = new VoiceSessionStore();
-    const adapter = new TwilioGatherAdapter({
-      store,
-      gateway: makeGatewayReturning('{"intentType":"unknown","confidence":0,"reasoning":"x"}'),
-      businessName: 'Acme Plumbing',
-      publicBaseUrl: 'https://example.com',
-      auditRepo,
-      settingsRepo,
-      callMeBackRepo,
-      deliveryProvider: {
-        sendSms: async (args) => {
-          sent.push(args);
-          return {};
-        },
-      },
-    });
-    await adapter.handleInboundForStream({
-      callSid: 'CA-fix6b',
-      from: '+15125550111',
-      tenantId: 'tenant-fix6b',
-    });
-    const session = store.findByCallSid('CA-fix6b')!;
-
-    await adapter.processCallerUtterance({
-      sessionId: session.id,
-      callSid: 'CA-fix6b',
-      speechResult: 'the basement is flooding',
-      tenantId: 'tenant-fix6b',
-    });
-    expect(session.machine.currentState).toBe('escalating');
-
-    await vi.advanceTimersByTimeAsync(EMERGENCY_PAGE_INTERVAL_MS * 4);
-
-    expect(sent.filter((s) => s.body.includes('EMERGENCY page')).length).toBeGreaterThan(0);
-    const tasks = await callMeBackRepo.listPending('tenant-fix6b');
-    expect(tasks.some((t) => t.reason === 'emergency_unanswered')).toBe(true);
   });
 });
 

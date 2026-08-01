@@ -123,8 +123,6 @@ import type { RepairTemplate } from '../verticals/registry';
 import { detectFrustration } from '../ai/agents/customer-calling/frustration-detector';
 import { classifyCallerSafety } from '../ai/agents/customer-calling/emergency-tier';
 import { detectPromptInjection } from '../ai/agents/customer-calling/untrusted-content';
-import { renderTtsText, type SessionLanguage } from '../ai/agents/customer-calling/tts-copy';
-import { detectEmergency } from '../ai/agents/customer-calling/emergency-detector';
 import {
   renderTtsText,
   LOW_STT_CONFIDENCE_REPROMPT_COPY,
@@ -145,12 +143,11 @@ import {
   type ConsentEventRepository,
 } from '../compliance/consent-events';
 import type { RecordingControl } from './recording-control';
-import { armEmergencyPageLadder, resolveEmergencyPageLadder } from './emergency-page-retry';
 import { armEmergencyPageLadder } from './emergency-page-retry';
 import type { Queue } from '../queues/queue';
 import type { CallMeBackRepository } from '../voice/call-me-back/call-me-back';
-import type { DeviceTokenService } from '../devices/device-token';
-import type { ExpoPushSender } from '../notifications/expo-push-sender';
+import type { DeviceTokenRepository } from '../push/device-token-service';
+import type { PushDeliveryProvider } from '../notifications/push-delivery-provider';
 import type {
   DroppedCallRecoveryRepository,
   DroppedCallScheduler,
@@ -419,11 +416,13 @@ export interface TwilioAdapterDeps {
   callMeBackRepo?: CallMeBackRepository;
   /**
    * ANS-001 — E1 push fan-out. Pass-through to the voice-turn processor:
-   * the tenant's registered mobile devices + the Expo transport. Optional;
-   * without them the E1 alert is SMS-only.
+   * the tenant's registered mobile devices + the push transport (main's
+   * Expo-backed PushDeliveryProvider). Optional; without them the E1 alert
+   * is SMS-only.
    */
-  deviceTokenRepo?: Pick<DeviceTokenService, 'listByTenant'>;
-  expoPushSender?: ExpoPushSender;
+  deviceTokenRepo?: Pick<DeviceTokenRepository, 'listByTenant'>;
+  pushDeliveryProvider?: PushDeliveryProvider;
+  /**
    * UC-5a — the shared durable queue (PgQueue in production) backing the
    * emergency page-retry ladder. Each ladder step is a delayed job, so a
    * restart or a replica race can neither drop nor double-fire a page.
@@ -1646,13 +1645,13 @@ export class TwilioGatherAdapter {
       // "I smell gas") left the ladder running: it would keep firing
       // "transfer unanswered — Call back NOW" pages and eventually land an
       // 'emergency_unanswered' exhaustion task, both of which directly
-      // contradict the E1 alert the tenant just received. `isResolved()`
-      // only recognizes `terminalReason === 'transferred'` — an E1 close
-      // stamps 'life_safety_e1', which the ladder would never treat as
-      // resolved on its own. Safe to call even when nothing is armed
-      // (resolveEmergencyPageLadder is a no-op then). Synchronous — cancel
-      // before any awaits below so there is no race with a pending page.
-      resolveEmergencyPageLadder(tenantId, session.id);
+      // contradict the E1 alert the tenant just received. With the durable
+      // queue ladder (UC-5a) the cancellation lives in the worker's
+      // isResolved() check: LADDER_RESOLVED_REASONS (emergency-page-retry.ts)
+      // recognizes the 'life_safety_e1' terminal reason this close stamps on
+      // the live session and the persisted voice_sessions row, so the next
+      // ladder step cancels silently on every replica — no in-process cancel
+      // call to race with.
 
       // ANS-001 — NOTHING slow may sit between the E1 keyword hit and the
       // TwiML that speaks the 911 script. Only `audit_log` is awaited (the
