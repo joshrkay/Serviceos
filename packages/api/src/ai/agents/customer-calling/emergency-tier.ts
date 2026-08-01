@@ -78,14 +78,15 @@ export const E1_HAZARD_PHRASES: ReadonlyArray<string> = [
   'gas leak', 'leaking gas',
   // Carbon monoxide
   'carbon monoxide', 'co detector', 'co alarm',
-  // Fire / smoke (phrase-level — bare "fire"/"smoke" too ambiguous)
+  // Fire / smoke (phrase-level — bare "fire"/"smoke"/"flames" too ambiguous:
+  // "the flames on my furnace are yellow" is a routine diagnostic call)
   'on fire', 'caught fire', 'house fire', 'there is a fire', "there's a fire",
-  'seeing flames', 'flames', 'smell smoke', 'smells like smoke', 'smoke coming',
-  'smoke in the house', 'full of smoke', 'filling with smoke',
+  'seeing flames', 'there are flames', 'smell smoke', 'smells like smoke',
+  'smoke coming', 'smoke in the house', 'full of smoke', 'filling with smoke',
   // Electrical
   'electrical burning', 'burning wires', 'wires are burning', 'burning plastic',
   'sparking', 'sparks coming', 'outlet is sparking', 'panel is sparking',
-  'breaker is sparking', 'wires sparking', 'sparks from',
+  'breaker is sparking', 'wires sparking', 'sparks from', 'sparks near',
 ];
 
 /**
@@ -96,12 +97,22 @@ export const E1_HAZARD_PHRASES: ReadonlyArray<string> = [
  * ambiguous stays E1 — the goal's asymmetric bias resolves upward.
  */
 export const E1_INJURY_PHRASES: ReadonlyArray<string> = [
-  'not breathing', 'stopped breathing', 'unconscious', 'unresponsive',
-  'passed out', 'collapsed', 'electrocuted', 'got shocked', 'electric shock',
+  'not breathing', "isn't breathing", 'is not breathing', 'stopped breathing',
+  "won't wake up", 'not waking up', 'unconscious', 'unresponsive',
+  'passed out', 'electrocuted', 'got shocked', 'electric shock',
   'someone is hurt', 'someone got hurt', "someone's hurt", 'somebody got hurt',
   'someone is injured', 'badly burned', 'severe burn', 'heart attack',
   'chest pain', 'chest pains', 'seizure',
 ];
+
+/**
+ * "collapsed" is a trade homonym ("my sewer line collapsed" is a routine,
+ * high-value plumbing complaint) — an E1 false positive now costs the entire
+ * call (911 script, hangup, booking revocation, owner emergency SMS), so the
+ * bare word is not in the phrase table. It is E1 only with a person subject.
+ */
+const COLLAPSED_PERSON_RE =
+  /\b(?:someone|somebody|anybody|he|she|they|my\s+(?:husband|wife|son|daughter|mom|dad|mother|father|kid|child|baby|brother|sister|friend|neighbor|roommate|tenant|grandma|grandpa|grandmother|grandfather|coworker|worker|guy|customer))\s+(?:(?:has|had|is|was|just)\s+){0,2}collapsed\b/i;
 
 /** Kept for callers/tests that want the full E1 vocabulary. */
 export const LIFE_SAFETY_E1_PHRASES: ReadonlyArray<string> = [
@@ -139,6 +150,9 @@ export function detectLifeSafetyE1(
   if (!clearlyNonAcute) {
     for (const { keyword, regex } of INJURY_REGEXES) {
       if (regex.test(transcript)) return { matched: true, keyword };
+    }
+    if (COLLAPSED_PERSON_RE.test(transcript)) {
+      return { matched: true, keyword: 'collapsed' };
     }
   }
   return { matched: false };

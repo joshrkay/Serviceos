@@ -130,6 +130,40 @@ describe('classifyCallerSafety — runtime hot path (NO rules / corpus not shipp
   });
 });
 
+describe('corpus ↔ embedded parity (the runtime-authoritative table)', () => {
+  // The corpus file is NOT shipped in the runtime image; the embedded table is
+  // authoritative in production. This pin converts silent drift between the
+  // two into a red CI run: every phrase a safety reviewer adds to the corpus
+  // TIER_1 list must classify E1 in the RUNTIME configuration (no rules).
+  it('every corpus TIER_1_EVACUATE phrase classifies E1 with NO rules loaded', () => {
+    const misses = rules.trigger_words.TIER_1_EVACUATE.phrases.filter(
+      (phrase) => classifyCallerSafety(phrase, {}).tier !== 'E1',
+    );
+    expect(misses).toEqual([]);
+  });
+});
+
+describe('runtime E1 vocabulary — contractions, sparks-near, trade homonyms', () => {
+  it.each([
+    ["my husband isn't breathing", 'contraction the phrase table must match'],
+    ['he is not breathing', 'uncontracted variant'],
+    ["she won't wake up", 'unresponsive phrasing'],
+    ['there are sparks near the water heater', 'sparks-near hazard'],
+    ['my husband collapsed', 'person collapse'],
+    ['someone collapsed, please help', 'person collapse'],
+  ])('E1 with no rules: %j (%s)', (utterance) => {
+    expect(classifyCallerSafety(utterance, {}).tier).toBe('E1');
+  });
+
+  it.each([
+    'my sewer line collapsed and sewage is backing up',
+    'the drain pipe collapsed',
+    'the flames on my furnace are yellow',
+  ])('trade homonym is NOT E1 (an E1 false positive hangs up on a customer): %j', (utterance) => {
+    expect(classifyCallerSafety(utterance, {}).tier).not.toBe('E1');
+  });
+});
+
 describe('classifyCallerSafety — upward-only bias (goal §3)', () => {
   it('a keyword-detected hazard is never downgraded below E2, even without engine tier context', () => {
     // "water everywhere" hits the detectEmergency backstop.
