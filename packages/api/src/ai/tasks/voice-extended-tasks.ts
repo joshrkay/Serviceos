@@ -496,17 +496,28 @@ function resolvedTechnicianIdFrom(context: TaskContext): string | undefined {
 // appointment. The classifier returns a technician NAME and an appointment
 // REFERENCE, never UUIDs. U1: the router's technician resolver fills
 // `context.existingEntities.technicianId` when the spoken name uniquely
-// matches a team member, so only the appointmentId still needs review-time
-// resolution; an unresolved name keeps the legacy technicianId
-// missing-marker. Capture-class, but the missing appointmentId keeps the
-// proposal in draft until an operator resolves it.
+// matches a team member. U2 (B7.10): both intents are now
+// APPOINTMENT_REF_INTENTS too, so the router's appointment resolver resolves
+// "the 2pm tomorrow" the same way reassign's does — a unique verified match
+// rides `existingEntities.appointmentId` (resolvedAppointmentIdFrom, the
+// B5.3 seam) and lifts the gate; an ambiguous reference never reaches here
+// (voice_clarification picker first, bounded at the resolver's candidate
+// cap — the P-43 overflow rule); an unresolved one keeps the missing-marker.
+// Capture-class, but any missing id keeps the proposal in draft until an
+// operator resolves it.
 export class AddCrewMemberTaskHandler implements TaskHandler {
   readonly taskType = 'add_crew_member' as const;
 
   async handle(context: TaskContext): Promise<TaskResult> {
     const ee = entitiesFrom(context);
     const payload: Record<string, unknown> = {};
-    const missing: string[] = ['appointmentId'];
+    const missing: string[] = [];
+
+    // U2 — resolver-verified appointment id first (B5.3 shape); only a
+    // reference the resolver could not answer falls to the gate.
+    const resolvedAppointmentId = resolvedAppointmentIdFrom(context);
+    if (resolvedAppointmentId) payload.appointmentId = resolvedAppointmentId;
+    else missing.push('appointmentId');
 
     if (ee.appointmentReference) payload.appointmentReference = ee.appointmentReference;
     if (ee.targetTechnicianName) payload.targetTechnicianName = ee.targetTechnicianName;
@@ -527,7 +538,12 @@ export class RemoveCrewMemberTaskHandler implements TaskHandler {
   async handle(context: TaskContext): Promise<TaskResult> {
     const ee = entitiesFrom(context);
     const payload: Record<string, unknown> = {};
-    const missing: string[] = ['appointmentId'];
+    const missing: string[] = [];
+
+    // U2 — same resolve-then-gate seam as AddCrewMemberTaskHandler above.
+    const resolvedAppointmentId = resolvedAppointmentIdFrom(context);
+    if (resolvedAppointmentId) payload.appointmentId = resolvedAppointmentId;
+    else missing.push('appointmentId');
 
     if (ee.appointmentReference) payload.appointmentReference = ee.appointmentReference;
     if (ee.targetTechnicianName) payload.targetTechnicianName = ee.targetTechnicianName;

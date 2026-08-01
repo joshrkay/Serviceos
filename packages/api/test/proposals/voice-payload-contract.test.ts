@@ -87,6 +87,10 @@ import {
 } from '../../src/proposals/execution/voice-extended-handlers';
 import { SendPaymentReminderExecutionHandler } from '../../src/proposals/execution/send-payment-reminder-handler';
 import { ApplyLateFeeExecutionHandler } from '../../src/proposals/execution/apply-late-fee-handler';
+import {
+  AddCrewMemberExecutionHandler,
+  RemoveCrewMemberExecutionHandler,
+} from '../../src/proposals/execution/crew-handler';
 import { LogExpenseExecutionHandler } from '../../src/proposals/execution/log-expense-handler';
 import { CreateStandingInstructionExecutionHandler } from '../../src/proposals/execution/standing-instruction-handler';
 import { UpdateBrandVoiceExecutionHandler } from '../../src/proposals/execution/brand-voice-handler';
@@ -635,27 +639,48 @@ const ROWS: Row[] = [
       ),
     execute: (p) => new ReassignAppointmentExecutionHandler().execute(p, execContext()),
   },
+  // ── U2 (B7.10) — flipped from 'gated' to 'resolves': crew add/remove
+  // joined APPOINTMENT_REF_INTENTS, so the router's appointment resolver
+  // threads a unique verified match onto existingEntities.appointmentId (the
+  // B5.3 seam) and the handlers consume it alongside the U1 technicianId
+  // seam. Unresolved references still gate — pinned in voice-extended-crew.test.ts.
   {
     intent: 'add_crew_member',
-    mode: 'gated',
-    note: 'appointmentId is unconditionally gated even with a resolved technicianId',
+    mode: 'resolves',
+    note: 'U2 — resolver-verified appointmentId + technicianId draft ungated; dep-less AddCrewMemberExecutionHandler synthetic-succeeds',
     draft: () =>
       draft(
         { gateway: NOOP_GATEWAY },
         'add_crew_member',
-        ctx({ existingEntities: { appointmentReference: 'the Garcia appointment', targetTechnicianName: 'Carlos' } }),
+        ctx({
+          existingEntities: {
+            appointmentReference: 'the Garcia appointment',
+            targetTechnicianName: 'Carlos',
+            appointmentId: APPOINTMENT_ID,
+            technicianId: TECHNICIAN_ID,
+          },
+        }),
       ),
+    execute: (p) => new AddCrewMemberExecutionHandler().execute(p, execContext()),
   },
   {
     intent: 'remove_crew_member',
-    mode: 'gated',
-    note: 'appointmentId is unconditionally gated even with a resolved technicianId',
+    mode: 'resolves',
+    note: 'U2 — resolver-verified appointmentId + technicianId draft ungated; dep-less RemoveCrewMemberExecutionHandler synthetic-succeeds',
     draft: () =>
       draft(
         { gateway: NOOP_GATEWAY },
         'remove_crew_member',
-        ctx({ existingEntities: { appointmentReference: "Tuesday's job", targetTechnicianName: 'Carlos' } }),
+        ctx({
+          existingEntities: {
+            appointmentReference: "Tuesday's job",
+            targetTechnicianName: 'Carlos',
+            appointmentId: APPOINTMENT_ID,
+            technicianId: TECHNICIAN_ID,
+          },
+        }),
       ),
+    execute: (p) => new RemoveCrewMemberExecutionHandler().execute(p, execContext()),
   },
   // ── U1 (voice back-office workflows) — flipped from 'gated' to 'resolves':
   // send_invoice/send_estimate/send_payment_reminder/apply_late_fee are all

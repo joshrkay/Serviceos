@@ -165,6 +165,35 @@ describe('planVoiceEntityLookups — intent-conditioned operator references', ()
     });
     expect(lookups).toEqual([]);
   });
+
+  // U2 (B7.10) — crew add/remove joined APPOINTMENT_REF_INTENTS: "add Jake
+  // to the 2pm tomorrow" plans BOTH the technician lookup (U1) and the
+  // appointment lookup (same order as reassign: technician before
+  // appointment, so the picker asks WHICH Jake before WHICH appointment).
+  it('plans technician + appointment lookups for add_crew_member', () => {
+    const lookups = planVoiceEntityLookups('add_crew_member', {
+      targetTechnicianName: 'Jake',
+      appointmentReference: 'the 2pm tomorrow',
+    });
+    expect(lookups).toEqual([
+      { kind: 'technician', reference: 'Jake', refKey: 'technicianId' },
+      { kind: 'appointment', reference: 'the 2pm tomorrow', refKey: 'appointmentId' },
+    ]);
+  });
+
+  it('plans technician + appointment lookups for remove_crew_member (no sticky-job fallback)', () => {
+    const lookups = planVoiceEntityLookups(
+      'remove_crew_member',
+      { targetTechnicianName: 'Jake', appointmentReference: "Tuesday's job" },
+      'sticky-job-1',
+    );
+    // Crew intents are deliberately NOT in APPOINTMENT_JOB_FALLBACK_INTENTS,
+    // so the sticky jobId never rides the appointment lookup here.
+    expect(lookups).toEqual([
+      { kind: 'technician', reference: 'Jake', refKey: 'technicianId' },
+      { kind: 'appointment', reference: "Tuesday's job", refKey: 'appointmentId' },
+    ]);
+  });
 });
 
 // SCH-03 — "cancel the upcoming appointment for that job" fails to parse as a

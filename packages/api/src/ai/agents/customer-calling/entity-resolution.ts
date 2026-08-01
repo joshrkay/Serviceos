@@ -106,6 +106,15 @@ const APPOINTMENT_REF_INTENTS = new Set([
   'reschedule_appointment',
   'confirm_appointment',
   'reassign_appointment',
+  // U2 (B7.10) — crew add/remove name an appointment ("add Jake to the 2pm
+  // tomorrow"). Route the spoken reference through the same appointment
+  // resolver reassign uses; a unique match rides
+  // existingEntities.appointmentId into the crew task handlers, anything
+  // else keeps their review-time gate. Deliberately NOT added to
+  // APPOINTMENT_JOB_FALLBACK_INTENTS — the sticky-job fallback stays scoped
+  // to the intents it was measured on (SCH-03).
+  'add_crew_member',
+  'remove_crew_member',
 ]);
 
 /**
