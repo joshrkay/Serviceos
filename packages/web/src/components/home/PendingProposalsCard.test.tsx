@@ -114,4 +114,33 @@ describe('PendingProposalsCard', () => {
       expect(screen.getByRole('button', { name }).className).toContain('min-h-11');
     }
   });
+
+  it('routes a review_response_proposal to the inbox instead of one-tap approving', () => {
+    // U6 — the components' `approved` flags are drafted false and the handler
+    // dispatches per flag: a one-tap approve here would mark the proposal
+    // executed while posting NOTHING. The home card must hand off to the
+    // inbox card, which shows the drafted reply and flips the flags.
+    hookState = {
+      proposals: [
+        proposal({
+          id: 'a',
+          summary: 'Respond to Dana’s review',
+          proposalType: 'review_response_proposal',
+        }),
+      ],
+      count: 1,
+      isLoading: false,
+    };
+    render(<PendingProposalsCard />);
+
+    expect(screen.queryByRole('button', { name: 'Approve' })).toBeNull();
+    const review = screen.getByTestId('review-response-review-link');
+    expect(review.className).toContain('min-h-11');
+    fireEvent.click(review);
+    expect(mockNavigate).toHaveBeenCalledWith('/inbox');
+    // No approve POST fired.
+    expect(mockApiFetch).not.toHaveBeenCalled();
+    // Reject stays inline — rejecting a draft is well-defined without review.
+    expect(screen.getByRole('button', { name: 'Reject' })).toBeInTheDocument();
+  });
 });

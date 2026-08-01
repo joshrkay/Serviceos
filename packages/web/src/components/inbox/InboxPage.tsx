@@ -16,6 +16,15 @@ import {
   needsAddressCompletion,
   type AddressValues,
 } from '../shared/ServiceAddressCompletion';
+import {
+  ReviewResponseReview,
+  anyReviewComponentSelected,
+  initialReviewResponseSelection,
+  needsReviewResponseReview,
+  reviewResponseEditsFrom,
+  type ReviewResponsePayloadView,
+  type ReviewResponseSelection,
+} from './ReviewResponseReview';
 
 type Urgency = 'critical' | 'high' | 'normal' | 'low';
 
@@ -126,6 +135,15 @@ interface InboxProposalRow {
       state?: string;
       postalCode?: string;
       country?: string;
+      // U6 — review_response_proposal components (shared contract
+      // review-response-proposal.ts). The inbox serializes the FULL payload,
+      // so these keys were already arriving at runtime; declaring them lets
+      // the card show the drafted reply and flip the per-component
+      // `approved` flags (drafted `false`) before approval.
+      classification?: ReviewResponsePayloadView['classification'];
+      publicResponse?: ReviewResponsePayloadView['publicResponse'];
+      privateFollowUp?: ReviewResponsePayloadView['privateFollowUp'];
+      serviceCredit?: ReviewResponsePayloadView['serviceCredit'];
     };
     sourceContext?: {
       catalogResolution?: Record<string, AmbiguityCandidate[]>;
@@ -219,6 +237,20 @@ function rowNeedsAddress(row: InboxProposalRow): boolean {
   return (
     row.proposal.proposalType === 'create_customer' &&
     needsAddressCompletion(row.proposal.payload)
+  );
+}
+
+/**
+ * U6 — does this row need the review-response card? Gated on the proposal
+ * type AND a non-empty drafted reply: the handler dispatches per-component
+ * `approved` flags (all drafted `false`), so this row's Approve must flip
+ * the selected flags via the edit endpoint first — a bare approve would
+ * execute nothing while marking the proposal done.
+ */
+function rowNeedsReviewResponse(row: InboxProposalRow): boolean {
+  return (
+    row.proposal.proposalType === 'review_response_proposal' &&
+    needsReviewResponseReview(row.proposal.payload)
   );
 }
 
@@ -573,6 +605,18 @@ export function InboxPage() {
   const addressValuesFor = (row: InboxProposalRow): AddressValues =>
     addressDrafts[row.proposal.id] ?? initialAddressValues(row.proposal.payload);
 
+  /**
+   * U6 — per-row review-response component selections, keyed by proposal id.
+   * Same shape/rationale as `addressDrafts`: the Approve button (a sibling of
+   * the toggles) must send the flag flips as an edit BEFORE approving, so the
+   * selection lives here. Lazily seeded to "everything the draft carries".
+   */
+  const [reviewSelections, setReviewSelections] = useState<
+    Record<string, ReviewResponseSelection>
+  >({});
+  const reviewSelectionFor = (row: InboxProposalRow): ReviewResponseSelection =>
+    reviewSelections[row.proposal.id] ?? initialReviewResponseSelection(row.proposal.payload);
+
   async function actOnProposal(id: string, action: 'approve' | 'reject'): Promise<void> {
     const removed = rows.find((r) => r.proposal.id === id);
     setRows((prev) => prev.filter((r) => r.proposal.id !== id));
@@ -586,6 +630,29 @@ export function InboxPage() {
       // rather than approving a proposal the approver did not see.
       if (action === 'approve' && removed && rowNeedsAddress(removed)) {
         const edits = addressEditsFrom(removed.proposal.payload, addressValuesFor(removed));
+        if (edits) {
+          const editRes = await apiFetch(`/api/proposals/${id}`, {
+            method: 'PUT',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ edits }),
+          });
+          if (!editRes.ok) throw new Error(`HTTP ${editRes.status}`);
+        }
+      }
+      // U6 — review-response: the execution handler dispatches per-component
+      // `approved` flags, which are drafted `false`. Flip the approver's
+      // selections through the SAME edit endpoint before approving; without
+      // this the approval would "succeed" while posting nothing. Approving
+      // with zero components selected is blocked (belt-and-braces — the
+      // button is also disabled in that state).
+      if (action === 'approve' && removed && rowNeedsReviewResponse(removed)) {
+        const selection = reviewSelectionFor(removed);
+        if (!anyReviewComponentSelected(removed.proposal.payload, selection)) {
+          setRows((prev) => [removed, ...prev]);
+          setError('Include at least one part of the review response, or reject the draft.');
+          return;
+        }
+        const edits = reviewResponseEditsFrom(removed.proposal.payload, selection);
         if (edits) {
           const editRes = await apiFetch(`/api/proposals/${id}`, {
             method: 'PUT',
@@ -843,6 +910,12 @@ export function InboxPage() {
             }
             const { row } = item;
             const badge = URGENCY_BADGE[row.urgency];
+            // U6 — a review-response approve with nothing selected would
+            // execute zero components; keep the button dead until at least
+            // one part is included (the card explains why).
+            const approveBlocked =
+              rowNeedsReviewResponse(row) &&
+              !anyReviewComponentSelected(row.proposal.payload, reviewSelectionFor(row));
             return (
               <li
                 key={row.proposal.id}
@@ -878,19 +951,34 @@ export function InboxPage() {
                         idPrefix={row.proposal.id}
                       />
                     )}
+                    {/* U6 — the drafted review response: the exact public
+                        reply text plus include/exclude toggles per component.
+                        Approve flips the selected `approved` flags via the
+                        edit endpoint before POSTing (see actOnProposal). */}
+                    {rowNeedsReviewResponse(row) && (
+                      <ReviewResponseReview
+                        payload={row.proposal.payload!}
+                        selection={reviewSelectionFor(row)}
+                        onChange={(next) =>
+                          setReviewSelections((prev) => ({ ...prev, [row.proposal.id]: next }))
+                        }
+                        idPrefix={row.proposal.id}
+                      />
+                    )}
                   </div>
                   <div className="flex items-center gap-2 shrink-0">
                     <button
                       type="button"
                       onClick={() => actOnProposal(row.proposal.id, 'reject')}
-                      className="rounded-lg border border-border bg-card text-foreground text-sm px-3 py-1.5 hover:bg-secondary"
+                      className="min-h-11 rounded-lg border border-border bg-card text-foreground text-sm px-3 py-1.5 hover:bg-secondary"
                     >
                       Reject
                     </button>
                     <button
                       type="button"
+                      disabled={approveBlocked}
                       onClick={() => actOnProposal(row.proposal.id, 'approve')}
-                      className="rounded-lg bg-primary text-primary-foreground text-sm px-3 py-1.5 hover:bg-primary/90"
+                      className="min-h-11 rounded-lg bg-primary text-primary-foreground text-sm px-3 py-1.5 hover:bg-primary/90 disabled:opacity-50"
                     >
                       Approve
                     </button>

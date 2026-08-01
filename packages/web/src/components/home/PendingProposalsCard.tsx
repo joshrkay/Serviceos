@@ -141,14 +141,30 @@ export function PendingProposalsCard() {
                 >
                   Reject
                 </button>
-                <button
-                  type="button"
-                  disabled={isActing}
-                  onClick={() => act(p.id, 'approve')}
-                  className="min-h-11 flex-1 rounded-lg bg-primary px-3 text-sm text-primary-foreground transition-colors hover:bg-primary/90 disabled:opacity-50"
-                >
-                  Approve
-                </button>
+                {p.proposalType === 'review_response_proposal' ? (
+                  /* U6 — a review_response_proposal's components are drafted
+                     with `approved: false` and the handler dispatches per
+                     flag, so a one-tap approve here would mark it executed
+                     while posting NOTHING. Route to the inbox card, which
+                     shows the drafted reply and flips the flags on approve. */
+                  <button
+                    type="button"
+                    data-testid="review-response-review-link"
+                    onClick={() => void navigate('/inbox')}
+                    className="min-h-11 flex-1 rounded-lg bg-primary px-3 text-sm text-primary-foreground transition-colors hover:bg-primary/90"
+                  >
+                    Review &amp; approve
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    disabled={isActing}
+                    onClick={() => act(p.id, 'approve')}
+                    className="min-h-11 flex-1 rounded-lg bg-primary px-3 text-sm text-primary-foreground transition-colors hover:bg-primary/90 disabled:opacity-50"
+                  >
+                    Approve
+                  </button>
+                )}
               </div>
             </div>
           );
