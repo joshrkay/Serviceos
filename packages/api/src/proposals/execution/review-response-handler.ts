@@ -125,6 +125,20 @@ export class ReviewResponseExecutionHandler implements ExecutionHandler {
     private readonly replyFn: ReplyToReviewFn = defaultReplyToReview,
   ) {}
 
+  // U8 — each sub-action (public reply / private follow-up / service credit)
+  // degrades to an ok:true skip when its dep is absent — a review response
+  // the owner approved would report success while posting/sending/crediting
+  // nothing. The boot guard (wiring-assertions.ts) fails boot when a pool is
+  // configured but any of the three is missing. auditRepo is failure-soft by
+  // design and deliberately excluded.
+  isFullyWired(): boolean {
+    return (
+      Boolean(this.serviceCreditRepo) &&
+      Boolean(this.googleReplyResolver) &&
+      Boolean(this.privateMessageSender)
+    );
+  }
+
   async execute(
     proposal: Proposal,
     context: ExecutionContext,
