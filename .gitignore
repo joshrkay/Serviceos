@@ -59,18 +59,6 @@ packages/api/voice-quality-layer2-failures/
 packages/api/src/ai/agents/customer-calling/fillers/*.mp3
 packages/api/src/ai/agents/customer-calling/fillers/*.bin
 packages/api/src/ai/agents/customer-calling/fillers/*.pcm
-.fable-verif/
-docs/verification-runs/fable-2026-07-10-artifacts/
 
-# T6-F01 — generate-utterances.ts's regenerable EN staging output.
-# merge-corpus.ts folds this into the committed data/corpus/utterances.jsonl
-# (which also carries frozen legacy-* rows); this file itself is a rebuildable
-# intermediate, not source of truth.
-data/corpus/utterances.generated.jsonl
-
-# Quality-baseline artifacts. Regenerable via `npm run lint:eslint:report` and
-# `npm run quality:metrics`; CI uploads both as PR artifacts. The committed
-# record is docs/quality/engineering-baseline-2026-07-25.md.
-eslint-report.json
-quality-metrics.json
-.gstack/
+# macOS
+.DS_Store

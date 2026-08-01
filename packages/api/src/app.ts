@@ -116,6 +116,14 @@ import {
   type MeTenantSettings,
   type UserModeService,
 } from './routes/me';
+import { createDevicesRouter } from './routes/devices';
+import {
+  DEVICE_TOKEN_STALE_AFTER_DAYS,
+  InMemoryDeviceTokenService,
+  type DeviceTokenService,
+} from './devices/device-token';
+import { PgDeviceTokenRepository } from './devices/pg-device-token';
+import { createExpoPushSender } from './notifications/expo-push-sender';
 import { setUserModeLoader } from './middleware/auth';
 import {
   setSupervisorPresenceLoader,
@@ -607,6 +615,7 @@ import {
   InMemoryDiffAnalysisRepository,
 } from './ai/diff-analysis';
 import { InMemoryDocumentRevisionRepository } from './ai/document-revision';
+import { e1ScriptReadiness } from './ai/agents/customer-calling/emergency-tier';
 import { createLogger } from './logging/logger';
 import { createRequestLoggingMiddleware, captureRequestError } from './middleware/request-logging';
 import {
@@ -813,6 +822,33 @@ export function createApp(): AppWithLifecycle {
   // Load validated config — must happen before CORS so validateProductionConfig()
   // can throw on missing CORS_ORIGIN before we wire the middleware.
   const config = loadConfig();
+
+  // FIX 10(i) (ANS-001) — boot-time readiness gate for the E1 life-safety
+  // script. This is the ONE consumer of E1_SCRIPT_REVIEW_REQUIRED; without
+  // it a placeholder life-safety script could ship silently forever. Purely
+  // a structured log — e1ScriptReadiness() is pure/synchronous and cannot
+  // throw, but the call is wrapped anyway so a readiness check can NEVER be
+  // the reason boot fails.
+  try {
+    const e1BootLogger = createLogger({
+      service: 'api-boot',
+      environment: process.env.NODE_ENV || 'development',
+    });
+    const e1Readiness = e1ScriptReadiness();
+    if (!e1Readiness.ready) {
+      e1BootLogger.warn(`⚠️  E1 LIFE-SAFETY SCRIPT READINESS: ${e1Readiness.message}`, {
+        gate: 'E1_SCRIPT_REVIEW_REQUIRED',
+        ready: false,
+      });
+    } else {
+      e1BootLogger.info(`E1 life-safety script readiness: ${e1Readiness.message}`, {
+        gate: 'E1_SCRIPT_REVIEW_REQUIRED',
+        ready: true,
+      });
+    }
+  } catch {
+    // Never let a readiness log crash boot.
+  }
 
   // Swagger UI — no auth required.
   // Mounted BEFORE helmet() so the CSP below doesn't break swagger-ui-express
@@ -1280,6 +1316,16 @@ export function createApp(): AppWithLifecycle {
   const negotiationQuoteResolver = new DefaultCurrentQuoteResolver({ jobRepo, estimateRepo });
   // Voice-parity (Feature 7) — call_me_back tasks (failed-transfer callbacks).
   const callMeBackRepo     = pool ? new PgCallMeBackRepository(pool)     : new InMemoryCallMeBackRepository();
+  // Device push-token registration (POST /api/devices/push-token, wired to the
+  // router further down) + the Expo transport that fans E1 alerts out to those
+  // devices. Declared here so the voice adapters can take both as deps.
+  const deviceTokenService: DeviceTokenService = pool
+    ? new PgDeviceTokenRepository(pool)
+    : new InMemoryDeviceTokenService();
+  // Gated so a dev/staging E1 test call doesn't POST to Expo's live endpoint.
+  // Unset/'true' keeps it on in production; set EXPO_PUSH_ENABLED=false to mute.
+  const expoPushSender =
+    process.env.EXPO_PUSH_ENABLED === 'false' ? undefined : createExpoPushSender();
   // PR B (Tier 4 / AI approval rules) — shared per-tenant
   // auto-approve threshold resolver. One cached instance for all
   // entry points (twilio adapter, inapp adapter, voice-action-router
@@ -3676,8 +3722,12 @@ export function createApp(): AppWithLifecycle {
           },
         }
       : {}),
-    // RV-143 — durable tail for the emergency page-retry ladder.
+    // RV-143 — durable tail for the emergency page-retry ladder; ANS-001 also
+    // uses it for an undeliverable E1 alert / unrevocable E1 booking.
     callMeBackRepo,
+    // ANS-001 — E1 alerts also push to the tenant's registered devices.
+    deviceTokenRepo: deviceTokenService,
+    ...(expoPushSender ? { expoPushSender } : {}),
     // UC-5a — the ladder itself is durable: each page is a delayed job on
     // the shared queue, consumed by the telephony.emergency_page worker
     // registered below.
@@ -5366,6 +5416,13 @@ export function createApp(): AppWithLifecycle {
     setSupervisorPresenceLoader(pgSupervisorPresenceLoader(pool));
   }
 
+  app.use('/api/me', createMeRouter(userModeService, auditRepo));
+
+  // Device push-token registration (the service itself is constructed with the
+  // other repos above so the voice adapters can share it). Pg-backed when a DB
+  // is configured — PgBaseRepository.withTenant, so every statement really does
+  // join the per-request tenant transaction and RLS scopes every row.
+  app.use('/api/devices', createDevicesRouter(deviceTokenService, auditRepo));
   app.use(
     '/api/me',
     createMeRouter(userModeService, auditRepo, {
@@ -6382,10 +6439,58 @@ export function createApp(): AppWithLifecycle {
   // U6 — held-slot reaper. Every 15 minutes, cancel tentative holds whose
   // hold_expiry_at has passed so the stale rows leave raw appointment reads.
   // Leader-locked + idempotent (only acts on rows still hold_pending_approval).
+  // Also carries the device push-token TTL sweep, which is day-guarded below.
   const holdReaperLogger = createLogger({
     service: 'hold-reaper-worker',
     environment: process.env.NODE_ENV || 'development',
   });
+  // Device tokens have a 90-day TTL, so sweeping on every 15-minute tick would
+  // be 96 pointless passes/day over every tenant — each a pool checkout + SET +
+  // DELETE + RESET contending for the same 20-connection pool the E1 audit
+  // write needs. Once per UTC day is plenty.
+  let lastDeviceTokenPruneDay = '';
+  registerInterval(setInterval(() => {
+    void runAsLeader(SWEEP_LOCK.holdReaper, async () => {
+      // Resolved once and shared by both sweeps below (one SELECT per tick).
+      const tenantIds = await (async (): Promise<string[]> => {
+        if (!pool) return [];
+        const r = await pool.query('SELECT id FROM tenants');
+        return r.rows.map((row: { id: string }) => row.id);
+      })();
+      await runHoldReaperSweep({
+        appointmentRepo,
+        auditRepo,
+        listTenantIds: async () => tenantIds,
+        logger: holdReaperLogger,
+      });
+      // Device push-token TTL. Rides this tick instead of owning a timer:
+      // tokens die silently (uninstall / rotation) and every dead one costs a
+      // wasted round trip on the E1 push fan-out. Per-tenant because
+      // device_push_tokens has FORCE ROW LEVEL SECURITY — there is no
+      // cross-tenant DELETE to write without breaking the RLS pattern.
+      const today = new Date().toISOString().slice(0, 10);
+      if (today !== lastDeviceTokenPruneDay) {
+        lastDeviceTokenPruneDay = today;
+        for (const tenantId of tenantIds) {
+          try {
+            const pruned = await deviceTokenService.pruneStale(
+              tenantId,
+              DEVICE_TOKEN_STALE_AFTER_DAYS,
+            );
+            if (pruned > 0) {
+              holdReaperLogger.info('Pruned stale device push tokens', { tenantId, pruned });
+            }
+          } catch (err) {
+            holdReaperLogger.warn('Device push-token prune failed', {
+              tenantId,
+              error: err instanceof Error ? err.message : String(err),
+            });
+          }
+        }
+      }
+    }).catch((err) => {
+      holdReaperLogger.error('Hold-reaper sweep failed', {
+        error: err instanceof Error ? err.message : String(err),
   if (shouldRunWorkers) {
     registerInterval(setInterval(() => {
       void runAsLeader(SWEEP_LOCK.holdReaper, async () => {

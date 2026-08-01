@@ -523,6 +523,15 @@ export interface TenantSettings {
   digestTime?: string;
   digestChannel?: DigestChannel;
   /**
+   * FIX 10(i) (ANS-001) — the tenant's REVIEWED E1 life-safety script.
+   * `LIFE_SAFETY_E1_SCRIPT` (emergency-tier.ts) is a PLACEHOLDER pending
+   * qualified (trade + legal) review — see `E1_SCRIPT_REVIEW_REQUIRED` /
+   * `e1ScriptReadiness()`. When set, `runEmergencyScan` (twilio-adapter.ts)
+   * passes this as `responseScript` on the `emergency_detected` event for
+   * E1 turns ONLY, overriding the placeholder with no code change. Null /
+   * undefined = placeholder still in effect. Migration 197.
+   */
+  e1ReviewedScript?: string | null;
    * Epic 12.6 — weekly feedback email. Opt-OUT (column defaults true,
    * migration 204), so pilots receive it unless they turn it off. Optional
    * on the type so pre-migration rows / legacy fixtures read as "on" via
@@ -690,6 +699,8 @@ export interface UpdateSettingsInput {
   digestTime?: string;
   /** RV-063 — 'sms' (owner SMS) or 'none' (store/web only). */
   digestChannel?: DigestChannel;
+  /** FIX 10(i) (ANS-001) — reviewed E1 script; null clears (reverts to the placeholder). */
+  e1ReviewedScript?: string | null;
   /** Epic 12.6 — opt out of the weekly feedback email (column default true). */
   weeklyFeedbackEnabled?: boolean;
   /** UB-D / D-015 — opt into the autonomous booking lane (column default false). */

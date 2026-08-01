@@ -4874,6 +4874,62 @@ export const MIGRATIONS = {
       USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
   `,
 
+  // Mobile push notifications — the owner's device registers its Expo push
+  // token after sign-in so the app can notify on proposal execution. Keyed by
+  // the Clerk subject (clerk_user_id, matching users) and unique per token so
+  // re-registration is an idempotent upsert; a user may have several devices.
+  '196_device_push_tokens': `
+    CREATE TABLE IF NOT EXISTS device_push_tokens (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+      clerk_user_id TEXT NOT NULL,
+      expo_push_token TEXT NOT NULL,
+      platform TEXT NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS device_push_tokens_unique
+      ON device_push_tokens (tenant_id, clerk_user_id, expo_push_token);
+    CREATE INDEX IF NOT EXISTS idx_device_push_tokens_user
+      ON device_push_tokens (tenant_id, clerk_user_id);
+    ALTER TABLE device_push_tokens ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE device_push_tokens FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_device_push_tokens ON device_push_tokens;
+    CREATE POLICY tenant_isolation_device_push_tokens ON device_push_tokens
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
+
+  // FIX 10(i) (ANS-001) — per-tenant REVIEWED E1 life-safety script. The
+  // embedded LIFE_SAFETY_E1_SCRIPT (emergency-tier.ts) is an explicit
+  // placeholder pending qualified (trade + legal) review; once a tenant's
+  // script clears review, this column overrides the placeholder via the
+  // emergency_detected event's existing responseScript seam
+  // (runEmergencyScan in twilio-adapter.ts, E1 turns ONLY). NULL = the
+  // placeholder is still in effect. Length-capped like voice_greeting
+  // (migration 090) but generous — this is a multi-sentence spoken script.
+  '197_tenant_settings_e1_reviewed_script': `
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS e1_reviewed_script TEXT;
+    ALTER TABLE tenant_settings
+      DROP CONSTRAINT IF EXISTS tenant_settings_e1_reviewed_script_length,
+      ADD CONSTRAINT tenant_settings_e1_reviewed_script_length
+        CHECK (e1_reviewed_script IS NULL OR length(e1_reviewed_script) <= 2000);
+  `,
+
+  // ANS-001 — (tenant_id, session_id) alone collapsed DISTINCT follow-ups for
+  // one call into a single row. The E1 FSM emits revoke_pending_bookings
+  // BEFORE notify_tenant_emergency, so when both failed the unrevocable-booking
+  // task was inserted first and the "a life-safety call came in" alert task hit
+  // the conflict and was silently dropped — losing the only durable fallback
+  // the E1 alert has, in exactly the degraded-tenant case it exists for.
+  // `reason` joins the key: distinct problems on one call each get a task,
+  // while a retry of the SAME problem still dedups (migration 154's intent,
+  // which this supersedes).
+  '198_call_me_back_session_reason_idempotency': `
+    DROP INDEX IF EXISTS idx_cmb_session_unique;
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_cmb_session_reason_unique
+      ON call_me_back_tasks (tenant_id, session_id, reason)
+      WHERE session_id IS NOT NULL;
   // Mobile push registration — one row per (tenant, device token). The app
   // upserts on sign-in (ON CONFLICT updates user/platform); the notify path
   // lists by tenant. user_id is the Clerk subject (TEXT, like other user_id
