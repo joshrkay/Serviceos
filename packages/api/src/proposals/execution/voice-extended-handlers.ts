@@ -300,6 +300,15 @@ export class SendEstimateExecutionHandler implements ExecutionHandler {
 
   constructor(private readonly provider?: EstimateDeliveryProvider) {}
 
+  // U8 — degrades to a synthetic-id passthrough (sends nothing) without a
+  // delivery provider — see execute(). The boot guard (wiring-assertions.ts)
+  // fails boot when a pool is configured but this is false; app.ts always
+  // resolves a provider object (real in prod/staging, Noop only where the
+  // delivery-boot policy explicitly allows it — see invoice-delivery-boot).
+  isFullyWired(): boolean {
+    return Boolean(this.provider);
+  }
+
   async execute(proposal: Proposal, context: ExecutionContext): Promise<ExecutionResult> {
     const { payload } = proposal;
 
@@ -352,6 +361,13 @@ export class SendInvoiceExecutionHandler implements ExecutionHandler {
   performsExternalIo = true;
 
   constructor(private readonly provider?: InvoiceDeliveryProvider) {}
+
+  // U8 — degrades to a synthetic-id passthrough (sends nothing) without a
+  // delivery provider — see execute(). Same guard rationale as
+  // SendEstimateExecutionHandler above.
+  isFullyWired(): boolean {
+    return Boolean(this.provider);
+  }
 
   async execute(proposal: Proposal, context: ExecutionContext): Promise<ExecutionResult> {
     const { payload } = proposal;

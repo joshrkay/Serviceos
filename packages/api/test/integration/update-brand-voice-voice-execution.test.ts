@@ -115,7 +115,11 @@ describe('Postgres integration — voice update_brand_voice → approve → exec
     // edited to a non-empty value, and `editProposal` re-validates the merged
     // payload against `updateBrandVoicePayloadSchema` first — so this step is
     // the human actually seeing "no slang" rather than it vanishing.
-    const ungated: Proposal = await editProposal(
+    // U8 bonus fix — editProposal returns { proposal, editedFields }; the old
+    // `const ungated: Proposal = await editProposal(...)` bound the WRAPPER,
+    // so missingFieldsFor(wrapper) saw no sourceContext and returned [] no
+    // matter what — a vacuous pass. Destructure so the assertion bites.
+    const { proposal: ungated } = await editProposal(
       proposalRepo,
       tenant.tenantId,
       drafted.id,

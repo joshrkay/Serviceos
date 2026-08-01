@@ -23,6 +23,14 @@ export class UpdateInvoiceExecutionHandler implements ExecutionHandler {
 
   constructor(private readonly invoiceRepo: InvoiceRepository) {}
 
+  // U8 — mutating an EXISTING invoice has no degraded mode: the repo is a
+  // required constructor param (the registry only registers this handler when
+  // it is wired). The probe exists so the boot guard (wiring-assertions.ts)
+  // can verify that structurally instead of trusting a missing probe.
+  isFullyWired(): boolean {
+    return Boolean(this.invoiceRepo);
+  }
+
   async execute(proposal: Proposal, _context: ExecutionContext): Promise<ExecutionResult> {
     const { payload } = proposal;
 

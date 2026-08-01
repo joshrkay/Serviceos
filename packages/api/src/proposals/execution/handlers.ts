@@ -1058,6 +1058,14 @@ export class SendEstimateNudgeExecutionHandler implements ExecutionHandler {
     private readonly pool?: Pool | null,
   ) {}
 
+  // U8 — already fail-closed at runtime ('send service not configured'), but
+  // a boot-time report beats a per-execution failure an owner only discovers
+  // after approving. dispatchRepo is deliberately excluded: the cooldown has
+  // the estimate.lastReminderAt belt-and-braces fallback.
+  isFullyWired(): boolean {
+    return Boolean(this.estimateRepo) && Boolean(this.sendService);
+  }
+
   async execute(proposal: Proposal, context: ExecutionContext): Promise<ExecutionResult> {
     const { payload } = proposal;
 
