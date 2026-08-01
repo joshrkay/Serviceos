@@ -662,7 +662,21 @@ export function InboxPage() {
           if (!editRes.ok) throw new Error(`HTTP ${editRes.status}`);
         }
       }
-      const res = await apiFetch(`/api/proposals/${id}/${action}`, { method: 'POST' });
+      // The reject endpoint validates `rejectProposalBodySchema` — `reason`
+      // is REQUIRED, so a body-less POST 400s for every proposal type. The
+      // inbox is a one-tap surface with no reason form (unlike mobile's
+      // useProposalReview, which collects one), so send the surface as the
+      // reason — same spirit as the route's 'ui' rejection-source stamp.
+      const res = await apiFetch(
+        `/api/proposals/${id}/${action}`,
+        action === 'reject'
+          ? {
+              method: 'POST',
+              headers: { 'content-type': 'application/json' },
+              body: JSON.stringify({ reason: 'Rejected from inbox' }),
+            }
+          : { method: 'POST' },
+      );
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       emitProposalsChanged();
       // D5 / Finding 2 — show the undo toast for approvals, anchored to the
@@ -966,7 +980,14 @@ export function InboxPage() {
                       />
                     )}
                   </div>
-                  <div className="flex items-center gap-2 shrink-0">
+                  {/* Stacked below sm: two side-by-side buttons squeezed the
+                      content column to ~92px at 320px (one word per line in
+                      the draft text). A vertical pair costs ~70px, not
+                      ~150px. Desktop keeps the row. */}
+                  <div
+                    data-testid="row-actions"
+                    className="flex shrink-0 flex-col gap-2 sm:flex-row sm:items-center"
+                  >
                     <button
                       type="button"
                       onClick={() => actOnProposal(row.proposal.id, 'reject')}

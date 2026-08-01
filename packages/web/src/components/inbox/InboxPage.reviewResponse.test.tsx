@@ -302,6 +302,15 @@ describe('InboxPage — review-response approval card', () => {
       expect(apiFetch.mock.calls.some((c) => c[0] === '/api/proposals/p-rev/reject')).toBe(true),
     );
     expect(apiFetch.mock.calls.some((c) => c[1]?.method === 'PUT')).toBe(false);
+    // The card's "…or reject the draft" copy points here — the POST must
+    // carry the reason the endpoint requires (rejectProposalBodySchema),
+    // or every reject 400s and the draft dead-ends again.
+    const rejectCall = apiFetch.mock.calls.find(
+      (c) => c[0] === '/api/proposals/p-rev/reject',
+    );
+    expect(JSON.parse(rejectCall![1].body as string)).toEqual({
+      reason: 'Rejected from inbox',
+    });
   });
 
   it('meets the mobile class contract: min-h-11 targets and wrap-safe draft text', async () => {
@@ -324,6 +333,13 @@ describe('InboxPage — review-response approval card', () => {
     const draft = screen.getByTestId('review-public-draft');
     expect(draft.className).toContain('break-words');
     expect(draft.className).toContain('whitespace-pre-wrap');
+
+    // The action column stacks below sm: side-by-side Reject/Approve
+    // squeezed the content column to ~92px at 320px. The Playwright spec
+    // measures the resulting draft width; this pins the class contract.
+    const actions = screen.getByTestId('row-actions');
+    expect(actions.className).toContain('flex-col');
+    expect(actions.className).toContain('sm:flex-row');
   });
 });
 

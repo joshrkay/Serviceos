@@ -100,13 +100,17 @@ test.describe('review-response approval — mobile layout', () => {
       expect(await horizontalOverflow(page)).toBeLessThanOrEqual(0);
     });
 
-    test('the draft text block stays inside the viewport', async ({ page }) => {
+    test('the draft text block stays inside the viewport with a usable width', async ({ page }) => {
       await openInbox(page);
       const draft = page.getByTestId('review-public-draft');
       await expect(draft).toBeVisible();
       const box = await draft.boundingBox();
       expect(box).not.toBeNull();
       expect(box!.x + box!.width).toBeLessThanOrEqual(320);
+      // Regression guard: with side-by-side Reject/Approve the content
+      // column collapsed to ~92px (one word per line). The stacked action
+      // column (flex-col below sm:) must leave the draft a readable track.
+      expect(box!.width).toBeGreaterThan(150);
     });
 
     test('glove targets: component toggles and Approve are ≥44px tall', async ({ page }) => {
