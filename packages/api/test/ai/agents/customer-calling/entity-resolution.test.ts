@@ -181,6 +181,18 @@ describe('planVoiceEntityLookups — intent-conditioned operator references', ()
     ]);
   });
 
+  // U3 (B7.8) — "$40 in parts for the Henderson job": log_expense joined
+  // JOB_REF_INTENTS so the spoken job reference resolves to a jobId and the
+  // expense keeps its P&L link.
+  it('plans a job lookup for log_expense', () => {
+    const lookups = planVoiceEntityLookups('log_expense', {
+      jobReference: 'the Henderson job',
+    });
+    expect(lookups).toEqual([
+      { kind: 'job', reference: 'the Henderson job', refKey: 'jobId' },
+    ]);
+  });
+
   it('plans technician + appointment lookups for remove_crew_member (no sticky-job fallback)', () => {
     const lookups = planVoiceEntityLookups(
       'remove_crew_member',

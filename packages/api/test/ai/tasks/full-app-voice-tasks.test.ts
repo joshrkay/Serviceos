@@ -98,6 +98,75 @@ describe('LogExpenseTaskHandler', () => {
     expect(res.proposal.payload.category).toBe('other');
     expect(missingFieldsFor(res.proposal)).toContain('amountCents');
   });
+
+  // U3 (B7.8) — log_expense joined JOB_REF_INTENTS: the router's entity
+  // resolver resolves "the Henderson job" pre-draft and the verified jobId
+  // rides existingEntities.jobId. The handler links the expense to it; an
+  // unresolved/absent reference still logs UNLINKED (no new gate). P-44: the
+  // linked case is proven by the EXECUTED EFFECT — the persisted expense row
+  // carries the jobId job P&L aggregates by.
+  describe('U3: spoken expense keeps its job link', () => {
+    const JOB_ID = '77777777-7777-4777-8777-777777777777';
+
+    it('resolver-verified jobId lands on the payload and the PERSISTED expense row (executed effect)', async () => {
+      const res = await new LogExpenseTaskHandler().handle(
+        ctx({
+          existingEntities: {
+            amount: 4000,
+            expenseCategory: 'materials',
+            expenseDescription: 'parts for the Henderson job',
+            jobReference: 'the Henderson job',
+            jobId: JOB_ID,
+          },
+        }),
+      );
+      expect(res.proposal.payload.jobId).toBe(JOB_ID);
+      expect(res.proposal.payload.jobReference).toBe('the Henderson job');
+      expect(res.proposal.payload.amountCents).toBe(4000);
+      expect(missingFieldsFor(res.proposal)).toEqual([]);
+
+      const { InMemoryExpenseRepository } = await import('../../../src/expenses/expense');
+      const { LogExpenseExecutionHandler } = await import(
+        '../../../src/proposals/execution/log-expense-handler'
+      );
+      const expenseRepo = new InMemoryExpenseRepository();
+      const exec = await new LogExpenseExecutionHandler(expenseRepo).execute(res.proposal, {
+        tenantId: 't-1',
+        executedBy: 'u-1',
+      });
+      expect(exec.success).toBe(true);
+
+      // The job-P&L aggregation reads findByTenant(tenantId, { jobId }) —
+      // exactly this filter must return the spoken expense.
+      const linked = await expenseRepo.findByTenant('t-1', { jobId: JOB_ID });
+      expect(linked).toHaveLength(1);
+      expect(linked[0].amountCents).toBe(4000);
+      expect(linked[0].jobId).toBe(JOB_ID);
+    });
+
+    it('no job mention → logs unlinked exactly as before (no gate, no jobId)', async () => {
+      const res = await new LogExpenseTaskHandler().handle(
+        ctx({ existingEntities: { amount: 4000, expenseCategory: 'materials' } }),
+      );
+      expect(res.proposal.payload.jobId).toBeUndefined();
+      expect(missingFieldsFor(res.proposal)).toEqual([]);
+    });
+
+    it('a non-UUID value in the jobId seam never links (shape check, no silent guess)', async () => {
+      const res = await new LogExpenseTaskHandler().handle(
+        ctx({
+          existingEntities: {
+            amount: 4000,
+            jobReference: 'the Henderson job',
+            jobId: 'the Henderson job',
+          },
+        }),
+      );
+      expect(res.proposal.payload.jobId).toBeUndefined();
+      // Still no gate — the expense logs unlinked rather than stalling.
+      expect(missingFieldsFor(res.proposal)).toEqual([]);
+    });
+  });
 });
 
 describe('ConvertLeadTaskHandler', () => {

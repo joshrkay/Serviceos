@@ -1600,6 +1600,15 @@ export class UpdateCustomerTaskHandler implements TaskHandler {
 // money. Reuses the existing LogExpenseExecutionHandler. spentAt
 // defaults to today (the operator can edit before approval). jobId is
 // optional on the contract, so a missing job reference does not block.
+//
+// U3 (B7.8) — `log_expense` joined JOB_REF_INTENTS, so the router's entity
+// resolver resolves "the Henderson job" pre-draft and a unique verified
+// match rides existingEntities.jobId. The handler stamps it onto the
+// payload so LogExpenseExecutionHandler persists the link and job P&L
+// (lookup_job_profit) counts the spoken expense. No new gate: an expense
+// with no (or an unresolved) job mention still logs UNLINKED, exactly as
+// before — resolution only adds the link. An AMBIGUOUS job never reaches
+// here (the router short-circuits to a voice_clarification picker).
 export class LogExpenseTaskHandler implements TaskHandler {
   readonly taskType = 'log_expense' as const;
 
@@ -1619,6 +1628,11 @@ export class LogExpenseTaskHandler implements TaskHandler {
     }
 
     if (ee.vendor) payload.vendor = ee.vendor;
+
+    // U3 — resolver-verified job id (shape-checked; same seam every other
+    // voice task consumes). The spoken reference is kept for the review card.
+    const resolvedJobId = context.existingEntities?.jobId;
+    if (isUuid(resolvedJobId)) payload.jobId = resolvedJobId;
     if (ee.jobReference) payload.jobReference = ee.jobReference;
 
     return {

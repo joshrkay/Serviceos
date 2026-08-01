@@ -97,6 +97,12 @@ const JOB_REF_INTENTS = new Set([
   'add_note',
   'notify_delay',
   'request_feedback',
+  // U3 (B7.8) — "$40 in parts for the Henderson job": resolve the spoken
+  // jobReference → jobId so the logged expense keeps its job link and job
+  // P&L (lookup_job_profit) counts it. jobId is OPTIONAL on the expense
+  // contract, so an unresolved (or absent) reference still logs the expense
+  // unlinked — resolution only ever ADDS the link, never gates the capture.
+  'log_expense',
 ]);
 
 const SCHEDULING_CREATE_INTENTS = new Set(['create_appointment', 'create_booking']);
