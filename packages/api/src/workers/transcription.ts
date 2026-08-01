@@ -4,6 +4,21 @@ import { VoiceRepository, TranscriptionProvider } from '../voice/voice-service';
 import { LLMGateway } from '../ai/gateway/gateway';
 import { encrypt } from '../integrations/crypto';
 
+/**
+ * U9 (voicemail → action) — marks a transcription job as voicemail-sourced.
+ * `callerPhone` is the carrier caller-ID captured by the voicemail-status
+ * callback (threaded from the TwiML's signed callback URL). Downstream, the
+ * router enqueue is GATED on this phone matching the tenant's approver set
+ * (`voicemailRouterEnqueueAllowed` below); absent/unknown callers keep the
+ * notify-only behavior. Identity here is transport-level caller-ID — the
+ * same trust boundary as `resolveOwnerSession` and the SMS reply transport
+ * — and it gates only WHETHER routing happens, never trust elevation: the
+ * recording row keeps source='inbound_call' (untrusted provenance).
+ */
+export interface VoicemailJobContext {
+  callerPhone?: string;
+}
+
 export interface TranscriptionJobPayload {
   tenantId: string;
   recordingId: string;
@@ -18,6 +33,8 @@ export interface TranscriptionJobPayload {
    * with older queue messages.
    */
   userId?: string;
+  /** U9 — present ONLY for voicemail-sourced jobs. */
+  voicemail?: VoicemailJobContext;
 }
 
 export interface TranscriptionCompletionEvent {
@@ -27,6 +44,37 @@ export interface TranscriptionCompletionEvent {
   conversationId?: string;
   userId?: string;
   jobId?: string;
+  /** U9 — threaded verbatim from the job payload for the router gate. */
+  voicemail?: VoicemailJobContext;
+}
+
+/**
+ * U9 — decide whether a completed transcript may be enqueued to the
+ * voice-action-router. Non-voicemail events (in-app operator memos) are
+ * always allowed — unchanged behavior. Voicemail events are allowed ONLY
+ * when the caller-ID matches the tenant's approver set (tenant_settings.
+ * owner_phone / backup supervisor mobile — production wires
+ * `isApproverPhone` from proposals/approver-identity.ts). FAIL-CLOSED:
+ * a lookup error, a missing caller phone, or a non-matching phone all
+ * keep the voicemail notify-only (mirrors `resolveOwnerSession`).
+ */
+export async function voicemailRouterEnqueueAllowed(
+  event: Pick<TranscriptionCompletionEvent, 'tenantId' | 'recordingId' | 'voicemail'>,
+  deps: {
+    isApproverPhone: (tenantId: string, phone: string | undefined) => Promise<boolean>;
+  },
+  logger: Logger,
+): Promise<boolean> {
+  if (!event.voicemail) return true;
+  try {
+    return await deps.isApproverPhone(event.tenantId, event.voicemail.callerPhone);
+  } catch (err) {
+    logger.warn('voicemail router gate failed — treating caller as non-approver', {
+      recordingId: event.recordingId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return false;
+  }
 }
 
 /**
@@ -261,7 +309,8 @@ export function createTranscriptionWorker(
   return {
     type: 'transcription',
     async handle(message: QueueMessage<TranscriptionJobPayload>, logger: Logger): Promise<void> {
-      const { tenantId, recordingId, audioUrl, conversationId, userId, jobId } = message.payload;
+      const { tenantId, recordingId, audioUrl, conversationId, userId, jobId, voicemail } =
+        message.payload;
 
       logger.info('Starting transcription', { recordingId, conversationId });
 
@@ -351,6 +400,9 @@ export function createTranscriptionWorker(
                 conversationId,
                 userId,
                 ...(jobId ? { jobId } : {}),
+                // U9 — voicemail context rides through so the hook can gate
+                // the router enqueue on the caller's approver identity.
+                ...(voicemail ? { voicemail } : {}),
               },
               logger
             );

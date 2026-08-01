@@ -138,6 +138,19 @@ export interface VoiceActionRouterPayload {
    * caller instead of asking the LLM to guess.
    */
   customerId?: string;
+  /**
+   * U9 (voicemail → action) — set to 'voicemail' by the transcription hook
+   * when this transcript came off an inbound voicemail recording. The
+   * transcript's author is an UNAUTHENTICATED phone caller (RIVET I13:
+   * `voice_recordings.source='inbound_call'` classifies untrusted,
+   * unconditionally), even though the owner-line gate let the job through.
+   * Every proposal built from it is therefore stamped
+   * `sourceContext.sourceChannel='voicemail'` and force-held for human
+   * review (`holdIfUntrustedSource`) — no auto-approval, no autonomous-lane
+   * exception, regardless of handler trust tier or supervisor presence.
+   * Absent ⇒ byte-identical legacy behavior (in-app operator memos).
+   */
+  sourceChannel?: 'voicemail';
 }
 
 /**
@@ -1073,6 +1086,8 @@ interface SegmentParams {
    * must not collide on these per-recording keys.
    */
   applyDedup?: boolean;
+  /** U9 — see VoiceActionRouterPayload.sourceChannel. */
+  sourceChannel?: 'voicemail';
 }
 
 type SegmentOutcome =
@@ -1704,9 +1719,16 @@ async function processSegment(
   // to thread presence can't slip an auto-approved (→ auto-executing) proposal
   // past an unsupervised tenant. No-op in the normal case (the handler already
   // computed 'ready_for_review').
+  //
+  // U9 — the untrusted-source guard runs LAST so a voicemail-sourced
+  // proposal can never leave here 'approved', including through the
+  // autonomous-lane exception holdIfUnsupervised deliberately preserves.
   return {
     kind: 'proposal',
-    proposal: holdIfUnsupervised(annotated, supervisorPresent),
+    proposal: holdIfUntrustedSource(
+      holdIfUnsupervised(annotated, supervisorPresent),
+      params.sourceChannel,
+    ),
     classification,
     supervisorPresent,
   };
@@ -1732,6 +1754,42 @@ export function holdIfUnsupervised(proposal: Proposal, supervisorPresent: boolea
     return proposal;
   }
   return { ...proposal, status: 'ready_for_review', approvedAt: undefined };
+}
+
+/**
+ * U9 — voicemail (untrusted-source) chokepoint. Pure; a no-op when
+ * `sourceChannel` is unset (every legacy path).
+ *
+ * For voicemail-sourced transcripts it does two things:
+ *
+ *   1. Stamps `sourceContext.sourceChannel='voicemail'` on EVERY proposal
+ *      so the review surface (and tests) can trace the proposal to an
+ *      unauthenticated-caller recording. Untrusted provenance itself is
+ *      carried by the recording row (`source='inbound_call'`, reachable
+ *      via sourceContext.recordingId → classifyRecordingProvenance) —
+ *      this stamp is the proposal-side pointer, not a parallel trust bit.
+ *
+ *   2. Demotes any 'approved' status to 'ready_for_review'. Unlike
+ *      holdIfUnsupervised there is NO autonomous-lane exception and no
+ *      supervisor-presence bypass: the owner's caller-ID gated only
+ *      whether the router ran — it never elevates the transcript's trust
+ *      (RIVET I13; ratified U9 provenance decision). Injection-bearing
+ *      voicemail text therefore stays data: whatever it talks the drafting
+ *      LLM into, the result still lands in the human review queue.
+ *
+ * Exported for the chokepoint tests.
+ */
+export function holdIfUntrustedSource(
+  proposal: Proposal,
+  sourceChannel: 'voicemail' | undefined,
+): Proposal {
+  if (!sourceChannel) return proposal;
+  const stamped: Proposal = {
+    ...proposal,
+    sourceContext: { ...(proposal.sourceContext ?? {}), sourceChannel },
+  };
+  if (stamped.status !== 'approved') return stamped;
+  return { ...stamped, status: 'ready_for_review', approvedAt: undefined };
 }
 
 /**
@@ -1995,6 +2053,7 @@ export function createVoiceActionRouterWorker(
         recordingId,
         customerId,
         jobId,
+        sourceChannel,
       } = message.payload;
 
       const log = logger.child({ tenantId, recordingId, transcriptLen: transcript.length });
@@ -2181,6 +2240,7 @@ export function createVoiceActionRouterWorker(
                 verticalPromptSection,
                 ...(activeStandingInstructions ? { activeStandingInstructions } : {}),
                 ...(extendedIntents ? { extendedIntents: true } : {}),
+                ...(sourceChannel ? { sourceChannel } : {}),
               },
               log,
             );
@@ -2215,6 +2275,7 @@ export function createVoiceActionRouterWorker(
             verticalPromptSection,
             ...(activeStandingInstructions ? { activeStandingInstructions } : {}),
             ...(extendedIntents ? { extendedIntents: true } : {}),
+            ...(sourceChannel ? { sourceChannel } : {}),
             // Single-action path: apply the per-recording dedup keys.
             applyDedup: true,
           },
