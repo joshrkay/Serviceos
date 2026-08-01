@@ -89,7 +89,7 @@ import type { VoiceAnswerStatus, VoiceLookupAnswer } from '@ai-service-os/shared
 import type { VoiceRepository } from '../voice/voice-service';
 import {
   executeLookupAnswer,
-  OWNER_GRADE_LOOKUP_INTENTS,
+  LOOKUP_REQUIRED_PERMISSION,
   type VoiceLookupAnswerDeps,
 } from './voice-lookup-answer';
 import type { UserRepository } from '../users/user';
@@ -1270,17 +1270,17 @@ async function processSegment(
       : undefined;
 
     // The memo creator (voice_recordings.created_by) is the authoritative
-    // identity for the owner-grade authorization gate — the enqueue
+    // identity for the permission-gated authorization gate — the enqueue
     // payload's userId can be 'system' on this path. Resolved only for
-    // owner-grade intents; a read failure falls through to the adapter's
-    // fail-closed refusal.
+    // permission-gated intents; a read failure falls through to the
+    // adapter's fail-closed refusal.
     let memoCreatorId: string | undefined;
-    if (OWNER_GRADE_LOOKUP_INTENTS.has(classification.intentType)) {
+    if (LOOKUP_REQUIRED_PERMISSION.has(classification.intentType)) {
       try {
         const recording = await deps.voiceRepo.findById(tenantId, recordingId);
         memoCreatorId = recording?.createdBy;
       } catch (err) {
-        log.warn('voice-action-router: memo creator lookup failed — owner-grade ask will refuse', {
+        log.warn('voice-action-router: memo creator lookup failed — permission-gated ask will refuse', {
           error: err instanceof Error ? err.message : String(err),
         });
       }

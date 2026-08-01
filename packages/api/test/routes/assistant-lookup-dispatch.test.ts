@@ -35,6 +35,11 @@ import type { JobRepository } from '../../src/jobs/job';
 import { InMemoryInvoiceRepository, createInvoice } from '../../src/invoices/invoice';
 import { buildLineItem } from '../../src/shared/billing-engine';
 import { InMemoryMoneyDashboardRepository } from '../../src/reports/money-dashboard';
+import { InMemoryLeadRepository, type Lead } from '../../src/leads/lead';
+import {
+  createCatalogItem,
+  InMemoryCatalogItemRepository,
+} from '../../src/catalog/catalog-item';
 import type { LLMGateway, LLMResponse } from '../../src/ai/gateway/gateway';
 import type { AuthenticatedRequest } from '../../src/auth/clerk';
 
@@ -344,5 +349,181 @@ describe('POST /api/assistant/chat — owner-grade lookups keep the reports:view
     expect(res.body.message.content).toContain('$4250.00');
     expect(res.body.message.content).toContain('$900.00 still outstanding');
     expect(res.body.message.content).not.toContain('owner-level report');
+  });
+});
+
+// U7 — operator-surface lookup parity. `lookup_leads` / `lookup_catalog`
+// used to be the two intents `dispatchAssistantLookup` returned null for,
+// silently falling through to the DB-less generic LLM. They now answer on
+// chat via the SAME shared skills telephony calls.
+describe('POST /api/assistant/chat — U7 parity: lookup_leads / lookup_catalog', () => {
+  const LEADS_CLASSIFICATION = JSON.stringify({
+    intentType: 'lookup_leads',
+    confidence: 0.93,
+    extractedEntities: {},
+  });
+  const CATALOG_CLASSIFICATION = JSON.stringify({
+    intentType: 'lookup_catalog',
+    confidence: 0.93,
+    extractedEntities: {},
+  });
+
+  function lead(id: string, stage: Lead['stage']): Lead {
+    return {
+      id,
+      tenantId: TEST_TENANT,
+      firstName: 'Lead',
+      lastName: id,
+      source: 'web_form',
+      stage,
+      createdBy: TEST_USER,
+      createdAt: NOW,
+      updatedAt: NOW,
+    };
+  }
+
+  function leadsLookups(
+    leadRepo: InMemoryLeadRepository,
+    resolveMemberRole: (tenantId: string, userId: string) => Promise<string | null>,
+  ): AssistantLookupDeps {
+    return {
+      answers: { leadRepo, resolveMemberRole },
+      shared: { proposalRepo: new InMemoryProposalRepository() },
+      now: () => NOW,
+    };
+  }
+
+  async function seededCatalogRepo(): Promise<InMemoryCatalogItemRepository> {
+    const repo = new InMemoryCatalogItemRepository();
+    await repo.create(
+      createCatalogItem({
+        tenantId: TEST_TENANT,
+        name: 'Drain cleaning',
+        category: 'Labor',
+        unit: 'hour',
+        unitPriceCents: 22500,
+      }),
+    );
+    await repo.create(
+      createCatalogItem({
+        tenantId: TEST_TENANT,
+        name: 'Water heater flush',
+        category: 'Labor',
+        unit: 'each',
+        unitPriceCents: 14900,
+      }),
+    );
+    return repo;
+  }
+
+  function catalogLookups(
+    catalogRepo: InMemoryCatalogItemRepository,
+    resolveMemberRole: (tenantId: string, userId: string) => Promise<string | null>,
+  ): AssistantLookupDeps {
+    return {
+      answers: { catalogRepo, resolveMemberRole },
+      shared: { proposalRepo: new InMemoryProposalRepository() },
+      now: () => NOW,
+    };
+  }
+
+  it('answers the lead-pipeline question from the SKILL with tenant DB data', async () => {
+    const gateway = scriptedGateway([LEADS_CLASSIFICATION]);
+    const leadRepo = new InMemoryLeadRepository();
+    await leadRepo.create(lead('lead-1', 'new'));
+    await leadRepo.create(lead('lead-2', 'qualified'));
+    await leadRepo.create(lead('lead-3', 'won')); // closed — not "open"
+    // Technicians hold `customers:view` (the GET /api/leads gate): the same
+    // role that can open the leads screen gets the answer here too.
+    const app = buildApp(gateway, {
+      lookups: leadsLookups(leadRepo, async () => 'technician'),
+    });
+
+    const res = await request(app)
+      .post('/api/assistant/chat')
+      .send({ messages: [{ role: 'user', content: 'How many open leads do we have?' }] });
+
+    expect(res.status).toBe(200);
+    expect(res.body.model).toBe('data-lookup');
+    expect(res.body.taskType).toBe('assistant.lookup.lookup_leads');
+    // Real rows out of the repo — won/lost leads excluded.
+    expect(res.body.message.content).toBe('There are 2 open leads in the pipeline.');
+    // Exactly ONE gateway call (the classifier) — the generic LLM never ran.
+    expect(gateway.complete as ReturnType<typeof vi.fn>).toHaveBeenCalledTimes(1);
+    expect(res.body.degraded).toBeUndefined();
+  });
+
+  it('zero open leads → the skill\'s honest empty answer, not a fluent invention', async () => {
+    const gateway = scriptedGateway([LEADS_CLASSIFICATION]);
+    const app = buildApp(gateway, {
+      lookups: leadsLookups(new InMemoryLeadRepository(), async () => 'owner'),
+    });
+
+    const res = await request(app)
+      .post('/api/assistant/chat')
+      .send({ messages: [{ role: 'user', content: 'How many open leads do we have?' }] });
+
+    expect(res.status).toBe(200);
+    expect(res.body.taskType).toBe('assistant.lookup.lookup_leads');
+    // The skill's own empty-state copy, verbatim.
+    expect(res.body.message.content).toBe('There are no open leads in the pipeline right now.');
+  });
+
+  it('catalog: a dispatcher (settings:view) hears the price book', async () => {
+    const gateway = scriptedGateway([CATALOG_CLASSIFICATION]);
+    const app = buildApp(gateway, {
+      lookups: catalogLookups(await seededCatalogRepo(), async () => 'dispatcher'),
+    });
+
+    const res = await request(app)
+      .post('/api/assistant/chat')
+      .send({ messages: [{ role: 'user', content: 'What services do we offer?' }] });
+
+    expect(res.status).toBe(200);
+    expect(res.body.model).toBe('data-lookup');
+    expect(res.body.taskType).toBe('assistant.lookup.lookup_catalog');
+    // Alphabetical, exactly the shared skill's copy.
+    expect(res.body.message.content).toBe(
+      'You have 2 catalog items: Drain cleaning, Water heater flush.',
+    );
+  });
+
+  it('catalog: a technician is refused by the DB-authoritative role, not the Clerk claim', async () => {
+    const gateway = scriptedGateway([CATALOG_CLASSIFICATION]);
+    const catalogRepo = await seededCatalogRepo();
+    const listByTenant = vi.spyOn(catalogRepo, 'listByTenant');
+    // The Clerk claim says `owner` — the gate must not trust it.
+    const app = buildApp(gateway, {
+      role: 'owner',
+      lookups: catalogLookups(catalogRepo, async () => 'technician'),
+    });
+
+    const res = await request(app)
+      .post('/api/assistant/chat')
+      .send({ messages: [{ role: 'user', content: 'What services do we offer?' }] });
+
+    expect(res.status).toBe(200);
+    expect(res.body.taskType).toBe('assistant.lookup.lookup_catalog');
+    expect(res.body.message.content).toBe(
+      'The service catalog is an office-level view. Ask an owner or dispatcher on your team to pull it up.',
+    );
+    // Refusal short-circuits BEFORE the skill; nothing leaks.
+    expect(listByTenant).not.toHaveBeenCalled();
+    expect(res.body.message.content).not.toContain('Drain cleaning');
+  });
+
+  it('catalog: empty catalog answers honestly', async () => {
+    const gateway = scriptedGateway([CATALOG_CLASSIFICATION]);
+    const app = buildApp(gateway, {
+      lookups: catalogLookups(new InMemoryCatalogItemRepository(), async () => 'owner'),
+    });
+
+    const res = await request(app)
+      .post('/api/assistant/chat')
+      .send({ messages: [{ role: 'user', content: 'What services do we offer?' }] });
+
+    expect(res.status).toBe(200);
+    expect(res.body.taskType).toBe('assistant.lookup.lookup_catalog');
+    expect(res.body.message.content).toBe('Your service catalog is empty right now.');
   });
 });

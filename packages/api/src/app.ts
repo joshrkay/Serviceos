@@ -2787,6 +2787,10 @@ export function createApp(): AppWithLifecycle {
     dunningConfigRepo,
     timeEntryRepo,
     expenseRepo,
+    // U7 — lookup_leads / lookup_catalog answer on memo + chat like
+    // telephony: same repos the twilio-adapter wiring hands the skills.
+    leadRepo,
+    catalogRepo,
     settingsRepo,
     // Mirrors the telephony adapter wiring: every surface writes the same
     // lookup_events analytics rows.
