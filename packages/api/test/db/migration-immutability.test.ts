@@ -301,6 +301,14 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   // U1 (PRD gap closure): onboarding_session table for the conversational
   // FSM (ENABLE + FORCE RLS per gemini-code-assist review on PR #594).
   ['195_onboarding_session', '4ca725aa5bd1d9e3c516282f67349e3fc5f47f0228bdc0a5e2ee6ed995d2834d'],
+  // Mobile push: device_push_tokens (tenant-scoped, FORCE RLS). Shipped
+  // without a snapshot entry; locked in alongside PgDeviceTokenRepository.
+  ['196_device_push_tokens', '73e344a636298ec9bea53f91cfc306d25abf6491d61251f94bd695740bab8446'],
+  // FIX 10(i) (ANS-001): per-tenant reviewed E1 life-safety script column.
+  ['197_tenant_settings_e1_reviewed_script', '5bff650e5b0f0d8be04958f3fa5da7b71f22196fc7d3c2084e94c5dd6f7640a4'],
+  // ANS-001: call_me_back idempotency key gains `reason` so an E1 call's
+  // life-safety alert task is no longer swallowed by its booking task.
+  ['198_call_me_back_session_reason_idempotency', '7807073281dad9a454020843788c85953d0a30f2b047b6ca05812ef3da2c7253'],
 ];
 
 function hashMigration(value: string): string {

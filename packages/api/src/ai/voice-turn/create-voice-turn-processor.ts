@@ -88,6 +88,7 @@ import type { WhisperCache } from '../../telephony/whisper-cache';
 import type { PanelData } from '../agents/customer-calling/escalation-summary-builder';
 import { TAU_INT } from '../agents/customer-calling/transitions';
 import type {
+  CallingAgentChannel,
   CallingAgentEvent,
   SideEffect,
 } from '../agents/customer-calling/types';
@@ -98,7 +99,9 @@ import type {
 import { deriveCallOutcome } from '../agents/customer-calling/outcome-mapper';
 import type { VoiceSessionRepository } from '../../voice/voice-session';
 import type {
+  Proposal,
   ProposalRepository,
+  ProposalStatus,
   ProposalType,
 } from '../../proposals/proposal';
 import { createProposal as buildProposal } from '../../proposals/proposal';
@@ -136,6 +139,9 @@ import type {
 import type { VoicePersonaResolver } from '../../settings/voice-persona-resolver';
 import type { SettingsRepository } from '../../settings/settings';
 import { resolveEscalationSettings } from '../../settings/settings';
+import type { CallMeBackRepository } from '../../voice/call-me-back/call-me-back';
+import type { DeviceTokenService } from '../../devices/device-token';
+import type { ExpoPushSender } from '../../notifications/expo-push-sender';
 import type { SpeechTurnHandler } from '../../telephony/media-streams/mediastream-adapter';
 import { createLogger } from '../../logging/logger';
 import { scheduleDroppedCallRecovery } from '../../telephony/dropped-call-recovery';
@@ -245,13 +251,28 @@ const S1_ALLOWED_PROPOSAL_TYPES: ReadonlySet<ProposalType> = new Set<ProposalTyp
 ]);
 
 /**
- * True when this session is the untrusted inbound-customer (S1) surface: an
- * inbound phone call NOT placed from an authenticated approver number. Owner
- * (approver) calls are the RV-070/RV-071 elevated exception and are not S1.
+ * I6 — the ALLOWLIST of channels whose sessions are trusted by default.
+ * `inapp` is the owner's own authenticated app surface. Everything else is
+ * untrusted until it is consciously added here.
+ */
+const TRUSTED_CHANNELS: ReadonlySet<CallingAgentChannel> = new Set<CallingAgentChannel>([
+  'inapp',
+]);
+
+/**
+ * True when this session is the untrusted inbound-customer (S1) surface: a
+ * session arriving on a channel that is NOT on the trusted allowlist and that
+ * was not placed from an authenticated approver number. Owner (approver) calls
+ * are the RV-070/RV-071 elevated exception and are not S1.
+ *
+ * Fail-CLOSED by construction: a channel added later (sms, web_chat, …) is S1
+ * from the moment it exists and stays S1 until someone deliberately puts it in
+ * `TRUSTED_CHANNELS`. The previous `channel === 'telephony'` form failed OPEN —
+ * any new channel would have silently skipped the S1 proposal-type gate.
  */
 function isUntrustedS1Session(session: VoiceSession): boolean {
   return (
-    session.channel === 'telephony' &&
+    !TRUSTED_CHANNELS.has(session.channel) &&
     session.machine.currentContext.ownerSession !== true
   );
 }
@@ -333,6 +354,20 @@ export interface VoiceTurnProcessorDeps {
   whisperCache?: WhisperCache;
   /** F4 — outbound SMS to dispatcher on escalation. */
   deliveryProvider?: { sendSms(args: { to: string; body: string }): Promise<unknown> };
+  /**
+   * ANS-001 — durable URGENT follow-up tasks (the same repo the call-me-back
+   * worker sweeps and the emergency page ladder falls back to). Wired so an E1
+   * alert that can't be delivered, and an E1 booking that can't be revoked,
+   * both leave a human-visible task instead of only a log line.
+   */
+  callMeBackRepo?: CallMeBackRepository;
+  /**
+   * ANS-001 — registered mobile devices for the tenant, for the E1 push
+   * fan-out. Structural (listByTenant only) so tests can pass a stub.
+   */
+  deviceTokenRepo?: Pick<DeviceTokenService, 'listByTenant'>;
+  /** ANS-001 — Expo push transport for the E1 alert. Best-effort, never throws. */
+  expoPushSender?: ExpoPushSender;
   /**
    * Caller E.164 for the active leg. When set, used to build escalation
    * summaries; otherwise a placeholder is used.
@@ -1069,8 +1104,118 @@ export function createVoiceTurnProcessor(
     'expired',
     'execution_failed',
   ]);
+  // The complement of TERMINAL_PROPOSAL_STATUSES — the statuses a booking may
+  // still be revoked FROM. Passed as the precondition of the conditional write
+  // so a proposal that moves on mid-revocation is never clobbered.
+  const REVOCABLE_FROM_STATUSES: ProposalStatus[] = [
+    'draft',
+    'ready_for_review',
+    'approved',
+  ];
   const UUID_RE =
     /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+  /**
+   * ANS-001 — durable URGENT follow-up for an E1 call. Mirrors the emergency
+   * page ladder's exhaustion fallback (`telephony/emergency-page-retry.ts`):
+   * the same `call_me_back` task the CSR sweep already surfaces, so a human
+   * still sees the problem when every live channel failed. Best-effort — the
+   * caller is on the life-safety path and nothing here may throw.
+   *
+   * The repo dedups on (tenant_id, session_id, REASON) — see migration 198.
+   * Keying on the session alone silently discarded the second task, and since
+   * the FSM emits revoke_pending_bookings before notify_tenant_emergency, the
+   * one that lost was always the life-safety ALERT. Distinct reasons now each
+   * get a task; a retry of the same reason still dedups.
+   */
+  async function createE1FollowUpTask(
+    session: VoiceSession,
+    tenantId: string,
+    reason: string,
+    callbackMessage: string,
+  ): Promise<void> {
+    if (!deps.callMeBackRepo) {
+      logger.error('E1 follow-up task NOT created (no callMeBackRepo wired)', {
+        tenantId,
+        sessionId: session.id,
+        reason,
+      });
+      return;
+    }
+    try {
+      await deps.callMeBackRepo.create({
+        tenantId,
+        sessionId: session.id,
+        ...(session.callSid ? { callSid: session.callSid } : {}),
+        // caller_phone is NOT NULL; an unresolvable caller still gets a task
+        // (the message carries the detail the CSR needs).
+        callerPhone: deps.callerPhoneResolver?.(session) ?? 'unknown',
+        callbackMessage,
+        intentSummary: 'emergency_dispatch',
+        reason,
+        scheduledFor: new Date(),
+      });
+    } catch (err) {
+      logger.error('E1 follow-up task create failed', {
+        error: err instanceof Error ? err.message : String(err),
+        tenantId,
+        sessionId: session.id,
+        reason,
+      });
+    }
+  }
+
+  /**
+   * ANS-001 — compensation for a booking that could NOT be revoked: it already
+   * executed, or a racing writer moved it past the revocable window. That
+   * leaves a live appointment attached to a life-safety call, so it is never
+   * silent — an audit event records it and a durable URGENT task puts it in
+   * front of a human.
+   */
+  async function recordRevokeBlocked(
+    session: VoiceSession,
+    tenantId: string,
+    proposal: Proposal,
+  ): Promise<void> {
+    const metadata = {
+      proposalId: proposal.id,
+      status: proposal.status,
+      resultEntityId: proposal.resultEntityId ?? null,
+    };
+    logger.error('revoke_pending_bookings: booking still LIVE on an E1 call', {
+      sessionId: session.id,
+      tenantId,
+      ...metadata,
+    });
+    if (deps.auditRepo) {
+      try {
+        await deps.auditRepo.create(
+          createAuditEvent({
+            tenantId,
+            actorId: deps.systemActorId ?? 'calling-agent',
+            actorRole: 'system',
+            eventType: 'agent.calling.e1_revoke_blocked_terminal',
+            entityType: 'voice_session',
+            entityId: session.id,
+            correlationId: session.id,
+            metadata,
+          }),
+        );
+      } catch (err) {
+        logger.warn('e1_revoke_blocked_terminal audit persist failed', {
+          error: err instanceof Error ? err.message : String(err),
+          sessionId: session.id,
+        });
+      }
+    }
+    await createE1FollowUpTask(
+      session,
+      tenantId,
+      'life_safety_e1_booking_live',
+      `EMERGENCY (E1): a booking from this call could NOT be revoked ` +
+        `(proposal ${proposal.id}, status ${proposal.status}). Cancel it by hand.`,
+    );
+  }
 
   /**
    * ANS-001 — E1 booking revocation. Rejects every still-live booking proposal
@@ -1090,11 +1235,61 @@ export function createVoiceTurnProcessor(
           const p = await deps.proposalRepo.findById(tenantId, id);
           if (!p) continue;
           if (!REVOCABLE_BOOKING_TYPES.has(p.proposalType)) continue;
-          if (TERMINAL_PROPOSAL_STATUSES.has(p.status)) continue;
-          await deps.proposalRepo.updateStatus(tenantId, id, 'rejected', {
-            rejectionReason: 'life_safety_emergency',
-            rejectionDetails: `Booking revoked — E1 life-safety signal (${reason}) during the call; a hazard call is never booked.`,
-          });
+          if (TERMINAL_PROPOSAL_STATUSES.has(p.status)) {
+            // Already past revocation — compensate instead of skipping.
+            await recordRevokeBlocked(session, tenantId, p);
+            continue;
+          }
+          // CONDITIONAL write: the execution worker can move this proposal
+          // approved → executing → executed between the read above and the
+          // write. `updateStatusIf` folds the precondition into the UPDATE, so
+          // a lost race returns null rather than rejecting an executed booking.
+          const revoked = await deps.proposalRepo.updateStatusIf(
+            tenantId,
+            id,
+            REVOCABLE_FROM_STATUSES,
+            'rejected',
+            {
+              rejectionReason: 'life_safety_emergency',
+              rejectionDetails: `Booking revoked — E1 life-safety signal (${reason}) during the call; a hazard call is never booked.`,
+            },
+          );
+          if (revoked) {
+            // Repo rule: all mutations emit an audit event. Cancelling a
+            // customer's booking is exactly what an operator reconstructing an
+            // E1 call will need to see.
+            if (deps.auditRepo) {
+              try {
+                await deps.auditRepo.create(
+                  createAuditEvent({
+                    tenantId,
+                    actorId: deps.systemActorId ?? 'calling-agent',
+                    actorRole: 'system',
+                    eventType: 'agent.calling.e1_booking_revoked',
+                    entityType: 'proposal',
+                    entityId: revoked.id,
+                    correlationId: session.id,
+                    metadata: {
+                      proposalId: revoked.id,
+                      proposalType: revoked.proposalType,
+                      fromStatus: p.status,
+                      reason,
+                    },
+                  }),
+                );
+              } catch (err) {
+                logger.warn('e1_booking_revoked audit persist failed', {
+                  error: err instanceof Error ? err.message : String(err),
+                  sessionId: session.id,
+                  proposalId: revoked.id,
+                });
+              }
+            }
+          } else {
+            // Lost the race. Re-read so the audit/task carry the real status.
+            const current = await deps.proposalRepo.findById(tenantId, id);
+            await recordRevokeBlocked(session, tenantId, current ?? p);
+          }
         } catch (err) {
           logger.warn('revoke_pending_bookings: proposal void failed', {
             error: err instanceof Error ? err.message : String(err),
@@ -1129,11 +1324,52 @@ export function createVoiceTurnProcessor(
   }
 
   /**
+   * ANS-001 — push half of the E1 tenant alert. Reaches the owner's phone even
+   * when the text channel is degraded, and reaches every staff device the
+   * tenant registered rather than one number. Additive to the SMS below and
+   * best-effort: a push failure never changes the SMS/fallback outcome.
+   */
+  async function pushE1AlertToDevices(
+    session: VoiceSession,
+    tenantId: string,
+    keyword: string,
+    callerPhone: string | undefined,
+  ): Promise<void> {
+    if (!deps.deviceTokenRepo || !deps.expoPushSender) return;
+    try {
+      const devices = await deps.deviceTokenRepo.listByTenant(tenantId);
+      if (devices.length === 0) return;
+      await deps.expoPushSender.send(
+        devices.map((d) => ({
+          to: d.expoPushToken,
+          // "E1" is an internal tier label — a contractor's lock screen gets
+          // plain language.
+          title: '⚠️ EMERGENCY — life-safety call',
+          // Same I13 discipline as the SMS body: detected keyword + masked
+          // number only, never the caller's own words.
+          body:
+            `Detected: "${keyword}"` +
+            (callerPhone ? ` from ${maskPhone(callerPhone)}` : '') +
+            `. Caller directed to 911/the utility — follow up immediately.`,
+        })),
+      );
+    } catch (err) {
+      logger.warn('notify_tenant_emergency: push fan-out failed', {
+        error: err instanceof Error ? err.message : String(err),
+        tenantId,
+        sessionId: session.id,
+      });
+    }
+  }
+
+  /**
    * ANS-001 — E1 tenant alert. Notifies the tenant that a life-safety call came
    * in, WITHOUT bridging the caller into a live transfer (no <Dial>): the caller
    * has been directed to 911/the utility and the call is closing. The durable
    * "logged as E1" record is the FSM's audit_log side effect; this fans the
-   * alert out over the tenant's text channel. Best-effort — never throws.
+   * alert out over the tenant's text + push channels, and falls back to a
+   * durable URGENT task when the text channel can't be used at all.
+   * Best-effort — never throws.
    */
   async function handleNotifyTenantEmergency(
     session: VoiceSession,
@@ -1142,22 +1378,27 @@ export function createVoiceTurnProcessor(
   ): Promise<void> {
     const keyword =
       typeof fx.payload.keyword === 'string' ? fx.payload.keyword : 'emergency';
-    let ownerNumber: string | undefined;
+    let recipients: string[] = [];
     if (deps.settingsRepo) {
       try {
         const settings = await deps.settingsRepo.findByTenant(tenantId);
-        ownerNumber = settings?.transferNumber ?? undefined;
+        // A life-safety alert goes to EVERY configured number, not a
+        // preference chain. ownerPhone (P8-016) is the owner's personal
+        // emergency cell but doubles as an approver-identity field that can go
+        // stale; transferNumber is a proven delivery target — and a
+        // Twilio-ACCEPTED send to a stale number throws nothing, so a
+        // preference chain can silently alert nobody. A duplicate text is
+        // free; a missed E1 alert is not.
+        recipients = [
+          ...new Set(
+            [settings?.ownerPhone, settings?.transferNumber].filter(
+              (n): n is string => typeof n === 'string' && n.length > 0,
+            ),
+          ),
+        ];
       } catch {
-        // best-effort — fall through to no-SMS
+        // best-effort — fall through to the durable fallback below
       }
-    }
-    if (!ownerNumber || !deps.deliveryProvider) {
-      logger.warn('notify_tenant_emergency: no owner number / delivery provider', {
-        tenantId,
-        sessionId: session.id,
-        hasNumber: Boolean(ownerNumber),
-      });
-      return;
     }
     const callerPhone = deps.callerPhoneResolver?.(session);
     // The caller's own words are UNTRUSTED (I13) and are NOT echoed into the
@@ -1168,14 +1409,42 @@ export function createVoiceTurnProcessor(
       (callerPhone ? ` from ${maskPhone(callerPhone)}` : '') +
       `. Detected: "${keyword}". The caller was directed to 911/the utility. ` +
       `Please follow up immediately.`;
-    try {
-      await deps.deliveryProvider.sendSms({ to: ownerNumber, body });
-    } catch (err) {
-      logger.warn('notify_tenant_emergency: SMS dispatch failed', {
-        error: err instanceof Error ? err.message : String(err),
-        sessionId: session.id,
-      });
-    }
+
+    // Push and SMS are independent channels, so START the push without
+    // awaiting it: a slow Expo endpoint costs up to 4s per 100-device batch,
+    // and awaiting it first would push the owner's TEXT behind that. Both are
+    // settled before returning; neither can throw.
+    const push = pushE1AlertToDevices(session, tenantId, keyword, callerPhone);
+    const provider = deps.deliveryProvider;
+    const sms = (async (): Promise<void> => {
+      if (recipients.length === 0 || !provider) {
+        logger.error('notify_tenant_emergency: no owner number / delivery provider', {
+          tenantId,
+          sessionId: session.id,
+          hasNumber: recipients.length > 0,
+        });
+        await createE1FollowUpTask(session, tenantId, 'life_safety_e1', body);
+        return;
+      }
+      const sends = await Promise.allSettled(
+        recipients.map((to) => provider.sendSms({ to, body })),
+      );
+      const failures = sends.filter((s) => s.status === 'rejected');
+      for (const f of failures) {
+        logger.error('notify_tenant_emergency: SMS dispatch failed', {
+          error:
+            f.reason instanceof Error ? f.reason.message : String(f.reason),
+          tenantId,
+          sessionId: session.id,
+        });
+      }
+      // The durable fallback fires only when NO text went out at all — one
+      // delivered alert is a notified tenant.
+      if (failures.length === sends.length) {
+        await createE1FollowUpTask(session, tenantId, 'life_safety_e1', body);
+      }
+    })();
+    await Promise.allSettled([push, sms]);
   }
 
   async function executeSideEffects(
@@ -1252,6 +1521,14 @@ export function createVoiceTurnProcessor(
         // the customers table and surface the linked customer.
         ...(session.customerId !== undefined
           ? { customerId: session.customerId }
+          : {}),
+        // I13 (FIX 10ii) — the FSM context's injectionFlagged was write-only
+        // (set by the prompt_injection_detected guard, never read). Stamp it
+        // into the durable end-of-call record so a caller injection attempt
+        // is discoverable without replaying the transcript. Sticky: once
+        // flagged this session, always flagged on the persisted row.
+        ...(session.machine.currentContext.injectionFlagged
+          ? { contentProvenance: 'untrusted' as const }
           : {}),
       });
     } catch {

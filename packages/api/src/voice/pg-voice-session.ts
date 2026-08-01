@@ -23,6 +23,11 @@ function mapRow(row: Record<string, unknown>): VoiceSessionRow {
     ...(row.outcome != null ? { outcome: row.outcome as CallOutcome } : {}),
     ...(row.transcript != null ? { transcript: row.transcript as string[] } : {}),
     ...(row.customer_id != null ? { customerId: row.customer_id as string } : {}),
+    // I13 (FIX 10ii) — rides the pre-existing `context` jsonb column
+    // (migration 066), which pg parses back into a plain object.
+    ...((row.context as Record<string, unknown> | null)?.contentProvenance === 'untrusted'
+      ? { contentProvenance: 'untrusted' as const }
+      : {}),
   };
 }
 
@@ -66,11 +71,21 @@ export class PgVoiceSessionRepository
       // returns zero rows → null → caller treats it as already-stamped).
       const transcriptJson =
         input.transcript !== undefined ? JSON.stringify(input.transcript) : null;
+      // I13 (FIX 10ii) — rides the pre-existing `context` jsonb column
+      // (migration 066; previously always inserted as '{}' and never
+      // updated). '{}' when unset so a pre-migration-197-shaped row is
+      // untouched; the DO UPDATE branch below only overwrites context when
+      // this write actually carries a value, mirroring the transcript
+      // COALESCE precedent (never clobber good data with an empty default).
+      const contextJson =
+        input.contentProvenance !== undefined
+          ? JSON.stringify({ contentProvenance: input.contentProvenance })
+          : null;
       const result = await client.query(
         `INSERT INTO voice_sessions
             (id, tenant_id, channel, call_sid, customer_id, state, context, started_at,
              ended_at, ended_reason, outcome, transcript)
-          VALUES ($1, $2, $3, $4, $5, $6, '{}'::jsonb, NOW(), $7, $8, $9,
+          VALUES ($1, $2, $3, $4, $5, $6, COALESCE($11::jsonb, '{}'::jsonb), NOW(), $7, $8, $9,
                   $10::jsonb)
           ON CONFLICT (id) DO UPDATE
              SET state        = EXCLUDED.state,
@@ -79,6 +94,8 @@ export class PgVoiceSessionRepository
                  outcome      = EXCLUDED.outcome,
                  transcript   = COALESCE(EXCLUDED.transcript, voice_sessions.transcript),
                  customer_id  = COALESCE(EXCLUDED.customer_id, voice_sessions.customer_id),
+                 context      = CASE WHEN EXCLUDED.context = '{}'::jsonb
+                                      THEN voice_sessions.context ELSE EXCLUDED.context END,
                  updated_at   = NOW()
            WHERE voice_sessions.tenant_id = EXCLUDED.tenant_id
              AND voice_sessions.ended_at IS NULL
@@ -94,6 +111,7 @@ export class PgVoiceSessionRepository
           input.endedReason,
           input.outcome,
           transcriptJson,
+          contextJson,
         ],
       );
       if (result.rows.length === 0) return null;

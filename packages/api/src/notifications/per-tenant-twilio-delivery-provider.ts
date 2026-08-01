@@ -21,6 +21,7 @@ import {
   SmsMessage,
 } from './delivery-provider';
 import { DeliveryError } from './notification-errors';
+import { SMS_SEND_TIMEOUT_MS } from './twilio-delivery-provider';
 import { getTenantTwilioCreds, TenantTwilioCreds } from '../integrations/credentials';
 import { isValidTenantId } from '../db/schema';
 
@@ -107,10 +108,26 @@ export class PerTenantTwilioDeliveryProvider implements MessageDeliveryProvider 
       headers['Idempotency-Key'] = message.idempotencyKey;
     }
 
-    const response = await this.fetchImpl(
-      `${this.apiBaseUrl}/Accounts/${creds.accountSid}/Messages.json`,
-      { method: 'POST', headers, body: body.toString() },
-    );
+    // Same ceiling as the base provider: a hung socket must never park an E1
+    // tenant alert (or any caller) on an unbounded wait. The abort rejects with
+    // a DOMException, so normalize it to a DeliveryError — callers branch on
+    // `instanceof DeliveryError` and would otherwise see an unclassified error.
+    let response: Response;
+    try {
+      response = await this.fetchImpl(
+        `${this.apiBaseUrl}/Accounts/${creds.accountSid}/Messages.json`,
+        {
+          method: 'POST',
+          headers,
+          body: body.toString(),
+          signal: AbortSignal.timeout(SMS_SEND_TIMEOUT_MS),
+        },
+      );
+    } catch (err) {
+      throw new DeliveryError('PROVIDER_FAILED', 'SMS provider timed out', {
+        providerBody: err instanceof Error ? err.message : String(err),
+      });
+    }
 
     if (!response.ok) {
       const text = await response.text().catch(() => '');

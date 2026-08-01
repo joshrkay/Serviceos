@@ -15,11 +15,23 @@ import {
 } from '../../../src/ai/voice-turn';
 import { VoiceSessionStore } from '../../../src/ai/agents/customer-calling/voice-session-store';
 import { InMemoryAuditRepository } from '../../../src/audit/audit';
-import { InMemoryProposalRepository } from '../../../src/proposals/proposal';
+import { InMemoryProposalRepository, createProposal } from '../../../src/proposals/proposal';
 import { InMemoryVoiceSessionRepository } from '../../../src/voice/voice-session';
+import { InMemoryCallMeBackRepository } from '../../../src/voice/call-me-back/call-me-back';
+import { InMemoryDeviceTokenService } from '../../../src/devices/device-token';
+import type { ExpoPushMessage } from '../../../src/notifications/expo-push-sender';
+import { InMemoryAppointmentRepository, createAppointment } from '../../../src/appointments/appointment';
+import { maskPhone } from '../../../src/telephony/twilio-call-control';
 import type { LLMGateway, LLMResponse } from '../../../src/ai/gateway/gateway';
-import type { SideEffect } from '../../../src/ai/agents/customer-calling/types';
-import type { TenantSettings, SettingsRepository } from '../../../src/settings/settings';
+import type {
+  CallingAgentChannel,
+  SideEffect,
+} from '../../../src/ai/agents/customer-calling/types';
+import {
+  InMemorySettingsRepository,
+  type TenantSettings,
+  type SettingsRepository,
+} from '../../../src/settings/settings';
 import type { CurrentQuoteResolver } from '../../../src/conversations/negotiation/current-quote-resolver';
 
 /** A configured (opted-in) discount policy + a grounded $250 quote, for U6 tests. */
@@ -90,6 +102,8 @@ function makeCtx(opts: {
   withRepos?: boolean;
   settingsRepo?: Pick<SettingsRepository, 'findByTenant'>;
   negotiationQuoteResolver?: CurrentQuoteResolver;
+  /** I6 — override the session's channel (defaults to the telephony surface). */
+  channel?: CallingAgentChannel;
 } = {
   gateway: makeGatewayReturning('{}'),
   withRepos: true,
@@ -98,7 +112,7 @@ function makeCtx(opts: {
   const auditRepo = new InMemoryAuditRepository();
   const proposalRepo = new InMemoryProposalRepository();
   const voiceSessionRepo = new InMemoryVoiceSessionRepository();
-  const session = store.create('tenant-abc', 'telephony', {
+  const session = store.create('tenant-abc', opts.channel ?? 'telephony', {
     callSid: 'CA-test',
   });
   // Drive the FSM forward to `intent_capture`. handleInbound's
@@ -124,7 +138,10 @@ function makeCtx(opts: {
     ...(opts.withRepos !== false
       ? { auditRepo, proposalRepo, voiceSessionRepo }
       : {}),
-    ...(opts.settingsRepo ? { settingsRepo: opts.settingsRepo } : {}),
+    // Only findByTenant is exercised; widen for the full-repo dep signature.
+    ...(opts.settingsRepo
+      ? { settingsRepo: opts.settingsRepo as SettingsRepository }
+      : {}),
     ...(opts.negotiationQuoteResolver
       ? { negotiationQuoteResolver: opts.negotiationQuoteResolver }
       : {}),
@@ -607,6 +624,100 @@ describe('createVoiceTurnProcessor — terminal hook + persist (Codex P1 r5)', (
       true,
     );
   });
+
+  // FIX 10(ii) — injectionFlagged was write-only on the FSM context (set by
+  // the prompt_injection_detected guard, never read anywhere). Pin that the
+  // durable end-of-call record now carries it as contentProvenance.
+  it('stamps contentProvenance: "untrusted" on the persisted end-of-call record when the session was injection-flagged', async () => {
+    type MarkEndedCall = Parameters<InMemoryVoiceSessionRepository['markEnded']>;
+    const captured: MarkEndedCall[] = [];
+    const fakeRepo: InMemoryVoiceSessionRepository = Object.assign(
+      new InMemoryVoiceSessionRepository(),
+      {
+        markEnded: vi.fn(async (...args: MarkEndedCall) => {
+          captured.push(args);
+          return null;
+        }),
+      },
+    );
+
+    const store = new VoiceSessionStore({ startInterval: false });
+    const session = store.create('tenant-abc', 'telephony', { callSid: 'CA-i13' });
+    session.machine.dispatch({
+      type: 'incoming_call',
+      callSid: 'CA-i13',
+      from: '+15125550100',
+      to: '+15125550999',
+      tenantId: 'tenant-abc',
+    });
+    session.machine.dispatch({ type: 'prompt_injection_detected' });
+    expect(session.machine.currentContext.injectionFlagged).toBe(true);
+    session.machine.dispatch({ type: 'caller_hangup' });
+    expect(session.machine.currentState).toBe('terminated');
+
+    const processor = createVoiceTurnProcessor({
+      store,
+      gateway: makeGatewayReturning('{}'),
+      businessName: 'Acme',
+      voiceSessionRepo: fakeRepo,
+    });
+
+    await processor.speechTurn({
+      session,
+      speechResult: 'whatever',
+      callSid: 'CA-i13',
+      tenantId: 'tenant-abc',
+    });
+    await new Promise((r) => setImmediate(r));
+
+    expect(captured.length).toBe(1);
+    const [, , input] = captured[0]!;
+    expect(input.contentProvenance).toBe('untrusted');
+  });
+
+  it('leaves contentProvenance unset when the session was never injection-flagged', async () => {
+    type MarkEndedCall = Parameters<InMemoryVoiceSessionRepository['markEnded']>;
+    const captured: MarkEndedCall[] = [];
+    const fakeRepo: InMemoryVoiceSessionRepository = Object.assign(
+      new InMemoryVoiceSessionRepository(),
+      {
+        markEnded: vi.fn(async (...args: MarkEndedCall) => {
+          captured.push(args);
+          return null;
+        }),
+      },
+    );
+
+    const store = new VoiceSessionStore({ startInterval: false });
+    const session = store.create('tenant-abc', 'telephony', { callSid: 'CA-clean' });
+    session.machine.dispatch({
+      type: 'incoming_call',
+      callSid: 'CA-clean',
+      from: '+15125550100',
+      to: '+15125550999',
+      tenantId: 'tenant-abc',
+    });
+    session.machine.dispatch({ type: 'caller_hangup' });
+
+    const processor = createVoiceTurnProcessor({
+      store,
+      gateway: makeGatewayReturning('{}'),
+      businessName: 'Acme',
+      voiceSessionRepo: fakeRepo,
+    });
+
+    await processor.speechTurn({
+      session,
+      speechResult: 'whatever',
+      callSid: 'CA-clean',
+      tenantId: 'tenant-abc',
+    });
+    await new Promise((r) => setImmediate(r));
+
+    expect(captured.length).toBe(1);
+    const [, , input] = captured[0]!;
+    expect(input.contentProvenance).toBeUndefined();
+  });
 });
 
 // ─── N-003 — negotiation guardrail (live FSM) ───────────────────────────────
@@ -705,5 +816,626 @@ describe('createVoiceTurnProcessor — negotiation guardrail (N-003)', () => {
     );
     expect(vc).toBeDefined();
     expect(vc!.payload.reason).toBe('ambiguous_discount_target');
+  });
+});
+
+// ─── I6 — fail-closed S1 predicate ───────────────────────────────────────────
+
+describe('I6 — untrusted-surface predicate is a trusted-channel allowlist', () => {
+  it('treats a session on an unknown (future) channel as S1', async () => {
+    // The predicate used to ask `channel === 'telephony'`, which fails OPEN:
+    // an sms / web_chat channel added later would have skipped the S1
+    // proposal-type gate entirely. A channel nobody has consciously trusted
+    // must be S1, so this S2 op is denied exactly as it is on telephony.
+    const gateway = makeGatewayWithSequence([
+      JSON.stringify({
+        intentType: 'send_invoice',
+        confidence: 0.97,
+        reasoning: 'caller asked to send an invoice',
+        extractedEntities: { customerName: 'Henderson' },
+      }),
+      JSON.stringify({ answer: 'yes', reasoning: 'caller said yes' }),
+    ]);
+    const { processor, session, proposalRepo, auditRepo } = makeCtx({
+      gateway,
+      withRepos: true,
+      // A channel that does not exist yet — the whole point of the allowlist.
+      channel: 'web_chat' as unknown as CallingAgentChannel,
+    });
+
+    await processor.speechTurn({
+      session,
+      speechResult: 'send the Henderson invoice to me',
+      callSid: 'CA-test',
+      tenantId: 'tenant-abc',
+    });
+    await processor.speechTurn({
+      session,
+      speechResult: 'yes',
+      callSid: 'CA-test',
+      tenantId: 'tenant-abc',
+    });
+
+    const proposals = await proposalRepo.findByTenant('tenant-abc');
+    expect(proposals.some((p) => p.proposalType === 'send_invoice')).toBe(false);
+    expect(
+      auditRepo.getAll().some((e) => e.eventType === 'agent.calling.i6_s1_denied_s2_op'),
+    ).toBe(true);
+  });
+
+  it('still exempts the trusted in-app owner surface', async () => {
+    // `inapp` IS on the allowlist — the owner's authenticated app surface is
+    // not the untrusted customer surface, so the S2 op is drafted normally.
+    const gateway = makeGatewayWithSequence([
+      JSON.stringify({
+        intentType: 'send_invoice',
+        confidence: 0.97,
+        reasoning: 'owner asked to send an invoice',
+        extractedEntities: { customerName: 'Henderson' },
+      }),
+      JSON.stringify({ answer: 'yes', reasoning: 'owner said yes' }),
+    ]);
+    const { processor, session, proposalRepo } = makeCtx({
+      gateway,
+      withRepos: true,
+      channel: 'inapp',
+    });
+
+    await processor.speechTurn({
+      session,
+      speechResult: 'send the Henderson invoice',
+      callSid: 'CA-test',
+      tenantId: 'tenant-abc',
+    });
+    await processor.speechTurn({
+      session,
+      speechResult: 'yes',
+      callSid: 'CA-test',
+      tenantId: 'tenant-abc',
+    });
+
+    const proposals = await proposalRepo.findByTenant('tenant-abc');
+    expect(proposals.some((p) => p.proposalType === 'send_invoice')).toBe(true);
+  });
+});
+
+// ─── ANS-001 — E1 side effects (revocation + tenant alert) ───────────────────
+
+/** Simulates losing the revoke race: the row moved after the read. */
+class RacingProposalRepository extends InMemoryProposalRepository {
+  async updateStatusIf(): Promise<null> {
+    return null;
+  }
+}
+
+function makeSettings(overrides: Partial<TenantSettings>): TenantSettings {
+  const now = new Date();
+  return {
+    id: 's-e1',
+    tenantId: 'tenant-e1',
+    businessName: 'Acme Plumbing',
+    timezone: 'America/Chicago',
+    estimatePrefix: 'EST-',
+    invoicePrefix: 'INV-',
+    nextEstimateNumber: 1,
+    nextInvoiceNumber: 1,
+    defaultPaymentTermDays: 30,
+    createdAt: now,
+    updatedAt: now,
+    ...overrides,
+  };
+}
+
+async function makeE1Ctx(opts: {
+  settings?: Partial<TenantSettings>;
+  proposalRepo?: InMemoryProposalRepository;
+  deliveryProvider?: { sendSms(args: { to: string; body: string }): Promise<unknown> };
+  deviceTokenRepo?: InMemoryDeviceTokenService;
+  expoPushSender?: { send(messages: ExpoPushMessage[]): Promise<void> };
+  appointmentRepo?: InMemoryAppointmentRepository;
+} = {}) {
+  const store = new VoiceSessionStore({ startInterval: false });
+  const auditRepo = new InMemoryAuditRepository();
+  const callMeBackRepo = new InMemoryCallMeBackRepository();
+  const proposalRepo = opts.proposalRepo ?? new InMemoryProposalRepository();
+  const settingsRepo = new InMemorySettingsRepository();
+  if (opts.settings) await settingsRepo.create(makeSettings(opts.settings));
+  const session = store.create('tenant-e1', 'telephony', { callSid: 'CA-e1' });
+  const processor = createVoiceTurnProcessor({
+    store,
+    gateway: makeGatewayReturning('{}'),
+    businessName: 'Acme Plumbing',
+    systemActorId: 'test-actor',
+    auditRepo,
+    proposalRepo,
+    callMeBackRepo,
+    settingsRepo,
+    callerPhoneResolver: () => '+15125550100',
+    ...(opts.deliveryProvider ? { deliveryProvider: opts.deliveryProvider } : {}),
+    ...(opts.deviceTokenRepo ? { deviceTokenRepo: opts.deviceTokenRepo } : {}),
+    ...(opts.expoPushSender ? { expoPushSender: opts.expoPushSender } : {}),
+    ...(opts.appointmentRepo ? { appointmentRepo: opts.appointmentRepo } : {}),
+  });
+  return { processor, store, session, auditRepo, callMeBackRepo, proposalRepo };
+}
+
+const REVOKE_FX: SideEffect = {
+  type: 'revoke_pending_bookings',
+  payload: { reason: 'life_safety_e1' },
+};
+const NOTIFY_FX: SideEffect = {
+  type: 'notify_tenant_emergency',
+  payload: { keyword: 'gas leak' },
+};
+
+describe('ANS-001 — E1 booking revocation (conditional write + compensation)', () => {
+  it('rejects a still-live booking created on the call', async () => {
+    const proposalRepo = new InMemoryProposalRepository();
+    const { processor, session } = await makeE1Ctx({ proposalRepo });
+    const booking = await proposalRepo.create(
+      createProposal({
+        tenantId: 'tenant-e1',
+        proposalType: 'create_appointment',
+        payload: {},
+        summary: 'Book a visit',
+        createdBy: 'voice',
+      }),
+    );
+    session.proposalIds.push(booking.id);
+
+    await processor.executeSideEffects(session, [REVOKE_FX], 'tenant-e1');
+
+    const after = await proposalRepo.findById('tenant-e1', booking.id);
+    expect(after!.status).toBe('rejected');
+    expect(after!.rejectionReason).toBe('life_safety_emergency');
+  });
+
+  it('audits + files a durable URGENT task when the booking already executed', async () => {
+    const proposalRepo = new InMemoryProposalRepository();
+    const { processor, session, auditRepo, callMeBackRepo } = await makeE1Ctx({
+      proposalRepo,
+    });
+    const booking = await proposalRepo.create(
+      createProposal({
+        tenantId: 'tenant-e1',
+        proposalType: 'create_appointment',
+        payload: {},
+        summary: 'Book a visit',
+        createdBy: 'voice',
+      }),
+    );
+    await proposalRepo.updateStatus('tenant-e1', booking.id, 'executed', {
+      resultEntityId: 'appt-77',
+    });
+    session.proposalIds.push(booking.id);
+
+    await processor.executeSideEffects(session, [REVOKE_FX], 'tenant-e1');
+
+    // Never silent: the live booking is audited...
+    const blocked = auditRepo
+      .getAll()
+      .find((e) => e.eventType === 'agent.calling.e1_revoke_blocked_terminal');
+    expect(blocked).toBeDefined();
+    expect(blocked!.metadata).toMatchObject({
+      proposalId: booking.id,
+      status: 'executed',
+      resultEntityId: 'appt-77',
+    });
+    // ...and a human gets a durable task.
+    const tasks = await callMeBackRepo.listPending('tenant-e1');
+    expect(tasks.map((t) => t.reason)).toContain('life_safety_e1_booking_live');
+  });
+
+  it('compensates when the conditional write loses the race (returns null)', async () => {
+    // findById still reports a revocable status, but the atomic UPDATE matches
+    // zero rows — the execution worker moved it in between. That MUST take the
+    // compensation path, not be treated as a successful revocation.
+    const proposalRepo = new RacingProposalRepository();
+    const { processor, session, auditRepo, callMeBackRepo } = await makeE1Ctx({
+      proposalRepo,
+    });
+    const booking = await proposalRepo.create(
+      createProposal({
+        tenantId: 'tenant-e1',
+        proposalType: 'create_booking',
+        payload: {},
+        summary: 'Book a visit',
+        createdBy: 'voice',
+      }),
+    );
+    session.proposalIds.push(booking.id);
+
+    await processor.executeSideEffects(session, [REVOKE_FX], 'tenant-e1');
+
+    expect(
+      auditRepo.getAll().some((e) => e.eventType === 'agent.calling.e1_revoke_blocked_terminal'),
+    ).toBe(true);
+    const tasks = await callMeBackRepo.listPending('tenant-e1');
+    expect(tasks.map((t) => t.reason)).toContain('life_safety_e1_booking_live');
+  });
+
+  it('leaves non-booking proposals from the same call alone', async () => {
+    const proposalRepo = new InMemoryProposalRepository();
+    const { processor, session, auditRepo } = await makeE1Ctx({ proposalRepo });
+    const note = await proposalRepo.create(
+      createProposal({
+        tenantId: 'tenant-e1',
+        proposalType: 'add_note',
+        payload: {},
+        summary: 'Note',
+        createdBy: 'voice',
+      }),
+    );
+    session.proposalIds.push(note.id);
+
+    await processor.executeSideEffects(session, [REVOKE_FX], 'tenant-e1');
+
+    expect((await proposalRepo.findById('tenant-e1', note.id))!.status).toBe(note.status);
+    expect(
+      auditRepo.getAll().some((e) => e.eventType === 'agent.calling.e1_revoke_blocked_terminal'),
+    ).toBe(false);
+  });
+
+  // FIX 4(a) — Opus's suite covers proposal rejection/compensation but never
+  // exercises the appointmentRepo hold-release branch (`handleRevokePendingBookings`
+  // reads `session.machine.currentContext.extractedEntities.jobId` and, when it is
+  // a UUID, releases any `holdPendingApproval` appointment on that job).
+  it('releases a holdPendingApproval appointment on the session\'s known job; other appointments untouched', async () => {
+    const appointmentRepo = new InMemoryAppointmentRepository();
+    const jobId = '11111111-1111-4111-8111-111111111111';
+    const { processor, session } = await makeE1Ctx({ appointmentRepo });
+
+    // Drive the REAL FSM to the point a real call resolves a known job
+    // (intent_capture -> entity_resolution), mirroring how extractedEntities
+    // is actually populated — not a private-field poke.
+    session.machine.dispatch({
+      type: 'incoming_call',
+      callSid: 'CA-e1',
+      from: '+15125550100',
+      to: '+15125550999',
+      tenantId: 'tenant-e1',
+    });
+    session.machine.dispatch({ type: 'greeted_ok' });
+    session.machine.dispatch({ type: 'caller_known', customerId: 'cust-1' });
+    session.machine.dispatch({
+      type: 'intent_classified',
+      intentType: 'reschedule_appointment',
+      entities: { jobId },
+      confidence: 0.9,
+    });
+    expect(session.machine.currentContext.extractedEntities?.['jobId']).toBe(jobId);
+
+    const held = await createAppointment(
+      {
+        tenantId: 'tenant-e1',
+        jobId,
+        scheduledStart: new Date(),
+        scheduledEnd: new Date(Date.now() + 3600_000),
+        timezone: 'America/Chicago',
+        holdPendingApproval: true,
+        holdExpiryAt: new Date(Date.now() + 3600_000),
+        createdBy: 'voice',
+      },
+      appointmentRepo,
+    );
+    const untouched = await createAppointment(
+      {
+        tenantId: 'tenant-e1',
+        jobId,
+        scheduledStart: new Date(Date.now() + 7200_000),
+        scheduledEnd: new Date(Date.now() + 10800_000),
+        timezone: 'America/Chicago',
+        createdBy: 'voice',
+      },
+      appointmentRepo,
+    );
+
+    await processor.executeSideEffects(session, [REVOKE_FX], 'tenant-e1');
+
+    const heldAfter = await appointmentRepo.findById('tenant-e1', held.id);
+    expect(heldAfter!.holdPendingApproval).toBe(false);
+    expect(heldAfter!.status).toBe('canceled');
+
+    const untouchedAfter = await appointmentRepo.findById('tenant-e1', untouched.id);
+    expect(untouchedAfter!.status).toBe('scheduled');
+    expect(untouchedAfter!.holdPendingApproval).toBe(false);
+  });
+});
+
+describe('ANS-001 — E1 tenant alert (owner cell, durable fallback, push fan-out)', () => {
+  it('texts EVERY configured number — owner cell AND transfer line (S2: no preference chain)', async () => {
+    // ownerPhone can be a stale identity field, and a Twilio-ACCEPTED send to
+    // a stale number throws nothing — a preference chain can silently alert
+    // nobody. A duplicate text is free; a missed E1 alert is not.
+    const sent: Array<{ to: string; body: string }> = [];
+    const { processor, session } = await makeE1Ctx({
+      settings: { ownerPhone: '+15125550111', transferNumber: '+15125550999' },
+      deliveryProvider: {
+        sendSms: async (args) => {
+          sent.push(args);
+          return {};
+        },
+      },
+    });
+
+    await processor.executeSideEffects(session, [NOTIFY_FX], 'tenant-e1');
+
+    expect(sent.map((s) => s.to).sort()).toEqual(['+15125550111', '+15125550999']);
+    expect(sent[0].body).toContain('gas leak');
+    // FIX 4(b) — the caller's own number is MASKED in the alert body (I13:
+    // caller content stays out of tenant tooling in raw form). The
+    // callerPhoneResolver in makeE1Ctx returns '+15125550100'.
+    expect(sent[0].body).toContain(maskPhone('+15125550100'));
+    expect(sent[0].body).not.toContain('+15125550100');
+  });
+
+  it('texts the transfer number alone when no owner cell is set', async () => {
+    const sent: Array<{ to: string; body: string }> = [];
+    const { processor, session } = await makeE1Ctx({
+      settings: { transferNumber: '+15125550999' },
+      deliveryProvider: {
+        sendSms: async (args) => {
+          sent.push(args);
+          return {};
+        },
+      },
+    });
+
+    await processor.executeSideEffects(session, [NOTIFY_FX], 'tenant-e1');
+
+    expect(sent).toHaveLength(1);
+    expect(sent[0].to).toBe('+15125550999');
+  });
+
+  it('dedupes when the owner cell IS the transfer number (one text, not two)', async () => {
+    const sent: Array<{ to: string; body: string }> = [];
+    const { processor, session } = await makeE1Ctx({
+      settings: { ownerPhone: '+15125550111', transferNumber: '+15125550111' },
+      deliveryProvider: {
+        sendSms: async (args) => {
+          sent.push(args);
+          return {};
+        },
+      },
+    });
+
+    await processor.executeSideEffects(session, [NOTIFY_FX], 'tenant-e1');
+
+    expect(sent).toHaveLength(1);
+  });
+
+  it('does NOT file the durable task when at least one of the two texts delivered', async () => {
+    const { processor, session, callMeBackRepo } = await makeE1Ctx({
+      settings: { ownerPhone: '+15125550111', transferNumber: '+15125550999' },
+      deliveryProvider: {
+        sendSms: async ({ to }) => {
+          if (to === '+15125550111') throw new Error('unreachable');
+          return {};
+        },
+      },
+    });
+
+    await processor.executeSideEffects(session, [NOTIFY_FX], 'tenant-e1');
+
+    const reasons = (await callMeBackRepo.listPending('tenant-e1')).map((t) => t.reason);
+    // One delivered alert = a notified tenant; the fallback is for total failure.
+    expect(reasons).not.toContain('life_safety_e1');
+  });
+
+  it('files the durable task when EVERY configured number fails', async () => {
+    const { processor, session, callMeBackRepo } = await makeE1Ctx({
+      settings: { ownerPhone: '+15125550111', transferNumber: '+15125550999' },
+      deliveryProvider: {
+        sendSms: async () => {
+          throw new Error('provider down');
+        },
+      },
+    });
+
+    await processor.executeSideEffects(session, [NOTIFY_FX], 'tenant-e1');
+
+    const reasons = (await callMeBackRepo.listPending('tenant-e1')).map((t) => t.reason);
+    expect(reasons).toContain('life_safety_e1');
+  });
+
+  it('files a durable URGENT task when there is no number to text', async () => {
+    const { processor, session, callMeBackRepo } = await makeE1Ctx({
+      settings: {},
+      deliveryProvider: { sendSms: async () => ({}) },
+    });
+
+    await processor.executeSideEffects(session, [NOTIFY_FX], 'tenant-e1');
+
+    const tasks = await callMeBackRepo.listPending('tenant-e1');
+    expect(tasks.map((t) => t.reason)).toContain('life_safety_e1');
+    expect(tasks[0].callerPhone).toBe('+15125550100');
+  });
+
+  it('files BOTH durable tasks when the booking is live AND the alert is undeliverable', async () => {
+    // The degraded-tenant case this whole fix exists for: an E1 call that left
+    // a live booking behind AND has no number to alert. The FSM emits
+    // revoke_pending_bookings BEFORE notify_tenant_emergency, so when the
+    // call_me_back key was (tenant, session) the booking task was written
+    // first and the life-safety ALERT task was silently swallowed by the
+    // conflict — nobody was ever told a life-safety call came in.
+    const proposalRepo = new InMemoryProposalRepository();
+    const { processor, session, callMeBackRepo } = await makeE1Ctx({
+      proposalRepo,
+      settings: {}, // no ownerPhone, no transferNumber → alert undeliverable
+      deliveryProvider: { sendSms: async () => ({}) },
+    });
+    const booking = await proposalRepo.create(
+      createProposal({
+        tenantId: 'tenant-e1',
+        proposalType: 'create_appointment',
+        payload: {},
+        summary: 'Book a visit',
+        createdBy: 'voice',
+      }),
+    );
+    await proposalRepo.updateStatus('tenant-e1', booking.id, 'executed');
+    session.proposalIds.push(booking.id);
+
+    // Same order the FSM emits them in.
+    await processor.executeSideEffects(session, [REVOKE_FX, NOTIFY_FX], 'tenant-e1');
+
+    const reasons = (await callMeBackRepo.listPending('tenant-e1')).map((t) => t.reason);
+    expect(reasons).toContain('life_safety_e1_booking_live');
+    expect(reasons).toContain('life_safety_e1');
+  });
+
+  it('still dedups a retry of the SAME reason on one session', async () => {
+    // The original idempotency guarantee must survive the key change: a Twilio
+    // retry must not file a second identical task.
+    const { processor, session, callMeBackRepo } = await makeE1Ctx({
+      settings: {},
+      deliveryProvider: { sendSms: async () => ({}) },
+    });
+
+    await processor.executeSideEffects(session, [NOTIFY_FX], 'tenant-e1');
+    await processor.executeSideEffects(session, [NOTIFY_FX], 'tenant-e1');
+
+    const tasks = await callMeBackRepo.listPending('tenant-e1');
+    expect(tasks.filter((t) => t.reason === 'life_safety_e1')).toHaveLength(1);
+  });
+
+  it('files a durable URGENT task when the SMS send fails', async () => {
+    const { processor, session, callMeBackRepo } = await makeE1Ctx({
+      settings: { ownerPhone: '+15125550111' },
+      deliveryProvider: {
+        sendSms: async () => {
+          throw new Error('twilio down');
+        },
+      },
+    });
+
+    await processor.executeSideEffects(session, [NOTIFY_FX], 'tenant-e1');
+
+    const tasks = await callMeBackRepo.listPending('tenant-e1');
+    expect(tasks.map((t) => t.reason)).toContain('life_safety_e1');
+  });
+
+  it('pushes the alert to every device the tenant registered', async () => {
+    const deviceTokenRepo = new InMemoryDeviceTokenService();
+    await deviceTokenRepo.upsert('tenant-e1', 'user-1', 'ExponentPushToken[aaa]', 'ios');
+    await deviceTokenRepo.upsert('tenant-e1', 'user-2', 'ExponentPushToken[bbb]', 'android');
+    const pushed: ExpoPushMessage[] = [];
+    const { processor, session } = await makeE1Ctx({
+      settings: { ownerPhone: '+15125550111' },
+      deliveryProvider: { sendSms: async () => ({}) },
+      deviceTokenRepo,
+      expoPushSender: {
+        send: async (messages) => {
+          pushed.push(...messages);
+        },
+      },
+    });
+
+    await processor.executeSideEffects(session, [NOTIFY_FX], 'tenant-e1');
+
+    expect(pushed.map((m) => m.to).sort()).toEqual([
+      'ExponentPushToken[aaa]',
+      'ExponentPushToken[bbb]',
+    ]);
+    expect(pushed[0].title).toContain('EMERGENCY');
+    expect(pushed[0].body).toContain('gas leak');
+  });
+
+  it('still texts the owner when the push fan-out throws', async () => {
+    const deviceTokenRepo = new InMemoryDeviceTokenService();
+    await deviceTokenRepo.upsert('tenant-e1', 'user-1', 'ExponentPushToken[aaa]', 'ios');
+    const sent: Array<{ to: string; body: string }> = [];
+    const { processor, session } = await makeE1Ctx({
+      settings: { ownerPhone: '+15125550111' },
+      deliveryProvider: {
+        sendSms: async (args) => {
+          sent.push(args);
+          return {};
+        },
+      },
+      deviceTokenRepo,
+      expoPushSender: {
+        send: async () => {
+          throw new Error('expo down');
+        },
+      },
+    });
+
+    await processor.executeSideEffects(session, [NOTIFY_FX], 'tenant-e1');
+
+    expect(sent).toHaveLength(1);
+  });
+});
+
+// FIX 4(c) — Opus's suite exercises handleRevokePendingBookings /
+// handleNotifyTenantEmergency directly with hand-built fixture side effects
+// (REVOKE_FX / NOTIFY_FX); it never drives the REAL machine's
+// `emergency_detected` (tier: 'E1') transition end to end, so the effect
+// ORDER the transition table promises (audit_log before tts_play before
+// revoke before notify before end_session) was unpinned.
+describe('ANS-001 — E1 FSM sequencing (real machine, real side effects, end to end)', () => {
+  it('dispatches audit_log, tts_play, revoke, notify, end_session in that exact order, and executing them actually revokes the booking + texts the owner', async () => {
+    const auditRepo = new InMemoryAuditRepository();
+    const proposalRepo = new InMemoryProposalRepository();
+    const callMeBackRepo = new InMemoryCallMeBackRepository();
+    const settingsRepo = new InMemorySettingsRepository();
+    await settingsRepo.create(makeSettings({ ownerPhone: '+15125550111' }));
+    const sent: Array<{ to: string; body: string }> = [];
+    const store = new VoiceSessionStore({ startInterval: false });
+    const session = store.create('tenant-e1', 'telephony', { callSid: 'CA-fsm-e1' });
+    const processor = createVoiceTurnProcessor({
+      store,
+      gateway: makeGatewayReturning('{}'),
+      businessName: 'Acme Plumbing',
+      systemActorId: 'test-actor',
+      auditRepo,
+      proposalRepo,
+      callMeBackRepo,
+      settingsRepo,
+      callerPhoneResolver: () => '+15125550100',
+      deliveryProvider: {
+        sendSms: async (args) => {
+          sent.push(args);
+          return {};
+        },
+      },
+    });
+
+    const booking = await proposalRepo.create(
+      createProposal({
+        tenantId: 'tenant-e1',
+        proposalType: 'create_appointment',
+        payload: {},
+        summary: 'Book a visit',
+        createdBy: 'voice',
+      }),
+    );
+    session.proposalIds.push(booking.id);
+
+    // Drive the REAL FSM — not a hand-built side-effect array.
+    const effects = session.machine.dispatch({
+      type: 'emergency_detected',
+      keyword: 'gas leak',
+      utterance: 'I smell gas',
+      tier: 'E1',
+    });
+
+    expect(effects.map((fx) => fx.type)).toEqual([
+      'audit_log',
+      'tts_play',
+      'revoke_pending_bookings',
+      'notify_tenant_emergency',
+      'end_session',
+    ]);
+    expect(session.machine.currentState).toBe('terminated');
+
+    // Execute the REAL effect list end to end with in-memory repos.
+    await processor.executeSideEffects(session, effects, 'tenant-e1');
+
+    const after = await proposalRepo.findById('tenant-e1', booking.id);
+    expect(after!.status).toBe('rejected');
+    expect(sent).toHaveLength(1);
+    expect(sent[0].to).toBe('+15125550111');
+    expect(sent[0].body).toContain('gas leak');
   });
 });

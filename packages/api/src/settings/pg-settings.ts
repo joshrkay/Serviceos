@@ -159,6 +159,9 @@ function mapRow(row: Record<string, unknown>): TenantSettings {
     digestEnabled: (row.digest_enabled as boolean | null) ?? false,
     digestTime: normalizeDigestTime(row.digest_time),
     digestChannel: (row.digest_channel as 'sms' | 'none' | null) ?? 'sms',
+    // FIX 10(i) (ANS-001) — migration 197. NULL → undefined = the embedded
+    // placeholder script (LIFE_SAFETY_E1_SCRIPT) is still in effect.
+    e1ReviewedScript: (row.e1_reviewed_script as string | null) ?? undefined,
     createdAt: new Date(row.created_at as string),
     updatedAt: new Date(row.updated_at as string),
   };
@@ -340,6 +343,8 @@ export class PgSettingsRepository extends PgBaseRepository implements SettingsRe
         digestEnabled: 'digest_enabled',
         digestTime: 'digest_time',
         digestChannel: 'digest_channel',
+        // FIX 10(i) (ANS-001) — migration 197.
+        e1ReviewedScript: 'e1_reviewed_script',
         updatedAt: 'updated_at',
       };
 

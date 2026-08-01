@@ -86,11 +86,18 @@ export class InMemoryCallMeBackRepository implements CallMeBackRepository {
   private readonly rows = new Map<string, CallMeBackTask>();
 
   async create(input: CreateCallMeBackInput): Promise<CallMeBackTask> {
-    // Idempotent on (tenantId, sessionId) — mirrors the pg unique index so a
-    // retried /callback-message returns the existing callback instead of a dup.
+    // Idempotent on (tenantId, sessionId, reason) — mirrors the pg unique
+    // index (migration 198) so a retried /callback-message returns the existing
+    // callback instead of a dup, while two DIFFERENT problems on one call each
+    // keep their own task (ANS-001: the E1 alert task must not be swallowed by
+    // the E1 booking task).
     if (input.sessionId != null) {
+      const reason = input.reason ?? 'transfer_failed';
       const existing = Array.from(this.rows.values()).find(
-        (r) => r.tenantId === input.tenantId && r.sessionId === input.sessionId,
+        (r) =>
+          r.tenantId === input.tenantId &&
+          r.sessionId === input.sessionId &&
+          r.reason === reason,
       );
       if (existing) return { ...existing };
     }

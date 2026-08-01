@@ -18,7 +18,11 @@ import {
   loadTriageRulesFromFile,
   type TriageRules,
 } from '../../../../src/ai/skills/triage-rules.schema';
-import { classifyCallerSafety } from '../../../../src/ai/agents/customer-calling/emergency-tier';
+import {
+  classifyCallerSafety,
+  e1ScriptReadiness,
+  E1_SCRIPT_REVIEW_REQUIRED,
+} from '../../../../src/ai/agents/customer-calling/emergency-tier';
 
 const TRIAGE_RULES_PATH = resolve(
   __dirname,
@@ -190,5 +194,61 @@ describe('classifyCallerSafety — upward-only bias (goal §3)', () => {
       hasElderly: true,
     }, rules);
     expect(r.tier).toBe('E2');
+  });
+});
+
+// ─── FIX 10(iii) — embedded E2 table (sewage/AC phrases dead without it) ────
+
+describe('runtime E2 vocabulary — embedded sewage/AC phrases (FIX 10iii)', () => {
+  // Before the embedded table, classifyCallerSafety({}) had NO E2 signal for
+  // any of these — the corpus TIER_2/TIER_3 additions were dead at runtime.
+  it.each([
+    'sewage backing up',
+    'sewage is backing up',
+    'sewage backing up into',
+    'ac is out',
+    'ac is completely out',
+    'air conditioner is out',
+    'no cooling',
+  ])('classifies %j as E2 with NO rules loaded', (phrase) => {
+    const r = classifyCallerSafety(phrase, {});
+    expect(r.tier).toBe('E2');
+    expect(r.requiresEvacuation).toBe(false);
+  });
+
+  it('classifies "sewage is backing up into the house" as E2 with no rules (was E3 before this fix)', () => {
+    const r = classifyCallerSafety('sewage is backing up into the house', {});
+    expect(r.tier).toBe('E2');
+  });
+
+  it.each([
+    'I want to book my annual AC tune-up',
+    'the AC is not as cold as it used to be',
+    'can you send someone to clean out a slow drain',
+  ])('routine utterances stay E3 with no rules: %j', (utterance) => {
+    expect(classifyCallerSafety(utterance, {}).tier).toBe('E3');
+  });
+
+  it('an E1 hazard still wins over an embedded E2 phrase in the same utterance (upward-only bias)', () => {
+    const r = classifyCallerSafety('I smell gas and the sewage is backing up too', {});
+    expect(r.tier).toBe('E1');
+  });
+});
+
+// ─── FIX 10(i) — E1_SCRIPT_REVIEW_REQUIRED boot-gate helper ─────────────────
+
+describe('e1ScriptReadiness (boot gate)', () => {
+  it('reports NOT ready while E1_SCRIPT_REVIEW_REQUIRED is true, with a prominent message', () => {
+    const readiness = e1ScriptReadiness();
+    expect(readiness.ready).toBe(E1_SCRIPT_REVIEW_REQUIRED ? false : true);
+    expect(readiness.message.length).toBeGreaterThan(0);
+    if (!readiness.ready) {
+      expect(readiness.message).toMatch(/unreviewed|placeholder/i);
+      expect(readiness.message).toMatch(/e1_reviewed_script/i);
+    }
+  });
+
+  it('never throws (pure, boot-safe)', () => {
+    expect(() => e1ScriptReadiness()).not.toThrow();
   });
 });

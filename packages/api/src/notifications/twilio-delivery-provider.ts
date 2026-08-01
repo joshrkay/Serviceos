@@ -27,7 +27,6 @@ import { DeliveryError } from "./notification-errors";
 export interface TwilioSmsConfig {
   accountSid: string;
   authToken: string;
-  secondaryAuthToken?: string;
   fromNumber: string;
   /** Override for tests. Defaults to Twilio's REST API host. */
   apiBaseUrl?: string;
@@ -59,6 +58,15 @@ interface TwilioMessageResponse {
   error_code?: number;
   error_message?: string;
 }
+
+/**
+ * Hard ceiling on a single outbound SMS HTTP call. Without it a hung Twilio
+ * socket keeps the caller's promise pending forever, which on the E1
+ * life-safety path would park the tenant alert behind an unbounded wait.
+ * Matches SMS_BEFORE_BRIDGE_TIMEOUT_MS in the voice-turn processor — a late
+ * text beats a stuck request.
+ */
+export const SMS_SEND_TIMEOUT_MS = 4000;
 
 interface NormalizedProviderFailure {
   code: "AUTH_FAILED" | "PROVIDER_FAILED";
@@ -115,11 +123,8 @@ function classifySendgridError(response: Response, providerBody: string): Normal
 }
 
 export class TwilioDeliveryProvider implements MessageDeliveryProvider {
-  private readonly sms: Required<
-    Omit<TwilioSmsConfig, "fetchImpl" | "secondaryAuthToken">
-  > & {
+  private readonly sms: Required<Omit<TwilioSmsConfig, "fetchImpl">> & {
     fetchImpl: typeof fetch;
-    secondaryAuthToken?: string;
   };
   private readonly email: Required<
     Omit<SendGridConfig, "fetchImpl" | "fromName" | "replyToEmail">
@@ -144,7 +149,6 @@ export class TwilioDeliveryProvider implements MessageDeliveryProvider {
     this.sms = {
       accountSid: config.sms.accountSid,
       authToken: config.sms.authToken,
-      secondaryAuthToken: config.sms.secondaryAuthToken,
       fromNumber: config.sms.fromNumber,
       apiBaseUrl: config.sms.apiBaseUrl ?? "https://api.twilio.com/2010-04-01",
       fetchImpl: config.sms.fetchImpl ?? fetch,
@@ -178,29 +182,33 @@ export class TwilioDeliveryProvider implements MessageDeliveryProvider {
       headers["Idempotency-Key"] = message.idempotencyKey;
     }
 
-    let response = await this.sms.fetchImpl(
-      `${this.sms.apiBaseUrl}/Accounts/${this.sms.accountSid}/Messages.json`,
-      {
-        method: "POST",
-        headers,
-        body: body.toString(),
-      },
-    );
+    // An AbortSignal timeout rejects with a DOMException, not a DeliveryError,
+    // so callers branching on `instanceof DeliveryError` (send-service's
+    // mapDeliveryErrorForClient, retry classification) would see an
+    // unclassified error. Normalize it here so the timeout stays a first-class,
+    // retriable provider failure.
+    let response: Response;
+    try {
+      response = await this.sms.fetchImpl(
+        `${this.sms.apiBaseUrl}/Accounts/${this.sms.accountSid}/Messages.json`,
+        {
+          method: "POST",
+          headers,
+          body: body.toString(),
+          signal: AbortSignal.timeout(SMS_SEND_TIMEOUT_MS),
+        },
+      );
+    } catch (err) {
+      throw new DeliveryError("PROVIDER_FAILED", "SMS provider timed out", {
+        providerBody: err instanceof Error ? err.message : String(err),
+      });
+    }
 
     if (!response.ok) {
       const text = await response.text().catch(() => "");
       const providerBody = text.slice(0, 300);
       const failure = classifyTwilioError(response, providerBody);
       throw new DeliveryError(failure.code, failure.message, failure);
-    }
-
-    if (!response.ok) {
-      const text = await response.text().catch(() => '');
-      const detail = '(' + response.status + '): ' + text.slice(0, 300);
-      if (response.status === 401) {
-        throw new Error('DELIVERY_AUTH_FAILED ' + detail);
-      }
-      throw new Error('DELIVERY_PROVIDER_FAILED ' + detail);
     }
 
     const data = (await response.json()) as TwilioMessageResponse;

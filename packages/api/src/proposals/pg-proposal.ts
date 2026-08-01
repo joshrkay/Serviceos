@@ -273,6 +273,61 @@ export class PgProposalRepository extends PgBaseRepository implements ProposalRe
     });
   }
 
+  /**
+   * ANS-001 — conditional status write. ONE atomic statement: the `status =
+   * ANY($3)` precondition lives in the WHERE clause, so the row transitions
+   * only while it is still in an expected status. No SELECT ... FOR UPDATE
+   * pair is needed — a single UPDATE takes its own row lock, and a losing
+   * racer simply matches zero rows and gets null back.
+   *
+   * Same optional-column handling as `updateStatus` (rejection metadata et al)
+   * so the two write paths stamp identical rows.
+   */
+  async updateStatusIf(
+    tenantId: string,
+    id: string,
+    fromStatuses: ProposalStatus[],
+    to: ProposalStatus,
+    updates?: Partial<
+      Pick<
+        Proposal,
+        | 'rejectionReason'
+        | 'rejectionDetails'
+        | 'resultEntityId'
+        | 'approvedAt'
+        | 'executedAt'
+        | 'executedBy'
+        | 'executionError'
+        | 'undoneAt'
+        | 'undoneBy'
+      >
+    >
+  ): Promise<Proposal | null> {
+    return this.withTenant(tenantId, async (client) => {
+      const setClauses = ['status = $4', 'updated_at = NOW()'];
+      const params: unknown[] = [tenantId, id, fromStatuses, to];
+      let p = 5;
+
+      if (updates?.rejectionReason !== undefined) { setClauses.push(`rejection_reason = $${p++}`); params.push(updates.rejectionReason); }
+      if (updates?.rejectionDetails !== undefined) { setClauses.push(`rejection_details = $${p++}`); params.push(updates.rejectionDetails); }
+      if (updates?.resultEntityId !== undefined)   { setClauses.push(`result_entity_id = $${p++}`); params.push(updates.resultEntityId); }
+      if (updates?.approvedAt !== undefined)        { setClauses.push(`approved_at = $${p++}`);      params.push(updates.approvedAt); }
+      if (updates?.executedAt !== undefined)        { setClauses.push(`executed_at = $${p++}`);      params.push(updates.executedAt); }
+      if (updates?.executedBy !== undefined)        { setClauses.push(`executed_by = $${p++}`);      params.push(updates.executedBy); }
+      if (updates?.executionError !== undefined)    { setClauses.push(`execution_error = $${p++}`);  params.push(updates.executionError); }
+      if (updates?.undoneAt !== undefined)          { setClauses.push(`undone_at = $${p++}`);        params.push(updates.undoneAt); }
+      if (updates?.undoneBy !== undefined)          { setClauses.push(`undone_by = $${p++}`);        params.push(updates.undoneBy); }
+
+      const result = await client.query(
+        `UPDATE proposals SET ${setClauses.join(', ')}
+         WHERE tenant_id = $1 AND id = $2 AND status = ANY($3::text[])
+         RETURNING *`,
+        params
+      );
+      return result.rows.length > 0 ? mapRow(result.rows[0]) : null;
+    });
+  }
+
   async update(
     tenantId: string,
     id: string,

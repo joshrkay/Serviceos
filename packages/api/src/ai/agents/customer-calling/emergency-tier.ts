@@ -158,6 +158,37 @@ export function detectLifeSafetyE1(
   return { matched: false };
 }
 
+/**
+ * FIX 10(iii) — embedded E2 urgent-dispatch phrase table. Same rationale as
+ * the E1 table above: corpus/data/triage-rules.json's TIER_2/TIER_3 phrases
+ * are NOT shipped in the runtime image, so without an embedded set they are
+ * dead weight outside a test/eval run that passes `rules`. This is
+ * deliberately NOT a full parity table with TIER_2/TIER_3 (those stay
+ * broader by design) — it pins only the specific corpus additions that had
+ * no runtime equivalent at all ("sewage is backing up into the house" and a
+ * fully-out AC classified E3 before this). Word-bounded like the E1 table.
+ */
+export const E2_URGENT_PHRASES: ReadonlyArray<string> = [
+  'sewage backing up',
+  'sewage is backing up',
+  'sewage backing up into',
+  'ac is out',
+  'ac is completely out',
+  'air conditioner is out',
+  'no cooling',
+];
+const E2_REGEXES = compile(E2_URGENT_PHRASES);
+
+/** Pure, synchronous, free — the embedded E2 urgent-dispatch scan. */
+export function detectEmbeddedE2(
+  transcript: string,
+): { matched: boolean; keyword?: string } {
+  for (const { keyword, regex } of E2_REGEXES) {
+    if (regex.test(transcript)) return { matched: true, keyword };
+  }
+  return { matched: false };
+}
+
 export interface SafetyClassification {
   /** E1 = life safety (evacuate, never book), E2 = urgent, E3 = routine. */
   tier: SafetyTier;
@@ -188,6 +219,7 @@ export function classifyCallerSafety(
   rules?: TriageRules,
 ): SafetyClassification {
   const e1 = detectLifeSafetyE1(utterance);
+  const embeddedE2 = detectEmbeddedE2(utterance);
   const backstop = detectEmergency(utterance);
   const engine = rules ? classifyUrgencyTier({ utterance, context: ctx }, rules) : null;
 
@@ -228,6 +260,8 @@ export function classifyCallerSafety(
     });
   if (engineTier === 'E2')
     candidates.push({ tier: 'E2', source: 'engine', keyword: engine!.matchedPhrases[0] });
+  if (embeddedE2.matched)
+    candidates.push({ tier: 'E2', source: 'embedded', keyword: embeddedE2.keyword });
   if (backstop.matched)
     candidates.push({ tier: 'E2', source: 'backstop', keyword: backstop.keyword });
   if (engineTier === 'E3') candidates.push({ tier: 'E3', source: 'engine' });
@@ -255,5 +289,45 @@ export function classifyCallerSafety(
     keyword: winner.keyword ?? 'unknown',
     responseScript,
     source: winner.source,
+  };
+}
+
+// ─── Boot-time readiness gate (FIX 10i) ───────────────────────────────────────
+
+export interface E1ScriptReadiness {
+  /** False while the embedded placeholder is still in effect (deployment gate). */
+  ready: boolean;
+  /** Prominent, human-readable status for a structured boot log. */
+  message: string;
+}
+
+/**
+ * Pure, synchronous boot-time readiness check. This is the ONE consumer of
+ * `E1_SCRIPT_REVIEW_REQUIRED` — without it the constant was declared but
+ * never read, so a placeholder life-safety script could ship to production
+ * completely silently. `app.ts` calls this once at boot and logs the result;
+ * per-tenant overrides ride `tenant_settings.e1_reviewed_script` (migration
+ * 197) via the `emergency_detected.responseScript` seam — see
+ * `runEmergencyScan` in `telephony/twilio-adapter.ts`.
+ *
+ * Deliberately pure/free of I/O so it can NEVER be the reason boot fails —
+ * callers still wrap the call defensively, but this function itself cannot
+ * throw.
+ */
+export function e1ScriptReadiness(): E1ScriptReadiness {
+  if (!E1_SCRIPT_REVIEW_REQUIRED) {
+    return {
+      ready: true,
+      message: 'E1 life-safety script has been marked reviewed (E1_SCRIPT_REVIEW_REQUIRED=false).',
+    };
+  }
+  return {
+    ready: false,
+    message:
+      'E1 life-safety script is an UNREVIEWED PLACEHOLDER (LIFE_SAFETY_E1_SCRIPT). ' +
+      'It leads with a fail-safe 911 direction but has not been signed off by anyone with ' +
+      'trade + legal standing. Configure a reviewed script per tenant via ' +
+      'tenant_settings.e1_reviewed_script before go-live — every E1 call speaks the ' +
+      'placeholder until then.',
   };
 }
