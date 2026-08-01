@@ -21,6 +21,7 @@ import {
   SmsMessage,
 } from './delivery-provider';
 import { DeliveryError } from './notification-errors';
+import { SMS_SEND_TIMEOUT_MS } from './twilio-delivery-provider';
 import { getTenantTwilioCreds, TenantTwilioCreds } from '../integrations/credentials';
 import { isValidTenantId } from '../db/schema';
 
@@ -107,16 +108,33 @@ export class PerTenantTwilioDeliveryProvider implements MessageDeliveryProvider 
       headers['Idempotency-Key'] = message.idempotencyKey;
     }
 
-    const response = await this.fetchImpl(
-      `${this.apiBaseUrl}/Accounts/${creds.accountSid}/Messages.json`,
-      {
-        method: 'POST',
-        headers,
-        body: body.toString(),
-        // fetch has NO default timeout — a Twilio stall would hang the send.
-        signal: AbortSignal.timeout(15_000),
-      },
-    );
+    // Same ceiling as the base provider: a hung socket must never park an E1
+    // tenant alert (or any caller) on an unbounded wait. The abort rejects with
+    // a DOMException, so normalize it to a DeliveryError — callers branch on
+    // `instanceof DeliveryError` and would otherwise see an unclassified error.
+    let response: Response;
+    try {
+      response = await this.fetchImpl(
+        `${this.apiBaseUrl}/Accounts/${creds.accountSid}/Messages.json`,
+        {
+          method: 'POST',
+          headers,
+          body: body.toString(),
+          signal: AbortSignal.timeout(SMS_SEND_TIMEOUT_MS),
+        },
+      );
+    } catch (err) {
+      if (err instanceof DeliveryError) throw err;
+      const message = err instanceof Error ? err.message : String(err);
+      const aborted =
+        err instanceof Error && (err.name === 'TimeoutError' || err.name === 'AbortError');
+      // Non-abort throws keep their original message (see the base provider).
+      throw new DeliveryError(
+        'PROVIDER_FAILED',
+        aborted ? 'SMS provider timed out' : `SMS provider failed: ${message}`,
+        { providerBody: message },
+      );
+    }
 
     if (!response.ok) {
       const text = await response.text().catch(() => '');

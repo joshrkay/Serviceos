@@ -91,6 +91,15 @@ interface TwilioMessageResponse {
   error_message?: string;
 }
 
+/**
+ * Hard ceiling on a single outbound SMS HTTP call. Without it a hung Twilio
+ * socket keeps the caller's promise pending forever, which on the E1
+ * life-safety path would park the tenant alert behind an unbounded wait.
+ * Matches SMS_BEFORE_BRIDGE_TIMEOUT_MS in the voice-turn processor — a late
+ * text beats a stuck request.
+ */
+export const SMS_SEND_TIMEOUT_MS = 4000;
+
 interface NormalizedProviderFailure {
   code: "AUTH_FAILED" | "PROVIDER_FAILED";
   message: string;
@@ -244,15 +253,38 @@ export class TwilioDeliveryProvider implements MessageDeliveryProvider {
       headers["Idempotency-Key"] = message.idempotencyKey;
     }
 
-    const response = await sms.fetchImpl(
-      `${sms.apiBaseUrl}/Accounts/${sms.accountSid}/Messages.json`,
-      {
-        method: "POST",
-        headers,
-        body: body.toString(),
-        signal: AbortSignal.timeout(DELIVERY_REQUEST_TIMEOUT_MS),
-      },
-    );
+    // SMS_SEND_TIMEOUT_MS (4s), not the generic 15s delivery ceiling: the E1
+    // life-safety tenant alert rides this path and must never park behind a
+    // hung Twilio socket. An AbortSignal timeout rejects with a DOMException,
+    // not a DeliveryError, so callers branching on `instanceof DeliveryError`
+    // (send-service's mapDeliveryErrorForClient, retry classification) would
+    // see an unclassified error. Normalize it here so the timeout stays a
+    // first-class, retriable provider failure.
+    let response: Response;
+    try {
+      response = await sms.fetchImpl(
+        `${sms.apiBaseUrl}/Accounts/${sms.accountSid}/Messages.json`,
+        {
+          method: "POST",
+          headers,
+          body: body.toString(),
+          signal: AbortSignal.timeout(SMS_SEND_TIMEOUT_MS),
+        },
+      );
+    } catch (err) {
+      if (err instanceof DeliveryError) throw err;
+      const message = err instanceof Error ? err.message : String(err);
+      const aborted =
+        err instanceof Error && (err.name === "TimeoutError" || err.name === "AbortError");
+      // Other throws (DNS failure, a test tripwire fetch, …) stay a
+      // DeliveryError too, but KEEP their original message — callers and
+      // tests must be able to see what actually failed.
+      throw new DeliveryError(
+        "PROVIDER_FAILED",
+        aborted ? "SMS provider timed out" : `SMS provider failed: ${message}`,
+        { providerBody: message },
+      );
+    }
 
     if (!response.ok) {
       const text = await response.text().catch(() => "");

@@ -6495,6 +6495,41 @@ export const MIGRATIONS = {
   '266_proposals_executed_by_role': `
     ALTER TABLE proposals ADD COLUMN IF NOT EXISTS executed_by_role TEXT;
   `,
+
+  // FIX 10(i) (ANS-001) — per-tenant REVIEWED E1 life-safety script. The
+  // embedded LIFE_SAFETY_E1_SCRIPT (emergency-tier.ts) is an explicit
+  // placeholder pending qualified (trade + legal) review; once a tenant's
+  // script clears review, this column overrides the placeholder via the
+  // emergency_detected event's existing responseScript seam
+  // (runEmergencyScan in twilio-adapter.ts, E1 turns ONLY). NULL = the
+  // placeholder is still in effect. Length-capped like voice_greeting
+  // (migration 090) but generous — this is a multi-sentence spoken script.
+  // (Renumbered from 197 when merging origin/main, whose migration tail
+  // had advanced to 266.)
+  '267_tenant_settings_e1_reviewed_script': `
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS e1_reviewed_script TEXT;
+    ALTER TABLE tenant_settings
+      DROP CONSTRAINT IF EXISTS tenant_settings_e1_reviewed_script_length,
+      ADD CONSTRAINT tenant_settings_e1_reviewed_script_length
+        CHECK (e1_reviewed_script IS NULL OR length(e1_reviewed_script) <= 2000);
+  `,
+
+  // ANS-001 — (tenant_id, session_id) alone collapsed DISTINCT follow-ups for
+  // one call into a single row. The E1 FSM emits revoke_pending_bookings
+  // BEFORE notify_tenant_emergency, so when both failed the unrevocable-booking
+  // task was inserted first and the "a life-safety call came in" alert task hit
+  // the conflict and was silently dropped — losing the only durable fallback
+  // the E1 alert has, in exactly the degraded-tenant case it exists for.
+  // `reason` joins the key: distinct problems on one call each get a task,
+  // while a retry of the SAME problem still dedups (migration 154's intent,
+  // which this supersedes). (Renumbered from 198 on the origin/main merge.)
+  '268_call_me_back_session_reason_idempotency': `
+    DROP INDEX IF EXISTS idx_cmb_session_unique;
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_cmb_session_reason_unique
+      ON call_me_back_tasks (tenant_id, session_id, reason)
+      WHERE session_id IS NOT NULL;
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

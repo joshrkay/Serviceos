@@ -28,6 +28,7 @@
     "check:ai-gateway-guard": "bash scripts/check-ai-gateway-guard.sh",
     "check:ai-provider-config": "tsx scripts/check-ai-provider-config.ts",
     "check:fk-paths": "bash scripts/check-fk-path-coverage.sh",
+    "check:migration-keys": "tsx scripts/check-migration-keys.ts",
     "seed": "ts-node scripts/seed.ts",
     "seed:clean": "ts-node scripts/seed.ts --clean",
     "migrate:dryrun": "ts-node scripts/migrate-dryrun.ts",

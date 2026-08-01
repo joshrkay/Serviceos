@@ -2,13 +2,12 @@ import { describe, it, expect, vi } from 'vitest';
 import { TwilioDeliveryProvider } from '../../src/notifications/twilio-delivery-provider';
 import { DeliveryError } from '../../src/notifications/notification-errors';
 
-function makeProvider(fetchImpl: typeof fetch, secondaryAuthToken?: string) {
+function makeProvider(fetchImpl: typeof fetch) {
   return new TwilioDeliveryProvider({
     sms: {
       accountSid: 'AC_test',
       authToken: 'token_test',
       fromNumber: '+15555550100',
-      secondaryAuthToken,
       apiBaseUrl: 'https://test.example/twilio',
       fetchImpl,
     },
@@ -49,6 +48,25 @@ describe('TwilioDeliveryProvider — SMS', () => {
     expect(result.providerMessageId).toBe('SM_abc');
     expect(result.provider).toBe('sms-gateway');
     expect(result.channel).toBe('sms');
+  });
+
+  it('bounds the send with an abort signal so a hung socket cannot block the caller', async () => {
+    // The E1 life-safety alert goes out through this path. Without a deadline
+    // a wedged Twilio socket keeps the promise pending indefinitely.
+    let seenSignal: AbortSignal | undefined;
+    const fetchImpl = vi.fn(async (_url: string, init: RequestInit) => {
+      seenSignal = init.signal as AbortSignal;
+      return new Response(JSON.stringify({ sid: 'SM_abc', status: 'queued' }), {
+        status: 201,
+        headers: { 'content-type': 'application/json' },
+      });
+    });
+
+    const provider = makeProvider(fetchImpl as unknown as typeof fetch);
+    await provider.sendSms({ to: '+15555550199', body: 'Hello world' });
+
+    expect(seenSignal).toBeInstanceOf(AbortSignal);
+    expect(seenSignal!.aborted).toBe(false);
   });
 
   it('throws DeliveryError when Twilio returns non-2xx', async () => {

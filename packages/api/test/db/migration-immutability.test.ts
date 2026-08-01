@@ -464,6 +464,13 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   // approval time, so a config write's audit names who authorized it.
   // Additive ALTER only; nothing existing touched.
   ['266_proposals_executed_by_role', '75a8f66b03c36528111b5a5743a1d03ab8676a9d6647a345fa0d44aa9f564727'],
+  // FIX 10(i) (ANS-001): per-tenant reviewed E1 life-safety script column.
+  // Renumbered 197→267 on the origin/main merge (SQL unchanged → hash preserved).
+  ['267_tenant_settings_e1_reviewed_script', '5bff650e5b0f0d8be04958f3fa5da7b71f22196fc7d3c2084e94c5dd6f7640a4'],
+  // ANS-001: call_me_back idempotency key gains `reason` so an E1 call's
+  // life-safety alert task is no longer swallowed by its booking task.
+  // Renumbered 198→268 on the origin/main merge (SQL unchanged → hash preserved).
+  ['268_call_me_back_session_reason_idempotency', '7807073281dad9a454020843788c85953d0a30f2b047b6ca05812ef3da2c7253'],
 ];
 
 function hashMigration(value: string): string {

@@ -204,6 +204,10 @@ function mapRow(row: Record<string, unknown>): TenantSettings {
     digestEnabled: (row.digest_enabled as boolean | null) ?? false,
     digestTime: normalizeDigestTime(row.digest_time),
     digestChannel: (row.digest_channel as 'sms' | 'none' | null) ?? 'sms',
+    // FIX 10(i) (ANS-001) — migration 267 (renumbered from 197 on merge).
+    // NULL → undefined = the embedded placeholder script
+    // (LIFE_SAFETY_E1_SCRIPT) is still in effect.
+    e1ReviewedScript: (row.e1_reviewed_script as string | null) ?? undefined,
     // Epic 12.6 — migration 204. Opt-out: column defaults true, so a
     // pre-migration row reads as enabled.
     weeklyFeedbackEnabled: (row.weekly_feedback_enabled as boolean | null) ?? true,
@@ -421,6 +425,8 @@ export class PgSettingsRepository extends PgBaseRepository implements SettingsRe
         digestEnabled: 'digest_enabled',
         digestTime: 'digest_time',
         digestChannel: 'digest_channel',
+        // FIX 10(i) (ANS-001) — migration 267 (renumbered from 197 on merge).
+        e1ReviewedScript: 'e1_reviewed_script',
         // Epic 12.6 — migration 204.
         weeklyFeedbackEnabled: 'weekly_feedback_enabled',
         // UB-D / D-015 — migration 231. Both NOT NULL with column defaults;
