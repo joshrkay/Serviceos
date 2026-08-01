@@ -6783,6 +6783,10 @@ export function createApp(): AppWithLifecycle {
     auditRepo,
     onCallRepo: sharedOnCallRepo,
     ...(pool ? { pool } : {}),
+    // U4 (Part E punch #1) — tenant timezone for spoken-datetime resolution,
+    // read once per session, so the in-app live path books "Thursday at 2pm"
+    // in the tenant's zone exactly like the recorded-memo path.
+    settingsRepo,
     verticalPromptResolver,
     callerPlanResolver,
     thresholdResolver,

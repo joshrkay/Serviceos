@@ -55,6 +55,8 @@ import type { CallOutcome } from '../../../voice/voice-service';
 import { deriveCallOutcome } from './outcome-mapper';
 import { resolveSchedulingEntities, requiresExistingEntity } from './entity-resolution';
 import type { SchedulingEntityResolution } from './entity-resolution';
+import type { SettingsRepository } from '../../../settings/settings';
+import { isRuntimeTimezone } from '../../../shared/timezone';
 import {
   MAX_DISAMBIGUATION_ATTEMPTS,
   refKeyForEntityKind,
@@ -109,6 +111,16 @@ export interface InAppAdapterDeps {
    * unresolved (proposal surfaces for operator review) — never guessed.
    */
   entityResolver?: EntityResolver;
+  /**
+   * U4 (Part E punch #1) — tenant settings for spoken-datetime resolution.
+   * The tenant's IANA zone is resolved ONCE per session and threaded into
+   * `resolveSchedulingEntities` so "Thursday at 2pm" spoken on the in-app
+   * live path books in the TENANT's timezone, exactly like the recorded-memo
+   * path. Optional and failure-soft: absent (or no configured zone) ⇒ spoken
+   * times stay unresolved and the proposal gates downstream (B5.5 precedent
+   * — never a silent UTC parse).
+   */
+  settingsRepo?: SettingsRepository;
   /** Used for `actorId` on proposal/audit rows. */
   systemActorId?: string;
   /**
@@ -451,6 +463,39 @@ export class InAppVoiceAdapter {
   }
 
   /**
+   * U4 — tenant timezone for spoken-datetime resolution, memoized per
+   * SESSION (settings read once per session, the E1-script convention).
+   * `undefined` outcomes are memoized too: the session then refuses to
+   * resolve spoken times (never a silent UTC/default-zone parse) and the
+   * NEXT session retries the read. Bounded so ended sessions can't grow the
+   * memo without limit (sessions are short-lived; a rare clear only costs
+   * one extra settings read per live session).
+   */
+  private readonly sessionTimezones = new Map<string, Promise<string | undefined>>();
+
+  private resolveSessionTimezone(
+    tenantId: string,
+    sessionId: string | undefined,
+  ): Promise<string | undefined> {
+    const key = `${tenantId}:${sessionId ?? ''}`;
+    const cached = this.sessionTimezones.get(key);
+    if (cached) return cached;
+    const pending = (async () => {
+      if (!this.deps.settingsRepo) return undefined;
+      try {
+        const settings = await this.deps.settingsRepo.findByTenant(tenantId);
+        const tz = settings?.timezone;
+        return typeof tz === 'string' && isRuntimeTimezone(tz.trim()) ? tz.trim() : undefined;
+      } catch {
+        return undefined;
+      }
+    })();
+    if (this.sessionTimezones.size > 500) this.sessionTimezones.clear();
+    this.sessionTimezones.set(key, pending);
+    return pending;
+  }
+
+  /**
    * Resolve scheduling entity references, translating the resolver outcome
    * into the FSM event the transition table expects. Resolution failure is
    * non-fatal: we fall back to a best-effort "resolved with no refs" (the
@@ -466,10 +511,20 @@ export class InAppVoiceAdapter {
     // resolveSchedulingEntities for cancel/reschedule/reassign_appointment
     // when the appointment reference isn't a date phrase.
     stickyJobId?: string,
+    // U4 — memo key for the once-per-session tenant-zone read above.
+    sessionId?: string,
   ): Promise<SchedulingEntityResolution> {
     const resolver = this.getEntityResolver();
     try {
-      return await resolveSchedulingEntities(resolver, tenantId, intent, entities, stickyJobId);
+      const timezone = await this.resolveSessionTimezone(tenantId, sessionId);
+      return await resolveSchedulingEntities(
+        resolver,
+        tenantId,
+        intent,
+        entities,
+        stickyJobId,
+        timezone ? { timezone } : undefined,
+      );
     } catch {
       return { status: 'resolved', refs: {} };
     }
@@ -610,6 +665,7 @@ export class InAppVoiceAdapter {
   private async resolvePendingForDisambiguation(
     tenantId: string,
     context: CallingAgentContext,
+    sessionId?: string,
   ): Promise<PendingEntityAmbiguity | undefined> {
     if (context.pendingEntityAmbiguity) {
       return context.pendingEntityAmbiguity;
@@ -625,6 +681,7 @@ export class InAppVoiceAdapter {
       intent,
       entities as Record<string, unknown>,
       context.jobId,
+      sessionId,
     );
     if (resolution.status !== 'ambiguous' || !resolution.ambiguous) {
       return undefined;
@@ -874,6 +931,7 @@ export class InAppVoiceAdapter {
       const pending = await this.resolvePendingForDisambiguation(
         session.tenantId,
         session.machine.currentContext,
+        session.id,
       );
       if (!pending) {
         fsmEvent = { type: 'correction', newTranscript: text };
@@ -1065,6 +1123,7 @@ export class InAppVoiceAdapter {
         fsmEvent.intentType,
         fsmEvent.entities,
         session.machine.currentContext.jobId,
+        session.id,
       );
       const resolutionEvent = await this.toResolutionEvent(
         session.tenantId,

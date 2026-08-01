@@ -200,6 +200,7 @@ import type {
 import type { VoicePersonaResolver } from '../../settings/voice-persona-resolver';
 import type { SettingsRepository } from '../../settings/settings';
 import { resolveEscalationSettings } from '../../settings/settings';
+import { isRuntimeTimezone } from '../../shared/timezone';
 import type { CallMeBackRepository } from '../../voice/call-me-back/call-me-back';
 import type { DeviceTokenRepository } from '../../push/device-token-service';
 import type { PushDeliveryProvider } from '../../notifications/push-delivery-provider';
@@ -753,6 +754,43 @@ export function createVoiceTurnProcessor(
   const pendingTransferTwiml =
     deps.pendingTransferTwiml ?? new Map<string, string>();
 
+  /**
+   * U4 (Part E punch #1) — tenant timezone for spoken-datetime resolution,
+   * resolved ONCE per session (E1-script precedent: settings read per
+   * session, not per utterance). Keyed by the live session OBJECT so
+   * entries are garbage-collected with the session — no eviction hook
+   * needed. `undefined` (no settings repo, no configured zone, or a
+   * settings-read failure) is cached too: the session then refuses to
+   * resolve spoken times rather than guessing a zone (B5.5 precedent),
+   * and the next session retries the read.
+   */
+  const sessionTimezones = new WeakMap<VoiceSession, Promise<string | undefined>>();
+
+  function resolveSessionTimezone(
+    session: VoiceSession,
+    tenantId: string,
+  ): Promise<string | undefined> {
+    const cached = sessionTimezones.get(session);
+    if (cached) return cached;
+    const pending = (async () => {
+      if (!deps.settingsRepo) return undefined;
+      try {
+        const settings = await deps.settingsRepo.findByTenant(tenantId);
+        const tz = settings?.timezone;
+        return typeof tz === 'string' && isRuntimeTimezone(tz.trim()) ? tz.trim() : undefined;
+      } catch (err) {
+        logger.warn('tenant timezone lookup failed; spoken times stay unresolved', {
+          tenantId,
+          sessionId: session.id,
+          error: err instanceof Error ? err.message : String(err),
+        });
+        return undefined;
+      }
+    })();
+    sessionTimezones.set(session, pending);
+    return pending;
+  }
+
   // ─── Helpers (formerly private methods on TwilioGatherAdapter) ──────
 
   async function resolveVerticalPromptSection(
@@ -1098,6 +1136,11 @@ export function createVoiceTurnProcessor(
   ): Promise<Record<string, string>> {
     let resolution: SchedulingEntityResolution;
     try {
+      // U4 — tenant zone (resolved once per session) so "Thursday at 2pm"
+      // books in the TENANT's timezone, matching the recorded-memo path.
+      // Unresolved zone ⇒ spoken times stay unresolved (never silent UTC)
+      // and the booking gates downstream instead of mis-booking.
+      const timezone = await resolveSessionTimezone(session, tenantId);
       resolution = await resolveSchedulingEntities(
         deps.entityResolver,
         tenantId,
@@ -1105,6 +1148,7 @@ export function createVoiceTurnProcessor(
         entities,
         // SCH-03 — sticky job anchor for "the appointment for that job".
         session.machine.currentContext.jobId,
+        timezone ? { timezone } : undefined,
       );
     } catch (err) {
       // A resolver hiccup must never strand a live caller. The classifier's

@@ -254,6 +254,18 @@ async function seedWorld(): Promise<World> {
   const catalogRepo = new InMemoryCatalogItemRepository();
   const auditRepo = new InMemoryAuditRepository();
 
+  // U4 — the tenant's zone. Spoken times ("Tuesday at 2pm") only resolve
+  // against a CONFIGURED tenant timezone now (never a silent UTC frame), so
+  // the world carries one the way every onboarded production tenant does.
+  await settingsRepo.create({
+    id: 'settings-exec-1',
+    tenantId: TENANT,
+    businessName: 'Rivet HVAC',
+    timezone: 'America/Chicago',
+    createdAt: new Date(),
+    updatedAt: new Date(),
+  } as unknown as Parameters<InMemorySettingsRepository['create']>[0]);
+
   // The tenant's price book. A caller can only be quoted for work the
   // tradesperson actually sells, so the two services this suite's caller asks
   // about are in it — that is what makes the drafted estimate's lines
@@ -422,6 +434,9 @@ async function makeInboundCall(
     //    drafted estimate's lines carry a real `unitPrice`.
     entityResolver: makeWorldEntityResolver(world),
     catalogRepo: world.catalogRepo,
+    //  - `settingsRepo` (U4): the tenant zone the spoken times resolve
+    //    against — production telephony threads it via twilioAdapterDeps.
+    settingsRepo: world.settingsRepo,
   });
 
   return { processor, store, proposalRepo, session, resolvedTenantId };
