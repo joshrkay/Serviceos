@@ -2875,3 +2875,141 @@ describe('voice-action-router U3 lookup answers (recorded-memo path)', () => {
     expect(rec?.answerStatus).toBe('proposal');
   });
 });
+
+// ── U1 (voice back-office workflows) — money-loop golden path ─────────────
+//
+// The four spoken collection phrases must complete END-TO-END through the
+// worker without missingFields once the entity resolver uniquely resolves
+// the spoken document reference: classify → resolve (INVOICE_DOC_INTENTS /
+// ESTIMATE_DOC_INTENTS route jobReference to the invoice/estimate kind) →
+// draft with the verified id on the payload. Ambiguity still short-circuits
+// to a voice_clarification BEFORE drafting — pinned per intent family by the
+// generic ambiguity tests above; the ambiguous-invoice case is re-pinned
+// here because these intents' gates only lift as of U1.
+describe('U1 — money-loop resolution end-to-end (worker golden path)', () => {
+  const INVOICE_UUID = '99999999-9999-4999-8999-999999999999';
+  const ESTIMATE_UUID = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee';
+
+  afterEach(() => {
+    _resetSupervisorPresenceCache();
+    setSupervisorPresenceLoader(null);
+  });
+
+  function classifier(intentType: string, entities: Record<string, unknown>): string {
+    return JSON.stringify({ intentType, confidence: 0.9, extractedEntities: entities });
+  }
+
+  function docResolver(kind: 'invoice' | 'estimate', id: string): EntityResolver {
+    return {
+      resolve: vi.fn(async (input: { kind: string }) =>
+        input.kind === kind
+          ? {
+              kind: 'resolved' as const,
+              candidate: { id, kind, label: kind === 'invoice' ? 'INV-0042' : 'EST-0042', score: 0.95 },
+            }
+          : { kind: 'not_found' as const, reference: 'x' },
+      ),
+    } as unknown as EntityResolver;
+  }
+
+  const PHRASES: Array<{
+    intent: string;
+    transcript: string;
+    entities: Record<string, unknown>;
+    kind: 'invoice' | 'estimate';
+    idKey: string;
+    resolvedId: string;
+  }> = [
+    {
+      intent: 'send_invoice',
+      transcript: 'Send the Henderson invoice',
+      entities: { jobReference: 'the Henderson invoice' },
+      kind: 'invoice',
+      idKey: 'invoiceId',
+      resolvedId: INVOICE_UUID,
+    },
+    {
+      intent: 'send_estimate',
+      transcript: 'Send the Khan estimate',
+      entities: { jobReference: 'the Khan estimate' },
+      kind: 'estimate',
+      idKey: 'estimateId',
+      resolvedId: ESTIMATE_UUID,
+    },
+    {
+      intent: 'send_payment_reminder',
+      transcript: 'Chase the Smith invoice',
+      entities: { jobReference: 'the Smith invoice' },
+      kind: 'invoice',
+      idKey: 'invoiceId',
+      resolvedId: INVOICE_UUID,
+    },
+    {
+      intent: 'apply_late_fee',
+      transcript: 'Add a twenty-five dollar late fee to the Smith invoice',
+      entities: { jobReference: 'the Smith invoice', amount: 2500 },
+      kind: 'invoice',
+      idKey: 'invoiceId',
+      resolvedId: INVOICE_UUID,
+    },
+  ];
+
+  for (const p of PHRASES) {
+    it(`"${p.transcript}" → ${p.intent} drafts with the resolver-verified ${p.idKey}, NO missingFields, and NEVER auto-approves`, async () => {
+      const proposalRepo = new InMemoryProposalRepository();
+      const gateway = gatewayReturning([classifier(p.intent, p.entities)]);
+      const worker = createVoiceActionRouterWorker({
+        gateway,
+        proposalRepo,
+        entityResolver: docResolver(p.kind, p.resolvedId),
+      });
+
+      await worker.handle(
+        msg({ tenantId: 't-1', userId: 'u-1', transcript: p.transcript }),
+        silentLogger(),
+      );
+
+      const proposals = await proposalRepo.findByTenant('t-1');
+      expect(proposals).toHaveLength(1);
+      expect(proposals[0].proposalType).toBe(p.intent);
+      expect((proposals[0].payload as Record<string, unknown>)[p.idKey]).toBe(p.resolvedId);
+      expect(missingFieldsFor(proposals[0])).toEqual([]);
+      // Money/comms class — a fully-resolved draft still requires a human
+      // tap (never 'approved' straight from the worker).
+      expect(proposals[0].status).toBe('draft');
+      // The drafted payload satisfies its Zod contract with the verified id.
+      expect(() =>
+        assertValidProposalPayload(proposals[0].proposalType, proposals[0].payload),
+      ).not.toThrow();
+    });
+  }
+
+  it('an ambiguous invoice reference on a money intent short-circuits to voice_clarification (no draft, no guess)', async () => {
+    const proposalRepo = new InMemoryProposalRepository();
+    const gateway = gatewayReturning([
+      classifier('send_invoice', { jobReference: 'the Henderson invoice' }),
+    ]);
+    const ambiguous = {
+      resolve: vi.fn(async () => ({
+        kind: 'ambiguous' as const,
+        candidates: [
+          { id: 'inv-1', kind: 'invoice' as const, label: 'INV-0042', score: 0.9 },
+          { id: 'inv-2', kind: 'invoice' as const, label: 'INV-0043', score: 0.88 },
+        ],
+      })),
+    } as unknown as EntityResolver;
+    const worker = createVoiceActionRouterWorker({ gateway, proposalRepo, entityResolver: ambiguous });
+
+    await worker.handle(
+      msg({ tenantId: 't-1', userId: 'u-1', transcript: 'Send the Henderson invoice' }),
+      silentLogger(),
+    );
+
+    const proposals = await proposalRepo.findByTenant('t-1');
+    expect(proposals).toHaveLength(1);
+    expect(proposals[0].proposalType).toBe('voice_clarification');
+    const payload = proposals[0].payload as Record<string, unknown>;
+    expect(payload.reason).toBe('ambiguous_entity');
+    expect(payload.entityReference).toBe('the Henderson invoice');
+  });
+});

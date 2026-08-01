@@ -80,7 +80,13 @@ import {
   ConfirmAppointmentExecutionHandler,
   LogTimeEntryExecutionHandler,
 } from '../../src/proposals/execution/full-app-voice-handlers';
-import { AddNoteExecutionHandler } from '../../src/proposals/execution/voice-extended-handlers';
+import {
+  AddNoteExecutionHandler,
+  SendInvoiceExecutionHandler,
+  SendEstimateExecutionHandler,
+} from '../../src/proposals/execution/voice-extended-handlers';
+import { SendPaymentReminderExecutionHandler } from '../../src/proposals/execution/send-payment-reminder-handler';
+import { ApplyLateFeeExecutionHandler } from '../../src/proposals/execution/apply-late-fee-handler';
 import { LogExpenseExecutionHandler } from '../../src/proposals/execution/log-expense-handler';
 import { CreateStandingInstructionExecutionHandler } from '../../src/proposals/execution/standing-instruction-handler';
 import { UpdateBrandVoiceExecutionHandler } from '../../src/proposals/execution/brand-voice-handler';
@@ -651,17 +657,36 @@ const ROWS: Row[] = [
         ctx({ existingEntities: { appointmentReference: "Tuesday's job", targetTechnicianName: 'Carlos' } }),
       ),
   },
+  // ── U1 (voice back-office workflows) — flipped from 'gated' to 'resolves':
+  // send_invoice/send_estimate/send_payment_reminder/apply_late_fee are all
+  // INVOICE_DOC_INTENTS/ESTIMATE_DOC_INTENTS, so the router's entity resolver
+  // resolves the spoken reference pre-draft and threads a unique verified
+  // match onto existingEntities.invoiceId/estimateId. The task handlers now
+  // consume that seam (resolve-then-gate, B5.3 shape). A reference that never
+  // resolved still gates — pinned in the per-handler task test files.
   {
     intent: 'send_invoice',
-    mode: 'gated',
-    note: 'invoiceId is gated whenever the reference is not already a UUID',
-    draft: () => draft({ gateway: NOOP_GATEWAY }, 'send_invoice', ctx({ existingEntities: { customerName: 'Henderson' } })),
+    mode: 'resolves',
+    note: 'U1 — resolver-verified existingEntities.invoiceId lifts the gate; dep-less SendInvoiceExecutionHandler synthetic-succeeds',
+    draft: () =>
+      draft(
+        { gateway: NOOP_GATEWAY },
+        'send_invoice',
+        ctx({ existingEntities: { customerName: 'Henderson', invoiceId: INVOICE_ID } }),
+      ),
+    execute: (p) => new SendInvoiceExecutionHandler().execute(p, execContext()),
   },
   {
     intent: 'send_estimate',
-    mode: 'gated',
-    note: 'estimateId is gated whenever the reference is not already a UUID',
-    draft: () => draft({ gateway: NOOP_GATEWAY }, 'send_estimate', ctx({ existingEntities: { customerName: 'Khan' } })),
+    mode: 'resolves',
+    note: 'U1 — resolver-verified existingEntities.estimateId lifts the gate; dep-less SendEstimateExecutionHandler synthetic-succeeds',
+    draft: () =>
+      draft(
+        { gateway: NOOP_GATEWAY },
+        'send_estimate',
+        ctx({ existingEntities: { customerName: 'Khan', estimateId: ESTIMATE_ID } }),
+      ),
+    execute: (p) => new SendEstimateExecutionHandler().execute(p, execContext()),
   },
   {
     intent: 'send_estimate_nudge',
@@ -700,21 +725,27 @@ const ROWS: Row[] = [
   },
   {
     intent: 'send_payment_reminder',
-    mode: 'gated',
-    note: 'invoiceId is unconditionally gated — never resolved by the entity resolver',
+    mode: 'resolves',
+    note: 'U1 — resolver-verified existingEntities.invoiceId lifts the gate; dep-less SendPaymentReminderExecutionHandler synthetic-succeeds',
     draft: () =>
-      draft({ gateway: NOOP_GATEWAY }, 'send_payment_reminder', ctx({ existingEntities: { customerName: 'Henderson' } })),
+      draft(
+        { gateway: NOOP_GATEWAY },
+        'send_payment_reminder',
+        ctx({ existingEntities: { customerName: 'Henderson', invoiceId: INVOICE_ID } }),
+      ),
+    execute: (p) => new SendPaymentReminderExecutionHandler().execute(p, execContext()),
   },
   {
     intent: 'apply_late_fee',
-    mode: 'gated',
-    note: 'invoiceId is unconditionally gated — never resolved by the entity resolver',
+    mode: 'resolves',
+    note: 'U1 — resolver-verified existingEntities.invoiceId + a stated cents amount lift the gate; dep-less ApplyLateFeeExecutionHandler synthetic-succeeds',
     draft: () =>
       draft(
         { gateway: NOOP_GATEWAY },
         'apply_late_fee',
-        ctx({ existingEntities: { customerName: 'Henderson', amount: 2500 } }),
+        ctx({ existingEntities: { customerName: 'Henderson', amount: 2500, invoiceId: INVOICE_ID } }),
       ),
+    execute: (p) => new ApplyLateFeeExecutionHandler().execute(p, execContext()),
   },
   {
     intent: 'record_payment',

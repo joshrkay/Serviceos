@@ -5668,6 +5668,11 @@ export function createApp(): AppWithLifecycle {
       // estimates/invoices (same resolver contract as the voice router).
       standingInstructionsResolver: (tenantId: string) =>
         standingInstructionRepo.listActive(tenantId),
+      // U1 — pre-draft entity resolution parity with the voice worker: the
+      // SAME shared resolver (alias-first → pg_trgm) the voice-action-router
+      // uses, so "send the Henderson invoice" typed into chat resolves the
+      // reference exactly as the spoken memo path does.
+      ...(sharedEntityResolver ? { entityResolver: sharedEntityResolver } : {}),
       // Story 3.11 — persist each chat turn so the running conversation
       // survives reload and is searchable.
       conversationRepo,
