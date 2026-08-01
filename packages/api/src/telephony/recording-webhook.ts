@@ -94,8 +94,11 @@ export function buildRecordingStorageKey(tenantId: string, callSid: string): str
  * scrub Authorization headers, but if a downstream wraps the URL or
  * curl-formats a request we'd rather see `<redacted>` than the token
  * in our logs.
+ *
+ * Exported for the voicemail-status route (U9), which runs the same
+ * authenticated-fetch → S3 → insert pipeline for voicemail recordings.
  */
-function scrubAuthToken(err: unknown, authToken: string | undefined): string {
+export function scrubAuthToken(err: unknown, authToken: string | undefined): string {
   const raw = err instanceof Error ? err.message : String(err);
   if (!authToken) return raw;
   // Replace both the raw token and any base64-encoded basic credential
@@ -108,6 +111,10 @@ function scrubAuthToken(err: unknown, authToken: string | undefined): string {
  * Fetch the recording payload from Twilio. The `.mp3` suffix asks Twilio
  * to transcode the WAV master into MP3 on the fly — our S3 key uses
  * `.mp3` to match.
+ *
+ * Exported (along with `uploadToS3`) for the voicemail-status route (U9),
+ * which reuses the exact authenticated-RecordingUrl-fetch + presigned-PUT
+ * pipeline for voicemail recordings.
  */
 // Media transfers get a generous but bounded window — without a signal a
 // stalled Twilio CDN / S3 endpoint hangs the webhook handler while Twilio
@@ -117,7 +124,7 @@ const MEDIA_TRANSFER_TIMEOUT_MS = 30_000;
 // MP3 is ~14MB; 50MB covers any real call while bounding a rogue payload).
 const MAX_RECORDING_BYTES = 50 * 1024 * 1024;
 
-async function fetchRecordingBytes(
+export async function fetchRecordingBytes(
   recordingUrl: string,
   accountSid: string,
   authToken: string,
@@ -146,7 +153,7 @@ async function fetchRecordingBytes(
   return Buffer.from(arrayBuf);
 }
 
-async function uploadToS3(
+export async function uploadToS3(
   url: string,
   bytes: Buffer,
   contentType: string,

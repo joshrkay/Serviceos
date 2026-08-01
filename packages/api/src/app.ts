@@ -264,7 +264,7 @@ import {
   resolveEscalationSettings,
   createSettingsOwnerPhoneResolver,
 } from './settings/settings';
-import { InMemoryAuditRepository } from './audit/audit';
+import { InMemoryAuditRepository, createAuditEvent } from './audit/audit';
 import { InMemoryLookupEventRepository } from './lookup-events/lookup-event';
 import { PgLookupEventRepository } from './lookup-events/pg-lookup-event';
 import { LookupEventService } from './lookup-events/lookup-event-service';
@@ -471,7 +471,13 @@ import { createInvoice as createInvoiceDomain } from './invoices/invoice';
 
 import { seedCanonicalVerticalPacks } from './shared/canonical-vertical-packs';
 import { createTenantOwnership } from './shared/tenant-ownership';
-import { createTranscriptionWorker } from './workers/transcription';
+import {
+  createTranscriptionWorker,
+  voicemailRouterEnqueueAllowed,
+} from './workers/transcription';
+// U9 — voicemail router gate: owner/approver caller-ID check (same identity
+// module the SMS reply transport and RV-070 owner-line recognition use).
+import { isApproverPhone } from './proposals/approver-identity';
 import { createTranscriptIngestionWorker } from './workers/transcript-ingestion-worker';
 import { createProposalCorrectionWorker } from './workers/proposal-correction-worker';
 // U7 — structured correction-lesson loop (record on execution, undo on undo).
@@ -1769,6 +1775,50 @@ export function createApp(): AppWithLifecycle {
         ? { gateway: llmGateway, glossary: transcriptionGlossaryProvider }
         : {}),
       onTranscribed: async (event, hookLogger) => {
+        // U9 — voicemail transcripts reach the action router ONLY when the
+        // caller-ID matches the tenant's approver set (owner_phone / backup
+        // supervisor — resolveOwnerSession precedent, fail-closed). Every
+        // other caller keeps today's notify-only voicemail (lead + audit,
+        // no router). Non-voicemail events (in-app memos) pass untouched.
+        const routerAllowed = await voicemailRouterEnqueueAllowed(
+          event,
+          {
+            isApproverPhone: (tenantId, phone) =>
+              isApproverPhone({ settingsRepo, userRepo }, tenantId, phone ?? null),
+          },
+          hookLogger,
+        );
+        if (event.voicemail) {
+          // Audit the gate decision (repo invariant: new pipeline legs
+          // audit). Best-effort — never blocks the enqueue path.
+          try {
+            await auditRepo.create(
+              createAuditEvent({
+                tenantId: event.tenantId,
+                actorId: 'voicemail_webhook',
+                actorRole: 'system',
+                eventType: 'voicemail.router_gate',
+                entityType: 'voice_recording',
+                entityId: event.recordingId,
+                metadata: {
+                  callerVerified: routerAllowed,
+                  enqueued: routerAllowed,
+                },
+              }),
+            );
+          } catch (auditErr) {
+            hookLogger.warn('voicemail router gate audit failed', {
+              recordingId: event.recordingId,
+              error: auditErr instanceof Error ? auditErr.message : String(auditErr),
+            });
+          }
+        }
+        if (!routerAllowed) {
+          hookLogger.info('voicemail transcript: caller not in approver set — notify-only', {
+            recordingId: event.recordingId,
+          });
+          return;
+        }
         // Enqueue the downstream voice-action-router job. A separate
         // poll loop (below) picks it up and runs intent classification.
         // Keeping it on the queue instead of running inline means:
@@ -1782,6 +1832,12 @@ export function createApp(): AppWithLifecycle {
           conversationId: event.conversationId,
           recordingId: event.recordingId,
           ...(event.jobId ? { jobId: event.jobId } : {}),
+          // U9 — the router stamps sourceContext.sourceChannel and force-
+          // holds every voicemail-sourced proposal for human review
+          // (holdIfUntrustedSource): the recording keeps untrusted
+          // provenance (source='inbound_call'), so the owner caller-ID
+          // gates only WHETHER this enqueue happens — never trust.
+          ...(event.voicemail ? { sourceChannel: 'voicemail' as const } : {}),
         };
         await queue.send(
           'voice_action_router',
@@ -1790,6 +1846,7 @@ export function createApp(): AppWithLifecycle {
         );
         hookLogger.info('voice_action_router enqueued', {
           recordingId: event.recordingId,
+          ...(event.voicemail ? { sourceChannel: 'voicemail' } : {}),
         });
       },
       // Blocker 12 — encrypt retained raw transcripts at rest. Prefer a
@@ -4085,6 +4142,44 @@ export function createApp(): AppWithLifecycle {
               },
             }
           : {}),
+      },
+      // U9 (voicemail → action) — replay-receipt store for the lead leg plus
+      // the transcription enqueue for persisted voicemail recordings. The
+      // storage/Twilio-cred deps are shared with `recording` above.
+      voicemail: {
+        webhookEventRepo,
+        options: {
+          onVoicemailPersisted: async (event) => {
+            // inserted=false ⇒ Twilio replay (or a call whose inbound
+            // recording row already exists) — the first delivery already
+            // enqueued the work.
+            if (!event.inserted) return;
+            try {
+              await queue.send(
+                'transcription',
+                {
+                  tenantId: event.tenantId,
+                  recordingId: event.voiceRecordingId,
+                  audioUrl: event.audioUrl,
+                  // Voicemail marker + caller-ID: on completion the
+                  // onTranscribed hook gates the router enqueue on this
+                  // phone matching the tenant's approver set. Absent
+                  // caller-ID fails closed (notify-only).
+                  voicemail: {
+                    ...(event.callerPhone ? { callerPhone: event.callerPhone } : {}),
+                  },
+                },
+                `${event.tenantId}:${event.voiceRecordingId}:transcription:voicemail`,
+              );
+            } catch (err) {
+              // eslint-disable-next-line no-console
+              console.error('app: failed to enqueue voicemail transcription', {
+                voiceRecordingId: event.voiceRecordingId,
+                error: err instanceof Error ? err.message : String(err),
+              });
+            }
+          },
+        },
       },
       // WS3 — per-tenant staged rollout of the realtime path (default ON) and
       // the pre-connect health signals. tenantFeatureFlags is null in

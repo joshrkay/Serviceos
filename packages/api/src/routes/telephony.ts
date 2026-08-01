@@ -47,7 +47,11 @@ import {
 import { getSentryClient, type SentryClient } from '../monitoring/sentry';
 import { buildVoicemailTwiml } from '../telephony/voicemail-fallback';
 import { isTenantAfterHours } from '../telephony/business-hours-loader';
-import { createVoicemailStatusRouter } from '../telephony/voicemail-status-route';
+import {
+  createVoicemailStatusRouter,
+  type VoicemailStatusHandlerOptions,
+  type VoicemailWebhookReceiptStore,
+} from '../telephony/voicemail-status-route';
 import type { SettingsRepository } from '../settings/settings';
 import { resolveEscalationSettings } from '../settings/settings';
 import type { LeadRepository } from '../leads/lead';
@@ -140,6 +144,18 @@ export interface TelephonyRouterDeps {
     twilioAuthToken?: string;
     /** Test seam — replace fetch / upload with stubs. */
     options?: RecordingHandlerOptions;
+  };
+  /**
+   * U9 (voicemail → action) — extra wiring for the voicemail-status
+   * callback's transcription leg. The storage/Twilio-cred deps are shared
+   * with `recording` above; this block carries only what is voicemail-
+   * specific: the replay-receipt store (lead-leg idempotency) and the
+   * app-layer hook that enqueues the transcription worker. Optional so
+   * legacy tests/dev keep the historical notify-only behavior.
+   */
+  voicemail?: {
+    webhookEventRepo?: VoicemailWebhookReceiptStore;
+    options?: VoicemailStatusHandlerOptions;
   };
   /**
    * P8-012 — when true, /voice returns a `<Connect><Stream/></Connect>`
@@ -275,16 +291,34 @@ export function createTelephonyRouter(deps: TelephonyRouterDeps): Router {
   // below so its router-scoped middleware fully owns the /recording path.
   if (deps.recording?.store) {
     router.use(
-      createVoicemailStatusRouter({
-        store: deps.recording.store,
-        pool: deps.pool,
-        leadRepo: deps.leadRepo,
-        auditRepo: deps.auditRepo,
-        // Public Twilio callback — mounts its own urlencoded parser +
-        // signature check (it sits before the shared middleware below).
-        authTokenGetter: deps.authTokenGetter,
-        ...(deps.publicBaseUrl ? { publicBaseUrl: deps.publicBaseUrl } : {}),
-      }),
+      createVoicemailStatusRouter(
+        {
+          store: deps.recording.store,
+          pool: deps.pool,
+          leadRepo: deps.leadRepo,
+          auditRepo: deps.auditRepo,
+          // Public Twilio callback — mounts its own urlencoded parser +
+          // signature check (it sits before the shared middleware below).
+          authTokenGetter: deps.authTokenGetter,
+          ...(deps.publicBaseUrl ? { publicBaseUrl: deps.publicBaseUrl } : {}),
+          // U9 — transcription leg reuses the recording sink's storage +
+          // Twilio creds; the To-number fallback covers after-hours
+          // voicemails, which have no in-process session by construction.
+          resolveTenantIdFallback: deps.resolveTenantId,
+          storage: deps.recording.storage,
+          storageBucket: deps.recording.storageBucket,
+          ...(deps.recording.twilioAccountSid
+            ? { twilioAccountSid: deps.recording.twilioAccountSid }
+            : {}),
+          ...(deps.recording.twilioAuthToken
+            ? { twilioAuthToken: deps.recording.twilioAuthToken }
+            : {}),
+          ...(deps.voicemail?.webhookEventRepo
+            ? { webhookEventRepo: deps.voicemail.webhookEventRepo }
+            : {}),
+        },
+        deps.voicemail?.options ?? {},
+      ),
     );
   }
 
@@ -430,7 +464,16 @@ export function createTelephonyRouter(deps: TelephonyRouterDeps): Router {
               ? `${base}/api/telephony/voicemail-status`
               : '/api/telephony/voicemail-status';
             res.status(200).type('text/xml').send(
-              buildVoicemailTwiml({ shopName, recordingStatusCallback: callback }),
+              // U9 — caller/dialed numbers ride the callback URL: the
+              // recordingStatusCallback POST has no From/To of its own, and
+              // this branch answers BEFORE any session exists, so they are
+              // the handler's only route to caller identity + tenant.
+              buildVoicemailTwiml({
+                shopName,
+                recordingStatusCallback: callback,
+                callerPhone: from,
+                dialedNumber: to,
+              }),
             );
             return;
           }
@@ -843,7 +886,16 @@ export function createTelephonyRouter(deps: TelephonyRouterDeps): Router {
     res
       .status(200)
       .type('text/xml')
-      .send(buildVoicemailTwiml({ shopName: businessName, recordingStatusCallback: callback }));
+      // U9 — same caller/dialed threading as the after-hours branch; the
+      // dial-result webhook carries the call's From/To as standard params.
+      .send(
+        buildVoicemailTwiml({
+          shopName: businessName,
+          recordingStatusCallback: callback,
+          ...(body.From ? { callerPhone: body.From } : {}),
+          ...(body.To ? { dialedNumber: body.To } : {}),
+        }),
+      );
   });
 
   /**
