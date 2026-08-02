@@ -264,7 +264,7 @@ import {
   resolveEscalationSettings,
   createSettingsOwnerPhoneResolver,
 } from './settings/settings';
-import { InMemoryAuditRepository } from './audit/audit';
+import { InMemoryAuditRepository, createAuditEvent } from './audit/audit';
 import { InMemoryLookupEventRepository } from './lookup-events/lookup-event';
 import { PgLookupEventRepository } from './lookup-events/pg-lookup-event';
 import { LookupEventService } from './lookup-events/lookup-event-service';
@@ -471,7 +471,13 @@ import { createInvoice as createInvoiceDomain } from './invoices/invoice';
 
 import { seedCanonicalVerticalPacks } from './shared/canonical-vertical-packs';
 import { createTenantOwnership } from './shared/tenant-ownership';
-import { createTranscriptionWorker } from './workers/transcription';
+import {
+  createTranscriptionWorker,
+  voicemailRouterEnqueueAllowed,
+} from './workers/transcription';
+// U9 — voicemail router gate: owner/approver caller-ID check (same identity
+// module the SMS reply transport and RV-070 owner-line recognition use).
+import { isApproverPhone } from './proposals/approver-identity';
 import { createTranscriptIngestionWorker } from './workers/transcript-ingestion-worker';
 import { createProposalCorrectionWorker } from './workers/proposal-correction-worker';
 // U7 — structured correction-lesson loop (record on execution, undo on undo).
@@ -1769,6 +1775,50 @@ export function createApp(): AppWithLifecycle {
         ? { gateway: llmGateway, glossary: transcriptionGlossaryProvider }
         : {}),
       onTranscribed: async (event, hookLogger) => {
+        // U9 — voicemail transcripts reach the action router ONLY when the
+        // caller-ID matches the tenant's approver set (owner_phone / backup
+        // supervisor — resolveOwnerSession precedent, fail-closed). Every
+        // other caller keeps today's notify-only voicemail (lead + audit,
+        // no router). Non-voicemail events (in-app memos) pass untouched.
+        const routerAllowed = await voicemailRouterEnqueueAllowed(
+          event,
+          {
+            isApproverPhone: (tenantId, phone) =>
+              isApproverPhone({ settingsRepo, userRepo }, tenantId, phone ?? null),
+          },
+          hookLogger,
+        );
+        if (event.voicemail) {
+          // Audit the gate decision (repo invariant: new pipeline legs
+          // audit). Best-effort — never blocks the enqueue path.
+          try {
+            await auditRepo.create(
+              createAuditEvent({
+                tenantId: event.tenantId,
+                actorId: 'voicemail_webhook',
+                actorRole: 'system',
+                eventType: 'voicemail.router_gate',
+                entityType: 'voice_recording',
+                entityId: event.recordingId,
+                metadata: {
+                  callerVerified: routerAllowed,
+                  enqueued: routerAllowed,
+                },
+              }),
+            );
+          } catch (auditErr) {
+            hookLogger.warn('voicemail router gate audit failed', {
+              recordingId: event.recordingId,
+              error: auditErr instanceof Error ? auditErr.message : String(auditErr),
+            });
+          }
+        }
+        if (!routerAllowed) {
+          hookLogger.info('voicemail transcript: caller not in approver set — notify-only', {
+            recordingId: event.recordingId,
+          });
+          return;
+        }
         // Enqueue the downstream voice-action-router job. A separate
         // poll loop (below) picks it up and runs intent classification.
         // Keeping it on the queue instead of running inline means:
@@ -1782,6 +1832,12 @@ export function createApp(): AppWithLifecycle {
           conversationId: event.conversationId,
           recordingId: event.recordingId,
           ...(event.jobId ? { jobId: event.jobId } : {}),
+          // U9 — the router stamps sourceContext.sourceChannel and force-
+          // holds every voicemail-sourced proposal for human review
+          // (holdIfUntrustedSource): the recording keeps untrusted
+          // provenance (source='inbound_call'), so the owner caller-ID
+          // gates only WHETHER this enqueue happens — never trust.
+          ...(event.voicemail ? { sourceChannel: 'voicemail' as const } : {}),
         };
         await queue.send(
           'voice_action_router',
@@ -1790,6 +1846,7 @@ export function createApp(): AppWithLifecycle {
         );
         hookLogger.info('voice_action_router enqueued', {
           recordingId: event.recordingId,
+          ...(event.voicemail ? { sourceChannel: 'voicemail' } : {}),
         });
       },
       // Blocker 12 — encrypt retained raw transcripts at rest. Prefer a
@@ -2787,6 +2844,10 @@ export function createApp(): AppWithLifecycle {
     dunningConfigRepo,
     timeEntryRepo,
     expenseRepo,
+    // U7 — lookup_leads / lookup_catalog answer on memo + chat like
+    // telephony: same repos the twilio-adapter wiring hands the skills.
+    leadRepo,
+    catalogRepo,
     settingsRepo,
     // Mirrors the telephony adapter wiring: every surface writes the same
     // lookup_events analytics rows.
@@ -4085,6 +4146,40 @@ export function createApp(): AppWithLifecycle {
               },
             }
           : {}),
+      },
+      // U9 (voicemail → action) — replay-receipt store for the lead leg plus
+      // the transcription enqueue for persisted voicemail recordings. The
+      // storage/Twilio-cred deps are shared with `recording` above.
+      voicemail: {
+        webhookEventRepo,
+        options: {
+          onVoicemailPersisted: async (event) => {
+            // Enqueue on EVERY invocation, including event.inserted=false
+            // (a retry after a prior insert-then-crash): true replays never
+            // reach this hook (the route's transcription receipt guards
+            // them), and the stable idempotency key + the router's own
+            // recordingId dedup make a re-send safe. Errors PROPAGATE by
+            // contract — the route answers 500 so Twilio retries, which is
+            // what keeps a transient queue blip from permanently
+            // downgrading the voicemail to notify-only.
+            await queue.send(
+              'transcription',
+              {
+                tenantId: event.tenantId,
+                recordingId: event.voiceRecordingId,
+                audioUrl: event.audioUrl,
+                // Voicemail marker + caller-ID: on completion the
+                // onTranscribed hook gates the router enqueue on this
+                // phone matching the tenant's approver set. Absent
+                // caller-ID fails closed (notify-only).
+                voicemail: {
+                  ...(event.callerPhone ? { callerPhone: event.callerPhone } : {}),
+                },
+              },
+              `${event.tenantId}:${event.voiceRecordingId}:transcription:voicemail`,
+            );
+          },
+        },
       },
       // WS3 — per-tenant staged rollout of the realtime path (default ON) and
       // the pre-connect health signals. tenantFeatureFlags is null in
@@ -5668,6 +5763,11 @@ export function createApp(): AppWithLifecycle {
       // estimates/invoices (same resolver contract as the voice router).
       standingInstructionsResolver: (tenantId: string) =>
         standingInstructionRepo.listActive(tenantId),
+      // U1 — pre-draft entity resolution parity with the voice worker: the
+      // SAME shared resolver (alias-first → pg_trgm) the voice-action-router
+      // uses, so "send the Henderson invoice" typed into chat resolves the
+      // reference exactly as the spoken memo path does.
+      ...(sharedEntityResolver ? { entityResolver: sharedEntityResolver } : {}),
       // Story 3.11 — persist each chat turn so the running conversation
       // survives reload and is searchable.
       conversationRepo,
@@ -6778,6 +6878,10 @@ export function createApp(): AppWithLifecycle {
     auditRepo,
     onCallRepo: sharedOnCallRepo,
     ...(pool ? { pool } : {}),
+    // U4 (Part E punch #1) — tenant timezone for spoken-datetime resolution,
+    // read once per session, so the in-app live path books "Thursday at 2pm"
+    // in the tenant's zone exactly like the recorded-memo path.
+    settingsRepo,
     verticalPromptResolver,
     callerPlanResolver,
     thresholdResolver,

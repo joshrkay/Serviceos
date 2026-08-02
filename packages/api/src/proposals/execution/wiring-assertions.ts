@@ -25,9 +25,18 @@ import { ExecutionHandler } from './handlers';
  *      sink.
  *
  * A voice-reachable proposal type whose handler reports NOT fully wired — or
- * that has no handler at all — is flagged. Handlers that don't implement
- * `isFullyWired` are still treated as fully wired (a handler with no degraded
- * persistence path, e.g. a pure comms sender, can omit it).
+ * that has no handler at all — is flagged.
+ *
+ * U8 (C2) — the guard FAILS CLOSED on a missing probe: a voice-reachable
+ * handler that does not implement `isFullyWired` is treated as DEGRADED, not
+ * as wired. The old default ("no probe = assume wired") meant a new handler
+ * shipped without a probe was invisible to this guard — exactly the class of
+ * silent success-without-persistence the guard exists to prevent. Every
+ * voice-reachable handler now implements the probe (pinned by the
+ * registry-enumeration test in test/proposals/wiring-assertions.test.ts), so
+ * the only way to trip the missing-probe branch is to add a new
+ * voice-reachable handler without one — which should fail the boot, and that
+ * test, until the probe is written.
  */
 export interface WiringLogger {
   warn(message: string, meta?: Record<string, unknown>): void;
@@ -50,7 +59,8 @@ export function findDegradedVoiceHandlers(
       degraded.add(type);
       continue;
     }
-    if (handler.isFullyWired && !handler.isFullyWired()) {
+    // U8 — fail closed: no probe counts as degraded (see module doc above).
+    if (!handler.isFullyWired || !handler.isFullyWired()) {
       degraded.add(type);
     }
   }
@@ -67,8 +77,8 @@ export function assertVoiceHandlersWired(
 
   const message =
     'Voice-reachable execution handlers are degraded (would return success ' +
-    `without persisting): ${degraded.join(', ')}. Wire their ` +
-    'repositories/services before serving voice traffic.';
+    `without persisting) or are missing an isFullyWired() probe: ${degraded.join(', ')}. ` +
+    'Wire their repositories/services (or implement the probe) before serving voice traffic.';
 
   if (opts.poolConfigured) {
     // A Postgres pool is configured → real deployment. Fail boot rather than

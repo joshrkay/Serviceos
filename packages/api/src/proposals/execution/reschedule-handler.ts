@@ -1,4 +1,3 @@
-import { v4 as uuidv4 } from 'uuid';
 import { Proposal, ProposalType } from '../proposal';
 import { resolveSurface } from '../surface';
 import { ExecutionHandler, ExecutionContext, ExecutionResult } from './handlers';
@@ -33,6 +32,15 @@ export class RescheduleAppointmentExecutionHandler implements ExecutionHandler {
     private readonly feasibilityDeps?: FeasibilityDependencies,
     private readonly transactionalComms?: TransactionalCommsService,
   ) {}
+
+  // U8 — degrades to an echo passthrough (moves nothing) without the
+  // appointment repo — see the final return in execute(). The boot guard
+  // (wiring-assertions.ts) fails boot when a pool is configured but this is
+  // false, so that branch is unreachable in a real deployment. (The S1
+  // caller path additionally fails closed at runtime without the repo.)
+  isFullyWired(): boolean {
+    return Boolean(this.appointmentRepo);
+  }
 
   async execute(proposal: Proposal, context: ExecutionContext): Promise<ExecutionResult> {
     const { payload } = proposal;

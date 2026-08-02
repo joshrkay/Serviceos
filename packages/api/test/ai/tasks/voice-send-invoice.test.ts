@@ -18,6 +18,10 @@ import { SendInvoiceTaskHandler } from '../../../src/ai/tasks/voice-extended-tas
 import { TaskContext } from '../../../src/ai/tasks/task-handlers';
 import { missingFieldsFor } from '../../../src/proposals/proposal';
 import { sendInvoicePayloadSchema } from '../../../src/proposals/contracts/send-invoice';
+import {
+  SendInvoiceExecutionHandler,
+  NoopInvoiceDeliveryProvider,
+} from '../../../src/proposals/execution/voice-extended-handlers';
 
 function ctx(overrides: Partial<TaskContext>): TaskContext {
   return { tenantId: 't-1', userId: 'u-1', message: 'test transcript', ...overrides };
@@ -148,5 +152,69 @@ describe('SendInvoiceTaskHandler — B2 candidatesForReference', () => {
     expect(missingFieldsFor(res.proposal)).toContain('invoiceId');
     const sc = res.proposal.sourceContext as Record<string, unknown> | undefined;
     expect(sc?.entityCandidates).toBeUndefined();
+  });
+});
+
+// ── U1 — resolver-verified invoiceId lifts the gate (resolve-then-gate) ────
+//
+// `send_invoice` is one of INVOICE_DOC_INTENTS, so the router's entity
+// resolver resolves the spoken reference pre-draft and threads a UNIQUE
+// verified match onto existingEntities.invoiceId (annotateResolvedEntities).
+// The handler must consume that seam: gate only when it is absent. P-44:
+// the lifted-gate case is proven by the EXECUTED EFFECT (the real execution
+// handler dispatches the right invoice), not just payload shape.
+describe('SendInvoiceTaskHandler — U1 resolver-verified invoiceId', () => {
+  const RESOLVED_ID = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc';
+
+  it('resolver seam lifts the gate; the drafted payload EXECUTES through the real handler (dispatch carries the resolved invoice)', async () => {
+    const res = await new SendInvoiceTaskHandler().handle(
+      ctx({ existingEntities: { customerName: 'Henderson', invoiceId: RESOLVED_ID } }),
+    );
+    expect(res.proposal.payload.invoiceId).toBe(RESOLVED_ID);
+    // The spoken reference is preserved for the review card's display.
+    expect(res.proposal.payload.invoiceReference).toBe('Henderson');
+    expect(missingFieldsFor(res.proposal)).toEqual([]);
+    // Comms class — a fully-resolved draft STILL never auto-approves.
+    expect(res.proposal.status).toBe('draft');
+    expect(sendInvoicePayloadSchema.safeParse(res.proposal.payload).success).toBe(true);
+
+    // Executed effect: the REAL execution handler accepts the drafted payload
+    // and dispatches the resolved invoice on the requested channel.
+    const provider = new NoopInvoiceDeliveryProvider();
+    const exec = await new SendInvoiceExecutionHandler(provider).execute(res.proposal, {
+      tenantId: 't-1',
+      executedBy: 'u-1',
+    });
+    expect(exec.success).toBe(true);
+    expect(provider.lastDispatch).toMatchObject({
+      tenantId: 't-1',
+      invoiceId: RESOLVED_ID,
+      channel: 'email',
+    });
+  });
+
+  it('a non-UUID value in the invoiceId seam never lifts the gate (shape check, no silent guess)', async () => {
+    const res = await new SendInvoiceTaskHandler().handle(
+      ctx({ existingEntities: { customerName: 'Henderson', invoiceId: 'the Henderson invoice' } }),
+    );
+    expect(res.proposal.payload.invoiceId).toBeUndefined();
+    expect(missingFieldsFor(res.proposal)).toContain('invoiceId');
+  });
+
+  it('no candidate search runs when the resolver already verified the id', async () => {
+    const findByTenant = vi.fn().mockResolvedValue([]);
+    const res = await new SendInvoiceTaskHandler({ invoiceRepo: { findByTenant } as never }).handle(
+      ctx({ existingEntities: { customerName: 'Henderson', invoiceId: RESOLVED_ID } }),
+    );
+    expect(findByTenant).not.toHaveBeenCalled();
+    expect(missingFieldsFor(res.proposal)).toEqual([]);
+  });
+
+  it('an unresolved reference (resolver not_found / low-confidence leaves the seam empty) keeps today\'s gate', async () => {
+    const res = await new SendInvoiceTaskHandler().handle(
+      ctx({ existingEntities: { customerName: 'Henderson' } }),
+    );
+    expect(missingFieldsFor(res.proposal)).toContain('invoiceId');
+    expect(res.proposal.payload.invoiceReference).toBe('Henderson');
   });
 });

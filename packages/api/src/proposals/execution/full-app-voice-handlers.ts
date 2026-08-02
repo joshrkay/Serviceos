@@ -252,6 +252,18 @@ export class NotifyDelayExecutionHandler implements ExecutionHandler {
     private readonly customerRepo?: CustomerRepository,
   ) {}
 
+  // U8 — degrades to an echo passthrough (notifies nobody) unless the whole
+  // send path is wired — see execute(). The boot guard (wiring-assertions.ts)
+  // fails boot when a pool is configured but this is false.
+  isFullyWired(): boolean {
+    return (
+      Boolean(this.delayService) &&
+      Boolean(this.appointmentRepo) &&
+      Boolean(this.jobRepo) &&
+      Boolean(this.customerRepo)
+    );
+  }
+
   async execute(proposal: Proposal, context: ExecutionContext): Promise<ExecutionResult> {
     const payload = proposal.payload as Record<string, unknown>;
     const appointmentId = typeof payload.appointmentId === 'string' ? payload.appointmentId : undefined;

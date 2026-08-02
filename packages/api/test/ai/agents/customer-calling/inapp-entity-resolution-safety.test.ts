@@ -645,8 +645,20 @@ describe('resolveSchedulingEntities (pure resolver folding)', () => {
     );
     expect(r.status).toBe('resolved');
     expect(r.refs.customerId).toBeUndefined();
-    // Deterministic datetime parse still runs (it's a parse, not a guess).
-    expect(typeof r.refs.scheduledStart).toBe('string');
+    // U4 — with NO tenant timezone the spoken time must stay UNRESOLVED
+    // (the old behavior parsed it in a silent UTC frame — the exact bug
+    // Part E punch #1 names). The datetime parse still runs when a zone IS
+    // supplied (it's a parse, not a guess).
+    expect(r.refs.scheduledStart).toBeUndefined();
+    const withZone = await resolveSchedulingEntities(
+      undefined,
+      TID,
+      'create_appointment',
+      { customerName: 'Bob', dateTimeDescription: 'tomorrow at 2pm' },
+      undefined,
+      { timezone: 'America/Chicago' },
+    );
+    expect(typeof withZone.refs.scheduledStart).toBe('string');
   });
 
   it('cancel_appointment with no appointmentReference does NOT guess an appointment', async () => {

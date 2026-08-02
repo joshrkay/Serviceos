@@ -472,3 +472,37 @@ targets files that are already extracted); extract by file size alone (would
 split `schema.ts` and `app.ts` in the same change, making the diff
 unreviewable); leave `app.ts` alone (the 488-import, 223-instantiation single
 function is the main obstacle to onboarding and to testing wiring in isolation).
+
+### D-023: Part F ratified — F-1 two-step invoice issuance; F-2 brand-voice lock stays tap-only
+**Date:** 2026-08-01
+**Initiative:** Voice back-office workflows plan, U5 decision gate
+(`docs/plans/2026-08-01-001-feat-voice-back-office-workflows-plan.md`); Part F register
+(`docs/PRD-v4-part-F-decisions.md`).
+**Decision:** The product owner ratified both PROPOSED Part F entries on 2026-08-01 (via
+AskUserQuestion — recorded here as the provenance of the call):
+- **F-1 (B9.1 issuance semantics) = the TWO-STEP reading.** One utterance + one tap yields an
+  approvable `draft_invoice`; a second utterance ("issue it") + a second tap approves the
+  separate `issue_invoice` proposal, which is money-class and never auto-approves. Single-
+  utterance auto-issue is explicitly NOT built.
+- **F-2 (B1.18) = amended to "captured by voice; locked by tap."** Brand-voice capture/edit is
+  speakable (as an approval-gated `update_brand_voice` proposal); locking remains tap-only. The
+  payload contract has no lock-shaped field, so a spoken "lock my brand voice" can never set
+  `brand_voice_locked`.
+**Rationale:** Both ratifications adopt the register's own recommendations unchanged. F-1:
+`issue_invoice` makes a customer-visible, money-bearing document real; the action-class ladder
+(`actionClassForProposalType` → `money`) and the D-013 posture (approval is never
+voice-reachable) both treat "make it real" transitions as human-gated, and an auto-issue-on-
+approve tap doing double duty would be a new capability needing its own risk review. F-2: lock
+is a control act freezing the tenant's outbound identity — same theory as D-013's approval
+exception (control acts stay off the voice surface).
+**Constraints:** No code was gated on these ratifications — the shipped implementation already
+matches both readings (issue leg: `packages/api/src/ai/orchestration/task-router.ts`
+`IssueInvoiceTaskHandler` + `packages/api/src/proposals/execution/issue-invoice-handler.ts`;
+lock: `packages/api/src/proposals/contracts/brand-voice.ts` +
+`packages/api/src/proposals/execution/brand-voice-handler.ts`). Chain-set approval sweeps
+capture-class siblings only, so a chained issue leg still requires its own tap
+(`proposals/actions.ts` `approveChainSet`). Rung-4→5 score flips in
+`projects/rivet-voice-19/re-measurement.md` belong to that run's own process, not this entry.
+**Alternatives rejected:** Single-utterance auto-issue (new capability; approval tap doing
+double duty over a money transition); lock-by-voice (an utterance that irreversibly freezes
+tenant config — its own risk review, deliberately unbuilt).
