@@ -2218,3 +2218,205 @@ describe('B5 — scheduling / create_job / invoice-follow-up intents wired onto 
     expect(appointment.id).toBeTruthy();
   });
 });
+
+// ── U1 (voice back-office workflows) — CHAT-SURFACE PARITY ────────────────
+//
+// The voice worker runs the entity resolver BEFORE drafting
+// (annotateResolvedEntities) so "send the Henderson invoice" resolves to a
+// verified invoiceId. Until U1 the chat surface never ran the resolver at
+// all, and even a resolved id would have been silently stripped by
+// dropUnverifiedIds (not literally in the operator's text). The route now
+// (1) runs the SAME resolver pre-draft, (2) threads resolved ids onto
+// existingEntities (the seam the task handlers consume), and (3) stamps
+// them into sourceContext.verifiedIds — a DB-lookup product, verifiable by
+// construction — so the scrub preserves them. P-44: each lifted case is
+// proven by the EXECUTED EFFECT that approval now unblocks
+// (approveProposal succeeds), not just card shape; ambiguity keeps the gate.
+describe('U1 — chat-surface entity resolution parity (all four money intents)', () => {
+  const RESOLVED_INVOICE_ID = '77777777-7777-4777-8777-777777777777';
+  const RESOLVED_ESTIMATE_ID = '88888888-8888-4888-8888-888888888888';
+
+  type ResolverInput = { tenantId: string; reference: string; kind: string };
+  function resolverFor(
+    impl: (input: ResolverInput) => Promise<unknown>,
+  ): import('../../src/ai/resolution/entity-resolver').EntityResolver {
+    return { resolve: vi.fn(impl) } as unknown as import('../../src/ai/resolution/entity-resolver').EntityResolver;
+  }
+
+  function buildResolverApp(
+    gateway: LLMGateway,
+    proposalRepo: InMemoryProposalRepository,
+    entityResolver: import('../../src/ai/resolution/entity-resolver').EntityResolver,
+  ) {
+    const app = express();
+    app.use(express.json());
+    app.use((req: Request, _res: Response, next: NextFunction) => {
+      (req as AuthenticatedRequest).auth = {
+        userId: TEST_USER,
+        sessionId: 'sess-1',
+        tenantId: TEST_TENANT,
+        role: 'owner',
+      };
+      next();
+    });
+    app.use('/api/assistant', createAssistantRouter({ gateway, proposalRepo, entityResolver }));
+    return app;
+  }
+
+  const resolvedInvoiceResolver = () =>
+    resolverFor(async ({ kind }) =>
+      kind === 'invoice'
+        ? {
+            kind: 'resolved',
+            candidate: { id: RESOLVED_INVOICE_ID, kind: 'invoice', label: 'INV-0042', score: 0.95 },
+          }
+        : { kind: 'skipped' },
+    );
+
+  const CASES: Array<{
+    intent: string;
+    phrase: string;
+    entities: Record<string, unknown>;
+    resolver: () => import('../../src/ai/resolution/entity-resolver').EntityResolver;
+    idKey: 'invoiceId' | 'estimateId';
+    resolvedId: string;
+  }> = [
+    {
+      intent: 'send_invoice',
+      phrase: 'Send the Henderson invoice',
+      entities: { jobReference: 'the Henderson invoice' },
+      resolver: resolvedInvoiceResolver,
+      idKey: 'invoiceId',
+      resolvedId: RESOLVED_INVOICE_ID,
+    },
+    {
+      intent: 'send_estimate',
+      phrase: 'Send the Khan estimate',
+      entities: { jobReference: 'the Khan estimate' },
+      resolver: () =>
+        resolverFor(async ({ kind }) =>
+          kind === 'estimate'
+            ? {
+                kind: 'resolved',
+                candidate: { id: RESOLVED_ESTIMATE_ID, kind: 'estimate', label: 'EST-0042', score: 0.95 },
+              }
+            : { kind: 'skipped' },
+        ),
+      idKey: 'estimateId',
+      resolvedId: RESOLVED_ESTIMATE_ID,
+    },
+    {
+      intent: 'send_payment_reminder',
+      phrase: 'Chase the Smith invoice',
+      entities: { jobReference: 'the Smith invoice' },
+      resolver: resolvedInvoiceResolver,
+      idKey: 'invoiceId',
+      resolvedId: RESOLVED_INVOICE_ID,
+    },
+    {
+      intent: 'apply_late_fee',
+      phrase: 'Add a twenty-five dollar late fee to the Smith invoice',
+      entities: { jobReference: 'the Smith invoice', amount: 2500 },
+      resolver: resolvedInvoiceResolver,
+      idKey: 'invoiceId',
+      resolvedId: RESOLVED_INVOICE_ID,
+    },
+  ];
+
+  for (const c of CASES) {
+    it(`${c.intent}: the resolved ${c.idKey} survives dropUnverifiedIds (verifiedIds) and approval unblocks`, async () => {
+      const gateway = scriptedGateway([
+        JSON.stringify({ intentType: c.intent, confidence: 0.9, extractedEntities: c.entities }),
+      ]);
+      const proposalRepo = new InMemoryProposalRepository();
+      const app = buildResolverApp(gateway, proposalRepo, c.resolver());
+
+      const res = await request(app)
+        .post('/api/assistant/chat')
+        .send({ messages: [{ role: 'user', content: c.phrase }] });
+
+      expect(res.status).toBe(200);
+      const persisted = await proposalRepo.findByTenant(TEST_TENANT);
+      expect(persisted).toHaveLength(1);
+      expect(persisted[0].proposalType).toBe(c.intent);
+      // The resolved id is ON the persisted payload — it was NOT stripped by
+      // dropUnverifiedIds even though it never appears in the operator text.
+      expect(persisted[0].payload[c.idKey]).toBe(c.resolvedId);
+      // …because the route stamped it into the verifiedIds allowlist from
+      // its OWN resolver call (never from classifier output).
+      const sc = persisted[0].sourceContext as Record<string, unknown>;
+      expect((sc.verifiedIds as Record<string, unknown>)[c.idKey]).toBe(c.resolvedId);
+      // Gate lifted…
+      expect(res.body.message.proposal.missingFields).toBeUndefined();
+      // …but money/comms class still NEVER auto-approves from drafting: the
+      // proposal waits in ready_for_review and a human tap approves it.
+      expect(persisted[0].status).toBe('ready_for_review');
+      const approved = await approveProposal(
+        proposalRepo,
+        TEST_TENANT,
+        persisted[0].id,
+        TEST_USER,
+        'owner',
+      );
+      expect(approved.status).toBe('approved');
+    });
+  }
+
+  it('an AMBIGUOUS reference keeps the gate (no guess, approval stays blocked)', async () => {
+    const gateway = scriptedGateway([
+      JSON.stringify({
+        intentType: 'send_invoice',
+        confidence: 0.9,
+        extractedEntities: { jobReference: 'the Henderson invoice' },
+      }),
+    ]);
+    const proposalRepo = new InMemoryProposalRepository();
+    const ambiguous = resolverFor(async () => ({
+      kind: 'ambiguous',
+      candidates: [
+        { id: 'inv-1', kind: 'invoice', label: 'INV-0042', score: 0.9 },
+        { id: 'inv-2', kind: 'invoice', label: 'INV-0043', score: 0.88 },
+      ],
+    }));
+    const app = buildResolverApp(gateway, proposalRepo, ambiguous);
+
+    const res = await request(app)
+      .post('/api/assistant/chat')
+      .send({ messages: [{ role: 'user', content: 'Send the Henderson invoice' }] });
+
+    expect(res.status).toBe(200);
+    const persisted = await proposalRepo.findByTenant(TEST_TENANT);
+    expect(persisted).toHaveLength(1);
+    expect(persisted[0].payload.invoiceId).toBeUndefined();
+    expect((persisted[0].sourceContext as Record<string, unknown> | undefined)?.verifiedIds)
+      .toBeUndefined();
+    await expect(
+      approveProposal(proposalRepo, TEST_TENANT, persisted[0].id, TEST_USER, 'owner'),
+    ).rejects.toThrow(/unfilled required fields/);
+  });
+
+  it('a resolver ERROR is failure-soft — drafting proceeds gated, exactly as with no resolver', async () => {
+    const gateway = scriptedGateway([
+      JSON.stringify({
+        intentType: 'send_invoice',
+        confidence: 0.9,
+        extractedEntities: { jobReference: 'the Henderson invoice' },
+      }),
+    ]);
+    const proposalRepo = new InMemoryProposalRepository();
+    const throwing = resolverFor(async () => {
+      throw new Error('pg down');
+    });
+    const app = buildResolverApp(gateway, proposalRepo, throwing);
+
+    const res = await request(app)
+      .post('/api/assistant/chat')
+      .send({ messages: [{ role: 'user', content: 'Send the Henderson invoice' }] });
+
+    expect(res.status).toBe(200);
+    const persisted = await proposalRepo.findByTenant(TEST_TENANT);
+    expect(persisted).toHaveLength(1);
+    expect(persisted[0].payload.invoiceId).toBeUndefined();
+    expect(res.body.message.proposal.missingFields).toContain('invoiceId');
+  });
+});

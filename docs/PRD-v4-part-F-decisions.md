@@ -4,12 +4,15 @@ Companion to `docs/PRD-v4-part-E-state.md`. Each entry below was recorded by the
 run (`projects/rivet-voice-19/`) under its never-ask rule: the run makes the call, logs it here
 and in the run log, and continues. Entries marked **PROPOSED** are recommendations awaiting
 product-owner ratification — per run-log #24 of Part E, no requirement is scored green on the
-strength of an unratified entry. Entries marked **RECORDED** are scoping decisions inside the
-run's own mandate (they do not amend a requirement's text).
+strength of an unratified entry. Entries marked **RATIFIED** were PROPOSED entries the product
+owner has since ratified; the ratification note on each records the date, channel, and the
+ratified reading (score flips remain the run's own re-measurement business, never this
+register's). Entries marked **RECORDED** are scoping decisions inside the run's own mandate
+(they do not amend a requirement's text).
 
 ---
 
-## F-1 · B9.1 issuance semantics — PROPOSED (awaiting ratification)
+## F-1 · B9.1 issuance semantics — RATIFIED (2026-08-01)
 
 **Question:** does "invoice issued from a spoken sentence" mean single-utterance-to-issued, or
 draft-then-issue with two taps?
@@ -28,7 +31,16 @@ this entry is ratified as the two-step reading AND the issue-leg proof (cross-te
 exists. If the product owner instead demands single-utterance issuance, B9.1 stays red until that
 is built, and the run target drops by one — reported honestly.
 
-## F-2 · B1.18 lock-as-tap amendment — PROPOSED (awaiting ratification)
+**Ratified 2026-08-01** — product owner, via AskUserQuestion (recorded as `docs/decisions.md`
+D-023): the TWO-STEP reading, exactly as recommended. One utterance + one tap yields an
+approvable draft; a second utterance ("issue it") + a second tap issues it. Single-utterance
+auto-issue is explicitly NOT built — it remains a NEW capability requiring its own risk review.
+The issue-leg cross-tenant negative this entry's rung-5 condition demands exists at
+`packages/api/test/integration/issue-invoice-conversation-resolution.test.ts` (tenant B can
+neither resolve nor issue tenant A's invoice; the invoice row stays `draft` under tenant A).
+The score flip itself belongs to the run's re-measurement process, not this register.
+
+## F-2 · B1.18 lock-as-tap amendment — RATIFIED (2026-08-01)
 
 **Question:** B1.18's text reads "brand voice captured, then locked." Phase 1 makes capture
 speakable. May "locked" be satisfied by the existing tap-only lock?
@@ -41,6 +53,17 @@ act that freezes the tenant's outbound identity; the same theory as D-013's appr
 **Scoring consequence:** B1.18 scores rung 5 only if this amendment is ratified. Rejected →
 lock-by-voice becomes an implied build (its own risk review — an utterance that irreversibly
 freezes config), B1.18 stays red, target drops by one — reported honestly.
+
+**Ratified 2026-08-01** — product owner, via AskUserQuestion (recorded as `docs/decisions.md`
+D-023): B1.18 is amended to "captured by voice; locked by tap." Lock stays tap-only. The
+negative test the recommendation promised is in place at three levels — task
+(`packages/api/test/ai/tasks/brand-voice-task.test.ts` AC-4: the payload contract has no
+lock-shaped field), execution handler
+(`packages/api/test/proposals/execution/brand-voice-handler.test.ts`: freeText-only refusal +
+adversarial stray `locked`/`brand_voice_locked` keys stripped), and Postgres integration
+(`packages/api/test/integration/update-brand-voice-voice-execution.test.ts`: a spoken "lock my
+brand voice" leaves the real `tenant_settings.brand_voice_locked` column false — executed
+effect, not payload shape). The score flip belongs to the run's re-measurement process.
 
 ## F-3 · B5.5 "on my way" as a direct audited status act — RECORDED
 

@@ -36,9 +36,10 @@
  *      byte-identical for cassette hashes, and keeping an anonymous caller
  *      away from owner reports). Neither applies to a signed-in operator on
  *      their own dashboard. Chat instead uses the DB-authoritative RBAC gate
- *      the shared module already enforces (`reports:view`), which fails
- *      CLOSED — a technician asking for revenue gets the refusal copy, not
- *      data.
+ *      the shared module already enforces (`LOOKUP_REQUIRED_PERMISSION` —
+ *      `reports:view` for the owner reports, `settings:view` for the
+ *      catalog, `customers:view` for leads), which fails CLOSED — a
+ *      technician asking for revenue gets the refusal copy, not data.
  *   3. Response shape + failure copy. The phone path speaks a TTS string and
  *      degrades every error to "let me get a person to help". Chat returns
  *      the assistant envelope and must make a failure VISIBLE rather than
@@ -51,6 +52,7 @@ import type { EntityCandidate, EntityResolver } from '../resolution/entity-resol
 import {
   executeLookupAnswer,
   CUSTOMER_SCOPED_LOOKUP_INTENTS,
+  LOOKUP_REQUIRED_PERMISSION,
   type SharedLookupRepos,
   type VoiceLookupAnswerDeps,
 } from '../../workers/voice-lookup-answer';
@@ -180,8 +182,8 @@ export interface DispatchAssistantLookupInput {
  * Execute a `lookup_*` intent for the assistant-chat surface.
  *
  * Returns `null` ONLY when this intent has no wired skill on this surface
- * (`lookup_leads` / `lookup_catalog`, or a deployment missing the repos) —
- * the caller then keeps today's fall-through. Every other outcome, INCLUDING
+ * (a deployment missing the repos for it) — the caller then keeps today's
+ * fall-through. Every other outcome, INCLUDING
  * a skill failure, returns a reply: a lookup must never silently become a
  * generic LLM answer, because that is precisely how "it isn't pulling up the
  * information I'm asking for" looks to an operator.
@@ -274,7 +276,9 @@ export async function dispatchAssistantLookup(
         content: execution.answer.summary,
         reasoning:
           execution.answer.result === 'refused'
-            ? 'Owner-level report refused — your role lacks reports:view.'
+            ? `Permission-gated lookup refused — your role lacks ${
+                LOOKUP_REQUIRED_PERMISSION.get(intent) ?? 'the required permission'
+              }.`
             : `Answered from your ${intent.replace(/^lookup_/, '').replace(/_/g, ' ')} records (read-only lookup).`,
       },
     };

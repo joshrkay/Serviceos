@@ -27,11 +27,12 @@
  *     `money` rows; the CLIENT formats. Never floats, never pre-formatted
  *     currency strings.
  *   - Dates render in the tenant timezone (threaded by the caller).
- *   - Authorization: owner-grade lookups (lookup_revenue,
- *     lookup_job_profit, lookup_pending_items, lookup_digest — E3/E4/E6/D3)
- *     check the ASKING ACTOR's DB-authoritative role and FAIL CLOSED to a
- *     refusal answer (copy, never data) when the role is missing or lacks
- *     `reports:view` (technicians).
+ *   - Authorization: permission-gated lookups (`LOOKUP_REQUIRED_PERMISSION`
+ *     — the owner-grade reports on `reports:view`, plus U7's lookup_leads
+ *     on `customers:view` and lookup_catalog on `settings:view`, each
+ *     mirroring the web route that exposes the same data) check the ASKING
+ *     ACTOR's DB-authoritative role and FAIL CLOSED to a refusal answer
+ *     (copy, never data) when the role is missing or lacks the permission.
  *   - Analytics: every skill call passes `lookupEvents` (keyed by the
  *     caller-supplied `sessionId`, which must be a UUID) so every surface
  *     writes the same `lookup_events` rows telephony does.
@@ -44,7 +45,7 @@ import type {
   VoiceLookupAnswer,
 } from '@ai-service-os/shared';
 import { voiceLookupAnswerSchema, MAX_VOICE_ANSWER_ROWS } from '@ai-service-os/shared';
-import { hasPermission, isValidRole } from '../auth/rbac';
+import { hasPermission, isValidRole, type Permission } from '../auth/rbac';
 import type { IntentType } from '../ai/orchestration/intent-classifier';
 import type { JobRepository } from '../jobs/job';
 import type { AppointmentRepository } from '../appointments/appointment';
@@ -58,6 +59,8 @@ import type { DailyDigestRepository } from '../digest/digest-service';
 import type { DunningConfigRepository } from '../invoices/dunning-config';
 import type { TimeEntryRepository } from '../time-tracking/time-entry';
 import type { ExpenseRepository } from '../expenses/expense';
+import type { LeadRepository } from '../leads/lead';
+import type { CatalogItemRepository } from '../catalog/catalog-item';
 import type { SettingsRepository } from '../settings/settings';
 import type { LookupEventService } from '../lookup-events/lookup-event-service';
 import type { AvailabilityFinder } from '../ai/tasks/availability-finder';
@@ -79,17 +82,34 @@ import { lookupJobProfit } from '../ai/skills/lookup-job-profit';
 import { lookupDayOverview } from '../ai/skills/lookup-day-overview';
 import { lookupDigest } from '../ai/skills/lookup-digest';
 import { lookupPendingItems } from '../ai/skills/lookup-pending-items';
+import { lookupLeads } from '../ai/skills/lookup-leads';
+import { lookupCatalog } from '../ai/skills/lookup-catalog';
 
 /**
- * Owner-grade lookups (E3/E4/E6/D3): tenant-wide financial / operational
- * reporting. Gated on the memo creator's role via `reports:view` —
- * owners and dispatchers hold it; technicians get a refusal answer.
+ * Permission-gated lookups: the DB-authoritative permission the ASKING
+ * ACTOR must hold, checked against their resolved role and FAILING CLOSED
+ * to a refusal answer. Each entry mirrors the web route exposing the same
+ * data, so voice never reads out what the screen would refuse:
+ *   - the owner-grade reports (E3/E4/E6/D3) — `reports:view`
+ *     (routes/reports.ts); owners and dispatchers hold it, technicians
+ *     get the refusal copy.
+ *   - `lookup_leads` (U7) — `customers:view` (GET /api/leads); every role
+ *     holds it today, so the gate only bites when the role is unresolvable.
+ *   - `lookup_catalog` (U7) — `settings:view` (GET /api/catalog-items);
+ *     technicians cannot browse the price book on screen, so not by voice
+ *     either. (Telephony gates the same skill on `ownerSession` caller-ID
+ *     identity instead, because its callers include CUSTOMERS.)
  */
-export const OWNER_GRADE_LOOKUP_INTENTS: ReadonlySet<IntentType> = new Set<IntentType>([
-  'lookup_revenue',
-  'lookup_job_profit',
-  'lookup_pending_items',
-  'lookup_digest',
+export const LOOKUP_REQUIRED_PERMISSION: ReadonlyMap<IntentType, Permission> = new Map<
+  IntentType,
+  Permission
+>([
+  ['lookup_revenue', 'reports:view'],
+  ['lookup_job_profit', 'reports:view'],
+  ['lookup_pending_items', 'reports:view'],
+  ['lookup_digest', 'reports:view'],
+  ['lookup_leads', 'customers:view'],
+  ['lookup_catalog', 'settings:view'],
 ]);
 
 /**
@@ -126,6 +146,10 @@ export interface VoiceLookupAnswerDeps {
   dunningConfigRepo?: DunningConfigRepository;
   timeEntryRepo?: TimeEntryRepository;
   expenseRepo?: ExpenseRepository;
+  /** U7 — `lookup_leads` (tenant lead pipeline; mirrors GET /api/leads). */
+  leadRepo?: LeadRepository;
+  /** U7 — `lookup_catalog` (price book; mirrors GET /api/catalog-items). */
+  catalogRepo?: CatalogItemRepository;
   /** Full settings repo — lookup_job_profit reads the tenant labor rate. */
   settingsRepo?: SettingsRepository;
   /** P11-001 analytics table writer — the memo path now records rows too. */
@@ -134,7 +158,7 @@ export interface VoiceLookupAnswerDeps {
    * DB-authoritative role of the ASKING ACTOR — the memo creator
    * (voice_recordings.created_by) on the worker path, the authenticated
    * operator (req.auth.userId) on the assistant-chat path. Both are Clerk
-   * subjects — resolve like `createAuthorizationLoader`. Owner-grade
+   * subjects — resolve like `createAuthorizationLoader`. Permission-gated
    * lookups FAIL CLOSED to a refusal when absent/unresolvable.
    */
   resolveMemberRole?: (tenantId: string, userId: string) => Promise<string | null>;
@@ -191,6 +215,19 @@ export type LookupExecution =
 
 const REFUSAL_SUMMARY =
   "That's an owner-level report. Ask an owner or dispatcher on your team to pull it up.";
+/** lookup_catalog (`settings:view`) — technicians can't browse the price book. */
+const CATALOG_REFUSAL_SUMMARY =
+  'The service catalog is an office-level view. Ask an owner or dispatcher on your team to pull it up.';
+/** lookup_leads (`customers:view`) — only reachable when the role is unresolvable. */
+const LEADS_REFUSAL_SUMMARY =
+  "I couldn't verify your access to the lead pipeline. Ask an owner or dispatcher on your team to pull it up.";
+
+/** Honest per-intent refusal copy — never data, never a fabricated answer. */
+function refusalSummary(intent: IntentType): string {
+  if (intent === 'lookup_catalog') return CATALOG_REFUSAL_SUMMARY;
+  if (intent === 'lookup_leads') return LEADS_REFUSAL_SUMMARY;
+  return REFUSAL_SUMMARY;
+}
 
 function buildAnswer(
   intent: IntentType,
@@ -259,8 +296,9 @@ export async function executeLookupAnswer(
 ): Promise<LookupExecution> {
   const { tenantId, sessionId, intent, customerId, timezone, now } = input;
 
-  // ── Authorization gate (owner-grade lookups fail closed) ────────────────
-  if (OWNER_GRADE_LOOKUP_INTENTS.has(intent)) {
+  // ── Authorization gate (permission-gated lookups fail closed) ───────────
+  const requiredPermission = LOOKUP_REQUIRED_PERMISSION.get(intent);
+  if (requiredPermission) {
     let role: string | null = null;
     if (deps.resolveMemberRole && input.actorId) {
       try {
@@ -269,8 +307,8 @@ export async function executeLookupAnswer(
         role = null; // fail closed — refusal, never data
       }
     }
-    if (!role || !isValidRole(role) || !hasPermission(role, 'reports:view')) {
-      return { kind: 'answer', answer: buildAnswer(intent, 'refused', REFUSAL_SUMMARY) };
+    if (!role || !isValidRole(role) || !hasPermission(role, requiredPermission)) {
+      return { kind: 'answer', answer: buildAnswer(intent, 'refused', refusalSummary(intent)) };
     }
   }
 
@@ -669,8 +707,42 @@ export async function executeLookupAnswer(
         return { kind: 'answer', answer: buildAnswer(intent, r.status, r.summary, rows) };
       }
 
-      // lookup_leads / lookup_catalog are not E-lane workflows (no memo
-      // answer surface planned) — keep today's skip semantics.
+      // U7 — operator-surface parity for the two tenant-scoped lookups
+      // telephony already answers. Same shared skills the twilio-adapter
+      // calls (`ai/skills/lookup-leads`, `ai/skills/lookup-catalog`) —
+      // one implementation, three surfaces.
+      case 'lookup_leads': {
+        if (!deps.leadRepo) return { kind: 'unsupported' };
+        const r = await lookupLeads(
+          { tenantId, sessionId },
+          { leadRepo: deps.leadRepo, ...events },
+        );
+        if (r.status === 'error') return { kind: 'failed', error: r.data.error };
+        const rows: VoiceAnswerRow[] =
+          r.status === 'found' ? [count('Open leads', r.data.openCount)] : [];
+        return { kind: 'answer', answer: buildAnswer(intent, r.status, r.summary, rows) };
+      }
+
+      case 'lookup_catalog': {
+        if (!deps.catalogRepo) return { kind: 'unsupported' };
+        const r = await lookupCatalog(
+          { tenantId, sessionId },
+          { catalogRepo: deps.catalogRepo, ...events },
+        );
+        if (r.status === 'error') return { kind: 'failed', error: r.data.error };
+        const rows: VoiceAnswerRow[] =
+          r.status === 'found'
+            ? [
+                count('Catalog items', r.data.count),
+                // The catalog's exact integer cents — the CLIENT formats.
+                ...r.data.items.slice(0, 3).map((i) => money(i.name, i.unitPriceCents)),
+              ]
+            : [];
+        return { kind: 'answer', answer: buildAnswer(intent, r.status, r.summary, rows) };
+      }
+
+      // Not a lookup this module answers (callers gate on isLookupIntent) —
+      // keep the skip semantics.
       default:
         return { kind: 'unsupported' };
     }

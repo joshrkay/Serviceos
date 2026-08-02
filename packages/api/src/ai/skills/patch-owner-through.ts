@@ -255,6 +255,10 @@ export async function patchOwnerThrough(
     ? buildVoicemailTwiml({
         shopName: input.shopName,
         recordingStatusCallback: input.voicemailRecordingCallbackUrl,
+        // U9 — thread the caller-ID so the voicemail-status handler can
+        // attach a phone to the lead (this path has a live session, so
+        // tenant resolution doesn't need the dialed number).
+        ...(input.callerPhone ? { callerPhone: input.callerPhone } : {}),
       })
     : undefined;
 

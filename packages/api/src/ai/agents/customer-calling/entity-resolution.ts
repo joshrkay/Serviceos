@@ -18,14 +18,12 @@ import type {
   EntityKind,
 } from '../../resolution/entity-resolver';
 import type { ExtractedEntities } from '../../orchestration/intent-classifier';
+import { resolveDateTime } from '../../scheduling/resolve-datetime';
+import { isRuntimeTimezone } from '../../../shared/timezone';
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const INV_NUMBER_RE = /^INV-\d+$/i;
 const EST_NUMBER_RE = /^EST-\d+$/i;
-
-const WEEKDAYS: Record<string, number> = {
-  sunday: 0, monday: 1, tuesday: 2, wednesday: 3, thursday: 4, friday: 5, saturday: 6,
-};
 
 const GENERIC_CUSTOMER_REFS = new Set([
   'our customer', 'the customer', 'a customer', 'customer', 'them', 'that customer', 'this customer',
@@ -97,6 +95,12 @@ const JOB_REF_INTENTS = new Set([
   'add_note',
   'notify_delay',
   'request_feedback',
+  // U3 (B7.8) — "$40 in parts for the Henderson job": resolve the spoken
+  // jobReference → jobId so the logged expense keeps its job link and job
+  // P&L (lookup_job_profit) counts it. jobId is OPTIONAL on the expense
+  // contract, so an unresolved (or absent) reference still logs the expense
+  // unlinked — resolution only ever ADDS the link, never gates the capture.
+  'log_expense',
 ]);
 
 const SCHEDULING_CREATE_INTENTS = new Set(['create_appointment', 'create_booking']);
@@ -106,6 +110,15 @@ const APPOINTMENT_REF_INTENTS = new Set([
   'reschedule_appointment',
   'confirm_appointment',
   'reassign_appointment',
+  // U2 (B7.10) — crew add/remove name an appointment ("add Jake to the 2pm
+  // tomorrow"). Route the spoken reference through the same appointment
+  // resolver reassign uses; a unique match rides
+  // existingEntities.appointmentId into the crew task handlers, anything
+  // else keeps their review-time gate. Deliberately NOT added to
+  // APPOINTMENT_JOB_FALLBACK_INTENTS — the sticky-job fallback stays scoped
+  // to the intents it was measured on (SCH-03).
+  'add_crew_member',
+  'remove_crew_member',
 ]);
 
 /**
@@ -204,48 +217,55 @@ export interface ParsedWindow {
 }
 
 /**
- * Parse common dispatcher datetime phrasings relative to `now`:
- * "today/tomorrow/next tuesday/this friday/tuesday" + "at 2 PM" / "at 14:30".
- * Returns undefined when nothing parseable is found — never guesses.
+ * U4 (Part E punch #1) — per-session inputs for spoken-datetime resolution.
+ * Threaded by the two live-call entry points (create-voice-turn-processor's
+ * `resolveTurnEntities` and InAppVoiceAdapter's `resolveEntities`), each of
+ * which resolves the tenant settings ONCE per session.
  */
-export function parseNaturalDatetime(desc: string, now: Date = new Date(), durationMinutes = 60): ParsedWindow | undefined {
-  const text = desc.toLowerCase();
+export interface SchedulingResolutionOptions {
+  /**
+   * Tenant IANA timezone (`tenant_settings.timezone`). REQUIRED for any
+   * spoken time to resolve: absent or invalid ⇒ the ISO fields stay
+   * unresolved so the proposal gates/refuses downstream (B5.5 precedent —
+   * "refuse a service day with no tenant zone"), NEVER a silent UTC or
+   * product-default parse. The July timezone fixes covered the recorded-memo
+   * and reschedule task paths; this module was the last one parsing spoken
+   * times in a hardcoded UTC frame (docs/PRD-v4-part-E-state.md).
+   */
+  timezone?: string;
+  /** Test seam for "now"; defaults to the wall clock inside resolveDateTime. */
+  now?: Date;
+}
 
-  let dayOffset: number | undefined;
-  if (/\btoday\b/.test(text)) dayOffset = 0;
-  else if (/\btomorrow\b/.test(text)) dayOffset = 1;
-  else {
-    const wd = Object.keys(WEEKDAYS).find((w) => text.includes(w));
-    if (wd) {
-      const target = WEEKDAYS[wd];
-      const current = now.getUTCDay();
-      let ahead = (target - current + 7) % 7;
-      if (ahead === 0) ahead = 7;
-      dayOffset = ahead;
-    }
-  }
-
-  const timeMatch = text.match(/\bat\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\b/);
-  if (dayOffset === undefined && !timeMatch) return undefined;
-
-  let hour = 9;
-  let minute = 0;
-  if (timeMatch) {
-    hour = parseInt(timeMatch[1], 10);
-    minute = timeMatch[2] ? parseInt(timeMatch[2], 10) : 0;
-    const meridiem = timeMatch[3];
-    if (meridiem === 'pm' && hour < 12) hour += 12;
-    if (meridiem === 'am' && hour === 12) hour = 0;
-    if (hour > 23 || minute > 59) return undefined;
-  }
-
-  const start = new Date(Date.UTC(
-    now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + (dayOffset ?? 0),
-    hour, minute, 0, 0,
-  ));
-  if (start.getTime() <= now.getTime()) start.setUTCDate(start.getUTCDate() + 1);
-  const end = new Date(start.getTime() + durationMinutes * 60_000);
-  return { scheduledStart: start.toISOString(), scheduledEnd: end.toISOString() };
+/**
+ * U4 — resolve a spoken datetime phrase against the TENANT's zone via the
+ * SAME `resolveDateTime` the recorded-memo path (create-appointment-task,
+ * RescheduleAppointmentTaskHandler) uses, so the live-call and memo entry
+ * points can never disagree on what "Thursday at 2pm" means. Returns
+ * undefined when no verified tenant zone is available or the phrase doesn't
+ * parse — the fields stay absent, never guessed (replaces the old
+ * `parseNaturalDatetime`, which did UTC-frame arithmetic regardless of the
+ * tenant's zone).
+ */
+function resolveSpokenWindow(
+  desc: string,
+  opts: SchedulingResolutionOptions | undefined,
+): ParsedWindow | undefined {
+  const timezone =
+    typeof opts?.timezone === 'string' && isRuntimeTimezone(opts.timezone.trim())
+      ? opts.timezone.trim()
+      : undefined;
+  // NO tenant zone ⇒ no resolution. `resolveDateTime` itself falls back to a
+  // product-default zone when handed an invalid/absent one, so the gate MUST
+  // sit here: a Phoenix tenant's "2pm" must never book at a default zone's
+  // 2pm (the exact create-side bug the July fixes closed elsewhere).
+  if (!timezone) return undefined;
+  const resolved = resolveDateTime(desc, {
+    timezone,
+    ...(opts?.now ? { now: opts.now } : {}),
+  });
+  if (!resolved.ok) return undefined;
+  return { scheduledStart: resolved.startUtc, scheduledEnd: resolved.endUtc };
 }
 
 export interface SchedulingEntityResolution {
@@ -431,6 +451,12 @@ export async function resolveSchedulingEntities(
    * appointment reference fails to parse as a date.
    */
   stickyJobId?: string,
+  /**
+   * U4 — tenant timezone (+ optional clock seam) for spoken-datetime
+   * resolution. Without a verified zone the ISO datetime fields stay
+   * unresolved (see resolveSpokenWindow) — never a silent UTC parse.
+   */
+  opts?: SchedulingResolutionOptions,
 ): Promise<SchedulingEntityResolution> {
   const refs: Record<string, string> = {};
 
@@ -450,7 +476,7 @@ export async function resolveSchedulingEntities(
     ? entities.dateTimeDescription
     : typeof entities.datetime === 'string' ? entities.datetime : undefined;
   if (dt && typeof entities.scheduledStart !== 'string') {
-    const win = parseNaturalDatetime(dt);
+    const win = resolveSpokenWindow(dt, opts);
     if (win) {
       refs.scheduledStart = win.scheduledStart;
       refs.scheduledEnd = win.scheduledEnd;
@@ -464,15 +490,16 @@ export async function resolveSchedulingEntities(
   // `newScheduledEnd`. Without this the phrase reached the proposal as raw
   // free text and every voice reschedule died at execution with 'Payload must
   // include a valid newScheduledStart'. Deterministic and non-guessing: the
-  // SAME `parseNaturalDatetime` the booking window above uses; an unparseable
-  // phrase leaves the ISO fields absent so the proposal fails its contract
-  // rather than mis-booking (the operator-side RescheduleAppointmentTaskHandler
-  // takes the identical "leave them missing" stance).
+  // SAME `resolveSpokenWindow` (tenant zone, U4) the booking window above
+  // uses; an unparseable phrase — or an unconfigured tenant zone — leaves the
+  // ISO fields absent so the proposal fails its contract rather than
+  // mis-booking (the operator-side RescheduleAppointmentTaskHandler takes the
+  // identical "leave them missing" stance).
   const newDt = typeof entities.newDateTimeDescription === 'string'
     ? entities.newDateTimeDescription
     : undefined;
   if (newDt && typeof entities.newScheduledStart !== 'string') {
-    const win = parseNaturalDatetime(newDt);
+    const win = resolveSpokenWindow(newDt, opts);
     if (win) {
       refs.newScheduledStart = win.scheduledStart;
       refs.newScheduledEnd = win.scheduledEnd;

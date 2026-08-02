@@ -54,6 +54,13 @@ import type { TaskHandler } from '../ai/tasks/task-handlers';
 // B4 — issue_invoice joined this shared registry too (see
 // HandlerRegistryDeps.proposalRepo in ai/orchestration/handler-registry.ts).
 import { buildTaskHandlers } from '../ai/orchestration/handler-registry';
+// U1 (voice back-office workflows) — chat-surface parity with the voice
+// worker's P8 pre-draft entity resolution: the SAME intent-conditioned
+// resolver the voice-action-router runs (annotateResolvedEntities) now runs
+// here before drafting, so "send the Henderson invoice" typed into chat
+// resolves to a verified invoiceId exactly as the spoken memo does.
+import { resolveVoiceEntityReferences } from '../ai/agents/customer-calling/entity-resolution';
+import type { EntityResolver } from '../ai/resolution/entity-resolver';
 import type { InvoiceRepository } from '../invoices/invoice';
 import type { CatalogItemRepository } from '../catalog/catalog-item';
 import type { EstimateRepository } from '../estimates/estimate';
@@ -419,6 +426,19 @@ export interface AssistantRouterDeps {
    * booking at a guessed offset.
    */
   tenantTimezoneResolver?: (tenantId: string) => Promise<string | undefined>;
+  /**
+   * U1 — the SAME tenant-scoped entity resolver the voice-action-router uses
+   * (app.ts wires `sharedEntityResolver`: alias-first → pg_trgm, τ_ent=0.80).
+   * When present, both drafting paths run intent-conditioned resolution
+   * BEFORE the task handler, thread verified ids onto `existingEntities`
+   * (the seam the task handlers already consume on the voice path), and
+   * stamp them into `sourceContext.verifiedIds` so `dropUnverifiedIds`
+   * preserves them — resolver output is a DB lookup, verifiable by
+   * construction (see the B4 security note on that function). Optional and
+   * failure-soft: absent/ambiguous/not-found/error ⇒ no ids threaded ⇒ the
+   * handlers keep today's gated drafting.
+   */
+  entityResolver?: EntityResolver;
 }
 
 export type AssistantProposal = z.infer<typeof assistantProposalSchema>;
@@ -678,6 +698,66 @@ export function dropUnverifiedIds(
     if (verifiedIds && verifiedIds[key] === v) continue;
     delete payload[key];
   }
+}
+
+/**
+ * U1 — pre-draft entity resolution for the chat surface, mirroring the voice
+ * worker's `annotateResolvedEntities` (workers/voice-action-router.ts): run
+ * the intent-conditioned resolver over the classifier's free-text references
+ * and return ONLY the resolver-verified ids (annotation.resolved — never the
+ * classifier's own id-shaped output). Failure-soft by the worker's own
+ * convention: an ambiguous reference, a not_found, a missing resolver, or a
+ * resolver error all return `{}` so drafting proceeds exactly as it does
+ * today (gated missingFields + B2 candidates). Ambiguity on this surface
+ * stays a gated card with a candidate picker rather than a
+ * voice_clarification — the operator is already looking at a screen.
+ */
+async function resolveVerifiedIdsForDraft(
+  resolver: EntityResolver | undefined,
+  tenantId: string,
+  intent: string,
+  entities: Record<string, unknown> | undefined,
+): Promise<Record<string, string>> {
+  if (!resolver || !entities) return {};
+  try {
+    const annotation = await resolveVoiceEntityReferences(resolver, {
+      tenantId,
+      intent,
+      entities,
+    });
+    if (annotation.kind !== 'ok') return {};
+    const resolved: Record<string, string> = {};
+    for (const [key, value] of Object.entries(annotation.resolved)) {
+      if (typeof value === 'string' && value.length > 0) resolved[key] = value;
+    }
+    return resolved;
+  } catch {
+    return {};
+  }
+}
+
+/**
+ * U1 — record route-resolved ids on `sourceContext.verifiedIds` so
+ * `dropUnverifiedIds` preserves them (pattern: IssueInvoiceTaskHandler's
+ * rung-2 conversation-context resolution, ai/orchestration/task-router.ts).
+ * SECURITY: callers must only pass ids from `resolveVerifiedIdsForDraft`
+ * (a DB lookup) — never classifier/LLM output. A task handler's own
+ * repo-verified `verifiedIds` (e.g. send_estimate_nudge's liftGate) win on
+ * key collision; both sources are DB-verified so either value is safe.
+ */
+function stampVerifiedIds(
+  proposal: { sourceContext?: Record<string, unknown> },
+  verifiedIds: Record<string, string>,
+): void {
+  if (Object.keys(verifiedIds).length === 0) return;
+  const existing =
+    proposal.sourceContext?.verifiedIds && typeof proposal.sourceContext.verifiedIds === 'object'
+      ? (proposal.sourceContext.verifiedIds as Record<string, unknown>)
+      : {};
+  proposal.sourceContext = {
+    ...(proposal.sourceContext ?? {}),
+    verifiedIds: { ...verifiedIds, ...existing },
+  };
 }
 
 /**
@@ -1168,12 +1248,22 @@ async function generateAssistantReply(
             activeStandingInstructions,
             segClass.intentType,
           );
+          // U1 — voice-worker parity: resolve free-text references to
+          // verified tenant ids BEFORE drafting; the resolved ids ride
+          // `existingEntities` (the seam the task handlers consume) and are
+          // stamped into verifiedIds below so the scrub preserves them.
+          const segVerifiedIds = await resolveVerifiedIdsForDraft(
+            deps.entityResolver,
+            tenantId,
+            segClass.intentType,
+            segEntities,
+          );
           const { proposal } = await factory().handle({
             tenantId,
             userId,
             message: segment,
             conversationId,
-            existingEntities: segEntities,
+            existingEntities: { ...segEntities, ...segVerifiedIds },
             // Tenant zone for the scheduling handlers in this chain.
             ...timezoneContext,
             ...(segStandingInstructions
@@ -1181,6 +1271,7 @@ async function generateAssistantReply(
               : {}),
           });
           if (!proposal) continue;
+          stampVerifiedIds(proposal, segVerifiedIds);
           dropUnverifiedIds(proposal.payload, segment, segEntities, proposal.sourceContext);
           proposal.sourceContext = { ...(proposal.sourceContext ?? {}), chainId, chainStep: chainCards.length + 1 };
           // Dependency gate: steps after the first reference results that
@@ -1289,21 +1380,33 @@ async function generateAssistantReply(
           activeStandingInstructions,
           classification.intentType,
         );
+        const extractedEntities: Record<string, unknown> = {
+          ...(classification.extractedEntities ?? {}),
+        };
+        // U1 — voice-worker parity: resolve free-text references to verified
+        // tenant ids BEFORE drafting (see resolveVerifiedIdsForDraft).
+        const verifiedIds = await resolveVerifiedIdsForDraft(
+          deps.entityResolver,
+          tenantId,
+          classification.intentType,
+          extractedEntities,
+        );
         const { proposal } = await handler.handle({
           tenantId,
           userId,
           message: lastUserText,
           conversationId,
-          existingEntities: { ...(classification.extractedEntities ?? {}) },
+          existingEntities: { ...extractedEntities, ...verifiedIds },
           // Tenant zone — `create_appointment` resolves the spoken time
           // against it. Absent ⇒ the handler gates instead of guessing.
           ...timezoneContext,
           ...(standingInstructions ? { standingInstructions } : {}),
         });
+        stampVerifiedIds(proposal, verifiedIds);
         dropUnverifiedIds(
           proposal.payload,
           lastUserText,
-          { ...(classification.extractedEntities ?? {}) },
+          extractedEntities,
           proposal.sourceContext,
         );
         // A caller without the direct permission never gets a self-executing

@@ -590,9 +590,16 @@ describe('InboxPage', () => {
     await waitFor(() => {
       expect(screen.queryByText('Add another note')).not.toBeInTheDocument();
     });
+    // The reject endpoint REQUIRES a `reason` (rejectProposalBodySchema) —
+    // a body-less POST 400s. The inbox has no reason form, so it sends the
+    // surface as a constant reason.
     expect(apiFetch).toHaveBeenCalledWith(
       '/api/proposals/p-2/reject',
-      expect.objectContaining({ method: 'POST' }),
+      expect.objectContaining({
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ reason: 'Rejected from inbox' }),
+      }),
     );
   });
 

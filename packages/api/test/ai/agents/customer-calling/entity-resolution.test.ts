@@ -1,10 +1,10 @@
 import { describe, it, expect, vi } from 'vitest';
 import {
-  parseNaturalDatetime,
   planVoiceEntityLookups,
   resolveSchedulingEntities,
   resolveVoiceEntityReferences,
 } from '../../../../src/ai/agents/customer-calling/entity-resolution';
+import { resolveDateTime } from '../../../../src/ai/scheduling/resolve-datetime';
 import type { EntityResolver, EntityResolverResult } from '../../../../src/ai/resolution/entity-resolver';
 
 // VOX-52 regression (PR #665 review): the resolver rewrite must still carry the
@@ -35,57 +35,105 @@ describe('resolveSchedulingEntities — carries free-text classifier fields into
   });
 });
 
-// QA-2026-06-05 (SCH-02/03) — deterministic NL datetime parsing for the
-// calling agent's entity resolution. Fixed "now" so weekday math is stable.
-describe('parseNaturalDatetime', () => {
-  const now = new Date('2026-06-05T12:00:00Z'); // a Friday
+// U4 (Part E punch #1) — spoken datetimes resolve in the TENANT's zone via
+// the SAME `resolveDateTime` the recorded-memo path uses (the old
+// `parseNaturalDatetime` did UTC-frame arithmetic regardless of zone —
+// "the July timezone fixes missed this module"). Fixed "now" (a Monday) so
+// weekday math is deterministic.
+describe('resolveSchedulingEntities — tenant-timezone spoken datetimes (U4)', () => {
+  // Monday 2026-08-03 noon in America/Chicago (CDT, UTC-5).
+  const NOW = new Date('2026-08-03T17:00:00.000Z');
+  const TZ = 'America/Chicago';
 
-  it('parses "next Tuesday at 2 PM"', () => {
-    const w = parseNaturalDatetime('next Tuesday at 2 PM', now)!;
-    const start = new Date(w.scheduledStart);
-    expect(start.getUTCDay()).toBe(2); // Tuesday
-    expect(start.getUTCHours()).toBe(14);
-    expect(start.getTime()).toBeGreaterThan(now.getTime());
-    expect(new Date(w.scheduledEnd).getTime() - start.getTime()).toBe(60 * 60_000);
+  it('"Thursday at 2pm" for an America/Chicago tenant → 14:00 CT stored as UTC (19:00Z), matching the memo path exactly', async () => {
+    const res = await resolveSchedulingEntities(
+      undefined,
+      'tenant-1',
+      'create_appointment',
+      { dateTimeDescription: 'Thursday at 2pm' },
+      undefined,
+      { timezone: TZ, now: NOW },
+    );
+    expect(res.refs.scheduledStart).toBe('2026-08-06T19:00:00.000Z');
+    // Byte-identical to the recorded-memo path's resolver for the same
+    // utterance + tenant — the two entry points can no longer disagree.
+    const memo = resolveDateTime('Thursday at 2pm', { timezone: TZ, now: NOW });
+    expect(memo.ok).toBe(true);
+    if (!memo.ok) return;
+    expect(res.refs.scheduledStart).toBe(memo.startUtc);
+    expect(res.refs.scheduledEnd).toBe(memo.endUtc);
   });
 
-  it('parses "tomorrow at 9:30 am"', () => {
-    const w = parseNaturalDatetime('tomorrow at 9:30 am', now)!;
-    const start = new Date(w.scheduledStart);
-    expect(start.getUTCDate()).toBe(6);
-    expect(start.getUTCHours()).toBe(9);
-    expect(start.getUTCMinutes()).toBe(30);
+  it('DST boundary week: the same wall-clock hour lands on the NEW offset (CDT 19:00Z → CST 20:00Z)', async () => {
+    // Thursday 2026-10-29 noon CDT; "next Tuesday at 2pm" crosses the
+    // 2026-11-01 fall-back. 2pm CST is UTC-6 → 20:00Z, where a frozen-offset
+    // (or UTC-frame) parse would land an hour off.
+    const beforeFallBack = new Date('2026-10-29T17:00:00.000Z');
+    const res = await resolveSchedulingEntities(
+      undefined,
+      'tenant-1',
+      'create_appointment',
+      { dateTimeDescription: 'next Tuesday at 2pm' },
+      undefined,
+      { timezone: TZ, now: beforeFallBack },
+    );
+    expect(res.refs.scheduledStart).toBe('2026-11-03T20:00:00.000Z');
   });
 
-  it('bare weekday means the NEXT occurrence (never today)', () => {
-    const w = parseNaturalDatetime('friday at 1 pm', now)!;
-    const start = new Date(w.scheduledStart);
-    expect(start.getUTCDay()).toBe(5);
-    expect(start.getUTCDate()).toBe(12); // a week out, not today
+  it('NO tenant timezone → the spoken time stays UNRESOLVED (explicit refusal downstream, never silent UTC)', async () => {
+    const res = await resolveSchedulingEntities(
+      undefined,
+      'tenant-1',
+      'create_appointment',
+      { dateTimeDescription: 'Thursday at 2pm' },
+    );
+    expect(res.status).toBe('resolved');
+    expect(res.refs.scheduledStart).toBeUndefined();
+    expect(res.refs.scheduledEnd).toBeUndefined();
   });
 
-  it('time-only gets a future slot', () => {
-    const w = parseNaturalDatetime('at 8 am', now)!;
-    expect(new Date(w.scheduledStart).getTime()).toBeGreaterThan(now.getTime());
+  it('an INVALID timezone is treated as unconfigured — never falls back to a default zone', async () => {
+    const res = await resolveSchedulingEntities(
+      undefined,
+      'tenant-1',
+      'create_appointment',
+      { dateTimeDescription: 'Thursday at 2pm' },
+      undefined,
+      { timezone: 'Not/AZone', now: NOW },
+    );
+    expect(res.refs.scheduledStart).toBeUndefined();
   });
 
-  it('day-only defaults to a morning slot', () => {
-    const w = parseNaturalDatetime('next monday', now)!;
-    const start = new Date(w.scheduledStart);
-    expect(start.getUTCDay()).toBe(1);
-    expect(start.getUTCHours()).toBe(9);
+  it('reschedule\'s newDateTimeDescription takes the same tenant-zone path', async () => {
+    const res = await resolveSchedulingEntities(
+      undefined,
+      'tenant-1',
+      'reschedule_appointment',
+      { appointmentReference: 'APT-1', newDateTimeDescription: 'Thursday at 2pm' },
+      undefined,
+      { timezone: TZ, now: NOW },
+    );
+    expect(res.refs.newScheduledStart).toBe('2026-08-06T19:00:00.000Z');
+
+    const noTz = await resolveSchedulingEntities(
+      undefined,
+      'tenant-1',
+      'reschedule_appointment',
+      { appointmentReference: 'APT-1', newDateTimeDescription: 'Thursday at 2pm' },
+    );
+    expect(noTz.refs.newScheduledStart).toBeUndefined();
   });
 
-  it('returns undefined for unparseable text (never guesses)', () => {
-    expect(parseNaturalDatetime('whenever works for you', now)).toBeUndefined();
-    expect(parseNaturalDatetime('at 27 pm', now)).toBeUndefined();
-  });
-
-  it('12 am / 12 pm edge cases', () => {
-    const noon = parseNaturalDatetime('tomorrow at 12 pm', now)!;
-    expect(new Date(noon.scheduledStart).getUTCHours()).toBe(12);
-    const midnight = parseNaturalDatetime('tomorrow at 12 am', now)!;
-    expect(new Date(midnight.scheduledStart).getUTCHours()).toBe(0);
+  it('unparseable text never guesses, even with a timezone', async () => {
+    const res = await resolveSchedulingEntities(
+      undefined,
+      'tenant-1',
+      'create_appointment',
+      { dateTimeDescription: 'whenever works for you' },
+      undefined,
+      { timezone: TZ, now: NOW },
+    );
+    expect(res.refs.scheduledStart).toBeUndefined();
   });
 });
 
@@ -164,6 +212,47 @@ describe('planVoiceEntityLookups — intent-conditioned operator references', ()
       displayName: 'New Person',
     });
     expect(lookups).toEqual([]);
+  });
+
+  // U2 (B7.10) — crew add/remove joined APPOINTMENT_REF_INTENTS: "add Jake
+  // to the 2pm tomorrow" plans BOTH the technician lookup (U1) and the
+  // appointment lookup (same order as reassign: technician before
+  // appointment, so the picker asks WHICH Jake before WHICH appointment).
+  it('plans technician + appointment lookups for add_crew_member', () => {
+    const lookups = planVoiceEntityLookups('add_crew_member', {
+      targetTechnicianName: 'Jake',
+      appointmentReference: 'the 2pm tomorrow',
+    });
+    expect(lookups).toEqual([
+      { kind: 'technician', reference: 'Jake', refKey: 'technicianId' },
+      { kind: 'appointment', reference: 'the 2pm tomorrow', refKey: 'appointmentId' },
+    ]);
+  });
+
+  // U3 (B7.8) — "$40 in parts for the Henderson job": log_expense joined
+  // JOB_REF_INTENTS so the spoken job reference resolves to a jobId and the
+  // expense keeps its P&L link.
+  it('plans a job lookup for log_expense', () => {
+    const lookups = planVoiceEntityLookups('log_expense', {
+      jobReference: 'the Henderson job',
+    });
+    expect(lookups).toEqual([
+      { kind: 'job', reference: 'the Henderson job', refKey: 'jobId' },
+    ]);
+  });
+
+  it('plans technician + appointment lookups for remove_crew_member (no sticky-job fallback)', () => {
+    const lookups = planVoiceEntityLookups(
+      'remove_crew_member',
+      { targetTechnicianName: 'Jake', appointmentReference: "Tuesday's job" },
+      'sticky-job-1',
+    );
+    // Crew intents are deliberately NOT in APPOINTMENT_JOB_FALLBACK_INTENTS,
+    // so the sticky jobId never rides the appointment lookup here.
+    expect(lookups).toEqual([
+      { kind: 'technician', reference: 'Jake', refKey: 'technicianId' },
+      { kind: 'appointment', reference: "Tuesday's job", refKey: 'appointmentId' },
+    ]);
   });
 });
 

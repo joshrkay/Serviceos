@@ -35,6 +35,14 @@ export class BatchInvoiceExecutionHandler implements ExecutionHandler {
 
   constructor(private readonly proposalRepo?: ProposalRepository) {}
 
+  // U8 — degrades to a synthetic-id passthrough (fans out nothing) without
+  // the proposal repo — see execute(). The boot guard (wiring-assertions.ts)
+  // fails boot when a pool is configured but this is false, so that branch is
+  // unreachable in a real deployment.
+  isFullyWired(): boolean {
+    return Boolean(this.proposalRepo);
+  }
+
   async execute(proposal: Proposal, context: ExecutionContext): Promise<ExecutionResult> {
     const jobs = proposal.payload.jobs as BatchJob[] | undefined;
     if (!Array.isArray(jobs) || jobs.length === 0) {

@@ -56,6 +56,15 @@ export class SendPaymentReminderExecutionHandler implements ExecutionHandler {
     private readonly now: () => Date = () => new Date(),
   ) {}
 
+  // U8 — degrades to an echo passthrough (reminds nobody) without the comms
+  // service — see execute(). The boot guard (wiring-assertions.ts) fails boot
+  // when a pool is configured but this is false, so an approved reminder can
+  // never report success while sending nothing in production. The dunning
+  // ledger is deliberately excluded (absent → documented legacy behavior).
+  isFullyWired(): boolean {
+    return Boolean(this.transactionalComms);
+  }
+
   async execute(
     proposal: Proposal,
     context: ExecutionContext,
