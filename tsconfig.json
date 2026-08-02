@@ -20,9 +20,9 @@
     }
   },
   "references": [
-    { "path": "./packages/shared" },
-    { "path": "./packages/api" },
-    { "path": "./packages/web" }
+    { "path": "./packages/shared/tsconfig.json" },
+    { "path": "./packages/api/tsconfig.json" },
+    { "path": "./packages/web/tsconfig.json" }
   ],
   "exclude": ["node_modules", "dist", "**/node_modules"]
 }

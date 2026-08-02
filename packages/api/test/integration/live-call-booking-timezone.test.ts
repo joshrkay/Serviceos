@@ -46,6 +46,7 @@ import { PgCustomerRepository } from '../../src/customers/pg-customer';
 import { PgLocationRepository } from '../../src/locations/pg-location';
 import { PgAuditRepository } from '../../src/audit/pg-audit';
 import { InMemoryVoiceSessionRepository } from '../../src/voice/voice-session';
+import { PgEntityResolver } from '../../src/ai/resolution/pg-entity-resolver';
 import { createVoiceActionRouterWorker } from '../../src/workers/voice-action-router';
 import { approveProposal } from '../../src/proposals/actions';
 import {
@@ -316,6 +317,13 @@ describe('Integration — U4 live-call booking resolves in the tenant timezone (
       ]),
       proposalRepo: memoProposalRepo,
       jobRepo,
+      // Production parity (app.ts wires sharedEntityResolver): the memo
+      // transcript names the customer as free text ("Dana Reyes"), and the
+      // REAL PgEntityResolver must resolve it to the seeded customer's UUID —
+      // without it the drafted payload has no customerId/jobId and the
+      // create_appointment execution handler refuses with "Payload must
+      // include a valid jobId".
+      entityResolver: new PgEntityResolver(pool),
       // Same source of truth the live-call leg used: the tenant's REAL
       // settings row.
       tenantSchedulingResolver: async (tenantId: string) => {

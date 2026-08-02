@@ -82,8 +82,11 @@ describe('Postgres integration — U9 voicemail replay idempotency', () => {
     // Real column values the route relies on — BOTH rows keep
     // source='inbound_call', which is what keeps voicemail provenance
     // UNTRUSTED (ratified U9 decision; fail-closed I13 classifier).
+    // duration_seconds is NUMERIC (src/db/schema.ts) — node-pg returns it as
+    // a string to preserve precision (production maps it via Number() in
+    // pg-voice.ts), so cast to int here to pin the stored VALUE.
     const rows = await pool.query(
-      `SELECT source, created_by, duration_seconds, recording_url
+      `SELECT source, created_by, duration_seconds::int AS duration_seconds, recording_url
          FROM voice_recordings
         WHERE tenant_id = $1 AND call_sid = $2
         ORDER BY created_by`,
