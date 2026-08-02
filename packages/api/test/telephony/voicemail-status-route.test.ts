@@ -12,13 +12,20 @@
  *     carrying the caller phone from the signed callback URL
  *   - replay idempotency for BOTH legs: a second delivery of the same
  *     RecordingSid creates no second lead and no second recording row
+ *   - CROSS-LEG collision (review fix): one call producing BOTH a live-leg
+ *     recording (/recording) AND a voicemail (/voicemail-status) yields
+ *     TWO voice_recordings rows in either arrival order — the voicemail
+ *     pipeline no longer silently no-ops when /recording lands first
+ *   - at-least-once transcription (review fix): a transient failure
+ *     answers 500 (Twilio retries) and the retry completes the pipeline
+ *     without duplicating the receipt-guarded lead; same for a failing
+ *     enqueue hook (errors now propagate)
  *   - after-hours case: no in-process session — tenant resolves via the
  *     To-number fallback minted onto the callback URL
  *   - unknown-caller voicemail still gets the lead + transcription enqueue
  *     (the owner gate lives at transcript completion, not here)
- *   - transcription-leg failure is failure-soft (lead survives, 200) and
- *     never leaks the Twilio auth token
- *   - legacy shape (no receipt store / storage) keeps notify-only behavior
+ *   - legacy shape (no receipt store / storage) keeps the historical
+ *     failure-soft 200 and notify-only behavior
  */
 import { describe, it, expect, vi } from 'vitest';
 import express from 'express';
@@ -102,7 +109,9 @@ interface VoiceRecordingRow {
 /**
  * Minimal pg.Pool stub mirroring recording-webhook.test.ts — just enough
  * surface for `recordInboundCall` (connect/query/release) including the
- * SELECT-by-(tenant, call_sid, source='inbound_call') idempotency probe.
+ * SELECT-by-(tenant, call_sid, recording_url) idempotency probe: the
+ * per-RECORDING identity (review fix), so the live-leg recording and the
+ * voicemail of one call are two rows while replays still dedupe.
  */
 class FakePool {
   public voiceRows: VoiceRecordingRow[] = [];
@@ -117,11 +126,13 @@ class FakePool {
         if (/SELECT id FROM voice_recordings/i.test(sql)) {
           const tenantId = params[0] as string;
           const callSid = params[1] as string;
+          const recordingUrl = params[2] as string;
           const match = this.voiceRows.find(
             (r) =>
               r.tenant_id === tenantId &&
               r.call_sid === callSid &&
-              r.source === 'inbound_call',
+              r.source === 'inbound_call' &&
+              r.recording_url === recordingUrl,
           );
           return { rows: match ? [{ id: match.id }] : [] };
         }
@@ -225,6 +236,12 @@ function buildHarness(opts: HarnessOptions = {}) {
               twilioAuthToken: TWILIO_AUTH_TOKEN,
             }
           : {}),
+        // Stubs for the /recording (live-leg) webhook so the cross-leg
+        // collision tests can fire both callbacks for one call.
+        options: {
+          fetchRecording: (async () => Buffer.from('ID3FAKECALLLEG')) as never,
+          uploadObject: (async () => undefined) as never,
+        },
       },
       voicemail: {
         ...(withReceiptStore ? { webhookEventRepo } : {}),
@@ -263,6 +280,21 @@ function signedVoicemailRequest(
   query = '',
 ) {
   const path = `/api/telephony/voicemail-status${query}`;
+  const url = `${PUBLIC_BASE_URL}${path}`;
+  const sig = twilio.getExpectedTwilioSignature(AUTH_TOKEN, url, params);
+  return request(app)
+    .post(path)
+    .set('X-Twilio-Signature', sig)
+    .type('form')
+    .send(params);
+}
+
+/** Signed POST to the live-leg /recording webhook (cross-leg tests). */
+function signedRecordingRequest(
+  app: express.Application,
+  params: Record<string, string>,
+) {
+  const path = '/api/telephony/recording';
   const url = `${PUBLIC_BASE_URL}${path}`;
   const sig = twilio.getExpectedTwilioSignature(AUTH_TOKEN, url, params);
   return request(app)
@@ -425,22 +457,129 @@ describe('U9 voicemail-status route', () => {
     expect(h.pool.voiceRows).toHaveLength(1);
   });
 
-  it('transcription-leg failure is failure-soft: lead survives, 200, and the auth token never leaks', async () => {
-    const errors: string[] = [];
+  it('cross-leg collision, /recording FIRST: the voicemail still gets its own row and its transcription hand-off', async () => {
+    const h = buildHarness({ sessionCallSid: 'CA-vm-1' });
+
+    // Live-leg call recording lands first (the previously-broken order:
+    // the voicemail leg then saw inserted=false and silently no-oped).
+    const rec = await signedRecordingRequest(h.app, {
+      CallSid: 'CA-vm-1',
+      RecordingSid: 'RE-live-1',
+      RecordingUrl: 'https://api.twilio.com/2010-04-01/Recordings/RE-live-1',
+      RecordingDuration: '95',
+    });
+    expect(rec.status).toBe(200);
+    expect(h.pool.voiceRows).toHaveLength(1);
+
+    const vm = await signedVoicemailRequest(h.app, FINAL_PARAMS, CALLER_QUERY);
+    expect(vm.status).toBe(200);
+
+    // TWO rows — one per recording — and the voicemail pipeline ran.
+    expect(h.pool.voiceRows).toHaveLength(2);
+    const urls = h.pool.voiceRows.map((r) => r.recording_url).sort();
+    expect(urls).toEqual([
+      FINAL_PARAMS.RecordingUrl,
+      'https://api.twilio.com/2010-04-01/Recordings/RE-live-1',
+    ].sort());
+    expect(h.persistedEvents).toHaveLength(1);
+    expect(h.persistedEvents[0].inserted).toBe(true);
+    // Distinct S3 objects too — the voicemail key never clobbers the call leg's.
+    expect(h.storage.uploadKeys).toContain(buildVoicemailStorageKey(TENANT_ID, 'CA-vm-1'));
+    expect(h.storage.uploadKeys).toContain(`${TENANT_ID}/CA-vm-1.mp3`);
+  });
+
+  it('cross-leg collision, voicemail FIRST: the later /recording callback still inserts the call-leg row', async () => {
+    const h = buildHarness({ sessionCallSid: 'CA-vm-1' });
+
+    await signedVoicemailRequest(h.app, FINAL_PARAMS, CALLER_QUERY);
+    expect(h.pool.voiceRows).toHaveLength(1);
+    expect(h.persistedEvents).toHaveLength(1);
+
+    const rec = await signedRecordingRequest(h.app, {
+      CallSid: 'CA-vm-1',
+      RecordingSid: 'RE-live-1',
+      RecordingUrl: 'https://api.twilio.com/2010-04-01/Recordings/RE-live-1',
+      RecordingDuration: '95',
+    });
+    expect(rec.status).toBe(200);
+    expect(h.pool.voiceRows).toHaveLength(2);
+  });
+
+  it('at-least-once: a transient fetch failure answers 500, and the Twilio retry completes the pipeline without a duplicate lead', async () => {
+    const fetchRecording = vi
+      .fn()
+      .mockRejectedValueOnce(
+        new Error(`Twilio recording fetch failed 503 for ${TWILIO_AUTH_TOKEN}`),
+      )
+      .mockResolvedValue(Buffer.from('ID3FAKEVOICEMAIL'));
+    const h = buildHarness({ sessionCallSid: 'CA-vm-1', fetchRecording });
+
+    // First delivery: lead lands (receipt-first), transcription leg fails →
+    // 500 so Twilio retries (recording-webhook precedent). Nothing enqueued.
+    const first = await signedVoicemailRequest(h.app, FINAL_PARAMS, CALLER_QUERY);
+    expect(first.status).toBe(500);
+    expect(await h.leadRepo.findByTenant(TENANT_ID)).toHaveLength(1);
+    expect(h.pool.voiceRows).toHaveLength(0);
+    expect(h.persistedEvents).toHaveLength(0);
+
+    // Twilio retry: lead leg is receipt-guarded (no duplicate), the
+    // transcription leg re-runs to completion.
+    const retry = await signedVoicemailRequest(h.app, FINAL_PARAMS, CALLER_QUERY);
+    expect(retry.status).toBe(200);
+    expect(await h.leadRepo.findByTenant(TENANT_ID)).toHaveLength(1);
+    expect(h.pool.voiceRows).toHaveLength(1);
+    expect(h.persistedEvents).toHaveLength(1);
+    expect(h.persistedEvents[0].inserted).toBe(true);
+
+    // A LATER replay (post-success) is fully short-circuited by the
+    // transcription receipt: no third fetch, no second hand-off.
+    const replay = await signedVoicemailRequest(h.app, FINAL_PARAMS, CALLER_QUERY);
+    expect(replay.status).toBe(200);
+    expect(fetchRecording).toHaveBeenCalledTimes(2);
+    expect(h.persistedEvents).toHaveLength(1);
+  });
+
+  it('at-least-once: a failing enqueue hook propagates (500) and the retry re-hands-off the already-inserted row', async () => {
+    const persistedEvents: VoicemailPersistedEvent[] = [];
+    const onVoicemailPersisted = vi
+      .fn()
+      .mockImplementationOnce(async () => {
+        throw new Error('queue unavailable');
+      })
+      .mockImplementation(async (event: VoicemailPersistedEvent) => {
+        persistedEvents.push(event);
+      });
+    const h = buildHarness({ sessionCallSid: 'CA-vm-1', onVoicemailPersisted });
+
+    const first = await signedVoicemailRequest(h.app, FINAL_PARAMS, CALLER_QUERY);
+    expect(first.status).toBe(500);
+    expect(h.pool.voiceRows).toHaveLength(1); // row committed before the hook
+
+    // Retry: row insert dedupes (inserted=false — the create-then-crash
+    // rescue), the hook runs again and succeeds, lead still single.
+    const retry = await signedVoicemailRequest(h.app, FINAL_PARAMS, CALLER_QUERY);
+    expect(retry.status).toBe(200);
+    expect(h.pool.voiceRows).toHaveLength(1);
+    expect(onVoicemailPersisted).toHaveBeenCalledTimes(2);
+    expect(persistedEvents).toHaveLength(1);
+    expect(persistedEvents[0].inserted).toBe(false);
+    expect(await h.leadRepo.findByTenant(TENANT_ID)).toHaveLength(1);
+  });
+
+  it('legacy shape (no receipt store): a transcription failure stays failure-soft 200 — a 500 there would duplicate the unguarded lead', async () => {
     const fetchRecording = vi.fn(async () => {
       throw new Error(`Twilio recording fetch failed 401 for ${TWILIO_AUTH_TOKEN}`);
     });
-    const h = buildHarness({ sessionCallSid: 'CA-vm-1', fetchRecording });
-    // Capture the route's error logging via console spy is brittle; instead
-    // assert the executed effects: lead exists, no recording row, no hand-off,
-    // 200 response (Twilio must not retry a permanently-failing fetch into
-    // a consumed receipt).
+    const h = buildHarness({
+      sessionCallSid: 'CA-vm-1',
+      withReceiptStore: false,
+      fetchRecording,
+    });
     const res = await signedVoicemailRequest(h.app, FINAL_PARAMS, CALLER_QUERY);
     expect(res.status).toBe(200);
     expect(await h.leadRepo.findByTenant(TENANT_ID)).toHaveLength(1);
     expect(h.pool.voiceRows).toHaveLength(0);
     expect(h.persistedEvents).toHaveLength(0);
-    expect(errors.join('')).not.toContain(TWILIO_AUTH_TOKEN);
   });
 
   it('notify-only fallback: without Twilio creds the lead is still created and nothing else runs', async () => {

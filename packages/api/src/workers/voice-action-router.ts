@@ -873,6 +873,14 @@ async function emitClarification(
      */
     idempotencyKey?: string;
     /**
+     * U9 — voicemail-sourced transcripts. Clarifications persist HERE
+     * (not through processSegment's proposal return), so the untrusted-
+     * source stamp must be applied here too — otherwise a voicemail
+     * clarification (and any redraft that copies its sourceContext, e.g.
+     * proposals/resolve-entity.ts) loses the 'voicemail' marker.
+     */
+    sourceChannel?: 'voicemail';
+    /**
      * P8 — set when the intent classified fine but an entity reference
      * matched several records ("three Bobs"). The clarification carries
      * the candidate list so the review UI can render a one-tap picker.
@@ -1046,10 +1054,15 @@ async function emitClarification(
     // `expired`.
   });
 
-  await createDeduped(deps.proposalRepo, proposal, recordingId, log);
+  // U9 — voicemail clarifications carry the untrusted-source marker on
+  // sourceContext, same as every other voicemail-sourced proposal (a
+  // clarification is already 'draft', so the stamp is the only effect).
+  const stamped = holdIfUntrustedSource(proposal, input.sourceChannel);
+
+  await createDeduped(deps.proposalRepo, stamped, recordingId, log);
 
   log.info('voice-action-router: clarification proposal emitted', {
-    proposalId: proposal.id,
+    proposalId: stamped.id,
     reason,
     confidence: classification.confidence,
     lowConfidenceIntent: classification.lowConfidenceIntent,
@@ -1171,6 +1184,7 @@ async function processSegment(
         classification,
         conversationId,
         recordingId,
+        ...(params.sourceChannel ? { sourceChannel: params.sourceChannel } : {}),
         // Single-action only: dedup a redelivered clarification atomically.
         ...(params.applyDedup && recordingId
           ? { idempotencyKey: voiceProposalIdempotencyKey(recordingId) }
@@ -1206,6 +1220,7 @@ async function processSegment(
         classification: { ...classification, intentType: 'unknown' as IntentType },
         conversationId,
         recordingId,
+        ...(params.sourceChannel ? { sourceChannel: params.sourceChannel } : {}),
         ...(params.applyDedup && recordingId
           ? { idempotencyKey: voiceProposalIdempotencyKey(recordingId) }
           : {}),
@@ -1261,6 +1276,7 @@ async function processSegment(
           classification,
           conversationId,
           recordingId,
+          ...(params.sourceChannel ? { sourceChannel: params.sourceChannel } : {}),
           entityAmbiguity: {
             entityKind: lookupAnnotation.entityKind,
             reference: lookupAnnotation.reference,
@@ -1411,6 +1427,7 @@ async function processSegment(
           classification,
           conversationId,
           recordingId,
+          ...(params.sourceChannel ? { sourceChannel: params.sourceChannel } : {}),
           entityAmbiguity: {
             entityKind: 'appointment',
             reference: enRoute.reference,
@@ -1506,6 +1523,7 @@ async function processSegment(
         classification,
         conversationId,
         recordingId,
+        ...(params.sourceChannel ? { sourceChannel: params.sourceChannel } : {}),
         entityAmbiguity: {
           entityKind: annotation.entityKind,
           reference: annotation.reference,
@@ -1775,7 +1793,12 @@ export function holdIfUnsupervised(proposal: Proposal, supervisorPresent: boolea
  *      whether the router ran — it never elevates the transcript's trust
  *      (RIVET I13; ratified U9 provenance decision). Injection-bearing
  *      voicemail text therefore stays data: whatever it talks the drafting
- *      LLM into, the result still lands in the human review queue.
+ *      LLM into, the result stays held un-executable in the review queue.
+ *      NOTE (runtime-verified): in today's direct voicemail flows nothing
+ *      upstream computes 'approved' — proposals arrive 'draft' — so this
+ *      demotion branch is defense-in-depth against a future handler or
+ *      trust-tier change, not the path that normally holds voicemail
+ *      proposals.
  *
  * Exported for the chokepoint tests.
  */

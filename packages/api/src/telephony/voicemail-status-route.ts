@@ -4,21 +4,29 @@
  * Legs, in order:
  *
  *   1. Lead leg (the original B4 behavior, now replay-safe): create a lead
- *      from the caller's number + a `voicemail.received` audit event. A
- *      Twilio callback replay (at-least-once delivery) is deduped through
- *      the webhook-events receipt store (P0-014 webhook base) keyed on
- *      RecordingSid, so a replay can no longer mint a duplicate lead.
+ *      from the caller's number + a `voicemail.received` audit event.
+ *      Receipt-FIRST through the webhook-events store (P0-014 webhook
+ *      base, provider 'twilio_voicemail_lead', keyed on RecordingSid) so
+ *      neither a Twilio replay nor our own 500-retry loop below can mint
+ *      a duplicate lead.
  *
- *   2. Transcription leg (U9 — NEW): fetch the recording bytes from
- *      Twilio's signed RecordingUrl (HTTP basic auth), upload them to S3,
- *      insert an idempotent `voice_recordings` row via `recordInboundCall`
+ *   2. Transcription leg (U9): fetch the recording bytes from Twilio's
+ *      signed RecordingUrl (HTTP basic auth), upload them to S3, insert an
+ *      idempotent `voice_recordings` row via `recordInboundCall`
  *      (source='inbound_call' — voicemail KEEPS untrusted provenance per
  *      the ratified U9 provenance decision; `classifyRecordingProvenance`
  *      treats 'inbound_call' as untrusted unconditionally), then hand the
  *      presigned audio URL to `onVoicemailPersisted` so the app layer can
- *      enqueue the transcription worker. `inserted=false` (replay, or a
- *      call that already has an inbound recording row) tells the app layer
- *      to skip the enqueue.
+ *      enqueue the transcription worker. This leg is AT-LEAST-ONCE, not
+ *      at-most-once: its receipt ('twilio_voicemail_transcription') is
+ *      recorded only AFTER the whole pipeline (including the enqueue hook)
+ *      succeeded, and a failure answers 500 so Twilio retries — one S3 or
+ *      queue blip can no longer permanently downgrade the voicemail to
+ *      notify-only (mirrors recording-webhook.ts's 500-for-retry). The
+ *      retry is safe end-to-end: the lead leg is receipt-guarded,
+ *      `recordInboundCall` dedupes the row on (tenant_id, call_sid,
+ *      recording_url), and the enqueue uses a stable queue idempotency key
+ *      (with the router itself idempotent on recordingId downstream).
  *
  * Caller identity / tenant resolution
  * ───────────────────────────────────
@@ -82,15 +90,27 @@ export interface VoicemailWebhookReceiptStore {
     eventType: string,
     payload: Record<string, unknown>,
   ): Promise<{ inserted: boolean }>;
+  /**
+   * Truthy when a receipt exists for (provider, eventId). Used by the
+   * transcription leg, whose receipt is recorded only on SUCCESS — the
+   * pre-check must therefore be a read, not an insert.
+   */
+  findById(provider: string, eventId: string): Promise<unknown>;
 }
 
 /**
  * Fired after the voicemail's `voice_recordings` row is persisted (or
- * matched, on replay). The app layer wires this to enqueue the
- * transcription worker with `audioUrl` (a presigned S3 GET for the
+ * matched, on a retried delivery). The app layer wires this to enqueue
+ * the transcription worker with `audioUrl` (a presigned S3 GET for the
  * just-uploaded object) and the caller phone for the downstream
- * owner-gate. Failure-soft: hook errors are logged here and never fail
- * the webhook — the recording is already persisted.
+ * owner-gate.
+ *
+ * ERROR CONTRACT (U9 review fix): hook errors PROPAGATE. When the receipt
+ * store is wired, a hook failure fails the transcription leg → the route
+ * answers 500 → Twilio retries → the leg re-runs (its success receipt was
+ * never recorded). The hook must therefore be idempotent — the app-layer
+ * enqueue is (stable queue idempotency key + router-side recordingId
+ * dedup).
  */
 export interface VoicemailPersistedEvent {
   tenantId: string;
@@ -103,10 +123,12 @@ export interface VoicemailPersistedEvent {
   /** Presigned S3 GET URL for the uploaded voicemail audio. */
   audioUrl: string;
   /**
-   * True when `recordInboundCall` inserted a new row; false on a Twilio
-   * replay OR when the call already carries an inbound recording row
-   * (`recordInboundCall` is idempotent on (tenant_id, call_sid)). The
-   * app-layer hook skips the transcription enqueue on false.
+   * True when `recordInboundCall` inserted a new row; false when this
+   * delivery matched an existing row — i.e. a retry after a prior attempt
+   * that inserted the row but failed before its success receipt (the
+   * create-then-crash rescue). Informational: the hook should enqueue in
+   * BOTH cases (true replays never reach it — the transcription receipt
+   * short-circuits them earlier), relying on queue/router idempotency.
    */
   inserted: boolean;
 }
@@ -240,23 +262,32 @@ export function createVoicemailStatusRouter(
       return;
     }
 
-    // U9 — replay guard (webhook base P0-014). One receipt per RecordingSid:
-    // the first delivery proceeds; every replay short-circuits BOTH legs, so
-    // a Twilio redelivery can't duplicate the lead or re-run the pipeline.
+    // U9 — PER-LEG replay guards (webhook base P0-014), one receipt
+    // provider each, both keyed on RecordingSid:
+    //
+    //   'twilio_voicemail_lead'          — receipt-FIRST: the lead is a
+    //     side effect we must never duplicate, so it is claimed before the
+    //     insert and a replay (or our own 500-retry below) skips it.
+    //   'twilio_voicemail_transcription' — receipt-on-SUCCESS: recorded
+    //     only after the whole pipeline (fetch → S3 → row → enqueue hook)
+    //     succeeded, so a transient failure stays retryable instead of
+    //     permanently downgrading the voicemail to notify-only.
+    //
     // A receipt-store failure returns 500 so Twilio retries later rather
     // than us proceeding unguarded.
+    const receiptKey = `${tenantId}:${recordingSid}`;
+    let createLeadThisDelivery = true;
     if (deps.webhookEventRepo) {
-      let receiptInserted: boolean;
       try {
-        const receipt = await deps.webhookEventRepo.recordReceipt(
-          'twilio_voicemail',
-          `${tenantId}:${recordingSid}`,
-          'voicemail_completed',
+        const leadReceipt = await deps.webhookEventRepo.recordReceipt(
+          'twilio_voicemail_lead',
+          receiptKey,
+          'voicemail_lead',
           { callSid, recordingSid },
         );
-        receiptInserted = receipt.inserted;
+        createLeadThisDelivery = leadReceipt.inserted;
       } catch (err) {
-        logger.error('voicemail-status: receipt store failed', {
+        logger.error('voicemail-status: lead receipt store failed', {
           tenantId,
           callSid,
           recordingSid,
@@ -265,20 +296,18 @@ export function createVoicemailStatusRouter(
         res.status(500).type('text/plain').send('Voicemail processing failed');
         return;
       }
-      if (!receiptInserted) {
-        logger.info('voicemail-status: replay skipped (receipt exists)', {
+      if (!createLeadThisDelivery) {
+        logger.info('voicemail-status: lead leg skipped (receipt exists)', {
           tenantId,
           callSid,
           recordingSid,
         });
-        res.status(200).send('OK');
-        return;
       }
     }
 
     // ── Leg 1: lead + audit (the original notify-only behavior) ─────────
     let leadId: string | undefined;
-    if (deps.leadRepo && deps.auditRepo) {
+    if (createLeadThisDelivery && deps.leadRepo && deps.auditRepo) {
       try {
         const lead = await createLead(
           {
@@ -319,7 +348,7 @@ export function createVoicemailStatusRouter(
           error: err instanceof Error ? err.message : String(err),
         });
       }
-    } else {
+    } else if (createLeadThisDelivery) {
       logger.warn('voicemail-status: leadRepo/auditRepo not wired — skipping lead', {
         tenantId,
         callSid,
@@ -327,9 +356,12 @@ export function createVoicemailStatusRouter(
     }
 
     // ── Leg 2 (U9): persist recording + hand off to transcription ───────
-    // Failure-soft relative to the lead: the notification lead is already
-    // committed; a transcription-leg failure logs (with the auth token
-    // scrubbed) and still 200s, matching the route's historical posture.
+    // AT-LEAST-ONCE (review fix): the success receipt below is recorded
+    // only after the whole pipeline lands, and a failure answers 500 so
+    // Twilio retries — the lead above is receipt-guarded, the row insert
+    // and the enqueue are idempotent, so the retry is safe end-to-end.
+    // Without a receipt store (legacy/dev shape) failures stay 200
+    // failure-soft: a retry there WOULD duplicate the lead.
     const transcriptionWired =
       Boolean(deps.pool) &&
       Boolean(deps.storage) &&
@@ -346,6 +378,35 @@ export function createVoicemailStatusRouter(
       });
       res.status(200).send('OK');
       return;
+    }
+
+    // True-replay short-circuit: a receipt exists only for deliveries whose
+    // pipeline fully succeeded, so nothing is lost by skipping here.
+    if (deps.webhookEventRepo) {
+      let alreadyTranscribed: boolean;
+      try {
+        alreadyTranscribed = Boolean(
+          await deps.webhookEventRepo.findById('twilio_voicemail_transcription', receiptKey),
+        );
+      } catch (err) {
+        logger.error('voicemail-status: transcription receipt lookup failed', {
+          tenantId,
+          callSid,
+          recordingSid,
+          error: err instanceof Error ? err.message : String(err),
+        });
+        res.status(500).type('text/plain').send('Voicemail processing failed');
+        return;
+      }
+      if (alreadyTranscribed) {
+        logger.info('voicemail-status: transcription leg skipped (receipt exists)', {
+          tenantId,
+          callSid,
+          recordingSid,
+        });
+        res.status(200).send('OK');
+        return;
+      }
     }
 
     try {
@@ -428,29 +489,44 @@ export function createVoicemailStatusRouter(
       }
 
       // 4. Hand off to the app layer for the transcription enqueue.
-      //    Failure-soft: the recording row is already committed.
+      //    Hook errors PROPAGATE (see VoicemailPersistedEvent doc): with a
+      //    receipt store they fail this leg → 500 → Twilio retry; the
+      //    enqueue is idempotent so a retried hand-off is safe.
       if (options.onVoicemailPersisted) {
+        const audioUrl = await deps.storage!.generateDownloadUrl(
+          deps.storageBucket!,
+          storageKey,
+        );
+        await options.onVoicemailPersisted({
+          tenantId,
+          voiceRecordingId: result.voiceRecordingId,
+          callSid,
+          recordingSid,
+          ...(from ? { callerPhone: from } : {}),
+          durationSeconds,
+          audioUrl,
+          inserted: result.inserted,
+        });
+      }
+
+      // 5. Success receipt — recorded LAST so any failure above leaves the
+      //    leg retryable. A failure HERE is logged and swallowed: the work
+      //    is done, and a replayed delivery re-running the pipeline is
+      //    harmless (row + enqueue both idempotent).
+      if (deps.webhookEventRepo) {
         try {
-          const audioUrl = await deps.storage!.generateDownloadUrl(
-            deps.storageBucket!,
-            storageKey,
+          await deps.webhookEventRepo.recordReceipt(
+            'twilio_voicemail_transcription',
+            receiptKey,
+            'voicemail_transcription',
+            { callSid, recordingSid, voiceRecordingId: result.voiceRecordingId },
           );
-          await options.onVoicemailPersisted({
+        } catch (err) {
+          logger.warn('voicemail-status: transcription receipt record failed', {
             tenantId,
-            voiceRecordingId: result.voiceRecordingId,
             callSid,
             recordingSid,
-            ...(from ? { callerPhone: from } : {}),
-            durationSeconds,
-            audioUrl,
-            inserted: result.inserted,
-          });
-        } catch (hookErr) {
-          logger.warn('voicemail-status: onVoicemailPersisted hook failed', {
-            tenantId,
-            callSid,
-            voiceRecordingId: result.voiceRecordingId,
-            error: hookErr instanceof Error ? hookErr.message : String(hookErr),
+            error: err instanceof Error ? err.message : String(err),
           });
         }
       }
@@ -461,6 +537,14 @@ export function createVoicemailStatusRouter(
         recordingSid,
         error: scrubAuthToken(err, deps.twilioAuthToken),
       });
+      if (deps.webhookEventRepo) {
+        // Lead leg is receipt-guarded, so a Twilio retry can't duplicate
+        // it — answer 500 to get the retry (recording-webhook precedent).
+        res.status(500).type('text/plain').send('Voicemail transcription failed');
+        return;
+      }
+      // Legacy shape (no receipt store): keep the historical failure-soft
+      // 200 — a retry here WOULD mint a duplicate lead.
     }
 
     res.status(200).send('OK');

@@ -17,7 +17,9 @@
  *   4. Presigns an S3 PUT for `<bucket>/<tenant_id>/<call_sid>.mp3` and
  *      uploads the bytes via `fetch(url, { method: 'PUT' })`.
  *   5. Inserts a `voice_recordings` row through `recordInboundCall`,
- *      which is idempotent on `(tenant_id, call_sid)`.
+ *      which is idempotent on `(tenant_id, call_sid, recording_url)` —
+ *      per-recording identity, so the voicemail leg's row for the same
+ *      call (delivered to /voicemail-status) never collides with this one.
  *
  * Logging discipline
  * ──────────────────

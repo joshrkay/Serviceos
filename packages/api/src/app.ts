@@ -4154,34 +4154,30 @@ export function createApp(): AppWithLifecycle {
         webhookEventRepo,
         options: {
           onVoicemailPersisted: async (event) => {
-            // inserted=false ⇒ Twilio replay (or a call whose inbound
-            // recording row already exists) — the first delivery already
-            // enqueued the work.
-            if (!event.inserted) return;
-            try {
-              await queue.send(
-                'transcription',
-                {
-                  tenantId: event.tenantId,
-                  recordingId: event.voiceRecordingId,
-                  audioUrl: event.audioUrl,
-                  // Voicemail marker + caller-ID: on completion the
-                  // onTranscribed hook gates the router enqueue on this
-                  // phone matching the tenant's approver set. Absent
-                  // caller-ID fails closed (notify-only).
-                  voicemail: {
-                    ...(event.callerPhone ? { callerPhone: event.callerPhone } : {}),
-                  },
+            // Enqueue on EVERY invocation, including event.inserted=false
+            // (a retry after a prior insert-then-crash): true replays never
+            // reach this hook (the route's transcription receipt guards
+            // them), and the stable idempotency key + the router's own
+            // recordingId dedup make a re-send safe. Errors PROPAGATE by
+            // contract — the route answers 500 so Twilio retries, which is
+            // what keeps a transient queue blip from permanently
+            // downgrading the voicemail to notify-only.
+            await queue.send(
+              'transcription',
+              {
+                tenantId: event.tenantId,
+                recordingId: event.voiceRecordingId,
+                audioUrl: event.audioUrl,
+                // Voicemail marker + caller-ID: on completion the
+                // onTranscribed hook gates the router enqueue on this
+                // phone matching the tenant's approver set. Absent
+                // caller-ID fails closed (notify-only).
+                voicemail: {
+                  ...(event.callerPhone ? { callerPhone: event.callerPhone } : {}),
                 },
-                `${event.tenantId}:${event.voiceRecordingId}:transcription:voicemail`,
-              );
-            } catch (err) {
-              // eslint-disable-next-line no-console
-              console.error('app: failed to enqueue voicemail transcription', {
-                voiceRecordingId: event.voiceRecordingId,
-                error: err instanceof Error ? err.message : String(err),
-              });
-            }
+              },
+              `${event.tenantId}:${event.voiceRecordingId}:transcription:voicemail`,
+            );
           },
         },
       },

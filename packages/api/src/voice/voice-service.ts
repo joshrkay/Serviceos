@@ -438,9 +438,22 @@ export interface RecordInboundCallResult {
 
 /**
  * Persist a `voice_recordings` row for a finalized Twilio inbound call
- * recording. Idempotent on `(tenant_id, call_sid)` via SELECT-then-INSERT
- * inside a transaction — a second webhook delivery for the same
- * RecordingSid is a no-op that returns the existing row's id.
+ * recording. Idempotent on `(tenant_id, call_sid, recording_url)` via
+ * SELECT-then-INSERT inside a transaction — a second webhook delivery for
+ * the same RecordingSid is a no-op that returns the existing row's id.
+ *
+ * Why recording_url is part of the identity (U9 review fix): one call can
+ * legitimately produce TWO recordings — the live leg's `<Start><Record>`
+ * (delivered to /recording) AND a voicemail `<Record>` after a failed
+ * dial-out (delivered to /voicemail-status) — and both share the CallSid.
+ * A probe on (tenant_id, call_sid) alone made whichever callback landed
+ * second a silent no-op (`inserted=false`), dropping either the call
+ * recording or the entire voicemail pipeline. `recording_url` embeds the
+ * RecordingSid, so it is the per-recording identity: a Twilio replay of
+ * either callback (same RecordingSid → same URL) still dedupes, while two
+ * genuine recordings of one call get two rows. Both rows keep
+ * source='inbound_call' — `classifyRecordingProvenance` classifies them
+ * untrusted regardless of which leg wrote them.
  *
  * The function inserts a `files` row as the FK target before the
  * voice_recordings row, mirroring the `(file_id NOT NULL REFERENCES files)`
@@ -468,9 +481,10 @@ export async function recordInboundCall(
     const existing = await client.query<{ id: string }>(
       `SELECT id FROM voice_recordings
        WHERE tenant_id = $1 AND call_sid = $2 AND source = 'inbound_call'
+         AND recording_url = $3
        LIMIT 1
        FOR UPDATE`,
-      [input.tenantId, input.callSid],
+      [input.tenantId, input.callSid, input.recordingUrl],
     );
     if (existing.rows.length > 0) {
       await client.query('COMMIT');

@@ -18,6 +18,14 @@
  *
  * Executed-effect assertions (P-44): every worker-path case asserts the
  * PERSISTED proposal row in the repo, not the in-memory return value.
+ *
+ * NOTE (runtime-verified): in the production voicemail flows nothing
+ * upstream currently computes 'approved' — proposals arrive 'draft' — so
+ * the demotion cases below deliberately CONSTRUCT the approved shape (the
+ * CONTROL test proves this harness can) to pin the defense-in-depth
+ * chokepoint. The invariant under test is "held un-executable, never
+ * auto-approved", not a promise that the direct path emits
+ * 'ready_for_review'.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
@@ -260,6 +268,38 @@ describe('voice-action-router — voicemail-sourced transcripts (U9)', () => {
     expect(proposals).toHaveLength(1);
     expect(proposals[0].status).toBe('ready_for_review');
     expect(proposals[0].sourceContext?.sourceChannel).toBe('voicemail');
+  });
+
+  it('voicemail clarification carries the voicemail marker too (review fix: emitClarification path)', async () => {
+    // Clarifications persist inside emitClarification, NOT through
+    // processSegment's proposal return — so the stamp must land there as
+    // well, or the redraft path (which copies sourceContext) loses the
+    // marker.
+    const gateway = gatewayReturning([
+      JSON.stringify({
+        intentType: 'unknown',
+        confidence: 0.2,
+        reasoning: 'could not classify',
+      }),
+    ]);
+    const worker = createVoiceActionRouterWorker({ gateway, proposalRepo });
+    await worker.handle(
+      msg({
+        tenantId: TENANT,
+        userId: 'system',
+        transcript: 'mumbled voicemail nobody can classify',
+        recordingId: RECORDING_ID,
+        sourceChannel: 'voicemail' as const,
+      }),
+      silentLogger(),
+    );
+
+    const proposals = await proposalRepo.findByTenant(TENANT);
+    expect(proposals).toHaveLength(1);
+    expect(proposals[0].proposalType).toBe('voice_clarification');
+    expect(proposals[0].sourceContext?.sourceChannel).toBe('voicemail');
+    expect(proposals[0].sourceContext?.recordingId).toBe(RECORDING_ID);
+    expect(proposals[0].status).toBe('draft');
   });
 
   it('redelivered voicemail router job does not create a second proposal (recordingId dedup)', async () => {
