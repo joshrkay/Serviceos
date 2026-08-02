@@ -47,7 +47,7 @@ Ship the eight focus requirements to **rung 5, with proof**: for each, a spoken 
 proposal → execution → persisted row + audit event` (or the audited status-act / conversation
 equivalent), pinned by a Docker-gated integration test (audit + cross-tenant negative) and a
 voice-quality fixture. The run ends with a **read-only re-measurement of all 19** using the Part E
-Track B method; the deliverable is that re-run scoring **12–14/19, per the ratified Part F decisions**: the two
+Track B method; the deliverable is that the re-run scores **12–14/19, per the ratified Part F decisions**: the two
 previously-green items (B7.1, B7.7) still green, B4.7/B7.6/B8.1 restored to rung 5 by items 9-10's
 proof-only tests, B9.1 and B1.18 each contributing only if their Part F decision ratifies the
 recommended reading, the remaining focus items newly green, and the five deferred items unchanged.
