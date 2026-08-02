@@ -103,11 +103,15 @@ describe('Postgres integration — U9 voicemail replay idempotency', () => {
 
     // Each recording's files FK target carries its own storage key (the
     // voicemail never clobbers the live leg's `<tenant>/<callSid>.mp3`).
+    // Sort BOTH sides with the same JS comparator: Postgres ORDER BY uses the
+    // database collation (linguistic — ranks "….mp3" before "…-voicemail.mp3"),
+    // which disagrees with JS's code-unit sort ("-" < "."), so relying on the
+    // SQL ordering makes the comparison collation-dependent.
     const files = await pool.query(
-      `SELECT s3_key FROM files WHERE tenant_id = $1 AND entity_id = $2 ORDER BY s3_key`,
+      `SELECT s3_key FROM files WHERE tenant_id = $1 AND entity_id = $2`,
       [tenant.tenantId, callSid],
     );
-    expect(files.rows.map((r) => r.s3_key)).toEqual(
+    expect(files.rows.map((r) => r.s3_key).sort()).toEqual(
       [
         buildVoicemailStorageKey(tenant.tenantId, callSid),
         `${tenant.tenantId}/${callSid}.mp3`,
