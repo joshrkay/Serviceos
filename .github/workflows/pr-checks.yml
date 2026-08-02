@@ -79,6 +79,14 @@ jobs:
       - name: FK-path coverage guard
         run: npm run check:fk-paths --workspace=packages/api
 
+      # Migration key guard — parallel branches twice claimed colliding
+      # migration numbers on 2026-08-01 (two '196_*' keys; a stale fork adding
+      # 197/198 under a main already at 266 → two device-token tables and a
+      # red main via PR #788). Blocks duplicate numeric prefixes and any NEW
+      # key numbered at or below origin/main's tail.
+      - name: Migration key guard
+        run: npm run check:migration-keys --workspace=packages/api
+
       # FAIL-VIS — env-coverage guard.
       #
       # A sweep of the running services found 85 environment variables read by
