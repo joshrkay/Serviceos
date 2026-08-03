@@ -252,11 +252,18 @@ function checkGlobalGuards(
   // subsequent gather turns hit the "unhandled state" branch and the caller
   // gets looped forever.
   if (event.type === 'system_failure') {
+    // AI infra failures (quota/breaker/provider) use an honest line — never
+    // "I didn't catch that" / trouble understanding the caller.
+    const infra =
+      typeof event.reason === 'string' && event.reason.startsWith('ai_infrastructure:');
+    const line = infra
+      ? "One moment — I'm having a brief technical issue. Let me connect you with a team member."
+      : "I'm having trouble completing that. Let me connect you with a team member.";
     return {
       nextState: 'escalating',
       sideEffects: [
         auditLog(context, state, 'escalating', 'system_failure', { reason: event.reason }),
-        ttsPlay("I'm having trouble completing that. Let me connect you with a team member."),
+        ttsPlay(line, infra ? { source: 'ai_infrastructure' } : undefined),
         notifyOncall(context, `system_failure:${event.reason}`),
       ],
       updatedContext: { ...context, escalationReason: `system_failure:${event.reason}` },

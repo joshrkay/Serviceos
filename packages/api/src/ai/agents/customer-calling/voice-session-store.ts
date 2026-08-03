@@ -275,6 +275,12 @@ export interface VoiceSession {
    * `[]` on a read failure (never rejects). GC'd with the session.
    */
   catalogPreload?: Promise<import('../../../catalog/catalog-item').CatalogItem[]>;
+  /**
+   * Consecutive AI infrastructure failures (quota/breaker/provider) on
+   * classify. First transient failure gets a hold-line retry; the next
+   * escalates. Cleared on a successful classify. Adapter-side; FSM never reads it.
+   */
+  aiInfraRetryCount?: number;
   /** Set after `endSession()` to short-circuit further input. */
   ended: boolean;
   /**
@@ -449,8 +455,10 @@ export class VoiceSessionStore {
       escalationTriggers?: CallingAgentContext['escalationTriggers'];
       /** RV-070 — caller-ID matched an approver phone (owner / backup). */
       ownerSession?: boolean;
-      /** Phase-2 Track A — tenant opted into extended owner intents. */
+      /** Phase-2 Track A — tenant opted into extended owner lookups. */
       extendedIntents?: boolean;
+      /** Customer protection (complaint/negotiation) — always on for telephony. */
+      customerProtectionIntents?: boolean;
     } = {}
   ): VoiceSession {
     const id = uuidv4();
@@ -466,6 +474,7 @@ export class VoiceSessionStore {
         : {}),
       ...(opts.ownerSession ? { ownerSession: true } : {}),
       ...(opts.extendedIntents ? { extendedIntents: true } : {}),
+      ...(opts.customerProtectionIntents ? { customerProtectionIntents: true } : {}),
     });
     const costTracker = new SessionCostTracker(
       channel === 'inapp' ? DEFAULT_INAPP_CAPS : DEFAULT_TELEPHONY_CAPS

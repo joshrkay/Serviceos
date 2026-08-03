@@ -25,7 +25,8 @@ import type { CustomerNegotiationContextProvider } from '../customers/customer-n
 import {
   classifyIntent,
   isLookupIntent,
-  isExtendedIntent,
+  isCustomerProtectionIntent,
+  isOwnerExtendedLookupIntent,
   isVoiceApprovalIntent,
   isVoiceEditIntent,
   ExtractedEntities,
@@ -1063,8 +1064,10 @@ interface SegmentParams {
    * intent via `selectApplicableInstructions` (≤5) before drafting.
    */
   activeStandingInstructions?: StandingInstruction[];
-  /** Phase-2 Track A — tenant opted in to the extended operator intents. */
+  /** Phase-2 Track A — tenant opted in to owner extended READ-ONLY lookups. */
   extendedIntents?: boolean;
+  /** Customer protection (complaint/negotiation) — always on for live voice. */
+  customerProtectionIntents?: boolean;
   /**
    * When true (single-action path only), thread `recordingId` into the task
    * context — so the held-slot appointment is keyed `voice-hold:<recordingId>`
@@ -1132,9 +1135,11 @@ async function processSegment(
     {
       tenantId,
       ...(params.verticalPromptSection ? { verticalPromptSection: params.verticalPromptSection } : {}),
-      // Phase-2 Track A — opt-in only: leaves the classifier prompt
-      // byte-identical for tenants without the flag (cassette hashes).
+      // Owner extended lookups — opt-in only (cassette stability).
       ...(params.extendedIntents ? { extendedIntents: true } : {}),
+      // Customer protection — on when the surface opted in (live telephony
+      // / operator router always pass true).
+      ...(params.customerProtectionIntents ? { customerProtectionIntents: true } : {}),
     },
     deps.gateway,
   );
@@ -1166,20 +1171,37 @@ async function processSegment(
     return { kind: 'clarified', classification };
   }
 
-  // Phase-2 Track A — belt-and-braces gate: extended intents (complaint,
-  // lookup_day_overview, lookup_digest, lookup_pending_items) are ONLY
-  // actionable when the calling surface opted in via extendedIntentsEnabled.
-  // The classifier prompt gate (appending EXTENDED_INTENTS_PROMPT_SECTION
-  // only when opted in) is the primary defence; this re-check is the
-  // backstop against LLM hallucination on a non-opted surface. Route to
-  // the clarification path (same as 'unknown') rather than silently
-  // skipping, so the caller gets an auditable response.
-  // Must run BEFORE the isLookupIntent check so that hallucinated
-  // lookup_day_overview / lookup_digest / lookup_pending_items on a
-  // non-opted surface produce an auditable clarification rather than a
-  // silent skip.
-  if (isExtendedIntent(classification.intentType) && !params.extendedIntents) {
-    log.warn('voice-action-router: extended intent refused — surface not opted in', {
+  // Belt-and-braces gates (split customer protection vs owner lookups):
+  //  - complaint/negotiation: require customerProtectionIntents OR extendedIntents
+  //  - owner lookups: require extendedIntents
+  // Primary defence is the classifier prompt sections; this is the backstop
+  // against LLM hallucination. Must run BEFORE isLookupIntent so refused
+  // owner lookups clarify instead of silent-skip.
+  const protectionOk =
+    params.customerProtectionIntents === true || params.extendedIntents === true;
+  if (isCustomerProtectionIntent(classification.intentType) && !protectionOk) {
+    log.warn('voice-action-router: customer protection intent refused — surface not opted in', {
+      intent: classification.intentType,
+    });
+    await emitClarification(
+      deps,
+      {
+        tenantId,
+        userId,
+        transcript: segmentText,
+        classification: { ...classification, intentType: 'unknown' as IntentType },
+        conversationId,
+        recordingId,
+        ...(params.applyDedup && recordingId
+          ? { idempotencyKey: voiceProposalIdempotencyKey(recordingId) }
+          : {}),
+      },
+      log,
+    );
+    return { kind: 'clarified', classification };
+  }
+  if (isOwnerExtendedLookupIntent(classification.intentType) && !params.extendedIntents) {
+    log.warn('voice-action-router: owner extended lookup refused — surface not opted in', {
       intent: classification.intentType,
     });
     await emitClarification(
@@ -2181,6 +2203,9 @@ export function createVoiceActionRouterWorker(
                 verticalPromptSection,
                 ...(activeStandingInstructions ? { activeStandingInstructions } : {}),
                 ...(extendedIntents ? { extendedIntents: true } : {}),
+                // Operator voice memos: always enable protection intents so a
+                // dictated complaint/negotiation still reaches the guardrails.
+                customerProtectionIntents: true,
               },
               log,
             );
@@ -2215,6 +2240,7 @@ export function createVoiceActionRouterWorker(
             verticalPromptSection,
             ...(activeStandingInstructions ? { activeStandingInstructions } : {}),
             ...(extendedIntents ? { extendedIntents: true } : {}),
+            customerProtectionIntents: true,
             // Single-action path: apply the per-recording dedup keys.
             applyDedup: true,
           },

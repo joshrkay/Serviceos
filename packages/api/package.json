@@ -39,7 +39,10 @@
     "lint:log-safety": "node scripts/check-log-safety.js",
     "launch-quality-check": "tsx scripts/launch-quality-check.ts",
     "voice-load:selfcheck": "tsx scripts/voice-load-selfcheck.ts",
-    "voice-load:staging": "tsx scripts/voice-load-test.ts --max 50 --ramp 60 --hold 300"
+    "voice-load:staging": "tsx scripts/voice-load-test.ts --max 50 --ramp 60 --hold 300",
+    "agent:graph-coverage": "tsx scripts/agent-graph-coverage.ts",
+    "agent:path-smoke": "tsx scripts/agent-path-smoke.ts",
+    "admin:voice-coverage": "tsx scripts/admin-voice-coverage.ts"
   },
   "dependencies": {
     "@ai-service-os/shared": "*",
