@@ -849,6 +849,8 @@ describe('RV-071 — approve_proposal / reject_proposal intents', () => {
 import {
   EXTENDED_INTENTS_PROMPT_SECTION,
   EXTENDED_INTENT_TYPES,
+  OWNER_EXTENDED_LOOKUP_INTENT_TYPES,
+  CUSTOMER_PROTECTION_PROMPT_SECTION,
   matchExtendedIntentPhrase,
 } from '../../../src/ai/orchestration/intent-classifier';
 
@@ -885,15 +887,22 @@ describe('consistency pin — EXTENDED_INTENT_TYPES', () => {
     return names;
   }
 
-  it('quoted intents in EXTENDED_INTENTS_PROMPT_SECTION match EXTENDED_INTENT_TYPES', () => {
+  it('quoted intents in EXTENDED_INTENTS_PROMPT_SECTION match owner extended lookups only', () => {
     const fromPrompt = intentNamesFromPrompt(EXTENDED_INTENTS_PROMPT_SECTION);
-    const fromSet = new Set(EXTENDED_INTENT_TYPES);
+    const fromSet = new Set(OWNER_EXTENDED_LOOKUP_INTENT_TYPES);
     for (const name of fromPrompt) {
-      expect(fromSet.has(name as never), `"${name}" in prompt but not in EXTENDED_INTENT_TYPES`).toBe(true);
+      expect(fromSet.has(name as never), `"${name}" in prompt but not in OWNER_EXTENDED_LOOKUP_INTENT_TYPES`).toBe(true);
     }
     for (const name of fromSet) {
-      expect(fromPrompt.has(name), `"${name}" in EXTENDED_INTENT_TYPES but not quoted in prompt`).toBe(true);
+      expect(fromPrompt.has(name), `"${name}" in OWNER_EXTENDED_LOOKUP_INTENT_TYPES but not quoted in prompt`).toBe(true);
     }
+  });
+
+  it('CUSTOMER_PROTECTION_PROMPT_SECTION quotes complaint and negotiation', () => {
+    const fromPrompt = intentNamesFromPrompt(CUSTOMER_PROTECTION_PROMPT_SECTION);
+    expect(fromPrompt.has('complaint')).toBe(true);
+    expect(fromPrompt.has('negotiation')).toBe(true);
+    expect(fromPrompt.has('lookup_day_overview')).toBe(false);
   });
 
   it('every EXTENDED_INTENT_TYPES member is in SUPPORTED_INTENTS', () => {
@@ -1006,7 +1015,7 @@ describe('Phase-2 Track A — extended operator intents', () => {
     expect(gateway.complete).not.toHaveBeenCalled();
   });
 
-  it('extendedIntents: true appends the section as a SEPARATE system message for non-matching transcripts', async () => {
+  it('extendedIntents: true appends protection + owner-lookup sections as SEPARATE system messages', async () => {
     const gateway = mockGateway('{"intentType":"lookup_day_overview","confidence":0.85}');
     const result = await classifyIntent(
       'morning rundown please, schedule and approvals',
@@ -1016,8 +1025,9 @@ describe('Phase-2 Track A — extended operator intents', () => {
     expect(result.intentType).toBe('lookup_day_overview');
     const call = (gateway.complete as ReturnType<typeof vi.fn>).mock.calls[0][0];
     const systemMessages = call.messages.filter((m: { role: string }) => m.role === 'system');
-    expect(systemMessages.length).toBe(2);
-    expect(systemMessages[1].content).toBe(EXTENDED_INTENTS_PROMPT_SECTION);
+    // base + customer protection + owner extended lookups
+    expect(systemMessages.length).toBe(3);
+    expect(systemMessages.some((m: { content: string }) => m.content === EXTENDED_INTENTS_PROMPT_SECTION)).toBe(true);
     // The BASE prompt is untouched — it must not mention the new intents.
     expect(systemMessages[0].content).not.toContain('lookup_day_overview');
   });

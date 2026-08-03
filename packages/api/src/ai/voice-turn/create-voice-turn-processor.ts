@@ -49,6 +49,12 @@ import type { Pool } from 'pg';
 import { appendAgentTts } from './transcript-append';
 import { classifyIntent, isVoiceApprovalIntent, isVoiceEditIntent } from '../orchestration/intent-classifier';
 import {
+  AI_BUSY_HOLD_LINE,
+  classifyInfraFailure,
+  isTransientInfraFailure,
+  systemFailureReasonForInfra,
+} from './classify-infra-failure';
+import {
   startVoiceApproval,
   startVoiceBatchApproval,
   continueVoiceApproval,
@@ -119,6 +125,12 @@ import { checkBusinessHours } from '../../compliance/business-hours';
 import { parseOnboardingBusinessHours } from '../../telephony/business-hours-loader';
 import { updateAppointment } from '../../appointments/appointment';
 import type { TenantSettings } from '../../settings/settings';
+import {
+  bookingSpeechForLane,
+  buildLaneInputFromSettings,
+  laneStampIfPresent,
+  timeReadbackFromHold,
+} from './inbound-booking-completion';
 import type {
   CallingAgentChannel,
   CallingAgentEvent,
@@ -1542,6 +1554,113 @@ export function createVoiceTurnProcessor(
         };
       }
 
+      // U3 — live inbound book completion. When create_appointment has a
+      // verified customer + spoken time + job, place a hold and evaluate
+      // D-015 so opt-in tenants can confirm on-call. Always speak an honest
+      // outcome (confirmed vs pending) — never silent drop.
+      let bookingUtterance: string | undefined;
+      let autonomousLaneForCreate:
+        | { eligible: true; threshold: number }
+        | undefined;
+      let laneSourceStamp: Record<string, unknown> | undefined;
+      if (
+        !degradedFromContract &&
+        surfaceAllowed &&
+        payloadProposalType === 'create_appointment' &&
+        session.channel === 'telephony' &&
+        session.machine.currentContext.ownerSession !== true &&
+        deps.appointmentRepo &&
+        deps.settingsRepo
+      ) {
+        const customerId =
+          (typeof payload.customerId === 'string' && payload.customerId) ||
+          session.customerId ||
+          (typeof fx.payload.customerId === 'string' ? fx.payload.customerId : undefined);
+        const jobId =
+          typeof payload.jobId === 'string' ? payload.jobId : undefined;
+        const dateTimeDescription = [
+          payload.dateTimeDescription,
+          payload.dateTimePhrase,
+          entities.dateTimeDescription,
+          entities.dateTimePhrase,
+        ].find((v): v is string => typeof v === 'string' && v.trim().length > 0);
+        if (customerId && jobId && dateTimeDescription) {
+          try {
+            const settings = await deps.settingsRepo.findByTenant(tenantId).catch(() => null);
+            const hold = await resolveAndPlaceAppointmentHold(
+              {
+                appointmentRepo: deps.appointmentRepo,
+                ...(deps.jobRepo ? { jobRepo: deps.jobRepo } : {}),
+              },
+              {
+                tenantId,
+                jobId,
+                customerId,
+                dateTimeDescription,
+                ...(settings?.timezone ? { timezone: settings.timezone } : {}),
+                createdBy: deps.systemActorId ?? 'calling-agent',
+                idempotencyKey: `inbound-book:${session.id}:${jobId}`,
+              },
+            );
+            if (hold.ok) {
+              const timeReadback = timeReadbackFromHold(
+                hold.scheduledStart,
+                hold.timezone,
+              );
+              const slotWithinBusinessHours = checkBusinessHours(
+                parseOnboardingBusinessHours(settings?.businessHours, hold.timezone),
+                new Date(hold.scheduledStart),
+              ).isOpen;
+              // Contract: `_meta.overallConfidence` is a label, not a 0–1 score
+              // (see packages/api/src/proposals/contracts.ts confidence envelope).
+              // Lane eval still uses the numeric score via confidenceScore below.
+              const bookingPayload: Record<string, unknown> = {
+                appointmentId: hold.appointmentId,
+                ...(typeof payloadConfidence === 'number'
+                  ? { _meta: { overallConfidence: getConfidenceLevel(payloadConfidence) } }
+                  : {}),
+              };
+              const laneEval = buildLaneInputFromSettings({
+                platformDisabled: process.env.AUTONOMOUS_BOOKING_DISABLED === 'true',
+                settings: {
+                  enabled: settings?.autonomousBookingEnabled ?? false,
+                  ...(settings?.autonomousBookingThreshold !== undefined
+                    ? { threshold: settings.autonomousBookingThreshold }
+                    : {}),
+                },
+                confidenceScore: payloadConfidence,
+                customerId,
+                holdExpiryAt: hold.holdExpiryAt,
+                now: new Date(),
+                slotWithinBusinessHours,
+                pendingReferenceCount: 0,
+                negotiationFlagged:
+                  session.machine.currentContext.negotiationFlagged === true,
+                payload: bookingPayload,
+              });
+              laneSourceStamp = laneStampIfPresent(laneEval) as
+                | Record<string, unknown>
+                | undefined;
+              bookingUtterance = bookingSpeechForLane(laneEval, timeReadback);
+              payloadProposalType = 'create_booking';
+              payload = bookingPayload;
+              if (laneEval.eligible) {
+                autonomousLaneForCreate = laneEval;
+              } else if (!laneEval.eligible) {
+                // Hold stays for owner confirmation window (24h); ineligible
+                // lane means draft create_booking, not auto-approve.
+              }
+            } else {
+              bookingUtterance = bookingSpeechForLane(undefined, undefined);
+            }
+          } catch {
+            bookingUtterance = bookingSpeechForLane(undefined, undefined);
+          }
+        } else if (payloadProposalType === 'create_appointment') {
+          bookingUtterance = bookingSpeechForLane(undefined, undefined);
+        }
+      }
+
       const proposal = buildProposal({
         tenantId,
         proposalType: payloadProposalType,
@@ -1586,6 +1705,7 @@ export function createVoiceTurnProcessor(
           ...(!degradedFromContract && estimateQuote?.catalogResolution
             ? { catalogResolution: estimateQuote.catalogResolution }
             : {}),
+          ...(laneSourceStamp ?? {}),
         },
         // WS5 — thread the (uncatalogued-capped) confidence and force 'draft'
         // for an ambiguous line, matching the EstimateTaskHandler. The voice
@@ -1627,6 +1747,13 @@ export function createVoiceTurnProcessor(
             ? fx.payload.customerId
             : deps.systemActorId ?? 'calling-agent',
         ...(tenantThresholdOverride ? { tenantThresholdOverride } : {}),
+        // D-015 — only when every autonomous booking gate passed.
+        ...(autonomousLaneForCreate
+          ? {
+              autonomousLane: autonomousLaneForCreate,
+              sourceTrustTier: 'autonomous' as const,
+            }
+          : {}),
       });
       const stored = await deps.proposalRepo.create(proposal);
       session.proposalIds.push(stored.id);
@@ -1636,9 +1763,12 @@ export function createVoiceTurnProcessor(
         // WS5 — the grounded quote read-back the caller hears. Absent for
         // non-estimate proposals (and for a contract-degraded clarification,
         // which quoted nothing) → the FSM speaks the fixed confirmation.
+        // U3 — booking paths override with honest confirmed/pending copy.
         ...(estimateQuote && !degradedFromContract
           ? { utterance: estimateQuote.utterance }
-          : {}),
+          : bookingUtterance
+            ? { utterance: bookingUtterance }
+            : {}),
         // WS18 — a grounded ESTIMATE (only) becomes a live, refinable/closeable
         // pendingQuote on the FSM. Scoped to draft_estimate: an invoice quote is
         // for completed work, not a sale to close on the call.
@@ -3559,9 +3689,17 @@ export function createVoiceTurnProcessor(
             ...(session.machine.currentContext.ownerSession === true
               ? { ownerSession: true }
               : {}),
+            ...(session.machine.currentContext.extendedIntents === true
+              ? { extendedIntents: true }
+              : {}),
+            ...(session.machine.currentContext.customerProtectionIntents === true
+              ? { customerProtectionIntents: true }
+              : {}),
           },
           deps.gateway,
         );
+        // Successful classify clears infra-retry budget for this session.
+        session.aiInfraRetryCount = 0;
         session.events.emit(
           'voice-event',
           intentClassifiedEvent({
@@ -3606,16 +3744,32 @@ export function createVoiceTurnProcessor(
           };
         }
       } catch (err) {
+        // Never map quota/breaker/provider brownouts to "didn't catch that".
+        const infraKind = classifyInfraFailure(err);
         logger.error('speechTurn: classifyIntent failed', {
           error: err instanceof Error ? err.message : String(err),
           sessionId: session.id,
+          infraKind,
         });
-        classifierEvent = {
-          type: 'intent_classified',
-          intentType: 'unknown',
-          entities: {},
-          confidence: 0,
-        };
+        if (isTransientInfraFailure(infraKind) && (session.aiInfraRetryCount ?? 0) < 1) {
+          session.aiInfraRetryCount = (session.aiInfraRetryCount ?? 0) + 1;
+          sideEffectsAll.push({
+            type: 'tts_play',
+            payload: { text: AI_BUSY_HOLD_LINE, source: 'ai_infrastructure_hold' },
+          });
+          await executeSideEffects(session, sideEffectsAll, tenantId);
+          appendAgentTts(deps.store, session.id, sideEffectsAll);
+          return sideEffectsAll;
+        }
+        sideEffectsAll.push(
+          ...session.machine.dispatch({
+            type: 'system_failure',
+            reason: systemFailureReasonForInfra(infraKind),
+          }),
+        );
+        await executeSideEffects(session, sideEffectsAll, tenantId);
+        appendAgentTts(deps.store, session.id, sideEffectsAll);
+        return sideEffectsAll;
       }
 
       // RV-071 — owner voice approval. Routed OUTSIDE the FSM (the

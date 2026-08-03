@@ -274,10 +274,17 @@ export interface CallingAgentContext {
   ownerSession?: boolean;
   /**
    * Phase-2 Track A — resolved once at session establishment from the
-   * tenant `voice_extended_intents` flag. When true the live-call
-   * classifier appends the extended owner-lookup/complaint prompt section.
+   * tenant `voice_extended_intents` flag + owner session. When true the
+   * live-call classifier appends owner extended READ-ONLY lookups
+   * (day overview / digest / pending items).
    */
   extendedIntents?: boolean;
+  /**
+   * Customer protection (complaint + negotiation). Always true on live
+   * telephony sessions so ordinary customers get the holding-line
+   * guardrails. Distinct from extendedIntents (owner lookups).
+   */
+  customerProtectionIntents?: boolean;
   /**
    * N-003 (P2-036) — set once the negotiation guardrail has fired this
    * session. The guardrail speaks a holding line on every negotiation turn

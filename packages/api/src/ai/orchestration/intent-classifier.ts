@@ -286,36 +286,58 @@ export function isLookupIntent(intent: IntentType | undefined | null): boolean {
 }
 
 /**
- * Phase-2 Track A — the full set of intents that require
- * `ClassifyContext.extendedIntents === true` to be actionable. Used
- * as a belt-and-braces dispatch gate: even if the LLM hallucinates one
- * of these without the opt-in flag, the router re-checks here and falls
- * through to the unknown/clarification path instead of acting on it.
+ * Customer-side protection intents: complaint + negotiation.
+ * These MUST be available on ordinary customer calls (not only owner
+ * sessions). Gated by `ClassifyContext.customerProtectionIntents` (or
+ * legacy `extendedIntents` for back-compat). Excluded from owner lookup
+ * skill routing.
  */
-export const EXTENDED_INTENT_TYPES = new Set<IntentType>([
+export const CUSTOMER_PROTECTION_INTENT_TYPES = new Set<IntentType>([
   'complaint',
   'negotiation',
+]);
+
+/**
+ * Owner/operator extended READ-ONLY lookups (day overview, digest, pending).
+ * Require `ClassifyContext.extendedIntents === true` (typically owner line
+ * + tenant flag). Never enabled for anonymous customers.
+ */
+export const OWNER_EXTENDED_LOOKUP_INTENT_TYPES = new Set<IntentType>([
   'lookup_day_overview',
   'lookup_digest',
   'lookup_pending_items',
 ]);
 
 /**
- * Extended intents that are NOT owner read-only lookups — they are
- * customer-side, proposal-driving intents (complaint, negotiation). Excluded
- * from OWNER_LOOKUP_INTENT_TYPES so the owner-lookup routing never treats them
- * as a read-only skill.
+ * Full set of "extended" intents for belt-and-braces routing.
+ * Prefer isCustomerProtectionIntent / isOwnerExtendedLookupIntent for
+ * new gates — this union remains for legacy checks.
  */
-const NON_LOOKUP_EXTENDED_INTENTS: ReadonlySet<IntentType> = new Set<IntentType>([
-  'complaint',
-  'negotiation',
+export const EXTENDED_INTENT_TYPES = new Set<IntentType>([
+  ...CUSTOMER_PROTECTION_INTENT_TYPES,
+  ...OWNER_EXTENDED_LOOKUP_INTENT_TYPES,
 ]);
 
-export const OWNER_LOOKUP_INTENT_TYPES = new Set<IntentType>(
-  [...EXTENDED_INTENT_TYPES].filter(
-    (intent): intent is IntentType => !NON_LOOKUP_EXTENDED_INTENTS.has(intent),
-  ),
-);
+/** @deprecated Use OWNER_EXTENDED_LOOKUP_INTENT_TYPES — same set. */
+export const OWNER_LOOKUP_INTENT_TYPES = OWNER_EXTENDED_LOOKUP_INTENT_TYPES;
+
+export function isCustomerProtectionIntent(
+  intent: IntentType | undefined | null,
+): boolean {
+  return (
+    typeof intent === 'string' &&
+    CUSTOMER_PROTECTION_INTENT_TYPES.has(intent as IntentType)
+  );
+}
+
+export function isOwnerExtendedLookupIntent(
+  intent: IntentType | undefined | null,
+): boolean {
+  return (
+    typeof intent === 'string' &&
+    OWNER_EXTENDED_LOOKUP_INTENT_TYPES.has(intent as IntentType)
+  );
+}
 
 export function isExtendedIntent(intent: IntentType | undefined | null): boolean {
   return typeof intent === 'string' && EXTENDED_INTENT_TYPES.has(intent as IntentType);
@@ -558,20 +580,22 @@ export interface ClassifyContext {
    */
   ownerSession?: boolean;
   /**
-   * Phase-2 Track A (RV-010/064/085/080) — opt-in for the extended
-   * operator intents (lookup_day_overview, lookup_digest,
-   * lookup_pending_items, complaint). When true:
-   *   - the EXTENDED_INTENTS_PROMPT_SECTION is appended as a SEPARATE
-   *     system message (non-opted calls keep byte-identical prompt
-   *     messages — voice-quality cassette hashes and gateway cache keys
-   *     are unaffected; same mechanism as RV-071's ownerSession), and
-   *   - the deterministic phrase matcher (matchExtendedIntentPhrase)
-   *     short-circuits stereotyped phrasings ("what's my day look
-   *     like?") without an LLM round-trip.
-   * When absent/false the new intents are never produced — existing
-   * call paths are bit-for-bit unchanged.
+   * Phase-2 Track A (RV-010/064/085) — opt-in for OWNER extended read-only
+   * lookups (lookup_day_overview, lookup_digest, lookup_pending_items).
+   * When true, EXTENDED_INTENTS_PROMPT_SECTION is appended and the
+   * deterministic phrase matcher short-circuits day/digest/pending
+   * phrasings. Complaint/negotiation are NOT gated here — see
+   * customerProtectionIntents.
    */
   extendedIntents?: boolean;
+  /**
+   * Customer protection intents (complaint, negotiation). When true,
+   * CUSTOMER_PROTECTION_PROMPT_SECTION is appended so haggling and
+   * dissatisfaction route to guardrails on ordinary customer calls.
+   * Telephony always sets this; legacy surfaces may omit (false).
+   * `extendedIntents: true` also unlocks these for back-compat (assistant).
+   */
+  customerProtectionIntents?: boolean;
 }
 
 /**
@@ -1257,33 +1281,14 @@ Notes:
   just extra optional keys inside extractedEntities.`;
 
 /**
- * Phase-2 Track A — extended operator intents prompt section. Delivered as
- * a SEPARATE system message, appended ONLY when
- * `ClassifyContext.extendedIntents` is true, so every non-opted call's
- * prompt stays byte-identical to the existing prompt (voice-quality
- * cassettes replay unchanged — the RV-071 mechanism).
+ * Customer protection intents — complaint + negotiation. Appended when
+ * `customerProtectionIntents` is true (live telephony for ALL callers) so
+ * a haggling or dissatisfied customer never falls through to "unknown".
+ * Separate from owner extended lookups to keep non-protection calls
+ * free of owner-only lookup taxonomy when only protection is enabled.
  */
-export const EXTENDED_INTENTS_PROMPT_SECTION = `Extended operator intents (this surface has opted in — these intents exist only on this call):
-- "lookup_day_overview" — the owner/operator asks for a morning overview of
-                           their day: schedule, priorities, overnight events,
-                           pending approvals. Read-only.
-                           Examples: "What's my day look like?"
-                                     "Give me my morning overview"
-                                     "What's on deck today?"
-- "lookup_digest"       — the owner asks to hear their stored end-of-day
-                           digest narrative. Read-only.
-                           Examples: "Read me my day"
-                                     "Read me my daily digest"
-                                     "What did the digest say?"
-- "lookup_pending_items" — the owner asks what they're WAITING ON from
-                           customers: estimates sent but not accepted,
-                           unpaid/overdue invoices, unanswered follow-up
-                           texts. Read-only.
-                           Examples: "What am I waiting on?"
-                                     "What's still out there?"
-                                     "Which estimates haven't been accepted?"
-- "complaint"            — the caller (or an operator relaying a call)
-                           reports DISSATISFACTION with work or service
+export const CUSTOMER_PROTECTION_PROMPT_SECTION = `Customer protection intents (enabled on this call — use when the caller is unhappy or haggling):
+- "complaint"            — the caller reports DISSATISFACTION with work or service
                            already delivered: poor workmanship, rude crew,
                            wrong charge, wants to escalate. Extract the
                            complaint text into noteBody, the customer into
@@ -1308,8 +1313,6 @@ export const EXTENDED_INTENTS_PROMPT_SECTION = `Extended operator intents (this 
                                      "Give me a refund or I'll leave a one-star review"
                                      "That's too expensive — any discount for cash?"
 Notes:
-- The lookup_* entries above are READ-ONLY intents — never classify a
-  command that creates or changes a record as one of them.
 - complaint vs negotiation: dissatisfaction with delivered work is "complaint"
   (even when it mentions a refund as redress). A demand aimed at getting a
   cheaper price/scope/terms is "negotiation". When both are present, prefer
@@ -1317,6 +1320,35 @@ Notes:
 - negotiation vs operator_request: "let me talk to the owner" with NO price/scope
   context is operator_request (a transfer). The same phrase used to haggle a
   price is "negotiation".
+- Do not change the JSON output schema.`;
+
+/**
+ * Owner/operator extended READ-ONLY lookups. Appended ONLY when
+ * `extendedIntents` is true (owner session + tenant flag typically).
+ * Complaint/negotiation live in CUSTOMER_PROTECTION_PROMPT_SECTION.
+ */
+export const EXTENDED_INTENTS_PROMPT_SECTION = `Extended operator intents (this surface has opted in — these intents exist only on this call):
+- "lookup_day_overview" — the owner/operator asks for a morning overview of
+                           their day: schedule, priorities, overnight events,
+                           pending approvals. Read-only.
+                           Examples: "What's my day look like?"
+                                     "Give me my morning overview"
+                                     "What's on deck today?"
+- "lookup_digest"       — the owner asks to hear their stored end-of-day
+                           digest narrative. Read-only.
+                           Examples: "Read me my day"
+                                     "Read me my daily digest"
+                                     "What did the digest say?"
+- "lookup_pending_items" — the owner asks what they're WAITING ON from
+                           customers: estimates sent but not accepted,
+                           unpaid/overdue invoices, unanswered follow-up
+                           texts. Read-only.
+                           Examples: "What am I waiting on?"
+                                     "What's still out there?"
+                                     "Which estimates haven't been accepted?"
+Notes:
+- The lookup_* entries above are READ-ONLY intents — never classify a
+  command that creates or changes a record as one of them.
 - Do not change the JSON output schema.`;
 
 interface OwnerOperatorCommandPattern {
@@ -1786,7 +1818,7 @@ async function classifyIntentRaw(
     if (matched) return matched;
   }
 
-  // Phase-2 Track A — deterministic extended-intent phrasings. Only on
+  // Phase-2 Track A — deterministic owner extended-intent phrasings. Only on
   // opted-in surfaces, BEFORE the LLM call: no gateway cost, no cassette
   // interaction, no model-drift regression for the canonical phrasings.
   if (context.extendedIntents === true) {
@@ -1828,10 +1860,15 @@ async function classifyIntentRaw(
   if (context.ownerSession === true) {
     systemMessages.push({ role: 'system', content: OWNER_APPROVAL_PROMPT_SECTION });
   }
-  // Phase-2 Track A — extended operator intents are documented to the model
-  // ONLY on opted-in surfaces. Appended last (after the owner section) so
-  // non-opted calls keep byte-identical messages (cassette hashes /
-  // gateway cache keys).
+  // Customer protection (complaint/negotiation): live telephony always opts
+  // in. Legacy extendedIntents also unlocks protection for back-compat
+  // (assistant / opted-in recorder).
+  const protectionOn =
+    context.customerProtectionIntents === true || context.extendedIntents === true;
+  if (protectionOn) {
+    systemMessages.push({ role: 'system', content: CUSTOMER_PROTECTION_PROMPT_SECTION });
+  }
+  // Owner extended READ-ONLY lookups — separate section, owner-flag only.
   if (context.extendedIntents === true) {
     systemMessages.push({ role: 'system', content: EXTENDED_INTENTS_PROMPT_SECTION });
   }

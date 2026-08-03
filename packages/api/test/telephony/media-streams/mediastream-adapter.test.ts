@@ -666,6 +666,13 @@ describe('P8-012 TwilioMediaStreamAdapter', () => {
     fillerEngine?: { selectNext(ctx?: { skipFillers?: boolean }): { id: string; text: string; approxDurationMs: number } | undefined };
     fillerDelayMs?: number;
     callSid?: string;
+    /** Override speechTurn (default returns []). Used by early-filler tests. */
+    speechTurn?: (args: {
+      session: NonNullable<ReturnType<VoiceSessionStore['findByCallSid']>>;
+      speechResult: string;
+      callSid: string;
+      tenantId: string;
+    }) => Promise<Array<{ type: string; payload?: Record<string, unknown> }>>;
     // Section 7 — escalate_with_context fan-out deps
     whisperCache?: WhisperCache;
     deliveryProvider?: { sendSms(args: { to: string; body: string }): Promise<unknown> };
@@ -690,7 +697,7 @@ describe('P8-012 TwilioMediaStreamAdapter', () => {
       {
         store,
         streamingProvider: opts.streamingProvider ?? defaultProvider,
-        speechTurn: async () => [],
+        speechTurn: (opts.speechTurn as never) ?? (async () => []),
         ttsProvider: opts.ttsProvider,
         terminologyProvider: opts.terminologyProvider,
         fillerCache: opts.fillerCache,
@@ -917,6 +924,117 @@ describe('P8-012 TwilioMediaStreamAdapter', () => {
 
       // The filler cache.get should never have been called — real TTS was fast.
       expect(fillerFetched).toBe(false);
+    });
+
+    it('U1: early filler plays before a slow speechTurn resolves', async () => {
+      let speechTurnStarted = false;
+      let speechTurnDone = false;
+      const fillerCache = makeFakeFillerCache(['okay']);
+      const fillerEngine = {
+        selectNext: () => ({ id: 'okay', text: 'Okay.', approxDurationMs: 260 }),
+      };
+      const fastTts = {
+        synthesize: vi.fn(),
+        synthesizeStream: vi.fn(() => ({
+          async *[Symbol.asyncIterator]() {
+            yield { pcm: Buffer.alloc(640), isFinal: true };
+          },
+        })),
+      };
+      const { ws, streamingProviderHandle: handle } = setupAdapter({
+        ttsProvider: fastTts,
+        fillerCache,
+        fillerEngine,
+        fillerDelayMs: 30,
+        callSid: 'CA-early-filler',
+        speechTurn: async () => {
+          speechTurnStarted = true;
+          await new Promise((r) => setTimeout(r, 200));
+          speechTurnDone = true;
+          return [{ type: 'tts_play', payload: { text: 'Booked for Tuesday.' } }];
+        },
+      });
+
+      ws.inboundJson({
+        event: 'start',
+        streamSid: 'MZ-early-filler',
+        start: {
+          callSid: 'CA-early-filler',
+          accountSid: 'AC',
+          streamSid: 'MZ-early-filler',
+          tracks: ['inbound'],
+        },
+      });
+      await new Promise((r) => setImmediate(r));
+
+      // Drive a final transcript through the streaming provider.
+      handle!.emit({
+        type: 'final',
+        isFinal: true,
+        transcript: 'I need a booking Tuesday',
+        confidence: 0.99,
+      });
+      await new Promise((r) => setImmediate(r));
+      expect(speechTurnStarted).toBe(true);
+
+      // Filler delay 30ms; speechTurn 200ms — media must appear before speechTurn ends.
+      await new Promise((r) => setTimeout(r, 80));
+      expect(speechTurnDone).toBe(false);
+      const mediaBeforeDone = ws.sent.filter(
+        (f) => (f as Record<string, unknown>).event === 'media',
+      );
+      expect(mediaBeforeDone.length).toBeGreaterThan(0);
+
+      // Let speechTurn finish and real TTS complete.
+      await new Promise((r) => setTimeout(r, 250));
+      expect(speechTurnDone).toBe(true);
+    });
+
+    it('U1: early filler is cancelled when speechTurn returns no tts_play', async () => {
+      const fillerCache = makeFakeFillerCache(['okay']);
+      let selectCount = 0;
+      const fillerEngine = {
+        selectNext: () => {
+          selectCount++;
+          return { id: 'okay', text: 'Okay.', approxDurationMs: 260 };
+        },
+      };
+      const { ws, streamingProviderHandle: handle, adapter } = setupAdapter({
+        fillerCache,
+        fillerEngine,
+        fillerDelayMs: 20,
+        callSid: 'CA-early-cancel',
+        speechTurn: async () => {
+          await new Promise((r) => setTimeout(r, 80));
+          return []; // no tts
+        },
+      });
+
+      ws.inboundJson({
+        event: 'start',
+        streamSid: 'MZ-early-cancel',
+        start: {
+          callSid: 'CA-early-cancel',
+          accountSid: 'AC',
+          streamSid: 'MZ-early-cancel',
+          tracks: ['inbound'],
+        },
+      });
+      await new Promise((r) => setImmediate(r));
+      handle!.emit({
+        type: 'final',
+        isFinal: true,
+        transcript: 'hello',
+        confidence: 0.99,
+      });
+      await new Promise((r) => setTimeout(r, 150));
+
+      const state = (
+        adapter as unknown as { state: { fillerActive: boolean; agentSpeaking: boolean } }
+      ).state;
+      expect(state.fillerActive).toBe(false);
+      expect(state.agentSpeaking).toBe(false);
+      expect(selectCount).toBeGreaterThanOrEqual(1);
     });
 
     it('cancels the filler cleanly when the real response arrives mid-filler', async () => {

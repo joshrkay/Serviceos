@@ -2093,7 +2093,7 @@ describe('Phase-2 Track A — extended intents routing', () => {
     expect(await proposalRepo.findByTenant('tenant-1')).toHaveLength(0);
   });
 
-  it('without the opt-in dep, classifier prompt messages keep the legacy single-system-message shape', async () => {
+  it('without the owner opt-in dep, classifier still gets customer protection but not owner lookups', async () => {
     const proposalRepo = new InMemoryProposalRepository();
     const gateway = gatewayReturning(['{"intentType":"unknown","confidence":0.9}']);
     const worker = createVoiceActionRouterWorker({ gateway, proposalRepo });
@@ -2105,8 +2105,14 @@ describe('Phase-2 Track A — extended intents routing', () => {
 
     const call = (gateway.complete as ReturnType<typeof vi.fn>).mock.calls[0][0];
     const systemMessages = call.messages.filter((m: { role: string }) => m.role === 'system');
-    expect(systemMessages).toHaveLength(1);
-    expect(systemMessages[0].content).not.toContain('lookup_day_overview');
+    // base + customer protection (router always enables protection)
+    expect(systemMessages.length).toBe(2);
+    expect(systemMessages.some((m: { content: string }) => m.content.includes('negotiation'))).toBe(
+      true,
+    );
+    expect(
+      systemMessages.some((m: { content: string }) => m.content.includes('lookup_day_overview')),
+    ).toBe(false);
   });
 
   it('extendedIntentsEnabled resolver failure is non-fatal (falls back to legacy prompt)', async () => {
@@ -2409,9 +2415,10 @@ describe('RV-080 — belt-and-braces extended intent dispatch gate', () => {
     return JSON.stringify({ intentType, confidence: 0.9 });
   }
 
-  const EXTENDED_INTENTS = ['complaint', 'lookup_day_overview', 'lookup_digest', 'lookup_pending_items'] as const;
+  // Owner extended LOOKUPS still require extendedIntentsEnabled.
+  const OWNER_LOOKUPS = ['lookup_day_overview', 'lookup_digest', 'lookup_pending_items'] as const;
 
-  for (const intentType of EXTENDED_INTENTS) {
+  for (const intentType of OWNER_LOOKUPS) {
     it(`${intentType}: routes to clarification when extendedIntentsEnabled is absent`, async () => {
       const proposalRepo = new InMemoryProposalRepository();
       const gateway = gatewayReturning([extendedIntentClassification(intentType)]);
@@ -2432,7 +2439,22 @@ describe('RV-080 — belt-and-braces extended intent dispatch gate', () => {
     });
   }
 
-  it('complaint: dispatches normally when extendedIntentsEnabled returns true', async () => {
+  it('complaint: dispatches without extendedIntentsEnabled (customer protection always on)', async () => {
+    const proposalRepo = new InMemoryProposalRepository();
+    const gateway = gatewayReturning([extendedIntentClassification('complaint')]);
+    // No extendedIntentsEnabled — protection intents still act.
+    const worker = createVoiceActionRouterWorker({ gateway, proposalRepo });
+
+    await worker.handle(
+      msg({ tenantId: 't-1', userId: 'op-1', transcript: 'I want to file a complaint' }),
+      silentLogger(),
+    );
+
+    const all = await proposalRepo.findByTenant('t-1');
+    expect(all.some((p) => p.proposalType === 'add_note')).toBe(true);
+  });
+
+  it('complaint: still dispatches when extendedIntentsEnabled returns true', async () => {
     const proposalRepo = new InMemoryProposalRepository();
     const gateway = gatewayReturning([extendedIntentClassification('complaint')]);
     const worker = createVoiceActionRouterWorker({

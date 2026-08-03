@@ -1557,7 +1557,7 @@ describe('TwilioGatherAdapter.handleGather', () => {
     });
   });
 
-  it('flag-off live calls omit extendedIntents from classifier context and resolve the flag once per call', async () => {
+  it('flag-off live calls omit owner lookups but still append customer protection', async () => {
     const extendedIntentsEnabled = vi.fn(async () => false);
     const gateway = makeGatewayReturning('{"intentType":"unknown","confidence":0.2}');
     const store = new VoiceSessionStore();
@@ -1591,11 +1591,19 @@ describe('TwilioGatherAdapter.handleGather', () => {
     expect(extendedIntentsEnabled).toHaveBeenCalledTimes(1);
     const call = (gateway.complete as ReturnType<typeof vi.fn>).mock.calls[0][0];
     const systemMessages = call.messages.filter((m: { role: string }) => m.role === 'system');
-    expect(systemMessages).toHaveLength(1);
-    expect(systemMessages[0].content).not.toContain('lookup_day_overview');
+    // base + customer protection (complaint/negotiation) — no owner lookups
+    expect(systemMessages.length).toBeGreaterThanOrEqual(2);
+    expect(systemMessages.some((m: { content: string }) => m.content.includes('negotiation'))).toBe(
+      true,
+    );
+    expect(
+      systemMessages.some((m: { content: string }) => m.content.includes('lookup_day_overview')),
+    ).toBe(false);
+    const session = await store.get(sid);
+    expect(session?.machine.currentContext.customerProtectionIntents).toBe(true);
   });
 
-  it('flag-on customer calls keep the legacy classifier prompt while flag-on owner calls append extended intents', async () => {
+  it('customer calls get protection intents; owner+flag also gets extended lookups', async () => {
     const settingsRepo = new InMemorySettingsRepository();
     const now = new Date();
     await settingsRepo.create({
@@ -1663,9 +1671,22 @@ describe('TwilioGatherAdapter.handleGather', () => {
     const calls = (gateway.complete as ReturnType<typeof vi.fn>).mock.calls;
     const customerSystemMessages = calls[0][0].messages.filter((m: { role: string }) => m.role === 'system');
     const ownerSystemMessages = calls[1][0].messages.filter((m: { role: string }) => m.role === 'system');
-    expect(customerSystemMessages).toHaveLength(1);
-    expect(customerSystemMessages[0].content).not.toContain('lookup_day_overview');
-    expect(ownerSystemMessages.some((m: { content: string }) => m.content.includes('lookup_day_overview'))).toBe(true);
+    // Customer: base + protection, no owner day overview
+    expect(
+      customerSystemMessages.some((m: { content: string }) => m.content.includes('negotiation')),
+    ).toBe(true);
+    expect(
+      customerSystemMessages.some((m: { content: string }) =>
+        m.content.includes('lookup_day_overview'),
+      ),
+    ).toBe(false);
+    // Owner: protection + extended lookups
+    expect(
+      ownerSystemMessages.some((m: { content: string }) => m.content.includes('lookup_day_overview')),
+    ).toBe(true);
+    expect(
+      ownerSystemMessages.some((m: { content: string }) => m.content.includes('negotiation')),
+    ).toBe(true);
   });
 
   it('extended-intents resolver error is non-fatal and resolves false for the session', async () => {
@@ -1702,8 +1723,14 @@ describe('TwilioGatherAdapter.handleGather', () => {
 
     const call = (gateway.complete as ReturnType<typeof vi.fn>).mock.calls[0][0];
     const systemMessages = call.messages.filter((m: { role: string }) => m.role === 'system');
-    expect(systemMessages).toHaveLength(1);
-    expect(systemMessages[0].content).not.toContain('lookup_day_overview');
+    // Customer protection still on; owner lookups off when flag resolver fails.
+    expect(systemMessages.length).toBe(2);
+    expect(
+      systemMessages.some((m: { content: string }) => m.content.includes('lookup_day_overview')),
+    ).toBe(false);
+    expect(
+      systemMessages.some((m: { content: string }) => m.content.includes('negotiation')),
+    ).toBe(true);
   });
 
   it('emergency_dispatch fast-paths to escalating and skips intent_confirm', async () => {

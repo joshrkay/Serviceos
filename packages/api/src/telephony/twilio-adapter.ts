@@ -1130,15 +1130,19 @@ export class TwilioGatherAdapter {
     // RV-070 — owner-line recognition happens at session establishment:
     // recognized owner line (caller-ID match; see approver-identity.ts).
     const ownerSession = await this.resolveOwnerSession(opts.tenantId, opts.from);
-    // Live-call customer complaint handling is unwired today; revisit this AND
-    // when the FSM complaint path ships.
+    // Owner extended lookups (day/digest/pending) stay owner+flag gated.
     const extendedIntents = extendedIntentsFlag && ownerSession;
+    // Customer protection (complaint/negotiation) is ALWAYS on for live
+    // telephony — ordinary customers must hit the holding-line guardrails,
+    // not "unknown". Separate from extendedIntents.
+    const customerProtectionIntents = true;
     const session = this.deps.store.create(opts.tenantId, 'telephony', {
       callSid: opts.callSid,
       ...(repairTemplates.length > 0 ? { repairTemplates } : {}),
       ...(escalationTriggers ? { escalationTriggers } : {}),
       ...(ownerSession ? { ownerSession: true } : {}),
       ...(extendedIntents ? { extendedIntents: true } : {}),
+      ...(customerProtectionIntents ? { customerProtectionIntents: true } : {}),
     });
     // WS5 — kick off the tenant-catalog load ONCE at session establishment so
     // in-call estimate grounding has the active catalog in hand synchronously
@@ -2313,9 +2317,13 @@ export class TwilioGatherAdapter {
             ...(session.machine.currentContext.extendedIntents === true
               ? { extendedIntents: true }
               : {}),
+            ...(session.machine.currentContext.customerProtectionIntents === true
+              ? { customerProtectionIntents: true }
+              : {}),
           },
           this.deps.gateway,
         );
+        session.aiInfraRetryCount = 0;
         // VQ-003: surface the classifier outcome for the harness.
         session.events.emit(
           'voice-event',
@@ -2350,16 +2358,37 @@ export class TwilioGatherAdapter {
           };
         }
       } catch (err) {
+        // Honest infra failure path (quota/breaker/provider) — never
+        // "didn't catch that". Mirrors create-voice-turn-processor.
+        const {
+          AI_BUSY_HOLD_LINE,
+          classifyInfraFailure,
+          isTransientInfraFailure,
+          systemFailureReasonForInfra,
+        } = await import('../ai/voice-turn/classify-infra-failure');
+        const infraKind = classifyInfraFailure(err);
         logger.error('classifyIntent failed in handleGather', {
           error: err instanceof Error ? err.message : String(err),
           sessionId: opts.sessionId,
+          infraKind,
         });
-        classifierEvent = {
-          type: 'intent_classified',
-          intentType: 'unknown',
-          entities: {},
-          confidence: 0,
-        };
+        if (isTransientInfraFailure(infraKind) && (session.aiInfraRetryCount ?? 0) < 1) {
+          session.aiInfraRetryCount = (session.aiInfraRetryCount ?? 0) + 1;
+          sideEffectsAll.push({
+            type: 'tts_play',
+            payload: { text: AI_BUSY_HOLD_LINE, source: 'ai_infrastructure_hold' },
+          });
+          await this.processor.executeSideEffects(session, sideEffectsAll, opts.tenantId);
+          return this.finalizeTwiml(session, sideEffectsAll, opts.sessionId);
+        }
+        sideEffectsAll.push(
+          ...session.machine.dispatch({
+            type: 'system_failure',
+            reason: systemFailureReasonForInfra(infraKind),
+          }),
+        );
+        await this.processor.executeSideEffects(session, sideEffectsAll, opts.tenantId);
+        return this.finalizeTwiml(session, sideEffectsAll, opts.sessionId);
       }
 
       // P11-001: lookup intents bypass the proposal-draft path. Route

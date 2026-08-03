@@ -1,0 +1,75 @@
+# Real-LLM path smoke over the critical agent graph (book / quote / escalate /
+# negotiate / complaint / Spanish). Complements the mock Layer-1 voice-quality
+# gate: this actually calls the production classifier with a live model.
+#
+# Cost: ~9 classify calls, capped at AGENT_PATH_SMOKE_COST_CAP_CENTS (default $1).
+# Fork-safe: skips with a warning when ANTHROPIC_API_KEY is absent.
+name: Agent Path Smoke
+
+on:
+  pull_request:
+    paths:
+      - 'packages/api/src/ai/**'
+      - 'packages/api/scripts/agent-path-smoke.ts'
+      - 'packages/api/scripts/agent-graph-coverage.ts'
+      - 'packages/api/src/ai/voice-quality/**'
+      - '.github/workflows/agent-path-smoke.yml'
+  workflow_dispatch:
+  schedule:
+    # Daily 06:30 UTC — offset from voice-eval-live Monday job
+    - cron: '30 6 * * *'
+
+permissions:
+  contents: read
+
+jobs:
+  path-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      # ~$1 default; suite is ~9 Haiku classify calls.
+      AGENT_PATH_SMOKE_COST_CAP_CENTS: '100'
+      AGENT_PATH_SMOKE_PASS_RATIO: '0.8'
+      AGENT_PATH_SMOKE_OUT: agent-path-smoke-report.json
+    steps:
+      - uses: actions/checkout@v5
+      - name: Check for API key (fork safety)
+        id: check
+        run: |
+          if [ -z "$ANTHROPIC_API_KEY" ]; then
+            echo "::warning::ANTHROPIC_API_KEY is not set — skipping real-LLM path smoke."
+            echo "This is expected on forks / when the secret is unavailable; a skipped run is NOT a passing gate."
+            echo "has_key=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "API key present."
+            echo "has_key=true" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: actions/setup-node@v7
+        if: steps.check.outputs.has_key == 'true'
+        with:
+          node-version-file: '.nvmrc'
+          cache: 'npm'
+      - name: Install deps
+        if: steps.check.outputs.has_key == 'true'
+        run: npm ci
+      - name: Offline graph coverage (always meaningful)
+        if: steps.check.outputs.has_key == 'true'
+        run: npm run agent:graph-coverage --workspace=packages/api -- --gate --markdown
+      - name: Real-LLM path smoke (gated)
+        if: steps.check.outputs.has_key == 'true'
+        run: |
+          set -o pipefail
+          npm run agent:path-smoke --workspace=packages/api -- --gate \
+            | tee agent-path-smoke-console.txt
+      - name: Upload path-smoke report
+        if: always() && steps.check.outputs.has_key == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: agent-path-smoke-report
+          path: |
+            agent-path-smoke-report.json
+            agent-path-smoke-console.txt
+          retention-days: 90
+          if-no-files-found: ignore
