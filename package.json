@@ -96,7 +96,7 @@
     "@testcontainers/postgresql": "^11.13.0",
     "@types/pg": "^8.18.0",
     "@vitest/coverage-v8": "^4.1.10",
-    "eslint": "^9.39.5",
+    "eslint": "^10.8.0",
     "eslint-plugin-react-hooks": "^7.1.1",
     "globals": "^16.5.0",
     "pg": "^8.20.0",
