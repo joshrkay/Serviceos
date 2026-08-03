@@ -55,7 +55,7 @@ jobs:
           STAGING_DB_URL: ${{ secrets.STAGING_DB_URL }}
       - name: Notify Slack on failure
         if: failure()
-        uses: slackapi/slack-github-action@v1.27.0
+        uses: slackapi/slack-github-action@v1.27.1
         with:
           payload: |
             {
