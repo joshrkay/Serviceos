@@ -117,7 +117,7 @@ jobs:
 
       - name: Upload QA report artifacts
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: qa-matrix-report-${{ github.run_id }}
           path: qa/reports/

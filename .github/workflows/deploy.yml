@@ -89,7 +89,7 @@ jobs:
           VOICE_QUALITY_ENFORCE_LAUNCH_GATE: 'true'
       - name: Upload voice quality report
         if: always()
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v7
         with:
           name: deploy-voice-quality-report
           path: packages/api/voice-quality-report.json
