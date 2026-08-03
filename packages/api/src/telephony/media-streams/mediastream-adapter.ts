@@ -604,6 +604,22 @@ interface RuntimeState {
    */
   fillerActive: boolean;
   /**
+   * U1 — timer for filler armed at STT-final (before speechTurn/LLM).
+   * Cleared when speechTurn completes, barge-in fires, or real TTS starts.
+   */
+  earlyFillerTimer: NodeJS.Timeout | null;
+  /**
+   * U1 — outboundTurnId used by the early (thinking-gap) filler stream.
+   * Bumping outboundTurnId cancels it the same way as post-answer fillers.
+   */
+  earlyFillerTurnId: number | null;
+  /**
+   * U1/U2 — true after early filler has contributed the turn's first-audible
+   * frame (so first-audio latency is measured once). Distinct from
+   * awaitingFirstAudioFrame which still tracks first REAL (non-filler) TTS.
+   */
+  earlyFillerFirstAudioObserved: boolean;
+  /**
    * Consent ordering — per-TURN completion flag. Set true ONLY where a turn
    * finished playing its COMPLETE real (non-filler) TTS: the streaming loop
    * running to its end, the buffered synth success, or the recovery path's
@@ -922,6 +938,9 @@ export class TwilioMediaStreamAdapter {
       awaitingFirstAudioFrame: false,
       turnLatencyStartMs: null,
       fillerActive: false,
+      earlyFillerTimer: null,
+      earlyFillerTurnId: null,
+      earlyFillerFirstAudioObserved: false,
       turnRealAudioComplete: false,
       turnAudioBytes: 0,
       disclosureAudioBytes: 0,
@@ -1630,10 +1649,15 @@ export class TwilioMediaStreamAdapter {
     // `audio_frame_emitted`. Emitted BEFORE speechTurn to capture the
     // full agent-thinking window.
     this.state.awaitingFirstAudioFrame = true;
+    this.state.earlyFillerFirstAudioObserved = false;
     // WS26 — stamp the turn-latency start (STT-final). Plain assignment; a
     // metrics failure can only happen at observe() time, which is wrapped.
     this.state.turnLatencyStartMs = Date.now();
     session.events.emit(VOICE_EVENT_CHANNEL, transcriptReceivedEvent());
+
+    // U1 — arm filler at STT-final so callers hear audio during the LLM gap,
+    // not only during TTS TTFB after speechTurn returns.
+    this.armEarlyFiller();
 
     let sideEffects: SideEffect[] = [];
     try {
@@ -1650,6 +1674,8 @@ export class TwilioMediaStreamAdapter {
         error: err instanceof Error ? err.message : String(err),
         sessionId: session.id,
       });
+      // Cancel thinking-gap filler before recovery apology TTS takes over.
+      this.cancelEarlyFiller();
       // VOX-35c — the turn threw inside the session lock. The old code just
       // returned, so the caller heard pure silence for this turn (the
       // inbound analogue of the VOX-35b mid-stream dead-air bug). Speak a
@@ -1664,6 +1690,17 @@ export class TwilioMediaStreamAdapter {
     // later isolated blip still gets its own apology+reprompt (not an
     // immediate escalation off a stale count).
     this.state.consecutiveSpeechTurnFailures = 0;
+
+    // Stop pending early-filler timer; an in-flight early filler clip is
+    // cancelled when emitSideEffects bumps outboundTurnId for real TTS.
+    // If there is no tts_play at all, cancel fully so we don't leave
+    // agentSpeaking stuck true from an early filler.
+    const hasTts = sideEffects.some((fx) => fx.type === 'tts_play');
+    if (!hasTts) {
+      this.cancelEarlyFiller();
+    } else {
+      this.clearEarlyFillerTimerOnly();
+    }
 
     await this.emitSideEffects(sideEffects);
 
@@ -2520,6 +2557,78 @@ export class TwilioMediaStreamAdapter {
   }
 
   /**
+   * U1 — arm a thinking-gap filler at STT-final, before `speechTurn`/LLM.
+   * Uses the same engine/cache/delay as post-answer fillers. Requires
+   * agentSpeaking so streamPcmAsMedia accepts frames; barge-in clears both.
+   * Early filler never counts as disclosure (isFiller=true path).
+   */
+  private armEarlyFiller(): void {
+    this.clearEarlyFillerTimerOnly();
+    const engine = this.deps.fillerEngine;
+    const cache = this.deps.fillerCache;
+    if (!engine || !cache || this.state.closed) return;
+    // Don't stack on top of an already-speaking agent turn.
+    if (this.state.agentSpeaking && !this.state.fillerActive) return;
+
+    const delayMs = this.deps.fillerDelayMs ?? 250;
+    const lang = this.currentSpokenLanguage();
+    const timer = setTimeout(() => {
+      this.state.earlyFillerTimer = null;
+      if (this.state.closed || this.state.ttsController) return;
+      // Real TTS turn already owns the line.
+      if (this.state.agentSpeaking && !this.state.fillerActive && this.state.earlyFillerTurnId === null) {
+        return;
+      }
+      const filler = engine.selectNext({ language: lang });
+      if (!filler) return;
+      const pcm = cache.get(filler.id);
+      if (!pcm) return;
+
+      const turnId = ++this.state.outboundTurnId;
+      this.state.earlyFillerTurnId = turnId;
+      this.state.agentSpeaking = true;
+      this.state.fillerActive = true;
+      void this.streamPcmAsMedia(pcm, turnId, /* isFiller */ true).catch(() => undefined);
+      if (this.state.session) {
+        this.state.session.events.emit(
+          VOICE_EVENT_CHANNEL,
+          fillerFiredEvent({ fillerText: filler.text }),
+        );
+      }
+    }, delayMs);
+    if (typeof timer.unref === 'function') timer.unref();
+    this.state.earlyFillerTimer = timer;
+  }
+
+  /** Clear the early-filler timer without touching an already-streaming clip. */
+  private clearEarlyFillerTimerOnly(): void {
+    if (this.state.earlyFillerTimer) {
+      clearTimeout(this.state.earlyFillerTimer);
+      this.state.earlyFillerTimer = null;
+    }
+  }
+
+  /**
+   * Cancel early filler timer + any in-flight early filler stream.
+   * Safe to call when no early filler was armed.
+   */
+  private cancelEarlyFiller(): void {
+    this.clearEarlyFillerTimerOnly();
+    if (this.state.earlyFillerTurnId !== null && this.state.fillerActive) {
+      this.state.fillerActive = false;
+      if (this.state.session) {
+        this.state.session.events.emit(
+          VOICE_EVENT_CHANNEL,
+          fillerCancelledEvent({ fillerText: '' }),
+        );
+      }
+      this.state.outboundTurnId++;
+      this.state.agentSpeaking = false;
+    }
+    this.state.earlyFillerTurnId = null;
+  }
+
+  /**
    * Run a single TTS turn, optionally preceded by a filler clip if the
    * real TTS has not started streaming within `fillerDelayMs` (default 250ms).
    *
@@ -2528,6 +2637,9 @@ export class TwilioMediaStreamAdapter {
    * already in-flight (e.g. buffered provider), the timer is a no-op because
    * `realStarted` will be true. The existing barge-in machinery (bargeIn())
    * cancels both filler and real audio together when the caller speaks.
+   *
+   * U1 note: thinking-gap filler may already be mid-stream from
+   * `armEarlyFiller`; the first real TTS chunk cancels it via turnId bump.
    */
   private async runTurnWithFiller(
     ttsProvider: TtsProvider,
@@ -2855,18 +2967,32 @@ export class TwilioMediaStreamAdapter {
       // enqueued for this turn, so the lost-ack backstop can wait out its true
       // playback duration rather than a fixed constant.
       if (!isFiller) this.state.turnAudioBytes += chunk.length;
+      // U2 — first-audible latency: early filler counts as first audio so the
+      // thinking-gap arm is measurable. Still emit audio_frame_emitted only
+      // for REAL TTS (awaitingFirstAudioFrame) so TTFA graders stay answer-
+      // focused; first-audible is observed via observeTurnLatency once.
+      if (
+        isFiller &&
+        !this.state.earlyFillerFirstAudioObserved &&
+        this.state.turnLatencyStartMs !== null
+      ) {
+        this.state.earlyFillerFirstAudioObserved = true;
+        observeTurnLatency(this.state.turnLatencyStartMs);
+        // Keep turnLatencyStartMs for optional real-TTS delta until real
+        // frame arrives; clear so we don't double-observe if only filler.
+        // Real TTS path below re-observes only if startMs still set — we
+        // clear here so histogram records first-audible (filler), not
+        // first-real. Product SLO is "caller hears something".
+        this.state.turnLatencyStartMs = null;
+      }
       // VQ2-004: TTFA-stop. Emit `audio_frame_emitted` ONCE per turn,
-      // on the first chunk that lands on the queue. The flag is armed
+      // on the first REAL (non-filler) chunk. The flag is armed
       // by `onTranscriptEvent` and disarmed here so subsequent chunks
       // in the same turn (and barge-in `clear` events) don't re-emit.
-      // Skip when this chunk is a filler — filler audio fills the LLM
-      // thinking gap and would otherwise poison the TTFA metric.
       if (!isFiller && this.state.awaitingFirstAudioFrame && this.state.session) {
         this.state.awaitingFirstAudioFrame = false;
-        // WS26 — observe voice turn latency at the first real (non-filler)
-        // outbound chunk. Best-effort + exception-proof (observeTurnLatency
-        // swallows any metrics error); done BEFORE the event emit so a
-        // metrics failure can't disturb the existing TTFA telemetry either.
+        // WS26 — if early filler already consumed turnLatencyStartMs, this
+        // is a no-op; otherwise observe first-real when no filler played.
         observeTurnLatency(this.state.turnLatencyStartMs);
         this.state.turnLatencyStartMs = null;
         this.state.session.events.emit(
@@ -2931,6 +3057,8 @@ export class TwilioMediaStreamAdapter {
    */
   private bargeIn(): void {
     this.clearSilenceRepromptTimer();
+    this.clearEarlyFillerTimerOnly();
+    this.state.earlyFillerTurnId = null;
     this.state.ttsController?.abort();
     // If a filler clip was mid-stream when barge-in fires, emit the
     // cancellation event and clear the flag before bumping the turn.
