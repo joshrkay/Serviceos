@@ -68,6 +68,14 @@ export class ApplyLateFeeExecutionHandler implements ExecutionHandler {
     private readonly moneyStateDeps?: RefreshJobMoneyStateDeps,
   ) {}
 
+  // U8 — degrades to an echo passthrough (charges nothing) without the
+  // invoice repo — see execute(). The boot guard (wiring-assertions.ts) fails
+  // boot when a pool is configured but this is false, so a spoken late fee
+  // can never report success while appending no fee line in production.
+  isFullyWired(): boolean {
+    return Boolean(this.invoiceRepo);
+  }
+
   async execute(
     proposal: Proposal,
     context: ExecutionContext,

@@ -56,8 +56,9 @@ cited test, confirm it exists, run it, and confirm it asserts what is claimed:
 ## The two conditional rows — the honesty test of this whole run
 
 **B1.18 and B9.1 may ONLY score rung 5 if the corresponding Part F entry is RATIFIED by the
-product owner** (`docs/PRD-v4-part-F-decisions.md`, entries F-2 and F-1). Both are currently
-marked **PROPOSED**.
+product owner** (`docs/PRD-v4-part-F-decisions.md`, entries F-2 and F-1). Both were **PROPOSED**
+when the 2026-08-01 re-measurement ran (it therefore reported 12/19); both have since been
+**RATIFIED (2026-08-01)** — verify the current status in the decisions file at measurement time.
 
 - If an entry is still PROPOSED or was rejected at the time you measure, that row is **red**, and
   the total is reported one lower per unratified entry.

@@ -723,6 +723,37 @@ export interface ProposalRepository {
       >
     >
   ): Promise<Proposal | null>;
+  /**
+   * ANS-001 — CONDITIONAL status write. Moves the proposal to `status` ONLY
+   * while its current status is still one of `fromStatuses`, in a single
+   * atomic statement. Use this instead of a read→`updateStatus` pair whenever
+   * the write must not clobber a concurrent transition (the E1 booking
+   * revocation races the execution worker: a proposal can go
+   * approved→executing→executed between the read and the write).
+   *
+   * Returns the updated proposal, or null when the precondition missed (the
+   * row moved on, or it isn't this tenant's).
+   */
+  updateStatusIf(
+    tenantId: string,
+    id: string,
+    fromStatuses: ProposalStatus[],
+    to: ProposalStatus,
+    updates?: Partial<
+      Pick<
+        Proposal,
+        | 'rejectionReason'
+        | 'rejectionDetails'
+        | 'resultEntityId'
+        | 'approvedAt'
+        | 'executedAt'
+        | 'executedBy'
+        | 'executionError'
+        | 'undoneAt'
+        | 'undoneBy'
+      >
+    >
+  ): Promise<Proposal | null>;
   update(
     tenantId: string,
     id: string,
@@ -1197,6 +1228,35 @@ export class InMemoryProposalRepository implements ProposalRepository {
 
     this.proposals.set(id, proposal);
     return { ...proposal };
+  }
+
+  async updateStatusIf(
+    tenantId: string,
+    id: string,
+    fromStatuses: ProposalStatus[],
+    to: ProposalStatus,
+    updates?: Partial<
+      Pick<
+        Proposal,
+        | 'rejectionReason'
+        | 'rejectionDetails'
+        | 'resultEntityId'
+        | 'approvedAt'
+        | 'executedAt'
+        | 'executedBy'
+        | 'executionError'
+        | 'undoneAt'
+        | 'undoneBy'
+      >
+    >
+  ): Promise<Proposal | null> {
+    // Same precondition the pg impl folds into its WHERE clause: the row must
+    // exist, belong to this tenant, and still sit in one of `fromStatuses`.
+    // Single-threaded here, so the check + write are trivially atomic.
+    const proposal = this.proposals.get(id);
+    if (!proposal || proposal.tenantId !== tenantId) return null;
+    if (!fromStatuses.includes(proposal.status)) return null;
+    return this.updateStatus(tenantId, id, to, updates);
   }
 
   async update(

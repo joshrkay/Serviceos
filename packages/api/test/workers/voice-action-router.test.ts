@@ -27,6 +27,12 @@ import { missingFieldsFor } from '../../src/proposals/proposal';
 import { InMemoryAppointmentRepository } from '../../src/appointments/in-memory-appointment';
 import { InMemoryCustomerRepository } from '../../src/customers/customer';
 import { InMemoryVoiceRepository } from '../../src/voice/voice-service';
+import { InMemoryAuditRepository } from '../../src/audit/audit';
+import { InMemoryLeadRepository, type Lead } from '../../src/leads/lead';
+import {
+  createCatalogItem,
+  InMemoryCatalogItemRepository,
+} from '../../src/catalog/catalog-item';
 import type { LLMGateway, LLMResponse } from '../../src/ai/gateway/gateway';
 import type { IntentClassification } from '../../src/ai/orchestration/intent-classifier';
 import type { QueueMessage } from '../../src/queues/queue';
@@ -2895,5 +2901,368 @@ describe('voice-action-router U3 lookup answers (recorded-memo path)', () => {
     expect(await proposalRepo.findByTenant(TENANT)).toHaveLength(1);
     const rec = await voiceRepo.findById(TENANT, RECORDING_ID);
     expect(rec?.answerStatus).toBe('proposal');
+  });
+
+  // U7 — operator-surface lookup parity: lookup_leads / lookup_catalog now
+  // answer on the memo path via the SAME shared skills telephony calls,
+  // instead of falling through to the `unsupported` skip.
+  describe('U7 operator-surface lookup parity (leads, catalog)', () => {
+    function lead(id: string, stage: Lead['stage']): Lead {
+      const now = new Date();
+      return {
+        id,
+        tenantId: TENANT,
+        firstName: 'Lead',
+        lastName: id,
+        source: 'phone_call',
+        stage,
+        createdBy: 'user-owner',
+        createdAt: now,
+        updatedAt: now,
+      };
+    }
+
+    function seededCatalogRepo(): InMemoryCatalogItemRepository {
+      const repo = new InMemoryCatalogItemRepository();
+      void repo.create(
+        createCatalogItem({
+          tenantId: TENANT,
+          name: 'Drain cleaning',
+          category: 'Labor',
+          unit: 'hour',
+          unitPriceCents: 22500,
+        }),
+      );
+      void repo.create(
+        createCatalogItem({
+          tenantId: TENANT,
+          name: 'Water heater flush',
+          category: 'Labor',
+          unit: 'each',
+          unitPriceCents: 14900,
+        }),
+      );
+      return repo;
+    }
+
+    it('lookup_leads answers on the memo path and emits the voice_lookup_answered audit event', async () => {
+      const proposalRepo = new InMemoryProposalRepository();
+      const voiceRepo = seededVoiceRepo('user-tech');
+      const auditRepo = new InMemoryAuditRepository();
+      const lookupEvents = lookupEventsSpy();
+      const gateway = gatewayReturning([classify('lookup_leads')]);
+      const leadRepo = new InMemoryLeadRepository();
+      await leadRepo.create(lead('lead-1', 'new'));
+      await leadRepo.create(lead('lead-2', 'qualified'));
+      await leadRepo.create(lead('lead-3', 'won')); // closed — not "open"
+      // Technicians hold `customers:view` (the GET /api/leads gate), so the
+      // same role that can open the leads screen gets the spoken answer.
+      const resolveMemberRole = vi.fn(async () => 'technician');
+
+      const worker = createVoiceActionRouterWorker({
+        gateway,
+        proposalRepo,
+        voiceRepo,
+        auditRepo,
+        lookupAnswers: {
+          leadRepo,
+          lookupEvents: lookupEvents as never,
+          resolveMemberRole,
+        },
+      });
+
+      await worker.handle(
+        msg({
+          tenantId: TENANT,
+          userId: 'system',
+          transcript: 'how many open leads do we have',
+          recordingId: RECORDING_ID,
+        }),
+        silentLogger(),
+      );
+
+      // Role resolved from the RECORDING's creator, like the owner reports.
+      expect(resolveMemberRole).toHaveBeenCalledWith(TENANT, 'user-tech');
+
+      const rec = await voiceRepo.findById(TENANT, RECORDING_ID);
+      expect(rec?.answerStatus).toBe('answered');
+      expect(rec?.answer?.result).toBe('found');
+      // The skill's real data-derived copy — won/lost leads excluded.
+      expect(rec?.answer?.summary).toBe('There are 2 open leads in the pipeline.');
+      expect(rec?.answer?.rows).toContainEqual({ kind: 'count', label: 'Open leads', count: 2 });
+      expect(await proposalRepo.findByTenant(TENANT)).toHaveLength(0);
+
+      // voice_lookup_answered parity with the other lookups (router :2429).
+      const audited = (await auditRepo.findByEntity(TENANT, 'voice_recording', RECORDING_ID)).filter(
+        (e) => e.eventType === 'voice_lookup_answered',
+      );
+      expect(audited).toHaveLength(1);
+      expect(audited[0].metadata).toMatchObject({
+        intent: 'lookup_leads',
+        answerStatus: 'answered',
+        result: 'found',
+      });
+      // Same lookup_events analytics row telephony writes.
+      expect(lookupEvents.record).toHaveBeenCalledWith(
+        expect.objectContaining({
+          tenantId: TENANT,
+          intent: 'lookup_leads',
+          sessionId: RECORDING_ID,
+          resultStatus: 'found',
+        }),
+      );
+    });
+
+    it('empty lead pipeline answers honestly with result=none (no fabrication)', async () => {
+      const proposalRepo = new InMemoryProposalRepository();
+      const voiceRepo = seededVoiceRepo();
+      const gateway = gatewayReturning([classify('lookup_leads')]);
+
+      const worker = createVoiceActionRouterWorker({
+        gateway,
+        proposalRepo,
+        voiceRepo,
+        lookupAnswers: {
+          leadRepo: new InMemoryLeadRepository(),
+          resolveMemberRole: vi.fn(async () => 'owner'),
+        },
+      });
+
+      await worker.handle(
+        msg({
+          tenantId: TENANT,
+          userId: 'system',
+          transcript: 'how many open leads do we have',
+          recordingId: RECORDING_ID,
+        }),
+        silentLogger(),
+      );
+
+      const rec = await voiceRepo.findById(TENANT, RECORDING_ID);
+      expect(rec?.answerStatus).toBe('answered');
+      expect(rec?.answer?.result).toBe('none');
+      // The skill's honest empty-state copy, verbatim — never an invention.
+      expect(rec?.answer?.summary).toBe('There are no open leads in the pipeline right now.');
+      expect(rec?.answer?.rows).toEqual([]);
+    });
+
+    it('owner-recorded catalog ask answers with integer-cents price rows', async () => {
+      const proposalRepo = new InMemoryProposalRepository();
+      const voiceRepo = seededVoiceRepo('user-owner');
+      const gateway = gatewayReturning([classify('lookup_catalog')]);
+
+      const worker = createVoiceActionRouterWorker({
+        gateway,
+        proposalRepo,
+        voiceRepo,
+        lookupAnswers: {
+          catalogRepo: seededCatalogRepo(),
+          resolveMemberRole: vi.fn(async () => 'owner'),
+        },
+      });
+
+      await worker.handle(
+        msg({
+          tenantId: TENANT,
+          userId: 'system',
+          transcript: 'what services do we offer',
+          recordingId: RECORDING_ID,
+        }),
+        silentLogger(),
+      );
+
+      const rec = await voiceRepo.findById(TENANT, RECORDING_ID);
+      expect(rec?.answerStatus).toBe('answered');
+      expect(rec?.answer?.result).toBe('found');
+      expect(rec?.answer?.summary).toContain('Drain cleaning');
+      expect(rec?.answer?.summary).toContain('Water heater flush');
+      expect(rec?.answer?.rows).toContainEqual({ kind: 'count', label: 'Catalog items', count: 2 });
+      // The catalog's exact integer cents ride the rows — never floats.
+      expect(rec?.answer?.rows).toContainEqual({
+        kind: 'money',
+        label: 'Drain cleaning',
+        amountCents: 22500,
+      });
+      expect(await proposalRepo.findByTenant(TENANT)).toHaveLength(0);
+    });
+
+    it('technician-recorded catalog ask gets a refusal (settings:view gate), never the price book', async () => {
+      const proposalRepo = new InMemoryProposalRepository();
+      const voiceRepo = seededVoiceRepo('user-tech');
+      const gateway = gatewayReturning([classify('lookup_catalog')]);
+      const catalogRepo = seededCatalogRepo();
+      const listByTenant = vi.spyOn(catalogRepo, 'listByTenant');
+
+      const worker = createVoiceActionRouterWorker({
+        gateway,
+        proposalRepo,
+        voiceRepo,
+        lookupAnswers: {
+          catalogRepo,
+          resolveMemberRole: vi.fn(async () => 'technician'),
+        },
+      });
+
+      await worker.handle(
+        msg({
+          tenantId: TENANT,
+          userId: 'system',
+          transcript: 'what services do we offer',
+          recordingId: RECORDING_ID,
+        }),
+        silentLogger(),
+      );
+
+      // The refusal short-circuits BEFORE the skill — no data read at all.
+      expect(listByTenant).not.toHaveBeenCalled();
+
+      const rec = await voiceRepo.findById(TENANT, RECORDING_ID);
+      expect(rec?.answerStatus).toBe('answered');
+      expect(rec?.answer?.result).toBe('refused');
+      expect(rec?.answer?.summary).toBe(
+        'The service catalog is an office-level view. Ask an owner or dispatcher on your team to pull it up.',
+      );
+      // No item names or prices leak into the refusal.
+      expect(rec?.answer?.summary).not.toContain('Drain cleaning');
+      expect(rec?.answer?.rows).toEqual([]);
+    });
+  });
+});
+
+// ── U1 (voice back-office workflows) — money-loop golden path ─────────────
+//
+// The four spoken collection phrases must complete END-TO-END through the
+// worker without missingFields once the entity resolver uniquely resolves
+// the spoken document reference: classify → resolve (INVOICE_DOC_INTENTS /
+// ESTIMATE_DOC_INTENTS route jobReference to the invoice/estimate kind) →
+// draft with the verified id on the payload. Ambiguity still short-circuits
+// to a voice_clarification BEFORE drafting — pinned per intent family by the
+// generic ambiguity tests above; the ambiguous-invoice case is re-pinned
+// here because these intents' gates only lift as of U1.
+describe('U1 — money-loop resolution end-to-end (worker golden path)', () => {
+  const INVOICE_UUID = '99999999-9999-4999-8999-999999999999';
+  const ESTIMATE_UUID = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee';
+
+  afterEach(() => {
+    _resetSupervisorPresenceCache();
+    setSupervisorPresenceLoader(null);
+  });
+
+  function classifier(intentType: string, entities: Record<string, unknown>): string {
+    return JSON.stringify({ intentType, confidence: 0.9, extractedEntities: entities });
+  }
+
+  function docResolver(kind: 'invoice' | 'estimate', id: string): EntityResolver {
+    return {
+      resolve: vi.fn(async (input: { kind: string }) =>
+        input.kind === kind
+          ? {
+              kind: 'resolved' as const,
+              candidate: { id, kind, label: kind === 'invoice' ? 'INV-0042' : 'EST-0042', score: 0.95 },
+            }
+          : { kind: 'not_found' as const, reference: 'x' },
+      ),
+    } as unknown as EntityResolver;
+  }
+
+  const PHRASES: Array<{
+    intent: string;
+    transcript: string;
+    entities: Record<string, unknown>;
+    kind: 'invoice' | 'estimate';
+    idKey: string;
+    resolvedId: string;
+  }> = [
+    {
+      intent: 'send_invoice',
+      transcript: 'Send the Henderson invoice',
+      entities: { jobReference: 'the Henderson invoice' },
+      kind: 'invoice',
+      idKey: 'invoiceId',
+      resolvedId: INVOICE_UUID,
+    },
+    {
+      intent: 'send_estimate',
+      transcript: 'Send the Khan estimate',
+      entities: { jobReference: 'the Khan estimate' },
+      kind: 'estimate',
+      idKey: 'estimateId',
+      resolvedId: ESTIMATE_UUID,
+    },
+    {
+      intent: 'send_payment_reminder',
+      transcript: 'Chase the Smith invoice',
+      entities: { jobReference: 'the Smith invoice' },
+      kind: 'invoice',
+      idKey: 'invoiceId',
+      resolvedId: INVOICE_UUID,
+    },
+    {
+      intent: 'apply_late_fee',
+      transcript: 'Add a twenty-five dollar late fee to the Smith invoice',
+      entities: { jobReference: 'the Smith invoice', amount: 2500 },
+      kind: 'invoice',
+      idKey: 'invoiceId',
+      resolvedId: INVOICE_UUID,
+    },
+  ];
+
+  for (const p of PHRASES) {
+    it(`"${p.transcript}" → ${p.intent} drafts with the resolver-verified ${p.idKey}, NO missingFields, and NEVER auto-approves`, async () => {
+      const proposalRepo = new InMemoryProposalRepository();
+      const gateway = gatewayReturning([classifier(p.intent, p.entities)]);
+      const worker = createVoiceActionRouterWorker({
+        gateway,
+        proposalRepo,
+        entityResolver: docResolver(p.kind, p.resolvedId),
+      });
+
+      await worker.handle(
+        msg({ tenantId: 't-1', userId: 'u-1', transcript: p.transcript }),
+        silentLogger(),
+      );
+
+      const proposals = await proposalRepo.findByTenant('t-1');
+      expect(proposals).toHaveLength(1);
+      expect(proposals[0].proposalType).toBe(p.intent);
+      expect((proposals[0].payload as Record<string, unknown>)[p.idKey]).toBe(p.resolvedId);
+      expect(missingFieldsFor(proposals[0])).toEqual([]);
+      // Money/comms class — a fully-resolved draft still requires a human
+      // tap (never 'approved' straight from the worker).
+      expect(proposals[0].status).toBe('draft');
+      // The drafted payload satisfies its Zod contract with the verified id.
+      expect(() =>
+        assertValidProposalPayload(proposals[0].proposalType, proposals[0].payload),
+      ).not.toThrow();
+    });
+  }
+
+  it('an ambiguous invoice reference on a money intent short-circuits to voice_clarification (no draft, no guess)', async () => {
+    const proposalRepo = new InMemoryProposalRepository();
+    const gateway = gatewayReturning([
+      classifier('send_invoice', { jobReference: 'the Henderson invoice' }),
+    ]);
+    const ambiguous = {
+      resolve: vi.fn(async () => ({
+        kind: 'ambiguous' as const,
+        candidates: [
+          { id: 'inv-1', kind: 'invoice' as const, label: 'INV-0042', score: 0.9 },
+          { id: 'inv-2', kind: 'invoice' as const, label: 'INV-0043', score: 0.88 },
+        ],
+      })),
+    } as unknown as EntityResolver;
+    const worker = createVoiceActionRouterWorker({ gateway, proposalRepo, entityResolver: ambiguous });
+
+    await worker.handle(
+      msg({ tenantId: 't-1', userId: 'u-1', transcript: 'Send the Henderson invoice' }),
+      silentLogger(),
+    );
+
+    const proposals = await proposalRepo.findByTenant('t-1');
+    expect(proposals).toHaveLength(1);
+    expect(proposals[0].proposalType).toBe('voice_clarification');
+    const payload = proposals[0].payload as Record<string, unknown>;
+    expect(payload.reason).toBe('ambiguous_entity');
+    expect(payload.entityReference).toBe('the Henderson invoice');
   });
 });

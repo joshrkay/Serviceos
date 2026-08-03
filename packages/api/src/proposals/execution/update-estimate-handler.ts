@@ -45,6 +45,15 @@ export class UpdateEstimateExecutionHandler implements ExecutionHandler {
     private readonly jobRepo?: Pick<JobRepository, 'findById'>,
   ) {}
 
+  // U8 — mutating an EXISTING estimate has no degraded mode: the repo is a
+  // required constructor param (the registry only registers this handler when
+  // it is wired). The optional deps degrade loudly, never silently: a missing
+  // jobRepo REFUSES job-linked edits (deposit lock, fail-closed above), and
+  // audit/revision/delta are feature deps, not persistence deps.
+  isFullyWired(): boolean {
+    return Boolean(this.estimateRepo);
+  }
+
   async execute(proposal: Proposal, context: ExecutionContext): Promise<ExecutionResult> {
     const { payload } = proposal;
 

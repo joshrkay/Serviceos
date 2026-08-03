@@ -90,7 +90,7 @@ import type { VoiceAnswerStatus, VoiceLookupAnswer } from '@ai-service-os/shared
 import type { VoiceRepository } from '../voice/voice-service';
 import {
   executeLookupAnswer,
-  OWNER_GRADE_LOOKUP_INTENTS,
+  LOOKUP_REQUIRED_PERMISSION,
   type VoiceLookupAnswerDeps,
 } from './voice-lookup-answer';
 import type { UserRepository } from '../users/user';
@@ -139,6 +139,19 @@ export interface VoiceActionRouterPayload {
    * caller instead of asking the LLM to guess.
    */
   customerId?: string;
+  /**
+   * U9 (voicemail → action) — set to 'voicemail' by the transcription hook
+   * when this transcript came off an inbound voicemail recording. The
+   * transcript's author is an UNAUTHENTICATED phone caller (RIVET I13:
+   * `voice_recordings.source='inbound_call'` classifies untrusted,
+   * unconditionally), even though the owner-line gate let the job through.
+   * Every proposal built from it is therefore stamped
+   * `sourceContext.sourceChannel='voicemail'` and force-held for human
+   * review (`holdIfUntrustedSource`) — no auto-approval, no autonomous-lane
+   * exception, regardless of handler trust tier or supervisor presence.
+   * Absent ⇒ byte-identical legacy behavior (in-app operator memos).
+   */
+  sourceChannel?: 'voicemail';
 }
 
 /**
@@ -861,6 +874,14 @@ async function emitClarification(
      */
     idempotencyKey?: string;
     /**
+     * U9 — voicemail-sourced transcripts. Clarifications persist HERE
+     * (not through processSegment's proposal return), so the untrusted-
+     * source stamp must be applied here too — otherwise a voicemail
+     * clarification (and any redraft that copies its sourceContext, e.g.
+     * proposals/resolve-entity.ts) loses the 'voicemail' marker.
+     */
+    sourceChannel?: 'voicemail';
+    /**
      * P8 — set when the intent classified fine but an entity reference
      * matched several records ("three Bobs"). The clarification carries
      * the candidate list so the review UI can render a one-tap picker.
@@ -1034,10 +1055,15 @@ async function emitClarification(
     // `expired`.
   });
 
-  await createDeduped(deps.proposalRepo, proposal, recordingId, log);
+  // U9 — voicemail clarifications carry the untrusted-source marker on
+  // sourceContext, same as every other voicemail-sourced proposal (a
+  // clarification is already 'draft', so the stamp is the only effect).
+  const stamped = holdIfUntrustedSource(proposal, input.sourceChannel);
+
+  await createDeduped(deps.proposalRepo, stamped, recordingId, log);
 
   log.info('voice-action-router: clarification proposal emitted', {
-    proposalId: proposal.id,
+    proposalId: stamped.id,
     reason,
     confidence: classification.confidence,
     lowConfidenceIntent: classification.lowConfidenceIntent,
@@ -1076,6 +1102,8 @@ interface SegmentParams {
    * must not collide on these per-recording keys.
    */
   applyDedup?: boolean;
+  /** U9 — see VoiceActionRouterPayload.sourceChannel. */
+  sourceChannel?: 'voicemail';
 }
 
 type SegmentOutcome =
@@ -1161,6 +1189,7 @@ async function processSegment(
         classification,
         conversationId,
         recordingId,
+        ...(params.sourceChannel ? { sourceChannel: params.sourceChannel } : {}),
         // Single-action only: dedup a redelivered clarification atomically.
         ...(params.applyDedup && recordingId
           ? { idempotencyKey: voiceProposalIdempotencyKey(recordingId) }
@@ -1213,6 +1242,7 @@ async function processSegment(
         classification: { ...classification, intentType: 'unknown' as IntentType },
         conversationId,
         recordingId,
+        ...(params.sourceChannel ? { sourceChannel: params.sourceChannel } : {}),
         ...(params.applyDedup && recordingId
           ? { idempotencyKey: voiceProposalIdempotencyKey(recordingId) }
           : {}),
@@ -1268,6 +1298,7 @@ async function processSegment(
           classification,
           conversationId,
           recordingId,
+          ...(params.sourceChannel ? { sourceChannel: params.sourceChannel } : {}),
           entityAmbiguity: {
             entityKind: lookupAnnotation.entityKind,
             reference: lookupAnnotation.reference,
@@ -1292,17 +1323,17 @@ async function processSegment(
       : undefined;
 
     // The memo creator (voice_recordings.created_by) is the authoritative
-    // identity for the owner-grade authorization gate — the enqueue
+    // identity for the permission-gated authorization gate — the enqueue
     // payload's userId can be 'system' on this path. Resolved only for
-    // owner-grade intents; a read failure falls through to the adapter's
-    // fail-closed refusal.
+    // permission-gated intents; a read failure falls through to the
+    // adapter's fail-closed refusal.
     let memoCreatorId: string | undefined;
-    if (OWNER_GRADE_LOOKUP_INTENTS.has(classification.intentType)) {
+    if (LOOKUP_REQUIRED_PERMISSION.has(classification.intentType)) {
       try {
         const recording = await deps.voiceRepo.findById(tenantId, recordingId);
         memoCreatorId = recording?.createdBy;
       } catch (err) {
-        log.warn('voice-action-router: memo creator lookup failed — owner-grade ask will refuse', {
+        log.warn('voice-action-router: memo creator lookup failed — permission-gated ask will refuse', {
           error: err instanceof Error ? err.message : String(err),
         });
       }
@@ -1418,6 +1449,7 @@ async function processSegment(
           classification,
           conversationId,
           recordingId,
+          ...(params.sourceChannel ? { sourceChannel: params.sourceChannel } : {}),
           entityAmbiguity: {
             entityKind: 'appointment',
             reference: enRoute.reference,
@@ -1513,6 +1545,7 @@ async function processSegment(
         classification,
         conversationId,
         recordingId,
+        ...(params.sourceChannel ? { sourceChannel: params.sourceChannel } : {}),
         entityAmbiguity: {
           entityKind: annotation.entityKind,
           reference: annotation.reference,
@@ -1726,9 +1759,16 @@ async function processSegment(
   // to thread presence can't slip an auto-approved (→ auto-executing) proposal
   // past an unsupervised tenant. No-op in the normal case (the handler already
   // computed 'ready_for_review').
+  //
+  // U9 — the untrusted-source guard runs LAST so a voicemail-sourced
+  // proposal can never leave here 'approved', including through the
+  // autonomous-lane exception holdIfUnsupervised deliberately preserves.
   return {
     kind: 'proposal',
-    proposal: holdIfUnsupervised(annotated, supervisorPresent),
+    proposal: holdIfUntrustedSource(
+      holdIfUnsupervised(annotated, supervisorPresent),
+      params.sourceChannel,
+    ),
     classification,
     supervisorPresent,
   };
@@ -1754,6 +1794,47 @@ export function holdIfUnsupervised(proposal: Proposal, supervisorPresent: boolea
     return proposal;
   }
   return { ...proposal, status: 'ready_for_review', approvedAt: undefined };
+}
+
+/**
+ * U9 — voicemail (untrusted-source) chokepoint. Pure; a no-op when
+ * `sourceChannel` is unset (every legacy path).
+ *
+ * For voicemail-sourced transcripts it does two things:
+ *
+ *   1. Stamps `sourceContext.sourceChannel='voicemail'` on EVERY proposal
+ *      so the review surface (and tests) can trace the proposal to an
+ *      unauthenticated-caller recording. Untrusted provenance itself is
+ *      carried by the recording row (`source='inbound_call'`, reachable
+ *      via sourceContext.recordingId → classifyRecordingProvenance) —
+ *      this stamp is the proposal-side pointer, not a parallel trust bit.
+ *
+ *   2. Demotes any 'approved' status to 'ready_for_review'. Unlike
+ *      holdIfUnsupervised there is NO autonomous-lane exception and no
+ *      supervisor-presence bypass: the owner's caller-ID gated only
+ *      whether the router ran — it never elevates the transcript's trust
+ *      (RIVET I13; ratified U9 provenance decision). Injection-bearing
+ *      voicemail text therefore stays data: whatever it talks the drafting
+ *      LLM into, the result stays held un-executable in the review queue.
+ *      NOTE (runtime-verified): in today's direct voicemail flows nothing
+ *      upstream computes 'approved' — proposals arrive 'draft' — so this
+ *      demotion branch is defense-in-depth against a future handler or
+ *      trust-tier change, not the path that normally holds voicemail
+ *      proposals.
+ *
+ * Exported for the chokepoint tests.
+ */
+export function holdIfUntrustedSource(
+  proposal: Proposal,
+  sourceChannel: 'voicemail' | undefined,
+): Proposal {
+  if (!sourceChannel) return proposal;
+  const stamped: Proposal = {
+    ...proposal,
+    sourceContext: { ...(proposal.sourceContext ?? {}), sourceChannel },
+  };
+  if (stamped.status !== 'approved') return stamped;
+  return { ...stamped, status: 'ready_for_review', approvedAt: undefined };
 }
 
 /**
@@ -2017,6 +2098,7 @@ export function createVoiceActionRouterWorker(
         recordingId,
         customerId,
         jobId,
+        sourceChannel,
       } = message.payload;
 
       const log = logger.child({ tenantId, recordingId, transcriptLen: transcript.length });
@@ -2206,6 +2288,7 @@ export function createVoiceActionRouterWorker(
                 // Operator voice memos: always enable protection intents so a
                 // dictated complaint/negotiation still reaches the guardrails.
                 customerProtectionIntents: true,
+                ...(sourceChannel ? { sourceChannel } : {}),
               },
               log,
             );
@@ -2241,6 +2324,7 @@ export function createVoiceActionRouterWorker(
             ...(activeStandingInstructions ? { activeStandingInstructions } : {}),
             ...(extendedIntents ? { extendedIntents: true } : {}),
             customerProtectionIntents: true,
+            ...(sourceChannel ? { sourceChannel } : {}),
             // Single-action path: apply the per-recording dedup keys.
             applyDedup: true,
           },

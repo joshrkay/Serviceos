@@ -175,6 +175,32 @@ describe('deriveCallOutcome — abuse_detected', () => {
   });
 });
 
+describe('deriveCallOutcome — life_safety_e1 (ANS-001 NIT)', () => {
+  it('escalated_to_human regardless of state or proposals (never the infra "failed" bucket)', () => {
+    expect(
+      deriveCallOutcome({
+        finalState: TERMINATED,
+        endedReason: 'life_safety_e1',
+        context: ctx({ escalationReason: 'life_safety_e1' }),
+        transcript: ['caller: I smell gas'],
+        proposalIds: [],
+      }),
+    ).toBe('escalated_to_human');
+  });
+
+  it('escalated_to_human even when a booking was revoked (proposalIds non-empty)', () => {
+    expect(
+      deriveCallOutcome({
+        finalState: TERMINATED,
+        endedReason: 'life_safety_e1',
+        context: ctx({ escalationReason: 'life_safety_e1' }),
+        transcript: ['caller: I smell gas'],
+        proposalIds: ['p-revoked'],
+      }),
+    ).toBe('escalated_to_human');
+  });
+});
+
 describe('deriveCallOutcome — escalating / degraded', () => {
   it('failed when escalationReason is system_failure:*', () => {
     expect(
