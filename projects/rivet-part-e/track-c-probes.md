@@ -14,18 +14,23 @@ session, plus one blocked direct probe. Each states exactly what it proves and n
   - Proves: live-mode keys/webhooks exist and target the production Railway `web` service. Enabled
     events cover the ACH lifecycle (`payment_intent.processing`/`payment_failed`), checkout,
     refunds, disputes, `setup_intent.succeeded`, `account.updated` (Connect mirroring).
-  - Finding: **duplicate endpoint registration** — every Stripe event is delivered twice. The
-    handler's event-ID dedupe (observed in integration logs: "Duplicate Stripe event — skipping")
-    absorbs this, but it doubles webhook traffic and is a latent double-processing risk if dedupe
-    ever regresses.
+  - Finding: **two overlapping endpoint registrations**, both platform-scoped (`application:null`) —
+    their enabled-event sets overlap on all money-critical events (those deliver twice; a few
+    events are single-endpoint). The handler's event-ID dedupe (observed in integration logs:
+    "Duplicate Stripe event — skipping" — code + test evidence, not live delivery) absorbs this,
+    but it doubles webhook traffic on the overlap set and is a latent double-processing risk if
+    dedupe ever regresses. (Wording synced to the round-6 refinement.)
   - NOT proven: that the deployed service has `STRIPE_WEBHOOK_SECRET` set for either endpoint, or
     which of the two secrets it verifies against (delivery success stats not readable here).
-- `GET /v1/accounts` (Connect): **empty list — zero connected accounts.**
-  - Proves: **no tenant has ever completed Stripe Connect onboarding** on the live platform.
-    B1.7–B1.11 cannot be rung 6; payouts-to-tenant-bank has never happened in production.
-- `GET /v1/payment_intents` (live mode): **empty list — zero payment intents ever.**
-  - Proves: **no live payment has ever been attempted** through the platform. The entire B9 money
-    rail is code-true at best, runtime-unproven.
+- `GET /v1/accounts` (Connect): **empty list — zero currently connected accounts.**
+  - Proves: **no tenant is Connect-onboarded today**. (Round-7 scope note: a previously
+    connected-then-removed account would be absent from this response, so "never completed
+    onboarding" is the probable but not provable reading.) B1.7–B1.11 cannot be rung 6 on
+    current state.
+- `GET /v1/payment_intents` (live mode): **empty list — zero platform-account payment intents.**
+  - Proves: no platform-account payment has ever been created. (Round-7 scope note: direct
+    charges scoped to a since-removed connected account would be invisible here.) The B9 money
+    rail is code-true at best, runtime-unproven on current state.
 
 ## PostHog — via PostHog MCP (project "Default project", org "Kay corp")
 
