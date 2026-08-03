@@ -105,6 +105,11 @@ jobs:
       - name: Env-coverage guard
         run: npm run check:env-coverage
 
+      # Offline agent graph coverage gate (no LLM). Complements the credential-
+      # gated real-LLM path smoke workflow (.github/workflows/agent-path-smoke.yml).
+      - name: Agent graph coverage
+        run: npm run agent:graph-coverage --workspace=packages/api -- --gate
+
       - name: Unit tests
         run: npm test -- --reporter=verbose
 

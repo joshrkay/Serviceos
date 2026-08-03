@@ -1611,10 +1611,13 @@ export function createVoiceTurnProcessor(
                 parseOnboardingBusinessHours(settings?.businessHours, hold.timezone),
                 new Date(hold.scheduledStart),
               ).isOpen;
+              // Contract: `_meta.overallConfidence` is a label, not a 0–1 score
+              // (see packages/api/src/proposals/contracts.ts confidence envelope).
+              // Lane eval still uses the numeric score via confidenceScore below.
               const bookingPayload: Record<string, unknown> = {
                 appointmentId: hold.appointmentId,
                 ...(typeof payloadConfidence === 'number'
-                  ? { _meta: { overallConfidence: payloadConfidence } }
+                  ? { _meta: { overallConfidence: getConfidenceLevel(payloadConfidence) } }
                   : {}),
               };
               const laneEval = buildLaneInputFromSettings({

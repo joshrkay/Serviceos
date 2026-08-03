@@ -23,11 +23,16 @@ describe('Postgres integration — PhoneRateLimiter (P0-036)', () => {
 
   it('window expiry — count resets for the same key after windowMs', async () => {
     const key = `+1555${Date.now()}`;
-    // 50ms window: consume once, deny immediately, then allow again after expiry.
-    expect(await limiter.tryConsume(tenant.tenantId, 'expiry', key, 1, 50)).toBe(true);
-    expect(await limiter.tryConsume(tenant.tenantId, 'expiry', key, 1, 50)).toBe(false);
-    await new Promise((r) => setTimeout(r, 70));
-    expect(await limiter.tryConsume(tenant.tenantId, 'expiry', key, 1, 50)).toBe(true);
+    // Cutoff uses host Date.now(); window_start uses Postgres NOW(). Under
+    // Colima/testcontainers those clocks can diverge by tens–hundreds of ms,
+    // so sub-second windows flake both ways (deny never sticks, or never
+    // expires). A 1s window + 1.5s wait is still cheap for integration and
+    // absorbs realistic skew.
+    const windowMs = 1_000;
+    expect(await limiter.tryConsume(tenant.tenantId, 'expiry', key, 1, windowMs)).toBe(true);
+    expect(await limiter.tryConsume(tenant.tenantId, 'expiry', key, 1, windowMs)).toBe(false);
+    await new Promise((r) => setTimeout(r, 1_500));
+    expect(await limiter.tryConsume(tenant.tenantId, 'expiry', key, 1, windowMs)).toBe(true);
   });
 
   it('distinct scopes count independently for the same key', async () => {
