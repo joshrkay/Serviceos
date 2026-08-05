@@ -82,6 +82,14 @@ describe('IntakeFormPage', () => {
     await screen.findByText('Ortega HVAC & Services'); // flush the mount effect
   });
 
+  it('shows a missing-tenant message instead of infinite Loading services… when ?t= is absent', async () => {
+    setTenantQueryParam(null);
+    render(<IntakeFormPage />);
+    expect(await screen.findByTestId('intake-missing-tenant')).toBeInTheDocument();
+    expect(screen.queryByTestId('intake-services-loading')).not.toBeInTheDocument();
+    expect(fetchIntakeTenantInfo).not.toHaveBeenCalled();
+  });
+
   it('keeps the CTA disabled until a service is selected', async () => {
     render(<IntakeFormPage />);
     await waitFor(() => {

@@ -1,0 +1,1715 @@
+[
+  {
+    "id": "QA-001",
+    "section": 1,
+    "sectionName": "Authentication and access",
+    "name": "Signup page loads with Rivet branding",
+    "tenant": "none",
+    "role": "anonymous",
+    "primaryRef": "beta 1.1; WF-01",
+    "passCriteria": [
+      "Signup page loads",
+      "Brand signal present",
+      "Zero console errors"
+    ],
+    "failCriteria": [
+      "Blank page",
+      "Console errors",
+      "Redirect loop"
+    ]
+  },
+  {
+    "id": "QA-002",
+    "section": 1,
+    "sectionName": "Authentication and access",
+    "name": "Fresh signup completes Clerk flow",
+    "tenant": "C",
+    "role": "owner",
+    "primaryRef": "beta 1.2; WF-01",
+    "passCriteria": [
+      "Clerk flow completes",
+      "User session established"
+    ],
+    "failCriteria": [
+      "Error screen",
+      "Stuck on signup",
+      "No session"
+    ]
+  },
+  {
+    "id": "QA-003",
+    "section": 1,
+    "sectionName": "Authentication and access",
+    "name": "/api/me returns tenantId after bootstrap",
+    "tenant": "A|C",
+    "role": "owner",
+    "primaryRef": "beta 1.4; ME-01; WF-01",
+    "passCriteria": [
+      "/api/me 200",
+      "tenantId present",
+      "DB row exists"
+    ],
+    "failCriteria": [
+      "401/500",
+      "Missing tenantId",
+      "No tenant row"
+    ]
+  },
+  {
+    "id": "QA-004",
+    "section": 1,
+    "sectionName": "Authentication and access",
+    "name": "Session survives hard reload; logout lands on /login",
+    "tenant": "A",
+    "role": "owner",
+    "primaryRef": "beta 1.5–1.6; WF-02",
+    "passCriteria": [
+      "Reload keeps session",
+      "Logout → /login",
+      "Protected routes blocked"
+    ],
+    "failCriteria": [
+      "Logged out after reload",
+      "Logout no-op",
+      "Still authenticated after logout"
+    ]
+  },
+  {
+    "id": "QA-005",
+    "section": 1,
+    "sectionName": "Authentication and access",
+    "name": "Protected route redirects when logged out",
+    "tenant": "none",
+    "role": "anonymous",
+    "primaryRef": "beta 1.7; WF-03",
+    "passCriteria": [
+      "Redirect to /login",
+      "API denies unauth"
+    ],
+    "failCriteria": [
+      "Customers page visible",
+      "API 200 without auth"
+    ]
+  },
+  {
+    "id": "QA-006",
+    "section": 2,
+    "sectionName": "Onboarding and go-live",
+    "name": "Land onboarding or dashboard after signup",
+    "tenant": "C",
+    "role": "owner",
+    "primaryRef": "beta 1.3; WF-06",
+    "passCriteria": [
+      "Valid post-signup route"
+    ],
+    "failCriteria": [
+      "Blank screen",
+      "Error boundary"
+    ]
+  },
+  {
+    "id": "QA-007",
+    "section": 2,
+    "sectionName": "Onboarding and go-live",
+    "name": "Onboarding v2 identity→pack→phone→billing",
+    "tenant": "C",
+    "role": "owner",
+    "primaryRef": "WF-06; PROV-01",
+    "passCriteria": [
+      "Wizard advances",
+      "Pack persisted"
+    ],
+    "failCriteria": [
+      "Step stuck",
+      "Progress not persisted after refresh"
+    ]
+  },
+  {
+    "id": "QA-008",
+    "section": 2,
+    "sectionName": "Onboarding and go-live",
+    "name": "HVAC pack activated via configure",
+    "tenant": "A",
+    "role": "owner",
+    "primaryRef": "PROV-01",
+    "passCriteria": [
+      "HVAC pack active",
+      "Settings report hvac"
+    ],
+    "failCriteria": [
+      "Wrong pack",
+      "No pack"
+    ]
+  },
+  {
+    "id": "QA-009",
+    "section": 2,
+    "sectionName": "Onboarding and go-live",
+    "name": "Plumbing pack distinct from HVAC",
+    "tenant": "A",
+    "role": "owner",
+    "primaryRef": "PROV-02",
+    "passCriteria": [
+      "Plumbing distinct and active"
+    ],
+    "failCriteria": [
+      "Same as HVAC",
+      "Activation fails"
+    ]
+  },
+  {
+    "id": "QA-010",
+    "section": 2,
+    "sectionName": "Onboarding and go-live",
+    "name": "Twilio subaccount provisions phone",
+    "tenant": "A",
+    "role": "owner+system",
+    "primaryRef": "beta 16.6–16.10; WF-07",
+    "passCriteria": [
+      "phoneE164 present",
+      "status full_readiness",
+      "Call routes to tenant"
+    ],
+    "failCriteria": [
+      "Stuck t0_requested",
+      "failed",
+      "Shared number across tenants"
+    ]
+  },
+  {
+    "id": "QA-011",
+    "section": 3,
+    "sectionName": "CRM and customers",
+    "name": "Create customer (UI + API)",
+    "tenant": "A",
+    "role": "owner",
+    "primaryRef": "CUST-01; WF-11; beta 2.1–2.5",
+    "passCriteria": [
+      "201",
+      "List shows customer",
+      "DB row tenant-scoped"
+    ],
+    "failCriteria": [
+      "UI success without row",
+      "Wrong tenant"
+    ]
+  },
+  {
+    "id": "QA-012",
+    "section": 3,
+    "sectionName": "CRM and customers",
+    "name": "Primary + second service location",
+    "tenant": "A",
+    "role": "owner",
+    "primaryRef": "LOC-01; beta 2.3, 2.6–2.8",
+    "passCriteria": [
+      "Two locations persist",
+      "Primary labeled"
+    ],
+    "failCriteria": [
+      "Second location missing",
+      "Primary unlabeled"
+    ]
+  },
+  {
+    "id": "QA-013",
+    "section": 3,
+    "sectionName": "CRM and customers",
+    "name": "Customer notes CRUD + surface on job",
+    "tenant": "A",
+    "role": "owner",
+    "primaryRef": "NOTE-01; beta 2.9–2.12",
+    "passCriteria": [
+      "CRUD works",
+      "Surfaces on job"
+    ],
+    "failCriteria": [
+      "Note disappears",
+      "Edit fails"
+    ]
+  },
+  {
+    "id": "QA-014",
+    "section": 3,
+    "sectionName": "CRM and customers",
+    "name": "Edit phone + search by last name",
+    "tenant": "A",
+    "role": "owner",
+    "primaryRef": "WF-12; beta 2.17–2.18",
+    "passCriteria": [
+      "Phone updated",
+      "Search finds customer"
+    ],
+    "failCriteria": [
+      "Stale phone",
+      "Search miss"
+    ]
+  },
+  {
+    "id": "QA-015",
+    "section": 3,
+    "sectionName": "CRM and customers",
+    "name": "Archive customer drops from active list",
+    "tenant": "A",
+    "role": "owner",
+    "primaryRef": "CUST-03; beta 2.19",
+    "passCriteria": [
+      "Archived flag set",
+      "Hidden from active list"
+    ],
+    "failCriteria": [
+      "Still in active list",
+      "Row deleted"
+    ]
+  },
+  {
+    "id": "QA-016",
+    "section": 3,
+    "sectionName": "CRM and customers",
+    "name": "Customer history shows job/estimate/invoice",
+    "tenant": "A",
+    "role": "owner",
+    "primaryRef": "beta 2.13–2.16; JRN-03",
+    "passCriteria": [
+      "All three history entries",
+      "Same location"
+    ],
+    "failCriteria": [
+      "Missing entity",
+      "Wrong location"
+    ]
+  },
+  {
+    "id": "QA-017",
+    "section": 4,
+    "sectionName": "Leads and conversion",
+    "name": "Manual lead create + note",
+    "tenant": "A",
+    "role": "owner",
+    "primaryRef": "LEAD-01; beta 3.1–3.4; WF-14",
+    "passCriteria": [
+      "Lead created",
+      "Note persists"
+    ],
+    "failCriteria": [
+      "Not created",
+      "Note lost"
+    ]
+  },
+  {
+    "id": "QA-018",
+    "section": 4,
+    "sectionName": "Leads and conversion",
+    "name": "Public intake → lead with source tag",
+    "tenant": "A",
+    "role": "anonymous",
+    "primaryRef": "beta 3.5–3.8; WF-16; JRN-03",
+    "passCriteria": [
+      "Lead created",
+      "Source tagged intake"
+    ],
+    "failCriteria": [
+      "No lead",
+      "Wrong tenant"
+    ]
+  },
+  {
+    "id": "QA-019",
+    "section": 4,
+    "sectionName": "Leads and conversion",
+    "name": "Lead stage progression (won-guard)",
+    "tenant": "A",
+    "role": "owner",
+    "primaryRef": "LEAD-01",
+    "passCriteria": [
+      "Stage persists"
+    ],
+    "failCriteria": [
+      "Stage reverts",
+      "Invalid transition allowed silently"
+    ]
+  },
+  {
+    "id": "QA-020",
+    "section": 4,
+    "sectionName": "Leads and conversion",
+    "name": "Lead lost with reason",
+    "tenant": "A",
+    "role": "owner",
+    "primaryRef": "LEAD-02",
+    "passCriteria": [
+      "Lost + reason persisted"
+    ],
+    "failCriteria": [
+      "Lost without reason accepted when required",
+      "Status wrong"
+    ]
+  },
+  {
+    "id": "QA-021",
+    "section": 4,
+    "sectionName": "Leads and conversion",
+    "name": "Convert lead → customer (link preserved)",
+    "tenant": "A",
+    "role": "owner",
+    "primaryRef": "beta 3.9–3.12; WF-15; JRN-03",
+    "passCriteria": [
+      "Customer exists",
+      "Lead converted",
+      "Link preserved"
+    ],
+    "failCriteria": [
+      "Re-entry required for contact fields",
+      "Lead deleted"
+    ]
+  },
+  {
+    "id": "QA-022",
+    "section": 5,
+    "sectionName": "Jobs",
+    "name": "Create job on primary location",
+    "tenant": "A",
+    "role": "owner",
+    "primaryRef": "JOB-01; WF-17; beta 4.1–4.6",
+    "passCriteria": [
+      "Job created",
+      "Primary location linked"
+    ],
+    "failCriteria": [
+      "Wrong location",
+      "No job row"
+    ]
+  },
+  {
+    "id": "QA-023",
+    "section": 5,
+    "sectionName": "Jobs",
+    "name": "Job lifecycle new→scheduled→in_progress→completed",
+    "tenant": "A",
+    "role": "owner",
+    "primaryRef": "JOB-01; WF-18; beta 4.7–4.10",
+    "passCriteria": [
+      "All transitions succeed",
+      "Final status completed"
+    ],
+    "failCriteria": [
+      "Stuck status",
+      "List stale after refresh"
+    ]
+  },
+  {
+    "id": "QA-024",
+    "section": 5,
+    "sectionName": "Jobs",
+    "name": "Invalid job transition rejected",
+    "tenant": "A",
+    "role": "owner",
+    "primaryRef": "JOB-02",
+    "passCriteria": [
+      "4xx",
+      "DB unchanged"
+    ],
+    "failCriteria": [
+      "200 with illegal transition"
+    ]
+  },
+  {
+    "id": "QA-025",
+    "section": 5,
+    "sectionName": "Jobs",
+    "name": "Job photos upload + render",
+    "tenant": "A",
+    "role": "owner",
+    "primaryRef": "beta 4.14–4.16",
+    "passCriteria": [
+      "Photo persists after refresh"
+    ],
+    "failCriteria": [
+      "Crash",
+      "Missing after refresh"
+    ]
+  },
+  {
+    "id": "QA-026",
+    "section": 5,
+    "sectionName": "Jobs",
+    "name": "Job notes persist + customer activity",
+    "tenant": "A",
+    "role": "owner",
+    "primaryRef": "NOTE-01; beta 4.17–4.19",
+    "passCriteria": [
+      "Note persists"
+    ],
+    "failCriteria": [
+      "Note lost"
+    ]
+  },
+  {
+    "id": "QA-027",
+    "section": 6,
+    "sectionName": "Scheduling",
+    "name": "Calendar loads; create appointment",
+    "tenant": "A",
+    "role": "owner",
+    "primaryRef": "SCH-01; WF-19; beta 7.1–7.5",
+    "passCriteria": [
+      "Appointment visible + DB row"
+    ],
+    "failCriteria": [
+      "UI-only appointment",
+      "Timezone wrong day"
+    ]
+  },
+  {
+    "id": "QA-028",
+    "section": 6,
+    "sectionName": "Scheduling",
+    "name": "Reschedule via API/UI (version bump)",
+    "tenant": "A",
+    "role": "owner",
+    "primaryRef": "SCH-01; WF-20; beta 7.8–7.10",
+    "passCriteria": [
+      "New time persisted",
+      "Single assignment"
+    ],
+    "failCriteria": [
+      "Stale time",
+      "Duplicate rows"
+    ]
+  },
+  {
+    "id": "QA-029",
+    "section": 6,
+    "sectionName": "Scheduling",
+    "name": "Overlap conflict indicator",
+    "tenant": "A",
+    "role": "owner/dispatcher",
+    "primaryRef": "beta 7.6–7.7, 7.9",
+    "passCriteria": [
+      "Conflict visible or blocked"
+    ],
+    "failCriteria": [
+      "Silent overlap created"
+    ]
+  },
+  {
+    "id": "QA-030",
+    "section": 6,
+    "sectionName": "Scheduling",
+    "name": "Appointment status lifecycle confirm→complete",
+    "tenant": "A",
+    "role": "owner",
+    "primaryRef": "SCH-04",
+    "passCriteria": [
+      "Lifecycle persists"
+    ],
+    "failCriteria": [
+      "Illegal skip without error"
+    ]
+  },
+  {
+    "id": "QA-031",
+    "section": 6,
+    "sectionName": "Scheduling",
+    "name": "Running-late delay notice (virtual status)",
+    "tenant": "A",
+    "role": "owner/dispatcher",
+    "primaryRef": "SCH-05; beta 7.14–7.18",
+    "passCriteria": [
+      "Delay recorded",
+      "UI reflects"
+    ],
+    "failCriteria": [
+      "No-op",
+      "Duplicate spam notifications"
+    ]
+  },
+  {
+    "id": "QA-032",
+    "section": 7,
+    "sectionName": "Dispatch",
+    "name": "GET /api/dispatch/board responds",
+    "tenant": "A",
+    "role": "owner/dispatcher",
+    "primaryRef": "beta §8; WF-23",
+    "passCriteria": [
+      "Board 200 + UI"
+    ],
+    "failCriteria": [
+      "404/500",
+      "Blank board crash"
+    ]
+  },
+  {
+    "id": "QA-033",
+    "section": 7,
+    "sectionName": "Dispatch",
+    "name": "Assign / reassign technician lane",
+    "tenant": "A",
+    "role": "dispatcher",
+    "primaryRef": "WF-23–24; beta 7.11",
+    "passCriteria": [
+      "Assignment persists"
+    ],
+    "failCriteria": [
+      "UI move without DB update"
+    ]
+  },
+  {
+    "id": "QA-034",
+    "section": 7,
+    "sectionName": "Dispatch",
+    "name": "Feasibility / conflict warnings",
+    "tenant": "A",
+    "role": "dispatcher",
+    "primaryRef": "WF-24; PROP-04",
+    "passCriteria": [
+      "Warnings visible before confirm"
+    ],
+    "failCriteria": [
+      "No warning on clear conflict"
+    ]
+  },
+  {
+    "id": "QA-035",
+    "section": 7,
+    "sectionName": "Dispatch",
+    "name": "Technician GPS ping stored",
+    "tenant": "A",
+    "role": "technician",
+    "primaryRef": "beta 8.8–8.10",
+    "passCriteria": [
+      "Ping stored"
+    ],
+    "failCriteria": [
+      "Endpoint 404/500",
+      "No row"
+    ]
+  },
+  {
+    "id": "QA-036",
+    "section": 8,
+    "sectionName": "Technician workflows",
+    "name": "/technician/day shows assigned work",
+    "tenant": "A",
+    "role": "technician",
+    "primaryRef": "WF-26; beta 12.1–12.3",
+    "passCriteria": [
+      "Assigned work listed"
+    ],
+    "failCriteria": [
+      "Empty when assigned",
+      "500"
+    ]
+  },
+  {
+    "id": "QA-037",
+    "section": 8,
+    "sectionName": "Technician workflows",
+    "name": "Tech status CTA updates job",
+    "tenant": "A",
+    "role": "technician",
+    "primaryRef": "WF-27; beta 12.6; JOB-01",
+    "passCriteria": [
+      "Status persisted"
+    ],
+    "failCriteria": [
+      "CTA no-op",
+      "UI-only change"
+    ]
+  },
+  {
+    "id": "QA-038",
+    "section": 8,
+    "sectionName": "Technician workflows",
+    "name": "Clock-in → clock-out time entry",
+    "tenant": "A",
+    "role": "technician/owner",
+    "primaryRef": "TIME-01; WF-22; beta 4.11–4.13",
+    "passCriteria": [
+      "In/out persisted"
+    ],
+    "failCriteria": [
+      "Missing entry",
+      "Open-ended stuck without record"
+    ]
+  },
+  {
+    "id": "QA-039",
+    "section": 8,
+    "sectionName": "Technician workflows",
+    "name": "Tech voice note appears on job",
+    "tenant": "A",
+    "role": "technician",
+    "primaryRef": "beta 12.4–12.5",
+    "passCriteria": [
+      "Artifact on job"
+    ],
+    "failCriteria": [
+      "Silent no-op"
+    ]
+  },
+  {
+    "id": "QA-040",
+    "section": 9,
+    "sectionName": "Estimates",
+    "name": "Create draft estimate (integer cents)",
+    "tenant": "A",
+    "role": "owner",
+    "primaryRef": "EST-01/04; WF-28; beta 5.1–5.7",
+    "passCriteria": [
+      "201",
+      "DB totals match API"
+    ],
+    "failCriteria": [
+      "Float drift",
+      "UI success without row"
+    ]
+  },
+  {
+    "id": "QA-041",
+    "section": 9,
+    "sectionName": "Estimates",
+    "name": "Validation errors on invalid create",
+    "tenant": "A",
+    "role": "owner",
+    "primaryRef": "EST-02",
+    "passCriteria": [
+      "4xx + no row"
+    ],
+    "failCriteria": [
+      "201 on invalid"
+    ]
+  },
+  {
+    "id": "QA-042",
+    "section": 9,
+    "sectionName": "Estimates",
+    "name": "Edit draft + revise sent (versioned)",
+    "tenant": "A",
+    "role": "owner",
+    "primaryRef": "EST-03; EST-R1",
+    "passCriteria": [
+      "Edits persist",
+      "Revision versioned"
+    ],
+    "failCriteria": [
+      "Overwrite without version when required"
+    ]
+  },
+  {
+    "id": "QA-043",
+    "section": 9,
+    "sectionName": "Estimates",
+    "name": "Mixed line items create→send→accept",
+    "tenant": "A",
+    "role": "owner",
+    "primaryRef": "JRN-01; WF-29–30",
+    "passCriteria": [
+      "Full lifecycle",
+      "Totals correct"
+    ],
+    "failCriteria": [
+      "Stuck sent",
+      "Total mismatch"
+    ]
+  },
+  {
+    "id": "QA-044",
+    "section": 9,
+    "sectionName": "Estimates",
+    "name": "Send estimate SMS + public approve",
+    "tenant": "A",
+    "role": "owner+customer",
+    "primaryRef": "PORT-01; WF-29–30; beta 5.8–5.16",
+    "passCriteria": [
+      "Delivery evidence",
+      "Accepted in DB",
+      "UI after refresh"
+    ],
+    "failCriteria": [
+      "UI-only accept",
+      "No provider evidence when claimed sent"
+    ]
+  },
+  {
+    "id": "QA-045",
+    "section": 9,
+    "sectionName": "Estimates",
+    "name": "Convert estimate → invoice (linked)",
+    "tenant": "A",
+    "role": "owner",
+    "primaryRef": "EST-05; WF-31; beta 6.1–6.4",
+    "passCriteria": [
+      "Linked invoice",
+      "Items preserved"
+    ],
+    "failCriteria": [
+      "Unlinked",
+      "Totals differ unexpectedly"
+    ]
+  },
+  {
+    "id": "QA-046",
+    "section": 10,
+    "sectionName": "Invoices and payments",
+    "name": "Invoice issue → void lifecycle",
+    "tenant": "A",
+    "role": "owner",
+    "primaryRef": "INV-01; INV-CR-01",
+    "passCriteria": [
+      "Issue then void persisted"
+    ],
+    "failCriteria": [
+      "Illegal state"
+    ]
+  },
+  {
+    "id": "QA-047",
+    "section": 10,
+    "sectionName": "Invoices and payments",
+    "name": "Invalid invoice transition rejected",
+    "tenant": "A",
+    "role": "owner",
+    "primaryRef": "INV-02",
+    "passCriteria": [
+      "4xx + unchanged"
+    ],
+    "failCriteria": [
+      "Allowed illegal transition"
+    ]
+  },
+  {
+    "id": "QA-048",
+    "section": 10,
+    "sectionName": "Invoices and payments",
+    "name": "Issue + delivery (email/SMS)",
+    "tenant": "A",
+    "role": "owner",
+    "primaryRef": "INV-03; WF-32; beta 6.10–6.12",
+    "passCriteria": [
+      "Issued + delivery evidence"
+    ],
+    "failCriteria": [
+      "Issued without dispatch when send claimed"
+    ]
+  },
+  {
+    "id": "QA-049",
+    "section": 10,
+    "sectionName": "Invoices and payments",
+    "name": "Public pay via Stripe test card",
+    "tenant": "A",
+    "role": "customer",
+    "primaryRef": "PORT-02; WF-33; beta 6.13–6.19",
+    "passCriteria": [
+      "Paid in DB after webhook",
+      "UI paid after refresh"
+    ],
+    "failCriteria": [
+      "UI paid without webhook/DB",
+      "Production key used"
+    ]
+  },
+  {
+    "id": "QA-050",
+    "section": 10,
+    "sectionName": "Invoices and payments",
+    "name": "Partial → full pay + overpay guard",
+    "tenant": "A",
+    "role": "owner",
+    "primaryRef": "PAY-01; WF-34",
+    "passCriteria": [
+      "Partial→paid",
+      "Overpay rejected"
+    ],
+    "failCriteria": [
+      "Overpay accepted",
+      "amount_due wrong"
+    ]
+  },
+  {
+    "id": "QA-051",
+    "section": 10,
+    "sectionName": "Invoices and payments",
+    "name": "Deposit credit on first invoice",
+    "tenant": "A",
+    "role": "owner",
+    "primaryRef": "PAY-02",
+    "passCriteria": [
+      "Deposit credited once"
+    ],
+    "failCriteria": [
+      "Missing credit",
+      "Double credit"
+    ]
+  },
+  {
+    "id": "QA-052",
+    "section": 10,
+    "sectionName": "Invoices and payments",
+    "name": "Stripe webhook paid + idempotency",
+    "tenant": "A",
+    "role": "system",
+    "primaryRef": "INV-05/06; beta 17.31–17.32",
+    "passCriteria": [
+      "Paid once",
+      "Replay idempotent"
+    ],
+    "failCriteria": [
+      "Duplicate payment",
+      "Unsigned accepted"
+    ]
+  },
+  {
+    "id": "QA-053",
+    "section": 11,
+    "sectionName": "Contracts",
+    "name": "Create maintenance contract",
+    "tenant": "A",
+    "role": "owner",
+    "primaryRef": "MC-01; beta 13.1–13.4",
+    "passCriteria": [
+      "Contract persists"
+    ],
+    "failCriteria": [
+      "Route 404",
+      "UI mock only"
+    ]
+  },
+  {
+    "id": "QA-054",
+    "section": 11,
+    "sectionName": "Contracts",
+    "name": "Contract visible on customer profile",
+    "tenant": "A",
+    "role": "owner",
+    "primaryRef": "beta 13.5",
+    "passCriteria": [
+      "Contract shown on customer"
+    ],
+    "failCriteria": [
+      "Missing"
+    ]
+  },
+  {
+    "id": "QA-055",
+    "section": 11,
+    "sectionName": "Contracts",
+    "name": "Recurring agreement pause→resume→cancel",
+    "tenant": "A",
+    "role": "owner",
+    "primaryRef": "AGR-01/02",
+    "passCriteria": [
+      "States persist"
+    ],
+    "failCriteria": [
+      "Illegal transition allowed"
+    ]
+  },
+  {
+    "id": "QA-056",
+    "section": 12,
+    "sectionName": "Reports and reconciliation",
+    "name": "Money dashboard after paid revenue",
+    "tenant": "A",
+    "role": "owner",
+    "primaryRef": "RPT-01; PAY-03; WF-35",
+    "passCriteria": [
+      "Totals match paid cents"
+    ],
+    "failCriteria": [
+      "Zero after payment",
+      "Cross-tenant bleed"
+    ]
+  },
+  {
+    "id": "QA-057",
+    "section": 12,
+    "sectionName": "Reports and reconciliation",
+    "name": "Revenue-by-source report",
+    "tenant": "A",
+    "role": "owner",
+    "primaryRef": "RPT-02",
+    "passCriteria": [
+      "Report loads with data or empty state"
+    ],
+    "failCriteria": [
+      "500",
+      "Blank crash"
+    ]
+  },
+  {
+    "id": "QA-058",
+    "section": 12,
+    "sectionName": "Reports and reconciliation",
+    "name": "Time-given-back report",
+    "tenant": "A",
+    "role": "owner",
+    "primaryRef": "RPT-03",
+    "passCriteria": [
+      "200 + render"
+    ],
+    "failCriteria": [
+      "500"
+    ]
+  },
+  {
+    "id": "QA-059",
+    "section": 12,
+    "sectionName": "Reports and reconciliation",
+    "name": "Overdue invoice → job money_state",
+    "tenant": "A",
+    "role": "owner+worker",
+    "primaryRef": "PAY-04; INV-07; WF-35",
+    "passCriteria": [
+      "Overdue reflected after worker"
+    ],
+    "failCriteria": [
+      "Never updates"
+    ]
+  },
+  {
+    "id": "QA-060",
+    "section": 13,
+    "sectionName": "Proposals",
+    "name": "Proposal create + draft reject guard",
+    "tenant": "A",
+    "role": "owner",
+    "primaryRef": "PROP-01; WF-36–37",
+    "passCriteria": [
+      "Rejected, no side effects"
+    ],
+    "failCriteria": [
+      "Entity created on reject"
+    ]
+  },
+  {
+    "id": "QA-061",
+    "section": 13,
+    "sectionName": "Proposals",
+    "name": "Proposal inbox prioritization",
+    "tenant": "A",
+    "role": "owner",
+    "primaryRef": "PROP-02; WF-41",
+    "passCriteria": [
+      "Inbox loads proposals"
+    ],
+    "failCriteria": [
+      "Empty when rows exist",
+      "500"
+    ]
+  },
+  {
+    "id": "QA-062",
+    "section": 13,
+    "sectionName": "Proposals",
+    "name": "Cross-tenant proposal denial",
+    "tenant": "B",
+    "role": "owner",
+    "primaryRef": "PROP-03",
+    "passCriteria": [
+      "Denied + unchanged"
+    ],
+    "failCriteria": [
+      "200 or executed"
+    ]
+  },
+  {
+    "id": "QA-063",
+    "section": 13,
+    "sectionName": "Proposals",
+    "name": "Approve booking proposal executes",
+    "tenant": "A",
+    "role": "owner",
+    "primaryRef": "WF-36; SCH-02",
+    "passCriteria": [
+      "Executed + appointment"
+    ],
+    "failCriteria": [
+      "Stuck approved",
+      "No entity"
+    ]
+  },
+  {
+    "id": "QA-064",
+    "section": 13,
+    "sectionName": "Proposals",
+    "name": "Edit proposal before approve",
+    "tenant": "A",
+    "role": "owner",
+    "primaryRef": "WF-38",
+    "passCriteria": [
+      "Executed with edits"
+    ],
+    "failCriteria": [
+      "Edits ignored"
+    ]
+  },
+  {
+    "id": "QA-065",
+    "section": 14,
+    "sectionName": "Communications and interactions",
+    "name": "Conversation + message thread",
+    "tenant": "A",
+    "role": "owner",
+    "primaryRef": "CONV-01",
+    "passCriteria": [
+      "Thread loads"
+    ],
+    "failCriteria": [
+      "500",
+      "Empty crash"
+    ]
+  },
+  {
+    "id": "QA-066",
+    "section": 14,
+    "sectionName": "Communications and interactions",
+    "name": "Interactions show SMS/email dispatches",
+    "tenant": "A",
+    "role": "owner",
+    "primaryRef": "beta 9.1–9.3; SMS-01",
+    "passCriteria": [
+      "Dispatch visible"
+    ],
+    "failCriteria": [
+      "Missing after send"
+    ]
+  },
+  {
+    "id": "QA-067",
+    "section": 14,
+    "sectionName": "Communications and interactions",
+    "name": "Customer comms history links entities",
+    "tenant": "A",
+    "role": "owner",
+    "primaryRef": "beta 9.5–9.7",
+    "passCriteria": [
+      "Links work"
+    ],
+    "failCriteria": [
+      "Orphan messages only"
+    ]
+  },
+  {
+    "id": "QA-068",
+    "section": 14,
+    "sectionName": "Communications and interactions",
+    "name": "Dispatch idempotency window",
+    "tenant": "A",
+    "role": "owner",
+    "primaryRef": "beta 9.4; SMS-01",
+    "passCriteria": [
+      "No duplicate delivery"
+    ],
+    "failCriteria": [
+      "Two messages for one action"
+    ]
+  },
+  {
+    "id": "QA-069",
+    "section": 15,
+    "sectionName": "Assistant and in-app voice",
+    "name": "Assistant chat loads + grounded answers",
+    "tenant": "A",
+    "role": "owner",
+    "primaryRef": "AST-01–06; beta 11.1–11.4; WF-39",
+    "passCriteria": [
+      "Reply present"
+    ],
+    "failCriteria": [
+      "500",
+      "Empty thread wipe"
+    ]
+  },
+  {
+    "id": "QA-070",
+    "section": 15,
+    "sectionName": "Assistant and in-app voice",
+    "name": "Create customer via assistant",
+    "tenant": "A",
+    "role": "owner",
+    "primaryRef": "AST-01; CUST-02",
+    "passCriteria": [
+      "Customer created via approval"
+    ],
+    "failCriteria": [
+      "No proposal",
+      "Auto-exec"
+    ]
+  },
+  {
+    "id": "QA-071",
+    "section": 15,
+    "sectionName": "Assistant and in-app voice",
+    "name": "Create/revise estimate via assistant",
+    "tenant": "A",
+    "role": "owner",
+    "primaryRef": "AST-02/03",
+    "passCriteria": [
+      "Estimate executed with grounded prices"
+    ],
+    "failCriteria": [
+      "Invented prices trusted",
+      "No estimate"
+    ]
+  },
+  {
+    "id": "QA-072",
+    "section": 15,
+    "sectionName": "Assistant and in-app voice",
+    "name": "In-app voice bar / mic transcript",
+    "tenant": "A",
+    "role": "owner",
+    "primaryRef": "WF-40/45; beta 11.7–11.8",
+    "passCriteria": [
+      "Transcript or explicit failure"
+    ],
+    "failCriteria": [
+      "Silent failure"
+    ]
+  },
+  {
+    "id": "QA-073",
+    "section": 15,
+    "sectionName": "Assistant and in-app voice",
+    "name": "Conversation history persists across tabs",
+    "tenant": "A",
+    "role": "owner",
+    "primaryRef": "beta 11.5–11.6",
+    "passCriteria": [
+      "History persists"
+    ],
+    "failCriteria": [
+      "Self-wipe"
+    ]
+  },
+  {
+    "id": "QA-074",
+    "section": 16,
+    "sectionName": "Inbound voice calls",
+    "name": "Live Twilio call connects + greets",
+    "tenant": "A",
+    "role": "caller",
+    "primaryRef": "beta 15.1–15.2; WF-08/42",
+    "passCriteria": [
+      "Call connects",
+      "Greeting uses business name"
+    ],
+    "failCriteria": [
+      "Busy/dead",
+      "Wrong tenant"
+    ]
+  },
+  {
+    "id": "QA-075",
+    "section": 16,
+    "sectionName": "Inbound voice calls",
+    "name": "Identify customer + book proposal",
+    "tenant": "A",
+    "role": "caller→owner",
+    "primaryRef": "SCH-02; CUST-02; WF-42",
+    "passCriteria": [
+      "Proposal + executed appointment"
+    ],
+    "failCriteria": [
+      "No proposal",
+      "Wrong customer"
+    ]
+  },
+  {
+    "id": "QA-076",
+    "section": 16,
+    "sectionName": "Inbound voice calls",
+    "name": "Emergency triage escalation",
+    "tenant": "A",
+    "role": "caller",
+    "primaryRef": "VOX-01; WF-43; beta 15.7",
+    "passCriteria": [
+      "Escalation path taken"
+    ],
+    "failCriteria": [
+      "Normal booking continues"
+    ]
+  },
+  {
+    "id": "QA-077",
+    "section": 16,
+    "sectionName": "Inbound voice calls",
+    "name": "Spanish / i18n voice response",
+    "tenant": "A",
+    "role": "caller",
+    "primaryRef": "VOX-02",
+    "passCriteria": [
+      "Spanish path engaged (soft language check ok)"
+    ],
+    "failCriteria": [
+      "Hard failure / hangup"
+    ]
+  },
+  {
+    "id": "QA-078",
+    "section": 16,
+    "sectionName": "Inbound voice calls",
+    "name": "Voice→estimate/invoice proposals",
+    "tenant": "A",
+    "role": "caller→owner",
+    "primaryRef": "VOX-05–08, VOX-11",
+    "passCriteria": [
+      "Proposals execute to entities"
+    ],
+    "failCriteria": [
+      "No proposal",
+      "Ungrounded prices auto-approved"
+    ]
+  },
+  {
+    "id": "QA-079",
+    "section": 16,
+    "sectionName": "Inbound voice calls",
+    "name": "Session in interactions + DB artifacts",
+    "tenant": "A",
+    "role": "owner",
+    "primaryRef": "VOX-09/10; WF-44; beta 15.8–15.9",
+    "passCriteria": [
+      "Interaction + transcript/session artifacts"
+    ],
+    "failCriteria": [
+      "Missing interaction",
+      "500 drawer"
+    ]
+  },
+  {
+    "id": "QA-080",
+    "section": 17,
+    "sectionName": "Notifications and compliance",
+    "name": "Outbound SMS dispatch + entity_type CHECK",
+    "tenant": "A",
+    "role": "owner",
+    "primaryRef": "SMS-01; beta 7.12–7.13",
+    "passCriteria": [
+      "SMS sent + valid row"
+    ],
+    "failCriteria": [
+      "DB error",
+      "No provider message"
+    ]
+  },
+  {
+    "id": "QA-081",
+    "section": 17,
+    "sectionName": "Notifications and compliance",
+    "name": "SMS consent / DNC gating",
+    "tenant": "A",
+    "role": "owner",
+    "primaryRef": "SMS-02; VOX-03",
+    "passCriteria": [
+      "Suppressed with evidence"
+    ],
+    "failCriteria": [
+      "SMS delivered to DNC"
+    ]
+  },
+  {
+    "id": "QA-082",
+    "section": 17,
+    "sectionName": "Notifications and compliance",
+    "name": "Appointment confirmation SMS natural copy",
+    "tenant": "A",
+    "role": "owner",
+    "primaryRef": "beta 7.12–7.13",
+    "passCriteria": [
+      "Natural copy delivered"
+    ],
+    "failCriteria": [
+      "Raw JSON SMS"
+    ]
+  },
+  {
+    "id": "QA-083",
+    "section": 17,
+    "sectionName": "Notifications and compliance",
+    "name": "Delay notice idempotency",
+    "tenant": "A",
+    "role": "owner",
+    "primaryRef": "SCH-05; beta 7.18",
+    "passCriteria": [
+      "Idempotent"
+    ],
+    "failCriteria": [
+      "Duplicate SMS"
+    ]
+  },
+  {
+    "id": "QA-084",
+    "section": 18,
+    "sectionName": "Public and customer self-service",
+    "name": "Public estimate approve/reject + re-open",
+    "tenant": "A",
+    "role": "customer",
+    "primaryRef": "PORT-01; WF-30; beta 10.1–10.4",
+    "passCriteria": [
+      "Valid flow works",
+      "Invalid safe"
+    ],
+    "failCriteria": [
+      "Mock data leak",
+      "Raw error JSON"
+    ]
+  },
+  {
+    "id": "QA-085",
+    "section": 18,
+    "sectionName": "Public and customer self-service",
+    "name": "Public invoice view + paid state",
+    "tenant": "A",
+    "role": "customer",
+    "primaryRef": "PORT-02; beta 10.5–10.7",
+    "passCriteria": [
+      "Correct amount + paid persistence"
+    ],
+    "failCriteria": [
+      "Wrong cents",
+      "Stale unpaid"
+    ]
+  },
+  {
+    "id": "QA-086",
+    "section": 18,
+    "sectionName": "Public and customer self-service",
+    "name": "Customer portal token-scoped data",
+    "tenant": "A",
+    "role": "customer",
+    "primaryRef": "WF-47; beta 10.8–10.10",
+    "passCriteria": [
+      "Scoped data only"
+    ],
+    "failCriteria": [
+      "Cross-customer leak"
+    ]
+  },
+  {
+    "id": "QA-087",
+    "section": 18,
+    "sectionName": "Public and customer self-service",
+    "name": "Intake form vertical fields",
+    "tenant": "A",
+    "role": "anonymous",
+    "primaryRef": "beta 10.11–10.13; WF-16",
+    "passCriteria": [
+      "Vertical options present"
+    ],
+    "failCriteria": [
+      "Empty/wrong vertical"
+    ]
+  },
+  {
+    "id": "QA-088",
+    "section": 18,
+    "sectionName": "Public and customer self-service",
+    "name": "Post-job feedback submit",
+    "tenant": "A",
+    "role": "customer",
+    "primaryRef": "WF-49; beta 10.14–10.16",
+    "passCriteria": [
+      "Rating persisted"
+    ],
+    "failCriteria": [
+      "No row"
+    ]
+  },
+  {
+    "id": "QA-089",
+    "section": 19,
+    "sectionName": "Settings",
+    "name": "Read + update tenant settings",
+    "tenant": "A",
+    "role": "owner",
+    "primaryRef": "SET-01; beta 14.1–14.2",
+    "passCriteria": [
+      "Persists after reload"
+    ],
+    "failCriteria": [
+      "Reverts",
+      "Pack wipe"
+    ]
+  },
+  {
+    "id": "QA-090",
+    "section": 19,
+    "sectionName": "Settings",
+    "name": "Terminology / AI approval / deposit rules",
+    "tenant": "A",
+    "role": "owner",
+    "primaryRef": "beta 14.4–14.7",
+    "passCriteria": [
+      "All three persist"
+    ],
+    "failCriteria": [
+      "Any reverts"
+    ]
+  },
+  {
+    "id": "QA-091",
+    "section": 19,
+    "sectionName": "Settings",
+    "name": "Templates + price book (catalog CRUD)",
+    "tenant": "A",
+    "role": "owner",
+    "primaryRef": "CAT-01; beta 14.12–14.14",
+    "passCriteria": [
+      "Edits prefill new estimate"
+    ],
+    "failCriteria": [
+      "Mock-only save"
+    ]
+  },
+  {
+    "id": "QA-092",
+    "section": 19,
+    "sectionName": "Settings",
+    "name": "Team invite Dispatcher + Technician",
+    "tenant": "A",
+    "role": "owner→dispatcher/tech",
+    "primaryRef": "beta 16.13–16.20",
+    "passCriteria": [
+      "Both roles join Tenant A"
+    ],
+    "failCriteria": [
+      "New tenant created",
+      "Wrong role"
+    ]
+  },
+  {
+    "id": "QA-093",
+    "section": 19,
+    "sectionName": "Settings",
+    "name": "Current-user profile + mode switch",
+    "tenant": "A",
+    "role": "owner",
+    "primaryRef": "ME-01",
+    "passCriteria": [
+      "/api/me correct",
+      "Mode switch persists if supported"
+    ],
+    "failCriteria": [
+      "Wrong tenant/role"
+    ]
+  },
+  {
+    "id": "QA-094",
+    "section": 20,
+    "sectionName": "Google Calendar",
+    "name": "Connect Google OAuth (auth URL)",
+    "tenant": "A",
+    "role": "owner",
+    "primaryRef": "WF-50; CAL-01",
+    "passCriteria": [
+      "Integration stored"
+    ],
+    "failCriteria": [
+      "Missing OAuth client",
+      "Tokens leaked"
+    ]
+  },
+  {
+    "id": "QA-095",
+    "section": 20,
+    "sectionName": "Google Calendar",
+    "name": "Appointment create/assign → synced event",
+    "tenant": "A",
+    "role": "owner",
+    "primaryRef": "WF-50; SCH-01",
+    "passCriteria": [
+      "Synced event exists"
+    ],
+    "failCriteria": [
+      "No external_event_id"
+    ]
+  },
+  {
+    "id": "QA-096",
+    "section": 20,
+    "sectionName": "Google Calendar",
+    "name": "Disconnect clears integration",
+    "tenant": "A",
+    "role": "owner",
+    "primaryRef": "WF-50",
+    "passCriteria": [
+      "Integration cleared"
+    ],
+    "failCriteria": [
+      "Stale tokens remain usable"
+    ]
+  },
+  {
+    "id": "QA-097",
+    "section": 21,
+    "sectionName": "Multi-tenant isolation and security",
+    "name": "Cross-tenant reads blocked",
+    "tenant": "B",
+    "role": "owner",
+    "primaryRef": "ISO-01; beta 17.5–17.13; WF-04",
+    "passCriteria": [
+      "All reads denied/empty"
+    ],
+    "failCriteria": [
+      "Any A entity returned"
+    ]
+  },
+  {
+    "id": "QA-098",
+    "section": 21,
+    "sectionName": "Multi-tenant isolation and security",
+    "name": "Cross-tenant writes blocked",
+    "tenant": "B",
+    "role": "owner",
+    "primaryRef": "ISO-01; beta 17.14–17.17",
+    "passCriteria": [
+      "Writes blocked"
+    ],
+    "failCriteria": [
+      "Child created under A"
+    ]
+  },
+  {
+    "id": "QA-099",
+    "section": 21,
+    "sectionName": "Multi-tenant isolation and security",
+    "name": "Technician RBAC",
+    "tenant": "A",
+    "role": "technician",
+    "primaryRef": "beta 17.18–17.24",
+    "passCriteria": [
+      "RBAC matrix matches"
+    ],
+    "failCriteria": [
+      "Tech reads invoices/settings"
+    ]
+  },
+  {
+    "id": "QA-100",
+    "section": 21,
+    "sectionName": "Multi-tenant isolation and security",
+    "name": "Public token isolation / no internal IDs",
+    "tenant": "A/B",
+    "role": "anonymous",
+    "primaryRef": "beta 17.25–17.28; PORT-01/02",
+    "passCriteria": [
+      "Safe failures"
+    ],
+    "failCriteria": [
+      "Data leak"
+    ]
+  },
+  {
+    "id": "QA-101",
+    "section": 21,
+    "sectionName": "Multi-tenant isolation and security",
+    "name": "Twilio/Stripe webhook tenant routing",
+    "tenant": "A/B",
+    "role": "system",
+    "primaryRef": "beta 17.29–17.32",
+    "passCriteria": [
+      "Tenant-correct routing"
+    ],
+    "failCriteria": [
+      "Cross-tenant write"
+    ]
+  },
+  {
+    "id": "QA-102",
+    "section": 21,
+    "sectionName": "Multi-tenant isolation and security",
+    "name": "RLS with GUC + no-GUC fail-closed",
+    "tenant": "A/B",
+    "role": "qa_readonly",
+    "primaryRef": "ISO-01; beta 17.33–17.35",
+    "passCriteria": [
+      "GUC scopes",
+      "no-GUC empty/fail-closed"
+    ],
+    "failCriteria": [
+      "Bypass RLS",
+      "Cross-tenant rows"
+    ]
+  },
+  {
+    "id": "QA-103",
+    "section": 21,
+    "sectionName": "Multi-tenant isolation and security",
+    "name": "Estimate tenant isolation row",
+    "tenant": "B",
+    "role": "owner",
+    "primaryRef": "EST-06",
+    "passCriteria": [
+      "Denied"
+    ],
+    "failCriteria": [
+      "200 with A estimate"
+    ]
+  },
+  {
+    "id": "QA-104",
+    "section": 21,
+    "sectionName": "Multi-tenant isolation and security",
+    "name": "Feature-flag admin platform-gated",
+    "tenant": "A",
+    "role": "owner",
+    "primaryRef": "FLAG-01",
+    "passCriteria": [
+      "Tenant cannot elevate flags"
+    ],
+    "failCriteria": [
+      "Owner mutates platform flags"
+    ]
+  },
+  {
+    "id": "QA-105",
+    "section": 22,
+    "sectionName": "Miscellaneous and hidden-route checks",
+    "name": "Golden funnel intake→invoice issued",
+    "tenant": "A",
+    "role": "owner",
+    "primaryRef": "JRN-03",
+    "passCriteria": [
+      "Full chain linked"
+    ],
+    "failCriteria": [
+      "Broken link",
+      "Missing stage"
+    ]
+  },
+  {
+    "id": "QA-106",
+    "section": 22,
+    "sectionName": "Miscellaneous and hidden-route checks",
+    "name": "Three-estimate billing journey (2 paid)",
+    "tenant": "A",
+    "role": "owner",
+    "primaryRef": "JRN-02",
+    "passCriteria": [
+      "Exact 2 paid + 1 left"
+    ],
+    "failCriteria": [
+      "Counts wrong"
+    ]
+  },
+  {
+    "id": "QA-107",
+    "section": 22,
+    "sectionName": "Miscellaneous and hidden-route checks",
+    "name": "Hidden routes + telephony gap documentation",
+    "tenant": "A",
+    "role": "owner",
+    "primaryRef": "VOX-04; MC-01; RPT-02",
+    "passCriteria": [
+      "Routes work",
+      "Telephony gaps either executed or FAIL with exact missing resource"
+    ],
+    "failCriteria": [
+      "ASSUMED/SKIPPED without FAIL"
+    ]
+  }
+]
