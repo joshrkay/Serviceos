@@ -911,6 +911,30 @@ function SaveAsTemplateSheet({ estimateId, estimateNumber, onClose, onSaved }: {
 }
 
 // ─── Estimate Detail ──────────────────────────────────────────────────────
+
+// Revision-source badge labels for the History section. The API records who
+// produced each snapshot: a human edit, an AI draft, or an AI revision.
+const REVISION_SOURCE_LABELS: Record<string, string> = {
+  manual: 'Manual',
+  ai_generated: 'AI generated',
+  ai_revised: 'AI revised',
+};
+
+// Compact relative timestamp for the History rows (same shape as
+// ActivityFeedCard's helper — local per-component, no new deps).
+function relativeTime(iso: string): string {
+  const ms = Date.now() - new Date(iso).getTime();
+  if (Number.isNaN(ms)) return '';
+  const mins = Math.floor(ms / 60000);
+  if (mins < 1) return 'just now';
+  if (mins < 60) return `${mins}m ago`;
+  const hrs = Math.floor(mins / 60);
+  if (hrs < 24) return `${hrs}h ago`;
+  const days = Math.floor(hrs / 24);
+  if (days < 7) return `${days}d ago`;
+  return new Date(iso).toLocaleDateString();
+}
+
 function EstimateDetail({ estimateId, onBack }: { estimateId: string; onBack: () => void }) {
   const navigate = useNavigate();
   const tz = useTenantTimezone();
@@ -1024,6 +1048,24 @@ function EstimateDetail({ estimateId, onBack }: { estimateId: string; onBack: ()
       .then((data: Array<{ id: string; summary: string; createdAt: string }>) =>
         setHistory(Array.isArray(data) ? data : []))
       .catch(() => { /* history is best-effort; absence just hides the card */ });
+  }, [estimateId]);
+
+  // Revision history: every persisted edit snapshots a document revision
+  // (source manual | ai_generated | ai_revised) and the API joins the diff
+  // summary the edit produced. Best-effort like notes/history — a failed
+  // fetch just hides the section.
+  const [revisions, setRevisions] = useState<Array<{ id: string; source: string; createdAt: string; summary?: string }>>([]);
+  const [revisionsLoaded, setRevisionsLoaded] = useState(false);
+  useEffect(() => {
+    setRevisionsLoaded(false);
+    apiFetch(`/api/estimates/${estimateId}/revisions`)
+      .then(r => (r.ok ? r.json() : null))
+      .then((data: Array<{ id: string; source: string; createdAt: string; summary?: string }> | null) => {
+        if (!Array.isArray(data)) return;
+        setRevisions(data);
+        setRevisionsLoaded(true);
+      })
+      .catch(() => { /* revisions are best-effort; absence just hides the section */ });
   }, [estimateId]);
 
   async function saveNote() {
@@ -1222,6 +1264,38 @@ function EstimateDetail({ estimateId, onBack }: { estimateId: string; onBack: ()
                       </div>
                     ))}
                   </div>
+                </div>
+              )}
+
+              {/* History — the document-revision read path: who produced each
+                  persisted snapshot (manual / AI) and the diff summary the
+                  edit recorded. Read-only; hidden until the fetch succeeds. */}
+              {revisionsLoaded && (
+                <div className="rounded-xl bg-card border border-border overflow-hidden">
+                  <div className="flex items-center gap-2 px-4 py-3 border-b border-border">
+                    <RotateCcw size={13} className="text-muted-foreground" />
+                    <p className="text-sm text-foreground">History</p>
+                    <span className="ml-auto text-xs text-muted-foreground">{revisions.length}</span>
+                  </div>
+                  {revisions.length === 0 ? (
+                    <p className="px-4 py-3 text-sm text-muted-foreground">No revisions yet</p>
+                  ) : (
+                    <div className="divide-y divide-border">
+                      {revisions.map(r => (
+                        <div key={r.id} className="px-4 py-3">
+                          <div className="flex items-center gap-2">
+                            <span className="rounded-full bg-secondary px-2 py-0.5 text-xs text-muted-foreground">
+                              {REVISION_SOURCE_LABELS[r.source] ?? r.source}
+                            </span>
+                            <span className="text-xs text-muted-foreground">{relativeTime(r.createdAt)}</span>
+                          </div>
+                          {r.summary && (
+                            <p className="text-sm text-foreground leading-snug mt-1.5">{r.summary}</p>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  )}
                 </div>
               )}
             </div>

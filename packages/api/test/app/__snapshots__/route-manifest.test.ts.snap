@@ -253,6 +253,7 @@ exports[`createApp route manifest > matches the committed route manifest 1`] = `
          └─ GET /
          └─ GET /:id
          └─ GET /:id/history
+         └─ GET /:id/revisions
          └─ PATCH /:id
          └─ POST /
          └─ POST /:id/clone
