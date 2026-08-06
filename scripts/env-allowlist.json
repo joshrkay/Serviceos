@@ -53,6 +53,7 @@
     { "name": "WHISPER_MODEL", "reason": "transcription-providers.ts:506 defaults to 'whisper-1'." },
     { "name": "STRIPE_API_KEY", "reason": "Fallback alias only: payment-link-provider.ts:129 uses `STRIPE_SECRET_KEY ?? STRIPE_API_KEY`, and STRIPE_SECRET_KEY is in the production contract." },
     { "name": "OVERDUE_SWEEP_INTERVAL_MS", "reason": "Dev/QA sweep-cadence override (app.ts:6110); non-positive/unset = 1 hour." },
+    { "name": "MONEY_RECONCILIATION_INTERVAL_MS", "reason": "Money-invariant sweep cadence override (app.ts, money-reconciliation registration; also documented in .env.production.example). Unset = 6 hours; 0 disables the read-only sweep." },
     { "name": "PAYMENT_LINK_EXPIRY_HOURS", "reason": "stripe-payment-link.ts:69 defaults to 24 hours on unset/unparseable." },
     { "name": "PROCESS_ROLE", "reason": "config.ts:84 defaults to 'all' (web + workers in one process), which is correct for the single-service deploy. Only set when splitting into web/worker/voice services." },
     { "name": "RAG_RETRIEVAL_ENABLED", "reason": "Opt-in retrieval adapter (app.ts:2224 requires the literal 'true'); unset = no retrieve adapter, the current behaviour." },
