@@ -291,5 +291,59 @@ describe('NewJobFlow', () => {
       expect(screen.getByText('Service location')).toBeInTheDocument();
       expect(screen.getByText('Home')).toBeInTheDocument();
     });
+
+    it('labels the parsed review card as a quick fill, never as Rivet AI', async () => {
+      H.customers = [
+        { id: 'cust-maria', displayName: 'Maria Garcia', primaryPhone: '512-555-0111', locations: [] },
+      ];
+      H.apiFetch.mockImplementation((url: unknown) => {
+        if (typeof url === 'string' && url.startsWith('/api/voice/transcribe')) {
+          return Promise.resolve({
+            ok: true,
+            json: async () => ({ transcript: 'Schedule an HVAC job for Maria Garcia, AC not cooling' }),
+          });
+        }
+        return Promise.resolve({ ok: true, json: async () => [] });
+      });
+
+      renderFlow();
+
+      await act(async () => { screen.getByText('Speak it').click(); });
+      await act(async () => { screen.getByText('Tap to start').click(); });
+      await waitFor(() =>
+        expect((navigator.mediaDevices.getUserMedia as ReturnType<typeof vi.fn>)).toHaveBeenCalled(),
+      );
+      await act(async () => { await Promise.resolve(); });
+      await act(async () => { screen.getByText('Tap to stop').click(); });
+      await waitFor(() => expect(screen.getByText(/Parse this job/i)).toBeInTheDocument());
+      await act(async () => { screen.getByText(/Parse this job/i).click(); });
+
+      // The review card is honest about being a keyword quick fill — the
+      // client-side regex parser must never be branded as AI.
+      expect(await screen.findByText('Quick fill · Parsed from your words')).toBeInTheDocument();
+      expect(document.body.textContent).not.toContain('Rivet AI');
+    });
+  });
+
+  describe('honest quick-fill copy (the voice parser is not AI)', () => {
+    it('describes the Speak-it option as keyword quick-fill, not AI, and points to the real assistant', () => {
+      renderFlow();
+
+      // New honest entry copy renders…
+      expect(
+        screen.getByText(/quick fill matches keywords in your words to pre-fill the job/i),
+      ).toBeInTheDocument();
+      expect(screen.getByText(/ask Rivet in the voice bar/i)).toBeInTheDocument();
+
+      // …and the overselling AI branding is gone from the start screen.
+      expect(document.body.textContent).not.toContain('AI fills in');
+      expect(document.body.textContent).not.toContain('Rivet AI');
+    });
+
+    it('ships no "Rivet AI" / "AI fills in" branding anywhere in this component', async () => {
+      const { default: src } = await import('./NewJobFlow.tsx?raw');
+      expect(src).not.toContain('Rivet AI');
+      expect(src).not.toContain('AI fills in');
+    });
   });
 });
