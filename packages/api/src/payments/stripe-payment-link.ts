@@ -1,4 +1,15 @@
-import { PaymentLinkProvider, PaymentLinkRequest, PaymentLinkResult, validatePaymentLinkRequest } from './payment-link-provider';
+import {
+  InvoicePaymentIntentSummary,
+  PaymentLinkProvider,
+  PaymentLinkRequest,
+  PaymentLinkResult,
+  validatePaymentLinkRequest,
+} from './payment-link-provider';
+import {
+  cancelPaymentIntent,
+  searchPaymentIntentsByInvoice,
+  StripeFetch,
+} from './stripe-payment-intent';
 
 export interface StripeConfig {
   apiKey: string;
@@ -97,5 +108,35 @@ export class StripePaymentLinkProvider implements PaymentLinkProvider {
       const body = await res.text();
       throw new Error(`Stripe deactivation failed (${res.status}): ${body}`);
     }
+  }
+
+  // P0-1 completion — the wrappers in stripe-payment-intent.ts take an
+  // injectable fetcher without a timeout; wrap global fetch so these calls
+  // share the same stalled-upstream guard as the link calls above.
+  private readonly timedFetch: StripeFetch = (input, init) =>
+    fetch(input, { ...init, signal: AbortSignal.timeout(STRIPE_REQUEST_TIMEOUT_MS) });
+
+  /** Discover PIs minted for an invoice (metadata-stamped at mint) in one
+   * account scope. See searchPaymentIntentsByInvoice for the mechanism. */
+  async listInvoicePaymentIntents(
+    tenantId: string,
+    invoiceId: string,
+    stripeAccountId?: string,
+  ): Promise<InvoicePaymentIntentSummary[]> {
+    return searchPaymentIntentsByInvoice(
+      { apiKey: this.config.apiKey },
+      { tenantId, invoiceId, ...(stripeAccountId?.trim() ? { stripeAccountId } : {}) },
+      this.timedFetch,
+    );
+  }
+
+  /** Cancel a minted PI so its client secret can no longer capture money. */
+  async cancelPaymentIntent(paymentIntentId: string, stripeAccountId?: string): Promise<void> {
+    await cancelPaymentIntent(
+      { apiKey: this.config.apiKey },
+      paymentIntentId,
+      stripeAccountId?.trim() || undefined,
+      this.timedFetch,
+    );
   }
 }

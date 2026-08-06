@@ -10,7 +10,7 @@ import { ValidationError } from '../shared/errors';
 import { SettingsRepository, getNextInvoiceNumber } from '../settings/settings';
 import { buildOriginationMetadata } from '../leads/attribution-metadata';
 import { RefreshJobMoneyStateDeps, refreshJobMoneyStateSafe } from '../jobs/job-money-state';
-import { deactivateInvoicePaymentLink } from './invoice-payment-link';
+import { cancelInvoicePaymentIntents, deactivateInvoicePaymentLink } from './invoice-payment-link';
 import type { PaymentLinkProvider } from '../payments/payment-link-provider';
 import type { ConnectAccountResolver } from './public-invoice-service';
 
@@ -500,7 +500,10 @@ export async function issueInvoice(
  * NO event, so a void left no durable timestamp). `paymentLink` arms the
  * P0-1 fix: a void/cancel deactivates the invoice's hosted Stripe payment
  * link, closing the path where a customer pays a stale link on a dead
- * invoice and Stripe captures money the system refuses to credit.
+ * invoice and Stripe captures money the system refuses to credit. The same
+ * provider also carries the P0-1 completion: minted PaymentIntent client
+ * secrets are swept and cancelled so an Elements/Terminal secret held from
+ * before the void can't complete either.
  */
 export interface TransitionInvoiceStatusOptions {
   auditRepo?: AuditRepository;
@@ -560,6 +563,21 @@ export async function transitionInvoiceStatus(
       invoice: updated,
       reason: newStatus === 'void' ? 'voided' : 'canceled',
       invoiceRepo: repository,
+      provider: opts.paymentLink.provider,
+      connectAccountResolver: opts.paymentLink.connectAccountResolver,
+      auditRepo: opts.auditRepo,
+      actor: opts.actor,
+    });
+    // P0-1 completion — the link is only half the exposure: a PaymentIntent
+    // client secret minted pre-void (public payment page / Terminal) stays
+    // confirmable until the PI is cancelled. Sweep and cancel them through
+    // the same provider; best-effort + audited, never blocks the transition.
+    // Runs even when no link column is set — the public PI mint never
+    // attaches a link to the invoice.
+    await cancelInvoicePaymentIntents({
+      tenantId,
+      invoice: updated,
+      reason: newStatus === 'void' ? 'voided' : 'canceled',
       provider: opts.paymentLink.provider,
       connectAccountResolver: opts.paymentLink.connectAccountResolver,
       auditRepo: opts.auditRepo,
