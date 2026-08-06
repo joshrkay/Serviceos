@@ -210,8 +210,9 @@ function looksLikeJson(text: string): boolean {
  * Best-effort transcription correction. Calls the gateway with
  * `taskType: 'transcription_correction'`, sending the system prompt above
  * plus the tenant glossary + raw transcript as the user message. (This
- * taskType isn't in ai-routing.ts `taskTierMapping`, so it resolves to the
- * standard tier.) Returns `{ corrected, glossary }`; on ANY failure, returns
+ * taskType is mapped to the `lightweight` tier in ai-routing.ts — which is
+ * why the call below pins `maxTokens` above that tier's 1024 default.)
+ * Returns `{ corrected, glossary }`; on ANY failure, returns
  * the raw transcript unchanged — this is a quality upgrade, not a gate.
  */
 async function correctTranscript(input: {
