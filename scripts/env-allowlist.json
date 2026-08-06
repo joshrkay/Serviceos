@@ -96,8 +96,6 @@
     { "name": "QUICKBOOKS_CLIENT_SECRET", "reason": "UNSURE - QuickBooks OAuth credential (quickbooks-oauth.ts:142)." },
     { "name": "QUICKBOOKS_REDIRECT_URI", "reason": "UNSURE - QuickBooks OAuth redirect (quickbooks-oauth.ts:145)." },
     { "name": "QUICKBOOKS_ENVIRONMENT", "reason": "UNSURE - sandbox vs production selector (quickbooks-oauth.ts:135). Whichever the unset default is, it is undeclared." },
-    { "name": "GOOGLE_OAUTH_CLIENT_ID", "reason": "UNSURE - Google OAuth credential (app.ts:3195). Unset silently disables whatever it gates." },
-    { "name": "GOOGLE_OAUTH_CLIENT_SECRET", "reason": "UNSURE - Google OAuth credential (app.ts:3195)." },
     { "name": "VAPI_API_KEY", "reason": "UNSURE - Vapi voice-provider credential (integrations/vapi/client.ts:96). Either the integration is dormant or this is missing." },
     { "name": "VAPI_BASE_URL", "reason": "UNSURE - Vapi API base (integrations/vapi/client.ts:112); only meaningful alongside VAPI_API_KEY." },
     { "name": "WISETACK_API_KEY", "reason": "UNSURE - financing provider credential (financing/financing-provider.ts:159). Setting it also turns FINANCING_ENABLED on implicitly, so its absence is load-bearing." },

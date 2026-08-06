@@ -34,69 +34,25 @@ import type {
   GoogleBusinessReplyContext,
   GoogleBusinessReplyResolver,
 } from '../proposals/execution/review-response-handler';
-import type {
-  CredentialResolver,
-  CredentialRow,
-} from '../integrations/credentials';
-import { decrypt } from '../integrations/crypto';
+import type { CredentialResolver } from '../integrations/credentials';
 import type { ReviewRepository } from './review';
-
-interface GoogleBusinessCredentials {
-  accessToken?: string;
-  accessTokenEnc?: string;
-  providerData?: { accountId?: string; locationId?: string };
-  accountId?: string;
-  locationId?: string;
-}
-
-/**
- * Pull the access token out of a credential row. Supports both
- * plaintext (`accessToken`) and encrypted-at-rest (`accessTokenEnc`)
- * shapes. Returns null when the row is missing both keys or the
- * decrypt fails — the resolver treats that as a "no context" outcome.
- *
- * Duplicated from `workers/google-reviews.ts` rather than extracted to
- * a shared helper so the two call sites can evolve independently —
- * the worker may eventually need refresh-token handling that the
- * handler doesn't (the handler's call is one-shot per approval).
- */
-function resolveAccessToken(
-  credRow: CredentialRow,
-  encKey: string | undefined,
-): string | null {
-  const creds = (credRow.credentials ?? {}) as GoogleBusinessCredentials;
-  if (creds.accessToken) return creds.accessToken;
-  if (creds.accessTokenEnc && encKey) {
-    try {
-      return decrypt(creds.accessTokenEnc, encKey);
-    } catch {
-      return null;
-    }
-  }
-  return null;
-}
+import type {
+  GoogleBusinessOAuthConfig,
+  GoogleFetch,
+} from './google-business-client';
+import { refreshAccessToken } from './google-business-client';
+import {
+  GoogleBusinessCredentialStore,
+  resolveGoogleBusinessLocation,
+  resolveGoogleBusinessTokens,
+} from './google-business-integration';
 
 /**
- * Extract `{accountId, locationId}` from a credential row, accepting
- * both nested (`credentials.providerData.{accountId,locationId}`) and
- * hoisted top-level shapes for forward-compat with onboarding.
+ * Consider a token expired this many ms BEFORE its recorded expiry so
+ * a reply started moments before the boundary doesn't race a mid-PUT
+ * expiration.
  */
-function resolveLocation(
-  credRow: CredentialRow,
-): { accountId?: string; locationId?: string } {
-  const creds = (credRow.credentials ?? {}) as GoogleBusinessCredentials;
-  if (creds.providerData) {
-    const { accountId, locationId } = creds.providerData;
-    return {
-      ...(accountId !== undefined ? { accountId } : {}),
-      ...(locationId !== undefined ? { locationId } : {}),
-    };
-  }
-  return {
-    ...(creds.accountId !== undefined ? { accountId: creds.accountId } : {}),
-    ...(creds.locationId !== undefined ? { locationId: creds.locationId } : {}),
-  };
-}
+const TOKEN_EXPIRY_SKEW_MS = 60_000;
 
 /**
  * Parse the trailing `reviews/{id}` segment from the upstream resource
@@ -129,11 +85,28 @@ export function parseLocationPath(
   };
 }
 
+/**
+ * Optional refresh wiring (review-monitoring self-serve). When present,
+ * `resolve()` proactively refreshes an EXPIRED access token (per the
+ * stored `accessTokenExpiresAt`) before handing it to the execution
+ * handler, persisting the rotation through `credentialStore` — the
+ * same store the poll worker's 401-retry path writes. When refresh
+ * fails, `resolve()` returns null and the handler surfaces an explicit
+ * `ok:false` for the public sub-action (visible to the operator).
+ */
+export interface PgGoogleBusinessReplyResolverOptions {
+  googleConfig?: GoogleBusinessOAuthConfig | null;
+  credentialStore?: GoogleBusinessCredentialStore | null;
+  fetchFn?: GoogleFetch;
+  now?: () => Date;
+}
+
 export class PgGoogleBusinessReplyResolver implements GoogleBusinessReplyResolver {
   constructor(
     private readonly reviewRepo: ReviewRepository,
     private readonly credentialResolver: CredentialResolver,
     private readonly encKey: string | undefined = process.env.TENANT_ENCRYPTION_KEY,
+    private readonly opts: PgGoogleBusinessReplyResolverOptions = {},
   ) {}
 
   async resolve(
@@ -152,12 +125,44 @@ export class PgGoogleBusinessReplyResolver implements GoogleBusinessReplyResolve
     );
     if (!credRow) return null;
 
-    const accessToken = resolveAccessToken(credRow, this.encKey);
-    if (!accessToken) return null;
+    const tokens = resolveGoogleBusinessTokens(credRow, this.encKey);
+    if (!tokens) return null;
+
+    let accessToken = tokens.accessToken;
+
+    // Proactive refresh: Google access tokens live ~1h, and approvals
+    // routinely land later than the poll that minted the stored token.
+    // Rows without a recorded expiry (hand-seeded) are used as-is.
+    const now = (this.opts.now ?? (() => new Date()))();
+    const expired =
+      tokens.expiresAt !== null &&
+      tokens.expiresAt.getTime() <= now.getTime() + TOKEN_EXPIRY_SKEW_MS;
+    if (expired) {
+      if (!tokens.refreshToken || !this.opts.googleConfig) return null;
+      try {
+        const rotated = await refreshAccessToken(
+          this.opts.googleConfig,
+          tokens.refreshToken,
+          this.opts.fetchFn ?? fetch,
+        );
+        if (this.opts.credentialStore) {
+          await this.opts.credentialStore.persistRotatedAccessToken(
+            tenantId,
+            rotated.accessToken,
+            rotated.expiresAt,
+          );
+        }
+        accessToken = rotated.accessToken;
+      } catch {
+        // Refresh grant is dead (operator revoked access). "No context"
+        // is the visible-failure path at the handler.
+        return null;
+      }
+    }
 
     // Prefer credential-row provider data; fall back to parsing the
     // review's `locationId`, which is `accounts/{a}/locations/{l}`.
-    let { accountId, locationId } = resolveLocation(credRow);
+    let { accountId, locationId } = resolveGoogleBusinessLocation(credRow);
     if (!accountId || !locationId) {
       const fromPath = parseLocationPath(review.locationId);
       accountId = accountId ?? fromPath.accountId;
