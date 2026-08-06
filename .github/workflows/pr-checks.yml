@@ -63,7 +63,7 @@ jobs:
 
       - name: Upload quality metrics
         if: always()
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v7
         with:
           name: quality-metrics
           path: quality-metrics.json
@@ -175,7 +175,7 @@ jobs:
           VOICE_QUALITY_ENFORCE_LAUNCH_GATE: 'true'
       - name: Upload report artifact
         if: always()
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v7
         with:
           name: voice-quality-report
           path: packages/api/voice-quality-report.json
