@@ -25,7 +25,14 @@ export type DispatchEntityType =
   | 'daily_digest'
   // U6 (CRM Jobber parity, Phase 2) — owner-authored conversation reply
   // (free-text SMS/email from the unified inbox; entity_id = conversations.id).
-  | 'conversation_reply';
+  | 'conversation_reply'
+  // Customer-portal link delivery (entity_id = portal_sessions.id). NOTE:
+  // the message_dispatches entity_type CHECK (last widened in migration
+  // 190) does not include this value yet — db/schema.ts was frozen for the
+  // change that introduced it, so a follow-up migration mirroring 092/125/
+  // 164/190 must add 'portal_session' to the CHECK before Pg-backed
+  // deployments can record these rows.
+  | 'portal_session';
 export type DispatchChannel = 'sms' | 'email';
 export type DispatchStatus = 'sent' | 'delivered' | 'failed' | 'bounced';
 

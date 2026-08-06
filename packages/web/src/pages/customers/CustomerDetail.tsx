@@ -15,6 +15,7 @@ import { RecurringJobsPanel } from '../../components/customers/RecurringJobsPane
 import { CustomerGroupsPanel } from '../../components/customers/CustomerGroupsPanel';
 import { CustomerRecordsPanel } from '../../components/customers/CustomerRecordsPanel';
 import { MergeCustomerPanel } from '../../components/customers/MergeCustomerPanel';
+import { PortalAccessPanel } from '../../components/customers/PortalAccessPanel';
 import { apiFetch } from '../../utils/api-fetch';
 import {
   Badge,
@@ -408,6 +409,12 @@ export function CustomerDetail({
         {
           title: 'Contacts',
           content: <ContactsPanel customerId={customerId} />,
+        },
+        {
+          // Customer portal access — mint a link (copyable, shown once) or
+          // send it by SMS/email through the consent/DNC-gated send path.
+          title: 'Customer Portal',
+          content: <PortalAccessPanel customerId={customerId} />,
         },
         {
           title: 'Customer Notes',

@@ -17,6 +17,8 @@ import {
   renderEstimateSms,
   renderInvoiceEmail,
   renderInvoiceSms,
+  renderPortalLinkEmail,
+  renderPortalLinkSms,
 } from './templates';
 import { DeliveryError } from './notification-errors';
 import { resolveCustomerLanguage } from '../i18n/resolve-language';
@@ -40,6 +42,35 @@ export interface SendInvoiceInput {
   recipientPhone?: string;
   recipientEmail?: string;
   customMessage?: string;
+}
+
+/**
+ * Portal-link delivery (routes/portal.ts mint+send). Unlike estimates and
+ * invoices, the portal session stores only a token HASH — the plaintext URL
+ * exists exactly once, at mint time — so the caller mints the session and
+ * hands the composed URL in. This method owns everything downstream:
+ * recipient resolution, template rendering, the consent/DNC-gated dispatch,
+ * and the dispatch-ledger rows keyed to the portal session.
+ */
+export interface SendPortalLinkInput {
+  tenantId: string;
+  customerId: string;
+  /** portal_sessions.id the link belongs to — dispatch rows key on it. */
+  portalSessionId: string;
+  /** Plaintext portal URL (contains the bearer token). */
+  portalUrl: string;
+  /** Session expiry — rendered in the message so the customer knows. */
+  expiresAt?: Date;
+  channel: SendChannel;
+  recipientPhone?: string;
+  recipientEmail?: string;
+  customMessage?: string;
+}
+
+export interface SendPortalLinkResult {
+  portalSessionId: string;
+  portalUrl: string;
+  channelsSent: SendResult['channelsSent'];
 }
 
 /**
@@ -430,6 +461,96 @@ export class SendService {
     };
   }
 
+  /**
+   * Portal-link variant of the estimate/invoice send shape. No entity
+   * write-back happens here — portal_sessions has no sentAt column; the
+   * dispatch ledger plus the route's portal_session.link_sent audit event
+   * carry the record. Consent/DNC gating is identical to the other sends:
+   * every SMS goes through the gated `delivery` with the customer's stored
+   * consent flag, and a suppression surfaces as a failed channel.
+   */
+  async sendPortalLink(input: SendPortalLinkInput): Promise<SendPortalLinkResult> {
+    const customer = await this.deps.customerRepo.findById(
+      input.tenantId,
+      input.customerId
+    );
+    if (!customer) {
+      throw new NotFoundError('Customer', input.customerId);
+    }
+
+    const { businessName, tenantDefaultLanguage } = await this.resolveBusinessContext(input.tenantId);
+    const language = resolveCustomerLanguage({
+      customerPreferredLanguage: customer.preferredLanguage,
+      tenantDefaultLanguage,
+    });
+
+    const channels = resolveChannels({
+      channel: input.channel,
+      customer,
+      recipientPhone: input.recipientPhone,
+      recipientEmail: input.recipientEmail,
+    });
+
+    const templateCtx = {
+      customerName: customer.displayName,
+      businessName,
+      portalUrl: input.portalUrl,
+      expiresAtIso: input.expiresAt?.toISOString(),
+      customMessage: input.customMessage,
+      language,
+    };
+
+    const sendStartedAt = Date.now();
+    const results = await Promise.allSettled(
+      channels.map((target) =>
+        this.dispatchOne({
+          tenantId: input.tenantId,
+          entityType: 'portal_session',
+          entityId: input.portalSessionId,
+          target,
+          customerSmsConsent: customer.smsConsent,
+          idempotencyKey: this.buildIdempotencyKey(
+            'portal_session',
+            input.portalSessionId,
+            target.channel,
+            sendStartedAt
+          ),
+          render: () =>
+            target.channel === 'sms'
+              ? { to: target.recipient, body: renderPortalLinkSms(templateCtx).body, recipientClass: 'customer' as const }
+              : { to: target.recipient, ...renderPortalLinkEmail(templateCtx) },
+        })
+      )
+    );
+
+    const sent: SendResult['channelsSent'] = [];
+    const errors: string[] = [];
+    results.forEach((r, i) => {
+      if (r.status === 'fulfilled') {
+        sent.push(r.value);
+      } else {
+        const target = channels[i];
+        errors.push(
+          `${target.channel} to ${target.recipient}: ${
+            mapDeliveryErrorForClient(r.reason)
+          }`
+        );
+      }
+    });
+
+    if (sent.length === 0) {
+      throw new ValidationError(
+        `Portal link send failed on all channels: ${errors.join('; ')}`
+      );
+    }
+
+    return {
+      portalSessionId: input.portalSessionId,
+      portalUrl: input.portalUrl,
+      channelsSent: sent,
+    };
+  }
+
   private async resolveBusinessContext(
     tenantId: string,
   ): Promise<{ businessName: string; tenantDefaultLanguage?: string | null }> {
@@ -452,7 +573,7 @@ export class SendService {
    * a new dispatch.
    */
   private buildIdempotencyKey(
-    entityType: 'estimate' | 'invoice',
+    entityType: 'estimate' | 'invoice' | 'portal_session',
     entityId: string,
     channel: 'sms' | 'email',
     nowMs: number
@@ -495,7 +616,7 @@ export class SendService {
 
   private async dispatchOne(args: {
     tenantId: string;
-    entityType: 'estimate' | 'invoice';
+    entityType: 'estimate' | 'invoice' | 'portal_session';
     entityId: string;
     target: ChannelTarget;
     render: () => SmsMessage | EmailMessage;

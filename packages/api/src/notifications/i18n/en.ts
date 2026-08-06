@@ -84,6 +84,18 @@ export const en = {
   'email.payment_receipt.subject': 'Payment received — {{business}}',
   'email.invoice_overdue.subject': 'Invoice overdue — {{business}}',
   'email.appointment.subject': '{{business}} — appointment update',
+
+  // ── Customer portal link (SMS + email) ───────────────────────────────
+  'sms.portal.intro': 'Hi {{name}} — your customer portal with {{business}} is ready.',
+  'sms.portal.cta': 'View estimates, invoices, and appointments: {{url}}',
+  'sms.portal.expires': 'This link expires {{date}}.',
+  'email.portal.subject': 'Your customer portal with {{business}}',
+  'email.portal.heading': 'Your customer portal',
+  'email.portal.body':
+    '{{business}} set up a secure online portal where you can view your estimates, invoices, jobs, and upcoming appointments.',
+  'email.portal.cta_text': 'Open your portal here: {{url}}',
+  'email.portal.button': 'Open Customer Portal',
+  'email.portal.expires': 'For your security this link expires {{date}}.',
 } as const;
 
 export type EnglishNotifications = typeof en;
