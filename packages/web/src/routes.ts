@@ -67,6 +67,21 @@ export const router = createBrowserRouter([
       // The index (home) renders on the hottest path — keep it eager.
       { index: true,            Component: RoleHome        },
       { path: 'assistant',      lazy: async () => ({ Component: (await import('./components/assistant/AssistantPage')).AssistantPage }) },
+      // Focused live-session view — the supervisor wall's
+      // CompressedSessionStrip mini-cards NavLink here. Must live inside the
+      // Shell tree: the page reads the ActiveSessionsProvider Shell mounts.
+      {
+        path: 'sessions/:id',
+        lazy: async () => {
+          const { SessionFocusPage } = await import('./pages/sessions/SessionFocusPage');
+          function SessionFocusRoute() {
+            const params = useParams<{ id: string }>();
+            if (!params.id) return null;
+            return React.createElement(SessionFocusPage, { sessionId: params.id });
+          }
+          return { Component: SessionFocusRoute };
+        },
+      },
       { path: 'jobs',           lazy: async () => ({ Component: (await import('./components/jobs/JobsPage')).JobsPage }) },
       { path: 'jobs/new',       lazy: async () => ({ Component: (await import('./pages/jobs/JobCreate')).JobCreate }) },
       { path: 'jobs/:id',       lazy: async () => ({ Component: (await import('./components/jobs/JobsPage')).JobsPage }) },

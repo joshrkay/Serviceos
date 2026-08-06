@@ -82,6 +82,21 @@ describe('router', () => {
     }
   });
 
+  // The supervisor wall's CompressedSessionStrip NavLinks each live-session
+  // mini-card to /sessions/:id — without this route those links dead-end on
+  // a blank page. It must resolve INSIDE the auth-wrapped Shell tree (the
+  // page reads the wall's ActiveSessionsProvider mounted by Shell).
+  it('registers the focused live-session route (sessions/:id) inside the authed Shell', () => {
+    const rootRoute = (router.routes as RouteObject[]).find(r => r.path === '/');
+    expect(rootRoute, 'expected the `/` ProtectedRoute').toBeDefined();
+    const shellRoute = rootRoute!.children?.find(r => r.path === '/');
+    expect(shellRoute, 'expected the Shell child route').toBeDefined();
+    const sessionRoute = shellRoute!.children?.find(r => r.path === 'sessions/:id');
+    expect(sessionRoute, 'sessions/:id must be a Shell child (auth-wrapped)').toBeDefined();
+    expect(typeof (sessionRoute as { lazy?: unknown }).lazy, 'sessions/:id should be lazy').toBe('function');
+    expect(isEager(sessionRoute!), 'sessions/:id should not be eagerly imported').toBe(false);
+  });
+
   it('the authenticated root route wires ErrorBoundary on the outer (ProtectedRoute) layer', () => {
     const topLevel = router.routes as RouteObject[];
     const rootRoute = topLevel.find((r) => r.path === '/');
