@@ -471,6 +471,9 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   // life-safety alert task is no longer swallowed by its booking task.
   // Renumbered 198→268 on the origin/main merge (SQL unchanged → hash preserved).
   ['268_call_me_back_session_reason_idempotency', '7807073281dad9a454020843788c85953d0a30f2b047b6ca05812ef3da2c7253'],
+  // Portal-link send (PR #802): widen message_dispatches entity_type CHECK
+  // for 'portal_session' — deliberate snapshot update for a new migration.
+  ['269_dispatch_entity_portal_session', '60bab4bbcd9c1d371c32bf846dbe52cfd9010ab581e95bd263340ce85acb8f3a'],
 ];
 
 function hashMigration(value: string): string {
