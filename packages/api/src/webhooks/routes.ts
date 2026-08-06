@@ -2195,9 +2195,11 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
       // cross-tenant lookup by payment_intent because the event
       // payload doesn't carry the parent charge's metadata.tenant_id.
       //
-      // Per-refund idempotency is in recordRefund() itself: when
-      // payment.lastRefundStripeId === refund.id, recordRefund
-      // short-circuits — so receiving the same refund via both
+      // Per-refund idempotency is in recordRefund() itself (D2-4a /
+      // P0-4): it claims a `payment_refunds` ledger row keyed
+      // (tenant_id, stripe_refund_id) in the SAME statement as the
+      // refunded-amount increment, and an already-claimed refund id is
+      // a duplicate no-op — so receiving the same refund via both
       // charge.refunded AND charge.refund.updated does NOT double-count.
       if (event.type === 'charge.refund.updated') {
         const refund = event.data.object as {
