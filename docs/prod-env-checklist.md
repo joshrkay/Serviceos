@@ -40,6 +40,7 @@
 | Stripe webhook **destinations** (Dashboard) | Not an env var — a Dashboard step, and the #1 silent money-loop failure. Connect direct charges live on the connected account, so you need **two** event destinations (platform + connected accounts), configured separately in Test and Live, both hitting `POST /webhooks/stripe`. Missing the connected-accounts destination ⇒ customer pays, money lands in the tenant's Stripe balance, but the Rivet invoice never flips to `paid`. See `docs/ops/stripe-connect-webhooks.md` and the go-live gate `docs/runbooks/stripe-go-live.md` |
 | Per-tenant Stripe **Connect onboarding** | Not an env var — per-tenant state. A tenant whose Connect account is not `charges_enabled` has its customers' charges fall back to the **platform** account with no automatic payout to the tenant. Verified via `GET /api/billing/connect`. See `docs/runbooks/stripe-go-live.md` |
 | `METRICS_TOKEN` | `/metrics` and `GET /api/health/ai/completion` return 503 in prod/staging without Bearer token |
+| `ONE_TAP_APPROVE_SECRET` | One-tap approve links (digest "APPROVE"/"Invoice it", unsupervised queue_and_sms) are **silently omitted** in prod/staging — digests still send, but without action links. No boot failure, no warning. Generate: `openssl rand -hex 32` |
 | `TRANSCRIPT_ENCRYPTION_KEY` | Falls back to `TENANT_ENCRYPTION_KEY`; if neither set, raw transcripts not retained |
 | `TENANT_ENCRYPTION_KEY` | Fallback for transcript encryption |
 
