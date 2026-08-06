@@ -343,6 +343,48 @@ export class PgInvoiceRepository extends PgBaseRepository implements InvoiceRepo
     });
   }
 
+  async applyDepositCreditAtomic(
+    tenantId: string,
+    id: string,
+    creditCents: number,
+    now: Date,
+  ): Promise<Invoice | null> {
+    return this.withTenantTransaction(tenantId, async (client) => {
+      // Track-5 — the deposit-credit leg of the P0-3/P0-6 convention: a
+      // single guarded UPDATE deriving the new paid/due/status from the row's
+      // OWN current values, never a caller snapshot, so a concurrent credit
+      // via incrementAmountPaidAtomic is never overwritten. Differs from that
+      // method ONLY in the status list: the deposit credit legitimately lands
+      // on the freshly-created 'draft' invoice (both call sites credit right
+      // after createInvoiceWithNextNumber), where a regular payment must
+      // still match 0 rows. A draft STAYS 'draft' even when fully covered —
+      // issuing remains the operator's explicit step — while a credit landing
+      // on an already-issued invoice follows payment semantics. The balance
+      // cap and GREATEST(0, …) clamp are identical to incrementAmountPaidAtomic:
+      // a credit that no longer fits the remaining balance (a concurrent
+      // payment landed first) matches 0 rows instead of overpaying, and a
+      // void/canceled/paid invoice takes no deposit money.
+      const { rows } = await client.query<{ id: string }>(
+        `UPDATE invoices
+         SET amount_paid_cents = amount_paid_cents + $3,
+             amount_due_cents  = GREATEST(0, total_cents - (amount_paid_cents + $3)),
+             status = CASE
+               WHEN status = 'draft' THEN 'draft'
+               WHEN total_cents - (amount_paid_cents + $3) <= 0 THEN 'paid'
+               ELSE 'partially_paid'
+             END,
+             updated_at = $4
+         WHERE id = $2 AND tenant_id = $1
+           AND status IN ('draft', 'open', 'partially_paid')
+           AND amount_paid_cents + $3 <= total_cents
+         RETURNING id`,
+        [tenantId, id, creditCents, now],
+      );
+      if (rows.length === 0) return null;
+      return this.findByIdWithClient(client, tenantId, id);
+    });
+  }
+
   async decrementAmountPaidAtomic(
     tenantId: string,
     id: string,

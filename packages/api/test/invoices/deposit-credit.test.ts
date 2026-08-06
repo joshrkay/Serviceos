@@ -219,10 +219,12 @@ describe('applyDepositCreditToInvoice — Tier 4 deposit (PR 3c)', () => {
     paymentRepo.create = originalCreate;
   });
 
-  it('KEEPS the consumed marker when payment write succeeded but invoice update failed (PR 319 P1 v2)', async () => {
+  it('KEEPS the consumed marker when payment write succeeded but the atomic credit THREW (PR 319 P1 v2)', async () => {
     // Codex caught a follow-up to the rollback: if paymentRepo.create
-    // succeeded and invoiceRepo.update later failed, rolling back the
-    // marker would let a retry double-credit (the orphan Payment row
+    // succeeded and the invoice credit later failed with an OUTAGE
+    // (throw — not a guard rejection, which compensates the row first;
+    // see deposit-credit-atomic.test.ts), rolling back the marker
+    // would let a retry double-credit (the orphan ACTIVE Payment row
     // + a fresh Payment row from the retry). The marker must STAY
     // SET in that case so future credits skip; ops reconciles via
     // the failure audit event.
@@ -230,12 +232,14 @@ describe('applyDepositCreditToInvoice — Tier 4 deposit (PR 3c)', () => {
     const invoice = makeInvoice(job.id, 100000);
     await invoiceRepo.create(invoice);
 
-    const originalUpdate = invoiceRepo.update.bind(invoiceRepo);
-    invoiceRepo.update = async () => null;
+    const originalAtomic = invoiceRepo.applyDepositCreditAtomic.bind(invoiceRepo);
+    invoiceRepo.applyDepositCreditAtomic = async () => {
+      throw new Error('simulated invoice repo outage');
+    };
 
     await expect(
       applyDepositCreditToInvoice(invoice, job, invoiceRepo, paymentRepo, jobRepo),
-    ).rejects.toThrow(/Failed to update invoice/);
+    ).rejects.toThrow(/simulated invoice repo outage/);
 
     // Marker stays set so a retry can't re-credit.
     const after = await jobRepo.findById('tenant-deposit-credit', job.id);
@@ -245,8 +249,9 @@ describe('applyDepositCreditToInvoice — Tier 4 deposit (PR 3c)', () => {
     const payments = await paymentRepo.findByInvoice('tenant-deposit-credit', invoice.id);
     expect(payments).toHaveLength(1);
     expect(payments[0].providerReference).toBe('deposit_credit');
+    expect(payments[0].status).toBe('completed');
 
-    invoiceRepo.update = originalUpdate;
+    invoiceRepo.applyDepositCreditAtomic = originalAtomic;
   });
 
   it('uses the atomic consume so concurrent calls cannot double-credit', async () => {
