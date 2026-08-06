@@ -337,6 +337,38 @@ describe('P0-9 — unapplied captures are audited; stale links die on credit', (
     expect(invoice!.stripePaymentLinkId).toBeUndefined();
   });
 
+  it('a capture on a zero-balance but still-open invoice audits the full amount and credits nothing', async () => {
+    // Inconsistent state: the cents already settled (amountPaidCents = total,
+    // amountDueCents = 0) but the status transition to 'paid' never landed.
+    // recordPayment's status gate passes ('open' is payable), the amount gate
+    // throws 'exceeds amount due', and the handler's refetch sees
+    // amountDueCents <= 0 — the zero_balance branch.
+    await invoiceRepo.create(makeInvoice({ amountPaidCents: 10000, amountDueCents: 0 }));
+
+    const res = await postSigned(app, checkoutEvent(10000));
+    expect(res.status).toBe(200);
+
+    // No payment row and no credit — the invoice's money state is untouched.
+    expect(await paymentRepo.findByInvoice(TENANT, INVOICE_ID)).toHaveLength(0);
+    const invoice = await invoiceRepo.findById(TENANT, INVOICE_ID);
+    expect(invoice!.amountPaidCents).toBe(10000);
+    expect(invoice!.amountDueCents).toBe(0);
+
+    // The entire capture is unapplied money on the audit trail…
+    const events = auditRepo.getAll().filter((e) => e.eventType === 'payment.unapplied_capture');
+    expect(events).toHaveLength(1);
+    expect(events[0].metadata).toMatchObject({
+      capturedCents: 10000,
+      creditedCents: 0,
+      unappliedCents: 10000,
+      reason: 'zero_balance',
+      invoiceStatus: 'open',
+    });
+    // …and the stale link on the zero-balance invoice dies.
+    expect(deactivated).toEqual([{ linkId: 'plink_stale_1', account: undefined }]);
+    expect(invoice!.stripePaymentLinkId).toBeUndefined();
+  });
+
   it('a clean full payment consumes the link and clears its columns', async () => {
     await invoiceRepo.create(makeInvoice());
 

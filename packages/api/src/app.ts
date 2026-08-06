@@ -416,6 +416,10 @@ import { PgDailyDigestRepository } from './digest/pg-daily-digest';
 import { InMemoryDailyDigestRepository, type DailyDigestPayload } from './digest/digest-service';
 import { composeBrandVoiceMessage } from './ai/brand-voice/composer';
 import { runOverdueInvoiceSweep } from './workers/overdue-invoice-worker';
+import {
+  runMoneyReconciliationSweep,
+  PgMoneyReconciliationReader,
+} from './workers/money-reconciliation';
 import { runHfcrWeeklySendSweep } from './workers/hfcr-weekly-send-worker';
 import { runWeeklyFeedbackSweep } from './workers/weekly-feedback-worker';
 import { buildWeeklyFeedbackSnapshot } from './digest/weekly-feedback-builder';
@@ -2529,6 +2533,11 @@ export function createApp(): AppWithLifecycle {
     // 590024 with sloMonitor would silently serialize the two monitors behind
     // one advisory lock — the exact 590014 collision called out above.
     failureMonitor: 590025,
+    // RIVET money findings (P0-9 / "What /goal money can and cannot assert")
+    // — read-only money-invariant reconciliation sweep (L2–L5). DISTINCT key
+    // per the collision discipline above; 590010 remains reserved by a
+    // parallel track.
+    moneyReconciliation: 590026,
   } as const;
   const runAsLeader = async (lockKey: number, work: () => Promise<void>): Promise<void> => {
     if (shuttingDown) return;
@@ -6353,6 +6362,53 @@ export function createApp(): AppWithLifecycle {
   }
   // QA-2026-06-05: interval is env-tunable (OVERDUE_SWEEP_INTERVAL_MS) so dev/QA
   // can observe the sweep inside a test window; default stays hourly.
+
+  // RIVET money findings — money-invariant reconciliation sweep (L2–L5).
+  // READ-ONLY detector: recomputes the stated balance invariants (subtotal/
+  // total identities, amount_paid vs the active-payment ledger, the overpaid
+  // bound, and captured checkout amount_total vs recorded payments) and
+  // reports drift via structured logs, metrics, and audit events. It never
+  // repairs and never mutates money rows. Same tenant-lister + runAsLeader
+  // driver as the overdue-invoice sweep above; per-tenant reads go through
+  // PgBaseRepository.withTenant inside the reader. Interval is env-tunable
+  // (MONEY_RECONCILIATION_INTERVAL_MS, default 6h); 0 disables the sweep.
+  {
+    const moneyReconciliationRaw = process.env.MONEY_RECONCILIATION_INTERVAL_MS;
+    const moneyReconciliationIntervalMs =
+      moneyReconciliationRaw === undefined || moneyReconciliationRaw === ''
+        ? 6 * 60 * 60_000
+        : Number(moneyReconciliationRaw);
+    if (
+      shouldRunWorkers &&
+      Number.isFinite(moneyReconciliationIntervalMs) &&
+      moneyReconciliationIntervalMs > 0
+    ) {
+      const moneyReconciliationLogger = createLogger({
+        service: 'money-reconciliation-worker',
+        environment: process.env.NODE_ENV || 'development',
+      });
+      const moneyReconciliationReader = pool ? new PgMoneyReconciliationReader(pool) : null;
+      registerInterval(setInterval(() => {
+        void runAsLeader(SWEEP_LOCK.moneyReconciliation, async () => {
+          await runMoneyReconciliationSweep({
+            // In-memory dev (no pool): no reader, no tenants — the sweep no-ops.
+            ...(moneyReconciliationReader ? { reader: moneyReconciliationReader } : {}),
+            auditRepo,
+            listTenantIds: async () => {
+              if (!pool) return [];
+              const r = await pool.query('SELECT id FROM tenants');
+              return r.rows.map((row: { id: string }) => row.id);
+            },
+            logger: moneyReconciliationLogger,
+          });
+        }).catch((err) => {
+          moneyReconciliationLogger.error('Money reconciliation sweep failed', {
+            error: err instanceof Error ? err.message : String(err),
+          });
+        });
+      }, moneyReconciliationIntervalMs));
+    }
+  }
 
   // HFCR weekly owner summary — one SMS per tenant per completed week,
   // idempotent via hfcr_weekly_sends. Only registered when an SMS sender is
