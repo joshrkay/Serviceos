@@ -267,3 +267,116 @@ export async function deactivateInvoicePaymentLink(params: {
   }
   return { deactivated: true };
 }
+
+/**
+ * P0-1 completion — cancel the invoice's minted PaymentIntents when it
+ * leaves the payable world. The payment LINK deactivation above closes one
+ * stale charge vector; this closes the other: a PaymentIntent client secret
+ * minted pre-void (public payment page `<PaymentElement>` or Terminal) stays
+ * confirmable at Stripe until the PI is cancelled, so a customer holding it
+ * could still complete payment against a dead invoice.
+ *
+ * PI ids are never persisted locally at mint — they are discovered through
+ * the provider's metadata search (every invoice-purpose mint stamps
+ * `metadata[invoice_id]` / `metadata[tenant_id]`). Both account scopes are
+ * swept because PIs can exist under BOTH at once: a public PI minted on the
+ * platform before Connect onboarding and a Terminal PI minted on the Connect
+ * account afterwards.
+ *
+ * Best-effort, mirroring deactivateInvoicePaymentLink: per-PI try/catch,
+ * terminal-state PIs (succeeded / canceled) are skipped, every outcome lands
+ * on the audit trail (`invoice.payment_intent_canceled` /
+ * `invoice.payment_intent_cancel_failed`), and nothing here ever throws —
+ * the caller's void/cancel transition must not be blocked or rolled back.
+ * Stripe's search index can lag ~1 minute, so a PI minted seconds before the
+ * void may be missed; the webhook's unapplied-capture audit remains the
+ * backstop for that window.
+ */
+export async function cancelInvoicePaymentIntents(params: {
+  tenantId: string;
+  invoice: Invoice;
+  reason: 'voided' | 'canceled';
+  provider: PaymentLinkProvider;
+  connectAccountResolver?: ConnectAccountResolver;
+  auditRepo?: AuditRepository;
+  actor?: { actorId: string; actorRole: string };
+}): Promise<{ canceled: string[]; failed: string[] }> {
+  const { tenantId, invoice, reason, provider, connectAccountResolver, auditRepo, actor } = params;
+
+  // Capability-gated: legacy fakes and the mock provider (which never mints
+  // PIs) don't implement the optional methods — the sweep is a clean no-op.
+  const list = provider.listInvoicePaymentIntents?.bind(provider);
+  const cancel = provider.cancelPaymentIntent?.bind(provider);
+  if (!list || !cancel) return { canceled: [], failed: [] };
+
+  const emit = async (eventType: string, metadata: Record<string, unknown>) => {
+    if (!auditRepo) return;
+    await auditRepo
+      .create(
+        createAuditEvent({
+          tenantId,
+          actorId: actor?.actorId ?? 'system',
+          actorRole: actor?.actorRole ?? 'system',
+          eventType,
+          entityType: 'invoice',
+          entityId: invoice.id,
+          metadata,
+        }),
+      )
+      .catch(() => undefined);
+  };
+
+  // Platform scope always; the Connect scope whenever the tenant has an
+  // account at all — charges being disabled TODAY doesn't kill PIs minted
+  // while they were enabled, so `chargesEnabled` must not gate the sweep.
+  const connect = connectAccountResolver
+    ? await connectAccountResolver.resolveTenantConnectAccount(tenantId).catch(() => null)
+    : null;
+  const scopes: Array<string | undefined> = [undefined];
+  if (connect?.accountId) scopes.push(connect.accountId);
+
+  // Stripe refuses to cancel PIs in these states; skipping them keeps the
+  // sweep quiet on invoices that were (partially) paid before the void.
+  const TERMINAL_PI_STATUSES = new Set(['succeeded', 'canceled']);
+
+  const canceled: string[] = [];
+  const failed: string[] = [];
+  for (const scope of scopes) {
+    let intents;
+    try {
+      intents = await list(tenantId, invoice.id, scope);
+    } catch (err) {
+      // Discovery failed — any live client secret in this scope stays live
+      // and invisible, so the miss itself must be durably visible.
+      await emit('invoice.payment_intent_cancel_failed', {
+        reason,
+        phase: 'list',
+        stripeAccountId: scope ?? null,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      continue;
+    }
+    for (const intent of intents) {
+      if (TERMINAL_PI_STATUSES.has(intent.status)) continue;
+      try {
+        await cancel(intent.id, scope);
+        canceled.push(intent.id);
+        await emit('invoice.payment_intent_canceled', {
+          stripePaymentIntentId: intent.id,
+          reason,
+          stripeAccountId: scope ?? null,
+        });
+      } catch (err) {
+        failed.push(intent.id);
+        await emit('invoice.payment_intent_cancel_failed', {
+          stripePaymentIntentId: intent.id,
+          reason,
+          phase: 'cancel',
+          stripeAccountId: scope ?? null,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+  }
+  return { canceled, failed };
+}

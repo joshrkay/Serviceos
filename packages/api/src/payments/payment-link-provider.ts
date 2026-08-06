@@ -20,6 +20,12 @@ export interface PaymentLinkResult {
   providerReference: string;
 }
 
+/** Minimal PaymentIntent shape surfaced by the void-time sweep. */
+export interface InvoicePaymentIntentSummary {
+  id: string;
+  status: string;
+}
+
 export interface PaymentLinkProvider {
   generateLink(request: PaymentLinkRequest): Promise<PaymentLinkResult>;
   /**
@@ -28,6 +34,24 @@ export interface PaymentLinkProvider {
    * the same account the mint used — Stripe scopes the link to that account.
    */
   deactivateLink(linkId: string, stripeAccountId?: string): Promise<void>;
+  /**
+   * P0-1 completion — optional PaymentIntent capability, carried on the same
+   * provider so the existing void-path wiring (transitionInvoiceStatus →
+   * paymentLink.provider) arms it with no extra plumbing. PI ids are never
+   * persisted locally at mint; they are discovered through Stripe's search
+   * API on the `metadata[invoice_id]` / `metadata[tenant_id]` every
+   * invoice-purpose mint stamps. Optional so legacy fakes and the mock
+   * provider (which never mints PIs) stay valid — the sweep no-ops without
+   * both methods.
+   */
+  listInvoicePaymentIntents?(
+    tenantId: string,
+    invoiceId: string,
+    stripeAccountId?: string,
+  ): Promise<InvoicePaymentIntentSummary[]>;
+  /** Cancel a minted PaymentIntent so its client secret dies. Scope must
+   * match the account the PI was minted under. */
+  cancelPaymentIntent?(paymentIntentId: string, stripeAccountId?: string): Promise<void>;
 }
 
 export function validatePaymentLinkRequest(request: PaymentLinkRequest): string[] {
