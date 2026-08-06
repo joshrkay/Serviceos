@@ -223,7 +223,11 @@ function markLocationAsOldAddress(customer: Customer, address: string): Customer
   };
 }
 
-// ─── Voice parser (mock AI) ───────────────────────────────────────────────────
+// ─── Keyword quick-fill parser ────────────────────────────────────────────────
+// Deliberately NOT AI: a client-side regex/keyword matcher over the transcript.
+// All user-facing copy must describe it as a quick fill — never brand it with
+// the assistant's name (the real voice→job pipeline lives behind the global
+// VoiceBar via /api/voice/recordings → create_job proposal).
 function parseVoice(
   input: string,
   customerPool: Customer[],
@@ -360,12 +364,12 @@ function ParsedReviewCard({
   return (
     <div className="rounded-2xl border border-border overflow-hidden bg-card"
       style={{ animation: 'fadeUp 0.25s ease' }}>
-      {/* AI header */}
+      {/* Quick-fill header — keyword matching, honestly labeled (not AI) */}
       <div className="flex items-center gap-2.5 px-4 py-3 bg-primary/10 border-b border-primary/20">
         <div className="flex size-6 items-center justify-center rounded-full bg-primary shrink-0">
           <Sparkles size={11} className="text-primary-foreground" />
         </div>
-        <p className="text-sm text-primary">Rivet AI · Job parsed from voice</p>
+        <p className="text-sm text-primary">Quick fill · Parsed from your words</p>
         {parsed.priority === 'Urgent' && (
           <span className="ml-auto flex items-center gap-1 text-xs bg-destructive/15 text-destructive border border-destructive/30 rounded-full px-2 py-0.5">
             <AlertCircle size={10} /> Urgent
@@ -965,7 +969,7 @@ export function NewJobFlow({
                 <div>
                   <p className="text-foreground">Speak it</p>
                   <p className="text-xs text-muted-foreground mt-1 leading-relaxed">
-                    Say the customer, service, date, and tech — AI fills in the whole job from your voice.
+                    Say the customer, service, and date — quick fill matches keywords in your words to pre-fill the job. For full AI drafting, ask Rivet in the voice bar.
                   </p>
                 </div>
               </button>
