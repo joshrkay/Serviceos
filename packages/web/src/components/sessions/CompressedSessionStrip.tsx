@@ -4,13 +4,14 @@
  * Sticky top strip rendered when the operator is in 'both' mode. Shows
  * up to 4 active AI session mini-cards so the supervisor can keep an
  * eye on inbound calls while still working a job. Click a mini-card to
- * navigate to the focused session view.
+ * navigate to the focused session view at /sessions/:id
+ * (pages/sessions/SessionFocusPage).
  *
- * Until the supervisor wall WebSocket transport ships, the underlying
- * `useActiveSessions` hook returns an empty list and this component
- * renders a placeholder strip with the session count + a "Sessions"
- * link to /assistant. The component is intentionally a thin renderer
- * so swapping in real WS data is a one-hook change.
+ * Data comes live from `useActiveSessions` (discovery via
+ * GET /api/voice/sessions/active + per-session subscribe frames on the
+ * shared client-gateway WS). The component stays a thin renderer over
+ * that hook; with no provider mounted (or without ai:run) the hook is
+ * inert and the strip renders its empty state.
  */
 import { NavLink } from 'react-router';
 import { Mic, MessageSquare } from 'lucide-react';
