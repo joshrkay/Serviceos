@@ -402,9 +402,9 @@ function SendPaymentSheet({ inv, amountDueCents, paymentLink, onClose, onSent, a
   /** The invoice's real Stripe payment link, when one exists. */
   paymentLink?: string;
   onClose: () => void; onSent: () => void;
-  /** When set, the sheet calls the real /api/invoices/:id/send endpoint
+  /** The invoice's API id — the sheet posts to /api/invoices/:id/send
    *  (and /:id/issue first, when the invoice is still a draft). */
-  apiId?: string;
+  apiId: string;
 }) {
   const [channel, setChannel] = useState<'sms' | 'email'>('sms');
   const [recipient, setRecipient] = useState<string>('');
@@ -425,7 +425,7 @@ function SendPaymentSheet({ inv, amountDueCents, paymentLink, onClose, onSent, a
   type SendResp = { viewUrl: string; viewToken: string };
   const { mutate: sendInvoice } = useMutation<SendBody, SendResp>(
     'POST',
-    apiId ? `/api/invoices/${apiId}/send` : '/api/invoices/_/send'
+    `/api/invoices/${apiId}/send`
   );
   // A still-draft invoice has no due date and can't produce a working
   // payment link — POST /:id/send now rejects it outright with a clear
@@ -438,27 +438,23 @@ function SendPaymentSheet({ inv, amountDueCents, paymentLink, onClose, onSent, a
   // reach.
   const { mutate: issueInvoice } = useMutation<Record<string, never>, unknown>(
     'POST',
-    apiId ? `/api/invoices/${apiId}/issue` : '/api/invoices/_/issue'
+    `/api/invoices/${apiId}/issue`
   );
 
   async function handleSend() {
     setSending(true);
     setSendError(null);
     try {
-      if (apiId) {
-        if (inv.status === 'Draft') {
-          await issueInvoice({});
-        }
-        const result = await sendInvoice({
-          channel,
-          recipientPhone: channel === 'sms' ? recipient : undefined,
-          recipientEmail: channel === 'email' ? recipient : undefined,
-          customMessage: msg,
-        });
-        if (result?.viewUrl) setSentUrl(result.viewUrl);
-      } else {
-        await new Promise((r) => setTimeout(r, 1200));
+      if (inv.status === 'Draft') {
+        await issueInvoice({});
       }
+      const result = await sendInvoice({
+        channel,
+        recipientPhone: channel === 'sms' ? recipient : undefined,
+        recipientEmail: channel === 'email' ? recipient : undefined,
+        customMessage: msg,
+      });
+      if (result?.viewUrl) setSentUrl(result.viewUrl);
       setSending(false);
       setSent(true);
       setTimeout(() => { onSent(); onClose(); }, 1200);
@@ -1068,7 +1064,7 @@ function InvoiceDetail({ invoiceId, onBack }: { invoiceId: string; onBack: () =>
           inv={invCompat}
           amountDueCents={amountDueCents}
           paymentLink={paymentLink}
-          apiId={inv?.id}
+          apiId={inv.id}
           onClose={() => setSendOpen(false)}
           // Refetch so a draft invoice's now-issued status (and the
           // "Payment journey" it drives) is reflected immediately, without
