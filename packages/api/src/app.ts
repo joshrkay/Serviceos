@@ -2412,9 +2412,10 @@ export function createApp(): AppWithLifecycle {
   // Gated on `RAG_RETRIEVAL_ENABLED === 'true'` so the corpus can fill
   // (Phase 4a-1 writers) before the reader fires in production. When
   // the flag is off the adapter is `undefined` and `buildSourceContext`
-  // falls through to the legacy recency-only path. Phase 4b will pass
-  // this through to the FSM `intent_capture` state once we measure
-  // latency impact in 4a.
+  // falls through to the legacy recency-only path. First real consumer:
+  // the conversations router's suggest-reply draft path (aiDeps below).
+  // Phase 4b will pass this through to the FSM `intent_capture` state
+  // once we measure latency impact in 4a.
   const ragRetrievalEnabled = process.env.RAG_RETRIEVAL_ENABLED === 'true';
   const retrieveAdapter: RetrieveAdapter | undefined =
     ragRetrievalEnabled && embeddingProvider
@@ -2425,10 +2426,6 @@ export function createApp(): AppWithLifecycle {
           languageDetector,
         })
       : undefined;
-  // The variable is wired into future `buildSourceContext` call sites
-  // (Phase 4b). Reference it once so the linter doesn't flag the
-  // construction during the gap between 4a-2 and 4b landing.
-  void retrieveAdapter;
 
   const delayNoticeStateRepo = pool
     ? new PgDelayNoticeStateRepository(pool)
@@ -5673,6 +5670,11 @@ export function createApp(): AppWithLifecycle {
         settingsRepo,
         // UB-A3 — owner standing instructions injected into suggested replies.
         standingInstructionRepo,
+        // Phase 4a-2 — first real RAG consumer: suggest-reply drafts pull
+        // fenced reference notes via buildSourceContext. Undefined unless
+        // RAG_RETRIEVAL_ENABLED='true' and an embedder exist; when absent
+        // the draft path stays byte-identical to the legacy one.
+        ...(retrieveAdapter ? { retrieveAdapter } : {}),
       },
       // U6 — owner reply send path. Only wired when a delivery provider exists
       // (prod/dev with creds); otherwise POST /:id/reply returns 503.

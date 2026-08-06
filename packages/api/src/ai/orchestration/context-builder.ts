@@ -251,6 +251,41 @@ export function buildRecentMessagesPromptSections(
 }
 
 /**
+ * Per-section char cap for the retrieved-notes prompt section. Bounds what
+ * k=DEFAULT_RETRIEVAL_K chunks can add to a single prompt slot; the
+ * token-level backstop is `trimContext`, which evicts `retrievedChunks`
+ * first when the whole context is over budget.
+ */
+export const MAX_RETRIEVED_SECTION_CHARS = 4000;
+
+/**
+ * RIVET I13 — render `SourceContext.retrievedChunks` into a single
+ * ready-to-inject prompt section, the retrieval sibling of
+ * `buildRecentMessagesPromptSections` above. Corpus chunks are derived from
+ * customer-authored surfaces (call summaries, caller messages, proposal
+ * corrections), so retrieved text is DATA, never instructions: the whole
+ * section rides inside `buildUntrustedContentSection` and MUST be injected
+ * into the LOWEST-authority prompt slot (inside the user message — never a
+ * system message). Each chunk line carries a `[sourceType]` provenance tag;
+ * the joined body is capped at MAX_RETRIEVED_SECTION_CHARS before fencing so
+ * the fence always closes. Returns undefined when there is nothing to render
+ * so consumers can spread conditionally and stay byte-identical.
+ */
+export function buildRetrievedChunksPromptSection(
+  chunks: ReadonlyArray<RetrievedChunk>,
+): string | undefined {
+  const lines: string[] = [];
+  for (const c of chunks) {
+    const content = c.content?.trim();
+    if (!content) continue;
+    lines.push(`[${c.sourceType}] ${content}`);
+  }
+  if (lines.length === 0) return undefined;
+  const body = lines.join('\n').slice(0, MAX_RETRIEVED_SECTION_CHARS);
+  return buildUntrustedContentSection(body, 'Retrieved reference notes');
+}
+
+/**
  * Roles whose latest message is treated as the retrieval query.
  * Allow-list (not exclude-list of agent/assistant) so that future
  * roles like 'system' or 'tool' don't accidentally drive retrieval.
