@@ -29,6 +29,7 @@ import { DepositRulesSheet } from './DepositRulesSheet';
 import { DiscountPolicySheet } from './DiscountPolicySheet';
 import { TeamMembersSheet } from './TeamMembersSheet';
 import { CalendarSyncSheet } from './CalendarSyncSheet';
+import { GoogleBusinessSheet } from './GoogleBusinessSheet';
 import { PaymentMethodsSheet } from './PaymentMethodsSheet';
 import { VerticalPacksSheet } from './VerticalPacksSheet';
 import { CallRoutingSheet } from './CallRoutingSheet';
@@ -206,6 +207,7 @@ export function SettingsPage() {
   const [discountPolicyOpen, setDiscountPolicyOpen] = useState(false);
   const [teamMembersOpen, setTeamMembersOpen] = useState(false);
   const [calendarSyncOpen, setCalendarSyncOpen] = useState(false);
+  const [googleBusinessOpen, setGoogleBusinessOpen] = useState(false);
   const [paymentMethodsOpen, setPaymentMethodsOpen] = useState(false);
   const [verticalPacksOpen, setVerticalPacksOpen] = useState(false);
   const [callRoutingOpen, setCallRoutingOpen] = useState(false);
@@ -227,12 +229,26 @@ export function SettingsPage() {
     const stripeReturned = params.get('stripe_connect') === '1';
     const quickbooksConnected = params.get('quickbooks_connected') === '1';
     const quickbooksError = params.get('quickbooks_error');
+    // Google Business OAuth return (review monitoring): the API callback
+    // redirects to /settings?googlebusiness_connected=1 on success or
+    // ?googlebusiness_error=<reason> when Google rejects / user declines.
+    const googleBusinessConnected = params.get('googlebusiness_connected') === '1';
+    const googleBusinessError = params.get('googlebusiness_error');
 
     let needsUrlUpdate = false;
     if (isConnected || connectionError) {
       setCalendarSyncOpen(true);
       if (connectionError) {
         toast.error(`Calendar connection failed: ${connectionError}`);
+      }
+      needsUrlUpdate = true;
+    }
+    if (googleBusinessConnected || googleBusinessError) {
+      setGoogleBusinessOpen(true);
+      if (googleBusinessConnected) {
+        toast.success('Google Business connected');
+      } else if (googleBusinessError) {
+        toast.error(`Google Business connection failed: ${googleBusinessError}`);
       }
       needsUrlUpdate = true;
     }
@@ -257,6 +273,8 @@ export function SettingsPage() {
       params.delete('stripe_connect');
       params.delete('quickbooks_connected');
       params.delete('quickbooks_error');
+      params.delete('googlebusiness_connected');
+      params.delete('googlebusiness_error');
       const next = `${window.location.pathname}${params.toString() ? `?${params}` : ''}`;
       window.history.replaceState(null, '', next);
     }
@@ -458,6 +476,12 @@ export function SettingsPage() {
           label: 'Calendar sync',
           description: 'Connect Google Calendar to your account',
           action: () => setCalendarSyncOpen(true),
+        },
+        {
+          icon: Star,
+          label: 'Google Business reviews',
+          description: 'Monitor reviews & draft replies for your approval',
+          action: () => setGoogleBusinessOpen(true),
         },
         {
           icon: Link,
@@ -936,6 +960,9 @@ export function SettingsPage() {
       )}
 
       {/* Calendar sync sheet — Google OAuth connect/disconnect (PR 1). */}
+      {googleBusinessOpen && (
+        <GoogleBusinessSheet onClose={() => setGoogleBusinessOpen(false)} />
+      )}
       {calendarSyncOpen && (
         <CalendarSyncSheet onClose={() => setCalendarSyncOpen(false)} />
       )}

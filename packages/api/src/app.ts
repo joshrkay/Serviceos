@@ -438,6 +438,15 @@ import { PgReviewRepository } from './reputation/pg-review';
 import { PgReviewPollStateRepository } from './reputation/poll-state';
 import { PgServiceCreditRepository } from './reputation/pg-service-credit';
 import { PgGoogleBusinessReplyResolver } from './reputation/pg-google-business-reply-resolver';
+import {
+  PgGoogleBusinessIntegrationRepository,
+  InMemoryGoogleBusinessIntegrationRepository,
+} from './reputation/google-business-integration';
+import type { GoogleBusinessOAuthConfig } from './reputation/google-business-client';
+import {
+  createGoogleBusinessIntegrationsRouter,
+  createGoogleBusinessOAuthCallbackRouter,
+} from './routes/googlebusiness-integrations';
 import { MessageDeliveryReviewPrivateMessageSender } from './reputation/private-message-sender-adapter';
 import { SettingsBrandVoiceLoader } from './reputation/settings-brand-voice-loader';
 import { PgCustomerLoader } from './reputation/match-customer';
@@ -2135,11 +2144,36 @@ export function createApp(): AppWithLifecycle {
   // that shipped but was never swapped, so review responses ignored the shop's
   // voice + banned_phrases). Reads tenant_settings.brand_voice, failure-soft.
   const googleReviewsBrandVoiceLoader = new SettingsBrandVoiceLoader(settingsRepo);
+  // Review-monitoring self-serve — Google Business connect + refresh.
+  // The repo writes/rotates the `tenant_integrations` credential row the
+  // poll worker + reply resolver read; the OAuth config reuses the same
+  // Google client as calendar sync (register BOTH redirect URIs on it).
+  const googleBusinessIntegrationRepo = pool
+    ? new PgGoogleBusinessIntegrationRepository(pool)
+    : new InMemoryGoogleBusinessIntegrationRepository();
+  const googleBusinessApiUrl =
+    process.env.PUBLIC_API_URL ?? process.env.APP_PUBLIC_URL ?? 'http://localhost:3000';
+  const googleBusinessOAuthConfig: GoogleBusinessOAuthConfig | undefined =
+    process.env.GOOGLE_OAUTH_CLIENT_ID && process.env.GOOGLE_OAUTH_CLIENT_SECRET
+      ? {
+          clientId: process.env.GOOGLE_OAUTH_CLIENT_ID,
+          clientSecret: process.env.GOOGLE_OAUTH_CLIENT_SECRET,
+          redirectUri: `${googleBusinessApiUrl}/api/googlebusiness-integrations/google/callback`,
+        }
+      : undefined;
   const googleReplyResolver =
     googleReviewsReviewRepo && googleReviewsCredResolver
       ? new PgGoogleBusinessReplyResolver(
           googleReviewsReviewRepo,
           googleReviewsCredResolver,
+          process.env.TENANT_ENCRYPTION_KEY,
+          {
+            // Proactive refresh of an expired token before the reply
+            // PUT, persisting the rotation to the same credential row
+            // the worker's 401-retry path writes.
+            googleConfig: googleBusinessOAuthConfig ?? null,
+            credentialStore: googleBusinessIntegrationRepo,
+          },
         )
       : undefined;
   const reviewPrivateMessageSender = messageDelivery
@@ -3412,6 +3446,29 @@ export function createApp(): AppWithLifecycle {
   app.use(
     '/api/calendar-integrations',
     createCalendarOAuthCallbackRouter(calendarRouterDeps),
+  );
+
+  // Review-monitoring self-serve — Google Business Profile OAuth. Same
+  // split as calendar: the unauthenticated callback mounts here (before
+  // the global /api Clerk auth — Google's redirect carries no session;
+  // the oauth_states nonce does the binding), the auth'd lifecycle
+  // router mounts later next to the calendar one. Reuses the calendar
+  // oauthStateRepo and the same Google OAuth client envs.
+  const googleBusinessRouterDeps = {
+    integrationRepo: googleBusinessIntegrationRepo,
+    stateRepo: oauthStateRepo,
+    googleConfig: googleBusinessOAuthConfig,
+    appBaseUrl: process.env.APP_PUBLIC_URL ?? 'http://localhost:5173',
+    auditRepo,
+    // Surfaces lastSuccessfulPollAt / backoffUntil on GET / so a broken
+    // credential (failed refresh) degrades visibly in Settings.
+    ...(googleReviewsPollStateRepo
+      ? { pollStateRepo: googleReviewsPollStateRepo }
+      : {}),
+  };
+  app.use(
+    '/api/googlebusiness-integrations',
+    createGoogleBusinessOAuthCallbackRouter(googleBusinessRouterDeps),
   );
 
   // F17 / P15-001 — QuickBooks accounting OAuth callback (unauthenticated).
@@ -5275,6 +5332,14 @@ export function createApp(): AppWithLifecycle {
     createCalendarIntegrationsRouter(calendarRouterDeps),
   );
 
+  // Review-monitoring self-serve — auth'd Google Business lifecycle
+  // endpoints (status / connect / disconnect). The OAuth callback was
+  // mounted earlier (before global requireAuth) on the same prefix.
+  app.use(
+    '/api/googlebusiness-integrations',
+    createGoogleBusinessIntegrationsRouter(googleBusinessRouterDeps),
+  );
+
   app.use(
     '/api/integrations',
     createIntegrationsRouter(integrationsRouterDeps),
@@ -6804,6 +6869,12 @@ export function createApp(): AppWithLifecycle {
             return r.rows.map((row: { id: string }) => row.id);
           },
           logger: googleReviewsLogger,
+          // Refresh-token handling: on 401 the sweep refreshes via the
+          // stored refresh token, persists the rotated access token to
+          // tenant_integrations, and retries once; a dead refresh grant
+          // lands in the review_poll_state backoff (visible in Settings).
+          googleConfig: googleBusinessOAuthConfig ?? null,
+          credentialStore: googleBusinessIntegrationRepo,
           ...(googleReviewsProposalEmission
             ? { proposalEmission: googleReviewsProposalEmission }
             : {}),

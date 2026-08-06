@@ -677,3 +677,212 @@ describe('P7-026 runGoogleReviewsSweep — ingestion → proposal bridge', () =>
     expect(proposals).toHaveLength(1);
   });
 });
+
+// ─── Review-monitoring self-serve — token refresh on 401 ──────────────────
+//
+// Google access tokens expire after ~1h, so a connected tenant would 401
+// forever after the first hour without refresh handling. On a 401 the
+// worker must refresh via the stored refresh token, persist the rotated
+// access token, and retry ONCE; when refresh fails (revoked grant) the
+// failure lands in the existing poll-state backoff so the tenant surface
+// degrades visibly instead of silently.
+import { vi } from 'vitest';
+import { GOOGLE_BUSINESS_AUTH_BACKOFF_SECONDS } from '../../src/reputation/google-business-integration';
+
+const AUTH_CONFIG = {
+  clientId: 'cid',
+  clientSecret: 'csec',
+  redirectUri: 'https://api.example.com/api/googlebusiness-integrations/google/callback',
+};
+
+function authHeaderOf(init?: RequestInit): string {
+  const headers = (init?.headers ?? {}) as Record<string, string>;
+  return headers.Authorization ?? '';
+}
+
+describe('P7-026 runGoogleReviewsSweep — refresh-token handling', () => {
+  let reviewRepo: InMemoryReviewRepository;
+  let pollStateRepo: InMemoryReviewPollStateRepository;
+
+  beforeEach(() => {
+    reviewRepo = new InMemoryReviewRepository();
+    pollStateRepo = new InMemoryReviewPollStateRepository(() => NOW);
+  });
+
+  function staleCredRow(tenantId: string): CredentialRow {
+    return makeCredRow(tenantId, {
+      credentials: {
+        accessToken: 'at-stale',
+        refreshToken: 'rt-1',
+        providerData: { accountId: 'A', locationId: 'L' },
+      },
+    });
+  }
+
+  it('on 401: refreshes, persists the rotated token, retries once, and ingests', async () => {
+    const persist = vi.fn(
+      async (_tenantId: string, _accessToken: string, _expiresAt: Date) => {},
+    );
+    const fetchFn = async (
+      input: string | URL | Request,
+      init?: RequestInit,
+    ): Promise<Response> => {
+      const url = String(input);
+      if (url.includes('oauth2.googleapis.com/token')) {
+        return jsonResponse({ access_token: 'at-new', expires_in: 3600 });
+      }
+      if (authHeaderOf(init) === 'Bearer at-stale') {
+        return new Response('{"error":"invalid_token"}', { status: 401 });
+      }
+      return jsonResponse({
+        reviews: [makeReviewJson('r1', '2026-05-17T10:00:00Z')],
+      });
+    };
+
+    const result = await runGoogleReviewsSweep({
+      reviewRepo,
+      pollStateRepo,
+      credentialResolver: makeResolver({
+        credentials: { t1: staleCredRow('t1') },
+      }),
+      listTenantIds: async () => ['t1'],
+      logger,
+      now: () => NOW,
+      fetchFn,
+      googleConfig: AUTH_CONFIG,
+      credentialStore: { persistRotatedAccessToken: persist },
+    });
+
+    expect(result.failed).toBe(0);
+    expect(result.persisted).toBe(1);
+    // The rotated token was persisted so the NEXT sweep starts fresh.
+    expect(persist).toHaveBeenCalledTimes(1);
+    expect(persist.mock.calls[0][0]).toBe('t1');
+    expect(persist.mock.calls[0][1]).toBe('at-new');
+    // Success path resets throttling as usual.
+    const state = await pollStateRepo.getPollState('t1');
+    expect(state?.backoffUntil).toBeNull();
+    expect(state?.cursor).toBe('2026-05-17T10:00:00.000Z');
+  });
+
+  it('refresh failure lands in the poll-state backoff (visible degradation, not silent)', async () => {
+    const persist = vi.fn(async () => {});
+    const fetchFn = async (
+      input: string | URL | Request,
+    ): Promise<Response> => {
+      const url = String(input);
+      if (url.includes('oauth2.googleapis.com/token')) {
+        // Revoked grant — refresh is dead until the operator reconnects.
+        return new Response('{"error":"invalid_grant"}', { status: 400 });
+      }
+      return new Response('{"error":"invalid_token"}', { status: 401 });
+    };
+
+    const result = await runGoogleReviewsSweep({
+      reviewRepo,
+      pollStateRepo,
+      credentialResolver: makeResolver({
+        credentials: { t1: staleCredRow('t1') },
+      }),
+      listTenantIds: async () => ['t1'],
+      logger,
+      now: () => NOW,
+      fetchFn,
+      googleConfig: AUTH_CONFIG,
+      credentialStore: { persistRotatedAccessToken: persist },
+    });
+
+    expect(result.failed).toBe(1);
+    expect(result.persisted).toBe(0);
+    expect(persist).not.toHaveBeenCalled();
+    // VISIBLE: the tenant's poll state carries a backoff window the
+    // status endpoint (and the next sweep's throttle check) surface.
+    const state = await pollStateRepo.getPollState('t1');
+    expect(state?.backoffUntil).not.toBeNull();
+    expect(state!.backoffUntil!.getTime()).toBe(
+      NOW.getTime() + GOOGLE_BUSINESS_AUTH_BACKOFF_SECONDS * 1000,
+    );
+    expect(state?.consecutive429Count).toBeGreaterThanOrEqual(1);
+
+    // And the next sweep skips the tenant entirely (throttled), so we
+    // don't hammer Google with dead credentials.
+    let fetched = false;
+    const second = await runGoogleReviewsSweep({
+      reviewRepo,
+      pollStateRepo,
+      credentialResolver: makeResolver({
+        credentials: { t1: staleCredRow('t1') },
+      }),
+      listTenantIds: async () => ['t1'],
+      logger,
+      now: () => NOW,
+      fetchFn: async () => {
+        fetched = true;
+        return jsonResponse({ reviews: [] });
+      },
+      googleConfig: AUTH_CONFIG,
+      credentialStore: { persistRotatedAccessToken: persist },
+    });
+    expect(second.throttled).toBe(1);
+    expect(fetched).toBe(false);
+  });
+
+  it('a second 401 after a successful refresh also lands in the backoff (retry exactly once)', async () => {
+    const persist = vi.fn(async () => {});
+    let reviewCalls = 0;
+    const fetchFn = async (
+      input: string | URL | Request,
+    ): Promise<Response> => {
+      const url = String(input);
+      if (url.includes('oauth2.googleapis.com/token')) {
+        return jsonResponse({ access_token: 'at-new', expires_in: 3600 });
+      }
+      reviewCalls++;
+      // Google keeps rejecting even the fresh token (e.g. access revoked
+      // upstream while the refresh grant still mints tokens).
+      return new Response('{"error":"invalid_token"}', { status: 401 });
+    };
+
+    const result = await runGoogleReviewsSweep({
+      reviewRepo,
+      pollStateRepo,
+      credentialResolver: makeResolver({
+        credentials: { t1: staleCredRow('t1') },
+      }),
+      listTenantIds: async () => ['t1'],
+      logger,
+      now: () => NOW,
+      fetchFn,
+      googleConfig: AUTH_CONFIG,
+      credentialStore: { persistRotatedAccessToken: persist },
+    });
+
+    // Exactly one retry: initial call + one post-refresh attempt.
+    expect(reviewCalls).toBe(2);
+    expect(result.failed).toBe(1);
+    const state = await pollStateRepo.getPollState('t1');
+    expect(state?.backoffUntil).not.toBeNull();
+  });
+
+  it('without refresh deps a 401 still degrades visibly into the backoff', async () => {
+    const fetchFn = async (): Promise<Response> =>
+      new Response('{"error":"invalid_token"}', { status: 401 });
+
+    const result = await runGoogleReviewsSweep({
+      reviewRepo,
+      pollStateRepo,
+      credentialResolver: makeResolver({
+        credentials: { t1: makeCredRow('t1') },
+      }),
+      listTenantIds: async () => ['t1'],
+      logger,
+      now: () => NOW,
+      fetchFn,
+      // No googleConfig / credentialStore wired.
+    });
+
+    expect(result.failed).toBe(1);
+    const state = await pollStateRepo.getPollState('t1');
+    expect(state?.backoffUntil).not.toBeNull();
+  });
+});

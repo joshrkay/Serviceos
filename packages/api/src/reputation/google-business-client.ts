@@ -75,6 +75,34 @@ export class GoogleBusinessApiError extends Error {
   }
 }
 
+/**
+ * Thrown on HTTP 401 from any GBP API call, and on a failed
+ * refresh-token grant. Google access tokens expire after ~1h, so this
+ * is the signal the worker (and reply resolver) branch on to run the
+ * refresh-and-retry-once path in
+ * `reputation/google-business-integration.ts`. When the refresh itself
+ * fails (revoked grant), the same class propagates and the worker
+ * records the failure into the poll-state backoff so the tenant
+ * surface degrades visibly.
+ */
+export class GoogleBusinessAuthError extends Error {
+  readonly status = 401;
+
+  constructor(message: string) {
+    super(message);
+    this.name = 'GoogleBusinessAuthError';
+  }
+}
+
+/** Shared 401 branch for every GBP call site in this module. */
+async function throwIfUnauthorized(res: Response, op: string): Promise<void> {
+  if (res.status !== 401) return;
+  const body = await res.text().catch(() => '');
+  throw new GoogleBusinessAuthError(
+    `Google Business ${op} unauthorized (401)${body ? `: ${body.slice(0, 200)}` : ''}`,
+  );
+}
+
 export function buildGoogleBusinessAuthUrl(
   config: GoogleBusinessOAuthConfig,
   state: string,
@@ -136,6 +164,58 @@ export async function exchangeAuthorizationCode(
     accessToken: json.access_token,
     refreshToken: json.refresh_token,
     expiresAt: new Date(Date.now() + expiresIn * 1000),
+  };
+}
+
+export interface RefreshedBusinessTokens {
+  accessToken: string;
+  expiresAt: Date;
+}
+
+/**
+ * Refresh-token grant (RFC 6749 §6). Google rotates only the access
+ * token — the refresh token stays valid until the user revokes access,
+ * so callers persist just the rotated access token + expiry.
+ *
+ * Every failure mode throws {@link GoogleBusinessAuthError}: a non-2xx
+ * (typically `invalid_grant` after the operator revoked access in
+ * their Google account) and a 2xx missing `access_token` both mean
+ * "these credentials cannot be made to work without the operator
+ * reconnecting", which is exactly the branch callers take on 401.
+ */
+export async function refreshAccessToken(
+  config: GoogleBusinessOAuthConfig,
+  refreshToken: string,
+  fetchFn: GoogleFetch = fetch,
+): Promise<RefreshedBusinessTokens> {
+  const res = await fetchFn(GOOGLE_TOKEN_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({
+      refresh_token: refreshToken,
+      client_id: config.clientId,
+      client_secret: config.clientSecret,
+      grant_type: 'refresh_token',
+    }),
+  });
+  if (!res.ok) {
+    const body = await res.text().catch(() => '');
+    throw new GoogleBusinessAuthError(
+      `Google business token refresh failed (${res.status})${body ? `: ${body.slice(0, 200)}` : ''}`,
+    );
+  }
+  const json = (await res.json()) as {
+    access_token?: string;
+    expires_in?: number;
+  };
+  if (!json.access_token) {
+    throw new GoogleBusinessAuthError(
+      'Google token refresh returned no access token',
+    );
+  }
+  return {
+    accessToken: json.access_token,
+    expiresAt: new Date(Date.now() + (json.expires_in ?? 3600) * 1000),
   };
 }
 
@@ -265,6 +345,8 @@ export async function listReviews(
     );
   }
 
+  await throwIfUnauthorized(res, 'listReviews');
+
   if (!res.ok) {
     const body = await res.text().catch(() => '');
     throw new Error(
@@ -348,6 +430,8 @@ export async function replyToReview(
     );
   }
 
+  await throwIfUnauthorized(res, 'replyToReview');
+
   if (!res.ok) {
     const body = await res.text().catch(() => '');
     throw new Error(
@@ -364,4 +448,95 @@ export async function replyToReview(
     );
   }
   return { comment: parsed.data.comment, updateTime: parsed.data.updateTime };
+}
+
+// ─── Connect-flow discovery (accounts + locations) ─────────────────────────
+//
+// The OAuth callback only receives tokens; the poll worker additionally
+// needs the tenant's GBP `accountId` + `locationId`. These two minimal
+// v4 listings let the connect flow auto-discover them (SMB tenants
+// overwhelmingly have exactly one of each). Same error taxonomy as the
+// review calls: 429 → quota, 401 → auth, schema drift → api error.
+
+const namedResourceSchema = z.object({ name: z.string().min(1) }).passthrough();
+
+const listAccountsResponseSchema = z
+  .object({ accounts: z.array(namedResourceSchema).optional() })
+  .passthrough();
+
+const listLocationsResponseSchema = z
+  .object({ locations: z.array(namedResourceSchema).optional() })
+  .passthrough();
+
+async function getNamedResources(
+  url: string,
+  accessToken: string,
+  op: string,
+  schema: typeof listAccountsResponseSchema | typeof listLocationsResponseSchema,
+  key: 'accounts' | 'locations',
+  fetchFn: GoogleFetch,
+): Promise<string[]> {
+  const res = await fetchFn(url, {
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      Accept: 'application/json',
+    },
+  });
+  if (res.status === 429) {
+    const retryAfterRaw = res.headers.get('Retry-After');
+    const retryAfter = retryAfterRaw ? Number(retryAfterRaw) : undefined;
+    const body = await res.text().catch(() => '');
+    throw new GoogleBusinessQuotaError(
+      `Google Business Profile quota exceeded${body ? `: ${body.slice(0, 200)}` : ''}`,
+      Number.isFinite(retryAfter) ? retryAfter : undefined,
+    );
+  }
+  await throwIfUnauthorized(res, op);
+  if (!res.ok) {
+    const body = await res.text().catch(() => '');
+    throw new Error(
+      `Google Business ${op} failed (${res.status}): ${body.slice(0, 500)}`,
+    );
+  }
+  const raw: unknown = await res.json();
+  const parsed = schema.safeParse(raw);
+  if (!parsed.success) {
+    throw new GoogleBusinessApiError(
+      `Google Business ${op} response failed schema validation`,
+      { cause: parsed.error },
+    );
+  }
+  const rows = (parsed.data as Record<string, { name: string }[] | undefined>)[key];
+  return (rows ?? []).map((r) => r.name);
+}
+
+/** List account resource names (`accounts/{id}`) visible to the token. */
+export async function listAccounts(
+  accessToken: string,
+  fetchFn: GoogleFetch = fetch,
+): Promise<string[]> {
+  return getNamedResources(
+    `${GOOGLE_BUSINESS_REVIEWS_HOST}/v4/accounts`,
+    accessToken,
+    'listAccounts',
+    listAccountsResponseSchema,
+    'accounts',
+    fetchFn,
+  );
+}
+
+/** List location resource names (`accounts/{a}/locations/{l}`) under an account. */
+export async function listLocations(
+  accessToken: string,
+  accountId: string,
+  fetchFn: GoogleFetch = fetch,
+): Promise<string[]> {
+  return getNamedResources(
+    `${GOOGLE_BUSINESS_REVIEWS_HOST}/v4/accounts/${accountId}/locations`,
+    accessToken,
+    'listLocations',
+    listLocationsResponseSchema,
+    'locations',
+    fetchFn,
+  );
 }
