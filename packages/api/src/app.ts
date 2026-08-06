@@ -4972,11 +4972,15 @@ export function createApp(): AppWithLifecycle {
     '/api/portal-sessions',
     // D2-1d: portal tokens are bearer credentials; both mint and
     // revoke emit portal_session.{created,revoked} via auditRepo.
+    // POST /send (mint + deliver) reuses the same SendService the
+    // estimate/invoice send routes use — consent/DNC gated; 503 when
+    // message delivery is not configured.
     createPortalRouter({
       portalRepo: portalSessionRepo,
       customerRepo,
       contactRepo: customerContactRepo,
       auditRepo,
+      sendService,
     }),
   );
   app.use('/api/leads', createLeadsRouter(leadRepo, customerRepo, auditRepo, locationRepo));

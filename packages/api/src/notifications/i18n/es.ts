@@ -78,4 +78,16 @@ export const es: Record<keyof EnglishNotifications, string> = {
   'email.payment_receipt.subject': 'Pago recibido — {{business}}',
   'email.invoice_overdue.subject': 'Factura vencida — {{business}}',
   'email.appointment.subject': '{{business}} — actualización de cita',
+
+  // ── Customer portal link (SMS + email) ───────────────────────────────
+  'sms.portal.intro': 'Hola {{name}} — su portal de cliente con {{business}} está listo.',
+  'sms.portal.cta': 'Vea presupuestos, facturas y citas: {{url}}',
+  'sms.portal.expires': 'Este enlace vence el {{date}}.',
+  'email.portal.subject': 'Su portal de cliente con {{business}}',
+  'email.portal.heading': 'Su portal de cliente',
+  'email.portal.body':
+    '{{business}} creó un portal en línea seguro donde puede ver sus presupuestos, facturas, trabajos y próximas citas.',
+  'email.portal.cta_text': 'Abra su portal aquí: {{url}}',
+  'email.portal.button': 'Abrir portal de cliente',
+  'email.portal.expires': 'Por su seguridad, este enlace vence el {{date}}.',
 };

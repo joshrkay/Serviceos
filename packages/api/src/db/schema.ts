@@ -6530,6 +6530,26 @@ export const MIGRATIONS = {
       ON call_me_back_tasks (tenant_id, session_id, reason)
       WHERE session_id IS NOT NULL;
   `,
+
+  // 269 — portal-link send: the customer-portal "send link" flow
+  // (POST /api/portal-sessions/send → SendService.sendPortalLink) writes its
+  // dispatch rows with entity_type='portal_session'. Mirrors the prior
+  // widenings (092, 125, 164, 190) — its own migration so the constraint
+  // change stays independently reviewable/reversible. Reuses the same
+  // dispatch ledger every other outbound send writes to, so DNC suppression
+  // and delivery accounting stay uniform.
+  '269_dispatch_entity_portal_session': `
+    ALTER TABLE message_dispatches
+      DROP CONSTRAINT IF EXISTS message_dispatches_entity_type_check;
+    ALTER TABLE message_dispatches
+      ADD CONSTRAINT message_dispatches_entity_type_check
+        CHECK (entity_type IN (
+          'estimate', 'invoice', 'appointment_confirmation',
+          'appointment_reschedule', 'appointment_cancel', 'appointment_reminder',
+          'payment_receipt', 'invoice_overdue', 'delay_notice', 'appointment_en_route',
+          'daily_digest', 'conversation_reply', 'portal_session'
+        ));
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

@@ -45,6 +45,11 @@ vi.mock('../../components/customers/CustomerRecordsPanel', () => ({
 vi.mock('../../components/customers/MergeCustomerPanel', () => ({
   MergeCustomerPanel: () => <div>MergeCustomerPanel</div>,
 }));
+// Portal panel only fetches on user action, but mock it like the other
+// self-contained panels so this suite stays focused on CustomerDetail.
+vi.mock('../../components/customers/PortalAccessPanel', () => ({
+  PortalAccessPanel: () => <div>PortalAccessPanel</div>,
+}));
 
 import { useDetailQuery } from '../../hooks/useDetailQuery';
 import { apiFetch } from '../../utils/api-fetch';
