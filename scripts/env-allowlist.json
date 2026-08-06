@@ -80,7 +80,6 @@
     { "name": "SUPERVISOR_DEFAULT_DAILY_SPEND_CAP_CENTS", "reason": "UNSURE - a daily spend cap read at app.ts:6720. Named in the July 2026 sweep." },
     { "name": "SUPERVISOR_DEFAULT_MAX_AUTO_APPROVALS_PER_HOUR", "reason": "UNSURE - an auto-approval rate cap read at app.ts:6722. Named in the July 2026 sweep." },
     { "name": "SUPERVISOR_REVIEW_MODE", "reason": "UNSURE - selects the supervisor review lane (app.ts:6762). Whichever mode the unset default picks is currently undocumented in the production contract." },
-    { "name": "ONE_TAP_APPROVE_SECRET", "reason": "UNSURE - probably SHOULD be set. app.ts:1603 leaves the HMAC secret undefined in prod/staging when unset (dev gets a fixed dev secret), which disables one-tap approve rather than failing loudly." },
     { "name": "PUBLIC_API_URL", "reason": "UNSURE - probably SHOULD be set. app.ts:1608 falls back to APP_PUBLIC_URL and then literally 'http://localhost:3000' when building one-tap approval links, in every environment." },
     { "name": "APP_PUBLIC_URL", "reason": "UNSURE - second-choice public API base (app.ts:1150 / 1608) with the same localhost fallback as PUBLIC_API_URL. At least one of the two belongs in the contract." },
     { "name": "PUBLIC_WEB_URL", "reason": "UNSURE - builds customer/owner links in escalation summaries (ai/agents/customer-calling/escalation-summary-builder.ts:55). WEB_URL is declared; whether these are aliases or distinct was not verified." },
