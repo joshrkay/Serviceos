@@ -680,8 +680,8 @@ function EstimateDocPreview({ est, lineItems, onClose }: {
 // ─── Send Estimate Sheet ──────────────────────────────────────────────────
 function SendEstimateSheet({ est, total, onClose, onSent, apiId }: {
   est: EstCompat; total: number; onClose: () => void; onSent: () => void;
-  /** When set, the sheet calls the real /api/estimates/:id/send endpoint. */
-  apiId?: string;
+  /** The estimate's API id — the sheet posts to /api/estimates/:id/send. */
+  apiId: string;
 }) {
   const estimateTerm = useEstimateTerm();
   const [channel, setChannel] = useState<'sms' | 'email'>('sms');
@@ -701,24 +701,19 @@ function SendEstimateSheet({ est, total, onClose, onSent, apiId }: {
   type SendResp = { viewUrl: string; viewToken: string };
   const { mutate: sendEstimate } = useMutation<SendBody, SendResp>(
     'POST',
-    apiId ? `/api/estimates/${apiId}/send` : '/api/estimates/_/send'
+    `/api/estimates/${apiId}/send`
   );
 
   async function handleSend() {
     setSending(true);
     setSendError(null);
     try {
-      if (apiId) {
-        await sendEstimate({
-          channel,
-          recipientPhone: channel === 'sms' ? recipient : undefined,
-          recipientEmail: channel === 'email' ? recipient : undefined,
-          customMessage: msg,
-        });
-      } else {
-        // No API id: fall back to local animation only (offline/demo path).
-        await new Promise((r) => setTimeout(r, 1200));
-      }
+      await sendEstimate({
+        channel,
+        recipientPhone: channel === 'sms' ? recipient : undefined,
+        recipientEmail: channel === 'email' ? recipient : undefined,
+        customMessage: msg,
+      });
       setSending(false);
       setSent(true);
       setTimeout(() => { onSent(); onClose(); }, 1200);
@@ -1397,7 +1392,7 @@ function EstimateDetail({ estimateId, onBack }: { estimateId: string; onBack: ()
         <SendEstimateSheet
           est={estCompat}
           total={total}
-          apiId={est?.id}
+          apiId={est.id}
           onClose={() => setSendOpen(false)}
           onSent={async () => {
             setWasSent(true);
