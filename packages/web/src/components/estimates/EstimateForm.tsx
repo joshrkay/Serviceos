@@ -57,17 +57,28 @@ interface State {
   items: LineItemDraft[];
 }
 
-const AI_SUGGESTIONS: Record<string, { description: string; qty: string; price: string }[]> = {
-  HVAC: [
-    { description: 'Labor – 2 hrs at $95/hr', qty: '2', price: '95.00' },
-    { description: 'Service call fee', qty: '1', price: '85.00' },
-    { description: 'R-410A refrigerant (1 lb)', qty: '1', price: '85.00' },
-  ],
-  default: [
-    { description: 'Labor – 2 hrs', qty: '2', price: '95.00' },
-    { description: 'Service call fee', qty: '1', price: '85.00' },
-  ],
-};
+// Line item returned by POST /api/estimates/suggest (estimate task contract,
+// packages/api/src/ai/tasks/estimate-task.ts — same shape NewEstimateFlow
+// consumes). `unitPrice` is INTEGER CENTS; `category` is a free string.
+interface SuggestedLineItem {
+  description: string;
+  quantity: number;
+  unitPrice: number;
+  category?: string;
+}
+
+const DRAFT_CATEGORIES: ReadonlyArray<NonNullable<LineItemDraft['category']>> = [
+  'labor',
+  'material',
+  'equipment',
+  'other',
+];
+
+/** Map the suggest contract's free-string category onto the editor's union. */
+function toDraftCategory(category?: string): LineItemDraft['category'] {
+  const normalized = category?.toLowerCase();
+  return DRAFT_CATEGORIES.find((c) => c === normalized);
+}
 
 function makeId() {
   return `li-${Math.random().toString(36).slice(2, 10)}-${Date.now().toString(36)}`;
@@ -89,6 +100,7 @@ export function EstimateForm({ onCreated, onCancel }: EstimateFormProps) {
   const [activeContract, setActiveContract] = useState<ApiAgreement | null>(null);
   const [aiLoading, setAiLoading] = useState(false);
   const [aiUsed, setAiUsed] = useState(false);
+  const [aiError, setAiError] = useState<string | null>(null);
 
   const { data: jobs } = useListQuery<ApiJob>('/api/jobs');
 
@@ -126,24 +138,66 @@ export function EstimateForm({ onCreated, onCancel }: EstimateFormProps) {
   function handleJobChange(jobId: string) {
     setForm(p => ({ ...p, jobId }));
     setAiUsed(false);
+    setAiError(null);
   }
 
-  function handleAiSuggest() {
+  // POST to the real /api/estimates/suggest endpoint (same authenticated
+  // client + request/response contract as NewEstimateFlow.suggestEstimate).
+  // The server invokes EstimateTaskHandler with catalog-grounded pricing and
+  // persists the proposal as a forced DRAFT — previewing a suggestion never
+  // writes a real estimate. On ANY failure we surface a visible error; there
+  // is no canned fallback list (fail closed, no invented prices).
+  async function handleAiSuggest() {
+    const description = [selectedJob?.summary, form.customerMessage, form.internalNotes]
+      .map(s => s?.trim())
+      .filter(Boolean)
+      .join('\n');
+    if (!description) {
+      setAiError('Select a job or add a customer message / internal notes so AI has context to suggest from.');
+      return;
+    }
     setAiLoading(true);
-    setTimeout(() => {
-      const suggestions = AI_SUGGESTIONS.HVAC;
-      const newItems = suggestions.map(s => ({
+    setAiError(null);
+    try {
+      const res = await apiFetch('/api/estimates/suggest', {
+        method: 'POST',
+        body: JSON.stringify({
+          description,
+          // The suggest schema accepts jobId for grounding (ownership-checked
+          // server-side); the selected job is this form's context.
+          ...(form.jobId.trim() ? { jobId: form.jobId.trim() } : {}),
+        }),
+      });
+      if (!res.ok) {
+        const json = await res.json().catch(() => ({}));
+        throw new Error((json as { message?: string })?.message ?? `AI suggestion failed (${res.status})`);
+      }
+      const data = await res.json() as { lineItems?: SuggestedLineItem[] };
+      const suggested: LineItemDraft[] = (data.lineItems ?? []).map(li => ({
         id: makeId(),
-        description: s.description,
-        quantity: s.qty,
-        unitPriceDollars: s.price,
+        description: li.description,
+        quantity: String(li.quantity),
+        // unitPrice is INTEGER CENTS (estimate task contract) — the editor
+        // holds a dollars string and re-converts to cents on submit.
+        unitPriceDollars: (li.unitPrice / 100).toFixed(2),
         taxable: false,
-        category: 'labor' as const,
+        category: toDraftCategory(li.category),
       }));
-      setForm(p => ({ ...p, items: [...p.items, ...newItems] }));
-      setAiLoading(false);
+      if (suggested.length === 0) {
+        throw new Error('AI returned no line items. Add more detail and try again, or build the estimate manually.');
+      }
+      setForm(p => {
+        // Drop untouched blank rows (the fresh form's sole empty draft) so
+        // suggestions aren't trailed by a row that fails submit validation.
+        const kept = p.items.filter(it => it.description.trim() !== '');
+        return { ...p, items: [...kept, ...suggested] };
+      });
       setAiUsed(true);
-    }, 1200);
+    } catch (err) {
+      setAiError(err instanceof Error ? err.message : 'AI suggestion failed. Try again or build the estimate manually.');
+    } finally {
+      setAiLoading(false);
+    }
   }
 
   const handleSubmit = useCallback(
@@ -334,6 +388,14 @@ export function EstimateForm({ onCreated, onCancel }: EstimateFormProps) {
             {aiLoading ? 'Generating...' : aiUsed ? 'Suggestions added' : 'AI Suggestions'}
           </Button>
         </div>
+        {aiError && (
+          <div
+            role="alert"
+            className="mb-2 rounded-lg border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive"
+          >
+            {aiError}
+          </div>
+        )}
         <LineItemEditor
           items={form.items}
           onChange={(items) => setForm((p) => ({ ...p, items }))}
