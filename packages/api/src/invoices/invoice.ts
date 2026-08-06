@@ -183,6 +183,28 @@ export interface InvoiceRepository {
     now: Date,
   ): Promise<Invoice | null>;
   /**
+   * Track-5 — the deposit-credit leg of the atomic-increment convention.
+   * Same shape as `incrementAmountPaidAtomic` (single guarded UPDATE deriving
+   * paid/due/status from the row's OWN current values, balance cap
+   * `amount_paid + credit <= total`, GREATEST(0, …) due clamp), differing
+   * ONLY in the status list: a deposit credit legitimately lands on the
+   * freshly-created 'draft' invoice (both call sites credit immediately after
+   * createInvoiceWithNextNumber), where a regular payment must still match 0
+   * rows. Creditable statuses: 'draft', 'open', 'partially_paid'. A draft
+   * STAYS 'draft' even when fully covered (issuing remains the operator's
+   * explicit step); on an already-issued invoice the credit follows payment
+   * semantics ('paid' / 'partially_paid'). Returns the updated invoice, or
+   * null when the row is missing, not creditable, or the credit no longer
+   * fits the remaining balance — callers must compensate the deposit payment
+   * row they already committed (see applyDepositCreditToInvoice).
+   */
+  applyDepositCreditAtomic(
+    tenantId: string,
+    id: string,
+    creditCents: number,
+    now: Date,
+  ): Promise<Invoice | null>;
+  /**
    * P0-3 (reconciler leg) — absolute balance repair guarded in the SAME
    * statement: writes amountPaid/amountDue/status ONLY while the row's
    * current status is in `guardStatuses`. The crash-repair reconcilers
@@ -682,6 +704,41 @@ export class InMemoryInvoiceRepository implements InvoiceRepository {
     const newPaid = i.amountPaidCents + deltaCents;
     const newDue = Math.max(0, i.totals.totalCents - newPaid);
     const status: InvoiceStatus = newDue === 0 ? 'paid' : 'partially_paid';
+    const updated: Invoice = {
+      ...i,
+      amountPaidCents: newPaid,
+      amountDueCents: newDue,
+      status,
+      updatedAt: now,
+    };
+    this.invoices.set(id, updated);
+    return { ...updated, lineItems: [...updated.lineItems] };
+  }
+
+  async applyDepositCreditAtomic(
+    tenantId: string,
+    id: string,
+    creditCents: number,
+    now: Date,
+  ): Promise<Invoice | null> {
+    const i = this.invoices.get(id);
+    if (!i || i.tenantId !== tenantId) return null;
+    // Mirror the Pg WHERE guards (Track-5): a deposit credit lands only on a
+    // creditable invoice — 'draft' (the freshly-created row both call sites
+    // produce) plus the payable statuses — and only when it still fits the
+    // remaining balance. A void/canceled/paid row and an over-total credit
+    // both return null, exactly as the SQL matches 0 rows.
+    if (i.status !== 'draft' && i.status !== 'open' && i.status !== 'partially_paid') return null;
+    if (i.amountPaidCents + creditCents > i.totals.totalCents) return null;
+    // JS is single-threaded, so read-modify-write here is already atomic; the
+    // Pg impl uses a single UPDATE to get the same guarantee under real
+    // concurrency. Recompute from the stored row, never a caller snapshot.
+    const newPaid = i.amountPaidCents + creditCents;
+    const newDue = Math.max(0, i.totals.totalCents - newPaid);
+    // A draft stays 'draft' even when fully covered — issuing remains the
+    // operator's explicit step. An issued invoice follows payment semantics.
+    const status: InvoiceStatus =
+      i.status === 'draft' ? 'draft' : newDue === 0 ? 'paid' : 'partially_paid';
     const updated: Invoice = {
       ...i,
       amountPaidCents: newPaid,
