@@ -981,12 +981,16 @@ Supported intents (return exactly ONE):
                                      "Ask Sarah to leave a review"
                                      "Request feedback on the completed Miller work"
 - "schedule_inspection"  — owner/technician books a permit/code inspection
-                           visit on a job. Same extraction as
-                           create_appointment (customerName, jobReference,
-                           dateTimeDescription). Put "Inspection — " plus
-                           the inspection type (rough-in/final/other) into
-                           jobTitle — e.g. jobTitle: "Inspection — rough-in".
-                           No separate inspectionType field exists.
+                           visit on a job. Extract customerName and
+                           dateTimeDescription exactly as create_appointment
+                           does, plus jobReference when an existing job is
+                           named (e.g. "the Patel job"). The inspection
+                           itself belongs in jobTitle — create_appointment's
+                           own "short name of the new work" field — prefixed
+                           "Inspection — " plus the type (rough-in/final/
+                           other), e.g. jobTitle: "Inspection — rough-in".
+                           No separate inspectionType/requestedDate/
+                           requestedTime fields exist.
                            Examples: "Schedule the rough-in inspection for Thursday"
                                      "Book the final inspection on the Patel job Friday morning"
 - "log_permit"           — owner/technician records a permit number/status
@@ -999,8 +1003,9 @@ Supported intents (return exactly ONE):
                                      "Note the electrical permit was approved for the Hendersons"
 - "log_warranty_claim"   — a warranty callback on past work. Maps to
                            create_job. Put "Warranty — " plus the failure
-                           description into jobTitle (e.g. jobTitle:
-                           "Warranty — water heater failed"). Extract
+                           description into jobTitle — create_job's own
+                           title field (e.g. jobTitle: "Warranty — water
+                           heater pilot won't stay lit"). Extract
                            customerName. No separate problemDescription
                            field exists.
                            Examples: "Log a warranty callback for the Hendersons' water heater"
@@ -1247,12 +1252,12 @@ Return valid JSON with exactly this shape (no prose, no markdown fences):
     "targetTechnicianName": "<string, optional — target technician on reassign_appointment>",
     "cancellationReason": "<string, optional — free-text reason on cancel_appointment>",
     "cancellationType": "<customer_request|technician_unavailable|scheduling_conflict|other, optional>",
-    "noteBody": "<string, optional — the note text on add_note>",
+    "noteBody": "<string, optional — the note text on add_note; on log_permit, MUST begin \"PERMIT: \" followed by the permit number/status>",
     "noteTargetKind": "<job|customer|invoice|estimate|appointment, optional>",
     "sendChannel": "<email|sms, optional — on send_invoice>",
     "paymentMethod": "<cash|check|card|other, optional — on record_payment>",
     "paymentReference": "<string, optional — check number or memo on record_payment>",
-    "jobTitle": "<string, optional — title of new job on create_job; also the short name of the new work being scheduled on create_appointment>",
+    "jobTitle": "<string, optional — title of new job on create_job (prefixed \"Warranty — \" plus what failed on log_warranty_claim); also the short name of the new work being scheduled on create_appointment (prefixed \"Inspection — \" plus the type on schedule_inspection)>",
     "updatedName": "<string, optional — new name on update_customer>",
     "updatedEmail": "<string, optional — new email on update_customer>",
     "updatedPhone": "<string, optional — new phone on update_customer>",
