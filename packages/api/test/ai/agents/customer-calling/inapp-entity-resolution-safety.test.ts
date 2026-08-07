@@ -721,6 +721,15 @@ describe('requiresExistingEntity', () => {
       'update_customer',
       'lookup_balance',
       'convert_lead',
+      // Tradesperson wave 1 (2026-08-07 plan) — deliberate divergence from
+      // their alias targets: schedule_inspection needs an existing JOB (you
+      // can't book an inspection visit on a job that doesn't exist yet) and
+      // log_warranty_claim needs an existing CUSTOMER (a warranty claim is
+      // necessarily against past work for a known customer) — unlike bare
+      // create_appointment / create_job, which are creation intents and
+      // stay FALSE above.
+      'schedule_inspection',
+      'log_warranty_claim',
     ]) {
       expect(requiresExistingEntity(intent)).toBe(true);
     }

@@ -348,8 +348,9 @@ const ROWS: Row[] = [
     // to 'create_appointment' (voice-intent-map.ts), so dispatch here is
     // byte-identical to the create_appointment row above: the SAME
     // CreateAppointmentAITaskHandler / CreateAppointmentExecutionHandler
-    // pair. Only the classifier's extraction differs (inspectionType, an
-    // "Inspection — " summary prefix), which this drift test cannot observe
+    // pair. Only the classifier's extraction differs (an "Inspection — "
+    // + inspection-type prefix folded into jobTitle — no separate
+    // inspectionType field exists), which this drift test cannot observe
     // — canned gateway JSON stands in for the LLM either way.
     intent: 'schedule_inspection',
     mode: 'resolves',
@@ -499,9 +500,10 @@ const ROWS: Row[] = [
     // to 'create_job' (voice-intent-map.ts), so dispatch here is
     // byte-identical to the create_job row above: the SAME
     // CreateJobVoiceTaskHandler / CreateJobExecutionHandler pair. Only the
-    // classifier's extraction differs (a "Warranty — " summary prefix,
-    // problemDescription carrying the failure), which this drift test
-    // cannot observe — no LLM is called for this row either way.
+    // classifier's extraction differs (a "Warranty — " + failure-description
+    // prefix folded into jobTitle — no separate problemDescription field
+    // exists), which this drift test cannot observe — no LLM is called for
+    // this row either way.
     intent: 'log_warranty_claim',
     mode: 'resolves',
     note: 'alias of create_job — resolved customerId + a title drafts ungated; dep-less CreateJobExecutionHandler synthetic-succeeds',
@@ -589,8 +591,9 @@ const ROWS: Row[] = [
     // 'add_note' (voice-intent-map.ts), so dispatch here is byte-identical
     // to the add_note row above: the SAME AddNoteTaskHandler /
     // AddNoteExecutionHandler pair. Only the classifier's extraction
-    // differs (permitNumber, a "PERMIT: " note-body prefix), which this
-    // drift test cannot observe — no LLM is called for this row either way.
+    // differs (the permit number/status fold into noteBody's "PERMIT: "
+    // prefix — no separate permitNumber field exists), which this drift
+    // test cannot observe — no LLM is called for this row either way.
     intent: 'log_permit',
     mode: 'resolves',
     note: 'alias of add_note — a resolver-verified jobId lands as targetId ungated; dep-less AddNoteExecutionHandler synthetic-succeeds',

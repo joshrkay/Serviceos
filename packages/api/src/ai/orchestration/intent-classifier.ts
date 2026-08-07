@@ -281,8 +281,14 @@ export const SUPPORTED_INTENTS: readonly IntentType[] = [
  *           Locking the brand voice stays tap-only — this intent's payload
  *           structurally cannot express `brand_voice_locked` (Part F
  *           entry F-2).
+ *   1.6.0 — Tradesperson wave 1 (2026-08-07 plan), additive: schedule_inspection,
+ *           log_permit, log_warranty_claim — alias intents onto existing
+ *           proposal types (create_appointment / add_note / create_job
+ *           respectively). Handler dispatch is keyed by proposal type, so
+ *           these inherit drafting + execution unchanged; only
+ *           classification + extraction differ.
  */
-export const INTENT_TAXONOMY_VERSION = '1.5.0';
+export const INTENT_TAXONOMY_VERSION = '1.6.0';
 
 /**
  * P11-001: convenience predicate the FSM adapter uses to route
@@ -981,12 +987,10 @@ Supported intents (return exactly ONE):
                                      "Ask Sarah to leave a review"
                                      "Request feedback on the completed Miller work"
 - "schedule_inspection"  — owner/technician books a permit/code inspection
-                           visit on a job. Extract customerName and
-                           dateTimeDescription exactly as create_appointment
-                           does, plus jobReference when an existing job is
-                           named (e.g. "the Patel job"). The inspection
-                           itself belongs in jobTitle — create_appointment's
-                           own "short name of the new work" field — prefixed
+                           visit on a job. Extract customerName, jobReference
+                           (when an existing job is named, e.g. "the Patel
+                           job"), jobTitle, and dateTimeDescription. The
+                           inspection itself belongs in jobTitle, prefixed
                            "Inspection — " plus the type (rough-in/final/
                            other), e.g. jobTitle: "Inspection — rough-in".
                            No separate inspectionType/requestedDate/

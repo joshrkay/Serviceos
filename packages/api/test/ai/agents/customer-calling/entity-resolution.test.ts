@@ -254,6 +254,43 @@ describe('planVoiceEntityLookups — intent-conditioned operator references', ()
       { kind: 'appointment', reference: "Tuesday's job", refKey: 'appointmentId' },
     ]);
   });
+
+  // Tradesperson wave 1 (2026-08-07 plan) — aliases resolve the same refs as
+  // their targets. schedule_inspection joined BOTH CUSTOMER_REF_INTENTS and
+  // JOB_REF_INTENTS (it books a visit on an existing job for a known
+  // customer), customer-before-job per the family's standard ordering.
+  it('plans customer + job lookups for schedule_inspection', () => {
+    const lookups = planVoiceEntityLookups('schedule_inspection', {
+      customerName: 'Patel',
+      jobReference: 'the Patel job',
+    });
+    expect(lookups).toEqual([
+      { kind: 'customer', reference: 'Patel', refKey: 'customerId' },
+      { kind: 'job', reference: 'the Patel job', refKey: 'jobId' },
+    ]);
+  });
+
+  // log_permit joined JOB_REF_INTENTS only — a permit attaches to a job, not
+  // directly to a customer name.
+  it('plans a job lookup for log_permit', () => {
+    const lookups = planVoiceEntityLookups('log_permit', {
+      jobReference: 'the Patel job',
+    });
+    expect(lookups).toEqual([
+      { kind: 'job', reference: 'the Patel job', refKey: 'jobId' },
+    ]);
+  });
+
+  // log_warranty_claim joined CUSTOMER_REF_INTENTS only — it aliases
+  // create_job, which resolves a customer, not an existing job reference.
+  it('plans a customer lookup for log_warranty_claim', () => {
+    const lookups = planVoiceEntityLookups('log_warranty_claim', {
+      customerName: 'Henderson',
+    });
+    expect(lookups).toEqual([
+      { kind: 'customer', reference: 'Henderson', refKey: 'customerId' },
+    ]);
+  });
 });
 
 // SCH-03 — "cancel the upcoming appointment for that job" fails to parse as a
