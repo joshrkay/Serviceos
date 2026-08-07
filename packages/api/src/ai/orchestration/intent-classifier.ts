@@ -60,6 +60,8 @@ export type IntentType =
   | 'schedule_inspection'
   | 'log_permit'
   | 'log_warranty_claim'
+  // Tradesperson wave 1 — price-book edit by voice; rides WS20's existing proposal type.
+  | 'update_catalog_item'
   // Taxonomy 1.2.0 (agent wave, Track A) — three proposal-driving on-ramps:
   //   create_invoice_schedule    — U2: milestone/progress billing plan for a
   //                                job; the verbatim milestone sentence rides
@@ -214,6 +216,7 @@ export const SUPPORTED_INTENTS: readonly IntentType[] = [
   'schedule_inspection',
   'log_permit',
   'log_warranty_claim',
+  'update_catalog_item',
   'create_invoice_schedule',
   'respond_to_review',
   'create_standing_instruction',
@@ -287,8 +290,15 @@ export const SUPPORTED_INTENTS: readonly IntentType[] = [
  *           respectively). Handler dispatch is keyed by proposal type, so
  *           these inherit drafting + execution unchanged; only
  *           classification + extraction differ.
+ *   1.7.0 — Tradesperson wave 1 (2026-08-07 plan) Task 2, additive:
+ *           update_catalog_item — voice on-ramp for WS20's existing
+ *           correction-repetition proposal type + execution handler
+ *           (price-book edits by voice). New extraction fields
+ *           (catalogItemReference / unitPriceCents / name / description);
+ *           see UpdateCatalogItemTaskHandler (ai/tasks/voice-extended-tasks.ts)
+ *           for the payload/contract-compatibility notes.
  */
-export const INTENT_TAXONOMY_VERSION = '1.6.0';
+export const INTENT_TAXONOMY_VERSION = '1.7.0';
 
 /**
  * P11-001: convenience predicate the FSM adapter uses to route
@@ -481,6 +491,23 @@ export interface ExtractedEntities {
   // onto the six brandVoiceSchema fields + a freeText catch-all; the
   // classifier itself never emits structured tone fields.
   brandVoiceInstruction?: string;
+  // Tradesperson wave 1, Task 2 — update_catalog_item: the spoken catalog
+  // (price-book) entry name the caller wants to edit. Free text; the task
+  // handler resolves it against the tenant's catalog (case-insensitive
+  // substring match) — never trusted as an id.
+  catalogItemReference?: string;
+  // update_catalog_item: the NEW unit price, in integer cents, when the
+  // caller stated one ("raise it to 89 dollars" → 8900).
+  unitPriceCents?: number;
+  // update_catalog_item: a requested NEW name for the catalog item
+  // ("rename 'AC tune-up' to 'AC seasonal service'" → "AC seasonal
+  // service"). Captured for the review card; see
+  // UpdateCatalogItemTaskHandler's doc comment for why a rename cannot be
+  // auto-applied through this proposal type today.
+  name?: string;
+  // update_catalog_item: a requested NEW description for the catalog item.
+  // Same capture-only caveat as `name` above.
+  description?: string;
 }
 
 /**
@@ -1014,6 +1041,14 @@ Supported intents (return exactly ONE):
                            field exists.
                            Examples: "Log a warranty callback for the Hendersons' water heater"
                                      "The Garcia compressor we installed failed — warranty job"
+- "update_catalog_item"  — owner changes a price-book (catalog) entry:
+                           price, name, or description. Capture-class; only
+                           shapes FUTURE drafts. Extract catalogItemReference
+                           (spoken name) and the new unitPriceCents (integer
+                           cents) or new name/description.
+                           Examples: "Raise the diagnostic fee to 89 dollars"
+                                     "Change the water heater install price to 1450"
+                                     "Rename 'AC tune-up' to 'AC seasonal service'"
 - "create_invoice_schedule" — user wants to set up a MILESTONE / PROGRESS
                            billing plan for a job: a deposit up front and the
                            rest later, or a percentage split across stages.
@@ -1279,7 +1314,11 @@ Return valid JSON with exactly this shape (no prose, no markdown fences):
     "reviewReference": "<string, optional — which review, verbatim, on respond_to_review>",
     "instructionText": "<string, optional — verbatim standing rule on create_standing_instruction>",
     "scopeIntentHint": "<string, optional — what work the standing rule applies to>",
-    "brandVoiceInstruction": "<string, optional — VERBATIM spoken tone/sign-off/persona instruction on update_brand_voice>"
+    "brandVoiceInstruction": "<string, optional — VERBATIM spoken tone/sign-off/persona instruction on update_brand_voice>",
+    "catalogItemReference": "<string, optional — spoken catalog/price-book entry name on update_catalog_item>",
+    "unitPriceCents": <integer cents, optional — the NEW price on update_catalog_item>,
+    "name": "<string, optional — the NEW name on update_catalog_item>",
+    "description": "<string, optional — the NEW description on update_catalog_item>"
   }
 }
 
@@ -1742,6 +1781,11 @@ export function parseClassifierJson(content: string): IntentClassification | nul
     if (typeof ee.scopeIntentHint === 'string') extracted.scopeIntentHint = ee.scopeIntentHint;
     // update_brand_voice fields (B1.18)
     if (typeof ee.brandVoiceInstruction === 'string') extracted.brandVoiceInstruction = ee.brandVoiceInstruction;
+    // update_catalog_item fields (Tradesperson wave 1, Task 2)
+    if (typeof ee.catalogItemReference === 'string') extracted.catalogItemReference = ee.catalogItemReference;
+    if (typeof ee.unitPriceCents === 'number') extracted.unitPriceCents = ee.unitPriceCents;
+    if (typeof ee.name === 'string') extracted.name = ee.name;
+    if (typeof ee.description === 'string') extracted.description = ee.description;
     if (Object.keys(extracted).length > 0) {
       result.extractedEntities = extracted;
     }

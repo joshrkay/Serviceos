@@ -48,6 +48,7 @@ import {
   RequestFeedbackTaskHandler,
   BatchInvoiceTaskHandler,
   CreateInvoiceScheduleTaskHandler,
+  UpdateCatalogItemTaskHandler,
 } from '../tasks/voice-extended-tasks';
 
 /**
@@ -265,6 +266,10 @@ export function buildTaskHandlers(deps: HandlerRegistryDeps): Map<ProposalType, 
   // U2 — milestone billing plan from a spoken sentence (deterministic
   // parser; no LLM drafting call).
   handlers.set('create_invoice_schedule', new CreateInvoiceScheduleTaskHandler());
+  // Tradesperson wave 1, Task 2 — WS20's update_catalog_item voice on-ramp.
+  // catalogRepo powers the spoken-reference → item resolution; absent →
+  // every reference stays gated (missingFields: ['catalogItemId']).
+  handlers.set('update_catalog_item', new UpdateCatalogItemTaskHandler(deps.catalogRepo));
   // B4 — unified issue_invoice: gated missingFields ladder (rung 3) PLUS
   // conversation-context resolution (rung 2, needs proposalRepo). See the
   // class doc comment in ./task-router.ts for the full resolution ladder.

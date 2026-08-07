@@ -43,6 +43,10 @@ function fullDeps(): RegistryDeps {
   return {
     customerRepo: {} as any,
     jobRepo: {} as any,
+    // Tradesperson wave 1, Task 2 — update_catalog_item became voice-reachable
+    // (proposals/voice-intent-map.ts), so its execution handler's
+    // isFullyWired() probe (Boolean(this.catalogRepo)) is now exercised here.
+    catalogRepo: {} as any,
     timelineRepo: {} as any,
     timeEntryRepo: {} as any,
     locationRepo: {} as any,
@@ -134,6 +138,10 @@ describe('U8: each newly probed handler is DETECTED when its effect dep is dropp
     { omit: ['googleReplyResolver'], flags: ['review_response_proposal'] },
     { omit: ['reviewPrivateMessageSender'], flags: ['review_response_proposal'] },
     { omit: ['serviceCreditRepo'], flags: ['review_response_proposal'] },
+    // Tradesperson wave 1, Task 2 — without catalogRepo,
+    // UpdateCatalogItemExecutionHandler.isFullyWired() reports false (its
+    // dep-less mode is a synthetic passthrough that persists nothing).
+    { omit: ['catalogRepo'], flags: ['update_catalog_item'] },
   ];
 
   for (const { omit, flags } of rows) {

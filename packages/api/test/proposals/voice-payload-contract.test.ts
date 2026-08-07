@@ -100,6 +100,8 @@ import { InMemoryAuditRepository } from '../../src/audit/audit';
 import { InMemoryJobRepository, type Job } from '../../src/jobs/job';
 import { InMemoryInvoiceRepository, type Invoice } from '../../src/invoices/invoice';
 import { InMemoryEstimateRepository, type Estimate } from '../../src/estimates/estimate';
+import { InMemoryCatalogItemRepository, createCatalogItem } from '../../src/catalog/catalog-item';
+import { UpdateCatalogItemExecutionHandler } from '../../src/proposals/execution/update-catalog-item-handler';
 import { buildLineItem, calculateDocumentTotals, type LineItem } from '../../src/shared/billing-engine';
 import type { AppointmentRepository } from '../../src/appointments/appointment';
 import type { JobRepository } from '../../src/jobs/job';
@@ -671,6 +673,39 @@ const ROWS: Row[] = [
         }),
       ),
     execute: (p) => new CreateInvoiceScheduleExecutionHandler().execute(p, execContext()),
+  },
+  {
+    // Tradesperson wave 1, Task 2 (2026-08-07 plan) — WS20's proposal type +
+    // execution handler pre-exist; this is the voice on-ramp's drift row.
+    // The payload deliberately carries no `evidence` (see
+    // UpdateCatalogItemTaskHandler's doc comment) — this row proves that
+    // omission is safe: missingFields is still [] and the REAL execution
+    // handler still accepts the payload, because it never reads
+    // payload.evidence.
+    intent: 'update_catalog_item',
+    mode: 'resolves',
+    note: 'a unique case-insensitive substring match on catalogRepo.listByTenant resolves catalogItemId; dep-less UpdateCatalogItemExecutionHandler synthetic-succeeds even with no evidence on the payload',
+    draft: () => {
+      const catalogRepo = new InMemoryCatalogItemRepository();
+      return catalogRepo
+        .create(
+          createCatalogItem({
+            tenantId: TENANT_ID,
+            name: 'AC diagnostic fee',
+            category: 'Labor',
+            unit: 'each',
+            unitPriceCents: 7900,
+          }),
+        )
+        .then(() =>
+          draft(
+            { gateway: NOOP_GATEWAY, catalogRepo },
+            'update_catalog_item',
+            ctx({ existingEntities: { catalogItemReference: 'diagnostic fee', unitPriceCents: 8900 } }),
+          ),
+        );
+    },
+    execute: (p) => new UpdateCatalogItemExecutionHandler().execute(p, execContext()),
   },
   {
     intent: 'create_standing_instruction',

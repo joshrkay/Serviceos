@@ -26,6 +26,7 @@ import {
 import { ExtractedEntities } from '../orchestration/intent-classifier';
 import type { AppointmentRepository } from '../../appointments/appointment';
 import type { JobRepository } from '../../jobs/job';
+import type { CatalogItem, CatalogItemRepository } from '../../catalog/catalog-item';
 import type { InvoiceRepository } from '../../invoices/invoice';
 import type { Estimate, EstimateRepository } from '../../estimates/estimate';
 import type { LLMGateway } from '../gateway/gateway';
@@ -1956,6 +1957,127 @@ export class CreateJobVoiceTaskHandler implements TaskHandler {
 
     return {
       proposal: createProposal(inputFor(context, this.taskType, payload, missing)),
+      taskType: this.taskType,
+    };
+  }
+}
+
+// ───────────── update_catalog_item ─────────────
+//
+// Tradesperson wave 1, Task 2 (2026-08-07 plan) — the voice ON-RAMP for
+// WS20's existing correction-repetition proposal type
+// (proposals/contracts/update-catalog-item.ts) and its execution handler
+// (proposals/execution/update-catalog-item-handler.ts) — both pre-exist and
+// are NOT modified here. Capture-class: moves no money, only shapes a
+// FUTURE catalog write that is itself reviewed.
+//
+// Contract-compatibility notes (read before changing this class):
+//
+//   1. `evidence` (lessonIds + correctionCount) is a REQUIRED nested object
+//      on `updateCatalogItemPayloadSchema`, but it exists to carry the
+//      correction-repetition loop's real provenance ("you've corrected this
+//      N times") — a live voice utterance has no lesson to point to, and
+//      `lessonIds` requires at least one real id. This handler deliberately
+//      OMITS `evidence` rather than fabricating one:
+//        - UpdateCatalogItemExecutionHandler.execute() never reads
+//          payload.evidence (only catalogItemId + proposedUnitPriceCents),
+//          so omitting it does not affect execution.
+//        - approveProposal (proposals/actions.ts) only blocks on the
+//          tracked `missingFields` list, not full Zod re-validation, so an
+//          unambiguous price-only draft (missingFields: []) still approves
+//          with one tap — proven by this type's row in
+//          test/proposals/voice-payload-contract.test.ts.
+//        - The one thing this cannot support: editing this proposal's
+//          fields via the generic `editProposal` path before approval,
+//          which revalidates the FULL merged payload against the Zod
+//          schema and would reject it for the still-missing `evidence` key.
+//          Fixing that means loosening the WS20 contract itself, which is
+//          out of this task's scope (Files list) — flagged as a follow-up,
+//          not silently worked around.
+//
+//   2. `name`/`description` changes cannot actually EXECUTE today: the
+//      contract's `name` field is documented as informational-only ("name
+//      at proposal time") and there is no `description` field on the
+//      contract at all — the execution handler only ever writes
+//      `proposedUnitPriceCents`. So a spoken rename/description change is
+//      never written to `payload.name`/`payload.description` (that would
+//      silently no-op on approval, misleading the reviewer into thinking it
+//      applied); instead it rides `proposal.explanation` as a human-readable
+//      note pointing at the Catalog screen. Only a price change is a real,
+//      executable proposal field here.
+export class UpdateCatalogItemTaskHandler implements TaskHandler {
+  readonly taskType = 'update_catalog_item' as const;
+
+  constructor(private readonly catalogRepo?: CatalogItemRepository) {}
+
+  async handle(context: TaskContext): Promise<TaskResult> {
+    const ee = entitiesFrom(context);
+    const payload: Record<string, unknown> = {};
+    const missing: string[] = [];
+    const explanationParts: string[] = [];
+
+    const reference = typeof ee.catalogItemReference === 'string' ? ee.catalogItemReference.trim() : '';
+    let resolvedItem: CatalogItem | undefined;
+
+    if (!reference || !this.catalogRepo) {
+      missing.push('catalogItemId');
+    } else {
+      const items = await this.catalogRepo.listByTenant(context.tenantId);
+      const needle = reference.toLowerCase();
+      const matches = items.filter((item) => item.name.toLowerCase().includes(needle));
+      if (matches.length === 1) {
+        resolvedItem = matches[0];
+      } else if (matches.length > 1) {
+        missing.push(`which catalog item (matches: ${matches.map((m) => m.name).join(', ')})`);
+      } else {
+        missing.push(`no catalog item matching '${reference}'`);
+      }
+    }
+
+    // Only a stated, non-negative integer cents value is a real price
+    // change — mirrors the durationMinutes sanity check elsewhere in this
+    // file (an LLM occasionally answers with a negative or fractional
+    // number).
+    const requestedPriceCents =
+      typeof ee.unitPriceCents === 'number' && Number.isFinite(ee.unitPriceCents) && ee.unitPriceCents >= 0
+        ? Math.round(ee.unitPriceCents)
+        : undefined;
+    const hasName = typeof ee.name === 'string' && ee.name.trim().length > 0;
+    const hasDescription = typeof ee.description === 'string' && ee.description.trim().length > 0;
+    if (requestedPriceCents === undefined && !hasName && !hasDescription) {
+      missing.push('what to change (price, name, or description)');
+    }
+
+    if (resolvedItem) {
+      payload.catalogItemId = resolvedItem.id;
+      // Informational per the contract's own doc comment (name AT PROPOSAL
+      // TIME, for the summary/UI) — the resolved item's REAL current name,
+      // never the requested new one (see class doc comment note 2).
+      payload.name = resolvedItem.name;
+      payload.currentUnitPriceCents = resolvedItem.unitPriceCents;
+      // No stated price change ⇒ proposed === current (an honest "no price
+      // change" value the schema's required field accepts) rather than a
+      // fabricated number.
+      payload.proposedUnitPriceCents = requestedPriceCents ?? resolvedItem.unitPriceCents;
+    }
+
+    if (hasName) {
+      explanationParts.push(
+        `Requested new name: "${(ee.name as string).trim()}" — not applied by this proposal; rename from the Catalog screen.`,
+      );
+    }
+    if (hasDescription) {
+      explanationParts.push(
+        `Requested new description: "${(ee.description as string).trim()}" — not applied by this proposal; edit from the Catalog screen.`,
+      );
+    }
+
+    return {
+      proposal: createProposal(
+        inputFor(context, this.taskType, payload, missing, {
+          ...(explanationParts.length > 0 ? { explanation: explanationParts.join(' ') } : {}),
+        }),
+      ),
       taskType: this.taskType,
     };
   }

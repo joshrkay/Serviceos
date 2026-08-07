@@ -22,3 +22,10 @@ describe('Phase 1 — alias intents', () => {
     expect(intentToProposalType(intent)).toBe(proposalType);
   });
 });
+
+describe('Phase 1 — update_catalog_item voice intent', () => {
+  it('is supported and maps to the existing update_catalog_item proposal type', () => {
+    expect(SUPPORTED_INTENTS).toContain('update_catalog_item');
+    expect(intentToProposalType('update_catalog_item')).toBe('update_catalog_item');
+  });
+});

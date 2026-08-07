@@ -26,7 +26,7 @@ exist today.
 
 ## A) Speakable today — intent + proposal + execution handler all exist
 
-These 39 actions can be spoken, drafted as a proposal, approved, and executed.
+These 40 actions can be spoken, drafted as a proposal, approved, and executed.
 "Persistence proof" = a Docker-gated integration test that proves the row +
 audit event actually land in Postgres (vs. mocked-DB-only coverage, which cannot
 catch schema drift or a missing dependency).
@@ -72,6 +72,7 @@ catch schema drift or a missing dependency).
 | "Schedule the rough-in inspection for Thursday" | `schedule_inspection` | `create_appointment` | capture | unit |
 | "Log permit 2024-1187 on the Patel job" | `log_permit` | `add_note` | capture | unit |
 | "Log a warranty callback for the Hendersons' water heater" | `log_warranty_claim` | `create_job` | capture | unit |
+| "Raise the diagnostic fee to 89 dollars" | `update_catalog_item` | `update_catalog_item` | capture | unit |
 
 > **Voice technician resolution (U1, taxonomy 1.2.0):** `reassign_appointment`,
 > `add_crew_member`, and `remove_crew_member` now resolve the spoken technician
@@ -96,6 +97,45 @@ Notes on the taxonomy-1.3.0 row:
   `/api/jobs/:id/transition` uses, which adds forward/backward-move
   validation, a timeline entry, and completion side effects. Emits
   `job.updated` (not a new audit event type).
+
+Notes on the Tradesperson wave 1, Task 2 row (`update_catalog_item`,
+taxonomy 1.7.0):
+
+- The proposal type + execution handler are WS20's — originally minted
+  system-side by the correction-repetition loop after N repeated same-SKU
+  price corrections (`learning/corrections/correction-repetition.ts`) —
+  this task adds ONLY the voice on-ramp (classifier intent + map entry +
+  drafting `UpdateCatalogItemTaskHandler`). Neither the contract
+  (`proposals/contracts/update-catalog-item.ts`) nor the execution handler
+  changed.
+- Only a **price** change actually executes: the contract's `name` field is
+  informational-only (the item's name at proposal time, for the review
+  card) and there is no `description` field on the contract at all — the
+  execution handler writes `proposedUnitPriceCents` and nothing else. A
+  spoken rename/description request is surfaced on `proposal.explanation`
+  ("edit from the Catalog screen") rather than silently no-opped as if it
+  had applied.
+- The catalog item reference is resolved by the task handler itself
+  (`catalogRepo.listByTenant` + case-insensitive substring match) — zero
+  matches or an ambiguous (>1) match keeps the proposal gated with a
+  human-readable reason; there is no general entity-resolver `kind:
+  'catalogItem'` the way jobs/appointments/technicians have.
+- The contract's `evidence` field (`lessonIds` + `correctionCount`) is
+  REQUIRED by the Zod schema but carries correction-loop-specific
+  provenance a voice utterance cannot honestly supply — the task handler
+  omits it rather than fabricating a fake lesson id. This is safe for
+  drafting and approval (the execution handler never reads `evidence`, and
+  `approveProposal` only blocks on the tracked `missingFields` list, not
+  full Zod re-validation) but means a voice-drafted `update_catalog_item`
+  proposal cannot go through the generic `editProposal` field-edit path
+  before approval — editing revalidates the FULL payload against the
+  schema and would reject it for the missing key. Loosening the schema
+  itself is out of this task's scope; see
+  `UpdateCatalogItemTaskHandler`'s doc comment
+  (`ai/tasks/voice-extended-tasks.ts`) for the full analysis.
+- This type is deliberately **absent** from `S1_ALLOWED_PROPOSAL_TYPES`
+  (`proposals/surface.ts`) — operator/owner-only, never reachable from an
+  unauthenticated inbound caller.
 
 Notes on the taxonomy-1.2.0 rows:
 
@@ -162,12 +202,16 @@ migration).
 | Spoken example a tradesperson would expect to work | Proposal type | Class | Plan |
 |---|---|---|---|
 | "Book this caller for Thursday" | `create_booking` | capture | deferred (customer-call FSM path) |
-| _(none — system-generated, not spoken)_ | `update_catalog_item` | capture | WS20: the correction loop emits this after N same-SKU price corrections; intentionally never voice-reachable (no on-ramp by design) |
 | _(none — minted after entity resolution, not spoken)_ | `adopt_entity_alias` | manual | U4: alias-learning lifecycle mints this when an operator resolves an ambiguous reference; owner-only approval, never voice-reachable |
 | _(none — conversational onboarding, not the voice intent classifier)_ | `onboarding_tenant_settings`, `onboarding_service_category`, `onboarding_estimate_template`, `onboarding_team_member`, `onboarding_schedule` | capture | B1.19: emitted by the onboarding FSM (`ai/orchestration/onboarding-conversation.ts`), a separate conversation surface from the voice intent classifier — never mapped through `INTENT_TO_PROPOSAL_TYPE`, so by design there is no spoken on-ramp for these. Execution handlers registered in `proposals/execution/onboarding-handlers.ts`; `onboarding_team_member` always reports `handler_not_wired` (no persistence target — see that file's doc comment). |
 
 (`create_invoice_schedule` and `review_response_proposal` graduated to
-section A in taxonomy 1.2.0 — U2/U3 of the agent build wave.)
+section A in taxonomy 1.2.0 — U2/U3 of the agent build wave. `update_catalog_item`
+graduated to section A in taxonomy 1.7.0 — Tradesperson wave 1, Task 2: the
+"intentionally never voice-reachable" note that used to sit here was
+reconsidered by that plan's locked scope decisions — see the "Notes on the
+Tradesperson wave 1, Task 2 row" above for the resulting price-only
+contract-compatibility caveats.)
 
 ## C) Not completable from speech yet — no proposal type/handler (white-space)
 
@@ -272,11 +316,11 @@ not a gap. No new `JobStatus` value was introduced for this.
     { "intent": "update_brand_voice", "proposalType": "update_brand_voice", "actionClass": "manual" },
     { "intent": "schedule_inspection", "proposalType": "create_appointment", "actionClass": "capture" },
     { "intent": "log_permit", "proposalType": "add_note", "actionClass": "capture" },
-    { "intent": "log_warranty_claim", "proposalType": "create_job", "actionClass": "capture" }
+    { "intent": "log_warranty_claim", "proposalType": "create_job", "actionClass": "capture" },
+    { "intent": "update_catalog_item", "proposalType": "update_catalog_item", "actionClass": "capture" }
   ],
   "handlerNoOnramp": [
     "create_booking",
-    "update_catalog_item",
     "adopt_entity_alias",
     "onboarding_tenant_settings",
     "onboarding_service_category",

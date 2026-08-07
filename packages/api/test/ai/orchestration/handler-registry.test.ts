@@ -81,6 +81,9 @@ const EXPECTED_PROPOSAL_TYPES: ProposalType[] = [
   'batch_invoice',
   'create_invoice_schedule',
   'issue_invoice',
+  // Tradesperson wave 1, Task 2 (2026-08-07 plan) — update_catalog_item's
+  // voice on-ramp (WS20's pre-existing proposal type + execution handler).
+  'update_catalog_item',
 ];
 
 describe('ai/orchestration/handler-registry — buildTaskHandlers', () => {

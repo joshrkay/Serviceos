@@ -114,6 +114,10 @@ export const INTENT_TO_PROPOSAL_TYPE: Partial<Record<Exclude<IntentType, 'unknow
   schedule_inspection: 'create_appointment',
   log_permit: 'add_note',
   log_warranty_claim: 'create_job',
+  // Tradesperson wave 1, Task 2 — WS20 type + handler pre-exist; this adds
+  // the voice on-ramp. NOT S1-allowed (operator-only): see
+  // proposals/surface.ts S1_ALLOWED_PROPOSAL_TYPES and its contract test.
+  update_catalog_item: 'update_catalog_item',
 };
 
 /**
