@@ -344,6 +344,30 @@ const ROWS: Row[] = [
     execute: (p) => new CreateAppointmentExecutionHandler().execute(p, execContext()),
   },
   {
+    // Tradesperson wave 1 (2026-08-07 plan) alias — schedule_inspection maps
+    // to 'create_appointment' (voice-intent-map.ts), so dispatch here is
+    // byte-identical to the create_appointment row above: the SAME
+    // CreateAppointmentAITaskHandler / CreateAppointmentExecutionHandler
+    // pair. Only the classifier's extraction differs (inspectionType, an
+    // "Inspection — " summary prefix), which this drift test cannot observe
+    // — canned gateway JSON stands in for the LLM either way.
+    intent: 'schedule_inspection',
+    mode: 'resolves',
+    note: 'alias of create_appointment — resolved timezone + a dateTimePhrase resolves the slot ungated; canned jobId skips the auto-open-a-job path entirely',
+    draft: () =>
+      draft(
+        { gateway: mockGateway(JSON.stringify({
+          dateTimePhrase: 'tomorrow at 2pm',
+          jobId: JOB_ID,
+          summary: 'Inspection — rough-in',
+          confidence_score: 0.9,
+        })) },
+        'create_appointment',
+        ctx({ timezone: TIMEZONE, now: NOW, existingEntities: { customerId: CUSTOMER_ID } }),
+      ),
+    execute: (p) => new CreateAppointmentExecutionHandler().execute(p, execContext()),
+  },
+  {
     intent: 'update_invoice',
     mode: 'resolves',
     note: 'invoiceReference is a UUID the wired invoiceRepo confirms → verify-or-gate lifts the gate; UpdateInvoiceExecutionHandler applies the edit (unit-bearing) against a seeded draft invoice',
@@ -471,6 +495,25 @@ const ROWS: Row[] = [
     execute: (p) => new CreateJobExecutionHandler().execute(p, execContext()),
   },
   {
+    // Tradesperson wave 1 (2026-08-07 plan) alias — log_warranty_claim maps
+    // to 'create_job' (voice-intent-map.ts), so dispatch here is
+    // byte-identical to the create_job row above: the SAME
+    // CreateJobVoiceTaskHandler / CreateJobExecutionHandler pair. Only the
+    // classifier's extraction differs (a "Warranty — " summary prefix,
+    // problemDescription carrying the failure), which this drift test
+    // cannot observe — no LLM is called for this row either way.
+    intent: 'log_warranty_claim',
+    mode: 'resolves',
+    note: 'alias of create_job — resolved customerId + a title drafts ungated; dep-less CreateJobExecutionHandler synthetic-succeeds',
+    draft: () =>
+      draft(
+        { gateway: NOOP_GATEWAY },
+        'create_job',
+        ctx({ existingEntities: { customerId: CUSTOMER_ID, jobTitle: 'Warranty — water heater failure' } }),
+      ),
+    execute: (p) => new CreateJobExecutionHandler().execute(p, execContext()),
+  },
+  {
     intent: 'update_job',
     mode: 'resolves',
     note: 'a UUID jobId the wired jobRepo confirms lifts resolveJobIdGate; dep-less UpdateJobExecutionHandler refuses on wiring, not validation (handler_not_wired:jobRepo)',
@@ -536,6 +579,31 @@ const ROWS: Row[] = [
             jobReference: 'the Henderson job',
             noteTargetKind: 'job',
             noteBody: 'Called ahead, no answer.',
+          },
+        }),
+      ),
+    execute: (p) => new AddNoteExecutionHandler(undefined, stubAuditRepo).execute(p, execContext()),
+  },
+  {
+    // Tradesperson wave 1 (2026-08-07 plan) alias — log_permit maps to
+    // 'add_note' (voice-intent-map.ts), so dispatch here is byte-identical
+    // to the add_note row above: the SAME AddNoteTaskHandler /
+    // AddNoteExecutionHandler pair. Only the classifier's extraction
+    // differs (permitNumber, a "PERMIT: " note-body prefix), which this
+    // drift test cannot observe — no LLM is called for this row either way.
+    intent: 'log_permit',
+    mode: 'resolves',
+    note: 'alias of add_note — a resolver-verified jobId lands as targetId ungated; dep-less AddNoteExecutionHandler synthetic-succeeds',
+    draft: () =>
+      draft(
+        { gateway: NOOP_GATEWAY },
+        'add_note',
+        ctx({
+          existingEntities: {
+            jobId: JOB_ID,
+            jobReference: 'the Patel job',
+            noteTargetKind: 'job',
+            noteBody: 'PERMIT: 2024-1187 approved',
           },
         }),
       ),

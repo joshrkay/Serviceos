@@ -108,6 +108,12 @@ export const INTENT_TO_PROPOSAL_TYPE: Partial<Record<Exclude<IntentType, 'unknow
   // tap-only: the payload has no field capable of expressing
   // `brand_voice_locked` (see contracts/brand-voice.ts).
   update_brand_voice: 'update_brand_voice',
+  // Tradesperson wave 1 — alias intents onto existing proposal types.
+  // Drafting + execution handlers are keyed by PROPOSAL type, so these
+  // inherit the create_appointment / add_note / create_job legs unchanged.
+  schedule_inspection: 'create_appointment',
+  log_permit: 'add_note',
+  log_warranty_claim: 'create_job',
 };
 
 /**

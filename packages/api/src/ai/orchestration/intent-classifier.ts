@@ -55,6 +55,11 @@ export type IntentType =
   | 'log_time_entry'
   | 'notify_delay'
   | 'request_feedback'
+  // Tradesperson wave 1 (2026-08-07 plan) — alias intents. Each rides an
+  // EXISTING proposal type + handler; only classification + extraction differ.
+  | 'schedule_inspection'
+  | 'log_permit'
+  | 'log_warranty_claim'
   // Taxonomy 1.2.0 (agent wave, Track A) — three proposal-driving on-ramps:
   //   create_invoice_schedule    — U2: milestone/progress billing plan for a
   //                                job; the verbatim milestone sentence rides
@@ -206,6 +211,9 @@ export const SUPPORTED_INTENTS: readonly IntentType[] = [
   'log_time_entry',
   'notify_delay',
   'request_feedback',
+  'schedule_inspection',
+  'log_permit',
+  'log_warranty_claim',
   'create_invoice_schedule',
   'respond_to_review',
   'create_standing_instruction',
@@ -972,6 +980,27 @@ Supported intents (return exactly ONE):
                            Examples: "Send a feedback request for the Johnson job"
                                      "Ask Sarah to leave a review"
                                      "Request feedback on the completed Miller work"
+- "schedule_inspection"  — owner/technician books a permit/code inspection
+                           visit on a job. Same extraction as
+                           create_appointment (customerReference,
+                           jobReference, requestedDate, requestedTime) plus
+                           inspectionType (rough-in/final/other). Summary
+                           must be prefixed "Inspection — ".
+                           Examples: "Schedule the rough-in inspection for Thursday"
+                                     "Book the final inspection on the Patel job Friday morning"
+- "log_permit"           — owner/technician records a permit number/status
+                           against a job. Maps to an add_note whose note text
+                           MUST begin "PERMIT: " followed by the permit number
+                           and any status the speaker gave. Extract
+                           jobReference and permitNumber.
+                           Examples: "Log permit 2024-1187 on the Patel job"
+                                     "Note the electrical permit was approved for the Hendersons"
+- "log_warranty_claim"   — a warranty callback on past work. Maps to
+                           create_job with summary prefixed "Warranty — " and
+                           problemDescription carrying what failed. Extract
+                           customerReference and the failure description.
+                           Examples: "Log a warranty callback for the Hendersons' water heater"
+                                     "The Garcia compressor we installed failed — warranty job"
 - "create_invoice_schedule" — user wants to set up a MILESTONE / PROGRESS
                            billing plan for a job: a deposit up front and the
                            rest later, or a percentage split across stages.

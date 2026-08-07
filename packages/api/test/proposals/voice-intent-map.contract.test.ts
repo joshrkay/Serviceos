@@ -86,8 +86,12 @@ describe('voice intent → proposal type: exactly one map', () => {
     // The security boundary is the ALLOWLIST, not this map: the phone path
     // gates the mapped type before building a payload, so an intent that
     // gains a mapping can only become reachable if its type is allowlisted.
-    // These five are the entire caller-reachable set, and adding intents here
-    // must never change that.
+    // Tradesperson wave 1 (2026-08-07 plan) added two INTENT NAMES to this
+    // set — schedule_inspection and log_warranty_claim — but zero new
+    // PROPOSAL TYPES: both alias onto create_appointment / create_job, which
+    // were already S1-allowed and already reachable via their own intents.
+    // The invariant this test guards (the reachable PROPOSAL TYPE set never
+    // grows without a matching S1_ALLOWED_PROPOSAL_TYPES edit) still holds.
     const s1Reachable = Object.entries(INTENT_TO_PROPOSAL_TYPE)
       .filter(([, proposalType]) => S1_ALLOWED_PROPOSAL_TYPES.has(proposalType!))
       .map(([intent]) => intent)
@@ -97,7 +101,9 @@ describe('voice intent → proposal type: exactly one map', () => {
       'create_customer',
       'create_job',
       'draft_estimate',
+      'log_warranty_claim',
       'reschedule_appointment',
+      'schedule_inspection',
     ]);
   });
 });

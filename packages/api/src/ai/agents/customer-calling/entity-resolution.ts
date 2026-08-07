@@ -70,6 +70,9 @@ const CUSTOMER_REF_INTENTS = new Set([
   'add_service_location',
   'mark_lead_lost',
   'confirm_appointment',
+  // Tradesperson wave 1 — aliases resolve the same refs as their targets.
+  'schedule_inspection',
+  'log_warranty_claim',
 ]);
 
 const INVOICE_DOC_INTENTS = new Set([
@@ -101,6 +104,9 @@ const JOB_REF_INTENTS = new Set([
   // contract, so an unresolved (or absent) reference still logs the expense
   // unlinked — resolution only ever ADDS the link, never gates the capture.
   'log_expense',
+  // Tradesperson wave 1 — aliases resolve the same refs as their targets.
+  'log_permit',
+  'schedule_inspection',
 ]);
 
 const SCHEDULING_CREATE_INTENTS = new Set(['create_appointment', 'create_booking']);

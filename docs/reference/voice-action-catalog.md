@@ -26,7 +26,7 @@ exist today.
 
 ## A) Speakable today — intent + proposal + execution handler all exist
 
-These 36 actions can be spoken, drafted as a proposal, approved, and executed.
+These 39 actions can be spoken, drafted as a proposal, approved, and executed.
 "Persistence proof" = a Docker-gated integration test that proves the row +
 audit event actually land in Postgres (vs. mocked-DB-only coverage, which cannot
 catch schema drift or a missing dependency).
@@ -69,6 +69,9 @@ catch schema drift or a missing dependency).
 | "Respond to that 1-star review" | `respond_to_review` | `review_response_proposal` | comms | unit |
 | "From now on always add a $79 diagnostic fee to AC calls" | `create_standing_instruction` | `create_standing_instruction` | capture | unit (table: integration via UB-A1 `integration/standing-instructions.test.ts`) |
 | "Set my brand voice: friendly, plain-spoken, no slang, always sign off 'Thanks — Bob's HVAC'" | `update_brand_voice` | `update_brand_voice` | manual | integration (`integration/update-brand-voice-voice-execution.test.ts`) |
+| "Schedule the rough-in inspection for Thursday" | `schedule_inspection` | `create_appointment` | capture | unit |
+| "Log permit 2024-1187 on the Patel job" | `log_permit` | `add_note` | capture | unit |
+| "Log a warranty callback for the Hendersons' water heater" | `log_warranty_claim` | `create_job` | capture | unit |
 
 > **Voice technician resolution (U1, taxonomy 1.2.0):** `reassign_appointment`,
 > `add_crew_member`, and `remove_crew_member` now resolve the spoken technician
@@ -266,7 +269,10 @@ not a gap. No new `JobStatus` value was introduced for this.
     { "intent": "create_invoice_schedule", "proposalType": "create_invoice_schedule", "actionClass": "capture" },
     { "intent": "respond_to_review", "proposalType": "review_response_proposal", "actionClass": "comms" },
     { "intent": "create_standing_instruction", "proposalType": "create_standing_instruction", "actionClass": "capture" },
-    { "intent": "update_brand_voice", "proposalType": "update_brand_voice", "actionClass": "manual" }
+    { "intent": "update_brand_voice", "proposalType": "update_brand_voice", "actionClass": "manual" },
+    { "intent": "schedule_inspection", "proposalType": "create_appointment", "actionClass": "capture" },
+    { "intent": "log_permit", "proposalType": "add_note", "actionClass": "capture" },
+    { "intent": "log_warranty_claim", "proposalType": "create_job", "actionClass": "capture" }
   ],
   "handlerNoOnramp": [
     "create_booking",
