@@ -105,9 +105,31 @@ const JOB_REF_INTENTS = new Set([
   // unlinked — resolution only ever ADDS the link, never gates the capture.
   'log_expense',
   // Tradesperson wave 1 — aliases resolve the same refs as their targets.
+  // schedule_inspection is ALSO in JOB_TITLE_FALLBACK_EXCLUDED_INTENTS below
+  // — its jobTitle carries descriptive inspection text, never an
+  // existing-job name — but stays a JOB_REF_INTENTS member so an EXPLICIT
+  // spoken jobReference ("on the Patel job") still resolves to a jobId.
   'log_permit',
   'schedule_inspection',
 ]);
+
+/**
+ * Spec-review fix (2026-08-07) — intents whose jobTitle must NEVER be used
+ * as the jobReference fallback below, even though they ARE JOB_REF_INTENTS
+ * members (unlike create_job/create_booking, which get this for free by
+ * never joining JOB_REF_INTENTS at all — see the comment above the fallback).
+ * schedule_inspection needs BOTH behaviors at once: an explicit "on the
+ * Patel job" must still resolve (JOB_REF_INTENTS membership, OR-branch
+ * below), but its jobTitle carries the inspection's own descriptive text
+ * ("Inspection — rough-in", intent-classifier.ts), not a job name — using it
+ * as a lookup key would search for a job that was never meant to exist by
+ * that name, producing a bogus not_found. Because
+ * requiresExistingEntity('schedule_inspection') is TRUE (e255bbc0 — a NAMED
+ * job must actually exist), that bogus not_found would incorrectly escalate
+ * an inspection that never named a job at all, instead of proceeding the
+ * same way create_appointment does with no job link.
+ */
+const JOB_TITLE_FALLBACK_EXCLUDED_INTENTS = new Set(['schedule_inspection']);
 
 const SCHEDULING_CREATE_INTENTS = new Set(['create_appointment', 'create_booking']);
 
@@ -343,11 +365,18 @@ export function planVoiceEntityLookups(
   // classified with entities.jobTitle="QA Matrix job" and no jobReference at
   // all, silently dropping the job link and failing execution downstream).
   // create_job/create_booking are deliberately excluded from JOB_REF_INTENTS
-  // /SCHEDULING_CREATE_INTENTS's fallback below, so this can never misread an
-  // intentional new-job title as a reference to an existing job.
+  // /SCHEDULING_CREATE_INTENTS's fallback below (they never join
+  // JOB_REF_INTENTS at all), so this can never misread an intentional
+  // new-job title as a reference to an existing job. schedule_inspection
+  // needs the opposite shape — it IS a JOB_REF_INTENTS member (an explicit
+  // "on the Patel job" must still resolve) — so it is excluded from this
+  // fallback by name via JOB_TITLE_FALLBACK_EXCLUDED_INTENTS instead: its
+  // jobTitle carries descriptive inspection text, never a job name.
   const jobReference =
     trimReference(entities.jobReference) ??
-    (JOB_REF_INTENTS.has(intent) ? trimReference(entities.jobTitle) : undefined);
+    (JOB_REF_INTENTS.has(intent) && !JOB_TITLE_FALLBACK_EXCLUDED_INTENTS.has(intent)
+      ? trimReference(entities.jobTitle)
+      : undefined);
   if (jobReference) {
     const documentKind = documentKindForReference(intent, jobReference);
     if (documentKind) {

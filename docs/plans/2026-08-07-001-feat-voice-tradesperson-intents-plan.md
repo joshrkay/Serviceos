@@ -17,6 +17,7 @@
 - `en_route` parity on live-call/in-app surfaces is OUT OF SCOPE (requires FSM changes in two adapters; separate plan). The three cheap parity fixes (silent-skip clarifications, `callback` handler guard, assistant-chat wiring for six dropped intents) are Phase 8.
 - Voice approval/edit surface policy is NOT touched (RV-071 security posture).
 - Alias intents carry no summary-prefix guarantees; distinctive wording must live in fields the target handler actually reads (spec-review finding, 2026-08-07).
+- Alias intents must mirror or deliberately diverge from their target's entity-resolution memberships — divergences must be pinned by test with rationale (schedule_inspection: requires existing job, pinned in e255bbc0); descriptive jobTitle is never a lookup key.
 
 **Phases (each independently shippable, in order):**
 1. Alias intents + `update_catalog_item` intent (pure wiring — ships in an hour)

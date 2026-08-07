@@ -270,6 +270,27 @@ describe('planVoiceEntityLookups — intent-conditioned operator references', ()
     ]);
   });
 
+  // Spec-review fix (2026-08-07) — schedule_inspection's jobTitle carries
+  // DESCRIPTIVE text ("Inspection — rough-in"), never an existing-job name.
+  // Before this fix, the JOB_REF_INTENTS fallback (jobReference ?? jobTitle,
+  // see the comment above the fallback in entity-resolution.ts) misread it
+  // as a lookup key, which would search for a job literally titled
+  // "Inspection — rough-in" — a job that was never meant to exist by that
+  // name. Because requiresExistingEntity('schedule_inspection') is TRUE
+  // (e255bbc0, deliberate — an inspection needs its named job to actually
+  // exist), that bogus not_found would wrongly escalate an inspection that
+  // never named a job at all. jobTitle must never be used as a lookup key
+  // for this intent; only an explicit jobReference may.
+  it('does NOT plan a job lookup from jobTitle when no jobReference is spoken', () => {
+    const lookups = planVoiceEntityLookups('schedule_inspection', {
+      customerName: 'Patel',
+      dateTimeDescription: 'Thursday',
+      jobTitle: 'Inspection — rough-in',
+      // no jobReference
+    });
+    expect(lookups).toEqual([{ kind: 'customer', reference: 'Patel', refKey: 'customerId' }]);
+  });
+
   // log_permit joined JOB_REF_INTENTS only — a permit attaches to a job, not
   // directly to a customer name.
   it('plans a job lookup for log_permit', () => {
@@ -387,6 +408,90 @@ describe('resolveSchedulingEntities — SCH-03 job fallback chain', () => {
       { appointmentReference: 'that job' },
       // no stickyJobId
     );
+    expect(res.status).toBe('not_found');
+  });
+});
+
+// Spec-review fix (2026-08-07) — schedule_inspection mirrors create_appointment
+// on the entity-resolution axis this plan didn't originally cover: jobTitle
+// is descriptive text, never a job-lookup key. requiresExistingEntity stays
+// TRUE for this intent (e255bbc0, deliberate — a NAMED job must actually
+// exist), so the fix is narrower than "never require an existing job": it is
+// "never attempt a job lookup the caller never asked for."
+describe('resolveSchedulingEntities — schedule_inspection descriptive jobTitle', () => {
+  it('proceeds with no job link when no job is named — the resolver is never asked to look up a job', async () => {
+    const resolver: EntityResolver = {
+      resolve: vi.fn(async (input): Promise<EntityResolverResult> => {
+        if (input.kind === 'job') {
+          throw new Error('must never look up a job keyed on descriptive jobTitle text');
+        }
+        return {
+          kind: 'resolved',
+          candidate: { id: 'cust-1', kind: 'customer', label: 'Patel', score: 1 },
+        };
+      }),
+    };
+    const res = await resolveSchedulingEntities(resolver, 'tenant-1', 'schedule_inspection', {
+      customerName: 'Patel',
+      dateTimeDescription: 'Thursday',
+      jobTitle: 'Inspection — rough-in',
+      // no jobReference
+    });
+    // Not a not_found escalation (VOX-02/inapp-adapter.ts) — the resolver
+    // was never asked about a job at all, so there is nothing to escalate.
+    expect(res.status).toBe('resolved');
+    expect(res.refs.customerId).toBe('cust-1');
+    expect(res.refs.jobId).toBeUndefined();
+  });
+
+  it('still resolves jobId when an existing job is explicitly named ("the Patel job")', async () => {
+    const resolver: EntityResolver = {
+      resolve: vi.fn(async (input): Promise<EntityResolverResult> => {
+        if (input.kind === 'job' && input.reference === 'the Patel job') {
+          return {
+            kind: 'resolved',
+            candidate: { id: 'job-77', kind: 'job', label: 'Patel Repair', score: 1 },
+          };
+        }
+        if (input.kind === 'customer') {
+          return {
+            kind: 'resolved',
+            candidate: { id: 'cust-1', kind: 'customer', label: 'Patel', score: 1 },
+          };
+        }
+        return { kind: 'not_found', reference: input.reference };
+      }),
+    };
+    const res = await resolveSchedulingEntities(resolver, 'tenant-1', 'schedule_inspection', {
+      customerName: 'Patel',
+      jobReference: 'the Patel job',
+      jobTitle: 'Inspection — rough-in',
+      dateTimeDescription: 'Thursday',
+    });
+    expect(res.status).toBe('resolved');
+    expect(res.refs.jobId).toBe('job-77');
+    expect(res.refs.customerId).toBe('cust-1');
+  });
+
+  it('a NAMED job that does not exist still escalates (requiresExistingEntity stays TRUE)', async () => {
+    const resolver: EntityResolver = {
+      resolve: vi.fn(async (input): Promise<EntityResolverResult> => {
+        if (input.kind === 'customer') {
+          return {
+            kind: 'resolved',
+            candidate: { id: 'cust-1', kind: 'customer', label: 'Patel', score: 1 },
+          };
+        }
+        return { kind: 'not_found', reference: input.reference };
+      }),
+    };
+    const res = await resolveSchedulingEntities(resolver, 'tenant-1', 'schedule_inspection', {
+      customerName: 'Patel',
+      jobReference: 'the nonexistent job',
+      jobTitle: 'Inspection — rough-in',
+    });
+    // An EXPLICIT reference that fails to resolve is a real not_found — the
+    // fallback exclusion only covers jobTitle, never a spoken jobReference.
     expect(res.status).toBe('not_found');
   });
 });
