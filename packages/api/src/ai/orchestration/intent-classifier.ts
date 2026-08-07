@@ -982,23 +982,27 @@ Supported intents (return exactly ONE):
                                      "Request feedback on the completed Miller work"
 - "schedule_inspection"  — owner/technician books a permit/code inspection
                            visit on a job. Same extraction as
-                           create_appointment (customerReference,
-                           jobReference, requestedDate, requestedTime) plus
-                           inspectionType (rough-in/final/other). Summary
-                           must be prefixed "Inspection — ".
+                           create_appointment (customerName, jobReference,
+                           dateTimeDescription). Put "Inspection — " plus
+                           the inspection type (rough-in/final/other) into
+                           jobTitle — e.g. jobTitle: "Inspection — rough-in".
+                           No separate inspectionType field exists.
                            Examples: "Schedule the rough-in inspection for Thursday"
                                      "Book the final inspection on the Patel job Friday morning"
 - "log_permit"           — owner/technician records a permit number/status
-                           against a job. Maps to an add_note whose note text
+                           against a job. Maps to an add_note whose noteBody
                            MUST begin "PERMIT: " followed by the permit number
-                           and any status the speaker gave. Extract
-                           jobReference and permitNumber.
+                           and any status the speaker gave — put that full
+                           "PERMIT: ..." text in noteBody. Extract jobReference.
+                           No separate permitNumber field exists.
                            Examples: "Log permit 2024-1187 on the Patel job"
                                      "Note the electrical permit was approved for the Hendersons"
 - "log_warranty_claim"   — a warranty callback on past work. Maps to
-                           create_job with summary prefixed "Warranty — " and
-                           problemDescription carrying what failed. Extract
-                           customerReference and the failure description.
+                           create_job. Put "Warranty — " plus the failure
+                           description into jobTitle (e.g. jobTitle:
+                           "Warranty — water heater failed"). Extract
+                           customerName. No separate problemDescription
+                           field exists.
                            Examples: "Log a warranty callback for the Hendersons' water heater"
                                      "The Garcia compressor we installed failed — warranty job"
 - "create_invoice_schedule" — user wants to set up a MILESTONE / PROGRESS
