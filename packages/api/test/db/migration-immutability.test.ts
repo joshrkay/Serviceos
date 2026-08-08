@@ -483,6 +483,10 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   // original bids (create_change_order proposal) — deliberate snapshot
   // update for a new migration.
   ['271_estimates_change_order_flag', '3ce6825664e4450cec463a8434906bd427ea84ea269d7d4df3db27f6d43498e3'],
+  // Tradesperson wave 1, Task 8 (2026-08-07 plan): new material_items table
+  // (voice-captured materials/shopping list, add_material proposal
+  // substrate) — deliberate snapshot update for a new migration.
+  ['272_create_material_items', '2d754dc8e092f3a77bf54fb4658d26e5a1ee8ca45560c104714d602e78f1c14e'],
 ];
 
 function hashMigration(value: string): string {
