@@ -131,18 +131,18 @@ describe('send_customer_message proposal type', () => {
   describe('wired against a stubbed CustomerMessenger', () => {
     it('reports isFullyWired() true once a messenger is supplied', () => {
       const messenger: CustomerMessenger = {
-        sendCustomMessage: async () => ({ dispatched: true, dispatchId: 'd1' }),
+        sendCustomMessage: async () => ({ dispatchId: 'd1' }),
       };
       const handler = new SendCustomerMessageExecutionHandler(messenger);
       expect(handler.isFullyWired()).toBe(true);
     });
 
-    it('sends through the messenger, passing tenantId/customerId/channel/body/actorId, and reports success', async () => {
+    it('sends through the messenger, passing tenantId/customerId/channel/body/actorId/idempotencyKey, and reports success', async () => {
       let received: CustomerMessengerInput | undefined;
       const messenger: CustomerMessenger = {
         sendCustomMessage: async (input) => {
           received = input;
-          return { dispatched: true, dispatchId: 'd1' };
+          return { dispatchId: 'd1' };
         },
       };
       const auditRepo = new InMemoryAuditRepository();
@@ -164,6 +164,10 @@ describe('send_customer_message proposal type', () => {
         channel: 'sms',
         body: 'Your part arrived — we can come Thursday morning.',
         actorId: 'u-1',
+        // Provider-level dedup key (quality-review fix) — closes the
+        // crash-between-send-and-marker double-text window. Mirrors
+        // TwilioDelayNotificationService's idempotencyKey pass-through.
+        idempotencyKey: 'send_customer_message:prop-1:sms',
       });
 
       const events = auditRepo.getAll();
@@ -178,12 +182,30 @@ describe('send_customer_message proposal type', () => {
       });
     });
 
+    it('derives a channel-scoped idempotencyKey (email proposal → :email suffix, not :sms)', async () => {
+      let received: CustomerMessengerInput | undefined;
+      const messenger: CustomerMessenger = {
+        sendCustomMessage: async (input) => {
+          received = input;
+          return { dispatchId: 'd3' };
+        },
+      };
+      const handler = new SendCustomerMessageExecutionHandler(messenger);
+
+      await handler.execute(
+        makeProposal({ customerId: CUSTOMER_ID, channel: 'email', body: 'Inspection passed.' }),
+        { tenantId: TENANT_ID, executedBy: 'u-1' },
+      );
+
+      expect(received?.idempotencyKey).toBe('send_customer_message:prop-1:email');
+    });
+
     it('threads an optional subject through when present (email)', async () => {
       let received: CustomerMessengerInput | undefined;
       const messenger: CustomerMessenger = {
         sendCustomMessage: async (input) => {
           received = input;
-          return { dispatched: true, dispatchId: 'd2' };
+          return { dispatchId: 'd2' };
         },
       };
       const handler = new SendCustomerMessageExecutionHandler(messenger);
@@ -223,7 +245,7 @@ describe('send_customer_message proposal type', () => {
       const messenger: CustomerMessenger = {
         sendCustomMessage: async () => {
           called = true;
-          return { dispatched: true };
+          return {};
         },
       };
       const handler = new SendCustomerMessageExecutionHandler(messenger);

@@ -176,4 +176,94 @@ describe('SendCustomerMessageTaskHandler', () => {
     const payload = proposal.payload as Record<string, unknown>;
     expect(payload.body).toBe('we are finished, the gate is locked');
   });
+
+  // Quality-review fix — an empty/whitespace-only rewrite is not real
+  // content; falls back to the verbatim spoken text (never a blank body).
+  it('an empty/whitespace-only rewrite result falls back to the verbatim spoken text', async () => {
+    const gateway = gatewayReturning('   ');
+    const { proposal } = await new SendCustomerMessageTaskHandler(gateway).handle(
+      ctx({
+        customerId: CUSTOMER_ID,
+        existingEntities: { customerMessageBody: 'the part arrived' },
+      }),
+    );
+
+    const payload = proposal.payload as Record<string, unknown>;
+    expect(payload.body).toBe('the part arrived');
+  });
+
+  // Quality-review fix — a model that wraps its reply in quotes should not
+  // leak the literal quote characters into the customer-facing text.
+  it('wrapping quotes returned by the model are stripped', async () => {
+    const gateway = gatewayReturning('"Hi there"');
+    const { proposal } = await new SendCustomerMessageTaskHandler(gateway).handle(
+      ctx({
+        customerId: CUSTOMER_ID,
+        existingEntities: { customerMessageBody: 'say hi' },
+      }),
+    );
+
+    const payload = proposal.payload as Record<string, unknown>;
+    expect(payload.body).toBe('Hi there');
+  });
+
+  // Quality-review fix (Important #3) — draft-time clamp. The approval card
+  // must always show exactly what will send: an LLM rewrite that blows past
+  // the contract's 1000-char cap is discarded in favor of the spoken text
+  // (never silently truncated text the operator never reviewed), and
+  // whichever text is finally chosen is truncated to 997 chars + "…" if it
+  // STILL exceeds the cap.
+  describe('draft-time 1000-char clamp (WYSIWYG — never draft what the contract will reject)', () => {
+    it('an LLM rewrite exceeding 1000 characters is discarded in favor of the (short) spoken text', async () => {
+      const gateway = gatewayReturning('x'.repeat(1001));
+      const { proposal } = await new SendCustomerMessageTaskHandler(gateway).handle(
+        ctx({
+          customerId: CUSTOMER_ID,
+          existingEntities: { customerMessageBody: 'the part arrived' },
+        }),
+      );
+
+      const payload = proposal.payload as Record<string, unknown>;
+      expect(payload.body).toBe('the part arrived');
+    });
+
+    it('a spoken body over 1000 characters is truncated to 997 chars + "…" when no gateway is wired', async () => {
+      const longSpoken = 'x'.repeat(1005);
+      const { proposal } = await new SendCustomerMessageTaskHandler(undefined).handle(
+        ctx({ customerId: CUSTOMER_ID, existingEntities: { customerMessageBody: longSpoken } }),
+      );
+
+      const payload = proposal.payload as Record<string, unknown>;
+      const body = payload.body as string;
+      // 997 characters + the ellipsis = 998 total (well under the 1000 cap).
+      expect(body.length).toBe(998);
+      expect(body.endsWith('…')).toBe(true);
+      expect(body).toBe(`${'x'.repeat(997)}…`);
+    });
+
+    it('an over-long rewrite AND an over-long spoken fallback still clamps to 997 chars + "…"', async () => {
+      const gateway = gatewayReturning('y'.repeat(1200));
+      const longSpoken = 'x'.repeat(1100);
+      const { proposal } = await new SendCustomerMessageTaskHandler(gateway).handle(
+        ctx({ customerId: CUSTOMER_ID, existingEntities: { customerMessageBody: longSpoken } }),
+      );
+
+      const payload = proposal.payload as Record<string, unknown>;
+      const body = payload.body as string;
+      expect(body).toBe(`${'x'.repeat(997)}…`);
+    });
+
+    it('a rewrite at exactly 1000 characters is kept (boundary, not discarded)', async () => {
+      const gateway = gatewayReturning('z'.repeat(1000));
+      const { proposal } = await new SendCustomerMessageTaskHandler(gateway).handle(
+        ctx({
+          customerId: CUSTOMER_ID,
+          existingEntities: { customerMessageBody: 'the part arrived' },
+        }),
+      );
+
+      const payload = proposal.payload as Record<string, unknown>;
+      expect(payload.body).toBe('z'.repeat(1000));
+    });
+  });
 });

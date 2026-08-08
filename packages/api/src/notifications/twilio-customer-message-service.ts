@@ -8,6 +8,27 @@ import type {
 } from '../proposals/execution/send-customer-message-handler';
 
 /**
+ * Quality-review fix — the owner approves PLAIN TEXT on the review card
+ * (`body` is a Zod string, never HTML). Escaping entities BEFORE the
+ * newline→`<br>` replace below means the customer's email client can never
+ * render a live link, tag, or markup the card never rendered — e.g. a
+ * spoken "less than 3 minutes away" or a pasted-sounding "<STOP>" renders
+ * as literal text, not a stray tag. Deliberately scoped to THIS service
+ * only: `TwilioDelayNotificationService`'s sibling email path
+ * (`notifications/twilio-delay-notification-service.ts`) is untouched —
+ * its `message` is built from OPERATOR-typed template strings, settled
+ * precedent, never raw customer- or transcript-sourced text.
+ */
+function escapeHtml(value: string): string {
+  return value
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+/**
  * Real implementation of `CustomerMessenger` (Tradesperson wave 1, Task 5).
  *
  * Sends a free-form, owner-approved customer message through the SAME
@@ -68,6 +89,7 @@ export class TwilioCustomerMessageService implements CustomerMessenger {
         to: customer.primaryPhone,
         body: input.body,
         tenantId: input.tenantId,
+        idempotencyKey: input.idempotencyKey,
         recipientClass: 'customer',
         consent: { smsConsent: customer.smsConsent === true, customerId: customer.id },
       });
@@ -80,8 +102,9 @@ export class TwilioCustomerMessageService implements CustomerMessenger {
         provider: result.provider,
         providerMessageId: result.providerMessageId,
         status: 'sent',
+        idempotencyKey: input.idempotencyKey,
       });
-      return { dispatched: true, dispatchId: dispatch.id };
+      return { dispatchId: dispatch.id };
     }
 
     if (!customer.email) {
@@ -89,10 +112,15 @@ export class TwilioCustomerMessageService implements CustomerMessenger {
     }
     const result = await this.delivery.sendEmail({
       to: customer.email,
+      // The owner never sees this default on the review card (the contract
+      // has no spoken-subject extraction seam today — the taxonomy only
+      // captures customerMessageBody/customerMessageChannel); a future
+      // spoken-subject field is a possible follow-up, not this task's scope.
       subject: input.subject ?? 'A message from your service provider',
       text: input.body,
-      html: `<p>${input.body.replace(/\n/g, '<br>')}</p>`,
+      html: `<p>${escapeHtml(input.body).replace(/\n/g, '<br>')}</p>`,
       tenantId: input.tenantId,
+      idempotencyKey: input.idempotencyKey,
     });
     const dispatch = await this.dispatchRepo.create({
       tenantId: input.tenantId,
@@ -103,7 +131,8 @@ export class TwilioCustomerMessageService implements CustomerMessenger {
       provider: result.provider,
       providerMessageId: result.providerMessageId,
       status: 'sent',
+      idempotencyKey: input.idempotencyKey,
     });
-    return { dispatched: true, dispatchId: dispatch.id };
+    return { dispatchId: dispatch.id };
   }
 }

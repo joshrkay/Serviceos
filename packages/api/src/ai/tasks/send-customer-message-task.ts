@@ -37,14 +37,37 @@
  * content, falls back to the verbatim spoken text. This never fabricates
  * content beyond what the operator said, and never blocks the draft on an
  * LLM outage — the owner still gets a proposal to review either way.
+ *
+ * ── Draft-time clamp (quality-review fix) ─────────────────────────────────
+ *
+ * The contract (`proposals/contracts/send-customer-message.ts`) caps `body`
+ * at `SEND_CUSTOMER_MESSAGE_BODY_MAX_LENGTH` chars — without a matching
+ * draft-time clamp, a proposal could draft ungated (`missingFields` only
+ * checks presence, not length) and then fail Zod validation the first time
+ * anyone tries to approve or edit it, well after the owner already read and
+ * approved the card. Two rules, applied in order:
+ *   1. An LLM rewrite that EXCEEDS the cap is discarded in favor of the
+ *      spoken text — never silently truncated text the operator never
+ *      reviewed at drafting time.
+ *   2. Whichever text is finally chosen (rewritten or spoken) is truncated
+ *      to `SEND_CUSTOMER_MESSAGE_BODY_MAX_LENGTH - 3` characters plus "…"
+ *      if it STILL exceeds the cap — covers a long raw spoken transcript
+ *      with no LLM rewrite involved at all (no gateway wired, or the
+ *      rewrite itself fell back per rule 1).
+ * The approval card must always show exactly what will send — WYSIWYG
+ * beats a post-approval validation error.
  */
 import { createProposal, CreateProposalInput } from '../../proposals/proposal';
 import type { TaskHandler, TaskContext, TaskResult } from './task-handlers';
 import type { ExtractedEntities } from '../orchestration/intent-classifier';
 import type { LLMGateway } from '../gateway/gateway';
+import { SEND_CUSTOMER_MESSAGE_BODY_MAX_LENGTH } from '../../proposals/contracts/send-customer-message';
 
 const REWRITE_SYSTEM_PROMPT =
   "Rewrite the operator's spoken message as a short, polite customer message. Do not add promises, prices, or times the operator did not say.";
+
+/** Room for the trailing "…" when a clamped body is truncated. */
+const TRUNCATED_BODY_LENGTH = SEND_CUSTOMER_MESSAGE_BODY_MAX_LENGTH - 3;
 
 export class SendCustomerMessageTaskHandler implements TaskHandler {
   readonly taskType = 'send_customer_message' as const;
@@ -94,12 +117,36 @@ export class SendCustomerMessageTaskHandler implements TaskHandler {
   }
 
   /**
-   * Optional, degradable LLM cleanup pass — see class doc comment "The
-   * message body" above. No gateway wired, or any failure/empty result
-   * from the rewrite call, falls back to the verbatim spoken text.
+   * Resolves the final draft body: attempts the optional LLM rewrite, then
+   * applies the draft-time clamp (class doc comment "Draft-time clamp"
+   * above). Never fabricates, never blocks, never drafts a body the
+   * contract will reject on length.
    */
   private async resolveBody(spoken: string, tenantId?: string): Promise<string> {
-    if (!this.gateway) return spoken;
+    const rewritten = await this.rewrite(spoken, tenantId);
+    // Rule 1 — an over-cap rewrite is discarded in favor of the spoken
+    // text rather than kept (even truncated): the operator never reviewed
+    // the rewrite's tail, only spoke the original.
+    const chosen =
+      rewritten !== undefined && rewritten.length <= SEND_CUSTOMER_MESSAGE_BODY_MAX_LENGTH
+        ? rewritten
+        : spoken;
+    // Rule 2 — whichever text was chosen still gets a hard clamp: this is
+    // what catches a long spoken transcript with no rewrite involved.
+    return chosen.length > SEND_CUSTOMER_MESSAGE_BODY_MAX_LENGTH
+      ? `${chosen.slice(0, TRUNCATED_BODY_LENGTH)}…`
+      : chosen;
+  }
+
+  /**
+   * Optional, degradable LLM cleanup pass — see class doc comment "The
+   * message body" above. Returns `undefined` (never throws) when no
+   * gateway is wired, the call fails, or the result is empty after
+   * cleanup — `resolveBody` above is the only caller and treats
+   * `undefined` as "fall back to the spoken text."
+   */
+  private async rewrite(spoken: string, tenantId?: string): Promise<string | undefined> {
+    if (!this.gateway) return undefined;
     try {
       const response = await this.gateway.complete({
         taskType: this.taskType,
@@ -114,10 +161,10 @@ export class SendCustomerMessageTaskHandler implements TaskHandler {
       // Strip stray wrapping quotes/whitespace a model sometimes adds
       // (mirrors SuggestReplyTask).
       const cleaned = response.content.trim().replace(/^"(.*)"$/s, '$1').trim();
-      return cleaned.length > 0 ? cleaned : spoken;
+      return cleaned.length > 0 ? cleaned : undefined;
     } catch {
       // Degrade — never fabricate, never block the draft on an LLM outage.
-      return spoken;
+      return undefined;
     }
   }
 }

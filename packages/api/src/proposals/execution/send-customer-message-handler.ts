@@ -23,10 +23,25 @@ export interface CustomerMessengerInput {
   body: string;
   subject?: string;
   actorId: string;
+  /**
+   * Provider-level idempotency key — parity with
+   * `TwilioDelayNotificationService`'s `idempotencyKey` pass-through
+   * (`notifications/twilio-delay-notification-service.ts`). Derived below
+   * as `send_customer_message:<proposalId>:<channel>` so a crash between
+   * the provider accepting the send and this handler's own bookkeeping
+   * can't cause an at-least-once retry to double-text/double-email the
+   * customer.
+   */
+  idempotencyKey: string;
 }
 
 export interface CustomerMessengerResult {
-  dispatched: boolean;
+  /**
+   * Quality-review fix — `dispatched` was write-only dead weight: a
+   * `CustomerMessenger` implementation signals failure by THROWING (see the
+   * class doc comment), so a resolved result is always a successful send.
+   * Dropped rather than kept "for completeness" (repo dead-code rule).
+   */
   dispatchId?: string;
 }
 
@@ -93,6 +108,12 @@ export class SendCustomerMessageExecutionHandler implements ExecutionHandler {
     }
 
     try {
+      // Provider-level dedup key — see CustomerMessengerInput.idempotencyKey
+      // doc comment. Keyed on (proposalId, channel) rather than proposalId
+      // alone so a hypothetical future multi-channel send on ONE proposal
+      // (not possible today — the contract carries a single channel) would
+      // still dedupe per channel, not collide across them.
+      const idempotencyKey = `send_customer_message:${proposal.id}:${channel}`;
       const result = await this.messenger.sendCustomMessage({
         tenantId: context.tenantId,
         customerId,
@@ -100,6 +121,7 @@ export class SendCustomerMessageExecutionHandler implements ExecutionHandler {
         body,
         ...(subject ? { subject } : {}),
         actorId: context.executedBy,
+        idempotencyKey,
       });
 
       if (this.auditRepo) {

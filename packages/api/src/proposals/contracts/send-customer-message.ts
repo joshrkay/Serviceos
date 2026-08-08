@@ -30,18 +30,32 @@ import { z } from 'zod';
  * branch) — it is never surfaced to the customer, so rejecting it here
  * would be a needless extra failure mode with no user-facing benefit.
  *
- * `body` is capped at 1000 characters — generous for both SMS (well beyond
- * a single segment, but this is a single free-form message, not a
- * multi-part campaign) and a short email — and must be non-empty after
- * trimming (a whitespace-only "message" is not real content).
+ * `body` is capped at `SEND_CUSTOMER_MESSAGE_BODY_MAX_LENGTH` (1000) —
+ * generous for both SMS (well beyond a single segment, but this is a single
+ * free-form message, not a multi-part campaign) and a short email — and
+ * must be non-empty after trimming (a whitespace-only "message" is not
+ * real content).
+ *
+ * Quality-review fix — `SendCustomerMessageTaskHandler` enforces the SAME
+ * cap at DRAFT time (importing this constant, never a re-declared magic
+ * number), so a proposal can never pass drafting only to fail this exact
+ * Zod check at approval: an LLM rewrite exceeding the cap is discarded in
+ * favor of the (already within-cap, spoken) text, and whichever text is
+ * finally chosen is truncated to `SEND_CUSTOMER_MESSAGE_BODY_MAX_LENGTH - 3`
+ * characters plus "…" if it STILL exceeds the cap (covers a raw spoken
+ * transcript alone running long, with no LLM rewrite involved at all). The
+ * approval card must always show exactly what will send — WYSIWYG beats a
+ * post-approval validation error.
  */
 export const SEND_CUSTOMER_MESSAGE_CHANNELS = ['sms', 'email'] as const;
 export type SendCustomerMessageChannel = (typeof SEND_CUSTOMER_MESSAGE_CHANNELS)[number];
 
+export const SEND_CUSTOMER_MESSAGE_BODY_MAX_LENGTH = 1000;
+
 export const sendCustomerMessagePayloadSchema = z.object({
   customerId: z.string().uuid(),
   channel: z.enum(SEND_CUSTOMER_MESSAGE_CHANNELS),
-  body: z.string().trim().min(1).max(1000),
+  body: z.string().trim().min(1).max(SEND_CUSTOMER_MESSAGE_BODY_MAX_LENGTH),
   subject: z.string().trim().min(1).max(200).optional(),
 });
 
