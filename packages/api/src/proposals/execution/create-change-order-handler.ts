@@ -4,10 +4,7 @@ import { ExecutionContext, ExecutionHandler, ExecutionResult, normalizeDraftLine
 import { EstimateRepository, createEstimate } from '../../estimates/estimate';
 import { SettingsRepository, getNextEstimateNumber } from '../../settings/settings';
 import { AuditRepository, createAuditEvent } from '../../audit/audit';
-import { createChangeOrderPayloadSchema } from '../contracts/create-change-order';
-
-/** Defensive prefix — the drafting task always sets this, but a hand-edited or re-drafted proposal payload might not. */
-const CHANGE_ORDER_PREFIX = 'Change order — ';
+import { createChangeOrderPayloadSchema, ensureChangeOrderTitle } from '../contracts/create-change-order';
 
 /**
  * Executes an approved `create_change_order` proposal: mints a NEW estimate
@@ -71,9 +68,14 @@ export class CreateChangeOrderExecutionHandler implements ExecutionHandler {
       };
     }
     const { jobId, lineItems: rawLineItems, customerMessage } = parsed.data;
-    const title = parsed.data.title.startsWith(CHANGE_ORDER_PREFIX)
-      ? parsed.data.title
-      : `${CHANGE_ORDER_PREFIX}${parsed.data.title}`;
+    // Quality-review fix — ensureChangeOrderTitle (contracts/create-change-
+    // order.ts) is idempotent against BOTH shapes the drafting task can
+    // produce (prefixed, or the bare 'Change order' fallback when no work
+    // description was spoken); a bare startsWith('Change order — ') check
+    // here previously double-prefixed the bare fallback into
+    // "Change order — Change order — created from voice change-order
+    // proposal <id>".
+    const title = ensureChangeOrderTitle(parsed.data.title);
 
     if (proposal.resultEntityId) {
       return { success: true, resultEntityId: proposal.resultEntityId };

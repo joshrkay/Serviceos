@@ -81,6 +81,31 @@ describe('create_change_order proposal type', () => {
     expect(result.valid).toBe(false);
   });
 
+  // Quality-review CRITICAL fix — the contract must declare (not just
+  // tolerate) the catalog-grounding passthrough fields, or Zod's
+  // strip-mode silently deletes them before they ever reach
+  // normalizeDraftLineItems. See the execution-handler describe block
+  // below for the persisted-row round trip.
+  it('accepts a catalog-grounded line item carrying pricingSource/unit/category/catalogItemId/totalCents', () => {
+    const result = validateProposalPayload('create_change_order', {
+      jobId: JOB_ID,
+      title: 'Change order — add second zone',
+      lineItems: [
+        {
+          description: 'Second zone install',
+          quantity: 1,
+          unitPriceCents: 175000,
+          totalCents: 175000,
+          unit: 'each',
+          category: 'labor',
+          catalogItemId: '99999999-9999-4999-8999-999999999999',
+          pricingSource: 'catalog',
+        },
+      ],
+    });
+    expect(result.valid).toBe(true);
+  });
+
   it('rejects a payload missing title', () => {
     const result = validateProposalPayload('create_change_order', {
       jobId: JOB_ID,
@@ -208,6 +233,109 @@ describe('CreateChangeOrderExecutionHandler', () => {
       proposalType: 'create_change_order',
       jobId: JOB_ID,
     });
+  });
+
+  // Quality-review CRITICAL fix — changeOrderLineItemSchema (contracts/
+  // create-change-order.ts) originally declared only {description,
+  // quantity, unitPriceCents}; Zod's strip-mode dropped every other field
+  // BEFORE normalizeDraftLineItems ever saw them, so a catalog-grounded
+  // line's pricingSource/unit/category were silently NULL on the persisted
+  // row — destroying the AI-invented-vs-catalog-grounded audit signal for
+  // every change order. This regression guard reads the PERSISTED row back
+  // (not just the payload) to prove the round trip.
+  //
+  // `catalogItemId` is declared on the contract too (so it survives on the
+  // PAYLOAD for the review UI's one-tap ambiguity resolution — the exact
+  // reason `contracts.ts`'s shared `lineItemSchema` declares it), but — like
+  // every other estimate-creating path in this codebase — it is NOT a
+  // persisted `LineItem` field at all (no `catalog_item_id` column exists on
+  // `estimate_line_items`; `normalizeDraftLineItems` never forwards it
+  // either, matching `draft_estimate`'s own behavior). `pricingSource` is
+  // the durable grounding signal that survives to the row.
+  it('preserves catalog-grounding metadata (pricingSource/unit/category/totalCents) through to the PERSISTED row', async () => {
+    const { estimateRepo, handler } = wired();
+    const catalogItemId = '99999999-9999-4999-8999-999999999999';
+
+    const result = await handler.execute(
+      makeProposal({
+        payload: {
+          jobId: JOB_ID,
+          title: 'Change order — add second zone',
+          lineItems: [
+            {
+              description: 'Second zone install',
+              quantity: 1,
+              unitPriceCents: 175000,
+              totalCents: 175000,
+              unit: 'each',
+              category: 'labor',
+              catalogItemId,
+              pricingSource: 'catalog',
+            },
+          ],
+        },
+      }),
+      ctx,
+    );
+    expect(result.success).toBe(true);
+
+    const stored = await estimateRepo.findById(TENANT, result.resultEntityId!);
+    const line = stored!.lineItems[0];
+    expect(line.pricingSource).toBe('catalog');
+    expect(line.unit).toBe('each');
+    expect(line.category).toBe('labor');
+    expect(line.totalCents).toBe(175000);
+  });
+
+  // Quality-review fix — a line with NO resolvable unitPriceCents at all
+  // (contract-legal: the field is optional pre-grounding) must still fail
+  // cleanly at execution rather than silently persisting a priceless line.
+  // The drafting task now gates this case before it ever reaches approval
+  // (ai/tasks/create-change-order-task.test.ts), but this proves the
+  // execution-side backstop independently — e.g. a hand-edited proposal
+  // payload that skipped the drafting task entirely.
+  it('rejects a line item with no resolvable unitPriceCents ("can\'t be priced"), no mutation', async () => {
+    const { estimateRepo, handler } = wired();
+
+    const result = await handler.execute(
+      makeProposal({
+        payload: {
+          jobId: JOB_ID,
+          title: 'Change order — add second zone',
+          lineItems: [{ description: 'Second zone', quantity: 1 }],
+        },
+      }),
+      ctx,
+    );
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/can't be priced/i);
+    expect(await estimateRepo.findByJob(TENANT, JOB_ID)).toHaveLength(0);
+  });
+
+  // Quality-review fix — the double-prefix bug: the drafting task's bare
+  // 'Change order' fallback (no description spoken) previously tripped a
+  // naive `startsWith('Change order — ')` re-prefix check into
+  // "Change order — Change order — created from voice change-order
+  // proposal <id>". ensureChangeOrderTitle is idempotent against this
+  // exact bare string — pinned end-to-end through execution here.
+  it('does NOT double-prefix the bare "Change order" title the drafting task emits when no description was spoken', async () => {
+    const { estimateRepo, handler } = wired();
+
+    const result = await handler.execute(
+      makeProposal({
+        payload: {
+          jobId: JOB_ID,
+          title: 'Change order',
+          lineItems: [{ description: 'Additional work', quantity: 1, unitPriceCents: 180000 }],
+        },
+      }),
+      ctx,
+    );
+    expect(result.success).toBe(true);
+
+    const stored = await estimateRepo.findById(TENANT, result.resultEntityId!);
+    expect(stored!.internalNotes).toContain('Change order — created from voice change-order proposal prop-1');
+    expect(stored!.internalNotes).not.toContain('Change order — Change order');
   });
 
   it('tenant isolation — a change order cannot be created for another tenant’s repo view', async () => {

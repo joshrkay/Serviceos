@@ -76,7 +76,7 @@ catch schema drift or a missing dependency).
 | "Refund the Smiths 100 dollars on their invoice" | `record_refund` | `record_refund` | money | unit |
 | "Knock 50 dollars off the Henderson invoice" | `apply_credit` | `apply_credit` | money | unit |
 | "Text the Hendersons the part arrived, we can come Thursday" | `send_customer_message` | `send_customer_message` | comms | unit |
-| "The Garcias want a second zone — change order for 1800" | `create_change_order` | `create_change_order` | capture | unit |
+| "The Garcias want a second zone — change order for 1800" | `create_change_order` | `create_change_order` | capture | integration (`integration/draft-estimate-execution.test.ts`) |
 
 > **Voice technician resolution (U1, taxonomy 1.2.0):** `reassign_appointment`,
 > `add_crew_member`, and `remove_crew_member` now resolve the spoken technician
@@ -367,18 +367,64 @@ taxonomy 1.11.0):
   a verified `jobId` stamped onto `context.existingEntities.jobId` BEFORE
   this handler runs. No LLM call in the drafting leg: the added work is a
   single named line, not a multi-line quote the model needs to structure.
+- **`isChangeOrder` survives `cloneEstimate`** (`estimates/estimate.ts`) —
+  quality-review fix. Clone is the documented escape hatch for editing a
+  locked (sent/accepted) estimate; `isChangeOrder` is a classification of
+  what the estimate IS, not lifecycle state, so it must NOT reset to false
+  on clone — that would launder a change order into a plain estimate on
+  its very first correction, defeating migration 271's reporting purpose.
+- **The catalog-grounding passthrough fields are declared on the line-item
+  contract, not just produced by the resolver** (quality-review fix,
+  `proposals/contracts/create-change-order.ts`): `unit` / `category` /
+  `catalogItemId` / `pricingSource` / `needsPricing` / `totalCents` /
+  `imageFileId` / `id` all mirror `contracts.ts`'s shared `lineItemSchema`.
+  Zod strips any undeclared key, and `CreateChangeOrderExecutionHandler`
+  parses the payload through this schema BEFORE handing line items to
+  `normalizeDraftLineItems` — the function that forwards exactly these
+  fields onto the persisted row. A narrower schema silently destroyed the
+  catalog-grounded-vs-AI-invented signal on every change order (the same
+  parity bug B7.5/EE-4 fixed for the shared estimate/invoice path).
 - **Catalog price grounding** — the single line item (built from
   `changeOrderDescription` + the spoken `amount`) is run through
   `groundLineItemPricing` (ai/resolution/catalog-resolver.ts), the SAME
   tenant-catalog grounding pass `draft_estimate`/`draft_invoice` use: a
   catalog match overrides the spoken price; an uncatalogued price rides
   as-is, flagged via the RV-007 confidence-marker `_meta` for human review.
+  A line that ends up with NO resolvable price (no spoken amount, no
+  catalog match — the classifier's own canonical example, "Customer added
+  three more outlets — write it up") gates the proposal
+  (`missingFields: ['lineItems[0].unitPriceCents']`) rather than drafting
+  ungated and failing post-approval at execution (quality-review fix).
+  `_meta.overallConfidence` is ALWAYS present when `_meta` is set (a
+  REQUIRED field on the shared `_meta` envelope, contracts.ts) — its
+  absence was a quality-review-caught bug that made every uncatalogued
+  change order fail `assertValidProposalPayload` the moment an operator
+  tried to edit or approve it. Unlike the LLM-drafting handlers, no
+  numeric `confidenceScore`/cap exists here (no LLM call); the real
+  auto-approve safety is that this task omits `sourceTrustTier` entirely,
+  so `decideInitialStatus`'s auto-approve branch is never reached at any
+  confidence.
 - **`title` has no home on the `Estimate` entity** (estimates carry no
   title/name column) — `CreateChangeOrderExecutionHandler`
-  (`proposals/execution/create-change-order-handler.ts`) folds the
-  (defensively re-prefixed) title into `internalNotes` alongside the
-  proposal id for traceability; `customerMessage` is a separate, optional
-  field that rides straight onto the created estimate.
+  (`proposals/execution/create-change-order-handler.ts`) folds the title
+  into `internalNotes` alongside the proposal id for traceability;
+  `customerMessage` is a separate, optional field that rides straight onto
+  the created estimate. The title-prefixing logic (`changeOrderTitle` /
+  `ensureChangeOrderTitle`) lives in ONE place
+  (`proposals/contracts/create-change-order.ts`), imported by both the
+  drafting task and the execution handler — a quality-review fix for a
+  double-prefix bug the previous duplicated-literal version had on the
+  no-description fallback path.
+- **Customer-visibility asymmetry (v1 product decision, flagged, not
+  fixed here):** a change order's created estimate arrives on the public
+  customer approval page BYTE-IDENTICAL to a fresh bid —
+  `PublicEstimateView` never reads `isChangeOrder` or `internalNotes` (the
+  title lives only in `internalNotes`), and the drafting task never
+  populates `customerMessage`, so the only customer-visible description is
+  the single line item's own text. Migration 271 distinguishes change
+  orders internally (reporting, the operator-facing internal notes) but
+  the CUSTOMER sees no difference from an original bid. Filed as a known
+  v1 gap rather than fixed in this task.
 - **Needs BOTH `estimateRepo` and `settingsRepo`** to be fully wired — like
   `DraftEstimateExecutionHandler`, minting a real `estimateNumber` requires
   `getNextEstimateNumber` (settings/settings.ts). Registered in the SAME

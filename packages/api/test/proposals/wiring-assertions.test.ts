@@ -130,6 +130,15 @@ describe('U8: each newly probed handler is DETECTED when its effect dep is dropp
     // SAME `if (deps?.estimateRepo)` block as update_estimate (handlers.ts),
     // so it is flagged the same way.
     { omit: ['estimateRepo'], flags: ['update_estimate', 'send_estimate_nudge', 'create_change_order'] },
+    // Quality-review fix — isFullyWired() for BOTH draft_estimate and
+    // create_change_order requires estimateRepo AND settingsRepo (estimate
+    // numbering, getNextEstimateNumber). Both handlers are still
+    // CONSTRUCTED without settingsRepo (draft_estimate unconditionally;
+    // create_change_order because estimateRepo alone satisfies its
+    // registration gate) — this row proves the missing dep is caught by
+    // the probe rather than silently defaulting to "wired". Pre-existing
+    // hole for draft_estimate (no row ever proved this before).
+    { omit: ['settingsRepo'], flags: ['draft_estimate', 'create_change_order'] },
     { omit: ['proposalRepo'], flags: ['batch_invoice'] },
     {
       omit: ['assignmentRepo'],

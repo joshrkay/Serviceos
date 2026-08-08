@@ -109,6 +109,36 @@ describe('Estimate lifecycle — clone', () => {
     const events = auditRepo.getAll();
     expect(events.some((e) => e.eventType === 'estimate.cloned')).toBe(true);
   });
+
+  // Tradesperson wave 1, Task 6 (quality-review fix) — isChangeOrder is a
+  // classification of what the estimate IS, not lifecycle state that
+  // resets on clone. Clone is the documented escape hatch for editing a
+  // locked (sent/accepted) estimate; without this fix, that normal
+  // correction path laundered a change order into a plain estimate on its
+  // first edit, defeating migration 271's whole reporting purpose.
+  it('preserves isChangeOrder across a clone', async () => {
+    const est = await createEstimate(
+      { tenantId: TENANT, jobId: 'job-1', estimateNumber: 'EST-1', lineItems: items(), createdBy: 'u-1', isChangeOrder: true },
+      repo,
+    );
+    expect(est.isChangeOrder).toBe(true);
+    await repo.update(TENANT, est.id, { status: 'sent' });
+
+    const clone = await cloneEstimate(TENANT, est.id, 'EST-2', 'u-2', repo, auditRepo);
+    expect(clone).not.toBeNull();
+    expect(clone!.isChangeOrder).toBe(true);
+  });
+
+  it('preserves isChangeOrder: false across a clone of an ordinary estimate', async () => {
+    const est = await createEstimate(
+      { tenantId: TENANT, jobId: 'job-1', estimateNumber: 'EST-1', lineItems: items(), createdBy: 'u-1' },
+      repo,
+    );
+    await repo.update(TENANT, est.id, { status: 'sent' });
+
+    const clone = await cloneEstimate(TENANT, est.id, 'EST-2', 'u-2', repo, auditRepo);
+    expect(clone!.isChangeOrder).toBe(false);
+  });
 });
 
 describe('Billing engine — good-better-best selection', () => {

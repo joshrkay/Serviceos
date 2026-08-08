@@ -26,25 +26,57 @@
  * without its job is meaningless.
  *
  * The added-work description (`changeOrderDescription`) becomes the change
- * order's title ("Change order — <description>") and the single line
- * item's description; a stated amount (`amount`, integer cents) becomes
- * that line's `unitPriceCents`. The line is then run through
+ * order's title (`changeOrderTitle`, contracts/create-change-order.ts) and
+ * the single line item's description; a stated amount (`amount`, integer
+ * cents) becomes that line's `unitPriceCents`. The line is then run through
  * `groundLineItemPricing` (ai/resolution/catalog-resolver.ts) — the SAME
- * tenant-catalog grounding pass `buildVoiceProposalPayload` / EstimateTaskHandler
- * use — so a catalog match overrides (or fills in) the price; an
- * uncatalogued spoken amount rides as-is, capped below auto-approve and
- * surfaced for human review via the RV-007 confidence-marker `_meta` (same
- * as every other catalog-grounded drafting handler). No LLM call: unlike
- * `draft_estimate`, the added work is a single named line, not a
+ * tenant-catalog grounding pass `EstimateTaskHandler`/`InvoiceTaskHandler`
+ * use — so a catalog match overrides (or fills in) the price. No LLM call:
+ * unlike `draft_estimate`, the added work is a single named line, not a
  * multi-line quote the model needs to structure.
  *
- * Deliberately omits `sourceTrustTier` (never auto-approves in v1) —
- * mirrors `LogExpenseTaskHandler` / `ConfirmAppointmentTaskHandler`'s
- * posture for a deterministic, non-LLM capture handler; RBAC-wise this
- * type is dispatcher-approvable, same as `draft_estimate` (it is NOT in
- * `CONFIG_WRITING_PROPOSAL_TYPES`, proposals/actions.ts).
+ * Quality-review fix — a line that comes out of grounding with NO
+ * resolvable `unitPriceCents` (no spoken amount AND no catalog match — the
+ * classifier's own canonical example, "Customer added three more outlets —
+ * write it up", has no stated amount) used to draft UNGATED
+ * (`groundLineItemPricing` only ever populates `missingFields` for an
+ * AMBIGUOUS catalog match, never for a simply-unpriced line) and then fail
+ * post-approval at `CreateChangeOrderExecutionHandler`
+ * (`normalizeDraftLineItems` refuses to persist a priceless line). Gated
+ * explicitly here instead, same idiom `applyCatalogPricing` uses for an
+ * ambiguous match: `missingFields: ['lineItems[0].unitPriceCents']`.
+ *
+ * Quality-review fix — `payload._meta` (the RV-007 Confidence Marker
+ * envelope, contracts.ts) is validated at the SHARED payload-contract choke
+ * point for every proposal type, and `overallConfidence` is a REQUIRED
+ * field on it whenever `_meta` is present — omitting it (the original bug)
+ * produced a payload that failed `assertValidProposalPayload` the moment an
+ * operator tried to edit or approve it from the review card. `_meta` is now
+ * ALWAYS built with `overallConfidence` set (mirrors every other catalog-
+ * grounded drafting handler — estimate-task.ts, invoice-task.ts,
+ * mms-estimate-task.ts — which all do the same
+ * `catalogOutcome.anyUncatalogued ? 'low' : ...` shape), and the mandatory
+ * `assertValidProposalPayload` gate (contracts.ts's own doc comment: every
+ * production AI-drafting task handler MUST call it before `createProposal`)
+ * is applied as a backstop so a future contract change can never again ship
+ * an invalid payload silently.
+ *
+ * An uncatalogued price is never numerically capped (no `confidenceScore`
+ * exists here — there is no LLM call to produce one): the safety mechanism
+ * is that this handler deliberately omits `sourceTrustTier`, so
+ * `decideInitialStatus`'s only auto-approve branch (which requires
+ * `sourceTrustTier === 'autonomous'`) is never reached at ANY confidence —
+ * mirrors `LogExpenseTaskHandler`/`ConfirmAppointmentTaskHandler`'s posture
+ * for a deterministic, non-LLM capture handler. `overallConfidence: 'low'`
+ * on an uncatalogued line is therefore purely a REVIEW-CARD signal (never a
+ * numeric auto-approve gate) — RBAC-wise this type is dispatcher-approvable,
+ * same as `draft_estimate` (it is NOT in `CONFIG_WRITING_PROPOSAL_TYPES`,
+ * proposals/actions.ts).
  */
 import { createProposal, CreateProposalInput } from '../../proposals/proposal';
+import { assertValidProposalPayload } from '../../proposals/contracts';
+import type { ProposalConfidenceMeta } from '../../proposals/contracts';
+import { changeOrderTitle } from '../../proposals/contracts/create-change-order';
 import type { TaskHandler, TaskContext, TaskResult } from './task-handlers';
 import type { ExtractedEntities } from '../orchestration/intent-classifier';
 import { CatalogItemRepository } from '../../catalog/catalog-item';
@@ -54,7 +86,31 @@ import {
   lineItemConfidenceSignals,
 } from '../resolution/catalog-resolver';
 
-const CHANGE_ORDER_PREFIX = 'Change order — ';
+/**
+ * Pull the Zod paths off a `ValidationError` thrown by
+ * `assertValidProposalPayload` (it stores them as `details.errors`, each
+ * formatted `"<path>: <message>"`). Mirrors `estimate-task.ts`'s
+ * `contractErrorsFrom` (not exported from there, so duplicated here).
+ */
+function contractErrorsFrom(err: unknown): string[] {
+  const details = (err as { details?: { errors?: unknown } } | undefined)?.details;
+  const errors = details?.errors;
+  if (Array.isArray(errors)) {
+    return errors.filter((e): e is string => typeof e === 'string');
+  }
+  return [err instanceof Error ? err.message : String(err)];
+}
+
+/** Map contract errors onto operator-facing `missingFields` entries (leading path segment of each Zod issue). */
+function contractGapFields(errors: string[]): string[] {
+  const fields = new Set<string>();
+  for (const error of errors) {
+    const path = error.split(':')[0]?.trim() ?? '';
+    const head = path.split(/[.[]/)[0];
+    fields.add(head.length > 0 ? head : 'lineItems');
+  }
+  return [...fields];
+}
 
 export class CreateChangeOrderTaskHandler implements TaskHandler {
   readonly taskType = 'create_change_order' as const;
@@ -87,7 +143,7 @@ export class CreateChangeOrderTaskHandler implements TaskHandler {
         ? ee.changeOrderDescription.trim()
         : undefined;
 
-    payload.title = description ? `${CHANGE_ORDER_PREFIX}${description}` : 'Change order';
+    payload.title = changeOrderTitle(description);
 
     const lineItem: Record<string, unknown> = {
       description: description ?? 'Additional work',
@@ -107,26 +163,42 @@ export class CreateChangeOrderTaskHandler implements TaskHandler {
     );
     payload.lineItems = catalogOutcome.lineItems;
 
+    // Quality-review fix — a line with NO resolvable price (no spoken
+    // amount, no catalog match) must gate: groundLineItemPricing's own
+    // missingFields only ever covers an AMBIGUOUS catalog match, never a
+    // simply-unpriced line, so without this check the proposal drafted
+    // ungated and failed post-approval at execution instead.
+    const groundedLine = (payload.lineItems as Array<Record<string, unknown>>)[0] as
+      | Record<string, unknown>
+      | undefined;
+    if (typeof groundedLine?.unitPriceCents !== 'number') {
+      missing.push('lineItems[0].unitPriceCents');
+    }
+
     const confidenceFactors: string[] = [];
     if (catalogOutcome.anyCatalogPriced) confidenceFactors.push('catalog_priced');
     if (catalogOutcome.anyUncatalogued) confidenceFactors.push('uncatalogued_line_item');
 
-    // RV-007 — Confidence Marker `_meta`, same translation every other
-    // catalog-grounded drafting handler applies: an uncatalogued/ambiguous
-    // line's pricingSource becomes a 'low' per-field marker for the review
-    // card. No new confidence computation.
+    // RV-007 — Confidence Marker `_meta`, same shape every other catalog-
+    // grounded drafting handler builds (estimate-task.ts / invoice-task.ts /
+    // mms-estimate-task.ts): `overallConfidence` is ALWAYS present (it is a
+    // REQUIRED field on `_meta` whenever `_meta` is set — see the module doc
+    // comment above for the bug this fixes), and `fieldConfidence`/`markers`
+    // translate the catalog resolver's pricingSource outcomes for the review
+    // card (uncatalogued/ambiguous lines → 'low' + a marker) — no new
+    // confidence computation.
     const signals = lineItemConfidenceSignals(
       payload.lineItems as Array<Record<string, unknown>>,
       'unitPriceCents',
     );
-    if (Object.keys(signals.fieldConfidence).length > 0 || signals.markers.length > 0) {
-      payload._meta = {
-        ...(Object.keys(signals.fieldConfidence).length > 0
-          ? { fieldConfidence: signals.fieldConfidence }
-          : {}),
-        ...(signals.markers.length > 0 ? { markers: signals.markers } : {}),
-      };
-    }
+    const meta: ProposalConfidenceMeta = {
+      overallConfidence: catalogOutcome.anyUncatalogued ? 'low' : 'high',
+      ...(Object.keys(signals.fieldConfidence).length > 0
+        ? { fieldConfidence: signals.fieldConfidence }
+        : {}),
+      ...(signals.markers.length > 0 ? { markers: signals.markers } : {}),
+    };
+    payload._meta = meta;
 
     const sourceContext: Record<string, unknown> = {
       ...(context.conversationId ? { conversationId: context.conversationId } : {}),
@@ -134,6 +206,27 @@ export class CreateChangeOrderTaskHandler implements TaskHandler {
     };
 
     const allMissing = [...catalogOutcome.missingFields, ...missing];
+
+    // P2-002 — the MANDATORY payload contract gate (proposals/contracts.ts
+    // documents assertValidProposalPayload as required before every
+    // createProposal on an AI-authored path). Enforced as a hard block
+    // rather than an exception: a payload that fails here is stamped into
+    // missingFields (forces 'draft' via decideInitialStatus) instead of
+    // shipping a proposal that throws ValidationError at the first
+    // edit/approve touch — the exact failure mode the missing
+    // `overallConfidence` bug produced before this gate existed.
+    let payloadContractErrors: string[] | undefined;
+    try {
+      assertValidProposalPayload(this.taskType, payload);
+    } catch (err) {
+      payloadContractErrors = contractErrorsFrom(err);
+      for (const field of contractGapFields(payloadContractErrors)) {
+        if (!allMissing.includes(field)) allMissing.push(field);
+      }
+    }
+    if (payloadContractErrors) {
+      sourceContext.payloadContractErrors = payloadContractErrors;
+    }
 
     const input: CreateProposalInput = {
       tenantId: context.tenantId,
