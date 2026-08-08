@@ -240,6 +240,11 @@ export enum ProposalType {
   // never auto-approves at any trust tier. Highest-frequency gap in the
   // 2026-08-07 tradesperson plan.
   SEND_CUSTOMER_MESSAGE = 'send_customer_message',
+  // Tradesperson wave 1, Task 6 — mints a NEW estimate pinned to an EXISTING
+  // job, flagged is_change_order (migration 271) so reporting can separate
+  // scope-adds from original bids. Capture-class: no money moves at
+  // creation, sending the resulting estimate is a later comms-class step.
+  CREATE_CHANGE_ORDER = 'create_change_order',
 }
 
 export enum RejectionCategory {

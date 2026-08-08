@@ -6565,6 +6565,13 @@ export const MIGRATIONS = {
           'daily_digest', 'conversation_reply', 'portal_session', 'custom_message'
         ));
   `,
+  // Tradesperson wave 1 — change orders are estimates pinned to an existing
+  // job and flagged so reporting can separate scope-adds from original bids.
+  '271_estimates_change_order_flag': `
+    ALTER TABLE estimates ADD COLUMN IF NOT EXISTS is_change_order BOOLEAN NOT NULL DEFAULT FALSE;
+    CREATE INDEX IF NOT EXISTS idx_estimates_change_order
+      ON estimates (tenant_id, job_id) WHERE is_change_order = TRUE;
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

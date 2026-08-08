@@ -81,6 +81,13 @@ export type IntentType =
   // before a customer sees it. Highest-frequency gap in the 2026-08-07
   // tradesperson plan.
   | 'send_customer_message'
+  // Tradesperson wave 1, Task 6 — NEW capture-class proposal type: mid-job
+  // scope change the customer asked for. Mints a NEW estimate pinned to the
+  // EXISTING job (jobReference is REQUIRED — that's what distinguishes this
+  // from draft_estimate, a fresh bid). No money moves at creation; sending
+  // the resulting estimate is a later, separate comms-class step
+  // (send_estimate) — same capture posture as draft_estimate.
+  | 'create_change_order'
   // Taxonomy 1.2.0 (agent wave, Track A) — three proposal-driving on-ramps:
   //   create_invoice_schedule    — U2: milestone/progress billing plan for a
   //                                job; the verbatim milestone sentence rides
@@ -239,6 +246,7 @@ export const SUPPORTED_INTENTS: readonly IntentType[] = [
   'record_refund',
   'apply_credit',
   'send_customer_message',
+  'create_change_order',
   'create_invoice_schedule',
   'respond_to_review',
   'create_standing_instruction',
@@ -355,8 +363,24 @@ export const SUPPORTED_INTENTS: readonly IntentType[] = [
  *           gates) TwilioDelayNotificationService already uses — see
  *           SendCustomerMessageExecutionHandler (proposals/execution/
  *           send-customer-message-handler.ts).
+ *   1.11.0 — Tradesperson wave 1 (2026-08-07 plan) Task 6, additive:
+ *           create_change_order — a NEW capture-class proposal type that
+ *           mints a NEW estimate pinned to an EXISTING job, flagged
+ *           `is_change_order` (migration 271) so reporting can separate
+ *           scope-adds from original bids. jobId is REQUIRED on the
+ *           contract (that's what distinguishes this from draft_estimate,
+ *           whose jobId is optional). No money moves at creation; sending
+ *           the resulting estimate is a later, separate comms-class step —
+ *           same capture posture as draft_estimate. New extraction field
+ *           (changeOrderDescription); reuses the existing jobReference/
+ *           amount seams for the job reference and cents amount.
+ *           `create_change_order` joined JOB_REF_INTENTS (entity-
+ *           resolution.ts) — an unresolved job reference gates the
+ *           proposal (missingFields: ['jobId']); see
+ *           CreateChangeOrderExecutionHandler (proposals/execution/
+ *           create-change-order-handler.ts).
  */
-export const INTENT_TAXONOMY_VERSION = '1.10.0';
+export const INTENT_TAXONOMY_VERSION = '1.11.0';
 
 /**
  * P11-001: convenience predicate the FSM adapter uses to route
@@ -599,6 +623,14 @@ export interface ExtractedEntities {
   // downstream when unstated. Qualified (not bare `channel`) per house
   // precedent (refundMethod / catalogItemNewName).
   customerMessageChannel?: 'sms' | 'email';
+  // Tradesperson wave 1, Task 6 — create_change_order: the added work the
+  // customer asked for mid-job ("a second zone", "replace the flue liner
+  // too"), verbatim. Qualified (not bare `description`) per house
+  // precedent (expenseDescription / refundReason) — the drafting task turns
+  // this into the change order's title + single line item description.
+  // jobReference (existing field) carries the spoken job reference; amount
+  // (existing field) carries the stated cents, when spoken.
+  changeOrderDescription?: string;
 }
 
 /**
@@ -1183,6 +1215,14 @@ Supported intents (return exactly ONE):
                            Examples: "Text the Hendersons the part arrived, we can come Thursday"
                                      "Email the Garcias that the inspection passed"
                                      "Let Maria know we're finished and the gate is locked"
+- "create_change_order"  — mid-job scope change the customer asked for:
+                           drafts a NEW estimate tied to the EXISTING job.
+                           Extract jobReference (required), the added work
+                           description (changeOrderDescription), and amount
+                           if spoken (integer cents).
+                           Examples: "The Garcias want a second zone — change order for 1800"
+                                     "Add a change order on the Patel job: replace the flue liner too"
+                                     "Customer added three more outlets — write it up"
 - "create_invoice_schedule" — user wants to set up a MILESTONE / PROGRESS
                            billing plan for a job: a deposit up front and the
                            rest later, or a percentage split across stages.
@@ -1458,7 +1498,8 @@ Return valid JSON with exactly this shape (no prose, no markdown fences):
     "refundCheckNumber": "<string, optional — check number on record_refund>",
     "creditReason": "<string, optional — why the credit was given on apply_credit>",
     "customerMessageBody": "<string, optional — the message content to send on send_customer_message, cleaned up but faithful>",
-    "customerMessageChannel": "<sms|email, optional — on send_customer_message, defaults to sms>"
+    "customerMessageChannel": "<sms|email, optional — on send_customer_message, defaults to sms>",
+    "changeOrderDescription": "<string, optional — the added work, verbatim, on create_change_order>"
   }
 }
 
@@ -1941,6 +1982,8 @@ export function parseClassifierJson(content: string): IntentClassification | nul
     if (typeof ee.customerMessageBody === 'string') extracted.customerMessageBody = ee.customerMessageBody;
     const customerMessageChannel = pickEnum(ee, 'customerMessageChannel', SEND_CHANNELS);
     if (customerMessageChannel) extracted.customerMessageChannel = customerMessageChannel;
+    // create_change_order fields (Tradesperson wave 1, Task 6)
+    if (typeof ee.changeOrderDescription === 'string') extracted.changeOrderDescription = ee.changeOrderDescription;
     if (Object.keys(extracted).length > 0) {
       result.extractedEntities = extracted;
     }

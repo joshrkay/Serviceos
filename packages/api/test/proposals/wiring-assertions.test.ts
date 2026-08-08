@@ -126,7 +126,10 @@ describe('U8: each newly probed handler is DETECTED when its effect dep is dropp
     // `if (deps?.invoiceRepo)` block as apply_late_fee (handlers.ts), so it
     // is flagged the same way.
     { omit: ['invoiceRepo'], flags: ['update_invoice', 'issue_invoice', 'apply_late_fee', 'apply_credit'] },
-    { omit: ['estimateRepo'], flags: ['update_estimate', 'send_estimate_nudge'] },
+    // Tradesperson wave 1, Task 6 — create_change_order registers in the
+    // SAME `if (deps?.estimateRepo)` block as update_estimate (handlers.ts),
+    // so it is flagged the same way.
+    { omit: ['estimateRepo'], flags: ['update_estimate', 'send_estimate_nudge', 'create_change_order'] },
     { omit: ['proposalRepo'], flags: ['batch_invoice'] },
     {
       omit: ['assignmentRepo'],

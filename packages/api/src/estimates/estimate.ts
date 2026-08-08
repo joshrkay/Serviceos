@@ -72,6 +72,14 @@ export interface Estimate {
   acceptedSelection?: string[];
   /** Soft-delete marker. Non-null hides the estimate from all reads. */
   deletedAt?: Date;
+  /**
+   * Tradesperson wave 1, Task 6 (migration 271) — this estimate is a
+   * CHANGE ORDER: a new estimate pinned to an already-in-progress job,
+   * scoping additional work the customer asked for mid-job, rather than a
+   * fresh bid for new work. Reporting uses this flag to separate scope-adds
+   * from original bids. Defaults false on every existing/legacy row.
+   */
+  isChangeOrder?: boolean;
   createdBy: string;
   createdAt: Date;
   updatedAt: Date;
@@ -88,6 +96,12 @@ export interface CreateEstimateInput {
   customerMessage?: string;
   internalNotes?: string;
   createdBy: string;
+  /**
+   * Tradesperson wave 1, Task 6 — mint this estimate flagged as a change
+   * order (see `Estimate.isChangeOrder`). Defaults to false so every
+   * existing caller (draft_estimate, revisions, etc.) is unaffected.
+   */
+  isChangeOrder?: boolean;
 }
 
 export interface UpdateEstimateInput {
@@ -286,6 +300,7 @@ export async function createEstimate(
     validUntil: input.validUntil,
     customerMessage: input.customerMessage,
     internalNotes: input.internalNotes,
+    isChangeOrder: input.isChangeOrder ?? false,
     version: 1,
     createdBy: input.createdBy,
     createdAt: new Date(),

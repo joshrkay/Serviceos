@@ -133,6 +133,11 @@ export const INTENT_TO_PROPOSAL_TYPE: Partial<Record<Exclude<IntentType, 'unknow
   // (operator-only): see proposals/surface.ts S1_ALLOWED_PROPOSAL_TYPES and
   // its contract test.
   send_customer_message: 'send_customer_message',
+  // Tradesperson wave 1, Task 6 — create_change_order is a NEW capture-class
+  // proposal type: mints a NEW estimate pinned to an EXISTING job, flagged
+  // isChangeOrder (migration 271). NOT S1-allowed (operator-only): see
+  // proposals/surface.ts S1_ALLOWED_PROPOSAL_TYPES and its contract test.
+  create_change_order: 'create_change_order',
 };
 
 /**
@@ -199,6 +204,10 @@ export function voiceProposalSummary(
   // every other named-recipient summary above uses (Record refund for
   // <name>, Apply credit for <name>).
   if (intent === 'send_customer_message') return `Message${name ? ` ${name}` : ''}`;
+  // Tradesperson wave 1, Task 6 — job-scoped, mirrors log_permit's shape
+  // (job reference takes precedence over a bare customer name, since a
+  // change order is meaningless without its job).
+  if (intent === 'create_change_order') return `Change order${ref ? ` on ${ref}` : name ? ` for ${name}` : ''}`;
   if (intent) return `Voice intent: ${intent}${ref ? ` (${ref})` : ''}`;
   return 'Voice clarification needed';
 }

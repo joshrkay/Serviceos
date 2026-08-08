@@ -25,6 +25,7 @@ import { updateCatalogItemPayloadSchema } from './contracts/update-catalog-item'
 import { recordRefundPayloadSchema } from './contracts/record-refund';
 import { applyCreditPayloadSchema } from './contracts/apply-credit';
 import { sendCustomerMessagePayloadSchema } from './contracts/send-customer-message';
+import { createChangeOrderPayloadSchema } from './contracts/create-change-order';
 import { adoptEntityAliasPayloadSchema } from './contracts/adopt-entity-alias';
 import { updateBrandVoicePayloadSchema } from './contracts/brand-voice';
 import {
@@ -813,6 +814,7 @@ export const PROPOSAL_TYPE_SCHEMAS: Record<ProposalType, z.ZodSchema> = {
   record_refund: recordRefundPayloadSchema,
   apply_credit: applyCreditPayloadSchema,
   send_customer_message: sendCustomerMessagePayloadSchema,
+  create_change_order: createChangeOrderPayloadSchema,
   adopt_entity_alias: adoptEntityAliasPayloadSchema,
   update_brand_voice: updateBrandVoicePayloadSchema,
 };

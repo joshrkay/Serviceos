@@ -26,7 +26,7 @@ exist today.
 
 ## A) Speakable today — intent + proposal + execution handler all exist
 
-These 43 actions can be spoken, drafted as a proposal, approved, and executed.
+These 44 actions can be spoken, drafted as a proposal, approved, and executed.
 "Persistence proof" = a Docker-gated integration test that proves the row +
 audit event actually land in Postgres (vs. mocked-DB-only coverage, which cannot
 catch schema drift or a missing dependency).
@@ -76,6 +76,7 @@ catch schema drift or a missing dependency).
 | "Refund the Smiths 100 dollars on their invoice" | `record_refund` | `record_refund` | money | unit |
 | "Knock 50 dollars off the Henderson invoice" | `apply_credit` | `apply_credit` | money | unit |
 | "Text the Hendersons the part arrived, we can come Thursday" | `send_customer_message` | `send_customer_message` | comms | unit |
+| "The Garcias want a second zone — change order for 1800" | `create_change_order` | `create_change_order` | capture | unit |
 
 > **Voice technician resolution (U1, taxonomy 1.2.0):** `reassign_appointment`,
 > `add_crew_member`, and `remove_crew_member` now resolve the spoken technician
@@ -343,6 +344,66 @@ taxonomy 1.10.0):
   (`proposals/surface.ts`) — operator/technician-only, never reachable from
   an unauthenticated inbound caller.
 
+Notes on the Tradesperson wave 1, Task 6 row (`create_change_order`,
+taxonomy 1.11.0):
+
+- **NEW capture-class proposal type** — mints a NEW estimate pinned to an
+  EXISTING job (migration 271 adds `estimates.is_change_order`, NOT NULL
+  DEFAULT FALSE, plus a partial index on `(tenant_id, job_id) WHERE
+  is_change_order`), so reporting can separate mid-job scope-adds from
+  original bids. No money moves at creation — sending the resulting
+  estimate to the customer is a later, separate `send_estimate` (comms)
+  step — same posture as `draft_estimate`.
+- **`jobId` is REQUIRED on the contract** (`proposals/contracts/create-
+  change-order.ts`), unlike `draft_estimate`'s optional jobId (which falls
+  back to auto-opening a job for a resolved customer). That's the entire
+  distinction between this type and a fresh bid: a change order without
+  its job is meaningless, so `CreateChangeOrderTaskHandler` (ai/tasks/
+  create-change-order-task.ts) never derives or auto-opens one — an
+  unresolved reference gates the proposal (`missingFields: ['jobId']`).
+- **The job reference resolves the SAME way `update_job`/`log_expense`'s
+  does** — `JOB_REF_INTENTS` membership (`ai/agents/customer-calling/
+  entity-resolution.ts`), the router resolving the spoken jobReference to
+  a verified `jobId` stamped onto `context.existingEntities.jobId` BEFORE
+  this handler runs. No LLM call in the drafting leg: the added work is a
+  single named line, not a multi-line quote the model needs to structure.
+- **Catalog price grounding** — the single line item (built from
+  `changeOrderDescription` + the spoken `amount`) is run through
+  `groundLineItemPricing` (ai/resolution/catalog-resolver.ts), the SAME
+  tenant-catalog grounding pass `draft_estimate`/`draft_invoice` use: a
+  catalog match overrides the spoken price; an uncatalogued price rides
+  as-is, flagged via the RV-007 confidence-marker `_meta` for human review.
+- **`title` has no home on the `Estimate` entity** (estimates carry no
+  title/name column) — `CreateChangeOrderExecutionHandler`
+  (`proposals/execution/create-change-order-handler.ts`) folds the
+  (defensively re-prefixed) title into `internalNotes` alongside the
+  proposal id for traceability; `customerMessage` is a separate, optional
+  field that rides straight onto the created estimate.
+- **Needs BOTH `estimateRepo` and `settingsRepo`** to be fully wired — like
+  `DraftEstimateExecutionHandler`, minting a real `estimateNumber` requires
+  `getNextEstimateNumber` (settings/settings.ts). Registered in the SAME
+  `if (deps?.estimateRepo)` block as `update_estimate` (handlers.ts);
+  `isFullyWired()` fails closed without `settingsRepo` too.
+- **Deliberately does NOT thread `auditRepo` into `createEstimate()`**
+  (which would additionally emit a generic `estimate.created` event):
+  migration 271 exists precisely so reporting can separate change-order
+  volume from original-bid volume, and double-emitting `estimate.created`
+  would pollute that same `estimate_created` product-analytics counter
+  (`analytics/audit-event-mapping.ts`). This handler's own
+  `estimate.change_order_created` event (entityType `estimate`) is the
+  sole record, deliberately **not** added to `audit-event-mapping.ts` —
+  mirrors `credit.applied` / `refund.recorded` / `expense.logged`'s
+  unmapped-by-design posture.
+- **RBAC posture unchanged (flagged, no policy change):** `create_change_order`
+  is not in `CONFIG_WRITING_PROPOSAL_TYPES` (`proposals/actions.ts`) — its
+  execution drafts an estimate, it does not write tenant configuration —
+  so approval requires only the generic `proposals:approve` permission
+  every `dispatcher` already holds, identical to `draft_estimate` today.
+  This task did not add a stricter owner-only gate.
+- This type is deliberately **absent** from `S1_ALLOWED_PROPOSAL_TYPES`
+  (`proposals/surface.ts`) — operator/technician-only, never reachable from
+  an unauthenticated inbound caller.
+
 Notes on the taxonomy-1.2.0 rows:
 
 - `create_invoice_schedule` — the spoken milestone sentence is parsed by a
@@ -526,7 +587,8 @@ not a gap. No new `JobStatus` value was introduced for this.
     { "intent": "update_catalog_item", "proposalType": "update_catalog_item", "actionClass": "capture" },
     { "intent": "record_refund", "proposalType": "record_refund", "actionClass": "money" },
     { "intent": "apply_credit", "proposalType": "apply_credit", "actionClass": "money" },
-    { "intent": "send_customer_message", "proposalType": "send_customer_message", "actionClass": "comms" }
+    { "intent": "send_customer_message", "proposalType": "send_customer_message", "actionClass": "comms" },
+    { "intent": "create_change_order", "proposalType": "create_change_order", "actionClass": "capture" }
   ],
   "handlerNoOnramp": [
     "create_booking",

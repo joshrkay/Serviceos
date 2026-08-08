@@ -95,6 +95,10 @@ const EXPECTED_PROPOSAL_TYPES: ProposalType[] = [
   // a NEW comms-class proposal type for a free-form owner-approved
   // outbound customer message.
   'send_customer_message',
+  // Tradesperson wave 1, Task 6 (2026-08-07 plan) — create_change_order:
+  // a NEW capture-class proposal type that mints a NEW estimate pinned to
+  // an EXISTING job, flagged isChangeOrder (migration 271).
+  'create_change_order',
 ];
 
 describe('ai/orchestration/handler-registry — buildTaskHandlers', () => {

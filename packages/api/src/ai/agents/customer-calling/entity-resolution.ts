@@ -174,6 +174,13 @@ const JOB_REF_INTENTS = new Set([
   //                          job") still resolves to a jobId.
   'log_permit',
   'schedule_inspection',
+  // Tradesperson wave 1, Task 6 — create_change_order mints a NEW estimate
+  // pinned to an EXISTING job: the spoken jobReference MUST resolve to a
+  // real jobId (a change order without its job is meaningless), same
+  // resolution ladder as update_job/log_expense. jobId is REQUIRED on the
+  // contract (unlike log_expense's optional link), so an unresolved
+  // reference gates the proposal — see CreateChangeOrderTaskHandler.
+  'create_change_order',
 ]);
 
 /**

@@ -53,6 +53,7 @@ import {
 } from '../tasks/voice-extended-tasks';
 import { ApplyCreditTaskHandler } from '../tasks/apply-credit-task';
 import { SendCustomerMessageTaskHandler } from '../tasks/send-customer-message-task';
+import { CreateChangeOrderTaskHandler } from '../tasks/create-change-order-task';
 
 /**
  * B5 (feat: voice-transcript-and-agent-paths) — the deps shared by the
@@ -262,6 +263,10 @@ export function buildTaskHandlers(deps: HandlerRegistryDeps): Map<ProposalType, 
   // The optional gateway-driven rewrite pass degrades to verbatim
   // passthrough when absent or on failure (see the handler's doc comment).
   handlers.set('send_customer_message', new SendCustomerMessageTaskHandler(deps.gateway));
+  // Tradesperson wave 1, Task 6 — create_change_order's voice on-ramp.
+  // catalogRepo powers line-item grounding (same dep draft_estimate uses);
+  // absent → the line rides the spoken amount as-is, uncatalogued.
+  handlers.set('create_change_order', new CreateChangeOrderTaskHandler(deps.catalogRepo));
   handlers.set('emergency_dispatch', new EmergencyDispatchTaskHandler());
   handlers.set('update_customer', new UpdateCustomerTaskHandler());
   handlers.set('log_expense', new LogExpenseTaskHandler());

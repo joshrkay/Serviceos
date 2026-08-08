@@ -119,6 +119,10 @@ const TYPE_PRIORITY: Record<ProposalType, number> = {
   // arrived, an ETA, a finished-job notice) — same tier as notify_delay /
   // send_invoice / record_payment.
   send_customer_message: 1,
+  // Tradesperson wave 1, Task 6 — a change order is a mid-job scope
+  // change: same-day relevance for whoever's on site, and it drafts a NEW
+  // estimate the same way draft_estimate does — same top tier.
+  create_change_order: 0,
 };
 
 export function getUrgency(proposal: Proposal): { urgency: PrioritizedProposal['urgency']; reason: string } {

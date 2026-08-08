@@ -58,6 +58,10 @@ export const CAPTURE_PROPOSAL_TYPES: ReadonlySet<string> = new Set<string>([
   // price back). The correction loop creates it with no trust tier, so it
   // always lands for review — never auto-executed (D-004).
   ProposalType.UPDATE_CATALOG_ITEM,
+  // Tradesperson wave 1, Task 6 — mints a NEW estimate pinned to an EXISTING
+  // job. No money moves at creation (sending it is a later comms-class
+  // step) — same capture posture as DRAFT_ESTIMATE.
+  ProposalType.CREATE_CHANGE_ORDER,
 ]);
 
 /**

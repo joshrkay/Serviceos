@@ -105,6 +105,7 @@ import { UpdateCatalogItemExecutionHandler } from '../../src/proposals/execution
 import { RecordRefundExecutionHandler } from '../../src/proposals/execution/record-refund-handler';
 import { ApplyCreditExecutionHandler } from '../../src/proposals/execution/apply-credit-handler';
 import { SendCustomerMessageExecutionHandler } from '../../src/proposals/execution/send-customer-message-handler';
+import { CreateChangeOrderExecutionHandler } from '../../src/proposals/execution/create-change-order-handler';
 import { buildLineItem, calculateDocumentTotals, type LineItem } from '../../src/shared/billing-engine';
 import type { AppointmentRepository } from '../../src/appointments/appointment';
 import type { JobRepository } from '../../src/jobs/job';
@@ -772,6 +773,31 @@ const ROWS: Row[] = [
       expect(payload.customerId).toBe(CUSTOMER_ID);
       expect(payload.channel).toBe('sms');
       expect(payload.body).toBe('Your part arrived — we can come Thursday morning.');
+    },
+  },
+  {
+    // Tradesperson wave 1, Task 6 (2026-08-07 plan) — create_change_order is
+    // a NEW capture-class proposal type. Like update_job, it joins
+    // JOB_REF_INTENTS and reads the ROUTER-INJECTED existingEntities.jobId —
+    // no LLM call, no jobReference fallback on the contract.
+    intent: 'create_change_order',
+    mode: 'resolves',
+    note: 'resolver-verified existingEntities.jobId (JOB_REF_INTENTS) + a work description + stated cents amount draft ungated; dep-less CreateChangeOrderExecutionHandler synthetic-succeeds',
+    draft: () =>
+      draft(
+        { gateway: NOOP_GATEWAY },
+        'create_change_order',
+        ctx({
+          existingEntities: { jobId: JOB_ID, changeOrderDescription: 'Second zone', amount: 180000 },
+        }),
+      ),
+    execute: (p) => new CreateChangeOrderExecutionHandler().execute(p, execContext()),
+    assertPayload: (payload) => {
+      expect(payload.jobId).toBe(JOB_ID);
+      expect(payload.title).toBe('Change order — Second zone');
+      const lineItems = payload.lineItems as Array<Record<string, unknown>>;
+      expect(lineItems[0].description).toBe('Second zone');
+      expect(lineItems[0].unitPriceCents).toBe(180000);
     },
   },
   {
