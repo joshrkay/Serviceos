@@ -110,6 +110,10 @@ const TYPE_PRIORITY: Record<ProposalType, number> = {
   // (the customer is owed the callback/follow-through) — same tier as
   // record_payment / apply_late_fee.
   record_refund: 1,
+  // Tradesperson wave 1, Task 4 — a credit is money-moving and
+  // customer-facing (it changes what the customer owes) — same tier as
+  // record_refund / apply_late_fee / record_payment.
+  apply_credit: 1,
 };
 
 export function getUrgency(proposal: Proposal): { urgency: PrioritizedProposal['urgency']; reason: string } {

@@ -117,7 +117,10 @@ describe('U8: each newly probed handler is DETECTED when its effect dep is dropp
   // exact guard boot calls.
   const rows: Array<{ omit: (keyof RegistryDeps)[]; flags: ProposalType[] }> = [
     // Not registered at all without invoiceRepo → flagged via the no-handler path.
-    { omit: ['invoiceRepo'], flags: ['update_invoice', 'issue_invoice', 'apply_late_fee'] },
+    // Tradesperson wave 1, Task 4 — apply_credit registers in the SAME
+    // `if (deps?.invoiceRepo)` block as apply_late_fee (handlers.ts), so it
+    // is flagged the same way.
+    { omit: ['invoiceRepo'], flags: ['update_invoice', 'issue_invoice', 'apply_late_fee', 'apply_credit'] },
     { omit: ['estimateRepo'], flags: ['update_estimate', 'send_estimate_nudge'] },
     { omit: ['proposalRepo'], flags: ['batch_invoice'] },
     {

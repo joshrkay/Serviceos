@@ -123,6 +123,11 @@ export const INTENT_TO_PROPOSAL_TYPE: Partial<Record<Exclude<IntentType, 'unknow
   // S1-allowed (operator-only): see proposals/surface.ts
   // S1_ALLOWED_PROPOSAL_TYPES and its contract test.
   record_refund: 'record_refund',
+  // Tradesperson wave 1, Task 4 — apply_credit is a NEW money-class
+  // proposal type: reduces what a customer owes on an issued invoice
+  // (goodwill, warranty labor, price match). NOT S1-allowed (operator-only):
+  // see proposals/surface.ts S1_ALLOWED_PROPOSAL_TYPES and its contract test.
+  apply_credit: 'apply_credit',
 };
 
 /**
@@ -184,6 +189,7 @@ export function voiceProposalSummary(
   if (intent === 'log_permit') return `Log permit${ref ? ` on ${ref}` : name ? ` for ${name}` : ''}`;
   if (intent === 'log_warranty_claim') return `Log warranty claim${name ? ` for ${name}` : ''}`;
   if (intent === 'record_refund') return `Record refund${name ? ` for ${name}` : ref ? ` on ${ref}` : ''}`;
+  if (intent === 'apply_credit') return `Apply credit${name ? ` for ${name}` : ref ? ` on ${ref}` : ''}`;
   if (intent) return `Voice intent: ${intent}${ref ? ` (${ref})` : ''}`;
   return 'Voice clarification needed';
 }

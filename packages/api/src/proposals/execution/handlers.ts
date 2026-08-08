@@ -15,6 +15,7 @@ import { UpdateInvoiceExecutionHandler } from './update-invoice-handler';
 import { IssueInvoiceExecutionHandler } from './issue-invoice-handler';
 import { SendPaymentReminderExecutionHandler } from './send-payment-reminder-handler';
 import { ApplyLateFeeExecutionHandler } from './apply-late-fee-handler';
+import { ApplyCreditExecutionHandler } from './apply-credit-handler';
 import { UpdateEstimateExecutionHandler } from './update-estimate-handler';
 import { UpdateJobExecutionHandler } from './update-job-handler';
 import { ReassignAppointmentExecutionHandler } from './reassignment-handler';
@@ -1509,6 +1510,15 @@ export function createExecutionHandlerRegistry(deps?: {
     // line to an overdue invoice and refreshes the money-state rollup.
     // Money-class: only runs after explicit owner approval.
     handlers.push(new ApplyLateFeeExecutionHandler(
+      deps.invoiceRepo,
+      deps.auditRepo,
+      moneyStateDeps,
+    ));
+    // Tradesperson wave 1, Task 4 — apply_credit: appends a non-taxable,
+    // NEGATIVE, floor-guarded line to an issued invoice and refreshes the
+    // money-state rollup. Money-class: only runs after explicit owner
+    // approval.
+    handlers.push(new ApplyCreditExecutionHandler(
       deps.invoiceRepo,
       deps.auditRepo,
       moneyStateDeps,

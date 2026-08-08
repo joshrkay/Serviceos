@@ -157,6 +157,16 @@ describe('planVoiceEntityLookups — intent-conditioned operator references', ()
     ]);
   });
 
+  // Tradesperson wave 1, Task 4 — apply_credit joins INVOICE_DOC_INTENTS the
+  // same way record_refund does: no separate invoiceReference field exists,
+  // so the spoken invoice reference rides jobReference.
+  it('routes a jobReference to invoice lookup for apply_credit', () => {
+    const lookups = planVoiceEntityLookups('apply_credit', { jobReference: 'the Henderson invoice' });
+    expect(lookups).toEqual([
+      { kind: 'invoice', reference: 'the Henderson invoice', refKey: 'invoiceId' },
+    ]);
+  });
+
   it('routes EST-0042 jobReference to estimate lookup for update_estimate', () => {
     const lookups = planVoiceEntityLookups('update_estimate', { jobReference: 'EST-0042' });
     expect(lookups).toEqual([
@@ -613,6 +623,61 @@ describe('resolveVoiceEntityReferences — router annotation folding', () => {
     const result = await resolveVoiceEntityReferences(resolver, {
       tenantId: TID,
       intent: 'record_refund',
+      entities: { jobReference: 'INV-9999' },
+    });
+    expect(result.kind).toBe('ok');
+    if (result.kind === 'ok') {
+      expect(result.resolved.invoiceId).toBeUndefined();
+    }
+  });
+
+  // Tradesperson wave 1, Task 4 — apply_credit plugs into the SAME generic
+  // annotation pipeline record_refund/record_payment use.
+  it('apply_credit: unique invoice match stamps invoiceId on the annotation', async () => {
+    const resolver = resolverWith({
+      'invoice:the Henderson invoice': {
+        kind: 'resolved',
+        candidate: { id: 'inv-henderson', kind: 'invoice', label: 'INV-0100 (Henderson)', score: 1 },
+      },
+    });
+    const result = await resolveVoiceEntityReferences(resolver, {
+      tenantId: TID,
+      intent: 'apply_credit',
+      entities: { jobReference: 'the Henderson invoice' },
+    });
+    expect(result.kind).toBe('ok');
+    if (result.kind === 'ok') {
+      expect(result.resolved.invoiceId).toBe('inv-henderson');
+    }
+  });
+
+  it('apply_credit: an ambiguous invoice reference becomes a clarification, never a guess', async () => {
+    const resolver = resolverWith({
+      'invoice:the Smith invoice': {
+        kind: 'ambiguous',
+        candidates: [
+          { id: 'inv-a', kind: 'invoice', label: 'INV-0010 (Smith)', score: 0.85 },
+          { id: 'inv-b', kind: 'invoice', label: 'INV-0031 (Smith)', score: 0.82 },
+        ],
+      },
+    });
+    const result = await resolveVoiceEntityReferences(resolver, {
+      tenantId: TID,
+      intent: 'apply_credit',
+      entities: { jobReference: 'the Smith invoice' },
+    });
+    expect(result.kind).toBe('ambiguous');
+    if (result.kind === 'ambiguous') {
+      expect(result.entityKind).toBe('invoice');
+      expect(result.candidates).toHaveLength(2);
+    }
+  });
+
+  it('apply_credit: a zero-match invoice reference leaves invoiceId absent (never silently guessed)', async () => {
+    const resolver = resolverWith({});
+    const result = await resolveVoiceEntityReferences(resolver, {
+      tenantId: TID,
+      intent: 'apply_credit',
       entities: { jobReference: 'INV-9999' },
     });
     expect(result.kind).toBe('ok');

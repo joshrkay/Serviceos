@@ -106,6 +106,12 @@ const INVOICE_DOC_INTENTS = new Set([
   // resolved here to a verified `invoiceId` BEFORE RecordRefundTaskHandler
   // runs (voice-action-router.ts stamps it onto `context.existingEntities`).
   'record_refund',
+  // Tradesperson wave 1, Task 4 — apply_credit needs the SAME invoice-
+  // reference resolution record_refund/record_payment get: the spoken
+  // invoice reference rides `entities.jobReference`, resolved here to a
+  // verified `invoiceId` BEFORE ApplyCreditTaskHandler runs
+  // (voice-action-router.ts stamps it onto `context.existingEntities`).
+  'apply_credit',
 ]);
 
 const ESTIMATE_DOC_INTENTS = new Set([

@@ -87,6 +87,10 @@ const EXPECTED_PROPOSAL_TYPES: ProposalType[] = [
   // Tradesperson wave 1, Task 3 (2026-08-07 plan) — record_refund: a NEW
   // money-class proposal type for recording MANUAL refunds by voice.
   'record_refund',
+  // Tradesperson wave 1, Task 4 (2026-08-07 plan) — apply_credit: a NEW
+  // money-class proposal type that reduces what a customer owes on an
+  // issued invoice (goodwill, warranty labor, price match).
+  'apply_credit',
 ];
 
 describe('ai/orchestration/handler-registry — buildTaskHandlers', () => {

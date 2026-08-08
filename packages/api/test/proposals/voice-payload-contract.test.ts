@@ -103,6 +103,7 @@ import { InMemoryEstimateRepository, type Estimate } from '../../src/estimates/e
 import { InMemoryCatalogItemRepository, createCatalogItem } from '../../src/catalog/catalog-item';
 import { UpdateCatalogItemExecutionHandler } from '../../src/proposals/execution/update-catalog-item-handler';
 import { RecordRefundExecutionHandler } from '../../src/proposals/execution/record-refund-handler';
+import { ApplyCreditExecutionHandler } from '../../src/proposals/execution/apply-credit-handler';
 import { buildLineItem, calculateDocumentTotals, type LineItem } from '../../src/shared/billing-engine';
 import type { AppointmentRepository } from '../../src/appointments/appointment';
 import type { JobRepository } from '../../src/jobs/job';
@@ -726,6 +727,23 @@ const ROWS: Row[] = [
         ctx({ existingEntities: { invoiceId: INVOICE_ID, amount: 10000, refundMethod: 'cash' } }),
       ),
     execute: (p) => new RecordRefundExecutionHandler().execute(p, execContext()),
+  },
+  {
+    // Tradesperson wave 1, Task 4 (2026-08-07 plan) — apply_credit is a NEW
+    // money-class proposal type. Like record_refund, it joins
+    // INVOICE_DOC_INTENTS and has no invoiceReference fallback, so a
+    // resolver-verified invoiceId is the ONLY way this payload drafts
+    // ungated.
+    intent: 'apply_credit',
+    mode: 'resolves',
+    note: 'resolver-verified existingEntities.invoiceId + a stated cents amount draft ungated; dep-less ApplyCreditExecutionHandler synthetic-succeeds',
+    draft: () =>
+      draft(
+        { gateway: NOOP_GATEWAY },
+        'apply_credit',
+        ctx({ existingEntities: { invoiceId: INVOICE_ID, amount: 5000 } }),
+      ),
+    execute: (p) => new ApplyCreditExecutionHandler().execute(p, execContext()),
   },
   {
     intent: 'create_standing_instruction',

@@ -1208,11 +1208,13 @@ describe('taxonomy 1.2.0 — new intents + entities', () => {
   // the same plan bumped it again to 1.7.0 (update_catalog_item — WS20's
   // existing proposal type/handler, voice on-ramp only), then Task 3 of the
   // same plan bumped it again to 1.8.0 (record_refund — a NEW money-class
-  // proposal type for recording MANUAL refunds by voice).
+  // proposal type for recording MANUAL refunds by voice), then Task 4 of the
+  // same plan bumped it again to 1.9.0 (apply_credit — a NEW money-class
+  // proposal type that reduces what a customer owes on an issued invoice).
   // classifyIntent always stamps the CURRENT constant regardless of which
   // intent, so this pin tracks the live value.
-  it('taxonomy version reflects the latest coordinated bump (1.8.0)', () => {
-    expect(INTENT_TAXONOMY_VERSION).toBe('1.8.0');
+  it('taxonomy version reflects the latest coordinated bump (1.9.0)', () => {
+    expect(INTENT_TAXONOMY_VERSION).toBe('1.9.0');
   });
 
   it('parses create_invoice_schedule with the verbatim milestone sentence', () => {
@@ -1447,6 +1449,47 @@ describe('taxonomy 1.2.0 — new intents + entities', () => {
     expect(result.intentType).toBe('record_refund');
     expect(result.taxonomyVersion).toBe(INTENT_TAXONOMY_VERSION);
     expect(result.extractedEntities?.jobReference).toBe('INV-0042');
+  });
+
+  // Tradesperson wave 1, Task 4 (taxonomy 1.9.0) — apply_credit. The credit
+  // reason is qualified (creditReason, not bare `reason`) per house
+  // precedent (refundReason, catalogItemNewName). The invoice reference
+  // itself reuses `jobReference` — no separate `invoiceReference` field
+  // exists anywhere in this taxonomy.
+  it('parses apply_credit with jobReference, amount, and creditReason', () => {
+    const result = parseClassifierJson(
+      JSON.stringify({
+        intentType: 'apply_credit',
+        confidence: 0.9,
+        extractedEntities: {
+          jobReference: 'the Henderson invoice',
+          amount: 5000,
+          creditReason: 'repeat leak',
+        },
+      }),
+    );
+    expect(result?.intentType).toBe('apply_credit');
+    expect(result?.extractedEntities?.jobReference).toBe('the Henderson invoice');
+    expect(result?.extractedEntities?.amount).toBe(5000);
+    expect(result?.extractedEntities?.creditReason).toBe('repeat leak');
+  });
+
+  it('classifyIntent end-to-end for apply_credit stamps the current taxonomy version', async () => {
+    const gateway = mockGateway(
+      JSON.stringify({
+        intentType: 'apply_credit',
+        confidence: 0.9,
+        extractedEntities: { jobReference: 'the Henderson invoice', amount: 5000 },
+      }),
+    );
+    const result = await classifyIntent(
+      'Knock 50 dollars off the Henderson invoice',
+      { tenantId: 't-1' },
+      gateway,
+    );
+    expect(result.intentType).toBe('apply_credit');
+    expect(result.taxonomyVersion).toBe(INTENT_TAXONOMY_VERSION);
+    expect(result.extractedEntities?.jobReference).toBe('the Henderson invoice');
   });
 });
 

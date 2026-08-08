@@ -68,6 +68,13 @@ export type IntentType =
   // execution handler doc comment) — this intent covers only what a
   // tradesperson does by hand outside the payment processor.
   | 'record_refund'
+  // Tradesperson wave 1, Task 4 — NEW money-class proposal type: reducing
+  // what a customer owes on an ISSUED invoice (goodwill, warranty labor, a
+  // price match). Distinct from record_refund: a credit never hands money
+  // BACK (it just lowers the balance still owed) — exceeding the amount due
+  // is a refund, not a credit, and the execution handler refuses it (see
+  // ApplyCreditExecutionHandler's floor guard).
+  | 'apply_credit'
   // Taxonomy 1.2.0 (agent wave, Track A) — three proposal-driving on-ramps:
   //   create_invoice_schedule    — U2: milestone/progress billing plan for a
   //                                job; the verbatim milestone sentence rides
@@ -224,6 +231,7 @@ export const SUPPORTED_INTENTS: readonly IntentType[] = [
   'log_warranty_claim',
   'update_catalog_item',
   'record_refund',
+  'apply_credit',
   'create_invoice_schedule',
   'respond_to_review',
   'create_standing_instruction',
@@ -315,8 +323,19 @@ export const SUPPORTED_INTENTS: readonly IntentType[] = [
  *           record_payment. Stripe-automated refunds are explicitly out of
  *           scope — see RecordRefundExecutionHandler
  *           (proposals/execution/record-refund-handler.ts) for why.
+ *   1.9.0 — Tradesperson wave 1 (2026-08-07 plan) Task 4, additive:
+ *           apply_credit — a NEW money-class proposal type that reduces
+ *           what a customer owes on an issued invoice (goodwill, warranty
+ *           labor, price match). Never auto-approves at any trust tier
+ *           (D3). New extraction field (creditReason); reuses the existing
+ *           jobReference/amount seams for the invoice reference and cents
+ *           amount, same as apply_late_fee/record_refund. Floor-guarded: a
+ *           credit may never exceed the invoice's amount due — exceeding
+ *           it is a refund (record_refund), not this type's job — see
+ *           ApplyCreditExecutionHandler (proposals/execution/
+ *           apply-credit-handler.ts).
  */
-export const INTENT_TAXONOMY_VERSION = '1.8.0';
+export const INTENT_TAXONOMY_VERSION = '1.9.0';
 
 /**
  * P11-001: convenience predicate the FSM adapter uses to route
@@ -544,6 +563,12 @@ export interface ExtractedEntities {
   // record_refund: the check number, when the refund method is 'check' and
   // the caller stated one ("check 2044"). Optional passthrough field.
   refundCheckNumber?: string;
+  // Tradesperson wave 1, Task 4 — apply_credit: why the credit was given
+  // ("repeat leak", "part was under warranty", "price match"). Qualified
+  // (not bare `reason`) per house precedent (refundReason,
+  // catalogItemNewName) — folded into the appended line's description by
+  // ApplyCreditTaskHandler; optional, never fabricated when unstated.
+  creditReason?: string;
 }
 
 /**
@@ -1110,6 +1135,14 @@ Supported intents (return exactly ONE):
                            Examples: "Refund the Smiths 100 dollars on their invoice"
                                      "Give the Garcias back 250, the part was under warranty"
                                      "Record a 75 dollar check refund to Jones, check 2044"
+- "apply_credit"         — owner reduces what a customer owes on an issued
+                           invoice (goodwill, warranty labor, price match).
+                           Money-class, never auto-approves. Extract
+                           jobReference (the spoken invoice/customer ref),
+                           amount (integer cents), creditReason.
+                           Examples: "Knock 50 dollars off the Henderson invoice"
+                                     "Apply a 100 dollar credit to Jones for the callback"
+                                     "Credit the Garcias 75 — we were late"
 - "create_invoice_schedule" — user wants to set up a MILESTONE / PROGRESS
                            billing plan for a job: a deposit up front and the
                            rest later, or a percentage split across stages.
@@ -1382,7 +1415,8 @@ Return valid JSON with exactly this shape (no prose, no markdown fences):
     "catalogItemNewDescription": "<string, optional — the NEW description on update_catalog_item>",
     "refundMethod": "<cash|check|card_external|other, optional — on record_refund>",
     "refundReason": "<string, optional — why the refund was given on record_refund>",
-    "refundCheckNumber": "<string, optional — check number on record_refund>"
+    "refundCheckNumber": "<string, optional — check number on record_refund>",
+    "creditReason": "<string, optional — why the credit was given on apply_credit>"
   }
 }
 
@@ -1857,6 +1891,8 @@ export function parseClassifierJson(content: string): IntentClassification | nul
     if (refundMethod) extracted.refundMethod = refundMethod;
     if (typeof ee.refundReason === 'string') extracted.refundReason = ee.refundReason;
     if (typeof ee.refundCheckNumber === 'string') extracted.refundCheckNumber = ee.refundCheckNumber;
+    // apply_credit fields (Tradesperson wave 1, Task 4)
+    if (typeof ee.creditReason === 'string') extracted.creditReason = ee.creditReason;
     if (Object.keys(extracted).length > 0) {
       result.extractedEntities = extracted;
     }

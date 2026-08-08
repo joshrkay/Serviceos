@@ -26,7 +26,7 @@ exist today.
 
 ## A) Speakable today — intent + proposal + execution handler all exist
 
-These 41 actions can be spoken, drafted as a proposal, approved, and executed.
+These 42 actions can be spoken, drafted as a proposal, approved, and executed.
 "Persistence proof" = a Docker-gated integration test that proves the row +
 audit event actually land in Postgres (vs. mocked-DB-only coverage, which cannot
 catch schema drift or a missing dependency).
@@ -74,6 +74,7 @@ catch schema drift or a missing dependency).
 | "Log a warranty callback for the Hendersons' water heater" | `log_warranty_claim` | `create_job` | capture | unit |
 | "Raise the diagnostic fee to 89 dollars" | `update_catalog_item` | `update_catalog_item` | capture | unit |
 | "Refund the Smiths 100 dollars on their invoice" | `record_refund` | `record_refund` | money | unit |
+| "Knock 50 dollars off the Henderson invoice" | `apply_credit` | `apply_credit` | money | unit |
 
 > **Voice technician resolution (U1, taxonomy 1.2.0):** `reassign_appointment`,
 > `add_crew_member`, and `remove_crew_member` now resolve the spoken technician
@@ -206,13 +207,67 @@ Notes on the Tradesperson wave 1, Task 3 row (`record_refund`, taxonomy 1.8.0):
   owner-only gate specifically for refunds in the future.
 - `refund.recorded` (entityType `invoice`) is a SEPARATE audit event the
   execution handler emits for proposal-level traceability
-  (`proposalId`/`proposalType`/`amountCents`/`method`), alongside whatever
+  (`proposalId`/`proposalType`/`amountCents`/`method`/`paymentId`, plus
+  `reason`/`checkNumber` when the operator stated them), alongside whatever
   `payment.refunded` event(s) `recordRefund()` emits per payment touched.
   `refund.recorded` is deliberately **not** added to
   `analytics/audit-event-mapping.ts` — the money signal is already
   captured by `payment.refunded` (which IS mapped there); a second mapped
   product event for the same real-world refund would double-count refund
   volume. This mirrors `expense.logged`'s unmapped-by-design posture.
+
+Notes on the Tradesperson wave 1, Task 4 row (`apply_credit`, taxonomy 1.9.0):
+
+- **NEW money-class proposal type** — reduces what a customer owes on an
+  ISSUED invoice (goodwill, warranty labor, price match). Never auto-approves
+  at any trust tier (D3), same as `record_payment` / `apply_late_fee` /
+  `record_refund`.
+- **Mirrors `apply_late_fee`'s mutation shape exactly, with a NEGATIVE,
+  floor-guarded line.** `ApplyCreditExecutionHandler`
+  (`proposals/execution/apply-credit-handler.ts`) appends a non-taxable line
+  item (`unitPriceCents: -amountCents`) and recomputes the document totals
+  through the SAME shared billing engine `apply_late_fee` uses — no second
+  invoice-mutation route was invented. Unlike `apply_late_fee`, this type has
+  no `stepKey`-based idempotency: the periodic dunning sweep that motivates
+  `apply_late_fee`'s deterministic line id has no analog here (each credit is
+  a one-off, human-approved voice action), and re-execution of the SAME
+  proposal is already deduped upstream by `ProposalExecutor`'s
+  `IdempotencyGuard` — see the execution handler's doc comment for the full
+  analysis of why forcing the stepKey pattern here would be wrong (it would
+  wrongly collapse two DIFFERENT, separately-approved credits on the same
+  invoice into one line).
+- **Floor guard — over-crediting is a refund, not a credit.** A credit may
+  never exceed the invoice's current `amountDueCents`; the execution handler
+  refuses BEFORE any write with a message naming both amounts
+  (`formatUsdCentsPlain`, matching `RecordRefundExecutionHandler`'s style)
+  and pointing the caller at `record_refund` instead. Over-crediting would
+  mean handing money back that was already collected — that mutates
+  PAYMENTS, a materially different operation `record_refund` already owns.
+- **Same issued-status precondition as `apply_late_fee`** — only `open` /
+  `partially_paid` invoices can be credited, never `draft` (not sent yet) or
+  `paid`/`void`/`canceled`.
+- **The invoice reference resolves the SAME way `record_payment`/
+  `record_refund`'s does** — `INVOICE_DOC_INTENTS` membership
+  (`ai/agents/customer-calling/entity-resolution.ts`), `jobReference`
+  carries the spoken reference, no separate `invoiceReference` fallback
+  field (unresolved gates `missingFields: ['invoiceId']`).
+- **`ApplyCreditTaskHandler` lives in its own file**
+  (`ai/tasks/apply-credit-task.ts`), not `voice-extended-tasks.ts` (at
+  capacity) — house pattern from `complaint-task.ts` / `brand-voice-task.ts`.
+- **RBAC posture unchanged (flagged, no policy change):** same as
+  `record_refund` — any `dispatcher` holding `proposals:approve` can approve
+  an `apply_credit` proposal under the current, pre-existing RBAC policy;
+  this task did not add a stricter owner-only gate.
+- `credit.applied` (entityType `invoice`) is the execution handler's audit
+  event, carrying `proposalId`/`proposalType`/`amountCents`/
+  `newAmountDueCents`, plus `reason` when stated. Deliberately not added to
+  `analytics/audit-event-mapping.ts` — mirrors `refund.recorded`'s
+  unmapped-by-design posture (no existing mapped event double-counts a
+  credit the way `payment.refunded` would a refund, but a credit is a pure
+  invoice-total adjustment with no separate payment-side event to defer to,
+  so this event is the sole record and stays intentionally out of the
+  product-analytics mapping to keep this type's traceability scope identical
+  to its sibling).
 
 Notes on the taxonomy-1.2.0 rows:
 
@@ -395,7 +450,8 @@ not a gap. No new `JobStatus` value was introduced for this.
     { "intent": "log_permit", "proposalType": "add_note", "actionClass": "capture" },
     { "intent": "log_warranty_claim", "proposalType": "create_job", "actionClass": "capture" },
     { "intent": "update_catalog_item", "proposalType": "update_catalog_item", "actionClass": "capture" },
-    { "intent": "record_refund", "proposalType": "record_refund", "actionClass": "money" }
+    { "intent": "record_refund", "proposalType": "record_refund", "actionClass": "money" },
+    { "intent": "apply_credit", "proposalType": "apply_credit", "actionClass": "money" }
   ],
   "handlerNoOnramp": [
     "create_booking",

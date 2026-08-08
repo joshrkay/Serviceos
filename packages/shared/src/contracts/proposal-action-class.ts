@@ -91,6 +91,11 @@ export const MONEY_PROPOSAL_TYPES: ReadonlySet<string> = new Set<string>([
   ProposalType.ISSUE_INVOICE,
   ProposalType.RECORD_PAYMENT,
   ProposalType.APPLY_LATE_FEE,
+  // Tradesperson wave 1, Task 3 — backfilled alongside APPLY_CREDIT below;
+  // this was missing since Task 3 shipped (see enums.ts's doc comment).
+  ProposalType.RECORD_REFUND,
+  // Tradesperson wave 1, Task 4 — reduces amount due on an issued invoice.
+  ProposalType.APPLY_CREDIT,
 ]);
 
 export const IRREVERSIBLE_PROPOSAL_TYPES: ReadonlySet<string> = new Set<string>([

@@ -23,6 +23,7 @@ import { applyLateFeePayloadSchema } from './contracts/apply-late-fee';
 import { createStandingInstructionPayloadSchema } from './contracts/standing-instruction';
 import { updateCatalogItemPayloadSchema } from './contracts/update-catalog-item';
 import { recordRefundPayloadSchema } from './contracts/record-refund';
+import { applyCreditPayloadSchema } from './contracts/apply-credit';
 import { adoptEntityAliasPayloadSchema } from './contracts/adopt-entity-alias';
 import { updateBrandVoicePayloadSchema } from './contracts/brand-voice';
 import {
@@ -809,6 +810,7 @@ export const PROPOSAL_TYPE_SCHEMAS: Record<ProposalType, z.ZodSchema> = {
   create_standing_instruction: createStandingInstructionPayloadSchema,
   update_catalog_item: updateCatalogItemPayloadSchema,
   record_refund: recordRefundPayloadSchema,
+  apply_credit: applyCreditPayloadSchema,
   adopt_entity_alias: adoptEntityAliasPayloadSchema,
   update_brand_voice: updateBrandVoicePayloadSchema,
 };
