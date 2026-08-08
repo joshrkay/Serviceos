@@ -199,6 +199,25 @@ describe('Postgres integration — material items', () => {
       expect(await repo.markPurchased('not-a-uuid', created.id, tenant.userId)).toBeNull();
     });
 
+    it(
+      'listPending returns [] for a non-UUID-shaped jobId instead of throwing or ' +
+        "falling back to the tenant's whole pending list",
+      async () => {
+        // Task 9's lookup_materials can pass a jobId from an unresolved
+        // spoken job reference ("the Patel job" that didn't resolve). This
+        // must behave like the malformed-tenantId case above — [], not a
+        // raw "invalid input syntax for type uuid" from job_id = $N below,
+        // and NOT the tenant's full list (that would look like a caller
+        // asking for one job's items and silently getting everyone's).
+        await repo.create({
+          tenantId: tenant.tenantId,
+          description: 'unfiltered by the malformed jobId below',
+          createdBy: tenant.userId,
+        });
+        expect(await repo.listPending(tenant.tenantId, { jobId: 'not-a-uuid' })).toEqual([]);
+      },
+    );
+
     it('markPurchased rejects an empty actorId', async () => {
       const created = await repo.create({
         tenantId: tenant.tenantId,

@@ -22,6 +22,23 @@ describe('MaterialItemRepository', () => {
     expect(await repo.listPending('t1')).toHaveLength(1);
   });
 
+  it(
+    "a non-matching/malformed jobId filter returns [] — never falls back to the " +
+      "tenant's whole pending list",
+    async () => {
+      // Mirrors the Pg-side guard (pg-material-item.ts): a jobId that can't
+      // match anything (an unresolved spoken job reference on the voice
+      // path, or simply malformed) must scope down to nothing, not silently
+      // drop the filter and hand back every pending item.
+      const repo = new InMemoryMaterialItemRepository();
+      await repo.create({ tenantId: 't1', description: 'unscoped', createdBy: 'u1' });
+      await repo.create({ tenantId: 't1', description: 'job-1 item', jobId: 'job-1', createdBy: 'u1' });
+
+      expect(await repo.listPending('t1')).toHaveLength(2);
+      expect(await repo.listPending('t1', { jobId: 'not-a-real-job' })).toEqual([]);
+    },
+  );
+
   it('never leaks another tenant into listPending, even with a matching jobId filter', async () => {
     const repo = new InMemoryMaterialItemRepository();
     await repo.create({ tenantId: 't1', description: 'a', jobId: 'job-1', createdBy: 'u1' });

@@ -15,13 +15,15 @@ import {
 } from './material-item';
 
 // Mirrors the per-file isUuid idiom used elsewhere for execution-side id
-// checks (e.g. src/ai/tasks/estimate-edit-task.ts): tenantId/id here can be
-// an LLM-invented reference on the voice path (Task 9), and
-// applyTenantContext (src/db/rls-runtime-role.ts) throws a raw
-// "Invalid tenant ID format" error on anything non-UUID-shaped before a
-// query even runs. Guarding here turns that throw into the same graceful
-// null/[] a genuinely-missing-but-well-formed id already produces, so a
-// garbled id reads as "not found" instead of a 500.
+// checks (e.g. src/ai/tasks/estimate-edit-task.ts): tenantId/id/jobId here
+// can all be LLM-invented or unresolved references on the voice path
+// (Task 9), and applyTenantContext (src/db/rls-runtime-role.ts) throws a
+// raw "Invalid tenant ID format" error on anything non-UUID-shaped before a
+// query even runs — a malformed jobId would separately hit Postgres's own
+// "invalid input syntax for type uuid" on the job_id column comparison.
+// Guarding here turns both into the same graceful null/[] a
+// genuinely-missing-but-well-formed id already produces, so a garbled
+// reference reads as "not found" instead of a 500.
 const UUID_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
 
 function isUuid(value: string): boolean {
@@ -106,6 +108,14 @@ export class PgMaterialItemRepository extends PgBaseRepository implements Materi
     options?: MaterialItemListOptions,
   ): Promise<MaterialItem[]> {
     if (!isUuid(tenantId)) return [];
+    // Same failure class as tenantId above, same fix: jobId can be an
+    // unresolved spoken job reference on the voice path (Task 9's
+    // lookup_materials). A malformed jobId must return [] — NOT the
+    // tenant's whole pending list (silently dropping the filter would be
+    // worse: the caller asked for one job's items and would get everyone's)
+    // and NOT a raw Postgres "invalid input syntax for type uuid" from
+    // comparing a non-UUID string against the job_id column below.
+    if (options?.jobId && !isUuid(options.jobId)) return [];
     return this.withTenant(tenantId, async (client) => {
       // status = 'pending' stays a SQL LITERAL (not a bind param) so the
       // planner can prove the predicate implies idx_material_items_pending
