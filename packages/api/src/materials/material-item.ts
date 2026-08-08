@@ -62,7 +62,13 @@ export interface MaterialItemListOptions {
 
 export interface MaterialItemRepository {
   create(input: CreateMaterialItemInput): Promise<MaterialItem>;
-  /** Pending items for a tenant, oldest-created first; optionally scoped to a job. */
+  /**
+   * Pending items for a tenant, oldest-created first; optionally scoped to
+   * a job. Ties break deterministically but ARBITRARILY in the Pg backend
+   * (id ASC, i.e. random v4 UUID order — see pg-material-item.ts) since two
+   * rows can share the same created_at timestamp; InMemory gives true
+   * insertion order in that case since it never ties by construction.
+   */
   listPending(tenantId: string, options?: MaterialItemListOptions): Promise<MaterialItem[]>;
   /** Transition pending -> purchased. Null if not found, wrong tenant, or not pending. */
   markPurchased(tenantId: string, id: string, actorId: string): Promise<MaterialItem | null>;

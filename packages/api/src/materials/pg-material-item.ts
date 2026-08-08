@@ -3,6 +3,7 @@
  * Tenant-scoped via RLS (`material_items`, migration 272).
  */
 import { Pool } from 'pg';
+import { isValidTenantId } from '../db/schema';
 import { PgBaseRepository } from '../db/pg-base';
 import {
   buildMaterialItem,
@@ -15,15 +16,16 @@ import {
 } from './material-item';
 
 // Mirrors the per-file isUuid idiom used elsewhere for execution-side id
-// checks (e.g. src/ai/tasks/estimate-edit-task.ts): tenantId/id/jobId here
-// can all be LLM-invented or unresolved references on the voice path
-// (Task 9), and applyTenantContext (src/db/rls-runtime-role.ts) throws a
-// raw "Invalid tenant ID format" error on anything non-UUID-shaped before a
-// query even runs — a malformed jobId would separately hit Postgres's own
-// "invalid input syntax for type uuid" on the job_id column comparison.
-// Guarding here turns both into the same graceful null/[] a
-// genuinely-missing-but-well-formed id already produces, so a garbled
-// reference reads as "not found" instead of a 500.
+// checks (e.g. src/ai/tasks/estimate-edit-task.ts): id/jobId here can be
+// LLM-invented or unresolved references on the voice path (Task 9), and a
+// malformed jobId would hit Postgres's own "invalid input syntax for type
+// uuid" on the job_id column comparison. Guarding here turns that into the
+// same graceful null/[] a genuinely-missing-but-well-formed id already
+// produces, so a garbled reference reads as "not found" instead of a 500.
+// tenantId is guarded separately via isValidTenantId (src/db/schema.ts) —
+// that's the single source of truth for the same check applyTenantContext
+// (src/db/rls-runtime-role.ts) throws against, so this guard can't drift
+// from the throw it protects against.
 const UUID_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
 
 function isUuid(value: string): boolean {
@@ -107,7 +109,7 @@ export class PgMaterialItemRepository extends PgBaseRepository implements Materi
     tenantId: string,
     options?: MaterialItemListOptions,
   ): Promise<MaterialItem[]> {
-    if (!isUuid(tenantId)) return [];
+    if (!isValidTenantId(tenantId)) return [];
     // Same failure class as tenantId above, same fix: jobId can be an
     // unresolved spoken job reference on the voice path (Task 9's
     // lookup_materials). A malformed jobId must return [] — NOT the
@@ -147,7 +149,7 @@ export class PgMaterialItemRepository extends PgBaseRepository implements Materi
 
   async markPurchased(tenantId: string, id: string, actorId: string): Promise<MaterialItem | null> {
     requireActorId(actorId);
-    if (!isUuid(tenantId) || !isUuid(id)) return null;
+    if (!isValidTenantId(tenantId) || !isUuid(id)) return null;
     return this.withTenant(tenantId, async (client) => {
       const { rows } = await client.query<MaterialItemRow>(
         `UPDATE material_items
