@@ -1427,8 +1427,11 @@ export function createExecutionHandlerRegistry(deps?: {
     // writes a service_agreements row (migration 056, already live) via
     // the SAME agreementRepo the authenticated route + recurring-sweep
     // worker use. LogExpense-family posture: registered unconditionally,
-    // degrades to a synthetic-id passthrough without the repo.
-    new CreateServiceAgreementExecutionHandler(deps?.agreementRepo, deps?.auditRepo),
+    // degrades to a synthetic-id passthrough without agreementRepo OR
+    // locationRepo — quality-review C1 fix, the drafting task never
+    // supplies a locationId, so the handler resolves the customer's
+    // service location itself (isFullyWired() requires both).
+    new CreateServiceAgreementExecutionHandler(deps?.agreementRepo, deps?.auditRepo, deps?.locationRepo),
     new ConvertLeadExecutionHandler(deps?.leadRepo, deps?.customerRepo, deps?.auditRepo, deps?.locationRepo),
     new ConfirmAppointmentExecutionHandler(deps?.appointmentRepo, requiredAuditRepo),
     new MarkLeadLostExecutionHandler(deps?.leadRepo, deps?.auditRepo),

@@ -1269,8 +1269,12 @@ Supported intents (return exactly ONE):
                                      "Customer added three more outlets — write it up"
 - "create_service_agreement" — owner signs a customer up for a recurring
                            maintenance plan/membership. Extract customerName,
-                           serviceAgreementName, serviceAgreementCadence
-                           (monthly/quarterly/twice a year/annual),
+                           serviceAgreementName, serviceAgreementCadence —
+                           exactly one of monthly, quarterly, twice_a_year,
+                           or annual (map "semiannual"/"every six months" to
+                           twice_a_year and "yearly" to annual; NEVER emit
+                           the words "twice a year" with spaces — the field
+                           value must be the literal token twice_a_year) —
                            amount (integer cents per period), and
                            serviceAgreementStartsOn if spoken.
                            Examples: "Sign the Garcias up for the annual maintenance plan, 290 a year"

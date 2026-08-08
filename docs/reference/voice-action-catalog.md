@@ -77,7 +77,7 @@ catch schema drift or a missing dependency).
 | "Knock 50 dollars off the Henderson invoice" | `apply_credit` | `apply_credit` | money | unit |
 | "Text the Hendersons the part arrived, we can come Thursday" | `send_customer_message` | `send_customer_message` | comms | unit |
 | "The Garcias want a second zone — change order for 1800" | `create_change_order` | `create_change_order` | capture | integration (`integration/draft-estimate-execution.test.ts`) |
-| "Sign the Garcias up for the annual maintenance plan, 290 a year" | `create_service_agreement` | `create_service_agreement` | capture | unit |
+| "Sign the Garcias up for the annual maintenance plan, 290 a year" | `create_service_agreement` | `create_service_agreement` | capture | unit + sweep round-trip (`proposals/create-service-agreement-handler.test.ts`: handler-created agreement → `runDueAgreements` → asserts a `generated`, not `failed`, run) |
 
 > **Voice technician resolution (U1, taxonomy 1.2.0):** `reassign_appointment`,
 > `add_crew_member`, and `remove_crew_member` now resolve the spoken technician
@@ -461,15 +461,34 @@ Notes on the Task 7 row (`create_service_agreement`, taxonomy 1.12.0):
 - **Reuses the existing agreements substrate end to end, does not
   reimplement it.** `CreateServiceAgreementExecutionHandler`
   (`proposals/execution/create-service-agreement-handler.ts`) writes
-  through the SAME `AgreementRepository` (`agreements/agreement.ts`,
-  Pg-backed via `agreements/pg-agreement.ts`) the authenticated
-  `POST /api/agreements` route and the recurring-agreements sweep
-  (`agreements/agreement-service.ts runDueAgreements`, driven by
-  `workers/recurring-agreements-worker.ts`) already use, and computes
-  `nextRunAt` via the SAME `computeFirstRun` function `createAgreement`
-  uses (exported from `agreement-service.ts` for this purpose) — a
-  voice-drafted agreement's first-run pointer can never diverge from a
-  form-created one's.
+  through `createAgreement` (`agreements/agreement-service.ts`) — the SAME
+  function the authenticated `POST /api/agreements` route calls, which in
+  turn writes through the SAME `AgreementRepository`
+  (`agreements/agreement.ts`, Pg-backed via `agreements/pg-agreement.ts`)
+  the recurring-agreements sweep (`runDueAgreements`, driven by
+  `workers/recurring-agreements-worker.ts`) reads from. Quality-review fix
+  (I1) — an earlier revision hand-assembled the `Agreement` row instead of
+  calling `createAgreement`, duplicating six defaults
+  (`autoGenerateInvoice`/`autoGenerateJob`/`autoRenew`/`renewalCount`/
+  `memberDiscountBps`/`priorityBooking`/`autoCollectDues`) and skipping
+  three invariants (`endsOn >= startsOn`, the auto-renew term invariant,
+  `parseRule` validation) that live in `createAgreement` — most of those
+  fields are OPTIONAL on the `Agreement` interface (added well after the
+  original table), so the type system could not have caught a future
+  hand-rolled copy silently missing one. Calling `createAgreement` means
+  `computeFirstRun` (its internal `nextRunAt` calculation) runs there too;
+  on TODAY's 4-cadence mapping table this is currently equivalent to a
+  plain copy of `startsOn` (`computeFirstRun` only diverges when the rule
+  carries `BYMONTHDAY`, which none of the four mappings emit) — reusing
+  the shared function is parity with the authenticated route and
+  future-proofing, not a fix for a live bug on today's table.
+- **`createAgreement`'s own audit call is suppressed** (called with
+  `undefined` as its audit-repo argument) because that call is not
+  failure-soft (no try/catch) — a thrown audit error there would propagate
+  AFTER the row was already inserted, misreporting a successful create as
+  a failed execution. The execution handler emits its OWN failure-soft
+  `service_agreement.created` event afterward instead, exactly like every
+  other LogExpense-family handler (`log-expense-handler.ts`).
 - **No money moves at creation.** `createAgreement`'s own doc comment
   explains that service agreements bypass the proposals layer for their
   RECURRING runs (each cycle's job/invoice generation is pre-approved
@@ -478,14 +497,39 @@ Notes on the Task 7 row (`create_service_agreement`, taxonomy 1.12.0):
   swept by the exact same unmodified `runDueAgreements` machinery as a
   form-created agreement, and each generated invoice rides the normal
   review path already in place for that invoice type.
-- **The execution handler does NOT call `createAgreement()` directly** —
-  that function's own `service_agreement.created` audit call is not
-  failure-soft (no try/catch), so a thrown audit error there would
-  propagate AFTER the row was already inserted, misreporting a successful
-  create as a failed execution (and risking a duplicate row on retry). The
-  repo write and the audit emission are done separately here instead,
-  exactly like every other LogExpense-family handler
-  (`log-expense-handler.ts`).
+- **CRITICAL fix (C1) — service-location resolution.** The drafting task
+  has no location-reference extraction seam, so `payload.locationId` is
+  ALWAYS absent on a voice-drafted proposal. `runDueAgreements` generates
+  each cycle's job with `locationId: agreement.locationId ?? ''`, and job
+  creation REJECTS an empty `locationId` — so before this fix, EVERY
+  voice-created agreement produced a `failed` run on EVERY sweep tick
+  (every 60 seconds — app.ts), forever, with the only trace being a
+  buried `agreement_runs` row (`nextRunAt` also advances on a failed run,
+  so the cycle was never retried either). `CreateServiceAgreementExecutionHandler`
+  now resolves the customer's PRIMARY active service location, else their
+  first active location, at execution time — the SAME ladder
+  `EmergencyDispatchExecutionHandler` and `CreateJobExecutionHandler`/
+  `CreateAppointmentExecutionHandler` (`handlers.ts`) already use. A
+  customer with no active location at all fails execution outright
+  ("Customer has no service location — add one before starting a plan")
+  rather than persisting a row the sweep can never service. Disabling
+  `autoGenerateJob` as a workaround was considered and rejected:
+  `createInvoice` independently requires a `jobId` (`invoices/invoice.ts`),
+  so a location-less agreement can never produce either side effect.
+  `isFullyWired()` requires BOTH `agreementRepo` and `locationRepo` for
+  this reason — a missing `locationRepo` is not a degraded-but-usable
+  mode here, since v1 never supplies a payload `locationId` at all. (The
+  underlying "an agreement can be created with no location" hole is
+  PRE-EXISTING and repo-wide — the authenticated route's `locationId` is
+  optional too, and no test anywhere covered a no-location agreement
+  before this task's sweep round-trip test; this fix closes it for the
+  voice path specifically, not the route.)
+- **PERPETUAL by default (info, not a bug).** A voice-created agreement
+  never sets `endsOn`, so `autoRenew: false` does not actually BOUND
+  anything — `autoRenew` only controls whether a LAPSED `endsOn` rolls
+  forward; with no `endsOn`, nothing ever lapses. "No auto-renew" reads
+  safer than it is: a voice-signed-up plan runs indefinitely until an
+  operator manually pauses or cancels it from the agreements screen.
 - **Idempotent replay, not just a synthetic-id passthrough.** Like
   `create_change_order`, this handler mints a brand NEW row on every
   `execute()` call (unlike `apply_credit`/`record_refund`, which mutate an
@@ -506,26 +550,79 @@ Notes on the Task 7 row (`create_service_agreement`, taxonomy 1.12.0):
   onto one of `monthly`/`quarterly`/`twice_a_year`/`annual` (synonyms like
   "semiannual"/"yearly" map onto the same tokens); `quarterly` and
   `twice_a_year` are expressed as `FREQ=MONTHLY;INTERVAL=3` and
-  `FREQ=MONTHLY;INTERVAL=6` respectively — the recurrence engine
-  (`agreements/recurrence.ts`) has no native `FREQ=QUARTERLY` step-6
-  equivalent for "twice a year", so both ride the `MONTHLY` frequency with
-  an interval. An absent/unrecognized cadence gates
-  `missingFields: ['recurrenceRule']`.
+  `FREQ=MONTHLY;INTERVAL=6` respectively. `FREQ=QUARTERLY;INTERVAL=2` is an
+  EQUALLY valid RRULE for "every 6 months" (`recurrence.ts`'s
+  `nextOccurrence` steps a `quarterly` frequency by `interval * 3` months)
+  — `MONTHLY;INTERVAL=6` was chosen so every multi-month cadence in this
+  table rides the same `FREQ`, not because the engine lacks a
+  `QUARTERLY`-based equivalent. The mapping table is typed against the
+  classifier's own cadence union (`Record<ServiceAgreementCadence,
+  string>`), not a widened `Record<string, string>`, so a fifth cadence
+  token added later without a matching RRULE entry is a COMPILE error, not
+  a silent gate. An absent/unrecognized cadence gates
+  `missingFields: ['recurrenceRule']`. **Weekly/biweekly cadences (lawn
+  care, pool service, pest control — core recurring-trades work) are
+  UNSUPPORTED by the recurrence engine itself** (`RECURRENCE_FREQUENCIES`
+  is `monthly | quarterly | yearly` only, `agreements/enums.ts`) — a
+  spoken "weekly" gates on `missingFields: ['recurrenceRule']` with no
+  further explanation on the card; this is a real product gap, not a bug,
+  filed here so the gate isn't mysterious.
 - **`startsOn` defaults to the first of next month computed from the
   TENANT's local calendar date** (`shared/timezone.ts localDateKey`), never
   raw server-local `Date` math — a naive default is off by a day for any
-  tenant whose local "today" differs from the server/UTC day. A spoken
-  override ("starting September", "October 1st") is parsed best-effort via
-  chrono-node, anchored to the tenant-local "now" (mirrors
+  tenant whose local "today" differs from the server/UTC day. This is a
+  DELIBERATE, narrower exception to the general "never silently default an
+  unresolved tenant timezone" rule (the Phoenix mis-booking incident
+  documented in `voice-action-router.ts`): the blast radius of a wrong
+  START DATE — possibly off by one day, on a review card the operator
+  reads before approving, for a sweep run weeks away — is materially
+  smaller than a mis-timed booking. The assumption is made VISIBLE rather
+  than silent: whenever the fallback timezone is used, the proposal's
+  `explanation` names it (e.g. "…starting Sep 1 2026 (assumed
+  America/New_York — tenant timezone unset)").
+  A spoken override ("starting September", "October 1st") is parsed
+  best-effort via chrono-node, anchored to the tenant-local "now" (mirrors
   `ai/scheduling/resolve-datetime.ts`'s own chrono+luxon reference-date
   construction, minus the exact-time/daypart requirement — this field is a
-  bare calendar DATE, never a time-of-day); an unparseable phrase falls
-  back to the computed default rather than gating. The contract
-  (`proposals/contracts/create-service-agreement.ts`) additionally refines
-  `startsOn` against a REAL calendar date (not just `YYYY-MM-DD` shape) —
-  `computeFirstRun` feeds the string straight into `Date.UTC` with no
-  further validation, so an out-of-range day (e.g. "2026-02-30") would
-  otherwise silently roll over to a wrong date instead of failing loudly.
+  bare calendar DATE, never a time-of-day), guarded (quality-review I2)
+  against two classes of bad parse: (1) a fully AMBIGUOUS relative phrase
+  with neither an explicit month nor day named — chrono still returns a
+  best guess for "a year"/"last year" (reading them as a bare duration
+  from "now"), and that guess is materially wrong for the classifier's own
+  canonical example ("290 A YEAR" could drop "a year" into this field);
+  (2) a resolved date already in the tenant's PAST ("January 2019") —
+  `runDueAgreements` (the sweep, every 60 seconds) would pick a back-dated
+  `nextRunAt` up on its very next tick and advance ONE interval per pass,
+  so a back-dated MONTHLY plan would drip a job+invoice pair roughly once
+  a MINUTE until it caught up to today. Either guard tripping, or chrono
+  simply failing to parse, falls back to the computed default rather than
+  gating — a soft scheduling default the reviewer can correct before
+  approving is not the "silent guess" the P0 voice-safety invariant
+  targets. The contract (`proposals/contracts/create-service-agreement.ts`)
+  layers two backstops: `startsOn` must be a REAL calendar date (not just
+  `YYYY-MM-DD` shape — `computeFirstRun` feeds the string straight into
+  `Date.UTC` with no further validation, so "2026-02-30" would otherwise
+  silently roll over to March 2), and must not already be in the past
+  (computed fresh per validation call against the server's wall clock —
+  defense in depth behind the drafting task's tenant-aware guard above).
+- **`explanation` renders the plan in plain language, not the raw
+  RRULE.** No operator reviewing a card verifies `"FREQ=MONTHLY;
+  INTERVAL=6"` by eye. `Proposal.explanation` (rendered on the review card
+  without touching the payload's Zod contract) carries a summary like
+  "Twice a year, $290.00, starting Sep 1 2026" instead, built from
+  whatever of {cadence, price, start date} is concretely known.
+- **A $0 plan is legal at the contract layer but never reachable by voice
+  today.** `priceCentsSchema` (`agreements/enums.ts`) is non-negative, so a
+  `priceCents: 0` payload (a comp membership) validates — a legitimate
+  configuration for a future non-voice caller (a hand-edited proposal, or
+  a comp-plan UI path). `CreateServiceAgreementTaskHandler` is stricter on
+  purpose: it requires a POSITIVE spoken amount (`ee.amount > 0`), because
+  voice cannot distinguish "the caller said zero" from "the caller didn't
+  state a price" — the voice path can never currently produce
+  `priceCents: 0`. The contract also caps `priceCents` at a $100,000/period
+  sanity ceiling (quality-review minor) — a backstop against a misheard
+  "290 thousand a year" persisting a $2.9M/period plan, not a real product
+  limit.
 - **No `_meta` confidence marker.** Unlike `create_change_order`, there is
   no catalog grounding or LLM call in this handler that would produce a
   real confidence signal on a plan price — `_meta` is omitted rather than

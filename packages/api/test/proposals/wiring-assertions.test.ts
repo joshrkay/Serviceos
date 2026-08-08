@@ -182,6 +182,14 @@ describe('U8: each newly probed handler is DETECTED when its effect dep is dropp
     // CreateServiceAgreementExecutionHandler.isFullyWired() reports false
     // (its dep-less mode is a synthetic passthrough that persists nothing).
     { omit: ['agreementRepo'], flags: ['create_service_agreement'] },
+    // Quality-review C1 fix — create_service_agreement ALSO requires
+    // locationRepo: the drafting task never supplies payload.locationId (no
+    // extraction seam), so isFullyWired() fails closed without a repo to
+    // resolve the customer's service location itself. This is a genuinely
+    // NEW omission scenario — no prior voice-reachable handler required
+    // locationRepo in its OWN isFullyWired() (emergency_dispatch's probe
+    // does too, but predates this suite's per-dep row coverage).
+    { omit: ['locationRepo'], flags: ['create_service_agreement'] },
   ];
 
   for (const { omit, flags } of rows) {
