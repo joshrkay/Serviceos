@@ -162,13 +162,30 @@ draft that named fields which don't exist in `ExtractedEntities` / the
 classifier's JSON-response allowlist (`customerReference`, `requestedDate`,
 `requestedTime`, `inspectionType`, `permitNumber`, `problemDescription`) —
 anything the LLM emitted under those keys would have been silently dropped.
-`CreateAppointmentAITaskHandler` makes its own LLM call
-(`APPOINTMENT_SYSTEM_PROMPT`) and unconditionally rewrites the summary as
-`"<jobTitle> — <resolved time>"` (`buildResolvedSummary`,
-`create-appointment-task.ts`); `CreateJobVoiceTaskHandler` copies `jobTitle`
-straight into the job's `title`. Both aliases now ride real fields the
-target handler already reads, so the distinctive wording (`"Inspection — "`,
-`"Warranty — "`) survives with zero handler changes — see also the JSON
+**Correction (2026-08-08, spec review of this correction itself):** the
+paragraph below originally claimed `CreateAppointmentAITaskHandler`
+"unconditionally rewrites the summary as `"<jobTitle> — <resolved time>"`
+(`buildResolvedSummary`, `create-appointment-task.ts`)" — false;
+`grep -n jobTitle packages/api/src/ai/tasks/create-appointment-task.ts`
+returns nothing. The real mechanism is surface-dependent, and differs by
+which voice path drafted the proposal:
+- **Memo-worker path** (`CreateAppointmentAITaskHandler`): `jobTitle` is
+  only ambient "Known entities" JSON in the handler's OWN second LLM call
+  (`buildUserMessage`) — a hint the model may or may not fold into its own
+  `summary` field, not a field the code is told to read deterministically.
+- **FSM live-call / in-app paths** (`buildVoiceProposalPayload`,
+  `proposals/voice-payload.ts`): `jobTitle` promotes VERBATIM into
+  `payload.jobTitle` via the generic flat-key copy loop, and
+  `CreateAppointmentExecutionHandler`'s SCH-02 auto-open-a-job fallback
+  (`proposals/execution/handlers.ts`) reads it deterministically to name
+  the job.
+
+`CreateJobVoiceTaskHandler` copies `jobTitle` straight into the job's
+`title` on every surface (no LLM re-extraction in between), so
+`log_warranty_claim`'s wording survival is NOT surface-dependent the way
+`schedule_inspection`'s is. Don't assume a future alias intent gets a
+guaranteed wording pass-through for free just because this one's target
+proposal type happens to read the field somewhere — see also the JSON
 response schema (`~L1230-1275`), whose `noteBody`/`jobTitle` descriptions
 were extended to mention `log_permit`/`schedule_inspection`/
 `log_warranty_claim`.
@@ -195,6 +212,19 @@ In `packages/api/src/ai/agents/customer-calling/entity-resolution.ts`, add `'sch
   'log_permit',
   'schedule_inspection',
 ```
+
+**Correction (2026-08-08, quality review of Task 2):** this step as originally
+written left `log_permit` OUT of `CUSTOMER_REF_INTENTS`, while its target
+proposal type (`add_note`) IS a member. Result: "Note the electrical permit
+was approved for the Hendersons" — a permit note that names a CUSTOMER
+rather than a job — extracted `customerName` but never resolved it, staying
+fully manual even though a plain `add_note` with the same phrasing resolves
+it automatically. `log_permit` now also joins `CUSTOMER_REF_INTENTS`,
+matching `schedule_inspection`/`log_warranty_claim`'s per-alias resolution
+parity with their own targets. See the per-alias rationale comments at both
+sets in `entity-resolution.ts` (each alias is checked against its OWN
+target, never a blanket assumption) and the `planVoiceEntityLookups` test
+coverage for `log_permit` customer resolution.
 
 - [ ] **Step 6: Run test to verify it passes**
 

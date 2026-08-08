@@ -291,13 +291,38 @@ describe('planVoiceEntityLookups — intent-conditioned operator references', ()
     expect(lookups).toEqual([{ kind: 'customer', reference: 'Patel', refKey: 'customerId' }]);
   });
 
-  // log_permit joined JOB_REF_INTENTS only — a permit attaches to a job, not
-  // directly to a customer name.
   it('plans a job lookup for log_permit', () => {
     const lookups = planVoiceEntityLookups('log_permit', {
       jobReference: 'the Patel job',
     });
     expect(lookups).toEqual([
+      { kind: 'job', reference: 'the Patel job', refKey: 'jobId' },
+    ]);
+  });
+
+  // Quality-review fix (2026-08-08) — log_permit ALSO joined
+  // CUSTOMER_REF_INTENTS: its target, add_note, already resolves
+  // customerName (a note can target a customer, not just a job — see
+  // NOTE_TARGET_KINDS), so a permit note naming a customer rather than a
+  // job ("Note the electrical permit was approved for the Hendersons")
+  // must resolve the same way a plain add_note would. Before this fix that
+  // customer reference stayed unresolved and fully manual.
+  it('plans a customer lookup for log_permit when a customer, not a job, is named', () => {
+    const lookups = planVoiceEntityLookups('log_permit', {
+      customerName: 'Henderson',
+    });
+    expect(lookups).toEqual([
+      { kind: 'customer', reference: 'Henderson', refKey: 'customerId' },
+    ]);
+  });
+
+  it('plans customer + job lookups for log_permit when both are named, customer first', () => {
+    const lookups = planVoiceEntityLookups('log_permit', {
+      customerName: 'Patel',
+      jobReference: 'the Patel job',
+    });
+    expect(lookups).toEqual([
+      { kind: 'customer', reference: 'Patel', refKey: 'customerId' },
       { kind: 'job', reference: 'the Patel job', refKey: 'jobId' },
     ]);
   });

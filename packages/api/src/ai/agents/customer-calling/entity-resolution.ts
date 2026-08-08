@@ -46,7 +46,7 @@ const CUSTOMER_REF_INTENTS = new Set([
   'create_invoice',
   'draft_estimate',
   'create_appointment',
-  'create_booking',
+  'create_booking', // vacuous today — see the note at SCHEDULING_CREATE_INTENTS below.
   'send_invoice',
   'send_estimate',
   // A spoken nudge names a PERSON ("nudge the Khan estimate"), not display
@@ -70,8 +70,24 @@ const CUSTOMER_REF_INTENTS = new Set([
   'add_service_location',
   'mark_lead_lost',
   'confirm_appointment',
-  // Tradesperson wave 1 — aliases resolve the same refs as their targets.
+  // Tradesperson wave 1 — each alias joins the SAME customer-reference
+  // resolution its target proposal type already gets (per-alias, not a
+  // blanket rule — a future alias must be checked against its own target,
+  // not assumed):
+  //   schedule_inspection  → create_appointment (already above) resolves
+  //                          customerName; the inspection's own customer
+  //                          reference needs the same resolution.
+  //   log_permit           → add_note (already above) resolves
+  //                          customerName when a permit note names a
+  //                          customer rather than a job ("Note the
+  //                          electrical permit was approved for the
+  //                          Hendersons") — without this, that customer
+  //                          reference stayed fully manual even though
+  //                          plain add_note already resolves it.
+  //   log_warranty_claim   → create_job (already above) resolves
+  //                          customerName for the new warranty job record.
   'schedule_inspection',
+  'log_permit',
   'log_warranty_claim',
 ]);
 
@@ -90,6 +106,23 @@ const ESTIMATE_DOC_INTENTS = new Set([
   'send_estimate_nudge',
 ]);
 
+/**
+ * Job-reference resolution membership. Before adding a NEW intent here,
+ * decide TWO separate questions — conflating them is exactly what caused
+ * schedule_inspection's real bug (e255bbc0 introduced it, 3b10d44d fixed
+ * it):
+ *   1. Does an EXPLICIT spoken jobReference for this intent need to resolve
+ *      to an existing job? If yes, join this set.
+ *   2. Does this intent's `jobTitle` field carry a NEW job's descriptive
+ *      name rather than an existing-job lookup key? If yes, it must ALSO
+ *      join `JOB_TITLE_FALLBACK_EXCLUDED_INTENTS` below — even while
+ *      staying a member of THIS set — otherwise the `jobReference ??
+ *      jobTitle` fallback (in `planVoiceEntityLookups` below) will search
+ *      for a job that was never meant to exist by that name.
+ * `create_job`/`create_booking` answer NO to (1): they never join this set
+ * at all (see the fallback's own comment for the full rationale).
+ * `schedule_inspection` answers YES to both.
+ */
 const JOB_REF_INTENTS = new Set([
   'update_job',
   'log_time_entry',
@@ -104,11 +137,21 @@ const JOB_REF_INTENTS = new Set([
   // contract, so an unresolved (or absent) reference still logs the expense
   // unlinked — resolution only ever ADDS the link, never gates the capture.
   'log_expense',
-  // Tradesperson wave 1 — aliases resolve the same refs as their targets.
-  // schedule_inspection is ALSO in JOB_TITLE_FALLBACK_EXCLUDED_INTENTS below
-  // — its jobTitle carries descriptive inspection text, never an
-  // existing-job name — but stays a JOB_REF_INTENTS member so an EXPLICIT
-  // spoken jobReference ("on the Patel job") still resolves to a jobId.
+  // Tradesperson wave 1 — per-alias job-reference rationale (log_warranty_claim
+  // is deliberately ABSENT: its target, create_job, never joins
+  // JOB_REF_INTENTS either — see the comment above the fallback below —
+  // so a new warranty job's descriptive jobTitle can never be misread as a
+  // lookup for an existing job):
+  //   log_permit           → add_note (already above) resolves an EXPLICIT
+  //                          spoken jobReference ("on the Patel job") the
+  //                          same way; a permit note names the job it
+  //                          attaches to just like any other add_note.
+  //   schedule_inspection  → is ALSO in JOB_TITLE_FALLBACK_EXCLUDED_INTENTS
+  //                          below — its jobTitle carries descriptive
+  //                          inspection text, never an existing-job name —
+  //                          but stays a JOB_REF_INTENTS member so an
+  //                          EXPLICIT spoken jobReference ("on the Patel
+  //                          job") still resolves to a jobId.
   'log_permit',
   'schedule_inspection',
 ]);
@@ -127,10 +170,26 @@ const JOB_REF_INTENTS = new Set([
  * requiresExistingEntity('schedule_inspection') is TRUE (e255bbc0 — a NAMED
  * job must actually exist), that bogus not_found would incorrectly escalate
  * an inspection that never named a job at all, instead of proceeding the
- * same way create_appointment does with no job link.
+ * same way create_appointment does: falling through to
+ * CreateAppointmentExecutionHandler's SCH-02 fallback (proposals/execution/
+ * handlers.ts), which auto-opens a NEW job named `jobTitle || proposal.
+ * summary` when a customerId is resolvable (or fails with the same
+ * missing-customerId error any other unresolved jobId hits) — never "no job
+ * link" (a booked appointment always ends up attached to a job one way or
+ * another).
  */
 const JOB_TITLE_FALLBACK_EXCLUDED_INTENTS = new Set(['schedule_inspection']);
 
+// Quality-review note (2026-08-08) — 'create_booking' in this set (and in
+// CUSTOMER_REF_INTENTS above) is a defensive, currently-VACUOUS entry: it
+// names a ProposalType (proposals/proposal.ts), never a classifier
+// IntentType (ai/orchestration/intent-classifier.ts) — grep confirms no
+// `IntentType` union member is named `create_booking`. Since every `intent`
+// value these sets are checked against (`.has(intent)`) is classifier
+// output, this entry can never match today. Kept (not removed) as a
+// forward guard in case a future classifier intent is ever named to match
+// it directly — removing it would be a silent behavior no-op either way,
+// so there is no urgency to delete it.
 const SCHEDULING_CREATE_INTENTS = new Set(['create_appointment', 'create_booking']);
 
 const APPOINTMENT_REF_INTENTS = new Set([

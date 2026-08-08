@@ -666,6 +666,18 @@ export const SIGNUP_INTENT_ACT_THRESHOLD = 0.75;
 // against the real prompt size in a test — see
 // packages/api/test/voice-quality/voice-eval-live.test.ts. Never trim this
 // export back to unexported without checking that test doesn't need it.
+//
+// Spec-review note (2026-08-08) — the schedule_inspection block's
+// "Inspection — " jobTitle prefix reaches the final summary differently per
+// surface (e5031cdd's commit message overstated this as one guaranteed
+// rewrite). Memo-worker path (CreateAppointmentAITaskHandler,
+// create-appointment-task.ts): jobTitle is only ambient "Known entities"
+// JSON in the handler's own second LLM call — not a field it is told to
+// read. FSM live-call/in-app paths (buildVoiceProposalPayload,
+// proposals/voice-payload.ts): jobTitle promotes verbatim into
+// payload.jobTitle, which CreateAppointmentExecutionHandler's SCH-02
+// fallback (proposals/execution/handlers.ts) reads deterministically.
+// Don't assume a future alias gets this for free on every surface.
 export const SYSTEM_PROMPT = `You are an intent classifier for a field service operating system.
 Given a voice transcript from a field service operator, decide which action they intend to take.
 

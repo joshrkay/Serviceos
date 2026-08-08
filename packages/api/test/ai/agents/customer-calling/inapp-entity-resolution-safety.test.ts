@@ -722,12 +722,15 @@ describe('requiresExistingEntity', () => {
       'lookup_balance',
       'convert_lead',
       // Tradesperson wave 1 (2026-08-07 plan) — deliberate divergence from
-      // their alias targets: schedule_inspection needs an existing JOB (you
-      // can't book an inspection visit on a job that doesn't exist yet) and
-      // log_warranty_claim needs an existing CUSTOMER (a warranty claim is
-      // necessarily against past work for a known customer) — unlike bare
-      // create_appointment / create_job, which are creation intents and
-      // stay FALSE above.
+      // their alias targets: an inspection that NAMES a job requires that
+      // job to exist (3b10d44d — a bare "schedule the rough-in inspection
+      // for Thursday" with NO job named does not require one; it falls
+      // through to the same auto-open-a-job path plain create_appointment
+      // uses, per JOB_TITLE_FALLBACK_EXCLUDED_INTENTS in
+      // entity-resolution.ts). log_warranty_claim needs an existing
+      // CUSTOMER (a warranty claim is necessarily against past work for a
+      // known customer) — unlike bare create_appointment / create_job,
+      // which are creation intents and stay FALSE above.
       'schedule_inspection',
       'log_warranty_claim',
     ]) {

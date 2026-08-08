@@ -164,6 +164,20 @@ export function voiceProposalSummary(
   if (intent === 'create_appointment') return `Schedule appointment${name ? ` for ${name}` : ''}`;
   if (intent === 'emergency_dispatch') return 'Emergency dispatch — escalate to on-call';
   if (intent === 'update_brand_voice') return 'Update brand voice';
+  // Quality-review fix (2026-08-08) — Tradesperson wave 1 alias intents were
+  // falling through to the generic `Voice intent: ${intent}` fallback below,
+  // since both call sites (inapp-adapter.ts, create-voice-turn-processor.ts)
+  // pass the raw CLASSIFIER intent, not the mapped proposal type. For
+  // schedule_inspection this isn't just a cosmetic miss: it aliases
+  // create_appointment, whose execution handler falls back to
+  // `proposal.summary` to name an auto-opened job when the classifier
+  // emitted no jobTitle — so a phone caller booking an inspection with no
+  // explicit jobTitle got a job literally named "Voice intent:
+  // schedule_inspection", the exact historical bug this function exists to
+  // prevent for plain create_appointment (see the module doc comment above).
+  if (intent === 'schedule_inspection') return `Schedule inspection${name ? ` for ${name}` : ''}`;
+  if (intent === 'log_permit') return `Log permit${ref ? ` on ${ref}` : name ? ` for ${name}` : ''}`;
+  if (intent === 'log_warranty_claim') return `Log warranty claim${name ? ` for ${name}` : ''}`;
   if (intent) return `Voice intent: ${intent}${ref ? ` (${ref})` : ''}`;
   return 'Voice clarification needed';
 }

@@ -122,4 +122,31 @@ describe('voiceProposalSummary', () => {
     );
     expect(voiceProposalSummary(undefined, {})).toBe('Voice clarification needed');
   });
+
+  // Quality-review fix (2026-08-08) — the Tradesperson wave 1 alias intents
+  // were missing cases here entirely and fell through to the generic
+  // `Voice intent: ${intent}` fallback (both real call sites pass the raw
+  // classifier intent, never the mapped proposal type — see
+  // ai/agents/customer-calling/inapp-adapter.ts and
+  // ai/voice-turn/create-voice-turn-processor.ts). For schedule_inspection
+  // this is the SAME "Voice intent: create_appointment" job-naming bug the
+  // test above pins, just for the alias: CreateAppointmentExecutionHandler's
+  // SCH-02 fallback names an auto-opened job from this summary.
+  it('gives the Tradesperson wave 1 alias intents a human-readable summary, not the debug fallback', () => {
+    expect(voiceProposalSummary('schedule_inspection', { customerName: 'Patel' })).toBe(
+      'Schedule inspection for Patel',
+    );
+    expect(voiceProposalSummary('schedule_inspection', {})).toBe('Schedule inspection');
+    expect(voiceProposalSummary('log_permit', { jobReference: 'the Patel job' })).toBe(
+      'Log permit on the Patel job',
+    );
+    expect(voiceProposalSummary('log_permit', { customerName: 'Henderson' })).toBe(
+      'Log permit for Henderson',
+    );
+    expect(voiceProposalSummary('log_permit', {})).toBe('Log permit');
+    expect(voiceProposalSummary('log_warranty_claim', { customerName: 'Henderson' })).toBe(
+      'Log warranty claim for Henderson',
+    );
+    expect(voiceProposalSummary('log_warranty_claim', {})).toBe('Log warranty claim');
+  });
 });
