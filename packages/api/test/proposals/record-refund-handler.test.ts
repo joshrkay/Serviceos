@@ -38,7 +38,7 @@ import {
 import { validateProposalPayload } from '../../src/proposals/contracts';
 import { RecordRefundExecutionHandler } from '../../src/proposals/execution/record-refund-handler';
 import type { Proposal } from '../../src/proposals/proposal';
-import { InMemoryPaymentRepository, Payment } from '../../src/invoices/payment';
+import { InMemoryPaymentRepository, Payment, PaymentRepository } from '../../src/invoices/payment';
 import { InMemoryAuditRepository } from '../../src/audit/audit';
 
 const TENANT_ID = 't1';
@@ -165,11 +165,17 @@ describe('record_refund proposal type', () => {
       expect(handler.isFullyWired()).toBe(true);
     });
 
-    it('records a refund against the single completed payment and emits refund.recorded', async () => {
+    it('records a refund against the single completed payment and emits refund.recorded with paymentId/reason/checkNumber', async () => {
       const payment = await paymentRepo.create(makePayment({ amountCents: 10000 }));
 
       const result = await handler.execute(
-        makeProposal({ invoiceId: INVOICE_ID, amountCents: 4000, method: 'cash', reason: 'warranty' }),
+        makeProposal({
+          invoiceId: INVOICE_ID,
+          amountCents: 4000,
+          method: 'check',
+          reason: 'warranty',
+          checkNumber: '2044',
+        }),
         { tenantId: TENANT_ID, executedBy: 'u1' },
       );
 
@@ -191,7 +197,13 @@ describe('record_refund proposal type', () => {
         proposalId: 'prop-1',
         proposalType: 'record_refund',
         amountCents: 4000,
-        method: 'cash',
+        method: 'check',
+        // Which payment absorbed the refund is the one fact the selection
+        // logic decides — must be on the proposal-level event, not just
+        // implicit in payment.refunded.
+        paymentId: payment.id,
+        reason: 'warranty',
+        checkNumber: '2044',
       });
       // The underlying payment-ledger event also fires (already mapped in
       // analytics/audit-event-mapping.ts) — record_refund does not
@@ -199,7 +211,20 @@ describe('record_refund proposal type', () => {
       expect(events.some((e) => e.eventType === 'payment.refunded')).toBe(true);
     });
 
-    it('enforces the over-refund invariant: a refund exceeding the single payment fails and mutates nothing', async () => {
+    it('omits reason/checkNumber from audit metadata when not spoken (never fabricated blanks)', async () => {
+      await paymentRepo.create(makePayment({ amountCents: 10000 }));
+
+      await handler.execute(
+        makeProposal({ invoiceId: INVOICE_ID, amountCents: 4000, method: 'cash' }),
+        { tenantId: TENANT_ID, executedBy: 'u1' },
+      );
+
+      const refundRecorded = auditRepo.getAll().find((e) => e.eventType === 'refund.recorded');
+      expect(refundRecorded?.metadata).not.toHaveProperty('reason');
+      expect(refundRecorded?.metadata).not.toHaveProperty('checkNumber');
+    });
+
+    it('enforces the over-refund invariant: a refund exceeding the single payment fails, mutates nothing, and names the largest possible refund', async () => {
       const payment = await paymentRepo.create(makePayment({ amountCents: 5000 }));
 
       const result = await handler.execute(
@@ -209,6 +234,10 @@ describe('record_refund proposal type', () => {
 
       expect(result.success).toBe(false);
       expect(result.error).toMatch(/exceeds any single payment/i);
+      // The largest single refund possible (5000 cents) is surfaced so the
+      // operator doesn't have to guess.
+      expect(result.error).toContain('$50.00');
+      expect(result.error).toMatch(/record it as separate smaller refunds/i);
 
       const reread = await paymentRepo.findById(TENANT_ID, payment.id);
       expect(reread?.refundedAmountCents).toBe(0);
@@ -263,6 +292,9 @@ describe('record_refund proposal type', () => {
 
       expect(result.success).toBe(false);
       expect(result.error).toMatch(/exceeds any single payment.*record it as separate smaller refunds/i);
+      // The largest single refund possible across the two payments (4000
+      // cents, the newer one) is surfaced.
+      expect(result.error).toContain('$40.00');
 
       const rereadOlder = await paymentRepo.findById(TENANT_ID, older.id);
       const rereadNewer = await paymentRepo.findById(TENANT_ID, newer.id);
@@ -288,13 +320,40 @@ describe('record_refund proposal type', () => {
       expect(reread?.refundedAmountCents).toBe(6000);
     });
 
-    it('fails when the invoice has no completed payments at all', async () => {
+    // Spec-review fix — when NOTHING is refundable, "record it as separate
+    // smaller refunds" is actively misleading (every retry fails
+    // identically; there is nothing to split). This must be a distinct
+    // message from the "exceeds any single payment" split-guidance branch.
+    it('fails with a distinct "nothing refundable" message when the invoice has no completed payments at all', async () => {
       const result = await handler.execute(
         makeProposal({ invoiceId: INVOICE_ID, amountCents: 1000, method: 'cash' }),
         { tenantId: TENANT_ID, executedBy: 'u1' },
       );
       expect(result.success).toBe(false);
-      expect(result.error).toMatch(/exceeds any single payment/i);
+      expect(result.error).toBe(
+        'This invoice has no completed payments with refundable amount remaining.',
+      );
+      expect(result.error).not.toMatch(/exceeds any single payment/i);
+      expect(result.error).not.toMatch(/separate smaller refunds/i);
+    });
+
+    // The double-submission case named in the spec review: a redelivered or
+    // re-approved record_refund proposal executes AFTER an earlier one (or
+    // a Stripe refund) already fully drained the only completed payment.
+    // Every completed payment exists but none has headroom left — same
+    // "nothing refundable" message as the no-payments-at-all case, not the
+    // split-guidance one.
+    it('fails with the same "nothing refundable" message when every completed payment is already fully refunded', async () => {
+      await paymentRepo.create(makePayment({ amountCents: 5000, refundedAmountCents: 5000 }));
+
+      const result = await handler.execute(
+        makeProposal({ invoiceId: INVOICE_ID, amountCents: 1000, method: 'cash' }),
+        { tenantId: TENANT_ID, executedBy: 'u1' },
+      );
+      expect(result.success).toBe(false);
+      expect(result.error).toBe(
+        'This invoice has no completed payments with refundable amount remaining.',
+      );
     });
 
     it('rejects an invalid invoiceId without touching the repository', async () => {
@@ -303,6 +362,56 @@ describe('record_refund proposal type', () => {
         { tenantId: TENANT_ID, executedBy: 'u1' },
       );
       expect(result.success).toBe(false);
+    });
+
+    // Error-leg pins (spec review) — a findByInvoice failure (e.g. a DB
+    // connection drop) must surface as a reported execution failure, never
+    // an unhandled rejection.
+    it('surfaces a findByInvoice failure as an execution failure, not a throw', async () => {
+      const failingRepo = {
+        findByInvoice: async () => {
+          throw new Error('connection reset');
+        },
+      } as unknown as PaymentRepository;
+      const failingHandler = new RecordRefundExecutionHandler(failingRepo, auditRepo);
+
+      const result = await failingHandler.execute(
+        makeProposal({ invoiceId: INVOICE_ID, amountCents: 1000, method: 'cash' }),
+        { tenantId: TENANT_ID, executedBy: 'u1' },
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.error).toBe('connection reset');
+    });
+
+    // Error-leg pin (spec review) — a concurrent shrink between this
+    // handler's headroom snapshot and recordRefund()'s own atomic guard
+    // (payment-service.ts's incrementRefundAtomic returning null, e.g. a
+    // Stripe webhook refund landing in the gap) must surface recordRefund's
+    // ValidationError as a reported failure, never an unhandled rejection —
+    // this is exactly the race the single-payment-scope fix eliminates
+    // ACROSS payments; within one payment it's still recordRefund's own
+    // atomic guard doing its job.
+    it("surfaces recordRefund's over-refund ValidationError (a concurrent-shrink race) as an execution failure", async () => {
+      const payment = makePayment({ amountCents: 10000, refundedAmountCents: 0 });
+      const raceRepo = {
+        findByInvoice: async () => [payment],
+        findById: async () => payment,
+        // Simulates the atomic guard rejecting a stale headroom snapshot —
+        // recordRefund() reads this as "0 rows updated" and, since findById
+        // still finds the payment, throws ValidationError rather than
+        // NotFoundError (payment-service.ts recordRefund).
+        incrementRefundAtomic: async () => null,
+      } as unknown as PaymentRepository;
+      const raceHandler = new RecordRefundExecutionHandler(raceRepo, auditRepo);
+
+      const result = await raceHandler.execute(
+        makeProposal({ invoiceId: INVOICE_ID, amountCents: 4000, method: 'cash' }),
+        { tenantId: TENANT_ID, executedBy: 'u1' },
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.error).toMatch(/refund exceeds original payment/i);
     });
   });
 });

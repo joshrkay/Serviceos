@@ -5,6 +5,7 @@ import { PaymentRepository, Payment } from '../../invoices/payment';
 import { recordRefund } from '../../payments/payment-service';
 import { AuditRepository, createAuditEvent } from '../../audit/audit';
 import { RECORD_REFUND_METHODS } from '../contracts/record-refund';
+import { formatUsdCentsPlain } from '@ai-service-os/shared';
 
 // Mirrors RecordPaymentExecutionHandler's isUuid (voice-extended-handlers.ts):
 // a resolved invoiceId must be a real UUID before any repository lookup —
@@ -54,51 +55,23 @@ function isUuid(value: unknown): value is string {
  * re-implementing (and risking under-guarding) them in a parallel
  * repository.
  *
- * ── Single-payment scope, not a cross-payment split (spec review fix) ─────
+ * ── Single-payment scope, not a cross-payment split ───────────────────────
  *
- * An earlier revision of this handler looped `recordRefund()` across every
- * refundable payment on the invoice (oldest-first) to satisfy a refund
- * larger than any one payment. That loop was NOT safe: the headroom
- * pre-check ran against a `findByInvoice` snapshot, so a chunk could commit
- * against payment A, then a CONCURRENT mutation (a Stripe webhook refund, or
- * another approved proposal) shrinks payment B's headroom between the
- * snapshot and the second `recordRefund()` call, which then throws. This
- * handler's own catch converts that throw into `{ success: false }` rather
- * than re-throwing — and `ProposalExecutor`'s `recordAndTransition`
- * (execution/executor.ts) commits the proposal's status transition (and
- * therefore the whole shared advisory-lock transaction, chunk A's write
- * included) on BOTH the success and the failure path, because a failed
- * execution still needs its `execution_failed` status write to land. So a
- * mid-loop failure left chunk A committed with no compensation — exactly
- * the "fails before any payment is touched" claim this doc comment used to
- * make, and it was false in that window.
- *
- * The fix considered (and rejected) making `recordRefund()`'s per-payment
- * writes join ONE ambient DB transaction across the whole loop
- * (`PgBaseRepository.withTenantTransaction` already reuses an ambient
- * `tenantContextStore` client when one exists, and `ProposalExecutor`'s
- * Path A wraps `handler.execute()` in exactly such a transaction via
- * `commands/command-runner.ts` — so the DB-level plumbing IS there).
- * That still doesn't fix it: to make a mid-loop failure roll back this
- * handler would have to THROW instead of returning `{ success: false }`,
- * which changes the shared executor's error contract for every execution
- * handler (throw-to-abort vs. return-to-report), not something this
- * money-safety fix should quietly redefine platform-wide. Per the plan's
- * own "do NOT fork a second mutation path" guidance, that's exactly the
- * kind of contorted, handler-specific transaction trick to avoid.
- *
- * Instead: a `record_refund` proposal applies to exactly ONE payment,
- * chosen deterministically (oldest-first among the payments whose OWN
- * headroom individually covers the requested amount). This makes the
- * mutation a SINGLE `recordRefund()` call — already atomic on its own, per
- * its own atomic CTE design — so there is no multi-call sequence and
- * therefore no partial-state window at all, not even in theory. An invoice
- * with more than one completed payment (e.g. deposit + final) where the
- * requested amount doesn't fit within any ONE of them (even though it fits
- * the combined total) fails BEFORE any write with a message telling the
- * operator to record it as separate smaller refunds — a real but
- * deliberately accepted limitation (see the catalog doc's Task 3 notes),
- * not a silent under-refund or a fabricated split.
+ * Applies to exactly ONE payment — the oldest whose OWN headroom covers the
+ * full amount — never split across several. One `recordRefund()` call is
+ * already atomic, so there is no partial-state window. A prior revision
+ * looped across payments and had one: this handler reports failure by
+ * RETURNING `{ success: false }`, and `ProposalExecutor` commits a failed
+ * execution's status transition — and everything already written — in the
+ * SAME shared transaction regardless of success/failure, so a mid-loop
+ * throw from a later chunk left an earlier chunk's write committed with no
+ * compensation. Full investigation (incl. why an ambient shared transaction
+ * doesn't rescue a loop without redefining the executor's throw-vs-return
+ * error contract for every handler): commit `a12d6f59` and this type's
+ * Task 3 notes in `docs/reference/voice-action-catalog.md`. An amount that
+ * fits the invoice's combined refundable total but not any ONE payment
+ * fails before any write, telling the operator to record it as separate
+ * smaller refunds instead of silently splitting or partially applying.
  *
  * Stripe-AUTOMATED refunds are explicitly OUT OF SCOPE for this proposal
  * type (YAGNI, 2026-08-07 tradesperson plan) — a refund the owner wants to
@@ -184,6 +157,20 @@ export class RecordRefundExecutionHandler implements ExecutionHandler {
       .filter((p) => p.status === 'completed' && p.amountCents - p.refundedAmountCents > 0)
       .sort((a, b) => a.receivedAt.getTime() - b.receivedAt.getTime());
 
+    // No refundable payment at all — either nothing ever settled on this
+    // invoice, or every completed payment is already fully refunded (e.g.
+    // a double-submitted/redelivered proposal executing after the first
+    // one already drained it). This is NOT a "split it up" situation —
+    // there is nothing left to split, and telling the operator to record
+    // smaller refunds would be actively misleading since every retry fails
+    // identically.
+    if (refundable.length === 0) {
+      return {
+        success: false,
+        error: 'This invoice has no completed payments with refundable amount remaining.',
+      };
+    }
+
     // Single-payment scope (see class doc comment "Single-payment scope,
     // not a cross-payment split"): the target is the OLDEST refundable
     // payment whose OWN headroom covers the full requested amount — never
@@ -194,10 +181,17 @@ export class RecordRefundExecutionHandler implements ExecutionHandler {
     // it either happens once or not at all.
     const target = refundable.find((p) => p.amountCents - p.refundedAmountCents >= amountCents);
     if (!target) {
+      // Operators can't see per-payment headrooms — give them the number
+      // so they know how to split it, rather than guessing.
+      const largestSingleRefundableCents = Math.max(
+        ...refundable.map((p) => p.amountCents - p.refundedAmountCents),
+      );
       return {
         success: false,
         error:
-          "Refund exceeds any single payment's refundable amount on this invoice — record it as separate smaller refunds",
+          `Refund exceeds any single payment's refundable amount on this invoice — ` +
+          `the largest single refund possible is ${formatUsdCentsPlain(largestSingleRefundableCents)} — ` +
+          `record it as separate smaller refunds`,
       };
     }
 
@@ -241,6 +235,14 @@ export class RecordRefundExecutionHandler implements ExecutionHandler {
               proposalType: 'record_refund',
               amountCents,
               method,
+              // Which payment absorbed the refund is the one fact the
+              // selection logic decides — worth carrying on the
+              // proposal-level event, not just implicit in payment.refunded.
+              paymentId: target.id,
+              ...(typeof payload.reason === 'string' ? { reason: payload.reason } : {}),
+              ...(typeof payload.checkNumber === 'string'
+                ? { checkNumber: payload.checkNumber }
+                : {}),
             },
           }),
         );
