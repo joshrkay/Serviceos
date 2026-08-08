@@ -26,7 +26,7 @@ exist today.
 
 ## A) Speakable today — intent + proposal + execution handler all exist
 
-These 40 actions can be spoken, drafted as a proposal, approved, and executed.
+These 41 actions can be spoken, drafted as a proposal, approved, and executed.
 "Persistence proof" = a Docker-gated integration test that proves the row +
 audit event actually land in Postgres (vs. mocked-DB-only coverage, which cannot
 catch schema drift or a missing dependency).
@@ -73,6 +73,7 @@ catch schema drift or a missing dependency).
 | "Log permit 2024-1187 on the Patel job" | `log_permit` | `add_note` | capture | unit |
 | "Log a warranty callback for the Hendersons' water heater" | `log_warranty_claim` | `create_job` | capture | unit |
 | "Raise the diagnostic fee to 89 dollars" | `update_catalog_item` | `update_catalog_item` | capture | unit |
+| "Refund the Smiths 100 dollars on their invoice" | `record_refund` | `record_refund` | money | unit |
 
 > **Voice technician resolution (U1, taxonomy 1.2.0):** `reassign_appointment`,
 > `add_crew_member`, and `remove_crew_member` now resolve the spoken technician
@@ -136,6 +137,66 @@ taxonomy 1.7.0):
 - This type is deliberately **absent** from `S1_ALLOWED_PROPOSAL_TYPES`
   (`proposals/surface.ts`) — operator/owner-only, never reachable from an
   unauthenticated inbound caller.
+
+Notes on the Tradesperson wave 1, Task 3 row (`record_refund`, taxonomy 1.8.0):
+
+- **NEW money-class proposal type** — this is the first Tradesperson-wave
+  addition that isn't an alias onto an existing type. Never auto-approves at
+  any trust tier (D3), same as `record_payment` / `apply_late_fee`.
+- **Manual refunds only — Stripe-automated refunds are explicitly OUT OF
+  SCOPE** (YAGNI). A refund the owner wants Stripe itself to push back is a
+  separate, deliberately unbuilt feature; this proposal type only ever
+  records money the owner ALREADY gave back by hand (cash/check/a card
+  swiped outside Stripe).
+- **Reuses `recordRefund()` (payments/payment-service.ts), not a new refund
+  ledger.** The plan's draft assumed a dedicated `PaymentRefundRepository`
+  writing into `payment_refunds` (migration `264_create_payment_refunds`) —
+  investigation before writing code found that table is NOT a general
+  refund record: it's the Stripe webhook idempotency claim ledger
+  (`stripe_refund_id TEXT NOT NULL`, unique on `(tenant_id,
+  stripe_refund_id)`, no `invoice_id` column at all). `recordRefund()`
+  already owns refund recording end to end and enforces the invariant
+  `refundedAmountCents + refundCents <= amountCents` atomically; the
+  execution handler resolves the invoice's refundable payments
+  (`PaymentRepository.findByInvoice`) and calls `recordRefund()` per
+  payment with `stripeRefundId: null` — the same "no provider id" branch a
+  webhook-less manual refund takes, which never touches `payment_refunds`.
+  An invoice with more than one completed payment is refunded oldest-first
+  until the requested amount is covered; if total refundable headroom is
+  less than requested, the whole execution fails before any payment is
+  touched. See `RecordRefundExecutionHandler`'s doc comment
+  (`proposals/execution/record-refund-handler.ts`) for the full analysis.
+- **No new execution dep** — the handler is wired against the SAME
+  `paymentRepo` `record_payment` already uses (app.ts passes it to
+  `createExecutionHandlerRegistry` once).
+- **The invoice reference resolves the SAME way `record_payment`'s does.**
+  There is no separate `invoiceReference` extraction field anywhere in this
+  taxonomy — every invoice-doc intent reuses `jobReference`/`jobTitle`,
+  disambiguated by `INVOICE_DOC_INTENTS` membership
+  (`ai/agents/customer-calling/entity-resolution.ts`). Unlike
+  `record_payment`'s contract, `record_refund`'s has **no
+  `invoiceReference` fallback field**: an unresolved reference gates
+  `missingFields: ['invoiceId']` rather than persisting free text (even a
+  bare customer name) as a stand-in "reference" — a deliberately safer
+  posture than `record_payment`'s own precedent for the identical case.
+- **RBAC finding (no policy change made):** the `CONFIG_WRITING_PROPOSAL_TYPES`
+  gate (`proposals/actions.ts`) only restricts proposal types whose
+  execution writes TENANT CONFIGURATION (settings); a refund record isn't
+  one. Under the CURRENT, pre-existing RBAC policy, any `dispatcher` (not
+  just `owner`) holds `proposals:approve` and can approve a `record_refund`
+  proposal — identical to how a dispatcher can already approve
+  `record_payment` and `apply_late_fee` today. This task did not change
+  that policy; it is flagged here because a controller may want a stricter,
+  owner-only gate specifically for refunds in the future.
+- `refund.recorded` (entityType `invoice`) is a SEPARATE audit event the
+  execution handler emits for proposal-level traceability
+  (`proposalId`/`proposalType`/`amountCents`/`method`), alongside whatever
+  `payment.refunded` event(s) `recordRefund()` emits per payment touched.
+  `refund.recorded` is deliberately **not** added to
+  `analytics/audit-event-mapping.ts` — the money signal is already
+  captured by `payment.refunded` (which IS mapped there); a second mapped
+  product event for the same real-world refund would double-count refund
+  volume. This mirrors `expense.logged`'s unmapped-by-design posture.
 
 Notes on the taxonomy-1.2.0 rows:
 
@@ -317,7 +378,8 @@ not a gap. No new `JobStatus` value was introduced for this.
     { "intent": "schedule_inspection", "proposalType": "create_appointment", "actionClass": "capture" },
     { "intent": "log_permit", "proposalType": "add_note", "actionClass": "capture" },
     { "intent": "log_warranty_claim", "proposalType": "create_job", "actionClass": "capture" },
-    { "intent": "update_catalog_item", "proposalType": "update_catalog_item", "actionClass": "capture" }
+    { "intent": "update_catalog_item", "proposalType": "update_catalog_item", "actionClass": "capture" },
+    { "intent": "record_refund", "proposalType": "record_refund", "actionClass": "money" }
   ],
   "handlerNoOnramp": [
     "create_booking",

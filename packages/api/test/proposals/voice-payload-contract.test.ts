@@ -102,6 +102,7 @@ import { InMemoryInvoiceRepository, type Invoice } from '../../src/invoices/invo
 import { InMemoryEstimateRepository, type Estimate } from '../../src/estimates/estimate';
 import { InMemoryCatalogItemRepository, createCatalogItem } from '../../src/catalog/catalog-item';
 import { UpdateCatalogItemExecutionHandler } from '../../src/proposals/execution/update-catalog-item-handler';
+import { RecordRefundExecutionHandler } from '../../src/proposals/execution/record-refund-handler';
 import { buildLineItem, calculateDocumentTotals, type LineItem } from '../../src/shared/billing-engine';
 import type { AppointmentRepository } from '../../src/appointments/appointment';
 import type { JobRepository } from '../../src/jobs/job';
@@ -706,6 +707,25 @@ const ROWS: Row[] = [
         );
     },
     execute: (p) => new UpdateCatalogItemExecutionHandler().execute(p, execContext()),
+  },
+  {
+    // Tradesperson wave 1, Task 3 (2026-08-07 plan) — record_refund is a NEW
+    // money-class proposal type. Unlike record_payment (which never reads
+    // the resolver-verified existingEntities.invoiceId — see that row's
+    // note above), RecordRefundTaskHandler DOES read it: this intent joins
+    // INVOICE_DOC_INTENTS (entity-resolution.ts) and the contract has no
+    // invoiceReference fallback, so a resolver-verified invoiceId is the
+    // ONLY way this payload drafts ungated.
+    intent: 'record_refund',
+    mode: 'resolves',
+    note: 'resolver-verified existingEntities.invoiceId + a stated cents amount draft ungated; dep-less RecordRefundExecutionHandler synthetic-succeeds',
+    draft: () =>
+      draft(
+        { gateway: NOOP_GATEWAY },
+        'record_refund',
+        ctx({ existingEntities: { invoiceId: INVOICE_ID, amount: 10000, refundMethod: 'cash' } }),
+      ),
+    execute: (p) => new RecordRefundExecutionHandler().execute(p, execContext()),
   },
   {
     intent: 'create_standing_instruction',

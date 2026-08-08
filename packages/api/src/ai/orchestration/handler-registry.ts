@@ -35,6 +35,7 @@ import {
   SendPaymentReminderTaskHandler,
   ApplyLateFeeTaskHandler,
   RecordPaymentTaskHandler,
+  RecordRefundTaskHandler,
   CreateJobVoiceTaskHandler,
   EmergencyDispatchTaskHandler,
   UpdateCustomerTaskHandler,
@@ -252,6 +253,7 @@ export function buildTaskHandlers(deps: HandlerRegistryDeps): Map<ProposalType, 
   );
   handlers.set('apply_late_fee', new ApplyLateFeeTaskHandler());
   handlers.set('record_payment', new RecordPaymentTaskHandler());
+  handlers.set('record_refund', new RecordRefundTaskHandler());
   handlers.set('emergency_dispatch', new EmergencyDispatchTaskHandler());
   handlers.set('update_customer', new UpdateCustomerTaskHandler());
   handlers.set('log_expense', new LogExpenseTaskHandler());

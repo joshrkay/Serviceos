@@ -62,6 +62,12 @@ export type IntentType =
   | 'log_warranty_claim'
   // Tradesperson wave 1 — price-book edit by voice; rides WS20's existing proposal type.
   | 'update_catalog_item'
+  // Tradesperson wave 1, Task 3 — NEW money-class proposal type: recording a
+  // MANUAL refund (cash/check/external card) given back to a customer.
+  // Stripe-automated refunds are a deliberate non-goal (see record_refund's
+  // execution handler doc comment) — this intent covers only what a
+  // tradesperson does by hand outside the payment processor.
+  | 'record_refund'
   // Taxonomy 1.2.0 (agent wave, Track A) — three proposal-driving on-ramps:
   //   create_invoice_schedule    — U2: milestone/progress billing plan for a
   //                                job; the verbatim milestone sentence rides
@@ -217,6 +223,7 @@ export const SUPPORTED_INTENTS: readonly IntentType[] = [
   'log_permit',
   'log_warranty_claim',
   'update_catalog_item',
+  'record_refund',
   'create_invoice_schedule',
   'respond_to_review',
   'create_standing_instruction',
@@ -298,8 +305,18 @@ export const SUPPORTED_INTENTS: readonly IntentType[] = [
  *           catalogItemNewDescription);
  *           see UpdateCatalogItemTaskHandler (ai/tasks/voice-extended-tasks.ts)
  *           for the payload/contract-compatibility notes.
+ *   1.8.0 — Tradesperson wave 1 (2026-08-07 plan) Task 3, additive:
+ *           record_refund — a NEW money-class proposal type for recording
+ *           MANUAL refunds (cash/check/external card) given back to a
+ *           customer. Never auto-approves at any trust tier (D3). New
+ *           extraction fields (refundMethod / refundReason /
+ *           refundCheckNumber); reuses the existing jobReference/amount
+ *           seams for the invoice reference and cents amount, same as
+ *           record_payment. Stripe-automated refunds are explicitly out of
+ *           scope — see RecordRefundExecutionHandler
+ *           (proposals/execution/record-refund-handler.ts) for why.
  */
-export const INTENT_TAXONOMY_VERSION = '1.7.0';
+export const INTENT_TAXONOMY_VERSION = '1.8.0';
 
 /**
  * P11-001: convenience predicate the FSM adapter uses to route
@@ -514,6 +531,19 @@ export interface ExtractedEntities {
   // Same capture-only caveat and qualified-name rationale as
   // `catalogItemNewName` above.
   catalogItemNewDescription?: string;
+  // Tradesperson wave 1, Task 3 — record_refund: how the MANUAL refund was
+  // given back (cash / check / a swiped card outside Stripe / other).
+  // Qualified (not bare `method`) so it can never be confused with a future
+  // unrelated `method` field on another intent — house precedent from
+  // `catalogItemNewName`/`expenseDescription`. Defaults to 'cash' downstream
+  // when unstated.
+  refundMethod?: 'cash' | 'check' | 'card_external' | 'other';
+  // record_refund: why the refund was given, verbatim ("the recharge didn't
+  // hold", "part was under warranty"). Optional — rides `payload.reason`.
+  refundReason?: string;
+  // record_refund: the check number, when the refund method is 'check' and
+  // the caller stated one ("check 2044"). Optional passthrough field.
+  refundCheckNumber?: string;
 }
 
 /**
@@ -1068,6 +1098,18 @@ Supported intents (return exactly ONE):
                            Examples: "Raise the diagnostic fee to 89 dollars"
                                      "Change the water heater install price to 1450"
                                      "Rename 'AC tune-up' to 'AC seasonal service'"
+- "record_refund"        — owner records money given BACK to a customer
+                           (cash/check/external card refund). Money-class,
+                           never auto-approves. Distinct from record_payment
+                           (money coming IN). Extract jobReference (the
+                           invoice the refund applies to — same field
+                           record_payment uses), amount (integer cents),
+                           refundMethod, refundReason, refundCheckNumber
+                           when spoken. This is ONLY for a refund the owner
+                           gave by hand — never a Stripe-processed refund.
+                           Examples: "Refund the Smiths 100 dollars on their invoice"
+                                     "Give the Garcias back 250, the part was under warranty"
+                                     "Record a 75 dollar check refund to Jones, check 2044"
 - "create_invoice_schedule" — user wants to set up a MILESTONE / PROGRESS
                            billing plan for a job: a deposit up front and the
                            rest later, or a percentage split across stages.
@@ -1337,7 +1379,10 @@ Return valid JSON with exactly this shape (no prose, no markdown fences):
     "catalogItemReference": "<string, optional — spoken catalog/price-book entry name on update_catalog_item>",
     "unitPriceCents": <integer cents, optional — the NEW price on update_catalog_item>,
     "catalogItemNewName": "<string, optional — the NEW name on update_catalog_item>",
-    "catalogItemNewDescription": "<string, optional — the NEW description on update_catalog_item>"
+    "catalogItemNewDescription": "<string, optional — the NEW description on update_catalog_item>",
+    "refundMethod": "<cash|check|card_external|other, optional — on record_refund>",
+    "refundReason": "<string, optional — why the refund was given on record_refund>",
+    "refundCheckNumber": "<string, optional — check number on record_refund>"
   }
 }
 
@@ -1691,6 +1736,7 @@ export function parseClassifierJson(content: string): IntentClassification | nul
   ] as const;
   const SEND_CHANNELS = ['email', 'sms'] as const;
   const PAYMENT_METHODS = ['cash', 'check', 'card', 'other'] as const;
+  const REFUND_METHODS = ['cash', 'check', 'card_external', 'other'] as const;
   const EXPENSE_CATEGORIES = [
     'materials',
     'fuel',
@@ -1806,6 +1852,11 @@ export function parseClassifierJson(content: string): IntentClassification | nul
     if (typeof ee.catalogItemNewName === 'string') extracted.catalogItemNewName = ee.catalogItemNewName;
     if (typeof ee.catalogItemNewDescription === 'string')
       extracted.catalogItemNewDescription = ee.catalogItemNewDescription;
+    // record_refund fields (Tradesperson wave 1, Task 3)
+    const refundMethod = pickEnum(ee, 'refundMethod', REFUND_METHODS);
+    if (refundMethod) extracted.refundMethod = refundMethod;
+    if (typeof ee.refundReason === 'string') extracted.refundReason = ee.refundReason;
+    if (typeof ee.refundCheckNumber === 'string') extracted.refundCheckNumber = ee.refundCheckNumber;
     if (Object.keys(extracted).length > 0) {
       result.extractedEntities = extracted;
     }

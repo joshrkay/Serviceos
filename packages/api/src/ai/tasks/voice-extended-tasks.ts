@@ -1535,6 +1535,80 @@ export class RecordPaymentTaskHandler implements TaskHandler {
   }
 }
 
+// ───────────── record_refund ─────────────
+//
+// Tradesperson wave 1, Task 3 (2026-08-07 plan) — a NEW money-class
+// proposal type for recording a MANUAL refund (cash/check/external card)
+// given back to a customer. Money class — never auto-approves under any
+// confidence (D3). Stripe-AUTOMATED refunds are explicitly OUT OF SCOPE
+// (YAGNI) — see RecordRefundExecutionHandler
+// (proposals/execution/record-refund-handler.ts) for the full analysis of
+// why this rides the existing `recordRefund()` domain function instead of
+// a new refund ledger.
+//
+// Reference resolution: unlike `update_catalog_item` (whose reference has
+// no membership in the generic entity-resolver's `EntityKind`), an invoice
+// reference is a first-class kind the resolver already handles for
+// `record_payment` and its siblings — this intent joins
+// `INVOICE_DOC_INTENTS` (entity-resolution.ts) instead of re-resolving it
+// here. That means by the time this handler runs, the voice-action-router
+// has ALREADY resolved the spoken reference (carried on `ee.jobReference` —
+// there is no separate `invoiceReference` extraction field anywhere in this
+// taxonomy; every invoice-doc intent reuses jobReference, disambiguated by
+// intent-set membership) to a verified `invoiceId` and stamped it onto
+// `context.existingEntities`, OR short-circuited to a `voice_clarification`
+// on an ambiguous match, OR left it absent on no match / nothing spoken.
+// `invoiceId` is therefore read off `ee` with a local type-widening cast
+// (house pattern — see `ComplaintTaskHandler`, which does the same for a
+// router-resolved `jobId`/`customerId`): it is a ROUTER-INJECTED verified
+// id, never an LLM-extracted field, so it is deliberately NOT added to
+// `ExtractedEntities` or the classifier's JSON template/parse allowlist.
+//
+// Unlike `record_payment`'s contract, `record_refund`'s has NO
+// `invoiceReference` fallback field — an unresolved reference gates the
+// proposal (`missingFields: ['invoiceId']`) rather than persisting free
+// text (e.g. a bare customer name) as a stand-in "reference" for a later
+// step to puzzle out. This is a deliberately SAFER posture than
+// `record_payment`'s own precedent for the identical case.
+export class RecordRefundTaskHandler implements TaskHandler {
+  readonly taskType = 'record_refund' as const;
+
+  async handle(context: TaskContext): Promise<TaskResult> {
+    const ee = entitiesFrom(context) as ExtractedEntities & { invoiceId?: string };
+    const payload: Record<string, unknown> = {
+      // Method defaults to 'cash' when unstated — the most common manual
+      // refund, and never blocks drafting on a detail the reviewer can
+      // correct with one tap before approving.
+      method: ee.refundMethod ?? 'cash',
+    };
+    const missing: string[] = [];
+
+    if (typeof ee.invoiceId === 'string' && ee.invoiceId.length > 0) {
+      payload.invoiceId = ee.invoiceId;
+    } else {
+      missing.push('invoiceId');
+    }
+
+    if (typeof ee.amount === 'number' && ee.amount > 0) {
+      payload.amountCents = Math.round(ee.amount);
+    } else {
+      missing.push('amountCents');
+    }
+
+    if (typeof ee.refundReason === 'string' && ee.refundReason.trim().length > 0) {
+      payload.reason = ee.refundReason.trim();
+    }
+    if (typeof ee.refundCheckNumber === 'string' && ee.refundCheckNumber.trim().length > 0) {
+      payload.checkNumber = ee.refundCheckNumber.trim();
+    }
+
+    return {
+      proposal: createProposal(inputFor(context, this.taskType, payload, missing)),
+      taskType: this.taskType,
+    };
+  }
+}
+
 // ───────────── emergency_dispatch ─────────────
 //
 // Fast-path — irreversible action class. Proposal creation is the only

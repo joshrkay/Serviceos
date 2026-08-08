@@ -106,6 +106,10 @@ const TYPE_PRIORITY: Record<ProposalType, number> = {
   update_catalog_item: 5,
   // Tenant alias learning is reversible back-office config — never same-day critical.
   adopt_entity_alias: 5,
+  // Tradesperson wave 1, Task 3 — a refund is money-moving, customer-facing
+  // (the customer is owed the callback/follow-through) — same tier as
+  // record_payment / apply_late_fee.
+  record_refund: 1,
 };
 
 export function getUrgency(proposal: Proposal): { urgency: PrioritizedProposal['urgency']; reason: string } {

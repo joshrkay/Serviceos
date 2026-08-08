@@ -30,6 +30,7 @@ import {
   EstimateDeliveryProvider,
 } from './voice-extended-handlers';
 import { LogExpenseExecutionHandler } from './log-expense-handler';
+import { RecordRefundExecutionHandler } from './record-refund-handler';
 import {
   ReviewResponseExecutionHandler,
   GoogleBusinessReplyResolver,
@@ -1394,6 +1395,12 @@ export function createExecutionHandlerRegistry(deps?: {
       deps?.auditRepo,
       deps?.paymentLinkCleanup,
     ),
+    // Tradesperson wave 1, Task 3 — record_refund: records a MANUAL refund
+    // (cash/check/external) via the SAME paymentRepo record_payment uses
+    // (no new dep — see RecordRefundExecutionHandler's doc comment for why
+    // a dedicated refund repo would bypass the existing over-refund
+    // invariant). Money-class: only runs after explicit approval.
+    new RecordRefundExecutionHandler(deps?.paymentRepo, deps?.auditRepo),
     new LogExpenseExecutionHandler(deps?.expenseRepo, deps?.auditRepo),
     new ConvertLeadExecutionHandler(deps?.leadRepo, deps?.customerRepo, deps?.auditRepo, deps?.locationRepo),
     new ConfirmAppointmentExecutionHandler(deps?.appointmentRepo, requiredAuditRepo),

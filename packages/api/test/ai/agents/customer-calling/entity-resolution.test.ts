@@ -145,6 +145,18 @@ describe('planVoiceEntityLookups — intent-conditioned operator references', ()
     ]);
   });
 
+  // Tradesperson wave 1, Task 3 — record_refund joins INVOICE_DOC_INTENTS
+  // the same way record_payment does: there is no separate
+  // `invoiceReference` extraction field anywhere in this taxonomy, so the
+  // spoken invoice reference rides `jobReference` and is disambiguated by
+  // intent-set membership alone.
+  it('routes a jobReference to invoice lookup for record_refund', () => {
+    const lookups = planVoiceEntityLookups('record_refund', { jobReference: 'INV-0099' });
+    expect(lookups).toEqual([
+      { kind: 'invoice', reference: 'INV-0099', refKey: 'invoiceId' },
+    ]);
+  });
+
   it('routes EST-0042 jobReference to estimate lookup for update_estimate', () => {
     const lookups = planVoiceEntityLookups('update_estimate', { jobReference: 'EST-0042' });
     expect(lookups).toEqual([
@@ -549,6 +561,63 @@ describe('resolveVoiceEntityReferences — router annotation folding', () => {
     if (result.kind === 'ok') {
       expect(result.resolved.invoiceId).toBe('inv-42');
       expect(result.pendingReferences).toEqual([]);
+    }
+  });
+
+  // Tradesperson wave 1, Task 3 — record_refund plugs into the SAME
+  // generic annotation pipeline record_payment uses: unique match resolves,
+  // ambiguous match clarifies, zero match leaves invoiceId absent (never a
+  // silent guess) so RecordRefundTaskHandler gates on missingFields.
+  it('record_refund: unique invoice match stamps invoiceId on the annotation', async () => {
+    const resolver = resolverWith({
+      'invoice:INV-0099': {
+        kind: 'resolved',
+        candidate: { id: 'inv-99', kind: 'invoice', label: 'INV-0099', score: 1 },
+      },
+    });
+    const result = await resolveVoiceEntityReferences(resolver, {
+      tenantId: TID,
+      intent: 'record_refund',
+      entities: { jobReference: 'INV-0099' },
+    });
+    expect(result.kind).toBe('ok');
+    if (result.kind === 'ok') {
+      expect(result.resolved.invoiceId).toBe('inv-99');
+    }
+  });
+
+  it('record_refund: an ambiguous invoice reference becomes a clarification, never a guess', async () => {
+    const resolver = resolverWith({
+      'invoice:the Smith invoice': {
+        kind: 'ambiguous',
+        candidates: [
+          { id: 'inv-a', kind: 'invoice', label: 'INV-0010 (Smith)', score: 0.85 },
+          { id: 'inv-b', kind: 'invoice', label: 'INV-0031 (Smith)', score: 0.82 },
+        ],
+      },
+    });
+    const result = await resolveVoiceEntityReferences(resolver, {
+      tenantId: TID,
+      intent: 'record_refund',
+      entities: { jobReference: 'the Smith invoice' },
+    });
+    expect(result.kind).toBe('ambiguous');
+    if (result.kind === 'ambiguous') {
+      expect(result.entityKind).toBe('invoice');
+      expect(result.candidates).toHaveLength(2);
+    }
+  });
+
+  it('record_refund: a zero-match invoice reference leaves invoiceId absent (never silently guessed)', async () => {
+    const resolver = resolverWith({});
+    const result = await resolveVoiceEntityReferences(resolver, {
+      tenantId: TID,
+      intent: 'record_refund',
+      entities: { jobReference: 'INV-9999' },
+    });
+    expect(result.kind).toBe('ok');
+    if (result.kind === 'ok') {
+      expect(result.resolved.invoiceId).toBeUndefined();
     }
   });
 

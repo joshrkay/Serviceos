@@ -142,6 +142,12 @@ describe('U8: each newly probed handler is DETECTED when its effect dep is dropp
     // UpdateCatalogItemExecutionHandler.isFullyWired() reports false (its
     // dep-less mode is a synthetic passthrough that persists nothing).
     { omit: ['catalogRepo'], flags: ['update_catalog_item'] },
+    // Tradesperson wave 1, Task 3 — record_refund reuses the SAME
+    // paymentRepo record_payment already depends on (no new dep — see
+    // RecordRefundExecutionHandler's doc comment). Without it,
+    // RecordRefundExecutionHandler.isFullyWired() reports false (its
+    // dep-less mode is a synthetic passthrough that persists nothing).
+    { omit: ['paymentRepo'], flags: ['record_refund'] },
   ];
 
   for (const { omit, flags } of rows) {

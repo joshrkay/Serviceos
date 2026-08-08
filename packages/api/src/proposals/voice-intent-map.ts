@@ -118,6 +118,11 @@ export const INTENT_TO_PROPOSAL_TYPE: Partial<Record<Exclude<IntentType, 'unknow
   // the voice on-ramp. NOT S1-allowed (operator-only): see
   // proposals/surface.ts S1_ALLOWED_PROPOSAL_TYPES and its contract test.
   update_catalog_item: 'update_catalog_item',
+  // Tradesperson wave 1, Task 3 — record_refund is a NEW money-class
+  // proposal type (manual cash/check/external refunds only). NOT
+  // S1-allowed (operator-only): see proposals/surface.ts
+  // S1_ALLOWED_PROPOSAL_TYPES and its contract test.
+  record_refund: 'record_refund',
 };
 
 /**
@@ -178,6 +183,7 @@ export function voiceProposalSummary(
   if (intent === 'schedule_inspection') return `Schedule inspection${name ? ` for ${name}` : ''}`;
   if (intent === 'log_permit') return `Log permit${ref ? ` on ${ref}` : name ? ` for ${name}` : ''}`;
   if (intent === 'log_warranty_claim') return `Log warranty claim${name ? ` for ${name}` : ''}`;
+  if (intent === 'record_refund') return `Record refund${name ? ` for ${name}` : ref ? ` on ${ref}` : ''}`;
   if (intent) return `Voice intent: ${intent}${ref ? ` (${ref})` : ''}`;
   return 'Voice clarification needed';
 }

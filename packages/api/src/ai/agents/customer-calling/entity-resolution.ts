@@ -98,6 +98,14 @@ const INVOICE_DOC_INTENTS = new Set([
   'apply_late_fee',
   'issue_invoice',
   'send_payment_reminder',
+  // Tradesperson wave 1, Task 3 — record_refund needs the SAME invoice-
+  // reference resolution record_payment gets: the spoken invoice reference
+  // rides `entities.jobReference` (there is no separate `invoiceReference`
+  // extraction field anywhere in this taxonomy — every invoice-doc intent
+  // reuses jobReference/jobTitle, disambiguated by this set's membership),
+  // resolved here to a verified `invoiceId` BEFORE RecordRefundTaskHandler
+  // runs (voice-action-router.ts stamps it onto `context.existingEntities`).
+  'record_refund',
 ]);
 
 const ESTIMATE_DOC_INTENTS = new Set([

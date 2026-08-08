@@ -84,6 +84,9 @@ const EXPECTED_PROPOSAL_TYPES: ProposalType[] = [
   // Tradesperson wave 1, Task 2 (2026-08-07 plan) — update_catalog_item's
   // voice on-ramp (WS20's pre-existing proposal type + execution handler).
   'update_catalog_item',
+  // Tradesperson wave 1, Task 3 (2026-08-07 plan) — record_refund: a NEW
+  // money-class proposal type for recording MANUAL refunds by voice.
+  'record_refund',
 ];
 
 describe('ai/orchestration/handler-registry — buildTaskHandlers', () => {
