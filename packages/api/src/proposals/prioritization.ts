@@ -123,6 +123,11 @@ const TYPE_PRIORITY: Record<ProposalType, number> = {
   // change: same-day relevance for whoever's on site, and it drafts a NEW
   // estimate the same way draft_estimate does — same top tier.
   create_change_order: 0,
+  // Task 7 — signing a customer up for a recurring plan is back-office
+  // capture: nothing downstream waits on it same-day (the first sweep run
+  // is typically weeks out), and it has no customer-facing comms attached
+  // at creation. Same low tier as notes / add_service_location / log_expense.
+  create_service_agreement: 5,
 };
 
 export function getUrgency(proposal: Proposal): { urgency: PrioritizedProposal['urgency']; reason: string } {

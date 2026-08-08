@@ -213,6 +213,16 @@ describe('planVoiceEntityLookups — intent-conditioned operator references', ()
     ]);
   });
 
+  // Task 7 (2026-08-07 tradesperson plan) — "sign the Garcias up for the
+  // annual maintenance plan" names a PERSON, not display text. Mirrors
+  // send_customer_message's rationale above.
+  it('resolves the spoken customer name for create_service_agreement', () => {
+    const lookups = planVoiceEntityLookups('create_service_agreement', { customerName: 'Garcia' });
+    expect(lookups).toEqual([
+      { kind: 'customer', reference: 'Garcia', refKey: 'customerId' },
+    ]);
+  });
+
   it('resolves Henderson customer name for lookup_balance', () => {
     const lookups = planVoiceEntityLookups('lookup_balance', { customerName: 'Henderson' });
     expect(lookups).toEqual([

@@ -157,4 +157,13 @@ describe('voiceProposalSummary', () => {
     );
     expect(voiceProposalSummary('send_customer_message', {})).toBe('Message');
   });
+
+  // Task 7 — "Service agreement for <customer>" shape, mirrors
+  // send_customer_message's named-recipient summary.
+  it('gives create_service_agreement a human-readable summary', () => {
+    expect(voiceProposalSummary('create_service_agreement', { customerName: 'Garcia' })).toBe(
+      'Service agreement for Garcia',
+    );
+    expect(voiceProposalSummary('create_service_agreement', {})).toBe('Service agreement');
+  });
 });

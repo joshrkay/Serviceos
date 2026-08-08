@@ -99,6 +99,10 @@ const EXPECTED_PROPOSAL_TYPES: ProposalType[] = [
   // a NEW capture-class proposal type that mints a NEW estimate pinned to
   // an EXISTING job, flagged isChangeOrder (migration 271).
   'create_change_order',
+  // Task 7 (2026-08-07 tradesperson plan) — create_service_agreement: a
+  // NEW capture-class proposal type that signs a customer up to a
+  // recurring maintenance plan/membership.
+  'create_service_agreement',
 ];
 
 describe('ai/orchestration/handler-registry — buildTaskHandlers', () => {

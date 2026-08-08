@@ -138,6 +138,11 @@ export const INTENT_TO_PROPOSAL_TYPE: Partial<Record<Exclude<IntentType, 'unknow
   // isChangeOrder (migration 271). NOT S1-allowed (operator-only): see
   // proposals/surface.ts S1_ALLOWED_PROPOSAL_TYPES and its contract test.
   create_change_order: 'create_change_order',
+  // Task 7 (2026-08-07 tradesperson plan) — create_service_agreement is a
+  // NEW capture-class proposal type: signs a customer up to a recurring
+  // maintenance plan/membership. NOT S1-allowed (operator-only): see
+  // proposals/surface.ts S1_ALLOWED_PROPOSAL_TYPES and its contract test.
+  create_service_agreement: 'create_service_agreement',
 };
 
 /**
@@ -208,6 +213,8 @@ export function voiceProposalSummary(
   // (job reference takes precedence over a bare customer name, since a
   // change order is meaningless without its job).
   if (intent === 'create_change_order') return `Change order${ref ? ` on ${ref}` : name ? ` for ${name}` : ''}`;
+  // Task 7 — mirrors apply_credit's shape (named-recipient summary).
+  if (intent === 'create_service_agreement') return `Service agreement${name ? ` for ${name}` : ''}`;
   if (intent) return `Voice intent: ${intent}${ref ? ` (${ref})` : ''}`;
   return 'Voice clarification needed';
 }

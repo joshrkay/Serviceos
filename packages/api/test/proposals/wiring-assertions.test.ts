@@ -82,6 +82,11 @@ function fullDeps(): RegistryDeps {
     dispatchRepo: {} as any,
     standingInstructionRepo: {} as any,
     brandVoiceRepo: {} as any,
+    // Task 7 (2026-08-07 tradesperson plan) — create_service_agreement
+    // became voice-reachable (proposals/voice-intent-map.ts), so its
+    // execution handler's isFullyWired() probe (Boolean(this.agreementRepo))
+    // is now exercised here.
+    agreementRepo: {} as any,
   };
 }
 
@@ -173,6 +178,10 @@ describe('U8: each newly probed handler is DETECTED when its effect dep is dropp
     // reports false (its dep-less mode is a synthetic passthrough that
     // sends nothing).
     { omit: ['customerMessenger'], flags: ['send_customer_message'] },
+    // Task 7 — create_service_agreement: without an agreementRepo,
+    // CreateServiceAgreementExecutionHandler.isFullyWired() reports false
+    // (its dep-less mode is a synthetic passthrough that persists nothing).
+    { omit: ['agreementRepo'], flags: ['create_service_agreement'] },
   ];
 
   for (const { omit, flags } of rows) {

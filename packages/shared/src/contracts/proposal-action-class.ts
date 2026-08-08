@@ -62,6 +62,11 @@ export const CAPTURE_PROPOSAL_TYPES: ReadonlySet<string> = new Set<string>([
   // job. No money moves at creation (sending it is a later comms-class
   // step) — same capture posture as DRAFT_ESTIMATE.
   ProposalType.CREATE_CHANGE_ORDER,
+  // Task 7 — signs a customer up to a recurring plan/membership. No money
+  // moves at creation (the agreement's own sweep invoices later, and those
+  // invoices ride the normal review path) — same capture posture as
+  // CREATE_CHANGE_ORDER / DRAFT_ESTIMATE.
+  ProposalType.CREATE_SERVICE_AGREEMENT,
 ]);
 
 /**

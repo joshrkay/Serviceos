@@ -26,7 +26,7 @@ exist today.
 
 ## A) Speakable today — intent + proposal + execution handler all exist
 
-These 44 actions can be spoken, drafted as a proposal, approved, and executed.
+These 45 actions can be spoken, drafted as a proposal, approved, and executed.
 "Persistence proof" = a Docker-gated integration test that proves the row +
 audit event actually land in Postgres (vs. mocked-DB-only coverage, which cannot
 catch schema drift or a missing dependency).
@@ -77,6 +77,7 @@ catch schema drift or a missing dependency).
 | "Knock 50 dollars off the Henderson invoice" | `apply_credit` | `apply_credit` | money | unit |
 | "Text the Hendersons the part arrived, we can come Thursday" | `send_customer_message` | `send_customer_message` | comms | unit |
 | "The Garcias want a second zone — change order for 1800" | `create_change_order` | `create_change_order` | capture | integration (`integration/draft-estimate-execution.test.ts`) |
+| "Sign the Garcias up for the annual maintenance plan, 290 a year" | `create_service_agreement` | `create_service_agreement` | capture | unit |
 
 > **Voice technician resolution (U1, taxonomy 1.2.0):** `reassign_appointment`,
 > `add_crew_member`, and `remove_crew_member` now resolve the spoken technician
@@ -450,6 +451,116 @@ taxonomy 1.11.0):
   (`proposals/surface.ts`) — operator/technician-only, never reachable from
   an unauthenticated inbound caller.
 
+Notes on the Task 7 row (`create_service_agreement`, taxonomy 1.12.0):
+
+- **NEW capture-class proposal type** — signs a customer up for a
+  recurring maintenance plan/membership ("Sign the Garcias up for the
+  annual maintenance plan, 290 a year"). Writes a `service_agreements` row
+  (migration 056, which was already live before this task — no new
+  migration was needed).
+- **Reuses the existing agreements substrate end to end, does not
+  reimplement it.** `CreateServiceAgreementExecutionHandler`
+  (`proposals/execution/create-service-agreement-handler.ts`) writes
+  through the SAME `AgreementRepository` (`agreements/agreement.ts`,
+  Pg-backed via `agreements/pg-agreement.ts`) the authenticated
+  `POST /api/agreements` route and the recurring-agreements sweep
+  (`agreements/agreement-service.ts runDueAgreements`, driven by
+  `workers/recurring-agreements-worker.ts`) already use, and computes
+  `nextRunAt` via the SAME `computeFirstRun` function `createAgreement`
+  uses (exported from `agreement-service.ts` for this purpose) — a
+  voice-drafted agreement's first-run pointer can never diverge from a
+  form-created one's.
+- **No money moves at creation.** `createAgreement`'s own doc comment
+  explains that service agreements bypass the proposals layer for their
+  RECURRING runs (each cycle's job/invoice generation is pre-approved
+  standing consent from the sign-up itself) — this task adds the sign-up
+  step itself as a reviewed proposal; once approved, the resulting row is
+  swept by the exact same unmodified `runDueAgreements` machinery as a
+  form-created agreement, and each generated invoice rides the normal
+  review path already in place for that invoice type.
+- **The execution handler does NOT call `createAgreement()` directly** —
+  that function's own `service_agreement.created` audit call is not
+  failure-soft (no try/catch), so a thrown audit error there would
+  propagate AFTER the row was already inserted, misreporting a successful
+  create as a failed execution (and risking a duplicate row on retry). The
+  repo write and the audit emission are done separately here instead,
+  exactly like every other LogExpense-family handler
+  (`log-expense-handler.ts`).
+- **Idempotent replay, not just a synthetic-id passthrough.** Like
+  `create_change_order`, this handler mints a brand NEW row on every
+  `execute()` call (unlike `apply_credit`/`record_refund`, which mutate an
+  EXISTING row and are naturally idempotent elsewhere) — a `resultEntityId`
+  already stamped on the proposal short-circuits to a pure replay so a
+  redelivered/re-executed approval can never sign the same customer up
+  twice.
+- **Customer resolution mirrors `send_customer_message` exactly** (not
+  `apply_credit`'s invoice-reference pattern): `create_service_agreement`
+  joined `CUSTOMER_REF_INTENTS` (`ai/agents/customer-calling/entity-
+  resolution.ts`), so the router resolves a spoken customer name to a
+  verified id BEFORE drafting and threads it onto `context.customerId`
+  (the top-level `TaskContext` field, not
+  `context.existingEntities.customerId`). An unresolved reference gates
+  `missingFields: ['customerId']`.
+- **Cadence is a fixed 4-token enum, mapped deterministically to an
+  RRULE — no LLM call.** The classifier normalizes the spoken cadence word
+  onto one of `monthly`/`quarterly`/`twice_a_year`/`annual` (synonyms like
+  "semiannual"/"yearly" map onto the same tokens); `quarterly` and
+  `twice_a_year` are expressed as `FREQ=MONTHLY;INTERVAL=3` and
+  `FREQ=MONTHLY;INTERVAL=6` respectively — the recurrence engine
+  (`agreements/recurrence.ts`) has no native `FREQ=QUARTERLY` step-6
+  equivalent for "twice a year", so both ride the `MONTHLY` frequency with
+  an interval. An absent/unrecognized cadence gates
+  `missingFields: ['recurrenceRule']`.
+- **`startsOn` defaults to the first of next month computed from the
+  TENANT's local calendar date** (`shared/timezone.ts localDateKey`), never
+  raw server-local `Date` math — a naive default is off by a day for any
+  tenant whose local "today" differs from the server/UTC day. A spoken
+  override ("starting September", "October 1st") is parsed best-effort via
+  chrono-node, anchored to the tenant-local "now" (mirrors
+  `ai/scheduling/resolve-datetime.ts`'s own chrono+luxon reference-date
+  construction, minus the exact-time/daypart requirement — this field is a
+  bare calendar DATE, never a time-of-day); an unparseable phrase falls
+  back to the computed default rather than gating. The contract
+  (`proposals/contracts/create-service-agreement.ts`) additionally refines
+  `startsOn` against a REAL calendar date (not just `YYYY-MM-DD` shape) —
+  `computeFirstRun` feeds the string straight into `Date.UTC` with no
+  further validation, so an out-of-range day (e.g. "2026-02-30") would
+  otherwise silently roll over to a wrong date instead of failing loudly.
+- **No `_meta` confidence marker.** Unlike `create_change_order`, there is
+  no catalog grounding or LLM call in this handler that would produce a
+  real confidence signal on a plan price — `_meta` is omitted rather than
+  fabricated (`overallConfidence` is a REQUIRED field on the shared `_meta`
+  envelope whenever `_meta` is present at all).
+- **Never auto-approves.** The drafting task deliberately omits
+  `sourceTrustTier`, so `decideInitialStatus`'s only auto-approve branch
+  (`sourceTrustTier === 'autonomous' AND` capture-class) is never reached
+  at any confidence — same posture as `create_change_order` /
+  `create_standing_instruction`.
+- **New fields voice-extractable in v1 only:** `customerId` (router-
+  resolved), `name` (`serviceAgreementName`), `recurrenceRule` (from
+  `serviceAgreementCadence`), `priceCents` (the existing `amount` seam),
+  and `startsOn` (`serviceAgreementStartsOn`, optional). `locationId` /
+  `description` / `autoRenew` / `renewalTermMonths` / `memberDiscountBps` /
+  `priorityBooking` / `autoCollectDues` all exist on the contract (mirroring
+  the authenticated route) but have no voice extraction seam yet — a v1
+  scope decision, not an oversight; the new rows default to
+  `autoGenerateInvoice: true`, `autoGenerateJob: true`, no auto-renew, no
+  member discount, no priority booking, no auto-collect-dues, matching
+  `createAgreement`'s own defaults.
+- **RBAC posture unchanged (flagged, no policy change):**
+  `create_service_agreement` is not in `CONFIG_WRITING_PROPOSAL_TYPES`
+  (`proposals/actions.ts`) — its execution writes a customer-scoped
+  agreement, not tenant configuration — so approval requires only the
+  generic `proposals:approve` permission every `dispatcher` already holds,
+  identical to `draft_estimate`/`create_change_order` today. This task did
+  not add a stricter owner-only gate, even though signing a customer up
+  for a recurring charge is a meaningfully different risk profile than a
+  note or a job-field edit; a controller may want to reconsider this in
+  the future.
+- This type is deliberately **absent** from `S1_ALLOWED_PROPOSAL_TYPES`
+  (`proposals/surface.ts`) — operator/technician-only, never reachable
+  from an unauthenticated inbound caller.
+
 Notes on the taxonomy-1.2.0 rows:
 
 - `create_invoice_schedule` — the spoken milestone sentence is parsed by a
@@ -634,7 +745,8 @@ not a gap. No new `JobStatus` value was introduced for this.
     { "intent": "record_refund", "proposalType": "record_refund", "actionClass": "money" },
     { "intent": "apply_credit", "proposalType": "apply_credit", "actionClass": "money" },
     { "intent": "send_customer_message", "proposalType": "send_customer_message", "actionClass": "comms" },
-    { "intent": "create_change_order", "proposalType": "create_change_order", "actionClass": "capture" }
+    { "intent": "create_change_order", "proposalType": "create_change_order", "actionClass": "capture" },
+    { "intent": "create_service_agreement", "proposalType": "create_service_agreement", "actionClass": "capture" }
   ],
   "handlerNoOnramp": [
     "create_booking",

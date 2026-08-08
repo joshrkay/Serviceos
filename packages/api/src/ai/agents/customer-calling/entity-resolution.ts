@@ -95,6 +95,12 @@ const CUSTOMER_REF_INTENTS = new Set([
   'schedule_inspection',
   'log_permit',
   'log_warranty_claim',
+  // Task 7 (2026-08-07 tradesperson plan) — "sign the Garcias up for the
+  // annual maintenance plan" names a PERSON, not display text. Mirrors
+  // send_customer_message's rationale above: without this the router
+  // never resolved that name to a customerId, so
+  // CreateServiceAgreementTaskHandler could only see raw free text.
+  'create_service_agreement',
 ]);
 
 const INVOICE_DOC_INTENTS = new Set([

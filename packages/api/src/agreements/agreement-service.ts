@@ -123,8 +123,14 @@ function parseDateOnly(s: string): Date {
 /**
  * Compute the first scheduled run from a startsOn date + rule.
  * If startsOn matches the rule's BYMONTHDAY, that IS the first run.
+ *
+ * Exported (Task 7) so `CreateServiceAgreementExecutionHandler`
+ * (proposals/execution/create-service-agreement-handler.ts) computes
+ * `nextRunAt` with the EXACT same math `createAgreement` uses here — a
+ * voice-drafted agreement's first sweep run can never diverge from what
+ * the authenticated route produces for the identical inputs.
  */
-function computeFirstRun(rule: string, startsOn: string): Date {
+export function computeFirstRun(rule: string, startsOn: string): Date {
   const parsed = parseRule(rule);
   const start = parseDateOnly(startsOn);
   // If startsOn already satisfies the rule, return startsOn itself.

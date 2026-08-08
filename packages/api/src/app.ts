@@ -2231,6 +2231,10 @@ export function createApp(): AppWithLifecycle {
     schedulingNotifier: transactionalComms,
     transactionalComms,
     expenseRepo,
+    // Task 7 (2026-08-07 tradesperson plan) — create_service_agreement
+    // writes through the SAME agreementRepo the recurring-agreements sweep
+    // and the authenticated /api/agreements route already use.
+    agreementRepo,
     auditRepo,
     feasibilityDeps,
     ...(serviceCreditRepo ? { serviceCreditRepo } : {}),

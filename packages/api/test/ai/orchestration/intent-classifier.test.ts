@@ -1215,11 +1215,14 @@ describe('taxonomy 1.2.0 — new intents + entities', () => {
   // (send_customer_message — a NEW comms-class proposal type for a
   // free-form outbound customer message), then Task 6 of the same plan
   // bumped it again to 1.11.0 (create_change_order — a NEW capture-class
-  // proposal type that mints a new estimate pinned to an existing job).
+  // proposal type that mints a new estimate pinned to an existing job),
+  // then Task 7 of the same plan bumped it again to 1.12.0
+  // (create_service_agreement — a NEW capture-class proposal type that
+  // signs a customer up to a recurring maintenance plan/membership).
   // classifyIntent always stamps the CURRENT constant regardless of which
   // intent, so this pin tracks the live value.
-  it('taxonomy version reflects the latest coordinated bump (1.11.0)', () => {
-    expect(INTENT_TAXONOMY_VERSION).toBe('1.11.0');
+  it('taxonomy version reflects the latest coordinated bump (1.12.0)', () => {
+    expect(INTENT_TAXONOMY_VERSION).toBe('1.12.0');
   });
 
   it('parses create_invoice_schedule with the verbatim milestone sentence', () => {

@@ -106,6 +106,7 @@ import { RecordRefundExecutionHandler } from '../../src/proposals/execution/reco
 import { ApplyCreditExecutionHandler } from '../../src/proposals/execution/apply-credit-handler';
 import { SendCustomerMessageExecutionHandler } from '../../src/proposals/execution/send-customer-message-handler';
 import { CreateChangeOrderExecutionHandler } from '../../src/proposals/execution/create-change-order-handler';
+import { CreateServiceAgreementExecutionHandler } from '../../src/proposals/execution/create-service-agreement-handler';
 import { buildLineItem, calculateDocumentTotals, type LineItem } from '../../src/shared/billing-engine';
 import type { AppointmentRepository } from '../../src/appointments/appointment';
 import type { JobRepository } from '../../src/jobs/job';
@@ -1056,6 +1057,38 @@ const ROWS: Row[] = [
         ctx({ message: "Set my brand voice: friendly, always sign off 'Thanks — Bob's HVAC'" }),
       ),
     execute: (p) => new UpdateBrandVoiceExecutionHandler(undefined, stubAuditRepo).execute(p, execContext()),
+  },
+  {
+    // Task 7 (2026-08-07 tradesperson plan) — create_service_agreement is a
+    // NEW capture-class proposal type. Like send_customer_message, it joins
+    // CUSTOMER_REF_INTENTS and reads the ROUTER-INJECTED context.customerId
+    // (not existingEntities.customerId) — no LLM call, no customerReference
+    // fallback on the contract. startsOn is never gated — it always carries
+    // either a parsed spoken date or the computed first-of-next-month default.
+    intent: 'create_service_agreement',
+    mode: 'resolves',
+    note: 'a resolved context.customerId + plan name + cadence + stated cents amount draft ungated; dep-less CreateServiceAgreementExecutionHandler synthetic-succeeds',
+    draft: () =>
+      draft(
+        { gateway: NOOP_GATEWAY },
+        'create_service_agreement',
+        ctx({
+          customerId: CUSTOMER_ID,
+          existingEntities: {
+            serviceAgreementName: 'Annual maintenance plan',
+            serviceAgreementCadence: 'annual',
+            amount: 29000,
+          },
+        }),
+      ),
+    execute: (p) => new CreateServiceAgreementExecutionHandler().execute(p, execContext()),
+    assertPayload: (payload) => {
+      expect(payload.customerId).toBe(CUSTOMER_ID);
+      expect(payload.name).toBe('Annual maintenance plan');
+      expect(payload.recurrenceRule).toBe('FREQ=YEARLY');
+      expect(payload.priceCents).toBe(29000);
+      expect(typeof payload.startsOn).toBe('string');
+    },
   },
 ];
 

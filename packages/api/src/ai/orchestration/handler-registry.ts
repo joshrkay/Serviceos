@@ -54,6 +54,7 @@ import {
 import { ApplyCreditTaskHandler } from '../tasks/apply-credit-task';
 import { SendCustomerMessageTaskHandler } from '../tasks/send-customer-message-task';
 import { CreateChangeOrderTaskHandler } from '../tasks/create-change-order-task';
+import { CreateServiceAgreementTaskHandler } from '../tasks/create-service-agreement-task';
 
 /**
  * B5 (feat: voice-transcript-and-agent-paths) — the deps shared by the
@@ -267,6 +268,11 @@ export function buildTaskHandlers(deps: HandlerRegistryDeps): Map<ProposalType, 
   // catalogRepo powers line-item grounding (same dep draft_estimate uses);
   // absent → the line rides the spoken amount as-is, uncatalogued.
   handlers.set('create_change_order', new CreateChangeOrderTaskHandler(deps.catalogRepo));
+  // Task 7 (2026-08-07 tradesperson plan) — create_service_agreement's
+  // voice on-ramp. No deps: customer resolution rides context.customerId
+  // (router-injected), cadence->RRULE mapping is a fixed table, and
+  // startsOn defaulting reads context.timezone/context.now directly.
+  handlers.set('create_service_agreement', new CreateServiceAgreementTaskHandler());
   handlers.set('emergency_dispatch', new EmergencyDispatchTaskHandler());
   handlers.set('update_customer', new UpdateCustomerTaskHandler());
   handlers.set('log_expense', new LogExpenseTaskHandler());

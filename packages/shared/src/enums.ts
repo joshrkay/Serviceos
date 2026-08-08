@@ -245,6 +245,11 @@ export enum ProposalType {
   // scope-adds from original bids. Capture-class: no money moves at
   // creation, sending the resulting estimate is a later comms-class step.
   CREATE_CHANGE_ORDER = 'create_change_order',
+  // Task 7 (2026-08-07 tradesperson plan) — signs a customer up to a
+  // recurring maintenance plan/membership, writing a service_agreements
+  // row (migration 056, already live). Capture-class: no money moves at
+  // creation, the agreement's own recurring sweep invoices later.
+  CREATE_SERVICE_AGREEMENT = 'create_service_agreement',
 }
 
 export enum RejectionCategory {

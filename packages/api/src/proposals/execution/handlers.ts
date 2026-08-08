@@ -17,6 +17,8 @@ import { SendPaymentReminderExecutionHandler } from './send-payment-reminder-han
 import { ApplyLateFeeExecutionHandler } from './apply-late-fee-handler';
 import { ApplyCreditExecutionHandler } from './apply-credit-handler';
 import { CreateChangeOrderExecutionHandler } from './create-change-order-handler';
+import { CreateServiceAgreementExecutionHandler } from './create-service-agreement-handler';
+import type { AgreementRepository } from '../../agreements/agreement';
 import { UpdateEstimateExecutionHandler } from './update-estimate-handler';
 import { UpdateJobExecutionHandler } from './update-job-handler';
 import { ReassignAppointmentExecutionHandler } from './reassignment-handler';
@@ -1222,6 +1224,11 @@ export function createExecutionHandlerRegistry(deps?: {
   estimateDeliveryProvider?: EstimateDeliveryProvider;
   analyticsRepo?: DispatchAnalyticsRepository;
   expenseRepo?: ExpenseRepository;
+  // Task 7 (2026-08-07 tradesperson plan) — create_service_agreement writes
+  // a service_agreements row (migration 056, already live) via this repo.
+  // Absent → the handler degrades to a synthetic-id passthrough (saves
+  // nothing).
+  agreementRepo?: AgreementRepository;
   auditRepo?: AuditRepository;
   feasibilityDeps?: import('../../scheduling/feasibility-types').FeasibilityDependencies;
   // P7-026 PR c — review-response wiring. All three are optional;
@@ -1416,6 +1423,12 @@ export function createExecutionHandlerRegistry(deps?: {
     // invariant). Money-class: only runs after explicit approval.
     new RecordRefundExecutionHandler(deps?.paymentRepo, deps?.auditRepo),
     new LogExpenseExecutionHandler(deps?.expenseRepo, deps?.auditRepo),
+    // Task 7 (2026-08-07 tradesperson plan) — create_service_agreement:
+    // writes a service_agreements row (migration 056, already live) via
+    // the SAME agreementRepo the authenticated route + recurring-sweep
+    // worker use. LogExpense-family posture: registered unconditionally,
+    // degrades to a synthetic-id passthrough without the repo.
+    new CreateServiceAgreementExecutionHandler(deps?.agreementRepo, deps?.auditRepo),
     new ConvertLeadExecutionHandler(deps?.leadRepo, deps?.customerRepo, deps?.auditRepo, deps?.locationRepo),
     new ConfirmAppointmentExecutionHandler(deps?.appointmentRepo, requiredAuditRepo),
     new MarkLeadLostExecutionHandler(deps?.leadRepo, deps?.auditRepo),

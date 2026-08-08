@@ -88,6 +88,14 @@ export type IntentType =
   // the resulting estimate is a later, separate comms-class step
   // (send_estimate) — same capture posture as draft_estimate.
   | 'create_change_order'
+  // Task 7 (2026-08-07 tradesperson plan) — NEW capture-class proposal
+  // type: signs a customer up to a recurring maintenance plan/membership
+  // ("Sign the Garcias up for the annual maintenance plan, 290 a year").
+  // Writes a `service_agreements` row (migration 056, already live); no
+  // money moves at creation — the agreement's OWN recurring sweep
+  // generates jobs/invoices later, and those invoices ride the normal
+  // review path.
+  | 'create_service_agreement'
   // Taxonomy 1.2.0 (agent wave, Track A) — three proposal-driving on-ramps:
   //   create_invoice_schedule    — U2: milestone/progress billing plan for a
   //                                job; the verbatim milestone sentence rides
@@ -247,6 +255,7 @@ export const SUPPORTED_INTENTS: readonly IntentType[] = [
   'apply_credit',
   'send_customer_message',
   'create_change_order',
+  'create_service_agreement',
   'create_invoice_schedule',
   'respond_to_review',
   'create_standing_instruction',
@@ -379,8 +388,25 @@ export const SUPPORTED_INTENTS: readonly IntentType[] = [
  *           proposal (missingFields: ['jobId']); see
  *           CreateChangeOrderExecutionHandler (proposals/execution/
  *           create-change-order-handler.ts).
+ *   1.12.0 — Task 7 (2026-08-07 tradesperson plan), additive:
+ *           create_service_agreement — a NEW capture-class proposal type
+ *           that signs a customer up to a recurring maintenance
+ *           plan/membership, writing a `service_agreements` row
+ *           (migration 056, already live). No money moves at creation —
+ *           the agreement's OWN recurring sweep
+ *           (agreements/agreement-service.ts runDueAgreements) generates
+ *           jobs/invoices later, and those invoices ride the normal
+ *           review path. New extraction fields (serviceAgreementName /
+ *           serviceAgreementCadence / serviceAgreementStartsOn); reuses
+ *           the existing customerName/amount seams for the customer
+ *           reference and per-period price. `create_service_agreement`
+ *           joined CUSTOMER_REF_INTENTS (entity-resolution.ts) — an
+ *           unresolved customer reference gates the proposal
+ *           (missingFields: ['customerId']); see
+ *           CreateServiceAgreementExecutionHandler (proposals/execution/
+ *           create-service-agreement-handler.ts).
  */
-export const INTENT_TAXONOMY_VERSION = '1.11.0';
+export const INTENT_TAXONOMY_VERSION = '1.12.0';
 
 /**
  * P11-001: convenience predicate the FSM adapter uses to route
@@ -631,6 +657,24 @@ export interface ExtractedEntities {
   // jobReference (existing field) carries the spoken job reference; amount
   // (existing field) carries the stated cents, when spoken.
   changeOrderDescription?: string;
+  // Task 7 — create_service_agreement: the spoken name of the plan/
+  // membership ("annual maintenance plan", "29-a-month membership").
+  // Qualified (not bare `name`) per house precedent
+  // (catalogItemNewName/refundReason) — folds directly onto the
+  // contract's `name` field.
+  serviceAgreementName?: string;
+  // create_service_agreement: how often the plan recurs, normalized by the
+  // classifier onto one of these 4 tokens (synonyms like "semiannual" or
+  // "yearly" map onto twice_a_year/annual respectively — never emitted
+  // verbatim). The task handler maps each token to an RRULE string
+  // deterministically; an absent/invalid value gates
+  // missingFields: ['recurrenceRule'].
+  serviceAgreementCadence?: 'monthly' | 'quarterly' | 'twice_a_year' | 'annual';
+  // create_service_agreement: the spoken plan start date/phrase
+  // ("starting September", "October 1st"), verbatim — the task handler
+  // parses it best-effort (chrono-node, tenant-timezone anchored) and
+  // falls back to the first of next month when unstated or unparseable.
+  serviceAgreementStartsOn?: string;
 }
 
 /**
@@ -1223,6 +1267,15 @@ Supported intents (return exactly ONE):
                            Examples: "The Garcias want a second zone — change order for 1800"
                                      "Add a change order on the Patel job: replace the flue liner too"
                                      "Customer added three more outlets — write it up"
+- "create_service_agreement" — owner signs a customer up for a recurring
+                           maintenance plan/membership. Extract customerName,
+                           serviceAgreementName, serviceAgreementCadence
+                           (monthly/quarterly/twice a year/annual),
+                           amount (integer cents per period), and
+                           serviceAgreementStartsOn if spoken.
+                           Examples: "Sign the Garcias up for the annual maintenance plan, 290 a year"
+                                     "Put Maria on the 29-a-month membership starting September"
+                                     "Quarterly filter service for the Patels, 79 per visit"
 - "create_invoice_schedule" — user wants to set up a MILESTONE / PROGRESS
                            billing plan for a job: a deposit up front and the
                            rest later, or a percentage split across stages.
@@ -1499,7 +1552,10 @@ Return valid JSON with exactly this shape (no prose, no markdown fences):
     "creditReason": "<string, optional — why the credit was given on apply_credit>",
     "customerMessageBody": "<string, optional — the message content to send on send_customer_message, cleaned up but faithful>",
     "customerMessageChannel": "<sms|email, optional — on send_customer_message, defaults to sms>",
-    "changeOrderDescription": "<string, optional — the added work, verbatim, on create_change_order>"
+    "changeOrderDescription": "<string, optional — the added work, verbatim, on create_change_order>",
+    "serviceAgreementName": "<string, optional — the plan/membership name on create_service_agreement>",
+    "serviceAgreementCadence": "<monthly|quarterly|twice_a_year|annual, optional — recurring cadence on create_service_agreement>",
+    "serviceAgreementStartsOn": "<string, optional — verbatim spoken start date/phrase on create_service_agreement>"
   }
 }
 
@@ -1865,6 +1921,7 @@ export function parseClassifierJson(content: string): IntentClassification | nul
     'other',
   ] as const;
   const TIME_ENTRY_TYPES = ['job', 'drive', 'break', 'admin'] as const;
+  const SERVICE_AGREEMENT_CADENCES = ['monthly', 'quarterly', 'twice_a_year', 'annual'] as const;
 
   /**
    * Validate an LLM-provided value against a fixed allowed-set.
@@ -1984,6 +2041,12 @@ export function parseClassifierJson(content: string): IntentClassification | nul
     if (customerMessageChannel) extracted.customerMessageChannel = customerMessageChannel;
     // create_change_order fields (Tradesperson wave 1, Task 6)
     if (typeof ee.changeOrderDescription === 'string') extracted.changeOrderDescription = ee.changeOrderDescription;
+    // create_service_agreement fields (Task 7, 2026-08-07 tradesperson plan)
+    if (typeof ee.serviceAgreementName === 'string') extracted.serviceAgreementName = ee.serviceAgreementName;
+    const serviceAgreementCadence = pickEnum(ee, 'serviceAgreementCadence', SERVICE_AGREEMENT_CADENCES);
+    if (serviceAgreementCadence) extracted.serviceAgreementCadence = serviceAgreementCadence;
+    if (typeof ee.serviceAgreementStartsOn === 'string')
+      extracted.serviceAgreementStartsOn = ee.serviceAgreementStartsOn;
     if (Object.keys(extracted).length > 0) {
       result.extractedEntities = extracted;
     }
