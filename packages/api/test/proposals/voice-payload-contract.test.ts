@@ -100,6 +100,12 @@ import { InMemoryAuditRepository } from '../../src/audit/audit';
 import { InMemoryJobRepository, type Job } from '../../src/jobs/job';
 import { InMemoryInvoiceRepository, type Invoice } from '../../src/invoices/invoice';
 import { InMemoryEstimateRepository, type Estimate } from '../../src/estimates/estimate';
+import { InMemoryCatalogItemRepository, createCatalogItem } from '../../src/catalog/catalog-item';
+import { UpdateCatalogItemExecutionHandler } from '../../src/proposals/execution/update-catalog-item-handler';
+import { RecordRefundExecutionHandler } from '../../src/proposals/execution/record-refund-handler';
+import { ApplyCreditExecutionHandler } from '../../src/proposals/execution/apply-credit-handler';
+import { SendCustomerMessageExecutionHandler } from '../../src/proposals/execution/send-customer-message-handler';
+import { CreateChangeOrderExecutionHandler } from '../../src/proposals/execution/create-change-order-handler';
 import { buildLineItem, calculateDocumentTotals, type LineItem } from '../../src/shared/billing-engine';
 import type { AppointmentRepository } from '../../src/appointments/appointment';
 import type { JobRepository } from '../../src/jobs/job';
@@ -344,6 +350,31 @@ const ROWS: Row[] = [
     execute: (p) => new CreateAppointmentExecutionHandler().execute(p, execContext()),
   },
   {
+    // Tradesperson wave 1 (2026-08-07 plan) alias — schedule_inspection maps
+    // to 'create_appointment' (voice-intent-map.ts), so dispatch here is
+    // byte-identical to the create_appointment row above: the SAME
+    // CreateAppointmentAITaskHandler / CreateAppointmentExecutionHandler
+    // pair. Only the classifier's extraction differs (an "Inspection — "
+    // + inspection-type prefix folded into jobTitle — no separate
+    // inspectionType field exists), which this drift test cannot observe
+    // — canned gateway JSON stands in for the LLM either way.
+    intent: 'schedule_inspection',
+    mode: 'resolves',
+    note: 'alias of create_appointment — resolved timezone + a dateTimePhrase resolves the slot ungated; canned jobId skips the auto-open-a-job path entirely',
+    draft: () =>
+      draft(
+        { gateway: mockGateway(JSON.stringify({
+          dateTimePhrase: 'tomorrow at 2pm',
+          jobId: JOB_ID,
+          summary: 'Inspection — rough-in',
+          confidence_score: 0.9,
+        })) },
+        'create_appointment',
+        ctx({ timezone: TIMEZONE, now: NOW, existingEntities: { customerId: CUSTOMER_ID } }),
+      ),
+    execute: (p) => new CreateAppointmentExecutionHandler().execute(p, execContext()),
+  },
+  {
     intent: 'update_invoice',
     mode: 'resolves',
     note: 'invoiceReference is a UUID the wired invoiceRepo confirms → verify-or-gate lifts the gate; UpdateInvoiceExecutionHandler applies the edit (unit-bearing) against a seeded draft invoice',
@@ -471,6 +502,26 @@ const ROWS: Row[] = [
     execute: (p) => new CreateJobExecutionHandler().execute(p, execContext()),
   },
   {
+    // Tradesperson wave 1 (2026-08-07 plan) alias — log_warranty_claim maps
+    // to 'create_job' (voice-intent-map.ts), so dispatch here is
+    // byte-identical to the create_job row above: the SAME
+    // CreateJobVoiceTaskHandler / CreateJobExecutionHandler pair. Only the
+    // classifier's extraction differs (a "Warranty — " + failure-description
+    // prefix folded into jobTitle — no separate problemDescription field
+    // exists), which this drift test cannot observe — no LLM is called for
+    // this row either way.
+    intent: 'log_warranty_claim',
+    mode: 'resolves',
+    note: 'alias of create_job — resolved customerId + a title drafts ungated; dep-less CreateJobExecutionHandler synthetic-succeeds',
+    draft: () =>
+      draft(
+        { gateway: NOOP_GATEWAY },
+        'create_job',
+        ctx({ existingEntities: { customerId: CUSTOMER_ID, jobTitle: 'Warranty — water heater failure' } }),
+      ),
+    execute: (p) => new CreateJobExecutionHandler().execute(p, execContext()),
+  },
+  {
     intent: 'update_job',
     mode: 'resolves',
     note: 'a UUID jobId the wired jobRepo confirms lifts resolveJobIdGate; dep-less UpdateJobExecutionHandler refuses on wiring, not validation (handler_not_wired:jobRepo)',
@@ -542,6 +593,32 @@ const ROWS: Row[] = [
     execute: (p) => new AddNoteExecutionHandler(undefined, stubAuditRepo).execute(p, execContext()),
   },
   {
+    // Tradesperson wave 1 (2026-08-07 plan) alias — log_permit maps to
+    // 'add_note' (voice-intent-map.ts), so dispatch here is byte-identical
+    // to the add_note row above: the SAME AddNoteTaskHandler /
+    // AddNoteExecutionHandler pair. Only the classifier's extraction
+    // differs (the permit number/status fold into noteBody's "PERMIT: "
+    // prefix — no separate permitNumber field exists), which this drift
+    // test cannot observe — no LLM is called for this row either way.
+    intent: 'log_permit',
+    mode: 'resolves',
+    note: 'alias of add_note — a resolver-verified jobId lands as targetId ungated; dep-less AddNoteExecutionHandler synthetic-succeeds',
+    draft: () =>
+      draft(
+        { gateway: NOOP_GATEWAY },
+        'add_note',
+        ctx({
+          existingEntities: {
+            jobId: JOB_ID,
+            jobReference: 'the Patel job',
+            noteTargetKind: 'job',
+            noteBody: 'PERMIT: 2024-1187 approved',
+          },
+        }),
+      ),
+    execute: (p) => new AddNoteExecutionHandler(undefined, stubAuditRepo).execute(p, execContext()),
+  },
+  {
     intent: 'log_time_entry',
     mode: 'resolves',
     note: 'resolved jobId lands on the payload (RV-051); dep-less LogTimeEntryExecutionHandler synthetic-succeeds',
@@ -600,6 +677,128 @@ const ROWS: Row[] = [
         }),
       ),
     execute: (p) => new CreateInvoiceScheduleExecutionHandler().execute(p, execContext()),
+  },
+  {
+    // Tradesperson wave 1, Task 2 (2026-08-07 plan) — WS20's proposal type +
+    // execution handler pre-exist; this is the voice on-ramp's drift row.
+    // The payload deliberately carries no `evidence` (see
+    // UpdateCatalogItemTaskHandler's doc comment) — this row proves that
+    // omission is safe: missingFields is still [] and the REAL execution
+    // handler still accepts the payload, because it never reads
+    // payload.evidence.
+    intent: 'update_catalog_item',
+    mode: 'resolves',
+    note: 'resolveLineItemToCatalog resolves catalogItemId at the "high" tier off catalogRepo.listByTenant; dep-less UpdateCatalogItemExecutionHandler synthetic-succeeds even with no evidence on the payload',
+    draft: () => {
+      const catalogRepo = new InMemoryCatalogItemRepository();
+      return catalogRepo
+        .create(
+          createCatalogItem({
+            tenantId: TENANT_ID,
+            name: 'AC diagnostic fee',
+            category: 'Labor',
+            unit: 'each',
+            unitPriceCents: 7900,
+          }),
+        )
+        .then(() =>
+          draft(
+            { gateway: NOOP_GATEWAY, catalogRepo },
+            'update_catalog_item',
+            ctx({ existingEntities: { catalogItemReference: 'diagnostic fee', unitPriceCents: 8900 } }),
+          ),
+        );
+    },
+    execute: (p) => new UpdateCatalogItemExecutionHandler().execute(p, execContext()),
+  },
+  {
+    // Tradesperson wave 1, Task 3 (2026-08-07 plan) — record_refund is a NEW
+    // money-class proposal type. Unlike record_payment (which never reads
+    // the resolver-verified existingEntities.invoiceId — see that row's
+    // note above), RecordRefundTaskHandler DOES read it: this intent joins
+    // INVOICE_DOC_INTENTS (entity-resolution.ts) and the contract has no
+    // invoiceReference fallback, so a resolver-verified invoiceId is the
+    // ONLY way this payload drafts ungated.
+    intent: 'record_refund',
+    mode: 'resolves',
+    note: 'resolver-verified existingEntities.invoiceId + a stated cents amount draft ungated; dep-less RecordRefundExecutionHandler synthetic-succeeds',
+    draft: () =>
+      draft(
+        { gateway: NOOP_GATEWAY },
+        'record_refund',
+        ctx({ existingEntities: { invoiceId: INVOICE_ID, amount: 10000, refundMethod: 'cash' } }),
+      ),
+    execute: (p) => new RecordRefundExecutionHandler().execute(p, execContext()),
+  },
+  {
+    // Tradesperson wave 1, Task 4 (2026-08-07 plan) — apply_credit is a NEW
+    // money-class proposal type. Like record_refund, it joins
+    // INVOICE_DOC_INTENTS and has no invoiceReference fallback, so a
+    // resolver-verified invoiceId is the ONLY way this payload drafts
+    // ungated.
+    intent: 'apply_credit',
+    mode: 'resolves',
+    note: 'resolver-verified existingEntities.invoiceId + a stated cents amount draft ungated; dep-less ApplyCreditExecutionHandler synthetic-succeeds',
+    draft: () =>
+      draft(
+        { gateway: NOOP_GATEWAY },
+        'apply_credit',
+        ctx({ existingEntities: { invoiceId: INVOICE_ID, amount: 5000 } }),
+      ),
+    execute: (p) => new ApplyCreditExecutionHandler().execute(p, execContext()),
+  },
+  {
+    // Tradesperson wave 1, Task 5 (2026-08-07 plan) — send_customer_message
+    // is a NEW comms-class proposal type. Like update_customer, it reads
+    // the ROUTER-INJECTED context.customerId (not existingEntities.customerId)
+    // — CUSTOMER_REF_INTENTS membership, same resolution ladder. The
+    // optional LLM rewrite pass runs (a gateway is wired) and its returned
+    // text — not the raw spoken text — is what rides the payload.
+    intent: 'send_customer_message',
+    mode: 'resolves',
+    note: 'a resolved context.customerId + a spoken body draft ungated (channel defaults to sms); the optional LLM rewrite pass runs and its text rides the payload; dep-less SendCustomerMessageExecutionHandler synthetic-succeeds',
+    draft: () =>
+      draft(
+        { gateway: mockGateway('Your part arrived — we can come Thursday morning.') },
+        'send_customer_message',
+        ctx({
+          customerId: CUSTOMER_ID,
+          existingEntities: {
+            customerMessageBody: 'the part arrived, we can come thursday morning',
+          },
+        }),
+      ),
+    execute: (p) => new SendCustomerMessageExecutionHandler().execute(p, execContext()),
+    assertPayload: (payload) => {
+      expect(payload.customerId).toBe(CUSTOMER_ID);
+      expect(payload.channel).toBe('sms');
+      expect(payload.body).toBe('Your part arrived — we can come Thursday morning.');
+    },
+  },
+  {
+    // Tradesperson wave 1, Task 6 (2026-08-07 plan) — create_change_order is
+    // a NEW capture-class proposal type. Like update_job, it joins
+    // JOB_REF_INTENTS and reads the ROUTER-INJECTED existingEntities.jobId —
+    // no LLM call, no jobReference fallback on the contract.
+    intent: 'create_change_order',
+    mode: 'resolves',
+    note: 'resolver-verified existingEntities.jobId (JOB_REF_INTENTS) + a work description + stated cents amount draft ungated; dep-less CreateChangeOrderExecutionHandler synthetic-succeeds',
+    draft: () =>
+      draft(
+        { gateway: NOOP_GATEWAY },
+        'create_change_order',
+        ctx({
+          existingEntities: { jobId: JOB_ID, changeOrderDescription: 'Second zone', amount: 180000 },
+        }),
+      ),
+    execute: (p) => new CreateChangeOrderExecutionHandler().execute(p, execContext()),
+    assertPayload: (payload) => {
+      expect(payload.jobId).toBe(JOB_ID);
+      expect(payload.title).toBe('Change order — Second zone');
+      const lineItems = payload.lineItems as Array<Record<string, unknown>>;
+      expect(lineItems[0].description).toBe('Second zone');
+      expect(lineItems[0].unitPriceCents).toBe(180000);
+    },
   },
   {
     intent: 'create_standing_instruction',

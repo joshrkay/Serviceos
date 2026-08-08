@@ -46,7 +46,7 @@ const CUSTOMER_REF_INTENTS = new Set([
   'create_invoice',
   'draft_estimate',
   'create_appointment',
-  'create_booking',
+  'create_booking', // vacuous today — see the note at SCHEDULING_CREATE_INTENTS below.
   'send_invoice',
   'send_estimate',
   // A spoken nudge names a PERSON ("nudge the Khan estimate"), not display
@@ -66,10 +66,35 @@ const CUSTOMER_REF_INTENTS = new Set([
   'add_note',
   'request_feedback',
   'notify_delay',
+  // Tradesperson wave 1, Task 5 — a spoken "text/email the Hendersons..."
+  // names a PERSON, not display text. Without this the router never
+  // resolved that name to a customerId, so SendCustomerMessageTaskHandler
+  // could only see raw free text — mirrors send_estimate_nudge's rationale
+  // above.
+  'send_customer_message',
   'log_expense',
   'add_service_location',
   'mark_lead_lost',
   'confirm_appointment',
+  // Tradesperson wave 1 — each alias joins the SAME customer-reference
+  // resolution its target proposal type already gets (per-alias, not a
+  // blanket rule — a future alias must be checked against its own target,
+  // not assumed):
+  //   schedule_inspection  → create_appointment (already above) resolves
+  //                          customerName; the inspection's own customer
+  //                          reference needs the same resolution.
+  //   log_permit           → add_note (already above) resolves
+  //                          customerName when a permit note names a
+  //                          customer rather than a job ("Note the
+  //                          electrical permit was approved for the
+  //                          Hendersons") — without this, that customer
+  //                          reference stayed fully manual even though
+  //                          plain add_note already resolves it.
+  //   log_warranty_claim   → create_job (already above) resolves
+  //                          customerName for the new warranty job record.
+  'schedule_inspection',
+  'log_permit',
+  'log_warranty_claim',
 ]);
 
 const INVOICE_DOC_INTENTS = new Set([
@@ -79,6 +104,20 @@ const INVOICE_DOC_INTENTS = new Set([
   'apply_late_fee',
   'issue_invoice',
   'send_payment_reminder',
+  // Tradesperson wave 1, Task 3 — record_refund needs the SAME invoice-
+  // reference resolution record_payment gets: the spoken invoice reference
+  // rides `entities.jobReference` (there is no separate `invoiceReference`
+  // extraction field anywhere in this taxonomy — every invoice-doc intent
+  // reuses jobReference/jobTitle, disambiguated by this set's membership),
+  // resolved here to a verified `invoiceId` BEFORE RecordRefundTaskHandler
+  // runs (voice-action-router.ts stamps it onto `context.existingEntities`).
+  'record_refund',
+  // Tradesperson wave 1, Task 4 — apply_credit needs the SAME invoice-
+  // reference resolution record_refund/record_payment get: the spoken
+  // invoice reference rides `entities.jobReference`, resolved here to a
+  // verified `invoiceId` BEFORE ApplyCreditTaskHandler runs
+  // (voice-action-router.ts stamps it onto `context.existingEntities`).
+  'apply_credit',
 ]);
 
 const ESTIMATE_DOC_INTENTS = new Set([
@@ -87,6 +126,23 @@ const ESTIMATE_DOC_INTENTS = new Set([
   'send_estimate_nudge',
 ]);
 
+/**
+ * Job-reference resolution membership. Before adding a NEW intent here,
+ * decide TWO separate questions — conflating them is exactly what caused
+ * schedule_inspection's real bug (e255bbc0 introduced it, 3b10d44d fixed
+ * it):
+ *   1. Does an EXPLICIT spoken jobReference for this intent need to resolve
+ *      to an existing job? If yes, join this set.
+ *   2. Does this intent's `jobTitle` field carry a NEW job's descriptive
+ *      name rather than an existing-job lookup key? If yes, it must ALSO
+ *      join `JOB_TITLE_FALLBACK_EXCLUDED_INTENTS` below — even while
+ *      staying a member of THIS set — otherwise the `jobReference ??
+ *      jobTitle` fallback (in `planVoiceEntityLookups` below) will search
+ *      for a job that was never meant to exist by that name.
+ * `create_job`/`create_booking` answer NO to (1): they never join this set
+ * at all (see the fallback's own comment for the full rationale).
+ * `schedule_inspection` answers YES to both.
+ */
 const JOB_REF_INTENTS = new Set([
   'update_job',
   'log_time_entry',
@@ -101,8 +157,66 @@ const JOB_REF_INTENTS = new Set([
   // contract, so an unresolved (or absent) reference still logs the expense
   // unlinked — resolution only ever ADDS the link, never gates the capture.
   'log_expense',
+  // Tradesperson wave 1 — per-alias job-reference rationale (log_warranty_claim
+  // is deliberately ABSENT: its target, create_job, never joins
+  // JOB_REF_INTENTS either — see the comment above the fallback below —
+  // so a new warranty job's descriptive jobTitle can never be misread as a
+  // lookup for an existing job):
+  //   log_permit           → add_note (already above) resolves an EXPLICIT
+  //                          spoken jobReference ("on the Patel job") the
+  //                          same way; a permit note names the job it
+  //                          attaches to just like any other add_note.
+  //   schedule_inspection  → is ALSO in JOB_TITLE_FALLBACK_EXCLUDED_INTENTS
+  //                          below — its jobTitle carries descriptive
+  //                          inspection text, never an existing-job name —
+  //                          but stays a JOB_REF_INTENTS member so an
+  //                          EXPLICIT spoken jobReference ("on the Patel
+  //                          job") still resolves to a jobId.
+  'log_permit',
+  'schedule_inspection',
+  // Tradesperson wave 1, Task 6 — create_change_order mints a NEW estimate
+  // pinned to an EXISTING job: the spoken jobReference MUST resolve to a
+  // real jobId (a change order without its job is meaningless), same
+  // resolution ladder as update_job/log_expense. jobId is REQUIRED on the
+  // contract (unlike log_expense's optional link), so an unresolved
+  // reference gates the proposal — see CreateChangeOrderTaskHandler.
+  'create_change_order',
 ]);
 
+/**
+ * Spec-review fix (2026-08-07) — intents whose jobTitle must NEVER be used
+ * as the jobReference fallback below, even though they ARE JOB_REF_INTENTS
+ * members (unlike create_job/create_booking, which get this for free by
+ * never joining JOB_REF_INTENTS at all — see the comment above the fallback).
+ * schedule_inspection needs BOTH behaviors at once: an explicit "on the
+ * Patel job" must still resolve (JOB_REF_INTENTS membership, OR-branch
+ * below), but its jobTitle carries the inspection's own descriptive text
+ * ("Inspection — rough-in", intent-classifier.ts), not a job name — using it
+ * as a lookup key would search for a job that was never meant to exist by
+ * that name, producing a bogus not_found. Because
+ * requiresExistingEntity('schedule_inspection') is TRUE (e255bbc0 — a NAMED
+ * job must actually exist), that bogus not_found would incorrectly escalate
+ * an inspection that never named a job at all, instead of proceeding the
+ * same way create_appointment does: falling through to
+ * CreateAppointmentExecutionHandler's SCH-02 fallback (proposals/execution/
+ * handlers.ts), which auto-opens a NEW job named `jobTitle || proposal.
+ * summary` when a customerId is resolvable (or fails with the same
+ * missing-customerId error any other unresolved jobId hits) — never "no job
+ * link" (a booked appointment always ends up attached to a job one way or
+ * another).
+ */
+const JOB_TITLE_FALLBACK_EXCLUDED_INTENTS = new Set(['schedule_inspection']);
+
+// Quality-review note (2026-08-08) — 'create_booking' in this set (and in
+// CUSTOMER_REF_INTENTS above) is a defensive, currently-VACUOUS entry: it
+// names a ProposalType (proposals/proposal.ts), never a classifier
+// IntentType (ai/orchestration/intent-classifier.ts) — grep confirms no
+// `IntentType` union member is named `create_booking`. Since every `intent`
+// value these sets are checked against (`.has(intent)`) is classifier
+// output, this entry can never match today. Kept (not removed) as a
+// forward guard in case a future classifier intent is ever named to match
+// it directly — removing it would be a silent behavior no-op either way,
+// so there is no urgency to delete it.
 const SCHEDULING_CREATE_INTENTS = new Set(['create_appointment', 'create_booking']);
 
 const APPOINTMENT_REF_INTENTS = new Set([
@@ -337,11 +451,18 @@ export function planVoiceEntityLookups(
   // classified with entities.jobTitle="QA Matrix job" and no jobReference at
   // all, silently dropping the job link and failing execution downstream).
   // create_job/create_booking are deliberately excluded from JOB_REF_INTENTS
-  // /SCHEDULING_CREATE_INTENTS's fallback below, so this can never misread an
-  // intentional new-job title as a reference to an existing job.
+  // /SCHEDULING_CREATE_INTENTS's fallback below (they never join
+  // JOB_REF_INTENTS at all), so this can never misread an intentional
+  // new-job title as a reference to an existing job. schedule_inspection
+  // needs the opposite shape — it IS a JOB_REF_INTENTS member (an explicit
+  // "on the Patel job" must still resolve) — so it is excluded from this
+  // fallback by name via JOB_TITLE_FALLBACK_EXCLUDED_INTENTS instead: its
+  // jobTitle carries descriptive inspection text, never a job name.
   const jobReference =
     trimReference(entities.jobReference) ??
-    (JOB_REF_INTENTS.has(intent) ? trimReference(entities.jobTitle) : undefined);
+    (JOB_REF_INTENTS.has(intent) && !JOB_TITLE_FALLBACK_EXCLUDED_INTENTS.has(intent)
+      ? trimReference(entities.jobTitle)
+      : undefined);
   if (jobReference) {
     const documentKind = documentKindForReference(intent, jobReference);
     if (documentKind) {

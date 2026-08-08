@@ -222,6 +222,29 @@ export enum ProposalType {
   // auto-approves at any trust tier, and its payload cannot express the lock
   // (locking stays tap-only, same theory as the D-013 approval exception).
   UPDATE_BRAND_VOICE = 'update_brand_voice',
+  // Tradesperson wave 1, Task 3 — records a MANUAL refund (cash/check/
+  // external card) given back to a customer. Money-class: never
+  // auto-approves at any trust tier. (Backfilled here alongside
+  // apply_credit below — this entry was missing from the shared enum since
+  // Task 3 shipped, which silently broke the ProposalType ↔
+  // VALID_PROPOSAL_TYPES and action-class parity tests in this file.)
+  RECORD_REFUND = 'record_refund',
+  // Tradesperson wave 1, Task 4 — reduces what a customer owes on an issued
+  // invoice (goodwill, warranty labor, price match). Money-class: never
+  // auto-approves at any trust tier. Floor-guarded against the invoice's
+  // amount due — over-crediting is record_refund's job, not this one's.
+  APPLY_CREDIT = 'apply_credit',
+  // Tradesperson wave 1, Task 5 — a free-form outbound customer message
+  // (status update, part arrival, ETA, thanks). Comms-class: the AI drafts
+  // the exact text; the owner ALWAYS approves before a customer sees it —
+  // never auto-approves at any trust tier. Highest-frequency gap in the
+  // 2026-08-07 tradesperson plan.
+  SEND_CUSTOMER_MESSAGE = 'send_customer_message',
+  // Tradesperson wave 1, Task 6 — mints a NEW estimate pinned to an EXISTING
+  // job, flagged is_change_order (migration 271) so reporting can separate
+  // scope-adds from original bids. Capture-class: no money moves at
+  // creation, sending the resulting estimate is a later comms-class step.
+  CREATE_CHANGE_ORDER = 'create_change_order',
 }
 
 export enum RejectionCategory {

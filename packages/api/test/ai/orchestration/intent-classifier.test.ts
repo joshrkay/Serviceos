@@ -1202,11 +1202,24 @@ describe('Story 3.4 — "log inventory" maps to expense logging', () => {
 describe('taxonomy 1.2.0 — new intents + entities', () => {
   // B7 (feat: voice-transcript-and-agent-paths) bumped the taxonomy again to
   // 1.3.0 (update_job); B5.5 (Part F decision F-3) bumped it again to 1.4.0
-  // (en_route); B1.18 bumped it again to 1.5.0 (update_brand_voice).
+  // (en_route); B1.18 bumped it again to 1.5.0 (update_brand_voice);
+  // Tradesperson wave 1 (2026-08-07 plan) bumped it again to 1.6.0
+  // (schedule_inspection / log_permit / log_warranty_claim), then Task 2 of
+  // the same plan bumped it again to 1.7.0 (update_catalog_item — WS20's
+  // existing proposal type/handler, voice on-ramp only), then Task 3 of the
+  // same plan bumped it again to 1.8.0 (record_refund — a NEW money-class
+  // proposal type for recording MANUAL refunds by voice), then Task 4 of the
+  // same plan bumped it again to 1.9.0 (apply_credit — a NEW money-class
+  // proposal type that reduces what a customer owes on an issued invoice),
+  // then Task 5 of the same plan bumped it again to 1.10.0
+  // (send_customer_message — a NEW comms-class proposal type for a
+  // free-form outbound customer message), then Task 6 of the same plan
+  // bumped it again to 1.11.0 (create_change_order — a NEW capture-class
+  // proposal type that mints a new estimate pinned to an existing job).
   // classifyIntent always stamps the CURRENT constant regardless of which
   // intent, so this pin tracks the live value.
-  it('taxonomy version reflects the latest coordinated bump (1.5.0)', () => {
-    expect(INTENT_TAXONOMY_VERSION).toBe('1.5.0');
+  it('taxonomy version reflects the latest coordinated bump (1.11.0)', () => {
+    expect(INTENT_TAXONOMY_VERSION).toBe('1.11.0');
   });
 
   it('parses create_invoice_schedule with the verbatim milestone sentence', () => {
@@ -1335,6 +1348,228 @@ describe('taxonomy 1.2.0 — new intents + entities', () => {
     expect(result.extractedEntities?.brandVoiceInstruction).toBe(
       'friendly, always sign off Thanks Bob',
     );
+  });
+
+  // Tradesperson wave 1, Task 2 (taxonomy 1.7.0) — update_catalog_item.
+  // Fields are qualified (catalogItemNewName/catalogItemNewDescription, not
+  // bare name/description) per the review fix: the template already has
+  // `updatedName` (update_customer) distinguished only by prose, and a
+  // weaker classifier emitting the wrong key would silently drop a rename.
+  it('parses update_catalog_item with catalogItemReference, unitPriceCents, catalogItemNewName, and catalogItemNewDescription', () => {
+    const result = parseClassifierJson(
+      JSON.stringify({
+        intentType: 'update_catalog_item',
+        confidence: 0.9,
+        extractedEntities: {
+          catalogItemReference: 'AC tune-up',
+          unitPriceCents: 8900,
+          catalogItemNewName: 'AC seasonal service',
+          catalogItemNewDescription: 'Full seasonal inspection and coil clean',
+        },
+      }),
+    );
+    expect(result?.intentType).toBe('update_catalog_item');
+    expect(result?.extractedEntities?.catalogItemReference).toBe('AC tune-up');
+    expect(result?.extractedEntities?.unitPriceCents).toBe(8900);
+    expect(result?.extractedEntities?.catalogItemNewName).toBe('AC seasonal service');
+    expect(result?.extractedEntities?.catalogItemNewDescription).toBe(
+      'Full seasonal inspection and coil clean',
+    );
+  });
+
+  it('classifyIntent end-to-end for update_catalog_item stamps the current taxonomy version', async () => {
+    const gateway = mockGateway(
+      JSON.stringify({
+        intentType: 'update_catalog_item',
+        confidence: 0.9,
+        extractedEntities: { catalogItemReference: 'AC tune-up', unitPriceCents: 8900 },
+      }),
+    );
+    const result = await classifyIntent(
+      'Raise the AC tune-up price to 89 dollars',
+      { tenantId: 't-1' },
+      gateway,
+    );
+    expect(result.intentType).toBe('update_catalog_item');
+    expect(result.taxonomyVersion).toBe(INTENT_TAXONOMY_VERSION);
+    expect(result.extractedEntities?.catalogItemReference).toBe('AC tune-up');
+  });
+
+  // Tradesperson wave 1, Task 3 (taxonomy 1.8.0) — record_refund. Fields are
+  // qualified (refundMethod/refundReason/refundCheckNumber, not bare
+  // method/reason) per house precedent (catalogItemNewName,
+  // expenseDescription, updatedName) — a weaker classifier emitting the
+  // wrong key would silently drop the refund detail. The invoice reference
+  // itself reuses `jobReference` (there is no separate `invoiceReference`
+  // field anywhere in this taxonomy).
+  it('parses record_refund with jobReference, amount, refundMethod, refundReason, and refundCheckNumber', () => {
+    const result = parseClassifierJson(
+      JSON.stringify({
+        intentType: 'record_refund',
+        confidence: 0.9,
+        extractedEntities: {
+          jobReference: 'INV-0042',
+          amount: 7500,
+          refundMethod: 'check',
+          refundReason: 'recharge did not hold',
+          refundCheckNumber: '2044',
+        },
+      }),
+    );
+    expect(result?.intentType).toBe('record_refund');
+    expect(result?.extractedEntities?.jobReference).toBe('INV-0042');
+    expect(result?.extractedEntities?.amount).toBe(7500);
+    expect(result?.extractedEntities?.refundMethod).toBe('check');
+    expect(result?.extractedEntities?.refundReason).toBe('recharge did not hold');
+    expect(result?.extractedEntities?.refundCheckNumber).toBe('2044');
+  });
+
+  it('rejects an invalid refundMethod as an invalid enum field, not a silent guess', () => {
+    const result = parseClassifierJson(
+      JSON.stringify({
+        intentType: 'record_refund',
+        confidence: 0.9,
+        extractedEntities: { amount: 7500, refundMethod: 'venmo' },
+      }),
+    );
+    expect(result?.extractedEntities?.refundMethod).toBeUndefined();
+    expect(result?.invalidEnumFields).toEqual(
+      expect.arrayContaining([{ field: 'refundMethod', value: 'venmo' }]),
+    );
+  });
+
+  it('classifyIntent end-to-end for record_refund stamps the current taxonomy version', async () => {
+    const gateway = mockGateway(
+      JSON.stringify({
+        intentType: 'record_refund',
+        confidence: 0.9,
+        extractedEntities: { jobReference: 'INV-0042', amount: 10000, refundMethod: 'cash' },
+      }),
+    );
+    const result = await classifyIntent(
+      'Refund the Smiths 100 dollars on their invoice',
+      { tenantId: 't-1' },
+      gateway,
+    );
+    expect(result.intentType).toBe('record_refund');
+    expect(result.taxonomyVersion).toBe(INTENT_TAXONOMY_VERSION);
+    expect(result.extractedEntities?.jobReference).toBe('INV-0042');
+  });
+
+  // Tradesperson wave 1, Task 4 (taxonomy 1.9.0) — apply_credit. The credit
+  // reason is qualified (creditReason, not bare `reason`) per house
+  // precedent (refundReason, catalogItemNewName). The invoice reference
+  // itself reuses `jobReference` — no separate `invoiceReference` field
+  // exists anywhere in this taxonomy.
+  it('parses apply_credit with jobReference, amount, and creditReason', () => {
+    const result = parseClassifierJson(
+      JSON.stringify({
+        intentType: 'apply_credit',
+        confidence: 0.9,
+        extractedEntities: {
+          jobReference: 'the Henderson invoice',
+          amount: 5000,
+          creditReason: 'repeat leak',
+        },
+      }),
+    );
+    expect(result?.intentType).toBe('apply_credit');
+    expect(result?.extractedEntities?.jobReference).toBe('the Henderson invoice');
+    expect(result?.extractedEntities?.amount).toBe(5000);
+    expect(result?.extractedEntities?.creditReason).toBe('repeat leak');
+  });
+
+  it('classifyIntent end-to-end for apply_credit stamps the current taxonomy version', async () => {
+    const gateway = mockGateway(
+      JSON.stringify({
+        intentType: 'apply_credit',
+        confidence: 0.9,
+        extractedEntities: { jobReference: 'the Henderson invoice', amount: 5000 },
+      }),
+    );
+    const result = await classifyIntent(
+      'Knock 50 dollars off the Henderson invoice',
+      { tenantId: 't-1' },
+      gateway,
+    );
+    expect(result.intentType).toBe('apply_credit');
+    expect(result.taxonomyVersion).toBe(INTENT_TAXONOMY_VERSION);
+    expect(result.extractedEntities?.jobReference).toBe('the Henderson invoice');
+  });
+
+  // Tradesperson wave 1, Task 5 (taxonomy 1.10.0) — send_customer_message.
+  // customerMessageChannel is enum-validated like refundMethod
+  // (invalid → invalidEnumFields); customerMessageBody is a flat string,
+  // no separate structured-content field exists.
+  it('parses send_customer_message with customerName, customerMessageBody, and customerMessageChannel', () => {
+    const result = parseClassifierJson(
+      JSON.stringify({
+        intentType: 'send_customer_message',
+        confidence: 0.9,
+        extractedEntities: {
+          customerName: 'Henderson',
+          customerMessageBody: 'the part arrived, we can come Thursday morning',
+          customerMessageChannel: 'sms',
+        },
+      }),
+    );
+    expect(result?.intentType).toBe('send_customer_message');
+    expect(result?.extractedEntities?.customerName).toBe('Henderson');
+    expect(result?.extractedEntities?.customerMessageBody).toBe(
+      'the part arrived, we can come Thursday morning',
+    );
+    expect(result?.extractedEntities?.customerMessageChannel).toBe('sms');
+  });
+
+  it('defaults customerMessageChannel to undefined when unstated (SendCustomerMessageTaskHandler defaults it to sms downstream)', () => {
+    const result = parseClassifierJson(
+      JSON.stringify({
+        intentType: 'send_customer_message',
+        confidence: 0.9,
+        extractedEntities: { customerName: 'Garcia', customerMessageBody: 'inspection passed' },
+      }),
+    );
+    expect(result?.extractedEntities?.customerMessageChannel).toBeUndefined();
+  });
+
+  it('an invalid customerMessageChannel is dropped and recorded as an invalid enum field', () => {
+    const result = parseClassifierJson(
+      JSON.stringify({
+        intentType: 'send_customer_message',
+        confidence: 0.9,
+        extractedEntities: {
+          customerName: 'Garcia',
+          customerMessageBody: 'inspection passed',
+          customerMessageChannel: 'carrier_pigeon',
+        },
+      }),
+    );
+    expect(result?.extractedEntities?.customerMessageChannel).toBeUndefined();
+    expect(result?.invalidEnumFields).toContainEqual({
+      field: 'customerMessageChannel',
+      value: 'carrier_pigeon',
+    });
+  });
+
+  it('classifyIntent end-to-end for send_customer_message stamps the current taxonomy version', async () => {
+    const gateway = mockGateway(
+      JSON.stringify({
+        intentType: 'send_customer_message',
+        confidence: 0.9,
+        extractedEntities: {
+          customerName: 'Henderson',
+          customerMessageBody: 'the part arrived',
+        },
+      }),
+    );
+    const result = await classifyIntent(
+      'Text the Hendersons the part arrived',
+      { tenantId: 't-1' },
+      gateway,
+    );
+    expect(result.intentType).toBe('send_customer_message');
+    expect(result.taxonomyVersion).toBe(INTENT_TAXONOMY_VERSION);
+    expect(result.extractedEntities?.customerName).toBe('Henderson');
   });
 });
 

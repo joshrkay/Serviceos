@@ -106,6 +106,23 @@ const TYPE_PRIORITY: Record<ProposalType, number> = {
   update_catalog_item: 5,
   // Tenant alias learning is reversible back-office config — never same-day critical.
   adopt_entity_alias: 5,
+  // Tradesperson wave 1, Task 3 — a refund is money-moving, customer-facing
+  // (the customer is owed the callback/follow-through) — same tier as
+  // record_payment / apply_late_fee.
+  record_refund: 1,
+  // Tradesperson wave 1, Task 4 — a credit is money-moving and
+  // customer-facing (it changes what the customer owes) — same tier as
+  // record_refund / apply_late_fee / record_payment.
+  apply_credit: 1,
+  // Tradesperson wave 1, Task 5 — a free-form customer message is
+  // outbound, customer-facing comms with same-day relevance (a part
+  // arrived, an ETA, a finished-job notice) — same tier as notify_delay /
+  // send_invoice / record_payment.
+  send_customer_message: 1,
+  // Tradesperson wave 1, Task 6 — a change order is a mid-job scope
+  // change: same-day relevance for whoever's on site, and it drafts a NEW
+  // estimate the same way draft_estimate does — same top tier.
+  create_change_order: 0,
 };
 
 export function getUrgency(proposal: Proposal): { urgency: PrioritizedProposal['urgency']; reason: string } {

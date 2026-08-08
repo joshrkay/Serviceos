@@ -108,6 +108,36 @@ export const INTENT_TO_PROPOSAL_TYPE: Partial<Record<Exclude<IntentType, 'unknow
   // tap-only: the payload has no field capable of expressing
   // `brand_voice_locked` (see contracts/brand-voice.ts).
   update_brand_voice: 'update_brand_voice',
+  // Tradesperson wave 1 — alias intents onto existing proposal types.
+  // Drafting + execution handlers are keyed by PROPOSAL type, so these
+  // inherit the create_appointment / add_note / create_job legs unchanged.
+  schedule_inspection: 'create_appointment',
+  log_permit: 'add_note',
+  log_warranty_claim: 'create_job',
+  // Tradesperson wave 1, Task 2 — WS20 type + handler pre-exist; this adds
+  // the voice on-ramp. NOT S1-allowed (operator-only): see
+  // proposals/surface.ts S1_ALLOWED_PROPOSAL_TYPES and its contract test.
+  update_catalog_item: 'update_catalog_item',
+  // Tradesperson wave 1, Task 3 — record_refund is a NEW money-class
+  // proposal type (manual cash/check/external refunds only). NOT
+  // S1-allowed (operator-only): see proposals/surface.ts
+  // S1_ALLOWED_PROPOSAL_TYPES and its contract test.
+  record_refund: 'record_refund',
+  // Tradesperson wave 1, Task 4 — apply_credit is a NEW money-class
+  // proposal type: reduces what a customer owes on an issued invoice
+  // (goodwill, warranty labor, price match). NOT S1-allowed (operator-only):
+  // see proposals/surface.ts S1_ALLOWED_PROPOSAL_TYPES and its contract test.
+  apply_credit: 'apply_credit',
+  // Tradesperson wave 1, Task 5 — send_customer_message is a NEW comms-class
+  // proposal type: a free-form outbound customer message. NOT S1-allowed
+  // (operator-only): see proposals/surface.ts S1_ALLOWED_PROPOSAL_TYPES and
+  // its contract test.
+  send_customer_message: 'send_customer_message',
+  // Tradesperson wave 1, Task 6 — create_change_order is a NEW capture-class
+  // proposal type: mints a NEW estimate pinned to an EXISTING job, flagged
+  // isChangeOrder (migration 271). NOT S1-allowed (operator-only): see
+  // proposals/surface.ts S1_ALLOWED_PROPOSAL_TYPES and its contract test.
+  create_change_order: 'create_change_order',
 };
 
 /**
@@ -154,6 +184,30 @@ export function voiceProposalSummary(
   if (intent === 'create_appointment') return `Schedule appointment${name ? ` for ${name}` : ''}`;
   if (intent === 'emergency_dispatch') return 'Emergency dispatch — escalate to on-call';
   if (intent === 'update_brand_voice') return 'Update brand voice';
+  // Quality-review fix (2026-08-08) — Tradesperson wave 1 alias intents were
+  // falling through to the generic `Voice intent: ${intent}` fallback below,
+  // since both call sites (inapp-adapter.ts, create-voice-turn-processor.ts)
+  // pass the raw CLASSIFIER intent, not the mapped proposal type. For
+  // schedule_inspection this isn't just a cosmetic miss: it aliases
+  // create_appointment, whose execution handler falls back to
+  // `proposal.summary` to name an auto-opened job when the classifier
+  // emitted no jobTitle — so a phone caller booking an inspection with no
+  // explicit jobTitle got a job literally named "Voice intent:
+  // schedule_inspection", the exact historical bug this function exists to
+  // prevent for plain create_appointment (see the module doc comment above).
+  if (intent === 'schedule_inspection') return `Schedule inspection${name ? ` for ${name}` : ''}`;
+  if (intent === 'log_permit') return `Log permit${ref ? ` on ${ref}` : name ? ` for ${name}` : ''}`;
+  if (intent === 'log_warranty_claim') return `Log warranty claim${name ? ` for ${name}` : ''}`;
+  if (intent === 'record_refund') return `Record refund${name ? ` for ${name}` : ref ? ` on ${ref}` : ''}`;
+  if (intent === 'apply_credit') return `Apply credit${name ? ` for ${name}` : ref ? ` on ${ref}` : ''}`;
+  // Tradesperson wave 1, Task 5 — "Message <customer>" mirrors the shape
+  // every other named-recipient summary above uses (Record refund for
+  // <name>, Apply credit for <name>).
+  if (intent === 'send_customer_message') return `Message${name ? ` ${name}` : ''}`;
+  // Tradesperson wave 1, Task 6 — job-scoped, mirrors log_permit's shape
+  // (job reference takes precedence over a bare customer name, since a
+  // change order is meaningless without its job).
+  if (intent === 'create_change_order') return `Change order${ref ? ` on ${ref}` : name ? ` for ${name}` : ''}`;
   if (intent) return `Voice intent: ${intent}${ref ? ` (${ref})` : ''}`;
   return 'Voice clarification needed';
 }

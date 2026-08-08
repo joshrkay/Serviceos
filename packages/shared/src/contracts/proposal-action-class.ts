@@ -58,6 +58,10 @@ export const CAPTURE_PROPOSAL_TYPES: ReadonlySet<string> = new Set<string>([
   // price back). The correction loop creates it with no trust tier, so it
   // always lands for review — never auto-executed (D-004).
   ProposalType.UPDATE_CATALOG_ITEM,
+  // Tradesperson wave 1, Task 6 — mints a NEW estimate pinned to an EXISTING
+  // job. No money moves at creation (sending it is a later comms-class
+  // step) — same capture posture as DRAFT_ESTIMATE.
+  ProposalType.CREATE_CHANGE_ORDER,
 ]);
 
 /**
@@ -85,12 +89,21 @@ export const COMMS_PROPOSAL_TYPES: ReadonlySet<string> = new Set<string>([
   ProposalType.SEND_ESTIMATE_NUDGE,
   ProposalType.REVIEW_RESPONSE_PROPOSAL,
   ProposalType.SEND_PAYMENT_REMINDER,
+  // Tradesperson wave 1, Task 5 — free-form outbound customer message. The
+  // AI drafts the exact text; the owner ALWAYS approves before a customer
+  // sees it — same comms gate as every other outbound send above.
+  ProposalType.SEND_CUSTOMER_MESSAGE,
 ]);
 
 export const MONEY_PROPOSAL_TYPES: ReadonlySet<string> = new Set<string>([
   ProposalType.ISSUE_INVOICE,
   ProposalType.RECORD_PAYMENT,
   ProposalType.APPLY_LATE_FEE,
+  // Tradesperson wave 1, Task 3 — backfilled alongside APPLY_CREDIT below;
+  // this was missing since Task 3 shipped (see enums.ts's doc comment).
+  ProposalType.RECORD_REFUND,
+  // Tradesperson wave 1, Task 4 — reduces amount due on an issued invoice.
+  ProposalType.APPLY_CREDIT,
 ]);
 
 export const IRREVERSIBLE_PROPOSAL_TYPES: ReadonlySet<string> = new Set<string>([

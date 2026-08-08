@@ -273,7 +273,7 @@ Of 19 🎙️ requirements: **2 reach rung 5** (B7.1, B7.7) → **11% strict voi
 | B9.12 reminder/late fee | ✗ blocked | `['invoiceId']` (+`feeCents`) unconditional |
 
 **Inverse enumerations** (mechanical, contract-test-pinned, both tests ran green):
-- **Handlers with no voice on-ramp:** exactly three, all documented-intentional and contract-pinned — `create_booking` (FSM path), `update_catalog_item` (WS20), `adopt_entity_alias` (U4).
+- **Handlers with no voice on-ramp:** at the time of this run, exactly three, all documented-intentional and contract-pinned — `create_booking` (FSM path), `update_catalog_item` (WS20), `adopt_entity_alias` (U4). **Update (Tradesperson wave 1, Task 2, taxonomy 1.7.0):** `update_catalog_item` graduated to a real voice on-ramp; only `create_booking` and `adopt_entity_alias` remain. See `docs/reference/voice-action-catalog.md` for the current state.
 - **Intents with no handler:** zero. The 25 unmapped intents decompose into 16 `lookup_*` (read-only by design — but **two have no skill case and are silently skipped**), the three hard-refused approval/edit intents, `complaint`/`negotiation` (synthetic-key routes to capture-class types), and four FSM-side non-action intents.
 - **The real drift is one layer below the tested matrix:** seven voice-mapped actions (`add_note`, `reassign_appointment`, `add_crew_member`, `remove_crew_member`, `send_estimate_nudge`, `send_payment_reminder`, `apply_late_fee`) discard resolver output or gate unconditionally. B7.11's contract tests cannot see this class; nothing tests the drafting-task ↔ execution-handler payload contract.
 

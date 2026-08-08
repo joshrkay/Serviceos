@@ -26,6 +26,7 @@ import {
 import { ExtractedEntities } from '../orchestration/intent-classifier';
 import type { AppointmentRepository } from '../../appointments/appointment';
 import type { JobRepository } from '../../jobs/job';
+import type { CatalogItem, CatalogItemRepository } from '../../catalog/catalog-item';
 import type { InvoiceRepository } from '../../invoices/invoice';
 import type { Estimate, EstimateRepository } from '../../estimates/estimate';
 import type { LLMGateway } from '../gateway/gateway';
@@ -40,6 +41,7 @@ import {
 import { parseMilestoneSentence } from '../../invoices/milestone-sentence-parser';
 import { candidatesForReference } from '../resolution/reference-candidates';
 import type { EntityCandidate } from '../resolution/entity-resolver';
+import { resolveLineItemToCatalog } from '../resolution/catalog-resolver';
 import { formatCents } from '../skills/spoken-format';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -257,8 +259,26 @@ function inputFor(
     missingFields: missingFields.length > 0 ? missingFields : undefined,
     sourceTrustTier: opts?.trust,
     // PR B — pass through the tenant threshold override the router
-    // resolved at request entry. All 8 voice-extended task call sites
-    // route through this helper, so this is a single touch point.
+    // resolved at request entry. Every call site IN THIS FILE routes
+    // through this helper, so within voice-extended-tasks.ts it is a
+    // single touch point.
+    //
+    // Quality-review note (Tradesperson wave 1, Task 4): that is no longer
+    // true repo-wide. Standalone task-handler files (complaint-task.ts,
+    // brand-voice-task.ts, standing-instruction-task.ts, and now
+    // apply-credit-task.ts) hand-roll an equivalent `CreateProposalInput`
+    // literal — including this same `...(context.tenantThresholdOverride
+    // ? {...} : {})` spread — because they can't import this private
+    // (non-exported) helper. So there are now TWO touch points for this
+    // passthrough: this function, and each standalone file's own inline
+    // copy. Both must stay in sync by hand today.
+    //
+    // Intended future cleanup (not done here — out of scope for a single
+    // task): once a THIRD standalone task-handler file needs it, extract
+    // `inputFor`/`entitiesFrom`/`baseSourceContext` out of this file into a
+    // small shared module (e.g. `ai/tasks/task-input.ts`) that both this
+    // file and the standalone files import, collapsing back to one touch
+    // point. Not worth the churn for two call sites; worth it at three.
     ...(context.tenantThresholdOverride
       ? { tenantThresholdOverride: context.tenantThresholdOverride }
       : {}),
@@ -1533,6 +1553,80 @@ export class RecordPaymentTaskHandler implements TaskHandler {
   }
 }
 
+// ───────────── record_refund ─────────────
+//
+// Tradesperson wave 1, Task 3 (2026-08-07 plan) — a NEW money-class
+// proposal type for recording a MANUAL refund (cash/check/external card)
+// given back to a customer. Money class — never auto-approves under any
+// confidence (D3). Stripe-AUTOMATED refunds are explicitly OUT OF SCOPE
+// (YAGNI) — see RecordRefundExecutionHandler
+// (proposals/execution/record-refund-handler.ts) for the full analysis of
+// why this rides the existing `recordRefund()` domain function instead of
+// a new refund ledger.
+//
+// Reference resolution: unlike `update_catalog_item` (whose reference has
+// no membership in the generic entity-resolver's `EntityKind`), an invoice
+// reference is a first-class kind the resolver already handles for
+// `record_payment` and its siblings — this intent joins
+// `INVOICE_DOC_INTENTS` (entity-resolution.ts) instead of re-resolving it
+// here. That means by the time this handler runs, the voice-action-router
+// has ALREADY resolved the spoken reference (carried on `ee.jobReference` —
+// there is no separate `invoiceReference` extraction field anywhere in this
+// taxonomy; every invoice-doc intent reuses jobReference, disambiguated by
+// intent-set membership) to a verified `invoiceId` and stamped it onto
+// `context.existingEntities`, OR short-circuited to a `voice_clarification`
+// on an ambiguous match, OR left it absent on no match / nothing spoken.
+// `invoiceId` is therefore read off `ee` with a local type-widening cast
+// (house pattern — see `ComplaintTaskHandler`, which does the same for a
+// router-resolved `jobId`/`customerId`): it is a ROUTER-INJECTED verified
+// id, never an LLM-extracted field, so it is deliberately NOT added to
+// `ExtractedEntities` or the classifier's JSON template/parse allowlist.
+//
+// Unlike `record_payment`'s contract, `record_refund`'s has NO
+// `invoiceReference` fallback field — an unresolved reference gates the
+// proposal (`missingFields: ['invoiceId']`) rather than persisting free
+// text (e.g. a bare customer name) as a stand-in "reference" for a later
+// step to puzzle out. This is a deliberately SAFER posture than
+// `record_payment`'s own precedent for the identical case.
+export class RecordRefundTaskHandler implements TaskHandler {
+  readonly taskType = 'record_refund' as const;
+
+  async handle(context: TaskContext): Promise<TaskResult> {
+    const ee = entitiesFrom(context) as ExtractedEntities & { invoiceId?: string };
+    const payload: Record<string, unknown> = {
+      // Method defaults to 'cash' when unstated — the most common manual
+      // refund, and never blocks drafting on a detail the reviewer can
+      // correct with one tap before approving.
+      method: ee.refundMethod ?? 'cash',
+    };
+    const missing: string[] = [];
+
+    if (typeof ee.invoiceId === 'string' && ee.invoiceId.length > 0) {
+      payload.invoiceId = ee.invoiceId;
+    } else {
+      missing.push('invoiceId');
+    }
+
+    if (typeof ee.amount === 'number' && ee.amount > 0) {
+      payload.amountCents = Math.round(ee.amount);
+    } else {
+      missing.push('amountCents');
+    }
+
+    if (typeof ee.refundReason === 'string' && ee.refundReason.trim().length > 0) {
+      payload.reason = ee.refundReason.trim();
+    }
+    if (typeof ee.refundCheckNumber === 'string' && ee.refundCheckNumber.trim().length > 0) {
+      payload.checkNumber = ee.refundCheckNumber.trim();
+    }
+
+    return {
+      proposal: createProposal(inputFor(context, this.taskType, payload, missing)),
+      taskType: this.taskType,
+    };
+  }
+}
+
 // ───────────── emergency_dispatch ─────────────
 //
 // Fast-path — irreversible action class. Proposal creation is the only
@@ -1956,6 +2050,173 @@ export class CreateJobVoiceTaskHandler implements TaskHandler {
 
     return {
       proposal: createProposal(inputFor(context, this.taskType, payload, missing)),
+      taskType: this.taskType,
+    };
+  }
+}
+
+// ───────────── update_catalog_item ─────────────
+//
+// Tradesperson wave 1, Task 2 (2026-08-07 plan) — the voice ON-RAMP for
+// WS20's existing correction-repetition proposal type
+// (proposals/contracts/update-catalog-item.ts) and its execution handler
+// (proposals/execution/update-catalog-item-handler.ts) — both pre-exist and
+// are NOT modified here. Capture-class: moves no money, only shapes a
+// FUTURE catalog write that is itself reviewed.
+//
+// Contract-compatibility notes (read before changing this class):
+//
+//   1. `evidence` (lessonIds + correctionCount) is a REQUIRED nested object
+//      on `updateCatalogItemPayloadSchema`, but it exists to carry the
+//      correction-repetition loop's real provenance ("you've corrected this
+//      N times") — a live voice utterance has no lesson to point to, and
+//      `lessonIds` requires at least one real id. This handler deliberately
+//      OMITS `evidence` rather than fabricating one:
+//        - UpdateCatalogItemExecutionHandler.execute() never reads
+//          payload.evidence (only catalogItemId + proposedUnitPriceCents),
+//          so omitting it does not affect execution.
+//        - approveProposal (proposals/actions.ts) only blocks on the
+//          tracked `missingFields` list, not full Zod re-validation, so an
+//          unambiguous price-only draft (missingFields: []) still approves
+//          with one tap — proven by this type's row in
+//          test/proposals/voice-payload-contract.test.ts.
+//        - The one thing this cannot support: editing this proposal's
+//          fields via the generic `editProposal` path before approval,
+//          which revalidates the FULL merged payload against the Zod
+//          schema and would reject it for the still-missing `evidence` key.
+//          Fixing that means loosening the WS20 contract itself, which is
+//          out of this task's scope (Files list) — flagged as a follow-up,
+//          not silently worked around.
+//
+//   2. `catalogItemNewName`/`catalogItemNewDescription` changes cannot
+//      actually EXECUTE today: the contract's `name` field is documented as
+//      informational-only ("name at proposal time") and there is no
+//      `description` field on the contract at all — the execution handler
+//      only ever writes `proposedUnitPriceCents`. So a spoken rename/
+//      description change is never written to `payload.name`/
+//      `payload.description` (that would silently no-op on approval,
+//      misleading the reviewer into thinking it applied); instead it rides
+//      `proposal.explanation` as a human-readable note pointing at the
+//      Catalog screen. Only a price change is a real, executable proposal
+//      field here.
+//
+//   3. Reference resolution reuses `resolveLineItemToCatalog` (ai/resolution/
+//      catalog-resolver.ts) — the SAME matcher draft_invoice/draft_estimate
+//      use to ground spoken line items — rather than a bespoke substring
+//      match. Quality-review correction (2026-08-08): the real win here is
+//      RECOVERABLE ambiguity (a flat gate key + scored candidates the
+//      reviewer can pick from) and robustness to speech variants
+//      (punctuation/plural folding, token overlap) — NOT prefix
+//      disambiguation. A prefix-shadowed pair ("AC tune-up" vs "AC tune-up
+//      deluxe") still lands 'ambiguous' here: this task's own test proves
+//      it (the two candidates score within MARGIN=0.15 of each other, and a
+//      price-differing tie is never broken silently). 'exact'/'high' resolve
+//      outright; 'ambiguous' gates with candidates surfaced on
+//      `sourceContext.entityCandidates` (AC-3/B2 pattern — see
+//      SendEstimateNudgeTaskHandler); 'none' gates with no candidates.
+//      `missingFields` entries are FLAT payload keys (`catalogItemId` /
+//      `proposedUnitPriceCents`), never prose — prose reasons live on
+//      `explanation` instead, per `clearSatisfiedMissingFields`
+//      (missing-fields.ts): it only lifts a gate on an EXACT flat-key edit,
+//      so a prose entry can never clear.
+export class UpdateCatalogItemTaskHandler implements TaskHandler {
+  readonly taskType = 'update_catalog_item' as const;
+
+  constructor(private readonly catalogRepo?: CatalogItemRepository) {}
+
+  async handle(context: TaskContext): Promise<TaskResult> {
+    const ee = entitiesFrom(context);
+    const payload: Record<string, unknown> = {};
+    const missing: string[] = [];
+    const explanationParts: string[] = [];
+    let sourceContext: Record<string, unknown> | undefined;
+
+    const reference = typeof ee.catalogItemReference === 'string' ? ee.catalogItemReference.trim() : '';
+    let resolvedItem: CatalogItem | undefined;
+
+    if (!reference || !this.catalogRepo) {
+      missing.push('catalogItemId');
+    } else {
+      const items = await this.catalogRepo.listByTenant(context.tenantId);
+      const resolution = resolveLineItemToCatalog(reference, items);
+      if ((resolution.tier === 'exact' || resolution.tier === 'high') && resolution.match) {
+        resolvedItem = resolution.match;
+      } else {
+        missing.push('catalogItemId');
+        if (resolution.tier === 'ambiguous' && resolution.candidates) {
+          explanationParts.push(
+            `No confident single match for "${reference}" — edit the proposal with the correct catalog item.`,
+          );
+          // Not `EntityCandidate[]` — 'catalogItem' isn't a member of
+          // `EntityKind` (entity-resolver.ts), which is out of this task's
+          // scope to extend. Same field SHAPE (id/kind/label/hint/score) as
+          // the AC-3/B2 pattern for display purposes only; this type has no
+          // resolve-entity.ts redraft handler, so nothing depends on `kind`
+          // being a real EntityKind member.
+          sourceContext = {
+            entityCandidates: resolution.candidates.map((c) => ({
+              id: c.item.id,
+              kind: 'catalogItem',
+              label: c.item.name,
+              hint: formatCents(c.item.unitPriceCents),
+              score: c.score,
+            })),
+            entityKind: 'catalogItem',
+            entityReference: reference,
+          };
+        } else {
+          explanationParts.push(`No catalog item matches "${reference}".`);
+        }
+      }
+    }
+
+    // Only a stated, non-negative integer cents value is a real price
+    // change — mirrors the durationMinutes sanity check elsewhere in this
+    // file (an LLM occasionally answers with a negative or fractional
+    // number).
+    const requestedPriceCents =
+      typeof ee.unitPriceCents === 'number' && Number.isFinite(ee.unitPriceCents) && ee.unitPriceCents >= 0
+        ? Math.round(ee.unitPriceCents)
+        : undefined;
+    const hasName = typeof ee.catalogItemNewName === 'string' && ee.catalogItemNewName.trim().length > 0;
+    const hasDescription =
+      typeof ee.catalogItemNewDescription === 'string' && ee.catalogItemNewDescription.trim().length > 0;
+    if (requestedPriceCents === undefined && !hasName && !hasDescription) {
+      missing.push('proposedUnitPriceCents');
+      explanationParts.push('No price, name, or description change was stated.');
+    }
+
+    if (resolvedItem) {
+      payload.catalogItemId = resolvedItem.id;
+      // Informational per the contract's own doc comment (name AT PROPOSAL
+      // TIME, for the summary/UI) — the resolved item's REAL current name,
+      // never the requested new one (see class doc comment note 2).
+      payload.name = resolvedItem.name;
+      payload.currentUnitPriceCents = resolvedItem.unitPriceCents;
+      // No stated price change ⇒ proposed === current (an honest "no price
+      // change" value the schema's required field accepts) rather than a
+      // fabricated number.
+      payload.proposedUnitPriceCents = requestedPriceCents ?? resolvedItem.unitPriceCents;
+    }
+
+    if (hasName) {
+      explanationParts.push(
+        `Requested new name: "${(ee.catalogItemNewName as string).trim()}" — not applied by this proposal; rename from the Catalog screen.`,
+      );
+    }
+    if (hasDescription) {
+      explanationParts.push(
+        `Requested new description: "${(ee.catalogItemNewDescription as string).trim()}" — not applied by this proposal; edit from the Catalog screen.`,
+      );
+    }
+
+    return {
+      proposal: createProposal(
+        inputFor(context, this.taskType, payload, missing, {
+          ...(explanationParts.length > 0 ? { explanation: explanationParts.join(' ') } : {}),
+          ...(sourceContext ? { sourceContext } : {}),
+        }),
+      ),
       taskType: this.taskType,
     };
   }

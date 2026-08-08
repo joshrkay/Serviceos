@@ -15,6 +15,8 @@ import { UpdateInvoiceExecutionHandler } from './update-invoice-handler';
 import { IssueInvoiceExecutionHandler } from './issue-invoice-handler';
 import { SendPaymentReminderExecutionHandler } from './send-payment-reminder-handler';
 import { ApplyLateFeeExecutionHandler } from './apply-late-fee-handler';
+import { ApplyCreditExecutionHandler } from './apply-credit-handler';
+import { CreateChangeOrderExecutionHandler } from './create-change-order-handler';
 import { UpdateEstimateExecutionHandler } from './update-estimate-handler';
 import { UpdateJobExecutionHandler } from './update-job-handler';
 import { ReassignAppointmentExecutionHandler } from './reassignment-handler';
@@ -30,6 +32,7 @@ import {
   EstimateDeliveryProvider,
 } from './voice-extended-handlers';
 import { LogExpenseExecutionHandler } from './log-expense-handler';
+import { RecordRefundExecutionHandler } from './record-refund-handler';
 import {
   ReviewResponseExecutionHandler,
   GoogleBusinessReplyResolver,
@@ -91,6 +94,10 @@ import {
 import { TimeEntryService } from '../../time-tracking/time-entry-service';
 import { FeedbackRequestRepository } from '../../feedback/feedback-request';
 import { DelayNotificationService } from '../../notifications/delay-notifications';
+import {
+  SendCustomerMessageExecutionHandler,
+  type CustomerMessenger,
+} from './send-customer-message-handler';
 import { LineItem, LineItemCategory, buildLineItem } from '../../shared/billing-engine';
 import type { PricingSource } from '../../ai/resolution/catalog-resolver';
 import {
@@ -1230,6 +1237,14 @@ export function createExecutionHandlerRegistry(deps?: {
   timeEntryService?: TimeEntryService;
   feedbackRepo?: FeedbackRequestRepository;
   delayNotificationService?: DelayNotificationService;
+  /**
+   * Tradesperson wave 1, Task 5 — send_customer_message's free-form
+   * owner-approved outbound message. Absent → the handler degrades to a
+   * synthetic-id passthrough (sends nothing). Production wires
+   * `TwilioCustomerMessageService` (notifications/twilio-customer-message-
+   * service.ts), built next to `delayNotificationService` in app.ts.
+   */
+  customerMessenger?: CustomerMessenger;
   // RV-141 — emergency_dispatch owner page. Optional; absent → the handler
   // degrades per its own per-dep guards (job-only / passthrough).
   emergencySmsSender?: EmergencySmsSender;
@@ -1394,6 +1409,12 @@ export function createExecutionHandlerRegistry(deps?: {
       deps?.auditRepo,
       deps?.paymentLinkCleanup,
     ),
+    // Tradesperson wave 1, Task 3 — record_refund: records a MANUAL refund
+    // (cash/check/external) via the SAME paymentRepo record_payment uses
+    // (no new dep — see RecordRefundExecutionHandler's doc comment for why
+    // a dedicated refund repo would bypass the existing over-refund
+    // invariant). Money-class: only runs after explicit approval.
+    new RecordRefundExecutionHandler(deps?.paymentRepo, deps?.auditRepo),
     new LogExpenseExecutionHandler(deps?.expenseRepo, deps?.auditRepo),
     new ConvertLeadExecutionHandler(deps?.leadRepo, deps?.customerRepo, deps?.auditRepo, deps?.locationRepo),
     new ConfirmAppointmentExecutionHandler(deps?.appointmentRepo, requiredAuditRepo),
@@ -1406,6 +1427,11 @@ export function createExecutionHandlerRegistry(deps?: {
       deps?.jobRepo,
       deps?.customerRepo,
     ),
+    // Tradesperson wave 1, Task 5 — send_customer_message: a free-form
+    // outbound message the owner has already read and approved. Comms-class
+    // — never auto-approves at any trust tier. Degrades to a synthetic-id
+    // passthrough (sends nothing) when no customerMessenger is wired.
+    new SendCustomerMessageExecutionHandler(deps?.customerMessenger, deps?.auditRepo),
     new RequestFeedbackExecutionHandler(deps?.feedbackRepo, requiredAuditRepo),
     // P7-026 PR c — review-response handler. Wired with optional deps;
     // see ReviewResponseExecutionHandler constructor for per-dep
@@ -1506,6 +1532,15 @@ export function createExecutionHandlerRegistry(deps?: {
       deps.auditRepo,
       moneyStateDeps,
     ));
+    // Tradesperson wave 1, Task 4 — apply_credit: appends a non-taxable,
+    // NEGATIVE, floor-guarded line to an issued invoice and refreshes the
+    // money-state rollup. Money-class: only runs after explicit owner
+    // approval.
+    handlers.push(new ApplyCreditExecutionHandler(
+      deps.invoiceRepo,
+      deps.auditRepo,
+      moneyStateDeps,
+    ));
   }
   if (deps?.estimateRepo) {
     handlers.push(new UpdateEstimateExecutionHandler(
@@ -1518,6 +1553,12 @@ export function createExecutionHandlerRegistry(deps?: {
       // Fail-closed inside the handler when the repo is absent.
       deps.jobRepo,
     ));
+    // Tradesperson wave 1, Task 6 — create_change_order: mints a NEW
+    // estimate pinned to an EXISTING job, flagged isChangeOrder (migration
+    // 271). Registered on the same estimateRepo trigger as update_estimate
+    // above; also needs settingsRepo for estimate numbering (same as
+    // DraftEstimateExecutionHandler) — isFullyWired() fails closed without it.
+    handlers.push(new CreateChangeOrderExecutionHandler(deps.estimateRepo, deps.settingsRepo, deps.auditRepo));
   }
   // B7 — update_job mutates an EXISTING job; only registered when the job
   // repo is wired (mirrors update_estimate/update_invoice above — no

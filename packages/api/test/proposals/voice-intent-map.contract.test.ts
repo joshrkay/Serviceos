@@ -86,8 +86,12 @@ describe('voice intent → proposal type: exactly one map', () => {
     // The security boundary is the ALLOWLIST, not this map: the phone path
     // gates the mapped type before building a payload, so an intent that
     // gains a mapping can only become reachable if its type is allowlisted.
-    // These five are the entire caller-reachable set, and adding intents here
-    // must never change that.
+    // Tradesperson wave 1 (2026-08-07 plan) added two INTENT NAMES to this
+    // set — schedule_inspection and log_warranty_claim — but zero new
+    // PROPOSAL TYPES: both alias onto create_appointment / create_job, which
+    // were already S1-allowed and already reachable via their own intents.
+    // The invariant this test guards (the reachable PROPOSAL TYPE set never
+    // grows without a matching S1_ALLOWED_PROPOSAL_TYPES edit) still holds.
     const s1Reachable = Object.entries(INTENT_TO_PROPOSAL_TYPE)
       .filter(([, proposalType]) => S1_ALLOWED_PROPOSAL_TYPES.has(proposalType!))
       .map(([intent]) => intent)
@@ -97,7 +101,9 @@ describe('voice intent → proposal type: exactly one map', () => {
       'create_customer',
       'create_job',
       'draft_estimate',
+      'log_warranty_claim',
       'reschedule_appointment',
+      'schedule_inspection',
     ]);
   });
 });
@@ -115,5 +121,40 @@ describe('voiceProposalSummary', () => {
       'Draft estimate for Jane Smith',
     );
     expect(voiceProposalSummary(undefined, {})).toBe('Voice clarification needed');
+  });
+
+  // Quality-review fix (2026-08-08) — the Tradesperson wave 1 alias intents
+  // were missing cases here entirely and fell through to the generic
+  // `Voice intent: ${intent}` fallback (both real call sites pass the raw
+  // classifier intent, never the mapped proposal type — see
+  // ai/agents/customer-calling/inapp-adapter.ts and
+  // ai/voice-turn/create-voice-turn-processor.ts). For schedule_inspection
+  // this is the SAME "Voice intent: create_appointment" job-naming bug the
+  // test above pins, just for the alias: CreateAppointmentExecutionHandler's
+  // SCH-02 fallback names an auto-opened job from this summary.
+  it('gives the Tradesperson wave 1 alias intents a human-readable summary, not the debug fallback', () => {
+    expect(voiceProposalSummary('schedule_inspection', { customerName: 'Patel' })).toBe(
+      'Schedule inspection for Patel',
+    );
+    expect(voiceProposalSummary('schedule_inspection', {})).toBe('Schedule inspection');
+    expect(voiceProposalSummary('log_permit', { jobReference: 'the Patel job' })).toBe(
+      'Log permit on the Patel job',
+    );
+    expect(voiceProposalSummary('log_permit', { customerName: 'Henderson' })).toBe(
+      'Log permit for Henderson',
+    );
+    expect(voiceProposalSummary('log_permit', {})).toBe('Log permit');
+    expect(voiceProposalSummary('log_warranty_claim', { customerName: 'Henderson' })).toBe(
+      'Log warranty claim for Henderson',
+    );
+    expect(voiceProposalSummary('log_warranty_claim', {})).toBe('Log warranty claim');
+  });
+
+  // Tradesperson wave 1, Task 5 — "Message <customer>" shape.
+  it('gives send_customer_message a human-readable summary', () => {
+    expect(voiceProposalSummary('send_customer_message', { customerName: 'Henderson' })).toBe(
+      'Message Henderson',
+    );
+    expect(voiceProposalSummary('send_customer_message', {})).toBe('Message');
   });
 });

@@ -58,6 +58,19 @@ export function lateFeeLineId(invoiceId: string, stepKey: string): string {
  * Mirrors IssueInvoiceExecutionHandler: degrades to a synthetic-id
  * passthrough when no invoiceRepo is wired, returns failed ExecutionResults
  * (never throws through), and emits a failure-soft audit event.
+ *
+ * DRY threshold breadcrumb: the append-line-then-recompute block below
+ * (build the line, append it, `calculateDocumentTotals`, derive
+ * `amountDueCents`) is mechanically identical to
+ * `ApplyCreditExecutionHandler`'s (proposals/execution/
+ * apply-credit-handler.ts, ~lines 154-160) — only the line's sign and
+ * description differ. Left duplicated for these two; if a THIRD
+ * append-a-line-to-invoice sibling shows up (e.g. a hypothetical
+ * `apply_discount`), extract an `appendInvoiceLineAndRecompute(invoice,
+ * line)` helper into the shared billing engine for this exact block.
+ * Guards (idempotency, status precondition, floor checks) and audit
+ * emission stay per-handler — they differ enough that folding them in
+ * would obscure more than it'd save.
  */
 export class ApplyLateFeeExecutionHandler implements ExecutionHandler {
   proposalType: ProposalType = 'apply_late_fee';

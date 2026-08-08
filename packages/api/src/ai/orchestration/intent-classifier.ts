@@ -55,6 +55,39 @@ export type IntentType =
   | 'log_time_entry'
   | 'notify_delay'
   | 'request_feedback'
+  // Tradesperson wave 1 (2026-08-07 plan) — alias intents. Each rides an
+  // EXISTING proposal type + handler; only classification + extraction differ.
+  | 'schedule_inspection'
+  | 'log_permit'
+  | 'log_warranty_claim'
+  // Tradesperson wave 1 — price-book edit by voice; rides WS20's existing proposal type.
+  | 'update_catalog_item'
+  // Tradesperson wave 1, Task 3 — NEW money-class proposal type: recording a
+  // MANUAL refund (cash/check/external card) given back to a customer.
+  // Stripe-automated refunds are a deliberate non-goal (see record_refund's
+  // execution handler doc comment) — this intent covers only what a
+  // tradesperson does by hand outside the payment processor.
+  | 'record_refund'
+  // Tradesperson wave 1, Task 4 — NEW money-class proposal type: reducing
+  // what a customer owes on an ISSUED invoice (goodwill, warranty labor, a
+  // price match). Distinct from record_refund: a credit never hands money
+  // BACK (it just lowers the balance still owed) — exceeding the amount due
+  // is a refund, not a credit, and the execution handler refuses it (see
+  // ApplyCreditExecutionHandler's floor guard).
+  | 'apply_credit'
+  // Tradesperson wave 1, Task 5 — NEW comms-class proposal type: a
+  // free-form outbound customer message (status update, part arrival,
+  // ETA, thanks). The AI drafts the exact text; the owner ALWAYS approves
+  // before a customer sees it. Highest-frequency gap in the 2026-08-07
+  // tradesperson plan.
+  | 'send_customer_message'
+  // Tradesperson wave 1, Task 6 — NEW capture-class proposal type: mid-job
+  // scope change the customer asked for. Mints a NEW estimate pinned to the
+  // EXISTING job (jobReference is REQUIRED — that's what distinguishes this
+  // from draft_estimate, a fresh bid). No money moves at creation; sending
+  // the resulting estimate is a later, separate comms-class step
+  // (send_estimate) — same capture posture as draft_estimate.
+  | 'create_change_order'
   // Taxonomy 1.2.0 (agent wave, Track A) — three proposal-driving on-ramps:
   //   create_invoice_schedule    — U2: milestone/progress billing plan for a
   //                                job; the verbatim milestone sentence rides
@@ -206,6 +239,14 @@ export const SUPPORTED_INTENTS: readonly IntentType[] = [
   'log_time_entry',
   'notify_delay',
   'request_feedback',
+  'schedule_inspection',
+  'log_permit',
+  'log_warranty_claim',
+  'update_catalog_item',
+  'record_refund',
+  'apply_credit',
+  'send_customer_message',
+  'create_change_order',
   'create_invoice_schedule',
   'respond_to_review',
   'create_standing_instruction',
@@ -273,8 +314,73 @@ export const SUPPORTED_INTENTS: readonly IntentType[] = [
  *           Locking the brand voice stays tap-only — this intent's payload
  *           structurally cannot express `brand_voice_locked` (Part F
  *           entry F-2).
+ *   1.6.0 — Tradesperson wave 1 (2026-08-07 plan), additive: schedule_inspection,
+ *           log_permit, log_warranty_claim — alias intents onto existing
+ *           proposal types (create_appointment / add_note / create_job
+ *           respectively). Handler dispatch is keyed by proposal type, so
+ *           these inherit drafting + execution unchanged; only
+ *           classification + extraction differ.
+ *   1.7.0 — Tradesperson wave 1 (2026-08-07 plan) Task 2, additive:
+ *           update_catalog_item — voice on-ramp for WS20's existing
+ *           correction-repetition proposal type + execution handler
+ *           (price-book edits by voice). New extraction fields
+ *           (catalogItemReference / unitPriceCents / catalogItemNewName /
+ *           catalogItemNewDescription);
+ *           see UpdateCatalogItemTaskHandler (ai/tasks/voice-extended-tasks.ts)
+ *           for the payload/contract-compatibility notes.
+ *   1.8.0 — Tradesperson wave 1 (2026-08-07 plan) Task 3, additive:
+ *           record_refund — a NEW money-class proposal type for recording
+ *           MANUAL refunds (cash/check/external card) given back to a
+ *           customer. Never auto-approves at any trust tier (D3). New
+ *           extraction fields (refundMethod / refundReason /
+ *           refundCheckNumber); reuses the existing jobReference/amount
+ *           seams for the invoice reference and cents amount, same as
+ *           record_payment. Stripe-automated refunds are explicitly out of
+ *           scope — see RecordRefundExecutionHandler
+ *           (proposals/execution/record-refund-handler.ts) for why.
+ *   1.9.0 — Tradesperson wave 1 (2026-08-07 plan) Task 4, additive:
+ *           apply_credit — a NEW money-class proposal type that reduces
+ *           what a customer owes on an issued invoice (goodwill, warranty
+ *           labor, price match). Never auto-approves at any trust tier
+ *           (D3). New extraction field (creditReason); reuses the existing
+ *           jobReference/amount seams for the invoice reference and cents
+ *           amount, same as apply_late_fee/record_refund. Floor-guarded: a
+ *           credit may never exceed the invoice's amount due — exceeding
+ *           it is a refund (record_refund), not this type's job — see
+ *           ApplyCreditExecutionHandler (proposals/execution/
+ *           apply-credit-handler.ts).
+ *   1.10.0 — Tradesperson wave 1 (2026-08-07 plan) Task 5, additive:
+ *           send_customer_message — a NEW comms-class proposal type for a
+ *           free-form outbound customer message (status update, part
+ *           arrival, ETA, thanks). The AI drafts the exact text; the
+ *           owner ALWAYS approves before a customer sees it — never
+ *           auto-approves at any trust tier. New extraction fields
+ *           (customerMessageBody / customerMessageChannel); reuses the
+ *           existing customerName seam for the spoken customer reference
+ *           (CUSTOMER_REF_INTENTS membership, same resolution ladder as
+ *           update_customer). Routes through the SAME
+ *           MessageDeliveryProvider (and TCPA consent/DNC/kill-switch
+ *           gates) TwilioDelayNotificationService already uses — see
+ *           SendCustomerMessageExecutionHandler (proposals/execution/
+ *           send-customer-message-handler.ts).
+ *   1.11.0 — Tradesperson wave 1 (2026-08-07 plan) Task 6, additive:
+ *           create_change_order — a NEW capture-class proposal type that
+ *           mints a NEW estimate pinned to an EXISTING job, flagged
+ *           `is_change_order` (migration 271) so reporting can separate
+ *           scope-adds from original bids. jobId is REQUIRED on the
+ *           contract (that's what distinguishes this from draft_estimate,
+ *           whose jobId is optional). No money moves at creation; sending
+ *           the resulting estimate is a later, separate comms-class step —
+ *           same capture posture as draft_estimate. New extraction field
+ *           (changeOrderDescription); reuses the existing jobReference/
+ *           amount seams for the job reference and cents amount.
+ *           `create_change_order` joined JOB_REF_INTENTS (entity-
+ *           resolution.ts) — an unresolved job reference gates the
+ *           proposal (missingFields: ['jobId']); see
+ *           CreateChangeOrderExecutionHandler (proposals/execution/
+ *           create-change-order-handler.ts).
  */
-export const INTENT_TAXONOMY_VERSION = '1.5.0';
+export const INTENT_TAXONOMY_VERSION = '1.11.0';
 
 /**
  * P11-001: convenience predicate the FSM adapter uses to route
@@ -467,6 +573,64 @@ export interface ExtractedEntities {
   // onto the six brandVoiceSchema fields + a freeText catch-all; the
   // classifier itself never emits structured tone fields.
   brandVoiceInstruction?: string;
+  // Tradesperson wave 1, Task 2 — update_catalog_item: the spoken catalog
+  // (price-book) entry name the caller wants to edit. Free text; the task
+  // handler resolves it against the tenant's catalog via
+  // resolveLineItemToCatalog (ai/resolution/catalog-resolver.ts) — never
+  // trusted as an id.
+  catalogItemReference?: string;
+  // update_catalog_item: the NEW unit price, in integer cents, when the
+  // caller stated one ("raise it to 89 dollars" → 8900).
+  unitPriceCents?: number;
+  // update_catalog_item: a requested NEW name for the catalog item
+  // ("rename 'AC tune-up' to 'AC seasonal service'" → "AC seasonal
+  // service"). Captured for the review card; see
+  // UpdateCatalogItemTaskHandler's doc comment for why a rename cannot be
+  // auto-applied through this proposal type today. Qualified (not bare
+  // `name`) so it can never be confused with `updatedName`
+  // (update_customer) — a weaker classifier emitting the wrong one would
+  // otherwise silently drop the rename.
+  catalogItemNewName?: string;
+  // update_catalog_item: a requested NEW description for the catalog item.
+  // Same capture-only caveat and qualified-name rationale as
+  // `catalogItemNewName` above.
+  catalogItemNewDescription?: string;
+  // Tradesperson wave 1, Task 3 — record_refund: how the MANUAL refund was
+  // given back (cash / check / a swiped card outside Stripe / other).
+  // Qualified (not bare `method`) so it can never be confused with a future
+  // unrelated `method` field on another intent — house precedent from
+  // `catalogItemNewName`/`expenseDescription`. Defaults to 'cash' downstream
+  // when unstated.
+  refundMethod?: 'cash' | 'check' | 'card_external' | 'other';
+  // record_refund: why the refund was given, verbatim ("the recharge didn't
+  // hold", "part was under warranty"). Optional — rides `payload.reason`.
+  refundReason?: string;
+  // record_refund: the check number, when the refund method is 'check' and
+  // the caller stated one ("check 2044"). Optional passthrough field.
+  refundCheckNumber?: string;
+  // Tradesperson wave 1, Task 4 — apply_credit: why the credit was given
+  // ("repeat leak", "part was under warranty", "price match"). Qualified
+  // (not bare `reason`) per house precedent (refundReason,
+  // catalogItemNewName) — folded into the appended line's description by
+  // ApplyCreditTaskHandler; optional, never fabricated when unstated.
+  creditReason?: string;
+  // Tradesperson wave 1, Task 5 — send_customer_message: the free-form
+  // customer-facing text/email body to send, cleaned up but faithful to
+  // what the operator said. Required on the contract; gates on the flat
+  // payload key `body` when absent (see SendCustomerMessageTaskHandler).
+  customerMessageBody?: string;
+  // send_customer_message: which channel to send on. Defaults to 'sms'
+  // downstream when unstated. Qualified (not bare `channel`) per house
+  // precedent (refundMethod / catalogItemNewName).
+  customerMessageChannel?: 'sms' | 'email';
+  // Tradesperson wave 1, Task 6 — create_change_order: the added work the
+  // customer asked for mid-job ("a second zone", "replace the flue liner
+  // too"), verbatim. Qualified (not bare `description`) per house
+  // precedent (expenseDescription / refundReason) — the drafting task turns
+  // this into the change order's title + single line item description.
+  // jobReference (existing field) carries the spoken job reference; amount
+  // (existing field) carries the stated cents, when spoken.
+  changeOrderDescription?: string;
 }
 
 /**
@@ -619,6 +783,18 @@ export const SIGNUP_INTENT_ACT_THRESHOLD = 0.75;
 // against the real prompt size in a test — see
 // packages/api/test/voice-quality/voice-eval-live.test.ts. Never trim this
 // export back to unexported without checking that test doesn't need it.
+//
+// Spec-review note (2026-08-08) — the schedule_inspection block's
+// "Inspection — " jobTitle prefix reaches the final summary differently per
+// surface (e5031cdd's commit message overstated this as one guaranteed
+// rewrite). Memo-worker path (CreateAppointmentAITaskHandler,
+// create-appointment-task.ts): jobTitle is only ambient "Known entities"
+// JSON in the handler's own second LLM call — not a field it is told to
+// read. FSM live-call/in-app paths (buildVoiceProposalPayload,
+// proposals/voice-payload.ts): jobTitle promotes verbatim into
+// payload.jobTitle, which CreateAppointmentExecutionHandler's SCH-02
+// fallback (proposals/execution/handlers.ts) reads deterministically.
+// Don't assume a future alias gets this for free on every surface.
 export const SYSTEM_PROMPT = `You are an intent classifier for a field service operating system.
 Given a voice transcript from a field service operator, decide which action they intend to take.
 
@@ -972,6 +1148,81 @@ Supported intents (return exactly ONE):
                            Examples: "Send a feedback request for the Johnson job"
                                      "Ask Sarah to leave a review"
                                      "Request feedback on the completed Miller work"
+- "schedule_inspection"  — owner/technician books a permit/code inspection
+                           visit on a job. Extract customerName, jobReference
+                           (when an existing job is named, e.g. "the Patel
+                           job"), jobTitle, and dateTimeDescription. The
+                           inspection itself belongs in jobTitle, prefixed
+                           "Inspection — " plus the type (rough-in/final/
+                           other), e.g. jobTitle: "Inspection — rough-in".
+                           No separate inspectionType/requestedDate/
+                           requestedTime fields exist.
+                           Examples: "Schedule the rough-in inspection for Thursday"
+                                     "Book the final inspection on the Patel job Friday morning"
+- "log_permit"           — owner/technician records a permit number/status
+                           against a job. Maps to an add_note whose noteBody
+                           MUST begin "PERMIT: " followed by the permit number
+                           and any status the speaker gave — put that full
+                           "PERMIT: ..." text in noteBody. Extract jobReference.
+                           No separate permitNumber field exists.
+                           Examples: "Log permit 2024-1187 on the Patel job"
+                                     "Note the electrical permit was approved for the Hendersons"
+- "log_warranty_claim"   — a warranty callback on past work. Maps to
+                           create_job. Put "Warranty — " plus the failure
+                           description into jobTitle — create_job's own
+                           title field (e.g. jobTitle: "Warranty — water
+                           heater pilot won't stay lit"). Extract
+                           customerName. No separate problemDescription
+                           field exists.
+                           Examples: "Log a warranty callback for the Hendersons' water heater"
+                                     "The Garcia compressor we installed failed — warranty job"
+- "update_catalog_item"  — owner changes a price-book (catalog) entry:
+                           price, name, or description. Capture-class; only
+                           shapes FUTURE drafts. Extract catalogItemReference
+                           (spoken name) and the new unitPriceCents (integer
+                           cents) or new catalogItemNewName/
+                           catalogItemNewDescription.
+                           Examples: "Raise the diagnostic fee to 89 dollars"
+                                     "Change the water heater install price to 1450"
+                                     "Rename 'AC tune-up' to 'AC seasonal service'"
+- "record_refund"        — owner records money given BACK to a customer
+                           (cash/check/external card refund). Money-class,
+                           never auto-approves. Distinct from record_payment
+                           (money coming IN). Extract jobReference (the
+                           invoice the refund applies to — same field
+                           record_payment uses), amount (integer cents),
+                           refundMethod, refundReason, refundCheckNumber
+                           when spoken. This is ONLY for a refund the owner
+                           gave by hand — never a Stripe-processed refund.
+                           Examples: "Refund the Smiths 100 dollars on their invoice"
+                                     "Give the Garcias back 250, the part was under warranty"
+                                     "Record a 75 dollar check refund to Jones, check 2044"
+- "apply_credit"         — owner reduces what a customer owes on an issued
+                           invoice (goodwill, warranty labor, price match).
+                           Money-class, never auto-approves. Extract
+                           jobReference (the spoken invoice/customer ref),
+                           amount (integer cents), creditReason.
+                           Examples: "Knock 50 dollars off the Henderson invoice"
+                                     "Apply a 100 dollar credit to Jones for the callback"
+                                     "Credit the Garcias 75 — we were late"
+- "send_customer_message" — owner/technician sends the customer a free-form
+                           text or email (status update, part arrival, ETA,
+                           thanks). Comms-class: the AI drafts the exact
+                           message; the owner approves before send. Extract
+                           customerName, customerMessageChannel (sms unless
+                           email stated), and customerMessageBody (the
+                           content to send, cleaned up but faithful).
+                           Examples: "Text the Hendersons the part arrived, we can come Thursday"
+                                     "Email the Garcias that the inspection passed"
+                                     "Let Maria know we're finished and the gate is locked"
+- "create_change_order"  — mid-job scope change the customer asked for:
+                           drafts a NEW estimate tied to the EXISTING job.
+                           Extract jobReference (required), the added work
+                           description (changeOrderDescription), and amount
+                           if spoken (integer cents).
+                           Examples: "The Garcias want a second zone — change order for 1800"
+                                     "Add a change order on the Patel job: replace the flue liner too"
+                                     "Customer added three more outlets — write it up"
 - "create_invoice_schedule" — user wants to set up a MILESTONE / PROGRESS
                            billing plan for a job: a deposit up front and the
                            rest later, or a percentage split across stages.
@@ -1214,12 +1465,12 @@ Return valid JSON with exactly this shape (no prose, no markdown fences):
     "targetTechnicianName": "<string, optional — target technician on reassign_appointment>",
     "cancellationReason": "<string, optional — free-text reason on cancel_appointment>",
     "cancellationType": "<customer_request|technician_unavailable|scheduling_conflict|other, optional>",
-    "noteBody": "<string, optional — the note text on add_note>",
+    "noteBody": "<string, optional — the note text on add_note; on log_permit, MUST begin \"PERMIT: \" followed by the permit number/status>",
     "noteTargetKind": "<job|customer|invoice|estimate|appointment, optional>",
     "sendChannel": "<email|sms, optional — on send_invoice>",
     "paymentMethod": "<cash|check|card|other, optional — on record_payment>",
     "paymentReference": "<string, optional — check number or memo on record_payment>",
-    "jobTitle": "<string, optional — title of new job on create_job; also the short name of the new work being scheduled on create_appointment>",
+    "jobTitle": "<string, optional — title of new job on create_job (prefixed \"Warranty — \" plus what failed on log_warranty_claim); also the short name of the new work being scheduled on create_appointment (prefixed \"Inspection — \" plus the type on schedule_inspection)>",
     "updatedName": "<string, optional — new name on update_customer>",
     "updatedEmail": "<string, optional — new email on update_customer>",
     "updatedPhone": "<string, optional — new phone on update_customer>",
@@ -1237,7 +1488,18 @@ Return valid JSON with exactly this shape (no prose, no markdown fences):
     "reviewReference": "<string, optional — which review, verbatim, on respond_to_review>",
     "instructionText": "<string, optional — verbatim standing rule on create_standing_instruction>",
     "scopeIntentHint": "<string, optional — what work the standing rule applies to>",
-    "brandVoiceInstruction": "<string, optional — VERBATIM spoken tone/sign-off/persona instruction on update_brand_voice>"
+    "brandVoiceInstruction": "<string, optional — VERBATIM spoken tone/sign-off/persona instruction on update_brand_voice>",
+    "catalogItemReference": "<string, optional — spoken catalog/price-book entry name on update_catalog_item>",
+    "unitPriceCents": <integer cents, optional — the NEW price on update_catalog_item>,
+    "catalogItemNewName": "<string, optional — the NEW name on update_catalog_item>",
+    "catalogItemNewDescription": "<string, optional — the NEW description on update_catalog_item>",
+    "refundMethod": "<cash|check|card_external|other, optional — on record_refund>",
+    "refundReason": "<string, optional — why the refund was given on record_refund>",
+    "refundCheckNumber": "<string, optional — check number on record_refund>",
+    "creditReason": "<string, optional — why the credit was given on apply_credit>",
+    "customerMessageBody": "<string, optional — the message content to send on send_customer_message, cleaned up but faithful>",
+    "customerMessageChannel": "<sms|email, optional — on send_customer_message, defaults to sms>",
+    "changeOrderDescription": "<string, optional — the added work, verbatim, on create_change_order>"
   }
 }
 
@@ -1591,6 +1853,7 @@ export function parseClassifierJson(content: string): IntentClassification | nul
   ] as const;
   const SEND_CHANNELS = ['email', 'sms'] as const;
   const PAYMENT_METHODS = ['cash', 'check', 'card', 'other'] as const;
+  const REFUND_METHODS = ['cash', 'check', 'card_external', 'other'] as const;
   const EXPENSE_CATEGORIES = [
     'materials',
     'fuel',
@@ -1700,6 +1963,27 @@ export function parseClassifierJson(content: string): IntentClassification | nul
     if (typeof ee.scopeIntentHint === 'string') extracted.scopeIntentHint = ee.scopeIntentHint;
     // update_brand_voice fields (B1.18)
     if (typeof ee.brandVoiceInstruction === 'string') extracted.brandVoiceInstruction = ee.brandVoiceInstruction;
+    // update_catalog_item fields (Tradesperson wave 1, Task 2)
+    if (typeof ee.catalogItemReference === 'string') extracted.catalogItemReference = ee.catalogItemReference;
+    if (typeof ee.unitPriceCents === 'number') extracted.unitPriceCents = ee.unitPriceCents;
+    if (typeof ee.catalogItemNewName === 'string') extracted.catalogItemNewName = ee.catalogItemNewName;
+    if (typeof ee.catalogItemNewDescription === 'string')
+      extracted.catalogItemNewDescription = ee.catalogItemNewDescription;
+    // record_refund fields (Tradesperson wave 1, Task 3)
+    const refundMethod = pickEnum(ee, 'refundMethod', REFUND_METHODS);
+    if (refundMethod) extracted.refundMethod = refundMethod;
+    if (typeof ee.refundReason === 'string') extracted.refundReason = ee.refundReason;
+    if (typeof ee.refundCheckNumber === 'string') extracted.refundCheckNumber = ee.refundCheckNumber;
+    // apply_credit fields (Tradesperson wave 1, Task 4)
+    if (typeof ee.creditReason === 'string') extracted.creditReason = ee.creditReason;
+    // send_customer_message fields (Tradesperson wave 1, Task 5). Channel
+    // reuses SEND_CHANNELS (['email','sms']) — same allowed value set
+    // send_invoice's sendChannel already validates against.
+    if (typeof ee.customerMessageBody === 'string') extracted.customerMessageBody = ee.customerMessageBody;
+    const customerMessageChannel = pickEnum(ee, 'customerMessageChannel', SEND_CHANNELS);
+    if (customerMessageChannel) extracted.customerMessageChannel = customerMessageChannel;
+    // create_change_order fields (Tradesperson wave 1, Task 6)
+    if (typeof ee.changeOrderDescription === 'string') extracted.changeOrderDescription = ee.changeOrderDescription;
     if (Object.keys(extracted).length > 0) {
       result.extractedEntities = extracted;
     }

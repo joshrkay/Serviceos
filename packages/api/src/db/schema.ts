@@ -6550,6 +6550,28 @@ export const MIGRATIONS = {
           'daily_digest', 'conversation_reply', 'portal_session'
         ));
   `,
+  // Tradesperson wave 1 — free-form owner-approved customer message
+  // (send_customer_message proposal). New dispatch entity type so the
+  // message_dispatches audit trail can carry it.
+  '270_dispatch_entity_custom_message': `
+    ALTER TABLE message_dispatches
+      DROP CONSTRAINT IF EXISTS message_dispatches_entity_type_check;
+    ALTER TABLE message_dispatches
+      ADD CONSTRAINT message_dispatches_entity_type_check
+        CHECK (entity_type IN (
+          'estimate', 'invoice', 'appointment_confirmation',
+          'appointment_reschedule', 'appointment_cancel', 'appointment_reminder',
+          'payment_receipt', 'invoice_overdue', 'delay_notice', 'appointment_en_route',
+          'daily_digest', 'conversation_reply', 'portal_session', 'custom_message'
+        ));
+  `,
+  // Tradesperson wave 1 — change orders are estimates pinned to an existing
+  // job and flagged so reporting can separate scope-adds from original bids.
+  '271_estimates_change_order_flag': `
+    ALTER TABLE estimates ADD COLUMN IF NOT EXISTS is_change_order BOOLEAN NOT NULL DEFAULT FALSE;
+    CREATE INDEX IF NOT EXISTS idx_estimates_change_order
+      ON estimates (tenant_id, job_id) WHERE is_change_order = TRUE;
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

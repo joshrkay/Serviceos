@@ -43,6 +43,10 @@ function fullDeps(): RegistryDeps {
   return {
     customerRepo: {} as any,
     jobRepo: {} as any,
+    // Tradesperson wave 1, Task 2 — update_catalog_item became voice-reachable
+    // (proposals/voice-intent-map.ts), so its execution handler's
+    // isFullyWired() probe (Boolean(this.catalogRepo)) is now exercised here.
+    catalogRepo: {} as any,
     timelineRepo: {} as any,
     timeEntryRepo: {} as any,
     locationRepo: {} as any,
@@ -68,6 +72,11 @@ function fullDeps(): RegistryDeps {
     timeEntryService: {} as any,
     feedbackRepo: {} as any,
     delayNotificationService: {} as any,
+    // Tradesperson wave 1, Task 5 — send_customer_message became
+    // voice-reachable (proposals/voice-intent-map.ts), so its execution
+    // handler's isFullyWired() probe (Boolean(this.messenger)) is now
+    // exercised here.
+    customerMessenger: {} as any,
     emergencySmsSender: {} as any,
     sendService: {} as any,
     dispatchRepo: {} as any,
@@ -113,8 +122,23 @@ describe('U8: each newly probed handler is DETECTED when its effect dep is dropp
   // exact guard boot calls.
   const rows: Array<{ omit: (keyof RegistryDeps)[]; flags: ProposalType[] }> = [
     // Not registered at all without invoiceRepo → flagged via the no-handler path.
-    { omit: ['invoiceRepo'], flags: ['update_invoice', 'issue_invoice', 'apply_late_fee'] },
-    { omit: ['estimateRepo'], flags: ['update_estimate', 'send_estimate_nudge'] },
+    // Tradesperson wave 1, Task 4 — apply_credit registers in the SAME
+    // `if (deps?.invoiceRepo)` block as apply_late_fee (handlers.ts), so it
+    // is flagged the same way.
+    { omit: ['invoiceRepo'], flags: ['update_invoice', 'issue_invoice', 'apply_late_fee', 'apply_credit'] },
+    // Tradesperson wave 1, Task 6 — create_change_order registers in the
+    // SAME `if (deps?.estimateRepo)` block as update_estimate (handlers.ts),
+    // so it is flagged the same way.
+    { omit: ['estimateRepo'], flags: ['update_estimate', 'send_estimate_nudge', 'create_change_order'] },
+    // Quality-review fix — isFullyWired() for BOTH draft_estimate and
+    // create_change_order requires estimateRepo AND settingsRepo (estimate
+    // numbering, getNextEstimateNumber). Both handlers are still
+    // CONSTRUCTED without settingsRepo (draft_estimate unconditionally;
+    // create_change_order because estimateRepo alone satisfies its
+    // registration gate) — this row proves the missing dep is caught by
+    // the probe rather than silently defaulting to "wired". Pre-existing
+    // hole for draft_estimate (no row ever proved this before).
+    { omit: ['settingsRepo'], flags: ['draft_estimate', 'create_change_order'] },
     { omit: ['proposalRepo'], flags: ['batch_invoice'] },
     {
       omit: ['assignmentRepo'],
@@ -134,6 +158,21 @@ describe('U8: each newly probed handler is DETECTED when its effect dep is dropp
     { omit: ['googleReplyResolver'], flags: ['review_response_proposal'] },
     { omit: ['reviewPrivateMessageSender'], flags: ['review_response_proposal'] },
     { omit: ['serviceCreditRepo'], flags: ['review_response_proposal'] },
+    // Tradesperson wave 1, Task 2 — without catalogRepo,
+    // UpdateCatalogItemExecutionHandler.isFullyWired() reports false (its
+    // dep-less mode is a synthetic passthrough that persists nothing).
+    { omit: ['catalogRepo'], flags: ['update_catalog_item'] },
+    // Tradesperson wave 1, Task 3 — record_refund reuses the SAME
+    // paymentRepo record_payment already depends on (no new dep — see
+    // RecordRefundExecutionHandler's doc comment). Without it,
+    // RecordRefundExecutionHandler.isFullyWired() reports false (its
+    // dep-less mode is a synthetic passthrough that persists nothing).
+    { omit: ['paymentRepo'], flags: ['record_refund'] },
+    // Tradesperson wave 1, Task 5 — send_customer_message: without a
+    // customerMessenger, SendCustomerMessageExecutionHandler.isFullyWired()
+    // reports false (its dep-less mode is a synthetic passthrough that
+    // sends nothing).
+    { omit: ['customerMessenger'], flags: ['send_customer_message'] },
   ];
 
   for (const { omit, flags } of rows) {
