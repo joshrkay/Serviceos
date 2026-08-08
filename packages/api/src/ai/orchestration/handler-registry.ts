@@ -52,6 +52,7 @@ import {
   UpdateCatalogItemTaskHandler,
 } from '../tasks/voice-extended-tasks';
 import { ApplyCreditTaskHandler } from '../tasks/apply-credit-task';
+import { SendCustomerMessageTaskHandler } from '../tasks/send-customer-message-task';
 
 /**
  * B5 (feat: voice-transcript-and-agent-paths) — the deps shared by the
@@ -257,6 +258,10 @@ export function buildTaskHandlers(deps: HandlerRegistryDeps): Map<ProposalType, 
   handlers.set('record_refund', new RecordRefundTaskHandler());
   // Tradesperson wave 1, Task 4 — apply_credit's voice on-ramp.
   handlers.set('apply_credit', new ApplyCreditTaskHandler());
+  // Tradesperson wave 1, Task 5 — send_customer_message's voice on-ramp.
+  // The optional gateway-driven rewrite pass degrades to verbatim
+  // passthrough when absent or on failure (see the handler's doc comment).
+  handlers.set('send_customer_message', new SendCustomerMessageTaskHandler(deps.gateway));
   handlers.set('emergency_dispatch', new EmergencyDispatchTaskHandler());
   handlers.set('update_customer', new UpdateCustomerTaskHandler());
   handlers.set('log_expense', new LogExpenseTaskHandler());

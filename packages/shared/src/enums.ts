@@ -234,6 +234,12 @@ export enum ProposalType {
   // auto-approves at any trust tier. Floor-guarded against the invoice's
   // amount due — over-crediting is record_refund's job, not this one's.
   APPLY_CREDIT = 'apply_credit',
+  // Tradesperson wave 1, Task 5 — a free-form outbound customer message
+  // (status update, part arrival, ETA, thanks). Comms-class: the AI drafts
+  // the exact text; the owner ALWAYS approves before a customer sees it —
+  // never auto-approves at any trust tier. Highest-frequency gap in the
+  // 2026-08-07 tradesperson plan.
+  SEND_CUSTOMER_MESSAGE = 'send_customer_message',
 }
 
 export enum RejectionCategory {

@@ -474,6 +474,10 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   // Portal-link send (PR #802): widen message_dispatches entity_type CHECK
   // for 'portal_session' — deliberate snapshot update for a new migration.
   ['269_dispatch_entity_portal_session', '60bab4bbcd9c1d371c32bf846dbe52cfd9010ab581e95bd263340ce85acb8f3a'],
+  // Tradesperson wave 1, Task 5 (2026-08-07 plan): widen message_dispatches
+  // entity_type CHECK for 'custom_message' (send_customer_message proposal)
+  // — deliberate snapshot update for a new migration.
+  ['270_dispatch_entity_custom_message', '3e166dce94eda1ed56ff0f9978f701863d80fd4b8071309ef1c448ced6ae6b9f'],
 ];
 
 function hashMigration(value: string): string {

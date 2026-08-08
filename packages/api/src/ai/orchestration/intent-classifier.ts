@@ -75,6 +75,12 @@ export type IntentType =
   // is a refund, not a credit, and the execution handler refuses it (see
   // ApplyCreditExecutionHandler's floor guard).
   | 'apply_credit'
+  // Tradesperson wave 1, Task 5 — NEW comms-class proposal type: a
+  // free-form outbound customer message (status update, part arrival,
+  // ETA, thanks). The AI drafts the exact text; the owner ALWAYS approves
+  // before a customer sees it. Highest-frequency gap in the 2026-08-07
+  // tradesperson plan.
+  | 'send_customer_message'
   // Taxonomy 1.2.0 (agent wave, Track A) — three proposal-driving on-ramps:
   //   create_invoice_schedule    — U2: milestone/progress billing plan for a
   //                                job; the verbatim milestone sentence rides
@@ -232,6 +238,7 @@ export const SUPPORTED_INTENTS: readonly IntentType[] = [
   'update_catalog_item',
   'record_refund',
   'apply_credit',
+  'send_customer_message',
   'create_invoice_schedule',
   'respond_to_review',
   'create_standing_instruction',
@@ -334,8 +341,22 @@ export const SUPPORTED_INTENTS: readonly IntentType[] = [
  *           it is a refund (record_refund), not this type's job — see
  *           ApplyCreditExecutionHandler (proposals/execution/
  *           apply-credit-handler.ts).
+ *   1.10.0 — Tradesperson wave 1 (2026-08-07 plan) Task 5, additive:
+ *           send_customer_message — a NEW comms-class proposal type for a
+ *           free-form outbound customer message (status update, part
+ *           arrival, ETA, thanks). The AI drafts the exact text; the
+ *           owner ALWAYS approves before a customer sees it — never
+ *           auto-approves at any trust tier. New extraction fields
+ *           (customerMessageBody / customerMessageChannel); reuses the
+ *           existing customerName seam for the spoken customer reference
+ *           (CUSTOMER_REF_INTENTS membership, same resolution ladder as
+ *           update_customer). Routes through the SAME
+ *           MessageDeliveryProvider (and TCPA consent/DNC/kill-switch
+ *           gates) TwilioDelayNotificationService already uses — see
+ *           SendCustomerMessageExecutionHandler (proposals/execution/
+ *           send-customer-message-handler.ts).
  */
-export const INTENT_TAXONOMY_VERSION = '1.9.0';
+export const INTENT_TAXONOMY_VERSION = '1.10.0';
 
 /**
  * P11-001: convenience predicate the FSM adapter uses to route
@@ -569,6 +590,15 @@ export interface ExtractedEntities {
   // catalogItemNewName) — folded into the appended line's description by
   // ApplyCreditTaskHandler; optional, never fabricated when unstated.
   creditReason?: string;
+  // Tradesperson wave 1, Task 5 — send_customer_message: the free-form
+  // customer-facing text/email body to send, cleaned up but faithful to
+  // what the operator said. Required on the contract; gates on the flat
+  // payload key `body` when absent (see SendCustomerMessageTaskHandler).
+  customerMessageBody?: string;
+  // send_customer_message: which channel to send on. Defaults to 'sms'
+  // downstream when unstated. Qualified (not bare `channel`) per house
+  // precedent (refundMethod / catalogItemNewName).
+  customerMessageChannel?: 'sms' | 'email';
 }
 
 /**
@@ -1143,6 +1173,16 @@ Supported intents (return exactly ONE):
                            Examples: "Knock 50 dollars off the Henderson invoice"
                                      "Apply a 100 dollar credit to Jones for the callback"
                                      "Credit the Garcias 75 — we were late"
+- "send_customer_message" — owner/technician sends the customer a free-form
+                           text or email (status update, part arrival, ETA,
+                           thanks). Comms-class: the AI drafts the exact
+                           message; the owner approves before send. Extract
+                           customerName, customerMessageChannel (sms unless
+                           email stated), and customerMessageBody (the
+                           content to send, cleaned up but faithful).
+                           Examples: "Text the Hendersons the part arrived, we can come Thursday"
+                                     "Email the Garcias that the inspection passed"
+                                     "Let Maria know we're finished and the gate is locked"
 - "create_invoice_schedule" — user wants to set up a MILESTONE / PROGRESS
                            billing plan for a job: a deposit up front and the
                            rest later, or a percentage split across stages.
@@ -1416,7 +1456,9 @@ Return valid JSON with exactly this shape (no prose, no markdown fences):
     "refundMethod": "<cash|check|card_external|other, optional — on record_refund>",
     "refundReason": "<string, optional — why the refund was given on record_refund>",
     "refundCheckNumber": "<string, optional — check number on record_refund>",
-    "creditReason": "<string, optional — why the credit was given on apply_credit>"
+    "creditReason": "<string, optional — why the credit was given on apply_credit>",
+    "customerMessageBody": "<string, optional — the message content to send on send_customer_message, cleaned up but faithful>",
+    "customerMessageChannel": "<sms|email, optional — on send_customer_message, defaults to sms>"
   }
 }
 
@@ -1893,6 +1935,12 @@ export function parseClassifierJson(content: string): IntentClassification | nul
     if (typeof ee.refundCheckNumber === 'string') extracted.refundCheckNumber = ee.refundCheckNumber;
     // apply_credit fields (Tradesperson wave 1, Task 4)
     if (typeof ee.creditReason === 'string') extracted.creditReason = ee.creditReason;
+    // send_customer_message fields (Tradesperson wave 1, Task 5). Channel
+    // reuses SEND_CHANNELS (['email','sms']) — same allowed value set
+    // send_invoice's sendChannel already validates against.
+    if (typeof ee.customerMessageBody === 'string') extracted.customerMessageBody = ee.customerMessageBody;
+    const customerMessageChannel = pickEnum(ee, 'customerMessageChannel', SEND_CHANNELS);
+    if (customerMessageChannel) extracted.customerMessageChannel = customerMessageChannel;
     if (Object.keys(extracted).length > 0) {
       result.extractedEntities = extracted;
     }

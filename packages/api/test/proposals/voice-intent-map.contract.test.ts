@@ -149,4 +149,12 @@ describe('voiceProposalSummary', () => {
     );
     expect(voiceProposalSummary('log_warranty_claim', {})).toBe('Log warranty claim');
   });
+
+  // Tradesperson wave 1, Task 5 — "Message <customer>" shape.
+  it('gives send_customer_message a human-readable summary', () => {
+    expect(voiceProposalSummary('send_customer_message', { customerName: 'Henderson' })).toBe(
+      'Message Henderson',
+    );
+    expect(voiceProposalSummary('send_customer_message', {})).toBe('Message');
+  });
 });

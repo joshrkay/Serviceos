@@ -32,7 +32,14 @@ export type DispatchEntityType =
   // change that introduced it, so a follow-up migration mirroring 092/125/
   // 164/190 must add 'portal_session' to the CHECK before Pg-backed
   // deployments can record these rows.
-  | 'portal_session';
+  | 'portal_session'
+  // Tradesperson wave 1, Task 5 — a free-form owner-approved customer
+  // message (send_customer_message proposal; entity_id = customers.id).
+  // Added to the message_dispatches entity_type CHECK constraint in the
+  // SAME migration that introduces this value (270_dispatch_entity_custom_
+  // message, db/schema.ts) — unlike 'portal_session' above, there is no
+  // follow-up-migration gap here.
+  | 'custom_message';
 export type DispatchChannel = 'sms' | 'email';
 export type DispatchStatus = 'sent' | 'delivered' | 'failed' | 'bounced';
 

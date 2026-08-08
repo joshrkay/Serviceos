@@ -104,6 +104,7 @@ import { InMemoryCatalogItemRepository, createCatalogItem } from '../../src/cata
 import { UpdateCatalogItemExecutionHandler } from '../../src/proposals/execution/update-catalog-item-handler';
 import { RecordRefundExecutionHandler } from '../../src/proposals/execution/record-refund-handler';
 import { ApplyCreditExecutionHandler } from '../../src/proposals/execution/apply-credit-handler';
+import { SendCustomerMessageExecutionHandler } from '../../src/proposals/execution/send-customer-message-handler';
 import { buildLineItem, calculateDocumentTotals, type LineItem } from '../../src/shared/billing-engine';
 import type { AppointmentRepository } from '../../src/appointments/appointment';
 import type { JobRepository } from '../../src/jobs/job';
@@ -744,6 +745,34 @@ const ROWS: Row[] = [
         ctx({ existingEntities: { invoiceId: INVOICE_ID, amount: 5000 } }),
       ),
     execute: (p) => new ApplyCreditExecutionHandler().execute(p, execContext()),
+  },
+  {
+    // Tradesperson wave 1, Task 5 (2026-08-07 plan) — send_customer_message
+    // is a NEW comms-class proposal type. Like update_customer, it reads
+    // the ROUTER-INJECTED context.customerId (not existingEntities.customerId)
+    // — CUSTOMER_REF_INTENTS membership, same resolution ladder. The
+    // optional LLM rewrite pass runs (a gateway is wired) and its returned
+    // text — not the raw spoken text — is what rides the payload.
+    intent: 'send_customer_message',
+    mode: 'resolves',
+    note: 'a resolved context.customerId + a spoken body draft ungated (channel defaults to sms); the optional LLM rewrite pass runs and its text rides the payload; dep-less SendCustomerMessageExecutionHandler synthetic-succeeds',
+    draft: () =>
+      draft(
+        { gateway: mockGateway('Your part arrived — we can come Thursday morning.') },
+        'send_customer_message',
+        ctx({
+          customerId: CUSTOMER_ID,
+          existingEntities: {
+            customerMessageBody: 'the part arrived, we can come thursday morning',
+          },
+        }),
+      ),
+    execute: (p) => new SendCustomerMessageExecutionHandler().execute(p, execContext()),
+    assertPayload: (payload) => {
+      expect(payload.customerId).toBe(CUSTOMER_ID);
+      expect(payload.channel).toBe('sms');
+      expect(payload.body).toBe('Your part arrived — we can come Thursday morning.');
+    },
   },
   {
     intent: 'create_standing_instruction',

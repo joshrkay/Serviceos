@@ -128,6 +128,11 @@ export const INTENT_TO_PROPOSAL_TYPE: Partial<Record<Exclude<IntentType, 'unknow
   // (goodwill, warranty labor, price match). NOT S1-allowed (operator-only):
   // see proposals/surface.ts S1_ALLOWED_PROPOSAL_TYPES and its contract test.
   apply_credit: 'apply_credit',
+  // Tradesperson wave 1, Task 5 — send_customer_message is a NEW comms-class
+  // proposal type: a free-form outbound customer message. NOT S1-allowed
+  // (operator-only): see proposals/surface.ts S1_ALLOWED_PROPOSAL_TYPES and
+  // its contract test.
+  send_customer_message: 'send_customer_message',
 };
 
 /**
@@ -190,6 +195,10 @@ export function voiceProposalSummary(
   if (intent === 'log_warranty_claim') return `Log warranty claim${name ? ` for ${name}` : ''}`;
   if (intent === 'record_refund') return `Record refund${name ? ` for ${name}` : ref ? ` on ${ref}` : ''}`;
   if (intent === 'apply_credit') return `Apply credit${name ? ` for ${name}` : ref ? ` on ${ref}` : ''}`;
+  // Tradesperson wave 1, Task 5 — "Message <customer>" mirrors the shape
+  // every other named-recipient summary above uses (Record refund for
+  // <name>, Apply credit for <name>).
+  if (intent === 'send_customer_message') return `Message${name ? ` ${name}` : ''}`;
   if (intent) return `Voice intent: ${intent}${ref ? ` (${ref})` : ''}`;
   return 'Voice clarification needed';
 }

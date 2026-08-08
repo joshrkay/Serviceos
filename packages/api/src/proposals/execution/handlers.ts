@@ -93,6 +93,10 @@ import {
 import { TimeEntryService } from '../../time-tracking/time-entry-service';
 import { FeedbackRequestRepository } from '../../feedback/feedback-request';
 import { DelayNotificationService } from '../../notifications/delay-notifications';
+import {
+  SendCustomerMessageExecutionHandler,
+  type CustomerMessenger,
+} from './send-customer-message-handler';
 import { LineItem, LineItemCategory, buildLineItem } from '../../shared/billing-engine';
 import type { PricingSource } from '../../ai/resolution/catalog-resolver';
 import {
@@ -1232,6 +1236,14 @@ export function createExecutionHandlerRegistry(deps?: {
   timeEntryService?: TimeEntryService;
   feedbackRepo?: FeedbackRequestRepository;
   delayNotificationService?: DelayNotificationService;
+  /**
+   * Tradesperson wave 1, Task 5 — send_customer_message's free-form
+   * owner-approved outbound message. Absent → the handler degrades to a
+   * synthetic-id passthrough (sends nothing). Production wires
+   * `TwilioCustomerMessageService` (notifications/twilio-customer-message-
+   * service.ts), built next to `delayNotificationService` in app.ts.
+   */
+  customerMessenger?: CustomerMessenger;
   // RV-141 — emergency_dispatch owner page. Optional; absent → the handler
   // degrades per its own per-dep guards (job-only / passthrough).
   emergencySmsSender?: EmergencySmsSender;
@@ -1414,6 +1426,11 @@ export function createExecutionHandlerRegistry(deps?: {
       deps?.jobRepo,
       deps?.customerRepo,
     ),
+    // Tradesperson wave 1, Task 5 — send_customer_message: a free-form
+    // outbound message the owner has already read and approved. Comms-class
+    // — never auto-approves at any trust tier. Degrades to a synthetic-id
+    // passthrough (sends nothing) when no customerMessenger is wired.
+    new SendCustomerMessageExecutionHandler(deps?.customerMessenger, deps?.auditRepo),
     new RequestFeedbackExecutionHandler(deps?.feedbackRepo, requiredAuditRepo),
     // P7-026 PR c — review-response handler. Wired with optional deps;
     // see ReviewResponseExecutionHandler constructor for per-dep

@@ -91,6 +91,10 @@ const EXPECTED_PROPOSAL_TYPES: ProposalType[] = [
   // money-class proposal type that reduces what a customer owes on an
   // issued invoice (goodwill, warranty labor, price match).
   'apply_credit',
+  // Tradesperson wave 1, Task 5 (2026-08-07 plan) — send_customer_message:
+  // a NEW comms-class proposal type for a free-form owner-approved
+  // outbound customer message.
+  'send_customer_message',
 ];
 
 describe('ai/orchestration/handler-registry — buildTaskHandlers', () => {

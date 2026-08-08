@@ -26,7 +26,7 @@ exist today.
 
 ## A) Speakable today — intent + proposal + execution handler all exist
 
-These 42 actions can be spoken, drafted as a proposal, approved, and executed.
+These 43 actions can be spoken, drafted as a proposal, approved, and executed.
 "Persistence proof" = a Docker-gated integration test that proves the row +
 audit event actually land in Postgres (vs. mocked-DB-only coverage, which cannot
 catch schema drift or a missing dependency).
@@ -75,6 +75,7 @@ catch schema drift or a missing dependency).
 | "Raise the diagnostic fee to 89 dollars" | `update_catalog_item` | `update_catalog_item` | capture | unit |
 | "Refund the Smiths 100 dollars on their invoice" | `record_refund` | `record_refund` | money | unit |
 | "Knock 50 dollars off the Henderson invoice" | `apply_credit` | `apply_credit` | money | unit |
+| "Text the Hendersons the part arrived, we can come Thursday" | `send_customer_message` | `send_customer_message` | comms | unit |
 
 > **Voice technician resolution (U1, taxonomy 1.2.0):** `reassign_appointment`,
 > `add_crew_member`, and `remove_crew_member` now resolve the spoken technician
@@ -269,6 +270,79 @@ Notes on the Tradesperson wave 1, Task 4 row (`apply_credit`, taxonomy 1.9.0):
   product-analytics mapping to keep this type's traceability scope identical
   to its sibling).
 
+Notes on the Tradesperson wave 1, Task 5 row (`send_customer_message`,
+taxonomy 1.10.0):
+
+- **NEW comms-class proposal type** — the highest-frequency gap in the
+  2026-08-07 tradesperson plan: a free-form outbound customer message
+  ("Text the Hendersons the part arrived", "Email the Garcias that the
+  inspection passed", "Let Maria know we're finished and the gate is
+  locked"). Never auto-approves at any trust tier (D3), same as
+  `notify_delay` / `send_invoice` / `request_feedback` — the owner ALWAYS
+  reads the exact text before a customer sees it; the AI drafts, a human
+  sends.
+- **Routes through the SAME delivery machinery `notify_delay` uses, not a
+  new Twilio/email touchpoint.** `SendCustomerMessageExecutionHandler`
+  (`proposals/execution/send-customer-message-handler.ts`) depends on a
+  structural `CustomerMessenger` interface; production wires
+  `TwilioCustomerMessageService`
+  (`notifications/twilio-customer-message-service.ts`), built next to
+  `delayNotificationService` in `app.ts` from the SAME `MessageDeliveryProvider`
+  + `DispatchRepository` + `CustomerRepository` instances. That provider is
+  the SAME gated wrapper (`notifications/gated-message-delivery.ts`) that
+  enforces the TCPA `sms_consent` + tenant DNC + per-channel kill-switch
+  gates for every other customer SMS/email in the product — no new consent
+  logic was written. A gate refusal is a THROWN error (`SmsSuppressedError`/
+  `EmailSuppressedError`, or this service's own "no phone/email on file"
+  checks); the execution handler's `catch` converts it into an honest
+  `{ success: false, error }`, never a silent success.
+- **Deliberately NOT layered on top of `TwilioDelayNotificationService`
+  itself** (Step 1's exemplar for this task), even though
+  `DelayNotificationService.sendDelayNotice()` can carry an arbitrary
+  message string: its concrete email path hardcodes the subject line
+  "Update about your upcoming appointment", which would be actively
+  misleading on a message that may have nothing to do with an appointment.
+  `TwilioCustomerMessageService` talks to the lower-level
+  `MessageDeliveryProvider` directly instead — the same "existing service
+  layer," same gates, but with a subject line this proposal type actually
+  controls (`payload.subject`, email-only, defaulted generically when
+  unstated).
+- **Customer resolution mirrors `update_customer` exactly.**
+  `send_customer_message` joined `CUSTOMER_REF_INTENTS`
+  (`ai/agents/customer-calling/entity-resolution.ts`), so the router
+  resolves a spoken customer name to a verified id BEFORE drafting (or
+  short-circuits to a `voice_clarification` on an ambiguous match) and
+  threads it onto `context.customerId` — the SAME router-injected seam
+  `UpdateCustomerTaskHandler` reads. No `customerReference` free-text
+  fallback exists on the contract; an unresolved reference gates
+  `missingFields: ['customerId']`.
+- **The message body is optionally cleaned up by a second, degradable LLM
+  call** (`SendCustomerMessageTaskHandler`, `ai/tasks/send-customer-message-
+  task.ts`) — mirrors `SuggestReplyTask`'s house pattern for AI-drafted
+  customer-facing text, with the system-prompt instruction "Rewrite the
+  operator's spoken message as a short, polite customer message. Do not add
+  promises, prices, or times the operator did not say." No gateway wired,
+  or ANY failure/empty result from the rewrite call, falls back to the
+  VERBATIM spoken text — this never fabricates content beyond what the
+  operator said, and never blocks the draft on an LLM outage.
+- **`channel` defaults to `sms`** when the operator doesn't say "email";
+  the contract (`proposals/contracts/send-customer-message.ts`) requires it
+  explicitly so a proposal can never execute with an ambiguous channel.
+  `body` is capped at 1000 characters and must be non-empty after trimming.
+- **New dispatch entity type.** Migration `270_dispatch_entity_custom_message`
+  (`db/schema.ts`) widens the `message_dispatches.entity_type` CHECK
+  constraint to add `'custom_message'` (`entity_id` = `customers.id`) — the
+  same audit-trail table every other outbound send writes to.
+- **RBAC posture unchanged (flagged, no policy change):** `send_customer_message`
+  is not in `CONFIG_WRITING_PROPOSAL_TYPES` (`proposals/actions.ts`) — its
+  execution sends a message, it does not write tenant configuration — so
+  approval requires only the generic `proposals:approve` permission every
+  `dispatcher` already holds, identical to `notify_delay` / `send_invoice`
+  today. This task did not add a stricter owner-only gate.
+- This type is deliberately **absent** from `S1_ALLOWED_PROPOSAL_TYPES`
+  (`proposals/surface.ts`) — operator/technician-only, never reachable from
+  an unauthenticated inbound caller.
+
 Notes on the taxonomy-1.2.0 rows:
 
 - `create_invoice_schedule` — the spoken milestone sentence is parsed by a
@@ -451,7 +525,8 @@ not a gap. No new `JobStatus` value was introduced for this.
     { "intent": "log_warranty_claim", "proposalType": "create_job", "actionClass": "capture" },
     { "intent": "update_catalog_item", "proposalType": "update_catalog_item", "actionClass": "capture" },
     { "intent": "record_refund", "proposalType": "record_refund", "actionClass": "money" },
-    { "intent": "apply_credit", "proposalType": "apply_credit", "actionClass": "money" }
+    { "intent": "apply_credit", "proposalType": "apply_credit", "actionClass": "money" },
+    { "intent": "send_customer_message", "proposalType": "send_customer_message", "actionClass": "comms" }
   ],
   "handlerNoOnramp": [
     "create_booking",

@@ -66,6 +66,12 @@ const CUSTOMER_REF_INTENTS = new Set([
   'add_note',
   'request_feedback',
   'notify_delay',
+  // Tradesperson wave 1, Task 5 — a spoken "text/email the Hendersons..."
+  // names a PERSON, not display text. Without this the router never
+  // resolved that name to a customerId, so SendCustomerMessageTaskHandler
+  // could only see raw free text — mirrors send_estimate_nudge's rationale
+  // above.
+  'send_customer_message',
   'log_expense',
   'add_service_location',
   'mark_lead_lost',

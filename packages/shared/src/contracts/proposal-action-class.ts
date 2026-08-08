@@ -85,6 +85,10 @@ export const COMMS_PROPOSAL_TYPES: ReadonlySet<string> = new Set<string>([
   ProposalType.SEND_ESTIMATE_NUDGE,
   ProposalType.REVIEW_RESPONSE_PROPOSAL,
   ProposalType.SEND_PAYMENT_REMINDER,
+  // Tradesperson wave 1, Task 5 — free-form outbound customer message. The
+  // AI drafts the exact text; the owner ALWAYS approves before a customer
+  // sees it — same comms gate as every other outbound send above.
+  ProposalType.SEND_CUSTOMER_MESSAGE,
 ]);
 
 export const MONEY_PROPOSAL_TYPES: ReadonlySet<string> = new Set<string>([

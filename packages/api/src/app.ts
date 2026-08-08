@@ -640,6 +640,7 @@ import {
   NoopDelayNotificationService,
 } from './notifications/delay-notifications';
 import { TwilioDelayNotificationService } from './notifications/twilio-delay-notification-service';
+import { TwilioCustomerMessageService } from './notifications/twilio-customer-message-service';
 import { TransactionalCommsService } from './notifications/transactional-comms-service';
 import { runAppointmentReminderSweep } from './workers/appointment-reminder-worker';
 import { runHoldReaperSweep } from './workers/hold-reaper-worker';
@@ -2187,6 +2188,14 @@ export function createApp(): AppWithLifecycle {
   const delayNotificationService = messageDelivery
     ? new TwilioDelayNotificationService(messageDelivery, dispatchRepo, customerRepo)
     : new NoopDelayNotificationService();
+  // Tradesperson wave 1, Task 5 — send_customer_message's concrete adapter,
+  // built next to delayNotificationService: same messageDelivery/dispatchRepo
+  // instances, same TCPA consent + DNC + kill-switch gates. Absent when no
+  // real messageDelivery is configured (dev/test) — the execution handler
+  // degrades to a synthetic-id passthrough.
+  const customerMessenger = messageDelivery
+    ? new TwilioCustomerMessageService(messageDelivery, dispatchRepo, customerRepo)
+    : undefined;
   // B1.18 — hoisted ahead of the execution registry (was declared next to the
   // brand-voice router further down) so update_brand_voice's execution
   // handler can be wired with the SAME repo instance the sheet's router uses.
@@ -2234,6 +2243,7 @@ export function createApp(): AppWithLifecycle {
     timeEntryService: new TimeEntryService(timeEntryRepo, auditRepo),
     feedbackRepo: feedbackRequestRepo,
     delayNotificationService,
+    customerMessenger,
     // RV-141 — emergency_dispatch owner page goes through the same
     // delivery provider as every other dispatch SMS.
     ...(messageDelivery ? { emergencySmsSender: messageDelivery } : {}),

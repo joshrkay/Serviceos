@@ -203,6 +203,16 @@ describe('planVoiceEntityLookups — intent-conditioned operator references', ()
     ]);
   });
 
+  // Tradesperson wave 1, Task 5 — a spoken "text/email the Hendersons..."
+  // names a PERSON, not display text. Mirrors send_estimate_nudge's
+  // rationale above.
+  it('resolves the spoken customer name for send_customer_message', () => {
+    const lookups = planVoiceEntityLookups('send_customer_message', { customerName: 'Henderson' });
+    expect(lookups).toEqual([
+      { kind: 'customer', reference: 'Henderson', refKey: 'customerId' },
+    ]);
+  });
+
   it('resolves Henderson customer name for lookup_balance', () => {
     const lookups = planVoiceEntityLookups('lookup_balance', { customerName: 'Henderson' });
     expect(lookups).toEqual([

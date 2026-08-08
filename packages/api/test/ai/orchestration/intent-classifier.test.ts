@@ -1210,11 +1210,14 @@ describe('taxonomy 1.2.0 — new intents + entities', () => {
   // same plan bumped it again to 1.8.0 (record_refund — a NEW money-class
   // proposal type for recording MANUAL refunds by voice), then Task 4 of the
   // same plan bumped it again to 1.9.0 (apply_credit — a NEW money-class
-  // proposal type that reduces what a customer owes on an issued invoice).
+  // proposal type that reduces what a customer owes on an issued invoice),
+  // then Task 5 of the same plan bumped it again to 1.10.0
+  // (send_customer_message — a NEW comms-class proposal type for a
+  // free-form outbound customer message).
   // classifyIntent always stamps the CURRENT constant regardless of which
   // intent, so this pin tracks the live value.
-  it('taxonomy version reflects the latest coordinated bump (1.9.0)', () => {
-    expect(INTENT_TAXONOMY_VERSION).toBe('1.9.0');
+  it('taxonomy version reflects the latest coordinated bump (1.10.0)', () => {
+    expect(INTENT_TAXONOMY_VERSION).toBe('1.10.0');
   });
 
   it('parses create_invoice_schedule with the verbatim milestone sentence', () => {
@@ -1490,6 +1493,81 @@ describe('taxonomy 1.2.0 — new intents + entities', () => {
     expect(result.intentType).toBe('apply_credit');
     expect(result.taxonomyVersion).toBe(INTENT_TAXONOMY_VERSION);
     expect(result.extractedEntities?.jobReference).toBe('the Henderson invoice');
+  });
+
+  // Tradesperson wave 1, Task 5 (taxonomy 1.10.0) — send_customer_message.
+  // customerMessageChannel is enum-validated like refundMethod
+  // (invalid → invalidEnumFields); customerMessageBody is a flat string,
+  // no separate structured-content field exists.
+  it('parses send_customer_message with customerName, customerMessageBody, and customerMessageChannel', () => {
+    const result = parseClassifierJson(
+      JSON.stringify({
+        intentType: 'send_customer_message',
+        confidence: 0.9,
+        extractedEntities: {
+          customerName: 'Henderson',
+          customerMessageBody: 'the part arrived, we can come Thursday morning',
+          customerMessageChannel: 'sms',
+        },
+      }),
+    );
+    expect(result?.intentType).toBe('send_customer_message');
+    expect(result?.extractedEntities?.customerName).toBe('Henderson');
+    expect(result?.extractedEntities?.customerMessageBody).toBe(
+      'the part arrived, we can come Thursday morning',
+    );
+    expect(result?.extractedEntities?.customerMessageChannel).toBe('sms');
+  });
+
+  it('defaults customerMessageChannel to undefined when unstated (SendCustomerMessageTaskHandler defaults it to sms downstream)', () => {
+    const result = parseClassifierJson(
+      JSON.stringify({
+        intentType: 'send_customer_message',
+        confidence: 0.9,
+        extractedEntities: { customerName: 'Garcia', customerMessageBody: 'inspection passed' },
+      }),
+    );
+    expect(result?.extractedEntities?.customerMessageChannel).toBeUndefined();
+  });
+
+  it('an invalid customerMessageChannel is dropped and recorded as an invalid enum field', () => {
+    const result = parseClassifierJson(
+      JSON.stringify({
+        intentType: 'send_customer_message',
+        confidence: 0.9,
+        extractedEntities: {
+          customerName: 'Garcia',
+          customerMessageBody: 'inspection passed',
+          customerMessageChannel: 'carrier_pigeon',
+        },
+      }),
+    );
+    expect(result?.extractedEntities?.customerMessageChannel).toBeUndefined();
+    expect(result?.invalidEnumFields).toContainEqual({
+      field: 'customerMessageChannel',
+      value: 'carrier_pigeon',
+    });
+  });
+
+  it('classifyIntent end-to-end for send_customer_message stamps the current taxonomy version', async () => {
+    const gateway = mockGateway(
+      JSON.stringify({
+        intentType: 'send_customer_message',
+        confidence: 0.9,
+        extractedEntities: {
+          customerName: 'Henderson',
+          customerMessageBody: 'the part arrived',
+        },
+      }),
+    );
+    const result = await classifyIntent(
+      'Text the Hendersons the part arrived',
+      { tenantId: 't-1' },
+      gateway,
+    );
+    expect(result.intentType).toBe('send_customer_message');
+    expect(result.taxonomyVersion).toBe(INTENT_TAXONOMY_VERSION);
+    expect(result.extractedEntities?.customerName).toBe('Henderson');
   });
 });
 

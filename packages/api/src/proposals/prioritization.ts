@@ -114,6 +114,11 @@ const TYPE_PRIORITY: Record<ProposalType, number> = {
   // customer-facing (it changes what the customer owes) — same tier as
   // record_refund / apply_late_fee / record_payment.
   apply_credit: 1,
+  // Tradesperson wave 1, Task 5 — a free-form customer message is
+  // outbound, customer-facing comms with same-day relevance (a part
+  // arrived, an ETA, a finished-job notice) — same tier as notify_delay /
+  // send_invoice / record_payment.
+  send_customer_message: 1,
 };
 
 export function getUrgency(proposal: Proposal): { urgency: PrioritizedProposal['urgency']; reason: string } {

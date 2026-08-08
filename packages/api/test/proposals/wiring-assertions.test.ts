@@ -72,6 +72,11 @@ function fullDeps(): RegistryDeps {
     timeEntryService: {} as any,
     feedbackRepo: {} as any,
     delayNotificationService: {} as any,
+    // Tradesperson wave 1, Task 5 — send_customer_message became
+    // voice-reachable (proposals/voice-intent-map.ts), so its execution
+    // handler's isFullyWired() probe (Boolean(this.messenger)) is now
+    // exercised here.
+    customerMessenger: {} as any,
     emergencySmsSender: {} as any,
     sendService: {} as any,
     dispatchRepo: {} as any,
@@ -151,6 +156,11 @@ describe('U8: each newly probed handler is DETECTED when its effect dep is dropp
     // RecordRefundExecutionHandler.isFullyWired() reports false (its
     // dep-less mode is a synthetic passthrough that persists nothing).
     { omit: ['paymentRepo'], flags: ['record_refund'] },
+    // Tradesperson wave 1, Task 5 — send_customer_message: without a
+    // customerMessenger, SendCustomerMessageExecutionHandler.isFullyWired()
+    // reports false (its dep-less mode is a synthetic passthrough that
+    // sends nothing).
+    { omit: ['customerMessenger'], flags: ['send_customer_message'] },
   ];
 
   for (const { omit, flags } of rows) {
