@@ -12,6 +12,13 @@
  * one per file. This module exists to collapse that back to one touch
  * point: import `entitiesFrom`/`baseSourceContext`/`inputFor` from here
  * rather than re-implementing any part of this shape.
+ *
+ * Known exceptions: complaint-task.ts (deliberately unconverted — custom
+ * summaries, an always-present `source: 'voice'` sourceContext,
+ * idempotencyKey/explanation), task-router.ts (IssueInvoiceTaskHandler,
+ * whose threshold comes from an async thresholdResolver fallback rather
+ * than off context, so it genuinely can't use inputFor as-is) — see each
+ * for why.
  */
 import { TaskContext } from './task-handlers';
 import { CreateProposalInput, ProposalType } from '../../proposals/proposal';

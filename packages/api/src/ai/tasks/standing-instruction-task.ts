@@ -20,7 +20,7 @@ import {
   StandingInstructionScope,
   standingInstructionScopeSchema,
 } from '../../instructions/standing-instructions';
-import { createProposal } from '../../proposals/proposal';
+import { createProposal, CreateProposalInput } from '../../proposals/proposal';
 import { LLMGateway } from '../gateway/gateway';
 import { ExtractedEntities } from '../orchestration/intent-classifier';
 import { TaskContext, TaskHandler, TaskResult } from './task-handlers';
@@ -73,7 +73,7 @@ export class CreateStandingInstructionTaskHandler implements TaskHandler {
     }
     if (scope && Object.keys(scope).length > 0) payload.scope = scope;
 
-    const input = {
+    const input: CreateProposalInput = {
       // v1 rule — sourceTrustTier is DELIBERATELY omitted (inputFor's
       // default): decideInitialStatus lands the proposal in 'draft', so a
       // standing instruction can never auto-approve regardless of
