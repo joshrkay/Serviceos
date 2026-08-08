@@ -19,6 +19,9 @@
 import { v4 as uuidv4 } from 'uuid';
 import { ValidationError } from '../shared/errors';
 
+// 'cancelled' is unreachable today — no method in this module sets it.
+// Kept for forward-compat (Task 9 may add markCancelled); removing it from
+// the TS union or the DB CHECK later would each cost their own change.
 export type MaterialItemStatus = 'pending' | 'purchased' | 'cancelled';
 
 export interface MaterialItem {
@@ -65,7 +68,20 @@ export interface MaterialItemRepository {
   markPurchased(tenantId: string, id: string, actorId: string): Promise<MaterialItem | null>;
 }
 
-export function validateCreateMaterialItemInput(input: CreateMaterialItemInput): string[] {
+// A spoken/transcribed quantity ("two billion nails") can overflow Postgres
+// INTEGER (int4, max 2147483647) and turn into a raw 22003 DB error instead
+// of a clean ValidationError. This cap is application-domain, not a DB
+// CHECK — comfortably above any real shopping-list quantity but well inside
+// int4, so create() always fails fast in shared code before either backend
+// touches the database.
+const MAX_QUANTITY = 1_000_000;
+
+// Not exported: only buildMaterialItem calls this, and every branch is
+// already exercised indirectly through repo.create() in
+// test/materials/material-item.test.ts. Re-export it (and give it its own
+// direct test suite, mirroring test/expenses/expense.test.ts) if a second
+// caller needs it standalone.
+function validateCreateMaterialItemInput(input: CreateMaterialItemInput): string[] {
   const errors: string[] = [];
   if (!input.tenantId) errors.push('tenantId is required');
   if (!input.createdBy) errors.push('createdBy is required');
@@ -81,6 +97,8 @@ export function validateCreateMaterialItemInput(input: CreateMaterialItemInput):
       errors.push('quantity must be a positive number');
     } else if (!Number.isInteger(input.quantity)) {
       errors.push('quantity must be an integer');
+    } else if (input.quantity > MAX_QUANTITY) {
+      errors.push(`quantity must not exceed ${MAX_QUANTITY}`);
     }
   }
   return errors;
@@ -108,6 +126,18 @@ export function buildMaterialItem(input: CreateMaterialItemInput): MaterialItem 
   };
 }
 
+/**
+ * Guards the actor performing a `markPurchased` transition. Shared so both
+ * backends reject the same way `create()` rejects a missing `createdBy` —
+ * without this, an empty actorId silently wrote `purchased_by = ''` in both
+ * the in-memory and Pg repos.
+ */
+export function requireActorId(actorId: string): void {
+  if (!actorId || actorId.trim().length === 0) {
+    throw new ValidationError('actorId is required');
+  }
+}
+
 export class InMemoryMaterialItemRepository implements MaterialItemRepository {
   private readonly items = new Map<string, MaterialItem>();
 
@@ -130,6 +160,7 @@ export class InMemoryMaterialItemRepository implements MaterialItemRepository {
   }
 
   async markPurchased(tenantId: string, id: string, actorId: string): Promise<MaterialItem | null> {
+    requireActorId(actorId);
     const item = this.items.get(id);
     if (!item || item.tenantId !== tenantId) return null;
     if (item.status !== 'pending') return null;

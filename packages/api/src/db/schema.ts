@@ -6584,6 +6584,9 @@ export const MIGRATIONS = {
       description TEXT NOT NULL,
       quantity INTEGER NOT NULL DEFAULT 1 CHECK (quantity > 0),
       vendor TEXT,
+      -- 'cancelled' is unreachable today (no method sets it); kept for
+      -- forward-compat since Task 9 may add markCancelled, and dropping a
+      -- CHECK value later would cost its own migration.
       status TEXT NOT NULL DEFAULT 'pending'
         CHECK (status IN ('pending', 'purchased', 'cancelled')),
       needed_by TIMESTAMPTZ,
@@ -6598,10 +6601,14 @@ export const MIGRATIONS = {
     DROP POLICY IF EXISTS tenant_isolation_material_items ON material_items;
     CREATE POLICY tenant_isolation_material_items ON material_items
       USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
-    CREATE INDEX IF NOT EXISTS idx_material_items_tenant
-      ON material_items (tenant_id);
+    -- Single covering index for the one real query shape (listPending: tenant +
+    -- pending + ORDER BY created_at). status = 'pending' is a SQL LITERAL, not a
+    -- bind param, so the planner can prove the predicate implies the index —
+    -- keep it a literal; parameterizing it later would make the index unusable.
+    -- No plain (tenant_id) index: nothing in this module queries by tenant_id
+    -- alone (markPurchased hits the id primary key).
     CREATE INDEX IF NOT EXISTS idx_material_items_pending
-      ON material_items (tenant_id) WHERE status = 'pending';
+      ON material_items (tenant_id, created_at) WHERE status = 'pending';
   `,
 };
 

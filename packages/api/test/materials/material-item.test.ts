@@ -103,6 +103,27 @@ describe('MaterialItemRepository', () => {
     ).rejects.toThrow(ValidationError);
   });
 
+  it('rejects a quantity that would overflow Postgres INTEGER (int4)', async () => {
+    const repo = new InMemoryMaterialItemRepository();
+    // A garbled transcript quantity ("two billion nails") is not exotic on
+    // the voice path — this must be a clean ValidationError, not a raw
+    // Postgres 22003 overflow surfacing as a 500.
+    await expect(
+      repo.create({ tenantId: 't1', description: 'way too many', quantity: 2_147_483_648, createdBy: 'u1' }),
+    ).rejects.toThrow(ValidationError);
+  });
+
+  it('accepts the quantity domain cap boundary (1,000,000)', async () => {
+    const repo = new InMemoryMaterialItemRepository();
+    const created = await repo.create({
+      tenantId: 't1',
+      description: 'at the cap',
+      quantity: 1_000_000,
+      createdBy: 'u1',
+    });
+    expect(created.quantity).toBe(1_000_000);
+  });
+
   it('rejects a missing/blank description, tenantId, or createdBy', async () => {
     const repo = new InMemoryMaterialItemRepository();
     await expect(
@@ -158,6 +179,15 @@ describe('MaterialItemRepository', () => {
       expect(second).toBeNull();
       // The original purchase is left intact, not clobbered by the second actor.
       expect(first!.purchasedBy).toBe('u2');
+    });
+
+    it('rejects an empty or blank actorId instead of writing purchased_by = \'\'', async () => {
+      const repo = new InMemoryMaterialItemRepository();
+      const created = await repo.create({ tenantId: 't1', description: 'PEX', createdBy: 'u1' });
+      await expect(repo.markPurchased('t1', created.id, '')).rejects.toThrow(ValidationError);
+      await expect(repo.markPurchased('t1', created.id, '   ')).rejects.toThrow(ValidationError);
+      // Untouched — still pending, not silently "purchased by nobody".
+      expect(await repo.listPending('t1')).toHaveLength(1);
     });
   });
 });

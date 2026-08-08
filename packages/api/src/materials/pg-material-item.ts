@@ -11,7 +11,22 @@ import {
   MaterialItemListOptions,
   MaterialItemRepository,
   MaterialItemStatus,
+  requireActorId,
 } from './material-item';
+
+// Mirrors the per-file isUuid idiom used elsewhere for execution-side id
+// checks (e.g. src/ai/tasks/estimate-edit-task.ts): tenantId/id here can be
+// an LLM-invented reference on the voice path (Task 9), and
+// applyTenantContext (src/db/rls-runtime-role.ts) throws a raw
+// "Invalid tenant ID format" error on anything non-UUID-shaped before a
+// query even runs. Guarding here turns that throw into the same graceful
+// null/[] a genuinely-missing-but-well-formed id already produces, so a
+// garbled id reads as "not found" instead of a 500.
+const UUID_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
+
+function isUuid(value: string): boolean {
+  return UUID_RE.test(value);
+}
 
 interface MaterialItemRow {
   id: string;
@@ -55,11 +70,20 @@ export class PgMaterialItemRepository extends PgBaseRepository implements Materi
   async create(input: CreateMaterialItemInput): Promise<MaterialItem> {
     const item = buildMaterialItem(input);
     return this.withTenant(item.tenantId, async (client) => {
+      // created_at/updated_at come from the DB clock (NOW()), not
+      // item.createdAt/item.updatedAt from buildMaterialItem — mirrors
+      // pg-call-me-back.ts. Passing the app-server JS Date here would mix
+      // clock sources with markPurchased's NOW() below: under app<->DB skew
+      // (or across Railway instances with their own skew from each other)
+      // you'd get updated_at < created_at on the same row, and ORDER BY
+      // created_at (listPending) would sort by app-server wall clock instead
+      // of true insertion sequence. RETURNING * + mapRow means the object
+      // this method returns still reflects the real, single-source DB time.
       const { rows } = await client.query<MaterialItemRow>(
         `INSERT INTO material_items
            (id, tenant_id, job_id, description, quantity, vendor, status,
             needed_by, created_by, created_at, updated_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW(), NOW())
          RETURNING *`,
         [
           item.id,
@@ -71,8 +95,6 @@ export class PgMaterialItemRepository extends PgBaseRepository implements Materi
           item.status,
           item.neededBy ?? null,
           item.createdBy,
-          item.createdAt,
-          item.updatedAt,
         ],
       );
       return mapRow(rows[0]);
@@ -83,15 +105,30 @@ export class PgMaterialItemRepository extends PgBaseRepository implements Materi
     tenantId: string,
     options?: MaterialItemListOptions,
   ): Promise<MaterialItem[]> {
+    if (!isUuid(tenantId)) return [];
     return this.withTenant(tenantId, async (client) => {
+      // status = 'pending' stays a SQL LITERAL (not a bind param) so the
+      // planner can prove the predicate implies idx_material_items_pending
+      // (migration 272) — parameterizing it later would make that index
+      // unusable for this query.
       const conditions: string[] = ['tenant_id = $1', "status = 'pending'"];
       const params: unknown[] = [tenantId];
       if (options?.jobId) {
         params.push(options.jobId);
         conditions.push(`job_id = $${params.length}`);
       }
+      // `, id ASC` tiebreak: even with created_at now DB-generated (NOW(),
+      // microsecond precision, since the create() fix above), two rows can
+      // still tie — and previously, when created_at was a JS Date bound as a
+      // param with millisecond resolution, ties on rapid successive creates
+      // were common (measured: 2 of 3 in one run). Without a tiebreak, a
+      // plain `ORDER BY created_at ASC` is nondeterministic between two
+      // identical calls whenever rows tie. The id tiebreak buys
+      // DETERMINISM, not true insertion-order fidelity — id is a random v4
+      // UUID, so a tie is broken consistently but not necessarily
+      // oldest-first.
       const { rows } = await client.query<MaterialItemRow>(
-        `SELECT * FROM material_items WHERE ${conditions.join(' AND ')} ORDER BY created_at ASC`,
+        `SELECT * FROM material_items WHERE ${conditions.join(' AND ')} ORDER BY created_at ASC, id ASC`,
         params,
       );
       return rows.map(mapRow);
@@ -99,6 +136,8 @@ export class PgMaterialItemRepository extends PgBaseRepository implements Materi
   }
 
   async markPurchased(tenantId: string, id: string, actorId: string): Promise<MaterialItem | null> {
+    requireActorId(actorId);
+    if (!isUuid(tenantId) || !isUuid(id)) return null;
     return this.withTenant(tenantId, async (client) => {
       const { rows } = await client.query<MaterialItemRow>(
         `UPDATE material_items

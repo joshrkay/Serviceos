@@ -1293,6 +1293,13 @@ export function createApp(): AppWithLifecycle {
   const batchInvoiceTxRunner = pool ? new PgTenantTransactionRunner(pool) : new InMemoryTransactionRunner();
   const paymentRepo        = pool ? new PgPaymentRepository(pool)        : new InMemoryPaymentRepository();
   const expenseRepo        = pool ? new PgExpenseRepository(pool)        : new InMemoryExpenseRepository();
+  // Tradesperson wave 1, Task 8 (2026-08-07 plan) — src/materials/material-item.ts
+  // (MaterialItemRepository, In-Memory + Pg) is deliberately NOT constructed
+  // here yet. Nothing consumes it until Task 9 wires the add_material /
+  // lookup_materials voice intents, at which point it gets a
+  // `pool ? new PgMaterialItemRepository(pool) : new InMemoryMaterialItemRepository()`
+  // line right here and gets threaded into the execution-handler deps bag,
+  // mirroring expenseRepo / agreementRepo above and below.
   // P5-017: Resolve the payment-link provider via the factory so the mock
   // is hard-blocked in production. The factory throws at boot if
   // STRIPE_SECRET_KEY (or STRIPE_API_KEY) is missing while NODE_ENV=production,

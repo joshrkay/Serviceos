@@ -21,6 +21,7 @@ import {
   TestTenant,
 } from './shared';
 import { PgMaterialItemRepository } from '../../src/materials/pg-material-item';
+import { ValidationError } from '../../src/shared/errors';
 
 /**
  * Insert the customer -> location -> job FK chain under tenant RLS context.
@@ -141,7 +142,7 @@ describe('Postgres integration — material items', () => {
     expect(scoped[0].description).toBe('job-scoped item');
   });
 
-  it('does not mark another tenant\'s item purchased (repo-level tenant check)', async () => {
+  it('does not mark another tenant\'s item purchased (repo-level tenant check, cross-tenant-null)', async () => {
     const created = await repo.create({
       tenantId: tenant.tenantId,
       description: 'cross-tenant guard',
@@ -149,6 +150,65 @@ describe('Postgres integration — material items', () => {
     });
     const result = await repo.markPurchased(other.tenantId, created.id, other.userId);
     expect(result).toBeNull();
+  });
+
+  it('returns null on a second markPurchased call against the same row (double-purchase)', async () => {
+    const t = await createTestTenant(pool);
+    const created = await repo.create({ tenantId: t.tenantId, description: 'PEX', createdBy: t.userId });
+    const first = await repo.markPurchased(t.tenantId, created.id, t.userId);
+    expect(first).not.toBeNull();
+    const second = await repo.markPurchased(t.tenantId, created.id, t.userId);
+    expect(second).toBeNull();
+  });
+
+  it(
+    'returns pending items in a stable order across repeated calls (determinism, ' +
+      'not insertion-order fidelity — see the created_at,id tiebreak in pg-material-item.ts)',
+    async () => {
+      const t = await createTestTenant(pool);
+      await repo.create({ tenantId: t.tenantId, description: 'a', createdBy: t.userId });
+      await repo.create({ tenantId: t.tenantId, description: 'b', createdBy: t.userId });
+      await repo.create({ tenantId: t.tenantId, description: 'c', createdBy: t.userId });
+
+      const first = await repo.listPending(t.tenantId);
+      const second = await repo.listPending(t.tenantId);
+      expect(first).toHaveLength(3);
+      expect(first.map((i) => i.id)).toEqual(second.map((i) => i.id));
+    },
+  );
+
+  describe('graceful handling of malformed ids (Task 9: an LLM-invented id must not 500)', () => {
+    it('listPending returns [] for a non-UUID-shaped tenantId instead of throwing', async () => {
+      expect(await repo.listPending('not-a-uuid')).toEqual([]);
+    });
+
+    it('listPending returns [] for a well-formed but unknown tenantId', async () => {
+      expect(await repo.listPending(randomUUID())).toEqual([]);
+    });
+
+    it('markPurchased returns null for a non-UUID-shaped item id instead of throwing', async () => {
+      expect(await repo.markPurchased(tenant.tenantId, 'not-a-uuid', tenant.userId)).toBeNull();
+    });
+
+    it('markPurchased returns null for a non-UUID-shaped tenantId instead of throwing', async () => {
+      const created = await repo.create({
+        tenantId: tenant.tenantId,
+        description: 'malformed tenant guard',
+        createdBy: tenant.userId,
+      });
+      expect(await repo.markPurchased('not-a-uuid', created.id, tenant.userId)).toBeNull();
+    });
+
+    it('markPurchased rejects an empty actorId', async () => {
+      const created = await repo.create({
+        tenantId: tenant.tenantId,
+        description: 'actor guard',
+        createdBy: tenant.userId,
+      });
+      await expect(repo.markPurchased(tenant.tenantId, created.id, '')).rejects.toThrow(
+        ValidationError,
+      );
+    });
   });
 
   describe('RLS enforcement (DB-level, unprivileged role)', () => {
@@ -191,6 +251,24 @@ describe('Postgres integration — material items', () => {
         return rows.length;
       });
       expect(count).toBe(0);
+    });
+
+    it('cannot INSERT a material_items row attributed to another tenant (WITH CHECK)', async () => {
+      // material_items' policy is USING-only (no explicit WITH CHECK) —
+      // Postgres reuses the USING expression for WITH CHECK when one isn't
+      // given, so this must reject exactly like the customers table does
+      // (rls-tenant-isolation.test.ts). Proven locally rather than inherited
+      // from that sibling test, since a per-table policy typo wouldn't be
+      // caught by another table's assertion.
+      await expect(
+        asTenant(pool, tenant.tenantId, async (client) => {
+          await client.query(
+            `INSERT INTO material_items (id, tenant_id, description, created_by)
+             VALUES ($1, $2, $3, $4)`,
+            [randomUUID(), other.tenantId, 'Forged', tenant.userId],
+          );
+        }),
+      ).rejects.toThrow(/row-level security/i);
     });
 
     it('an unprivileged role scoped to tenant A cannot UPDATE tenant B\'s row', async () => {
