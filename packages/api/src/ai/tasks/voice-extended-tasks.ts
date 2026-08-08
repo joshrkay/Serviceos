@@ -2011,17 +2011,22 @@ export class CreateJobVoiceTaskHandler implements TaskHandler {
 //   3. Reference resolution reuses `resolveLineItemToCatalog` (ai/resolution/
 //      catalog-resolver.ts) — the SAME matcher draft_invoice/draft_estimate
 //      use to ground spoken line items — rather than a bespoke substring
-//      match: its exact-tier preference solves prefix shadowing ("AC
-//      tune-up" vs "AC tune-up deluxe", where a naive `includes` gates
-//      forever on two matches) and gets punctuation/plural folding + token
-//      overlap for free. 'exact'/'high' resolve outright; 'ambiguous' gates
-//      with candidates surfaced on `sourceContext.entityCandidates` (AC-3/B2
-//      pattern — see SendEstimateNudgeTaskHandler); 'none' gates with no
-//      candidates. `missingFields` entries are FLAT payload keys
-//      (`catalogItemId` / `proposedUnitPriceCents`), never prose — prose
-//      reasons live on `explanation` instead, per
-//      `clearSatisfiedMissingFields` (missing-fields.ts): it only lifts a
-//      gate on an EXACT flat-key edit, so a prose entry can never clear.
+//      match. Quality-review correction (2026-08-08): the real win here is
+//      RECOVERABLE ambiguity (a flat gate key + scored candidates the
+//      reviewer can pick from) and robustness to speech variants
+//      (punctuation/plural folding, token overlap) — NOT prefix
+//      disambiguation. A prefix-shadowed pair ("AC tune-up" vs "AC tune-up
+//      deluxe") still lands 'ambiguous' here: this task's own test proves
+//      it (the two candidates score within MARGIN=0.15 of each other, and a
+//      price-differing tie is never broken silently). 'exact'/'high' resolve
+//      outright; 'ambiguous' gates with candidates surfaced on
+//      `sourceContext.entityCandidates` (AC-3/B2 pattern — see
+//      SendEstimateNudgeTaskHandler); 'none' gates with no candidates.
+//      `missingFields` entries are FLAT payload keys (`catalogItemId` /
+//      `proposedUnitPriceCents`), never prose — prose reasons live on
+//      `explanation` instead, per `clearSatisfiedMissingFields`
+//      (missing-fields.ts): it only lifts a gate on an EXACT flat-key edit,
+//      so a prose entry can never clear.
 export class UpdateCatalogItemTaskHandler implements TaskHandler {
   readonly taskType = 'update_catalog_item' as const;
 
@@ -2047,7 +2052,9 @@ export class UpdateCatalogItemTaskHandler implements TaskHandler {
       } else {
         missing.push('catalogItemId');
         if (resolution.tier === 'ambiguous' && resolution.candidates) {
-          explanationParts.push(`No confident single match for "${reference}" — pick the right one.`);
+          explanationParts.push(
+            `No confident single match for "${reference}" — edit the proposal with the correct catalog item.`,
+          );
           // Not `EntityCandidate[]` — 'catalogItem' isn't a member of
           // `EntityKind` (entity-resolver.ts), which is out of this task's
           // scope to extend. Same field SHAPE (id/kind/label/hint/score) as
