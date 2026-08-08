@@ -15,8 +15,19 @@
  * manual refund would either fabricate a fake Stripe id or bypass the
  * `refundedAmountCents <= amountCents` over-refund guard `recordRefund()`
  * already enforces atomically. These tests pin that the invariant is
- * enforced (never bypassed) and that a multi-payment invoice is refunded
- * correctly.
+ * enforced (never bypassed).
+ *
+ * Spec-review fix (2026-08-08): the handler used to LOOP recordRefund()
+ * across every refundable payment (splitting a refund across a deposit +
+ * final payment). That loop had a partial-state window — a concurrent
+ * mutation between the headroom snapshot and a later chunk's write could
+ * leave an earlier chunk committed with the overall execution reported
+ * failed. The handler now applies a `record_refund` proposal to exactly
+ * ONE payment (the oldest whose OWN headroom covers the full amount) —
+ * a single `recordRefund()` call, already atomic, so there is no
+ * multi-call sequence and no partial-state window even in theory. See
+ * RecordRefundExecutionHandler's doc comment for the full analysis of why
+ * a cross-payment transaction was rejected instead of fixed.
  */
 import { describe, it, expect, beforeEach } from 'vitest';
 import { v4 as uuidv4 } from 'uuid';
@@ -188,7 +199,7 @@ describe('record_refund proposal type', () => {
       expect(events.some((e) => e.eventType === 'payment.refunded')).toBe(true);
     });
 
-    it('enforces the over-refund invariant: a refund exceeding the invoice total fails and mutates nothing', async () => {
+    it('enforces the over-refund invariant: a refund exceeding the single payment fails and mutates nothing', async () => {
       const payment = await paymentRepo.create(makePayment({ amountCents: 5000 }));
 
       const result = await handler.execute(
@@ -197,25 +208,23 @@ describe('record_refund proposal type', () => {
       );
 
       expect(result.success).toBe(false);
-      expect(result.error).toMatch(/exceeds amount paid/i);
+      expect(result.error).toMatch(/exceeds any single payment/i);
 
       const reread = await paymentRepo.findById(TENANT_ID, payment.id);
       expect(reread?.refundedAmountCents).toBe(0);
       expect(auditRepo.getAll()).toHaveLength(0);
     });
 
-    it('splits a refund across multiple completed payments, oldest first, when one payment cannot cover it alone', async () => {
+    // Required pinning test (spec review) — Option B, "chosen payment is the
+    // oldest refundable one": both payments individually have enough
+    // headroom to cover the request, so the deterministic oldest-first
+    // tie-break is the only thing that decides which one is touched.
+    it('picks the OLDEST refundable payment when more than one could individually cover the amount', async () => {
       const older = await paymentRepo.create(
-        makePayment({
-          amountCents: 3000,
-          receivedAt: new Date('2026-05-01T00:00:00Z'),
-        }),
+        makePayment({ amountCents: 8000, receivedAt: new Date('2026-05-01T00:00:00Z') }),
       );
       const newer = await paymentRepo.create(
-        makePayment({
-          amountCents: 8000,
-          receivedAt: new Date('2026-05-02T00:00:00Z'),
-        }),
+        makePayment({ amountCents: 9000, receivedAt: new Date('2026-05-02T00:00:00Z') }),
       );
 
       const result = await handler.execute(
@@ -227,10 +236,39 @@ describe('record_refund proposal type', () => {
 
       const rereadOlder = await paymentRepo.findById(TENANT_ID, older.id);
       const rereadNewer = await paymentRepo.findById(TENANT_ID, newer.id);
-      // Fully drains the older (smaller, earlier) payment first...
-      expect(rereadOlder?.refundedAmountCents).toBe(3000);
-      // ...then takes the remainder from the newer one.
-      expect(rereadNewer?.refundedAmountCents).toBe(2000);
+      // Only the older payment is touched — single-payment scope, never a
+      // split, even though the newer one could ALSO have covered it alone.
+      expect(rereadOlder?.refundedAmountCents).toBe(5000);
+      expect(rereadNewer?.refundedAmountCents).toBe(0);
+    });
+
+    // Required pinning test (spec review) — the amount-fits-total-but-not-
+    // any-single-payment case: two payments sum to more than enough
+    // headroom, but NEITHER can individually cover the request. Must fail
+    // BEFORE any write (never silently split, never partially apply).
+    it('fails with a split-guidance message when the amount fits the combined total but no single payment can cover it, mutating nothing', async () => {
+      const older = await paymentRepo.create(
+        makePayment({ amountCents: 3000, receivedAt: new Date('2026-05-01T00:00:00Z') }),
+      );
+      const newer = await paymentRepo.create(
+        makePayment({ amountCents: 4000, receivedAt: new Date('2026-05-02T00:00:00Z') }),
+      );
+
+      // Combined headroom is 7000 — comfortably covers 5000 — but no ONE
+      // payment (3000 or 4000) does on its own.
+      const result = await handler.execute(
+        makeProposal({ invoiceId: INVOICE_ID, amountCents: 5000, method: 'cash' }),
+        { tenantId: TENANT_ID, executedBy: 'u1' },
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.error).toMatch(/exceeds any single payment.*record it as separate smaller refunds/i);
+
+      const rereadOlder = await paymentRepo.findById(TENANT_ID, older.id);
+      const rereadNewer = await paymentRepo.findById(TENANT_ID, newer.id);
+      expect(rereadOlder?.refundedAmountCents).toBe(0);
+      expect(rereadNewer?.refundedAmountCents).toBe(0);
+      expect(auditRepo.getAll()).toHaveLength(0);
     });
 
     it('ignores a payment that never settled (pending) and one already fully refunded when computing headroom', async () => {
@@ -256,7 +294,7 @@ describe('record_refund proposal type', () => {
         { tenantId: TENANT_ID, executedBy: 'u1' },
       );
       expect(result.success).toBe(false);
-      expect(result.error).toMatch(/exceeds amount paid/i);
+      expect(result.error).toMatch(/exceeds any single payment/i);
     });
 
     it('rejects an invalid invoiceId without touching the repository', async () => {

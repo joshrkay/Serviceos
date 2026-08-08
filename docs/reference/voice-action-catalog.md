@@ -158,14 +158,30 @@ Notes on the Tradesperson wave 1, Task 3 row (`record_refund`, taxonomy 1.8.0):
   already owns refund recording end to end and enforces the invariant
   `refundedAmountCents + refundCents <= amountCents` atomically; the
   execution handler resolves the invoice's refundable payments
-  (`PaymentRepository.findByInvoice`) and calls `recordRefund()` per
-  payment with `stripeRefundId: null` — the same "no provider id" branch a
-  webhook-less manual refund takes, which never touches `payment_refunds`.
-  An invoice with more than one completed payment is refunded oldest-first
-  until the requested amount is covered; if total refundable headroom is
-  less than requested, the whole execution fails before any payment is
-  touched. See `RecordRefundExecutionHandler`'s doc comment
-  (`proposals/execution/record-refund-handler.ts`) for the full analysis.
+  (`PaymentRepository.findByInvoice`) and calls `recordRefund()` with
+  `stripeRefundId: null` — the same "no provider id" branch a webhook-less
+  manual refund takes, which never touches `payment_refunds`.
+- **Single-payment scope — a `record_refund` never splits across payments**
+  (spec-review fix, 2026-08-08). An earlier revision looped `recordRefund()`
+  across every refundable payment on the invoice to satisfy an amount
+  larger than any one payment; that loop had a genuine partial-state
+  window (a concurrent mutation between the headroom snapshot and a later
+  chunk's write could leave an earlier chunk committed while the overall
+  execution reported failed — the executor commits a failed execution's
+  status transition, and everything already written, in the SAME shared
+  transaction unless the handler throws instead of returning
+  `{success:false}`, which would change the executor's error contract for
+  every handler, not just this one). The handler now targets exactly ONE
+  payment — the OLDEST refundable payment whose own headroom covers the
+  full requested amount — so there is a single `recordRefund()` call,
+  already atomic, and zero partial-state window. **Limitation:** a refund
+  that fits the invoice's combined refundable total but not any ONE
+  payment (e.g. a $500 refund against a $300 deposit + $300 final, neither
+  alone enough) fails before any write with a message telling the operator
+  to record it as separate smaller refunds — it is never silently split or
+  partially applied. See `RecordRefundExecutionHandler`'s doc comment
+  (`proposals/execution/record-refund-handler.ts`) for the full analysis of
+  why a cross-payment transaction was rejected instead of fixed.
 - **No new execution dep** — the handler is wired against the SAME
   `paymentRepo` `record_payment` already uses (app.ts passes it to
   `createExecutionHandlerRegistry` once).

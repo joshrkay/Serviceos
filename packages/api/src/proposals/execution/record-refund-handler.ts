@@ -43,21 +43,62 @@ function isUuid(value: unknown): value is string {
  * its own doc comment calls it "the ONLY allowed mutation path for refund
  * tracking" and states the invariant this handler must not bypass:
  * `payment.refundedAmountCents + refundCents <= payment.amountCents`. This
- * handler therefore resolves the approved invoice's REFUNDABLE payments
+ * handler resolves the approved invoice's REFUNDABLE payments
  * (`PaymentRepository.findByInvoice`, filtered to `status === 'completed'`
- * with positive headroom) and calls `recordRefund()` per payment with
- * `stripeRefundId: null` — the SAME "no provider id" branch a webhook-less
- * manual refund would take, which uses the plain atomic increment (guarded,
- * but never touches `payment_refunds` — that table is reached only when a
+ * with positive headroom) and calls `recordRefund()` with `stripeRefundId:
+ * null` — the SAME "no provider id" branch a webhook-less manual refund
+ * would take, which uses the plain atomic increment (guarded, but never
+ * touches `payment_refunds` — that table is reached only when a
  * `stripeRefundId` is supplied). This gets the existing over-refund
- * invariant, the atomic guard, and the `payment.refunded` audit event for
- * free, instead of re-implementing (and risking under-guarding) them in a
- * parallel repository. An invoice with more than one completed payment
- * (e.g. deposit + final) is refunded oldest-payment-first until the
- * requested amount is covered; if the invoice's TOTAL refundable headroom
- * is less than the requested amount, the whole execution fails before any
- * payment is touched (no partial refund is ever applied when the full
- * amount can't be satisfied).
+ * invariant and the `payment.refunded` audit event for free, instead of
+ * re-implementing (and risking under-guarding) them in a parallel
+ * repository.
+ *
+ * ── Single-payment scope, not a cross-payment split (spec review fix) ─────
+ *
+ * An earlier revision of this handler looped `recordRefund()` across every
+ * refundable payment on the invoice (oldest-first) to satisfy a refund
+ * larger than any one payment. That loop was NOT safe: the headroom
+ * pre-check ran against a `findByInvoice` snapshot, so a chunk could commit
+ * against payment A, then a CONCURRENT mutation (a Stripe webhook refund, or
+ * another approved proposal) shrinks payment B's headroom between the
+ * snapshot and the second `recordRefund()` call, which then throws. This
+ * handler's own catch converts that throw into `{ success: false }` rather
+ * than re-throwing — and `ProposalExecutor`'s `recordAndTransition`
+ * (execution/executor.ts) commits the proposal's status transition (and
+ * therefore the whole shared advisory-lock transaction, chunk A's write
+ * included) on BOTH the success and the failure path, because a failed
+ * execution still needs its `execution_failed` status write to land. So a
+ * mid-loop failure left chunk A committed with no compensation — exactly
+ * the "fails before any payment is touched" claim this doc comment used to
+ * make, and it was false in that window.
+ *
+ * The fix considered (and rejected) making `recordRefund()`'s per-payment
+ * writes join ONE ambient DB transaction across the whole loop
+ * (`PgBaseRepository.withTenantTransaction` already reuses an ambient
+ * `tenantContextStore` client when one exists, and `ProposalExecutor`'s
+ * Path A wraps `handler.execute()` in exactly such a transaction via
+ * `commands/command-runner.ts` — so the DB-level plumbing IS there).
+ * That still doesn't fix it: to make a mid-loop failure roll back this
+ * handler would have to THROW instead of returning `{ success: false }`,
+ * which changes the shared executor's error contract for every execution
+ * handler (throw-to-abort vs. return-to-report), not something this
+ * money-safety fix should quietly redefine platform-wide. Per the plan's
+ * own "do NOT fork a second mutation path" guidance, that's exactly the
+ * kind of contorted, handler-specific transaction trick to avoid.
+ *
+ * Instead: a `record_refund` proposal applies to exactly ONE payment,
+ * chosen deterministically (oldest-first among the payments whose OWN
+ * headroom individually covers the requested amount). This makes the
+ * mutation a SINGLE `recordRefund()` call — already atomic on its own, per
+ * its own atomic CTE design — so there is no multi-call sequence and
+ * therefore no partial-state window at all, not even in theory. An invoice
+ * with more than one completed payment (e.g. deposit + final) where the
+ * requested amount doesn't fit within any ONE of them (even though it fits
+ * the combined total) fails BEFORE any write with a message telling the
+ * operator to record it as separate smaller refunds — a real but
+ * deliberately accepted limitation (see the catalog doc's Task 3 notes),
+ * not a silent under-refund or a fabricated split.
  *
  * Stripe-AUTOMATED refunds are explicitly OUT OF SCOPE for this proposal
  * type (YAGNI, 2026-08-07 tradesperson plan) — a refund the owner wants to
@@ -137,50 +178,47 @@ export class RecordRefundExecutionHandler implements ExecutionHandler {
     // Only settled payments still carrying refundable headroom are
     // candidates — a payment that never cleared (pending/processing) or
     // was reversed (failed) was never real collected cash to give back.
-    // Oldest-first is an arbitrary but deterministic tie-break when an
-    // invoice has more than one completed payment (e.g. a deposit + a
-    // final payment) — the voice utterance carries no signal about which
-    // specific payment to draw down first.
+    // Oldest-first is a deterministic tie-break when an invoice has more
+    // than one completed payment (e.g. a deposit + a final payment).
     const refundable = payments
       .filter((p) => p.status === 'completed' && p.amountCents - p.refundedAmountCents > 0)
       .sort((a, b) => a.receivedAt.getTime() - b.receivedAt.getTime());
 
-    const totalHeadroomCents = refundable.reduce(
-      (sum, p) => sum + (p.amountCents - p.refundedAmountCents),
-      0,
-    );
-    if (totalHeadroomCents < amountCents) {
+    // Single-payment scope (see class doc comment "Single-payment scope,
+    // not a cross-payment split"): the target is the OLDEST refundable
+    // payment whose OWN headroom covers the full requested amount — never
+    // a payment picked because it happens to be biggest, and never a sum
+    // across several. If none qualifies (even though the combined total
+    // across all refundable payments might), this fails with NO write at
+    // all — there is exactly one `recordRefund()` call in this method, and
+    // it either happens once or not at all.
+    const target = refundable.find((p) => p.amountCents - p.refundedAmountCents >= amountCents);
+    if (!target) {
       return {
         success: false,
-        error: `Refund exceeds amount paid on invoice: ${amountCents} > ${totalHeadroomCents} available to refund`,
+        error:
+          "Refund exceeds any single payment's refundable amount on this invoice — record it as separate smaller refunds",
       };
     }
 
-    let remaining = amountCents;
     try {
-      for (const payment of refundable) {
-        if (remaining <= 0) break;
-        const headroom = payment.amountCents - payment.refundedAmountCents;
-        const chunk = Math.min(headroom, remaining);
-        await recordRefund(
-          {
-            tenantId: context.tenantId,
-            paymentId: payment.id,
-            refundCents: chunk,
-            // Manual refund — no Stripe refund id to key an idempotency
-            // claim on, so this takes recordRefund's plain atomic-increment
-            // path (still guarded against over-refund) rather than the
-            // payment_refunds claim ledger, which exists solely to dedupe
-            // STRIPE webhook redelivery (see class doc comment above).
-            stripeRefundId: null,
-            actorId: context.executedBy,
-            actorRole: 'voice_agent',
-          },
-          this.paymentRepo,
-          this.auditRepo,
-        );
-        remaining -= chunk;
-      }
+      await recordRefund(
+        {
+          tenantId: context.tenantId,
+          paymentId: target.id,
+          refundCents: amountCents,
+          // Manual refund — no Stripe refund id to key an idempotency
+          // claim on, so this takes recordRefund's plain atomic-increment
+          // path (still guarded against over-refund) rather than the
+          // payment_refunds claim ledger, which exists solely to dedupe
+          // STRIPE webhook redelivery (see class doc comment above).
+          stripeRefundId: null,
+          actorId: context.executedBy,
+          actorRole: 'voice_agent',
+        },
+        this.paymentRepo,
+        this.auditRepo,
+      );
     } catch (err) {
       return {
         success: false,
