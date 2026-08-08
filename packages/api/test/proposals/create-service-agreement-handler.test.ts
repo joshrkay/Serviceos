@@ -54,6 +54,19 @@ function futureDateWithDay(monthsAhead: number, day: number): string {
 
 const VALID_STARTS_ON = futureDateWithDay(2, 1); // always day 1, always >= 2 months out
 
+/**
+ * Feb 30 never exists in ANY year — safely far in the future (relative to
+ * REAL wall-clock time, so it never goes stale) so this discriminates the
+ * real-calendar-date refine specifically, not the past-date refine.
+ * Quality-review N2 — the original fixture ('2026-02-30') went stale: by
+ * the time this suite ran for real, that date was ALSO in the past, so
+ * the test passed on the past-date refine alone and would keep passing
+ * even with the calendar-date refine deleted entirely.
+ */
+function futureImpossibleDate(): string {
+  return `${new Date().getUTCFullYear() + 50}-02-30`;
+}
+
 function makeLocation(overrides: Partial<ServiceLocation> = {}): ServiceLocation {
   const now = new Date();
   return {
@@ -202,14 +215,18 @@ describe('create_service_agreement proposal type', () => {
   });
 
   // Right shape, impossible calendar date — must not reach nextRunAt
-  // computation as a silently-rolled-over date (Feb 30 -> Mar 2).
+  // computation as a silently-rolled-over date (Feb 30 -> Mar 2). Uses a
+  // FUTURE impossible date (quality-review N2) so this test discriminates
+  // the calendar-date refine specifically — a past impossible date would
+  // also be rejected by the past-date refine alone, making the test pass
+  // even with the calendar-date refine deleted.
   it('rejects a startsOn that is not a real calendar date', () => {
     const result = validateProposalPayload('create_service_agreement', {
       customerId: CUSTOMER_ID,
       name: 'Annual maintenance plan',
       recurrenceRule: 'FREQ=MONTHLY',
       priceCents: 2900,
-      startsOn: '2026-02-30',
+      startsOn: futureImpossibleDate(),
     });
     expect(result.valid).toBe(false);
   });
@@ -283,6 +300,39 @@ describe('CreateServiceAgreementExecutionHandler', () => {
       ctx,
     );
     expect(result.success).toBe(false);
+  });
+
+  // Quality-review N1 — a proposal's startsOn can LAPSE between drafting
+  // and approval (e.g. drafted "starting September 1", approved September
+  // 2). Every OTHER field is present and valid — the generic "missing
+  // customer, name, cadence, price, or start date" message would send the
+  // operator hunting for the wrong thing. This must give an actionable,
+  // specific message instead.
+  it('gives an actionable message — not the generic one — when startsOn has lapsed between drafting and approval', async () => {
+    const { handler } = await wired();
+    const oneWeekAgo = (() => {
+      const d = new Date();
+      d.setUTCDate(d.getUTCDate() - 7);
+      return d.toISOString().slice(0, 10);
+    })();
+
+    const result = await handler.execute(
+      makeProposal({
+        payload: {
+          customerId: CUSTOMER_ID,
+          name: 'Annual maintenance plan',
+          recurrenceRule: 'FREQ=MONTHLY',
+          priceCents: 2900,
+          startsOn: oneWeekAgo, // real calendar date, correct shape — just lapsed
+        },
+      }),
+      ctx,
+    );
+
+    expect(result.success).toBe(false);
+    expect(result.error).toBe("The plan's start date has already passed — redraft with a new start date.");
+    // The generic message names fields that are ALL present here — must not appear.
+    expect(result.error).not.toMatch(/missing customer, name, cadence, price/);
   });
 
   // Quality-review C1 — the whole point of this handler's location

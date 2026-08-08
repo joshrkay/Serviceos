@@ -3,7 +3,10 @@ import { Proposal, ProposalType } from '../proposal';
 import { ExecutionContext, ExecutionHandler, ExecutionResult } from './handlers';
 import { AgreementRepository } from '../../agreements/agreement';
 import { createAgreement } from '../../agreements/agreement-service';
-import { createServiceAgreementPayloadSchema } from '../contracts/create-service-agreement';
+import {
+  createServiceAgreementPayloadSchema,
+  createServiceAgreementShapeSchema,
+} from '../contracts/create-service-agreement';
 import { AuditRepository, createAuditEvent } from '../../audit/audit';
 import { LocationRepository } from '../../locations/location';
 
@@ -102,6 +105,22 @@ export class CreateServiceAgreementExecutionHandler implements ExecutionHandler 
   async execute(proposal: Proposal, context: ExecutionContext): Promise<ExecutionResult> {
     const parsed = createServiceAgreementPayloadSchema.safeParse(proposal.payload);
     if (!parsed.success) {
+      // Quality-review N1 — a proposal's startsOn can LAPSE between
+      // drafting and approval (the contract's past-date backstop is
+      // re-checked here at execution time). When every OTHER field is
+      // fine and startsOn's only problem is that it's now in the past,
+      // the generic "missing customer, name, cadence, price, or start
+      // date" message is actively misleading — it names fields that are
+      // all present, sending the operator hunting for the wrong thing.
+      // `createServiceAgreementShapeSchema` is the identical shape MINUS
+      // the past-date check, so a success there (paired with the full
+      // schema's failure) isolates the lapsed-date case precisely.
+      if (createServiceAgreementShapeSchema.safeParse(proposal.payload).success) {
+        return {
+          success: false,
+          error: "The plan's start date has already passed — redraft with a new start date.",
+        };
+      }
       return {
         success: false,
         error:

@@ -60,6 +60,30 @@ import { recurrenceRuleSchema, priceCentsSchema } from '../../agreements/enums';
  * ONE interval per pass, so a back-dated MONTHLY plan drips a job+invoice
  * pair roughly once a MINUTE until it catches up to today.
  *
+ * Quality-review N3 — the past-date backstop compares against server UTC
+ * (`new Date().toISOString().slice(0, 10)`), NOT the tenant's local date.
+ * This is DELIBERATE: the contract has no tenant-timezone context to
+ * compare against (that context lives on `TaskContext`, several layers
+ * up, and never reaches Zod validation). The PRIMARY guard (the drafting
+ * task's `parseSpokenStartsOn`/tenant-local default) is already correctly
+ * tenant-aware; this backstop only ever fires for a hand-crafted payload
+ * that bypassed it. Comparing in UTC errs in the SAFE direction — for a
+ * tenant west of UTC, a legitimately-today local date can read as
+ * "yesterday" in UTC after local 5pm-ish and get rejected — a false
+ * positive that sends the operator to redraft, never a false negative
+ * that lets a stale date slip through.
+ *
+ * Quality-review N1 — `createServiceAgreementShapeSchema` (below,
+ * exported) is the SAME object shape MINUS the past-date check, so the
+ * execution handler can distinguish "this payload is genuinely malformed"
+ * from "every field is fine, but the plan's startsOn LAPSED between
+ * drafting and approval" and give the operator an actionable message
+ * instead of a generic one that sends them hunting for the wrong field.
+ * A proposal drafted with "starting September 1" and approved on
+ * September 2 hits exactly this case — the default first-of-next-month
+ * gives ~30 days of slack, so it is rare, but a spoken explicit date
+ * makes it real.
+ *
  * `locationId`/`description` are declared (mirroring the authenticated
  * route's own optional fields). `locationId` is not populated by the
  * voice drafting task (no location-reference extraction seam for this
@@ -74,28 +98,40 @@ const priceCentsWithSanityCeilingSchema = priceCentsSchema.max(
   `priceCents exceeds the sanity ceiling for a recurring plan (max $${(PRICE_CENTS_SANITY_CEILING / 100).toLocaleString('en-US')}/period) — check for a dollars/thousands mix-up`,
 );
 
-const startsOnSchema = z
+/** Shape + real-calendar-date validity ONLY — no past-date check. See `createServiceAgreementShapeSchema` doc comment (N1). */
+const startsOnShapeSchema = z
   .string()
   .regex(/^\d{4}-\d{2}-\d{2}$/, 'startsOn must look like YYYY-MM-DD')
   .refine((s) => {
     const [y, m, d] = s.split('-').map(Number);
     const dt = new Date(Date.UTC(y, m - 1, d));
     return dt.getUTCFullYear() === y && dt.getUTCMonth() === m - 1 && dt.getUTCDate() === d;
-  }, 'startsOn must be a real calendar date')
-  .refine(
-    // Computed fresh per call — never hoist "today" to module-load time.
-    (s) => s >= new Date().toISOString().slice(0, 10),
-    'startsOn must not be in the past',
-  );
+  }, 'startsOn must be a real calendar date');
 
-export const createServiceAgreementPayloadSchema = z.object({
+/**
+ * Every field EXCEPT the past-date check on `startsOn` (quality-review
+ * N1). Exported so `CreateServiceAgreementExecutionHandler` can tell "the
+ * ONLY problem is a lapsed start date" apart from "this payload is
+ * missing/malformed fields": parse against this schema first — a success
+ * here plus a failure against the full schema below means startsOn is the
+ * sole offender, and specifically because it has lapsed (every other
+ * shape check, including calendar-date validity, already passed).
+ */
+export const createServiceAgreementShapeSchema = z.object({
   customerId: z.string().uuid(),
   locationId: z.string().uuid().optional(),
   name: z.string().min(1).max(200),
   description: z.string().max(2000).optional(),
   recurrenceRule: recurrenceRuleSchema,
   priceCents: priceCentsWithSanityCeilingSchema,
-  startsOn: startsOnSchema,
+  startsOn: startsOnShapeSchema,
 });
+
+export const createServiceAgreementPayloadSchema = createServiceAgreementShapeSchema.refine(
+  // Computed fresh per call — never hoist "today" to module-load time.
+  // See the module doc comment (N3) for why this compares in UTC.
+  (data) => data.startsOn >= new Date().toISOString().slice(0, 10),
+  { message: 'startsOn must not be in the past', path: ['startsOn'] },
+);
 
 export type CreateServiceAgreementPayload = z.infer<typeof createServiceAgreementPayloadSchema>;
