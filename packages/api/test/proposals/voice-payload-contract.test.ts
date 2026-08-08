@@ -684,7 +684,7 @@ const ROWS: Row[] = [
     // payload.evidence.
     intent: 'update_catalog_item',
     mode: 'resolves',
-    note: 'a unique case-insensitive substring match on catalogRepo.listByTenant resolves catalogItemId; dep-less UpdateCatalogItemExecutionHandler synthetic-succeeds even with no evidence on the payload',
+    note: 'resolveLineItemToCatalog resolves catalogItemId at the "high" tier off catalogRepo.listByTenant; dep-less UpdateCatalogItemExecutionHandler synthetic-succeeds even with no evidence on the payload',
     draft: () => {
       const catalogRepo = new InMemoryCatalogItemRepository();
       return catalogRepo

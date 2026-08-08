@@ -294,7 +294,8 @@ export const SUPPORTED_INTENTS: readonly IntentType[] = [
  *           update_catalog_item — voice on-ramp for WS20's existing
  *           correction-repetition proposal type + execution handler
  *           (price-book edits by voice). New extraction fields
- *           (catalogItemReference / unitPriceCents / name / description);
+ *           (catalogItemReference / unitPriceCents / catalogItemNewName /
+ *           catalogItemNewDescription);
  *           see UpdateCatalogItemTaskHandler (ai/tasks/voice-extended-tasks.ts)
  *           for the payload/contract-compatibility notes.
  */
@@ -493,8 +494,9 @@ export interface ExtractedEntities {
   brandVoiceInstruction?: string;
   // Tradesperson wave 1, Task 2 — update_catalog_item: the spoken catalog
   // (price-book) entry name the caller wants to edit. Free text; the task
-  // handler resolves it against the tenant's catalog (case-insensitive
-  // substring match) — never trusted as an id.
+  // handler resolves it against the tenant's catalog via
+  // resolveLineItemToCatalog (ai/resolution/catalog-resolver.ts) — never
+  // trusted as an id.
   catalogItemReference?: string;
   // update_catalog_item: the NEW unit price, in integer cents, when the
   // caller stated one ("raise it to 89 dollars" → 8900).
@@ -503,11 +505,15 @@ export interface ExtractedEntities {
   // ("rename 'AC tune-up' to 'AC seasonal service'" → "AC seasonal
   // service"). Captured for the review card; see
   // UpdateCatalogItemTaskHandler's doc comment for why a rename cannot be
-  // auto-applied through this proposal type today.
-  name?: string;
+  // auto-applied through this proposal type today. Qualified (not bare
+  // `name`) so it can never be confused with `updatedName`
+  // (update_customer) — a weaker classifier emitting the wrong one would
+  // otherwise silently drop the rename.
+  catalogItemNewName?: string;
   // update_catalog_item: a requested NEW description for the catalog item.
-  // Same capture-only caveat as `name` above.
-  description?: string;
+  // Same capture-only caveat and qualified-name rationale as
+  // `catalogItemNewName` above.
+  catalogItemNewDescription?: string;
 }
 
 /**
@@ -1045,7 +1051,8 @@ Supported intents (return exactly ONE):
                            price, name, or description. Capture-class; only
                            shapes FUTURE drafts. Extract catalogItemReference
                            (spoken name) and the new unitPriceCents (integer
-                           cents) or new name/description.
+                           cents) or new catalogItemNewName/
+                           catalogItemNewDescription.
                            Examples: "Raise the diagnostic fee to 89 dollars"
                                      "Change the water heater install price to 1450"
                                      "Rename 'AC tune-up' to 'AC seasonal service'"
@@ -1317,8 +1324,8 @@ Return valid JSON with exactly this shape (no prose, no markdown fences):
     "brandVoiceInstruction": "<string, optional — VERBATIM spoken tone/sign-off/persona instruction on update_brand_voice>",
     "catalogItemReference": "<string, optional — spoken catalog/price-book entry name on update_catalog_item>",
     "unitPriceCents": <integer cents, optional — the NEW price on update_catalog_item>,
-    "name": "<string, optional — the NEW name on update_catalog_item>",
-    "description": "<string, optional — the NEW description on update_catalog_item>"
+    "catalogItemNewName": "<string, optional — the NEW name on update_catalog_item>",
+    "catalogItemNewDescription": "<string, optional — the NEW description on update_catalog_item>"
   }
 }
 
@@ -1784,8 +1791,9 @@ export function parseClassifierJson(content: string): IntentClassification | nul
     // update_catalog_item fields (Tradesperson wave 1, Task 2)
     if (typeof ee.catalogItemReference === 'string') extracted.catalogItemReference = ee.catalogItemReference;
     if (typeof ee.unitPriceCents === 'number') extracted.unitPriceCents = ee.unitPriceCents;
-    if (typeof ee.name === 'string') extracted.name = ee.name;
-    if (typeof ee.description === 'string') extracted.description = ee.description;
+    if (typeof ee.catalogItemNewName === 'string') extracted.catalogItemNewName = ee.catalogItemNewName;
+    if (typeof ee.catalogItemNewDescription === 'string')
+      extracted.catalogItemNewDescription = ee.catalogItemNewDescription;
     if (Object.keys(extracted).length > 0) {
       result.extractedEntities = extracted;
     }

@@ -33,6 +33,14 @@ const logger = createLogger({
  * HTTP layer. Approving one of these is equivalent to calling those routes,
  * so it demands the same authority rather than the generic
  * `proposals:approve` that every dispatcher holds.
+ *
+ * `update_catalog_item` joined this set for the same reason: the catalog
+ * item HTTP routes (routes/catalog-items.ts POST/PUT/DELETE) all require
+ * `settings:update`, and a dispatcher holds `proposals:approve` but NOT
+ * `settings:update` (auth/rbac.ts). Without this entry, a dispatcher could
+ * speak "raise the diagnostic fee to 89 dollars" and approve their own
+ * card — the exact approval-queue-as-route-permission-bypass this guard
+ * exists to close.
  */
 const CONFIG_WRITING_PROPOSAL_TYPES: ReadonlySet<string> = new Set([
   'onboarding_tenant_settings',
@@ -41,6 +49,7 @@ const CONFIG_WRITING_PROPOSAL_TYPES: ReadonlySet<string> = new Set([
   'onboarding_team_member',
   'onboarding_schedule',
   'update_brand_voice',
+  'update_catalog_item',
 ]);
 
 /**

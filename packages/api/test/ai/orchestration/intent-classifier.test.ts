@@ -1340,6 +1340,51 @@ describe('taxonomy 1.2.0 — new intents + entities', () => {
       'friendly, always sign off Thanks Bob',
     );
   });
+
+  // Tradesperson wave 1, Task 2 (taxonomy 1.7.0) — update_catalog_item.
+  // Fields are qualified (catalogItemNewName/catalogItemNewDescription, not
+  // bare name/description) per the review fix: the template already has
+  // `updatedName` (update_customer) distinguished only by prose, and a
+  // weaker classifier emitting the wrong key would silently drop a rename.
+  it('parses update_catalog_item with catalogItemReference, unitPriceCents, catalogItemNewName, and catalogItemNewDescription', () => {
+    const result = parseClassifierJson(
+      JSON.stringify({
+        intentType: 'update_catalog_item',
+        confidence: 0.9,
+        extractedEntities: {
+          catalogItemReference: 'AC tune-up',
+          unitPriceCents: 8900,
+          catalogItemNewName: 'AC seasonal service',
+          catalogItemNewDescription: 'Full seasonal inspection and coil clean',
+        },
+      }),
+    );
+    expect(result?.intentType).toBe('update_catalog_item');
+    expect(result?.extractedEntities?.catalogItemReference).toBe('AC tune-up');
+    expect(result?.extractedEntities?.unitPriceCents).toBe(8900);
+    expect(result?.extractedEntities?.catalogItemNewName).toBe('AC seasonal service');
+    expect(result?.extractedEntities?.catalogItemNewDescription).toBe(
+      'Full seasonal inspection and coil clean',
+    );
+  });
+
+  it('classifyIntent end-to-end for update_catalog_item stamps the current taxonomy version', async () => {
+    const gateway = mockGateway(
+      JSON.stringify({
+        intentType: 'update_catalog_item',
+        confidence: 0.9,
+        extractedEntities: { catalogItemReference: 'AC tune-up', unitPriceCents: 8900 },
+      }),
+    );
+    const result = await classifyIntent(
+      'Raise the AC tune-up price to 89 dollars',
+      { tenantId: 't-1' },
+      gateway,
+    );
+    expect(result.intentType).toBe('update_catalog_item');
+    expect(result.taxonomyVersion).toBe(INTENT_TAXONOMY_VERSION);
+    expect(result.extractedEntities?.catalogItemReference).toBe('AC tune-up');
+  });
 });
 
 // ─── Part A — ai_run_id threading (classify → classification) ─────────────────

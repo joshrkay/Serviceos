@@ -95,6 +95,11 @@ describe('P2-005 — Approve / reject / edit interactions', () => {
   it.each([
     ['onboarding_tenant_settings', { businessName: 'Acme', verticalPacks: ['plumbing'] }],
     ['update_brand_voice', { register: 'friendly' }],
+    // Tradesperson wave 1, Task 2 review fix — update_catalog_item writes the
+    // SAME catalog price book routes/catalog-items.ts POST/PUT/DELETE guard
+    // with settings:update; a dispatcher speaking "raise the diagnostic fee
+    // to 89 dollars" must not be able to approve their own card.
+    ['update_catalog_item', { catalogItemId: 'c-1', currentUnitPriceCents: 7900, proposedUnitPriceCents: 8900 }],
   ])('config-writing type %s cannot be approved without settings:update', async (type, payload) => {
     const repo = makeRepo();
     const proposal = await createReadyProposal(repo, {
@@ -123,6 +128,7 @@ describe('P2-005 — Approve / reject / edit interactions', () => {
   it.each([
     ['onboarding_tenant_settings', { businessName: 'Acme', verticalPacks: ['plumbing'] }],
     ['update_brand_voice', { register: 'friendly' }],
+    ['update_catalog_item', { catalogItemId: 'c-1', currentUnitPriceCents: 7900, proposedUnitPriceCents: 8900 }],
   ])('config-writing type %s stamps the approver, not the drafter', async (type, payload) => {
     const repo = makeRepo();
     const proposal = await createReadyProposal(repo, {

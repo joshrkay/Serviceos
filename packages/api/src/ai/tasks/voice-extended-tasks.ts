@@ -41,6 +41,7 @@ import {
 import { parseMilestoneSentence } from '../../invoices/milestone-sentence-parser';
 import { candidatesForReference } from '../resolution/reference-candidates';
 import type { EntityCandidate } from '../resolution/entity-resolver';
+import { resolveLineItemToCatalog } from '../resolution/catalog-resolver';
 import { formatCents } from '../skills/spoken-format';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -1995,16 +1996,32 @@ export class CreateJobVoiceTaskHandler implements TaskHandler {
 //          out of this task's scope (Files list) — flagged as a follow-up,
 //          not silently worked around.
 //
-//   2. `name`/`description` changes cannot actually EXECUTE today: the
-//      contract's `name` field is documented as informational-only ("name
-//      at proposal time") and there is no `description` field on the
-//      contract at all — the execution handler only ever writes
-//      `proposedUnitPriceCents`. So a spoken rename/description change is
-//      never written to `payload.name`/`payload.description` (that would
-//      silently no-op on approval, misleading the reviewer into thinking it
-//      applied); instead it rides `proposal.explanation` as a human-readable
-//      note pointing at the Catalog screen. Only a price change is a real,
-//      executable proposal field here.
+//   2. `catalogItemNewName`/`catalogItemNewDescription` changes cannot
+//      actually EXECUTE today: the contract's `name` field is documented as
+//      informational-only ("name at proposal time") and there is no
+//      `description` field on the contract at all — the execution handler
+//      only ever writes `proposedUnitPriceCents`. So a spoken rename/
+//      description change is never written to `payload.name`/
+//      `payload.description` (that would silently no-op on approval,
+//      misleading the reviewer into thinking it applied); instead it rides
+//      `proposal.explanation` as a human-readable note pointing at the
+//      Catalog screen. Only a price change is a real, executable proposal
+//      field here.
+//
+//   3. Reference resolution reuses `resolveLineItemToCatalog` (ai/resolution/
+//      catalog-resolver.ts) — the SAME matcher draft_invoice/draft_estimate
+//      use to ground spoken line items — rather than a bespoke substring
+//      match: its exact-tier preference solves prefix shadowing ("AC
+//      tune-up" vs "AC tune-up deluxe", where a naive `includes` gates
+//      forever on two matches) and gets punctuation/plural folding + token
+//      overlap for free. 'exact'/'high' resolve outright; 'ambiguous' gates
+//      with candidates surfaced on `sourceContext.entityCandidates` (AC-3/B2
+//      pattern — see SendEstimateNudgeTaskHandler); 'none' gates with no
+//      candidates. `missingFields` entries are FLAT payload keys
+//      (`catalogItemId` / `proposedUnitPriceCents`), never prose — prose
+//      reasons live on `explanation` instead, per
+//      `clearSatisfiedMissingFields` (missing-fields.ts): it only lifts a
+//      gate on an EXACT flat-key edit, so a prose entry can never clear.
 export class UpdateCatalogItemTaskHandler implements TaskHandler {
   readonly taskType = 'update_catalog_item' as const;
 
@@ -2015,6 +2032,7 @@ export class UpdateCatalogItemTaskHandler implements TaskHandler {
     const payload: Record<string, unknown> = {};
     const missing: string[] = [];
     const explanationParts: string[] = [];
+    let sourceContext: Record<string, unknown> | undefined;
 
     const reference = typeof ee.catalogItemReference === 'string' ? ee.catalogItemReference.trim() : '';
     let resolvedItem: CatalogItem | undefined;
@@ -2023,14 +2041,33 @@ export class UpdateCatalogItemTaskHandler implements TaskHandler {
       missing.push('catalogItemId');
     } else {
       const items = await this.catalogRepo.listByTenant(context.tenantId);
-      const needle = reference.toLowerCase();
-      const matches = items.filter((item) => item.name.toLowerCase().includes(needle));
-      if (matches.length === 1) {
-        resolvedItem = matches[0];
-      } else if (matches.length > 1) {
-        missing.push(`which catalog item (matches: ${matches.map((m) => m.name).join(', ')})`);
+      const resolution = resolveLineItemToCatalog(reference, items);
+      if ((resolution.tier === 'exact' || resolution.tier === 'high') && resolution.match) {
+        resolvedItem = resolution.match;
       } else {
-        missing.push(`no catalog item matching '${reference}'`);
+        missing.push('catalogItemId');
+        if (resolution.tier === 'ambiguous' && resolution.candidates) {
+          explanationParts.push(`No confident single match for "${reference}" — pick the right one.`);
+          // Not `EntityCandidate[]` — 'catalogItem' isn't a member of
+          // `EntityKind` (entity-resolver.ts), which is out of this task's
+          // scope to extend. Same field SHAPE (id/kind/label/hint/score) as
+          // the AC-3/B2 pattern for display purposes only; this type has no
+          // resolve-entity.ts redraft handler, so nothing depends on `kind`
+          // being a real EntityKind member.
+          sourceContext = {
+            entityCandidates: resolution.candidates.map((c) => ({
+              id: c.item.id,
+              kind: 'catalogItem',
+              label: c.item.name,
+              hint: formatCents(c.item.unitPriceCents),
+              score: c.score,
+            })),
+            entityKind: 'catalogItem',
+            entityReference: reference,
+          };
+        } else {
+          explanationParts.push(`No catalog item matches "${reference}".`);
+        }
       }
     }
 
@@ -2042,10 +2079,12 @@ export class UpdateCatalogItemTaskHandler implements TaskHandler {
       typeof ee.unitPriceCents === 'number' && Number.isFinite(ee.unitPriceCents) && ee.unitPriceCents >= 0
         ? Math.round(ee.unitPriceCents)
         : undefined;
-    const hasName = typeof ee.name === 'string' && ee.name.trim().length > 0;
-    const hasDescription = typeof ee.description === 'string' && ee.description.trim().length > 0;
+    const hasName = typeof ee.catalogItemNewName === 'string' && ee.catalogItemNewName.trim().length > 0;
+    const hasDescription =
+      typeof ee.catalogItemNewDescription === 'string' && ee.catalogItemNewDescription.trim().length > 0;
     if (requestedPriceCents === undefined && !hasName && !hasDescription) {
-      missing.push('what to change (price, name, or description)');
+      missing.push('proposedUnitPriceCents');
+      explanationParts.push('No price, name, or description change was stated.');
     }
 
     if (resolvedItem) {
@@ -2063,12 +2102,12 @@ export class UpdateCatalogItemTaskHandler implements TaskHandler {
 
     if (hasName) {
       explanationParts.push(
-        `Requested new name: "${(ee.name as string).trim()}" — not applied by this proposal; rename from the Catalog screen.`,
+        `Requested new name: "${(ee.catalogItemNewName as string).trim()}" — not applied by this proposal; rename from the Catalog screen.`,
       );
     }
     if (hasDescription) {
       explanationParts.push(
-        `Requested new description: "${(ee.description as string).trim()}" — not applied by this proposal; edit from the Catalog screen.`,
+        `Requested new description: "${(ee.catalogItemNewDescription as string).trim()}" — not applied by this proposal; edit from the Catalog screen.`,
       );
     }
 
@@ -2076,6 +2115,7 @@ export class UpdateCatalogItemTaskHandler implements TaskHandler {
       proposal: createProposal(
         inputFor(context, this.taskType, payload, missing, {
           ...(explanationParts.length > 0 ? { explanation: explanationParts.join(' ') } : {}),
+          ...(sourceContext ? { sourceContext } : {}),
         }),
       ),
       taskType: this.taskType,
