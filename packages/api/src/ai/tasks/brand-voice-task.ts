@@ -39,9 +39,9 @@
 import { createProposal, CreateProposalInput } from '../../proposals/proposal';
 import { BRAND_VOICE_FIELDS } from '../../tenants/brand/brand-voice';
 import { LLMGateway } from '../gateway/gateway';
-import { ExtractedEntities } from '../orchestration/intent-classifier';
 import { assessConfidence, getConfidenceLevel } from '../guardrails/confidence';
 import { TaskContext, TaskHandler, TaskResult } from './task-handlers';
+import { entitiesFrom, inputFor } from './task-input';
 
 const MAX_OPENING_LINE_LEN = 200;
 const MAX_OPENING_LINES = 5;
@@ -190,7 +190,7 @@ export class UpdateBrandVoiceTaskHandler implements TaskHandler {
   constructor(private readonly gateway: LLMGateway) {}
 
   async handle(context: TaskContext): Promise<TaskResult> {
-    const ee = (context.existingEntities ?? {}) as ExtractedEntities;
+    const ee = entitiesFrom(context);
     const spoken =
       typeof ee.brandVoiceInstruction === 'string' && ee.brandVoiceInstruction.trim().length > 0
         ? ee.brandVoiceInstruction.trim()
@@ -272,38 +272,31 @@ export class UpdateBrandVoiceTaskHandler implements TaskHandler {
         ? `Update brand voice — ${register}`
         : 'Update brand voice';
 
+    // missingFields is the APPROVAL gate (decideInitialStatus forces
+    // 'draft'; approveProposal refuses outright).
+    //
+    // Case 1 — nothing mapped: stamped when the extraction produced NONE
+    // of the six persisted brand-voice fields — the freeText-only payload
+    // the execution handler deterministically refuses. See
+    // BRAND_VOICE_GATE_FIELD above.
+    //
+    // Case 2 — mixed: something mapped AND the model explicitly reported
+    // unmapped content alongside it. Without this, the proposal would be
+    // approvable while the unmapped instruction is silently dropped by the
+    // execution handler's strip-mode parse. See FREE_TEXT_GATE_FIELD above.
+    const missingFields = !mappedAnything
+      ? [BRAND_VOICE_GATE_FIELD]
+      : modelUnmapped
+        ? [FREE_TEXT_GATE_FIELD]
+        : [];
+
     const input: CreateProposalInput = {
-      tenantId: context.tenantId,
-      proposalType: this.taskType,
-      payload,
+      // No sourceTrustTier (inputFor's default): the action class
+      // ('manual') is what makes this structurally never-auto-approve —
+      // see AC-1's unit test on decideInitialStatus.
+      ...inputFor(context, this.taskType, payload, missingFields),
       summary,
-      sourceContext: context.conversationId ? { conversationId: context.conversationId } : undefined,
-      createdBy: context.userId,
       confidenceScore: effectiveScore,
-      ...(context.tenantThresholdOverride
-        ? { tenantThresholdOverride: context.tenantThresholdOverride }
-        : {}),
-      // No sourceTrustTier: the action class ('manual') is what makes this
-      // structurally never-auto-approve — see AC-1's unit test on
-      // decideInitialStatus.
-      //
-      // missingFields is the APPROVAL gate (decideInitialStatus forces
-      // 'draft'; approveProposal refuses outright).
-      //
-      // Case 1 — nothing mapped: stamped when the extraction produced NONE
-      // of the six persisted brand-voice fields — the freeText-only payload
-      // the execution handler deterministically refuses. See
-      // BRAND_VOICE_GATE_FIELD above.
-      //
-      // Case 2 — mixed: something mapped AND the model explicitly reported
-      // unmapped content alongside it. Without this, the proposal would be
-      // approvable while the unmapped instruction is silently dropped by the
-      // execution handler's strip-mode parse. See FREE_TEXT_GATE_FIELD above.
-      ...(!mappedAnything
-        ? { missingFields: [BRAND_VOICE_GATE_FIELD] }
-        : modelUnmapped
-          ? { missingFields: [FREE_TEXT_GATE_FIELD] }
-          : {}),
     };
 
     return { proposal: createProposal(input), taskType: this.taskType };

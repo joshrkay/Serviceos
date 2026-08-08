@@ -57,11 +57,11 @@
  * The approval card must always show exactly what will send — WYSIWYG
  * beats a post-approval validation error.
  */
-import { createProposal, CreateProposalInput } from '../../proposals/proposal';
+import { createProposal } from '../../proposals/proposal';
 import type { TaskHandler, TaskContext, TaskResult } from './task-handlers';
-import type { ExtractedEntities } from '../orchestration/intent-classifier';
 import type { LLMGateway } from '../gateway/gateway';
 import { SEND_CUSTOMER_MESSAGE_BODY_MAX_LENGTH } from '../../proposals/contracts/send-customer-message';
+import { entitiesFrom, inputFor } from './task-input';
 
 const REWRITE_SYSTEM_PROMPT =
   "Rewrite the operator's spoken message as a short, polite customer message. Do not add promises, prices, or times the operator did not say.";
@@ -75,7 +75,7 @@ export class SendCustomerMessageTaskHandler implements TaskHandler {
   constructor(private readonly gateway?: LLMGateway) {}
 
   async handle(context: TaskContext): Promise<TaskResult> {
-    const ee = (context.existingEntities ?? {}) as ExtractedEntities;
+    const ee = entitiesFrom(context);
     const payload: Record<string, unknown> = {};
     const missing: string[] = [];
 
@@ -98,22 +98,10 @@ export class SendCustomerMessageTaskHandler implements TaskHandler {
       missing.push('body');
     }
 
-    const input: CreateProposalInput = {
-      tenantId: context.tenantId,
-      proposalType: this.taskType,
-      payload,
-      summary: context.message,
-      sourceContext: context.conversationId
-        ? { conversationId: context.conversationId }
-        : undefined,
-      createdBy: context.userId,
-      missingFields: missing.length > 0 ? missing : undefined,
-      ...(context.tenantThresholdOverride
-        ? { tenantThresholdOverride: context.tenantThresholdOverride }
-        : {}),
+    return {
+      proposal: createProposal(inputFor(context, this.taskType, payload, missing)),
+      taskType: this.taskType,
     };
-
-    return { proposal: createProposal(input), taskType: this.taskType };
   }
 
   /**

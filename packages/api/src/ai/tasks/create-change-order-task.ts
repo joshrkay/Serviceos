@@ -85,6 +85,7 @@ import {
   groundLineItemPricing,
   lineItemConfidenceSignals,
 } from '../resolution/catalog-resolver';
+import { entitiesFrom, inputFor } from './task-input';
 
 /**
  * Pull the Zod paths off a `ValidationError` thrown by
@@ -128,7 +129,7 @@ export class CreateChangeOrderTaskHandler implements TaskHandler {
   }
 
   async handle(context: TaskContext): Promise<TaskResult> {
-    const ee = (context.existingEntities ?? {}) as ExtractedEntities & { jobId?: string };
+    const ee = entitiesFrom(context) as ExtractedEntities & { jobId?: string };
     const payload: Record<string, unknown> = {};
     const missing: string[] = [];
 
@@ -200,10 +201,15 @@ export class CreateChangeOrderTaskHandler implements TaskHandler {
     };
     payload._meta = meta;
 
-    const sourceContext: Record<string, unknown> = {
-      ...(context.conversationId ? { conversationId: context.conversationId } : {}),
-      ...(catalogOutcome.catalogResolution ? { catalogResolution: catalogOutcome.catalogResolution } : {}),
-    };
+    // Extra sourceContext entries layered on top of inputFor's
+    // baseSourceContext (conversationId) — mirrors the `extraSourceContext`
+    // idiom voice-extended-tasks.ts's SendInvoiceTaskHandler uses: left
+    // `undefined` (never an empty object) when there's nothing to add, so
+    // inputFor's own conversationId-only-or-undefined collapse is preserved.
+    let extraSourceContext: Record<string, unknown> | undefined;
+    if (catalogOutcome.catalogResolution) {
+      extraSourceContext = { catalogResolution: catalogOutcome.catalogResolution };
+    }
 
     const allMissing = [...catalogOutcome.missingFields, ...missing];
 
@@ -225,21 +231,14 @@ export class CreateChangeOrderTaskHandler implements TaskHandler {
       }
     }
     if (payloadContractErrors) {
-      sourceContext.payloadContractErrors = payloadContractErrors;
+      extraSourceContext = { ...(extraSourceContext ?? {}), payloadContractErrors };
     }
 
     const input: CreateProposalInput = {
-      tenantId: context.tenantId,
-      proposalType: this.taskType,
-      payload,
-      summary: context.message,
+      ...inputFor(context, this.taskType, payload, allMissing, {
+        sourceContext: extraSourceContext,
+      }),
       confidenceFactors: confidenceFactors.length > 0 ? confidenceFactors : undefined,
-      sourceContext: Object.keys(sourceContext).length > 0 ? sourceContext : undefined,
-      createdBy: context.userId,
-      missingFields: allMissing.length > 0 ? allMissing : undefined,
-      ...(context.tenantThresholdOverride
-        ? { tenantThresholdOverride: context.tenantThresholdOverride }
-        : {}),
     };
 
     return { proposal: createProposal(input), taskType: this.taskType };

@@ -20,10 +20,11 @@ import {
   StandingInstructionScope,
   standingInstructionScopeSchema,
 } from '../../instructions/standing-instructions';
-import { createProposal, CreateProposalInput } from '../../proposals/proposal';
+import { createProposal } from '../../proposals/proposal';
 import { LLMGateway } from '../gateway/gateway';
 import { ExtractedEntities } from '../orchestration/intent-classifier';
 import { TaskContext, TaskHandler, TaskResult } from './task-handlers';
+import { entitiesFrom, inputFor } from './task-input';
 
 const STANDING_INSTRUCTION_SYSTEM_PROMPT = `You normalize a spoken standing instruction for a field-service business into a stored directive.
 
@@ -49,7 +50,7 @@ export class CreateStandingInstructionTaskHandler implements TaskHandler {
   constructor(private readonly gateway: LLMGateway) {}
 
   async handle(context: TaskContext): Promise<TaskResult> {
-    const ee = (context.existingEntities ?? {}) as ExtractedEntities;
+    const ee = entitiesFrom(context);
     const spoken =
       typeof ee.instructionText === 'string' && ee.instructionText.trim().length > 0
         ? ee.instructionText.trim()
@@ -72,24 +73,18 @@ export class CreateStandingInstructionTaskHandler implements TaskHandler {
     }
     if (scope && Object.keys(scope).length > 0) payload.scope = scope;
 
-    const input: CreateProposalInput = {
-      tenantId: context.tenantId,
-      proposalType: this.taskType,
-      payload,
+    const input = {
+      // v1 rule — sourceTrustTier is DELIBERATELY omitted (inputFor's
+      // default): decideInitialStatus lands the proposal in 'draft', so a
+      // standing instruction can never auto-approve regardless of
+      // confidence or supervisor presence.
+      ...inputFor(context, this.taskType, payload, missing),
+      // Summary is a normalized readback of the instruction, not the raw
+      // transcript inputFor defaults to — overridden here, same idiom
+      // LogTimeEntryTaskHandler uses in voice-extended-tasks.ts.
       summary: instruction
         ? `Standing instruction: ${instruction.length > 80 ? `${instruction.slice(0, 79)}…` : instruction}`
         : context.message,
-      sourceContext: context.conversationId
-        ? { conversationId: context.conversationId }
-        : undefined,
-      createdBy: context.userId,
-      missingFields: missing.length > 0 ? missing : undefined,
-      ...(context.tenantThresholdOverride
-        ? { tenantThresholdOverride: context.tenantThresholdOverride }
-        : {}),
-      // v1 rule — sourceTrustTier is DELIBERATELY omitted: decideInitialStatus
-      // lands the proposal in 'draft', so a standing instruction can never
-      // auto-approve regardless of confidence or supervisor presence.
     };
 
     return { proposal: createProposal(input), taskType: this.taskType };
