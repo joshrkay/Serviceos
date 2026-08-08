@@ -138,6 +138,12 @@ describe('apply_credit execution handler', () => {
     expect(result.success).toBe(true);
     const updated = await invoiceRepo.findById(TENANT, INVOICE_ID);
     expect(updated!.amountDueCents).toBe(0);
+    // Deliberate product posture: a full credit zeroes the balance but does
+    // NOT flip the invoice to 'paid' — no money actually changed hands, so
+    // "paid" would misrepresent it (product follow-up filed for a possible
+    // future 'credited'/closed status). Pinned so a future status-flip
+    // change breaks loudly instead of silently.
+    expect(updated!.status).toBe('open');
   });
 
   it('appends a non-taxable credit line with the reason folded into the description', async () => {
@@ -215,6 +221,34 @@ describe('apply_credit execution handler', () => {
     const updated = await invoiceRepo.findById(TENANT, INVOICE_ID);
     // total 3000 - 1000 credit = 2000; 2000 - 1000 paid = 1000 due.
     expect(updated!.amountDueCents).toBe(1000);
+  });
+
+  // Quality-review fix — the floor guard compares against amountDueCents,
+  // NOT the invoice's total/invoiced amount. Every other floor-guard test in
+  // this file uses amountPaidCents: 0, where amountDueCents === totalCents,
+  // so a guard mistakenly written as `amountCents > invoice.totals.totalCents`
+  // would have passed every prior test in this file too. This case pins the
+  // discriminating band: total 3000, paid 1000 -> amountDueCents 2000, and a
+  // 2500 credit is BELOW the total (3000) but ABOVE the amount due (2000) —
+  // only a guard keyed on amountDueCents correctly refuses it.
+  it('floor guard keys off amountDueCents, not the invoice total (partially_paid, credit between due and total)', async () => {
+    invoiceRepo = new InMemoryInvoiceRepository();
+    await invoiceRepo.create(
+      makeInvoice({ status: 'partially_paid', amountPaidCents: 1000, amountDueCents: 2000 }),
+    );
+    handler = new ApplyCreditExecutionHandler(invoiceRepo, auditRepo);
+
+    const result = await handler.execute(
+      makeProposal({ payload: { invoiceId: INVOICE_ID, amountCents: 2500 } }),
+      ctx,
+    );
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/exceeds amount due/i);
+
+    const untouched = await invoiceRepo.findById(TENANT, INVOICE_ID);
+    expect(untouched!.lineItems).toHaveLength(1);
+    expect(untouched!.amountDueCents).toBe(2000);
+    expect(untouched!.amountPaidCents).toBe(1000);
   });
 
   it('rejects an invalid payload (missing amount) without throwing', async () => {

@@ -20,7 +20,7 @@ import { PgCustomerRepository } from '../../src/customers/pg-customer';
 import { PgLocationRepository } from '../../src/locations/pg-location';
 import { PgSettingsRepository } from '../../src/settings/pg-settings';
 import { PgAuditRepository } from '../../src/audit/pg-audit';
-import { buildLineItem } from '../../src/shared/billing-engine';
+import { buildLineItem, calculateDocumentTotals } from '../../src/shared/billing-engine';
 import {
   createProposal,
   CreateProposalInput,
@@ -425,5 +425,166 @@ describe('Postgres integration — B6: customer-only draft_invoice (no jobId) au
       result.resultEntityId,
     ]);
     expect(rows[0].job_id).toBe(existingJobId);
+  });
+});
+
+describe('Postgres integration — Tradesperson wave 1, Task 4: apply_credit persists a negative line', () => {
+  // Quality-review follow-up (commit 9617894e). Mocked-repo unit tests
+  // (test/proposals/apply-credit-handler.test.ts) prove the handler's
+  // logic, but a NEGATIVE `invoice_line_items.unit_price_cents` row is a
+  // first for this codebase — the late-fee line-id incident
+  // (`lateFeeLineId`'s doc comment, apply-late-fee-handler.ts) is this
+  // repo's case study for why a mocked `InMemoryInvoiceRepository` is never
+  // sole proof a real-schema write behaves (there it was
+  // pg-invoice.insertLineItems silently rewriting non-UUID ids; here the
+  // risk class is a numeric-column CHECK/precision surprise on a negative
+  // value neither the in-memory repo nor a hand-rolled fixture can
+  // exercise). This runs the credit through the PRODUCTION execution
+  // registry against real Postgres and reads the persisted row back.
+  //
+  // No local Docker in this environment — like every other suite in this
+  // file, it runs only under `npm run test:integration` in PR CI (vitest
+  // globalSetup starts the Postgres testcontainer). NOT executed locally;
+  // verified here by `tsc --project tsconfig.build.json --noEmit` only.
+  let pool: Pool;
+  let invoiceRepo: PgInvoiceRepository;
+  let auditRepo: PgAuditRepository;
+  let tenant: { tenantId: string; userId: string };
+  let invoiceId: string;
+
+  beforeAll(async () => {
+    pool = await getSharedTestDb();
+    invoiceRepo = new PgInvoiceRepository(pool);
+    auditRepo = new PgAuditRepository(pool);
+    const jobRepo = new PgJobRepository(pool);
+    const customerRepo = new PgCustomerRepository(pool);
+    const locationRepo = new PgLocationRepository(pool);
+    tenant = await createTestTenant(pool);
+
+    const customerId = crypto.randomUUID();
+    await customerRepo.create({
+      id: customerId,
+      tenantId: tenant.tenantId,
+      firstName: 'Credit',
+      lastName: 'Customer',
+      displayName: 'Credit Customer',
+      preferredChannel: 'phone',
+      smsConsent: false,
+      isArchived: false,
+      createdBy: tenant.userId,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+
+    const locationId = crypto.randomUUID();
+    await locationRepo.create({
+      id: locationId,
+      tenantId: tenant.tenantId,
+      customerId,
+      street1: '9 Goodwill Way',
+      city: 'Austin',
+      state: 'TX',
+      postalCode: '78701',
+      country: 'USA',
+      isPrimary: true,
+      isArchived: false,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+
+    const jobId = crypto.randomUUID();
+    await jobRepo.create({
+      id: jobId,
+      tenantId: tenant.tenantId,
+      customerId,
+      locationId,
+      jobNumber: 'JOB-CREDIT-1',
+      summary: 'apply_credit integration test job',
+      status: 'scheduled',
+      priority: 'normal',
+      createdBy: tenant.userId,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+
+    // Seed an already-ISSUED ('open') invoice directly (mirrors
+    // invoice-webhook-paid.test.ts's seedOpenInvoice) — apply_credit only
+    // ever runs against an invoice that already exists and is owed.
+    const lineItems = [buildLineItem(crypto.randomUUID(), 'Labor', 1, 30000, 0, true, 'labor')];
+    const totals = calculateDocumentTotals(lineItems, 0, 0);
+    invoiceId = crypto.randomUUID();
+    await invoiceRepo.create({
+      id: invoiceId,
+      tenantId: tenant.tenantId,
+      jobId,
+      invoiceNumber: `INV-${invoiceId.slice(0, 8)}`,
+      status: 'open',
+      lineItems,
+      totals,
+      amountPaidCents: 0,
+      amountDueCents: totals.totalCents,
+      createdBy: tenant.userId,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+  });
+
+  afterAll(async () => {
+    await closeSharedTestDb();
+  });
+
+  it('appends a negative non-taxable line via the PRODUCTION registry and persists reduced totals', async () => {
+    const registry = createExecutionHandlerRegistry({ invoiceRepo, auditRepo });
+    const proposalRepo = new InMemoryProposalRepository();
+    const executionRepo = new InMemoryProposalExecutionRepository();
+    const guard = new IdempotencyGuard(executionRepo, proposalRepo);
+    const executor = new ProposalExecutor(registry, proposalRepo, guard, auditRepo);
+
+    const input: CreateProposalInput = {
+      tenantId: tenant.tenantId,
+      proposalType: 'apply_credit',
+      payload: { invoiceId, amountCents: 5000, reason: 'goodwill — repeat leak' },
+      summary: 'Apply credit from voice',
+      createdBy: tenant.userId,
+    };
+    let proposal: Proposal = createProposal(input);
+    proposal = transitionProposal(proposal, 'ready_for_review', tenant.userId);
+    proposal = transitionProposal(proposal, 'approved', tenant.userId);
+    proposal = { ...proposal, approvedAt: new Date(Date.now() - UNDO_WINDOW_MS - 100) };
+    await proposalRepo.create(proposal);
+
+    const context: ExecutionContext = { tenantId: tenant.tenantId, executedBy: tenant.userId };
+    const { result } = await executor.execute(proposal, context);
+
+    expect(result.success).toBe(true);
+    expect(result.resultEntityId).toBe(invoiceId);
+
+    const { rows: invoiceRows } = await pool.query(
+      `SELECT total_cents, amount_due_cents FROM invoices WHERE id = $1`,
+      [invoiceId],
+    );
+    expect(invoiceRows).toHaveLength(1);
+    // 30000 base - 5000 credit = 25000.
+    expect(Number(invoiceRows[0].total_cents)).toBe(25000);
+    expect(Number(invoiceRows[0].amount_due_cents)).toBe(25000);
+
+    const { rows: lineRows } = await pool.query(
+      `SELECT description, unit_price_cents, quantity, taxable
+         FROM invoice_line_items WHERE invoice_id = $1 ORDER BY sort_order`,
+      [invoiceId],
+    );
+    expect(lineRows).toHaveLength(2);
+    const creditRow = lineRows[1];
+    expect(creditRow.description).toBe('Credit — goodwill — repeat leak');
+    expect(Number(creditRow.unit_price_cents)).toBe(-5000);
+    expect(Number(creditRow.quantity)).toBe(1);
+    expect(creditRow.taxable).toBe(false);
+
+    const { rows: auditRows } = await pool.query(
+      `SELECT event_type FROM audit_events
+        WHERE entity_type = 'invoice' AND entity_id = $1 AND event_type = 'credit.applied'`,
+      [invoiceId],
+    );
+    expect(auditRows).toHaveLength(1);
   });
 });

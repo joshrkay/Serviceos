@@ -69,6 +69,19 @@ import { formatUsdCentsPlain } from '@ai-service-os/shared';
  * passthrough when no invoiceRepo is wired, returns failed ExecutionResults
  * (never throws through), and emits a failure-soft audit event
  * (`credit.applied`, entityType `invoice`).
+ *
+ * DRY threshold breadcrumb: the append-line-then-recompute block below
+ * (~lines 154-160 — build the line, append it, `calculateDocumentTotals`,
+ * derive `amountDueCents`) is mechanically identical to
+ * `ApplyLateFeeExecutionHandler`'s (proposals/execution/
+ * apply-late-fee-handler.ts, ~lines 144-150) — only the line's sign and
+ * description differ. Left duplicated for these two; if a THIRD
+ * append-a-line-to-invoice sibling shows up (e.g. a hypothetical
+ * `apply_discount`), extract an `appendInvoiceLineAndRecompute(invoice,
+ * line)` helper into the shared billing engine for this exact block.
+ * Guards (idempotency, status precondition, floor checks) and audit
+ * emission stay per-handler — they differ enough that folding them in
+ * would obscure more than it'd save.
  */
 export class ApplyCreditExecutionHandler implements ExecutionHandler {
   proposalType: ProposalType = 'apply_credit';

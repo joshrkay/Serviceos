@@ -259,8 +259,26 @@ function inputFor(
     missingFields: missingFields.length > 0 ? missingFields : undefined,
     sourceTrustTier: opts?.trust,
     // PR B — pass through the tenant threshold override the router
-    // resolved at request entry. All 8 voice-extended task call sites
-    // route through this helper, so this is a single touch point.
+    // resolved at request entry. Every call site IN THIS FILE routes
+    // through this helper, so within voice-extended-tasks.ts it is a
+    // single touch point.
+    //
+    // Quality-review note (Tradesperson wave 1, Task 4): that is no longer
+    // true repo-wide. Standalone task-handler files (complaint-task.ts,
+    // brand-voice-task.ts, standing-instruction-task.ts, and now
+    // apply-credit-task.ts) hand-roll an equivalent `CreateProposalInput`
+    // literal — including this same `...(context.tenantThresholdOverride
+    // ? {...} : {})` spread — because they can't import this private
+    // (non-exported) helper. So there are now TWO touch points for this
+    // passthrough: this function, and each standalone file's own inline
+    // copy. Both must stay in sync by hand today.
+    //
+    // Intended future cleanup (not done here — out of scope for a single
+    // task): once a THIRD standalone task-handler file needs it, extract
+    // `inputFor`/`entitiesFrom`/`baseSourceContext` out of this file into a
+    // small shared module (e.g. `ai/tasks/task-input.ts`) that both this
+    // file and the standalone files import, collapsing back to one touch
+    // point. Not worth the churn for two call sites; worth it at three.
     ...(context.tenantThresholdOverride
       ? { tenantThresholdOverride: context.tenantThresholdOverride }
       : {}),
