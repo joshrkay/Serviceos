@@ -61,14 +61,41 @@ export interface CreateMaterialItemInput {
 export interface MaterialItemListOptions {
   jobId?: string;
   /**
+   * Follow-up to Task 9 (2026-08-09) — date-scope the shopping list to
+   * items needed before this instant (`needed_by < neededByBefore`,
+   * exclusive). Added because `lookup_materials`'s bounded fetch (I4,
+   * `limit`, below) only ever looks at the OLDEST-created rows: a tenant
+   * with more pending items than the fetch cap could have a genuinely
+   * time-sensitive item never spoken at all, self-correcting only once it
+   * ages into the oldest-N window. Per-item `neededBy` in the spoken
+   * summary was the interim mitigation; this is the real fix.
+   *
+   * NULL/undefined `neededBy` semantics (decided, pinned by both backends'
+   * tests): an item with NO `neededBy` does NOT match this filter. An
+   * undated item has no known deadline, so it cannot honestly be said to
+   * be "needed by" any particular date — silently including it in a
+   * date-scoped answer would be a worse surprise than omitting it. This
+   * is also what a bare SQL `needed_by < $1` does for free (three-valued
+   * logic excludes NULL from ANY comparison), so the Pg backend needs no
+   * special-case and the InMemory backend mirrors it explicitly to keep
+   * both backends provably in agreement.
+   *
+   * Ordering interaction: when this option is set, `listPending` orders
+   * by `needed_by ASC` (soonest-due first) instead of the default
+   * oldest-created-first — see the interface doc comment below for why.
+   */
+  neededByBefore?: Date;
+  /**
    * Cap the number of rows returned, applied at the repo/SQL boundary —
    * NOT sliced app-side after an unbounded fetch (quality-review I4, Task
    * 9: `lookup_materials` used to load every pending row for the tenant
    * just to speak 5 of them — a shopping list is append-mostly, only
    * `markPurchased` prunes it, so that only gets worse over a tenant's
-   * lifetime). Rows are returned in the same oldest-created-first order
-   * `listPending` already documents, so `limit: N` yields the N OLDEST
-   * pending items, not an arbitrary N.
+   * lifetime). Rows are returned in the SAME order `listPending` uses for
+   * this call (oldest-created-first by default, or soonest-`needed_by`-
+   * first when `neededByBefore` is given — see that option's doc
+   * comment), so `limit: N` yields the N rows that ordering puts first,
+   * not an arbitrary N.
    */
   limit?: number;
 }
@@ -76,11 +103,18 @@ export interface MaterialItemListOptions {
 export interface MaterialItemRepository {
   create(input: CreateMaterialItemInput): Promise<MaterialItem>;
   /**
-   * Pending items for a tenant, oldest-created first; optionally scoped to
-   * a job. Ties break deterministically but ARBITRARILY in the Pg backend
-   * (id ASC, i.e. random v4 UUID order — see pg-material-item.ts) since two
-   * rows can share the same created_at timestamp; InMemory gives true
-   * insertion order in that case since it never ties by construction.
+   * Pending items for a tenant, optionally scoped to a job and/or a
+   * needed-by date (`options.neededByBefore`).
+   *
+   * Ordering: oldest-created first by DEFAULT. When `neededByBefore` is
+   * given, ordering switches to soonest-`needed_by`-first instead — a
+   * date-scoped ask ("what do I need for tomorrow?") cares about urgency,
+   * not which row happened to be created first, and the fetch is capped
+   * (`options.limit`) so which rows make the cut matters. Ties break
+   * deterministically but ARBITRARILY in the Pg backend (a trailing `id
+   * ASC` — see pg-material-item.ts) since two rows can share the same
+   * created_at/needed_by; InMemory gives true insertion order among ties
+   * since it never ties by construction.
    */
   listPending(tenantId: string, options?: MaterialItemListOptions): Promise<MaterialItem[]>;
   /** Transition pending -> purchased. Null if not found, wrong tenant, or not pending. */
@@ -179,13 +213,22 @@ export class InMemoryMaterialItemRepository implements MaterialItemRepository {
     tenantId: string,
     options?: MaterialItemListOptions,
   ): Promise<MaterialItem[]> {
-    const sorted = Array.from(this.items.values())
+    const neededByBefore = options?.neededByBefore;
+    const filtered = Array.from(this.items.values())
       .filter((i) => i.tenantId === tenantId)
       .filter((i) => i.status === 'pending')
       .filter((i) => !options?.jobId || i.jobId === options.jobId)
-      .sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime())
-      .map((i) => ({ ...i }));
-    return typeof options?.limit === 'number' ? sorted.slice(0, options.limit) : sorted;
+      // NULL/undefined neededBy never matches a date-scoped query — see
+      // MaterialItemListOptions.neededByBefore's doc comment for why (an
+      // undated item has no known deadline). Mirrors the Pg backend's bare
+      // `needed_by < $1`, which excludes NULL for the same reason without
+      // needing this explicit check.
+      .filter((i) => !neededByBefore || (i.neededBy !== undefined && i.neededBy.getTime() < neededByBefore.getTime()));
+    const sorted = neededByBefore
+      ? filtered.sort((a, b) => a.neededBy!.getTime() - b.neededBy!.getTime())
+      : filtered.sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime());
+    const result = sorted.map((i) => ({ ...i }));
+    return typeof options?.limit === 'number' ? result.slice(0, options.limit) : result;
   }
 
   async markPurchased(tenantId: string, id: string, actorId: string): Promise<MaterialItem | null> {

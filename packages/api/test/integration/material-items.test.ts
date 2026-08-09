@@ -142,6 +142,74 @@ describe('Postgres integration — material items', () => {
     expect(scoped[0].description).toBe('job-scoped item');
   });
 
+  // Follow-up to Task 9 — real SQL proof that `needed_by < $N` behaves the
+  // way the in-memory backend's unit tests assert, including the NULL
+  // exclusion the Pg side gets "for free" from three-valued logic (never
+  // an app-side special case, unlike InMemory which must filter it
+  // explicitly — see MaterialItemListOptions.neededByBefore's doc comment).
+  describe('neededByBefore filter (real SQL)', () => {
+    it('returns only rows with needed_by strictly before the boundary', async () => {
+      const t = await createTestTenant(pool);
+      const dueBefore = await repo.create({
+        tenantId: t.tenantId,
+        description: 'due before',
+        neededBy: new Date('2026-08-09T00:00:00Z'),
+        createdBy: t.userId,
+      });
+      await repo.create({
+        tenantId: t.tenantId,
+        description: 'due at boundary (excluded, exclusive)',
+        neededBy: new Date('2026-08-10T00:00:00Z'),
+        createdBy: t.userId,
+      });
+
+      const result = await repo.listPending(t.tenantId, {
+        neededByBefore: new Date('2026-08-10T00:00:00Z'),
+      });
+      expect(result.map((i) => i.id)).toEqual([dueBefore.id]);
+    });
+
+    it('excludes rows with a NULL needed_by — three-valued logic, no special-case needed', async () => {
+      const t = await createTestTenant(pool);
+      const dated = await repo.create({
+        tenantId: t.tenantId,
+        description: 'dated',
+        neededBy: new Date('2026-08-01T00:00:00Z'),
+        createdBy: t.userId,
+      });
+      await repo.create({ tenantId: t.tenantId, description: 'undated', createdBy: t.userId });
+
+      const result = await repo.listPending(t.tenantId, {
+        neededByBefore: new Date('2026-09-01T00:00:00Z'),
+      });
+      expect(result.map((i) => i.id)).toEqual([dated.id]);
+    });
+
+    it('orders date-scoped results by needed_by ascending, not created_at', async () => {
+      const t = await createTestTenant(pool);
+      const createdFirstDueLater = await repo.create({
+        tenantId: t.tenantId,
+        description: 'created first, due later',
+        neededBy: new Date('2026-08-09T00:00:00Z'),
+        createdBy: t.userId,
+      });
+      const createdSecondDueSooner = await repo.create({
+        tenantId: t.tenantId,
+        description: 'created second, due sooner',
+        neededBy: new Date('2026-08-01T00:00:00Z'),
+        createdBy: t.userId,
+      });
+
+      const result = await repo.listPending(t.tenantId, {
+        neededByBefore: new Date('2026-08-10T00:00:00Z'),
+      });
+      expect(result.map((i) => i.id)).toEqual([
+        createdSecondDueSooner.id,
+        createdFirstDueLater.id,
+      ]);
+    });
+  });
+
   // Quality-review I4 — the SQL LIMIT clause, not an app-side slice.
   it('scopes listPending by limit, applied in SQL', async () => {
     const t = await createTestTenant(pool);

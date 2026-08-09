@@ -1,6 +1,21 @@
 /**
  * Tradesperson wave 1, Task 8 — Postgres-backed material items repository.
  * Tenant-scoped via RLS (`material_items`, migration 272).
+ *
+ * Follow-up (2026-08-09) — `neededByBefore` (below) deliberately does NOT
+ * get its own index/migration. `idx_material_items_pending (tenant_id,
+ * created_at) WHERE status = 'pending'` (migration 272) already narrows
+ * `tenant_id = $1 AND status = 'pending'` to that ONE tenant's pending rows
+ * before `needed_by < $N` or the ORDER BY even run — and a shopping list is
+ * a small, append-mostly, per-tenant operational list (`markPurchased`
+ * continuously removes rows from the partial index's own predicate), not a
+ * table where any real tenant accumulates enough concurrently-pending rows
+ * for an extra filter/sort over that already-narrow set to show up as a
+ * measurable cost. Adding `needed_by` to the index would speculatively pay
+ * write-amplification on every insert/update for a read-side saving that
+ * has no realistic workload to justify it. Revisit only if a tenant is
+ * ever observed with a genuinely large pending set (thousands of rows) —
+ * not speculatively here.
  */
 import { Pool } from 'pg';
 import { isValidTenantId } from '../db/schema';
@@ -129,6 +144,17 @@ export class PgMaterialItemRepository extends PgBaseRepository implements Materi
         params.push(options.jobId);
         conditions.push(`job_id = $${params.length}`);
       }
+      // Follow-up to Task 9 — date-scope the shopping list. A plain `<`
+      // comparison excludes a NULL needed_by for free (three-valued logic:
+      // `NULL < $N` is NULL, never TRUE, so WHERE drops the row) — this is
+      // the decided, tested behavior (see MaterialItemListOptions.
+      // neededByBefore's doc comment), not an accident of SQL semantics we
+      // merely tolerate. No extra `needed_by IS NOT NULL` clause needed.
+      const hasNeededByBefore = options?.neededByBefore instanceof Date;
+      if (hasNeededByBefore) {
+        params.push(options!.neededByBefore);
+        conditions.push(`needed_by < $${params.length}`);
+      }
       // `, id ASC` tiebreak: even with created_at now DB-generated (NOW(),
       // microsecond precision, since the create() fix above), two rows can
       // still tie — and previously, when created_at was a JS Date bound as a
@@ -150,8 +176,17 @@ export class PgMaterialItemRepository extends PgBaseRepository implements Materi
         typeof options?.limit === 'number' && Number.isInteger(options.limit) && options.limit > 0;
       const limitClause = hasLimit ? ` LIMIT $${params.length + 1}` : '';
       if (hasLimit) params.push(options!.limit);
+      // Ordering decision (MaterialItemListOptions.neededByBefore doc
+      // comment): a date-scoped ask orders by URGENCY (soonest needed_by
+      // first), not insertion order — every row in a `neededByBefore`
+      // result set has a non-NULL needed_by (excluded above), so this sort
+      // key is always well-defined, never a NULLS-FIRST/LAST ambiguity.
+      // Default (no date scope) stays oldest-created-first, unchanged.
+      const orderByClause = hasNeededByBefore
+        ? 'ORDER BY needed_by ASC, id ASC'
+        : 'ORDER BY created_at ASC, id ASC';
       const { rows } = await client.query<MaterialItemRow>(
-        `SELECT * FROM material_items WHERE ${conditions.join(' AND ')} ORDER BY created_at ASC, id ASC${limitClause}`,
+        `SELECT * FROM material_items WHERE ${conditions.join(' AND ')} ${orderByClause}${limitClause}`,
         params,
       );
       return rows.map(mapRow);

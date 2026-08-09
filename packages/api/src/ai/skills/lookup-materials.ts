@@ -44,24 +44,46 @@
  * deliberately NOT added here (that's a distinct, larger change than this
  * task's scope).
  *
- * ── "for tomorrow" is not a filter — and neededBy IS surfaced (spec-review
- * MAJOR B) ──
+ * ── "for tomorrow" IS a filter now (2026-08-09 follow-up) — and neededBy is
+ * STILL surfaced per-item (spec-review MAJOR B) ──
  *
- * Task 8's `MaterialItemListOptions` has only `jobId` and (as of I4)
- * `limit` — no `neededBy`/date filter — so a date-scoped ask like "what do
- * I need tomorrow?" cannot narrow the query; the classifier taxonomy
- * (intent-classifier.ts) no longer advertises that phrasing for this
- * reason. But `neededBy` IS captured by `add_material` and persisted on
- * every row (Task 9's own write leg) — silently never mentioning it on the
- * read side would mean this module collects data it then hides from the
- * very person who spoke it. So each spoken/rendered item states its
- * needed-by date when the row has one ("3 boxes of PEX, quantity 3, needed
- * by August 9") — the operator hears which of the (possibly unfiltered) items
- * are actually time-sensitive, rather than the system pretending to
- * understand "tomorrow" it cannot honor as a query filter. Adding a real
- * `neededBy` filter to `MaterialItemListOptions` (both backends) is a
- * genuine Task 8 contract extension, filed as separate follow-up work —
- * NOT done here.
+ * `MaterialItemListOptions.neededByBefore` (Task 8's substrate, extended)
+ * lets this skill actually narrow the query to "what's needed by <date>",
+ * closing a real gap the interim per-item-surfacing mitigation left open:
+ * the fetch is bounded (`FETCH_LIMIT`, below) and ordered oldest-created
+ * first BY DEFAULT, so a tenant with more pending items than the fetch cap
+ * could have a genuinely time-sensitive item never spoken at all — it only
+ * "self-corrected" once the item aged into the oldest-N window. A real
+ * date filter, applied at the repo/SQL boundary, fixes that directly.
+ *
+ * `dateTimeDescription` (the caller's raw spoken day phrase — "tomorrow",
+ * "by Friday") is resolved to a calendar day via `resolveSpokenDay`
+ * (ai/scheduling/resolve-datetime.ts) — the SAME lookup-side day resolver
+ * `lookup_crew_schedule` uses, reused rather than re-implemented (see that
+ * module's doc comment for why a LOOKUP needs a different contract than
+ * the booking resolver `resolveDateTime`, which refuses a bare day). The
+ * resolved day becomes a `neededByBefore` boundary — the START of the day
+ * AFTER the resolved one, so "needed by tomorrow" includes everything due
+ * ON tomorrow (and anything earlier/overdue), never just before midnight.
+ *
+ * UNLIKE `lookup_crew_schedule`, an absent or UNPARSEABLE phrase applies NO
+ * filter at all — it does NOT fall back to "today". Crew-schedule always
+ * has something to report (today's schedule is a valid answer either way,
+ * and it says so explicitly); silently narrowing an unparseable materials
+ * ask to "today" would instead HIDE real, later-dated pending items behind
+ * a guessed filter the caller never asked for — a worse outcome than just
+ * answering the plain unfiltered list honestly.
+ *
+ * `neededBy` is STILL surfaced per-item in the spoken summary regardless of
+ * whether a date filter was applied (spec-review MAJOR B) — a date-scoped
+ * answer can still contain several items due on different days before the
+ * cutoff, and an unfiltered answer still benefits from the per-item date
+ * this fix doesn't replace.
+ *
+ * Ordering: date-scoped results are ordered soonest-`neededBy`-first (see
+ * `MaterialItemListOptions.neededByBefore`'s doc comment) rather than
+ * oldest-created-first — a date-scoped ask cares about urgency, and the
+ * fetch is still capped, so which rows make the cut matters.
  *
  * ── TTS-safe formatting (quality-review I2) ────────────────────────────────
  *
@@ -74,6 +96,7 @@
  */
 import type { MaterialItem, MaterialItemRepository } from '../../materials/material-item';
 import type { LookupEventService } from '../../lookup-events/lookup-event-service';
+import { resolveSpokenDay } from '../scheduling/resolve-datetime';
 import { plural } from './spoken-format';
 
 export interface LookupMaterialsInput {
@@ -81,6 +104,17 @@ export interface LookupMaterialsInput {
   sessionId?: string;
   /** Verified jobId, when a job was named and resolved (JOB_REF_INTENTS). */
   jobId?: string;
+  /**
+   * Follow-up (2026-08-09) — raw spoken day phrase ("tomorrow", "by
+   * Friday"), when the caller scoped the ask to a date. Resolved
+   * internally via `resolveSpokenDay` — see the module doc comment for the
+   * full "unparseable means no filter, never a today-guess" rationale.
+   */
+  dateTimeDescription?: string;
+  /** Tenant IANA timezone, used to resolve `dateTimeDescription`. Defaults to DEFAULT_TENANT_TIMEZONE (resolve-datetime.ts) when omitted. */
+  timezone?: string;
+  /** Reference instant for resolving a relative day phrase. Defaults to now. */
+  now?: Date;
 }
 
 export interface LookupMaterialsDeps {
@@ -167,6 +201,41 @@ function describeItem(m: LookupMaterialsItem): string {
   return parts.join(', ');
 }
 
+interface NeededByScope {
+  /** `MaterialItemListOptions.neededByBefore` — the exclusive upper bound. */
+  before: Date;
+  /** TTS-safe "MMMM d" label for the resolved day, for the summary header. */
+  label: string;
+}
+
+/**
+ * Resolve `dateTimeDescription` to a `neededByBefore` boundary, or `null`
+ * when no date filter applies. Returns `null` for BOTH an absent phrase
+ * AND an unparseable one — see the module doc comment for why this
+ * deliberately does NOT fall back to "today" the way
+ * `lookup-crew-schedule.ts`'s day resolution does.
+ */
+function resolveNeededByScope(
+  desc: string | undefined,
+  now: Date,
+  timezone: string | undefined,
+): NeededByScope | null {
+  if (!desc) return null;
+  const dayKey = resolveSpokenDay(desc, { timezone, now });
+  if (!dayKey) return null;
+  // `needed_by` is a bare calendar date stored at UTC midnight
+  // (add-material-handler.ts) — treat the resolved day the SAME way,
+  // never re-projecting it through a timezone a second time (mirrors
+  // lookup-crew-schedule.ts's dayLabelForDateKey doc comment: that's
+  // exactly how a midnight-UTC date rolls back a day in a western tenant
+  // zone). The boundary is the START of the day AFTER the resolved one so
+  // "needed by <day>" includes everything due ON that day, not just
+  // before its midnight.
+  const dayStartUtc = new Date(`${dayKey}T00:00:00.000Z`);
+  const before = new Date(dayStartUtc.getTime() + 24 * 60 * 60 * 1000);
+  return { before, label: formatNeededByLabel(dayStartUtc) };
+}
+
 export async function lookupMaterials(
   input: LookupMaterialsInput,
   deps: LookupMaterialsDeps,
@@ -194,13 +263,22 @@ export async function lookupMaterials(
   };
 
   try {
+    const scope = resolveNeededByScope(input.dateTimeDescription, input.now ?? new Date(), input.timezone);
     const items: MaterialItem[] = await deps.materialItemRepo.listPending(input.tenantId, {
       ...(input.jobId ? { jobId: input.jobId } : {}),
+      ...(scope ? { neededByBefore: scope.before } : {}),
       limit: FETCH_LIMIT,
     });
 
     if (items.length === 0) {
-      const summary = 'Your materials list is clear — nothing pending.';
+      // Date-scoped emptiness is a DIFFERENT fact than "nothing pending at
+      // all" — there could be plenty pending outside this window, so the
+      // summary must not claim the whole list is clear (see module doc
+      // comment / spec-review MAJOR B precedent for "never silently widen
+      // OR narrow a claim past what was actually asked").
+      const summary = scope
+        ? `Nothing on the materials list is needed by ${scope.label}.`
+        : 'Your materials list is clear — nothing pending.';
       await record('none', 0, summary);
       return { status: 'none', summary, data: { count: 0, spokenItems: [] } };
     }
@@ -216,8 +294,9 @@ export async function lookupMaterials(
     const countPhrase = hasMore
       ? `${MAX_ITEMS_SPOKEN}+ ${plural(MAX_ITEMS_SPOKEN, 'item')}`
       : `${items.length} ${plural(items.length, 'item')}`;
+    const scopePhrase = scope ? ` needed by ${scope.label}` : '';
     const summary =
-      `${countPhrase} on the materials list: ` +
+      `${countPhrase} on the materials list${scopePhrase}: ` +
       spokenItems.map(describeItem).join('; ') +
       (hasMore ? '; and more beyond that' : '');
 

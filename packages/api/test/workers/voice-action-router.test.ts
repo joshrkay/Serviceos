@@ -3255,15 +3255,19 @@ describe('voice-action-router U3 lookup answers (recorded-memo path)', () => {
       expect(rec?.answerStatus).toBe('skipped');
     });
 
-    // Task 9 house decision — job-scoping is real (via jobId), but a date
-    // phrase like "tomorrow" is NOT a filter: materialItemRepo.listPending
-    // has no neededBy/date option (Task 8's substrate never grew one, and
-    // Task 9 does not extend it — see lookup-materials.ts's module doc
-    // comment). The classifier taxonomy no longer advertises "for
-    // tomorrow" phrasing for this reason (spec-review MAJOR B); instead,
-    // any captured neededBy is SPOKEN per-item so the operator can tell
-    // which of the (possibly unfiltered) items are time-sensitive — see
-    // the 'surfaces a captured needed-by date' test below.
+    // Follow-up (2026-08-09) — job-scoping is real (via jobId), AND a date
+    // phrase like "tomorrow" is now ALSO a real filter:
+    // materialItemRepo.listPending grew `neededByBefore`, and
+    // lookup-materials.ts resolves the classifier's `dateTimeDescription`
+    // slot (the SAME generic slot lookup_crew_schedule uses) via
+    // `resolveSpokenDay` — see lookup-materials.ts's module doc comment.
+    // The classifier taxonomy advertises "for tomorrow" phrasing again for
+    // this reason (spec-review MAJOR B is resolved, not just mitigated).
+    // Any captured neededBy is STILL spoken per-item regardless (an
+    // unfiltered or date-scoped answer can both contain several different
+    // dates before/within the window) — see the 'surfaces a captured
+    // needed-by date' test below, and the 'date-scoped ask' describe block
+    // further down for the new filter's end-to-end coverage.
     //
     // Quality-review M5 — a real UUID, not the literal string 'job-patel':
     // InMemoryMaterialItemRepository accepts any string as a jobId, but
@@ -3437,6 +3441,113 @@ describe('voice-action-router U3 lookup answers (recorded-memo path)', () => {
       expect(rec?.answer?.summary).toContain('needed by August 9');
       const row = rec?.answer?.rows?.[0] as { text?: string } | undefined;
       expect(row?.text).toContain('needed by August 9');
+    });
+
+    // Follow-up (2026-08-09) — end-to-end proof that a spoken date phrase
+    // reaches the repo as a real `neededByBefore` filter: classifier ->
+    // dateTimeDescription (the generic slot, ungated per-intent — see
+    // lookup-dispatch.ts / voice-action-router.ts) -> executeLookupAnswer's
+    // `lookup_materials` case -> lookupMaterials's resolveSpokenDay -> a
+    // date-scoped SQL/in-memory query.
+    describe('date-scoped ask ("for tomorrow")', () => {
+      // 2026-06-11 (Thursday) ~07:00 New York (11:00 UTC) — matches
+      // lookup-materials.test.ts's own fixture, so "tomorrow" resolves to
+      // the same 2026-06-12 in both suites.
+      const FIXED_NOW = new Date('2026-06-11T11:00:00.000Z');
+
+      it('scopes the spoken list to items due by the resolved day, excluding later and undated items', async () => {
+        const proposalRepo = new InMemoryProposalRepository();
+        const voiceRepo = seededVoiceRepo();
+        const gateway = gatewayReturning([
+          classify('lookup_materials', { dateTimeDescription: 'tomorrow' }),
+        ]);
+        const materialItemRepo = new InMemoryMaterialItemRepository();
+        await materialItemRepo.create({
+          tenantId: TENANT,
+          description: 'due tomorrow',
+          neededBy: new Date('2026-06-12T00:00:00Z'),
+          createdBy: 'user-owner',
+        });
+        await materialItemRepo.create({
+          tenantId: TENANT,
+          description: 'due next month',
+          neededBy: new Date('2026-07-01T00:00:00Z'),
+          createdBy: 'user-owner',
+        });
+        await materialItemRepo.create({
+          tenantId: TENANT,
+          description: 'no date at all',
+          createdBy: 'user-owner',
+        });
+
+        const worker = createVoiceActionRouterWorker({
+          gateway,
+          proposalRepo,
+          voiceRepo,
+          now: () => FIXED_NOW,
+          lookupAnswers: { materialItemRepo: materialItemRepo as never },
+        });
+
+        await worker.handle(
+          msg({
+            tenantId: TENANT,
+            userId: 'system',
+            transcript: 'what do I need for tomorrow',
+            recordingId: RECORDING_ID,
+          }),
+          silentLogger(),
+        );
+
+        const rec = await voiceRepo.findById(TENANT, RECORDING_ID);
+        expect(rec?.answer?.result).toBe('found');
+        expect(rec?.answer?.summary).toContain('needed by June 12');
+        expect(rec?.answer?.summary).toContain('due tomorrow');
+        expect(rec?.answer?.summary).not.toContain('due next month');
+        expect(rec?.answer?.summary).not.toContain('no date at all');
+        expect(rec?.answer?.rows).toHaveLength(1);
+      });
+
+      it('an unparseable date phrase applies no filter — the unscoped list, never a guessed day', async () => {
+        const proposalRepo = new InMemoryProposalRepository();
+        const voiceRepo = seededVoiceRepo();
+        const gateway = gatewayReturning([
+          classify('lookup_materials', { dateTimeDescription: 'gibberish not a date' }),
+        ]);
+        const materialItemRepo = new InMemoryMaterialItemRepository();
+        await materialItemRepo.create({
+          tenantId: TENANT,
+          description: 'due next month',
+          neededBy: new Date('2026-07-01T00:00:00Z'),
+          createdBy: 'user-owner',
+        });
+
+        const worker = createVoiceActionRouterWorker({
+          gateway,
+          proposalRepo,
+          voiceRepo,
+          now: () => FIXED_NOW,
+          lookupAnswers: { materialItemRepo: materialItemRepo as never },
+        });
+
+        await worker.handle(
+          msg({
+            tenantId: TENANT,
+            userId: 'system',
+            transcript: 'what do I need for whenever',
+            recordingId: RECORDING_ID,
+          }),
+          silentLogger(),
+        );
+
+        const rec = await voiceRepo.findById(TENANT, RECORDING_ID);
+        expect(rec?.answer?.result).toBe('found');
+        expect(rec?.answer?.summary).toContain('due next month');
+        // The item's own captured date is still spoken per-item ("needed by
+        // July 1") — what must be ABSENT is the date-SCOPE header phrase a
+        // resolved filter would add ("on the materials list needed by …").
+        expect(rec?.answer?.summary).not.toContain('on the materials list needed by');
+        expect(rec?.answer?.summary).toContain('needed by July 1');
+      });
     });
   });
 

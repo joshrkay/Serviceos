@@ -708,6 +708,16 @@ export async function executeLookupAnswer(
       // named a scope and silently got unscoped data instead of an honest
       // "not found". Absent any jobReference at all, the unfiltered list is
       // the CORRECT, intended answer ("read me the shopping list").
+      //
+      // Follow-up (2026-08-09) — `dateTimeDescription` ("for tomorrow", "by
+      // Friday") is now a real filter too: it rides the SAME generic
+      // extraction slot `lookup_crew_schedule` uses (never gated per-intent
+      // upstream — see lookup-dispatch.ts / voice-action-router.ts) and the
+      // skill resolves it internally via `resolveSpokenDay`. Unlike
+      // `lookup_crew_schedule`, an unresolved/absent phrase applies NO
+      // filter here rather than defaulting to "today" — see
+      // lookup-materials.ts's module doc comment for why a materials ask
+      // must never silently narrow past what was actually understood.
       case 'lookup_materials': {
         if (!deps.materialItemRepo) return { kind: 'unsupported' };
         if (!input.jobId && input.jobReference) {
@@ -717,7 +727,14 @@ export async function executeLookupAnswer(
           };
         }
         const r = await lookupMaterials(
-          { tenantId, sessionId, ...(input.jobId ? { jobId: input.jobId } : {}) },
+          {
+            tenantId,
+            sessionId,
+            ...(input.jobId ? { jobId: input.jobId } : {}),
+            ...(input.dateTimeDescription ? { dateTimeDescription: input.dateTimeDescription } : {}),
+            ...(timezone ? { timezone } : {}),
+            now,
+          },
           { materialItemRepo: deps.materialItemRepo, ...events },
         );
         if (r.status === 'error') return { kind: 'failed', error: r.data.error };

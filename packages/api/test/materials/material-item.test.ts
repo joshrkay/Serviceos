@@ -90,6 +90,133 @@ describe('MaterialItemRepository', () => {
     expect(pending.map((i) => i.id)).toEqual([first.id, second.id, third.id]);
   });
 
+  // Follow-up to Task 9's I4/M4 fetch-bound work: lookup_materials's bounded
+  // fetch (oldest-created-first, capped at MAX_ITEMS_SPOKEN + 1) meant a
+  // tenant with more pending items than the cap could have a genuinely
+  // time-sensitive item never spoken at all — it only "self-corrects" once
+  // the item ages into the oldest-N window. A real date filter, applied at
+  // the repo/SQL boundary (not sliced app-side), is the actual fix.
+  describe('neededByBefore filter', () => {
+    it('returns only items whose neededBy is strictly before the boundary', async () => {
+      const repo = new InMemoryMaterialItemRepository();
+      const dueBefore = await repo.create({
+        tenantId: 't1', description: 'due before', createdBy: 'u1',
+        neededBy: new Date('2026-08-09T00:00:00Z'),
+      });
+      await repo.create({
+        tenantId: 't1', description: 'due at boundary (excluded, exclusive)', createdBy: 'u1',
+        neededBy: new Date('2026-08-10T00:00:00Z'),
+      });
+      await repo.create({
+        tenantId: 't1', description: 'due after boundary', createdBy: 'u1',
+        neededBy: new Date('2026-08-11T00:00:00Z'),
+      });
+
+      const result = await repo.listPending('t1', { neededByBefore: new Date('2026-08-10T00:00:00Z') });
+      expect(result.map((i) => i.id)).toEqual([dueBefore.id]);
+    });
+
+    // Decision (documented on MaterialItemListOptions.neededByBefore): a
+    // NULL/undefined neededBy does NOT match a date-scoped query. An
+    // undated item has no known deadline, so it can't honestly be said to
+    // be "needed by" any particular date — and this is also what a plain
+    // SQL `needed_by < $1` does for free (three-valued logic excludes
+    // NULL), so both backends agree on this without any extra branching.
+    it('excludes items with no neededBy at all — an undated item is not "needed by" any date', async () => {
+      const repo = new InMemoryMaterialItemRepository();
+      const dated = await repo.create({
+        tenantId: 't1', description: 'dated', createdBy: 'u1',
+        neededBy: new Date('2026-08-01T00:00:00Z'),
+      });
+      await repo.create({ tenantId: 't1', description: 'undated', createdBy: 'u1' });
+
+      const result = await repo.listPending('t1', { neededByBefore: new Date('2026-09-01T00:00:00Z') });
+      expect(result.map((i) => i.id)).toEqual([dated.id]);
+    });
+
+    it('combines neededByBefore with a jobId filter', async () => {
+      const repo = new InMemoryMaterialItemRepository();
+      const match = await repo.create({
+        tenantId: 't1', description: 'job + due soon', jobId: 'job-1', createdBy: 'u1',
+        neededBy: new Date('2026-08-01T00:00:00Z'),
+      });
+      await repo.create({
+        tenantId: 't1', description: 'job + due later', jobId: 'job-1', createdBy: 'u1',
+        neededBy: new Date('2026-09-01T00:00:00Z'),
+      });
+      await repo.create({
+        tenantId: 't1', description: 'other job, due soon', jobId: 'job-2', createdBy: 'u1',
+        neededBy: new Date('2026-08-01T00:00:00Z'),
+      });
+
+      const result = await repo.listPending('t1', {
+        jobId: 'job-1',
+        neededByBefore: new Date('2026-08-15T00:00:00Z'),
+      });
+      expect(result.map((i) => i.id)).toEqual([match.id]);
+    });
+
+    it('combines neededByBefore with limit', async () => {
+      const repo = new InMemoryMaterialItemRepository();
+      const soonest = await repo.create({
+        tenantId: 't1', description: 'soonest', createdBy: 'u1',
+        neededBy: new Date('2026-08-01T00:00:00Z'),
+      });
+      await repo.create({
+        tenantId: 't1', description: 'next soonest', createdBy: 'u1',
+        neededBy: new Date('2026-08-05T00:00:00Z'),
+      });
+
+      const result = await repo.listPending('t1', {
+        neededByBefore: new Date('2026-09-01T00:00:00Z'),
+        limit: 1,
+      });
+      expect(result.map((i) => i.id)).toEqual([soonest.id]);
+    });
+
+    // Ordering decision (documented on MaterialItemListOptions.neededByBefore):
+    // a date-scoped ask cares about URGENCY, not insertion order — the
+    // fetch is capped (lookup-materials.ts's FETCH_LIMIT), so if more
+    // matching items exist than the cap, the ones due SOONEST must be the
+    // ones that make the cut, not merely the ones created first.
+    it('orders date-scoped results by neededBy ascending (soonest first), not creation order', async () => {
+      const repo = new InMemoryMaterialItemRepository();
+      // Created FIRST, but due LATER — if order were still creation-order,
+      // this would come first; it must not.
+      const createdFirstDueLater = await repo.create({
+        tenantId: 't1', description: 'created first, due later', createdBy: 'u1',
+        neededBy: new Date('2026-08-09T00:00:00Z'),
+      });
+      // Created SECOND, but due SOONER — must be spoken first in a
+      // date-scoped ask despite being the newer row.
+      const createdSecondDueSooner = await repo.create({
+        tenantId: 't1', description: 'created second, due sooner', createdBy: 'u1',
+        neededBy: new Date('2026-08-01T00:00:00Z'),
+      });
+
+      const result = await repo.listPending('t1', { neededByBefore: new Date('2026-08-10T00:00:00Z') });
+      expect(result.map((i) => i.id)).toEqual([
+        createdSecondDueSooner.id,
+        createdFirstDueLater.id,
+      ]);
+    });
+
+    it('an absent neededByBefore keeps the existing oldest-created-first order (no behavior change)', async () => {
+      const repo = new InMemoryMaterialItemRepository();
+      const first = await repo.create({
+        tenantId: 't1', description: 'first, due later', createdBy: 'u1',
+        neededBy: new Date('2026-09-01T00:00:00Z'),
+      });
+      const second = await repo.create({
+        tenantId: 't1', description: 'second, due sooner', createdBy: 'u1',
+        neededBy: new Date('2026-08-01T00:00:00Z'),
+      });
+
+      const result = await repo.listPending('t1');
+      expect(result.map((i) => i.id)).toEqual([first.id, second.id]);
+    });
+  });
+
   it('defaults quantity to 1 when omitted, matching the DB column default', async () => {
     const repo = new InMemoryMaterialItemRepository();
     const created = await repo.create({ tenantId: 't1', description: 'flux paste', createdBy: 'u1' });

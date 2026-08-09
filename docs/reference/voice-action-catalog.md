@@ -687,11 +687,13 @@ Notes on the Tradesperson wave 1, Task 9 row (`add_material`, taxonomy 1.13.0):
   7's `startsOn`.** `startsOn` (`create-service-agreement.ts`) rejects a
   past date because a back-dated value feeds a 60-second recurring sweep
   that would immediately drip a job+invoice pair. `neededBy` has no such
-  consumer — nothing sweeps, bills, or repeats off it, and Task 8's
-  `listPending` doesn't even filter by it — so a tradesperson genuinely
-  saying "we needed this yesterday" is a real, useful shopping-list
-  signal, not a malformed one. See `contracts/add-material.ts`'s module
-  doc comment for the full rationale.
+  consumer — nothing sweeps, bills, or repeats off it — so a tradesperson
+  genuinely saying "we needed this yesterday" is a real, useful
+  shopping-list signal, not a malformed one. (`listPending`'s
+  `neededByBefore` — follow-up, 2026-08-09 — is a plain `<` comparison, so
+  a past-dated item is simply "before" any future boundary too; it does
+  not reject or specially treat past dates either.) See
+  `contracts/add-material.ts`'s module doc comment for the full rationale.
 - **`quantity`'s domain cap (1,000,000) is imported, not duplicated
   (quality-review I6).** The contract imports `MAX_QUANTITY` from
   `material-item.ts` rather than repeating the literal — the SAME number
@@ -771,19 +773,40 @@ Notes on the Tradesperson wave 1, Task 9 row (`add_material`, taxonomy 1.13.0):
   silent widen. Absent any jobReference at all, the unfiltered (or
   job-scoped, when `jobId` resolved) list remains the correct, INTENDED
   answer for "read me the shopping list".
-- **"For tomorrow" is not a filter, but `neededBy` IS spoken (spec-review
-  MAJOR B).** Task 8's `MaterialItemListOptions` has no date filter, so
-  the taxonomy no longer advertises "what parts do I need tomorrow?"
-  phrasing — a date-scoped ask now classifies elsewhere rather than
-  quietly returning an unfiltered list under a promise the query can't
-  keep. But `neededBy` IS captured by `add_material` and persisted on
-  every row, so silently never mentioning it on the read side would mean
-  this module collects data it then hides from the person who spoke it:
-  each spoken/rendered item now states its needed-by date when present
-  ("3 boxes of PEX, quantity 3, needed by August 9"), letting the operator
-  identify which of the (possibly unfiltered) items are time-sensitive
-  themselves. A real `neededBy` QUERY filter is a genuine Task 8 contract
-  extension, filed as separate follow-up work — not done here.
+- **"For tomorrow" IS a filter now (follow-up, 2026-08-09) — and `neededBy`
+  is STILL spoken per item (spec-review MAJOR B).**
+  `MaterialItemListOptions.neededByBefore` (both backends —
+  `material-item.ts`, `pg-material-item.ts`) closes the real gap the
+  interim per-item mitigation left open: the fetch is bounded and, by
+  default, ordered oldest-created-first, so a tenant with more pending
+  items than the fetch cap could have a genuinely time-sensitive item
+  never spoken at all — it only "self-corrected" once the item aged into
+  the oldest-N window. `lookup-materials.ts` resolves the caller's raw
+  `dateTimeDescription` ("tomorrow", "by Friday") via `resolveSpokenDay`
+  (ai/scheduling/resolve-datetime.ts) — the SAME lookup-side day resolver
+  `lookup_crew_schedule` uses — into a `neededByBefore` boundary (the
+  start of the day AFTER the resolved one, so the whole named day is
+  included). Two decisions pinned by tests on both backends: (1) a NULL
+  `neededBy` never matches a date-scoped query (an undated item has no
+  known deadline — this falls out of plain SQL `<` comparison semantics on
+  the Pg side, and is filtered explicitly on the InMemory side to keep
+  both backends provably in agreement); (2) date-scoped results are
+  ordered soonest-`neededBy`-first, not oldest-created-first, since a
+  date-scoped ask cares about urgency and the fetch is still capped.
+  UNLIKE `lookup_crew_schedule`, an absent or unparseable phrase applies NO
+  filter at all rather than defaulting to "today" — silently narrowing an
+  unparseable materials ask could hide a real, later-dated item behind a
+  guessed filter, which is worse than just answering the plain unfiltered
+  list. `neededBy` is STILL surfaced per item in the spoken summary
+  regardless of whether a date filter was applied ("3 boxes of PEX,
+  quantity 3, needed by August 9") — a date-scoped answer can still
+  contain several different dates before the cutoff. No new
+  migration/index: `idx_material_items_pending (tenant_id, created_at)
+  WHERE status = 'pending'` (migration 272) already narrows to one
+  tenant's small, append-mostly pending set before the date filter/sort
+  ever runs — see `pg-material-item.ts`'s module doc comment for the full
+  reasoning on why a speculative index isn't justified at this table's
+  realistic size.
 - **TTS-safe quantity wording (quality-review I2).** The original
   `${quantity}× ${description}` shape used U+00D7 MULTIPLICATION SIGN,
   which Amazon Polly reads as "times" in a numeric context ("3× 3 boxes"
@@ -1139,14 +1162,15 @@ the whole tenant list (spec-review MAJOR A). **No permission gate** —
 unlike `lookup_leads`/`lookup_catalog`, there is deliberately no entry in
 `LOOKUP_REQUIRED_PERMISSION` (`workers/voice-lookup-answer.ts`): any
 authenticated operator, technician included, may hear the shopping list.
-There is no date/"for tomorrow" query filter — Task 8's
-`MaterialItemListOptions` has no `neededBy` option, and Task 9 does not
-extend that contract — so the classifier taxonomy does not advertise
-date-scoped phrasing; instead, each item's captured `neededBy` (when
-present) is spoken directly, so the operator can tell which of the
-(possibly unfiltered) items are time-sensitive. The fetch itself is
-bounded (`limit`, at most 6 rows) rather than loading the tenant's whole
-pending set — see the Task 9 notes above for the full rationale.
+A date/"for tomorrow" query filter now exists (follow-up, 2026-08-09,
+taxonomy 1.17.0) — `MaterialItemListOptions.neededByBefore`, resolved from
+the caller's spoken day phrase via `resolveSpokenDay` — see the Task 9
+notes above for the full rationale (NULL semantics, ordering, the
+deliberate "unparseable means no filter, never a today-guess" divergence
+from `lookup_crew_schedule`). Each item's captured `neededBy` is STILL
+spoken directly regardless of whether a filter was applied. The fetch
+itself is bounded (`limit`, at most 6 rows) rather than loading the
+tenant's whole pending set — unaffected by this follow-up.
 
 **`lookup_crew_schedule` / `lookup_timesheets` / `lookup_my_day` (Task 10,
 2026-08-07 tradesperson plan):** three more read-only lookup-skill family
@@ -1197,10 +1221,12 @@ members — no proposal types, no migrations.
   path uses; an unparseable or absent phrase defaults to TODAY, and the
   spoken summary always names the day actually being reported (never lets
   a defaulted day pass as the one asked about). `lookup_timesheets` only
-  supports the CURRENT tenant-local week — mirrors `lookup_materials`'s
-  "for tomorrow is not a filter" precedent — so the taxonomy only
-  advertises "this week" phrasing; a real "last week" query is a genuine
-  but separate extension, not done here.
+  supports the CURRENT tenant-local week — no date filter exists on that
+  skill's repo query at all, the same "not wired yet" state
+  `lookup_materials` was in before its 2026-08-09 follow-up (see the Task
+  9 notes above) — so the taxonomy only advertises "this week" phrasing; a
+  real "last week" query is a genuine but separate extension, not done
+  here.
 - **Bounded fetch, technician-per-appointment via `job.assignedTechnicianId`.**
   All three skills mirror `lookup-day-overview.ts`'s established pattern
   rather than a second `AssignmentRepository.findByTechnician` fetch

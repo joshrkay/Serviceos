@@ -555,8 +555,23 @@ export const SUPPORTED_INTENTS: readonly IntentType[] = [
  *           DEFAULT_MILEAGE_RATE_CENTS_PER_MILE (70¢, the 2026 IRS standard
  *           rate — a constant, not tenant config) into `amountCents`,
  *           forcing `category: 'vehicle'`.
+ *   1.17.0 — Follow-up (2026-08-09), additive coverage extension (no new
+ *           intent): `lookup_materials` now advertises date-scoped
+ *           phrasing again ("what do I need for tomorrow?"), reusing the
+ *           EXISTING `dateTimeDescription` extraction slot (the same one
+ *           `lookup_crew_schedule` already populates — no new field).
+ *           Taxonomy 1.13.0 had REMOVED this phrasing because
+ *           `MaterialItemListOptions` had no date filter, so the ask could
+ *           only be answered by mentioning `neededBy` per item, not by
+ *           narrowing the query — see `lookup-materials.ts`'s module doc
+ *           comment. That filter (`neededByBefore`) now exists on BOTH
+ *           `MaterialItemRepository` backends, and `lookup-materials.ts`
+ *           resolves the phrase via `resolveSpokenDay`
+ *           (ai/scheduling/resolve-datetime.ts) exactly like
+ *           `lookup_crew_schedule` does — restoring the phrase only once
+ *           it was actually wired through, not before.
  */
-export const INTENT_TAXONOMY_VERSION = '1.16.0';
+export const INTENT_TAXONOMY_VERSION = '1.17.0';
 
 /**
  * P11-001: convenience predicate the FSM adapter uses to route
@@ -1682,10 +1697,17 @@ Supported intents (return exactly ONE):
                                      "Did the Davis job turn a profit?"
                                      "What did I clear on JOB-0042?"
 - "lookup_materials"     — read back the pending shopping list, optionally
-                           for one job.
+                           for one job or scoped to a stated day ("what do
+                           I need for tomorrow?"). Extract jobReference
+                           when a job is named, and dateTimeDescription
+                           (verbatim) when the caller scopes the ask to a
+                           day — "by Friday", "for tomorrow", "before
+                           Thursday". Omit dateTimeDescription when no date
+                           was said; never guess one.
                            Examples: "Read me the shopping list"
                                      "What parts do I need?"
                                      "What materials are open on the Patel job?"
+                                     "What do I need to grab for tomorrow?"
 - "lookup_my_day"        — the SPEAKER asks about their own schedule today.
                            Available to any technician; scoped to the
                            speaker's own assignments only.

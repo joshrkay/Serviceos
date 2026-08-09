@@ -10,6 +10,12 @@
  * the redesign this same review forced: bounded fetch (I4)/count semantics
  * (M2), TTS-safe quantity wording (I2), description truncation (M1),
  * needed-by surfacing (spec-review MAJOR B).
+ *
+ * Follow-up (2026-08-09) — `neededByBefore` date scoping. Covers: the
+ * `dateTimeDescription` -> `resolveSpokenDay` -> `neededByBefore` wiring,
+ * the NULL-exclusion/ordering contract inherited from the repo layer, the
+ * date-aware summary phrasing, and the deliberate "unparseable phrase means
+ * NO filter" behavior (unlike lookup-crew-schedule.ts's today-fallback).
  */
 import { describe, it, expect, vi } from 'vitest';
 import { lookupMaterials } from '../../../src/ai/skills/lookup-materials';
@@ -17,6 +23,9 @@ import { InMemoryMaterialItemRepository, type MaterialItem } from '../../../src/
 import type { LookupEventService } from '../../../src/lookup-events/lookup-event-service';
 
 const TENANT = 't-1';
+const TZ = 'America/New_York';
+// 2026-06-11 (Thursday) ~07:00 New York (11:00 UTC).
+const NOW = new Date('2026-06-11T11:00:00.000Z');
 
 function eventsSpy(): LookupEventService {
   return { record: vi.fn(async () => ({}) as never) } as unknown as LookupEventService;
@@ -181,6 +190,138 @@ describe('lookupMaterials skill', () => {
     const res = await lookupMaterials({ tenantId: TENANT }, { materialItemRepo });
 
     expect(res.status).toBe('none');
+  });
+
+  // Follow-up (2026-08-09) — date-scoping via dateTimeDescription.
+  describe('date scoping (neededByBefore)', () => {
+    it('resolves "tomorrow" and passes the day-after boundary to the repo', async () => {
+      const listPending = vi.fn(async () => [] as MaterialItem[]);
+      const materialItemRepo = { listPending, create: vi.fn(), markPurchased: vi.fn() };
+
+      await lookupMaterials(
+        { tenantId: TENANT, dateTimeDescription: 'tomorrow', timezone: TZ, now: NOW },
+        { materialItemRepo: materialItemRepo as never },
+      );
+
+      // "tomorrow" relative to 2026-06-11 NY is 2026-06-12; the boundary is
+      // the START of the day AFTER that (needed_by < boundary keeps
+      // everything ON 2026-06-12 and earlier/overdue).
+      expect(listPending).toHaveBeenCalledWith(TENANT, {
+        neededByBefore: new Date('2026-06-13T00:00:00.000Z'),
+        limit: 6,
+      });
+    });
+
+    it('only speaks items due before the resolved boundary, and orders them soonest-first', async () => {
+      const materialItemRepo = new InMemoryMaterialItemRepository();
+      const dueTomorrow = await materialItemRepo.create({
+        tenantId: TENANT, description: 'due tomorrow', createdBy: 'u1',
+        neededBy: new Date('2026-06-12T00:00:00Z'),
+      });
+      await materialItemRepo.create({
+        tenantId: TENANT, description: 'due next week', createdBy: 'u1',
+        neededBy: new Date('2026-06-19T00:00:00Z'),
+      });
+      await materialItemRepo.create({ tenantId: TENANT, description: 'undated', createdBy: 'u1' });
+
+      const res = await lookupMaterials(
+        { tenantId: TENANT, dateTimeDescription: 'tomorrow', timezone: TZ, now: NOW },
+        { materialItemRepo },
+      );
+
+      expect(res.status).toBe('found');
+      if (res.status !== 'found') throw new Error('unreachable');
+      expect(res.data.spokenItems.map((i) => i.description)).toEqual([dueTomorrow.description]);
+    });
+
+    it('states the resolved date scope in the summary', async () => {
+      const materialItemRepo = new InMemoryMaterialItemRepository();
+      await materialItemRepo.create({
+        tenantId: TENANT, description: 'due tomorrow', createdBy: 'u1',
+        neededBy: new Date('2026-06-12T00:00:00Z'),
+      });
+
+      const res = await lookupMaterials(
+        { tenantId: TENANT, dateTimeDescription: 'tomorrow', timezone: TZ, now: NOW },
+        { materialItemRepo },
+      );
+
+      expect(res.status).toBe('found');
+      if (res.status !== 'found') throw new Error('unreachable');
+      expect(res.summary).toContain('needed by June 12');
+    });
+
+    // A date-scoped empty result must NOT claim "the materials list is
+    // clear" — there could be plenty pending, just none matching this
+    // window. Saying so would misrepresent an unrelated fact as an answer
+    // to the question actually asked.
+    it('a date-scoped empty result is honest about the SCOPE being empty, not the whole list', async () => {
+      const materialItemRepo = new InMemoryMaterialItemRepository();
+      await materialItemRepo.create({
+        tenantId: TENANT, description: 'due way later', createdBy: 'u1',
+        neededBy: new Date('2026-12-01T00:00:00Z'),
+      });
+
+      const res = await lookupMaterials(
+        { tenantId: TENANT, dateTimeDescription: 'tomorrow', timezone: TZ, now: NOW },
+        { materialItemRepo },
+      );
+
+      expect(res.status).toBe('none');
+      expect(res.summary).toContain('June 12');
+      expect(res.summary).not.toMatch(/materials list is clear/i);
+    });
+
+    // Deliberately DIFFERENT from lookup-crew-schedule.ts's today-fallback:
+    // that skill always has something to report (today is always a valid
+    // answer), but silently narrowing an unparseable phrase to "today" here
+    // could hide a real, later-dated item behind a guessed filter. An
+    // unparseable phrase is treated as no filter at all.
+    it('an unparseable dateTimeDescription applies no filter — never a silent today-guess', async () => {
+      const listPending = vi.fn(async () => [] as MaterialItem[]);
+      const materialItemRepo = { listPending, create: vi.fn(), markPurchased: vi.fn() };
+
+      await lookupMaterials(
+        { tenantId: TENANT, dateTimeDescription: 'gibberish not a date', timezone: TZ, now: NOW },
+        { materialItemRepo: materialItemRepo as never },
+      );
+
+      expect(listPending).toHaveBeenCalledWith(TENANT, { limit: 6 });
+    });
+
+    it('combines a date scope with a job scope', async () => {
+      const materialItemRepo = new InMemoryMaterialItemRepository();
+      const match = await materialItemRepo.create({
+        tenantId: TENANT, description: 'job item due tomorrow', jobId: 'job-1', createdBy: 'u1',
+        neededBy: new Date('2026-06-12T00:00:00Z'),
+      });
+      await materialItemRepo.create({
+        tenantId: TENANT, description: 'job item due later', jobId: 'job-1', createdBy: 'u1',
+        neededBy: new Date('2026-12-01T00:00:00Z'),
+      });
+      await materialItemRepo.create({
+        tenantId: TENANT, description: 'other job due tomorrow', jobId: 'job-2', createdBy: 'u1',
+        neededBy: new Date('2026-06-12T00:00:00Z'),
+      });
+
+      const res = await lookupMaterials(
+        { tenantId: TENANT, jobId: 'job-1', dateTimeDescription: 'tomorrow', timezone: TZ, now: NOW },
+        { materialItemRepo },
+      );
+
+      expect(res.status).toBe('found');
+      if (res.status !== 'found') throw new Error('unreachable');
+      expect(res.data.spokenItems.map((i) => i.description)).toEqual([match.description]);
+    });
+
+    it('no dateTimeDescription at all applies no filter (unchanged default behavior)', async () => {
+      const listPending = vi.fn(async () => [] as MaterialItem[]);
+      const materialItemRepo = { listPending, create: vi.fn(), markPurchased: vi.fn() };
+
+      await lookupMaterials({ tenantId: TENANT, timezone: TZ, now: NOW }, { materialItemRepo: materialItemRepo as never });
+
+      expect(listPending).toHaveBeenCalledWith(TENANT, { limit: 6 });
+    });
   });
 
   // I3(b) — the error path: previously untested entirely.

@@ -1236,8 +1236,12 @@ describe('taxonomy 1.2.0 — new intents + entities', () => {
   // a NEW capture-class proposal type that lets an owner add a price-book
   // entry by voice; reuses catalogItemNewName/unitPriceCents/
   // catalogItemNewDescription, adds one new field, catalogItemUnit).
-  it('taxonomy version reflects the latest coordinated bump (1.16.0)', () => {
-    expect(INTENT_TAXONOMY_VERSION).toBe('1.16.0');
+  // A follow-up (2026-08-09) bumped it again to 1.17.0: `lookup_materials`
+  // advertises date-scoped phrasing again now that `neededByBefore` is a
+  // real repo-layer filter (reuses the EXISTING dateTimeDescription slot —
+  // no new extraction field, additive coverage extension only).
+  it('taxonomy version reflects the latest coordinated bump (1.17.0)', () => {
+    expect(INTENT_TAXONOMY_VERSION).toBe('1.17.0');
   });
 
   // Task 11 (2026-08-07 tradesperson plan) — log_mileage is a new intent
