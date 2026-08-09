@@ -6572,6 +6572,44 @@ export const MIGRATIONS = {
     CREATE INDEX IF NOT EXISTS idx_estimates_change_order
       ON estimates (tenant_id, job_id) WHERE is_change_order = TRUE;
   `,
+  // Tradesperson wave 1, Task 8 (2026-08-07 plan) — voice-captured
+  // materials/shopping list. An item is an operational row (like
+  // call_me_back_tasks), created via an approved add_material proposal;
+  // purchasing/PO automation is a non-goal.
+  '272_create_material_items': `
+    CREATE TABLE IF NOT EXISTS material_items (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      job_id UUID REFERENCES jobs(id),
+      description TEXT NOT NULL,
+      quantity INTEGER NOT NULL DEFAULT 1 CHECK (quantity > 0),
+      vendor TEXT,
+      -- 'cancelled' is unreachable today (no method sets it); kept for
+      -- forward-compat since a future task may add markCancelled, and
+      -- dropping a CHECK value later would cost its own migration.
+      status TEXT NOT NULL DEFAULT 'pending'
+        CHECK (status IN ('pending', 'purchased', 'cancelled')),
+      needed_by TIMESTAMPTZ,
+      created_by TEXT NOT NULL,
+      purchased_by TEXT,
+      purchased_at TIMESTAMPTZ,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    ALTER TABLE material_items ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE material_items FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_material_items ON material_items;
+    CREATE POLICY tenant_isolation_material_items ON material_items
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+    -- Single covering index for the one real query shape (listPending: tenant +
+    -- pending + ORDER BY created_at). status = 'pending' is a SQL LITERAL, not a
+    -- bind param, so the planner can prove the predicate implies the index —
+    -- keep it a literal; parameterizing it later would make the index unusable.
+    -- No plain (tenant_id) index: nothing in this module queries by tenant_id
+    -- alone (markPurchased hits the id primary key).
+    CREATE INDEX IF NOT EXISTS idx_material_items_pending
+      ON material_items (tenant_id, created_at) WHERE status = 'pending';
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

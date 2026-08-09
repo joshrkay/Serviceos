@@ -213,6 +213,16 @@ describe('planVoiceEntityLookups — intent-conditioned operator references', ()
     ]);
   });
 
+  // Task 7 (2026-08-07 tradesperson plan) — "sign the Garcias up for the
+  // annual maintenance plan" names a PERSON, not display text. Mirrors
+  // send_customer_message's rationale above.
+  it('resolves the spoken customer name for create_service_agreement', () => {
+    const lookups = planVoiceEntityLookups('create_service_agreement', { customerName: 'Garcia' });
+    expect(lookups).toEqual([
+      { kind: 'customer', reference: 'Garcia', refKey: 'customerId' },
+    ]);
+  });
+
   it('resolves Henderson customer name for lookup_balance', () => {
     const lookups = planVoiceEntityLookups('lookup_balance', { customerName: 'Henderson' });
     expect(lookups).toEqual([
@@ -271,6 +281,90 @@ describe('planVoiceEntityLookups — intent-conditioned operator references', ()
     expect(lookups).toEqual([
       { kind: 'job', reference: 'the Henderson job', refKey: 'jobId' },
     ]);
+  });
+
+  // Task 9 (2026-08-07 tradesperson plan) — "grab three boxes of PEX for
+  // the Patel job" joins JOB_REF_INTENTS the same way log_expense does, so
+  // the spoken job reference resolves to a jobId and the captured material
+  // keeps its job link. jobId stays OPTIONAL on the contract — an
+  // unresolved reference never gates — but a NAMED job still resolves.
+  it('plans a job lookup for add_material', () => {
+    const lookups = planVoiceEntityLookups('add_material', {
+      jobReference: 'the Patel job',
+    });
+    expect(lookups).toEqual([
+      { kind: 'job', reference: 'the Patel job', refKey: 'jobId' },
+    ]);
+  });
+
+  // Task 9 — lookup_materials joins JOB_REF_INTENTS the SAME way so the
+  // shopping-list readback can scope to one job ("what materials are open
+  // on the Patel job?"). Read-only — no gating implications.
+  it('plans a job lookup for lookup_materials', () => {
+    const lookups = planVoiceEntityLookups('lookup_materials', {
+      jobReference: 'the Patel job',
+    });
+    expect(lookups).toEqual([
+      { kind: 'job', reference: 'the Patel job', refKey: 'jobId' },
+    ]);
+  });
+
+  // Task 11 (2026-08-07 tradesperson plan) — "Log 32 miles to the Patel
+  // job" joins JOB_REF_INTENTS the SAME way log_expense does (log_mileage
+  // is an ALIAS onto log_expense's proposal type), so the spoken job
+  // reference resolves to a jobId and the logged mileage keeps its job
+  // link. jobId stays OPTIONAL on the log_expense contract — an unresolved
+  // reference never gates — but a NAMED job still resolves.
+  it('plans a job lookup for log_mileage', () => {
+    const lookups = planVoiceEntityLookups('log_mileage', {
+      jobReference: 'the Patel job',
+    });
+    expect(lookups).toEqual([
+      { kind: 'job', reference: 'the Patel job', refKey: 'jobId' },
+    ]);
+  });
+
+  // Task 10 (2026-08-07 tradesperson plan) — lookup_crew_schedule/
+  // lookup_timesheets join TECHNICIAN_REF_INTENTS the SAME way
+  // reassign_appointment does, so a named crew member ("What's Mike's day
+  // look like?") resolves to a verified technicianId before either skill
+  // runs. An unresolved name is refused by the caller
+  // (workers/voice-lookup-answer.ts), never silently widened to the whole
+  // crew.
+  it('resolves a named crew member for lookup_crew_schedule', () => {
+    const lookups = planVoiceEntityLookups('lookup_crew_schedule', {
+      targetTechnicianName: 'Mike',
+    });
+    expect(lookups).toEqual([{ kind: 'technician', reference: 'Mike', refKey: 'technicianId' }]);
+  });
+
+  it('lookup_crew_schedule with no named crew member plans no lookups (whole-crew ask)', () => {
+    const lookups = planVoiceEntityLookups('lookup_crew_schedule', {
+      dateTimeDescription: 'Thursday afternoon',
+    });
+    expect(lookups).toEqual([]);
+  });
+
+  it('resolves a named crew member for lookup_timesheets', () => {
+    const lookups = planVoiceEntityLookups('lookup_timesheets', {
+      targetTechnicianName: 'Carlos',
+    });
+    expect(lookups).toEqual([{ kind: 'technician', reference: 'Carlos', refKey: 'technicianId' }]);
+  });
+
+  it('lookup_timesheets with no named crew member plans no lookups (whole-crew ask)', () => {
+    const lookups = planVoiceEntityLookups('lookup_timesheets', {});
+    expect(lookups).toEqual([]);
+  });
+
+  // lookup_my_day is deliberately absent from TECHNICIAN_REF_INTENTS — it
+  // is self-scoped to the SPEAKER via resolveCanonicalUser
+  // (dispatch/en-route-voice.ts), never a spoken/resolved reference.
+  it('lookup_my_day never plans a technician lookup — it is self-scoped, not reference-scoped', () => {
+    const lookups = planVoiceEntityLookups('lookup_my_day', {
+      targetTechnicianName: 'Mike',
+    });
+    expect(lookups).toEqual([]);
   });
 
   it('plans technician + appointment lookups for remove_crew_member (no sticky-job fallback)', () => {

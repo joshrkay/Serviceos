@@ -245,6 +245,21 @@ export enum ProposalType {
   // scope-adds from original bids. Capture-class: no money moves at
   // creation, sending the resulting estimate is a later comms-class step.
   CREATE_CHANGE_ORDER = 'create_change_order',
+  // Task 7 (2026-08-07 tradesperson plan) — signs a customer up to a
+  // recurring maintenance plan/membership, writing a service_agreements
+  // row (migration 056, already live). Capture-class: no money moves at
+  // creation, the agreement's own recurring sweep invoices later.
+  CREATE_SERVICE_AGREEMENT = 'create_service_agreement',
+  // Task 9 (2026-08-07 tradesperson plan) — adds a row to the voice-
+  // captured shopping list (material_items, migration 272). Capture-class:
+  // no money moves, and it's reversible (the row can be marked purchased
+  // or simply ignored).
+  ADD_MATERIAL = 'add_material',
+  // Task 12 (2026-08-07 tradesperson plan) — adds a NEW price-book entry.
+  // Capture-class, create-side mirror of UPDATE_CATALOG_ITEM above: no
+  // money moves at creation, only shapes FUTURE drafts (which are
+  // themselves reviewed), and it's reversible (archive the item).
+  ADD_CATALOG_ITEM = 'add_catalog_item',
 }
 
 export enum RejectionCategory {

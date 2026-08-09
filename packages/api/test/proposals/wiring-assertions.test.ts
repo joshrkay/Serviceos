@@ -46,6 +46,7 @@ function fullDeps(): RegistryDeps {
     // Tradesperson wave 1, Task 2 — update_catalog_item became voice-reachable
     // (proposals/voice-intent-map.ts), so its execution handler's
     // isFullyWired() probe (Boolean(this.catalogRepo)) is now exercised here.
+    // Task 12 — add_catalog_item shares this SAME dep.
     catalogRepo: {} as any,
     timelineRepo: {} as any,
     timeEntryRepo: {} as any,
@@ -82,6 +83,16 @@ function fullDeps(): RegistryDeps {
     dispatchRepo: {} as any,
     standingInstructionRepo: {} as any,
     brandVoiceRepo: {} as any,
+    // Task 7 (2026-08-07 tradesperson plan) — create_service_agreement
+    // became voice-reachable (proposals/voice-intent-map.ts), so its
+    // execution handler's isFullyWired() probe (Boolean(this.agreementRepo))
+    // is now exercised here.
+    agreementRepo: {} as any,
+    // Task 9 (2026-08-07 tradesperson plan) — add_material became
+    // voice-reachable (proposals/voice-intent-map.ts), so its execution
+    // handler's isFullyWired() probe (Boolean(this.materialItemRepo)) is
+    // now exercised here.
+    materialItemRepo: {} as any,
   };
 }
 
@@ -161,7 +172,10 @@ describe('U8: each newly probed handler is DETECTED when its effect dep is dropp
     // Tradesperson wave 1, Task 2 — without catalogRepo,
     // UpdateCatalogItemExecutionHandler.isFullyWired() reports false (its
     // dep-less mode is a synthetic passthrough that persists nothing).
-    { omit: ['catalogRepo'], flags: ['update_catalog_item'] },
+    // Task 12 — add_catalog_item shares the SAME catalogRepo dep (no new
+    // dep introduced), so AddCatalogItemExecutionHandler degrades the
+    // same way and is flagged in the SAME row.
+    { omit: ['catalogRepo'], flags: ['update_catalog_item', 'add_catalog_item'] },
     // Tradesperson wave 1, Task 3 — record_refund reuses the SAME
     // paymentRepo record_payment already depends on (no new dep — see
     // RecordRefundExecutionHandler's doc comment). Without it,
@@ -173,6 +187,22 @@ describe('U8: each newly probed handler is DETECTED when its effect dep is dropp
     // reports false (its dep-less mode is a synthetic passthrough that
     // sends nothing).
     { omit: ['customerMessenger'], flags: ['send_customer_message'] },
+    // Task 7 — create_service_agreement: without an agreementRepo,
+    // CreateServiceAgreementExecutionHandler.isFullyWired() reports false
+    // (its dep-less mode is a synthetic passthrough that persists nothing).
+    { omit: ['agreementRepo'], flags: ['create_service_agreement'] },
+    // Quality-review C1 fix — create_service_agreement ALSO requires
+    // locationRepo: the drafting task never supplies payload.locationId (no
+    // extraction seam), so isFullyWired() fails closed without a repo to
+    // resolve the customer's service location itself. This is a genuinely
+    // NEW omission scenario — no prior voice-reachable handler required
+    // locationRepo in its OWN isFullyWired() (emergency_dispatch's probe
+    // does too, but predates this suite's per-dep row coverage).
+    { omit: ['locationRepo'], flags: ['create_service_agreement'] },
+    // Task 9 — add_material: without a materialItemRepo,
+    // AddMaterialExecutionHandler.isFullyWired() reports false (its
+    // dep-less mode is a synthetic passthrough that persists nothing).
+    { omit: ['materialItemRepo'], flags: ['add_material'] },
   ];
 
   for (const { omit, flags } of rows) {

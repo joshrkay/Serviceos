@@ -62,6 +62,19 @@ export const CAPTURE_PROPOSAL_TYPES: ReadonlySet<string> = new Set<string>([
   // job. No money moves at creation (sending it is a later comms-class
   // step) — same capture posture as DRAFT_ESTIMATE.
   ProposalType.CREATE_CHANGE_ORDER,
+  // Task 7 — signs a customer up to a recurring plan/membership. No money
+  // moves at creation (the agreement's own sweep invoices later, and those
+  // invoices ride the normal review path) — same capture posture as
+  // CREATE_CHANGE_ORDER / DRAFT_ESTIMATE.
+  ProposalType.CREATE_SERVICE_AGREEMENT,
+  // Task 9 — adds a row to the voice-captured shopping list. No money
+  // moves, and it's reversible (mark purchased or ignore) — same capture
+  // posture as LOG_EXPENSE.
+  ProposalType.ADD_MATERIAL,
+  // Task 12 — adds a NEW price-book entry. Create-side mirror of
+  // UPDATE_CATALOG_ITEM above: no money moves at creation (future pricing
+  // only), sends no customer message, reversible (archive the item).
+  ProposalType.ADD_CATALOG_ITEM,
 ]);
 
 /**

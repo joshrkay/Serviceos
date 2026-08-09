@@ -88,6 +88,70 @@ export type IntentType =
   // the resulting estimate is a later, separate comms-class step
   // (send_estimate) — same capture posture as draft_estimate.
   | 'create_change_order'
+  // Task 7 (2026-08-07 tradesperson plan) — NEW capture-class proposal
+  // type: signs a customer up to a recurring maintenance plan/membership
+  // ("Sign the Garcias up for the annual maintenance plan, 290 a year").
+  // Writes a `service_agreements` row (migration 056, already live); no
+  // money moves at creation — the agreement's OWN recurring sweep
+  // generates jobs/invoices later, and those invoices ride the normal
+  // review path.
+  | 'create_service_agreement'
+  // Task 9 (2026-08-07 tradesperson plan) — NEW capture-class proposal
+  // type: adds a row to the voice-captured shopping list (`material_items`,
+  // migration 272, Task 8's substrate). No money moves, and it's
+  // reversible (the row can be marked purchased or simply ignored) — same
+  // posture as `log_expense`.
+  | 'add_material'
+  // Task 9 (2026-08-07 tradesperson plan) — read-only lookup-skill family
+  // member: reads back the pending shopping list, optionally scoped to one
+  // job. Never a proposal — routed to the lookup-skill family like every
+  // other `lookup_*` intent.
+  | 'lookup_materials'
+  // Task 10 (2026-08-07 tradesperson plan) — read-only lookup-skill family
+  // members. lookup_crew_schedule/lookup_timesheets are owner-extended
+  // (OWNER_EXTENDED_LOOKUP_INTENT_TYPES) + permission-gated
+  // (LOOKUP_REQUIRED_PERMISSION, reports:view) exactly like
+  // lookup_day_overview; a named crew member rides
+  // extractedEntities.targetTechnicianName (TECHNICIAN_REF_INTENTS
+  // membership — entity-resolution.ts), resolved to a verified
+  // technicianId before the skill runs, and an unresolved name is refused
+  // rather than silently widened to the whole crew (see
+  // ai/skills/lookup-crew-schedule.ts / lookup-timesheets.ts). lookup_my_day
+  // is the opposite shape: available to ANY technician (NOT owner-extended,
+  // NOT permission-gated) because it is strictly self-scoped to the
+  // resolved SPEAKER's own day — see that skill's module doc comment for
+  // why self-scoping IS this intent's entire access-control story.
+  | 'lookup_crew_schedule'
+  | 'lookup_timesheets'
+  | 'lookup_my_day'
+  // Task 11 (2026-08-07 tradesperson plan) — ALIAS intent onto the
+  // EXISTING `log_expense` proposal type/execution handler: a technician
+  // logs drive miles for the tax-deduction mileage log ("Log 32 miles to
+  // the Patel job"). No new ProposalType, no new execution handler. Extract
+  // `mileageMiles` (number, required); jobReference reuses the existing
+  // seam (JOB_REF_INTENTS membership — entity-resolution.ts, mirroring
+  // log_expense). Quality-review fix (2026-08-09) — `LogExpenseTaskHandler`
+  // (ai/tasks/voice-extended-tasks.ts) branches on `context.intent ===
+  // 'log_mileage'` (TaskContext.intent), NOT on the presence of
+  // `mileageMiles` — the classifier's extraction shape is one GLOBAL
+  // template shared by every intent (`entitiesForProposal`,
+  // workers/voice-action-router.ts, is a passthrough for every intent
+  // except `create_customer`), so the taxonomy above only INSTRUCTS the
+  // model to extract `mileageMiles` on this intent; it does not
+  // structurally prevent the model from also populating it (or the plain
+  // `amount` dollars key) on a different intent's turn. Converts miles ×
+  // DEFAULT_MILEAGE_RATE_CENTS_PER_MILE into `amountCents`, forcing
+  // `category: 'vehicle'`.
+  | 'log_mileage'
+  // Task 12 (2026-08-07 tradesperson plan) — NEW capture-class proposal
+  // type: an owner adds a price-book entry by voice ("Add a catalog item:
+  // smart thermostat install, 385"). The create-side mirror of
+  // update_catalog_item: no money moves at creation, only shapes FUTURE
+  // drafts (which are themselves reviewed), and it's reversible (archive
+  // the item). See AddCatalogItemTaskHandler (ai/tasks/add-catalog-item-
+  // task.ts) for the extraction-seam reuse decision and the 0-price
+  // legality rationale.
+  | 'add_catalog_item'
   // Taxonomy 1.2.0 (agent wave, Track A) — three proposal-driving on-ramps:
   //   create_invoice_schedule    — U2: milestone/progress billing plan for a
   //                                job; the verbatim milestone sentence rides
@@ -247,6 +311,14 @@ export const SUPPORTED_INTENTS: readonly IntentType[] = [
   'apply_credit',
   'send_customer_message',
   'create_change_order',
+  'create_service_agreement',
+  'add_material',
+  'lookup_materials',
+  'lookup_crew_schedule',
+  'lookup_timesheets',
+  'lookup_my_day',
+  'log_mileage',
+  'add_catalog_item',
   'create_invoice_schedule',
   'respond_to_review',
   'create_standing_instruction',
@@ -379,8 +451,112 @@ export const SUPPORTED_INTENTS: readonly IntentType[] = [
  *           proposal (missingFields: ['jobId']); see
  *           CreateChangeOrderExecutionHandler (proposals/execution/
  *           create-change-order-handler.ts).
+ *   1.12.0 — Task 7 (2026-08-07 tradesperson plan), additive:
+ *           create_service_agreement — a NEW capture-class proposal type
+ *           that signs a customer up to a recurring maintenance
+ *           plan/membership, writing a `service_agreements` row
+ *           (migration 056, already live). No money moves at creation —
+ *           the agreement's OWN recurring sweep
+ *           (agreements/agreement-service.ts runDueAgreements) generates
+ *           jobs/invoices later, and those invoices ride the normal
+ *           review path. New extraction fields (serviceAgreementName /
+ *           serviceAgreementCadence / serviceAgreementStartsOn); reuses
+ *           the existing customerName/amount seams for the customer
+ *           reference and per-period price. `create_service_agreement`
+ *           joined CUSTOMER_REF_INTENTS (entity-resolution.ts) — an
+ *           unresolved customer reference gates the proposal
+ *           (missingFields: ['customerId']); see
+ *           CreateServiceAgreementExecutionHandler (proposals/execution/
+ *           create-service-agreement-handler.ts).
+ *   1.13.0 — Task 9 (2026-08-07 tradesperson plan), additive: add_material
+ *           — a NEW capture-class proposal type that adds a row to the
+ *           voice-captured shopping list (`material_items`, migration 272,
+ *           Task 8's substrate). No money moves, and it's reversible (the
+ *           row can be marked purchased or simply ignored). New extraction
+ *           fields (materialDescription / materialQuantity /
+ *           materialNeededBy); reuses the existing jobReference/vendor
+ *           seams (jobReference via `JOB_REF_INTENTS` membership — see
+ *           entity-resolution.ts — and vendor, already carried by
+ *           log_expense). lookup_materials — a NEW read-only lookup-skill
+ *           family member (additive, same family as lookup_revenue /
+ *           lookup_job_profit): reads back the pending shopping list,
+ *           optionally scoped to one job via the SAME `JOB_REF_INTENTS`
+ *           resolution. NOT added to `INTENT_TO_PROPOSAL_TYPE` (lookup_*
+ *           intents never produce a proposal) and deliberately has NO
+ *           entry in `LOOKUP_REQUIRED_PERMISSION`
+ *           (workers/voice-lookup-answer.ts) — any authenticated operator
+ *           may hear the shopping list, unlike the owner-grade reports.
+ *           See AddMaterialTaskHandler (ai/tasks/add-material-task.ts) and
+ *           executeLookupAnswer's `lookup_materials` case
+ *           (workers/voice-lookup-answer.ts) for the extraction/answer
+ *           details.
+ *   1.14.0 — Task 10 (2026-08-07 tradesperson plan), additive: three
+ *           READ-ONLY lookup-skill family members, no proposal types, no
+ *           migrations. lookup_crew_schedule (owner asks who is free /
+ *           where a crew member is on a given day or window) and
+ *           lookup_timesheets (owner asks logged hours per crew member for
+ *           the current tenant-local week) are owner-extended
+ *           (OWNER_EXTENDED_LOOKUP_INTENT_TYPES) + permission-gated
+ *           (LOOKUP_REQUIRED_PERMISSION, reports:view) — same posture as
+ *           lookup_day_overview. Both join TECHNICIAN_REF_INTENTS
+ *           (entity-resolution.ts) so a named crew member
+ *           (extractedEntities.targetTechnicianName) resolves to a
+ *           verified technicianId the SAME way reassign_appointment/
+ *           add_crew_member/remove_crew_member already do; an unresolved
+ *           name is refused by name rather than silently widened to the
+ *           whole crew (workers/voice-lookup-answer.ts). lookup_my_day
+ *           (the SPEAKER asks about their own schedule today) is
+ *           deliberately in NEITHER set — available to any technician,
+ *           strictly self-scoped to the resolved speaker's own day via
+ *           users/user.ts's resolveCanonicalUser; an unresolvable speaker
+ *           fails the turn rather than ever falling back to an unscoped
+ *           day. See ai/skills/lookup-crew-schedule.ts, lookup-
+ *           timesheets.ts, and lookup-my-day.ts for the full rationale.
+ *   1.16.0 — Task 12 (2026-08-07 tradesperson plan), additive:
+ *           add_catalog_item — a NEW capture-class proposal type that lets
+ *           an owner add a price-book entry by voice ("Add a catalog item:
+ *           smart thermostat install, 385"). The create-side mirror of
+ *           update_catalog_item (taxonomy 1.7.0): no money moves at
+ *           creation, only shapes FUTURE drafts (which are themselves
+ *           reviewed), and it's reversible (archive the item). REUSES
+ *           update_catalog_item's catalogItemNewName / unitPriceCents /
+ *           catalogItemNewDescription extraction fields (their meaning
+ *           generalizes cleanly to a create — see
+ *           AddCatalogItemTaskHandler's doc comment for the reuse-vs-new
+ *           decision); adds one genuinely NEW field, catalogItemUnit. Zero
+ *           is a LEGAL unitPriceCents (a free/comp price-book line) —
+ *           contract and drafting gate agree on this boundary, unlike the
+ *           contract-accepts-0/task-gates-0 contradiction a prior task's
+ *           review found for a different type. Joined
+ *           CONFIG_WRITING_PROPOSAL_TYPES (proposals/actions.ts) for the
+ *           same reason update_catalog_item did: the catalog HTTP routes
+ *           require settings:update, which a dispatcher's proposals:approve
+ *           does not carry. See AddCatalogItemExecutionHandler
+ *           (proposals/execution/add-catalog-item-handler.ts) for the
+ *           category/unit default posture.
+ *   1.15.0 — Task 11 (2026-08-07 tradesperson plan), additive: log_mileage
+ *           — an ALIAS intent onto the EXISTING `log_expense` proposal type
+ *           (no new ProposalType, no new execution handler, no migration).
+ *           A technician logs drive miles for the tax-deduction mileage
+ *           log ("Log 32 miles to the Patel job"). New extraction field
+ *           (mileageMiles, a possibly-fractional number, deliberately NOT
+ *           the plan's literal suggested name `miles` — a generic key in a
+ *           shared entity bag risks collision with a future intent);
+ *           reuses the existing jobReference seam (JOB_REF_INTENTS
+ *           membership — entity-resolution.ts — mirrors log_expense's own
+ *           membership). Quality-review fix (2026-08-09) —
+ *           `LogExpenseTaskHandler` (ai/tasks/voice-extended-tasks.ts)
+ *           branches on `context.intent === 'log_mileage'` (TaskContext.
+ *           intent), not the presence of `mileageMiles`: the classifier's
+ *           extraction shape is one global template the taxonomy only
+ *           INSTRUCTS per intent, not structurally scopes, so keying on
+ *           field presence let a stray field from the OTHER alias hijack
+ *           (or get silently dropped by) the wrong branch. Converts miles ×
+ *           DEFAULT_MILEAGE_RATE_CENTS_PER_MILE (70¢, the 2026 IRS standard
+ *           rate — a constant, not tenant config) into `amountCents`,
+ *           forcing `category: 'vehicle'`.
  */
-export const INTENT_TAXONOMY_VERSION = '1.11.0';
+export const INTENT_TAXONOMY_VERSION = '1.16.0';
 
 /**
  * P11-001: convenience predicate the FSM adapter uses to route
@@ -412,6 +588,11 @@ export const OWNER_EXTENDED_LOOKUP_INTENT_TYPES = new Set<IntentType>([
   'lookup_day_overview',
   'lookup_digest',
   'lookup_pending_items',
+  // Task 10 (2026-08-07 tradesperson plan) — owner/dispatcher-only crew
+  // reports. `lookup_my_day` is deliberately NOT here — see its own doc
+  // comment on IntentType.
+  'lookup_crew_schedule',
+  'lookup_timesheets',
 ]);
 
 /**
@@ -519,6 +700,18 @@ export interface ExtractedEntities {
     | 'office'
     | 'other';
   vendor?: string;
+  // Task 11 (2026-08-07 tradesperson plan) — log_mileage intent (aliases
+  // log_expense). Miles driven, possibly fractional (an odometer reading).
+  // The parser only drops a non-finite value (NaN/Infinity — see
+  // `Number.isFinite` in the parse allowlist below); unlike
+  // materialQuantity it is NOT additionally filtered to `> 0` or rounded
+  // here — a required field with domain bounds (positive, ≤ MAX_MILEAGE_
+  // MILES) gets validated at the HANDLER, same posture as
+  // `LogExpenseTaskHandler`'s own `amount` gate, so a spoken 0/negative/
+  // out-of-range value reaches the handler and gates on `amountCents` for
+  // an accurate reason instead of silently vanishing here and looking like
+  // "no miles stated at all".
+  mileageMiles?: number;
   // convert_lead intent: free-text reference to the lead being converted
   // (caller name or "the Johnson lead"). The execution handler resolves
   // it to a concrete leadId.
@@ -595,6 +788,17 @@ export interface ExtractedEntities {
   // Same capture-only caveat and qualified-name rationale as
   // `catalogItemNewName` above.
   catalogItemNewDescription?: string;
+  // Task 12 (2026-08-07 tradesperson plan) — add_catalog_item: the unit of
+  // measure for a NEW price-book entry ("copper pipe, per pound"). No
+  // existing ExtractedEntities field carries a catalog unit of measure, so
+  // this is a genuinely new field (unlike catalogItemNewName/
+  // catalogItemNewDescription/unitPriceCents, which add_catalog_item
+  // REUSES from update_catalog_item — see AddCatalogItemTaskHandler's doc
+  // comment). Mirrors catalog-item.ts's CatalogUnit vocabulary; validated
+  // against CATALOG_UNITS at parse time (below) like every other bounded
+  // enum field, so an out-of-vocabulary value never reaches the task
+  // handler as if it were a real unit.
+  catalogItemUnit?: 'each' | 'hour' | 'sq ft' | 'per lb' | 'per gal';
   // Tradesperson wave 1, Task 3 — record_refund: how the MANUAL refund was
   // given back (cash / check / a swiped card outside Stripe / other).
   // Qualified (not bare `method`) so it can never be confused with a future
@@ -631,6 +835,40 @@ export interface ExtractedEntities {
   // jobReference (existing field) carries the spoken job reference; amount
   // (existing field) carries the stated cents, when spoken.
   changeOrderDescription?: string;
+  // Task 7 — create_service_agreement: the spoken name of the plan/
+  // membership ("annual maintenance plan", "29-a-month membership").
+  // Qualified (not bare `name`) per house precedent
+  // (catalogItemNewName/refundReason) — folds directly onto the
+  // contract's `name` field.
+  serviceAgreementName?: string;
+  // create_service_agreement: how often the plan recurs, normalized by the
+  // classifier onto one of these 4 tokens (synonyms like "semiannual" or
+  // "yearly" map onto twice_a_year/annual respectively — never emitted
+  // verbatim). The task handler maps each token to an RRULE string
+  // deterministically; an absent/invalid value gates
+  // missingFields: ['recurrenceRule'].
+  serviceAgreementCadence?: 'monthly' | 'quarterly' | 'twice_a_year' | 'annual';
+  // create_service_agreement: the spoken plan start date/phrase
+  // ("starting September", "October 1st"), verbatim — the task handler
+  // parses it best-effort (chrono-node, tenant-timezone anchored) and
+  // falls back to the first of next month when unstated or unparseable.
+  serviceAgreementStartsOn?: string;
+  // Task 9 (2026-08-07 tradesperson plan) — add_material: what the caller
+  // wants added to the shopping list, verbatim ("three boxes of half-inch
+  // PEX", "a flue liner kit"). Qualified (not bare `description`) per house
+  // precedent (expenseDescription / changeOrderDescription) — the flat
+  // gate key downstream is still the contract's own `description`.
+  materialDescription?: string;
+  // add_material: how many, when the caller stated a count ("three boxes",
+  // "two heaters"). Defaults to 1 downstream when unstated. Qualified (not
+  // bare `quantity`) per house precedent (unitPriceCents / durationMinutes).
+  materialQuantity?: number;
+  // add_material: when the material is needed by, verbatim ("before
+  // Thursday", "by next week") — the task handler parses it best-effort
+  // (chrono-node, tenant-timezone anchored); an unparseable phrase is
+  // simply omitted, never gated (purely informational). Qualified (not
+  // bare `neededBy`) per house precedent (serviceAgreementStartsOn).
+  materialNeededBy?: string;
 }
 
 /**
@@ -745,11 +983,14 @@ export interface ClassifyContext {
   ownerSession?: boolean;
   /**
    * Phase-2 Track A (RV-010/064/085) — opt-in for OWNER extended read-only
-   * lookups (lookup_day_overview, lookup_digest, lookup_pending_items).
-   * When true, EXTENDED_INTENTS_PROMPT_SECTION is appended and the
-   * deterministic phrase matcher short-circuits day/digest/pending
-   * phrasings. Complaint/negotiation are NOT gated here — see
-   * customerProtectionIntents.
+   * lookups (lookup_day_overview, lookup_digest, lookup_pending_items;
+   * Task 10 adds lookup_crew_schedule/lookup_timesheets — lookup_my_day is
+   * NOT gated here, see its IntentType doc comment). When true,
+   * EXTENDED_INTENTS_PROMPT_SECTION is appended and the deterministic
+   * phrase matcher short-circuits day/digest/pending phrasings (crew
+   * schedule/timesheets extract entities, so they are deliberately NOT
+   * phrase-matched — see EXTENDED_INTENT_PHRASES's own rule). Complaint/
+   * negotiation are NOT gated here — see customerProtectionIntents.
    */
   extendedIntents?: boolean;
   /**
@@ -1223,6 +1464,27 @@ Supported intents (return exactly ONE):
                            Examples: "The Garcias want a second zone — change order for 1800"
                                      "Add a change order on the Patel job: replace the flue liner too"
                                      "Customer added three more outlets — write it up"
+- "create_service_agreement" — owner signs a customer up for a recurring
+                           maintenance plan/membership. Extract customerName,
+                           serviceAgreementName, serviceAgreementCadence —
+                           exactly one of monthly, quarterly, twice_a_year,
+                           or annual (map "semiannual"/"every six months" to
+                           twice_a_year and "yearly" to annual; NEVER emit
+                           the words "twice a year" with spaces — the field
+                           value must be the literal token twice_a_year) —
+                           amount (integer cents per period), and
+                           serviceAgreementStartsOn if spoken.
+                           Examples: "Sign the Garcias up for the annual maintenance plan, 290 a year"
+                                     "Put Maria on the 29-a-month membership starting September"
+                                     "Quarterly filter service for the Patels, 79 per visit"
+- "add_material"         — owner/technician adds parts/materials to the
+                           shopping list, optionally tied to a job and
+                           vendor. Extract materialDescription (required),
+                           materialQuantity, jobReference, vendor,
+                           materialNeededBy.
+                           Examples: "Add three boxes of half-inch PEX to the shopping list"
+                                     "We need a flue liner kit for the Patel job"
+                                     "Pick up two 40-gallon heaters at Ferguson before Thursday"
 - "create_invoice_schedule" — user wants to set up a MILESTONE / PROGRESS
                            billing plan for a job: a deposit up front and the
                            rest later, or a percentage split across stages.
@@ -1419,6 +1681,35 @@ Supported intents (return exactly ONE):
                                      "How'd we do on the Smith water heater?"
                                      "Did the Davis job turn a profit?"
                                      "What did I clear on JOB-0042?"
+- "lookup_materials"     — read back the pending shopping list, optionally
+                           for one job.
+                           Examples: "Read me the shopping list"
+                                     "What parts do I need?"
+                                     "What materials are open on the Patel job?"
+- "lookup_my_day"        — the SPEAKER asks about their own schedule today.
+                           Available to any technician; scoped to the
+                           speaker's own assignments only.
+                           Examples: "What's my next job?"
+                                     "What's on my schedule today?"
+                                     "Where am I going after this one?"
+- "log_mileage"          — technician logs drive miles (tax deduction).
+                           Maps to log_expense, category "vehicle", amount =
+                           miles × DEFAULT_MILEAGE_RATE_CENTS_PER_MILE (70¢,
+                           2026 IRS standard rate — constant, not config).
+                           Extract mileageMiles (number, required) and
+                           jobReference.
+                           Examples: "Log 32 miles to the Patel job"
+                                     "Put down 18 miles for today's supply run"
+- "add_catalog_item"     — owner adds a price-book entry (new service or
+                           part with a standard price). Extract name
+                           (required, catalogItemNewName), unitPriceCents
+                           (required), unit (catalogItemUnit) and
+                           description (catalogItemNewDescription) when
+                           spoken. Distinct from update_catalog_item: this
+                           is a brand-new entry, never an edit to an
+                           existing one — no catalogItemReference.
+                           Examples: "Add a catalog item: smart thermostat install, 385"
+                                     "New price-book entry — sump pump replacement, 1200"
 - "unknown"             — anything else: ambiguous transcripts, or edit
                            commands without a clear reference.
 
@@ -1444,6 +1735,18 @@ Distinctions that matter:
   "add a <thing> to <existing invoice/estimate>" = update_invoice/update_estimate.
   When "add" refers to a line item, money, or an existing document, it is
   NOT create_customer even if a customer name appears in the sentence.
+- "lookup_appointments" vs "lookup_my_day" (spec-review addendum,
+  2026-08-09): both can sound like "what's on my schedule" out of context,
+  but they answer for DIFFERENT people. lookup_appointments is the
+  CUSTOMER asking about a booking THEY are waiting on ("when are y'all
+  coming out?", "what time is my appointment?") — the caller is not doing
+  the work, they are having work done TO them. lookup_my_day is a
+  TECHNICIAN or crew member asking about their OWN day of work to perform
+  ("what's my next job?", "where am I going after this one?") — the
+  caller IS the one doing the work. When the phrasing gives no other
+  signal, a caller asking about "MY appointment" (singular, something
+  scheduled for them) is lookup_appointments; a caller asking about "MY
+  schedule/day/jobs" (plural work to do) is lookup_my_day.
 
 Return valid JSON with exactly this shape (no prose, no markdown fences):
 {
@@ -1462,7 +1765,7 @@ Return valid JSON with exactly this shape (no prose, no markdown fences):
     "address": "<string, optional — NEW customer's street address, verbatim, on create_customer>",
     "appointmentReference": "<string, optional — existing appointment reference>",
     "newDateTimeDescription": "<string, optional — new time for reschedule_appointment>",
-    "targetTechnicianName": "<string, optional — target technician on reassign_appointment>",
+    "targetTechnicianName": "<string, optional — target technician on reassign_appointment; also the named crew member on lookup_crew_schedule/lookup_timesheets>",
     "cancellationReason": "<string, optional — free-text reason on cancel_appointment>",
     "cancellationType": "<customer_request|technician_unavailable|scheduling_conflict|other, optional>",
     "noteBody": "<string, optional — the note text on add_note; on log_permit, MUST begin \"PERMIT: \" followed by the permit number/status>",
@@ -1477,7 +1780,7 @@ Return valid JSON with exactly this shape (no prose, no markdown fences):
     "updatedAddress": "<string, optional — new address on update_customer>",
     "expenseDescription": "<string, optional — what the expense was for on log_expense>",
     "expenseCategory": "<materials|fuel|tools|subcontractor|vehicle|insurance|office|other, optional — on log_expense>",
-    "vendor": "<string, optional — who was paid on log_expense>",
+    "vendor": "<string, optional — who was paid on log_expense, or the supply house on add_material>",
     "leadReference": "<string, optional — the lead being converted/lost on convert_lead/mark_lead_lost>",
     "lostReason": "<string, optional — why the lead was lost on mark_lead_lost>",
     "serviceAddress": "<string, optional — full address on add_service_location>",
@@ -1490,16 +1793,24 @@ Return valid JSON with exactly this shape (no prose, no markdown fences):
     "scopeIntentHint": "<string, optional — what work the standing rule applies to>",
     "brandVoiceInstruction": "<string, optional — VERBATIM spoken tone/sign-off/persona instruction on update_brand_voice>",
     "catalogItemReference": "<string, optional — spoken catalog/price-book entry name on update_catalog_item>",
-    "unitPriceCents": <integer cents, optional — the NEW price on update_catalog_item>,
-    "catalogItemNewName": "<string, optional — the NEW name on update_catalog_item>",
-    "catalogItemNewDescription": "<string, optional — the NEW description on update_catalog_item>",
+    "unitPriceCents": <integer cents, optional — the NEW price on update_catalog_item, or the price of the new entry on add_catalog_item>,
+    "catalogItemNewName": "<string, optional — the NEW name on update_catalog_item, or the name of the new entry on add_catalog_item>",
+    "catalogItemNewDescription": "<string, optional — the NEW description on update_catalog_item, or the description of the new entry on add_catalog_item>",
+    "catalogItemUnit": "<each|hour|sq ft|per lb|per gal, optional — unit of measure on add_catalog_item>",
     "refundMethod": "<cash|check|card_external|other, optional — on record_refund>",
     "refundReason": "<string, optional — why the refund was given on record_refund>",
     "refundCheckNumber": "<string, optional — check number on record_refund>",
     "creditReason": "<string, optional — why the credit was given on apply_credit>",
     "customerMessageBody": "<string, optional — the message content to send on send_customer_message, cleaned up but faithful>",
     "customerMessageChannel": "<sms|email, optional — on send_customer_message, defaults to sms>",
-    "changeOrderDescription": "<string, optional — the added work, verbatim, on create_change_order>"
+    "changeOrderDescription": "<string, optional — the added work, verbatim, on create_change_order>",
+    "serviceAgreementName": "<string, optional — the plan/membership name on create_service_agreement>",
+    "serviceAgreementCadence": "<monthly|quarterly|twice_a_year|annual, optional — recurring cadence on create_service_agreement>",
+    "serviceAgreementStartsOn": "<string, optional — verbatim spoken start date/phrase on create_service_agreement>",
+    "materialDescription": "<string, optional — what to add to the shopping list on add_material>",
+    "materialQuantity": <integer, optional — how many on add_material, defaults to 1>,
+    "materialNeededBy": "<string, optional — verbatim spoken needed-by date/phrase on add_material>",
+    "mileageMiles": <number, optional — miles driven on log_mileage; may be fractional>
   }
 }
 
@@ -1608,9 +1919,31 @@ export const EXTENDED_INTENTS_PROMPT_SECTION = `Extended operator intents (this 
                            Examples: "What am I waiting on?"
                                      "What's still out there?"
                                      "Which estimates haven't been accepted?"
+- "lookup_crew_schedule" — owner asks who is free / where a crew member is
+                           on a given day or window. Owner-extended.
+                           Examples: "Who's free Thursday afternoon?"
+                                     "What's Mike's day look like?"
+                                     "Where's Carlos right now?"
+- "lookup_timesheets"    — owner asks logged hours per crew member for a
+                           period (default: this week). Owner-extended.
+                           Examples: "How many hours did Carlos log this week?"
+                                     "Give me everyone's hours for the week"
 Notes:
 - The lookup_* entries above are READ-ONLY intents — never classify a
   command that creates or changes a record as one of them.
+- "lookup_day_overview" vs "lookup_my_day" (always available, not shown in
+  this section): "what's my day look like?" spoken by the OWNER about
+  their OWN cross-crew overview (schedule + priorities + approvals) is
+  lookup_day_overview. The SAME phrase asking about ONE named crew
+  member's day ("What's Mike's day look like?") is lookup_crew_schedule,
+  not lookup_day_overview — lookup_day_overview never takes a
+  targetTechnicianName.
+- lookup_crew_schedule/lookup_timesheets name a crew member in
+  extractedEntities.targetTechnicianName when one is stated, and a day/
+  window phrase in extractedEntities.dateTimeDescription when stated
+  (lookup_crew_schedule only — lookup_timesheets is always "this week").
+  Omit either field when the caller didn't say it; do not guess a name or
+  a day.
 - Do not change the JSON output schema.`;
 
 interface OwnerOperatorCommandPattern {
@@ -1865,6 +2198,11 @@ export function parseClassifierJson(content: string): IntentClassification | nul
     'other',
   ] as const;
   const TIME_ENTRY_TYPES = ['job', 'drive', 'break', 'admin'] as const;
+  const SERVICE_AGREEMENT_CADENCES = ['monthly', 'quarterly', 'twice_a_year', 'annual'] as const;
+  // Task 12 (2026-08-07 tradesperson plan) — mirrors catalog-item.ts's
+  // CatalogUnit vocabulary (duplicated, not imported — see
+  // contracts/add-catalog-item.ts's module doc comment for why).
+  const CATALOG_UNITS = ['each', 'hour', 'sq ft', 'per lb', 'per gal'] as const;
 
   /**
    * Validate an LLM-provided value against a fixed allowed-set.
@@ -1969,6 +2307,12 @@ export function parseClassifierJson(content: string): IntentClassification | nul
     if (typeof ee.catalogItemNewName === 'string') extracted.catalogItemNewName = ee.catalogItemNewName;
     if (typeof ee.catalogItemNewDescription === 'string')
       extracted.catalogItemNewDescription = ee.catalogItemNewDescription;
+    // add_catalog_item fields (Task 12, 2026-08-07 tradesperson plan).
+    // catalogItemNewName/catalogItemNewDescription/unitPriceCents are
+    // REUSED from update_catalog_item (parsed unconditionally above,
+    // regardless of intentType) — only catalogItemUnit is new here.
+    const catalogItemUnit = pickEnum(ee, 'catalogItemUnit', CATALOG_UNITS);
+    if (catalogItemUnit) extracted.catalogItemUnit = catalogItemUnit;
     // record_refund fields (Tradesperson wave 1, Task 3)
     const refundMethod = pickEnum(ee, 'refundMethod', REFUND_METHODS);
     if (refundMethod) extracted.refundMethod = refundMethod;
@@ -1984,6 +2328,39 @@ export function parseClassifierJson(content: string): IntentClassification | nul
     if (customerMessageChannel) extracted.customerMessageChannel = customerMessageChannel;
     // create_change_order fields (Tradesperson wave 1, Task 6)
     if (typeof ee.changeOrderDescription === 'string') extracted.changeOrderDescription = ee.changeOrderDescription;
+    // create_service_agreement fields (Task 7, 2026-08-07 tradesperson plan)
+    if (typeof ee.serviceAgreementName === 'string') extracted.serviceAgreementName = ee.serviceAgreementName;
+    const serviceAgreementCadence = pickEnum(ee, 'serviceAgreementCadence', SERVICE_AGREEMENT_CADENCES);
+    if (serviceAgreementCadence) extracted.serviceAgreementCadence = serviceAgreementCadence;
+    if (typeof ee.serviceAgreementStartsOn === 'string')
+      extracted.serviceAgreementStartsOn = ee.serviceAgreementStartsOn;
+    // add_material fields (Task 9, 2026-08-07 tradesperson plan). jobId is
+    // deliberately NOT parsed here — it is a router-injected verified id
+    // (see AddMaterialTaskHandler's doc comment), never an LLM-extracted
+    // field, so it has no entry in this allowlist. jobReference and vendor
+    // already flow through the shared fields above.
+    if (typeof ee.materialDescription === 'string') extracted.materialDescription = ee.materialDescription;
+    if (
+      typeof ee.materialQuantity === 'number' &&
+      Number.isFinite(ee.materialQuantity) &&
+      ee.materialQuantity > 0
+    ) {
+      extracted.materialQuantity = Math.round(ee.materialQuantity);
+    }
+    if (typeof ee.materialNeededBy === 'string') extracted.materialNeededBy = ee.materialNeededBy;
+    // log_mileage field (Task 11, 2026-08-07 tradesperson plan). jobReference
+    // already flows through the shared field above (JOB_REF_INTENTS
+    // membership — entity-resolution.ts). NOT filtered to `> 0` here (unlike
+    // materialQuantity) — mileageMiles is a REQUIRED field on this intent
+    // (unlike materialQuantity's optional-with-default posture), so an
+    // invalid value (0, negative, an STT-garbled huge figure) must still
+    // reach LogExpenseTaskHandler, which owns the real domain gate and
+    // reports an accurate `amountCents` missingFields entry — dropping it
+    // here would make an invalid mileage value indistinguishable from no
+    // mileage being stated at all.
+    if (typeof ee.mileageMiles === 'number' && Number.isFinite(ee.mileageMiles)) {
+      extracted.mileageMiles = ee.mileageMiles;
+    }
     if (Object.keys(extracted).length > 0) {
       result.extractedEntities = extracted;
     }

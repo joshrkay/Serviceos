@@ -63,6 +63,28 @@ import type { ProposalType } from './proposal';
  * here, next to lookup_*, so the drift test
  * (test/ai/voice-action-catalog.contract.test.ts) and a human reader both
  * see this as an intentional exclusion, not a gap.
+ *
+ * Task 13 (2026-08-07 tradesperson plan): `confirm`, `language_switch`, and
+ * `operator_request` are a THIRD kind of deliberate omission, distinct from
+ * both of the above — they are real, understood intents (never absorbed
+ * into 'unknown'; see intent-classifier.ts's low_confidence/unknown_intent
+ * guards) that simply have no recorded-memo action: a memo has no live
+ * pending question to confirm (`confirm`), no live call whose language can
+ * be switched (`language_switch`), and no live operator to transfer to
+ * (`operator_request`). On the memo path (workers/voice-action-router.ts)
+ * the miss on this map is caught by a dedicated branch, just above the
+ * generic warn+skip, that emits a `voice_clarification` explaining why —
+ * not the same silent skip that branch protects against.
+ *
+ * This is NOT a gap the live-call/chat text-mode-driver path shares:
+ * `text-mode-driver.ts` is not a separate pipeline — it dispatches through
+ * `createVoiceActionRouterWorker`, the same worker this map serves — but it
+ * intercepts these three intents itself, BEFORE reaching this map's lookup
+ * (`evaluateTurn`: `confirm`/`language_switch` → `{kind:'noop'}`,
+ * `operator_request` → `{kind:'escalate'}`), because on a live call they
+ * DO have a real target (the in-progress dialogue / the on-call human).
+ * That earlier interception, not this map, is why the two surfaces don't
+ * double-emit for the same intent.
  */
 export const INTENT_TO_PROPOSAL_TYPE: Partial<Record<Exclude<IntentType, 'unknown'>, ProposalType>> = {
   create_invoice: 'draft_invoice',
@@ -138,6 +160,32 @@ export const INTENT_TO_PROPOSAL_TYPE: Partial<Record<Exclude<IntentType, 'unknow
   // isChangeOrder (migration 271). NOT S1-allowed (operator-only): see
   // proposals/surface.ts S1_ALLOWED_PROPOSAL_TYPES and its contract test.
   create_change_order: 'create_change_order',
+  // Task 7 (2026-08-07 tradesperson plan) — create_service_agreement is a
+  // NEW capture-class proposal type: signs a customer up to a recurring
+  // maintenance plan/membership. NOT S1-allowed (operator-only): see
+  // proposals/surface.ts S1_ALLOWED_PROPOSAL_TYPES and its contract test.
+  create_service_agreement: 'create_service_agreement',
+  // Task 9 (2026-08-07 tradesperson plan) — add_material is a NEW
+  // capture-class proposal type: adds a row to the voice-captured shopping
+  // list (material_items, migration 272, Task 8's substrate). NOT
+  // S1-allowed (operator-only): see proposals/surface.ts
+  // S1_ALLOWED_PROPOSAL_TYPES and its contract test. `lookup_materials` is
+  // deliberately OMITTED from this map — like every other lookup_*
+  // intent, it is read-only and never produces a proposal.
+  add_material: 'add_material',
+  // Task 11 (2026-08-07 tradesperson plan) — log_mileage is an ALIAS onto
+  // the EXISTING log_expense proposal type: no new ProposalType, no new
+  // execution handler, no migration. Drafting + execution are keyed by
+  // PROPOSAL type, so this inherits the log_expense leg unchanged; only
+  // LogExpenseTaskHandler's own drafting branches on the intent-specific
+  // `mileageMiles` extracted-entity field (ai/tasks/voice-extended-tasks.ts).
+  log_mileage: 'log_expense',
+  // Task 12 (2026-08-07 tradesperson plan) — add_catalog_item is a NEW
+  // capture-class proposal type: an owner adds a price-book entry by
+  // voice. NOT S1-allowed (operator-only), same as update_catalog_item:
+  // see proposals/surface.ts S1_ALLOWED_PROPOSAL_TYPES and its contract
+  // test.
+  add_catalog_item: 'add_catalog_item',
 };
 
 /**
@@ -208,6 +256,24 @@ export function voiceProposalSummary(
   // (job reference takes precedence over a bare customer name, since a
   // change order is meaningless without its job).
   if (intent === 'create_change_order') return `Change order${ref ? ` on ${ref}` : name ? ` for ${name}` : ''}`;
+  // Task 7 — mirrors apply_credit's shape (named-recipient summary).
+  if (intent === 'create_service_agreement') return `Service agreement${name ? ` for ${name}` : ''}`;
+  // Task 9 — job-scoped, mirrors create_change_order's precedence rule
+  // (job reference takes precedence over a bare customer name — a
+  // shopping-list item is usually about the job, not the customer).
+  if (intent === 'add_material') return `Add material${ref ? ` for ${ref}` : name ? ` for ${name}` : ''}`;
+  // Task 11 — mirrors log_permit's preposition convention ("on" for a job,
+  // "for" for a bare customer name) rather than add_material's uniform
+  // "for" — both log_mileage and log_permit are "Log <noun>" intents.
+  if (intent === 'log_mileage') return `Log mileage${ref ? ` on ${ref}` : name ? ` for ${name}` : ''}`;
+  // Task 12 — the new catalog item's own name (catalogItemNewName), not
+  // entities.customerName/jobReference — a price-book entry names an
+  // item, not a customer or a job.
+  if (intent === 'add_catalog_item') {
+    const itemName =
+      entities && typeof entities.catalogItemNewName === 'string' ? entities.catalogItemNewName : undefined;
+    return `Add catalog item${itemName ? `: ${itemName}` : ''}`;
+  }
   if (intent) return `Voice intent: ${intent}${ref ? ` (${ref})` : ''}`;
   return 'Voice clarification needed';
 }

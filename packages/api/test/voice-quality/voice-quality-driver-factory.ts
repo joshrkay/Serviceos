@@ -218,6 +218,55 @@ function classifierJsonForTurn(script: VoiceQualityScript, turnIndex: number): s
   if (intent === 'request_feedback') {
     if (typeof slots.jobReference === 'string') entities.jobReference = slots.jobReference;
   }
+  // Tradesperson wave 1 (2026-08-07 plan), final-verification corpus
+  // additions — record_refund / apply_credit / create_change_order /
+  // add_material extraction fields (see intent-classifier.ts's
+  // ExtractedEntities doc comments for the field-name rationale). This
+  // harness wires no `entityResolver` (see runner.ts's `makeRepoBundle` —
+  // no job/invoice fuzzy-match dep exists here), so `jobReference` free
+  // text is deliberately omitted from the mock's entities for these four:
+  // it would stay unresolved and land the proposal on `missingFields`
+  // instead of a clean happy-path draft. The corpus scripts therefore pin
+  // only the extractable-without-resolution fields in `expected.slots`.
+  if (intent === 'record_refund') {
+    if (typeof slots.amountCents === 'number') entities.amount = slots.amountCents;
+    entities.refundMethod = typeof slots.refundMethod === 'string' ? slots.refundMethod : 'cash';
+    if (typeof slots.refundReason === 'string') entities.refundReason = slots.refundReason;
+  }
+  if (intent === 'apply_credit') {
+    if (typeof slots.amountCents === 'number') entities.amount = slots.amountCents;
+    if (typeof slots.creditReason === 'string') entities.creditReason = slots.creditReason;
+  }
+  if (intent === 'create_change_order') {
+    if (typeof slots.amountCents === 'number') entities.amount = slots.amountCents;
+    entities.changeOrderDescription =
+      typeof slots.changeOrderDescription === 'string' ? slots.changeOrderDescription : 'the added work';
+  }
+  if (intent === 'add_material') {
+    entities.materialDescription =
+      typeof slots.description === 'string' ? slots.description : 'materials for the shopping list';
+    if (typeof slots.quantity === 'number') entities.materialQuantity = slots.quantity;
+  }
+  // create_service_agreement / send_customer_message are CUSTOMER_REF
+  // intents resolved via the caller's own verified identity (same
+  // mechanism update_customer/log_expense already rely on in this
+  // harness — a "known customer" callerId resolves `context.customerId`
+  // directly, no free-text customerName lookup needed).
+  if (intent === 'create_service_agreement') {
+    entities.serviceAgreementName =
+      typeof slots.name === 'string' ? slots.name : 'Annual maintenance plan';
+    entities.serviceAgreementCadence =
+      typeof slots.recurrenceRule === 'string' ? slots.recurrenceRule : 'monthly';
+    if (typeof slots.priceCents === 'number') entities.amount = slots.priceCents;
+    entities.serviceAgreementStartsOn =
+      typeof slots.startsOn === 'string' ? slots.startsOn : 'next month';
+  }
+  if (intent === 'send_customer_message') {
+    entities.customerMessageBody =
+      typeof slots.body === 'string' ? slots.body : 'Your part arrived — we can come by Thursday morning.';
+    entities.customerMessageChannel =
+      typeof slots.channel === 'string' ? slots.channel : 'sms';
+  }
   // B8.10 — send_estimate_nudge's reference resolution reads
   // customerName/jobReference off entitiesFrom(context) exactly like
   // send_estimate/send_invoice. `slots.customerName` is NOT reused here for
@@ -345,6 +394,22 @@ export class ScriptAwareMockGateway extends LLMGateway {
       const idx = turnIndexForUserMessage(this.script, userLine);
       return {
         content: draftEstimateJsonForTurn(this.script, idx),
+        model: request.model ?? 'mock-model',
+        provider: 'mock',
+        latencyMs: 1,
+        tokenUsage: { input: 10, output: 10, total: 20 },
+      };
+    }
+
+    // Tradesperson wave 1 — SendCustomerMessageTaskHandler's OWN second
+    // gateway call (message-rewrite pass, `send-customer-message-task.ts`
+    // `rewrite()`), separate from the classify_intent call above. Without
+    // this branch it falls through to the generic mock below and the
+    // drafted body would be whatever placeholder that returns rather than
+    // a realistic customer-facing message.
+    if (request.taskType === 'send_customer_message') {
+      return {
+        content: 'Your part arrived — we can come by Thursday morning.',
         model: request.model ?? 'mock-model',
         provider: 'mock',
         latencyMs: 1,

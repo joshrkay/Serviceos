@@ -20,6 +20,8 @@ import {
   RequestFeedbackTaskHandler,
   RescheduleAppointmentTaskHandler,
   CancelAppointmentTaskHandler,
+  DEFAULT_MILEAGE_RATE_CENTS_PER_MILE,
+  MAX_MILEAGE_MILES,
 } from '../../../src/ai/tasks/voice-extended-tasks';
 import type { AppointmentRepository } from '../../../src/appointments/appointment';
 import type { JobRepository } from '../../../src/jobs/job';
@@ -87,7 +89,13 @@ describe('LogExpenseTaskHandler', () => {
     expect(res.proposal.payload.amountCents).toBe(24000);
     expect(res.proposal.payload.category).toBe('materials');
     expect(res.proposal.payload.vendor).toBe('Supply House');
-    expect(res.proposal.payload.spentAt).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+    // Quality-review fix (I3) — spentAt is now a full ISO instant (tenant
+    // midnight, via tzMidnight), not a bare 'YYYY-MM-DD' string: the
+    // execution handler's `new Date(spentAtRaw)` reads a date-only string
+    // as UTC midnight, silently rendering back a day early in any tenant
+    // west of UTC. Applies to the plain log_expense path too, not just
+    // log_mileage — same flaw, same fix.
+    expect(res.proposal.payload.spentAt).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
     expect(missingFieldsFor(res.proposal)).not.toContain('amountCents');
   });
 
@@ -165,6 +173,202 @@ describe('LogExpenseTaskHandler', () => {
       expect(res.proposal.payload.jobId).toBeUndefined();
       // Still no gate — the expense logs unlinked rather than stalling.
       expect(missingFieldsFor(res.proposal)).toEqual([]);
+    });
+  });
+
+  // Task 11 (2026-08-07 tradesperson plan) — log_mileage is an ALIAS intent
+  // onto this SAME handler/proposal type. Quality-review fix (2026-08-09):
+  // the branch keys on `context.intent === 'log_mileage'` (TaskContext.intent
+  // — ai/tasks/task-handlers.ts), NOT the presence of `mileageMiles`. The
+  // classifier's JSON template is a single GLOBAL shape shared by every
+  // intent (entitiesForProposal, workers/voice-action-router.ts, is a
+  // passthrough for every intent except create_customer) — nothing stops a
+  // real LLM from also populating `mileageMiles` on a log_expense turn, or
+  // `amount` on a log_mileage turn. Keying on field presence let either
+  // stray field hijack or get hijacked; keying on the classified intent
+  // cannot.
+  describe('Task 11: log_mileage alias (mileageMiles → amountCents, category: vehicle)', () => {
+    it('converts a spoken mileage count at the IRS rate; spentAt is TODAY in the TENANT timezone', async () => {
+      // 11:30pm America/New_York on 2026-06-11 is already 2026-06-12 in UTC —
+      // pins that spentAt is computed from the TENANT-LOCAL calendar date,
+      // never a raw `new Date().toISOString()` UTC slice (Task 7's lesson),
+      // AND that the stored value is a full ISO instant representing tenant
+      // midnight (tzMidnight) rather than a bare 'YYYY-MM-DD' string —
+      // LogExpenseExecutionHandler's `new Date(spentAtRaw)` reads a bare
+      // date-only string as UTC midnight, which re-introduces the exact
+      // off-by-one this fix exists to eliminate once rendered back in a
+      // western tenant's own timezone.
+      const now = new Date('2026-06-12T03:30:00.000Z');
+      const res = await new LogExpenseTaskHandler().handle(
+        ctx({
+          intent: 'log_mileage',
+          timezone: 'America/New_York',
+          now,
+          existingEntities: { mileageMiles: 32, jobReference: 'the Patel job' },
+        }),
+      );
+      expect(res.proposal.proposalType).toBe('log_expense');
+      expect(res.proposal.payload.category).toBe('vehicle');
+      expect(res.proposal.payload.amountCents).toBe(32 * DEFAULT_MILEAGE_RATE_CENTS_PER_MILE);
+      expect(res.proposal.payload.amountCents).toBe(2240);
+      expect(res.proposal.payload.description).toBe('Mileage — 32 miles');
+      // Midnight America/New_York (EDT, UTC-4) on 2026-06-11 is 04:00 UTC.
+      expect(res.proposal.payload.spentAt).toBe('2026-06-11T04:00:00.000Z');
+      expect(res.proposal.payload.jobReference).toBe('the Patel job');
+      expect(missingFieldsFor(res.proposal)).toEqual([]);
+    });
+
+    it('rounds a fractional mileage count to the nearest cent', async () => {
+      const res = await new LogExpenseTaskHandler().handle(
+        ctx({ intent: 'log_mileage', existingEntities: { mileageMiles: 4.37 } }),
+      );
+      // 4.37 * 70 = 305.9 -> rounds to 306.
+      expect(res.proposal.payload.amountCents).toBe(306);
+      expect(res.proposal.payload.description).toBe('Mileage — 4.37 miles');
+    });
+
+    it('gates on amountCents when no mileage is stated at all', async () => {
+      const res = await new LogExpenseTaskHandler().handle(
+        ctx({ intent: 'log_mileage', existingEntities: {} }),
+      );
+      expect(missingFieldsFor(res.proposal)).toContain('amountCents');
+      expect(res.proposal.payload.amountCents).toBeUndefined();
+      expect(res.proposal.payload.category).toBe('vehicle');
+    });
+
+    it('gates on amountCents for zero miles (a degenerate, nothing-to-log value)', async () => {
+      const res = await new LogExpenseTaskHandler().handle(
+        ctx({ intent: 'log_mileage', existingEntities: { mileageMiles: 0 } }),
+      );
+      expect(missingFieldsFor(res.proposal)).toContain('amountCents');
+      expect(res.proposal.payload.amountCents).toBeUndefined();
+    });
+
+    it('gates on amountCents for negative miles', async () => {
+      const res = await new LogExpenseTaskHandler().handle(
+        ctx({ intent: 'log_mileage', existingEntities: { mileageMiles: -5 } }),
+      );
+      expect(missingFieldsFor(res.proposal)).toContain('amountCents');
+      expect(res.proposal.payload.amountCents).toBeUndefined();
+    });
+
+    // M1 (quality review) — the gate must be on the COMPUTED CENTS, not the
+    // raw miles: any 0 < miles < 1/140 (~0.00714) rounds to 0 cents, which
+    // would otherwise pass a bare `miles > 0` check and violate the
+    // contract's `amountCents.positive()` (and the DB CHECK) downstream —
+    // approved-then-fails-at-execution, the exact drift class
+    // voice-payload-contract.test.ts exists to catch.
+    it('gates on amountCents when a genuinely positive mileage figure still rounds to zero cents', async () => {
+      // 0.005 * 70 = 0.35 -> rounds to 0.
+      const res = await new LogExpenseTaskHandler().handle(
+        ctx({ intent: 'log_mileage', existingEntities: { mileageMiles: 0.005 } }),
+      );
+      expect(missingFieldsFor(res.proposal)).toContain('amountCents');
+      expect(res.proposal.payload.amountCents).toBeUndefined();
+    });
+
+    // Domain cap (mirrors Task 8/9's MAX_QUANTITY lesson, quality-review
+    // corrected rationale): this is a SANITY bound on a spoken figure (no
+    // single logged trip is 10,000+ miles), not an overflow guard — int4
+    // overflow (expenses.amount_cents) would need ~30.7 MILLION miles at
+    // this rate, so 10,000 is a domain judgment, not a boundary requirement.
+    // logExpensePayloadSchema has NO upper bound on amountCents (a real
+    // expense — e.g. a new work van — legitimately runs into the tens of
+    // thousands), so this handler-level cap is the ONLY thing between a
+    // garbled spoken figure and Postgres.
+    it('passes at the domain cap boundary (MAX_MILEAGE_MILES)', async () => {
+      const res = await new LogExpenseTaskHandler().handle(
+        ctx({ intent: 'log_mileage', existingEntities: { mileageMiles: MAX_MILEAGE_MILES } }),
+      );
+      expect(res.proposal.payload.amountCents).toBe(
+        MAX_MILEAGE_MILES * DEFAULT_MILEAGE_RATE_CENTS_PER_MILE,
+      );
+      expect(missingFieldsFor(res.proposal)).toEqual([]);
+    });
+
+    it('gates on amountCents just over the domain cap boundary (MAX_MILEAGE_MILES + 1)', async () => {
+      const res = await new LogExpenseTaskHandler().handle(
+        ctx({ intent: 'log_mileage', existingEntities: { mileageMiles: MAX_MILEAGE_MILES + 1 } }),
+      );
+      expect(missingFieldsFor(res.proposal)).toContain('amountCents');
+      expect(res.proposal.payload.amountCents).toBeUndefined();
+    });
+
+    it('falls back to the product-default timezone when the tenant zone is unresolved', async () => {
+      const res = await new LogExpenseTaskHandler().handle(
+        ctx({
+          intent: 'log_mileage',
+          now: new Date('2026-06-11T12:00:00.000Z'),
+          existingEntities: { mileageMiles: 10 },
+        }),
+      );
+      // America/New_York (DEFAULT_TENANT_TIMEZONE) noon UTC is still the same
+      // calendar day — this only pins that a MISSING timezone never throws
+      // and still produces a well-formed ISO instant, not a specific zone's
+      // date.
+      expect(res.proposal.payload.spentAt).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
+      expect(missingFieldsFor(res.proposal)).toEqual([]);
+    });
+
+    it('a plain log_expense utterance (intent absent/log_expense, no mileageMiles) is completely unaffected', async () => {
+      const res = await new LogExpenseTaskHandler().handle(
+        ctx({ intent: 'log_expense', existingEntities: { amount: 5500, expenseCategory: 'fuel' } }),
+      );
+      expect(res.proposal.payload.category).toBe('fuel');
+      expect(res.proposal.payload.amountCents).toBe(5500);
+      expect(res.proposal.payload.description).not.toContain('Mileage');
+    });
+
+    // I1 (quality review, both legs) — the classifier's extractedEntities
+    // shape is GLOBAL, not per-intent, so a real LLM turn can populate a
+    // field that "belongs" to the other alias. Keying on `context.intent`
+    // (rather than field presence) must make BOTH directions safe.
+    describe('I1 — a stray field from the OTHER alias never hijacks or gets silently dropped', () => {
+      it('log_expense intent with a stray mileageMiles present: real amount wins, never mileage math', async () => {
+        const res = await new LogExpenseTaskHandler().handle(
+          ctx({
+            intent: 'log_expense',
+            existingEntities: { amount: 24000, expenseCategory: 'materials', mileageMiles: 32 },
+          }),
+        );
+        expect(res.proposal.payload.category).toBe('materials');
+        expect(res.proposal.payload.amountCents).toBe(24000);
+        expect(missingFieldsFor(res.proposal)).toEqual([]);
+      });
+
+      it('log_mileage intent with mileageMiles ABSENT never falls through to the plain amount branch (never a bogus "other" expense)', async () => {
+        const res = await new LogExpenseTaskHandler().handle(
+          ctx({ intent: 'log_mileage', existingEntities: { amount: 32 } }),
+        );
+        // Must stay in the mileage branch (category forced to 'vehicle') and
+        // gate on amountCents — never silently accept the stray `amount` as
+        // if it were a $0.32 "other" expense with zero missingFields.
+        expect(res.proposal.payload.category).toBe('vehicle');
+        expect(missingFieldsFor(res.proposal)).toContain('amountCents');
+        expect(res.proposal.payload.amountCents).toBeUndefined();
+      });
+
+      it('log_mileage intent with BOTH mileageMiles and a stray amount: prefers the mileage math but preserves the spoken amount visibly', async () => {
+        const res = await new LogExpenseTaskHandler().handle(
+          ctx({ intent: 'log_mileage', existingEntities: { mileageMiles: 32, amount: 24000 } }),
+        );
+        expect(res.proposal.payload.amountCents).toBe(2240);
+        expect(res.proposal.payload.category).toBe('vehicle');
+        expect(res.proposal.payload.description).toContain('32 miles');
+        expect(res.proposal.payload.description).toContain('$240.00');
+        expect(missingFieldsFor(res.proposal)).toEqual([]);
+      });
+
+      it('log_mileage intent also carrying expenseDescription folds it into the visible description rather than discarding it', async () => {
+        const res = await new LogExpenseTaskHandler().handle(
+          ctx({
+            intent: 'log_mileage',
+            existingEntities: { mileageMiles: 18, expenseDescription: "today's supply run" },
+          }),
+        );
+        expect(res.proposal.payload.description).toContain('18 miles');
+        expect(res.proposal.payload.description).toContain("today's supply run");
+      });
     });
   });
 });

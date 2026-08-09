@@ -156,6 +156,25 @@ export class PgJobRepository extends PgBaseRepository implements JobRepository {
   }
 
   /**
+   * Task 10 (2026-08-07 tradesperson plan) quality-review C2 — bulk read
+   * by id, tenant-scoped. See the
+   * interface doc comment (jobs/job.ts) for the full rationale: a caller
+   * that already knows which job ids it needs (e.g. off a day's
+   * appointments) must not depend on those jobs being recent enough to
+   * survive a `findByTenant({ limit })` page.
+   */
+  async findByIds(tenantId: string, ids: string[]): Promise<Job[]> {
+    if (ids.length === 0) return [];
+    return this.withTenant(tenantId, async (client) => {
+      const result = await client.query(
+        'SELECT * FROM jobs WHERE tenant_id = $1 AND id = ANY($2::uuid[])',
+        [tenantId, ids],
+      );
+      return result.rows.map(mapRow);
+    });
+  }
+
+  /**
    * P11-001: tenant-scoped read of every job belonging to a customer.
    * Drives the voice lookup-skill family. tenant_id is the FIRST WHERE
    * predicate (defense-in-depth alongside RLS) and customer_id rides as

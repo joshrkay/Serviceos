@@ -56,6 +56,7 @@ import {
   type SharedLookupRepos,
   type VoiceLookupAnswerDeps,
 } from '../../workers/voice-lookup-answer';
+import { TECHNICIAN_REF_INTENTS } from '../agents/customer-calling/entity-resolution';
 
 /**
  * Everything the assistant route needs to answer a lookup, as ONE optional
@@ -99,6 +100,20 @@ export const LOOKUP_MODEL = 'data-lookup';
 /** `assistant.lookup.<intent>` also matches `task_type ILIKE '%lookup%'`. */
 export function lookupTaskType(intent: IntentType): string {
   return `assistant.lookup.${intent}`;
+}
+
+/**
+ * The human-readable "your ___" subject for copy like "I couldn't pull up
+ * your ___ just now". The generic derivation (strip `lookup_`, underscores
+ * → spaces) reads fine for most intents ("your crew schedule", "your
+ * timesheets") but `lookup_my_day` → "my day" doubles the possessive
+ * ("your my day") — spec-review addendum. Special-cased rather than
+ * generalizing the strip rule, since every other intent's derived subject
+ * is correct as-is.
+ */
+function lookupSubject(intent: IntentType): string {
+  if (intent === 'lookup_my_day') return 'day';
+  return intent.replace(/^lookup_/, '').replace(/_/g, ' ');
 }
 
 /**
@@ -155,7 +170,7 @@ async function resolveReference(
   resolver: EntityResolver | undefined,
   tenantId: string,
   reference: string | undefined,
-  kind: 'customer' | 'job',
+  kind: 'customer' | 'job' | 'technician',
 ): Promise<
   | { kind: 'resolved'; id: string }
   | { kind: 'ambiguous'; candidates: EntityCandidate[] }
@@ -205,6 +220,27 @@ export async function dispatchAssistantLookup(
       typeof entities.customerName === 'string' ? entities.customerName : undefined;
     const jobReference =
       typeof entities.jobReference === 'string' ? entities.jobReference : undefined;
+    // Task 10 (2026-08-07 tradesperson plan) — lookup_crew_schedule /
+    // lookup_timesheets name a crew member the SAME way reassign_appointment
+    // does (targetTechnicianName); dateTimeDescription is the raw spoken
+    // day/window phrase lookup_crew_schedule resolves internally.
+    //
+    // Gated on TECHNICIAN_REF_INTENTS (spec-review addendum) — the SAME
+    // set the memo path's entity-resolution reaches via
+    // planVoiceEntityLookups. Without this gate, ANY lookup intent's
+    // extractedEntities.targetTechnicianName would trigger a resolver
+    // query here, including on lookup_my_day: a wasted query on an intent
+    // that never reads the result (see voice-lookup-answer.ts's
+    // `lookup_my_day` case, which resolves the SPEAKER, never
+    // input.technicianId), and on an ambiguous name it would return a
+    // list of crew members' full names for the one lookup intent with NO
+    // permission gate.
+    const technicianReference =
+      TECHNICIAN_REF_INTENTS.has(intent) && typeof entities.targetTechnicianName === 'string'
+        ? entities.targetTechnicianName
+        : undefined;
+    const dateTimeDescription =
+      typeof entities.dateTimeDescription === 'string' ? entities.dateTimeDescription : undefined;
 
     // Customer-scoped ask with nothing to resolve → chat-specific clarification.
     if (CUSTOMER_SCOPED_LOOKUP_INTENTS.has(intent) && !customerReference) {
@@ -234,6 +270,20 @@ export async function dispatchAssistantLookup(
       if (resolved.kind === 'resolved') jobId = resolved.id;
     }
 
+    let technicianId: string | undefined;
+    if (technicianReference) {
+      const resolved = await resolveReference(
+        deps.entityResolver,
+        tenantId,
+        technicianReference,
+        'technician',
+      );
+      if (resolved.kind === 'ambiguous') {
+        return ambiguousReply(intent, technicianReference, resolved.candidates);
+      }
+      if (resolved.kind === 'resolved') technicianId = resolved.id;
+    }
+
     const timezone = deps.tenantTimezoneResolver
       ? await deps.tenantTimezoneResolver(tenantId).catch(() => undefined)
       : undefined;
@@ -250,6 +300,9 @@ export async function dispatchAssistantLookup(
         ...(jobId ? { jobId } : {}),
         ...(customerReference ? { customerReference } : {}),
         ...(jobReference ? { jobReference } : {}),
+        ...(technicianId ? { technicianId } : {}),
+        ...(technicianReference ? { technicianReference } : {}),
+        ...(dateTimeDescription ? { dateTimeDescription } : {}),
         ...(timezone ? { timezone } : {}),
         now: deps.now ? deps.now() : new Date(),
       },
@@ -279,7 +332,7 @@ export async function dispatchAssistantLookup(
             ? `Permission-gated lookup refused — your role lacks ${
                 LOOKUP_REQUIRED_PERMISSION.get(intent) ?? 'the required permission'
               }.`
-            : `Answered from your ${intent.replace(/^lookup_/, '').replace(/_/g, ' ')} records (read-only lookup).`,
+            : `Answered from your ${lookupSubject(intent)} records (read-only lookup).`,
       },
     };
   } catch (err) {
@@ -296,7 +349,7 @@ export async function dispatchAssistantLookup(
  * `degraded: true` also marks the turn in the response envelope.
  */
 export function failureReply(intent: IntentType, error: string): AssistantLookupReply {
-  const subject = intent.replace(/^lookup_/, '').replace(/_/g, ' ');
+  const subject = lookupSubject(intent);
   return {
     taskType: lookupTaskType(intent),
     model: LOOKUP_MODEL,

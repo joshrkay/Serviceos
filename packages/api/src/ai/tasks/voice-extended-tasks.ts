@@ -18,20 +18,17 @@
  */
 
 import { TaskHandler, TaskContext, TaskResult } from './task-handlers';
-import {
-  createProposal,
-  CreateProposalInput,
-  ProposalType,
-} from '../../proposals/proposal';
+import { createProposal } from '../../proposals/proposal';
 import { ExtractedEntities } from '../orchestration/intent-classifier';
 import type { AppointmentRepository } from '../../appointments/appointment';
 import type { JobRepository } from '../../jobs/job';
 import type { CatalogItem, CatalogItemRepository } from '../../catalog/catalog-item';
+import { MAX_UNIT_PRICE_CENTS } from '../../proposals/contracts/add-catalog-item';
 import type { InvoiceRepository } from '../../invoices/invoice';
 import type { Estimate, EstimateRepository } from '../../estimates/estimate';
 import type { LLMGateway } from '../gateway/gateway';
 import { resolveDateTime } from '../scheduling/resolve-datetime';
-import { isRuntimeTimezone } from '../../shared/timezone';
+import { isRuntimeTimezone, localDateKey, tzMidnight } from '../../shared/timezone';
 import { findJobsRequiringInvoicing, InvoicingQueueDeps } from '../../invoices/invoicing-queue';
 import {
   DunningEvent,
@@ -43,12 +40,9 @@ import { candidatesForReference } from '../resolution/reference-candidates';
 import type { EntityCandidate } from '../resolution/entity-resolver';
 import { resolveLineItemToCatalog } from '../resolution/catalog-resolver';
 import { formatCents } from '../skills/spoken-format';
+import { entitiesFrom, baseSourceContext, inputFor, resolveTenantTimezone } from './task-input';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
-
-function entitiesFrom(context: TaskContext): ExtractedEntities {
-  return (context.existingEntities ?? {}) as ExtractedEntities;
-}
 
 // Mirrors the execution-side check (isUuid in
 // proposals/execution/voice-extended-handlers.ts / UUID_RE in
@@ -215,74 +209,6 @@ function resolvedEstimateIdFrom(context: TaskContext): string | undefined {
 function resolvedInvoiceIdFrom(context: TaskContext): string | undefined {
   const id = context.existingEntities?.invoiceId;
   return isUuid(id) ? id : undefined;
-}
-
-function baseSourceContext(context: TaskContext): Record<string, unknown> | undefined {
-  if (!context.conversationId) return undefined;
-  return { conversationId: context.conversationId };
-}
-
-function inputFor(
-  context: TaskContext,
-  proposalType: ProposalType,
-  payload: Record<string, unknown>,
-  missingFields: string[],
-  opts?: {
-    trust?: 'autonomous' | undefined;
-    /**
-     * B2 — additional sourceContext entries to merge on top of
-     * baseSourceContext (e.g. entityCandidates/entityKind/entityReference).
-     * Optional and additive; existing call sites are unaffected.
-     */
-    sourceContext?: Record<string, unknown>;
-    /**
-     * B8.10 — surfaces a human-readable "why" on the review card
-     * (Proposal.explanation) without touching the payload's Zod contract.
-     * Used for the AC-3 non-nudgeable-match gate ("the Khan estimate was
-     * already accepted") — optional and additive; existing call sites are
-     * unaffected.
-     */
-    explanation?: string;
-  }
-): CreateProposalInput {
-  const base = baseSourceContext(context);
-  const extra = opts?.sourceContext;
-  const sourceContext = extra ? { ...(base ?? {}), ...extra } : base;
-  return {
-    tenantId: context.tenantId,
-    proposalType,
-    payload,
-    summary: context.message,
-    explanation: opts?.explanation,
-    sourceContext,
-    createdBy: context.userId,
-    missingFields: missingFields.length > 0 ? missingFields : undefined,
-    sourceTrustTier: opts?.trust,
-    // PR B — pass through the tenant threshold override the router
-    // resolved at request entry. Every call site IN THIS FILE routes
-    // through this helper, so within voice-extended-tasks.ts it is a
-    // single touch point.
-    //
-    // Quality-review note (Tradesperson wave 1, Task 4): that is no longer
-    // true repo-wide. Standalone task-handler files (complaint-task.ts,
-    // brand-voice-task.ts, standing-instruction-task.ts, and now
-    // apply-credit-task.ts) hand-roll an equivalent `CreateProposalInput`
-    // literal — including this same `...(context.tenantThresholdOverride
-    // ? {...} : {})` spread — because they can't import this private
-    // (non-exported) helper. So there are now TWO touch points for this
-    // passthrough: this function, and each standalone file's own inline
-    // copy. Both must stay in sync by hand today.
-    //
-    // Intended future cleanup (not done here — out of scope for a single
-    // task): once a THIRD standalone task-handler file needs it, extract
-    // `inputFor`/`entitiesFrom`/`baseSourceContext` out of this file into a
-    // small shared module (e.g. `ai/tasks/task-input.ts`) that both this
-    // file and the standalone files import, collapsing back to one touch
-    // point. Not worth the churn for two call sites; worth it at three.
-    ...(context.tenantThresholdOverride
-      ? { tenantThresholdOverride: context.tenantThresholdOverride }
-      : {}),
-  };
 }
 
 // ───────────── reschedule_appointment ─────────────
@@ -1688,7 +1614,34 @@ export class UpdateCustomerTaskHandler implements TaskHandler {
   }
 }
 
-// ───────────── log_expense ─────────────
+/**
+ * The 2026 IRS standard mileage rate, in cents per mile. A CONSTANT, not
+ * tenant config — the IRS publishes one national rate per year; this is
+ * not a per-tenant business setting the way a labor rate or tax rate is.
+ * Bump this literal (with a comment naming the new year/rate) when the IRS
+ * publishes an updated rate — never make it configurable per Task 11's
+ * scope decision.
+ */
+export const DEFAULT_MILEAGE_RATE_CENTS_PER_MILE = 70;
+
+/**
+ * Quality-review correction (2026-08-09) — this is a SANITY BOUND on a
+ * spoken figure, not an overflow guard: `expenses.amount_cents` is Postgres
+ * INTEGER (int4, max 2,147,483,647), which at this rate would need roughly
+ * 30.7 MILLION miles to overflow. 10,000 is a domain judgment ("no single
+ * logged trip is five figures of miles"), not a boundary the overflow math
+ * requires — the original 1,000 figure UNDERSOLD what a legitimate batch
+ * entry ("log 1,200 miles for the month") might need and gated it for no
+ * stated reason. `logExpensePayloadSchema` (contracts/log-expense.ts) has
+ * NO upper bound on `amountCents` — a real expense (a new work van)
+ * legitimately runs into the tens of thousands — so this handler-level
+ * cap on MILES is the only thing standing between an STT-garbled spoken
+ * figure and Postgres; that is the real argument for having any cap at
+ * all, not the overflow arithmetic.
+ */
+export const MAX_MILEAGE_MILES = 10_000;
+
+// ───────────── log_expense (+ Task 11 alias: log_mileage) ─────────────
 //
 // Owner/technician logs a business expense. Capture-class, moves no
 // money. Reuses the existing LogExpenseExecutionHandler. spentAt
@@ -1703,23 +1656,118 @@ export class UpdateCustomerTaskHandler implements TaskHandler {
 // with no (or an unresolved) job mention still logs UNLINKED, exactly as
 // before — resolution only adds the link. An AMBIGUOUS job never reaches
 // here (the router short-circuits to a voice_clarification picker).
+//
+// ── Task 11 (2026-08-07 tradesperson plan): log_mileage alias ───────────
+//
+// `log_mileage` is an ALIAS intent onto this SAME `log_expense` proposal
+// type (voice-intent-map.ts) — no new ProposalType, no new execution
+// handler, no migration. House precedent for a NO-OP alias (schedule_
+// inspection → create_appointment, log_permit → add_note) is a thin
+// dispatch-only alias: the target handler runs completely unchanged.
+// log_mileage cannot follow that precedent byte-for-byte because it needs
+// its OWN math (miles × rate) the plain log_expense drafting never does —
+// so this handler grows a BRANCH instead of a second file/subclass.
+//
+// Quality-review fix (2026-08-09) — the branch keys on `context.intent ===
+// 'log_mileage'` (TaskContext.intent, ai/tasks/task-handlers.ts), NOT on
+// the presence of the `mileageMiles` extracted-entity field. It was
+// originally keyed on field presence, reasoned as safe because "a plain
+// log_expense utterance never extracts mileageMiles" — but that is a
+// PROMPT-LEVEL instruction to the model, not a structural guarantee:
+// `entitiesForProposal` (workers/voice-action-router.ts) is a passthrough
+// for every intent except `create_customer`, and the classifier's
+// "Return valid JSON with exactly this shape" template is ONE GLOBAL
+// object shared by every intent, not scoped per intent. A real utterance
+// mixing both signals ("drove 32 miles round trip, spent $240 on
+// fittings") can classify as `log_expense` while the model still emits
+// `mileageMiles` alongside the real `amount` — field-presence keying would
+// have silently eaten the real $240 expense for a bogus $22.40 mileage
+// entry, and the mirror image (a log_mileage turn where the model puts the
+// heard number on the shared `amount` key instead) would have produced a
+// fully-formed, zero-missing-fields WRONG expense with nothing for the
+// operator to notice. `context.intent` is the classifier's actual verdict,
+// not a proxy for it, so neither direction can happen: an off-intent
+// stray field is preserved (see the `expenseDescription`/stray-`amount`
+// handling below) but never allowed to redirect or silently vanish.
 export class LogExpenseTaskHandler implements TaskHandler {
   readonly taskType = 'log_expense' as const;
 
   async handle(context: TaskContext): Promise<TaskResult> {
     const ee = entitiesFrom(context);
+    // spentAt = TODAY in the TENANT timezone, for BOTH log_expense and its
+    // log_mileage alias (Task 7's lesson: never raw `new Date()` UTC math;
+    // quality-review fix, 2026-08-09 — a bare 'YYYY-MM-DD' string is not
+    // enough either: `spent_at` is TIMESTAMPTZ (schema.ts) and
+    // `LogExpenseExecutionHandler` parses the payload's `spentAt` with
+    // `new Date(spentAtRaw)`, which reads a date-only string as UTC
+    // MIDNIGHT — silently rendering back as the PREVIOUS calendar day in
+    // any tenant west of UTC. `tzMidnight` (shared/timezone.ts) converts
+    // the tenant-local calendar date into the correct UTC instant; the
+    // contract explicitly allows a full ISO timestamp (contracts/
+    // log-expense.ts). Computed once, here, for both branches below —
+    // this used to be TWO different idioms (a raw UTC slice for plain
+    // log_expense, tenant-tz math only inside the log_mileage branch),
+    // which is its own smell once one of them is wrong.
+    const { timezone } = resolveTenantTimezone(context);
+    const spentAt = tzMidnight(localDateKey(context.now ?? new Date(), timezone), timezone).toISOString();
     const payload: Record<string, unknown> = {
       category: ee.expenseCategory ?? 'other',
       description: ee.expenseDescription ?? context.message,
-      spentAt: new Date().toISOString().slice(0, 10),
+      spentAt,
     };
     const missing: string[] = [];
 
-    if (typeof ee.amount === 'number' && ee.amount > 0) {
+    if (context.intent === 'log_mileage') {
+      const miles = ee.mileageMiles;
+      const validMiles =
+        typeof miles === 'number' && Number.isFinite(miles) && miles > 0 && miles <= MAX_MILEAGE_MILES;
+      // M1 (quality review) — gate on the COMPUTED CENTS, not the raw
+      // miles: any 0 < miles < 1/140 (~0.00714) rounds to 0 cents, which
+      // would pass a bare `miles > 0` check yet violate the contract's
+      // `amountCents.positive()` (and the DB CHECK) at execution — the
+      // exact "draft-time contract looser than what it feeds" drift class
+      // voice-payload-contract.test.ts exists to catch.
+      const mileageCents = validMiles
+        ? Math.round((miles as number) * DEFAULT_MILEAGE_RATE_CENTS_PER_MILE)
+        : undefined;
+
+      payload.category = 'vehicle';
+
+      // Never silently discard a stray field from the shared/global JSON
+      // template: `expenseDescription` and the plain `amount` (dollars) key
+      // can both still arrive on a log_mileage-classified turn (see class
+      // doc comment). Fold them into the visible description instead of
+      // dropping them — the operator reviewing the draft sees everything
+      // the model heard, even when only the miles drive the math.
+      const descriptionParts: string[] = [
+        typeof miles === 'number' && Number.isFinite(miles) ? `Mileage — ${miles} miles` : 'Mileage',
+      ];
+      if (typeof ee.expenseDescription === 'string' && ee.expenseDescription.trim()) {
+        descriptionParts.push(ee.expenseDescription.trim());
+      }
+      if (typeof ee.amount === 'number' && ee.amount > 0) {
+        descriptionParts.push(`spoken amount also heard: ${formatCents(ee.amount)}`);
+      }
+      payload.description = descriptionParts.join(' — ');
+
+      if (mileageCents !== undefined && mileageCents > 0) {
+        payload.amountCents = mileageCents;
+      } else {
+        missing.push('amountCents');
+      }
+    } else if (typeof ee.amount === 'number' && ee.amount > 0) {
       payload.amountCents = ee.amount;
     } else {
       missing.push('amountCents');
     }
+    // Note the asymmetry with the log_mileage branch above: a stray `amount`
+    // heard on a log_mileage turn is folded into the description (nothing
+    // heard is silently lost), but a stray `mileageMiles` heard on a plain
+    // log_expense turn is dropped here without a trace — `ee.mileageMiles`
+    // is never read in this branch. This is intentional, not an oversight:
+    // `amount` is money (losing it would misstate a real expense the
+    // operator needs to see), while `mileageMiles` on a log_expense turn is
+    // very likely classifier noise with nothing financial riding on it.
 
     if (ee.vendor) payload.vendor = ee.vendor;
 
@@ -2119,6 +2167,15 @@ export class CreateJobVoiceTaskHandler implements TaskHandler {
 //      `explanation` instead, per `clearSatisfiedMissingFields`
 //      (missing-fields.ts): it only lifts a gate on an EXACT flat-key edit,
 //      so a prose entry can never clear.
+//
+//   4. Quality-review fix (2026-08-09, Task 12 review, "I4") — a spoken
+//      `unitPriceCents` above `MAX_UNIT_PRICE_CENTS` ($100,000,
+//      contracts/add-catalog-item.ts) is treated the same as an absent
+//      one (falls back to the current price, same as the existing
+//      negative-price guard). Added because Task 12's add_catalog_item
+//      sibling ceilings the SAME unitPriceCents field writing the SAME
+//      catalog_items.unit_price_cents column — without this, a misheard
+//      "290 thousand" gates on create but sails through on edit.
 export class UpdateCatalogItemTaskHandler implements TaskHandler {
   readonly taskType = 'update_catalog_item' as const;
 
@@ -2170,12 +2227,20 @@ export class UpdateCatalogItemTaskHandler implements TaskHandler {
       }
     }
 
-    // Only a stated, non-negative integer cents value is a real price
-    // change — mirrors the durationMinutes sanity check elsewhere in this
-    // file (an LLM occasionally answers with a negative or fractional
-    // number).
+    // Only a stated, non-negative, in-range integer cents value is a real
+    // price change — mirrors the durationMinutes sanity check elsewhere in
+    // this file (an LLM occasionally answers with a negative or fractional
+    // number). The upper bound (quality-review fix, "I4") mirrors
+    // add_catalog_item's own MAX_UNIT_PRICE_CENTS ceiling — both intents
+    // write the SAME catalog_items.unit_price_cents column from the SAME
+    // spoken unitPriceCents field, so a misheard "290 thousand" must gate
+    // here exactly as it does on the create side, not fall back to "no
+    // price change" and sail through unchecked.
     const requestedPriceCents =
-      typeof ee.unitPriceCents === 'number' && Number.isFinite(ee.unitPriceCents) && ee.unitPriceCents >= 0
+      typeof ee.unitPriceCents === 'number' &&
+      Number.isFinite(ee.unitPriceCents) &&
+      ee.unitPriceCents >= 0 &&
+      ee.unitPriceCents <= MAX_UNIT_PRICE_CENTS
         ? Math.round(ee.unitPriceCents)
         : undefined;
     const hasName = typeof ee.catalogItemNewName === 'string' && ee.catalogItemNewName.trim().length > 0;

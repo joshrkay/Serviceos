@@ -41,6 +41,16 @@ const logger = createLogger({
  * speak "raise the diagnostic fee to 89 dollars" and approve their own
  * card — the exact approval-queue-as-route-permission-bypass this guard
  * exists to close.
+ *
+ * `add_catalog_item` (Task 12, 2026-08-07 tradesperson plan) joined for the
+ * IDENTICAL reason: its execution handler writes a new row through the
+ * SAME catalog domain layer the `settings:update`-gated
+ * `POST /api/catalog-items` route writes through — same authority class as
+ * `update_catalog_item`, just the create side instead of the price-edit
+ * side. Without this entry, a dispatcher could speak "Add a catalog item:
+ * smart thermostat install, 385" and approve their own card, creating a
+ * price-book entry with only `proposals:approve` — the same bypass this
+ * guard closed for `update_catalog_item`.
  */
 const CONFIG_WRITING_PROPOSAL_TYPES: ReadonlySet<string> = new Set([
   'onboarding_tenant_settings',
@@ -50,6 +60,7 @@ const CONFIG_WRITING_PROPOSAL_TYPES: ReadonlySet<string> = new Set([
   'onboarding_schedule',
   'update_brand_voice',
   'update_catalog_item',
+  'add_catalog_item',
 ]);
 
 /**

@@ -1,0 +1,50 @@
+{
+  "id": "create-change-order-known-customer",
+  "bucket": "02-happy-booker",
+  "callerId": "+15555550417",
+  "callerIdBlocked": false,
+  "fixtures": {
+    "tenant": {
+      "id": "t_02_change_order",
+      "display_name": "Test HVAC Co",
+      "timezone": "America/Los_Angeles"
+    },
+    "customers": [
+      {
+        "id": "cust_02_change_order_owner",
+        "tenantId": "t_02_change_order",
+        "firstName": "Sam",
+        "lastName": "Owner",
+        "displayName": "Sam Owner",
+        "companyName": null,
+        "primaryPhone": "+15555550417",
+        "secondaryPhone": null,
+        "email": "sam.changeorder@testhvac.example",
+        "preferredChannel": "phone",
+        "smsConsent": false,
+        "communicationNotes": null,
+        "isArchived": false,
+        "createdBy": "user_seed",
+        "createdAt": "2026-01-15T10:00:00.000Z",
+        "updatedAt": "2026-04-01T10:00:00.000Z"
+      }
+    ]
+  },
+  "turns": [
+    {
+      "caller": "The Garcias want a second zone added — write up a change order for 1800 dollars.",
+      "expected": {
+        "intent": "create_change_order",
+        "proposalType": "create_change_order",
+        "spokenAnswerMatches": "Got it — I've drafted a create change order for review. Anything else I can help you with?",
+        "escalates": false
+      },
+      "hangupAfter": false
+    }
+  ],
+  "grading": {
+    "appliesFloor": [1, 2, 3, 4, 5, 6, 7, 8],
+    "appliesDisposition": [9, 10, 11, 12]
+  },
+  "layer2Eligible": true
+}

@@ -837,6 +837,27 @@ function clarificationSummary(transcript: string): string {
  * suggestion" expando.
  */
 function clarificationExplanation(classification: IntentClassification): string {
+  // Task 13 (2026-08-07 tradesperson plan) — these three are real,
+  // CONFIRMED classifications, never 'unknown': classifyIntentRaw's
+  // low_confidence/unknown_intent guards always force intentType to
+  // 'unknown' whenever unknownReason would be set, so a classification
+  // that reaches here with intentType === one of these never carries an
+  // unknownReason at all. They land in this function via the miss branch
+  // in processSegment's INTENT_TO_PROPOSAL_TYPE lookup: each is a genuine,
+  // understood action with no home on a recorded memo (no live pending
+  // question / live call / live operator), not something the classifier
+  // failed to understand — so the copy says why instead of falling into
+  // the generic "didn't recognize an action" line below.
+  switch (classification.intentType) {
+    case 'confirm':
+      return "It sounds like you were confirming something, but recorded memos don't have a pending question — say the full action instead.";
+    case 'language_switch':
+      return 'Language preferences apply to live calls — this memo was processed as recorded.';
+    case 'operator_request':
+      return "Talking to a person isn't available from a recorded memo — call the office line instead.";
+    default:
+      break;
+  }
   switch (classification.unknownReason) {
     case 'low_confidence':
       return classification.lowConfidenceIntent
@@ -1324,11 +1345,19 @@ async function processSegment(
 
     // The memo creator (voice_recordings.created_by) is the authoritative
     // identity for the permission-gated authorization gate — the enqueue
-    // payload's userId can be 'system' on this path. Resolved only for
-    // permission-gated intents; a read failure falls through to the
-    // adapter's fail-closed refusal.
+    // payload's userId can be 'system' on this path. Resolved for
+    // permission-gated intents AND for `lookup_my_day` (Task 10): that
+    // intent carries no permission, but it still needs the memo creator's
+    // identity to resolve the SPEAKER to a technician — self-scoping is
+    // its entire access-control story (workers/voice-lookup-answer.ts's
+    // `lookup_my_day` case fails the turn when this is absent, rather than
+    // ever falling back to an unscoped answer). A read failure falls
+    // through to the adapter's fail-closed refusal either way.
     let memoCreatorId: string | undefined;
-    if (LOOKUP_REQUIRED_PERMISSION.has(classification.intentType)) {
+    if (
+      LOOKUP_REQUIRED_PERMISSION.has(classification.intentType) ||
+      classification.intentType === 'lookup_my_day'
+    ) {
       try {
         const recording = await deps.voiceRepo.findById(tenantId, recordingId);
         memoCreatorId = recording?.createdBy;
@@ -1359,6 +1388,18 @@ async function processSegment(
         ...(classification.extractedEntities?.jobReference
           ? { jobReference: classification.extractedEntities.jobReference }
           : {}),
+        // Task 10 — the resolver-verified crew-member id (TECHNICIAN_REF_
+        // INTENTS membership, entity-resolution.ts) and the raw spoken
+        // reference/day phrase, for lookup_crew_schedule/lookup_timesheets.
+        ...(lookupAnnotation.resolved.technicianId
+          ? { technicianId: lookupAnnotation.resolved.technicianId }
+          : {}),
+        ...(classification.extractedEntities?.targetTechnicianName
+          ? { technicianReference: classification.extractedEntities.targetTechnicianName }
+          : {}),
+        ...(classification.extractedEntities?.dateTimeDescription
+          ? { dateTimeDescription: classification.extractedEntities.dateTimeDescription }
+          : {}),
         ...(lookupScheduling?.timezone ? { timezone: lookupScheduling.timezone } : {}),
         now: deps.now ? deps.now() : new Date(),
       },
@@ -1369,6 +1410,10 @@ async function processSegment(
         customerRepo: deps.customerRepo,
         proposalRepo: deps.proposalRepo,
         availabilityFinder: deps.availabilityFinder,
+        // Task 10 — crew roster / technician names / speaker resolution
+        // (lookup_crew_schedule, lookup_timesheets, lookup_my_day). Already
+        // carried by this worker for en_route's speaker resolution below.
+        userRepo: deps.userRepo,
       },
     );
 
@@ -1513,6 +1558,57 @@ async function processSegment(
           ? handlers.get(proposalType)
           : undefined;
   if (!handler) {
+    // Task 13 (2026-08-07 tradesperson plan) — three real, understood
+    // intents have no recorded-memo action: `confirm` has no live pending
+    // question to confirm, `language_switch` has no live call to change
+    // language on, and `operator_request` has no live operator to transfer
+    // to. Route them through the SAME clarification path every other miss
+    // in this file uses, instead of the silent `{kind:'skipped'}` an
+    // operator could never see. Every OTHER unmapped intent keeps the
+    // warn+skip below — that branch protects future taxonomy growth (a
+    // new classifier intent shipped before its proposal mapping/handler is
+    // wired fails loud in logs, not silently in the operator's queue with
+    // a clarification nobody has decided how to phrase yet).
+    if (
+      classification.intentType === 'confirm' ||
+      classification.intentType === 'language_switch' ||
+      classification.intentType === 'operator_request'
+    ) {
+      await emitClarification(
+        deps,
+        {
+          tenantId,
+          userId,
+          transcript: segmentText,
+          classification,
+          conversationId,
+          recordingId,
+          ...(params.sourceChannel ? { sourceChannel: params.sourceChannel } : {}),
+          ...(params.applyDedup && recordingId
+            ? { idempotencyKey: voiceProposalIdempotencyKey(recordingId) }
+            : {}),
+        },
+        log,
+      );
+      return { kind: 'clarified', classification };
+    }
+    // Invariant, verified during Task 13's review (2026-08-07 tradesperson
+    // plan): as of the current taxonomy, NO real IntentType member reaches
+    // this branch. A reviewer probed all 48 intents mapped in
+    // INTENT_TO_PROPOSAL_TYPE against `buildTaskHandlers` (every one
+    // resolves to a handler) plus all 30 unmapped intents (lookup_* by its
+    // startsWith prefix — 20 members, count-independent — plus en_route,
+    // complaint, negotiation, confirm, language_switch, operator_request,
+    // approve_proposal, reject_proposal, edit_proposal, and 'unknown' itself
+    // — every one of these 30 has a dedicated branch earlier in
+    // processSegment that returns before reaching here, INCLUDING 'unknown'
+    // (its own emitClarification call, before the belt-and-braces gates).
+    // So this line is dead in production today; it only fires for a FUTURE
+    // taxonomy bump that ships a new classifier intent before its proposal
+    // mapping/handler exists. The `vi.mock` in
+    // voice-action-router-silent-skip.test.ts that forces a fake
+    // 'future_unmapped_intent' to reach this branch is therefore deliberate
+    // (no real intent can be used to exercise it), not lazy.
     log.warn('voice-action-router: no handler for intent', {
       intent: classification.intentType,
       proposalType,
@@ -1642,6 +1738,10 @@ async function processSegment(
     userId,
     message: segmentText,
     conversationId,
+    // Quality-review fix (2026-08-09, Task 11) — the raw classified intent,
+    // for handlers that alias multiple intents onto the same taskType (see
+    // TaskContext.intent's doc comment, ai/tasks/task-handlers.ts).
+    intent: classification.intentType,
     ...(standingInstructions ? { standingInstructions } : {}),
     ...(handler.taskType === 'draft_estimate' ? { clarificationCount } : {}),
     existingEntities: {

@@ -100,6 +100,12 @@ describe('P2-005 — Approve / reject / edit interactions', () => {
     // with settings:update; a dispatcher speaking "raise the diagnostic fee
     // to 89 dollars" must not be able to approve their own card.
     ['update_catalog_item', { catalogItemId: 'c-1', currentUnitPriceCents: 7900, proposedUnitPriceCents: 8900 }],
+    // Task 12 (2026-08-07 tradesperson plan) — add_catalog_item writes the
+    // SAME catalog domain layer through the settings:update-gated
+    // POST /api/catalog-items route; a dispatcher speaking "Add a catalog
+    // item: smart thermostat install, 385" must not be able to approve
+    // their own card.
+    ['add_catalog_item', { name: 'Smart thermostat install', unitPriceCents: 38500 }],
   ])('config-writing type %s cannot be approved without settings:update', async (type, payload) => {
     const repo = makeRepo();
     const proposal = await createReadyProposal(repo, {
@@ -129,6 +135,7 @@ describe('P2-005 — Approve / reject / edit interactions', () => {
     ['onboarding_tenant_settings', { businessName: 'Acme', verticalPacks: ['plumbing'] }],
     ['update_brand_voice', { register: 'friendly' }],
     ['update_catalog_item', { catalogItemId: 'c-1', currentUnitPriceCents: 7900, proposedUnitPriceCents: 8900 }],
+    ['add_catalog_item', { name: 'Smart thermostat install', unitPriceCents: 38500 }],
   ])('config-writing type %s stamps the approver, not the drafter', async (type, payload) => {
     const repo = makeRepo();
     const proposal = await createReadyProposal(repo, {

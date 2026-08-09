@@ -14,6 +14,7 @@ import { UpdateCatalogItemTaskHandler } from '../../../src/ai/tasks/voice-extend
 import { TaskContext } from '../../../src/ai/tasks/task-handlers';
 import { missingFieldsFor } from '../../../src/proposals/proposal';
 import { InMemoryCatalogItemRepository, createCatalogItem } from '../../../src/catalog/catalog-item';
+import { MAX_UNIT_PRICE_CENTS } from '../../../src/proposals/contracts/add-catalog-item';
 
 const TENANT_ID = 't-1';
 
@@ -153,6 +154,40 @@ describe('UpdateCatalogItemTaskHandler', () => {
     // no-change gate fires, since no OTHER change field was stated either.
     expect(payload.proposedUnitPriceCents).toBe(8900);
     expect(missingFieldsFor(proposal)).toContain('proposedUnitPriceCents');
+  });
+
+  // Quality-review fix (2026-08-09, "I4") — mirrors add_catalog_item's own
+  // MAX_UNIT_PRICE_CENTS ceiling: both intents write the SAME
+  // catalog_items.unit_price_cents column from the SAME spoken
+  // unitPriceCents field, so a misheard "290 thousand" must gate here
+  // exactly as it does on the create side.
+  it('a unitPriceCents above the sanity ceiling is not trusted as a real price change', async () => {
+    const catalogRepo = await seededRepo([{ name: 'AC tune-up', unitPriceCents: 8900 }]);
+    const { proposal } = await new UpdateCatalogItemTaskHandler(catalogRepo).handle(
+      ctx({
+        existingEntities: { catalogItemReference: 'AC tune-up', unitPriceCents: MAX_UNIT_PRICE_CENTS + 1 },
+      }),
+    );
+
+    const payload = proposal.payload as Record<string, unknown>;
+    // Falls back to the current price (no fabricated change) and the
+    // no-change gate fires, since no OTHER change field was stated either
+    // — same collapsing behavior the negative-price test above pins.
+    expect(payload.proposedUnitPriceCents).toBe(8900);
+    expect(missingFieldsFor(proposal)).toContain('proposedUnitPriceCents');
+  });
+
+  it('a unitPriceCents of exactly the sanity ceiling is trusted as a real price change', async () => {
+    const catalogRepo = await seededRepo([{ name: 'AC tune-up', unitPriceCents: 8900 }]);
+    const { proposal } = await new UpdateCatalogItemTaskHandler(catalogRepo).handle(
+      ctx({
+        existingEntities: { catalogItemReference: 'AC tune-up', unitPriceCents: MAX_UNIT_PRICE_CENTS },
+      }),
+    );
+
+    const payload = proposal.payload as Record<string, unknown>;
+    expect(payload.proposedUnitPriceCents).toBe(MAX_UNIT_PRICE_CENTS);
+    expect(missingFieldsFor(proposal)).not.toContain('proposedUnitPriceCents');
   });
 
   it('a fractional unitPriceCents is rounded to the nearest cent, mirroring the durationMinutes guard', async () => {

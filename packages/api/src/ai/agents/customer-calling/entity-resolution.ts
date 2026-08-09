@@ -95,6 +95,24 @@ const CUSTOMER_REF_INTENTS = new Set([
   'schedule_inspection',
   'log_permit',
   'log_warranty_claim',
+  // Task 7 (2026-08-07 tradesperson plan) — "sign the Garcias up for the
+  // annual maintenance plan" names a PERSON, not display text. Mirrors
+  // send_customer_message's rationale above: without this the router
+  // never resolved that name to a customerId, so
+  // CreateServiceAgreementTaskHandler could only see raw free text.
+  'create_service_agreement',
+  // Task 11 (2026-08-07 tradesperson plan) — log_mileage is an ALIAS onto
+  // log_expense's proposal type, so it mirrors log_expense's OWN
+  // CUSTOMER_REF_INTENTS membership too, for full parity with its target
+  // (Task 1's adjudication: an alias's entity-resolution membership must
+  // mirror the target). log_mileage's own taxonomy (intent-classifier.ts)
+  // instructs the classifier to extract `mileageMiles`/`jobReference`, not
+  // `customerName` — but `customerName` is a SHARED template key, so a
+  // real utterance ("log 32 miles for the Hendersons") could still
+  // populate it; this membership is what makes that name resolve to a
+  // customerId the same way it would for log_expense, rather than staying
+  // inert free text.
+  'log_mileage',
 ]);
 
 const INVOICE_DOC_INTENTS = new Set([
@@ -181,6 +199,26 @@ const JOB_REF_INTENTS = new Set([
   // contract (unlike log_expense's optional link), so an unresolved
   // reference gates the proposal — see CreateChangeOrderTaskHandler.
   'create_change_order',
+  // Task 9 (2026-08-07 tradesperson plan) — add_material: "grab three
+  // boxes of PEX for the Patel job" resolves the spoken jobReference →
+  // jobId so the captured material item keeps its job link. jobId is
+  // OPTIONAL on the add_material contract, so an unresolved (or absent)
+  // reference still captures the item unlinked — resolution only ever
+  // ADDS the link, never gates the proposal (same posture as
+  // log_expense's jobId).
+  'add_material',
+  // Task 9 — lookup_materials: "what materials are open on the Patel
+  // job?" resolves the SAME way so the shopping-list readback can scope
+  // to one job. Read-only — no contract/gating implications at all.
+  'lookup_materials',
+  // Task 11 (2026-08-07 tradesperson plan) — log_mileage is an ALIAS onto
+  // log_expense's proposal type, so it mirrors log_expense's OWN
+  // JOB_REF_INTENTS membership exactly: "Log 32 miles to the Patel job"
+  // resolves the spoken jobReference → jobId so the mileage expense keeps
+  // its job link. jobId is OPTIONAL on the (shared) log_expense contract,
+  // so an unresolved (or absent) reference still logs the expense
+  // unlinked — resolution only ever ADDS the link, never gates.
+  'log_mileage',
 ]);
 
 /**
@@ -251,10 +289,32 @@ const APPOINTMENT_JOB_FALLBACK_INTENTS = new Set([
   'reassign_appointment',
 ]);
 
-const TECHNICIAN_REF_INTENTS = new Set([
+/**
+ * Exported (spec-review addendum, Task 10) — `ai/orchestration/lookup-
+ * dispatch.ts` (the assistant-chat surface) gates its own
+ * `targetTechnicianName` resolution on this SAME set, mirroring the memo
+ * path (`workers/voice-action-router.ts`'s `annotateResolvedEntities`
+ * call, which reaches this set via `planVoiceEntityLookups` internally).
+ * Before that fix, the chat surface resolved a spoken technician name for
+ * EVERY lookup intent, including `lookup_my_day` — a wasted resolver
+ * query there, and on an ambiguous name it returned a list of crew-member
+ * full names for the one lookup intent with NO permission gate.
+ */
+export const TECHNICIAN_REF_INTENTS = new Set([
   'reassign_appointment',
   'add_crew_member',
   'remove_crew_member',
+  // Task 10 (2026-08-07 tradesperson plan) — the owner-extended crew
+  // lookups reuse the SAME technician resolution reassign/add-crew/
+  // remove-crew get: "What's Mike's day look like?" / "How many hours did
+  // Carlos log?" name a crew member via `targetTechnicianName`, resolved
+  // here to a verified `technicianId` BEFORE the lookup skill runs
+  // (voice-lookup-answer.ts stamps it onto ExecuteLookupInput). An
+  // unresolved name is refused by the CALLER, never silently widened to
+  // the whole crew's schedule/hours (see that module's `lookup_crew_
+  // schedule`/`lookup_timesheets` cases).
+  'lookup_crew_schedule',
+  'lookup_timesheets',
 ]);
 
 /**

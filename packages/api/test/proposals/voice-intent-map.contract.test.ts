@@ -72,6 +72,20 @@ describe('voice intent → proposal type: exactly one map', () => {
     }
   });
 
+  // Task 11 (2026-08-07 tradesperson plan) — log_mileage is an ALIAS onto
+  // the EXISTING log_expense proposal type: no new ProposalType, no new
+  // execution handler.
+  it('maps log_mileage onto the log_expense proposal type', () => {
+    expect(intentToProposalType('log_mileage')).toBe('log_expense');
+  });
+
+  // Task 12 (2026-08-07 tradesperson plan) — add_catalog_item is a NEW
+  // proposal type (not an alias), the create-side mirror of
+  // update_catalog_item.
+  it('maps add_catalog_item onto its own add_catalog_item proposal type', () => {
+    expect(intentToProposalType('add_catalog_item')).toBe('add_catalog_item');
+  });
+
   it('falls back to voice_clarification for unmapped / absent intents', () => {
     expect(intentToProposalType(undefined)).toBe('voice_clarification');
     // lookup_* intents are READ-ONLY and deliberately unmapped (P11-001).
@@ -156,5 +170,59 @@ describe('voiceProposalSummary', () => {
       'Message Henderson',
     );
     expect(voiceProposalSummary('send_customer_message', {})).toBe('Message');
+  });
+
+  // Task 7 — "Service agreement for <customer>" shape, mirrors
+  // send_customer_message's named-recipient summary.
+  it('gives create_service_agreement a human-readable summary', () => {
+    expect(voiceProposalSummary('create_service_agreement', { customerName: 'Garcia' })).toBe(
+      'Service agreement for Garcia',
+    );
+    expect(voiceProposalSummary('create_service_agreement', {})).toBe('Service agreement');
+  });
+
+  // Task 9 (spec-review drift-guard gap) — "Add material for <job or
+  // customer>" shape, mirrors create_change_order's job-takes-precedence
+  // rule (a shopping-list item is usually about the job, not the customer).
+  it('gives add_material a human-readable summary', () => {
+    expect(voiceProposalSummary('add_material', { jobReference: 'the Patel job' })).toBe(
+      'Add material for the Patel job',
+    );
+    expect(voiceProposalSummary('add_material', { customerName: 'Henderson' })).toBe(
+      'Add material for Henderson',
+    );
+    // jobReference wins over a bare customer name when both are present.
+    expect(
+      voiceProposalSummary('add_material', { jobReference: 'the Patel job', customerName: 'Henderson' }),
+    ).toBe('Add material for the Patel job');
+    expect(voiceProposalSummary('add_material', {})).toBe('Add material');
+  });
+
+  // Task 11 (2026-08-07 tradesperson plan) — "Log mileage on <job>" /
+  // "for <customer>" shape, mirrors log_permit's preposition convention
+  // (both are "Log <noun>" intents) rather than add_material's uniform
+  // "for" — job reference wins when both are present.
+  it('gives log_mileage a human-readable summary', () => {
+    expect(voiceProposalSummary('log_mileage', { jobReference: 'the Patel job' })).toBe(
+      'Log mileage on the Patel job',
+    );
+    expect(voiceProposalSummary('log_mileage', { customerName: 'Henderson' })).toBe(
+      'Log mileage for Henderson',
+    );
+    expect(
+      voiceProposalSummary('log_mileage', { jobReference: 'the Patel job', customerName: 'Henderson' }),
+    ).toBe('Log mileage on the Patel job');
+    expect(voiceProposalSummary('log_mileage', {})).toBe('Log mileage');
+  });
+
+  // Task 12 (2026-08-07 tradesperson plan) — "Add catalog item: <name>"
+  // shape — the new item's OWN name (catalogItemNewName), never
+  // customerName/jobReference (a price-book entry names an item, not a
+  // customer or a job).
+  it('gives add_catalog_item a human-readable summary', () => {
+    expect(voiceProposalSummary('add_catalog_item', { catalogItemNewName: 'Smart thermostat install' })).toBe(
+      'Add catalog item: Smart thermostat install',
+    );
+    expect(voiceProposalSummary('add_catalog_item', {})).toBe('Add catalog item');
   });
 });

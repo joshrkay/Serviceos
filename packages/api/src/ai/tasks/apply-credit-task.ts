@@ -39,15 +39,16 @@
  * so it cannot pre-validate the floor; it only gates on the flat payload
  * shape the execution handler's Zod contract requires.
  */
-import { createProposal, CreateProposalInput } from '../../proposals/proposal';
+import { createProposal } from '../../proposals/proposal';
 import type { TaskHandler, TaskContext, TaskResult } from './task-handlers';
 import type { ExtractedEntities } from '../orchestration/intent-classifier';
+import { entitiesFrom, inputFor } from './task-input';
 
 export class ApplyCreditTaskHandler implements TaskHandler {
   readonly taskType = 'apply_credit' as const;
 
   async handle(context: TaskContext): Promise<TaskResult> {
-    const ee = (context.existingEntities ?? {}) as ExtractedEntities & { invoiceId?: string };
+    const ee = entitiesFrom(context) as ExtractedEntities & { invoiceId?: string };
     const payload: Record<string, unknown> = {};
     const missing: string[] = [];
 
@@ -67,21 +68,9 @@ export class ApplyCreditTaskHandler implements TaskHandler {
       payload.reason = ee.creditReason.trim();
     }
 
-    const input: CreateProposalInput = {
-      tenantId: context.tenantId,
-      proposalType: this.taskType,
-      payload,
-      summary: context.message,
-      sourceContext: context.conversationId
-        ? { conversationId: context.conversationId }
-        : undefined,
-      createdBy: context.userId,
-      missingFields: missing.length > 0 ? missing : undefined,
-      ...(context.tenantThresholdOverride
-        ? { tenantThresholdOverride: context.tenantThresholdOverride }
-        : {}),
+    return {
+      proposal: createProposal(inputFor(context, this.taskType, payload, missing)),
+      taskType: this.taskType,
     };
-
-    return { proposal: createProposal(input), taskType: this.taskType };
   }
 }

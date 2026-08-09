@@ -636,6 +636,15 @@ async function redraftResolvedProposal(args: {
     // A verified customer id flows onto the context too (some handlers read
     // context.customerId), mirroring the non-ambiguous path.
     ...(resolvedCustomerId ? { customerId: resolvedCustomerId } : {}),
+    // Stamp the original classified intent (TaskContext.intent, added Task
+    // 11, 2026-08-07 tradesperson plan) so a handler shared by multiple
+    // intents (e.g. LogExpenseTaskHandler for
+    // both log_expense and log_mileage) can tell them apart on redraft, exactly
+    // as it does on the canonical (non-ambiguous) voice path. Inert today only
+    // because createRedraftHandlerFactory doesn't register log_expense — but
+    // the moment it does, omitting this would silently degrade a redrafted
+    // log_mileage proposal to a plain expense.
+    intent: originalIntent.intentType,
   };
 
   const { proposal: drafted } = await handler.handle(context);

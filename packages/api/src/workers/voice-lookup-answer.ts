@@ -64,6 +64,9 @@ import type { CatalogItemRepository } from '../catalog/catalog-item';
 import type { SettingsRepository } from '../settings/settings';
 import type { LookupEventService } from '../lookup-events/lookup-event-service';
 import type { AvailabilityFinder } from '../ai/tasks/availability-finder';
+import type { MaterialItemRepository } from '../materials/material-item';
+import type { UserRepository } from '../users/user';
+import { resolveCanonicalUser } from '../users/user';
 import { lookupBalance } from '../ai/skills/lookup-balance';
 import { lookupInvoices } from '../ai/skills/lookup-invoices';
 import { lookupCustomer } from '../ai/skills/lookup-customer';
@@ -84,6 +87,11 @@ import { lookupDigest } from '../ai/skills/lookup-digest';
 import { lookupPendingItems } from '../ai/skills/lookup-pending-items';
 import { lookupLeads } from '../ai/skills/lookup-leads';
 import { lookupCatalog } from '../ai/skills/lookup-catalog';
+import { lookupMaterials } from '../ai/skills/lookup-materials';
+import { lookupCrewSchedule } from '../ai/skills/lookup-crew-schedule';
+import { lookupTimesheets } from '../ai/skills/lookup-timesheets';
+import { lookupMyDay } from '../ai/skills/lookup-my-day';
+import { formatHours } from '../ai/skills/spoken-format';
 
 /**
  * Permission-gated lookups: the DB-authoritative permission the ASKING
@@ -110,6 +118,11 @@ export const LOOKUP_REQUIRED_PERMISSION: ReadonlyMap<IntentType, Permission> = n
   ['lookup_digest', 'reports:view'],
   ['lookup_leads', 'customers:view'],
   ['lookup_catalog', 'settings:view'],
+  // Task 10 (2026-08-07 tradesperson plan) — owner-grade crew reports,
+  // same permission + gating posture as the owner-extended lookups above.
+  // `lookup_my_day` is deliberately ABSENT — see its case body below.
+  ['lookup_crew_schedule', 'reports:view'],
+  ['lookup_timesheets', 'reports:view'],
 ]);
 
 /**
@@ -152,6 +165,14 @@ export interface VoiceLookupAnswerDeps {
   catalogRepo?: CatalogItemRepository;
   /** Full settings repo — lookup_job_profit reads the tenant labor rate. */
   settingsRepo?: SettingsRepository;
+  /**
+   * Task 9 (2026-08-07 tradesperson plan) — `lookup_materials` (voice
+   * shopping list readback; mirrors GET-equivalent access to Task 8's
+   * material_items substrate). No entry in `LOOKUP_REQUIRED_PERMISSION` —
+   * deliberately unlike `lookup_leads`/`lookup_catalog` — any authenticated
+   * operator (technician included) may hear the pending shopping list.
+   */
+  materialItemRepo?: MaterialItemRepository;
   /** P11-001 analytics table writer — the memo path now records rows too. */
   lookupEvents?: LookupEventService;
   /**
@@ -171,6 +192,14 @@ export interface SharedLookupRepos {
   customerRepo?: CustomerRepository;
   proposalRepo: ProposalRepository;
   availabilityFinder?: AvailabilityFinder;
+  /**
+   * Task 10 (2026-08-07 tradesperson plan) — already carried by the router
+   * for `en_route`'s speaker resolution (dispatch/en-route-voice.ts). Reused
+   * here for the crew roster (lookup_crew_schedule), technician display
+   * names (lookup_timesheets), and the SPEAKER's own identity resolution
+   * (lookup_my_day) — one shared dep, not a second copy.
+   */
+  userRepo?: Pick<UserRepository, 'findByTenant'>;
 }
 
 export interface ExecuteLookupInput {
@@ -200,6 +229,21 @@ export interface ExecuteLookupInput {
   customerReference?: string;
   /** The spoken job reference, when one was extracted (D3). */
   jobReference?: string;
+  /**
+   * Task 10 — verified (resolver-verified) technicianId, when a crew
+   * member was named and resolved (TECHNICIAN_REF_INTENTS membership —
+   * entity-resolution.ts).
+   */
+  technicianId?: string;
+  /** Task 10 — the spoken crew-member reference, when one was extracted. */
+  technicianReference?: string;
+  /**
+   * Task 10 — raw spoken day/window phrase ("Thursday afternoon"), when
+   * one was extracted. Only consumed by `lookup_crew_schedule`; resolved
+   * inside that skill via the SAME `resolveDateTime` (U4) the booking path
+   * uses.
+   */
+  dateTimeDescription?: string;
   /** Tenant IANA timezone for date rendering. */
   timezone?: string;
   now: Date;
@@ -642,6 +686,197 @@ export async function executeLookupAnswer(
             id: input.jobId,
           }),
         };
+      }
+
+      // Task 9 (2026-08-07 tradesperson plan) — read back Task 8's
+      // material_items shopping list (src/materials/material-item.ts). No
+      // permission gate (see LOOKUP_REQUIRED_PERMISSION's doc comment
+      // above) — any authenticated operator may hear it.
+      //
+      // Spec-review MAJOR A fix — an unresolved spoken job reference must
+      // NOT silently widen to the tenant's whole pending list. Mirrors
+      // `lookup_job_profit`'s identical guard a few cases up: when a job
+      // WAS named (`input.jobReference` set) but the entity resolver
+      // couldn't match it (`resolveVoiceEntityReferences` returns
+      // `kind: 'ok'` with `resolved.jobId` left undefined for a genuine
+      // not_found — only 'ambiguous' short-circuits upstream before this
+      // function ever runs), `input.jobId` is absent while `jobReference`
+      // is present. Without this check the caller who asked "what
+      // materials are open on the Patel job?" with no matching Patel got
+      // back EVERY pending item for the tenant, announced as a normal
+      // found-answer — the worse failure mode, since the operator actively
+      // named a scope and silently got unscoped data instead of an honest
+      // "not found". Absent any jobReference at all, the unfiltered list is
+      // the CORRECT, intended answer ("read me the shopping list").
+      case 'lookup_materials': {
+        if (!deps.materialItemRepo) return { kind: 'unsupported' };
+        if (!input.jobId && input.jobReference) {
+          return {
+            kind: 'answer',
+            answer: buildAnswer(intent, 'none', `I couldn't find a job matching "${input.jobReference}".`),
+          };
+        }
+        const r = await lookupMaterials(
+          { tenantId, sessionId, ...(input.jobId ? { jobId: input.jobId } : {}) },
+          { materialItemRepo: deps.materialItemRepo, ...events },
+        );
+        if (r.status === 'error') return { kind: 'failed', error: r.data.error };
+        const rows: VoiceAnswerRow[] =
+          r.status === 'found'
+            ? r.data.spokenItems.map((m) =>
+                text(
+                  m.description,
+                  `qty ${m.quantity}${m.vendor ? ` — ${m.vendor}` : ''}${
+                    m.neededByLabel ? `, needed by ${m.neededByLabel}` : ''
+                  }`,
+                ),
+              )
+            : [];
+        return { kind: 'answer', answer: buildAnswer(intent, r.status, r.summary, rows) };
+      }
+
+      // Task 10 (2026-08-07 tradesperson plan) — owner/dispatcher asks who
+      // is free / where a named crew member is, on a given day or window.
+      // Owner-extended + permission-gated (reports:view, see
+      // LOOKUP_REQUIRED_PERMISSION above) — mirrors lookup_day_overview.
+      //
+      // An unresolved spoken technician name refuses honestly rather than
+      // silently falling back to the WHOLE crew's schedule — this failure
+      // mode matters MORE here than lookup_materials's job-reference
+      // precedent (spec-review MAJOR A): a named PERSON who didn't resolve
+      // must never widen to "everyone's schedule".
+      case 'lookup_crew_schedule': {
+        if (!shared.appointmentRepo || !shared.jobRepo || !shared.userRepo) {
+          return { kind: 'unsupported' };
+        }
+        if (!input.technicianId && input.technicianReference) {
+          return {
+            kind: 'answer',
+            answer: buildAnswer(
+              intent,
+              'none',
+              `I couldn't find a crew member matching "${input.technicianReference}".`,
+            ),
+          };
+        }
+        const r = await lookupCrewSchedule(
+          {
+            tenantId,
+            sessionId,
+            ...(input.technicianId ? { technicianId: input.technicianId } : {}),
+            ...(input.dateTimeDescription ? { dateTimeDescription: input.dateTimeDescription } : {}),
+            ...(timezone ? { timezone } : {}),
+            now,
+          },
+          {
+            appointmentRepo: shared.appointmentRepo,
+            jobRepo: shared.jobRepo,
+            userRepo: shared.userRepo,
+            ...events,
+          },
+        );
+        if (r.status === 'error') return { kind: 'failed', error: r.data.error };
+        const rows: VoiceAnswerRow[] =
+          r.status === 'found'
+            ? r.data.bookings
+                .slice(0, 5)
+                .map((b) =>
+                  text(
+                    b.technicianName,
+                    `${shortDateTime(b.scheduledStart, timezone)}${b.jobSummary ? ` — ${b.jobSummary}` : ''}`,
+                  ),
+                )
+            : [];
+        return { kind: 'answer', answer: buildAnswer(intent, r.status, r.summary, rows) };
+      }
+
+      // Task 10 — owner asks logged hours per crew member for the current
+      // tenant-local week. Same gating + unresolved-name refusal posture
+      // as lookup_crew_schedule immediately above.
+      case 'lookup_timesheets': {
+        if (!deps.timeEntryRepo || !shared.userRepo) return { kind: 'unsupported' };
+        if (!input.technicianId && input.technicianReference) {
+          return {
+            kind: 'answer',
+            answer: buildAnswer(
+              intent,
+              'none',
+              `I couldn't find a crew member matching "${input.technicianReference}".`,
+            ),
+          };
+        }
+        const r = await lookupTimesheets(
+          {
+            tenantId,
+            sessionId,
+            ...(input.technicianId ? { technicianId: input.technicianId } : {}),
+            ...(timezone ? { timezone } : {}),
+            now,
+          },
+          { timeEntryRepo: deps.timeEntryRepo, userRepo: shared.userRepo, ...events },
+        );
+        if (r.status === 'error') return { kind: 'failed', error: r.data.error };
+        const rows: VoiceAnswerRow[] =
+          r.status === 'found'
+            ? r.data.entries
+                .slice(0, 5)
+                // I4 — reuse the SAME formatHours the skill's own spoken
+                // summary uses, rather than the raw 2-decimal totalHours:
+                // the card used to read "7.83 hrs" while the operator
+                // HEARD "7.8 hours" for the identical value.
+                .map((e) => text(e.name, `${formatHours(e.totalHours)} this week`))
+            : [];
+        return { kind: 'answer', answer: buildAnswer(intent, r.status, r.summary, rows) };
+      }
+
+      // Task 10 — the SPEAKER asks about their OWN schedule today.
+      // Deliberately NOT in LOOKUP_REQUIRED_PERMISSION (available to any
+      // technician) — self-scoping to the resolved SPEAKER is this
+      // intent's entire access-control story, so the speaker is resolved
+      // to a concrete technician HERE, before the skill ever runs. An
+      // unresolvable speaker fails the turn — it must NEVER fall back to
+      // an unscoped (whole-crew) answer.
+      case 'lookup_my_day': {
+        if (!shared.appointmentRepo || !shared.jobRepo || !shared.userRepo) {
+          return { kind: 'unsupported' };
+        }
+        if (!input.actorId) {
+          return { kind: 'failed', error: 'could not match you to a technician' };
+        }
+        const technician = await resolveCanonicalUser(shared.userRepo, tenantId, input.actorId);
+        if (!technician) {
+          return { kind: 'failed', error: 'could not match you to a technician' };
+        }
+        const r = await lookupMyDay(
+          {
+            tenantId,
+            sessionId,
+            technicianId: technician.id,
+            ...(timezone ? { timezone } : {}),
+            now,
+          },
+          { appointmentRepo: shared.appointmentRepo, jobRepo: shared.jobRepo, ...events },
+        );
+        if (r.status === 'error') return { kind: 'failed', error: r.data.error };
+        const rows: VoiceAnswerRow[] =
+          r.status === 'found'
+            ? r.data.appointments
+                .slice(0, 5)
+                .map((a) =>
+                  text(
+                    shortDateTime(a.scheduledStart, timezone),
+                    // I1 — `jobs.summary` is TEXT NOT NULL with no non-empty
+                    // CHECK (imports/direct writes can produce ''), and
+                    // `voiceAnswerRowSchema` requires `text: z.string().min(1)`.
+                    // buildAnswer PARSES rather than casts, so an empty
+                    // string here throws a ZodError caught by the outer
+                    // catch — discarding an otherwise-correct, already-
+                    // computed answer. Never emit an empty row value.
+                    a.jobSummary || `Job ${a.jobId.slice(0, 8)}`,
+                  ),
+                )
+            : [];
+        return { kind: 'answer', answer: buildAnswer(intent, r.status, r.summary, rows) };
       }
 
       case 'lookup_day_overview': {

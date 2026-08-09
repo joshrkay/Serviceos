@@ -25,6 +25,7 @@ import {
   buildStandingInstructionsSection,
   intersectAppliedStandingInstructions,
 } from '../standing-instructions-context';
+import { contractErrorsFrom, contractGapFields } from './task-input';
 
 /**
  * Story 7.2 — confidence ceiling for a draft that still has open clarifications
@@ -100,37 +101,6 @@ function customerReferenceFrom(context: TaskContext): string | undefined {
   if (typeof raw !== 'string') return undefined;
   const trimmed = raw.trim();
   return trimmed.length > 0 ? trimmed.slice(0, 200) : undefined;
-}
-
-/**
- * Pull the Zod paths off a `ValidationError` thrown by
- * `assertValidProposalPayload` (it stores them as `details.errors`, each
- * formatted `"<path>: <message>"`). Falls back to the error message so a
- * future error shape still leaves a breadcrumb on the proposal.
- */
-function contractErrorsFrom(err: unknown): string[] {
-  const details = (err as { details?: { errors?: unknown } } | undefined)?.details;
-  const errors = details?.errors;
-  if (Array.isArray(errors)) {
-    return errors.filter((e): e is string => typeof e === 'string');
-  }
-  return [err instanceof Error ? err.message : String(err)];
-}
-
-/**
- * Map contract errors onto operator-facing `missingFields` entries: the
- * leading path segment of each Zod issue. Object-level issues (the
- * customerId-or-customerReference `.refine`) carry an EMPTY path, so they map
- * to 'customerId' — which is exactly the gap the operator has to fill.
- */
-function contractGapFields(errors: string[]): string[] {
-  const fields = new Set<string>();
-  for (const error of errors) {
-    const path = error.split(':')[0]?.trim() ?? '';
-    const head = path.split(/[.[]/)[0];
-    fields.add(head.length > 0 ? head : 'customerId');
-  }
-  return [...fields];
 }
 
 function buildPartialPayload(parsed: Record<string, unknown> | null): Record<string, unknown> {
@@ -380,7 +350,7 @@ export class EstimateTaskHandler implements TaskHandler {
       assertValidProposalPayload(this.taskType, payload);
     } catch (err) {
       payloadContractErrors = contractErrorsFrom(err);
-      for (const field of contractGapFields(payloadContractErrors)) {
+      for (const field of contractGapFields(payloadContractErrors, 'customerId')) {
         if (!missingFields.includes(field)) missingFields.push(field);
       }
       confidenceScore = Math.min(confidenceScore, CLARIFICATION_REVIEW_CONFIDENCE_CAP);

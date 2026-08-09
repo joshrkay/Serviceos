@@ -85,32 +85,7 @@ import {
   groundLineItemPricing,
   lineItemConfidenceSignals,
 } from '../resolution/catalog-resolver';
-
-/**
- * Pull the Zod paths off a `ValidationError` thrown by
- * `assertValidProposalPayload` (it stores them as `details.errors`, each
- * formatted `"<path>: <message>"`). Mirrors `estimate-task.ts`'s
- * `contractErrorsFrom` (not exported from there, so duplicated here).
- */
-function contractErrorsFrom(err: unknown): string[] {
-  const details = (err as { details?: { errors?: unknown } } | undefined)?.details;
-  const errors = details?.errors;
-  if (Array.isArray(errors)) {
-    return errors.filter((e): e is string => typeof e === 'string');
-  }
-  return [err instanceof Error ? err.message : String(err)];
-}
-
-/** Map contract errors onto operator-facing `missingFields` entries (leading path segment of each Zod issue). */
-function contractGapFields(errors: string[]): string[] {
-  const fields = new Set<string>();
-  for (const error of errors) {
-    const path = error.split(':')[0]?.trim() ?? '';
-    const head = path.split(/[.[]/)[0];
-    fields.add(head.length > 0 ? head : 'lineItems');
-  }
-  return [...fields];
-}
+import { contractErrorsFrom, contractGapFields, entitiesFrom, inputFor } from './task-input';
 
 export class CreateChangeOrderTaskHandler implements TaskHandler {
   readonly taskType = 'create_change_order' as const;
@@ -128,7 +103,7 @@ export class CreateChangeOrderTaskHandler implements TaskHandler {
   }
 
   async handle(context: TaskContext): Promise<TaskResult> {
-    const ee = (context.existingEntities ?? {}) as ExtractedEntities & { jobId?: string };
+    const ee = entitiesFrom(context) as ExtractedEntities & { jobId?: string };
     const payload: Record<string, unknown> = {};
     const missing: string[] = [];
 
@@ -200,10 +175,15 @@ export class CreateChangeOrderTaskHandler implements TaskHandler {
     };
     payload._meta = meta;
 
-    const sourceContext: Record<string, unknown> = {
-      ...(context.conversationId ? { conversationId: context.conversationId } : {}),
-      ...(catalogOutcome.catalogResolution ? { catalogResolution: catalogOutcome.catalogResolution } : {}),
-    };
+    // Extra sourceContext entries layered on top of inputFor's
+    // baseSourceContext (conversationId) — mirrors the `extraSourceContext`
+    // idiom voice-extended-tasks.ts's SendInvoiceTaskHandler uses: left
+    // `undefined` (never an empty object) when there's nothing to add, so
+    // inputFor's own conversationId-only-or-undefined collapse is preserved.
+    let extraSourceContext: Record<string, unknown> | undefined;
+    if (catalogOutcome.catalogResolution) {
+      extraSourceContext = { catalogResolution: catalogOutcome.catalogResolution };
+    }
 
     const allMissing = [...catalogOutcome.missingFields, ...missing];
 
@@ -220,26 +200,19 @@ export class CreateChangeOrderTaskHandler implements TaskHandler {
       assertValidProposalPayload(this.taskType, payload);
     } catch (err) {
       payloadContractErrors = contractErrorsFrom(err);
-      for (const field of contractGapFields(payloadContractErrors)) {
+      for (const field of contractGapFields(payloadContractErrors, 'lineItems')) {
         if (!allMissing.includes(field)) allMissing.push(field);
       }
     }
     if (payloadContractErrors) {
-      sourceContext.payloadContractErrors = payloadContractErrors;
+      extraSourceContext = { ...(extraSourceContext ?? {}), payloadContractErrors };
     }
 
     const input: CreateProposalInput = {
-      tenantId: context.tenantId,
-      proposalType: this.taskType,
-      payload,
-      summary: context.message,
+      ...inputFor(context, this.taskType, payload, allMissing, {
+        sourceContext: extraSourceContext,
+      }),
       confidenceFactors: confidenceFactors.length > 0 ? confidenceFactors : undefined,
-      sourceContext: Object.keys(sourceContext).length > 0 ? sourceContext : undefined,
-      createdBy: context.userId,
-      missingFields: allMissing.length > 0 ? allMissing : undefined,
-      ...(context.tenantThresholdOverride
-        ? { tenantThresholdOverride: context.tenantThresholdOverride }
-        : {}),
     };
 
     return { proposal: createProposal(input), taskType: this.taskType };

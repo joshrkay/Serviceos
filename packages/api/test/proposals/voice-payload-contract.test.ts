@@ -106,6 +106,9 @@ import { RecordRefundExecutionHandler } from '../../src/proposals/execution/reco
 import { ApplyCreditExecutionHandler } from '../../src/proposals/execution/apply-credit-handler';
 import { SendCustomerMessageExecutionHandler } from '../../src/proposals/execution/send-customer-message-handler';
 import { CreateChangeOrderExecutionHandler } from '../../src/proposals/execution/create-change-order-handler';
+import { CreateServiceAgreementExecutionHandler } from '../../src/proposals/execution/create-service-agreement-handler';
+import { AddMaterialExecutionHandler } from '../../src/proposals/execution/add-material-handler';
+import { AddCatalogItemExecutionHandler } from '../../src/proposals/execution/add-catalog-item-handler';
 import { buildLineItem, calculateDocumentTotals, type LineItem } from '../../src/shared/billing-engine';
 import type { AppointmentRepository } from '../../src/appointments/appointment';
 import type { JobRepository } from '../../src/jobs/job';
@@ -1056,6 +1059,108 @@ const ROWS: Row[] = [
         ctx({ message: "Set my brand voice: friendly, always sign off 'Thanks — Bob's HVAC'" }),
       ),
     execute: (p) => new UpdateBrandVoiceExecutionHandler(undefined, stubAuditRepo).execute(p, execContext()),
+  },
+  {
+    // Task 7 (2026-08-07 tradesperson plan) — create_service_agreement is a
+    // NEW capture-class proposal type. Like send_customer_message, it joins
+    // CUSTOMER_REF_INTENTS and reads the ROUTER-INJECTED context.customerId
+    // (not existingEntities.customerId) — no LLM call, no customerReference
+    // fallback on the contract. startsOn is never gated — it always carries
+    // either a parsed spoken date or the computed first-of-next-month default.
+    intent: 'create_service_agreement',
+    mode: 'resolves',
+    note: 'a resolved context.customerId + plan name + cadence + stated cents amount draft ungated; dep-less CreateServiceAgreementExecutionHandler synthetic-succeeds',
+    draft: () =>
+      draft(
+        { gateway: NOOP_GATEWAY },
+        'create_service_agreement',
+        ctx({
+          customerId: CUSTOMER_ID,
+          existingEntities: {
+            serviceAgreementName: 'Annual maintenance plan',
+            serviceAgreementCadence: 'annual',
+            amount: 29000,
+          },
+        }),
+      ),
+    execute: (p) => new CreateServiceAgreementExecutionHandler().execute(p, execContext()),
+    assertPayload: (payload) => {
+      expect(payload.customerId).toBe(CUSTOMER_ID);
+      expect(payload.name).toBe('Annual maintenance plan');
+      expect(payload.recurrenceRule).toBe('FREQ=YEARLY');
+      expect(payload.priceCents).toBe(29000);
+      expect(typeof payload.startsOn).toBe('string');
+    },
+  },
+  {
+    // Task 9 (2026-08-07 tradesperson plan) — add_material is a NEW
+    // capture-class proposal type. Unlike create_change_order/
+    // create_service_agreement, jobId is OPTIONAL on the contract — a
+    // spoken description alone drafts fully ungated with no job/customer
+    // reference needed at all.
+    intent: 'add_material',
+    mode: 'resolves',
+    note: 'a spoken materialDescription alone drafts ungated (quantity defaults to 1); dep-less AddMaterialExecutionHandler synthetic-succeeds',
+    draft: () =>
+      draft(
+        { gateway: NOOP_GATEWAY },
+        'add_material',
+        ctx({ existingEntities: { materialDescription: 'flue liner kit' } }),
+      ),
+    execute: (p) => new AddMaterialExecutionHandler().execute(p, execContext()),
+    assertPayload: (payload) => {
+      expect(payload.description).toBe('flue liner kit');
+      expect(payload.quantity).toBe(1);
+    },
+  },
+  {
+    // Task 11 (2026-08-07 tradesperson plan) alias — log_mileage maps to
+    // 'log_expense' (voice-intent-map.ts), so dispatch here is
+    // byte-identical to the log_expense row above: the SAME
+    // LogExpenseTaskHandler / LogExpenseExecutionHandler pair.
+    // Quality-review fix (2026-08-09) — LogExpenseTaskHandler branches on
+    // `context.intent === 'log_mileage'` (TaskContext.intent), not the
+    // presence of `mileageMiles` — see the class doc comment in
+    // ai/tasks/voice-extended-tasks.ts for why field-presence keying was
+    // unsafe (a stray `mileageMiles`/`amount` from the shared JSON
+    // template could hijack or get hijacked by the wrong branch).
+    intent: 'log_mileage',
+    mode: 'resolves',
+    note: 'alias of log_expense — dispatch is gated on context.intent, not field presence; dep-less LogExpenseExecutionHandler synthetic-succeeds',
+    draft: () =>
+      draft(
+        { gateway: NOOP_GATEWAY },
+        'log_expense',
+        ctx({ intent: 'log_mileage', existingEntities: { mileageMiles: 32 } }),
+      ),
+    execute: (p) => new LogExpenseExecutionHandler().execute(p, execContext()),
+    assertPayload: (payload) => {
+      expect(payload.category).toBe('vehicle');
+      expect(payload.amountCents).toBe(2240);
+      expect(payload.description).toBe('Mileage — 32 miles');
+    },
+  },
+  {
+    // Task 12 (2026-08-07 tradesperson plan) — add_catalog_item is a NEW
+    // capture-class proposal type. Unlike update_catalog_item, it needs no
+    // reference resolution (no existing item to find) — a spoken name +
+    // price alone draft ungated.
+    intent: 'add_catalog_item',
+    mode: 'resolves',
+    note: 'a spoken catalogItemNewName + unitPriceCents draft ungated (no catalogRepo needed to create); dep-less AddCatalogItemExecutionHandler synthetic-succeeds',
+    draft: () =>
+      draft(
+        { gateway: NOOP_GATEWAY },
+        'add_catalog_item',
+        ctx({
+          existingEntities: { catalogItemNewName: 'Smart thermostat install', unitPriceCents: 38500 },
+        }),
+      ),
+    execute: (p) => new AddCatalogItemExecutionHandler().execute(p, execContext()),
+    assertPayload: (payload) => {
+      expect(payload.name).toBe('Smart thermostat install');
+      expect(payload.unitPriceCents).toBe(38500);
+    },
   },
 ];
 

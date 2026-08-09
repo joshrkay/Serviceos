@@ -40,8 +40,10 @@ import {
   createCatalogItem,
   InMemoryCatalogItemRepository,
 } from '../../src/catalog/catalog-item';
+import { InMemoryUserRepository } from '../../src/users/user';
 import type { LLMGateway, LLMResponse } from '../../src/ai/gateway/gateway';
 import type { AuthenticatedRequest } from '../../src/auth/clerk';
+import type { EntityResolver } from '../../src/ai/resolution/entity-resolver';
 
 const TEST_TENANT = '11111111-1111-4111-8111-111111111111';
 const TEST_USER = 'user-lookup-dispatch';
@@ -525,5 +527,210 @@ describe('POST /api/assistant/chat — U7 parity: lookup_leads / lookup_catalog'
     expect(res.status).toBe(200);
     expect(res.body.taskType).toBe('assistant.lookup.lookup_catalog');
     expect(res.body.message.content).toBe('Your service catalog is empty right now.');
+  });
+});
+
+// Task 10 (2026-08-07 tradesperson plan) quality-review addendum (spec
+// review) — the chat surface had
+// ZERO coverage of technicianReference resolution, technicianId
+// threading, or lookup_my_day's self-scoping, even though this is
+// PRECISELY the surface where technicianId gets populated for
+// TECHNICIAN_REF_INTENTS (via dispatchAssistantLookup's own entity
+// resolution). `lookup_my_day` is deliberately NOT a member of that set,
+// so the property pinned below is the SURFACE GATE — this endpoint must
+// never even attempt to resolve a named technician for this intent — not
+// the `executeLookupAnswer` case body's discard of an already-resolved
+// `technicianId` (that line is pinned directly, independent of any
+// surface gate, in test/workers/voice-lookup-answer.test.ts).
+describe('POST /api/assistant/chat — Task 10 (2026-08-07 tradesperson plan) crew lookups (technician resolution + self-scoping)', () => {
+  function technicianResolver(matches: Record<string, string>): EntityResolver {
+    return {
+      resolve: vi.fn(async (input: { reference: string; kind: string }) => {
+        if (input.kind !== 'technician') return { kind: 'skipped' };
+        const id = matches[input.reference];
+        if (!id) return { kind: 'not_found', reference: input.reference };
+        return { kind: 'resolved', candidate: { id, kind: 'technician', label: input.reference, score: 0.95 } };
+      }),
+    } as unknown as EntityResolver;
+  }
+
+  it('lookup_my_day: naming a DIFFERENT technician in the transcript still returns the ACTOR\'s own day', async () => {
+    const userRepo = new InMemoryUserRepository();
+    // The ACTOR's user row — resolveCanonicalUser matches on
+    // clerkUserId OR id against req.auth.userId (TEST_USER).
+    await userRepo.create({
+      id: 'actor-internal-id',
+      tenantId: TEST_TENANT,
+      clerkUserId: TEST_USER,
+      email: 'actor@example.com',
+      role: 'technician',
+      firstName: 'Actor',
+      lastName: 'Self',
+      canFieldServe: true,
+    });
+    await userRepo.create({
+      id: 'tech-mike',
+      tenantId: TEST_TENANT,
+      email: 'mike@example.com',
+      role: 'technician',
+      firstName: 'Mike',
+      lastName: 'Diaz',
+      canFieldServe: true,
+    });
+
+    const jobRepo = new InMemoryJobRepository();
+    const appointmentRepo = new InMemoryAppointmentRepository();
+    const myJob = await createJob(
+      {
+        tenantId: TEST_TENANT,
+        customerId: 'cust-1',
+        locationId: 'loc-1',
+        summary: 'Actor\'s own AC job',
+        createdBy: TEST_USER,
+      } as never,
+      jobRepo,
+    );
+    await jobRepo.update(TEST_TENANT, myJob.id, { assignedTechnicianId: 'actor-internal-id' });
+    const mikesJob = await createJob(
+      {
+        tenantId: TEST_TENANT,
+        customerId: 'cust-2',
+        locationId: 'loc-2',
+        summary: 'Mike\'s drain job',
+        createdBy: TEST_USER,
+      } as never,
+      jobRepo,
+    );
+    await jobRepo.update(TEST_TENANT, mikesJob.id, { assignedTechnicianId: 'tech-mike' });
+
+    const baseAppt = {
+      tenantId: TEST_TENANT,
+      timezone: TZ,
+      status: 'scheduled' as const,
+      holdPendingApproval: false,
+      createdBy: TEST_USER,
+      createdAt: NOW,
+      updatedAt: NOW,
+    };
+    await appointmentRepo.create({
+      ...baseAppt,
+      id: 'appt-mine',
+      jobId: myJob.id,
+      scheduledStart: new Date('2026-07-15T14:00:00Z'),
+      scheduledEnd: new Date('2026-07-15T16:00:00Z'),
+    });
+    await appointmentRepo.create({
+      ...baseAppt,
+      id: 'appt-mikes',
+      jobId: mikesJob.id,
+      scheduledStart: new Date('2026-07-15T18:00:00Z'),
+      scheduledEnd: new Date('2026-07-15T19:00:00Z'),
+    });
+
+    // An entity resolver that WOULD resolve "Mike" successfully — proves
+    // the chat surface never even ATTEMPTS resolution for lookup_my_day
+    // (see `resolve).not.toHaveBeenCalled()` below), not merely that this
+    // particular name happened not to match. It does NOT prove anything
+    // about executeLookupAnswer's own discard of an already-resolved
+    // technicianId — that's a separate property, pinned directly (without
+    // any surface gate in the way) in test/workers/voice-lookup-answer.test.ts.
+    const entityResolver = technicianResolver({ Mike: 'tech-mike' });
+
+    const gateway = scriptedGateway([
+      JSON.stringify({
+        intentType: 'lookup_my_day',
+        confidence: 0.9,
+        extractedEntities: { targetTechnicianName: 'Mike' },
+      }),
+    ]);
+    const lookups: AssistantLookupDeps = {
+      answers: {},
+      shared: { jobRepo, appointmentRepo, userRepo, proposalRepo: new InMemoryProposalRepository() },
+      entityResolver,
+      tenantTimezoneResolver: async () => TZ,
+      now: () => NOW,
+    };
+    const app = buildApp(gateway, { lookups });
+
+    const res = await request(app)
+      .post('/api/assistant/chat')
+      .send({ messages: [{ role: 'user', content: "What's Mike's day look like?" }] });
+
+    expect(res.status).toBe(200);
+    expect(res.body.taskType).toBe('assistant.lookup.lookup_my_day');
+    expect(res.body.message.content).toContain("Actor's own AC job");
+    // Mike's job must NEVER appear — this is the actor's OWN day, always.
+    expect(res.body.message.content).not.toContain("Mike's drain job");
+    // Surface-asymmetry fix: lookup_my_day is not in TECHNICIAN_REF_INTENTS,
+    // so the chat surface must not even attempt to resolve the name.
+    expect((entityResolver.resolve as ReturnType<typeof vi.fn>)).not.toHaveBeenCalled();
+  });
+
+  it('lookup_crew_schedule: an unresolved crew-member name refuses honestly on the chat surface too', async () => {
+    const userRepo = new InMemoryUserRepository();
+    await userRepo.create({
+      id: 'tech-mike',
+      tenantId: TEST_TENANT,
+      email: 'mike@example.com',
+      role: 'technician',
+      firstName: 'Mike',
+      lastName: 'Diaz',
+      canFieldServe: true,
+    });
+    const jobRepo = new InMemoryJobRepository();
+    const appointmentRepo = new InMemoryAppointmentRepository();
+    const mikeJob = await createJob(
+      {
+        tenantId: TEST_TENANT,
+        customerId: 'cust-1',
+        locationId: 'loc-1',
+        summary: 'Mike\'s real booking',
+        createdBy: TEST_USER,
+      } as never,
+      jobRepo,
+    );
+    await jobRepo.update(TEST_TENANT, mikeJob.id, { assignedTechnicianId: 'tech-mike' });
+    await appointmentRepo.create({
+      id: 'appt-mike',
+      tenantId: TEST_TENANT,
+      jobId: mikeJob.id,
+      scheduledStart: new Date('2026-07-15T14:00:00Z'),
+      scheduledEnd: new Date('2026-07-15T16:00:00Z'),
+      timezone: TZ,
+      status: 'scheduled',
+      holdPendingApproval: false,
+      createdBy: TEST_USER,
+      createdAt: NOW,
+      updatedAt: NOW,
+    });
+
+    const entityResolver = technicianResolver({}); // "Zzyzx" never matches — not_found
+
+    const gateway = scriptedGateway([
+      JSON.stringify({
+        intentType: 'lookup_crew_schedule',
+        confidence: 0.9,
+        extractedEntities: { targetTechnicianName: 'Zzyzx' },
+      }),
+    ]);
+    const lookups: AssistantLookupDeps = {
+      answers: { resolveMemberRole: async () => 'owner' },
+      shared: { jobRepo, appointmentRepo, userRepo, proposalRepo: new InMemoryProposalRepository() },
+      entityResolver,
+      tenantTimezoneResolver: async () => TZ,
+      now: () => NOW,
+    };
+    const app = buildApp(gateway, { lookups });
+
+    const res = await request(app)
+      .post('/api/assistant/chat')
+      .send({ messages: [{ role: 'user', content: "What's Zzyzx's day look like?" }] });
+
+    expect(res.status).toBe(200);
+    expect(res.body.taskType).toBe('assistant.lookup.lookup_crew_schedule');
+    expect(res.body.message.content).toBe('I couldn\'t find a crew member matching "Zzyzx".');
+    // The refusal is by name — never a fallback to the whole crew's data.
+    expect(res.body.message.content).not.toContain("Mike's real booking");
+    expect(res.body.message.content).not.toContain('Mike Diaz');
   });
 });

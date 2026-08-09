@@ -483,6 +483,19 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   // original bids (create_change_order proposal) — deliberate snapshot
   // update for a new migration.
   ['271_estimates_change_order_flag', '3ce6825664e4450cec463a8434906bd427ea84ea269d7d4df3db27f6d43498e3'],
+  // Tradesperson wave 1, Task 8 (2026-08-07 plan): new material_items table
+  // (voice-captured materials/shopping list, add_material proposal
+  // substrate) — deliberate snapshot update for a new migration. Edited
+  // in place pre-merge (quality review) to fix the index shape: dropped
+  // the plain (tenant_id) index (no query used it) and made
+  // idx_material_items_pending cover (tenant_id, created_at) so
+  // listPending's ORDER BY is served by the index scan; hash regenerated.
+  // Regenerated 2026-08-09: Task 9's review reworded a comment INSIDE this
+  // migration's SQL string ("Task 9 may add markCancelled" -> "a future task
+  // may"), which changes the hash. 272 is unmerged, so editing in place is
+  // still safe; once it ships, comment edits need a new migration like any
+  // other change to the value.
+  ['272_create_material_items', '364728f31ee0bada90eb104a2b77198624e5518002d38f28910d6b24a8e60622'],
 ];
 
 function hashMigration(value: string): string {

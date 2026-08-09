@@ -99,6 +99,18 @@ const EXPECTED_PROPOSAL_TYPES: ProposalType[] = [
   // a NEW capture-class proposal type that mints a NEW estimate pinned to
   // an EXISTING job, flagged isChangeOrder (migration 271).
   'create_change_order',
+  // Task 7 (2026-08-07 tradesperson plan) — create_service_agreement: a
+  // NEW capture-class proposal type that signs a customer up to a
+  // recurring maintenance plan/membership.
+  'create_service_agreement',
+  // Task 9 (2026-08-07 tradesperson plan) — add_material: a NEW
+  // capture-class proposal type that adds a row to the voice-captured
+  // shopping list (Task 8's material_items substrate).
+  'add_material',
+  // Task 12 (2026-08-07 tradesperson plan) — add_catalog_item: a NEW
+  // capture-class proposal type that lets an owner add a price-book entry
+  // by voice, the create-side mirror of update_catalog_item.
+  'add_catalog_item',
 ];
 
 describe('ai/orchestration/handler-registry — buildTaskHandlers', () => {

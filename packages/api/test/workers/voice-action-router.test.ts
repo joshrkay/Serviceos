@@ -33,6 +33,10 @@ import {
   createCatalogItem,
   InMemoryCatalogItemRepository,
 } from '../../src/catalog/catalog-item';
+import { InMemoryMaterialItemRepository } from '../../src/materials/material-item';
+import { InMemoryJobRepository, type Job } from '../../src/jobs/job';
+import { InMemoryUserRepository } from '../../src/users/user';
+import type { Appointment } from '../../src/appointments/appointment';
 import type { LLMGateway, LLMResponse } from '../../src/ai/gateway/gateway';
 import type { IntentClassification } from '../../src/ai/orchestration/intent-classifier';
 import type { QueueMessage } from '../../src/queues/queue';
@@ -3125,6 +3129,729 @@ describe('voice-action-router U3 lookup answers (recorded-memo path)', () => {
       // No item names or prices leak into the refusal.
       expect(rec?.answer?.summary).not.toContain('Drain cleaning');
       expect(rec?.answer?.rows).toEqual([]);
+    });
+  });
+
+  // Task 9 (2026-08-07 tradesperson plan) — lookup_materials reads back
+  // Task 8's material_items shopping list. UNLIKE lookup_leads/
+  // lookup_catalog, there is deliberately NO entry in
+  // LOOKUP_REQUIRED_PERMISSION for this intent — any authenticated operator
+  // (technician included) may hear the shopping list, so these tests never
+  // wire resolveMemberRole and still expect a real answer.
+  describe('Task 9 — lookup_materials (voice shopping list readback)', () => {
+    it('reads back the pending list — no permission gate, technician-recorded memo still gets real data', async () => {
+      const proposalRepo = new InMemoryProposalRepository();
+      const voiceRepo = seededVoiceRepo('user-tech');
+      const lookupEvents = lookupEventsSpy();
+      const gateway = gatewayReturning([classify('lookup_materials')]);
+      const materialItemRepo = new InMemoryMaterialItemRepository();
+      await materialItemRepo.create({
+        tenantId: TENANT,
+        description: '3 boxes 1/2" PEX',
+        quantity: 3,
+        createdBy: 'user-owner',
+      });
+      await materialItemRepo.create({
+        tenantId: TENANT,
+        description: 'Flue liner kit',
+        quantity: 1,
+        vendor: 'Ferguson',
+        createdBy: 'user-owner',
+      });
+
+      const worker = createVoiceActionRouterWorker({
+        gateway,
+        proposalRepo,
+        voiceRepo,
+        lookupAnswers: {
+          materialItemRepo: materialItemRepo as never,
+          lookupEvents: lookupEvents as never,
+        },
+      });
+
+      await worker.handle(
+        msg({
+          tenantId: TENANT,
+          userId: 'system',
+          transcript: 'read me the shopping list',
+          recordingId: RECORDING_ID,
+        }),
+        silentLogger(),
+      );
+
+      // No proposal minted for an executed (read-only) lookup.
+      expect(await proposalRepo.findByTenant(TENANT)).toHaveLength(0);
+
+      const rec = await voiceRepo.findById(TENANT, RECORDING_ID);
+      expect(rec?.answerStatus).toBe('answered');
+      expect(rec?.answer?.result).toBe('found');
+      expect(rec?.answer?.summary).toContain('2 items');
+      // Quality-review I2 — the multiplication sign ("3×") reads as "three
+      // times" on Amazon Polly and is typically dropped on Google Cloud
+      // TTS; quantity is always spoken as the word "quantity".
+      expect(rec?.answer?.summary).toContain('3 boxes 1/2" PEX, quantity 3');
+      expect(rec?.answer?.summary).not.toContain('×');
+      expect(lookupEvents.record).toHaveBeenCalledWith(
+        expect.objectContaining({
+          tenantId: TENANT,
+          intent: 'lookup_materials',
+          sessionId: RECORDING_ID,
+          resultStatus: 'found',
+        }),
+      );
+    });
+
+    it('an empty list answers honestly with result=none (no fabrication)', async () => {
+      const proposalRepo = new InMemoryProposalRepository();
+      const voiceRepo = seededVoiceRepo();
+      const gateway = gatewayReturning([classify('lookup_materials')]);
+
+      const worker = createVoiceActionRouterWorker({
+        gateway,
+        proposalRepo,
+        voiceRepo,
+        lookupAnswers: { materialItemRepo: new InMemoryMaterialItemRepository() as never },
+      });
+
+      await worker.handle(
+        msg({
+          tenantId: TENANT,
+          userId: 'system',
+          transcript: 'what parts do I need',
+          recordingId: RECORDING_ID,
+        }),
+        silentLogger(),
+      );
+
+      const rec = await voiceRepo.findById(TENANT, RECORDING_ID);
+      expect(rec?.answerStatus).toBe('answered');
+      expect(rec?.answer?.result).toBe('none');
+      expect(rec?.answer?.rows).toEqual([]);
+    });
+
+    it('with no materialItemRepo wired, the intent is skipped (unsupported), never a fabricated answer', async () => {
+      const proposalRepo = new InMemoryProposalRepository();
+      const voiceRepo = seededVoiceRepo();
+      const gateway = gatewayReturning([classify('lookup_materials')]);
+
+      const worker = createVoiceActionRouterWorker({
+        gateway,
+        proposalRepo,
+        voiceRepo,
+        lookupAnswers: {},
+      });
+
+      await worker.handle(
+        msg({
+          tenantId: TENANT,
+          userId: 'system',
+          transcript: 'what parts do I need',
+          recordingId: RECORDING_ID,
+        }),
+        silentLogger(),
+      );
+
+      const rec = await voiceRepo.findById(TENANT, RECORDING_ID);
+      expect(rec?.answerStatus).toBe('skipped');
+    });
+
+    // Task 9 house decision — job-scoping is real (via jobId), but a date
+    // phrase like "tomorrow" is NOT a filter: materialItemRepo.listPending
+    // has no neededBy/date option (Task 8's substrate never grew one, and
+    // Task 9 does not extend it — see lookup-materials.ts's module doc
+    // comment). The classifier taxonomy no longer advertises "for
+    // tomorrow" phrasing for this reason (spec-review MAJOR B); instead,
+    // any captured neededBy is SPOKEN per-item so the operator can tell
+    // which of the (possibly unfiltered) items are time-sensitive — see
+    // the 'surfaces a captured needed-by date' test below.
+    //
+    // Quality-review M5 — a real UUID, not the literal string 'job-patel':
+    // InMemoryMaterialItemRepository accepts any string as a jobId, but
+    // PgMaterialItemRepository's isUuid guard would return [] for a
+    // non-UUID jobId — a non-UUID fixture here could never catch a
+    // regression in that guard.
+    const JOB_PATEL_ID = '77777777-7777-4777-8777-777777777777';
+
+    it('a pre-verified jobId (VoiceActionRouterPayload.jobId) scopes the list to that job', async () => {
+      const proposalRepo = new InMemoryProposalRepository();
+      const voiceRepo = seededVoiceRepo();
+      const gateway = gatewayReturning([classify('lookup_materials')]);
+      const materialItemRepo = new InMemoryMaterialItemRepository();
+      await materialItemRepo.create({
+        tenantId: TENANT,
+        description: 'unscoped item',
+        createdBy: 'user-owner',
+      });
+      await materialItemRepo.create({
+        tenantId: TENANT,
+        description: 'Patel job item',
+        jobId: JOB_PATEL_ID,
+        createdBy: 'user-owner',
+      });
+
+      const worker = createVoiceActionRouterWorker({
+        gateway,
+        proposalRepo,
+        voiceRepo,
+        lookupAnswers: { materialItemRepo: materialItemRepo as never },
+      });
+
+      await worker.handle(
+        msg({
+          tenantId: TENANT,
+          userId: 'system',
+          transcript: 'what materials are open on the Patel job',
+          recordingId: RECORDING_ID,
+          jobId: JOB_PATEL_ID,
+        }),
+        silentLogger(),
+      );
+
+      const rec = await voiceRepo.findById(TENANT, RECORDING_ID);
+      expect(rec?.answer?.result).toBe('found');
+      expect(rec?.answer?.summary).toContain('1 item');
+      expect(rec?.answer?.summary).toContain('Patel job item');
+      expect(rec?.answer?.summary).not.toContain('unscoped item');
+    });
+
+    // Spec-review MAJOR A — the worse-than-nothing failure mode: an
+    // operator NAMES a job scope, the resolver can't match it, and the
+    // answer must refuse honestly (mirrors lookup_job_profit's identical
+    // guard) rather than silently widening to the tenant's WHOLE pending
+    // list. Before this fix, this exact scenario answered 'found' with
+    // every pending item.
+    it('an unresolved spoken job reference refuses honestly — never silently widens to the whole tenant list', async () => {
+      const proposalRepo = new InMemoryProposalRepository();
+      const voiceRepo = seededVoiceRepo();
+      const gateway = gatewayReturning([classify('lookup_materials', { jobReference: 'the Patel job' })]);
+      const materialItemRepo = new InMemoryMaterialItemRepository();
+      await materialItemRepo.create({
+        tenantId: TENANT,
+        description: 'unrelated tenant-wide item',
+        createdBy: 'user-owner',
+      });
+      const notFoundResolver: EntityResolver = {
+        resolve: vi.fn(async () => ({
+          kind: 'not_found',
+          reference: 'the Patel job',
+        })) as unknown as EntityResolver['resolve'],
+      };
+
+      const worker = createVoiceActionRouterWorker({
+        gateway,
+        proposalRepo,
+        voiceRepo,
+        entityResolver: notFoundResolver,
+        lookupAnswers: { materialItemRepo: materialItemRepo as never },
+      });
+
+      await worker.handle(
+        msg({
+          tenantId: TENANT,
+          userId: 'system',
+          transcript: 'what materials are open on the Patel job',
+          recordingId: RECORDING_ID,
+        }),
+        silentLogger(),
+      );
+
+      const rec = await voiceRepo.findById(TENANT, RECORDING_ID);
+      expect(rec?.answer?.result).toBe('none');
+      expect(rec?.answer?.summary).toBe('I couldn\'t find a job matching "the Patel job".');
+      // The exact bug this test pins: the unscoped item must NEVER leak
+      // into a "job not found" answer.
+      expect(rec?.answer?.summary).not.toContain('unrelated tenant-wide item');
+      expect(rec?.answer?.rows).toEqual([]);
+    });
+
+    // I3(b) router-level piece — a skill-level error must route to
+    // answerStatus='failed', never crash the message or fabricate data.
+    it('a repo error routes to answerStatus=failed', async () => {
+      const proposalRepo = new InMemoryProposalRepository();
+      const voiceRepo = seededVoiceRepo();
+      const gateway = gatewayReturning([classify('lookup_materials')]);
+      const throwingRepo = {
+        listPending: vi.fn(async () => {
+          throw new Error('db down');
+        }),
+        create: vi.fn(),
+        markPurchased: vi.fn(),
+      };
+
+      const worker = createVoiceActionRouterWorker({
+        gateway,
+        proposalRepo,
+        voiceRepo,
+        lookupAnswers: { materialItemRepo: throwingRepo as never },
+      });
+
+      await worker.handle(
+        msg({
+          tenantId: TENANT,
+          userId: 'system',
+          transcript: 'what parts do I need',
+          recordingId: RECORDING_ID,
+        }),
+        silentLogger(),
+      );
+
+      const rec = await voiceRepo.findById(TENANT, RECORDING_ID);
+      expect(rec?.answerStatus).toBe('failed');
+    });
+
+    // Spec-review MAJOR B(2) — neededBy is captured by add_material and
+    // must not be silently dropped on the read side just because it isn't
+    // a query filter.
+    it('surfaces a captured needed-by date in the spoken answer and the row', async () => {
+      const proposalRepo = new InMemoryProposalRepository();
+      const voiceRepo = seededVoiceRepo();
+      const gateway = gatewayReturning([classify('lookup_materials')]);
+      const materialItemRepo = new InMemoryMaterialItemRepository();
+      await materialItemRepo.create({
+        tenantId: TENANT,
+        description: '40-gallon water heater',
+        quantity: 2,
+        vendor: 'Ferguson',
+        neededBy: new Date('2026-08-09T00:00:00Z'),
+        createdBy: 'user-owner',
+      });
+
+      const worker = createVoiceActionRouterWorker({
+        gateway,
+        proposalRepo,
+        voiceRepo,
+        lookupAnswers: { materialItemRepo: materialItemRepo as never },
+      });
+
+      await worker.handle(
+        msg({
+          tenantId: TENANT,
+          userId: 'system',
+          transcript: 'what parts do I need',
+          recordingId: RECORDING_ID,
+        }),
+        silentLogger(),
+      );
+
+      const rec = await voiceRepo.findById(TENANT, RECORDING_ID);
+      expect(rec?.answer?.summary).toContain('needed by August 9');
+      const row = rec?.answer?.rows?.[0] as { text?: string } | undefined;
+      expect(row?.text).toContain('needed by August 9');
+    });
+  });
+
+  // Task 10 (2026-08-07 tradesperson plan) — three READ-ONLY lookup-skill
+  // family members. lookup_crew_schedule/lookup_timesheets are owner-
+  // extended + permission-gated (reports:view) exactly like lookup_revenue
+  // above; lookup_my_day is the opposite shape — no permission gate at
+  // all, strictly self-scoped to the resolved SPEAKER.
+  describe('Task 10 — lookup_crew_schedule, lookup_timesheets, lookup_my_day', () => {
+    function makeJob(over: Partial<Job>): Job {
+      return {
+        id: `job-${Math.random().toString(36).slice(2, 8)}`,
+        tenantId: TENANT,
+        customerId: 'cust-1',
+        locationId: 'loc-1',
+        jobNumber: 'JOB-0001',
+        summary: 'AC tune-up',
+        status: 'scheduled',
+        priority: 'normal',
+        createdBy: 'user-owner',
+        createdAt: new Date('2026-06-01T00:00:00.000Z'),
+        updatedAt: new Date('2026-06-01T00:00:00.000Z'),
+        ...over,
+      } as Job;
+    }
+
+    function makeAppointment(over: Partial<Appointment>): Appointment {
+      const start = new Date();
+      start.setHours(start.getHours() + 1, 0, 0, 0);
+      return {
+        id: `appt-${Math.random().toString(36).slice(2, 8)}`,
+        tenantId: TENANT,
+        jobId: 'job-1',
+        scheduledStart: start,
+        scheduledEnd: new Date(start.getTime() + 60 * 60 * 1000),
+        timezone: 'America/New_York',
+        status: 'scheduled',
+        holdPendingApproval: false,
+        createdBy: 'user-owner',
+        createdAt: new Date('2026-06-01T00:00:00.000Z'),
+        updatedAt: new Date('2026-06-01T00:00:00.000Z'),
+        ...over,
+      };
+    }
+
+    async function seededUserRepo(technicians: Array<{ id: string; firstName: string; lastName: string }>) {
+      const userRepo = new InMemoryUserRepository();
+      for (const t of technicians) {
+        await userRepo.create({
+          id: t.id,
+          tenantId: TENANT,
+          email: `${t.id}@example.com`,
+          role: 'technician',
+          firstName: t.firstName,
+          lastName: t.lastName,
+          canFieldServe: true,
+        });
+      }
+      return userRepo;
+    }
+
+    function technicianResolver(id: string, label: string): EntityResolver {
+      return {
+        resolve: vi.fn(async () => ({
+          kind: 'resolved',
+          candidate: { id, kind: 'technician', label, score: 0.95 },
+        })) as unknown as EntityResolver['resolve'],
+      };
+    }
+
+    function technicianNotFoundResolver(reference: string): EntityResolver {
+      return {
+        resolve: vi.fn(async () => ({ kind: 'not_found', reference })) as unknown as EntityResolver['resolve'],
+      };
+    }
+
+    describe('lookup_crew_schedule', () => {
+      it('technician-recorded ask gets a refusal answer, never crew data', async () => {
+        const proposalRepo = new InMemoryProposalRepository();
+        const voiceRepo = seededVoiceRepo('user-tech');
+        const gateway = gatewayReturning([classify('lookup_crew_schedule')]);
+        const userRepo = await seededUserRepo([{ id: 'tech-mike', firstName: 'Mike', lastName: 'Diaz' }]);
+
+        const worker = createVoiceActionRouterWorker({
+          gateway,
+          proposalRepo,
+          voiceRepo,
+          appointmentRepo: new InMemoryAppointmentRepository(),
+          jobRepo: new InMemoryJobRepository(),
+          userRepo,
+          extendedIntentsEnabled: async () => true,
+          lookupAnswers: { resolveMemberRole: vi.fn(async () => 'technician') },
+        });
+
+        await worker.handle(
+          msg({ tenantId: TENANT, userId: 'system', transcript: "who's free today", recordingId: RECORDING_ID }),
+          silentLogger(),
+        );
+
+        const rec = await voiceRepo.findById(TENANT, RECORDING_ID);
+        expect(rec?.answer?.result).toBe('refused');
+        expect(rec?.answer?.rows).toEqual([]);
+      });
+
+      it('owner-recorded ask with no name reports the whole crew', async () => {
+        const proposalRepo = new InMemoryProposalRepository();
+        const voiceRepo = seededVoiceRepo('user-owner');
+        const gateway = gatewayReturning([classify('lookup_crew_schedule')]);
+        const userRepo = await seededUserRepo([
+          { id: 'tech-mike', firstName: 'Mike', lastName: 'Diaz' },
+          { id: 'tech-carlos', firstName: 'Carlos', lastName: 'Ruiz' },
+        ]);
+
+        const worker = createVoiceActionRouterWorker({
+          gateway,
+          proposalRepo,
+          voiceRepo,
+          appointmentRepo: new InMemoryAppointmentRepository(),
+          jobRepo: new InMemoryJobRepository(),
+          userRepo,
+          extendedIntentsEnabled: async () => true,
+          lookupAnswers: { resolveMemberRole: vi.fn(async () => 'owner') },
+        });
+
+        await worker.handle(
+          msg({ tenantId: TENANT, userId: 'system', transcript: "who's free today", recordingId: RECORDING_ID }),
+          silentLogger(),
+        );
+
+        const rec = await voiceRepo.findById(TENANT, RECORDING_ID);
+        expect(rec?.answer?.result).toBe('found');
+        expect(rec?.answer?.summary).toContain('Mike Diaz');
+        expect(rec?.answer?.summary).toContain('Carlos Ruiz');
+      });
+
+      it('a named crew member who resolves scopes the answer to ONLY that person', async () => {
+        const proposalRepo = new InMemoryProposalRepository();
+        const voiceRepo = seededVoiceRepo('user-owner');
+        const gateway = gatewayReturning([
+          classify('lookup_crew_schedule', { targetTechnicianName: 'Mike' }),
+        ]);
+        const jobRepo = new InMemoryJobRepository();
+        const jobMike = makeJob({ id: 'job-mike', assignedTechnicianId: 'tech-mike' });
+        await jobRepo.create(jobMike);
+        const appointmentRepo = new InMemoryAppointmentRepository();
+        await appointmentRepo.create(makeAppointment({ id: 'appt-mike', jobId: 'job-mike' }));
+        const userRepo = await seededUserRepo([
+          { id: 'tech-mike', firstName: 'Mike', lastName: 'Diaz' },
+          { id: 'tech-carlos', firstName: 'Carlos', lastName: 'Ruiz' },
+        ]);
+
+        const worker = createVoiceActionRouterWorker({
+          gateway,
+          proposalRepo,
+          voiceRepo,
+          appointmentRepo,
+          jobRepo,
+          userRepo,
+          entityResolver: technicianResolver('tech-mike', 'Mike Diaz'),
+          extendedIntentsEnabled: async () => true,
+          lookupAnswers: { resolveMemberRole: vi.fn(async () => 'owner') },
+        });
+
+        await worker.handle(
+          msg({ tenantId: TENANT, userId: 'system', transcript: "what's Mike's day look like", recordingId: RECORDING_ID }),
+          silentLogger(),
+        );
+
+        const rec = await voiceRepo.findById(TENANT, RECORDING_ID);
+        expect(rec?.answer?.result).toBe('found');
+        expect(rec?.answer?.summary).toContain('Mike Diaz');
+        expect(rec?.answer?.summary).not.toContain('Carlos');
+      });
+
+      // The single most important guard this task adds for the two
+      // owner-extended crew lookups: a NAMED technician who does not
+      // resolve must be refused BY NAME, never silently widened to the
+      // whole crew's schedule (spec-review MAJOR A precedent, applied with
+      // more force — see lookup-crew-schedule.ts's module doc comment).
+      it('an unresolved crew-member name refuses honestly — never falls back to the whole crew', async () => {
+        const proposalRepo = new InMemoryProposalRepository();
+        const voiceRepo = seededVoiceRepo('user-owner');
+        const gateway = gatewayReturning([
+          classify('lookup_crew_schedule', { targetTechnicianName: 'Zzyzx' }),
+        ]);
+        const jobRepo = new InMemoryJobRepository();
+        const jobMike = makeJob({ id: 'job-mike', assignedTechnicianId: 'tech-mike' });
+        await jobRepo.create(jobMike);
+        const appointmentRepo = new InMemoryAppointmentRepository();
+        await appointmentRepo.create(makeAppointment({ id: 'appt-mike', jobId: 'job-mike' }));
+        const userRepo = await seededUserRepo([{ id: 'tech-mike', firstName: 'Mike', lastName: 'Diaz' }]);
+
+        const worker = createVoiceActionRouterWorker({
+          gateway,
+          proposalRepo,
+          voiceRepo,
+          appointmentRepo,
+          jobRepo,
+          userRepo,
+          entityResolver: technicianNotFoundResolver('Zzyzx'),
+          extendedIntentsEnabled: async () => true,
+          lookupAnswers: { resolveMemberRole: vi.fn(async () => 'owner') },
+        });
+
+        await worker.handle(
+          msg({ tenantId: TENANT, userId: 'system', transcript: "what's Zzyzx's day look like", recordingId: RECORDING_ID }),
+          silentLogger(),
+        );
+
+        const rec = await voiceRepo.findById(TENANT, RECORDING_ID);
+        expect(rec?.answer?.result).toBe('none');
+        expect(rec?.answer?.summary).toBe('I couldn\'t find a crew member matching "Zzyzx".');
+        // The exact failure mode this test pins: Mike's real booking must
+        // NEVER leak into a "crew member not found" answer.
+        expect(rec?.answer?.summary).not.toContain('Mike');
+        expect(rec?.answer?.rows).toEqual([]);
+      });
+    });
+
+    describe('lookup_timesheets', () => {
+      it('technician-recorded ask gets a refusal answer, never hours data', async () => {
+        const proposalRepo = new InMemoryProposalRepository();
+        const voiceRepo = seededVoiceRepo('user-tech');
+        const gateway = gatewayReturning([classify('lookup_timesheets')]);
+        const userRepo = await seededUserRepo([{ id: 'tech-mike', firstName: 'Mike', lastName: 'Diaz' }]);
+
+        const worker = createVoiceActionRouterWorker({
+          gateway,
+          proposalRepo,
+          voiceRepo,
+          userRepo,
+          extendedIntentsEnabled: async () => true,
+          lookupAnswers: {
+            timeEntryRepo: { findByTenant: vi.fn(async () => []) } as never,
+            resolveMemberRole: vi.fn(async () => 'technician'),
+          },
+        });
+
+        await worker.handle(
+          msg({ tenantId: TENANT, userId: 'system', transcript: 'give me everyone\'s hours for the week', recordingId: RECORDING_ID }),
+          silentLogger(),
+        );
+
+        const rec = await voiceRepo.findById(TENANT, RECORDING_ID);
+        expect(rec?.answer?.result).toBe('refused');
+      });
+
+      it('an unresolved crew-member name refuses honestly — never falls back to everyone\'s hours', async () => {
+        const proposalRepo = new InMemoryProposalRepository();
+        const voiceRepo = seededVoiceRepo('user-owner');
+        const gateway = gatewayReturning([
+          classify('lookup_timesheets', { targetTechnicianName: 'Zzyzx' }),
+        ]);
+        const timeEntryFindByTenant = vi.fn(async () => []);
+        const userRepo = await seededUserRepo([{ id: 'tech-mike', firstName: 'Mike', lastName: 'Diaz' }]);
+
+        const worker = createVoiceActionRouterWorker({
+          gateway,
+          proposalRepo,
+          voiceRepo,
+          userRepo,
+          entityResolver: technicianNotFoundResolver('Zzyzx'),
+          extendedIntentsEnabled: async () => true,
+          lookupAnswers: {
+            timeEntryRepo: { findByTenant: timeEntryFindByTenant } as never,
+            resolveMemberRole: vi.fn(async () => 'owner'),
+          },
+        });
+
+        await worker.handle(
+          msg({ tenantId: TENANT, userId: 'system', transcript: 'how many hours did Zzyzx log this week', recordingId: RECORDING_ID }),
+          silentLogger(),
+        );
+
+        // The refusal short-circuits BEFORE the skill — no data read at all.
+        expect(timeEntryFindByTenant).not.toHaveBeenCalled();
+        const rec = await voiceRepo.findById(TENANT, RECORDING_ID);
+        expect(rec?.answer?.result).toBe('none');
+        expect(rec?.answer?.summary).toBe('I couldn\'t find a crew member matching "Zzyzx".');
+      });
+
+      it('a named crew member who resolves scopes the answer to ONLY that person\'s hours', async () => {
+        const proposalRepo = new InMemoryProposalRepository();
+        const voiceRepo = seededVoiceRepo('user-owner');
+        const gateway = gatewayReturning([
+          classify('lookup_timesheets', { targetTechnicianName: 'Carlos' }),
+        ]);
+        const now = new Date();
+        const timeEntryRepo = {
+          findByTenant: vi.fn(async () => [
+            {
+              id: 'te-1',
+              tenantId: TENANT,
+              userId: 'tech-carlos',
+              entryType: 'job' as const,
+              clockedInAt: now,
+              clockedOutAt: new Date(now.getTime() + 4 * 60 * 60 * 1000),
+              durationMinutes: 240,
+              createdAt: now,
+              updatedAt: now,
+            },
+          ]),
+        };
+        const userRepo = await seededUserRepo([
+          { id: 'tech-mike', firstName: 'Mike', lastName: 'Diaz' },
+          { id: 'tech-carlos', firstName: 'Carlos', lastName: 'Ruiz' },
+        ]);
+
+        const worker = createVoiceActionRouterWorker({
+          gateway,
+          proposalRepo,
+          voiceRepo,
+          userRepo,
+          entityResolver: technicianResolver('tech-carlos', 'Carlos Ruiz'),
+          extendedIntentsEnabled: async () => true,
+          lookupAnswers: {
+            timeEntryRepo: timeEntryRepo as never,
+            resolveMemberRole: vi.fn(async () => 'owner'),
+          },
+        });
+
+        await worker.handle(
+          msg({ tenantId: TENANT, userId: 'system', transcript: 'how many hours did Carlos log this week', recordingId: RECORDING_ID }),
+          silentLogger(),
+        );
+
+        const rec = await voiceRepo.findById(TENANT, RECORDING_ID);
+        expect(rec?.answer?.result).toBe('found');
+        expect(rec?.answer?.summary).toContain('Carlos Ruiz');
+        expect(rec?.answer?.summary).not.toContain('Mike');
+      });
+    });
+
+    describe('lookup_my_day', () => {
+      it("a technician's own recorded memo gets real self-scoped data — NOT permission-gated", async () => {
+        const proposalRepo = new InMemoryProposalRepository();
+        const voiceRepo = seededVoiceRepo('user-tech');
+        const gateway = gatewayReturning([classify('lookup_my_day')]);
+        const jobRepo = new InMemoryJobRepository();
+        const myJob = makeJob({ id: 'job-mine', assignedTechnicianId: 'user-tech', summary: 'My AC job' });
+        const theirJob = makeJob({ id: 'job-theirs', assignedTechnicianId: 'tech-carlos', summary: "Carlos's job" });
+        await jobRepo.create(myJob);
+        await jobRepo.create(theirJob);
+        const appointmentRepo = new InMemoryAppointmentRepository();
+        await appointmentRepo.create(makeAppointment({ id: 'appt-mine', jobId: 'job-mine' }));
+        await appointmentRepo.create(makeAppointment({ id: 'appt-theirs', jobId: 'job-theirs' }));
+        const userRepo = await seededUserRepo([
+          { id: 'user-tech', firstName: 'Me', lastName: 'Technician' },
+          { id: 'tech-carlos', firstName: 'Carlos', lastName: 'Ruiz' },
+        ]);
+
+        const worker = createVoiceActionRouterWorker({
+          gateway,
+          proposalRepo,
+          voiceRepo,
+          appointmentRepo,
+          jobRepo,
+          userRepo,
+          // lookupAnswers present but with NO resolveMemberRole wired —
+          // lookup_my_day must still answer with real data since it
+          // carries no permission gate.
+          lookupAnswers: {},
+        });
+
+        await worker.handle(
+          msg({ tenantId: TENANT, userId: 'system', transcript: "what's on my schedule today", recordingId: RECORDING_ID }),
+          silentLogger(),
+        );
+
+        const rec = await voiceRepo.findById(TENANT, RECORDING_ID);
+        expect(rec?.answer?.result).toBe('found');
+        expect(rec?.answer?.summary).toContain('My AC job');
+        // Strictly self-scoped — a coworker's job must never appear.
+        expect(rec?.answer?.summary).not.toContain("Carlos's job");
+        expect(await proposalRepo.findByTenant(TENANT)).toHaveLength(0);
+      });
+
+      // The single most important security property in this task: when the
+      // speaker cannot be resolved to a technician, the turn fails — it
+      // must NEVER fall back to an unscoped (whole-crew) day. This intent
+      // is deliberately NOT permission-gated, so this resolution IS its
+      // entire access-control story.
+      it('an unresolvable speaker fails the turn — NEVER falls back to the whole crew\'s day', async () => {
+        const proposalRepo = new InMemoryProposalRepository();
+        // createdBy 'user-ghost' matches no row in userRepo below.
+        const voiceRepo = seededVoiceRepo('user-ghost');
+        const gateway = gatewayReturning([classify('lookup_my_day')]);
+        const jobRepo = new InMemoryJobRepository();
+        const someoneElsesJob = makeJob({ id: 'job-theirs', assignedTechnicianId: 'tech-carlos', summary: "Carlos's job" });
+        await jobRepo.create(someoneElsesJob);
+        const appointmentRepo = new InMemoryAppointmentRepository();
+        await appointmentRepo.create(makeAppointment({ id: 'appt-theirs', jobId: 'job-theirs' }));
+        const userRepo = await seededUserRepo([{ id: 'tech-carlos', firstName: 'Carlos', lastName: 'Ruiz' }]);
+
+        const worker = createVoiceActionRouterWorker({
+          gateway,
+          proposalRepo,
+          voiceRepo,
+          appointmentRepo,
+          jobRepo,
+          userRepo,
+          lookupAnswers: {},
+        });
+
+        await worker.handle(
+          msg({ tenantId: TENANT, userId: 'system', transcript: "what's on my schedule today", recordingId: RECORDING_ID }),
+          silentLogger(),
+        );
+
+        const rec = await voiceRepo.findById(TENANT, RECORDING_ID);
+        // Failed, not a fabricated/unscoped answer — and definitely not
+        // Carlos's job appearing anywhere.
+        expect(rec?.answerStatus).toBe('failed');
+        expect(rec?.answer).toBeUndefined();
+      });
     });
   });
 });

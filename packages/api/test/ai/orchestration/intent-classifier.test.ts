@@ -17,6 +17,7 @@ import {
   isLookupIntent,
   isInventoryLoggingPhrasing,
   INTENT_TAXONOMY_VERSION,
+  SUPPORTED_INTENTS,
 } from '../../../src/ai/orchestration/intent-classifier';
 import { LLMGateway, LLMResponse } from '../../../src/ai/gateway/gateway';
 import { formatVerticalForCallerPrompt } from '../../../src/verticals/context-assembly';
@@ -1215,11 +1216,126 @@ describe('taxonomy 1.2.0 — new intents + entities', () => {
   // (send_customer_message — a NEW comms-class proposal type for a
   // free-form outbound customer message), then Task 6 of the same plan
   // bumped it again to 1.11.0 (create_change_order — a NEW capture-class
-  // proposal type that mints a new estimate pinned to an existing job).
+  // proposal type that mints a new estimate pinned to an existing job),
+  // then Task 7 of the same plan bumped it again to 1.12.0
+  // (create_service_agreement — a NEW capture-class proposal type that
+  // signs a customer up to a recurring maintenance plan/membership), then
+  // Task 9 of the same plan bumped it again to 1.13.0 (add_material — a
+  // NEW capture-class proposal type that adds a row to the voice-captured
+  // shopping list; plus lookup_materials — a NEW read-only lookup-skill
+  // family member), then Task 10 of the same plan bumped it again to
+  // 1.14.0 (lookup_crew_schedule / lookup_timesheets / lookup_my_day —
+  // three more read-only lookup-skill family members; no proposal types,
+  // no migrations).
   // classifyIntent always stamps the CURRENT constant regardless of which
   // intent, so this pin tracks the live value.
-  it('taxonomy version reflects the latest coordinated bump (1.11.0)', () => {
-    expect(INTENT_TAXONOMY_VERSION).toBe('1.11.0');
+  // Task 11 of the same plan bumped it again to 1.15.0 (log_mileage — an
+  // ALIAS intent onto the EXISTING log_expense proposal type; no new
+  // ProposalType, no migration).
+  // Task 12 of the same plan bumped it again to 1.16.0 (add_catalog_item —
+  // a NEW capture-class proposal type that lets an owner add a price-book
+  // entry by voice; reuses catalogItemNewName/unitPriceCents/
+  // catalogItemNewDescription, adds one new field, catalogItemUnit).
+  it('taxonomy version reflects the latest coordinated bump (1.16.0)', () => {
+    expect(INTENT_TAXONOMY_VERSION).toBe('1.16.0');
+  });
+
+  // Task 11 (2026-08-07 tradesperson plan) — log_mileage is a new intent
+  // that must be classifiable at all before anything downstream can map or
+  // draft it.
+  it('log_mileage is a supported intent', () => {
+    expect(SUPPORTED_INTENTS).toContain('log_mileage');
+  });
+
+  it('parses log_mileage with mileageMiles (possibly fractional) and jobReference', () => {
+    const result = parseClassifierJson(
+      JSON.stringify({
+        intentType: 'log_mileage',
+        confidence: 0.9,
+        extractedEntities: { mileageMiles: 32.5, jobReference: 'the Patel job' },
+      }),
+    );
+    expect(result?.intentType).toBe('log_mileage');
+    expect(result?.extractedEntities?.mileageMiles).toBe(32.5);
+    expect(result?.extractedEntities?.jobReference).toBe('the Patel job');
+  });
+
+  // A spoken 0/negative miles value must still reach the extracted entities
+  // (never silently dropped here) so the task handler — which owns the
+  // domain gate — can distinguish "no miles stated" from "an invalid miles
+  // value was stated" and gate on `amountCents` with an accurate reason.
+  it('a non-positive mileageMiles still passes the parse allowlist (the handler gates it, not the parser)', () => {
+    const result = parseClassifierJson(
+      JSON.stringify({
+        intentType: 'log_mileage',
+        confidence: 0.9,
+        extractedEntities: { mileageMiles: 0 },
+      }),
+    );
+    expect(result?.extractedEntities?.mileageMiles).toBe(0);
+  });
+
+  it('a non-numeric mileageMiles is dropped (flat number only)', () => {
+    const result = parseClassifierJson(
+      JSON.stringify({
+        intentType: 'log_mileage',
+        confidence: 0.9,
+        extractedEntities: { mileageMiles: '32 miles' },
+      }),
+    );
+    expect(result?.extractedEntities?.mileageMiles).toBeUndefined();
+  });
+
+  // Task 12 (2026-08-07 tradesperson plan) — add_catalog_item is a new
+  // intent that must be classifiable at all before anything downstream
+  // can map or draft it.
+  it('add_catalog_item is a supported intent', () => {
+    expect(SUPPORTED_INTENTS).toContain('add_catalog_item');
+  });
+
+  it('parses add_catalog_item with name, unitPriceCents, and unit', () => {
+    const result = parseClassifierJson(
+      JSON.stringify({
+        intentType: 'add_catalog_item',
+        confidence: 0.9,
+        extractedEntities: {
+          catalogItemNewName: 'Smart thermostat install',
+          unitPriceCents: 38500,
+          catalogItemUnit: 'each',
+        },
+      }),
+    );
+    expect(result?.intentType).toBe('add_catalog_item');
+    expect(result?.extractedEntities?.catalogItemNewName).toBe('Smart thermostat install');
+    expect(result?.extractedEntities?.unitPriceCents).toBe(38500);
+    expect(result?.extractedEntities?.catalogItemUnit).toBe('each');
+  });
+
+  it('parses add_catalog_item with a spoken price of exactly 0 (flat number only, never dropped)', () => {
+    const result = parseClassifierJson(
+      JSON.stringify({
+        intentType: 'add_catalog_item',
+        confidence: 0.9,
+        extractedEntities: { catalogItemNewName: 'Free estimate', unitPriceCents: 0 },
+      }),
+    );
+    expect(result?.extractedEntities?.unitPriceCents).toBe(0);
+  });
+
+  it('drops an out-of-vocabulary catalogItemUnit and records the invalid-field entry', () => {
+    const result = parseClassifierJson(
+      JSON.stringify({
+        intentType: 'add_catalog_item',
+        confidence: 0.9,
+        extractedEntities: {
+          catalogItemNewName: 'Copper pipe',
+          unitPriceCents: 500,
+          catalogItemUnit: 'per widget',
+        },
+      }),
+    );
+    expect(result?.extractedEntities?.catalogItemUnit).toBeUndefined();
+    expect(result?.invalidEnumFields).toContainEqual({ field: 'catalogItemUnit', value: 'per widget' });
   });
 
   it('parses create_invoice_schedule with the verbatim milestone sentence', () => {

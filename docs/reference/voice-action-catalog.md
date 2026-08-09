@@ -26,7 +26,7 @@ exist today.
 
 ## A) Speakable today — intent + proposal + execution handler all exist
 
-These 44 actions can be spoken, drafted as a proposal, approved, and executed.
+These 48 actions can be spoken, drafted as a proposal, approved, and executed.
 "Persistence proof" = a Docker-gated integration test that proves the row +
 audit event actually land in Postgres (vs. mocked-DB-only coverage, which cannot
 catch schema drift or a missing dependency).
@@ -77,6 +77,10 @@ catch schema drift or a missing dependency).
 | "Knock 50 dollars off the Henderson invoice" | `apply_credit` | `apply_credit` | money | unit |
 | "Text the Hendersons the part arrived, we can come Thursday" | `send_customer_message` | `send_customer_message` | comms | unit |
 | "The Garcias want a second zone — change order for 1800" | `create_change_order` | `create_change_order` | capture | integration (`integration/draft-estimate-execution.test.ts`) |
+| "Sign the Garcias up for the annual maintenance plan, 290 a year" | `create_service_agreement` | `create_service_agreement` | capture | unit + sweep round-trip (`proposals/create-service-agreement-handler.test.ts`: handler-created agreement → `runDueAgreements` → asserts a `generated`, not `failed`, run) |
+| "Add three boxes of half-inch PEX to the shopping list" | `add_material` | `add_material` | capture | unit (`proposals/add-material-handler.test.ts`) |
+| "Log 32 miles to the Patel job" | `log_mileage` | `log_expense` | capture | unit |
+| "Add a catalog item: smart thermostat install, 385" | `add_catalog_item` | `add_catalog_item` | capture | unit (`proposals/add-catalog-item-handler.test.ts`) |
 
 > **Voice technician resolution (U1, taxonomy 1.2.0):** `reassign_appointment`,
 > `add_crew_member`, and `remove_crew_member` now resolve the spoken technician
@@ -450,6 +454,575 @@ taxonomy 1.11.0):
   (`proposals/surface.ts`) — operator/technician-only, never reachable from
   an unauthenticated inbound caller.
 
+Notes on the Tradesperson wave 1, Task 7 row (`create_service_agreement`, taxonomy 1.12.0):
+
+- **NEW capture-class proposal type** — signs a customer up for a
+  recurring maintenance plan/membership ("Sign the Garcias up for the
+  annual maintenance plan, 290 a year"). Writes a `service_agreements` row
+  (migration 056, which was already live before this task — no new
+  migration was needed).
+- **Reuses the existing agreements substrate end to end, does not
+  reimplement it.** `CreateServiceAgreementExecutionHandler`
+  (`proposals/execution/create-service-agreement-handler.ts`) writes
+  through `createAgreement` (`agreements/agreement-service.ts`) — the SAME
+  function the authenticated `POST /api/agreements` route calls, which in
+  turn writes through the SAME `AgreementRepository`
+  (`agreements/agreement.ts`, Pg-backed via `agreements/pg-agreement.ts`)
+  the recurring-agreements sweep (`runDueAgreements`, driven by
+  `workers/recurring-agreements-worker.ts`) reads from. Quality-review fix
+  (I1) — an earlier revision hand-assembled the `Agreement` row instead of
+  calling `createAgreement`, duplicating six defaults
+  (`autoGenerateInvoice`/`autoGenerateJob`/`autoRenew`/`renewalCount`/
+  `memberDiscountBps`/`priorityBooking`/`autoCollectDues`) and skipping
+  three invariants (`endsOn >= startsOn`, the auto-renew term invariant,
+  `parseRule` validation) that live in `createAgreement` — most of those
+  fields are OPTIONAL on the `Agreement` interface (added well after the
+  original table), so the type system could not have caught a future
+  hand-rolled copy silently missing one. Calling `createAgreement` means
+  `computeFirstRun` (its internal `nextRunAt` calculation) runs there too;
+  on TODAY's 4-cadence mapping table this is currently equivalent to a
+  plain copy of `startsOn` (`computeFirstRun` only diverges when the rule
+  carries `BYMONTHDAY`, which none of the four mappings emit) — reusing
+  the shared function is parity with the authenticated route and
+  future-proofing, not a fix for a live bug on today's table.
+- **`createAgreement`'s own audit call is suppressed** (called with
+  `undefined` as its audit-repo argument) because that call is not
+  failure-soft (no try/catch) — a thrown audit error there would propagate
+  AFTER the row was already inserted, misreporting a successful create as
+  a failed execution. The execution handler emits its OWN failure-soft
+  `service_agreement.created` event afterward instead, exactly like every
+  other LogExpense-family handler (`log-expense-handler.ts`).
+- **No money moves at creation.** `createAgreement`'s own doc comment
+  explains that service agreements bypass the proposals layer for their
+  RECURRING runs (each cycle's job/invoice generation is pre-approved
+  standing consent from the sign-up itself) — this task adds the sign-up
+  step itself as a reviewed proposal; once approved, the resulting row is
+  swept by the exact same unmodified `runDueAgreements` machinery as a
+  form-created agreement, and each generated invoice rides the normal
+  review path already in place for that invoice type.
+- **CRITICAL fix (C1) — service-location resolution.** The drafting task
+  has no location-reference extraction seam, so `payload.locationId` is
+  ALWAYS absent on a voice-drafted proposal. `runDueAgreements` generates
+  each cycle's job with `locationId: agreement.locationId ?? ''`, and job
+  creation REJECTS an empty `locationId` — so before this fix, EVERY
+  voice-created agreement produced a `failed` run on EVERY sweep tick
+  (every 60 seconds — app.ts), forever, with the only trace being a
+  buried `agreement_runs` row (`nextRunAt` also advances on a failed run,
+  so the cycle was never retried either). `CreateServiceAgreementExecutionHandler`
+  now resolves the customer's PRIMARY active service location, else their
+  first active location, at execution time — the SAME ladder
+  `EmergencyDispatchExecutionHandler` and `CreateJobExecutionHandler`/
+  `CreateAppointmentExecutionHandler` (`handlers.ts`) already use. A
+  customer with no active location at all fails execution outright
+  ("Customer has no service location — add one before starting a plan")
+  rather than persisting a row the sweep can never service. Disabling
+  `autoGenerateJob` as a workaround was considered and rejected:
+  `createInvoice` independently requires a `jobId` (`invoices/invoice.ts`),
+  so a location-less agreement can never produce either side effect.
+  `isFullyWired()` requires BOTH `agreementRepo` and `locationRepo` for
+  this reason — a missing `locationRepo` is not a degraded-but-usable
+  mode here, since v1 never supplies a payload `locationId` at all. (The
+  underlying "an agreement can be created with no location" hole is
+  PRE-EXISTING and repo-wide — the authenticated route's `locationId` is
+  optional too, and no test anywhere covered a no-location agreement
+  before this task's sweep round-trip test; this fix closes it for the
+  voice path specifically, not the route.)
+- **PERPETUAL by default (info, not a bug).** A voice-created agreement
+  never sets `endsOn`, so `autoRenew: false` does not actually BOUND
+  anything — `autoRenew` only controls whether a LAPSED `endsOn` rolls
+  forward; with no `endsOn`, nothing ever lapses. "No auto-renew" reads
+  safer than it is: a voice-signed-up plan runs indefinitely until an
+  operator manually pauses or cancels it from the agreements screen.
+- **Idempotent replay, not just a synthetic-id passthrough.** Like
+  `create_change_order`, this handler mints a brand NEW row on every
+  `execute()` call (unlike `apply_credit`/`record_refund`, which mutate an
+  EXISTING row and are naturally idempotent elsewhere) — a `resultEntityId`
+  already stamped on the proposal short-circuits to a pure replay so a
+  redelivered/re-executed approval can never sign the same customer up
+  twice.
+- **Customer resolution mirrors `send_customer_message` exactly** (not
+  `apply_credit`'s invoice-reference pattern): `create_service_agreement`
+  joined `CUSTOMER_REF_INTENTS` (`ai/agents/customer-calling/entity-
+  resolution.ts`), so the router resolves a spoken customer name to a
+  verified id BEFORE drafting and threads it onto `context.customerId`
+  (the top-level `TaskContext` field, not
+  `context.existingEntities.customerId`). An unresolved reference gates
+  `missingFields: ['customerId']`.
+- **Cadence is a fixed 4-token enum, mapped deterministically to an
+  RRULE — no LLM call.** The classifier normalizes the spoken cadence word
+  onto one of `monthly`/`quarterly`/`twice_a_year`/`annual` (synonyms like
+  "semiannual"/"yearly" map onto the same tokens); `quarterly` and
+  `twice_a_year` are expressed as `FREQ=MONTHLY;INTERVAL=3` and
+  `FREQ=MONTHLY;INTERVAL=6` respectively. `FREQ=QUARTERLY;INTERVAL=2` is an
+  EQUALLY valid RRULE for "every 6 months" (`recurrence.ts`'s
+  `nextOccurrence` steps a `quarterly` frequency by `interval * 3` months)
+  — `MONTHLY;INTERVAL=6` was chosen so every multi-month cadence in this
+  table rides the same `FREQ`, not because the engine lacks a
+  `QUARTERLY`-based equivalent. The mapping table is typed against the
+  classifier's own cadence union (`Record<ServiceAgreementCadence,
+  string>`), not a widened `Record<string, string>`, so a fifth cadence
+  token added later without a matching RRULE entry is a COMPILE error, not
+  a silent gate. An absent/unrecognized cadence gates
+  `missingFields: ['recurrenceRule']`. **Weekly/biweekly cadences (lawn
+  care, pool service, pest control — core recurring-trades work) are
+  UNSUPPORTED by the recurrence engine itself** (`RECURRENCE_FREQUENCIES`
+  is `monthly | quarterly | yearly` only, `agreements/enums.ts`) — a
+  spoken "weekly" gates on `missingFields: ['recurrenceRule']` with no
+  further explanation on the card; this is a real product gap, not a bug,
+  filed here so the gate isn't mysterious.
+- **`startsOn` defaults to the first of next month computed from the
+  TENANT's local calendar date** (`shared/timezone.ts localDateKey`), never
+  raw server-local `Date` math — a naive default is off by a day for any
+  tenant whose local "today" differs from the server/UTC day. This is a
+  DELIBERATE, narrower exception to the general "never silently default an
+  unresolved tenant timezone" rule (the Phoenix mis-booking incident
+  documented in `voice-action-router.ts`): the blast radius of a wrong
+  START DATE — possibly off by one day, on a review card the operator
+  reads before approving, for a sweep run weeks away — is materially
+  smaller than a mis-timed booking. The assumption is made VISIBLE rather
+  than silent: whenever the fallback timezone is used, the proposal's
+  `explanation` names it (e.g. "…starting Sep 1 2026 (assumed
+  America/New_York — tenant timezone unset)").
+  A spoken override ("starting September", "October 1st") is parsed
+  best-effort via chrono-node, anchored to the tenant-local "now" (mirrors
+  `ai/scheduling/resolve-datetime.ts`'s own chrono+luxon reference-date
+  construction, minus the exact-time/daypart requirement — this field is a
+  bare calendar DATE, never a time-of-day), guarded (quality-review I2)
+  against two classes of bad parse: (1) a fully AMBIGUOUS relative phrase
+  with neither an explicit month nor day named — chrono still returns a
+  best guess for "a year"/"last year" (reading them as a bare duration
+  from "now"), and that guess is materially wrong for the classifier's own
+  canonical example ("290 A YEAR" could drop "a year" into this field);
+  (2) a resolved date already in the tenant's PAST ("January 2019") —
+  `runDueAgreements` (the sweep, every 60 seconds) would pick a back-dated
+  `nextRunAt` up on its very next tick and advance ONE interval per pass,
+  so a back-dated MONTHLY plan would drip a job+invoice pair roughly once
+  a MINUTE until it caught up to today. Either guard tripping, or chrono
+  simply failing to parse, falls back to the computed default rather than
+  gating — a soft scheduling default the reviewer can correct before
+  approving is not the "silent guess" the P0 voice-safety invariant
+  targets. The contract (`proposals/contracts/create-service-agreement.ts`)
+  layers two backstops: `startsOn` must be a REAL calendar date (not just
+  `YYYY-MM-DD` shape — `computeFirstRun` feeds the string straight into
+  `Date.UTC` with no further validation, so "2026-02-30" would otherwise
+  silently roll over to March 2), and must not already be in the past
+  (computed fresh per validation call against the server's wall clock —
+  defense in depth behind the drafting task's tenant-aware guard above).
+- **`explanation` renders the plan in plain language, not the raw
+  RRULE.** No operator reviewing a card verifies `"FREQ=MONTHLY;
+  INTERVAL=6"` by eye. `Proposal.explanation` (rendered on the review card
+  without touching the payload's Zod contract) carries a summary like
+  "Twice a year, $290.00, starting Sep 1 2026" instead, built from
+  whatever of {cadence, price, start date} is concretely known.
+- **A $0 plan is legal at the contract layer but never reachable by voice
+  today.** `priceCentsSchema` (`agreements/enums.ts`) is non-negative, so a
+  `priceCents: 0` payload (a comp membership) validates — a legitimate
+  configuration for a future non-voice caller (a hand-edited proposal, or
+  a comp-plan UI path). `CreateServiceAgreementTaskHandler` is stricter on
+  purpose: it requires a POSITIVE spoken amount (`ee.amount > 0`), because
+  voice cannot distinguish "the caller said zero" from "the caller didn't
+  state a price" — the voice path can never currently produce
+  `priceCents: 0`. The contract also caps `priceCents` at a $100,000/period
+  sanity ceiling (quality-review minor) — a backstop against a misheard
+  "290 thousand a year" persisting a $2.9M/period plan, not a real product
+  limit.
+- **No `_meta` confidence marker.** Unlike `create_change_order`, there is
+  no catalog grounding or LLM call in this handler that would produce a
+  real confidence signal on a plan price — `_meta` is omitted rather than
+  fabricated (`overallConfidence` is a REQUIRED field on the shared `_meta`
+  envelope whenever `_meta` is present at all).
+- **Never auto-approves.** The drafting task deliberately omits
+  `sourceTrustTier`, so `decideInitialStatus`'s only auto-approve branch
+  (`sourceTrustTier === 'autonomous' AND` capture-class) is never reached
+  at any confidence — same posture as `create_change_order` /
+  `create_standing_instruction`.
+- **New fields voice-extractable in v1 only:** `customerId` (router-
+  resolved), `name` (`serviceAgreementName`), `recurrenceRule` (from
+  `serviceAgreementCadence`), `priceCents` (the existing `amount` seam),
+  and `startsOn` (`serviceAgreementStartsOn`, optional). `locationId` /
+  `description` / `autoRenew` / `renewalTermMonths` / `memberDiscountBps` /
+  `priorityBooking` / `autoCollectDues` all exist on the contract (mirroring
+  the authenticated route) but have no voice extraction seam yet — a v1
+  scope decision, not an oversight; the new rows default to
+  `autoGenerateInvoice: true`, `autoGenerateJob: true`, no auto-renew, no
+  member discount, no priority booking, no auto-collect-dues, matching
+  `createAgreement`'s own defaults.
+- **RBAC posture unchanged (flagged, no policy change):**
+  `create_service_agreement` is not in `CONFIG_WRITING_PROPOSAL_TYPES`
+  (`proposals/actions.ts`) — its execution writes a customer-scoped
+  agreement, not tenant configuration — so approval requires only the
+  generic `proposals:approve` permission every `dispatcher` already holds,
+  identical to `draft_estimate`/`create_change_order` today. This task did
+  not add a stricter owner-only gate, even though signing a customer up
+  for a recurring charge is a meaningfully different risk profile than a
+  note or a job-field edit; a controller may want to reconsider this in
+  the future.
+- This type is deliberately **absent** from `S1_ALLOWED_PROPOSAL_TYPES`
+  (`proposals/surface.ts`) — operator/technician-only, never reachable
+  from an unauthenticated inbound caller.
+
+Notes on the Tradesperson wave 1, Task 9 row (`add_material`, taxonomy 1.13.0):
+
+- **NEW capture-class proposal type** — adds a row to the voice-captured
+  shopping list. Writes a `material_items` row (migration 272, Task 8's
+  substrate — `src/materials/material-item.ts`, `PgMaterialItemRepository`
+  / `InMemoryMaterialItemRepository`). No money moves, and it's reversible
+  (the row can be marked purchased via `markPurchased`, or simply
+  ignored) — same posture as `log_expense`.
+- **Wires Task 8's dormant substrate.** `material_items` shipped in Task 8
+  with zero callers — nothing constructed a repo instance and no voice
+  intent read/wrote through it. This task is what gives it real callers:
+  `AddMaterialExecutionHandler` (`proposals/execution/
+  add-material-handler.ts`) writes through it, and `lookup_materials`
+  (below) reads from the SAME instance (`app.ts` constructs one
+  `materialItemRepo` and threads it into both the execution-handler
+  registry and `lookupAnswerDeps`).
+- **jobId is OPTIONAL, unlike `create_change_order`'s REQUIRED jobId.** A
+  shopping-list item can be unlinked to any job ("grab three boxes of PEX"
+  with no job named is still a perfectly good capture) — `add_material`
+  joined `JOB_REF_INTENTS` (`entity-resolution.ts`) so a NAMED job still
+  resolves to a verified id, but an unresolved/absent reference never
+  gates the proposal (same posture as `log_expense`'s jobId).
+- **`neededBy` accepts a PAST date — a deliberate divergence from Task
+  7's `startsOn`.** `startsOn` (`create-service-agreement.ts`) rejects a
+  past date because a back-dated value feeds a 60-second recurring sweep
+  that would immediately drip a job+invoice pair. `neededBy` has no such
+  consumer — nothing sweeps, bills, or repeats off it, and Task 8's
+  `listPending` doesn't even filter by it — so a tradesperson genuinely
+  saying "we needed this yesterday" is a real, useful shopping-list
+  signal, not a malformed one. See `contracts/add-material.ts`'s module
+  doc comment for the full rationale.
+- **`quantity`'s domain cap (1,000,000) is imported, not duplicated
+  (quality-review I6).** The contract imports `MAX_QUANTITY` from
+  `material-item.ts` rather than repeating the literal — the SAME number
+  enforced at the repo layer, structurally, so a payload that passes the
+  draft-time contract can never throw at execution against a stricter
+  repo-layer check (the divergence class Task 6's change-order contract
+  first surfaced, and which a mere "keep these in sync" comment cannot
+  prevent on its own).
+- **`description` rejects whitespace-only input (quality-review I5).**
+  The contract trims BEFORE checking length
+  (`z.string().trim().min(1).max(1000)`) — without `.trim()`, a
+  spoken-then-mistranscribed `"   "` would pass this draft-time gate and
+  only fail later at execution against `material-item.ts`'s own
+  (trim-then-check) validator, exactly the "contract looser than the
+  layer it feeds" class this task's own `quantity` cap guards against on
+  a different field.
+- **Audit event: `material.requested`, entityType `material_item`.**
+  "Requested" names what happened from the shop's point of view (a
+  tradesperson asked for a part), not that it physically arrived —
+  `markPurchased` is the event that would earn a past-tense verb.
+  `entityType` is `material_item` (singular of the `material_items`
+  table), mirroring `service_agreement.created`'s choice over the bare
+  domain-object name. Like `expense.logged`/`credit.applied`/
+  `refund.recorded`, this event is deliberately **not** added to
+  `audit-event-mapping.ts` — same unmapped-by-design posture.
+- **Idempotent replay, not just a synthetic-id passthrough.** Like
+  `create_change_order`/`create_service_agreement`, this handler mints a
+  brand NEW row on every `execute()` call — a `resultEntityId` already
+  stamped on the proposal short-circuits to a pure replay so a
+  redelivered/re-executed approval can never double-add the same item.
+- **No `_meta` confidence marker.** No catalog grounding or LLM call
+  anywhere in this type's drafting leg produces a real confidence signal
+  on a shopping-list line — `_meta` is omitted rather than fabricated,
+  same posture as `create_service_agreement`.
+- **Never auto-approves (today).** The drafting task deliberately omits
+  `sourceTrustTier`, so `decideInitialStatus`'s only auto-approve branch
+  is never reached at any confidence — same posture as
+  `create_change_order`/`create_service_agreement`. A shopping-list add is
+  about as low-risk as a capture-class action gets, so a future revision
+  may reconsider graduating it to the autonomous lane; that is a
+  deliberate scope decision for a later pass, not an oversight here.
+- **RBAC posture unchanged (flagged, no policy change):** `add_material`
+  is not in `CONFIG_WRITING_PROPOSAL_TYPES` (`proposals/actions.ts`) —
+  its execution writes an operational shopping-list row, not tenant
+  configuration — so approval requires only the generic
+  `proposals:approve` permission every `dispatcher` already holds,
+  identical to `draft_estimate`/`create_change_order`/
+  `create_service_agreement` today.
+- This type is deliberately **absent** from `S1_ALLOWED_PROPOSAL_TYPES`
+  (`proposals/surface.ts`) — operator/technician-only, never reachable
+  from an unauthenticated inbound caller.
+
+`lookup_materials` (read-only, Section E) reads the same substrate back:
+
+- **Bounded fetch, not "load everything and slice" (quality-review I4).**
+  `ai/skills/lookup-materials.ts` fetches at most `MAX_ITEMS_SPOKEN + 1`
+  (6) rows via `MaterialItemListOptions.limit` — a NEW option Task 9 added
+  to Task 8's `MaterialItemListOptions`/`PgMaterialItemRepository`/
+  `InMemoryMaterialItemRepository`. A shopping list is append-mostly (only
+  `markPurchased` prunes it), so the original unbounded `SELECT *` loaded
+  every pending row for the tenant just to speak 5 of them. Because the
+  fetch is capped, the skill genuinely cannot report an exact total once a
+  tenant has more than 5 pending items — `data.count` is `null` in that
+  case (never a guessed number) and the summary says "5+ items" rather
+  than a false-precise total. This is a deliberate divergence from
+  `lookup_catalog` (which fetches the tenant's WHOLE catalog and lets the
+  WORKER slice, since other consumers need every item) — there is no
+  non-TTS consumer of the pending shopping list today.
+- **An unresolved spoken job reference refuses honestly (spec-review
+  MAJOR A).** "What materials are open on the Patel job?" with no
+  matching Patel used to silently fall through to the UNFILTERED tenant
+  list, announced as a normal found-answer — the worse failure mode,
+  since the operator actively named a scope. `executeLookupAnswer`'s
+  `lookup_materials` case (`workers/voice-lookup-answer.ts`) now mirrors
+  `lookup_job_profit`'s identical guard: `jobReference` present but
+  `jobId` absent → `"I couldn't find a job matching \"…\""`, never a
+  silent widen. Absent any jobReference at all, the unfiltered (or
+  job-scoped, when `jobId` resolved) list remains the correct, INTENDED
+  answer for "read me the shopping list".
+- **"For tomorrow" is not a filter, but `neededBy` IS spoken (spec-review
+  MAJOR B).** Task 8's `MaterialItemListOptions` has no date filter, so
+  the taxonomy no longer advertises "what parts do I need tomorrow?"
+  phrasing — a date-scoped ask now classifies elsewhere rather than
+  quietly returning an unfiltered list under a promise the query can't
+  keep. But `neededBy` IS captured by `add_material` and persisted on
+  every row, so silently never mentioning it on the read side would mean
+  this module collects data it then hides from the person who spoke it:
+  each spoken/rendered item now states its needed-by date when present
+  ("3 boxes of PEX, quantity 3, needed by August 9"), letting the operator
+  identify which of the (possibly unfiltered) items are time-sensitive
+  themselves. A real `neededBy` QUERY filter is a genuine Task 8 contract
+  extension, filed as separate follow-up work — not done here.
+- **TTS-safe quantity wording (quality-review I2).** The original
+  `${quantity}× ${description}` shape used U+00D7 MULTIPLICATION SIGN,
+  which Amazon Polly reads as "times" in a numeric context ("3× 3 boxes"
+  → "three times three boxes," i.e. nine) and Google Cloud TTS typically
+  drops entirely. Every quantity is now spoken as the word "quantity".
+- **Spoken items are the OLDEST pending, not the newest.** Mirrors Task
+  8's own `listPending` contract (oldest-created-first); a caller with
+  more than 5 pending items hears the 5 that have been waiting longest,
+  and "and more beyond that" hides the most RECENTLY added ones — a
+  plausibly surprising order for a shopping list, documented here and in
+  `lookup-materials.ts`'s own module doc comment rather than left
+  implicit.
+- **`lookup_events.result_count` SATURATES at 6 for this intent.** The
+  bounded fetch (I4, above) means the row written by `record()` carries
+  rows-fetched, capped at `MAX_ITEMS_SPOKEN + 1` (6) — never the true
+  pending total once it exceeds that. `avg(result_count) where intent =
+  'lookup_materials'` (or any analytics query treating this column as an
+  exact count) is therefore a ceilinged metric: a genuine 6 pending items
+  is indistinguishable from a genuine 600. See `lookup-events/lookup-event.ts`'s
+  `resultCount` doc comment.
+
+Notes on the Tradesperson wave 1, Task 11 row (`log_mileage`, taxonomy 1.15.0):
+
+- **ALIAS onto the EXISTING `log_expense` proposal type — no new
+  ProposalType, no new execution handler, no migration.** A technician
+  logs drive miles for the tax-deduction mileage log ("Log 32 miles to
+  the Patel job"); the resulting row is a plain `expenses` row with
+  `category: 'vehicle'`, indistinguishable in storage from a manually
+  logged vehicle expense.
+- **Branches inside `LogExpenseTaskHandler`, not a subclass or a second
+  file.** House precedent for a no-op alias (`schedule_inspection` →
+  `create_appointment`, `log_permit` → `add_note`) is a thin dispatch-only
+  alias where the target handler runs completely unchanged. `log_mileage`
+  can't follow that byte-for-byte — it needs its OWN math (miles × rate)
+  the plain `log_expense` drafting never does.
+- **Quality-review fix (2026-08-09) — the branch keys on `context.intent
+  === 'log_mileage'`, not the presence of `mileageMiles`.** `TaskContext`
+  gained an `intent?: IntentType` field (`ai/tasks/task-handlers.ts`),
+  threaded at the `voice-action-router.ts` dispatch site, specifically to
+  fix this: the branch originally keyed on the mere PRESENCE of the
+  `mileageMiles` extracted-entity field, reasoned as safe because "a plain
+  `log_expense` utterance never extracts `mileageMiles`" — but that is a
+  PROMPT-LEVEL instruction to the model, not a structural guarantee.
+  `entitiesForProposal` (`workers/voice-action-router.ts`) is a passthrough
+  for every intent except `create_customer`, and the classifier's JSON
+  response shape is ONE GLOBAL template shared by every intent — nothing
+  stops a real utterance ("drove 32 miles round trip, spent $240 on
+  fittings") from classifying `log_expense` while the model still emits
+  `mileageMiles` alongside the real `amount`, or the mirror image (a
+  `log_mileage` turn where the model puts the heard number on the shared
+  `amount` key instead). Field-presence keying let either direction hijack
+  or silently vanish; `context.intent` is the classifier's actual verdict,
+  so neither can. A stray `expenseDescription` or `amount` on a
+  `log_mileage` turn is folded into the visible description rather than
+  discarded, so the operator always sees everything the model heard.
+- **`amountCents = round(miles × DEFAULT_MILEAGE_RATE_CENTS_PER_MILE)`.**
+  `DEFAULT_MILEAGE_RATE_CENTS_PER_MILE` (70¢, `ai/tasks/voice-extended-
+  tasks.ts`) is the 2026 IRS standard mileage rate — a CONSTANT, not
+  tenant config (the IRS publishes one national rate per year; this isn't
+  a per-tenant business setting the way a labor rate is). Gated on the
+  COMPUTED CENTS, not the raw miles — any `0 < miles < 1/140` (~0.00714)
+  rounds to 0 cents, which would pass a bare `miles > 0` check yet violate
+  the contract's `amountCents.positive()` at execution.
+- **Miles get a domain cap (0 < miles ≤ 10,000).** `MAX_MILEAGE_MILES`
+  (exported, `ai/tasks/voice-extended-tasks.ts`) is a SANITY BOUND on a
+  spoken figure, not an overflow guard: `expenses.amount_cents` is
+  Postgres `INTEGER` (int4, max 2,147,483,647), which at this rate would
+  need roughly 30.7 MILLION miles to overflow. 10,000 is a domain judgment
+  ("no single logged trip is five figures of miles"), not a boundary the
+  overflow math requires. `logExpensePayloadSchema` has NO upper bound on
+  `amountCents` (a real expense — a new work van — legitimately runs into
+  the tens of thousands), so this handler-level cap on MILES is the only
+  thing standing between an STT-garbled spoken figure and Postgres; that
+  is the actual argument for having any cap at all. An out-of-range value
+  (0, negative, or over the cap) gates on `amountCents` exactly like a
+  genuinely absent one — never silently clamped.
+- **`spentAt` is TODAY in the TENANT timezone as a full ISO instant, not a
+  bare date string (Task 7's lesson, quality-review fix).** `spent_at` is
+  TIMESTAMPTZ (`schema.ts`) and `LogExpenseExecutionHandler` parses the
+  payload's `spentAt` with `new Date(spentAtRaw)`, which reads a bare
+  `'YYYY-MM-DD'` string as UTC MIDNIGHT — silently rendering back as the
+  PREVIOUS calendar day in any tenant west of UTC, the exact off-by-one
+  this fix exists to eliminate. `tzMidnight(localDateKey(now, tz), tz)`
+  (`shared/timezone.ts`) converts the tenant-local calendar date into the
+  correct UTC instant instead; the contract explicitly allows a full ISO
+  timestamp. Uses the shared `resolveTenantTimezone` (`ai/tasks/
+  task-input.ts` — lifted here from four independent copies, quality
+  review "I4"), falling back to `DEFAULT_TENANT_TIMEZONE` when the tenant
+  zone is unresolved. Applies to the PLAIN `log_expense` path too, not
+  just `log_mileage` — same flaw, same fix, computed once for both. No
+  past-date guard is needed for either (unlike Task 7's `startsOn`, which
+  feeds a 60-second recurring sweep): nothing sweeps, bills, or repeats
+  off this field, mirroring `add_material`'s `neededBy` reasoning, not
+  `startsOn`'s.
+- **`jobReference` joins `JOB_REF_INTENTS` mirroring `log_expense`'s OWN
+  membership exactly** (`entity-resolution.ts`) — jobId stays OPTIONAL on
+  the (shared) contract, so an unresolved/absent reference still logs the
+  mileage UNLINKED; resolution only ever ADDS the link. Also mirrors
+  `log_expense`'s `CUSTOMER_REF_INTENTS` membership for full parity with
+  its target — `log_mileage`'s own taxonomy doesn't ask the classifier for
+  `customerName`, but it's a SHARED template key, so a real utterance
+  ("log 32 miles for the Hendersons") could still populate it, and this
+  membership is what resolves that name to a customerId instead of
+  leaving it inert.
+- **`voiceProposalSummary` gives `log_mileage` its own copy** ("Log
+  mileage on `<job>`" / "for `<customer>`", mirroring `log_permit`'s
+  preposition convention) rather than falling through to the generic
+  `Voice intent: log_mileage` debug fallback (the exact drift-guard gap
+  Task 9 shipped and a later review caught).
+- **Field name is `mileageMiles`, not the plan's literal suggested `miles`.**
+  A generic key like `miles` in a shared, cross-intent entity bag risks a
+  future collision; the qualified name is the better choice and is applied
+  consistently everywhere (interface, JSON template, parse allowlist) —
+  recorded here as a deliberate divergence from the plan text, not an
+  oversight.
+- This type is deliberately **absent** from `S1_ALLOWED_PROPOSAL_TYPES`
+  (`proposals/surface.ts`) — it aliases `log_expense`, which is itself
+  operator/technician-only, never reachable from an unauthenticated
+  inbound caller.
+
+Notes on the Tradesperson wave 1, Task 12 row (`add_catalog_item`, taxonomy 1.16.0):
+
+- **NEW capture-class proposal type** — the create-side mirror of
+  `update_catalog_item` (Task 2): an owner adds a price-book entry by
+  voice ("Add a catalog item: smart thermostat install, 385"). No money
+  moves at creation (only shapes FUTURE drafts, which are themselves
+  reviewed), no customer is contacted, and it's reversible (archive the
+  item from the Catalog screen).
+- **Extraction seams REUSE Task 2's fields — no new fields for name/
+  description/price.** `catalogItemNewName` / `catalogItemNewDescription`
+  / `unitPriceCents` already existed on `ExtractedEntities`
+  (`update_catalog_item`); their meaning generalizes cleanly to a CREATE
+  ("the NEW name" is exactly what's true of a brand-new item's only
+  name). Reusing them avoids minting a duplicate field for the same
+  concept on the shared, cross-intent entity bag, and carries no
+  field-presence-hijack risk (Task 11's `TaskContext.intent` concern):
+  `add_catalog_item` and `update_catalog_item` dispatch to DIFFERENT
+  drafting AND execution handlers, so a stray value on the wrong intent's
+  turn is simply never read. Only ONE genuinely new field was added:
+  `catalogItemUnit` (`CatalogUnit`'s 5-token vocabulary) — no existing
+  field carried a catalog unit of measure. See
+  `AddCatalogItemTaskHandler`'s doc comment (`ai/tasks/add-catalog-item-
+  task.ts`) for the full reuse-vs-new analysis.
+- **Zero is a LEGAL `unitPriceCents` — contract and drafting gate
+  deliberately AGREE at that boundary.** A free/comp price-book line ("free
+  estimate", "no-charge warranty inspection") is a real, common catalog
+  entry for a tradesperson — a DELIBERATE divergence from
+  `create_service_agreement`'s stricter, positive-only voice gate for a
+  RECURRING plan price (a stated $0 RECURRING charge is inherently
+  suspicious; a one-time price-book SKU is not). Both
+  `contracts/add-catalog-item.ts`'s Zod schema and
+  `AddCatalogItemTaskHandler`'s hand-written gate use the exact same
+  `>= 0` boundary, so they can never disagree the way a prior task's
+  review found for a different type (contract accepted 0, the task
+  refused to draft on 0, and two passing tests locked the contradiction
+  in without either side ever exercising the disagreement). A sanity
+  ceiling ($100,000, mirroring `create-service-agreement.ts`'s identical
+  backstop) guards against a misheard "290 thousand" style figure — not a
+  real product limit, and NOT a shared constant (the domain/HTTP layer
+  places no upper bound on `unitPriceCents` at all, so there is nothing
+  to keep in lockstep with).
+- **`category`/`unit` defaults live at EXECUTION time, not drafting.**
+  `CatalogItem.category`/`.unit` are BOTH required at the domain layer,
+  but this intent's taxonomy has no category extraction seam at all (a v1
+  scope decision — category is a business-taxonomy choice a tradesperson
+  rarely states aloud alongside a price) and `unit` is only sometimes
+  spoken. `AddCatalogItemExecutionHandler` defaults `category: 'Labor'`
+  (both taxonomy examples are installation/labor-type line items;
+  `test/catalog/catalog-item.test.ts`'s own fixture precedent pairs an
+  "Install" item with category 'Labor') and `unit: 'each'` (a flat,
+  one-off price-book line is naturally "each", not hourly) only when the
+  drafted payload omits them — the drafting task never guesses a default
+  itself, so the review card only ever shows what the operator actually
+  said.
+- **In-memory catalog repo's `create()` has NO analogous trap to its
+  `update()`'s (checked, not assumed).** Task 2's review found
+  `InMemoryCatalogItemRepository.update()`'s `{...current, ...updates}`
+  merge silently wipes `name`/`description` on a price-only patch,
+  because `updateCatalogItem` (the domain function) always constructs its
+  patch object with explicit `name: updates.name?.trim()` /
+  `description: updates.description?.trim()` keys — even when unstated,
+  these keys exist on the patch object with value `undefined`, and the
+  spread happily overwrites the current value with `undefined`.
+  `create()` has no such risk: it takes a FULL, already-materialized
+  `CatalogItem` (built by the pure `createCatalogItem()` function, which
+  fills every field with a concrete value via `??`/`.trim() ?? ''`
+  fallbacks) and does a plain `Map.set` — there is no partial-object
+  merge for a subset of fields to silently clobber.
+- **Reuses `catalog_item.created` — the SAME audit event type/analytics
+  mapping the authenticated `POST /api/catalog-items` route already
+  emits.** `analytics/audit-event-mapping.ts` already maps
+  `catalog_item.created` → `catalog_item_created`
+  (category/unit/unitPriceCents/hasImage) — a voice-added catalog item is
+  the SAME real-world event as one added from the Catalog screen, so
+  `AddCatalogItemExecutionHandler` emits the identical eventType with a
+  matching metadata shape, feeding the SAME product-analytics counter
+  rather than a second, unmapped one. This is deliberately UNLIKE
+  `add_material`'s `material.requested` / `apply_credit`'s
+  `credit.applied` (each omitted from the mapping to avoid
+  double-counting a signal an existing mapped event already captures
+  elsewhere) — there is no separate "item created" event this could
+  double with. The handler does NOT call `catalog-item.ts`'s own
+  `persistCatalogItem` helper (whose bundled audit call has no try/catch
+  — a thrown audit error there would propagate AFTER the row was already
+  inserted, misreporting a successful create as a failed execution, the
+  exact anti-pattern `create_service_agreement`'s handler found and
+  worked around for `createAgreement`'s own audit call); it builds the
+  item with `createCatalogItem()`, persists via `catalogRepo.create()`
+  directly, and emits its own FAILURE-SOFT audit event afterward instead.
+- **RBAC — joined `CONFIG_WRITING_PROPOSAL_TYPES` (`proposals/actions.ts`)
+  for the SAME reason `update_catalog_item` did.** The catalog HTTP
+  routes (`routes/catalog-items.ts` POST/PUT/DELETE) all require
+  `settings:update`, and a dispatcher holds `proposals:approve` but NOT
+  `settings:update` (`auth/rbac.ts`). Without this entry, a dispatcher
+  could speak "Add a catalog item: smart thermostat install, 385" and
+  approve their own card, creating a price-book entry with only
+  `proposals:approve` — the identical approval-queue-as-route-permission-
+  bypass the `update_catalog_item` guard exists to close, just on the
+  create side instead of the price-edit side.
+- **No `_meta` confidence marker.** No LLM call anywhere in this type's
+  drafting leg (`ai/tasks/add-catalog-item-task.ts`) produces a real
+  confidence signal on a price-book entry — `_meta` is omitted rather
+  than fabricated, same posture as `add_material` /
+  `create_service_agreement`.
+- **Never auto-approves.** The drafting task deliberately omits
+  `sourceTrustTier`, so `decideInitialStatus`'s only auto-approve branch
+  is never reached at any confidence — same posture as
+  `update_catalog_item` / `create_change_order` /
+  `create_service_agreement` / `add_material`.
+- **Idempotent replay, not just a synthetic-id passthrough.** Like
+  `add_material`, this handler mints a brand NEW row on every `execute()`
+  call — a `resultEntityId` already stamped on the proposal
+  short-circuits to a pure replay so a redelivered/re-executed approval
+  can never double-add the same item.
+- This type is deliberately **absent** from `S1_ALLOWED_PROPOSAL_TYPES`
+  (`proposals/surface.ts`) — operator/owner-only, same as
+  `update_catalog_item`, never reachable from an unauthenticated inbound
+  caller.
+
 Notes on the taxonomy-1.2.0 rows:
 
 - `create_invoice_schedule` — the spoken milestone sentence is parsed by a
@@ -517,6 +1090,7 @@ migration).
 | "Book this caller for Thursday" | `create_booking` | capture | deferred (customer-call FSM path) |
 | _(none — minted after entity resolution, not spoken)_ | `adopt_entity_alias` | manual | U4: alias-learning lifecycle mints this when an operator resolves an ambiguous reference; owner-only approval, never voice-reachable |
 | _(none — conversational onboarding, not the voice intent classifier)_ | `onboarding_tenant_settings`, `onboarding_service_category`, `onboarding_estimate_template`, `onboarding_team_member`, `onboarding_schedule` | capture | B1.19: emitted by the onboarding FSM (`ai/orchestration/onboarding-conversation.ts`), a separate conversation surface from the voice intent classifier — never mapped through `INTENT_TO_PROPOSAL_TYPE`, so by design there is no spoken on-ramp for these. Execution handlers registered in `proposals/execution/onboarding-handlers.ts`; `onboarding_team_member` always reports `handler_not_wired` (no persistence target — see that file's doc comment). |
+| _(none — minted internally as a companion/fallback, never a top-level classifier intent)_ | `callback` | capture | Task 14 (2026-08-07 tradesperson plan): `CallbackExecutionHandler` (`proposals/execution/callback-handler.ts`) — deliberately dep-free, registered unconditionally, always `isFullyWired()`. Fixes the pre-existing bug where an approved `callback` proposal had NO execution handler at all and threw `HANDLER_NOT_FOUND`, retrying into terminal `execution_failed`. A no-op-plus-audit is the correct semantic, not a gap: `callback` mutates nothing (surface.ts), its payload is already durably captured on the proposal row at DRAFT time — 4 production files / 5 `createProposal`/`buildProposal` call sites / 7 total content branches resolving to `proposalType: 'callback'` (see `proposals/execution/callback-handler.ts`'s class doc for the counting rule): negotiation-task.ts (2 direct calls, ALLOW branch + the enriched/default branch), complaint-task.ts (1 direct call, companion owner-followup), create-voice-turn-processor.ts (1 call, live-call negotiation FSM path, 2 of 3 evaluation-outcome branches), and sms/negotiation/inbound-negotiation-handler.ts (1 call, inbound-SMS negotiation guardrail, 2 of 3 branches — the only site stamping `callerPhone`); text-mode-driver.ts's after-hours branch also mints one but is the VQ-007 voice-quality harness, excluded from every count above (production after-hours is routes/telephony.ts's `afterHours` branch, which sends the caller to voicemail TwiML and drafts no `callback` proposal) — and the separate `call_me_back_tasks` operational-task system (voice/call-me-back/call-me-back.ts) is created directly by its own independent call sites (warm-transfer failure, E1 safety follow-up, patched-through voicemail) — none of which is gated on a `callback` proposal's approval. `callback` IS S1-reachable (the after-hours caller path, surface.ts's allowlist) even though it has no `INTENT_TO_PROPOSAL_TYPE` on-ramp. |
 
 (`create_invoice_schedule` and `review_response_proposal` graduated to
 section A in taxonomy 1.2.0 — U2/U3 of the agent build wave. `update_catalog_item`
@@ -546,8 +1120,101 @@ approves by screen/SMS tap).
 `lookup_appointments`, `lookup_invoices`, `lookup_balance`, `lookup_jobs`,
 `lookup_agreements`, `lookup_account_summary`, `lookup_customer`,
 `lookup_estimates`, `lookup_availability`, `lookup_leads`, `lookup_revenue`,
-`lookup_catalog`, `lookup_day_overview`, `lookup_digest`, `lookup_pending_items`
-— routed to read-only skills, never to a proposal (correct by design).
+`lookup_catalog`, `lookup_day_overview`, `lookup_digest`, `lookup_pending_items`,
+`lookup_materials`, `lookup_crew_schedule`, `lookup_timesheets`, `lookup_my_day`,
+`lookup_job_profit`
+— 20 `lookup_*` intents total — routed to read-only skills, never to a
+proposal (correct by design). The count is incidental, not load-bearing:
+every consumer (`isLookupIntent`, `intent-classifier.ts`) gates on the
+`lookup_` string prefix, not an enumeration, so a new lookup intent is
+covered automatically without touching this list or any dispatch code —
+only this doc's enumeration needs a manual update to stay complete.
+
+**`lookup_materials` (Task 9, 2026-08-07 tradesperson plan):** reads back
+Task 8's pending `material_items` shopping list
+(`ai/skills/lookup-materials.ts`), optionally scoped to one job via the
+same `JOB_REF_INTENTS` resolution `add_material` uses — an unresolved
+spoken job reference refuses honestly rather than silently widening to
+the whole tenant list (spec-review MAJOR A). **No permission gate** —
+unlike `lookup_leads`/`lookup_catalog`, there is deliberately no entry in
+`LOOKUP_REQUIRED_PERMISSION` (`workers/voice-lookup-answer.ts`): any
+authenticated operator, technician included, may hear the shopping list.
+There is no date/"for tomorrow" query filter — Task 8's
+`MaterialItemListOptions` has no `neededBy` option, and Task 9 does not
+extend that contract — so the classifier taxonomy does not advertise
+date-scoped phrasing; instead, each item's captured `neededBy` (when
+present) is spoken directly, so the operator can tell which of the
+(possibly unfiltered) items are time-sensitive. The fetch itself is
+bounded (`limit`, at most 6 rows) rather than loading the tenant's whole
+pending set — see the Task 9 notes above for the full rationale.
+
+**`lookup_crew_schedule` / `lookup_timesheets` / `lookup_my_day` (Task 10,
+2026-08-07 tradesperson plan):** three more read-only lookup-skill family
+members — no proposal types, no migrations.
+
+- **Permission posture is the deliberate split this task exists to
+  demonstrate.** `lookup_crew_schedule` (owner asks who is free / where a
+  crew member is on a given day or window) and `lookup_timesheets` (owner
+  asks logged hours per crew member for the current tenant-local week) are
+  owner-extended (`OWNER_EXTENDED_LOOKUP_INTENT_TYPES`, requiring
+  `extendedIntents === true`, exactly like `lookup_day_overview`) **and**
+  permission-gated (`reports:view`, `LOOKUP_REQUIRED_PERMISSION`) — a
+  technician's own recorded ask for either gets the refusal, never data.
+  `lookup_my_day` (the SPEAKER asks about their own schedule today) is
+  deliberately in **neither** set — available to ANY technician — because
+  it is strictly self-scoped to the resolved SPEAKER's own day, so
+  self-scoping IS this intent's entire access-control story (mirrors the
+  precedent `lookup_materials` set for "no permission gate" lookups, one
+  level stricter: `lookup_materials` widens to the whole tenant's list when
+  unscoped, which is fine for a shopping list; `lookup_my_day` must never
+  widen past the ONE resolved technician, so it takes a required, already-
+  resolved `technicianId`, never an optional one).
+- **An unresolved crew-member name refuses honestly, never widens to the
+  whole crew.** Both `lookup_crew_schedule` and `lookup_timesheets` join
+  `TECHNICIAN_REF_INTENTS` (entity-resolution.ts) — the same technician
+  resolution `reassign_appointment`/`add_crew_member`/`remove_crew_member`
+  already get — so a named crew member
+  (`extractedEntities.targetTechnicianName`) resolves to a verified
+  `technicianId` before either skill runs. When a name was spoken but
+  didn't resolve, `workers/voice-lookup-answer.ts` refuses by name
+  ("I couldn't find a crew member matching …") rather than silently
+  falling back to everyone's schedule or everyone's hours — the
+  spec-review MAJOR A precedent (`lookup_materials`), applied with MORE
+  force here: a named PERSON who didn't resolve leaking to "everyone" is a
+  materially worse disclosure than an unscoped shopping list.
+- **`lookup_my_day`'s speaker resolution is its access control.** The
+  SPEAKER is resolved to a canonical technician via
+  `dispatch/en-route-voice.ts`'s `resolveCanonicalTechnician` (now
+  exported, reused rather than duplicated) — the SAME resolution
+  `en_route` uses for "on my way". When the speaker cannot be resolved to
+  a technician, the turn FAILS (`{ kind: 'failed', error: 'could not match
+  you to a technician' }`) — it never falls back to an unscoped or
+  whole-crew day.
+- **Day/window resolution reuses the booking path's own resolver.**
+  `lookup_crew_schedule` resolves a spoken day/window
+  (`extractedEntities.dateTimeDescription`) via the SAME
+  `resolveDateTime` (U4, `ai/scheduling/resolve-datetime.ts`) the booking
+  path uses; an unparseable or absent phrase defaults to TODAY, and the
+  spoken summary always names the day actually being reported (never lets
+  a defaulted day pass as the one asked about). `lookup_timesheets` only
+  supports the CURRENT tenant-local week — mirrors `lookup_materials`'s
+  "for tomorrow is not a filter" precedent — so the taxonomy only
+  advertises "this week" phrasing; a real "last week" query is a genuine
+  but separate extension, not done here.
+- **Bounded fetch, technician-per-appointment via `job.assignedTechnicianId`.**
+  All three skills mirror `lookup-day-overview.ts`'s established pattern
+  rather than a second `AssignmentRepository.findByTechnician` fetch
+  (which has no date bound — an unbounded per-technician scan across the
+  tenant's whole assignment history just to answer "are you free today",
+  the exact class of bug I4 fixed for `lookup_materials`). Appointments
+  are bounded to the resolved day (`AppointmentRepository.findByDateRange`);
+  jobs are bounded either to one technician's own jobs
+  (`JobRepository.findByTenant({ technicianId })`, when one is named or
+  resolved) or a generous but bounded tenant-wide page (`limit: 200`, the
+  same cap `lookup-day-overview.ts` uses) otherwise. `lookup_timesheets`
+  reuses `TimeEntryService.weeklyHoursByUser` verbatim — the SAME
+  aggregation `GET /api/time-entries?weekOf=` already uses — rather than
+  re-implementing weekly rollup math.
 
 ## F) Direct status acts — audited directly, never a proposal (B5.5, Part F decision F-3)
 
@@ -586,6 +1253,17 @@ exclusion) — so the intent-map drift test reads its absence as deliberate,
 not a gap. No new `JobStatus` value was introduced for this.
 
 ---
+
+**`lookups` (added at final verification, 2026-08-07 tradesperson plan):**
+read-only lookup-skill intents. They never create a proposal (no
+`proposalType`/`actionClass` — `intentToProposalType(...)` returns
+`'voice_clarification'` for every member, by design; see the `lookup_*`
+exclusion comment in `proposals/voice-intent-map.ts`), so they cannot join
+`speakable` above. Listed here purely so `packages/web`'s VoiceBar
+discoverability examples (`voice-examples.ts`) can reference a lookup
+(`lookup_crew_schedule`) without inventing a second, undocumented pinning
+mechanism — `voice-examples.catalog.test.ts` accepts an example intent from
+either `speakable` or `lookups`.
 
 <!-- BEGIN machine-readable: voice-action-catalog -->
 ```json
@@ -634,7 +1312,33 @@ not a gap. No new `JobStatus` value was introduced for this.
     { "intent": "record_refund", "proposalType": "record_refund", "actionClass": "money" },
     { "intent": "apply_credit", "proposalType": "apply_credit", "actionClass": "money" },
     { "intent": "send_customer_message", "proposalType": "send_customer_message", "actionClass": "comms" },
-    { "intent": "create_change_order", "proposalType": "create_change_order", "actionClass": "capture" }
+    { "intent": "create_change_order", "proposalType": "create_change_order", "actionClass": "capture" },
+    { "intent": "create_service_agreement", "proposalType": "create_service_agreement", "actionClass": "capture" },
+    { "intent": "add_material", "proposalType": "add_material", "actionClass": "capture" },
+    { "intent": "log_mileage", "proposalType": "log_expense", "actionClass": "capture" },
+    { "intent": "add_catalog_item", "proposalType": "add_catalog_item", "actionClass": "capture" }
+  ],
+  "lookups": [
+    "lookup_account_summary",
+    "lookup_agreements",
+    "lookup_appointments",
+    "lookup_availability",
+    "lookup_balance",
+    "lookup_catalog",
+    "lookup_crew_schedule",
+    "lookup_customer",
+    "lookup_day_overview",
+    "lookup_digest",
+    "lookup_estimates",
+    "lookup_invoices",
+    "lookup_job_profit",
+    "lookup_jobs",
+    "lookup_leads",
+    "lookup_materials",
+    "lookup_my_day",
+    "lookup_pending_items",
+    "lookup_revenue",
+    "lookup_timesheets"
   ],
   "handlerNoOnramp": [
     "create_booking",
@@ -643,7 +1347,8 @@ not a gap. No new `JobStatus` value was introduced for this.
     "onboarding_service_category",
     "onboarding_estimate_template",
     "onboarding_team_member",
-    "onboarding_schedule"
+    "onboarding_schedule",
+    "callback"
   ],
   "gated": ["approve_proposal", "reject_proposal", "edit_proposal"]
 }
