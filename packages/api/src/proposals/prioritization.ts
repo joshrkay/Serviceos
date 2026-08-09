@@ -128,6 +128,10 @@ const TYPE_PRIORITY: Record<ProposalType, number> = {
   // is typically weeks out), and it has no customer-facing comms attached
   // at creation. Same low tier as notes / add_service_location / log_expense.
   create_service_agreement: 5,
+  // Task 9 — adding a shopping-list item is informational, captured after
+  // the fact (or ahead of a supply run) — never gates any other work. Same
+  // low tier as log_expense.
+  add_material: 5,
 };
 
 export function getUrgency(proposal: Proposal): { urgency: PrioritizedProposal['urgency']; reason: string } {

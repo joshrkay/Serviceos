@@ -143,6 +143,14 @@ export const INTENT_TO_PROPOSAL_TYPE: Partial<Record<Exclude<IntentType, 'unknow
   // maintenance plan/membership. NOT S1-allowed (operator-only): see
   // proposals/surface.ts S1_ALLOWED_PROPOSAL_TYPES and its contract test.
   create_service_agreement: 'create_service_agreement',
+  // Task 9 (2026-08-07 tradesperson plan) — add_material is a NEW
+  // capture-class proposal type: adds a row to the voice-captured shopping
+  // list (material_items, migration 272, Task 8's substrate). NOT
+  // S1-allowed (operator-only): see proposals/surface.ts
+  // S1_ALLOWED_PROPOSAL_TYPES and its contract test. `lookup_materials` is
+  // deliberately OMITTED from this map — like every other lookup_*
+  // intent, it is read-only and never produces a proposal.
+  add_material: 'add_material',
 };
 
 /**
@@ -215,6 +223,10 @@ export function voiceProposalSummary(
   if (intent === 'create_change_order') return `Change order${ref ? ` on ${ref}` : name ? ` for ${name}` : ''}`;
   // Task 7 — mirrors apply_credit's shape (named-recipient summary).
   if (intent === 'create_service_agreement') return `Service agreement${name ? ` for ${name}` : ''}`;
+  // Task 9 — job-scoped, mirrors log_permit/create_change_order's shape
+  // (job reference takes precedence over a bare customer name — a
+  // shopping-list item is usually about the job, not the customer).
+  if (intent === 'add_material') return `Add material${ref ? ` for ${ref}` : name ? ` for ${name}` : ''}`;
   if (intent) return `Voice intent: ${intent}${ref ? ` (${ref})` : ''}`;
   return 'Voice clarification needed';
 }

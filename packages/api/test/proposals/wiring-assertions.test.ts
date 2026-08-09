@@ -87,6 +87,11 @@ function fullDeps(): RegistryDeps {
     // execution handler's isFullyWired() probe (Boolean(this.agreementRepo))
     // is now exercised here.
     agreementRepo: {} as any,
+    // Task 9 (2026-08-07 tradesperson plan) — add_material became
+    // voice-reachable (proposals/voice-intent-map.ts), so its execution
+    // handler's isFullyWired() probe (Boolean(this.materialItemRepo)) is
+    // now exercised here.
+    materialItemRepo: {} as any,
   };
 }
 
@@ -190,6 +195,10 @@ describe('U8: each newly probed handler is DETECTED when its effect dep is dropp
     // locationRepo in its OWN isFullyWired() (emergency_dispatch's probe
     // does too, but predates this suite's per-dep row coverage).
     { omit: ['locationRepo'], flags: ['create_service_agreement'] },
+    // Task 9 — add_material: without a materialItemRepo,
+    // AddMaterialExecutionHandler.isFullyWired() reports false (its
+    // dep-less mode is a synthetic passthrough that persists nothing).
+    { omit: ['materialItemRepo'], flags: ['add_material'] },
   ];
 
   for (const { omit, flags } of rows) {

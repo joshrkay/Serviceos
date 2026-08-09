@@ -187,6 +187,18 @@ const JOB_REF_INTENTS = new Set([
   // contract (unlike log_expense's optional link), so an unresolved
   // reference gates the proposal — see CreateChangeOrderTaskHandler.
   'create_change_order',
+  // Task 9 (2026-08-07 tradesperson plan) — add_material: "grab three
+  // boxes of PEX for the Patel job" resolves the spoken jobReference →
+  // jobId so the captured material item keeps its job link. jobId is
+  // OPTIONAL on the add_material contract, so an unresolved (or absent)
+  // reference still captures the item unlinked — resolution only ever
+  // ADDS the link, never gates the proposal (same posture as
+  // log_expense's jobId).
+  'add_material',
+  // Task 9 — lookup_materials: "what materials are open on the Patel
+  // job?" resolves the SAME way so the shopping-list readback can scope
+  // to one job. Read-only — no contract/gating implications at all.
+  'lookup_materials',
 ]);
 
 /**

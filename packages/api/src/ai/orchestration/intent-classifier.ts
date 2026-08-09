@@ -96,6 +96,17 @@ export type IntentType =
   // generates jobs/invoices later, and those invoices ride the normal
   // review path.
   | 'create_service_agreement'
+  // Task 9 (2026-08-07 tradesperson plan) — NEW capture-class proposal
+  // type: adds a row to the voice-captured shopping list (`material_items`,
+  // migration 272, Task 8's substrate). No money moves, and it's
+  // reversible (the row can be marked purchased or simply ignored) — same
+  // posture as `log_expense`.
+  | 'add_material'
+  // Task 9 (2026-08-07 tradesperson plan) — read-only lookup-skill family
+  // member: reads back the pending shopping list, optionally scoped to one
+  // job. Never a proposal — routed to the lookup-skill family like every
+  // other `lookup_*` intent.
+  | 'lookup_materials'
   // Taxonomy 1.2.0 (agent wave, Track A) — three proposal-driving on-ramps:
   //   create_invoice_schedule    — U2: milestone/progress billing plan for a
   //                                job; the verbatim milestone sentence rides
@@ -256,6 +267,8 @@ export const SUPPORTED_INTENTS: readonly IntentType[] = [
   'send_customer_message',
   'create_change_order',
   'create_service_agreement',
+  'add_material',
+  'lookup_materials',
   'create_invoice_schedule',
   'respond_to_review',
   'create_standing_instruction',
@@ -405,8 +418,30 @@ export const SUPPORTED_INTENTS: readonly IntentType[] = [
  *           (missingFields: ['customerId']); see
  *           CreateServiceAgreementExecutionHandler (proposals/execution/
  *           create-service-agreement-handler.ts).
+ *   1.13.0 — Task 9 (2026-08-07 tradesperson plan), additive: add_material
+ *           — a NEW capture-class proposal type that adds a row to the
+ *           voice-captured shopping list (`material_items`, migration 272,
+ *           Task 8's substrate). No money moves, and it's reversible (the
+ *           row can be marked purchased or simply ignored). New extraction
+ *           fields (materialDescription / materialQuantity /
+ *           materialNeededBy); reuses the existing jobReference/vendor
+ *           seams (jobReference via `JOB_REF_INTENTS` membership — see
+ *           entity-resolution.ts — and vendor, already carried by
+ *           log_expense). lookup_materials — a NEW read-only lookup-skill
+ *           family member (additive, same family as lookup_revenue /
+ *           lookup_job_profit): reads back the pending shopping list,
+ *           optionally scoped to one job via the SAME `JOB_REF_INTENTS`
+ *           resolution. NOT added to `INTENT_TO_PROPOSAL_TYPE` (lookup_*
+ *           intents never produce a proposal) and deliberately has NO
+ *           entry in `LOOKUP_REQUIRED_PERMISSION`
+ *           (workers/voice-lookup-answer.ts) — any authenticated operator
+ *           may hear the shopping list, unlike the owner-grade reports.
+ *           See AddMaterialTaskHandler (ai/tasks/add-material-task.ts) and
+ *           executeLookupAnswer's `lookup_materials` case
+ *           (workers/voice-lookup-answer.ts) for the extraction/answer
+ *           details.
  */
-export const INTENT_TAXONOMY_VERSION = '1.12.0';
+export const INTENT_TAXONOMY_VERSION = '1.13.0';
 
 /**
  * P11-001: convenience predicate the FSM adapter uses to route
@@ -675,6 +710,22 @@ export interface ExtractedEntities {
   // parses it best-effort (chrono-node, tenant-timezone anchored) and
   // falls back to the first of next month when unstated or unparseable.
   serviceAgreementStartsOn?: string;
+  // Task 9 (2026-08-07 tradesperson plan) — add_material: what the caller
+  // wants added to the shopping list, verbatim ("three boxes of half-inch
+  // PEX", "a flue liner kit"). Qualified (not bare `description`) per house
+  // precedent (expenseDescription / changeOrderDescription) — the flat
+  // gate key downstream is still the contract's own `description`.
+  materialDescription?: string;
+  // add_material: how many, when the caller stated a count ("three boxes",
+  // "two heaters"). Defaults to 1 downstream when unstated. Qualified (not
+  // bare `quantity`) per house precedent (unitPriceCents / durationMinutes).
+  materialQuantity?: number;
+  // add_material: when the material is needed by, verbatim ("before
+  // Thursday", "by next week") — the task handler parses it best-effort
+  // (chrono-node, tenant-timezone anchored); an unparseable phrase is
+  // simply omitted, never gated (purely informational). Qualified (not
+  // bare `neededBy`) per house precedent (serviceAgreementStartsOn).
+  materialNeededBy?: string;
 }
 
 /**
@@ -1280,6 +1331,14 @@ Supported intents (return exactly ONE):
                            Examples: "Sign the Garcias up for the annual maintenance plan, 290 a year"
                                      "Put Maria on the 29-a-month membership starting September"
                                      "Quarterly filter service for the Patels, 79 per visit"
+- "add_material"         — owner/technician adds parts/materials to the
+                           shopping list, optionally tied to a job and
+                           vendor. Extract materialDescription (required),
+                           materialQuantity, jobReference, vendor,
+                           materialNeededBy.
+                           Examples: "Add three boxes of half-inch PEX to the shopping list"
+                                     "We need a flue liner kit for the Patel job"
+                                     "Pick up two 40-gallon heaters at Ferguson before Thursday"
 - "create_invoice_schedule" — user wants to set up a MILESTONE / PROGRESS
                            billing plan for a job: a deposit up front and the
                            rest later, or a percentage split across stages.
@@ -1476,6 +1535,11 @@ Supported intents (return exactly ONE):
                                      "How'd we do on the Smith water heater?"
                                      "Did the Davis job turn a profit?"
                                      "What did I clear on JOB-0042?"
+- "lookup_materials"     — read back the pending shopping list, optionally
+                           for one job or "for tomorrow".
+                           Examples: "What parts do I need tomorrow?"
+                                     "Read me the shopping list"
+                                     "What materials are open on the Patel job?"
 - "unknown"             — anything else: ambiguous transcripts, or edit
                            commands without a clear reference.
 
@@ -1559,7 +1623,10 @@ Return valid JSON with exactly this shape (no prose, no markdown fences):
     "changeOrderDescription": "<string, optional — the added work, verbatim, on create_change_order>",
     "serviceAgreementName": "<string, optional — the plan/membership name on create_service_agreement>",
     "serviceAgreementCadence": "<monthly|quarterly|twice_a_year|annual, optional — recurring cadence on create_service_agreement>",
-    "serviceAgreementStartsOn": "<string, optional — verbatim spoken start date/phrase on create_service_agreement>"
+    "serviceAgreementStartsOn": "<string, optional — verbatim spoken start date/phrase on create_service_agreement>",
+    "materialDescription": "<string, optional — what to add to the shopping list on add_material>",
+    "materialQuantity": <integer, optional — how many on add_material, defaults to 1>,
+    "materialNeededBy": "<string, optional — verbatim spoken needed-by date/phrase on add_material>"
   }
 }
 
@@ -2051,6 +2118,20 @@ export function parseClassifierJson(content: string): IntentClassification | nul
     if (serviceAgreementCadence) extracted.serviceAgreementCadence = serviceAgreementCadence;
     if (typeof ee.serviceAgreementStartsOn === 'string')
       extracted.serviceAgreementStartsOn = ee.serviceAgreementStartsOn;
+    // add_material fields (Task 9, 2026-08-07 tradesperson plan). jobId is
+    // deliberately NOT parsed here — it is a router-injected verified id
+    // (see AddMaterialTaskHandler's doc comment), never an LLM-extracted
+    // field, so it has no entry in this allowlist. jobReference and vendor
+    // already flow through the shared fields above.
+    if (typeof ee.materialDescription === 'string') extracted.materialDescription = ee.materialDescription;
+    if (
+      typeof ee.materialQuantity === 'number' &&
+      Number.isFinite(ee.materialQuantity) &&
+      ee.materialQuantity > 0
+    ) {
+      extracted.materialQuantity = Math.round(ee.materialQuantity);
+    }
+    if (typeof ee.materialNeededBy === 'string') extracted.materialNeededBy = ee.materialNeededBy;
     if (Object.keys(extracted).length > 0) {
       result.extractedEntities = extracted;
     }

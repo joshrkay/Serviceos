@@ -26,7 +26,7 @@ exist today.
 
 ## A) Speakable today — intent + proposal + execution handler all exist
 
-These 45 actions can be spoken, drafted as a proposal, approved, and executed.
+These 46 actions can be spoken, drafted as a proposal, approved, and executed.
 "Persistence proof" = a Docker-gated integration test that proves the row +
 audit event actually land in Postgres (vs. mocked-DB-only coverage, which cannot
 catch schema drift or a missing dependency).
@@ -78,6 +78,7 @@ catch schema drift or a missing dependency).
 | "Text the Hendersons the part arrived, we can come Thursday" | `send_customer_message` | `send_customer_message` | comms | unit |
 | "The Garcias want a second zone — change order for 1800" | `create_change_order` | `create_change_order` | capture | integration (`integration/draft-estimate-execution.test.ts`) |
 | "Sign the Garcias up for the annual maintenance plan, 290 a year" | `create_service_agreement` | `create_service_agreement` | capture | unit + sweep round-trip (`proposals/create-service-agreement-handler.test.ts`: handler-created agreement → `runDueAgreements` → asserts a `generated`, not `failed`, run) |
+| "Add three boxes of half-inch PEX to the shopping list" | `add_material` | `add_material` | capture | unit (`proposals/add-material-handler.test.ts`) |
 
 > **Voice technician resolution (U1, taxonomy 1.2.0):** `reassign_appointment`,
 > `add_crew_member`, and `remove_crew_member` now resolve the spoken technician
@@ -658,6 +659,80 @@ Notes on the Task 7 row (`create_service_agreement`, taxonomy 1.12.0):
   (`proposals/surface.ts`) — operator/technician-only, never reachable
   from an unauthenticated inbound caller.
 
+Notes on the Task 9 row (`add_material`, taxonomy 1.13.0):
+
+- **NEW capture-class proposal type** — adds a row to the voice-captured
+  shopping list. Writes a `material_items` row (migration 272, Task 8's
+  substrate — `src/materials/material-item.ts`, `PgMaterialItemRepository`
+  / `InMemoryMaterialItemRepository`). No money moves, and it's reversible
+  (the row can be marked purchased via `markPurchased`, or simply
+  ignored) — same posture as `log_expense`.
+- **Wires Task 8's dormant substrate.** `material_items` shipped in Task 8
+  with zero callers — nothing constructed a repo instance and no voice
+  intent read/wrote through it. This task is what gives it real callers:
+  `AddMaterialExecutionHandler` (`proposals/execution/
+  add-material-handler.ts`) writes through it, and `lookup_materials`
+  (below) reads from the SAME instance (`app.ts` constructs one
+  `materialItemRepo` and threads it into both the execution-handler
+  registry and `lookupAnswerDeps`).
+- **jobId is OPTIONAL, unlike `create_change_order`'s REQUIRED jobId.** A
+  shopping-list item can be unlinked to any job ("grab three boxes of PEX"
+  with no job named is still a perfectly good capture) — `add_material`
+  joined `JOB_REF_INTENTS` (`entity-resolution.ts`) so a NAMED job still
+  resolves to a verified id, but an unresolved/absent reference never
+  gates the proposal (same posture as `log_expense`'s jobId).
+- **`neededBy` accepts a PAST date — a deliberate divergence from Task
+  7's `startsOn`.** `startsOn` (`create-service-agreement.ts`) rejects a
+  past date because a back-dated value feeds a 60-second recurring sweep
+  that would immediately drip a job+invoice pair. `neededBy` has no such
+  consumer — nothing sweeps, bills, or repeats off it, and Task 8's
+  `listPending` doesn't even filter by it — so a tradesperson genuinely
+  saying "we needed this yesterday" is a real, useful shopping-list
+  signal, not a malformed one. See `contracts/add-material.ts`'s module
+  doc comment for the full rationale.
+- **`quantity`'s domain cap (1,000,000) is kept in lockstep with Task 8's
+  own cap** (`material-item.ts`'s `MAX_QUANTITY`) — the contract and the
+  repo-layer validator enforce the SAME number, so a payload that passes
+  the draft-time contract can never throw at execution against a stricter
+  repo-layer check (the divergence class Task 6's change-order contract
+  first surfaced).
+- **Audit event: `material.requested`, entityType `material_item`.**
+  "Requested" names what happened from the shop's point of view (a
+  tradesperson asked for a part), not that it physically arrived —
+  `markPurchased` is the event that would earn a past-tense verb.
+  `entityType` is `material_item` (singular of the `material_items`
+  table), mirroring `service_agreement.created`'s choice over the bare
+  domain-object name. Like `expense.logged`/`credit.applied`/
+  `refund.recorded`/`service_agreement.created`, this event is
+  deliberately **not** added to `audit-event-mapping.ts` — same
+  unmapped-by-design posture.
+- **Idempotent replay, not just a synthetic-id passthrough.** Like
+  `create_change_order`/`create_service_agreement`, this handler mints a
+  brand NEW row on every `execute()` call — a `resultEntityId` already
+  stamped on the proposal short-circuits to a pure replay so a
+  redelivered/re-executed approval can never double-add the same item.
+- **No `_meta` confidence marker.** No catalog grounding or LLM call
+  anywhere in this type's drafting leg produces a real confidence signal
+  on a shopping-list line — `_meta` is omitted rather than fabricated,
+  same posture as `create_service_agreement`.
+- **Never auto-approves (today).** The drafting task deliberately omits
+  `sourceTrustTier`, so `decideInitialStatus`'s only auto-approve branch
+  is never reached at any confidence — same posture as
+  `create_change_order`/`create_service_agreement`. A shopping-list add is
+  about as low-risk as a capture-class action gets, so a future revision
+  may reconsider graduating it to the autonomous lane; that is a
+  deliberate scope decision for a later pass, not an oversight here.
+- **RBAC posture unchanged (flagged, no policy change):** `add_material`
+  is not in `CONFIG_WRITING_PROPOSAL_TYPES` (`proposals/actions.ts`) —
+  its execution writes an operational shopping-list row, not tenant
+  configuration — so approval requires only the generic
+  `proposals:approve` permission every `dispatcher` already holds,
+  identical to `draft_estimate`/`create_change_order`/
+  `create_service_agreement` today.
+- This type is deliberately **absent** from `S1_ALLOWED_PROPOSAL_TYPES`
+  (`proposals/surface.ts`) — operator/technician-only, never reachable
+  from an unauthenticated inbound caller.
+
 Notes on the taxonomy-1.2.0 rows:
 
 - `create_invoice_schedule` — the spoken milestone sentence is parsed by a
@@ -754,8 +829,22 @@ approves by screen/SMS tap).
 `lookup_appointments`, `lookup_invoices`, `lookup_balance`, `lookup_jobs`,
 `lookup_agreements`, `lookup_account_summary`, `lookup_customer`,
 `lookup_estimates`, `lookup_availability`, `lookup_leads`, `lookup_revenue`,
-`lookup_catalog`, `lookup_day_overview`, `lookup_digest`, `lookup_pending_items`
+`lookup_catalog`, `lookup_day_overview`, `lookup_digest`, `lookup_pending_items`,
+`lookup_materials`
 — routed to read-only skills, never to a proposal (correct by design).
+
+**`lookup_materials` (Task 9, 2026-08-07 tradesperson plan):** reads back
+Task 8's pending `material_items` shopping list
+(`ai/skills/lookup-materials.ts`), optionally scoped to one job via the
+same `JOB_REF_INTENTS` resolution `add_material` uses. **No permission
+gate** — unlike `lookup_leads`/`lookup_catalog`, there is deliberately no
+entry in `LOOKUP_REQUIRED_PERMISSION` (`workers/voice-lookup-answer.ts`):
+any authenticated operator, technician included, may hear the shopping
+list. A "for tomorrow" / date-scoped ask is a **deliberate non-filter**:
+Task 8's `MaterialItemListOptions` has only `jobId`, no `neededBy`/date
+filter, and Task 9 does not extend that contract — the answer is always
+the tenant's (or job's) full pending list, never silently narrowed by a
+date word the repo has no way to honor.
 
 ## F) Direct status acts — audited directly, never a proposal (B5.5, Part F decision F-3)
 
@@ -843,7 +932,8 @@ not a gap. No new `JobStatus` value was introduced for this.
     { "intent": "apply_credit", "proposalType": "apply_credit", "actionClass": "money" },
     { "intent": "send_customer_message", "proposalType": "send_customer_message", "actionClass": "comms" },
     { "intent": "create_change_order", "proposalType": "create_change_order", "actionClass": "capture" },
-    { "intent": "create_service_agreement", "proposalType": "create_service_agreement", "actionClass": "capture" }
+    { "intent": "create_service_agreement", "proposalType": "create_service_agreement", "actionClass": "capture" },
+    { "intent": "add_material", "proposalType": "add_material", "actionClass": "capture" }
   ],
   "handlerNoOnramp": [
     "create_booking",

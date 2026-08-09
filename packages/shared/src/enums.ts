@@ -250,6 +250,11 @@ export enum ProposalType {
   // row (migration 056, already live). Capture-class: no money moves at
   // creation, the agreement's own recurring sweep invoices later.
   CREATE_SERVICE_AGREEMENT = 'create_service_agreement',
+  // Task 9 (2026-08-07 tradesperson plan) — adds a row to the voice-
+  // captured shopping list (material_items, migration 272). Capture-class:
+  // no money moves, and it's reversible (the row can be marked purchased
+  // or simply ignored).
+  ADD_MATERIAL = 'add_material',
 }
 
 export enum RejectionCategory {

@@ -33,6 +33,7 @@ import {
   createCatalogItem,
   InMemoryCatalogItemRepository,
 } from '../../src/catalog/catalog-item';
+import { InMemoryMaterialItemRepository } from '../../src/materials/material-item';
 import type { LLMGateway, LLMResponse } from '../../src/ai/gateway/gateway';
 import type { IntentClassification } from '../../src/ai/orchestration/intent-classifier';
 import type { QueueMessage } from '../../src/queues/queue';
@@ -3125,6 +3126,175 @@ describe('voice-action-router U3 lookup answers (recorded-memo path)', () => {
       // No item names or prices leak into the refusal.
       expect(rec?.answer?.summary).not.toContain('Drain cleaning');
       expect(rec?.answer?.rows).toEqual([]);
+    });
+  });
+
+  // Task 9 (2026-08-07 tradesperson plan) — lookup_materials reads back
+  // Task 8's material_items shopping list. UNLIKE lookup_leads/
+  // lookup_catalog, there is deliberately NO entry in
+  // LOOKUP_REQUIRED_PERMISSION for this intent — any authenticated operator
+  // (technician included) may hear the shopping list, so these tests never
+  // wire resolveMemberRole and still expect a real answer.
+  describe('Task 9 — lookup_materials (voice shopping list readback)', () => {
+    it('reads back the pending list — no permission gate, technician-recorded memo still gets real data', async () => {
+      const proposalRepo = new InMemoryProposalRepository();
+      const voiceRepo = seededVoiceRepo('user-tech');
+      const lookupEvents = lookupEventsSpy();
+      const gateway = gatewayReturning([classify('lookup_materials')]);
+      const materialItemRepo = new InMemoryMaterialItemRepository();
+      await materialItemRepo.create({
+        tenantId: TENANT,
+        description: '3 boxes 1/2" PEX',
+        quantity: 3,
+        createdBy: 'user-owner',
+      });
+      await materialItemRepo.create({
+        tenantId: TENANT,
+        description: 'Flue liner kit',
+        quantity: 1,
+        vendor: 'Ferguson',
+        createdBy: 'user-owner',
+      });
+
+      const worker = createVoiceActionRouterWorker({
+        gateway,
+        proposalRepo,
+        voiceRepo,
+        lookupAnswers: {
+          materialItemRepo: materialItemRepo as never,
+          lookupEvents: lookupEvents as never,
+        },
+      });
+
+      await worker.handle(
+        msg({
+          tenantId: TENANT,
+          userId: 'system',
+          transcript: 'read me the shopping list',
+          recordingId: RECORDING_ID,
+        }),
+        silentLogger(),
+      );
+
+      // No proposal minted for an executed (read-only) lookup.
+      expect(await proposalRepo.findByTenant(TENANT)).toHaveLength(0);
+
+      const rec = await voiceRepo.findById(TENANT, RECORDING_ID);
+      expect(rec?.answerStatus).toBe('answered');
+      expect(rec?.answer?.result).toBe('found');
+      expect(rec?.answer?.summary).toContain('2 items');
+      expect(rec?.answer?.summary).toContain('3× 3 boxes 1/2" PEX');
+      expect(lookupEvents.record).toHaveBeenCalledWith(
+        expect.objectContaining({
+          tenantId: TENANT,
+          intent: 'lookup_materials',
+          sessionId: RECORDING_ID,
+          resultStatus: 'found',
+        }),
+      );
+    });
+
+    it('an empty list answers honestly with result=none (no fabrication)', async () => {
+      const proposalRepo = new InMemoryProposalRepository();
+      const voiceRepo = seededVoiceRepo();
+      const gateway = gatewayReturning([classify('lookup_materials')]);
+
+      const worker = createVoiceActionRouterWorker({
+        gateway,
+        proposalRepo,
+        voiceRepo,
+        lookupAnswers: { materialItemRepo: new InMemoryMaterialItemRepository() as never },
+      });
+
+      await worker.handle(
+        msg({
+          tenantId: TENANT,
+          userId: 'system',
+          transcript: 'what parts do I need',
+          recordingId: RECORDING_ID,
+        }),
+        silentLogger(),
+      );
+
+      const rec = await voiceRepo.findById(TENANT, RECORDING_ID);
+      expect(rec?.answerStatus).toBe('answered');
+      expect(rec?.answer?.result).toBe('none');
+      expect(rec?.answer?.rows).toEqual([]);
+    });
+
+    it('with no materialItemRepo wired, the intent is skipped (unsupported), never a fabricated answer', async () => {
+      const proposalRepo = new InMemoryProposalRepository();
+      const voiceRepo = seededVoiceRepo();
+      const gateway = gatewayReturning([classify('lookup_materials')]);
+
+      const worker = createVoiceActionRouterWorker({
+        gateway,
+        proposalRepo,
+        voiceRepo,
+        lookupAnswers: {},
+      });
+
+      await worker.handle(
+        msg({
+          tenantId: TENANT,
+          userId: 'system',
+          transcript: 'what parts do I need',
+          recordingId: RECORDING_ID,
+        }),
+        silentLogger(),
+      );
+
+      const rec = await voiceRepo.findById(TENANT, RECORDING_ID);
+      expect(rec?.answerStatus).toBe('skipped');
+    });
+
+    // Task 9 house decision — "for tomorrow" / "for the Patel job" scope by
+    // JOB only (materialItemRepo.listPending has no neededBy/date filter —
+    // Task 8's substrate never grew one, and Task 9 does not extend it). A
+    // job-scoped ask narrows to that job's items; a date phrase like
+    // "tomorrow" is honored only insofar as JOB_REF_INTENTS membership lets
+    // a NAMED job resolve — the date word itself is not a filter and never
+    // will be with today's contract.
+    it('a pre-verified jobId (VoiceActionRouterPayload.jobId) scopes the list to that job', async () => {
+      const proposalRepo = new InMemoryProposalRepository();
+      const voiceRepo = seededVoiceRepo();
+      const gateway = gatewayReturning([classify('lookup_materials')]);
+      const materialItemRepo = new InMemoryMaterialItemRepository();
+      await materialItemRepo.create({
+        tenantId: TENANT,
+        description: 'unscoped item',
+        createdBy: 'user-owner',
+      });
+      await materialItemRepo.create({
+        tenantId: TENANT,
+        description: 'Patel job item',
+        jobId: 'job-patel',
+        createdBy: 'user-owner',
+      });
+
+      const worker = createVoiceActionRouterWorker({
+        gateway,
+        proposalRepo,
+        voiceRepo,
+        lookupAnswers: { materialItemRepo: materialItemRepo as never },
+      });
+
+      await worker.handle(
+        msg({
+          tenantId: TENANT,
+          userId: 'system',
+          transcript: 'what materials are open on the Patel job',
+          recordingId: RECORDING_ID,
+          jobId: 'job-patel',
+        }),
+        silentLogger(),
+      );
+
+      const rec = await voiceRepo.findById(TENANT, RECORDING_ID);
+      expect(rec?.answer?.result).toBe('found');
+      expect(rec?.answer?.summary).toContain('1 item');
+      expect(rec?.answer?.summary).toContain('Patel job item');
+      expect(rec?.answer?.summary).not.toContain('unscoped item');
     });
   });
 });

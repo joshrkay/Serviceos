@@ -67,6 +67,10 @@ export const CAPTURE_PROPOSAL_TYPES: ReadonlySet<string> = new Set<string>([
   // invoices ride the normal review path) — same capture posture as
   // CREATE_CHANGE_ORDER / DRAFT_ESTIMATE.
   ProposalType.CREATE_SERVICE_AGREEMENT,
+  // Task 9 — adds a row to the voice-captured shopping list. No money
+  // moves, and it's reversible (mark purchased or ignore) — same capture
+  // posture as LOG_EXPENSE.
+  ProposalType.ADD_MATERIAL,
 ]);
 
 /**

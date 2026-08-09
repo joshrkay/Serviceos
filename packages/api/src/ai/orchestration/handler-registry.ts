@@ -55,6 +55,7 @@ import { ApplyCreditTaskHandler } from '../tasks/apply-credit-task';
 import { SendCustomerMessageTaskHandler } from '../tasks/send-customer-message-task';
 import { CreateChangeOrderTaskHandler } from '../tasks/create-change-order-task';
 import { CreateServiceAgreementTaskHandler } from '../tasks/create-service-agreement-task';
+import { AddMaterialTaskHandler } from '../tasks/add-material-task';
 
 /**
  * B5 (feat: voice-transcript-and-agent-paths) — the deps shared by the
@@ -273,6 +274,11 @@ export function buildTaskHandlers(deps: HandlerRegistryDeps): Map<ProposalType, 
   // (router-injected), cadence->RRULE mapping is a fixed table, and
   // startsOn defaulting reads context.timezone/context.now directly.
   handlers.set('create_service_agreement', new CreateServiceAgreementTaskHandler());
+  // Task 9 (2026-08-07 tradesperson plan) — add_material's voice on-ramp.
+  // No deps: jobId resolution rides context.existingEntities.jobId
+  // (router-injected, see the handler's own doc comment), and
+  // materialNeededBy parsing reads context.timezone/context.now directly.
+  handlers.set('add_material', new AddMaterialTaskHandler());
   handlers.set('emergency_dispatch', new EmergencyDispatchTaskHandler());
   handlers.set('update_customer', new UpdateCustomerTaskHandler());
   handlers.set('log_expense', new LogExpenseTaskHandler());

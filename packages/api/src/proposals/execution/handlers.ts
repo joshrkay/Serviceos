@@ -129,6 +129,8 @@ import { EstimateTemplateRepository } from '../../templates/estimate-template';
 import { SeedPackDefaultsDeps } from '../../packs/seed-pack-defaults';
 import { UpdateBrandVoiceExecutionHandler } from './brand-voice-handler';
 import type { BrandVoiceRepository } from '../../tenants/brand/brand-voice';
+import { AddMaterialExecutionHandler } from './add-material-handler';
+import type { MaterialItemRepository } from '../../materials/material-item';
 
 export interface ExecutionContext {
   tenantId: string;
@@ -1301,6 +1303,13 @@ export function createExecutionHandlerRegistry(deps?: {
   // updateBrandVoice). Absent → the handler reports isFullyWired() false and
   // refuses to execute (WS3 convention) rather than a synthetic passthrough.
   brandVoiceRepo?: BrandVoiceRepository;
+  /**
+   * Task 9 (2026-08-07 tradesperson plan) — add_material writes a
+   * material_items row (migration 272, Task 8's substrate) via this repo.
+   * Absent -> the handler degrades to a synthetic-id passthrough (saves
+   * nothing).
+   */
+  materialItemRepo?: MaterialItemRepository;
 }): Map<ProposalType, ExecutionHandler> {
   // WS3 — audit is a structural invariant for the consent/entity mutation
   // handlers below (their constructors take a non-optional AuditRepository).
@@ -1525,6 +1534,12 @@ export function createExecutionHandlerRegistry(deps?: {
     // sheet uses (never re-implemented here — see brand-voice-handler.ts).
     // manual action class, so it only ever runs after an explicit owner tap.
     new UpdateBrandVoiceExecutionHandler(deps?.brandVoiceRepo, requiredAuditRepo),
+    // Task 9 (2026-08-07 tradesperson plan) — add_material: writes a
+    // material_items row (migration 272, Task 8's substrate) via the SAME
+    // repo lookup_materials reads from. LogExpense-family posture:
+    // registered unconditionally, degrades to a synthetic-id passthrough
+    // without materialItemRepo.
+    new AddMaterialExecutionHandler(deps?.materialItemRepo, deps?.auditRepo),
   ];
 
   // Handlers that mutate existing entities take a repo dep. Registered

@@ -64,6 +64,7 @@ import type { CatalogItemRepository } from '../catalog/catalog-item';
 import type { SettingsRepository } from '../settings/settings';
 import type { LookupEventService } from '../lookup-events/lookup-event-service';
 import type { AvailabilityFinder } from '../ai/tasks/availability-finder';
+import type { MaterialItemRepository } from '../materials/material-item';
 import { lookupBalance } from '../ai/skills/lookup-balance';
 import { lookupInvoices } from '../ai/skills/lookup-invoices';
 import { lookupCustomer } from '../ai/skills/lookup-customer';
@@ -84,6 +85,7 @@ import { lookupDigest } from '../ai/skills/lookup-digest';
 import { lookupPendingItems } from '../ai/skills/lookup-pending-items';
 import { lookupLeads } from '../ai/skills/lookup-leads';
 import { lookupCatalog } from '../ai/skills/lookup-catalog';
+import { lookupMaterials } from '../ai/skills/lookup-materials';
 
 /**
  * Permission-gated lookups: the DB-authoritative permission the ASKING
@@ -152,6 +154,14 @@ export interface VoiceLookupAnswerDeps {
   catalogRepo?: CatalogItemRepository;
   /** Full settings repo — lookup_job_profit reads the tenant labor rate. */
   settingsRepo?: SettingsRepository;
+  /**
+   * Task 9 (2026-08-07 tradesperson plan) — `lookup_materials` (voice
+   * shopping list readback; mirrors GET-equivalent access to Task 8's
+   * material_items substrate). No entry in `LOOKUP_REQUIRED_PERMISSION` —
+   * deliberately unlike `lookup_leads`/`lookup_catalog` — any authenticated
+   * operator (technician included) may hear the pending shopping list.
+   */
+  materialItemRepo?: MaterialItemRepository;
   /** P11-001 analytics table writer — the memo path now records rows too. */
   lookupEvents?: LookupEventService;
   /**
@@ -642,6 +652,31 @@ export async function executeLookupAnswer(
             id: input.jobId,
           }),
         };
+      }
+
+      // Task 9 (2026-08-07 tradesperson plan) — read back Task 8's
+      // material_items shopping list (src/materials/material-item.ts). No
+      // permission gate (see LOOKUP_REQUIRED_PERMISSION's doc comment
+      // above) — any authenticated operator may hear it.
+      //
+      // "for tomorrow" / date-scoped asks — DELIBERATE non-filter: see
+      // `ai/skills/lookup-materials.ts`'s module doc comment. A job-scoped
+      // ask genuinely narrows via `input.jobId` (the SAME JOB_REF_INTENTS
+      // resolution every other job-scoped lookup uses); a bare date phrase
+      // like "tomorrow" is not distinguished — the answer is always the
+      // tenant's (or job's) FULL pending list.
+      case 'lookup_materials': {
+        if (!deps.materialItemRepo) return { kind: 'unsupported' };
+        const r = await lookupMaterials(
+          { tenantId, sessionId, ...(input.jobId ? { jobId: input.jobId } : {}) },
+          { materialItemRepo: deps.materialItemRepo, ...events },
+        );
+        if (r.status === 'error') return { kind: 'failed', error: r.data.error };
+        const rows: VoiceAnswerRow[] =
+          r.status === 'found'
+            ? r.data.items.map((m) => text(m.description, `qty ${m.quantity}${m.vendor ? ` — ${m.vendor}` : ''}`))
+            : [];
+        return { kind: 'answer', answer: buildAnswer(intent, r.status, r.summary, rows) };
       }
 
       case 'lookup_day_overview': {

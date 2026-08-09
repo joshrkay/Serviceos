@@ -107,6 +107,7 @@ import { ApplyCreditExecutionHandler } from '../../src/proposals/execution/apply
 import { SendCustomerMessageExecutionHandler } from '../../src/proposals/execution/send-customer-message-handler';
 import { CreateChangeOrderExecutionHandler } from '../../src/proposals/execution/create-change-order-handler';
 import { CreateServiceAgreementExecutionHandler } from '../../src/proposals/execution/create-service-agreement-handler';
+import { AddMaterialExecutionHandler } from '../../src/proposals/execution/add-material-handler';
 import { buildLineItem, calculateDocumentTotals, type LineItem } from '../../src/shared/billing-engine';
 import type { AppointmentRepository } from '../../src/appointments/appointment';
 import type { JobRepository } from '../../src/jobs/job';
@@ -1088,6 +1089,27 @@ const ROWS: Row[] = [
       expect(payload.recurrenceRule).toBe('FREQ=YEARLY');
       expect(payload.priceCents).toBe(29000);
       expect(typeof payload.startsOn).toBe('string');
+    },
+  },
+  {
+    // Task 9 (2026-08-07 tradesperson plan) — add_material is a NEW
+    // capture-class proposal type. Unlike create_change_order/
+    // create_service_agreement, jobId is OPTIONAL on the contract — a
+    // spoken description alone drafts fully ungated with no job/customer
+    // reference needed at all.
+    intent: 'add_material',
+    mode: 'resolves',
+    note: 'a spoken materialDescription alone drafts ungated (quantity defaults to 1); dep-less AddMaterialExecutionHandler synthetic-succeeds',
+    draft: () =>
+      draft(
+        { gateway: NOOP_GATEWAY },
+        'add_material',
+        ctx({ existingEntities: { materialDescription: 'flue liner kit' } }),
+      ),
+    execute: (p) => new AddMaterialExecutionHandler().execute(p, execContext()),
+    assertPayload: (payload) => {
+      expect(payload.description).toBe('flue liner kit');
+      expect(payload.quantity).toBe(1);
     },
   },
 ];

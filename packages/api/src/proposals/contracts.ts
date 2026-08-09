@@ -27,6 +27,7 @@ import { applyCreditPayloadSchema } from './contracts/apply-credit';
 import { sendCustomerMessagePayloadSchema } from './contracts/send-customer-message';
 import { createChangeOrderPayloadSchema } from './contracts/create-change-order';
 import { createServiceAgreementPayloadSchema } from './contracts/create-service-agreement';
+import { addMaterialPayloadSchema } from './contracts/add-material';
 import { adoptEntityAliasPayloadSchema } from './contracts/adopt-entity-alias';
 import { updateBrandVoicePayloadSchema } from './contracts/brand-voice';
 import {
@@ -817,6 +818,7 @@ export const PROPOSAL_TYPE_SCHEMAS: Record<ProposalType, z.ZodSchema> = {
   send_customer_message: sendCustomerMessagePayloadSchema,
   create_change_order: createChangeOrderPayloadSchema,
   create_service_agreement: createServiceAgreementPayloadSchema,
+  add_material: addMaterialPayloadSchema,
   adopt_entity_alias: adoptEntityAliasPayloadSchema,
   update_brand_voice: updateBrandVoicePayloadSchema,
 };

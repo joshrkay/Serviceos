@@ -103,6 +103,10 @@ const EXPECTED_PROPOSAL_TYPES: ProposalType[] = [
   // NEW capture-class proposal type that signs a customer up to a
   // recurring maintenance plan/membership.
   'create_service_agreement',
+  // Task 9 (2026-08-07 tradesperson plan) — add_material: a NEW
+  // capture-class proposal type that adds a row to the voice-captured
+  // shopping list (Task 8's material_items substrate).
+  'add_material',
 ];
 
 describe('ai/orchestration/handler-registry — buildTaskHandlers', () => {

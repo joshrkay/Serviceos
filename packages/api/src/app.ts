@@ -344,6 +344,8 @@ import { PgDunningConfigRepository, PgDunningEventRepository } from './invoices/
 import { PgPaymentRepository } from './invoices/pg-payment';
 import { InMemoryExpenseRepository } from './expenses/expense';
 import { PgExpenseRepository } from './expenses/pg-expense';
+import { InMemoryMaterialItemRepository } from './materials/material-item';
+import { PgMaterialItemRepository } from './materials/pg-material-item';
 import { PgNoteRepository } from './notes/pg-note';
 import { PgConversationRepository } from './conversations/pg-conversation';
 import { PgSettingsRepository } from './settings/pg-settings';
@@ -1293,13 +1295,12 @@ export function createApp(): AppWithLifecycle {
   const batchInvoiceTxRunner = pool ? new PgTenantTransactionRunner(pool) : new InMemoryTransactionRunner();
   const paymentRepo        = pool ? new PgPaymentRepository(pool)        : new InMemoryPaymentRepository();
   const expenseRepo        = pool ? new PgExpenseRepository(pool)        : new InMemoryExpenseRepository();
-  // Tradesperson wave 1, Task 8 (2026-08-07 plan) — src/materials/material-item.ts
-  // (MaterialItemRepository, In-Memory + Pg) is deliberately NOT constructed
-  // here yet. Nothing consumes it until Task 9 wires the add_material /
-  // lookup_materials voice intents, at which point it gets a
-  // `pool ? new PgMaterialItemRepository(pool) : new InMemoryMaterialItemRepository()`
-  // line right here and gets threaded into the execution-handler deps bag,
-  // mirroring expenseRepo / agreementRepo above and below.
+  // Task 9 (2026-08-07 tradesperson plan) — material_items (Task 8's
+  // substrate) backs the add_material / lookup_materials voice intents.
+  // Threaded into the execution-handler deps bag below and into
+  // lookupAnswerDeps (shared by the recorded-memo worker + assistant chat),
+  // mirroring expenseRepo / agreementRepo.
+  const materialItemRepo = pool ? new PgMaterialItemRepository(pool) : new InMemoryMaterialItemRepository();
   // P5-017: Resolve the payment-link provider via the factory so the mock
   // is hard-blocked in production. The factory throws at boot if
   // STRIPE_SECRET_KEY (or STRIPE_API_KEY) is missing while NODE_ENV=production,
@@ -2238,6 +2239,9 @@ export function createApp(): AppWithLifecycle {
     schedulingNotifier: transactionalComms,
     transactionalComms,
     expenseRepo,
+    // Task 9 (2026-08-07 tradesperson plan) — add_material writes through
+    // the SAME materialItemRepo lookup_materials reads from.
+    materialItemRepo,
     // Task 7 (2026-08-07 tradesperson plan) — create_service_agreement
     // writes through the SAME agreementRepo the recurring-agreements sweep
     // and the authenticated /api/agreements route already use.
@@ -2910,6 +2914,10 @@ export function createApp(): AppWithLifecycle {
     leadRepo,
     catalogRepo,
     settingsRepo,
+    // Task 9 (2026-08-07 tradesperson plan) — lookup_materials answers on
+    // memo + chat from the SAME materialItemRepo add_material writes
+    // through (see the execution-handler registry call above).
+    materialItemRepo,
     // Mirrors the telephony adapter wiring: every surface writes the same
     // lookup_events analytics rows.
     lookupEvents: lookupEventService,
