@@ -1121,8 +1121,14 @@ approves by screen/SMS tap).
 `lookup_agreements`, `lookup_account_summary`, `lookup_customer`,
 `lookup_estimates`, `lookup_availability`, `lookup_leads`, `lookup_revenue`,
 `lookup_catalog`, `lookup_day_overview`, `lookup_digest`, `lookup_pending_items`,
-`lookup_materials`, `lookup_crew_schedule`, `lookup_timesheets`, `lookup_my_day`
-— routed to read-only skills, never to a proposal (correct by design).
+`lookup_materials`, `lookup_crew_schedule`, `lookup_timesheets`, `lookup_my_day`,
+`lookup_job_profit`
+— 20 `lookup_*` intents total — routed to read-only skills, never to a
+proposal (correct by design). The count is incidental, not load-bearing:
+every consumer (`isLookupIntent`, `intent-classifier.ts`) gates on the
+`lookup_` string prefix, not an enumeration, so a new lookup intent is
+covered automatically without touching this list or any dispatch code —
+only this doc's enumeration needs a manual update to stay complete.
 
 **`lookup_materials` (Task 9, 2026-08-07 tradesperson plan):** reads back
 Task 8's pending `material_items` shopping list

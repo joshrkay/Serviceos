@@ -63,6 +63,28 @@ import type { ProposalType } from './proposal';
  * here, next to lookup_*, so the drift test
  * (test/ai/voice-action-catalog.contract.test.ts) and a human reader both
  * see this as an intentional exclusion, not a gap.
+ *
+ * Task 13 (2026-08-07 tradesperson plan): `confirm`, `language_switch`, and
+ * `operator_request` are a THIRD kind of deliberate omission, distinct from
+ * both of the above — they are real, understood intents (never absorbed
+ * into 'unknown'; see intent-classifier.ts's low_confidence/unknown_intent
+ * guards) that simply have no recorded-memo action: a memo has no live
+ * pending question to confirm (`confirm`), no live call whose language can
+ * be switched (`language_switch`), and no live operator to transfer to
+ * (`operator_request`). On the memo path (workers/voice-action-router.ts)
+ * the miss on this map is caught by a dedicated branch, just above the
+ * generic warn+skip, that emits a `voice_clarification` explaining why —
+ * not the same silent skip that branch protects against.
+ *
+ * This is NOT a gap the live-call/chat text-mode-driver path shares:
+ * `text-mode-driver.ts` is not a separate pipeline — it dispatches through
+ * `createVoiceActionRouterWorker`, the same worker this map serves — but it
+ * intercepts these three intents itself, BEFORE reaching this map's lookup
+ * (`evaluateTurn`: `confirm`/`language_switch` → `{kind:'noop'}`,
+ * `operator_request` → `{kind:'escalate'}`), because on a live call they
+ * DO have a real target (the in-progress dialogue / the on-call human).
+ * That earlier interception, not this map, is why the two surfaces don't
+ * double-emit for the same intent.
  */
 export const INTENT_TO_PROPOSAL_TYPE: Partial<Record<Exclude<IntentType, 'unknown'>, ProposalType>> = {
   create_invoice: 'draft_invoice',

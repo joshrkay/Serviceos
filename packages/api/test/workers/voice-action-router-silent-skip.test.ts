@@ -82,6 +82,20 @@ function silentLogger(): Logger {
   return base;
 }
 
+/** Same as silentLogger, but records `warn` calls so tests can assert on them. */
+function spyingLogger(): { logger: Logger; warn: ReturnType<typeof vi.fn> } {
+  const noop = (..._args: unknown[]) => {};
+  const warn = vi.fn();
+  const base = {
+    debug: noop,
+    info: noop,
+    warn,
+    error: noop,
+    child: () => base,
+  } as unknown as Logger;
+  return { logger: base, warn };
+}
+
 function gatewayReturning(responses: string[]): LLMGateway {
   let i = 0;
   return {
@@ -138,7 +152,7 @@ describe('Task 13 — clarification cards instead of silent skips', () => {
       intent: 'language_switch',
       transcript: 'Can we do this in Spanish',
       explanation:
-        'Language preferences apply to live calls — this memo was still processed in English.',
+        'Language preferences apply to live calls — this memo was processed as recorded.',
     },
     {
       intent: 'operator_request',
@@ -183,15 +197,23 @@ describe('Task 13 — clarification cards instead of silent skips', () => {
       gateway: gatewayReturning(['{}']),
       proposalRepo,
     });
+    const { logger, warn } = spyingLogger();
 
     await worker.handle(
       msg({ tenantId: 't-1', userId: 'u-1', transcript: FUTURE_TAXONOMY_TRANSCRIPT }),
-      silentLogger(),
+      logger,
     );
 
     // Still silent — this is the pre-existing, intentional behavior for
-    // every unmapped intent OTHER than the three above.
+    // every unmapped intent OTHER than the three above. Asserting `warn`
+    // fired with the specific "no handler for intent" message (not just
+    // zero proposals) pins the actual warn+skip branch — a zero-proposal
+    // outcome alone would also pass for a silently swallowed error.
     const proposals = await proposalRepo.findByTenant('t-1');
     expect(proposals).toHaveLength(0);
+    expect(warn).toHaveBeenCalledWith(
+      'voice-action-router: no handler for intent',
+      expect.objectContaining({ intent: 'future_unmapped_intent' }),
+    );
   });
 });
