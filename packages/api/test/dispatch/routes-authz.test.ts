@@ -47,8 +47,11 @@ describe('dispatch routes — authorization', () => {
   beforeEach(() => {
     app = express();
     app.use(express.json());
-    appointmentRepo = new InMemoryAppointmentRepository();
     assignmentRepo = new InMemoryAssignmentRepository();
+    // Threaded into the appointment repo so its listWithMeta technicianId
+    // filter (used by the technician-day-window route below) works instead
+    // of throwing — see in-memory-appointment.ts's TechnicianAssignmentLookup.
+    appointmentRepo = new InMemoryAppointmentRepository(assignmentRepo);
     auditRepo = new InMemoryAuditRepository();
     currentAuth = undefined;
     enqueueEnRouteNotice = vi.fn().mockResolvedValue(`${appointmentId}:en_route`);

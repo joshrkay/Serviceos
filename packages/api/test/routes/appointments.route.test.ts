@@ -12,6 +12,7 @@ import express, { Request, Response, NextFunction } from 'express';
 import { createAppointmentRouter } from '../../src/routes/appointments';
 import { createJobRouter } from '../../src/routes/jobs';
 import { InMemoryAppointmentRepository } from '../../src/appointments/appointment';
+import { InMemoryAssignmentRepository } from '../../src/appointments/assignment';
 import { InMemoryJobRepository } from '../../src/jobs/job';
 import { InMemoryJobTimelineRepository } from '../../src/jobs/job-lifecycle';
 import { InMemoryAuditRepository } from '../../src/audit/audit';
@@ -73,9 +74,56 @@ describe('POST /api/appointments', () => {
 
 describe('P1-018 — listAppointments date range + pagination', () => {
   let app: Express;
+  let assignmentRepo: Awaited<ReturnType<typeof buildTestApp>>['assignmentRepo'];
 
   beforeEach(async () => {
-    ({ app } = await buildTestApp());
+    ({ app, assignmentRepo } = await buildTestApp());
+  });
+
+  /**
+   * PR #815 review, Important 3 — this harness previously constructed
+   * appointmentRepo bare (no assignment lookup wired in), so this exact
+   * request 500'd once InMemoryAppointmentRepository started throwing on an
+   * unconfigured technicianId filter rather than silently ignoring it.
+   * Fixed by threading test-app.ts's own assignmentRepo into
+   * appointmentRepo — this pins that the shared harness now supports the
+   * query end-to-end (route → listAppointmentsWithMeta →
+   * InMemoryAppointmentRepository.listWithMeta → InMemoryAssignmentRepository),
+   * not just that it no longer throws.
+   */
+  it('GET /api/appointments?technicianId= filters to only that technician\'s appointments', async () => {
+    const { start: start1, end: end1 } = tomorrowIso(1, 3);
+    const assigned = await request(app).post('/api/appointments').send({
+      jobId: 'job-tech-1',
+      scheduledStart: start1,
+      scheduledEnd: end1,
+      timezone: 'UTC',
+    });
+    expect(assigned.status).toBe(201);
+
+    const { start: start2, end: end2 } = tomorrowIso(4, 6);
+    const unassigned = await request(app).post('/api/appointments').send({
+      jobId: 'job-tech-2',
+      scheduledStart: start2,
+      scheduledEnd: end2,
+      timezone: 'UTC',
+    });
+    expect(unassigned.status).toBe(201);
+
+    await assignmentRepo.create({
+      id: 'asg-route-test-1',
+      tenantId: 'tenant-test-1',
+      appointmentId: assigned.body.id,
+      technicianId: 'tech-route-1',
+      isPrimary: true,
+      assignedBy: 'dispatcher-1',
+      assignedAt: new Date(),
+    });
+
+    const res = await request(app).get('/api/appointments').query({ technicianId: 'tech-route-1' });
+    expect(res.status).toBe(200);
+    expect(res.body.total).toBe(1);
+    expect(res.body.data[0].id).toBe(assigned.body.id);
   });
 
   async function seedAt(jobId: string, hoursOffset: number) {
@@ -154,7 +202,11 @@ describe('POST /api/appointments/:id/delay-ack', () => {
       next();
     });
 
-    const appointmentRepo = new InMemoryAppointmentRepository();
+    // Threaded into appointmentRepo so its listWithMeta technicianId filter
+    // works instead of throwing (PR #815 review, Important 3) — see
+    // in-memory-appointment.ts's TechnicianAssignmentLookup.
+    const assignmentRepo = new InMemoryAssignmentRepository();
+    const appointmentRepo = new InMemoryAppointmentRepository(assignmentRepo);
     const jobRepo = new InMemoryJobRepository();
     const timelineRepo = new InMemoryJobTimelineRepository();
     const auditRepo = new InMemoryAuditRepository();

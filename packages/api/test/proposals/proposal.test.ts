@@ -915,3 +915,142 @@ describe('§5.5 — InMemoryProposalRepository.findExpiredScheduleProposals', ()
     expect(capped[0].summary).toBe('create_appointment@3600000');
   });
 });
+
+/**
+ * Follow-up — resetStaleExecuting must surface WHICH proposals it moved to
+ * the terminal 'execution_failed' state, not just an aggregate count.
+ *
+ * Prior investigation: HANDLER_NOT_FOUND (executor.ts) throws before any
+ * executeAudited call, so no proposal.execution_failed audit event is
+ * written on that path; the execution-worker sweep catches, logs, and
+ * moves on, leaving the row 'executing'. resetStaleExecuting then retries
+ * up to maxRetries times and finally writes 'execution_failed' DIRECTLY,
+ * bypassing executeAudited — so the proposal reaches a terminal failed
+ * state with no audit event anywhere explaining why. Fixing that (in
+ * execution-worker.ts) requires resetStaleExecuting to return per-proposal
+ * identity for the ones it moved to failed, since only a count was
+ * previously returned.
+ */
+describe('InMemoryProposalRepository.resetStaleExecuting — failed proposal detail', () => {
+  function seedExecuting(
+    repo: InMemoryProposalRepository,
+    overrides: Partial<Proposal> & { id: string },
+  ) {
+    const p = createProposal({
+      tenantId: overrides.tenantId ?? 'tenant-1',
+      proposalType: overrides.proposalType ?? 'create_customer',
+      payload: {},
+      summary: 'stale executing proposal',
+      createdBy: 'u1',
+    });
+    return repo.create({
+      ...p,
+      id: overrides.id,
+      tenantId: overrides.tenantId ?? p.tenantId,
+      proposalType: overrides.proposalType ?? p.proposalType,
+      status: 'executing',
+      claimedAt: overrides.claimedAt,
+      claimedBy: overrides.claimedBy ?? 'execution-worker',
+      executionRetryCount: overrides.executionRetryCount,
+      executionError: overrides.executionError,
+    });
+  }
+
+  it('returns identifying detail (id, tenantId, proposalType, retryCount) for proposals moved to execution_failed', async () => {
+    const repo = new InMemoryProposalRepository();
+    await seedExecuting(repo, {
+      id: 'stale-1',
+      tenantId: 'tenant-1',
+      proposalType: 'create_customer',
+      claimedAt: new Date(Date.now() - 11 * 60 * 1000),
+      executionRetryCount: 3, // already at maxRetries — this run moves it to failed
+    });
+
+    const result = await repo.resetStaleExecuting(10, 3);
+
+    expect(result.movedToFailed).toBe(1);
+    expect(result.resetToApproved).toBe(0);
+    expect(result.failedProposals).toEqual([
+      { id: 'stale-1', tenantId: 'tenant-1', proposalType: 'create_customer', retryCount: 3 },
+    ]);
+  });
+
+  it('does not include proposals that were reset to approved for another retry', async () => {
+    const repo = new InMemoryProposalRepository();
+    await seedExecuting(repo, {
+      id: 'stale-retry',
+      claimedAt: new Date(Date.now() - 11 * 60 * 1000),
+      executionRetryCount: 0, // below maxRetries — retried, not failed
+    });
+
+    const result = await repo.resetStaleExecuting(10, 3);
+
+    expect(result.resetToApproved).toBe(1);
+    expect(result.movedToFailed).toBe(0);
+    expect(result.failedProposals).toEqual([]);
+  });
+
+  it('reports multiple failed proposals across tenants', async () => {
+    const repo = new InMemoryProposalRepository();
+    await seedExecuting(repo, {
+      id: 'stale-a',
+      tenantId: 'tenant-a',
+      proposalType: 'create_customer',
+      claimedAt: new Date(Date.now() - 20 * 60 * 1000),
+      executionRetryCount: 3,
+    });
+    await seedExecuting(repo, {
+      id: 'stale-b',
+      tenantId: 'tenant-b',
+      proposalType: 'issue_invoice',
+      claimedAt: new Date(Date.now() - 20 * 60 * 1000),
+      executionRetryCount: 5,
+    });
+
+    const result = await repo.resetStaleExecuting(10, 3);
+
+    expect(result.movedToFailed).toBe(2);
+    expect(result.failedProposals.sort((a, b) => a.id.localeCompare(b.id))).toEqual([
+      { id: 'stale-a', tenantId: 'tenant-a', proposalType: 'create_customer', retryCount: 3 },
+      { id: 'stale-b', tenantId: 'tenant-b', proposalType: 'issue_invoice', retryCount: 5 },
+    ]);
+  });
+
+  /**
+   * PR #815 review, Important 2 — the stale-timeout terminal write must also
+   * populate `execution_error` (COALESCE'd, never clobbering a real reason
+   * already recorded), because `evaluateSilentExecutionFailures`
+   * (workers/failure-rate-monitor.ts) and GET /api/proposals both read that
+   * column directly — an audit event alone never reaches either surface.
+   */
+  it('sets execution_error with a synthesized timeout reason when moving to failed', async () => {
+    const repo = new InMemoryProposalRepository();
+    await seedExecuting(repo, {
+      id: 'stale-no-reason',
+      claimedAt: new Date(Date.now() - 11 * 60 * 1000),
+      executionRetryCount: 3,
+    });
+
+    await repo.resetStaleExecuting(10, 3);
+
+    const updated = await repo.findById('tenant-1', 'stale-no-reason');
+    expect(updated!.executionError).toMatch(/timed out/i);
+    expect(updated!.executionError).toMatch(/10/); // staleMinutes
+    expect(updated!.executionError).toMatch(/3/); // retryCount
+  });
+
+  it('does not clobber an execution_error that was already recorded', async () => {
+    const repo = new InMemoryProposalRepository();
+    await seedExecuting(repo, {
+      id: 'stale-has-reason',
+      claimedAt: new Date(Date.now() - 11 * 60 * 1000),
+      executionRetryCount: 3,
+      executionError: 'a real reason recorded earlier',
+    });
+
+    await repo.resetStaleExecuting(10, 3);
+
+    const updated = await repo.findById('tenant-1', 'stale-has-reason');
+    expect(updated!.executionError).toBe('a real reason recorded earlier');
+  });
+});

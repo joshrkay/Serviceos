@@ -383,6 +383,27 @@ export async function listAppointmentsWithMeta(
   // Fallback path: pull a date-range slice and apply remaining filters in
   // memory. This is only used by repositories that haven't implemented
   // `listWithMeta` yet (P1-018 ships it for InMemory + Pg).
+  //
+  // technicianId has no fallback here: this path has no assignments concept
+  // to consult (no repo reference, no lookup to thread in) — the same gap
+  // InMemoryAppointmentRepository.listWithMeta closes by throwing rather
+  // than silently returning every appointment in the tenant. Both of this
+  // function's callers (routes/appointments.ts, dispatch/routes.ts) reach
+  // exactly this fallback whenever a repository doesn't implement
+  // `listWithMeta`, so leaving it silent here would reopen the original bug
+  // one frame above where it was fixed.
+  if (options?.technicianId) {
+    // toErrorResponse (shared/errors.ts) maps a plain Error to a generic 500
+    // with a static message — the route's catch block doesn't log — so
+    // without logging here, this carefully-worded message is loud in tests
+    // (a rejected assertion) and invisible in a running server.
+    const message =
+      'listAppointmentsWithMeta: technicianId filter requires repository.listWithMeta — ' +
+      'the date-range fallback has no assignments lookup and cannot filter by technician. ' +
+      'Silently ignoring technicianId would return every appointment in the tenant.';
+    console.error(message, { tenantId, technicianId: options.technicianId });
+    throw new Error(message);
+  }
   const start = options?.fromDate ?? new Date('1970-01-01T00:00:00Z');
   const end = options?.toDate ?? new Date('9999-12-31T23:59:59Z');
   const all = await repository.findByDateRange(tenantId, start, end);
