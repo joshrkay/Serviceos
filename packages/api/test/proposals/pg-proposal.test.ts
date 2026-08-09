@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import { Pool, PoolClient, QueryResult } from 'pg';
 import { PgProposalRepository } from '../../src/proposals/pg-proposal';
+import { staleExecutionTimeoutMessage } from '../../src/proposals/proposal';
 
 /**
  * Follow-up — resetStaleExecuting must surface WHICH proposals it moved to
@@ -102,5 +103,58 @@ describe('PgProposalRepository.resetStaleExecuting — failed proposal detail', 
     expect(failUpdate!.sql).toMatch(/execution_error\s*=\s*COALESCE\(\s*execution_error\s*,/i);
     // Never a plain overwrite — must not clobber a real reason.
     expect(failUpdate!.sql).not.toMatch(/execution_error\s*=\s*\$/);
+  });
+
+  /**
+   * PR #815 review, second pass, closer 1 — the shape assertion above pins
+   * that a COALESCE exists, but NOT that its wording matches
+   * `staleExecutionTimeoutMessage()` (proposal.ts). Since the two can't
+   * literally share a JS string (one lives in a SQL literal), the only
+   * thing keeping them in sync was a hand-written comment repeated three
+   * times — exactly the divergence class this PR exists to close, at small
+   * scale: edit the message template and every test still passes while the
+   * two backends silently render different text. This test extracts the
+   * literal `||` concatenation chain from the emitted SQL, evaluates it in
+   * JS (substituting the two placeholders for their bound values), and
+   * asserts the RENDERED string equals what the InMemory backend produces —
+   * so a wording edit on one side without the other now fails red.
+   */
+  it('renders the COALESCE fallback expression to exactly staleExecutionTimeoutMessage(staleMinutes, retryCount)', async () => {
+    const { pool, calls } = buildPool([
+      {
+        id: 'stale-1',
+        tenant_id: 'tenant-1',
+        proposal_type: 'create_customer',
+        execution_retry_count: 3,
+      },
+    ]);
+    const repo = new PgProposalRepository(pool);
+
+    await repo.resetStaleExecuting(10, 3);
+
+    const failUpdate = calls.find((c) => /SET\s+status\s*=\s*'execution_failed'/i.test(c.sql));
+    expect(failUpdate).toBeDefined();
+
+    // Pull the COALESCE's second argument — the `||` concatenation chain —
+    // out of the raw SQL text.
+    const match = failUpdate!.sql.match(/COALESCE\(\s*execution_error,\s*([\s\S]*?)\n\s*\)/);
+    expect(match).not.toBeNull();
+    const expr = match![1];
+
+    // Render it: split on `||`, substitute the two typed placeholders for
+    // the values this call used ($1::text → staleMinutes,
+    // execution_retry_count::text → the RETURNING row's retry count), and
+    // unquote everything else (a SQL string literal, `''`-escaped).
+    const rendered = expr
+      .split('||')
+      .map((part) => part.trim())
+      .map((part) => {
+        if (part === '$1::text') return '10';
+        if (part === 'execution_retry_count::text') return '3';
+        return part.replace(/^'|'$/g, '').replace(/''/g, "'");
+      })
+      .join('');
+
+    expect(rendered).toBe(staleExecutionTimeoutMessage(10, 3));
   });
 });
