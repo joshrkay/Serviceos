@@ -1,9 +1,10 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
   resolveAutoApproveThreshold,
   shouldAutoApprove,
   DEFAULT_AUTO_APPROVE_THRESHOLDS,
   LEGACY_AUTO_APPROVE_THRESHOLD,
+  _resetMissingSupervisionSignalWarningForTests,
 } from '../../src/proposals/auto-approve';
 import { decideInitialStatus } from '../../src/proposals/proposal';
 
@@ -82,6 +83,74 @@ describe('P12-004 — resolveAutoApproveThreshold', () => {
         supervisorPresent: true,
       }),
     ).toBe(DEFAULT_AUTO_APPROVE_THRESHOLDS.tech);
+  });
+});
+
+// ───────────────────────────────────────────────────────────────────────────
+// Commit 3 (followup-autoapprove-default) — loud guard for the exact gap
+// that let assistant-chat's threading omission ship silently: a caller that
+// passes NEITHER `supervisorMode` NOR `supervisorPresent` gets the permissive
+// LEGACY_AUTO_APPROVE_THRESHOLD with no signal anything is wrong. This does
+// NOT change the resolution — same 0.9 default, same tests above pass
+// unchanged — it only makes the "nobody told me anything" case observable in
+// review/staging logs instead of silent.
+// ───────────────────────────────────────────────────────────────────────────
+describe('Commit 3 — loud guard when both supervision signals are absent', () => {
+  let writeSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    // createLogger writes warn-level entries to process.stdout (see
+    // logging/logger.ts) — same spy target the existing P20-005 assistant
+    // logging tests use for stderr/error.
+    writeSpy = vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('warns exactly once when both supervisorMode and supervisorPresent are undefined', () => {
+    // Reset ONLY inside this one test, not in a shared beforeEach/afterEach:
+    // the throttle is a real "has this process already warned" latch, not a
+    // value cache with a safe reset default. Resetting it after the LAST
+    // test in this block would re-arm it for whatever test runs next in the
+    // suite (outside this describe, unspied) — turning "once per process"
+    // into "once per process, plus once more whenever this file happens to
+    // run" and defeating the noise-scoping this guard exists for. This test
+    // intentionally leaves the latch tripped (`true`) on exit, same as real
+    // production life-of-process behavior, so it's safe for the rest of the
+    // suite regardless of run order.
+    _resetMissingSupervisionSignalWarningForTests();
+
+    expect(resolveAutoApproveThreshold({})).toBe(LEGACY_AUTO_APPROVE_THRESHOLD);
+    expect(writeSpy).toHaveBeenCalledTimes(1);
+    const logged = String(writeSpy.mock.calls[0]?.[0]);
+    expect(logged).toContain('"level":"warn"');
+    expect(logged).toContain('resolveAutoApproveThreshold');
+
+    // Throttled — a second call with the same missing-signal shape does not
+    // warn again. This is the scoping decision: unthrottled, a caller that
+    // legitimately never threads either field (today: the D-015 telephony
+    // booking lane in create-voice-turn-processor.ts) would log on every
+    // single auto-approving request in production, drowning out the "a NEW
+    // surface just shipped this gap" signal the guard exists to raise.
+    expect(resolveAutoApproveThreshold({})).toBe(LEGACY_AUTO_APPROVE_THRESHOLD);
+    expect(writeSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not warn when supervisorPresent is explicitly provided (partial signal is not the gap)', () => {
+    resolveAutoApproveThreshold({ supervisorPresent: true });
+    expect(writeSpy).not.toHaveBeenCalled();
+  });
+
+  it('does not warn on the categorical unsupervised block (supervisorPresent === false)', () => {
+    resolveAutoApproveThreshold({ supervisorPresent: false });
+    expect(writeSpy).not.toHaveBeenCalled();
+  });
+
+  it('does not warn when supervisorMode alone is provided', () => {
+    resolveAutoApproveThreshold({ supervisorMode: 'tech' });
+    expect(writeSpy).not.toHaveBeenCalled();
   });
 });
 

@@ -65,13 +65,17 @@
  */
 import request from 'supertest';
 import express, { Request, Response, NextFunction } from 'express';
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
   createAssistantRouter,
   CHAT_INTENT_TO_REGISTRY_KEY,
   CHAT_CONTEXT_CUSTOMER_ID_INTENTS,
   CHAT_DISPATCH_EXCLUDED_INTENTS,
 } from '../../src/routes/assistant';
+import {
+  setSupervisorPresenceLoader,
+  _resetSupervisorPresenceCache,
+} from '../../src/ai/supervisor-presence';
 import { InMemoryProposalRepository } from '../../src/proposals/proposal';
 import {
   InMemoryCatalogItemRepository,
@@ -742,8 +746,24 @@ describe('C1/C2 — context.customerId is NOT threaded for already-shipped inten
 // dependency set (entityResolver + appointmentRepo + jobRepo + locationRepo)
 // app.ts wires, and asserts what it ACTUALLY produces rather than assuming.
 describe('schedule_inspection — full dependency set (the allowlist\'s one deliberate admission)', () => {
-  it('with a resolved, customer-owned job and a drafting LLM that echoes the job id, it places a real held slot (create_booking)', async () => {
-    const RESOLVED_CUSTOMER_ID = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc';
+  const RESOLVED_CUSTOMER_ID = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc';
+
+  beforeEach(() => {
+    _resetSupervisorPresenceCache();
+  });
+
+  afterEach(() => {
+    _resetSupervisorPresenceCache();
+    setSupervisorPresenceLoader(null);
+  });
+
+  /**
+   * Shared fixture builder — a resolved, customer-owned job plus a drafting
+   * LLM that echoes the known jobId with a high confidence_score. Both tests
+   * below drive the IDENTICAL request; only tenant supervision differs, so
+   * whatever status difference shows up is attributable to that ALONE.
+   */
+  function buildScheduleInspectionApp() {
     const proposalRepo = new InMemoryProposalRepository();
     const appointmentRepo = new InMemoryAppointmentRepository();
     const jobRepo = new InMemoryJobRepository();
@@ -761,9 +781,11 @@ describe('schedule_inspection — full dependency set (the allowlist\'s one deli
       createdAt: new Date(),
       updatedAt: new Date(),
     };
-    await jobRepo.create(job);
+    return { proposalRepo, appointmentRepo, jobRepo, locationRepo, job };
+  }
 
-    const entityResolver = resolverFor(async ({ kind }) => {
+  function scheduleInspectionEntityResolver(job: Job) {
+    return resolverFor(async ({ kind }) => {
       if (kind === 'customer') {
         return {
           kind: 'resolved',
@@ -775,6 +797,21 @@ describe('schedule_inspection — full dependency set (the allowlist\'s one deli
       }
       return { kind: 'skipped' };
     });
+  }
+
+  it('supervisor genuinely on duty + confidence over the mode-aware threshold: places a real held slot AND auto-approves it', async () => {
+    // Fixed behavior (commit 1): assistant-chat now resolves real tenant
+    // supervision the same way workers/voice-action-router.ts does. With a
+    // supervisor on duty, `create_booking`'s 0.95 confidence clears the
+    // 'supervisor'-mode threshold (0.90 — req.auth.mode defaults to
+    // 'supervisor' with no userModeLoader wired in this test), so this is a
+    // PRINCIPLED auto-approval, not an accident of a threading gap.
+    setSupervisorPresenceLoader(async () => true);
+
+    const { proposalRepo, appointmentRepo, jobRepo, locationRepo, job } =
+      buildScheduleInspectionApp();
+    await jobRepo.create(job);
+    const entityResolver = scheduleInspectionEntityResolver(job);
 
     const app = buildApp(
       strictGateway([
@@ -814,18 +851,74 @@ describe('schedule_inspection — full dependency set (the allowlist\'s one deli
     const appointments = await appointmentRepo.findByJob(TEST_TENANT, job.id);
     expect(appointments).toHaveLength(1);
     expect(appointments[0].holdPendingApproval).toBe(true);
-    // The severity claim, proven empirically rather than asserted from
-    // reading the code: `sourceTrustTier: 'autonomous'` is set
-    // UNCONDITIONALLY (not gated on context.autonomousBooking, which chat
-    // never sets — the D-015 lane genuinely never engages here). But
-    // decideInitialStatus doesn't need that lane: with
-    // context.supervisorPresent also never set by chat,
-    // resolveAutoApproveThreshold falls through to
-    // LEGACY_AUTO_APPROVE_THRESHOLD (0.9) rather than the categorical
-    // `null` block, so a plain, lane-independent
-    // shouldAutoApprove(confidenceScore, 0.9) check is enough to auto-
-    // approve — no human ever reviews this booking.
     expect(persisted[0].status).toBe('approved');
+    // Commit 2 — the chat reply must not contradict what actually happened.
+    // Before this fix, `proposalToUI` hardcoded `status: 'Pending'` and the
+    // reply text unconditionally said "Review and approve to proceed" even
+    // though the DB row above is already 'approved' and headed for
+    // execution — the UI actively lying about a proposal that no longer
+    // needs (or permits) a review tap.
+    expect(res.body.message.proposal.status).toBe('Approved');
+    expect(res.body.message.content).not.toMatch(/review and approve/i);
+  });
+
+  it('no supervisor on duty: places the same held slot but does NOT auto-approve it', async () => {
+    // The other half of the same pin: an IDENTICAL request, with the tenant
+    // genuinely unsupervised. Before commit 1, assistant-chat never threaded
+    // supervisorPresent at all, so this case was indistinguishable from the
+    // supervised one above — both auto-approved via the legacy 0.9 fallback.
+    // Chat never sets context.autonomousBooking (the D-015 lane's own
+    // inputs — that lane is threaded only by the inbound-receptionist call
+    // sites), so there is no scoped exception here: unsupervised must mean
+    // 'ready_for_review', full stop.
+    setSupervisorPresenceLoader(async () => false);
+
+    const { proposalRepo, appointmentRepo, jobRepo, locationRepo, job } =
+      buildScheduleInspectionApp();
+    await jobRepo.create(job);
+    const entityResolver = scheduleInspectionEntityResolver(job);
+
+    const app = buildApp(
+      strictGateway([
+        classifierReply('schedule_inspection', {
+          customerName: 'Patel',
+          jobReference: 'the Patel job',
+          jobTitle: 'Inspection — rough-in',
+          dateTimeDescription: 'Thursday at 2pm',
+        }),
+        JSON.stringify({ jobId: job.id, confidence_score: 0.95 }),
+      ]),
+      {
+        proposalRepo,
+        entityResolver,
+        appointmentRepo,
+        jobRepo,
+        locationRepo,
+        tenantTimezoneResolver: async () => 'America/New_York',
+      },
+    );
+
+    const res = await chat(app, 'Book the rough-in inspection on the Patel job Thursday at 2pm');
+
+    expect(res.status).toBe(200);
+    const persisted = await proposalRepo.findByTenant(TEST_TENANT);
+    expect(persisted).toHaveLength(1);
+    // The held slot is still placed — the write itself is unaffected by
+    // supervision, only the STATUS decision is.
+    expect(persisted[0].proposalType).toBe('create_booking');
+    const appointments = await appointmentRepo.findByJob(TEST_TENANT, job.id);
+    expect(appointments).toHaveLength(1);
+    expect(appointments[0].holdPendingApproval).toBe(true);
+    // No human ever reviewed this booking before commit 1. Now it lands in
+    // the review queue like every other unsupervised auto-approve candidate.
+    expect(persisted[0].status).toBe('ready_for_review');
+    // Commit 2 — the flip side of the same pin: a genuinely-pending card
+    // must still say "review and approve" (this direction already worked
+    // pre-fix, since `status: 'Pending'` was always the hardcoded default —
+    // asserted here so the two tests together pin BOTH branches of the new
+    // conditional, not just the one that changed).
+    expect(res.body.message.proposal.status).toBe('Pending');
+    expect(res.body.message.content).toMatch(/review and approve/i);
   });
 });
 

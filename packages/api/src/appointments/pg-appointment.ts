@@ -249,6 +249,13 @@ export class PgAppointmentRepository extends PgBaseRepository implements Appoint
         holdPendingApproval: 'hold_pending_approval',
         holdExpiryAt: 'hold_expiry_at',
         notes: 'notes',
+        // PR #815 review, Important 4 — appointmentType is a field of
+        // Appointment (mapRow above reads it back) but was missing here, so
+        // update(tenantId, id, { appointmentType }) silently dropped it
+        // (Pg) while InMemoryAppointmentRepository's plain spread applied it
+        // (divergence). No current caller updates this field (dormant), but
+        // the interface method should not drop a field of its own entity.
+        appointmentType: 'appointment_type',
         // Releasable on cancel: `update({ idempotencyKey: null })` writes SQL
         // NULL here (value ?? null below), freeing the canonical job-schedule
         // key so a later reschedule creates a fresh row instead of deduping

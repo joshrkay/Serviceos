@@ -6,8 +6,6 @@ import {
   type CatalogItem,
 } from '../../../src/catalog/catalog-item';
 import { UpdateCatalogItemExecutionHandler } from '../../../src/proposals/execution/update-catalog-item-handler';
-import { validateProposalPayload } from '../../../src/proposals/contracts';
-import { MAX_UNIT_PRICE_CENTS } from '../../../src/proposals/contracts/add-catalog-item';
 import type { Proposal } from '../../../src/proposals/proposal';
 
 const TENANT = 'tenant-ws20';
@@ -43,50 +41,10 @@ function proposal(payload: Record<string, unknown>): Proposal {
   } as Proposal;
 }
 
-// Quality-review fix (2026-08-09, "I4") — update_catalog_item's
-// proposedUnitPriceCents now carries the SAME MAX_UNIT_PRICE_CENTS
-// ceiling add_catalog_item's unitPriceCents does (both write
-// catalog_items.unit_price_cents from a spoken unitPriceCents field).
-// currentUnitPriceCents is deliberately NOT ceilinged — see
-// contracts/update-catalog-item.ts's module doc comment.
-describe('update_catalog_item payload contract — price ceiling parity with add_catalog_item', () => {
-  const basePayload = {
-    catalogItemId: CATALOG_ID,
-    currentUnitPriceCents: 10000,
-    evidence: { lessonIds: ['l1'], correctionCount: 3 },
-  };
-
-  it('accepts a proposedUnitPriceCents of exactly the sanity ceiling (100_000_00)', () => {
-    const result = validateProposalPayload('update_catalog_item', {
-      ...basePayload,
-      proposedUnitPriceCents: MAX_UNIT_PRICE_CENTS,
-    });
-    expect(result.valid).toBe(true);
-  });
-
-  it('rejects a proposedUnitPriceCents one cent above the sanity ceiling', () => {
-    const result = validateProposalPayload('update_catalog_item', {
-      ...basePayload,
-      proposedUnitPriceCents: MAX_UNIT_PRICE_CENTS + 1,
-    });
-    expect(result.valid).toBe(false);
-  });
-
-  // currentUnitPriceCents is informational (the RESOLVED item's real,
-  // already-persisted price, never spoken) and the domain/HTTP layer
-  // places no upper bound on a catalog item's price — a legitimately
-  // priced pre-existing item over $100k must not be rejected just for
-  // being echoed back on this payload.
-  it('does NOT ceiling currentUnitPriceCents — a pre-existing item priced above $100k still validates', () => {
-    const result = validateProposalPayload('update_catalog_item', {
-      ...basePayload,
-      currentUnitPriceCents: MAX_UNIT_PRICE_CENTS + 1,
-      proposedUnitPriceCents: MAX_UNIT_PRICE_CENTS,
-    });
-    expect(result.valid).toBe(true);
-  });
-});
-
+// The contract-level "no price ceiling" tests that used to live here moved
+// to test/proposals/contracts/update-catalog-item.test.ts (follow-up fix,
+// 2026-08-09) — both halves of this type's payload contract (evidence
+// optionality + the price ceiling) now live together in one file.
 describe('UpdateCatalogItemExecutionHandler', () => {
   it('applies the proposed unit price to the catalog item + emits catalog audit', async () => {
     const catalogRepo = new InMemoryCatalogItemRepository();
