@@ -219,6 +219,7 @@ describe('Postgres integration — voice update_brand_voice → approve → exec
       proposalRepo,
       executor: sweepExecutor,
       logger: createLogger({ service: 'test', environment: 'test', level: 'error' }),
+      auditRepo,
     });
 
     expect((await proposalRepo.findById(t.tenantId, drafted.id))!.status).toBe('executed');

@@ -17,6 +17,7 @@ import { createNoteRouter } from '../../src/routes/notes';
 import { createConversationRouter } from '../../src/routes/conversations';
 
 import { InMemoryAppointmentRepository } from '../../src/appointments/appointment';
+import { InMemoryAssignmentRepository } from '../../src/appointments/assignment';
 import { InMemoryLocationRepository, createLocation } from '../../src/locations/location';
 import { InMemoryNoteRepository } from '../../src/notes/note';
 import { InMemoryConversationRepository } from '../../src/conversations/conversation-service';
@@ -49,7 +50,11 @@ describe('D2-1a — audit coverage for appointments/locations/notes/conversation
     app.use(express.json());
     withAuth(app);
 
-    const appointmentRepo = new InMemoryAppointmentRepository();
+    // Threaded into appointmentRepo so its listWithMeta technicianId filter
+    // works instead of throwing (PR #815 review, Important 3) — see
+    // in-memory-appointment.ts's TechnicianAssignmentLookup.
+    const assignmentRepo = new InMemoryAssignmentRepository();
+    const appointmentRepo = new InMemoryAppointmentRepository(assignmentRepo);
     const jobRepo = new InMemoryJobRepository();
     const timelineRepo = new InMemoryJobTimelineRepository();
     const auditRepo = new InMemoryAuditRepository();

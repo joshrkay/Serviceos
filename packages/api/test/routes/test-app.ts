@@ -24,6 +24,7 @@ import { InMemoryDocumentRevisionRepository } from '../../src/ai/document-revisi
 import { InMemoryInvoiceRepository } from '../../src/invoices/invoice';
 import { InMemoryPaymentRepository } from '../../src/invoices/payment';
 import { InMemoryAppointmentRepository } from '../../src/appointments/appointment';
+import { InMemoryAssignmentRepository } from '../../src/appointments/assignment';
 import { InMemoryAgreementRepository } from '../../src/agreements/agreement';
 import { InMemoryEstimateTemplateRepository } from '../../src/templates/estimate-template';
 import { InMemoryAuditRepository } from '../../src/audit/audit';
@@ -61,6 +62,7 @@ export interface TestApp {
   invoiceRepo: InMemoryInvoiceRepository;
   paymentRepo: InMemoryPaymentRepository;
   appointmentRepo: InMemoryAppointmentRepository;
+  assignmentRepo: InMemoryAssignmentRepository;
   proposalRepo: InMemoryProposalRepository;
   settingsRepo: InMemorySettingsRepository;
   auditRepo: InMemoryAuditRepository;
@@ -88,7 +90,11 @@ export async function buildTestApp(): Promise<TestApp> {
   const estimateRepo = new InMemoryEstimateRepository();
   const invoiceRepo = new InMemoryInvoiceRepository();
   const paymentRepo = new InMemoryPaymentRepository();
-  const appointmentRepo = new InMemoryAppointmentRepository();
+  // Threaded into appointmentRepo so its listWithMeta technicianId filter
+  // works instead of throwing (PR #815 review, Important 3) — see
+  // in-memory-appointment.ts's TechnicianAssignmentLookup.
+  const assignmentRepo = new InMemoryAssignmentRepository();
+  const appointmentRepo = new InMemoryAppointmentRepository(assignmentRepo);
   const proposalRepo = new InMemoryProposalRepository();
   const settingsRepo = new InMemorySettingsRepository();
   const auditRepo = new InMemoryAuditRepository();
@@ -159,5 +165,5 @@ export async function buildTestApp(): Promise<TestApp> {
   app.use('/api/appointments', createAppointmentRouter(appointmentRepo, ownership, jobRepo, timelineRepo));
   app.use('/api/proposals', createProposalsRouter(proposalRepo));
 
-  return { app, jobRepo, customerRepo, estimateRepo, invoiceRepo, paymentRepo, appointmentRepo, proposalRepo, settingsRepo, auditRepo, agreementRepo };
+  return { app, jobRepo, customerRepo, estimateRepo, invoiceRepo, paymentRepo, appointmentRepo, assignmentRepo, proposalRepo, settingsRepo, auditRepo, agreementRepo };
 }

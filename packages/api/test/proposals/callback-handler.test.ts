@@ -10,8 +10,10 @@
  * (workers/execution-worker.ts) catches that per-proposal throw and moves
  * on, leaving the row claimed ('executing'); resetStaleExecuting then
  * retries it up to 3 times (10-minute stale window each) before landing it
- * in terminal 'execution_failed' — no audit trail explains why, and the
- * caller's callback request dead-ends there.
+ * in terminal 'execution_failed'. (PR #815 gave that generic timeout path an
+ * audit trail — `proposal.execution_timed_out` — but the caller's callback
+ * request would still dead-end there with no domain outcome ever recorded,
+ * 30-40 minutes late.)
  *
  * The fix: a deliberately dep-free acknowledgement handler, registered
  * UNCONDITIONALLY in handlers.ts (there is nothing to wire — see the class

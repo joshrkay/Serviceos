@@ -13,6 +13,7 @@ import type { Express } from 'express';
 import express, { Request, Response, NextFunction } from 'express';
 import { createAppointmentRouter, DelayNotificationEnqueuer } from '../../src/routes/appointments';
 import { InMemoryAppointmentRepository } from '../../src/appointments/appointment';
+import { InMemoryAssignmentRepository } from '../../src/appointments/assignment';
 import { InMemoryJobRepository } from '../../src/jobs/job';
 import {
   addDelayAcknowledgmentTimelineEntry,
@@ -43,7 +44,11 @@ function buildRunningLateApp() {
     next();
   });
 
-  const appointmentRepo = new InMemoryAppointmentRepository();
+  // Threaded into appointmentRepo so its listWithMeta technicianId filter
+  // works instead of throwing (PR #815 review, Important 3) — see
+  // in-memory-appointment.ts's TechnicianAssignmentLookup.
+  const assignmentRepo = new InMemoryAssignmentRepository();
+  const appointmentRepo = new InMemoryAppointmentRepository(assignmentRepo);
   const jobRepo = new InMemoryJobRepository();
   const timelineRepo = new InMemoryJobTimelineRepository();
   const auditRepo = new InMemoryAuditRepository();
