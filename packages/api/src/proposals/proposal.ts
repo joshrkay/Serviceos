@@ -552,6 +552,16 @@ export function decideInitialStatus(input: {
    * branch (it lives inside the `autonomous + capture` arm).
    */
   autonomousLane?: { eligible: true; threshold: number };
+  /**
+   * I1 (post-C1 review, followup-autoapprove-default) — best-effort surface
+   * label (e.g. 'S1' / 'S2' / a channel string) for
+   * `resolveAutoApproveThreshold`'s missing-supervision-signal warning
+   * throttle key. Purely diagnostic — never read by any approval decision.
+   * `createProposal` derives it from `sourceContext.surface`/`channel` when
+   * present; direct callers of `decideInitialStatus` may omit it (the
+   * throttle just falls back to proposalType-only keying).
+   */
+  warningSurface?: string;
 }): ProposalStatus {
   // Missing required fields always land in 'draft' — a partial payload
   // can't be auto-approved even by an autonomous agent with high
@@ -585,6 +595,12 @@ export function decideInitialStatus(input: {
       supervisorMode: input.supervisorMode,
       supervisorPresent: input.supervisorPresent,
       tenantOverride: input.tenantThresholdOverride,
+      // I1 — diagnostic-only key for the missing-supervision-signal
+      // warning's throttle; never affects the resolved threshold.
+      warningContext: {
+        proposalType: input.proposalType,
+        ...(input.warningSurface ? { surface: input.warningSurface } : {}),
+      },
     });
 
     if (threshold === null) {
@@ -913,6 +929,16 @@ export function createProposal(input: CreateProposalInput): Proposal {
     // passed. The supervisor hook below still runs and can only
     // downgrade — a policy block/force_review beats the lane.
     autonomousLane: input.autonomousLane,
+    // I1 (post-C1 review) — best-effort surface label for the missing-
+    // supervision-signal warning's throttle key, diagnostic only. Prefers
+    // the RIVET P4 `surface` stamp ('S1'/'S2'/...) when present, else the
+    // `channel` string (e.g. 'telephony'/'inapp'); undefined for callers
+    // (chat) that set neither.
+    ...(typeof input.sourceContext?.surface === 'string'
+      ? { warningSurface: input.sourceContext.surface }
+      : typeof input.sourceContext?.channel === 'string'
+        ? { warningSurface: input.sourceContext.channel }
+        : {}),
   });
   // Supervisor verdict application:
   //   'block'        → 'draft' (decideInitialStatus result discarded);
