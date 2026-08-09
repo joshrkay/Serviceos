@@ -820,10 +820,28 @@ export interface ProposalRepository {
    */
   findReadyForExecution(windowMs: number): Promise<Proposal[]>;
   claimForExecution(proposalId: string, workerId: string): Promise<Proposal | null>;
+  /**
+   * Follow-up (stale-timeout audit gap): a proposal that maxes out
+   * maxRetries is written straight to the terminal 'execution_failed'
+   * status here, bypassing executeAudited — the only place that would
+   * otherwise emit the WS11 execution-outcome audit event. `failedProposals`
+   * gives the caller (execution-worker.ts) enough identity per row —
+   * NOT a captured error reason, which was never recorded on this path —
+   * to emit its own `proposal.execution_timed_out` audit event.
+   */
   resetStaleExecuting(
     staleMinutes: number,
     maxRetries: number
-  ): Promise<{ resetToApproved: number; movedToFailed: number }>;
+  ): Promise<{
+    resetToApproved: number;
+    movedToFailed: number;
+    failedProposals: Array<{
+      id: string;
+      tenantId: string;
+      proposalType: ProposalType;
+      retryCount: number;
+    }>;
+  }>;
 }
 
 export function validateProposalInput(input: CreateProposalInput): string[] {
@@ -1346,10 +1364,25 @@ export class InMemoryProposalRepository implements ProposalRepository {
   async resetStaleExecuting(
     staleMinutes: number,
     maxRetries: number
-  ): Promise<{ resetToApproved: number; movedToFailed: number }> {
+  ): Promise<{
+    resetToApproved: number;
+    movedToFailed: number;
+    failedProposals: Array<{
+      id: string;
+      tenantId: string;
+      proposalType: ProposalType;
+      retryCount: number;
+    }>;
+  }> {
     const now = Date.now();
     let resetToApproved = 0;
     let movedToFailed = 0;
+    const failedProposals: Array<{
+      id: string;
+      tenantId: string;
+      proposalType: ProposalType;
+      retryCount: number;
+    }> = [];
     for (const [id, proposal] of this.proposals.entries()) {
       if (proposal.status !== 'executing' || !proposal.claimedAt) continue;
       const ageMinutes = (now - proposal.claimedAt.getTime()) / 60000;
@@ -1358,6 +1391,12 @@ export class InMemoryProposalRepository implements ProposalRepository {
       if (retries >= maxRetries) {
         proposal.status = 'execution_failed';
         movedToFailed++;
+        failedProposals.push({
+          id: proposal.id,
+          tenantId: proposal.tenantId,
+          proposalType: proposal.proposalType,
+          retryCount: retries,
+        });
       } else {
         proposal.status = 'approved';
         proposal.executionRetryCount = retries + 1;
@@ -1368,6 +1407,6 @@ export class InMemoryProposalRepository implements ProposalRepository {
       proposal.updatedAt = new Date();
       this.proposals.set(id, proposal);
     }
-    return { resetToApproved, movedToFailed };
+    return { resetToApproved, movedToFailed, failedProposals };
   }
 }

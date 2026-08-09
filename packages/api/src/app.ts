@@ -2819,6 +2819,7 @@ export function createApp(): AppWithLifecycle {
           proposalRepo,
           executor: proposalExecutor,
           logger: executionWorkerLogger,
+          auditRepo,
         });
       } catch (err) {
         executionWorkerLogger.error('Execution sweep failed', {

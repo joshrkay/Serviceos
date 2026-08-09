@@ -596,14 +596,29 @@ export class PgProposalRepository extends PgBaseRepository implements ProposalRe
   async resetStaleExecuting(
     staleMinutes: number,
     maxRetries: number
-  ): Promise<{ resetToApproved: number; movedToFailed: number }> {
+  ): Promise<{
+    resetToApproved: number;
+    movedToFailed: number;
+    failedProposals: Array<{
+      id: string;
+      tenantId: string;
+      proposalType: ProposalType;
+      retryCount: number;
+    }>;
+  }> {
     return this.withCrossTenantSweep(async (client) => {
+      // RETURNING the moved-to-failed rows' identity (follow-up fix): this is
+      // the ONLY write for a HANDLER_NOT_FOUND-style stale timeout — the
+      // executor throws before any executeAudited call ever runs, so the
+      // caller (execution-worker.ts) needs enough per-row identity here to
+      // emit its own proposal.execution_timed_out audit event afterward.
       const failed = await client.query(
         `UPDATE proposals
          SET status = 'execution_failed', updated_at = NOW()
          WHERE status = 'executing'
            AND claimed_at < NOW() - ($1 || ' minutes')::INTERVAL
-           AND execution_retry_count >= $2`,
+           AND execution_retry_count >= $2
+         RETURNING id, tenant_id, proposal_type, execution_retry_count`,
         [staleMinutes, maxRetries]
       );
       const reset = await client.query(
@@ -618,7 +633,17 @@ export class PgProposalRepository extends PgBaseRepository implements ProposalRe
            AND execution_retry_count < $2`,
         [staleMinutes, maxRetries]
       );
-      return { resetToApproved: reset.rowCount ?? 0, movedToFailed: failed.rowCount ?? 0 };
+      const failedProposals = failed.rows.map((row) => ({
+        id: row.id as string,
+        tenantId: row.tenant_id as string,
+        proposalType: row.proposal_type as ProposalType,
+        retryCount: Number(row.execution_retry_count),
+      }));
+      return {
+        resetToApproved: reset.rowCount ?? 0,
+        movedToFailed: failed.rowCount ?? 0,
+        failedProposals,
+      };
     });
   }
 }
