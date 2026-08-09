@@ -513,6 +513,30 @@ export function makeVoiceQualityDriverFactory(
       update: async () => settingsRow,
       incrementEstimateNumber: async () => 1,
       incrementInvoiceNumber: async () => 1,
+      // Tooling fix (2026-08-09) — `SettingsRepository` grew
+      // `upsertIdentityFields` (PUT /api/onboarding/identity + the
+      // conversational onboarding execution handlers) after this stub was
+      // written; the object literal above never got the new method, which
+      // `ts-node`'s full typecheck rejects (`error TS2741: Property
+      // 'upsertIdentityFields' is missing`) — vitest's esbuild transform
+      // doesn't typecheck, so this only ever surfaced when running this
+      // script directly via `ts-node` (e.g. scripts/seed-voice-
+      // quality-cassettes.ts), not via `npm test`/`voice-quality:refresh`.
+      // No corpus script here exercises an onboarding proposal today (grep
+      // confirms zero `onboarding_*` intents in src/ai/voice-quality/corpus),
+      // so there is no real behavior to fake — this throws rather than
+      // returning a plausible-looking `TenantSettings` that was never
+      // actually upserted, so a FUTURE onboarding corpus script fails
+      // loudly here (pointing straight at this comment) instead of quietly
+      // asserting against fabricated data.
+      upsertIdentityFields: async (): Promise<TenantSettings> => {
+        throw new Error(
+          'voice-quality-driver-factory: upsertIdentityFields is not implemented in this ' +
+            'settings stub — no corpus script exercises onboarding execution handlers today. ' +
+            'Wire a real implementation (e.g. delegate to InMemorySettingsRepository) before ' +
+            'adding one.',
+        );
+      },
     };
     let now: (() => Date) | undefined;
     if (businessHours?.callMomentLocal) {

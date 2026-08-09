@@ -271,3 +271,74 @@ export function formatStalenessReport(report: StalenessReport): string {
   }
   return lines.join('\n');
 }
+
+export interface CassettePruneResult {
+  /** Survivors, in their ORIGINAL relative file order (unchanged). */
+  kept: CassetteEntry[];
+  /** Removed entries — not (re)written by the refresh pass that just ran. */
+  pruned: CassetteEntry[];
+}
+
+/**
+ * Keep only entries (re)written at or after `cutoffIso`; prune the rest.
+ *
+ * REJECTED DESIGN, kept here as a record of why (2026-08-09) — an earlier
+ * version of this function grouped entries by `callKey` (the SAME
+ * (schema, system-fingerprint, last-user-message) key the replay fallback
+ * matches on — see `findFallbackEntry`, `analyzeCassette` above) and kept
+ * only `pickNewestRecording` per group. That looked airtight — a hash
+ * appears at most once per cassette (`CassetteLLMGateway.recordOrRefresh`
+ * enforces it), and fallback replay only ever resolves a group via
+ * `pickNewestRecording` — but it silently assumed at most ONE currently-
+ * live hash per callKey group. That assumption is FALSE in this corpus:
+ * running it against the real cassettes found scripts (e.g.
+ * `spam-create-customer`) where the SAME (schema, fp, last-user-message)
+ * triple legitimately produces TWO DIFFERENT live requests every single
+ * refresh (traced to two distinct call sites sharing an utterance, one
+ * with an extra context section the other lacks) — `callKey` is a lossy
+ * fallback-matching heuristic, not a true identity, and grouping-based
+ * pruning discarded one of the two live entries, breaking strict replay
+ * (`cassette drift` failures) the very next run. Proven via the seven
+ * `pruneCassetteEntries`-era tests below plus an actual `--prune` dry run
+ * against the committed corpus (73/73 -> 36/73) before this rewrite —
+ * see scripts/seed-voice-quality-cassettes.ts's `--prune` doc comment.
+ *
+ * THIS design sidesteps the whole problem by not grouping at all: a
+ * cutoff timestamp captured immediately BEFORE an authoritative refresh
+ * pass (the REAL `npm run voice-quality:refresh` — i.e. `vitest run -c
+ * vitest.voice-quality.config.ts` with `VOICE_QUALITY_CASSETTE_MODE=
+ * refresh`, not a hand-rolled re-implementation of it — see the caller)
+ * is compared against each entry's own `recordedAt`. `CassetteLLMGateway.
+ * recordOrRefresh` bumps `recordedAt` to "now" for EVERY hash it touches
+ * in refresh mode, whether that hash already existed or is brand new —
+ * so after a full refresh pass, EVERY currently-reachable hash (via
+ * strict OR fallback replay — fallback can only ever pick among entries
+ * that exist, and a freshly-touched entry is, if still live, always at
+ * least as new as any stale sibling) has `recordedAt >= cutoffIso`,
+ * REGARDLESS of how many live variants share a callKey. Anything older
+ * was not reproduced by that authoritative pass and is safe to drop.
+ *
+ * Pure and side-effect-free: callers own capturing `cutoffIso`, running
+ * the refresh, and reading/writing the cassette file.
+ */
+export function pruneEntriesBefore(entries: CassetteEntry[], cutoffIso: string): CassettePruneResult {
+  const cutoffMs = Date.parse(cutoffIso);
+  const kept: CassetteEntry[] = [];
+  const pruned: CassetteEntry[] = [];
+  for (const e of entries) {
+    // Compared as parsed instants, NOT raw strings — a malformed
+    // recordedAt (e.g. "not-a-date") can sort lexically AFTER a valid
+    // ISO timestamp (`'n' > '2'`), which a plain string `>=` would
+    // misread as "fresh." A missing/malformed recordedAt can never prove
+    // "touched by this refresh" — treat it as prunable rather than
+    // silently keeping it (mirrors analyzeCassette's own "unparseable
+    // timestamp is surfaced, never treated as fresh" posture above).
+    const recordedMs = typeof e.recordedAt === 'string' ? Date.parse(e.recordedAt) : NaN;
+    if (Number.isFinite(recordedMs) && recordedMs >= cutoffMs) {
+      kept.push(e);
+    } else {
+      pruned.push(e);
+    }
+  }
+  return { kept, pruned };
+}
