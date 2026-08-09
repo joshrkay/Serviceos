@@ -3431,9 +3431,9 @@ describe('voice-action-router U3 lookup answers (recorded-memo path)', () => {
       );
 
       const rec = await voiceRepo.findById(TENANT, RECORDING_ID);
-      expect(rec?.answer?.summary).toContain('needed by Aug 9');
+      expect(rec?.answer?.summary).toContain('needed by August 9');
       const row = rec?.answer?.rows?.[0] as { text?: string } | undefined;
-      expect(row?.text).toContain('needed by Aug 9');
+      expect(row?.text).toContain('needed by August 9');
     });
   });
 });

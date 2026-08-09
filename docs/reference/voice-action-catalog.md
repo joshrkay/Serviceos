@@ -778,7 +778,7 @@ Notes on the Task 9 row (`add_material`, taxonomy 1.13.0):
   every row, so silently never mentioning it on the read side would mean
   this module collects data it then hides from the person who spoke it:
   each spoken/rendered item now states its needed-by date when present
-  ("3 boxes of PEX, quantity 3, needed by Aug 9"), letting the operator
+  ("3 boxes of PEX, quantity 3, needed by August 9"), letting the operator
   identify which of the (possibly unfiltered) items are time-sensitive
   themselves. A real `neededBy` QUERY filter is a genuine Task 8 contract
   extension, filed as separate follow-up work — not done here.
@@ -794,6 +794,14 @@ Notes on the Task 9 row (`add_material`, taxonomy 1.13.0):
   plausibly surprising order for a shopping list, documented here and in
   `lookup-materials.ts`'s own module doc comment rather than left
   implicit.
+- **`lookup_events.result_count` SATURATES at 6 for this intent.** The
+  bounded fetch (I4, above) means the row written by `record()` carries
+  rows-fetched, capped at `MAX_ITEMS_SPOKEN + 1` (6) — never the true
+  pending total once it exceeds that. `avg(result_count) where intent =
+  'lookup_materials'` (or any analytics query treating this column as an
+  exact count) is therefore a ceilinged metric: a genuine 6 pending items
+  is indistinguishable from a genuine 600. See `lookup-events/lookup-event.ts`'s
+  `resultCount` doc comment.
 
 Notes on the taxonomy-1.2.0 rows:
 

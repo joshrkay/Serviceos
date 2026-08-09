@@ -142,9 +142,9 @@ describe('lookupMaterials skill', () => {
     expect(res.status).toBe('found');
     if (res.status !== 'found') throw new Error('unreachable');
     expect(res.data.spokenItems[0].vendor).toBe('Ferguson');
-    expect(res.data.spokenItems[0].neededByLabel).toBe('Aug 9');
+    expect(res.data.spokenItems[0].neededByLabel).toBe('August 9');
     expect(res.summary).toContain('from Ferguson');
-    expect(res.summary).toContain('needed by Aug 9');
+    expect(res.summary).toContain('needed by August 9');
   });
 
   it('omits vendor/needed-by phrasing entirely when the item has neither (never fabricated)', async () => {

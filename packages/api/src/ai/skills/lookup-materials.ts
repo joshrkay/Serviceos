@@ -56,7 +56,7 @@
  * read side would mean this module collects data it then hides from the
  * very person who spoke it. So each spoken/rendered item states its
  * needed-by date when the row has one ("3 boxes of PEX, quantity 3, needed
- * by Aug 9") — the operator hears which of the (possibly unfiltered) items
+ * by August 9") — the operator hears which of the (possibly unfiltered) items
  * are actually time-sensitive, rather than the system pretending to
  * understand "tomorrow" it cannot honor as a query filter. Adding a real
  * `neededBy` filter to `MaterialItemListOptions` (both backends) is a
@@ -92,7 +92,7 @@ export interface LookupMaterialsItem {
   description: string;
   quantity: number;
   vendor?: string;
-  /** TTS-safe "MMM d" label for the item's `neededBy`, when it has one (see `formatNeededByLabel`). */
+  /** TTS-safe "MMMM d" label for the item's `neededBy`, when it has one (see `formatNeededByLabel`). */
   neededByLabel?: string;
 }
 
@@ -140,16 +140,21 @@ function truncateForSpeech(s: string, max: number): string {
 }
 
 /**
- * "MMM d" label for a bare calendar date, anchored to UTC — NEVER
- * tz-shifted. Mirrors `create-service-agreement-task.ts`'s
- * `formatStartsOnLabel`: `neededBy` is persisted as a bare YYYY-MM-DD date
- * at midnight UTC (`add-material-handler.ts`), so rendering it in a
- * tenant timezone west of UTC could roll it back a calendar day.
+ * "MMMM d" label for a bare calendar date, anchored to UTC — NEVER
+ * tz-shifted. `neededBy` is persisted as a bare YYYY-MM-DD date at midnight
+ * UTC (`add-material-handler.ts`), so rendering it in a tenant timezone west
+ * of UTC could roll it back a calendar day; the UTC anchoring mirrors
+ * `create-service-agreement-task.ts`'s `formatStartsOnLabel` for that reason.
+ * Unlike that helper (a review-card label, not spoken aloud), this label IS
+ * spoken by TTS, so it deliberately uses `month: 'long'` rather than
+ * `'short'` — this is the first `month: 'short'`-style date in any spoken
+ * summary across the skill family, and a full month name removes any risk
+ * of an engine mis-reading an abbreviation (e.g. "Aug") at zero cost.
  */
 function formatNeededByLabel(d: Date): string {
   return new Intl.DateTimeFormat('en-US', {
     timeZone: 'UTC',
-    month: 'short',
+    month: 'long',
     day: 'numeric',
   }).format(d);
 }
