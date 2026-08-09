@@ -1759,6 +1759,14 @@ export class LogExpenseTaskHandler implements TaskHandler {
     } else {
       missing.push('amountCents');
     }
+    // Note the asymmetry with the log_mileage branch above: a stray `amount`
+    // heard on a log_mileage turn is folded into the description (nothing
+    // heard is silently lost), but a stray `mileageMiles` heard on a plain
+    // log_expense turn is dropped here without a trace — `ee.mileageMiles`
+    // is never read in this branch. This is intentional, not an oversight:
+    // `amount` is money (losing it would misstate a real expense the
+    // operator needs to see), while `mileageMiles` on a log_expense turn is
+    // very likely classifier noise with nothing financial riding on it.
 
     if (ee.vendor) payload.vendor = ee.vendor;
 

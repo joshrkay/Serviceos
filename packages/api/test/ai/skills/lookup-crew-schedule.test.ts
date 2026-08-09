@@ -367,9 +367,10 @@ describe('lookupCrewSchedule skill', () => {
   // owner/dispatcher/technician was right for the NAMED branch (it must
   // match the entity resolver's role set), but the UNNAMED "who's free"
   // branch answers a DIFFERENT question — "who can I send?" — and an idle
-  // office-only owner/dispatcher is never sendable. `User.canFieldServe`
-  // is the discriminator: the roster (techById/name resolution) stays
-  // unfiltered, but the FREE LIST must exclude anyone who can't field-serve.
+  // office-only owner/dispatcher is never sendable. `role === 'technician'
+  // || canFieldServe` is the discriminator: the roster (techById/name
+  // resolution) stays unfiltered, but the FREE LIST must exclude anyone who
+  // can't field-serve.
   it('an idle office-only OWNER never appears in the free list (canFieldServe: false)', async () => {
     const deps = await fixtures({
       technicians: [

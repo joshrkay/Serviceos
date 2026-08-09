@@ -1125,7 +1125,7 @@ const ROWS: Row[] = [
     // template could hijack or get hijacked by the wrong branch).
     intent: 'log_mileage',
     mode: 'resolves',
-    note: 'alias of log_expense — a spoken mileageMiles count is the only gate; dep-less LogExpenseExecutionHandler synthetic-succeeds',
+    note: 'alias of log_expense — dispatch is gated on context.intent, not field presence; dep-less LogExpenseExecutionHandler synthetic-succeeds',
     draft: () =>
       draft(
         { gateway: NOOP_GATEWAY },
