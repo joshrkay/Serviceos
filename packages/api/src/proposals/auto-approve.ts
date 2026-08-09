@@ -55,6 +55,18 @@ export const DEFAULT_AUTO_APPROVE_THRESHOLDS: Record<Mode, number> = {
  * Pre-Phase-12 default. Used when no `supervisorMode` is supplied —
  * i.e. callers that don't yet thread mode through (legacy paths,
  * backfills). Keeps the existing 0.9 behavior unchanged.
+ *
+ * ACCIDENTAL COUPLING (followup-autoapprove-default audit) — this value must
+ * stay `<= AUTONOMOUS_BOOKING_THRESHOLD_FLOOR` (proposals/autonomous-lane.ts).
+ * `ai/voice-turn/create-voice-turn-processor.ts` never threads
+ * `supervisorMode`/`supervisorPresent`, so its `create_booking` proposals
+ * always resolve THIS constant (never the D-015 lane's own dedicated
+ * threshold, and never the categorical `null` block) whenever the lane
+ * already deemed them eligible. That's harmless today only because this
+ * constant equals the lane's floor (0.9 === 0.9) — eligibility already
+ * guarantees the confidence score clears it. See
+ * `AUTONOMOUS_BOOKING_THRESHOLD_FLOOR`'s doc comment for the full mechanism
+ * and `test/proposals/autonomous-lane.test.ts` for the pinned invariant.
  */
 export const LEGACY_AUTO_APPROVE_THRESHOLD = 0.9;
 
