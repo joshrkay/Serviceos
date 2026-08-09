@@ -2114,12 +2114,13 @@ export class CreateJobVoiceTaskHandler implements TaskHandler {
 //
 // Contract-compatibility notes (read before changing this class):
 //
-//   1. `evidence` (lessonIds + correctionCount) is a REQUIRED nested object
-//      on `updateCatalogItemPayloadSchema`, but it exists to carry the
-//      correction-repetition loop's real provenance ("you've corrected this
-//      N times") — a live voice utterance has no lesson to point to, and
-//      `lessonIds` requires at least one real id. This handler deliberately
-//      OMITS `evidence` rather than fabricating one:
+//   1. `evidence` (lessonIds + correctionCount) is an OPTIONAL nested object
+//      on `updateCatalogItemPayloadSchema` (follow-up fix, 2026-08-09 — it
+//      was REQUIRED until then), carrying the correction-repetition loop's
+//      real provenance ("you've corrected this N times") — a live voice
+//      utterance has no lesson to point to, and `lessonIds` requires at
+//      least one real id when the key IS present. This handler
+//      deliberately OMITS `evidence` rather than fabricating one:
 //        - UpdateCatalogItemExecutionHandler.execute() never reads
 //          payload.evidence (only catalogItemId + proposedUnitPriceCents),
 //          so omitting it does not affect execution.
@@ -2128,13 +2129,14 @@ export class CreateJobVoiceTaskHandler implements TaskHandler {
 //          unambiguous price-only draft (missingFields: []) still approves
 //          with one tap — proven by this type's row in
 //          test/proposals/voice-payload-contract.test.ts.
-//        - The one thing this cannot support: editing this proposal's
-//          fields via the generic `editProposal` path before approval,
-//          which revalidates the FULL merged payload against the Zod
-//          schema and would reject it for the still-missing `evidence` key.
-//          Fixing that means loosening the WS20 contract itself, which is
-//          out of this task's scope (Files list) — flagged as a follow-up,
-//          not silently worked around.
+//        - editProposal (proposals/actions.ts) revalidates the FULL merged
+//          payload against the Zod schema on every field edit. While
+//          `evidence` was required, that meant a voice-drafted proposal
+//          ALWAYS failed the review card's EDIT action with "Invalid
+//          payload after edit" — not an edge case. Making `evidence`
+//          optional on the shared contract (nothing reads it, so
+//          "required" was pure ceremony) fixed this without touching
+//          approve/execute's behavior at all.
 //
 //   2. `catalogItemNewName`/`catalogItemNewDescription` changes cannot
 //      actually EXECUTE today: the contract's `name` field is documented as

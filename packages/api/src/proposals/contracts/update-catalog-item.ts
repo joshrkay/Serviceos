@@ -20,7 +20,25 @@ import { MAX_UNIT_PRICE_CENTS } from './add-catalog-item';
  *
  * All money is integer cents (CLAUDE.md core pattern — never floating point).
  * `evidence` carries the repetition provenance so the review UI can show WHY
- * the AI is asking ("you've corrected this 3 times").
+ * the AI is asking ("you've corrected this 3 times") — OPTIONAL (follow-up
+ * fix, 2026-08-09): the correction loop is the only producer that can
+ * honestly populate it, but this type now also has a voice on-ramp
+ * (`UpdateCatalogItemTaskHandler`, ai/tasks/voice-extended-tasks.ts) that
+ * has no lesson to point to and correctly omits the key rather than
+ * fabricate one. Nothing reads `payload.evidence` — not
+ * `UpdateCatalogItemExecutionHandler.execute()` (only reads
+ * `catalogItemId` + `proposedUnitPriceCents`), not any review-card UI in
+ * `packages/web`/`packages/mobile` — so "required" was pure ceremony that
+ * bought nothing except breaking `editProposal` (proposals/actions.ts),
+ * which revalidates the FULL merged payload against this schema: a
+ * voice-drafted proposal failed with "Invalid payload after edit" at ANY
+ * price, always, not just at an edge case. `approveProposal` was never
+ * affected (it only blocks on the tracked `missingFields` list, not full
+ * Zod re-validation), so approve/execute worked fine — only the review
+ * card's EDIT action was broken. When `evidence` IS present (the
+ * correction loop's honest case), its own shape (non-empty `lessonIds`,
+ * positive `correctionCount`) is still enforced — optional presence, not a
+ * loosened shape.
  *
  * `proposedUnitPriceCents` carries the SAME `MAX_UNIT_PRICE_CENTS` sanity
  * ceiling `add-catalog-item.ts`'s `unitPriceCents` does (quality-review
@@ -49,13 +67,21 @@ export const updateCatalogItemPayloadSchema = z.object({
   currentUnitPriceCents: z.number().int().nonnegative(),
   /** The corrected price to make the catalog default, in integer cents. */
   proposedUnitPriceCents: z.number().int().nonnegative().max(MAX_UNIT_PRICE_CENTS),
-  /** Repetition provenance that earned this proposal. */
-  evidence: z.object({
-    /** Correction lesson ids that evidence the repetition (at least the trigger). */
-    lessonIds: z.array(z.string().min(1)).min(1),
-    /** Total same-SKU price corrections observed (>= the threshold). */
-    correctionCount: z.number().int().positive(),
-  }),
+  /**
+   * Repetition provenance that earned this proposal. OPTIONAL — only the
+   * correction-repetition loop can honestly populate this; the voice
+   * on-ramp (UpdateCatalogItemTaskHandler) omits it. See the module doc
+   * comment for why "required" was pure ceremony that only broke
+   * `editProposal`.
+   */
+  evidence: z
+    .object({
+      /** Correction lesson ids that evidence the repetition (at least the trigger). */
+      lessonIds: z.array(z.string().min(1)).min(1),
+      /** Total same-SKU price corrections observed (>= the threshold). */
+      correctionCount: z.number().int().positive(),
+    })
+    .optional(),
 });
 
 export type UpdateCatalogItemPayload = z.infer<typeof updateCatalogItemPayloadSchema>;

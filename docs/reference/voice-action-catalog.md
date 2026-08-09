@@ -129,16 +129,19 @@ taxonomy 1.7.0):
   human-readable reason; there is no general entity-resolver `kind:
   'catalogItem'` the way jobs/appointments/technicians have.
 - The contract's `evidence` field (`lessonIds` + `correctionCount`) is
-  REQUIRED by the Zod schema but carries correction-loop-specific
-  provenance a voice utterance cannot honestly supply — the task handler
-  omits it rather than fabricating a fake lesson id. This is safe for
-  drafting and approval (the execution handler never reads `evidence`, and
-  `approveProposal` only blocks on the tracked `missingFields` list, not
-  full Zod re-validation) but means a voice-drafted `update_catalog_item`
-  proposal cannot go through the generic `editProposal` field-edit path
-  before approval — editing revalidates the FULL payload against the
-  schema and would reject it for the missing key. Loosening the schema
-  itself is out of this task's scope; see
+  OPTIONAL on the Zod schema (follow-up fix, 2026-08-09 — it was REQUIRED
+  until then) and carries correction-loop-specific provenance a voice
+  utterance cannot honestly supply — the task handler omits it rather than
+  fabricating a fake lesson id. This is safe for drafting, approval, AND
+  editing: the execution handler never reads `evidence`, `approveProposal`
+  only blocks on the tracked `missingFields` list (not full Zod
+  re-validation), and — since the follow-up fix — `editProposal`'s full
+  payload re-validation no longer rejects the still-missing key either.
+  Before the fix, a voice-drafted `update_catalog_item` proposal could not
+  go through the generic `editProposal` field-edit path before approval at
+  all: editing revalidates the FULL merged payload against the schema, and
+  a REQUIRED `evidence` key that voice drafting never supplies made every
+  such edit fail with "Invalid payload after edit". See
   `UpdateCatalogItemTaskHandler`'s doc comment
   (`ai/tasks/voice-extended-tasks.ts`) for the full analysis.
 - This type is deliberately **absent** from `S1_ALLOWED_PROPOSAL_TYPES`
