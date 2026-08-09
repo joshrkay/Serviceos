@@ -2178,6 +2178,19 @@ export class CreateJobVoiceTaskHandler implements TaskHandler {
 //      sibling ceilings the SAME unitPriceCents field writing the SAME
 //      catalog_items.unit_price_cents column — without this, a misheard
 //      "290 thousand" gates on create but sails through on edit.
+//
+//      Follow-up fix (2026-08-09, same day) — this gate USED to be mirrored
+//      onto `updateCatalogItemPayloadSchema` itself
+//      (contracts/update-catalog-item.ts) too, but that placement was
+//      wrong and was reverted: `proposedUnitPriceCents` also carries the
+//      correction-repetition loop's `afterCents` (a persisted, never-spoken
+//      value) and this handler's own no-price-change fallback
+//      (`resolvedItem.unitPriceCents`, also never spoken), so a
+//      contract-level ceiling rejected legitimate >$100k prices neither
+//      producer ever spoke. This gate right here — the one place that ever
+//      writes a genuinely SPOKEN `unitPriceCents` into the proposal — is
+//      now the ONLY place `MAX_UNIT_PRICE_CENTS` is enforced for this
+//      intent.
 export class UpdateCatalogItemTaskHandler implements TaskHandler {
   readonly taskType = 'update_catalog_item' as const;
 

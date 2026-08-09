@@ -43,20 +43,42 @@ function proposal(payload: Record<string, unknown>): Proposal {
   } as Proposal;
 }
 
-// Quality-review fix (2026-08-09, "I4") — update_catalog_item's
-// proposedUnitPriceCents now carries the SAME MAX_UNIT_PRICE_CENTS
-// ceiling add_catalog_item's unitPriceCents does (both write
-// catalog_items.unit_price_cents from a spoken unitPriceCents field).
-// currentUnitPriceCents is deliberately NOT ceilinged — see
-// contracts/update-catalog-item.ts's module doc comment.
-describe('update_catalog_item payload contract — price ceiling parity with add_catalog_item', () => {
+// Follow-up fix (2026-08-09) — the MAX_UNIT_PRICE_CENTS ceiling on
+// `proposedUnitPriceCents` was REMOVED from this contract (it briefly
+// mirrored add_catalog_item's ceiling, "I4"). It was always meant as a
+// backstop against a MISHEARD SPOKEN figure, but proposedUnitPriceCents
+// carries never-spoken values on two producer paths: a voice name/
+// description-only edit inherits the item's own untouched price
+// (`requestedPriceCents ?? resolvedItem.unitPriceCents` in
+// UpdateCatalogItemTaskHandler, ai/tasks/voice-extended-tasks.ts), and the
+// correction-repetition loop carries `afterCents` straight from persisted
+// lesson data. Both are legitimate, human-verified prices the
+// misheard-figure backstop was never meant to police — a real catalog item
+// priced above $100k must not be rejected on EDIT just for existing. The
+// ceiling now lives ONLY in the voice drafting handler's own gate (the one
+// path that ever writes a genuinely SPOKEN value into this field);
+// removing it from the shared contract fixed a real regression: the
+// correction loop's payload validated fine before the ceiling was added
+// and then started failing `editProposal` with "Invalid payload after
+// edit" for any pre-existing item priced above $100k — blaming the
+// operator for a price they never touched.
+//
+// Producer-topology contrast with add_catalog_item (whose ceiling is
+// UNCHANGED and correct, kept exactly as-is): add_catalog_item has exactly
+// ONE producer (voice), so its contract-level ceiling and its drafting-time
+// gate can never disagree by construction. update_catalog_item has TWO
+// producers — voice AND the correction loop — and the non-voice one
+// legitimately carries a human-entered/persisted price the backstop was
+// never meant to police, so a SHARED contract-level ceiling was the wrong
+// place to enforce it.
+describe('update_catalog_item payload contract — no price ceiling (producer-topology fix)', () => {
   const basePayload = {
     catalogItemId: CATALOG_ID,
     currentUnitPriceCents: 10000,
     evidence: { lessonIds: ['l1'], correctionCount: 3 },
   };
 
-  it('accepts a proposedUnitPriceCents of exactly the sanity ceiling (100_000_00)', () => {
+  it('accepts a proposedUnitPriceCents of exactly the OLD sanity ceiling (100_000_00)', () => {
     const result = validateProposalPayload('update_catalog_item', {
       ...basePayload,
       proposedUnitPriceCents: MAX_UNIT_PRICE_CENTS,
@@ -64,10 +86,35 @@ describe('update_catalog_item payload contract — price ceiling parity with add
     expect(result.valid).toBe(true);
   });
 
-  it('rejects a proposedUnitPriceCents one cent above the sanity ceiling', () => {
+  it('accepts a proposedUnitPriceCents one cent above the OLD sanity ceiling — the contract no longer bounds this field', () => {
     const result = validateProposalPayload('update_catalog_item', {
       ...basePayload,
       proposedUnitPriceCents: MAX_UNIT_PRICE_CENTS + 1,
+    });
+    expect(result.valid).toBe(true);
+  });
+
+  it('accepts a legitimately priced catalog item far above $100k (the correction-loop path)', () => {
+    const result = validateProposalPayload('update_catalog_item', {
+      ...basePayload,
+      currentUnitPriceCents: 250_000_00,
+      proposedUnitPriceCents: 250_000_00,
+    });
+    expect(result.valid).toBe(true);
+  });
+
+  it('accepts a proposedUnitPriceCents of exactly 0 — the nonnegative floor is inclusive', () => {
+    const result = validateProposalPayload('update_catalog_item', {
+      ...basePayload,
+      proposedUnitPriceCents: 0,
+    });
+    expect(result.valid).toBe(true);
+  });
+
+  it('still rejects a negative proposedUnitPriceCents — the >= 0 floor is untouched by this fix', () => {
+    const result = validateProposalPayload('update_catalog_item', {
+      ...basePayload,
+      proposedUnitPriceCents: -1,
     });
     expect(result.valid).toBe(false);
   });
@@ -76,12 +123,14 @@ describe('update_catalog_item payload contract — price ceiling parity with add
   // already-persisted price, never spoken) and the domain/HTTP layer
   // places no upper bound on a catalog item's price — a legitimately
   // priced pre-existing item over $100k must not be rejected just for
-  // being echoed back on this payload.
-  it('does NOT ceiling currentUnitPriceCents — a pre-existing item priced above $100k still validates', () => {
+  // being echoed back on this payload. (Unaffected by this fix — already
+  // true before it — kept here for parity with proposedUnitPriceCents now
+  // sharing the same "no ceiling" posture.)
+  it('does NOT ceiling currentUnitPriceCents either — a pre-existing item priced above $100k still validates', () => {
     const result = validateProposalPayload('update_catalog_item', {
       ...basePayload,
       currentUnitPriceCents: MAX_UNIT_PRICE_CENTS + 1,
-      proposedUnitPriceCents: MAX_UNIT_PRICE_CENTS,
+      proposedUnitPriceCents: MAX_UNIT_PRICE_CENTS + 1,
     });
     expect(result.valid).toBe(true);
   });

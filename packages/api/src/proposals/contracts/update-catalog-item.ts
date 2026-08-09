@@ -1,5 +1,4 @@
 import { z } from 'zod';
-import { MAX_UNIT_PRICE_CENTS } from './add-catalog-item';
 
 /**
  * update_catalog_item proposal payload (WS20 — correction-repetition meta-proposal).
@@ -40,17 +39,34 @@ import { MAX_UNIT_PRICE_CENTS } from './add-catalog-item';
  * positive `correctionCount`) is still enforced — optional presence, not a
  * loosened shape.
  *
- * `proposedUnitPriceCents` carries the SAME `MAX_UNIT_PRICE_CENTS` sanity
- * ceiling `add-catalog-item.ts`'s `unitPriceCents` does (quality-review
- * fix, "I4") — both intents write `catalog_items.unit_price_cents` from a
- * spoken `unitPriceCents` field, so an un-ceilinged sibling would let a
- * misheard huge figure gate on CREATE (add_catalog_item) and sail through
- * on EDIT of the identical row. `currentUnitPriceCents` is deliberately
- * NOT ceilinged: it's informational, populated from the RESOLVED item's
- * real, already-persisted price (never spoken), and the domain/HTTP layer
- * itself places no upper bound on a catalog item's price — a legitimately
- * priced pre-existing item over $100k must not be rejected just for being
- * echoed back on this proposal's payload.
+ * `proposedUnitPriceCents` carries NO price ceiling (follow-up fix,
+ * 2026-08-09 — it briefly mirrored `add-catalog-item.ts`'s
+ * `MAX_UNIT_PRICE_CENTS` sanity ceiling, "I4", removed here). That ceiling
+ * is a backstop against a MISHEARD SPOKEN figure, and it correctly still
+ * lives on `add_catalog_item`'s contract — but `add_catalog_item` has
+ * exactly ONE producer (voice), so a contract-level ceiling and a
+ * drafting-time gate can never disagree there. `update_catalog_item` has
+ * TWO producers, and `proposedUnitPriceCents` carries a never-spoken value
+ * on both of the non-"fresh voice price" paths:
+ *   (a) a voice name/description-only edit inherits the item's own
+ *       UNTOUCHED price (`requestedPriceCents ?? resolvedItem.unitPriceCents`
+ *       in `UpdateCatalogItemTaskHandler`, ai/tasks/voice-extended-tasks.ts)
+ *       — never a spoken figure that could be misheard;
+ *   (b) the correction-repetition loop carries `afterCents` straight from
+ *       already-persisted lesson data (learning/corrections/
+ *       correction-repetition.ts) — also never spoken.
+ * A legitimately priced catalog item over $100k is reachable on both paths
+ * (no bound in `createCatalogItem`, none on `POST /api/catalog-items`, and
+ * the DB CHECK is `unit_price_cents >= 0` with no ceiling), so a
+ * contract-level ceiling here rejected real prices the operator never
+ * touched. The ONE path that ever writes a genuinely spoken value into
+ * this field — `UpdateCatalogItemTaskHandler`'s own drafting gate — keeps
+ * its `MAX_UNIT_PRICE_CENTS` check exactly where a misheard-figure
+ * backstop belongs: at the point a spoken number is first trusted, not on
+ * a shared contract two other, non-spoken producers must also satisfy.
+ * `currentUnitPriceCents` was never ceilinged for the same reason (see the
+ * field's own doc comment) — `proposedUnitPriceCents` now matches that
+ * posture instead of contradicting it.
  */
 export const updateCatalogItemPayloadSchema = z.object({
   /** Catalog item whose unit price the proposal would update. */
@@ -65,8 +81,14 @@ export const updateCatalogItemPayloadSchema = z.object({
    * Not ceilinged — see module doc comment.
    */
   currentUnitPriceCents: z.number().int().nonnegative(),
-  /** The corrected price to make the catalog default, in integer cents. */
-  proposedUnitPriceCents: z.number().int().nonnegative().max(MAX_UNIT_PRICE_CENTS),
+  /**
+   * The corrected price to make the catalog default, in integer cents.
+   * Deliberately NOT ceilinged — see module doc comment (producer
+   * topology: this field carries never-spoken values from both real
+   * producers; the misheard-spoken-figure ceiling lives in
+   * UpdateCatalogItemTaskHandler's own drafting gate instead).
+   */
+  proposedUnitPriceCents: z.number().int().nonnegative(),
   /**
    * Repetition provenance that earned this proposal. OPTIONAL — only the
    * correction-repetition loop can honestly populate this; the voice
