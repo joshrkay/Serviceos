@@ -157,6 +157,12 @@ interface BuildAppOpts {
   appointmentRepo?: InMemoryAppointmentRepository;
   jobRepo?: InMemoryJobRepository;
   locationRepo?: InMemoryLocationRepository;
+  // I3 (post-C1 review, followup-autoapprove-default) — per-tenant
+  // auto-approve threshold override resolver, mirroring
+  // workers/voice-action-router.ts's `thresholdResolver` dep exactly.
+  thresholdResolver?: (
+    tenantId: string,
+  ) => Promise<Partial<Record<'supervisor' | 'tech' | 'both', number>> | undefined>;
 }
 
 function buildApp(gateway: LLMGateway, opts: BuildAppOpts = {}) {
@@ -182,6 +188,7 @@ function buildApp(gateway: LLMGateway, opts: BuildAppOpts = {}) {
       ...(opts.appointmentRepo ? { appointmentRepo: opts.appointmentRepo } : {}),
       ...(opts.jobRepo ? { jobRepo: opts.jobRepo } : {}),
       ...(opts.locationRepo ? { locationRepo: opts.locationRepo } : {}),
+      ...(opts.thresholdResolver ? { thresholdResolver: opts.thresholdResolver } : {}),
     }),
   );
   return app;
@@ -919,6 +926,87 @@ describe('schedule_inspection — full dependency set (the allowlist\'s one deli
     // conditional, not just the one that changed).
     expect(res.body.message.proposal.status).toBe('Pending');
     expect(res.body.message.content).toMatch(/review and approve/i);
+  });
+});
+
+// ───── I3 (post-C1 review) — the tenant auto-approve threshold override ─────
+//
+// `tenant_settings.auto_approve_threshold` (the Settings UI value) is keyed
+// BY MODE, so `resolveAutoApproveThreshold` can only consult it once
+// `supervisorMode` is known — and commit 1 made chat the first (and,
+// as of this fix, only) caller anywhere in the codebase that threads a real
+// `supervisorMode`. These tests prove the override actually takes effect on
+// chat now that it's threaded, using the IDENTICAL update_job scenario with
+// and without a stricter override.
+
+describe('I3 — tenant threshold override actually affects chat auto-approval', () => {
+  const RESOLVED_JOB_ID = '99999999-9999-4999-8999-999999999999';
+
+  async function buildUpdateJobApp(opts: { thresholdResolver?: BuildAppOpts['thresholdResolver'] }) {
+    const proposalRepo = new InMemoryProposalRepository();
+    const jobRepo = new InMemoryJobRepository();
+    const job: Job = {
+      id: RESOLVED_JOB_ID,
+      tenantId: TEST_TENANT,
+      customerId: 'cust-threshold',
+      locationId: 'loc-threshold',
+      jobNumber: 'JOB-THRESHOLD',
+      summary: 'Threshold override job',
+      status: 'scheduled',
+      priority: 'normal',
+      createdBy: TEST_USER,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    };
+    await jobRepo.create(job);
+    const entityResolver = resolverFor(async ({ kind }) =>
+      kind === 'job'
+        ? { kind: 'resolved', candidate: { id: job.id, kind: 'job', label: 'Threshold job', score: 0.95 } }
+        : { kind: 'skipped' },
+    );
+    const app = buildApp(
+      strictGateway([
+        classifierReply('update_job', { jobReference: 'the threshold job', status: 'completed' }),
+        // UpdateJobTaskHandler makes its OWN drafting call (job-edit-task.ts)
+        // after the classifier — it does not reuse the classifier's
+        // confidence, so this second completion carries the real
+        // confidence_score the auto-approve decision is based on.
+        JSON.stringify({
+          jobReference: 'the threshold job',
+          status: 'completed',
+          confidence_score: 0.95,
+        }),
+      ]),
+      {
+        proposalRepo,
+        entityResolver,
+        jobRepo,
+        ...(opts.thresholdResolver ? { thresholdResolver: opts.thresholdResolver } : {}),
+      },
+    );
+    return { app, proposalRepo, jobRepo, job };
+  }
+
+  it('with NO override: 0.95 confidence clears the default supervisor threshold (0.90) and auto-approves', async () => {
+    const { app, proposalRepo } = await buildUpdateJobApp({});
+    const res = await chat(app, 'Mark the threshold job as completed');
+    expect(res.status).toBe(200);
+    const persisted = await proposalRepo.findByTenant(TEST_TENANT);
+    expect(persisted).toHaveLength(1);
+    expect(persisted[0].status).toBe('approved');
+  });
+
+  it('with a stricter override (supervisor: 0.99): the SAME 0.95-confidence request no longer auto-approves', async () => {
+    const thresholdResolver = async () => ({ supervisor: 0.99 });
+    const { app, proposalRepo } = await buildUpdateJobApp({ thresholdResolver });
+    const res = await chat(app, 'Mark the threshold job as completed');
+    expect(res.status).toBe(200);
+    const persisted = await proposalRepo.findByTenant(TEST_TENANT);
+    expect(persisted).toHaveLength(1);
+    // The Settings UI value now genuinely blocks what the default would
+    // have approved — proof the override is threaded and consulted, not
+    // silently discarded by the mode-undefined early return.
+    expect(persisted[0].status).not.toBe('approved');
   });
 });
 
