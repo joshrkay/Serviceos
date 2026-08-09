@@ -132,3 +132,70 @@ describe('PgAppointmentRepository — releasable idempotency_key', () => {
     expect(update!.params[paramPos]).toBeNull();
   });
 });
+
+/**
+ * Follow-up — technicianId filter parity with InMemoryAppointmentRepository.
+ *
+ * Pins the shape of Pg's technicianId filter (an EXISTS subquery against
+ * `appointment_assignments`, scoped to the same tenant as the appointment)
+ * so a change here that silently drops the filter is caught the same way
+ * the in-memory equivalent is pinned in in-memory-appointment.test.ts.
+ * Without real Postgres this can only assert the query SHAPE, not that the
+ * DB actually filters correctly — that end-to-end proof lives in the
+ * Docker-gated integration test
+ * (test/integration/dispatch-technician-day-window.test.ts).
+ */
+describe('PgAppointmentRepository — technicianId filter (parity with InMemory)', () => {
+  const tenantId = '550e8400-e29b-41d4-a716-446655440000';
+
+  function buildCapturePool() {
+    const calls: Array<{ sql: string; params: unknown[] }> = [];
+    const client: Partial<PoolClient> = {
+      query: vi.fn(async (sql: string, params?: unknown[]) => {
+        if (/^\s*(BEGIN|COMMIT|ROLLBACK|RESET\b|SET\s+(LOCAL\s+)?ROLE\b|SELECT set_config)/i.test(sql)) {
+          return { rows: [], rowCount: 0 } as unknown as QueryResult;
+        }
+        calls.push({ sql, params: params ?? [] });
+        if (/^SELECT COUNT/i.test(sql)) {
+          return { rows: [{ total: 0 }], rowCount: 1 } as unknown as QueryResult;
+        }
+        return { rows: [], rowCount: 0 } as unknown as QueryResult;
+      }) as unknown as PoolClient['query'],
+      release: vi.fn() as unknown as PoolClient['release'],
+    };
+    const pool: Partial<Pool> = {
+      connect: vi.fn(async () => client as PoolClient) as unknown as Pool['connect'],
+    };
+    return { pool: pool as Pool, calls };
+  }
+
+  it('emits an EXISTS subquery against appointment_assignments, scoped to the same tenant, when technicianId is set', async () => {
+    const { pool, calls } = buildCapturePool();
+    const repo = new PgAppointmentRepository(pool);
+
+    await repo.listWithMeta(tenantId, { technicianId: 'tech-1' });
+
+    const dataQuery = calls.find((c) => /^SELECT a\.\* FROM appointments/i.test(c.sql));
+    expect(dataQuery).toBeDefined();
+    expect(dataQuery!.sql).toMatch(
+      /EXISTS \(SELECT 1 FROM appointment_assignments aa\s+WHERE aa\.appointment_id = a\.id\s+AND aa\.tenant_id = a\.tenant_id\s+AND aa\.technician_id = \$\d+\)/
+    );
+    expect(dataQuery!.params).toContain('tech-1');
+
+    // The count query shares the same WHERE clause (and therefore the same
+    // filter), so pagination totals agree with the returned page.
+    const countQuery = calls.find((c) => /^SELECT COUNT/i.test(c.sql));
+    expect(countQuery).toBeDefined();
+    expect(countQuery!.sql).toMatch(/EXISTS \(SELECT 1 FROM appointment_assignments aa/);
+  });
+
+  it('omits the EXISTS subquery entirely when technicianId is not set', async () => {
+    const { pool, calls } = buildCapturePool();
+    const repo = new PgAppointmentRepository(pool);
+
+    await repo.listWithMeta(tenantId, {});
+
+    const dataQuery = calls.find((c) => /^SELECT a\.\* FROM appointments/i.test(c.sql));
+    expect(dataQuery!.sql).not.toMatch(/appointment_assignments/);
+  });
+});
