@@ -837,6 +837,27 @@ function clarificationSummary(transcript: string): string {
  * suggestion" expando.
  */
 function clarificationExplanation(classification: IntentClassification): string {
+  // Task 13 (2026-08-07 tradesperson plan) — these three are real,
+  // CONFIRMED classifications, never 'unknown': classifyIntentRaw's
+  // low_confidence/unknown_intent guards always force intentType to
+  // 'unknown' whenever unknownReason would be set, so a classification
+  // that reaches here with intentType === one of these never carries an
+  // unknownReason at all. They land in this function via the miss branch
+  // in processSegment's INTENT_TO_PROPOSAL_TYPE lookup: each is a genuine,
+  // understood action with no home on a recorded memo (no live pending
+  // question / live call / live operator), not something the classifier
+  // failed to understand — so the copy says why instead of falling into
+  // the generic "didn't recognize an action" line below.
+  switch (classification.intentType) {
+    case 'confirm':
+      return "It sounds like you were confirming something, but recorded memos don't have a pending question — say the full action instead.";
+    case 'language_switch':
+      return 'Language preferences apply to live calls — this memo was still processed in English.';
+    case 'operator_request':
+      return "Talking to a person isn't available from a recorded memo — call the office line instead.";
+    default:
+      break;
+  }
   switch (classification.unknownReason) {
     case 'low_confidence':
       return classification.lowConfidenceIntent
@@ -1537,6 +1558,40 @@ async function processSegment(
           ? handlers.get(proposalType)
           : undefined;
   if (!handler) {
+    // Task 13 (2026-08-07 tradesperson plan) — three real, understood
+    // intents have no recorded-memo action: `confirm` has no live pending
+    // question to confirm, `language_switch` has no live call to change
+    // language on, and `operator_request` has no live operator to transfer
+    // to. Route them through the SAME clarification path every other miss
+    // in this file uses, instead of the silent `{kind:'skipped'}` an
+    // operator could never see. Every OTHER unmapped intent keeps the
+    // warn+skip below — that branch protects future taxonomy growth (a
+    // new classifier intent shipped before its proposal mapping/handler is
+    // wired fails loud in logs, not silently in the operator's queue with
+    // a clarification nobody has decided how to phrase yet).
+    if (
+      classification.intentType === 'confirm' ||
+      classification.intentType === 'language_switch' ||
+      classification.intentType === 'operator_request'
+    ) {
+      await emitClarification(
+        deps,
+        {
+          tenantId,
+          userId,
+          transcript: segmentText,
+          classification,
+          conversationId,
+          recordingId,
+          ...(params.sourceChannel ? { sourceChannel: params.sourceChannel } : {}),
+          ...(params.applyDedup && recordingId
+            ? { idempotencyKey: voiceProposalIdempotencyKey(recordingId) }
+            : {}),
+        },
+        log,
+      );
+      return { kind: 'clarified', classification };
+    }
     log.warn('voice-action-router: no handler for intent', {
       intent: classification.intentType,
       proposalType,
