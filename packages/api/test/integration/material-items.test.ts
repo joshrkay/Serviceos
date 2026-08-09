@@ -142,6 +142,18 @@ describe('Postgres integration — material items', () => {
     expect(scoped[0].description).toBe('job-scoped item');
   });
 
+  // Quality-review I4 — the SQL LIMIT clause, not an app-side slice.
+  it('scopes listPending by limit, applied in SQL', async () => {
+    const t = await createTestTenant(pool);
+    const first = await repo.create({ tenantId: t.tenantId, description: 'a', createdBy: t.userId });
+    await repo.create({ tenantId: t.tenantId, description: 'b', createdBy: t.userId });
+    await repo.create({ tenantId: t.tenantId, description: 'c', createdBy: t.userId });
+
+    const limited = await repo.listPending(t.tenantId, { limit: 1 });
+    expect(limited).toHaveLength(1);
+    expect(limited[0].id).toBe(first.id);
+  });
+
   it('does not mark another tenant\'s item purchased (repo-level tenant check, cross-tenant-null)', async () => {
     const created = await repo.create({
       tenantId: tenant.tenantId,

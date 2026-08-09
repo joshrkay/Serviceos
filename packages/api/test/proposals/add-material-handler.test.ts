@@ -78,6 +78,16 @@ describe('add_material proposal type', () => {
     expect(result.valid).toBe(false);
   });
 
+  // Quality-review I5 — z.string().min(1) alone accepts a whitespace-only
+  // string; material-item.ts's own validator rejects it AFTER trimming, so
+  // without .trim() here too this payload would pass the draft-time
+  // contract and then throw a ValidationError at execution instead of
+  // failing cleanly at draft time.
+  it('rejects a whitespace-only description', () => {
+    const result = validateProposalPayload('add_material', { description: '   ' });
+    expect(result.valid).toBe(false);
+  });
+
   it('rejects a missing description', () => {
     const result = validateProposalPayload('add_material', { quantity: 2 });
     expect(result.valid).toBe(false);
@@ -208,6 +218,10 @@ describe('AddMaterialExecutionHandler', () => {
     const handler = new AddMaterialExecutionHandler(new InMemoryMaterialItemRepository());
     const result = await handler.execute(makeProposal({ description: '' }), ctx);
     expect(result.success).toBe(false);
+    // Quality-review M8 — pin the operator-facing copy, not just success:false.
+    expect(result.error).toBe(
+      'Could not determine the material to add (missing description or an invalid quantity).',
+    );
   });
 
   it('replays the same resultEntityId without creating a second row when already executed', async () => {

@@ -166,4 +166,21 @@ describe('voiceProposalSummary', () => {
     );
     expect(voiceProposalSummary('create_service_agreement', {})).toBe('Service agreement');
   });
+
+  // Task 9 (spec-review drift-guard gap) — "Add material for <job or
+  // customer>" shape, mirrors create_change_order's job-takes-precedence
+  // rule (a shopping-list item is usually about the job, not the customer).
+  it('gives add_material a human-readable summary', () => {
+    expect(voiceProposalSummary('add_material', { jobReference: 'the Patel job' })).toBe(
+      'Add material for the Patel job',
+    );
+    expect(voiceProposalSummary('add_material', { customerName: 'Henderson' })).toBe(
+      'Add material for Henderson',
+    );
+    // jobReference wins over a bare customer name when both are present.
+    expect(
+      voiceProposalSummary('add_material', { jobReference: 'the Patel job', customerName: 'Henderson' }),
+    ).toBe('Add material for the Patel job');
+    expect(voiceProposalSummary('add_material', {})).toBe('Add material');
+  });
 });

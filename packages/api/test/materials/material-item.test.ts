@@ -50,6 +50,36 @@ describe('MaterialItemRepository', () => {
     expect(await repo.listPending('nonexistent-tenant')).toHaveLength(0);
   });
 
+  // Quality-review I4 — lookup_materials must be able to cap the fetch at
+  // the repo boundary instead of loading every pending row for the tenant.
+  it('limit caps the returned rows to the N OLDEST pending items', async () => {
+    const repo = new InMemoryMaterialItemRepository();
+    const first = await repo.create({ tenantId: 't1', description: 'first', createdBy: 'u1' });
+    const second = await repo.create({ tenantId: 't1', description: 'second', createdBy: 'u1' });
+    await repo.create({ tenantId: 't1', description: 'third', createdBy: 'u1' });
+
+    const limited = await repo.listPending('t1', { limit: 2 });
+    expect(limited.map((i) => i.id)).toEqual([first.id, second.id]);
+  });
+
+  it('an absent limit returns every pending row (unbounded, current behavior)', async () => {
+    const repo = new InMemoryMaterialItemRepository();
+    for (let i = 0; i < 4; i++) {
+      await repo.create({ tenantId: 't1', description: `item ${i}`, createdBy: 'u1' });
+    }
+    expect(await repo.listPending('t1')).toHaveLength(4);
+  });
+
+  it('combines limit with a jobId filter', async () => {
+    const repo = new InMemoryMaterialItemRepository();
+    const firstForJob = await repo.create({ tenantId: 't1', description: 'a', jobId: 'job-1', createdBy: 'u1' });
+    await repo.create({ tenantId: 't1', description: 'b', jobId: 'job-1', createdBy: 'u1' });
+    await repo.create({ tenantId: 't1', description: 'unrelated', createdBy: 'u1' });
+
+    const limited = await repo.listPending('t1', { jobId: 'job-1', limit: 1 });
+    expect(limited.map((i) => i.id)).toEqual([firstForJob.id]);
+  });
+
   it('returns pending items oldest-created first', async () => {
     const repo = new InMemoryMaterialItemRepository();
     const first = await repo.create({ tenantId: 't1', description: 'first', createdBy: 'u1' });

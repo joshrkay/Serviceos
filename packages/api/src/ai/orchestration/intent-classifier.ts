@@ -1536,9 +1536,9 @@ Supported intents (return exactly ONE):
                                      "Did the Davis job turn a profit?"
                                      "What did I clear on JOB-0042?"
 - "lookup_materials"     — read back the pending shopping list, optionally
-                           for one job or "for tomorrow".
-                           Examples: "What parts do I need tomorrow?"
-                                     "Read me the shopping list"
+                           for one job.
+                           Examples: "Read me the shopping list"
+                                     "What parts do I need?"
                                      "What materials are open on the Patel job?"
 - "unknown"             — anything else: ambiguous transcripts, or edit
                            commands without a clear reference.
@@ -1598,7 +1598,7 @@ Return valid JSON with exactly this shape (no prose, no markdown fences):
     "updatedAddress": "<string, optional — new address on update_customer>",
     "expenseDescription": "<string, optional — what the expense was for on log_expense>",
     "expenseCategory": "<materials|fuel|tools|subcontractor|vehicle|insurance|office|other, optional — on log_expense>",
-    "vendor": "<string, optional — who was paid on log_expense>",
+    "vendor": "<string, optional — who was paid on log_expense, or the supply house on add_material>",
     "leadReference": "<string, optional — the lead being converted/lost on convert_lead/mark_lead_lost>",
     "lostReason": "<string, optional — why the lead was lost on mark_lead_lost>",
     "serviceAddress": "<string, optional — full address on add_service_location>",

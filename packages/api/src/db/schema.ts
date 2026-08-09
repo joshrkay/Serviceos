@@ -6585,8 +6585,8 @@ export const MIGRATIONS = {
       quantity INTEGER NOT NULL DEFAULT 1 CHECK (quantity > 0),
       vendor TEXT,
       -- 'cancelled' is unreachable today (no method sets it); kept for
-      -- forward-compat since Task 9 may add markCancelled, and dropping a
-      -- CHECK value later would cost its own migration.
+      -- forward-compat since a future task may add markCancelled, and
+      -- dropping a CHECK value later would cost its own migration.
       status TEXT NOT NULL DEFAULT 'pending'
         CHECK (status IN ('pending', 'purchased', 'cancelled')),
       needed_by TIMESTAMPTZ,

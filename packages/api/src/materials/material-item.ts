@@ -8,20 +8,22 @@
  * automation is a non-goal — `markPurchased` just records who bought it
  * and when.
  *
- * This module is substrate only: nothing constructs a repo instance at
- * the composition root (`app.ts`) yet, and no voice intent reads/writes
- * through it. The forthcoming `add_material` / `lookup_materials` voice
- * intents (tradesperson wave 1, Task 9) will wire it in — mirroring how
- * `expenseRepo` / `agreementRepo` are threaded into the execution-handler
- * deps bag — at which point it starts having real callers instead of
- * sitting unread.
+ * Wired at the composition root (`app.ts` constructs ONE `materialItemRepo`
+ * instance, Pg-backed in production or InMemory otherwise) and threaded to
+ * its two real callers: Task 9's `AddMaterialExecutionHandler`
+ * (`proposals/execution/add-material-handler.ts`) writes through it on an
+ * approved `add_material` proposal, and `ai/skills/lookup-materials.ts`
+ * reads from the SAME instance to answer the `lookup_materials` voice
+ * intent — mirroring how `expenseRepo` / `agreementRepo` are threaded into
+ * the execution-handler deps bag.
  */
 import { v4 as uuidv4 } from 'uuid';
 import { ValidationError } from '../shared/errors';
 
 // 'cancelled' is unreachable today — no method in this module sets it.
-// Kept for forward-compat (Task 9 may add markCancelled); removing it from
-// the TS union or the DB CHECK later would each cost their own change.
+// Kept for forward-compat (a future task may add markCancelled); removing
+// it from the TS union or the DB CHECK later would each cost their own
+// change.
 export type MaterialItemStatus = 'pending' | 'purchased' | 'cancelled';
 
 export interface MaterialItem {
@@ -58,6 +60,17 @@ export interface CreateMaterialItemInput {
 
 export interface MaterialItemListOptions {
   jobId?: string;
+  /**
+   * Cap the number of rows returned, applied at the repo/SQL boundary —
+   * NOT sliced app-side after an unbounded fetch (quality-review I4, Task
+   * 9: `lookup_materials` used to load every pending row for the tenant
+   * just to speak 5 of them — a shopping list is append-mostly, only
+   * `markPurchased` prunes it, so that only gets worse over a tenant's
+   * lifetime). Rows are returned in the same oldest-created-first order
+   * `listPending` already documents, so `limit: N` yields the N OLDEST
+   * pending items, not an arbitrary N.
+   */
+  limit?: number;
 }
 
 export interface MaterialItemRepository {
@@ -80,7 +93,16 @@ export interface MaterialItemRepository {
 // CHECK — comfortably above any real shopping-list quantity but well inside
 // int4, so create() always fails fast in shared code before either backend
 // touches the database.
-const MAX_QUANTITY = 1_000_000;
+//
+// Exported (quality-review I6) — `contracts/add-material.ts` imports this
+// constant rather than duplicating the literal `1_000_000`. Two independent
+// literals agreeing today is not a guarantee they stay in lockstep; a
+// comment saying "keep these in sync" can't fail a build, and this exact
+// divergence class (a draft-time contract looser than the repo-layer
+// validator it feeds) is what Task 6's change-order contract review
+// caught, and what Task 9's own contract doc comment warned about before
+// this fix made the warning structural.
+export const MAX_QUANTITY = 1_000_000;
 
 // Not exported: only buildMaterialItem calls this, and every branch is
 // already exercised indirectly through repo.create() in
@@ -157,12 +179,13 @@ export class InMemoryMaterialItemRepository implements MaterialItemRepository {
     tenantId: string,
     options?: MaterialItemListOptions,
   ): Promise<MaterialItem[]> {
-    return Array.from(this.items.values())
+    const sorted = Array.from(this.items.values())
       .filter((i) => i.tenantId === tenantId)
       .filter((i) => i.status === 'pending')
       .filter((i) => !options?.jobId || i.jobId === options.jobId)
       .sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime())
       .map((i) => ({ ...i }));
+    return typeof options?.limit === 'number' ? sorted.slice(0, options.limit) : sorted;
   }
 
   async markPurchased(tenantId: string, id: string, actorId: string): Promise<MaterialItem | null> {

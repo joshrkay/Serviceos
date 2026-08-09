@@ -3183,7 +3183,11 @@ describe('voice-action-router U3 lookup answers (recorded-memo path)', () => {
       expect(rec?.answerStatus).toBe('answered');
       expect(rec?.answer?.result).toBe('found');
       expect(rec?.answer?.summary).toContain('2 items');
-      expect(rec?.answer?.summary).toContain('3× 3 boxes 1/2" PEX');
+      // Quality-review I2 — the multiplication sign ("3×") reads as "three
+      // times" on Amazon Polly and is typically dropped on Google Cloud
+      // TTS; quantity is always spoken as the word "quantity".
+      expect(rec?.answer?.summary).toContain('3 boxes 1/2" PEX, quantity 3');
+      expect(rec?.answer?.summary).not.toContain('×');
       expect(lookupEvents.record).toHaveBeenCalledWith(
         expect.objectContaining({
           tenantId: TENANT,
@@ -3248,13 +3252,23 @@ describe('voice-action-router U3 lookup answers (recorded-memo path)', () => {
       expect(rec?.answerStatus).toBe('skipped');
     });
 
-    // Task 9 house decision — "for tomorrow" / "for the Patel job" scope by
-    // JOB only (materialItemRepo.listPending has no neededBy/date filter —
-    // Task 8's substrate never grew one, and Task 9 does not extend it). A
-    // job-scoped ask narrows to that job's items; a date phrase like
-    // "tomorrow" is honored only insofar as JOB_REF_INTENTS membership lets
-    // a NAMED job resolve — the date word itself is not a filter and never
-    // will be with today's contract.
+    // Task 9 house decision — job-scoping is real (via jobId), but a date
+    // phrase like "tomorrow" is NOT a filter: materialItemRepo.listPending
+    // has no neededBy/date option (Task 8's substrate never grew one, and
+    // Task 9 does not extend it — see lookup-materials.ts's module doc
+    // comment). The classifier taxonomy no longer advertises "for
+    // tomorrow" phrasing for this reason (spec-review MAJOR B); instead,
+    // any captured neededBy is SPOKEN per-item so the operator can tell
+    // which of the (possibly unfiltered) items are time-sensitive — see
+    // the 'surfaces a captured needed-by date' test below.
+    //
+    // Quality-review M5 — a real UUID, not the literal string 'job-patel':
+    // InMemoryMaterialItemRepository accepts any string as a jobId, but
+    // PgMaterialItemRepository's isUuid guard would return [] for a
+    // non-UUID jobId — a non-UUID fixture here could never catch a
+    // regression in that guard.
+    const JOB_PATEL_ID = '77777777-7777-4777-8777-777777777777';
+
     it('a pre-verified jobId (VoiceActionRouterPayload.jobId) scopes the list to that job', async () => {
       const proposalRepo = new InMemoryProposalRepository();
       const voiceRepo = seededVoiceRepo();
@@ -3268,7 +3282,7 @@ describe('voice-action-router U3 lookup answers (recorded-memo path)', () => {
       await materialItemRepo.create({
         tenantId: TENANT,
         description: 'Patel job item',
-        jobId: 'job-patel',
+        jobId: JOB_PATEL_ID,
         createdBy: 'user-owner',
       });
 
@@ -3285,7 +3299,7 @@ describe('voice-action-router U3 lookup answers (recorded-memo path)', () => {
           userId: 'system',
           transcript: 'what materials are open on the Patel job',
           recordingId: RECORDING_ID,
-          jobId: 'job-patel',
+          jobId: JOB_PATEL_ID,
         }),
         silentLogger(),
       );
@@ -3295,6 +3309,131 @@ describe('voice-action-router U3 lookup answers (recorded-memo path)', () => {
       expect(rec?.answer?.summary).toContain('1 item');
       expect(rec?.answer?.summary).toContain('Patel job item');
       expect(rec?.answer?.summary).not.toContain('unscoped item');
+    });
+
+    // Spec-review MAJOR A — the worse-than-nothing failure mode: an
+    // operator NAMES a job scope, the resolver can't match it, and the
+    // answer must refuse honestly (mirrors lookup_job_profit's identical
+    // guard) rather than silently widening to the tenant's WHOLE pending
+    // list. Before this fix, this exact scenario answered 'found' with
+    // every pending item.
+    it('an unresolved spoken job reference refuses honestly — never silently widens to the whole tenant list', async () => {
+      const proposalRepo = new InMemoryProposalRepository();
+      const voiceRepo = seededVoiceRepo();
+      const gateway = gatewayReturning([classify('lookup_materials', { jobReference: 'the Patel job' })]);
+      const materialItemRepo = new InMemoryMaterialItemRepository();
+      await materialItemRepo.create({
+        tenantId: TENANT,
+        description: 'unrelated tenant-wide item',
+        createdBy: 'user-owner',
+      });
+      const notFoundResolver: EntityResolver = {
+        resolve: vi.fn(async () => ({
+          kind: 'not_found',
+          reference: 'the Patel job',
+        })) as unknown as EntityResolver['resolve'],
+      };
+
+      const worker = createVoiceActionRouterWorker({
+        gateway,
+        proposalRepo,
+        voiceRepo,
+        entityResolver: notFoundResolver,
+        lookupAnswers: { materialItemRepo: materialItemRepo as never },
+      });
+
+      await worker.handle(
+        msg({
+          tenantId: TENANT,
+          userId: 'system',
+          transcript: 'what materials are open on the Patel job',
+          recordingId: RECORDING_ID,
+        }),
+        silentLogger(),
+      );
+
+      const rec = await voiceRepo.findById(TENANT, RECORDING_ID);
+      expect(rec?.answer?.result).toBe('none');
+      expect(rec?.answer?.summary).toBe('I couldn\'t find a job matching "the Patel job".');
+      // The exact bug this test pins: the unscoped item must NEVER leak
+      // into a "job not found" answer.
+      expect(rec?.answer?.summary).not.toContain('unrelated tenant-wide item');
+      expect(rec?.answer?.rows).toEqual([]);
+    });
+
+    // I3(b) router-level piece — a skill-level error must route to
+    // answerStatus='failed', never crash the message or fabricate data.
+    it('a repo error routes to answerStatus=failed', async () => {
+      const proposalRepo = new InMemoryProposalRepository();
+      const voiceRepo = seededVoiceRepo();
+      const gateway = gatewayReturning([classify('lookup_materials')]);
+      const throwingRepo = {
+        listPending: vi.fn(async () => {
+          throw new Error('db down');
+        }),
+        create: vi.fn(),
+        markPurchased: vi.fn(),
+      };
+
+      const worker = createVoiceActionRouterWorker({
+        gateway,
+        proposalRepo,
+        voiceRepo,
+        lookupAnswers: { materialItemRepo: throwingRepo as never },
+      });
+
+      await worker.handle(
+        msg({
+          tenantId: TENANT,
+          userId: 'system',
+          transcript: 'what parts do I need',
+          recordingId: RECORDING_ID,
+        }),
+        silentLogger(),
+      );
+
+      const rec = await voiceRepo.findById(TENANT, RECORDING_ID);
+      expect(rec?.answerStatus).toBe('failed');
+    });
+
+    // Spec-review MAJOR B(2) — neededBy is captured by add_material and
+    // must not be silently dropped on the read side just because it isn't
+    // a query filter.
+    it('surfaces a captured needed-by date in the spoken answer and the row', async () => {
+      const proposalRepo = new InMemoryProposalRepository();
+      const voiceRepo = seededVoiceRepo();
+      const gateway = gatewayReturning([classify('lookup_materials')]);
+      const materialItemRepo = new InMemoryMaterialItemRepository();
+      await materialItemRepo.create({
+        tenantId: TENANT,
+        description: '40-gallon water heater',
+        quantity: 2,
+        vendor: 'Ferguson',
+        neededBy: new Date('2026-08-09T00:00:00Z'),
+        createdBy: 'user-owner',
+      });
+
+      const worker = createVoiceActionRouterWorker({
+        gateway,
+        proposalRepo,
+        voiceRepo,
+        lookupAnswers: { materialItemRepo: materialItemRepo as never },
+      });
+
+      await worker.handle(
+        msg({
+          tenantId: TENANT,
+          userId: 'system',
+          transcript: 'what parts do I need',
+          recordingId: RECORDING_ID,
+        }),
+        silentLogger(),
+      );
+
+      const rec = await voiceRepo.findById(TENANT, RECORDING_ID);
+      expect(rec?.answer?.summary).toContain('needed by Aug 9');
+      const row = rec?.answer?.rows?.[0] as { text?: string } | undefined;
+      expect(row?.text).toContain('needed by Aug 9');
     });
   });
 });

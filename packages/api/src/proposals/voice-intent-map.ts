@@ -223,7 +223,7 @@ export function voiceProposalSummary(
   if (intent === 'create_change_order') return `Change order${ref ? ` on ${ref}` : name ? ` for ${name}` : ''}`;
   // Task 7 — mirrors apply_credit's shape (named-recipient summary).
   if (intent === 'create_service_agreement') return `Service agreement${name ? ` for ${name}` : ''}`;
-  // Task 9 — job-scoped, mirrors log_permit/create_change_order's shape
+  // Task 9 — job-scoped, mirrors create_change_order's precedence rule
   // (job reference takes precedence over a bare customer name — a
   // shopping-list item is usually about the job, not the customer).
   if (intent === 'add_material') return `Add material${ref ? ` for ${ref}` : name ? ` for ${name}` : ''}`;

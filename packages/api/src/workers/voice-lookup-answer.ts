@@ -659,14 +659,29 @@ export async function executeLookupAnswer(
       // permission gate (see LOOKUP_REQUIRED_PERMISSION's doc comment
       // above) — any authenticated operator may hear it.
       //
-      // "for tomorrow" / date-scoped asks — DELIBERATE non-filter: see
-      // `ai/skills/lookup-materials.ts`'s module doc comment. A job-scoped
-      // ask genuinely narrows via `input.jobId` (the SAME JOB_REF_INTENTS
-      // resolution every other job-scoped lookup uses); a bare date phrase
-      // like "tomorrow" is not distinguished — the answer is always the
-      // tenant's (or job's) FULL pending list.
+      // Spec-review MAJOR A fix — an unresolved spoken job reference must
+      // NOT silently widen to the tenant's whole pending list. Mirrors
+      // `lookup_job_profit`'s identical guard a few cases up: when a job
+      // WAS named (`input.jobReference` set) but the entity resolver
+      // couldn't match it (`resolveVoiceEntityReferences` returns
+      // `kind: 'ok'` with `resolved.jobId` left undefined for a genuine
+      // not_found — only 'ambiguous' short-circuits upstream before this
+      // function ever runs), `input.jobId` is absent while `jobReference`
+      // is present. Without this check the caller who asked "what
+      // materials are open on the Patel job?" with no matching Patel got
+      // back EVERY pending item for the tenant, announced as a normal
+      // found-answer — the worse failure mode, since the operator actively
+      // named a scope and silently got unscoped data instead of an honest
+      // "not found". Absent any jobReference at all, the unfiltered list is
+      // the CORRECT, intended answer ("read me the shopping list").
       case 'lookup_materials': {
         if (!deps.materialItemRepo) return { kind: 'unsupported' };
+        if (!input.jobId && input.jobReference) {
+          return {
+            kind: 'answer',
+            answer: buildAnswer(intent, 'none', `I couldn't find a job matching "${input.jobReference}".`),
+          };
+        }
         const r = await lookupMaterials(
           { tenantId, sessionId, ...(input.jobId ? { jobId: input.jobId } : {}) },
           { materialItemRepo: deps.materialItemRepo, ...events },
@@ -674,7 +689,14 @@ export async function executeLookupAnswer(
         if (r.status === 'error') return { kind: 'failed', error: r.data.error };
         const rows: VoiceAnswerRow[] =
           r.status === 'found'
-            ? r.data.items.map((m) => text(m.description, `qty ${m.quantity}${m.vendor ? ` — ${m.vendor}` : ''}`))
+            ? r.data.spokenItems.map((m) =>
+                text(
+                  m.description,
+                  `qty ${m.quantity}${m.vendor ? ` — ${m.vendor}` : ''}${
+                    m.neededByLabel ? `, needed by ${m.neededByLabel}` : ''
+                  }`,
+                ),
+              )
             : [];
         return { kind: 'answer', answer: buildAnswer(intent, r.status, r.summary, rows) };
       }

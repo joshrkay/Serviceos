@@ -690,12 +690,22 @@ Notes on the Task 9 row (`add_material`, taxonomy 1.13.0):
   saying "we needed this yesterday" is a real, useful shopping-list
   signal, not a malformed one. See `contracts/add-material.ts`'s module
   doc comment for the full rationale.
-- **`quantity`'s domain cap (1,000,000) is kept in lockstep with Task 8's
-  own cap** (`material-item.ts`'s `MAX_QUANTITY`) — the contract and the
-  repo-layer validator enforce the SAME number, so a payload that passes
-  the draft-time contract can never throw at execution against a stricter
+- **`quantity`'s domain cap (1,000,000) is imported, not duplicated
+  (quality-review I6).** The contract imports `MAX_QUANTITY` from
+  `material-item.ts` rather than repeating the literal — the SAME number
+  enforced at the repo layer, structurally, so a payload that passes the
+  draft-time contract can never throw at execution against a stricter
   repo-layer check (the divergence class Task 6's change-order contract
-  first surfaced).
+  first surfaced, and which a mere "keep these in sync" comment cannot
+  prevent on its own).
+- **`description` rejects whitespace-only input (quality-review I5).**
+  The contract trims BEFORE checking length
+  (`z.string().trim().min(1).max(1000)`) — without `.trim()`, a
+  spoken-then-mistranscribed `"   "` would pass this draft-time gate and
+  only fail later at execution against `material-item.ts`'s own
+  (trim-then-check) validator, exactly the "contract looser than the
+  layer it feeds" class this task's own `quantity` cap guards against on
+  a different field.
 - **Audit event: `material.requested`, entityType `material_item`.**
   "Requested" names what happened from the shop's point of view (a
   tradesperson asked for a part), not that it physically arrived —
@@ -703,9 +713,8 @@ Notes on the Task 9 row (`add_material`, taxonomy 1.13.0):
   `entityType` is `material_item` (singular of the `material_items`
   table), mirroring `service_agreement.created`'s choice over the bare
   domain-object name. Like `expense.logged`/`credit.applied`/
-  `refund.recorded`/`service_agreement.created`, this event is
-  deliberately **not** added to `audit-event-mapping.ts` — same
-  unmapped-by-design posture.
+  `refund.recorded`, this event is deliberately **not** added to
+  `audit-event-mapping.ts` — same unmapped-by-design posture.
 - **Idempotent replay, not just a synthetic-id passthrough.** Like
   `create_change_order`/`create_service_agreement`, this handler mints a
   brand NEW row on every `execute()` call — a `resultEntityId` already
@@ -732,6 +741,59 @@ Notes on the Task 9 row (`add_material`, taxonomy 1.13.0):
 - This type is deliberately **absent** from `S1_ALLOWED_PROPOSAL_TYPES`
   (`proposals/surface.ts`) — operator/technician-only, never reachable
   from an unauthenticated inbound caller.
+
+`lookup_materials` (read-only, Section E) reads the same substrate back:
+
+- **Bounded fetch, not "load everything and slice" (quality-review I4).**
+  `ai/skills/lookup-materials.ts` fetches at most `MAX_ITEMS_SPOKEN + 1`
+  (6) rows via `MaterialItemListOptions.limit` — a NEW option Task 9 added
+  to Task 8's `MaterialItemListOptions`/`PgMaterialItemRepository`/
+  `InMemoryMaterialItemRepository`. A shopping list is append-mostly (only
+  `markPurchased` prunes it), so the original unbounded `SELECT *` loaded
+  every pending row for the tenant just to speak 5 of them. Because the
+  fetch is capped, the skill genuinely cannot report an exact total once a
+  tenant has more than 5 pending items — `data.count` is `null` in that
+  case (never a guessed number) and the summary says "5+ items" rather
+  than a false-precise total. This is a deliberate divergence from
+  `lookup_catalog` (which fetches the tenant's WHOLE catalog and lets the
+  WORKER slice, since other consumers need every item) — there is no
+  non-TTS consumer of the pending shopping list today.
+- **An unresolved spoken job reference refuses honestly (spec-review
+  MAJOR A).** "What materials are open on the Patel job?" with no
+  matching Patel used to silently fall through to the UNFILTERED tenant
+  list, announced as a normal found-answer — the worse failure mode,
+  since the operator actively named a scope. `executeLookupAnswer`'s
+  `lookup_materials` case (`workers/voice-lookup-answer.ts`) now mirrors
+  `lookup_job_profit`'s identical guard: `jobReference` present but
+  `jobId` absent → `"I couldn't find a job matching \"…\""`, never a
+  silent widen. Absent any jobReference at all, the unfiltered (or
+  job-scoped, when `jobId` resolved) list remains the correct, INTENDED
+  answer for "read me the shopping list".
+- **"For tomorrow" is not a filter, but `neededBy` IS spoken (spec-review
+  MAJOR B).** Task 8's `MaterialItemListOptions` has no date filter, so
+  the taxonomy no longer advertises "what parts do I need tomorrow?"
+  phrasing — a date-scoped ask now classifies elsewhere rather than
+  quietly returning an unfiltered list under a promise the query can't
+  keep. But `neededBy` IS captured by `add_material` and persisted on
+  every row, so silently never mentioning it on the read side would mean
+  this module collects data it then hides from the person who spoke it:
+  each spoken/rendered item now states its needed-by date when present
+  ("3 boxes of PEX, quantity 3, needed by Aug 9"), letting the operator
+  identify which of the (possibly unfiltered) items are time-sensitive
+  themselves. A real `neededBy` QUERY filter is a genuine Task 8 contract
+  extension, filed as separate follow-up work — not done here.
+- **TTS-safe quantity wording (quality-review I2).** The original
+  `${quantity}× ${description}` shape used U+00D7 MULTIPLICATION SIGN,
+  which Amazon Polly reads as "times" in a numeric context ("3× 3 boxes"
+  → "three times three boxes," i.e. nine) and Google Cloud TTS typically
+  drops entirely. Every quantity is now spoken as the word "quantity".
+- **Spoken items are the OLDEST pending, not the newest.** Mirrors Task
+  8's own `listPending` contract (oldest-created-first); a caller with
+  more than 5 pending items hears the 5 that have been waiting longest,
+  and "and more beyond that" hides the most RECENTLY added ones — a
+  plausibly surprising order for a shopping list, documented here and in
+  `lookup-materials.ts`'s own module doc comment rather than left
+  implicit.
 
 Notes on the taxonomy-1.2.0 rows:
 
@@ -836,15 +898,20 @@ approves by screen/SMS tap).
 **`lookup_materials` (Task 9, 2026-08-07 tradesperson plan):** reads back
 Task 8's pending `material_items` shopping list
 (`ai/skills/lookup-materials.ts`), optionally scoped to one job via the
-same `JOB_REF_INTENTS` resolution `add_material` uses. **No permission
-gate** — unlike `lookup_leads`/`lookup_catalog`, there is deliberately no
-entry in `LOOKUP_REQUIRED_PERMISSION` (`workers/voice-lookup-answer.ts`):
-any authenticated operator, technician included, may hear the shopping
-list. A "for tomorrow" / date-scoped ask is a **deliberate non-filter**:
-Task 8's `MaterialItemListOptions` has only `jobId`, no `neededBy`/date
-filter, and Task 9 does not extend that contract — the answer is always
-the tenant's (or job's) full pending list, never silently narrowed by a
-date word the repo has no way to honor.
+same `JOB_REF_INTENTS` resolution `add_material` uses — an unresolved
+spoken job reference refuses honestly rather than silently widening to
+the whole tenant list (spec-review MAJOR A). **No permission gate** —
+unlike `lookup_leads`/`lookup_catalog`, there is deliberately no entry in
+`LOOKUP_REQUIRED_PERMISSION` (`workers/voice-lookup-answer.ts`): any
+authenticated operator, technician included, may hear the shopping list.
+There is no date/"for tomorrow" query filter — Task 8's
+`MaterialItemListOptions` has no `neededBy` option, and Task 9 does not
+extend that contract — so the classifier taxonomy does not advertise
+date-scoped phrasing; instead, each item's captured `neededBy` (when
+present) is spoken directly, so the operator can tell which of the
+(possibly unfiltered) items are time-sensitive. The fetch itself is
+bounded (`limit`, at most 6 rows) rather than loading the tenant's whole
+pending set — see the Task 9 notes above for the full rationale.
 
 ## F) Direct status acts — audited directly, never a proposal (B5.5, Part F decision F-3)
 

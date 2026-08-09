@@ -139,8 +139,19 @@ export class PgMaterialItemRepository extends PgBaseRepository implements Materi
       // DETERMINISM, not true insertion-order fidelity — id is a random v4
       // UUID, so a tie is broken consistently but not necessarily
       // oldest-first.
+      // Quality-review I4 — LIMIT applied in SQL, not sliced app-side after
+      // an unbounded SELECT: a shopping list is append-mostly (only
+      // markPurchased prunes it), so without this a tenant's pending set
+      // grows without bound while `lookup_materials` only ever speaks a
+      // handful of rows. A non-positive/non-integer limit is ignored
+      // (treated as "no cap") rather than producing an invalid `LIMIT`
+      // clause or silently returning zero rows.
+      const hasLimit =
+        typeof options?.limit === 'number' && Number.isInteger(options.limit) && options.limit > 0;
+      const limitClause = hasLimit ? ` LIMIT $${params.length + 1}` : '';
+      if (hasLimit) params.push(options!.limit);
       const { rows } = await client.query<MaterialItemRow>(
-        `SELECT * FROM material_items WHERE ${conditions.join(' AND ')} ORDER BY created_at ASC, id ASC`,
+        `SELECT * FROM material_items WHERE ${conditions.join(' AND ')} ORDER BY created_at ASC, id ASC${limitClause}`,
         params,
       );
       return rows.map(mapRow);
