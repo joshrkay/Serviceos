@@ -852,6 +852,19 @@ function proposalToUI(
     payload: Record<string, unknown>;
     sourceContext?: Record<string, unknown>;
     confidenceScore?: number;
+    /**
+     * Commit 2 (followup-autoapprove-default) — the real persisted status.
+     * Previously this mapper hardcoded `status: 'Pending'` unconditionally,
+     * which was silently wrong for the auto-approving proposal types
+     * (draft_estimate / draft_invoice / update_estimate / update_invoice /
+     * update_job / create_appointment / create_booking): the chat reply told
+     * the operator to "review and approve" a proposal that had ALREADY been
+     * approved (and was headed for execution after the undo window). Optional
+     * so the (rare, test-only) call sites that construct a bare literal
+     * without a status still compile — those default to 'Pending', matching
+     * pre-fix behavior exactly.
+     */
+    status?: string;
   },
   sourceMessage: string
 ): AssistantProposal {
@@ -893,7 +906,12 @@ function proposalToUI(
     explanation: `From your message: "${sourceMessage.slice(0, 120)}"`,
     confidence: (proposal.confidenceScore ?? 0) >= 0.85 ? 'High' : 'Medium',
     type: cardType,
-    status: 'Pending',
+    // Commit 2 — the real persisted status, not a hardcoded 'Pending'. Only
+    // 'approved' maps to 'Approved'; every other status (draft,
+    // ready_for_review, and any future addition) reads as 'Pending' — this
+    // card has no "why" to show a 'Rejected' state (a proposal is never
+    // created already-rejected).
+    status: proposal.status === 'approved' ? 'Approved' : 'Pending',
     proposalType: proposal.proposalType,
     // Same address slice as customerProposalToUI. Kept on BOTH mappers on
     // purpose: `create_customer` reaches the card through either one
@@ -907,6 +925,21 @@ function proposalToUI(
     // surface: render an Edit input for every flat missingFields entry.
     editFields: editFieldsForMissing(signals.missingFields, proposal.payload),
   };
+}
+
+/**
+ * Commit 2 (followup-autoapprove-default) — the reply sentence following a
+ * card's title. Previously this was the single hardcoded string "Review and
+ * approve to proceed." regardless of the card's actual status; now that
+ * `proposalToUI` reports the real status (see its own comment), the reply
+ * must agree with it — an already-'Approved' card has nothing left to
+ * review, and telling the operator otherwise actively contradicts what the
+ * backend just did.
+ */
+function proposalReplySuffix(status: AssistantProposal['status']): string {
+  return status === 'Approved'
+    ? 'Approved automatically — it will proceed shortly.'
+    : 'Review and approve to proceed.';
 }
 
 const UNPAID_QUERY_RE = /(which|what|list|show|any)\b.{0,40}\binvoices?\b.{0,40}\b(unpaid|open|outstanding|overdue|due|owed)|\b(unpaid|outstanding)\s+invoices?/i;
@@ -1526,7 +1559,7 @@ async function generateAssistantReply(
             usage: { input: 0, output: 0, total: 0 },
             message: {
               role: 'assistant' as const,
-              content: `${chainCards[0].title}. Review and approve to proceed.`,
+              content: `${chainCards[0].title}. ${proposalReplySuffix(chainCards[0].status)}`,
               proposal: chainCards[0],
             },
           };
@@ -1621,7 +1654,7 @@ async function generateAssistantReply(
           usage: { input: 0, output: 0, total: 0 },
           message: {
             role: 'assistant' as const,
-            content: `${uiProposal.title}. Review and approve to proceed.`,
+            content: `${uiProposal.title}. ${proposalReplySuffix(uiProposal.status)}`,
             reasoning: classification.reasoning,
             proposal: uiProposal,
           },

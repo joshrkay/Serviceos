@@ -852,6 +852,14 @@ describe('schedule_inspection — full dependency set (the allowlist\'s one deli
     expect(appointments).toHaveLength(1);
     expect(appointments[0].holdPendingApproval).toBe(true);
     expect(persisted[0].status).toBe('approved');
+    // Commit 2 — the chat reply must not contradict what actually happened.
+    // Before this fix, `proposalToUI` hardcoded `status: 'Pending'` and the
+    // reply text unconditionally said "Review and approve to proceed" even
+    // though the DB row above is already 'approved' and headed for
+    // execution — the UI actively lying about a proposal that no longer
+    // needs (or permits) a review tap.
+    expect(res.body.message.proposal.status).toBe('Approved');
+    expect(res.body.message.content).not.toMatch(/review and approve/i);
   });
 
   it('no supervisor on duty: places the same held slot but does NOT auto-approve it', async () => {
@@ -904,6 +912,13 @@ describe('schedule_inspection — full dependency set (the allowlist\'s one deli
     // No human ever reviewed this booking before commit 1. Now it lands in
     // the review queue like every other unsupervised auto-approve candidate.
     expect(persisted[0].status).toBe('ready_for_review');
+    // Commit 2 — the flip side of the same pin: a genuinely-pending card
+    // must still say "review and approve" (this direction already worked
+    // pre-fix, since `status: 'Pending'` was always the hardcoded default —
+    // asserted here so the two tests together pin BOTH branches of the new
+    // conditional, not just the one that changed).
+    expect(res.body.message.proposal.status).toBe('Pending');
+    expect(res.body.message.content).toMatch(/review and approve/i);
   });
 });
 
