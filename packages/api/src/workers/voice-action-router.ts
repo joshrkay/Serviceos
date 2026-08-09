@@ -1597,15 +1597,18 @@ async function processSegment(
     // this branch. A reviewer probed all 48 intents mapped in
     // INTENT_TO_PROPOSAL_TYPE against `buildTaskHandlers` (every one
     // resolves to a handler) plus all 30 unmapped intents (lookup_* by its
-    // startsWith prefix, en_route, complaint, negotiation, confirm,
-    // language_switch, operator_request, approve/reject/edit_proposal —
-    // every one has a dedicated branch earlier in processSegment that
-    // returns before reaching here). So this line is dead in production
-    // today; it only fires for a FUTURE taxonomy bump that ships a new
-    // classifier intent before its proposal mapping/handler exists. The
-    // `vi.mock` in voice-action-router-silent-skip.test.ts that forces a
-    // fake 'future_unmapped_intent' to reach this branch is therefore
-    // deliberate (no real intent can be used to exercise it), not lazy.
+    // startsWith prefix — 20 members, count-independent — plus en_route,
+    // complaint, negotiation, confirm, language_switch, operator_request,
+    // approve_proposal, reject_proposal, edit_proposal, and 'unknown' itself
+    // — every one of these 30 has a dedicated branch earlier in
+    // processSegment that returns before reaching here, INCLUDING 'unknown'
+    // (its own emitClarification call, before the belt-and-braces gates).
+    // So this line is dead in production today; it only fires for a FUTURE
+    // taxonomy bump that ships a new classifier intent before its proposal
+    // mapping/handler exists. The `vi.mock` in
+    // voice-action-router-silent-skip.test.ts that forces a fake
+    // 'future_unmapped_intent' to reach this branch is therefore deliberate
+    // (no real intent can be used to exercise it), not lazy.
     log.warn('voice-action-router: no handler for intent', {
       intent: classification.intentType,
       proposalType,

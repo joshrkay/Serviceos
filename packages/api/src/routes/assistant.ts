@@ -961,6 +961,205 @@ function downgradeIfCallerLacksDirectPermission(
   return true;
 }
 
+/**
+ * Task 15 (2026-08-07 tradesperson plan) — quality-review fix. Single source
+ * of truth for which classifier intents this route can dispatch to a
+ * drafting handler, mapping the intent (classifier output) to the PROPOSAL
+ * TYPE (`sharedHandlers`'s key) that drafts it. Before this constant,
+ * `chainHandlers` and `proposalHandlers` (below) were two hand-maintained
+ * object-literal copies of the same key list — construction ("resolve from
+ * `sharedHandlers`, never `new X(...)` inline") never drifted, but the KEY
+ * LIST did, repeatedly, across at least four waves of intents (B5, the
+ * 2026-07 field-write batch, Task 15's 18). One list now; both dispatch
+ * sites derive from it; a contract test
+ * (test/routes/assistant-dropped-intents.test.ts) asserts both maps' key
+ * sets equal this constant's key set.
+ *
+ * `create_customer` is the ONE documented exception: it is deliberately NOT
+ * a member of this map. It needs bespoke handling the other 42 don't (asking
+ * conversationally for a name when the turn extracted none —
+ * `assistant.create_customer.needs_name` below), so the single-intent path
+ * dispatches it from its own branch, after this map's lookup fails. The
+ * CHAIN path has no equivalent conversational fallback (a chain segment
+ * either drafts or is skipped), so it special-cases `create_customer`
+ * separately, alongside this map, rather than folding it in here.
+ */
+export const CHAT_INTENT_TO_REGISTRY_KEY: Readonly<Record<string, ProposalType>> = {
+  draft_estimate: 'draft_estimate',
+  update_estimate: 'update_estimate',
+  create_invoice: 'draft_invoice',
+  send_invoice: 'send_invoice',
+  issue_invoice: 'issue_invoice',
+  update_invoice: 'update_invoice',
+  reschedule_appointment: 'reschedule_appointment',
+  cancel_appointment: 'cancel_appointment',
+  reassign_appointment: 'reassign_appointment',
+  confirm_appointment: 'confirm_appointment',
+  create_job: 'create_job',
+  update_job: 'update_job',
+  send_payment_reminder: 'send_payment_reminder',
+  apply_late_fee: 'apply_late_fee',
+  send_estimate_nudge: 'send_estimate_nudge',
+  batch_invoice: 'batch_invoice',
+  create_invoice_schedule: 'create_invoice_schedule',
+  record_payment: 'record_payment',
+  notify_delay: 'notify_delay',
+  add_note: 'add_note',
+  log_time_entry: 'log_time_entry',
+  log_expense: 'log_expense',
+  create_appointment: 'create_appointment',
+  send_estimate: 'send_estimate',
+  update_customer: 'update_customer',
+  // Task 15 — the 18 intents a mechanical derivation (every
+  // INTENT_TO_PROPOSAL_TYPE key checked against this map) found with a real
+  // drafting handler in `sharedHandlers` and no chat dispatch entry.
+  add_crew_member: 'add_crew_member',
+  remove_crew_member: 'remove_crew_member',
+  convert_lead: 'convert_lead',
+  mark_lead_lost: 'mark_lead_lost',
+  add_service_location: 'add_service_location',
+  request_feedback: 'request_feedback',
+  record_refund: 'record_refund',
+  apply_credit: 'apply_credit',
+  send_customer_message: 'send_customer_message',
+  create_change_order: 'create_change_order',
+  create_service_agreement: 'create_service_agreement',
+  add_material: 'add_material',
+  update_catalog_item: 'update_catalog_item',
+  add_catalog_item: 'add_catalog_item',
+  // Alias intents — dispatch keyed by the classifier's INTENT (this map's
+  // key), drafting keyed by PROPOSAL type (the value), so each rides its
+  // target's handler unchanged, exactly like `create_invoice` → `draft_invoice`
+  // above.
+  schedule_inspection: 'create_appointment',
+  log_permit: 'add_note',
+  log_warranty_claim: 'create_job',
+  // log_mileage ALSO aliases log_expense's handler, but — unlike the three
+  // aliases above — needs `context.intent` threaded through (see the
+  // `intent:` field on both `.handle()` calls below) so LogExpenseTaskHandler
+  // can tell it apart from a plain log_expense turn (Task 11,
+  // TaskContext.intent's doc comment).
+  log_mileage: 'log_expense',
+};
+
+/**
+ * Task 15 quality-review fix (C1/C2) — intents that read `context.customerId`
+ * (the TASK-CONTEXT TOP-LEVEL field — distinct from
+ * `existingEntities.customerId`) and therefore need it explicitly threaded
+ * on this surface. Three of the 18 newly-wired intents read it EXCLUSIVELY,
+ * with no `existingEntities.customerId` fallback: `send-customer-message-
+ * task.ts`, `create-service-agreement-task.ts`,
+ * `AddServiceLocationTaskHandler` (voice-extended-tasks.ts). `schedule_
+ * inspection` is a fourth, narrower case: it is a brand-new intent (no
+ * shipped chat behavior to regress) that is ALSO a CUSTOMER_REF_INTENTS +
+ * JOB_REF_INTENTS member, so admitting it here is a deliberate, tested
+ * choice — see the "schedule_inspection — full dependency set" test in
+ * test/routes/assistant-dropped-intents.test.ts for exactly what that
+ * produces (a held calendar slot / `create_booking`, when a jobRepo +
+ * appointmentRepo are wired and the drafting LLM echoes back the resolved
+ * jobId).
+ *
+ * This is an ALLOWLIST, not a blanket thread, because at least TEN already-
+ * shipped chat intents read `context.customerId` too, but as one of several
+ * EXCLUSIVE-READER SIDE EFFECTS whose behavior this route was never asked to
+ * change:
+ *
+ *   - `CreateAppointmentAITaskHandler` (create_appointment, already wired):
+ *     when an `appointmentRepo` is wired and the drafting LLM echoes a
+ *     `jobId` (it is embedded in that call's own "Known entities:" prompt
+ *     section — `buildUserMessage`), a truthy `context.customerId` is enough
+ *     to PASS `place-hold.ts`'s ownership guard (`if (!UUID_RE.test(jobId)
+ *     || !customerId) return job_not_owned`) instead of always failing it.
+ *     Before: `job_not_owned` was unconditional on chat (customerId was
+ *     always undefined) → the review-gated `create_appointment` fallback,
+ *     which explicitly STRIPS `sourceTrustTier` so it can never auto-approve
+ *     and never writes a hold. After (if threaded blanket): a REAL
+ *     `appointments` row can be INSERTED at DRAFT time — before any human
+ *     review — as a `create_booking` proposal carrying
+ *     `sourceTrustTier: 'autonomous'`. That trust tier is set UNCONDITIONALLY
+ *     (not gated on `context.autonomousBooking`, which chat never sets, so
+ *     the D-015 autonomous-lane bonus check never engages) — but
+ *     `decideInitialStatus` (proposals/proposal.ts) does not need that lane:
+ *     with `context.supervisorPresent` also never set by chat,
+ *     `resolveAutoApproveThreshold` falls through to
+ *     `LEGACY_AUTO_APPROVE_THRESHOLD` (0.9, NOT the categorical `null`
+ *     block), so a plain `shouldAutoApprove(confidenceScore, 0.9)` check —
+ *     wholly independent of the lane — can auto-approve the booking outright
+ *     for a sufficiently confident drafting call. The row write happens
+ *     regardless of whether that check passes; auto-approval just removes
+ *     the human tap on top of it. This is a live path in production shape
+ *     (app.ts wires appointmentRepo/jobRepo/locationRepo/entityResolver for
+ *     this route), not a theoretical one.
+ *   - `ConfirmAppointmentTaskHandler` / `NotifyDelayTaskHandler` (both
+ *     already wired): `resolveActiveAppointmentId`'s customer-scoping block
+ *     only runs when `customerId` is truthy; unscoped, it can only auto-pick
+ *     an appointment when the ENTIRE TENANT has exactly one active
+ *     appointment (near-impossible in a real shop → always gated before).
+ *     Scoped, it auto-picks whenever the NAMED customer has exactly one
+ *     qualifying appointment — notify_delay's own class doc calls out
+ *     exactly this risk ("resolving to a different customer's appointment
+ *     would message the wrong person").
+ *   - `SendPaymentReminderTaskHandler.attachDuplicateReminderMarker`
+ *     (already wired): gated on a truthy `customerId`; newly reachable, it
+ *     runs three DB round-trips per chat turn and can synthesize a 'medium'
+ *     confidence marker that flips an otherwise auto-approving reminder into
+ *     review.
+ *
+ * None of that is a defensible byproduct of a dispatch-wiring task — "should
+ * typing in chat place a real calendar hold?" is a product decision. The fix
+ * is an explicit allowlist rather than a blanket thread: every already-
+ * shipped intent's behavior stays byte-for-byte what it was before Task 15.
+ */
+export const CHAT_CONTEXT_CUSTOMER_ID_INTENTS: ReadonlySet<string> = new Set([
+  'send_customer_message',
+  'create_service_agreement',
+  'add_service_location',
+  'schedule_inspection',
+]);
+
+/**
+ * Task 15 quality-review fix (I1) — intents this route deliberately never
+ * dispatches, for two structurally different reasons. Single source of
+ * truth so the rationale lives in exactly one place instead of five
+ * (assistant.ts's two dispatch-map comments plus three test files, all
+ * previously hand-copied and — for `emergency_dispatch` / `update_brand_
+ * voice` — citing the wrong authority):
+ *
+ *   - `respond_to_review`, `create_standing_instruction`, `update_brand_voice`:
+ *     STRUCTURALLY unwireable — none of the three has a handler registered
+ *     in the shared registry at all (`ai/orchestration/handler-registry.ts`
+ *     `buildTaskHandlers`; grep confirms no `handlers.set(...)` line for any
+ *     of them). `respond_to_review` / `create_standing_instruction` are
+ *     named in that module's own doc comment as deliberately excluded from
+ *     its taxonomy (alongside the synthetic `_complaint`/`_negotiation`
+ *     keys); `update_brand_voice` isn't named there but is absent from the
+ *     registry all the same. `sharedHandlers.get(...)!` would be `undefined`
+ *     for any of the three — wiring them would be a crash, not a feature.
+ *   - `emergency_dispatch`: the ODD one out. It DOES have a real handler
+ *     (`handler-registry.ts:283`, `EmergencyDispatchTaskHandler`) and DOES
+ *     have an `INTENT_TO_PROPOSAL_TYPE` entry — it satisfies every inclusion
+ *     criterion Task 15 used for the other 18. Excluded anyway, on this
+ *     wave's own PLAN's explicit instruction
+ *     (`docs/plans/2026-08-07-001-feat-voice-tradesperson-intents-plan.md`
+ *     line 1221: "...stay surface-specific BY DESIGN...do NOT wire them"),
+ *     not on any rationale documented in the registry itself. This IS a
+ *     real, KNOWN memo/chat divergence, not a false one: an owner typing
+ *     "emergency, no heat at the Hayes place, page me" into chat gets the
+ *     generic "I can't do that from here yet" refusal (`isActionIntent` +
+ *     `buildUnmappedCapabilityReply`), while the identical words recorded as
+ *     a voice memo draft a real `emergency_dispatch` proposal —
+ *     `workers/voice-action-router.ts` has no special-case branch for it
+ *     either; it reaches `EmergencyDispatchTaskHandler` through the exact
+ *     same generic `INTENT_TO_PROPOSAL_TYPE` dispatch every other mapped
+ *     intent uses. Recorded here rather than silently left as a gap.
+ */
+export const CHAT_DISPATCH_EXCLUDED_INTENTS: ReadonlySet<string> = new Set([
+  'respond_to_review',
+  'create_standing_instruction',
+  'update_brand_voice',
+  'emergency_dispatch',
+]);
+
 async function generateAssistantReply(
   messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>,
   tenantId: string,
@@ -1189,93 +1388,17 @@ async function generateAssistantReply(
           } catch {
             continue;
           }
-          const chainHandlers: Record<string, (() => TaskHandler) | undefined> = {
-            // Every registry-covered proposal type resolves from the shared
-            // registry (built once at composition time) so this chain map and
-            // the single-intent map below construct the SAME handler instances
-            // — no surface-specific `new X(...)` that could drift (the
-            // single-intent send_invoice previously lost its invoiceRepo this
-            // way). `create_invoice` is the classifier intent alias for the
-            // `draft_invoice` registry key.
-            create_customer: () => sharedHandlers.get('create_customer')!,
-            draft_estimate: () => sharedHandlers.get('draft_estimate')!,
-            update_estimate: () => sharedHandlers.get('update_estimate')!,
-            create_invoice: () => sharedHandlers.get('draft_invoice')!,
-            send_invoice: () => sharedHandlers.get('send_invoice')!,
-            issue_invoice: () => sharedHandlers.get('issue_invoice')!,
-            update_invoice: () => sharedHandlers.get('update_invoice')!,
-            // B5 — the 12 intents this route was silently dropping to a
-            // conversational LLM reply (no draft at all). Drawn from
-            // `sharedHandlers` so this surface can't drift from the voice
-            // worker's construction of the same handlers.
-            reschedule_appointment: () => sharedHandlers.get('reschedule_appointment')!,
-            cancel_appointment: () => sharedHandlers.get('cancel_appointment')!,
-            reassign_appointment: () => sharedHandlers.get('reassign_appointment')!,
-            confirm_appointment: () => sharedHandlers.get('confirm_appointment')!,
-            create_job: () => sharedHandlers.get('create_job')!,
-            // B7 — update_job (status/priority/title/description edit to an
-            // existing job); same shared registry, same gate as the worker.
-            update_job: () => sharedHandlers.get('update_job')!,
-            send_payment_reminder: () => sharedHandlers.get('send_payment_reminder')!,
-            apply_late_fee: () => sharedHandlers.get('apply_late_fee')!,
-            send_estimate_nudge: () => sharedHandlers.get('send_estimate_nudge')!,
-            batch_invoice: () => sharedHandlers.get('batch_invoice')!,
-            create_invoice_schedule: () => sharedHandlers.get('create_invoice_schedule')!,
-            record_payment: () => sharedHandlers.get('record_payment')!,
-            notify_delay: () => sharedHandlers.get('notify_delay')!,
-            // Field write intents (2026-07) — the technician's day loop. Each
-            // already had a task handler in the shared registry and an
-            // execution handler; only this dispatch entry was missing, so a
-            // tech saying "log two hours on the Miller job" fell through to a
-            // conversational reply with no draft. Same shared registry as
-            // every other entry, so the two maps still cannot drift.
-            add_note: () => sharedHandlers.get('add_note')!,
-            log_time_entry: () => sharedHandlers.get('log_time_entry')!,
-            log_expense: () => sharedHandlers.get('log_expense')!,
-            create_appointment: () => sharedHandlers.get('create_appointment')!,
-            send_estimate: () => sharedHandlers.get('send_estimate')!,
-            update_customer: () => sharedHandlers.get('update_customer')!,
-            // Task 15 (2026-08-07 tradesperson plan) — the wider B5
-            // completion. A mechanical derivation (every INTENT_TO_PROPOSAL_
-            // TYPE key checked against this map + the single-intent map
-            // below) found 18 intents — not the 6 originally named — with a
-            // real drafting handler in `sharedHandlers` and NO chat dispatch
-            // entry: each silently refused instead of drafting. Same shared
-            // registry as every other entry, so this map and the one below
-            // still cannot drift. `emergency_dispatch` / `update_brand_voice`
-            // / `respond_to_review` / `create_standing_instruction` are
-            // DELIBERATELY excluded — handler-registry.ts's module doc names
-            // them surface-specific by design.
-            add_crew_member: () => sharedHandlers.get('add_crew_member')!,
-            remove_crew_member: () => sharedHandlers.get('remove_crew_member')!,
-            convert_lead: () => sharedHandlers.get('convert_lead')!,
-            mark_lead_lost: () => sharedHandlers.get('mark_lead_lost')!,
-            add_service_location: () => sharedHandlers.get('add_service_location')!,
-            request_feedback: () => sharedHandlers.get('request_feedback')!,
-            record_refund: () => sharedHandlers.get('record_refund')!,
-            apply_credit: () => sharedHandlers.get('apply_credit')!,
-            send_customer_message: () => sharedHandlers.get('send_customer_message')!,
-            create_change_order: () => sharedHandlers.get('create_change_order')!,
-            create_service_agreement: () => sharedHandlers.get('create_service_agreement')!,
-            add_material: () => sharedHandlers.get('add_material')!,
-            update_catalog_item: () => sharedHandlers.get('update_catalog_item')!,
-            add_catalog_item: () => sharedHandlers.get('add_catalog_item')!,
-            // Alias intents — dispatch keyed by the classifier's INTENT (this
-            // map's key), drafting keyed by PROPOSAL type (sharedHandlers'
-            // key), so each rides its target's handler unchanged, exactly
-            // like `create_invoice` → `draft_invoice` above.
-            schedule_inspection: () => sharedHandlers.get('create_appointment')!,
-            log_permit: () => sharedHandlers.get('add_note')!,
-            log_warranty_claim: () => sharedHandlers.get('create_job')!,
-            // log_mileage ALSO aliases log_expense's handler, but — unlike
-            // the three aliases above — needs `context.intent` threaded
-            // through (see the `intent:` field on both `.handle()` calls
-            // below) so LogExpenseTaskHandler can tell it apart from a plain
-            // log_expense turn (Task 11, TaskContext.intent's doc comment).
-            log_mileage: () => sharedHandlers.get('log_expense')!,
-          };
-          const factory = chainHandlers[segClass.intentType];
-          if (!factory) continue;
+          // create_customer is the one documented exception to
+          // CHAT_INTENT_TO_REGISTRY_KEY (see that constant's doc comment) —
+          // the chain path has no conversational "ask for a name" fallback,
+          // so it dispatches create_customer straight to the plain shared
+          // handler rather than skipping it.
+          const registryKey =
+            segClass.intentType === 'create_customer'
+              ? 'create_customer'
+              : CHAT_INTENT_TO_REGISTRY_KEY[segClass.intentType];
+          if (!registryKey) continue;
+          const factory = () => sharedHandlers.get(registryKey)!;
           const segEntities: Record<string, unknown> = { ...carried, ...(segClass.extractedEntities ?? {}) };
           if (segClass.intentType === 'create_customer' && segEntities.displayName && !segEntities.name) {
             segEntities.name = segEntities.displayName;
@@ -1301,25 +1424,28 @@ async function generateAssistantReply(
             userId,
             message: segment,
             conversationId,
-            // Task 15 / Task 11 parity — the raw classified intent, for
-            // handlers that alias multiple intents onto the same taskType
-            // (log_mileage vs log_expense both drive LogExpenseTaskHandler;
-            // see TaskContext.intent's doc comment, ai/tasks/task-handlers.ts).
-            // The memo worker has always threaded this; this chat path never
-            // did, so log_mileage would have silently drafted a plain,
-            // wrong-category log_expense once dispatched.
+            // Task 15 (2026-08-07 tradesperson plan), Task 11 parity — the
+            // raw classified intent, for handlers that alias multiple
+            // intents onto the same taskType (log_mileage vs log_expense
+            // both drive LogExpenseTaskHandler; see TaskContext.intent's doc
+            // comment, ai/tasks/task-handlers.ts). The memo worker has
+            // always threaded this; this chat path never did, so
+            // log_mileage would have silently drafted a plain, wrong-
+            // category log_expense once dispatched.
             intent: segClass.intentType,
             existingEntities: { ...segEntities, ...segVerifiedIds },
-            // Mirrors the memo worker's precedence for its top-level
-            // `customerId` field (workers/voice-action-router.ts: "verified
-            // caller-ID identity wins; a resolver hit fills it otherwise").
-            // Chat has no caller-ID concept, so a resolver hit is the only
-            // source. Several handlers (send_customer_message,
-            // create_service_agreement, add_service_location) read
-            // `context.customerId` directly rather than
-            // `existingEntities.customerId` — without this they would draft
-            // permanently gated even with a resolver wired.
-            ...(segVerifiedIds.customerId ? { customerId: segVerifiedIds.customerId } : {}),
+            // Task 15 quality-review fix (C1/C2) — `context.customerId` is
+            // threaded ONLY for the CHAT_CONTEXT_CUSTOMER_ID_INTENTS
+            // allowlist (see that constant's doc comment for why this is
+            // deliberately narrow, not a blanket "mirror the memo worker's
+            // precedence" thread: several already-shipped intents read this
+            // same field as an exclusive, unrelated side channel — a
+            // held-slot calendar write, an unsupervised appointment
+            // auto-pick — that a dispatch-wiring task must not silently
+            // activate).
+            ...(CHAT_CONTEXT_CUSTOMER_ID_INTENTS.has(segClass.intentType) && segVerifiedIds.customerId
+              ? { customerId: segVerifiedIds.customerId }
+              : {}),
             // Tenant zone for the scheduling handlers in this chain.
             ...timezoneContext,
             ...(segStandingInstructions
@@ -1385,72 +1511,12 @@ async function generateAssistantReply(
 
       // QA-2026-06-05 (AST-02/03/04): estimate/invoice intents go through
       // the REAL task handlers and persist — the generic LLM path returned
-      // unpersisted JSON cards whose ids 404'd on approve.
-      const proposalHandlers: Record<string, () => TaskHandler> = {
-        // Same shared registry as the chain map above — every registry-covered
-        // type resolves from `sharedHandlers` (built once at composition time)
-        // so the two maps can't drift. `create_invoice` is the classifier
-        // intent alias for the `draft_invoice` registry key. NOTE: this is the
-        // map where single-intent `send_invoice` previously constructed
-        // `new SendInvoiceTaskHandler()` with NO invoiceRepo (dropping the
-        // candidate picker) while the chain map passed it — that drift is what
-        // resolving both from one registry closes.
-        draft_estimate: () => sharedHandlers.get('draft_estimate')!,
-        update_estimate: () => sharedHandlers.get('update_estimate')!,
-        create_invoice: () => sharedHandlers.get('draft_invoice')!,
-        send_invoice: () => sharedHandlers.get('send_invoice')!,
-        issue_invoice: () => sharedHandlers.get('issue_invoice')!,
-        update_invoice: () => sharedHandlers.get('update_invoice')!,
-        // B5 — same 12 intents as the chain map above, same shared registry.
-        reschedule_appointment: () => sharedHandlers.get('reschedule_appointment')!,
-        cancel_appointment: () => sharedHandlers.get('cancel_appointment')!,
-        reassign_appointment: () => sharedHandlers.get('reassign_appointment')!,
-        confirm_appointment: () => sharedHandlers.get('confirm_appointment')!,
-        create_job: () => sharedHandlers.get('create_job')!,
-        // B7 — update_job (status/priority/title/description edit to an
-        // existing job); same shared registry, same gate as the worker.
-        update_job: () => sharedHandlers.get('update_job')!,
-        send_payment_reminder: () => sharedHandlers.get('send_payment_reminder')!,
-        apply_late_fee: () => sharedHandlers.get('apply_late_fee')!,
-        send_estimate_nudge: () => sharedHandlers.get('send_estimate_nudge')!,
-        batch_invoice: () => sharedHandlers.get('batch_invoice')!,
-        create_invoice_schedule: () => sharedHandlers.get('create_invoice_schedule')!,
-        record_payment: () => sharedHandlers.get('record_payment')!,
-        notify_delay: () => sharedHandlers.get('notify_delay')!,
-        // Field write intents (2026-07) — same six as the chain map above,
-        // same shared registry. Dispatch wiring only: the task handlers and
-        // execution handlers already existed.
-        add_note: () => sharedHandlers.get('add_note')!,
-        log_time_entry: () => sharedHandlers.get('log_time_entry')!,
-        log_expense: () => sharedHandlers.get('log_expense')!,
-        create_appointment: () => sharedHandlers.get('create_appointment')!,
-        send_estimate: () => sharedHandlers.get('send_estimate')!,
-        update_customer: () => sharedHandlers.get('update_customer')!,
-        // Task 15 (2026-08-07 tradesperson plan) — same 18 intents as the
-        // chain map above, same shared registry, same exclusions
-        // (emergency_dispatch / update_brand_voice / respond_to_review /
-        // create_standing_instruction stay surface-specific by design).
-        add_crew_member: () => sharedHandlers.get('add_crew_member')!,
-        remove_crew_member: () => sharedHandlers.get('remove_crew_member')!,
-        convert_lead: () => sharedHandlers.get('convert_lead')!,
-        mark_lead_lost: () => sharedHandlers.get('mark_lead_lost')!,
-        add_service_location: () => sharedHandlers.get('add_service_location')!,
-        request_feedback: () => sharedHandlers.get('request_feedback')!,
-        record_refund: () => sharedHandlers.get('record_refund')!,
-        apply_credit: () => sharedHandlers.get('apply_credit')!,
-        send_customer_message: () => sharedHandlers.get('send_customer_message')!,
-        create_change_order: () => sharedHandlers.get('create_change_order')!,
-        create_service_agreement: () => sharedHandlers.get('create_service_agreement')!,
-        add_material: () => sharedHandlers.get('add_material')!,
-        update_catalog_item: () => sharedHandlers.get('update_catalog_item')!,
-        add_catalog_item: () => sharedHandlers.get('add_catalog_item')!,
-        // Alias intents — see the chain map's identical comment above.
-        schedule_inspection: () => sharedHandlers.get('create_appointment')!,
-        log_permit: () => sharedHandlers.get('add_note')!,
-        log_warranty_claim: () => sharedHandlers.get('create_job')!,
-        log_mileage: () => sharedHandlers.get('log_expense')!,
-      };
-      const handlerFactory = proposalHandlers[classification.intentType];
+      // unpersisted JSON cards whose ids 404'd on approve. `create_customer`
+      // is the one documented exception to CHAT_INTENT_TO_REGISTRY_KEY (see
+      // that constant's doc comment) — it's dispatched from its own branch
+      // below instead, so it's absent from this lookup on purpose.
+      const registryKey = CHAT_INTENT_TO_REGISTRY_KEY[classification.intentType];
+      const handlerFactory = registryKey ? () => sharedHandlers.get(registryKey)! : undefined;
       if (handlerFactory) {
         const handler = handlerFactory();
         // UB-A3 — thread the applicable standing instructions (≤5, keyed on
@@ -1475,13 +1541,17 @@ async function generateAssistantReply(
           userId,
           message: lastUserText,
           conversationId,
-          // Task 15 / Task 11 parity — see the identical comment on the
-          // chain-segment `.handle()` call above.
+          // Task 15 (2026-08-07 tradesperson plan) / Task 11 parity — see the
+          // identical comment on the chain-segment `.handle()` call above.
           intent: classification.intentType,
           existingEntities: { ...extractedEntities, ...verifiedIds },
-          // Mirrors the memo worker's `customerId` precedence — see the
-          // identical comment on the chain-segment `.handle()` call above.
-          ...(verifiedIds.customerId ? { customerId: verifiedIds.customerId } : {}),
+          // Task 15 quality-review fix (C1/C2) — see the identical comment +
+          // CHAT_CONTEXT_CUSTOMER_ID_INTENTS doc comment on the
+          // chain-segment `.handle()` call above: this is an explicit
+          // allowlist, not a blanket thread.
+          ...(CHAT_CONTEXT_CUSTOMER_ID_INTENTS.has(classification.intentType) && verifiedIds.customerId
+            ? { customerId: verifiedIds.customerId }
+            : {}),
           // Tenant zone — `create_appointment` resolves the spoken time
           // against it. Absent ⇒ the handler gates instead of guessing.
           ...timezoneContext,
@@ -1593,17 +1663,22 @@ async function generateAssistantReply(
 
       // ── Honest-failure guard, layer 1: UNMAPPED CAPABILITY ─────────
       // Nothing above matched. If the classifier was CONFIDENT about a real
-      // write intent and this surface simply has no handler wired for it
-      // (`add_crew_member`, `convert_lead`, `mark_lead_lost`, …), the only
-      // honest answer is "I can't do that from here" — and it must be said
-      // deterministically.
+      // write intent and this surface simply has no handler wired for it —
+      // today that means a CHAT_DISPATCH_EXCLUDED_INTENTS member
+      // (`emergency_dispatch`, `update_brand_voice`, `respond_to_review`,
+      // `create_standing_instruction` — see that constant's doc comment for
+      // why each is excluded) or a genuinely new, not-yet-wired taxonomy
+      // intent — the only honest answer is "I can't do that from here", and
+      // it must be said deterministically.
       //
       // This is the door PR #776 left open. That change closed the
       // low-confidence hole ('unknown' → clarification) but a CONFIDENT
       // unmapped intent still fell through to the generic LLM path below,
       // which is handed the raw imperative and asked for "concise operational
       // help". A past-tense confirmation is that prompt's most natural
-      // completion, and it is exactly what production produced:
+      // completion, and it is exactly what production produced, for the
+      // THEN-unmapped `add_crew_member` (wired since Task 15, 2026-08-07
+      // tradesperson plan):
       //   "put Dave on the crew"  → "I've added Dave to the crew."
       // No row was written. The tradesperson drives away believing it was.
       //

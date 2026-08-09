@@ -24,18 +24,30 @@ import { AuditRepository, createAuditEvent } from '../../audit/audit';
  * `callerPhone`/`transcript`/`conversationId` — contracts.ts, an
  * all-optional passthrough) IS the durable capture: the proposal row is
  * persisted the moment it's drafted — long before any approval — so nothing
- * about approving it is the only chance to record the caller's need. The
- * production creation sites (six branches, five files): `negotiation-task.ts`
- * (ALLOW branch + the enriched/default branch — two separate `createProposal`
- * calls), `complaint-task.ts` (the companion owner-followup callback),
- * `create-voice-turn-processor.ts` (the live-call negotiation branch, FSM
- * path), and `sms/negotiation/inbound-negotiation-handler.ts` (the inbound-SMS
- * negotiation guardrail — the ONLY site that stamps `callerPhone` into the
- * payload). `text-mode-driver.ts`'s after-hours branch also constructs a
- * `callback` proposal, but that file is the VQ-007 voice-quality corpus
- * harness, not production — the real production after-hours path
- * (`routes/telephony.ts`'s `afterHours` branch) sends the caller to voicemail
- * TwiML and drafts no `callback` proposal at all.
+ * about approving it is the only chance to record the caller's need.
+ *
+ * ── Production creation-site inventory (counting rule stated explicitly,
+ * since this got miscounted twice before) ─────────────────────────────────
+ * 4 production FILES; 5 `createProposal`/`buildProposal` CALL SITES; 7 total
+ * CONTENT BRANCHES that resolve to `proposalType: 'callback'` (two of the
+ * files share one call site across three evaluation-outcome branches, two of
+ * which are 'callback' — the third is 'voice_clarification'):
+ *   - `negotiation-task.ts` — 2 direct `createProposal` calls (ALLOW branch +
+ *     the enriched/default branch), both unconditionally 'callback'.
+ *   - `complaint-task.ts` — 1 direct `createProposal` call (the companion
+ *     owner-followup callback), unconditionally 'callback'.
+ *   - `create-voice-turn-processor.ts` — 1 `buildProposal` call fed by
+ *     inline branching (the live-call negotiation branch, FSM path); 2 of
+ *     its 3 possible outcomes (ALLOW, enriched/default) are 'callback', the
+ *     third (CLARIFY) is 'voice_clarification'.
+ *   - `sms/negotiation/inbound-negotiation-handler.ts` — 1 `createProposal`
+ *     call fed by `buildNegotiationProposalContent`; same 2-of-3 shape as
+ *     above. The ONLY site that stamps `callerPhone` into the payload.
+ * `text-mode-driver.ts`'s after-hours branch ALSO constructs a `callback`
+ * proposal, but that file is the VQ-007 voice-quality corpus harness, not
+ * production — excluded from every count above. The real production
+ * after-hours path (`routes/telephony.ts`'s `afterHours` branch) sends the
+ * caller to voicemail TwiML and drafts no `callback` proposal at all.
  *
  * The SEPARATE `call_me_back_tasks` operational-task system
  * (voice/call-me-back/call-me-back.ts, its own CSR-notification worker) is
@@ -80,11 +92,12 @@ export class CallbackExecutionHandler implements ExecutionHandler {
       try {
         // conversationId links the acknowledgement back to the call/thread
         // that raised it without joining through the proposal row. Present
-        // on 4 of the 6 production `callback`-creation branches
-        // (negotiation-task.ts's two branches, complaint-task.ts,
-        // text-mode-driver.ts's after-hours branch); absent on the FSM
-        // live-call and inbound-SMS branches, which key on session/phone
-        // instead — so this is opportunistic, not a contract guarantee.
+        // on every production `callback`-creation branch EXCEPT the
+        // inbound-SMS one (sms/negotiation/inbound-negotiation-handler.ts),
+        // which has no conversationId concept at all — it keys on
+        // fromPhone/messageSid instead (see this class's own doc comment for
+        // the full production-site inventory). So this is opportunistic, not
+        // a contract guarantee.
         const conversationId =
           typeof proposal.payload.conversationId === 'string'
             ? proposal.payload.conversationId

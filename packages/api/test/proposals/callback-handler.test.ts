@@ -126,15 +126,6 @@ describe('CallbackExecutionHandler', () => {
     expect(events[0].metadata).not.toHaveProperty('conversationId');
   });
 
-  // A prior version of this suite had a test named "does not emit any audit
-  // event when no audit repo is wired" that asserted only
-  // `result.success === true` — the SAME assertion the "acknowledges an
-  // approved callback" test above already makes with the same no-repo
-  // construction, so it was a duplicate under a misleading name and pinned
-  // nothing about audit emission at all. There is no repo instance to spy on
-  // in the "no repo wired" case (that's the point of the case), so dropped
-  // rather than faked into a spy assertion that couldn't observe anything.
-
   it('a throwing audit repo does NOT break execution — failure-soft, matching the LogExpense family', async () => {
     const throwingAuditRepo: AuditRepository = {
       create: vi.fn(async () => {
