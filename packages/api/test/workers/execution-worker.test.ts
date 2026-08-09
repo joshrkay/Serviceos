@@ -13,7 +13,7 @@ import { transitionProposal, UNDO_WINDOW_MS } from '../../src/proposals/lifecycl
 import { ProposalExecutor } from '../../src/proposals/execution/executor';
 import { IdempotencyGuard } from '../../src/proposals/execution/idempotency';
 import { InMemoryProposalExecutionRepository } from '../../src/proposals/proposal-execution';
-import { InMemoryAuditRepository } from '../../src/audit/audit';
+import { InMemoryAuditRepository, AuditRepository, AuditEvent } from '../../src/audit/audit';
 import { createExecutionHandlerRegistry } from '../../src/proposals/execution/handlers';
 import { runExecutionSweep, ExecutionWorkerDeps } from '../../src/workers/execution-worker';
 import { createLogger } from '../../src/logging/logger';
@@ -28,11 +28,14 @@ const baseInput: CreateProposalInput = {
 
 const logger = createLogger({ service: 'test', environment: 'test', level: 'error' });
 
-function makeDeps(repo: InMemoryProposalRepository): ExecutionWorkerDeps {
+function makeDeps(
+  repo: InMemoryProposalRepository,
+  auditRepo: AuditRepository = new InMemoryAuditRepository(),
+): ExecutionWorkerDeps {
   const handlers = createExecutionHandlerRegistry();
   const guard = new IdempotencyGuard(new InMemoryProposalExecutionRepository(), repo);
-  const executor = new ProposalExecutor(handlers, repo, guard, new InMemoryAuditRepository());
-  return { proposalRepo: repo, executor, logger };
+  const executor = new ProposalExecutor(handlers, repo, guard, auditRepo);
+  return { proposalRepo: repo, executor, logger, auditRepo };
 }
 
 describe('Execution auto-delivery worker (D9 undo window complement)', () => {
@@ -179,6 +182,106 @@ describe('Execution auto-delivery worker (D9 undo window complement)', () => {
     expect(executed).toBe(1);
   });
 
+  /**
+   * Follow-up — a proposal claimed for execution (status 'executing') whose
+   * handler throws before executeAudited ever runs (e.g. HANDLER_NOT_FOUND)
+   * stays 'executing' until resetStaleExecuting retries it maxRetries times
+   * and finally writes 'execution_failed' DIRECTLY — bypassing executeAudited,
+   * the only place that would otherwise write the WS11 execution-outcome
+   * audit event. Net: the proposal reaches a terminal failed state with no
+   * audit event anywhere explaining why. The execution sweep must now emit
+   * its own `proposal.execution_timed_out` event for that transition.
+   */
+  describe('stale-executing timeout audit event', () => {
+    function findEvents(events: AuditEvent[], proposalId: string) {
+      return events.filter(
+        (e) => e.entityType === 'proposal' && e.entityId === proposalId && e.eventType === 'proposal.execution_timed_out',
+      );
+    }
+
+    it('emits proposal.execution_timed_out when a stale executing proposal exhausts retries', async () => {
+      let proposal = createProposal({ ...baseInput, proposalType: 'create_customer', idempotencyKey: 'stale-timeout' });
+      proposal = transitionProposal(proposal, 'ready_for_review', 'user-1');
+      proposal = transitionProposal(proposal, 'approved', 'user-1');
+      proposal = {
+        ...proposal,
+        status: 'executing',
+        claimedAt: new Date(Date.now() - 11 * 60 * 1000),
+        claimedBy: 'execution-worker',
+        executionRetryCount: 3, // already at maxRetries(3) — this sweep terminates it
+        approvedAt: new Date(Date.now() - UNDO_WINDOW_MS - 100),
+      };
+      await repo.create(proposal);
+
+      const auditRepo = new InMemoryAuditRepository();
+      await runExecutionSweep(makeDeps(repo, auditRepo));
+
+      const updated = await repo.findById(proposal.tenantId, proposal.id);
+      expect(updated!.status).toBe('execution_failed');
+
+      const events = await auditRepo.findByEntity(proposal.tenantId, 'proposal', proposal.id);
+      const timeoutEvents = findEvents(events, proposal.id);
+      expect(timeoutEvents).toHaveLength(1);
+      expect(timeoutEvents[0].actorRole).toBe('system');
+      expect(timeoutEvents[0].metadata).toMatchObject({
+        proposalType: 'create_customer',
+        // Matches logProposalEvent / executionAuditInput's convention of
+        // always including the post-transition status.
+        status: 'execution_failed',
+        retryCount: 3,
+        staleMinutes: 10,
+        maxRetries: 3,
+      });
+    });
+
+    it('does not emit a timeout event for a proposal merely reset for another retry', async () => {
+      let proposal = createProposal({ ...baseInput, idempotencyKey: 'stale-retry-no-audit' });
+      proposal = transitionProposal(proposal, 'ready_for_review', 'user-1');
+      proposal = transitionProposal(proposal, 'approved', 'user-1');
+      proposal = {
+        ...proposal,
+        status: 'executing',
+        claimedAt: new Date(Date.now() - 11 * 60 * 1000),
+        executionRetryCount: 0,
+        approvedAt: new Date(Date.now() - UNDO_WINDOW_MS - 100),
+      };
+      await repo.create(proposal);
+
+      const auditRepo = new InMemoryAuditRepository();
+      await runExecutionSweep(makeDeps(repo, auditRepo));
+
+      const events = await auditRepo.findByEntity(proposal.tenantId, 'proposal', proposal.id);
+      expect(findEvents(events, proposal.id)).toHaveLength(0);
+    });
+
+    it('is failure-soft: an audit write failure does not stop the proposal from moving to execution_failed or crash the sweep', async () => {
+      let proposal = createProposal({ ...baseInput, idempotencyKey: 'stale-timeout-audit-fails' });
+      proposal = transitionProposal(proposal, 'ready_for_review', 'user-1');
+      proposal = transitionProposal(proposal, 'approved', 'user-1');
+      proposal = {
+        ...proposal,
+        status: 'executing',
+        claimedAt: new Date(Date.now() - 11 * 60 * 1000),
+        executionRetryCount: 3,
+        approvedAt: new Date(Date.now() - UNDO_WINDOW_MS - 100),
+      };
+      await repo.create(proposal);
+
+      const throwingAuditRepo: AuditRepository = {
+        create: async () => {
+          throw new Error('audit sink unavailable');
+        },
+        findByEntity: async () => [],
+        findByCorrelation: async () => [],
+      };
+
+      await expect(runExecutionSweep(makeDeps(repo, throwingAuditRepo))).resolves.not.toThrow();
+
+      const updated = await repo.findById(proposal.tenantId, proposal.id);
+      expect(updated!.status).toBe('execution_failed');
+    });
+  });
+
   // Raised in PR review: the sweep attributed every type but
   // `adopt_entity_alias` to `createdBy` — the DRAFTER — and passed no role at
   // all. A technician-drafted config proposal approved by an owner therefore
@@ -193,7 +296,7 @@ describe('Execution auto-delivery worker (D9 undo window complement)', () => {
           contexts.push(context);
         },
       } as unknown as ExecutionWorkerDeps['executor'];
-      return { deps: { proposalRepo: repo, executor, logger }, contexts };
+      return { deps: { proposalRepo: repo, executor, logger, auditRepo: new InMemoryAuditRepository() }, contexts };
     }
 
     async function seedApproved(overrides: Partial<CreateProposalInput> & { executedBy?: string; executedByRole?: string }) {

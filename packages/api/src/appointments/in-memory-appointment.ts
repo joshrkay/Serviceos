@@ -12,8 +12,14 @@
  * pg-appointment.ts). The Voice Quality Layer 1 corpus runner uses this to
  * seed appointment fixtures per script without touching Postgres on PR-CI.
  *
- * Note: `technicianId` filtering is a Pg-only concept (joins through the
- * assignments table); the in-memory variant silently ignores it.
+ * `technicianId` filtering: Pg answers it with an EXISTS subquery against
+ * `appointment_assignments` (pg-appointment.ts). This store has no such
+ * table, so the equivalent lookup must be threaded in from outside via the
+ * constructor (see `TechnicianAssignmentLookup` below) — app.ts passes the
+ * same `InMemoryAssignmentRepository` instance constructed alongside this
+ * repo. Without one configured, a `technicianId` filter request throws
+ * rather than silently returning every appointment in the tenant (the prior
+ * behavior).
  *
  * Originally lived inline in `./appointment`; extracted here so the in-memory
  * and Pg variants are symmetric. The original `./appointment` re-exports for
@@ -28,8 +34,24 @@ import {
   MAX_APPOINTMENT_LIMIT,
 } from './appointment';
 
+/**
+ * Narrow shape needed to resolve `technicianId` → assigned appointment ids.
+ * Declared locally (rather than importing `AssignmentRepository` from
+ * `./assignment`) to avoid a module dependency in this direction; the real
+ * `AssignmentRepository`/`InMemoryAssignmentRepository` satisfy this
+ * structurally, so the production instance can be passed directly.
+ */
+export interface TechnicianAssignmentLookup {
+  findByTechnician(
+    tenantId: string,
+    technicianId: string
+  ): Promise<Array<{ appointmentId: string }>>;
+}
+
 export class InMemoryAppointmentRepository implements AppointmentRepository {
   private appointments: Map<string, Appointment> = new Map();
+
+  constructor(private readonly technicianAssignments?: TechnicianAssignmentLookup) {}
 
   async create(appointment: Appointment): Promise<Appointment> {
     // Idempotency: a redelivered write with the same key returns the
@@ -100,9 +122,26 @@ export class InMemoryAppointmentRepository implements AppointmentRepository {
     }
     if (options?.jobId) results = results.filter((a) => a.jobId === options.jobId);
     if (options?.status) results = results.filter((a) => a.status === options.status);
-    // technicianId is implemented via an assignments-table JOIN in Pg.
-    // The InMemory store doesn't reference assignments here, so the
-    // option is best-effort only and silently ignored when unset.
+    if (options?.technicianId) {
+      if (!this.technicianAssignments) {
+        // toErrorResponse (shared/errors.ts) maps a plain Error to a generic
+        // 500 with a static message — the route's catch block doesn't log —
+        // so without logging here, this carefully-worded message is loud in
+        // tests (a rejected assertion) and invisible in a running server.
+        const message =
+          'InMemoryAppointmentRepository.listWithMeta: technicianId filter requires an ' +
+          'assignment lookup — construct with `new InMemoryAppointmentRepository(assignmentRepo)`. ' +
+          'Silently ignoring technicianId would return every appointment in the tenant.';
+        console.error(message, { tenantId, technicianId: options.technicianId });
+        throw new Error(message);
+      }
+      const assigned = await this.technicianAssignments.findByTechnician(
+        tenantId,
+        options.technicianId
+      );
+      const assignedIds = new Set(assigned.map((a) => a.appointmentId));
+      results = results.filter((a) => assignedIds.has(a.id));
+    }
     const sortDir = options?.sort === 'desc' ? -1 : 1;
     results.sort((a, b) => sortDir * (a.scheduledStart.getTime() - b.scheduledStart.getTime()));
     const total = results.length;

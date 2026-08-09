@@ -14,10 +14,13 @@ import { AuditRepository, createAuditEvent } from '../../audit/audit';
  * (workers/execution-worker.ts) caught and logged, leaving the row claimed
  * ('executing') until `resetStaleExecuting` retried it up to 3 times (a
  * 10-minute stale window each) and finally landed it in terminal
- * 'execution_failed', with no audit event explaining why. This handler
- * makes approval a graceful no-op: it acknowledges the callback (a
+ * 'execution_failed'. (PR #815 closed the audit gap on THAT path generically
+ * — resetStaleExecuting now emits `proposal.execution_timed_out` — but the
+ * caller's callback request would still dead-end there with no domain
+ * outcome ever recorded, ~30-40 minutes after being approved.) This handler
+ * makes approval a graceful no-op instead: it acknowledges the callback (a
  * failure-soft audit event, LogExpense-family posture) and completes
- * successfully.
+ * successfully, immediately.
  *
  * ── Why a no-op is correct, not a gap ─────────────────────────────────────
  * A `callback` proposal's payload (`reason`/`requestedService`/
