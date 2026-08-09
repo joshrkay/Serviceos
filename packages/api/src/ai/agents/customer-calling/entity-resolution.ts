@@ -101,6 +101,17 @@ const CUSTOMER_REF_INTENTS = new Set([
   // never resolved that name to a customerId, so
   // CreateServiceAgreementTaskHandler could only see raw free text.
   'create_service_agreement',
+  // Task 11 (2026-08-07 tradesperson plan) — log_mileage is an ALIAS onto
+  // log_expense's proposal type, so it mirrors log_expense's OWN
+  // CUSTOMER_REF_INTENTS membership too, for full parity with its target
+  // (Task 1's adjudication: an alias's entity-resolution membership must
+  // mirror the target). Currently VACUOUS in practice — log_mileage's own
+  // taxonomy (intent-classifier.ts) never instructs the classifier to
+  // extract `customerName`, only `mileageMiles`/`jobReference` — but kept
+  // for the same reason `log_expense`'s own membership costs nothing:
+  // `planVoiceEntityLookups` only acts on this set when `customerName` is
+  // actually present, which it structurally never will be here.
+  'log_mileage',
 ]);
 
 const INVOICE_DOC_INTENTS = new Set([
@@ -199,6 +210,14 @@ const JOB_REF_INTENTS = new Set([
   // job?" resolves the SAME way so the shopping-list readback can scope
   // to one job. Read-only — no contract/gating implications at all.
   'lookup_materials',
+  // Task 11 (2026-08-07 tradesperson plan) — log_mileage is an ALIAS onto
+  // log_expense's proposal type, so it mirrors log_expense's OWN
+  // JOB_REF_INTENTS membership exactly: "Log 32 miles to the Patel job"
+  // resolves the spoken jobReference → jobId so the mileage expense keeps
+  // its job link. jobId is OPTIONAL on the (shared) log_expense contract,
+  // so an unresolved (or absent) reference still logs the expense
+  // unlinked — resolution only ever ADDS the link, never gates.
+  'log_mileage',
 ]);
 
 /**

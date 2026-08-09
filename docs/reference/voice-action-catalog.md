@@ -26,7 +26,7 @@ exist today.
 
 ## A) Speakable today — intent + proposal + execution handler all exist
 
-These 46 actions can be spoken, drafted as a proposal, approved, and executed.
+These 47 actions can be spoken, drafted as a proposal, approved, and executed.
 "Persistence proof" = a Docker-gated integration test that proves the row +
 audit event actually land in Postgres (vs. mocked-DB-only coverage, which cannot
 catch schema drift or a missing dependency).
@@ -79,6 +79,7 @@ catch schema drift or a missing dependency).
 | "The Garcias want a second zone — change order for 1800" | `create_change_order` | `create_change_order` | capture | integration (`integration/draft-estimate-execution.test.ts`) |
 | "Sign the Garcias up for the annual maintenance plan, 290 a year" | `create_service_agreement` | `create_service_agreement` | capture | unit + sweep round-trip (`proposals/create-service-agreement-handler.test.ts`: handler-created agreement → `runDueAgreements` → asserts a `generated`, not `failed`, run) |
 | "Add three boxes of half-inch PEX to the shopping list" | `add_material` | `add_material` | capture | unit (`proposals/add-material-handler.test.ts`) |
+| "Log 32 miles to the Patel job" | `log_mileage` | `log_expense` | capture | unit |
 
 > **Voice technician resolution (U1, taxonomy 1.2.0):** `reassign_appointment`,
 > `add_crew_member`, and `remove_crew_member` now resolve the spoken technician
@@ -803,6 +804,72 @@ Notes on the Task 9 row (`add_material`, taxonomy 1.13.0):
   is indistinguishable from a genuine 600. See `lookup-events/lookup-event.ts`'s
   `resultCount` doc comment.
 
+Notes on the Task 11 row (`log_mileage`, taxonomy 1.15.0):
+
+- **ALIAS onto the EXISTING `log_expense` proposal type — no new
+  ProposalType, no new execution handler, no migration.** A technician
+  logs drive miles for the tax-deduction mileage log ("Log 32 miles to
+  the Patel job"); the resulting row is a plain `expenses` row with
+  `category: 'vehicle'`, indistinguishable in storage from a manually
+  logged vehicle expense.
+- **Branches inside `LogExpenseTaskHandler`, not a subclass or a second
+  file.** House precedent for a no-op alias (`schedule_inspection` →
+  `create_appointment`, `log_permit` → `add_note`) is a thin dispatch-only
+  alias where the target handler runs completely unchanged. `log_mileage`
+  can't follow that byte-for-byte — it needs its OWN math (miles × rate)
+  the plain `log_expense` drafting never does. `TaskContext`
+  (`ai/tasks/task-handlers.ts`) carries no `intent` field anywhere in this
+  codebase, so the branch keys on the PRESENCE of the qualified
+  `mileageMiles` extracted-entity field instead — the only provenance
+  signal available inside the shared handler. A plain `log_expense`
+  utterance never extracts `mileageMiles` (its own taxonomy entry has no
+  such field), so the branch cannot misfire on a real expense that merely
+  mentions a number.
+- **`amountCents = round(miles × DEFAULT_MILEAGE_RATE_CENTS_PER_MILE)`.**
+  `DEFAULT_MILEAGE_RATE_CENTS_PER_MILE` (70¢, `ai/tasks/voice-extended-
+  tasks.ts`) is the 2026 IRS standard mileage rate — a CONSTANT, not
+  tenant config (the IRS publishes one national rate per year; this isn't
+  a per-tenant business setting the way a labor rate is).
+- **Miles get a domain cap (0 < miles ≤ 1,000), mirroring Task 8/9's
+  `MAX_QUANTITY` lesson** (`materials/material-item.ts`). `expenses.
+  amount_cents` is Postgres `INTEGER` (int4, max 2,147,483,647); an
+  STT-garbled mileage figure ("fifty billion miles") times the mileage
+  rate would otherwise overflow that column — a raw DB error instead of a
+  clean gate. The cap is on MILES, not dollars: a real expense
+  `amountCents` has no such cap (a work-van purchase legitimately runs
+  into the tens of thousands), but a single mileage entry's computed
+  amount has no business anywhere near the overflow boundary (1,000 miles
+  × 70¢ = $700). An out-of-range value (0, negative, or over the cap)
+  gates the proposal on `amountCents` exactly like a genuinely absent one
+  — never silently clamped.
+- **`spentAt` is TODAY in the TENANT timezone, not raw `new Date()` UTC
+  math (Task 7's lesson).** Uses the same `resolveTenantTimezone` +
+  `localDateKey` pattern `add-material-task.ts` and `create-service-
+  agreement-task.ts` established, falling back to
+  `DEFAULT_TENANT_TIMEZONE` when the tenant zone is unresolved. Unlike
+  Task 7's `startsOn` (which feeds a 60-second recurring sweep that would
+  immediately act on a back-dated value), nothing sweeps, bills, or
+  repeats off `log_expense`/`log_mileage`'s `spentAt` — so no past-date
+  guard is needed; a technician logging mileage for yesterday's drive is
+  a normal, honest capture, mirroring `add_material`'s `neededBy`
+  reasoning, not `startsOn`'s.
+- **`jobReference` joins `JOB_REF_INTENTS` mirroring `log_expense`'s OWN
+  membership exactly** (`entity-resolution.ts`) — jobId stays OPTIONAL on
+  the (shared) contract, so an unresolved/absent reference still logs the
+  mileage UNLINKED; resolution only ever ADDS the link. Also mirrors
+  `log_expense`'s (currently vacuous) `CUSTOMER_REF_INTENTS` membership
+  for full parity with its target, even though `log_mileage`'s own
+  taxonomy never extracts `customerName`.
+- **`voiceProposalSummary` gives `log_mileage` its own copy** ("Log
+  mileage on `<job>`" / "for `<customer>`", mirroring `log_permit`'s
+  preposition convention) rather than falling through to the generic
+  `Voice intent: log_mileage` debug fallback (the exact drift-guard gap
+  Task 9 shipped and a later review caught).
+- This type is deliberately **absent** from `S1_ALLOWED_PROPOSAL_TYPES`
+  (`proposals/surface.ts`) — it aliases `log_expense`, which is itself
+  operator/technician-only, never reachable from an unauthenticated
+  inbound caller.
+
 Notes on the taxonomy-1.2.0 rows:
 
 - `create_invoice_schedule` — the spoken milestone sentence is parsed by a
@@ -1076,7 +1143,8 @@ not a gap. No new `JobStatus` value was introduced for this.
     { "intent": "send_customer_message", "proposalType": "send_customer_message", "actionClass": "comms" },
     { "intent": "create_change_order", "proposalType": "create_change_order", "actionClass": "capture" },
     { "intent": "create_service_agreement", "proposalType": "create_service_agreement", "actionClass": "capture" },
-    { "intent": "add_material", "proposalType": "add_material", "actionClass": "capture" }
+    { "intent": "add_material", "proposalType": "add_material", "actionClass": "capture" },
+    { "intent": "log_mileage", "proposalType": "log_expense", "actionClass": "capture" }
   ],
   "handlerNoOnramp": [
     "create_booking",

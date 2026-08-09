@@ -17,6 +17,7 @@ import {
   isLookupIntent,
   isInventoryLoggingPhrasing,
   INTENT_TAXONOMY_VERSION,
+  SUPPORTED_INTENTS,
 } from '../../../src/ai/orchestration/intent-classifier';
 import { LLMGateway, LLMResponse } from '../../../src/ai/gateway/gateway';
 import { formatVerticalForCallerPrompt } from '../../../src/verticals/context-assembly';
@@ -1228,8 +1229,57 @@ describe('taxonomy 1.2.0 — new intents + entities', () => {
   // no migrations).
   // classifyIntent always stamps the CURRENT constant regardless of which
   // intent, so this pin tracks the live value.
-  it('taxonomy version reflects the latest coordinated bump (1.14.0)', () => {
-    expect(INTENT_TAXONOMY_VERSION).toBe('1.14.0');
+  // Task 11 of the same plan bumped it again to 1.15.0 (log_mileage — an
+  // ALIAS intent onto the EXISTING log_expense proposal type; no new
+  // ProposalType, no migration).
+  it('taxonomy version reflects the latest coordinated bump (1.15.0)', () => {
+    expect(INTENT_TAXONOMY_VERSION).toBe('1.15.0');
+  });
+
+  // Task 11 (2026-08-07 tradesperson plan) — log_mileage is a new intent
+  // that must be classifiable at all before anything downstream can map or
+  // draft it.
+  it('log_mileage is a supported intent', () => {
+    expect(SUPPORTED_INTENTS).toContain('log_mileage');
+  });
+
+  it('parses log_mileage with mileageMiles (possibly fractional) and jobReference', () => {
+    const result = parseClassifierJson(
+      JSON.stringify({
+        intentType: 'log_mileage',
+        confidence: 0.9,
+        extractedEntities: { mileageMiles: 32.5, jobReference: 'the Patel job' },
+      }),
+    );
+    expect(result?.intentType).toBe('log_mileage');
+    expect(result?.extractedEntities?.mileageMiles).toBe(32.5);
+    expect(result?.extractedEntities?.jobReference).toBe('the Patel job');
+  });
+
+  // A spoken 0/negative miles value must still reach the extracted entities
+  // (never silently dropped here) so the task handler — which owns the
+  // domain gate — can distinguish "no miles stated" from "an invalid miles
+  // value was stated" and gate on `amountCents` with an accurate reason.
+  it('a non-positive mileageMiles still passes the parse allowlist (the handler gates it, not the parser)', () => {
+    const result = parseClassifierJson(
+      JSON.stringify({
+        intentType: 'log_mileage',
+        confidence: 0.9,
+        extractedEntities: { mileageMiles: 0 },
+      }),
+    );
+    expect(result?.extractedEntities?.mileageMiles).toBe(0);
+  });
+
+  it('a non-numeric mileageMiles is dropped (flat number only)', () => {
+    const result = parseClassifierJson(
+      JSON.stringify({
+        intentType: 'log_mileage',
+        confidence: 0.9,
+        extractedEntities: { mileageMiles: '32 miles' },
+      }),
+    );
+    expect(result?.extractedEntities?.mileageMiles).toBeUndefined();
   });
 
   it('parses create_invoice_schedule with the verbatim milestone sentence', () => {

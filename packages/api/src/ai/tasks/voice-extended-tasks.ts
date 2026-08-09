@@ -26,8 +26,8 @@ import type { CatalogItem, CatalogItemRepository } from '../../catalog/catalog-i
 import type { InvoiceRepository } from '../../invoices/invoice';
 import type { Estimate, EstimateRepository } from '../../estimates/estimate';
 import type { LLMGateway } from '../gateway/gateway';
-import { resolveDateTime } from '../scheduling/resolve-datetime';
-import { isRuntimeTimezone } from '../../shared/timezone';
+import { resolveDateTime, DEFAULT_TENANT_TIMEZONE } from '../scheduling/resolve-datetime';
+import { isRuntimeTimezone, localDateKey } from '../../shared/timezone';
 import { findJobsRequiringInvoicing, InvoicingQueueDeps } from '../../invoices/invoicing-queue';
 import {
   DunningEvent,
@@ -1613,7 +1613,7 @@ export class UpdateCustomerTaskHandler implements TaskHandler {
   }
 }
 
-// ───────────── log_expense ─────────────
+// ───────────── log_expense (+ Task 11 alias: log_mileage) ─────────────
 //
 // Owner/technician logs a business expense. Capture-class, moves no
 // money. Reuses the existing LogExpenseExecutionHandler. spentAt
@@ -1628,6 +1628,28 @@ export class UpdateCustomerTaskHandler implements TaskHandler {
 // with no (or an unresolved) job mention still logs UNLINKED, exactly as
 // before — resolution only adds the link. An AMBIGUOUS job never reaches
 // here (the router short-circuits to a voice_clarification picker).
+//
+// ── Task 11 (2026-08-07 tradesperson plan): log_mileage alias ───────────
+//
+// `log_mileage` is an ALIAS intent onto this SAME `log_expense` proposal
+// type (voice-intent-map.ts) — no new ProposalType, no new execution
+// handler, no migration. House precedent for a NO-OP alias (schedule_
+// inspection → create_appointment, log_permit → add_note) is a thin
+// dispatch-only alias: the target handler runs completely unchanged.
+// log_mileage cannot follow that precedent byte-for-byte because it needs
+// its OWN math (miles × rate) the plain log_expense drafting never does —
+// so this handler grows a BRANCH instead of a second file/subclass.
+//
+// The branch is keyed on the PRESENCE of the qualified `mileageMiles`
+// extracted-entity field, NOT on `context.intent` — `TaskContext`
+// (ai/tasks/task-handlers.ts) carries no `intent` field anywhere in this
+// codebase (verified: no construction site, test fixture, or the shared
+// `voice-payload-contract.test.ts` drift harness ever sets one), so a
+// classifier-populated `mileageMiles` is the only available provenance
+// signal inside this shared handler. A plain log_expense utterance never
+// extracts `mileageMiles` (intent-classifier.ts's log_expense taxonomy
+// entry has no such field), so the branch can never misfire on a real
+// expense that merely mentions a number.
 export class LogExpenseTaskHandler implements TaskHandler {
   readonly taskType = 'log_expense' as const;
 
@@ -1640,7 +1662,42 @@ export class LogExpenseTaskHandler implements TaskHandler {
     };
     const missing: string[] = [];
 
-    if (typeof ee.amount === 'number' && ee.amount > 0) {
+    if (typeof ee.mileageMiles === 'number') {
+      const miles = ee.mileageMiles;
+      payload.category = 'vehicle';
+      if (Number.isFinite(miles)) {
+        payload.description = `Mileage — ${miles} miles`;
+      }
+      // Domain gate (mirrors Task 8/9's MAX_QUANTITY lesson —
+      // materials/material-item.ts): a positive-but-sane floor/ceiling on
+      // MILES, not dollars — a real expense amountCents has no such cap
+      // (a work-van purchase legitimately runs into the tens of thousands),
+      // but an STT-garbled mileage figure ("fifty billion miles") times
+      // DEFAULT_MILEAGE_RATE_CENTS_PER_MILE would otherwise overflow
+      // expenses.amount_cents (Postgres INTEGER/int4, max 2,147,483,647) —
+      // a raw DB error instead of a clean gate. 0 and negative values are
+      // degenerate ("nothing to log") and gate the same way. Never
+      // silently clamped — an out-of-range value gates for a human to
+      // correct, exactly like a genuinely absent one.
+      if (Number.isFinite(miles) && miles > 0 && miles <= MAX_MILEAGE_MILES) {
+        payload.amountCents = Math.round(miles * DEFAULT_MILEAGE_RATE_CENTS_PER_MILE);
+      } else {
+        missing.push('amountCents');
+      }
+      // spentAt = TODAY in the TENANT timezone (Task 7's lesson: never raw
+      // `new Date()` UTC math — see create-service-agreement-task.ts's
+      // `resolveTenantTimezone` precedent, mirrored here). No sweep ever
+      // consumes a log_expense/log_mileage `spentAt` (unlike a booking's
+      // `startsOn`), so there is no "past date poisons a scheduled job"
+      // risk to guard against — a technician logging mileage for a trip
+      // taken yesterday is a normal, honest capture, not a malformed one
+      // (same posture Task 9 documents for `add_material`'s `neededBy`).
+      const timezone =
+        typeof context.timezone === 'string' && isRuntimeTimezone(context.timezone.trim())
+          ? context.timezone.trim()
+          : DEFAULT_TENANT_TIMEZONE;
+      payload.spentAt = localDateKey(context.now ?? new Date(), timezone);
+    } else if (typeof ee.amount === 'number' && ee.amount > 0) {
       payload.amountCents = ee.amount;
     } else {
       missing.push('amountCents');
@@ -1660,6 +1717,25 @@ export class LogExpenseTaskHandler implements TaskHandler {
     };
   }
 }
+
+/**
+ * The 2026 IRS standard mileage rate, in cents per mile. A CONSTANT, not
+ * tenant config — the IRS publishes one national rate per year; this is
+ * not a per-tenant business setting the way a labor rate or tax rate is.
+ * Bump this literal (with a comment naming the new year/rate) when the IRS
+ * publishes an updated rate — never make it configurable per Task 11's
+ * scope decision.
+ */
+export const DEFAULT_MILEAGE_RATE_CENTS_PER_MILE = 70;
+
+/**
+ * Domain cap on a single `log_mileage` entry, in miles — see the module
+ * doc comment above `LogExpenseTaskHandler` for the overflow rationale.
+ * 1,000 miles comfortably covers even an extreme single-entry, multi-day
+ * drive while sitting nowhere near the `expenses.amount_cents` int4
+ * overflow boundary (1,000 × 70¢ = $700).
+ */
+const MAX_MILEAGE_MILES = 1000;
 
 // ───────────── convert_lead ─────────────
 //

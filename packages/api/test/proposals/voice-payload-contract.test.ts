@@ -1112,6 +1112,29 @@ const ROWS: Row[] = [
       expect(payload.quantity).toBe(1);
     },
   },
+  {
+    // Task 11 (2026-08-07 tradesperson plan) alias — log_mileage maps to
+    // 'log_expense' (voice-intent-map.ts), so dispatch here is
+    // byte-identical to the log_expense row above: the SAME
+    // LogExpenseTaskHandler / LogExpenseExecutionHandler pair.
+    // LogExpenseTaskHandler branches on the PRESENCE of `mileageMiles` in
+    // existingEntities to compute amountCents/category/description.
+    intent: 'log_mileage',
+    mode: 'resolves',
+    note: 'alias of log_expense — a spoken mileageMiles count is the only gate; dep-less LogExpenseExecutionHandler synthetic-succeeds',
+    draft: () =>
+      draft(
+        { gateway: NOOP_GATEWAY },
+        'log_expense',
+        ctx({ existingEntities: { mileageMiles: 32 } }),
+      ),
+    execute: (p) => new LogExpenseExecutionHandler().execute(p, execContext()),
+    assertPayload: (payload) => {
+      expect(payload.category).toBe('vehicle');
+      expect(payload.amountCents).toBe(2240);
+      expect(payload.description).toBe('Mileage — 32 miles');
+    },
+  },
 ];
 
 // ── The test ─────────────────────────────────────────────────────────────

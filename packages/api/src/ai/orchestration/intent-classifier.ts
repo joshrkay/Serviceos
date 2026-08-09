@@ -124,6 +124,19 @@ export type IntentType =
   | 'lookup_crew_schedule'
   | 'lookup_timesheets'
   | 'lookup_my_day'
+  // Task 11 (2026-08-07 tradesperson plan) — ALIAS intent onto the
+  // EXISTING `log_expense` proposal type/execution handler: a technician
+  // logs drive miles for the tax-deduction mileage log ("Log 32 miles to
+  // the Patel job"). No new ProposalType, no new execution handler. Extract
+  // `mileageMiles` (number, required); jobReference reuses the existing
+  // seam (JOB_REF_INTENTS membership — entity-resolution.ts, mirroring
+  // log_expense). `LogExpenseTaskHandler` (ai/tasks/voice-extended-
+  // tasks.ts) branches on the PRESENCE of `mileageMiles` — TaskContext
+  // carries no `intent` field, so that extracted-entity field is the only
+  // provenance signal available inside the shared handler — and converts
+  // miles × DEFAULT_MILEAGE_RATE_CENTS_PER_MILE into `amountCents`, forcing
+  // `category: 'vehicle'`.
+  | 'log_mileage'
   // Taxonomy 1.2.0 (agent wave, Track A) — three proposal-driving on-ramps:
   //   create_invoice_schedule    — U2: milestone/progress billing plan for a
   //                                job; the verbatim milestone sentence rides
@@ -289,6 +302,7 @@ export const SUPPORTED_INTENTS: readonly IntentType[] = [
   'lookup_crew_schedule',
   'lookup_timesheets',
   'lookup_my_day',
+  'log_mileage',
   'create_invoice_schedule',
   'respond_to_review',
   'create_standing_instruction',
@@ -482,8 +496,22 @@ export const SUPPORTED_INTENTS: readonly IntentType[] = [
  *           fails the turn rather than ever falling back to an unscoped
  *           day. See ai/skills/lookup-crew-schedule.ts, lookup-
  *           timesheets.ts, and lookup-my-day.ts for the full rationale.
+ *   1.15.0 — Task 11 (2026-08-07 tradesperson plan), additive: log_mileage
+ *           — an ALIAS intent onto the EXISTING `log_expense` proposal type
+ *           (no new ProposalType, no new execution handler, no migration).
+ *           A technician logs drive miles for the tax-deduction mileage
+ *           log ("Log 32 miles to the Patel job"). New extraction field
+ *           (mileageMiles, a possibly-fractional number); reuses the
+ *           existing jobReference seam (JOB_REF_INTENTS membership —
+ *           entity-resolution.ts — mirrors log_expense's own membership).
+ *           `LogExpenseTaskHandler` (ai/tasks/voice-extended-tasks.ts)
+ *           branches on the PRESENCE of `mileageMiles` (TaskContext carries
+ *           no `intent` field) and converts miles ×
+ *           DEFAULT_MILEAGE_RATE_CENTS_PER_MILE (70¢, the 2026 IRS standard
+ *           rate — a constant, not tenant config) into `amountCents`,
+ *           forcing `category: 'vehicle'`.
  */
-export const INTENT_TAXONOMY_VERSION = '1.14.0';
+export const INTENT_TAXONOMY_VERSION = '1.15.0';
 
 /**
  * P11-001: convenience predicate the FSM adapter uses to route
@@ -627,6 +655,15 @@ export interface ExtractedEntities {
     | 'office'
     | 'other';
   vendor?: string;
+  // Task 11 (2026-08-07 tradesperson plan) — log_mileage intent (aliases
+  // log_expense). Miles driven, possibly fractional (an odometer reading).
+  // NOT filtered/rounded at parse time (unlike materialQuantity) — required
+  // fields with domain bounds get validated at the HANDLER, same posture as
+  // `LogExpenseTaskHandler`'s own `amount` gate, so a spoken 0/negative
+  // value reaches the handler and gates on `amountCents` for an accurate
+  // reason instead of silently vanishing here and looking like "no miles
+  // stated at all".
+  mileageMiles?: number;
   // convert_lead intent: free-text reference to the lead being converted
   // (caller name or "the Johnson lead"). The execution handler resolves
   // it to a concrete leadId.
@@ -1596,6 +1633,14 @@ Supported intents (return exactly ONE):
                            Examples: "What's my next job?"
                                      "What's on my schedule today?"
                                      "Where am I going after this one?"
+- "log_mileage"          — technician logs drive miles (tax deduction).
+                           Maps to log_expense, category "vehicle", amount =
+                           miles × DEFAULT_MILEAGE_RATE_CENTS_PER_MILE (70¢,
+                           2026 IRS standard rate — constant, not config).
+                           Extract mileageMiles (number, required) and
+                           jobReference.
+                           Examples: "Log 32 miles to the Patel job"
+                                     "Put down 18 miles for today's supply run"
 - "unknown"             — anything else: ambiguous transcripts, or edit
                            commands without a clear reference.
 
@@ -1694,7 +1739,8 @@ Return valid JSON with exactly this shape (no prose, no markdown fences):
     "serviceAgreementStartsOn": "<string, optional — verbatim spoken start date/phrase on create_service_agreement>",
     "materialDescription": "<string, optional — what to add to the shopping list on add_material>",
     "materialQuantity": <integer, optional — how many on add_material, defaults to 1>,
-    "materialNeededBy": "<string, optional — verbatim spoken needed-by date/phrase on add_material>"
+    "materialNeededBy": "<string, optional — verbatim spoken needed-by date/phrase on add_material>",
+    "mileageMiles": <number, optional — miles driven on log_mileage; may be fractional>
   }
 }
 
@@ -2222,6 +2268,19 @@ export function parseClassifierJson(content: string): IntentClassification | nul
       extracted.materialQuantity = Math.round(ee.materialQuantity);
     }
     if (typeof ee.materialNeededBy === 'string') extracted.materialNeededBy = ee.materialNeededBy;
+    // log_mileage field (Task 11, 2026-08-07 tradesperson plan). jobReference
+    // already flows through the shared field above (JOB_REF_INTENTS
+    // membership — entity-resolution.ts). NOT filtered to `> 0` here (unlike
+    // materialQuantity) — mileageMiles is a REQUIRED field on this intent
+    // (unlike materialQuantity's optional-with-default posture), so an
+    // invalid value (0, negative, an STT-garbled huge figure) must still
+    // reach LogExpenseTaskHandler, which owns the real domain gate and
+    // reports an accurate `amountCents` missingFields entry — dropping it
+    // here would make an invalid mileage value indistinguishable from no
+    // mileage being stated at all.
+    if (typeof ee.mileageMiles === 'number' && Number.isFinite(ee.mileageMiles)) {
+      extracted.mileageMiles = ee.mileageMiles;
+    }
     if (Object.keys(extracted).length > 0) {
       result.extractedEntities = extracted;
     }

@@ -72,6 +72,13 @@ describe('voice intent → proposal type: exactly one map', () => {
     }
   });
 
+  // Task 11 (2026-08-07 tradesperson plan) — log_mileage is an ALIAS onto
+  // the EXISTING log_expense proposal type: no new ProposalType, no new
+  // execution handler.
+  it('maps log_mileage onto the log_expense proposal type', () => {
+    expect(intentToProposalType('log_mileage')).toBe('log_expense');
+  });
+
   it('falls back to voice_clarification for unmapped / absent intents', () => {
     expect(intentToProposalType(undefined)).toBe('voice_clarification');
     // lookup_* intents are READ-ONLY and deliberately unmapped (P11-001).
@@ -182,5 +189,22 @@ describe('voiceProposalSummary', () => {
       voiceProposalSummary('add_material', { jobReference: 'the Patel job', customerName: 'Henderson' }),
     ).toBe('Add material for the Patel job');
     expect(voiceProposalSummary('add_material', {})).toBe('Add material');
+  });
+
+  // Task 11 (2026-08-07 tradesperson plan) — "Log mileage on <job>" /
+  // "for <customer>" shape, mirrors log_permit's preposition convention
+  // (both are "Log <noun>" intents) rather than add_material's uniform
+  // "for" — job reference wins when both are present.
+  it('gives log_mileage a human-readable summary', () => {
+    expect(voiceProposalSummary('log_mileage', { jobReference: 'the Patel job' })).toBe(
+      'Log mileage on the Patel job',
+    );
+    expect(voiceProposalSummary('log_mileage', { customerName: 'Henderson' })).toBe(
+      'Log mileage for Henderson',
+    );
+    expect(
+      voiceProposalSummary('log_mileage', { jobReference: 'the Patel job', customerName: 'Henderson' }),
+    ).toBe('Log mileage on the Patel job');
+    expect(voiceProposalSummary('log_mileage', {})).toBe('Log mileage');
   });
 });

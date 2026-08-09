@@ -20,6 +20,7 @@ import {
   RequestFeedbackTaskHandler,
   RescheduleAppointmentTaskHandler,
   CancelAppointmentTaskHandler,
+  DEFAULT_MILEAGE_RATE_CENTS_PER_MILE,
 } from '../../../src/ai/tasks/voice-extended-tasks';
 import type { AppointmentRepository } from '../../../src/appointments/appointment';
 import type { JobRepository } from '../../../src/jobs/job';
@@ -165,6 +166,102 @@ describe('LogExpenseTaskHandler', () => {
       expect(res.proposal.payload.jobId).toBeUndefined();
       // Still no gate — the expense logs unlinked rather than stalling.
       expect(missingFieldsFor(res.proposal)).toEqual([]);
+    });
+  });
+
+  // Task 11 (2026-08-07 tradesperson plan) — log_mileage is an ALIAS intent
+  // onto this SAME handler/proposal type. TaskContext carries no `intent`
+  // field, so the branch keys on the PRESENCE of the qualified
+  // `mileageMiles` extracted-entity field (intent-classifier.ts) — never
+  // extracted for a plain log_expense utterance.
+  describe('Task 11: log_mileage alias (mileageMiles → amountCents, category: vehicle)', () => {
+    it('converts a spoken mileage count at the IRS rate; spentAt is TODAY in the TENANT timezone', async () => {
+      // 11:30pm America/New_York on 2026-06-11 is already 2026-06-12 in UTC —
+      // pins that spentAt is computed from the TENANT-LOCAL calendar date,
+      // never a raw `new Date().toISOString()` UTC slice (Task 7's lesson).
+      const now = new Date('2026-06-12T03:30:00.000Z');
+      const res = await new LogExpenseTaskHandler().handle(
+        ctx({
+          timezone: 'America/New_York',
+          now,
+          existingEntities: { mileageMiles: 32, jobReference: 'the Patel job' },
+        }),
+      );
+      expect(res.proposal.proposalType).toBe('log_expense');
+      expect(res.proposal.payload.category).toBe('vehicle');
+      expect(res.proposal.payload.amountCents).toBe(32 * DEFAULT_MILEAGE_RATE_CENTS_PER_MILE);
+      expect(res.proposal.payload.amountCents).toBe(2240);
+      expect(res.proposal.payload.description).toBe('Mileage — 32 miles');
+      expect(res.proposal.payload.spentAt).toBe('2026-06-11');
+      expect(res.proposal.payload.jobReference).toBe('the Patel job');
+      expect(missingFieldsFor(res.proposal)).toEqual([]);
+    });
+
+    it('rounds a fractional mileage count to the nearest cent', async () => {
+      const res = await new LogExpenseTaskHandler().handle(
+        ctx({ existingEntities: { mileageMiles: 4.37 } }),
+      );
+      // 4.37 * 70 = 305.9 -> rounds to 306.
+      expect(res.proposal.payload.amountCents).toBe(306);
+      expect(res.proposal.payload.description).toBe('Mileage — 4.37 miles');
+    });
+
+    it('gates on amountCents when no mileage is stated at all', async () => {
+      const res = await new LogExpenseTaskHandler().handle(ctx({ existingEntities: {} }));
+      expect(missingFieldsFor(res.proposal)).toContain('amountCents');
+      expect(res.proposal.payload.amountCents).toBeUndefined();
+    });
+
+    it('gates on amountCents for zero miles (a degenerate, nothing-to-log value)', async () => {
+      const res = await new LogExpenseTaskHandler().handle(
+        ctx({ existingEntities: { mileageMiles: 0 } }),
+      );
+      expect(missingFieldsFor(res.proposal)).toContain('amountCents');
+      expect(res.proposal.payload.amountCents).toBeUndefined();
+    });
+
+    it('gates on amountCents for negative miles', async () => {
+      const res = await new LogExpenseTaskHandler().handle(
+        ctx({ existingEntities: { mileageMiles: -5 } }),
+      );
+      expect(missingFieldsFor(res.proposal)).toContain('amountCents');
+      expect(res.proposal.payload.amountCents).toBeUndefined();
+    });
+
+    // Domain cap (mirrors Task 8/9's MAX_QUANTITY lesson): expenses.amount_cents
+    // is Postgres INTEGER (int4, max 2,147,483,647). An STT-garbled mileage
+    // figure ("fifty billion miles") times the mileage rate would overflow
+    // that column and throw a raw DB error instead of a clean gate. A sane
+    // domain cap on MILES (not dollars — a real expense amountCents has no
+    // such cap, since business expenses like a new work van legitimately run
+    // into the tens of thousands) keeps a single mileage entry's computed
+    // amountCents nowhere near the overflow boundary.
+    it('gates on amountCents for an absurd, STT-garbled mileage figure (domain cap)', async () => {
+      const res = await new LogExpenseTaskHandler().handle(
+        ctx({ existingEntities: { mileageMiles: 10_000 } }),
+      );
+      expect(missingFieldsFor(res.proposal)).toContain('amountCents');
+      expect(res.proposal.payload.amountCents).toBeUndefined();
+    });
+
+    it('falls back to the product-default timezone when the tenant zone is unresolved', async () => {
+      const res = await new LogExpenseTaskHandler().handle(
+        ctx({ now: new Date('2026-06-11T12:00:00.000Z'), existingEntities: { mileageMiles: 10 } }),
+      );
+      // America/New_York (DEFAULT_TENANT_TIMEZONE) noon UTC is still the same
+      // calendar day — this only pins that a MISSING timezone never throws
+      // and still produces a well-formed date, not a specific zone's date.
+      expect(res.proposal.payload.spentAt).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+      expect(missingFieldsFor(res.proposal)).toEqual([]);
+    });
+
+    it('a plain log_expense utterance (no mileageMiles) is completely unaffected', async () => {
+      const res = await new LogExpenseTaskHandler().handle(
+        ctx({ existingEntities: { amount: 5500, expenseCategory: 'fuel' } }),
+      );
+      expect(res.proposal.payload.category).toBe('fuel');
+      expect(res.proposal.payload.amountCents).toBe(5500);
+      expect(res.proposal.payload.description).not.toContain('Mileage');
     });
   });
 });

@@ -309,6 +309,21 @@ describe('planVoiceEntityLookups — intent-conditioned operator references', ()
     ]);
   });
 
+  // Task 11 (2026-08-07 tradesperson plan) — "Log 32 miles to the Patel
+  // job" joins JOB_REF_INTENTS the SAME way log_expense does (log_mileage
+  // is an ALIAS onto log_expense's proposal type), so the spoken job
+  // reference resolves to a jobId and the logged mileage keeps its job
+  // link. jobId stays OPTIONAL on the log_expense contract — an unresolved
+  // reference never gates — but a NAMED job still resolves.
+  it('plans a job lookup for log_mileage', () => {
+    const lookups = planVoiceEntityLookups('log_mileage', {
+      jobReference: 'the Patel job',
+    });
+    expect(lookups).toEqual([
+      { kind: 'job', reference: 'the Patel job', refKey: 'jobId' },
+    ]);
+  });
+
   // Task 10 (2026-08-07 tradesperson plan) — lookup_crew_schedule/
   // lookup_timesheets join TECHNICIAN_REF_INTENTS the SAME way
   // reassign_appointment does, so a named crew member ("What's Mike's day

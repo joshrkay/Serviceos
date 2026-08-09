@@ -151,6 +151,13 @@ export const INTENT_TO_PROPOSAL_TYPE: Partial<Record<Exclude<IntentType, 'unknow
   // deliberately OMITTED from this map — like every other lookup_*
   // intent, it is read-only and never produces a proposal.
   add_material: 'add_material',
+  // Task 11 (2026-08-07 tradesperson plan) — log_mileage is an ALIAS onto
+  // the EXISTING log_expense proposal type: no new ProposalType, no new
+  // execution handler, no migration. Drafting + execution are keyed by
+  // PROPOSAL type, so this inherits the log_expense leg unchanged; only
+  // LogExpenseTaskHandler's own drafting branches on the intent-specific
+  // `mileageMiles` extracted-entity field (ai/tasks/voice-extended-tasks.ts).
+  log_mileage: 'log_expense',
 };
 
 /**
@@ -227,6 +234,10 @@ export function voiceProposalSummary(
   // (job reference takes precedence over a bare customer name — a
   // shopping-list item is usually about the job, not the customer).
   if (intent === 'add_material') return `Add material${ref ? ` for ${ref}` : name ? ` for ${name}` : ''}`;
+  // Task 11 — mirrors log_permit's preposition convention ("on" for a job,
+  // "for" for a bare customer name) rather than add_material's uniform
+  // "for" — both log_mileage and log_permit are "Log <noun>" intents.
+  if (intent === 'log_mileage') return `Log mileage${ref ? ` on ${ref}` : name ? ` for ${name}` : ''}`;
   if (intent) return `Voice intent: ${intent}${ref ? ` (${ref})` : ''}`;
   return 'Voice clarification needed';
 }
