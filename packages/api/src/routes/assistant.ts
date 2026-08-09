@@ -1235,6 +1235,44 @@ async function generateAssistantReply(
             create_appointment: () => sharedHandlers.get('create_appointment')!,
             send_estimate: () => sharedHandlers.get('send_estimate')!,
             update_customer: () => sharedHandlers.get('update_customer')!,
+            // Task 15 (2026-08-07 tradesperson plan) — the wider B5
+            // completion. A mechanical derivation (every INTENT_TO_PROPOSAL_
+            // TYPE key checked against this map + the single-intent map
+            // below) found 18 intents — not the 6 originally named — with a
+            // real drafting handler in `sharedHandlers` and NO chat dispatch
+            // entry: each silently refused instead of drafting. Same shared
+            // registry as every other entry, so this map and the one below
+            // still cannot drift. `emergency_dispatch` / `update_brand_voice`
+            // / `respond_to_review` / `create_standing_instruction` are
+            // DELIBERATELY excluded — handler-registry.ts's module doc names
+            // them surface-specific by design.
+            add_crew_member: () => sharedHandlers.get('add_crew_member')!,
+            remove_crew_member: () => sharedHandlers.get('remove_crew_member')!,
+            convert_lead: () => sharedHandlers.get('convert_lead')!,
+            mark_lead_lost: () => sharedHandlers.get('mark_lead_lost')!,
+            add_service_location: () => sharedHandlers.get('add_service_location')!,
+            request_feedback: () => sharedHandlers.get('request_feedback')!,
+            record_refund: () => sharedHandlers.get('record_refund')!,
+            apply_credit: () => sharedHandlers.get('apply_credit')!,
+            send_customer_message: () => sharedHandlers.get('send_customer_message')!,
+            create_change_order: () => sharedHandlers.get('create_change_order')!,
+            create_service_agreement: () => sharedHandlers.get('create_service_agreement')!,
+            add_material: () => sharedHandlers.get('add_material')!,
+            update_catalog_item: () => sharedHandlers.get('update_catalog_item')!,
+            add_catalog_item: () => sharedHandlers.get('add_catalog_item')!,
+            // Alias intents — dispatch keyed by the classifier's INTENT (this
+            // map's key), drafting keyed by PROPOSAL type (sharedHandlers'
+            // key), so each rides its target's handler unchanged, exactly
+            // like `create_invoice` → `draft_invoice` above.
+            schedule_inspection: () => sharedHandlers.get('create_appointment')!,
+            log_permit: () => sharedHandlers.get('add_note')!,
+            log_warranty_claim: () => sharedHandlers.get('create_job')!,
+            // log_mileage ALSO aliases log_expense's handler, but — unlike
+            // the three aliases above — needs `context.intent` threaded
+            // through (see the `intent:` field on both `.handle()` calls
+            // below) so LogExpenseTaskHandler can tell it apart from a plain
+            // log_expense turn (Task 11, TaskContext.intent's doc comment).
+            log_mileage: () => sharedHandlers.get('log_expense')!,
           };
           const factory = chainHandlers[segClass.intentType];
           if (!factory) continue;
@@ -1263,7 +1301,25 @@ async function generateAssistantReply(
             userId,
             message: segment,
             conversationId,
+            // Task 15 / Task 11 parity — the raw classified intent, for
+            // handlers that alias multiple intents onto the same taskType
+            // (log_mileage vs log_expense both drive LogExpenseTaskHandler;
+            // see TaskContext.intent's doc comment, ai/tasks/task-handlers.ts).
+            // The memo worker has always threaded this; this chat path never
+            // did, so log_mileage would have silently drafted a plain,
+            // wrong-category log_expense once dispatched.
+            intent: segClass.intentType,
             existingEntities: { ...segEntities, ...segVerifiedIds },
+            // Mirrors the memo worker's precedence for its top-level
+            // `customerId` field (workers/voice-action-router.ts: "verified
+            // caller-ID identity wins; a resolver hit fills it otherwise").
+            // Chat has no caller-ID concept, so a resolver hit is the only
+            // source. Several handlers (send_customer_message,
+            // create_service_agreement, add_service_location) read
+            // `context.customerId` directly rather than
+            // `existingEntities.customerId` — without this they would draft
+            // permanently gated even with a resolver wired.
+            ...(segVerifiedIds.customerId ? { customerId: segVerifiedIds.customerId } : {}),
             // Tenant zone for the scheduling handlers in this chain.
             ...timezoneContext,
             ...(segStandingInstructions
@@ -1370,6 +1426,29 @@ async function generateAssistantReply(
         create_appointment: () => sharedHandlers.get('create_appointment')!,
         send_estimate: () => sharedHandlers.get('send_estimate')!,
         update_customer: () => sharedHandlers.get('update_customer')!,
+        // Task 15 (2026-08-07 tradesperson plan) — same 18 intents as the
+        // chain map above, same shared registry, same exclusions
+        // (emergency_dispatch / update_brand_voice / respond_to_review /
+        // create_standing_instruction stay surface-specific by design).
+        add_crew_member: () => sharedHandlers.get('add_crew_member')!,
+        remove_crew_member: () => sharedHandlers.get('remove_crew_member')!,
+        convert_lead: () => sharedHandlers.get('convert_lead')!,
+        mark_lead_lost: () => sharedHandlers.get('mark_lead_lost')!,
+        add_service_location: () => sharedHandlers.get('add_service_location')!,
+        request_feedback: () => sharedHandlers.get('request_feedback')!,
+        record_refund: () => sharedHandlers.get('record_refund')!,
+        apply_credit: () => sharedHandlers.get('apply_credit')!,
+        send_customer_message: () => sharedHandlers.get('send_customer_message')!,
+        create_change_order: () => sharedHandlers.get('create_change_order')!,
+        create_service_agreement: () => sharedHandlers.get('create_service_agreement')!,
+        add_material: () => sharedHandlers.get('add_material')!,
+        update_catalog_item: () => sharedHandlers.get('update_catalog_item')!,
+        add_catalog_item: () => sharedHandlers.get('add_catalog_item')!,
+        // Alias intents — see the chain map's identical comment above.
+        schedule_inspection: () => sharedHandlers.get('create_appointment')!,
+        log_permit: () => sharedHandlers.get('add_note')!,
+        log_warranty_claim: () => sharedHandlers.get('create_job')!,
+        log_mileage: () => sharedHandlers.get('log_expense')!,
       };
       const handlerFactory = proposalHandlers[classification.intentType];
       if (handlerFactory) {
@@ -1396,7 +1475,13 @@ async function generateAssistantReply(
           userId,
           message: lastUserText,
           conversationId,
+          // Task 15 / Task 11 parity — see the identical comment on the
+          // chain-segment `.handle()` call above.
+          intent: classification.intentType,
           existingEntities: { ...extractedEntities, ...verifiedIds },
+          // Mirrors the memo worker's `customerId` precedence — see the
+          // identical comment on the chain-segment `.handle()` call above.
+          ...(verifiedIds.customerId ? { customerId: verifiedIds.customerId } : {}),
           // Tenant zone — `create_appointment` resolves the spoken time
           // against it. Absent ⇒ the handler gates instead of guessing.
           ...timezoneContext,

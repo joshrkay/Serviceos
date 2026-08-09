@@ -158,21 +158,29 @@ describe('the two Development fabrications must never reproduce', () => {
 describe('the three no-proposal outcomes are distinguishable', () => {
   it('UNMAPPED CAPABILITY: a confident write intent with no handler refuses deterministically and never reaches the LLM', async () => {
     const proposalRepo = new InMemoryProposalRepository();
-    // add_crew_member is a real, supported taxonomy intent with NO entry in
-    // either chat dispatch map. The second scripted response is a fabrication
-    // the fallback LLM would happily have returned — it must never be asked.
+    // update_brand_voice is a real, supported taxonomy intent with NO entry
+    // in either chat dispatch map — DELIBERATELY, per handler-registry.ts's
+    // module doc (it stays surface-specific by design). Was `add_crew_member`
+    // until Task 15 (2026-08-07 tradesperson plan) wired that intent onto the
+    // shared registry for this surface too, which turned this into a false
+    // negative — the canonical "unmapped" example must be one of the four
+    // intents that STAY unmapped on purpose (emergency_dispatch /
+    // update_brand_voice / respond_to_review / create_standing_instruction),
+    // not an incidental gap that closes over time. The second scripted
+    // response is a fabrication the fallback LLM would happily have
+    // returned — it must never be asked.
     const gateway = scriptedGateway([
-      classifierReply('add_crew_member', 0.95),
-      llmReply("I've added Dave to the crew."),
+      classifierReply('update_brand_voice', 0.95),
+      llmReply("I've updated the brand voice."),
     ]);
     const app = buildApp(gateway, proposalRepo);
 
     const res = await request(app)
       .post('/api/assistant/chat')
-      .send({ messages: [{ role: 'user', content: 'Put Dave on the crew for the Miller work.' }] });
+      .send({ messages: [{ role: 'user', content: 'From now on sound more casual and friendly.' }] });
 
     expect(res.status).toBe(200);
-    expect(res.body.taskType).toBe('assistant.unhandled.add_crew_member');
+    expect(res.body.taskType).toBe('assistant.unhandled.update_brand_voice');
     expect(res.body.message.content).not.toMatch(SUCCESS_LANGUAGE);
     expect(res.body.message.proposal ?? null).toBeNull();
     expect(await proposalRepo.findByTenant(TEST_TENANT)).toHaveLength(0);
@@ -185,7 +193,11 @@ describe('the three no-proposal outcomes are distinguishable', () => {
   });
 
   it('NOT UNDERSTOOD and UNMAPPED CAPABILITY are not the same reply', async () => {
-    const unmapped = scriptedGateway([classifierReply('convert_lead', 0.9), llmReply('x')]);
+    // respond_to_review stays surface-specific by design (same rationale as
+    // update_brand_voice above) — was `convert_lead` until Task 15 wired
+    // that intent onto this surface's shared registry, which would have
+    // made this a false negative too.
+    const unmapped = scriptedGateway([classifierReply('respond_to_review', 0.9), llmReply('x')]);
     const unknown = scriptedGateway([
       classifierReply('unknown', 0.3),
       llmReply('I have booked that for you.'),
@@ -193,12 +205,12 @@ describe('the three no-proposal outcomes are distinguishable', () => {
 
     const a = await request(buildApp(unmapped, new InMemoryProposalRepository()))
       .post('/api/assistant/chat')
-      .send({ messages: [{ role: 'user', content: 'Turn that lead into a customer.' }] });
+      .send({ messages: [{ role: 'user', content: 'Reply to that 1-star review.' }] });
     const b = await request(buildApp(unknown, new InMemoryProposalRepository()))
       .post('/api/assistant/chat')
       .send({ messages: [{ role: 'user', content: 'Sort that one out for me.' }] });
 
-    expect(a.body.taskType).toBe('assistant.unhandled.convert_lead');
+    expect(a.body.taskType).toBe('assistant.unhandled.respond_to_review');
     expect(b.body.taskType).toBe('assistant.not_understood');
     expect(a.body.message.content).not.toBe(b.body.message.content);
     expect(a.body.message.content).not.toMatch(SUCCESS_LANGUAGE);
