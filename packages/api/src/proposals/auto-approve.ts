@@ -1,3 +1,5 @@
+import { createLogger } from '../logging/logger';
+
 /**
  * Operator mode (Phase 12). Mirrors the same type defined in
  * `middleware/auth.ts` and `packages/shared/src/types.ts`. We re-declare
@@ -5,6 +7,31 @@
  * middleware would invert the layering.
  */
 export type Mode = 'supervisor' | 'tech' | 'both';
+
+const autoApproveLogger = createLogger({
+  service: 'proposals.auto-approve',
+  environment: process.env.NODE_ENV || 'dev',
+});
+
+/**
+ * Commit 3 (followup-autoapprove-default) — throttle for the loud guard
+ * below. Module-level, process-lifetime: the guard exists to catch a NEW
+ * caller shipping the exact gap that let assistant-chat silently inherit
+ * the permissive legacy threshold with no real supervision signal (see
+ * `resolveAutoApproveThreshold`'s doc comment). One warning per process is
+ * enough to surface that in review/staging logs; unthrottled, the ALREADY-
+ * KNOWN gap in `ai/voice-turn/create-voice-turn-processor.ts` (the D-015
+ * telephony booking lane never threads either field — see its own comment)
+ * would log on every auto-approving request in production, burying the
+ * "something NEW just shipped this" signal in noise from something old and
+ * separately tracked.
+ */
+let hasWarnedMissingSupervisionSignal = false;
+
+/** Test-only: reset the once-per-process throttle above. */
+export function _resetMissingSupervisionSignalWarningForTests(): void {
+  hasWarnedMissingSupervisionSignal = false;
+}
 
 /**
  * Default per-mode auto-approve thresholds for proposals (Phase 12).
@@ -84,6 +111,25 @@ export function resolveAutoApproveThreshold(
   }
 
   if (input.supervisorMode === undefined) {
+    // Commit 3 — loud guard, behavior-preserving. We're already past the
+    // `supervisorPresent === false` check above, so `supervisorPresent`
+    // here is either `true` (an intentional partial signal — fine, no
+    // warning) or `undefined` (the caller never threaded it at all — the
+    // exact shape of the assistant-chat gap this followup fixed). Warn only
+    // on the latter; never change the resolution — still the legacy 0.9
+    // default either way.
+    if (input.supervisorPresent === undefined && !hasWarnedMissingSupervisionSignal) {
+      hasWarnedMissingSupervisionSignal = true;
+      autoApproveLogger.warn(
+        'resolveAutoApproveThreshold called with no supervision signal — ' +
+          'falling through to the permissive LEGACY_AUTO_APPROVE_THRESHOLD ' +
+          '(0.9) with no unsupervised hard-block. If this caller can create ' +
+          'an autonomous, capture-class proposal, thread a real ' +
+          'supervisorPresent (and, where available, supervisorMode) — see ' +
+          'workers/voice-action-router.ts or routes/assistant.ts for the ' +
+          'pattern. Logged once per process.',
+      );
+    }
     return LEGACY_AUTO_APPROVE_THRESHOLD;
   }
 
