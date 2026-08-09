@@ -900,7 +900,7 @@ approves by screen/SMS tap).
 `lookup_agreements`, `lookup_account_summary`, `lookup_customer`,
 `lookup_estimates`, `lookup_availability`, `lookup_leads`, `lookup_revenue`,
 `lookup_catalog`, `lookup_day_overview`, `lookup_digest`, `lookup_pending_items`,
-`lookup_materials`
+`lookup_materials`, `lookup_crew_schedule`, `lookup_timesheets`, `lookup_my_day`
 — routed to read-only skills, never to a proposal (correct by design).
 
 **`lookup_materials` (Task 9, 2026-08-07 tradesperson plan):** reads back
@@ -920,6 +920,74 @@ present) is spoken directly, so the operator can tell which of the
 (possibly unfiltered) items are time-sensitive. The fetch itself is
 bounded (`limit`, at most 6 rows) rather than loading the tenant's whole
 pending set — see the Task 9 notes above for the full rationale.
+
+**`lookup_crew_schedule` / `lookup_timesheets` / `lookup_my_day` (Task 10,
+2026-08-07 tradesperson plan):** three more read-only lookup-skill family
+members — no proposal types, no migrations.
+
+- **Permission posture is the deliberate split this task exists to
+  demonstrate.** `lookup_crew_schedule` (owner asks who is free / where a
+  crew member is on a given day or window) and `lookup_timesheets` (owner
+  asks logged hours per crew member for the current tenant-local week) are
+  owner-extended (`OWNER_EXTENDED_LOOKUP_INTENT_TYPES`, requiring
+  `extendedIntents === true`, exactly like `lookup_day_overview`) **and**
+  permission-gated (`reports:view`, `LOOKUP_REQUIRED_PERMISSION`) — a
+  technician's own recorded ask for either gets the refusal, never data.
+  `lookup_my_day` (the SPEAKER asks about their own schedule today) is
+  deliberately in **neither** set — available to ANY technician — because
+  it is strictly self-scoped to the resolved SPEAKER's own day, so
+  self-scoping IS this intent's entire access-control story (mirrors the
+  precedent `lookup_materials` set for "no permission gate" lookups, one
+  level stricter: `lookup_materials` widens to the whole tenant's list when
+  unscoped, which is fine for a shopping list; `lookup_my_day` must never
+  widen past the ONE resolved technician, so it takes a required, already-
+  resolved `technicianId`, never an optional one).
+- **An unresolved crew-member name refuses honestly, never widens to the
+  whole crew.** Both `lookup_crew_schedule` and `lookup_timesheets` join
+  `TECHNICIAN_REF_INTENTS` (entity-resolution.ts) — the same technician
+  resolution `reassign_appointment`/`add_crew_member`/`remove_crew_member`
+  already get — so a named crew member
+  (`extractedEntities.targetTechnicianName`) resolves to a verified
+  `technicianId` before either skill runs. When a name was spoken but
+  didn't resolve, `workers/voice-lookup-answer.ts` refuses by name
+  ("I couldn't find a crew member matching …") rather than silently
+  falling back to everyone's schedule or everyone's hours — the
+  spec-review MAJOR A precedent (`lookup_materials`), applied with MORE
+  force here: a named PERSON who didn't resolve leaking to "everyone" is a
+  materially worse disclosure than an unscoped shopping list.
+- **`lookup_my_day`'s speaker resolution is its access control.** The
+  SPEAKER is resolved to a canonical technician via
+  `dispatch/en-route-voice.ts`'s `resolveCanonicalTechnician` (now
+  exported, reused rather than duplicated) — the SAME resolution
+  `en_route` uses for "on my way". When the speaker cannot be resolved to
+  a technician, the turn FAILS (`{ kind: 'failed', error: 'could not match
+  you to a technician' }`) — it never falls back to an unscoped or
+  whole-crew day.
+- **Day/window resolution reuses the booking path's own resolver.**
+  `lookup_crew_schedule` resolves a spoken day/window
+  (`extractedEntities.dateTimeDescription`) via the SAME
+  `resolveDateTime` (U4, `ai/scheduling/resolve-datetime.ts`) the booking
+  path uses; an unparseable or absent phrase defaults to TODAY, and the
+  spoken summary always names the day actually being reported (never lets
+  a defaulted day pass as the one asked about). `lookup_timesheets` only
+  supports the CURRENT tenant-local week — mirrors `lookup_materials`'s
+  "for tomorrow is not a filter" precedent — so the taxonomy only
+  advertises "this week" phrasing; a real "last week" query is a genuine
+  but separate extension, not done here.
+- **Bounded fetch, technician-per-appointment via `job.assignedTechnicianId`.**
+  All three skills mirror `lookup-day-overview.ts`'s established pattern
+  rather than a second `AssignmentRepository.findByTechnician` fetch
+  (which has no date bound — an unbounded per-technician scan across the
+  tenant's whole assignment history just to answer "are you free today",
+  the exact class of bug I4 fixed for `lookup_materials`). Appointments
+  are bounded to the resolved day (`AppointmentRepository.findByDateRange`);
+  jobs are bounded either to one technician's own jobs
+  (`JobRepository.findByTenant({ technicianId })`, when one is named or
+  resolved) or a generous but bounded tenant-wide page (`limit: 200`, the
+  same cap `lookup-day-overview.ts` uses) otherwise. `lookup_timesheets`
+  reuses `TimeEntryService.weeklyHoursByUser` verbatim — the SAME
+  aggregation `GET /api/time-entries?weekOf=` already uses — rather than
+  re-implementing weekly rollup math.
 
 ## F) Direct status acts — audited directly, never a proposal (B5.5, Part F decision F-3)
 

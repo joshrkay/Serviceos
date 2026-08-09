@@ -5895,6 +5895,11 @@ export function createApp(): AppWithLifecycle {
           customerRepo,
           proposalRepo,
           availabilityFinder,
+          // Task 10 (2026-08-07 tradesperson plan) — crew roster /
+          // technician names / speaker resolution (lookup_crew_schedule,
+          // lookup_timesheets, lookup_my_day). Same userRepo the voice
+          // memo worker is wired with (see voiceActionRouterWorker below).
+          userRepo,
         },
         ...(sharedEntityResolver ? { entityResolver: sharedEntityResolver } : {}),
         tenantTimezoneResolver: async (tenantId: string) =>

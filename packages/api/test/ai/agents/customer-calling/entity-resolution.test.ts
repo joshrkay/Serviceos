@@ -309,6 +309,49 @@ describe('planVoiceEntityLookups — intent-conditioned operator references', ()
     ]);
   });
 
+  // Task 10 (2026-08-07 tradesperson plan) — lookup_crew_schedule/
+  // lookup_timesheets join TECHNICIAN_REF_INTENTS the SAME way
+  // reassign_appointment does, so a named crew member ("What's Mike's day
+  // look like?") resolves to a verified technicianId before either skill
+  // runs. An unresolved name is refused by the caller
+  // (workers/voice-lookup-answer.ts), never silently widened to the whole
+  // crew.
+  it('resolves a named crew member for lookup_crew_schedule', () => {
+    const lookups = planVoiceEntityLookups('lookup_crew_schedule', {
+      targetTechnicianName: 'Mike',
+    });
+    expect(lookups).toEqual([{ kind: 'technician', reference: 'Mike', refKey: 'technicianId' }]);
+  });
+
+  it('lookup_crew_schedule with no named crew member plans no lookups (whole-crew ask)', () => {
+    const lookups = planVoiceEntityLookups('lookup_crew_schedule', {
+      dateTimeDescription: 'Thursday afternoon',
+    });
+    expect(lookups).toEqual([]);
+  });
+
+  it('resolves a named crew member for lookup_timesheets', () => {
+    const lookups = planVoiceEntityLookups('lookup_timesheets', {
+      targetTechnicianName: 'Carlos',
+    });
+    expect(lookups).toEqual([{ kind: 'technician', reference: 'Carlos', refKey: 'technicianId' }]);
+  });
+
+  it('lookup_timesheets with no named crew member plans no lookups (whole-crew ask)', () => {
+    const lookups = planVoiceEntityLookups('lookup_timesheets', {});
+    expect(lookups).toEqual([]);
+  });
+
+  // lookup_my_day is deliberately absent from TECHNICIAN_REF_INTENTS — it
+  // is self-scoped to the SPEAKER via resolveCanonicalTechnician
+  // (dispatch/en-route-voice.ts), never a spoken/resolved reference.
+  it('lookup_my_day never plans a technician lookup — it is self-scoped, not reference-scoped', () => {
+    const lookups = planVoiceEntityLookups('lookup_my_day', {
+      targetTechnicianName: 'Mike',
+    });
+    expect(lookups).toEqual([]);
+  });
+
   it('plans technician + appointment lookups for remove_crew_member (no sticky-job fallback)', () => {
     const lookups = planVoiceEntityLookups(
       'remove_crew_member',

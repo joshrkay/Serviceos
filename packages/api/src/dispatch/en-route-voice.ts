@@ -360,8 +360,15 @@ export type EnRouteVoiceOutcome =
  * dual-check `app.ts`'s `resolveVoiceMemberRole` already uses for the
  * owner-grade lookup gate, so a memo creator resolves the same way on both
  * paths.
+ *
+ * Exported (Task 10, 2026-08-07 tradesperson plan) — `lookup_my_day`
+ * (workers/voice-lookup-answer.ts) reuses this SAME resolution to map the
+ * asking actor to a canonical technician before running its skill;
+ * `lookup_my_day` is deliberately NOT permission-gated, so this resolution
+ * — and refusing the turn when it comes back null — IS that intent's
+ * entire access-control story. One resolution, not a second copy.
  */
-async function resolveCanonicalTechnician(
+export async function resolveCanonicalTechnician(
   userRepo: Pick<UserRepository, 'findByTenant'>,
   tenantId: string,
   rawCreatorId: string,

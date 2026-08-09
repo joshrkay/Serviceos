@@ -155,7 +155,7 @@ async function resolveReference(
   resolver: EntityResolver | undefined,
   tenantId: string,
   reference: string | undefined,
-  kind: 'customer' | 'job',
+  kind: 'customer' | 'job' | 'technician',
 ): Promise<
   | { kind: 'resolved'; id: string }
   | { kind: 'ambiguous'; candidates: EntityCandidate[] }
@@ -205,6 +205,14 @@ export async function dispatchAssistantLookup(
       typeof entities.customerName === 'string' ? entities.customerName : undefined;
     const jobReference =
       typeof entities.jobReference === 'string' ? entities.jobReference : undefined;
+    // Task 10 (2026-08-07 tradesperson plan) — lookup_crew_schedule /
+    // lookup_timesheets name a crew member the SAME way reassign_appointment
+    // does (targetTechnicianName); dateTimeDescription is the raw spoken
+    // day/window phrase lookup_crew_schedule resolves internally.
+    const technicianReference =
+      typeof entities.targetTechnicianName === 'string' ? entities.targetTechnicianName : undefined;
+    const dateTimeDescription =
+      typeof entities.dateTimeDescription === 'string' ? entities.dateTimeDescription : undefined;
 
     // Customer-scoped ask with nothing to resolve → chat-specific clarification.
     if (CUSTOMER_SCOPED_LOOKUP_INTENTS.has(intent) && !customerReference) {
@@ -234,6 +242,20 @@ export async function dispatchAssistantLookup(
       if (resolved.kind === 'resolved') jobId = resolved.id;
     }
 
+    let technicianId: string | undefined;
+    if (technicianReference) {
+      const resolved = await resolveReference(
+        deps.entityResolver,
+        tenantId,
+        technicianReference,
+        'technician',
+      );
+      if (resolved.kind === 'ambiguous') {
+        return ambiguousReply(intent, technicianReference, resolved.candidates);
+      }
+      if (resolved.kind === 'resolved') technicianId = resolved.id;
+    }
+
     const timezone = deps.tenantTimezoneResolver
       ? await deps.tenantTimezoneResolver(tenantId).catch(() => undefined)
       : undefined;
@@ -250,6 +272,9 @@ export async function dispatchAssistantLookup(
         ...(jobId ? { jobId } : {}),
         ...(customerReference ? { customerReference } : {}),
         ...(jobReference ? { jobReference } : {}),
+        ...(technicianId ? { technicianId } : {}),
+        ...(technicianReference ? { technicianReference } : {}),
+        ...(dateTimeDescription ? { dateTimeDescription } : {}),
         ...(timezone ? { timezone } : {}),
         now: deps.now ? deps.now() : new Date(),
       },

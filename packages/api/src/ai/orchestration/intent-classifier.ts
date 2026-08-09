@@ -107,6 +107,23 @@ export type IntentType =
   // job. Never a proposal — routed to the lookup-skill family like every
   // other `lookup_*` intent.
   | 'lookup_materials'
+  // Task 10 (2026-08-07 tradesperson plan) — read-only lookup-skill family
+  // members. lookup_crew_schedule/lookup_timesheets are owner-extended
+  // (OWNER_EXTENDED_LOOKUP_INTENT_TYPES) + permission-gated
+  // (LOOKUP_REQUIRED_PERMISSION, reports:view) exactly like
+  // lookup_day_overview; a named crew member rides
+  // extractedEntities.targetTechnicianName (TECHNICIAN_REF_INTENTS
+  // membership — entity-resolution.ts), resolved to a verified
+  // technicianId before the skill runs, and an unresolved name is refused
+  // rather than silently widened to the whole crew (see
+  // ai/skills/lookup-crew-schedule.ts / lookup-timesheets.ts). lookup_my_day
+  // is the opposite shape: available to ANY technician (NOT owner-extended,
+  // NOT permission-gated) because it is strictly self-scoped to the
+  // resolved SPEAKER's own day — see that skill's module doc comment for
+  // why self-scoping IS this intent's entire access-control story.
+  | 'lookup_crew_schedule'
+  | 'lookup_timesheets'
+  | 'lookup_my_day'
   // Taxonomy 1.2.0 (agent wave, Track A) — three proposal-driving on-ramps:
   //   create_invoice_schedule    — U2: milestone/progress billing plan for a
   //                                job; the verbatim milestone sentence rides
@@ -269,6 +286,9 @@ export const SUPPORTED_INTENTS: readonly IntentType[] = [
   'create_service_agreement',
   'add_material',
   'lookup_materials',
+  'lookup_crew_schedule',
+  'lookup_timesheets',
+  'lookup_my_day',
   'create_invoice_schedule',
   'respond_to_review',
   'create_standing_instruction',
@@ -440,8 +460,31 @@ export const SUPPORTED_INTENTS: readonly IntentType[] = [
  *           executeLookupAnswer's `lookup_materials` case
  *           (workers/voice-lookup-answer.ts) for the extraction/answer
  *           details.
+ *   1.14.0 — Task 10 (2026-08-07 tradesperson plan), additive: three
+ *           READ-ONLY lookup-skill family members, no proposal types, no
+ *           migrations. lookup_crew_schedule (owner asks who is free /
+ *           where a crew member is on a given day or window) and
+ *           lookup_timesheets (owner asks logged hours per crew member for
+ *           the current tenant-local week) are owner-extended
+ *           (OWNER_EXTENDED_LOOKUP_INTENT_TYPES) + permission-gated
+ *           (LOOKUP_REQUIRED_PERMISSION, reports:view) — same posture as
+ *           lookup_day_overview. Both join TECHNICIAN_REF_INTENTS
+ *           (entity-resolution.ts) so a named crew member
+ *           (extractedEntities.targetTechnicianName) resolves to a
+ *           verified technicianId the SAME way reassign_appointment/
+ *           add_crew_member/remove_crew_member already do; an unresolved
+ *           name is refused by name rather than silently widened to the
+ *           whole crew (workers/voice-lookup-answer.ts). lookup_my_day
+ *           (the SPEAKER asks about their own schedule today) is
+ *           deliberately in NEITHER set — available to any technician,
+ *           strictly self-scoped to the resolved speaker's own day via
+ *           dispatch/en-route-voice.ts's (now exported)
+ *           resolveCanonicalTechnician; an unresolvable speaker fails the
+ *           turn rather than ever falling back to an unscoped day. See
+ *           ai/skills/lookup-crew-schedule.ts, lookup-timesheets.ts, and
+ *           lookup-my-day.ts for the full rationale.
  */
-export const INTENT_TAXONOMY_VERSION = '1.13.0';
+export const INTENT_TAXONOMY_VERSION = '1.14.0';
 
 /**
  * P11-001: convenience predicate the FSM adapter uses to route
@@ -473,6 +516,11 @@ export const OWNER_EXTENDED_LOOKUP_INTENT_TYPES = new Set<IntentType>([
   'lookup_day_overview',
   'lookup_digest',
   'lookup_pending_items',
+  // Task 10 (2026-08-07 tradesperson plan) — owner/dispatcher-only crew
+  // reports. `lookup_my_day` is deliberately NOT here — see its own doc
+  // comment on IntentType.
+  'lookup_crew_schedule',
+  'lookup_timesheets',
 ]);
 
 /**
@@ -840,11 +888,14 @@ export interface ClassifyContext {
   ownerSession?: boolean;
   /**
    * Phase-2 Track A (RV-010/064/085) — opt-in for OWNER extended read-only
-   * lookups (lookup_day_overview, lookup_digest, lookup_pending_items).
-   * When true, EXTENDED_INTENTS_PROMPT_SECTION is appended and the
-   * deterministic phrase matcher short-circuits day/digest/pending
-   * phrasings. Complaint/negotiation are NOT gated here — see
-   * customerProtectionIntents.
+   * lookups (lookup_day_overview, lookup_digest, lookup_pending_items;
+   * Task 10 adds lookup_crew_schedule/lookup_timesheets — lookup_my_day is
+   * NOT gated here, see its IntentType doc comment). When true,
+   * EXTENDED_INTENTS_PROMPT_SECTION is appended and the deterministic
+   * phrase matcher short-circuits day/digest/pending phrasings (crew
+   * schedule/timesheets extract entities, so they are deliberately NOT
+   * phrase-matched — see EXTENDED_INTENT_PHRASES's own rule). Complaint/
+   * negotiation are NOT gated here — see customerProtectionIntents.
    */
   extendedIntents?: boolean;
   /**
@@ -1540,6 +1591,12 @@ Supported intents (return exactly ONE):
                            Examples: "Read me the shopping list"
                                      "What parts do I need?"
                                      "What materials are open on the Patel job?"
+- "lookup_my_day"        — the SPEAKER asks about their own schedule today.
+                           Available to any technician; scoped to the
+                           speaker's own assignments only.
+                           Examples: "What's my next job?"
+                                     "What's on my schedule today?"
+                                     "Where am I going after this one?"
 - "unknown"             — anything else: ambiguous transcripts, or edit
                            commands without a clear reference.
 
@@ -1583,7 +1640,7 @@ Return valid JSON with exactly this shape (no prose, no markdown fences):
     "address": "<string, optional — NEW customer's street address, verbatim, on create_customer>",
     "appointmentReference": "<string, optional — existing appointment reference>",
     "newDateTimeDescription": "<string, optional — new time for reschedule_appointment>",
-    "targetTechnicianName": "<string, optional — target technician on reassign_appointment>",
+    "targetTechnicianName": "<string, optional — target technician on reassign_appointment; also the named crew member on lookup_crew_schedule/lookup_timesheets>",
     "cancellationReason": "<string, optional — free-text reason on cancel_appointment>",
     "cancellationType": "<customer_request|technician_unavailable|scheduling_conflict|other, optional>",
     "noteBody": "<string, optional — the note text on add_note; on log_permit, MUST begin \"PERMIT: \" followed by the permit number/status>",
@@ -1735,9 +1792,31 @@ export const EXTENDED_INTENTS_PROMPT_SECTION = `Extended operator intents (this 
                            Examples: "What am I waiting on?"
                                      "What's still out there?"
                                      "Which estimates haven't been accepted?"
+- "lookup_crew_schedule" — owner asks who is free / where a crew member is
+                           on a given day or window. Owner-extended.
+                           Examples: "Who's free Thursday afternoon?"
+                                     "What's Mike's day look like?"
+                                     "Where's Carlos right now?"
+- "lookup_timesheets"    — owner asks logged hours per crew member for a
+                           period (default: this week). Owner-extended.
+                           Examples: "How many hours did Carlos log this week?"
+                                     "Give me everyone's hours for the week"
 Notes:
 - The lookup_* entries above are READ-ONLY intents — never classify a
   command that creates or changes a record as one of them.
+- "lookup_day_overview" vs "lookup_my_day" (always available, not shown in
+  this section): "what's my day look like?" spoken by the OWNER about
+  their OWN cross-crew overview (schedule + priorities + approvals) is
+  lookup_day_overview. The SAME phrase asking about ONE named crew
+  member's day ("What's Mike's day look like?") is lookup_crew_schedule,
+  not lookup_day_overview — lookup_day_overview never takes a
+  targetTechnicianName.
+- lookup_crew_schedule/lookup_timesheets name a crew member in
+  extractedEntities.targetTechnicianName when one is stated, and a day/
+  window phrase in extractedEntities.dateTimeDescription when stated
+  (lookup_crew_schedule only — lookup_timesheets is always "this week").
+  Omit either field when the caller didn't say it; do not guess a name or
+  a day.
 - Do not change the JSON output schema.`;
 
 interface OwnerOperatorCommandPattern {

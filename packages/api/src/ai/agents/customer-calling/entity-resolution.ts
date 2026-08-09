@@ -273,6 +273,17 @@ const TECHNICIAN_REF_INTENTS = new Set([
   'reassign_appointment',
   'add_crew_member',
   'remove_crew_member',
+  // Task 10 (2026-08-07 tradesperson plan) — the owner-extended crew
+  // lookups reuse the SAME technician resolution reassign/add-crew/
+  // remove-crew get: "What's Mike's day look like?" / "How many hours did
+  // Carlos log?" name a crew member via `targetTechnicianName`, resolved
+  // here to a verified `technicianId` BEFORE the lookup skill runs
+  // (voice-lookup-answer.ts stamps it onto ExecuteLookupInput). An
+  // unresolved name is refused by the CALLER, never silently widened to
+  // the whole crew's schedule/hours (see that module's `lookup_crew_
+  // schedule`/`lookup_timesheets` cases).
+  'lookup_crew_schedule',
+  'lookup_timesheets',
 ]);
 
 /**

@@ -1324,11 +1324,19 @@ async function processSegment(
 
     // The memo creator (voice_recordings.created_by) is the authoritative
     // identity for the permission-gated authorization gate — the enqueue
-    // payload's userId can be 'system' on this path. Resolved only for
-    // permission-gated intents; a read failure falls through to the
-    // adapter's fail-closed refusal.
+    // payload's userId can be 'system' on this path. Resolved for
+    // permission-gated intents AND for `lookup_my_day` (Task 10): that
+    // intent carries no permission, but it still needs the memo creator's
+    // identity to resolve the SPEAKER to a technician — self-scoping is
+    // its entire access-control story (workers/voice-lookup-answer.ts's
+    // `lookup_my_day` case fails the turn when this is absent, rather than
+    // ever falling back to an unscoped answer). A read failure falls
+    // through to the adapter's fail-closed refusal either way.
     let memoCreatorId: string | undefined;
-    if (LOOKUP_REQUIRED_PERMISSION.has(classification.intentType)) {
+    if (
+      LOOKUP_REQUIRED_PERMISSION.has(classification.intentType) ||
+      classification.intentType === 'lookup_my_day'
+    ) {
       try {
         const recording = await deps.voiceRepo.findById(tenantId, recordingId);
         memoCreatorId = recording?.createdBy;
@@ -1359,6 +1367,18 @@ async function processSegment(
         ...(classification.extractedEntities?.jobReference
           ? { jobReference: classification.extractedEntities.jobReference }
           : {}),
+        // Task 10 — the resolver-verified crew-member id (TECHNICIAN_REF_
+        // INTENTS membership, entity-resolution.ts) and the raw spoken
+        // reference/day phrase, for lookup_crew_schedule/lookup_timesheets.
+        ...(lookupAnnotation.resolved.technicianId
+          ? { technicianId: lookupAnnotation.resolved.technicianId }
+          : {}),
+        ...(classification.extractedEntities?.targetTechnicianName
+          ? { technicianReference: classification.extractedEntities.targetTechnicianName }
+          : {}),
+        ...(classification.extractedEntities?.dateTimeDescription
+          ? { dateTimeDescription: classification.extractedEntities.dateTimeDescription }
+          : {}),
         ...(lookupScheduling?.timezone ? { timezone: lookupScheduling.timezone } : {}),
         now: deps.now ? deps.now() : new Date(),
       },
@@ -1369,6 +1389,10 @@ async function processSegment(
         customerRepo: deps.customerRepo,
         proposalRepo: deps.proposalRepo,
         availabilityFinder: deps.availabilityFinder,
+        // Task 10 — crew roster / technician names / speaker resolution
+        // (lookup_crew_schedule, lookup_timesheets, lookup_my_day). Already
+        // carried by this worker for en_route's speaker resolution below.
+        userRepo: deps.userRepo,
       },
     );
 
