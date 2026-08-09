@@ -132,6 +132,7 @@ import type { BrandVoiceRepository } from '../../tenants/brand/brand-voice';
 import { AddMaterialExecutionHandler } from './add-material-handler';
 import { AddCatalogItemExecutionHandler } from './add-catalog-item-handler';
 import type { MaterialItemRepository } from '../../materials/material-item';
+import { CallbackExecutionHandler } from './callback-handler';
 
 export interface ExecutionContext {
   tenantId: string;
@@ -1548,6 +1549,14 @@ export function createExecutionHandlerRegistry(deps?: {
     // registered unconditionally, degrades to a synthetic-id passthrough
     // without materialItemRepo.
     new AddMaterialExecutionHandler(deps?.materialItemRepo, deps?.auditRepo),
+    // Task 14 (2026-08-07 tradesperson plan) — callback: a deliberately
+    // dep-free acknowledgement handler. Registered UNCONDITIONALLY (no dep
+    // gate — there is nothing to wire; see callback-handler.ts's class doc
+    // comment for why a no-op is the correct semantic, not a gap). Fixes
+    // the pre-existing bug where an approved `callback` proposal had no
+    // registered handler at all and threw HANDLER_NOT_FOUND, retrying into
+    // terminal 'execution_failed'.
+    new CallbackExecutionHandler(deps?.auditRepo),
   ];
 
   // Handlers that mutate existing entities take a repo dep. Registered
