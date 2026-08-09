@@ -61,6 +61,21 @@ import { buildTaskHandlers } from '../ai/orchestration/handler-registry';
 // resolves to a verified invoiceId exactly as the spoken memo does.
 import { resolveVoiceEntityReferences } from '../ai/agents/customer-calling/entity-resolution';
 import type { EntityResolver } from '../ai/resolution/entity-resolver';
+// Phase 12 supervisor gate (commit 1 of the followup-autoapprove-default
+// fix) — mirrors workers/voice-action-router.ts's use of the SAME function:
+// resolve tenant-wide supervisor presence once per turn and thread it onto
+// every dispatched TaskContext so an autonomous, capture-class proposal
+// (draft_estimate / draft_invoice / update_estimate / update_invoice /
+// update_job / create_appointment / create_booking) can only auto-approve
+// when a supervisor is actually on duty. Before this, chat never threaded
+// supervisorPresent/supervisorMode at all, so `resolveAutoApproveThreshold`
+// silently fell through to the permissive LEGACY_AUTO_APPROVE_THRESHOLD
+// (0.9) regardless of real tenant supervision — see auto-approve.ts and
+// CHAT_CONTEXT_CUSTOMER_ID_INTENTS's doc comment (C1) for the full history.
+// `isSupervisorPresent` never throws (its own internal try/catch degrades
+// to the permissive `true` default), so no wrapping try/catch is needed
+// here — same as the voice worker's call site.
+import { isSupervisorPresent } from '../ai/supervisor-presence';
 import type { InvoiceRepository } from '../invoices/invoice';
 import type { CatalogItemRepository } from '../catalog/catalog-item';
 import type { EstimateRepository } from '../estimates/estimate';
@@ -1192,6 +1207,16 @@ async function generateAssistantReply(
   // proposal from executing for a caller who lacks the direct permission.
   // Undefined → treated as "lacks it" (fails closed).
   callerRole?: string,
+  // P12-001/P12-004 wiring gap (commit 1) — `req.auth.mode` has been
+  // populated by `requireTenant` on every authenticated request since
+  // P12-001, but no proposal-creating caller ever forwarded it into
+  // `resolveAutoApproveThreshold`. For chat, "the user-on-record for the
+  // originating session" (the docstring's phrase for supervisorMode) is
+  // just the requesting user themselves — there is no separate voice
+  // session — so `req.auth.mode` is exactly the right per-request signal.
+  // Defaults to 'supervisor' at the auth layer when no mode loader is
+  // wired, matching DEFAULT_AUTO_APPROVE_THRESHOLDS' own default mode.
+  supervisorMode?: 'supervisor' | 'tech' | 'both',
 ) {
   const lastUser = [...messages].reverse().find((m) => m.role === 'user');
   const lastUserText = lastUser?.content ?? '';
@@ -1251,6 +1276,14 @@ async function generateAssistantReply(
         }
       }
       const timezoneContext = tenantTimezone ? { timezone: tenantTimezone } : {};
+
+      // Phase 12 supervisor gate — resolved once per turn, mirroring
+      // workers/voice-action-router.ts's identical call. Reads the
+      // singleton wired in app.ts (pgSupervisorPresenceLoader); with no
+      // loader wired (in-memory dev mode, most tests) this returns the
+      // permissive `true` default, preserving existing fixtures exactly
+      // the same way the voice worker's tests are preserved.
+      const supervisorPresent = await isSupervisorPresent(tenantId);
 
       // QA-2026-06-05 (AST-05): deterministic read-only query — answer from
       // data, never propose. Runs before classification so phrasing variance
@@ -1451,6 +1484,12 @@ async function generateAssistantReply(
             ...(segStandingInstructions
               ? { standingInstructions: segStandingInstructions }
               : {}),
+            // Phase 12 supervisor gate (commit 1) — see the isSupervisorPresent
+            // import comment above. Threaded unconditionally: harmless for
+            // every handler that never sets sourceTrustTier (the vast
+            // majority), load-bearing for the six that do.
+            supervisorPresent,
+            ...(supervisorMode ? { supervisorMode } : {}),
           });
           if (!proposal) continue;
           stampVerifiedIds(proposal, segVerifiedIds);
@@ -1556,6 +1595,10 @@ async function generateAssistantReply(
           // against it. Absent ⇒ the handler gates instead of guessing.
           ...timezoneContext,
           ...(standingInstructions ? { standingInstructions } : {}),
+          // Phase 12 supervisor gate (commit 1) — see the isSupervisorPresent
+          // import comment above.
+          supervisorPresent,
+          ...(supervisorMode ? { supervisorMode } : {}),
         });
         stampVerifiedIds(proposal, verifiedIds);
         dropUnverifiedIds(
@@ -1905,6 +1948,13 @@ export function createAssistantRouter(deps: AssistantRouterDeps): Router {
           // the membership row's role), so a stale/forged `owner` token claim
           // cannot buy a self-executing proposal.
           req.auth!.role,
+          // P12-001/P12-004 wiring gap (commit 1) — `requireTenant` (above)
+          // already attaches `req.auth.mode` from `users.current_mode`
+          // (defaulting to 'supervisor' with no loader wired); it just had
+          // no downstream reader until now. `AuthWithMode` is a local,
+          // unexported cast type in middleware/auth.ts, so it's mirrored
+          // here rather than imported.
+          (req.auth as { mode?: 'supervisor' | 'tech' | 'both' } | undefined)?.mode,
         );
 
         // Story 3.11 — persist the turn so the conversation survives reload and
