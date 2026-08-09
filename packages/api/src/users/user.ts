@@ -146,6 +146,35 @@ export function validateUpdateUserInput(input: UpdateUserInput): string[] {
   return errors;
 }
 
+/**
+ * Resolve a raw Clerk subject (or an already-canonical `users.id`) to its
+ * tenant user row. `voice_recordings.created_by` and the authenticated
+ * chat operator's `req.auth.userId` are both CLERK subjects, not the
+ * canonical `users.id` other repos (assignments, appointments, time
+ * entries) key on — this is the one dual-check (`clerkUserId === raw ||
+ * id === raw`) every voice/chat identity resolution needs, so it lives
+ * here once rather than being copied per caller.
+ *
+ * (2026-08-09, Task 10 quality-review I7) — moved from
+ * `dispatch/en-route-voice.ts` (named `resolveCanonicalTechnician` there)
+ * so `workers/voice-lookup-answer.ts` — which declares itself
+ * SURFACE-NEUTRAL in its own header — no longer transitively imports
+ * `dispatch/routes.ts` (an Express router module) just to resolve a user
+ * id. Renamed too: this does NO role filtering at all (any tenant user
+ * matches, technician or not), so `resolveCanonicalTechnician` over-
+ * promised what it checks — the caller (`lookup_my_day`'s case body)
+ * already owns the "is this actually a technician" question implicitly,
+ * since a non-technician's day is simply empty.
+ */
+export async function resolveCanonicalUser(
+  userRepo: Pick<UserRepository, 'findByTenant'>,
+  tenantId: string,
+  rawSubject: string,
+): Promise<User | null> {
+  const users = await userRepo.findByTenant(tenantId);
+  return users.find((u) => u.clerkUserId === rawSubject || u.id === rawSubject) ?? null;
+}
+
 export async function listUsers(
   tenantId: string,
   repository: UserRepository,

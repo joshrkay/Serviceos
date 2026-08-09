@@ -69,6 +69,21 @@ async function fixtures(opts: FixtureOpts = {}) {
 }
 
 describe('lookupTimesheets skill', () => {
+  // I6 — record('found', ...) coverage (only 'none'/'error' were previously exercised).
+  it('records the lookup event on the found branch', async () => {
+    const deps = await fixtures({
+      entries: [makeEntry({ userId: 'tech-mike', durationMinutes: 480 })],
+      technicians: [{ id: 'tech-mike', firstName: 'Mike', lastName: 'Diaz' }],
+    });
+    const lookupEvents = eventsSpy();
+
+    await lookupTimesheets({ tenantId: TENANT, timezone: TZ, now: NOW }, { ...deps, lookupEvents });
+
+    expect(lookupEvents.record).toHaveBeenCalledWith(
+      expect.objectContaining({ tenantId: TENANT, intent: 'lookup_timesheets', resultStatus: 'found', resultCount: 1 }),
+    );
+  });
+
   it('reports hours logged per crew member this week when no technician is named', async () => {
     const deps = await fixtures({
       entries: [
@@ -158,8 +173,10 @@ describe('lookupTimesheets skill', () => {
     expect(res.status).toBe('found');
     if (res.status !== 'found') throw new Error('unreachable');
     expect(res.data.entries).toEqual([{ userId: 'tech-carlos', name: 'Carlos Ruiz', totalHours: 0 }]);
-    expect(res.summary).toContain('Carlos Ruiz');
-    expect(res.summary).toMatch(/no hours|0 hours|hasn't logged/i);
+    // Quality-review I6 — pin the EXACT string this module's own doc
+    // comment argues for ("hasn't logged", never "0 hours") rather than a
+    // loose regex that would also accept the phrasing the doc rejects.
+    expect(res.summary).toBe("Carlos Ruiz hasn't logged any hours this week.");
   });
 
   it('reports status "none" and records the event when nobody logged any hours this week', async () => {
@@ -185,7 +202,7 @@ describe('lookupTimesheets skill', () => {
     expect(res.status).toBe('none');
   });
 
-  it('truncates the spoken list with an honest "and more" tail for a large crew', async () => {
+  it('truncates the spoken list with an EXACT "and N more crew members" tail (pinned count)', async () => {
     const technicians = Array.from({ length: 8 }, (_, i) => ({
       id: `tech-${i}`,
       firstName: `Tech${i}`,
@@ -199,7 +216,29 @@ describe('lookupTimesheets skill', () => {
     expect(res.status).toBe('found');
     if (res.status !== 'found') throw new Error('unreachable');
     expect(res.data.entries).toHaveLength(8);
-    expect(res.summary).toContain('more');
+    // MAX_SPOKEN_ENTRIES is 6 — exactly 2 must be left over.
+    expect(res.summary).toContain('and 2 more crew members');
+  });
+
+  // Quality-review I3 — an uncapped list reads with a natural "and", not
+  // bare commas/semicolons ("Mike Diaz: 8 hours and Carlos Ruiz: 4 hours").
+  it('an uncapped whole-crew list joins with "and", not a bare separator', async () => {
+    const deps = await fixtures({
+      entries: [
+        makeEntry({ userId: 'tech-mike', durationMinutes: 480 }),
+        makeEntry({ userId: 'tech-carlos', durationMinutes: 240 }),
+      ],
+      technicians: [
+        { id: 'tech-mike', firstName: 'Mike', lastName: 'Diaz' },
+        { id: 'tech-carlos', firstName: 'Carlos', lastName: 'Ruiz' },
+      ],
+    });
+
+    const res = await lookupTimesheets({ tenantId: TENANT, timezone: TZ, now: NOW }, deps);
+
+    expect(res.status).toBe('found');
+    if (res.status !== 'found') throw new Error('unreachable');
+    expect(res.summary).toContain('Mike Diaz: 8 hours and Carlos Ruiz: 4 hours');
   });
 
   describe('error path', () => {

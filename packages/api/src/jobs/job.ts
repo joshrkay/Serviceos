@@ -210,6 +210,21 @@ export interface JobRepository {
     customerId: string,
     opts?: JobFindByCustomerOptions,
   ): Promise<Job[]>;
+  /**
+   * Task 10 quality-review C2 — bulk read by id, tenant-scoped. Exists so
+   * a caller who already knows WHICH jobs it needs (e.g. the distinct
+   * `jobId`s off a day's appointments) can fetch exactly those rows
+   * instead of paging `findByTenant` by `createdAt DESC` and hoping the
+   * relevant job is recent enough to be on the page. It never is,
+   * reliably, once a tenant has done more than `limit` jobs — a job
+   * created months ago can still have a live appointment today (recurring
+   * maintenance, a reschedule), and `findByTenant({ limit })` silently
+   * drops it. Strictly MORE bounded than any tenant-wide page: the
+   * result set is exactly `ids.length` rows, correct at any tenant size,
+   * any job age. Empty `ids` returns `[]` without a query. Order is not
+   * guaranteed — callers that care, index by id.
+   */
+  findByIds(tenantId: string, ids: string[]): Promise<Job[]>;
   update(tenantId: string, id: string, updates: Partial<Job>): Promise<Job | null>;
   /**
    * Atomically credit `amountCents` to the job's paid deposit in a SINGLE
@@ -409,6 +424,14 @@ export class InMemoryJobRepository implements JobRepository {
     results.sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
     const limit = Math.min(opts?.limit ?? results.length, MAX_JOB_LIMIT);
     return results.slice(0, limit).map((j) => ({ ...j }));
+  }
+
+  async findByIds(tenantId: string, ids: string[]): Promise<Job[]> {
+    if (ids.length === 0) return [];
+    const idSet = new Set(ids);
+    return Array.from(this.jobs.values())
+      .filter((j) => j.tenantId === tenantId && idSet.has(j.id))
+      .map((j) => ({ ...j }));
   }
 
   async findByTenant(tenantId: string, options?: JobListOptions): Promise<Job[]> {

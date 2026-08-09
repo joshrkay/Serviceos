@@ -23,6 +23,7 @@ import type { JobRepository } from '../../jobs/job';
 import type { SettingsRepository } from '../../settings/settings';
 import type { LookupEventService } from '../../lookup-events/lookup-event-service';
 import { formatUsdCentsPlain } from '@ai-service-os/shared';
+import { formatHours, spokenList } from './spoken-format';
 
 export interface LookupJobProfitInput {
   tenantId: string;
@@ -59,15 +60,6 @@ function formatCents(cents: number): string {
   return formatUsdCentsPlain(Math.abs(cents));
 }
 
-/** Whole-ish hours for speech: "3 hours", "1 hour", "1.5 hours". */
-function formatHours(minutes: number): string {
-  const hours = minutes / 60;
-  // One decimal, then drop a trailing ".0" so "3.0" speaks as "3".
-  const rounded = Math.round(hours * 10) / 10;
-  const text = Number.isInteger(rounded) ? String(rounded) : rounded.toFixed(1);
-  return `${text} ${rounded === 1 ? 'hour' : 'hours'}`;
-}
-
 /**
  * Build the spoken summary. Kept pure + exported so the skill test can assert
  * grammaticality (incl. the negative-margin and unpriced-labor cases) without
@@ -91,18 +83,15 @@ export function formatJobProfitSummary(jobLabel: string, profit: JobProfit): str
     costClauses.push(`${formatCents(profit.expensesCents)} in expenses`);
   }
   if (profit.laborMinutes > 0) {
+    const laborHours = formatHours(profit.laborMinutes / 60);
     costClauses.push(
       profit.laborUnpriced
-        ? `${formatHours(profit.laborMinutes)} of labor`
-        : `${formatHours(profit.laborMinutes)} of labor (${formatCents(profit.laborCents ?? 0)})`,
+        ? `${laborHours} of labor`
+        : `${laborHours} of labor (${formatCents(profit.laborCents ?? 0)})`,
     );
   }
   if (costClauses.length > 0) {
-    const joined =
-      costClauses.length === 1
-        ? costClauses[0]
-        : `${costClauses.slice(0, -1).join(', ')} and ${costClauses[costClauses.length - 1]}`;
-    parts.push(`you spent ${joined}`);
+    parts.push(`you spent ${spokenList(costClauses)}`);
   }
 
   // Margin clause — sign-aware so a loss reads honestly.

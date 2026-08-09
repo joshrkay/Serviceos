@@ -62,17 +62,20 @@ export const HAIKU_OUTPUT_CENTS_PER_MTOKEN = 1500;
 //
 // This constant MUST stay an overestimate of the real classifier system
 // prompt (SYSTEM_PROMPT in packages/api/src/ai/orchestration/intent-classifier.ts,
-// exported for exactly this reason). Re-measured 2026-08-07 after the
-// Tradesperson wave 1 taxonomy bump (schedule_inspection / log_permit /
-// log_warranty_claim, taxonomy 1.6.0): ~47,400 chars ≈ 11,850 tokens by this
-// file's own chars/4 heuristic (estimateTokens) — up from 43,267 chars ≈
-// 10,817 tokens (2026-07-29, B5.5/en_route). Bumped from 13,500 to 16,000:
-// the prior constant had shrunk to ~1 token of headroom over the 1.15x
-// safety margin (packages/api/test/voice-quality/voice-eval-live.test.ts),
-// and the Tradesperson plan adds ~10 more intent blocks (~635 chars each,
-// ~6,350 chars) across its remaining phases — 16,000 covers that full
-// 13-intent taxonomy with ~20-25% headroom over the projected end state,
-// not just the current measurement. (Previously 2026-07-26, VOX-07
+// exported for exactly this reason). Re-measured 2026-08-09 after Task 10
+// of the Tradesperson plan (2026-08-07) — the final task in that plan wave,
+// adding lookup_crew_schedule / lookup_timesheets / lookup_my_day (taxonomy
+// 1.14.0) plus a "Distinctions that matter" disambiguation note
+// (lookup_appointments vs lookup_my_day): 55,992 chars ≈ 13,998 tokens by
+// this file's own chars/4 heuristic (estimateTokens) — up from ~47,400
+// chars ≈ 11,850 tokens (2026-08-07, taxonomy 1.6.0). Bumped from 16,000 to
+// 20,000: the prior constant had fallen BELOW the 1.15x safety margin
+// entirely (packages/api/test/voice-quality/voice-eval-live.test.ts failed:
+// 16,000 < 16,098 required), and this plan wave is now complete, so there
+// is no known further taxonomy growth to project forward — 20,000 gives
+// ~43% headroom over the current measurement (~24% over the strict 1.15x
+// minimum) for incidental doc/comment growth in the prompt text, not a
+// specific future taxonomy size. (Previously 2026-07-26, VOX-07
 // create_invoice field guidance: 37,899 chars ≈ 9,475 tokens. Before that,
 // 2026-07-17: 35,309 chars ≈ 8,828 tokens.) The live eval path
 // (SYNTHETIC_TENANT_ID, no vertical/plan/owner/extended context) sends only
@@ -85,7 +88,7 @@ export const HAIKU_OUTPUT_CENTS_PER_MTOKEN = 1500;
 // overestimate — if that test fails, bump this constant (don't just raise
 // the test's margin) and re-verify the cost cap semantics still abort
 // before spending.
-export const EST_SYSTEM_PROMPT_TOKENS = 16000;
+export const EST_SYSTEM_PROMPT_TOKENS = 20000;
 export const EST_OUTPUT_TOKENS_PER_CALL = 250;
 export const DEFAULT_COST_CAP_CENTS = 500; // $5
 

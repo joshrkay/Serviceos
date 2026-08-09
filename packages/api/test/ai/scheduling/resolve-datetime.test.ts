@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   resolveDateTime,
+  resolveSpokenDay,
   formatForReadback,
   DEFAULT_TENANT_TIMEZONE,
 } from '../../../src/ai/scheduling/resolve-datetime';
@@ -121,5 +122,94 @@ describe('resolveDateTime', () => {
     const s = formatForReadback('2026-06-02T18:00:00.000Z', 'America/New_York');
     expect(s).toContain('2:00');
     expect(s).toContain('Tuesday');
+  });
+});
+
+// (2026-08-09, Task 10 quality-review C1) — resolveSpokenDay is the
+// lookup-side sibling of resolveDateTime: it must ACCEPT every bare-day
+// phrase resolveDateTime correctly REFUSES for booking. NOW is a Thursday
+// so the exact phrases the review probed are pinned verbatim.
+describe('resolveSpokenDay', () => {
+  // Thursday 2026-06-11, 07:00 America/New_York (11:00 UTC).
+  const NOW_THU = new Date('2026-06-11T11:00:00.000Z');
+
+  it('resolves a bare weekday that IS today to today\'s date key', () => {
+    expect(resolveSpokenDay('Thursday', { timezone: 'America/New_York', now: NOW_THU })).toBe(
+      '2026-06-11',
+    );
+  });
+
+  it('resolves "tomorrow" (bare, no time-of-day) — resolveDateTime refuses this exact phrase', () => {
+    expect(resolveSpokenDay('tomorrow', { timezone: 'America/New_York', now: NOW_THU })).toBe(
+      '2026-06-12',
+    );
+    // Pin the contrast: the booking resolver correctly refuses the same phrase.
+    const booking = resolveDateTime('tomorrow', { timezone: 'America/New_York', now: NOW_THU });
+    expect(booking.ok).toBe(false);
+    if (!booking.ok) expect(booking.reason).toBe('ambiguous_no_time');
+  });
+
+  it('resolves "Monday" (bare weekday, forward-looking) — resolveDateTime refuses this exact phrase', () => {
+    expect(resolveSpokenDay('Monday', { timezone: 'America/New_York', now: NOW_THU })).toBe(
+      '2026-06-15',
+    );
+    const booking = resolveDateTime('Monday', { timezone: 'America/New_York', now: NOW_THU });
+    expect(booking.ok).toBe(false);
+    if (!booking.ok) expect(booking.reason).toBe('ambiguous_no_time');
+  });
+
+  it('resolves "this Friday" — resolveDateTime refuses this exact phrase', () => {
+    expect(resolveSpokenDay('this Friday', { timezone: 'America/New_York', now: NOW_THU })).toBe(
+      '2026-06-12',
+    );
+    const booking = resolveDateTime('this Friday', { timezone: 'America/New_York', now: NOW_THU });
+    expect(booking.ok).toBe(false);
+    if (!booking.ok) expect(booking.reason).toBe('ambiguous_no_time');
+  });
+
+  it('resolves "next week" to a date — resolveDateTime refuses this exact phrase', () => {
+    const key = resolveSpokenDay('next week', { timezone: 'America/New_York', now: NOW_THU });
+    expect(key).not.toBeNull();
+    expect(key).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+    const booking = resolveDateTime('next week', { timezone: 'America/New_York', now: NOW_THU });
+    expect(booking.ok).toBe(false);
+    if (!booking.ok) expect(booking.reason).toBe('ambiguous_no_time');
+  });
+
+  it('resolves a daypart phrase to the same day as the bare weekday ("Thursday afternoon" == today)', () => {
+    expect(
+      resolveSpokenDay('Thursday afternoon', { timezone: 'America/New_York', now: NOW_THU }),
+    ).toBe('2026-06-11');
+  });
+
+  it('"next Thursday afternoon" resolves to NEXT WEEK\'s Thursday, not today', () => {
+    expect(
+      resolveSpokenDay('next Thursday afternoon', { timezone: 'America/New_York', now: NOW_THU }),
+    ).toBe('2026-06-18');
+  });
+
+  it('returns null for an unparseable phrase — never guesses a day', () => {
+    expect(
+      resolveSpokenDay('gibberish not a date', { timezone: 'America/New_York', now: NOW_THU }),
+    ).toBeNull();
+  });
+
+  it('returns null for an empty/absent phrase', () => {
+    expect(resolveSpokenDay('', { timezone: 'America/New_York', now: NOW_THU })).toBeNull();
+    expect(resolveSpokenDay('   ', { timezone: 'America/New_York', now: NOW_THU })).toBeNull();
+  });
+
+  it('anchors to the TENANT timezone, not the server/UTC day', () => {
+    // 11:00 UTC Thursday is already Thursday in every US zone, so use a
+    // moment where the tenant-local day differs from the UTC day: 02:30
+    // UTC on 2026-06-12 (Friday) is still 22:30 Thursday in
+    // America/Los_Angeles (PDT, UTC-7).
+    const crossMidnightUtc = new Date('2026-06-12T02:30:00.000Z');
+    expect(
+      resolveSpokenDay('today', { timezone: 'America/Los_Angeles', now: crossMidnightUtc }),
+    ).toBe('2026-06-11');
+    expect(
+      resolveSpokenDay('tomorrow', { timezone: 'America/Los_Angeles', now: crossMidnightUtc }),
+    ).toBe('2026-06-12');
   });
 });

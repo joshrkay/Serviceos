@@ -20,43 +20,70 @@
  * individual — a materially worse disclosure than an unscoped shopping
  * list.
  *
- * ── Day/window resolution ───────────────────────────────────────────────
+ * ── Day/window resolution (quality-review C1) ───────────────────────────
  *
- * Reuses the SAME `resolveDateTime` (U4, ai/scheduling/resolve-datetime.ts)
- * the booking path uses, given the caller's raw spoken
- * `dateTimeDescription` + tenant timezone. Only the DAY the phrase
- * resolves to is used — the whole calendar day is reported even when a
- * daypart was named ("Thursday afternoon" shows Thursday's whole
- * schedule, not just noon-5pm; narrowing to the daypart itself is a
- * genuine future refinement, not done here). A phrase that doesn't parse
- * (or no phrase at all — "What's Mike's day look like?" names no day)
- * defaults to TODAY, and the spoken summary always names the day being
- * reported ("today" vs. the resolved weekday) so a defaulted day can never
- * be mistaken for the one actually asked about.
+ * Resolves the caller's raw spoken `dateTimeDescription` via
+ * `resolveSpokenDay` (ai/scheduling/resolve-datetime.ts) — the LOOKUP-side
+ * sibling of the booking resolver `resolveDateTime`. The two have
+ * DIFFERENT contracts on purpose: booking a bare "Thursday" is
+ * meaningless (there's no time to reserve), so `resolveDateTime` correctly
+ * REFUSES it; a day/window LOOKUP has nothing to book, it only needs to
+ * know WHICH DAY, so `resolveSpokenDay` accepts exactly the bare-day
+ * phrasings `resolveDateTime` refuses ("Thursday", "tomorrow", "Monday",
+ * "this Friday", "next week") — which is exactly what the classifier
+ * prompt instructs callers to say. An earlier version of this skill called
+ * `resolveDateTime` here, which silently answered about TODAY for every
+ * one of those phrasings. Only the DAY the phrase resolves to is used —
+ * the whole calendar day is reported even when a daypart was named
+ * ("Thursday afternoon" shows Thursday's whole schedule, not just
+ * noon-5pm; narrowing to the daypart itself is a genuine future
+ * refinement, not done here). A phrase that doesn't parse (or no phrase at
+ * all — "What's Mike's day look like?" names no day) defaults to TODAY,
+ * and the spoken summary always names the day being reported ("today" vs.
+ * the resolved weekday) so a defaulted day can never be mistaken for the
+ * one actually asked about.
  *
- * ── Technician roster + assignment (bounded fetch) ──────────────────────
+ * ── Roster + assignment (quality-review C2, MEDIUM) ─────────────────────
  *
- * Mirrors `lookup-day-overview.ts`'s established pattern: a job's
- * `assignedTechnicianId` (not a second `AssignmentRepository` fetch) is
- * the technician-per-appointment join. `AssignmentRepository.findByTechnician`
- * has no date bound — using it here would be an UNBOUNDED per-technician
- * fetch across the tenant's entire assignment history just to answer "are
- * you free today" (the exact bounded-fetch failure class `lookup-
- * materials.ts`'s I4 fix addressed). Appointments are bounded to the
- * resolved day (`AppointmentRepository.findByDateRange`); jobs are bounded
- * either to that ONE technician's own jobs (`JobRepository.findByTenant`
- * with `technicianId`, when one is named) or to a generous but bounded
- * tenant-wide page (`limit: 200`, the same cap `lookup-day-overview.ts`
- * uses) when reporting on the whole crew.
+ * The roster is EVERY user in the tenant, not just `role: 'technician'` —
+ * the entity resolver's `technician` EntityKind matches
+ * `role IN ('technician','dispatcher','owner')` ("anyone assignable to an
+ * appointment", pg-entity-resolver.ts), and every user role in this system
+ * IS one of those three, so an unfiltered `findByTenant` is exactly that
+ * set. Filtering to `role: 'technician'` alone meant a working owner or
+ * dispatcher — a normal case in trades, not an edge one — resolved fine by
+ * name but then vanished from `techById`, so their real bookings were
+ * silently dropped and they were reported "free all day" under the
+ * fallback name 'that technician'.
+ *
+ * Appointments are bounded to the resolved day
+ * (`AppointmentRepository.findByDateRange`, tenant-wide); jobs are
+ * resolved by id from THAT DAY'S appointments alone
+ * (`JobRepository.findByIds`) rather than a `findByTenant({ limit })`
+ * page. A page ordered by `createdAt DESC` returns the most RECENTLY
+ * CREATED jobs, not the jobs relevant to this day — a job created months
+ * ago (a recurring maintenance visit, a reschedule) routinely still has a
+ * live appointment today, and once a tenant has done more jobs than the
+ * page limit, that appointment's job silently misses the page. The
+ * mechanism made this WORSE than a missing string: `jobById.get(...)`
+ * returning undefined meant the technician was never added to
+ * `busyTechnicianIds` at all, so a technician with a real appointment
+ * today was reported free. `findByIds` is strictly MORE bounded than any
+ * tenant-wide page (exactly the day's distinct job ids) and correct at any
+ * tenant size or job age. `AssignmentRepository.findByTechnician` remains
+ * the wrong tool for either problem — it has no date bound at all, an
+ * unbounded per-technician scan across the tenant's entire assignment
+ * history just to answer "are you free today" (the exact bounded-fetch
+ * failure class `lookup-materials.ts`'s I4 fix addressed).
  */
 import type { Appointment, AppointmentRepository } from '../../appointments/appointment';
 import type { Job, JobRepository } from '../../jobs/job';
 import type { User, UserRepository } from '../../users/user';
 import type { LookupEventService } from '../../lookup-events/lookup-event-service';
-import { resolveDateTime } from '../scheduling/resolve-datetime';
+import { resolveSpokenDay } from '../scheduling/resolve-datetime';
 import { resolveDayWindow } from '../../reports/money-dashboard';
 import { localDateString } from '../../digest/digest-service';
-import { plural } from './spoken-format';
+import { plural, formatTime, technicianDisplayName, spokenList } from './spoken-format';
 
 export interface LookupCrewScheduleInput {
   tenantId: string;
@@ -71,7 +98,7 @@ export interface LookupCrewScheduleInput {
 
 export interface LookupCrewScheduleDeps {
   appointmentRepo: AppointmentRepository;
-  jobRepo: JobRepository;
+  jobRepo: Pick<JobRepository, 'findByIds'>;
   userRepo: Pick<UserRepository, 'findByTenant'>;
   lookupEvents?: LookupEventService;
 }
@@ -102,34 +129,23 @@ const DEFAULT_TIMEZONE = 'America/New_York';
 const MAX_SPOKEN_FREE = 8;
 const MAX_SPOKEN_BOOKINGS = 5;
 
-function technicianDisplayName(u: Pick<User, 'firstName' | 'lastName' | 'email'>): string {
-  return [u.firstName, u.lastName].filter(Boolean).join(' ') || u.email;
-}
-
-function formatTime(d: Date, timezone: string): string {
+function dayLabelForDateKey(dateKey: string): string {
+  // UTC-anchored render of a bare calendar-date string — mirrors
+  // lookup-materials.ts's formatNeededByLabel: never re-project a
+  // resolved YYYY-MM-DD through a timezone a second time (that's exactly
+  // how a midnight-UTC date rolls back a day in a western tenant zone).
   return new Intl.DateTimeFormat('en-US', {
-    hour: 'numeric',
-    minute: 'numeric',
-    hour12: true,
-    timeZone: timezone,
-  })
-    .format(d)
-    .replace(':00', '');
-}
-
-function dayLabelFor(d: Date, timezone: string): string {
-  return new Intl.DateTimeFormat('en-US', {
+    timeZone: 'UTC',
     weekday: 'long',
     month: 'long',
     day: 'numeric',
-    timeZone: timezone,
-  }).format(d);
+  }).format(new Date(`${dateKey}T00:00:00Z`));
 }
 
 /**
- * Resolve the calendar day being asked about. See module doc comment for
- * the full rationale — only the DAY component of a resolved phrase is
- * used, and an unparseable/absent phrase honestly defaults to today.
+ * Resolve the calendar day being asked about via `resolveSpokenDay` (see
+ * module doc comment, C1). An unparseable/absent phrase honestly defaults
+ * to today.
  */
 function resolveDayBoundary(
   desc: string | undefined,
@@ -137,17 +153,15 @@ function resolveDayBoundary(
   timezone: string,
 ): { start: Date; end: Date; label: string } {
   const todayKey = localDateString(now, timezone);
-  if (desc) {
-    const resolved = resolveDateTime(desc, { timezone, now });
-    if (resolved.ok) {
-      const anchor = new Date(resolved.startUtc);
-      const dateKey = localDateString(anchor, timezone);
-      const window = resolveDayWindow(dateKey, timezone);
-      const label = dateKey === todayKey ? 'today' : dayLabelFor(anchor, timezone);
-      return { ...window, label };
-    }
-  }
-  return { ...resolveDayWindow(todayKey, timezone), label: 'today' };
+  const resolvedKey = (desc ? resolveSpokenDay(desc, { timezone, now }) : null) ?? todayKey;
+  const label = resolvedKey === todayKey ? 'today' : dayLabelForDateKey(resolvedKey);
+  return { ...resolveDayWindow(resolvedKey, timezone), label };
+}
+
+/** A visible list, with a truncation count appended as just another list item ("and N more"). */
+function spokenListWithTail(items: string[], totalCount: number): string {
+  const rest = totalCount - items.length;
+  return spokenList(rest > 0 ? [...items, `${rest} more`] : items);
 }
 
 export async function lookupCrewSchedule(
@@ -182,22 +196,29 @@ export async function lookupCrewSchedule(
   try {
     const day = resolveDayBoundary(input.dateTimeDescription, now, timezone);
 
-    const [technicians, appointments, jobs] = await Promise.all([
-      deps.userRepo.findByTenant(input.tenantId, { role: 'technician' }),
+    // Roster + today's appointments run in parallel — the appointment
+    // read doesn't depend on the roster at all.
+    const [roster, appointments] = await Promise.all([
+      // Every tenant user, NOT filtered to role: 'technician' — see
+      // module doc comment (MEDIUM). USER_ROLES has exactly three values
+      // (owner/dispatcher/technician), so this IS "anyone assignable to
+      // an appointment", the same set the entity resolver matches.
+      deps.userRepo.findByTenant(input.tenantId),
       deps.appointmentRepo.findByDateRange(input.tenantId, day.start, day.end),
-      input.technicianId
-        ? deps.jobRepo.findByTenant(input.tenantId, { technicianId: input.technicianId, limit: 200 })
-        : deps.jobRepo.findByTenant(input.tenantId, { limit: 200 }),
     ]);
 
-    if (technicians.length === 0) {
+    if (roster.length === 0) {
       const summary = "You don't have any crew members on the roster yet.";
       await record('none', 0, summary);
       return { status: 'none', summary, data: { dayLabel: day.label, freeTechnicians: [], bookings: [] } };
     }
 
+    // Jobs resolved by id from TODAY's appointments only (C2) — never a
+    // recency-ordered tenant-wide page.
+    const jobIds = Array.from(new Set(appointments.map((a) => a.jobId)));
+    const jobs = jobIds.length > 0 ? await deps.jobRepo.findByIds(input.tenantId, jobIds) : [];
     const jobById = new Map<string, Job>(jobs.map((j) => [j.id, j] as const));
-    const techById = new Map<string, User>(technicians.map((t) => [t.id, t] as const));
+    const techById = new Map<string, User>(roster.map((t) => [t.id, t] as const));
 
     const liveAppointments = appointments.filter(
       (a: Appointment) => a.status !== 'canceled' && a.status !== 'no_show',
@@ -211,7 +232,7 @@ export async function lookupCrewSchedule(
       if (!techId) continue;
       if (input.technicianId && techId !== input.technicianId) continue;
       const tech = techById.get(techId);
-      if (!tech) continue; // not on the technician roster (role changed / removed) — not a crew booking
+      if (!tech) continue; // not on the tenant roster (deleted/foreign) — not a crew booking
       busyTechnicianIds.add(techId);
       bookings.push({
         technicianId: techId,
@@ -241,24 +262,22 @@ export async function lookupCrewSchedule(
         const time = formatTime(b.scheduledStart, timezone);
         return `${time}${b.jobSummary ? ` — ${b.jobSummary}` : ''}`;
       });
-      const rest = bookings.length - spoken.length;
       const summary =
         `${name} has ${bookings.length} ${plural(bookings.length, 'booking')} ${day.label}: ` +
-        `${spoken.join('; ')}${rest > 0 ? `; and ${rest} more` : ''}.`;
+        `${spokenListWithTail(spoken, bookings.length)}.`;
       await record('found', bookings.length, summary);
       return { status: 'found', summary, data: { dayLabel: day.label, freeTechnicians: [], bookings } };
     }
 
     // No technician named — "who's free" for the WHOLE crew.
-    const freeTechnicians = technicians
+    const freeTechnicians = roster
       .filter((t) => !busyTechnicianIds.has(t.id))
       .map((t) => technicianDisplayName(t));
 
     const summaryParts: string[] = [];
     if (freeTechnicians.length > 0) {
       const spoken = freeTechnicians.slice(0, MAX_SPOKEN_FREE);
-      const rest = freeTechnicians.length - spoken.length;
-      summaryParts.push(`Free ${day.label}: ${spoken.join(', ')}${rest > 0 ? `, and ${rest} more` : ''}`);
+      summaryParts.push(`Free ${day.label}: ${spokenListWithTail(spoken, freeTechnicians.length)}`);
     } else {
       summaryParts.push(`Nobody's free ${day.label} — the whole crew is booked`);
     }
@@ -267,11 +286,15 @@ export async function lookupCrewSchedule(
         const time = formatTime(b.scheduledStart, timezone);
         return `${b.technicianName} at ${time}${b.jobSummary ? ` — ${b.jobSummary}` : ''}`;
       });
-      const rest = bookings.length - spoken.length;
-      summaryParts.push(`Booked: ${spoken.join('; ')}${rest > 0 ? `; and ${rest} more` : ''}`);
+      summaryParts.push(`Booked: ${spokenListWithTail(spoken, bookings.length)}`);
     }
     const summary = `${summaryParts.join('. ')}.`;
-    await record('found', technicians.length, summary);
+    // resultCount is the number of booking ROWS this lookup actually
+    // surfaced — matches the lookup-skill family convention (e.g.
+    // lookup-materials.ts) of counting rows fetched, not the roster size
+    // (which contradicts "resultCount = rows fetched" and is a poor
+    // signal of what the lookup actually found).
+    await record('found', bookings.length, summary);
     return { status: 'found', summary, data: { dayLabel: day.label, freeTechnicians, bookings } };
   } catch (err) {
     const summary = "I'm having trouble pulling up the crew schedule right now.";

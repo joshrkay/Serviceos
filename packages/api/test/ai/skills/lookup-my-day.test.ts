@@ -3,7 +3,7 @@
  *
  * The SPEAKER asks about their OWN schedule today. This skill takes an
  * ALREADY-RESOLVED `technicianId` (the router resolves the speaker via
- * `resolveCanonicalTechnician` BEFORE calling this skill — see
+ * `resolveCanonicalUser` BEFORE calling this skill — see
  * dispatch/en-route-voice.ts and workers/voice-lookup-answer.ts's
  * `lookup_my_day` case) — mirroring lookup_job_profit's "job is resolved
  * upstream" contract. The self-scoping security property (never falling
@@ -129,7 +129,7 @@ describe('lookupMyDay skill', () => {
     expect(res.summary).not.toContain('Their job');
   });
 
-  it('excludes canceled/no_show appointments', async () => {
+  it('excludes canceled/no_show/completed appointments', async () => {
     const job = makeJob({ id: 'job-1', assignedTechnicianId: ME });
     const deps = await fixtures({
       jobs: [job],
@@ -137,6 +137,11 @@ describe('lookupMyDay skill', () => {
         makeAppointment({ id: 'appt-live', jobId: 'job-1' }),
         makeAppointment({ id: 'appt-cxl', jobId: 'job-1', status: 'canceled' }),
         makeAppointment({ id: 'appt-noshow', jobId: 'job-1', status: 'no_show' }),
+        // Quality-review I5 — a completed job is done regardless of the
+        // clock; crew-schedule DELIBERATELY keeps completed jobs (a
+        // dispatcher's "who was busy" needs it), but my-day's "what's
+        // next" must not read a finished visit back.
+        makeAppointment({ id: 'appt-done', jobId: 'job-1', status: 'completed' }),
       ],
     });
 
@@ -145,6 +150,64 @@ describe('lookupMyDay skill', () => {
     expect(res.status).toBe('found');
     if (res.status !== 'found') throw new Error('unreachable');
     expect(res.data.appointments.map((a) => a.appointmentId)).toEqual(['appt-live']);
+  });
+
+  // Quality-review I5 — the taxonomy advertises "What's my next job?" and
+  // "Where am I going after this one?"; a technician asking at 3pm must
+  // not hear their 8am job read back first (or at all).
+  it('I5 — only shows appointments that are still ahead, never one already finished', async () => {
+    const jobMorning = makeJob({ id: 'job-morning', assignedTechnicianId: ME, summary: 'Morning job (already done)' });
+    const jobAfternoon = makeJob({ id: 'job-afternoon', assignedTechnicianId: ME, summary: 'Afternoon job (still ahead)' });
+    const deps = await fixtures({
+      jobs: [jobMorning, jobAfternoon],
+      appointments: [
+        makeAppointment({
+          id: 'appt-morning',
+          jobId: 'job-morning',
+          // 6am-8am NY — well before NOW (07:00 NY).
+          scheduledStart: new Date('2026-06-11T10:00:00.000Z'),
+          scheduledEnd: new Date('2026-06-11T12:00:00.000Z'),
+        }),
+        makeAppointment({
+          id: 'appt-afternoon',
+          jobId: 'job-afternoon',
+          // 2pm-4pm NY — after NOW.
+          scheduledStart: new Date('2026-06-11T18:00:00.000Z'),
+          scheduledEnd: new Date('2026-06-11T20:00:00.000Z'),
+        }),
+      ],
+    });
+
+    // NOW is 11:00 UTC = 07:00 America/New_York — after the morning job's
+    // scheduledEnd (12:00 UTC = 08:00 NY)... use a NOW between the two.
+    const midday = new Date('2026-06-11T16:00:00.000Z'); // noon NY
+
+    const res = await lookupMyDay({ tenantId: TENANT, technicianId: ME, timezone: TZ, now: midday }, deps);
+
+    expect(res.status).toBe('found');
+    if (res.status !== 'found') throw new Error('unreachable');
+    expect(res.data.appointments.map((a) => a.jobSummary)).toEqual(['Afternoon job (still ahead)']);
+    expect(res.summary).not.toContain('Morning job');
+  });
+
+  it('I5 — a fully-finished day reports "none", not the completed appointments', async () => {
+    const job = makeJob({ id: 'job-1', assignedTechnicianId: ME, summary: 'Long-done job' });
+    const deps = await fixtures({
+      jobs: [job],
+      appointments: [
+        makeAppointment({
+          id: 'appt-past',
+          jobId: 'job-1',
+          scheduledStart: new Date('2026-06-11T10:00:00.000Z'),
+          scheduledEnd: new Date('2026-06-11T12:00:00.000Z'),
+        }),
+      ],
+    });
+    const lateInDay = new Date('2026-06-11T22:00:00.000Z'); // 6pm NY, well after appt end
+
+    const res = await lookupMyDay({ tenantId: TENANT, technicianId: ME, timezone: TZ, now: lateInDay }, deps);
+
+    expect(res.status).toBe('none');
   });
 
   it('only shows TODAY — an appointment on another day never appears', async () => {
@@ -164,6 +227,47 @@ describe('lookupMyDay skill', () => {
     const res = await lookupMyDay({ tenantId: TENANT, technicianId: ME, timezone: TZ, now: NOW }, deps);
 
     expect(res.status).toBe('none');
+  });
+
+  // Quality-review C2 — a job created long before MAX_JOB_LIMIT more-recent
+  // jobs, with a real appointment TODAY, must still show on "my day" —
+  // never dropped because it fell off a findByTenant({ technicianId,
+  // limit }) page ordered by createdAt DESC. A technician with over a
+  // year of job history (250+ jobs) is a NORMAL tenure, not an edge case.
+  it('C2 — an old job outside a recency-limited page with an appointment today still appears', async () => {
+    const oldJob = makeJob({
+      id: 'job-old',
+      assignedTechnicianId: ME,
+      summary: 'Old maintenance visit',
+      createdAt: new Date('2025-01-01T00:00:00.000Z'),
+    });
+    const deps = await fixtures({
+      jobs: [oldJob],
+      appointments: [makeAppointment({ id: 'appt-old', jobId: 'job-old' })],
+    });
+    const newerBase = new Date('2026-06-01T00:00:00.000Z').getTime();
+    for (let i = 0; i < 250; i++) {
+      await deps.jobRepo.create({
+        id: `job-new-${i}`,
+        tenantId: TENANT,
+        customerId: 'cust-1',
+        locationId: 'loc-1',
+        jobNumber: `JOB-${1000 + i}`,
+        summary: `newer ${i}`,
+        status: 'scheduled',
+        priority: 'normal',
+        assignedTechnicianId: ME,
+        createdBy: 'u1',
+        createdAt: new Date(newerBase + i * 1000),
+        updatedAt: new Date(newerBase + i * 1000),
+      } as Job);
+    }
+
+    const res = await lookupMyDay({ tenantId: TENANT, technicianId: ME, timezone: TZ, now: NOW }, deps);
+
+    expect(res.status).toBe('found');
+    if (res.status !== 'found') throw new Error('unreachable');
+    expect(res.data.appointments.map((a) => a.jobSummary)).toEqual(['Old maintenance visit']);
   });
 
   it('returns status "none" with a clear-day summary and records the event when nothing is on', async () => {

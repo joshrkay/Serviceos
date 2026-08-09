@@ -269,7 +269,18 @@ const APPOINTMENT_JOB_FALLBACK_INTENTS = new Set([
   'reassign_appointment',
 ]);
 
-const TECHNICIAN_REF_INTENTS = new Set([
+/**
+ * Exported (spec-review addendum, Task 10) — `ai/orchestration/lookup-
+ * dispatch.ts` (the assistant-chat surface) gates its own
+ * `targetTechnicianName` resolution on this SAME set, mirroring the memo
+ * path (`workers/voice-action-router.ts`'s `annotateResolvedEntities`
+ * call, which reaches this set via `planVoiceEntityLookups` internally).
+ * Before that fix, the chat surface resolved a spoken technician name for
+ * EVERY lookup intent, including `lookup_my_day` — a wasted resolver
+ * query there, and on an ambiguous name it returned a list of crew-member
+ * full names for the one lookup intent with NO permission gate.
+ */
+export const TECHNICIAN_REF_INTENTS = new Set([
   'reassign_appointment',
   'add_crew_member',
   'remove_crew_member',

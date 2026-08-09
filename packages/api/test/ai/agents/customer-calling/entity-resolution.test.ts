@@ -343,7 +343,7 @@ describe('planVoiceEntityLookups — intent-conditioned operator references', ()
   });
 
   // lookup_my_day is deliberately absent from TECHNICIAN_REF_INTENTS — it
-  // is self-scoped to the SPEAKER via resolveCanonicalTechnician
+  // is self-scoped to the SPEAKER via resolveCanonicalUser
   // (dispatch/en-route-voice.ts), never a spoken/resolved reference.
   it('lookup_my_day never plans a technician lookup — it is self-scoped, not reference-scoped', () => {
     const lookups = planVoiceEntityLookups('lookup_my_day', {

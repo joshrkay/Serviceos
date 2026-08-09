@@ -14,8 +14,7 @@
  * `LookupMyDayInput` is REQUIRED, not optional — there is no code path in
  * this module that can answer without one. The CALLER
  * (workers/voice-lookup-answer.ts's `lookup_my_day` case) resolves the
- * asking actor to a canonical technician via
- * `dispatch/en-route-voice.ts`'s `resolveCanonicalTechnician` BEFORE this
+ * asking actor via `users/user.ts`'s `resolveCanonicalUser` BEFORE this
  * skill ever runs, and returns `{ kind: 'failed', error: 'could not match
  * you to a technician' }` immediately when that resolution fails — this
  * skill is never invoked with an unresolved or absent identity, and never
@@ -30,33 +29,54 @@
  * `AppointmentRepository.findByDateRange` (bounded to the day, tenant-
  * wide), technician assignment via `job.assignedTechnicianId` (never a
  * second, unbounded `AssignmentRepository.findByTechnician` fetch — see
- * `lookup-crew-schedule.ts`'s identical rationale). Jobs are fetched
- * SERVER-SIDE FILTERED to this one technician
- * (`JobRepository.findByTenant({ technicianId })`) rather than the
- * whole-tenant page `lookup-day-overview.ts` pulls for the owner's
- * cross-crew overview — a technician's own day needs only their own jobs,
- * so this is both more bounded and impossible to accidentally leak a
- * coworker's job summary into the join.
+ * `lookup-crew-schedule.ts`'s identical rationale).
+ *
+ * Jobs are resolved by id from TODAY's appointments alone
+ * (`JobRepository.findByIds`, quality-review C2) — NOT a
+ * `findByTenant({ technicianId, limit })` page. That page is ordered by
+ * `createdAt DESC`, so once a technician has done more jobs than the page
+ * limit over their tenure, a job created long ago that still has a live
+ * appointment today silently falls off the page and the appointment is
+ * filtered out of "my day" entirely — a technician who has worked at a
+ * shop for over a year (a normal tenure, not an edge case) would
+ * routinely be told their real day was clear. `findByIds` is bounded to
+ * exactly the day's distinct job ids and correct at any job-count
+ * history.
  *
  * No urgent-jobs section, no pending-approvals count, no overnight
  * digest — those are owner-facing concepts `lookup_day_overview` speaks;
  * this intent is deliberately just "your appointments today."
+ *
+ * ── Only what's STILL ahead today (quality-review I5) ────────────────────
+ *
+ * Filtered to appointments that are not yet finished
+ * (`status !== 'completed'` AND `scheduledEnd >= now`) — a DELIBERATE
+ * divergence from `lookup-day-overview.ts`, which speaks the WHOLE day
+ * unfiltered by time (including appointments already past). The taxonomy
+ * (intent-classifier.ts) advertises "What's my next job?" and "Where am I
+ * going after this one?" for this intent — phrasings that promise
+ * FORWARD-looking information; a technician asking at 3pm must not hear
+ * their 8am job read back first (or at all). `lookup_crew_schedule` makes
+ * the OPPOSITE choice for the SAME "completed" status on purpose — from a
+ * dispatcher's planning perspective a completed job still occupied that
+ * technician's day, which is exactly what "who was busy" needs to answer
+ * correctly. Two different questions, two different correct filters.
  */
 import type { Appointment, AppointmentRepository } from '../../appointments/appointment';
 import type { JobRepository } from '../../jobs/job';
 import type { LookupEventService } from '../../lookup-events/lookup-event-service';
 import { resolveDayWindow } from '../../reports/money-dashboard';
 import { localDateString } from '../../digest/digest-service';
-import { plural } from './spoken-format';
+import { plural, formatTime } from './spoken-format';
 
 export interface LookupMyDayInput {
   tenantId: string;
   sessionId?: string;
   /**
    * The SPEAKER's own canonical technician id, already resolved by the
-   * caller (dispatch/en-route-voice.ts's `resolveCanonicalTechnician`).
-   * REQUIRED — see module doc comment: this is not an optional narrowing
-   * filter, it is the entire access-control story for this intent.
+   * caller (`users/user.ts`'s `resolveCanonicalUser`). REQUIRED — see
+   * module doc comment: this is not an optional narrowing filter, it is
+   * the entire access-control story for this intent.
    */
   technicianId: string;
   timezone?: string;
@@ -65,7 +85,7 @@ export interface LookupMyDayInput {
 
 export interface LookupMyDayDeps {
   appointmentRepo: AppointmentRepository;
-  jobRepo: JobRepository;
+  jobRepo: Pick<JobRepository, 'findByIds'>;
   lookupEvents?: LookupEventService;
 }
 
@@ -88,17 +108,6 @@ export type LookupMyDayResult =
 const DEFAULT_TIMEZONE = 'America/New_York';
 /** Spoken cap — a busy day must not become a monologue. */
 const MAX_SPOKEN_APPOINTMENTS = 5;
-
-function formatTime(d: Date, timezone: string): string {
-  return new Intl.DateTimeFormat('en-US', {
-    hour: 'numeric',
-    minute: 'numeric',
-    hour12: true,
-    timeZone: timezone,
-  })
-    .format(d)
-    .replace(':00', '');
-}
 
 export async function lookupMyDay(
   input: LookupMyDayInput,
@@ -132,21 +141,35 @@ export async function lookupMyDay(
   try {
     const today = resolveDayWindow(localDateString(now, timezone), timezone);
 
-    const [rawAppointments, myJobs] = await Promise.all([
-      deps.appointmentRepo.findByDateRange(input.tenantId, today.start, today.end),
-      // Server-side filtered to THIS technician's own jobs — never the
-      // whole-tenant page (see module doc comment).
-      deps.jobRepo.findByTenant(input.tenantId, { technicianId: input.technicianId, limit: 200 }),
-    ]);
+    // Bounded to TODAY, tenant-wide (mirrors lookup-day-overview.ts).
+    const rawAppointments = await deps.appointmentRepo.findByDateRange(
+      input.tenantId,
+      today.start,
+      today.end,
+    );
 
-    const myJobIds = new Set(myJobs.map((j) => j.id));
-    const jobById = new Map(myJobs.map((j) => [j.id, j] as const));
+    // Jobs resolved by id from TODAY's appointments only (C2) — never a
+    // findByTenant({ technicianId, limit }) page, which is ordered by
+    // createdAt DESC and silently drops an old job with a live
+    // appointment today once a technician has more jobs than the page
+    // limit in their history. See module doc comment.
+    const jobIds = Array.from(new Set(rawAppointments.map((a) => a.jobId)));
+    const jobs = jobIds.length > 0 ? await deps.jobRepo.findByIds(input.tenantId, jobIds) : [];
+    const jobById = new Map(jobs.map((j) => [j.id, j] as const));
 
     const appointments: MyDayAppointment[] = rawAppointments
-      .filter(
-        (a: Appointment) =>
-          a.status !== 'canceled' && a.status !== 'no_show' && myJobIds.has(a.jobId),
-      )
+      .filter((a: Appointment) => {
+        if (a.status === 'canceled' || a.status === 'no_show' || a.status === 'completed') {
+          return false;
+        }
+        // I5 — only what's still ahead: "what's my next job" must never
+        // read back a visit that's already over. See module doc comment.
+        if (a.scheduledEnd < now) return false;
+        const job = jobById.get(a.jobId);
+        // Strictly scoped to THIS technician's own assignment — never a
+        // coworker's appointment on a job this fetch happened to load.
+        return job?.assignedTechnicianId === input.technicianId;
+      })
       .sort((a, b) => a.scheduledStart.getTime() - b.scheduledStart.getTime())
       .map((a) => {
         const job = jobById.get(a.jobId);

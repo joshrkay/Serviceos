@@ -275,6 +275,66 @@ export function resolveDateTime(
 }
 
 /**
+ * Resolve a spoken DAY phrase ("Thursday", "tomorrow", "next Monday",
+ * "this Friday", "Thursday afternoon") to a calendar date key
+ * (`YYYY-MM-DD`) in the tenant's timezone — WITHOUT requiring a
+ * time-of-day or daypart.
+ *
+ * (2026-08-09, Task 10 quality-review C1) This is the lookup-side sibling
+ * of `resolveDateTime`, which this module's OTHER exported function
+ * intentionally REFUSES a bare day for (`ambiguous_no_time`) — booking a
+ * bare "Thursday" is meaningless, there's no time to reserve. But a
+ * day/window LOOKUP ("who's free Thursday?", "what's Mike's day look
+ * like Monday?") has NOTHING to book; it only needs to know WHICH DAY.
+ * `ai/skills/lookup-crew-schedule.ts` used to call `resolveDateTime` for
+ * this and silently answered about TODAY for every bare-day phrase —
+ * "Thursday", "tomorrow", "Monday", "this Friday", "next week" all
+ * failed with `ambiguous_no_time` and fell through to a today-default,
+ * even though the classifier prompt actively instructs callers to speak
+ * exactly those phrasings. One shared chrono parse, two contracts:
+ * `resolveDateTime` needs a time to book; this needs ONLY the day.
+ *
+ * Returns `null` when the phrase is empty, unparseable, or the tenant
+ * zone is invalid — callers must treat `null` as "couldn't tell which
+ * day was meant," never guess a day.
+ */
+export function resolveSpokenDay(phrase: string, opts: ResolveDateTimeOptions = {}): string | null {
+  const timezone = isValidTimezone(opts.timezone) ? opts.timezone : DEFAULT_TENANT_TIMEZONE;
+  const now = opts.now ?? new Date();
+  const text = (phrase ?? '').trim();
+  if (!text) return null;
+
+  // Same tenant-local reference-date construction as resolveDateTime, so
+  // "tomorrow"/"next Thursday" anchor to the tenant's today, not the
+  // server's — see that function's own comment for the full rationale.
+  const refLocal = DateTime.fromJSDate(now).setZone(timezone);
+  const referenceDate = new Date(
+    refLocal.year,
+    refLocal.month - 1,
+    refLocal.day,
+    refLocal.hour,
+    refLocal.minute,
+    refLocal.second,
+    refLocal.millisecond,
+  );
+
+  const results = chrono.parse(text, referenceDate, { forwardDate: true });
+  if (results.length === 0) return null;
+
+  const start = results[0].start;
+  const year = start.get('year');
+  const month = start.get('month');
+  const dayOfMonth = start.get('day');
+  if (year == null || month == null || dayOfMonth == null) return null;
+
+  // Render at LOCAL midnight in the tenant zone (no time component at
+  // all is needed) and format as YYYY-MM-DD.
+  const dt = DateTime.fromObject({ year, month, day: dayOfMonth }, { zone: timezone });
+  if (!dt.isValid) return null;
+  return dt.toFormat('yyyy-MM-dd');
+}
+
+/**
  * Human-readable, tenant-local rendering of a resolved UTC instant for the
  * spoken read-back ("Tuesday, June 3 at 2:00 PM"). Reuses the Intl pattern
  * already used across the ai/skills/lookup-* formatters.

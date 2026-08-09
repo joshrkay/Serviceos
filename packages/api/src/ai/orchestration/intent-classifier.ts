@@ -478,11 +478,10 @@ export const SUPPORTED_INTENTS: readonly IntentType[] = [
  *           (the SPEAKER asks about their own schedule today) is
  *           deliberately in NEITHER set — available to any technician,
  *           strictly self-scoped to the resolved speaker's own day via
- *           dispatch/en-route-voice.ts's (now exported)
- *           resolveCanonicalTechnician; an unresolvable speaker fails the
- *           turn rather than ever falling back to an unscoped day. See
- *           ai/skills/lookup-crew-schedule.ts, lookup-timesheets.ts, and
- *           lookup-my-day.ts for the full rationale.
+ *           users/user.ts's resolveCanonicalUser; an unresolvable speaker
+ *           fails the turn rather than ever falling back to an unscoped
+ *           day. See ai/skills/lookup-crew-schedule.ts, lookup-
+ *           timesheets.ts, and lookup-my-day.ts for the full rationale.
  */
 export const INTENT_TAXONOMY_VERSION = '1.14.0';
 
@@ -1622,6 +1621,18 @@ Distinctions that matter:
   "add a <thing> to <existing invoice/estimate>" = update_invoice/update_estimate.
   When "add" refers to a line item, money, or an existing document, it is
   NOT create_customer even if a customer name appears in the sentence.
+- "lookup_appointments" vs "lookup_my_day" (spec-review addendum,
+  2026-08-09): both can sound like "what's on my schedule" out of context,
+  but they answer for DIFFERENT people. lookup_appointments is the
+  CUSTOMER asking about a booking THEY are waiting on ("when are y'all
+  coming out?", "what time is my appointment?") — the caller is not doing
+  the work, they are having work done TO them. lookup_my_day is a
+  TECHNICIAN or crew member asking about their OWN day of work to perform
+  ("what's my next job?", "where am I going after this one?") — the
+  caller IS the one doing the work. When the phrasing gives no other
+  signal, a caller asking about "MY appointment" (singular, something
+  scheduled for them) is lookup_appointments; a caller asking about "MY
+  schedule/day/jobs" (plural work to do) is lookup_my_day.
 
 Return valid JSON with exactly this shape (no prose, no markdown fences):
 {

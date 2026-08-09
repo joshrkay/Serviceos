@@ -49,10 +49,10 @@
  */
 import { TimeEntryService, type WeeklyHours } from '../../time-tracking/time-entry-service';
 import type { TimeEntryRepository } from '../../time-tracking/time-entry';
-import type { User, UserRepository } from '../../users/user';
+import type { UserRepository } from '../../users/user';
 import type { LookupEventService } from '../../lookup-events/lookup-event-service';
-import { tzMidnight, addCalendarDays, localDateKey } from '../../shared/timezone';
-import { plural } from './spoken-format';
+import { tzMidnight, localDateKey } from '../../shared/timezone';
+import { plural, formatHours, technicianDisplayName, spokenList } from './spoken-format';
 
 export interface LookupTimesheetsInput {
   tenantId: string;
@@ -87,29 +87,21 @@ const DEFAULT_TIMEZONE = 'America/New_York';
 /** Spoken cap — a large crew must not become a name-reading marathon. */
 const MAX_SPOKEN_ENTRIES = 6;
 
-function technicianDisplayName(u: Pick<User, 'firstName' | 'lastName' | 'email'>): string {
-  return [u.firstName, u.lastName].filter(Boolean).join(' ') || u.email;
-}
-
 /**
  * The Monday-midnight (tenant-local) instant of the calendar week
- * containing `now`. DST-safe — mirrors `addCalendarDays`'s own contract
- * (shared/timezone.ts).
+ * containing `now`. DST-safe: the target calendar date is computed via
+ * plain UTC arithmetic on the ALREADY-tenant-local `YYYY-MM-DD` key
+ * (`Date.UTC` normalizes month/day underflow, e.g. day 3 minus 5 rolls
+ * into the previous month correctly), and `tzMidnight` converts that key
+ * to a UTC instant exactly once — no redundant midnight round-trip.
  */
 function resolveWeekStart(now: Date, timezone: string): Date {
   const todayKey = localDateKey(now, timezone);
-  const todayMidnight = tzMidnight(todayKey, timezone);
   const [y, m, d] = todayKey.split('-').map(Number);
   const dow = new Date(Date.UTC(y, m - 1, d)).getUTCDay(); // 0=Sun..6=Sat
   const daysSinceMonday = (dow + 6) % 7; // Mon=0 .. Sun=6
-  return daysSinceMonday === 0 ? todayMidnight : addCalendarDays(todayMidnight, -daysSinceMonday, timezone);
-}
-
-/** "8 hours", "1 hour", "4.5 hours" — mirrors lookup-job-profit.ts's formatHours. */
-function formatHours(hours: number): string {
-  const rounded = Math.round(hours * 10) / 10;
-  const text = Number.isInteger(rounded) ? String(rounded) : rounded.toFixed(1);
-  return `${text} ${rounded === 1 ? 'hour' : 'hours'}`;
+  const mondayKey = new Date(Date.UTC(y, m - 1, d - daysSinceMonday)).toISOString().slice(0, 10);
+  return tzMidnight(mondayKey, timezone);
 }
 
 export async function lookupTimesheets(
@@ -190,8 +182,14 @@ export async function lookupTimesheets(
     } else {
       const spoken = entries.slice(0, MAX_SPOKEN_ENTRIES).map((e) => `${e.name}: ${formatHours(e.totalHours)}`);
       const rest = entries.length - spoken.length;
-      summary =
-        `Hours logged this week — ${spoken.join('; ')}` + (rest > 0 ? `; and ${rest} more ${plural(rest, 'crew member')}` : '') + '.';
+      // spokenList join (quality-review I3) — a "N more" tail is just
+      // another list item, so it gets the same "and" treatment an
+      // uncapped list does instead of a bare comma/semicolon.
+      const list =
+        rest > 0
+          ? spokenList([...spoken, `${rest} more ${plural(rest, 'crew member')}`])
+          : spokenList(spoken);
+      summary = `Hours logged this week — ${list}.`;
     }
 
     await record('found', entries.length, summary);

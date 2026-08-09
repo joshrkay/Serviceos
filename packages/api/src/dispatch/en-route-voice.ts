@@ -22,6 +22,7 @@ import type { Appointment, AppointmentRepository, AppointmentStatus } from '../a
 import type { Job, JobRepository } from '../jobs/job';
 import type { Customer, CustomerRepository } from '../customers/customer';
 import type { User, UserRepository } from '../users/user';
+import { resolveCanonicalUser } from '../users/user';
 import type { VoiceRepository } from '../voice/voice-service';
 import type { SettingsRepository } from '../settings/settings';
 import type { AuditRepository } from '../audit/audit';
@@ -354,30 +355,6 @@ export type EnRouteVoiceOutcome =
   | { kind: 'unavailable' };
 
 /**
- * `voice_recordings.created_by` is stamped with the CLERK subject
- * (`req.auth.userId`), not the canonical `users.id` that
- * `AssignmentRepository`/`AppointmentRepository` key on. Mirrors the same
- * dual-check `app.ts`'s `resolveVoiceMemberRole` already uses for the
- * owner-grade lookup gate, so a memo creator resolves the same way on both
- * paths.
- *
- * Exported (Task 10, 2026-08-07 tradesperson plan) — `lookup_my_day`
- * (workers/voice-lookup-answer.ts) reuses this SAME resolution to map the
- * asking actor to a canonical technician before running its skill;
- * `lookup_my_day` is deliberately NOT permission-gated, so this resolution
- * — and refusing the turn when it comes back null — IS that intent's
- * entire access-control story. One resolution, not a second copy.
- */
-export async function resolveCanonicalTechnician(
-  userRepo: Pick<UserRepository, 'findByTenant'>,
-  tenantId: string,
-  rawCreatorId: string,
-): Promise<User | null> {
-  const users = await userRepo.findByTenant(tenantId);
-  return users.find((u) => u.clerkUserId === rawCreatorId || u.id === rawCreatorId) ?? null;
-}
-
-/**
  * Tenant-local "today" window, shared by the voice leg above and the
  * SMS-keyword leg (sms/tech-status/en-route-keyword.ts) so both scope the
  * bare "on my way" case to the SAME calendar day.
@@ -443,7 +420,14 @@ export async function handleEnRouteVoiceIntent(
   const recording = await deps.voiceRepo.findById(input.tenantId, input.recordingId);
   if (!recording) return { kind: 'unavailable' };
 
-  const technician = await resolveCanonicalTechnician(deps.userRepo, input.tenantId, recording.createdBy);
+  // `voice_recordings.created_by` is stamped with the CLERK subject
+  // (`req.auth.userId`), not the canonical `users.id` that
+  // `AssignmentRepository`/`AppointmentRepository` key on —
+  // `resolveCanonicalUser` (src/users/user.ts) does the same dual-check
+  // (`clerkUserId === raw || id === raw`) `app.ts`'s `resolveVoiceMemberRole`
+  // uses for the owner-grade lookup gate, so a memo creator resolves the
+  // same way on both paths.
+  const technician = await resolveCanonicalUser(deps.userRepo, input.tenantId, recording.createdBy);
   if (!technician) return { kind: 'unavailable' };
 
   const now = deps.now ? deps.now() : new Date();

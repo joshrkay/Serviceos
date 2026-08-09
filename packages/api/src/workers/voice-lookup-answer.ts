@@ -66,6 +66,7 @@ import type { LookupEventService } from '../lookup-events/lookup-event-service';
 import type { AvailabilityFinder } from '../ai/tasks/availability-finder';
 import type { MaterialItemRepository } from '../materials/material-item';
 import type { UserRepository } from '../users/user';
+import { resolveCanonicalUser } from '../users/user';
 import { lookupBalance } from '../ai/skills/lookup-balance';
 import { lookupInvoices } from '../ai/skills/lookup-invoices';
 import { lookupCustomer } from '../ai/skills/lookup-customer';
@@ -90,7 +91,7 @@ import { lookupMaterials } from '../ai/skills/lookup-materials';
 import { lookupCrewSchedule } from '../ai/skills/lookup-crew-schedule';
 import { lookupTimesheets } from '../ai/skills/lookup-timesheets';
 import { lookupMyDay } from '../ai/skills/lookup-my-day';
-import { resolveCanonicalTechnician } from '../dispatch/en-route-voice';
+import { formatHours } from '../ai/skills/spoken-format';
 
 /**
  * Permission-gated lookups: the DB-authoritative permission the ASKING
@@ -817,7 +818,13 @@ export async function executeLookupAnswer(
         if (r.status === 'error') return { kind: 'failed', error: r.data.error };
         const rows: VoiceAnswerRow[] =
           r.status === 'found'
-            ? r.data.entries.slice(0, 5).map((e) => text(e.name, `${e.totalHours} hrs this week`))
+            ? r.data.entries
+                .slice(0, 5)
+                // I4 — reuse the SAME formatHours the skill's own spoken
+                // summary uses, rather than the raw 2-decimal totalHours:
+                // the card used to read "7.83 hrs" while the operator
+                // HEARD "7.8 hours" for the identical value.
+                .map((e) => text(e.name, `${formatHours(e.totalHours)} this week`))
             : [];
         return { kind: 'answer', answer: buildAnswer(intent, r.status, r.summary, rows) };
       }
@@ -836,7 +843,7 @@ export async function executeLookupAnswer(
         if (!input.actorId) {
           return { kind: 'failed', error: 'could not match you to a technician' };
         }
-        const technician = await resolveCanonicalTechnician(shared.userRepo, tenantId, input.actorId);
+        const technician = await resolveCanonicalUser(shared.userRepo, tenantId, input.actorId);
         if (!technician) {
           return { kind: 'failed', error: 'could not match you to a technician' };
         }
@@ -855,7 +862,19 @@ export async function executeLookupAnswer(
           r.status === 'found'
             ? r.data.appointments
                 .slice(0, 5)
-                .map((a) => text(shortDateTime(a.scheduledStart, timezone), a.jobSummary ?? ''))
+                .map((a) =>
+                  text(
+                    shortDateTime(a.scheduledStart, timezone),
+                    // I1 — `jobs.summary` is TEXT NOT NULL with no non-empty
+                    // CHECK (imports/direct writes can produce ''), and
+                    // `voiceAnswerRowSchema` requires `text: z.string().min(1)`.
+                    // buildAnswer PARSES rather than casts, so an empty
+                    // string here throws a ZodError caught by the outer
+                    // catch — discarding an otherwise-correct, already-
+                    // computed answer. Never emit an empty row value.
+                    a.jobSummary || `Job ${a.jobId.slice(0, 8)}`,
+                  ),
+                )
             : [];
         return { kind: 'answer', answer: buildAnswer(intent, r.status, r.summary, rows) };
       }
