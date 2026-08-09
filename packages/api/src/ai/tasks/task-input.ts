@@ -11,7 +11,10 @@
  * from another file and started hand-rolling equivalent literals instead,
  * one per file. This module exists to collapse that back to one touch
  * point: import `entitiesFrom`/`baseSourceContext`/`inputFor` from here
- * rather than re-implementing any part of this shape.
+ * rather than re-implementing any part of this shape. Also home to
+ * `contractErrorsFrom`/`contractGapFields` (Task 12 review, "I5") — the
+ * `assertValidProposalPayload`-error-to-`missingFields` mapping every
+ * standalone drafting task needs for its P2-002 contract-gate backstop.
  *
  * Known exceptions: complaint-task.ts (deliberately unconverted — custom
  * summaries, an always-present `source: 'voice'` sourceContext,
@@ -61,6 +64,51 @@ export function resolveTenantTimezone(context: TaskContext): ResolvedTenantTimez
 export function baseSourceContext(context: TaskContext): Record<string, unknown> | undefined {
   if (!context.conversationId) return undefined;
   return { conversationId: context.conversationId };
+}
+
+/**
+ * Quality-review fix (2026-08-09, Task 12 review, "I5") — pull the Zod
+ * paths off a `ValidationError` thrown by `assertValidProposalPayload`
+ * (it stores them as `details.errors`, each formatted
+ * `"<path>: <message>"`). This was independently duplicated, BYTE-
+ * IDENTICAL, in six standalone drafting task files (add-catalog-item-task,
+ * add-material-task, create-service-agreement-task,
+ * create-change-order-task, invoice-task, estimate-task) — each one's own
+ * comment called it "the house pattern every standalone drafting task
+ * file uses," which is exactly the point at which a house pattern becomes
+ * a house problem. Extracted here, the single home every one of those
+ * files already imports (or now imports for the first time — invoice-
+ * task.ts/estimate-task.ts predate `task-input.ts` and didn't use
+ * `inputFor`/`entitiesFrom`, but this pair of helpers is a self-contained
+ * addition to their imports).
+ */
+export function contractErrorsFrom(err: unknown): string[] {
+  const details = (err as { details?: { errors?: unknown } } | undefined)?.details;
+  const errors = details?.errors;
+  if (Array.isArray(errors)) {
+    return errors.filter((e): e is string => typeof e === 'string');
+  }
+  return [err instanceof Error ? err.message : String(err)];
+}
+
+/**
+ * Map contract errors onto operator-facing `missingFields` entries — the
+ * leading path segment of each Zod issue. Object-level issues (a
+ * `.refine` at the schema root, or a required top-level field with no
+ * further path) carry an EMPTY path, so `fallback` names the gap the
+ * operator actually has to fill in that case. Callers choose it
+ * deliberately per contract — e.g. 'customerId' for invoice/estimate's
+ * customerId-or-reference refine, 'name' for add_catalog_item's required
+ * name, 'lineItems' for create_change_order's single line item.
+ */
+export function contractGapFields(errors: string[], fallback: string): string[] {
+  const fields = new Set<string>();
+  for (const error of errors) {
+    const path = error.split(':')[0]?.trim() ?? '';
+    const head = path.split(/[.[]/)[0];
+    fields.add(head.length > 0 ? head : fallback);
+  }
+  return [...fields];
 }
 
 export function inputFor(

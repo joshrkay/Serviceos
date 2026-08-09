@@ -133,7 +133,14 @@ import { createProposal } from '../../proposals/proposal';
 import { assertValidProposalPayload } from '../../proposals/contracts';
 import type { TaskHandler, TaskContext, TaskResult } from './task-handlers';
 import type { ExtractedEntities } from '../orchestration/intent-classifier';
-import { entitiesFrom, inputFor, resolveTenantTimezone, ResolvedTenantTimezone } from './task-input';
+import {
+  contractErrorsFrom,
+  contractGapFields,
+  entitiesFrom,
+  inputFor,
+  resolveTenantTimezone,
+  ResolvedTenantTimezone,
+} from './task-input';
 import { localDateKey } from '../../shared/timezone';
 import { formatUsdCentsPlain } from '@ai-service-os/shared';
 
@@ -166,32 +173,6 @@ const CADENCE_LABELS: Record<ServiceAgreementCadence, string> = {
   annual: 'Annual',
 };
 
-/**
- * Pull the Zod paths off a `ValidationError` thrown by
- * `assertValidProposalPayload` (it stores them as `details.errors`, each
- * formatted `"<path>: <message>"`). Mirrors `estimate-task.ts`'s
- * `contractErrorsFrom` (not exported from there, so duplicated here — same
- * house pattern `apply-credit-task.ts`/`create-change-order-task.ts` use).
- */
-function contractErrorsFrom(err: unknown): string[] {
-  const details = (err as { details?: { errors?: unknown } } | undefined)?.details;
-  const errors = details?.errors;
-  if (Array.isArray(errors)) {
-    return errors.filter((e): e is string => typeof e === 'string');
-  }
-  return [err instanceof Error ? err.message : String(err)];
-}
-
-/** Map contract errors onto operator-facing `missingFields` entries (leading path segment of each Zod issue). */
-function contractGapFields(errors: string[]): string[] {
-  const fields = new Set<string>();
-  for (const error of errors) {
-    const path = error.split(':')[0]?.trim() ?? '';
-    const head = path.split(/[.[]/)[0];
-    fields.add(head.length > 0 ? head : 'payload');
-  }
-  return [...fields];
-}
 
 /**
  * First of next month, as a `YYYY-MM-DD` string, computed from the
@@ -345,7 +326,7 @@ export class CreateServiceAgreementTaskHandler implements TaskHandler {
       assertValidProposalPayload(this.taskType, payload);
     } catch (err) {
       payloadContractErrors = contractErrorsFrom(err);
-      for (const field of contractGapFields(payloadContractErrors)) {
+      for (const field of contractGapFields(payloadContractErrors, 'payload')) {
         if (!missing.includes(field)) missing.push(field);
       }
     }

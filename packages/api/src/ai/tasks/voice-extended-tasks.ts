@@ -23,6 +23,7 @@ import { ExtractedEntities } from '../orchestration/intent-classifier';
 import type { AppointmentRepository } from '../../appointments/appointment';
 import type { JobRepository } from '../../jobs/job';
 import type { CatalogItem, CatalogItemRepository } from '../../catalog/catalog-item';
+import { MAX_UNIT_PRICE_CENTS } from '../../proposals/contracts/add-catalog-item';
 import type { InvoiceRepository } from '../../invoices/invoice';
 import type { Estimate, EstimateRepository } from '../../estimates/estimate';
 import type { LLMGateway } from '../gateway/gateway';
@@ -2166,6 +2167,15 @@ export class CreateJobVoiceTaskHandler implements TaskHandler {
 //      `explanation` instead, per `clearSatisfiedMissingFields`
 //      (missing-fields.ts): it only lifts a gate on an EXACT flat-key edit,
 //      so a prose entry can never clear.
+//
+//   4. Quality-review fix (2026-08-09, Task 12 review, "I4") — a spoken
+//      `unitPriceCents` above `MAX_UNIT_PRICE_CENTS` ($100,000,
+//      contracts/add-catalog-item.ts) is treated the same as an absent
+//      one (falls back to the current price, same as the existing
+//      negative-price guard). Added because Task 12's add_catalog_item
+//      sibling ceilings the SAME unitPriceCents field writing the SAME
+//      catalog_items.unit_price_cents column — without this, a misheard
+//      "290 thousand" gates on create but sails through on edit.
 export class UpdateCatalogItemTaskHandler implements TaskHandler {
   readonly taskType = 'update_catalog_item' as const;
 
@@ -2217,12 +2227,20 @@ export class UpdateCatalogItemTaskHandler implements TaskHandler {
       }
     }
 
-    // Only a stated, non-negative integer cents value is a real price
-    // change — mirrors the durationMinutes sanity check elsewhere in this
-    // file (an LLM occasionally answers with a negative or fractional
-    // number).
+    // Only a stated, non-negative, in-range integer cents value is a real
+    // price change — mirrors the durationMinutes sanity check elsewhere in
+    // this file (an LLM occasionally answers with a negative or fractional
+    // number). The upper bound (quality-review fix, "I4") mirrors
+    // add_catalog_item's own MAX_UNIT_PRICE_CENTS ceiling — both intents
+    // write the SAME catalog_items.unit_price_cents column from the SAME
+    // spoken unitPriceCents field, so a misheard "290 thousand" must gate
+    // here exactly as it does on the create side, not fall back to "no
+    // price change" and sail through unchecked.
     const requestedPriceCents =
-      typeof ee.unitPriceCents === 'number' && Number.isFinite(ee.unitPriceCents) && ee.unitPriceCents >= 0
+      typeof ee.unitPriceCents === 'number' &&
+      Number.isFinite(ee.unitPriceCents) &&
+      ee.unitPriceCents >= 0 &&
+      ee.unitPriceCents <= MAX_UNIT_PRICE_CENTS
         ? Math.round(ee.unitPriceCents)
         : undefined;
     const hasName = typeof ee.catalogItemNewName === 'string' && ee.catalogItemNewName.trim().length > 0;

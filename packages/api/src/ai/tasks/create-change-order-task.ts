@@ -85,33 +85,7 @@ import {
   groundLineItemPricing,
   lineItemConfidenceSignals,
 } from '../resolution/catalog-resolver';
-import { entitiesFrom, inputFor } from './task-input';
-
-/**
- * Pull the Zod paths off a `ValidationError` thrown by
- * `assertValidProposalPayload` (it stores them as `details.errors`, each
- * formatted `"<path>: <message>"`). Mirrors `estimate-task.ts`'s
- * `contractErrorsFrom` (not exported from there, so duplicated here).
- */
-function contractErrorsFrom(err: unknown): string[] {
-  const details = (err as { details?: { errors?: unknown } } | undefined)?.details;
-  const errors = details?.errors;
-  if (Array.isArray(errors)) {
-    return errors.filter((e): e is string => typeof e === 'string');
-  }
-  return [err instanceof Error ? err.message : String(err)];
-}
-
-/** Map contract errors onto operator-facing `missingFields` entries (leading path segment of each Zod issue). */
-function contractGapFields(errors: string[]): string[] {
-  const fields = new Set<string>();
-  for (const error of errors) {
-    const path = error.split(':')[0]?.trim() ?? '';
-    const head = path.split(/[.[]/)[0];
-    fields.add(head.length > 0 ? head : 'lineItems');
-  }
-  return [...fields];
-}
+import { contractErrorsFrom, contractGapFields, entitiesFrom, inputFor } from './task-input';
 
 export class CreateChangeOrderTaskHandler implements TaskHandler {
   readonly taskType = 'create_change_order' as const;
@@ -226,7 +200,7 @@ export class CreateChangeOrderTaskHandler implements TaskHandler {
       assertValidProposalPayload(this.taskType, payload);
     } catch (err) {
       payloadContractErrors = contractErrorsFrom(err);
-      for (const field of contractGapFields(payloadContractErrors)) {
+      for (const field of contractGapFields(payloadContractErrors, 'lineItems')) {
         if (!allMissing.includes(field)) allMissing.push(field);
       }
     }

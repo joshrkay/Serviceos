@@ -19,17 +19,24 @@ import { AuditRepository, createAuditEvent } from '../../audit/audit';
  *
  * ── Builds the CatalogItem directly — does NOT call `persistCatalogItem` ──
  *
- * `catalog-item.ts`'s own `persistCatalogItem` helper (used by the
- * authenticated `POST /api/catalog-items` route) bundles create + a
- * `catalog_item.created` audit call with NO try/catch — a thrown audit
- * error there would propagate AFTER the row was already inserted,
- * misreporting a genuinely successful create as a failed execution. This
- * is the exact anti-pattern `create_service_agreement`'s execution handler
- * found and worked around for `createAgreement`'s own (also non-failure-
- * soft) audit call — see `create-service-agreement-handler.ts`'s doc
- * comment. This handler builds the item with the pure `createCatalogItem()`
- * builder, persists it via `catalogRepo.create()` directly, and emits its
- * OWN failure-soft audit event afterward instead, exactly like every other
+ * Quality-review fix (2026-08-09, "I2") — `persistCatalogItem(repo, item,
+ * actor, auditRepo?)` DOES take an optional audit repo, so `createAgreement`'s
+ * `(input, repo, undefined)` escape hatch (`create-service-agreement-
+ * handler.ts`) was considered here too — an earlier draft of this comment
+ * wrongly implied the bundled audit call left no such option. It was
+ * REJECTED: unlike `createAgreement` — whose direct-call route bypassed six
+ * real defaults (`autoGenerateInvoice`/`autoGenerateJob`/`autoRenew`/etc.)
+ * and three invariants (`endsOn >= startsOn`, the auto-renew term
+ * invariant, `parseRule` validation), making the reroute genuinely worth
+ * doing — `persistCatalogItem` with `auditRepo: undefined` degenerates to
+ * literally `await repo.create(item)` plus an unused `actor` argument: no
+ * defaults, no invariants, nothing this handler would otherwise have to
+ * duplicate. Calling it that way would buy nothing over calling
+ * `repo.create()` directly, while still carrying a name (`persistCatalogItem`)
+ * that promises audit behavior this call site would silently opt out of.
+ * So: build the item with the pure `createCatalogItem()` builder, persist
+ * via `catalogRepo.create()` directly, and emit this handler's OWN
+ * failure-soft audit event afterward instead, exactly like every other
  * LogExpense-family handler.
  *
  * ── Reuses `catalog_item.created` — the SAME audit event type/analytics

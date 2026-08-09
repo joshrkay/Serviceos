@@ -38,12 +38,19 @@ import type { CatalogUnit } from '../../catalog/catalog-item';
  * A sanity ceiling (`MAX_UNIT_PRICE_CENTS`, $100,000 — mirrors
  * create-service-agreement.ts's identical `PRICE_CENTS_SANITY_CEILING`) is
  * a backstop against a misheard "290 thousand" style figure, NOT a real
- * product limit. It is NOT imported from a shared constant: catalog-item.ts
- * / shared/contracts.ts's `createCatalogItemSchema` place no upper bound on
- * `unitPriceCents` at the domain/HTTP layer, so this bound has no
- * counterpart to drift from — the "one shared constant" lesson (Task 8's
- * `MAX_QUANTITY`) only applies where the same cap is enforced on both
- * sides, which is not the case here.
+ * product limit. `catalog-item.ts` / `shared/contracts.ts`'s
+ * `createCatalogItemSchema` place no upper bound on `unitPriceCents` at
+ * the domain/HTTP layer — but that is NOT the whole counterpart-drift
+ * picture (quality-review fix, "I4"): `update_catalog_item`
+ * (`contracts/update-catalog-item.ts`) writes `proposedUnitPriceCents`
+ * onto the SAME `catalog_items.unit_price_cents` column from the SAME
+ * spoken `unitPriceCents` field, so an un-ceilinged sibling would let a
+ * misheard "290 thousand" gate on CREATE and sail straight through on
+ * EDIT of the identical row. `MAX_UNIT_PRICE_CENTS` is exported from here
+ * and imported into `update-catalog-item.ts` for exactly that reason —
+ * the two intents ARE the "both sides" the MAX_QUANTITY lesson (Task 8)
+ * cares about, even though neither the domain nor the HTTP layer enforces
+ * a bound at all.
  *
  * `description` is optional, trimmed, and — like `name` — rejects
  * whitespace-only input (`.trim().min(1)` again) for the same reason.
@@ -68,6 +75,9 @@ export const CATALOG_UNITS = ['each', 'hour', 'sq ft', 'per lb', 'per gal'] as c
 
 // Backstop against a misheard huge figure, not a real product limit —
 // mirrors create-service-agreement.ts's PRICE_CENTS_SANITY_CEILING ($100k).
+// Shared with contracts/update-catalog-item.ts (I4) — both intents write
+// the SAME catalog_items.unit_price_cents column from the SAME spoken
+// unitPriceCents field, so the ceiling must agree on both sides.
 export const MAX_UNIT_PRICE_CENTS = 100_000_00; // $100,000
 
 export const addCatalogItemPayloadSchema = z.object({

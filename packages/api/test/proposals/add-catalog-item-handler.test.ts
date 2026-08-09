@@ -13,6 +13,7 @@ import { describe, it, expect } from 'vitest';
 import { VALID_PROPOSAL_TYPES, actionClassForProposalType } from '../../src/proposals/proposal';
 import { validateProposalPayload } from '../../src/proposals/contracts';
 import { AddCatalogItemExecutionHandler } from '../../src/proposals/execution/add-catalog-item-handler';
+import { MAX_UNIT_PRICE_CENTS } from '../../src/proposals/contracts/add-catalog-item';
 import { InMemoryCatalogItemRepository } from '../../src/catalog/catalog-item';
 import { InMemoryAuditRepository } from '../../src/audit/audit';
 import type { Proposal } from '../../src/proposals/proposal';
@@ -93,8 +94,25 @@ describe('add_catalog_item proposal type', () => {
     expect(result.valid).toBe(false);
   });
 
-  it('rejects a price above the sanity ceiling', () => {
-    const result = validateProposalPayload('add_catalog_item', { name: 'x', unitPriceCents: 100_000_01 });
+  // Quality-review fix (2026-08-09, "I3") — the ceiling is pinned at
+  // NEITHER inclusive edge by the original suite (both prior tests only
+  // exercise MAX+1): if the schema ever drifted from `.max()` to `.lt()`
+  // (exclusive), both this and the rejects-above-ceiling test would still
+  // pass while the boundary itself silently moved. Exactly-at-the-ceiling
+  // must validate.
+  it('accepts a price of exactly the sanity ceiling (100_000_00)', () => {
+    const result = validateProposalPayload('add_catalog_item', {
+      name: 'Whole house repipe',
+      unitPriceCents: MAX_UNIT_PRICE_CENTS,
+    });
+    expect(result.valid).toBe(true);
+  });
+
+  it('rejects a price one cent above the sanity ceiling', () => {
+    const result = validateProposalPayload('add_catalog_item', {
+      name: 'x',
+      unitPriceCents: MAX_UNIT_PRICE_CENTS + 1,
+    });
     expect(result.valid).toBe(false);
   });
 
@@ -159,6 +177,24 @@ describe('AddCatalogItemExecutionHandler', () => {
     expect(events).toHaveLength(1);
     expect(events[0].eventType).toBe('catalog_item.created');
     expect(events[0].entityId).toBe(result.resultEntityId);
+    // Spec-review addendum — the analytics claim (audit-event-mapping.ts
+    // maps catalog_item.created's category/unit/unitPriceCents/hasImage
+    // to pickMeta) rests on these four metadata props actually reaching
+    // the event; mirrors create-service-agreement-handler.test.ts's
+    // toMatchObject assertion for the identical reason. `name` IS in
+    // metadata (parity with persistCatalogItem's own shape, for anyone
+    // reading the audit trail) but the mapping deliberately does NOT pick
+    // it — no business label reaches analytics, same as the HTTP path —
+    // so it's asserted present here without asserting the mapping reads it.
+    expect(events[0].metadata).toMatchObject({
+      proposalId: 'prop-1',
+      proposalType: 'add_catalog_item',
+      name: 'Smart thermostat install',
+      category: 'Labor',
+      unit: 'each',
+      unitPriceCents: 38500,
+      hasImage: false,
+    });
   });
 
   it('defaults unit to "each" when the payload omits it', async () => {

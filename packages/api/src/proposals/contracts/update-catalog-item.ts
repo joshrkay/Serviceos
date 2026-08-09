@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { MAX_UNIT_PRICE_CENTS } from './add-catalog-item';
 
 /**
  * update_catalog_item proposal payload (WS20 — correction-repetition meta-proposal).
@@ -20,6 +21,18 @@ import { z } from 'zod';
  * All money is integer cents (CLAUDE.md core pattern — never floating point).
  * `evidence` carries the repetition provenance so the review UI can show WHY
  * the AI is asking ("you've corrected this 3 times").
+ *
+ * `proposedUnitPriceCents` carries the SAME `MAX_UNIT_PRICE_CENTS` sanity
+ * ceiling `add-catalog-item.ts`'s `unitPriceCents` does (quality-review
+ * fix, "I4") — both intents write `catalog_items.unit_price_cents` from a
+ * spoken `unitPriceCents` field, so an un-ceilinged sibling would let a
+ * misheard huge figure gate on CREATE (add_catalog_item) and sail through
+ * on EDIT of the identical row. `currentUnitPriceCents` is deliberately
+ * NOT ceilinged: it's informational, populated from the RESOLVED item's
+ * real, already-persisted price (never spoken), and the domain/HTTP layer
+ * itself places no upper bound on a catalog item's price — a legitimately
+ * priced pre-existing item over $100k must not be rejected just for being
+ * echoed back on this proposal's payload.
  */
 export const updateCatalogItemPayloadSchema = z.object({
   /** Catalog item whose unit price the proposal would update. */
@@ -31,10 +44,11 @@ export const updateCatalogItemPayloadSchema = z.object({
   /**
    * The catalog's price the owner has been repeatedly overriding, in integer
    * cents. Informational — the executor writes `proposedUnitPriceCents`.
+   * Not ceilinged — see module doc comment.
    */
   currentUnitPriceCents: z.number().int().nonnegative(),
   /** The corrected price to make the catalog default, in integer cents. */
-  proposedUnitPriceCents: z.number().int().nonnegative(),
+  proposedUnitPriceCents: z.number().int().nonnegative().max(MAX_UNIT_PRICE_CENTS),
   /** Repetition provenance that earned this proposal. */
   evidence: z.object({
     /** Correction lesson ids that evidence the repetition (at least the trigger). */

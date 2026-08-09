@@ -71,35 +71,13 @@ import { createProposal, CreateProposalInput } from '../../proposals/proposal';
 import { assertValidProposalPayload } from '../../proposals/contracts';
 import type { TaskHandler, TaskContext, TaskResult } from './task-handlers';
 import type { ExtractedEntities } from '../orchestration/intent-classifier';
-import { entitiesFrom, inputFor, resolveTenantTimezone } from './task-input';
-
-/**
- * Pull the Zod paths off a `ValidationError` thrown by
- * `assertValidProposalPayload` (it stores them as `details.errors`, each
- * formatted `"<path>: <message>"`). Mirrors `estimate-task.ts`'s
- * `contractErrorsFrom` (not exported from there, so duplicated here — same
- * house pattern `apply-credit-task.ts`/`create-change-order-task.ts`/
- * `create-service-agreement-task.ts` use).
- */
-function contractErrorsFrom(err: unknown): string[] {
-  const details = (err as { details?: { errors?: unknown } } | undefined)?.details;
-  const errors = details?.errors;
-  if (Array.isArray(errors)) {
-    return errors.filter((e): e is string => typeof e === 'string');
-  }
-  return [err instanceof Error ? err.message : String(err)];
-}
-
-/** Map contract errors onto operator-facing `missingFields` entries (leading path segment of each Zod issue). */
-function contractGapFields(errors: string[]): string[] {
-  const fields = new Set<string>();
-  for (const error of errors) {
-    const path = error.split(':')[0]?.trim() ?? '';
-    const head = path.split(/[.[]/)[0];
-    fields.add(head.length > 0 ? head : 'description');
-  }
-  return [...fields];
-}
+import {
+  contractErrorsFrom,
+  contractGapFields,
+  entitiesFrom,
+  inputFor,
+  resolveTenantTimezone,
+} from './task-input';
 
 /**
  * Best-effort parse of a spoken "needed by" phrase into a calendar date,
@@ -195,7 +173,7 @@ export class AddMaterialTaskHandler implements TaskHandler {
       assertValidProposalPayload(this.taskType, payload);
     } catch (err) {
       payloadContractErrors = contractErrorsFrom(err);
-      for (const field of contractGapFields(payloadContractErrors)) {
+      for (const field of contractGapFields(payloadContractErrors, 'description')) {
         if (!missing.includes(field)) missing.push(field);
       }
     }

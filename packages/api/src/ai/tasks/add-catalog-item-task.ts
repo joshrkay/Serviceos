@@ -59,6 +59,26 @@
  * refused to draft on 0, and two passing tests locked the contradiction
  * in without either side ever exercising the disagreement).
  *
+ * ── Structural gate against misclassified renames ────────────────────────
+ *
+ * Quality-review + spec-review fix (2026-08-09) — a rename+reprice
+ * utterance ("rename the diagnostic fee to Service call fee, make it 89")
+ * can misclassify as `add_catalog_item` instead of `update_catalog_item`:
+ * the model emits `catalogItemReference` (naming the EXISTING item)
+ * ALONGSIDE `catalogItemNewName`/`unitPriceCents`. Drafting a complete,
+ * zero-`missingFields` create in that case would approve into a DUPLICATE
+ * SKU instead of renaming the existing one — `catalog_items` has no
+ * unique constraint on `(tenant_id, name)`, so the duplicate silently
+ * pollutes the catalog resolver's grounding for future quotes. The
+ * taxonomy prompt instructs the model that this intent is "never an
+ * edit... no catalogItemReference", but a prompt instruction is not a
+ * structural guarantee — the identical reasoning Task 11's review
+ * established for `mileageMiles`/`log_expense` (the classifier's JSON
+ * shape is one GLOBAL template, not structurally scoped per intent). Any
+ * `catalogItemReference` on this turn therefore refuses to draft a
+ * create — gates on `name`, explains why — regardless of how complete
+ * the rest of the spoken payload looks.
+ *
  * ── unit/category defaults live at EXECUTION time, not here ──────────────
  *
  * `CatalogItem.unit`/`.category` are BOTH required at the domain layer
@@ -81,40 +101,9 @@
  */
 import { createProposal, CreateProposalInput } from '../../proposals/proposal';
 import { assertValidProposalPayload } from '../../proposals/contracts';
-import { CATALOG_UNITS } from '../../proposals/contracts/add-catalog-item';
+import { CATALOG_UNITS, MAX_UNIT_PRICE_CENTS } from '../../proposals/contracts/add-catalog-item';
 import type { TaskHandler, TaskContext, TaskResult } from './task-handlers';
-import { entitiesFrom, inputFor } from './task-input';
-
-// Mirrors contracts/add-catalog-item.ts's MAX_UNIT_PRICE_CENTS — see that
-// module's doc comment for why this sanity ceiling isn't a domain-layer
-// shared constant.
-const MAX_UNIT_PRICE_CENTS = 100_000_00; // $100,000
-
-/**
- * Pull the Zod paths off a `ValidationError` thrown by
- * `assertValidProposalPayload`. Mirrors `add-material-task.ts`'s
- * `contractErrorsFrom` (not exported from there, so duplicated here — same
- * house pattern every standalone drafting task file uses).
- */
-function contractErrorsFrom(err: unknown): string[] {
-  const details = (err as { details?: { errors?: unknown } } | undefined)?.details;
-  const errors = details?.errors;
-  if (Array.isArray(errors)) {
-    return errors.filter((e): e is string => typeof e === 'string');
-  }
-  return [err instanceof Error ? err.message : String(err)];
-}
-
-/** Map contract errors onto operator-facing `missingFields` entries (leading path segment of each Zod issue). */
-function contractGapFields(errors: string[]): string[] {
-  const fields = new Set<string>();
-  for (const error of errors) {
-    const path = error.split(':')[0]?.trim() ?? '';
-    const head = path.split(/[.[]/)[0];
-    fields.add(head.length > 0 ? head : 'name');
-  }
-  return [...fields];
-}
+import { contractErrorsFrom, contractGapFields, entitiesFrom, inputFor } from './task-input';
 
 export class AddCatalogItemTaskHandler implements TaskHandler {
   readonly taskType = 'add_catalog_item' as const;
@@ -123,43 +112,74 @@ export class AddCatalogItemTaskHandler implements TaskHandler {
     const ee = entitiesFrom(context);
     const payload: Record<string, unknown> = {};
     const missing: string[] = [];
+    const explanationParts: string[] = [];
 
-    const name = typeof ee.catalogItemNewName === 'string' ? ee.catalogItemNewName.trim() : '';
-    if (name) {
-      payload.name = name;
-    } else {
+    // Quality-review + spec-review fix (2026-08-09) — a rename+reprice
+    // utterance ("rename the diagnostic fee to Service call fee, make it
+    // 89") can misclassify as add_catalog_item instead of
+    // update_catalog_item: the model emits catalogItemReference (naming
+    // the EXISTING item) alongside catalogItemNewName/unitPriceCents, and
+    // this handler used to ignore the reference entirely — drafting a
+    // COMPLETE, zero-missingFields NEW item. Approving it creates a
+    // duplicate SKU instead of renaming the existing one — catalog_items
+    // has no unique constraint on (tenant_id, name), so the duplicate
+    // silently pollutes the catalog resolver's grounding for future
+    // quotes. The taxonomy prompt tells the model add_catalog_item is
+    // "never an edit... no catalogItemReference" — but a prompt
+    // instruction is not a structural guarantee (Task 11's review
+    // rejected the identical reasoning for mileageMiles/log_expense: the
+    // classifier's JSON shape is one GLOBAL template, not structurally
+    // scoped per intent). Gate structurally instead: ANY
+    // catalogItemReference on this turn refuses to draft a create,
+    // however complete the rest of the spoken payload looks — mirrors
+    // update_catalog_item's own posture of leaving the payload sparse
+    // whenever it can't be confident.
+    const suspectedEdit =
+      typeof ee.catalogItemReference === 'string' && ee.catalogItemReference.trim().length > 0;
+
+    if (suspectedEdit) {
       missing.push('name');
-    }
-
-    // Zero is a LEGAL price (see class doc comment) — only a genuinely
-    // absent/negative/non-numeric/over-ceiling value gates.
-    const price = ee.unitPriceCents;
-    const validPrice =
-      typeof price === 'number' &&
-      Number.isFinite(price) &&
-      price >= 0 &&
-      price <= MAX_UNIT_PRICE_CENTS;
-    if (validPrice) {
-      payload.unitPriceCents = Math.round(price as number);
+      explanationParts.push(
+        `This sounds like an edit to an existing item ("${(ee.catalogItemReference as string).trim()}") — use update_catalog_item instead of adding a new one.`,
+      );
     } else {
-      missing.push('unitPriceCents');
-    }
+      const name = typeof ee.catalogItemNewName === 'string' ? ee.catalogItemNewName.trim() : '';
+      if (name) {
+        payload.name = name;
+      } else {
+        missing.push('name');
+      }
 
-    if (
-      typeof ee.catalogItemNewDescription === 'string' &&
-      ee.catalogItemNewDescription.trim().length > 0
-    ) {
-      payload.description = ee.catalogItemNewDescription.trim();
-    }
+      // Zero is a LEGAL price (see class doc comment) — only a genuinely
+      // absent/negative/non-numeric/over-ceiling value gates.
+      const price = ee.unitPriceCents;
+      const validPrice =
+        typeof price === 'number' &&
+        Number.isFinite(price) &&
+        price >= 0 &&
+        price <= MAX_UNIT_PRICE_CENTS;
+      if (validPrice) {
+        payload.unitPriceCents = Math.round(price);
+      } else {
+        missing.push('unitPriceCents');
+      }
 
-    // Defense in depth — see class doc comment on why this re-checks the
-    // classifier's own CATALOG_UNITS allowlist rather than trusting the
-    // type alone.
-    if (
-      typeof ee.catalogItemUnit === 'string' &&
-      (CATALOG_UNITS as readonly string[]).includes(ee.catalogItemUnit)
-    ) {
-      payload.unit = ee.catalogItemUnit;
+      if (
+        typeof ee.catalogItemNewDescription === 'string' &&
+        ee.catalogItemNewDescription.trim().length > 0
+      ) {
+        payload.description = ee.catalogItemNewDescription.trim();
+      }
+
+      // Defense in depth — see class doc comment on why this re-checks the
+      // classifier's own CATALOG_UNITS allowlist rather than trusting the
+      // type alone.
+      if (
+        typeof ee.catalogItemUnit === 'string' &&
+        (CATALOG_UNITS as readonly string[]).includes(ee.catalogItemUnit)
+      ) {
+        payload.unit = ee.catalogItemUnit;
+      }
     }
 
     // P2-002 — the MANDATORY payload contract gate (proposals/contracts.ts
@@ -173,7 +193,7 @@ export class AddCatalogItemTaskHandler implements TaskHandler {
       assertValidProposalPayload(this.taskType, payload);
     } catch (err) {
       payloadContractErrors = contractErrorsFrom(err);
-      for (const field of contractGapFields(payloadContractErrors)) {
+      for (const field of contractGapFields(payloadContractErrors, 'name')) {
         if (!missing.includes(field)) missing.push(field);
       }
     }
@@ -182,6 +202,7 @@ export class AddCatalogItemTaskHandler implements TaskHandler {
 
     const input: CreateProposalInput = inputFor(context, this.taskType, payload, missing, {
       sourceContext: extraSourceContext,
+      explanation: explanationParts.length > 0 ? explanationParts.join(' ') : undefined,
     });
 
     return { proposal: createProposal(input), taskType: this.taskType };
