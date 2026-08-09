@@ -1748,6 +1748,17 @@ export function createVoiceTurnProcessor(
             : deps.systemActorId ?? 'calling-agent',
         ...(tenantThresholdOverride ? { tenantThresholdOverride } : {}),
         // D-015 — only when every autonomous booking gate passed.
+        //
+        // followup-autoapprove-default audit — this call site never threads
+        // supervisorMode/supervisorPresent (intentionally left as-is; see
+        // that investigation), so decideInitialStatus's generic
+        // shouldAutoApprove(confidence, LEGACY_AUTO_APPROVE_THRESHOLD) check
+        // runs here instead of the lane's own dedicated threshold. Currently
+        // harmless only because AUTONOMOUS_BOOKING_THRESHOLD_FLOOR ===
+        // LEGACY_AUTO_APPROVE_THRESHOLD — see the doc comments on both
+        // constants (proposals/autonomous-lane.ts /
+        // proposals/auto-approve.ts) and the pinned invariant in
+        // test/proposals/autonomous-lane.test.ts before changing either.
         ...(autonomousLaneForCreate
           ? {
               autonomousLane: autonomousLaneForCreate,
