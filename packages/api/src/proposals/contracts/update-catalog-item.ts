@@ -18,10 +18,11 @@ import { z } from 'zod';
  * the normal inbox, no auto-approve).
  *
  * All money is integer cents (CLAUDE.md core pattern — never floating point).
- * `evidence` carries the repetition provenance so the review UI can show WHY
- * the AI is asking ("you've corrected this 3 times") — OPTIONAL (follow-up
- * fix, 2026-08-09): the correction loop is the only producer that can
- * honestly populate it, but this type now also has a voice on-ramp
+ * `evidence` was added so the review UI could show WHY the AI is asking
+ * ("you've corrected this 3 times") — though no UI consumes it yet (see
+ * below). It is OPTIONAL (follow-up fix, 2026-08-09): the correction loop
+ * is the only producer that can honestly populate it, but this type now
+ * also has a voice on-ramp
  * (`UpdateCatalogItemTaskHandler`, ai/tasks/voice-extended-tasks.ts) that
  * has no lesson to point to and correctly omits the key rather than
  * fabricate one. Nothing reads `payload.evidence` — not

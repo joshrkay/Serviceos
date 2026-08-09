@@ -144,6 +144,25 @@ taxonomy 1.7.0):
   such edit fail with "Invalid payload after edit". See
   `UpdateCatalogItemTaskHandler`'s doc comment
   (`ai/tasks/voice-extended-tasks.ts`) for the full analysis.
+- **`proposedUnitPriceCents` carries NO price ceiling on the contract**
+  (follow-up fix, 2026-08-09 — it briefly mirrored `add_catalog_item`'s
+  `MAX_UNIT_PRICE_CENTS` ceiling, "I4", removed here). Unlike
+  `add_catalog_item`, which has exactly ONE producer (voice) and so can
+  safely ceiling at the contract level, `update_catalog_item` has TWO:
+  voice AND the correction-repetition loop. `proposedUnitPriceCents`
+  carries a never-spoken value on both of this type's non-"fresh voice
+  price" paths — a voice name/description-only edit inherits the item's
+  own untouched price, and the correction loop carries `afterCents`
+  straight from persisted lesson data — so a shared contract-level
+  ceiling rejected real, legitimately-priced (>$100k) catalog items
+  neither producer ever spoke. The `MAX_UNIT_PRICE_CENTS` check instead
+  lives ONLY in `UpdateCatalogItemTaskHandler`'s own drafting gate — the
+  one path that ever writes a genuinely spoken figure into this field —
+  which now doubles as the sole enforcement point for a misheard-figure
+  backstop on this intent (`test/ai/tasks/update-catalog-item-task.test.ts`
+  pins this; do not delete it as a "redundant mirror" of
+  `add_catalog_item`'s test, since post-fix it no longer mirrors
+  anything).
 - This type is deliberately **absent** from `S1_ALLOWED_PROPOSAL_TYPES`
   (`proposals/surface.ts`) — operator/owner-only, never reachable from an
   unauthenticated inbound caller.
@@ -945,9 +964,13 @@ Notes on the Tradesperson wave 1, Task 12 row (`add_catalog_item`, taxonomy 1.16
   in without either side ever exercising the disagreement). A sanity
   ceiling ($100,000, mirroring `create-service-agreement.ts`'s identical
   backstop) guards against a misheard "290 thousand" style figure — not a
-  real product limit, and NOT a shared constant (the domain/HTTP layer
-  places no upper bound on `unitPriceCents` at all, so there is nothing
-  to keep in lockstep with).
+  real product limit, and not something the domain/HTTP layer itself
+  enforces (the DB/HTTP layer places no upper bound on `unitPriceCents` at
+  all). The `MAX_UNIT_PRICE_CENTS` constant IS shared — it's also imported
+  into `update_catalog_item`'s `UpdateCatalogItemTaskHandler` drafting gate
+  (see the Task 2 notes above) — but only as a drafting-time check on a
+  spoken figure in each intent's own task handler, never as a bound either
+  intent's contract shares with the domain/HTTP layer.
 - **`category`/`unit` defaults live at EXECUTION time, not drafting.**
   `CatalogItem.category`/`.unit` are BOTH required at the domain layer,
   but this intent's taxonomy has no category extraction seam at all (a v1

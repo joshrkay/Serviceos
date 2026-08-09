@@ -161,6 +161,17 @@ describe('UpdateCatalogItemTaskHandler', () => {
   // catalog_items.unit_price_cents column from the SAME spoken
   // unitPriceCents field, so a misheard "290 thousand" must gate here
   // exactly as it does on the create side.
+  //
+  // Follow-up fix (2026-08-09, same day) — the ceiling was REMOVED from
+  // `updateCatalogItemPayloadSchema` itself (contracts/update-catalog-item.ts)
+  // because `proposedUnitPriceCents` also carries never-spoken values from
+  // the correction-repetition loop and this handler's own no-price-change
+  // fallback, and a shared contract ceiling wrongly rejected those. That
+  // makes THIS TEST (and the exactly-ceiling test below it) the sole
+  // remaining enforcement proof of the misheard-figure ceiling for this
+  // intent — it no longer "mirrors" add_catalog_item's contract-level test,
+  // it IS the enforcement. DO NOT DELETE AS A REDUNDANT MIRROR: nothing
+  // else fails if this gate silently regresses.
   it('a unitPriceCents above the sanity ceiling is not trusted as a real price change', async () => {
     const catalogRepo = await seededRepo([{ name: 'AC tune-up', unitPriceCents: 8900 }]);
     const { proposal } = await new UpdateCatalogItemTaskHandler(catalogRepo).handle(
