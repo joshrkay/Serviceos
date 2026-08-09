@@ -1666,6 +1666,10 @@ async function processSegment(
     userId,
     message: segmentText,
     conversationId,
+    // Quality-review fix (2026-08-09, Task 11) — the raw classified intent,
+    // for handlers that alias multiple intents onto the same taskType (see
+    // TaskContext.intent's doc comment, ai/tasks/task-handlers.ts).
+    intent: classification.intentType,
     ...(standingInstructions ? { standingInstructions } : {}),
     ...(handler.taskType === 'draft_estimate' ? { clarificationCount } : {}),
     existingEntities: {

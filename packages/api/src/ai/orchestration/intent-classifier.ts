@@ -130,11 +130,17 @@ export type IntentType =
   // the Patel job"). No new ProposalType, no new execution handler. Extract
   // `mileageMiles` (number, required); jobReference reuses the existing
   // seam (JOB_REF_INTENTS membership — entity-resolution.ts, mirroring
-  // log_expense). `LogExpenseTaskHandler` (ai/tasks/voice-extended-
-  // tasks.ts) branches on the PRESENCE of `mileageMiles` — TaskContext
-  // carries no `intent` field, so that extracted-entity field is the only
-  // provenance signal available inside the shared handler — and converts
-  // miles × DEFAULT_MILEAGE_RATE_CENTS_PER_MILE into `amountCents`, forcing
+  // log_expense). Quality-review fix (2026-08-09) — `LogExpenseTaskHandler`
+  // (ai/tasks/voice-extended-tasks.ts) branches on `context.intent ===
+  // 'log_mileage'` (TaskContext.intent), NOT on the presence of
+  // `mileageMiles` — the classifier's extraction shape is one GLOBAL
+  // template shared by every intent (`entitiesForProposal`,
+  // workers/voice-action-router.ts, is a passthrough for every intent
+  // except `create_customer`), so the taxonomy above only INSTRUCTS the
+  // model to extract `mileageMiles` on this intent; it does not
+  // structurally prevent the model from also populating it (or the plain
+  // `amount` dollars key) on a different intent's turn. Converts miles ×
+  // DEFAULT_MILEAGE_RATE_CENTS_PER_MILE into `amountCents`, forcing
   // `category: 'vehicle'`.
   | 'log_mileage'
   // Taxonomy 1.2.0 (agent wave, Track A) — three proposal-driving on-ramps:
@@ -501,12 +507,19 @@ export const SUPPORTED_INTENTS: readonly IntentType[] = [
  *           (no new ProposalType, no new execution handler, no migration).
  *           A technician logs drive miles for the tax-deduction mileage
  *           log ("Log 32 miles to the Patel job"). New extraction field
- *           (mileageMiles, a possibly-fractional number); reuses the
- *           existing jobReference seam (JOB_REF_INTENTS membership —
- *           entity-resolution.ts — mirrors log_expense's own membership).
+ *           (mileageMiles, a possibly-fractional number, deliberately NOT
+ *           the plan's literal suggested name `miles` — a generic key in a
+ *           shared entity bag risks collision with a future intent);
+ *           reuses the existing jobReference seam (JOB_REF_INTENTS
+ *           membership — entity-resolution.ts — mirrors log_expense's own
+ *           membership). Quality-review fix (2026-08-09) —
  *           `LogExpenseTaskHandler` (ai/tasks/voice-extended-tasks.ts)
- *           branches on the PRESENCE of `mileageMiles` (TaskContext carries
- *           no `intent` field) and converts miles ×
+ *           branches on `context.intent === 'log_mileage'` (TaskContext.
+ *           intent), not the presence of `mileageMiles`: the classifier's
+ *           extraction shape is one global template the taxonomy only
+ *           INSTRUCTS per intent, not structurally scopes, so keying on
+ *           field presence let a stray field from the OTHER alias hijack
+ *           (or get silently dropped by) the wrong branch. Converts miles ×
  *           DEFAULT_MILEAGE_RATE_CENTS_PER_MILE (70¢, the 2026 IRS standard
  *           rate — a constant, not tenant config) into `amountCents`,
  *           forcing `category: 'vehicle'`.
@@ -657,12 +670,15 @@ export interface ExtractedEntities {
   vendor?: string;
   // Task 11 (2026-08-07 tradesperson plan) — log_mileage intent (aliases
   // log_expense). Miles driven, possibly fractional (an odometer reading).
-  // NOT filtered/rounded at parse time (unlike materialQuantity) — required
-  // fields with domain bounds get validated at the HANDLER, same posture as
-  // `LogExpenseTaskHandler`'s own `amount` gate, so a spoken 0/negative
-  // value reaches the handler and gates on `amountCents` for an accurate
-  // reason instead of silently vanishing here and looking like "no miles
-  // stated at all".
+  // The parser only drops a non-finite value (NaN/Infinity — see
+  // `Number.isFinite` in the parse allowlist below); unlike
+  // materialQuantity it is NOT additionally filtered to `> 0` or rounded
+  // here — a required field with domain bounds (positive, ≤ MAX_MILEAGE_
+  // MILES) gets validated at the HANDLER, same posture as
+  // `LogExpenseTaskHandler`'s own `amount` gate, so a spoken 0/negative/
+  // out-of-range value reaches the handler and gates on `amountCents` for
+  // an accurate reason instead of silently vanishing here and looking like
+  // "no miles stated at all".
   mileageMiles?: number;
   // convert_lead intent: free-text reference to the lead being converted
   // (caller name or "the Johnson lead"). The execution handler resolves

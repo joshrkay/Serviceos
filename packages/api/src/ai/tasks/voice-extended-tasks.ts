@@ -26,8 +26,8 @@ import type { CatalogItem, CatalogItemRepository } from '../../catalog/catalog-i
 import type { InvoiceRepository } from '../../invoices/invoice';
 import type { Estimate, EstimateRepository } from '../../estimates/estimate';
 import type { LLMGateway } from '../gateway/gateway';
-import { resolveDateTime, DEFAULT_TENANT_TIMEZONE } from '../scheduling/resolve-datetime';
-import { isRuntimeTimezone, localDateKey } from '../../shared/timezone';
+import { resolveDateTime } from '../scheduling/resolve-datetime';
+import { isRuntimeTimezone, localDateKey, tzMidnight } from '../../shared/timezone';
 import { findJobsRequiringInvoicing, InvoicingQueueDeps } from '../../invoices/invoicing-queue';
 import {
   DunningEvent,
@@ -39,7 +39,7 @@ import { candidatesForReference } from '../resolution/reference-candidates';
 import type { EntityCandidate } from '../resolution/entity-resolver';
 import { resolveLineItemToCatalog } from '../resolution/catalog-resolver';
 import { formatCents } from '../skills/spoken-format';
-import { entitiesFrom, baseSourceContext, inputFor } from './task-input';
+import { entitiesFrom, baseSourceContext, inputFor, resolveTenantTimezone } from './task-input';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -1613,6 +1613,33 @@ export class UpdateCustomerTaskHandler implements TaskHandler {
   }
 }
 
+/**
+ * The 2026 IRS standard mileage rate, in cents per mile. A CONSTANT, not
+ * tenant config — the IRS publishes one national rate per year; this is
+ * not a per-tenant business setting the way a labor rate or tax rate is.
+ * Bump this literal (with a comment naming the new year/rate) when the IRS
+ * publishes an updated rate — never make it configurable per Task 11's
+ * scope decision.
+ */
+export const DEFAULT_MILEAGE_RATE_CENTS_PER_MILE = 70;
+
+/**
+ * Quality-review correction (2026-08-09) — this is a SANITY BOUND on a
+ * spoken figure, not an overflow guard: `expenses.amount_cents` is Postgres
+ * INTEGER (int4, max 2,147,483,647), which at this rate would need roughly
+ * 30.7 MILLION miles to overflow. 10,000 is a domain judgment ("no single
+ * logged trip is five figures of miles"), not a boundary the overflow math
+ * requires — the original 1,000 figure UNDERSOLD what a legitimate batch
+ * entry ("log 1,200 miles for the month") might need and gated it for no
+ * stated reason. `logExpensePayloadSchema` (contracts/log-expense.ts) has
+ * NO upper bound on `amountCents` — a real expense (a new work van)
+ * legitimately runs into the tens of thousands — so this handler-level
+ * cap on MILES is the only thing standing between an STT-garbled spoken
+ * figure and Postgres; that is the real argument for having any cap at
+ * all, not the overflow arithmetic.
+ */
+export const MAX_MILEAGE_MILES = 10_000;
+
 // ───────────── log_expense (+ Task 11 alias: log_mileage) ─────────────
 //
 // Owner/technician logs a business expense. Capture-class, moves no
@@ -1640,63 +1667,93 @@ export class UpdateCustomerTaskHandler implements TaskHandler {
 // its OWN math (miles × rate) the plain log_expense drafting never does —
 // so this handler grows a BRANCH instead of a second file/subclass.
 //
-// The branch is keyed on the PRESENCE of the qualified `mileageMiles`
-// extracted-entity field, NOT on `context.intent` — `TaskContext`
-// (ai/tasks/task-handlers.ts) carries no `intent` field anywhere in this
-// codebase (verified: no construction site, test fixture, or the shared
-// `voice-payload-contract.test.ts` drift harness ever sets one), so a
-// classifier-populated `mileageMiles` is the only available provenance
-// signal inside this shared handler. A plain log_expense utterance never
-// extracts `mileageMiles` (intent-classifier.ts's log_expense taxonomy
-// entry has no such field), so the branch can never misfire on a real
-// expense that merely mentions a number.
+// Quality-review fix (2026-08-09) — the branch keys on `context.intent ===
+// 'log_mileage'` (TaskContext.intent, ai/tasks/task-handlers.ts), NOT on
+// the presence of the `mileageMiles` extracted-entity field. It was
+// originally keyed on field presence, reasoned as safe because "a plain
+// log_expense utterance never extracts mileageMiles" — but that is a
+// PROMPT-LEVEL instruction to the model, not a structural guarantee:
+// `entitiesForProposal` (workers/voice-action-router.ts) is a passthrough
+// for every intent except `create_customer`, and the classifier's
+// "Return valid JSON with exactly this shape" template is ONE GLOBAL
+// object shared by every intent, not scoped per intent. A real utterance
+// mixing both signals ("drove 32 miles round trip, spent $240 on
+// fittings") can classify as `log_expense` while the model still emits
+// `mileageMiles` alongside the real `amount` — field-presence keying would
+// have silently eaten the real $240 expense for a bogus $22.40 mileage
+// entry, and the mirror image (a log_mileage turn where the model puts the
+// heard number on the shared `amount` key instead) would have produced a
+// fully-formed, zero-missing-fields WRONG expense with nothing for the
+// operator to notice. `context.intent` is the classifier's actual verdict,
+// not a proxy for it, so neither direction can happen: an off-intent
+// stray field is preserved (see the `expenseDescription`/stray-`amount`
+// handling below) but never allowed to redirect or silently vanish.
 export class LogExpenseTaskHandler implements TaskHandler {
   readonly taskType = 'log_expense' as const;
 
   async handle(context: TaskContext): Promise<TaskResult> {
     const ee = entitiesFrom(context);
+    // spentAt = TODAY in the TENANT timezone, for BOTH log_expense and its
+    // log_mileage alias (Task 7's lesson: never raw `new Date()` UTC math;
+    // quality-review fix, 2026-08-09 — a bare 'YYYY-MM-DD' string is not
+    // enough either: `spent_at` is TIMESTAMPTZ (schema.ts) and
+    // `LogExpenseExecutionHandler` parses the payload's `spentAt` with
+    // `new Date(spentAtRaw)`, which reads a date-only string as UTC
+    // MIDNIGHT — silently rendering back as the PREVIOUS calendar day in
+    // any tenant west of UTC. `tzMidnight` (shared/timezone.ts) converts
+    // the tenant-local calendar date into the correct UTC instant; the
+    // contract explicitly allows a full ISO timestamp (contracts/
+    // log-expense.ts). Computed once, here, for both branches below —
+    // this used to be TWO different idioms (a raw UTC slice for plain
+    // log_expense, tenant-tz math only inside the log_mileage branch),
+    // which is its own smell once one of them is wrong.
+    const { timezone } = resolveTenantTimezone(context);
+    const spentAt = tzMidnight(localDateKey(context.now ?? new Date(), timezone), timezone).toISOString();
     const payload: Record<string, unknown> = {
       category: ee.expenseCategory ?? 'other',
       description: ee.expenseDescription ?? context.message,
-      spentAt: new Date().toISOString().slice(0, 10),
+      spentAt,
     };
     const missing: string[] = [];
 
-    if (typeof ee.mileageMiles === 'number') {
+    if (context.intent === 'log_mileage') {
       const miles = ee.mileageMiles;
+      const validMiles =
+        typeof miles === 'number' && Number.isFinite(miles) && miles > 0 && miles <= MAX_MILEAGE_MILES;
+      // M1 (quality review) — gate on the COMPUTED CENTS, not the raw
+      // miles: any 0 < miles < 1/140 (~0.00714) rounds to 0 cents, which
+      // would pass a bare `miles > 0` check yet violate the contract's
+      // `amountCents.positive()` (and the DB CHECK) at execution — the
+      // exact "draft-time contract looser than what it feeds" drift class
+      // voice-payload-contract.test.ts exists to catch.
+      const mileageCents = validMiles
+        ? Math.round((miles as number) * DEFAULT_MILEAGE_RATE_CENTS_PER_MILE)
+        : undefined;
+
       payload.category = 'vehicle';
-      if (Number.isFinite(miles)) {
-        payload.description = `Mileage — ${miles} miles`;
+
+      // Never silently discard a stray field from the shared/global JSON
+      // template: `expenseDescription` and the plain `amount` (dollars) key
+      // can both still arrive on a log_mileage-classified turn (see class
+      // doc comment). Fold them into the visible description instead of
+      // dropping them — the operator reviewing the draft sees everything
+      // the model heard, even when only the miles drive the math.
+      const descriptionParts: string[] = [
+        typeof miles === 'number' && Number.isFinite(miles) ? `Mileage — ${miles} miles` : 'Mileage',
+      ];
+      if (typeof ee.expenseDescription === 'string' && ee.expenseDescription.trim()) {
+        descriptionParts.push(ee.expenseDescription.trim());
       }
-      // Domain gate (mirrors Task 8/9's MAX_QUANTITY lesson —
-      // materials/material-item.ts): a positive-but-sane floor/ceiling on
-      // MILES, not dollars — a real expense amountCents has no such cap
-      // (a work-van purchase legitimately runs into the tens of thousands),
-      // but an STT-garbled mileage figure ("fifty billion miles") times
-      // DEFAULT_MILEAGE_RATE_CENTS_PER_MILE would otherwise overflow
-      // expenses.amount_cents (Postgres INTEGER/int4, max 2,147,483,647) —
-      // a raw DB error instead of a clean gate. 0 and negative values are
-      // degenerate ("nothing to log") and gate the same way. Never
-      // silently clamped — an out-of-range value gates for a human to
-      // correct, exactly like a genuinely absent one.
-      if (Number.isFinite(miles) && miles > 0 && miles <= MAX_MILEAGE_MILES) {
-        payload.amountCents = Math.round(miles * DEFAULT_MILEAGE_RATE_CENTS_PER_MILE);
+      if (typeof ee.amount === 'number' && ee.amount > 0) {
+        descriptionParts.push(`spoken amount also heard: ${formatCents(ee.amount)}`);
+      }
+      payload.description = descriptionParts.join(' — ');
+
+      if (mileageCents !== undefined && mileageCents > 0) {
+        payload.amountCents = mileageCents;
       } else {
         missing.push('amountCents');
       }
-      // spentAt = TODAY in the TENANT timezone (Task 7's lesson: never raw
-      // `new Date()` UTC math — see create-service-agreement-task.ts's
-      // `resolveTenantTimezone` precedent, mirrored here). No sweep ever
-      // consumes a log_expense/log_mileage `spentAt` (unlike a booking's
-      // `startsOn`), so there is no "past date poisons a scheduled job"
-      // risk to guard against — a technician logging mileage for a trip
-      // taken yesterday is a normal, honest capture, not a malformed one
-      // (same posture Task 9 documents for `add_material`'s `neededBy`).
-      const timezone =
-        typeof context.timezone === 'string' && isRuntimeTimezone(context.timezone.trim())
-          ? context.timezone.trim()
-          : DEFAULT_TENANT_TIMEZONE;
-      payload.spentAt = localDateKey(context.now ?? new Date(), timezone);
     } else if (typeof ee.amount === 'number' && ee.amount > 0) {
       payload.amountCents = ee.amount;
     } else {
@@ -1717,25 +1774,6 @@ export class LogExpenseTaskHandler implements TaskHandler {
     };
   }
 }
-
-/**
- * The 2026 IRS standard mileage rate, in cents per mile. A CONSTANT, not
- * tenant config — the IRS publishes one national rate per year; this is
- * not a per-tenant business setting the way a labor rate or tax rate is.
- * Bump this literal (with a comment naming the new year/rate) when the IRS
- * publishes an updated rate — never make it configurable per Task 11's
- * scope decision.
- */
-export const DEFAULT_MILEAGE_RATE_CENTS_PER_MILE = 70;
-
-/**
- * Domain cap on a single `log_mileage` entry, in miles — see the module
- * doc comment above `LogExpenseTaskHandler` for the overflow rationale.
- * 1,000 miles comfortably covers even an extreme single-entry, multi-day
- * drive while sitting nowhere near the `expenses.amount_cents` int4
- * overflow boundary (1,000 × 70¢ = $700).
- */
-const MAX_MILEAGE_MILES = 1000;
 
 // ───────────── convert_lead ─────────────
 //

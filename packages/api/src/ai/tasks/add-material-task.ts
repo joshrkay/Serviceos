@@ -71,9 +71,7 @@ import { createProposal, CreateProposalInput } from '../../proposals/proposal';
 import { assertValidProposalPayload } from '../../proposals/contracts';
 import type { TaskHandler, TaskContext, TaskResult } from './task-handlers';
 import type { ExtractedEntities } from '../orchestration/intent-classifier';
-import { entitiesFrom, inputFor } from './task-input';
-import { isRuntimeTimezone, localDateKey } from '../../shared/timezone';
-import { DEFAULT_TENANT_TIMEZONE } from '../scheduling/resolve-datetime';
+import { entitiesFrom, inputFor, resolveTenantTimezone } from './task-input';
 
 /**
  * Pull the Zod paths off a `ValidationError` thrown by
@@ -140,11 +138,6 @@ function parseSpokenNeededBy(phrase: string, timezone: string, now: Date): strin
   return dt.toFormat('yyyy-MM-dd');
 }
 
-function resolveTenantTimezone(context: TaskContext): string {
-  const raw = typeof context.timezone === 'string' ? context.timezone.trim() : '';
-  return raw && isRuntimeTimezone(raw) ? raw : DEFAULT_TENANT_TIMEZONE;
-}
-
 export class AddMaterialTaskHandler implements TaskHandler {
   readonly taskType = 'add_material' as const;
 
@@ -183,7 +176,7 @@ export class AddMaterialTaskHandler implements TaskHandler {
     const spokenNeededBy =
       typeof ee.materialNeededBy === 'string' ? ee.materialNeededBy.trim() : '';
     if (spokenNeededBy.length > 0) {
-      const timezone = resolveTenantTimezone(context);
+      const { timezone } = resolveTenantTimezone(context);
       const now = context.now ?? new Date();
       const neededBy = parseSpokenNeededBy(spokenNeededBy, timezone, now);
       if (neededBy) payload.neededBy = neededBy;

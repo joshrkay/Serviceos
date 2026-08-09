@@ -271,21 +271,44 @@ export async function lookupCrewSchedule(
 
     // No technician named — "who's free" for the WHOLE crew. This answers
     // a DIFFERENT question than the roster/techById above: "who can I
-    // send?" — so it is additionally filtered to `canFieldServe`. An idle
-    // office-only owner or dispatcher is correctly a "booking" NEVER (they
-    // have no appointments to be busy with) but must not be reported
-    // "free" either — they are not sendable to a job. Keep the full roster
-    // for name resolution/techById; only the free list narrows further.
+    // send?" — so it is additionally narrowed. An idle office-only owner
+    // or dispatcher is correctly a "booking" NEVER (they have no
+    // appointments to be busy with) but must not be reported "free"
+    // either — they are not sendable to a job. Keep the full roster for
+    // name resolution/techById; only the free list narrows further.
+    //
+    // C1 (quality-review fix, 2026-08-09) — the discriminator is
+    // `role === 'technician' || canFieldServe`, NOT `canFieldServe` alone.
+    // `canFieldServe` is unpopulated in production: the DB column defaults
+    // `false` (migration adding it), no user-creation path writes it, and
+    // it is not settable from the product UI at all (the sole write path,
+    // PATCH /api/users/:id, is only ever called with `{ role }` —
+    // TeamMembersSheet.tsx). Filtering on it alone meant EVERY technician
+    // in a typical tenant was excluded and a fully idle crew reported
+    // "Nobody's free — the whole crew is booked" while nobody was booked
+    // either — strictly worse, and inverted from intent, versus the
+    // office-only-owner bug this filter was added to fix. `role` is
+    // populated on every row and can never exclude a real technician;
+    // `canFieldServe` only ADDS office staff who separately opted in to
+    // field-serving (Shell.tsx's `showModeToggle = isOwner || canFieldServe`
+    // — the Phase-12 "office user may switch into tech mode" grant, never
+    // a dispatchability attribute for technicians).
     const freeTechnicians = roster
-      .filter((t) => t.canFieldServe && !busyTechnicianIds.has(t.id))
+      .filter((t) => (t.role === 'technician' || t.canFieldServe) && !busyTechnicianIds.has(t.id))
       .map((t) => technicianDisplayName(t));
 
     const summaryParts: string[] = [];
     if (freeTechnicians.length > 0) {
       const spoken = freeTechnicians.slice(0, MAX_SPOKEN_FREE);
       summaryParts.push(`Free ${day.label}: ${spokenListWithTail(spoken, freeTechnicians.length)}`);
-    } else {
+    } else if (bookings.length > 0) {
       summaryParts.push(`Nobody's free ${day.label} — the whole crew is booked`);
+    } else {
+      // C1 (quality-review fix) — an empty free list no longer implies
+      // everyone is busy: it can also mean nobody on the roster is
+      // sendable at all (no technicians, no field-serving office staff).
+      // Zero bookings here would make "the whole crew is booked" false.
+      summaryParts.push(`Nobody on the crew can be sent out ${day.label}`);
     }
     if (bookings.length > 0) {
       const spoken = bookings.slice(0, MAX_SPOKEN_BOOKINGS).map((b) => {

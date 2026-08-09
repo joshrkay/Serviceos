@@ -187,8 +187,10 @@ export async function lookupMyDay(
       // nothing on today", which is false at 5pm after a full day of
       // already-worked (now-filtered-out, per I5 above) appointments.
       // "Nothing left today" is honest either way: no day happened at
-      // all, or a full day already happened and finished.
-      const summary = 'Nothing left today.';
+      // all, or a full day already happened and finished. Quality-review
+      // minor — "You have nothing left today." reads better spoken than
+      // the bare fragment.
+      const summary = 'You have nothing left today.';
       await record('none', 0, summary);
       return { status: 'none', summary, data: { appointments: [] } };
     }

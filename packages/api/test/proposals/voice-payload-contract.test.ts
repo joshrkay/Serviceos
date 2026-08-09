@@ -1117,8 +1117,12 @@ const ROWS: Row[] = [
     // 'log_expense' (voice-intent-map.ts), so dispatch here is
     // byte-identical to the log_expense row above: the SAME
     // LogExpenseTaskHandler / LogExpenseExecutionHandler pair.
-    // LogExpenseTaskHandler branches on the PRESENCE of `mileageMiles` in
-    // existingEntities to compute amountCents/category/description.
+    // Quality-review fix (2026-08-09) — LogExpenseTaskHandler branches on
+    // `context.intent === 'log_mileage'` (TaskContext.intent), not the
+    // presence of `mileageMiles` — see the class doc comment in
+    // ai/tasks/voice-extended-tasks.ts for why field-presence keying was
+    // unsafe (a stray `mileageMiles`/`amount` from the shared JSON
+    // template could hijack or get hijacked by the wrong branch).
     intent: 'log_mileage',
     mode: 'resolves',
     note: 'alias of log_expense — a spoken mileageMiles count is the only gate; dep-less LogExpenseExecutionHandler synthetic-succeeds',
@@ -1126,7 +1130,7 @@ const ROWS: Row[] = [
       draft(
         { gateway: NOOP_GATEWAY },
         'log_expense',
-        ctx({ existingEntities: { mileageMiles: 32 } }),
+        ctx({ intent: 'log_mileage', existingEntities: { mileageMiles: 32 } }),
       ),
     execute: (p) => new LogExpenseExecutionHandler().execute(p, execContext()),
     assertPayload: (payload) => {

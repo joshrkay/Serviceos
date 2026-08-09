@@ -86,7 +86,14 @@ async function fixtures(opts: FixtureOpts = {}) {
       role: t.role ?? 'technician',
       firstName: t.firstName,
       lastName: t.lastName,
-      canFieldServe: t.canFieldServe ?? true,
+      // Quality-review fix (2026-08-09) — DB column default is `false`
+      // (migration: `can_field_serve BOOLEAN NOT NULL DEFAULT false`; no
+      // user-creation path writes it, and it's not settable from the
+      // product UI at all — see users/user.ts:33 and the C1 finding on the
+      // `lookup-crew-schedule.ts` free-list filter). Defaulting the fixture
+      // to `true` inverted the real-world default and is exactly why the
+      // suite never caught the free-list bug this filter fix addresses.
+      canFieldServe: t.canFieldServe ?? false,
     });
   }
   return { appointmentRepo, jobRepo, userRepo };
@@ -380,6 +387,28 @@ describe('lookupCrewSchedule skill', () => {
     expect(res.summary).not.toContain('Bob Smith');
   });
 
+  // C1 (quality review, 2026-08-09) — `canFieldServe` is unpopulated in
+  // production: the DB column defaults `false`, no user-creation path
+  // writes it, and it is not settable from the product UI at all (the
+  // sole write path, PATCH /api/users/:id, is only ever called with
+  // `{ role }` — TeamMembersSheet.tsx). Filtering the free list on
+  // `canFieldServe` alone means EVERY technician in a typical tenant is
+  // `false` and the free list comes back empty for a fully idle crew.
+  // `role === 'technician'` is populated on every row and can never
+  // exclude a real technician — that must be the primary discriminator,
+  // with `canFieldServe` only ADDING office staff who separately opted in.
+  it('an idle TECHNICIAN with canFieldServe: false (the real-world default) still appears in the free list', async () => {
+    const deps = await fixtures({
+      technicians: [{ id: 'tech-mike', firstName: 'Mike', lastName: 'Diaz', canFieldServe: false }],
+    });
+
+    const res = await lookupCrewSchedule({ tenantId: TENANT, timezone: TZ, now: NOW }, deps);
+
+    expect(res.status).toBe('found');
+    if (res.status !== 'found') throw new Error('unreachable');
+    expect(res.data.freeTechnicians).toEqual(['Mike Diaz']);
+  });
+
   // Quality-review I3 — an UNCAPPED list must read with "and", not bare
   // commas ("Carlos, Mike and Dana", never "Carlos, Mike, Dana.").
   it('I3 — an uncapped free-technician list reads with a natural "and", not bare commas', async () => {
@@ -421,6 +450,25 @@ describe('lookupCrewSchedule skill', () => {
     expect(lookupEvents.record).toHaveBeenCalledWith(
       expect.objectContaining({ resultStatus: 'found', resultCount: 1 }), // 1 booking, not the 3-person roster
     );
+  });
+
+  // C1 (quality-review fix) — an empty free list does NOT always mean
+  // "everyone's booked". A roster of purely office staff who can't
+  // field-serve, with zero appointments, must not be told "the whole
+  // crew is booked" — nobody is booked; nobody is sendable either.
+  it('an all-office, zero-bookings roster reads honestly — not "the whole crew is booked"', async () => {
+    const deps = await fixtures({
+      technicians: [{ id: 'owner-bob', firstName: 'Bob', lastName: 'Smith', role: 'owner', canFieldServe: false }],
+    });
+
+    const res = await lookupCrewSchedule({ tenantId: TENANT, timezone: TZ, now: NOW }, deps);
+
+    expect(res.status).toBe('found');
+    if (res.status !== 'found') throw new Error('unreachable');
+    expect(res.data.freeTechnicians).toEqual([]);
+    expect(res.data.bookings).toEqual([]);
+    expect(res.summary).not.toContain('booked');
+    expect(res.summary).toContain('Nobody on the crew can be sent out');
   });
 
   it('reports status "none" and records the event when the tenant has no crew at all', async () => {

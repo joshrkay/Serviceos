@@ -213,7 +213,7 @@ describe('lookupMyDay skill', () => {
     // today", which is false at 5pm after a full day). "Nothing left
     // today" is honest: it speaks to what's still AHEAD, matching I5's
     // forward-looking filter above.
-    expect(res.summary).toContain('Nothing left today');
+    expect(res.summary).toContain('You have nothing left today');
     expect(res.summary).not.toMatch(/clear/i);
   });
 
@@ -287,7 +287,7 @@ describe('lookupMyDay skill', () => {
     );
 
     expect(res.status).toBe('none');
-    expect(res.summary).toContain('Nothing left today');
+    expect(res.summary).toContain('You have nothing left today');
     expect(lookupEvents.record).toHaveBeenCalledWith(
       expect.objectContaining({ tenantId: TENANT, intent: 'lookup_my_day', resultStatus: 'none', resultCount: 0 }),
     );

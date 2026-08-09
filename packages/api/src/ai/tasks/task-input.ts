@@ -23,9 +23,39 @@
 import { TaskContext } from './task-handlers';
 import { CreateProposalInput, ProposalType } from '../../proposals/proposal';
 import { ExtractedEntities } from '../orchestration/intent-classifier';
+import { isRuntimeTimezone } from '../../shared/timezone';
+import { DEFAULT_TENANT_TIMEZONE } from '../scheduling/resolve-datetime';
 
 export function entitiesFrom(context: TaskContext): ExtractedEntities {
   return (context.existingEntities ?? {}) as ExtractedEntities;
+}
+
+export interface ResolvedTenantTimezone {
+  timezone: string;
+  /** True when no valid tenant timezone was available and DEFAULT_TENANT_TIMEZONE was substituted. */
+  usedFallback: boolean;
+}
+
+/**
+ * Quality-review fix (2026-08-09, Task 11 review, "I4") — the single
+ * `context.timezone` validate-or-fallback pattern that had drifted into
+ * FOUR independent copies (add-material-task.ts, create-service-agreement-
+ * task.ts, voice-extended-tasks.ts's RescheduleAppointmentTaskHandler, and
+ * LogExpenseTaskHandler's log_mileage branch) — each one "mirrors" the
+ * others in a comment rather than sharing code. Returns the RICH shape
+ * (mirroring create-service-agreement-task.ts's own `ResolvedTimezone`,
+ * the strictest existing consumer) rather than a bare string: that file's
+ * `buildExplanation` needs `usedFallback` to tell the operator "(assumed
+ * America/New_York — tenant timezone unset)" on the review card, and a
+ * tenant genuinely configured for America/New_York must never be
+ * indistinguishable from one that fell back to it by coincidence — a bare
+ * `timezone === DEFAULT_TENANT_TIMEZONE` check cannot tell those apart.
+ * Callers that only need the zone string destructure `.timezone`.
+ */
+export function resolveTenantTimezone(context: TaskContext): ResolvedTenantTimezone {
+  const raw = typeof context.timezone === 'string' ? context.timezone.trim() : '';
+  if (raw && isRuntimeTimezone(raw)) return { timezone: raw, usedFallback: false };
+  return { timezone: DEFAULT_TENANT_TIMEZONE, usedFallback: true };
 }
 
 export function baseSourceContext(context: TaskContext): Record<string, unknown> | undefined {

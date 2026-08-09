@@ -133,9 +133,8 @@ import { createProposal } from '../../proposals/proposal';
 import { assertValidProposalPayload } from '../../proposals/contracts';
 import type { TaskHandler, TaskContext, TaskResult } from './task-handlers';
 import type { ExtractedEntities } from '../orchestration/intent-classifier';
-import { entitiesFrom, inputFor } from './task-input';
-import { isRuntimeTimezone, localDateKey } from '../../shared/timezone';
-import { DEFAULT_TENANT_TIMEZONE } from '../scheduling/resolve-datetime';
+import { entitiesFrom, inputFor, resolveTenantTimezone, ResolvedTenantTimezone } from './task-input';
+import { localDateKey } from '../../shared/timezone';
 import { formatUsdCentsPlain } from '@ai-service-os/shared';
 
 type ServiceAgreementCadence = NonNullable<ExtractedEntities['serviceAgreementCadence']>;
@@ -192,18 +191,6 @@ function contractGapFields(errors: string[]): string[] {
     fields.add(head.length > 0 ? head : 'payload');
   }
   return [...fields];
-}
-
-interface ResolvedTimezone {
-  timezone: string;
-  /** True when no valid tenant timezone was available and DEFAULT_TENANT_TIMEZONE was substituted. */
-  usedFallback: boolean;
-}
-
-function resolveTenantTimezone(context: TaskContext): ResolvedTimezone {
-  const raw = typeof context.timezone === 'string' ? context.timezone.trim() : '';
-  if (raw && isRuntimeTimezone(raw)) return { timezone: raw, usedFallback: false };
-  return { timezone: DEFAULT_TENANT_TIMEZONE, usedFallback: true };
 }
 
 /**
@@ -284,7 +271,7 @@ function buildExplanation(
   cadence: ServiceAgreementCadence | undefined,
   priceCents: number | undefined,
   startsOn: string,
-  tz: ResolvedTimezone,
+  tz: ResolvedTenantTimezone,
 ): string {
   const parts: string[] = [];
   if (cadence) parts.push(CADENCE_LABELS[cadence]);

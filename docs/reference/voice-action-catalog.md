@@ -817,54 +817,87 @@ Notes on the Task 11 row (`log_mileage`, taxonomy 1.15.0):
   `create_appointment`, `log_permit` → `add_note`) is a thin dispatch-only
   alias where the target handler runs completely unchanged. `log_mileage`
   can't follow that byte-for-byte — it needs its OWN math (miles × rate)
-  the plain `log_expense` drafting never does. `TaskContext`
-  (`ai/tasks/task-handlers.ts`) carries no `intent` field anywhere in this
-  codebase, so the branch keys on the PRESENCE of the qualified
-  `mileageMiles` extracted-entity field instead — the only provenance
-  signal available inside the shared handler. A plain `log_expense`
-  utterance never extracts `mileageMiles` (its own taxonomy entry has no
-  such field), so the branch cannot misfire on a real expense that merely
-  mentions a number.
+  the plain `log_expense` drafting never does.
+- **Quality-review fix (2026-08-09) — the branch keys on `context.intent
+  === 'log_mileage'`, not the presence of `mileageMiles`.** `TaskContext`
+  gained an `intent?: IntentType` field (`ai/tasks/task-handlers.ts`),
+  threaded at the `voice-action-router.ts` dispatch site, specifically to
+  fix this: the branch originally keyed on the mere PRESENCE of the
+  `mileageMiles` extracted-entity field, reasoned as safe because "a plain
+  `log_expense` utterance never extracts `mileageMiles`" — but that is a
+  PROMPT-LEVEL instruction to the model, not a structural guarantee.
+  `entitiesForProposal` (`workers/voice-action-router.ts`) is a passthrough
+  for every intent except `create_customer`, and the classifier's JSON
+  response shape is ONE GLOBAL template shared by every intent — nothing
+  stops a real utterance ("drove 32 miles round trip, spent $240 on
+  fittings") from classifying `log_expense` while the model still emits
+  `mileageMiles` alongside the real `amount`, or the mirror image (a
+  `log_mileage` turn where the model puts the heard number on the shared
+  `amount` key instead). Field-presence keying let either direction hijack
+  or silently vanish; `context.intent` is the classifier's actual verdict,
+  so neither can. A stray `expenseDescription` or `amount` on a
+  `log_mileage` turn is folded into the visible description rather than
+  discarded, so the operator always sees everything the model heard.
 - **`amountCents = round(miles × DEFAULT_MILEAGE_RATE_CENTS_PER_MILE)`.**
   `DEFAULT_MILEAGE_RATE_CENTS_PER_MILE` (70¢, `ai/tasks/voice-extended-
   tasks.ts`) is the 2026 IRS standard mileage rate — a CONSTANT, not
   tenant config (the IRS publishes one national rate per year; this isn't
-  a per-tenant business setting the way a labor rate is).
-- **Miles get a domain cap (0 < miles ≤ 1,000), mirroring Task 8/9's
-  `MAX_QUANTITY` lesson** (`materials/material-item.ts`). `expenses.
-  amount_cents` is Postgres `INTEGER` (int4, max 2,147,483,647); an
-  STT-garbled mileage figure ("fifty billion miles") times the mileage
-  rate would otherwise overflow that column — a raw DB error instead of a
-  clean gate. The cap is on MILES, not dollars: a real expense
-  `amountCents` has no such cap (a work-van purchase legitimately runs
-  into the tens of thousands), but a single mileage entry's computed
-  amount has no business anywhere near the overflow boundary (1,000 miles
-  × 70¢ = $700). An out-of-range value (0, negative, or over the cap)
-  gates the proposal on `amountCents` exactly like a genuinely absent one
-  — never silently clamped.
-- **`spentAt` is TODAY in the TENANT timezone, not raw `new Date()` UTC
-  math (Task 7's lesson).** Uses the same `resolveTenantTimezone` +
-  `localDateKey` pattern `add-material-task.ts` and `create-service-
-  agreement-task.ts` established, falling back to
-  `DEFAULT_TENANT_TIMEZONE` when the tenant zone is unresolved. Unlike
-  Task 7's `startsOn` (which feeds a 60-second recurring sweep that would
-  immediately act on a back-dated value), nothing sweeps, bills, or
-  repeats off `log_expense`/`log_mileage`'s `spentAt` — so no past-date
-  guard is needed; a technician logging mileage for yesterday's drive is
-  a normal, honest capture, mirroring `add_material`'s `neededBy`
-  reasoning, not `startsOn`'s.
+  a per-tenant business setting the way a labor rate is). Gated on the
+  COMPUTED CENTS, not the raw miles — any `0 < miles < 1/140` (~0.00714)
+  rounds to 0 cents, which would pass a bare `miles > 0` check yet violate
+  the contract's `amountCents.positive()` at execution.
+- **Miles get a domain cap (0 < miles ≤ 10,000).** `MAX_MILEAGE_MILES`
+  (exported, `ai/tasks/voice-extended-tasks.ts`) is a SANITY BOUND on a
+  spoken figure, not an overflow guard: `expenses.amount_cents` is
+  Postgres `INTEGER` (int4, max 2,147,483,647), which at this rate would
+  need roughly 30.7 MILLION miles to overflow. 10,000 is a domain judgment
+  ("no single logged trip is five figures of miles"), not a boundary the
+  overflow math requires. `logExpensePayloadSchema` has NO upper bound on
+  `amountCents` (a real expense — a new work van — legitimately runs into
+  the tens of thousands), so this handler-level cap on MILES is the only
+  thing standing between an STT-garbled spoken figure and Postgres; that
+  is the actual argument for having any cap at all. An out-of-range value
+  (0, negative, or over the cap) gates on `amountCents` exactly like a
+  genuinely absent one — never silently clamped.
+- **`spentAt` is TODAY in the TENANT timezone as a full ISO instant, not a
+  bare date string (Task 7's lesson, quality-review fix).** `spent_at` is
+  TIMESTAMPTZ (`schema.ts`) and `LogExpenseExecutionHandler` parses the
+  payload's `spentAt` with `new Date(spentAtRaw)`, which reads a bare
+  `'YYYY-MM-DD'` string as UTC MIDNIGHT — silently rendering back as the
+  PREVIOUS calendar day in any tenant west of UTC, the exact off-by-one
+  this fix exists to eliminate. `tzMidnight(localDateKey(now, tz), tz)`
+  (`shared/timezone.ts`) converts the tenant-local calendar date into the
+  correct UTC instant instead; the contract explicitly allows a full ISO
+  timestamp. Uses the shared `resolveTenantTimezone` (`ai/tasks/
+  task-input.ts` — lifted here from four independent copies, quality
+  review "I4"), falling back to `DEFAULT_TENANT_TIMEZONE` when the tenant
+  zone is unresolved. Applies to the PLAIN `log_expense` path too, not
+  just `log_mileage` — same flaw, same fix, computed once for both. No
+  past-date guard is needed for either (unlike Task 7's `startsOn`, which
+  feeds a 60-second recurring sweep): nothing sweeps, bills, or repeats
+  off this field, mirroring `add_material`'s `neededBy` reasoning, not
+  `startsOn`'s.
 - **`jobReference` joins `JOB_REF_INTENTS` mirroring `log_expense`'s OWN
   membership exactly** (`entity-resolution.ts`) — jobId stays OPTIONAL on
   the (shared) contract, so an unresolved/absent reference still logs the
   mileage UNLINKED; resolution only ever ADDS the link. Also mirrors
-  `log_expense`'s (currently vacuous) `CUSTOMER_REF_INTENTS` membership
-  for full parity with its target, even though `log_mileage`'s own
-  taxonomy never extracts `customerName`.
+  `log_expense`'s `CUSTOMER_REF_INTENTS` membership for full parity with
+  its target — `log_mileage`'s own taxonomy doesn't ask the classifier for
+  `customerName`, but it's a SHARED template key, so a real utterance
+  ("log 32 miles for the Hendersons") could still populate it, and this
+  membership is what resolves that name to a customerId instead of
+  leaving it inert.
 - **`voiceProposalSummary` gives `log_mileage` its own copy** ("Log
   mileage on `<job>`" / "for `<customer>`", mirroring `log_permit`'s
   preposition convention) rather than falling through to the generic
   `Voice intent: log_mileage` debug fallback (the exact drift-guard gap
   Task 9 shipped and a later review caught).
+- **Field name is `mileageMiles`, not the plan's literal suggested `miles`.**
+  A generic key like `miles` in a shared, cross-intent entity bag risks a
+  future collision; the qualified name is the better choice and is applied
+  consistently everywhere (interface, JSON template, parse allowlist) —
+  recorded here as a deliberate divergence from the plan text, not an
+  oversight.
 - This type is deliberately **absent** from `S1_ALLOWED_PROPOSAL_TYPES`
   (`proposals/surface.ts`) — it aliases `log_expense`, which is itself
   operator/technician-only, never reachable from an unauthenticated

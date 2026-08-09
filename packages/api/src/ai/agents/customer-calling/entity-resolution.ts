@@ -105,12 +105,13 @@ const CUSTOMER_REF_INTENTS = new Set([
   // log_expense's proposal type, so it mirrors log_expense's OWN
   // CUSTOMER_REF_INTENTS membership too, for full parity with its target
   // (Task 1's adjudication: an alias's entity-resolution membership must
-  // mirror the target). Currently VACUOUS in practice — log_mileage's own
-  // taxonomy (intent-classifier.ts) never instructs the classifier to
-  // extract `customerName`, only `mileageMiles`/`jobReference` — but kept
-  // for the same reason `log_expense`'s own membership costs nothing:
-  // `planVoiceEntityLookups` only acts on this set when `customerName` is
-  // actually present, which it structurally never will be here.
+  // mirror the target). log_mileage's own taxonomy (intent-classifier.ts)
+  // instructs the classifier to extract `mileageMiles`/`jobReference`, not
+  // `customerName` — but `customerName` is a SHARED template key, so a
+  // real utterance ("log 32 miles for the Hendersons") could still
+  // populate it; this membership is what makes that name resolve to a
+  // customerId the same way it would for log_expense, rather than staying
+  // inert free text.
   'log_mileage',
 ]);
 
