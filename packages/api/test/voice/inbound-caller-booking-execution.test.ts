@@ -739,22 +739,57 @@ describe('Inbound caller — a real-path proposal must actually execute', () => 
 /**
  * Control group. The other two S1-allowlisted types are NOT record-
  * creating: `callback` routes the caller to a human and
- * `voice_clarification` is an ask, not a mutation. Neither has an entry
- * in the production execution registry — by design. These assertions are
+ * `voice_clarification` is an ask, not a mutation. These assertions are
  * expected to PASS, and they are what proves the harness above is sound:
  * the same two-turn drive against the same production registry works, so
  * a red case in the suite above is the payload contract and not the rig.
+ *
+ * The two types diverged on Task 14 (2026-08-07 tradesperson plan):
+ * `callback` now HAS an execution handler (`CallbackExecutionHandler`,
+ * `proposals/execution/callback-handler.ts`) — a deliberately dep-free
+ * acknowledgement, registered unconditionally, that fixed the pre-existing
+ * `HANDLER_NOT_FOUND` bug on an approved `callback` proposal.
+ * `voice_clarification` still has none, but for a DIFFERENT reason: its
+ * own version of "approving it must do something real" was solved by TYPE
+ * TRANSITION rather than by an execution handler — `resolve-entity.ts`'s
+ * one-tap resolution REPLACES the `voice_clarification` row with a freshly
+ * drafted, executable typed proposal (e.g. `draft_invoice`) before
+ * approval, so there is never an approved `voice_clarification` proposal
+ * left needing an execution handler at all (see resolve-entity.ts's class
+ * doc comment).
  */
 describe('Inbound caller — the non-mutating S1 types (control)', () => {
   const registry = createExecutionHandlerRegistry({});
 
-  it.each(['callback', 'voice_clarification'] as ProposalType[])(
-    '%s is S1-allowed but has no execution handler (never executed by design)',
-    (type) => {
-      expect(S1_ALLOWED_PROPOSAL_TYPES.has(type)).toBe(true);
-      expect(registry.has(type)).toBe(false);
-    },
-  );
+  it('voice_clarification is S1-allowed and has no execution handler (resolved by type transition — resolve-entity.ts)', () => {
+    expect(S1_ALLOWED_PROPOSAL_TYPES.has('voice_clarification')).toBe(true);
+    expect(registry.has('voice_clarification')).toBe(false);
+  });
+
+  it('callback is S1-allowed and HAS a dep-free acknowledgement handler (Task 14)', () => {
+    expect(S1_ALLOWED_PROPOSAL_TYPES.has('callback')).toBe(true);
+    expect(registry.has('callback')).toBe(true);
+  });
+
+  /**
+   * The two tests above were, until Task 14, a single `it.each` that
+   * asserted BOTH S1-allowed types lacked an execution handler — a red test
+   * the moment `callback` got one, because the enumeration lived only in
+   * that one assertion with no separate source of truth to check it against.
+   * This test is that source of truth: it names, in ONE reviewed constant,
+   * exactly which S1-allowed proposal types are intentionally handler-less
+   * (today: only `voice_clarification`, resolved by type transition — see
+   * the doc comment above). Any other S1-allowed type with no execution
+   * handler is a real gap, not a documented exception, and should fail here
+   * rather than surface as a runtime HANDLER_NOT_FOUND.
+   */
+  it('the only S1-allowed proposal type with no execution handler is voice_clarification', () => {
+    const EXPECTED_HANDLERLESS_S1_TYPES = ['voice_clarification'];
+    const actuallyHandlerless = [...S1_ALLOWED_PROPOSAL_TYPES].filter(
+      (type) => !registry.has(type),
+    );
+    expect(actuallyHandlerless).toEqual(EXPECTED_HANDLERLESS_S1_TYPES);
+  });
 
   it('an operator-only ask from a caller is coerced to voice_clarification', async () => {
     const world = await seedWorld();

@@ -104,11 +104,36 @@ describe('CallbackExecutionHandler', () => {
     });
   });
 
-  it('does not emit any audit event when no audit repo is wired', async () => {
-    const handler = new CallbackExecutionHandler();
-    const result = await handler.execute(makeProposal(CALLBACK_PAYLOAD), ctx);
-    expect(result.success).toBe(true);
+  it('stamps payload.conversationId onto the audit metadata when present — links the acknowledgement back to the call without joining through the proposal row', async () => {
+    const auditRepo = new InMemoryAuditRepository();
+    const handler = new CallbackExecutionHandler(auditRepo);
+    const proposal = makeProposal({ ...CALLBACK_PAYLOAD, conversationId: 'conv-42' });
+
+    await handler.execute(proposal, ctx);
+
+    const events = auditRepo.getAll();
+    expect(events[0].metadata).toMatchObject({ conversationId: 'conv-42' });
   });
+
+  it('omits conversationId from the audit metadata when the payload has none', async () => {
+    const auditRepo = new InMemoryAuditRepository();
+    const handler = new CallbackExecutionHandler(auditRepo);
+    const proposal = makeProposal(CALLBACK_PAYLOAD);
+
+    await handler.execute(proposal, ctx);
+
+    const events = auditRepo.getAll();
+    expect(events[0].metadata).not.toHaveProperty('conversationId');
+  });
+
+  // A prior version of this suite had a test named "does not emit any audit
+  // event when no audit repo is wired" that asserted only
+  // `result.success === true` — the SAME assertion the "acknowledges an
+  // approved callback" test above already makes with the same no-repo
+  // construction, so it was a duplicate under a misleading name and pinned
+  // nothing about audit emission at all. There is no repo instance to spy on
+  // in the "no repo wired" case (that's the point of the case), so dropped
+  // rather than faked into a spy assertion that couldn't observe anything.
 
   it('a throwing audit repo does NOT break execution — failure-soft, matching the LogExpense family', async () => {
     const throwingAuditRepo: AuditRepository = {
