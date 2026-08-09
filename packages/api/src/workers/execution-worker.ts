@@ -26,11 +26,20 @@ import { ProposalExecutor } from '../proposals/execution/executor';
 import { UNDO_WINDOW_MS } from '../proposals/lifecycle';
 import { Logger } from '../logging/logger';
 import { instrument } from '../monitoring/instrumentation';
+import { AuditRepository, createAuditEvent } from '../audit/audit';
 
 export interface ExecutionWorkerDeps {
   proposalRepo: ProposalRepository;
   executor: ProposalExecutor;
   logger: Logger;
+  /**
+   * Required (WS11-style, like ProposalExecutor's own auditRepo dependency):
+   * resetStaleExecuting can write a proposal straight to the terminal
+   * 'execution_failed' status, bypassing executeAudited entirely — this is
+   * the ONLY place that transition gets an audit event. Not optional so a
+   * new wiring can't silently drop it.
+   */
+  auditRepo: AuditRepository;
   windowMs?: number;
   workerId?: string;
   staleMinutes?: number;
@@ -52,7 +61,56 @@ async function runExecutionSweepInner(deps: ExecutionWorkerDeps): Promise<{
   try {
     const recovered = await deps.proposalRepo.resetStaleExecuting(staleMinutes, maxRetries);
     if (recovered.resetToApproved > 0 || recovered.movedToFailed > 0) {
-      deps.logger.warn('Execution sweep: recovered stale executing proposals', recovered);
+      // Log only the two counts, not the whole `recovered` object — it now
+      // carries `failedProposals`, and dumping that array into one log line
+      // on a mass timeout would duplicate the per-proposal audit events
+      // emitted just below with no added signal.
+      deps.logger.warn('Execution sweep: recovered stale executing proposals', {
+        resetToApproved: recovered.resetToApproved,
+        movedToFailed: recovered.movedToFailed,
+      });
+    }
+    // Follow-up: a proposal moved straight to the terminal 'execution_failed'
+    // status here (maxRetries exhausted) bypassed executeAudited entirely —
+    // this is the only place that transition gets an audit event. We can't
+    // recover the ORIGINAL failure reason (it was never captured on this
+    // path — e.g. a HANDLER_NOT_FOUND throw happens before any result is
+    // recorded), so the event records what we genuinely know: the proposal
+    // sat claimed in 'executing' past the stale threshold across
+    // `retryCount` retries without ever completing. Failure-soft — an
+    // audit-write failure never blocks the sweep or the status transition,
+    // which already committed.
+    for (const failedProposal of recovered.failedProposals) {
+      try {
+        await deps.auditRepo.create(
+          createAuditEvent({
+            tenantId: failedProposal.tenantId,
+            actorId: 'system:execution-worker',
+            actorRole: 'system',
+            eventType: 'proposal.execution_timed_out',
+            entityType: 'proposal',
+            entityId: failedProposal.id,
+            metadata: {
+              proposalType: failedProposal.proposalType,
+              // Matches logProposalEvent / executionAuditInput's convention
+              // of always including the post-transition status.
+              status: 'execution_failed',
+              retryCount: failedProposal.retryCount,
+              staleMinutes,
+              maxRetries,
+            },
+          }),
+        );
+      } catch (err) {
+        deps.logger.error(
+          'Execution sweep: failed to write proposal.execution_timed_out audit event',
+          {
+            proposalId: failedProposal.id,
+            tenantId: failedProposal.tenantId,
+            error: err instanceof Error ? err.message : String(err),
+          },
+        );
+      }
     }
     ready = await deps.proposalRepo.findReadyForExecution(windowMs);
   } catch (err) {

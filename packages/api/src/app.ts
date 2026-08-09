@@ -1265,8 +1265,14 @@ export function createApp(): AppWithLifecycle {
   // jobRepo is hoisted earlier so the Stripe webhook + everything else
   // share a single InMemory instance during tests.
   const timelineRepo       = pool ? new PgJobTimelineRepository(pool)    : new InMemoryJobTimelineRepository();
-  const appointmentRepo    = pool ? new PgAppointmentRepository(pool)    : new InMemoryAppointmentRepository();
+  // assignmentRepo is constructed BEFORE appointmentRepo (rather than the
+  // historical order) so the in-memory appointment repo can be threaded the
+  // same assignment lookup it needs for technicianId filtering in
+  // listWithMeta — see in-memory-appointment.ts's TechnicianAssignmentLookup.
+  // Pg's equivalent filter is a self-contained EXISTS subquery, so
+  // PgAppointmentRepository needs no such wiring.
   const assignmentRepo     = pool ? new PgAssignmentRepository(pool)     : new InMemoryAssignmentRepository();
+  const appointmentRepo    = pool ? new PgAppointmentRepository(pool)    : new InMemoryAppointmentRepository(assignmentRepo);
   // Declared here (ahead of its first router use) so the jobs router's
   // from-estimate scheduling deps can reference it.
   const userRepo = pool ? new PgUserRepository(pool) : new InMemoryUserRepository();
@@ -2813,6 +2819,7 @@ export function createApp(): AppWithLifecycle {
           proposalRepo,
           executor: proposalExecutor,
           logger: executionWorkerLogger,
+          auditRepo,
         });
       } catch (err) {
         executionWorkerLogger.error('Execution sweep failed', {

@@ -293,6 +293,97 @@ describe('P2-005 — Approve / reject / edit interactions', () => {
     ).rejects.toThrow(ValidationError);
   });
 
+  // Follow-up fix (2026-08-09) — a voice-drafted update_catalog_item
+  // payload (UpdateCatalogItemTaskHandler) never populates `evidence`
+  // (only the correction-repetition loop can honestly do that), and the
+  // contract used to REQUIRE it. Since editProposal revalidates the FULL
+  // merged payload against the Zod schema, this meant the review card's
+  // EDIT action failed with "Invalid payload after edit" for every
+  // voice-drafted update_catalog_item proposal — not an edge case, ALWAYS.
+  // Approve/execute were unaffected (approveProposal only blocks on the
+  // tracked missingFields list; the executor never re-validates).
+  describe('Follow-up — update_catalog_item editProposal contract (evidence optional)', () => {
+    function voiceDraftedProposal() {
+      return createProposal({
+        tenantId,
+        proposalType: 'update_catalog_item',
+        payload: {
+          catalogItemId: '550e8400-e29b-41d4-a716-446655440000',
+          name: 'AC diagnostic fee',
+          currentUnitPriceCents: 7900,
+          proposedUnitPriceCents: 8900,
+          // No `evidence` — voice drafting never populates it (see
+          // UpdateCatalogItemTaskHandler's doc comment).
+        },
+        summary: 'Update AC diagnostic fee to $89.00',
+        createdBy: actorId,
+      });
+    }
+
+    it('a voice-drafted update_catalog_item proposal survives an unrelated field edit (operator can use EDIT from the review card)', async () => {
+      const repo = makeRepo();
+      const proposal = voiceDraftedProposal();
+      await repo.create(proposal);
+      await repo.updateStatus(tenantId, proposal.id, 'ready_for_review');
+
+      const { proposal: updated, editedFields } = await editProposal(
+        repo, tenantId, proposal.id, actorId, 'owner',
+        { proposedUnitPriceCents: 9500 },
+      );
+
+      expect(updated.payload.proposedUnitPriceCents).toBe(9500);
+      expect(editedFields).toContain('proposedUnitPriceCents');
+      // The fix must not fabricate an evidence object the operator never
+      // supplied — it stays honestly absent.
+      expect(updated.payload.evidence).toBeUndefined();
+    });
+  });
+
+  // Follow-up fix (2026-08-09) — the correction-repetition loop's
+  // proposedUnitPriceCents carries `afterCents` straight from persisted
+  // lesson data (learning/corrections/correction-repetition.ts), never a
+  // spoken value. A ceiling meant to catch a MISHEARD figure was briefly
+  // added to the shared contract ("I4") and wrongly caught this producer
+  // too: a legitimately priced (>$100k) catalog item's correction-loop
+  // proposal failed editProposal's full-payload revalidation with
+  // "Invalid payload after edit" for a price the operator never touched.
+  describe('Follow-up — update_catalog_item price ceiling scoped to spoken values only', () => {
+    function correctionLoopProposal(proposedUnitPriceCents: number) {
+      return createProposal({
+        tenantId,
+        proposalType: 'update_catalog_item',
+        payload: {
+          catalogItemId: '550e8400-e29b-41d4-a716-446655440000',
+          name: 'Commercial rooftop HVAC unit',
+          currentUnitPriceCents: 120_000_00,
+          proposedUnitPriceCents,
+          // The correction loop's own, honest evidence — real lesson ids,
+          // never fabricated (see Commit 1's fix above).
+          evidence: { lessonIds: ['lesson-9'], correctionCount: 3 },
+        },
+        summary: 'You\'ve corrected Commercial rooftop HVAC unit to $1,250.00 3 times — update the catalog?',
+        createdBy: actorId,
+      });
+    }
+
+    it('a correction-loop proposal for a legitimately priced (>$100k) catalog item survives an unrelated field edit', async () => {
+      const repo = makeRepo();
+      const proposal = correctionLoopProposal(125_000_00);
+      await repo.create(proposal);
+      await repo.updateStatus(tenantId, proposal.id, 'ready_for_review');
+
+      const { proposal: updated, editedFields } = await editProposal(
+        repo, tenantId, proposal.id, actorId, 'owner',
+        { sku: 'RTU-12' },
+      );
+
+      expect(updated.payload.sku).toBe('RTU-12');
+      expect(editedFields).toContain('sku');
+      // The price the operator never touched must survive untouched too.
+      expect(updated.payload.proposedUnitPriceCents).toBe(125_000_00);
+    });
+  });
+
   // B1 — resolution-loop foundation: editProposal must clear a satisfied
   // missingFields gate on fill, and never via a schema recompute (see
   // proposals/missing-fields.ts for why a recompute reopens the doomed-
