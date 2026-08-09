@@ -490,7 +490,12 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   // the plain (tenant_id) index (no query used it) and made
   // idx_material_items_pending cover (tenant_id, created_at) so
   // listPending's ORDER BY is served by the index scan; hash regenerated.
-  ['272_create_material_items', '28d3249fa800c52ebf97b4c69df821337b0084ba7670498c53a60eb1f10da55b'],
+  // Regenerated 2026-08-09: Task 9's review reworded a comment INSIDE this
+  // migration's SQL string ("Task 9 may add markCancelled" -> "a future task
+  // may"), which changes the hash. 272 is unmerged, so editing in place is
+  // still safe; once it ships, comment edits need a new migration like any
+  // other change to the value.
+  ['272_create_material_items', '364728f31ee0bada90eb104a2b77198624e5518002d38f28910d6b24a8e60622'],
 ];
 
 function hashMigration(value: string): string {
