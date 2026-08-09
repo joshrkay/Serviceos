@@ -1232,8 +1232,12 @@ describe('taxonomy 1.2.0 — new intents + entities', () => {
   // Task 11 of the same plan bumped it again to 1.15.0 (log_mileage — an
   // ALIAS intent onto the EXISTING log_expense proposal type; no new
   // ProposalType, no migration).
-  it('taxonomy version reflects the latest coordinated bump (1.15.0)', () => {
-    expect(INTENT_TAXONOMY_VERSION).toBe('1.15.0');
+  // Task 12 of the same plan bumped it again to 1.16.0 (add_catalog_item —
+  // a NEW capture-class proposal type that lets an owner add a price-book
+  // entry by voice; reuses catalogItemNewName/unitPriceCents/
+  // catalogItemNewDescription, adds one new field, catalogItemUnit).
+  it('taxonomy version reflects the latest coordinated bump (1.16.0)', () => {
+    expect(INTENT_TAXONOMY_VERSION).toBe('1.16.0');
   });
 
   // Task 11 (2026-08-07 tradesperson plan) — log_mileage is a new intent
@@ -1280,6 +1284,58 @@ describe('taxonomy 1.2.0 — new intents + entities', () => {
       }),
     );
     expect(result?.extractedEntities?.mileageMiles).toBeUndefined();
+  });
+
+  // Task 12 (2026-08-07 tradesperson plan) — add_catalog_item is a new
+  // intent that must be classifiable at all before anything downstream
+  // can map or draft it.
+  it('add_catalog_item is a supported intent', () => {
+    expect(SUPPORTED_INTENTS).toContain('add_catalog_item');
+  });
+
+  it('parses add_catalog_item with name, unitPriceCents, and unit', () => {
+    const result = parseClassifierJson(
+      JSON.stringify({
+        intentType: 'add_catalog_item',
+        confidence: 0.9,
+        extractedEntities: {
+          catalogItemNewName: 'Smart thermostat install',
+          unitPriceCents: 38500,
+          catalogItemUnit: 'each',
+        },
+      }),
+    );
+    expect(result?.intentType).toBe('add_catalog_item');
+    expect(result?.extractedEntities?.catalogItemNewName).toBe('Smart thermostat install');
+    expect(result?.extractedEntities?.unitPriceCents).toBe(38500);
+    expect(result?.extractedEntities?.catalogItemUnit).toBe('each');
+  });
+
+  it('parses add_catalog_item with a spoken price of exactly 0 (flat number only, never dropped)', () => {
+    const result = parseClassifierJson(
+      JSON.stringify({
+        intentType: 'add_catalog_item',
+        confidence: 0.9,
+        extractedEntities: { catalogItemNewName: 'Free estimate', unitPriceCents: 0 },
+      }),
+    );
+    expect(result?.extractedEntities?.unitPriceCents).toBe(0);
+  });
+
+  it('drops an out-of-vocabulary catalogItemUnit and records the invalid-field entry', () => {
+    const result = parseClassifierJson(
+      JSON.stringify({
+        intentType: 'add_catalog_item',
+        confidence: 0.9,
+        extractedEntities: {
+          catalogItemNewName: 'Copper pipe',
+          unitPriceCents: 500,
+          catalogItemUnit: 'per widget',
+        },
+      }),
+    );
+    expect(result?.extractedEntities?.catalogItemUnit).toBeUndefined();
+    expect(result?.invalidEnumFields).toContainEqual({ field: 'catalogItemUnit', value: 'per widget' });
   });
 
   it('parses create_invoice_schedule with the verbatim milestone sentence', () => {

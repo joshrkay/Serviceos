@@ -108,6 +108,7 @@ import { SendCustomerMessageExecutionHandler } from '../../src/proposals/executi
 import { CreateChangeOrderExecutionHandler } from '../../src/proposals/execution/create-change-order-handler';
 import { CreateServiceAgreementExecutionHandler } from '../../src/proposals/execution/create-service-agreement-handler';
 import { AddMaterialExecutionHandler } from '../../src/proposals/execution/add-material-handler';
+import { AddCatalogItemExecutionHandler } from '../../src/proposals/execution/add-catalog-item-handler';
 import { buildLineItem, calculateDocumentTotals, type LineItem } from '../../src/shared/billing-engine';
 import type { AppointmentRepository } from '../../src/appointments/appointment';
 import type { JobRepository } from '../../src/jobs/job';
@@ -1137,6 +1138,28 @@ const ROWS: Row[] = [
       expect(payload.category).toBe('vehicle');
       expect(payload.amountCents).toBe(2240);
       expect(payload.description).toBe('Mileage — 32 miles');
+    },
+  },
+  {
+    // Task 12 (2026-08-07 tradesperson plan) — add_catalog_item is a NEW
+    // capture-class proposal type. Unlike update_catalog_item, it needs no
+    // reference resolution (no existing item to find) — a spoken name +
+    // price alone draft ungated.
+    intent: 'add_catalog_item',
+    mode: 'resolves',
+    note: 'a spoken catalogItemNewName + unitPriceCents draft ungated (no catalogRepo needed to create); dep-less AddCatalogItemExecutionHandler synthetic-succeeds',
+    draft: () =>
+      draft(
+        { gateway: NOOP_GATEWAY },
+        'add_catalog_item',
+        ctx({
+          existingEntities: { catalogItemNewName: 'Smart thermostat install', unitPriceCents: 38500 },
+        }),
+      ),
+    execute: (p) => new AddCatalogItemExecutionHandler().execute(p, execContext()),
+    assertPayload: (payload) => {
+      expect(payload.name).toBe('Smart thermostat install');
+      expect(payload.unitPriceCents).toBe(38500);
     },
   },
 ];

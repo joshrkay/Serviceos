@@ -71,6 +71,10 @@ export const CAPTURE_PROPOSAL_TYPES: ReadonlySet<string> = new Set<string>([
   // moves, and it's reversible (mark purchased or ignore) — same capture
   // posture as LOG_EXPENSE.
   ProposalType.ADD_MATERIAL,
+  // Task 12 — adds a NEW price-book entry. Create-side mirror of
+  // UPDATE_CATALOG_ITEM above: no money moves at creation (future pricing
+  // only), sends no customer message, reversible (archive the item).
+  ProposalType.ADD_CATALOG_ITEM,
 ]);
 
 /**

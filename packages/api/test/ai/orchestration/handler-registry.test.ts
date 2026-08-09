@@ -107,6 +107,10 @@ const EXPECTED_PROPOSAL_TYPES: ProposalType[] = [
   // capture-class proposal type that adds a row to the voice-captured
   // shopping list (Task 8's material_items substrate).
   'add_material',
+  // Task 12 (2026-08-07 tradesperson plan) — add_catalog_item: a NEW
+  // capture-class proposal type that lets an owner add a price-book entry
+  // by voice, the create-side mirror of update_catalog_item.
+  'add_catalog_item',
 ];
 
 describe('ai/orchestration/handler-registry — buildTaskHandlers', () => {

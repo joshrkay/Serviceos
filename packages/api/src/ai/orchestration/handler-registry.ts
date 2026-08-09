@@ -56,6 +56,7 @@ import { SendCustomerMessageTaskHandler } from '../tasks/send-customer-message-t
 import { CreateChangeOrderTaskHandler } from '../tasks/create-change-order-task';
 import { CreateServiceAgreementTaskHandler } from '../tasks/create-service-agreement-task';
 import { AddMaterialTaskHandler } from '../tasks/add-material-task';
+import { AddCatalogItemTaskHandler } from '../tasks/add-catalog-item-task';
 
 /**
  * B5 (feat: voice-transcript-and-agent-paths) — the deps shared by the
@@ -297,6 +298,11 @@ export function buildTaskHandlers(deps: HandlerRegistryDeps): Map<ProposalType, 
   // catalogRepo powers the spoken-reference → item resolution; absent →
   // every reference stays gated (missingFields: ['catalogItemId']).
   handlers.set('update_catalog_item', new UpdateCatalogItemTaskHandler(deps.catalogRepo));
+  // Task 12 (2026-08-07 tradesperson plan) — add_catalog_item's voice
+  // on-ramp. No deps: this is a pure create (no spoken reference to
+  // resolve against the existing catalog the way update_catalog_item
+  // needs catalogRepo for).
+  handlers.set('add_catalog_item', new AddCatalogItemTaskHandler());
   // B4 — unified issue_invoice: gated missingFields ladder (rung 3) PLUS
   // conversation-context resolution (rung 2, needs proposalRepo). See the
   // class doc comment in ./task-router.ts for the full resolution ladder.

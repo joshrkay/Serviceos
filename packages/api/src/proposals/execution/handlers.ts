@@ -130,6 +130,7 @@ import { SeedPackDefaultsDeps } from '../../packs/seed-pack-defaults';
 import { UpdateBrandVoiceExecutionHandler } from './brand-voice-handler';
 import type { BrandVoiceRepository } from '../../tenants/brand/brand-voice';
 import { AddMaterialExecutionHandler } from './add-material-handler';
+import { AddCatalogItemExecutionHandler } from './add-catalog-item-handler';
 import type { MaterialItemRepository } from '../../materials/material-item';
 
 export interface ExecutionContext {
@@ -1269,7 +1270,9 @@ export function createExecutionHandlerRegistry(deps?: {
   // Absent → the handler degrades to a synthetic-id passthrough.
   standingInstructionRepo?: StandingInstructionRepository;
   // WS20 — update_catalog_item writes the new SKU price via the catalog repo.
-  // Absent → the handler degrades to a synthetic passthrough.
+  // Absent → the handler degrades to a synthetic passthrough. Also used by
+  // Task 12's add_catalog_item (create-side mirror) — same dep, same
+  // degraded behavior.
   catalogRepo?: CatalogItemRepository;
   // Tenant entity aliases activate only through an owner-approved proposal.
   // Absent fails closed inside the handler.
@@ -1502,6 +1505,11 @@ export function createExecutionHandlerRegistry(deps?: {
     // but the correction loop creates it with no trust tier, so it only ever
     // runs after a human tap.
     new UpdateCatalogItemExecutionHandler(deps?.catalogRepo, deps?.auditRepo),
+    // Task 12 (2026-08-07 tradesperson plan) — add_catalog_item: the
+    // create-side mirror of update_catalog_item, over the SAME catalogRepo
+    // (no new dep). LogExpense-family posture: registered unconditionally,
+    // degrades to a synthetic-id passthrough without catalogRepo.
+    new AddCatalogItemExecutionHandler(deps?.catalogRepo, deps?.auditRepo),
     new EntityAliasExecutionHandler(deps?.entityAliasRepo),
     // B1.19 — conversational onboarding execution handlers. Each writes
     // through the SAME shared function the form wizard's routes use

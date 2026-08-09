@@ -132,6 +132,10 @@ const TYPE_PRIORITY: Record<ProposalType, number> = {
   // the fact (or ahead of a supply run) — never gates any other work. Same
   // low tier as log_expense.
   add_material: 5,
+  // Task 12 — adding a price-book entry is back-office config capture; it
+  // gates no same-day work. Same low tier as update_catalog_item / notes /
+  // standing instructions.
+  add_catalog_item: 5,
 };
 
 export function getUrgency(proposal: Proposal): { urgency: PrioritizedProposal['urgency']; reason: string } {

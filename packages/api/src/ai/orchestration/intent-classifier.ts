@@ -143,6 +143,15 @@ export type IntentType =
   // DEFAULT_MILEAGE_RATE_CENTS_PER_MILE into `amountCents`, forcing
   // `category: 'vehicle'`.
   | 'log_mileage'
+  // Task 12 (2026-08-07 tradesperson plan) — NEW capture-class proposal
+  // type: an owner adds a price-book entry by voice ("Add a catalog item:
+  // smart thermostat install, 385"). The create-side mirror of
+  // update_catalog_item: no money moves at creation, only shapes FUTURE
+  // drafts (which are themselves reviewed), and it's reversible (archive
+  // the item). See AddCatalogItemTaskHandler (ai/tasks/add-catalog-item-
+  // task.ts) for the extraction-seam reuse decision and the 0-price
+  // legality rationale.
+  | 'add_catalog_item'
   // Taxonomy 1.2.0 (agent wave, Track A) — three proposal-driving on-ramps:
   //   create_invoice_schedule    — U2: milestone/progress billing plan for a
   //                                job; the verbatim milestone sentence rides
@@ -309,6 +318,7 @@ export const SUPPORTED_INTENTS: readonly IntentType[] = [
   'lookup_timesheets',
   'lookup_my_day',
   'log_mileage',
+  'add_catalog_item',
   'create_invoice_schedule',
   'respond_to_review',
   'create_standing_instruction',
@@ -502,6 +512,28 @@ export const SUPPORTED_INTENTS: readonly IntentType[] = [
  *           fails the turn rather than ever falling back to an unscoped
  *           day. See ai/skills/lookup-crew-schedule.ts, lookup-
  *           timesheets.ts, and lookup-my-day.ts for the full rationale.
+ *   1.16.0 — Task 12 (2026-08-07 tradesperson plan), additive:
+ *           add_catalog_item — a NEW capture-class proposal type that lets
+ *           an owner add a price-book entry by voice ("Add a catalog item:
+ *           smart thermostat install, 385"). The create-side mirror of
+ *           update_catalog_item (taxonomy 1.7.0): no money moves at
+ *           creation, only shapes FUTURE drafts (which are themselves
+ *           reviewed), and it's reversible (archive the item). REUSES
+ *           update_catalog_item's catalogItemNewName / unitPriceCents /
+ *           catalogItemNewDescription extraction fields (their meaning
+ *           generalizes cleanly to a create — see
+ *           AddCatalogItemTaskHandler's doc comment for the reuse-vs-new
+ *           decision); adds one genuinely NEW field, catalogItemUnit. Zero
+ *           is a LEGAL unitPriceCents (a free/comp price-book line) —
+ *           contract and drafting gate agree on this boundary, unlike the
+ *           contract-accepts-0/task-gates-0 contradiction a prior task's
+ *           review found for a different type. Joined
+ *           CONFIG_WRITING_PROPOSAL_TYPES (proposals/actions.ts) for the
+ *           same reason update_catalog_item did: the catalog HTTP routes
+ *           require settings:update, which a dispatcher's proposals:approve
+ *           does not carry. See AddCatalogItemExecutionHandler
+ *           (proposals/execution/add-catalog-item-handler.ts) for the
+ *           category/unit default posture.
  *   1.15.0 — Task 11 (2026-08-07 tradesperson plan), additive: log_mileage
  *           — an ALIAS intent onto the EXISTING `log_expense` proposal type
  *           (no new ProposalType, no new execution handler, no migration).
@@ -524,7 +556,7 @@ export const SUPPORTED_INTENTS: readonly IntentType[] = [
  *           rate — a constant, not tenant config) into `amountCents`,
  *           forcing `category: 'vehicle'`.
  */
-export const INTENT_TAXONOMY_VERSION = '1.15.0';
+export const INTENT_TAXONOMY_VERSION = '1.16.0';
 
 /**
  * P11-001: convenience predicate the FSM adapter uses to route
@@ -756,6 +788,17 @@ export interface ExtractedEntities {
   // Same capture-only caveat and qualified-name rationale as
   // `catalogItemNewName` above.
   catalogItemNewDescription?: string;
+  // Task 12 (2026-08-07 tradesperson plan) — add_catalog_item: the unit of
+  // measure for a NEW price-book entry ("copper pipe, per pound"). No
+  // existing ExtractedEntities field carries a catalog unit of measure, so
+  // this is a genuinely new field (unlike catalogItemNewName/
+  // catalogItemNewDescription/unitPriceCents, which add_catalog_item
+  // REUSES from update_catalog_item — see AddCatalogItemTaskHandler's doc
+  // comment). Mirrors catalog-item.ts's CatalogUnit vocabulary; validated
+  // against CATALOG_UNITS at parse time (below) like every other bounded
+  // enum field, so an out-of-vocabulary value never reaches the task
+  // handler as if it were a real unit.
+  catalogItemUnit?: 'each' | 'hour' | 'sq ft' | 'per lb' | 'per gal';
   // Tradesperson wave 1, Task 3 — record_refund: how the MANUAL refund was
   // given back (cash / check / a swiped card outside Stripe / other).
   // Qualified (not bare `method`) so it can never be confused with a future
@@ -1657,6 +1700,16 @@ Supported intents (return exactly ONE):
                            jobReference.
                            Examples: "Log 32 miles to the Patel job"
                                      "Put down 18 miles for today's supply run"
+- "add_catalog_item"     — owner adds a price-book entry (new service or
+                           part with a standard price). Extract name
+                           (required, catalogItemNewName), unitPriceCents
+                           (required), unit (catalogItemUnit) and
+                           description (catalogItemNewDescription) when
+                           spoken. Distinct from update_catalog_item: this
+                           is a brand-new entry, never an edit to an
+                           existing one — no catalogItemReference.
+                           Examples: "Add a catalog item: smart thermostat install, 385"
+                                     "New price-book entry — sump pump replacement, 1200"
 - "unknown"             — anything else: ambiguous transcripts, or edit
                            commands without a clear reference.
 
@@ -1740,9 +1793,10 @@ Return valid JSON with exactly this shape (no prose, no markdown fences):
     "scopeIntentHint": "<string, optional — what work the standing rule applies to>",
     "brandVoiceInstruction": "<string, optional — VERBATIM spoken tone/sign-off/persona instruction on update_brand_voice>",
     "catalogItemReference": "<string, optional — spoken catalog/price-book entry name on update_catalog_item>",
-    "unitPriceCents": <integer cents, optional — the NEW price on update_catalog_item>,
-    "catalogItemNewName": "<string, optional — the NEW name on update_catalog_item>",
-    "catalogItemNewDescription": "<string, optional — the NEW description on update_catalog_item>",
+    "unitPriceCents": <integer cents, optional — the NEW price on update_catalog_item, or the price of the new entry on add_catalog_item>,
+    "catalogItemNewName": "<string, optional — the NEW name on update_catalog_item, or the name of the new entry on add_catalog_item>",
+    "catalogItemNewDescription": "<string, optional — the NEW description on update_catalog_item, or the description of the new entry on add_catalog_item>",
+    "catalogItemUnit": "<each|hour|sq ft|per lb|per gal, optional — unit of measure on add_catalog_item>",
     "refundMethod": "<cash|check|card_external|other, optional — on record_refund>",
     "refundReason": "<string, optional — why the refund was given on record_refund>",
     "refundCheckNumber": "<string, optional — check number on record_refund>",
@@ -2145,6 +2199,10 @@ export function parseClassifierJson(content: string): IntentClassification | nul
   ] as const;
   const TIME_ENTRY_TYPES = ['job', 'drive', 'break', 'admin'] as const;
   const SERVICE_AGREEMENT_CADENCES = ['monthly', 'quarterly', 'twice_a_year', 'annual'] as const;
+  // Task 12 (2026-08-07 tradesperson plan) — mirrors catalog-item.ts's
+  // CatalogUnit vocabulary (duplicated, not imported — see
+  // contracts/add-catalog-item.ts's module doc comment for why).
+  const CATALOG_UNITS = ['each', 'hour', 'sq ft', 'per lb', 'per gal'] as const;
 
   /**
    * Validate an LLM-provided value against a fixed allowed-set.
@@ -2249,6 +2307,12 @@ export function parseClassifierJson(content: string): IntentClassification | nul
     if (typeof ee.catalogItemNewName === 'string') extracted.catalogItemNewName = ee.catalogItemNewName;
     if (typeof ee.catalogItemNewDescription === 'string')
       extracted.catalogItemNewDescription = ee.catalogItemNewDescription;
+    // add_catalog_item fields (Task 12, 2026-08-07 tradesperson plan).
+    // catalogItemNewName/catalogItemNewDescription/unitPriceCents are
+    // REUSED from update_catalog_item (parsed unconditionally above,
+    // regardless of intentType) — only catalogItemUnit is new here.
+    const catalogItemUnit = pickEnum(ee, 'catalogItemUnit', CATALOG_UNITS);
+    if (catalogItemUnit) extracted.catalogItemUnit = catalogItemUnit;
     // record_refund fields (Tradesperson wave 1, Task 3)
     const refundMethod = pickEnum(ee, 'refundMethod', REFUND_METHODS);
     if (refundMethod) extracted.refundMethod = refundMethod;

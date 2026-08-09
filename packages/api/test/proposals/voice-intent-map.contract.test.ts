@@ -79,6 +79,13 @@ describe('voice intent → proposal type: exactly one map', () => {
     expect(intentToProposalType('log_mileage')).toBe('log_expense');
   });
 
+  // Task 12 (2026-08-07 tradesperson plan) — add_catalog_item is a NEW
+  // proposal type (not an alias), the create-side mirror of
+  // update_catalog_item.
+  it('maps add_catalog_item onto its own add_catalog_item proposal type', () => {
+    expect(intentToProposalType('add_catalog_item')).toBe('add_catalog_item');
+  });
+
   it('falls back to voice_clarification for unmapped / absent intents', () => {
     expect(intentToProposalType(undefined)).toBe('voice_clarification');
     // lookup_* intents are READ-ONLY and deliberately unmapped (P11-001).
@@ -206,5 +213,16 @@ describe('voiceProposalSummary', () => {
       voiceProposalSummary('log_mileage', { jobReference: 'the Patel job', customerName: 'Henderson' }),
     ).toBe('Log mileage on the Patel job');
     expect(voiceProposalSummary('log_mileage', {})).toBe('Log mileage');
+  });
+
+  // Task 12 (2026-08-07 tradesperson plan) — "Add catalog item: <name>"
+  // shape — the new item's OWN name (catalogItemNewName), never
+  // customerName/jobReference (a price-book entry names an item, not a
+  // customer or a job).
+  it('gives add_catalog_item a human-readable summary', () => {
+    expect(voiceProposalSummary('add_catalog_item', { catalogItemNewName: 'Smart thermostat install' })).toBe(
+      'Add catalog item: Smart thermostat install',
+    );
+    expect(voiceProposalSummary('add_catalog_item', {})).toBe('Add catalog item');
   });
 });

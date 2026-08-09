@@ -255,6 +255,11 @@ export enum ProposalType {
   // no money moves, and it's reversible (the row can be marked purchased
   // or simply ignored).
   ADD_MATERIAL = 'add_material',
+  // Task 12 (2026-08-07 tradesperson plan) — adds a NEW price-book entry.
+  // Capture-class, create-side mirror of UPDATE_CATALOG_ITEM above: no
+  // money moves at creation, only shapes FUTURE drafts (which are
+  // themselves reviewed), and it's reversible (archive the item).
+  ADD_CATALOG_ITEM = 'add_catalog_item',
 }
 
 export enum RejectionCategory {

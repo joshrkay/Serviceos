@@ -158,6 +158,12 @@ export const INTENT_TO_PROPOSAL_TYPE: Partial<Record<Exclude<IntentType, 'unknow
   // LogExpenseTaskHandler's own drafting branches on the intent-specific
   // `mileageMiles` extracted-entity field (ai/tasks/voice-extended-tasks.ts).
   log_mileage: 'log_expense',
+  // Task 12 (2026-08-07 tradesperson plan) — add_catalog_item is a NEW
+  // capture-class proposal type: an owner adds a price-book entry by
+  // voice. NOT S1-allowed (operator-only), same as update_catalog_item:
+  // see proposals/surface.ts S1_ALLOWED_PROPOSAL_TYPES and its contract
+  // test.
+  add_catalog_item: 'add_catalog_item',
 };
 
 /**
@@ -238,6 +244,14 @@ export function voiceProposalSummary(
   // "for" for a bare customer name) rather than add_material's uniform
   // "for" — both log_mileage and log_permit are "Log <noun>" intents.
   if (intent === 'log_mileage') return `Log mileage${ref ? ` on ${ref}` : name ? ` for ${name}` : ''}`;
+  // Task 12 — the new catalog item's own name (catalogItemNewName), not
+  // entities.customerName/jobReference — a price-book entry names an
+  // item, not a customer or a job.
+  if (intent === 'add_catalog_item') {
+    const itemName =
+      entities && typeof entities.catalogItemNewName === 'string' ? entities.catalogItemNewName : undefined;
+    return `Add catalog item${itemName ? `: ${itemName}` : ''}`;
+  }
   if (intent) return `Voice intent: ${intent}${ref ? ` (${ref})` : ''}`;
   return 'Voice clarification needed';
 }

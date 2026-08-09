@@ -26,7 +26,7 @@ exist today.
 
 ## A) Speakable today — intent + proposal + execution handler all exist
 
-These 47 actions can be spoken, drafted as a proposal, approved, and executed.
+These 48 actions can be spoken, drafted as a proposal, approved, and executed.
 "Persistence proof" = a Docker-gated integration test that proves the row +
 audit event actually land in Postgres (vs. mocked-DB-only coverage, which cannot
 catch schema drift or a missing dependency).
@@ -80,6 +80,7 @@ catch schema drift or a missing dependency).
 | "Sign the Garcias up for the annual maintenance plan, 290 a year" | `create_service_agreement` | `create_service_agreement` | capture | unit + sweep round-trip (`proposals/create-service-agreement-handler.test.ts`: handler-created agreement → `runDueAgreements` → asserts a `generated`, not `failed`, run) |
 | "Add three boxes of half-inch PEX to the shopping list" | `add_material` | `add_material` | capture | unit (`proposals/add-material-handler.test.ts`) |
 | "Log 32 miles to the Patel job" | `log_mileage` | `log_expense` | capture | unit |
+| "Add a catalog item: smart thermostat install, 385" | `add_catalog_item` | `add_catalog_item` | capture | unit (`proposals/add-catalog-item-handler.test.ts`) |
 
 > **Voice technician resolution (U1, taxonomy 1.2.0):** `reassign_appointment`,
 > `add_crew_member`, and `remove_crew_member` now resolve the spoken technician
@@ -903,6 +904,125 @@ Notes on the Task 11 row (`log_mileage`, taxonomy 1.15.0):
   operator/technician-only, never reachable from an unauthenticated
   inbound caller.
 
+Notes on the Task 12 row (`add_catalog_item`, taxonomy 1.16.0):
+
+- **NEW capture-class proposal type** — the create-side mirror of
+  `update_catalog_item` (Task 2): an owner adds a price-book entry by
+  voice ("Add a catalog item: smart thermostat install, 385"). No money
+  moves at creation (only shapes FUTURE drafts, which are themselves
+  reviewed), no customer is contacted, and it's reversible (archive the
+  item from the Catalog screen).
+- **Extraction seams REUSE Task 2's fields — no new fields for name/
+  description/price.** `catalogItemNewName` / `catalogItemNewDescription`
+  / `unitPriceCents` already existed on `ExtractedEntities`
+  (`update_catalog_item`); their meaning generalizes cleanly to a CREATE
+  ("the NEW name" is exactly what's true of a brand-new item's only
+  name). Reusing them avoids minting a duplicate field for the same
+  concept on the shared, cross-intent entity bag, and carries no
+  field-presence-hijack risk (Task 11's `TaskContext.intent` concern):
+  `add_catalog_item` and `update_catalog_item` dispatch to DIFFERENT
+  drafting AND execution handlers, so a stray value on the wrong intent's
+  turn is simply never read. Only ONE genuinely new field was added:
+  `catalogItemUnit` (`CatalogUnit`'s 5-token vocabulary) — no existing
+  field carried a catalog unit of measure. See
+  `AddCatalogItemTaskHandler`'s doc comment (`ai/tasks/add-catalog-item-
+  task.ts`) for the full reuse-vs-new analysis.
+- **Zero is a LEGAL `unitPriceCents` — contract and drafting gate
+  deliberately AGREE at that boundary.** A free/comp price-book line ("free
+  estimate", "no-charge warranty inspection") is a real, common catalog
+  entry for a tradesperson — a DELIBERATE divergence from
+  `create_service_agreement`'s stricter, positive-only voice gate for a
+  RECURRING plan price (a stated $0 RECURRING charge is inherently
+  suspicious; a one-time price-book SKU is not). Both
+  `contracts/add-catalog-item.ts`'s Zod schema and
+  `AddCatalogItemTaskHandler`'s hand-written gate use the exact same
+  `>= 0` boundary, so they can never disagree the way a prior task's
+  review found for a different type (contract accepted 0, the task
+  refused to draft on 0, and two passing tests locked the contradiction
+  in without either side ever exercising the disagreement). A sanity
+  ceiling ($100,000, mirroring `create-service-agreement.ts`'s identical
+  backstop) guards against a misheard "290 thousand" style figure — not a
+  real product limit, and NOT a shared constant (the domain/HTTP layer
+  places no upper bound on `unitPriceCents` at all, so there is nothing
+  to keep in lockstep with).
+- **`category`/`unit` defaults live at EXECUTION time, not drafting.**
+  `CatalogItem.category`/`.unit` are BOTH required at the domain layer,
+  but this intent's taxonomy has no category extraction seam at all (a v1
+  scope decision — category is a business-taxonomy choice a tradesperson
+  rarely states aloud alongside a price) and `unit` is only sometimes
+  spoken. `AddCatalogItemExecutionHandler` defaults `category: 'Labor'`
+  (both taxonomy examples are installation/labor-type line items;
+  `test/catalog/catalog-item.test.ts`'s own fixture precedent pairs an
+  "Install" item with category 'Labor') and `unit: 'each'` (a flat,
+  one-off price-book line is naturally "each", not hourly) only when the
+  drafted payload omits them — the drafting task never guesses a default
+  itself, so the review card only ever shows what the operator actually
+  said.
+- **In-memory catalog repo's `create()` has NO analogous trap to its
+  `update()`'s (checked, not assumed).** Task 2's review found
+  `InMemoryCatalogItemRepository.update()`'s `{...current, ...updates}`
+  merge silently wipes `name`/`description` on a price-only patch,
+  because `updateCatalogItem` (the domain function) always constructs its
+  patch object with explicit `name: updates.name?.trim()` /
+  `description: updates.description?.trim()` keys — even when unstated,
+  these keys exist on the patch object with value `undefined`, and the
+  spread happily overwrites the current value with `undefined`.
+  `create()` has no such risk: it takes a FULL, already-materialized
+  `CatalogItem` (built by the pure `createCatalogItem()` function, which
+  fills every field with a concrete value via `??`/`.trim() ?? ''`
+  fallbacks) and does a plain `Map.set` — there is no partial-object
+  merge for a subset of fields to silently clobber.
+- **Reuses `catalog_item.created` — the SAME audit event type/analytics
+  mapping the authenticated `POST /api/catalog-items` route already
+  emits.** `analytics/audit-event-mapping.ts` already maps
+  `catalog_item.created` → `catalog_item_created`
+  (category/unit/unitPriceCents/hasImage) — a voice-added catalog item is
+  the SAME real-world event as one added from the Catalog screen, so
+  `AddCatalogItemExecutionHandler` emits the identical eventType with a
+  matching metadata shape, feeding the SAME product-analytics counter
+  rather than a second, unmapped one. This is deliberately UNLIKE
+  `add_material`'s `material.requested` / `apply_credit`'s
+  `credit.applied` (each omitted from the mapping to avoid
+  double-counting a signal an existing mapped event already captures
+  elsewhere) — there is no separate "item created" event this could
+  double with. The handler does NOT call `catalog-item.ts`'s own
+  `persistCatalogItem` helper (whose bundled audit call has no try/catch
+  — a thrown audit error there would propagate AFTER the row was already
+  inserted, misreporting a successful create as a failed execution, the
+  exact anti-pattern `create_service_agreement`'s handler found and
+  worked around for `createAgreement`'s own audit call); it builds the
+  item with `createCatalogItem()`, persists via `catalogRepo.create()`
+  directly, and emits its own FAILURE-SOFT audit event afterward instead.
+- **RBAC — joined `CONFIG_WRITING_PROPOSAL_TYPES` (`proposals/actions.ts`)
+  for the SAME reason `update_catalog_item` did.** The catalog HTTP
+  routes (`routes/catalog-items.ts` POST/PUT/DELETE) all require
+  `settings:update`, and a dispatcher holds `proposals:approve` but NOT
+  `settings:update` (`auth/rbac.ts`). Without this entry, a dispatcher
+  could speak "Add a catalog item: smart thermostat install, 385" and
+  approve their own card, creating a price-book entry with only
+  `proposals:approve` — the identical approval-queue-as-route-permission-
+  bypass the `update_catalog_item` guard exists to close, just on the
+  create side instead of the price-edit side.
+- **No `_meta` confidence marker.** No LLM call anywhere in this type's
+  drafting leg (`ai/tasks/add-catalog-item-task.ts`) produces a real
+  confidence signal on a price-book entry — `_meta` is omitted rather
+  than fabricated, same posture as `add_material` /
+  `create_service_agreement`.
+- **Never auto-approves.** The drafting task deliberately omits
+  `sourceTrustTier`, so `decideInitialStatus`'s only auto-approve branch
+  is never reached at any confidence — same posture as
+  `update_catalog_item` / `create_change_order` /
+  `create_service_agreement` / `add_material`.
+- **Idempotent replay, not just a synthetic-id passthrough.** Like
+  `add_material`, this handler mints a brand NEW row on every `execute()`
+  call — a `resultEntityId` already stamped on the proposal
+  short-circuits to a pure replay so a redelivered/re-executed approval
+  can never double-add the same item.
+- This type is deliberately **absent** from `S1_ALLOWED_PROPOSAL_TYPES`
+  (`proposals/surface.ts`) — operator/owner-only, same as
+  `update_catalog_item`, never reachable from an unauthenticated inbound
+  caller.
+
 Notes on the taxonomy-1.2.0 rows:
 
 - `create_invoice_schedule` — the spoken milestone sentence is parsed by a
@@ -1177,7 +1297,8 @@ not a gap. No new `JobStatus` value was introduced for this.
     { "intent": "create_change_order", "proposalType": "create_change_order", "actionClass": "capture" },
     { "intent": "create_service_agreement", "proposalType": "create_service_agreement", "actionClass": "capture" },
     { "intent": "add_material", "proposalType": "add_material", "actionClass": "capture" },
-    { "intent": "log_mileage", "proposalType": "log_expense", "actionClass": "capture" }
+    { "intent": "log_mileage", "proposalType": "log_expense", "actionClass": "capture" },
+    { "intent": "add_catalog_item", "proposalType": "add_catalog_item", "actionClass": "capture" }
   ],
   "handlerNoOnramp": [
     "create_booking",
