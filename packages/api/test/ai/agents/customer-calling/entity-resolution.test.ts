@@ -283,6 +283,32 @@ describe('planVoiceEntityLookups — intent-conditioned operator references', ()
     ]);
   });
 
+  // Task 9 (2026-08-07 tradesperson plan) — "grab three boxes of PEX for
+  // the Patel job" joins JOB_REF_INTENTS the same way log_expense does, so
+  // the spoken job reference resolves to a jobId and the captured material
+  // keeps its job link. jobId stays OPTIONAL on the contract — an
+  // unresolved reference never gates — but a NAMED job still resolves.
+  it('plans a job lookup for add_material', () => {
+    const lookups = planVoiceEntityLookups('add_material', {
+      jobReference: 'the Patel job',
+    });
+    expect(lookups).toEqual([
+      { kind: 'job', reference: 'the Patel job', refKey: 'jobId' },
+    ]);
+  });
+
+  // Task 9 — lookup_materials joins JOB_REF_INTENTS the SAME way so the
+  // shopping-list readback can scope to one job ("what materials are open
+  // on the Patel job?"). Read-only — no gating implications.
+  it('plans a job lookup for lookup_materials', () => {
+    const lookups = planVoiceEntityLookups('lookup_materials', {
+      jobReference: 'the Patel job',
+    });
+    expect(lookups).toEqual([
+      { kind: 'job', reference: 'the Patel job', refKey: 'jobId' },
+    ]);
+  });
+
   it('plans technician + appointment lookups for remove_crew_member (no sticky-job fallback)', () => {
     const lookups = planVoiceEntityLookups(
       'remove_crew_member',
