@@ -1,0 +1,53 @@
+{
+  "id": "apply-credit-known-customer",
+  "bucket": "02-happy-booker",
+  "callerId": "+15555550416",
+  "callerIdBlocked": false,
+  "fixtures": {
+    "tenant": {
+      "id": "t_02_apply_credit",
+      "display_name": "Test HVAC Co",
+      "timezone": "America/Los_Angeles"
+    },
+    "customers": [
+      {
+        "id": "cust_02_apply_credit_owner",
+        "tenantId": "t_02_apply_credit",
+        "firstName": "Sam",
+        "lastName": "Owner",
+        "displayName": "Sam Owner",
+        "companyName": null,
+        "primaryPhone": "+15555550416",
+        "secondaryPhone": null,
+        "email": "sam.credit@testhvac.example",
+        "preferredChannel": "phone",
+        "smsConsent": false,
+        "communicationNotes": null,
+        "isArchived": false,
+        "createdBy": "user_seed",
+        "createdAt": "2026-01-15T10:00:00.000Z",
+        "updatedAt": "2026-04-01T10:00:00.000Z"
+      }
+    ]
+  },
+  "turns": [
+    {
+      "caller": "Apply a 50 dollar credit to the Henderson invoice for the callback.",
+      "expected": {
+        "intent": "apply_credit",
+        "proposalType": "apply_credit",
+        "slots": {
+          "amountCents": 5000
+        },
+        "spokenAnswerMatches": "Got it — I've drafted an apply credit for review. Anything else I can help you with?",
+        "escalates": false
+      },
+      "hangupAfter": false
+    }
+  ],
+  "grading": {
+    "appliesFloor": [1, 2, 3, 4, 5, 6, 7, 8],
+    "appliesDisposition": [9, 10, 11, 12]
+  },
+  "layer2Eligible": true
+}

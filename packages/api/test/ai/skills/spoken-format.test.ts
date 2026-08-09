@@ -1,5 +1,6 @@
 /**
- * Task 10 quality-review I2/I3/I6 — spoken-format.ts shared helper tests.
+ * Task 10 (2026-08-07 tradesperson plan) quality-review I2/I3/I6 —
+ * spoken-format.ts shared helper tests.
  * `formatHours`, `formatTime`, `technicianDisplayName`, and `spokenList`
  * were consolidated here from three-plus duplicated copies across the
  * lookup-skill family; this file is their first direct test coverage.

@@ -23,8 +23,9 @@
  * already-past 8am visit is still spoken alongside a not-yet-started 2pm
  * one (only `canceled`/`no_show` are dropped). That's the right answer
  * for an owner's morning overview of "what happened/is happening/will
- * happen today." `ai/skills/lookup-my-day.ts` (Task 10, quality-review
- * I5) makes the OPPOSITE, equally deliberate choice for the SAME
+ * happen today." `ai/skills/lookup-my-day.ts` (Task 10, 2026-08-07
+ * tradesperson plan, quality-review I5) makes the OPPOSITE, equally
+ * deliberate choice for the SAME
  * `AppointmentRepository.findByDateRange` data: a technician asking
  * "what's my next job?" needs only what's still ahead, so that skill
  * additionally drops `completed` status and anything already past

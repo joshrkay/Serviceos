@@ -211,7 +211,8 @@ export interface JobRepository {
     opts?: JobFindByCustomerOptions,
   ): Promise<Job[]>;
   /**
-   * Task 10 quality-review C2 — bulk read by id, tenant-scoped. Exists so
+   * Task 10 (2026-08-07 tradesperson plan) quality-review C2 — bulk read
+   * by id, tenant-scoped. Exists so
    * a caller who already knows WHICH jobs it needs (e.g. the distinct
    * `jobId`s off a day's appointments) can fetch exactly those rows
    * instead of paging `findByTenant` by `createdAt DESC` and hoping the

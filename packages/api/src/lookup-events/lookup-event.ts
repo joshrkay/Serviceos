@@ -24,7 +24,8 @@ export interface LookupEvent {
   resultStatus: LookupEventStatus;
   /**
    * Rows actually FETCHED for this turn — honest, but not always the true
-   * total. `lookup_materials` (Task 9) fetches `MAX_ITEMS_SPOKEN + 1` (6)
+   * total. `lookup_materials` (Task 9, 2026-08-07 tradesperson plan)
+   * fetches `MAX_ITEMS_SPOKEN + 1` (6)
    * rows at the repo boundary (bounded fetch, I4) and reports whichever of
    * those it got, so this column SATURATES at 6 for that intent: a real 6
    * pending items and a real 600 are both recorded as `resultCount: 6`.

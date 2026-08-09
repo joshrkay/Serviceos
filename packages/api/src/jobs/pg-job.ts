@@ -156,7 +156,8 @@ export class PgJobRepository extends PgBaseRepository implements JobRepository {
   }
 
   /**
-   * Task 10 quality-review C2 — bulk read by id, tenant-scoped. See the
+   * Task 10 (2026-08-07 tradesperson plan) quality-review C2 — bulk read
+   * by id, tenant-scoped. See the
    * interface doc comment (jobs/job.ts) for the full rationale: a caller
    * that already knows which job ids it needs (e.g. off a day's
    * appointments) must not depend on those jobs being recent enough to

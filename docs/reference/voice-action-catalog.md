@@ -454,7 +454,7 @@ taxonomy 1.11.0):
   (`proposals/surface.ts`) — operator/technician-only, never reachable from
   an unauthenticated inbound caller.
 
-Notes on the Task 7 row (`create_service_agreement`, taxonomy 1.12.0):
+Notes on the Tradesperson wave 1, Task 7 row (`create_service_agreement`, taxonomy 1.12.0):
 
 - **NEW capture-class proposal type** — signs a customer up for a
   recurring maintenance plan/membership ("Sign the Garcias up for the
@@ -661,7 +661,7 @@ Notes on the Task 7 row (`create_service_agreement`, taxonomy 1.12.0):
   (`proposals/surface.ts`) — operator/technician-only, never reachable
   from an unauthenticated inbound caller.
 
-Notes on the Task 9 row (`add_material`, taxonomy 1.13.0):
+Notes on the Tradesperson wave 1, Task 9 row (`add_material`, taxonomy 1.13.0):
 
 - **NEW capture-class proposal type** — adds a row to the voice-captured
   shopping list. Writes a `material_items` row (migration 272, Task 8's
@@ -805,7 +805,7 @@ Notes on the Task 9 row (`add_material`, taxonomy 1.13.0):
   is indistinguishable from a genuine 600. See `lookup-events/lookup-event.ts`'s
   `resultCount` doc comment.
 
-Notes on the Task 11 row (`log_mileage`, taxonomy 1.15.0):
+Notes on the Tradesperson wave 1, Task 11 row (`log_mileage`, taxonomy 1.15.0):
 
 - **ALIAS onto the EXISTING `log_expense` proposal type — no new
   ProposalType, no new execution handler, no migration.** A technician
@@ -904,7 +904,7 @@ Notes on the Task 11 row (`log_mileage`, taxonomy 1.15.0):
   operator/technician-only, never reachable from an unauthenticated
   inbound caller.
 
-Notes on the Task 12 row (`add_catalog_item`, taxonomy 1.16.0):
+Notes on the Tradesperson wave 1, Task 12 row (`add_catalog_item`, taxonomy 1.16.0):
 
 - **NEW capture-class proposal type** — the create-side mirror of
   `update_catalog_item` (Task 2): an owner adds a price-book entry by
@@ -1254,6 +1254,17 @@ not a gap. No new `JobStatus` value was introduced for this.
 
 ---
 
+**`lookups` (added at final verification, 2026-08-07 tradesperson plan):**
+read-only lookup-skill intents. They never create a proposal (no
+`proposalType`/`actionClass` — `intentToProposalType(...)` returns
+`'voice_clarification'` for every member, by design; see the `lookup_*`
+exclusion comment in `proposals/voice-intent-map.ts`), so they cannot join
+`speakable` above. Listed here purely so `packages/web`'s VoiceBar
+discoverability examples (`voice-examples.ts`) can reference a lookup
+(`lookup_crew_schedule`) without inventing a second, undocumented pinning
+mechanism — `voice-examples.catalog.test.ts` accepts an example intent from
+either `speakable` or `lookups`.
+
 <!-- BEGIN machine-readable: voice-action-catalog -->
 ```json
 {
@@ -1306,6 +1317,28 @@ not a gap. No new `JobStatus` value was introduced for this.
     { "intent": "add_material", "proposalType": "add_material", "actionClass": "capture" },
     { "intent": "log_mileage", "proposalType": "log_expense", "actionClass": "capture" },
     { "intent": "add_catalog_item", "proposalType": "add_catalog_item", "actionClass": "capture" }
+  ],
+  "lookups": [
+    "lookup_account_summary",
+    "lookup_agreements",
+    "lookup_appointments",
+    "lookup_availability",
+    "lookup_balance",
+    "lookup_catalog",
+    "lookup_crew_schedule",
+    "lookup_customer",
+    "lookup_day_overview",
+    "lookup_digest",
+    "lookup_estimates",
+    "lookup_invoices",
+    "lookup_job_profit",
+    "lookup_jobs",
+    "lookup_leads",
+    "lookup_materials",
+    "lookup_my_day",
+    "lookup_pending_items",
+    "lookup_revenue",
+    "lookup_timesheets"
   ],
   "handlerNoOnramp": [
     "create_booking",

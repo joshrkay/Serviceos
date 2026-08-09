@@ -1,5 +1,6 @@
 /**
- * Task 10 residual (two re-reviews, both "ship") — a DIRECT unit test on
+ * Task 10 (2026-08-07 tradesperson plan) residual (two re-reviews, both
+ * "ship") — a DIRECT unit test on
  * `executeLookupAnswer`'s `lookup_my_day` case.
  *
  * WHY THIS FILE EXISTS

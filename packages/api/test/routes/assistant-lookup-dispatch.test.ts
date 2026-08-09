@@ -530,7 +530,8 @@ describe('POST /api/assistant/chat — U7 parity: lookup_leads / lookup_catalog'
   });
 });
 
-// Task 10 quality-review addendum (spec review) — the chat surface had
+// Task 10 (2026-08-07 tradesperson plan) quality-review addendum (spec
+// review) — the chat surface had
 // ZERO coverage of technicianReference resolution, technicianId
 // threading, or lookup_my_day's self-scoping, even though this is
 // PRECISELY the surface where technicianId gets populated for
@@ -541,7 +542,7 @@ describe('POST /api/assistant/chat — U7 parity: lookup_leads / lookup_catalog'
 // the `executeLookupAnswer` case body's discard of an already-resolved
 // `technicianId` (that line is pinned directly, independent of any
 // surface gate, in test/workers/voice-lookup-answer.test.ts).
-describe('POST /api/assistant/chat — Task 10 crew lookups (technician resolution + self-scoping)', () => {
+describe('POST /api/assistant/chat — Task 10 (2026-08-07 tradesperson plan) crew lookups (technician resolution + self-scoping)', () => {
   function technicianResolver(matches: Record<string, string>): EntityResolver {
     return {
       resolve: vi.fn(async (input: { reference: string; kind: string }) => {

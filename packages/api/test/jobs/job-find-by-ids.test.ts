@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { createJob, InMemoryJobRepository, MAX_JOB_LIMIT } from '../../src/jobs/job';
 
-describe('Task 10 quality-review C2 — JobRepository.findByIds', () => {
+describe('Task 10 (2026-08-07 tradesperson plan) quality-review C2 — JobRepository.findByIds', () => {
   let repo: InMemoryJobRepository;
 
   beforeEach(() => {

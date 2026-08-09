@@ -36,6 +36,15 @@ export const VOICE_EXAMPLES: readonly VoiceExample[] = [
   { intent: 'add_note', example: 'Note on the Patel job: wants morning visits' },
   { intent: 'log_expense', example: 'Log a $60 parts expense on the Patel job' },
   { intent: 'notify_delay', example: "Text the Garcia customer I'm 20 minutes late" },
+  // Tradesperson wave 1 (2026-08-07 plan), final-verification additions.
+  { intent: 'create_change_order', example: 'The Garcias want a second zone — change order for 1800' },
+  { intent: 'record_refund', example: 'Refund the Smiths 100 dollars on their invoice' },
+  { intent: 'add_material', example: 'Add three boxes of half-inch PEX to the shopping list' },
+  {
+    intent: 'create_service_agreement',
+    example: 'Sign the Garcias up for the annual maintenance plan, 29 a month',
+  },
+  { intent: 'lookup_crew_schedule', example: "Where's Carlos this afternoon?" },
 ];
 
 /**
