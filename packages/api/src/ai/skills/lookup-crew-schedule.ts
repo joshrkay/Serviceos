@@ -269,9 +269,15 @@ export async function lookupCrewSchedule(
       return { status: 'found', summary, data: { dayLabel: day.label, freeTechnicians: [], bookings } };
     }
 
-    // No technician named — "who's free" for the WHOLE crew.
+    // No technician named — "who's free" for the WHOLE crew. This answers
+    // a DIFFERENT question than the roster/techById above: "who can I
+    // send?" — so it is additionally filtered to `canFieldServe`. An idle
+    // office-only owner or dispatcher is correctly a "booking" NEVER (they
+    // have no appointments to be busy with) but must not be reported
+    // "free" either — they are not sendable to a job. Keep the full roster
+    // for name resolution/techById; only the free list narrows further.
     const freeTechnicians = roster
-      .filter((t) => !busyTechnicianIds.has(t.id))
+      .filter((t) => t.canFieldServe && !busyTechnicianIds.has(t.id))
       .map((t) => technicianDisplayName(t));
 
     const summaryParts: string[] = [];

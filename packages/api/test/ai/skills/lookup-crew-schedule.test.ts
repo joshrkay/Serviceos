@@ -68,6 +68,7 @@ interface FixtureOpts {
     firstName: string;
     lastName: string;
     role?: 'technician' | 'dispatcher' | 'owner';
+    canFieldServe?: boolean;
   }>;
 }
 
@@ -85,7 +86,7 @@ async function fixtures(opts: FixtureOpts = {}) {
       role: t.role ?? 'technician',
       firstName: t.firstName,
       lastName: t.lastName,
-      canFieldServe: true,
+      canFieldServe: t.canFieldServe ?? true,
     });
   }
   return { appointmentRepo, jobRepo, userRepo };
@@ -353,6 +354,30 @@ describe('lookupCrewSchedule skill', () => {
     expect(res.data.freeTechnicians).toEqual([]);
     expect(res.data.bookings.map((b) => b.technicianName)).toEqual(['Bob Smith']);
     expect(res.summary).toContain('Bob Smith');
+  });
+
+  // Task 10 residual (two re-reviews) — widening the roster to
+  // owner/dispatcher/technician was right for the NAMED branch (it must
+  // match the entity resolver's role set), but the UNNAMED "who's free"
+  // branch answers a DIFFERENT question — "who can I send?" — and an idle
+  // office-only owner/dispatcher is never sendable. `User.canFieldServe`
+  // is the discriminator: the roster (techById/name resolution) stays
+  // unfiltered, but the FREE LIST must exclude anyone who can't field-serve.
+  it('an idle office-only OWNER never appears in the free list (canFieldServe: false)', async () => {
+    const deps = await fixtures({
+      technicians: [
+        { id: 'tech-mike', firstName: 'Mike', lastName: 'Diaz' },
+        { id: 'owner-bob', firstName: 'Bob', lastName: 'Smith', role: 'owner', canFieldServe: false },
+      ],
+    });
+
+    const res = await lookupCrewSchedule({ tenantId: TENANT, timezone: TZ, now: NOW }, deps);
+
+    expect(res.status).toBe('found');
+    if (res.status !== 'found') throw new Error('unreachable');
+    // Bob is idle (no appointment) but office-only — never "free to send".
+    expect(res.data.freeTechnicians).toEqual(['Mike Diaz']);
+    expect(res.summary).not.toContain('Bob Smith');
   });
 
   // Quality-review I3 — an UNCAPPED list must read with "and", not bare

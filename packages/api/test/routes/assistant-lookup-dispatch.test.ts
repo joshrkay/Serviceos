@@ -533,10 +533,14 @@ describe('POST /api/assistant/chat — U7 parity: lookup_leads / lookup_catalog'
 // Task 10 quality-review addendum (spec review) — the chat surface had
 // ZERO coverage of technicianReference resolution, technicianId
 // threading, or lookup_my_day's self-scoping, even though this is
-// PRECISELY the surface where technicianId gets populated (via
-// dispatchAssistantLookup's own entity resolution) and then must be
-// discarded by lookup_my_day's case body. That discard is the single
-// most load-bearing line in the whole Task 10 change.
+// PRECISELY the surface where technicianId gets populated for
+// TECHNICIAN_REF_INTENTS (via dispatchAssistantLookup's own entity
+// resolution). `lookup_my_day` is deliberately NOT a member of that set,
+// so the property pinned below is the SURFACE GATE — this endpoint must
+// never even attempt to resolve a named technician for this intent — not
+// the `executeLookupAnswer` case body's discard of an already-resolved
+// `technicianId` (that line is pinned directly, independent of any
+// surface gate, in test/workers/voice-lookup-answer.test.ts).
 describe('POST /api/assistant/chat — Task 10 crew lookups (technician resolution + self-scoping)', () => {
   function technicianResolver(matches: Record<string, string>): EntityResolver {
     return {
@@ -623,8 +627,12 @@ describe('POST /api/assistant/chat — Task 10 crew lookups (technician resoluti
     });
 
     // An entity resolver that WOULD resolve "Mike" successfully — proves
-    // the case body discards a resolved technicianId, not merely that
-    // resolution never ran.
+    // the chat surface never even ATTEMPTS resolution for lookup_my_day
+    // (see `resolve).not.toHaveBeenCalled()` below), not merely that this
+    // particular name happened not to match. It does NOT prove anything
+    // about executeLookupAnswer's own discard of an already-resolved
+    // technicianId — that's a separate property, pinned directly (without
+    // any surface gate in the way) in test/workers/voice-lookup-answer.test.ts.
     const entityResolver = technicianResolver({ Mike: 'tech-mike' });
 
     const gateway = scriptedGateway([
