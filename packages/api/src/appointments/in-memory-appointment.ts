@@ -124,11 +124,16 @@ export class InMemoryAppointmentRepository implements AppointmentRepository {
     if (options?.status) results = results.filter((a) => a.status === options.status);
     if (options?.technicianId) {
       if (!this.technicianAssignments) {
-        throw new Error(
+        // toErrorResponse (shared/errors.ts) maps a plain Error to a generic
+        // 500 with a static message — the route's catch block doesn't log —
+        // so without logging here, this carefully-worded message is loud in
+        // tests (a rejected assertion) and invisible in a running server.
+        const message =
           'InMemoryAppointmentRepository.listWithMeta: technicianId filter requires an ' +
-            'assignment lookup — construct with `new InMemoryAppointmentRepository(assignmentRepo)`. ' +
-            'Silently ignoring technicianId would return every appointment in the tenant.'
-        );
+          'assignment lookup — construct with `new InMemoryAppointmentRepository(assignmentRepo)`. ' +
+          'Silently ignoring technicianId would return every appointment in the tenant.';
+        console.error(message, { tenantId, technicianId: options.technicianId });
+        throw new Error(message);
       }
       const assigned = await this.technicianAssignments.findByTechnician(
         tenantId,

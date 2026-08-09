@@ -616,6 +616,22 @@ export function decideInitialStatus(input: {
   return 'draft';
 }
 
+/**
+ * PR #815 review, Important 2 — the reason recorded in `execution_error`
+ * when `resetStaleExecuting` terminalizes a stale-claimed proposal that
+ * exhausted `maxRetries`. NOT the original failure (a HANDLER_NOT_FOUND
+ * throw, a worker crash, ...) — that was never captured on this path — but
+ * a true statement of what happened, and critically the ONLY thing written
+ * to the column both `evaluateSilentExecutionFailures`
+ * (workers/failure-rate-monitor.ts) and `GET /api/proposals` read. Exported
+ * so pg-proposal.ts's SQL literal (which can't share this JS string
+ * directly) is written to produce identical wording — keep the two in sync
+ * by hand if this changes.
+ */
+export function staleExecutionTimeoutMessage(staleMinutes: number, retryCount: number): string {
+  return `Execution timed out: claimed >${staleMinutes}min across ${retryCount} retries, never completed`;
+}
+
 export interface ProposalRepository {
   create(proposal: Proposal): Promise<Proposal>;
   /**
@@ -824,10 +840,14 @@ export interface ProposalRepository {
    * Follow-up (stale-timeout audit gap): a proposal that maxes out
    * maxRetries is written straight to the terminal 'execution_failed'
    * status here, bypassing executeAudited — the only place that would
-   * otherwise emit the WS11 execution-outcome audit event. `failedProposals`
-   * gives the caller (execution-worker.ts) enough identity per row —
-   * NOT a captured error reason, which was never recorded on this path —
-   * to emit its own `proposal.execution_timed_out` audit event.
+   * otherwise emit the WS11 execution-outcome audit event. Implementations
+   * ALSO stamp `execution_error` with `staleExecutionTimeoutMessage(...)`
+   * (COALESCE'd — never clobbering a real reason recorded earlier), because
+   * `evaluateSilentExecutionFailures` (workers/failure-rate-monitor.ts) and
+   * GET /api/proposals both read that column directly; an audit event alone
+   * never reaches either surface. `failedProposals` gives the caller
+   * (execution-worker.ts) enough identity per row to ALSO emit its own
+   * `proposal.execution_timed_out` audit event.
    */
   resetStaleExecuting(
     staleMinutes: number,
@@ -1390,6 +1410,10 @@ export class InMemoryProposalRepository implements ProposalRepository {
       const retries = proposal.executionRetryCount ?? 0;
       if (retries >= maxRetries) {
         proposal.status = 'execution_failed';
+        // COALESCE-equivalent: never clobber a real reason already recorded.
+        if (proposal.executionError === undefined) {
+          proposal.executionError = staleExecutionTimeoutMessage(staleMinutes, retries);
+        }
         movedToFailed++;
         failedProposals.push({
           id: proposal.id,

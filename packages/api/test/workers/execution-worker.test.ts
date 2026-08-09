@@ -225,6 +225,9 @@ describe('Execution auto-delivery worker (D9 undo window complement)', () => {
       expect(timeoutEvents[0].actorRole).toBe('system');
       expect(timeoutEvents[0].metadata).toMatchObject({
         proposalType: 'create_customer',
+        // Matches logProposalEvent / executionAuditInput's convention of
+        // always including the post-transition status.
+        status: 'execution_failed',
         retryCount: 3,
         staleMinutes: 10,
         maxRetries: 3,

@@ -904,6 +904,7 @@ describe('InMemoryProposalRepository.resetStaleExecuting — failed proposal det
       claimedAt: overrides.claimedAt,
       claimedBy: overrides.claimedBy ?? 'execution-worker',
       executionRetryCount: overrides.executionRetryCount,
+      executionError: overrides.executionError,
     });
   }
 
@@ -965,5 +966,43 @@ describe('InMemoryProposalRepository.resetStaleExecuting — failed proposal det
       { id: 'stale-a', tenantId: 'tenant-a', proposalType: 'create_customer', retryCount: 3 },
       { id: 'stale-b', tenantId: 'tenant-b', proposalType: 'issue_invoice', retryCount: 5 },
     ]);
+  });
+
+  /**
+   * PR #815 review, Important 2 — the stale-timeout terminal write must also
+   * populate `execution_error` (COALESCE'd, never clobbering a real reason
+   * already recorded), because `evaluateSilentExecutionFailures`
+   * (workers/failure-rate-monitor.ts) and GET /api/proposals both read that
+   * column directly — an audit event alone never reaches either surface.
+   */
+  it('sets execution_error with a synthesized timeout reason when moving to failed', async () => {
+    const repo = new InMemoryProposalRepository();
+    await seedExecuting(repo, {
+      id: 'stale-no-reason',
+      claimedAt: new Date(Date.now() - 11 * 60 * 1000),
+      executionRetryCount: 3,
+    });
+
+    await repo.resetStaleExecuting(10, 3);
+
+    const updated = await repo.findById('tenant-1', 'stale-no-reason');
+    expect(updated!.executionError).toMatch(/timed out/i);
+    expect(updated!.executionError).toMatch(/10/); // staleMinutes
+    expect(updated!.executionError).toMatch(/3/); // retryCount
+  });
+
+  it('does not clobber an execution_error that was already recorded', async () => {
+    const repo = new InMemoryProposalRepository();
+    await seedExecuting(repo, {
+      id: 'stale-has-reason',
+      claimedAt: new Date(Date.now() - 11 * 60 * 1000),
+      executionRetryCount: 3,
+      executionError: 'a real reason recorded earlier',
+    });
+
+    await repo.resetStaleExecuting(10, 3);
+
+    const updated = await repo.findById('tenant-1', 'stale-has-reason');
+    expect(updated!.executionError).toBe('a real reason recorded earlier');
   });
 });

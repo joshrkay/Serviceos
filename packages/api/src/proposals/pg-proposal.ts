@@ -612,9 +612,23 @@ export class PgProposalRepository extends PgBaseRepository implements ProposalRe
       // executor throws before any executeAudited call ever runs, so the
       // caller (execution-worker.ts) needs enough per-row identity here to
       // emit its own proposal.execution_timed_out audit event afterward.
+      //
+      // execution_error is COALESCE'd (PR #815 review, Important 2) to a
+      // synthesized timeout reason — NEVER a plain overwrite, so a real
+      // reason recorded earlier survives — because
+      // evaluateSilentExecutionFailures (workers/failure-rate-monitor.ts)
+      // and GET /api/proposals both read this column directly; the audit
+      // event above never reaches either surface. Wording must match
+      // staleExecutionTimeoutMessage() in proposal.ts exactly (can't share
+      // the JS string in SQL — keep the two in sync by hand).
       const failed = await client.query(
         `UPDATE proposals
-         SET status = 'execution_failed', updated_at = NOW()
+         SET status = 'execution_failed',
+             execution_error = COALESCE(
+               execution_error,
+               'Execution timed out: claimed >' || $1::text || 'min across ' || execution_retry_count::text || ' retries, never completed'
+             ),
+             updated_at = NOW()
          WHERE status = 'executing'
            AND claimed_at < NOW() - ($1 || ' minutes')::INTERVAL
            AND execution_retry_count >= $2

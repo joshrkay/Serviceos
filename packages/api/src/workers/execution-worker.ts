@@ -61,7 +61,14 @@ async function runExecutionSweepInner(deps: ExecutionWorkerDeps): Promise<{
   try {
     const recovered = await deps.proposalRepo.resetStaleExecuting(staleMinutes, maxRetries);
     if (recovered.resetToApproved > 0 || recovered.movedToFailed > 0) {
-      deps.logger.warn('Execution sweep: recovered stale executing proposals', recovered);
+      // Log only the two counts, not the whole `recovered` object — it now
+      // carries `failedProposals`, and dumping that array into one log line
+      // on a mass timeout would duplicate the per-proposal audit events
+      // emitted just below with no added signal.
+      deps.logger.warn('Execution sweep: recovered stale executing proposals', {
+        resetToApproved: recovered.resetToApproved,
+        movedToFailed: recovered.movedToFailed,
+      });
     }
     // Follow-up: a proposal moved straight to the terminal 'execution_failed'
     // status here (maxRetries exhausted) bypassed executeAudited entirely —
@@ -85,6 +92,9 @@ async function runExecutionSweepInner(deps: ExecutionWorkerDeps): Promise<{
             entityId: failedProposal.id,
             metadata: {
               proposalType: failedProposal.proposalType,
+              // Matches logProposalEvent / executionAuditInput's convention
+              // of always including the post-transition status.
+              status: 'execution_failed',
               retryCount: failedProposal.retryCount,
               staleMinutes,
               maxRetries,

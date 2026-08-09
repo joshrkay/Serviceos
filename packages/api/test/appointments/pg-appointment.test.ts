@@ -134,6 +134,64 @@ describe('PgAppointmentRepository — releasable idempotency_key', () => {
 });
 
 /**
+ * PR #815 review, Important 4 — `appointmentType` is a field of `Appointment`
+ * (appointments/appointment.ts) and `mapRow` above reads it back from
+ * `appointment_type`, but the `update` fieldMap omitted it — so
+ * `PgAppointmentRepository.update(tenantId, id, { appointmentType })`
+ * silently discarded the field while `InMemoryAppointmentRepository.update`
+ * (a plain object spread) applied it. Exactly the divergence class this PR
+ * exists to close: no current caller updates this field (dormant), but a
+ * repo-interface method should not divergently drop a documented field of
+ * its own entity depending on which backend is live.
+ */
+describe('PgAppointmentRepository — update() field-map completeness', () => {
+  const tenantId = '550e8400-e29b-41d4-a716-446655440000';
+
+  function buildCapturePool() {
+    const calls: Array<{ sql: string; params: unknown[] }> = [];
+    const client: Partial<PoolClient> = {
+      query: vi.fn(async (sql: string, params?: unknown[]) => {
+        if (/^\s*(BEGIN|COMMIT|ROLLBACK|RESET\b|SET\s+(LOCAL\s+)?ROLE\b|SELECT set_config)/i.test(sql)) {
+          return { rows: [], rowCount: 0 } as unknown as QueryResult;
+        }
+        calls.push({ sql, params: params ?? [] });
+        return {
+          rows: [
+            {
+              id: 'appt-1', tenant_id: tenantId, job_id: 'job-1',
+              scheduled_start: '2026-04-20T14:00:00Z', scheduled_end: '2026-04-20T15:00:00Z',
+              timezone: 'UTC', status: 'scheduled', hold_pending_approval: false,
+              idempotency_key: null, notes: null, appointment_type: 'repair', created_by: 'u1',
+              created_at: '2026-04-20T00:00:00Z', updated_at: '2026-04-20T00:00:00Z',
+            },
+          ],
+          rowCount: 1,
+        } as unknown as QueryResult;
+      }) as unknown as PoolClient['query'],
+      release: vi.fn() as unknown as PoolClient['release'],
+    };
+    const pool: Partial<Pool> = {
+      connect: vi.fn(async () => client as PoolClient) as unknown as Pool['connect'],
+    };
+    return { pool: pool as Pool, calls };
+  }
+
+  it('emits an appointment_type SET clause instead of silently dropping the field', async () => {
+    const { pool, calls } = buildCapturePool();
+    const repo = new PgAppointmentRepository(pool);
+
+    await repo.update(tenantId, 'appt-1', { appointmentType: 'repair' });
+
+    const update = calls.find((c) => /UPDATE appointments SET/i.test(c.sql));
+    expect(update).toBeDefined();
+    const match = update!.sql.match(/appointment_type = \$(\d+)/);
+    expect(match).not.toBeNull();
+    const paramPos = Number(match![1]) - 1;
+    expect(update!.params[paramPos]).toBe('repair');
+  });
+});
+
+/**
  * Follow-up — technicianId filter parity with InMemoryAppointmentRepository.
  *
  * Pins the shape of Pg's technicianId filter (an EXISTS subquery against

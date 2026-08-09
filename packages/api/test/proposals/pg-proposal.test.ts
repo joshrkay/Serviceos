@@ -75,4 +75,32 @@ describe('PgProposalRepository.resetStaleExecuting — failed proposal detail', 
     expect(result.movedToFailed).toBe(0);
     expect(result.failedProposals).toEqual([]);
   });
+
+  /**
+   * PR #815 review, Important 2 — the terminal-failure UPDATE must also
+   * COALESCE-set `execution_error` to a synthesized timeout reason, because
+   * `evaluateSilentExecutionFailures` (workers/failure-rate-monitor.ts) and
+   * GET /api/proposals both read that column directly — the audit event
+   * from execution-worker.ts never reaches either surface. COALESCE (not a
+   * plain overwrite) so a real reason recorded earlier survives.
+   */
+  it('COALESCE-sets execution_error to a synthesized timeout reason on the terminal-failure UPDATE', async () => {
+    const { pool, calls } = buildPool([
+      {
+        id: 'stale-1',
+        tenant_id: 'tenant-1',
+        proposal_type: 'create_customer',
+        execution_retry_count: 3,
+      },
+    ]);
+    const repo = new PgProposalRepository(pool);
+
+    await repo.resetStaleExecuting(10, 3);
+
+    const failUpdate = calls.find((c) => /SET\s+status\s*=\s*'execution_failed'/i.test(c.sql));
+    expect(failUpdate).toBeDefined();
+    expect(failUpdate!.sql).toMatch(/execution_error\s*=\s*COALESCE\(\s*execution_error\s*,/i);
+    // Never a plain overwrite — must not clobber a real reason.
+    expect(failUpdate!.sql).not.toMatch(/execution_error\s*=\s*\$/);
+  });
 });
