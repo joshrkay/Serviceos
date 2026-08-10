@@ -385,10 +385,38 @@ export class CreateCustomerVoiceTaskHandler implements TaskHandler {
     const summaryPhone = phone ? ` (${phone})` : '';
     const summaryEmail = payload.email ? `, ${payload.email}` : '';
     const summaryAddress = payload.address ? `, ${payload.address}` : '';
-    const summary = `New customer from inbound call: ${payload.name}${summaryPhone}${summaryEmail}${summaryAddress}`;
+    // A4 (2026-08-10) — was "New customer from inbound call: …". Same false
+    // channel claim the F1 rider removed from `explanation` below, one field
+    // over, and F1's rider text said this one was left "for its own fix" on
+    // the belief that no chat surface renders it. That belief was wrong:
+    // routes/assistant.ts's multi-intent CHAIN branch special-cases
+    // create_customer and serializes with `proposalToUI`, which puts
+    // `summary` into the card TITLE — so an operator who TYPES "Add a
+    // customer named Alex, 555-0100, then book him Tuesday at 9" read
+    // "Customer: New customer from inbound call: Alex (555-0100)". Only the
+    // single-intent branch uses `customerProposalToUI`, which builds its own
+    // summary. The inbox renders this string verbatim on every surface.
+    const summary = `New customer: ${payload.name}${summaryPhone}${summaryEmail}${summaryAddress}`;
+    // F1 rider — the DEFAULT branch dropped "Caller". This handler serves
+    // three surfaces (telephony FSM, the voice-action-router worker, and
+    // assistant chat), and only the first of them has a caller: the worker
+    // path is the OPERATOR's own voice memo and the chat path is the
+    // operator typing. The string was already being rendered verbatim on the
+    // inbox (web InboxPage reads `proposal.explanation` off the row), and
+    // F1's serializer fix puts it on the chat card too, so a channel claim
+    // the handler cannot actually make had to go. The lead-match branch
+    // keeps "Caller phone" — `existingLeadId` is stamped ONLY by
+    // telephony/twilio-adapter.ts, so there really is a caller there.
+    //
+    // F1's rider justified itself with "the chat card builds its own summary
+    // and never showed it", which was true only of the single-intent branch.
+    // A4 corrected that and fixed `summary` above; both strings are now
+    // pinned by tests (test/ai/tasks/create-customer-task.test.ts, and
+    // test/routes/assistant-dropped-intents.test.ts for the chain card the
+    // rider was wrong about).
     const explanation = ents.existingLeadId
       ? `Caller phone matches lead ${ents.existingLeadId}. Approve to convert to customer; reject to keep as lead.`
-      : 'Caller asked to sign up as a new customer. Approve to add them to the CRM.';
+      : 'New customer captured. Approve to add them to the CRM.';
 
     // RV-007 — Confidence Marker `_meta`: the intent classifier's score
     // mapped onto the shared level vocabulary. Omitted when no

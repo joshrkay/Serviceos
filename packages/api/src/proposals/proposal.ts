@@ -668,13 +668,20 @@ const CAUSE_REDACTED = '[redacted]';
 /**
  * Hard bound on how much of `err.message` is ever handed to a regex.
  *
- * The PII patterns (`pii-redact.ts`) contain self-overlapping character
- * classes, so their cost is QUADRATIC in input length — measured at 158ms /
- * 645ms / 2597ms for 8KB / 16KB / 32KB of `('a.'×n/2) + '@' + ('b'×n)`, a
- * clean 4× per doubling. `runExecutionSweep` runs in-process with Express
- * (app.ts), and `err.message` is attacker-INFLUENCED (a driver error echoing
- * a bound JSONB payload, an HTTP client echoing a response body), so an
- * unbounded ~1MB message of that shape would stall the whole API for minutes.
+ * This bound was introduced because the PII email pattern in `pii-redact.ts`
+ * backtracked QUADRATICALLY — 158ms / 645ms / 2597ms for 8KB / 16KB / 32KB of
+ * `('a.'×n/2) + '@' + ('b'×n)`, a clean 4× per doubling. That defect is now
+ * FIXED AT THE SOURCE: the email rule is a linear scanner, and every other
+ * pattern in that module was measured linear. So this slice is no longer what
+ * stands between `runExecutionSweep` and a stalled event loop.
+ *
+ * It stays anyway, for the reasons that do not depend on that defect:
+ *   - `err.message` is attacker-INFLUENCED (a driver error echoing a bound
+ *     JSONB payload, an HTTP client echoing a response body) and can be
+ *     megabytes. Even linear work over megabytes, per proposal, per sweep, is
+ *     work worth not doing for a value that is about to be cut to 500 chars.
+ *   - It bounds what the SECRET rules below see too, and those are local to
+ *     this file rather than covered by `pii-redact.ts`'s tests.
  *
  * Bounding the INPUT (rather than moving the truncation earlier in the
  * pipeline) keeps the scrub-then-truncate ORDER intact — that order is what
@@ -685,11 +692,23 @@ const CAUSE_REDACTED = '[redacted]';
 const MAX_CAUSE_SCAN_LENGTH = MAX_EXECUTION_ERROR_LENGTH * 8;
 
 /**
- * Iteration cap for the scrub loop. The chain is designed to reach a fixed
- * point on pass 1; the loop exists so that (a) a rule whose output happens to
- * feed another rule cannot leave a half-scrubbed value persisted, and (b) the
- * length cap re-scrubs anything its slice exposed. Passes after the first run
- * over a <=500-char string, so they are free.
+ * Iteration cap for the scrub loop.
+ *
+ * A second pass is genuinely NEEDED, not merely defensive: `redactPii` is not
+ * idempotent, and two emails abutting inside one word-character run take two
+ * passes (`x@y.io4155552671foo@bar.com` — see that module's header). The loop
+ * also covers (a) a rule whose output happens to feed another rule, and (b)
+ * the length cap re-scrubbing anything its slice exposed.
+ *
+ * 3 is enough HERE, which is a property of this call site's options rather
+ * than of `redactPii`. `requireSeparatedPhones: true` means a bare digit run
+ * is not a phone, so the one shape that does not converge in bounded passes
+ * (an n-digit run needs n/10) never fires. Measured over 200,000 generated
+ * causes under exactly these options, the worst case was 2 productive passes.
+ * The reputation call sites, which use the default options over unbounded
+ * review text, need `redactPiiRepeatedly`'s own cap for that reason.
+ *
+ * Passes after the first run over a <=500-char string, so they are free.
  */
 const MAX_CAUSE_SCRUB_PASSES = 3;
 
@@ -804,9 +823,11 @@ function scrubCauseOnce(text: string): string {
     out = out.replace(pattern, replacement);
   }
   // Customer PII via the codebase's ONE free-text redactor
-  // (reputation/pii-redact.ts), whose idempotency contract is documented and
-  // separately tested, and which orders the international phone rule BEFORE
-  // the US one (so `+442071234567` masks whole rather than leaving `+44`).
+  // (reputation/pii-redact.ts), whose contract is documented and separately
+  // tested, and which orders the international phone rule BEFORE the US one
+  // (so `+442071234567` masks whole rather than leaving `+44`). Note that
+  // contract is placeholder-INERTNESS, not idempotence: one pass can leave
+  // PII a further pass removes, which is why the caller below loops.
   // Addresses and last names stay on: a street-address or FirstName-LastName
   // heuristic over machine-generated diagnostics is all false positives.
   // `requireSeparatedPhones` keeps integer cents, epoch millis and int4
@@ -832,13 +853,20 @@ function scrubCauseOnce(text: string): string {
  * than at each surface that renders it.
  *
  * The PII half delegates to `reputation/pii-redact.ts` — this codebase's
- * free-text redactor, which is documented DETERMINISTIC and IDEMPOTENT and
- * has its own test file. This function previously carried a copy of its
- * regexes; the copy drifted (it ordered the US phone rule before the
- * international one, and its email rule's trailing `\b` made an email
- * followed by a digit unmatchable) and there is no reason for two
- * idempotency contracts. Only the SECRET rules — which pii-redact has no
- * business knowing about — stay local.
+ * free-text redactor, which is documented DETERMINISTIC with INERT
+ * placeholders and has its own test file. This function previously carried a
+ * copy of its regexes; the copy drifted (it ordered the US phone rule before
+ * the international one, and its email rule's trailing `\b` made an email
+ * followed by a digit unmatchable) and there is no reason for two contracts.
+ * Only the SECRET rules — which pii-redact has no business knowing about —
+ * stay local.
+ *
+ * `redactPii` is NOT idempotent (see its module header: abutting emails, long
+ * digit runs), which is exactly why the scrub below runs in a capped LOOP
+ * rather than once. The reputation draft composers do the same thing with
+ * `redactPiiRepeatedly`; this loop stays separate because its body also runs
+ * the local secret rules and the length cap, neither of which belongs in
+ * pii-redact.ts.
  *
  * Deliberately NOT `redactSecrets` (logging/redact.ts) either: that walks an
  * OBJECT masking by KEY name, and there are no keys here. Its keyword LIST

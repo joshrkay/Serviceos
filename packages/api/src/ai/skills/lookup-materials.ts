@@ -6,8 +6,9 @@
  *
  * Tenant-scoped, read-only. Reads Task 8's `material_items` substrate
  * (src/materials/material-item.ts) via `MaterialItemRepository.listPending`
- * and summarizes the OLDEST-CREATED (quality-review M4 — Task 8's contract
- * is oldest-created-first) up to `MAX_ITEMS_SPOKEN` (5) items by
+ * and summarizes the MOST URGENT (F2, 2026-08-10 — Task 8's contract is
+ * soonest-`needed_by` first, undated last; it was oldest-created-first
+ * through quality-review M4) up to `MAX_ITEMS_SPOKEN` (5) items by
  * description + quantity, plus vendor/needed-by when the caller stated
  * them. Optionally scoped to one job when the caller's spoken jobReference
  * resolved to a verified `jobId` (JOB_REF_INTENTS membership — see
@@ -28,18 +29,20 @@
  * `lookup_catalog`, whose skill returns the tenant's WHOLE catalog and lets
  * the WORKER slice it (comment: "programmatic consumers need every item,
  * not the TTS-capped names") — there is no non-TTS consumer of the pending
- * shopping list today, and a shopping list is append-mostly (only
- * `markPurchased` prunes it), so an unbounded `SELECT *` here would load
- * every pending row for the tenant just to speak 5 of them, and that only
- * gets worse over a tenant's lifetime. If a future consumer needs more
+ * shopping list today, and NOTHING PRUNES this list (`markPurchased` has no
+ * production caller; see its doc comment in materials/material-item.ts), so
+ * an unbounded `SELECT *` here would load every pending row for the tenant
+ * just to speak 5 of them, and that only gets monotonically worse over a
+ * tenant's lifetime. If a future consumer needs more
  * than `MAX_ITEMS_SPOKEN` items (the review card can render up to
  * `MAX_VOICE_ANSWER_ROWS`, 24), raise `FETCH_LIMIT` deliberately rather
  * than reverting to an unbounded fetch.
  *
  * The bounded fetch means this skill genuinely CANNOT report an exact
- * total once the tenant has more than `MAX_ITEMS_SPOKEN + 1` pending items
- * — `data.count` is `null` in that case (never a false-precise guess), and
- * the summary says "5+ items" rather than inventing a total. A caller that
+ * total once more than `MAX_ITEMS_SPOKEN` (5) pending items match — the
+ * fetch stops at 6, so 6 rows means "at least 6" and nothing more precise.
+ * `data.count` is `null` in that case (never a false-precise guess), and
+ * the summary says "more than 5 items" rather than inventing a total. A caller that
  * needs an exact total past that boundary needs a separate COUNT query —
  * deliberately NOT added here (that's a distinct, larger change than this
  * task's scope).
@@ -50,11 +53,13 @@
  * `MaterialItemListOptions.neededByBefore` (Task 8's substrate, extended)
  * lets this skill actually narrow the query to "what's needed by <date>",
  * closing a real gap the interim per-item-surfacing mitigation left open:
- * the fetch is bounded (`FETCH_LIMIT`, below) and ordered oldest-created
- * first BY DEFAULT, so a tenant with more pending items than the fetch cap
- * could have a genuinely time-sensitive item never spoken at all — it only
- * "self-corrected" once the item aged into the oldest-N window. A real
- * date filter, applied at the repo/SQL boundary, fixes that directly.
+ * the fetch is bounded (`FETCH_LIMIT`, below) and, at the time, ordered
+ * oldest-created first BY DEFAULT, so a tenant with more pending items than
+ * the fetch cap could have a genuinely time-sensitive item never spoken at
+ * all — it only "self-corrected" once the item aged into the oldest-N
+ * window. A real date filter, applied at the repo/SQL boundary, fixes that
+ * for the caller who NAMES a day; F2 (below) fixes it for the caller who
+ * does not.
  *
  * `dateTimeDescription` (the caller's raw spoken day phrase — "tomorrow",
  * "by Friday") is resolved to a calendar day via `resolveSpokenDay`
@@ -117,10 +122,54 @@
  * whether a date filter was applied (spec-review MAJOR B) — an unfiltered
  * answer still benefits from the per-item date this fix doesn't replace.
  *
- * Ordering: date-scoped results are ordered soonest-`neededBy`-first (see
- * `MaterialItemListOptions.neededByBefore`'s doc comment) rather than
- * oldest-created-first — a date-scoped ask cares about urgency, and the
- * fetch is still capped, so which rows make the cut matters.
+ * ── The UN-SCOPED ask is ordered by urgency too (F2, 2026-08-10) ──────────
+ *
+ * K3 (above) fixed "what do I need for TOMORROW?". The bare "what do I
+ * need?" kept the original defect, and it is the more common ask: the repo's
+ * DEFAULT ordering was `created_at ASC`, so under `FETCH_LIMIT` 6 /
+ * `MAX_ITEMS_SPOKEN` 5 the five oldest-CREATED rows consumed the entire
+ * spoken answer and an item due tomorrow was never mentioned. Because
+ * nothing prunes this list (`markPurchased` has no production caller), that
+ * was not a transient omission the way an aging window is — the SAME five
+ * stale rows owned the answer indefinitely.
+ *
+ * `listPending` now uses ONE ordering for every call — `needed_by ASC NULLS
+ * LAST, created_at ASC` (+ `id ASC` in Pg) — so this skill no longer has a
+ * "default" ordering distinct from its date-scoped one. Undated items sort
+ * LAST, not first: no `needed_by` means no deadline, not infinite urgency.
+ *
+ * WHAT F2 DID NOT CLOSE, AND WHAT A1 (2026-08-10) DOES ABOUT IT. F2's own
+ * first draft claimed the un-scoped ask now hides nothing, because the query
+ * is lower-unbounded and so every omitted row has a LATER deadline than
+ * everything spoken. That last clause is true and the conclusion drawn from
+ * it was not. Measured counterexample: 8 abandoned March rows (dated, never
+ * purchased) plus 2 items due tomorrow, asked "what do I need?" — the five
+ * spoken rows are all March and NEITHER item due tomorrow is mentioned. That
+ * is the same silent omission K3 fixed for the date-scoped ask, and F2 only
+ * moved the crowding-out from stale-CREATED rows to stale-DATED ones. It is
+ * closed only for a tenant whose stale rows are UNDATED, because those sort
+ * last and cannot consume the cap.
+ *
+ * It cannot be closed by ordering — the omitted rows really are the less
+ * urgent ones, and demoting an overdue row to speak an upcoming one just
+ * trades the omission back (the `needed_by DESC` argument above, again). So
+ * A1 makes the DISCLOSURE carry it: the tail names the deadline of the FIRST
+ * OMITTED row ("and more beyond that, the next needed by March 6"). A bare
+ * "and more beyond that" is equally true of one extra undated row and of a
+ * hundred-item overdue backlog, which is exactly why it was not enough.
+ *
+ * STILL NO SECOND DISCLOSURE QUERY HERE, unlike K3's "needed sooner" probe.
+ * K3 needed one because a BRACKETED day window hides rows that are MORE
+ * urgent than the ones spoken, and nothing already fetched could reveal
+ * them. Here the disclosure is free: `FETCH_LIMIT` is `MAX_ITEMS_SPOKEN + 1`,
+ * so the first omitted row is already in hand (that extra row is the whole
+ * point of I4's bounded fetch). A probe would double the cost of the most
+ * common ask to say something the fetched row already says.
+ *
+ * The residual is a PRODUCT hole, not a query-shape one: nothing prunes this
+ * list (see `markPurchased`'s note below), so an abandoned backlog grows
+ * without bound and no amount of summary wording makes a 100-item overdue
+ * list speakable in five clauses.
  *
  * ── TTS-safe formatting (quality-review I2) ────────────────────────────────
  *
@@ -130,6 +179,22 @@
  * context ("3× 3 boxes" → "three times three boxes," i.e. nine) and Google
  * Cloud TTS typically drops entirely ("three three boxes"). Every quantity
  * is now spoken as the word "quantity" instead.
+ *
+ * F3 (2026-08-10) applied the SAME test to the rest of this file's spoken
+ * text and found one more of that class: the capped count read "5+ items",
+ * and "+" has a lexical reading exactly like "×" does — Polly voices it
+ * ("five plus items"), Google drops it and leaves "five items", which is
+ * indistinguishable from an exact five and defeats the whole point of the
+ * capped fetch. It now reads "more than 5 items".
+ *
+ * THE TEST THAT MATTERS IS "does the engine try to SAY it", not "is it a
+ * symbol". `—` and `…` in the strings below are deliberately left: both
+ * engines treat them as prosody (a pause), neither verbalises them, and the
+ * em-dash is a house idiom across ~15 spoken lines in this skill family
+ * (lookup-availability.ts's caller-facing "I have 1 PM or 3 PM on Tuesday —
+ * which works?" among them). Changing them here alone would buy nothing
+ * audible and cost the family its one consistent voice; if that idiom is
+ * ever retired it should be retired everywhere, behind a shared guard.
  */
 import type { MaterialItem, MaterialItemRepository } from '../../materials/material-item';
 import type { LookupEventService } from '../../lookup-events/lookup-event-service';
@@ -174,9 +239,11 @@ export type LookupMaterialsResult =
       data: {
         /**
          * Exact count OF THE SCOPE THAT WAS ASKED ABOUT, or `null` once
-         * more than `MAX_ITEMS_SPOKEN + 1` rows match it — this skill's
-         * bounded fetch (I4) means the true total is genuinely unknown past
-         * that point. Never a false-precise guess; see module doc comment.
+         * more than `MAX_ITEMS_SPOKEN` (5) rows match it — this skill's
+         * bounded fetch (I4) stops at `MAX_ITEMS_SPOKEN + 1`, so a 6-row
+         * result means "6 or more" and the true total is genuinely unknown
+         * past that point. Never a false-precise guess; see module doc
+         * comment.
          *
          * "The scope that was asked about" is load-bearing and NOT the
          * tenant's pending total: it is narrowed by `jobId` and, for a
@@ -188,11 +255,16 @@ export type LookupMaterialsResult =
          */
         count: number | null;
         /**
-         * The (at most `MAX_ITEMS_SPOKEN`) OLDEST pending items actually
-         * spoken/rendered (quality-review M2/M4) — named `spokenItems`,
-         * not `items`, so a caller can never mistake this for the full
-         * pending set. A caller asking "what's next after these?" hears
-         * the newest-added items LAST, if at all — see module doc comment.
+         * The (at most `MAX_ITEMS_SPOKEN`) MOST URGENT pending items
+         * actually spoken/rendered (quality-review M2/M4; F2 changed this
+         * from "oldest") — named `spokenItems`, not `items`, so a caller can
+         * never mistake this for the full pending set.
+         *
+         * What the cap omits is later-dated (then undated), which is NOT the
+         * same as harmless: a tenant with a dated overdue backlog can have
+         * all five slots eaten by months-old rows while an item due tomorrow
+         * goes unspoken. The summary's tail names the first omitted row's
+         * deadline for exactly that reason (A1) — see module doc comment.
          */
         spokenItems: LookupMaterialsItem[];
       };
@@ -202,14 +274,15 @@ export type LookupMaterialsResult =
 
 const MAX_ITEMS_SPOKEN = 5;
 // One extra row beyond what's ever spoken, fetched solely to detect "more
-// exist" without a second COUNT query — see module doc comment (I4).
+// exist" without a second COUNT query — and, since A1, to name the first
+// OMITTED row's deadline in the tail. See module doc comment (I4, A1).
 const FETCH_LIMIT = MAX_ITEMS_SPOKEN + 1;
 /**
  * Bounded probe for the "needed sooner" disclosure (K3). Same honesty rule
  * as `count`/`FETCH_LIMIT`: fetch one row PAST the number we're willing to
- * state so the summary can say "20+" rather than guess a total. Larger than
- * `FETCH_LIMIT` because this bucket is only ever COUNTED, never spoken
- * item-by-item, so the rows are cheap.
+ * state so the summary can say "more than 20" rather than guess a total.
+ * Larger than `FETCH_LIMIT` because this bucket is only ever COUNTED, never
+ * spoken item-by-item, so the rows are cheap.
  */
 const MAX_SOONER_COUNTED = 20;
 /** Spoken-summary description cap — mirrors the row-builder's own label cap (`text()`, voice-lookup-answer.ts). */
@@ -343,10 +416,11 @@ function resolveNeededByScope(
  *
  * The count is honest about its own bound the same way `data.count` is: the
  * probe fetches `MAX_SOONER_COUNTED + 1` rows, so a saturated bucket says
- * "more than 20 items" rather than inventing a total. Deliberately spelled
- * out rather than reusing the "5+" shape the count phrase above uses —
- * that shape is a known TTS nit (an engine may read the "+" as "plus" or
- * drop it), pre-existing there and not worth propagating into new text.
+ * "more than 20 items" rather than inventing a total. This spelled-out shape
+ * was chosen here to avoid the "5+" shape the count phrase above used — a
+ * TTS nit (an engine may read the "+" as "plus" or drop it) that was
+ * pre-existing and left alone at the time. F3 fixed it there too, so both
+ * ceiling-honest counts in this file now read the same way.
  */
 function soonerSentence(sooner: MaterialItem[], currentYear: number): string | null {
   if (sooner.length === 0) return null;
@@ -458,15 +532,42 @@ export async function lookupMaterials(
       ...(m.neededBy ? { neededByLabel: formatNeededByLabel(m.neededBy, currentYear) } : {}),
     }));
 
+    // F3 — this used to say "5+ items". "+" is a symbol with a LEXICAL
+    // reading, which is the class of TTS defect the I2 fix to `×` above was
+    // about: Amazon Polly voices it ("five plus items") and Google Cloud TTS
+    // drops it entirely, leaving "five items" — indistinguishable from an
+    // exact count of five, which destroys the very distinction the capped
+    // fetch and `count: null` exist to preserve. Spelled the way
+    // `soonerSentence` already spells its own ceiling, so the two
+    // ceiling-honest counts in this file now read the same way. Accurate as
+    // well as safe: `hasMore` means `items.length > MAX_ITEMS_SPOKEN`, so
+    // there really are MORE THAN five, not five-or-more.
     const countPhrase = hasMore
-      ? `${MAX_ITEMS_SPOKEN}+ ${plural(MAX_ITEMS_SPOKEN, 'item')}`
+      ? `more than ${MAX_ITEMS_SPOKEN} ${plural(MAX_ITEMS_SPOKEN, 'item')}`
       : `${items.length} ${plural(items.length, 'item')}`;
     const scopePhrase = scope.kind === 'day' ? ` needed by ${scope.label}` : '';
+    // A1 (2026-08-10) — the tail names the HORIZON it is hiding. `hasMore`
+    // means `FETCH_LIMIT` rows came back, so `items[MAX_ITEMS_SPOKEN]` — the
+    // first row the cap omits — is already in hand: no second query, no
+    // COUNT, just the one extra row I4 already fetches to detect "more
+    // exist". Naming its deadline is what makes the tail informative rather
+    // than merely true; see the module doc comment for why a bare "and more
+    // beyond that" is not enough on a tenant with a dated backlog.
+    //
+    // Suppressed on a date-scoped ask: every row there is inside the same
+    // resolved DAY window, so the label would just repeat `scope.label`.
+    // Suppressed when the first omitted row is UNDATED: everything past it
+    // is undated too (undated sorts last), and there is no deadline to name.
+    const firstOmitted = hasMore ? items[MAX_ITEMS_SPOKEN] : undefined;
+    const omittedHorizon =
+      scope.kind !== 'day' && firstOmitted?.neededBy
+        ? `, the next needed by ${formatNeededByLabel(firstOmitted.neededBy, currentYear)}`
+        : '';
     const summary =
       unresolvedPrefix +
       `${countPhrase} on the materials list${scopePhrase}: ` +
       spokenItems.map(describeItem).join('; ') +
-      (hasMore ? '; and more beyond that' : '') +
+      (hasMore ? `; and more beyond that${omittedHorizon}` : '') +
       (soonerPhrase ? `. ${soonerPhrase}` : '');
 
     // resultCount is the number of rows actually FETCHED (up to

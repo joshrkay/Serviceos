@@ -195,3 +195,50 @@ describe('P7-026 draft-private-followup', () => {
     expect(calls[0].tenantId).toBe('55555555-5555-5555-5555-555555555555');
   });
 });
+
+/**
+ * Review R1 — see the sibling block in draft-public-response.test.ts for the
+ * mechanism. Two addresses abutting inside one word-character run: the first
+ * match ends mid-run, `\b` cannot fire inside the residual, and the second
+ * address never gets a start position in a single pass.
+ */
+describe('P7-026 draft-private-followup — abutting PII survives a single redaction pass', () => {
+  it('does not ship a raw abutting email to the LLM provider (INPUT redaction)', async () => {
+    const { gateway, calls } = makeMockGateway('Hi Alice, we apologize.');
+    const review = makeReview({
+      commentText: 'Great work! Reach me at x@y.io4155552671foo@bar.com anytime',
+    });
+    await draftPrivateFollowUp(
+      {
+        review,
+        classification: 'praise',
+        brandVoice: NEUTRAL_BRAND_VOICE,
+        matchedCustomer: makeMatched(),
+        channel: 'email',
+      },
+      { llmGateway: gateway },
+    );
+    const userMessage = calls[0].messages.find((m) => m.role === 'user');
+    expect(userMessage).toBeDefined();
+    expect(userMessage!.content).not.toContain('x@y.io');
+    expect(userMessage!.content).not.toContain('foo@bar.com');
+  });
+
+  it('does not return a raw abutting email in the body (OUTPUT redaction)', async () => {
+    const { gateway } = makeMockGateway(
+      'Hi Alice, reach me at x@y.io4155552671foo@bar.com or call.',
+    );
+    const out = await draftPrivateFollowUp(
+      {
+        review: makeReview(),
+        classification: 'specific_complaint',
+        brandVoice: NEUTRAL_BRAND_VOICE,
+        matchedCustomer: makeMatched(),
+        channel: 'email',
+      },
+      { llmGateway: gateway },
+    );
+    expect(out).not.toContain('x@y.io');
+    expect(out).not.toContain('foo@bar.com');
+  });
+});

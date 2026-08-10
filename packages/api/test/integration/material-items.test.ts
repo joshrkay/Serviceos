@@ -247,6 +247,54 @@ describe('Postgres integration — material items', () => {
       });
       expect(result.map((i) => i.id)).toEqual([first.id, second.id, third.id]);
     });
+
+    /**
+     * F2 (2026-08-10) — real-SQL proof of the DEFAULT ordering, the half
+     * #819 left alone. The mocked-pool test (test/materials/
+     * pg-material-item.test.ts) can only prove the ORDER BY TEXT; only
+     * Postgres can prove `NULLS LAST` actually places undated rows last
+     * under the LIMIT that decides what `lookup_materials` speaks.
+     */
+    it('orders an UN-SCOPED listPending by needed_by, undated rows last, under the LIMIT', async () => {
+      const t = await createTestTenant(pool);
+      // Created FIRST and undated: under the old `created_at ASC` default
+      // these two owned the whole answer and hid the dated rows below.
+      const undatedOld = await repo.create({
+        tenantId: t.tenantId,
+        description: 'undated, captured first',
+        createdBy: t.userId,
+      });
+      const undatedNewer = await repo.create({
+        tenantId: t.tenantId,
+        description: 'undated, captured second',
+        createdBy: t.userId,
+      });
+      const dueLater = await repo.create({
+        tenantId: t.tenantId,
+        description: 'due next year',
+        neededBy: new Date('2027-01-01T00:00:00Z'),
+        createdBy: t.userId,
+      });
+      const overdue = await repo.create({
+        tenantId: t.tenantId,
+        description: 'overdue since March',
+        neededBy: new Date('2026-03-02T00:00:00Z'),
+        createdBy: t.userId,
+      });
+
+      // Dated rows soonest-first, then the undated pair in created_at order.
+      const all = await repo.listPending(t.tenantId);
+      expect(all.map((i) => i.id)).toEqual([
+        overdue.id,
+        dueLater.id,
+        undatedOld.id,
+        undatedNewer.id,
+      ]);
+
+      // The pairing that matters: a cap now keeps the DATED rows.
+      const capped = await repo.listPending(t.tenantId, { limit: 2 });
+      expect(capped.map((i) => i.id)).toEqual([overdue.id, dueLater.id]);
+    });
   });
 
   // Review follow-up K3 — real-SQL proof of the INCLUSIVE lower bound that
@@ -484,6 +532,52 @@ describe('Postgres integration — material items', () => {
       // Untouched — still pending under its real tenant.
       const stillPending = await repo.listPending(other.tenantId);
       expect(stillPending.map((i) => i.id)).toContain(theirs.id);
+    });
+  });
+
+  /**
+   * A3 (2026-08-10) — migration 273. #819 declined an index for
+   * `listPending`'s ORDER BY on two premises that turned out to be false
+   * (see schema.ts's comment on '273_material_items_urgency_index'), so the
+   * decision was reversed. What is pinned here is the KEY SHAPE, because
+   * that is the part a future edit can silently get wrong: the trailing
+   * `id` is not decoration. `listPending` orders `needed_by ASC NULLS LAST,
+   * created_at ASC, id ASC`, and an index that stops at `created_at` leaves
+   * `id ASC` unsupplied — Postgres then resolves it with an Incremental Sort
+   * instead of a plain ordered index scan, and the LIMIT stops bounding the
+   * work again.
+   *
+   * The plan SHAPE itself is deliberately not asserted: it depends on the
+   * planner's costing against whatever rows the shared test DB happens to
+   * hold, which would make this a flaky gate rather than a contract.
+   */
+  describe('migration 273 — urgency index for listPending (A3)', () => {
+    it('creates idx_material_items_pending_urgency on the FULL sort key, partial on pending', async () => {
+      const { rows } = await pool.query(
+        `SELECT indexdef FROM pg_indexes
+          WHERE tablename = 'material_items'
+            AND indexname = 'idx_material_items_pending_urgency'`,
+      );
+      expect(rows).toHaveLength(1);
+      const def: string = rows[0].indexdef;
+      // The trailing `id` is the point — see this block's doc comment.
+      expect(def).toMatch(
+        /ON public\.material_items USING btree \(tenant_id, needed_by, created_at, id\)/,
+      );
+      // Partial, on the same literal predicate listPending emits, so the
+      // planner can prove the query's `status = 'pending'` implies it.
+      expect(def).toMatch(/WHERE \(status = 'pending'::text\)/);
+    });
+
+    it("keeps migration 272's idx_material_items_pending — 273 supersedes it but must not DROP it", async () => {
+      // The runner has no ledger: getMigrationSQL() re-executes every
+      // migration on every boot, so a DROP here would pair with 272's
+      // CREATE to rebuild and destroy the index on every single boot.
+      const { rows } = await pool.query(
+        `SELECT indexname FROM pg_indexes
+          WHERE tablename = 'material_items' AND indexname = 'idx_material_items_pending'`,
+      );
+      expect(rows).toHaveLength(1);
     });
   });
 });
