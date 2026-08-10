@@ -335,13 +335,16 @@ function resolveNeededByScope(
  *
  * The count is honest about its own bound the same way `data.count` is: the
  * probe fetches `MAX_SOONER_COUNTED + 1` rows, so a saturated bucket says
- * "20+" rather than inventing a total.
+ * "more than 20 items" rather than inventing a total. Deliberately spelled
+ * out rather than reusing the "5+" shape the count phrase above uses —
+ * that shape is a known TTS nit (an engine may read the "+" as "plus" or
+ * drop it), pre-existing there and not worth propagating into new text.
  */
 function soonerSentence(sooner: MaterialItem[], currentYear: number): string | null {
   if (sooner.length === 0) return null;
   const capped = sooner.length > MAX_SOONER_COUNTED;
   const n = capped ? MAX_SOONER_COUNTED : sooner.length;
-  const count = capped ? `${MAX_SOONER_COUNTED}+` : String(n);
+  const count = capped ? `more than ${MAX_SOONER_COUNTED}` : String(n);
   // The probe is ordered soonest-`needed_by`-first, so row 0 is the oldest
   // outstanding deadline — the single most useful fact about the backlog.
   const earliest = formatNeededByLabel(sooner[0].neededBy!, currentYear);

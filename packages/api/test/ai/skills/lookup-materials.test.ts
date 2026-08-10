@@ -411,6 +411,35 @@ describe('lookupMaterials skill', () => {
       expect(res.summary).toContain('March 2');
     });
 
+    // The backlog count is honest about its own ceiling, like `data.count`
+    // — and spells it out rather than reusing the "N+" shape, which is a
+    // known TTS nit (Polly may read the "+" as "plus"; Google TTS may drop
+    // it). No bare symbols in new spoken text (spoken-format.ts).
+    it('caps the backlog count honestly, in words, once the probe saturates', async () => {
+      const materialItemRepo = new InMemoryMaterialItemRepository();
+      for (let i = 1; i <= 25; i++) {
+        await materialItemRepo.create({
+          tenantId: TENANT,
+          description: `overdue ${i}`,
+          createdBy: 'u1',
+          neededBy: new Date(`2026-03-${String(i).padStart(2, '0')}T00:00:00Z`),
+        });
+      }
+      await materialItemRepo.create({
+        tenantId: TENANT, description: 'due tomorrow', createdBy: 'u1',
+        neededBy: new Date('2026-06-12T00:00:00Z'),
+      });
+
+      const res = await lookupMaterials(
+        { tenantId: TENANT, dateTimeDescription: 'tomorrow', timezone: TZ, now: NOW },
+        { materialItemRepo },
+      );
+
+      expect(res.summary).toContain('There are more than 20 items needed sooner');
+      expect(res.summary).toContain('the earliest on March 1');
+      expect(res.summary).not.toContain('+');
+    });
+
     it('says nothing about a sooner backlog when there is none', async () => {
       const materialItemRepo = new InMemoryMaterialItemRepository();
       await materialItemRepo.create({
