@@ -78,7 +78,13 @@ describe('lookupMaterials skill', () => {
     if (res.status !== 'found') throw new Error('unreachable');
     expect(res.data.spokenItems).toHaveLength(5);
     expect(res.data.count).toBeNull();
-    expect(res.summary).toContain('5+ items on the materials list');
+    // F3 — was `5+ items`. "+" is a symbol with a LEXICAL reading: Polly
+    // says "five plus items" and Google Cloud TTS drops it entirely, which
+    // makes a capped count indistinguishable from an exact 5 — destroying
+    // the very distinction `count: null` exists to preserve. Now spelled the
+    // way `soonerSentence` already spells its own ceiling.
+    expect(res.summary).toContain('more than 5 items on the materials list');
+    expect(res.summary).not.toContain('+');
     expect(res.summary).toContain('and more');
     // All 7 are UNDATED, so F2's urgency ordering ties on every row and
     // falls through to created_at: the 5 oldest are spoken (M4), item 0..4,

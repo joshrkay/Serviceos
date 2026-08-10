@@ -807,8 +807,11 @@ Notes on the Tradesperson wave 1, Task 9 row (`add_material`, taxonomy 1.13.0):
   every pending row for the tenant just to speak 5 of them. Because the
   fetch is capped, the skill genuinely cannot report an exact total once a
   tenant has more than 5 pending items — `data.count` is `null` in that
-  case (never a guessed number) and the summary says "5+ items" rather
-  than a false-precise total. This is a deliberate divergence from
+  case (never a guessed number) and the summary says "more than 5 items"
+  rather than a false-precise total. (It said "5+ items" until F3,
+  2026-08-10 — "+" has a lexical reading, so Polly voiced it as "five plus
+  items" and Google Cloud TTS dropped it, leaving "five items" and erasing
+  the very distinction the capped fetch exists to express.) This is a deliberate divergence from
   `lookup_catalog` (which fetches the tenant's WHOLE catalog and lets the
   WORKER slice, since other consumers need every item) — there is no
   non-TTS consumer of the pending shopping list today.

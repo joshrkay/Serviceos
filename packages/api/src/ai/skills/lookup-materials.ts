@@ -40,7 +40,7 @@
  * The bounded fetch means this skill genuinely CANNOT report an exact
  * total once the tenant has more than `MAX_ITEMS_SPOKEN + 1` pending items
  * — `data.count` is `null` in that case (never a false-precise guess), and
- * the summary says "5+ items" rather than inventing a total. A caller that
+ * the summary says "more than 5 items" rather than inventing a total. A caller that
  * needs an exact total past that boundary needs a separate COUNT query —
  * deliberately NOT added here (that's a distinct, larger change than this
  * task's scope).
@@ -154,6 +154,22 @@
  * context ("3× 3 boxes" → "three times three boxes," i.e. nine) and Google
  * Cloud TTS typically drops entirely ("three three boxes"). Every quantity
  * is now spoken as the word "quantity" instead.
+ *
+ * F3 (2026-08-10) applied the SAME test to the rest of this file's spoken
+ * text and found one more of that class: the capped count read "5+ items",
+ * and "+" has a lexical reading exactly like "×" does — Polly voices it
+ * ("five plus items"), Google drops it and leaves "five items", which is
+ * indistinguishable from an exact five and defeats the whole point of the
+ * capped fetch. It now reads "more than 5 items".
+ *
+ * THE TEST THAT MATTERS IS "does the engine try to SAY it", not "is it a
+ * symbol". `—` and `…` in the strings below are deliberately left: both
+ * engines treat them as prosody (a pause), neither verbalises them, and the
+ * em-dash is a house idiom across ~15 spoken lines in this skill family
+ * (lookup-availability.ts's caller-facing "I have 1 PM or 3 PM on Tuesday —
+ * which works?" among them). Changing them here alone would buy nothing
+ * audible and cost the family its one consistent voice; if that idiom is
+ * ever retired it should be retired everywhere, behind a shared guard.
  */
 import type { MaterialItem, MaterialItemRepository } from '../../materials/material-item';
 import type { LookupEventService } from '../../lookup-events/lookup-event-service';
@@ -368,10 +384,11 @@ function resolveNeededByScope(
  *
  * The count is honest about its own bound the same way `data.count` is: the
  * probe fetches `MAX_SOONER_COUNTED + 1` rows, so a saturated bucket says
- * "more than 20 items" rather than inventing a total. Deliberately spelled
- * out rather than reusing the "5+" shape the count phrase above uses —
- * that shape is a known TTS nit (an engine may read the "+" as "plus" or
- * drop it), pre-existing there and not worth propagating into new text.
+ * "more than 20 items" rather than inventing a total. This spelled-out shape
+ * was chosen here to avoid the "5+" shape the count phrase above used — a
+ * TTS nit (an engine may read the "+" as "plus" or drop it) that was
+ * pre-existing and left alone at the time. F3 fixed it there too, so both
+ * ceiling-honest counts in this file now read the same way.
  */
 function soonerSentence(sooner: MaterialItem[], currentYear: number): string | null {
   if (sooner.length === 0) return null;
@@ -483,8 +500,18 @@ export async function lookupMaterials(
       ...(m.neededBy ? { neededByLabel: formatNeededByLabel(m.neededBy, currentYear) } : {}),
     }));
 
+    // F3 — this used to say "5+ items". "+" is a symbol with a LEXICAL
+    // reading, which is the class of TTS defect the I2 fix to `×` above was
+    // about: Amazon Polly voices it ("five plus items") and Google Cloud TTS
+    // drops it entirely, leaving "five items" — indistinguishable from an
+    // exact count of five, which destroys the very distinction the capped
+    // fetch and `count: null` exist to preserve. Spelled the way
+    // `soonerSentence` already spells its own ceiling, so the two
+    // ceiling-honest counts in this file now read the same way. Accurate as
+    // well as safe: `hasMore` means `items.length > MAX_ITEMS_SPOKEN`, so
+    // there really are MORE THAN five, not five-or-more.
     const countPhrase = hasMore
-      ? `${MAX_ITEMS_SPOKEN}+ ${plural(MAX_ITEMS_SPOKEN, 'item')}`
+      ? `more than ${MAX_ITEMS_SPOKEN} ${plural(MAX_ITEMS_SPOKEN, 'item')}`
       : `${items.length} ${plural(items.length, 'item')}`;
     const scopePhrase = scope.kind === 'day' ? ` needed by ${scope.label}` : '';
     const summary =
