@@ -114,6 +114,42 @@ describe('proposalToUI — auto-approved card carries its undo window', () => {
   });
 });
 
+/**
+ * Review K4 — this mapper OVERWROTE `proposal.explanation` unconditionally
+ * with "From your message: …". `update_catalog_item` IS chat-dispatchable,
+ * so the entire payload of the refused-spoken-price fix — the sentence that
+ * names the figure that was heard, says it was above the limit, and says it
+ * was NOT applied — was discarded on the assistant surface, leaving the
+ * operator with a raw payload key ("Needs: proposedUnitPriceCents").
+ */
+describe('proposalToUI — the persisted explanation reaches the card', () => {
+  const base = {
+    id: 'prop-explained',
+    proposalType: 'update_catalog_item',
+    summary: 'Update catalog item — Drain snake',
+    payload: {},
+  };
+
+  it('keeps a persisted explanation instead of overwriting it with the echo', () => {
+    const explanation =
+      'Heard a price of $290000.00, above the $100000.00 limit for a spoken price — most likely a mishearing, so it was NOT applied. Set the price on this proposal if that figure is right.';
+    const card = proposalToUI({ ...base, explanation }, 'change the drain snake to two ninety');
+
+    expect(card.explanation).toContain('$290000.00');
+    expect(card.explanation).toContain('NOT applied');
+  });
+
+  it('still shows the source echo when the proposal has no explanation of its own', () => {
+    const card = proposalToUI(base, 'change the drain snake to two ninety');
+    expect(card.explanation).toBe('From your message: "change the drain snake to two ninety"');
+  });
+
+  it('treats a blank explanation as absent', () => {
+    const card = proposalToUI({ ...base, explanation: '   ' }, 'change the drain snake');
+    expect(card.explanation).toBe('From your message: "change the drain snake"');
+  });
+});
+
 describe('assistant chat — a pending card carries no undo window', () => {
   it('omits undoExpiresAt on a card that is still pending review', async () => {
     const proposalRepo = new InMemoryProposalRepository();

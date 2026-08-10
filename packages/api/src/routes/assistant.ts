@@ -804,6 +804,11 @@ const MISSING_FIELD_LABELS: Record<string, string> = {
   customerId: 'Customer name or ID',
   appointmentId: 'Appointment # or ID',
   leadId: 'Lead name or ID',
+  // Not an id — the money gate on `update_catalog_item`, which is
+  // chat-dispatchable, so a refused spoken price surfaces here. Without a
+  // label the operator was shown the raw payload key on the one card whose
+  // whole subject is a price.
+  proposedUnitPriceCents: 'Unit price ($)',
 };
 
 /**
@@ -877,6 +882,15 @@ export function proposalToUI(
     sourceContext?: Record<string, unknown>;
     confidenceScore?: number;
     /**
+     * The drafting handler's own reasoning, as persisted on the row. Where a
+     * handler wrote one it is the ONLY place the operator learns what the
+     * proposal declined to do and why — `update_catalog_item`'s refused
+     * spoken price ("Heard a price of $290,000.00, above the … limit … so it
+     * was NOT applied") being the case that exposed this. Optional: most
+     * types persist none and fall back to the source echo below.
+     */
+    explanation?: string;
+    /**
      * Commit 2 (followup-autoapprove-default) — the real persisted status.
      * Previously this mapper hardcoded `status: 'Pending'` unconditionally,
      * which was silently wrong for the auto-approving proposal types
@@ -936,7 +950,16 @@ export function proposalToUI(
     id: proposal.id,
     title: `${cardType}: ${proposal.summary.slice(0, 80)}${total}`,
     summary: proposal.summary.slice(0, 160),
-    explanation: `From your message: "${sourceMessage.slice(0, 120)}"`,
+    // Review K4 — the persisted explanation WINS. This used to overwrite it
+    // unconditionally with the source echo, which discarded the only thing on
+    // the card that said what the proposal refused to do: a chat-dispatched
+    // `update_catalog_item` whose spoken price was rejected showed the
+    // operator "Needs: proposedUnitPriceCents" and nothing else. The echo is
+    // the FALLBACK, for the types that persist no reasoning of their own.
+    explanation:
+      proposal.explanation && proposal.explanation.trim().length > 0
+        ? proposal.explanation
+        : `From your message: "${sourceMessage.slice(0, 120)}"`,
     confidence: (proposal.confidenceScore ?? 0) >= 0.85 ? 'High' : 'Medium',
     type: cardType,
     // Commit 2 — the real persisted status, not a hardcoded 'Pending'. Only

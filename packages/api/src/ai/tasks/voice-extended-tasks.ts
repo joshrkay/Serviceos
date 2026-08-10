@@ -40,6 +40,7 @@ import { candidatesForReference } from '../resolution/reference-candidates';
 import type { EntityCandidate } from '../resolution/entity-resolver';
 import { resolveLineItemToCatalog } from '../resolution/catalog-resolver';
 import { formatCents } from '../skills/spoken-format';
+import { formatUsdCentsFixed } from '@ai-service-os/shared';
 import { entitiesFrom, baseSourceContext, inputFor, resolveTenantTimezone } from './task-input';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -2200,8 +2201,18 @@ export class CreateJobVoiceTaskHandler implements TaskHandler {
 //      approved. But a name/description change also counts as a "real
 //      change" and SUPPRESSED that gate — so "rename the tune-up to
 //      seasonal service and make it two ninety thousand" drafted an
-//      approvable rename with the spoken price thrown away and nothing on
-//      the card saying so. Silent data loss on an approval surface.
+//      approvable COMPLETE NO-OP with nothing on the card saying so.
+//      Silent data loss on an approval surface.
+//
+//      (Correcting an earlier version of this note, which described it as
+//      "an approvable rename with the spoken price thrown away". That is
+//      not what this handler does and the accurate statement is worse:
+//      `payload.name` is set to the resolved item's REAL CURRENT name —
+//      note 2 — and the explanation says the rename is "not applied by
+//      this proposal". With the price refused, `proposedUnitPriceCents`
+//      falls back to `resolvedItem.unitPriceCents`, so proposed ===
+//      current and nothing else differs either: approving it changed
+//      literally nothing.)
 //
 //      The refusal now pushes the flat `proposedUnitPriceCents` gate key
 //      unconditionally and states the dropped figure on `explanation`.
@@ -2225,6 +2236,35 @@ export class CreateJobVoiceTaskHandler implements TaskHandler {
 //      Same change also stops the no-change gate from claiming "No price,
 //      name, or description change was stated" when a price WAS stated and
 //      refused — that branch now only fires when nothing was spoken at all.
+/**
+ * Largest spoken figure worth ECHOING back on the card. Review N8 —
+ * `Number.isFinite` admits up to 1.79e308, so an ASR figure that absurd
+ * reached the refusal message and rendered as `$1.0000000000000001e+306`
+ * (`toFixed` goes exponential at >=1e21; `Intl` instead prints a 300-digit
+ * wall). Neither belongs on an approval surface, and the operator learns
+ * nothing from either that "an implausible amount" does not tell them.
+ */
+const MAX_ECHOED_SPOKEN_PRICE_CENTS = 100_000_000_000; // $1,000,000,000.00
+
+/**
+ * Render a REFUSED spoken price for the operator to read.
+ *
+ * Review N6 — `formatUsdCentsFixed` (shared/contracts/money.ts), NOT
+ * `formatCents` (ai/skills/spoken-format.ts). The latter is a TTS formatter
+ * that deliberately omits thousands separators because they confuse Polly;
+ * money.ts's own doc says to prefer the fixed formatter for display. This
+ * string is on-screen card prose (confirmed: the web assistant speaks
+ * `reply.content` only, never `explanation`), and `$100000.00` on a money
+ * approval surface is one misread from an order of magnitude. The sibling
+ * `formatCents` uses in this file feed spoken/hint contexts and stay.
+ */
+function describeRefusedPrice(cents: number): string {
+  if (!Number.isFinite(cents) || Math.abs(cents) > MAX_ECHOED_SPOKEN_PRICE_CENTS) {
+    return 'an implausibly large amount';
+  }
+  return formatUsdCentsFixed(Math.round(cents));
+}
+
 export class UpdateCatalogItemTaskHandler implements TaskHandler {
   readonly taskType = 'update_catalog_item' as const;
 
@@ -2310,8 +2350,12 @@ export class UpdateCatalogItemTaskHandler implements TaskHandler {
       missing.push('proposedUnitPriceCents');
       explanationParts.push(
         spokenPriceCents > MAX_UNIT_PRICE_CENTS
-          ? `Heard a price of ${formatCents(Math.round(spokenPriceCents))}, above the ${formatCents(MAX_UNIT_PRICE_CENTS)} limit for a spoken price — most likely a mishearing, so it was NOT applied. Set the price on this proposal if that figure is right.`
-          : 'Heard a price that is not a valid catalog price, so it was NOT applied. Set the price on this proposal.',
+          ? `Heard a price of ${describeRefusedPrice(spokenPriceCents)}, above the ${formatUsdCentsFixed(MAX_UNIT_PRICE_CENTS)} limit for a spoken price — most likely a mishearing, so it was NOT applied. Set the price on this proposal if that figure is right.`
+          : // Review N7 — symmetric with the branch above. A spoken `-$5.00`
+            // is as much a mishearing worth showing as `$290,000.00` is, and
+            // "not a valid catalog price" alone left the operator unable to
+            // tell what had actually been heard.
+            `Heard a price of ${describeRefusedPrice(spokenPriceCents)}, which is not a valid catalog price, so it was NOT applied. Set the price on this proposal.`,
       );
     } else if (requestedPriceCents === undefined && !hasName && !hasDescription) {
       missing.push('proposedUnitPriceCents');

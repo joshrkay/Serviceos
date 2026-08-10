@@ -170,11 +170,18 @@ taxonomy 1.7.0):
   else was spoken, because the no-change gate fired; but a spoken
   name/description change also counts as a "real change" and SUPPRESSED
   that gate, so "rename the tune-up and make it two ninety thousand"
-  drafted an APPROVABLE rename with the price thrown away and nothing on
-  the card saying so. The refusal now always pushes the flat
+  drafted an APPROVABLE COMPLETE NO-OP with nothing on the card saying so.
+  (An earlier version of this note said it "drafted the rename and threw
+  the price away". That was wrong and worth correcting: this handler never
+  drafts a rename — `payload.name` is set to the resolved item's REAL
+  CURRENT name, and the explanation says in so many words that the rename
+  is "not applied by this proposal". So with the price refused, `proposed
+  === current` and every other field is unchanged: approving it changed
+  literally nothing.) The refusal now always pushes the flat
   `proposedUnitPriceCents` key into `missingFields` and states the dropped
-  figure on `explanation` ("Heard a price of $290000.00, above the
-  $100000.00 limit … NOT applied"). Chosen over refusing the whole
+  figure on `explanation` ("Heard a price of $290,000.00, above the
+  $100,000.00 limit … NOT applied" — `formatUsdCentsFixed`, the display
+  formatter, not the separator-less spoken one). Chosen over refusing the whole
   utterance with a `voice_clarification`: the item resolved and a real
   rename was heard, and this handler's posture for a partially-extracted
   utterance is a flat gate key plus prose on `explanation` (same shape as

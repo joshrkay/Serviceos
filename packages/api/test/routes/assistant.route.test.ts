@@ -628,6 +628,23 @@ describe('B1 — editFieldsForMissing helper (pure mapper)', () => {
     expect(editFieldsForMissing([], { invoiceId: 'x' })).toBeUndefined();
     expect(editFieldsForMissing(undefined, { invoiceId: 'x' })).toBeUndefined();
   });
+
+  /**
+   * Review K4 — `update_catalog_item`'s refused-spoken-price gate puts
+   * `proposedUnitPriceCents` on missingFields, and it is chat-dispatchable,
+   * so the operator was shown the raw payload key as the Edit control's
+   * label on a MONEY approval surface.
+   */
+  it('labels the catalog unit-price gate in human terms, not as a payload key', () => {
+    const out = editFieldsForMissing(['proposedUnitPriceCents'], {
+      catalogItemId: 'item-1',
+      currentUnitPriceCents: 12000,
+      proposedUnitPriceCents: 12000,
+    });
+    expect(out).toEqual([
+      { label: 'Unit price ($)', key: 'proposedUnitPriceCents', value: '' },
+    ]);
+  });
 });
 
 /**
