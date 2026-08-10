@@ -109,17 +109,18 @@ describe('Commit 3 — loud guard when both supervision signals are absent', () 
     vi.restoreAllMocks();
   });
 
-  it('warns exactly once when both supervisorMode and supervisorPresent are undefined', () => {
+  it('warns exactly once per proposal type when both supervisorMode and supervisorPresent are undefined', () => {
     // Reset ONLY inside this one test, not in a shared beforeEach/afterEach:
-    // the throttle is a real "has this process already warned" latch, not a
-    // value cache with a safe reset default. Resetting it after the LAST
-    // test in this block would re-arm it for whatever test runs next in the
-    // suite (outside this describe, unspied) — turning "once per process"
-    // into "once per process, plus once more whenever this file happens to
-    // run" and defeating the noise-scoping this guard exists for. This test
-    // intentionally leaves the latch tripped (`true`) on exit, same as real
-    // production life-of-process behavior, so it's safe for the rest of the
-    // suite regardless of run order.
+    // the throttle is a real "have I already warned about THIS key" latch,
+    // not a value cache with a safe reset default. Resetting it after the
+    // LAST test in this block would re-arm it for whatever test runs next
+    // in the suite (outside this describe, unspied) — turning "once per
+    // key per process" into "once per key per process, plus once more
+    // whenever this file happens to run" and defeating the noise-scoping
+    // this guard exists for. This test intentionally leaves every key it
+    // touches tripped on exit, same as real production life-of-process
+    // behavior, so it's safe for the rest of the suite regardless of run
+    // order.
     _resetMissingSupervisionSignalWarningForTests();
 
     expect(resolveAutoApproveThreshold({})).toBe(LEGACY_AUTO_APPROVE_THRESHOLD);
@@ -128,29 +129,73 @@ describe('Commit 3 — loud guard when both supervision signals are absent', () 
     expect(logged).toContain('"level":"warn"');
     expect(logged).toContain('resolveAutoApproveThreshold');
 
-    // Throttled — a second call with the same missing-signal shape does not
-    // warn again. This is the scoping decision: unthrottled, a caller that
-    // legitimately never threads either field (today: the D-015 telephony
-    // booking lane in create-voice-turn-processor.ts) would log on every
-    // single auto-approving request in production, drowning out the "a NEW
-    // surface just shipped this gap" signal the guard exists to raise.
+    // Throttled — a second call with the SAME key (no warningContext given,
+    // so both calls key on the same "unknown" fallback) does not warn again.
     expect(resolveAutoApproveThreshold({})).toBe(LEGACY_AUTO_APPROVE_THRESHOLD);
     expect(writeSpy).toHaveBeenCalledTimes(1);
   });
 
+  it('I1 (post-C1 review) — a DIFFERENT proposal type gets its own warning, not masked by an already-warned one', () => {
+    // The whole point of re-keying: a single global latch means the FIRST
+    // caller to trip it (in production, realistically a high-volume known
+    // gap) permanently silences every subsequent DIFFERENT caller that
+    // ships the same mistake. Keyed per proposal type, two distinct
+    // offenders each get their own one-time warning.
+    _resetMissingSupervisionSignalWarningForTests();
+
+    resolveAutoApproveThreshold({ warningContext: { proposalType: 'draft_estimate' } });
+    expect(writeSpy).toHaveBeenCalledTimes(1);
+
+    // A SECOND call for the SAME type does not warn again.
+    resolveAutoApproveThreshold({ warningContext: { proposalType: 'draft_estimate' } });
+    expect(writeSpy).toHaveBeenCalledTimes(1);
+
+    // A DIFFERENT type warns again — this is the behavior a single boolean
+    // latch could not provide.
+    resolveAutoApproveThreshold({ warningContext: { proposalType: 'create_appointment' } });
+    expect(writeSpy).toHaveBeenCalledTimes(2);
+  });
+
+  // The four tests below each pair a NEGATIVE assertion (this specific
+  // shape must not warn) with a POSITIVE control (a genuine trigger, on a
+  // key unique to this test, still warns immediately after) — a bare
+  // `not.toHaveBeenCalled()` alone would pass identically if the guard
+  // (or this test's own spy) were silently broken, proving nothing.
   it('does not warn when supervisorPresent is explicitly provided (partial signal is not the gap)', () => {
-    resolveAutoApproveThreshold({ supervisorPresent: true });
+    _resetMissingSupervisionSignalWarningForTests();
+    resolveAutoApproveThreshold({
+      supervisorPresent: true,
+      warningContext: { proposalType: 'update_estimate' },
+    });
     expect(writeSpy).not.toHaveBeenCalled();
+
+    // Positive control — same key, but now genuinely missing both signals.
+    resolveAutoApproveThreshold({ warningContext: { proposalType: 'update_estimate' } });
+    expect(writeSpy).toHaveBeenCalledTimes(1);
   });
 
   it('does not warn on the categorical unsupervised block (supervisorPresent === false)', () => {
-    resolveAutoApproveThreshold({ supervisorPresent: false });
+    _resetMissingSupervisionSignalWarningForTests();
+    resolveAutoApproveThreshold({
+      supervisorPresent: false,
+      warningContext: { proposalType: 'update_invoice' },
+    });
     expect(writeSpy).not.toHaveBeenCalled();
+
+    resolveAutoApproveThreshold({ warningContext: { proposalType: 'update_invoice' } });
+    expect(writeSpy).toHaveBeenCalledTimes(1);
   });
 
   it('does not warn when supervisorMode alone is provided', () => {
-    resolveAutoApproveThreshold({ supervisorMode: 'tech' });
+    _resetMissingSupervisionSignalWarningForTests();
+    resolveAutoApproveThreshold({
+      supervisorMode: 'tech',
+      warningContext: { proposalType: 'update_job' },
+    });
     expect(writeSpy).not.toHaveBeenCalled();
+
+    resolveAutoApproveThreshold({ warningContext: { proposalType: 'update_job' } });
+    expect(writeSpy).toHaveBeenCalledTimes(1);
   });
 });
 
