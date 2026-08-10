@@ -308,22 +308,84 @@ jobs:
       # runbooks.
       - name: Every Layer 1 script has a recorded cassette (blocking)
         run: npm run voice-quality:check-cassettes --workspace=packages/api
+      # A5 — the seed must be asserted POSITIVELY, by what it says it did.
+      #
+      # The no-op check below cannot do it. On a healthy corpus "wrote
+      # nothing" IS the pass condition, so a regression that makes seed()
+      # issue zero LLM calls and exit 0 writes nothing, leaves `git status`
+      # empty, and takes all three steps green. Proven: empty the cassettes
+      # dir, rebuild with `voice-quality:refresh` (73/73, 72 files), snapshot
+      # every sha, run the seed — zero files changed, zero created. The
+      # seed's request set is a strict subset of the suite's, so the green
+      # state carried no information about the seed at all.
+      #
+      # `Seeded N/N` is what the script prints, and pinning N catches the
+      # failure class the script's own doc comment worries about elsewhere:
+      # corpus-loading drift that quietly narrows what runs. (seed() already
+      # exits 1 on an EMPTY corpus; a partial one is the gap.) The literal is
+      # duplicated on purpose — deriving it from the corpus would make the
+      # assertion circular and unable to fail.
+      #
+      # ADDING OR REMOVING A LAYER 1 CORPUS SCRIPT? Update EXPECTED_SEEDED
+      # here in the same commit. That is the intended cost.
       - name: Cassette seed script executes end to end (blocking)
-        run: npm run voice-quality:seed-cassettes --workspace=packages/api
+        run: |
+          set -o pipefail
+          EXPECTED_SEEDED=73
+          npm run voice-quality:seed-cassettes --workspace=packages/api 2>&1 | tee /tmp/seed.log
+          if ! grep -qx "Seeded ${EXPECTED_SEEDED}/${EXPECTED_SEEDED} cassettes." /tmp/seed.log; then
+            echo "::error title=Cassette seed did not seed the whole corpus::Expected the script to print 'Seeded ${EXPECTED_SEEDED}/${EXPECTED_SEEDED} cassettes.'"
+            echo ""
+            echo "It printed:"
+            grep -E '^Seeded ' /tmp/seed.log || echo "  (no 'Seeded N/N' line at all — the script never reached the end of seed())"
+            echo ""
+            echo "Either the seed is silently skipping scripts (corpus loading"
+            echo "narrowed, or runScript stopped covering some of them), or a"
+            echo "Layer 1 corpus script was added/removed without updating"
+            echo "EXPECTED_SEEDED in .github/workflows/pr-checks.yml."
+            exit 1
+          fi
       # Record mode is idempotent (cassette-gateway.ts refuses to overwrite an
       # entry that is already present), so re-seeding a current corpus must
-      # produce ZERO bytes of change. That turns the run above from "it exited
-      # 0" into a real assertion: a harness change that re-records differently,
-      # or a script that quietly records nothing, both surface here. Uses
-      # `git status --porcelain` rather than `git diff --exit-code` so an
-      # UNTRACKED new cassette is caught too.
+      # produce ZERO bytes of change. This catches a harness change that
+      # re-records DIFFERENTLY, and a cassette missing from the commit. It
+      # cannot catch a seed that records nothing — that is the step above's
+      # job. Uses `git status --porcelain` rather than `git diff --exit-code`
+      # so an UNTRACKED new cassette is caught too.
       - name: Re-seeding the current corpus must be a no-op
         run: |
           CHANGED=$(git status --porcelain -- packages/api/src/ai/voice-quality/corpus/cassettes)
           if [ -n "$CHANGED" ]; then
-            echo "::error title=Cassette seed produced changes::Re-recording the corpus was expected to be a no-op. Either a cassette is missing from the commit (run 'npm run voice-quality:seed-cassettes --workspace=packages/api' locally and commit the result), or a harness change altered what gets recorded."
+            echo "::error title=Cassette seed produced changes::Re-recording the corpus was expected to be a no-op. See the job log for which files changed and how to fix each case."
+            echo ""
+            echo "Changed under packages/api/src/ai/voice-quality/corpus/cassettes:"
             echo "$CHANGED"
+            echo ""
+            # N12 — `git diff --stat` prints NOTHING for an untracked file,
+            # which is the exact case `git status` was chosen over
+            # `git diff --exit-code` to catch. So the porcelain list above is
+            # the authoritative one; this is only extra detail for the
+            # tracked-modification case.
+            echo "Line counts for MODIFIED (tracked) cassettes only — a '??' entry above will not appear here:"
             git diff --stat -- packages/api/src/ai/voice-quality/corpus/cassettes
+            echo ""
+            echo "FIX, by the marker in the list above:"
+            echo "  '??' (untracked, a cassette missing from the commit):"
+            echo "      cd packages/api && npm run voice-quality:seed-cassettes"
+            echo "      git add src/ai/voice-quality/corpus/cassettes"
+            echo "    ...UNLESS the new file is for a script declared in"
+            echo "    ZERO_LLM_CALL_SCRIPT_IDS (scripts/check-voice-quality-cassettes.ts)."
+            echo "    A declared script that has started issuing LLM calls will record a"
+            echo "    cassette here and then fail the FIRST step in this job, which tells"
+            echo "    you to delete the file — following both messages literally is a loop."
+            echo "    The fix in that case is to REMOVE the id from ZERO_LLM_CALL_SCRIPT_IDS"
+            echo "    and commit the cassette."
+            echo "  ' M' (modified, a prompt changed under a recorded cassette):"
+            echo "      cd packages/api && npm run voice-quality:refresh"
+            echo "      git add src/ai/voice-quality/corpus/cassettes"
+            echo "    (Re-seeding does NOT fix this — record mode refuses to overwrite an"
+            echo "    entry that is already present. :refresh is what the sibling"
+            echo "    voice-quality-cassette-drift job prescribes for the same condition.)"
             exit 1
           fi
           echo "Seed run left the recorded cassettes byte-identical."
