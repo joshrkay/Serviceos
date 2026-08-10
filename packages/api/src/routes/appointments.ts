@@ -47,6 +47,34 @@ const runningLateBodySchema = z.object({
   delayMinutes: z.number().int().positive().optional(),
 });
 
+/**
+ * Read a string filter off `req.query`, treating a PRESENT-BUT-EMPTY value
+ * (`?technicianId=`, the shape a UI emits when its filter select is cleared)
+ * as ABSENT — "no filter", never "match the row whose column is the empty
+ * string".
+ *
+ * Follow-up to PR #815. The repositories already agreed on this for the value
+ * itself: `if (options?.technicianId)` / `if (options?.status)` are truthiness
+ * tests in PgAppointmentRepository.buildListWhere, in
+ * InMemoryAppointmentRepository.listWithMeta, and in listAppointmentsWithMeta's
+ * no-listWithMeta fallback (where a falsy technicianId also correctly skips the
+ * "cannot filter by technician" throw), so `''` never became a predicate.
+ * The ROUTE was the one place that disagreed: a bare
+ * `typeof req.query.x === 'string'` check kept `''`, which is `!== undefined`
+ * and therefore flipped `wantsPaginated` on. The damage was to the response
+ * ENVELOPE rather than the rows — `?jobId=x&technicianId=` silently traded the
+ * legacy bare-array contract for `{ data, total }`, and a bare
+ * `?technicianId=` turned the historical "jobId query parameter is required"
+ * 400 into a 200 listing the whole tenant.
+ *
+ * Whitespace is NOT trimmed away: `?technicianId=%20` is a caller asserting a
+ * value, and silently reinterpreting it as "no filter" would be the same class
+ * of guess this helper exists to remove.
+ */
+function stringFilter(value: unknown): string | undefined {
+  return typeof value === 'string' && value.length > 0 ? value : undefined;
+}
+
 export function createAppointmentRouter(
   appointmentRepo: AppointmentRepository,
   ownership: TenantOwnership,
@@ -199,13 +227,14 @@ export function createAppointmentRouter(
     requirePermission('appointments:view'),
     async (req: AuthenticatedRequest, res: Response) => {
       try {
-        const jobId = typeof req.query.jobId === 'string' ? req.query.jobId : undefined;
-        const technicianId = typeof req.query.technicianId === 'string' ? req.query.technicianId : undefined;
-        const status = typeof req.query.status === 'string' ? req.query.status as AppointmentStatus : undefined;
+        // Empty-valued params mean "no filter" — see stringFilter's comment.
+        const jobId = stringFilter(req.query.jobId);
+        const technicianId = stringFilter(req.query.technicianId);
+        const status = stringFilter(req.query.status) as AppointmentStatus | undefined;
         const sort: 'asc' | 'desc' = req.query.sort === 'desc' ? 'desc' : 'asc';
 
-        const fromRaw = typeof req.query.fromDate === 'string' ? req.query.fromDate : undefined;
-        const toRaw = typeof req.query.toDate === 'string' ? req.query.toDate : undefined;
+        const fromRaw = stringFilter(req.query.fromDate);
+        const toRaw = stringFilter(req.query.toDate);
         const fromDate = fromRaw ? new Date(fromRaw) : undefined;
         const toDate = toRaw ? new Date(toRaw) : undefined;
         if (fromDate && Number.isNaN(fromDate.getTime())) {
