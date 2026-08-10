@@ -255,7 +255,12 @@ export async function installProposalMocks(
     await route.fulfill({
       status: 200,
       contentType: 'application/json',
-      body: JSON.stringify({ data: toApproveResponse(state) }),
+      // UNWRAPPED, matching the real route: the single-proposal mutations in
+      // `routes/proposals.ts` all `res.json(result)` — only the LIST endpoints
+      // carry a `{ data, total }` envelope. `InboxPage.approveOrReject` reads
+      // `undoExpiresAt`/`undoRemainingMs` off the TOP level of this body, so a
+      // `{ data: … }` wrapper hides them one level down.
+      body: JSON.stringify(toApproveResponse(state)),
     });
   });
 
@@ -269,7 +274,8 @@ export async function installProposalMocks(
     await route.fulfill({
       status: 200,
       contentType: 'application/json',
-      body: JSON.stringify({ data: toProposalResponse(state) }),
+      // Unwrapped, as the real route returns it (see the approve mock).
+      body: JSON.stringify(toProposalResponse(state)),
     });
   });
 
@@ -284,7 +290,8 @@ export async function installProposalMocks(
     await route.fulfill({
       status: 200,
       contentType: 'application/json',
-      body: JSON.stringify({ data: toProposalResponse(state) }),
+      // Unwrapped, as the real route returns it (see the approve mock).
+      body: JSON.stringify(toProposalResponse(state)),
     });
   });
 
