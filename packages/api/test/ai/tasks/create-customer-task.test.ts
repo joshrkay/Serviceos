@@ -883,6 +883,62 @@ describe('voice field capture — spoken address survives into the create_custom
     expect(out.proposal!.payload.name).toBe('Mario Delingo');
   });
 
+  /**
+   * A4 (2026-08-10) — this handler serves three surfaces (telephony FSM,
+   * the voice-action-router memo worker, assistant chat) and only the first
+   * has a caller. Both operator-visible strings it writes were unpinned:
+   * `summary` claimed "from inbound call" on all three, and `explanation`'s
+   * default branch used to say "Caller" until F1 removed it. Nothing in
+   * packages/api asserted either one, which is why F1's rider could argue
+   * from a wrong premise about where they render.
+   */
+  describe('A4 — no surface claim either string cannot support', () => {
+    it('summary names the customer without claiming a channel', async () => {
+      const out = await handler.run({
+        tenantId: TENANT,
+        message: 'Add a customer named Alex, 555-0100',
+        conversationId: SESSION,
+        userId: SYSTEM_USER,
+        existingEntities: { displayName: 'Alex', phone: '555-0100' },
+      });
+      expect(out.proposal!.summary).not.toMatch(/inbound call/i);
+      expect(out.proposal!.summary).not.toMatch(/caller/i);
+      // Still says what the proposal DOES — the inbox renders this verbatim.
+      expect(out.proposal!.summary).toMatch(/^New customer: Alex/);
+    });
+
+    it("explanation's DEFAULT branch names no caller either (F1)", async () => {
+      const out = await handler.run({
+        tenantId: TENANT,
+        message: 'Add a customer named Alex, 555-0100',
+        conversationId: SESSION,
+        userId: SYSTEM_USER,
+        existingEntities: { displayName: 'Alex', phone: '555-0100' },
+      });
+      expect(out.proposal!.explanation).not.toMatch(/caller/i);
+      expect(out.proposal!.explanation).toBe(
+        'New customer captured. Approve to add them to the CRM.',
+      );
+    });
+
+    it('the LEAD-MATCH branch keeps "Caller phone" — existingLeadId only comes from telephony', async () => {
+      const out = await handler.run({
+        tenantId: TENANT,
+        message: 'Add a customer named Alex, 555-0100',
+        conversationId: SESSION,
+        userId: SYSTEM_USER,
+        existingEntities: {
+          displayName: 'Alex',
+          phone: '555-0100',
+          existingLeadId: 'lead-77',
+        },
+      });
+      // twilio-adapter.ts is the only writer of existingLeadId, so there
+      // genuinely IS a caller on this branch — the claim is supportable.
+      expect(out.proposal!.explanation).toMatch(/^Caller phone matches lead lead-77\./);
+    });
+  });
+
   it('surfaces the address in the proposal summary so the approver sees it on the card', async () => {
     const out = await handler.run({
       tenantId: TENANT,

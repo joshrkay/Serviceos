@@ -60,17 +60,24 @@ describe('PgMaterialItemRepository.listPending — SQL shape', () => {
     await repo.listPending(TENANT, { neededByBefore: new Date('2026-06-13T00:00:00.000Z') });
 
     expect(selectStatement(queries).text).toContain(
-      'ORDER BY needed_by ASC, created_at ASC, id ASC',
+      'ORDER BY needed_by ASC NULLS LAST, created_at ASC, id ASC',
     );
   });
 
-  it('keeps the default (undated) ordering unchanged', async () => {
+  // F2 — the default ask used to order `created_at ASC, id ASC`, which under
+  // lookup_materials's 6-row fetch let ancient rows hide an item due
+  // tomorrow. There is now ONE ordering for every shape (NULLS LAST is a
+  // no-op on the date-scoped one, whose rows all have a needed_by), so the
+  // two shapes can no longer drift apart on tie-breaks.
+  it('uses the SAME urgency ordering for the default (undated) ask, undated rows last', async () => {
     const { pool, queries } = fakePool();
     const repo = new PgMaterialItemRepository(pool);
 
     await repo.listPending(TENANT);
 
-    expect(selectStatement(queries).text).toContain('ORDER BY created_at ASC, id ASC');
+    expect(selectStatement(queries).text).toContain(
+      'ORDER BY needed_by ASC NULLS LAST, created_at ASC, id ASC',
+    );
   });
 
   it('emits a needed_by lower bound (inclusive) when neededByFrom is given', async () => {

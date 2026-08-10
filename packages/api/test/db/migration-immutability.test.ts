@@ -492,10 +492,25 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   // listPending's ORDER BY is served by the index scan; hash regenerated.
   // Regenerated 2026-08-09: Task 9's review reworded a comment INSIDE this
   // migration's SQL string ("Task 9 may add markCancelled" -> "a future task
-  // may"), which changes the hash. 272 is unmerged, so editing in place is
-  // still safe; once it ships, comment edits need a new migration like any
-  // other change to the value.
+  // may"), which changes the hash. 272 was unmerged then, so editing in place
+  // was still safe; it has since SHIPPED (PR #814), so from now on even a
+  // comment edit inside its SQL needs a new migration like any other change
+  // to the value.
+  //
+  // 272's own in-SQL comment ("the one real query shape ... ORDER BY
+  // created_at") went stale on 2026-08-10 when F2 reordered listPending by
+  // `needed_by` for every call. It is FROZEN WRONG on purpose: the comment
+  // lives inside the hashed value, so correcting it would mutate a shipped
+  // migration. The correction and the current index story live in 273's
+  // comment in schema.ts and in pg-material-item.ts's module doc comment
+  // (review follow-up N4) — read those, not 272's inline comment.
   ['272_create_material_items', '364728f31ee0bada90eb104a2b77198624e5518002d38f28910d6b24a8e60622'],
+  // A3 (2026-08-10) — new migration adding the index that supplies
+  // listPending's full ORDER BY (tenant_id, needed_by, created_at, id)
+  // WHERE status = 'pending'. Reverses #819's declined-index decision; see
+  // schema.ts's comment on the key for why it flipped. Deliberate snapshot
+  // update for a NEW migration — 272 was NOT edited.
+  ['273_material_items_urgency_index', '0327e1316d8935b47272f639f98836551172168c4150eb8b6fed648a6c7242f0'],
 ];
 
 function hashMigration(value: string): string {

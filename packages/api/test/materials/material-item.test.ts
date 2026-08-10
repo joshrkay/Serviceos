@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { InMemoryMaterialItemRepository } from '../../src/materials/material-item';
 import { ValidationError } from '../../src/shared/errors';
 
@@ -80,7 +80,7 @@ describe('MaterialItemRepository', () => {
     expect(limited.map((i) => i.id)).toEqual([firstForJob.id]);
   });
 
-  it('returns pending items oldest-created first', async () => {
+  it('returns UNDATED pending items oldest-created first', async () => {
     const repo = new InMemoryMaterialItemRepository();
     const first = await repo.create({ tenantId: 't1', description: 'first', createdBy: 'u1' });
     const second = await repo.create({ tenantId: 't1', description: 'second', createdBy: 'u1' });
@@ -88,6 +88,134 @@ describe('MaterialItemRepository', () => {
 
     const pending = await repo.listPending('t1');
     expect(pending.map((i) => i.id)).toEqual([first.id, second.id, third.id]);
+  });
+
+  /**
+   * F2 — the DEFAULT (no `needed_by` bound) ordering. #819 fixed the
+   * DATE-SCOPED ask; the un-scoped one kept the original defect:
+   * `created_at ASC` under `lookup_materials`'s 6-row fetch / 5-item spoken
+   * cap meant "what do I need?" spoke five ancient items and never mentioned
+   * one due tomorrow. Worse than a one-off omission, because nothing prunes
+   * this list (`markPurchased` has no production caller) — the SAME five
+   * stalest rows own the whole spoken answer forever.
+   *
+   * One ordering now serves both shapes: `needed_by ASC NULLS LAST,
+   * created_at ASC` (+ `id ASC` in Pg). NULLS LAST is what makes it safe:
+   * an undated item has no deadline, so it is not infinitely urgent.
+   */
+  describe('F2 — default ordering is by urgency, undated last', () => {
+    it('puts a dated item ahead of undated ones however much older they are', async () => {
+      const repo = new InMemoryMaterialItemRepository();
+      for (let i = 0; i < 6; i++) {
+        await repo.create({ tenantId: 't1', description: `ancient undated ${i}`, createdBy: 'u1' });
+      }
+      const urgent = await repo.create({
+        tenantId: 't1', description: 'PEX for tomorrow', createdBy: 'u1',
+        neededBy: new Date('2026-06-12T00:00:00.000Z'),
+      });
+
+      const top = await repo.listPending('t1', { limit: 6 });
+      // N3 — the `toContain` that used to follow this line was implied by
+      // it and could not fail independently.
+      expect(top[0].id).toBe(urgent.id);
+    });
+
+    it('sorts undated items LAST — no needed_by is NOT infinite urgency', async () => {
+      const repo = new InMemoryMaterialItemRepository();
+      const undated = await repo.create({ tenantId: 't1', description: 'undated', createdBy: 'u1' });
+      const farFuture = await repo.create({
+        tenantId: 't1', description: 'due in a year', createdBy: 'u1',
+        neededBy: new Date('2027-01-01T00:00:00.000Z'),
+      });
+
+      expect((await repo.listPending('t1')).map((i) => i.id)).toEqual([farFuture.id, undated.id]);
+    });
+
+    it('orders dated items soonest-first, overdue ahead of upcoming', async () => {
+      const repo = new InMemoryMaterialItemRepository();
+      const upcoming = await repo.create({
+        tenantId: 't1', description: 'due next week', createdBy: 'u1',
+        neededBy: new Date('2026-06-19T00:00:00.000Z'),
+      });
+      const overdue = await repo.create({
+        tenantId: 't1', description: 'overdue since March', createdBy: 'u1',
+        neededBy: new Date('2026-03-02T00:00:00.000Z'),
+      });
+
+      expect((await repo.listPending('t1')).map((i) => i.id)).toEqual([overdue.id, upcoming.id]);
+    });
+
+    /**
+     * N3 (2026-08-10) — this test used to be UNFALSIFIABLE. It created two
+     * rows in order and asserted they came back in that order, but the
+     * InMemory clock is `new Date()` at `create()` time, so insertion order
+     * and `created_at` order always coincided; `Array.prototype.sort` is
+     * stable, so the assertion held with the `created_at` key, WITHOUT it,
+     * and on `origin/main`. Verified by deleting the key and re-running: it
+     * still passed.
+     *
+     * The only way to make the key observable in a fake whose clock is its
+     * insertion counter is to decouple the two. Fake timers do that: row A
+     * is inserted first but stamped LATER, so insertion order and
+     * `created_at` order now disagree and only the comparator's
+     * `created_at` term can produce the expected result. Deleting that term
+     * makes the stable sort return insertion order — a real failure.
+     *
+     * This is not a contrived scenario in Pg, either: `created_at` there is
+     * `NOW()`, and across instances with clock skew (Railway runs several)
+     * insertion order and stamp order genuinely can disagree. The sort key
+     * is what makes both backends answer that case the same way.
+     */
+    it('breaks a needed_by tie on created_at, NOT on insertion order', async () => {
+      vi.useFakeTimers();
+      try {
+        const repo = new InMemoryMaterialItemRepository();
+        const sameDay = new Date('2026-06-12T00:00:00.000Z');
+
+        vi.setSystemTime(new Date('2026-06-10T12:00:00.000Z'));
+        const stampedLater = await repo.create({
+          tenantId: 't1', description: 'inserted first, stamped later', createdBy: 'u1',
+          neededBy: sameDay,
+        });
+        // Wind the clock BACK, so the second insert carries the earlier
+        // created_at. Insertion order and created_at order now disagree.
+        vi.setSystemTime(new Date('2026-06-10T11:00:00.000Z'));
+        const stampedEarlier = await repo.create({
+          tenantId: 't1', description: 'inserted second, stamped earlier', createdBy: 'u1',
+          neededBy: sameDay,
+        });
+
+        expect((await repo.listPending('t1')).map((i) => i.id)).toEqual([
+          stampedEarlier.id,
+          stampedLater.id,
+        ]);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('falls back to insertion order only when created_at ALSO ties', async () => {
+      // The documented, deliberate residual divergence from Pg's `id ASC`:
+      // equal needed_by AND equal created_at leaves the stable sort's
+      // insertion order, which is the more useful answer for a fake.
+      vi.useFakeTimers();
+      try {
+        const repo = new InMemoryMaterialItemRepository();
+        const sameDay = new Date('2026-06-12T00:00:00.000Z');
+        vi.setSystemTime(new Date('2026-06-10T12:00:00.000Z'));
+        const first = await repo.create({
+          tenantId: 't1', description: 'first', createdBy: 'u1', neededBy: sameDay,
+        });
+        const second = await repo.create({
+          tenantId: 't1', description: 'second', createdBy: 'u1', neededBy: sameDay,
+        });
+
+        expect(first.createdAt.getTime()).toBe(second.createdAt.getTime());
+        expect((await repo.listPending('t1')).map((i) => i.id)).toEqual([first.id, second.id]);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
   });
 
   // Follow-up to Task 9's I4/M4 fetch-bound work: lookup_materials's bounded
@@ -255,19 +383,23 @@ describe('MaterialItemRepository', () => {
       expect(await repo.listPending('t1', { neededByBefore: new Date('nonsense') })).toEqual([]);
     });
 
-    it('an absent neededByBefore keeps the existing oldest-created-first order (no behavior change)', async () => {
+    // F2 REVERSED THIS PIN. It used to assert that an absent bound kept
+    // oldest-created-first even when that buried the sooner-due item — i.e.
+    // it encoded the exact defect F2 fixes. The un-scoped list now orders by
+    // urgency too, so the same two rows come back sooner-due first.
+    it('an absent neededByBefore still orders by urgency, sooner-due first', async () => {
       const repo = new InMemoryMaterialItemRepository();
-      const first = await repo.create({
+      const dueLater = await repo.create({
         tenantId: 't1', description: 'first, due later', createdBy: 'u1',
         neededBy: new Date('2026-09-01T00:00:00Z'),
       });
-      const second = await repo.create({
+      const dueSooner = await repo.create({
         tenantId: 't1', description: 'second, due sooner', createdBy: 'u1',
         neededBy: new Date('2026-08-01T00:00:00Z'),
       });
 
       const result = await repo.listPending('t1');
-      expect(result.map((i) => i.id)).toEqual([first.id, second.id]);
+      expect(result.map((i) => i.id)).toEqual([dueSooner.id, dueLater.id]);
     });
   });
 
@@ -417,6 +549,63 @@ describe('MaterialItemRepository', () => {
       createdBy: 'u1',
     });
     expect(created.quantity).toBe(1_000_000);
+  });
+
+  /**
+   * N2 (2026-08-10) — an `Invalid Date` on the ROW (not on a list bound;
+   * that is J2's `isUsableDateBound`) scrambled the ENTIRE InMemory
+   * ordering, not just its own row. `NaN !== NaN`, so the comparator took
+   * the leading branch and returned `NaN`; the sort spec coerces that to
+   * `+0`, which makes the comparator non-transitive and the whole result
+   * order arbitrary. Measured before the fix: `d-2030 | INVALID | d-2025 |
+   * d-2026 | …`.
+   *
+   * Postgres would reject the same value at INSERT, so this was a fresh
+   * mock/prod divergence in the exact function whose comment carries J1's
+   * and J2's writeups of the last two. Fixed per the J2 principle — reject
+   * in SHARED validation so both backends refuse identically — rather than
+   * by teaching one comparator to cope.
+   */
+  it('rejects an Invalid Date neededBy — both backends must refuse the same input', async () => {
+    const repo = new InMemoryMaterialItemRepository();
+    await expect(
+      repo.create({
+        tenantId: 't1', description: 'garbled date', createdBy: 'u1',
+        neededBy: new Date('nonsense'),
+      }),
+    ).rejects.toThrow(ValidationError);
+    await expect(
+      repo.create({
+        tenantId: 't1', description: 'not a date at all', createdBy: 'u1',
+        neededBy: '2026-06-12' as unknown as Date,
+      }),
+    ).rejects.toThrow(ValidationError);
+  });
+
+  it('an Invalid Date can never reach the comparator and reorder unrelated rows', async () => {
+    const repo = new InMemoryMaterialItemRepository();
+    const y2025 = await repo.create({
+      tenantId: 't1', description: 'd-2025', createdBy: 'u1',
+      neededBy: new Date('2025-01-01T00:00:00.000Z'),
+    });
+    const y2026 = await repo.create({
+      tenantId: 't1', description: 'd-2026', createdBy: 'u1',
+      neededBy: new Date('2026-01-01T00:00:00.000Z'),
+    });
+    const y2030 = await repo.create({
+      tenantId: 't1', description: 'd-2030', createdBy: 'u1',
+      neededBy: new Date('2030-01-01T00:00:00.000Z'),
+    });
+
+    await expect(
+      repo.create({
+        tenantId: 't1', description: 'INVALID', createdBy: 'u1',
+        neededBy: new Date('nonsense'),
+      }),
+    ).rejects.toThrow(ValidationError);
+
+    // The rejected row is absent AND the survivors are still in date order.
+    expect((await repo.listPending('t1')).map((i) => i.id)).toEqual([y2025.id, y2026.id, y2030.id]);
   });
 
   it('rejects a missing/blank description, tenantId, or createdBy', async () => {

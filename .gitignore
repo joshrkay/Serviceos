@@ -53,6 +53,12 @@ packages/api/.voice-quality-verdicts/
 packages/api/voice-quality-layer2-report.json
 packages/api/voice-quality-layer2-vitest-report.json
 packages/api/voice-quality-layer2-failures/
+# N10 — cassette-gateway.ts's acquireLock() writes `<scriptId>.lock` INSIDE
+# the cassettes directory itself. An interrupted record/refresh/seed leaves
+# one behind, and the corpus-integrity job's no-op gate reports any untracked
+# file under that directory as "Cassette seed produced changes" — a red CI
+# run caused by a stray lock, not by the corpus.
+packages/api/src/ai/voice-quality/corpus/cassettes/*.lock
 
 # P2-1 Filler engine — pre-rendered PCM clips (generated at deploy time by
 # scripts/render-fillers.ts; never committed).
@@ -78,4 +84,3 @@ data/corpus/utterances.generated.jsonl
 eslint-report.json
 quality-metrics.json
 .gstack/
->>>>>>> origin/main

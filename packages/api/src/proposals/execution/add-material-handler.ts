@@ -26,7 +26,9 @@ import { AuditRepository, createAuditEvent } from '../../audit/audit';
  * "Requested" names what actually happened from the shop's point of view:
  * a tradesperson asked for a part to be picked up, not that a part
  * physically arrived — `markPurchased` (material-item.ts) is the event
- * that would earn a past-tense "added"/"purchased" verb. Mirrors
+ * that would earn a past-tense "added"/"purchased" verb, and it has no
+ * production caller today, so that event never fires: this handler is the
+ * ONLY writer and the list only ever grows. Mirrors
  * `expense.logged`'s posture (the verb describes the operator's act, not
  * an inventory state change) rather than `service_agreement.created`'s
  * (a row genuinely came into being with no further verb needed) — a
