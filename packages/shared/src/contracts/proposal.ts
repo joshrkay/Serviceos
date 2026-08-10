@@ -35,3 +35,41 @@ export const proposalResponseSchema = z.object({
 });
 
 export type ProposalResponse = z.infer<typeof proposalResponseSchema>;
+
+/**
+ * Human labels for the FLAT payload keys that money/reference-path task
+ * handlers gate on via `sourceContext.missingFields`.
+ *
+ * Shared because more than one surface renders the same list and they were
+ * drifting: the assistant route had this map (routes/assistant.ts) while the
+ * web INBOX — the primary surface a voice-drafted proposal lands on —
+ * rendered the raw key, or nothing at all (review J8/K4). One definition, so
+ * a newly-gated field is labelled everywhere or nowhere.
+ *
+ * Entries are flat keys only. Path-shaped entries (`lineItems[0].…`) belong
+ * to the candidate picker, not to a text-input form, and are filtered by
+ * `isFlatMissingField` below exactly as `clearSatisfiedMissingFields`
+ * (api proposals/missing-fields.ts) filters them.
+ */
+export const MISSING_FIELD_LABELS: Record<string, string> = {
+  invoiceId: 'Invoice # or ID',
+  estimateId: 'Estimate # or ID',
+  jobId: 'Job # or ID',
+  customerId: 'Customer name or ID',
+  appointmentId: 'Appointment # or ID',
+  leadId: 'Lead name or ID',
+  // Not an id — the money gate on `update_catalog_item`, whose whole subject
+  // is a price. Showing the raw key here is the defect that prompted the
+  // shared map.
+  proposedUnitPriceCents: 'Unit price ($)',
+};
+
+/** A `missingFields` entry an operator can fill with one flat-key edit. */
+export function isFlatMissingField(key: string): boolean {
+  return !key.includes('.') && !key.includes('[');
+}
+
+/** Label for a `missingFields` entry, falling back to the raw key. */
+export function labelForMissingField(key: string): string {
+  return MISSING_FIELD_LABELS[key] ?? key;
+}

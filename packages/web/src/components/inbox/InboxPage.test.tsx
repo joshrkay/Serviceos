@@ -787,3 +787,152 @@ describe('InboxPage', () => {
     });
   });
 });
+
+/**
+ * Review J8 — the web INBOX is the primary surface a voice-drafted
+ * `update_catalog_item` lands on, and it rendered NEITHER the handler's
+ * explanation NOR the gate. `missingFields` was declared on
+ * `InboxProposalRow` and never read; `explanation` did not appear anywhere;
+ * `ProposalMarkers` reads other fields only; and Approve was disabled only
+ * for review-response rows. So the operator tapped Approve and ate a 400,
+ * with nothing on the card saying why. Only MOBILE satisfied the
+ * refused-spoken-price ticket end to end.
+ *
+ * Scope is deliberately narrow: SHOW the reason, SHOW what is missing, and
+ * do not offer an approval that cannot succeed. No edit affordance is added
+ * here — see the note in the report.
+ */
+describe('InboxPage — a gated proposal explains itself and cannot be approved', () => {
+  beforeEach(() => apiFetch.mockReset());
+
+  const gatedRow = {
+    proposal: {
+      id: 'p-gated',
+      proposalType: 'update_catalog_item',
+      summary: 'Update catalog item — AC tune-up',
+      status: 'ready_for_review',
+      createdAt: new Date().toISOString(),
+      explanation:
+        'Heard a price of $290,000.00, above the $100,000.00 limit for a spoken price — most likely a mishearing, so it was NOT applied. Set the price on this proposal if that figure is right.',
+      payload: { catalogItemId: 'item-1', currentUnitPriceCents: 8900, proposedUnitPriceCents: 8900 },
+      sourceContext: { missingFields: ['proposedUnitPriceCents'] },
+    },
+    urgency: 'normal',
+    reason: 'Awaiting review',
+  };
+
+  function mockRows(rows: unknown[]) {
+    apiFetch.mockResolvedValueOnce(
+      jsonResponse({
+        data: rows,
+        summary: {
+          totalCount: rows.length,
+          criticalCount: 0,
+          highCount: 0,
+          normalCount: rows.length,
+          lowCount: 0,
+          truncated: false,
+        },
+      }),
+    );
+  }
+
+  it('renders the handler explanation that says the price was NOT applied', async () => {
+    mockRows([gatedRow]);
+    render(<InboxPage />);
+
+    await waitFor(() => screen.getByTestId('inbox-row'));
+    const row = screen.getByTestId('inbox-row');
+    expect(within(row).getByTestId('proposal-explanation')).toHaveTextContent('$290,000.00');
+    expect(within(row).getByTestId('proposal-explanation')).toHaveTextContent(/NOT applied/);
+  });
+
+  it('names what is missing in human terms, not as a raw payload key', async () => {
+    mockRows([gatedRow]);
+    render(<InboxPage />);
+
+    await waitFor(() => screen.getByTestId('inbox-row'));
+    const needs = within(screen.getByTestId('inbox-row')).getByTestId('proposal-missing-fields');
+    expect(needs).toHaveTextContent(/Needs: Unit price/i);
+    expect(needs).not.toHaveTextContent('proposedUnitPriceCents');
+  });
+
+  it('disables Approve while the gate stands, so the operator cannot eat a 400', async () => {
+    mockRows([gatedRow]);
+    render(<InboxPage />);
+
+    await waitFor(() => screen.getByTestId('inbox-row'));
+    const approve = within(screen.getByTestId('inbox-row')).getByRole('button', { name: /^approve$/i });
+    expect(approve).toBeDisabled();
+
+    fireEvent.click(approve);
+    // Only the initial inbox GET — no approve POST was attempted.
+    expect(apiFetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps a gated row out of "Approve all eligible" — the hero is an Approve too', async () => {
+    mockRows([
+      {
+        proposal: {
+          id: 'p-gated-capture',
+          proposalType: 'create_customer',
+          summary: 'Create customer Pat',
+          status: 'ready_for_review',
+          createdAt: new Date().toISOString(),
+          confidenceScore: 0.95,
+          payload: { name: 'Pat' },
+          sourceContext: { missingFields: ['customerId'] },
+        },
+        urgency: 'normal',
+      },
+    ]);
+    render(<InboxPage />);
+
+    await waitFor(() => screen.getByTestId('inbox-row'));
+    expect(screen.queryByTestId('approve-all-eligible')).not.toBeInTheDocument();
+  });
+
+  it('leaves an ungated proposal exactly as before — no explanation block, Approve live', async () => {
+    mockRows([
+      {
+        proposal: {
+          id: 'p-plain',
+          proposalType: 'add_note',
+          summary: 'Add a note',
+          status: 'ready_for_review',
+          createdAt: new Date().toISOString(),
+        },
+        urgency: 'normal',
+      },
+    ]);
+    render(<InboxPage />);
+
+    await waitFor(() => screen.getByTestId('inbox-row'));
+    const row = screen.getByTestId('inbox-row');
+    expect(within(row).queryByTestId('proposal-explanation')).not.toBeInTheDocument();
+    expect(within(row).queryByTestId('proposal-missing-fields')).not.toBeInTheDocument();
+    expect(within(row).getByRole('button', { name: /^approve$/i })).toBeEnabled();
+  });
+
+  it('skips path-shaped missingFields entries — those are the candidate picker\'s territory', async () => {
+    mockRows([
+      {
+        ...gatedRow,
+        proposal: {
+          ...gatedRow.proposal,
+          id: 'p-path-gated',
+          explanation: undefined,
+          sourceContext: { missingFields: ['lineItems[0].catalogItemId'] },
+        },
+      },
+    ]);
+    render(<InboxPage />);
+
+    await waitFor(() => screen.getByTestId('inbox-row'));
+    const row = screen.getByTestId('inbox-row');
+    expect(within(row).queryByTestId('proposal-missing-fields')).not.toBeInTheDocument();
+    // Still blocked — approveProposal gates on the tracked list regardless of
+    // whether this UI can offer a text input for the entry.
+    expect(within(row).getByRole('button', { name: /^approve$/i })).toBeDisabled();
+  });
+});

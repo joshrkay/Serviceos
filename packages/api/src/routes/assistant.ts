@@ -1,7 +1,12 @@
 import { Router, Response } from 'express';
 import { z } from 'zod';
 import { v4 as uuidv4 } from 'uuid';
-import { readStructuredAddress, resolveSpokenAddress } from '@ai-service-os/shared';
+import {
+  isFlatMissingField,
+  labelForMissingField,
+  readStructuredAddress,
+  resolveSpokenAddress,
+} from '@ai-service-os/shared';
 import { AuthenticatedRequest } from '../auth/clerk';
 import { requireAuth, requireTenant, requirePermission } from '../middleware/auth';
 import { hasPermission, isValidRole, type Permission, type Role } from '../auth/rbac';
@@ -797,19 +802,10 @@ function stampVerifiedIds(
  * for any missingFields entry not listed here (e.g. `title`, `jobId`), so a
  * newly-added gate never silently loses its Edit control.
  */
-const MISSING_FIELD_LABELS: Record<string, string> = {
-  invoiceId: 'Invoice # or ID',
-  estimateId: 'Estimate # or ID',
-  jobId: 'Job # or ID',
-  customerId: 'Customer name or ID',
-  appointmentId: 'Appointment # or ID',
-  leadId: 'Lead name or ID',
-  // Not an id — the money gate on `update_catalog_item`, which is
-  // chat-dispatchable, so a refused spoken price surfaces here. Without a
-  // label the operator was shown the raw payload key on the one card whose
-  // whole subject is a price.
-  proposedUnitPriceCents: 'Unit price ($)',
-};
+// Moved to @ai-service-os/shared (contracts/proposal.ts) — the web INBOX
+// renders the SAME list and was showing the raw key, so the two surfaces were
+// drifting off two definitions. `labelForMissingField` falls back to the raw
+// key for anything unlisted, exactly as this map's `??` did.
 
 /**
  * B1 — the free-text reference field each gated id is paired with on the
@@ -844,7 +840,7 @@ export function editFieldsForMissing(
   if (!missingFields || missingFields.length === 0) return undefined;
 
   const fields = missingFields
-    .filter((key) => !key.includes('[') && !key.includes('.'))
+    .filter(isFlatMissingField)
     .map((key) => {
       const existing = payload[key];
       const referenceKey = REFERENCE_FIELD_FOR_MISSING[key];
@@ -855,7 +851,7 @@ export function editFieldsForMissing(
           : typeof referenceValue === 'string'
             ? referenceValue
             : '';
-      return { label: MISSING_FIELD_LABELS[key] ?? key, key, value };
+      return { label: labelForMissingField(key), key, value };
     });
 
   return fields.length > 0 ? fields : undefined;
