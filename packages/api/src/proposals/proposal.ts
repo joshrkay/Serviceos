@@ -668,13 +668,20 @@ const CAUSE_REDACTED = '[redacted]';
 /**
  * Hard bound on how much of `err.message` is ever handed to a regex.
  *
- * The PII patterns (`pii-redact.ts`) contain self-overlapping character
- * classes, so their cost is QUADRATIC in input length — measured at 158ms /
- * 645ms / 2597ms for 8KB / 16KB / 32KB of `('a.'×n/2) + '@' + ('b'×n)`, a
- * clean 4× per doubling. `runExecutionSweep` runs in-process with Express
- * (app.ts), and `err.message` is attacker-INFLUENCED (a driver error echoing
- * a bound JSONB payload, an HTTP client echoing a response body), so an
- * unbounded ~1MB message of that shape would stall the whole API for minutes.
+ * This bound was introduced because the PII email pattern in `pii-redact.ts`
+ * backtracked QUADRATICALLY — 158ms / 645ms / 2597ms for 8KB / 16KB / 32KB of
+ * `('a.'×n/2) + '@' + ('b'×n)`, a clean 4× per doubling. That defect is now
+ * FIXED AT THE SOURCE: the email rule is a linear scanner, and every other
+ * pattern in that module was measured linear. So this slice is no longer what
+ * stands between `runExecutionSweep` and a stalled event loop.
+ *
+ * It stays anyway, for the reasons that do not depend on that defect:
+ *   - `err.message` is attacker-INFLUENCED (a driver error echoing a bound
+ *     JSONB payload, an HTTP client echoing a response body) and can be
+ *     megabytes. Even linear work over megabytes, per proposal, per sweep, is
+ *     work worth not doing for a value that is about to be cut to 500 chars.
+ *   - It bounds what the SECRET rules below see too, and those are local to
+ *     this file rather than covered by `pii-redact.ts`'s tests.
  *
  * Bounding the INPUT (rather than moving the truncation earlier in the
  * pipeline) keeps the scrub-then-truncate ORDER intact — that order is what

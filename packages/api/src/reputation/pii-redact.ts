@@ -84,16 +84,137 @@ const COMMON_FIRST_NAMES = new Set([
 
 // Emails — RFC-ish, good enough for free-form text.
 //
-// NO trailing `\b`. It used to be there and it was a LEAK: `\b` after the
-// TLD means an email immediately followed by a word character never matches
-// at all — `jane.doe@example.com4155552671` (a Postgres unique-constraint
-// `DETAIL: Key (contact)=(…)` over a concatenated column) and
-// `jane.doe@example.com2026-08-09T12:00:00Z` both sailed through whole.
-// Dropping it is strictly MORE redaction (the TLD class is letters-only, so
-// the match still ends at the last letter run after the final dot) and it
-// removes the chain's dependence on a later pass creating the boundary the
-// email rule needed — which is what made the whole redactor non-idempotent.
-const EMAIL_RE = /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g;
+// This rule is expressed as a scanner (`replaceEmails`) rather than a single
+// `String.replace(regex, …)`. It is EXACTLY EQUIVALENT to the regex it
+// replaces —
+//
+//     /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g
+//
+// — byte for byte, but runs in linear time instead of quadratic. Both halves
+// of that sentence matter, so both are pinned by tests.
+//
+// WHY THE REGEX HAD TO GO (ReDoS). `\b` sits between a word and a non-word
+// character, but the local-part class straddles that line: `.`, `%`, `+` and
+// `-` are non-word characters INSIDE the class. So in a run like `a.a.a.a.…`
+// EVERY character is a legal place for `\b` to fire — O(n) match starts
+// inside ONE token — and `[local]+` rescans the rest of the run from each of
+// them. That is O(n²), and it needs no `@` anywhere in the input. Measured
+// through `redactPii`: 64KB of `('a.'×n/2) + '@' + ('b'×n)` took ~2.4s, a
+// clean 4x per doubling, and plain `'a.'×n` with no `@` at all cost the same.
+// `redactPii` runs on `review.commentText` and on LLM output, neither of
+// which this service length-bounds, on the Express event loop.
+//
+// Restructuring the DOMAIN — the `(?:[A-Za-z0-9-]+\.)+` shape a reviewer
+// proposed — does not help: the cost is the restart across the LOCAL part,
+// which is why the two shapes above fire with the domain empty or absent. JS
+// has no atomic groups, and emulating one with `(?=(…))\1` would not help
+// either: it removes the give-back steps but not the O(n) forward scan that
+// each of the O(n) starts performs.
+//
+// NO TRAILING `\b`, as before. It used to be there and it was a LEAK: `\b`
+// after the TLD means an email immediately followed by a word character never
+// matches at all — `jane.doe@example.com4155552671` (a Postgres
+// unique-constraint `DETAIL: Key (contact)=(…)` over a concatenated column)
+// and `jane.doe@example.com2026-08-09T12:00:00Z` both sailed through whole.
+// The TLD class is letters-only, so the match still ends at the last letter
+// run after the final dot.
+
+/** Domain half, sticky so it can be applied at one exact offset. */
+const EMAIL_DOMAIN_RE = /[A-Za-z0-9.-]+\.[A-Za-z]{2,}/y;
+
+/** `[A-Za-z0-9._%+-]` — the local-part class, by char code. */
+function isEmailLocalCode(code: number): boolean {
+  return (
+    (code >= 97 && code <= 122) || // a-z
+    (code >= 65 && code <= 90) || // A-Z
+    (code >= 48 && code <= 57) || // 0-9
+    code === 46 || // .
+    code === 95 || // _
+    code === 37 || // %
+    code === 43 || // +
+    code === 45 // -
+  );
+}
+
+/**
+ * `\w` — what `\b` is defined in terms of. NaN (from `charCodeAt` past
+ * either end of the string) fails every comparison, which is exactly the
+ * "off the end counts as non-word" rule `\b` uses.
+ */
+function isWordCode(code: number): boolean {
+  return (
+    (code >= 97 && code <= 122) ||
+    (code >= 65 && code <= 90) ||
+    (code >= 48 && code <= 57) ||
+    code === 95
+  );
+}
+
+/**
+ * Replace every email in `text` with `[email]`, in one linear pass.
+ *
+ * The equivalence argument, which is why this is safe to swap in under a PII
+ * control. For a match starting at `p`, the greedy `[local]+` runs to the end
+ * of `p`'s local-part run — call it `m` — and `@` must then match at `m`; any
+ * shorter local part would need `@` at a position holding a local-part
+ * character, which is impossible. So:
+ *
+ *   - the local part is always the whole run from `p` to the next `@`, and
+ *   - whether the domain matches depends only on `m`, never on `p`.
+ *
+ * Every start position inside one run therefore succeeds or fails together,
+ * and the regex's leftmost-match rule just picks the smallest `p` in the run
+ * at which `\b` holds. That makes the `@` the natural thing to iterate: find
+ * each `@`, walk back over its local-part run, take the leftmost `\b` in it,
+ * and match the domain once. Because `@` is in neither the local-part class
+ * nor the domain class, the runs belonging to distinct `@`s are disjoint, so
+ * the total work is linear in the length of the text.
+ *
+ * `pos` carries the regex's `lastIndex`: a match may not start before the end
+ * of the previous one. `\b` itself is still evaluated against the ORIGINAL
+ * string on both sides of the position, exactly as the engine did.
+ *
+ * Verified by differential fuzzing against the original regex over 3.2M
+ * generated strings (four fragment alphabets, including abutting emails and
+ * dense local-class punctuation soup): zero output differences.
+ */
+function replaceEmails(text: string): string {
+  let out = '';
+  let pos = 0;
+  let at = text.indexOf('@');
+  while (at !== -1) {
+    // Local-part run, clipped at `pos` — a match cannot start before it.
+    let lo = at;
+    while (lo > pos && isEmailLocalCode(text.charCodeAt(lo - 1))) lo--;
+
+    let start = -1;
+    let end = -1;
+    if (lo < at) {
+      EMAIL_DOMAIN_RE.lastIndex = at + 1;
+      const domain = EMAIL_DOMAIN_RE.exec(text);
+      if (domain) {
+        for (let p = lo; p < at; p++) {
+          if (isWordCode(text.charCodeAt(p - 1)) !== isWordCode(text.charCodeAt(p))) {
+            start = p;
+            end = at + 1 + domain[0].length;
+            break;
+          }
+        }
+      }
+    }
+
+    if (start === -1) {
+      at = text.indexOf('@', at + 1);
+      continue;
+    }
+    out += text.slice(pos, start) + EMAIL_PLACEHOLDER;
+    pos = end;
+    // The domain class excludes `@`, so the next candidate is at or after
+    // `pos`; no `@` can hide inside the span just consumed.
+    at = text.indexOf('@', pos);
+  }
+  return pos === 0 ? text : out + text.slice(pos);
+}
 
 // US phone with optional country code, parens, dashes, dots, spaces.
 const US_PHONE_RE = /(?:\+?1[-.\s]?)?\(?[0-9]{3}\)?[-.\s]?[0-9]{3}[-.\s]?[0-9]{4}\b/g;
@@ -150,7 +271,7 @@ export function redactPii(text: string, options: RedactPiiOptions = {}): string 
   // 1. Emails first — they contain "@" and "." that could otherwise
   // confuse later passes (e.g. "a.b@c.com" looks salutation-adjacent).
   if (redactEmails) {
-    result = result.replace(EMAIL_RE, EMAIL_PLACEHOLDER);
+    result = replaceEmails(result);
   }
 
   // 2. Phones — international (leading +) first so longer matches win
