@@ -1501,11 +1501,29 @@ export class InAppVoiceAdapter {
     const summary = voiceProposalSummary(intent, entities);
 
     try {
-      // PR B — load tenant threshold override so the Settings UI value
-      // actually flows into the proposal's auto-approve decision.
-      // Best-effort: a resolver that throws or returns undefined falls
-      // through to DEFAULT_AUTO_APPROVE_THRESHOLDS — never blocks
-      // proposal creation on a settings-lookup hiccup.
+      // PR B — load the tenant threshold override. Best-effort: a resolver
+      // that throws or returns undefined falls through to
+      // DEFAULT_AUTO_APPROVE_THRESHOLDS — never blocks proposal creation on
+      // a settings-lookup hiccup.
+      //
+      // I3 correction (post-C1 review, followup-autoapprove-default) — the
+      // ORIGINAL comment here claimed this makes "the Settings UI value
+      // actually flow into the proposal's auto-approve decision." That was
+      // never true and still isn't: `resolveAutoApproveThreshold`
+      // (proposals/auto-approve.ts) returns `LEGACY_AUTO_APPROVE_THRESHOLD`
+      // and returns EARLY — before ever indexing `tenantOverride` by mode —
+      // whenever `supervisorMode` is undefined. This call site never sets
+      // `supervisorMode` (no caller on this path does), so `tenantOverride`
+      // is loaded, threaded, and then structurally never read. It is also
+      // moot for a second, independent reason: `sourceTrustTier` itself is
+      // forced `undefined` here by `createProposal`'s `voiceMutation` guard
+      // (this is an in-app voice call — see C1's investigation and the
+      // pinned test in test/proposals/proposal.test.ts), so this proposal
+      // never reaches the auto-approve branch at all, threshold or no
+      // threshold. Left wired (rather than removed) because it's harmless
+      // and correctly-shaped for the day `supervisorMode` is threaded on a
+      // voice-mutation-exempt path (e.g. the D-015 booking lane) — but
+      // today, for THIS call site, the Settings UI value has no effect.
       let tenantThresholdOverride;
       if (this.deps.thresholdResolver) {
         try {

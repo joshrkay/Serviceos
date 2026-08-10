@@ -24,8 +24,12 @@
  */
 import request from 'supertest';
 import express, { Request, Response, NextFunction } from 'express';
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, afterEach } from 'vitest';
 import { createAssistantRouter } from '../../src/routes/assistant';
+import {
+  setSupervisorPresenceLoader,
+  _resetSupervisorPresenceCache,
+} from '../../src/ai/supervisor-presence';
 import type { AssistantLookupDeps } from '../../src/ai/orchestration/lookup-dispatch';
 import { InMemoryProposalRepository } from '../../src/proposals/proposal';
 import { InMemoryAppointmentRepository } from '../../src/appointments/in-memory-appointment';
@@ -245,6 +249,11 @@ describe('POST /api/assistant/chat — a failing lookup stays VISIBLE', () => {
 });
 
 describe('POST /api/assistant/chat — UNPAID_QUERY_RE still runs first', () => {
+  afterEach(() => {
+    _resetSupervisorPresenceCache();
+    setSupervisorPresenceLoader(null);
+  });
+
   it('routes "which invoices are unpaid?" to the deterministic invoice query, not the lookup dispatch', async () => {
     const invoiceRepo = new InMemoryInvoiceRepository();
     const invoice = await createInvoice(
@@ -260,6 +269,13 @@ describe('POST /api/assistant/chat — UNPAID_QUERY_RE still runs first', () => 
       invoiceRepo,
     );
     await invoiceRepo.update(TEST_TENANT, invoice.id, { status: 'open' } as never);
+
+    // Minor fix (post-C1 review) — isSupervisorPresent must be resolved
+    // LAZILY, only once a proposal-creating dispatch is actually reached.
+    // A read-only query like this one never creates a proposal, so it
+    // should never pay for a supervisor-presence lookup at all.
+    const presenceLoader = vi.fn(async () => true);
+    setSupervisorPresenceLoader(presenceLoader);
 
     const gateway = scriptedGateway([
       JSON.stringify({ intentType: 'lookup_invoices', confidence: 0.9, extractedEntities: {} }),
@@ -278,6 +294,8 @@ describe('POST /api/assistant/chat — UNPAID_QUERY_RE still runs first', () => 
     expect(res.body.message.content).toContain('$125.00');
     // It short-circuits before classification, so the gateway is untouched.
     expect((gateway.complete as ReturnType<typeof vi.fn>)).not.toHaveBeenCalled();
+    // It short-circuits before ever needing supervision, too.
+    expect(presenceLoader).not.toHaveBeenCalled();
   });
 });
 
