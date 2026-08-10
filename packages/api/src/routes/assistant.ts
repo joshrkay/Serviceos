@@ -88,6 +88,16 @@ import type { EntityResolver } from '../ai/resolution/entity-resolver';
 // to the permissive `true` default), so no wrapping try/catch is needed
 // here — same as the voice worker's call site.
 import { isSupervisorPresent } from '../ai/supervisor-presence';
+// Minor fix (post-C1 review) — reuse the shared `Mode` type instead of a
+// hand-rolled `'supervisor' | 'tech' | 'both'` structural union.
+import type { Mode } from '../proposals/auto-approve';
+// I4 (post-C1 review) — the memo worker's chokepoint backstop, reused
+// as-is rather than re-implemented: pure, already tested
+// (test/workers/voice-action-router*.test.ts), and importing it keeps the
+// downgrade rule in exactly one place instead of two copies that could
+// drift. `routes -> workers` imports are an existing pattern in this
+// codebase (see routes/admin-tenants.ts, routes/onboarding.ts).
+import { holdIfUnsupervised } from '../workers/voice-action-router';
 import type { InvoiceRepository } from '../invoices/invoice';
 import type { CatalogItemRepository } from '../catalog/catalog-item';
 import type { EstimateRepository } from '../estimates/estimate';
@@ -495,6 +505,27 @@ export interface AssistantRouterDeps {
    * handlers keep today's gated drafting.
    */
   entityResolver?: EntityResolver;
+  /**
+   * I3 (post-C1 review, followup-autoapprove-default) — per-tenant
+   * auto-approve threshold override resolver (`tenant_settings.
+   * auto_approve_threshold`, the Settings UI value), mirroring
+   * `workers/voice-action-router.ts`'s `thresholdResolver` dep exactly —
+   * same shape, same fallback posture (absent/throwing ⇒
+   * DEFAULT_AUTO_APPROVE_THRESHOLDS). `resolveAutoApproveThreshold`
+   * (proposals/auto-approve.ts) can only consult this map once
+   * `supervisorMode` is known — before commit 1, chat never threaded
+   * `supervisorMode` at all, so this override was dead-wired on every
+   * caller that had it (twilio-adapter.ts, create-voice-turn-processor.ts,
+   * inapp-agent's in-app calls — none of which set `supervisorMode`
+   * either; see the correction on inapp-adapter.ts's PR B comment). Chat
+   * is now the first (and only) place in the codebase where a real
+   * `supervisorMode` and a tenant override can meet, so it's threaded here
+   * too — see test/routes/assistant-dropped-intents.test.ts's I3 suite for
+   * the before/after proof. Optional; absent → the mode-aware defaults.
+   */
+  thresholdResolver?: (
+    tenantId: string,
+  ) => Promise<Partial<Record<Mode, number>> | undefined>;
 }
 
 export type AssistantProposal = z.infer<typeof assistantProposalSchema>;
@@ -1225,18 +1256,24 @@ export const CHAT_INTENT_TO_REGISTRY_KEY: Readonly<Record<string, ProposalType>>
  *     review — as a `create_booking` proposal carrying
  *     `sourceTrustTier: 'autonomous'`. That trust tier is set UNCONDITIONALLY
  *     (not gated on `context.autonomousBooking`, which chat never sets, so
- *     the D-015 autonomous-lane bonus check never engages) — but
- *     `decideInitialStatus` (proposals/proposal.ts) does not need that lane:
- *     with `context.supervisorPresent` also never set by chat,
- *     `resolveAutoApproveThreshold` falls through to
+ *     the D-015 autonomous-lane bonus check never engages).
+ *
+ *     HISTORICAL (fixed by followup-autoapprove-default, commit 1): through
+ *     that gap, `decideInitialStatus` (proposals/proposal.ts) didn't need
+ *     the lane either — with `context.supervisorPresent` ALSO never set by
+ *     chat at the time, `resolveAutoApproveThreshold` fell through to
  *     `LEGACY_AUTO_APPROVE_THRESHOLD` (0.9, NOT the categorical `null`
  *     block), so a plain `shouldAutoApprove(confidenceScore, 0.9)` check —
- *     wholly independent of the lane — can auto-approve the booking outright
- *     for a sufficiently confident drafting call. The row write happens
- *     regardless of whether that check passes; auto-approval just removes
- *     the human tap on top of it. This is a live path in production shape
- *     (app.ts wires appointmentRepo/jobRepo/locationRepo/entityResolver for
- *     this route), not a theoretical one.
+ *     wholly independent of the lane — could auto-approve the booking
+ *     outright for a sufficiently confident drafting call. `generateAssistant
+ *     Reply` now resolves real `isSupervisorPresent`/`req.auth.mode` and
+ *     threads both into every dispatch site (see the `isSupervisorPresent`
+ *     import comment near the top of this file), so that auto-approval now
+ *     requires a supervisor genuinely on duty and confidence clearing the
+ *     real mode-aware threshold — it is no longer an accident of an unthreaded
+ *     field. The row WRITE (the held-slot insert this bullet is actually
+ *     about) is unaffected by that fix and still happens regardless of
+ *     supervision; only the auto-approval on top of it is now gated.
  *   - `ConfirmAppointmentTaskHandler` / `NotifyDelayTaskHandler` (both
  *     already wired): `resolveActiveAppointmentId`'s customer-scoping block
  *     only runs when `customerId` is truthy; unscoped, it can only auto-pick
@@ -1347,8 +1384,13 @@ async function generateAssistantReply(
   // just the requesting user themselves — there is no separate voice
   // session — so `req.auth.mode` is exactly the right per-request signal.
   // Defaults to 'supervisor' at the auth layer when no mode loader is
-  // wired, matching DEFAULT_AUTO_APPROVE_THRESHOLDS' own default mode.
-  supervisorMode?: 'supervisor' | 'tech' | 'both',
+  // wired (middleware/auth.ts's `loadModeWithCache`). Minor fix (post-C1
+  // review): `DEFAULT_AUTO_APPROVE_THRESHOLDS` has no notion of a "default
+  // mode" — the point of this default is narrower: 'supervisor' resolves
+  // to 0.90 (`DEFAULT_AUTO_APPROVE_THRESHOLDS.supervisor`), the SAME value
+  // as `LEGACY_AUTO_APPROVE_THRESHOLD`, so a tenant with no mode loader
+  // configured sees byte-identical behavior to the pre-commit-1 fallback.
+  supervisorMode?: Mode,
 ) {
   const lastUser = [...messages].reverse().find((m) => m.role === 'user');
   const lastUserText = lastUser?.content ?? '';
@@ -1409,13 +1451,40 @@ async function generateAssistantReply(
       }
       const timezoneContext = tenantTimezone ? { timezone: tenantTimezone } : {};
 
-      // Phase 12 supervisor gate — resolved once per turn, mirroring
-      // workers/voice-action-router.ts's identical call. Reads the
-      // singleton wired in app.ts (pgSupervisorPresenceLoader); with no
-      // loader wired (in-memory dev mode, most tests) this returns the
-      // permissive `true` default, preserving existing fixtures exactly
-      // the same way the voice worker's tests are preserved.
-      const supervisorPresent = await isSupervisorPresent(tenantId);
+      // Phase 12 supervisor gate — mirrors workers/voice-action-router.ts's
+      // identical call, but LAZY (minor fix, post-C1 review): read-only
+      // paths below (the deterministic unpaid-invoices query, `lookup_*`
+      // dispatch) never create a proposal and must never pay for a
+      // supervisor-presence read at all. Resolved at most once per turn —
+      // memoized so every dispatch site downstream awaits the SAME promise
+      // instead of re-querying. Reads the singleton wired in app.ts
+      // (pgSupervisorPresenceLoader); with no loader wired (in-memory dev
+      // mode, most tests) this returns the permissive `true` default,
+      // preserving existing fixtures exactly the same way the voice
+      // worker's tests are preserved.
+      let supervisorPresentPromise: Promise<boolean> | undefined;
+      const getSupervisorPresent = (): Promise<boolean> => {
+        if (!supervisorPresentPromise) supervisorPresentPromise = isSupervisorPresent(tenantId);
+        return supervisorPresentPromise;
+      };
+
+      // I3 — tenant auto-approve threshold override, same lazy/memoized
+      // shape as supervisorPresent above and for the identical reason
+      // (read-only paths never need it). Best-effort: a resolver that
+      // throws or returns undefined falls through to
+      // DEFAULT_AUTO_APPROVE_THRESHOLDS, same posture as every other
+      // caller of this dep.
+      let tenantThresholdOverridePromise:
+        | Promise<Partial<Record<Mode, number>> | undefined>
+        | undefined;
+      const getTenantThresholdOverride = (): Promise<Partial<Record<Mode, number>> | undefined> => {
+        if (!tenantThresholdOverridePromise) {
+          tenantThresholdOverridePromise = deps.thresholdResolver
+            ? deps.thresholdResolver(tenantId).catch(() => undefined)
+            : Promise.resolve(undefined);
+        }
+        return tenantThresholdOverridePromise;
+      };
 
       // QA-2026-06-05 (AST-05): deterministic read-only query — answer from
       // data, never propose. Runs before classification so phrasing variance
@@ -1584,6 +1653,8 @@ async function generateAssistantReply(
             segClass.intentType,
             segEntities,
           );
+          // I3 — resolved once (memoized) and reused across every segment.
+          const segTenantThresholdOverride = await getTenantThresholdOverride();
           const { proposal } = await factory().handle({
             tenantId,
             userId,
@@ -1619,9 +1690,15 @@ async function generateAssistantReply(
             // Phase 12 supervisor gate (commit 1) — see the isSupervisorPresent
             // import comment above. Threaded unconditionally: harmless for
             // every handler that never sets sourceTrustTier (the vast
-            // majority), load-bearing for the six that do.
-            supervisorPresent,
+            // majority), load-bearing for the six that do. Lazy (minor fix,
+            // post-C1 review) — only resolved now that we're genuinely
+            // about to dispatch a proposal-creating handler.
+            supervisorPresent: await getSupervisorPresent(),
             ...(supervisorMode ? { supervisorMode } : {}),
+            // I3 — Settings UI per-tenant threshold override.
+            ...(segTenantThresholdOverride
+              ? { tenantThresholdOverride: segTenantThresholdOverride }
+              : {}),
           });
           if (!proposal) continue;
           stampVerifiedIds(proposal, segVerifiedIds);
@@ -1636,6 +1713,16 @@ async function generateAssistantReply(
             proposal.status = 'ready_for_review';
             proposal.approvedAt = undefined;
           }
+          // I4 (post-C1 review) — chokepoint backstop, mirroring
+          // workers/voice-action-router.ts's holdIfUnsupervised: every
+          // dispatched handler forwards supervisorPresent today, but this
+          // is the ONE place every chat-sourced proposal flows through, so
+          // a future CHAT_INTENT_TO_REGISTRY_KEY entry that forgets to
+          // forward it can't slip an auto-approved proposal past an
+          // unsupervised tenant. No-op when the handler already agreed
+          // (the normal case). Already resolved (memoized) by the dispatch
+          // call above, so this await is free.
+          Object.assign(proposal, holdIfUnsupervised(proposal, await getSupervisorPresent()));
           // A caller without the direct permission never gets a self-executing
           // proposal — their draft waits for the approval tap instead.
           downgradeIfCallerLacksDirectPermission(proposal, callerRole);
@@ -1707,6 +1794,8 @@ async function generateAssistantReply(
           classification.intentType,
           extractedEntities,
         );
+        // I3 — resolved once (memoized).
+        const singleIntentTenantThresholdOverride = await getTenantThresholdOverride();
         const { proposal } = await handler.handle({
           tenantId,
           userId,
@@ -1728,9 +1817,13 @@ async function generateAssistantReply(
           ...timezoneContext,
           ...(standingInstructions ? { standingInstructions } : {}),
           // Phase 12 supervisor gate (commit 1) — see the isSupervisorPresent
-          // import comment above.
-          supervisorPresent,
+          // import comment above. Lazy (minor fix, post-C1 review).
+          supervisorPresent: await getSupervisorPresent(),
           ...(supervisorMode ? { supervisorMode } : {}),
+          // I3 — Settings UI per-tenant threshold override.
+          ...(singleIntentTenantThresholdOverride
+            ? { tenantThresholdOverride: singleIntentTenantThresholdOverride }
+            : {}),
         });
         stampVerifiedIds(proposal, verifiedIds);
         dropUnverifiedIds(
@@ -1739,6 +1832,10 @@ async function generateAssistantReply(
           extractedEntities,
           proposal.sourceContext,
         );
+        // I4 (post-C1 review) — chokepoint backstop; see the identical
+        // comment on the chain-segment path above. Already resolved
+        // (memoized) by the dispatch call above.
+        Object.assign(proposal, holdIfUnsupervised(proposal, await getSupervisorPresent()));
         // A caller without the direct permission never gets a self-executing
         // proposal — their draft waits for the approval tap instead.
         downgradeIfCallerLacksDirectPermission(proposal, callerRole);
@@ -1804,6 +1901,19 @@ async function generateAssistantReply(
           userId,
           message: lastUserText,
           existingEntities: customerPayload,
+          // Minor fix (post-C1 review) — thread supervision here too for
+          // consistency with the other two dispatch sites, even though
+          // CreateCustomerTaskHandler never sets `sourceTrustTier` and so
+          // can never reach the auto-approve branch (this proposal always
+          // lands 'draft', promoted to 'ready_for_review' just below).
+          // Inert today; kept in step so a future change to this handler
+          // doesn't silently inherit the exact gap commit 1 fixed.
+          supervisorPresent: await getSupervisorPresent(),
+          ...(supervisorMode ? { supervisorMode } : {}),
+          // I3 — same consistency rationale as supervisorPresent above.
+          ...((await getTenantThresholdOverride())
+            ? { tenantThresholdOverride: await getTenantThresholdOverride() }
+            : {}),
         });
         await deps.proposalRepo.create(proposal);
         // QA-2026-06-05: parity with the guardrail promote step (see
@@ -2084,9 +2194,11 @@ export function createAssistantRouter(deps: AssistantRouterDeps): Router {
           // already attaches `req.auth.mode` from `users.current_mode`
           // (defaulting to 'supervisor' with no loader wired); it just had
           // no downstream reader until now. `AuthWithMode` is a local,
-          // unexported cast type in middleware/auth.ts, so it's mirrored
-          // here rather than imported.
-          (req.auth as { mode?: 'supervisor' | 'tech' | 'both' } | undefined)?.mode,
+          // unexported cast type in middleware/auth.ts (its `mode` field is
+          // exactly `Mode` from proposals/auto-approve.ts), so the shape is
+          // mirrored here via the shared `Mode` type rather than a fresh
+          // hand-rolled union (minor fix, post-C1 review).
+          (req.auth as { mode?: Mode } | undefined)?.mode,
         );
 
         // Story 3.11 — persist the turn so the conversation survives reload and

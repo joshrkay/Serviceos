@@ -1365,8 +1365,11 @@ export function createApp(): AppWithLifecycle {
   // PR B (Tier 4 / AI approval rules) — shared per-tenant
   // auto-approve threshold resolver. One cached instance for all
   // entry points (twilio adapter, inapp adapter, voice-action-router
-  // worker) so settings hits the DB at most once per tenant per TTL
-  // window across the whole process.
+  // worker, and — I3, post-C1 review, followup-autoapprove-default —
+  // the assistant-chat router, the first caller where this override can
+  // actually take effect since it's also the first to thread a real
+  // supervisorMode) so settings hits the DB at most once per tenant per
+  // TTL window across the whole process.
   const thresholdResolver = createThresholdResolver(settingsRepo);
   // Per-tenant scheduling context (IANA timezone) for the voice booking
   // path. Delegates to settingsRepo (same RLS / withTenant path) so spoken
@@ -5871,6 +5874,13 @@ export function createApp(): AppWithLifecycle {
       // drafted from assistant chat received NO timezone at all.
       tenantTimezoneResolver: async (tenantId: string) =>
         (await tenantSchedulingResolver(tenantId))?.timezone,
+      // I3 (post-C1 review, followup-autoapprove-default) — the SAME
+      // shared, cached resolver instance every other entry point uses (see
+      // its own comment above). Now that commit 1 threads a real
+      // supervisorMode on this surface, this is the first place the
+      // Settings UI's per-tenant auto-approve threshold actually affects a
+      // decision.
+      thresholdResolver,
       // §3B/3D/3E — assistant chat shares the operator-side resolver
       // shim with the voice-action-router so the same vertical context
       // reaches both text and voice classification paths.

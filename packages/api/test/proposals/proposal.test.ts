@@ -628,6 +628,54 @@ describe('createProposal — D3 trust-tier integration', () => {
     expect(proposal.approvedAt).toBeUndefined();
   });
 
+  it('inapp-adapter.ts S2 in-app voice calls never auto-approve, regardless of confidence or supervision — pinned so nobody has to re-derive this from the voiceMutation guard', () => {
+    // followup-autoapprove-default, C1 — a code review claimed
+    // ai/agents/customer-calling/inapp-adapter.ts:1682 sets
+    // sourceTrustTier:'autonomous' UNCONDITIONALLY, threads NEITHER
+    // supervisorMode nor supervisorPresent, and is therefore a live,
+    // un-lane-gated auto-approve hole worse than the chat gap commit 1
+    // fixed. Empirically false: reproduced the adapter's EXACT
+    // CreateProposalInput shape below (verbatim fields, verbatim absences)
+    // through the real createProposal/decideInitialStatus and confirmed
+    // `effectiveTrustTier` computes to `undefined` — the same
+    // `voiceMutation && !autonomousLane?.eligible` guard the test above
+    // pins already covers it; inapp-adapter.ts just never sets
+    // `autonomousLane` (that field is exclusive to the D-015 booking lane,
+    // which never engages for in-app calls), so the guard is unconditional
+    // here. This is also independently proven by
+    // test/ai/agents/customer-calling/inapp-adapter.test.ts's own "happy
+    // path: high-confidence intent creates a proposal and closes" test
+    // (confidence 0.94, draft_invoice, asserts 'ready_for_review' — not
+    // 'approved') and by the fact NO test in that file ever asserts
+    // status === 'approved'.
+    const proposal = createProposal({
+      tenantId: 'tenant-1',
+      proposalType: 'create_customer', // capture-class
+      payload: { name: 'Jane Probe', email: 'jane@example.com' },
+      summary: 'Add Jane Probe as a customer',
+      confidenceScore: 0.99, // comfortably above every threshold in play
+      sourceTrustTier: 'autonomous', // exactly what inapp-adapter.ts:1682 sets
+      sourceContext: {
+        source: 'calling-agent',
+        channel: 'inapp', // the REAL channel string (not the dead 'inapp_voice')
+        voiceMutation: true, // inapp-adapter.ts:1686
+        surface: 'S2', // inapp-adapter.ts:1689 — RIVET P4 authenticated-operator stamp
+        sessionId: 'session-probe',
+      },
+      createdBy: 'calling-agent',
+      // Deliberately OMITTED, matching inapp-adapter.ts exactly: no
+      // supervisorMode, no supervisorPresent, no tenantThresholdOverride,
+      // no autonomousLane. If this test ever starts failing because
+      // inapp-adapter.ts (or this guard) changed to thread real
+      // supervision, that's fine — update it deliberately. If it starts
+      // returning 'approved' with none of those threaded, that's the
+      // exact regression this pin exists to catch.
+    });
+
+    expect(proposal.status).toBe('draft');
+    expect(proposal.approvedAt).toBeUndefined();
+  });
+
   it('forwards supervisorPresent=false: autonomous + capture + 0.95 → ready_for_review, not approved', () => {
     // Regression for the P0 launch blocker: createProposal used to DROP
     // supervisorPresent before calling decideInitialStatus, so the
