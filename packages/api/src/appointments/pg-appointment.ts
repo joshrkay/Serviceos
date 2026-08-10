@@ -10,6 +10,23 @@ import {
   MAX_APPOINTMENT_LIMIT,
 } from './appointment';
 
+// Follow-up review N5 — `appointments.job_id` and
+// `appointment_assignments.technician_id` are `UUID NOT NULL` (db/schema.ts),
+// so comparing them against a value that is not UUID-shaped is not a
+// zero-result filter: Postgres raises `invalid input syntax for type uuid`
+// (22P02) and the caller gets a 500. `GET /api/appointments?technicianId=%20`
+// was reaching exactly that. The route is right not to TRIM such a value
+// (a present value is an assertion, and silently reinterpreting it as "no
+// filter" would widen the response to the whole tenant), so the honest
+// answer is decided here: a value that cannot match any row in a UUID
+// column matches nothing. Mirrors the per-file isUuid idiom already used in
+// materials/pg-material-item.ts for the same situation.
+const UUID_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
+
+function isUuid(value: string): boolean {
+  return UUID_RE.test(value);
+}
+
 function mapRow(row: Record<string, unknown>): Appointment {
   return {
     id: row.id as string,
@@ -120,6 +137,9 @@ export class PgAppointmentRepository extends PgBaseRepository implements Appoint
   }
 
   async findByJob(tenantId: string, jobId: string): Promise<Appointment[]> {
+    // See isUuid above — a non-UUID job id cannot match a UUID column, and
+    // sending it would raise 22P02 rather than return nothing.
+    if (!isUuid(jobId)) return [];
     return this.withTenant(tenantId, async (client) => {
       const result = await client.query(
         'SELECT * FROM appointments WHERE tenant_id = $1 AND job_id = $2 ORDER BY scheduled_start ASC',
@@ -213,6 +233,15 @@ export class PgAppointmentRepository extends PgBaseRepository implements Appoint
     tenantId: string,
     options?: AppointmentListOptions
   ): Promise<AppointmentListResult> {
+    // See isUuid above. Both of these filter UUID columns, so a value that
+    // isn't UUID-shaped matches nothing — answered here rather than letting
+    // the driver turn it into a 500.
+    if (
+      (options?.jobId && !isUuid(options.jobId)) ||
+      (options?.technicianId && !isUuid(options.technicianId))
+    ) {
+      return { data: [], total: 0 };
+    }
     return this.withTenant(tenantId, async (client) => {
       const { where, params } = this.buildListWhere(tenantId, options);
       // Default sort for appointments is scheduled_start ASC per spec.

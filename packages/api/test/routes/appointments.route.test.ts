@@ -246,6 +246,48 @@ describe('P1-018 — listAppointments date range + pagination', () => {
       expect(res.body.total).toBe(1);
       expect(res.body.data[0].id).toBe(assigned.body.id);
     });
+
+    /**
+     * Follow-up review J6 — `limit` and `offset` were left on the bare
+     * `req.query.x !== undefined` check twenty lines below the fix above, and
+     * for them the outcome is WORSE than a swapped envelope: `''` flips
+     * `wantsPaginated` on, then `parseInt('', 10)` is NaN, so the legacy
+     * bare-array contract becomes a hard 400 with a message
+     * ("limit must be between 1 and 200") that names a bound the caller never
+     * crossed. `fromDate`/`toDate` were fixed by the same commit but never
+     * pinned; they are pinned here so the pair cannot drift apart again.
+     */
+    for (const param of ['limit', 'offset', 'fromDate', 'toDate']) {
+      it(`?jobId=…&${param}= (present but empty) keeps the legacy bare-array contract`, async () => {
+        const jobId = `job-empty-${param.toLowerCase()}`;
+        await seedAt(jobId, 1);
+        await seedAt(jobId, 4);
+        await seedAt('job-untouched', 1);
+
+        const res = await request(app).get(`/api/appointments?jobId=${jobId}&${param}=`);
+        expect(res.status).toBe(200);
+        expect(Array.isArray(res.body)).toBe(true);
+        expect(res.body).toHaveLength(2);
+      });
+
+      it(`a bare ?${param}= is treated as absent — same 400 as no filter at all`, async () => {
+        const res = await request(app).get(`/api/appointments?${param}=`);
+        expect(res.status).toBe(400);
+        expect(res.body.error).toBe('VALIDATION_ERROR');
+        expect(res.body.message).toBe('jobId query parameter is required');
+      });
+    }
+
+    it('a NON-empty limit/offset still paginates (the fix must not disable them)', async () => {
+      await seedAt('job-paginate-guard', 1);
+      await seedAt('job-paginate-guard', 4);
+      await seedAt('job-paginate-guard', 7);
+
+      const res = await request(app).get('/api/appointments?limit=2&offset=1');
+      expect(res.status).toBe(200);
+      expect(res.body.data).toHaveLength(2);
+      expect(res.body.total).toBe(3);
+    });
   });
 });
 

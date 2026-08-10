@@ -69,7 +69,19 @@ const runningLateBodySchema = z.object({
  *
  * Whitespace is NOT trimmed away: `?technicianId=%20` is a caller asserting a
  * value, and silently reinterpreting it as "no filter" would be the same class
- * of guess this helper exists to remove.
+ * of guess this helper exists to remove — and a worse one here, because a
+ * whitespace-only technician filter would then WIDEN the response to every
+ * appointment in the tenant, the exact widening this helper removed.
+ *
+ * Follow-up review N5 — an earlier version of this note went on to call the
+ * untrimmed value "an honest zero-result filter". It was not: `job_id` and
+ * `appointment_assignments.technician_id` are `UUID NOT NULL` (db/schema.ts),
+ * so Postgres raised `invalid input syntax for type uuid` and the caller got
+ * a 500. The not-trimming DECISION stands; the zero-result is now actually
+ * DELIVERED, in PgAppointmentRepository (see its `isUuid` short-circuit,
+ * mirroring the idiom in materials/pg-material-item.ts) — at the layer that
+ * knows the column type, rather than by a route-level UUID check that would
+ * impose Postgres's id shape on the in-memory backend too.
  */
 function stringFilter(value: unknown): string | undefined {
   return typeof value === 'string' && value.length > 0 ? value : undefined;
@@ -246,10 +258,22 @@ export function createAppointmentRouter(
           return;
         }
 
+        // Follow-up review J6 — `limit`/`offset` go through the SAME helper as
+        // every other string param, and `wantsPaginated` is derived from the
+        // FILTERED values. They were previously left on a bare
+        // `req.query.limit !== undefined`, twenty lines below the fix that
+        // removed exactly that check everywhere else, and for them the
+        // outcome was worse than a swapped envelope: `?jobId=x&limit=` flipped
+        // `wantsPaginated` on, `parseInt('', 10)` produced NaN, and the legacy
+        // bare-array contract became a hard 400 naming a bound the caller
+        // never crossed ("limit must be between 1 and 200").
+        const limitRaw = stringFilter(req.query.limit);
+        const offsetRaw = stringFilter(req.query.offset);
+
         const wantsPaginated =
           req.query.paginated === 'true' ||
-          req.query.limit !== undefined ||
-          req.query.offset !== undefined ||
+          limitRaw !== undefined ||
+          offsetRaw !== undefined ||
           fromDate !== undefined ||
           toDate !== undefined ||
           technicianId !== undefined ||
@@ -270,8 +294,6 @@ export function createAppointmentRouter(
           return;
         }
 
-        const limitRaw = req.query.limit as string | undefined;
-        const offsetRaw = req.query.offset as string | undefined;
         const limit = limitRaw !== undefined ? parseInt(limitRaw, 10) : DEFAULT_APPOINTMENT_LIMIT;
         const offset = offsetRaw !== undefined ? parseInt(offsetRaw, 10) : 0;
         if (limitRaw !== undefined && (Number.isNaN(limit) || limit < 1 || limit > MAX_APPOINTMENT_LIMIT)) {
