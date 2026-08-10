@@ -90,9 +90,9 @@
     "loadtest:mixed:selfcheck": "tsx loadtest/mixed-1000-selfcheck.ts"
   },
   "devDependencies": {
-    "@clerk/testing": "^2.2.14",
+    "@clerk/testing": "^2.2.18",
     "@eslint/js": "^9.39.5",
-    "@playwright/test": "^1.62.0",
+    "@playwright/test": "^1.62.1",
     "@testcontainers/postgresql": "^11.13.0",
     "@types/pg": "^8.18.0",
     "@vitest/coverage-v8": "^4.1.10",
@@ -101,9 +101,9 @@
     "globals": "^16.5.0",
     "pg": "^8.20.0",
     "testcontainers": "^11.13.0",
-    "tsx": "^4.23.1",
+    "tsx": "^4.23.10",
     "typescript": "^5.4.0",
-    "typescript-eslint": "^8.65.0",
+    "typescript-eslint": "^8.66.0",
     "vitest": "^4.1.10"
   },
   "overrides": {
