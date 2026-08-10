@@ -83,10 +83,47 @@ function toProposalResponse(state: ProposalMockState) {
     confidenceScore: 0.72,
     payload: state.payload,
     resultEntityId: state.resultEntityId,
+    // The approval stamp must ride the response, exactly as the real route
+    // does (`res.json({ ...result, … })` spreads the domain proposal, which
+    // carries `approvedAt`). This mock previously stamped `state.approvedAt`
+    // and then dropped it here, so the approve response carried NO server
+    // timing at all — the undo toast only appeared because the client hook
+    // invented a fresh 5s window when none rode. Removing that invented
+    // fallback (review J3) exposed the gap: the spec asserted an affordance
+    // the mocked contract never justified.
+    approvedAt: state.approvedAt,
     createdBy: 'ai',
     createdAt: now,
     updatedAt: now,
   });
+}
+
+/**
+ * Mirrors the undo window both real implementations use — the API's
+ * `UNDO_WINDOW_MS` (packages/api/src/proposals/lifecycle.ts) and the web
+ * hook's (packages/web/src/hooks/useUndoableApproval.ts). Duplicated here
+ * rather than imported because neither is exported through
+ * `@ai-service-os/shared`, which is the only package this root-level e2e
+ * helper resolves; the exact value does not matter to the assertions (they
+ * check that a window RODE, not its length), only that one is present.
+ */
+const UNDO_WINDOW_MS = 5000;
+
+/**
+ * The approve response as the REAL route builds it — the proposal plus the
+ * two additive undo-window fields (`routes/proposals.ts`, "Finding 2"/N11).
+ * `undoRemainingMs` is deliberately outside `proposalResponseSchema`: the
+ * server adds it to the JSON body only, never to the stored proposal.
+ */
+function toApproveResponse(state: ProposalMockState) {
+  const proposal = toProposalResponse(state);
+  if (!state.approvedAt) return proposal;
+  const approvedMs = Date.parse(state.approvedAt);
+  return {
+    ...proposal,
+    undoExpiresAt: new Date(approvedMs + UNDO_WINDOW_MS).toISOString(),
+    undoRemainingMs: Math.max(0, approvedMs + UNDO_WINDOW_MS - Date.now()),
+  };
 }
 
 function inboxEnvelope(state: ProposalMockState) {
@@ -218,7 +255,7 @@ export async function installProposalMocks(
     await route.fulfill({
       status: 200,
       contentType: 'application/json',
-      body: JSON.stringify({ data: toProposalResponse(state) }),
+      body: JSON.stringify({ data: toApproveResponse(state) }),
     });
   });
 
