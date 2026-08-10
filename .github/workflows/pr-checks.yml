@@ -275,6 +275,58 @@ jobs:
       - name: Corpus duplicate gate (non-blocking until generator dedup follow-up)
         continue-on-error: true
         run: npm run corpus:dedup
+      # F4 — nothing in CI ever RAN scripts/seed-voice-quality-cassettes.ts.
+      #
+      # PR #819 fixed a type error that made the script fail to start at all
+      # and added a scoped `tsc --noEmit` over `scripts/` to `npm run lint`,
+      # so the TYPE half cannot regress. The RUNTIME half was left open: a
+      # stub that typechecks and then throws, or a change to corpus loading,
+      # still ships silently. The script is the only way to rebuild the
+      # cassette corpus from scratch, so it is exactly the kind of tool that
+      # is discovered broken at the worst possible moment.
+      #
+      # WHY HERE and not a nightly. It was filed as "a slow job"; measured,
+      # it is not. Seeding all 73 Layer 1 scripts takes 5.8s of script time
+      # (10.7s through `npm run` from the repo root) and needs no secret, no
+      # network, no Postgres and no Docker — the "LLM" is the in-repo
+      # deterministic mock (`buildCassetteGatewayForScript`) and the repos are
+      # `repoMode: 'memory'`. A dedicated job would spend ~40-60s of checkout
+      # + setup-node + `npm ci` to host 6s of work, and a nightly would leave
+      # main broken for up to a day with the author long gone. This job is
+      # already the "corpus tooling nobody was running" job (see its comment
+      # above), already has no `needs:`, already runs in parallel, and has 10
+      # minutes of budget against ~2 spent — the marginal cost here is the
+      # 6s itself.
+      #
+      # NOT the `--prune` mode, ever: it is destructive, boots vitest twice,
+      # and its own doc comment requires a human to read `--dry-run` output
+      # first.
+      # Order matters. This first step judges the COMMITTED state — every
+      # Layer 1 corpus script has a non-empty recorded cassette — before
+      # anything re-records and papers over a gap. Sub-second, and like the
+      # seed script itself it had never run in CI, only in manual launch
+      # runbooks.
+      - name: Every Layer 1 script has a recorded cassette (blocking)
+        run: npm run voice-quality:check-cassettes --workspace=packages/api
+      - name: Cassette seed script executes end to end (blocking)
+        run: npm run voice-quality:seed-cassettes --workspace=packages/api
+      # Record mode is idempotent (cassette-gateway.ts refuses to overwrite an
+      # entry that is already present), so re-seeding a current corpus must
+      # produce ZERO bytes of change. That turns the run above from "it exited
+      # 0" into a real assertion: a harness change that re-records differently,
+      # or a script that quietly records nothing, both surface here. Uses
+      # `git status --porcelain` rather than `git diff --exit-code` so an
+      # UNTRACKED new cassette is caught too.
+      - name: Re-seeding the current corpus must be a no-op
+        run: |
+          CHANGED=$(git status --porcelain -- packages/api/src/ai/voice-quality/corpus/cassettes)
+          if [ -n "$CHANGED" ]; then
+            echo "::error title=Cassette seed produced changes::Re-recording the corpus was expected to be a no-op. Either a cassette is missing from the commit (run 'npm run voice-quality:seed-cassettes --workspace=packages/api' locally and commit the result), or a harness change altered what gets recorded."
+            echo "$CHANGED"
+            git diff --stat -- packages/api/src/ai/voice-quality/corpus/cassettes
+            exit 1
+          fi
+          echo "Seed run left the recorded cassettes byte-identical."
 
   # Voice-quality cassette-drift guard.
   #
