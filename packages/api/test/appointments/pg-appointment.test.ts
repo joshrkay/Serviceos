@@ -231,14 +231,18 @@ describe('PgAppointmentRepository — technicianId filter (parity with InMemory)
     const { pool, calls } = buildCapturePool();
     const repo = new PgAppointmentRepository(pool);
 
-    await repo.listWithMeta(tenantId, { technicianId: 'tech-1' });
+    // A real UUID: `technician_id` is `UUID NOT NULL`, and the repository
+    // short-circuits a value that could not match it (review N5), so a
+    // placeholder id here would prove nothing about the emitted SQL.
+    const technicianId = '9f1c2d3e-4a5b-6c7d-8e9f-0a1b2c3d4e5f';
+    await repo.listWithMeta(tenantId, { technicianId });
 
     const dataQuery = calls.find((c) => /^SELECT a\.\* FROM appointments/i.test(c.sql));
     expect(dataQuery).toBeDefined();
     expect(dataQuery!.sql).toMatch(
       /EXISTS \(SELECT 1 FROM appointment_assignments aa\s+WHERE aa\.appointment_id = a\.id\s+AND aa\.tenant_id = a\.tenant_id\s+AND aa\.technician_id = \$\d+\)/
     );
-    expect(dataQuery!.params).toContain('tech-1');
+    expect(dataQuery!.params).toContain(technicianId);
 
     // The count query shares the same WHERE clause (and therefore the same
     // filter), so pagination totals agree with the returned page.
@@ -255,5 +259,89 @@ describe('PgAppointmentRepository — technicianId filter (parity with InMemory)
 
     const dataQuery = calls.find((c) => /^SELECT a\.\* FROM appointments/i.test(c.sql));
     expect(dataQuery!.sql).not.toMatch(/appointment_assignments/);
+  });
+});
+
+/**
+ * Follow-up review N5 — `appointments.job_id` and
+ * `appointment_assignments.technician_id` are both `UUID NOT NULL`
+ * (db/schema.ts). The appointments route deliberately does NOT trim a
+ * filter value, on the correct reasoning that `?technicianId=%20` is a
+ * caller asserting a value rather than asking for no filter. Its comment
+ * then claimed the result was "an honest zero-result filter" — and that
+ * was FALSE at this layer: Postgres raises `invalid input syntax for type
+ * uuid` on the comparison, so the operator got a 500, not an empty list.
+ *
+ * Fixed here rather than at the route, using the idiom this codebase
+ * already established for exactly this (`isUuid` short-circuit in
+ * materials/pg-material-item.ts): a filter value that cannot possibly
+ * match a UUID column matches nothing, which is what the route's comment
+ * always claimed and is honest. Trimming instead would be worse than the
+ * bug: a whitespace-only technicianId would silently become "no filter"
+ * and widen the response to every appointment in the tenant — the exact
+ * widening the empty-param fix removed.
+ */
+describe('PgAppointmentRepository — non-UUID filter values', () => {
+  const tenantId = '550e8400-e29b-41d4-a716-446655440000';
+
+  function buildCountingPool() {
+    const businessSql: string[] = [];
+    const client: Partial<PoolClient> = {
+      query: vi.fn(async (sql: string) => {
+        if (/^\s*(BEGIN|COMMIT|ROLLBACK|RESET\b|SET\s+(LOCAL\s+)?ROLE\b|SELECT set_config)/i.test(sql)) {
+          return { rows: [], rowCount: 0 } as unknown as QueryResult;
+        }
+        businessSql.push(sql);
+        // Any real execution against a UUID column with these values would
+        // raise 22P02; the point of the assertions below is that we never
+        // get here.
+        return { rows: [{ total: 0 }], rowCount: 0 } as unknown as QueryResult;
+      }) as unknown as PoolClient['query'],
+      release: vi.fn() as unknown as PoolClient['release'],
+    };
+    const pool: Partial<Pool> = {
+      connect: vi.fn(async () => client as PoolClient) as unknown as Pool['connect'],
+    };
+    return { pool: pool as Pool, businessSql };
+  }
+
+  for (const value of [' ', '   ', 'tech-1', 'not-a-uuid']) {
+    it(`listWithMeta returns an empty page for technicianId=${JSON.stringify(value)} without querying`, async () => {
+      const { pool, businessSql } = buildCountingPool();
+      const repo = new PgAppointmentRepository(pool);
+
+      const result = await repo.listWithMeta(tenantId, { technicianId: value });
+
+      expect(result).toEqual({ data: [], total: 0 });
+      expect(businessSql).toHaveLength(0);
+    });
+
+    it(`listWithMeta returns an empty page for jobId=${JSON.stringify(value)} without querying`, async () => {
+      const { pool, businessSql } = buildCountingPool();
+      const repo = new PgAppointmentRepository(pool);
+
+      const result = await repo.listWithMeta(tenantId, { jobId: value });
+
+      expect(result).toEqual({ data: [], total: 0 });
+      expect(businessSql).toHaveLength(0);
+    });
+
+    it(`findByJob returns an empty list for jobId=${JSON.stringify(value)} without querying`, async () => {
+      const { pool, businessSql } = buildCountingPool();
+      const repo = new PgAppointmentRepository(pool);
+
+      expect(await repo.findByJob(tenantId, value)).toEqual([]);
+      expect(businessSql).toHaveLength(0);
+    });
+  }
+
+  it('a well-formed UUID filter still reaches the database', async () => {
+    const { pool, businessSql } = buildCountingPool();
+    const repo = new PgAppointmentRepository(pool);
+
+    await repo.listWithMeta(tenantId, { technicianId: '11111111-2222-3333-4444-555555555555' });
+
+    expect(businessSql.length).toBeGreaterThan(0);
+    expect(businessSql.some((sql) => /appointment_assignments/i.test(sql))).toBe(true);
   });
 });

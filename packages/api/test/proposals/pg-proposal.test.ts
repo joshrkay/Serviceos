@@ -51,6 +51,10 @@ describe('PgProposalRepository.resetStaleExecuting — failed proposal detail', 
         tenant_id: 'tenant-1',
         proposal_type: 'create_customer',
         execution_retry_count: 3,
+        // UPDATE ... RETURNING yields POST-update values, so this is what the
+        // COALESCE resolved to — here, a real cause recorded earlier by
+        // execution-worker.ts on the still-'executing' row.
+        execution_error: 'SMTP relay refused the message',
       },
     ]);
     const repo = new PgProposalRepository(pool);
@@ -59,12 +63,41 @@ describe('PgProposalRepository.resetStaleExecuting — failed proposal detail', 
 
     expect(result.movedToFailed).toBe(1);
     expect(result.failedProposals).toEqual([
-      { id: 'stale-1', tenantId: 'tenant-1', proposalType: 'create_customer', retryCount: 3 },
+      {
+        id: 'stale-1',
+        tenantId: 'tenant-1',
+        proposalType: 'create_customer',
+        retryCount: 3,
+        executionError: 'SMTP relay refused the message',
+      },
     ]);
 
     const failUpdate = calls.find((c) => /SET\s+status\s*=\s*'execution_failed'/i.test(c.sql));
     expect(failUpdate).toBeDefined();
-    expect(failUpdate!.sql).toMatch(/RETURNING\s+id,\s*tenant_id,\s*proposal_type,\s*execution_retry_count/i);
+    // Follow-up — execution_error joins the RETURNING list so the caller can
+    // put the real cause on the proposal.execution_timed_out audit event.
+    expect(failUpdate!.sql).toMatch(
+      /RETURNING\s+id,\s*tenant_id,\s*proposal_type,\s*execution_retry_count,\s*execution_error/i,
+    );
+  });
+
+  /**
+   * Review J4 — reset-to-approved IS the "start a fresh attempt" boundary.
+   * The row can now carry a reason recorded by the execution sweep while it
+   * was still 'executing', and carrying that into the retry means a
+   * proposal that goes on to succeed is served by `GET /api/proposals/:id`
+   * with a stale error string on it. Mirror of the InMemory pin in
+   * test/proposals/proposal.test.ts.
+   */
+  it('clears execution_error on the reset-to-approved UPDATE', async () => {
+    const { pool, calls } = buildPool([]);
+    const repo = new PgProposalRepository(pool);
+
+    await repo.resetStaleExecuting(10, 3);
+
+    const resetUpdate = calls.find((c) => /SET\s+status\s*=\s*'approved'/i.test(c.sql));
+    expect(resetUpdate).toBeDefined();
+    expect(resetUpdate!.sql).toMatch(/execution_error\s*=\s*NULL/i);
   });
 
   it('returns an empty failedProposals array when nothing moved to failed', async () => {

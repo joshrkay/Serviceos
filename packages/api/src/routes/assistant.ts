@@ -1,13 +1,25 @@
 import { Router, Response } from 'express';
 import { z } from 'zod';
 import { v4 as uuidv4 } from 'uuid';
-import { readStructuredAddress, resolveSpokenAddress } from '@ai-service-os/shared';
+import {
+  centsToInputValue,
+  isCentsKey,
+  isFlatMissingField,
+  labelForMissingField,
+  readStructuredAddress,
+  resolveSpokenAddress,
+} from '@ai-service-os/shared';
 import { AuthenticatedRequest } from '../auth/clerk';
 import { requireAuth, requireTenant, requirePermission } from '../middleware/auth';
 import { hasPermission, isValidRole, type Permission, type Role } from '../auth/rbac';
 import { toErrorResponse } from '../shared/errors';
 import { LLMGateway } from '../ai/gateway/gateway';
 import { ProposalRepository, ProposalType } from '../proposals/proposal';
+// Aliased — the card field this feeds is also called `undoExpiresAt`.
+import {
+  undoExpiresAt as undoWindowCloseAt,
+  undoRemainingMs as undoWindowRemainingMs,
+} from '../proposals/lifecycle';
 import { createAuditEvent, type AuditRepository } from '../audit/audit';
 import {
   recordAssistantTurn,
@@ -121,7 +133,21 @@ const assistantProposalSchema = z.object({
   summary: z.string(),
   explanation: z.string(),
   reasoning: z.array(z.string()).optional(),
-  editFields: z.array(z.object({ label: z.string(), key: z.string(), value: z.string() })).optional(),
+  // `kind` (review J5) tells the card how to PARSE the typed input before
+  // it reaches `PUT /api/proposals/:id { edits }`. Absent means 'text',
+  // which is what every pre-existing emitter produces, so this stays
+  // backward compatible. A 'cents' field is DOLLARS in the input and
+  // integer cents on the wire.
+  editFields: z
+    .array(
+      z.object({
+        label: z.string(),
+        key: z.string(),
+        value: z.string(),
+        kind: z.enum(['text', 'cents', 'number']).optional(),
+      }),
+    )
+    .optional(),
   confidence: z.enum(['High', 'Medium']),
   type: z.enum(['Invoice', 'Estimate', 'Schedule', 'Follow-up', 'Alert', 'Duplicate', 'Customer']),
   // QA-2026-06-05: LLMs emit free-form statuses ('Sent', 'Draft', …) —
@@ -130,6 +156,21 @@ const assistantProposalSchema = z.object({
     (v) => (v === 'Approved' || v === 'Rejected' ? v : 'Pending'),
     z.enum(['Pending', 'Approved', 'Rejected'])
   ),
+  /**
+   * Follow-up (auto-approved undo parity) — the instant the server's 5s undo
+   * window closes for an already-'Approved' card, so the chat surface can
+   * raise the SAME `UndoToast` an operator-tapped approval raises. Only set
+   * for auto-approved cards; an operator-tapped approval gets its window from
+   * the approve response instead.
+   *
+   * The client anchors its countdown to this instant rather than a fresh
+   * client 5s, so the part of the window the chat round-trip already spent is
+   * never offered back — `useUndoableApproval` leaves the affordance inactive
+   * when nothing is left, instead of offering an undo `POST
+   * /api/proposals/:id/undo` would 409 with UNDO_WINDOW_CLOSED.
+   */
+  undoExpiresAt: z.string().nullish().transform((v) => v ?? undefined),
+  undoRemainingMs: z.number().nullish().transform((v) => v ?? undefined),
   // QA-2026-06-05: LLMs emit JSON null for "no value" — .optional() alone
   // rejects null, so every estimate-draft completion whose relatedId/impact
   // was null failed validation and degraded to the fallback envelope
@@ -812,14 +853,10 @@ function stampVerifiedIds(
  * for any missingFields entry not listed here (e.g. `title`, `jobId`), so a
  * newly-added gate never silently loses its Edit control.
  */
-const MISSING_FIELD_LABELS: Record<string, string> = {
-  invoiceId: 'Invoice # or ID',
-  estimateId: 'Estimate # or ID',
-  jobId: 'Job # or ID',
-  customerId: 'Customer name or ID',
-  appointmentId: 'Appointment # or ID',
-  leadId: 'Lead name or ID',
-};
+// Moved to @ai-service-os/shared (contracts/proposal.ts) — the web INBOX
+// renders the SAME list and was showing the raw key, so the two surfaces were
+// drifting off two definitions. `labelForMissingField` falls back to the raw
+// key for anything unlisted, exactly as this map's `??` did.
 
 /**
  * B1 — the free-text reference field each gated id is paired with on the
@@ -854,9 +891,21 @@ export function editFieldsForMissing(
   if (!missingFields || missingFields.length === 0) return undefined;
 
   const fields = missingFields
-    .filter((key) => !key.includes('[') && !key.includes('.'))
+    .filter(isFlatMissingField)
     .map((key) => {
       const existing = payload[key];
+      const label = labelForMissingField(key);
+      // Review J5 — a NUMERIC gated field (the catalog unit price) used to
+      // fall through every branch below and emit `value: ''`, because the
+      // helper only ever prefilled STRINGS. The operator then typed into an
+      // empty box and the card sent a string against a `z.number()` field.
+      // Both halves are fixed here: the current value is prefilled, and
+      // `kind` tells the card what to parse it back into.
+      if (typeof existing === 'number' && Number.isFinite(existing)) {
+        return isCentsKey(key)
+          ? { label, key, kind: 'cents' as const, value: centsToInputValue(existing) }
+          : { label, key, kind: 'number' as const, value: String(existing) };
+      }
       const referenceKey = REFERENCE_FIELD_FOR_MISSING[key];
       const referenceValue = referenceKey ? payload[referenceKey] : undefined;
       const value =
@@ -865,7 +914,7 @@ export function editFieldsForMissing(
           : typeof referenceValue === 'string'
             ? referenceValue
             : '';
-      return { label: MISSING_FIELD_LABELS[key] ?? key, key, value };
+      return { label, key, kind: 'text' as const, value };
     });
 
   return fields.length > 0 ? fields : undefined;
@@ -874,8 +923,16 @@ export function editFieldsForMissing(
 /**
  * QA-2026-06-05 (AST-02/03/04): map any persisted proposal to the UI card
  * shape — estimates/invoices were previously unpersisted LLM JSON.
+ *
+ * Exported (pure, no I/O) so the AUTO-APPROVED branch is directly testable.
+ * Reaching `status: 'approved'` through the route requires an entity resolver
+ * plus enough seeded repos to keep the drafting handler's confidence above the
+ * auto-approve threshold — every lightweight harness caps it at 0.5 and lands
+ * on 'ready_for_review' — so a route test can only ever exercise the pending
+ * half of this mapping. `test/routes/assistant-auto-approved-undo.route.test.ts`
+ * pins that half end-to-end and this half directly.
  */
-function proposalToUI(
+export function proposalToUI(
   proposal: {
     id: string;
     proposalType: string;
@@ -883,6 +940,15 @@ function proposalToUI(
     payload: Record<string, unknown>;
     sourceContext?: Record<string, unknown>;
     confidenceScore?: number;
+    /**
+     * The drafting handler's own reasoning, as persisted on the row. Where a
+     * handler wrote one it is the ONLY place the operator learns what the
+     * proposal declined to do and why — `update_catalog_item`'s refused
+     * spoken price ("Heard a price of $290,000.00, above the … limit … so it
+     * was NOT applied") being the case that exposed this. Optional: most
+     * types persist none and fall back to the source echo below.
+     */
+    explanation?: string;
     /**
      * Commit 2 (followup-autoapprove-default) — the real persisted status.
      * Previously this mapper hardcoded `status: 'Pending'` unconditionally,
@@ -896,6 +962,15 @@ function proposalToUI(
      * pre-fix behavior exactly.
      */
     status?: string;
+    /**
+     * Follow-up (auto-approved undo parity) — stamped by `createProposal` at
+     * the instant an auto-approving type is decided 'approved'. Feeds the
+     * card's `undoExpiresAt` so the chat surface can offer the same undo an
+     * operator-tapped approval gets. Optional for the same reason `status`
+     * is: bare test literals still compile (no stamp ⇒ no window ⇒ no
+     * affordance, which is the honest answer for a card that isn't approved).
+     */
+    approvedAt?: Date;
   },
   sourceMessage: string
 ): AssistantProposal {
@@ -934,7 +1009,16 @@ function proposalToUI(
     id: proposal.id,
     title: `${cardType}: ${proposal.summary.slice(0, 80)}${total}`,
     summary: proposal.summary.slice(0, 160),
-    explanation: `From your message: "${sourceMessage.slice(0, 120)}"`,
+    // Review K4 — the persisted explanation WINS. This used to overwrite it
+    // unconditionally with the source echo, which discarded the only thing on
+    // the card that said what the proposal refused to do: a chat-dispatched
+    // `update_catalog_item` whose spoken price was rejected showed the
+    // operator "Needs: proposedUnitPriceCents" and nothing else. The echo is
+    // the FALLBACK, for the types that persist no reasoning of their own.
+    explanation:
+      proposal.explanation && proposal.explanation.trim().length > 0
+        ? proposal.explanation
+        : `From your message: "${sourceMessage.slice(0, 120)}"`,
     confidence: (proposal.confidenceScore ?? 0) >= 0.85 ? 'High' : 'Medium',
     type: cardType,
     // Commit 2 — the real persisted status, not a hardcoded 'Pending'. Only
@@ -943,6 +1027,21 @@ function proposalToUI(
     // card has no "why" to show a 'Rejected' state (a proposal is never
     // created already-rejected).
     status: proposal.status === 'approved' ? 'Approved' : 'Pending',
+    // Only meaningful on the auto-approved path — an operator-tapped approval
+    // takes its window from the approve response. `undoWindowCloseAt` returns
+    // undefined without an `approvedAt` stamp, so an unapproved (or
+    // historical, unstamped) proposal emits no window rather than a bogus one.
+    ...(proposal.status === 'approved' && proposal.approvedAt
+      ? {
+          undoExpiresAt: undoWindowCloseAt({ approvedAt: proposal.approvedAt })?.toISOString(),
+          // Review N11 — the DURATION twin, so the card's countdown is
+          // anchored to the client's own clock at receipt rather than to a
+          // differenced server instant. On this path the round trip is an LLM
+          // call, so most of the 5s is already gone and skew is the
+          // difference between an undo that works and a 409.
+          undoRemainingMs: undoWindowRemainingMs({ approvedAt: proposal.approvedAt }),
+        }
+      : {}),
     proposalType: proposal.proposalType,
     // Same address slice as customerProposalToUI. Kept on BOTH mappers on
     // purpose: `create_customer` reaches the card through either one

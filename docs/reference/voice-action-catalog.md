@@ -163,6 +163,34 @@ taxonomy 1.7.0):
   pins this; do not delete it as a "redundant mirror" of
   `add_catalog_item`'s test, since post-fix it no longer mirrors
   anything).
+- **A refused spoken price is always surfaced, never silently dropped**
+  (follow-up fix, 2026-08-09). When the drafting gate refuses a spoken
+  `unitPriceCents` (over the ceiling, or negative) it collapses it to "no
+  price change" — proposed === current. That stayed visible while nothing
+  else was spoken, because the no-change gate fired; but a spoken
+  name/description change also counts as a "real change" and SUPPRESSED
+  that gate, so "rename the tune-up and make it two ninety thousand"
+  drafted an APPROVABLE COMPLETE NO-OP with nothing on the card saying so.
+  (An earlier version of this note said it "drafted the rename and threw
+  the price away". That was wrong and worth correcting: this handler never
+  drafts a rename — `payload.name` is set to the resolved item's REAL
+  CURRENT name, and the explanation says in so many words that the rename
+  is "not applied by this proposal". So with the price refused, `proposed
+  === current` and every other field is unchanged: approving it changed
+  literally nothing.) The refusal now always pushes the flat
+  `proposedUnitPriceCents` key into `missingFields` and states the dropped
+  figure on `explanation` ("Heard a price of $290,000.00, above the
+  $100,000.00 limit … NOT applied" — `formatUsdCentsFixed`, the display
+  formatter, not the separator-less spoken one). Chosen over refusing the whole
+  utterance with a `voice_clarification`: the item resolved and a real
+  rename was heard, and this handler's posture for a partially-extracted
+  utterance is a flat gate key plus prose on `explanation` (same shape as
+  its ambiguous-catalog-match path) — a clarification would discard
+  everything extracted and force a re-utterance, where the gate costs one
+  field edit (`approveProposal` blocks on the tracked list;
+  `clearSatisfiedMissingFields` lifts it on an exact flat-key edit). The
+  same change stops the no-change gate from claiming "No price, name, or
+  description change was stated" when a price WAS stated and refused.
 - This type is deliberately **absent** from `S1_ALLOWED_PROPOSAL_TYPES`
   (`proposals/surface.ts`) — operator/owner-only, never reachable from an
   unauthenticated inbound caller.

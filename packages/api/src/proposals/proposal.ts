@@ -7,6 +7,7 @@ import {
   type Mode,
   type ResolveThresholdInput,
 } from './auto-approve';
+import { redactPii } from '../reputation/pii-redact';
 import { payloadHeadlineCents } from './payload-money';
 import { getSupervisorCreationHook } from './supervisor/hook';
 import { payloadWithSupervisorMarker } from './supervisor/marker';
@@ -633,19 +634,237 @@ export function decideInitialStatus(input: {
 }
 
 /**
- * PR #815 review, Important 2 — the reason recorded in `execution_error`
- * when `resetStaleExecuting` terminalizes a stale-claimed proposal that
- * exhausted `maxRetries`. NOT the original failure (a HANDLER_NOT_FOUND
- * throw, a worker crash, ...) — that was never captured on this path — but
- * a true statement of what happened, and critically the ONLY thing written
- * to the column both `evaluateSilentExecutionFailures`
- * (workers/failure-rate-monitor.ts) and `GET /api/proposals` read. Exported
- * so pg-proposal.ts's SQL literal (which can't share this JS string
- * directly) is written to produce identical wording — keep the two in sync
- * by hand if this changes.
+ * PR #815 review, Important 2 — the FALLBACK reason recorded in
+ * `execution_error` when `resetStaleExecuting` terminalizes a stale-claimed
+ * proposal that exhausted `maxRetries`. A true statement of what happened,
+ * and critically the only thing written to the column both
+ * `evaluateSilentExecutionFailures` (workers/failure-rate-monitor.ts) and
+ * `GET /api/proposals` read. Exported so pg-proposal.ts's SQL literal (which
+ * can't share this JS string directly) is written to produce identical
+ * wording — keep the two in sync by hand if this changes.
+ *
+ * Follow-up: this is now genuinely a FALLBACK. When the execution sweep
+ * caught the underlying throw it records that cause on the row while it is
+ * still 'executing' (workers/execution-worker.ts, via
+ * `redactedExecutionErrorCause` below), and the terminal write COALESCEs
+ * rather than overwrites — so this wording only survives on rows where no
+ * cause was ever captured (a crashed worker, a claim that outlived the
+ * process).
  */
 export function staleExecutionTimeoutMessage(staleMinutes: number, retryCount: number): string {
   return `Execution timed out: claimed >${staleMinutes}min across ${retryCount} retries, never completed`;
+}
+
+/**
+ * Upper bound on anything written to `proposals.execution_error`. The column
+ * is TEXT (no DB-side limit) and the value is echoed by `GET /api/proposals`
+ * and copied into an audit row, so an unbounded stack-sized message would
+ * bloat both.
+ */
+export const MAX_EXECUTION_ERROR_LENGTH = 500;
+
+const CAUSE_REDACTED = '[redacted]';
+
+/**
+ * Hard bound on how much of `err.message` is ever handed to a regex.
+ *
+ * The PII patterns (`pii-redact.ts`) contain self-overlapping character
+ * classes, so their cost is QUADRATIC in input length — measured at 158ms /
+ * 645ms / 2597ms for 8KB / 16KB / 32KB of `('a.'×n/2) + '@' + ('b'×n)`, a
+ * clean 4× per doubling. `runExecutionSweep` runs in-process with Express
+ * (app.ts), and `err.message` is attacker-INFLUENCED (a driver error echoing
+ * a bound JSONB payload, an HTTP client echoing a response body), so an
+ * unbounded ~1MB message of that shape would stall the whole API for minutes.
+ *
+ * Bounding the INPUT (rather than moving the truncation earlier in the
+ * pipeline) keeps the scrub-then-truncate ORDER intact — that order is what
+ * stops a secret being sliced in half by the length cap and then missed. The
+ * multiple leaves generous headroom above the 500-char output cap so a
+ * secret sitting just past it is still masked before the slice.
+ */
+const MAX_CAUSE_SCAN_LENGTH = MAX_EXECUTION_ERROR_LENGTH * 8;
+
+/**
+ * Iteration cap for the scrub loop. The chain is designed to reach a fixed
+ * point on pass 1; the loop exists so that (a) a rule whose output happens to
+ * feed another rule cannot leave a half-scrubbed value persisted, and (b) the
+ * length cap re-scrubs anything its slice exposed. Passes after the first run
+ * over a <=500-char string, so they are free.
+ */
+const MAX_CAUSE_SCRUB_PASSES = 3;
+
+/** C0 control characters that `\s` does NOT match (tab/LF/CR are excluded). */
+// eslint-disable-next-line no-control-regex
+const CAUSE_CONTROL_CHARS_RE = /[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g;
+
+/**
+ * Keyword half of the `key=value` secret rule.
+ *
+ * The optional leading segment is what makes `client_secret`, `auth_token`,
+ * `signing_secret`, `webhook_secret` and `x-api-key` match: the previous
+ * version anchored the keyword with `\b`, and `\b` does not exist between
+ * `t` and `_`, so every one of those shapes passed through untouched. The
+ * segment is length-bounded rather than `[A-Za-z0-9_]*` so the prefix cannot
+ * itself become a backtracking source. Keyword list harvested from
+ * `logging/redact.ts`'s SECRET_KEY_PATTERNS — that list already existed and
+ * was strictly stronger than the copy this replaces.
+ */
+const SECRET_KEY_PATTERN =
+  '(?:[A-Za-z0-9]{1,24}[_-])?(?:api[_-]?key|apikey|private[_-]?key|access[_-]?token|refresh[_-]?token|token|secret|password|passwd|pwd|passphrase|credential|authorization|auth)';
+
+/**
+ * Ordered SECRET scrub passes, run before the PII pass (`redactPii`) so a
+ * credential that happens to contain an email-like or phone-like run is
+ * removed whole rather than partially.
+ *
+ * Every replacement is a FIXED POINT: re-running the chain over its own
+ * output yields the same string. That is load-bearing — a cause is recorded
+ * once here and can be re-read and re-recorded by a later retry — and it is
+ * verified by a generated-corpus property test rather than by one
+ * hand-picked string (the hand-picked string that shipped happened to be a
+ * fixed point while the chain was still leaking).
+ */
+const CAUSE_SECRET_SCRUBS: Array<[RegExp, string]> = [
+  // Secret-ish `key=value` / `key: value` / `"key":"value"`, including inside
+  // a URL query string (the value stops at `&`, so non-secret params stay
+  // readable). The value may carry an auth SCHEME (`Authorization: Basic
+  // dXNlcj…`) — consumed here so the credential goes with the key rather
+  // than the scheme name being masked and the credential surviving.
+  // `(?!\[redacted\])` is what makes the rule a fixed point: without it the
+  // second pass re-matches its own `[redacted]` output and appends a `]`.
+  [
+    new RegExp(
+      String.raw`\b(${SECRET_KEY_PATTERN})"?\s*[=:]\s*"?(?!\[redacted\])(?:(?:bearer|basic|digest)\s+)?[^\s"'&,;)\]}]+"?`,
+      'gi',
+    ),
+    `$1=${CAUSE_REDACTED}`,
+  ],
+  // A bare auth scheme with no key= in front of it. The replacement's `[` is
+  // outside the token character class, so a second pass finds nothing left.
+  [/\b(bearer|basic|digest)\s+[A-Za-z0-9._~+/=-]+/gi, `$1 ${CAUSE_REDACTED}`],
+  // Credentials embedded in a connection string: `postgres://user:pw@host`,
+  // `redis://:pw@host`. `[^/\s:@]` cannot cross a `/`, so an ordinary
+  // `https://host/path?x=1` never matches.
+  [/\b([a-z][a-z0-9+.-]*:\/\/)[^/\s:@]*:[^/\s@]*@/gi, `$1${CAUSE_REDACTED}@`],
+  // Bare JWTs (three base64url segments; the `eyJ` header anchor keeps this
+  // specific enough not to eat dotted identifiers).
+  [/\beyJ[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]+/g, CAUSE_REDACTED],
+  // Provider key literals that travel without a key= prefix: Stripe
+  // (`sk_live_`, `whsec_`), OpenAI/Anthropic (`sk-proj-`, `sk-ant-api03-`),
+  // GitHub (`ghp_`), Slack (`xoxb-`, `xapp-`).
+  [/\b(?:sk|pk|rk|whsec|gh[pousr]|xox[abprs]|xapp)[_-][A-Za-z0-9_-]{8,}/gi, CAUSE_REDACTED],
+  // AWS access key id. Fixed-width and uppercase-only, so no `\b` games.
+  [/\bAKIA[0-9A-Z]{16}\b/g, CAUSE_REDACTED],
+];
+
+/**
+ * Message text for a caught throw, walking up to two `cause` levels.
+ *
+ * undici throws `TypeError: fetch failed` and puts the real reason
+ * (`getaddrinfo ENOTFOUND …`, `ECONNREFUSED`) on `.cause` — the single most
+ * common Node failure mode, and without this it persisted as a message with
+ * no diagnostic content whatsoever.
+ */
+function causeChainMessage(err: unknown): string {
+  if (typeof err === 'string') return err;
+  if (!(err instanceof Error)) return '';
+  const parts: string[] = [];
+  let node: unknown = err;
+  for (let depth = 0; depth <= 2 && node instanceof Error; depth++) {
+    if (node.message) parts.push(node.message);
+    node = (node as { cause?: unknown }).cause;
+  }
+  if (typeof node === 'string' && node) parts.push(node);
+  return parts.join(': ');
+}
+
+/**
+ * Truncate to `MAX_EXECUTION_ERROR_LENGTH` without slicing a placeholder in
+ * half. `Authorization=[redac…` would otherwise re-match the key=value rule
+ * on a later pass (its `[redacted]` lookahead no longer sees a whole
+ * placeholder) and the function would stop being a fixed point.
+ */
+const CAUSE_PLACEHOLDERS = [CAUSE_REDACTED, '[email]', '[phone]', '[address]', '[name]'];
+function boundCauseLength(text: string): string {
+  if (text.length <= MAX_EXECUTION_ERROR_LENGTH) return text;
+  let end = MAX_EXECUTION_ERROR_LENGTH - 1;
+  const lastOpen = text.lastIndexOf('[', end - 1);
+  if (lastOpen !== -1) {
+    const tail = text.slice(lastOpen, end);
+    if (!tail.includes(']') && CAUSE_PLACEHOLDERS.some((p) => p.startsWith(tail))) {
+      end = lastOpen;
+    }
+  }
+  return `${text.slice(0, end)}…`;
+}
+
+function scrubCauseOnce(text: string): string {
+  let out = text;
+  for (const [pattern, replacement] of CAUSE_SECRET_SCRUBS) {
+    out = out.replace(pattern, replacement);
+  }
+  // Customer PII via the codebase's ONE free-text redactor
+  // (reputation/pii-redact.ts), whose idempotency contract is documented and
+  // separately tested, and which orders the international phone rule BEFORE
+  // the US one (so `+442071234567` masks whole rather than leaving `+44`).
+  // Addresses and last names stay on: a street-address or FirstName-LastName
+  // heuristic over machine-generated diagnostics is all false positives.
+  // `requireSeparatedPhones` keeps integer cents, epoch millis and int4
+  // bounds readable — see that option's doc comment.
+  return redactPii(out, {
+    redactAddresses: false,
+    redactLastNames: false,
+    requireSeparatedPhones: true,
+  });
+}
+
+/**
+ * Build the string recorded in `proposals.execution_error` from a CAUGHT
+ * throw (workers/execution-worker.ts's per-proposal catch).
+ *
+ * Handlers that fail politely return `result.error`, a string the handler
+ * author wrote. A THROW is not that: its message can be a driver error
+ * echoing a bound parameter, an HTTP client error echoing a URL with a token
+ * in the query string, or a provider error quoting the customer contact it
+ * failed to reach. `execution_error` is read back by `GET /api/proposals` and
+ * copied into the `proposal.execution_timed_out` audit row, so the cause is
+ * bounded and scrubbed here — at the single place that builds it — rather
+ * than at each surface that renders it.
+ *
+ * The PII half delegates to `reputation/pii-redact.ts` — this codebase's
+ * free-text redactor, which is documented DETERMINISTIC and IDEMPOTENT and
+ * has its own test file. This function previously carried a copy of its
+ * regexes; the copy drifted (it ordered the US phone rule before the
+ * international one, and its email rule's trailing `\b` made an email
+ * followed by a digit unmatchable) and there is no reason for two
+ * idempotency contracts. Only the SECRET rules — which pii-redact has no
+ * business knowing about — stay local.
+ *
+ * Deliberately NOT `redactSecrets` (logging/redact.ts) either: that walks an
+ * OBJECT masking by KEY name, and there are no keys here. Its keyword LIST
+ * is harvested above, though — it is the same threat model.
+ */
+export function redactedExecutionErrorCause(err: unknown): string {
+  const raw = causeChainMessage(err);
+  // Bound BEFORE any regex touches it (see MAX_CAUSE_SCAN_LENGTH), then make
+  // one cause one audit-row line. The control-character strip is in the same
+  // pass because `\s` does not match NUL — and a NUL byte makes the Postgres
+  // write throw, losing the cause silently.
+  let out = raw
+    .slice(0, MAX_CAUSE_SCAN_LENGTH)
+    .replace(CAUSE_CONTROL_CHARS_RE, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  // `String(someObject)` yields '[object Object]', which is not a cause.
+  if (out.length === 0 || out === 'undefined' || out === 'null' || out === '[object Object]') {
+    return 'unknown execution failure';
+  }
+  for (let pass = 0; pass < MAX_CAUSE_SCRUB_PASSES; pass++) {
+    const next = boundCauseLength(scrubCauseOnce(out));
+    if (next === out) break;
+    out = next;
+  }
+  return out;
 }
 
 export interface ProposalRepository {
@@ -864,6 +1083,19 @@ export interface ProposalRepository {
    * never reaches either surface. `failedProposals` gives the caller
    * (execution-worker.ts) enough identity per row to ALSO emit its own
    * `proposal.execution_timed_out` audit event.
+   *
+   * Follow-up: each entry also carries the row's POST-write `executionError`
+   * — the real caught cause when the sweep recorded one, otherwise the
+   * synthesized timeout wording — so the audit event can state WHY rather
+   * than only that a timeout happened. REQUIRED, not optional: the same
+   * statement that selects these rows COALESCEs the column to a non-null
+   * literal, so there is no reachable state in which a returned entry lacks
+   * a reason. (The type used to say "optional because a historical row can
+   * hold NULL"; that was wrong — RETURNING yields the post-update value.)
+   *
+   * Implementations ALSO clear `execution_error` on the reset-to-approved
+   * branch: that is the "start a fresh attempt" boundary, and a reason from
+   * the previous attempt must not survive into a retry that succeeds.
    */
   resetStaleExecuting(
     staleMinutes: number,
@@ -876,6 +1108,7 @@ export interface ProposalRepository {
       tenantId: string;
       proposalType: ProposalType;
       retryCount: number;
+      executionError: string;
     }>;
   }>;
 }
@@ -1418,6 +1651,7 @@ export class InMemoryProposalRepository implements ProposalRepository {
       tenantId: string;
       proposalType: ProposalType;
       retryCount: number;
+      executionError: string;
     }>;
   }> {
     const now = Date.now();
@@ -1428,6 +1662,7 @@ export class InMemoryProposalRepository implements ProposalRepository {
       tenantId: string;
       proposalType: ProposalType;
       retryCount: number;
+      executionError: string;
     }> = [];
     for (const [id, proposal] of this.proposals.entries()) {
       if (proposal.status !== 'executing' || !proposal.claimedAt) continue;
@@ -1446,12 +1681,24 @@ export class InMemoryProposalRepository implements ProposalRepository {
           tenantId: proposal.tenantId,
           proposalType: proposal.proposalType,
           retryCount: retries,
+          // POST-COALESCE value: the real caught cause when one was recorded
+          // while the row was still 'executing', else the synthesized wording
+          // just assigned above — which is why this is never undefined.
+          // Mirrors the Pg RETURNING clause, which cannot be SQL NULL for the
+          // same reason.
+          executionError: proposal.executionError,
         });
       } else {
         proposal.status = 'approved';
         proposal.executionRetryCount = retries + 1;
         proposal.claimedAt = undefined;
         proposal.claimedBy = undefined;
+        // Follow-up review J4 — the "start a fresh attempt" boundary. The
+        // previous attempt's reason must not ride into the retry: a proposal
+        // that then succeeds would otherwise be served by
+        // `GET /api/proposals/:id` still carrying an error string. Mirrors
+        // `execution_error = NULL` on the Pg reset UPDATE.
+        proposal.executionError = undefined;
         resetToApproved++;
       }
       proposal.updatedAt = new Date();

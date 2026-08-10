@@ -40,6 +40,7 @@ import { candidatesForReference } from '../resolution/reference-candidates';
 import type { EntityCandidate } from '../resolution/entity-resolver';
 import { resolveLineItemToCatalog } from '../resolution/catalog-resolver';
 import { formatCents } from '../skills/spoken-format';
+import { formatUsdCentsFixed } from '@ai-service-os/shared';
 import { entitiesFrom, baseSourceContext, inputFor, resolveTenantTimezone } from './task-input';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -2191,6 +2192,79 @@ export class CreateJobVoiceTaskHandler implements TaskHandler {
 //      writes a genuinely SPOKEN `unitPriceCents` into the proposal — is
 //      now the ONLY place `MAX_UNIT_PRICE_CENTS` is enforced for this
 //      intent.
+//
+//   5. Follow-up to note 4 (2026-08-09) — a price the gate REFUSES is now
+//      always REPORTED, never silently collapsed. The gate turns an
+//      untrusted spoken figure into "no price change" (proposed ===
+//      current). On its own that stayed visible: with nothing else spoken,
+//      the no-change gate below fired and the proposal could not be
+//      approved. But a name/description change also counts as a "real
+//      change" and SUPPRESSED that gate — so "rename the tune-up to
+//      seasonal service and make it two ninety thousand" drafted an
+//      approvable COMPLETE NO-OP with nothing on the card saying so.
+//      Silent data loss on an approval surface.
+//
+//      (Correcting an earlier version of this note, which described it as
+//      "an approvable rename with the spoken price thrown away". That is
+//      not what this handler does and the accurate statement is worse:
+//      `payload.name` is set to the resolved item's REAL CURRENT name —
+//      note 2 — and the explanation says the rename is "not applied by
+//      this proposal". With the price refused, `proposedUnitPriceCents`
+//      falls back to `resolvedItem.unitPriceCents`, so proposed ===
+//      current and nothing else differs either: approving it changed
+//      literally nothing.)
+//
+//      The refusal now pushes the flat `proposedUnitPriceCents` gate key
+//      unconditionally and states the dropped figure on `explanation`.
+//      Deliberately NOT a refusal-with-clarification of the whole
+//      utterance: the catalog item resolved and a real rename was heard,
+//      and this class's established posture for a partially-extracted
+//      utterance is exactly this — a FLAT gate key plus a prose reason on
+//      `explanation` (note 3, and the ambiguous-catalog-match path right
+//      above). Task 13's clarification cards
+//      (workers/voice-action-router.ts) are the precedent for "never
+//      silent", but its remedy was a clarification because there was
+//      NOTHING to draft — `confirm`/`language_switch`/`operator_request`
+//      have no proposal type, no handler, no payload. Emitting one here
+//      would discard everything successfully extracted and make the
+//      operator re-speak the whole sentence, where a `missingFields` gate
+//      costs them one field edit: `approveProposal` blocks on the tracked
+//      list (so a one-tap approval that drops the price is impossible) and
+//      `clearSatisfiedMissingFields` lifts the gate on an exact flat-key
+//      edit.
+//
+//      Same change also stops the no-change gate from claiming "No price,
+//      name, or description change was stated" when a price WAS stated and
+//      refused — that branch now only fires when nothing was spoken at all.
+/**
+ * Largest spoken figure worth ECHOING back on the card. Review N8 —
+ * `Number.isFinite` admits up to 1.79e308, so an ASR figure that absurd
+ * reached the refusal message and rendered as `$1.0000000000000001e+306`
+ * (`toFixed` goes exponential at >=1e21; `Intl` instead prints a 300-digit
+ * wall). Neither belongs on an approval surface, and the operator learns
+ * nothing from either that "an implausible amount" does not tell them.
+ */
+const MAX_ECHOED_SPOKEN_PRICE_CENTS = 100_000_000_000; // $1,000,000,000.00
+
+/**
+ * Render a REFUSED spoken price for the operator to read.
+ *
+ * Review N6 — `formatUsdCentsFixed` (shared/contracts/money.ts), NOT
+ * `formatCents` (ai/skills/spoken-format.ts). The latter is a TTS formatter
+ * that deliberately omits thousands separators because they confuse Polly;
+ * money.ts's own doc says to prefer the fixed formatter for display. This
+ * string is on-screen card prose (confirmed: the web assistant speaks
+ * `reply.content` only, never `explanation`), and `$100000.00` on a money
+ * approval surface is one misread from an order of magnitude. The sibling
+ * `formatCents` uses in this file feed spoken/hint contexts and stay.
+ */
+function describeRefusedPrice(cents: number): string {
+  if (!Number.isFinite(cents) || Math.abs(cents) > MAX_ECHOED_SPOKEN_PRICE_CENTS) {
+    return 'an implausibly large amount';
+  }
+  return formatUsdCentsFixed(Math.round(cents));
+}
+
 export class UpdateCatalogItemTaskHandler implements TaskHandler {
   readonly taskType = 'update_catalog_item' as const;
 
@@ -2251,17 +2325,39 @@ export class UpdateCatalogItemTaskHandler implements TaskHandler {
     // spoken unitPriceCents field, so a misheard "290 thousand" must gate
     // here exactly as it does on the create side, not fall back to "no
     // price change" and sail through unchecked.
+    //
+    // `spokenPriceCents` is kept separately from `requestedPriceCents` (the
+    // TRUSTED value) so the refusal is reportable — see note 5.
+    const spokenPriceCents =
+      typeof ee.unitPriceCents === 'number' && Number.isFinite(ee.unitPriceCents)
+        ? ee.unitPriceCents
+        : undefined;
     const requestedPriceCents =
-      typeof ee.unitPriceCents === 'number' &&
-      Number.isFinite(ee.unitPriceCents) &&
-      ee.unitPriceCents >= 0 &&
-      ee.unitPriceCents <= MAX_UNIT_PRICE_CENTS
-        ? Math.round(ee.unitPriceCents)
+      spokenPriceCents !== undefined &&
+      spokenPriceCents >= 0 &&
+      spokenPriceCents <= MAX_UNIT_PRICE_CENTS
+        ? Math.round(spokenPriceCents)
         : undefined;
     const hasName = typeof ee.catalogItemNewName === 'string' && ee.catalogItemNewName.trim().length > 0;
     const hasDescription =
       typeof ee.catalogItemNewDescription === 'string' && ee.catalogItemNewDescription.trim().length > 0;
-    if (requestedPriceCents === undefined && !hasName && !hasDescription) {
+
+    if (spokenPriceCents !== undefined && requestedPriceCents === undefined) {
+      // A price WAS spoken and the gate refused it (note 5). Gate on the flat
+      // payload key regardless of what else was spoken, and say which figure
+      // was dropped — silently collapsing it to "no price change" behind an
+      // approvable rename is data loss on an approval surface.
+      missing.push('proposedUnitPriceCents');
+      explanationParts.push(
+        spokenPriceCents > MAX_UNIT_PRICE_CENTS
+          ? `Heard a price of ${describeRefusedPrice(spokenPriceCents)}, above the ${formatUsdCentsFixed(MAX_UNIT_PRICE_CENTS)} limit for a spoken price — most likely a mishearing, so it was NOT applied. Set the price on this proposal if that figure is right.`
+          : // Review N7 — symmetric with the branch above. A spoken `-$5.00`
+            // is as much a mishearing worth showing as `$290,000.00` is, and
+            // "not a valid catalog price" alone left the operator unable to
+            // tell what had actually been heard.
+            `Heard a price of ${describeRefusedPrice(spokenPriceCents)}, which is not a valid catalog price, so it was NOT applied. Set the price on this proposal.`,
+      );
+    } else if (requestedPriceCents === undefined && !hasName && !hasDescription) {
       missing.push('proposedUnitPriceCents');
       explanationParts.push('No price, name, or description change was stated.');
     }

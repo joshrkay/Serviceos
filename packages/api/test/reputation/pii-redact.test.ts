@@ -148,3 +148,51 @@ describe('P7-026 redactPii — edge cases', () => {
     expect(redactPii('Great service overall')).toBe('Great service overall');
   });
 });
+
+/**
+ * Review K1/J2 (followup-review-remnants) — two behaviours this module gained
+ * when `redactedExecutionErrorCause` (proposals/proposal.ts) stopped carrying
+ * its own drifted copy of these regexes and started calling in here.
+ */
+describe('P7-026 redactPii — email boundary and phone strictness', () => {
+  it('redacts an email immediately followed by a word character', () => {
+    // The rule used to end in `\b`, so an email abutting a digit run never
+    // matched AT ALL — the shape a Postgres `DETAIL: Key (contact)=(…)` over
+    // a concatenated column produces.
+    expect(redactPii('Key (contact)=(jane.doe@example.com4155552671)')).toBe(
+      'Key (contact)=([email][phone])',
+    );
+    expect(redactPii('sent to jane.doe@example.com2026-08-09T12:00:00Z')).toContain('[email]');
+    expect(redactPii('sent to jane.doe@example.com2026-08-09T12:00:00Z')).not.toContain(
+      'jane.doe@example.com',
+    );
+  });
+
+  it('still redacts a bare digit-run phone by default', () => {
+    expect(redactPii('call 4155552671')).toBe('call [phone]');
+  });
+
+  it('requireSeparatedPhones leaves a bare digit run alone', () => {
+    expect(
+      redactPii('amount 1234567890 exceeds int4 range 2147483647', {
+        requireSeparatedPhones: true,
+        redactAddresses: false,
+        redactLastNames: false,
+      }),
+    ).toBe('amount 1234567890 exceeds int4 range 2147483647');
+  });
+
+  it('requireSeparatedPhones still redacts a separated or parenthesised number', () => {
+    const opts = { requireSeparatedPhones: true } as const;
+    expect(redactPii('call 415-555-2671', opts)).toBe('call [phone]');
+    expect(redactPii('call (415) 555-2671', opts)).toBe('call [phone]');
+    expect(redactPii('call +1 415.555.2671', opts)).toBe('call [phone]');
+    expect(redactPii('call +442071234567', opts)).toBe('call [phone]');
+  });
+
+  it('requireSeparatedPhones is still idempotent', () => {
+    const opts = { requireSeparatedPhones: true } as const;
+    const once = redactPii('call 415-555-2671 about 1234567890', opts);
+    expect(redactPii(once, opts)).toBe(once);
+  });
+});

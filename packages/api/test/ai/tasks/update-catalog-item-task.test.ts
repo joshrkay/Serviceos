@@ -15,6 +15,8 @@ import { TaskContext } from '../../../src/ai/tasks/task-handlers';
 import { missingFieldsFor } from '../../../src/proposals/proposal';
 import { InMemoryCatalogItemRepository, createCatalogItem } from '../../../src/catalog/catalog-item';
 import { MAX_UNIT_PRICE_CENTS } from '../../../src/proposals/contracts/add-catalog-item';
+import { InMemoryProposalRepository } from '../../../src/proposals/proposal';
+import { approveProposal, editProposal } from '../../../src/proposals/actions';
 
 const TENANT_ID = 't-1';
 
@@ -72,7 +74,13 @@ describe('UpdateCatalogItemTaskHandler', () => {
     // lifts a gate on an exact flat-key edit; a prose entry could never
     // clear.
     expect(missingFieldsFor(proposal)).toContain('catalogItemId');
-    expect(missingFieldsFor(proposal).every((f) => !f.includes(' '))).toBe(true);
+    // Flat means NO `.` and NO `[` — the two shapes
+      // `clearSatisfiedMissingFields` skips (missing-fields.ts) and
+      // `editFieldsForMissing` filters out. Absence of SPACES, which this
+      // used to assert, is neither necessary nor sufficient.
+      expect(
+        missingFieldsFor(proposal).every((f) => !f.includes('.') && !f.includes('[')),
+      ).toBe(true);
 
     const sourceContext = proposal.sourceContext as Record<string, unknown>;
     const candidates = sourceContext.entityCandidates as Array<Record<string, unknown>>;
@@ -212,6 +220,233 @@ describe('UpdateCatalogItemTaskHandler', () => {
     // A real (rounded) price change was stated, so the no-change gate
     // does not fire.
     expect(missingFieldsFor(proposal)).not.toContain('proposedUnitPriceCents');
+  });
+
+  /**
+   * Follow-up to PR #816 — a spoken price the drafting gate REFUSES must
+   * never just disappear.
+   *
+   * The gate above collapses an untrusted spoken figure to "no price change"
+   * (proposed === current). On its own that was visible: with nothing else
+   * spoken, the no-change gate fired and the proposal could not be approved.
+   * But a name/description change is ALSO a "real change", so it suppressed
+   * that gate — and the operator got a rename proposal with the price they
+   * spoke silently thrown away, on an APPROVAL surface.
+   *
+   * The fix keeps drafting (option b) rather than refusing the whole
+   * utterance with a clarification (option a): the catalog item resolved and
+   * a real rename was heard, and this handler's established posture for a
+   * partially-extracted utterance is a FLAT `missingFields` key plus a prose
+   * reason on `explanation` (see class doc note 3 and the ambiguous-match
+   * tests above), not a `voice_clarification` that discards everything
+   * extracted and makes the operator re-speak. A clarification card is what
+   * Task 13 reached for when there was NOTHING to draft; that is not this.
+   *
+   * `missingFields` is what makes it non-silent rather than merely
+   * documented: `approveProposal` blocks on the tracked list, so the
+   * one-tap approval of a proposal that dropped a spoken price is
+   * impossible, and `clearSatisfiedMissingFields` lifts the gate on an exact
+   * flat-key edit — the operator's recovery is one edit, not a re-utterance.
+   */
+  describe('a spoken price the gate refuses is surfaced, never silently dropped', () => {
+    it('gates and names the discarded figure when an over-ceiling price rides ALONG WITH a name change', async () => {
+      const catalogRepo = await seededRepo([{ name: 'AC tune-up', unitPriceCents: 8900 }]);
+      const { proposal } = await new UpdateCatalogItemTaskHandler(catalogRepo).handle(
+        ctx({
+          existingEntities: {
+            catalogItemReference: 'AC tune-up',
+            unitPriceCents: 29_000_000, // misheard "two ninety" -> $290000.00
+            catalogItemNewName: 'AC seasonal service',
+          },
+        }),
+      );
+
+      const payload = proposal.payload as Record<string, unknown>;
+      // Still a real draft (option b) — the resolved item and the rename ask
+      // both survive; nothing about the utterance is thrown away.
+      expect(payload.catalogItemId).toBeTruthy();
+      expect(proposal.explanation).toMatch(/requested new name: "AC seasonal service"/i);
+      // The untrusted figure NEVER lands on the executable field.
+      expect(payload.proposedUnitPriceCents).toBe(8900);
+      // ...but the operator cannot approve past it, and is told why.
+      expect(missingFieldsFor(proposal)).toContain('proposedUnitPriceCents');
+      // Flat means NO `.` and NO `[` — the two shapes
+      // `clearSatisfiedMissingFields` skips (missing-fields.ts) and
+      // `editFieldsForMissing` filters out. Absence of SPACES, which this
+      // used to assert, is neither necessary nor sufficient.
+      expect(
+        missingFieldsFor(proposal).every((f) => !f.includes('.') && !f.includes('[')),
+      ).toBe(true);
+      expect(proposal.explanation).toMatch(/\$290,000\.00/);
+      expect(proposal.explanation).toMatch(/not applied/i);
+    });
+
+    it('gates and names the discarded figure when a negative price rides along with a description change', async () => {
+      const catalogRepo = await seededRepo([{ name: 'AC tune-up', unitPriceCents: 8900 }]);
+      const { proposal } = await new UpdateCatalogItemTaskHandler(catalogRepo).handle(
+        ctx({
+          existingEntities: {
+            catalogItemReference: 'AC tune-up',
+            unitPriceCents: -500,
+            catalogItemNewDescription: 'Full seasonal inspection',
+          },
+        }),
+      );
+
+      const payload = proposal.payload as Record<string, unknown>;
+      expect(payload.proposedUnitPriceCents).toBe(8900);
+      expect(missingFieldsFor(proposal)).toContain('proposedUnitPriceCents');
+      expect(proposal.explanation).toMatch(/not applied/i);
+      expect(proposal.explanation).toMatch(/requested new description: "full seasonal inspection"/i);
+    });
+
+    it('stops claiming "no price was stated" when a price WAS stated and refused', async () => {
+      const catalogRepo = await seededRepo([{ name: 'AC tune-up', unitPriceCents: 8900 }]);
+      const { proposal } = await new UpdateCatalogItemTaskHandler(catalogRepo).handle(
+        ctx({ existingEntities: { catalogItemReference: 'AC tune-up', unitPriceCents: 29_000_000 } }),
+      );
+
+      // The gate itself was already correct here (nothing else was spoken, so
+      // the no-change gate fired) — the WORDING was a lie: the operator did
+      // state a price and was told they hadn't.
+      expect(missingFieldsFor(proposal)).toContain('proposedUnitPriceCents');
+      expect(proposal.explanation).not.toMatch(/no price, name, or description change was stated/i);
+      expect(proposal.explanation).toMatch(/\$290,000\.00/);
+      expect(proposal.explanation).toMatch(/\$100,000\.00/); // the limit it exceeded
+    });
+
+    /**
+     * Review N7 — the over-ceiling branch names the figure it dropped; the
+     * negative/invalid branch did not. A spoken `-$5.00` is as much a
+     * mishearing worth showing the operator as `$290,000.00` is, and the
+     * asymmetry meant half the refusals said only "a price that is not
+     * valid" with no way to tell WHAT was heard.
+     */
+    it('names the refused figure on the negative/invalid branch too, not just the over-ceiling one', async () => {
+      const catalogRepo = await seededRepo([{ name: 'AC tune-up', unitPriceCents: 8900 }]);
+      const { proposal } = await new UpdateCatalogItemTaskHandler(catalogRepo).handle(
+        ctx({ existingEntities: { catalogItemReference: 'AC tune-up', unitPriceCents: -500 } }),
+      );
+
+      expect(missingFieldsFor(proposal)).toContain('proposedUnitPriceCents');
+      expect(proposal.explanation).toMatch(/-\$5\.00/);
+      expect(proposal.explanation).toMatch(/not applied/i);
+    });
+
+    /**
+     * Review N8 — `Number.isFinite` admits up to 1.79e308, so an ASR figure
+     * that absurd reached the echo. `toFixed` goes exponential at >=1e21
+     * ("Heard a price of $1e+306") and `Intl` renders a 300-digit wall;
+     * neither is something to put on an approval card.
+     */
+    it('does not echo an absurd ASR figure verbatim', async () => {
+      const catalogRepo = await seededRepo([{ name: 'AC tune-up', unitPriceCents: 8900 }]);
+      const { proposal } = await new UpdateCatalogItemTaskHandler(catalogRepo).handle(
+        ctx({ existingEntities: { catalogItemReference: 'AC tune-up', unitPriceCents: 1e306 } }),
+      );
+
+      expect(missingFieldsFor(proposal)).toContain('proposedUnitPriceCents');
+      expect(proposal.explanation).not.toMatch(/e\+/i);
+      // Nothing longer than a plausible money string reaches the card.
+      expect(proposal.explanation!.length).toBeLessThan(400);
+      expect(proposal.explanation).toMatch(/not applied/i);
+    });
+
+    it('gates only once — an unresolvable item AND a refused price do not double-push the price key', async () => {
+      const catalogRepo = await seededRepo([{ name: 'Water heater install', unitPriceCents: 145000 }]);
+      const { proposal } = await new UpdateCatalogItemTaskHandler(catalogRepo).handle(
+        ctx({ existingEntities: { catalogItemReference: 'flux capacitor', unitPriceCents: 29_000_000 } }),
+      );
+
+      const missing = missingFieldsFor(proposal);
+      expect(missing).toContain('catalogItemId');
+      expect(missing.filter((f) => f === 'proposedUnitPriceCents')).toHaveLength(1);
+    });
+  });
+
+  /**
+   * Review N14 — the gate's whole justification is "the operator's recovery
+   * is one field edit, not a re-utterance". That claim had never been
+   * tested end to end, and on the web chat surface it turned out to be
+   * FALSE (the card posts the edit as a STRING against a `z.number()`
+   * field). This pins the server half of the claim so the client half has
+   * something true to be measured against. Precedent:
+   * test/ai/tasks/brand-voice-task.test.ts.
+   */
+  describe('the refused-price gate has a real unblock path', () => {
+    it('an exact flat-key edit clears the gate and the proposal then approves', async () => {
+      const catalogRepo = await seededRepo([{ name: 'AC tune-up', unitPriceCents: 8900 }]);
+      const { proposal } = await new UpdateCatalogItemTaskHandler(catalogRepo).handle(
+        ctx({
+          existingEntities: {
+            catalogItemReference: 'AC tune-up',
+            unitPriceCents: 29_000_000,
+            catalogItemNewName: 'AC seasonal service',
+          },
+        }),
+      );
+      expect(missingFieldsFor(proposal)).toContain('proposedUnitPriceCents');
+
+      const proposalRepo = new InMemoryProposalRepository();
+      await proposalRepo.create({ ...proposal, status: 'ready_for_review' });
+
+      // The gate is REAL: approval is refused while it stands.
+      await expect(
+        approveProposal(proposalRepo, TENANT_ID, proposal.id, 'u-owner', 'owner'),
+      ).rejects.toThrow();
+
+      // An unrelated edit does not lift it — clear-on-fill only lifts the
+      // entry for the EXACT key edited (missing-fields.ts).
+      const afterUnrelated = await editProposal(
+        proposalRepo,
+        TENANT_ID,
+        proposal.id,
+        'u-owner',
+        'owner',
+        { name: 'AC tune-up' },
+      );
+      expect(missingFieldsFor(afterUnrelated.proposal)).toContain('proposedUnitPriceCents');
+
+      // Editing the gated key itself clears it. NOTE the NUMBER: the payload
+      // field is `z.number()` and `editProposal` re-validates the merged
+      // payload, so a string would fail with "Invalid payload after edit".
+      const afterEdit = await editProposal(
+        proposalRepo,
+        TENANT_ID,
+        proposal.id,
+        'u-owner',
+        'owner',
+        { proposedUnitPriceCents: 29_000_000 },
+      );
+      expect(missingFieldsFor(afterEdit.proposal)).toEqual([]);
+
+      // …and the proposal an operator deliberately priced at $290,000 is now
+      // approvable: the ceiling is a SPOKEN-price gate, not a contract bound.
+      const approved = await approveProposal(
+        proposalRepo,
+        TENANT_ID,
+        proposal.id,
+        'u-owner',
+        'owner',
+      );
+      expect(approved.status).toBe('approved');
+      expect((approved.payload as Record<string, unknown>).proposedUnitPriceCents).toBe(29_000_000);
+    });
+
+    it('rejects a STRING edit of the cents key — the shape the web chat card was sending', async () => {
+      const catalogRepo = await seededRepo([{ name: 'AC tune-up', unitPriceCents: 8900 }]);
+      const { proposal } = await new UpdateCatalogItemTaskHandler(catalogRepo).handle(
+        ctx({ existingEntities: { catalogItemReference: 'AC tune-up', unitPriceCents: 29_000_000 } }),
+      );
+      const proposalRepo = new InMemoryProposalRepository();
+      await proposalRepo.create({ ...proposal, status: 'ready_for_review' });
+
+      await expect(
+        editProposal(proposalRepo, TENANT_ID, proposal.id, 'u-owner', 'owner', {
+          proposedUnitPriceCents: '29000000',
+        }),
+      ).rejects.toThrow(/Invalid payload after edit/);
+    });
   });
 
   it('a description-only request resolves the item and rides explanation, never a fabricated payload field', async () => {

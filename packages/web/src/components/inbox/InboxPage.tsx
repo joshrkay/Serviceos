@@ -1,5 +1,9 @@
 import { useEffect, useState, useRef, useCallback } from 'react';
-import { isCaptureProposalType } from '@ai-service-os/shared';
+import {
+  isCaptureProposalType,
+  isFlatMissingField,
+  labelForMissingField,
+} from '@ai-service-os/shared';
 import { useApiClient } from '../../lib/apiClient';
 import { emitProposalsChanged, PROPOSALS_CHANGED } from '../../lib/proposal-events';
 import { useTenantTimezone } from '../../hooks/useTenantTimezone';
@@ -102,6 +106,15 @@ interface InboxProposalRow {
     id: string;
     proposalType: string;
     summary: string;
+    /**
+     * Review J8 — the drafting handler's own reasoning. Already serialized by
+     * the inbox endpoint (`proposalResponseSchema` carries it); it was simply
+     * never declared here and therefore never read. On a gated proposal it is
+     * the ONLY place the operator learns what the draft refused to do —
+     * `update_catalog_item`'s refused spoken price ("Heard a price of
+     * $290,000.00 … NOT applied") being the case that exposed this.
+     */
+    explanation?: string;
     status: string;
     createdAt: string;
     expiresAt?: string;
@@ -254,6 +267,36 @@ function rowNeedsReviewResponse(row: InboxProposalRow): boolean {
   );
 }
 
+/**
+ * Review J8 — the `missingFields` gate, as this surface must honour it.
+ *
+ * `approveProposal` (api proposals/actions.ts) REFUSES a proposal with a
+ * non-empty tracked list, so an Approve button offered over one is an
+ * approval that cannot succeed: the operator taps it and gets a 400. The
+ * inbox declared this field and never read it, so a voice-drafted
+ * `update_catalog_item` whose spoken price was refused looked identical to
+ * an ordinary approvable row — on the surface such a proposal primarily
+ * lands on.
+ *
+ * Returns EVERY entry (path-shaped included), because the server gates on
+ * every entry; `flatMissingFieldsFor` is the narrower list this UI can
+ * actually name.
+ */
+function missingFieldsFor(row: InboxProposalRow): string[] {
+  const raw = row.proposal.sourceContext?.missingFields;
+  return Array.isArray(raw) ? raw.filter((f): f is string => typeof f === 'string') : [];
+}
+
+/**
+ * The subset worth printing: flat keys an operator could fill. Path-shaped
+ * entries (`lineItems[0].catalogItemId`) belong to the ambiguous-line
+ * candidate picker `ProposalMarkers` already renders, and naming them in
+ * prose would just be a second, worse copy of that control.
+ */
+function flatMissingFieldsFor(row: InboxProposalRow): string[] {
+  return missingFieldsFor(row).filter(isFlatMissingField);
+}
+
 function holdExpiryLine(row: InboxProposalRow, timezone: string): string | null {
   if (row.proposal.proposalType !== 'create_booking' || !row.proposal.expiresAt) {
     return null;
@@ -340,7 +383,13 @@ function batchConfidence(proposal: InboxProposalRow['proposal']): number {
 function isBatchEligibleRow(row: InboxProposalRow): boolean {
   return (
     isCaptureProposalType(row.proposal.proposalType) &&
-    batchConfidence(row.proposal) >= 0.8
+    batchConfidence(row.proposal) >= 0.8 &&
+    // Review J8 — the hero is an Approve too. `approveProposal` refuses a
+    // proposal with a tracked `missingFields` entry, so sweeping one into
+    // the batch buys a per-id failure and a confusing partial result. A
+    // high-confidence `create_customer` with only a name is exactly this
+    // shape, so it is not hypothetical.
+    missingFieldsFor(row).length === 0
   );
 }
 
@@ -927,9 +976,14 @@ export function InboxPage() {
             // U6 — a review-response approve with nothing selected would
             // execute zero components; keep the button dead until at least
             // one part is included (the card explains why).
+            // Review J8 — a tracked `missingFields` entry blocks approval
+            // SERVER-side, so offering Approve over one offers a 400.
+            const missingFields = missingFieldsFor(row);
+            const namedMissingFields = flatMissingFieldsFor(row);
             const approveBlocked =
-              rowNeedsReviewResponse(row) &&
-              !anyReviewComponentSelected(row.proposal.payload, reviewSelectionFor(row));
+              missingFields.length > 0 ||
+              (rowNeedsReviewResponse(row) &&
+                !anyReviewComponentSelected(row.proposal.payload, reviewSelectionFor(row)));
             return (
               <li
                 key={row.proposal.id}
@@ -949,7 +1003,34 @@ export function InboxPage() {
                       <p className="text-xs text-warning mt-0.5">{holdExpiryLine(row, tz)}</p>
                     )}
                     {row.reason && <p className="text-xs text-muted-foreground mt-0.5">{row.reason}</p>}
+                    {/* Review J8 — the drafting handler's own reasoning. On a
+                        gated proposal it is the only thing that says what the
+                        draft REFUSED to do ("Heard a price of $290,000.00 …
+                        NOT applied"), and it was rendered nowhere on this
+                        surface. */}
+                    {row.proposal.explanation && (
+                      <p
+                        data-testid="proposal-explanation"
+                        className="text-xs text-muted-foreground mt-0.5"
+                      >
+                        {row.proposal.explanation}
+                      </p>
+                    )}
                     <ProposalMarkers row={row} onResolveLine={resolveLine} onResolveEntity={resolveEntity} />
+                    {/* Why Approve is dead, in the operator's words. Only the
+                        flat entries are named — a path-shaped one is the
+                        candidate picker's job, rendered by ProposalMarkers
+                        just above. Editing is not offered HERE: the inbox has
+                        no field-edit affordance and building one is a
+                        different piece of work (see the report). */}
+                    {namedMissingFields.length > 0 && (
+                      <p
+                        data-testid="proposal-missing-fields"
+                        className="text-xs text-warning mt-1"
+                      >
+                        Needs: {namedMissingFields.map(labelForMissingField).join(', ')}
+                      </p>
+                    )}
                     {/* A spoken address that can't yet become a
                         `service_location`. Completing it here is the obvious
                         path; leaving it blank is still allowed and the

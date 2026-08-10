@@ -116,4 +116,33 @@ describe('Postgres integration — resetStaleExecuting execution_error stamp', (
     expect(row.status).toBe('execution_failed');
     expect(row.executionError).toBe(preExisting);
   });
+
+  /**
+   * Follow-up review J4 — the RETRY branch of the same statement pair. The
+   * unit test can only see `execution_error = NULL` in the SQL text; this
+   * proves a real planner actually clears the column, and that the clear is
+   * scoped to the branch that resets (the terminal branch above must keep
+   * COALESCE-ing, which the two tests above pin).
+   */
+  it('clears execution_error when the row is reset to approved for another retry', async () => {
+    const tenant = await createTestTenant(pool);
+    const staleMinutes = 10;
+    const maxRetries = 3;
+    const id = await seedStaleExecuting(pool, tenant.tenantId, {
+      idempotencyKey: 'reset-stale-clears-cause',
+      claimedMinutesAgo: staleMinutes + 5,
+      // BELOW the cap — this run retries rather than terminalizing.
+      retryCount: 0,
+      executionError: 'SMTP relay refused the message',
+    });
+
+    await repo.resetStaleExecuting(staleMinutes, maxRetries);
+
+    const row = await rowOf(pool, id);
+    expect(row.status).toBe('approved');
+    // The previous attempt's reason must not survive into the fresh attempt:
+    // GET /api/proposals/:id returns the full Proposal, so carrying it means
+    // an operator sees an error string on a proposal that went on to succeed.
+    expect(row.executionError).toBeNull();
+  });
 });

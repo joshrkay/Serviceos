@@ -1,6 +1,7 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router';
 import { toast } from 'sonner';
+import { parseMoneyToCents } from '@ai-service-os/shared';
 import {
   ServiceAddressCompletion,
   addressEditsFrom,
@@ -11,7 +12,7 @@ import {
 import {
   Check, Pencil, X, Sparkles, ChevronDown, ChevronUp,
   Brain, Receipt, Calendar, MessageCircle, AlertCircle, Copy,
-  ArrowUpRight, UserPlus, HelpCircle, StickyNote, DollarSign, Send,
+  ArrowUpRight, UserPlus, HelpCircle, StickyNote, DollarSign, Send, Undo2,
 } from 'lucide-react';
 import type {
   AIProposal,
@@ -133,7 +134,7 @@ interface Props {
    * This is the human-approval gate, so a failed call must NOT look like
    * success.
    */
-  onApprove?: (edits?: Record<string, string>) => void | Promise<void>;
+  onApprove?: (edits?: Record<string, unknown>) => void | Promise<void>;
   /**
    * Invoked when the operator dismisses. May be async — a thrown error
    * (or rejected promise) reverts the optimistic "Rejected" state and
@@ -144,13 +145,58 @@ interface Props {
 
 export function AIProposalCard({ proposal, onApprove, onReject }: Props) {
   const navigate = useNavigate();
-  const [status,       setStatus]       = useState<'Pending' | 'Approved' | 'Rejected'>(proposal.status);
+  const [status,       setStatus]       = useState<AIProposal['status']>(proposal.status);
+  /**
+   * Did this card arrive already approved — i.e. the backend auto-approved
+   * and queued it with NO human tap?
+   *
+   * Captured from the FIRST render only (useState initialiser), because
+   * `status` also flips to 'Approved' when the operator taps Approve and the
+   * two cases need different copy. Without this the terminal branch below
+   * told an operator who never touched the card "Applied successfully": they
+   * did not approve it, and it has not applied — auto-approval stamps
+   * `approvedAt` and the execution sweep only picks the row up once the undo
+   * window closes, so at render time the write is still pending and still
+   * cancellable (the page raises the shared UndoToast off `undoExpiresAt`).
+   */
+  const [arrivedAutoApproved] = useState(() => proposal.status === 'Approved');
+
+  /**
+   * Review N10 — is the server's undo window still open RIGHT NOW?
+   *
+   * The terminal line used to be a static string chosen at first render, so
+   * it went on promising "undo now" after the window had lapsed and after a
+   * successful undo had already cancelled the write. This ticks so the copy
+   * stops making an offer that no longer stands. No window stamp ⇒ no offer,
+   * matching the API-side contract (routes/assistant.ts) and the hook.
+   */
+  const undoCloseAt = proposal.undoExpiresAt ? Date.parse(proposal.undoExpiresAt) : NaN;
+  const [undoWindowOpen, setUndoWindowOpen] = useState(
+    () => !Number.isNaN(undoCloseAt) && undoCloseAt > Date.now(),
+  );
+  useEffect(() => {
+    if (Number.isNaN(undoCloseAt)) {
+      setUndoWindowOpen(false);
+      return;
+    }
+    const tick = () => setUndoWindowOpen(undoCloseAt > Date.now());
+    tick();
+    const id = setInterval(tick, 250);
+    return () => clearInterval(id);
+  }, [undoCloseAt]);
+
+  // Prop-driven status changes (an undo landing on the page's message state)
+  // must reach the card — the local state exists only for the OPTIMISTIC flip
+  // on tap, and used to swallow every later correction.
+  useEffect(() => setStatus(proposal.status), [proposal.status]);
   const [showReason,   setShowReason]   = useState(false);
   const [editing,      setEditing]      = useState(false);
   const [isApproving,  setIsApproving]  = useState(false);
   const [fieldValues,  setFieldValues]  = useState<Record<string, string>>(
     Object.fromEntries((proposal.editFields ?? []).map(f => [f.key, f.value]))
   );
+  /** Labels of edit inputs that could not be parsed — blocks Save & apply. */
+  const [invalidFields, setInvalidFields] = useState<string[]>([]);
 
   // ── Service-address completion ────────────────────────────────
   // See ServiceAddressCompletion.tsx for why this exists and why it is never
@@ -162,19 +208,70 @@ export function AIProposalCard({ proposal, onApprove, onReject }: Props) {
     initialAddressValues(proposal.addressCapture),
   );
 
-  /** Merge card edits with address edits; undefined when there is nothing to save. */
-  const mergedEdits = (base?: Record<string, string>): Record<string, string> | undefined => {
-    const merged = {
-      ...(base ?? {}),
-      ...(addressEditsFrom(proposal.addressCapture, addressValues) ?? {}),
-    };
+  /**
+   * Review J5 — turn the typed input strings into the SHAPES the payload
+   * contract expects, then merge the address edits.
+   *
+   * `editProposalBodySchema` is `z.record(z.unknown())` with no coercion and
+   * `editProposal` re-validates the merged payload against the real contract,
+   * so a `z.number()` field sent as `"29000000"` came back 400 "Invalid
+   * payload after edit" — surfacing to the operator as "Couldn't apply this
+   * suggestion. Please try again." on the one recovery path #28's gate exists
+   * to give them. Parsing here rather than coercing server-side is not a
+   * preference: a 'cents' input is DOLLARS, so `z.coerce.number()` on
+   * "290000" would have meant $2,900 — wrong by 100x on a money field.
+   *
+   * Returns `null` when any input is unparseable; the caller shows the
+   * offending labels instead of sending a request that cannot succeed.
+   */
+  const typedEdits = (
+    drafts: Record<string, string>,
+  ): { edits: Record<string, unknown> | undefined; invalid: string[] } => {
+    const edits: Record<string, unknown> = {};
+    const invalid: string[] = [];
+    for (const field of proposal.editFields ?? []) {
+      const draft = drafts[field.key];
+      if (draft === undefined) continue;
+      if (field.kind === 'cents') {
+        const cents = parseMoneyToCents(draft);
+        if (cents === null) {
+          invalid.push(field.label);
+          continue;
+        }
+        edits[field.key] = cents;
+      } else if (field.kind === 'number') {
+        const n = Number(draft.trim());
+        if (draft.trim() === '' || Number.isNaN(n)) {
+          invalid.push(field.label);
+          continue;
+        }
+        edits[field.key] = n;
+      } else {
+        edits[field.key] = draft;
+      }
+    }
+    Object.assign(edits, addressEditsFrom(proposal.addressCapture, addressValues) ?? {});
+    return { edits: Object.keys(edits).length > 0 ? edits : undefined, invalid };
+  };
+
+  /** Address-only edits, for the non-editing Approve path. */
+  const mergedEdits = (): Record<string, unknown> | undefined => {
+    const merged = { ...(addressEditsFrom(proposal.addressCapture, addressValues) ?? {}) };
     return Object.keys(merged).length > 0 ? merged : undefined;
+  };
+
+  /** Parse, then approve — or refuse and name the fields that would 400. */
+  const saveAndApply = () => {
+    const { edits, invalid } = typedEdits(fieldValues);
+    setInvalidFields(invalid);
+    if (invalid.length > 0) return;
+    void runApprove(() => setEditing(false), edits);
   };
 
   // Optimistically flip to Approved, then await the handler. On failure
   // revert to the prior state and surface a toast — never leave a failed
   // approval showing "Applied successfully".
-  const runApprove = async (onDone?: () => void, edits?: Record<string, string>) => {
+  const runApprove = async (onDone?: () => void, edits?: Record<string, unknown>) => {
     if (isApproving) return;
     const prevStatus = status;
     setStatus('Approved');
@@ -237,7 +334,21 @@ export function AIProposalCard({ proposal, onApprove, onReject }: Props) {
         </span>
         <div className="flex-1 min-w-0">
           <p className="text-sm text-success">{proposal.title}</p>
-          <p className="text-xs text-success mt-0.5">Applied successfully</p>
+          {/* Review J7 — "Applied successfully" was false on BOTH branches,
+              not just the auto one. `findReadyForExecution` requires
+              `approved_at <= NOW() - windowMs`, so at the instant this
+              renders nothing has applied either way; and the page raises the
+              undo toast on the same tick, so the card claimed a completed
+              write while offering to cancel it. The ATTRIBUTION clause is
+              the only part that differs between the two audiences.
+              Review N10 — the undo clause is driven off the live window, not
+              a first-render snapshot. */}
+          <p className="text-xs text-success mt-0.5">
+            {arrivedAutoApproved ? 'Approved automatically — nobody tapped Approve. ' : ''}
+            {undoWindowOpen
+              ? 'Applying shortly; undo now, or reverse it from the record afterwards.'
+              : 'Applying shortly — reverse it from the record if it was wrong.'}
+          </p>
         </div>
         {proposal.relatedId && entityRouteFor(proposal.type, proposal.relatedId) && (
           <button
@@ -248,6 +359,23 @@ export function AIProposalCard({ proposal, onApprove, onReject }: Props) {
             View <ArrowUpRight size={11} />
           </button>
         )}
+      </div>
+    );
+  }
+
+  // ── Undone ────────────────────────────────────────────────────
+  // Review N10 — a cancelled write is not an approved one and not a rejected
+  // one. Without this the card kept rendering the Approved branch, still
+  // saying "Applying shortly", for something the operator had just undone.
+  if (status === 'Undone') {
+    return (
+      <div className="rounded-xl border border-border bg-secondary px-4 py-3 flex items-center gap-3">
+        <span className="flex size-6 shrink-0 items-center justify-center rounded-full bg-secondary">
+          <Undo2 size={12} className="text-muted-foreground" />
+        </span>
+        <p className="text-sm text-muted-foreground">
+          {proposal.title} — undone. Nothing was applied.
+        </p>
       </div>
     );
   }
@@ -276,8 +404,19 @@ export function AIProposalCard({ proposal, onApprove, onReject }: Props) {
           <div className="flex flex-col gap-3 mb-4">
             {proposal.editFields.map(field => (
               <div key={field.key}>
-                <label className="block text-xs text-muted-foreground mb-1">{field.label}</label>
+                <label
+                  htmlFor={`${proposal.id}-edit-${field.key}`}
+                  className="block text-xs text-muted-foreground mb-1"
+                >
+                  {field.label}
+                </label>
                 <input
+                  id={`${proposal.id}-edit-${field.key}`}
+                  // A money field is typed in DOLLARS and sent as integer
+                  // cents (review J5) — `inputMode` keeps the numeric keypad
+                  // on a phone without rejecting "$1,299.50", which the
+                  // shared parser accepts.
+                  inputMode={field.kind === 'cents' || field.kind === 'number' ? 'decimal' : undefined}
                   value={fieldValues[field.key] ?? field.value}
                   onChange={e => setFieldValues(prev => ({ ...prev, [field.key]: e.target.value }))}
                   className="w-full rounded-lg border border-border bg-secondary px-3 py-2 text-sm text-foreground outline-none focus:border-primary focus:bg-card transition-colors"
@@ -285,9 +424,14 @@ export function AIProposalCard({ proposal, onApprove, onReject }: Props) {
               </div>
             ))}
           </div>
+          {invalidFields.length > 0 && (
+            <p data-testid="edit-field-error" className="text-xs text-destructive mb-3">
+              Enter a valid amount for: {invalidFields.join(', ')}
+            </p>
+          )}
           <div className="flex items-center gap-2">
             <button
-              onClick={() => { void runApprove(() => setEditing(false), mergedEdits(fieldValues)); }}
+              onClick={saveAndApply}
               disabled={isApproving}
               className="flex items-center gap-1.5 rounded-lg bg-primary px-4 py-2 text-xs text-primary-foreground hover:bg-primary/90 transition-colors disabled:bg-muted disabled:cursor-not-allowed"
             >

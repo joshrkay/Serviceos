@@ -65,10 +65,46 @@ export interface AIProposal {
   summary: string;
   explanation: string;
   reasoning?: string[];
-  editFields?: { label: string; value: string; key: string }[];
+  /**
+   * Edit-before-approve inputs. `kind` (review J5) says how the typed input
+   * is PARSED before it goes to `PUT /api/proposals/:id { edits }`: a
+   * 'cents' field is DOLLARS in the box and integer cents on the wire.
+   * Absent means 'text', which is what every pre-existing emitter produces.
+   * Without it the card sent the raw string for a `z.number()` payload field
+   * and every money edit came back 400 "Invalid payload after edit".
+   */
+  editFields?: {
+    label: string;
+    value: string;
+    key: string;
+    kind?: 'text' | 'cents' | 'number';
+  }[];
   confidence: ProposalConfidence;
   type: ProposalType;
-  status: 'Pending' | 'Approved' | 'Rejected';
+  /**
+   * 'Undone' (review N10) is a real terminal state — `POST
+   * /api/proposals/:id/undo` moves the row to 'undone'. Without it the card
+   * kept rendering "Applying shortly; undo now" for a write the operator had
+   * just cancelled, because nothing could tell it otherwise.
+   */
+  status: 'Pending' | 'Approved' | 'Rejected' | 'Undone';
+  /**
+   * ISO instant the server's 5s undo window closes, present only on a card
+   * that arrived ALREADY `Approved` — i.e. the backend auto-approved and
+   * queued it with no human tap. The surface rendering the card anchors its
+   * undo countdown to this instant (never a fresh client 5s), so the slice of
+   * the window the request round-trip already spent is not offered back.
+   * Absent ⇒ no server-side window ⇒ no undo affordance.
+   */
+  undoExpiresAt?: string;
+  /**
+   * The same window as a DURATION, in milliseconds, measured when the server
+   * wrote the response (review N11). Preferred over `undoExpiresAt` because
+   * it carries no clock: differencing a server instant against a local
+   * `Date.now()` subtracts any skew straight out of a 5-second budget the
+   * chat round trip (an LLM call) has already spent most of.
+   */
+  undoRemainingMs?: number;
   relatedId?: string;
   impact?: string;
   /**

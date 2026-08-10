@@ -807,10 +807,27 @@ export function AssistantPage() {
   const undoToast = useUndoableApproval({
     requestUndo: (proposalId) =>
       apiFetch(`/api/proposals/${proposalId}/undo`, { method: 'POST' }),
-    // Keep the inbox (and any other live surface) in sync after an undo.
-    onUndone: () => emitProposalsChanged(),
+    // Keep the inbox (and any other live surface) in sync after an undo…
+    onUndone: (proposalId) => {
+      emitProposalsChanged();
+      // …and this surface too. Review N10 — only the cross-surface event was
+      // fired, so the chat message's own `proposal` was never updated and the
+      // card went on saying "Applying shortly; undo now" about a write the
+      // operator had just cancelled.
+      setMessages((prev) =>
+        prev.map((m) =>
+          m.proposal?.id === proposalId
+            ? { ...m, proposal: { ...m.proposal, status: 'Undone' as const } }
+            : m,
+        ),
+      );
+    },
     onError: (message) => toast.error(message),
   });
+  // Stable reference (a useCallback inside the hook) so `send` can depend on
+  // it without re-creating itself every render — the hook's returned object
+  // is a fresh literal each time, `start` is not.
+  const startUndo = undoToast.start;
   const lastInputWasVoiceRef = useRef(false);
   // UB-B2 — conversation mode. Populated after `send` is defined (the hook
   // needs `send`; `send` needs the session to speak replies through the
@@ -953,6 +970,36 @@ export function AssistantPage() {
       };
       setMessages(prev => [...prev, aiMsg]);
 
+      // Follow-up — undo parity for the AUTO-APPROVED path. A proposal the
+      // backend approved on its own never goes through AIProposalCard's
+      // approve callback (no tap, no approve round-trip), so it used to reach
+      // the operator already committed with no way back — even though the row
+      // is 'approved' and still inside its undo window, exactly the state
+      // `POST /api/proposals/:id/undo` accepts. Raise the SAME toast the
+      // manual path raises, anchored to the SERVER's `undoExpiresAt`: the hook
+      // leaves the affordance inactive when the chat round-trip already ate
+      // the window, so this never offers an undo the server would 409.
+      // Review J3 — the guard requires SERVER TIMING, not just an 'Approved'
+      // status. `assistantReplySchema` accepts `status: 'Approved'` straight
+      // from the model and the route returns `parsed.proposal` UNMAPPED on
+      // the raw-completion path, so a model-authored "Approved" with no
+      // window (and possibly no real proposal id) used to reach `start` and
+      // be handed a freshly invented client 5s. Clicking Undo then POSTed to
+      // a bogus id and the operator got a raw error toast. The hook refuses
+      // a timing-less start too; both belts are cheap and the API-side
+      // contract is unambiguous ("no stamp ⇒ no window ⇒ no affordance").
+      const undoWindow = reply.proposal?.undoExpiresAt ?? reply.proposal?.undoRemainingMs;
+      if (reply.proposal?.status === 'Approved' && undoWindow !== undefined) {
+        startUndo({
+          proposalId: reply.proposal.id,
+          summary: reply.proposal.title,
+          response: {
+            undoExpiresAt: reply.proposal.undoExpiresAt,
+            undoRemainingMs: reply.proposal.undoRemainingMs,
+          },
+        });
+      }
+
       // Story 3.12 — the assistant API swallows transport failures into a
       // degraded reply (failed:true) so the error renders inline; surface a
       // one-tap RETRY for the failed input alongside it.
@@ -982,7 +1029,7 @@ export function AssistantPage() {
       setTyping(false);
       setTypingReason('');
     }
-  }, [conversationId, navigate, ttsEnabled, speak]);
+  }, [conversationId, navigate, ttsEnabled, speak, startUndo]);
 
   // UB-B2 — conversational voice session: continuous STT, per-utterance
   // auto-submit through the SAME chat path as typed input (inputMode: 'voice'

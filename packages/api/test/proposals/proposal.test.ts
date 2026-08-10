@@ -8,6 +8,9 @@ import {
   decideInitialStatus,
   actionClassForProposalType,
   VALID_PROPOSAL_TYPES,
+  redactedExecutionErrorCause,
+  MAX_EXECUTION_ERROR_LENGTH,
+  staleExecutionTimeoutMessage,
 } from '../../src/proposals/proposal';
 import { ConflictError } from '../../src/shared/errors';
 
@@ -970,8 +973,17 @@ describe('InMemoryProposalRepository.resetStaleExecuting — failed proposal det
 
     expect(result.movedToFailed).toBe(1);
     expect(result.resetToApproved).toBe(0);
+    // Follow-up: each entry also carries the row's POST-write reason, so the
+    // caller's `proposal.execution_timed_out` event can state WHY. Nothing was
+    // recorded on this row before the sweep, so it is the synthesized wording.
     expect(result.failedProposals).toEqual([
-      { id: 'stale-1', tenantId: 'tenant-1', proposalType: 'create_customer', retryCount: 3 },
+      {
+        id: 'stale-1',
+        tenantId: 'tenant-1',
+        proposalType: 'create_customer',
+        retryCount: 3,
+        executionError: staleExecutionTimeoutMessage(10, 3),
+      },
     ]);
   });
 
@@ -988,6 +1000,32 @@ describe('InMemoryProposalRepository.resetStaleExecuting — failed proposal det
     expect(result.resetToApproved).toBe(1);
     expect(result.movedToFailed).toBe(0);
     expect(result.failedProposals).toEqual([]);
+  });
+
+  /**
+   * Review J4 — reset-to-approved IS the "start a fresh attempt" boundary,
+   * and the previous attempt's reason must not ride along into it. This
+   * state was IMPOSSIBLE before the cause started being recorded on the
+   * still-'executing' row (the column was only ever written at the terminal
+   * transition) and is now routine on EVERY retry path: `GET
+   * /api/proposals/:id` returns the full Proposal, so an operator would see
+   * a successfully-executed proposal still carrying an error string.
+   */
+  it('clears the previous attempt reason when resetting a proposal to approved', async () => {
+    const repo = new InMemoryProposalRepository();
+    await seedExecuting(repo, {
+      id: 'stale-retry-with-cause',
+      claimedAt: new Date(Date.now() - 11 * 60 * 1000),
+      executionRetryCount: 0,
+      executionError: 'SMTP relay refused the message',
+    });
+
+    const result = await repo.resetStaleExecuting(10, 3);
+    expect(result.resetToApproved).toBe(1);
+
+    const reset = await repo.findById('tenant-1', 'stale-retry-with-cause');
+    expect(reset!.status).toBe('approved');
+    expect(reset!.executionError).toBeUndefined();
   });
 
   it('reports multiple failed proposals across tenants', async () => {
@@ -1011,8 +1049,49 @@ describe('InMemoryProposalRepository.resetStaleExecuting — failed proposal det
 
     expect(result.movedToFailed).toBe(2);
     expect(result.failedProposals.sort((a, b) => a.id.localeCompare(b.id))).toEqual([
-      { id: 'stale-a', tenantId: 'tenant-a', proposalType: 'create_customer', retryCount: 3 },
-      { id: 'stale-b', tenantId: 'tenant-b', proposalType: 'issue_invoice', retryCount: 5 },
+      {
+        id: 'stale-a',
+        tenantId: 'tenant-a',
+        proposalType: 'create_customer',
+        retryCount: 3,
+        executionError: staleExecutionTimeoutMessage(10, 3),
+      },
+      {
+        id: 'stale-b',
+        tenantId: 'tenant-b',
+        proposalType: 'issue_invoice',
+        retryCount: 5,
+        executionError: staleExecutionTimeoutMessage(10, 5),
+      },
+    ]);
+  });
+
+  /**
+   * Follow-up — a cause recorded while the row was still 'executing' (the
+   * execution sweep's per-proposal catch) must be the reason REPORTED, not
+   * just the reason left on the column: the audit event is built from this
+   * array, so a COALESCE that preserves the real cause on the row while the
+   * caller still emits "timed out" would leave the original gap open.
+   */
+  it('reports the real recorded cause, not the synthesized wording, when one was already on the row', async () => {
+    const repo = new InMemoryProposalRepository();
+    await seedExecuting(repo, {
+      id: 'stale-with-cause',
+      claimedAt: new Date(Date.now() - 11 * 60 * 1000),
+      executionRetryCount: 3,
+      executionError: 'SMTP relay refused the message',
+    });
+
+    const result = await repo.resetStaleExecuting(10, 3);
+
+    expect(result.failedProposals).toEqual([
+      {
+        id: 'stale-with-cause',
+        tenantId: 'tenant-1',
+        proposalType: 'create_customer',
+        retryCount: 3,
+        executionError: 'SMTP relay refused the message',
+      },
     ]);
   });
 
@@ -1052,5 +1131,274 @@ describe('InMemoryProposalRepository.resetStaleExecuting — failed proposal det
 
     const updated = await repo.findById('tenant-1', 'stale-has-reason');
     expect(updated!.executionError).toBe('a real reason recorded earlier');
+  });
+});
+
+/**
+ * Follow-up to PR #815 — `execution_error` now also receives the CAUGHT
+ * execution error from workers/execution-worker.ts, and from there rides both
+ * `GET /api/proposals` and the `proposal.execution_timed_out` audit row.
+ * A thrown error's message is far less controlled than a handler's own
+ * `result.error` string: it can be a driver error echoing a bound parameter,
+ * an HTTP client error echoing a URL with a token in the query string, or a
+ * provider error quoting the customer contact it failed to reach. So the
+ * cause is bounded and scrubbed on the way in, at the single place that
+ * builds it.
+ */
+describe('redactedExecutionErrorCause — bounded, scrubbed execution_error input', () => {
+  it('passes an ordinary handler message through unchanged', () => {
+    expect(redactedExecutionErrorCause(new Error('Customer has no service location'))).toBe(
+      'Customer has no service location',
+    );
+  });
+
+  it('accepts a non-Error throw without crashing', () => {
+    expect(redactedExecutionErrorCause('plain string throw')).toBe('plain string throw');
+    expect(redactedExecutionErrorCause(undefined)).toBe('unknown execution failure');
+    expect(redactedExecutionErrorCause(null)).toBe('unknown execution failure');
+  });
+
+  it('masks bearer tokens', () => {
+    const out = redactedExecutionErrorCause(
+      new Error('401 from provider — Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.abc.def'),
+    );
+    expect(out).not.toContain('eyJhbGciOiJIUzI1NiJ9.abc.def');
+    expect(out).toContain('401 from provider');
+  });
+
+  it('masks secret-ish key=value pairs, including inside a URL query string', () => {
+    const out = redactedExecutionErrorCause(
+      new Error('GET https://api.example.com/v1/send?api_key=live_9f8e7d6c&retry=2 failed'),
+    );
+    expect(out).not.toContain('live_9f8e7d6c');
+    // Non-secret params and the host survive — this has to stay debuggable.
+    expect(out).toContain('api.example.com');
+    expect(out).toContain('retry=2');
+  });
+
+  it('masks provider-style key literals wherever they appear', () => {
+    const out = redactedExecutionErrorCause(new Error('bad key sk_live_51H8xYzAbCdEfGh'));
+    expect(out).not.toContain('sk_live_51H8xYzAbCdEfGh');
+  });
+
+  it('masks customer PII (email addresses and phone numbers)', () => {
+    const out = redactedExecutionErrorCause(
+      new Error('could not reach jane.doe@example.com at (555) 123-4567'),
+    );
+    expect(out).not.toContain('jane.doe@example.com');
+    expect(out).not.toContain('123-4567');
+    expect(out).toContain('could not reach');
+  });
+
+  it('collapses newlines so one cause is one audit-row line', () => {
+    const out = redactedExecutionErrorCause(new Error('line one\nline two\r\nline three'));
+    expect(out).not.toMatch(/[\r\n]/);
+    expect(out).toContain('line one');
+    expect(out).toContain('line three');
+  });
+
+  it('bounds the length so a stack-sized message cannot bloat the row', () => {
+    const out = redactedExecutionErrorCause(new Error('x'.repeat(5000)));
+    expect(out.length).toBeLessThanOrEqual(MAX_EXECUTION_ERROR_LENGTH);
+    expect(out.endsWith('…')).toBe(true);
+  });
+
+  it('is idempotent — re-scrubbing an already-scrubbed cause changes nothing', () => {
+    const once = redactedExecutionErrorCause(
+      new Error('failed for jane.doe@example.com with api_key=live_9f8e7d6c'),
+    );
+    expect(redactedExecutionErrorCause(once)).toBe(once);
+  });
+
+  /**
+   * Review K1 — a hand-picked idempotence string proves nothing: the one
+   * above happens to be a fixed point, so it passed while the chain was
+   * still capable of LEAKING on its single production pass. These are the
+   * two shapes that actually leaked, then a generated corpus so the next
+   * regression is caught by the property rather than by luck.
+   */
+  it('does not leak an email that abuts a digit run (PG unique-constraint DETAIL shape)', () => {
+    const out = redactedExecutionErrorCause(
+      new Error('insert failed: Key (contact)=(jane.doe@example.com4155552671) already exists'),
+    );
+    expect(out).not.toContain('jane.doe@example.com');
+    expect(out).toContain('already exists');
+  });
+
+  it('does not leak an email that abuts a timestamp', () => {
+    const out = redactedExecutionErrorCause(
+      new Error('notify failed for jane.doe@example.com2026-08-09T12:00:00Z'),
+    );
+    expect(out).not.toContain('jane.doe@example.com');
+    expect(out).toContain('notify failed for');
+  });
+
+  it('is a FIXED POINT over a generated corpus, and never leaks a generated email', () => {
+    // Deterministic PRNG (mulberry32) so a failure is reproducible from the
+    // seed printed in the assertion message.
+    const rng = (seed: number) => () => {
+      seed = (seed + 0x6d2b79f5) | 0;
+      let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+    const EMAILS = ['jane.doe@example.com', 'a_b+c@sub.domain.co.uk', 'x@y.io'];
+    const FRAGMENTS = [
+      ...EMAILS,
+      '4155552671',
+      '(415) 555-2671',
+      '+442071234567',
+      '2026-08-09T12:00:00Z',
+      'api_key=live_9f8e7d6c',
+      'client_secret=abc123XYZsecretvalue',
+      'Authorization: Basic dXNlcjpzdXBlcnNlY3JldA==',
+      'Bearer eyJhbGciOiJIUzI1NiJ9.abc.def',
+      'postgres://appuser:sup3rS3cret@localhost:5432/db',
+      '{"apiKey":"sk-proj-abcdefghijkl","password":"hunter2"}',
+      'sk_live_51H8xYzAbCdEfGh',
+      'AKIAIOSFODNN7EXAMPLE',
+      'ghp_abcdefghijklmnopqrstuvwxyz0123456789',
+      'Key (contact)=(',
+      ') already exists',
+      'insert failed:',
+      'amount 1234567890 exceeds int4 range 2147483647',
+      'proposal 42',
+      'DETAIL:',
+      '-',
+      '.',
+      ' ',
+      '@',
+      'x'.repeat(40),
+      '[redacted]',
+      '[email]',
+      '[phone]',
+    ];
+    for (let seed = 0; seed < 400; seed++) {
+      const rand = rng(seed);
+      const parts: string[] = [];
+      const n = 1 + Math.floor(rand() * 12);
+      for (let i = 0; i < n; i++) {
+        parts.push(FRAGMENTS[Math.floor(rand() * FRAGMENTS.length)]!);
+      }
+      // Join with no separator half the time so tokens ABUT each other —
+      // exactly the condition the `\b`-terminated email rule failed on.
+      const input = parts.join(rand() < 0.5 ? '' : ' ');
+      const once = redactedExecutionErrorCause(new Error(input));
+      expect(redactedExecutionErrorCause(once), `seed ${seed}: ${input}`).toBe(once);
+      for (const email of EMAILS) {
+        expect(once, `seed ${seed}: ${input}`).not.toContain(email);
+      }
+    }
+  });
+
+  /**
+   * Review K2 — the email rule's `[A-Za-z0-9.-]+\.[A-Za-z]{2,}` self-overlaps,
+   * so an unbounded `err.message` of this shape backtracks quadratically ON
+   * THE API EVENT LOOP (runExecutionSweep runs in-process with Express). The
+   * message is attacker-influenced: a driver error echoing a bound JSONB
+   * payload, an HTTP client echoing a response body.
+   */
+  it('returns fast on a pathological backtracking input', () => {
+    const n = 64_000;
+    const input = `${'a.'.repeat(n / 2)}@${'b'.repeat(n)}`;
+    const started = Date.now();
+    const out = redactedExecutionErrorCause(new Error(input));
+    const elapsedMs = Date.now() - started;
+    expect(out.length).toBeLessThanOrEqual(MAX_EXECUTION_ERROR_LENGTH);
+    expect(elapsedMs).toBeLessThan(250);
+  });
+
+  /**
+   * Review J1 — the scrubber's own doc claimed shapes it did not cover. Each
+   * of these was verified LEAKING before the fix.
+   */
+  describe('secret shapes', () => {
+    const cases: Array<[string, string, string]> = [
+      ['basic auth credential', 'Authorization: Basic dXNlcjpzdXBlcnNlY3JldA==', 'dXNlcjpzdXBlcnNlY3JldA=='],
+      ['underscore-prefixed key', 'oauth exchange failed: client_secret=abc123XYZsecretvalue', 'abc123XYZsecretvalue'],
+      ['twilio env name', 'auth_token=SK0011223344556677 rejected', 'SK0011223344556677'],
+      ['private key', 'private_key=MIIEvQIBADANBg rejected', 'MIIEvQIBADANBg'],
+      ['signing secret', 'signing_secret=v1_whsig_abcdef', 'v1_whsig_abcdef'],
+      ['webhook secret', 'webhook_secret=topsecretvalue', 'topsecretvalue'],
+      ['json body', 'body {"apiKey":"abcdefghijkl","password":"hunter2"}', 'hunter2'],
+      ['spaced quoted assignment', 'config password = "hunter2" invalid', 'hunter2'],
+      ['bare jwt', 'token rejected eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NX0.dBjftJeZ4CVPmB92K', 'eyJzdWIiOiIxMjM0NX0'],
+      ['openai project key', 'provider rejected sk-proj-abcdefghijklmnop', 'sk-proj-abcdefghijklmnop'],
+      ['anthropic key', 'provider rejected sk-ant-api03-abcdefghijklmnop', 'sk-ant-api03-abcdefghijklmnop'],
+      ['github token', 'clone failed ghp_abcdefghijklmnopqrstuvwxyz0123', 'ghp_abcdefghijklmnopqrstuvwxyz0123'],
+      ['slack bot token', 'slack rejected xoxb-123456789012-abcdefghijkl', 'xoxb-123456789012-abcdefghijkl'],
+      ['aws access key id', 'sts denied AKIAIOSFODNN7EXAMPLE', 'AKIAIOSFODNN7EXAMPLE'],
+      ['postgres dsn password', 'connect ECONNREFUSED postgres://appuser:sup3rS3cret@localhost:5432/db', 'sup3rS3cret'],
+      ['redis dsn password', 'connect ECONNREFUSED redis://:sup3rS3cret@cache:6379', 'sup3rS3cret'],
+    ];
+    for (const [label, input, secret] of cases) {
+      it(`masks a ${label}`, () => {
+        expect(redactedExecutionErrorCause(new Error(input))).not.toContain(secret);
+      });
+    }
+  });
+
+  /**
+   * Review J2 — `execution_error` exists to be read by a human debugging a
+   * failure. A phone rule that eats integer cents and epoch millis destroys
+   * the only field that carries the diagnosis, and this repo has a live
+   * int4-overflow / MAX_QUANTITY error class shaped exactly like these.
+   */
+  describe('diagnostic numbers survive the phone rule', () => {
+    it('keeps a bare integer-cents amount and an int4 bound readable', () => {
+      const out = redactedExecutionErrorCause(
+        new Error('amount 1234567890 exceeds int4 range 2147483647'),
+      );
+      expect(out).toBe('amount 1234567890 exceeds int4 range 2147483647');
+    });
+
+    it('keeps an epoch-millis timestamp readable', () => {
+      const out = redactedExecutionErrorCause(
+        new Error('lock timeout at 1754697600000 for proposal 42'),
+      );
+      expect(out).toBe('lock timeout at 1754697600000 for proposal 42');
+    });
+
+    it('still masks a separated US phone number', () => {
+      expect(redactedExecutionErrorCause(new Error('could not reach 415-555-2671'))).toBe(
+        'could not reach [phone]',
+      );
+    });
+
+    it('masks an international number WHOLE (intl rule ordered before US)', () => {
+      const out = redactedExecutionErrorCause(new Error('could not reach +442071234567'));
+      expect(out).toBe('could not reach [phone]');
+      expect(out).not.toContain('44');
+    });
+  });
+
+  /**
+   * Review N1 — undici throws `TypeError: fetch failed` and puts the real
+   * reason on `.cause`, so the single most common Node failure persisted as
+   * a message with no diagnostic content at all.
+   */
+  it('walks the cause chain so `fetch failed` carries its real reason', () => {
+    const inner = new Error('getaddrinfo ENOTFOUND api.example.com');
+    const outer = new TypeError('fetch failed', { cause: inner });
+    const out = redactedExecutionErrorCause(outer);
+    expect(out).toContain('fetch failed');
+    expect(out).toContain('ENOTFOUND');
+  });
+
+  it('treats a non-Error object throw as unusable rather than persisting "[object Object]"', () => {
+    expect(redactedExecutionErrorCause({ code: 'E_SOMETHING' })).toBe('unknown execution failure');
+  });
+
+  /**
+   * Review N4 — `\s+` does not match NUL, and a NUL byte makes the Postgres
+   * write throw, losing the cause silently. Strip the whole C0 range that
+   * `\s` misses in the same pass.
+   */
+  it('strips control characters a whitespace collapse misses', () => {
+    const out = redactedExecutionErrorCause(new Error('insert failed\x00 for row\x07 42'));
+    // eslint-disable-next-line no-control-regex
+    expect(out).not.toMatch(/[\x00-\x08\x0B\x0C\x0E-\x1F]/);
+    expect(out).toContain('insert failed');
+    expect(out).toContain('42');
   });
 });
