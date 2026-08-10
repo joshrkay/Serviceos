@@ -152,7 +152,25 @@ const COMMON_FIRST_NAMES = new Set([
 // The TLD class is letters-only, so the match still ends at the last letter
 // run after the final dot.
 
-/** Domain half, sticky so it can be applied at one exact offset. */
+/**
+ * Domain half, sticky so it can be applied at one exact offset.
+ *
+ * SAFETY INVARIANT — a sticky regex carries `lastIndex` ACROSS calls, and this
+ * one is module-level shared mutable state. Correctness therefore depends on
+ * two rules that no type and no test can enforce for you:
+ *
+ *   1. Assign `lastIndex` on the line immediately before EVERY `exec`. Not
+ *      earlier in the function — an early `return`, `continue` or `throw`
+ *      slipped in between the two would leave the next call anchored at a
+ *      STALE offset, matching (or failing to match) the domain at the wrong
+ *      place, in a PII control, silently.
+ *   2. Never `exec` or `test` this regex anywhere else, and never export it. A
+ *      second user interleaves its `lastIndex` with the first's.
+ *
+ * There is exactly ONE call site today: the adjacent `lastIndex = at + 1` /
+ * `exec(text)` pair in `replaceEmails` below. If you need this pattern
+ * somewhere else, declare a separate non-sticky copy rather than reusing it.
+ */
 const EMAIL_DOMAIN_RE = /[A-Za-z0-9.-]+\.[A-Za-z]{2,}/y;
 
 /** `[A-Za-z0-9._%+-]` — the local-part class, by char code. */
@@ -207,9 +225,19 @@ function isWordCode(code: number): boolean {
  * of the previous one. `\b` itself is still evaluated against the ORIGINAL
  * string on both sides of the position, exactly as the engine did.
  *
- * Verified by differential fuzzing against the original regex over 3.2M
- * generated strings (four fragment alphabets, including abutting emails and
- * dense local-class punctuation soup): zero output differences.
+ * Verified by differential fuzzing against the original regex, which is
+ * restated in test/reputation/pii-redact.test.ts and compared byte for byte
+ * against this scanner. What that committed corpus ACTUALLY runs is 60,000
+ * generated strings — three fragment alphabets (abutting emails, dense
+ * local-class punctuation soup, and email-shaped parts) x 20,000 seeds — plus
+ * the six hand-picked shapes the two rejected variants leaked on. Zero output
+ * differences.
+ *
+ * Larger one-off runs were done offline while developing the scanner (~3.2M
+ * strings over a fourth alphabet, and a later adversarial-Unicode pass). They
+ * are NOT reproducible from this repo and are NOT coverage this repo has:
+ * 60,000 is the number backing this module today. If you need more, raise the
+ * seed count in the test — do not cite the offline figure as if it were.
  */
 function replaceEmails(text: string): string {
   let out = '';
