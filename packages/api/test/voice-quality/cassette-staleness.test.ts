@@ -345,4 +345,21 @@ describe('pruneEntriesBefore', () => {
     expect(kept).toEqual([]);
     expect(pruned).toEqual(driftedCassette.entries);
   });
+
+  // Review follow-up J5 (2026-08-09) — this function guards every ENTRY
+  // timestamp meticulously (five lines of comment above the check) and left
+  // the one value that decides the BLAST RADIUS unvalidated. `Date.parse`
+  // returns NaN for a malformed cutoff, and `recordedMs >= NaN` is false for
+  // every entry, so a typo'd cutoff silently returned "prune everything" —
+  // the maximally destructive answer — from a delete-deciding function. All
+  // nine tests above pass a well-formed cutoff, so none could see it.
+  it('throws on a non-parseable cutoff instead of returning "prune everything"', () => {
+    const fresh = entry({ system: 'You are X. a', user: 'hi', recordedAt: '2026-06-21T00:00:00.000Z' });
+    expect(() => pruneEntriesBefore([fresh], 'not-a-date')).toThrow(/cutoff/i);
+  });
+
+  it('throws on an empty cutoff', () => {
+    const fresh = entry({ system: 'You are X. a', user: 'hi', recordedAt: '2026-06-21T00:00:00.000Z' });
+    expect(() => pruneEntriesBefore([fresh], '')).toThrow(/cutoff/i);
+  });
 });

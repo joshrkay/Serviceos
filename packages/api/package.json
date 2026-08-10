@@ -24,7 +24,7 @@
     "voice-quality:seed-cassettes": "ts-node scripts/seed-voice-quality-cassettes.ts",
     "voice-quality:layer2": "vitest run -c vitest.voice-quality-layer2.config.ts",
     "voice-quality:layer2:weekly": "VOICE_QUALITY_LAYER2_WEEKLY=true vitest run -c vitest.voice-quality-layer2.config.ts",
-    "lint": "npm run lint:log-safety && tsc --noEmit -p tsconfig.lint.json",
+    "lint": "npm run lint:log-safety && tsc --noEmit -p tsconfig.lint.json && npm run typecheck:scripts",
     "check:ai-gateway-guard": "bash scripts/check-ai-gateway-guard.sh",
     "check:ai-provider-config": "tsx scripts/check-ai-provider-config.ts",
     "check:fk-paths": "bash scripts/check-fk-path-coverage.sh",
@@ -43,7 +43,8 @@
     "voice-load:staging": "tsx scripts/voice-load-test.ts --max 50 --ramp 60 --hold 300",
     "agent:graph-coverage": "tsx scripts/agent-graph-coverage.ts",
     "agent:path-smoke": "tsx scripts/agent-path-smoke.ts",
-    "admin:voice-coverage": "tsx scripts/admin-voice-coverage.ts"
+    "admin:voice-coverage": "tsx scripts/admin-voice-coverage.ts",
+    "typecheck:scripts": "tsc --noEmit -p tsconfig.scripts.json"
   },
   "dependencies": {
     "@ai-service-os/shared": "*",

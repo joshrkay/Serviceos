@@ -298,10 +298,21 @@ export interface CassettePruneResult {
  * with an extra context section the other lacks) — `callKey` is a lossy
  * fallback-matching heuristic, not a true identity, and grouping-based
  * pruning discarded one of the two live entries, breaking strict replay
- * (`cassette drift` failures) the very next run. Proven via the seven
- * `pruneCassetteEntries`-era tests below plus an actual `--prune` dry run
- * against the committed corpus (73/73 -> 36/73) before this rewrite —
- * see scripts/seed-voice-quality-cassettes.ts's `--prune` doc comment.
+ * (`cassette drift` failures) the very next run. Proven by an actual
+ * grouping-based prune run against the committed corpus, which took the
+ * replay suite from 73/73 to 36/73 — see
+ * scripts/seed-voice-quality-cassettes.ts's `--prune` doc comment.
+ *
+ * (ACCURACY NOTE, review follow-up N2, 2026-08-09 — this paragraph is the
+ * safety argument for a tool that deletes committed data, so its details
+ * have to be checkable, and three of them were not. It used to cite "the
+ * seven `pruneCassetteEntries`-era tests below": `pruneCassetteEntries`
+ * exists nowhere in the tree — the rejected design was never committed
+ * under that name — and the tests below number eleven and exercise THIS
+ * design, not the rejected one. It also called the 73/73 -> 36/73 run a
+ * "`--prune` dry run"; it was a real prune, and no dry-run mode existed at
+ * the time. One does now: `--dry-run` on the seed script, added by the same
+ * review, and it is the documented required first step.)
  *
  * THIS design sidesteps the whole problem by not grouping at all: a
  * cutoff timestamp captured immediately BEFORE an authoritative refresh
@@ -320,9 +331,23 @@ export interface CassettePruneResult {
  *
  * Pure and side-effect-free: callers own capturing `cutoffIso`, running
  * the refresh, and reading/writing the cassette file.
+ *
+ * THROWS on a cutoff that does not parse (review follow-up J5). Entry
+ * timestamps are guarded meticulously below; leaving the one parameter that
+ * decides the BLAST RADIUS unguarded was the asymmetry worth fixing. With
+ * `cutoffMs = NaN`, `recordedMs >= NaN` is false for EVERY entry, so a
+ * typo'd cutoff quietly returned `{kept: [], pruned: everything}` — the
+ * maximally destructive answer — from a delete-deciding function. Fail
+ * closed on the parameter that decides what dies.
  */
 export function pruneEntriesBefore(entries: CassetteEntry[], cutoffIso: string): CassettePruneResult {
   const cutoffMs = Date.parse(cutoffIso);
+  if (!Number.isFinite(cutoffMs)) {
+    throw new Error(
+      `pruneEntriesBefore: cutoff is not a parseable timestamp (${JSON.stringify(cutoffIso)}). ` +
+        'Refusing to prune — an unparseable cutoff would prune every entry.',
+    );
+  }
   const kept: CassetteEntry[] = [];
   const pruned: CassetteEntry[] = [];
   for (const e of entries) {
