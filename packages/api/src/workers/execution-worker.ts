@@ -160,32 +160,41 @@ async function runExecutionSweepInner(deps: ExecutionWorkerDeps): Promise<{
       });
     } catch (err) {
       failed++;
-      const cause = redactedExecutionErrorCause(err);
-      deps.logger.warn('Execution sweep: proposal execution failed', {
-        proposalId: proposal.id,
-        tenantId: proposal.tenantId,
-        error: cause,
-      });
-      // Persist WHY. Without this the cause lived only in this log line: the
-      // row stayed claimed in 'executing' until resetStaleExecuting
-      // terminalized it, and both `GET /api/proposals` and the
-      // `proposal.execution_timed_out` audit event could then only say "timed
-      // out". Same `execution_error` concept the terminal write already uses
-      // — never a parallel field — and that write COALESCEs, so what is
-      // recorded here is what survives.
-      //
-      // Conditional on the row still being 'executing' (updateStatusIf, one
-      // atomic statement, self-transition — status is unchanged, only the
-      // reason is written):
-      //   - CHAIN_PARENT_PENDING puts the row back to 'approved' BEFORE
-      //     throwing. That is a routine "retry next tick", not a failure, and
-      //     stamping a reason would show a scary error on a proposal that is
-      //     merely waiting for its chain sibling.
-      //   - a handler that terminalized itself already recorded its own,
-      //     better-worded reason; the precondition misses and leaves it.
-      // Failure-soft: a write failure here must never turn one proposal's
-      // failure into the whole sweep's.
+      // Follow-up review N2 — BUILDING the cause is inside this try, not just
+      // persisting it. `redactedExecutionErrorCause` reads `err.message`, and
+      // a throw from that accessor (a driver error object with a lazy or
+      // derived message) used to escape this catch and abandon the rest of
+      // the loop — defeating the failure-soft promise stated just below.
       try {
+        const cause = redactedExecutionErrorCause(err);
+        // N3 — this log line carries the REDACTED cause, not the raw
+        // `err.message` it used to. Deliberate: the message can quote a
+        // customer contact or a credential, and log sinks are a wider
+        // audience than the `execution_error` column. The scrub keeps the
+        // non-sensitive shape of the failure (host, driver code, SQLSTATE),
+        // so the line stays as debuggable as it needs to be.
+        deps.logger.warn('Execution sweep: proposal execution failed', {
+          proposalId: proposal.id,
+          tenantId: proposal.tenantId,
+          error: cause,
+        });
+        // Persist WHY. Without this the cause lived only in this log line: the
+        // row stayed claimed in 'executing' until resetStaleExecuting
+        // terminalized it, and both `GET /api/proposals` and the
+        // `proposal.execution_timed_out` audit event could then only say
+        // "timed out". Same `execution_error` concept the terminal write
+        // already uses — never a parallel field — and that write COALESCEs,
+        // so what is recorded here is what survives.
+        //
+        // Conditional on the row still being 'executing' (updateStatusIf, one
+        // atomic statement, self-transition — status is unchanged, only the
+        // reason is written):
+        //   - CHAIN_PARENT_PENDING puts the row back to 'approved' BEFORE
+        //     throwing. That is a routine "retry next tick", not a failure,
+        //     and stamping a reason would show a scary error on a proposal
+        //     that is merely waiting for its chain sibling.
+        //   - a handler that terminalized itself already recorded its own,
+        //     better-worded reason; the precondition misses and leaves it.
         await deps.proposalRepo.updateStatusIf(
           proposal.tenantId,
           proposal.id,
@@ -193,11 +202,15 @@ async function runExecutionSweepInner(deps: ExecutionWorkerDeps): Promise<{
           'executing',
           { executionError: cause },
         );
-      } catch (persistErr) {
-        deps.logger.error('Execution sweep: failed to record execution_error for a failed execution', {
+      } catch (recordErr) {
+        // Failure-soft: nothing in this handler — building the cause, logging
+        // it, or writing it — may turn one proposal's failure into the whole
+        // sweep's. `failed` is already counted, so the sweep's return value
+        // stays honest even when the reason could not be recorded.
+        deps.logger.error('Execution sweep: failed to record the cause of a failed execution', {
           proposalId: proposal.id,
           tenantId: proposal.tenantId,
-          error: persistErr instanceof Error ? persistErr.message : String(persistErr),
+          error: recordErr instanceof Error ? recordErr.message : String(recordErr),
         });
       }
     }

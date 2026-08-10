@@ -441,6 +441,36 @@ describe('Execution auto-delivery worker (D9 undo window complement)', () => {
       expect(updated!.status).toBe('approved');
       expect(updated!.executionError).toBeUndefined();
     });
+
+    /**
+     * Review N2 — the cause was BUILT outside the failure-soft try that
+     * persists it, so a throw while building it escaped the per-proposal
+     * catch and took the whole sweep with it. That is exactly what the
+     * "never turn one proposal's failure into the whole sweep's" comment
+     * three lines below promised would not happen. A message accessor that
+     * throws is the cheapest reproduction; a real one is any driver error
+     * object with a lazy/derived `message`.
+     */
+    it('a throw while BUILDING the cause does not take the sweep down with it', async () => {
+      const hostile = new Error('placeholder');
+      Object.defineProperty(hostile, 'message', {
+        get() {
+          throw new Error('message accessor exploded');
+        },
+      });
+      const first = await seedReady('cause-builder-throws');
+      const second = await seedReady('sweep-survives-to-here');
+      const auditRepo = new InMemoryAuditRepository();
+
+      const result = await runExecutionSweep(throwingDeps(repo, auditRepo, hostile));
+
+      // The sweep RETURNS rather than propagating, and both proposals were
+      // attempted — the second is the proof the loop was not abandoned.
+      expect(result.failed).toBe(2);
+      for (const seeded of [first, second]) {
+        expect((await repo.findById(seeded.tenantId, seeded.id))!.status).toBe('executing');
+      }
+    });
   });
 
   // Raised in PR review: the sweep attributed every type but
