@@ -173,10 +173,18 @@ export type LookupMaterialsResult =
       summary: string;
       data: {
         /**
-         * Exact pending count, or `null` once the tenant has more than
-         * `MAX_ITEMS_SPOKEN + 1` pending items — this skill's bounded
-         * fetch (I4) means the true total is genuinely unknown past that
-         * point. Never a false-precise guess; see module doc comment.
+         * Exact count OF THE SCOPE THAT WAS ASKED ABOUT, or `null` once
+         * more than `MAX_ITEMS_SPOKEN + 1` rows match it — this skill's
+         * bounded fetch (I4) means the true total is genuinely unknown past
+         * that point. Never a false-precise guess; see module doc comment.
+         *
+         * "The scope that was asked about" is load-bearing and NOT the
+         * tenant's pending total: it is narrowed by `jobId` and, for a
+         * date-scoped ask, by the resolved DAY window (K3) — so a tenant
+         * with ten pending items can legitimately get `count: 2` for "what
+         * do I need for tomorrow?". Items due EARLIER than that window are
+         * not in this number; they are disclosed in the summary's closing
+         * "needed sooner" sentence instead.
          */
         count: number | null;
         /**
