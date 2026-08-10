@@ -103,7 +103,8 @@ describe('lookupMaterials skill', () => {
    * bare "what do I need?" kept the original defect, and it is the more
    * common ask. `created_at ASC` under FETCH_LIMIT 6 / MAX_ITEMS_SPOKEN 5
    * meant five ancient rows owned the entire spoken answer — permanently,
-   * since the list is append-mostly and only `markPurchased` prunes it.
+   * since nothing prunes this list (`markPurchased` has no production
+   * caller).
    */
   describe('F2 — a bare "what do I need?" leads with what is actually due', () => {
     it('speaks the item due tomorrow rather than five ancient undated ones', async () => {
@@ -135,6 +136,72 @@ describe('lookupMaterials skill', () => {
       expect(res.status).toBe('found');
       if (res.status !== 'found') throw new Error('unreachable');
       expect(res.data.spokenItems.map((i) => i.description)).toEqual(['shop rags']);
+    });
+
+    /**
+     * A1 (2026-08-10) — F2 closed the defect only for tenants whose stale
+     * rows are UNDATED. A DATED backlog still consumes the whole cap: 8
+     * abandoned March rows sort ahead of 2 items due tomorrow, so the
+     * un-scoped ask speaks five March items and neither of tomorrow's — the
+     * exact shape K3 fixed for the date-scoped ask, one call shape over.
+     *
+     * The tail is the only thing that can carry the disclosure without a
+     * second query, and "and more beyond that" alone does not: it is
+     * equally true of a tenant with one extra undated row. Naming the first
+     * OMITTED row's deadline (the 6th fetched row — already in hand, no
+     * extra query) tells the caller the horizon they are not being told
+     * about, so a date-scoped follow-up is an obvious next ask.
+     */
+    it('names the deadline of the first omitted row when a dated backlog fills the cap', async () => {
+      const materialItemRepo = new InMemoryMaterialItemRepository();
+      for (let i = 1; i <= 8; i++) {
+        await materialItemRepo.create({
+          tenantId: TENANT, description: `abandoned March ${i}`, createdBy: 'u1',
+          neededBy: new Date(`2026-03-0${i}T00:00:00.000Z`),
+        });
+      }
+      for (const description of ['copper fittings', 'condensate pump']) {
+        await materialItemRepo.create({
+          tenantId: TENANT, description, createdBy: 'u1',
+          neededBy: new Date('2026-06-12T00:00:00.000Z'),
+        });
+      }
+
+      const res = await lookupMaterials({ tenantId: TENANT, now: NOW, timezone: TZ }, { materialItemRepo });
+
+      expect(res.status).toBe('found');
+      if (res.status !== 'found') throw new Error('unreachable');
+      // The five spoken rows are still the five most urgent — that part of
+      // F2 is right and is NOT what this test changes.
+      expect(res.data.spokenItems.map((i) => i.description)).toEqual([
+        'abandoned March 1',
+        'abandoned March 2',
+        'abandoned March 3',
+        'abandoned March 4',
+        'abandoned March 5',
+      ]);
+      // What changes: the tail names where the omitted rows start, so the
+      // caller can hear that the answer stopped inside the March backlog.
+      expect(res.summary).toContain('and more beyond that, the next needed by March 6');
+    });
+
+    it('leaves the tail unqualified when the first omitted row is undated', async () => {
+      const materialItemRepo = new InMemoryMaterialItemRepository();
+      // One dated row sorts first; six undated rows follow, so the 6th
+      // fetched (first omitted) row has no deadline to name. Claiming one
+      // would be worse than saying nothing.
+      await materialItemRepo.create({
+        tenantId: TENANT, description: 'due tomorrow', createdBy: 'u1',
+        neededBy: new Date('2026-06-12T00:00:00.000Z'),
+      });
+      for (let i = 0; i < 6; i++) {
+        await materialItemRepo.create({ tenantId: TENANT, description: `undated ${i}`, createdBy: 'u1' });
+      }
+
+      const res = await lookupMaterials({ tenantId: TENANT, now: NOW, timezone: TZ }, { materialItemRepo });
+
+      expect(res.summary).toContain('and more beyond that');
+      expect(res.summary).not.toContain('the next needed by');
     });
   });
 

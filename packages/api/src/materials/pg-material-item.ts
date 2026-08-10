@@ -2,50 +2,61 @@
  * Tradesperson wave 1, Task 8 — Postgres-backed material items repository.
  * Tenant-scoped via RLS (`material_items`, migration 272).
  *
- * Follow-up (2026-08-09) — the `needed_by` bounds (below) deliberately do
- * NOT get their own index/migration. The CONCLUSION stands; the reasoning
- * below was corrected on 2026-08-09 (review follow-up N8) because the
- * original version of this comment claimed the LIMIT still bounds the work,
- * and it does not — and corrected again on 2026-08-10 (F2), which took the
- * last index-supplied query away.
+ * INDEXING — the history matters, because the decision flipped.
  *
- * The REAL tradeoff:
+ * `listPending` issues ONE ordering for every shape since F2: `ORDER BY
+ * needed_by ASC NULLS LAST, created_at ASC, id ASC`. Migration 272's
+ * `idx_material_items_pending (tenant_id, created_at) WHERE status =
+ * 'pending'` cannot supply that order — `needed_by` is not in it. The
+ * planner uses it to FIND the tenant's pending rows, then MATERIALIZES every
+ * row matching the predicates and top-N sorts them. The LIMIT caps what is
+ * RETURNED, not what is read and sorted: cost is O(matching pending rows),
+ * not O(6), and K3's two-query date-scoped shape pays it twice.
  *
- *   - EVERY query — `ORDER BY needed_by ASC NULLS LAST, created_at ASC,
- *     id ASC` (one ordering for every shape since F2; see `listPending`).
- *     `idx_material_items_pending (tenant_id, created_at) WHERE status =
- *     'pending'` (migration 272) cannot supply that order — `needed_by` is
- *     not in it. The planner uses the index to FIND the tenant's pending
- *     rows, then MATERIALIZES every row matching the predicates and top-N
- *     sorts them. The LIMIT caps what is RETURNED, not what is read and
- *     sorted: cost is O(matching pending rows), not O(6). K3's two-query
- *     shape (bracketed answer + bounded overdue probe) doubles that on a
- *     date-scoped ask, though each query is the same order of magnitude.
+ * Before F2 the DEFAULT (undated) query was the one exception — it ordered
+ * `created_at ASC`, which that index DID supply, so the planner walked it and
+ * stopped after 6 rows. F2 gave that up knowingly, and rightly: an O(limit)
+ * query that answers the wrong question is not a saving. But that left EVERY
+ * shape unindexed, and #819's decision to ship without an index was made
+ * before that was true.
  *
- *   - Before F2 the DEFAULT (undated) query was the one exception: it
- *     ordered `created_at ASC`, which that index DID supply, so the planner
- *     walked it and stopped after 6 rows — O(limit). F2 gave that up
- *     knowingly. What it bought is correctness: `created_at ASC` under a
- *     6-row fetch and a 5-item spoken cap let five ancient rows hide an item
- *     due tomorrow, permanently, because a shopping list is append-mostly.
- *     An O(limit) query that answers the wrong question is not a saving.
+ * DECISION REVISITED AND REVERSED (A3, 2026-08-10) — migration 273 adds
+ * `idx_material_items_pending_urgency (tenant_id, needed_by, created_at, id)
+ * WHERE status = 'pending'`, which supplies the whole ORDER BY, so the LIMIT
+ * bounds the work again on BOTH shapes.
  *
- * That is still the right trade today: a shopping list is a small,
- * append-mostly, per-tenant operational list (`markPurchased` continuously
- * removes rows from the partial index's own predicate), so "every matching
- * pending row" is tens of rows for a real tenant, and a top-N sort over tens
- * of rows is free. Adding `needed_by` to the index would pay
- * write-amplification on every insert/update for a saving with no observed
- * workload behind it.
+ * What the declining argument (#819) rested on, and why each half failed:
  *
- * CONCRETE REVISIT TRIGGER (not "if it feels slow"): if any tenant's
- * concurrently-pending set is observed above ~2,000 rows, add
- * `(tenant_id, needed_by) WHERE status = 'pending'` so the date-scoped
- * ORDER BY becomes index-supplied and the LIMIT bounds the work again.
- * Since F2 that trigger covers the DEFAULT ask too, and the index should be
- * `(tenant_id, needed_by, created_at) WHERE status = 'pending'` to supply
- * the whole sort — a btree ASC index already stores NULLs last, matching
- * `NULLS LAST`.
+ *   - "The pending set stays small because `markPurchased` continuously
+ *     removes rows from the partial index's own predicate." FALSE, and it
+ *     was the load-bearing half. `markPurchased` has NO production caller:
+ *     no route (there is no materials route), no worker, no proposal
+ *     execution handler, no UI. The only writer is Task 9's
+ *     `AddMaterialExecutionHandler`, which appends. A tenant's pending set
+ *     is therefore strictly MONOTONIC for the life of the tenant — "tens of
+ *     rows for a real tenant" is a hope, not a bound.
+ *   - "Revisit if any tenant's concurrently-pending set is observed above
+ *     ~2,000 rows." That trigger cannot fire, because nothing observes it:
+ *     `lookup_events.result_count` saturates at `FETCH_LIMIT` (6),
+ *     `data.count` is null past 5, and there is no materials route, metric
+ *     or alert. The trigger existed only in this comment.
+ *   - Write amplification, the cost side, is negligible here: the table is
+ *     written once per approved voice `add_material` proposal.
+ *
+ * The same index also serves the date-scoped two-query shape (K3), which is
+ * the more expensive one. The key is the FULL sort key including the trailing
+ * `id` — `(tenant_id, needed_by, created_at)` alone leaves `id ASC`
+ * unsupplied and yields an Incremental Sort rather than a plain index scan.
+ * A btree ASC index already stores NULLs last, which is what `NULLS LAST`
+ * asks for.
+ *
+ * Migration 272's `idx_material_items_pending (tenant_id, created_at)` is
+ * deliberately LEFT IN PLACE rather than dropped as superseded. The runner
+ * has no ledger — `getMigrationSQL()` concatenates and re-executes every
+ * migration on every boot — so a `CREATE INDEX` in 272 followed by a
+ * `DROP INDEX` in 273 would rebuild and destroy that index on every single
+ * boot. Redundant index maintenance on a table written once per approved
+ * proposal is far cheaper than a per-boot index build.
  */
 import { Pool } from 'pg';
 import { isValidTenantId } from '../db/schema';
@@ -174,9 +185,11 @@ export class PgMaterialItemRepository extends PgBaseRepository implements Materi
     if (!dateBoundsAreValid(options)) return [];
     return this.withTenant(tenantId, async (client) => {
       // status = 'pending' stays a SQL LITERAL (not a bind param) so the
-      // planner can prove the predicate implies idx_material_items_pending
-      // (migration 272) — parameterizing it later would make that index
-      // unusable for this query.
+      // planner can prove the predicate implies the partial indexes'
+      // predicate — idx_material_items_pending_urgency (migration 273, the
+      // one that supplies this query's ORDER BY) and idx_material_items_
+      // pending (272). Parameterizing it later would make both unusable
+      // for this query.
       const conditions: string[] = ['tenant_id = $1', "status = 'pending'"];
       const params: unknown[] = [tenantId];
       if (options?.jobId) {
@@ -223,10 +236,10 @@ export class PgMaterialItemRepository extends PgBaseRepository implements Materi
       // UUID, so a tie is broken consistently but not necessarily
       // oldest-first.
       // Quality-review I4 — LIMIT applied in SQL, not sliced app-side after
-      // an unbounded SELECT: a shopping list is append-mostly (only
-      // markPurchased prunes it), so without this a tenant's pending set
-      // grows without bound while `lookup_materials` only ever speaks a
-      // handful of rows. A non-positive/non-integer limit is ignored
+      // an unbounded SELECT: nothing prunes this list (`markPurchased` has
+      // no production caller — see the module doc comment), so a tenant's
+      // pending set grows without bound while `lookup_materials` only ever
+      // speaks a handful of rows. A non-positive/non-integer limit is ignored
       // (treated as "no cap") rather than producing an invalid `LIMIT`
       // clause or silently returning zero rows.
       const hasLimit =
@@ -238,9 +251,10 @@ export class PgMaterialItemRepository extends PgBaseRepository implements Materi
       // default was the last home of the silent-omission defect the whole
       // date path exists to fix — `lookup_materials` fetches 6 rows and
       // speaks 5, so five ancient rows owned the entire answer to "what do I
-      // need?" and an item due tomorrow was never mentioned; and because a
-      // shopping list is append-mostly (only `markPurchased` prunes it),
-      // those same five rows owned it forever rather than self-correcting.
+      // need?" and an item due tomorrow was never mentioned; and because
+      // nothing prunes this list (`markPurchased` has no production caller —
+      // see the module doc comment), those same five rows owned it forever
+      // rather than self-correcting.
       //
       // `NULLS LAST` is a no-op on the date-scoped shape (a `needed_by`
       // predicate already excludes NULL rows) and is the whole safety of the

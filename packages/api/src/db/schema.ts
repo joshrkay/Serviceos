@@ -6610,6 +6610,40 @@ export const MIGRATIONS = {
     CREATE INDEX IF NOT EXISTS idx_material_items_pending
       ON material_items (tenant_id, created_at) WHERE status = 'pending';
   `,
+  // A3 (2026-08-10) — index for listPending's ONE ordering, reversing #819's
+  // decision to ship without one. A NEW migration, not an edit to 272: 272
+  // shipped to main in PR #814, and the immutability guard's rule for a
+  // shipped migration is "add a new one with idempotent CREATE INDEX IF NOT
+  // EXISTS" (test/db/migration-immutability.test.ts).
+  //
+  // WHY THE DECISION FLIPPED. #819 declined this index on two premises, both
+  // of which turned out to be false: (1) "markPurchased continuously prunes
+  // the pending set" — markPurchased has NO production caller, so a tenant's
+  // pending set is strictly monotonic; and (2) a revisit trigger of "~2,000
+  // concurrently-pending rows for one tenant" that nothing observes (no
+  // materials route, no metric, no alert; lookup_events.result_count
+  // saturates at 6). Unbounded growth plus an unobservable trigger is not a
+  // plan. The write side is negligible either way — this table is written
+  // once per approved voice add_material proposal.
+  //
+  // WHY THE FULL FOUR-COLUMN KEY. listPending orders `needed_by ASC NULLS
+  // LAST, created_at ASC, id ASC` under a tenant_id equality and the
+  // status = 'pending' literal. (tenant_id, needed_by, created_at) leaves
+  // the trailing `id ASC` unsupplied, which the planner resolves with an
+  // Incremental Sort rather than a plain index scan; including `id` makes
+  // the whole sort index-supplied so the LIMIT bounds the work. A btree ASC
+  // index already stores NULLs last, which is exactly what NULLS LAST wants.
+  //
+  // 272's idx_material_items_pending is deliberately NOT dropped here even
+  // though nothing orders by created_at any more. The runner has no ledger —
+  // getMigrationSQL() re-executes every migration on every boot — so a
+  // CREATE in 272 plus a DROP in 273 would rebuild and destroy that index on
+  // every boot. Keeping a redundant index is much cheaper than that.
+  '273_material_items_urgency_index': `
+    CREATE INDEX IF NOT EXISTS idx_material_items_pending_urgency
+      ON material_items (tenant_id, needed_by, created_at, id)
+      WHERE status = 'pending';
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

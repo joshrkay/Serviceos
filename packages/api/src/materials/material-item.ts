@@ -4,9 +4,10 @@
  * A material item is a first-class operational row (like
  * `call_me_back_tasks`), NOT a proposal: capturing "grab 3 boxes of PEX"
  * is a task list entry, not an AI mutation requiring approval. Backed by
- * `material_items` (migration 272), tenant-scoped via RLS. Purchasing/PO
- * automation is a non-goal — `markPurchased` just records who bought it
- * and when.
+ * `material_items` (migrations 272 and 273), tenant-scoped via RLS.
+ * Purchasing/PO automation is a non-goal — `markPurchased` just records who
+ * bought it and when, and nothing calls it yet (see its doc comment on
+ * `MaterialItemRepository`; the list is append-ONLY in production today).
  *
  * Wired at the composition root (`app.ts` constructs ONE `materialItemRepo`
  * instance, Pg-backed in production or InMemory otherwise) and threaded to
@@ -80,18 +81,28 @@ export interface MaterialItemListOptions {
    * special-case and the InMemory backend mirrors it explicitly to keep
    * both backends provably in agreement.
    *
-   * OVERDUE INTERACTION (review follow-up K3, 2026-08-09) — READ THIS
-   * BEFORE USING THIS OPTION ALONE. `neededByBefore` is an OPEN-ENDED
-   * lower-unbounded window: it includes every overdue item, however old.
-   * Combined with `needed_by ASC` ordering and a `limit`, the OLDEST
-   * overdue rows sort FIRST and can consume the entire cap, so a
-   * date-scoped read can return zero of the items actually due on the day
-   * the caller asked about — the same silent-omission class this option
-   * was introduced to fix, pointed the other way. A caller that means "due
-   * ON day X" must bracket the window with `neededByFrom` (below) and
-   * account for the pre-window backlog separately; `ai/skills/lookup-
-   * materials.ts` does exactly that (one bracketed query for the answer,
-   * one bounded probe for the "plus N needed sooner" disclosure).
+   * OVERDUE INTERACTION (review follow-up K3, 2026-08-09; widened by A1,
+   * 2026-08-10) — READ THIS BEFORE USING THIS OPTION ALONE.
+   *
+   * The general rule, and it is NOT specific to this option: `listPending`
+   * orders `needed_by ASC`, so under a `limit` the OLDEST overdue rows sort
+   * FIRST and can consume the entire cap. A capped read can therefore return
+   * zero of the items actually due soon, however the window is (or is not)
+   * bounded. K3 found it here because `neededByBefore` alone is an OPEN-ENDED
+   * lower-unbounded window that includes every overdue item however old; F2
+   * then gave the UNBOUNDED call the same `needed_by ASC` ordering, so a call
+   * with NO date bound at all now has it too. What K3's fix could rely on —
+   * that the caller named a day — is exactly what the unbounded caller has
+   * not done.
+   *
+   * A caller that means "due ON day X" must bracket the window with
+   * `neededByFrom` (below) and account for the pre-window backlog separately;
+   * `ai/skills/lookup-materials.ts` does exactly that (one bracketed query
+   * for the answer, one bounded probe for the "plus N needed sooner"
+   * disclosure). A caller with no bound cannot bracket anything, so it
+   * discloses instead — it fetches `limit + 1` and names the first omitted
+   * row's deadline (A1). Either way the caller must NOT assume a capped
+   * result is the whole urgent set.
    *
    * A malformed value (anything that is not a valid `Date`) yields `[]`
    * from BOTH backends — see `isUsableDateBound` below.
@@ -117,9 +128,10 @@ export interface MaterialItemListOptions {
    * Cap the number of rows returned, applied at the repo/SQL boundary —
    * NOT sliced app-side after an unbounded fetch (quality-review I4, Task
    * 9: `lookup_materials` used to load every pending row for the tenant
-   * just to speak 5 of them — a shopping list is append-mostly, only
-   * `markPurchased` prunes it, so that only gets worse over a tenant's
-   * lifetime). Rows come back in `listPending`'s ONE ordering (soonest-
+   * just to speak 5 of them — and nothing prunes this list, so that only
+   * gets worse over a tenant's lifetime; see `markPurchased` below for why
+   * "append-mostly" is really "append-only"). Rows come back in
+   * `listPending`'s ONE ordering (soonest-
    * `needed_by` first, undated last — see the interface doc comment), so
    * `limit: N` yields the N MOST URGENT rows, not an arbitrary N.
    *
@@ -159,12 +171,19 @@ export function isUsableDateBound(value: unknown): value is Date {
 }
 
 /**
- * `true` when the caller supplied a `needed_by` bound at all (valid or not).
- * Distinguishing "no bound" from "malformed bound" is what lets both
- * backends return `[]` for the latter instead of silently answering the
- * unfiltered question.
+ * `true` when the caller supplied a `needed_by` bound at all, valid or not.
+ * The InMemory backend uses it for ONE thing (`dateScoped`, below): a
+ * date-scoped query must drop rows with no `neededBy`, mirroring what Pg's
+ * bare `needed_by < $1` does for free under three-valued logic.
+ *
+ * NOT exported (review follow-up N1, 2026-08-10). It was, and had no
+ * consumer outside this file — the Pg backend imports `dateBoundsAreValid`,
+ * not this. Its doc comment also described `dateBoundsAreValid`'s job
+ * ("lets both backends return [] for a malformed bound"), which is a
+ * different predicate: this one does not look at whether the bound is
+ * USABLE, only at whether one was given.
  */
-export function hasDateBound(options?: MaterialItemListOptions): boolean {
+function hasDateBound(options?: MaterialItemListOptions): boolean {
   return options?.neededByBefore !== undefined || options?.neededByFrom !== undefined;
 }
 
@@ -193,10 +212,10 @@ export interface MaterialItemRepository {
    * default kept the original defect. `lookup_materials` fetches 6 rows and
    * speaks 5, so under `created_at ASC` the five oldest-CREATED rows owned
    * the whole answer to "what do I need?" and an item due tomorrow was never
-   * mentioned — and since a shopping list is append-mostly (only
-   * `markPurchased` prunes it), those same five rows owned it permanently
-   * rather than self-correcting. An ordering paired with a cap decides what
-   * the caller never hears, so it has to demote the least consequential rows.
+   * mentioned — and since nothing prunes this list (see `markPurchased`
+   * below), those same five rows owned it permanently rather than
+   * self-correcting. An ordering paired with a cap decides what the caller
+   * never hears, so it has to demote the least consequential rows.
    *
    * NULLS LAST is what keeps that honest. An item with no `needed_by` has no
    * deadline; it is not infinitely urgent, so it sorts AFTER every dated item
@@ -224,19 +243,43 @@ export interface MaterialItemRepository {
    * precision, which CAN tie on rapid successive creates — and among those
    * ties InMemory yields insertion order where Pg would yield `id` order.
    * That residual divergence is reachable only in a mock that creates two
-   * rows inside one millisecond that tie on the leading key — an identical
-   * `needed_by`, or (since F2 folded them into the same sort) both undated;
-   * it is
-   * deliberately left rather than adding an `id` tie-break to InMemory,
-   * because insertion order is the more useful (and more truthful) answer
-   * for a fake, and an `id` tie-break there would make every "N oldest"
-   * assertion in the suite nondeterministic.
+   * rows inside one millisecond which also tie on the leading key — either
+   * an identical `needed_by`, or both undated. It is deliberately left
+   * rather than adding an `id` tie-break to InMemory, because insertion
+   * order is the more useful (and more truthful) answer for a fake, and an
+   * `id` tie-break there would make every "N oldest" assertion in the suite
+   * nondeterministic.
    *
-   * A malformed `needed_by` bound returns `[]` from both backends — see
-   * `isUsableDateBound`.
+   * F2 did not WIDEN that surface, despite folding both shapes into one
+   * sort (an earlier version of this comment implied otherwise). Before F2
+   * the default shape ordered on `created_at` alone, so EVERY `created_at`
+   * tie diverged; now a tie must also match on `needed_by` to reach the
+   * fallback. The reachable set got strictly smaller.
+   *
+   * A malformed `needed_by` BOUND returns `[]` from both backends — see
+   * `isUsableDateBound`. A malformed `needed_by` on the ROW itself cannot
+   * reach either backend's sort: `create()` rejects it (N2, below).
    */
   listPending(tenantId: string, options?: MaterialItemListOptions): Promise<MaterialItem[]>;
-  /** Transition pending -> purchased. Null if not found, wrong tenant, or not pending. */
+  /**
+   * Transition pending -> purchased. Null if not found, wrong tenant, or not
+   * pending.
+   *
+   * NO PRODUCTION CALLER (verified 2026-08-10, review follow-up A2). Nothing
+   * in `packages/api/src`, `packages/web/src` or `packages/mobile` invokes
+   * this: there is no materials route, no worker, no proposal execution
+   * handler and no UI affordance. Both implementations and the tests below
+   * are the only call sites. The single writer is Task 9's
+   * `AddMaterialExecutionHandler`, which appends.
+   *
+   * The consequence is load-bearing wherever this module reasons about size,
+   * and several comments used to get it wrong: a tenant's pending set is
+   * strictly MONOTONIC for the life of the tenant. This list is append-ONLY,
+   * not "append-mostly". An owner can add materials by voice and has no way
+   * to ever remove one. That is a product hole, not a bug in this file —
+   * filed separately; do not close it by quietly wiring a caller here
+   * without the surrounding permission/audit/undo design.
+   */
   markPurchased(tenantId: string, id: string, actorId: string): Promise<MaterialItem | null>;
 }
 
@@ -281,6 +324,32 @@ function validateCreateMaterialItemInput(input: CreateMaterialItemInput): string
     } else if (input.quantity > MAX_QUANTITY) {
       errors.push(`quantity must not exceed ${MAX_QUANTITY}`);
     }
+  }
+  // N2 (2026-08-10) — reject a malformed `neededBy` HERE, in shared code,
+  // so both backends refuse the identical input. This is the J2 principle
+  // applied one field over: J2 fixed the malformed date BOUNDS (a filter
+  // argument); this is the malformed date on the ROW.
+  //
+  // Pg would already refuse it (`Invalid Date` binds as an out-of-range
+  // timestamptz), so accepting it was a mock/prod divergence — and a
+  // uniquely nasty one, because the InMemory damage is NOT confined to the
+  // bad row. `listPending`'s comparator compares `getTime()` values, and
+  // `NaN !== NaN` sends an Invalid Date down the leading branch to return
+  // `NaN`; the sort specification coerces a NaN comparator result to `+0`
+  // ("these are equal"), which makes the comparator non-transitive and
+  // leaves the WHOLE result order arbitrary. Measured before this guard:
+  // `d-2030 | INVALID | d-2025 | d-2026 | …`.
+  //
+  // Rejecting at the boundary is preferred over making the comparator sort
+  // non-finite values last: that would keep an unstorable row alive in the
+  // fake, so the two backends would still disagree about whether the write
+  // succeeded — just later and more quietly.
+  //
+  // Reuses `isUsableDateBound` rather than a second `instanceof Date &&
+  // isFinite` spelling for the same reason J2 introduced it: two copies of
+  // one predicate are two chances to drift.
+  if (input.neededBy !== undefined && !isUsableDateBound(input.neededBy)) {
+    errors.push('neededBy must be a valid Date');
   }
   return errors;
 }
