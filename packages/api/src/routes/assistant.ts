@@ -2,6 +2,8 @@ import { Router, Response } from 'express';
 import { z } from 'zod';
 import { v4 as uuidv4 } from 'uuid';
 import {
+  centsToInputValue,
+  isCentsKey,
   isFlatMissingField,
   labelForMissingField,
   readStructuredAddress,
@@ -118,7 +120,21 @@ const assistantProposalSchema = z.object({
   summary: z.string(),
   explanation: z.string(),
   reasoning: z.array(z.string()).optional(),
-  editFields: z.array(z.object({ label: z.string(), key: z.string(), value: z.string() })).optional(),
+  // `kind` (review J5) tells the card how to PARSE the typed input before
+  // it reaches `PUT /api/proposals/:id { edits }`. Absent means 'text',
+  // which is what every pre-existing emitter produces, so this stays
+  // backward compatible. A 'cents' field is DOLLARS in the input and
+  // integer cents on the wire.
+  editFields: z
+    .array(
+      z.object({
+        label: z.string(),
+        key: z.string(),
+        value: z.string(),
+        kind: z.enum(['text', 'cents', 'number']).optional(),
+      }),
+    )
+    .optional(),
   confidence: z.enum(['High', 'Medium']),
   type: z.enum(['Invoice', 'Estimate', 'Schedule', 'Follow-up', 'Alert', 'Duplicate', 'Customer']),
   // QA-2026-06-05: LLMs emit free-form statuses ('Sent', 'Draft', …) —
@@ -843,6 +859,18 @@ export function editFieldsForMissing(
     .filter(isFlatMissingField)
     .map((key) => {
       const existing = payload[key];
+      const label = labelForMissingField(key);
+      // Review J5 — a NUMERIC gated field (the catalog unit price) used to
+      // fall through every branch below and emit `value: ''`, because the
+      // helper only ever prefilled STRINGS. The operator then typed into an
+      // empty box and the card sent a string against a `z.number()` field.
+      // Both halves are fixed here: the current value is prefilled, and
+      // `kind` tells the card what to parse it back into.
+      if (typeof existing === 'number' && Number.isFinite(existing)) {
+        return isCentsKey(key)
+          ? { label, key, kind: 'cents' as const, value: centsToInputValue(existing) }
+          : { label, key, kind: 'number' as const, value: String(existing) };
+      }
       const referenceKey = REFERENCE_FIELD_FOR_MISSING[key];
       const referenceValue = referenceKey ? payload[referenceKey] : undefined;
       const value =
@@ -851,7 +879,7 @@ export function editFieldsForMissing(
           : typeof referenceValue === 'string'
             ? referenceValue
             : '';
-      return { label: labelForMissingField(key), key, value };
+      return { label, key, kind: 'text' as const, value };
     });
 
   return fields.length > 0 ? fields : undefined;

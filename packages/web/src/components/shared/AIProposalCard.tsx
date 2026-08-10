@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { useNavigate } from 'react-router';
 import { toast } from 'sonner';
+import { parseMoneyToCents } from '@ai-service-os/shared';
 import {
   ServiceAddressCompletion,
   addressEditsFrom,
@@ -133,7 +134,7 @@ interface Props {
    * This is the human-approval gate, so a failed call must NOT look like
    * success.
    */
-  onApprove?: (edits?: Record<string, string>) => void | Promise<void>;
+  onApprove?: (edits?: Record<string, unknown>) => void | Promise<void>;
   /**
    * Invoked when the operator dismisses. May be async — a thrown error
    * (or rejected promise) reverts the optimistic "Rejected" state and
@@ -165,6 +166,8 @@ export function AIProposalCard({ proposal, onApprove, onReject }: Props) {
   const [fieldValues,  setFieldValues]  = useState<Record<string, string>>(
     Object.fromEntries((proposal.editFields ?? []).map(f => [f.key, f.value]))
   );
+  /** Labels of edit inputs that could not be parsed — blocks Save & apply. */
+  const [invalidFields, setInvalidFields] = useState<string[]>([]);
 
   // ── Service-address completion ────────────────────────────────
   // See ServiceAddressCompletion.tsx for why this exists and why it is never
@@ -176,19 +179,70 @@ export function AIProposalCard({ proposal, onApprove, onReject }: Props) {
     initialAddressValues(proposal.addressCapture),
   );
 
-  /** Merge card edits with address edits; undefined when there is nothing to save. */
-  const mergedEdits = (base?: Record<string, string>): Record<string, string> | undefined => {
-    const merged = {
-      ...(base ?? {}),
-      ...(addressEditsFrom(proposal.addressCapture, addressValues) ?? {}),
-    };
+  /**
+   * Review J5 — turn the typed input strings into the SHAPES the payload
+   * contract expects, then merge the address edits.
+   *
+   * `editProposalBodySchema` is `z.record(z.unknown())` with no coercion and
+   * `editProposal` re-validates the merged payload against the real contract,
+   * so a `z.number()` field sent as `"29000000"` came back 400 "Invalid
+   * payload after edit" — surfacing to the operator as "Couldn't apply this
+   * suggestion. Please try again." on the one recovery path #28's gate exists
+   * to give them. Parsing here rather than coercing server-side is not a
+   * preference: a 'cents' input is DOLLARS, so `z.coerce.number()` on
+   * "290000" would have meant $2,900 — wrong by 100x on a money field.
+   *
+   * Returns `null` when any input is unparseable; the caller shows the
+   * offending labels instead of sending a request that cannot succeed.
+   */
+  const typedEdits = (
+    drafts: Record<string, string>,
+  ): { edits: Record<string, unknown> | undefined; invalid: string[] } => {
+    const edits: Record<string, unknown> = {};
+    const invalid: string[] = [];
+    for (const field of proposal.editFields ?? []) {
+      const draft = drafts[field.key];
+      if (draft === undefined) continue;
+      if (field.kind === 'cents') {
+        const cents = parseMoneyToCents(draft);
+        if (cents === null) {
+          invalid.push(field.label);
+          continue;
+        }
+        edits[field.key] = cents;
+      } else if (field.kind === 'number') {
+        const n = Number(draft.trim());
+        if (draft.trim() === '' || Number.isNaN(n)) {
+          invalid.push(field.label);
+          continue;
+        }
+        edits[field.key] = n;
+      } else {
+        edits[field.key] = draft;
+      }
+    }
+    Object.assign(edits, addressEditsFrom(proposal.addressCapture, addressValues) ?? {});
+    return { edits: Object.keys(edits).length > 0 ? edits : undefined, invalid };
+  };
+
+  /** Address-only edits, for the non-editing Approve path. */
+  const mergedEdits = (): Record<string, unknown> | undefined => {
+    const merged = { ...(addressEditsFrom(proposal.addressCapture, addressValues) ?? {}) };
     return Object.keys(merged).length > 0 ? merged : undefined;
+  };
+
+  /** Parse, then approve — or refuse and name the fields that would 400. */
+  const saveAndApply = () => {
+    const { edits, invalid } = typedEdits(fieldValues);
+    setInvalidFields(invalid);
+    if (invalid.length > 0) return;
+    void runApprove(() => setEditing(false), edits);
   };
 
   // Optimistically flip to Approved, then await the handler. On failure
   // revert to the prior state and surface a toast — never leave a failed
   // approval showing "Applied successfully".
-  const runApprove = async (onDone?: () => void, edits?: Record<string, string>) => {
+  const runApprove = async (onDone?: () => void, edits?: Record<string, unknown>) => {
     if (isApproving) return;
     const prevStatus = status;
     setStatus('Approved');
@@ -294,8 +348,19 @@ export function AIProposalCard({ proposal, onApprove, onReject }: Props) {
           <div className="flex flex-col gap-3 mb-4">
             {proposal.editFields.map(field => (
               <div key={field.key}>
-                <label className="block text-xs text-muted-foreground mb-1">{field.label}</label>
+                <label
+                  htmlFor={`${proposal.id}-edit-${field.key}`}
+                  className="block text-xs text-muted-foreground mb-1"
+                >
+                  {field.label}
+                </label>
                 <input
+                  id={`${proposal.id}-edit-${field.key}`}
+                  // A money field is typed in DOLLARS and sent as integer
+                  // cents (review J5) — `inputMode` keeps the numeric keypad
+                  // on a phone without rejecting "$1,299.50", which the
+                  // shared parser accepts.
+                  inputMode={field.kind === 'cents' || field.kind === 'number' ? 'decimal' : undefined}
                   value={fieldValues[field.key] ?? field.value}
                   onChange={e => setFieldValues(prev => ({ ...prev, [field.key]: e.target.value }))}
                   className="w-full rounded-lg border border-border bg-secondary px-3 py-2 text-sm text-foreground outline-none focus:border-primary focus:bg-card transition-colors"
@@ -303,9 +368,14 @@ export function AIProposalCard({ proposal, onApprove, onReject }: Props) {
               </div>
             ))}
           </div>
+          {invalidFields.length > 0 && (
+            <p data-testid="edit-field-error" className="text-xs text-destructive mb-3">
+              Enter a valid amount for: {invalidFields.join(', ')}
+            </p>
+          )}
           <div className="flex items-center gap-2">
             <button
-              onClick={() => { void runApprove(() => setEditing(false), mergedEdits(fieldValues)); }}
+              onClick={saveAndApply}
               disabled={isApproving}
               className="flex items-center gap-1.5 rounded-lg bg-primary px-4 py-2 text-xs text-primary-foreground hover:bg-primary/90 transition-colors disabled:bg-muted disabled:cursor-not-allowed"
             >

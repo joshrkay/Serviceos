@@ -598,17 +598,21 @@ describe('U7 — proposalSignals helper (pure mapper passthrough)', () => {
 describe('B1 — editFieldsForMissing helper (pure mapper)', () => {
   it('emits a labelled, keyed field for a flat missingFields entry, prefilled from its reference field', () => {
     const out = editFieldsForMissing(['invoiceId'], { invoiceReference: 'Henderson', channel: 'email' });
-    expect(out).toEqual([{ label: 'Invoice # or ID', key: 'invoiceId', value: 'Henderson' }]);
+    expect(out).toEqual([
+      { label: 'Invoice # or ID', key: 'invoiceId', kind: 'text', value: 'Henderson' },
+    ]);
   });
 
   it('prefers an existing string payload value over the reference field', () => {
     const out = editFieldsForMissing(['invoiceId'], { invoiceId: 'partial-typed-value', invoiceReference: 'Henderson' });
-    expect(out).toEqual([{ label: 'Invoice # or ID', key: 'invoiceId', value: 'partial-typed-value' }]);
+    expect(out).toEqual([
+      { label: 'Invoice # or ID', key: 'invoiceId', kind: 'text', value: 'partial-typed-value' },
+    ]);
   });
 
   it('falls back to the raw key as the label and an empty value when nothing is known', () => {
     const out = editFieldsForMissing(['title'], {});
-    expect(out).toEqual([{ label: 'title', key: 'title', value: '' }]);
+    expect(out).toEqual([{ label: 'title', key: 'title', kind: 'text', value: '' }]);
   });
 
   it('skips path-shaped entries — those are resolve-line/candidate-picker territory, not a plain text field', () => {
@@ -616,7 +620,9 @@ describe('B1 — editFieldsForMissing helper (pure mapper)', () => {
       ['invoiceId', 'lineItems[0].catalogItemId', 'editActions[0].lineItem.catalogItemId'],
       { invoiceReference: 'Henderson' },
     );
-    expect(out).toEqual([{ label: 'Invoice # or ID', key: 'invoiceId', value: 'Henderson' }]);
+    expect(out).toEqual([
+      { label: 'Invoice # or ID', key: 'invoiceId', kind: 'text', value: 'Henderson' },
+    ]);
   });
 
   it('returns undefined when every missingFields entry is path-shaped', () => {
@@ -641,8 +647,12 @@ describe('B1 — editFieldsForMissing helper (pure mapper)', () => {
       currentUnitPriceCents: 12000,
       proposedUnitPriceCents: 12000,
     });
+    // Review J5 — a NUMERIC gated field is prefilled with its CURRENT value
+    // (dollars) and marked `cents`, so the card can send integer cents back.
+    // It used to emit `value: ''` and no kind, and the string the operator
+    // then typed 400'd against the payload's `z.number()`.
     expect(out).toEqual([
-      { label: 'Unit price ($)', key: 'proposedUnitPriceCents', value: '' },
+      { label: 'Unit price ($)', key: 'proposedUnitPriceCents', kind: 'cents', value: '120.00' },
     ]);
   });
 });
@@ -1159,7 +1169,7 @@ describe('money-path handler wiring — update_invoice/send_invoice/issue_invoic
     // as a stand-in value the operator could approve unedited.
     expect(res.body.message.proposal.editFields).toEqual(
       expect.arrayContaining([
-        { label: 'Invoice # or ID', key: 'invoiceId', value: 'Henderson' },
+        { label: 'Invoice # or ID', key: 'invoiceId', kind: 'text', value: 'Henderson' },
       ]),
     );
 

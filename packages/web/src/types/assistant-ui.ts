@@ -65,7 +65,20 @@ export interface AIProposal {
   summary: string;
   explanation: string;
   reasoning?: string[];
-  editFields?: { label: string; value: string; key: string }[];
+  /**
+   * Edit-before-approve inputs. `kind` (review J5) says how the typed input
+   * is PARSED before it goes to `PUT /api/proposals/:id { edits }`: a
+   * 'cents' field is DOLLARS in the box and integer cents on the wire.
+   * Absent means 'text', which is what every pre-existing emitter produces.
+   * Without it the card sent the raw string for a `z.number()` payload field
+   * and every money edit came back 400 "Invalid payload after edit".
+   */
+  editFields?: {
+    label: string;
+    value: string;
+    key: string;
+    kind?: 'text' | 'cents' | 'number';
+  }[];
   confidence: ProposalConfidence;
   type: ProposalType;
   status: 'Pending' | 'Approved' | 'Rejected';

@@ -251,3 +251,102 @@ describe('auto-approved card — honest copy', () => {
     expect(navigateMock).toHaveBeenCalledWith('/invoices/inv-7');
   });
 });
+
+/**
+ * Review J5 — #28's recovery path ("the operator's recovery is one field
+ * edit, not a re-utterance") was FALSE on the web chat card.
+ *
+ * The server half is fine: `approveProposal` blocks on the tracked list,
+ * `clearSatisfiedMissingFields` lifts on an exact flat-key edit,
+ * `proposedUnitPriceCents` IS a flat key, and the contract carries no
+ * ceiling so a deliberate $290,000 edit passes. The CLIENT was broken: the
+ * card's inputs produce `Record<string, string>`, `editProposalBodySchema`
+ * is `z.record(z.unknown())` with NO coercion, so `PUT` sent
+ * `{proposedUnitPriceCents: "29000000"}` against a `z.number()` field →
+ * 400 "Invalid payload after edit" → the operator got "Couldn't apply this
+ * suggestion. Please try again."
+ *
+ * Fixed by giving `editFields` a `kind`, mirroring mobile's
+ * `editableScalarFields`/`parseMoneyToCents`, which works correctly today.
+ * A `kind: 'cents'` field is DOLLARS in the input and integer cents on the
+ * wire — server-side coercion could not do this, because coercing the
+ * string "290000" would mean 290000 CENTS ($2,900), wrong by 100x on a
+ * money field.
+ */
+describe('AIProposalCard — typed edit fields (review J5)', () => {
+  beforeEach(() => navigateMock.mockReset());
+
+  const gated = (): AIProposal =>
+    makeProposal({
+      type: 'Follow-up',
+      missingFields: ['proposedUnitPriceCents'],
+      editFields: [
+        {
+          label: 'Unit price ($)',
+          key: 'proposedUnitPriceCents',
+          kind: 'cents',
+          value: '89.00',
+        },
+      ],
+    });
+
+  function openEditor() {
+    fireEvent.click(screen.getByRole('button', { name: /edit/i }));
+  }
+
+  it('sends integer CENTS for a cents field, not the raw input string', async () => {
+    const onApprove = vi.fn().mockResolvedValue(undefined);
+    render(<AIProposalCard proposal={gated()} onApprove={onApprove} />);
+
+    openEditor();
+    fireEvent.change(screen.getByLabelText('Unit price ($)'), { target: { value: '290000' } });
+    fireEvent.click(screen.getByRole('button', { name: /save & apply/i }));
+
+    await vi.waitFor(() => expect(onApprove).toHaveBeenCalled());
+    expect(onApprove).toHaveBeenCalledWith({ proposedUnitPriceCents: 29_000_000 });
+  });
+
+  it('parses dollars-and-cents input exactly, without float multiplication', async () => {
+    const onApprove = vi.fn().mockResolvedValue(undefined);
+    render(<AIProposalCard proposal={gated()} onApprove={onApprove} />);
+
+    openEditor();
+    fireEvent.change(screen.getByLabelText('Unit price ($)'), { target: { value: '0.29' } });
+    fireEvent.click(screen.getByRole('button', { name: /save & apply/i }));
+
+    await vi.waitFor(() => expect(onApprove).toHaveBeenCalled());
+    expect(onApprove).toHaveBeenCalledWith({ proposedUnitPriceCents: 29 });
+  });
+
+  it('refuses to submit an unparseable money input instead of sending a 400-bound string', () => {
+    const onApprove = vi.fn().mockResolvedValue(undefined);
+    render(<AIProposalCard proposal={gated()} onApprove={onApprove} />);
+
+    openEditor();
+    fireEvent.change(screen.getByLabelText('Unit price ($)'), { target: { value: 'two ninety' } });
+    fireEvent.click(screen.getByRole('button', { name: /save & apply/i }));
+
+    expect(onApprove).not.toHaveBeenCalled();
+    expect(screen.getByTestId('edit-field-error')).toHaveTextContent(/Unit price/);
+  });
+
+  it('leaves an untyped (text) field exactly as before — a string on the wire', async () => {
+    const onApprove = vi.fn().mockResolvedValue(undefined);
+    render(
+      <AIProposalCard
+        proposal={makeProposal({
+          type: 'Follow-up',
+          editFields: [{ label: 'Invoice # or ID', key: 'invoiceId', value: 'Henderson' }],
+        })}
+        onApprove={onApprove}
+      />,
+    );
+
+    openEditor();
+    fireEvent.change(screen.getByLabelText('Invoice # or ID'), { target: { value: 'INV-9' } });
+    fireEvent.click(screen.getByRole('button', { name: /save & apply/i }));
+
+    await vi.waitFor(() => expect(onApprove).toHaveBeenCalled());
+    expect(onApprove).toHaveBeenCalledWith({ invoiceId: 'INV-9' });
+  });
+});
