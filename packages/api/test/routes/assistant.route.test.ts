@@ -12,6 +12,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
   createAssistantRouter,
   proposalSignals,
+  cardExplanation,
   editFieldsForMissing,
   dropUnverifiedIds,
   VOICE_APPROVAL_REFUSAL,
@@ -169,6 +170,36 @@ describe('POST /api/assistant/chat — create_customer path', () => {
     );
     expect(byKey.email).toBe('');
     expect(byKey.phone).toBe('');
+  });
+
+  // F1 — the SAME defect review K4 fixed on `proposalToUI`, one serializer
+  // over. `customerProposalToUI` overwrote the persisted explanation
+  // unconditionally with `From your message: "…"`, and
+  // `CreateCustomerVoiceTaskHandler` persists one on EVERY draft (the
+  // lead-match branch of it is genuinely load-bearing: "Approve to convert
+  // to customer; reject to keep as lead"). Asserted against the ROW rather
+  // than a string literal so this stays true if the handler's wording
+  // changes — the claim is "the card shows what the handler wrote".
+  it("shows the drafting handler's persisted explanation, not the source echo", async () => {
+    const gateway = scriptedGateway([
+      JSON.stringify({
+        intentType: 'create_customer',
+        confidence: 0.93,
+        extractedEntities: { displayName: 'Alex', phone: '555-0100' },
+      }),
+    ]);
+    const app = buildApp(gateway, proposalRepo);
+
+    const res = await request(app)
+      .post('/api/assistant/chat')
+      .send({ messages: [{ role: 'user', content: 'Create a new customer named Alex, phone 555-0100' }] });
+
+    expect(res.status).toBe(200);
+    const card = res.body?.message?.proposal;
+    const [persisted] = await proposalRepo.findByTenant(TEST_TENANT);
+    expect(persisted.explanation).toBeTruthy();
+    expect(card.explanation).toBe(persisted.explanation);
+    expect(card.explanation).not.toMatch(/^From your message:/);
   });
 
   // B8 (feat: voice-transcript-and-agent-paths) — the assistant route now
@@ -654,6 +685,29 @@ describe('B1 — editFieldsForMissing helper (pure mapper)', () => {
     expect(out).toEqual([
       { label: 'Unit price ($)', key: 'proposedUnitPriceCents', kind: 'cents', value: '120.00' },
     ]);
+  });
+});
+
+/**
+ * F1 — the explanation rule review K4 established, now shared by BOTH card
+ * serializers on this route (`proposalToUI` and `customerProposalToUI`)
+ * instead of being written out twice and fixed once.
+ */
+describe('F1 — cardExplanation (shared by both card serializers)', () => {
+  it('prefers the handler-persisted explanation over the source echo', () => {
+    expect(cardExplanation('Heard $290,000.00, above the limit — NOT applied.', 'change it')).toBe(
+      'Heard $290,000.00, above the limit — NOT applied.',
+    );
+  });
+
+  it('falls back to the source echo when nothing was persisted, blank included', () => {
+    expect(cardExplanation(undefined, 'add a customer')).toBe('From your message: "add a customer"');
+    expect(cardExplanation('   ', 'add a customer')).toBe('From your message: "add a customer"');
+  });
+
+  it('caps the echo at 120 characters (the customer serializer had no cap at all)', () => {
+    const long = 'x'.repeat(500);
+    expect(cardExplanation(undefined, long)).toBe(`From your message: "${'x'.repeat(120)}"`);
   });
 });
 

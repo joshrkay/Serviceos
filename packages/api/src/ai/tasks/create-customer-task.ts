@@ -386,9 +386,22 @@ export class CreateCustomerVoiceTaskHandler implements TaskHandler {
     const summaryEmail = payload.email ? `, ${payload.email}` : '';
     const summaryAddress = payload.address ? `, ${payload.address}` : '';
     const summary = `New customer from inbound call: ${payload.name}${summaryPhone}${summaryEmail}${summaryAddress}`;
+    // F1 rider — the DEFAULT branch dropped "Caller". This handler serves
+    // three surfaces (telephony FSM, the voice-action-router worker, and
+    // assistant chat), and only the first of them has a caller: the worker
+    // path is the OPERATOR's own voice memo and the chat path is the
+    // operator typing. The string was already being rendered verbatim on the
+    // inbox (web InboxPage reads `proposal.explanation` off the row), and
+    // F1's serializer fix puts it on the chat card too, so a channel claim
+    // the handler cannot actually make had to go. The lead-match branch
+    // keeps "Caller phone" — `existingLeadId` is stamped ONLY by
+    // telephony/twilio-adapter.ts, so there really is a caller there.
+    // (`summary` above still says "from inbound call" on every surface; that
+    // is the same class of defect one field over, is NOT newly exposed by
+    // this change, and is left for its own fix.)
     const explanation = ents.existingLeadId
       ? `Caller phone matches lead ${ents.existingLeadId}. Approve to convert to customer; reject to keep as lead.`
-      : 'Caller asked to sign up as a new customer. Approve to add them to the CRM.';
+      : 'New customer captured. Approve to add them to the CRM.';
 
     // RV-007 — Confidence Marker `_meta`: the intent classifier's score
     // mapped onto the shared level vocabulary. Omitted when no
