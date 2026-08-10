@@ -6,8 +6,9 @@
  *
  * Tenant-scoped, read-only. Reads Task 8's `material_items` substrate
  * (src/materials/material-item.ts) via `MaterialItemRepository.listPending`
- * and summarizes the OLDEST-CREATED (quality-review M4 — Task 8's contract
- * is oldest-created-first) up to `MAX_ITEMS_SPOKEN` (5) items by
+ * and summarizes the MOST URGENT (F2, 2026-08-10 — Task 8's contract is
+ * soonest-`needed_by` first, undated last; it was oldest-created-first
+ * through quality-review M4) up to `MAX_ITEMS_SPOKEN` (5) items by
  * description + quantity, plus vendor/needed-by when the caller stated
  * them. Optionally scoped to one job when the caller's spoken jobReference
  * resolved to a verified `jobId` (JOB_REF_INTENTS membership — see
@@ -50,11 +51,13 @@
  * `MaterialItemListOptions.neededByBefore` (Task 8's substrate, extended)
  * lets this skill actually narrow the query to "what's needed by <date>",
  * closing a real gap the interim per-item-surfacing mitigation left open:
- * the fetch is bounded (`FETCH_LIMIT`, below) and ordered oldest-created
- * first BY DEFAULT, so a tenant with more pending items than the fetch cap
- * could have a genuinely time-sensitive item never spoken at all — it only
- * "self-corrected" once the item aged into the oldest-N window. A real
- * date filter, applied at the repo/SQL boundary, fixes that directly.
+ * the fetch is bounded (`FETCH_LIMIT`, below) and, at the time, ordered
+ * oldest-created first BY DEFAULT, so a tenant with more pending items than
+ * the fetch cap could have a genuinely time-sensitive item never spoken at
+ * all — it only "self-corrected" once the item aged into the oldest-N
+ * window. A real date filter, applied at the repo/SQL boundary, fixes that
+ * for the caller who NAMES a day; F2 (below) fixes it for the caller who
+ * does not.
  *
  * `dateTimeDescription` (the caller's raw spoken day phrase — "tomorrow",
  * "by Friday") is resolved to a calendar day via `resolveSpokenDay`
@@ -117,10 +120,31 @@
  * whether a date filter was applied (spec-review MAJOR B) — an unfiltered
  * answer still benefits from the per-item date this fix doesn't replace.
  *
- * Ordering: date-scoped results are ordered soonest-`neededBy`-first (see
- * `MaterialItemListOptions.neededByBefore`'s doc comment) rather than
- * oldest-created-first — a date-scoped ask cares about urgency, and the
- * fetch is still capped, so which rows make the cut matters.
+ * ── The UN-SCOPED ask is ordered by urgency too (F2, 2026-08-10) ──────────
+ *
+ * K3 (above) fixed "what do I need for TOMORROW?". The bare "what do I
+ * need?" kept the original defect, and it is the more common ask: the repo's
+ * DEFAULT ordering was `created_at ASC`, so under `FETCH_LIMIT` 6 /
+ * `MAX_ITEMS_SPOKEN` 5 the five oldest-CREATED rows consumed the entire
+ * spoken answer and an item due tomorrow was never mentioned. Because a
+ * shopping list is append-mostly (only `markPurchased` prunes it), that was
+ * not a transient omission the way an aging window is — the SAME five stale
+ * rows owned the answer indefinitely.
+ *
+ * `listPending` now uses ONE ordering for every call — `needed_by ASC NULLS
+ * LAST, created_at ASC` (+ `id ASC` in Pg) — so this skill no longer has a
+ * "default" ordering distinct from its date-scoped one. Undated items sort
+ * LAST, not first: no `needed_by` means no deadline, not infinite urgency.
+ *
+ * NO SECOND DISCLOSURE QUERY HERE, unlike K3's "needed sooner" probe, and
+ * the asymmetry is deliberate. K3 needed one because a BRACKETED day window
+ * hides rows that are MORE urgent than the ones spoken — the caller would
+ * never guess they existed. The un-scoped ask hides nothing of the kind: it
+ * is lower-unbounded, so whatever the cap omits is by construction LESS
+ * urgent than everything spoken, and the existing `hasMore` tail ("more than
+ * 5 items on the materials list … and more beyond that") already says the
+ * list continues. Adding a probe would double the query cost to disclose
+ * "there are also less urgent items", which the tail states already.
  *
  * ── TTS-safe formatting (quality-review I2) ────────────────────────────────
  *
@@ -188,11 +212,12 @@ export type LookupMaterialsResult =
          */
         count: number | null;
         /**
-         * The (at most `MAX_ITEMS_SPOKEN`) OLDEST pending items actually
-         * spoken/rendered (quality-review M2/M4) — named `spokenItems`,
-         * not `items`, so a caller can never mistake this for the full
-         * pending set. A caller asking "what's next after these?" hears
-         * the newest-added items LAST, if at all — see module doc comment.
+         * The (at most `MAX_ITEMS_SPOKEN`) MOST URGENT pending items
+         * actually spoken/rendered (quality-review M2/M4; F2 changed this
+         * from "oldest") — named `spokenItems`, not `items`, so a caller can
+         * never mistake this for the full pending set. What the cap omits is
+         * by construction the LEAST urgent: later-dated items first, then
+         * undated ones — see module doc comment.
          */
         spokenItems: LookupMaterialsItem[];
       };

@@ -247,6 +247,54 @@ describe('Postgres integration — material items', () => {
       });
       expect(result.map((i) => i.id)).toEqual([first.id, second.id, third.id]);
     });
+
+    /**
+     * F2 (2026-08-10) — real-SQL proof of the DEFAULT ordering, the half
+     * #819 left alone. The mocked-pool test (test/materials/
+     * pg-material-item.test.ts) can only prove the ORDER BY TEXT; only
+     * Postgres can prove `NULLS LAST` actually places undated rows last
+     * under the LIMIT that decides what `lookup_materials` speaks.
+     */
+    it('orders an UN-SCOPED listPending by needed_by, undated rows last, under the LIMIT', async () => {
+      const t = await createTestTenant(pool);
+      // Created FIRST and undated: under the old `created_at ASC` default
+      // these two owned the whole answer and hid the dated rows below.
+      const undatedOld = await repo.create({
+        tenantId: t.tenantId,
+        description: 'undated, captured first',
+        createdBy: t.userId,
+      });
+      const undatedNewer = await repo.create({
+        tenantId: t.tenantId,
+        description: 'undated, captured second',
+        createdBy: t.userId,
+      });
+      const dueLater = await repo.create({
+        tenantId: t.tenantId,
+        description: 'due next year',
+        neededBy: new Date('2027-01-01T00:00:00Z'),
+        createdBy: t.userId,
+      });
+      const overdue = await repo.create({
+        tenantId: t.tenantId,
+        description: 'overdue since March',
+        neededBy: new Date('2026-03-02T00:00:00Z'),
+        createdBy: t.userId,
+      });
+
+      // Dated rows soonest-first, then the undated pair in created_at order.
+      const all = await repo.listPending(t.tenantId);
+      expect(all.map((i) => i.id)).toEqual([
+        overdue.id,
+        dueLater.id,
+        undatedOld.id,
+        undatedNewer.id,
+      ]);
+
+      // The pairing that matters: a cap now keeps the DATED rows.
+      const capped = await repo.listPending(t.tenantId, { limit: 2 });
+      expect(capped.map((i) => i.id)).toEqual([overdue.id, dueLater.id]);
+    });
   });
 
   // Review follow-up K3 — real-SQL proof of the INCLUSIVE lower bound that

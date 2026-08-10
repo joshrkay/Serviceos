@@ -827,11 +827,11 @@ Notes on the Tradesperson wave 1, Task 9 row (`add_material`, taxonomy 1.13.0):
   is STILL spoken per item (spec-review MAJOR B).**
   `MaterialItemListOptions.neededByBefore` (both backends —
   `material-item.ts`, `pg-material-item.ts`) closes the real gap the
-  interim per-item mitigation left open: the fetch is bounded and, by
-  default, ordered oldest-created-first, so a tenant with more pending
-  items than the fetch cap could have a genuinely time-sensitive item
-  never spoken at all — it only "self-corrected" once the item aged into
-  the oldest-N window. `lookup-materials.ts` resolves the caller's raw
+  interim per-item mitigation left open: the fetch is bounded and, at the
+  time, ordered oldest-created-first by default, so a tenant with more
+  pending items than the fetch cap could have a genuinely time-sensitive
+  item never spoken at all — it only "self-corrected" once the item aged
+  into the oldest-N window. `lookup-materials.ts` resolves the caller's raw
   `dateTimeDescription` ("tomorrow", "by Friday") via `resolveSpokenDay`
   (ai/scheduling/resolve-datetime.ts) — the SAME lookup-side day resolver
   `lookup_crew_schedule` uses — into a bracketed `[neededByFrom,
@@ -840,9 +840,10 @@ Notes on the Tradesperson wave 1, Task 9 row (`add_material`, taxonomy 1.13.0):
   `neededBy` never matches a date-scoped query (an undated item has no
   known deadline — this falls out of plain SQL `<` comparison semantics on
   the Pg side, and is filtered explicitly on the InMemory side to keep
-  both backends provably in agreement); (2) date-scoped results are
-  ordered soonest-`neededBy`-first, not oldest-created-first, since a
-  date-scoped ask cares about urgency and the fetch is still capped.
+  both backends provably in agreement); (2) results are ordered
+  soonest-`neededBy`-first, since the ask cares about urgency and the fetch
+  is still capped. (2) originally applied only to date-scoped calls; F2
+  below extended it to every call.
   UNLIKE `lookup_crew_schedule`, an absent or unparseable phrase applies NO
   filter at all rather than defaulting to "today" — silently narrowing an
   unparseable materials ask could hide a real, later-dated item behind a
@@ -899,13 +900,26 @@ Notes on the Tradesperson wave 1, Task 9 row (`add_material`, taxonomy 1.13.0):
   which Amazon Polly reads as "times" in a numeric context ("3× 3 boxes"
   → "three times three boxes," i.e. nine) and Google Cloud TTS typically
   drops entirely. Every quantity is now spoken as the word "quantity".
-- **Spoken items are the OLDEST pending, not the newest.** Mirrors Task
-  8's own `listPending` contract (oldest-created-first); a caller with
-  more than 5 pending items hears the 5 that have been waiting longest,
-  and "and more beyond that" hides the most RECENTLY added ones — a
-  plausibly surprising order for a shopping list, documented here and in
-  `lookup-materials.ts`'s own module doc comment rather than left
-  implicit.
+- **Spoken items are the MOST URGENT pending, undated ones last (F2,
+  2026-08-10).** Mirrors Task 8's `listPending` contract, which now uses
+  ONE ordering for every call — `needed_by ASC NULLS LAST, created_at ASC`
+  (+ `id ASC` in Pg) — rather than switching to urgency only when a date
+  bound was given. K3 (above) fixed "what do I need for TOMORROW?"; the
+  bare "what do I need?" kept the original defect and is the more common
+  ask: under the old `created_at ASC` default, the 5 oldest-CREATED rows
+  consumed the whole spoken answer and an item due tomorrow was never
+  mentioned — permanently, not transiently, because a shopping list is
+  append-mostly (only `markPurchased` prunes it), so the same 5 stale rows
+  owned the answer indefinitely. `NULLS LAST` is the safety: an item with
+  no `needed_by` has no deadline, so it sorts after every dated item rather
+  than being treated as infinitely urgent. NO second disclosure query is
+  added for this shape (unlike K3's "needed sooner" probe) — the un-scoped
+  ask is lower-unbounded, so whatever the cap omits is by construction LESS
+  urgent than everything spoken, and the existing "and more beyond that"
+  tail already says the list continues. No new migration/index; see
+  `pg-material-item.ts`'s module doc comment, which records that F2 gave up
+  the one index-supplied ordering knowingly and extends the same ~2,000-row
+  revisit trigger to cover the default ask.
 - **`lookup_events.result_count` SATURATES at 6 for this intent.** The
   bounded fetch (I4, above) means the row written by `record()` carries
   rows-fetched, capped at `MAX_ITEMS_SPOKEN + 1` (6) — never the true

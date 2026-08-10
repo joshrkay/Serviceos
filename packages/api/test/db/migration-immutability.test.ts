@@ -490,6 +490,10 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   // the plain (tenant_id) index (no query used it) and made
   // idx_material_items_pending cover (tenant_id, created_at) so
   // listPending's ORDER BY is served by the index scan; hash regenerated.
+  // (That last clause stopped being true on 2026-08-10: F2 reordered
+  // listPending by `needed_by` for every call, which this index cannot
+  // supply — it now serves the WHERE only. Deliberate; see
+  // pg-material-item.ts's module doc comment and its revisit trigger.)
   // Regenerated 2026-08-09: Task 9's review reworded a comment INSIDE this
   // migration's SQL string ("Task 9 may add markCancelled" -> "a future task
   // may"), which changes the hash. 272 is unmerged, so editing in place is

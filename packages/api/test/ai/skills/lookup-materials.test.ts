@@ -80,7 +80,9 @@ describe('lookupMaterials skill', () => {
     expect(res.data.count).toBeNull();
     expect(res.summary).toContain('5+ items on the materials list');
     expect(res.summary).toContain('and more');
-    // The 5 OLDEST are spoken (M4) — item 0..4, not the newest (item 6).
+    // All 7 are UNDATED, so F2's urgency ordering ties on every row and
+    // falls through to created_at: the 5 oldest are spoken (M4), item 0..4,
+    // not the newest (item 6).
     expect(res.data.spokenItems.map((i) => i.description)).toEqual([
       'item 0',
       'item 1',
@@ -88,6 +90,46 @@ describe('lookupMaterials skill', () => {
       'item 3',
       'item 4',
     ]);
+  });
+
+  /**
+   * F2 — the DEFAULT ask. #819 fixed "what do I need for TOMORROW?"; the
+   * bare "what do I need?" kept the original defect, and it is the more
+   * common ask. `created_at ASC` under FETCH_LIMIT 6 / MAX_ITEMS_SPOKEN 5
+   * meant five ancient rows owned the entire spoken answer — permanently,
+   * since the list is append-mostly and only `markPurchased` prunes it.
+   */
+  describe('F2 — a bare "what do I need?" leads with what is actually due', () => {
+    it('speaks the item due tomorrow rather than five ancient undated ones', async () => {
+      const materialItemRepo = new InMemoryMaterialItemRepository();
+      for (let i = 0; i < 6; i++) {
+        await materialItemRepo.create({
+          tenantId: TENANT, description: `ancient ${i}`, createdBy: 'u1',
+        });
+      }
+      await materialItemRepo.create({
+        tenantId: TENANT, description: 'PEX for the Patel job', quantity: 3, createdBy: 'u1',
+        neededBy: new Date('2026-06-12T00:00:00.000Z'),
+      });
+
+      const res = await lookupMaterials({ tenantId: TENANT, now: NOW, timezone: TZ }, { materialItemRepo });
+
+      expect(res.status).toBe('found');
+      if (res.status !== 'found') throw new Error('unreachable');
+      expect(res.data.spokenItems[0].description).toBe('PEX for the Patel job');
+      expect(res.summary).toContain('PEX for the Patel job');
+    });
+
+    it('still speaks undated items when nothing is dated (no needed_by is not a demotion to invisible)', async () => {
+      const materialItemRepo = new InMemoryMaterialItemRepository();
+      await materialItemRepo.create({ tenantId: TENANT, description: 'shop rags', createdBy: 'u1' });
+
+      const res = await lookupMaterials({ tenantId: TENANT, now: NOW, timezone: TZ }, { materialItemRepo });
+
+      expect(res.status).toBe('found');
+      if (res.status !== 'found') throw new Error('unreachable');
+      expect(res.data.spokenItems.map((i) => i.description)).toEqual(['shop rags']);
+    });
   });
 
   // I4 — the fetch is bounded at the repo boundary (MAX_ITEMS_SPOKEN + 1),

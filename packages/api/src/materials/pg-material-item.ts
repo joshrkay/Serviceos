@@ -6,24 +6,29 @@
  * NOT get their own index/migration. The CONCLUSION stands; the reasoning
  * below was corrected on 2026-08-09 (review follow-up N8) because the
  * original version of this comment claimed the LIMIT still bounds the work,
- * and it does not.
+ * and it does not — and corrected again on 2026-08-10 (F2), which took the
+ * last index-supplied query away.
  *
  * The REAL tradeoff:
  *
- *   - Default (undated) query — `WHERE tenant_id = $1 AND status =
- *     'pending' ORDER BY created_at ASC LIMIT 6`. `idx_material_items_pending
- *     (tenant_id, created_at) WHERE status = 'pending'` (migration 272)
- *     SUPPLIES the sort order, so the planner walks the index and stops after
- *     6 rows. Cost is O(limit), independent of how large the pending set is.
+ *   - EVERY query — `ORDER BY needed_by ASC NULLS LAST, created_at ASC,
+ *     id ASC` (one ordering for every shape since F2; see `listPending`).
+ *     `idx_material_items_pending (tenant_id, created_at) WHERE status =
+ *     'pending'` (migration 272) cannot supply that order — `needed_by` is
+ *     not in it. The planner uses the index to FIND the tenant's pending
+ *     rows, then MATERIALIZES every row matching the predicates and top-N
+ *     sorts them. The LIMIT caps what is RETURNED, not what is read and
+ *     sorted: cost is O(matching pending rows), not O(6). K3's two-query
+ *     shape (bracketed answer + bounded overdue probe) doubles that on a
+ *     date-scoped ask, though each query is the same order of magnitude.
  *
- *   - Date-scoped query — `ORDER BY needed_by ASC` cannot be served by that
- *     index at all (needed_by is not in it). The planner uses the index to
- *     find the tenant's pending rows, then MATERIALIZES every row matching
- *     the needed_by predicate and top-N sorts them. The LIMIT caps what is
- *     RETURNED, not what is read and sorted: cost is O(matching pending
- *     rows), not O(6). K3's two-query shape (bracketed answer + bounded
- *     overdue probe) doubles that, though each query is the same order of
- *     magnitude.
+ *   - Before F2 the DEFAULT (undated) query was the one exception: it
+ *     ordered `created_at ASC`, which that index DID supply, so the planner
+ *     walked it and stopped after 6 rows — O(limit). F2 gave that up
+ *     knowingly. What it bought is correctness: `created_at ASC` under a
+ *     6-row fetch and a 5-item spoken cap let five ancient rows hide an item
+ *     due tomorrow, permanently, because a shopping list is append-mostly.
+ *     An O(limit) query that answers the wrong question is not a saving.
  *
  * That is still the right trade today: a shopping list is a small,
  * append-mostly, per-tenant operational list (`markPurchased` continuously
@@ -37,6 +42,10 @@
  * concurrently-pending set is observed above ~2,000 rows, add
  * `(tenant_id, needed_by) WHERE status = 'pending'` so the date-scoped
  * ORDER BY becomes index-supplied and the LIMIT bounds the work again.
+ * Since F2 that trigger covers the DEFAULT ask too, and the index should be
+ * `(tenant_id, needed_by, created_at) WHERE status = 'pending'` to supply
+ * the whole sort — a btree ASC index already stores NULLs last, matching
+ * `NULLS LAST`.
  */
 import { Pool } from 'pg';
 import { isValidTenantId } from '../db/schema';
@@ -45,7 +54,6 @@ import {
   buildMaterialItem,
   CreateMaterialItemInput,
   dateBoundsAreValid,
-  hasDateBound,
   MaterialItem,
   MaterialItemListOptions,
   MaterialItemRepository,
@@ -225,15 +233,25 @@ export class PgMaterialItemRepository extends PgBaseRepository implements Materi
         typeof options?.limit === 'number' && Number.isInteger(options.limit) && options.limit > 0;
       const limitClause = hasLimit ? ` LIMIT $${params.length + 1}` : '';
       if (hasLimit) params.push(options!.limit);
-      // Ordering decision (MaterialItemListOptions.neededByBefore doc
-      // comment): a date-scoped ask orders by URGENCY (soonest needed_by
-      // first), not insertion order — every row in a date-bounded result
-      // set has a non-NULL needed_by (excluded above), so this sort key is
-      // always well-defined, never a NULLS-FIRST/LAST ambiguity.
-      // Default (no date scope) stays oldest-created-first, unchanged.
-      const orderByClause = hasDateBound(options)
-        ? 'ORDER BY needed_by ASC, created_at ASC, id ASC'
-        : 'ORDER BY created_at ASC, id ASC';
+      // F2 — ONE ordering for every shape. This used to branch: date-scoped
+      // asks ordered by urgency, the default ordered `created_at ASC`. That
+      // default was the last home of the silent-omission defect the whole
+      // date path exists to fix — `lookup_materials` fetches 6 rows and
+      // speaks 5, so five ancient rows owned the entire answer to "what do I
+      // need?" and an item due tomorrow was never mentioned; and because a
+      // shopping list is append-mostly (only `markPurchased` prunes it),
+      // those same five rows owned it forever rather than self-correcting.
+      //
+      // `NULLS LAST` is a no-op on the date-scoped shape (a `needed_by`
+      // predicate already excludes NULL rows) and is the whole safety of the
+      // default shape: an undated item has no deadline, so it sorts after
+      // every dated one rather than being treated as infinitely urgent. It
+      // is spelled out rather than left to Postgres's ASC default so the
+      // intent survives anyone later flipping a direction.
+      //
+      // Collapsing the branch also removes the possibility of the two shapes
+      // drifting apart on tie-breaks, which is exactly what J1 had to fix.
+      const orderByClause = 'ORDER BY needed_by ASC NULLS LAST, created_at ASC, id ASC';
       const { rows } = await client.query<MaterialItemRow>(
         `SELECT * FROM material_items WHERE ${conditions.join(' AND ')} ${orderByClause}${limitClause}`,
         params,

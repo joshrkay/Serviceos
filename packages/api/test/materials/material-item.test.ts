@@ -80,7 +80,7 @@ describe('MaterialItemRepository', () => {
     expect(limited.map((i) => i.id)).toEqual([firstForJob.id]);
   });
 
-  it('returns pending items oldest-created first', async () => {
+  it('returns UNDATED pending items oldest-created first', async () => {
     const repo = new InMemoryMaterialItemRepository();
     const first = await repo.create({ tenantId: 't1', description: 'first', createdBy: 'u1' });
     const second = await repo.create({ tenantId: 't1', description: 'second', createdBy: 'u1' });
@@ -88,6 +88,81 @@ describe('MaterialItemRepository', () => {
 
     const pending = await repo.listPending('t1');
     expect(pending.map((i) => i.id)).toEqual([first.id, second.id, third.id]);
+  });
+
+  /**
+   * F2 — the DEFAULT (no `needed_by` bound) ordering. #819 fixed the
+   * DATE-SCOPED ask; the un-scoped one kept the original defect:
+   * `created_at ASC` under `lookup_materials`'s 6-row fetch / 5-item spoken
+   * cap meant "what do I need?" spoke five ancient items and never mentioned
+   * one due tomorrow. Worse than a one-off omission, because the shopping
+   * list is append-mostly (only `markPurchased` prunes it) — the SAME five
+   * stalest rows own the whole spoken answer forever.
+   *
+   * One ordering now serves both shapes: `needed_by ASC NULLS LAST,
+   * created_at ASC` (+ `id ASC` in Pg). NULLS LAST is what makes it safe:
+   * an undated item has no deadline, so it is not infinitely urgent.
+   */
+  describe('F2 — default ordering is by urgency, undated last', () => {
+    it('puts a dated item ahead of undated ones however much older they are', async () => {
+      const repo = new InMemoryMaterialItemRepository();
+      for (let i = 0; i < 6; i++) {
+        await repo.create({ tenantId: 't1', description: `ancient undated ${i}`, createdBy: 'u1' });
+      }
+      const urgent = await repo.create({
+        tenantId: 't1', description: 'PEX for tomorrow', createdBy: 'u1',
+        neededBy: new Date('2026-06-12T00:00:00.000Z'),
+      });
+
+      const top = await repo.listPending('t1', { limit: 6 });
+      expect(top[0].id).toBe(urgent.id);
+      expect(top.map((i) => i.id)).toContain(urgent.id);
+    });
+
+    it('sorts undated items LAST — no needed_by is NOT infinite urgency', async () => {
+      const repo = new InMemoryMaterialItemRepository();
+      const undated = await repo.create({ tenantId: 't1', description: 'undated', createdBy: 'u1' });
+      const farFuture = await repo.create({
+        tenantId: 't1', description: 'due in a year', createdBy: 'u1',
+        neededBy: new Date('2027-01-01T00:00:00.000Z'),
+      });
+
+      expect((await repo.listPending('t1')).map((i) => i.id)).toEqual([farFuture.id, undated.id]);
+    });
+
+    it('orders dated items soonest-first, overdue ahead of upcoming', async () => {
+      const repo = new InMemoryMaterialItemRepository();
+      const upcoming = await repo.create({
+        tenantId: 't1', description: 'due next week', createdBy: 'u1',
+        neededBy: new Date('2026-06-19T00:00:00.000Z'),
+      });
+      const overdue = await repo.create({
+        tenantId: 't1', description: 'overdue since March', createdBy: 'u1',
+        neededBy: new Date('2026-03-02T00:00:00.000Z'),
+      });
+
+      expect((await repo.listPending('t1')).map((i) => i.id)).toEqual([overdue.id, upcoming.id]);
+    });
+
+    it('breaks a needed_by tie on created_at, same key Pg breaks it on', async () => {
+      const repo = new InMemoryMaterialItemRepository();
+      const sameDay = new Date('2026-06-12T00:00:00.000Z');
+      const firstCreated = await repo.create({
+        tenantId: 't1', description: 'first created', createdBy: 'u1', neededBy: sameDay,
+      });
+      // Force a distinct created_at: the InMemory clock is millisecond
+      // precision, and a same-millisecond tie falls to insertion order (the
+      // documented, deliberate residual divergence from Pg's `id ASC`).
+      await new Promise((r) => setTimeout(r, 2));
+      const secondCreated = await repo.create({
+        tenantId: 't1', description: 'second created', createdBy: 'u1', neededBy: sameDay,
+      });
+
+      expect((await repo.listPending('t1')).map((i) => i.id)).toEqual([
+        firstCreated.id,
+        secondCreated.id,
+      ]);
+    });
   });
 
   // Follow-up to Task 9's I4/M4 fetch-bound work: lookup_materials's bounded
@@ -255,19 +330,23 @@ describe('MaterialItemRepository', () => {
       expect(await repo.listPending('t1', { neededByBefore: new Date('nonsense') })).toEqual([]);
     });
 
-    it('an absent neededByBefore keeps the existing oldest-created-first order (no behavior change)', async () => {
+    // F2 REVERSED THIS PIN. It used to assert that an absent bound kept
+    // oldest-created-first even when that buried the sooner-due item — i.e.
+    // it encoded the exact defect F2 fixes. The un-scoped list now orders by
+    // urgency too, so the same two rows come back sooner-due first.
+    it('an absent neededByBefore still orders by urgency, sooner-due first', async () => {
       const repo = new InMemoryMaterialItemRepository();
-      const first = await repo.create({
+      const dueLater = await repo.create({
         tenantId: 't1', description: 'first, due later', createdBy: 'u1',
         neededBy: new Date('2026-09-01T00:00:00Z'),
       });
-      const second = await repo.create({
+      const dueSooner = await repo.create({
         tenantId: 't1', description: 'second, due sooner', createdBy: 'u1',
         neededBy: new Date('2026-08-01T00:00:00Z'),
       });
 
       const result = await repo.listPending('t1');
-      expect(result.map((i) => i.id)).toEqual([first.id, second.id]);
+      expect(result.map((i) => i.id)).toEqual([dueSooner.id, dueLater.id]);
     });
   });
 

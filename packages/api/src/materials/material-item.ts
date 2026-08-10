@@ -96,9 +96,9 @@ export interface MaterialItemListOptions {
    * A malformed value (anything that is not a valid `Date`) yields `[]`
    * from BOTH backends — see `isUsableDateBound` below.
    *
-   * Ordering interaction: when this option is set, `listPending` orders
-   * by `needed_by ASC` (soonest-due first) instead of the default
-   * oldest-created-first — see the interface doc comment below for why.
+   * Ordering interaction: NONE, as of F2 (2026-08-10). `listPending` orders
+   * by `needed_by` first for EVERY call, bound or no bound, so setting this
+   * option no longer switches the sort — see the interface doc comment below.
    */
   neededByBefore?: Date;
   /**
@@ -109,8 +109,8 @@ export interface MaterialItemListOptions {
    * this day (including everything ever overdue)".
    *
    * Same NULL semantics and same malformed-value posture as
-   * `neededByBefore`, and setting either bound switches `listPending` to
-   * `needed_by ASC` ordering.
+   * `neededByBefore`, and — since F2 — the same non-effect on ordering:
+   * `listPending` sorts by `needed_by` whether a bound is given or not.
    */
   neededByFrom?: Date;
   /**
@@ -119,11 +119,14 @@ export interface MaterialItemListOptions {
    * 9: `lookup_materials` used to load every pending row for the tenant
    * just to speak 5 of them — a shopping list is append-mostly, only
    * `markPurchased` prunes it, so that only gets worse over a tenant's
-   * lifetime). Rows are returned in the SAME order `listPending` uses for
-   * this call (oldest-created-first by default, or soonest-`needed_by`-
-   * first when a `needed_by` bound is given — see those options' doc
-   * comments), so `limit: N` yields the N rows that ordering puts first,
-   * not an arbitrary N.
+   * lifetime). Rows come back in `listPending`'s ONE ordering (soonest-
+   * `needed_by` first, undated last — see the interface doc comment), so
+   * `limit: N` yields the N MOST URGENT rows, not an arbitrary N.
+   *
+   * That pairing is the whole point of F2: this option and the ordering are
+   * a single decision. Whatever the ordering puts last is what a capped
+   * caller never sees, so the ordering has to put the least-consequential
+   * rows there.
    */
   limit?: number;
 }
@@ -178,19 +181,32 @@ export interface MaterialItemRepository {
    * Pending items for a tenant, optionally scoped to a job and/or a
    * needed-by window (`options.neededByFrom` / `options.neededByBefore`).
    *
-   * Ordering: oldest-created first by DEFAULT. When a `needed_by` bound is
-   * given, ordering switches to soonest-`needed_by`-first instead — a
-   * date-scoped ask ("what do I need for tomorrow?") cares about urgency,
-   * not which row happened to be created first, and the fetch is capped
-   * (`options.limit`) so which rows make the cut matters.
+   * ORDERING — ONE ordering, for every call, bound or no bound (F2,
+   * 2026-08-10):
+   *
+   *   Pg:       `needed_by ASC NULLS LAST, created_at ASC, id ASC`
+   *   InMemory: the same, then insertion order (Array.prototype.sort is
+   *             stable) where Pg would use `id`
+   *
+   * There used to be TWO: date-scoped calls ordered by `needed_by`, and the
+   * default ordered `created_at ASC`. #819 fixed the date-scoped ask; the
+   * default kept the original defect. `lookup_materials` fetches 6 rows and
+   * speaks 5, so under `created_at ASC` the five oldest-CREATED rows owned
+   * the whole answer to "what do I need?" and an item due tomorrow was never
+   * mentioned — and since a shopping list is append-mostly (only
+   * `markPurchased` prunes it), those same five rows owned it permanently
+   * rather than self-correcting. An ordering paired with a cap decides what
+   * the caller never hears, so it has to demote the least consequential rows.
+   *
+   * NULLS LAST is what keeps that honest. An item with no `needed_by` has no
+   * deadline; it is not infinitely urgent, so it sorts AFTER every dated item
+   * rather than ahead of them. (It is also unreachable on a date-scoped call:
+   * a `needed_by` predicate already excludes NULL rows, which is why
+   * collapsing the two orderings into one changed nothing for that shape.)
    *
    * TIE-BREAKING (corrected 2026-08-09, review follow-up J1 — the previous
    * version of this comment claimed InMemory "never ties by construction",
    * which was FALSE and shipped a real mock/prod divergence):
-   *
-   *   Pg:       `needed_by ASC, created_at ASC, id ASC`
-   *   InMemory: `needed_by ASC, created_at ASC`, then insertion order
-   *             (Array.prototype.sort is stable)
    *
    * `needed_by` ties are the NORMAL case, not an edge case:
    * `add-material-handler.ts` writes every voice-captured date as
@@ -208,7 +224,9 @@ export interface MaterialItemRepository {
    * precision, which CAN tie on rapid successive creates — and among those
    * ties InMemory yields insertion order where Pg would yield `id` order.
    * That residual divergence is reachable only in a mock that creates two
-   * rows inside one millisecond with an identical `needed_by`; it is
+   * rows inside one millisecond that tie on the leading key — an identical
+   * `needed_by`, or (since F2 folded them into the same sort) both undated;
+   * it is
    * deliberately left rather than adding an `id` tie-break to InMemory,
    * because insertion order is the more useful (and more truthful) answer
    * for a fake, and an `id` tie-break there would make every "N oldest"
@@ -332,16 +350,22 @@ export class InMemoryMaterialItemRepository implements MaterialItemRepository {
       .filter((i) => !dateScoped || i.neededBy !== undefined)
       .filter((i) => !before || i.neededBy!.getTime() < before.getTime())
       .filter((i) => !from || i.neededBy!.getTime() >= from.getTime());
-    // Tie-break parity with Pg (`needed_by ASC, created_at ASC, id ASC`) —
-    // see MaterialItemRepository.listPending's doc comment. `sort` is stable,
-    // so a created_at tie keeps insertion order here.
-    const sorted = dateScoped
-      ? filtered.sort(
-          (a, b) =>
-            a.neededBy!.getTime() - b.neededBy!.getTime() ||
-            a.createdAt.getTime() - b.createdAt.getTime(),
-        )
-      : filtered.sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime());
+    // F2 — ONE ordering for every shape, mirroring Pg's
+    // `needed_by ASC NULLS LAST, created_at ASC, id ASC`. `sort` is stable,
+    // so a created_at tie keeps insertion order here (the one deliberate
+    // residual divergence — see MaterialItemRepository.listPending's doc
+    // comment). `undefined` neededBy sorts LAST, never first: an item with no
+    // deadline is not infinitely urgent.
+    const sorted = filtered.sort((a, b) => {
+      const an = a.neededBy?.getTime();
+      const bn = b.neededBy?.getTime();
+      if (an !== bn) {
+        if (an === undefined) return 1;
+        if (bn === undefined) return -1;
+        return an - bn;
+      }
+      return a.createdAt.getTime() - b.createdAt.getTime();
+    });
     const result = sorted.map((i) => ({ ...i }));
     return typeof options?.limit === 'number' ? result.slice(0, options.limit) : result;
   }
