@@ -604,6 +604,7 @@ export class PgProposalRepository extends PgBaseRepository implements ProposalRe
       tenantId: string;
       proposalType: ProposalType;
       retryCount: number;
+      executionError?: string;
     }>;
   }> {
     return this.withCrossTenantSweep(async (client) => {
@@ -621,6 +622,13 @@ export class PgProposalRepository extends PgBaseRepository implements ProposalRe
       // event above never reaches either surface. Wording must match
       // staleExecutionTimeoutMessage() in proposal.ts exactly (can't share
       // the JS string in SQL — keep the two in sync by hand).
+      //
+      // Follow-up: execution_error is also RETURNED. UPDATE ... RETURNING
+      // yields POST-update values, so this is exactly what the COALESCE
+      // resolved to — the real caught cause when execution-worker.ts
+      // recorded one on the still-'executing' row, else the synthesized
+      // wording — which the caller puts on the timeout audit event so it
+      // states WHY, not just that a timeout happened.
       const failed = await client.query(
         `UPDATE proposals
          SET status = 'execution_failed',
@@ -632,7 +640,7 @@ export class PgProposalRepository extends PgBaseRepository implements ProposalRe
          WHERE status = 'executing'
            AND claimed_at < NOW() - ($1 || ' minutes')::INTERVAL
            AND execution_retry_count >= $2
-         RETURNING id, tenant_id, proposal_type, execution_retry_count`,
+         RETURNING id, tenant_id, proposal_type, execution_retry_count, execution_error`,
         [staleMinutes, maxRetries]
       );
       const reset = await client.query(
@@ -652,6 +660,9 @@ export class PgProposalRepository extends PgBaseRepository implements ProposalRe
         tenantId: row.tenant_id as string,
         proposalType: row.proposal_type as ProposalType,
         retryCount: Number(row.execution_retry_count),
+        ...(row.execution_error != null
+          ? { executionError: row.execution_error as string }
+          : {}),
       }));
       return {
         resetToApproved: reset.rowCount ?? 0,

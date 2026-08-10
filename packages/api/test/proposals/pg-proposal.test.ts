@@ -51,6 +51,10 @@ describe('PgProposalRepository.resetStaleExecuting — failed proposal detail', 
         tenant_id: 'tenant-1',
         proposal_type: 'create_customer',
         execution_retry_count: 3,
+        // UPDATE ... RETURNING yields POST-update values, so this is what the
+        // COALESCE resolved to — here, a real cause recorded earlier by
+        // execution-worker.ts on the still-'executing' row.
+        execution_error: 'SMTP relay refused the message',
       },
     ]);
     const repo = new PgProposalRepository(pool);
@@ -59,12 +63,41 @@ describe('PgProposalRepository.resetStaleExecuting — failed proposal detail', 
 
     expect(result.movedToFailed).toBe(1);
     expect(result.failedProposals).toEqual([
-      { id: 'stale-1', tenantId: 'tenant-1', proposalType: 'create_customer', retryCount: 3 },
+      {
+        id: 'stale-1',
+        tenantId: 'tenant-1',
+        proposalType: 'create_customer',
+        retryCount: 3,
+        executionError: 'SMTP relay refused the message',
+      },
     ]);
 
     const failUpdate = calls.find((c) => /SET\s+status\s*=\s*'execution_failed'/i.test(c.sql));
     expect(failUpdate).toBeDefined();
-    expect(failUpdate!.sql).toMatch(/RETURNING\s+id,\s*tenant_id,\s*proposal_type,\s*execution_retry_count/i);
+    // Follow-up — execution_error joins the RETURNING list so the caller can
+    // put the real cause on the proposal.execution_timed_out audit event.
+    expect(failUpdate!.sql).toMatch(
+      /RETURNING\s+id,\s*tenant_id,\s*proposal_type,\s*execution_retry_count,\s*execution_error/i,
+    );
+  });
+
+  it('omits executionError when the RETURNING row carries SQL NULL (historical row)', async () => {
+    const { pool } = buildPool([
+      {
+        id: 'stale-null-reason',
+        tenant_id: 'tenant-1',
+        proposal_type: 'create_customer',
+        execution_retry_count: 3,
+        execution_error: null,
+      },
+    ]);
+    const repo = new PgProposalRepository(pool);
+
+    const result = await repo.resetStaleExecuting(10, 3);
+
+    expect(result.failedProposals).toEqual([
+      { id: 'stale-null-reason', tenantId: 'tenant-1', proposalType: 'create_customer', retryCount: 3 },
+    ]);
   });
 
   it('returns an empty failedProposals array when nothing moved to failed', async () => {

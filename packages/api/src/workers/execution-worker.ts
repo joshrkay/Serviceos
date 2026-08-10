@@ -21,7 +21,7 @@
  * scheduler belongs in a future slice).
  */
 
-import { ProposalRepository, Proposal } from '../proposals/proposal';
+import { ProposalRepository, Proposal, redactedExecutionErrorCause } from '../proposals/proposal';
 import { ProposalExecutor } from '../proposals/execution/executor';
 import { UNDO_WINDOW_MS } from '../proposals/lifecycle';
 import { Logger } from '../logging/logger';
@@ -72,14 +72,20 @@ async function runExecutionSweepInner(deps: ExecutionWorkerDeps): Promise<{
     }
     // Follow-up: a proposal moved straight to the terminal 'execution_failed'
     // status here (maxRetries exhausted) bypassed executeAudited entirely —
-    // this is the only place that transition gets an audit event. We can't
-    // recover the ORIGINAL failure reason (it was never captured on this
-    // path — e.g. a HANDLER_NOT_FOUND throw happens before any result is
-    // recorded), so the event records what we genuinely know: the proposal
-    // sat claimed in 'executing' past the stale threshold across
-    // `retryCount` retries without ever completing. Failure-soft — an
-    // audit-write failure never blocks the sweep or the status transition,
-    // which already committed.
+    // this is the only place that transition gets an audit event.
+    //
+    // The event now also carries `executionError`, the row's post-write
+    // reason. Earlier this path could only say "it timed out": the ORIGINAL
+    // throw was caught by the per-proposal catch below, written to a log
+    // line, and dropped, so an operator debugging a stuck proposal got a
+    // terminal failure with no cause. That catch now records the (redacted)
+    // cause into the SAME `execution_error` concept — while the row is still
+    // 'executing' — and the terminal write COALESCEs rather than clobbers, so
+    // a real cause survives to here. Rows that went stale without this worker
+    // ever catching anything (a crashed process) still report the synthesized
+    // `staleExecutionTimeoutMessage` wording. Failure-soft — an audit-write
+    // failure never blocks the sweep or the status transition, which already
+    // committed.
     for (const failedProposal of recovered.failedProposals) {
       try {
         await deps.auditRepo.create(
@@ -98,6 +104,12 @@ async function runExecutionSweepInner(deps: ExecutionWorkerDeps): Promise<{
               retryCount: failedProposal.retryCount,
               staleMinutes,
               maxRetries,
+              // Already bounded + scrubbed by redactedExecutionErrorCause at
+              // the point it was recorded (or a synthesized constant) — safe
+              // to copy into an audit row verbatim.
+              ...(failedProposal.executionError
+                ? { executionError: failedProposal.executionError }
+                : {}),
             },
           }),
         );
@@ -148,11 +160,46 @@ async function runExecutionSweepInner(deps: ExecutionWorkerDeps): Promise<{
       });
     } catch (err) {
       failed++;
+      const cause = redactedExecutionErrorCause(err);
       deps.logger.warn('Execution sweep: proposal execution failed', {
         proposalId: proposal.id,
         tenantId: proposal.tenantId,
-        error: err instanceof Error ? err.message : String(err),
+        error: cause,
       });
+      // Persist WHY. Without this the cause lived only in this log line: the
+      // row stayed claimed in 'executing' until resetStaleExecuting
+      // terminalized it, and both `GET /api/proposals` and the
+      // `proposal.execution_timed_out` audit event could then only say "timed
+      // out". Same `execution_error` concept the terminal write already uses
+      // — never a parallel field — and that write COALESCEs, so what is
+      // recorded here is what survives.
+      //
+      // Conditional on the row still being 'executing' (updateStatusIf, one
+      // atomic statement, self-transition — status is unchanged, only the
+      // reason is written):
+      //   - CHAIN_PARENT_PENDING puts the row back to 'approved' BEFORE
+      //     throwing. That is a routine "retry next tick", not a failure, and
+      //     stamping a reason would show a scary error on a proposal that is
+      //     merely waiting for its chain sibling.
+      //   - a handler that terminalized itself already recorded its own,
+      //     better-worded reason; the precondition misses and leaves it.
+      // Failure-soft: a write failure here must never turn one proposal's
+      // failure into the whole sweep's.
+      try {
+        await deps.proposalRepo.updateStatusIf(
+          proposal.tenantId,
+          proposal.id,
+          ['executing'],
+          'executing',
+          { executionError: cause },
+        );
+      } catch (persistErr) {
+        deps.logger.error('Execution sweep: failed to record execution_error for a failed execution', {
+          proposalId: proposal.id,
+          tenantId: proposal.tenantId,
+          error: persistErr instanceof Error ? persistErr.message : String(persistErr),
+        });
+      }
     }
   }
 

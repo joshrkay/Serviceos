@@ -8,6 +8,9 @@ import {
   decideInitialStatus,
   actionClassForProposalType,
   VALID_PROPOSAL_TYPES,
+  redactedExecutionErrorCause,
+  MAX_EXECUTION_ERROR_LENGTH,
+  staleExecutionTimeoutMessage,
 } from '../../src/proposals/proposal';
 import { ConflictError } from '../../src/shared/errors';
 
@@ -922,8 +925,17 @@ describe('InMemoryProposalRepository.resetStaleExecuting — failed proposal det
 
     expect(result.movedToFailed).toBe(1);
     expect(result.resetToApproved).toBe(0);
+    // Follow-up: each entry also carries the row's POST-write reason, so the
+    // caller's `proposal.execution_timed_out` event can state WHY. Nothing was
+    // recorded on this row before the sweep, so it is the synthesized wording.
     expect(result.failedProposals).toEqual([
-      { id: 'stale-1', tenantId: 'tenant-1', proposalType: 'create_customer', retryCount: 3 },
+      {
+        id: 'stale-1',
+        tenantId: 'tenant-1',
+        proposalType: 'create_customer',
+        retryCount: 3,
+        executionError: staleExecutionTimeoutMessage(10, 3),
+      },
     ]);
   });
 
@@ -963,8 +975,49 @@ describe('InMemoryProposalRepository.resetStaleExecuting — failed proposal det
 
     expect(result.movedToFailed).toBe(2);
     expect(result.failedProposals.sort((a, b) => a.id.localeCompare(b.id))).toEqual([
-      { id: 'stale-a', tenantId: 'tenant-a', proposalType: 'create_customer', retryCount: 3 },
-      { id: 'stale-b', tenantId: 'tenant-b', proposalType: 'issue_invoice', retryCount: 5 },
+      {
+        id: 'stale-a',
+        tenantId: 'tenant-a',
+        proposalType: 'create_customer',
+        retryCount: 3,
+        executionError: staleExecutionTimeoutMessage(10, 3),
+      },
+      {
+        id: 'stale-b',
+        tenantId: 'tenant-b',
+        proposalType: 'issue_invoice',
+        retryCount: 5,
+        executionError: staleExecutionTimeoutMessage(10, 5),
+      },
+    ]);
+  });
+
+  /**
+   * Follow-up — a cause recorded while the row was still 'executing' (the
+   * execution sweep's per-proposal catch) must be the reason REPORTED, not
+   * just the reason left on the column: the audit event is built from this
+   * array, so a COALESCE that preserves the real cause on the row while the
+   * caller still emits "timed out" would leave the original gap open.
+   */
+  it('reports the real recorded cause, not the synthesized wording, when one was already on the row', async () => {
+    const repo = new InMemoryProposalRepository();
+    await seedExecuting(repo, {
+      id: 'stale-with-cause',
+      claimedAt: new Date(Date.now() - 11 * 60 * 1000),
+      executionRetryCount: 3,
+      executionError: 'SMTP relay refused the message',
+    });
+
+    const result = await repo.resetStaleExecuting(10, 3);
+
+    expect(result.failedProposals).toEqual([
+      {
+        id: 'stale-with-cause',
+        tenantId: 'tenant-1',
+        proposalType: 'create_customer',
+        retryCount: 3,
+        executionError: 'SMTP relay refused the message',
+      },
     ]);
   });
 
@@ -1004,5 +1057,82 @@ describe('InMemoryProposalRepository.resetStaleExecuting — failed proposal det
 
     const updated = await repo.findById('tenant-1', 'stale-has-reason');
     expect(updated!.executionError).toBe('a real reason recorded earlier');
+  });
+});
+
+/**
+ * Follow-up to PR #815 — `execution_error` now also receives the CAUGHT
+ * execution error from workers/execution-worker.ts, and from there rides both
+ * `GET /api/proposals` and the `proposal.execution_timed_out` audit row.
+ * A thrown error's message is far less controlled than a handler's own
+ * `result.error` string: it can be a driver error echoing a bound parameter,
+ * an HTTP client error echoing a URL with a token in the query string, or a
+ * provider error quoting the customer contact it failed to reach. So the
+ * cause is bounded and scrubbed on the way in, at the single place that
+ * builds it.
+ */
+describe('redactedExecutionErrorCause — bounded, scrubbed execution_error input', () => {
+  it('passes an ordinary handler message through unchanged', () => {
+    expect(redactedExecutionErrorCause(new Error('Customer has no service location'))).toBe(
+      'Customer has no service location',
+    );
+  });
+
+  it('accepts a non-Error throw without crashing', () => {
+    expect(redactedExecutionErrorCause('plain string throw')).toBe('plain string throw');
+    expect(redactedExecutionErrorCause(undefined)).toBe('unknown execution failure');
+    expect(redactedExecutionErrorCause(null)).toBe('unknown execution failure');
+  });
+
+  it('masks bearer tokens', () => {
+    const out = redactedExecutionErrorCause(
+      new Error('401 from provider — Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.abc.def'),
+    );
+    expect(out).not.toContain('eyJhbGciOiJIUzI1NiJ9.abc.def');
+    expect(out).toContain('401 from provider');
+  });
+
+  it('masks secret-ish key=value pairs, including inside a URL query string', () => {
+    const out = redactedExecutionErrorCause(
+      new Error('GET https://api.example.com/v1/send?api_key=live_9f8e7d6c&retry=2 failed'),
+    );
+    expect(out).not.toContain('live_9f8e7d6c');
+    // Non-secret params and the host survive — this has to stay debuggable.
+    expect(out).toContain('api.example.com');
+    expect(out).toContain('retry=2');
+  });
+
+  it('masks provider-style key literals wherever they appear', () => {
+    const out = redactedExecutionErrorCause(new Error('bad key sk_live_51H8xYzAbCdEfGh'));
+    expect(out).not.toContain('sk_live_51H8xYzAbCdEfGh');
+  });
+
+  it('masks customer PII (email addresses and phone numbers)', () => {
+    const out = redactedExecutionErrorCause(
+      new Error('could not reach jane.doe@example.com at (555) 123-4567'),
+    );
+    expect(out).not.toContain('jane.doe@example.com');
+    expect(out).not.toContain('123-4567');
+    expect(out).toContain('could not reach');
+  });
+
+  it('collapses newlines so one cause is one audit-row line', () => {
+    const out = redactedExecutionErrorCause(new Error('line one\nline two\r\nline three'));
+    expect(out).not.toMatch(/[\r\n]/);
+    expect(out).toContain('line one');
+    expect(out).toContain('line three');
+  });
+
+  it('bounds the length so a stack-sized message cannot bloat the row', () => {
+    const out = redactedExecutionErrorCause(new Error('x'.repeat(5000)));
+    expect(out.length).toBeLessThanOrEqual(MAX_EXECUTION_ERROR_LENGTH);
+    expect(out.endsWith('…')).toBe(true);
+  });
+
+  it('is idempotent — re-scrubbing an already-scrubbed cause changes nothing', () => {
+    const once = redactedExecutionErrorCause(
+      new Error('failed for jane.doe@example.com with api_key=live_9f8e7d6c'),
+    );
+    expect(redactedExecutionErrorCause(once)).toBe(once);
   });
 });

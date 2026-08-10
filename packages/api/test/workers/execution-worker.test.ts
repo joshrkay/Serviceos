@@ -8,6 +8,8 @@ import {
   createProposal,
   InMemoryProposalRepository,
   CreateProposalInput,
+  Proposal,
+  staleExecutionTimeoutMessage,
 } from '../../src/proposals/proposal';
 import { transitionProposal, UNDO_WINDOW_MS } from '../../src/proposals/lifecycle';
 import { ProposalExecutor } from '../../src/proposals/execution/executor';
@@ -279,6 +281,165 @@ describe('Execution auto-delivery worker (D9 undo window complement)', () => {
 
       const updated = await repo.findById(proposal.tenantId, proposal.id);
       expect(updated!.status).toBe('execution_failed');
+    });
+  });
+
+  /**
+   * Follow-up to PR #815 — the timeout event above was emitted with the
+   * GENERIC timeout wording only, because the underlying cause was thrown,
+   * caught, logged, and dropped: the per-proposal `catch` around
+   * `executor.execute` recorded `err.message` in a log line and nowhere else.
+   * An operator debugging a stuck proposal in the inbox (or
+   * `evaluateSilentExecutionFailures`) then saw "timed out" with no reason.
+   *
+   * The caught error is now persisted into the SAME `execution_error` concept
+   * PR #815 already established (never a parallel field), which
+   * `resetStaleExecuting` already COALESCEs rather than clobbers — so the real
+   * cause survives to the terminal write and rides the timeout audit event.
+   */
+  describe('stale-executing timeout carries the real cause', () => {
+    /** Executor stub that always throws — stands in for a handler blowing up. */
+    function throwingDeps(
+      repo: InMemoryProposalRepository,
+      auditRepo: AuditRepository,
+      thrown: unknown,
+      onExecute?: (proposal: Proposal) => Promise<void>,
+    ): ExecutionWorkerDeps {
+      const executor = {
+        execute: async (proposal: Proposal) => {
+          await onExecute?.(proposal);
+          throw thrown;
+        },
+      } as unknown as ExecutionWorkerDeps['executor'];
+      return { proposalRepo: repo, executor, logger, auditRepo };
+    }
+
+    async function seedReady(idempotencyKey: string): Promise<Proposal> {
+      let proposal = createProposal({ ...baseInput, idempotencyKey });
+      proposal = transitionProposal(proposal, 'ready_for_review', 'user-1');
+      proposal = transitionProposal(proposal, 'approved', 'user-1');
+      proposal = { ...proposal, approvedAt: new Date(Date.now() - UNDO_WINDOW_MS - 100) };
+      await repo.create(proposal);
+      return proposal;
+    }
+
+    it('persists the caught execution error onto the still-executing proposal', async () => {
+      const proposal = await seedReady('cause-persisted');
+      const auditRepo = new InMemoryAuditRepository();
+
+      const { failed } = await runExecutionSweep(
+        throwingDeps(repo, auditRepo, new Error('handler exploded: column "foo" does not exist')),
+      );
+      expect(failed).toBe(1);
+
+      const updated = await repo.findById(proposal.tenantId, proposal.id);
+      // Still claimed — the throw happened before any status transition.
+      expect(updated!.status).toBe('executing');
+      expect(updated!.executionError).toBe('handler exploded: column "foo" does not exist');
+    });
+
+    it('the proposal.execution_timed_out event carries the persisted cause, not only the generic timeout wording', async () => {
+      const proposal = await seedReady('cause-on-audit-event');
+      const auditRepo = new InMemoryAuditRepository();
+
+      // Sweep 1 — claim, throw, record the cause.
+      await runExecutionSweep(throwingDeps(repo, auditRepo, new Error('SMTP relay refused the message')));
+      // Sweep 2 — staleMinutes/maxRetries at 0 so the claimed row terminalizes
+      // on this very tick instead of waiting out the real 10-minute window.
+      await runExecutionSweep({
+        ...throwingDeps(repo, auditRepo, new Error('unused — nothing is ready any more')),
+        staleMinutes: 0,
+        maxRetries: 0,
+      });
+
+      const updated = await repo.findById(proposal.tenantId, proposal.id);
+      expect(updated!.status).toBe('execution_failed');
+      // COALESCE semantics: the real cause survives the terminal write.
+      expect(updated!.executionError).toBe('SMTP relay refused the message');
+
+      const events = (await auditRepo.findByEntity(proposal.tenantId, 'proposal', proposal.id)).filter(
+        (e) => e.eventType === 'proposal.execution_timed_out',
+      );
+      expect(events).toHaveLength(1);
+      expect(events[0].metadata).toMatchObject({
+        proposalType: 'create_customer',
+        status: 'execution_failed',
+        executionError: 'SMTP relay refused the message',
+      });
+    });
+
+    it('still records the synthesized timeout reason when no cause was ever captured', async () => {
+      // A proposal that went stale without this worker ever catching a throw
+      // (a crashed worker, say) has no real cause to report — the event must
+      // carry the synthesized reason rather than an empty/absent field.
+      let proposal = createProposal({ ...baseInput, idempotencyKey: 'no-cause-captured' });
+      proposal = transitionProposal(proposal, 'ready_for_review', 'user-1');
+      proposal = transitionProposal(proposal, 'approved', 'user-1');
+      proposal = {
+        ...proposal,
+        status: 'executing',
+        claimedAt: new Date(Date.now() - 11 * 60 * 1000),
+        claimedBy: 'execution-worker',
+        executionRetryCount: 3,
+        approvedAt: new Date(Date.now() - UNDO_WINDOW_MS - 100),
+      };
+      await repo.create(proposal);
+
+      const auditRepo = new InMemoryAuditRepository();
+      await runExecutionSweep(makeDeps(repo, auditRepo));
+
+      const events = (await auditRepo.findByEntity(proposal.tenantId, 'proposal', proposal.id)).filter(
+        (e) => e.eventType === 'proposal.execution_timed_out',
+      );
+      expect(events).toHaveLength(1);
+      expect(events[0].metadata.executionError).toBe(staleExecutionTimeoutMessage(10, 3));
+    });
+
+    it('redacts secrets and PII out of the cause before it reaches the row or the audit event', async () => {
+      const proposal = await seedReady('cause-redacted');
+      const auditRepo = new InMemoryAuditRepository();
+
+      await runExecutionSweep(
+        throwingDeps(
+          repo,
+          auditRepo,
+          new Error(
+            'POST https://api.example.com/send?api_key=live_9f8e7d6c5b failed for ' +
+              'jane.doe@example.com (555-123-4567) — Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.abc.def',
+          ),
+        ),
+      );
+
+      const updated = await repo.findById(proposal.tenantId, proposal.id);
+      const recorded = updated!.executionError!;
+      expect(recorded).not.toContain('live_9f8e7d6c5b');
+      expect(recorded).not.toContain('eyJhbGciOiJIUzI1NiJ9.abc.def');
+      expect(recorded).not.toContain('jane.doe@example.com');
+      expect(recorded).not.toContain('555-123-4567');
+      // Still debuggable — the non-sensitive shape of the failure survives.
+      expect(recorded).toContain('api.example.com');
+    });
+
+    it('does not stamp a cause on a proposal the executor already moved out of executing', async () => {
+      // Mirrors the CHAIN_PARENT_PENDING path: the executor deliberately puts
+      // the row back to 'approved' for the next tick and THEN throws. That is
+      // a routine retry, not a failure — writing an execution_error there
+      // would show a scary reason on GET /api/proposals for a proposal that
+      // is simply waiting on its chain sibling.
+      const proposal = await seedReady('cause-not-stamped-when-requeued');
+      const auditRepo = new InMemoryAuditRepository();
+
+      await runExecutionSweep(
+        throwingDeps(repo, auditRepo, new Error('CHAIN_PARENT_PENDING'), async (claimed) => {
+          await repo.updateStatus(claimed.tenantId, claimed.id, 'approved', {
+            approvedAt: claimed.approvedAt,
+          });
+        }),
+      );
+
+      const updated = await repo.findById(proposal.tenantId, proposal.id);
+      expect(updated!.status).toBe('approved');
+      expect(updated!.executionError).toBeUndefined();
     });
   });
 

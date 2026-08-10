@@ -617,19 +617,94 @@ export function decideInitialStatus(input: {
 }
 
 /**
- * PR #815 review, Important 2 — the reason recorded in `execution_error`
- * when `resetStaleExecuting` terminalizes a stale-claimed proposal that
- * exhausted `maxRetries`. NOT the original failure (a HANDLER_NOT_FOUND
- * throw, a worker crash, ...) — that was never captured on this path — but
- * a true statement of what happened, and critically the ONLY thing written
- * to the column both `evaluateSilentExecutionFailures`
- * (workers/failure-rate-monitor.ts) and `GET /api/proposals` read. Exported
- * so pg-proposal.ts's SQL literal (which can't share this JS string
- * directly) is written to produce identical wording — keep the two in sync
- * by hand if this changes.
+ * PR #815 review, Important 2 — the FALLBACK reason recorded in
+ * `execution_error` when `resetStaleExecuting` terminalizes a stale-claimed
+ * proposal that exhausted `maxRetries`. A true statement of what happened,
+ * and critically the only thing written to the column both
+ * `evaluateSilentExecutionFailures` (workers/failure-rate-monitor.ts) and
+ * `GET /api/proposals` read. Exported so pg-proposal.ts's SQL literal (which
+ * can't share this JS string directly) is written to produce identical
+ * wording — keep the two in sync by hand if this changes.
+ *
+ * Follow-up: this is now genuinely a FALLBACK. When the execution sweep
+ * caught the underlying throw it records that cause on the row while it is
+ * still 'executing' (workers/execution-worker.ts, via
+ * `redactedExecutionErrorCause` below), and the terminal write COALESCEs
+ * rather than overwrites — so this wording only survives on rows where no
+ * cause was ever captured (a crashed worker, a claim that outlived the
+ * process).
  */
 export function staleExecutionTimeoutMessage(staleMinutes: number, retryCount: number): string {
   return `Execution timed out: claimed >${staleMinutes}min across ${retryCount} retries, never completed`;
+}
+
+/**
+ * Upper bound on anything written to `proposals.execution_error`. The column
+ * is TEXT (no DB-side limit) and the value is echoed by `GET /api/proposals`
+ * and copied into an audit row, so an unbounded stack-sized message would
+ * bloat both.
+ */
+export const MAX_EXECUTION_ERROR_LENGTH = 500;
+
+const CAUSE_REDACTED = '[redacted]';
+
+/**
+ * Ordered scrub passes. Secret-shaped tokens are masked BEFORE PII so a
+ * credential that happens to contain an email-like or phone-like run is
+ * removed whole rather than partially. Every replacement is chosen to be a
+ * FIXED POINT — re-running the whole chain over its own output yields the
+ * same string — because a cause can be re-scrubbed (recorded once here,
+ * re-read and re-recorded by a later retry).
+ */
+const CAUSE_SCRUBS: Array<[RegExp, string]> = [
+  // `Bearer <token>`. The replacement's `[` is outside the token character
+  // class, so a second pass finds nothing left to mask.
+  [/\bbearer\s+[A-Za-z0-9._~+/=-]+/gi, `Bearer ${CAUSE_REDACTED}`],
+  // Secret-ish `key=value` / `key: value`, including inside a URL query
+  // string (the value stops at `&`, so non-secret params stay readable).
+  [
+    /\b(api[_-]?key|apikey|access[_-]?token|refresh[_-]?token|token|secret|password|passwd|pwd|authorization|auth)\b\s*[=:]\s*[^\s&"']+/gi,
+    `$1=${CAUSE_REDACTED}`,
+  ],
+  // Provider key literals that travel without a key= prefix (Stripe-style).
+  [/\b(?:sk|pk|rk|whsec)_[A-Za-z0-9_]{8,}/gi, CAUSE_REDACTED],
+  // Customer PII. Emails first — they contain dots and digits a phone
+  // pattern could otherwise clip.
+  [/\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/g, '[email]'],
+  [/(?:\+?1[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b/g, '[phone]'],
+  [/\+\d{7,15}\b/g, '[phone]'],
+];
+
+/**
+ * Build the string recorded in `proposals.execution_error` from a CAUGHT
+ * throw (workers/execution-worker.ts's per-proposal catch).
+ *
+ * Handlers that fail politely return `result.error`, a string the handler
+ * author wrote. A THROW is not that: its message can be a driver error
+ * echoing a bound parameter, an HTTP client error echoing a URL with a token
+ * in the query string, or a provider error quoting the customer contact it
+ * failed to reach. `execution_error` is read back by `GET /api/proposals` and
+ * copied into the `proposal.execution_timed_out` audit row, so the cause is
+ * bounded and scrubbed here — at the single place that builds it — rather
+ * than at each surface that renders it.
+ *
+ * Deliberately NOT `redactSecrets` (logging/redact.ts): that walks an OBJECT
+ * masking by KEY name, and there are no keys here — this is one free-text
+ * string whose secrets are only findable by value pattern.
+ */
+export function redactedExecutionErrorCause(err: unknown): string {
+  const raw = err instanceof Error ? err.message : typeof err === 'string' ? err : String(err ?? '');
+  // One cause is one audit-row line.
+  let out = raw.replace(/\s+/g, ' ').trim();
+  if (out.length === 0 || out === 'undefined' || out === 'null') {
+    return 'unknown execution failure';
+  }
+  for (const [pattern, replacement] of CAUSE_SCRUBS) {
+    out = out.replace(pattern, replacement);
+  }
+  return out.length > MAX_EXECUTION_ERROR_LENGTH
+    ? `${out.slice(0, MAX_EXECUTION_ERROR_LENGTH - 1)}…`
+    : out;
 }
 
 export interface ProposalRepository {
@@ -848,6 +923,12 @@ export interface ProposalRepository {
    * never reaches either surface. `failedProposals` gives the caller
    * (execution-worker.ts) enough identity per row to ALSO emit its own
    * `proposal.execution_timed_out` audit event.
+   *
+   * Follow-up: each entry also carries the row's POST-write `executionError`
+   * — the real caught cause when the sweep recorded one, otherwise the
+   * synthesized timeout wording — so the audit event can state WHY rather
+   * than only that a timeout happened. Optional on the type because a
+   * historical row can hold NULL; every implementation returns it.
    */
   resetStaleExecuting(
     staleMinutes: number,
@@ -860,6 +941,7 @@ export interface ProposalRepository {
       tenantId: string;
       proposalType: ProposalType;
       retryCount: number;
+      executionError?: string;
     }>;
   }>;
 }
@@ -1392,6 +1474,7 @@ export class InMemoryProposalRepository implements ProposalRepository {
       tenantId: string;
       proposalType: ProposalType;
       retryCount: number;
+      executionError?: string;
     }>;
   }> {
     const now = Date.now();
@@ -1402,6 +1485,7 @@ export class InMemoryProposalRepository implements ProposalRepository {
       tenantId: string;
       proposalType: ProposalType;
       retryCount: number;
+      executionError?: string;
     }> = [];
     for (const [id, proposal] of this.proposals.entries()) {
       if (proposal.status !== 'executing' || !proposal.claimedAt) continue;
@@ -1420,6 +1504,12 @@ export class InMemoryProposalRepository implements ProposalRepository {
           tenantId: proposal.tenantId,
           proposalType: proposal.proposalType,
           retryCount: retries,
+          // POST-COALESCE value: the real caught cause when one was recorded
+          // while the row was still 'executing', else the synthesized wording
+          // just assigned above. Mirrors the Pg RETURNING clause.
+          ...(proposal.executionError !== undefined
+            ? { executionError: proposal.executionError }
+            : {}),
         });
       } else {
         proposal.status = 'approved';
