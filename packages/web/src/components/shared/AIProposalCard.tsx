@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router';
 import { toast } from 'sonner';
 import { parseMoneyToCents } from '@ai-service-os/shared';
@@ -12,7 +12,7 @@ import {
 import {
   Check, Pencil, X, Sparkles, ChevronDown, ChevronUp,
   Brain, Receipt, Calendar, MessageCircle, AlertCircle, Copy,
-  ArrowUpRight, UserPlus, HelpCircle, StickyNote, DollarSign, Send,
+  ArrowUpRight, UserPlus, HelpCircle, StickyNote, DollarSign, Send, Undo2,
 } from 'lucide-react';
 import type {
   AIProposal,
@@ -145,7 +145,7 @@ interface Props {
 
 export function AIProposalCard({ proposal, onApprove, onReject }: Props) {
   const navigate = useNavigate();
-  const [status,       setStatus]       = useState<'Pending' | 'Approved' | 'Rejected'>(proposal.status);
+  const [status,       setStatus]       = useState<AIProposal['status']>(proposal.status);
   /**
    * Did this card arrive already approved — i.e. the backend auto-approved
    * and queued it with NO human tap?
@@ -160,6 +160,35 @@ export function AIProposalCard({ proposal, onApprove, onReject }: Props) {
    * cancellable (the page raises the shared UndoToast off `undoExpiresAt`).
    */
   const [arrivedAutoApproved] = useState(() => proposal.status === 'Approved');
+
+  /**
+   * Review N10 — is the server's undo window still open RIGHT NOW?
+   *
+   * The terminal line used to be a static string chosen at first render, so
+   * it went on promising "undo now" after the window had lapsed and after a
+   * successful undo had already cancelled the write. This ticks so the copy
+   * stops making an offer that no longer stands. No window stamp ⇒ no offer,
+   * matching the API-side contract (routes/assistant.ts) and the hook.
+   */
+  const undoCloseAt = proposal.undoExpiresAt ? Date.parse(proposal.undoExpiresAt) : NaN;
+  const [undoWindowOpen, setUndoWindowOpen] = useState(
+    () => !Number.isNaN(undoCloseAt) && undoCloseAt > Date.now(),
+  );
+  useEffect(() => {
+    if (Number.isNaN(undoCloseAt)) {
+      setUndoWindowOpen(false);
+      return;
+    }
+    const tick = () => setUndoWindowOpen(undoCloseAt > Date.now());
+    tick();
+    const id = setInterval(tick, 250);
+    return () => clearInterval(id);
+  }, [undoCloseAt]);
+
+  // Prop-driven status changes (an undo landing on the page's message state)
+  // must reach the card — the local state exists only for the OPTIMISTIC flip
+  // on tap, and used to swallow every later correction.
+  useEffect(() => setStatus(proposal.status), [proposal.status]);
   const [showReason,   setShowReason]   = useState(false);
   const [editing,      setEditing]      = useState(false);
   const [isApproving,  setIsApproving]  = useState(false);
@@ -305,10 +334,20 @@ export function AIProposalCard({ proposal, onApprove, onReject }: Props) {
         </span>
         <div className="flex-1 min-w-0">
           <p className="text-sm text-success">{proposal.title}</p>
+          {/* Review J7 — "Applied successfully" was false on BOTH branches,
+              not just the auto one. `findReadyForExecution` requires
+              `approved_at <= NOW() - windowMs`, so at the instant this
+              renders nothing has applied either way; and the page raises the
+              undo toast on the same tick, so the card claimed a completed
+              write while offering to cancel it. The ATTRIBUTION clause is
+              the only part that differs between the two audiences.
+              Review N10 — the undo clause is driven off the live window, not
+              a first-render snapshot. */}
           <p className="text-xs text-success mt-0.5">
-            {arrivedAutoApproved
-              ? 'Approved automatically — nobody tapped Approve. Applying shortly; undo now, or reverse it from the record afterwards.'
-              : 'Applied successfully'}
+            {arrivedAutoApproved ? 'Approved automatically — nobody tapped Approve. ' : ''}
+            {undoWindowOpen
+              ? 'Applying shortly; undo now, or reverse it from the record afterwards.'
+              : 'Applying shortly — reverse it from the record if it was wrong.'}
           </p>
         </div>
         {proposal.relatedId && entityRouteFor(proposal.type, proposal.relatedId) && (
@@ -320,6 +359,23 @@ export function AIProposalCard({ proposal, onApprove, onReject }: Props) {
             View <ArrowUpRight size={11} />
           </button>
         )}
+      </div>
+    );
+  }
+
+  // ── Undone ────────────────────────────────────────────────────
+  // Review N10 — a cancelled write is not an approved one and not a rejected
+  // one. Without this the card kept rendering the Approved branch, still
+  // saying "Applying shortly", for something the operator had just undone.
+  if (status === 'Undone') {
+    return (
+      <div className="rounded-xl border border-border bg-secondary px-4 py-3 flex items-center gap-3">
+        <span className="flex size-6 shrink-0 items-center justify-center rounded-full bg-secondary">
+          <Undo2 size={12} className="text-muted-foreground" />
+        </span>
+        <p className="text-sm text-muted-foreground">
+          {proposal.title} — undone. Nothing was applied.
+        </p>
       </div>
     );
   }

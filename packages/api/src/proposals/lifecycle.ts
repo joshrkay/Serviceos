@@ -98,6 +98,29 @@ export function undoExpiresAt(
   return new Date(proposal.approvedAt.getTime() + windowMs);
 }
 
+/**
+ * Milliseconds of undo window LEFT as of `now` (default: this instant).
+ * Returns undefined when there is no window, and 0 when it has closed.
+ *
+ * Follow-up review N11 — `undoExpiresAt` alone is a SERVER instant that the
+ * client compares against its own `Date.now()`. Any clock skew is subtracted
+ * straight out of a 5-second budget the chat round trip (an LLM call) has
+ * already eaten most of: skew one way hides a valid undo, the other way
+ * offers one the server then 409s. A DURATION carries no clock, so the client
+ * can anchor it to its own clock at the moment it receives the response and
+ * be wrong only by the response's transit time — which is strictly less than
+ * the error a skewed absolute comparison can produce.
+ */
+export function undoRemainingMs(
+  proposal: Pick<Proposal, 'approvedAt'>,
+  windowMs: number = UNDO_WINDOW_MS,
+  now: Date = new Date(),
+): number | undefined {
+  const closesAt = undoExpiresAt(proposal, windowMs);
+  if (!closesAt) return undefined;
+  return Math.max(0, closesAt.getTime() - now.getTime());
+}
+
 export function canTransition(from: ProposalStatus, to: ProposalStatus): boolean {
   const allowed = VALID_TRANSITIONS[from];
   return allowed !== undefined && allowed.includes(to);

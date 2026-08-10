@@ -807,8 +807,21 @@ export function AssistantPage() {
   const undoToast = useUndoableApproval({
     requestUndo: (proposalId) =>
       apiFetch(`/api/proposals/${proposalId}/undo`, { method: 'POST' }),
-    // Keep the inbox (and any other live surface) in sync after an undo.
-    onUndone: () => emitProposalsChanged(),
+    // Keep the inbox (and any other live surface) in sync after an undo…
+    onUndone: (proposalId) => {
+      emitProposalsChanged();
+      // …and this surface too. Review N10 — only the cross-surface event was
+      // fired, so the chat message's own `proposal` was never updated and the
+      // card went on saying "Applying shortly; undo now" about a write the
+      // operator had just cancelled.
+      setMessages((prev) =>
+        prev.map((m) =>
+          m.proposal?.id === proposalId
+            ? { ...m, proposal: { ...m.proposal, status: 'Undone' as const } }
+            : m,
+        ),
+      );
+    },
     onError: (message) => toast.error(message),
   });
   // Stable reference (a useCallback inside the hook) so `send` can depend on
@@ -966,11 +979,24 @@ export function AssistantPage() {
       // manual path raises, anchored to the SERVER's `undoExpiresAt`: the hook
       // leaves the affordance inactive when the chat round-trip already ate
       // the window, so this never offers an undo the server would 409.
-      if (reply.proposal?.status === 'Approved') {
+      // Review J3 — the guard requires SERVER TIMING, not just an 'Approved'
+      // status. `assistantReplySchema` accepts `status: 'Approved'` straight
+      // from the model and the route returns `parsed.proposal` UNMAPPED on
+      // the raw-completion path, so a model-authored "Approved" with no
+      // window (and possibly no real proposal id) used to reach `start` and
+      // be handed a freshly invented client 5s. Clicking Undo then POSTed to
+      // a bogus id and the operator got a raw error toast. The hook refuses
+      // a timing-less start too; both belts are cheap and the API-side
+      // contract is unambiguous ("no stamp ⇒ no window ⇒ no affordance").
+      const undoWindow = reply.proposal?.undoExpiresAt ?? reply.proposal?.undoRemainingMs;
+      if (reply.proposal?.status === 'Approved' && undoWindow !== undefined) {
         startUndo({
           proposalId: reply.proposal.id,
           summary: reply.proposal.title,
-          response: { undoExpiresAt: reply.proposal.undoExpiresAt },
+          response: {
+            undoExpiresAt: reply.proposal.undoExpiresAt,
+            undoRemainingMs: reply.proposal.undoRemainingMs,
+          },
         });
       }
 

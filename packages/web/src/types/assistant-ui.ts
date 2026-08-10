@@ -81,7 +81,13 @@ export interface AIProposal {
   }[];
   confidence: ProposalConfidence;
   type: ProposalType;
-  status: 'Pending' | 'Approved' | 'Rejected';
+  /**
+   * 'Undone' (review N10) is a real terminal state — `POST
+   * /api/proposals/:id/undo` moves the row to 'undone'. Without it the card
+   * kept rendering "Applying shortly; undo now" for a write the operator had
+   * just cancelled, because nothing could tell it otherwise.
+   */
+  status: 'Pending' | 'Approved' | 'Rejected' | 'Undone';
   /**
    * ISO instant the server's 5s undo window closes, present only on a card
    * that arrived ALREADY `Approved` — i.e. the backend auto-approved and
@@ -91,6 +97,14 @@ export interface AIProposal {
    * Absent ⇒ no server-side window ⇒ no undo affordance.
    */
   undoExpiresAt?: string;
+  /**
+   * The same window as a DURATION, in milliseconds, measured when the server
+   * wrote the response (review N11). Preferred over `undoExpiresAt` because
+   * it carries no clock: differencing a server instant against a local
+   * `Date.now()` subtracts any skew straight out of a 5-second budget the
+   * chat round trip (an LLM call) has already spent most of.
+   */
+  undoRemainingMs?: number;
   relatedId?: string;
   impact?: string;
   /**

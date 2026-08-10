@@ -1,5 +1,5 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, within, fireEvent } from '@testing-library/react';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { render, screen, within, fireEvent, act } from '@testing-library/react';
 import { AIProposalCard } from './AIProposalCard';
 import type { AIProposal, ProposalConfidenceLevel } from '../../types/assistant-ui';
 
@@ -216,8 +216,16 @@ describe('Story 3.11 — approved proposal deep-links to the created entity', ()
  * sweep only picks the row up after the undo window closes, so at render time
  * the write has NOT happened and is still cancellable.
  *
- * The manual path's copy is deliberately left alone: there the operator DID
- * just approve, so the branch has only one audience to serve.
+ * Review J7 OVERRIDES the original decision to leave the MANUAL path alone.
+ * That rationale answered the ATTRIBUTION half of the lie and ignored the
+ * COMPLETION half, which is the half the ticket named:
+ * `findReadyForExecution` requires `approved_at <= NOW() - windowMs`
+ * (pg-proposal.ts), so at the instant "Applied successfully" rendered,
+ * NOTHING had applied — identically to the auto path. Worse,
+ * `AssistantPage` raises the undo toast on the same tick, so the UI said
+ * "Applied successfully" while offering to undo it. Both branches now say
+ * "Approved — applying shortly."; only the auto path adds the attribution
+ * clause.
  */
 describe('auto-approved card — honest copy', () => {
   beforeEach(() => navigateMock.mockReset());
@@ -234,10 +242,14 @@ describe('auto-approved card — honest copy', () => {
     expect(screen.getByText(/appl(y|ying)/i)).toBeInTheDocument();
   });
 
-  it('keeps the applied copy on the path the operator actually approved', () => {
+  it('does not claim the operator-approved path APPLIED either — nothing has (J7)', () => {
     render(<AIProposalCard proposal={makeProposal({ status: 'Pending' })} onApprove={vi.fn()} />);
     fireEvent.click(screen.getByRole('button', { name: /approve/i }));
-    expect(screen.getByText('Applied successfully')).toBeInTheDocument();
+    expect(screen.queryByText(/applied successfully/i)).toBeNull();
+    expect(screen.getByText(/applying shortly/i)).toBeInTheDocument();
+    // The attribution clause belongs only to the auto path — here the
+    // operator DID tap Approve.
+    expect(screen.queryByText(/nobody tapped approve/i)).toBeNull();
     expect(screen.queryByText(/approved automatically/i)).toBeNull();
   });
 
@@ -348,5 +360,55 @@ describe('AIProposalCard — typed edit fields (review J5)', () => {
 
     await vi.waitFor(() => expect(onApprove).toHaveBeenCalled());
     expect(onApprove).toHaveBeenCalledWith({ invoiceId: 'INV-9' });
+  });
+});
+
+/**
+ * Review N10 — the terminal line was snapshotted at FIRST RENDER
+ * (`arrivedAutoApproved` via a useState initialiser, plus a static string),
+ * so after a successful undo the card still said "Applying shortly; undo
+ * now" for something just cancelled, and it kept saying it long after the
+ * window had lapsed. The line must come off live state.
+ */
+describe('auto-approved card — the terminal line tracks live state', () => {
+  beforeEach(() => {
+    navigateMock.mockReset();
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  const approvedWithWindow = (msLeft: number): AIProposal =>
+    makeProposal({
+      status: 'Approved',
+      undoExpiresAt: new Date(Date.now() + msLeft).toISOString(),
+    });
+
+  it('offers the undo clause only while the window is genuinely open', () => {
+    render(<AIProposalCard proposal={approvedWithWindow(5000)} />);
+    expect(screen.getByText(/undo now/i)).toBeInTheDocument();
+
+    act(() => { vi.advanceTimersByTime(5200); });
+
+    expect(screen.queryByText(/undo now/i)).toBeNull();
+    // Still honest about what happens next — the sweep picks it up now.
+    expect(screen.getByText(/applying shortly/i)).toBeInTheDocument();
+  });
+
+  it('never offers an undo clause for an approved card with no window at all', () => {
+    render(<AIProposalCard proposal={makeProposal({ status: 'Approved' })} />);
+    expect(screen.queryByText(/undo now/i)).toBeNull();
+  });
+
+  it('says the write was cancelled once the proposal comes back Undone', () => {
+    const { rerender } = render(<AIProposalCard proposal={approvedWithWindow(5000)} />);
+    expect(screen.getByText(/applying shortly/i)).toBeInTheDocument();
+
+    rerender(<AIProposalCard proposal={{ ...approvedWithWindow(5000), status: 'Undone' }} />);
+
+    expect(screen.queryByText(/applying shortly/i)).toBeNull();
+    expect(screen.getByText(/undone/i)).toBeInTheDocument();
+    expect(screen.queryByText(/undo now/i)).toBeNull();
   });
 });

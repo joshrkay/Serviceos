@@ -16,7 +16,10 @@ import { toErrorResponse } from '../shared/errors';
 import { LLMGateway } from '../ai/gateway/gateway';
 import { ProposalRepository, ProposalType } from '../proposals/proposal';
 // Aliased — the card field this feeds is also called `undoExpiresAt`.
-import { undoExpiresAt as undoWindowCloseAt } from '../proposals/lifecycle';
+import {
+  undoExpiresAt as undoWindowCloseAt,
+  undoRemainingMs as undoWindowRemainingMs,
+} from '../proposals/lifecycle';
 import { createAuditEvent, type AuditRepository } from '../audit/audit';
 import {
   recordAssistantTurn,
@@ -157,6 +160,7 @@ const assistantProposalSchema = z.object({
    * /api/proposals/:id/undo` would 409 with UNDO_WINDOW_CLOSED.
    */
   undoExpiresAt: z.string().nullish().transform((v) => v ?? undefined),
+  undoRemainingMs: z.number().nullish().transform((v) => v ?? undefined),
   // QA-2026-06-05: LLMs emit JSON null for "no value" — .optional() alone
   // rejects null, so every estimate-draft completion whose relatedId/impact
   // was null failed validation and degraded to the fallback envelope
@@ -997,7 +1001,15 @@ export function proposalToUI(
     // undefined without an `approvedAt` stamp, so an unapproved (or
     // historical, unstamped) proposal emits no window rather than a bogus one.
     ...(proposal.status === 'approved' && proposal.approvedAt
-      ? { undoExpiresAt: undoWindowCloseAt({ approvedAt: proposal.approvedAt })?.toISOString() }
+      ? {
+          undoExpiresAt: undoWindowCloseAt({ approvedAt: proposal.approvedAt })?.toISOString(),
+          // Review N11 — the DURATION twin, so the card's countdown is
+          // anchored to the client's own clock at receipt rather than to a
+          // differenced server instant. On this path the round trip is an LLM
+          // call, so most of the 5s is already gone and skew is the
+          // difference between an undo that works and a 409.
+          undoRemainingMs: undoWindowRemainingMs({ approvedAt: proposal.approvedAt }),
+        }
       : {}),
     proposalType: proposal.proposalType,
     // Same address slice as customerProposalToUI. Kept on BOTH mappers on
