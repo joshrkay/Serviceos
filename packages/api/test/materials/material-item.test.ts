@@ -201,6 +201,60 @@ describe('MaterialItemRepository', () => {
       ]);
     });
 
+    // Review follow-up J1 (2026-08-09) — the tie-break the two backends must
+    // AGREE on. `add-material-handler.ts` writes every voice-captured
+    // needed_by as `new Date(\`${neededBy}T00:00:00Z\`)`, so two items due the
+    // same day tie EXACTLY on the sort key — the normal case, not an edge
+    // case. Both backends now break that tie on created_at (Pg adds `id ASC`
+    // after it purely for determinism); before this fix Pg went straight to a
+    // random v4 `id` while InMemory's stable sort gave insertion order, so
+    // under lookup_materials's 5-item cap they spoke DIFFERENT SUBSETS.
+    it('breaks an exact needed_by tie on created_at (the key both backends share)', async () => {
+      const repo = new InMemoryMaterialItemRepository();
+      const sameDay = new Date('2026-06-12T00:00:00.000Z');
+      const first = await repo.create({
+        tenantId: 't1', description: 'first captured', createdBy: 'u1', neededBy: sameDay,
+      });
+      // Distinct millisecond so this pins created_at ordering itself, not
+      // merely the stable-sort fallback (Pg's created_at is DB NOW() at
+      // microsecond precision, so it effectively never ties there).
+      await new Promise((r) => setTimeout(r, 2));
+      const second = await repo.create({
+        tenantId: 't1', description: 'second captured', createdBy: 'u1', neededBy: sameDay,
+      });
+
+      const result = await repo.listPending('t1', { neededByBefore: new Date('2026-06-13T00:00:00.000Z') });
+      expect(result.map((i) => i.id)).toEqual([first.id, second.id]);
+    });
+
+    // Review follow-up J2 — a malformed date bound must behave like a
+    // malformed jobId: return [], never a silently WIDENED list. Pg used to
+    // drop the predicate entirely (whole pending list under a date-scoped
+    // question); InMemory used to throw a raw TypeError. Same input, opposite
+    // outcomes — now one shared guard.
+    it('returns [] for a non-Date neededByBefore instead of throwing', async () => {
+      const repo = new InMemoryMaterialItemRepository();
+      await repo.create({
+        tenantId: 't1', description: 'dated', createdBy: 'u1',
+        neededBy: new Date('2026-06-12T00:00:00.000Z'),
+      });
+
+      const result = await repo.listPending('t1', {
+        neededByBefore: '2026-06-13T00:00:00.000Z' as unknown as Date,
+      });
+      expect(result).toEqual([]);
+    });
+
+    it('returns [] for an Invalid Date neededByBefore', async () => {
+      const repo = new InMemoryMaterialItemRepository();
+      await repo.create({
+        tenantId: 't1', description: 'dated', createdBy: 'u1',
+        neededBy: new Date('2026-06-12T00:00:00.000Z'),
+      });
+
+      expect(await repo.listPending('t1', { neededByBefore: new Date('nonsense') })).toEqual([]);
+    });
+
     it('an absent neededByBefore keeps the existing oldest-created-first order (no behavior change)', async () => {
       const repo = new InMemoryMaterialItemRepository();
       const first = await repo.create({
@@ -214,6 +268,73 @@ describe('MaterialItemRepository', () => {
 
       const result = await repo.listPending('t1');
       expect(result.map((i) => i.id)).toEqual([first.id, second.id]);
+    });
+  });
+
+  // Review follow-up K3 (2026-08-09) — the INCLUSIVE lower bound that lets
+  // lookup_materials isolate "due ON the day you asked about" from "due
+  // sooner (possibly long overdue)". Without it, one open-ended
+  // `neededByBefore` query ordered soonest-first let overdue rows consume the
+  // whole spoken cap and silently omit every item due on the asked-for day.
+  describe('neededByFrom (inclusive lower bound)', () => {
+    it('includes an item due exactly ON the lower bound, excludes anything earlier', async () => {
+      const repo = new InMemoryMaterialItemRepository();
+      const onBound = await repo.create({
+        tenantId: 't1', description: 'due on the boundary', createdBy: 'u1',
+        neededBy: new Date('2026-06-12T00:00:00.000Z'),
+      });
+      await repo.create({
+        tenantId: 't1', description: 'due a day earlier', createdBy: 'u1',
+        neededBy: new Date('2026-06-11T00:00:00.000Z'),
+      });
+
+      const result = await repo.listPending('t1', {
+        neededByFrom: new Date('2026-06-12T00:00:00.000Z'),
+      });
+      expect(result.map((i) => i.id)).toEqual([onBound.id]);
+    });
+
+    it('brackets a single day when combined with neededByBefore', async () => {
+      const repo = new InMemoryMaterialItemRepository();
+      await repo.create({
+        tenantId: 't1', description: 'overdue', createdBy: 'u1',
+        neededBy: new Date('2026-03-02T00:00:00.000Z'),
+      });
+      const onDay = await repo.create({
+        tenantId: 't1', description: 'due that day', createdBy: 'u1',
+        neededBy: new Date('2026-06-12T00:00:00.000Z'),
+      });
+      await repo.create({
+        tenantId: 't1', description: 'due later', createdBy: 'u1',
+        neededBy: new Date('2026-06-19T00:00:00.000Z'),
+      });
+
+      const result = await repo.listPending('t1', {
+        neededByFrom: new Date('2026-06-12T00:00:00.000Z'),
+        neededByBefore: new Date('2026-06-13T00:00:00.000Z'),
+      });
+      expect(result.map((i) => i.id)).toEqual([onDay.id]);
+    });
+
+    it('excludes undated items, exactly like neededByBefore', async () => {
+      const repo = new InMemoryMaterialItemRepository();
+      await repo.create({ tenantId: 't1', description: 'undated', createdBy: 'u1' });
+
+      expect(
+        await repo.listPending('t1', { neededByFrom: new Date('2020-01-01T00:00:00.000Z') }),
+      ).toEqual([]);
+    });
+
+    it('returns [] for a malformed neededByFrom rather than widening the answer', async () => {
+      const repo = new InMemoryMaterialItemRepository();
+      await repo.create({
+        tenantId: 't1', description: 'dated', createdBy: 'u1',
+        neededBy: new Date('2026-06-12T00:00:00.000Z'),
+      });
+
+      expect(
+        await repo.listPending('t1', { neededByFrom: 'yesterday' as unknown as Date }),
+      ).toEqual([]);
     });
   });
 

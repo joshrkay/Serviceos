@@ -3507,7 +3507,14 @@ describe('voice-action-router U3 lookup answers (recorded-memo path)', () => {
         expect(rec?.answer?.rows).toHaveLength(1);
       });
 
-      it('an unparseable date phrase applies no filter — the unscoped list, never a guessed day', async () => {
+      // HONESTY NOTE (review follow-up N9, 2026-08-09): a DESIGN PIN, not
+      // red-first evidence — this assertion also holds against origin/main,
+      // which ignored `dateTimeDescription` entirely and therefore applied
+      // no filter for any phrase. What IS red-first here is the disclosure
+      // assertion at the end of the test (added 2026-08-09, J3): origin/main
+      // and this branch's first commit both answer an unresolvable phrase
+      // with a summary byte-identical to an unscoped ask.
+      it('an unparseable date phrase applies no filter — and SAYS so, never a guessed day', async () => {
         const proposalRepo = new InMemoryProposalRepository();
         const voiceRepo = seededVoiceRepo();
         const gateway = gatewayReturning([
@@ -3547,6 +3554,11 @@ describe('voice-action-router U3 lookup answers (recorded-memo path)', () => {
         // resolved filter would add ("on the materials list needed by …").
         expect(rec?.answer?.summary).not.toContain('on the materials list needed by');
         expect(rec?.answer?.summary).toContain('needed by July 1');
+        // J3 — the caller must hear that their scope was dropped, verbatim
+        // phrase included, rather than an answer that looks unscoped.
+        expect(rec?.answer?.summary).toMatch(
+          /couldn't tell which day "gibberish not a date" meant/i,
+        );
       });
     });
   });

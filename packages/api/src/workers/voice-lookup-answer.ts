@@ -238,10 +238,21 @@ export interface ExecuteLookupInput {
   /** Task 10 — the spoken crew-member reference, when one was extracted. */
   technicianReference?: string;
   /**
-   * Task 10 — raw spoken day/window phrase ("Thursday afternoon"), when
-   * one was extracted. Only consumed by `lookup_crew_schedule`; resolved
-   * inside that skill via the SAME `resolveDateTime` (U4) the booking path
-   * uses.
+   * Task 10 — raw spoken day/window phrase ("Thursday afternoon", "for
+   * tomorrow"), when one was extracted.
+   *
+   * Consumed by TWO lookup skills (corrected 2026-08-09, review follow-up
+   * N1 — this comment used to say "only `lookup_crew_schedule`" and to name
+   * `resolveDateTime`; both halves were wrong once `lookup_materials` was
+   * wired at the `lookup_materials` case below):
+   *   - `lookup_crew_schedule` — resolves it, and FALLS BACK to today when
+   *     it can't (today's schedule is always a valid answer, and it names
+   *     the day it actually reports).
+   *   - `lookup_materials` — resolves it, and applies NO filter when it
+   *     can't, saying so out loud rather than guessing a day.
+   * Both resolve it via `resolveSpokenDay` (ai/scheduling/resolve-datetime
+   * .ts), the LOOKUP-side day resolver — not the booking path's
+   * `resolveDateTime`, which refuses a bare day (`ambiguous_no_time`).
    */
   dateTimeDescription?: string;
   /** Tenant IANA timezone for date rendering. */

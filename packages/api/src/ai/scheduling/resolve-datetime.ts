@@ -297,6 +297,28 @@ export function resolveDateTime(
  * Returns `null` when the phrase is empty, unparseable, or the tenant
  * zone is invalid — callers must treat `null` as "couldn't tell which
  * day was meant," never guess a day.
+ *
+ * ── NOT A DEADLINE RESOLVER (2026-08-09, review follow-up J4) ────────────
+ *
+ * This answers "WHICH ONE CALENDAR DAY did they mean?". It does NOT answer
+ * "where does this deadline RANGE end?", and the two are different
+ * questions for any phrase naming a period rather than a day. Measured,
+ * reference Thu 2026-06-11 America/New_York:
+ *
+ *   "end of the week"        -> 2026-06-18   (a deadline reading wants 06-14)
+ *   "by the end of the month"-> 2026-07-11   (a deadline reading wants 06-30)
+ *   "this week"              -> 2026-06-12
+ *   "the weekend"            -> 2026-06-13
+ *   "last Friday"            -> 2026-06-12   (`forwardDate: true` flips a
+ *                                             backward phrase forward)
+ *
+ * Both current callers are day-shaped and safe: `lookup-crew-schedule.ts`
+ * genuinely wants one day, and `lookup-materials.ts` uses the resolved day
+ * as a bracketed [day, day+1) window whose label it ALWAYS speaks back, so
+ * a range phrase surfaces as an audible mismatch rather than a silent wrong
+ * answer. Do NOT add a deadline/range caller without first building a
+ * resolver with that contract — widening this one in place would silently
+ * change what both existing callers report.
  */
 export function resolveSpokenDay(phrase: string, opts: ResolveDateTimeOptions = {}): string | null {
   const timezone = isValidTimezone(opts.timezone) ? opts.timezone : DEFAULT_TENANT_TIMEZONE;

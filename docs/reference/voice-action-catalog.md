@@ -806,9 +806,9 @@ Notes on the Tradesperson wave 1, Task 9 row (`add_material`, taxonomy 1.13.0):
   the oldest-N window. `lookup-materials.ts` resolves the caller's raw
   `dateTimeDescription` ("tomorrow", "by Friday") via `resolveSpokenDay`
   (ai/scheduling/resolve-datetime.ts) — the SAME lookup-side day resolver
-  `lookup_crew_schedule` uses — into a `neededByBefore` boundary (the
-  start of the day AFTER the resolved one, so the whole named day is
-  included). Two decisions pinned by tests on both backends: (1) a NULL
+  `lookup_crew_schedule` uses — into a bracketed `[neededByFrom,
+  neededByBefore)` window covering exactly the resolved day. Two decisions
+  pinned by tests on both backends: (1) a NULL
   `neededBy` never matches a date-scoped query (an undated item has no
   known deadline — this falls out of plain SQL `<` comparison semantics on
   the Pg side, and is filtered explicitly on the InMemory side to keep
@@ -821,14 +821,51 @@ Notes on the Tradesperson wave 1, Task 9 row (`add_material`, taxonomy 1.13.0):
   guessed filter, which is worse than just answering the plain unfiltered
   list. `neededBy` is STILL surfaced per item in the spoken summary
   regardless of whether a date filter was applied ("3 boxes of PEX,
-  quantity 3, needed by August 9") — a date-scoped answer can still
-  contain several different dates before the cutoff. No new
-  migration/index: `idx_material_items_pending (tenant_id, created_at)
-  WHERE status = 'pending'` (migration 272) already narrows to one
-  tenant's small, append-mostly pending set before the date filter/sort
-  ever runs — see `pg-material-item.ts`'s module doc comment for the full
-  reasoning on why a speculative index isn't justified at this table's
-  realistic size.
+  quantity 3, needed by August 9"). No new
+  migration/index — see `pg-material-item.ts`'s module doc comment for the
+  real read/write tradeoff and the concrete revisit trigger (~2,000
+  concurrently-pending rows for one tenant).
+- **The date scope is a bracketed DAY plus a COUNTED backlog, not an
+  open-ended "before" (review follow-up K3, 2026-08-09).** The first cut
+  of the filter was a lone `needed_by < boundary`. That re-created the
+  original defect in the other direction: date-scoped results order
+  `needed_by ASC` under a 6-row fetch and a 5-item spoken cap, so the
+  OLDEST OVERDUE rows sorted first and consumed the entire cap. A tenant
+  with 8 items months overdue plus 2 due tomorrow, asked "what do I need
+  for tomorrow?", heard five March items and "and more beyond that" — and
+  neither item due tomorrow. `needed_by DESC` was rejected as the fix: it
+  answers the question asked but buries genuinely urgent overdue work,
+  trading one silent omission for another. The shipped mechanism satisfies
+  both halves — one bracketed query answers the question asked, and a
+  second bounded probe (`neededByBefore: dayStart`, 21 rows) COUNTS the
+  earlier backlog into one closing sentence ("There are 8 items needed
+  sooner, the earliest on March 1."), honest about its own ceiling ("20+
+  items") exactly like `data.count` is.
+- **An UNRESOLVABLE date phrase is disclosed, not silently dropped (review
+  follow-up J3).** `asap`, `soon`, `right away`, `whenever`, `first thing`
+  and `before the Patel job` all resolve to no day. The no-today-guess
+  decision above stands, but the summary now opens with "I couldn't tell
+  which day \"asap\" meant, so here's the full list." — previously the
+  answer was byte-identical to an unscoped ask, contradicting the sibling
+  contract this design cites as its foil (`lookup_crew_schedule` "always
+  names the day actually being reported").
+- **`resolveSpokenDay` is a SINGLE-DAY resolver being used for a DEADLINE
+  (review follow-up J4 — known, bounded, documented).** It answers "which
+  one calendar day?", not "where does this deadline range end?". Measured,
+  reference Thu 2026-06-11 America/New_York: "end of the week" → 06-18 (a
+  deadline reading wants 06-14), "by the end of the month" → 07-11 (wants
+  06-30), "last Friday" → 06-12 (chrono's `forwardDate: true` flips a
+  backward phrase forward). A real deadline-aware resolver is a separate
+  feature and was deliberately NOT built into this follow-up. Two
+  mitigations stand in: the classifier prompt advertises only the
+  phrasings that resolve correctly (a bare weekday, "tomorrow", "by
+  &lt;weekday&gt;"), and the resolved day is ALWAYS spoken back ("needed by
+  June 12") so a caller who said something outside that set hears the
+  mismatch rather than silently getting the wrong window.
+- **A job-scoped answer never asserts a fact about the tenant's whole list
+  (review follow-up N3).** The empty-result phrasing carries the job scope
+  ("Nothing on this job's materials list is needed by June 12") — the same
+  rule the date-scoped empty message already followed, one axis over.
 - **TTS-safe quantity wording (quality-review I2).** The original
   `${quantity}× ${description}` shape used U+00D7 MULTIPLICATION SIGN,
   which Amazon Polly reads as "times" in a numeric context ("3× 3 boxes"

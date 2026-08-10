@@ -208,6 +208,101 @@ describe('Postgres integration — material items', () => {
         createdFirstDueLater.id,
       ]);
     });
+
+    // Review follow-up J1 (2026-08-09) — real-SQL proof of the tie-break
+    // that made the two backends diverge. `add-material-handler.ts` writes
+    // every voice-captured needed_by at exact UTC midnight, so two items due
+    // the same day tie EXACTLY on the sort key. Before `created_at ASC` was
+    // added, this ORDER BY fell straight through to `id ASC` — a random v4
+    // UUID — while InMemory's stable sort gave insertion order, so under
+    // lookup_materials's 5-item cap the two backends spoke DIFFERENT
+    // SUBSETS. Both rows here get their created_at from the DB clock (NOW(),
+    // one transaction per create()), so the expected order is insertion
+    // order, deterministically, on every run.
+    it('breaks an exact needed_by tie on created_at (insertion order), not the random uuid', async () => {
+      const t = await createTestTenant(pool);
+      const sameDay = new Date('2026-06-12T00:00:00Z');
+      const first = await repo.create({
+        tenantId: t.tenantId,
+        description: 'first captured',
+        neededBy: sameDay,
+        createdBy: t.userId,
+      });
+      const second = await repo.create({
+        tenantId: t.tenantId,
+        description: 'second captured',
+        neededBy: sameDay,
+        createdBy: t.userId,
+      });
+      const third = await repo.create({
+        tenantId: t.tenantId,
+        description: 'third captured',
+        neededBy: sameDay,
+        createdBy: t.userId,
+      });
+
+      const result = await repo.listPending(t.tenantId, {
+        neededByFrom: sameDay,
+        neededByBefore: new Date('2026-06-13T00:00:00Z'),
+      });
+      expect(result.map((i) => i.id)).toEqual([first.id, second.id, third.id]);
+    });
+  });
+
+  // Review follow-up K3 — real-SQL proof of the INCLUSIVE lower bound that
+  // lets lookup_materials isolate "due ON the asked-for day" from an overdue
+  // backlog that would otherwise consume its whole spoken cap.
+  describe('neededByFrom lower bound (real SQL)', () => {
+    it('brackets a single day: includes needed_by = from, excludes anything earlier or later', async () => {
+      const t = await createTestTenant(pool);
+      await repo.create({
+        tenantId: t.tenantId,
+        description: 'months overdue',
+        neededBy: new Date('2026-03-02T00:00:00Z'),
+        createdBy: t.userId,
+      });
+      const onDay = await repo.create({
+        tenantId: t.tenantId,
+        description: 'due on the asked-for day',
+        neededBy: new Date('2026-06-12T00:00:00Z'),
+        createdBy: t.userId,
+      });
+      await repo.create({
+        tenantId: t.tenantId,
+        description: 'due next week',
+        neededBy: new Date('2026-06-19T00:00:00Z'),
+        createdBy: t.userId,
+      });
+      await repo.create({ tenantId: t.tenantId, description: 'undated', createdBy: t.userId });
+
+      const result = await repo.listPending(t.tenantId, {
+        neededByFrom: new Date('2026-06-12T00:00:00Z'),
+        neededByBefore: new Date('2026-06-13T00:00:00Z'),
+      });
+      expect(result.map((i) => i.id)).toEqual([onDay.id]);
+    });
+
+    // J2 — a malformed bound narrows to nothing, never widens. Pg used to
+    // drop the predicate entirely and answer a date-scoped question with the
+    // tenant's whole pending list.
+    it('returns [] for a malformed date bound instead of the whole pending list', async () => {
+      const t = await createTestTenant(pool);
+      await repo.create({
+        tenantId: t.tenantId,
+        description: 'pending',
+        neededBy: new Date('2026-06-12T00:00:00Z'),
+        createdBy: t.userId,
+      });
+
+      expect(
+        await repo.listPending(t.tenantId, {
+          neededByBefore: '2026-06-13T00:00:00.000Z' as unknown as Date,
+        }),
+      ).toEqual([]);
+      expect(
+        await repo.listPending(t.tenantId, { neededByFrom: new Date('nonsense') }),
+      ).toEqual([]);
+    });
   });
 
   // Quality-review I4 — the SQL LIMIT clause, not an app-side slice.

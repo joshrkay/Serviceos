@@ -2,20 +2,41 @@
  * Tradesperson wave 1, Task 8 — Postgres-backed material items repository.
  * Tenant-scoped via RLS (`material_items`, migration 272).
  *
- * Follow-up (2026-08-09) — `neededByBefore` (below) deliberately does NOT
- * get its own index/migration. `idx_material_items_pending (tenant_id,
- * created_at) WHERE status = 'pending'` (migration 272) already narrows
- * `tenant_id = $1 AND status = 'pending'` to that ONE tenant's pending rows
- * before `needed_by < $N` or the ORDER BY even run — and a shopping list is
- * a small, append-mostly, per-tenant operational list (`markPurchased`
- * continuously removes rows from the partial index's own predicate), not a
- * table where any real tenant accumulates enough concurrently-pending rows
- * for an extra filter/sort over that already-narrow set to show up as a
- * measurable cost. Adding `needed_by` to the index would speculatively pay
- * write-amplification on every insert/update for a read-side saving that
- * has no realistic workload to justify it. Revisit only if a tenant is
- * ever observed with a genuinely large pending set (thousands of rows) —
- * not speculatively here.
+ * Follow-up (2026-08-09) — the `needed_by` bounds (below) deliberately do
+ * NOT get their own index/migration. The CONCLUSION stands; the reasoning
+ * below was corrected on 2026-08-09 (review follow-up N8) because the
+ * original version of this comment claimed the LIMIT still bounds the work,
+ * and it does not.
+ *
+ * The REAL tradeoff:
+ *
+ *   - Default (undated) query — `WHERE tenant_id = $1 AND status =
+ *     'pending' ORDER BY created_at ASC LIMIT 6`. `idx_material_items_pending
+ *     (tenant_id, created_at) WHERE status = 'pending'` (migration 272)
+ *     SUPPLIES the sort order, so the planner walks the index and stops after
+ *     6 rows. Cost is O(limit), independent of how large the pending set is.
+ *
+ *   - Date-scoped query — `ORDER BY needed_by ASC` cannot be served by that
+ *     index at all (needed_by is not in it). The planner uses the index to
+ *     find the tenant's pending rows, then MATERIALIZES every row matching
+ *     the needed_by predicate and top-N sorts them. The LIMIT caps what is
+ *     RETURNED, not what is read and sorted: cost is O(matching pending
+ *     rows), not O(6). K3's two-query shape (bracketed answer + bounded
+ *     overdue probe) doubles that, though each query is the same order of
+ *     magnitude.
+ *
+ * That is still the right trade today: a shopping list is a small,
+ * append-mostly, per-tenant operational list (`markPurchased` continuously
+ * removes rows from the partial index's own predicate), so "every matching
+ * pending row" is tens of rows for a real tenant, and a top-N sort over tens
+ * of rows is free. Adding `needed_by` to the index would pay
+ * write-amplification on every insert/update for a saving with no observed
+ * workload behind it.
+ *
+ * CONCRETE REVISIT TRIGGER (not "if it feels slow"): if any tenant's
+ * concurrently-pending set is observed above ~2,000 rows, add
+ * `(tenant_id, needed_by) WHERE status = 'pending'` so the date-scoped
+ * ORDER BY becomes index-supplied and the LIMIT bounds the work again.
  */
 import { Pool } from 'pg';
 import { isValidTenantId } from '../db/schema';
@@ -23,6 +44,8 @@ import { PgBaseRepository } from '../db/pg-base';
 import {
   buildMaterialItem,
   CreateMaterialItemInput,
+  dateBoundsAreValid,
+  hasDateBound,
   MaterialItem,
   MaterialItemListOptions,
   MaterialItemRepository,
@@ -133,6 +156,14 @@ export class PgMaterialItemRepository extends PgBaseRepository implements Materi
     // and NOT a raw Postgres "invalid input syntax for type uuid" from
     // comparing a non-UUID string against the job_id column below.
     if (options?.jobId && !isUuid(options.jobId)) return [];
+    // Same posture, one field over (review follow-up J2): a `neededByFrom`/
+    // `neededByBefore` that is not a usable Date returns [] rather than
+    // dropping the predicate and answering a date-scoped question with the
+    // tenant's WHOLE pending list. The old `instanceof Date` gate did
+    // exactly that for an ISO string crossing a queue/JSON boundary, and
+    // passed an `Invalid Date` straight through to SQL as NULL. The guard is
+    // shared with the InMemory backend so one input can't take two branches.
+    if (!dateBoundsAreValid(options)) return [];
     return this.withTenant(tenantId, async (client) => {
       // status = 'pending' stays a SQL LITERAL (not a bind param) so the
       // planner can prove the predicate implies idx_material_items_pending
@@ -150,11 +181,29 @@ export class PgMaterialItemRepository extends PgBaseRepository implements Materi
       // the decided, tested behavior (see MaterialItemListOptions.
       // neededByBefore's doc comment), not an accident of SQL semantics we
       // merely tolerate. No extra `needed_by IS NOT NULL` clause needed.
-      const hasNeededByBefore = options?.neededByBefore instanceof Date;
-      if (hasNeededByBefore) {
-        params.push(options!.neededByBefore);
+      if (options?.neededByBefore !== undefined) {
+        params.push(options.neededByBefore);
         conditions.push(`needed_by < $${params.length}`);
       }
+      // Review follow-up K3 — the INCLUSIVE lower bound that brackets the
+      // window, so "what do I need for tomorrow" can be answered with the
+      // items due ON tomorrow instead of a lower-unbounded set whose oldest
+      // overdue rows eat the caller's whole spoken cap.
+      if (options?.neededByFrom !== undefined) {
+        params.push(options.neededByFrom);
+        conditions.push(`needed_by >= $${params.length}`);
+      }
+      // `created_at ASC` before `id ASC` (review follow-up J1, 2026-08-09):
+      // `add-material-handler.ts` writes every voice-captured needed_by as
+      // `new Date(`${neededBy}T00:00:00Z`)`, so two items due the same day
+      // tie EXACTLY on needed_by — the NORMAL case. Without created_at in
+      // the sort, those rows fell straight through to `id ASC` (a random v4
+      // UUID) while the InMemory backend's stable sort gave insertion order,
+      // so under lookup_materials's 5-item spoken cap the two backends
+      // answered the same question with DIFFERENT SUBSETS. created_at is the
+      // key both backends share; see MaterialItemRepository.listPending's
+      // doc comment for the one residual (mock-only) divergence.
+      //
       // `, id ASC` tiebreak: even with created_at now DB-generated (NOW(),
       // microsecond precision, since the create() fix above), two rows can
       // still tie — and previously, when created_at was a JS Date bound as a
@@ -178,12 +227,12 @@ export class PgMaterialItemRepository extends PgBaseRepository implements Materi
       if (hasLimit) params.push(options!.limit);
       // Ordering decision (MaterialItemListOptions.neededByBefore doc
       // comment): a date-scoped ask orders by URGENCY (soonest needed_by
-      // first), not insertion order — every row in a `neededByBefore`
-      // result set has a non-NULL needed_by (excluded above), so this sort
-      // key is always well-defined, never a NULLS-FIRST/LAST ambiguity.
+      // first), not insertion order — every row in a date-bounded result
+      // set has a non-NULL needed_by (excluded above), so this sort key is
+      // always well-defined, never a NULLS-FIRST/LAST ambiguity.
       // Default (no date scope) stays oldest-created-first, unchanged.
-      const orderByClause = hasNeededByBefore
-        ? 'ORDER BY needed_by ASC, id ASC'
+      const orderByClause = hasDateBound(options)
+        ? 'ORDER BY needed_by ASC, created_at ASC, id ASC'
         : 'ORDER BY created_at ASC, id ASC';
       const { rows } = await client.query<MaterialItemRow>(
         `SELECT * FROM material_items WHERE ${conditions.join(' AND ')} ${orderByClause}${limitClause}`,

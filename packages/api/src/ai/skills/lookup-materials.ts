@@ -61,10 +61,45 @@
  * (ai/scheduling/resolve-datetime.ts) — the SAME lookup-side day resolver
  * `lookup_crew_schedule` uses, reused rather than re-implemented (see that
  * module's doc comment for why a LOOKUP needs a different contract than
- * the booking resolver `resolveDateTime`, which refuses a bare day). The
- * resolved day becomes a `neededByBefore` boundary — the START of the day
- * AFTER the resolved one, so "needed by tomorrow" includes everything due
- * ON tomorrow (and anything earlier/overdue), never just before midnight.
+ * the booking resolver `resolveDateTime`, which refuses a bare day).
+ *
+ * RESOLVER CONTRACT (review follow-up J4, 2026-08-09) — `resolveSpokenDay`
+ * answers "WHICH ONE CALENDAR DAY did they mean?", NOT "where does this
+ * deadline range end?". Those coincide for the phrasings the classifier
+ * advertises for this intent (a bare weekday, "tomorrow", "by <weekday>")
+ * and DIVERGE for range phrases. Measured, reference Thu 2026-06-11
+ * America/New_York: "end of the week" -> 06-18 (a deadline reading wants
+ * 06-14), "by the end of the month" -> 07-11 (wants 06-30), "last Friday"
+ * -> 06-12 (chrono's `forwardDate: true` flips a backward phrase forward).
+ * A real deadline-aware resolver is a separate, deliberate feature and was
+ * NOT smuggled in here. Two mitigations stand in for it: the classifier
+ * prompt advertises only the phrasings that resolve correctly, and the
+ * resolved day is ALWAYS spoken back ("needed by June 12"), so a caller who
+ * said something outside that set hears the mismatch instead of silently
+ * getting the wrong window.
+ *
+ * ── The date scope is a bracketed DAY, plus a counted backlog (K3) ────────
+ *
+ * The resolved day becomes a [start, start + 24h) window — `neededByFrom`
+ * and `neededByBefore` together — NOT an open-ended `needed_by < boundary`.
+ * The open-ended version shipped and was wrong: date-scoped results order
+ * `needed_by ASC` under a 6-row fetch and a 5-item spoken cap, so the
+ * OLDEST OVERDUE rows sorted first and consumed the entire cap. A tenant
+ * with 8 items months overdue plus 2 due tomorrow, asked "what do I need
+ * for tomorrow?", heard five March items and "and more beyond that" — and
+ * neither item due tomorrow. That is the exact silent-omission class this
+ * whole date path exists to fix, pointed the other way.
+ *
+ * `needed_by DESC` was REJECTED as the fix: it answers the question asked
+ * but buries genuinely urgent overdue work, trading one silent omission for
+ * another. The contract both halves must satisfy is "the caller MUST hear
+ * the items due on the day they asked about, AND must not be left unaware
+ * that earlier/overdue items exist." So: one bracketed query answers the
+ * question, and a second bounded probe (`neededByBefore: dayStart`,
+ * `MAX_SOONER_COUNTED + 1` rows) COUNTS the backlog into one closing
+ * sentence — "There are 8 items needed sooner, the earliest on March 1."
+ * Counted, never spoken item-by-item: the spoken answer stays scoped to the
+ * question, and the caller has an obvious follow-up to ask.
  *
  * UNLIKE `lookup_crew_schedule`, an absent or UNPARSEABLE phrase applies NO
  * filter at all — it does NOT fall back to "today". Crew-schedule always
@@ -72,13 +107,15 @@
  * and it says so explicitly); silently narrowing an unparseable materials
  * ask to "today" would instead HIDE real, later-dated pending items behind
  * a guessed filter the caller never asked for — a worse outcome than just
- * answering the plain unfiltered list honestly.
+ * answering the plain unfiltered list honestly. But an unparseable phrase
+ * is DISCLOSED (J3): "I couldn't tell which day X meant, so here's the full
+ * list." Absent and unparseable used to collapse into one `null` and
+ * produce byte-identical summaries, so a caller who said "asap" had no sign
+ * their scope had been dropped.
  *
  * `neededBy` is STILL surfaced per-item in the spoken summary regardless of
- * whether a date filter was applied (spec-review MAJOR B) — a date-scoped
- * answer can still contain several items due on different days before the
- * cutoff, and an unfiltered answer still benefits from the per-item date
- * this fix doesn't replace.
+ * whether a date filter was applied (spec-review MAJOR B) — an unfiltered
+ * answer still benefits from the per-item date this fix doesn't replace.
  *
  * Ordering: date-scoped results are ordered soonest-`neededBy`-first (see
  * `MaterialItemListOptions.neededByBefore`'s doc comment) rather than
@@ -96,7 +133,7 @@
  */
 import type { MaterialItem, MaterialItemRepository } from '../../materials/material-item';
 import type { LookupEventService } from '../../lookup-events/lookup-event-service';
-import { resolveSpokenDay } from '../scheduling/resolve-datetime';
+import { DEFAULT_TENANT_TIMEZONE, resolveSpokenDay } from '../scheduling/resolve-datetime';
 import { plural } from './spoken-format';
 
 export interface LookupMaterialsInput {
@@ -159,6 +196,14 @@ const MAX_ITEMS_SPOKEN = 5;
 // One extra row beyond what's ever spoken, fetched solely to detect "more
 // exist" without a second COUNT query — see module doc comment (I4).
 const FETCH_LIMIT = MAX_ITEMS_SPOKEN + 1;
+/**
+ * Bounded probe for the "needed sooner" disclosure (K3). Same honesty rule
+ * as `count`/`FETCH_LIMIT`: fetch one row PAST the number we're willing to
+ * state so the summary can say "20+" rather than guess a total. Larger than
+ * `FETCH_LIMIT` because this bucket is only ever COUNTED, never spoken
+ * item-by-item, so the rows are cheap.
+ */
+const MAX_SOONER_COUNTED = 20;
 /** Spoken-summary description cap — mirrors the row-builder's own label cap (`text()`, voice-lookup-answer.ts). */
 const MAX_DESCRIPTION_CHARS = 80;
 
@@ -184,13 +229,41 @@ function truncateForSpeech(s: string, max: number): string {
  * `'short'` — this is the first `month: 'short'`-style date in any spoken
  * summary across the skill family, and a full month name removes any risk
  * of an engine mis-reading an abbreviation (e.g. "Aug") at zero cost.
+ *
+ * The YEAR is appended only when it differs from the tenant's current year
+ * (review follow-up N7). `resolveSpokenDay` runs chrono with
+ * `forwardDate: true`, so a phrase spoken in December resolves INTO NEXT
+ * YEAR — and a bare "January 5" gave the caller no way to hear that. Adding
+ * the year unconditionally would instead put a redundant "2026" on every
+ * ordinary same-year date, which is noise on TTS.
  */
-function formatNeededByLabel(d: Date): string {
+function formatNeededByLabel(d: Date, currentYear: number): string {
   return new Intl.DateTimeFormat('en-US', {
     timeZone: 'UTC',
     month: 'long',
     day: 'numeric',
+    ...(d.getUTCFullYear() !== currentYear ? { year: 'numeric' as const } : {}),
   }).format(d);
+}
+
+/**
+ * The calendar year it currently is FOR THE TENANT — the baseline
+ * `formatNeededByLabel` compares against. Tenant-local, not UTC: on
+ * December 31st a west-coast tenant is still in the old year for several
+ * hours after UTC has rolled over, and labelling their dates off UTC's year
+ * would add a spurious "2027" to everything.
+ */
+function tenantCurrentYear(now: Date, timezone: string | undefined): number {
+  const tz = timezone ?? DEFAULT_TENANT_TIMEZONE;
+  try {
+    return Number(new Intl.DateTimeFormat('en-US', { timeZone: tz, year: 'numeric' }).format(now));
+  } catch {
+    // An invalid IANA zone throws from Intl; resolveSpokenDay falls back to
+    // DEFAULT_TENANT_TIMEZONE for the same input, so mirror that here.
+    return Number(
+      new Intl.DateTimeFormat('en-US', { timeZone: DEFAULT_TENANT_TIMEZONE, year: 'numeric' }).format(now),
+    );
+  }
 }
 
 /** One spoken clause per item — TTS-safe (I2), truncated (M1), needed-by surfaced when present (MAJOR B). */
@@ -201,39 +274,79 @@ function describeItem(m: LookupMaterialsItem): string {
   return parts.join(', ');
 }
 
-interface NeededByScope {
-  /** `MaterialItemListOptions.neededByBefore` — the exclusive upper bound. */
-  before: Date;
-  /** TTS-safe "MMMM d" label for the resolved day, for the summary header. */
-  label: string;
-}
+type NeededByScope =
+  /** No date phrase was spoken at all — answer the plain pending list. */
+  | { kind: 'none' }
+  /**
+   * A phrase WAS spoken but `resolveSpokenDay` could not turn it into a
+   * calendar day ("asap", "soon", "before the Patel job"). Still no filter
+   * — but the summary must SAY so (J3); see `lookupMaterials` below.
+   */
+  | { kind: 'unresolved'; phrase: string }
+  | {
+      kind: 'day';
+      /** `MaterialItemListOptions.neededByFrom` — inclusive start of the resolved day. */
+      from: Date;
+      /** `MaterialItemListOptions.neededByBefore` — exclusive end of the resolved day. */
+      before: Date;
+      /** TTS-safe "MMMM d" label for the resolved day, for the summary header. */
+      label: string;
+    };
 
 /**
- * Resolve `dateTimeDescription` to a `neededByBefore` boundary, or `null`
- * when no date filter applies. Returns `null` for BOTH an absent phrase
- * AND an unparseable one — see the module doc comment for why this
- * deliberately does NOT fall back to "today" the way
- * `lookup-crew-schedule.ts`'s day resolution does.
+ * Resolve `dateTimeDescription` to the resolved day's [from, before) window.
+ *
+ * Three outcomes, deliberately distinguished (review follow-up J3): absent,
+ * present-but-unresolvable, and resolved. The first two both apply NO filter
+ * — this skill never falls back to "today" the way
+ * `lookup-crew-schedule.ts`'s day resolution does (see the module doc
+ * comment) — but they are DIFFERENT FACTS, and collapsing them into one
+ * `null` is what let "what do I need asap?" produce a summary byte-identical
+ * to an unscoped ask.
  */
 function resolveNeededByScope(
   desc: string | undefined,
   now: Date,
   timezone: string | undefined,
-): NeededByScope | null {
-  if (!desc) return null;
-  const dayKey = resolveSpokenDay(desc, { timezone, now });
-  if (!dayKey) return null;
+  currentYear: number,
+): NeededByScope {
+  const phrase = desc?.trim();
+  if (!phrase) return { kind: 'none' };
+  const dayKey = resolveSpokenDay(phrase, { timezone, now });
+  if (!dayKey) return { kind: 'unresolved', phrase };
   // `needed_by` is a bare calendar date stored at UTC midnight
   // (add-material-handler.ts) — treat the resolved day the SAME way,
   // never re-projecting it through a timezone a second time (mirrors
   // lookup-crew-schedule.ts's dayLabelForDateKey doc comment: that's
   // exactly how a midnight-UTC date rolls back a day in a western tenant
-  // zone). The boundary is the START of the day AFTER the resolved one so
-  // "needed by <day>" includes everything due ON that day, not just
-  // before its midnight.
+  // zone). The window is [start of the resolved day, start of the day
+  // AFTER it) so "needed by <day>" covers everything due ON that day —
+  // and, per K3, NOTHING due before it: the pre-window backlog is counted
+  // separately rather than allowed to crowd the answer out.
   const dayStartUtc = new Date(`${dayKey}T00:00:00.000Z`);
   const before = new Date(dayStartUtc.getTime() + 24 * 60 * 60 * 1000);
-  return { before, label: formatNeededByLabel(dayStartUtc) };
+  return { kind: 'day', from: dayStartUtc, before, label: formatNeededByLabel(dayStartUtc, currentYear) };
+}
+
+/**
+ * "There are 8 items needed sooner, the earliest on March 1." — the K3
+ * disclosure that keeps a boundary-day answer from hiding an overdue
+ * backlog. `null` when the pre-window bucket is empty.
+ *
+ * The count is honest about its own bound the same way `data.count` is: the
+ * probe fetches `MAX_SOONER_COUNTED + 1` rows, so a saturated bucket says
+ * "20+" rather than inventing a total.
+ */
+function soonerSentence(sooner: MaterialItem[], currentYear: number): string | null {
+  if (sooner.length === 0) return null;
+  const capped = sooner.length > MAX_SOONER_COUNTED;
+  const n = capped ? MAX_SOONER_COUNTED : sooner.length;
+  const count = capped ? `${MAX_SOONER_COUNTED}+` : String(n);
+  // The probe is ordered soonest-`needed_by`-first, so row 0 is the oldest
+  // outstanding deadline — the single most useful fact about the backlog.
+  const earliest = formatNeededByLabel(sooner[0].neededBy!, currentYear);
+  const verb = !capped && n === 1 ? 'is' : 'are';
+  return `There ${verb} ${count} ${plural(n, 'item')} needed sooner, the earliest on ${earliest}.`;
 }
 
 export async function lookupMaterials(
@@ -263,22 +376,65 @@ export async function lookupMaterials(
   };
 
   try {
-    const scope = resolveNeededByScope(input.dateTimeDescription, input.now ?? new Date(), input.timezone);
+    const now = input.now ?? new Date();
+    const currentYear = tenantCurrentYear(now, input.timezone);
+    const scope = resolveNeededByScope(input.dateTimeDescription, now, input.timezone, currentYear);
+    const jobScope = input.jobId ? { jobId: input.jobId } : {};
+
+    // K3 — a date-scoped ask is TWO queries, not one open-ended
+    // `needed_by < boundary`:
+    //   1. the ANSWER: items due ON the resolved day (bracketed window), so
+    //      the caller who asked "what do I need for tomorrow?" always hears
+    //      tomorrow's items rather than five months-old ones that sorted
+    //      ahead of them under the spoken cap;
+    //   2. a bounded PROBE of everything due before that day, counted (never
+    //      spoken item-by-item) so the same caller is never left unaware the
+    //      backlog exists.
+    // See the module doc comment for why `needed_by DESC` was rejected: it
+    // answers the question asked but buries genuinely urgent overdue work,
+    // trading one silent omission for another.
     const items: MaterialItem[] = await deps.materialItemRepo.listPending(input.tenantId, {
-      ...(input.jobId ? { jobId: input.jobId } : {}),
-      ...(scope ? { neededByBefore: scope.before } : {}),
+      ...jobScope,
+      ...(scope.kind === 'day' ? { neededByFrom: scope.from, neededByBefore: scope.before } : {}),
       limit: FETCH_LIMIT,
     });
+    const sooner: MaterialItem[] =
+      scope.kind === 'day'
+        ? await deps.materialItemRepo.listPending(input.tenantId, {
+            ...jobScope,
+            neededByBefore: scope.from,
+            limit: MAX_SOONER_COUNTED + 1,
+          })
+        : [];
+    const soonerPhrase = soonerSentence(sooner, currentYear);
+
+    // J3 — an UNRESOLVED phrase applies no filter (the no-today-guess
+    // decision stands), but the caller must hear that their scope was
+    // dropped. Silence here made "what do I need asap?" indistinguishable
+    // from an unscoped ask, contradicting the sibling contract this design
+    // cites as its foil (lookup_crew_schedule "always names the day actually
+    // being reported" — docs/reference/voice-action-catalog.md).
+    const unresolvedPrefix =
+      scope.kind === 'unresolved'
+        ? `I couldn't tell which day "${scope.phrase}" meant, so here's ` +
+          `${input.jobId ? "this job's full list" : 'the full list'}. `
+        : '';
 
     if (items.length === 0) {
       // Date-scoped emptiness is a DIFFERENT fact than "nothing pending at
       // all" — there could be plenty pending outside this window, so the
       // summary must not claim the whole list is clear (see module doc
       // comment / spec-review MAJOR B precedent for "never silently widen
-      // OR narrow a claim past what was actually asked").
-      const summary = scope
-        ? `Nothing on the materials list is needed by ${scope.label}.`
-        : 'Your materials list is clear — nothing pending.';
+      // OR narrow a claim past what was actually asked"). N3: the same rule
+      // one axis over — a JOB-scoped query may not assert a fact about the
+      // tenant's whole list either.
+      const emptyBody =
+        scope.kind === 'day'
+          ? `Nothing on ${input.jobId ? "this job's" : 'the'} materials list is needed by ${scope.label}.`
+          : input.jobId
+            ? "This job's materials list is clear — nothing pending."
+            : 'Your materials list is clear — nothing pending.';
+      const summary = unresolvedPrefix + emptyBody + (soonerPhrase ? ` ${soonerPhrase}` : '');
       await record('none', 0, summary);
       return { status: 'none', summary, data: { count: 0, spokenItems: [] } };
     }
@@ -288,17 +444,19 @@ export async function lookupMaterials(
       description: m.description,
       quantity: m.quantity,
       ...(m.vendor ? { vendor: m.vendor } : {}),
-      ...(m.neededBy ? { neededByLabel: formatNeededByLabel(m.neededBy) } : {}),
+      ...(m.neededBy ? { neededByLabel: formatNeededByLabel(m.neededBy, currentYear) } : {}),
     }));
 
     const countPhrase = hasMore
       ? `${MAX_ITEMS_SPOKEN}+ ${plural(MAX_ITEMS_SPOKEN, 'item')}`
       : `${items.length} ${plural(items.length, 'item')}`;
-    const scopePhrase = scope ? ` needed by ${scope.label}` : '';
+    const scopePhrase = scope.kind === 'day' ? ` needed by ${scope.label}` : '';
     const summary =
+      unresolvedPrefix +
       `${countPhrase} on the materials list${scopePhrase}: ` +
       spokenItems.map(describeItem).join('; ') +
-      (hasMore ? '; and more beyond that' : '');
+      (hasMore ? '; and more beyond that' : '') +
+      (soonerPhrase ? `. ${soonerPhrase}` : '');
 
     // resultCount is the number of rows actually FETCHED (up to
     // FETCH_LIMIT) — a true, if capped, measurement; never the guessed
