@@ -9,6 +9,7 @@ import type { CassetteEntry } from '../../src/ai/voice-quality/cassette-gateway'
 import {
   analyzeCassetteStaleness,
   formatStalenessReport,
+  pruneEntriesBefore,
   type CassetteInput,
 } from '../../src/ai/voice-quality/cassette-staleness';
 
@@ -238,5 +239,127 @@ describe('analyzeCassetteStaleness', () => {
   it('formatStalenessReport reports a fully fresh corpus cleanly', () => {
     const md = formatStalenessReport(analyzeCassetteStaleness([freshCassette], NOW));
     expect(md).toContain('corpus is fresh');
+  });
+});
+
+/**
+ * `pruneEntriesBefore` — tooling follow-up (2026-08-09). Every taxonomy
+ * change invalidates the hash for every classify_intent cassette entry
+ * corpus-wide (the system prompt is shared verbatim across every call), and
+ * `refresh` mode only ever APPENDS/overwrites — it never removes a
+ * superseded entry, so cassette files grow monotonically.
+ *
+ * A callKey-grouping design ("keep only pickNewestRecording per (schema,
+ * fp, user) group") was tried first and REJECTED — see the doc comment on
+ * `pruneEntriesBefore` in cassette-staleness.ts for the full story: running
+ * it against the real corpus proved two DIFFERENT live requests can share
+ * one callKey (`spam-create-customer`, traced to two call sites sharing an
+ * utterance), so grouping-based pruning silently deleted a still-needed
+ * entry and broke strict replay. `pruneEntriesBefore` sidesteps grouping
+ * entirely: it keeps everything (re)written at/after a cutoff captured
+ * immediately before an authoritative refresh pass. These tests pin that
+ * simpler, safe contract — including a reconstruction of the exact
+ * counterexample that sank the grouping design.
+ */
+describe('pruneEntriesBefore', () => {
+  const CUTOFF = '2026-06-20T00:00:00.000Z';
+
+  it('keeps an entry recorded exactly AT the cutoff (inclusive boundary)', () => {
+    const e = entry({ system: 'You are X. a', user: 'hi', recordedAt: CUTOFF });
+    const { kept, pruned } = pruneEntriesBefore([e], CUTOFF);
+    expect(kept).toEqual([e]);
+    expect(pruned).toEqual([]);
+  });
+
+  it('keeps an entry recorded AFTER the cutoff', () => {
+    const e = entry({ system: 'You are X. a', user: 'hi', recordedAt: '2026-06-20T00:00:00.001Z' });
+    const { kept } = pruneEntriesBefore([e], CUTOFF);
+    expect(kept).toEqual([e]);
+  });
+
+  it('prunes an entry recorded BEFORE the cutoff', () => {
+    const e = entry({ system: 'You are X. a', user: 'hi', recordedAt: '2026-06-19T23:59:59.999Z' });
+    const { kept, pruned } = pruneEntriesBefore([e], CUTOFF);
+    expect(kept).toEqual([]);
+    expect(pruned).toEqual([e]);
+  });
+
+  // THE counterexample that sank the callKey-grouping design: two entries
+  // that share (schema, system-fingerprint, last-user-message) — i.e. would
+  // collapse to ONE group under that design — but are BOTH genuinely live
+  // (both freshly (re)written by the same authoritative refresh pass, so
+  // both carry a post-cutoff recordedAt). A grouping-based prune would keep
+  // only the newer one and break the other's exact-hash replay; a
+  // cutoff-based prune keeps BOTH, because it never groups at all.
+  it('keeps BOTH entries of a same-callKey pair when both are post-cutoff (the spam-create-customer counterexample)', () => {
+    const shortForm = entry({
+      system: 'You are an intent classifier. x.',
+      user: 'I want to create a new customer.',
+      recordedAt: '2026-06-20T00:00:00.100Z',
+    });
+    const withProtectionSection = entry({
+      system: 'You are an intent classifier. x.',
+      user: 'I want to create a new customer.',
+      recordedAt: '2026-06-20T00:00:00.200Z',
+    });
+    // Same callKey by construction (identical system fingerprint + user +
+    // schema) — a grouping design would treat these as ONE logical call.
+    const { kept, pruned } = pruneEntriesBefore([shortForm, withProtectionSection], CUTOFF);
+    expect(kept).toEqual([shortForm, withProtectionSection]);
+    expect(pruned).toEqual([]);
+  });
+
+  it('a mix of pre- and post-cutoff entries splits correctly, preserving original order among survivors', () => {
+    const stale1 = entry({ system: 'You are X. a', user: 'old call 1', recordedAt: '2026-06-01T00:00:00.000Z' });
+    const fresh1 = entry({ system: 'You are X. a', user: 'call A', recordedAt: '2026-06-20T00:00:00.000Z' });
+    const stale2 = entry({ system: 'You are X. a', user: 'old call 2', recordedAt: '2026-06-10T00:00:00.000Z' });
+    const fresh2 = entry({ system: 'You are X. a', user: 'call B', recordedAt: '2026-06-21T00:00:00.000Z' });
+    const { kept, pruned } = pruneEntriesBefore([stale1, fresh1, stale2, fresh2], CUTOFF);
+    expect(kept).toEqual([fresh1, fresh2]);
+    expect(pruned).toEqual([stale1, stale2]);
+  });
+
+  // Mirrors analyzeCassetteStaleness's own posture: an unparseable/missing
+  // recordedAt is surfaced as unsafe, never silently treated as fresh (kept).
+  it('treats a missing/malformed recordedAt as prunable, never silently kept', () => {
+    const malformed = entry({ system: 'You are X. a', user: 'hi', recordedAt: 'not-a-date' });
+    const { kept, pruned } = pruneEntriesBefore([malformed], CUTOFF);
+    expect(kept).toEqual([]);
+    expect(pruned).toEqual([malformed]);
+  });
+
+  it('an empty cassette prunes to nothing, without throwing', () => {
+    const { kept, pruned } = pruneEntriesBefore([], CUTOFF);
+    expect(kept).toEqual([]);
+    expect(pruned).toEqual([]);
+  });
+
+  it('a fully fresh cassette (every entry post-cutoff) prunes nothing', () => {
+    const { kept, pruned } = pruneEntriesBefore(freshCassette.entries, CUTOFF);
+    expect(kept).toEqual(freshCassette.entries);
+    expect(pruned).toEqual([]);
+  });
+
+  it('a cassette entirely pre-cutoff (never refreshed) prunes everything', () => {
+    const { kept, pruned } = pruneEntriesBefore(driftedCassette.entries, CUTOFF);
+    expect(kept).toEqual([]);
+    expect(pruned).toEqual(driftedCassette.entries);
+  });
+
+  // Review follow-up J5 (2026-08-09) — this function guards every ENTRY
+  // timestamp meticulously (five lines of comment above the check) and left
+  // the one value that decides the BLAST RADIUS unvalidated. `Date.parse`
+  // returns NaN for a malformed cutoff, and `recordedMs >= NaN` is false for
+  // every entry, so a typo'd cutoff silently returned "prune everything" —
+  // the maximally destructive answer — from a delete-deciding function. All
+  // nine tests above pass a well-formed cutoff, so none could see it.
+  it('throws on a non-parseable cutoff instead of returning "prune everything"', () => {
+    const fresh = entry({ system: 'You are X. a', user: 'hi', recordedAt: '2026-06-21T00:00:00.000Z' });
+    expect(() => pruneEntriesBefore([fresh], 'not-a-date')).toThrow(/cutoff/i);
+  });
+
+  it('throws on an empty cutoff', () => {
+    const fresh = entry({ system: 'You are X. a', user: 'hi', recordedAt: '2026-06-21T00:00:00.000Z' });
+    expect(() => pruneEntriesBefore([fresh], '')).toThrow(/cutoff/i);
   });
 });

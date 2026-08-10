@@ -61,26 +61,161 @@ export interface CreateMaterialItemInput {
 export interface MaterialItemListOptions {
   jobId?: string;
   /**
+   * Follow-up to Task 9 (2026-08-09) — date-scope the shopping list to
+   * items needed before this instant (`needed_by < neededByBefore`,
+   * exclusive). Added because `lookup_materials`'s bounded fetch (I4,
+   * `limit`, below) only ever looks at the OLDEST-created rows: a tenant
+   * with more pending items than the fetch cap could have a genuinely
+   * time-sensitive item never spoken at all, self-correcting only once it
+   * ages into the oldest-N window. Per-item `neededBy` in the spoken
+   * summary was the interim mitigation; this is the real fix.
+   *
+   * NULL/undefined `neededBy` semantics (decided, pinned by both backends'
+   * tests): an item with NO `neededBy` does NOT match this filter. An
+   * undated item has no known deadline, so it cannot honestly be said to
+   * be "needed by" any particular date — silently including it in a
+   * date-scoped answer would be a worse surprise than omitting it. This
+   * is also what a bare SQL `needed_by < $1` does for free (three-valued
+   * logic excludes NULL from ANY comparison), so the Pg backend needs no
+   * special-case and the InMemory backend mirrors it explicitly to keep
+   * both backends provably in agreement.
+   *
+   * OVERDUE INTERACTION (review follow-up K3, 2026-08-09) — READ THIS
+   * BEFORE USING THIS OPTION ALONE. `neededByBefore` is an OPEN-ENDED
+   * lower-unbounded window: it includes every overdue item, however old.
+   * Combined with `needed_by ASC` ordering and a `limit`, the OLDEST
+   * overdue rows sort FIRST and can consume the entire cap, so a
+   * date-scoped read can return zero of the items actually due on the day
+   * the caller asked about — the same silent-omission class this option
+   * was introduced to fix, pointed the other way. A caller that means "due
+   * ON day X" must bracket the window with `neededByFrom` (below) and
+   * account for the pre-window backlog separately; `ai/skills/lookup-
+   * materials.ts` does exactly that (one bracketed query for the answer,
+   * one bounded probe for the "plus N needed sooner" disclosure).
+   *
+   * A malformed value (anything that is not a valid `Date`) yields `[]`
+   * from BOTH backends — see `isUsableDateBound` below.
+   *
+   * Ordering interaction: when this option is set, `listPending` orders
+   * by `needed_by ASC` (soonest-due first) instead of the default
+   * oldest-created-first — see the interface doc comment below for why.
+   */
+  neededByBefore?: Date;
+  /**
+   * Review follow-up K3 (2026-08-09) — INCLUSIVE lower bound
+   * (`needed_by >= neededByFrom`). The companion that turns
+   * `neededByBefore`'s open-ended window into a bracketed one, so a caller
+   * can ask "what is due ON this day" rather than only "what is due by
+   * this day (including everything ever overdue)".
+   *
+   * Same NULL semantics and same malformed-value posture as
+   * `neededByBefore`, and setting either bound switches `listPending` to
+   * `needed_by ASC` ordering.
+   */
+  neededByFrom?: Date;
+  /**
    * Cap the number of rows returned, applied at the repo/SQL boundary —
    * NOT sliced app-side after an unbounded fetch (quality-review I4, Task
    * 9: `lookup_materials` used to load every pending row for the tenant
    * just to speak 5 of them — a shopping list is append-mostly, only
    * `markPurchased` prunes it, so that only gets worse over a tenant's
-   * lifetime). Rows are returned in the same oldest-created-first order
-   * `listPending` already documents, so `limit: N` yields the N OLDEST
-   * pending items, not an arbitrary N.
+   * lifetime). Rows are returned in the SAME order `listPending` uses for
+   * this call (oldest-created-first by default, or soonest-`needed_by`-
+   * first when a `needed_by` bound is given — see those options' doc
+   * comments), so `limit: N` yields the N rows that ordering puts first,
+   * not an arbitrary N.
    */
   limit?: number;
+}
+
+/**
+ * Shared malformed-bound guard for `neededByFrom`/`neededByBefore` (review
+ * follow-up J2, 2026-08-09). Used by BOTH backends so one input can never
+ * take two different branches.
+ *
+ * Before this existed, `pg-material-item.ts` gated on `instanceof Date` and
+ * `material-item.ts` gated on truthiness. An ISO STRING that crossed a
+ * queue/JSON boundary therefore made Pg emit no date predicate at all —
+ * answering a date-scoped question with the tenant's WHOLE pending list —
+ * while InMemory threw a raw `TypeError` from `.getTime()`. Same input,
+ * opposite outcomes, and the production backend took the dangerous branch,
+ * contradicting the posture stated twenty lines above it in the same
+ * function ("a malformed jobId must return [] — silently dropping the
+ * filter would be worse").
+ *
+ * `new Date('nonsense')` is also rejected: it IS `instanceof Date`, but its
+ * time is NaN, and every comparison against NaN is false — which in SQL
+ * three-valued logic and in JS alike quietly returns the wrong row set
+ * rather than failing.
+ *
+ * Callers treat `false` as "return []", matching the `jobId` precedent: a
+ * malformed filter narrows to nothing, never widens.
+ */
+export function isUsableDateBound(value: unknown): value is Date {
+  return value instanceof Date && Number.isFinite(value.getTime());
+}
+
+/**
+ * `true` when the caller supplied a `needed_by` bound at all (valid or not).
+ * Distinguishing "no bound" from "malformed bound" is what lets both
+ * backends return `[]` for the latter instead of silently answering the
+ * unfiltered question.
+ */
+export function hasDateBound(options?: MaterialItemListOptions): boolean {
+  return options?.neededByBefore !== undefined || options?.neededByFrom !== undefined;
+}
+
+/** `true` when every supplied `needed_by` bound is a usable Date. */
+export function dateBoundsAreValid(options?: MaterialItemListOptions): boolean {
+  if (options?.neededByBefore !== undefined && !isUsableDateBound(options.neededByBefore)) return false;
+  if (options?.neededByFrom !== undefined && !isUsableDateBound(options.neededByFrom)) return false;
+  return true;
 }
 
 export interface MaterialItemRepository {
   create(input: CreateMaterialItemInput): Promise<MaterialItem>;
   /**
-   * Pending items for a tenant, oldest-created first; optionally scoped to
-   * a job. Ties break deterministically but ARBITRARILY in the Pg backend
-   * (id ASC, i.e. random v4 UUID order — see pg-material-item.ts) since two
-   * rows can share the same created_at timestamp; InMemory gives true
-   * insertion order in that case since it never ties by construction.
+   * Pending items for a tenant, optionally scoped to a job and/or a
+   * needed-by window (`options.neededByFrom` / `options.neededByBefore`).
+   *
+   * Ordering: oldest-created first by DEFAULT. When a `needed_by` bound is
+   * given, ordering switches to soonest-`needed_by`-first instead — a
+   * date-scoped ask ("what do I need for tomorrow?") cares about urgency,
+   * not which row happened to be created first, and the fetch is capped
+   * (`options.limit`) so which rows make the cut matters.
+   *
+   * TIE-BREAKING (corrected 2026-08-09, review follow-up J1 — the previous
+   * version of this comment claimed InMemory "never ties by construction",
+   * which was FALSE and shipped a real mock/prod divergence):
+   *
+   *   Pg:       `needed_by ASC, created_at ASC, id ASC`
+   *   InMemory: `needed_by ASC, created_at ASC`, then insertion order
+   *             (Array.prototype.sort is stable)
+   *
+   * `needed_by` ties are the NORMAL case, not an edge case:
+   * `add-material-handler.ts` writes every voice-captured date as
+   * ``new Date(`${neededBy}T00:00:00Z`)``, so two items due the same day are
+   * EXACTLY equal on that key. Before `created_at` was added to the Pg sort,
+   * such rows fell through to `id ASC` — a random v4 UUID — while InMemory's
+   * stable sort gave insertion order, so with `lookup_materials`'s 5-item
+   * spoken cap the two backends spoke DIFFERENT SUBSETS of the same data.
+   * (Every pre-existing test constructed distinct `neededBy` values, so none
+   * of them could see it.)
+   *
+   * `created_at` makes them agree in practice: in Pg it is the DB clock
+   * (`NOW()`, microsecond precision, one transaction per `create()`), so it
+   * effectively never ties; in InMemory it is a JS `Date` at millisecond
+   * precision, which CAN tie on rapid successive creates — and among those
+   * ties InMemory yields insertion order where Pg would yield `id` order.
+   * That residual divergence is reachable only in a mock that creates two
+   * rows inside one millisecond with an identical `needed_by`; it is
+   * deliberately left rather than adding an `id` tie-break to InMemory,
+   * because insertion order is the more useful (and more truthful) answer
+   * for a fake, and an `id` tie-break there would make every "N oldest"
+   * assertion in the suite nondeterministic.
+   *
+   * A malformed `needed_by` bound returns `[]` from both backends — see
+   * `isUsableDateBound`.
    */
   listPending(tenantId: string, options?: MaterialItemListOptions): Promise<MaterialItem[]>;
   /** Transition pending -> purchased. Null if not found, wrong tenant, or not pending. */
@@ -179,13 +314,36 @@ export class InMemoryMaterialItemRepository implements MaterialItemRepository {
     tenantId: string,
     options?: MaterialItemListOptions,
   ): Promise<MaterialItem[]> {
-    const sorted = Array.from(this.items.values())
+    // A malformed date bound narrows to nothing, exactly like a malformed
+    // jobId — never a silently widened list (J2, isUsableDateBound).
+    if (!dateBoundsAreValid(options)) return [];
+    const dateScoped = hasDateBound(options);
+    const before = options?.neededByBefore;
+    const from = options?.neededByFrom;
+    const filtered = Array.from(this.items.values())
       .filter((i) => i.tenantId === tenantId)
       .filter((i) => i.status === 'pending')
       .filter((i) => !options?.jobId || i.jobId === options.jobId)
-      .sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime())
-      .map((i) => ({ ...i }));
-    return typeof options?.limit === 'number' ? sorted.slice(0, options.limit) : sorted;
+      // NULL/undefined neededBy never matches a date-scoped query — see
+      // MaterialItemListOptions.neededByBefore's doc comment for why (an
+      // undated item has no known deadline). Mirrors the Pg backend's bare
+      // `needed_by < $1` / `needed_by >= $1`, which exclude NULL for the same
+      // reason without needing this explicit check.
+      .filter((i) => !dateScoped || i.neededBy !== undefined)
+      .filter((i) => !before || i.neededBy!.getTime() < before.getTime())
+      .filter((i) => !from || i.neededBy!.getTime() >= from.getTime());
+    // Tie-break parity with Pg (`needed_by ASC, created_at ASC, id ASC`) —
+    // see MaterialItemRepository.listPending's doc comment. `sort` is stable,
+    // so a created_at tie keeps insertion order here.
+    const sorted = dateScoped
+      ? filtered.sort(
+          (a, b) =>
+            a.neededBy!.getTime() - b.neededBy!.getTime() ||
+            a.createdAt.getTime() - b.createdAt.getTime(),
+        )
+      : filtered.sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime());
+    const result = sorted.map((i) => ({ ...i }));
+    return typeof options?.limit === 'number' ? result.slice(0, options.limit) : result;
   }
 
   async markPurchased(tenantId: string, id: string, actorId: string): Promise<MaterialItem | null> {

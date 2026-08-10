@@ -23,6 +23,7 @@ import type { DriverFactoryContext } from '../../src/ai/voice-quality/runner';
 import type { VoiceQualityScript } from '../../src/ai/voice-quality/schema';
 import { InMemoryOnCallRepository } from '../../src/oncall/rotation';
 import { InMemoryDncRepository, normalizePhone } from '../../src/compliance/dnc';
+import { InMemorySettingsRepository } from '../../src/settings/settings';
 import type { SettingsRepository, TenantSettings } from '../../src/settings/settings';
 import {
   hashVoiceApprovalPin,
@@ -507,12 +508,33 @@ export function makeVoiceQualityDriverFactory(
             ...(escalationSettings ? { escalationSettings } : {}),
           } as unknown as TenantSettings)
         : null;
+    // Tooling fix (2026-08-09) — `SettingsRepository` grew
+    // `upsertIdentityFields` (PUT /api/onboarding/identity + the
+    // conversational onboarding execution handlers) after this hand-rolled
+    // stub was written, and the object literal below never got the new
+    // method. `ts-node`'s full typecheck rejects that (`error TS2741:
+    // Property 'upsertIdentityFields' is missing`) while vitest's esbuild
+    // transform does not typecheck at all, which is why it only ever
+    // surfaced when running a script directly via `ts-node` (e.g.
+    // scripts/seed-voice-quality-cassettes.ts).
+    //
+    // Review follow-up N5: the first fix threw from the new method. Safe,
+    // but `InMemorySettingsRepository` (src/settings/settings.ts) already
+    // implements it for real, so DELEGATION is strictly better — a future
+    // onboarding corpus script gets working behavior instead of a crash,
+    // and the next `SettingsRepository` method addition breaks `ts-node`
+    // again unless it is also delegated. The bespoke overrides above it stay
+    // because the corpus needs a settings row synthesized from SCRIPT
+    // FIXTURES (business hours, tenant tz, owner phone, escalation config),
+    // which no repository can invent.
+    const delegate = new InMemorySettingsRepository();
     const settingsRepo: SettingsRepository = {
       findByTenant: async (t: string) => (t === fctx.tenantId ? settingsRow : null),
       create: async (s: TenantSettings) => s,
       update: async () => settingsRow,
       incrementEstimateNumber: async () => 1,
       incrementInvoiceNumber: async () => 1,
+      upsertIdentityFields: (tenantId, fields) => delegate.upsertIdentityFields(tenantId, fields),
     };
     let now: (() => Date) | undefined;
     if (businessHours?.callMomentLocal) {
