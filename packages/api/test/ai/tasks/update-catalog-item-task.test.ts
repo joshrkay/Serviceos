@@ -214,6 +214,105 @@ describe('UpdateCatalogItemTaskHandler', () => {
     expect(missingFieldsFor(proposal)).not.toContain('proposedUnitPriceCents');
   });
 
+  /**
+   * Follow-up to PR #816 — a spoken price the drafting gate REFUSES must
+   * never just disappear.
+   *
+   * The gate above collapses an untrusted spoken figure to "no price change"
+   * (proposed === current). On its own that was visible: with nothing else
+   * spoken, the no-change gate fired and the proposal could not be approved.
+   * But a name/description change is ALSO a "real change", so it suppressed
+   * that gate — and the operator got a rename proposal with the price they
+   * spoke silently thrown away, on an APPROVAL surface.
+   *
+   * The fix keeps drafting (option b) rather than refusing the whole
+   * utterance with a clarification (option a): the catalog item resolved and
+   * a real rename was heard, and this handler's established posture for a
+   * partially-extracted utterance is a FLAT `missingFields` key plus a prose
+   * reason on `explanation` (see class doc note 3 and the ambiguous-match
+   * tests above), not a `voice_clarification` that discards everything
+   * extracted and makes the operator re-speak. A clarification card is what
+   * Task 13 reached for when there was NOTHING to draft; that is not this.
+   *
+   * `missingFields` is what makes it non-silent rather than merely
+   * documented: `approveProposal` blocks on the tracked list, so the
+   * one-tap approval of a proposal that dropped a spoken price is
+   * impossible, and `clearSatisfiedMissingFields` lifts the gate on an exact
+   * flat-key edit — the operator's recovery is one edit, not a re-utterance.
+   */
+  describe('a spoken price the gate refuses is surfaced, never silently dropped', () => {
+    it('gates and names the discarded figure when an over-ceiling price rides ALONG WITH a name change', async () => {
+      const catalogRepo = await seededRepo([{ name: 'AC tune-up', unitPriceCents: 8900 }]);
+      const { proposal } = await new UpdateCatalogItemTaskHandler(catalogRepo).handle(
+        ctx({
+          existingEntities: {
+            catalogItemReference: 'AC tune-up',
+            unitPriceCents: 29_000_000, // misheard "two ninety" -> $290000.00
+            catalogItemNewName: 'AC seasonal service',
+          },
+        }),
+      );
+
+      const payload = proposal.payload as Record<string, unknown>;
+      // Still a real draft (option b) — the resolved item and the rename ask
+      // both survive; nothing about the utterance is thrown away.
+      expect(payload.catalogItemId).toBeTruthy();
+      expect(proposal.explanation).toMatch(/requested new name: "AC seasonal service"/i);
+      // The untrusted figure NEVER lands on the executable field.
+      expect(payload.proposedUnitPriceCents).toBe(8900);
+      // ...but the operator cannot approve past it, and is told why.
+      expect(missingFieldsFor(proposal)).toContain('proposedUnitPriceCents');
+      expect(missingFieldsFor(proposal).every((f) => !f.includes(' '))).toBe(true);
+      expect(proposal.explanation).toMatch(/\$290000\.00/);
+      expect(proposal.explanation).toMatch(/not applied/i);
+    });
+
+    it('gates and names the discarded figure when a negative price rides along with a description change', async () => {
+      const catalogRepo = await seededRepo([{ name: 'AC tune-up', unitPriceCents: 8900 }]);
+      const { proposal } = await new UpdateCatalogItemTaskHandler(catalogRepo).handle(
+        ctx({
+          existingEntities: {
+            catalogItemReference: 'AC tune-up',
+            unitPriceCents: -500,
+            catalogItemNewDescription: 'Full seasonal inspection',
+          },
+        }),
+      );
+
+      const payload = proposal.payload as Record<string, unknown>;
+      expect(payload.proposedUnitPriceCents).toBe(8900);
+      expect(missingFieldsFor(proposal)).toContain('proposedUnitPriceCents');
+      expect(proposal.explanation).toMatch(/not applied/i);
+      expect(proposal.explanation).toMatch(/requested new description: "full seasonal inspection"/i);
+    });
+
+    it('stops claiming "no price was stated" when a price WAS stated and refused', async () => {
+      const catalogRepo = await seededRepo([{ name: 'AC tune-up', unitPriceCents: 8900 }]);
+      const { proposal } = await new UpdateCatalogItemTaskHandler(catalogRepo).handle(
+        ctx({ existingEntities: { catalogItemReference: 'AC tune-up', unitPriceCents: 29_000_000 } }),
+      );
+
+      // The gate itself was already correct here (nothing else was spoken, so
+      // the no-change gate fired) — the WORDING was a lie: the operator did
+      // state a price and was told they hadn't.
+      expect(missingFieldsFor(proposal)).toContain('proposedUnitPriceCents');
+      expect(proposal.explanation).not.toMatch(/no price, name, or description change was stated/i);
+      expect(proposal.explanation).toMatch(/\$290000\.00/);
+      expect(proposal.explanation).toMatch(/\$100000\.00/); // the limit it exceeded
+    });
+
+    it('gates only once — an unresolvable item AND a refused price do not double-push the price key', async () => {
+      const catalogRepo = await seededRepo([{ name: 'Water heater install', unitPriceCents: 145000 }]);
+      const { proposal } = await new UpdateCatalogItemTaskHandler(catalogRepo).handle(
+        ctx({ existingEntities: { catalogItemReference: 'flux capacitor', unitPriceCents: 29_000_000 } }),
+      );
+
+      const missing = missingFieldsFor(proposal);
+      expect(missing).toContain('catalogItemId');
+      expect(missing.filter((f) => f === 'proposedUnitPriceCents')).toHaveLength(1);
+    });
+  });
+
   it('a description-only request resolves the item and rides explanation, never a fabricated payload field', async () => {
     const catalogRepo = await seededRepo([{ name: 'AC tune-up', unitPriceCents: 8900 }]);
     const { proposal } = await new UpdateCatalogItemTaskHandler(catalogRepo).handle(

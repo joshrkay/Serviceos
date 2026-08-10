@@ -2191,6 +2191,40 @@ export class CreateJobVoiceTaskHandler implements TaskHandler {
 //      writes a genuinely SPOKEN `unitPriceCents` into the proposal — is
 //      now the ONLY place `MAX_UNIT_PRICE_CENTS` is enforced for this
 //      intent.
+//
+//   5. Follow-up to note 4 (2026-08-09) — a price the gate REFUSES is now
+//      always REPORTED, never silently collapsed. The gate turns an
+//      untrusted spoken figure into "no price change" (proposed ===
+//      current). On its own that stayed visible: with nothing else spoken,
+//      the no-change gate below fired and the proposal could not be
+//      approved. But a name/description change also counts as a "real
+//      change" and SUPPRESSED that gate — so "rename the tune-up to
+//      seasonal service and make it two ninety thousand" drafted an
+//      approvable rename with the spoken price thrown away and nothing on
+//      the card saying so. Silent data loss on an approval surface.
+//
+//      The refusal now pushes the flat `proposedUnitPriceCents` gate key
+//      unconditionally and states the dropped figure on `explanation`.
+//      Deliberately NOT a refusal-with-clarification of the whole
+//      utterance: the catalog item resolved and a real rename was heard,
+//      and this class's established posture for a partially-extracted
+//      utterance is exactly this — a FLAT gate key plus a prose reason on
+//      `explanation` (note 3, and the ambiguous-catalog-match path right
+//      above). Task 13's clarification cards
+//      (workers/voice-action-router.ts) are the precedent for "never
+//      silent", but its remedy was a clarification because there was
+//      NOTHING to draft — `confirm`/`language_switch`/`operator_request`
+//      have no proposal type, no handler, no payload. Emitting one here
+//      would discard everything successfully extracted and make the
+//      operator re-speak the whole sentence, where a `missingFields` gate
+//      costs them one field edit: `approveProposal` blocks on the tracked
+//      list (so a one-tap approval that drops the price is impossible) and
+//      `clearSatisfiedMissingFields` lifts the gate on an exact flat-key
+//      edit.
+//
+//      Same change also stops the no-change gate from claiming "No price,
+//      name, or description change was stated" when a price WAS stated and
+//      refused — that branch now only fires when nothing was spoken at all.
 export class UpdateCatalogItemTaskHandler implements TaskHandler {
   readonly taskType = 'update_catalog_item' as const;
 
@@ -2251,17 +2285,35 @@ export class UpdateCatalogItemTaskHandler implements TaskHandler {
     // spoken unitPriceCents field, so a misheard "290 thousand" must gate
     // here exactly as it does on the create side, not fall back to "no
     // price change" and sail through unchecked.
+    //
+    // `spokenPriceCents` is kept separately from `requestedPriceCents` (the
+    // TRUSTED value) so the refusal is reportable — see note 5.
+    const spokenPriceCents =
+      typeof ee.unitPriceCents === 'number' && Number.isFinite(ee.unitPriceCents)
+        ? ee.unitPriceCents
+        : undefined;
     const requestedPriceCents =
-      typeof ee.unitPriceCents === 'number' &&
-      Number.isFinite(ee.unitPriceCents) &&
-      ee.unitPriceCents >= 0 &&
-      ee.unitPriceCents <= MAX_UNIT_PRICE_CENTS
-        ? Math.round(ee.unitPriceCents)
+      spokenPriceCents !== undefined &&
+      spokenPriceCents >= 0 &&
+      spokenPriceCents <= MAX_UNIT_PRICE_CENTS
+        ? Math.round(spokenPriceCents)
         : undefined;
     const hasName = typeof ee.catalogItemNewName === 'string' && ee.catalogItemNewName.trim().length > 0;
     const hasDescription =
       typeof ee.catalogItemNewDescription === 'string' && ee.catalogItemNewDescription.trim().length > 0;
-    if (requestedPriceCents === undefined && !hasName && !hasDescription) {
+
+    if (spokenPriceCents !== undefined && requestedPriceCents === undefined) {
+      // A price WAS spoken and the gate refused it (note 5). Gate on the flat
+      // payload key regardless of what else was spoken, and say which figure
+      // was dropped — silently collapsing it to "no price change" behind an
+      // approvable rename is data loss on an approval surface.
+      missing.push('proposedUnitPriceCents');
+      explanationParts.push(
+        spokenPriceCents > MAX_UNIT_PRICE_CENTS
+          ? `Heard a price of ${formatCents(Math.round(spokenPriceCents))}, above the ${formatCents(MAX_UNIT_PRICE_CENTS)} limit for a spoken price — most likely a mishearing, so it was NOT applied. Set the price on this proposal if that figure is right.`
+          : 'Heard a price that is not a valid catalog price, so it was NOT applied. Set the price on this proposal.',
+      );
+    } else if (requestedPriceCents === undefined && !hasName && !hasDescription) {
       missing.push('proposedUnitPriceCents');
       explanationParts.push('No price, name, or description change was stated.');
     }
