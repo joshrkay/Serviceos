@@ -1226,8 +1226,10 @@ unlike `lookup_leads`/`lookup_catalog`, there is deliberately no entry in
 `LOOKUP_REQUIRED_PERMISSION` (`workers/voice-lookup-answer.ts`): any
 authenticated operator, technician included, may hear the shopping list.
 A date/"for tomorrow" query filter now exists (follow-up, 2026-08-09,
-taxonomy 1.17.0) — `MaterialItemListOptions.neededByBefore`, resolved from
-the caller's spoken day phrase via `resolveSpokenDay` — see the Task 9
+taxonomy 1.17.0; narrowed to a bare weekday / "tomorrow" / "by <weekday>"
+in 1.18.0) — `MaterialItemListOptions.neededByFrom`/`neededByBefore`,
+resolved from the caller's spoken day phrase via `resolveSpokenDay` — see
+the Task 9
 notes above for the full rationale (NULL semantics, ordering, the
 deliberate "unparseable means no filter, never a today-guess" divergence
 from `lookup_crew_schedule`). Each item's captured `neededBy` is STILL

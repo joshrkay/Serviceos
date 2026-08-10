@@ -570,8 +570,27 @@ export const SUPPORTED_INTENTS: readonly IntentType[] = [
  *           (ai/scheduling/resolve-datetime.ts) exactly like
  *           `lookup_crew_schedule` does — restoring the phrase only once
  *           it was actually wired through, not before.
+ *   1.18.0 — Review follow-up (2026-08-09), NARROWING only:
+ *           `lookup_materials`'s advertised `dateTimeDescription` phrasing
+ *           is restricted to what the resolver actually resolves
+ *           correctly. `resolveSpokenDay` answers "WHICH ONE CALENDAR
+ *           DAY?", not "where does this deadline range end?", and the two
+ *           diverge for range phrases (measured, ref Thu 2026-06-11
+ *           America/New_York: "end of the week" -> 06-18, a deadline
+ *           reading wants 06-14; "by the end of the month" -> 07-11, wants
+ *           06-30). The prompt now advertises only a bare weekday,
+ *           "tomorrow" and "by <weekday>", where the two readings coincide.
+ *           Also drops the "before Thursday" example: the skill's boundary
+ *           is the START of the day AFTER the resolved one, so Thursday-due
+ *           items ARE included — "before Thursday" advertised an exclusive
+ *           reading the implementation does not have. Nothing is added and
+ *           no intent changes; a range phrase still extracts verbatim and
+ *           the resolved day is always spoken back, so a mismatch is
+ *           audible rather than silent. See `lookup-materials.ts`'s module
+ *           doc comment and `resolveSpokenDay`'s "NOT A DEADLINE RESOLVER"
+ *           section.
  */
-export const INTENT_TAXONOMY_VERSION = '1.17.0';
+export const INTENT_TAXONOMY_VERSION = '1.18.0';
 
 /**
  * P11-001: convenience predicate the FSM adapter uses to route
@@ -1700,10 +1719,10 @@ Supported intents (return exactly ONE):
                            for one job or scoped to a stated day ("what do
                            I need for tomorrow?"). Extract jobReference
                            when a job is named, and dateTimeDescription
-                           (verbatim) when the caller scopes the ask to a
-                           day — "by Friday", "for tomorrow", "before
-                           Thursday". Omit dateTimeDescription when no date
-                           was said; never guess one.
+                           (verbatim) when the caller names ONE DAY —
+                           "tomorrow", "Friday", "by Friday". Omit
+                           dateTimeDescription when no date was said; never
+                           guess one.
                            Examples: "Read me the shopping list"
                                      "What parts do I need?"
                                      "What materials are open on the Patel job?"
