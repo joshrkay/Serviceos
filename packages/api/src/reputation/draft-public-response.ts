@@ -25,7 +25,7 @@
 import { LLMGateway } from '../ai/gateway/gateway';
 import { BrandVoice } from './brand-voice';
 import { Classification } from './classifier';
-import { redactPii } from './pii-redact';
+import { redactPiiRepeatedly } from './pii-redact';
 import { Review } from './review';
 
 export const REVIEW_PUBLIC_RESPONSE_TASK_TYPE = 'review_public_response';
@@ -95,7 +95,12 @@ export async function draftPublicResponse(
   // provider's context never holds raw personal data — even on a
   // request that would have stayed in our infrastructure had it not
   // gone to the LLM.
-  const redactedComment = redactPii(rawComment);
+  //
+  // `redactPiiRepeatedly`, not `redactPii`: ONE pass leaves the second of two
+  // abutting addresses raw (`x@y.io4155552671foo@bar.com` -> `[email]4155…
+  // foo@bar.com`), and this is precisely the call that must not hand raw
+  // personal data to a third party. See pii-redact.ts's module header.
+  const redactedComment = redactPiiRepeatedly(rawComment);
 
   const systemPrompt = buildSystemPrompt(input.brandVoice);
   const userPrompt = buildUserPrompt(
@@ -118,7 +123,7 @@ export async function draftPublicResponse(
   // redactor catches it before the text reaches the owner-review
   // pane. `preserveKnownFirstNames` intentionally empty — the public
   // reply must NEVER address the customer by first name.
-  const draft = redactPii(response.content.trim(), {
+  const draft = redactPiiRepeatedly(response.content.trim(), {
     preserveKnownFirstNames: [],
   });
 

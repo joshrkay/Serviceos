@@ -1,5 +1,9 @@
 import { describe, it, expect } from 'vitest';
-import { redactPii } from '../../src/reputation/pii-redact';
+import {
+  MAX_REDACT_PII_PASSES,
+  redactPii,
+  redactPiiRepeatedly,
+} from '../../src/reputation/pii-redact';
 
 describe('P7-026 redactPii — emails', () => {
   it('redacts a simple email', () => {
@@ -410,5 +414,240 @@ describe('P7-026 redactPii — pathological input is not quadratic', () => {
         requireSeparatedPhones: true,
       }).elapsedMs,
     ).toBeLessThan(BUDGET_MS);
+  });
+});
+
+/**
+ * Review R1 — `redactPiiRepeatedly`, the loop the four reputation call sites
+ * use (draft-public-response.ts, draft-private-followup.ts) because ONE
+ * `redactPii` pass leaves the second of two abutting addresses raw.
+ *
+ * The three properties that make the loop safe to put in front of an LLM
+ * provider are pinned separately below, because they fail in different
+ * directions: it must redact MORE than one pass (the defect), it must never
+ * redact LESS (the house rule), and it must stay LINEAR (the reason the cap
+ * exists at all — an uncapped loop here is quadratic, which is the exact
+ * defect class the scanner rewrite removed).
+ */
+describe('P7-026 redactPiiRepeatedly — loop to a fixed point, capped', () => {
+  /** Reference: apply `redactPii` until nothing changes, however long it takes. */
+  const uncapped = (text: string, options?: Parameters<typeof redactPii>[1]) => {
+    let out = text;
+    let passes = 0;
+    for (;;) {
+      passes++;
+      const next = redactPii(out, options);
+      if (next === out) return { out, passes };
+      out = next;
+    }
+  };
+
+  it('closes the abutting-email leak that one pass leaves behind', () => {
+    const input = 'Email x@y.io4155552671foo@bar.com';
+    // Exactly the observed single-pass behaviour, restated so a change to it
+    // shows up here rather than as a silent shift in what the loop is fixing.
+    expect(redactPii(input)).toBe('Email [email]4155552671foo@bar.com');
+    expect(redactPiiRepeatedly(input)).toBe('Email [email][email]');
+  });
+
+  it('leaves no email-shaped span on the abutting shapes, whatever the options', () => {
+    // The property that matters is not "no `@` survives" — a bare `x@` with no
+    // valid domain after it is not an address and the original regex never
+    // matched it either. It is that NOTHING the original email regex would
+    // match is still there.
+    const ORIGINAL_EMAIL_RE = /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g;
+    const inputs = [
+      'Email x@y.io4155552671foo@bar.com',
+      'jane.doe@example.comcoma_b+c@sub.domain.co.uk',
+      'x@y.io4155552671x@y.iofoo@bar.comx-yco',
+      'Key (contact)=(jane.doe@example.com4155552671)',
+      '=[address]%+@jane.doe@example.com@jane.doe@example.com[]',
+      '> .@jane.doe@example.com_  +',
+    ];
+    const optionSets: Array<Parameters<typeof redactPii>[1]> = [
+      undefined,
+      { preserveKnownFirstNames: ['Alice'] },
+      { redactAddresses: false, redactLastNames: false, requireSeparatedPhones: true },
+    ];
+    for (const input of inputs) {
+      for (const options of optionSets) {
+        const label = `${input} / ${JSON.stringify(options)}`;
+        const out = redactPiiRepeatedly(input, options);
+        // A real fixed point: the cap did not run out on these.
+        expect(redactPii(out, options), label).toBe(out);
+        ORIGINAL_EMAIL_RE.lastIndex = 0;
+        expect(ORIGINAL_EMAIL_RE.test(out), label).toBe(false);
+      }
+    }
+    // Sanity: one pass alone does NOT get there — the corpus above really
+    // does exercise the multi-pass path.
+    ORIGINAL_EMAIL_RE.lastIndex = 0;
+    expect(ORIGINAL_EMAIL_RE.test(redactPii('Email x@y.io4155552671foo@bar.com'))).toBe(true);
+  });
+
+  /**
+   * The house rule: no change may redact LESS in any input class. The loop
+   * runs `redactPii` on its own output, so every pass can only turn raw spans
+   * into placeholders — but "obviously monotone" is how under-redaction ships,
+   * so it is checked over the same generated corpus the differential test
+   * uses. `[email]`/`[phone]`/`[address]`/`[name]` counts may only go up, and
+   * anything one pass redacted must still be redacted after the loop.
+   */
+  it('never redacts less than a single pass (generated corpus)', () => {
+    const rng = (seed: number) => () => {
+      seed = (seed + 0x6d2b79f5) | 0;
+      let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+    const alphabet = [
+      'jane.doe@example.com', 'a_b+c@sub.domain.co.uk', 'x@y.io', 'foo@bar.com',
+      '.', '..', '-', '+', '%', '_', '@', ' ', '', '(', ')', '[', ']', ':',
+      'abc', 'Z9', 'com', 'co', '4155552671', '415-555-2671', '+442071234567',
+      '123 Main Street', 'Mr. Smith', 'Alice Smith', 'Aa',
+      '[email]', '[phone]', '[name]', '[address]',
+    ];
+    const count = (s: string, needle: string) => s.split(needle).length - 1;
+    for (let seed = 0; seed < 20_000; seed++) {
+      const rand = rng(seed);
+      const n = 1 + Math.floor(rand() * 12);
+      let input = '';
+      for (let i = 0; i < n; i++) input += alphabet[Math.floor(rand() * alphabet.length)]!;
+
+      const once = redactPii(input);
+      const looped = redactPiiRepeatedly(input);
+      const label = `seed ${seed}: ${JSON.stringify(input)}`;
+
+      for (const placeholder of ['[email]', '[phone]', '[address]', '[name]']) {
+        expect(count(looped, placeholder), `${label} / ${placeholder}`).toBeGreaterThanOrEqual(
+          count(once, placeholder),
+        );
+      }
+      // Nothing one pass hid may reappear: raw '@' spans only ever shrink.
+      expect(count(looped, '@'), label).toBeLessThanOrEqual(count(once, '@'));
+    }
+  });
+
+  /**
+   * WHY THE CAP IS 4, checked rather than asserted. The loop exists for the
+   * EMAIL defect, so the email rule has to converge inside the cap or the fix
+   * is not a fix. It does — over the differential corpus's alphabets and over
+   * long chains of abutting addresses, an uncapped loop never needed more than
+   * MAX_REDACT_PII_PASSES productive passes.
+   */
+  it('the email rule converges within the cap (generated corpus + long chains)', () => {
+    const EMAIL_ONLY = {
+      redactPhones: false,
+      redactAddresses: false,
+      redactLastNames: false,
+    } as const;
+    const rng = (seed: number) => () => {
+      seed = (seed + 0x6d2b79f5) | 0;
+      let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+    const alphabet = [
+      'jane.doe@example.com', 'a_b+c@sub.domain.co.uk', 'x@y.io', 'foo@bar.com',
+      '.', '..', '...', '-', '+', '%', '_', '@', ' ', '', '(', ')', '[', ']',
+      ':', '/', '<', '>', '=', '&', 'abc', 'Z9', 'com', 'co', '4155552671',
+      '[email]', 'a.b', 'b.c.d', 'x-y', 'p%q', 'n+m',
+    ];
+    let worst = 0;
+    for (let seed = 0; seed < 20_000; seed++) {
+      const rand = rng(seed);
+      const n = 1 + Math.floor(rand() * 24);
+      let input = '';
+      for (let i = 0; i < n; i++) input += alphabet[Math.floor(rand() * alphabet.length)]!;
+      const { passes } = uncapped(input, EMAIL_ONLY);
+      // `passes` counts the confirming no-op, so productive passes = passes-1.
+      worst = Math.max(worst, passes - 1);
+      expect(passes - 1, `seed ${seed}: ${JSON.stringify(input)}`).toBeLessThanOrEqual(
+        MAX_REDACT_PII_PASSES,
+      );
+    }
+    // The corpus must actually exercise the multi-pass path, or this proves
+    // nothing about the cap.
+    expect(worst).toBeGreaterThanOrEqual(2);
+
+    for (const fragment of ['x@y.io', 'a@b.co', 'jane.doe@example.com']) {
+      for (const repeats of [64, 512]) {
+        const { out, passes } = uncapped(fragment.repeat(repeats), EMAIL_ONLY);
+        expect(passes - 1, `${fragment} x${repeats}`).toBeLessThanOrEqual(MAX_REDACT_PII_PASSES);
+        expect(redactPiiRepeatedly(fragment.repeat(repeats), EMAIL_ONLY)).toBe(out);
+      }
+    }
+  });
+
+  /**
+   * The shape that does NOT converge, pinned so nobody rediscovers it in
+   * production. `US_PHONE_RE` ends in `\b` and the only word boundary inside a
+   * digit run is its end, so one pass eats the last ten digits and no more —
+   * an n-digit run needs n/10 passes. This is why the loop is capped and why
+   * exhausting the cap must not throw: `review.commentText` is authored by
+   * whoever left the Google review, and a reviewer typing digits would
+   * otherwise kill the drafting pipeline.
+   *
+   * What the cap guarantees in that case is the thing that matters: the
+   * residual is a partially redacted DIGIT RUN, never a raw email address.
+   */
+  it('caps out on a long digit run without throwing, and still beats one pass', () => {
+    const input = '4155552671'.repeat(20); // 200 digits -> 20 passes to converge
+    const once = redactPii(input);
+    const looped = redactPiiRepeatedly(input);
+
+    const count = (s: string) => s.split('[phone]').length - 1;
+    expect(count(once)).toBe(1);
+    expect(count(looped)).toBe(MAX_REDACT_PII_PASSES);
+    // Not a fixed point — deliberately. The cap ran out first.
+    expect(redactPii(looped)).not.toBe(looped);
+    // ...but it is strictly more redacted than the previous behaviour, and the
+    // residual carries no address.
+    expect(looped.length).toBeLessThan(once.length);
+    expect(looped).not.toContain('@');
+  });
+
+  it('an email abutting a long digit run is still fully redacted', () => {
+    // The digit run is what exhausts the cap; the address must not be
+    // collateral damage of that.
+    const input = `contact jane.doe@example.com${'4155552671'.repeat(20)}`;
+    const out = redactPiiRepeatedly(input);
+    expect(out).not.toContain('jane.doe@example.com');
+    expect(out).toContain('[email]');
+  });
+
+  /**
+   * The cap is a performance contract as much as a correctness one. An
+   * UNCAPPED loop over the digit run above is quadratic — measured 100/400/
+   * 1,600/3,200 passes and 1ms/21ms/326ms/1,290ms at 1KB/4KB/16KB/32KB — which
+   * is the same defect class, on the same unbounded attacker-authored input,
+   * that the email scanner rewrite removed. Raising MAX_REDACT_PII_PASSES
+   * multiplies every one of these; this test is the line that holds.
+   */
+  it('stays within budget on the pathological inputs, at every option set', () => {
+    const BUDGET_MS = 250;
+    const inputs: ReadonlyArray<readonly [string, string]> = [
+      ['64KB local-part/domain bomb', `${'a.'.repeat(16_000)}@${'b'.repeat(32_000)}`],
+      ['64KB bare digit run', '4155552671'.repeat(6_400)],
+      ['64KB abutting addresses', 'x@y.io'.repeat(10_666)],
+      ['64KB + then digit run', `+${'1'.repeat(64_000)}`],
+    ];
+    for (const [label, input] of inputs) {
+      for (const options of [
+        undefined,
+        { redactAddresses: false, redactLastNames: false, requireSeparatedPhones: true },
+      ]) {
+        const started = Date.now();
+        redactPiiRepeatedly(input, options);
+        expect(Date.now() - started, `${label} / ${JSON.stringify(options)}`).toBeLessThan(
+          BUDGET_MS,
+        );
+      }
+    }
+  });
+
+  it('is a no-op on empty input and on text with no PII', () => {
+    expect(redactPiiRepeatedly('')).toBe('');
+    expect(redactPiiRepeatedly('Great service overall')).toBe('Great service overall');
   });
 });

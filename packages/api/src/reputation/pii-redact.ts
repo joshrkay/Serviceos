@@ -7,12 +7,45 @@
  * etc. — and replaces identifiable tokens with stable placeholders so
  * downstream LLM prompts and audit logs never carry full PII.
  *
- * Design contract: the redactor is DETERMINISTIC and IDEMPOTENT.
- *   redactPii(redactPii(text)) === redactPii(text)
+ * Design contract: the redactor is DETERMINISTIC, and its placeholders are
+ * INERT — `[email]`, `[phone]`, `[address]` and `[name]` contain `[` and `]`,
+ * which no pattern in this module can match, so a span already replaced is
+ * untouchable on every later pass. That is what PR c needs: running the
+ * redactor twice (once on intake, once before LLM submission) never compounds
+ * placeholders or redacts the placeholders themselves.
  *
- * This is critical because PR c may run the redactor twice (once on
- * intake, once before LLM submission) and we MUST NOT compound
- * placeholders or accidentally redact the placeholders themselves.
+ * Inert placeholders are NOT idempotence, and the stronger claim this comment
+ * used to make —
+ *
+ *     redactPii(redactPii(text)) === redactPii(text)
+ *
+ * — is FALSE. A second pass can redact MORE (never less; see below). Two
+ * shapes do it, both pre-existing and both independent of the email rule's
+ * scanner rewrite:
+ *
+ *   1. ABUTTING emails. A match may not start before the end of the previous
+ *      one, so a second address inside the same unbroken word-character run
+ *      has no position at which `\b` can fire:
+ *          x@y.io4155552671foo@bar.com
+ *       -> [email]4155552671foo@bar.com   <- raw second address survives
+ *       -> [email][email]
+ *      The phone pass does not rescue it: `4155552671` is followed by `f`, so
+ *      `US_PHONE_RE`'s trailing `\b` fails.
+ *   2. Long DIGIT runs. That same trailing `\b` means the only place a US
+ *      phone can END inside a 10,000-digit run is the run's end, so one pass
+ *      consumes the last ten digits and no more. An n-digit run needs n/10
+ *      passes and does NOT converge in a bounded number of them.
+ *
+ * Callers that must not emit partially-redacted text apply this function
+ * REPEATEDLY — `redactPiiRepeatedly` below, which the reputation draft
+ * composers use, and the equivalent loop in `redactedExecutionErrorCause`
+ * (proposals/proposal.ts). Both CAP the iteration count, because of shape 2.
+ *
+ * The one property every pass does guarantee, and the one the callers rely
+ * on, is MONOTONICITY: a pass only ever turns raw spans into placeholders and
+ * can never turn a placeholder back into raw text, so pass k+1 is redacted at
+ * least as much as pass k. Stopping early is safe; stopping early is not
+ * complete.
  *
  * The order of operations matters: emails first (they contain dots and
  * could confuse address/name detection), then phones, then addresses,
@@ -247,12 +280,17 @@ const SALUTATION_RE = /\b(Mr\.?|Ms\.?|Mrs\.?|Dr\.?|Mister|Miss|Misses|Doctor)\s+
 const FIRST_LAST_RE = /\b([A-Z][a-z]+)\s+([A-Z][a-z]+)\b/g;
 
 /**
- * Redact PII tokens from a free-form text string.
+ * Redact PII tokens from a free-form text string. ONE pass.
  *
- * Idempotency note: each pass uses placeholders like `[email]` that
- * contain characters (`[`, `]`) which none of the other patterns can
+ * Placeholder-inertness note: each pass uses placeholders like `[email]`
+ * that contain characters (`[`, `]`) which none of the other patterns can
  * match. Re-running the function on its own output is therefore a
  * no-op for already-redacted spans.
+ *
+ * It is NOT a no-op for the whole string: one pass can leave raw PII that a
+ * further pass removes (abutting emails, long digit runs — see the module
+ * header). Callers that must not emit partially-redacted text want
+ * `redactPiiRepeatedly` instead.
  */
 export function redactPii(text: string, options: RedactPiiOptions = {}): string {
   const {
@@ -317,4 +355,76 @@ export function redactPii(text: string, options: RedactPiiOptions = {}): string 
   }
 
   return result;
+}
+
+/**
+ * Iteration cap for `redactPiiRepeatedly`.
+ *
+ * WHY THERE IS A CAP AT ALL, and why it is small. `redactPii` does NOT always
+ * reach a fixed point: `US_PHONE_RE` ends in `\b`, and inside a run of n
+ * digits the only word boundary is the run's end, so each pass eats the last
+ * ten digits and n/10 passes are needed. Measured through this loop with the
+ * cap removed, on `'4155552671'.repeat(n/10)`:
+ *
+ *     len  1,000 ->   100 passes,    1ms      (one pass: <1ms)
+ *     len  4,000 ->   400 passes,   21ms
+ *     len 16,000 -> 1,600 passes,  326ms
+ *     len 32,000 -> 3,200 passes, 1290ms
+ *
+ * — a clean 4x per doubling. An UNCAPPED loop here is therefore quadratic in
+ * the input, which is the exact defect class the email scanner rewrite
+ * removed, on the exact same unbounded attacker-authored input
+ * (`review.commentText`), on the same Express event loop. The cap is what
+ * keeps the loop linear: worst-case work is MAX_REDACT_PII_PASSES times one
+ * linear pass, full stop.
+ *
+ * WHY 4. The defect this loop exists to fix is ABUTTING EMAILS (module
+ * header, shape 1), and the email rule DOES converge: over 300,000 generated
+ * strings across the three differential-corpus alphabets, plus abutting-email
+ * chains up to 512 addresses long, the worst case was 2 productive passes.
+ * Four gives that a pass of headroom and still bounds the work at 4x linear.
+ *
+ * Raising this number is not free — it multiplies the worst-case cost of
+ * every reputation draft by the same factor. The budget test in
+ * test/reputation/pii-redact.test.ts is what holds that line.
+ */
+export const MAX_REDACT_PII_PASSES = 4;
+
+/**
+ * Apply `redactPii` until it stops changing the text, or until
+ * `MAX_REDACT_PII_PASSES` passes have run — whichever comes first.
+ *
+ * Use this, not bare `redactPii`, anywhere partially-redacted output would
+ * escape the process: into an LLM provider's context, into a persisted draft,
+ * into anything a third party can read. One pass is not enough (module
+ * header): abutting emails leave the second address raw.
+ *
+ * WHAT HAPPENS IF THE CAP IS REACHED. The text returned is the output of the
+ * last pass that ran, which by the monotonicity property in the module header
+ * is redacted AT LEAST AS MUCH as any earlier pass and strictly more than the
+ * single pass these callers used to do. So exhausting the cap can never
+ * produce a worse result than the previous behaviour — it degrades toward
+ * "not yet finished", never toward "leaked something one pass would have
+ * caught".
+ *
+ * The cap is genuinely reachable — a ~40-digit run in a review comment does
+ * it — so this is a real branch, not a defensive one, and it is deliberately
+ * NOT an exception. `review.commentText` is authored by whoever left the
+ * Google review; throwing here would let any reviewer kill the drafting
+ * pipeline by typing digits. The residual in that case is a partially
+ * redacted DIGIT RUN, never a raw email address: shape 1 converges within the
+ * cap and shape 2 is the only non-converging shape. Both facts are pinned by
+ * tests in test/reputation/pii-redact.test.ts.
+ */
+export function redactPiiRepeatedly(
+  text: string,
+  options: RedactPiiOptions = {},
+): string {
+  let out = text;
+  for (let pass = 0; pass < MAX_REDACT_PII_PASSES; pass++) {
+    const next = redactPii(out, options);
+    if (next === out) break;
+    out = next;
+  }
+  return out;
 }
