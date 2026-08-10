@@ -707,7 +707,24 @@ describe('F1 — cardExplanation (shared by both card serializers)', () => {
 
   it('caps the echo at 120 characters (the customer serializer had no cap at all)', () => {
     const long = 'x'.repeat(500);
-    expect(cardExplanation(undefined, long)).toBe(`From your message: "${'x'.repeat(120)}"`);
+    expect(cardExplanation(undefined, long)).toBe(`From your message: "${'x'.repeat(120)}…"`);
+  });
+
+  /**
+   * N8 (2026-08-10) — the cap closed the quote with no ellipsis, so a
+   * truncated verbatim quote read as a COMPLETE one. That is the same
+   * honesty class the commit that spread this helper to a second serializer
+   * was about: an operator cannot tell "this is all you said" from "this is
+   * the first 120 characters of what you said". `truncateForSpeech`
+   * (ai/skills/lookup-materials.ts) already marks its own cut this way.
+   */
+  it('marks a truncated echo as truncated, and leaves an untruncated one alone', () => {
+    expect(cardExplanation(undefined, 'x'.repeat(121))).toMatch(/…"$/);
+    // Exactly at the cap is NOT truncated — no ellipsis may be added.
+    expect(cardExplanation(undefined, 'x'.repeat(120))).toBe(
+      `From your message: "${'x'.repeat(120)}"`,
+    );
+    expect(cardExplanation(undefined, 'short one')).toBe('From your message: "short one"');
   });
 });
 

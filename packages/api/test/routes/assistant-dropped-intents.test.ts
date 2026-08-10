@@ -1390,3 +1390,62 @@ describe('I2 — the chain path threads intent + customerId exactly like the sin
     expect((message!.sourceContext as Record<string, unknown>)?.chainStep).toBe(2);
   });
 });
+
+/**
+ * A4 (2026-08-10) — the false channel claim IS operator-visible on chat.
+ *
+ * F1's rider deleted "Caller" from `create_customer`'s default EXPLANATION
+ * on the argument that "the chat card builds its own summary and never
+ * showed it". That is true of the single-intent branch, which serializes
+ * with `customerProposalToUI`. It is NOT true of the multi-intent CHAIN
+ * branch, which is explicitly special-cased for `create_customer` and
+ * serializes with `proposalToUI` — and `proposalToUI` puts
+ * `proposal.summary` straight into the card TITLE.
+ *
+ * So an operator who TYPES a two-step turn has been reading
+ * "Customer: New customer from inbound call: …" on their own typed message
+ * with no call anywhere in sight. This test drives the real chain path and
+ * reads the real card, rather than asserting the string in isolation, so it
+ * fails if either the handler's summary or the chain serializer regresses.
+ */
+describe('A4 — the chain path card carries no channel claim it cannot support', () => {
+  it('"Add a customer named Alex, 555-0100, then book him Tuesday at 9" titles the card honestly', async () => {
+    const proposalRepo = new InMemoryProposalRepository();
+    const app = buildApp(
+      strictGateway([
+        // Top-level classify of the full turn; chain detection runs after.
+        classifierReply('unknown', {}),
+        // Segment 1 — create_customer, the documented chain exception.
+        classifierReply('create_customer', { displayName: 'Alex', phone: '555-0100' }),
+        // Segment 2 — anything that drafts; only segment 1's card matters.
+        classifierReply('create_appointment', {
+          customerName: 'Alex',
+          dateTimeDescription: 'Tuesday at 9',
+        }),
+      ]),
+      { proposalRepo },
+    );
+
+    const res = await chat(app, 'Add a customer named Alex, 555-0100, then book him Tuesday at 9');
+    expect(res.status).toBe(200);
+
+    const customer = (await proposalRepo.findByTenant(TEST_TENANT)).find(
+      (p) => p.proposalType === 'create_customer',
+    );
+    expect(customer).toBeTruthy();
+
+    // The persisted summary is what `proposalToUI` renders into the title,
+    // and what the inbox renders verbatim.
+    expect(customer!.summary).not.toMatch(/inbound call/i);
+    expect(customer!.summary).toContain('Alex');
+    expect(customer!.summary).toContain('555-0100');
+
+    // ...and the card the operator actually receives on this path.
+    const card = res.body.message?.proposal;
+    expect(card).toBeTruthy();
+    expect(card.title).not.toMatch(/inbound call/i);
+    expect(card.title).toContain('Alex');
+    // F1's own fix, on the surface F1 claimed could not show it.
+    expect(card.explanation).not.toMatch(/Caller/);
+  });
+});

@@ -710,27 +710,57 @@ export function addressCaptureFor(
  * The 120-char slice on the echo comes from `proposalToUI` and now applies
  * to both: an unbounded verbatim echo of the operator's message was never
  * intended on a card field, and the customer serializer had no cap at all.
+ *
+ * N8 — the slice now MARKS itself when it bites. The closing quote used to
+ * go straight on the end of the cut, so a truncated verbatim quote read as
+ * a complete one and the operator had no way to tell "this is all you said"
+ * from "this is the first 120 characters of what you said". That is the same
+ * honesty class F1 was about, so shipping it on a second serializer was
+ * worse than leaving it on one. `truncateForSpeech`
+ * (ai/skills/lookup-materials.ts) already marks its own cut this way.
  */
+const CARD_ECHO_MAX_CHARS = 120;
+
 export function cardExplanation(persisted: string | undefined, sourceMessage: string): string {
-  return persisted && persisted.trim().length > 0
-    ? persisted
-    : `From your message: "${sourceMessage.slice(0, 120)}"`;
+  if (persisted && persisted.trim().length > 0) return persisted;
+  const echo =
+    sourceMessage.length > CARD_ECHO_MAX_CHARS
+      ? `${sourceMessage.slice(0, CARD_ECHO_MAX_CHARS)}…`
+      : sourceMessage;
+  return `From your message: "${echo}"`;
 }
 
 /**
  * Map the server-side create_customer Proposal to the UI card shape.
  * Reads `name` / `email` / `phone` out of the payload (the router
  * translates classifier `displayName` → contract `name` in AST-01).
+ *
+ * N9 — an OPTIONS OBJECT, not positionals. This grew to six parameters with
+ * two optional trailing ones of unrelated types, and the failure mode is
+ * silent: a caller that omits the 6th gets a card whose explanation reverts
+ * to the source echo — exactly the defect F1 existed to fix, reintroduced by
+ * an argument list rather than by any change to this function. Named keys
+ * make an omission a compile error at the shape, and make the two optionals
+ * unorderable relative to each other.
  */
-function customerProposalToUI(
-  proposalId: string,
-  payload: Record<string, unknown>,
-  sourceMessage: string,
-  confidenceScore: number,
-  sourceContext?: Record<string, unknown>,
+interface CustomerProposalToUIInput {
+  proposalId: string;
+  payload: Record<string, unknown>;
+  sourceMessage: string;
+  confidenceScore: number;
+  sourceContext?: Record<string, unknown>;
   /** The drafting handler's own reasoning, as persisted on the row — see `cardExplanation`. */
-  explanation?: string,
-): AssistantProposal {
+  explanation?: string;
+}
+
+function customerProposalToUI({
+  proposalId,
+  payload,
+  sourceMessage,
+  confidenceScore,
+  sourceContext,
+  explanation,
+}: CustomerProposalToUIInput): AssistantProposal {
   const name = typeof payload.name === 'string' && payload.name.length > 0 ? payload.name : undefined;
   const email = typeof payload.email === 'string' ? payload.email : undefined;
   const phone = typeof payload.phone === 'string' ? payload.phone : undefined;
@@ -1951,16 +1981,16 @@ async function generateAssistantReply(
           await deps.proposalRepo.updateStatus(tenantId, proposal.id, 'ready_for_review');
         }
 
-        const uiProposal = customerProposalToUI(
-          proposal.id,
-          proposal.payload,
-          lastUserText,
-          classification.confidence,
-          proposal.sourceContext,
+        const uiProposal = customerProposalToUI({
+          proposalId: proposal.id,
+          payload: proposal.payload,
+          sourceMessage: lastUserText,
+          confidenceScore: classification.confidence,
+          sourceContext: proposal.sourceContext,
           // F1 — the handler's own reasoning, which this serializer used to
           // discard. See `cardExplanation`.
-          proposal.explanation,
-        );
+          explanation: proposal.explanation,
+        });
 
         return {
           taskType: 'assistant.create_customer',
