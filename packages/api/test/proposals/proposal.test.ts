@@ -954,6 +954,32 @@ describe('InMemoryProposalRepository.resetStaleExecuting — failed proposal det
     expect(result.failedProposals).toEqual([]);
   });
 
+  /**
+   * Review J4 — reset-to-approved IS the "start a fresh attempt" boundary,
+   * and the previous attempt's reason must not ride along into it. This
+   * state was IMPOSSIBLE before the cause started being recorded on the
+   * still-'executing' row (the column was only ever written at the terminal
+   * transition) and is now routine on EVERY retry path: `GET
+   * /api/proposals/:id` returns the full Proposal, so an operator would see
+   * a successfully-executed proposal still carrying an error string.
+   */
+  it('clears the previous attempt reason when resetting a proposal to approved', async () => {
+    const repo = new InMemoryProposalRepository();
+    await seedExecuting(repo, {
+      id: 'stale-retry-with-cause',
+      claimedAt: new Date(Date.now() - 11 * 60 * 1000),
+      executionRetryCount: 0,
+      executionError: 'SMTP relay refused the message',
+    });
+
+    const result = await repo.resetStaleExecuting(10, 3);
+    expect(result.resetToApproved).toBe(1);
+
+    const reset = await repo.findById('tenant-1', 'stale-retry-with-cause');
+    expect(reset!.status).toBe('approved');
+    expect(reset!.executionError).toBeUndefined();
+  });
+
   it('reports multiple failed proposals across tenants', async () => {
     const repo = new InMemoryProposalRepository();
     await seedExecuting(repo, {

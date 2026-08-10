@@ -81,23 +81,23 @@ describe('PgProposalRepository.resetStaleExecuting — failed proposal detail', 
     );
   });
 
-  it('omits executionError when the RETURNING row carries SQL NULL (historical row)', async () => {
-    const { pool } = buildPool([
-      {
-        id: 'stale-null-reason',
-        tenant_id: 'tenant-1',
-        proposal_type: 'create_customer',
-        execution_retry_count: 3,
-        execution_error: null,
-      },
-    ]);
+  /**
+   * Review J4 — reset-to-approved IS the "start a fresh attempt" boundary.
+   * The row can now carry a reason recorded by the execution sweep while it
+   * was still 'executing', and carrying that into the retry means a
+   * proposal that goes on to succeed is served by `GET /api/proposals/:id`
+   * with a stale error string on it. Mirror of the InMemory pin in
+   * test/proposals/proposal.test.ts.
+   */
+  it('clears execution_error on the reset-to-approved UPDATE', async () => {
+    const { pool, calls } = buildPool([]);
     const repo = new PgProposalRepository(pool);
 
-    const result = await repo.resetStaleExecuting(10, 3);
+    await repo.resetStaleExecuting(10, 3);
 
-    expect(result.failedProposals).toEqual([
-      { id: 'stale-null-reason', tenantId: 'tenant-1', proposalType: 'create_customer', retryCount: 3 },
-    ]);
+    const resetUpdate = calls.find((c) => /SET\s+status\s*=\s*'approved'/i.test(c.sql));
+    expect(resetUpdate).toBeDefined();
+    expect(resetUpdate!.sql).toMatch(/execution_error\s*=\s*NULL/i);
   });
 
   it('returns an empty failedProposals array when nothing moved to failed', async () => {

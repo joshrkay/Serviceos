@@ -1071,8 +1071,15 @@ export interface ProposalRepository {
    * Follow-up: each entry also carries the row's POST-write `executionError`
    * — the real caught cause when the sweep recorded one, otherwise the
    * synthesized timeout wording — so the audit event can state WHY rather
-   * than only that a timeout happened. Optional on the type because a
-   * historical row can hold NULL; every implementation returns it.
+   * than only that a timeout happened. REQUIRED, not optional: the same
+   * statement that selects these rows COALESCEs the column to a non-null
+   * literal, so there is no reachable state in which a returned entry lacks
+   * a reason. (The type used to say "optional because a historical row can
+   * hold NULL"; that was wrong — RETURNING yields the post-update value.)
+   *
+   * Implementations ALSO clear `execution_error` on the reset-to-approved
+   * branch: that is the "start a fresh attempt" boundary, and a reason from
+   * the previous attempt must not survive into a retry that succeeds.
    */
   resetStaleExecuting(
     staleMinutes: number,
@@ -1085,7 +1092,7 @@ export interface ProposalRepository {
       tenantId: string;
       proposalType: ProposalType;
       retryCount: number;
-      executionError?: string;
+      executionError: string;
     }>;
   }>;
 }
@@ -1618,7 +1625,7 @@ export class InMemoryProposalRepository implements ProposalRepository {
       tenantId: string;
       proposalType: ProposalType;
       retryCount: number;
-      executionError?: string;
+      executionError: string;
     }>;
   }> {
     const now = Date.now();
@@ -1629,7 +1636,7 @@ export class InMemoryProposalRepository implements ProposalRepository {
       tenantId: string;
       proposalType: ProposalType;
       retryCount: number;
-      executionError?: string;
+      executionError: string;
     }> = [];
     for (const [id, proposal] of this.proposals.entries()) {
       if (proposal.status !== 'executing' || !proposal.claimedAt) continue;
@@ -1650,16 +1657,22 @@ export class InMemoryProposalRepository implements ProposalRepository {
           retryCount: retries,
           // POST-COALESCE value: the real caught cause when one was recorded
           // while the row was still 'executing', else the synthesized wording
-          // just assigned above. Mirrors the Pg RETURNING clause.
-          ...(proposal.executionError !== undefined
-            ? { executionError: proposal.executionError }
-            : {}),
+          // just assigned above — which is why this is never undefined.
+          // Mirrors the Pg RETURNING clause, which cannot be SQL NULL for the
+          // same reason.
+          executionError: proposal.executionError,
         });
       } else {
         proposal.status = 'approved';
         proposal.executionRetryCount = retries + 1;
         proposal.claimedAt = undefined;
         proposal.claimedBy = undefined;
+        // Follow-up review J4 — the "start a fresh attempt" boundary. The
+        // previous attempt's reason must not ride into the retry: a proposal
+        // that then succeeds would otherwise be served by
+        // `GET /api/proposals/:id` still carrying an error string. Mirrors
+        // `execution_error = NULL` on the Pg reset UPDATE.
+        proposal.executionError = undefined;
         resetToApproved++;
       }
       proposal.updatedAt = new Date();

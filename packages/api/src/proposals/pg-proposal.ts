@@ -604,7 +604,7 @@ export class PgProposalRepository extends PgBaseRepository implements ProposalRe
       tenantId: string;
       proposalType: ProposalType;
       retryCount: number;
-      executionError?: string;
+      executionError: string;
     }>;
   }> {
     return this.withCrossTenantSweep(async (client) => {
@@ -643,11 +643,21 @@ export class PgProposalRepository extends PgBaseRepository implements ProposalRe
          RETURNING id, tenant_id, proposal_type, execution_retry_count, execution_error`,
         [staleMinutes, maxRetries]
       );
+      // `execution_error = NULL` is the RETRY half of the same concept the
+      // terminal write above COALESCEs. This is the "start a fresh attempt"
+      // boundary: the row goes back to 'approved' and will be claimed again,
+      // so the PREVIOUS attempt's reason must not ride along. Carrying it
+      // means a proposal that then executes successfully is still served by
+      // `GET /api/proposals/:id` with an error string on it — a state that
+      // was impossible while the column was only written at the terminal
+      // transition, and routine now that the sweep records the caught cause
+      // on the still-'executing' row.
       const reset = await client.query(
         `UPDATE proposals
          SET status = 'approved',
              claimed_by = NULL,
              claimed_at = NULL,
+             execution_error = NULL,
              execution_retry_count = execution_retry_count + 1,
              updated_at = NOW()
          WHERE status = 'executing'
@@ -655,14 +665,18 @@ export class PgProposalRepository extends PgBaseRepository implements ProposalRe
            AND execution_retry_count < $2`,
         [staleMinutes, maxRetries]
       );
+      // `execution_error` cannot be SQL NULL here: RETURNING yields the
+      // POST-update value and the statement above COALESCEs it to a
+      // non-null literal. There is therefore no "historical row holds NULL"
+      // case to defend against — the guard that used to be here was dead,
+      // and the test that exercised it asserted a state only a mocked Pool
+      // could produce.
       const failedProposals = failed.rows.map((row) => ({
         id: row.id as string,
         tenantId: row.tenant_id as string,
         proposalType: row.proposal_type as ProposalType,
         retryCount: Number(row.execution_retry_count),
-        ...(row.execution_error != null
-          ? { executionError: row.execution_error as string }
-          : {}),
+        executionError: row.execution_error as string,
       }));
       return {
         resetToApproved: reset.rowCount ?? 0,
