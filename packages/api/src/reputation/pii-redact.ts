@@ -7,12 +7,45 @@
  * etc. — and replaces identifiable tokens with stable placeholders so
  * downstream LLM prompts and audit logs never carry full PII.
  *
- * Design contract: the redactor is DETERMINISTIC and IDEMPOTENT.
- *   redactPii(redactPii(text)) === redactPii(text)
+ * Design contract: the redactor is DETERMINISTIC, and its placeholders are
+ * INERT — `[email]`, `[phone]`, `[address]` and `[name]` contain `[` and `]`,
+ * which no pattern in this module can match, so a span already replaced is
+ * untouchable on every later pass. That is what PR c needs: running the
+ * redactor twice (once on intake, once before LLM submission) never compounds
+ * placeholders or redacts the placeholders themselves.
  *
- * This is critical because PR c may run the redactor twice (once on
- * intake, once before LLM submission) and we MUST NOT compound
- * placeholders or accidentally redact the placeholders themselves.
+ * Inert placeholders are NOT idempotence, and the stronger claim this comment
+ * used to make —
+ *
+ *     redactPii(redactPii(text)) === redactPii(text)
+ *
+ * — is FALSE. A second pass can redact MORE (never less; see below). Two
+ * shapes do it, both pre-existing and both independent of the email rule's
+ * scanner rewrite:
+ *
+ *   1. ABUTTING emails. A match may not start before the end of the previous
+ *      one, so a second address inside the same unbroken word-character run
+ *      has no position at which `\b` can fire:
+ *          x@y.io4155552671foo@bar.com
+ *       -> [email]4155552671foo@bar.com   <- raw second address survives
+ *       -> [email][email]
+ *      The phone pass does not rescue it: `4155552671` is followed by `f`, so
+ *      `US_PHONE_RE`'s trailing `\b` fails.
+ *   2. Long DIGIT runs. That same trailing `\b` means the only place a US
+ *      phone can END inside a 10,000-digit run is the run's end, so one pass
+ *      consumes the last ten digits and no more. An n-digit run needs n/10
+ *      passes and does NOT converge in a bounded number of them.
+ *
+ * Callers that must not emit partially-redacted text apply this function
+ * REPEATEDLY — `redactPiiRepeatedly` below, which the reputation draft
+ * composers use, and the equivalent loop in `redactedExecutionErrorCause`
+ * (proposals/proposal.ts). Both CAP the iteration count, because of shape 2.
+ *
+ * The one property every pass does guarantee, and the one the callers rely
+ * on, is MONOTONICITY: a pass only ever turns raw spans into placeholders and
+ * can never turn a placeholder back into raw text, so pass k+1 is redacted at
+ * least as much as pass k. Stopping early is safe; stopping early is not
+ * complete.
  *
  * The order of operations matters: emails first (they contain dots and
  * could confuse address/name detection), then phones, then addresses,
@@ -84,16 +117,165 @@ const COMMON_FIRST_NAMES = new Set([
 
 // Emails — RFC-ish, good enough for free-form text.
 //
-// NO trailing `\b`. It used to be there and it was a LEAK: `\b` after the
-// TLD means an email immediately followed by a word character never matches
-// at all — `jane.doe@example.com4155552671` (a Postgres unique-constraint
-// `DETAIL: Key (contact)=(…)` over a concatenated column) and
-// `jane.doe@example.com2026-08-09T12:00:00Z` both sailed through whole.
-// Dropping it is strictly MORE redaction (the TLD class is letters-only, so
-// the match still ends at the last letter run after the final dot) and it
-// removes the chain's dependence on a later pass creating the boundary the
-// email rule needed — which is what made the whole redactor non-idempotent.
-const EMAIL_RE = /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g;
+// This rule is expressed as a scanner (`replaceEmails`) rather than a single
+// `String.replace(regex, …)`. It is EXACTLY EQUIVALENT to the regex it
+// replaces —
+//
+//     /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g
+//
+// — byte for byte, but runs in linear time instead of quadratic. Both halves
+// of that sentence matter, so both are pinned by tests.
+//
+// WHY THE REGEX HAD TO GO (ReDoS). `\b` sits between a word and a non-word
+// character, but the local-part class straddles that line: `.`, `%`, `+` and
+// `-` are non-word characters INSIDE the class. So in a run like `a.a.a.a.…`
+// EVERY character is a legal place for `\b` to fire — O(n) match starts
+// inside ONE token — and `[local]+` rescans the rest of the run from each of
+// them. That is O(n²), and it needs no `@` anywhere in the input. Measured
+// through `redactPii`: 64KB of `('a.'×n/2) + '@' + ('b'×n)` took ~2.4s, a
+// clean 4x per doubling, and plain `'a.'×n` with no `@` at all cost the same.
+// `redactPii` runs on `review.commentText` and on LLM output, neither of
+// which this service length-bounds, on the Express event loop.
+//
+// Restructuring the DOMAIN — the `(?:[A-Za-z0-9-]+\.)+` shape a reviewer
+// proposed — does not help: the cost is the restart across the LOCAL part,
+// which is why the two shapes above fire with the domain empty or absent. JS
+// has no atomic groups, and emulating one with `(?=(…))\1` would not help
+// either: it removes the give-back steps but not the O(n) forward scan that
+// each of the O(n) starts performs.
+//
+// NO TRAILING `\b`, as before. It used to be there and it was a LEAK: `\b`
+// after the TLD means an email immediately followed by a word character never
+// matches at all — `jane.doe@example.com4155552671` (a Postgres
+// unique-constraint `DETAIL: Key (contact)=(…)` over a concatenated column)
+// and `jane.doe@example.com2026-08-09T12:00:00Z` both sailed through whole.
+// The TLD class is letters-only, so the match still ends at the last letter
+// run after the final dot.
+
+/**
+ * Domain half, sticky so it can be applied at one exact offset.
+ *
+ * SAFETY INVARIANT — a sticky regex carries `lastIndex` ACROSS calls, and this
+ * one is module-level shared mutable state. Correctness therefore depends on
+ * two rules that no type and no test can enforce for you:
+ *
+ *   1. Assign `lastIndex` on the line immediately before EVERY `exec`. Not
+ *      earlier in the function — an early `return`, `continue` or `throw`
+ *      slipped in between the two would leave the next call anchored at a
+ *      STALE offset, matching (or failing to match) the domain at the wrong
+ *      place, in a PII control, silently.
+ *   2. Never `exec` or `test` this regex anywhere else, and never export it. A
+ *      second user interleaves its `lastIndex` with the first's.
+ *
+ * There is exactly ONE call site today: the adjacent `lastIndex = at + 1` /
+ * `exec(text)` pair in `replaceEmails` below. If you need this pattern
+ * somewhere else, declare a separate non-sticky copy rather than reusing it.
+ */
+const EMAIL_DOMAIN_RE = /[A-Za-z0-9.-]+\.[A-Za-z]{2,}/y;
+
+/** `[A-Za-z0-9._%+-]` — the local-part class, by char code. */
+function isEmailLocalCode(code: number): boolean {
+  return (
+    (code >= 97 && code <= 122) || // a-z
+    (code >= 65 && code <= 90) || // A-Z
+    (code >= 48 && code <= 57) || // 0-9
+    code === 46 || // .
+    code === 95 || // _
+    code === 37 || // %
+    code === 43 || // +
+    code === 45 // -
+  );
+}
+
+/**
+ * `\w` — what `\b` is defined in terms of. NaN (from `charCodeAt` past
+ * either end of the string) fails every comparison, which is exactly the
+ * "off the end counts as non-word" rule `\b` uses.
+ */
+function isWordCode(code: number): boolean {
+  return (
+    (code >= 97 && code <= 122) ||
+    (code >= 65 && code <= 90) ||
+    (code >= 48 && code <= 57) ||
+    code === 95
+  );
+}
+
+/**
+ * Replace every email in `text` with `[email]`, in one linear pass.
+ *
+ * The equivalence argument, which is why this is safe to swap in under a PII
+ * control. For a match starting at `p`, the greedy `[local]+` runs to the end
+ * of `p`'s local-part run — call it `m` — and `@` must then match at `m`; any
+ * shorter local part would need `@` at a position holding a local-part
+ * character, which is impossible. So:
+ *
+ *   - the local part is always the whole run from `p` to the next `@`, and
+ *   - whether the domain matches depends only on `m`, never on `p`.
+ *
+ * Every start position inside one run therefore succeeds or fails together,
+ * and the regex's leftmost-match rule just picks the smallest `p` in the run
+ * at which `\b` holds. That makes the `@` the natural thing to iterate: find
+ * each `@`, walk back over its local-part run, take the leftmost `\b` in it,
+ * and match the domain once. Because `@` is in neither the local-part class
+ * nor the domain class, the runs belonging to distinct `@`s are disjoint, so
+ * the total work is linear in the length of the text.
+ *
+ * `pos` carries the regex's `lastIndex`: a match may not start before the end
+ * of the previous one. `\b` itself is still evaluated against the ORIGINAL
+ * string on both sides of the position, exactly as the engine did.
+ *
+ * Verified by differential fuzzing against the original regex, which is
+ * restated in test/reputation/pii-redact.test.ts and compared byte for byte
+ * against this scanner. What that committed corpus ACTUALLY runs is 60,000
+ * generated strings — three fragment alphabets (abutting emails, dense
+ * local-class punctuation soup, and email-shaped parts) x 20,000 seeds — plus
+ * the six hand-picked shapes the two rejected variants leaked on. Zero output
+ * differences.
+ *
+ * Larger one-off runs were done offline while developing the scanner (~3.2M
+ * strings over a fourth alphabet, and a later adversarial-Unicode pass). They
+ * are NOT reproducible from this repo and are NOT coverage this repo has:
+ * 60,000 is the number backing this module today. If you need more, raise the
+ * seed count in the test — do not cite the offline figure as if it were.
+ */
+function replaceEmails(text: string): string {
+  let out = '';
+  let pos = 0;
+  let at = text.indexOf('@');
+  while (at !== -1) {
+    // Local-part run, clipped at `pos` — a match cannot start before it.
+    let lo = at;
+    while (lo > pos && isEmailLocalCode(text.charCodeAt(lo - 1))) lo--;
+
+    let start = -1;
+    let end = -1;
+    if (lo < at) {
+      EMAIL_DOMAIN_RE.lastIndex = at + 1;
+      const domain = EMAIL_DOMAIN_RE.exec(text);
+      if (domain) {
+        for (let p = lo; p < at; p++) {
+          if (isWordCode(text.charCodeAt(p - 1)) !== isWordCode(text.charCodeAt(p))) {
+            start = p;
+            end = at + 1 + domain[0].length;
+            break;
+          }
+        }
+      }
+    }
+
+    if (start === -1) {
+      at = text.indexOf('@', at + 1);
+      continue;
+    }
+    out += text.slice(pos, start) + EMAIL_PLACEHOLDER;
+    pos = end;
+    // The domain class excludes `@`, so the next candidate is at or after
+    // `pos`; no `@` can hide inside the span just consumed.
+    at = text.indexOf('@', pos);
+  }
+  return pos === 0 ? text : out + text.slice(pos);
+}
 
 // US phone with optional country code, parens, dashes, dots, spaces.
 const US_PHONE_RE = /(?:\+?1[-.\s]?)?\(?[0-9]{3}\)?[-.\s]?[0-9]{3}[-.\s]?[0-9]{4}\b/g;
@@ -126,12 +308,17 @@ const SALUTATION_RE = /\b(Mr\.?|Ms\.?|Mrs\.?|Dr\.?|Mister|Miss|Misses|Doctor)\s+
 const FIRST_LAST_RE = /\b([A-Z][a-z]+)\s+([A-Z][a-z]+)\b/g;
 
 /**
- * Redact PII tokens from a free-form text string.
+ * Redact PII tokens from a free-form text string. ONE pass.
  *
- * Idempotency note: each pass uses placeholders like `[email]` that
- * contain characters (`[`, `]`) which none of the other patterns can
+ * Placeholder-inertness note: each pass uses placeholders like `[email]`
+ * that contain characters (`[`, `]`) which none of the other patterns can
  * match. Re-running the function on its own output is therefore a
  * no-op for already-redacted spans.
+ *
+ * It is NOT a no-op for the whole string: one pass can leave raw PII that a
+ * further pass removes (abutting emails, long digit runs — see the module
+ * header). Callers that must not emit partially-redacted text want
+ * `redactPiiRepeatedly` instead.
  */
 export function redactPii(text: string, options: RedactPiiOptions = {}): string {
   const {
@@ -150,7 +337,7 @@ export function redactPii(text: string, options: RedactPiiOptions = {}): string 
   // 1. Emails first — they contain "@" and "." that could otherwise
   // confuse later passes (e.g. "a.b@c.com" looks salutation-adjacent).
   if (redactEmails) {
-    result = result.replace(EMAIL_RE, EMAIL_PLACEHOLDER);
+    result = replaceEmails(result);
   }
 
   // 2. Phones — international (leading +) first so longer matches win
@@ -196,4 +383,76 @@ export function redactPii(text: string, options: RedactPiiOptions = {}): string 
   }
 
   return result;
+}
+
+/**
+ * Iteration cap for `redactPiiRepeatedly`.
+ *
+ * WHY THERE IS A CAP AT ALL, and why it is small. `redactPii` does NOT always
+ * reach a fixed point: `US_PHONE_RE` ends in `\b`, and inside a run of n
+ * digits the only word boundary is the run's end, so each pass eats the last
+ * ten digits and n/10 passes are needed. Measured through this loop with the
+ * cap removed, on `'4155552671'.repeat(n/10)`:
+ *
+ *     len  1,000 ->   100 passes,    1ms      (one pass: <1ms)
+ *     len  4,000 ->   400 passes,   21ms
+ *     len 16,000 -> 1,600 passes,  326ms
+ *     len 32,000 -> 3,200 passes, 1290ms
+ *
+ * — a clean 4x per doubling. An UNCAPPED loop here is therefore quadratic in
+ * the input, which is the exact defect class the email scanner rewrite
+ * removed, on the exact same unbounded attacker-authored input
+ * (`review.commentText`), on the same Express event loop. The cap is what
+ * keeps the loop linear: worst-case work is MAX_REDACT_PII_PASSES times one
+ * linear pass, full stop.
+ *
+ * WHY 4. The defect this loop exists to fix is ABUTTING EMAILS (module
+ * header, shape 1), and the email rule DOES converge: over 300,000 generated
+ * strings across the three differential-corpus alphabets, plus abutting-email
+ * chains up to 512 addresses long, the worst case was 2 productive passes.
+ * Four gives that a pass of headroom and still bounds the work at 4x linear.
+ *
+ * Raising this number is not free — it multiplies the worst-case cost of
+ * every reputation draft by the same factor. The budget test in
+ * test/reputation/pii-redact.test.ts is what holds that line.
+ */
+export const MAX_REDACT_PII_PASSES = 4;
+
+/**
+ * Apply `redactPii` until it stops changing the text, or until
+ * `MAX_REDACT_PII_PASSES` passes have run — whichever comes first.
+ *
+ * Use this, not bare `redactPii`, anywhere partially-redacted output would
+ * escape the process: into an LLM provider's context, into a persisted draft,
+ * into anything a third party can read. One pass is not enough (module
+ * header): abutting emails leave the second address raw.
+ *
+ * WHAT HAPPENS IF THE CAP IS REACHED. The text returned is the output of the
+ * last pass that ran, which by the monotonicity property in the module header
+ * is redacted AT LEAST AS MUCH as any earlier pass and strictly more than the
+ * single pass these callers used to do. So exhausting the cap can never
+ * produce a worse result than the previous behaviour — it degrades toward
+ * "not yet finished", never toward "leaked something one pass would have
+ * caught".
+ *
+ * The cap is genuinely reachable — a ~40-digit run in a review comment does
+ * it — so this is a real branch, not a defensive one, and it is deliberately
+ * NOT an exception. `review.commentText` is authored by whoever left the
+ * Google review; throwing here would let any reviewer kill the drafting
+ * pipeline by typing digits. The residual in that case is a partially
+ * redacted DIGIT RUN, never a raw email address: shape 1 converges within the
+ * cap and shape 2 is the only non-converging shape. Both facts are pinned by
+ * tests in test/reputation/pii-redact.test.ts.
+ */
+export function redactPiiRepeatedly(
+  text: string,
+  options: RedactPiiOptions = {},
+): string {
+  let out = text;
+  for (let pass = 0; pass < MAX_REDACT_PII_PASSES; pass++) {
+    const next = redactPii(out, options);
+    if (next === out) break;
+    out = next;
+  }
+  return out;
 }

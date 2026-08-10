@@ -1292,11 +1292,21 @@ describe('redactedExecutionErrorCause — bounded, scrubbed execution_error inpu
   });
 
   /**
-   * Review K2 — the email rule's `[A-Za-z0-9.-]+\.[A-Za-z]{2,}` self-overlaps,
-   * so an unbounded `err.message` of this shape backtracks quadratically ON
-   * THE API EVENT LOOP (runExecutionSweep runs in-process with Express). The
-   * message is attacker-influenced: a driver error echoing a bound JSONB
-   * payload, an HTTP client echoing a response body.
+   * Review K2 — an unbounded `err.message` of this shape used to backtrack
+   * quadratically ON THE API EVENT LOOP (runExecutionSweep runs in-process
+   * with Express). The message is attacker-influenced: a driver error echoing
+   * a bound JSONB payload, an HTTP client echoing a response body.
+   *
+   * The cost was in the LOCAL part, not the domain. `.`, `%`, `+` and `-` are
+   * non-word characters INSIDE `[A-Za-z0-9._%+-]`, so in an `a.a.a.…` run
+   * every character is a legal place for `\b` to fire, and `[local]+` rescans
+   * the rest of the run from each of them. `'a.'×n` with NO `@` anywhere in it
+   * is equally quadratic, and the domain-restructured variant a reviewer
+   * proposed measured identically slow (2413ms vs 2419ms at 32KB). See the
+   * ReDoS block in reputation/pii-redact.ts.
+   *
+   * Fixed at the source — the email rule is a linear scanner now — but this
+   * test stays: it pins the MAX_CAUSE_SCAN_LENGTH bound and the time budget.
    */
   it('returns fast on a pathological backtracking input', () => {
     const n = 64_000;
