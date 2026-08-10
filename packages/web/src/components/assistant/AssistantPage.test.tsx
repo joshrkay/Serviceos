@@ -674,3 +674,110 @@ describe('UB-B2 — conversation mode', () => {
     });
   });
 });
+
+/**
+ * Follow-up review remnant — undo parity for the AUTO-APPROVED path.
+ *
+ * When the operator taps Approve, the page raises the shared UndoToast off the
+ * approve response's server window (Finding 2, above). A proposal the server
+ * auto-approved never goes through that callback — no tap, no approve
+ * round-trip — so it reached the operator already committed with no way back,
+ * even though the row is 'approved' and still inside its undo window
+ * (`POST /api/proposals/:id/undo` accepts exactly that state).
+ *
+ * The reply's card now carries the server's `undoExpiresAt`, and the page
+ * raises the SAME toast off it. Anchoring to the server instant (not a fresh
+ * client 5s) is what keeps the affordance honest: useUndoableApproval leaves
+ * the toast inactive when the real window has already run out, so the page
+ * never offers an undo the server would 409.
+ */
+describe('auto-approved proposal — undo parity', () => {
+  const autoApproved = {
+    id: 'prop-auto-1',
+    title: 'Book Tuesday 9am for the Hendersons',
+    summary: 'Appointment booked automatically.',
+    explanation: 'High confidence, supervised tenant.',
+    confidence: 'High',
+    type: 'Schedule',
+    status: 'Approved',
+  };
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  async function renderWithAutoApproved(undoExpiresAt: string | undefined) {
+    mockedApiFetch.mockResolvedValueOnce(
+      jsonResponse({
+        message: {
+          content: 'Booked it.',
+          autoApplied: true,
+          proposal: { ...autoApproved, ...(undoExpiresAt ? { undoExpiresAt } : {}) },
+        },
+      }),
+    );
+
+    renderPage();
+    await waitFor(() => {
+      expect(screen.getByText(/I'm your AI assistant/)).toBeInTheDocument();
+    });
+    const input = screen.getByPlaceholderText('Ask anything or give a command…');
+    fireEvent.change(input, { target: { value: 'Book Tuesday 9am for the Hendersons' } });
+    fireEvent.keyDown(input, { key: 'Enter', code: 'Enter' });
+    await waitFor(() => expect(screen.getByText('Booked it.')).toBeInTheDocument());
+  }
+
+  it('raises the shared undo toast for a proposal the server already auto-approved', async () => {
+    await renderWithAutoApproved(new Date(Date.now() + 5000).toISOString());
+
+    await waitFor(() => {
+      expect(screen.getByTestId('undo-toast')).toBeInTheDocument();
+    });
+    expect(screen.getByRole('button', { name: /undo/i })).toBeInTheDocument();
+  });
+
+  it('clicking Undo POSTs the undo endpoint for the auto-approved proposal', async () => {
+    await renderWithAutoApproved(new Date(Date.now() + 5000).toISOString());
+    await waitFor(() => screen.getByTestId('undo-toast'));
+
+    mockedApiFetch.mockResolvedValueOnce(jsonResponse({ id: 'prop-auto-1', status: 'undone' }));
+    fireEvent.click(screen.getByRole('button', { name: /undo/i }));
+
+    await waitFor(() => {
+      expect(mockedApiFetch).toHaveBeenCalledWith(
+        '/api/proposals/prop-auto-1/undo',
+        expect.objectContaining({ method: 'POST' }),
+      );
+    });
+  });
+
+  it('offers no undo once the server window has already closed', async () => {
+    await renderWithAutoApproved(new Date(Date.now() - 1000).toISOString());
+
+    // Give the effect a tick — the assertion is that nothing ever appears.
+    await act(async () => { await Promise.resolve(); });
+    expect(screen.queryByTestId('undo-toast')).toBeNull();
+  });
+
+  it('does not raise an undo toast for an ordinary Pending card', async () => {
+    mockedApiFetch.mockResolvedValueOnce(
+      jsonResponse({
+        message: {
+          content: 'Here is a draft invoice.',
+          proposal: { ...autoApproved, id: 'prop-pending-1', status: 'Pending' },
+        },
+      }),
+    );
+    renderPage();
+    await waitFor(() => {
+      expect(screen.getByText(/I'm your AI assistant/)).toBeInTheDocument();
+    });
+    const input = screen.getByPlaceholderText('Ask anything or give a command…');
+    fireEvent.change(input, { target: { value: 'Draft an invoice' } });
+    fireEvent.keyDown(input, { key: 'Enter', code: 'Enter' });
+    await waitFor(() => expect(screen.getByText('Here is a draft invoice.')).toBeInTheDocument());
+
+    await act(async () => { await Promise.resolve(); });
+    expect(screen.queryByTestId('undo-toast')).toBeNull();
+  });
+});

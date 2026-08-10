@@ -69,6 +69,15 @@ export interface AIProposal {
   confidence: ProposalConfidence;
   type: ProposalType;
   status: 'Pending' | 'Approved' | 'Rejected';
+  /**
+   * ISO instant the server's 5s undo window closes, present only on a card
+   * that arrived ALREADY `Approved` — i.e. the backend auto-approved and
+   * queued it with no human tap. The surface rendering the card anchors its
+   * undo countdown to this instant (never a fresh client 5s), so the slice of
+   * the window the request round-trip already spent is not offered back.
+   * Absent ⇒ no server-side window ⇒ no undo affordance.
+   */
+  undoExpiresAt?: string;
   relatedId?: string;
   impact?: string;
   /**

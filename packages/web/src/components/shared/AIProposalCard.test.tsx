@@ -204,3 +204,50 @@ describe('Story 3.11 — approved proposal deep-links to the created entity', ()
     expect(screen.getByRole('button', { name: /view/i }).className).toContain('min-h-11');
   });
 });
+
+/**
+ * Follow-up review remnant — the assistant chat can now surface a proposal the
+ * server AUTO-APPROVED and queued for execution with no human tap. That card
+ * arrives with `status: 'Approved'` and took the same terminal branch as a
+ * card the operator just approved, which said "Applied successfully".
+ *
+ * Two lies in one line. The operator did not approve it — nothing was tapped —
+ * and it has not applied: auto-approval stamps `approvedAt` and the execution
+ * sweep only picks the row up after the undo window closes, so at render time
+ * the write has NOT happened and is still cancellable.
+ *
+ * The manual path's copy is deliberately left alone: there the operator DID
+ * just approve, so the branch has only one audience to serve.
+ */
+describe('auto-approved card — honest copy', () => {
+  beforeEach(() => navigateMock.mockReset());
+
+  it('does not claim the operator applied it when the card arrives already Approved', () => {
+    render(<AIProposalCard proposal={makeProposal({ status: 'Approved' })} />);
+    expect(screen.queryByText('Applied successfully')).toBeNull();
+  });
+
+  it('says it was approved automatically and has not applied yet', () => {
+    render(<AIProposalCard proposal={makeProposal({ status: 'Approved' })} />);
+    expect(screen.getByText(/approved automatically/i)).toBeInTheDocument();
+    // "will apply" / "applying" — a future/in-flight write, never a completed one.
+    expect(screen.getByText(/appl(y|ying)/i)).toBeInTheDocument();
+  });
+
+  it('keeps the applied copy on the path the operator actually approved', () => {
+    render(<AIProposalCard proposal={makeProposal({ status: 'Pending' })} onApprove={vi.fn()} />);
+    fireEvent.click(screen.getByRole('button', { name: /approve/i }));
+    expect(screen.getByText('Applied successfully')).toBeInTheDocument();
+    expect(screen.queryByText(/approved automatically/i)).toBeNull();
+  });
+
+  it('still deep-links to the created entity on the auto-approved path', () => {
+    render(
+      <AIProposalCard
+        proposal={makeProposal({ status: 'Approved', type: 'Invoice', relatedId: 'inv-7' })}
+      />,
+    );
+    fireEvent.click(screen.getByRole('button', { name: /view/i }));
+    expect(navigateMock).toHaveBeenCalledWith('/invoices/inv-7');
+  });
+});

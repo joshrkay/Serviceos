@@ -811,6 +811,10 @@ export function AssistantPage() {
     onUndone: () => emitProposalsChanged(),
     onError: (message) => toast.error(message),
   });
+  // Stable reference (a useCallback inside the hook) so `send` can depend on
+  // it without re-creating itself every render — the hook's returned object
+  // is a fresh literal each time, `start` is not.
+  const startUndo = undoToast.start;
   const lastInputWasVoiceRef = useRef(false);
   // UB-B2 — conversation mode. Populated after `send` is defined (the hook
   // needs `send`; `send` needs the session to speak replies through the
@@ -953,6 +957,23 @@ export function AssistantPage() {
       };
       setMessages(prev => [...prev, aiMsg]);
 
+      // Follow-up — undo parity for the AUTO-APPROVED path. A proposal the
+      // backend approved on its own never goes through AIProposalCard's
+      // approve callback (no tap, no approve round-trip), so it used to reach
+      // the operator already committed with no way back — even though the row
+      // is 'approved' and still inside its undo window, exactly the state
+      // `POST /api/proposals/:id/undo` accepts. Raise the SAME toast the
+      // manual path raises, anchored to the SERVER's `undoExpiresAt`: the hook
+      // leaves the affordance inactive when the chat round-trip already ate
+      // the window, so this never offers an undo the server would 409.
+      if (reply.proposal?.status === 'Approved') {
+        startUndo({
+          proposalId: reply.proposal.id,
+          summary: reply.proposal.title,
+          response: { undoExpiresAt: reply.proposal.undoExpiresAt },
+        });
+      }
+
       // Story 3.12 — the assistant API swallows transport failures into a
       // degraded reply (failed:true) so the error renders inline; surface a
       // one-tap RETRY for the failed input alongside it.
@@ -982,7 +1003,7 @@ export function AssistantPage() {
       setTyping(false);
       setTypingReason('');
     }
-  }, [conversationId, navigate, ttsEnabled, speak]);
+  }, [conversationId, navigate, ttsEnabled, speak, startUndo]);
 
   // UB-B2 — conversational voice session: continuous STT, per-utterance
   // auto-submit through the SAME chat path as typed input (inputMode: 'voice'

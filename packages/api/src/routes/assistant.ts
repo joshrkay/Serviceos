@@ -8,6 +8,8 @@ import { hasPermission, isValidRole, type Permission, type Role } from '../auth/
 import { toErrorResponse } from '../shared/errors';
 import { LLMGateway } from '../ai/gateway/gateway';
 import { ProposalRepository, ProposalType } from '../proposals/proposal';
+// Aliased — the card field this feeds is also called `undoExpiresAt`.
+import { undoExpiresAt as undoWindowCloseAt } from '../proposals/lifecycle';
 import { createAuditEvent, type AuditRepository } from '../audit/audit';
 import {
   recordAssistantTurn,
@@ -120,6 +122,20 @@ const assistantProposalSchema = z.object({
     (v) => (v === 'Approved' || v === 'Rejected' ? v : 'Pending'),
     z.enum(['Pending', 'Approved', 'Rejected'])
   ),
+  /**
+   * Follow-up (auto-approved undo parity) — the instant the server's 5s undo
+   * window closes for an already-'Approved' card, so the chat surface can
+   * raise the SAME `UndoToast` an operator-tapped approval raises. Only set
+   * for auto-approved cards; an operator-tapped approval gets its window from
+   * the approve response instead.
+   *
+   * The client anchors its countdown to this instant rather than a fresh
+   * client 5s, so the part of the window the chat round-trip already spent is
+   * never offered back — `useUndoableApproval` leaves the affordance inactive
+   * when nothing is left, instead of offering an undo `POST
+   * /api/proposals/:id/undo` would 409 with UNDO_WINDOW_CLOSED.
+   */
+  undoExpiresAt: z.string().nullish().transform((v) => v ?? undefined),
   // QA-2026-06-05: LLMs emit JSON null for "no value" — .optional() alone
   // rejects null, so every estimate-draft completion whose relatedId/impact
   // was null failed validation and degraded to the fallback envelope
@@ -843,8 +859,16 @@ export function editFieldsForMissing(
 /**
  * QA-2026-06-05 (AST-02/03/04): map any persisted proposal to the UI card
  * shape — estimates/invoices were previously unpersisted LLM JSON.
+ *
+ * Exported (pure, no I/O) so the AUTO-APPROVED branch is directly testable.
+ * Reaching `status: 'approved'` through the route requires an entity resolver
+ * plus enough seeded repos to keep the drafting handler's confidence above the
+ * auto-approve threshold — every lightweight harness caps it at 0.5 and lands
+ * on 'ready_for_review' — so a route test can only ever exercise the pending
+ * half of this mapping. `test/routes/assistant-auto-approved-undo.route.test.ts`
+ * pins that half end-to-end and this half directly.
  */
-function proposalToUI(
+export function proposalToUI(
   proposal: {
     id: string;
     proposalType: string;
@@ -865,6 +889,15 @@ function proposalToUI(
      * pre-fix behavior exactly.
      */
     status?: string;
+    /**
+     * Follow-up (auto-approved undo parity) — stamped by `createProposal` at
+     * the instant an auto-approving type is decided 'approved'. Feeds the
+     * card's `undoExpiresAt` so the chat surface can offer the same undo an
+     * operator-tapped approval gets. Optional for the same reason `status`
+     * is: bare test literals still compile (no stamp ⇒ no window ⇒ no
+     * affordance, which is the honest answer for a card that isn't approved).
+     */
+    approvedAt?: Date;
   },
   sourceMessage: string
 ): AssistantProposal {
@@ -912,6 +945,13 @@ function proposalToUI(
     // card has no "why" to show a 'Rejected' state (a proposal is never
     // created already-rejected).
     status: proposal.status === 'approved' ? 'Approved' : 'Pending',
+    // Only meaningful on the auto-approved path — an operator-tapped approval
+    // takes its window from the approve response. `undoWindowCloseAt` returns
+    // undefined without an `approvedAt` stamp, so an unapproved (or
+    // historical, unstamped) proposal emits no window rather than a bogus one.
+    ...(proposal.status === 'approved' && proposal.approvedAt
+      ? { undoExpiresAt: undoWindowCloseAt({ approvedAt: proposal.approvedAt })?.toISOString() }
+      : {}),
     proposalType: proposal.proposalType,
     // Same address slice as customerProposalToUI. Kept on BOTH mappers on
     // purpose: `create_customer` reaches the card through either one

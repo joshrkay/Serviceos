@@ -86,7 +86,12 @@ export function isInUndoWindow(
  * already consumed is never offered as undoable.
  */
 export function undoExpiresAt(
-  proposal: Proposal,
+  // Only `approvedAt` is read. Narrowed from `Proposal` so callers holding
+  // just the stamp (routes/assistant.ts's card mapper, which takes a
+  // structural literal rather than a persisted row) can derive the window
+  // from the ONE helper that owns the derivation instead of re-adding
+  // UNDO_WINDOW_MS themselves. A full Proposal still satisfies it.
+  proposal: Pick<Proposal, 'approvedAt'>,
   windowMs: number = UNDO_WINDOW_MS
 ): Date | undefined {
   if (!proposal.approvedAt) return undefined;

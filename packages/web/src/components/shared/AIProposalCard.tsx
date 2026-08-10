@@ -145,6 +145,20 @@ interface Props {
 export function AIProposalCard({ proposal, onApprove, onReject }: Props) {
   const navigate = useNavigate();
   const [status,       setStatus]       = useState<'Pending' | 'Approved' | 'Rejected'>(proposal.status);
+  /**
+   * Did this card arrive already approved — i.e. the backend auto-approved
+   * and queued it with NO human tap?
+   *
+   * Captured from the FIRST render only (useState initialiser), because
+   * `status` also flips to 'Approved' when the operator taps Approve and the
+   * two cases need different copy. Without this the terminal branch below
+   * told an operator who never touched the card "Applied successfully": they
+   * did not approve it, and it has not applied — auto-approval stamps
+   * `approvedAt` and the execution sweep only picks the row up once the undo
+   * window closes, so at render time the write is still pending and still
+   * cancellable (the page raises the shared UndoToast off `undoExpiresAt`).
+   */
+  const [arrivedAutoApproved] = useState(() => proposal.status === 'Approved');
   const [showReason,   setShowReason]   = useState(false);
   const [editing,      setEditing]      = useState(false);
   const [isApproving,  setIsApproving]  = useState(false);
@@ -237,7 +251,11 @@ export function AIProposalCard({ proposal, onApprove, onReject }: Props) {
         </span>
         <div className="flex-1 min-w-0">
           <p className="text-sm text-success">{proposal.title}</p>
-          <p className="text-xs text-success mt-0.5">Applied successfully</p>
+          <p className="text-xs text-success mt-0.5">
+            {arrivedAutoApproved
+              ? 'Approved automatically — nobody tapped Approve. Applying shortly; undo now, or reverse it from the record afterwards.'
+              : 'Applied successfully'}
+          </p>
         </div>
         {proposal.relatedId && entityRouteFor(proposal.type, proposal.relatedId) && (
           <button
