@@ -802,8 +802,10 @@ Notes on the Tradesperson wave 1, Task 9 row (`add_material`, taxonomy 1.13.0):
   `ai/skills/lookup-materials.ts` fetches at most `MAX_ITEMS_SPOKEN + 1`
   (6) rows via `MaterialItemListOptions.limit` — a NEW option Task 9 added
   to Task 8's `MaterialItemListOptions`/`PgMaterialItemRepository`/
-  `InMemoryMaterialItemRepository`. A shopping list is append-mostly (only
-  `markPurchased` prunes it), so the original unbounded `SELECT *` loaded
+  `InMemoryMaterialItemRepository`. Nothing prunes this list —
+  `markPurchased` has no production caller (verified 2026-08-10, A2: no
+  route, worker, execution handler or UI invokes it), so a tenant's pending
+  set is strictly monotonic — and the original unbounded `SELECT *` loaded
   every pending row for the tenant just to speak 5 of them. Because the
   fetch is capped, the skill genuinely cannot report an exact total once a
   tenant has more than 5 pending items — `data.count` is `null` in that
@@ -811,10 +813,10 @@ Notes on the Tradesperson wave 1, Task 9 row (`add_material`, taxonomy 1.13.0):
   rather than a false-precise total. (It said "5+ items" until F3,
   2026-08-10 — "+" has a lexical reading, so Polly voiced it as "five plus
   items" and Google Cloud TTS dropped it, leaving "five items" and erasing
-  the very distinction the capped fetch exists to express.) This is a deliberate divergence from
-  `lookup_catalog` (which fetches the tenant's WHOLE catalog and lets the
-  WORKER slice, since other consumers need every item) — there is no
-  non-TTS consumer of the pending shopping list today.
+  the very distinction the capped fetch exists to express.) This is a
+  deliberate divergence from `lookup_catalog` (which fetches the tenant's
+  WHOLE catalog and lets the WORKER slice, since other consumers need every
+  item) — there is no non-TTS consumer of the pending shopping list today.
 - **An unresolved spoken job reference refuses honestly (spec-review
   MAJOR A).** "What materials are open on the Patel job?" with no
   matching Patel used to silently fall through to the UNFILTERED tenant
@@ -845,18 +847,22 @@ Notes on the Tradesperson wave 1, Task 9 row (`add_material`, taxonomy 1.13.0):
   the Pg side, and is filtered explicitly on the InMemory side to keep
   both backends provably in agreement); (2) results are ordered
   soonest-`neededBy`-first, since the ask cares about urgency and the fetch
-  is still capped. (2) originally applied only to date-scoped calls; F2
-  below extended it to every call.
+  is still capped. That second decision originally applied only to
+  date-scoped calls; F2 (below) extended it to every call.
   UNLIKE `lookup_crew_schedule`, an absent or unparseable phrase applies NO
   filter at all rather than defaulting to "today" — silently narrowing an
   unparseable materials ask could hide a real, later-dated item behind a
   guessed filter, which is worse than just answering the plain unfiltered
   list. `neededBy` is STILL surfaced per item in the spoken summary
   regardless of whether a date filter was applied ("3 boxes of PEX,
-  quantity 3, needed by August 9"). No new
-  migration/index — see `pg-material-item.ts`'s module doc comment for the
-  real read/write tradeoff and the concrete revisit trigger (~2,000
-  concurrently-pending rows for one tenant).
+  quantity 3, needed by August 9"). This shipped with NO index, on a
+  "revisit at ~2,000 concurrently-pending rows for one tenant" trigger;
+  that decision was REVERSED on 2026-08-10 (review follow-up A3) because
+  nothing could observe the trigger and the pruning that was supposed to
+  keep the set small does not exist. Migration 273 adds
+  `idx_material_items_pending_urgency (tenant_id, needed_by, created_at,
+  id) WHERE status = 'pending'` — see `pg-material-item.ts`'s module doc
+  comment for the full argument.
 - **The date scope is a bracketed DAY plus a COUNTED backlog, not an
   open-ended "before" (review follow-up K3, 2026-08-09).** The first cut
   of the filter was a lone `needed_by < boundary`. That re-created the
@@ -871,8 +877,26 @@ Notes on the Tradesperson wave 1, Task 9 row (`add_material`, taxonomy 1.13.0):
   both halves — one bracketed query answers the question asked, and a
   second bounded probe (`neededByBefore: dayStart`, 21 rows) COUNTS the
   earlier backlog into one closing sentence ("There are 8 items needed
-  sooner, the earliest on March 1."), honest about its own ceiling ("20+
-  items") exactly like `data.count` is.
+  sooner, the earliest on March 1."), honest about its own ceiling ("more
+  than 20 items") exactly like `data.count` is. That sentence has always
+  been spelled out rather than as "20+"; the last reference to a "+" shape
+  anywhere in this feature went with F3 and review follow-up N7.
+- **The UN-SCOPED ask names the horizon its cap hides (review follow-up A1,
+  2026-08-10).** F2 gave "what do I need?" the same urgency ordering, and
+  its commit argued that closed the omission entirely, because a
+  lower-unbounded query can only omit LATER-dated rows. True, and not
+  sufficient: with 8 abandoned March rows plus 2 items due tomorrow, the
+  five spoken rows are all March and neither item due tomorrow is
+  mentioned. F2 moved the crowding-out from stale-CREATED rows to
+  stale-DATED ones; it closed the defect only where the stale rows are
+  UNDATED, since those sort last. Ordering cannot fix it (demoting an
+  overdue row to speak an upcoming one just trades the omission back — the
+  same reason `needed_by DESC` was rejected), so the tail carries the
+  disclosure: it now names the deadline of the FIRST OMITTED row ("and more
+  beyond that, the next needed by March 6"). No extra query — `FETCH_LIMIT`
+  is `MAX_ITEMS_SPOKEN + 1`, so that row is already fetched. Suppressed on a
+  date-scoped ask (the label would repeat the resolved day) and when the
+  first omitted row is undated.
 - **An UNRESOLVABLE date phrase is disclosed, not silently dropped (review
   follow-up J3).** `asap`, `soon`, `right away`, `whenever`, `first thing`
   and `before the Patel job` all resolve to no day. The no-today-guess
@@ -911,18 +935,16 @@ Notes on the Tradesperson wave 1, Task 9 row (`add_material`, taxonomy 1.13.0):
   bare "what do I need?" kept the original defect and is the more common
   ask: under the old `created_at ASC` default, the 5 oldest-CREATED rows
   consumed the whole spoken answer and an item due tomorrow was never
-  mentioned — permanently, not transiently, because a shopping list is
-  append-mostly (only `markPurchased` prunes it), so the same 5 stale rows
+  mentioned — permanently, not transiently, because nothing prunes this
+  list (`markPurchased` has no production caller), so the same 5 stale rows
   owned the answer indefinitely. `NULLS LAST` is the safety: an item with
   no `needed_by` has no deadline, so it sorts after every dated item rather
-  than being treated as infinitely urgent. NO second disclosure query is
-  added for this shape (unlike K3's "needed sooner" probe) — the un-scoped
-  ask is lower-unbounded, so whatever the cap omits is by construction LESS
-  urgent than everything spoken, and the existing "and more beyond that"
-  tail already says the list continues. No new migration/index; see
-  `pg-material-item.ts`'s module doc comment, which records that F2 gave up
-  the one index-supplied ordering knowingly and extends the same ~2,000-row
-  revisit trigger to cover the default ask.
+  than being treated as infinitely urgent. Still NO second disclosure query
+  for this shape, unlike K3's "needed sooner" probe — but not because the
+  cap hides nothing; see the A1 bullet above for what F2 left open and how
+  the tail closes it without one. F2 knowingly gave up the last
+  index-supplied ordering, which is what A3 then reversed with migration
+  273; `pg-material-item.ts`'s module doc comment has both halves.
 - **`lookup_events.result_count` SATURATES at 6 for this intent.** The
   bounded fetch (I4, above) means the row written by `record()` carries
   rows-fetched, capped at `MAX_ITEMS_SPOKEN + 1` (6) — never the true
