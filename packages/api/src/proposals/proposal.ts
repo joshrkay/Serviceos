@@ -7,6 +7,7 @@ import {
   type Mode,
   type ResolveThresholdInput,
 } from './auto-approve';
+import { redactPii } from '../reputation/pii-redact';
 import { payloadHeadlineCents } from './payload-money';
 import { getSupervisorCreationHook } from './supervisor/hook';
 import { payloadWithSupervisorMarker } from './supervisor/marker';
@@ -649,31 +650,157 @@ export const MAX_EXECUTION_ERROR_LENGTH = 500;
 const CAUSE_REDACTED = '[redacted]';
 
 /**
- * Ordered scrub passes. Secret-shaped tokens are masked BEFORE PII so a
- * credential that happens to contain an email-like or phone-like run is
- * removed whole rather than partially. Every replacement is chosen to be a
- * FIXED POINT — re-running the whole chain over its own output yields the
- * same string — because a cause can be re-scrubbed (recorded once here,
- * re-read and re-recorded by a later retry).
+ * Hard bound on how much of `err.message` is ever handed to a regex.
+ *
+ * The PII patterns (`pii-redact.ts`) contain self-overlapping character
+ * classes, so their cost is QUADRATIC in input length — measured at 158ms /
+ * 645ms / 2597ms for 8KB / 16KB / 32KB of `('a.'×n/2) + '@' + ('b'×n)`, a
+ * clean 4× per doubling. `runExecutionSweep` runs in-process with Express
+ * (app.ts), and `err.message` is attacker-INFLUENCED (a driver error echoing
+ * a bound JSONB payload, an HTTP client echoing a response body), so an
+ * unbounded ~1MB message of that shape would stall the whole API for minutes.
+ *
+ * Bounding the INPUT (rather than moving the truncation earlier in the
+ * pipeline) keeps the scrub-then-truncate ORDER intact — that order is what
+ * stops a secret being sliced in half by the length cap and then missed. The
+ * multiple leaves generous headroom above the 500-char output cap so a
+ * secret sitting just past it is still masked before the slice.
  */
-const CAUSE_SCRUBS: Array<[RegExp, string]> = [
-  // `Bearer <token>`. The replacement's `[` is outside the token character
-  // class, so a second pass finds nothing left to mask.
-  [/\bbearer\s+[A-Za-z0-9._~+/=-]+/gi, `Bearer ${CAUSE_REDACTED}`],
-  // Secret-ish `key=value` / `key: value`, including inside a URL query
-  // string (the value stops at `&`, so non-secret params stay readable).
+const MAX_CAUSE_SCAN_LENGTH = MAX_EXECUTION_ERROR_LENGTH * 8;
+
+/**
+ * Iteration cap for the scrub loop. The chain is designed to reach a fixed
+ * point on pass 1; the loop exists so that (a) a rule whose output happens to
+ * feed another rule cannot leave a half-scrubbed value persisted, and (b) the
+ * length cap re-scrubs anything its slice exposed. Passes after the first run
+ * over a <=500-char string, so they are free.
+ */
+const MAX_CAUSE_SCRUB_PASSES = 3;
+
+/** C0 control characters that `\s` does NOT match (tab/LF/CR are excluded). */
+// eslint-disable-next-line no-control-regex
+const CAUSE_CONTROL_CHARS_RE = /[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g;
+
+/**
+ * Keyword half of the `key=value` secret rule.
+ *
+ * The optional leading segment is what makes `client_secret`, `auth_token`,
+ * `signing_secret`, `webhook_secret` and `x-api-key` match: the previous
+ * version anchored the keyword with `\b`, and `\b` does not exist between
+ * `t` and `_`, so every one of those shapes passed through untouched. The
+ * segment is length-bounded rather than `[A-Za-z0-9_]*` so the prefix cannot
+ * itself become a backtracking source. Keyword list harvested from
+ * `logging/redact.ts`'s SECRET_KEY_PATTERNS — that list already existed and
+ * was strictly stronger than the copy this replaces.
+ */
+const SECRET_KEY_PATTERN =
+  '(?:[A-Za-z0-9]{1,24}[_-])?(?:api[_-]?key|apikey|private[_-]?key|access[_-]?token|refresh[_-]?token|token|secret|password|passwd|pwd|passphrase|credential|authorization|auth)';
+
+/**
+ * Ordered SECRET scrub passes, run before the PII pass (`redactPii`) so a
+ * credential that happens to contain an email-like or phone-like run is
+ * removed whole rather than partially.
+ *
+ * Every replacement is a FIXED POINT: re-running the chain over its own
+ * output yields the same string. That is load-bearing — a cause is recorded
+ * once here and can be re-read and re-recorded by a later retry — and it is
+ * verified by a generated-corpus property test rather than by one
+ * hand-picked string (the hand-picked string that shipped happened to be a
+ * fixed point while the chain was still leaking).
+ */
+const CAUSE_SECRET_SCRUBS: Array<[RegExp, string]> = [
+  // Secret-ish `key=value` / `key: value` / `"key":"value"`, including inside
+  // a URL query string (the value stops at `&`, so non-secret params stay
+  // readable). The value may carry an auth SCHEME (`Authorization: Basic
+  // dXNlcj…`) — consumed here so the credential goes with the key rather
+  // than the scheme name being masked and the credential surviving.
+  // `(?!\[redacted\])` is what makes the rule a fixed point: without it the
+  // second pass re-matches its own `[redacted]` output and appends a `]`.
   [
-    /\b(api[_-]?key|apikey|access[_-]?token|refresh[_-]?token|token|secret|password|passwd|pwd|authorization|auth)\b\s*[=:]\s*[^\s&"']+/gi,
+    new RegExp(
+      String.raw`\b(${SECRET_KEY_PATTERN})"?\s*[=:]\s*"?(?!\[redacted\])(?:(?:bearer|basic|digest)\s+)?[^\s"'&,;)\]}]+"?`,
+      'gi',
+    ),
     `$1=${CAUSE_REDACTED}`,
   ],
-  // Provider key literals that travel without a key= prefix (Stripe-style).
-  [/\b(?:sk|pk|rk|whsec)_[A-Za-z0-9_]{8,}/gi, CAUSE_REDACTED],
-  // Customer PII. Emails first — they contain dots and digits a phone
-  // pattern could otherwise clip.
-  [/\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/g, '[email]'],
-  [/(?:\+?1[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b/g, '[phone]'],
-  [/\+\d{7,15}\b/g, '[phone]'],
+  // A bare auth scheme with no key= in front of it. The replacement's `[` is
+  // outside the token character class, so a second pass finds nothing left.
+  [/\b(bearer|basic|digest)\s+[A-Za-z0-9._~+/=-]+/gi, `$1 ${CAUSE_REDACTED}`],
+  // Credentials embedded in a connection string: `postgres://user:pw@host`,
+  // `redis://:pw@host`. `[^/\s:@]` cannot cross a `/`, so an ordinary
+  // `https://host/path?x=1` never matches.
+  [/\b([a-z][a-z0-9+.-]*:\/\/)[^/\s:@]*:[^/\s@]*@/gi, `$1${CAUSE_REDACTED}@`],
+  // Bare JWTs (three base64url segments; the `eyJ` header anchor keeps this
+  // specific enough not to eat dotted identifiers).
+  [/\beyJ[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]+/g, CAUSE_REDACTED],
+  // Provider key literals that travel without a key= prefix: Stripe
+  // (`sk_live_`, `whsec_`), OpenAI/Anthropic (`sk-proj-`, `sk-ant-api03-`),
+  // GitHub (`ghp_`), Slack (`xoxb-`, `xapp-`).
+  [/\b(?:sk|pk|rk|whsec|gh[pousr]|xox[abprs]|xapp)[_-][A-Za-z0-9_-]{8,}/gi, CAUSE_REDACTED],
+  // AWS access key id. Fixed-width and uppercase-only, so no `\b` games.
+  [/\bAKIA[0-9A-Z]{16}\b/g, CAUSE_REDACTED],
 ];
+
+/**
+ * Message text for a caught throw, walking up to two `cause` levels.
+ *
+ * undici throws `TypeError: fetch failed` and puts the real reason
+ * (`getaddrinfo ENOTFOUND …`, `ECONNREFUSED`) on `.cause` — the single most
+ * common Node failure mode, and without this it persisted as a message with
+ * no diagnostic content whatsoever.
+ */
+function causeChainMessage(err: unknown): string {
+  if (typeof err === 'string') return err;
+  if (!(err instanceof Error)) return '';
+  const parts: string[] = [];
+  let node: unknown = err;
+  for (let depth = 0; depth <= 2 && node instanceof Error; depth++) {
+    if (node.message) parts.push(node.message);
+    node = (node as { cause?: unknown }).cause;
+  }
+  if (typeof node === 'string' && node) parts.push(node);
+  return parts.join(': ');
+}
+
+/**
+ * Truncate to `MAX_EXECUTION_ERROR_LENGTH` without slicing a placeholder in
+ * half. `Authorization=[redac…` would otherwise re-match the key=value rule
+ * on a later pass (its `[redacted]` lookahead no longer sees a whole
+ * placeholder) and the function would stop being a fixed point.
+ */
+const CAUSE_PLACEHOLDERS = [CAUSE_REDACTED, '[email]', '[phone]', '[address]', '[name]'];
+function boundCauseLength(text: string): string {
+  if (text.length <= MAX_EXECUTION_ERROR_LENGTH) return text;
+  let end = MAX_EXECUTION_ERROR_LENGTH - 1;
+  const lastOpen = text.lastIndexOf('[', end - 1);
+  if (lastOpen !== -1) {
+    const tail = text.slice(lastOpen, end);
+    if (!tail.includes(']') && CAUSE_PLACEHOLDERS.some((p) => p.startsWith(tail))) {
+      end = lastOpen;
+    }
+  }
+  return `${text.slice(0, end)}…`;
+}
+
+function scrubCauseOnce(text: string): string {
+  let out = text;
+  for (const [pattern, replacement] of CAUSE_SECRET_SCRUBS) {
+    out = out.replace(pattern, replacement);
+  }
+  // Customer PII via the codebase's ONE free-text redactor
+  // (reputation/pii-redact.ts), whose idempotency contract is documented and
+  // separately tested, and which orders the international phone rule BEFORE
+  // the US one (so `+442071234567` masks whole rather than leaving `+44`).
+  // Addresses and last names stay on: a street-address or FirstName-LastName
+  // heuristic over machine-generated diagnostics is all false positives.
+  // `requireSeparatedPhones` keeps integer cents, epoch millis and int4
+  // bounds readable — see that option's doc comment.
+  return redactPii(out, {
+    redactAddresses: false,
+    redactLastNames: false,
+    requireSeparatedPhones: true,
+  });
+}
 
 /**
  * Build the string recorded in `proposals.execution_error` from a CAUGHT
@@ -688,23 +815,40 @@ const CAUSE_SCRUBS: Array<[RegExp, string]> = [
  * bounded and scrubbed here — at the single place that builds it — rather
  * than at each surface that renders it.
  *
- * Deliberately NOT `redactSecrets` (logging/redact.ts): that walks an OBJECT
- * masking by KEY name, and there are no keys here — this is one free-text
- * string whose secrets are only findable by value pattern.
+ * The PII half delegates to `reputation/pii-redact.ts` — this codebase's
+ * free-text redactor, which is documented DETERMINISTIC and IDEMPOTENT and
+ * has its own test file. This function previously carried a copy of its
+ * regexes; the copy drifted (it ordered the US phone rule before the
+ * international one, and its email rule's trailing `\b` made an email
+ * followed by a digit unmatchable) and there is no reason for two
+ * idempotency contracts. Only the SECRET rules — which pii-redact has no
+ * business knowing about — stay local.
+ *
+ * Deliberately NOT `redactSecrets` (logging/redact.ts) either: that walks an
+ * OBJECT masking by KEY name, and there are no keys here. Its keyword LIST
+ * is harvested above, though — it is the same threat model.
  */
 export function redactedExecutionErrorCause(err: unknown): string {
-  const raw = err instanceof Error ? err.message : typeof err === 'string' ? err : String(err ?? '');
-  // One cause is one audit-row line.
-  let out = raw.replace(/\s+/g, ' ').trim();
-  if (out.length === 0 || out === 'undefined' || out === 'null') {
+  const raw = causeChainMessage(err);
+  // Bound BEFORE any regex touches it (see MAX_CAUSE_SCAN_LENGTH), then make
+  // one cause one audit-row line. The control-character strip is in the same
+  // pass because `\s` does not match NUL — and a NUL byte makes the Postgres
+  // write throw, losing the cause silently.
+  let out = raw
+    .slice(0, MAX_CAUSE_SCAN_LENGTH)
+    .replace(CAUSE_CONTROL_CHARS_RE, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  // `String(someObject)` yields '[object Object]', which is not a cause.
+  if (out.length === 0 || out === 'undefined' || out === 'null' || out === '[object Object]') {
     return 'unknown execution failure';
   }
-  for (const [pattern, replacement] of CAUSE_SCRUBS) {
-    out = out.replace(pattern, replacement);
+  for (let pass = 0; pass < MAX_CAUSE_SCRUB_PASSES; pass++) {
+    const next = boundCauseLength(scrubCauseOnce(out));
+    if (next === out) break;
+    out = next;
   }
-  return out.length > MAX_EXECUTION_ERROR_LENGTH
-    ? `${out.slice(0, MAX_EXECUTION_ERROR_LENGTH - 1)}…`
-    : out;
+  return out;
 }
 
 export interface ProposalRepository {

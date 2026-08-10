@@ -1135,4 +1135,196 @@ describe('redactedExecutionErrorCause — bounded, scrubbed execution_error inpu
     );
     expect(redactedExecutionErrorCause(once)).toBe(once);
   });
+
+  /**
+   * Review K1 — a hand-picked idempotence string proves nothing: the one
+   * above happens to be a fixed point, so it passed while the chain was
+   * still capable of LEAKING on its single production pass. These are the
+   * two shapes that actually leaked, then a generated corpus so the next
+   * regression is caught by the property rather than by luck.
+   */
+  it('does not leak an email that abuts a digit run (PG unique-constraint DETAIL shape)', () => {
+    const out = redactedExecutionErrorCause(
+      new Error('insert failed: Key (contact)=(jane.doe@example.com4155552671) already exists'),
+    );
+    expect(out).not.toContain('jane.doe@example.com');
+    expect(out).toContain('already exists');
+  });
+
+  it('does not leak an email that abuts a timestamp', () => {
+    const out = redactedExecutionErrorCause(
+      new Error('notify failed for jane.doe@example.com2026-08-09T12:00:00Z'),
+    );
+    expect(out).not.toContain('jane.doe@example.com');
+    expect(out).toContain('notify failed for');
+  });
+
+  it('is a FIXED POINT over a generated corpus, and never leaks a generated email', () => {
+    // Deterministic PRNG (mulberry32) so a failure is reproducible from the
+    // seed printed in the assertion message.
+    const rng = (seed: number) => () => {
+      seed = (seed + 0x6d2b79f5) | 0;
+      let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+    const EMAILS = ['jane.doe@example.com', 'a_b+c@sub.domain.co.uk', 'x@y.io'];
+    const FRAGMENTS = [
+      ...EMAILS,
+      '4155552671',
+      '(415) 555-2671',
+      '+442071234567',
+      '2026-08-09T12:00:00Z',
+      'api_key=live_9f8e7d6c',
+      'client_secret=abc123XYZsecretvalue',
+      'Authorization: Basic dXNlcjpzdXBlcnNlY3JldA==',
+      'Bearer eyJhbGciOiJIUzI1NiJ9.abc.def',
+      'postgres://appuser:sup3rS3cret@localhost:5432/db',
+      '{"apiKey":"sk-proj-abcdefghijkl","password":"hunter2"}',
+      'sk_live_51H8xYzAbCdEfGh',
+      'AKIAIOSFODNN7EXAMPLE',
+      'ghp_abcdefghijklmnopqrstuvwxyz0123456789',
+      'Key (contact)=(',
+      ') already exists',
+      'insert failed:',
+      'amount 1234567890 exceeds int4 range 2147483647',
+      'proposal 42',
+      'DETAIL:',
+      '-',
+      '.',
+      ' ',
+      '@',
+      'x'.repeat(40),
+      '[redacted]',
+      '[email]',
+      '[phone]',
+    ];
+    for (let seed = 0; seed < 400; seed++) {
+      const rand = rng(seed);
+      const parts: string[] = [];
+      const n = 1 + Math.floor(rand() * 12);
+      for (let i = 0; i < n; i++) {
+        parts.push(FRAGMENTS[Math.floor(rand() * FRAGMENTS.length)]!);
+      }
+      // Join with no separator half the time so tokens ABUT each other —
+      // exactly the condition the `\b`-terminated email rule failed on.
+      const input = parts.join(rand() < 0.5 ? '' : ' ');
+      const once = redactedExecutionErrorCause(new Error(input));
+      expect(redactedExecutionErrorCause(once), `seed ${seed}: ${input}`).toBe(once);
+      for (const email of EMAILS) {
+        expect(once, `seed ${seed}: ${input}`).not.toContain(email);
+      }
+    }
+  });
+
+  /**
+   * Review K2 — the email rule's `[A-Za-z0-9.-]+\.[A-Za-z]{2,}` self-overlaps,
+   * so an unbounded `err.message` of this shape backtracks quadratically ON
+   * THE API EVENT LOOP (runExecutionSweep runs in-process with Express). The
+   * message is attacker-influenced: a driver error echoing a bound JSONB
+   * payload, an HTTP client echoing a response body.
+   */
+  it('returns fast on a pathological backtracking input', () => {
+    const n = 64_000;
+    const input = `${'a.'.repeat(n / 2)}@${'b'.repeat(n)}`;
+    const started = Date.now();
+    const out = redactedExecutionErrorCause(new Error(input));
+    const elapsedMs = Date.now() - started;
+    expect(out.length).toBeLessThanOrEqual(MAX_EXECUTION_ERROR_LENGTH);
+    expect(elapsedMs).toBeLessThan(250);
+  });
+
+  /**
+   * Review J1 — the scrubber's own doc claimed shapes it did not cover. Each
+   * of these was verified LEAKING before the fix.
+   */
+  describe('secret shapes', () => {
+    const cases: Array<[string, string, string]> = [
+      ['basic auth credential', 'Authorization: Basic dXNlcjpzdXBlcnNlY3JldA==', 'dXNlcjpzdXBlcnNlY3JldA=='],
+      ['underscore-prefixed key', 'oauth exchange failed: client_secret=abc123XYZsecretvalue', 'abc123XYZsecretvalue'],
+      ['twilio env name', 'auth_token=SK0011223344556677 rejected', 'SK0011223344556677'],
+      ['private key', 'private_key=MIIEvQIBADANBg rejected', 'MIIEvQIBADANBg'],
+      ['signing secret', 'signing_secret=v1_whsig_abcdef', 'v1_whsig_abcdef'],
+      ['webhook secret', 'webhook_secret=topsecretvalue', 'topsecretvalue'],
+      ['json body', 'body {"apiKey":"abcdefghijkl","password":"hunter2"}', 'hunter2'],
+      ['spaced quoted assignment', 'config password = "hunter2" invalid', 'hunter2'],
+      ['bare jwt', 'token rejected eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NX0.dBjftJeZ4CVPmB92K', 'eyJzdWIiOiIxMjM0NX0'],
+      ['openai project key', 'provider rejected sk-proj-abcdefghijklmnop', 'sk-proj-abcdefghijklmnop'],
+      ['anthropic key', 'provider rejected sk-ant-api03-abcdefghijklmnop', 'sk-ant-api03-abcdefghijklmnop'],
+      ['github token', 'clone failed ghp_abcdefghijklmnopqrstuvwxyz0123', 'ghp_abcdefghijklmnopqrstuvwxyz0123'],
+      ['slack bot token', 'slack rejected xoxb-123456789012-abcdefghijkl', 'xoxb-123456789012-abcdefghijkl'],
+      ['aws access key id', 'sts denied AKIAIOSFODNN7EXAMPLE', 'AKIAIOSFODNN7EXAMPLE'],
+      ['postgres dsn password', 'connect ECONNREFUSED postgres://appuser:sup3rS3cret@localhost:5432/db', 'sup3rS3cret'],
+      ['redis dsn password', 'connect ECONNREFUSED redis://:sup3rS3cret@cache:6379', 'sup3rS3cret'],
+    ];
+    for (const [label, input, secret] of cases) {
+      it(`masks a ${label}`, () => {
+        expect(redactedExecutionErrorCause(new Error(input))).not.toContain(secret);
+      });
+    }
+  });
+
+  /**
+   * Review J2 — `execution_error` exists to be read by a human debugging a
+   * failure. A phone rule that eats integer cents and epoch millis destroys
+   * the only field that carries the diagnosis, and this repo has a live
+   * int4-overflow / MAX_QUANTITY error class shaped exactly like these.
+   */
+  describe('diagnostic numbers survive the phone rule', () => {
+    it('keeps a bare integer-cents amount and an int4 bound readable', () => {
+      const out = redactedExecutionErrorCause(
+        new Error('amount 1234567890 exceeds int4 range 2147483647'),
+      );
+      expect(out).toBe('amount 1234567890 exceeds int4 range 2147483647');
+    });
+
+    it('keeps an epoch-millis timestamp readable', () => {
+      const out = redactedExecutionErrorCause(
+        new Error('lock timeout at 1754697600000 for proposal 42'),
+      );
+      expect(out).toBe('lock timeout at 1754697600000 for proposal 42');
+    });
+
+    it('still masks a separated US phone number', () => {
+      expect(redactedExecutionErrorCause(new Error('could not reach 415-555-2671'))).toBe(
+        'could not reach [phone]',
+      );
+    });
+
+    it('masks an international number WHOLE (intl rule ordered before US)', () => {
+      const out = redactedExecutionErrorCause(new Error('could not reach +442071234567'));
+      expect(out).toBe('could not reach [phone]');
+      expect(out).not.toContain('44');
+    });
+  });
+
+  /**
+   * Review N1 — undici throws `TypeError: fetch failed` and puts the real
+   * reason on `.cause`, so the single most common Node failure persisted as
+   * a message with no diagnostic content at all.
+   */
+  it('walks the cause chain so `fetch failed` carries its real reason', () => {
+    const inner = new Error('getaddrinfo ENOTFOUND api.example.com');
+    const outer = new TypeError('fetch failed', { cause: inner });
+    const out = redactedExecutionErrorCause(outer);
+    expect(out).toContain('fetch failed');
+    expect(out).toContain('ENOTFOUND');
+  });
+
+  it('treats a non-Error object throw as unusable rather than persisting "[object Object]"', () => {
+    expect(redactedExecutionErrorCause({ code: 'E_SOMETHING' })).toBe('unknown execution failure');
+  });
+
+  /**
+   * Review N4 — `\s+` does not match NUL, and a NUL byte makes the Postgres
+   * write throw, losing the cause silently. Strip the whole C0 range that
+   * `\s` misses in the same pass.
+   */
+  it('strips control characters a whitespace collapse misses', () => {
+    const out = redactedExecutionErrorCause(new Error('insert failed\x00 for row\x07 42'));
+    // eslint-disable-next-line no-control-regex
+    expect(out).not.toMatch(/[\x00-\x08\x0B\x0C\x0E-\x1F]/);
+    expect(out).toContain('insert failed');
+    expect(out).toContain('42');
+  });
 });

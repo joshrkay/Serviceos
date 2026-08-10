@@ -28,6 +28,21 @@ export interface RedactPiiOptions {
   redactAddresses?: boolean;
   /** Redact phone numbers (US and international). Default true. */
   redactPhones?: boolean;
+  /**
+   * Require a US number to carry a separator, parentheses, or a `+1`
+   * country code — a BARE 10/11-digit run then stays readable. Default
+   * false (the review-text behavior: in a customer's prose a bare
+   * `5551234567` is a phone number and redacting it is correct).
+   *
+   * Opt in when the text is machine-generated diagnostics rather than
+   * prose, where a bare digit run is far more likely to be integer cents,
+   * an epoch-millis timestamp, or an int4 bound than a phone number
+   * (see `redactedExecutionErrorCause`, proposals/proposal.ts). Redacting
+   * those destroys the only field that carries the diagnosis:
+   * `amount 1234567890 exceeds int4 range 2147483647` becomes
+   * `amount [phone] exceeds int4 range [phone]`.
+   */
+  requireSeparatedPhones?: boolean;
   /** Redact email addresses. Default true. */
   redactEmails?: boolean;
   /**
@@ -68,10 +83,27 @@ const COMMON_FIRST_NAMES = new Set([
 ]);
 
 // Emails — RFC-ish, good enough for free-form text.
-const EMAIL_RE = /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/g;
+//
+// NO trailing `\b`. It used to be there and it was a LEAK: `\b` after the
+// TLD means an email immediately followed by a word character never matches
+// at all — `jane.doe@example.com4155552671` (a Postgres unique-constraint
+// `DETAIL: Key (contact)=(…)` over a concatenated column) and
+// `jane.doe@example.com2026-08-09T12:00:00Z` both sailed through whole.
+// Dropping it is strictly MORE redaction (the TLD class is letters-only, so
+// the match still ends at the last letter run after the final dot) and it
+// removes the chain's dependence on a later pass creating the boundary the
+// email rule needed — which is what made the whole redactor non-idempotent.
+const EMAIL_RE = /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g;
 
 // US phone with optional country code, parens, dashes, dots, spaces.
 const US_PHONE_RE = /(?:\+?1[-.\s]?)?\(?[0-9]{3}\)?[-.\s]?[0-9]{3}[-.\s]?[0-9]{4}\b/g;
+// Same shape, but every optional separator is mandatory in at least one
+// position: the number must carry `(`/`)`, a `-`/`.`/space, or a `+1`
+// prefix. A bare 10- or 11-digit run therefore does NOT match. The leading
+// `(?<![0-9])` stops the pattern from starting mid-run and clipping a long
+// integer. See `RedactPiiOptions.requireSeparatedPhones`.
+const US_PHONE_SEPARATED_RE =
+  /(?<![0-9])(?:\+?1[-.\s])?(?:\([0-9]{3}\)[-.\s]?|[0-9]{3}[-.\s])[0-9]{3}[-.\s][0-9]{4}\b/g;
 // International phone: +<country><7-15 digits>. Restricted to leading + so we
 // don't double-match a US number already caught above.
 const INTL_PHONE_RE = /\+[0-9]{7,15}\b/g;
@@ -105,6 +137,7 @@ export function redactPii(text: string, options: RedactPiiOptions = {}): string 
   const {
     redactEmails = true,
     redactPhones = true,
+    requireSeparatedPhones = false,
     redactAddresses = true,
     redactLastNames = true,
     preserveKnownFirstNames = [],
@@ -125,7 +158,10 @@ export function redactPii(text: string, options: RedactPiiOptions = {}): string 
   // strands "+44" in the output. US format runs second.
   if (redactPhones) {
     result = result.replace(INTL_PHONE_RE, PHONE_PLACEHOLDER);
-    result = result.replace(US_PHONE_RE, PHONE_PLACEHOLDER);
+    result = result.replace(
+      requireSeparatedPhones ? US_PHONE_SEPARATED_RE : US_PHONE_RE,
+      PHONE_PLACEHOLDER,
+    );
   }
 
   // 3. Street addresses — the digit-prefix + street-type-suffix shape
