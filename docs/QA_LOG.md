@@ -21,7 +21,7 @@
 | Run Date | Tester | Environment | Pass Rate | Passes | Failures | Critical | High | Medium | Low | Status | Notes | Detailed Report |
 |----------|--------|-------------|-----------|--------|----------|----------|------|--------|-----|--------|-------|-----------------|
 | 2026-07-30 | [TBD] | Staging | [%] | [X] | [X] | [X] | [X] | [X] | [X] | 🟢 HEALTHY | Initial baseline QA run | [qa-results-2026-07-30.md](qa-results-2026-07-30.md) |
-| 2026-08-18 | Claude Code | Development | 71% | 60 | 13 | 3 | 2 | 4 | 4 | 🟡 CONDITIONAL | Infrastructure blockers prevent full testing; code quality clean; no regressions | [qa-results-2026-08-18.md](#) |
+| 2026-08-18 | Claude Code | Development | 71% | 60 | 13 | 3 | 2 | 4 | 4 | 🔴 BLOCKED | Pass rate <80% per QA_PROCESS.md; infrastructure blockers prevent full testing; code quality clean; no regressions | [qa-results-2026-08-18.md](qa-results-2026-08-18.md) |
 | [DATE] | [Name] | Prod/Staging | [%] | [X] | [X] | [X] | [X] | [X] | [X] | 🔴/🟠/🟡/🟢 | [Change summary] | [Link] |
 
 ---
@@ -79,10 +79,10 @@ Updated after each QA run. Shows which areas are stable vs. problematic.
 | 13. Settings | 10 | 20% | 🔴 | ↓ Blocked | Auth-blocked |
 | 14. Mobile | 10 | 0% | 🔴 | ↓ Blocked | Auth-blocked |
 | 15. Errors | 10 | 60% | 🟡 | → Stable | Infrastructure stable |
-| 16. Performance | 6 | 67% | 🟢 | ↑ Good | Build/load times excellent |
+| 16. Performance | 6 | 67% | 🟠 | ↑ Concerning | Build/load times excellent but below threshold |
 | 17. AI Quality | 8 | 0% | 🔴 | ↓ Blocked | LLM gateway blocked |
-| 18. Security | 8 | 50% | 🟡 | → Stable | RLS policies present |
-| **OVERALL** | **177** | **71%** | 🟡 | **→ Stable** | **Code clean; infrastructure blockers explicit** |
+| 18. Security | 8 | 50% | 🟠 | → Stable | RLS policies present but below threshold |
+| **OVERALL** | **159** | **71%** | 🔴 | **→ Stable** | **Pass rate <80% per QA_PROCESS.md; code clean; infrastructure blockers explicit** |
 
 **Legend**:
 - 🟢 **Healthy** (95%+): Area is stable, no action needed.
