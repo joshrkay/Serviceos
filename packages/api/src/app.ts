@@ -8,6 +8,7 @@ import { openApiSpec } from './swagger/spec';
 import { createHealthRouter, HealthCheck } from './health/health';
 import { toErrorResponse } from './shared/errors';
 import { createPool, createDirectPool } from './db/pool';
+import { buildRepositories, type Repositories } from './db/build-repositories';
 import { verifyRlsRuntimeRole } from './db/rls-runtime-role';
 import { loadConfig, resolveMediaStreamsEnabled } from './shared/config';
 import { resolveWebDistDir } from './web-static-path';
@@ -35,7 +36,6 @@ import {
   verifyRs256Token, type AuthenticatedRequest } from './auth/clerk';
 import { RESILIENCE_FLAG_NAMES } from './flags/resilience-flags';
 import { DeepgramStreamingProvider } from './voice/transcription-providers';
-import { PgTenantRepository } from './auth/pg-tenant';
 
 // Route factories
 import { createCustomerRouter } from './routes/customers';
@@ -54,34 +54,12 @@ import {
   createIntegrationsRouter,
   createIntegrationsOAuthCallbackRouter,
 } from './routes/integrations';
-import {
-  PgAccountingIntegrationRepository,
-  PgAccountingSyncLogRepository,
-  PgAccountingOAuthStateRepository,
-  InMemoryAccountingIntegrationRepository,
-  InMemoryAccountingSyncLogRepository,
-  InMemoryAccountingOAuthStateRepository,
-} from './integrations/accounting/repository';
 import { resolveQuickBooksOAuthConfig } from './integrations/accounting/quickbooks-oauth';
 import {
   runAccountingSyncSweep,
   ACCOUNTING_SYNC_INTERVAL_MS,
 } from './workers/accounting-sync-worker';
-import {
-  PgCalendarIntegrationRepository,
-  PgOAuthStateRepository,
-  InMemoryCalendarIntegrationRepository,
-  InMemoryOAuthStateRepository,
-} from './integrations/calendar-integration';
-import {
-  CalendarSyncService,
-  PgAppointmentCalendarEventRepository,
-  InMemoryAppointmentCalendarEventRepository,
-} from './integrations/calendar-sync';
-import { PgUserRepository } from './users/pg-user';
-import { InMemoryUserRepository } from './users/user';
-import { PgPendingInvitationRepository } from './users/pg-pending-invitation';
-import { InMemoryPendingInvitationRepository } from './users/pending-invitation';
+import { CalendarSyncService } from './integrations/calendar-sync';
 import { createBillingRouter } from './routes/billing';
 import { StripeConnectService } from './billing/stripe-connect';
 import { BillingService } from './billing/subscription';
@@ -89,11 +67,7 @@ import { createPaymentRouter } from './routes/payments';
 import { createTerminalRouter } from './routes/terminal';
 import { createNoteRouter } from './routes/notes';
 import { createDevicesRouter } from './routes/devices';
-import {
-  DEVICE_TOKEN_STALE_AFTER_DAYS,
-  InMemoryDeviceTokenRepository,
-} from './push/device-token-service';
-import { PgDeviceTokenRepository } from './push/pg-device-token-repository';
+import { DEVICE_TOKEN_STALE_AFTER_DAYS } from './push/device-token-service';
 import { ExpoPushDeliveryProvider } from './notifications/expo-push-service';
 import {
   approverUserIdsResolver,
@@ -101,16 +75,10 @@ import {
   notifyNeedsApproval as notifyNeedsApprovalPush_,
 } from './notifications/proposal-push-notifier';
 import { OwnerNotificationService } from './notifications/owner-notification-service';
-import { InMemoryNotificationPreferenceRepository } from './notifications/notification-preferences-service';
-import { PgNotificationPreferenceRepository } from './notifications/pg-notification-preferences-repository';
 import { createNotificationPreferencesRouter } from './routes/notification-preferences';
 import { userIdsWithPermissionResolver } from './notifications/user-targeting';
 import { setOwnerNotifications } from './notifications/owner-notifications-instance';
 import { setOwnerNotificationNameResolvers } from './notifications/owner-notification-name-resolver';
-import {
-  TechnicianAssignmentNotifier,
-  setTechnicianAssignmentNotifier,
-} from './appointments/assignment-notifications';
 import {
   createMeRouter,
   DEFAULT_TENANT_TIMEZONE,
@@ -127,8 +95,6 @@ import {
 import { createConversationRouter } from './routes/conversations';
 import { createSettingsRouter } from './routes/settings';
 import { createBrandVoiceRouter } from './tenants/brand/brand-voice-router';
-import { PgBrandVoiceRepository } from './tenants/brand/pg-brand-voice-repository';
-import { InMemoryBrandVoiceRepository } from './tenants/brand/in-memory-brand-voice-repository';
 import { createDncRouter } from './routes/dnc';
 import { createVerticalRouter } from './routes/verticals';
 import { createVerticalTrainingAssetsRouter } from './routes/vertical-training-assets';
@@ -144,10 +110,6 @@ import { maybeFireFirstRealCallActivation } from './voice/activation';
 import { createOnboardingRouter } from './routes/onboarding';
 import { createOnboardingConversationRouter } from './routes/onboarding-conversation';
 import { OnboardingConversationOrchestrator } from './ai/orchestration/onboarding-conversation';
-import {
-  InMemoryOnboardingSessionRepository,
-  PgOnboardingSessionRepository,
-} from './db/onboarding-session-repository';
 import { createAssistantRouter } from './routes/assistant';
 import { createProposalsRouter } from './routes/proposals';
 import { createRedraftHandlerFactory } from './proposals/redraft-handler-factory';
@@ -157,12 +119,8 @@ import { createFilesRouter, createDevStorageRouter } from './routes/files';
 import { createJobFilesRouter } from './routes/job-files';
 import { createJobPhotosRouter } from './routes/job-photos';
 import { JobPhotoService } from './jobs/job-photo-service';
-import { InMemoryJobPhotoRepository } from './jobs/job-photo';
-import { PgJobPhotoRepository } from './jobs/pg-job-photo';
 import { createAttachmentsRouter } from './routes/attachments';
 import { AttachmentService } from './attachments/attachment-service';
-import { InMemoryAttachmentRepository } from './attachments/attachment';
-import { PgAttachmentRepository } from './attachments/pg-attachment';
 import { createDispatchRoutes } from './dispatch/routes';
 import { initDispatchPresenceStore } from './dispatch/presence-store';
 import { initDispatchBoardFanout } from './dispatch/board-event-bus';
@@ -181,13 +139,7 @@ import { RepoBackedActivityFeedReporter } from './analytics/activity-feed';
 import { createActivityFeedRouter } from './analytics/activity-feed-router';
 import { loadTenantBusinessHours } from './telephony/business-hours-loader';
 import { createTimeEntriesRouter } from './routes/time-entries';
-import { InMemoryTimeEntryRepository } from './time-tracking/time-entry';
-import { PgTimeEntryRepository } from './time-tracking/pg-time-entry';
 import { TimeEntryService } from './time-tracking/time-entry-service';
-import {
-  PgRevenueBySourceRepository,
-  InMemoryRevenueBySourceRepository,
-} from './reports/revenue-by-source';
 import { PgMoneyDashboardRepository } from './reports/pg-money-dashboard';
 import { createFeedbackResponsesRouter } from './routes/feedback';
 import { createInteractionsRouter } from './routes/interactions';
@@ -209,78 +161,25 @@ import {
 } from './workers/failure-rate-monitor';
 
 // In-memory repositories (fallback for dev without DATABASE_URL)
-import { InMemoryCustomerRepository } from './customers/customer';
-import { InMemoryContactRepository } from './customers/contact';
-import { PgContactRepository } from './customers/pg-contact';
-import { InMemoryTagRepository } from './customers/tag';
-import { PgTagRepository } from './customers/pg-tag';
-import { InMemoryCustomFieldRepository } from './customers/custom-field';
-import { PgCustomFieldRepository } from './customers/pg-custom-field';
-import { InMemoryCustomerMergeRepository } from './customers/merge';
-import { PgCustomerMergeRepository } from './customers/pg-merge';
 import { createCustomerCustomFieldRouter } from './routes/customer-custom-fields';
-import { InMemoryJobFormRepository } from './job-forms/job-form';
-import { PgJobFormRepository } from './job-forms/pg-job-form';
 import { createJobFormRouter } from './routes/job-forms';
-import { InMemoryRecurringJobRepository } from './recurring-jobs/recurring-job';
-import { PgRecurringJobRepository } from './recurring-jobs/pg-recurring-job';
 import { createRecurringJobRouter } from './routes/recurring-jobs';
-import { InMemoryJobCustomFieldRepository } from './jobs/job-custom-field';
-import { PgJobCustomFieldRepository } from './jobs/pg-job-custom-field';
 import { createJobCustomFieldRouter } from './routes/job-custom-fields';
-import { InMemoryFinancingRepository } from './financing/financing';
-import { PgFinancingRepository } from './financing/pg-financing';
 import { createFinancingProvider } from './financing/financing-provider';
 import { createFinancingRouter, createFinancingWebhookRouter } from './routes/financing';
-import { InMemoryCampaignRepository } from './marketing/campaign';
-import { PgCampaignRepository } from './marketing/pg-campaign';
 import { createMarketingRouter } from './routes/marketing';
-import { InMemoryCustomerGroupRepository } from './customers/customer-group';
-import { PgCustomerGroupRepository } from './customers/pg-customer-group';
 import { createCustomerGroupRouter } from './routes/customer-groups';
-import { InMemoryStandingInstructionRepository } from './instructions/standing-instructions';
-import { PgStandingInstructionRepository } from './instructions/pg-standing-instructions';
 import { createStandingInstructionRouter } from './routes/standing-instructions';
-import { InMemoryLeadRepository } from './leads/lead';
-import { InMemoryLocationRepository } from './locations/location';
-import { InMemoryJobRepository } from './jobs/job';
-import { InMemoryJobTimelineRepository } from './jobs/job-lifecycle';
-import { InMemoryAppointmentRepository } from './appointments/appointment';
-import { InMemoryAssignmentRepository } from './appointments/assignment';
-import { InMemoryEstimateRepository } from './estimates/estimate';
-import { InMemoryInvoiceRepository } from './invoices/invoice';
-import { InMemoryDunningConfigRepository, InMemoryDunningEventRepository } from './invoices/dunning-config';
-import { InMemoryInvoiceScheduleRepository } from './invoices/invoice-schedule';
-import { PgInvoiceScheduleRepository } from './invoices/pg-invoice-schedule';
-import { InMemoryBatchInvoiceRunRepository } from './invoices/batch-invoice-run';
-import { PgBatchInvoiceRunRepository } from './invoices/pg-batch-invoice-run';
 import { runBatchInvoiceSweep } from './workers/batch-invoice-worker';
-import { InMemoryPaymentRepository } from './invoices/payment';
 import { createPaymentLinkProvider } from './payments/payment-link-provider';
-import { InMemoryNoteRepository } from './notes/note';
-import { InMemoryConversationRepository } from './conversations/conversation-service';
-import {
-  InMemorySettingsRepository,
-  resolveEscalationSettings,
-  createSettingsOwnerPhoneResolver,
-} from './settings/settings';
+import { resolveEscalationSettings, createSettingsOwnerPhoneResolver } from './settings/settings';
 import { InMemoryAuditRepository, createAuditEvent } from './audit/audit';
-import { InMemoryLookupEventRepository } from './lookup-events/lookup-event';
-import { PgLookupEventRepository } from './lookup-events/pg-lookup-event';
 import { LookupEventService } from './lookup-events/lookup-event-service';
-import { InMemoryEstimateTemplateRepository } from './templates/estimate-template';
-import { InMemoryServiceBundleRepository } from './verticals/bundles';
-import {
-  InMemoryPrivacyAuditRepository,
-  InMemoryTrainingAssetRepository,
-} from './verticals/in-memory-training-assets';
 import { TrainingAssetRedactionService } from './verticals/training-asset-redaction';
 import { TrainingAssetService } from './verticals/training-asset-service';
 import { createPresidioAnonymizer } from './ai/privacy/presidio-adapter';
-import { InMemoryQualityMetricsRepository } from './quality/metrics';
-import { InMemoryVoiceRepository, createTranscribeAudioFn } from './voice/voice-service';
+import { createTranscribeAudioFn } from './voice/voice-service';
 import { createWhisperTranscriptionProvider } from './voice/transcription-providers';
-import { InMemoryDispatchAnalyticsRepository } from './dispatch/analytics';
 import {
   InMemoryFeatureFlagStore,
   InMemoryFeatureFlagRepository,
@@ -292,18 +191,10 @@ import { PgFeatureFlagRepository } from './flags/pg-feature-flags';
 import { PgTenantFeatureFlagRepository } from './flags/pg-tenant-feature-flags';
 import { createFeatureFlagsRouter } from './routes/feature-flags';
 import { createAdminTenantsRouter } from './routes/admin-tenants';
-import { InMemoryTechnicianLocationPingRepository } from './telemetry/technician-location-ping';
-import {
-  InMemoryTechnicianLocationAuthorizer,
-  PgTechnicianLocationAuthorizer,
-} from './telemetry/technician-location-authz';
-import { InMemoryQueue, processMessage, type QueueMessage } from './queues/queue';
-import { createProvisionTwilioWorker, PROVISION_TWILIO_JOB_TYPE } from './workers/provision-twilio';
+import { processMessage, type QueueMessage } from './queues/queue';
+import { createProvisionTwilioWorker } from './workers/provision-twilio';
 import { createDeprovisionTenantWorker } from './workers/deprovision-tenant';
 import { createVerifyAiWorker } from './workers/verify-ai';
-import { InMemoryApprovalRepository } from './estimates/approval';
-import { InMemoryEditDeltaRepository } from './estimates/edit-delta';
-import { InMemoryPackActivationRepository } from './settings/pack-activation';
 import { buildVerticalPromptResolver } from './verticals/resolve-active-pack';
 import { VerticalTerminologyProvider } from './voice/vertical-terminology-provider';
 import { TenantGlossaryProvider } from './voice/tenant-glossary-provider';
@@ -312,10 +203,6 @@ import { FillerAudioCache } from './ai/agents/customer-calling/filler-audio-cach
 import { classifyTurnSentiment } from './ai/agents/customer-calling/sentiment-classifier';
 import { gradeVulnerability } from './ai/agents/customer-calling/vulnerability-grader';
 import { createVulnerabilityTriageHook } from './ai/agents/customer-calling/vulnerability-triage-hook';
-import {
-  PgTriageEventRepository,
-  InMemoryTriageEventRepository,
-} from './ai/agents/customer-calling/pg-triage-events';
 import { patchOwnerThrough } from './ai/skills/patch-owner-through';
 import { buildMarkCustomerVulnerablePayload } from './ai/agents/customer-calling/vulnerable-customer';
 import { createHvacPack } from './verticals/packs/hvac';
@@ -329,81 +216,22 @@ import {
 } from './ai/orchestration/caller-plan-context';
 import { createThresholdResolver } from './proposals/threshold-resolver';
 import { createVoicePersonaResolver } from './settings/voice-persona-resolver';
-import { InMemoryVerticalPackRegistry as InMemoryCanonicalVerticalPackRegistry } from './shared/vertical-pack-registry';
 
 // Postgres-backed repositories (production)
-import { PgCustomerRepository } from './customers/pg-customer';
-import { PgLeadRepository } from './leads/pg-lead';
-import { PgLocationRepository } from './locations/pg-location';
-import { PgJobRepository } from './jobs/pg-job';
-import { PgJobTimelineRepository } from './jobs/pg-job-lifecycle';
-import { PgAppointmentRepository } from './appointments/pg-appointment';
-import { PgEstimateRepository } from './estimates/pg-estimate';
-import { PgInvoiceRepository } from './invoices/pg-invoice';
-import { PgDunningConfigRepository, PgDunningEventRepository } from './invoices/pg-dunning-config';
-import { PgPaymentRepository } from './invoices/pg-payment';
-import { InMemoryExpenseRepository } from './expenses/expense';
-import { PgExpenseRepository } from './expenses/pg-expense';
-import { InMemoryMaterialItemRepository } from './materials/material-item';
-import { PgMaterialItemRepository } from './materials/pg-material-item';
-import { PgNoteRepository } from './notes/pg-note';
-import { PgConversationRepository } from './conversations/pg-conversation';
-import { PgSettingsRepository } from './settings/pg-settings';
 import { PgAuditRepository } from './audit/pg-audit';
 import { ForwardingAuditRepository } from './audit/forwarding-audit-repository';
 import { recordApiError } from './analytics/posthog';
-import { PgEstimateTemplateRepository } from './templates/pg-estimate-template';
-import { PgServiceBundleRepository } from './verticals/pg-bundles';
-import {
-  PgPrivacyAuditRepository,
-  PgTrainingAssetRepository,
-} from './verticals/pg-training-assets';
-import { PgQualityMetricsRepository } from './quality/pg-metrics';
-import { PgVoiceRepository } from './voice/pg-voice';
-import { InMemoryVoiceSessionRepository } from './voice/voice-session';
-import { PgVoiceSessionRepository } from './voice/pg-voice-session';
-import { InMemoryCallMeBackRepository } from './voice/call-me-back/call-me-back';
-import { PgCallMeBackRepository } from './voice/call-me-back/pg-call-me-back';
 import { runCallMeBackSweep } from './workers/call-me-back-worker';
-import { PgTechnicianLocationPingRepository } from './telemetry/pg-technician-location-ping';
-import { PgApprovalRepository } from './estimates/pg-approval';
-import { PgEditDeltaRepository } from './estimates/pg-edit-delta';
-import { PgPackActivationRepository } from './settings/pg-pack-activation';
-import { PgVerticalPackRegistry } from './shared/pg-vertical-pack-registry';
-import { InMemoryFileRepository } from './files/file-service';
-import { InMemoryJobFileRepository } from './files/job-file-repository';
-import { PgFileRepository } from './files/pg-file';
-import { PgJobFileRepository } from './files/pg-job-file';
-import { InMemoryCatalogItemRepository } from './catalog/catalog-item';
-import { PgCatalogItemRepository } from './catalog/pg-catalog-item';
 import { createStorageProvider } from './files/storage-provider';
 import { createSharpImageProcessor } from './files/image-processor';
 import { createImagePostProcessWorker } from './workers/image-post-process-worker';
 import { PgWebhookRepository } from './webhooks/pg-webhook';
-import { PgWebhookEventRepository } from './webhooks/pg-webhook-event';
-import { PgAssignmentRepository } from './appointments/pg-assignment';
-import { PgDocumentRevisionRepository } from './ai/pg-document-revision';
-import { PgDiffAnalysisRepository } from './ai/pg-diff-analysis';
-import { PgDispatchAnalyticsRepository } from './dispatch/pg-analytics';
-import { PgDelayNoticeStateRepository } from './notifications/pg-delay-notice-state';
 import { PgQueue } from './queues/pg-queue';
-import {
-  InMemoryFeedbackRequestRepository,
-} from './feedback/feedback-request';
-import {
-  InMemoryFeedbackResponseRepository,
-} from './feedback/feedback-response';
-import { PgFeedbackRequestRepository } from './feedback/pg-feedback-request';
-import { PgFeedbackResponseRepository } from './feedback/pg-feedback-response';
 import { NoopFeedbackDispatcher, MessageDeliveryFeedbackDispatcher } from './feedback/dispatcher';
 import { MessageDeliveryProvider } from './notifications/delivery-provider';
 import { createMessageDeliveryProvider } from './notifications/delivery-provider-factory';
 import { GatedMessageDelivery } from './notifications/gated-message-delivery';
 import { SendService } from './notifications/send-service';
-import {
-  InMemoryDispatchRepository,
-  PgDispatchRepository,
-} from './notifications/dispatch-repository';
 import { PublicEstimateService } from './estimates/public-estimate-service';
 import { createPublicEstimatesRouter } from './routes/public-estimates';
 import { PublicInvoiceService } from './invoices/public-invoice-service';
@@ -414,8 +242,7 @@ import { createOneTapUndoRouter } from './routes/one-tap-undo';
 import { createFeedbackSendWorker } from './workers/feedback-send';
 import { runRecurringAgreementsSweep } from './workers/recurring-agreements-worker';
 import { runDailyDigestSweep, DIGEST_SWEEP_INTERVAL_MS } from './workers/daily-digest-worker';
-import { PgDailyDigestRepository } from './digest/pg-daily-digest';
-import { InMemoryDailyDigestRepository, type DailyDigestPayload } from './digest/digest-service';
+import { type DailyDigestPayload } from './digest/digest-service';
 import { composeBrandVoiceMessage } from './ai/brand-voice/composer';
 import { runOverdueInvoiceSweep } from './workers/overdue-invoice-worker';
 import {
@@ -426,10 +253,6 @@ import { runHfcrWeeklySendSweep } from './workers/hfcr-weekly-send-worker';
 import { runWeeklyFeedbackSweep } from './workers/weekly-feedback-worker';
 import { buildWeeklyFeedbackSnapshot } from './digest/weekly-feedback-builder';
 import { buildSuggestionsPrompt, parseSuggestions } from './digest/weekly-feedback';
-import {
-  PgHfcrWeeklySendRepository,
-  InMemoryHfcrWeeklySendRepository,
-} from './metrics/hfcr-weekly-send';
 import { runGoogleReviewsSweep } from './workers/google-reviews';
 import { runThankYouSmsSweep } from './workers/thank-you-sms-worker';
 import { runReviewRequestSweep } from './workers/review-request-worker';
@@ -440,10 +263,6 @@ import { PgReviewRepository } from './reputation/pg-review';
 import { PgReviewPollStateRepository } from './reputation/poll-state';
 import { PgServiceCreditRepository } from './reputation/pg-service-credit';
 import { PgGoogleBusinessReplyResolver } from './reputation/pg-google-business-reply-resolver';
-import {
-  PgGoogleBusinessIntegrationRepository,
-  InMemoryGoogleBusinessIntegrationRepository,
-} from './reputation/google-business-integration';
 import type { GoogleBusinessOAuthConfig } from './reputation/google-business-client';
 import {
   createGoogleBusinessIntegrationsRouter,
@@ -454,22 +273,14 @@ import { SettingsBrandVoiceLoader } from './reputation/settings-brand-voice-load
 import { PgCustomerLoader } from './reputation/match-customer';
 import { createCredentialResolver, getTenantTwilioCreds } from './integrations/credentials';
 import { checkOutboundConsent, type OutboundConsentContext } from './voice/outbound-consent';
-import { InMemoryAgreementRepository } from './agreements/agreement';
-import { PgAgreementRepository } from './agreements/pg-agreement';
-import { InMemoryCustomerPaymentMethodRepository } from './payments/customer-payment-method';
-import { PgCustomerPaymentMethodRepository } from './payments/pg-customer-payment-method';
 import { StripeDuesCollector, DuesInvoiceOps } from './agreements/dues-collector';
 import { issueInvoice } from './invoices/invoice';
 import { recordPayment } from './invoices/payment';
-import { InMemoryAgreementRunRepository } from './agreements/agreement-run';
-import { PgAgreementRunRepository } from './agreements/pg-agreement-run';
 import { createAgreementsRouter } from './routes/agreements';
 import { createMaintenanceContractsRouter } from './routes/maintenance-contracts';
 import { PgMaintenanceContractRepository } from './maintenance-contracts/pg-maintenance-contract';
 import { InMemoryMaintenanceContractRepository } from './maintenance-contracts/maintenance-contract';
 import { createMessageTemplateRouter } from './messaging/message-template-router';
-import { PgMessageTemplateRepository } from './messaging/pg-message-template';
-import { InMemoryMessageTemplateRepository } from './messaging/message-template';
 import {
   InMemoryPortalSessionRepository,
   PortalSessionRepository,
@@ -496,15 +307,9 @@ import { isApproverPhone } from './proposals/approver-identity';
 import { createTranscriptIngestionWorker } from './workers/transcript-ingestion-worker';
 import { createProposalCorrectionWorker } from './workers/proposal-correction-worker';
 // U7 — structured correction-lesson loop (record on execution, undo on undo).
-import {
-  InMemoryCorrectionLessonRepository,
-} from './learning/corrections/correction-lesson';
-import { PgCorrectionLessonRepository } from './learning/corrections/pg-correction-lesson';
 import type { ConfigPorts } from './learning/corrections/lesson-applicator';
 import { recordCorrectionLessonsOnExecution } from './learning/corrections/record-on-execution';
 // Story 3.9 — raw per-field proposal-edit corrections log.
-import { InMemoryCorrectionRepository } from './proposals/corrections/correction';
-import { PgCorrectionRepository } from './proposals/corrections/pg-correction';
 import {
   runRecordingRetentionSweep,
   PgRecordingRetentionRepository,
@@ -521,16 +326,6 @@ export { detectLanguage } from './ai/orchestration/language-detector';
 // through detectLanguage (which applies the supported_languages gate).
 import { detectLanguage as detectInitialCallLanguage } from './ai/orchestration/language-detector';
 import { identifyCaller } from './ai/skills/identify-caller';
-import {
-  PgKnowledgeChunkRepository,
-  InMemoryKnowledgeChunkRepository,
-} from './ai/training/knowledge-chunks';
-import { InMemoryRetrievalEvalRunRepository } from './ai/training/retrieval-eval-run';
-import { PgRetrievalEvalRunRepository } from './ai/training/pg-retrieval-eval-run';
-import { InMemoryProposalExecutionRepository } from './proposals/proposal-execution';
-import { PgProposalExecutionRepository } from './proposals/pg-proposal-execution';
-import { PgCallTranscriptTurnRepository } from './voice/pg-call-transcript-turn';
-import { InMemoryCallTranscriptTurnRepository } from './voice/call-transcript-turn';
 import type { EmbeddingProvider } from './ai/providers/openai-compatible';
 import { createVoiceActionRouterWorker, VoiceActionRouterPayload, INTENT_TO_PROPOSAL_TYPE } from './workers/voice-action-router';
 import { PgEntityResolver } from './ai/resolution/pg-entity-resolver';
@@ -550,8 +345,6 @@ import {
 import * as gatewayFactory from './ai/gateway/factory';
 import { shutdownRedisClients } from './redis/redis-client';
 import { createAiHealthRouter } from './routes/ai-health';
-import { InMemoryAiRunRepository } from './ai/ai-run';
-import { PgAiRunRepository } from './ai/pg-ai-run';
 import { createEvaluationRouter } from './routes/evaluation';
 import { PgShadowComparisonStore } from './ai/evaluation/pg-shadow-comparison';
 import { InMemoryShadowComparisonStore } from './ai/evaluation/shadow-comparison';
@@ -566,14 +359,10 @@ import { escalationEventsRouter } from './escalations/events-route';
 import { whisperRouter } from './telephony/whisper-route';
 import { WhisperCache } from './telephony/whisper-cache';
 import { requireTwilioSignature } from './telephony/twilio-signature';
-import { InMemoryOnCallRepository, PgOnCallRepository } from './oncall/rotation';
 import { InMemoryProposalRepository, createProposal as buildProposalRow } from './proposals/proposal';
 import { PgProposalRepository } from './proposals/pg-proposal';
 // Rivet P2 F-1 — Supervisor Agent v1 (deterministic policy hook + advisory annotator).
-import {
-  configureSupervisorCreationHook,
-  SUPERVISOR_DISABLED_FLAG,
-} from './proposals/supervisor/hook';
+import { configureSupervisorCreationHook } from './proposals/supervisor/hook';
 import {
   SupervisorPolicyService,
   recordExecutedProposalSpend,
@@ -594,10 +383,6 @@ import {
 // N-004 (P2-037) — Supervisor Agent review pass (four-check pre-dispatch gate).
 import { configureSupervisorReviewGate } from './ai/supervisor/review-gate';
 import { createSupervisorReviewGate } from './ai/supervisor/reviewer';
-import {
-  InMemorySupervisorReviewRepository,
-  PgSupervisorReviewRepository,
-} from './ai/supervisor/reviews-repo';
 import { PgPricingBaselineResolver } from './ai/supervisor/pricing-baseline';
 import {
   DEFAULT_SUPERVISOR_REVIEW_MODE,
@@ -610,34 +395,21 @@ import {
 } from './config/ai-routing';
 import { ProposalExecutor } from './proposals/execution/executor';
 import { IdempotencyGuard } from './proposals/execution/idempotency';
-import {
-  NoOpIdempotencyLockProvider,
-  PgIdempotencyLockProvider,
-} from './proposals/execution/idempotency-lock';
 import { createExecutionHandlerRegistry } from './proposals/execution/handlers';
 import { assertVoiceHandlersWired } from './proposals/execution/wiring-assertions';
 import { resolveInvoiceDeliveryProvider } from './proposals/execution/invoice-delivery-factory';
 import { resolveEstimateDeliveryProvider } from './proposals/execution/estimate-delivery-factory';
-import { InMemoryWorkingHoursRepository } from './availability/working-hours';
-import { PgWorkingHoursRepository } from './availability/pg-working-hours';
-import { InMemoryUnavailableBlockRepository } from './availability/unavailable-block';
-import { PgUnavailableBlockRepository } from './availability/pg-unavailable-block';
 import { createTravelTimeProvider } from './scheduling/travel-time/factory';
 import { StubSkillMatcher } from './scheduling/skill-matcher';
 import { createSchedulingRouter } from './scheduling/routes';
 import type { FeasibilityDependencies } from './scheduling/feasibility-types';
-import {
-  createDiffAnalysisWorker,
-  InMemoryDiffAnalysisRepository,
-} from './ai/diff-analysis';
-import { InMemoryDocumentRevisionRepository } from './ai/document-revision';
+import { createDiffAnalysisWorker } from './ai/diff-analysis';
 import { e1ScriptReadiness } from './ai/agents/customer-calling/emergency-tier';
 import { createLogger } from './logging/logger';
 import { createRequestLoggingMiddleware, captureRequestError } from './middleware/request-logging';
 import {
   createDelayNotificationWorker,
   DelayNotificationCoordinator,
-  InMemoryDelayNoticeStateRepository,
   NextCustomerSelector,
   NoopDelayNotificationService,
 } from './notifications/delay-notifications';
@@ -649,7 +421,6 @@ import { runHoldReaperSweep } from './workers/hold-reaper-worker';
 import { runEstimateReminderSweep } from './workers/estimate-reminder-worker';
 import { runEstimateExpirySweep } from './workers/estimate-expiry-worker';
 import { runProposalExpirySweep } from './workers/proposal-expiry-worker';
-import { PgDncRepository, InMemoryDncRepository } from './compliance/dnc';
 import { buildStopKeywordHandler, buildStartKeywordHandler } from './compliance/stop-reply';
 import {
   registerKeywordHandler,
@@ -663,11 +434,7 @@ import { PgCustomerNegotiationContextProvider } from './customers/pg-customer-ne
 import { normalizePhone } from './customers/dedup';
 import { DefaultCurrentQuoteResolver } from './conversations/negotiation/current-quote-resolver';
 import { evaluateNegotiationDiscount } from './proposals/guardrails/negotiation-guardrail';
-import {
-  DroppedCallScheduler,
-  PgDroppedCallRecoveryRepository,
-  InMemoryDroppedCallRecoveryRepository,
-} from './sms/recovery/scheduler';
+import { DroppedCallScheduler } from './sms/recovery/scheduler';
 import { createDroppedCallResumeHandler } from './sms/recovery/resume-handler';
 // P8-015 — production deps for the dropped-call recovery sweep.
 import type { DroppedCallHandlerDeps } from './sms/recovery/dropped-call-handler';
@@ -680,10 +447,6 @@ import {
   DROPPED_CALL_RECOVERY_FLAG,
 } from './workers/dropped-call-worker';
 import { PgConversationLinkRepository } from './conversations/pg-conversation-link';
-import {
-  PgConsentEventRepository,
-  InMemoryConsentEventRepository,
-} from './compliance/consent-events';
 import { TwilioRecordingControl } from './telephony/recording-control';
 // RV-050 — inbound MMS photo ingestion from registered tech phones.
 // P0-009: the webhook seam enqueues; the worker runs the pipeline.
@@ -694,8 +457,6 @@ import {
 // P6-028 — tech "I'm out today" keyword handler (OUT|SICK|UNAVAILABLE).
 import {
   registerTechStatusKeywords,
-  PgTechStatusTodayRepository,
-  InMemoryTechStatusTodayRepository,
   // B5.5 — the en-route ('omw' / 'on my way') SMS keyword leg.
   registerEnRouteSmsKeyword,
 } from './sms/tech-status';
@@ -708,8 +469,6 @@ import {
 } from './sms/customer-mms/customer-mms-intake';
 import {
   registerProposalReplySms,
-  PgProposalSmsEventRepository,
-  InMemoryProposalSmsEventRepository,
   createProposalSmsEvent,
   encodeDigestApproveAllBody,
   createLlmEditInterpreter,
@@ -731,7 +490,6 @@ import type { TenantIntegrationStatus } from './integrations/status-machine';
 // this composition-root into its own module so app.ts no longer carries an
 // inline repository class. Production/staging always use the Pg variant
 // (createApp() throws if DATABASE_URL is missing in those environments).
-import { InMemoryWebhookEventRepository } from './webhooks/in-memory-webhook-event';
 
 // Composition-root helpers extracted into ./bootstrap. Imported for local use
 // inside createApp() AND re-exported so existing tests that import them from
@@ -766,7 +524,7 @@ export type AppWithLifecycle = express.Express & {
   readonly backgroundIntervalCount: number;
 };
 
-export function createApp(): AppWithLifecycle {
+export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecycle {
   // §11 H3: Initialize Sentry FIRST so any error thrown during startup
   // or in handler construction below is captured. initSentry() is a no-op
   // when SENTRY_DSN is unset (dev/test), so this is safe in every env.
@@ -1085,40 +843,115 @@ export function createApp(): AppWithLifecycle {
 
   // Webhook routes — mounted before Clerk JWT middleware because webhooks
   // use their own signature verification (svix for Clerk, stripe-signature for Stripe).
-  // The settings repo is constructed early so the Clerk webhook tenant
-  // bootstrap can seed a default TenantSettings row alongside the new
-  // tenant — closes the onboarding hole where a new operator would 500
-  // on their first POST /api/estimates.
-  // BUG-2 — when there's no pool, every consumer must share ONE
-  // DevInMemoryTenantRepository instance, otherwise the public-intake
-  // path and the dev-auth-bypass middleware end up with disjoint
-  // tenant maps and customers created on one side don't resolve on
-  // the other.
-  // Same for settings: InMemorySettingsRepository is stateful — the
-  // Clerk webhook seeder and /api/settings must share one map or
-  // hermetic/dev boots 404 on Settings after a successful bootstrap.
-  const tenantRepo = pool
-    ? new PgTenantRepository(pool)
-    : new DevInMemoryTenantRepository();
-  const settingsRepo = pool
-    ? new PgSettingsRepository(pool)
-    : new InMemorySettingsRepository();
+  // Repositories are constructed by buildRepositories() (D-024 Stage 1);
+  // `overrides` lets a caller substitute individual repositories — see the
+  // overrides caveat in db/build-repositories.ts.
+  const {
+    tenantRepo,
+    settingsRepo,
+    webhookInvoiceRepo,
+    webhookEstimateRepo,
+    webhookPaymentRepo,
+    jobRepo,
+    pendingInvitationRepo,
+    queue,
+    webhookEventRepo,
+    dncRepo,
+    customerRepo,
+    customerContactRepo,
+    customerTagRepo,
+    customerCustomFieldRepo,
+    jobFormRepo,
+    recurringJobRepo,
+    jobCustomFieldRepo,
+    financingRepo,
+    campaignRepo,
+    customerGroupRepo,
+    standingInstructionRepo,
+    customerMergeRepo,
+    leadRepo,
+    locationRepo,
+    timelineRepo,
+    assignmentRepo,
+    appointmentRepo,
+    userRepo,
+    workingHoursRepo,
+    unavailableBlockRepo,
+    estimateRepo,
+    invoiceRepo,
+    dunningConfigRepo,
+    dunningEventRepo,
+    hfcrWeeklySendRepo,
+    invoiceScheduleRepo,
+    batchInvoiceRunRepo,
+    batchInvoiceTxRunner,
+    paymentRepo,
+    expenseRepo,
+    materialItemRepo,
+    noteRepo,
+    conversationRepo,
+    callMeBackRepo,
+    deviceTokenRepo,
+    lookupEventRepo,
+    agreementRepo,
+    customerPaymentMethodRepo,
+    templateRepo,
+    messageTemplateRepo,
+    bundleRepo,
+    qualityMetricsRepo,
+    voiceRepo,
+    voiceSessionRepo,
+    technicianLocationPingRepo,
+    technicianLocationAuthorizer,
+    approvalRepo,
+    deltaRepo,
+    packActivationRepo,
+    trainingAssetRepo,
+    privacyAuditRepo,
+    fileRepo,
+    jobFileRepo,
+    jobPhotoRepo,
+    attachmentRepo,
+    catalogRepo,
+    feedbackRequestRepo,
+    feedbackResponseRepo,
+    agreementRunRepo,
+    timeEntryRepo,
+    canonicalPackRegistry,
+    aiRunRepo,
+    knowledgeChunkRepo,
+    proposalExecutionRepo,
+    correctionLessonRepo,
+    supervisorReviewsRepo,
+    correctionRepo,
+    retrievalEvalRunRepo,
+    callTranscriptTurnRepo,
+    dispatchRepo,
+    consentEventRepo,
+    documentRevisionRepo,
+    diffAnalysisRepo,
+    techStatusTodayRepo,
+    proposalSmsEventRepo,
+    dispatchAnalyticsRepo,
+    googleBusinessIntegrationRepo,
+    brandVoiceRepo,
+    proposalIdempotencyLock,
+    delayNoticeStateRepo,
+    dailyDigestRepo,
+    calendarIntegrationRepo,
+    oauthStateRepo,
+    appointmentCalendarEventRepo,
+    accountingIntegrationRepo,
+    accountingSyncLogRepo,
+    accountingOAuthStateRepo,
+    sharedOnCallRepo,
+    droppedCallRecoveryRepo,
+    triageEventsRepo,
+    revenueBySourceRepo,
+    notificationPreferenceRepo,
+    onboardingSessionRepo,
+  } = { ...buildRepositories(pool, directPool), ...overrides };
   const webhookSettingsRepo = settingsRepo;
-  // Constructed early so the Stripe webhook handler can record payments.
-  const webhookInvoiceRepo = pool ? new PgInvoiceRepository(pool) : new InMemoryInvoiceRepository();
-  const webhookEstimateRepo = pool ? new PgEstimateRepository(pool) : new InMemoryEstimateRepository();
-  const webhookPaymentRepo = pool ? new PgPaymentRepository(pool) : new InMemoryPaymentRepository();
-  // Tier 4 (Deposit rules — PR 3b). Hoisted up so the Stripe webhook
-  // and the rest of the app share a single instance — InMemory repos
-  // are stateful, so two separate `new InMemoryJobRepository()` calls
-  // would diverge in tests.
-  const jobRepo            = pool ? new PgJobRepository(pool)            : new InMemoryJobRepository();
-  // Tier 4 (Team members — PR 3). Same hoist for pending invitations
-  // — the Clerk webhook reads them on user.created and the /api/users
-  // routes write them. Single shared InMemory in tests.
-  const pendingInvitationRepo = pool
-    ? new PgPendingInvitationRepository(pool)
-    : new InMemoryPendingInvitationRepository();
   // Tier 4 (Subscription — Rivet billing). Hoisted up so the Stripe
   // webhook can update the cached subscription status when
   // customer.subscription.* events arrive. Single instance shared
@@ -1145,9 +978,6 @@ export function createApp(): AppWithLifecycle {
         config: { apiKey: process.env.STRIPE_SECRET_KEY },
       })
     : undefined;
-  // Queue constructed here (before webhook router) so new-tenant webhooks can
-  // enqueue provisioning jobs synchronously during the request.
-  const queue = pool ? new PgQueue(pool) : new InMemoryQueue();
   // Wrap the single audit-repo instance in the PostHog forwarding decorator at
   // the composition root: every mutation's audit write (~270 sites, all
   // domains) is threaded through `auditRepo`, so this one wrap gives full
@@ -1156,7 +986,6 @@ export function createApp(): AppWithLifecycle {
   const webhookAuditRepo = new ForwardingAuditRepository(
     pool ? new PgAuditRepository(pool) : new InMemoryAuditRepository(),
   );
-  const webhookEventRepo = pool ? new PgWebhookEventRepository(pool) : new InMemoryWebhookEventRepository();
   // Blocker 1 — durable idempotency store for the Stripe/Clerk dedup path
   // (handleWebhookEvent). Postgres-backed in real deploys; left undefined
   // without a pool (tests/dev) so createWebhookRouter falls back to its
@@ -1167,7 +996,6 @@ export function createApp(): AppWithLifecycle {
   // The inbound-SMS dispatcher routes any matching first-token to these
   // handlers, which mutate tenant_dnc_list. Suppression at outbound-send
   // time is layered on top in send-service / appointment-confirmation-notifier.
-  const dncRepo = pool ? new PgDncRepository(pool) : new InMemoryDncRepository();
   // STOP/START handler registration is deferred until the consent ledger and
   // customer repos exist (Story 10.6 unifies DNC + consent_events + the
   // customers.consent_status rollup) — see registration below.
@@ -1233,80 +1061,23 @@ export function createApp(): AppWithLifecycle {
     app.use('/storage-dev', createDevStorageRouter());
   }
 
-  const customerRepo       = pool ? new PgCustomerRepository(pool)       : new InMemoryCustomerRepository();
-  // U1 (CRM Jobber parity) — multiple contacts per customer.
-  const customerContactRepo = pool ? new PgContactRepository(pool)       : new InMemoryContactRepository();
-  // U2 (CRM Jobber parity) — customer tags + tenant-defined custom fields.
-  const customerTagRepo     = pool ? new PgTagRepository(pool)           : new InMemoryTagRepository();
-  const customerCustomFieldRepo = pool ? new PgCustomFieldRepository(pool) : new InMemoryCustomFieldRepository();
-  const jobFormRepo = pool ? new PgJobFormRepository(pool) : new InMemoryJobFormRepository();
-  const recurringJobRepo = pool ? new PgRecurringJobRepository(pool) : new InMemoryRecurringJobRepository();
-  const jobCustomFieldRepo = pool ? new PgJobCustomFieldRepository(pool) : new InMemoryJobCustomFieldRepository();
-  const financingRepo = pool ? new PgFinancingRepository(pool) : new InMemoryFinancingRepository();
   const financingProvider = createFinancingProvider();
-  const campaignRepo = pool ? new PgCampaignRepository(pool) : new InMemoryCampaignRepository();
-  const customerGroupRepo = pool ? new PgCustomerGroupRepository(pool) : new InMemoryCustomerGroupRepository();
-  // UB-A1 — standing instructions the AI agents apply when drafting.
-  const standingInstructionRepo = pool
-    ? new PgStandingInstructionRepository(pool)
-    : new InMemoryStandingInstructionRepository();
   const entityAliasRepo = pool ? new PgEntityAliasRepository(pool) : undefined;
-  // Story 4.6 — customer merge. Pg re-parents child rows + archives the loser
-  // in one transaction; the no-DB dev path only archives (no child tables).
-  const customerMergeRepo = pool
-    ? new PgCustomerMergeRepository(pool)
-    : new InMemoryCustomerMergeRepository(customerRepo);
   // N-003 (P2-036) — caller LTV/recency for the negotiation guardrail callback.
   const customerNegotiationContextProvider = pool
     ? new PgCustomerNegotiationContextProvider(pool)
     : undefined;
-  const leadRepo           = pool ? new PgLeadRepository(pool)           : new InMemoryLeadRepository();
-  const locationRepo       = pool ? new PgLocationRepository(pool)       : new InMemoryLocationRepository();
   // jobRepo is hoisted earlier so the Stripe webhook + everything else
   // share a single InMemory instance during tests.
-  const timelineRepo       = pool ? new PgJobTimelineRepository(pool)    : new InMemoryJobTimelineRepository();
-  // assignmentRepo is constructed BEFORE appointmentRepo (rather than the
-  // historical order) so the in-memory appointment repo can be threaded the
-  // same assignment lookup it needs for technicianId filtering in
-  // listWithMeta — see in-memory-appointment.ts's TechnicianAssignmentLookup.
-  // Pg's equivalent filter is a self-contained EXISTS subquery, so
-  // PgAppointmentRepository needs no such wiring.
-  const assignmentRepo     = pool ? new PgAssignmentRepository(pool)     : new InMemoryAssignmentRepository();
-  const appointmentRepo    = pool ? new PgAppointmentRepository(pool)    : new InMemoryAppointmentRepository(assignmentRepo);
-  // Declared here (ahead of its first router use) so the jobs router's
-  // from-estimate scheduling deps can reference it.
-  const userRepo = pool ? new PgUserRepository(pool) : new InMemoryUserRepository();
   // Hermetic / DEV_AUTH_BYPASS path: share one InMemoryUserModeService so
   // bootstrap can upsert the owner row (with internal_user_id) before
   // /api/me mounts. Pg-backed mode still builds its service later.
   const inMemoryUserModeService = pool ? null : new InMemoryUserModeService();
-  // Working hours are now Pg-backed in production (migration 137 added
-  // technician_working_hours), so the dispatch feasibility composer and the
-  // inbound-AI availability search enforce real working-hours rows instead of
-  // treating missing rows as no-conflict. The unavailable-block repo is now
-  // Pg-backed too (migration 116 `tech_unavailable_blocks`) so the P6-028
-  // tech "I'm out" handler persists real same-day blocks the feasibility
-  // composer reads. InMemory variants stay for tests / no-pool.
-  const workingHoursRepo       = pool ? new PgWorkingHoursRepository(pool)     : new InMemoryWorkingHoursRepository();
-  const unavailableBlockRepo   = pool ? new PgUnavailableBlockRepository(pool) : new InMemoryUnavailableBlockRepository();
   const travelTimeProvider     = createTravelTimeProvider(process.env);
   const skillMatcher           = new StubSkillMatcher();
-  const estimateRepo       = pool ? new PgEstimateRepository(pool)       : new InMemoryEstimateRepository();
-  const invoiceRepo        = pool ? new PgInvoiceRepository(pool)        : new InMemoryInvoiceRepository();
-  const dunningConfigRepo  = pool ? new PgDunningConfigRepository(pool)  : new InMemoryDunningConfigRepository();
-  const dunningEventRepo   = pool ? new PgDunningEventRepository(pool)   : new InMemoryDunningEventRepository();
-  const hfcrWeeklySendRepo = pool ? new PgHfcrWeeklySendRepository(pool) : new InMemoryHfcrWeeklySendRepository();
-  const invoiceScheduleRepo = pool ? new PgInvoiceScheduleRepository(pool) : new InMemoryInvoiceScheduleRepository();
-  const batchInvoiceRunRepo = pool ? new PgBatchInvoiceRunRepository(pool) : new InMemoryBatchInvoiceRunRepository();
-  const batchInvoiceTxRunner = pool ? new PgTenantTransactionRunner(pool) : new InMemoryTransactionRunner();
-  const paymentRepo        = pool ? new PgPaymentRepository(pool)        : new InMemoryPaymentRepository();
-  const expenseRepo        = pool ? new PgExpenseRepository(pool)        : new InMemoryExpenseRepository();
-  // Task 9 (2026-08-07 tradesperson plan) — material_items (Task 8's
-  // substrate) backs the add_material / lookup_materials voice intents.
   // Threaded into the execution-handler deps bag below and into
   // lookupAnswerDeps (shared by the recorded-memo worker + assistant chat),
   // mirroring expenseRepo / agreementRepo.
-  const materialItemRepo = pool ? new PgMaterialItemRepository(pool) : new InMemoryMaterialItemRepository();
   // P5-017: Resolve the payment-link provider via the factory so the mock
   // is hard-blocked in production. The factory throws at boot if
   // STRIPE_SECRET_KEY (or STRIPE_API_KEY) is missing while NODE_ENV=production,
@@ -1338,23 +1109,9 @@ export function createApp(): AppWithLifecycle {
   // as customerPaymentMethodRepo: the router reads deps lazily).
   webhookRouterDeps.paymentLinkProvider = paymentLinkProvider;
   webhookRouterDeps.connectAccountResolver = connectAccountResolver;
-  const noteRepo           = pool ? new PgNoteRepository(pool)           : new InMemoryNoteRepository();
-  const conversationRepo   = pool ? new PgConversationRepository(pool)   : new InMemoryConversationRepository();
   // settingsRepo is constructed once above (webhook + /api/settings share it).
   // P2-036 V2 — resolves the customer's current live quote for the discount engine.
   const negotiationQuoteResolver = new DefaultCurrentQuoteResolver({ jobRepo, estimateRepo });
-  // Voice-parity (Feature 7) — call_me_back tasks (failed-transfer callbacks).
-  const callMeBackRepo     = pool ? new PgCallMeBackRepository(pool)     : new InMemoryCallMeBackRepository();
-  // Mobile push-token store (POST/DELETE /api/devices, the proposal/owner
-  // push notifiers bound further down, and account deletion's token purge) +
-  // the Expo push transport. Constructed HERE — not at the router mount — so
-  // the voice adapters can take both as deps for the ANS-001 E1 alert
-  // fan-out. Pg-backed when a DB is configured (PgBaseRepository.withTenant,
-  // so every statement joins the per-request tenant transaction and RLS
-  // scopes every row); in-memory otherwise.
-  const deviceTokenRepo = pool
-    ? new PgDeviceTokenRepository(pool)
-    : new InMemoryDeviceTokenRepository();
   const expoPushProvider = new ExpoPushDeliveryProvider(fetch, process.env.EXPO_ACCESS_TOKEN);
   // Gated so a dev/staging E1 test call doesn't POST to Expo's live endpoint.
   // Unset/'true' keeps it on in production; set EXPO_PUSH_ENABLED=false to
@@ -1402,44 +1159,10 @@ export function createApp(): AppWithLifecycle {
   // both the Twilio and in-app adapters.
   const voicePersonaResolver = createVoicePersonaResolver(settingsRepo);
   const auditRepo          = webhookAuditRepo;
-  // P11-001: voice lookup-skill audit log. The skills write one row
-  // per invocation through `LookupEventService` and the Twilio adapter
-  // pulls it from the deps bundle. InMemory in dev/test, Pg in prod.
-  const lookupEventRepo    = pool ? new PgLookupEventRepository(pool)    : new InMemoryLookupEventRepository();
   const lookupEventService = new LookupEventService(lookupEventRepo);
-  // P11-001: hoisted so the Twilio lookup-skill family can read agreements.
-  // The richer agreement-service wiring (agreementRunRepo, generators,
-  // etc.) still happens further below — this declaration is purely so
-  // the read-only lookup branch has access.
-  const agreementRepo      = pool ? new PgAgreementRepository(pool)      : new InMemoryAgreementRepository();
-  // #6 phase 4 — saved cards for off-session dues billing.
-  const customerPaymentMethodRepo = pool
-    ? new PgCustomerPaymentMethodRepository(pool)
-    : new InMemoryCustomerPaymentMethodRepository();
   // Wire into the webhook deps (assembled above, before this repo existed) so
   // setup_intent.succeeded can persist the card — mirrors paymentReceiptNotifier.
   webhookRouterDeps.customerPaymentMethodRepo = customerPaymentMethodRepo;
-  const templateRepo       = pool ? new PgEstimateTemplateRepository(pool) : new InMemoryEstimateTemplateRepository();
-  const messageTemplateRepo = pool ? new PgMessageTemplateRepository(pool) : new InMemoryMessageTemplateRepository();
-  const bundleRepo         = pool ? new PgServiceBundleRepository(pool)  : new InMemoryServiceBundleRepository();
-  const qualityMetricsRepo = pool ? new PgQualityMetricsRepository(pool) : new InMemoryQualityMetricsRepository();
-  const voiceRepo          = pool ? new PgVoiceRepository(pool)          : new InMemoryVoiceRepository();
-  const voiceSessionRepo   = pool ? new PgVoiceSessionRepository(pool)   : new InMemoryVoiceSessionRepository();
-  const technicianLocationPingRepo = pool
-    ? new PgTechnicianLocationPingRepository(pool)
-    : new InMemoryTechnicianLocationPingRepository();
-  const technicianLocationAuthorizer = pool
-    ? new PgTechnicianLocationAuthorizer(pool)
-    : new InMemoryTechnicianLocationAuthorizer();
-  const approvalRepo       = pool ? new PgApprovalRepository(pool)       : new InMemoryApprovalRepository();
-  const deltaRepo          = pool ? new PgEditDeltaRepository(pool)      : new InMemoryEditDeltaRepository();
-  const packActivationRepo = pool ? new PgPackActivationRepository(pool) : new InMemoryPackActivationRepository();
-  const trainingAssetRepo = pool
-    ? new PgTrainingAssetRepository(pool)
-    : new InMemoryTrainingAssetRepository();
-  const privacyAuditRepo = pool
-    ? new PgPrivacyAuditRepository(pool)
-    : new InMemoryPrivacyAuditRepository();
   // Holder set later once the vertical prompt resolver is built (it
   // depends on canonicalPackRegistry, which is created further down).
   // Lifecycle mutations call this to drop the cached prompt section
@@ -1487,36 +1210,17 @@ export function createApp(): AppWithLifecycle {
     pool: pool ?? undefined,
     invalidatePromptCache: (tenantId) => invalidateVerticalPromptCache?.(tenantId),
   });
-  const fileRepo           = pool ? new PgFileRepository(pool)           : new InMemoryFileRepository();
-  const jobFileRepo        = pool ? new PgJobFileRepository(pool)        : new InMemoryJobFileRepository();
-  const jobPhotoRepo       = pool ? new PgJobPhotoRepository(pool)       : new InMemoryJobPhotoRepository();
-  // RV-005: generalized attachments (photos & documents on any entity).
-  const attachmentRepo     = pool ? new PgAttachmentRepository(pool)     : new InMemoryAttachmentRepository();
-  const catalogRepo        = pool ? new PgCatalogItemRepository(pool)    : new InMemoryCatalogItemRepository();
-  const feedbackRequestRepo = pool ? new PgFeedbackRequestRepository(pool) : new InMemoryFeedbackRequestRepository();
-  const feedbackResponseRepo = pool ? new PgFeedbackResponseRepository(pool) : new InMemoryFeedbackResponseRepository();
   // P10-001: portal session repo (single signed token per customer for the
   // self-service portal). Wired here so both the authed creation route and
   // the public token-resolver router share one instance.
   const portalSessionRepo: PortalSessionRepository = pool
     ? new PgPortalSessionRepository(pool)
     : new InMemoryPortalSessionRepository();
-  // Agreement-runs are also surfaced on the public portal (read-only).
-  // Hoisted here so the public portal router (mounted before Clerk auth)
-  // can reference it. `agreementRepo` is already declared above (hoisted
-  // for the P11-001 voice lookup-skill family).
-  const agreementRunRepo = pool
-    ? new PgAgreementRunRepository(pool)
-    : new InMemoryAgreementRunRepository();
-  const timeEntryRepo      = pool ? new PgTimeEntryRepository(pool)       : new InMemoryTimeEntryRepository();
 
   const { provider: storageProvider, bucket: storageBucket } = createStorageProvider(
     process.env as NodeJS.ProcessEnv
   );
 
-  const canonicalPackRegistry = pool
-    ? new PgVerticalPackRegistry(pool)
-    : new InMemoryCanonicalVerticalPackRegistry();
   seedCanonicalVerticalPacks(canonicalPackRegistry);
 
   // Synchronous transcription function — used by POST /api/voice/transcribe.
@@ -1524,9 +1228,6 @@ export function createApp(): AppWithLifecycle {
 
   // URL-based provider for the queue worker pipeline.
   const transcriptionProvider = createWhisperTranscriptionProvider(process.env);
-  // AI-run repository — tracks every LLM call lifecycle (pending → running → completed/failed).
-  // Pg-backed in production; InMemory when DATABASE_URL is unset (dev/test).
-  const aiRunRepo = pool ? new PgAiRunRepository(pool) : new InMemoryAiRunRepository();
 
   // P2-030 — shadow comparison store.
   // PgShadowComparisonStore when DATABASE_URL + SHADOW_LLM_ENABLED=true;
@@ -1556,39 +1257,12 @@ export function createApp(): AppWithLifecycle {
   const embeddingProvider: EmbeddingProvider | null =
     createEmbeddingProvider(config);
 
-  // Phase 4a-1 repositories — used by transcript-ingestion-worker and
-  // proposal-correction-worker. All Pg-backed in production with
-  // tenant-scoped RLS via PgBaseRepository.withTenant; InMemory in
-  // dev/test so the app boots without DATABASE_URL.
-  const knowledgeChunkRepo = pool
-    ? new PgKnowledgeChunkRepository(pool)
-    : new InMemoryKnowledgeChunkRepository();
-  const proposalExecutionRepo = pool
-    ? new PgProposalExecutionRepository(pool)
-    : new InMemoryProposalExecutionRepository();
-  // U7 — structured correction-lesson loop. The repo + ConfigPorts back the
   // recordCorrectionLessonsOnExecution call in the executor's onExecuted seam
   // (and the undo path in proposal actions). Ports cascade a distilled lesson
   // into real tenant config: labor rate (tenant_settings.labor_rate_cents_per
   // _hour), SKU price (catalog item), banned phrases (brand-voice negative
   // prompt). setTemplateWeight is a no-op — no template-weight store exists yet,
   // so scope_reclassified lessons aren't produced (no resolveTemplate passed).
-  const correctionLessonRepo = pool
-    ? new PgCorrectionLessonRepository(pool)
-    : new InMemoryCorrectionLessonRepository();
-  // WS6 — supervisor_reviews repo, hoisted here (rather than constructed
-  // inline inside the review-gate config further down) so the daily-digest
-  // worker deps can reuse the SAME instance for its "Checked: N proposals,
-  // M flagged" reflection line instead of standing up a second repo.
-  const supervisorReviewsRepo = pool
-    ? new PgSupervisorReviewRepository(pool)
-    : new InMemorySupervisorReviewRepository();
-  // Story 3.9 — raw per-field proposal-edit log (intent + field + before/after),
-  // queryable per tenant and per intent; the training signal for prompt/routing
-  // improvement. Distinct from correction_lessons (cascading config above).
-  const correctionRepo = pool
-    ? new PgCorrectionRepository(pool)
-    : new InMemoryCorrectionRepository();
   const correctionConfigPorts: ConfigPorts = {
     async setLaborRateCents(tenantId, cents) {
       await settingsRepo.update(tenantId, { laborRateCentsPerHour: cents });
@@ -1606,19 +1280,12 @@ export function createApp(): AppWithLifecycle {
       /* No template-weight store yet; scope_reclassified lessons aren't produced. */
     },
   };
-  const retrievalEvalRunRepo = pool
-    ? new PgRetrievalEvalRunRepository(pool)
-    : new InMemoryRetrievalEvalRunRepository();
-  const callTranscriptTurnRepo = pool
-    ? new PgCallTranscriptTurnRepository(pool)
-    : new InMemoryCallTranscriptTurnRepository();
 
   // Customer-facing message delivery for estimates and invoices.
   // prod/staging wire Twilio (SMS) + Twilio-native email or SendGrid; every
   // other environment gets InMemoryDeliveryProvider so the app boots without
   // delivery credentials AND cannot send real messages. Send routes return
   // 503 when sendService is undefined.
-  const dispatchRepo = pool ? new PgDispatchRepository(pool) : new InMemoryDispatchRepository();
   // Provider selection lives in notifications/delivery-provider-factory.ts so
   // it is unit-testable without booting createApp(). The invariant it enforces:
   // ONLY prod/staging (or an explicit DELIVERY_ALLOW_REAL_PROVIDERS=true
@@ -1637,13 +1304,6 @@ export function createApp(): AppWithLifecycle {
     }),
   });
   const rawMessageDelivery: MessageDeliveryProvider | null = deliveryWiring.provider;
-  // RV-130 — consent ledger (append-only consent_events). Constructed here —
-  // before the SMS gate — because WS12 makes it the cross-channel source of
-  // truth both outbound gates consult; the STOP/START keyword handlers and
-  // the voice adapter (registered further down) append to the same instance.
-  const consentEventRepo = pool
-    ? new PgConsentEventRepository(pool)
-    : new InMemoryConsentEventRepository();
 
   // WS1 safety rails — wrap the single delivery object in the consent+DNC gate
   // so EVERY outbound SMS passes exactly one gate. Owner-class sends bypass;
@@ -1925,14 +1585,6 @@ export function createApp(): AppWithLifecycle {
 
   // ── Diff-analysis worker (P0-018): compares two revision snapshots and
   // persists a structured field-level delta. P0-023 graduates the revision
-  // store and the analysis store onto Postgres when DATABASE_URL is set —
-  // dev still uses the in-memory variants so tests boot without a DB.
-  const documentRevisionRepo = pool
-    ? new PgDocumentRevisionRepository(pool)
-    : new InMemoryDocumentRevisionRepository();
-  const diffAnalysisRepo = pool
-    ? new PgDiffAnalysisRepository(pool)
-    : new InMemoryDiffAnalysisRepository();
   const diffAnalysisWorker = createDiffAnalysisWorker(
     documentRevisionRepo,
     diffAnalysisRepo
@@ -2015,9 +1667,6 @@ export function createApp(): AppWithLifecycle {
   // the STOP/START registrations so re-running createApp() (across test files /
   // multiple bootstraps in one process) re-registers without tripping the
   // duplicate-keyword guard.
-  const techStatusTodayRepo = pool
-    ? new PgTechStatusTodayRepository(pool)
-    : new InMemoryTechStatusTodayRepository();
   registerTechStatusKeywords(
     {
       userRepo,
@@ -2048,9 +1697,6 @@ export function createApp(): AppWithLifecycle {
   // approves/rejects through the EXISTING proposal actions, or opens a
   // 10-minute edit session interpreted by the LLM gateway and re-rendered
   // for re-approval. Free text with no context gets one clarification nudge.
-  const proposalSmsEventRepo = pool
-    ? new PgProposalSmsEventRepository(pool)
-    : new InMemoryProposalSmsEventRepository();
   registerProposalReplySms(
     {
       proposalRepo,
@@ -2105,9 +1751,6 @@ export function createApp(): AppWithLifecycle {
     sendService,
     allowNoopInProduction: deliveryOptedOut,
   });
-  const dispatchAnalyticsRepo = pool
-    ? new PgDispatchAnalyticsRepository(pool)
-    : new InMemoryDispatchAnalyticsRepository();
   const transactionalCommsLogger = createLogger({
     service: 'transactional-comms',
     environment: process.env.NODE_ENV || 'development',
@@ -2162,13 +1805,7 @@ export function createApp(): AppWithLifecycle {
   // that shipped but was never swapped, so review responses ignored the shop's
   // voice + banned_phrases). Reads tenant_settings.brand_voice, failure-soft.
   const googleReviewsBrandVoiceLoader = new SettingsBrandVoiceLoader(settingsRepo);
-  // Review-monitoring self-serve — Google Business connect + refresh.
-  // The repo writes/rotates the `tenant_integrations` credential row the
-  // poll worker + reply resolver read; the OAuth config reuses the same
   // Google client as calendar sync (register BOTH redirect URIs on it).
-  const googleBusinessIntegrationRepo = pool
-    ? new PgGoogleBusinessIntegrationRepository(pool)
-    : new InMemoryGoogleBusinessIntegrationRepository();
   const googleBusinessApiUrl =
     process.env.PUBLIC_API_URL ?? process.env.APP_PUBLIC_URL ?? 'http://localhost:3000';
   const googleBusinessOAuthConfig: GoogleBusinessOAuthConfig | undefined =
@@ -2213,12 +1850,6 @@ export function createApp(): AppWithLifecycle {
   const customerMessenger = messageDelivery
     ? new TwilioCustomerMessageService(messageDelivery, dispatchRepo, customerRepo)
     : undefined;
-  // B1.18 — hoisted ahead of the execution registry (was declared next to the
-  // brand-voice router further down) so update_brand_voice's execution
-  // handler can be wired with the SAME repo instance the sheet's router uses.
-  const brandVoiceRepo = pool
-    ? new PgBrandVoiceRepository(pool)
-    : new InMemoryBrandVoiceRepository();
   const executionHandlers = createExecutionHandlerRegistry({
     customerRepo,
     jobRepo,
@@ -2317,11 +1948,6 @@ export function createApp(): AppWithLifecycle {
     Object.values(INTENT_TO_PROPOSAL_TYPE),
     { poolConfigured: Boolean(pool), logger: workerLogger },
   );
-  // §11 H1: IdempotencyGuard + advisory lock per (tenant, key). Keys
-  // default to `proposal-run:{tenant}:{id}` when callers omit one.
-  const proposalIdempotencyLock = pool
-    ? new PgIdempotencyLockProvider(directPool ?? pool)
-    : new NoOpIdempotencyLockProvider();
   const proposalIdempotencyGuard = new IdempotencyGuard(
     proposalExecutionRepo,
     proposalRepo,
@@ -2461,9 +2087,6 @@ export function createApp(): AppWithLifecycle {
         })
       : undefined;
 
-  const delayNoticeStateRepo = pool
-    ? new PgDelayNoticeStateRepository(pool)
-    : new InMemoryDelayNoticeStateRepository();
   const delayNotificationCoordinator = new DelayNotificationCoordinator(
     queue,
     new NextCustomerSelector(appointmentRepo, assignmentRepo, jobRepo, customerRepo),
@@ -2866,12 +2489,6 @@ export function createApp(): AppWithLifecycle {
     paymentRepo,
     expenseRepo,
   );
-  // RV-062 — shared by the digest worker (writes) and the /api/digests
-  // web-view router (reads). Created once here so both wire to the same
-  // instance (Pg-backed in prod, in-memory in dev where the sweep no-ops).
-  const dailyDigestRepo = pool
-    ? new PgDailyDigestRepository(pool)
-    : new InMemoryDailyDigestRepository();
   // U3 — DB-authoritative role of a memo's creator for the owner-grade
   // lookup gate (revenue / job profit / pending items / digest). The
   // recording's created_by is the Clerk subject, so the Pg path reuses the
@@ -3433,18 +3050,9 @@ export function createApp(): AppWithLifecycle {
   // consent flow AND exchanging the callback code; without them the
   // /connect route returns ValidationError. Callback URL must match
   // the one registered in the Google Cloud OAuth console.
-  const calendarIntegrationRepo = pool
-    ? new PgCalendarIntegrationRepository(pool)
-    : new InMemoryCalendarIntegrationRepository();
-  const oauthStateRepo = pool
-    ? new PgOAuthStateRepository(pool)
-    : new InMemoryOAuthStateRepository();
   // Tier 4 (Calendar sync — PR 2). Sync service exposed on the
   // auth'd router as POST /google/test-push so operators can verify
   // their connection before relying on it for real appointments.
-  const appointmentCalendarEventRepo = pool
-    ? new PgAppointmentCalendarEventRepository(pool)
-    : new InMemoryAppointmentCalendarEventRepository();
   const googleApiUrl =
     process.env.PUBLIC_API_URL ?? process.env.APP_PUBLIC_URL ?? 'http://localhost:3000';
   const googleConfig =
@@ -3508,15 +3116,6 @@ export function createApp(): AppWithLifecycle {
   );
 
   // F17 / P15-001 — QuickBooks accounting OAuth callback (unauthenticated).
-  const accountingIntegrationRepo = pool
-    ? new PgAccountingIntegrationRepository(pool)
-    : new InMemoryAccountingIntegrationRepository();
-  const accountingSyncLogRepo = pool
-    ? new PgAccountingSyncLogRepository(pool)
-    : new InMemoryAccountingSyncLogRepository();
-  const accountingOAuthStateRepo = pool
-    ? new PgAccountingOAuthStateRepository(pool)
-    : new InMemoryAccountingOAuthStateRepository();
   const qboConfig = resolveQuickBooksOAuthConfig(googleApiUrl);
   const integrationsRouterDeps = {
     integrationRepo: accountingIntegrationRepo,
@@ -3559,10 +3158,6 @@ export function createApp(): AppWithLifecycle {
   //   - MediaStreamAdapter (stores whisper text after escalation_started)
   // Single-instance; multi-instance Railway deploys would need Redis.
   const sharedWhisperCache = new WhisperCache();
-  // OnCall repo is created here so both the telephony adapter (notify_oncall
-  // side effect) and the in-app adapter (escalation) share a single
-  // implementation. The in-app block below reuses this same instance.
-  const sharedOnCallRepo = pool ? new PgOnCallRepository(pool) : new InMemoryOnCallRepository();
   // §3B + §3D: shared vertical-prompt resolver injected into both
   // calling-agent adapters so per-tenant equipment terminology AND
   // intake-question disambiguation reach the classifier.
@@ -3615,12 +3210,6 @@ export function createApp(): AppWithLifecycle {
   // moneyDashboardRepo / dailyDigestRepo are constructed further up (U3 —
   // the voice-action-router worker's E-lane answer deps need them before
   // this telephony wiring block).
-  // RV-115/RV-116 — durable dropped-call recovery: the scheduler persists
-  // the FSM context snapshot at termination; the resume handler picks the
-  // thread back up when the caller replies to the recovery SMS.
-  const droppedCallRecoveryRepo = pool
-    ? new PgDroppedCallRecoveryRepository(pool)
-    : new InMemoryDroppedCallRecoveryRepository();
   const droppedCallScheduler = new DroppedCallScheduler(
     droppedCallRecoveryRepo,
     createLogger({
@@ -4550,9 +4139,6 @@ export function createApp(): AppWithLifecycle {
       // evaluateTriage outcome to triage_events, and patches vulnerable +
       // urgent callers straight through to the owner (fallback ladder:
       // owner → on-call → voicemail + urgent SMS + call_me_back).
-      const triageEventsRepo = pool
-        ? new PgTriageEventRepository(pool)
-        : new InMemoryTriageEventRepository();
       const mediaStreamPublicBase = (process.env.PUBLIC_API_URL ?? '').replace(/\/+$/, '');
       // WS7 — mid-call REST redirector: on a terminal realtime failure the
       // mediastream adapter steers the LIVE call back to the Gather-fallback
@@ -5385,10 +4971,6 @@ export function createApp(): AppWithLifecycle {
   // the same instance.
   app.use('/api/billing', createBillingRouter({ billingService, connectService, auditRepo, pool: pool ?? undefined }));
 
-  // Tenant-scoped reporting (revenue by lead source / UTM, money dashboard, tax export).
-  const revenueBySourceRepo = pool
-    ? new PgRevenueBySourceRepository(pool)
-    : new InMemoryRevenueBySourceRepository();
   const timeGivenBackReporter = new RepoBackedTimeGivenBackReporter(
     proposalRepo,
     settingsRepo,
@@ -5638,10 +5220,6 @@ export function createApp(): AppWithLifecycle {
 
   app.use('/api/devices', createDevicesRouter(deviceTokenRepo, auditRepo));
 
-  // U10 — per-user notification preferences (opt-out by category).
-  const notificationPreferenceRepo = pool
-    ? new PgNotificationPreferenceRepository(pool)
-    : new InMemoryNotificationPreferenceRepository();
   app.use(
     '/api/notification-preferences',
     createNotificationPreferencesRouter(notificationPreferenceRepo, auditRepo),
@@ -5802,9 +5380,6 @@ export function createApp(): AppWithLifecycle {
   // existing V2 onboarding routes so the web client can post turns to
   // POST /api/onboarding/conversation/turn while the form-based
   // wizard's other endpoints stay unchanged.
-  const onboardingSessionRepo = pool
-    ? new PgOnboardingSessionRepository(pool)
-    : new InMemoryOnboardingSessionRepository();
   app.use(
     '/api/onboarding/conversation',
     createOnboardingConversationRouter({

@@ -19,31 +19,14 @@ import { resolve } from 'path';
 describe('P0-023 — app-wiring (pool ternary coverage)', () => {
   const src = readFileSync(resolve(__dirname, '../../src/app.ts'), 'utf8');
 
-  it.each([
-    ['Assignment', 'PgAssignmentRepository', 'InMemoryAssignmentRepository'],
-    ['WebhookEvent', 'PgWebhookEventRepository', 'InMemoryWebhookEventRepository'],
-    ['DocumentRevision', 'PgDocumentRevisionRepository', 'InMemoryDocumentRevisionRepository'],
-    ['DiffAnalysis', 'PgDiffAnalysisRepository', 'InMemoryDiffAnalysisRepository'],
-    ['DispatchAnalytics', 'PgDispatchAnalyticsRepository', 'InMemoryDispatchAnalyticsRepository'],
-    ['DelayNoticeState', 'PgDelayNoticeStateRepository', 'InMemoryDelayNoticeStateRepository'],
-  ])('%s repo wired through pool ternary', (_label, pgClass, inMemoryClass) => {
-    expect(src).toContain(pgClass);
-    expect(src).toContain(inMemoryClass);
-    const ternaryPattern = new RegExp(
-      `pool\\s*\\?\\s*new\\s+${pgClass}[\\s\\S]*?:\\s*new\\s+${inMemoryClass}`,
-      'm',
-    );
-    expect(src).toMatch(ternaryPattern);
-  });
-
-  it('TechStatusToday repo wired through pool ternary', () => {
-    // U1 (P6-028) — the "I'm out today" idempotency store.
-    expect(src).toContain('PgTechStatusTodayRepository');
-    expect(src).toContain('InMemoryTechStatusTodayRepository');
-    expect(src).toMatch(
-      /pool\s*\?\s*new\s+PgTechStatusTodayRepository[\s\S]*?:\s*new\s+InMemoryTechStatusTodayRepository/m,
-    );
-  });
+  // RETIRED (D-024 Stage 1) — the seven `pool ? Pg : InMemory` coverage cases
+  // that used to live here asserted on app.ts AS TEXT, because the ternaries
+  // were inline in a 6,715-line function with no interface to test through.
+  // Repository construction now lives behind buildRepositories(), so those
+  // cases moved to test/app/build-repositories.test.ts where they assert the
+  // RESOLVED implementation instead of the source characters. The remaining
+  // assertions in this file still read source text; they cover wiring order
+  // and lifecycle, which has no interface yet.
 
   it('tech-status (OUT|SICK|UNAVAILABLE) keyword handler is registered', () => {
     // U1 (P6-028) — guards against re-regression to "built but never wired":
