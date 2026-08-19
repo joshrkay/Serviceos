@@ -102,8 +102,29 @@ function classifyTokenUsage(script: VoiceQualityScript): { input: number; output
   return { input: 10, output: 10, total: 20 };
 }
 
+/**
+ * ⚠️ CRITERION 9 IS NOT INDEPENDENTLY ASSESSED IN THIS LANE.
+ *
+ * The intent below is taken FROM `turn.expected.intent` — the same field the
+ * disposition grader compares the observed intent against
+ * (src/ai/voice-quality/graders/disposition-structured.ts, `intentMatched`).
+ * The fixture's answer is fed in and then compared back to itself, so
+ * `rightIntentClassified` cannot fail in the mock-driven Layer 1 corpus. A
+ * green Layer 1 run is NOT evidence that intent classification works, and a
+ * prompt/taxonomy regression cannot be detected here.
+ *
+ * What Layer 1 DOES exercise is everything downstream of classification:
+ * parseClassifierJson, confidence thresholds, the turn FSM, task handlers,
+ * payload contracts and the other graders. That value is real — this note is
+ * only about criterion 9.
+ *
+ * Real assessment requires either a live model (voice-eval-live.yml — weekly
+ * cron, secret-gated, not PR-blocking) or mock intents sourced independently
+ * of `expected.intent`. See the fix options recorded alongside this note.
+ */
 function classifierJsonForTurn(script: VoiceQualityScript, turnIndex: number): string {
   const turn = script.turns[turnIndex];
+  // NOTE: derived from expected.intent — see the tautology warning above.
   let intent = turn.expected.intent ?? 'unknown';
   if (OPERATOR_REQUEST_SCRIPTS.has(script.id)) intent = 'operator_request';
   if (script.id === 'cost-cap-drain') intent = 'lookup_account_summary';

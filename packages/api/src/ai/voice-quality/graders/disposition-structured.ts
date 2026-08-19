@@ -3,6 +3,14 @@
  *
  * Grades the mechanically-checkable parts of disposition correctness:
  *   - Criterion 9  (rightIntentClassified): expected.intent matches the
+ *
+ *     ⚠️ Under the Layer 1 CASSETTE corpus this criterion is a tautology and
+ *     cannot fail: the mock classifier in
+ *     test/voice-quality/voice-quality-driver-factory.ts sets its intent FROM
+ *     `turn.expected.intent`, which is the same value compared below. The
+ *     comparison itself is correct and IS meaningful against a live model
+ *     (voice-eval-live.yml); it is the mock that makes it circular. Do not
+ *     read a green Layer 1 run as evidence that classification works.
  *     `intent_classified` event's intentType for the same turn (string
  *     equality, case-insensitive).
  *   - Criterion 10 (hard slots only): the proposal payload's "hard" fields
