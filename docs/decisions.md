@@ -506,3 +506,73 @@ capture-class siblings only, so a chained issue leg still requires its own tap
 **Alternatives rejected:** Single-utterance auto-issue (new capability; approval tap doing
 double duty over a money transition); lock-by-voice (an utterance that irreversibly freezes
 tenant config — its own risk review, deliberately unbuilt).
+
+### D-024: `app.ts` decomposition is sequenced by construction kind, not by domain — D-022's per-domain half is deferred
+**Date:** 2026-08-19
+**Decision:** Execute the `packages/api/src/app.ts` decomposition in two stages and ship
+only the first for now. **Stage 1** slices by construction *kind* —
+`buildRepositories(pool)`, then `buildServices(repos, config)`, then the worker
+constructions — and gives `createApp` an **optional** overrides parameter
+(`createApp(overrides?: Partial<AppDeps>)`), so the production path is unchanged and the
+18 test files that boot the app keep working untouched. **Stage 2** — D-022's per-domain
+`registerXModule(app, deps)` functions — is explicitly deferred until Stage 1 has landed
+and the shared-dependency surface is visible in a type rather than inferred from a
+6,715-line function.
+**Rationale:** D-022's target shape ("repository/service factory modules **plus** per-domain
+`registerXModule(app, deps)` functions") names two pieces of work in one sentence, and
+measurement taken 2026-08-19 shows they should not be attempted together. Fan-out inside
+`createApp()` is extreme and cross-cutting: `auditRepo` has **90** distinct consumers
+spanning every domain (its own comment at `app.ts:1152` records ~270 audit-write sites
+threading through it), `pool` has 164, and eleven bindings exceed fifteen consumers
+(`settingsRepo` 46, `customerRepo` 41, `jobRepo` 37, `proposalRepo` 31, `invoiceRepo` 23,
+`appointmentRepo` 22, `messageDelivery` 20, `llmGateway` 19, `estimateRepo`/`userRepo`/`queue`
+16). Cross-domain edges are the norm, not the tail: `createVoiceActionRouterWorker` receives
+43 distinct bindings, `twilioAdapterDeps` 57, `createExecutionHandlerRegistry` 50, and only
+three construction clusters are contiguous and self-contained (integrations `3436–3521`,
+reputation `2148–2197`, media-streams `4427–4818`). A per-domain split executed today
+therefore yields twelve modules that each import most of a shared core bag — churn against
+the same 6,715 lines, which is the specific failure D-022 was written to prevent. Slicing by
+kind instead attacks the largest measured mass (~150 `new PgX(pool)` constructions behind 74
+`pool ? Pg : InMemory` ternaries), has a mechanical correctness criterion, and makes the core
+bag explicit so the Stage 2 domain question can be answered from a type instead of a guess.
+**Story:** Quality Sprint — `app.ts` wiring decomposition. Characterization groundwork landed
+in PR #828 (`chore/app-wiring-characterization`).
+**Constraints:**
+- D-022's constraints carry over unchanged: the route-manifest snapshot
+  (`test/app/route-manifest.test.ts`) must be regenerated and reviewed line-by-line in any
+  commit that moves wiring, with particular attention to exposure-class changes and the
+  pre-`requireAuth` `/api` allowlist; the migration corpus (`db/schema.ts`) stays a separate
+  workstream.
+- Two further characterization gates are prerequisites, added by PR #828:
+  `test/app/interval-registration-count.test.ts` pins the exact gated background-interval
+  count (`backgroundIntervalCount` is derived from registration *order* relative to the
+  `observabilityIntervalCount` snapshot at `app.ts:2674`, so a reordering changes it with no
+  type error), and `test/app/repository-instance-sharing.test.ts` pins per-boot construction
+  counts for the hoisted repositories.
+- The hoisting invariant is **not uniform** and Stage 1 must preserve it exactly:
+  `settingsRepo` (aliased `1106`), `jobRepo` (`1115`) and `pendingInvitationRepo` (`1119`) are
+  single shared instances, while `invoiceRepo`/`estimateRepo`/`paymentRepo` are each
+  constructed a second time for the webhook surface (`1108`–`1110`). The duplicates are
+  harmless in production (two Pg repos read one database) but diverge in hermetic mode.
+  Collapsing them is a behaviour change that must land on its own, never inside a wiring move.
+- Process-global setters are **partially** in scope: the auth, owner-notification and
+  supervisor-presence loaders become instance-scoped because last-write-wins is what currently
+  prevents two `createApp()` calls in one process from being isolated
+  (`configureSupervisorCreationHook`'s own comment records this, and the SMS keyword registry
+  passes `{ overwrite: true }` from ten sites specifically to survive re-entry). `setDraining`
+  and the `process.once` SIGTERM handler stay process-wide — that is correct behaviour.
+- The ~10 late-bound `let` slots (e.g. `supervisorSpendRecorder` declared `2341`, consumed
+  `2357`, assigned `7271`) become explicit providers so the ordering constraint is carried by
+  a type rather than by line position. An eager factory extraction would silently turn them
+  permanently `undefined`.
+**Alternatives rejected:**
+- Execute D-022 as one change (factories *and* per-domain registration). Rejected on the
+  fan-out measurement above — the domain modules cannot be made independent while `auditRepo`
+  has 90 consumers, so the split would move code without reducing coupling.
+- Make the deps parameter required (`createApp(deps: AppDeps)`). Rejected for Stage 1: it
+  forces all 18 booting test files to change in the same diff as the wiring move, which is the
+  unreviewable-diff failure D-022 already called out. It stays available as a mechanical
+  follow-up once every dependency is reachable through the overrides bag.
+- Leave `app.ts` alone. Rejected — it has grown from the 6,143 lines D-022 measured on
+  2026-07-25 to 6,715 (`app.ts:769–7484`), and the growth is per-feature wiring, so the cost
+  compounds with every voice intent added.
