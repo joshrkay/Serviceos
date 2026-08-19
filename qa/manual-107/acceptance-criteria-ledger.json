@@ -1,0 +1,5145 @@
+{
+  "title": "ServiceOS Manual QA — Authoritative 107-item Acceptance Criteria Ledger",
+  "generatedAt": "2026-07-25T14:02:55.947Z",
+  "sourceNote": "Reconstructed in-repo because the Mac-path accounting file was unavailable to the cloud agent. Sources: docs/beta-verification-runbook.md, e2e/qa-matrix/matrix.ts, docs/superpowers/specs/2026-05-24-platform-assessment-and-e2e-qa-50-workflows.md, and the 22-section goal order.",
+  "environmentDefaults": {
+    "web": "https://serviceosweb-development.up.railway.app",
+    "api": "https://serviceosapi-development.up.railway.app",
+    "preferredRailwayEnv": "Development or dedicated QA (never production customer data)"
+  },
+  "counts": {
+    "total": 107,
+    "pass": 0,
+    "fail": 0,
+    "not_run": 107
+  },
+  "items": [
+    {
+      "id": "QA-001",
+      "status": "NOT_RUN",
+      "section": 1,
+      "sectionName": "Authentication and access",
+      "name": "Signup page loads with Rivet branding",
+      "purpose": "Prove the unauthenticated signup surface loads without console errors.",
+      "primaryRef": "beta 1.1; WF-01",
+      "tenant": "none",
+      "role": "anonymous",
+      "preconditions": [
+        "E2E_BASE_URL reachable",
+        "Web deploy healthy"
+      ],
+      "fixtures": [],
+      "externalResources": [],
+      "manualSteps": [
+        "Open /signup in a clean browser profile",
+        "Open DevTools console",
+        "Confirm page render"
+      ],
+      "expectedUi": [
+        "Rivet branding visible",
+        "No blank screen",
+        "No uncaught console errors"
+      ],
+      "expectedApi": [
+        "Static assets 200"
+      ],
+      "expectedDb": [],
+      "expectedWorkers": [],
+      "expectedAuthz": [
+        "Page does not require auth"
+      ],
+      "negativeAssertions": [
+        "No Fieldly-only dead branding as sole title",
+        "No raw stack traces"
+      ],
+      "requiredEvidence": [
+        "recording",
+        "screenshot of /signup",
+        "console log empty of errors"
+      ],
+      "cleanup": [],
+      "passCriteria": [
+        "Signup page loads",
+        "Brand signal present",
+        "Zero console errors"
+      ],
+      "failCriteria": [
+        "Blank page",
+        "Console errors",
+        "Redirect loop"
+      ]
+    },
+    {
+      "id": "QA-002",
+      "status": "NOT_RUN",
+      "section": 1,
+      "sectionName": "Authentication and access",
+      "name": "Fresh signup completes Clerk flow",
+      "purpose": "Prove a disposable email can create an auth session via Clerk.",
+      "primaryRef": "beta 1.2; WF-01",
+      "tenant": "C",
+      "role": "owner",
+      "preconditions": [
+        "Clerk test instance",
+        "Disposable inbox"
+      ],
+      "fixtures": [
+        "fresh email"
+      ],
+      "externalResources": [
+        "Clerk"
+      ],
+      "manualSteps": [
+        "Sign up with fresh test email",
+        "Complete Clerk verification",
+        "Land in app"
+      ],
+      "expectedUi": [
+        "No Clerk error screen",
+        "Redirect to /onboarding or /dashboard"
+      ],
+      "expectedApi": [
+        "Session cookie/JWT present"
+      ],
+      "expectedDb": [
+        "tenants row created OR pending webhook"
+      ],
+      "expectedWorkers": [
+        "Clerk user.created webhook processed"
+      ],
+      "expectedAuthz": [
+        "Authenticated after signup"
+      ],
+      "negativeAssertions": [
+        "No duplicate tenant for same email on first signup"
+      ],
+      "requiredEvidence": [
+        "recording",
+        "redacted /api/me response"
+      ],
+      "cleanup": [
+        "Mark Tenant C disposable"
+      ],
+      "passCriteria": [
+        "Clerk flow completes",
+        "User session established"
+      ],
+      "failCriteria": [
+        "Error screen",
+        "Stuck on signup",
+        "No session"
+      ]
+    },
+    {
+      "id": "QA-003",
+      "status": "NOT_RUN",
+      "section": 1,
+      "sectionName": "Authentication and access",
+      "name": "/api/me returns tenantId after bootstrap",
+      "purpose": "Prove Clerk webhook + Postgres tenant bootstrap succeeded.",
+      "primaryRef": "beta 1.4; ME-01; WF-01",
+      "tenant": "A|C",
+      "role": "owner",
+      "preconditions": [
+        "Authenticated session"
+      ],
+      "fixtures": [],
+      "externalResources": [
+        "Clerk webhook"
+      ],
+      "manualSteps": [
+        "Open DevTools Network",
+        "Locate GET /api/me",
+        "Confirm tenantId"
+      ],
+      "expectedUi": [
+        "App shell loads"
+      ],
+      "expectedApi": [
+        "GET /api/me → 200 with tenantId"
+      ],
+      "expectedDb": [
+        "tenants.id matches /api/me.tenantId"
+      ],
+      "expectedWorkers": [],
+      "expectedAuthz": [
+        "JWT tenant_id matches row"
+      ],
+      "negativeAssertions": [
+        "tenantId not null/empty"
+      ],
+      "requiredEvidence": [
+        "recording",
+        "redacted api-response.json",
+        "database-assertion.txt"
+      ],
+      "cleanup": [],
+      "passCriteria": [
+        "/api/me 200",
+        "tenantId present",
+        "DB row exists"
+      ],
+      "failCriteria": [
+        "401/500",
+        "Missing tenantId",
+        "No tenant row"
+      ]
+    },
+    {
+      "id": "QA-004",
+      "status": "NOT_RUN",
+      "section": 1,
+      "sectionName": "Authentication and access",
+      "name": "Session survives hard reload; logout lands on /login",
+      "purpose": "Prove session persistence and clean logout.",
+      "primaryRef": "beta 1.5–1.6; WF-02",
+      "tenant": "A",
+      "role": "owner",
+      "preconditions": [
+        "Logged in"
+      ],
+      "fixtures": [],
+      "externalResources": [
+        "Clerk"
+      ],
+      "manualSteps": [
+        "Hard reload (Ctrl+Shift+R)",
+        "Confirm still logged in",
+        "Sign out",
+        "Confirm /login"
+      ],
+      "expectedUi": [
+        "Still in app after reload",
+        "After logout: /login"
+      ],
+      "expectedApi": [
+        "/api/me 200 before logout; 401 after"
+      ],
+      "expectedDb": [],
+      "expectedWorkers": [],
+      "expectedAuthz": [
+        "Session revoked after logout"
+      ],
+      "negativeAssertions": [
+        "No access to /customers after logout"
+      ],
+      "requiredEvidence": [
+        "recording"
+      ],
+      "cleanup": [],
+      "passCriteria": [
+        "Reload keeps session",
+        "Logout → /login",
+        "Protected routes blocked"
+      ],
+      "failCriteria": [
+        "Logged out after reload",
+        "Logout no-op",
+        "Still authenticated after logout"
+      ]
+    },
+    {
+      "id": "QA-005",
+      "status": "NOT_RUN",
+      "section": 1,
+      "sectionName": "Authentication and access",
+      "name": "Protected route redirects when logged out",
+      "purpose": "Prove auth gate on /customers.",
+      "primaryRef": "beta 1.7; WF-03",
+      "tenant": "none",
+      "role": "anonymous",
+      "preconditions": [
+        "Logged out"
+      ],
+      "fixtures": [],
+      "externalResources": [],
+      "manualSteps": [
+        "Navigate to /customers while logged out"
+      ],
+      "expectedUi": [
+        "Redirect to /login"
+      ],
+      "expectedApi": [
+        "GET /api/customers without auth → 401/403"
+      ],
+      "expectedDb": [],
+      "expectedWorkers": [],
+      "expectedAuthz": [
+        "No tenant data leaked"
+      ],
+      "negativeAssertions": [
+        "Customer list never rendered"
+      ],
+      "requiredEvidence": [
+        "recording",
+        "screenshot of redirect"
+      ],
+      "cleanup": [],
+      "passCriteria": [
+        "Redirect to /login",
+        "API denies unauth"
+      ],
+      "failCriteria": [
+        "Customers page visible",
+        "API 200 without auth"
+      ]
+    },
+    {
+      "id": "QA-006",
+      "status": "NOT_RUN",
+      "section": 2,
+      "sectionName": "Onboarding and go-live",
+      "name": "Land onboarding or dashboard after signup",
+      "purpose": "Prove post-signup routing is not a blank screen.",
+      "primaryRef": "beta 1.3; WF-06",
+      "tenant": "C",
+      "role": "owner",
+      "preconditions": [
+        "Just completed signup"
+      ],
+      "fixtures": [],
+      "externalResources": [],
+      "manualSteps": [
+        "Observe landing route after signup"
+      ],
+      "expectedUi": [
+        "/onboarding or /dashboard",
+        "No blank screen"
+      ],
+      "expectedApi": [],
+      "expectedDb": [],
+      "expectedWorkers": [],
+      "expectedAuthz": [],
+      "negativeAssertions": [
+        "Not stuck on /signup"
+      ],
+      "requiredEvidence": [
+        "recording"
+      ],
+      "cleanup": [],
+      "passCriteria": [
+        "Valid post-signup route"
+      ],
+      "failCriteria": [
+        "Blank screen",
+        "Error boundary"
+      ]
+    },
+    {
+      "id": "QA-007",
+      "status": "NOT_RUN",
+      "section": 2,
+      "sectionName": "Onboarding and go-live",
+      "name": "Onboarding v2 identity→pack→phone→billing",
+      "purpose": "Prove onboarding wizard advances through core steps.",
+      "primaryRef": "WF-06; PROV-01",
+      "tenant": "C",
+      "role": "owner",
+      "preconditions": [
+        "Fresh Tenant C",
+        "Onboarding incomplete"
+      ],
+      "fixtures": [
+        "business identity fields"
+      ],
+      "externalResources": [
+        "Twilio sandbox optional",
+        "Stripe test"
+      ],
+      "manualSteps": [
+        "Complete identity",
+        "Select trade pack",
+        "Phone step (or skip if allowed)",
+        "Billing/trial step"
+      ],
+      "expectedUi": [
+        "Checklist advances",
+        "Steps marked complete"
+      ],
+      "expectedApi": [
+        "Onboarding status endpoints reflect progress"
+      ],
+      "expectedDb": [
+        "tenant_settings updated",
+        "vertical pack active"
+      ],
+      "expectedWorkers": [],
+      "expectedAuthz": [
+        "Owner only"
+      ],
+      "negativeAssertions": [
+        "Cannot skip required identity without validation"
+      ],
+      "requiredEvidence": [
+        "recording",
+        "api status snapshots"
+      ],
+      "cleanup": [
+        "Keep Tenant C for later onboarding negatives"
+      ],
+      "passCriteria": [
+        "Wizard advances",
+        "Pack persisted"
+      ],
+      "failCriteria": [
+        "Step stuck",
+        "Progress not persisted after refresh"
+      ]
+    },
+    {
+      "id": "QA-008",
+      "status": "NOT_RUN",
+      "section": 2,
+      "sectionName": "Onboarding and go-live",
+      "name": "HVAC pack activated via configure",
+      "purpose": "Prove HVAC vertical pack configuration.",
+      "primaryRef": "PROV-01",
+      "tenant": "A",
+      "role": "owner",
+      "preconditions": [
+        "Tenant A authenticated"
+      ],
+      "fixtures": [],
+      "externalResources": [],
+      "manualSteps": [
+        "Call/configure services=[\"HVAC\"] via onboarding or settings",
+        "GET /api/settings and /api/verticals"
+      ],
+      "expectedUi": [
+        "HVAC terminology/categories present"
+      ],
+      "expectedApi": [
+        "Verticals report hvac"
+      ],
+      "expectedDb": [
+        "Pack active for tenant"
+      ],
+      "expectedWorkers": [],
+      "expectedAuthz": [
+        "Tenant-scoped"
+      ],
+      "negativeAssertions": [
+        "Plumbing-only terms not sole active set"
+      ],
+      "requiredEvidence": [
+        "api-response.json",
+        "recording"
+      ],
+      "cleanup": [],
+      "passCriteria": [
+        "HVAC pack active",
+        "Settings report hvac"
+      ],
+      "failCriteria": [
+        "Wrong pack",
+        "No pack"
+      ]
+    },
+    {
+      "id": "QA-009",
+      "status": "NOT_RUN",
+      "section": 2,
+      "sectionName": "Onboarding and go-live",
+      "name": "Plumbing pack distinct from HVAC",
+      "purpose": "Prove plumbing pack is distinct.",
+      "primaryRef": "PROV-02",
+      "tenant": "A",
+      "role": "owner",
+      "preconditions": [
+        "Can activate plumbing"
+      ],
+      "fixtures": [],
+      "externalResources": [],
+      "manualSteps": [
+        "Activate plumbing pack",
+        "Compare categories to HVAC"
+      ],
+      "expectedUi": [
+        "Plumbing service types appear"
+      ],
+      "expectedApi": [
+        "Verticals report plumbing"
+      ],
+      "expectedDb": [
+        "Pack row"
+      ],
+      "expectedWorkers": [],
+      "expectedAuthz": [],
+      "negativeAssertions": [
+        "Not identical to HVAC catalog"
+      ],
+      "requiredEvidence": [
+        "api-response.json",
+        "recording"
+      ],
+      "cleanup": [
+        "Restore HVAC as primary if needed"
+      ],
+      "passCriteria": [
+        "Plumbing distinct and active"
+      ],
+      "failCriteria": [
+        "Same as HVAC",
+        "Activation fails"
+      ]
+    },
+    {
+      "id": "QA-010",
+      "status": "NOT_RUN",
+      "section": 2,
+      "sectionName": "Onboarding and go-live",
+      "name": "Twilio subaccount provisions phone",
+      "purpose": "Prove async telephony provisioning for a tenant.",
+      "primaryRef": "beta 16.6–16.10; WF-07",
+      "tenant": "A",
+      "role": "owner+system",
+      "preconditions": [
+        "Twilio credentials on Railway",
+        "Worker running"
+      ],
+      "fixtures": [],
+      "externalResources": [
+        "Twilio"
+      ],
+      "manualSteps": [
+        "Trigger provision",
+        "Wait ≤2 min",
+        "Inspect tenant_integrations"
+      ],
+      "expectedUi": [
+        "Phone number shown in settings if exposed"
+      ],
+      "expectedApi": [
+        "Integration status full_readiness"
+      ],
+      "expectedDb": [
+        "tenant_integrations.twilio with subaccount_sid + phoneE164"
+      ],
+      "expectedWorkers": [
+        "Provisioning worker completes"
+      ],
+      "expectedAuthz": [
+        "Number exclusive to tenant"
+      ],
+      "negativeAssertions": [
+        "No second number on replay"
+      ],
+      "requiredEvidence": [
+        "database-assertion.txt",
+        "recording",
+        "provider receipt redacted"
+      ],
+      "cleanup": [],
+      "passCriteria": [
+        "phoneE164 present",
+        "status full_readiness",
+        "Call routes to tenant"
+      ],
+      "failCriteria": [
+        "Stuck t0_requested",
+        "failed",
+        "Shared number across tenants"
+      ]
+    },
+    {
+      "id": "QA-011",
+      "status": "NOT_RUN",
+      "section": 3,
+      "sectionName": "CRM and customers",
+      "name": "Create customer (UI + API)",
+      "purpose": "Create a customer under Tenant A with phone/email.",
+      "primaryRef": "CUST-01; WF-11; beta 2.1–2.5",
+      "tenant": "A",
+      "role": "owner",
+      "preconditions": [
+        "Logged in as Tenant A owner"
+      ],
+      "fixtures": [
+        "QA customer name/phone/email"
+      ],
+      "externalResources": [],
+      "manualSteps": [
+        "/customers → New",
+        "Fill fields",
+        "Save",
+        "Open detail"
+      ],
+      "expectedUi": [
+        "Customer in list",
+        "Detail shows fields"
+      ],
+      "expectedApi": [
+        "POST /api/customers → 201"
+      ],
+      "expectedDb": [
+        "customers.tenant_id = A"
+      ],
+      "expectedWorkers": [],
+      "expectedAuthz": [
+        "Tenant A only"
+      ],
+      "negativeAssertions": [
+        "Not visible to Tenant B"
+      ],
+      "requiredEvidence": [
+        "recording",
+        "api-response.json",
+        "database-assertion.txt"
+      ],
+      "cleanup": [
+        "Keep as fixture customer"
+      ],
+      "passCriteria": [
+        "201",
+        "List shows customer",
+        "DB row tenant-scoped"
+      ],
+      "failCriteria": [
+        "UI success without row",
+        "Wrong tenant"
+      ]
+    },
+    {
+      "id": "QA-012",
+      "status": "NOT_RUN",
+      "section": 3,
+      "sectionName": "CRM and customers",
+      "name": "Primary + second service location",
+      "purpose": "Attach two locations and select primary on jobs.",
+      "primaryRef": "LOC-01; beta 2.3, 2.6–2.8",
+      "tenant": "A",
+      "role": "owner",
+      "preconditions": [
+        "Customer from QA-011"
+      ],
+      "fixtures": [
+        "two addresses"
+      ],
+      "externalResources": [],
+      "manualSteps": [
+        "Add primary location",
+        "Add second location",
+        "Verify labels"
+      ],
+      "expectedUi": [
+        "Both locations on profile",
+        "Primary labeled"
+      ],
+      "expectedApi": [
+        "Locations CRUD 2xx"
+      ],
+      "expectedDb": [
+        "two service_locations rows"
+      ],
+      "expectedWorkers": [],
+      "expectedAuthz": [],
+      "negativeAssertions": [
+        "Locations not swapped silently"
+      ],
+      "requiredEvidence": [
+        "recording",
+        "database-assertion.txt"
+      ],
+      "cleanup": [],
+      "passCriteria": [
+        "Two locations persist",
+        "Primary labeled"
+      ],
+      "failCriteria": [
+        "Second location missing",
+        "Primary unlabeled"
+      ]
+    },
+    {
+      "id": "QA-013",
+      "status": "NOT_RUN",
+      "section": 3,
+      "sectionName": "CRM and customers",
+      "name": "Customer notes CRUD + surface on job",
+      "purpose": "Notes persist and appear on job context.",
+      "primaryRef": "NOTE-01; beta 2.9–2.12",
+      "tenant": "A",
+      "role": "owner",
+      "preconditions": [
+        "Customer exists"
+      ],
+      "fixtures": [
+        "note text"
+      ],
+      "externalResources": [],
+      "manualSteps": [
+        "Add note",
+        "Reload",
+        "Edit note",
+        "Open related job later"
+      ],
+      "expectedUi": [
+        "Note persists",
+        "Updated text shown",
+        "Visible on job"
+      ],
+      "expectedApi": [
+        "Notes endpoints 2xx"
+      ],
+      "expectedDb": [
+        "notes row"
+      ],
+      "expectedWorkers": [],
+      "expectedAuthz": [],
+      "negativeAssertions": [
+        "Note not lost on reload"
+      ],
+      "requiredEvidence": [
+        "recording"
+      ],
+      "cleanup": [],
+      "passCriteria": [
+        "CRUD works",
+        "Surfaces on job"
+      ],
+      "failCriteria": [
+        "Note disappears",
+        "Edit fails"
+      ]
+    },
+    {
+      "id": "QA-014",
+      "status": "NOT_RUN",
+      "section": 3,
+      "sectionName": "CRM and customers",
+      "name": "Edit phone + search by last name",
+      "purpose": "Customer edit and search.",
+      "primaryRef": "WF-12; beta 2.17–2.18",
+      "tenant": "A",
+      "role": "owner",
+      "preconditions": [
+        "Customer exists"
+      ],
+      "fixtures": [],
+      "externalResources": [],
+      "manualSteps": [
+        "Edit phone",
+        "Save",
+        "Search by last name"
+      ],
+      "expectedUi": [
+        "Updated phone",
+        "Search hit"
+      ],
+      "expectedApi": [
+        "PATCH customer 200"
+      ],
+      "expectedDb": [
+        "primary_phone updated"
+      ],
+      "expectedWorkers": [],
+      "expectedAuthz": [],
+      "negativeAssertions": [],
+      "requiredEvidence": [
+        "recording",
+        "api-response.json"
+      ],
+      "cleanup": [],
+      "passCriteria": [
+        "Phone updated",
+        "Search finds customer"
+      ],
+      "failCriteria": [
+        "Stale phone",
+        "Search miss"
+      ]
+    },
+    {
+      "id": "QA-015",
+      "status": "NOT_RUN",
+      "section": 3,
+      "sectionName": "CRM and customers",
+      "name": "Archive customer drops from active list",
+      "purpose": "Archive soft-hides customer.",
+      "primaryRef": "CUST-03; beta 2.19",
+      "tenant": "A",
+      "role": "owner",
+      "preconditions": [
+        "Disposable customer OR restore after"
+      ],
+      "fixtures": [
+        "archive-target customer"
+      ],
+      "externalResources": [],
+      "manualSteps": [
+        "Archive",
+        "Confirm absent from active list",
+        "Restore if needed"
+      ],
+      "expectedUi": [
+        "Gone from active list"
+      ],
+      "expectedApi": [
+        "Archive endpoint 2xx"
+      ],
+      "expectedDb": [
+        "is_archived true"
+      ],
+      "expectedWorkers": [],
+      "expectedAuthz": [],
+      "negativeAssertions": [
+        "Hard delete did not occur"
+      ],
+      "requiredEvidence": [
+        "recording",
+        "database-assertion.txt"
+      ],
+      "cleanup": [
+        "Restore primary fixture customer"
+      ],
+      "passCriteria": [
+        "Archived flag set",
+        "Hidden from active list"
+      ],
+      "failCriteria": [
+        "Still in active list",
+        "Row deleted"
+      ]
+    },
+    {
+      "id": "QA-016",
+      "status": "NOT_RUN",
+      "section": 3,
+      "sectionName": "CRM and customers",
+      "name": "Customer history shows job/estimate/invoice",
+      "purpose": "History tabs link lifecycle entities to same location.",
+      "primaryRef": "beta 2.13–2.16; JRN-03",
+      "tenant": "A",
+      "role": "owner",
+      "preconditions": [
+        "Job, estimate, invoice exist for customer"
+      ],
+      "fixtures": [
+        "lifecycle entities"
+      ],
+      "externalResources": [],
+      "manualSteps": [
+        "Open customer detail history tabs",
+        "Verify three entity types",
+        "Check location link"
+      ],
+      "expectedUi": [
+        "Job/estimate/invoice listed"
+      ],
+      "expectedApi": [
+        "History endpoints include entities"
+      ],
+      "expectedDb": [
+        "Same location_id"
+      ],
+      "expectedWorkers": [],
+      "expectedAuthz": [],
+      "negativeAssertions": [
+        "No blank/mismatched location"
+      ],
+      "requiredEvidence": [
+        "recording",
+        "final-state.png"
+      ],
+      "cleanup": [],
+      "passCriteria": [
+        "All three history entries",
+        "Same location"
+      ],
+      "failCriteria": [
+        "Missing entity",
+        "Wrong location"
+      ]
+    },
+    {
+      "id": "QA-017",
+      "status": "NOT_RUN",
+      "section": 4,
+      "sectionName": "Leads and conversion",
+      "name": "Manual lead create + note",
+      "purpose": "Create a lead with note.",
+      "primaryRef": "LEAD-01; beta 3.1–3.4; WF-14",
+      "tenant": "A",
+      "role": "owner",
+      "preconditions": [
+        "Logged in"
+      ],
+      "fixtures": [],
+      "externalResources": [],
+      "manualSteps": [
+        "/leads → New",
+        "Fill fields",
+        "Save",
+        "Add note"
+      ],
+      "expectedUi": [
+        "Lead in list",
+        "Note saved"
+      ],
+      "expectedApi": [
+        "POST /api/leads 201"
+      ],
+      "expectedDb": [
+        "leads row"
+      ],
+      "expectedWorkers": [],
+      "expectedAuthz": [],
+      "negativeAssertions": [],
+      "requiredEvidence": [
+        "recording",
+        "api-response.json"
+      ],
+      "cleanup": [],
+      "passCriteria": [
+        "Lead created",
+        "Note persists"
+      ],
+      "failCriteria": [
+        "Not created",
+        "Note lost"
+      ]
+    },
+    {
+      "id": "QA-018",
+      "status": "NOT_RUN",
+      "section": 4,
+      "sectionName": "Leads and conversion",
+      "name": "Public intake → lead with source tag",
+      "purpose": "Unauthenticated intake creates a lead.",
+      "primaryRef": "beta 3.5–3.8; WF-16; JRN-03",
+      "tenant": "A",
+      "role": "anonymous",
+      "preconditions": [
+        "Public /intake enabled for tenant"
+      ],
+      "fixtures": [],
+      "externalResources": [],
+      "manualSteps": [
+        "Incognito /intake",
+        "Complete form",
+        "Submit",
+        "Verify in /leads"
+      ],
+      "expectedUi": [
+        "Success on intake",
+        "Lead appears in app"
+      ],
+      "expectedApi": [
+        "POST public intake 2xx"
+      ],
+      "expectedDb": [
+        "lead source = intake"
+      ],
+      "expectedWorkers": [],
+      "expectedAuthz": [
+        "Public path only creates for target tenant"
+      ],
+      "negativeAssertions": [
+        "No auth required",
+        "Source not blank"
+      ],
+      "requiredEvidence": [
+        "recording",
+        "database-assertion.txt"
+      ],
+      "cleanup": [],
+      "passCriteria": [
+        "Lead created",
+        "Source tagged intake"
+      ],
+      "failCriteria": [
+        "No lead",
+        "Wrong tenant"
+      ]
+    },
+    {
+      "id": "QA-019",
+      "status": "NOT_RUN",
+      "section": 4,
+      "sectionName": "Leads and conversion",
+      "name": "Lead stage progression (won-guard)",
+      "purpose": "Kanban/stage moves persist with won guards.",
+      "primaryRef": "LEAD-01",
+      "tenant": "A",
+      "role": "owner",
+      "preconditions": [
+        "Open lead"
+      ],
+      "fixtures": [],
+      "externalResources": [],
+      "manualSteps": [
+        "Move lead across stages",
+        "Reload"
+      ],
+      "expectedUi": [
+        "Stage badge updates"
+      ],
+      "expectedApi": [
+        "Stage PATCH 2xx"
+      ],
+      "expectedDb": [
+        "stage persisted"
+      ],
+      "expectedWorkers": [],
+      "expectedAuthz": [],
+      "negativeAssertions": [
+        "Invalid won transition blocked if applicable"
+      ],
+      "requiredEvidence": [
+        "recording"
+      ],
+      "cleanup": [],
+      "passCriteria": [
+        "Stage persists"
+      ],
+      "failCriteria": [
+        "Stage reverts",
+        "Invalid transition allowed silently"
+      ]
+    },
+    {
+      "id": "QA-020",
+      "status": "NOT_RUN",
+      "section": 4,
+      "sectionName": "Leads and conversion",
+      "name": "Lead lost with reason",
+      "purpose": "Mark lead lost with reason.",
+      "primaryRef": "LEAD-02",
+      "tenant": "A",
+      "role": "owner",
+      "preconditions": [
+        "Disposable lead"
+      ],
+      "fixtures": [],
+      "externalResources": [],
+      "manualSteps": [
+        "Mark lost",
+        "Enter reason",
+        "Save"
+      ],
+      "expectedUi": [
+        "Status lost",
+        "Reason visible"
+      ],
+      "expectedApi": [
+        "Lost endpoint 2xx"
+      ],
+      "expectedDb": [
+        "lost reason stored"
+      ],
+      "expectedWorkers": [],
+      "expectedAuthz": [],
+      "negativeAssertions": [
+        "Cannot convert lost without reopen if guarded"
+      ],
+      "requiredEvidence": [
+        "recording",
+        "api-response.json"
+      ],
+      "cleanup": [],
+      "passCriteria": [
+        "Lost + reason persisted"
+      ],
+      "failCriteria": [
+        "Lost without reason accepted when required",
+        "Status wrong"
+      ]
+    },
+    {
+      "id": "QA-021",
+      "status": "NOT_RUN",
+      "section": 4,
+      "sectionName": "Leads and conversion",
+      "name": "Convert lead → customer (link preserved)",
+      "purpose": "Conversion creates customer and preserves link.",
+      "primaryRef": "beta 3.9–3.12; WF-15; JRN-03",
+      "tenant": "A",
+      "role": "owner",
+      "preconditions": [
+        "Convertible lead"
+      ],
+      "fixtures": [],
+      "externalResources": [],
+      "manualSteps": [
+        "Convert to customer",
+        "Open customer",
+        "Check lead status"
+      ],
+      "expectedUi": [
+        "Customer created",
+        "Lead status Converted"
+      ],
+      "expectedApi": [
+        "Convert 2xx"
+      ],
+      "expectedDb": [
+        "customer linked to lead"
+      ],
+      "expectedWorkers": [],
+      "expectedAuthz": [],
+      "negativeAssertions": [
+        "Lead not deleted"
+      ],
+      "requiredEvidence": [
+        "recording",
+        "database-assertion.txt"
+      ],
+      "cleanup": [],
+      "passCriteria": [
+        "Customer exists",
+        "Lead converted",
+        "Link preserved"
+      ],
+      "failCriteria": [
+        "Re-entry required for contact fields",
+        "Lead deleted"
+      ]
+    },
+    {
+      "id": "QA-022",
+      "status": "NOT_RUN",
+      "section": 5,
+      "sectionName": "Jobs",
+      "name": "Create job on primary location",
+      "purpose": "Create job bound to primary service location.",
+      "primaryRef": "JOB-01; WF-17; beta 4.1–4.6",
+      "tenant": "A",
+      "role": "owner",
+      "preconditions": [
+        "Customer + two locations"
+      ],
+      "fixtures": [],
+      "externalResources": [],
+      "manualSteps": [
+        "/jobs/new",
+        "Select customer + primary location",
+        "Save"
+      ],
+      "expectedUi": [
+        "Job in list",
+        "Detail links customer + location"
+      ],
+      "expectedApi": [
+        "POST /api/jobs 201"
+      ],
+      "expectedDb": [
+        "jobs.location_id = primary"
+      ],
+      "expectedWorkers": [],
+      "expectedAuthz": [],
+      "negativeAssertions": [
+        "Not attached to second location"
+      ],
+      "requiredEvidence": [
+        "recording",
+        "database-assertion.txt"
+      ],
+      "cleanup": [],
+      "passCriteria": [
+        "Job created",
+        "Primary location linked"
+      ],
+      "failCriteria": [
+        "Wrong location",
+        "No job row"
+      ]
+    },
+    {
+      "id": "QA-023",
+      "status": "NOT_RUN",
+      "section": 5,
+      "sectionName": "Jobs",
+      "name": "Job lifecycle new→scheduled→in_progress→completed",
+      "purpose": "Valid status transitions update UI + DB.",
+      "primaryRef": "JOB-01; WF-18; beta 4.7–4.10",
+      "tenant": "A",
+      "role": "owner",
+      "preconditions": [
+        "Open job"
+      ],
+      "fixtures": [],
+      "externalResources": [],
+      "manualSteps": [
+        "Transition through lifecycle",
+        "Verify list badge"
+      ],
+      "expectedUi": [
+        "Badge updates each step"
+      ],
+      "expectedApi": [
+        "transition endpoints 2xx"
+      ],
+      "expectedDb": [
+        "status final = completed",
+        "audit events"
+      ],
+      "expectedWorkers": [],
+      "expectedAuthz": [],
+      "negativeAssertions": [],
+      "requiredEvidence": [
+        "recording",
+        "database-assertion.txt"
+      ],
+      "cleanup": [],
+      "passCriteria": [
+        "All transitions succeed",
+        "Final status completed"
+      ],
+      "failCriteria": [
+        "Stuck status",
+        "List stale after refresh"
+      ]
+    },
+    {
+      "id": "QA-024",
+      "status": "NOT_RUN",
+      "section": 5,
+      "sectionName": "Jobs",
+      "name": "Invalid job transition rejected",
+      "purpose": "Illegal transitions return 4xx and do not persist.",
+      "primaryRef": "JOB-02",
+      "tenant": "A",
+      "role": "owner",
+      "preconditions": [
+        "Job in draft/new"
+      ],
+      "fixtures": [],
+      "externalResources": [],
+      "manualSteps": [
+        "Attempt illegal transition via API"
+      ],
+      "expectedUi": [
+        "Error toast if via UI"
+      ],
+      "expectedApi": [
+        "4xx"
+      ],
+      "expectedDb": [
+        "status unchanged"
+      ],
+      "expectedWorkers": [],
+      "expectedAuthz": [],
+      "negativeAssertions": [
+        "No silent status change"
+      ],
+      "requiredEvidence": [
+        "api-response.json",
+        "database-assertion.txt",
+        "recording"
+      ],
+      "cleanup": [],
+      "passCriteria": [
+        "4xx",
+        "DB unchanged"
+      ],
+      "failCriteria": [
+        "200 with illegal transition"
+      ]
+    },
+    {
+      "id": "QA-025",
+      "status": "NOT_RUN",
+      "section": 5,
+      "sectionName": "Jobs",
+      "name": "Job photos upload + render",
+      "purpose": "Photo upload persists and renders.",
+      "primaryRef": "beta 4.14–4.16",
+      "tenant": "A",
+      "role": "owner",
+      "preconditions": [
+        "Job exists",
+        "Object storage configured or local stub"
+      ],
+      "fixtures": [
+        "small test image"
+      ],
+      "externalResources": [
+        "storage"
+      ],
+      "manualSteps": [
+        "Upload photo on job",
+        "Reload",
+        "Confirm thumbnail"
+      ],
+      "expectedUi": [
+        "Photo visible"
+      ],
+      "expectedApi": [
+        "Upload 2xx"
+      ],
+      "expectedDb": [
+        "attachment metadata"
+      ],
+      "expectedWorkers": [],
+      "expectedAuthz": [],
+      "negativeAssertions": [
+        "Upload does not crash page"
+      ],
+      "requiredEvidence": [
+        "recording",
+        "final-state.png"
+      ],
+      "cleanup": [],
+      "passCriteria": [
+        "Photo persists after refresh"
+      ],
+      "failCriteria": [
+        "Crash",
+        "Missing after refresh"
+      ]
+    },
+    {
+      "id": "QA-026",
+      "status": "NOT_RUN",
+      "section": 5,
+      "sectionName": "Jobs",
+      "name": "Job notes persist + customer activity",
+      "purpose": "Job notes persist and appear in activity.",
+      "primaryRef": "NOTE-01; beta 4.17–4.19",
+      "tenant": "A",
+      "role": "owner",
+      "preconditions": [
+        "Job exists"
+      ],
+      "fixtures": [],
+      "externalResources": [],
+      "manualSteps": [
+        "Add job note",
+        "Reload",
+        "Check customer activity"
+      ],
+      "expectedUi": [
+        "Note visible"
+      ],
+      "expectedApi": [
+        "Notes 2xx"
+      ],
+      "expectedDb": [
+        "note row"
+      ],
+      "expectedWorkers": [],
+      "expectedAuthz": [],
+      "negativeAssertions": [],
+      "requiredEvidence": [
+        "recording"
+      ],
+      "cleanup": [],
+      "passCriteria": [
+        "Note persists"
+      ],
+      "failCriteria": [
+        "Note lost"
+      ]
+    },
+    {
+      "id": "QA-027",
+      "status": "NOT_RUN",
+      "section": 6,
+      "sectionName": "Scheduling",
+      "name": "Calendar loads; create appointment",
+      "purpose": "Create appointment on schedule.",
+      "primaryRef": "SCH-01; WF-19; beta 7.1–7.5",
+      "tenant": "A",
+      "role": "owner",
+      "preconditions": [
+        "Job exists"
+      ],
+      "fixtures": [],
+      "externalResources": [],
+      "manualSteps": [
+        "Open /schedule",
+        "Create appointment",
+        "Save"
+      ],
+      "expectedUi": [
+        "Appointment on calendar"
+      ],
+      "expectedApi": [
+        "POST /api/appointments 201"
+      ],
+      "expectedDb": [
+        "appointment row"
+      ],
+      "expectedWorkers": [],
+      "expectedAuthz": [],
+      "negativeAssertions": [],
+      "requiredEvidence": [
+        "recording",
+        "api-response.json"
+      ],
+      "cleanup": [],
+      "passCriteria": [
+        "Appointment visible + DB row"
+      ],
+      "failCriteria": [
+        "UI-only appointment",
+        "Timezone wrong day"
+      ]
+    },
+    {
+      "id": "QA-028",
+      "status": "NOT_RUN",
+      "section": 6,
+      "sectionName": "Scheduling",
+      "name": "Reschedule via API/UI (version bump)",
+      "purpose": "Reschedule updates window and version.",
+      "primaryRef": "SCH-01; WF-20; beta 7.8–7.10",
+      "tenant": "A",
+      "role": "owner",
+      "preconditions": [
+        "Appointment exists"
+      ],
+      "fixtures": [],
+      "externalResources": [],
+      "manualSteps": [
+        "Reschedule to new slot",
+        "Hard refresh"
+      ],
+      "expectedUi": [
+        "New time shown"
+      ],
+      "expectedApi": [
+        "PATCH/reschedule 2xx"
+      ],
+      "expectedDb": [
+        "window updated",
+        "version incremented"
+      ],
+      "expectedWorkers": [],
+      "expectedAuthz": [],
+      "negativeAssertions": [
+        "No duplicate appointment"
+      ],
+      "requiredEvidence": [
+        "recording",
+        "database-assertion.txt"
+      ],
+      "cleanup": [],
+      "passCriteria": [
+        "New time persisted",
+        "Single assignment"
+      ],
+      "failCriteria": [
+        "Stale time",
+        "Duplicate rows"
+      ]
+    },
+    {
+      "id": "QA-029",
+      "status": "NOT_RUN",
+      "section": 6,
+      "sectionName": "Scheduling",
+      "name": "Overlap conflict indicator",
+      "purpose": "Overlapping assignments surface conflict UI.",
+      "primaryRef": "beta 7.6–7.7, 7.9",
+      "tenant": "A",
+      "role": "owner/dispatcher",
+      "preconditions": [
+        "Tech with existing appointment"
+      ],
+      "fixtures": [
+        "overlapping slot attempt"
+      ],
+      "externalResources": [],
+      "manualSteps": [
+        "Attempt overlapping assign",
+        "Observe warning/block"
+      ],
+      "expectedUi": [
+        "Conflict indicator"
+      ],
+      "expectedApi": [
+        "Conflict response or feasibility warning"
+      ],
+      "expectedDb": [
+        "No illegal double book if constrained"
+      ],
+      "expectedWorkers": [],
+      "expectedAuthz": [],
+      "negativeAssertions": [
+        "Silent double-book not allowed when exclusion active"
+      ],
+      "requiredEvidence": [
+        "recording"
+      ],
+      "cleanup": [],
+      "passCriteria": [
+        "Conflict visible or blocked"
+      ],
+      "failCriteria": [
+        "Silent overlap created"
+      ]
+    },
+    {
+      "id": "QA-030",
+      "status": "NOT_RUN",
+      "section": 6,
+      "sectionName": "Scheduling",
+      "name": "Appointment status lifecycle confirm→complete",
+      "purpose": "Appointment status transitions.",
+      "primaryRef": "SCH-04",
+      "tenant": "A",
+      "role": "owner",
+      "preconditions": [
+        "Appointment scheduled"
+      ],
+      "fixtures": [],
+      "externalResources": [],
+      "manualSteps": [
+        "Confirm",
+        "Complete",
+        "Refresh"
+      ],
+      "expectedUi": [
+        "Status badges update"
+      ],
+      "expectedApi": [
+        "Status endpoints 2xx"
+      ],
+      "expectedDb": [
+        "final status complete"
+      ],
+      "expectedWorkers": [],
+      "expectedAuthz": [],
+      "negativeAssertions": [],
+      "requiredEvidence": [
+        "recording"
+      ],
+      "cleanup": [],
+      "passCriteria": [
+        "Lifecycle persists"
+      ],
+      "failCriteria": [
+        "Illegal skip without error"
+      ]
+    },
+    {
+      "id": "QA-031",
+      "status": "NOT_RUN",
+      "section": 6,
+      "sectionName": "Scheduling",
+      "name": "Running-late delay notice (virtual status)",
+      "purpose": "Delay notice updates virtual status / notify path.",
+      "primaryRef": "SCH-05; beta 7.14–7.18",
+      "tenant": "A",
+      "role": "owner/dispatcher",
+      "preconditions": [
+        "Active appointment"
+      ],
+      "fixtures": [],
+      "externalResources": [
+        "SMS optional"
+      ],
+      "manualSteps": [
+        "Mark running late",
+        "Observe status + notification"
+      ],
+      "expectedUi": [
+        "Running-late indicator"
+      ],
+      "expectedApi": [
+        "Delay endpoint 2xx"
+      ],
+      "expectedDb": [
+        "Event/log row"
+      ],
+      "expectedWorkers": [
+        "Notification dispatch if configured"
+      ],
+      "expectedAuthz": [],
+      "negativeAssertions": [
+        "Idempotent re-mark does not spam"
+      ],
+      "requiredEvidence": [
+        "recording",
+        "api-response.json"
+      ],
+      "cleanup": [],
+      "passCriteria": [
+        "Delay recorded",
+        "UI reflects"
+      ],
+      "failCriteria": [
+        "No-op",
+        "Duplicate spam notifications"
+      ]
+    },
+    {
+      "id": "QA-032",
+      "status": "NOT_RUN",
+      "section": 7,
+      "sectionName": "Dispatch",
+      "name": "GET /api/dispatch/board responds",
+      "purpose": "Dispatch board API/UI loads.",
+      "primaryRef": "beta §8; WF-23",
+      "tenant": "A",
+      "role": "owner/dispatcher",
+      "preconditions": [
+        "Appointments exist"
+      ],
+      "fixtures": [],
+      "externalResources": [],
+      "manualSteps": [
+        "Open /dispatch",
+        "Observe board"
+      ],
+      "expectedUi": [
+        "Board renders"
+      ],
+      "expectedApi": [
+        "GET /api/dispatch/board 200"
+      ],
+      "expectedDb": [],
+      "expectedWorkers": [],
+      "expectedAuthz": [
+        "Requires dispatch permission"
+      ],
+      "negativeAssertions": [
+        "Technician without permission denied"
+      ],
+      "requiredEvidence": [
+        "recording",
+        "api-response.json"
+      ],
+      "cleanup": [],
+      "passCriteria": [
+        "Board 200 + UI"
+      ],
+      "failCriteria": [
+        "404/500",
+        "Blank board crash"
+      ]
+    },
+    {
+      "id": "QA-033",
+      "status": "NOT_RUN",
+      "section": 7,
+      "sectionName": "Dispatch",
+      "name": "Assign / reassign technician lane",
+      "purpose": "Drag/assign updates assignment.",
+      "primaryRef": "WF-23–24; beta 7.11",
+      "tenant": "A",
+      "role": "dispatcher",
+      "preconditions": [
+        "Unassigned appointment",
+        "Technician user"
+      ],
+      "fixtures": [],
+      "externalResources": [],
+      "manualSteps": [
+        "Assign to tech lane",
+        "Reassign",
+        "Refresh"
+      ],
+      "expectedUi": [
+        "Card moves lanes"
+      ],
+      "expectedApi": [
+        "Assign 2xx"
+      ],
+      "expectedDb": [
+        "assignment row updated"
+      ],
+      "expectedWorkers": [
+        "Proposal path if required"
+      ],
+      "expectedAuthz": [
+        "Dispatcher/owner"
+      ],
+      "negativeAssertions": [],
+      "requiredEvidence": [
+        "recording",
+        "database-assertion.txt"
+      ],
+      "cleanup": [],
+      "passCriteria": [
+        "Assignment persists"
+      ],
+      "failCriteria": [
+        "UI move without DB update"
+      ]
+    },
+    {
+      "id": "QA-034",
+      "status": "NOT_RUN",
+      "section": 7,
+      "sectionName": "Dispatch",
+      "name": "Feasibility / conflict warnings",
+      "purpose": "Feasibility preview surfaces warnings.",
+      "primaryRef": "WF-24; PROP-04",
+      "tenant": "A",
+      "role": "dispatcher",
+      "preconditions": [
+        "Conflicting assign available"
+      ],
+      "fixtures": [],
+      "externalResources": [],
+      "manualSteps": [
+        "Drag into conflict",
+        "Read warnings",
+        "Confirm or cancel"
+      ],
+      "expectedUi": [
+        "Warning chips/dialog"
+      ],
+      "expectedApi": [
+        "Feasibility preview includes warnings"
+      ],
+      "expectedDb": [],
+      "expectedWorkers": [],
+      "expectedAuthz": [],
+      "negativeAssertions": [
+        "Warnings not silently dropped"
+      ],
+      "requiredEvidence": [
+        "recording"
+      ],
+      "cleanup": [],
+      "passCriteria": [
+        "Warnings visible before confirm"
+      ],
+      "failCriteria": [
+        "No warning on clear conflict"
+      ]
+    },
+    {
+      "id": "QA-035",
+      "status": "NOT_RUN",
+      "section": 7,
+      "sectionName": "Dispatch",
+      "name": "Technician GPS ping stored",
+      "purpose": "Tech location ping persists.",
+      "primaryRef": "beta 8.8–8.10",
+      "tenant": "A",
+      "role": "technician",
+      "preconditions": [
+        "Technician session",
+        "GPS permission"
+      ],
+      "fixtures": [],
+      "externalResources": [],
+      "manualSteps": [
+        "Emit GPS ping from tech view",
+        "Verify stored"
+      ],
+      "expectedUi": [
+        "Optional map/location indicator"
+      ],
+      "expectedApi": [
+        "Ping endpoint 2xx"
+      ],
+      "expectedDb": [
+        "location/ping row"
+      ],
+      "expectedWorkers": [],
+      "expectedAuthz": [
+        "Tech scoped to tenant"
+      ],
+      "negativeAssertions": [],
+      "requiredEvidence": [
+        "recording",
+        "database-assertion.txt"
+      ],
+      "cleanup": [],
+      "passCriteria": [
+        "Ping stored"
+      ],
+      "failCriteria": [
+        "Endpoint 404/500",
+        "No row"
+      ]
+    },
+    {
+      "id": "QA-036",
+      "status": "NOT_RUN",
+      "section": 8,
+      "sectionName": "Technician workflows",
+      "name": "/technician/day shows assigned work",
+      "purpose": "Tech day view lists assignments.",
+      "primaryRef": "WF-26; beta 12.1–12.3",
+      "tenant": "A",
+      "role": "technician",
+      "preconditions": [
+        "Technician JWT/role C",
+        "Assigned appointment"
+      ],
+      "fixtures": [],
+      "externalResources": [],
+      "manualSteps": [
+        "Login as tech",
+        "Open /technician/day"
+      ],
+      "expectedUi": [
+        "Assigned jobs visible",
+        "≥44px tap targets"
+      ],
+      "expectedApi": [
+        "Day appointments 200"
+      ],
+      "expectedDb": [],
+      "expectedWorkers": [],
+      "expectedAuthz": [
+        "Only own assignments"
+      ],
+      "negativeAssertions": [
+        "No other tech jobs"
+      ],
+      "requiredEvidence": [
+        "recording",
+        "mobile viewport screenshot"
+      ],
+      "cleanup": [],
+      "passCriteria": [
+        "Assigned work listed"
+      ],
+      "failCriteria": [
+        "Empty when assigned",
+        "500"
+      ]
+    },
+    {
+      "id": "QA-037",
+      "status": "NOT_RUN",
+      "section": 8,
+      "sectionName": "Technician workflows",
+      "name": "Tech status CTA updates job",
+      "purpose": "Tech CTAs change job status.",
+      "primaryRef": "WF-27; beta 12.6; JOB-01",
+      "tenant": "A",
+      "role": "technician",
+      "preconditions": [
+        "Assigned job"
+      ],
+      "fixtures": [],
+      "externalResources": [],
+      "manualSteps": [
+        "Tap en-route/in-progress CTA",
+        "Refresh"
+      ],
+      "expectedUi": [
+        "Status updates"
+      ],
+      "expectedApi": [
+        "Transition 2xx"
+      ],
+      "expectedDb": [
+        "job status updated"
+      ],
+      "expectedWorkers": [],
+      "expectedAuthz": [
+        "Tech can transition assigned job"
+      ],
+      "negativeAssertions": [
+        "Cannot transition unassigned foreign job"
+      ],
+      "requiredEvidence": [
+        "recording",
+        "database-assertion.txt"
+      ],
+      "cleanup": [],
+      "passCriteria": [
+        "Status persisted"
+      ],
+      "failCriteria": [
+        "CTA no-op",
+        "UI-only change"
+      ]
+    },
+    {
+      "id": "QA-038",
+      "status": "NOT_RUN",
+      "section": 8,
+      "sectionName": "Technician workflows",
+      "name": "Clock-in → clock-out time entry",
+      "purpose": "Time entries record duration.",
+      "primaryRef": "TIME-01; WF-22; beta 4.11–4.13",
+      "tenant": "A",
+      "role": "technician/owner",
+      "preconditions": [
+        "Job exists"
+      ],
+      "fixtures": [],
+      "externalResources": [],
+      "manualSteps": [
+        "Clock in",
+        "Clock out",
+        "Verify entry"
+      ],
+      "expectedUi": [
+        "Time entry listed"
+      ],
+      "expectedApi": [
+        "Time entry endpoints 2xx"
+      ],
+      "expectedDb": [
+        "time_entries row with duration"
+      ],
+      "expectedWorkers": [],
+      "expectedAuthz": [],
+      "negativeAssertions": [
+        "No negative duration"
+      ],
+      "requiredEvidence": [
+        "recording",
+        "database-assertion.txt"
+      ],
+      "cleanup": [],
+      "passCriteria": [
+        "In/out persisted"
+      ],
+      "failCriteria": [
+        "Missing entry",
+        "Open-ended stuck without record"
+      ]
+    },
+    {
+      "id": "QA-039",
+      "status": "NOT_RUN",
+      "section": 8,
+      "sectionName": "Technician workflows",
+      "name": "Tech voice note appears on job",
+      "purpose": "Voice note from tech lands on job.",
+      "primaryRef": "beta 12.4–12.5",
+      "tenant": "A",
+      "role": "technician",
+      "preconditions": [
+        "Mic available or upload path",
+        "STT optional"
+      ],
+      "fixtures": [],
+      "externalResources": [
+        "STT if live"
+      ],
+      "manualSteps": [
+        "Record/upload voice note",
+        "Open job notes"
+      ],
+      "expectedUi": [
+        "Note/transcript present or graceful placeholder"
+      ],
+      "expectedApi": [
+        "Upload 2xx"
+      ],
+      "expectedDb": [
+        "note/attachment row"
+      ],
+      "expectedWorkers": [
+        "Transcription worker if keyed"
+      ],
+      "expectedAuthz": [],
+      "negativeAssertions": [
+        "No silent discard without error"
+      ],
+      "requiredEvidence": [
+        "recording"
+      ],
+      "cleanup": [],
+      "passCriteria": [
+        "Artifact on job"
+      ],
+      "failCriteria": [
+        "Silent no-op"
+      ]
+    },
+    {
+      "id": "QA-040",
+      "status": "NOT_RUN",
+      "section": 9,
+      "sectionName": "Estimates",
+      "name": "Create draft estimate (integer cents)",
+      "purpose": "Draft estimate totals match billing engine cents.",
+      "primaryRef": "EST-01/04; WF-28; beta 5.1–5.7",
+      "tenant": "A",
+      "role": "owner",
+      "preconditions": [
+        "Job exists"
+      ],
+      "fixtures": [
+        "line items"
+      ],
+      "externalResources": [],
+      "manualSteps": [
+        "Create estimate with line items",
+        "Save draft"
+      ],
+      "expectedUi": [
+        "Totals display with cents"
+      ],
+      "expectedApi": [
+        "POST /api/estimates 201",
+        "totals integer cents"
+      ],
+      "expectedDb": [
+        "status=draft",
+        "total_cents match"
+      ],
+      "expectedWorkers": [],
+      "expectedAuthz": [],
+      "negativeAssertions": [
+        "No float money columns"
+      ],
+      "requiredEvidence": [
+        "recording",
+        "api-response.json",
+        "database-assertion.txt"
+      ],
+      "cleanup": [],
+      "passCriteria": [
+        "201",
+        "DB totals match API"
+      ],
+      "failCriteria": [
+        "Float drift",
+        "UI success without row"
+      ]
+    },
+    {
+      "id": "QA-041",
+      "status": "NOT_RUN",
+      "section": 9,
+      "sectionName": "Estimates",
+      "name": "Validation errors on invalid create",
+      "purpose": "Invalid payload rejected without persist.",
+      "primaryRef": "EST-02",
+      "tenant": "A",
+      "role": "owner",
+      "preconditions": [],
+      "fixtures": [
+        "invalid payload"
+      ],
+      "externalResources": [],
+      "manualSteps": [
+        "POST invalid estimate"
+      ],
+      "expectedUi": [
+        "Validation message if UI"
+      ],
+      "expectedApi": [
+        "4xx"
+      ],
+      "expectedDb": [
+        "no new row"
+      ],
+      "expectedWorkers": [],
+      "expectedAuthz": [],
+      "negativeAssertions": [
+        "No partial row"
+      ],
+      "requiredEvidence": [
+        "api-response.json",
+        "database-assertion.txt",
+        "recording"
+      ],
+      "cleanup": [],
+      "passCriteria": [
+        "4xx + no row"
+      ],
+      "failCriteria": [
+        "201 on invalid"
+      ]
+    },
+    {
+      "id": "QA-042",
+      "status": "NOT_RUN",
+      "section": 9,
+      "sectionName": "Estimates",
+      "name": "Edit draft + revise sent (versioned)",
+      "purpose": "Draft edit and sent revision versioning.",
+      "primaryRef": "EST-03; EST-R1",
+      "tenant": "A",
+      "role": "owner",
+      "preconditions": [
+        "Draft estimate"
+      ],
+      "fixtures": [],
+      "externalResources": [],
+      "manualSteps": [
+        "PATCH draft",
+        "Send",
+        "Revise",
+        "Verify version"
+      ],
+      "expectedUi": [
+        "Updated totals",
+        "Revision indicator"
+      ],
+      "expectedApi": [
+        "PATCH/revise 2xx"
+      ],
+      "expectedDb": [
+        "version/total updated"
+      ],
+      "expectedWorkers": [],
+      "expectedAuthz": [],
+      "negativeAssertions": [],
+      "requiredEvidence": [
+        "recording",
+        "database-assertion.txt"
+      ],
+      "cleanup": [],
+      "passCriteria": [
+        "Edits persist",
+        "Revision versioned"
+      ],
+      "failCriteria": [
+        "Overwrite without version when required"
+      ]
+    },
+    {
+      "id": "QA-043",
+      "status": "NOT_RUN",
+      "section": 9,
+      "sectionName": "Estimates",
+      "name": "Mixed line items create→send→accept",
+      "purpose": "Labor/material/equipment estimate lifecycle.",
+      "primaryRef": "JRN-01; WF-29–30",
+      "tenant": "A",
+      "role": "owner",
+      "preconditions": [
+        "Job + catalog items"
+      ],
+      "fixtures": [
+        "mixed line items"
+      ],
+      "externalResources": [],
+      "manualSteps": [
+        "Create mixed estimate",
+        "Send",
+        "Accept via public or API"
+      ],
+      "expectedUi": [
+        "Status draft→sent→accepted"
+      ],
+      "expectedApi": [
+        "Lifecycle 2xx"
+      ],
+      "expectedDb": [
+        "status accepted",
+        "totals match engine"
+      ],
+      "expectedWorkers": [
+        "Dispatch send"
+      ],
+      "expectedAuthz": [],
+      "negativeAssertions": [],
+      "requiredEvidence": [
+        "recording",
+        "database-assertion.txt"
+      ],
+      "cleanup": [],
+      "passCriteria": [
+        "Full lifecycle",
+        "Totals correct"
+      ],
+      "failCriteria": [
+        "Stuck sent",
+        "Total mismatch"
+      ]
+    },
+    {
+      "id": "QA-044",
+      "status": "NOT_RUN",
+      "section": 9,
+      "sectionName": "Estimates",
+      "name": "Send estimate SMS + public approve",
+      "purpose": "Customer receives link and approves on /e/:token.",
+      "primaryRef": "PORT-01; WF-29–30; beta 5.8–5.16",
+      "tenant": "A",
+      "role": "owner+customer",
+      "preconditions": [
+        "SMS consent",
+        "Twilio/SendGrid"
+      ],
+      "fixtures": [
+        "sent estimate token"
+      ],
+      "externalResources": [
+        "Twilio or email inbox"
+      ],
+      "manualSteps": [
+        "Send estimate",
+        "Open public token",
+        "Approve with signature"
+      ],
+      "expectedUi": [
+        "Public page loads",
+        "Accepted confirmation"
+      ],
+      "expectedApi": [
+        "Send 2xx",
+        "Public accept 2xx"
+      ],
+      "expectedDb": [
+        "status accepted",
+        "token row"
+      ],
+      "expectedWorkers": [
+        "Outbound SMS/email"
+      ],
+      "expectedAuthz": [
+        "Token scoped"
+      ],
+      "negativeAssertions": [
+        "Invalid token safe error"
+      ],
+      "requiredEvidence": [
+        "recording",
+        "provider receipt",
+        "database-assertion.txt"
+      ],
+      "cleanup": [],
+      "passCriteria": [
+        "Delivery evidence",
+        "Accepted in DB",
+        "UI after refresh"
+      ],
+      "failCriteria": [
+        "UI-only accept",
+        "No provider evidence when claimed sent"
+      ]
+    },
+    {
+      "id": "QA-045",
+      "status": "NOT_RUN",
+      "section": 9,
+      "sectionName": "Estimates",
+      "name": "Convert estimate → invoice (linked)",
+      "purpose": "Conversion preserves line items and estimate_id.",
+      "primaryRef": "EST-05; WF-31; beta 6.1–6.4",
+      "tenant": "A",
+      "role": "owner",
+      "preconditions": [
+        "Accepted or convertible estimate"
+      ],
+      "fixtures": [],
+      "externalResources": [],
+      "manualSteps": [
+        "Convert to invoice",
+        "Open invoice"
+      ],
+      "expectedUi": [
+        "Invoice shows same lines"
+      ],
+      "expectedApi": [
+        "Convert 2xx"
+      ],
+      "expectedDb": [
+        "invoice.estimate_id set",
+        "line items preserved"
+      ],
+      "expectedWorkers": [],
+      "expectedAuthz": [],
+      "negativeAssertions": [
+        "No re-keyed totals drift"
+      ],
+      "requiredEvidence": [
+        "recording",
+        "database-assertion.txt"
+      ],
+      "cleanup": [],
+      "passCriteria": [
+        "Linked invoice",
+        "Items preserved"
+      ],
+      "failCriteria": [
+        "Unlinked",
+        "Totals differ unexpectedly"
+      ]
+    },
+    {
+      "id": "QA-046",
+      "status": "NOT_RUN",
+      "section": 10,
+      "sectionName": "Invoices and payments",
+      "name": "Invoice issue → void lifecycle",
+      "purpose": "Issue and void invoice states.",
+      "primaryRef": "INV-01; INV-CR-01",
+      "tenant": "A",
+      "role": "owner",
+      "preconditions": [
+        "Draft invoice"
+      ],
+      "fixtures": [],
+      "externalResources": [],
+      "manualSteps": [
+        "Issue",
+        "Void",
+        "Refresh"
+      ],
+      "expectedUi": [
+        "Status badges"
+      ],
+      "expectedApi": [
+        "Issue/void 2xx"
+      ],
+      "expectedDb": [
+        "status void"
+      ],
+      "expectedWorkers": [],
+      "expectedAuthz": [],
+      "negativeAssertions": [
+        "Cannot pay voided"
+      ],
+      "requiredEvidence": [
+        "recording",
+        "database-assertion.txt"
+      ],
+      "cleanup": [],
+      "passCriteria": [
+        "Issue then void persisted"
+      ],
+      "failCriteria": [
+        "Illegal state"
+      ]
+    },
+    {
+      "id": "QA-047",
+      "status": "NOT_RUN",
+      "section": 10,
+      "sectionName": "Invoices and payments",
+      "name": "Invalid invoice transition rejected",
+      "purpose": "Guard illegal invoice transitions.",
+      "primaryRef": "INV-02",
+      "tenant": "A",
+      "role": "owner",
+      "preconditions": [
+        "Invoice in terminal/wrong state"
+      ],
+      "fixtures": [],
+      "externalResources": [],
+      "manualSteps": [
+        "Attempt illegal transition"
+      ],
+      "expectedUi": [
+        "Error"
+      ],
+      "expectedApi": [
+        "4xx"
+      ],
+      "expectedDb": [
+        "unchanged"
+      ],
+      "expectedWorkers": [],
+      "expectedAuthz": [],
+      "negativeAssertions": [],
+      "requiredEvidence": [
+        "api-response.json",
+        "recording"
+      ],
+      "cleanup": [],
+      "passCriteria": [
+        "4xx + unchanged"
+      ],
+      "failCriteria": [
+        "Allowed illegal transition"
+      ]
+    },
+    {
+      "id": "QA-048",
+      "status": "NOT_RUN",
+      "section": 10,
+      "sectionName": "Invoices and payments",
+      "name": "Issue + delivery (email/SMS)",
+      "purpose": "Issued invoice delivery creates dispatch evidence.",
+      "primaryRef": "INV-03; WF-32; beta 6.10–6.12",
+      "tenant": "A",
+      "role": "owner",
+      "preconditions": [
+        "Recipient channel available"
+      ],
+      "fixtures": [],
+      "externalResources": [
+        "SendGrid/Twilio"
+      ],
+      "manualSteps": [
+        "Issue/send invoice",
+        "Confirm customer message"
+      ],
+      "expectedUi": [
+        "Issued status"
+      ],
+      "expectedApi": [
+        "Send 2xx"
+      ],
+      "expectedDb": [
+        "issued_at set",
+        "dispatch log"
+      ],
+      "expectedWorkers": [
+        "Notification worker"
+      ],
+      "expectedAuthz": [],
+      "negativeAssertions": [],
+      "requiredEvidence": [
+        "recording",
+        "provider receipt",
+        "database-assertion.txt"
+      ],
+      "cleanup": [],
+      "passCriteria": [
+        "Issued + delivery evidence"
+      ],
+      "failCriteria": [
+        "Issued without dispatch when send claimed"
+      ]
+    },
+    {
+      "id": "QA-049",
+      "status": "NOT_RUN",
+      "section": 10,
+      "sectionName": "Invoices and payments",
+      "name": "Public pay via Stripe test card",
+      "purpose": "Customer pays on /pay/:token with Stripe test mode.",
+      "primaryRef": "PORT-02; WF-33; beta 6.13–6.19",
+      "tenant": "A",
+      "role": "customer",
+      "preconditions": [
+        "Stripe test mode",
+        "Open invoice token"
+      ],
+      "fixtures": [
+        "4242 card"
+      ],
+      "externalResources": [
+        "Stripe"
+      ],
+      "manualSteps": [
+        "Open /pay/:token",
+        "Pay with test card",
+        "Wait webhook"
+      ],
+      "expectedUi": [
+        "Paid confirmation"
+      ],
+      "expectedApi": [
+        "Payment intent/session success"
+      ],
+      "expectedDb": [
+        "invoice paid",
+        "payment row"
+      ],
+      "expectedWorkers": [
+        "Stripe webhook handler"
+      ],
+      "expectedAuthz": [
+        "Token scoped"
+      ],
+      "negativeAssertions": [
+        "No live charges"
+      ],
+      "requiredEvidence": [
+        "recording",
+        "Stripe receipt redacted",
+        "database-assertion.txt"
+      ],
+      "cleanup": [],
+      "passCriteria": [
+        "Paid in DB after webhook",
+        "UI paid after refresh"
+      ],
+      "failCriteria": [
+        "UI paid without webhook/DB",
+        "Production key used"
+      ]
+    },
+    {
+      "id": "QA-050",
+      "status": "NOT_RUN",
+      "section": 10,
+      "sectionName": "Invoices and payments",
+      "name": "Partial → full pay + overpay guard",
+      "purpose": "Partial payments then full; overpay rejected.",
+      "primaryRef": "PAY-01; WF-34",
+      "tenant": "A",
+      "role": "owner",
+      "preconditions": [
+        "Issued invoice"
+      ],
+      "fixtures": [],
+      "externalResources": [
+        "Stripe test optional"
+      ],
+      "manualSteps": [
+        "Record/partial pay",
+        "Complete pay",
+        "Attempt overpay"
+      ],
+      "expectedUi": [
+        "partially_paid then paid"
+      ],
+      "expectedApi": [
+        "Overpay 4xx"
+      ],
+      "expectedDb": [
+        "amount_due=0 on paid"
+      ],
+      "expectedWorkers": [],
+      "expectedAuthz": [],
+      "negativeAssertions": [
+        "Overpay not applied"
+      ],
+      "requiredEvidence": [
+        "recording",
+        "api-response.json",
+        "database-assertion.txt"
+      ],
+      "cleanup": [],
+      "passCriteria": [
+        "Partial→paid",
+        "Overpay rejected"
+      ],
+      "failCriteria": [
+        "Overpay accepted",
+        "amount_due wrong"
+      ]
+    },
+    {
+      "id": "QA-051",
+      "status": "NOT_RUN",
+      "section": 10,
+      "sectionName": "Invoices and payments",
+      "name": "Deposit credit on first invoice",
+      "purpose": "Deposit applied correctly in cents.",
+      "primaryRef": "PAY-02",
+      "tenant": "A",
+      "role": "owner",
+      "preconditions": [
+        "Estimate with deposit paid"
+      ],
+      "fixtures": [],
+      "externalResources": [
+        "Stripe test"
+      ],
+      "manualSteps": [
+        "Convert/create invoice",
+        "Verify deposit credit"
+      ],
+      "expectedUi": [
+        "Deposit line/credit shown"
+      ],
+      "expectedApi": [
+        "Totals include credit"
+      ],
+      "expectedDb": [
+        "integer cents credit"
+      ],
+      "expectedWorkers": [],
+      "expectedAuthz": [],
+      "negativeAssertions": [
+        "No double credit"
+      ],
+      "requiredEvidence": [
+        "recording",
+        "database-assertion.txt"
+      ],
+      "cleanup": [],
+      "passCriteria": [
+        "Deposit credited once"
+      ],
+      "failCriteria": [
+        "Missing credit",
+        "Double credit"
+      ]
+    },
+    {
+      "id": "QA-052",
+      "status": "NOT_RUN",
+      "section": 10,
+      "sectionName": "Invoices and payments",
+      "name": "Stripe webhook paid + idempotency",
+      "purpose": "Webhook marks paid; replay does not duplicate.",
+      "primaryRef": "INV-05/06; beta 17.31–17.32",
+      "tenant": "A",
+      "role": "system",
+      "preconditions": [
+        "Stripe CLI or dashboard replay"
+      ],
+      "fixtures": [
+        "evt_qa_*"
+      ],
+      "externalResources": [
+        "Stripe"
+      ],
+      "manualSteps": [
+        "Deliver checkout.session.completed",
+        "Replay same event"
+      ],
+      "expectedUi": [
+        "Invoice paid"
+      ],
+      "expectedApi": [
+        "Webhook 200 both times"
+      ],
+      "expectedDb": [
+        "one payment row"
+      ],
+      "expectedWorkers": [
+        "Webhook handler"
+      ],
+      "expectedAuthz": [
+        "Signature validated"
+      ],
+      "negativeAssertions": [
+        "No duplicate payment"
+      ],
+      "requiredEvidence": [
+        "recording or CLI log",
+        "database-assertion.txt"
+      ],
+      "cleanup": [],
+      "passCriteria": [
+        "Paid once",
+        "Replay idempotent"
+      ],
+      "failCriteria": [
+        "Duplicate payment",
+        "Unsigned accepted"
+      ]
+    },
+    {
+      "id": "QA-053",
+      "status": "NOT_RUN",
+      "section": 11,
+      "sectionName": "Contracts",
+      "name": "Create maintenance contract",
+      "purpose": "Create contract linked to customer/location.",
+      "primaryRef": "MC-01; beta 13.1–13.4",
+      "tenant": "A",
+      "role": "owner",
+      "preconditions": [
+        "Customer + location"
+      ],
+      "fixtures": [],
+      "externalResources": [],
+      "manualSteps": [
+        "/contracts → New",
+        "Save",
+        "Open detail"
+      ],
+      "expectedUi": [
+        "Contract listed",
+        "Detail correct"
+      ],
+      "expectedApi": [
+        "POST contracts/agreements 201"
+      ],
+      "expectedDb": [
+        "contract row"
+      ],
+      "expectedWorkers": [],
+      "expectedAuthz": [],
+      "negativeAssertions": [],
+      "requiredEvidence": [
+        "recording",
+        "api-response.json"
+      ],
+      "cleanup": [],
+      "passCriteria": [
+        "Contract persists"
+      ],
+      "failCriteria": [
+        "Route 404",
+        "UI mock only"
+      ]
+    },
+    {
+      "id": "QA-054",
+      "status": "NOT_RUN",
+      "section": 11,
+      "sectionName": "Contracts",
+      "name": "Contract visible on customer profile",
+      "purpose": "Customer profile shows active contract.",
+      "primaryRef": "beta 13.5",
+      "tenant": "A",
+      "role": "owner",
+      "preconditions": [
+        "Contract exists"
+      ],
+      "fixtures": [],
+      "externalResources": [],
+      "manualSteps": [
+        "Open customer detail"
+      ],
+      "expectedUi": [
+        "Active contract visible"
+      ],
+      "expectedApi": [],
+      "expectedDb": [],
+      "expectedWorkers": [],
+      "expectedAuthz": [],
+      "negativeAssertions": [],
+      "requiredEvidence": [
+        "recording",
+        "final-state.png"
+      ],
+      "cleanup": [],
+      "passCriteria": [
+        "Contract shown on customer"
+      ],
+      "failCriteria": [
+        "Missing"
+      ]
+    },
+    {
+      "id": "QA-055",
+      "status": "NOT_RUN",
+      "section": 11,
+      "sectionName": "Contracts",
+      "name": "Recurring agreement pause→resume→cancel",
+      "purpose": "Agreement state machine.",
+      "primaryRef": "AGR-01/02",
+      "tenant": "A",
+      "role": "owner",
+      "preconditions": [
+        "Active agreement"
+      ],
+      "fixtures": [],
+      "externalResources": [],
+      "manualSteps": [
+        "Pause",
+        "Resume",
+        "Cancel",
+        "Refresh"
+      ],
+      "expectedUi": [
+        "Status updates"
+      ],
+      "expectedApi": [
+        "State transitions 2xx/4xx correctly"
+      ],
+      "expectedDb": [
+        "final canceled"
+      ],
+      "expectedWorkers": [],
+      "expectedAuthz": [],
+      "negativeAssertions": [
+        "Illegal transitions rejected"
+      ],
+      "requiredEvidence": [
+        "recording",
+        "database-assertion.txt"
+      ],
+      "cleanup": [],
+      "passCriteria": [
+        "States persist"
+      ],
+      "failCriteria": [
+        "Illegal transition allowed"
+      ]
+    },
+    {
+      "id": "QA-056",
+      "status": "NOT_RUN",
+      "section": 12,
+      "sectionName": "Reports and reconciliation",
+      "name": "Money dashboard after paid revenue",
+      "purpose": "Money dashboard reflects paid invoice.",
+      "primaryRef": "RPT-01; PAY-03; WF-35",
+      "tenant": "A",
+      "role": "owner",
+      "preconditions": [
+        "Paid invoice"
+      ],
+      "fixtures": [],
+      "externalResources": [],
+      "manualSteps": [
+        "Open /reports/money",
+        "Compare totals"
+      ],
+      "expectedUi": [
+        "Revenue includes payment"
+      ],
+      "expectedApi": [
+        "Money dashboard 200"
+      ],
+      "expectedDb": [
+        "Matches payment sum"
+      ],
+      "expectedWorkers": [],
+      "expectedAuthz": [
+        "Owner"
+      ],
+      "negativeAssertions": [
+        "Tenant B revenue not included"
+      ],
+      "requiredEvidence": [
+        "recording",
+        "api-response.json"
+      ],
+      "cleanup": [],
+      "passCriteria": [
+        "Totals match paid cents"
+      ],
+      "failCriteria": [
+        "Zero after payment",
+        "Cross-tenant bleed"
+      ]
+    },
+    {
+      "id": "QA-057",
+      "status": "NOT_RUN",
+      "section": 12,
+      "sectionName": "Reports and reconciliation",
+      "name": "Revenue-by-source report",
+      "purpose": "Revenue-by-source route works.",
+      "primaryRef": "RPT-02",
+      "tenant": "A",
+      "role": "owner",
+      "preconditions": [
+        "Payments with sources"
+      ],
+      "fixtures": [],
+      "externalResources": [],
+      "manualSteps": [
+        "Open /reports/revenue-by-source"
+      ],
+      "expectedUi": [
+        "Report renders"
+      ],
+      "expectedApi": [
+        "200"
+      ],
+      "expectedDb": [],
+      "expectedWorkers": [],
+      "expectedAuthz": [],
+      "negativeAssertions": [],
+      "requiredEvidence": [
+        "recording"
+      ],
+      "cleanup": [],
+      "passCriteria": [
+        "Report loads with data or empty state"
+      ],
+      "failCriteria": [
+        "500",
+        "Blank crash"
+      ]
+    },
+    {
+      "id": "QA-058",
+      "status": "NOT_RUN",
+      "section": 12,
+      "sectionName": "Reports and reconciliation",
+      "name": "Time-given-back report",
+      "purpose": "Time-given-back report endpoint/UI.",
+      "primaryRef": "RPT-03",
+      "tenant": "A",
+      "role": "owner",
+      "preconditions": [],
+      "fixtures": [],
+      "externalResources": [],
+      "manualSteps": [
+        "Open report or call API"
+      ],
+      "expectedUi": [
+        "Renders"
+      ],
+      "expectedApi": [
+        "200"
+      ],
+      "expectedDb": [],
+      "expectedWorkers": [],
+      "expectedAuthz": [],
+      "negativeAssertions": [],
+      "requiredEvidence": [
+        "recording",
+        "api-response.json"
+      ],
+      "cleanup": [],
+      "passCriteria": [
+        "200 + render"
+      ],
+      "failCriteria": [
+        "500"
+      ]
+    },
+    {
+      "id": "QA-059",
+      "status": "NOT_RUN",
+      "section": 12,
+      "sectionName": "Reports and reconciliation",
+      "name": "Overdue invoice → job money_state",
+      "purpose": "Overdue cron/worker updates money state.",
+      "primaryRef": "PAY-04; INV-07; WF-35",
+      "tenant": "A",
+      "role": "owner+worker",
+      "preconditions": [
+        "Past-due invoice fixture",
+        "Worker/cron"
+      ],
+      "fixtures": [
+        "overdue invoice"
+      ],
+      "externalResources": [],
+      "manualSteps": [
+        "Advance/trigger overdue job",
+        "Inspect invoice/job"
+      ],
+      "expectedUi": [
+        "Overdue badge"
+      ],
+      "expectedApi": [],
+      "expectedDb": [
+        "money_state/overdue flag"
+      ],
+      "expectedWorkers": [
+        "Overdue worker ran"
+      ],
+      "expectedAuthz": [],
+      "negativeAssertions": [],
+      "requiredEvidence": [
+        "recording",
+        "worker log redacted",
+        "database-assertion.txt"
+      ],
+      "cleanup": [],
+      "passCriteria": [
+        "Overdue reflected after worker"
+      ],
+      "failCriteria": [
+        "Never updates"
+      ]
+    },
+    {
+      "id": "QA-060",
+      "status": "NOT_RUN",
+      "section": 13,
+      "sectionName": "Proposals",
+      "name": "Proposal create + draft reject guard",
+      "purpose": "Reject draft proposal without side effects.",
+      "primaryRef": "PROP-01; WF-36–37",
+      "tenant": "A",
+      "role": "owner",
+      "preconditions": [
+        "Draft proposal"
+      ],
+      "fixtures": [],
+      "externalResources": [],
+      "manualSteps": [
+        "Reject proposal",
+        "Verify no entity created"
+      ],
+      "expectedUi": [
+        "Rejected status"
+      ],
+      "expectedApi": [
+        "Reject 2xx"
+      ],
+      "expectedDb": [
+        "status rejected",
+        "no result entity"
+      ],
+      "expectedWorkers": [],
+      "expectedAuthz": [],
+      "negativeAssertions": [
+        "No appointment/customer created"
+      ],
+      "requiredEvidence": [
+        "recording",
+        "database-assertion.txt"
+      ],
+      "cleanup": [],
+      "passCriteria": [
+        "Rejected, no side effects"
+      ],
+      "failCriteria": [
+        "Entity created on reject"
+      ]
+    },
+    {
+      "id": "QA-061",
+      "status": "NOT_RUN",
+      "section": 13,
+      "sectionName": "Proposals",
+      "name": "Proposal inbox prioritization",
+      "purpose": "Inbox lists and prioritizes proposals.",
+      "primaryRef": "PROP-02; WF-41",
+      "tenant": "A",
+      "role": "owner",
+      "preconditions": [
+        "≥1 proposal"
+      ],
+      "fixtures": [],
+      "externalResources": [],
+      "manualSteps": [
+        "Open /inbox"
+      ],
+      "expectedUi": [
+        "Proposals listed",
+        "Priority/markers if present"
+      ],
+      "expectedApi": [
+        "GET /api/proposals 200"
+      ],
+      "expectedDb": [],
+      "expectedWorkers": [],
+      "expectedAuthz": [],
+      "negativeAssertions": [],
+      "requiredEvidence": [
+        "recording"
+      ],
+      "cleanup": [],
+      "passCriteria": [
+        "Inbox loads proposals"
+      ],
+      "failCriteria": [
+        "Empty when rows exist",
+        "500"
+      ]
+    },
+    {
+      "id": "QA-062",
+      "status": "NOT_RUN",
+      "section": 13,
+      "sectionName": "Proposals",
+      "name": "Cross-tenant proposal denial",
+      "purpose": "Tenant B cannot approve/read Tenant A proposal.",
+      "primaryRef": "PROP-03",
+      "tenant": "B",
+      "role": "owner",
+      "preconditions": [
+        "Tenant A proposal id known"
+      ],
+      "fixtures": [
+        "cross-tenant ids"
+      ],
+      "externalResources": [],
+      "manualSteps": [
+        "As B, GET/approve A proposal id"
+      ],
+      "expectedUi": [
+        "Not listed"
+      ],
+      "expectedApi": [
+        "403/404"
+      ],
+      "expectedDb": [
+        "A proposal unchanged"
+      ],
+      "expectedWorkers": [],
+      "expectedAuthz": [
+        "Denied"
+      ],
+      "negativeAssertions": [
+        "No execution"
+      ],
+      "requiredEvidence": [
+        "api-response.json",
+        "recording"
+      ],
+      "cleanup": [],
+      "passCriteria": [
+        "Denied + unchanged"
+      ],
+      "failCriteria": [
+        "200 or executed"
+      ]
+    },
+    {
+      "id": "QA-063",
+      "status": "NOT_RUN",
+      "section": 13,
+      "sectionName": "Proposals",
+      "name": "Approve booking proposal executes",
+      "purpose": "Approve creates appointment via executor.",
+      "primaryRef": "WF-36; SCH-02",
+      "tenant": "A",
+      "role": "owner",
+      "preconditions": [
+        "Booking proposal",
+        "Worker running"
+      ],
+      "fixtures": [],
+      "externalResources": [],
+      "manualSteps": [
+        "Approve",
+        "Wait execution",
+        "Verify appointment"
+      ],
+      "expectedUi": [
+        "Executed / appointment exists"
+      ],
+      "expectedApi": [
+        "Approve 2xx"
+      ],
+      "expectedDb": [
+        "proposal executed",
+        "appointment row",
+        "result_entity_id"
+      ],
+      "expectedWorkers": [
+        "Proposal executor"
+      ],
+      "expectedAuthz": [],
+      "negativeAssertions": [
+        "Not auto-executed before approve"
+      ],
+      "requiredEvidence": [
+        "recording",
+        "database-assertion.txt"
+      ],
+      "cleanup": [],
+      "passCriteria": [
+        "Executed + appointment"
+      ],
+      "failCriteria": [
+        "Stuck approved",
+        "No entity"
+      ]
+    },
+    {
+      "id": "QA-064",
+      "status": "NOT_RUN",
+      "section": 13,
+      "sectionName": "Proposals",
+      "name": "Edit proposal before approve",
+      "purpose": "Edited payload is what executes.",
+      "primaryRef": "WF-38",
+      "tenant": "A",
+      "role": "owner",
+      "preconditions": [
+        "Editable proposal"
+      ],
+      "fixtures": [],
+      "externalResources": [],
+      "manualSteps": [
+        "Edit field",
+        "Approve",
+        "Verify result uses edit"
+      ],
+      "expectedUi": [
+        "Edit form"
+      ],
+      "expectedApi": [
+        "Patch+approve 2xx"
+      ],
+      "expectedDb": [
+        "result reflects edit"
+      ],
+      "expectedWorkers": [
+        "Executor"
+      ],
+      "expectedAuthz": [],
+      "negativeAssertions": [
+        "Original unedited payload not used"
+      ],
+      "requiredEvidence": [
+        "recording",
+        "database-assertion.txt"
+      ],
+      "cleanup": [],
+      "passCriteria": [
+        "Executed with edits"
+      ],
+      "failCriteria": [
+        "Edits ignored"
+      ]
+    },
+    {
+      "id": "QA-065",
+      "status": "NOT_RUN",
+      "section": 14,
+      "sectionName": "Communications and interactions",
+      "name": "Conversation + message thread",
+      "purpose": "Comms inbox thread works.",
+      "primaryRef": "CONV-01",
+      "tenant": "A",
+      "role": "owner",
+      "preconditions": [
+        "Customer phone/email"
+      ],
+      "fixtures": [],
+      "externalResources": [],
+      "manualSteps": [
+        "Open /comms-inbox",
+        "Open thread",
+        "Send reply if allowed"
+      ],
+      "expectedUi": [
+        "Thread renders"
+      ],
+      "expectedApi": [
+        "Messages 200"
+      ],
+      "expectedDb": [
+        "conversation/messages"
+      ],
+      "expectedWorkers": [],
+      "expectedAuthz": [],
+      "negativeAssertions": [],
+      "requiredEvidence": [
+        "recording"
+      ],
+      "cleanup": [],
+      "passCriteria": [
+        "Thread loads"
+      ],
+      "failCriteria": [
+        "500",
+        "Empty crash"
+      ]
+    },
+    {
+      "id": "QA-066",
+      "status": "NOT_RUN",
+      "section": 14,
+      "sectionName": "Communications and interactions",
+      "name": "Interactions show SMS/email dispatches",
+      "purpose": "Interactions log shows outbound dispatches.",
+      "primaryRef": "beta 9.1–9.3; SMS-01",
+      "tenant": "A",
+      "role": "owner",
+      "preconditions": [
+        "Prior send"
+      ],
+      "fixtures": [],
+      "externalResources": [],
+      "manualSteps": [
+        "Open /interactions",
+        "Find dispatch"
+      ],
+      "expectedUi": [
+        "Dispatch entry"
+      ],
+      "expectedApi": [
+        "Interactions 200"
+      ],
+      "expectedDb": [
+        "dispatch rows"
+      ],
+      "expectedWorkers": [],
+      "expectedAuthz": [],
+      "negativeAssertions": [],
+      "requiredEvidence": [
+        "recording"
+      ],
+      "cleanup": [],
+      "passCriteria": [
+        "Dispatch visible"
+      ],
+      "failCriteria": [
+        "Missing after send"
+      ]
+    },
+    {
+      "id": "QA-067",
+      "status": "NOT_RUN",
+      "section": 14,
+      "sectionName": "Communications and interactions",
+      "name": "Customer comms history links entities",
+      "purpose": "Customer timeline links messages to entities.",
+      "primaryRef": "beta 9.5–9.7",
+      "tenant": "A",
+      "role": "owner",
+      "preconditions": [
+        "Messages tied to estimate/invoice"
+      ],
+      "fixtures": [],
+      "externalResources": [],
+      "manualSteps": [
+        "Open customer timeline"
+      ],
+      "expectedUi": [
+        "Linked entities clickable"
+      ],
+      "expectedApi": [],
+      "expectedDb": [],
+      "expectedWorkers": [],
+      "expectedAuthz": [],
+      "negativeAssertions": [],
+      "requiredEvidence": [
+        "recording"
+      ],
+      "cleanup": [],
+      "passCriteria": [
+        "Links work"
+      ],
+      "failCriteria": [
+        "Orphan messages only"
+      ]
+    },
+    {
+      "id": "QA-068",
+      "status": "NOT_RUN",
+      "section": 14,
+      "sectionName": "Communications and interactions",
+      "name": "Dispatch idempotency window",
+      "purpose": "Re-send within window does not duplicate.",
+      "primaryRef": "beta 9.4; SMS-01",
+      "tenant": "A",
+      "role": "owner",
+      "preconditions": [
+        "Recent successful send"
+      ],
+      "fixtures": [],
+      "externalResources": [
+        "Twilio/SendGrid"
+      ],
+      "manualSteps": [
+        "Trigger duplicate send",
+        "Count provider messages"
+      ],
+      "expectedUi": [
+        "Idempotent success or guarded message"
+      ],
+      "expectedApi": [
+        "2xx without duplicate side effect"
+      ],
+      "expectedDb": [
+        "single dispatch or dedup key"
+      ],
+      "expectedWorkers": [],
+      "expectedAuthz": [],
+      "negativeAssertions": [
+        "No duplicate SMS within window"
+      ],
+      "requiredEvidence": [
+        "recording",
+        "provider receipt count"
+      ],
+      "cleanup": [],
+      "passCriteria": [
+        "No duplicate delivery"
+      ],
+      "failCriteria": [
+        "Two messages for one action"
+      ]
+    },
+    {
+      "id": "QA-069",
+      "status": "NOT_RUN",
+      "section": 15,
+      "sectionName": "Assistant and in-app voice",
+      "name": "Assistant chat loads + grounded answers",
+      "purpose": "Assistant chat round-trip works.",
+      "primaryRef": "AST-01–06; beta 11.1–11.4; WF-39",
+      "tenant": "A",
+      "role": "owner",
+      "preconditions": [
+        "AI_PROVIDER_API_KEY"
+      ],
+      "fixtures": [],
+      "externalResources": [
+        "LLM"
+      ],
+      "manualSteps": [
+        "Open /assistant",
+        "Ask grounded question",
+        "Observe reply"
+      ],
+      "expectedUi": [
+        "Reply rendered"
+      ],
+      "expectedApi": [
+        "Assistant 2xx"
+      ],
+      "expectedDb": [
+        "conversation messages"
+      ],
+      "expectedWorkers": [],
+      "expectedAuthz": [],
+      "negativeAssertions": [
+        "No silent empty success"
+      ],
+      "requiredEvidence": [
+        "recording"
+      ],
+      "cleanup": [],
+      "passCriteria": [
+        "Reply present"
+      ],
+      "failCriteria": [
+        "500",
+        "Empty thread wipe"
+      ]
+    },
+    {
+      "id": "QA-070",
+      "status": "NOT_RUN",
+      "section": 15,
+      "sectionName": "Assistant and in-app voice",
+      "name": "Create customer via assistant",
+      "purpose": "Assistant creates customer proposal → execute.",
+      "primaryRef": "AST-01; CUST-02",
+      "tenant": "A",
+      "role": "owner",
+      "preconditions": [
+        "LLM key"
+      ],
+      "fixtures": [],
+      "externalResources": [
+        "LLM"
+      ],
+      "manualSteps": [
+        "Ask to create customer",
+        "Approve proposal",
+        "Verify customer"
+      ],
+      "expectedUi": [
+        "Proposal card",
+        "Customer exists"
+      ],
+      "expectedApi": [
+        "Proposal approve 2xx"
+      ],
+      "expectedDb": [
+        "customer row",
+        "proposal executed"
+      ],
+      "expectedWorkers": [
+        "Executor"
+      ],
+      "expectedAuthz": [],
+      "negativeAssertions": [
+        "Not auto-executed"
+      ],
+      "requiredEvidence": [
+        "recording",
+        "database-assertion.txt"
+      ],
+      "cleanup": [],
+      "passCriteria": [
+        "Customer created via approval"
+      ],
+      "failCriteria": [
+        "No proposal",
+        "Auto-exec"
+      ]
+    },
+    {
+      "id": "QA-071",
+      "status": "NOT_RUN",
+      "section": 15,
+      "sectionName": "Assistant and in-app voice",
+      "name": "Create/revise estimate via assistant",
+      "purpose": "Estimate proposals catalog-grounded.",
+      "primaryRef": "AST-02/03",
+      "tenant": "A",
+      "role": "owner",
+      "preconditions": [
+        "Catalog items",
+        "LLM"
+      ],
+      "fixtures": [],
+      "externalResources": [
+        "LLM"
+      ],
+      "manualSteps": [
+        "Ask create/revise estimate",
+        "Approve",
+        "Verify cents"
+      ],
+      "expectedUi": [
+        "Proposal with line items"
+      ],
+      "expectedApi": [
+        "2xx"
+      ],
+      "expectedDb": [
+        "estimate row",
+        "catalog-grounded prices"
+      ],
+      "expectedWorkers": [
+        "Executor"
+      ],
+      "expectedAuthz": [],
+      "negativeAssertions": [
+        "Uncatalogued high-confidence auto-approve blocked"
+      ],
+      "requiredEvidence": [
+        "recording",
+        "database-assertion.txt"
+      ],
+      "cleanup": [],
+      "passCriteria": [
+        "Estimate executed with grounded prices"
+      ],
+      "failCriteria": [
+        "Invented prices trusted",
+        "No estimate"
+      ]
+    },
+    {
+      "id": "QA-072",
+      "status": "NOT_RUN",
+      "section": 15,
+      "sectionName": "Assistant and in-app voice",
+      "name": "In-app voice bar / mic transcript",
+      "purpose": "Voice bar captures transcript path.",
+      "primaryRef": "WF-40/45; beta 11.7–11.8",
+      "tenant": "A",
+      "role": "owner",
+      "preconditions": [
+        "Mic or upload"
+      ],
+      "fixtures": [],
+      "externalResources": [
+        "STT optional"
+      ],
+      "manualSteps": [
+        "Use voice bar",
+        "Confirm transcript/proposal/nav"
+      ],
+      "expectedUi": [
+        "Transcript or clear error"
+      ],
+      "expectedApi": [
+        "Voice session 2xx"
+      ],
+      "expectedDb": [
+        "session row optional"
+      ],
+      "expectedWorkers": [],
+      "expectedAuthz": [],
+      "negativeAssertions": [
+        "No silent no-op"
+      ],
+      "requiredEvidence": [
+        "recording"
+      ],
+      "cleanup": [],
+      "passCriteria": [
+        "Transcript or explicit failure"
+      ],
+      "failCriteria": [
+        "Silent failure"
+      ]
+    },
+    {
+      "id": "QA-073",
+      "status": "NOT_RUN",
+      "section": 15,
+      "sectionName": "Assistant and in-app voice",
+      "name": "Conversation history persists across tabs",
+      "purpose": "Assistant history survives navigation.",
+      "primaryRef": "beta 11.5–11.6",
+      "tenant": "A",
+      "role": "owner",
+      "preconditions": [
+        "Prior assistant messages"
+      ],
+      "fixtures": [],
+      "externalResources": [],
+      "manualSteps": [
+        "Send message",
+        "Navigate away",
+        "Return"
+      ],
+      "expectedUi": [
+        "History intact"
+      ],
+      "expectedApi": [
+        "GET conversation includes messages"
+      ],
+      "expectedDb": [
+        "messages persisted"
+      ],
+      "expectedWorkers": [],
+      "expectedAuthz": [],
+      "negativeAssertions": [
+        "Thread does not self-wipe"
+      ],
+      "requiredEvidence": [
+        "recording"
+      ],
+      "cleanup": [],
+      "passCriteria": [
+        "History persists"
+      ],
+      "failCriteria": [
+        "Self-wipe"
+      ]
+    },
+    {
+      "id": "QA-074",
+      "status": "NOT_RUN",
+      "section": 16,
+      "sectionName": "Inbound voice calls",
+      "name": "Live Twilio call connects + greets",
+      "purpose": "Inbound call answers with business greeting.",
+      "primaryRef": "beta 15.1–15.2; WF-08/42",
+      "tenant": "A",
+      "role": "caller",
+      "preconditions": [
+        "Tenant Twilio number",
+        "Voice stack live"
+      ],
+      "fixtures": [],
+      "externalResources": [
+        "Twilio"
+      ],
+      "manualSteps": [
+        "Call tenant number",
+        "Listen to greeting"
+      ],
+      "expectedUi": [
+        "N/A live call"
+      ],
+      "expectedApi": [
+        "Voice webhook 200"
+      ],
+      "expectedDb": [
+        "interaction/session started"
+      ],
+      "expectedWorkers": [
+        "Media streams"
+      ],
+      "expectedAuthz": [
+        "Routes to correct tenant"
+      ],
+      "negativeAssertions": [
+        "Not dead air",
+        "Not wrong tenant"
+      ],
+      "requiredEvidence": [
+        "recording of call workflow + webhook evidence"
+      ],
+      "cleanup": [],
+      "passCriteria": [
+        "Call connects",
+        "Greeting uses business name"
+      ],
+      "failCriteria": [
+        "Busy/dead",
+        "Wrong tenant"
+      ]
+    },
+    {
+      "id": "QA-075",
+      "status": "NOT_RUN",
+      "section": 16,
+      "sectionName": "Inbound voice calls",
+      "name": "Identify customer + book proposal",
+      "purpose": "Caller identified; booking proposal created.",
+      "primaryRef": "SCH-02; CUST-02; WF-42",
+      "tenant": "A",
+      "role": "caller→owner",
+      "preconditions": [
+        "Known customer phone",
+        "LLM+voice"
+      ],
+      "fixtures": [
+        "customer phone"
+      ],
+      "externalResources": [
+        "Twilio",
+        "LLM"
+      ],
+      "manualSteps": [
+        "Call from/as known customer",
+        "Request booking",
+        "Approve proposal"
+      ],
+      "expectedUi": [
+        "Proposal in inbox"
+      ],
+      "expectedApi": [],
+      "expectedDb": [
+        "session",
+        "proposal",
+        "appointment after approve"
+      ],
+      "expectedWorkers": [
+        "Voice + executor"
+      ],
+      "expectedAuthz": [],
+      "negativeAssertions": [
+        "No silent guess on ambiguous entity"
+      ],
+      "requiredEvidence": [
+        "recording",
+        "database-assertion.txt"
+      ],
+      "cleanup": [],
+      "passCriteria": [
+        "Proposal + executed appointment"
+      ],
+      "failCriteria": [
+        "No proposal",
+        "Wrong customer"
+      ]
+    },
+    {
+      "id": "QA-076",
+      "status": "NOT_RUN",
+      "section": 16,
+      "sectionName": "Inbound voice calls",
+      "name": "Emergency triage escalation",
+      "purpose": "Emergency utterance escalates.",
+      "primaryRef": "VOX-01; WF-43; beta 15.7",
+      "tenant": "A",
+      "role": "caller",
+      "preconditions": [
+        "Voice live"
+      ],
+      "fixtures": [],
+      "externalResources": [
+        "Twilio",
+        "LLM"
+      ],
+      "manualSteps": [
+        "Say emergency phrase",
+        "Observe escalation"
+      ],
+      "expectedUi": [
+        "Escalation in interactions/inbox"
+      ],
+      "expectedApi": [],
+      "expectedDb": [
+        "escalation state"
+      ],
+      "expectedWorkers": [],
+      "expectedAuthz": [],
+      "negativeAssertions": [
+        "Does not continue normal booking"
+      ],
+      "requiredEvidence": [
+        "recording",
+        "database-assertion.txt"
+      ],
+      "cleanup": [],
+      "passCriteria": [
+        "Escalation path taken"
+      ],
+      "failCriteria": [
+        "Normal booking continues"
+      ]
+    },
+    {
+      "id": "QA-077",
+      "status": "NOT_RUN",
+      "section": 16,
+      "sectionName": "Inbound voice calls",
+      "name": "Spanish / i18n voice response",
+      "purpose": "Spanish utterance gets Spanish-capable response path.",
+      "primaryRef": "VOX-02",
+      "tenant": "A",
+      "role": "caller",
+      "preconditions": [
+        "Voice live"
+      ],
+      "fixtures": [],
+      "externalResources": [
+        "Twilio",
+        "LLM"
+      ],
+      "manualSteps": [
+        "Speak Spanish request",
+        "Observe response language/path"
+      ],
+      "expectedUi": [
+        "Interaction notes language"
+      ],
+      "expectedApi": [],
+      "expectedDb": [
+        "session language marker if stored"
+      ],
+      "expectedWorkers": [],
+      "expectedAuthz": [],
+      "negativeAssertions": [],
+      "requiredEvidence": [
+        "recording"
+      ],
+      "cleanup": [],
+      "passCriteria": [
+        "Spanish path engaged (soft language check ok)"
+      ],
+      "failCriteria": [
+        "Hard failure / hangup"
+      ]
+    },
+    {
+      "id": "QA-078",
+      "status": "NOT_RUN",
+      "section": 16,
+      "sectionName": "Inbound voice calls",
+      "name": "Voice→estimate/invoice proposals",
+      "purpose": "Voice can draft estimate/invoice proposals.",
+      "primaryRef": "VOX-05–08, VOX-11",
+      "tenant": "A",
+      "role": "caller→owner",
+      "preconditions": [
+        "Voice+LLM",
+        "Customer/job context"
+      ],
+      "fixtures": [],
+      "externalResources": [
+        "Twilio",
+        "LLM"
+      ],
+      "manualSteps": [
+        "Request estimate/invoice via voice",
+        "Approve in inbox"
+      ],
+      "expectedUi": [
+        "Proposals in inbox"
+      ],
+      "expectedApi": [],
+      "expectedDb": [
+        "proposals + entities after approve"
+      ],
+      "expectedWorkers": [
+        "Executor"
+      ],
+      "expectedAuthz": [],
+      "negativeAssertions": [
+        "Prices catalog-grounded"
+      ],
+      "requiredEvidence": [
+        "recording",
+        "database-assertion.txt"
+      ],
+      "cleanup": [],
+      "passCriteria": [
+        "Proposals execute to entities"
+      ],
+      "failCriteria": [
+        "No proposal",
+        "Ungrounded prices auto-approved"
+      ]
+    },
+    {
+      "id": "QA-079",
+      "status": "NOT_RUN",
+      "section": 16,
+      "sectionName": "Inbound voice calls",
+      "name": "Session in interactions + DB artifacts",
+      "purpose": "Call transcript/session linked in interactions.",
+      "primaryRef": "VOX-09/10; WF-44; beta 15.8–15.9",
+      "tenant": "A",
+      "role": "owner",
+      "preconditions": [
+        "Completed call"
+      ],
+      "fixtures": [],
+      "externalResources": [],
+      "manualSteps": [
+        "Open /interactions",
+        "Open transcript"
+      ],
+      "expectedUi": [
+        "Transcript drawer"
+      ],
+      "expectedApi": [
+        "Interactions 200"
+      ],
+      "expectedDb": [
+        "session linked to customer if known"
+      ],
+      "expectedWorkers": [
+        "Recording webhook"
+      ],
+      "expectedAuthz": [],
+      "negativeAssertions": [
+        "Not blank/[inaudible] throughout when audio present"
+      ],
+      "requiredEvidence": [
+        "recording",
+        "database-assertion.txt"
+      ],
+      "cleanup": [],
+      "passCriteria": [
+        "Interaction + transcript/session artifacts"
+      ],
+      "failCriteria": [
+        "Missing interaction",
+        "500 drawer"
+      ]
+    },
+    {
+      "id": "QA-080",
+      "status": "NOT_RUN",
+      "section": 17,
+      "sectionName": "Notifications and compliance",
+      "name": "Outbound SMS dispatch + entity_type CHECK",
+      "purpose": "SMS send writes valid dispatch row.",
+      "primaryRef": "SMS-01; beta 7.12–7.13",
+      "tenant": "A",
+      "role": "owner",
+      "preconditions": [
+        "Twilio",
+        "consenting customer"
+      ],
+      "fixtures": [],
+      "externalResources": [
+        "Twilio"
+      ],
+      "manualSteps": [
+        "Trigger appointment/estimate SMS",
+        "Inspect dispatch"
+      ],
+      "expectedUi": [
+        "Sent indicator"
+      ],
+      "expectedApi": [
+        "Send 2xx"
+      ],
+      "expectedDb": [
+        "dispatch entity_type valid"
+      ],
+      "expectedWorkers": [
+        "SMS worker"
+      ],
+      "expectedAuthz": [],
+      "negativeAssertions": [
+        "CHECK constraint not violated"
+      ],
+      "requiredEvidence": [
+        "recording",
+        "database-assertion.txt",
+        "provider receipt"
+      ],
+      "cleanup": [],
+      "passCriteria": [
+        "SMS sent + valid row"
+      ],
+      "failCriteria": [
+        "DB error",
+        "No provider message"
+      ]
+    },
+    {
+      "id": "QA-081",
+      "status": "NOT_RUN",
+      "section": 17,
+      "sectionName": "Notifications and compliance",
+      "name": "SMS consent / DNC gating",
+      "purpose": "DNC/consent suppresses outbound SMS.",
+      "primaryRef": "SMS-02; VOX-03",
+      "tenant": "A",
+      "role": "owner",
+      "preconditions": [
+        "DNC or no-consent fixture"
+      ],
+      "fixtures": [
+        "DNC phone"
+      ],
+      "externalResources": [
+        "Twilio"
+      ],
+      "manualSteps": [
+        "Attempt SMS",
+        "Confirm suppressed"
+      ],
+      "expectedUi": [
+        "Suppressed reason"
+      ],
+      "expectedApi": [
+        "Send blocked or no-op with reason"
+      ],
+      "expectedDb": [
+        "no outbound sent"
+      ],
+      "expectedWorkers": [],
+      "expectedAuthz": [],
+      "negativeAssertions": [
+        "No SMS delivered"
+      ],
+      "requiredEvidence": [
+        "recording",
+        "database-assertion.txt",
+        "provider: zero messages"
+      ],
+      "cleanup": [],
+      "passCriteria": [
+        "Suppressed with evidence"
+      ],
+      "failCriteria": [
+        "SMS delivered to DNC"
+      ]
+    },
+    {
+      "id": "QA-082",
+      "status": "NOT_RUN",
+      "section": 17,
+      "sectionName": "Notifications and compliance",
+      "name": "Appointment confirmation SMS natural copy",
+      "purpose": "Confirmation SMS uses natural language copy.",
+      "primaryRef": "beta 7.12–7.13",
+      "tenant": "A",
+      "role": "owner",
+      "preconditions": [
+        "Consenting customer",
+        "Appointment"
+      ],
+      "fixtures": [],
+      "externalResources": [
+        "Twilio"
+      ],
+      "manualSteps": [
+        "Trigger confirmation",
+        "Read message body"
+      ],
+      "expectedUi": [],
+      "expectedApi": [],
+      "expectedDb": [
+        "dispatch body stored/redacted"
+      ],
+      "expectedWorkers": [],
+      "expectedAuthz": [],
+      "negativeAssertions": [
+        "Not raw JSON"
+      ],
+      "requiredEvidence": [
+        "recording",
+        "redacted message body"
+      ],
+      "cleanup": [],
+      "passCriteria": [
+        "Natural copy delivered"
+      ],
+      "failCriteria": [
+        "Raw JSON SMS"
+      ]
+    },
+    {
+      "id": "QA-083",
+      "status": "NOT_RUN",
+      "section": 17,
+      "sectionName": "Notifications and compliance",
+      "name": "Delay notice idempotency",
+      "purpose": "Repeated delay notice does not spam.",
+      "primaryRef": "SCH-05; beta 7.18",
+      "tenant": "A",
+      "role": "owner",
+      "preconditions": [
+        "Running-late state"
+      ],
+      "fixtures": [],
+      "externalResources": [
+        "Twilio"
+      ],
+      "manualSteps": [
+        "Trigger delay twice quickly",
+        "Count SMS"
+      ],
+      "expectedUi": [],
+      "expectedApi": [],
+      "expectedDb": [
+        "dedup key"
+      ],
+      "expectedWorkers": [],
+      "expectedAuthz": [],
+      "negativeAssertions": [
+        "≤1 customer SMS"
+      ],
+      "requiredEvidence": [
+        "provider count",
+        "recording"
+      ],
+      "cleanup": [],
+      "passCriteria": [
+        "Idempotent"
+      ],
+      "failCriteria": [
+        "Duplicate SMS"
+      ]
+    },
+    {
+      "id": "QA-084",
+      "status": "NOT_RUN",
+      "section": 18,
+      "sectionName": "Public and customer self-service",
+      "name": "Public estimate approve/reject + re-open",
+      "purpose": "Public estimate token flows.",
+      "primaryRef": "PORT-01; WF-30; beta 10.1–10.4",
+      "tenant": "A",
+      "role": "customer",
+      "preconditions": [
+        "Valid estimate token"
+      ],
+      "fixtures": [
+        "/e/:token"
+      ],
+      "externalResources": [],
+      "manualSteps": [
+        "Open token",
+        "Approve or reject",
+        "Invalid token check"
+      ],
+      "expectedUi": [
+        "Estimate details",
+        "Success state"
+      ],
+      "expectedApi": [
+        "Public endpoints 2xx/4xx"
+      ],
+      "expectedDb": [
+        "status updated"
+      ],
+      "expectedWorkers": [],
+      "expectedAuthz": [
+        "Token only"
+      ],
+      "negativeAssertions": [
+        "Invalid token safe copy, no raw upstream JSON"
+      ],
+      "requiredEvidence": [
+        "recording",
+        "final-state.png"
+      ],
+      "cleanup": [],
+      "passCriteria": [
+        "Valid flow works",
+        "Invalid safe"
+      ],
+      "failCriteria": [
+        "Mock data leak",
+        "Raw error JSON"
+      ]
+    },
+    {
+      "id": "QA-085",
+      "status": "NOT_RUN",
+      "section": 18,
+      "sectionName": "Public and customer self-service",
+      "name": "Public invoice view + paid state",
+      "purpose": "Public invoice page reflects paid state.",
+      "primaryRef": "PORT-02; beta 10.5–10.7",
+      "tenant": "A",
+      "role": "customer",
+      "preconditions": [
+        "Invoice token"
+      ],
+      "fixtures": [
+        "/pay/:token"
+      ],
+      "externalResources": [
+        "Stripe test"
+      ],
+      "manualSteps": [
+        "Open pay page",
+        "Pay or view paid"
+      ],
+      "expectedUi": [
+        "Amount correct",
+        "Paid state after settlement"
+      ],
+      "expectedApi": [],
+      "expectedDb": [
+        "paid"
+      ],
+      "expectedWorkers": [
+        "Webhook"
+      ],
+      "expectedAuthz": [],
+      "negativeAssertions": [],
+      "requiredEvidence": [
+        "recording"
+      ],
+      "cleanup": [],
+      "passCriteria": [
+        "Correct amount + paid persistence"
+      ],
+      "failCriteria": [
+        "Wrong cents",
+        "Stale unpaid"
+      ]
+    },
+    {
+      "id": "QA-086",
+      "status": "NOT_RUN",
+      "section": 18,
+      "sectionName": "Public and customer self-service",
+      "name": "Customer portal token-scoped data",
+      "purpose": "Portal tabs only show token tenant/customer data.",
+      "primaryRef": "WF-47; beta 10.8–10.10",
+      "tenant": "A",
+      "role": "customer",
+      "preconditions": [
+        "Portal token"
+      ],
+      "fixtures": [
+        "/portal/:token"
+      ],
+      "externalResources": [],
+      "manualSteps": [
+        "Open portal tabs",
+        "Attempt foreign ids"
+      ],
+      "expectedUi": [
+        "Own data only"
+      ],
+      "expectedApi": [
+        "Foreign ids 404/403"
+      ],
+      "expectedDb": [],
+      "expectedWorkers": [],
+      "expectedAuthz": [
+        "Token scoped"
+      ],
+      "negativeAssertions": [
+        "No Tenant B data"
+      ],
+      "requiredEvidence": [
+        "recording",
+        "api-response.json"
+      ],
+      "cleanup": [],
+      "passCriteria": [
+        "Scoped data only"
+      ],
+      "failCriteria": [
+        "Cross-customer leak"
+      ]
+    },
+    {
+      "id": "QA-087",
+      "status": "NOT_RUN",
+      "section": 18,
+      "sectionName": "Public and customer self-service",
+      "name": "Intake form vertical fields",
+      "purpose": "Intake shows active vertical fields.",
+      "primaryRef": "beta 10.11–10.13; WF-16",
+      "tenant": "A",
+      "role": "anonymous",
+      "preconditions": [
+        "Active pack"
+      ],
+      "fixtures": [],
+      "externalResources": [],
+      "manualSteps": [
+        "Open /intake",
+        "Inspect service types"
+      ],
+      "expectedUi": [
+        "Vertical-specific options"
+      ],
+      "expectedApi": [],
+      "expectedDb": [],
+      "expectedWorkers": [],
+      "expectedAuthz": [],
+      "negativeAssertions": [],
+      "requiredEvidence": [
+        "recording"
+      ],
+      "cleanup": [],
+      "passCriteria": [
+        "Vertical options present"
+      ],
+      "failCriteria": [
+        "Empty/wrong vertical"
+      ]
+    },
+    {
+      "id": "QA-088",
+      "status": "NOT_RUN",
+      "section": 18,
+      "sectionName": "Public and customer self-service",
+      "name": "Post-job feedback submit",
+      "purpose": "Feedback token submits rating.",
+      "primaryRef": "WF-49; beta 10.14–10.16",
+      "tenant": "A",
+      "role": "customer",
+      "preconditions": [
+        "Feedback token"
+      ],
+      "fixtures": [
+        "/public/feedback/:token"
+      ],
+      "externalResources": [],
+      "manualSteps": [
+        "Submit stars + comment"
+      ],
+      "expectedUi": [
+        "Thank you / review gate"
+      ],
+      "expectedApi": [
+        "Submit 2xx"
+      ],
+      "expectedDb": [
+        "feedback row"
+      ],
+      "expectedWorkers": [],
+      "expectedAuthz": [],
+      "negativeAssertions": [
+        "Invalid token safe"
+      ],
+      "requiredEvidence": [
+        "recording",
+        "database-assertion.txt"
+      ],
+      "cleanup": [],
+      "passCriteria": [
+        "Rating persisted"
+      ],
+      "failCriteria": [
+        "No row"
+      ]
+    },
+    {
+      "id": "QA-089",
+      "status": "NOT_RUN",
+      "section": 19,
+      "sectionName": "Settings",
+      "name": "Read + update tenant settings",
+      "purpose": "Business profile persists.",
+      "primaryRef": "SET-01; beta 14.1–14.2",
+      "tenant": "A",
+      "role": "owner",
+      "preconditions": [],
+      "fixtures": [],
+      "externalResources": [],
+      "manualSteps": [
+        "Edit company name",
+        "Save",
+        "Hard reload"
+      ],
+      "expectedUi": [
+        "Updated name"
+      ],
+      "expectedApi": [
+        "PUT settings 200"
+      ],
+      "expectedDb": [
+        "settings row"
+      ],
+      "expectedWorkers": [],
+      "expectedAuthz": [
+        "Owner"
+      ],
+      "negativeAssertions": [
+        "Does not wipe vertical packs"
+      ],
+      "requiredEvidence": [
+        "recording",
+        "database-assertion.txt"
+      ],
+      "cleanup": [],
+      "passCriteria": [
+        "Persists after reload"
+      ],
+      "failCriteria": [
+        "Reverts",
+        "Pack wipe"
+      ]
+    },
+    {
+      "id": "QA-090",
+      "status": "NOT_RUN",
+      "section": 19,
+      "sectionName": "Settings",
+      "name": "Terminology / AI approval / deposit rules",
+      "purpose": "Rule sheets persist.",
+      "primaryRef": "beta 14.4–14.7",
+      "tenant": "A",
+      "role": "owner",
+      "preconditions": [],
+      "fixtures": [],
+      "externalResources": [],
+      "manualSteps": [
+        "Update terminology",
+        "AI approval threshold",
+        "Deposit rules",
+        "Reload"
+      ],
+      "expectedUi": [
+        "Values persist"
+      ],
+      "expectedApi": [
+        "Settings endpoints 200"
+      ],
+      "expectedDb": [
+        "values stored"
+      ],
+      "expectedWorkers": [],
+      "expectedAuthz": [],
+      "negativeAssertions": [],
+      "requiredEvidence": [
+        "recording"
+      ],
+      "cleanup": [],
+      "passCriteria": [
+        "All three persist"
+      ],
+      "failCriteria": [
+        "Any reverts"
+      ]
+    },
+    {
+      "id": "QA-091",
+      "status": "NOT_RUN",
+      "section": 19,
+      "sectionName": "Settings",
+      "name": "Templates + price book (catalog CRUD)",
+      "purpose": "Templates and price book edit prices in cents.",
+      "primaryRef": "CAT-01; beta 14.12–14.14",
+      "tenant": "A",
+      "role": "owner",
+      "preconditions": [],
+      "fixtures": [],
+      "externalResources": [],
+      "manualSteps": [
+        "Edit template",
+        "Edit price book item",
+        "Use in estimate"
+      ],
+      "expectedUi": [
+        "Updated values"
+      ],
+      "expectedApi": [
+        "CRUD 2xx"
+      ],
+      "expectedDb": [
+        "integer cents"
+      ],
+      "expectedWorkers": [],
+      "expectedAuthz": [],
+      "negativeAssertions": [],
+      "requiredEvidence": [
+        "recording",
+        "database-assertion.txt"
+      ],
+      "cleanup": [],
+      "passCriteria": [
+        "Edits prefill new estimate"
+      ],
+      "failCriteria": [
+        "Mock-only save"
+      ]
+    },
+    {
+      "id": "QA-092",
+      "status": "NOT_RUN",
+      "section": 19,
+      "sectionName": "Settings",
+      "name": "Team invite Dispatcher + Technician",
+      "purpose": "Invites join existing tenant with roles.",
+      "primaryRef": "beta 16.13–16.20",
+      "tenant": "A",
+      "role": "owner→dispatcher/tech",
+      "preconditions": [
+        "Clerk invites enabled"
+      ],
+      "fixtures": [
+        "invite emails"
+      ],
+      "externalResources": [
+        "Clerk"
+      ],
+      "manualSteps": [
+        "Invite dispatcher",
+        "Invite technician",
+        "Accept as invitee",
+        "GET /api/me"
+      ],
+      "expectedUi": [
+        "Pending then accepted"
+      ],
+      "expectedApi": [
+        "/api/me role correct"
+      ],
+      "expectedDb": [
+        "invitation accepted",
+        "same tenant_id"
+      ],
+      "expectedWorkers": [
+        "Clerk webhook"
+      ],
+      "expectedAuthz": [
+        "Role permissions enforced"
+      ],
+      "negativeAssertions": [
+        "Invite does not bootstrap new tenant"
+      ],
+      "requiredEvidence": [
+        "recording",
+        "redacted /api/me"
+      ],
+      "cleanup": [],
+      "passCriteria": [
+        "Both roles join Tenant A"
+      ],
+      "failCriteria": [
+        "New tenant created",
+        "Wrong role"
+      ]
+    },
+    {
+      "id": "QA-093",
+      "status": "NOT_RUN",
+      "section": 19,
+      "sectionName": "Settings",
+      "name": "Current-user profile + mode switch",
+      "purpose": "GET /api/me and supervisor/tech mode switch.",
+      "primaryRef": "ME-01",
+      "tenant": "A",
+      "role": "owner",
+      "preconditions": [],
+      "fixtures": [],
+      "externalResources": [],
+      "manualSteps": [
+        "Open profile/home",
+        "Switch mode if available",
+        "Confirm /api/me"
+      ],
+      "expectedUi": [
+        "Mode-aware nav"
+      ],
+      "expectedApi": [
+        "GET /api/me 200 with role/mode"
+      ],
+      "expectedDb": [],
+      "expectedWorkers": [],
+      "expectedAuthz": [],
+      "negativeAssertions": [],
+      "requiredEvidence": [
+        "recording",
+        "api-response.json"
+      ],
+      "cleanup": [],
+      "passCriteria": [
+        "/api/me correct",
+        "Mode switch persists if supported"
+      ],
+      "failCriteria": [
+        "Wrong tenant/role"
+      ]
+    },
+    {
+      "id": "QA-094",
+      "status": "NOT_RUN",
+      "section": 20,
+      "sectionName": "Google Calendar",
+      "name": "Connect Google OAuth (auth URL)",
+      "purpose": "Calendar connect returns OAuth URL.",
+      "primaryRef": "WF-50; CAL-01",
+      "tenant": "A",
+      "role": "owner",
+      "preconditions": [
+        "Google OAuth client configured"
+      ],
+      "fixtures": [
+        "disposable Google account"
+      ],
+      "externalResources": [
+        "Google"
+      ],
+      "manualSteps": [
+        "POST connect",
+        "Complete OAuth",
+        "Confirm integration stored"
+      ],
+      "expectedUi": [
+        "Connected state in settings"
+      ],
+      "expectedApi": [
+        "connect returns auth URL",
+        "callback 2xx"
+      ],
+      "expectedDb": [
+        "calendar integration row"
+      ],
+      "expectedWorkers": [],
+      "expectedAuthz": [
+        "Per-user"
+      ],
+      "negativeAssertions": [
+        "No token printed in UI/logs"
+      ],
+      "requiredEvidence": [
+        "recording",
+        "database-assertion.txt"
+      ],
+      "cleanup": [],
+      "passCriteria": [
+        "Integration stored"
+      ],
+      "failCriteria": [
+        "Missing OAuth client",
+        "Tokens leaked"
+      ]
+    },
+    {
+      "id": "QA-095",
+      "status": "NOT_RUN",
+      "section": 20,
+      "sectionName": "Google Calendar",
+      "name": "Appointment create/assign → synced event",
+      "purpose": "Appointment push creates external event.",
+      "primaryRef": "WF-50; SCH-01",
+      "tenant": "A",
+      "role": "owner",
+      "preconditions": [
+        "Google connected"
+      ],
+      "fixtures": [],
+      "externalResources": [
+        "Google Calendar"
+      ],
+      "manualSteps": [
+        "Create/assign appointment",
+        "Verify Google event",
+        "Check appointment_calendar_events"
+      ],
+      "expectedUi": [
+        "Synced indicator if any"
+      ],
+      "expectedApi": [
+        "Optional test-push 2xx"
+      ],
+      "expectedDb": [
+        "status='synced'",
+        "external_event_id set"
+      ],
+      "expectedWorkers": [
+        "Calendar sync"
+      ],
+      "expectedAuthz": [],
+      "negativeAssertions": [],
+      "requiredEvidence": [
+        "recording",
+        "Google event screenshot redacted",
+        "database-assertion.txt"
+      ],
+      "cleanup": [],
+      "passCriteria": [
+        "Synced event exists"
+      ],
+      "failCriteria": [
+        "No external_event_id"
+      ]
+    },
+    {
+      "id": "QA-096",
+      "status": "NOT_RUN",
+      "section": 20,
+      "sectionName": "Google Calendar",
+      "name": "Disconnect clears integration",
+      "purpose": "Disconnect removes integration.",
+      "primaryRef": "WF-50",
+      "tenant": "A",
+      "role": "owner",
+      "preconditions": [
+        "Connected"
+      ],
+      "fixtures": [],
+      "externalResources": [
+        "Google"
+      ],
+      "manualSteps": [
+        "Disconnect",
+        "Confirm cleared"
+      ],
+      "expectedUi": [
+        "Disconnected"
+      ],
+      "expectedApi": [
+        "Disconnect 2xx"
+      ],
+      "expectedDb": [
+        "integration cleared"
+      ],
+      "expectedWorkers": [],
+      "expectedAuthz": [],
+      "negativeAssertions": [],
+      "requiredEvidence": [
+        "recording",
+        "database-assertion.txt"
+      ],
+      "cleanup": [],
+      "passCriteria": [
+        "Integration cleared"
+      ],
+      "failCriteria": [
+        "Stale tokens remain usable"
+      ]
+    },
+    {
+      "id": "QA-097",
+      "status": "NOT_RUN",
+      "section": 21,
+      "sectionName": "Multi-tenant isolation and security",
+      "name": "Cross-tenant reads blocked",
+      "purpose": "Tenant B cannot read Tenant A entities.",
+      "primaryRef": "ISO-01; beta 17.5–17.13; WF-04",
+      "tenant": "B",
+      "role": "owner",
+      "preconditions": [
+        "Tenant A entity ids",
+        "Tenant B token"
+      ],
+      "fixtures": [
+        "cross-tenant ids"
+      ],
+      "externalResources": [],
+      "manualSteps": [
+        "As B, GET A customer/job/estimate/invoice/appointments/proposals/settings"
+      ],
+      "expectedUi": [
+        "Empty lists"
+      ],
+      "expectedApi": [
+        "404/403 or empty"
+      ],
+      "expectedDb": [
+        "A unchanged"
+      ],
+      "expectedWorkers": [],
+      "expectedAuthz": [
+        "Denied"
+      ],
+      "negativeAssertions": [
+        "No A ids in B list"
+      ],
+      "requiredEvidence": [
+        "api-response.json matrix",
+        "recording"
+      ],
+      "cleanup": [],
+      "passCriteria": [
+        "All reads denied/empty"
+      ],
+      "failCriteria": [
+        "Any A entity returned"
+      ]
+    },
+    {
+      "id": "QA-098",
+      "status": "NOT_RUN",
+      "section": 21,
+      "sectionName": "Multi-tenant isolation and security",
+      "name": "Cross-tenant writes blocked",
+      "purpose": "Tenant B cannot write using Tenant A parent ids.",
+      "primaryRef": "ISO-01; beta 17.14–17.17",
+      "tenant": "B",
+      "role": "owner",
+      "preconditions": [
+        "A ids"
+      ],
+      "fixtures": [],
+      "externalResources": [],
+      "manualSteps": [
+        "POST notes/appointments/estimates with A parent ids"
+      ],
+      "expectedUi": [],
+      "expectedApi": [
+        "400/403/404"
+      ],
+      "expectedDb": [
+        "No new A rows from B"
+      ],
+      "expectedWorkers": [],
+      "expectedAuthz": [
+        "Denied"
+      ],
+      "negativeAssertions": [
+        "Parent ownership validated"
+      ],
+      "requiredEvidence": [
+        "api-response.json",
+        "database-assertion.txt",
+        "recording"
+      ],
+      "cleanup": [],
+      "passCriteria": [
+        "Writes blocked"
+      ],
+      "failCriteria": [
+        "Child created under A"
+      ]
+    },
+    {
+      "id": "QA-099",
+      "status": "NOT_RUN",
+      "section": 21,
+      "sectionName": "Multi-tenant isolation and security",
+      "name": "Technician RBAC",
+      "purpose": "Technician lacks estimates/invoices/settings; can view jobs.",
+      "primaryRef": "beta 17.18–17.24",
+      "tenant": "A",
+      "role": "technician",
+      "preconditions": [
+        "Technician JWT"
+      ],
+      "fixtures": [],
+      "externalResources": [],
+      "manualSteps": [
+        "As tech: GET estimates/invoices/settings/invites → deny; GET jobs → allow; transition assigned job"
+      ],
+      "expectedUi": [
+        "Nav hides forbidden"
+      ],
+      "expectedApi": [
+        "403 on forbidden",
+        "200 on jobs"
+      ],
+      "expectedDb": [],
+      "expectedWorkers": [],
+      "expectedAuthz": [
+        "RBAC enforced"
+      ],
+      "negativeAssertions": [
+        "Cannot invite users"
+      ],
+      "requiredEvidence": [
+        "api-response.json",
+        "recording"
+      ],
+      "cleanup": [],
+      "passCriteria": [
+        "RBAC matrix matches"
+      ],
+      "failCriteria": [
+        "Tech reads invoices/settings"
+      ]
+    },
+    {
+      "id": "QA-100",
+      "status": "NOT_RUN",
+      "section": 21,
+      "sectionName": "Multi-tenant isolation and security",
+      "name": "Public token isolation / no internal IDs",
+      "purpose": "Public pages do not leak internal ids or other tenants.",
+      "primaryRef": "beta 17.25–17.28; PORT-01/02",
+      "tenant": "A/B",
+      "role": "anonymous",
+      "preconditions": [
+        "Valid + invalid tokens"
+      ],
+      "fixtures": [],
+      "externalResources": [],
+      "manualSteps": [
+        "Alter tokens",
+        "Open pages",
+        "Inspect payload"
+      ],
+      "expectedUi": [
+        "Safe error copy"
+      ],
+      "expectedApi": [
+        "401/404"
+      ],
+      "expectedDb": [],
+      "expectedWorkers": [],
+      "expectedAuthz": [],
+      "negativeAssertions": [
+        "No raw upstream JSON",
+        "No foreign tenant data"
+      ],
+      "requiredEvidence": [
+        "recording",
+        "api-response.json"
+      ],
+      "cleanup": [],
+      "passCriteria": [
+        "Safe failures"
+      ],
+      "failCriteria": [
+        "Data leak"
+      ]
+    },
+    {
+      "id": "QA-101",
+      "status": "NOT_RUN",
+      "section": 21,
+      "sectionName": "Multi-tenant isolation and security",
+      "name": "Twilio/Stripe webhook tenant routing",
+      "purpose": "Provider webhooks route to owning tenant only.",
+      "primaryRef": "beta 17.29–17.32",
+      "tenant": "A/B",
+      "role": "system",
+      "preconditions": [
+        "Two numbers or stripe metadata"
+      ],
+      "fixtures": [],
+      "externalResources": [
+        "Twilio",
+        "Stripe"
+      ],
+      "manualSteps": [
+        "Send SMS to A vs B numbers",
+        "Replay stripe with A invoice metadata as B context if applicable"
+      ],
+      "expectedUi": [],
+      "expectedApi": [
+        "Webhooks 200"
+      ],
+      "expectedDb": [
+        "Events only on owning tenant"
+      ],
+      "expectedWorkers": [
+        "Webhook handlers"
+      ],
+      "expectedAuthz": [],
+      "negativeAssertions": [
+        "No cross-tenant apply"
+      ],
+      "requiredEvidence": [
+        "database-assertion.txt",
+        "recording/logs redacted"
+      ],
+      "cleanup": [],
+      "passCriteria": [
+        "Tenant-correct routing"
+      ],
+      "failCriteria": [
+        "Cross-tenant write"
+      ]
+    },
+    {
+      "id": "QA-102",
+      "status": "NOT_RUN",
+      "section": 21,
+      "sectionName": "Multi-tenant isolation and security",
+      "name": "RLS with GUC + no-GUC fail-closed",
+      "purpose": "NOSUPERUSER NOBYPASSRLS role enforces RLS.",
+      "primaryRef": "ISO-01; beta 17.33–17.35",
+      "tenant": "A/B",
+      "role": "qa_readonly",
+      "preconditions": [
+        "qa_readonly role",
+        "SET app.tenant_id"
+      ],
+      "fixtures": [],
+      "externalResources": [
+        "Postgres"
+      ],
+      "manualSteps": [
+        "SELECT with GUC for A",
+        "SELECT with GUC for B",
+        "SELECT without GUC"
+      ],
+      "expectedUi": [],
+      "expectedApi": [],
+      "expectedDb": [
+        "Only tenant rows with GUC",
+        "0 rows without GUC"
+      ],
+      "expectedWorkers": [],
+      "expectedAuthz": [
+        "RLS"
+      ],
+      "negativeAssertions": [
+        "Service role not used for this proof"
+      ],
+      "requiredEvidence": [
+        "database-assertion.txt",
+        "recording of SQL session"
+      ],
+      "cleanup": [],
+      "passCriteria": [
+        "GUC scopes",
+        "no-GUC empty/fail-closed"
+      ],
+      "failCriteria": [
+        "Bypass RLS",
+        "Cross-tenant rows"
+      ]
+    },
+    {
+      "id": "QA-103",
+      "status": "NOT_RUN",
+      "section": 21,
+      "sectionName": "Multi-tenant isolation and security",
+      "name": "Estimate tenant isolation row",
+      "purpose": "Tenant B cannot read Tenant A estimate.",
+      "primaryRef": "EST-06",
+      "tenant": "B",
+      "role": "owner",
+      "preconditions": [
+        "A estimate id"
+      ],
+      "fixtures": [],
+      "externalResources": [],
+      "manualSteps": [
+        "GET A estimate as B"
+      ],
+      "expectedUi": [],
+      "expectedApi": [
+        "403/404"
+      ],
+      "expectedDb": [],
+      "expectedWorkers": [],
+      "expectedAuthz": [
+        "Denied"
+      ],
+      "negativeAssertions": [],
+      "requiredEvidence": [
+        "api-response.json",
+        "recording"
+      ],
+      "cleanup": [],
+      "passCriteria": [
+        "Denied"
+      ],
+      "failCriteria": [
+        "200 with A estimate"
+      ]
+    },
+    {
+      "id": "QA-104",
+      "status": "NOT_RUN",
+      "section": 21,
+      "sectionName": "Multi-tenant isolation and security",
+      "name": "Feature-flag admin platform-gated",
+      "purpose": "Platform admin flags not tenant-writable.",
+      "primaryRef": "FLAG-01",
+      "tenant": "A",
+      "role": "owner",
+      "preconditions": [],
+      "fixtures": [],
+      "externalResources": [],
+      "manualSteps": [
+        "Attempt admin flag mutation as tenant owner"
+      ],
+      "expectedUi": [
+        "Forbidden or hidden"
+      ],
+      "expectedApi": [
+        "403"
+      ],
+      "expectedDb": [
+        "unchanged"
+      ],
+      "expectedWorkers": [],
+      "expectedAuthz": [
+        "Platform-gated"
+      ],
+      "negativeAssertions": [],
+      "requiredEvidence": [
+        "api-response.json",
+        "recording"
+      ],
+      "cleanup": [],
+      "passCriteria": [
+        "Tenant cannot elevate flags"
+      ],
+      "failCriteria": [
+        "Owner mutates platform flags"
+      ]
+    },
+    {
+      "id": "QA-105",
+      "status": "NOT_RUN",
+      "section": 22,
+      "sectionName": "Miscellaneous and hidden-route checks",
+      "name": "Golden funnel intake→invoice issued",
+      "purpose": "End-to-end golden funnel.",
+      "primaryRef": "JRN-03",
+      "tenant": "A",
+      "role": "owner",
+      "preconditions": [
+        "Clean funnel fixtures"
+      ],
+      "fixtures": [],
+      "externalResources": [],
+      "manualSteps": [
+        "Intake→lead→customer→job→estimate→invoice issued"
+      ],
+      "expectedUi": [
+        "Each stage visible"
+      ],
+      "expectedApi": [
+        "Each step 2xx"
+      ],
+      "expectedDb": [
+        "Linked chain"
+      ],
+      "expectedWorkers": [],
+      "expectedAuthz": [],
+      "negativeAssertions": [],
+      "requiredEvidence": [
+        "recording spanning funnel",
+        "entity id chain"
+      ],
+      "cleanup": [],
+      "passCriteria": [
+        "Full chain linked"
+      ],
+      "failCriteria": [
+        "Broken link",
+        "Missing stage"
+      ]
+    },
+    {
+      "id": "QA-106",
+      "status": "NOT_RUN",
+      "section": 22,
+      "sectionName": "Miscellaneous and hidden-route checks",
+      "name": "Three-estimate billing journey (2 paid)",
+      "purpose": "Create three estimates; invoice+pay two; leave one.",
+      "primaryRef": "JRN-02",
+      "tenant": "A",
+      "role": "owner",
+      "preconditions": [],
+      "fixtures": [],
+      "externalResources": [
+        "Stripe test"
+      ],
+      "manualSteps": [
+        "Create 3 estimates",
+        "Invoice+pay 2",
+        "Leave 1"
+      ],
+      "expectedUi": [
+        "Two paid invoices",
+        "One uninvoiced estimate"
+      ],
+      "expectedApi": [],
+      "expectedDb": [
+        "2 paid invoices",
+        "1 estimate without invoice"
+      ],
+      "expectedWorkers": [
+        "Webhooks"
+      ],
+      "expectedAuthz": [],
+      "negativeAssertions": [],
+      "requiredEvidence": [
+        "recording",
+        "database-assertion.txt"
+      ],
+      "cleanup": [],
+      "passCriteria": [
+        "Exact 2 paid + 1 left"
+      ],
+      "failCriteria": [
+        "Counts wrong"
+      ]
+    },
+    {
+      "id": "QA-107",
+      "status": "NOT_RUN",
+      "section": 22,
+      "sectionName": "Miscellaneous and hidden-route checks",
+      "name": "Hidden routes + telephony gap documentation",
+      "purpose": "Hidden routes load; VOX-04 telephony-only gaps documented if not drivable.",
+      "primaryRef": "VOX-04; MC-01; RPT-02",
+      "tenant": "A",
+      "role": "owner",
+      "preconditions": [],
+      "fixtures": [],
+      "externalResources": [],
+      "manualSteps": [
+        "Open /contracts",
+        "/reports/revenue-by-source",
+        "Document VOX-04 cases"
+      ],
+      "expectedUi": [
+        "Routes render"
+      ],
+      "expectedApi": [
+        "200"
+      ],
+      "expectedDb": [],
+      "expectedWorkers": [],
+      "expectedAuthz": [],
+      "negativeAssertions": [
+        "Not testable ≠ PASS — document FAIL until drivability restored"
+      ],
+      "requiredEvidence": [
+        "recording",
+        "notes.md for VOX-04"
+      ],
+      "cleanup": [],
+      "passCriteria": [
+        "Routes work",
+        "Telephony gaps either executed or FAIL with exact missing resource"
+      ],
+      "failCriteria": [
+        "ASSUMED/SKIPPED without FAIL"
+      ]
+    }
+  ]
+}
