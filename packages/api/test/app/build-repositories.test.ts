@@ -16,6 +16,8 @@
 import { describe, it, expect } from 'vitest';
 import type { Pool } from 'pg';
 import { buildRepositories } from '../../src/db/build-repositories';
+import { InMemoryCustomerRepository } from '../../src/customers/customer';
+import { InMemoryAssignmentRepository } from '../../src/appointments/assignment';
 
 // The repositories take the pool and hold it; none query during construction,
 // so an opaque stub is enough to select the Postgres branch.
@@ -71,5 +73,52 @@ describe('buildRepositories — adapter resolution', () => {
 
   it('resolution snapshot — with pool', () => {
     expect(resolutionMap(stubPool)).toMatchSnapshot();
+  });
+});
+
+/**
+ * Sibling overrides.
+ *
+ * `customerMergeRepo` and `appointmentRepo` capture a sibling repository in
+ * their in-memory CONSTRUCTOR. A spread applied to the returned set therefore
+ * cannot reach inside them, so buildRepositories takes those two overrides
+ * directly. Without that, `createApp({ customerRepo })` would substitute the
+ * repo everywhere EXCEPT the one place that had already captured the default —
+ * a silent split-brain that no type check would catch.
+ */
+describe('buildRepositories — sibling overrides reach dependent repositories', () => {
+  it('customerMergeRepo delegates to an overridden customerRepo', async () => {
+    const calls: string[] = [];
+    const spyCustomerRepo = {
+      ...new InMemoryCustomerRepository(),
+      update: async (tenantId: string, id: string) => {
+        calls.push(`${tenantId}/${id}`);
+        return null;
+      },
+    } as unknown as InMemoryCustomerRepository;
+
+    const { customerMergeRepo } = buildRepositories(undefined, undefined, {
+      customerRepo: spyCustomerRepo,
+    });
+    await customerMergeRepo.reassignAndArchive('tenant-1', 'survivor', 'loser');
+
+    expect(calls).toEqual(['tenant-1/loser']);
+  });
+
+  it('appointmentRepo receives an overridden assignmentRepo', () => {
+    const lookup = { listByAppointmentIds: async () => new Map() };
+    const { appointmentRepo } = buildRepositories(undefined, undefined, {
+      assignmentRepo: lookup as unknown as InMemoryAssignmentRepository,
+    });
+    // The lookup is captured privately; assert the dependent was built with the
+    // override rather than a default instance by identity through the closure.
+    expect((appointmentRepo as unknown as { technicianAssignments?: unknown }).technicianAssignments)
+      .toBe(lookup);
+  });
+
+  it('the overridden sibling is also returned in the set', () => {
+    const spy = new InMemoryCustomerRepository();
+    const { customerRepo } = buildRepositories(undefined, undefined, { customerRepo: spy });
+    expect(customerRepo).toBe(spy);
   });
 });
