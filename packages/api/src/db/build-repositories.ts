@@ -19,12 +19,21 @@
  * repository in their in-memory constructor, so they are built after
  * `customerRepo` and `assignmentRepo` respectively.
  *
- * OVERRIDES CAVEAT — createApp() applies test overrides by spreading them
- * over this result. That substitutes the named repository for every consumer
- * EXCEPT the two in-memory constructors above, which captured their sibling
- * at construction time. If you override `customerRepo` or `assignmentRepo`
- * and the dependent behaviour matters, override `customerMergeRepo` /
- * `appointmentRepo` too.
+ * OVERRIDES — createApp() applies test overrides by spreading them over this
+ * result, which substitutes the named repository for every consumer that
+ * receives it from the returned set. The two in-memory constructors above are
+ * the exception, because they capture their sibling at CONSTRUCTION time
+ * rather than reading it from the set: a spread applied afterwards could not
+ * reach inside them. They therefore take the override through `siblings`
+ * below, so `createApp({ customerRepo })` is honoured by `customerMergeRepo`
+ * and `createApp({ assignmentRepo })` by `appointmentRepo`.
+ *
+ * `siblings` is typed against the CONCRETE adapter union rather than
+ * `Partial<Repositories>`, because `Repositories` is inferred FROM this
+ * function and referencing it in its own parameter list would be circular.
+ * It deliberately matches the type each binding already had — typing it
+ * against the narrower consumed interface instead widens the inferred
+ * `customerRepo`/`assignmentRepo` and breaks ~20 consumers in app.ts.
  */
 import type { Pool } from 'pg';
 
@@ -270,8 +279,17 @@ import { PgWebhookEventRepository } from '../webhooks/pg-webhook-event';
  *
  * @param pool       main pool; `undefined` selects the in-memory adapters
  * @param directPool session-mode pool (advisory locks); falls back to `pool`
+ * @param siblings   overrides for the two repositories that are consumed by
+ *                   another repository's constructor (see OVERRIDES above)
  */
-export function buildRepositories(pool: Pool | undefined, directPool: Pool | undefined) {
+export function buildRepositories(
+  pool: Pool | undefined,
+  directPool: Pool | undefined,
+  siblings: {
+    customerRepo?: PgCustomerRepository | InMemoryCustomerRepository;
+    assignmentRepo?: PgAssignmentRepository | InMemoryAssignmentRepository;
+  } = {},
+) {
 
   // The settings repo is constructed early so the Clerk webhook tenant
   // bootstrap can seed a default TenantSettings row alongside the new
@@ -315,7 +333,9 @@ export function buildRepositories(pool: Pool | undefined, directPool: Pool | und
     ? new PgWebhookEventRepository(pool)
     : new InMemoryWebhookEventRepository();
   const dncRepo = pool ? new PgDncRepository(pool) : new InMemoryDncRepository();
-  const customerRepo = pool ? new PgCustomerRepository(pool) : new InMemoryCustomerRepository();
+  const customerRepo =
+    siblings.customerRepo ??
+    (pool ? new PgCustomerRepository(pool) : new InMemoryCustomerRepository());
 
   // U1 (CRM Jobber parity) — multiple contacts per customer.
   const customerContactRepo = pool
@@ -362,9 +382,9 @@ export function buildRepositories(pool: Pool | undefined, directPool: Pool | und
   // listWithMeta — see in-memory-appointment.ts's TechnicianAssignmentLookup.
   // Pg's equivalent filter is a self-contained EXISTS subquery, so
   // PgAppointmentRepository needs no such wiring.
-  const assignmentRepo = pool
-    ? new PgAssignmentRepository(pool)
-    : new InMemoryAssignmentRepository();
+  const assignmentRepo =
+    siblings.assignmentRepo ??
+    (pool ? new PgAssignmentRepository(pool) : new InMemoryAssignmentRepository());
   const appointmentRepo = pool
     ? new PgAppointmentRepository(pool)
     : new InMemoryAppointmentRepository(assignmentRepo);

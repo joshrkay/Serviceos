@@ -843,9 +843,11 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
 
   // Webhook routes — mounted before Clerk JWT middleware because webhooks
   // use their own signature verification (svix for Clerk, stripe-signature for Stripe).
-  // Repositories are constructed by buildRepositories() (D-024 Stage 1);
-  // `overrides` lets a caller substitute individual repositories — see the
-  // overrides caveat in db/build-repositories.ts.
+  // Repositories are constructed by buildRepositories() (D-024 Stage 1).
+  // `overrides` lets a caller substitute individual repositories. It is passed
+  // IN as well as spread over the result: the two repos that capture a sibling
+  // in their constructor (customerMergeRepo, appointmentRepo) can only honour
+  // an override that reaches them before construction.
   const {
     tenantRepo,
     settingsRepo,
@@ -950,7 +952,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     revenueBySourceRepo,
     notificationPreferenceRepo,
     onboardingSessionRepo,
-  } = { ...buildRepositories(pool, directPool), ...overrides };
+  } = { ...buildRepositories(pool, directPool, overrides), ...overrides };
   const webhookSettingsRepo = settingsRepo;
   // Tier 4 (Subscription — Rivet billing). Hoisted up so the Stripe
   // webhook can update the cached subscription status when

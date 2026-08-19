@@ -15,7 +15,11 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import request from 'supertest';
 import { createApp, type AppWithLifecycle } from '../../src/app';
 import { resetConfig } from '../../src/shared/config';
-import { InMemoryCustomerRepository, type Customer } from '../../src/customers/customer';
+import {
+  InMemoryCustomerRepository,
+  type Customer,
+  type CustomerListResult,
+} from '../../src/customers/customer';
 
 function unsignedJwt(claims: Record<string, unknown>): string {
   const b64 = (o: unknown) => Buffer.from(JSON.stringify(o)).toString('base64url');
@@ -45,8 +49,8 @@ class SentinelCustomerRepository extends InMemoryCustomerRepository {
   async findByTenant(): Promise<Customer[]> {
     return [sentinelCustomer];
   }
-  async listWithMeta(): Promise<{ customers: Customer[]; total: number }> {
-    return { customers: [sentinelCustomer], total: 1 };
+  async listWithMeta(): Promise<CustomerListResult> {
+    return { data: [sentinelCustomer], total: 1 };
   }
 }
 
