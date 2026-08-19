@@ -214,6 +214,14 @@ export async function buildVoiceProposalPayload(
   if (nonEmptyString(entities.sendChannel) && flat.channel === undefined) {
     flat.channel = entities.sendChannel;
   }
+  // create_standing_instruction: classifier emits `instructionText`
+  // (`ExtractedEntities.instructionText`), the contract wants `instruction`
+  // (`contracts/standing-instruction.ts`). Without this the spoken text never
+  // reaches the payload, so every standing instruction failed the contract on
+  // `instruction: Required` and could never be approved (#845).
+  if (nonEmptyString(entities.instructionText) && flat.instruction === undefined) {
+    flat.instruction = entities.instructionText;
+  }
   // create_job: classifier emits `jobTitle` (a NAME for work being created);
   // `createJobPayloadSchema` and `CreateJobExecutionHandler` read `title`.
   // Same precedence as `CreateJobVoiceTaskHandler` (jobTitle → jobReference).
