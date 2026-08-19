@@ -98,8 +98,17 @@ export const HONESTY_GUARD_MODEL = 'honesty-guard';
  */
 const NON_ACTION_INTENTS: ReadonlySet<string> = new Set<string>([
   // Conversational / signalling — never a write on any surface.
-  'complaint',
-  'negotiation',
+  //
+  // `complaint` and `negotiation` were listed here and did NOT meet that
+  // criterion (#844): on the recorded-memo surface they are handled by
+  // ComplaintTaskHandler / NegotiationGuardrailTaskHandler
+  // (workers/voice-action-router.ts) and produce real add_note / callback
+  // proposals. Listing them made chat skip the deterministic refusal below
+  // and answer from the generic LLM, which has no DB access — the "answered
+  // from nothing" failure ai/orchestration/lookup-dispatch.ts documents.
+  // They now default to "action", so an unmapped one refuses honestly.
+  // Whether chat should EXECUTE them is a separate scope decision (#835);
+  // refusing is correct either way.
   'language_switch',
   'operator_request',
   'confirm',
