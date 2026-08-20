@@ -113,6 +113,7 @@ import type { WhisperCache } from './whisper-cache';
 import {
   createVoiceTurnProcessor,
   appendAgentTts,
+  callerTranscriptText,
   preloadSessionCatalog,
   type VoiceTurnProcessor,
   type VoiceTurnProcessorDeps,
@@ -1905,7 +1906,9 @@ export class TwilioGatherAdapter {
     // regardless of the path below (frustration escalation or normal turn).
     this.deps.store.appendTranscript(opts.sessionId, {
       speaker: 'caller',
-      text: opts.speechResult,
+      // #850 — a spoken money-approval challenge is redacted here rather than
+      // at each consumer, so every derived summary inherits it.
+      text: callerTranscriptText(session, opts.speechResult),
       ts: Date.now(),
     });
 
@@ -2152,7 +2155,8 @@ export class TwilioGatherAdapter {
     if (opts.speechResult.trim().length > 0) {
       this.deps.store.appendTranscript(opts.sessionId, {
         speaker: 'caller',
-        text: opts.speechResult,
+        // #850 — see the sibling append above.
+        text: callerTranscriptText(session, opts.speechResult),
         ts: Date.now(),
       });
     }
