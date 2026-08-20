@@ -1786,3 +1786,58 @@ describe('ANS-001 — E1 FSM sequencing (real machine, real side effects, end to
     expect(sent[0].body).toContain('gas leak');
   });
 });
+
+/**
+ * #850 follow-up — speechTurn is the SECOND caller-append site.
+ *
+ * On the media-streams path the adapter routes through
+ * `TwilioGatherAdapter#processCallerUtterance`, which appends the caller line,
+ * and then hands off to `speechTurn`, which appended it AGAIN — raw.
+ * `VoiceSessionStore.appendTranscript` is an unconditional push with no
+ * dedupe, so the spoken money-approval challenge that the first site had just
+ * redacted was re-published in full by the second.
+ *
+ * The original fix was verified only through the Gather adapter, which never
+ * reaches this site. That is why it passed while the leak remained.
+ */
+describe('#850 — speechTurn redacts the spoken approval challenge', () => {
+  it('never writes the spoken code, even though it is the second append', async () => {
+    const { processor, session, store } = makeCtx({
+      gateway: makeGatewayReturning('{}'),
+      ownerSession: true,
+    });
+    // The owner is mid-approval, answering the challenge prompt.
+    session.pendingVoiceApproval = {
+      action: 'approve',
+      stage: 'challenge',
+      proposalId: 'p-1',
+    } as unknown as typeof session.pendingVoiceApproval;
+
+    await processor.speechTurn({
+      session,
+      speechResult: '4821',
+      callSid: 'CA-pin-ms',
+      tenantId: session.tenantId,
+    });
+
+    const transcript = store.get(session.id)!.transcript.join('\n');
+    expect(transcript).not.toContain('4821');
+    expect(transcript).toContain('redacted');
+  });
+
+  it('leaves ordinary speech intact at this site', async () => {
+    const { processor, session, store } = makeCtx({
+      gateway: makeGatewayReturning('{}'),
+      ownerSession: true,
+    });
+
+    await processor.speechTurn({
+      session,
+      speechResult: 'the boiler is leaking again',
+      callSid: 'CA-ordinary-ms',
+      tenantId: session.tenantId,
+    });
+
+    expect(store.get(session.id)!.transcript.join('\n')).toContain('boiler');
+  });
+});

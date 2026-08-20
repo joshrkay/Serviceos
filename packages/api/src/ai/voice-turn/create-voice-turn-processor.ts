@@ -46,7 +46,7 @@
  */
 
 import type { Pool } from 'pg';
-import { appendAgentTts } from './transcript-append';
+import { appendAgentTts, callerTranscriptText } from './transcript-append';
 import { classifyIntent, isVoiceApprovalIntent, isVoiceEditIntent } from '../orchestration/intent-classifier';
 import {
   AI_BUSY_HOLD_LINE,
@@ -3541,9 +3541,14 @@ export function createVoiceTurnProcessor(
     }
 
     // 1. Append caller utterance to transcript.
+    // #850 — redacted when the session is awaiting a spoken money-approval
+    // challenge. This site is REACHED TWICE on the media-streams path (the
+    // adapter routes through TwilioGatherAdapter#processCallerUtterance, which
+    // appends first), so an unguarded append here re-leaked the secret that
+    // the other site had just redacted.
     deps.store.appendTranscript(session.id, {
       speaker: 'caller',
-      text: speechResult,
+      text: callerTranscriptText(session, speechResult),
       ts: Date.now(),
     });
 
