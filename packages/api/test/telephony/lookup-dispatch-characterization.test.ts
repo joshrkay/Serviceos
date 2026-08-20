@@ -150,3 +150,53 @@ describe('Gather lookup dispatch — characterization', () => {
     expect(h.session.machine.currentState).toBe('intent_capture');
   });
 });
+
+/**
+ * The success path and its telemetry.
+ *
+ * Flagged by code review: the net above pinned refusals, fallbacks and the FSM
+ * contract, but nothing pinned a lookup actually SUCCEEDING — the caller
+ * hearing the skill's summary — or the VQ-003 `lookup_executed` event. Those
+ * are the parts most likely to break silently in a relocation, because a
+ * broken one still returns a plausible string.
+ */
+describe('Gather lookup dispatch — success path', () => {
+  it('speaks the skill summary and keeps the conversation open', async () => {
+    const findByCustomer = vi.fn(async () => []);
+    const h = makeAdapter({
+      intentType: 'lookup_jobs',
+      deps: {
+        jobRepo: { findByCustomer, findById: vi.fn(async () => null) },
+        appointmentRepo: { findByCustomer: vi.fn(async () => []) },
+      },
+    });
+
+    const xml = await ask(h, 'what jobs do I have open');
+
+    // The skill ran against the repo rather than degrading to the fallback.
+    expect(findByCustomer).toHaveBeenCalled();
+    expect(xml).not.toContain(NOT_WIRED);
+    // runLookupSkill appends this so the caller can immediately ask again.
+    expect(xml).toContain('Anything else');
+  });
+
+  it('emits a lookup_executed event on the session bus', async () => {
+    // VQ-003 telemetry. Emitted on BOTH the success and error branches, so the
+    // harness can see that a lookup was attempted even when it fell back.
+    const events: string[] = [];
+    const h = makeAdapter({
+      intentType: 'lookup_jobs',
+      deps: {
+        jobRepo: { findByCustomer: vi.fn(async () => []), findById: vi.fn(async () => null) },
+        appointmentRepo: { findByCustomer: vi.fn(async () => []) },
+      },
+    });
+    h.session.events.on('voice-event', (e: { type?: string }) => {
+      if (e?.type) events.push(e.type);
+    });
+
+    await ask(h, 'what jobs do I have open');
+
+    expect(events).toContain('lookup_executed');
+  });
+});

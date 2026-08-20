@@ -1,5 +1,5 @@
 /**
- * The voice LOOKUP family — one implementation, every live transport.
+ * The voice LOOKUP family, owned in one place.
  *
  * WHY THIS EXISTS
  * ---------------
@@ -11,8 +11,15 @@
  * right?" and, on saying yes, minted a `voice_clarification` card for an
  * operator to review. A read-only question produced human review and no answer.
  *
- * Owning the family here means a transport is a transport: audio in, audio out.
- * A capability targets "the phone", not "Gather".
+ * STATUS: step 1 of 2. Only `telephony/twilio-adapter.ts` imports this module
+ * today, so media-streams still answers no lookups — nothing about the caller
+ * experience has changed yet. Step 2 wires `speechTurn`, and is deliberately
+ * held back pending #838 Q2 (whether media-streams becomes the primary
+ * transport at all). Until then this is a relocation that makes step 2
+ * possible, NOT a fix for the transport gap.
+ *
+ * The goal it serves: a transport should be a transport — audio in, audio out —
+ * and a capability should target "the phone", not "Gather".
  *
  * WHAT THIS IS NOT
  * ----------------
@@ -59,7 +66,6 @@ import { lookupDayOverview } from '../skills/lookup-day-overview';
 import { lookupDigest } from '../skills/lookup-digest';
 import { lookupPendingItems } from '../skills/lookup-pending-items';
 import { schedulingConfigFromSettings } from '../../scheduling/booking-availability';
-import { buildRecoveryContext } from '../../sms/recovery/scheduler';
 import type { DroppedCallRecoveryRepository } from '../../sms/recovery/scheduler';
 import type { AgreementRepository } from '../../agreements/agreement';
 import type { AppointmentRepository } from '../../appointments/appointment';
@@ -112,11 +118,11 @@ const logger = createLogger({
 });
 
 /** True when the intent is one of the owner-extended lookups. */
-export function isOwnerLookupIntent(intentType: string): boolean {
+function isOwnerLookupIntent(intentType: string): boolean {
   return OWNER_LOOKUP_INTENT_TYPES.has(intentType as IntentType);
 }
 
-export function lookupNotWiredFallback(): string {
+function lookupNotWiredFallback(): string {
   return "I'm having trouble pulling that up right now. Let me get a person to help.";
 }
 
@@ -425,7 +431,7 @@ export async function runLookupSkill(
   }
 }
 
-export async function runOwnerLookupSkill(
+async function runOwnerLookupSkill(
   deps: LookupSkillDeps,
   session: VoiceSession,
   intentType: string,

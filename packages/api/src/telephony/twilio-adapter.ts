@@ -24,7 +24,6 @@ import {
   isLookupIntent,
   isVoiceApprovalIntent,
   isVoiceEditIntent,
-  type IntentType,
 } from '../ai/orchestration/intent-classifier';
 import {
   CreateCustomerVoiceTaskHandler,
@@ -55,10 +54,7 @@ import { notifyOwner } from '../notifications/owner-notifications-instance';
 import { assembleB2bAccountContext } from '../ai/agents/customer-calling/b2b-account-context';
 import { confirmIntent } from '../ai/skills/confirm-intent';
 import { summarizeSession } from '../ai/skills/summarize-session';
-import {
-  intentClassifiedEvent,
-  lookupExecutedEvent,
-} from '../ai/voice-quality/events';
+import { intentClassifiedEvent } from '../ai/voice-quality/events';
 import { TAU_INT } from '../ai/agents/customer-calling/transitions';
 import type {
   CallingAgentContext,
@@ -2381,7 +2377,8 @@ export class TwilioGatherAdapter {
         classifiedIntentType &&
         isLookupIntent(classifiedIntentType as Parameters<typeof isLookupIntent>[0])
       ) {
-        const lookupSummary = await this.runLookupSkill(
+        const lookupSummary = await runLookupSkill(
+          this.deps,
           session,
           classifiedIntentType,
           opts.tenantId,
@@ -2722,16 +2719,6 @@ export class TwilioGatherAdapter {
    * Caller must guarantee `intentType` starts with `lookup_` (the gate
    * lives at the call site so the routing branch can stay tight).
    */
-  private async runLookupSkill(
-    session: VoiceSession,
-    intentType: string,
-    tenantId: string,
-  ): Promise<string> {
-    // #838 Q1(a) — the lookup family now lives in ai/voice-turn so BOTH live
-    // transports reach one implementation. This adapter keeps a thin method so
-    // the call site in _handleGatherLocked is unchanged.
-    return runLookupSkill(this.deps, session, intentType, tenantId);
-  }
 
 
   private async resolveExtendedIntents(tenantId: string): Promise<boolean> {
