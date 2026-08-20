@@ -576,3 +576,53 @@ in PR #828 (`chore/app-wiring-characterization`).
 - Leave `app.ts` alone. Rejected — it has grown from the 6,143 lines D-022 measured on
   2026-07-25 to 6,715 (`app.ts:769–7484`), and the growth is per-feature wiring, so the cost
   compounds with every voice intent added.
+
+### D-025: Owner voice approval is permitted — the "approval is never voice-reachable" posture was never decided
+**Date:** 2026-08-19
+**Initiative:** Voice-first on the phone (wayfinder map #833), ticket #834.
+**Decision:** Approval of a proposal **by voice, by a human owner on a transport-identified
+owner line, is permitted**. The shipped class boundary in `ai/tasks/proposal-approval-task.ts`
+(RV-071) is ratified as-is:
+- **capture / comms** — approve on a deterministic strict affirmative
+  (`classifyStrictConfirm`, never an LLM), after a readback composed from the **proposal
+  payload** rather than the owner's utterance.
+- **money / irreversible** — additionally require a spoken challenge
+  (`proposal-approval-task.ts:366`), with at most 3 failed attempts per voice session and a
+  session-wide lockout on the third.
+
+**Rationale:** D-023's rationale asserts "the D-013 posture (approval is never
+voice-reachable)". **D-013 contains no such posture** — it is the §5 status correction about
+QuickBooks sync and the correction loop, and mentions neither approval nor voice. The phrase
+"voice-reachable" occurs exactly once in this entire log, in that citation. So there was no
+decision to supersede: a posture was asserted in passing, attributed to an unrelated entry, and
+then contradicted by shipped code that nobody flagged. This entry records the real posture for
+the first time.
+
+The substantive invariant is **D-019**, and it is about *actors*, not *channels*: no `system:`
+actor may transition a proposal to `approved`, enforced structurally in
+`proposals/lifecycle.ts` (`isSystemActor`). A human owner speaking on a caller-ID-identified
+line is a human approving; it does not breach that invariant. Reading D-019 as a prohibition on
+the voice *channel* confuses who is authorising with how they are speaking.
+
+**Constraints:**
+- Gated on `ownerSession` (RV-070 caller-ID identity), re-checked inside the task as defence in
+  depth; blocked while `hasUnappliedEditRequest` holds, matching the SMS and one-tap paths.
+- **Money-class voice approval is NOT to be considered shipped** until the spoken challenge is
+  excluded from the stored transcript and every derived summary (#850). A static per-tenant PIN
+  re-spoken on every approval accumulates exposure with each recorded call.
+- **Not viable on the Gather transport.** An approval exchange costs ~5–7s against a `noHang` of
+  5s soft / 7s hard, so the approval turn trips the hang timer before any work runs (~2–3s on
+  Media Streams). Which transport carries voice approval is #838.
+- Recorded reservation: `comms` sits on the soft side of the boundary. An approved
+  `send_invoice` or `send_customer_message` is customer-visible and effectively not undoable,
+  yet needs no challenge. Ratified deliberately, not overlooked.
+
+**Alternatives rejected:**
+- *Gate the shipped voice-approval path off to match D-023's wording.* Rejected: it would delete
+  a carefully-designed capability on the strength of a parenthetical that cites a decision
+  saying something else.
+- *Require the challenge for `comms` as well.* Rejected for now — it would put a PIN in front of
+  routine customer messages, which is the friction voice-first exists to remove. Revisit if the
+  undo window proves insufficient for outbound comms.
+- *Leave the contradiction unrecorded.* Rejected: a reader of this log would conclude a live,
+  security-reviewed feature should not exist.

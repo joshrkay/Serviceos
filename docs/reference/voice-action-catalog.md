@@ -31,6 +31,19 @@ These 48 actions can be spoken, drafted as a proposal, approved, and executed.
 audit event actually land in Postgres (vs. mocked-DB-only coverage, which cannot
 catch schema drift or a missing dependency).
 
+> **⚠️ The Persistence-proof column below is hand-maintained and is known to be
+> stale.** A 2026-08-19 audit read the integration tests directly and found
+> **29** actions with real-database proof; this column lists 8. It understates
+> real coverage by more than 3×.
+>
+> It is deliberately NOT being hand-corrected here. A 48-row column updated by
+> hand is what produced the drift in the first place, and re-typing it would
+> restart the same clock. Whether this catalog becomes generated from code,
+> reduced to prose that cannot make checkable claims, or deleted is the
+> decision at #842; the proof bar it should be measured against is #841.
+>
+> Until then, treat the column as a lower bound and read the tests.
+
 | Spoken example | Intent | Proposal type | Class | Persistence proof |
 |---|---|---|---|---|
 | "Invoice the Johnson job, $450 capacitor + labor" | `create_invoice` | `draft_invoice` | capture | integration (`integration/draft-invoice-execution.test.ts`) |
@@ -1277,11 +1290,33 @@ approves by screen/SMS tap).
 `lookup_materials`, `lookup_crew_schedule`, `lookup_timesheets`, `lookup_my_day`,
 `lookup_job_profit`
 — 20 `lookup_*` intents total — routed to read-only skills, never to a
-proposal (correct by design). The count is incidental, not load-bearing:
-every consumer (`isLookupIntent`, `intent-classifier.ts`) gates on the
-`lookup_` string prefix, not an enumeration, so a new lookup intent is
-covered automatically without touching this list or any dispatch code —
-only this doc's enumeration needs a manual update to stay complete.
+proposal (correct by design).
+
+> **⚠️ A new lookup intent is NOT covered automatically.** This section
+> previously claimed the opposite — that "every consumer gates on the
+> `lookup_` string prefix, not an enumeration, so a new lookup intent is
+> covered automatically without touching this list or any dispatch code."
+> That is true of *classification* (`isLookupIntent`,
+> `intent-classifier.ts:600`, is a prefix test) and **false of dispatch**,
+> which is three enumerated switches:
+>
+> | Surface | Dispatch | Cases | Missing-entry behaviour |
+> |---|---|---|---|
+> | recorded memo + in-app chat | `workers/voice-lookup-answer.ts:385` | 20 | `default: {kind:'unsupported'}` |
+> | live phone, customer-scoped | `telephony/twilio-adapter.ts:2814` | 11 | `default: lookupNotWiredFallback()` |
+> | live phone, owner-extended | `telephony/twilio-adapter.ts:3055` | 3 | `default: lookupNotWiredFallback()` |
+>
+> Adding a lookup intent without a case in each surface's switch produces a
+> silent degradation, not an error. That is exactly what happened: five
+> lookups — `lookup_my_day`, `lookup_materials`, `lookup_job_profit`,
+> `lookup_crew_schedule`, `lookup_timesheets` — are unreachable on the phone
+> today and answer the caller "let me get a person to help"
+> (`twilio-adapter.ts:3139`). Tracked at #843; the duplication is the defect,
+> not the missing cases.
+>
+> Two supporting registries also need an entry per intent and are likewise
+> not prefix-driven: `LOOKUP_REQUIRED_PERMISSION` and
+> `CUSTOMER_SCOPED_LOOKUP_INTENTS` (`workers/voice-lookup-answer.ts`).
 
 **`lookup_materials` (Task 9, 2026-08-07 tradesperson plan):** reads back
 Task 8's pending `material_items` shopping list
