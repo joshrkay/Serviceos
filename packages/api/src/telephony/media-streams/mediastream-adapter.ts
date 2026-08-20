@@ -24,6 +24,7 @@
  * inflating unbounded.
  */
 
+import { callerTranscriptText } from '../../ai/voice-turn/transcript-append';
 import { z } from 'zod';
 import { createLogger } from '../../logging/logger';
 import type {
@@ -2109,7 +2110,10 @@ export class TwilioMediaStreamAdapter {
     // appends the caller line) — keep the transcript faithful ourselves.
     this.deps.store.appendTranscript(session.id, {
       speaker: 'caller',
-      text: transcript,
+      // #850 — this consumed-turn path cannot carry an approval challenge (a
+      // language request is not a PIN), but every caller-append site applies
+      // the same guard: one unguarded site is how the others started.
+      text: callerTranscriptText(session, transcript),
       ts: Date.now(),
     });
     const ack = LANGUAGE_SWITCH_ACK[target];
