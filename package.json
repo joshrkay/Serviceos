@@ -90,12 +90,12 @@
     "loadtest:mixed:selfcheck": "tsx loadtest/mixed-1000-selfcheck.ts"
   },
   "devDependencies": {
-    "@clerk/testing": "^2.2.23",
+    "@clerk/testing": "^2.2.28",
     "@eslint/js": "^9.39.5",
     "@playwright/test": "^1.62.1",
     "@testcontainers/postgresql": "^11.13.0",
     "@types/pg": "^8.18.0",
-    "@vitest/coverage-v8": "^4.1.10",
+    "@vitest/coverage-v8": "^4.1.11",
     "eslint": "^10.8.1",
     "eslint-plugin-react-hooks": "^7.1.1",
     "globals": "^16.5.0",
