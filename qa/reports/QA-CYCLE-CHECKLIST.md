@@ -25,9 +25,9 @@
 ## Automated Test Execution
 
 ### Build Verification
-- [ ] Run TypeScript check: `cd packages/api && npx tsc --project tsconfig.build.json --noEmit`
-  - **Expected:** Exit code 0, zero errors
-  - **Failure action:** Review error details, fix type issues
+- [ ] Run TypeScript check: `npm run typecheck`
+  - **Expected:** Exit code 0, zero errors (validates packages/api, packages/web, data-pipeline)
+  - **Failure action:** Review error details, fix type issues in affected package
 
 ### Unit Test Suite
 - [ ] Run full test suite: `npm test -- --run`

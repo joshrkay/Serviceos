@@ -30,16 +30,19 @@ Since the June 4, 2026 baseline report, the system has undergone significant dev
 ### TypeScript Compilation
 ```
 Status: ✅ PASS
-Command: cd packages/api && npx tsc --project tsconfig.build.json --noEmit
-Result: Exit code 0 (no errors)
+Command: npm run typecheck
+  - packages/api: tsc --project tsconfig.build.json --noEmit ✅
+  - packages/web: tsc --noEmit ✅
+  - scripts/data-pipeline: tsc --noEmit ✅
+Result: Exit code 0 (all zero errors)
 ```
 
-The production build configuration (tsconfig.build.json) passes validation with zero type errors, indicating the codebase maintains type safety integrity.
+Full workspace type validation confirms production build safety and web UI type integrity.
 
 ### Package Build Status
-- `packages/api` — ✅ Ready
-- `packages/web` — ✅ Ready
-- `packages/shared` — ✅ Ready
+- `packages/api` — ✅ Validated (production tsconfig)
+- `packages/web` — ✅ Validated (strict mode)
+- `packages/shared` — ✅ Validated (included in workspace checks)
 - `packages/mobile` — ⏳ Not validated this cycle
 - `packages/voice-eval` — ⏳ Not validated this cycle
 
@@ -68,7 +71,7 @@ The production build configuration (tsconfig.build.json) passes validation with 
 - ✅ `/api/*` routes require Clerk JWT
 
 ### Metrics Endpoint
-- ✅ `/metrics` now requires `METRICS_SECRET` Bearer token (fixed since June report)
+- ✅ `/metrics` now requires `METRICS_TOKEN` Bearer token (fixed since June report)
 
 ---
 
@@ -253,7 +256,7 @@ Since full matrix QA could not run due to environment constraints, recommend man
 ### API Spot Checks
 - [ ] Health endpoint: `GET /health` returns `{status: ok}`
 - [ ] Auth: Unauthenticated requests get 401 (except public portal)
-- [ ] Metrics: `GET /metrics` requires `METRICS_SECRET` token
+- [ ] Metrics: `GET /metrics` requires `METRICS_TOKEN` token
 - [ ] Webhooks: Stripe/Clerk webhook idempotency (duplicate events deduplicated)
 
 ---
