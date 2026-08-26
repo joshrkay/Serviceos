@@ -139,7 +139,7 @@ export class PgUserRepository extends PgBaseRepository implements UserRepository
            AND deleted_at IS NULL
          RETURNING id, tenant_id, clerk_user_id, email, role, first_name, last_name,
                    COALESCE(can_field_serve, false) AS can_field_serve,
-                   mobile_number,
+                   mobile_number, status, deleted_at,
                    created_at, updated_at`,
         [e164, id, tenantId],
       );
@@ -186,7 +186,7 @@ export class PgUserRepository extends PgBaseRepository implements UserRepository
            )
          RETURNING id, tenant_id, clerk_user_id, email, role, first_name, last_name,
                    COALESCE(can_field_serve, false) AS can_field_serve,
-                   mobile_number,
+                   mobile_number, status, deleted_at,
                    created_at, updated_at`,
         [newRole, id, tenantId],
       );
@@ -235,7 +235,7 @@ export class PgUserRepository extends PgBaseRepository implements UserRepository
            )
          RETURNING id, tenant_id, clerk_user_id, email, role, first_name, last_name,
                    COALESCE(can_field_serve, false) AS can_field_serve,
-                   mobile_number,
+                   mobile_number, status, deleted_at,
                    created_at, updated_at`,
         [id, tenantId],
       );
@@ -265,7 +265,7 @@ export class PgUserRepository extends PgBaseRepository implements UserRepository
            AND deleted_at IS NOT NULL
          RETURNING id, tenant_id, clerk_user_id, email, role, first_name, last_name,
                    COALESCE(can_field_serve, false) AS can_field_serve,
-                   mobile_number,
+                   mobile_number, status, deleted_at,
                    created_at, updated_at`,
         [id, tenantId],
       );
@@ -279,7 +279,7 @@ export class PgUserRepository extends PgBaseRepository implements UserRepository
              WHERE id = $2 AND tenant_id = $3
              RETURNING id, tenant_id, clerk_user_id, email, role, first_name, last_name,
                        COALESCE(can_field_serve, false) AS can_field_serve,
-                       mobile_number,
+                       mobile_number, status, deleted_at,
                        created_at, updated_at`,
             [mobileNumber, id, tenantId],
           );
@@ -324,7 +324,7 @@ export class PgUserRepository extends PgBaseRepository implements UserRepository
            AND deleted_at IS NULL
          RETURNING id, tenant_id, clerk_user_id, email, role, first_name, last_name,
                    COALESCE(can_field_serve, false) AS can_field_serve,
-                   mobile_number,
+                   mobile_number, status, deleted_at,
                    created_at, updated_at`,
         params,
       );

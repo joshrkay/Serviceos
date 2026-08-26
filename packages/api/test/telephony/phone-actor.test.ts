@@ -91,6 +91,12 @@ describe('resolvePhoneActor', () => {
     });
   });
 
+  it('resolves nothing when the owner line matches but the tenant has no active owner user (the zero-owner branch)', async () => {
+    const repo = new InMemoryUserRepository();
+
+    expect(await resolvePhoneActor(deps(repo), TENANT, '+15125550100', true)).toBeNull();
+  });
+
   it('does NOT bridge a non-owner line: a customer number with no mobile match resolves nothing', async () => {
     const repo = new InMemoryUserRepository();
     await seed(repo, { id: 'u-owner', role: 'owner' });

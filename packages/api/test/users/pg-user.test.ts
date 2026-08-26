@@ -121,7 +121,9 @@ describe('PgUserRepository — status + deleted_at mapping (#866 follow-up)', ()
     can_field_serve: false,
     mobile_number: '+15125550111',
     status: 'suspended',
-    deleted_at: '2026-08-01T00:00:00.000Z',
+    // node-postgres returns Date objects for timestamp columns, not ISO
+    // strings — matches what a real driver hands mapRow.
+    deleted_at: new Date('2026-08-01T00:00:00.000Z'),
     created_at: '2026-01-01T00:00:00.000Z',
     updated_at: '2026-01-01T00:00:00.000Z',
   };
@@ -136,18 +138,46 @@ describe('PgUserRepository — status + deleted_at mapping (#866 follow-up)', ()
     expect(user?.deletedAt).toBeInstanceOf(Date);
   });
 
-  it('findByMobileNumber SELECTs status and deleted_at as columns (not just in the WHERE clause)', async () => {
-    const { pool, queries } = buildRowPool(suspendedDeletedRow);
-    const repo = new PgUserRepository(pool);
-
-    await repo.findByMobileNumber(TENANT_ID, '+15125550111');
-
+  function assertSelectColumnsIncludeStatusAndDeletedAt(queries: string[]): void {
     const selectSql = queries.find((q) => /SELECT id,\s*tenant_id/i.test(q));
     expect(selectSql).toBeDefined();
     const fromIdx = selectSql!.search(/\bFROM\b/i);
     const selectClause = selectSql!.slice(0, fromIdx);
     expect(selectClause).toMatch(/\bstatus\b/);
     expect(selectClause).toMatch(/\bdeleted_at\b/);
+  }
+
+  it.each([
+    ['findByTenant', (repo: PgUserRepository) => repo.findByTenant(TENANT_ID)],
+    ['findById', (repo: PgUserRepository) => repo.findById(TENANT_ID, 'u-1')],
+    ['findByMobileNumber', (repo: PgUserRepository) => repo.findByMobileNumber(TENANT_ID, '+15125550111')],
+  ] as const)('%s SELECTs status and deleted_at as columns (not just in the WHERE clause)', async (_name, call) => {
+    const { pool, queries } = buildRowPool(suspendedDeletedRow);
+    const repo = new PgUserRepository(pool);
+
+    await call(repo);
+
+    assertSelectColumnsIncludeStatusAndDeletedAt(queries);
+  });
+
+  it("softDeleteSelf's RETURNING selects status and deleted_at, and a returned deleted_at maps to a Date", async () => {
+    const deletedRow = { ...suspendedDeletedRow, status: 'active' };
+    const { pool, queries } = buildRowPool(deletedRow);
+    const repo = new PgUserRepository(pool);
+
+    const user = await repo.softDeleteSelf(TENANT_ID, 'u-1');
+
+    // Postgres DID return deleted_at on this RETURNING row (that's what the
+    // fixture models) — mapRow must turn it into a Date, matching
+    // InMemoryUserRepository.softDeleteSelf's `deletedAt: new Date()`.
+    expect(user?.deletedAt).toBeInstanceOf(Date);
+
+    const returningSql = queries.find((q) => /UPDATE users SET deleted_at = NOW/i.test(q));
+    expect(returningSql).toBeDefined();
+    const returningIdx = returningSql!.search(/RETURNING/i);
+    const returningClause = returningSql!.slice(returningIdx);
+    expect(returningClause).toMatch(/\bstatus\b/);
+    expect(returningClause).toMatch(/\bdeleted_at\b/);
   });
 });
 
