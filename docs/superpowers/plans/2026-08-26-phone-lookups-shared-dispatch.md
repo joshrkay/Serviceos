@@ -325,6 +325,17 @@ git commit -m "feat(telephony): resolve the caller-ID to a tenant actor (phone-a
 owner bridge, else none. Fail-soft. Nothing calls it yet."
 ```
 
+- [ ] **Step 7 (from code review, 2026-08-26): make `isActive` real against Postgres**
+
+`PgUserRepository.mapRow` (`packages/api/src/users/pg-user.ts`) never mapped `status` or `deletedAt`, and its three SELECT lists never selected them — so on the production repository `u.status` was always `undefined` and the suspended check above was a tautology (a suspended technician with a mobile still on file would resolve as an actor; a suspended ex-owner would be counted against the sole-owner bridge). Fix, TDD-first in `packages/api/test/users/pg-user.test.ts`: add `status, deleted_at` to the `findByTenant` / `findById` / `findByMobileNumber` SELECT lists and map them:
+
+```ts
+    status: (row.status as User['status'] | null) ?? undefined,
+    deletedAt: row.deleted_at ? new Date(row.deleted_at as string) : null,
+```
+
+Also: build the phone-actor test fixture over `InMemoryUserRepository` (real deleted-filtering semantics) instead of a hand-rolled mock; split the ambiguity warning into "zero active owners" (data-integrity alarm) vs "two or more" (operator-fixable, with the hint); note in the header that `resolveCanonicalUser` matches on row id too, so a pending invitee with a mobile can pass identity-only intents while failing permission-gated ones. Commit as a follow-up.
+
 ---
 
 ### Task 2: Stamp the actor at session establishment
@@ -447,7 +458,18 @@ Inside `establishInboundSession`, directly after the line `if (opts.from) sessio
       opts.from,
       ownerSession,
     );
-    if (actor) session.actorUserId = actor.userId;
+    if (actor) {
+      session.actorUserId = actor.userId;
+      // `via` is the one diagnostic an operator needs when an owner's
+      // lookups behave differently from expected ("resolved through the
+      // owner_phone bridge" vs "through a registered mobile"). No caller-ID
+      // or user id in the log line.
+      logger.info('phone actor resolved at session establishment', {
+        tenantId: opts.tenantId,
+        sessionId: session.id,
+        via: actor.via,
+      });
+    }
 ```
 
 - [ ] **Step 4: Run to verify it passes**
@@ -1736,6 +1758,7 @@ import { PgCustomerRepository } from '../../src/customers/pg-customer';
 import { PgLocationRepository } from '../../src/locations/pg-location';
 import { PgProposalRepository } from '../../src/proposals/pg-proposal';
 import { PgInvoiceRepository } from '../../src/invoices/pg-invoice';
+import { PgEstimateRepository } from '../../src/estimates/pg-estimate';
 import { PgTimeEntryRepository } from '../../src/time-tracking/pg-time-entry';
 import { PgExpenseRepository } from '../../src/expenses/pg-expense';
 import { PgMaterialItemRepository } from '../../src/materials/pg-material-item';
@@ -1794,6 +1817,7 @@ describe('#866 — phone lookups against real Postgres (Gather seam)', () => {
       // Production-shaped: mirrors app.ts's lookupAnswerDeps / sharedLookupRepos.
       answers: {
         invoiceRepo,
+        estimateRepo: new PgEstimateRepository(pool),
         timeEntryRepo,
         expenseRepo,
         settingsRepo,
@@ -2024,6 +2048,31 @@ describe('#866 — phone lookups against real Postgres (Gather seam)', () => {
     expect(xml).toContain('owner-level report');
   });
 
+  it('suspension: a suspended technician whose mobile is still on file resolves NO actor — lookup_my_day cannot self-scope', async () => {
+    const s = await seed();
+    await pool.query(`UPDATE users SET status = 'suspended' WHERE id = $1`, [s.techUserId]);
+
+    const xml = await callAndAsk(s, TECH_MOBILE, 'lookup_my_day');
+
+    expect(xml).toContain('I&apos;m having trouble pulling that up');
+  });
+
+  it('suspension: a suspended ex-owner is NOT counted against the sole-owner bridge', async () => {
+    const s = await seed();
+    await pool.query(
+      `INSERT INTO users (id, tenant_id, clerk_user_id, email, role, status) VALUES ($1, $2, $3, $4, 'owner', 'suspended')`,
+      [crypto.randomUUID(), s.tenantId, `clerk-ex-${crypto.randomUUID()}`, `ex.${crypto.randomUUID().slice(0, 8)}@example.com`],
+    );
+
+    // lookup_pending_items: permission-gated (reports:view) and fully wired in
+    // this harness (estimateRepo + invoiceRepo), so "not refused, not
+    // unavailable" proves the bridge resolved the real owner.
+    const xml = await callAndAsk(s, OWNER_PHONE, 'lookup_pending_items');
+
+    expect(xml).not.toContain('owner-level report');
+    expect(xml).not.toContain('I&apos;m having trouble pulling that up');
+  });
+
   it('cross-tenant: a mobile registered in tenant B resolves NO actor in tenant A', async () => {
     const a = await seed();
     const b = await createTestTenant(pool);
@@ -2048,7 +2097,7 @@ Before running: open `src/materials/pg-material-item.ts`, `src/expenses/expense.
 colima start 2>&1 | tail -1
 cd packages/api && npm run test:integration -- test/integration/phone-lookups-shared-dispatch.test.ts 2>&1 | tail -25
 ```
-Expected: 8 passing. If a spoken-line assertion misses because the skill's real copy differs (e.g. "Jake logged 2 hours this week"), print the XML once, pin the actual phrase, and keep the row-derived content (the name, the job summary, the material) as the thing asserted.
+Expected: 10 passing. If a spoken-line assertion misses because the skill's real copy differs (e.g. "Jake logged 2 hours this week"), print the XML once, pin the actual phrase, and keep the row-derived content (the name, the job summary, the material) as the thing asserted.
 
 If Docker is unavailable: commit, push, and read the `test` workflow's integration job on the PR; fix from its output.
 
@@ -2179,8 +2228,11 @@ path. Verified while specifying: `lookup_revenue` and `lookup_leads` sit in the 
 prompt and the phone's dispatch applied no authorization after customer identification — an
 identified customer could be read the tenant's revenue. RBAC at dispatch is the missing
 defence-in-depth layer behind the prompt.
-**Constraints:** No classifier prompt / taxonomy / cassette change. `ownerSession` keeps its
-RV-071 approval role unchanged (D-025). Customer-name resolution on the phone stays
+**Constraints:** Caller-ID is the *authentication factor* that mints the phone actor. It is
+transport-level recognition, spoofable by design, and no stronger than the RV-070 owner-line
+check that already gated owner lookups and voice approval — `actorUserId` must never be read
+as a verified subject the way `req.auth.userId` is. No classifier prompt / taxonomy /
+cassette change. `ownerSession` keeps its RV-071 approval role unchanged (D-025). Customer-name resolution on the phone stays
 undecided (#833 "entity resolution per surface"). #860 step 2 (media-streams) calls the same
 surface adapter; it is not wired here.
 ```
