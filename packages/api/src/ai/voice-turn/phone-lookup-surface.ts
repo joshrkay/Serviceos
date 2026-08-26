@@ -20,6 +20,11 @@
  *      extendedIntents check at dispatch any more. The tenant flag still
  *      decides whether the classifier OFFERS the owner-extended intents;
  *      that is a prompt-hash concern, and this is defence in depth behind it.
+ *      One phone-only addition sits on top of the shared gate: an
+ *      OWNER_EXTENDED_LOOKUP_INTENT_TYPES intent with NO resolved actor is
+ *      refused here, because `lookup_day_overview` has no permission entry
+ *      (correctly — any signed-in operator may hear it on memo/chat) and this
+ *      is the one surface where the caller may be an anonymous customer.
  *   2. Reference resolution. Job / crew-member / day references the
  *      classifier extracted go through the SAME shared resolver chat uses
  *      (`lookup-reference.ts`). A spoken customer NAME is deliberately not
@@ -45,7 +50,10 @@
  */
 import { createLogger } from '../../logging/logger';
 import type { VoiceSession } from '../agents/customer-calling/voice-session-store';
-import type { IntentType } from '../orchestration/intent-classifier';
+import {
+  OWNER_EXTENDED_LOOKUP_INTENT_TYPES,
+  type IntentType,
+} from '../orchestration/intent-classifier';
 import { TECHNICIAN_REF_INTENTS } from '../agents/customer-calling/entity-resolution';
 import { ambiguousReferenceLine, resolveLookupReference } from '../orchestration/lookup-reference';
 import type { EntityResolver } from '../resolution/entity-resolver';
@@ -53,6 +61,7 @@ import { lookupExecutedEvent } from '../voice-quality/events';
 import {
   CUSTOMER_SCOPED_LOOKUP_INTENTS,
   executeLookupAnswer,
+  refusalSummary,
   type SharedLookupRepos,
   type VoiceLookupAnswerDeps,
 } from '../../workers/voice-lookup-answer';
@@ -121,6 +130,17 @@ export async function answerPhoneLookup(
       // different tenant's summary to an anonymous caller.
       emit(false, 'unidentified_caller');
       return UNIDENTIFIED_CALLER_LINE;
+    }
+
+    // Owner-extended lookups (day overview / digest / pending / crew / timesheets)
+    // are "never enabled for anonymous customers" (intent-classifier.ts). The
+    // shared RBAC map gates most of them by permission, but lookup_day_overview
+    // has no entry (any signed-in operator may hear it on memo/chat). On the
+    // phone — the only surface with customer callers — an intent in that set
+    // with no resolved actor is refused, before anything is read.
+    if (OWNER_EXTENDED_LOOKUP_INTENT_TYPES.has(intent) && !session.actorUserId) {
+      emit(false, 'refused');
+      return refusalSummary(intent);
     }
 
     const jobReference = str(entities, 'jobReference');

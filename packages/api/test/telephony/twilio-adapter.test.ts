@@ -1216,7 +1216,7 @@ describe('TwilioGatherAdapter.handleGather', () => {
     });
 
     it.each(['lookup_day_overview', 'lookup_digest', 'lookup_pending_items'])(
-      'a session with NO actor (customer line) is refused %s — the permission-gated two speak the owner-level refusal',
+      'a session with NO actor (customer line) is refused %s — owner-extended lookups are never answered to an anonymous caller',
       async (intentType) => {
         const deps = await ownerAdapter(intentType, null);
         const xml = await deps.adapter.handleGather({
@@ -1227,15 +1227,7 @@ describe('TwilioGatherAdapter.handleGather', () => {
           tenantId,
         });
 
-        if (intentType === 'lookup_day_overview') {
-          // `lookup_day_overview` has NO entry in LOOKUP_REQUIRED_PERMISSION
-          // on ANY surface — an open question in the #866 plan, deliberately
-          // NOT closed here. It answers from the tenant's own (empty) day; it
-          // still carries no owner-report data.
-          expect(xml).toContain('Your day is clear');
-        } else {
-          expect(xml).toContain('owner-level report');
-        }
+        expect(xml).toContain('owner-level report');
         expect(xml).not.toContain('Owner digest: revenue was strong');
       },
     );

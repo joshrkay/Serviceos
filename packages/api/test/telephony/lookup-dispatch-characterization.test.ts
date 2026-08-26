@@ -21,6 +21,9 @@ import {
 } from '../../src/ai/voice-turn/phone-lookup-surface';
 
 const tenantId = 'tenant-lk';
+// Midday in New York (the skills' default timezone). A wall-clock-relative
+// appointment would drop out of "today" for an hour before local midnight.
+const FIXED = new Date('2026-08-26T16:00:00.000Z');
 // `voiceLookupAnswerSchema` validates `entityRef.id` as a UUID (the phone's
 // real customerId/jobId always are), so the stub ids have to be too.
 const CUSTOMER_ID = '11111111-1111-4111-8111-111111111111';
@@ -53,6 +56,8 @@ function lookups(over: {
   shared?: Record<string, unknown>;
   roles?: Record<string, Role>;
   entityResolver?: PhoneLookupDeps['entityResolver'];
+  /** Fixed clock, for the pins whose answer depends on "today". */
+  now?: () => Date;
 }): PhoneLookupDeps {
   return {
     answers: {
@@ -64,6 +69,7 @@ function lookups(over: {
       ...(over.shared ?? {}),
     } as unknown as PhoneLookupDeps['shared'],
     ...(over.entityResolver ? { entityResolver: over.entityResolver } : {}),
+    ...(over.now ? { now: over.now } : {}),
   };
 }
 
@@ -121,12 +127,13 @@ const lookupEvents = (h: ReturnType<typeof makeAdapter>) => h.events.filter((e) 
 
 describe('phone lookups — the five that were dead on the phone now answer', () => {
   it('lookup_my_day: a technician actor hears THEIR day (self-scoped through the shared dispatch)', async () => {
-    const start = new Date(Date.now() + 60 * 60 * 1000);
+    const start = new Date(FIXED.getTime() + 60 * 60 * 1000);
     const h = makeAdapter({
       intentType: 'lookup_my_day',
       actorUserId: 'clerk-tech',
       lookups: lookups({
         roles: { 'clerk-tech': 'technician' },
+        now: () => FIXED,
         shared: {
           appointmentRepo: {
             findByDateRange: vi.fn(async () => [
@@ -291,6 +298,44 @@ describe('phone lookups — authorization is the actor\'s DB role, not the calle
 
     expect(findLatest).toHaveBeenCalled();
     expect(xml).toContain('Owner digest');
+  });
+
+  it('lookup_day_overview with NO actor is refused — "never enabled for anonymous customers" holds at DISPATCH, not just classification', async () => {
+    // The classifier's tenant flag decides whether an owner-extended intent
+    // is OFFERED; on the phone — the only surface with customer callers —
+    // dispatch refuses one without a resolved actor too. `lookup_day_overview`
+    // has no LOOKUP_REQUIRED_PERMISSION entry, so the shared RBAC gate would
+    // otherwise read out the tenant's day to whoever called in.
+    const findByDateRange = vi.fn(async () => []);
+    const h = makeAdapter({
+      intentType: 'lookup_day_overview',
+      lookups: lookups({ shared: { appointmentRepo: { findByDateRange }, jobRepo: { findByTenant: vi.fn(async () => []) } } }),
+    });
+
+    const xml = await ask(h, "what's on for today");
+
+    expect(xml).toContain(OWNER_REFUSAL);
+    expect(findByDateRange).not.toHaveBeenCalled();
+  });
+
+  it('lookup_day_overview still has NO permission entry — a technician ACTOR is answered, exactly as on memo and chat', async () => {
+    const h = makeAdapter({
+      intentType: 'lookup_day_overview',
+      actorUserId: 'clerk-tech',
+      lookups: lookups({
+        roles: { 'clerk-tech': 'technician' },
+        shared: {
+          appointmentRepo: { findByDateRange: vi.fn(async () => []) },
+          jobRepo: { findByTenant: vi.fn(async () => []) },
+          proposalRepo: { findByTenant: vi.fn(async () => []), findByStatus: vi.fn(async () => []) },
+        },
+      }),
+    });
+
+    const xml = await ask(h, "what's on for today");
+
+    expect(xml).not.toContain(OWNER_REFUSAL);
+    expect(xml).toContain('Your day is clear');
   });
 
   it('a customer\'s own balance / invoices / appointments keep answering exactly as before', async () => {

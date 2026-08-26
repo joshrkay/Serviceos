@@ -278,7 +278,7 @@ const LEADS_REFUSAL_SUMMARY =
   "I couldn't verify your access to the lead pipeline. Ask an owner or dispatcher on your team to pull it up.";
 
 /** Honest per-intent refusal copy — never data, never a fabricated answer. */
-function refusalSummary(intent: IntentType): string {
+export function refusalSummary(intent: IntentType): string {
   if (intent === 'lookup_catalog') return CATALOG_REFUSAL_SUMMARY;
   if (intent === 'lookup_leads') return LEADS_REFUSAL_SUMMARY;
   return REFUSAL_SUMMARY;
