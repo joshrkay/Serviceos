@@ -12,7 +12,7 @@
 | Metric | June 4 | Aug 25 | Change | Verdict |
 |--------|--------|---------|--------|---------|
 | API tests | 5,511 passed | 13,558 passed | **+8,047 (+146%)** | ✅ Excellent growth with zero failures |
-| Web tests | 944 passed | (same suite, passed) | Stable | ✅ No regression |
+| Web tests | 944 passed | ⏳ **NOT EXECUTED** (separate suite) | ❌ Unvalidated | ⚠️ Could conceal regression |
 | Test files | ~600 | 1,129 | **+529 (+88%)** | ✅ Comprehensive expansion |
 | Failures | 0 | 0 | **No change** | ✅ Zero regressions |
 
@@ -26,11 +26,11 @@
 
 | Issue | June Status | Aug Status | Fix Status | Risk |
 |-------|---------|-----------|---------|------|
-| **Blocker 11: TCPA/DNC gate** | 🔴 OPEN | 🔴 **STILL OPEN** | No commits addressing | 🔴 **CRITICAL** — Ship blocker if voice is live |
+| ~~**Blocker 11: TCPA/DNC gate**~~ | 🔴 OPEN | ✅ **CLOSED** | Implemented in outbound-call-service.ts:136 | ✅ Shipped |
 | **Branding ("Fieldly" vs "ServiceOS")** | 🔴 OPEN | 🔴 **STILL OPEN** | No commits addressing | 🟠 High (customer-visible) |
 | **5 HIGH npm vulnerabilities** | Not tracked | 🔴 **NEW FINDING** | Yes, fixable via `npm audit fix` | 🔴 **CRITICAL** — Supply chain risk |
 
-**Regression Alert:** Same two blockers still open from June. Blocker 11 is **ship-critical** if voice product is in use.
+**Correction:** Blocker 11 (TCPA/DNC gate) is actually CLOSED as of this cycle — implemented and tested. Only branding blocker remains open.
 
 ---
 

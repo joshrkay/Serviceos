@@ -229,7 +229,7 @@ Exit Code:   0 (SUCCESS)
 ### 🟡 P2 — Medium (Pre-Scale)
 | ID | Issue | Module | Status |
 |---|-------|--------|--------|
-| Refund-Webhook | charge.refund.updated handler not wired | webhooks | Not fixed in commits reviewed |
+| ~~Refund-Webhook~~ | ~~charge.refund.updated handler not wired~~ | webhooks | **CLOSED** — Implemented in routes.ts:2204, tested |
 | Node-Drift | Node 20 vs 22 mismatch | CI/Dockerfile | Not addressed |
 | centsToDisplay | Missing thousands separators | web/lib | Not addressed |
 
