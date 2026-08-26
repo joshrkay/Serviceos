@@ -18,7 +18,7 @@
  * This module does NOT contain a lookup switch. It is a thin surface
  * adapter over `workers/voice-lookup-answer.ts#executeLookupAnswer` — the
  * per-skill dispatch that already existed and that the recorded-memo worker
- * already calls. One implementation, two callers. Copying the telephony
+ * already calls. One implementation, three callers. Copying the telephony
  * adapter's `runLookupSkill` switch in here is exactly the mistake that
  * produced three drifted copies of `intentToProposalType`.
  *
@@ -30,16 +30,16 @@
  *      `EntityResolver` first. Ambiguity returns a "which one?" answer
  *      listing the candidates; not-found falls through to the shared
  *      module's honest "I couldn't find a customer matching …".
- *   2. The authorization model. The phone path gates owner lookups on
- *      `ownerSession` (caller-ID identity) AND `extendedIntents` (a tenant
- *      opt-in whose real job is keeping the TELEPHONY classifier prompt
- *      byte-identical for cassette hashes, and keeping an anonymous caller
- *      away from owner reports). Neither applies to a signed-in operator on
- *      their own dashboard. Chat instead uses the DB-authoritative RBAC gate
- *      the shared module already enforces (`LOOKUP_REQUIRED_PERMISSION` —
- *      `reports:view` for the owner reports, `settings:view` for the
- *      catalog, `customers:view` for leads), which fails CLOSED — a
- *      technician asking for revenue gets the refusal copy, not data.
+ *   2. The authorization model. Every surface now uses the DB-authoritative
+ *      RBAC gate the shared module enforces (`LOOKUP_REQUIRED_PERMISSION`).
+ *      Chat passes the signed-in operator (`req.auth.userId`); the phone
+ *      passes the actor it resolved from caller-ID at session establishment
+ *      (`telephony/phone-actor.ts`, #866); the memo passes its creator.
+ *      That gate maps `reports:view` to the owner reports, `settings:view`
+ *      to the catalog and `customers:view` to leads, and fails CLOSED — a
+ *      technician asking for revenue gets the refusal copy, not data. The
+ *      phone adds one rule of its own on top (a default-deny allowlist for
+ *      actor-less callers); see `ai/voice-turn/phone-lookup-surface.ts`.
  *   3. Response shape + failure copy. The phone path speaks a TTS string and
  *      degrades every error to "let me get a person to help". Chat returns
  *      the assistant envelope and must make a failure VISIBLE rather than

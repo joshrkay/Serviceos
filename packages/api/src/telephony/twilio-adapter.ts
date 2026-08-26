@@ -2291,6 +2291,9 @@ export class TwilioGatherAdapter {
       //    (which would hang the caller mid-call).
       let classifierEvent: CallingAgentEvent | null = null;
       let classifiedIntentType: string | undefined;
+      // #866 — captured alongside the intent so the lookup branch below reads
+      // it directly rather than re-narrowing `classifierEvent`.
+      let classifiedEntities: Record<string, unknown> = {};
       const verticalPromptSection = await this.processor.resolveVerticalPromptSection(opts.tenantId);
       const planPromptSection = await this.processor.resolvePlanPromptSection(
         opts.tenantId,
@@ -2332,10 +2335,11 @@ export class TwilioGatherAdapter {
           classifierEvent = { type: 'cost_cap_exceeded' };
         } else if (classification.confidence >= TAU_INT && classification.intentType !== 'unknown') {
           classifiedIntentType = classification.intentType;
+          classifiedEntities = (classification.extractedEntities ?? {}) as Record<string, unknown>;
           classifierEvent = {
             type: 'intent_classified',
             intentType: classification.intentType,
-            entities: (classification.extractedEntities ?? {}) as Record<string, unknown>,
+            entities: classifiedEntities,
             confidence: classification.confidence,
             // Thread the classify call's REAL ai_runs id so a proposal born
             // from this intent links to its run row (proposals.ai_run_id FK).
@@ -2398,10 +2402,7 @@ export class TwilioGatherAdapter {
           session,
           tenantId: opts.tenantId,
           intent: classifiedIntentType as IntentType,
-          entities:
-            classifierEvent && classifierEvent.type === 'intent_classified'
-              ? classifierEvent.entities
-              : {},
+          entities: classifiedEntities,
         });
         sideEffectsAll.push({
           type: 'tts_play',

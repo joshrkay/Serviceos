@@ -17,8 +17,11 @@ import { VoiceSessionStore } from '../../src/ai/agents/customer-calling/voice-se
 import type { LLMGateway, LLMResponse } from '../../src/ai/gateway/gateway';
 import type { PhoneLookupDeps } from '../../src/ai/voice-turn/phone-lookup-surface';
 import {
-  LOOKUP_UNAVAILABLE_LINE,
-} from '../../src/ai/voice-turn/phone-lookup-surface';
+  CUSTOMER_SCOPED_LOOKUP_INTENTS,
+  LOOKUP_REQUIRED_PERMISSION,
+} from '../../src/workers/voice-lookup-answer';
+import { OWNER_EXTENDED_LOOKUP_INTENT_TYPES } from '../../src/ai/orchestration/intent-classifier';
+import type { IntentType } from '../../src/ai/orchestration/intent-classifier';
 
 const tenantId = 'tenant-lk';
 // Midday in New York (the skills' default timezone). A wall-clock-relative
@@ -227,6 +230,13 @@ describe('phone lookups — the five that were dead on the phone now answer', ()
 
       expect(xml).not.toContain(NOT_WIRED);
       expect(xml).not.toContain(OWNER_REFUSAL);
+      // The skills' real empty-state copy — proof a DATA answer was spoken,
+      // not merely the absence of a refusal.
+      expect(xml).toContain(
+        intentType === 'lookup_crew_schedule'
+          ? 'crew members on the roster'
+          : 'Nobody logged any hours this week',
+      );
       expect(h.session.machine.currentState).toBe('intent_capture');
     },
   );
@@ -338,6 +348,42 @@ describe('phone lookups — authorization is the actor\'s DB role, not the calle
     expect(xml).toContain('Your day is clear');
   });
 
+  it('lookup_materials with NO actor is refused — the shopping list is not customer-facing', async () => {
+    // lookup_materials sits in the BASE classifier prompt and carries no
+    // LOOKUP_REQUIRED_PERMISSION entry (any signed-in operator may hear it on
+    // memo/chat), so nothing upstream stopped an identified CUSTOMER from
+    // hearing the tenant's shopping list here.
+    const listPending = vi.fn(async () => []);
+    const h = makeAdapter({
+      intentType: 'lookup_materials',
+      lookups: lookups({ answers: { materialItemRepo: { listPending } as never } }),
+    });
+
+    const xml = await ask(h, 'what materials do we need');
+
+    expect(xml).toContain(OWNER_REFUSAL);
+    expect(listPending).not.toHaveBeenCalled();
+  });
+
+  it('lookup_my_day with NO actor says so honestly — an identity outcome, not an authorization one', async () => {
+    const findByDateRange = vi.fn(async () => []);
+    const h = makeAdapter({
+      intentType: 'lookup_my_day',
+      lookups: lookups({
+        shared: {
+          appointmentRepo: { findByDateRange },
+          jobRepo: { findByIds: vi.fn(async () => []) },
+          userRepo: { findByTenant: vi.fn(async () => []) },
+        },
+      }),
+    });
+
+    const xml = await ask(h, "what's my day look like");
+
+    expect(xml).toContain('couldn&apos;t match your number');
+    expect(findByDateRange).not.toHaveBeenCalled();
+  });
+
   it('a customer\'s own balance / invoices / appointments keep answering exactly as before', async () => {
     const findByCustomer = vi.fn(async () => []);
     const h = makeAdapter({
@@ -369,9 +415,18 @@ describe('phone lookups — the contract that must not move', () => {
     expect(findByCustomer).not.toHaveBeenCalled();
   });
 
-  it('a lookup never advances the FSM', async () => {
-    const h = makeAdapter({ intentType: 'lookup_invoices', lookups: lookups({}) });
-    await ask(h, 'what do I owe');
+  it('a lookup never advances the FSM — pinned on an ANSWERED lookup, not a fallback', async () => {
+    const h = makeAdapter({
+      intentType: 'lookup_invoices',
+      lookups: lookups({
+        shared: { jobRepo: { findByCustomer: vi.fn(async () => []) } },
+        answers: { invoiceRepo: { findByCustomer: vi.fn(async () => []), findByTenant: vi.fn(async () => []) } as never },
+      }),
+    });
+
+    const xml = await ask(h, 'what do I owe');
+
+    expect(xml).not.toContain(NOT_WIRED);
     expect(h.session.machine.currentState).toBe('intent_capture');
   });
 
@@ -392,7 +447,6 @@ describe('phone lookups — the contract that must not move', () => {
     const xml = await ask(h, 'what do I owe');
 
     expect(xml).toContain(NOT_WIRED);
-    expect(LOOKUP_UNAVAILABLE_LINE).toContain("I'm having trouble pulling that up right now");
   });
 });
 
@@ -532,4 +586,98 @@ describe('phone lookups — every outcome is a lookup_executed event', () => {
     expect(warnings).toHaveLength(1);
     expect(warnings[0].intent).toBe('lookup_materials');
   });
+});
+
+/**
+ * The default-deny net.
+ *
+ * Two intents reached data with no actor because they carry no permission
+ * entry BY DESIGN (`lookup_day_overview`, `lookup_materials` — any signed-in
+ * operator may hear them on memo/chat). The phone is the one surface whose
+ * caller may be a customer, so the rule here is an ALLOWLIST: with no actor
+ * you get your OWN records and tenant-public lookups, nothing else. This
+ * table walks the whole taxonomy so intent 21 cannot slip through silently.
+ */
+const ALL_LOOKUP_INTENTS: IntentType[] = Array.from(
+  new Set<IntentType>([
+    ...CUSTOMER_SCOPED_LOOKUP_INTENTS,
+    ...LOOKUP_REQUIRED_PERMISSION.keys(),
+    ...OWNER_EXTENDED_LOOKUP_INTENT_TYPES,
+    'lookup_my_day',
+    'lookup_materials',
+    'lookup_availability',
+  ]),
+);
+
+/** Tenant-public: a customer may legitimately ask when you could come out. */
+const PHONE_PUBLIC: IntentType[] = ['lookup_availability'];
+
+const MUST_REFUSE_WITHOUT_ACTOR = ALL_LOOKUP_INTENTS.filter(
+  (i) => !CUSTOMER_SCOPED_LOOKUP_INTENTS.has(i) && !PHONE_PUBLIC.includes(i),
+);
+
+/** Every repo method any lookup skill can reach, as a call-recording stub. */
+function trackedRepos() {
+  const called: string[] = [];
+  const method = (label: string) =>
+    vi.fn(async () => {
+      called.push(label);
+      return [] as never[];
+    });
+  const repo = (label: string, methods: string[]) =>
+    Object.fromEntries(methods.map((k) => [k, method(`${label}.${k}`)]));
+  return {
+    called,
+    answers: {
+      invoiceRepo: repo('invoiceRepo', ['findByTenant', 'findByJob', 'findByCustomer']),
+      estimateRepo: repo('estimateRepo', ['findByTenant', 'findByJob']),
+      agreementRepo: repo('agreementRepo', ['findByCustomer', 'findByTenant']),
+      moneyDashboardRepo: repo('moneyDashboardRepo', ['query']),
+      dailyDigestRepo: repo('dailyDigestRepo', ['findByTenantAndDate', 'findLatest']),
+      dunningConfigRepo: repo('dunningConfigRepo', ['findByTenant']),
+      droppedCallRecoveryRepo: repo('droppedCallRecoveryRepo', ['listUnansweredRecoveries']),
+      timeEntryRepo: repo('timeEntryRepo', ['findByTenant', 'findByJob', 'findByUser']),
+      expenseRepo: repo('expenseRepo', ['findByTenant']),
+      leadRepo: repo('leadRepo', ['findByTenant']),
+      catalogRepo: repo('catalogRepo', ['listByTenant']),
+      settingsRepo: repo('settingsRepo', ['findByTenant']),
+      materialItemRepo: repo('materialItemRepo', ['listPending']),
+    },
+    shared: {
+      jobRepo: repo('jobRepo', ['findByCustomer', 'findById', 'findByIds', 'findByTenant']),
+      appointmentRepo: repo('appointmentRepo', ['findByCustomer', 'findByDateRange']),
+      customerRepo: repo('customerRepo', ['findById', 'findByTenant']),
+      proposalRepo: repo('proposalRepo', ['findByTenant', 'findByStatus']),
+      userRepo: repo('userRepo', ['findByTenant']),
+    },
+  };
+}
+
+/** The honest refusals — never data. */
+const REFUSAL_COPY: Partial<Record<string, string>> = {
+  lookup_catalog: 'office-level view',
+  lookup_leads: 'couldn&apos;t verify your access',
+  lookup_my_day: 'couldn&apos;t match your number',
+};
+
+describe('phone lookups — with no actor, default-deny across the whole taxonomy', () => {
+  it('the taxonomy this net covers is exactly 20 intents (intent 21 must fail here)', () => {
+    expect(ALL_LOOKUP_INTENTS).toHaveLength(20);
+  });
+
+  it.each(MUST_REFUSE_WITHOUT_ACTOR)(
+    '%s is refused to a caller with no actor, and reads NO repo',
+    async (intent) => {
+      const repos = trackedRepos();
+      const h = makeAdapter({
+        intentType: intent,
+        lookups: lookups({ answers: repos.answers, shared: repos.shared }),
+      });
+
+      const xml = await ask(h, 'tell me about that');
+
+      expect(xml).toContain(REFUSAL_COPY[intent] ?? OWNER_REFUSAL);
+      expect(repos.called).toEqual([]);
+    },
+  );
 });
