@@ -18,7 +18,7 @@
  * This module does NOT contain a lookup switch. It is a thin surface
  * adapter over `workers/voice-lookup-answer.ts#executeLookupAnswer` — the
  * per-skill dispatch that already existed and that the recorded-memo worker
- * already calls. One implementation, two callers. Copying the telephony
+ * already calls. One implementation, three callers. Copying the telephony
  * adapter's `runLookupSkill` switch in here is exactly the mistake that
  * produced three drifted copies of `intentToProposalType`.
  *
@@ -30,16 +30,16 @@
  *      `EntityResolver` first. Ambiguity returns a "which one?" answer
  *      listing the candidates; not-found falls through to the shared
  *      module's honest "I couldn't find a customer matching …".
- *   2. The authorization model. The phone path gates owner lookups on
- *      `ownerSession` (caller-ID identity) AND `extendedIntents` (a tenant
- *      opt-in whose real job is keeping the TELEPHONY classifier prompt
- *      byte-identical for cassette hashes, and keeping an anonymous caller
- *      away from owner reports). Neither applies to a signed-in operator on
- *      their own dashboard. Chat instead uses the DB-authoritative RBAC gate
- *      the shared module already enforces (`LOOKUP_REQUIRED_PERMISSION` —
- *      `reports:view` for the owner reports, `settings:view` for the
- *      catalog, `customers:view` for leads), which fails CLOSED — a
- *      technician asking for revenue gets the refusal copy, not data.
+ *   2. The authorization model. Every surface now uses the DB-authoritative
+ *      RBAC gate the shared module enforces (`LOOKUP_REQUIRED_PERMISSION`).
+ *      Chat passes the signed-in operator (`req.auth.userId`); the phone
+ *      passes the actor it resolved from caller-ID at session establishment
+ *      (`telephony/phone-actor.ts`, #866); the memo passes its creator.
+ *      That gate maps `reports:view` to the owner reports, `settings:view`
+ *      to the catalog and `customers:view` to leads, and fails CLOSED — a
+ *      technician asking for revenue gets the refusal copy, not data. The
+ *      phone adds one rule of its own on top (a default-deny allowlist for
+ *      actor-less callers); see `ai/voice-turn/phone-lookup-surface.ts`.
  *   3. Response shape + failure copy. The phone path speaks a TTS string and
  *      degrades every error to "let me get a person to help". Chat returns
  *      the assistant envelope and must make a failure VISIBLE rather than
@@ -57,6 +57,7 @@ import {
   type VoiceLookupAnswerDeps,
 } from '../../workers/voice-lookup-answer';
 import { TECHNICIAN_REF_INTENTS } from '../agents/customer-calling/entity-resolution';
+import { ambiguousReferenceLine, resolveLookupReference } from './lookup-reference';
 
 /**
  * Everything the assistant route needs to answer a lookup, as ONE optional
@@ -144,45 +145,16 @@ function ambiguousReply(
   reference: string,
   candidates: EntityCandidate[],
 ): AssistantLookupReply {
-  const list = candidates
-    .slice(0, 5)
-    .map((c) => c.label)
-    .join('; ');
   return {
     taskType: lookupTaskType(intent),
     model: LOOKUP_MODEL,
     usage: { input: 0, output: 0, total: 0 },
     message: {
       role: 'assistant',
-      content: `More than one match for "${reference}": ${list}. Which one did you mean?`,
+      content: ambiguousReferenceLine(reference, candidates),
       reasoning: 'Entity reference was ambiguous — asked instead of guessing (never a silent pick).',
     },
   };
-}
-
-/**
- * Resolve one free-text reference. Read-only lookups accept the
- * `low_confidence` band (the voice write path forces a confirm turn there
- * because it is about to MUTATE; showing an operator their own tenant's
- * probably-right record is not the same risk). `ambiguous` still asks.
- */
-async function resolveReference(
-  resolver: EntityResolver | undefined,
-  tenantId: string,
-  reference: string | undefined,
-  kind: 'customer' | 'job' | 'technician',
-): Promise<
-  | { kind: 'resolved'; id: string }
-  | { kind: 'ambiguous'; candidates: EntityCandidate[] }
-  | { kind: 'unresolved' }
-> {
-  if (!resolver || !reference || reference.trim().length === 0) return { kind: 'unresolved' };
-  const result = await resolver.resolve({ tenantId, reference, kind });
-  if (result.kind === 'resolved' || result.kind === 'low_confidence') {
-    return { kind: 'resolved', id: result.candidate.id };
-  }
-  if (result.kind === 'ambiguous') return { kind: 'ambiguous', candidates: result.candidates };
-  return { kind: 'unresolved' };
 }
 
 export interface DispatchAssistantLookupInput {
@@ -249,7 +221,7 @@ export async function dispatchAssistantLookup(
 
     let customerId: string | undefined;
     if (customerReference) {
-      const resolved = await resolveReference(
+      const resolved = await resolveLookupReference(
         deps.entityResolver,
         tenantId,
         customerReference,
@@ -263,7 +235,7 @@ export async function dispatchAssistantLookup(
 
     let jobId: string | undefined;
     if (jobReference) {
-      const resolved = await resolveReference(deps.entityResolver, tenantId, jobReference, 'job');
+      const resolved = await resolveLookupReference(deps.entityResolver, tenantId, jobReference, 'job');
       if (resolved.kind === 'ambiguous') {
         return ambiguousReply(intent, jobReference, resolved.candidates);
       }
@@ -272,7 +244,7 @@ export async function dispatchAssistantLookup(
 
     let technicianId: string | undefined;
     if (technicianReference) {
-      const resolved = await resolveReference(
+      const resolved = await resolveLookupReference(
         deps.entityResolver,
         tenantId,
         technicianReference,

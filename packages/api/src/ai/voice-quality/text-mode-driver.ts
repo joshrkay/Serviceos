@@ -34,11 +34,25 @@
  * job would. This keeps the driver behavior in lock-step with the
  * worker without copy-pasting business logic.
  *
- * # Lookup dispatch
- * Lookup intents are read-only and never produce a proposal. Mirror
- * `twilio-adapter.runLookupSkill`: each `lookup_*` intent maps to a
- * skill, the skill's TTS-ready `summary` becomes the `agentResponse`,
- * and `lookup_executed` is emitted on the session bus.
+ * # Lookup dispatch — a KNOWINGLY STALE mirror of the PRE-#866 phone path
+ * Lookup intents are read-only and never produce a proposal. This harness
+ * carries its own 15-case switch: each `lookup_*` intent maps to a skill, the
+ * skill's TTS-ready `summary` becomes the `agentResponse`, and
+ * `lookup_executed` is emitted on the session bus.
+ *
+ * It is a copy of how the LIVE PHONE worked BEFORE #866, and it has
+ * deliberately not been converted:
+ *   - it gates on `ownerSession && extendedIntents`, not on a resolved actor;
+ *   - it has no RBAC gate, no default-deny allowlist, no actor at all;
+ *   - it answers none of the five intents #866 wired (lookup_my_day,
+ *     lookup_materials, lookup_job_profit, lookup_crew_schedule,
+ *     lookup_timesheets).
+ * PRODUCTION no longer looks like this: the phone dispatches through
+ * `ai/voice-turn/phone-lookup-surface.ts` into the shared
+ * `workers/voice-lookup-answer.ts`. Converting this harness is a follow-up
+ * that must land WITH a corpus refresh — the voice-quality lookup scores
+ * measure THIS copy, not the shipped surface, so changing it silently
+ * re-baselines the corpus.
  *
  * # Synthetic CallSid
  * `VoiceSessionStore.create()` accepts an optional `callSid` (used by
@@ -96,7 +110,10 @@ import type { SettingsRepository } from '../../settings/settings';
 import type { OnCallRepository } from '../../oncall/rotation';
 import type { Customer } from '../../customers/customer';
 
-// Skills (lookup family — read-only; mirror runLookupSkill from twilio-adapter).
+// Skills (lookup family — read-only). Imported directly by this harness's own
+// switch below, which is a knowingly stale mirror of the pre-#866 phone path
+// (see the "Lookup dispatch" section of the module doc comment); production
+// reaches these skills through workers/voice-lookup-answer.ts instead.
 import { lookupAppointments } from '../skills/lookup-appointments';
 import { lookupInvoices } from '../skills/lookup-invoices';
 import { lookupBalance } from '../skills/lookup-balance';
@@ -1260,9 +1277,16 @@ export class TextModeDriver implements AgentDriver {
   }
 
   /**
-   * Mirror of `twilio-adapter.runLookupSkill` minus the TwiML wrapping:
-   * map intent → skill, time it end-to-end, emit `lookup_executed`,
-   * return the skill's TTS-ready `summary` string.
+   * The harness's own lookup switch, minus the TwiML wrapping: map intent →
+   * skill, time it end-to-end, emit `lookup_executed`, return the skill's
+   * TTS-ready `summary` string.
+   *
+   * KNOWINGLY STALE (#866). This mirrors the phone's DELETED `runLookupSkill`
+   * — `ownerSession && extendedIntents` gating, no actor, no RBAC, none of the
+   * five intents #866 wired. The live phone now calls
+   * `ai/voice-turn/phone-lookup-surface.ts`. Do not "fix" this to match
+   * without refreshing the voice-quality corpus in the same change: the lookup
+   * scores are measured against this copy.
    */
   private async runLookupSkill(
     session: VoiceSession,

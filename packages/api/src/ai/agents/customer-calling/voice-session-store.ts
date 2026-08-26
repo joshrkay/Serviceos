@@ -173,6 +173,26 @@ export interface VoiceSession {
   /** Set when `identifyCaller` matched an existing customer. */
   customerId?: string;
   /**
+   * #866 — the tenant user this call is authorised AS, resolved ONCE at
+   * session establishment from the caller-ID (`telephony/phone-actor.ts`)
+   * and never from utterance content. A Clerk subject when the user has
+   * one, else the users row id — both are accepted by the shared role
+   * resolver. Absent for customers and unrecognised numbers: permission-
+   * gated lookups then refuse honestly. Session-level (not FSM context) on
+   * purpose: the transition table must stay inert to it.
+   *
+   * Only the telephony establishment core populates this field —
+   * `TwilioGatherAdapter.establishInboundSession`, shared by BOTH phone
+   * transports, so a Media Streams session carries it today just as a Gather
+   * session does (pinned in test/telephony/owner-session.test.ts). What Media
+   * Streams lacks until #860 step 2 is the DISPATCH — `speechTurn` does not yet
+   * call `answerPhoneLookup`; step 2 adds that call and nothing about the actor.
+   * The in-app adapter and the voice-quality drivers (`text-mode-driver`,
+   * `audio-mode-driver`) create sessions outside this core and leave it
+   * undefined.
+   */
+  actorUserId?: string;
+  /**
    * True once the recording disclosure has actually been emitted to the caller
    * on this call (set by `bootstrapCallEstablishment`, which is the only
    * caller of `discloseRecording`). Any path that resumes or re-arms audio

@@ -25,24 +25,20 @@ import {
   isVoiceApprovalIntent,
   isVoiceEditIntent,
 } from '../ai/orchestration/intent-classifier';
+import type { IntentType } from '../ai/orchestration/intent-classifier';
 import {
   CreateCustomerVoiceTaskHandler,
   CREATE_CUSTOMER_CONFIRMATION_TTS,
 } from '../ai/tasks/create-customer-task';
-import type { AvailabilityFinder } from '../ai/tasks/availability-finder';
-import type { MoneyDashboardRepository } from '../reports/money-dashboard';
 import type { CatalogItemRepository } from '../catalog/catalog-item';
 import type { JobRepository } from '../jobs/job';
 import type { AppointmentRepository } from '../appointments/appointment';
 import type { InvoiceRepository } from '../invoices/invoice';
-import type { DunningConfigRepository } from '../invoices/dunning-config';
 import type { AgreementRepository } from '../agreements/agreement';
 import type { CustomerRepository } from '../customers/customer';
 import type { TagRepository } from '../customers/tag';
 import { isCustomerDuplicateLoader } from '../customers/dedup';
 import type { EstimateRepository } from '../estimates/estimate';
-import type { DailyDigestRepository } from '../digest/digest-service';
-import type { LookupEventService } from '../lookup-events/lookup-event-service';
 import type { LLMGateway } from '../ai/gateway/gateway';
 import { discloseRecording } from '../ai/skills/disclose-recording';
 import { t, type Language } from '../ai/i18n/i18n';
@@ -85,8 +81,9 @@ import { MEDIA_STREAM_PATH } from './media-streams/twilio-mediastream-server';
 import type { VoiceRepository, CallOutcome } from '../voice/voice-service';
 import type { VoicePersona, VoicePersonaResolver } from '../settings/voice-persona-resolver';
 import { resolveEscalationSettings } from '../settings/settings';
+import { resolvePhoneActor } from './phone-actor';
 import type { WhisperCache } from './whisper-cache';
-import { runLookupSkill } from '../ai/voice-turn/lookup-skill-runner';
+import { answerPhoneLookup, type PhoneLookupDeps } from '../ai/voice-turn/phone-lookup-surface';
 import {
   createVoiceTurnProcessor,
   appendAgentTts,
@@ -126,10 +123,7 @@ import type { Queue } from '../queues/queue';
 import type { CallMeBackRepository } from '../voice/call-me-back/call-me-back';
 import type { DeviceTokenRepository } from '../push/device-token-service';
 import type { PushDeliveryProvider } from '../notifications/push-delivery-provider';
-import type {
-  DroppedCallRecoveryRepository,
-  DroppedCallScheduler,
-} from '../sms/recovery/scheduler';
+import type { DroppedCallScheduler } from '../sms/recovery/scheduler';
 import { buildRecoveryContext } from '../sms/recovery/scheduler';
 import type { SettingsRepository } from '../settings/settings';
 import type { UserRepository } from '../users/user';
@@ -251,17 +245,15 @@ export interface TwilioAdapterDeps {
   /** P2-036 V2 — threaded to the voice-turn processor for the live-call discount engine. */
   negotiationQuoteResolver?: CurrentQuoteResolver;
   estimateRepo?: EstimateRepository;
-  /** Full-app voice coverage: owner-scoped revenue + catalog lookups. */
-  moneyDashboardRepo?: MoneyDashboardRepository;
   catalogRepo?: CatalogItemRepository;
-  /** Phase-2 Track A: owner-scoped day/digest/pending lookups. */
-  dailyDigestRepo?: DailyDigestRepository;
-  dunningConfigRepo?: DunningConfigRepository;
-  droppedCallRecoveryRepo?: Pick<DroppedCallRecoveryRepository, 'listUnansweredRecoveries'>;
-  /** When wired, lookup_availability speaks the next open slots. */
-  availabilityFinder?: AvailabilityFinder;
-  /** P11-001: when wired, every lookup invocation writes a row. */
-  lookupEvents?: LookupEventService;
+  /**
+   * #866 — the SAME lookup bundle (answers + shared repos + resolver +
+   * timezone) app.ts hands the memo worker and the assistant chat. The
+   * phone's read-only `lookup_*` intents dispatch through it
+   * (`ai/voice-turn/phone-lookup-surface.ts`). Absent → every lookup speaks
+   * the unavailable line and logs a wiring-gap warning.
+   */
+  lookups?: PhoneLookupDeps;
   /**
    * Phase C: per-tenant integration resolver for runtime auth lookups.
    * Wiring is optional in this adapter phase; consumers can inject and
@@ -1135,6 +1127,28 @@ export class TwilioGatherAdapter {
     // leaned on the voice-turn processor's callerPhoneResolver fallback, which
     // stays as defense-in-depth but is no longer the sole source.
     if (opts.from) session.callerPhone = opts.from;
+    // #866 — resolve the caller to a tenant ACTOR once, here, for both
+    // transports (this method is the shared establishment core). The shared
+    // lookup dispatch authorises by the actor's DB role; the phone used to
+    // carry only the ownerSession boolean. Fail-soft: never blocks the call.
+    const actor = await resolvePhoneActor(
+      { ...(this.deps.userRepo ? { userRepo: this.deps.userRepo } : {}) },
+      opts.tenantId,
+      opts.from,
+      ownerSession,
+    );
+    if (actor) {
+      session.actorUserId = actor.userId;
+      // `via` is the one diagnostic an operator needs when an owner's
+      // lookups behave differently from expected ("resolved through the
+      // owner_phone bridge" vs "through a registered mobile"). No caller-ID
+      // or user id in the log line.
+      logger.info('phone actor resolved at session establishment', {
+        tenantId: opts.tenantId,
+        sessionId: session.id,
+        via: actor.via,
+      });
+    }
     return { session, replayed: false };
   }
 
@@ -2274,6 +2288,9 @@ export class TwilioGatherAdapter {
       //    (which would hang the caller mid-call).
       let classifierEvent: CallingAgentEvent | null = null;
       let classifiedIntentType: string | undefined;
+      // #866 — captured alongside the intent so the lookup branch below reads
+      // it directly rather than re-narrowing `classifierEvent`.
+      let classifiedEntities: Record<string, unknown> = {};
       const verticalPromptSection = await this.processor.resolveVerticalPromptSection(opts.tenantId);
       const planPromptSection = await this.processor.resolvePlanPromptSection(
         opts.tenantId,
@@ -2315,10 +2332,11 @@ export class TwilioGatherAdapter {
           classifierEvent = { type: 'cost_cap_exceeded' };
         } else if (classification.confidence >= TAU_INT && classification.intentType !== 'unknown') {
           classifiedIntentType = classification.intentType;
+          classifiedEntities = (classification.extractedEntities ?? {}) as Record<string, unknown>;
           classifierEvent = {
             type: 'intent_classified',
             intentType: classification.intentType,
-            entities: (classification.extractedEntities ?? {}) as Record<string, unknown>,
+            entities: classifiedEntities,
             confidence: classification.confidence,
             // Thread the classify call's REAL ai_runs id so a proposal born
             // from this intent links to its run row (proposals.ai_run_id FK).
@@ -2368,8 +2386,8 @@ export class TwilioGatherAdapter {
         return this.finalizeTwiml(session, sideEffectsAll, opts.sessionId);
       }
 
-      // P11-001: lookup intents bypass the proposal-draft path. Route
-      // to the corresponding skill, push its `summary` into the
+      // P11-001 / #866: lookup intents bypass the proposal-draft path. Route
+      // through the shared dispatch (phone surface adapter), push the line into the
       // tts_play stream, and DO NOT dispatch `intent_classified` —
       // the FSM stays in `intent_capture` so the next <Gather> turn
       // re-enters with "Anything else I can help you with?".
@@ -2377,12 +2395,12 @@ export class TwilioGatherAdapter {
         classifiedIntentType &&
         isLookupIntent(classifiedIntentType as Parameters<typeof isLookupIntent>[0])
       ) {
-        const lookupSummary = await runLookupSkill(
-          this.deps,
+        const lookupSummary = await answerPhoneLookup(this.deps.lookups, {
           session,
-          classifiedIntentType,
-          opts.tenantId,
-        );
+          tenantId: opts.tenantId,
+          intent: classifiedIntentType as IntentType,
+          entities: classifiedEntities,
+        });
         sideEffectsAll.push({
           type: 'tts_play',
           payload: { text: lookupSummary, source: 'lookup_skill' },
