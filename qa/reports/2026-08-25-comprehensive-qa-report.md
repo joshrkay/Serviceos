@@ -123,7 +123,7 @@ Full workspace type validation confirms production build safety and web UI type 
 | BUG-05: UTC bucketing in money dashboard | 🔴 OPEN | ✅ FIXED | routes/reports.ts resolves tenant timezone; PgMoneyDashboardRepository.query() derives tenant-local month boundaries; test/reports/money-dashboard-tz.test.ts covers LA/UTC/Berlin/month-edge cases |
 | `/metrics` unauthenticated | ✅ FIXED | ✅ CONFIRMED | Fix applied in June, still present |
 | Voice transcript encryption | ✅ FIXED | ✅ CONFIRMED | AES-256-GCM at rest, no regression |
-| RLS enforcement | ✅ FIXED | ✅ CONFIRMED | FORCE RLS on 74 tables, no changes |
+| RLS enforcement | ✅ FIXED (June) | ⚠️  NOT TESTED THIS CYCLE | Schema has FORCE RLS on 74 tables (static), but integration tests were excluded from this run — `npm run test:integration` required for actual RLS verification |
 | ReviewResponseExecutionHandler | ❌ OPEN (June) | ✅ FIXED | app.ts constructs dependencies; createExecutionHandlerRegistry() registers handler in composition root |
 
 ### New Issues Introduced Since June
@@ -175,13 +175,13 @@ Exit Code:   0 (SUCCESS)
 - ℹ️  **Stub LLM warnings:** Expected in test environment (mock AI provider)
 - ℹ️  **Connection errors during seed:** Expected (Redis/external services not running in CI)
 
-**Test Coverage by Area** (inferred from successful runs):
+**Test Coverage by Area** (unit tests only; integration tests excluded from this run):
 - Voice: ✅ Extensive coverage (transcription, approval, PII redaction, standing instructions)
 - Money/Billing: ✅ Full coverage (integer cents, proposals, invoices, refunds)
-- Auth & Security: ✅ Clerk, RLS, JWT token validation
-- Database: ✅ RLS enforcement, migrations, schema integrity
+- Auth & Security: ✅ Clerk, JWT token validation (RLS enforcement requires integration tests)
+- Database: ⚠️  Unit tests only — RLS enforcement and migrations require `npm run test:integration` (PostgreSQL fixtures)
 - Chat/Assistant: ✅ Message handling, proposal execution, error cases
-- Webhooks: ✅ Stripe, Clerk, idempotency handling
+- Webhooks: ✅ Stripe, Clerk, idempotency handling (mock fixtures)
 - Scheduling: ✅ Appointment management, double-booking prevention
 
 **Key Observation:** The test suite GREW since June baseline (was ~5,511 in June, now 13,558). This indicates:
