@@ -1144,7 +1144,9 @@ Note: `test/telephony/lookup-catalog-owner-gate.test.ts` and the owner block in 
 
 - [ ] **Step 7 (decision taken during execution, 2026-08-26): owner-extended intents require a resolved actor on the phone**
 
-`lookup_day_overview` has no entry in `LOOKUP_REQUIRED_PERMISSION` (any signed-in operator may hear it on memo/chat), so routing the phone through the shared gate alone would let a caller with NO actor hear the tenant's day overview — a regression from the old `ownerSession` gate. The classifier's own contract for `OWNER_EXTENDED_LOOKUP_INTENT_TYPES` is "never enabled for anonymous customers", and the phone is the only surface with anonymous/customer callers. So the phone surface adapter refuses any intent in that set when `session.actorUserId` is absent, speaking the shared module's own refusal copy (`refusalSummary(intent)`, now exported) and emitting `lookup_executed` with `error: 'refused'`. Memo/chat semantics are unchanged (a technician actor still hears the day overview). Pinned in the characterization suite and the Task 4 `twilio-adapter.test.ts` no-actor cases (all three owner-extended intents → `owner-level report`). Also: the `lookup_my_day` pin uses an injected fixed clock (`PhoneLookupDeps.now`) so it cannot flake near local midnight.
+`lookup_day_overview` has no entry in `LOOKUP_REQUIRED_PERMISSION` (any signed-in operator may hear it on memo/chat), so routing the phone through the shared gate alone would let a caller with NO actor hear the tenant's day overview — a regression from the old `ownerSession` gate. The classifier's own contract for `OWNER_EXTENDED_LOOKUP_INTENT_TYPES` is "never enabled for anonymous customers", and the phone is the only surface with anonymous/customer callers. So the phone surface adapter refuses any intent in that set when `session.actorUserId` is absent, speaking the shared module's own refusal copy (`refusalSummary(intent)`, now exported) and emitting `lookup_executed` with `error: 'refused'`. Memo/chat semantics are unchanged (a technician actor still hears the day overview).
+
+**Amended by the Tasks 3+4 code review (C1):** the rule is an **allowlist**, not a denylist over the owner-extended set. `lookup_materials` is in the base classifier prompt and carries no permission entry, so the denylist read the tenant's shopping list to any identified caller. Final rule: with no actor, only `CUSTOMER_SCOPED_LOOKUP_INTENTS` (the caller's own records) and `PHONE_PUBLIC_LOOKUP_INTENTS = {lookup_availability}` are answered; everything else is refused before any repo is read (`lookup_my_day` speaks `NO_ACTOR_MY_DAY_LINE`). Pinned by a table-driven test over all 20 lookup intents that asserts the count is exactly 20 and no repo stub is called for a refused intent. Pinned in the characterization suite and the Task 4 `twilio-adapter.test.ts` no-actor cases (all three owner-extended intents → `owner-level report`). Also: the `lookup_my_day` pin uses an injected fixed clock (`PhoneLookupDeps.now`) so it cannot flake near local midnight.
 
 ---
 
@@ -1769,6 +1771,7 @@ import { PgLocationRepository } from '../../src/locations/pg-location';
 import { PgProposalRepository } from '../../src/proposals/pg-proposal';
 import { PgInvoiceRepository } from '../../src/invoices/pg-invoice';
 import { PgEstimateRepository } from '../../src/estimates/pg-estimate';
+import { PgDroppedCallRecoveryRepository } from '../../src/sms/recovery/scheduler';
 import { PgTimeEntryRepository } from '../../src/time-tracking/pg-time-entry';
 import { PgExpenseRepository } from '../../src/expenses/pg-expense';
 import { PgMaterialItemRepository } from '../../src/materials/pg-material-item';
@@ -1828,6 +1831,7 @@ describe('#866 — phone lookups against real Postgres (Gather seam)', () => {
       answers: {
         invoiceRepo,
         estimateRepo: new PgEstimateRepository(pool),
+        droppedCallRecoveryRepo: new PgDroppedCallRecoveryRepository(pool),
         timeEntryRepo,
         expenseRepo,
         settingsRepo,
@@ -2046,6 +2050,23 @@ describe('#866 — phone lookups against real Postgres (Gather seam)', () => {
     expect(xml).toMatch(/2(\.0)? hours|2h/);
   });
 
+  it('lookup_pending_items on the phone keeps the dropped-call recoveries line (review I3 — this was silently lost for two commits)', async () => {
+    // Seeding a real dropped-call recovery row is the point: the shared case
+    // only threads `listUnansweredRecoveries` when `droppedCallRecoveryRepo` is
+    // wired in `answers`, and no unit test pinned the phone's old behaviour.
+    // Read src/sms/recovery/scheduler.ts for the Pg repository + row shape and
+    // seed ONE unanswered recovery for this tenant, then assert the spoken line
+    // mentions it (read lookup-pending-items.ts for the exact recoveries
+    // sentence and pin its stable prefix).
+    const s = await seed();
+    // …seed one unanswered recovery here (see note above)…
+
+    const xml = await callAndAsk(s, OWNER_PHONE, 'lookup_pending_items');
+
+    expect(xml).not.toContain('owner-level report');
+    // expect(xml).toContain('<the recoveries sentence prefix>');
+  });
+
   it('RBAC: the technician asking for revenue is refused by the REAL membership loader', async () => {
     const s = await seed();
     const xml = await callAndAsk(s, TECH_MOBILE, 'lookup_revenue');
@@ -2107,7 +2128,7 @@ Before running: open `src/materials/pg-material-item.ts`, `src/expenses/expense.
 colima start 2>&1 | tail -1
 cd packages/api && npm run test:integration -- test/integration/phone-lookups-shared-dispatch.test.ts 2>&1 | tail -25
 ```
-Expected: 10 passing. If a spoken-line assertion misses because the skill's real copy differs (e.g. "Jake logged 2 hours this week"), print the XML once, pin the actual phrase, and keep the row-derived content (the name, the job summary, the material) as the thing asserted.
+Expected: 11 passing. If a spoken-line assertion misses because the skill's real copy differs (e.g. "Jake logged 2 hours this week"), print the XML once, pin the actual phrase, and keep the row-derived content (the name, the job summary, the material) as the thing asserted.
 
 If Docker is unavailable: commit, push, and read the `test` workflow's integration job on the PR; fix from its output.
 
@@ -2231,10 +2252,14 @@ session establishment** from caller-ID (`telephony/phone-actor.ts`: registered m
 else owner line → the tenant's single active owner; else none), never from utterance content.
 The `ownerSession && extendedIntents` dispatch-side gate is removed; the tenant flag continues to
 gate only whether the classifier *offers* the owner-extended intents. One phone-specific rule
-remains at dispatch: an owner-extended intent (`OWNER_EXTENDED_LOOKUP_INTENT_TYPES`) with **no
-resolved actor** is refused with the shared module's refusal copy — the phone is the only surface
-with anonymous/customer callers, and `lookup_day_overview` carries no permission entry on purpose
-(any signed-in operator may hear it on memo/chat).
+remains at dispatch, stated as an **allowlist** (default-deny): with **no resolved actor** the
+phone answers only the caller's own customer-scoped records and tenant-public lookups
+(`lookup_availability`); every other lookup is refused with the shared module's refusal copy
+(`lookup_my_day` gets an identity-flavoured line). The phone is the only surface with
+anonymous/customer callers, and `lookup_day_overview` / `lookup_materials` carry no permission
+entry on purpose (any signed-in operator may hear them on memo/chat) — a denylist over the
+owner-extended set would have read the tenant's shopping list to any identified caller. A
+table-driven pin over all 20 lookup intents makes the 21st fail loudly.
 **Rationale:** Five lookups were unreachable on the phone because the phone carried its own
 14-case copy of a 20-case switch (#843). The shared module's gate and `lookup_my_day`'s
 self-scoping both require an actor, so the "minimal fix" was not available through the shared
