@@ -21,6 +21,12 @@ function mapRow(row: Record<string, unknown>): User {
     canFieldServe: Boolean(row.can_field_serve ?? false),
     // P1-022 — column added in migration 109. NULL when no mobile on file.
     mobileNumber: (row.mobile_number as string | null) ?? undefined,
+    // #866 follow-up — status/deletedAt were previously never mapped, which
+    // made every isActive()-style consumer's suspended/deleted check a
+    // silent no-op against real Postgres. Undefined ⇒ 'active' (see the
+    // User interface doc comment); the column default backs that up.
+    status: (row.status as User['status'] | null) ?? undefined,
+    deletedAt: row.deleted_at ? new Date(row.deleted_at as string) : null,
     createdAt: new Date(row.created_at as string),
     updatedAt: new Date(row.updated_at as string),
   };
@@ -48,7 +54,7 @@ export class PgUserRepository extends PgBaseRepository implements UserRepository
       // `createdAt.getTime()` sort).
       let sql = `SELECT id, tenant_id, clerk_user_id, email, role, first_name, last_name,
                 COALESCE(can_field_serve, false) AS can_field_serve,
-                mobile_number,
+                mobile_number, status, deleted_at,
                 created_at, updated_at
          FROM users
          ${where}
@@ -67,7 +73,7 @@ export class PgUserRepository extends PgBaseRepository implements UserRepository
       const result = await client.query(
         `SELECT id, tenant_id, clerk_user_id, email, role, first_name, last_name,
                 COALESCE(can_field_serve, false) AS can_field_serve,
-                mobile_number,
+                mobile_number, status, deleted_at,
                 created_at, updated_at
          FROM users
          WHERE id = $1
@@ -97,7 +103,7 @@ export class PgUserRepository extends PgBaseRepository implements UserRepository
       const result = await client.query(
         `SELECT id, tenant_id, clerk_user_id, email, role, first_name, last_name,
                 COALESCE(can_field_serve, false) AS can_field_serve,
-                mobile_number,
+                mobile_number, status, deleted_at,
                 created_at, updated_at
          FROM users
          WHERE tenant_id = $1

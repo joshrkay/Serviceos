@@ -28,6 +28,10 @@
  * users row id — `resolveVoiceMemberRole` (app.ts) accepts either on the
  * in-memory path and keys on clerk_user_id on the Pg path, so a user who
  * never signed up cannot pass the owner-grade gate. That is correct.
+ * `resolveCanonicalUser` (users/user.ts), which `lookup_my_day` uses,
+ * matches on the row id too — so a pending invitee with a mobile on file
+ * CAN pass identity-only intents while still failing the permission-gated
+ * ones.
  */
 import { createLogger } from '../logging/logger';
 import { normalizeMobileE164 } from '../shared/phone/normalize';
@@ -82,11 +86,25 @@ export async function resolvePhoneActor(
     if (owners.length === 1) {
       return { userId: subjectOf(owners[0]!), via: 'owner_phone' };
     }
-    logger.warn('owner line could not be resolved to a single owner user — owner-grade lookups will refuse', {
-      tenantId,
-      activeOwners: owners.length,
-      hint: 'add the owner\'s mobile number on their team-member profile',
-    });
+    if (owners.length === 0) {
+      // Should be impossible — the last-owner guards (softDeleteSelf,
+      // demoteOwnerIfAnotherExists) never let a tenant go ownerless — so
+      // this is a data-integrity alarm, not something the tenant can fix.
+      logger.warn('owner line matched but the tenant has no active owner user — data-integrity alarm', {
+        tenantId,
+        activeOwners: 0,
+      });
+    } else {
+      // Two or more active owners is operator-fixable: add the caller's
+      // mobile number on their team-member profile so the mobile-match
+      // path (step 1) resolves them directly instead of relying on the
+      // owner-line bridge.
+      logger.warn('owner line could not be resolved to a single owner user — owner-grade lookups will refuse', {
+        tenantId,
+        activeOwners: owners.length,
+        hint: 'add the owner\'s mobile number on their team-member profile',
+      });
+    }
     return null;
   } catch (err) {
     logger.warn('resolvePhoneActor failed — treating caller as unresolved', {
