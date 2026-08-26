@@ -61,6 +61,20 @@ describe('resolvePhoneActor', () => {
     expect(await resolvePhoneActor(deps(repo), TENANT, '+15125550111', false)).toBeNull();
   });
 
+  it('a suspended user whose mobile matches resolves NO actor even on the owner line (never the bridge)', async () => {
+    const repo = new InMemoryUserRepository();
+    await seed(repo, { id: 'u-owner', role: 'owner', clerkUserId: 'clerk-owner' });
+    await seed(repo, {
+      id: 'u-backup',
+      role: 'dispatcher',
+      clerkUserId: 'clerk-backup',
+      mobileNumber: '+15125550111',
+      status: 'suspended',
+    });
+
+    expect(await resolvePhoneActor(deps(repo), TENANT, '+15125550111', true)).toBeNull();
+  });
+
   it('bridges the owner line to the SOLE active owner when no mobile matches', async () => {
     const repo = new InMemoryUserRepository();
     await seed(repo, { id: 'u-owner', role: 'owner', clerkUserId: 'clerk-owner' });

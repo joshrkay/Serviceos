@@ -180,6 +180,14 @@ export interface VoiceSession {
    * resolver. Absent for customers and unrecognised numbers: permission-
    * gated lookups then refuse honestly. Session-level (not FSM context) on
    * purpose: the transition table must stay inert to it.
+   *
+   * Only the telephony establishment core populates this field —
+   * `TwilioGatherAdapter.establishInboundSession`, shared by both phone
+   * transports (Gather and Media Streams). The in-app adapter and the
+   * voice-quality drivers (`text-mode-driver`, `audio-mode-driver`) leave it
+   * undefined: the text-mode driver keeps its own lookup switch, and Media
+   * Streams dispatches no lookups until #860 step 2 lands — that step must
+   * stamp it there too.
    */
   actorUserId?: string;
   /**

@@ -36,11 +36,13 @@ function stubSettingsRepo(
 }
 
 function stubUserRepo(): UserRepository {
+  const row = { id: BACKUP_USER_ID, tenantId: TENANT, mobileNumber: BACKUP_MOBILE };
   return {
     findById: async (tenantId: string, id: string) =>
-      tenantId === TENANT && id === BACKUP_USER_ID
-        ? { id, tenantId, mobileNumber: BACKUP_MOBILE }
-        : null,
+      tenantId === TENANT && id === BACKUP_USER_ID ? row : null,
+    findByMobileNumber: async (tenantId: string, e164: string) =>
+      tenantId === TENANT && e164 === BACKUP_MOBILE ? row : null,
+    findByTenant: async (tenantId: string) => (tenantId === TENANT ? [row] : []),
   } as unknown as UserRepository;
 }
 
@@ -299,6 +301,28 @@ describe('#866 — actor stamped at session establishment (both transports share
     expect(session.actorUserId).toBe('clerk-backup');
   });
 
+  it('a suspended backup supervisor gets NO actor even though the owner line still bridges (ownerSession unaffected)', async () => {
+    const { adapter, store } = makeAdapter({
+      settingsRepo: stubSettingsRepo({ backupSupervisorUserId: BACKUP_USER_ID }),
+      userRepo: usersRepo([
+        { id: 'u-owner', role: 'owner' },
+        {
+          id: BACKUP_USER_ID,
+          role: 'dispatcher',
+          clerkUserId: 'clerk-backup',
+          mobileNumber: BACKUP_MOBILE,
+          status: 'suspended',
+        },
+      ]),
+    });
+
+    await adapter.handleInbound({ callSid: 'CA-actor-backup-suspended', from: BACKUP_MOBILE, to: '+15125550000', tenantId: TENANT });
+
+    const session = store.findByCallSid('CA-actor-backup-suspended')!;
+    expect(session.machine.currentContext.ownerSession).toBe(true);
+    expect(session.actorUserId).toBeUndefined();
+  });
+
   it('a customer number gets no actor', async () => {
     const { adapter, store } = makeAdapter({
       settingsRepo: stubSettingsRepo(),
@@ -311,13 +335,30 @@ describe('#866 — actor stamped at session establishment (both transports share
   });
 
   it('a Twilio replay of the same CallSid keeps the actor already stamped', async () => {
+    const userRepo = usersRepo([{ id: 'u-tech', role: 'technician', mobileNumber: TECH_MOBILE }]);
+    const findByMobileNumberSpy = vi.spyOn(userRepo, 'findByMobileNumber');
     const { adapter, store } = makeAdapter({
       settingsRepo: stubSettingsRepo(),
-      userRepo: usersRepo([{ id: 'u-tech', role: 'technician', mobileNumber: TECH_MOBILE }]),
+      userRepo,
     });
     await adapter.handleInbound({ callSid: 'CA-actor-replay', from: TECH_MOBILE, to: '+15125550000', tenantId: TENANT });
     await adapter.handleInbound({ callSid: 'CA-actor-replay', from: TECH_MOBILE, to: '+15125550000', tenantId: TENANT });
 
     expect(store.findByCallSid('CA-actor-replay')!.actorUserId).toBe('u-tech');
+    // Proves the replay took the early-return path in establishInboundSession
+    // rather than re-running actor resolution (and thus never re-hitting the
+    // repo on the second webhook retry).
+    expect(findByMobileNumberSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('the Media Streams transport stamps the actor too (both transports share establishInboundSession)', async () => {
+    const { adapter, store } = makeAdapter({
+      settingsRepo: stubSettingsRepo(),
+      userRepo: usersRepo([{ id: 'u-tech', role: 'technician', clerkUserId: 'clerk-tech', mobileNumber: TECH_MOBILE }]),
+    });
+
+    await adapter.handleInboundForStream({ callSid: 'CA-actor-stream-tech', from: TECH_MOBILE, tenantId: TENANT });
+
+    expect(store.findByCallSid('CA-actor-stream-tech')!.actorUserId).toBe('clerk-tech');
   });
 });

@@ -76,8 +76,11 @@ export async function resolvePhoneActor(
 
   try {
     const byMobile = await deps.userRepo.findByMobileNumber(tenantId, e164);
-    if (byMobile && isActive(byMobile)) {
-      return { userId: subjectOf(byMobile), via: 'mobile' };
+    if (byMobile) {
+      // A tenant user matched but is suspended/deleted: refuse outright.
+      // Never fall through to the owner-line bridge — that would hand a
+      // revoked user a HIGHER identity than their own.
+      return isActive(byMobile) ? { userId: subjectOf(byMobile), via: 'mobile' } : null;
     }
 
     if (!ownerSession) return null;
