@@ -488,6 +488,12 @@ Both transports pass through establishInboundSession, so media-streams
 gets the actor for free when #860 step 2 lands."
 ```
 
+- [ ] **Step 6 (from code review, 2026-08-26): close the suspended-approver fall-through**
+
+A tenant user whose mobile MATCHES but who is suspended must resolve **no** actor even on the owner line — never fall through to the sole-owner bridge (a suspended backup supervisor's mobile is still an approver phone, so `ownerSession` is true, and the bridge would hand them the owner's identity). In `phone-actor.ts`: `if (byMobile) return isActive(byMobile) ? {…via:'mobile'} : null;` before the `ownerSession` check. Pin in both `phone-actor.test.ts` and the #866 describe of `owner-session.test.ts`. Also: give the file's old `stubUserRepo()` a `findByMobileNumber`/`findByTenant` so the RV-070 test stops exercising the fail-soft catch; assert `findByMobileNumber` is called once across a Twilio replay; add a `handleInboundForStream` case.
+
+**Reviewed and closed without code:** the voice-quality drivers (`ai/voice-quality/text-mode-driver.ts`, `ai/voice-quality/audio/audio-mode-driver.ts`) create `ownerSession: true` telephony sessions without an actor. Verified they cannot reach the gate this plan flips: the text-mode driver runs its own private 15-case lookup switch (out of scope, see Task 10), and the audio driver rides media-streams, which dispatches no lookups until #860 step 2 — which must stamp `actorUserId` for the audio path when it lands. Recorded on `VoiceSession.actorUserId`'s doc comment.
+
 ---
 
 ### Task 3: Shared reference helper + the phone surface adapter (five dead lookups answer)
