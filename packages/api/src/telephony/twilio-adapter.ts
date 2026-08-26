@@ -85,6 +85,7 @@ import { MEDIA_STREAM_PATH } from './media-streams/twilio-mediastream-server';
 import type { VoiceRepository, CallOutcome } from '../voice/voice-service';
 import type { VoicePersona, VoicePersonaResolver } from '../settings/voice-persona-resolver';
 import { resolveEscalationSettings } from '../settings/settings';
+import { resolvePhoneActor } from './phone-actor';
 import type { WhisperCache } from './whisper-cache';
 import { runLookupSkill } from '../ai/voice-turn/lookup-skill-runner';
 import {
@@ -1135,6 +1136,28 @@ export class TwilioGatherAdapter {
     // leaned on the voice-turn processor's callerPhoneResolver fallback, which
     // stays as defense-in-depth but is no longer the sole source.
     if (opts.from) session.callerPhone = opts.from;
+    // #866 — resolve the caller to a tenant ACTOR once, here, for both
+    // transports (this method is the shared establishment core). The shared
+    // lookup dispatch authorises by the actor's DB role; the phone used to
+    // carry only the ownerSession boolean. Fail-soft: never blocks the call.
+    const actor = await resolvePhoneActor(
+      { ...(this.deps.userRepo ? { userRepo: this.deps.userRepo } : {}) },
+      opts.tenantId,
+      opts.from,
+      ownerSession,
+    );
+    if (actor) {
+      session.actorUserId = actor.userId;
+      // `via` is the one diagnostic an operator needs when an owner's
+      // lookups behave differently from expected ("resolved through the
+      // owner_phone bridge" vs "through a registered mobile"). No caller-ID
+      // or user id in the log line.
+      logger.info('phone actor resolved at session establishment', {
+        tenantId: opts.tenantId,
+        sessionId: session.id,
+        via: actor.via,
+      });
+    }
     return { session, replayed: false };
   }
 

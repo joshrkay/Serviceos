@@ -14,6 +14,7 @@ import { VoiceSessionStore } from '../../src/ai/agents/customer-calling/voice-se
 import type { LLMGateway, LLMResponse } from '../../src/ai/gateway/gateway';
 import type { SettingsRepository, TenantSettings } from '../../src/settings/settings';
 import type { UserRepository } from '../../src/users/user';
+import type { User } from '../../src/users/user';
 import {
   resolveApproverPhones,
   isApprover,
@@ -238,5 +239,85 @@ describe('RV-070 — approver-identity helper (shared with SMS transport)', () =
     expect(
       await isApproverPhone({ settingsRepo: stubSettingsRepo() }, TENANT, ''),
     ).toBe(false);
+  });
+});
+
+describe('#866 — actor stamped at session establishment (both transports share establishInboundSession)', () => {
+  const TECH_MOBILE = '+15125550222';
+
+  function usersRepo(users: Array<Partial<User> & Pick<User, 'id' | 'role'>>): UserRepository {
+    const rows = users.map((u) => ({ tenantId: TENANT, canFieldServe: true, email: `${u.id}@x.io`, ...u })) as User[];
+    return {
+      findById: async (tenantId: string, id: string) =>
+        rows.find((u) => u.tenantId === tenantId && u.id === id) ?? null,
+      findByMobileNumber: async (tenantId: string, e164: string) =>
+        rows.find((u) => u.tenantId === tenantId && u.mobileNumber === e164 && !u.deletedAt) ?? null,
+      findByTenant: async (tenantId: string, opts?: { role?: string }) =>
+        rows.filter((u) => u.tenantId === tenantId && (!opts?.role || u.role === opts.role)),
+    } as unknown as UserRepository;
+  }
+
+  it('a technician calling from their registered mobile gets an actor (and no ownerSession)', async () => {
+    const { adapter, store } = makeAdapter({
+      settingsRepo: stubSettingsRepo(),
+      userRepo: usersRepo([{ id: 'u-tech', role: 'technician', clerkUserId: 'clerk-tech', mobileNumber: TECH_MOBILE }]),
+    });
+
+    await adapter.handleInbound({ callSid: 'CA-actor-tech', from: TECH_MOBILE, to: '+15125550000', tenantId: TENANT });
+
+    const session = store.findByCallSid('CA-actor-tech')!;
+    expect(session.actorUserId).toBe('clerk-tech');
+    expect(session.machine.currentContext.ownerSession).toBeUndefined();
+  });
+
+  it('the owner line with no mobile on any profile bridges to the sole owner user', async () => {
+    const { adapter, store } = makeAdapter({
+      settingsRepo: stubSettingsRepo(),
+      userRepo: usersRepo([{ id: 'u-owner', role: 'owner', clerkUserId: 'clerk-owner' }]),
+    });
+
+    await adapter.handleInbound({ callSid: 'CA-actor-owner', from: OWNER_PHONE, to: '+15125550000', tenantId: TENANT });
+
+    const session = store.findByCallSid('CA-actor-owner')!;
+    expect(session.machine.currentContext.ownerSession).toBe(true);
+    expect(session.actorUserId).toBe('clerk-owner');
+  });
+
+  it('the backup supervisor resolves through their mobile', async () => {
+    const { adapter, store } = makeAdapter({
+      settingsRepo: stubSettingsRepo({ backupSupervisorUserId: BACKUP_USER_ID }),
+      userRepo: usersRepo([
+        { id: 'u-owner', role: 'owner' },
+        { id: BACKUP_USER_ID, role: 'dispatcher', clerkUserId: 'clerk-backup', mobileNumber: BACKUP_MOBILE },
+      ]),
+    });
+
+    await adapter.handleInbound({ callSid: 'CA-actor-backup', from: BACKUP_MOBILE, to: '+15125550000', tenantId: TENANT });
+
+    const session = store.findByCallSid('CA-actor-backup')!;
+    expect(session.machine.currentContext.ownerSession).toBe(true);
+    expect(session.actorUserId).toBe('clerk-backup');
+  });
+
+  it('a customer number gets no actor', async () => {
+    const { adapter, store } = makeAdapter({
+      settingsRepo: stubSettingsRepo(),
+      userRepo: usersRepo([{ id: 'u-owner', role: 'owner' }]),
+    });
+
+    await adapter.handleInbound({ callSid: 'CA-actor-cust', from: CUSTOMER_PHONE, to: '+15125550000', tenantId: TENANT });
+
+    expect(store.findByCallSid('CA-actor-cust')!.actorUserId).toBeUndefined();
+  });
+
+  it('a Twilio replay of the same CallSid keeps the actor already stamped', async () => {
+    const { adapter, store } = makeAdapter({
+      settingsRepo: stubSettingsRepo(),
+      userRepo: usersRepo([{ id: 'u-tech', role: 'technician', mobileNumber: TECH_MOBILE }]),
+    });
+    await adapter.handleInbound({ callSid: 'CA-actor-replay', from: TECH_MOBILE, to: '+15125550000', tenantId: TENANT });
+    await adapter.handleInbound({ callSid: 'CA-actor-replay', from: TECH_MOBILE, to: '+15125550000', tenantId: TENANT });
+
+    expect(store.findByCallSid('CA-actor-replay')!.actorUserId).toBe('u-tech');
   });
 });
