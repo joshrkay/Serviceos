@@ -1142,6 +1142,10 @@ Expected: PASS. If a skill-shape stub in a test is wrong (e.g. a repo method nam
 
 Note: `test/telephony/lookup-catalog-owner-gate.test.ts` and the owner block in `twilio-adapter.test.ts` are now RED (they pass repos directly and expect the old gate). That is expected; Task 4 fixes them. Do not commit with them red — Tasks 3 and 4 are one commit. Continue to Task 4.
 
+- [ ] **Step 7 (decision taken during execution, 2026-08-26): owner-extended intents require a resolved actor on the phone**
+
+`lookup_day_overview` has no entry in `LOOKUP_REQUIRED_PERMISSION` (any signed-in operator may hear it on memo/chat), so routing the phone through the shared gate alone would let a caller with NO actor hear the tenant's day overview — a regression from the old `ownerSession` gate. The classifier's own contract for `OWNER_EXTENDED_LOOKUP_INTENT_TYPES` is "never enabled for anonymous customers", and the phone is the only surface with anonymous/customer callers. So the phone surface adapter refuses any intent in that set when `session.actorUserId` is absent, speaking the shared module's own refusal copy (`refusalSummary(intent)`, now exported) and emitting `lookup_executed` with `error: 'refused'`. Memo/chat semantics are unchanged (a technician actor still hears the day overview). Pinned in the characterization suite and the Task 4 `twilio-adapter.test.ts` no-actor cases (all three owner-extended intents → `owner-level report`). Also: the `lookup_my_day` pin uses an injected fixed clock (`PhoneLookupDeps.now`) so it cannot flake near local midnight.
+
 ---
 
 ### Task 4: Re-pin the catalog gate and the owner-lookup block on the actor's role
@@ -2226,7 +2230,11 @@ the shared module's DB-authoritative RBAC gate applied to an **actor** resolved 
 session establishment** from caller-ID (`telephony/phone-actor.ts`: registered mobile → user;
 else owner line → the tenant's single active owner; else none), never from utterance content.
 The `ownerSession && extendedIntents` dispatch-side gate is removed; the tenant flag continues to
-gate only whether the classifier *offers* the owner-extended intents.
+gate only whether the classifier *offers* the owner-extended intents. One phone-specific rule
+remains at dispatch: an owner-extended intent (`OWNER_EXTENDED_LOOKUP_INTENT_TYPES`) with **no
+resolved actor** is refused with the shared module's refusal copy — the phone is the only surface
+with anonymous/customer callers, and `lookup_day_overview` carries no permission entry on purpose
+(any signed-in operator may hear it on memo/chat).
 **Rationale:** Five lookups were unreachable on the phone because the phone carried its own
 14-case copy of a 20-case switch (#843). The shared module's gate and `lookup_my_day`'s
 self-scoping both require an actor, so the "minimal fix" was not available through the shared
