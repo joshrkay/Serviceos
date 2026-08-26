@@ -28,7 +28,7 @@
 - `packages/api/src/ai/voice-turn/phone-lookup-surface.ts` — `answerPhoneLookup(deps, input)`: the phone surface adapter. No lookup switch. Returns the line to speak.
 - `packages/api/test/telephony/phone-actor.test.ts`
 - `packages/api/test/integration/phone-lookups-shared-dispatch.test.ts`
-- `CONTEXT.md` (repo root) — the glossary the map asks for.
+- `packages/api/CONTEXT.md` — the glossary the map asks for (moved from the repo root on 2026-08-26 when the repo adopted a multi-context `CONTEXT-MAP.md` layout).
 - `docs/solutions/logic-errors/phone-lookup-dispatch-had-no-authorization-behind-the-prompt.md`
 
 **Modify**

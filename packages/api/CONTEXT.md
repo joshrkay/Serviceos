@@ -1,9 +1,11 @@
-# ServiceOS domain glossary
+# `packages/api` domain glossary
 
-Terms this codebase uses with a specific meaning. Decisions live in
-`docs/decisions.md`; the speakable capability inventory in
-`docs/reference/voice-action-catalog.md`. Coined during the voice-first
-effort (#833); add to it rather than letting terms float.
+Terms the backend uses with a specific meaning. This is one context of a
+multi-context repo — the root `CONTEXT-MAP.md` says which package owns which
+vocabulary. System-wide decisions live in `docs/decisions.md` (D-NNN); the
+speakable capability inventory in `docs/reference/voice-action-catalog.md`.
+Coined during the voice-first effort (#833); add to it rather than letting
+terms float.
 
 - **Surface** — a way a person reaches the product: the live phone, a recorded
   memo, in-app chat (mic or typed). Web and mobile UI are surfaces too, but
