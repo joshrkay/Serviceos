@@ -57,6 +57,7 @@ import {
   type VoiceLookupAnswerDeps,
 } from '../../workers/voice-lookup-answer';
 import { TECHNICIAN_REF_INTENTS } from '../agents/customer-calling/entity-resolution';
+import { ambiguousReferenceLine, resolveLookupReference } from './lookup-reference';
 
 /**
  * Everything the assistant route needs to answer a lookup, as ONE optional
@@ -144,45 +145,16 @@ function ambiguousReply(
   reference: string,
   candidates: EntityCandidate[],
 ): AssistantLookupReply {
-  const list = candidates
-    .slice(0, 5)
-    .map((c) => c.label)
-    .join('; ');
   return {
     taskType: lookupTaskType(intent),
     model: LOOKUP_MODEL,
     usage: { input: 0, output: 0, total: 0 },
     message: {
       role: 'assistant',
-      content: `More than one match for "${reference}": ${list}. Which one did you mean?`,
+      content: ambiguousReferenceLine(reference, candidates),
       reasoning: 'Entity reference was ambiguous — asked instead of guessing (never a silent pick).',
     },
   };
-}
-
-/**
- * Resolve one free-text reference. Read-only lookups accept the
- * `low_confidence` band (the voice write path forces a confirm turn there
- * because it is about to MUTATE; showing an operator their own tenant's
- * probably-right record is not the same risk). `ambiguous` still asks.
- */
-async function resolveReference(
-  resolver: EntityResolver | undefined,
-  tenantId: string,
-  reference: string | undefined,
-  kind: 'customer' | 'job' | 'technician',
-): Promise<
-  | { kind: 'resolved'; id: string }
-  | { kind: 'ambiguous'; candidates: EntityCandidate[] }
-  | { kind: 'unresolved' }
-> {
-  if (!resolver || !reference || reference.trim().length === 0) return { kind: 'unresolved' };
-  const result = await resolver.resolve({ tenantId, reference, kind });
-  if (result.kind === 'resolved' || result.kind === 'low_confidence') {
-    return { kind: 'resolved', id: result.candidate.id };
-  }
-  if (result.kind === 'ambiguous') return { kind: 'ambiguous', candidates: result.candidates };
-  return { kind: 'unresolved' };
 }
 
 export interface DispatchAssistantLookupInput {
@@ -249,7 +221,7 @@ export async function dispatchAssistantLookup(
 
     let customerId: string | undefined;
     if (customerReference) {
-      const resolved = await resolveReference(
+      const resolved = await resolveLookupReference(
         deps.entityResolver,
         tenantId,
         customerReference,
@@ -263,7 +235,7 @@ export async function dispatchAssistantLookup(
 
     let jobId: string | undefined;
     if (jobReference) {
-      const resolved = await resolveReference(deps.entityResolver, tenantId, jobReference, 'job');
+      const resolved = await resolveLookupReference(deps.entityResolver, tenantId, jobReference, 'job');
       if (resolved.kind === 'ambiguous') {
         return ambiguousReply(intent, jobReference, resolved.candidates);
       }
@@ -272,7 +244,7 @@ export async function dispatchAssistantLookup(
 
     let technicianId: string | undefined;
     if (technicianReference) {
-      const resolved = await resolveReference(
+      const resolved = await resolveLookupReference(
         deps.entityResolver,
         tenantId,
         technicianReference,

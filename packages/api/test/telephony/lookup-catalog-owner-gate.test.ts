@@ -1,17 +1,20 @@
 /**
- * WS5 — `lookup_catalog` is owner-only at runtime.
+ * WS5 → #866 — `lookup_catalog` is gated on the ACTOR's role (`settings:view`:
+ * owners and dispatchers), not on the caller-ID boolean.
  *
- * Before WS5 the catalog browse was gated only on `session.customerId` (any
- * identified caller), contradicting the classifier doc (owner/dispatcher
- * only). WS5 gates it on the RV-070 `ownerSession` flag: an owner hears the
- * catalog; a customer gets the human fallback (their price questions flow
- * through the grounded estimate path instead).
+ * Before WS5 any identified caller could browse the price book. WS5 gated it
+ * on `ownerSession`. #866 routes the phone through the shared dispatch, whose
+ * RBAC gate mirrors the web route (GET /api/catalog-items): an owner or
+ * dispatcher actor hears the catalog; a customer (no actor) or a technician
+ * hears the office-level refusal and the repo is never read. Customer price
+ * questions still flow through the grounded estimate path.
  */
 import { describe, it, expect, vi } from 'vitest';
 import { TwilioGatherAdapter } from '../../src/telephony/twilio-adapter';
 import { VoiceSessionStore } from '../../src/ai/agents/customer-calling/voice-session-store';
 import type { LLMGateway, LLMResponse } from '../../src/ai/gateway/gateway';
 import type { CatalogItem, CatalogItemRepository } from '../../src/catalog/catalog-item';
+import type { PhoneLookupDeps } from '../../src/ai/voice-turn/phone-lookup-surface';
 
 const tenantId = 'tenant-cat';
 
@@ -43,59 +46,69 @@ function catalogItem(name: string, unitPriceCents: number): CatalogItem {
   };
 }
 
-function makeAdapter(ownerSession: boolean) {
+function makeAdapter(actor?: { userId: string; role: 'owner' | 'dispatcher' | 'technician' }) {
   const store = new VoiceSessionStore({ startInterval: false });
   const listByTenant = vi.fn(async () => [
     catalogItem('Water Heater Replacement', 185000),
     catalogItem('Gasket', 450),
   ]);
   const catalogRepo = { listByTenant } as unknown as CatalogItemRepository;
+  const lookups: PhoneLookupDeps = {
+    answers: {
+      catalogRepo,
+      resolveMemberRole: async (_t, userId) => (actor && userId === actor.userId ? actor.role : null),
+    },
+    shared: { proposalRepo: { findByTenant: vi.fn(async () => []) } as never },
+  };
   const adapter = new TwilioGatherAdapter({
     store,
     gateway: gatewayReturning(JSON.stringify({ intentType: 'lookup_catalog', confidence: 0.96 })),
     businessName: 'Acme Plumbing',
     publicBaseUrl: 'https://example.com',
-    catalogRepo,
+    lookups,
   });
-  const callSid = ownerSession ? 'CA-cat-owner' : 'CA-cat-cust';
-  const session = store.create(tenantId, 'telephony', {
-    callSid,
-    ...(ownerSession ? { ownerSession: true } : {}),
-  });
+  const callSid = `CA-cat-${actor?.role ?? 'cust'}`;
+  const session = store.create(tenantId, 'telephony', { callSid });
+  if (actor) session.actorUserId = actor.userId;
   session.machine.dispatch({ type: 'incoming_call', tenantId, callSid, from: '+15125550111', to: '+15125550000' });
   session.machine.dispatch({ type: 'greeted_ok' });
   session.machine.dispatch({ type: 'caller_known', customerId: 'cust-1' });
-  // Even an identified CUSTOMER (non-owner) must not browse the catalog.
+  // Even an identified CUSTOMER must not browse the catalog.
   session.customerId = 'cust-1';
   return { adapter, session, callSid, listByTenant };
 }
 
-describe('WS5 — lookup_catalog owner gate', () => {
-  it('owner session hears the catalog summary', async () => {
-    const { adapter, session, callSid, listByTenant } = makeAdapter(true);
-    const xml = await adapter.handleGather({
-      sessionId: session.id,
-      callSid,
-      speechResult: "what's in our catalog",
-      confidence: 0.95,
-      tenantId,
-    });
-    expect(xml).toContain('catalog items');
-    expect(xml).toContain('Water Heater Replacement');
-    expect(listByTenant).toHaveBeenCalled();
+const ask = (h: ReturnType<typeof makeAdapter>) =>
+  h.adapter.handleGather({
+    sessionId: h.session.id,
+    callSid: h.callSid,
+    speechResult: "what's in our catalog",
+    confidence: 0.95,
+    tenantId,
   });
 
-  it('non-owner (customer) session is refused and never reads the catalog', async () => {
-    const { adapter, session, callSid, listByTenant } = makeAdapter(false);
-    const xml = await adapter.handleGather({
-      sessionId: session.id,
-      callSid,
-      speechResult: "what's in your catalog",
-      confidence: 0.95,
-      tenantId,
-    });
-    expect(xml).toContain('I&apos;m having trouble pulling that up right now');
+describe('lookup_catalog — gated on the actor\'s role (settings:view)', () => {
+  it.each(['owner', 'dispatcher'] as const)('a %s actor hears the catalog summary', async (role) => {
+    const h = makeAdapter({ userId: `clerk-${role}`, role });
+    const xml = await ask(h);
+    expect(xml).toContain('catalog items');
+    expect(xml).toContain('Water Heater Replacement');
+    expect(h.listByTenant).toHaveBeenCalled();
+  });
+
+  it('a technician actor is refused with the office-level copy and the repo is never read', async () => {
+    const h = makeAdapter({ userId: 'clerk-tech', role: 'technician' });
+    const xml = await ask(h);
+    expect(xml).toContain('office-level view');
     expect(xml).not.toContain('Water Heater Replacement');
-    expect(listByTenant).not.toHaveBeenCalled();
+    expect(h.listByTenant).not.toHaveBeenCalled();
+  });
+
+  it('an identified customer (no actor) is refused and never reads the catalog', async () => {
+    const h = makeAdapter();
+    const xml = await ask(h);
+    expect(xml).toContain('office-level view');
+    expect(xml).not.toContain('Water Heater Replacement');
+    expect(h.listByTenant).not.toHaveBeenCalled();
   });
 });

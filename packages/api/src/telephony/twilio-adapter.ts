@@ -25,6 +25,7 @@ import {
   isVoiceApprovalIntent,
   isVoiceEditIntent,
 } from '../ai/orchestration/intent-classifier';
+import type { IntentType } from '../ai/orchestration/intent-classifier';
 import {
   CreateCustomerVoiceTaskHandler,
   CREATE_CUSTOMER_CONFIRMATION_TTS,
@@ -87,7 +88,7 @@ import type { VoicePersona, VoicePersonaResolver } from '../settings/voice-perso
 import { resolveEscalationSettings } from '../settings/settings';
 import { resolvePhoneActor } from './phone-actor';
 import type { WhisperCache } from './whisper-cache';
-import { runLookupSkill } from '../ai/voice-turn/lookup-skill-runner';
+import { answerPhoneLookup, type PhoneLookupDeps } from '../ai/voice-turn/phone-lookup-surface';
 import {
   createVoiceTurnProcessor,
   appendAgentTts,
@@ -263,6 +264,14 @@ export interface TwilioAdapterDeps {
   availabilityFinder?: AvailabilityFinder;
   /** P11-001: when wired, every lookup invocation writes a row. */
   lookupEvents?: LookupEventService;
+  /**
+   * #866 — the SAME lookup bundle (answers + shared repos + resolver +
+   * timezone) app.ts hands the memo worker and the assistant chat. The
+   * phone's read-only `lookup_*` intents dispatch through it
+   * (`ai/voice-turn/phone-lookup-surface.ts`). Absent → every lookup speaks
+   * the unavailable line and logs a wiring-gap warning.
+   */
+  lookups?: PhoneLookupDeps;
   /**
    * Phase C: per-tenant integration resolver for runtime auth lookups.
    * Wiring is optional in this adapter phase; consumers can inject and
@@ -2391,8 +2400,8 @@ export class TwilioGatherAdapter {
         return this.finalizeTwiml(session, sideEffectsAll, opts.sessionId);
       }
 
-      // P11-001: lookup intents bypass the proposal-draft path. Route
-      // to the corresponding skill, push its `summary` into the
+      // P11-001 / #866: lookup intents bypass the proposal-draft path. Route
+      // through the shared dispatch (phone surface adapter), push the line into the
       // tts_play stream, and DO NOT dispatch `intent_classified` —
       // the FSM stays in `intent_capture` so the next <Gather> turn
       // re-enters with "Anything else I can help you with?".
@@ -2400,12 +2409,15 @@ export class TwilioGatherAdapter {
         classifiedIntentType &&
         isLookupIntent(classifiedIntentType as Parameters<typeof isLookupIntent>[0])
       ) {
-        const lookupSummary = await runLookupSkill(
-          this.deps,
+        const lookupSummary = await answerPhoneLookup(this.deps.lookups, {
           session,
-          classifiedIntentType,
-          opts.tenantId,
-        );
+          tenantId: opts.tenantId,
+          intent: classifiedIntentType as IntentType,
+          entities:
+            classifierEvent && classifierEvent.type === 'intent_classified'
+              ? classifierEvent.entities
+              : {},
+        });
         sideEffectsAll.push({
           type: 'tts_play',
           payload: { text: lookupSummary, source: 'lookup_skill' },
