@@ -30,19 +30,15 @@ import {
   CreateCustomerVoiceTaskHandler,
   CREATE_CUSTOMER_CONFIRMATION_TTS,
 } from '../ai/tasks/create-customer-task';
-import type { AvailabilityFinder } from '../ai/tasks/availability-finder';
-import type { MoneyDashboardRepository } from '../reports/money-dashboard';
 import type { CatalogItemRepository } from '../catalog/catalog-item';
 import type { JobRepository } from '../jobs/job';
 import type { AppointmentRepository } from '../appointments/appointment';
 import type { InvoiceRepository } from '../invoices/invoice';
-import type { DunningConfigRepository } from '../invoices/dunning-config';
 import type { AgreementRepository } from '../agreements/agreement';
 import type { CustomerRepository } from '../customers/customer';
 import type { TagRepository } from '../customers/tag';
 import { isCustomerDuplicateLoader } from '../customers/dedup';
 import type { EstimateRepository } from '../estimates/estimate';
-import type { DailyDigestRepository } from '../digest/digest-service';
 import type { LookupEventService } from '../lookup-events/lookup-event-service';
 import type { LLMGateway } from '../ai/gateway/gateway';
 import { discloseRecording } from '../ai/skills/disclose-recording';
@@ -128,10 +124,7 @@ import type { Queue } from '../queues/queue';
 import type { CallMeBackRepository } from '../voice/call-me-back/call-me-back';
 import type { DeviceTokenRepository } from '../push/device-token-service';
 import type { PushDeliveryProvider } from '../notifications/push-delivery-provider';
-import type {
-  DroppedCallRecoveryRepository,
-  DroppedCallScheduler,
-} from '../sms/recovery/scheduler';
+import type { DroppedCallScheduler } from '../sms/recovery/scheduler';
 import { buildRecoveryContext } from '../sms/recovery/scheduler';
 import type { SettingsRepository } from '../settings/settings';
 import type { UserRepository } from '../users/user';
@@ -253,15 +246,7 @@ export interface TwilioAdapterDeps {
   /** P2-036 V2 — threaded to the voice-turn processor for the live-call discount engine. */
   negotiationQuoteResolver?: CurrentQuoteResolver;
   estimateRepo?: EstimateRepository;
-  /** Full-app voice coverage: owner-scoped revenue + catalog lookups. */
-  moneyDashboardRepo?: MoneyDashboardRepository;
   catalogRepo?: CatalogItemRepository;
-  /** Phase-2 Track A: owner-scoped day/digest/pending lookups. */
-  dailyDigestRepo?: DailyDigestRepository;
-  dunningConfigRepo?: DunningConfigRepository;
-  droppedCallRecoveryRepo?: Pick<DroppedCallRecoveryRepository, 'listUnansweredRecoveries'>;
-  /** When wired, lookup_availability speaks the next open slots. */
-  availabilityFinder?: AvailabilityFinder;
   /** P11-001: when wired, every lookup invocation writes a row. */
   lookupEvents?: LookupEventService;
   /**

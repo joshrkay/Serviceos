@@ -4,17 +4,20 @@
  * The voice-action-router worker used to SKIP every `lookup_*` intent
  * because a recorded memo had no voice back-channel to speak the result
  * into. The recording row is now that back-channel: this module is the
- * per-skill dispatch adapter (mirroring `twilio-adapter.runLookupSkill`
+ * per-skill dispatch adapter (originally mirroring the phone's
+ * `runLookupSkill`, which #866 deleted in favour of calling THIS module,
  * and `text-mode-driver.runLookupSkill`) that executes the lookup skill
  * and flattens its NON-UNIFORM result shape (`lookup_availability`
  * returns message/slots, not `{summary, data}`) into the shared
  * `VoiceLookupAnswer` wire contract the mobile AnswerCard renders.
  *
  * SURFACE-NEUTRAL (2026-07): this switch is now the single lookup-dispatch
- * implementation behind TWO surfaces — the recorded-memo worker
- * (`workers/voice-action-router.ts`) and the in-app assistant chat
+ * implementation behind THREE surfaces — the recorded-memo worker
+ * (`workers/voice-action-router.ts`), the in-app assistant chat
  * (`routes/assistant.ts`, via `ai/orchestration/lookup-dispatch.ts`,
- * which is where BOTH the mic button and typed input land). Nothing in
+ * which is where BOTH the mic button and typed input land), and, since
+ * #866, the live phone (`ai/voice-turn/phone-lookup-surface.ts`, both
+ * transports via the Gather adapter's establishment core today). Nothing in
  * here may reference memo-only concepts: the correlation key is
  * `sessionId` (a memo's recordingId / a chat turn's lookup session id)
  * and the authorization subject is `actorId` (the memo creator / the
@@ -57,6 +60,7 @@ import type { AgreementRepository } from '../agreements/agreement';
 import type { MoneyDashboardRepository } from '../reports/money-dashboard';
 import type { DailyDigestRepository } from '../digest/digest-service';
 import type { DunningConfigRepository } from '../invoices/dunning-config';
+import type { DroppedCallRecoveryRepository } from '../sms/recovery/scheduler';
 import type { TimeEntryRepository } from '../time-tracking/time-entry';
 import type { ExpenseRepository } from '../expenses/expense';
 import type { LeadRepository } from '../leads/lead';
@@ -157,6 +161,12 @@ export interface VoiceLookupAnswerDeps {
   moneyDashboardRepo?: MoneyDashboardRepository;
   dailyDigestRepo?: DailyDigestRepository;
   dunningConfigRepo?: DunningConfigRepository;
+  /**
+   * #866 — dropped-call recoveries awaiting an answer, spoken by
+   * `lookup_pending_items`. The phone's old switch passed this and the
+   * memo/chat path did not; now every surface gets the same line.
+   */
+  droppedCallRecoveryRepo?: Pick<DroppedCallRecoveryRepository, 'listUnansweredRecoveries'>;
   timeEntryRepo?: TimeEntryRepository;
   expenseRepo?: ExpenseRepository;
   /** U7 — `lookup_leads` (tenant lead pipeline; mirrors GET /api/leads). */
@@ -943,6 +953,12 @@ export async function executeLookupAnswer(
             estimateRepo: deps.estimateRepo,
             invoiceRepo: deps.invoiceRepo,
             ...(deps.dunningConfigRepo ? { dunningConfigRepo: deps.dunningConfigRepo } : {}),
+            ...(deps.droppedCallRecoveryRepo
+              ? {
+                  listUnansweredRecoveries: (tenant: string) =>
+                    deps.droppedCallRecoveryRepo!.listUnansweredRecoveries(tenant),
+                }
+              : {}),
             ...events,
           },
         );

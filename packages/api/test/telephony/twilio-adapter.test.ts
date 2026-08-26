@@ -1095,15 +1095,15 @@ describe('TwilioGatherAdapter.handleGather', () => {
         estimateRepo,
         invoiceRepo,
         // #866 — lookups dispatch through the shared bundle, the same shape
-        // app.ts hands memo + chat. Authorization is the actor's role.
-        // (`droppedCallRecoveryRepo` is not a VoiceLookupAnswerDeps field
-        // yet — the shared `lookup_pending_items` case does not thread the
-        // recovery port; a later step in #866 adds it.)
+        // app.ts hands memo + chat. Authorization is the actor's role, and
+        // the recovery port rides `answers` now that the shared
+        // `lookup_pending_items` case threads it on every surface.
         lookups: {
           answers: {
             dailyDigestRepo,
             estimateRepo,
             invoiceRepo,
+            droppedCallRecoveryRepo,
             resolveMemberRole: async (_t: string, userId: string) =>
               actor && userId === actor.userId ? actor.role : null,
           },

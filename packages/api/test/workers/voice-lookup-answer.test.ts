@@ -24,7 +24,7 @@
  * (chat's TECHNICIAN_REF_INTENTS, the memo worker's own dispatch) happens
  * to guard the field upstream.
  */
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { executeLookupAnswer } from '../../src/workers/voice-lookup-answer';
 import { InMemoryJobRepository } from '../../src/jobs/job';
 import type { Job } from '../../src/jobs/job';
@@ -135,5 +135,42 @@ describe('executeLookupAnswer — lookup_my_day discards a resolved technicianId
     if (execution.kind !== 'answer') throw new Error('unreachable');
     expect(execution.answer.summary).toContain("Actor's own job");
     expect(execution.answer.summary).not.toContain("Someone else's job");
+  });
+});
+
+/**
+ * #866 — `lookup_pending_items` speaks the dropped-call recoveries bucket on
+ * EVERY surface.
+ *
+ * The phone's deleted switch (`ai/voice-turn/lookup-skill-runner.ts`) passed
+ * `listUnansweredRecoveries` to the skill; the shared dispatch did not, so
+ * routing the phone through it would have silently dropped that line from the
+ * one surface that had it. The port belongs on the shared deps, not on a
+ * surface adapter.
+ */
+describe('executeLookupAnswer — lookup_pending_items recoveries port', () => {
+  it('threads droppedCallRecoveryRepo through to the skill', async () => {
+    const listUnansweredRecoveries = vi.fn(async () => []);
+    const execution = await executeLookupAnswer(
+      {
+        tenantId: 't1',
+        sessionId: '00000000-0000-4000-8000-000000000001',
+        intent: 'lookup_pending_items',
+        actorId: 'owner-1',
+        now: new Date(),
+      },
+      {
+        // lookup-pending-items.ts reads sent estimates and open /
+        // partially_paid invoices off findByTenant.
+        estimateRepo: { findByTenant: vi.fn(async () => []) } as never,
+        invoiceRepo: { findByTenant: vi.fn(async () => []) } as never,
+        droppedCallRecoveryRepo: { listUnansweredRecoveries },
+        resolveMemberRole: async () => 'owner',
+      },
+      { proposalRepo: new InMemoryProposalRepository() },
+    );
+
+    expect(execution.kind).toBe('answer');
+    expect(listUnansweredRecoveries).toHaveBeenCalledWith('t1');
   });
 });

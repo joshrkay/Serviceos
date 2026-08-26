@@ -2536,6 +2536,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     moneyDashboardRepo,
     dailyDigestRepo,
     dunningConfigRepo,
+    droppedCallRecoveryRepo,
     timeEntryRepo,
     expenseRepo,
     // U7 — lookup_leads / lookup_catalog answer on memo + chat like
@@ -2551,6 +2552,26 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     // lookup_events analytics rows.
     lookupEvents: lookupEventService,
     resolveMemberRole: resolveVoiceMemberRole,
+  };
+
+  // #866 — the repos the lookup skills reuse from the routers, built ONCE.
+  // Handed to the assistant chat and the live phone as the same object, so
+  // three surfaces cannot drift on which repos a skill gets. (The memo worker
+  // assembles the identical set from its own deps inside voice-action-router.)
+  const sharedLookupRepos = {
+    jobRepo,
+    appointmentRepo,
+    customerRepo,
+    proposalRepo,
+    availabilityFinder,
+    userRepo,
+  };
+  const phoneLookupDeps = {
+    answers: lookupAnswerDeps,
+    shared: sharedLookupRepos,
+    ...(sharedEntityResolver ? { entityResolver: sharedEntityResolver } : {}),
+    tenantTimezoneResolver: async (tenantId: string) =>
+      (await tenantSchedulingResolver(tenantId))?.timezone,
   };
 
   const voiceActionRouterWorker = createVoiceActionRouterWorker({
@@ -3494,10 +3515,11 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     consentEvents: consentEventRepo,
     ...(twilioRecordingControl ? { recordingControl: twilioRecordingControl } : {}),
     leadRepo,
-    // P11-001: lookup-skill family wiring. Without these the adapter
-    // falls back to a "let me get a person to help" line on lookup_*
-    // intents — the call doesn't crash, but the read-only path is
-    // unavailable. agreementRepo lives a few hundred lines down.
+    // These reach the voice-turn processor through the adapter's
+    // `...this.deps` spread (proposal drafting + execution handlers).
+    // NOTE: they are no longer the lookup-skill wiring — since #866 the
+    // read-only lookups get their repos from `lookups` below, not from
+    // here. agreementRepo lives a few hundred lines down.
     jobRepo,
     appointmentRepo,
     invoiceRepo,
@@ -3509,13 +3531,13 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     // onto their conversation, mirroring the outbound click-to-call log.
     conversationRepo,
     agreementRepo,
-    moneyDashboardRepo,
     catalogRepo,
-    dailyDigestRepo,
-    dunningConfigRepo,
-    droppedCallRecoveryRepo,
-    availabilityFinder,
     lookupEvents: lookupEventService,
+    // #866 — the phone's read-only lookups dispatch through the SAME bundle
+    // the assistant chat gets (see phoneLookupDeps above). The five
+    // lookup-only repos that used to be listed here fed the deleted
+    // per-surface switch; they now reach the skills through `answers`.
+    lookups: phoneLookupDeps,
     // P0 voice-safety — the inbound PHONE path resolves free-text references
     // through the SAME resolver stack the voice-action-router uses above
     // (alias-first, then pg_trgm), NOT the bare PgEntityResolver the in-app
@@ -5483,18 +5505,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
       // through to a generic LLM with no DB access.
       lookups: {
         answers: lookupAnswerDeps,
-        shared: {
-          jobRepo,
-          appointmentRepo,
-          customerRepo,
-          proposalRepo,
-          availabilityFinder,
-          // Task 10 (2026-08-07 tradesperson plan) — crew roster /
-          // technician names / speaker resolution (lookup_crew_schedule,
-          // lookup_timesheets, lookup_my_day). Same userRepo the voice
-          // memo worker is wired with (see voiceActionRouterWorker below).
-          userRepo,
-        },
+        shared: sharedLookupRepos,
         ...(sharedEntityResolver ? { entityResolver: sharedEntityResolver } : {}),
         tenantTimezoneResolver: async (tenantId: string) =>
           (await tenantSchedulingResolver(tenantId))?.timezone,
