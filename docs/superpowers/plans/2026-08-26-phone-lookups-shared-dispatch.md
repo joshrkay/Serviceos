@@ -1720,6 +1720,14 @@ TZ=UTC npx vitest run 2>&1 | tail -15
 ```
 Expected: 0 tsc errors; suites pass (baseline-flaky files listed at the top are the only tolerated failures, and only when run without `TZ=UTC`). If `test/app` has a `createApp` wiring-invariant characterization (PR #828), update its expectation for the removed adapter fields deliberately.
 
+- [ ] **Step 7 (from the Tasks 5–7 code review, 2026-08-26): polish that landed after Task 9**
+
+- The 20-intent no-actor table is derived from `SUPPORTED_INTENTS.filter(isLookupIntent)` (the runtime taxonomy), not from a hand-union — so adding lookup intent 21 to the taxonomy breaks the pin on the same commit and forces the allowlist decision. Plus a positive pin that a no-actor caller IS answered `lookup_availability`.
+- A Docker-free phone-seam pin that `lookup_pending_items` speaks the dropped-call recoveries line (the wiring in `ownerAdapter` was vacuous until seeded).
+- `text-mode-driver.ts` keeps its own 15-case lookup switch with the pre-#866 `ownerSession && extendedIntents` gate. **Knowingly stale, recorded in its header, not converted** — it is the voice-quality Layer 1 harness and its outputs feed the corpus; converting it is a follow-up with its own corpus refresh. Voice-quality lookup scores measure that copy, not the shipped surface.
+- `TwilioAdapterDeps.lookupEvents` removed (the adapter never read it; the processor only declares it; lookup analytics rows come from `lookups.answers.lookupEvents`).
+- D-026 records why `PHONE_PUBLIC_LOOKUP_INTENTS` has exactly one member.
+
 - [ ] **Step 6: Commit**
 
 ```bash
