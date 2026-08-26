@@ -41,7 +41,10 @@ expressed as "refuse these" fails open for the next intent added; only "answer t
 
 ## How to recognise it next time
 - A surface with its own copy of a shared switch. `grep -rn "case 'lookup_"` should hit ONE
-  production file (plus the voice-quality text-mode harness, which is out of scope).
+  production dispatch (`workers/voice-lookup-answer.ts`) plus two non-dispatch hits: the voice-quality
+  text-mode harness (knowingly stale mirror, out of scope) and
+  `ai/agents/customer-calling/escalation-summary-builder.ts` (an intent → human-phrase switch, not a
+  dispatch).
 - "Gated by the prompt" anywhere in a comment. The prompt decides what the model may *say*;
   it must never be the only thing deciding what the system *does*.
 - A boolean where the shared module wants an identity.

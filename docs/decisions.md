@@ -665,4 +665,6 @@ which is still a net tightening because revenue and leads previously had no gate
 challenge for owner-grade lookups is a follow-up. No classifier prompt / taxonomy / cassette
 change. `ownerSession` keeps its RV-071 approval role unchanged (D-025). Customer-name resolution
 on the phone stays undecided (#833 "entity resolution per surface"). #860 step 2 (media-streams)
-calls the same surface adapter and must stamp `actorUserId` for its path; it is not wired here.
+calls the same surface adapter from `speechTurn`; the actor is already stamped for that transport by the
+shared establishment core, so step 2 adds the dispatch call and nothing about identity. It is not
+wired here.

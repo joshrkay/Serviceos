@@ -42,10 +42,12 @@
  *      phone is a deployment wiring gap, so it also logs.
  *   4. Telemetry. `lookup_executed` on the session bus for EVERY outcome
  *      (answered / refused / failed / unsupported / ambiguous), so a dead
- *      lookup is a metric, not an audit finding. `success` means "the caller
- *      got DATA" — a refusal, an ambiguity question and an unidentified
- *      caller are all `success: false` with a reason, because none of them
- *      answered the question that was asked.
+ *      lookup is a metric, not an audit finding. `success` means "the lookup
+ *      ran and answered the question" — a data-derived empty answer ("no
+ *      invoices on file") counts, exactly as the pre-#866 runner counted it.
+ *      A refusal, an ambiguity question and an unidentified caller are all
+ *      `success: false` with a reason, because none of them answered the
+ *      question that was asked.
  *
  * TRANSPORT-NEUTRAL BY DESIGN. Input is a session + intent + entities; output
  * is a line to speak. Gather calls it today; media-streams' `speechTurn` calls

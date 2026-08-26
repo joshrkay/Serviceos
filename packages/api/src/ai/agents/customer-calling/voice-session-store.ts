@@ -182,12 +182,14 @@ export interface VoiceSession {
    * purpose: the transition table must stay inert to it.
    *
    * Only the telephony establishment core populates this field —
-   * `TwilioGatherAdapter.establishInboundSession`, shared by both phone
-   * transports (Gather and Media Streams). The in-app adapter and the
-   * voice-quality drivers (`text-mode-driver`, `audio-mode-driver`) leave it
-   * undefined: the text-mode driver keeps its own lookup switch, and Media
-   * Streams dispatches no lookups until #860 step 2 lands — that step must
-   * stamp it there too.
+   * `TwilioGatherAdapter.establishInboundSession`, shared by BOTH phone
+   * transports, so a Media Streams session carries it today just as a Gather
+   * session does (pinned in test/telephony/owner-session.test.ts). What Media
+   * Streams lacks until #860 step 2 is the DISPATCH — `speechTurn` does not yet
+   * call `answerPhoneLookup`; step 2 adds that call and nothing about the actor.
+   * The in-app adapter and the voice-quality drivers (`text-mode-driver`,
+   * `audio-mode-driver`) create sessions outside this core and leave it
+   * undefined.
    */
   actorUserId?: string;
   /**
