@@ -1292,31 +1292,34 @@ approves by screen/SMS tap).
 — 20 `lookup_*` intents total — routed to read-only skills, never to a
 proposal (correct by design).
 
-> **⚠️ A new lookup intent is NOT covered automatically.** This section
-> previously claimed the opposite — that "every consumer gates on the
-> `lookup_` string prefix, not an enumeration, so a new lookup intent is
-> covered automatically without touching this list or any dispatch code."
-> That is true of *classification* (`isLookupIntent`,
-> `intent-classifier.ts:600`, is a prefix test) and **false of dispatch**,
-> which is three enumerated switches:
+> **Dispatch is ONE switch behind THREE surface adapters (#866).** Classification
+> is a prefix test (`isLookupIntent`, `intent-classifier.ts`), and dispatch is the
+> single enumerated switch in `workers/voice-lookup-answer.ts#executeLookupAnswer`,
+> reached by:
 >
-> | Surface | Dispatch | Cases | Missing-entry behaviour |
-> |---|---|---|---|
-> | recorded memo + in-app chat | `workers/voice-lookup-answer.ts:385` | 20 | `default: {kind:'unsupported'}` |
-> | live phone, customer-scoped | `telephony/twilio-adapter.ts:2814` | 11 | `default: lookupNotWiredFallback()` |
-> | live phone, owner-extended | `telephony/twilio-adapter.ts:3055` | 3 | `default: lookupNotWiredFallback()` |
+> | Surface | Surface adapter (owns identity, response shape, failure copy, telemetry — never a switch) |
+> |---|---|
+> | recorded memo | `workers/voice-action-router.ts` |
+> | in-app chat (mic + typed) | `ai/orchestration/lookup-dispatch.ts` |
+> | live phone (Gather today; media-streams when #860 step 2 lands) | `ai/voice-turn/phone-lookup-surface.ts` |
 >
-> Adding a lookup intent without a case in each surface's switch produces a
-> silent degradation, not an error. That is exactly what happened: five
-> lookups — `lookup_my_day`, `lookup_materials`, `lookup_job_profit`,
-> `lookup_crew_schedule`, `lookup_timesheets` — are unreachable on the phone
-> today and answer the caller "let me get a person to help"
-> (`twilio-adapter.ts:3139`). Tracked at #843; the duplication is the defect,
-> not the missing cases.
+> A new `lookup_*` skill is added to the shared switch **once** and answers on
+> every surface. Two supporting registries remain per-intent and are NOT
+> prefix-driven: `LOOKUP_REQUIRED_PERMISSION` (who may hear it — the phone now
+> enforces this on the caller's resolved actor, not on caller-ID alone) and
+> `CUSTOMER_SCOPED_LOOKUP_INTENTS` (which lookups need a customer). On the phone
+> a caller with **no resolved actor** is answered only the customer-scoped
+> lookups (their own records) and `lookup_availability`; every other lookup is
+> refused before any repo is read (default-deny — `lookup_day_overview` and
+> `lookup_materials` carry no permission entry on purpose, and the phone is the
+> one surface whose caller may be a customer). A missing entry in the switch
+> degrades to `unsupported`; on the phone that speaks the unavailable line AND
+> logs a wiring-gap warning AND emits `lookup_executed` with
+> `error: 'unsupported'` — a metric, not a silent degradation.
 >
-> Two supporting registries also need an entry per intent and are likewise
-> not prefix-driven: `LOOKUP_REQUIRED_PERMISSION` and
-> `CUSTOMER_SCOPED_LOOKUP_INTENTS` (`workers/voice-lookup-answer.ts`).
+> History: until 2026-08 the live phone carried its own 14-case copy of this
+> switch (`telephony/twilio-adapter.ts`, then `lookup-skill-runner.ts`), and five
+> lookups were unreachable on the phone (#843). The duplication was the defect.
 
 **`lookup_materials` (Task 9, 2026-08-07 tradesperson plan):** reads back
 Task 8's pending `material_items` shopping list

@@ -626,3 +626,39 @@ the voice *channel* confuses who is authorising with how they are speaking.
   undo window proves insufficient for outbound comms.
 - *Leave the contradiction unrecorded.* Rejected: a reader of this log would conclude a live,
   security-reviewed feature should not exist.
+
+### D-026: The phone authorises lookups by a caller-ID-resolved actor's DB role, through the shared dispatch
+**Date:** 2026-08-26
+**Initiative:** Voice-first on the phone (wayfinder map #833), Phase 0 of #852; spec #866, closes #843.
+**Decision:** The live phone is the third caller of the shared lookup dispatch
+(`workers/voice-lookup-answer.ts`); its private switch is deleted. Authorization on the phone is
+the shared module's DB-authoritative RBAC gate applied to an **actor** resolved **once at
+session establishment** from caller-ID (`telephony/phone-actor.ts`: registered mobile → active
+user, and a matched-but-inactive user resolves nothing; else owner line → the tenant's single
+active owner; else none), never from utterance content. The `ownerSession && extendedIntents`
+dispatch-side gate is removed; the tenant flag continues to gate only whether the classifier
+*offers* the owner-extended intents. One phone-specific rule remains at dispatch, stated as an
+**allowlist** (default-deny): with **no resolved actor** the phone answers only the caller's own
+customer-scoped records and tenant-public lookups (`lookup_availability`); every other lookup is
+refused with the shared module's refusal copy (`lookup_my_day` gets an identity-flavoured line).
+The phone is the only surface with anonymous/customer callers, and `lookup_day_overview` /
+`lookup_materials` carry no permission entry on purpose (any signed-in operator may hear them on
+memo/chat) — a denylist over the owner-extended set would have read the tenant's shopping list to
+any identified caller. A table-driven pin over all 20 lookup intents makes the 21st fail loudly.
+**Rationale:** Five lookups were unreachable on the phone because the phone carried its own
+14-case copy of a 20-case switch (#843). The shared module's gate and `lookup_my_day`'s
+self-scoping both require an actor, so the "minimal fix" was not available through the shared
+path. Verified while specifying: `lookup_revenue` and `lookup_leads` sit in the base classifier
+prompt and the phone's dispatch applied no authorization after customer identification — an
+identified customer could be read the tenant's revenue. RBAC at dispatch is the missing
+defence-in-depth layer behind the prompt.
+**Constraints:** Caller-ID is the *authentication factor* that mints the phone actor. It is
+transport-level recognition, spoofable by design, and no stronger than the RV-070 owner-line
+check that already gated owner lookups and voice approval — `actorUserId` must never be read
+as a verified subject the way `req.auth.userId` is; note the blast radius widened from the owner
+line to any employee mobile on file (spoofing a dispatcher's number yields owner-grade reports),
+which is still a net tightening because revenue and leads previously had no gate at all. A spoken
+challenge for owner-grade lookups is a follow-up. No classifier prompt / taxonomy / cassette
+change. `ownerSession` keeps its RV-071 approval role unchanged (D-025). Customer-name resolution
+on the phone stays undecided (#833 "entity resolution per surface"). #860 step 2 (media-streams)
+calls the same surface adapter and must stamp `actorUserId` for its path; it is not wired here.
