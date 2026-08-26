@@ -395,3 +395,83 @@ describe('phone lookups — the contract that must not move', () => {
     expect(LOOKUP_UNAVAILABLE_LINE).toContain("I'm having trouble pulling that up right now");
   });
 });
+
+describe('phone lookups — spoken reference resolution (shared resolver, chat semantics)', () => {
+  it('an ambiguous job reference asks "which one?" listing the candidates, and stays in intent_capture', async () => {
+    const h = makeAdapter({
+      intentType: 'lookup_job_profit',
+      entities: { jobReference: 'the Miller job' },
+      actorUserId: 'clerk-owner',
+      lookups: lookups({
+        roles: { 'clerk-owner': 'owner' },
+        entityResolver: {
+          resolve: vi.fn(async () => ({
+            kind: 'ambiguous',
+            candidates: [
+              { id: 'j1', kind: 'job', label: 'Miller — Oak Street water heater', score: 0.8 },
+              { id: 'j2', kind: 'job', label: 'Miller — 5th Ave furnace', score: 0.79 },
+            ],
+          })),
+        } as never,
+        shared: { jobRepo: { findById: vi.fn(), findByIds: vi.fn(async () => []) } },
+        answers: {
+          settingsRepo: { findByTenant: vi.fn(async () => ({ tenantId })) } as never,
+          invoiceRepo: { findByJob: vi.fn(async () => []) } as never,
+          timeEntryRepo: { findByJob: vi.fn(async () => []) } as never,
+          expenseRepo: { findByTenant: vi.fn(async () => []) } as never,
+        },
+      }),
+    });
+
+    const xml = await ask(h, 'did I make money on the Miller job');
+
+    expect(xml).toContain('More than one match for &quot;the Miller job&quot;');
+    expect(xml).toContain('Oak Street');
+    expect(xml).toContain('5th Ave');
+    expect(h.session.machine.currentState).toBe('intent_capture');
+    expect(lookupEvents(h)).toEqual([expect.objectContaining({ success: false, error: 'ambiguous_reference' })]);
+  });
+
+  it('a crew-member reference the resolver cannot find speaks the shared not-found copy', async () => {
+    const h = makeAdapter({
+      intentType: 'lookup_crew_schedule',
+      entities: { targetTechnicianName: 'Jake' },
+      actorUserId: 'clerk-owner',
+      lookups: lookups({
+        roles: { 'clerk-owner': 'owner' },
+        entityResolver: { resolve: vi.fn(async () => ({ kind: 'not_found', reference: 'Jake' })) } as never,
+        shared: {
+          appointmentRepo: { findByDateRange: vi.fn(async () => []) },
+          jobRepo: { findByIds: vi.fn(async () => []) },
+          userRepo: { findByTenant: vi.fn(async () => []) },
+        },
+      }),
+    });
+
+    const xml = await ask(h, "what's Jake doing Thursday");
+
+    expect(xml).toContain('couldn&apos;t find a crew member matching &quot;Jake&quot;');
+  });
+
+  it('a technician name on lookup_my_day is IGNORED (not a TECHNICIAN_REF intent) — the speaker is always self', async () => {
+    const resolve = vi.fn();
+    const h = makeAdapter({
+      intentType: 'lookup_my_day',
+      entities: { targetTechnicianName: 'Jake' },
+      actorUserId: 'clerk-tech',
+      lookups: lookups({
+        roles: { 'clerk-tech': 'technician' },
+        entityResolver: { resolve } as never,
+        shared: {
+          appointmentRepo: { findByDateRange: vi.fn(async () => []) },
+          jobRepo: { findByIds: vi.fn(async () => []) },
+          userRepo: { findByTenant: vi.fn(async () => [{ id: 'u-tech', tenantId, clerkUserId: 'clerk-tech', role: 'technician' }]) },
+        },
+      }),
+    });
+
+    await ask(h, "what's my day look like");
+
+    expect(resolve).not.toHaveBeenCalled();
+  });
+});
