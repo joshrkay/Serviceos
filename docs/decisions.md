@@ -644,7 +644,11 @@ refused with the shared module's refusal copy (`lookup_my_day` gets an identity-
 The phone is the only surface with anonymous/customer callers, and `lookup_day_overview` /
 `lookup_materials` carry no permission entry on purpose (any signed-in operator may hear them on
 memo/chat) — a denylist over the owner-extended set would have read the tenant's shopping list to
-any identified caller. A table-driven pin over all 20 lookup intents makes the 21st fail loudly.
+any identified caller. `PHONE_PUBLIC_LOOKUP_INTENTS` has exactly one member, `lookup_availability`:
+it is the one lookup a customer legitimately asks ("when could you come out?"), it answered to
+customers before #866, and it reveals only aggregate booking density; anything added to that set
+must be argued for in this log. A table-driven pin over all 20 lookup intents makes the 21st fail
+loudly.
 **Rationale:** Five lookups were unreachable on the phone because the phone carried its own
 14-case copy of a 20-case switch (#843). The shared module's gate and `lookup_my_day`'s
 self-scoping both require an actor, so the "minimal fix" was not available through the shared

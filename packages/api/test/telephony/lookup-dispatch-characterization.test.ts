@@ -16,11 +16,8 @@ import { TwilioGatherAdapter } from '../../src/telephony/twilio-adapter';
 import { VoiceSessionStore } from '../../src/ai/agents/customer-calling/voice-session-store';
 import type { LLMGateway, LLMResponse } from '../../src/ai/gateway/gateway';
 import type { PhoneLookupDeps } from '../../src/ai/voice-turn/phone-lookup-surface';
-import {
-  CUSTOMER_SCOPED_LOOKUP_INTENTS,
-  LOOKUP_REQUIRED_PERMISSION,
-} from '../../src/workers/voice-lookup-answer';
-import { OWNER_EXTENDED_LOOKUP_INTENT_TYPES } from '../../src/ai/orchestration/intent-classifier';
+import { CUSTOMER_SCOPED_LOOKUP_INTENTS } from '../../src/workers/voice-lookup-answer';
+import { SUPPORTED_INTENTS, isLookupIntent } from '../../src/ai/orchestration/intent-classifier';
 import type { IntentType } from '../../src/ai/orchestration/intent-classifier';
 
 const tenantId = 'tenant-lk';
@@ -579,7 +576,8 @@ describe('phone lookups — every outcome is a lookup_executed event', () => {
     expect(lookupEvents(h)).toEqual([expect.objectContaining({ skillName: 'lookup_materials', success: false, error: 'unsupported' })]);
 
     const warnings = stdoutChunks
-      .flatMap((c) => c.split('\n'))
+      .join('')
+      .split('\n')
       .filter((line) => line.startsWith('{'))
       .map((line) => JSON.parse(line) as { level?: string; message?: string; intent?: string })
       .filter((e) => e.level === 'warn' && (e.message ?? '').includes('unsupported'));
@@ -595,18 +593,18 @@ describe('phone lookups — every outcome is a lookup_executed event', () => {
  * entry BY DESIGN (`lookup_day_overview`, `lookup_materials` — any signed-in
  * operator may hear them on memo/chat). The phone is the one surface whose
  * caller may be a customer, so the rule here is an ALLOWLIST: with no actor
- * you get your OWN records and tenant-public lookups, nothing else. This
- * table walks the whole taxonomy so intent 21 cannot slip through silently.
+ * you get your OWN records and tenant-public lookups, nothing else.
+ *
+ * The table is DERIVED from the classifier's own runtime list rather than
+ * hand-unioned from the authorization sets, so an intent 21 that is added to
+ * the taxonomy but to none of those sets still lands here and is forced to
+ * declare itself. (`SUPPORTED_INTENTS` lists five lookup intents twice —
+ * lookup_crew_schedule / lookup_timesheets / lookup_day_overview /
+ * lookup_digest / lookup_pending_items — so it is de-duplicated here; the
+ * count below is the taxonomy, not the array length.)
  */
 const ALL_LOOKUP_INTENTS: IntentType[] = Array.from(
-  new Set<IntentType>([
-    ...CUSTOMER_SCOPED_LOOKUP_INTENTS,
-    ...LOOKUP_REQUIRED_PERMISSION.keys(),
-    ...OWNER_EXTENDED_LOOKUP_INTENT_TYPES,
-    'lookup_my_day',
-    'lookup_materials',
-    'lookup_availability',
-  ]),
+  new Set(SUPPORTED_INTENTS.filter(isLookupIntent)),
 );
 
 /** Tenant-public: a customer may legitimately ask when you could come out. */
@@ -663,6 +661,23 @@ const REFUSAL_COPY: Partial<Record<string, string>> = {
 describe('phone lookups — with no actor, default-deny across the whole taxonomy', () => {
   it('the taxonomy this net covers is exactly 20 intents (intent 21 must fail here)', () => {
     expect(ALL_LOOKUP_INTENTS).toHaveLength(20);
+  });
+
+  it('lookup_availability IS answered with no actor — the one tenant-public lookup', async () => {
+    const h = makeAdapter({
+      intentType: 'lookup_availability',
+      lookups: lookups({
+        shared: { appointmentRepo: { findByDateRange: vi.fn(async () => []) } },
+        answers: { settingsRepo: { findByTenant: vi.fn(async () => ({ tenantId })) } as never },
+      }),
+    });
+
+    const xml = await ask(h, 'when could you come out');
+
+    expect(xml).not.toContain(OWNER_REFUSAL);
+    expect(xml).not.toContain('office-level view');
+    expect(xml).not.toContain('couldn&apos;t verify');
+    expect(xml).toMatch(/which works|open slots/i);
   });
 
   it.each(MUST_REFUSE_WITHOUT_ACTOR)(

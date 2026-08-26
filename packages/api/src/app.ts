@@ -2557,7 +2557,9 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
   // #866 — the repos the lookup skills reuse from the routers, built ONCE.
   // Handed to the assistant chat and the live phone as the same object, so
   // three surfaces cannot drift on which repos a skill gets. (The memo worker
-  // assembles the identical set from its own deps inside voice-action-router.)
+  // receives the same repo instances as individual deps and assembles the
+  // identical set inside voice-action-router — by convention, not by
+  // construction.)
   const sharedLookupRepos = {
     jobRepo,
     appointmentRepo,
@@ -3532,7 +3534,6 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     conversationRepo,
     agreementRepo,
     catalogRepo,
-    lookupEvents: lookupEventService,
     // #866 — the phone's read-only lookups dispatch through the SAME bundle
     // the assistant chat gets (see phoneLookupDeps above). The five
     // lookup-only repos that used to be listed here fed the deleted

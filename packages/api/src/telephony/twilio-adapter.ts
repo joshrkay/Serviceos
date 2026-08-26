@@ -39,7 +39,6 @@ import type { CustomerRepository } from '../customers/customer';
 import type { TagRepository } from '../customers/tag';
 import { isCustomerDuplicateLoader } from '../customers/dedup';
 import type { EstimateRepository } from '../estimates/estimate';
-import type { LookupEventService } from '../lookup-events/lookup-event-service';
 import type { LLMGateway } from '../ai/gateway/gateway';
 import { discloseRecording } from '../ai/skills/disclose-recording';
 import { t, type Language } from '../ai/i18n/i18n';
@@ -247,8 +246,6 @@ export interface TwilioAdapterDeps {
   negotiationQuoteResolver?: CurrentQuoteResolver;
   estimateRepo?: EstimateRepository;
   catalogRepo?: CatalogItemRepository;
-  /** P11-001: when wired, every lookup invocation writes a row. */
-  lookupEvents?: LookupEventService;
   /**
    * #866 — the SAME lookup bundle (answers + shared repos + resolver +
    * timezone) app.ts hands the memo worker and the assistant chat. The

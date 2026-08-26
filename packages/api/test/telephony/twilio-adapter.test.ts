@@ -1232,6 +1232,34 @@ describe('TwilioGatherAdapter.handleGather', () => {
       },
     );
 
+    it('lookup_pending_items speaks the dropped-call recoveries line at the PHONE seam (the port the old switch passed and the shared dispatch briefly lost)', async () => {
+      const deps = await ownerAdapter('lookup_pending_items');
+      // "Unanswered" = a recovery SMS that was SENT and never suppressed —
+      // schedule then markSent, the two steps the recovery worker takes.
+      const row = await deps.droppedCallRecoveryRepo.schedule({
+        tenantId,
+        voiceSessionId: 'a1111111-1111-4111-8111-111111111111',
+        callerE164: '+15125550111',
+        scheduledFor: new Date(Date.now() - 60 * 60 * 1000),
+      });
+      await deps.droppedCallRecoveryRepo.markSent(
+        tenantId,
+        row.id,
+        'SM-test',
+        new Date(Date.now() - 30 * 60 * 1000),
+      );
+
+      const xml = await deps.adapter.handleGather({
+        sessionId: deps.session.id,
+        callSid: 'CA-lookup_pending_items-recoveries',
+        speechResult: 'what is pending',
+        confidence: 0.95,
+        tenantId,
+      });
+
+      expect(xml).toContain('dropped-call recovery');
+    });
+
     it('a forced lookup_digest classification with NO resolvable actor is refused without calling the skill', async () => {
       const deps = await ownerAdapter('lookup_digest', null, false);
       const findLatest = vi.spyOn(deps.dailyDigestRepo, 'findLatest');
