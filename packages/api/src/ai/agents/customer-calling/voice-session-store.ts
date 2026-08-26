@@ -173,6 +173,16 @@ export interface VoiceSession {
   /** Set when `identifyCaller` matched an existing customer. */
   customerId?: string;
   /**
+   * #866 — the tenant user this call is authorised AS, resolved ONCE at
+   * session establishment from the caller-ID (`telephony/phone-actor.ts`)
+   * and never from utterance content. A Clerk subject when the user has
+   * one, else the users row id — both are accepted by the shared role
+   * resolver. Absent for customers and unrecognised numbers: permission-
+   * gated lookups then refuse honestly. Session-level (not FSM context) on
+   * purpose: the transition table must stay inert to it.
+   */
+  actorUserId?: string;
+  /**
    * True once the recording disclosure has actually been emitted to the caller
    * on this call (set by `bootstrapCallEstablishment`, which is the only
    * caller of `discloseRecording`). Any path that resumes or re-arms audio
