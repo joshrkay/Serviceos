@@ -475,3 +475,61 @@ describe('phone lookups — spoken reference resolution (shared resolver, chat s
     expect(resolve).not.toHaveBeenCalled();
   });
 });
+
+describe('phone lookups — every outcome is a lookup_executed event', () => {
+  it('answered → success: true', async () => {
+    const h = makeAdapter({
+      intentType: 'lookup_jobs',
+      lookups: lookups({ shared: { jobRepo: { findByCustomer: vi.fn(async () => []), findById: vi.fn(async () => null) }, appointmentRepo: { findByCustomer: vi.fn(async () => []) } } }),
+    });
+    await ask(h, 'what jobs do I have');
+    expect(lookupEvents(h)).toEqual([expect.objectContaining({ skillName: 'lookup_jobs', success: true })]);
+  });
+
+  it('refused → success: false, error: refused', async () => {
+    const h = makeAdapter({ intentType: 'lookup_revenue', lookups: lookups({ answers: { moneyDashboardRepo: {} as never } }) });
+    await ask(h, 'revenue');
+    expect(lookupEvents(h)).toEqual([expect.objectContaining({ skillName: 'lookup_revenue', success: false, error: 'refused' })]);
+  });
+
+  it('skill failure → success: false with the error, and the unavailable line', async () => {
+    const h = makeAdapter({
+      intentType: 'lookup_jobs',
+      lookups: lookups({ shared: { jobRepo: { findByCustomer: vi.fn(async () => { throw new Error('pg down'); }), findById: vi.fn() }, appointmentRepo: {} } }),
+    });
+    const xml = await ask(h, 'what jobs do I have');
+    expect(xml).toContain(NOT_WIRED);
+    expect(lookupEvents(h)).toEqual([expect.objectContaining({ success: false, error: 'pg down' })]);
+  });
+
+  it('unsupported (repos missing in this deployment) → success: false, error: unsupported, and a warning naming the intent', async () => {
+    const h = makeAdapter({ intentType: 'lookup_materials', actorUserId: 'clerk-tech', lookups: lookups({ roles: { 'clerk-tech': 'technician' } }) });
+
+    // The JSON logger writes directly to process.stdout — not console.* — so
+    // spy on stdout.write to capture the wiring-gap warning line. (Same
+    // mechanism as test/routes/telephony-tenant-lookup.test.ts.)
+    const stdoutChunks: string[] = [];
+    const stdoutSpy = vi.spyOn(process.stdout, 'write').mockImplementation(((chunk: unknown) => {
+      stdoutChunks.push(String(chunk));
+      return true;
+    }) as typeof process.stdout.write);
+
+    let xml: string;
+    try {
+      xml = await ask(h, 'what materials do I need');
+    } finally {
+      stdoutSpy.mockRestore();
+    }
+
+    expect(xml).toContain(NOT_WIRED);
+    expect(lookupEvents(h)).toEqual([expect.objectContaining({ skillName: 'lookup_materials', success: false, error: 'unsupported' })]);
+
+    const warnings = stdoutChunks
+      .flatMap((c) => c.split('\n'))
+      .filter((line) => line.startsWith('{'))
+      .map((line) => JSON.parse(line) as { level?: string; message?: string; intent?: string })
+      .filter((e) => e.level === 'warn' && (e.message ?? '').includes('unsupported'));
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0].intent).toBe('lookup_materials');
+  });
+});
