@@ -288,11 +288,45 @@ describe('CustomerEdit — create mode (no customerId)', () => {
     expect(body.lastName).toBe('Hopper');
   });
 
-  it('shows the same required-field validation as edit mode', () => {
+  it('shows a first-name-required error on a fully blank submit', () => {
     render(<CustomerEdit />);
     fireEvent.click(screen.getByRole('button', { name: /create/i }));
-    expect(screen.getByRole('alert')).toHaveTextContent(/required/i);
+    expect(screen.getByRole('alert')).toHaveTextContent(/first name is required/i);
     expect(apiFetch).not.toHaveBeenCalled();
+  });
+
+  // createCustomerSchema (packages/api/src/shared/contracts.ts) requires
+  // BOTH firstName and lastName — unlike edit mode's PUT, which allows
+  // company-only. AddCustomerSheet (CustomersPage.tsx), the other create
+  // path, agrees: it has no company field at all and always derives both
+  // firstName and lastName from its single "Full name" input before
+  // POSTing. Company-only must not reach the server here either — a
+  // company-only submit would otherwise pass this form's client check,
+  // POST, and come back as a 400 the user never asked for.
+  it('rejects a company-only submit with a last-name-required error and never calls POST /api/customers', () => {
+    render(<CustomerEdit />);
+
+    fireEvent.change(screen.getByLabelText('firstName'), { target: { value: 'Acme Plumbing' } });
+    fireEvent.change(screen.getByLabelText('companyName'), { target: { value: 'Acme Plumbing' } });
+    fireEvent.click(screen.getByRole('button', { name: /create/i }));
+
+    expect(screen.getByRole('alert')).toHaveTextContent(/last name is required/i);
+    expect(apiFetch).not.toHaveBeenCalled();
+  });
+
+  it('shows the API error when the POST fails (server 400 is surfaced, not swallowed)', async () => {
+    vi.mocked(apiFetch).mockResolvedValueOnce({
+      ok: false,
+      status: 400,
+      json: async () => ({ message: 'firstName and lastName are required' }),
+    } as unknown as Response);
+
+    render(<CustomerEdit />);
+    fireEvent.change(screen.getByLabelText('firstName'), { target: { value: 'Grace' } });
+    fireEvent.change(screen.getByLabelText('lastName'), { target: { value: 'Hopper' } });
+    fireEvent.click(screen.getByRole('button', { name: /create/i }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('firstName and lastName are required');
   });
 
   it('Cancel and Create controls are present and full-size for the create form', () => {

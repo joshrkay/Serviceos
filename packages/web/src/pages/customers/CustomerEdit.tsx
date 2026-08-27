@@ -103,9 +103,29 @@ export function CustomerEdit({ customerId, onSaved, onCancel }: CustomerEditProp
       e.preventDefault();
       setError(null);
 
-      if (!form.firstName.trim() && !form.companyName.trim()) {
-        setError('First name or company is required.');
-        return;
+      if (customerId) {
+        if (!form.firstName.trim() && !form.companyName.trim()) {
+          setError('First name or company is required.');
+          return;
+        }
+      } else {
+        // Create mode matches the server's createCustomerSchema
+        // (packages/api/src/shared/contracts.ts), which requires BOTH
+        // firstName and lastName — unlike PUT/update, POST /api/customers
+        // has no "or company" fallback. AddCustomerSheet (the other create
+        // path, CustomersPage.tsx) agrees: it has no company field and
+        // always derives both names before POSTing. Catching this
+        // client-side, with a message naming the missing field, keeps a
+        // company-only submit from round-tripping to a 400 the user never
+        // asked for.
+        if (!form.firstName.trim()) {
+          setError('First name is required.');
+          return;
+        }
+        if (!form.lastName.trim()) {
+          setError('Last name is required.');
+          return;
+        }
       }
 
       // Cleared optionals serialize as '' — never a dropped key. The server
