@@ -45,7 +45,7 @@ function syntheticLookupScript(): VoiceQualityScript {
       tenant: { id: 't-vq-008', name: 'Acme HVAC' },
       customers: [
         {
-          id: 'cust-vq-1',
+          id: '00000000-0000-4000-8000-0000000000a1',
           tenantId: 't-vq-008',
           firstName: 'Jane',
           lastName: 'Smith',
@@ -128,6 +128,18 @@ function makeDriverFactory(
       jobRepo: fctx.repos.jobRepo,
       leadRepo: fctx.repos.leadRepo,
       auditRepo: fctx.repos.auditRepo,
+      // #869 — minimal shared lookup bundle so the synthetic `lookup_customer`
+      // script exercises a real answered lookup (an unwired bundle would also
+      // emit `lookup_executed`, but as `success:false, error:'unsupported'`).
+      lookups: {
+        answers: {},
+        shared: {
+          customerRepo: fctx.repos.customerRepo,
+          jobRepo: fctx.repos.jobRepo,
+          appointmentRepo: fctx.repos.appointmentRepo,
+          proposalRepo: fctx.repos.proposalRepo,
+        },
+      },
       systemActorId: 'system:vq-test',
     });
 
@@ -159,7 +171,7 @@ describe('VQ-008 — runner', () => {
   it('VQ-008 — runScript with a synthetic single-turn lookup script returns Observation with non-empty events and lookup_executed', async () => {
     const script = syntheticLookupScript();
     const factory = makeDriverFactory(
-      'cust-vq-1',
+      '00000000-0000-4000-8000-0000000000a1',
       JSON.stringify({ intentType: 'lookup_customer', confidence: 0.95 }),
     );
 
@@ -171,6 +183,11 @@ describe('VQ-008 — runner', () => {
       (e) => e.type === 'lookup_executed',
     );
     expect(lookupEvents).toHaveLength(1);
+    // #869 — an ANSWERED lookup, not merely an emitted event: an unwired
+    // bundle (or a fixture id the shared dispatch cannot parse) would also
+    // emit exactly one `lookup_executed`, with `success: false`.
+    expect(lookupEvents[0]).toMatchObject({ skillName: 'lookup_customer', success: true });
+    expect(result.observation.errors).toEqual([]);
     expect(result.errors).toHaveLength(0);
     // Runner does not grade.
     expect(result.passed).toBe(false);
@@ -180,7 +197,7 @@ describe('VQ-008 — runner', () => {
   it('VQ-008 — runScript with a hangup turn marks Observation.sessionEndedAs=terminated and hangupOccurred=true', async () => {
     const script = syntheticHangupScript();
     const factory = makeDriverFactory(
-      'cust-vq-1',
+      '00000000-0000-4000-8000-0000000000a1',
       JSON.stringify({ intentType: 'lookup_customer', confidence: 0.95 }),
     );
 
@@ -193,7 +210,7 @@ describe('VQ-008 — runner', () => {
   it('VQ-008 — runScript seeds fixtures: customer count delta is 0 when no creations expected', async () => {
     const script = syntheticLookupScript();
     const factory = makeDriverFactory(
-      'cust-vq-1',
+      '00000000-0000-4000-8000-0000000000a1',
       JSON.stringify({ intentType: 'lookup_customer', confidence: 0.95 }),
     );
 
@@ -224,7 +241,7 @@ describe('VQ-008 — runner', () => {
     };
 
     const factoryA = makeDriverFactory(
-      'cust-vq-1',
+      '00000000-0000-4000-8000-0000000000a1',
       JSON.stringify({ intentType: 'lookup_customer', confidence: 0.95 }),
     );
     const factoryB = makeDriverFactory(
@@ -287,7 +304,7 @@ describe('VQ-008 — runner', () => {
   it('PR#265 review — runScript on a happy-path script emits session_terminated{completed} so observation.sessionEndedAs === completed', async () => {
     const script = syntheticLookupScript();
     const factory = makeDriverFactory(
-      'cust-vq-1',
+      '00000000-0000-4000-8000-0000000000a1',
       JSON.stringify({ intentType: 'lookup_customer', confidence: 0.95 }),
     );
 
@@ -307,7 +324,7 @@ describe('VQ-008 — runner', () => {
   it('PR#265 review — runScript on a hangup script still ends as terminated and does NOT add a competing completed event', async () => {
     const script = syntheticHangupScript();
     const factory = makeDriverFactory(
-      'cust-vq-1',
+      '00000000-0000-4000-8000-0000000000a1',
       JSON.stringify({ intentType: 'lookup_customer', confidence: 0.95 }),
     );
 

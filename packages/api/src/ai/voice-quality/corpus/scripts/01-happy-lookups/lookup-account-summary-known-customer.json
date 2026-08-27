@@ -11,7 +11,7 @@
     },
     "customers": [
       {
-        "id": "cust_01_account_summary_jane",
+        "id": "00000000-0000-4000-8000-000001010001",
         "tenantId": "t_01_lookup_account_summary",
         "firstName": "Jane",
         "lastName": "Smith",
@@ -31,9 +31,9 @@
     ],
     "appointments": [
       {
-        "id": "appt_01_account_summary_1",
+        "id": "00000000-0000-4000-8000-000001010003",
         "tenantId": "t_01_lookup_account_summary",
-        "jobId": "job_01_account_summary_1",
+        "jobId": "00000000-0000-4000-8000-000001010002",
         "scheduledStart": "2026-05-20T17:00:00.000Z",
         "scheduledEnd": "2026-05-20T19:00:00.000Z",
         "arrivalWindowStart": "2026-05-20T17:00:00.000Z",
@@ -48,9 +48,9 @@
     ],
     "invoices": [
       {
-        "id": "inv_01_account_summary_1",
+        "id": "00000000-0000-4000-8000-000001010004",
         "tenantId": "t_01_lookup_account_summary",
-        "jobId": "job_01_account_summary_1",
+        "jobId": "00000000-0000-4000-8000-000001010002",
         "estimateId": null,
         "invoiceNumber": "INV-1001",
         "status": "sent",

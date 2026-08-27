@@ -34,25 +34,47 @@
  * job would. This keeps the driver behavior in lock-step with the
  * worker without copy-pasting business logic.
  *
- * # Lookup dispatch — a KNOWINGLY STALE mirror of the PRE-#866 phone path
+ * # Lookup dispatch — the FOURTH caller of the shared dispatch (#869)
  * Lookup intents are read-only and never produce a proposal. This harness
- * carries its own 15-case switch: each `lookup_*` intent maps to a skill, the
- * skill's TTS-ready `summary` becomes the `agentResponse`, and
- * `lookup_executed` is emitted on the session bus.
+ * carries NO lookup switch. The `lookup` branch of the turn plan calls
+ * `ai/voice-turn/phone-lookup-surface.ts#answerPhoneLookup` — the SAME
+ * transport-neutral surface adapter the live phone's Gather adapter calls —
+ * which dispatches into the one shared implementation,
+ * `workers/voice-lookup-answer.ts#executeLookupAnswer`. The harness adds
+ * nothing on top: the five #866 intents, the DB-authoritative RBAC gate, the
+ * phone's default-deny allowlist, shared reference resolution, the production
+ * refusal / unavailable copy and `lookup_executed` on EVERY outcome are all
+ * inherited. (Until #869 this file carried a 15-case copy of the phone's
+ * pre-#866 switch; a lookup regression on the phone could not move the Layer 1
+ * score, and three corpus scripts asserted the leak #866 closed.)
  *
- * It is a copy of how the LIVE PHONE worked BEFORE #866, and it has
- * deliberately not been converted:
- *   - it gates on `ownerSession && extendedIntents`, not on a resolved actor;
- *   - it has no RBAC gate, no default-deny allowlist, no actor at all;
- *   - it answers none of the five intents #866 wired (lookup_my_day,
- *     lookup_materials, lookup_job_profit, lookup_crew_schedule,
- *     lookup_timesheets).
- * PRODUCTION no longer looks like this: the phone dispatches through
- * `ai/voice-turn/phone-lookup-surface.ts` into the shared
- * `workers/voice-lookup-answer.ts`. Converting this harness is a follow-up
- * that must land WITH a corpus refresh — the voice-quality lookup scores
- * measure THIS copy, not the shipped surface, so changing it silently
- * re-baselines the corpus.
+ * IDENTITY. The phone resolves its ACTOR once, at session establishment, from
+ * caller-ID (`telephony/phone-actor.ts`); it is never derived from anything the
+ * caller says. This harness has no users substrate, so it mirrors that shape
+ * with a SYNTHETIC actor: a recognized owner line (the `callerIsOwner` fixture
+ * or a caller-ID match against `tenant_settings.owner_phone`) stamps
+ * `session.actorUserId = vqOwnerActorId(tenantId)`, and the harness-owned
+ * `lookups.answers.resolveMemberRole` — the same seam production resolves
+ * roles through — maps that subject to `owner`. A non-owner caller gets NO
+ * actor, exactly like a customer on the phone, so the allowlist and the
+ * refusal copy are what a corpus script observes.
+ *
+ * WHAT A LAYER 1 LOOKUP SCORE THEREFORE MEANS. It measures the shipped lookup
+ * surface: a regression in `phone-lookup-surface.ts` or in the shared dispatch
+ * turns the corpus red. It does NOT measure classification (see the criterion-9
+ * note in the corpus driver factory), and it does not measure Twilio.
+ *
+ * FIXTURES MUST BE PRODUCTION-SHAPED. Because the harness now runs the shipped
+ * dispatch, a corpus script's entity ids are held to the shipped contract: the
+ * answer's `entityRef.id` is a UUID, and `executeLookupAnswer` PARSES the answer
+ * rather than casting it, so a readable id like `cust_01_…` makes a lookup that
+ * actually succeeded report `failed` and speak the unavailable line. Seed
+ * customer / job / invoice / estimate ids as UUIDs.
+ *
+ * The classifier side is untouched: the driver does not set `extendedIntents`,
+ * so no script's prompt gains the owner-extended section (D-026 — the tenant
+ * flag gates what the classifier OFFERS; the actor + allowlist gate what the
+ * dispatch ANSWERS).
  *
  * # Synthetic CallSid
  * `VoiceSessionStore.create()` accepts an optional `callSid` (used by
@@ -74,7 +96,6 @@ import {
   isLookupIntent,
   isVoiceApprovalIntent,
   isVoiceEditIntent,
-  OWNER_LOOKUP_INTENT_TYPES,
   type IntentType,
 } from '../orchestration/intent-classifier';
 import { isApproverPhone } from '../../proposals/approver-identity';
@@ -110,44 +131,25 @@ import type { SettingsRepository } from '../../settings/settings';
 import type { OnCallRepository } from '../../oncall/rotation';
 import type { Customer } from '../../customers/customer';
 
-// Skills (lookup family — read-only). Imported directly by this harness's own
-// switch below, which is a knowingly stale mirror of the pre-#866 phone path
-// (see the "Lookup dispatch" section of the module doc comment); production
-// reaches these skills through workers/voice-lookup-answer.ts instead.
-import { lookupAppointments } from '../skills/lookup-appointments';
-import { lookupInvoices } from '../skills/lookup-invoices';
-import { lookupBalance } from '../skills/lookup-balance';
-import { lookupJobs } from '../skills/lookup-jobs';
-import { lookupAgreements } from '../skills/lookup-agreements';
-import { lookupAccountSummary } from '../skills/lookup-account-summary';
-import { lookupCustomer } from '../skills/lookup-customer';
-import { lookupEstimates } from '../skills/lookup-estimates';
-import { lookupLeads } from '../skills/lookup-leads';
-import { lookupRevenue } from '../skills/lookup-revenue';
-import { lookupCatalog } from '../skills/lookup-catalog';
-import { lookupAvailability } from '../skills/lookup-availability';
-import { lookupDayOverview } from '../skills/lookup-day-overview';
-import { lookupDigest } from '../skills/lookup-digest';
-import { lookupPendingItems } from '../skills/lookup-pending-items';
-import type { AvailabilityFinder } from '../tasks/availability-finder';
-import type { LookupEventService } from '../../lookup-events/lookup-event-service';
+// Lookups: the shared surface adapter the live phone calls. No skill imports
+// here on purpose — a lookup switch in this file is exactly the drift #869
+// deleted (see the "Lookup dispatch" section of the module doc comment).
+import {
+  answerPhoneLookup,
+  type PhoneLookupDeps,
+} from '../voice-turn/phone-lookup-surface';
 
-// Repos (mutation handlers + lookup deps).
+// Repos (mutation handlers + the driver's own identity / compliance paths).
 import type { CustomerRepository } from '../../customers/customer';
 import type { AppointmentRepository } from '../../appointments/appointment';
 import type { InvoiceRepository } from '../../invoices/invoice';
-import type { DunningConfigRepository } from '../../invoices/dunning-config';
 import type { EstimateRepository } from '../../estimates/estimate';
 import type { JobRepository } from '../../jobs/job';
 import type { LeadRepository } from '../../leads/lead';
 import type { AuditRepository } from '../../audit/audit';
-import type { AgreementRepository } from '../../agreements/agreement';
-import type { MoneyDashboardRepository } from '../../reports/money-dashboard';
 import type { CatalogItemRepository } from '../../catalog/catalog-item';
 import type { EntityResolver } from '../resolution/entity-resolver';
-import type { DailyDigestRepository } from '../../digest/digest-service';
 import { createProposal, type ProposalRepository } from '../../proposals/proposal';
-import type { DroppedCallRecoveryRepository } from '../../sms/recovery/scheduler';
 
 // Mutation worker (production code path for proposal creation).
 import {
@@ -227,13 +229,19 @@ export interface TextModeDriverDeps {
   jobRepo?: JobRepository;
   leadRepo?: LeadRepository;
   auditRepo?: AuditRepository;
-  agreementRepo?: AgreementRepository;
-  moneyDashboardRepo?: MoneyDashboardRepository;
   catalogRepo?: CatalogItemRepository;
-  dailyDigestRepo?: DailyDigestRepository;
-  dunningConfigRepo?: DunningConfigRepository;
-  droppedCallRecoveryRepo?: Pick<DroppedCallRecoveryRepository, 'listUnansweredRecoveries'>;
-  availabilityFinder?: AvailabilityFinder;
+  /**
+   * #869 — the shared lookup bundle, IDENTICAL in shape to the one the live
+   * phone's Gather adapter takes (`app.ts` builds one and hands it to every
+   * surface). Omit it and every lookup speaks the unavailable line and emits
+   * `lookup_executed{success:false, error:'unsupported'}`, exactly as an
+   * unwired deployment does on the phone.
+   *
+   * `answers.resolveMemberRole` is harness-owned: it maps the synthetic owner
+   * subject (`vqOwnerActorId`) to `owner` and everything else to null, so the
+   * shipped RBAC gate is exercised rather than bypassed.
+   */
+  lookups?: PhoneLookupDeps;
   /**
    * P0 voice-safety — tenant-scoped entity resolver threaded into the
    * production voice-turn processor below, so a corpus script that says
@@ -242,8 +250,6 @@ export interface TextModeDriverDeps {
    * the deterministic parts (datetime phrases, already-UUID ids).
    */
   entityResolver?: EntityResolver;
-  /** Optional audit-trail of every lookup. */
-  lookupEvents?: LookupEventService;
   /** Used as `userId` on synthesized voice-action-router messages. */
   systemActorId?: string;
   /**
@@ -302,8 +308,38 @@ const SPAM_INTENT_THRESHOLD = 5;
 
 const TEXT_MODE_CALLSID_PREFIX = 'TEXT_MODE_';
 
-const LOOKUP_NOT_WIRED_FALLBACK =
-  "I'm having trouble pulling that up right now. Let me get a person to help.";
+/**
+ * #869 — prefix of the SYNTHETIC actor subject a recognized owner line gets.
+ * The harness's `resolveMemberRole` (corpus factory / unit harness) maps any
+ * subject carrying this prefix to the `owner` role and everything else to
+ * null, so the shipped RBAC gate does the authorising. Distinct from a Clerk
+ * subject (`user_…`) on purpose: nothing in this harness is a real user.
+ */
+export const VQ_OWNER_ACTOR_PREFIX = 'vq-owner:';
+
+/**
+ * The owner line's actor subject for a tenant. Deterministic (stable across
+ * runs, so cassettes and reports don't churn) and tenant-scoped (so a
+ * cross-tenant actor can never resolve).
+ */
+export function vqOwnerActorId(tenantId: string): string {
+  return `${VQ_OWNER_ACTOR_PREFIX}${tenantId}`;
+}
+
+/**
+ * The harness's `resolveMemberRole` — the SAME seam production resolves a
+ * Clerk subject's DB-authoritative role through, so the shared RBAC gate is
+ * exercised rather than bypassed. The owner line's synthetic subject is the
+ * owner; anything else is unknown, and a permission-gated lookup fails closed
+ * to the production refusal copy. Exported so the corpus factory and the unit
+ * harness share one definition (they must agree, or the two lanes gate
+ * differently).
+ */
+export const vqResolveMemberRole = (
+  _tenantId: string,
+  userId: string,
+): Promise<string | null> =>
+  Promise.resolve(userId.startsWith(VQ_OWNER_ACTOR_PREFIX) ? 'owner' : null);
 
 /**
  * WS21b — skill name stamped on the `lookup_executed` event a recognized owner
@@ -446,6 +482,16 @@ export class TextModeDriver implements AgentDriver {
     });
     if (this.deps.bus) {
       this.deps.bus.subscribe(session);
+    }
+
+    // #869 — ACTOR, stamped ONCE at establishment and never from utterance
+    // content, mirroring `telephony/phone-actor.ts`. The harness has no users
+    // substrate, so the owner line resolves to a deterministic SYNTHETIC
+    // subject the harness's own `resolveMemberRole` maps to `owner`. A
+    // non-owner caller gets no actor, exactly as a customer on the phone does,
+    // and the shared dispatch's allowlist decides what they may hear.
+    if (ownerSession) {
+      session.actorUserId = vqOwnerActorId(opts.tenantId);
     }
 
     // WS21b — a recognized owner line is identity-resolved the instant the
@@ -800,7 +846,15 @@ export class TextModeDriver implements AgentDriver {
           agentResponse = 'Got it.';
           break;
         case 'lookup':
-          agentResponse = await this.runLookupSkill(session, intent as IntentType);
+          // #869 — the SAME call the Gather adapter makes. The adapter owns
+          // identity, the allowlist, reference resolution, the spoken copy and
+          // `lookup_executed` on every outcome; the driver adds nothing.
+          agentResponse = await answerPhoneLookup(this.deps.lookups, {
+            session,
+            tenantId: session.tenantId,
+            intent: intent as IntentType,
+            entities,
+          });
           break;
         case 'reprompt': {
           const tts = await this.fireEscalation(
@@ -1274,358 +1328,6 @@ export class TextModeDriver implements AgentDriver {
       createdAt: new Date().toISOString(),
     };
     await this.voiceActionRouter.handle(message, silentLogger());
-  }
-
-  /**
-   * The harness's own lookup switch, minus the TwiML wrapping: map intent →
-   * skill, time it end-to-end, emit `lookup_executed`, return the skill's
-   * TTS-ready `summary` string.
-   *
-   * KNOWINGLY STALE (#866). This mirrors the phone's DELETED `runLookupSkill`
-   * — `ownerSession && extendedIntents` gating, no actor, no RBAC, none of the
-   * five intents #866 wired. The live phone now calls
-   * `ai/voice-turn/phone-lookup-surface.ts`. Do not "fix" this to match
-   * without refreshing the voice-quality corpus in the same change: the lookup
-   * scores are measured against this copy.
-   */
-  private async runLookupSkill(
-    session: VoiceSession,
-    intentType: IntentType,
-  ): Promise<string> {
-    const tenantId = session.tenantId;
-    const customerId = session.customerId;
-    const ownerSession = session.machine.currentContext.ownerSession === true;
-    const extendedIntents = session.machine.currentContext.extendedIntents === true;
-    const ownerLookup = OWNER_LOOKUP_INTENT_TYPES.has(intentType);
-
-    if (ownerLookup) {
-      if (!ownerSession || !extendedIntents) {
-        return LOOKUP_NOT_WIRED_FALLBACK;
-      }
-      return this.runOwnerLookupSkill(session, intentType);
-    }
-    // Lookups are customer-scoped. An anonymous caller doesn't have
-    // an account to read from; degrade gracefully.
-    if (!customerId) {
-      return "I can't pull up your account without identifying you first. Let me get a person to help.";
-    }
-
-    const sharedInput = { tenantId, customerId, sessionId: session.id };
-    // `performance.now()` for sub-ms resolution — see speak() comment.
-    const startMs = performance.now();
-    try {
-      switch (intentType) {
-        case 'lookup_appointments': {
-          if (!this.deps.jobRepo || !this.deps.appointmentRepo) {
-            return LOOKUP_NOT_WIRED_FALLBACK;
-          }
-          const result = await lookupAppointments(sharedInput, {
-            jobRepo: this.deps.jobRepo,
-            appointmentRepo: this.deps.appointmentRepo,
-            ...(this.deps.lookupEvents ? { lookupEvents: this.deps.lookupEvents } : {}),
-          });
-          session.events.emit(
-            'voice-event',
-            lookupExecutedEvent(intentType, performance.now() - startMs, true),
-          );
-          return result.summary;
-        }
-        case 'lookup_invoices': {
-          if (!this.deps.jobRepo || !this.deps.invoiceRepo) {
-            return LOOKUP_NOT_WIRED_FALLBACK;
-          }
-          const result = await lookupInvoices(sharedInput, {
-            jobRepo: this.deps.jobRepo,
-            invoiceRepo: this.deps.invoiceRepo,
-            ...(this.deps.lookupEvents ? { lookupEvents: this.deps.lookupEvents } : {}),
-          });
-          session.events.emit(
-            'voice-event',
-            lookupExecutedEvent(intentType, performance.now() - startMs, true),
-          );
-          return result.summary;
-        }
-        case 'lookup_balance': {
-          if (!this.deps.jobRepo || !this.deps.invoiceRepo) {
-            return LOOKUP_NOT_WIRED_FALLBACK;
-          }
-          const result = await lookupBalance(sharedInput, {
-            jobRepo: this.deps.jobRepo,
-            invoiceRepo: this.deps.invoiceRepo,
-            ...(this.deps.lookupEvents ? { lookupEvents: this.deps.lookupEvents } : {}),
-          });
-          session.events.emit(
-            'voice-event',
-            lookupExecutedEvent(intentType, performance.now() - startMs, true),
-          );
-          return result.summary;
-        }
-        case 'lookup_jobs': {
-          if (!this.deps.jobRepo) {
-            return LOOKUP_NOT_WIRED_FALLBACK;
-          }
-          const result = await lookupJobs(sharedInput, {
-            jobRepo: this.deps.jobRepo,
-            ...(this.deps.lookupEvents ? { lookupEvents: this.deps.lookupEvents } : {}),
-          });
-          session.events.emit(
-            'voice-event',
-            lookupExecutedEvent(intentType, performance.now() - startMs, true),
-          );
-          return result.summary;
-        }
-        case 'lookup_agreements': {
-          if (!this.deps.agreementRepo) {
-            return LOOKUP_NOT_WIRED_FALLBACK;
-          }
-          const result = await lookupAgreements(sharedInput, {
-            agreementRepo: this.deps.agreementRepo,
-            ...(this.deps.lookupEvents ? { lookupEvents: this.deps.lookupEvents } : {}),
-          });
-          session.events.emit(
-            'voice-event',
-            lookupExecutedEvent(intentType, performance.now() - startMs, true),
-          );
-          return result.summary;
-        }
-        case 'lookup_account_summary': {
-          if (
-            !this.deps.jobRepo ||
-            !this.deps.appointmentRepo ||
-            !this.deps.invoiceRepo ||
-            !this.deps.agreementRepo
-          ) {
-            return LOOKUP_NOT_WIRED_FALLBACK;
-          }
-          const result = await lookupAccountSummary(sharedInput, {
-            jobRepo: this.deps.jobRepo,
-            appointmentRepo: this.deps.appointmentRepo,
-            invoiceRepo: this.deps.invoiceRepo,
-            agreementRepo: this.deps.agreementRepo,
-            ...(this.deps.lookupEvents ? { lookupEvents: this.deps.lookupEvents } : {}),
-          });
-          session.events.emit(
-            'voice-event',
-            lookupExecutedEvent(intentType, performance.now() - startMs, true),
-          );
-          return result.summary;
-        }
-        case 'lookup_customer': {
-          if (!this.deps.customerRepo) {
-            return LOOKUP_NOT_WIRED_FALLBACK;
-          }
-          const result = await lookupCustomer(
-            {
-              tenantId,
-              identifier: { type: 'id', value: customerId },
-              sessionId: session.id,
-            },
-            {
-              customerRepo: this.deps.customerRepo,
-              ...(this.deps.lookupEvents ? { lookupEvents: this.deps.lookupEvents } : {}),
-            },
-          );
-          session.events.emit(
-            'voice-event',
-            lookupExecutedEvent(intentType, performance.now() - startMs, true),
-          );
-          return result.summary;
-        }
-        case 'lookup_estimates': {
-          if (!this.deps.jobRepo || !this.deps.estimateRepo) {
-            return LOOKUP_NOT_WIRED_FALLBACK;
-          }
-          const result = await lookupEstimates(sharedInput, {
-            jobRepo: this.deps.jobRepo,
-            estimateRepo: this.deps.estimateRepo,
-            ...(this.deps.lookupEvents ? { lookupEvents: this.deps.lookupEvents } : {}),
-          });
-          session.events.emit(
-            'voice-event',
-            lookupExecutedEvent(intentType, performance.now() - startMs, true),
-          );
-          return result.summary;
-        }
-        case 'lookup_leads': {
-          if (!this.deps.leadRepo) {
-            return LOOKUP_NOT_WIRED_FALLBACK;
-          }
-          const result = await lookupLeads(
-            { tenantId, sessionId: session.id },
-            {
-              leadRepo: this.deps.leadRepo,
-              ...(this.deps.lookupEvents ? { lookupEvents: this.deps.lookupEvents } : {}),
-            },
-          );
-          session.events.emit(
-            'voice-event',
-            lookupExecutedEvent(intentType, performance.now() - startMs, true),
-          );
-          return result.summary;
-        }
-        case 'lookup_revenue': {
-          if (!this.deps.moneyDashboardRepo) {
-            return LOOKUP_NOT_WIRED_FALLBACK;
-          }
-          const result = await lookupRevenue(
-            { tenantId, sessionId: session.id },
-            {
-              moneyDashboardRepo: this.deps.moneyDashboardRepo,
-              ...(this.deps.lookupEvents ? { lookupEvents: this.deps.lookupEvents } : {}),
-            },
-          );
-          session.events.emit(
-            'voice-event',
-            lookupExecutedEvent(intentType, performance.now() - startMs, true),
-          );
-          return result.summary;
-        }
-        case 'lookup_catalog': {
-          if (!this.deps.catalogRepo) {
-            return LOOKUP_NOT_WIRED_FALLBACK;
-          }
-          const result = await lookupCatalog(
-            { tenantId, sessionId: session.id },
-            {
-              catalogRepo: this.deps.catalogRepo,
-              ...(this.deps.lookupEvents ? { lookupEvents: this.deps.lookupEvents } : {}),
-            },
-          );
-          session.events.emit(
-            'voice-event',
-            lookupExecutedEvent(intentType, performance.now() - startMs, true),
-          );
-          return result.summary;
-        }
-        case 'lookup_availability': {
-          if (!this.deps.availabilityFinder) {
-            return LOOKUP_NOT_WIRED_FALLBACK;
-          }
-          const from = this.deps.now ? this.deps.now() : new Date();
-          const result = await lookupAvailability(
-            {
-              tenantId,
-              searchFrom: from,
-              searchTo: new Date(from.getTime() + 14 * 24 * 60 * 60 * 1000),
-              durationMs: 2 * 60 * 60 * 1000,
-            },
-            this.deps.availabilityFinder,
-          );
-          session.events.emit(
-            'voice-event',
-            lookupExecutedEvent(intentType, performance.now() - startMs, true),
-          );
-          return result.status === 'unavailable'
-            ? LOOKUP_NOT_WIRED_FALLBACK
-            : result.message;
-        }
-        default:
-          return LOOKUP_NOT_WIRED_FALLBACK;
-      }
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      session.events.emit(
-        'voice-event',
-        lookupExecutedEvent(intentType, performance.now() - startMs, false, message),
-      );
-      return LOOKUP_NOT_WIRED_FALLBACK;
-    }
-  }
-
-  private async runOwnerLookupSkill(
-    session: VoiceSession,
-    intentType: IntentType,
-  ): Promise<string> {
-    const tenantId = session.tenantId;
-    const startMs = performance.now();
-    try {
-      switch (intentType) {
-        case 'lookup_day_overview': {
-          if (!this.deps.appointmentRepo || !this.deps.jobRepo || !this.deps.proposalRepo) {
-            return LOOKUP_NOT_WIRED_FALLBACK;
-          }
-          const result = await lookupDayOverview(
-            {
-              tenantId,
-              sessionId: session.id,
-              ...(this.deps.now ? { now: this.deps.now() } : {}),
-            },
-            {
-              appointmentRepo: this.deps.appointmentRepo,
-              jobRepo: this.deps.jobRepo,
-              proposalRepo: this.deps.proposalRepo,
-              ...(this.deps.lookupEvents ? { lookupEvents: this.deps.lookupEvents } : {}),
-            },
-          );
-          session.events.emit(
-            'voice-event',
-            lookupExecutedEvent(intentType, performance.now() - startMs, true),
-          );
-          return result.summary;
-        }
-        case 'lookup_digest': {
-          if (!this.deps.dailyDigestRepo) {
-            return LOOKUP_NOT_WIRED_FALLBACK;
-          }
-          const result = await lookupDigest(
-            {
-              tenantId,
-              sessionId: session.id,
-              ...(this.deps.now ? { now: this.deps.now() } : {}),
-            },
-            {
-              digestRepo: this.deps.dailyDigestRepo,
-              ...(this.deps.lookupEvents ? { lookupEvents: this.deps.lookupEvents } : {}),
-            },
-          );
-          session.events.emit(
-            'voice-event',
-            lookupExecutedEvent(intentType, performance.now() - startMs, true),
-          );
-          return result.summary;
-        }
-        case 'lookup_pending_items': {
-          if (!this.deps.estimateRepo || !this.deps.invoiceRepo) {
-            return LOOKUP_NOT_WIRED_FALLBACK;
-          }
-          const result = await lookupPendingItems(
-            {
-              tenantId,
-              sessionId: session.id,
-              ...(this.deps.now ? { now: this.deps.now() } : {}),
-            },
-            {
-              estimateRepo: this.deps.estimateRepo,
-              invoiceRepo: this.deps.invoiceRepo,
-              ...(this.deps.dunningConfigRepo
-                ? { dunningConfigRepo: this.deps.dunningConfigRepo }
-                : {}),
-              ...(this.deps.droppedCallRecoveryRepo
-                ? {
-                    listUnansweredRecoveries: (tenant: string) =>
-                      this.deps.droppedCallRecoveryRepo!.listUnansweredRecoveries(tenant),
-                  }
-                : {}),
-              ...(this.deps.lookupEvents ? { lookupEvents: this.deps.lookupEvents } : {}),
-            },
-          );
-          session.events.emit(
-            'voice-event',
-            lookupExecutedEvent(intentType, performance.now() - startMs, true),
-          );
-          return result.summary;
-        }
-        default:
-          return LOOKUP_NOT_WIRED_FALLBACK;
-      }
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      session.events.emit(
-        'voice-event',
-        lookupExecutedEvent(intentType, performance.now() - startMs, false, message),
-      );
-      return LOOKUP_NOT_WIRED_FALLBACK;
-    }
   }
 }
 

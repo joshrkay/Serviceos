@@ -1292,7 +1292,8 @@ approves by screen/SMS tap).
 — 20 `lookup_*` intents total — routed to read-only skills, never to a
 proposal (correct by design).
 
-> **Dispatch is ONE switch behind THREE surface adapters (#866).** Classification
+> **Dispatch is ONE switch behind THREE surface adapters (#866), with FOUR
+> callers (#869).** Classification
 > is a prefix test (`isLookupIntent`, `intent-classifier.ts`), and dispatch is the
 > single enumerated switch in `workers/voice-lookup-answer.ts#executeLookupAnswer`,
 > reached by:
@@ -1302,6 +1303,12 @@ proposal (correct by design).
 > | recorded memo | `workers/voice-action-router.ts` |
 > | in-app chat (mic + typed) | `ai/orchestration/lookup-dispatch.ts` |
 > | live phone (Gather today; media-streams when #860 step 2 lands) | `ai/voice-turn/phone-lookup-surface.ts` |
+> | Voice Quality Layer 1 harness (not a production surface) | `ai/voice-quality/text-mode-driver.ts` |
+>
+> The Layer 1 harness (#869) is a fourth **caller**, not a fourth surface: it
+> reaches the switch through the phone's own surface adapter, with a synthetic
+> owner actor derived from the script's owner-line fixture, so a Layer 1 lookup
+> score measures the shipped phone lookup path.
 >
 > A new `lookup_*` skill is added to the shared switch **once** and answers on
 > every surface. Two supporting registries remain per-intent and are NOT
