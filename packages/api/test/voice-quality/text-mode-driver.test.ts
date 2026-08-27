@@ -20,7 +20,12 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { VoiceSessionStore } from '../../src/ai/agents/customer-calling/voice-session-store';
 import { AgentEventBus } from '../../src/ai/voice-quality/event-bus';
-import { TextModeDriver } from '../../src/ai/voice-quality/text-mode-driver';
+import {
+  TextModeDriver,
+  VQ_OWNER_ACTOR_PREFIX,
+  vqOwnerActorId,
+} from '../../src/ai/voice-quality/text-mode-driver';
+import { LOOKUP_UNAVAILABLE_LINE } from '../../src/ai/voice-turn/phone-lookup-surface';
 import { createMockLLMGateway } from '../../src/ai/gateway/factory';
 import { InMemoryProposalRepository } from '../../src/proposals/proposal';
 import { InMemoryCustomerRepository } from '../../src/customers/customer';
@@ -30,7 +35,9 @@ import { InMemoryEstimateRepository } from '../../src/estimates/estimate';
 import { InMemoryJobRepository } from '../../src/jobs/job';
 import { InMemoryLeadRepository } from '../../src/leads/in-memory-lead';
 import { InMemoryAuditRepository } from '../../src/audit/audit';
+import { InMemoryAgreementRepository } from '../../src/agreements/agreement';
 import { InMemoryDailyDigestRepository } from '../../src/digest/digest-service';
+import { InMemoryMoneyDashboardRepository } from '../../src/reports/money-dashboard';
 import { InMemoryOnCallRepository } from '../../src/oncall/rotation';
 
 import type { Customer } from '../../src/customers/customer';
@@ -62,6 +69,8 @@ interface Harness {
   customerRepo: InMemoryCustomerRepository;
   appointmentRepo: InMemoryAppointmentRepository;
   dailyDigestRepo: InMemoryDailyDigestRepository;
+  moneyDashboardRepo: InMemoryMoneyDashboardRepository;
+  invoiceRepo: InMemoryInvoiceRepository;
 }
 
 function buildHarness(): Harness {
@@ -77,7 +86,9 @@ function buildHarness(): Harness {
   const jobRepo = new InMemoryJobRepository();
   const leadRepo = new InMemoryLeadRepository();
   const auditRepo = new InMemoryAuditRepository();
+  const agreementRepo = new InMemoryAgreementRepository();
   const dailyDigestRepo = new InMemoryDailyDigestRepository();
+  const moneyDashboardRepo = new InMemoryMoneyDashboardRepository();
 
   const driver = new TextModeDriver({
     voiceSessionStore: store,
@@ -91,11 +102,39 @@ function buildHarness(): Harness {
     jobRepo,
     leadRepo,
     auditRepo,
-    dailyDigestRepo,
+    // #869 — the harness is the FOURTH caller of the shared lookup dispatch;
+    // this bundle is the same shape the live phone's Gather adapter takes.
+    lookups: {
+      answers: {
+        invoiceRepo,
+        estimateRepo,
+        agreementRepo,
+        leadRepo,
+        dailyDigestRepo,
+        moneyDashboardRepo,
+        // Harness-owned actor → role seam (decision 3). The driver's synthetic
+        // owner subject resolves to `owner`; every other subject is unknown, so
+        // the shipped RBAC gate fails closed exactly as it does in production.
+        resolveMemberRole: async (_tenantId: string, userId: string) =>
+          userId.startsWith(VQ_OWNER_ACTOR_PREFIX) ? 'owner' : null,
+      },
+      shared: { jobRepo, appointmentRepo, customerRepo, proposalRepo },
+    },
     systemActorId: 'system:vq-test',
   });
 
-  return { store, bus, driver, provider, proposalRepo, customerRepo, appointmentRepo, dailyDigestRepo };
+  return {
+    store,
+    bus,
+    driver,
+    provider,
+    proposalRepo,
+    customerRepo,
+    appointmentRepo,
+    dailyDigestRepo,
+    moneyDashboardRepo,
+    invoiceRepo,
+  };
 }
 
 describe('VQ-007 — TextModeDriver', () => {
@@ -230,15 +269,20 @@ describe('VQ-007 — TextModeDriver', () => {
     expect(lookups[0].success).toBe(true);
   });
 
-  it('refuses forced owner lookup intent when extendedIntents is not set', async () => {
+  // #869 — replaces "refuses forced owner lookup intent when extendedIntents is
+  // not set". The tenant flag gates what the CLASSIFIER offers, never what the
+  // dispatch answers (D-026); the shipped gate is the resolved actor + RBAC.
+  it('#869 — a forced owner-extended lookup is ANSWERED for an owner actor with the tenant flag unset', async () => {
+    const tenantId = 't-owner-flag-off';
     const { sessionId } = await h.driver.startSession({
-      tenantId: 't-owner-flag-off',
+      tenantId,
       callerId: '+15555550109',
       callerIdBlocked: false,
+      callerIsOwner: true,
     });
     const session = h.store.get(sessionId);
     if (!session) throw new Error('missing session');
-    session.machine.currentContext.ownerSession = true;
+    expect(session.machine.currentContext.extendedIntents).not.toBe(true);
     const findLatest = vi.spyOn(h.dailyDigestRepo, 'findLatest');
 
     h.provider.setDefaultResponse(
@@ -247,9 +291,149 @@ describe('VQ-007 — TextModeDriver', () => {
 
     const { agentResponse } = await h.driver.speak(sessionId, 'read me my day');
 
-    expect(agentResponse).toBe("I'm having trouble pulling that up right now. Let me get a person to help.");
+    expect(agentResponse).not.toBe(LOOKUP_UNAVAILABLE_LINE);
+    expect(agentResponse).not.toContain('owner-level report');
+    expect(findLatest).toHaveBeenCalled();
+    const digests = h.bus
+      .filterByType('lookup_executed')
+      .filter((e) => e.skillName === 'lookup_digest');
+    expect(digests).toHaveLength(1);
+    expect(digests[0].success).toBe(true);
+  });
+
+  it('#869 — a forced owner-extended lookup is REFUSED for a session with no actor', async () => {
+    const { sessionId } = await h.driver.startSession({
+      tenantId: 't-owner-no-actor',
+      callerId: '+15555550110',
+      callerIdBlocked: false,
+    });
+    const findLatest = vi.spyOn(h.dailyDigestRepo, 'findLatest');
+
+    h.provider.setDefaultResponse(
+      JSON.stringify({ intentType: 'lookup_digest', confidence: 0.95 }),
+    );
+
+    const { agentResponse } = await h.driver.speak(sessionId, 'read me my day');
+
+    expect(agentResponse).toContain('owner-level report');
     expect(findLatest).not.toHaveBeenCalled();
-    expect(h.bus.filterByType('lookup_executed')).toHaveLength(0);
+    const digests = h.bus
+      .filterByType('lookup_executed')
+      .filter((e) => e.skillName === 'lookup_digest');
+    expect(digests).toHaveLength(1);
+    expect(digests[0].success).toBe(false);
+    expect(digests[0].error).toBe('refused');
+  });
+
+  it('#869 — an owner-line session answers an owner-grade lookup from the shared dispatch', async () => {
+    const tenantId = 't-owner-revenue';
+    h.moneyDashboardRepo.setSummary({
+      month: '2026-08',
+      revenueCents: 1234500,
+      grossRevenueCents: 1234500,
+      refundsCents: 0,
+      priorMonthRevenueCents: 0,
+      revenueTrendCents: 0,
+      expensesCents: 0,
+      outstandingCents: 0,
+      overdueCents: 0,
+    });
+    const query = vi.spyOn(h.moneyDashboardRepo, 'query');
+
+    const { sessionId } = await h.driver.startSession({
+      tenantId,
+      callerId: '+15125550100',
+      callerIdBlocked: false,
+      callerIsOwner: true,
+    });
+
+    h.provider.setDefaultResponse(
+      JSON.stringify({ intentType: 'lookup_revenue', confidence: 0.95 }),
+    );
+
+    const { agentResponse } = await h.driver.speak(
+      sessionId,
+      'How much have we brought in this month?',
+    );
+
+    // The in-memory money dashboard was actually read — the spoken line is the
+    // skill's own summary, not the surface's unavailable/refusal copy.
+    expect(query).toHaveBeenCalled();
+    expect(agentResponse).toContain('$12345.00');
+    expect(agentResponse).not.toBe(LOOKUP_UNAVAILABLE_LINE);
+
+    const revenue = h.bus
+      .filterByType('lookup_executed')
+      .filter((e) => e.skillName === 'lookup_revenue');
+    expect(revenue).toHaveLength(1);
+    expect(revenue[0].success).toBe(true);
+
+    // The actor is stamped ONCE, at establishment, from the owner line.
+    expect(h.store.get(sessionId)?.actorUserId).toBe(vqOwnerActorId(tenantId));
+  });
+
+  it('#869 — a customer session is refused the same owner-grade lookup, with the production copy', async () => {
+    const tenantId = 't-customer-revenue';
+    const customer = makeCustomer(tenantId, 'cust-rev', 'Rita Ruiz', '+15555550120');
+    await h.customerRepo.create(customer);
+    const query = vi.spyOn(h.moneyDashboardRepo, 'query');
+
+    const { sessionId } = await h.driver.startSession({
+      tenantId,
+      callerId: '+15555550120',
+      callerIdBlocked: false,
+    });
+
+    h.provider.setDefaultResponse(
+      JSON.stringify({ intentType: 'lookup_revenue', confidence: 0.95 }),
+    );
+
+    const { agentResponse } = await h.driver.speak(
+      sessionId,
+      'How much have you brought in this month?',
+    );
+
+    expect(agentResponse).toContain('owner-level report');
+    // Nothing was read: the refusal is decided before any repository call.
+    expect(query).not.toHaveBeenCalled();
+
+    const revenue = h.bus
+      .filterByType('lookup_executed')
+      .filter((e) => e.skillName === 'lookup_revenue');
+    expect(revenue).toHaveLength(1);
+    expect(revenue[0].success).toBe(false);
+    expect(revenue[0].error).toBe('refused');
+
+    // A customer on the phone gets no actor — and neither does this caller.
+    expect(h.store.get(sessionId)?.actorUserId).toBeUndefined();
+  });
+
+  it('#869 — a customer session still gets its OWN records answered (lookup_invoices)', async () => {
+    const tenantId = 't-customer-invoices';
+    const customer = makeCustomer(tenantId, 'cust-inv', 'Fiona Fields', '+15555550121');
+    await h.customerRepo.create(customer);
+
+    const { sessionId } = await h.driver.startSession({
+      tenantId,
+      callerId: '+15555550121',
+      callerIdBlocked: false,
+    });
+    expect(h.store.get(sessionId)?.customerId).toBe('cust-inv');
+
+    h.provider.setDefaultResponse(
+      JSON.stringify({ intentType: 'lookup_invoices', confidence: 0.95 }),
+    );
+
+    const { agentResponse } = await h.driver.speak(sessionId, 'What do I owe?');
+
+    expect(agentResponse).not.toBe(LOOKUP_UNAVAILABLE_LINE);
+    expect(agentResponse).not.toContain('owner-level report');
+
+    const invoices = h.bus
+      .filterByType('lookup_executed')
+      .filter((e) => e.skillName === 'lookup_invoices');
+    expect(invoices).toHaveLength(1);
+    expect(invoices[0].success).toBe(true);
   });
 
   it('VQ-007 — speak() returns latencyMs > 0', async () => {

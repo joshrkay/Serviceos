@@ -639,9 +639,6 @@ export const EXTENDED_INTENT_TYPES = new Set<IntentType>([
   ...OWNER_EXTENDED_LOOKUP_INTENT_TYPES,
 ]);
 
-/** @deprecated Use OWNER_EXTENDED_LOOKUP_INTENT_TYPES — same set. */
-export const OWNER_LOOKUP_INTENT_TYPES = OWNER_EXTENDED_LOOKUP_INTENT_TYPES;
-
 export function isCustomerProtectionIntent(
   intent: IntentType | undefined | null,
 ): boolean {

@@ -128,6 +128,18 @@ function makeDriverFactory(
       jobRepo: fctx.repos.jobRepo,
       leadRepo: fctx.repos.leadRepo,
       auditRepo: fctx.repos.auditRepo,
+      // #869 — minimal shared lookup bundle so the synthetic `lookup_customer`
+      // script exercises a real answered lookup (an unwired bundle would also
+      // emit `lookup_executed`, but as `success:false, error:'unsupported'`).
+      lookups: {
+        answers: {},
+        shared: {
+          customerRepo: fctx.repos.customerRepo,
+          jobRepo: fctx.repos.jobRepo,
+          appointmentRepo: fctx.repos.appointmentRepo,
+          proposalRepo: fctx.repos.proposalRepo,
+        },
+      },
       systemActorId: 'system:vq-test',
     });
 
