@@ -103,6 +103,28 @@ describe('router', () => {
     expect(rootRoute, 'expected a `/` top-level route').toBeDefined();
     expect(routeUsesErrorElement(rootRoute!)).toBe(true);
   });
+
+  // The production bug this guards against: `/customers/new` had no route
+  // of its own, so the literal "new" segment fell through to `customers/:id`
+  // (CustomerDetail), which called GET /api/customers/new and got a 500
+  // (the id isn't a UUID). A real, lazy-loaded customers/new route — declared
+  // before customers/:id — fixes both the missing page and the false match.
+  it('registers customers/new as its own lazy route, before customers/:id', () => {
+    const allRoutes = flattenRoutes(router.routes as RouteObject[]);
+    const createRoute = allRoutes.find((r) => r.path === 'customers/new');
+    expect(createRoute, 'expected a customers/new route').toBeDefined();
+    expect(typeof (createRoute as { lazy?: unknown }).lazy, 'customers/new should be lazy').toBe('function');
+    expect(isEager(createRoute!), 'customers/new should not be eagerly imported').toBe(false);
+
+    const rootRoute = (router.routes as RouteObject[]).find((r) => r.path === '/');
+    const shellRoute = rootRoute!.children?.find((r) => r.path === '/');
+    const siblings = shellRoute!.children ?? [];
+    const newIdx = siblings.findIndex((r) => r.path === 'customers/new');
+    const detailIdx = siblings.findIndex((r) => r.path === 'customers/:id');
+    expect(newIdx, 'customers/new must be registered').toBeGreaterThanOrEqual(0);
+    expect(detailIdx, 'customers/:id must be registered').toBeGreaterThanOrEqual(0);
+    expect(newIdx).toBeLessThan(detailIdx);
+  });
 });
 
 /**

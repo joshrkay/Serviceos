@@ -238,3 +238,66 @@ describe('P11-007 CustomerEdit', () => {
     });
   });
 });
+
+// Root-cause fix for the `/customers/new` 500: the web app had no create
+// route, so "new" was captured as `:id` by CustomerDetail and the API was
+// asked for GET /api/customers/new. This is the page the new customers/new
+// route (routes.ts) renders: CustomerEdit without a customerId.
+describe('CustomerEdit — create mode (no customerId)', () => {
+  beforeEach(() => {
+    vi.mocked(apiFetch).mockReset();
+  });
+
+  it('renders a blank create form immediately, with no fetch-on-mount', async () => {
+    render(<CustomerEdit />);
+
+    expect(await screen.findByTestId('customer-edit-form')).toBeInTheDocument();
+    expect(screen.getByText('New Customer')).toBeInTheDocument();
+    expect(screen.getByLabelText('firstName')).toHaveValue('');
+    // The bug this guards against: CustomerDetail fetching GET
+    // /api/customers/new. The create form must never call apiFetch until
+    // the user submits.
+    expect(apiFetch).not.toHaveBeenCalled();
+  });
+
+  it('POSTs a new customer on save and never calls /api/customers/new', async () => {
+    vi.mocked(apiFetch).mockResolvedValueOnce({
+      ok: true,
+      status: 201,
+      json: async () => ({ id: 'c-new', firstName: 'Grace', lastName: 'Hopper' }),
+    } as unknown as Response);
+
+    const onSaved = vi.fn();
+    render(<CustomerEdit onSaved={onSaved} />);
+
+    fireEvent.change(screen.getByLabelText('firstName'), { target: { value: 'Grace' } });
+    fireEvent.change(screen.getByLabelText('lastName'), { target: { value: 'Hopper' } });
+    fireEvent.click(screen.getByRole('button', { name: /create/i }));
+
+    await waitFor(() => {
+      expect(onSaved).toHaveBeenCalledWith('c-new');
+    });
+
+    expect(apiFetch).toHaveBeenCalledTimes(1);
+    const [url, opts] = vi.mocked(apiFetch).mock.calls[0];
+    expect(url).toBe('/api/customers');
+    expect(url).not.toBe('/api/customers/new');
+    expect(opts?.method).toBe('POST');
+    const body = JSON.parse(opts?.body as string);
+    expect(body.firstName).toBe('Grace');
+    expect(body.lastName).toBe('Hopper');
+  });
+
+  it('shows the same required-field validation as edit mode', () => {
+    render(<CustomerEdit />);
+    fireEvent.click(screen.getByRole('button', { name: /create/i }));
+    expect(screen.getByRole('alert')).toHaveTextContent(/required/i);
+    expect(apiFetch).not.toHaveBeenCalled();
+  });
+
+  it('Cancel and Create controls are present and full-size for the create form', () => {
+    render(<CustomerEdit />);
+    expect(screen.getByRole('button', { name: /create/i }).className).toContain('min-h-11');
+    expect(screen.getByRole('button', { name: /cancel/i }).className).toContain('min-h-11');
+  });
+});
