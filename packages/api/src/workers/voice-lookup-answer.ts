@@ -6,22 +6,18 @@
  * into. The recording row is now that back-channel: this module is the
  * per-skill dispatch adapter (originally mirroring the phone's
  * `runLookupSkill`, which #866 deleted in favour of calling THIS module,
- * and `text-mode-driver.runLookupSkill`, which #869 deleted the same way)
- * that executes the lookup skill and flattens its NON-UNIFORM result shape
- * (`lookup_availability` returns message/slots, not `{summary, data}`) into
- * the shared `VoiceLookupAnswer` wire contract the mobile AnswerCard renders.
+ * and `text-mode-driver.runLookupSkill`) that executes the lookup skill
+ * and flattens its NON-UNIFORM result shape (`lookup_availability`
+ * returns message/slots, not `{summary, data}`) into the shared
+ * `VoiceLookupAnswer` wire contract the mobile AnswerCard renders.
  *
  * SURFACE-NEUTRAL (2026-07): this switch is now the single lookup-dispatch
- * implementation behind FOUR callers — the recorded-memo worker
+ * implementation behind THREE surfaces — the recorded-memo worker
  * (`workers/voice-action-router.ts`), the in-app assistant chat
  * (`routes/assistant.ts`, via `ai/orchestration/lookup-dispatch.ts`,
- * which is where BOTH the mic button and typed input land), since
- * #866 the live phone (`ai/voice-turn/phone-lookup-surface.ts`, both
- * transports via the Gather adapter's establishment core today), and since
- * #869 the Voice Quality Layer 1 harness
- * (`ai/voice-quality/text-mode-driver.ts`, through that same phone surface
- * adapter — a caller, not a production surface, so the Layer 1 lookup score
- * measures the shipped surface). Nothing in
+ * which is where BOTH the mic button and typed input land), and, since
+ * #866, the live phone (`ai/voice-turn/phone-lookup-surface.ts`, both
+ * transports via the Gather adapter's establishment core today). Nothing in
  * here may reference memo-only concepts: the correlation key is
  * `sessionId` (a memo's recordingId / a chat turn's lookup session id)
  * and the authorization subject is `actorId` (the memo creator / the
@@ -51,11 +47,7 @@ import type {
   VoiceAnswerRow,
   VoiceLookupAnswer,
 } from '@ai-service-os/shared';
-import {
-  voiceAnswerEntityRefSchema,
-  voiceLookupAnswerSchema,
-  MAX_VOICE_ANSWER_ROWS,
-} from '@ai-service-os/shared';
+import { voiceLookupAnswerSchema, MAX_VOICE_ANSWER_ROWS } from '@ai-service-os/shared';
 import { hasPermission, isValidRole, type Permission } from '../auth/rbac';
 import type { IntentType } from '../ai/orchestration/intent-classifier';
 import type { JobRepository } from '../jobs/job';
@@ -317,23 +309,8 @@ function buildAnswer(
     result,
     summary: summary.slice(0, 2000),
     rows: rows.slice(0, MAX_VOICE_ANSWER_ROWS),
-    ...(entityRef ? { entityRef: sanitizeEntityRef(entityRef) } : {}),
+    ...(entityRef ? { entityRef } : {}),
   });
-}
-
-/**
- * The entityRef is an OPTIONAL client-side deep-link ("open this customer").
- * Its `id` is `z.string().uuid()`, so an id that isn't a UUID used to throw
- * inside `buildAnswer` and surface as `{kind:'failed'}` — turning a correct,
- * already-computed answer into "let me get a person to help" on the phone
- * (which discards the ref entirely) and `answer_status='failed'` on chat/memo.
- * The answer's SUBSTANCE (result / summary / rows) is still parsed strictly;
- * only the unusable decoration degrades. #869 — surfaced by routing the Layer 1
- * harness through this dispatch, whose corpus fixtures carry readable ids.
- */
-function sanitizeEntityRef(entityRef: VoiceAnswerEntityRef): VoiceAnswerEntityRef {
-  const parsed = voiceAnswerEntityRefSchema.safeParse(entityRef);
-  return parsed.success ? parsed.data : { kind: entityRef.kind };
 }
 
 function text(label: string, value: string): VoiceAnswerRow {
