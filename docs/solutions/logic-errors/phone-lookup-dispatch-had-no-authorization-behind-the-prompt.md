@@ -38,13 +38,19 @@ expressed as "refuse these" fails open for the next intent added; only "answer t
 - The shared RBAC gate then applies on the phone, plus one phone-only allowlist: with no actor, only
   the caller's own customer-scoped records and `lookup_availability` are answered.
 - `PgUserRepository` now maps `status`/`deleted_at` (it never had), so the active check is real.
+- Follow-up (#869): the Voice Quality Layer 1 text-mode harness — which still carried a 15-case copy
+  of the pre-#866 phone switch, so a regression here could not move the Layer 1 score — was converted
+  to the same surface adapter (a synthetic owner actor from the owner-line fixture, resolved through
+  the same `resolveMemberRole` seam), and the three corpus scripts that asked owner questions
+  (`lookup_catalog` / `lookup_revenue` / `lookup_leads`) from a customer's number — i.e. that asserted
+  exactly this leak — were corrected to say the caller is the owner line.
 
 ## How to recognise it next time
 - A surface with its own copy of a shared switch. `grep -rn "case 'lookup_"` should hit ONE
-  production dispatch (`workers/voice-lookup-answer.ts`) plus two non-dispatch hits: the voice-quality
-  text-mode harness (knowingly stale mirror, out of scope) and
+  production dispatch (`workers/voice-lookup-answer.ts`) plus one non-dispatch hit:
   `ai/agents/customer-calling/escalation-summary-builder.ts` (an intent → human-phrase switch, not a
-  dispatch).
+  dispatch). The voice-quality text-mode harness used to be a third hit; #869 deleted its copy, so a
+  new hit in that file is a regression, not a known exception.
 - "Gated by the prompt" anywhere in a comment. The prompt decides what the model may *say*;
   it must never be the only thing deciding what the system *does*.
 - A boolean where the shared module wants an identity.
