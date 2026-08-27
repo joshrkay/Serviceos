@@ -1070,7 +1070,11 @@ describe('TwilioGatherAdapter.handleGather', () => {
       };
     }
 
-    async function ownerAdapter(intentType: string, ownerSession = true, extendedIntents = true) {
+    async function ownerAdapter(
+      intentType: string,
+      actor: { userId: string; role: 'owner' | 'dispatcher' | 'technician' } | null = { userId: 'clerk-owner', role: 'owner' },
+      extendedIntents = true,
+    ) {
       const store = new VoiceSessionStore();
       const gateway = makeGatewayReturning(JSON.stringify({ intentType, confidence: 0.96 }));
       const appointmentRepo = new InMemoryAppointmentRepository();
@@ -1088,16 +1092,30 @@ describe('TwilioGatherAdapter.handleGather', () => {
         appointmentRepo,
         jobRepo,
         proposalRepo,
-        dailyDigestRepo,
         estimateRepo,
         invoiceRepo,
-        droppedCallRecoveryRepo,
+        // #866 — lookups dispatch through the shared bundle, the same shape
+        // app.ts hands memo + chat. Authorization is the actor's role, and
+        // the recovery port rides `answers` now that the shared
+        // `lookup_pending_items` case threads it on every surface.
+        lookups: {
+          answers: {
+            dailyDigestRepo,
+            estimateRepo,
+            invoiceRepo,
+            droppedCallRecoveryRepo,
+            resolveMemberRole: async (_t: string, userId: string) =>
+              actor && userId === actor.userId ? actor.role : null,
+          },
+          shared: { appointmentRepo, jobRepo, proposalRepo },
+        },
       });
       const session = store.create(tenantId, 'telephony', {
         callSid: `CA-${intentType}`,
-        ...(ownerSession ? { ownerSession: true } : {}),
+        ...(actor?.role === 'owner' ? { ownerSession: true } : {}),
         ...(extendedIntents ? { extendedIntents: true } : {}),
       });
+      if (actor) session.actorUserId = actor.userId;
       advanceToIntentCapture(session);
       return {
         adapter,
@@ -1198,9 +1216,9 @@ describe('TwilioGatherAdapter.handleGather', () => {
     });
 
     it.each(['lookup_day_overview', 'lookup_digest', 'lookup_pending_items'])(
-      'non-owner session refuses %s and speaks the existing lookup fallback',
+      'a session with NO actor (customer line) is refused %s — owner-extended lookups are never answered to an anonymous caller',
       async (intentType) => {
-        const deps = await ownerAdapter(intentType, false);
+        const deps = await ownerAdapter(intentType, null);
         const xml = await deps.adapter.handleGather({
           sessionId: deps.session.id,
           callSid: `CA-${intentType}-non-owner`,
@@ -1209,25 +1227,73 @@ describe('TwilioGatherAdapter.handleGather', () => {
           tenantId,
         });
 
-        expect(xml).toContain('I&apos;m having trouble pulling that up right now');
+        expect(xml).toContain('owner-level report');
         expect(xml).not.toContain('Owner digest: revenue was strong');
       },
     );
 
-    it('flag-off owner session refuses a forced lookup_digest classification without calling the skill', async () => {
-      const deps = await ownerAdapter('lookup_digest', true, false);
+    it('lookup_pending_items speaks the dropped-call recoveries line at the PHONE seam (the port the old switch passed and the shared dispatch briefly lost)', async () => {
+      const deps = await ownerAdapter('lookup_pending_items');
+      // "Unanswered" = a recovery SMS that was SENT and never suppressed —
+      // schedule then markSent, the two steps the recovery worker takes.
+      const row = await deps.droppedCallRecoveryRepo.schedule({
+        tenantId,
+        voiceSessionId: 'a1111111-1111-4111-8111-111111111111',
+        callerE164: '+15125550111',
+        scheduledFor: new Date(Date.now() - 60 * 60 * 1000),
+      });
+      await deps.droppedCallRecoveryRepo.markSent(
+        tenantId,
+        row.id,
+        'SM-test',
+        new Date(Date.now() - 30 * 60 * 1000),
+      );
+
+      const xml = await deps.adapter.handleGather({
+        sessionId: deps.session.id,
+        callSid: 'CA-lookup_pending_items-recoveries',
+        speechResult: 'what is pending',
+        confidence: 0.95,
+        tenantId,
+      });
+
+      expect(xml).toContain('dropped-call recovery');
+    });
+
+    it('a forced lookup_digest classification with NO resolvable actor is refused without calling the skill', async () => {
+      const deps = await ownerAdapter('lookup_digest', null, false);
       const findLatest = vi.spyOn(deps.dailyDigestRepo, 'findLatest');
 
       const xml = await deps.adapter.handleGather({
         sessionId: deps.session.id,
-        callSid: 'CA-lookup_digest-flag-off-owner',
+        callSid: 'CA-lookup_digest-no-actor',
         speechResult: 'read me my day',
         confidence: 0.95,
         tenantId,
       });
 
-      expect(xml).toContain('I&apos;m having trouble pulling that up right now');
+      expect(xml).toContain('owner-level report');
       expect(findLatest).not.toHaveBeenCalled();
+    });
+
+    it('the extendedIntents flag no longer gates DISPATCH: a flag-off owner actor is answered (the flag gates classification only)', async () => {
+      const deps = await ownerAdapter('lookup_digest', { userId: 'clerk-owner', role: 'owner' }, false);
+      await deps.dailyDigestRepo.upsert(
+        tenantId,
+        new Date().toISOString().slice(0, 10),
+        {} as Parameters<InMemoryDailyDigestRepository['upsert']>[2],
+        'Owner digest: revenue was strong',
+      );
+
+      const xml = await deps.adapter.handleGather({
+        sessionId: deps.session.id,
+        callSid: 'CA-lookup_digest-flag-off-owner-actor',
+        speechResult: 'read me my day',
+        confidence: 0.95,
+        tenantId,
+      });
+
+      expect(xml).toContain('Owner digest: revenue was strong');
     });
   });
 
