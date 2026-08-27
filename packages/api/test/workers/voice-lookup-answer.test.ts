@@ -32,6 +32,7 @@ import { InMemoryAppointmentRepository } from '../../src/appointments/in-memory-
 import type { Appointment } from '../../src/appointments/appointment';
 import { InMemoryUserRepository } from '../../src/users/user';
 import { InMemoryProposalRepository } from '../../src/proposals/proposal';
+import { InMemoryCustomerRepository } from '../../src/customers/customer';
 
 const TENANT = 'tenant-1';
 const TZ = 'America/New_York';
@@ -172,5 +173,95 @@ describe('executeLookupAnswer — lookup_pending_items recoveries port', () => {
 
     expect(execution.kind).toBe('answer');
     expect(listUnansweredRecoveries).toHaveBeenCalledWith('t1');
+  });
+});
+
+/**
+ * #869 — the answer's SUBSTANCE must survive an entity id the client-side
+ * deep-link schema rejects.
+ *
+ * `VoiceAnswerEntityRef.id` is `z.string().uuid()`, and `buildAnswer` parses
+ * (never casts) the whole answer — so a non-UUID id used to throw INSIDE the
+ * dispatch's try block and surface as `{kind:'failed'}`. On the phone the
+ * entityRef is discarded entirely, so a caller whose lookup succeeded would
+ * instead hear "let me get a person to help"; on chat/memo a correct, already
+ * computed answer would be stored as `answer_status='failed'`. The optional
+ * deep-link is the only thing that may degrade.
+ *
+ * Found by routing the Layer 1 harness through this dispatch (#869): its
+ * corpus fixtures carry readable ids (`cust_01_…`), not UUIDs.
+ */
+describe('executeLookupAnswer — a non-UUID entity id degrades the deep-link, not the answer', () => {
+  it('answers lookup_customer for a non-UUID customerId, dropping only entityRef.id', async () => {
+    const customerRepo = new InMemoryCustomerRepository();
+    await customerRepo.create({
+      id: 'cust_01_customer_carlos',
+      tenantId: TENANT,
+      firstName: 'Carlos',
+      lastName: 'Rivera',
+      displayName: 'Carlos Rivera',
+      primaryPhone: '+15555550102',
+      preferredChannel: 'phone',
+      smsConsent: true,
+      isArchived: false,
+      createdBy: 'user_seed',
+      createdAt: new Date('2026-02-10T09:00:00.000Z'),
+      updatedAt: new Date('2026-04-01T09:00:00.000Z'),
+    });
+
+    const execution = await executeLookupAnswer(
+      {
+        tenantId: TENANT,
+        sessionId: '00000000-0000-4000-8000-000000000002',
+        intent: 'lookup_customer',
+        customerId: 'cust_01_customer_carlos',
+        now: NOW,
+      },
+      {},
+      { proposalRepo: new InMemoryProposalRepository(), customerRepo },
+    );
+
+    expect(execution.kind).toBe('answer');
+    if (execution.kind !== 'answer') return;
+    expect(execution.answer.result).toBe('found');
+    expect(execution.answer.summary).toContain('Carlos');
+    // The kind survives (it tells the client WHAT was answered about); the
+    // unusable id does not.
+    expect(execution.answer.entityRef).toEqual({ kind: 'customer' });
+  });
+
+  it('keeps a well-formed UUID entity id', async () => {
+    const customerRepo = new InMemoryCustomerRepository();
+    const id = '11111111-1111-4111-8111-111111111111';
+    await customerRepo.create({
+      id,
+      tenantId: TENANT,
+      firstName: 'Uma',
+      lastName: 'Uuid',
+      displayName: 'Uma Uuid',
+      primaryPhone: '+15555550103',
+      preferredChannel: 'phone',
+      smsConsent: true,
+      isArchived: false,
+      createdBy: 'user_seed',
+      createdAt: new Date('2026-02-10T09:00:00.000Z'),
+      updatedAt: new Date('2026-04-01T09:00:00.000Z'),
+    });
+
+    const execution = await executeLookupAnswer(
+      {
+        tenantId: TENANT,
+        sessionId: '00000000-0000-4000-8000-000000000003',
+        intent: 'lookup_customer',
+        customerId: id,
+        now: NOW,
+      },
+      {},
+      { proposalRepo: new InMemoryProposalRepository(), customerRepo },
+    );
+
+    expect(execution.kind).toBe('answer');
+    if (execution.kind !== 'answer') return;
+    expect(execution.answer.entityRef).toEqual({ kind: 'customer', id });
   });
 });
