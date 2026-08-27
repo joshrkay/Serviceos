@@ -22,8 +22,8 @@ import { VoiceSessionStore } from '../../src/ai/agents/customer-calling/voice-se
 import { AgentEventBus } from '../../src/ai/voice-quality/event-bus';
 import {
   TextModeDriver,
-  VQ_OWNER_ACTOR_PREFIX,
   vqOwnerActorId,
+  vqResolveMemberRole,
 } from '../../src/ai/voice-quality/text-mode-driver';
 import { LOOKUP_UNAVAILABLE_LINE } from '../../src/ai/voice-turn/phone-lookup-surface';
 import { createMockLLMGateway } from '../../src/ai/gateway/factory';
@@ -112,11 +112,9 @@ function buildHarness(): Harness {
         leadRepo,
         dailyDigestRepo,
         moneyDashboardRepo,
-        // Harness-owned actor → role seam (decision 3). The driver's synthetic
-        // owner subject resolves to `owner`; every other subject is unknown, so
-        // the shipped RBAC gate fails closed exactly as it does in production.
-        resolveMemberRole: async (_tenantId: string, userId: string) =>
-          userId.startsWith(VQ_OWNER_ACTOR_PREFIX) ? 'owner' : null,
+        // Harness-owned actor → role seam (decision 3), shared verbatim with
+        // the corpus factory.
+        resolveMemberRole: vqResolveMemberRole,
       },
       shared: { jobRepo, appointmentRepo, customerRepo, proposalRepo },
     },
@@ -163,7 +161,7 @@ describe('VQ-007 — TextModeDriver', () => {
 
   it('VQ-007 — speak() with a lookup intent returns a spoken summary as agentResponse', async () => {
     const tenantId = 't-1';
-    const customer = makeCustomer(tenantId, 'cust-1', 'Jane Smith', '+15555550100');
+    const customer = makeCustomer(tenantId, '00000000-0000-4000-8000-000000000001', 'Jane Smith', '+15555550100');
     await h.customerRepo.create(customer);
 
     const { sessionId } = await h.driver.startSession({
@@ -174,7 +172,7 @@ describe('VQ-007 — TextModeDriver', () => {
     // Bind the session to this customer so customer-scoped lookups
     // (lookup_customer, lookup_account_summary) resolve.
     const session = h.store.get(sessionId);
-    if (session) session.customerId = 'cust-1';
+    if (session) session.customerId = '00000000-0000-4000-8000-000000000001';
 
     h.provider.setDefaultResponse(
       JSON.stringify({ intentType: 'lookup_customer', confidence: 0.95 }),
@@ -245,7 +243,7 @@ describe('VQ-007 — TextModeDriver', () => {
 
   it('VQ-007 — speak() emits intent_classified + lookup_executed on the bus for a lookup', async () => {
     const tenantId = 't-3';
-    const customer = makeCustomer(tenantId, 'cust-9', 'Alice Doe', '+15555550103');
+    const customer = makeCustomer(tenantId, '00000000-0000-4000-8000-000000000009', 'Alice Doe', '+15555550103');
     await h.customerRepo.create(customer);
 
     const { sessionId } = await h.driver.startSession({
@@ -254,7 +252,7 @@ describe('VQ-007 — TextModeDriver', () => {
       callerIdBlocked: false,
     });
     const session = h.store.get(sessionId);
-    if (session) session.customerId = 'cust-9';
+    if (session) session.customerId = '00000000-0000-4000-8000-000000000009';
 
     h.provider.setDefaultResponse(
       JSON.stringify({ intentType: 'lookup_customer', confidence: 0.93 }),
@@ -374,7 +372,7 @@ describe('VQ-007 — TextModeDriver', () => {
 
   it('#869 — a customer session is refused the same owner-grade lookup, with the production copy', async () => {
     const tenantId = 't-customer-revenue';
-    const customer = makeCustomer(tenantId, 'cust-rev', 'Rita Ruiz', '+15555550120');
+    const customer = makeCustomer(tenantId, '00000000-0000-4000-8000-000000000010', 'Rita Ruiz', '+15555550120');
     await h.customerRepo.create(customer);
     const query = vi.spyOn(h.moneyDashboardRepo, 'query');
 
@@ -410,7 +408,7 @@ describe('VQ-007 — TextModeDriver', () => {
 
   it('#869 — a customer session still gets its OWN records answered (lookup_invoices)', async () => {
     const tenantId = 't-customer-invoices';
-    const customer = makeCustomer(tenantId, 'cust-inv', 'Fiona Fields', '+15555550121');
+    const customer = makeCustomer(tenantId, '00000000-0000-4000-8000-000000000011', 'Fiona Fields', '+15555550121');
     await h.customerRepo.create(customer);
 
     const { sessionId } = await h.driver.startSession({
@@ -418,7 +416,7 @@ describe('VQ-007 — TextModeDriver', () => {
       callerId: '+15555550121',
       callerIdBlocked: false,
     });
-    expect(h.store.get(sessionId)?.customerId).toBe('cust-inv');
+    expect(h.store.get(sessionId)?.customerId).toBe('00000000-0000-4000-8000-000000000011');
 
     h.provider.setDefaultResponse(
       JSON.stringify({ intentType: 'lookup_invoices', confidence: 0.95 }),

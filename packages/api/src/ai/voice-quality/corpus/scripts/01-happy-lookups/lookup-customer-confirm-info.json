@@ -11,7 +11,7 @@
     },
     "customers": [
       {
-        "id": "cust_01_customer_carlos",
+        "id": "00000000-0000-4000-8000-000001020001",
         "tenantId": "t_01_lookup_customer",
         "firstName": "Carlos",
         "lastName": "Rivera",

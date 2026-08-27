@@ -17,7 +17,7 @@ import {
 } from '../../src/ai/voice-quality/cassette-gateway';
 import {
   TextModeDriver,
-  VQ_OWNER_ACTOR_PREFIX,
+  vqResolveMemberRole,
   type AgentDriver,
 } from '../../src/ai/voice-quality/text-mode-driver';
 import { InMemoryMoneyDashboardRepository } from '../../src/reports/money-dashboard';
@@ -614,13 +614,10 @@ export function makeVoiceQualityDriverFactory(
           moneyDashboardRepo: new InMemoryMoneyDashboardRepository(),
           catalogRepo,
           settingsRepo,
-          // Harness-owned actor → role seam (decision 3). The owner line's
-          // synthetic subject resolves to `owner`; anything else is unknown, so
-          // the shipped RBAC gate fails closed on a permission-gated lookup
-          // instead of being bypassed. No `users` fixtures exist (or are
-          // needed) — the owner-line flag is the corpus's identity vocabulary.
-          resolveMemberRole: async (_tenantId: string, userId: string) =>
-            userId.startsWith(VQ_OWNER_ACTOR_PREFIX) ? 'owner' : null,
+          // Harness-owned actor → role seam (decision 3). No `users` fixtures
+          // exist (or are needed) — the owner-line flag is the corpus's
+          // identity vocabulary.
+          resolveMemberRole: vqResolveMemberRole,
         },
         shared: {
           jobRepo: fctx.repos.jobRepo,

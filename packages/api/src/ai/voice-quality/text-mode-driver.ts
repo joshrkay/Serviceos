@@ -64,6 +64,13 @@
  * turns the corpus red. It does NOT measure classification (see the criterion-9
  * note in the corpus driver factory), and it does not measure Twilio.
  *
+ * FIXTURES MUST BE PRODUCTION-SHAPED. Because the harness now runs the shipped
+ * dispatch, a corpus script's entity ids are held to the shipped contract: the
+ * answer's `entityRef.id` is a UUID, and `executeLookupAnswer` PARSES the answer
+ * rather than casting it, so a readable id like `cust_01_…` makes a lookup that
+ * actually succeeded report `failed` and speak the unavailable line. Seed
+ * customer / job / invoice / estimate ids as UUIDs.
+ *
  * The classifier side is untouched: the driver does not set `extendedIntents`,
  * so no script's prompt gains the owner-extended section (D-026 — the tenant
  * flag gates what the classifier OFFERS; the actor + allowlist gate what the
@@ -318,6 +325,21 @@ export const VQ_OWNER_ACTOR_PREFIX = 'vq-owner:';
 export function vqOwnerActorId(tenantId: string): string {
   return `${VQ_OWNER_ACTOR_PREFIX}${tenantId}`;
 }
+
+/**
+ * The harness's `resolveMemberRole` — the SAME seam production resolves a
+ * Clerk subject's DB-authoritative role through, so the shared RBAC gate is
+ * exercised rather than bypassed. The owner line's synthetic subject is the
+ * owner; anything else is unknown, and a permission-gated lookup fails closed
+ * to the production refusal copy. Exported so the corpus factory and the unit
+ * harness share one definition (they must agree, or the two lanes gate
+ * differently).
+ */
+export const vqResolveMemberRole = (
+  _tenantId: string,
+  userId: string,
+): Promise<string | null> =>
+  Promise.resolve(userId.startsWith(VQ_OWNER_ACTOR_PREFIX) ? 'owner' : null);
 
 /**
  * WS21b — skill name stamped on the `lookup_executed` event a recognized owner

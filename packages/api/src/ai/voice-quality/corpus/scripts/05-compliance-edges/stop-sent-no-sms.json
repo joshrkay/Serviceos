@@ -13,7 +13,7 @@
     },
     "customers": [
       {
-        "id": "cust_05_stop_sent_taylor",
+        "id": "00000000-0000-4000-8000-000005010001",
         "tenantId": "00000000-0000-0000-0000-0000000c0503",
         "firstName": "Taylor",
         "lastName": "Brooks",
@@ -33,9 +33,9 @@
     ],
     "appointments": [
       {
-        "id": "appt_05_stop_sent_1",
+        "id": "00000000-0000-4000-8000-000005010003",
         "tenantId": "00000000-0000-0000-0000-0000000c0503",
-        "jobId": "job_05_stop_sent_1",
+        "jobId": "00000000-0000-4000-8000-000005010002",
         "scheduledStart": "2026-05-12T17:00:00.000Z",
         "scheduledEnd": "2026-05-12T19:00:00.000Z",
         "arrivalWindowStart": "2026-05-12T17:00:00.000Z",

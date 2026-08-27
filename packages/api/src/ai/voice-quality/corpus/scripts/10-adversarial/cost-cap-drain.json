@@ -11,7 +11,7 @@
     },
     "customers": [
       {
-        "id": "cust_10_drain_jane",
+        "id": "00000000-0000-4000-8000-000010010001",
         "tenantId": "t_10_cost_cap_drain",
         "firstName": "Jane",
         "lastName": "Chatty",
