@@ -5,7 +5,9 @@ import { Field, Input, Select, Textarea, Button } from '../../components/ui';
 const CHANNELS = ['email', 'sms', 'phone', 'mail'] as const;
 
 export interface CustomerEditProps {
-  customerId: string;
+  // Omitted for the create flow (`/customers/new`) — the form starts blank
+  // and POSTs a new customer instead of loading + PUTing an existing one.
+  customerId?: string;
   onSaved?: (customerId: string) => void;
   onCancel?: () => void;
 }
@@ -38,14 +40,18 @@ const empty: FormState = {
 /**
  * P11-007 — CustomerEdit.
  *
- * Loads an existing customer and PUTs the updated fields back to the API.
- * The API exposes PUT /api/customers/:id (no PATCH) so we send a full
- * field set; unset optional fields become empty strings — the back-end
- * coerces blanks to null.
+ * With a `customerId`, loads the existing customer and PUTs the updated
+ * fields back to the API (PUT /api/customers/:id — no PATCH — so we send a
+ * full field set; unset optional fields become empty strings, which the
+ * back-end coerces to null).
+ *
+ * Without one (the `/customers/new` create route), the form starts blank
+ * and submits via POST /api/customers instead — same fields, same client
+ * validation, no fetch-on-mount.
  */
 export function CustomerEdit({ customerId, onSaved, onCancel }: CustomerEditProps) {
   const [form, setForm] = useState<FormState>(empty);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(Boolean(customerId));
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
 
@@ -54,6 +60,7 @@ export function CustomerEdit({ customerId, onSaved, onCancel }: CustomerEditProp
   }, []);
 
   useEffect(() => {
+    if (!customerId) return; // create mode: nothing to load, form starts blank
     let cancelled = false;
     (async () => {
       setLoading(true);
@@ -96,9 +103,29 @@ export function CustomerEdit({ customerId, onSaved, onCancel }: CustomerEditProp
       e.preventDefault();
       setError(null);
 
-      if (!form.firstName.trim() && !form.companyName.trim()) {
-        setError('First name or company is required.');
-        return;
+      if (customerId) {
+        if (!form.firstName.trim() && !form.companyName.trim()) {
+          setError('First name or company is required.');
+          return;
+        }
+      } else {
+        // Create mode matches the server's createCustomerSchema
+        // (packages/api/src/shared/contracts.ts), which requires BOTH
+        // firstName and lastName — unlike PUT/update, POST /api/customers
+        // has no "or company" fallback. AddCustomerSheet (the other create
+        // path, CustomersPage.tsx) agrees: it has no company field and
+        // always derives both names before POSTing. Catching this
+        // client-side, with a message naming the missing field, keeps a
+        // company-only submit from round-tripping to a 400 the user never
+        // asked for.
+        if (!form.firstName.trim()) {
+          setError('First name is required.');
+          return;
+        }
+        if (!form.lastName.trim()) {
+          setError('Last name is required.');
+          return;
+        }
       }
 
       // Cleared optionals serialize as '' — never a dropped key. The server
@@ -120,15 +147,21 @@ export function CustomerEdit({ customerId, onSaved, onCancel }: CustomerEditProp
 
       setSubmitting(true);
       try {
-        const res = await apiFetch(`/api/customers/${customerId}`, {
-          method: 'PUT',
-          body: JSON.stringify(body),
-        });
+        const res = customerId
+          ? await apiFetch(`/api/customers/${customerId}`, {
+              method: 'PUT',
+              body: JSON.stringify(body),
+            })
+          : await apiFetch('/api/customers', {
+              method: 'POST',
+              body: JSON.stringify(body),
+            });
         if (!res.ok) {
           const json = await res.json().catch(() => ({}));
           throw new Error(json?.message ?? `HTTP ${res.status}`);
         }
-        onSaved?.(customerId);
+        const saved = await res.json();
+        onSaved?.(customerId ?? saved.id);
       } catch (err) {
         setError(err instanceof Error ? err.message : 'Failed to save customer');
       } finally {
@@ -148,7 +181,7 @@ export function CustomerEdit({ customerId, onSaved, onCancel }: CustomerEditProp
 
   return (
     <form onSubmit={handleSubmit} className="p-4 md:p-6 max-w-2xl mx-auto" data-testid="customer-edit-form">
-      <h1 className="text-lg text-foreground mb-4">Edit Customer</h1>
+      <h1 className="text-lg text-foreground mb-4">{customerId ? 'Edit Customer' : 'New Customer'}</h1>
 
       {error && (
         <div role="alert" className="mb-3 rounded-lg border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">
@@ -247,7 +280,9 @@ export function CustomerEdit({ customerId, onSaved, onCancel }: CustomerEditProp
 
       <div className="mt-4 flex gap-2">
         <Button type="submit" disabled={submitting} className="min-h-11">
-          {submitting ? 'Saving…' : 'Save'}
+          {customerId
+            ? (submitting ? 'Saving…' : 'Save')
+            : (submitting ? 'Creating…' : 'Create')}
         </Button>
         <Button type="button" variant="outline" onClick={onCancel} className="min-h-11">
           Cancel
