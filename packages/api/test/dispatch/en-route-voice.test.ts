@@ -21,7 +21,7 @@ import {
   resolveEnRouteAppointment,
   handleEnRouteVoiceIntent,
   handleEnRouteForTechnician,
-  technicianDisplayName,
+  technicianNameIfKnown,
   type EnRouteResolutionDeps,
 } from '../../src/dispatch/en-route-voice';
 
@@ -836,12 +836,12 @@ describe('#847 — handleEnRouteForTechnician (surface-agnostic core)', () => {
   });
 });
 
-describe('#847 — technicianDisplayName', () => {
+describe('#847 — technicianNameIfKnown', () => {
   it('prefers "First Last", falls back to email, and is undefined when the row has neither', () => {
     expect(
-      technicianDisplayName({ firstName: 'Carlos', lastName: 'Ruiz', email: 't@x.com' } as User),
+      technicianNameIfKnown({ firstName: 'Carlos', lastName: 'Ruiz', email: 't@x.com' } as User),
     ).toBe('Carlos Ruiz');
-    expect(technicianDisplayName({ email: 't@x.com' } as User)).toBe('t@x.com');
-    expect(technicianDisplayName({ email: '' } as User)).toBeUndefined();
+    expect(technicianNameIfKnown({ email: 't@x.com' } as User)).toBe('t@x.com');
+    expect(technicianNameIfKnown({ email: '' } as User)).toBeUndefined();
   });
 });

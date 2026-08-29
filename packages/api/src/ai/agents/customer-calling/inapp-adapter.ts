@@ -354,7 +354,13 @@ export function buildInappGreeting(persona?: VoicePersona | null): string {
 export function classifierToFsmEvent(
   intentType: string,
   confidence: number,
-  entities: Record<string, unknown> | undefined
+  entities: Record<string, unknown> | undefined,
+  /**
+   * The user's raw message for the classified turn. Optional so legacy
+   * callers stay valid; pass it whenever it is in hand — guards that persist
+   * caller words (complaint severity detection) read it off the event.
+   */
+  utterance?: string
 ): CallingAgentEvent {
   // Unknown / below-threshold intent stays on the intent_classified path so
   // the FSM fires `low_intent_confidence` repair copy — not
@@ -365,6 +371,7 @@ export function classifierToFsmEvent(
     intentType,
     entities: entities ?? {},
     confidence,
+    ...(utterance ? { utterance } : {}),
   };
 }
 
@@ -1025,7 +1032,8 @@ export class InAppVoiceAdapter {
         fsmEvent = classifierToFsmEvent(
           classification.intentType,
           classification.confidence,
-          classification.extractedEntities as Record<string, unknown> | undefined
+          classification.extractedEntities as Record<string, unknown> | undefined,
+          text
         );
         if (
           classification.confidence >= TAU_INT &&

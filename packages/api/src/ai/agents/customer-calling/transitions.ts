@@ -84,16 +84,17 @@ export const NEGOTIATION_HOLDING_LINE =
   "That's a good question — I'll need to check with the owner on that, and we'll get right back to you. Is there anything else I can help with in the meantime?";
 
 /**
- * #846 — deterministic acknowledgment spoken when the caller reports
- * dissatisfaction with completed work or service. Same posture as the
- * negotiation holding line: the agent never argues, promises a remedy, or
- * improvises an apology beyond this — it acknowledges and routes the
- * complaint to the owner (a `callback` proposal the voice-turn processor
- * builds with the same severity markers the recorded-memo path uses).
- * Exported so adapters/tests share it.
+ * #846 / D-027 — deterministic acknowledgment spoken when the caller reports
+ * dissatisfaction with completed work or service. The agent never argues,
+ * promises a remedy, or improvises an apology beyond this — it acknowledges
+ * and hands the caller to a human (the complaint guard fast-paths to
+ * `escalating`, like operator_request). The one-shot `callback` proposal the
+ * voice-turn processor builds — with the same severity markers the
+ * recorded-memo path uses — is the escalation's paper trail, not a
+ * deflection. Exported so adapters/tests share it.
  */
-export const COMPLAINT_ACK_LINE =
-  "I'm sorry to hear that — I've flagged this for the owner, and someone will follow up with you shortly. Is there anything else I can help with?";
+export const COMPLAINT_ESCALATION_LINE =
+  "I'm sorry to hear that — let me get a person on the line to help you right away.";
 
 /**
  * #846 — spoken when the caller answers "yes" (a bare `confirm` intent) at
@@ -385,15 +386,21 @@ function checkGlobalGuards(
     return { nextState: state, sideEffects, updatedContext };
   }
 
-  // #846 — complaint guardrail. The caller reports dissatisfaction with
-  // completed work or service. Mirrors the negotiation guard above: speak a
-  // fixed acknowledgment and route the complaint to the owner (a `callback`
-  // proposal the voice-turn processor enriches with the shared severity
-  // markers), staying in the current state — a complaint is context for a
-  // human, not a reason to derail the call. Idempotent per session via
-  // `complaintFlagged`: the acknowledgment is spoken every time (an unhappy
-  // caller is always answered) but the owner follow-up is created only on
-  // the first complaint turn. Before this guard the intent fell through to
+  // #846 / D-027 — complaint guardrail. The caller reports dissatisfaction
+  // with completed work or service. Mirrors the operator_request guard
+  // above, NOT negotiation: an unhappy caller gets a HUMAN, not a hold-and-
+  // continue — the guard acknowledges and fast-paths to `escalating`
+  // (auditLog + notify_oncall + escalationReason, the same escalation
+  // machinery operator_request drives). The first cut of this guard
+  // deflected and continued; the owner ratified escalation on 2026-08-28.
+  // Unlike operator_request there is no escalationTriggers deflect branch: a
+  // complaint always reaches a person — no tenant toggle maps to it.
+  //
+  // The one-shot `callback` proposal (idempotent via `complaintFlagged`) is
+  // kept as the escalation's PAPER TRAIL: the voice-turn processor enriches
+  // it with the shared severity markers, and `event.utterance` travels in
+  // the payload so severity detection sees the caller's actual words.
+  // Before this guard existed the intent fell through to
   // `intentToProposalType`'s default and became a bare clarification card —
   // "let me check that" with no signal a complaint was ever heard.
   if (event.type === 'intent_classified' && event.intentType === 'complaint') {
@@ -401,12 +408,19 @@ function checkGlobalGuards(
       return { nextState: state, sideEffects: [], updatedContext: context };
     }
     const alreadyFlagged = context.complaintFlagged === true;
-    const updatedContext: CallingAgentContext = { ...context, complaintFlagged: true };
+    const updatedContext: CallingAgentContext = {
+      ...context,
+      currentIntent: event.intentType,
+      extractedEntities: event.entities,
+      retryCount: 0,
+      complaintFlagged: true,
+      escalationReason: 'complaint',
+    };
     const sideEffects: SideEffect[] = [
-      auditLog(updatedContext, state, state, 'complaint_guardrail', { alreadyFlagged }),
+      auditLog(updatedContext, state, 'escalating', 'complaint_guardrail', { alreadyFlagged }),
       // Tagged so a settings-aware processor can brand-voice it later, same
       // convention as `negotiation_holding`.
-      ttsPlay(COMPLAINT_ACK_LINE, { source: 'complaint_ack' }),
+      ttsPlay(COMPLAINT_ESCALATION_LINE, { source: 'complaint_ack' }),
       // Executed by the media-streams / in-app adapters (the Gather path has
       // no quality-event executor; its complaint telemetry is the
       // `proposal_created` session-bus event the processor emits).
@@ -430,34 +444,42 @@ function checkGlobalGuards(
           callSid: updatedContext.callSid,
           conversationId: updatedContext.conversationId,
           customerId: updatedContext.customerId,
+          // The caller's raw words — severity detection ("refund", "my
+          // lawyer") runs over these, not just classifier-extracted
+          // entities, mirroring ComplaintTaskHandler's noteBody ?? message
+          // fallback on the memo path.
+          ...(event.utterance ? { utterance: event.utterance } : {}),
           // Link the complaint follow-up proposal to the classify call's
           // ai_runs row (FK-satisfied) instead of null.
           ...(event.aiRunId ? { aiRunId: event.aiRunId } : {}),
         },
       });
     }
-    return { nextState: state, sideEffects, updatedContext };
+    sideEffects.push(notifyOncall(updatedContext, 'complaint'));
+    return { nextState: 'escalating', sideEffects, updatedContext };
   }
 
-  // #846 — a bare `confirm` ("yes", "that's right") at intent_capture has
-  // nothing on the table to confirm: every real pending question lives in a
-  // different state (`intent_confirm` / `entity_confirm` readbacks, the
-  // adapters' out-of-FSM approval and consent dialogues consume their turns
-  // before classification). Speak a re-prompt and stay — before this guard
-  // the intent fell through to the proposal path and minted a
-  // `voice_clarification` card an operator could never act on. Scoped to
-  // intent_capture ONLY: `intent_confirm` already treats intent_classified
-  // as a correction, and `closing` has its own deterministic post-quote
-  // pre-checks.
+  // #846 — a bare `confirm` ("yes", "that's right") with nothing on the
+  // table to confirm: every real pending question lives elsewhere
+  // (`intent_confirm` / `entity_confirm` readbacks, the adapters' out-of-FSM
+  // approval and consent dialogues consume their turns before
+  // classification, and a live post-quote "yes" in `closing` is consumed by
+  // the adapters' deterministic pendingQuote pre-check before the classifier
+  // ever runs). Speak a re-prompt and stay — before this guard the intent
+  // fell through to the proposal path and minted a `voice_clarification`
+  // card an operator could never act on. Covers BOTH states the adapters
+  // classify in (`intent_capture` and `closing` — the same pair
+  // twilio-adapter/speechTurn gate on); `intent_confirm` keeps its
+  // pre-existing intent_classified-as-correction handling untouched.
   if (
     event.type === 'intent_classified' &&
     event.intentType === 'confirm' &&
-    state === 'intent_capture'
+    (state === 'intent_capture' || state === 'closing')
   ) {
     return {
-      nextState: 'intent_capture',
+      nextState: state,
       sideEffects: [
-        auditLog(context, 'intent_capture', 'intent_capture', 'confirm_without_pending'),
+        auditLog(context, state, state, 'confirm_without_pending'),
         ttsPlay(CONFIRM_NOTHING_PENDING_LINE),
       ],
       updatedContext: context,

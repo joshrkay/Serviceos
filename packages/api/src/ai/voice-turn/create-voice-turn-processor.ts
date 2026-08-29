@@ -90,6 +90,7 @@ import {
   escalationStartedEvent,
 } from '../voice-quality/events';
 import { VOICE_EVENT_CHANNEL } from '../voice-quality/event-bus';
+import { answerPhoneEnRoute, type PhoneEnRouteDeps } from './phone-en-route-surface';
 import { buildEscalationSummary } from '../agents/customer-calling/escalation-summary-builder';
 import { buildCallerContextFromSession } from '../agents/customer-calling/escalation-context-from-session';
 import {
@@ -157,10 +158,7 @@ import {
   buildNegotiationCallbackContent,
   evaluateNegotiationDiscount,
 } from '../../proposals/guardrails/negotiation-guardrail';
-import {
-  complaintSeverity,
-  COMPLAINT_HIGH_SEVERITY_REASON,
-} from '../tasks/complaint-task';
+import { buildComplaintCallbackContent } from '../../proposals/guardrails/complaint-guardrail';
 import {
   buildAllowDiscountCallbackContent,
   buildDiscountClarificationPayload,
@@ -454,6 +452,16 @@ export interface VoiceTurnProcessorDeps {
   auditRepo?: AuditRepository;
   proposalRepo?: ProposalRepository;
   onCallRepo?: OnCallRepository;
+  /**
+   * #847 — the en_route ("on my way") bundle for the transports whose turns
+   * run through `speechTurn` (media-streams finals via
+   * `processCallerUtterance`). The SAME `PhoneEnRouteDeps` the Gather branch
+   * uses — the Twilio adapter constructs this processor with `...this.deps`,
+   * so app.ts's one wiring site serves BOTH phone transports. Absent → the
+   * surface speaks the honest unavailable line and logs a wiring-gap
+   * warning (never a silent clarification card).
+   */
+  enRoute?: PhoneEnRouteDeps;
   leadRepo?: LeadRepository;
   /**
    * N-003 (P2-036) — when wired, a live-call negotiation guardrail callback is
@@ -1344,58 +1352,44 @@ export function createVoiceTurnProcessor(
         return;
       }
 
-      // #846 — complaint guardrail. The FSM emits this when the caller
-      // reports dissatisfaction (transitions.ts, next to the negotiation
-      // guard). The recorded-memo path (ComplaintTaskHandler) mints a
-      // pinned-prefix `add_note` PLUS an owner `callback` — but `add_note`
-      // is NOT S1-allowed, so the generic path below would coerce the live
-      // caller's complaint to a bare clarification: the exact silent degrade
-      // this branch exists to prevent. The live leg therefore mints only the
-      // `callback` follow-up (S1-allowed — it routes a human, never a
-      // mutation), carrying the SAME deterministic severity markers the memo
-      // path stamps, and does NOT dispatch `proposal_queued`: the guard
-      // stays in the current state, so a proposal_queued transition would be
-      // wrong here.
+      // #846 / D-027 — complaint guardrail paper trail. The FSM emits this
+      // when the caller reports dissatisfaction (transitions.ts) while it
+      // fast-paths the CALL to `escalating` — the caller gets a human; this
+      // proposal is the owner's record of it. The recorded-memo path
+      // (ComplaintTaskHandler) mints a pinned-prefix `add_note` PLUS an
+      // owner `callback` — but `add_note` is NOT S1-allowed, so the generic
+      // path below would coerce the live caller's complaint to a bare
+      // clarification: the exact silent degrade this branch exists to
+      // prevent. The live leg therefore mints only the `callback` follow-up
+      // (S1-allowed — it routes a human, never a mutation), carrying the
+      // SAME deterministic severity markers the memo path stamps, and does
+      // NOT dispatch `proposal_queued`: the guard already moved the FSM to
+      // `escalating`, so a proposal_queued transition would be wrong here.
       if (intent === 'complaint') {
         const description = typeof entities.noteBody === 'string' ? entities.noteBody : '';
         const transcript = typeof entities.transcript === 'string' ? entities.transcript : '';
-        const detectText = `${description} ${transcript}`.trim();
+        // The caller's raw words, threaded from the classified turn by the
+        // FSM guard — without them a "refund / my lawyer" complaint whose
+        // classifier extracted no noteBody scored `normal` (severity
+        // detection saw empty text). Mirrors ComplaintTaskHandler's
+        // `ee.noteBody ?? context.message` fallback on the memo path.
+        const utterance = typeof fx.payload.utterance === 'string' ? fx.payload.utterance : '';
+        const detectText = `${description} ${transcript} ${utterance}`.trim();
         const customerName =
           typeof entities.customerName === 'string' ? entities.customerName : undefined;
         const conversationId =
           typeof fx.payload.conversationId === 'string' ? fx.payload.conversationId : undefined;
-        // Same deterministic keyword severity the memo path uses, so the
-        // review surfaces (cards, SMS render, digest) flag both legs alike.
-        const severity = complaintSeverity(detectText);
-        const severityMeta =
-          severity === 'high'
-            ? {
-                _meta: {
-                  // Required by the _meta contract; 'medium' is neutral (only
-                  // low/very_low gate anything). The marker is the payload.
-                  overallConfidence: 'medium',
-                  markers: [{ path: 'body', reason: COMPLAINT_HIGH_SEVERITY_REASON }],
-                },
-              }
-            : {};
-        const who = customerName ?? 'the customer';
+        const content = buildComplaintCallbackContent({
+          detectText,
+          ...(customerName ? { customerName } : {}),
+          ...(conversationId ? { conversationId } : {}),
+        });
         const complaintProposal = buildProposal({
           tenantId,
           proposalType: 'callback',
-          payload: {
-            reason: 'customer_complaint_followup',
-            transcript:
-              detectText ||
-              'Caller reported a complaint on a live call — no details were captured; check the call transcript.',
-            ...(conversationId ? { conversationId } : {}),
-            ...severityMeta,
-          },
-          summary:
-            severity === 'high'
-              ? `HIGH-SEVERITY complaint — call ${who} back`
-              : `Complaint follow-up — call ${who} back`,
-          explanation:
-            'Heard on a live call. The transcript carries the details; this callback is the owner follow-up. No note is drafted on the live-caller surface (add_note is operator-only).',
+          payload: content.payload,
+          summary: content.summary,
+          explanation: content.explanation,
           sourceContext: {
             source: 'calling-agent',
             channel: 'telephony',
@@ -3828,6 +3822,9 @@ export function createVoiceTurnProcessor(
               unknown
             >,
             confidence: classification.confidence,
+            // The raw transcript rides the event so guards that persist
+            // caller words (complaint severity detection) see them.
+            utterance: speechResult,
             // Thread the classify call's REAL ai_runs id so a proposal born
             // from this intent links to its run row (proposals.ai_run_id FK).
             ...(classification.aiRunId ? { aiRunId: classification.aiRunId } : {}),
@@ -3846,6 +3843,7 @@ export function createVoiceTurnProcessor(
               unknown
             >,
             confidence: classification.confidence,
+            utterance: speechResult,
           };
         }
       } catch (err) {
@@ -3872,6 +3870,42 @@ export function createVoiceTurnProcessor(
             reason: systemFailureReasonForInfra(infraKind),
           }),
         );
+        await executeSideEffects(session, sideEffectsAll, tenantId);
+        appendAgentTts(deps.store, session.id, sideEffectsAll);
+        return sideEffectsAll;
+      }
+
+      // #847 (#860 step 2) — en_route ("on my way") on the transports whose
+      // turns run through speechTurn (media-streams finals). A DIRECT status
+      // act (Part F decision F-3): the technician IS the human acting, so it
+      // fires the SAME audited act the app en-route button executes — never
+      // a proposal, which is why it is deliberately absent from
+      // INTENT_TO_PROPOSAL_TYPE (falling through to the FSM would end in the
+      // clarification card this branch exists to prevent). Same out-of-FSM
+      // shape as the Gather branch in twilio-adapter: identity + role are
+      // checked in the surface adapter (session.actorUserId is stamped for
+      // BOTH phone transports by the shared establishment core), the outcome
+      // is spoken, and `intent_classified` is NOT dispatched — the FSM stays
+      // in intent_capture. High-confidence only, mirroring the Gather gate:
+      // a low-confidence en_route follows the normal repair path.
+      if (
+        classifierEvent.type === 'intent_classified' &&
+        classifierEvent.intentType === 'en_route' &&
+        classifierEvent.confidence >= TAU_INT
+      ) {
+        const enRouteLine = await answerPhoneEnRoute(deps.enRoute, {
+          session,
+          tenantId,
+          entities: classifierEvent.entities,
+        });
+        sideEffectsAll.push({
+          type: 'tts_play',
+          payload: { text: enRouteLine, source: 'en_route' },
+        });
+        sideEffectsAll.push({
+          type: 'tts_play',
+          payload: { text: 'Anything else I can help you with?' },
+        });
         await executeSideEffects(session, sideEffectsAll, tenantId);
         appendAgentTts(deps.store, session.id, sideEffectsAll);
         return sideEffectsAll;

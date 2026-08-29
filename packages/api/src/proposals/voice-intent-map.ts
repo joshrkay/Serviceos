@@ -62,10 +62,15 @@ import type { ProposalType } from './proposal';
  * dispatch/en-route-voice.ts#handleEnRouteForTechnician; its callers (#847)
  * are workers/voice-action-router.ts (the recorded-memo `en_route` branch,
  * handled before the proposalType lookup below, via the
- * handleEnRouteVoiceIntent wrapper), sms/tech-status/en-route-keyword.ts
- * (the OMW keyword), ai/voice-turn/phone-en-route-surface.ts (the live
- * Gather branch in telephony/twilio-adapter.ts), and routes/assistant.ts
- * (the chat branch, before the unmapped-capability refusal). Registered
+ * handleEnRouteVoiceIntent wrapper), ai/voice-turn/phone-en-route-surface.ts
+ * (BOTH live phone transports: the Gather branch in
+ * telephony/twilio-adapter.ts and media-streams finals via speechTurn in
+ * create-voice-turn-processor.ts), and routes/assistant.ts (the chat branch,
+ * before the unmapped-capability refusal). The SMS OMW keyword
+ * (sms/tech-status/en-route-keyword.ts) fires the SAME audited
+ * `triggerEnRoute` act but predates the core and still resolves inline —
+ * folding it in is a filed follow-up, so don't read it as a caller here.
+ * Registered
  * here, next to lookup_*, so the drift test
  * (test/ai/voice-action-catalog.contract.test.ts) and a human reader both
  * see this as an intentional exclusion, not a gap.
@@ -90,8 +95,9 @@ import type { ProposalType } from './proposal';
  *   - `operator_request` — FSM global guard (customer-calling/transitions.ts
  *     checkGlobalGuards) → escalating. All live surfaces.
  *   - `confirm` — the approval/readback dialogues consume their turns before
- *     classification; a bare confirm at intent_capture with nothing pending
- *     is answered by the FSM's spoken re-prompt guard (#846,
+ *     classification; a bare confirm with nothing pending, in EITHER state
+ *     the adapters classify in (intent_capture or closing), is answered by
+ *     the FSM's spoken re-prompt guard (#846 + D-027,
  *     CONFIRM_NOTHING_PENDING_LINE), never a clarification card.
  *   - `language_switch` — per-transport adapter branches (the FSM is pure
  *     and cannot mutate session.language): media-streams'

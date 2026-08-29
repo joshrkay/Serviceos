@@ -2357,6 +2357,9 @@ export class TwilioGatherAdapter {
             intentType: classification.intentType,
             entities: classifiedEntities,
             confidence: classification.confidence,
+            // The raw transcript rides the event so guards that persist
+            // caller words (complaint severity detection) see them.
+            utterance: opts.speechResult,
             // Thread the classify call's REAL ai_runs id so a proposal born
             // from this intent links to its run row (proposals.ai_run_id FK).
             ...(classification.aiRunId ? { aiRunId: classification.aiRunId } : {}),
@@ -2369,6 +2372,7 @@ export class TwilioGatherAdapter {
             intentType: classification.intentType === 'unknown' ? 'unknown' : classification.intentType,
             entities: (classification.extractedEntities ?? {}) as Record<string, unknown>,
             confidence: classification.confidence,
+            utterance: opts.speechResult,
           };
         }
       } catch (err) {

@@ -1,8 +1,11 @@
 /**
- * #846 — a bare `confirm` ("yes") at intent_capture with nothing pending is a
- * spoken re-prompt, never a `voice_clarification` card
- * (src/ai/agents/customer-calling/transitions.ts). The guard is scoped to
- * intent_capture only: `intent_confirm`'s correction handling stays untouched.
+ * #846 — a bare `confirm` ("yes") with nothing pending is a spoken
+ * re-prompt, never a `voice_clarification` card
+ * (src/ai/agents/customer-calling/transitions.ts). The guard covers BOTH
+ * states the adapters classify in — intent_capture AND closing (the
+ * adapters gate classification on `intent_capture || closing`, so a bare
+ * "yes" in closing used to fall through and mint a clarification card);
+ * `intent_confirm`'s correction handling stays untouched.
  */
 import { describe, it, expect } from 'vitest';
 import {
@@ -45,6 +48,15 @@ describe('bare confirm at intent_capture (nothing pending)', () => {
     expect(ttsTexts(result.sideEffects)).toContain(CONFIRM_NOTHING_PENDING_LINE);
     expect(result.sideEffects.some((f) => f.type === 'create_proposal')).toBe(false);
     // No funnel state is mutated — the next turn is a fresh classification.
+    expect(result.updatedContext).toEqual(baseContext);
+  });
+
+  it('speaks the re-prompt and stays in closing with no proposal (a bare "yes" after a wrap-up)', () => {
+    const result = transition('closing', confirmEvent, baseContext);
+
+    expect(result.nextState).toBe('closing');
+    expect(ttsTexts(result.sideEffects)).toContain(CONFIRM_NOTHING_PENDING_LINE);
+    expect(result.sideEffects.some((f) => f.type === 'create_proposal')).toBe(false);
     expect(result.updatedContext).toEqual(baseContext);
   });
 

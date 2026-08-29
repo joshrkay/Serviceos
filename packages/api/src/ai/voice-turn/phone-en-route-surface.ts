@@ -4,9 +4,15 @@
  * THE SEAM — same shape as `phone-lookup-surface.ts` one file over: this
  * module contains NO resolution or dispatch logic. It is the phone's thin
  * caller of `dispatch/en-route-voice.ts#handleEnRouteForTechnician` — the
- * one technician-scoped core the recorded-memo wrapper and the SMS-keyword
- * leg already drive. Adding a surface means adding a caller, NOT copying
- * the resolve-then-act flow.
+ * technician-scoped core the recorded-memo wrapper
+ * (`handleEnRouteVoiceIntent`) and the chat branch (`routes/assistant.ts`)
+ * also drive. (The SMS keyword leg predates the core and still calls
+ * `triggerEnRoute` directly with its own inline resolution — migrating it is
+ * a filed follow-up, not a fact.) Adding a surface means adding a caller,
+ * NOT copying the resolve-then-act flow — BOTH phone transports call this
+ * one function: the Gather branch in `telephony/twilio-adapter.ts` and the
+ * media-streams finals path via `speechTurn`
+ * (`create-voice-turn-processor.ts`).
  *
  * What lives here (and ONLY here) is genuinely phone-specific:
  *   1. Identity. The ACTOR is `session.actorUserId`, resolved once at
@@ -32,13 +38,16 @@
  * the next utterance can be another ask.
  */
 import { createLogger } from '../../logging/logger';
-import type { VoiceSession } from '../agents/customer-calling/voice-session-store';
+import type {
+  VoiceSession,
+  VoiceSessionEvent,
+} from '../agents/customer-calling/voice-session-store';
 import { ambiguousReferenceLine } from '../orchestration/lookup-reference';
 import { enRouteExecutedEvent } from '../voice-quality/events';
 import type { UserRepository } from '../../users/user';
 import {
   handleEnRouteForTechnician,
-  technicianDisplayName,
+  technicianNameIfKnown,
   type EnRouteTechnicianDeps,
 } from '../../dispatch/en-route-voice';
 
@@ -95,7 +104,7 @@ export async function answerPhoneEnRoute(
   const entities = input.entities ?? {};
   const startMs = Date.now();
   const emit = (
-    outcome: 'sent' | 'no_appointment' | 'ambiguous' | 'refused' | 'unavailable',
+    outcome: Extract<VoiceSessionEvent, { type: 'en_route_executed' }>['outcome'],
     error?: string,
   ) =>
     session.events.emit(
@@ -129,7 +138,7 @@ export async function answerPhoneEnRoute(
       typeof entities.jobReference === 'string' && entities.jobReference.trim().length > 0
         ? entities.jobReference.trim()
         : undefined;
-    const technicianName = technicianDisplayName(user);
+    const technicianName = technicianNameIfKnown(user);
 
     const outcome = await handleEnRouteForTechnician(deps, {
       tenantId,

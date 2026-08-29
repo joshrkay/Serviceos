@@ -14,7 +14,7 @@ import { TwilioGatherAdapter } from '../../src/telephony/twilio-adapter';
 import { VoiceSessionStore } from '../../src/ai/agents/customer-calling/voice-session-store';
 import type { LLMGateway, LLMResponse } from '../../src/ai/gateway/gateway';
 import {
-  COMPLAINT_ACK_LINE,
+  COMPLAINT_ESCALATION_LINE,
   CONFIRM_NOTHING_PENDING_LINE,
 } from '../../src/ai/agents/customer-calling/transitions';
 import { COMPLAINT_HIGH_SEVERITY_REASON } from '../../src/ai/tasks/complaint-task';
@@ -81,8 +81,8 @@ const ask = (h: ReturnType<typeof makeAdapter>, speech: string) =>
     tenantId,
   });
 
-describe('complaint on the Gather path', () => {
-  it('acknowledges, stays in intent_capture, and mints ONE S1-safe callback follow-up', async () => {
+describe('complaint on the Gather path (escalates, D-027)', () => {
+  it('acknowledges, escalates to a human, and mints ONE S1-safe callback paper trail', async () => {
     const h = makeAdapter({
       intentType: 'complaint',
       entities: { noteBody: 'the tech left a mess in my yard last week' },
@@ -90,14 +90,13 @@ describe('complaint on the Gather path', () => {
 
     const twiml = await ask(h, 'I want to complain about the mess your tech left in my yard');
 
-    // The caller hears the acknowledgment, not "let me check that".
-    expect(twiml).toContain('flagged this for the owner');
-    // The call continues — next <Gather> turn, no escalation, no hangup.
-    expect(twiml).toContain('<Gather');
-    expect(twiml).not.toContain('<Hangup/>');
-    expect(h.session.machine.currentState).toBe('intent_capture');
+    // The caller hears the escalation acknowledgment, not "let me check
+    // that" and not a deflect-and-continue.
+    expect(twiml).toContain('let me get a person on the line');
+    // D-027: the call is handed to a human, like operator_request.
+    expect(h.session.machine.currentState).toBe('escalating');
 
-    // Exactly one proposal: the owner `callback` follow-up (S1-allowed) —
+    // Exactly one proposal: the owner `callback` paper trail (S1-allowed) —
     // never an add_note (operator-only) and never a voice_clarification.
     expect(h.proposalRepo.create).toHaveBeenCalledTimes(1);
     const stored = h.proposalRepo.create.mock.calls[0][0] as {
@@ -120,7 +119,7 @@ describe('complaint on the Gather path', () => {
 
     const twiml = await ask(h, 'your work was sloppy and I want a refund');
 
-    expect(twiml).toContain('flagged this for the owner');
+    expect(twiml).toContain('let me get a person on the line');
     const stored = h.proposalRepo.create.mock.calls[0][0] as {
       payload: { _meta?: { markers?: Array<{ reason: string }> } };
       summary: string;
@@ -129,16 +128,37 @@ describe('complaint on the Gather path', () => {
     expect(stored.payload._meta?.markers?.[0]?.reason).toBe(COMPLAINT_HIGH_SEVERITY_REASON);
   });
 
-  it('acknowledges a restated complaint but does not mint a second follow-up', async () => {
+  it('detects severity from the raw utterance when the classifier extracts no entities (#846 review fix)', async () => {
+    // The real bug: the guard payload used to carry only classifier
+    // entities, so a "refund / my lawyer" complaint with an empty
+    // extraction scored `normal`. The utterance now rides the payload.
+    const h = makeAdapter({ intentType: 'complaint' });
+
+    await ask(h, "your work was sloppy, I want a refund or I'm calling my lawyer");
+
+    expect(h.proposalRepo.create).toHaveBeenCalledTimes(1);
+    const stored = h.proposalRepo.create.mock.calls[0][0] as {
+      payload: { transcript?: string; _meta?: { markers?: Array<{ reason: string }> } };
+      summary: string;
+    };
+    expect(stored.summary).toContain('HIGH-SEVERITY');
+    expect(stored.payload._meta?.markers?.[0]?.reason).toBe(COMPLAINT_HIGH_SEVERITY_REASON);
+    // The paper trail carries the caller's actual words, not the
+    // "no details were captured" placeholder.
+    expect(stored.payload.transcript).toContain('refund');
+  });
+
+  it('does not mint a second follow-up once the call is escalating', async () => {
     const h = makeAdapter({
       intentType: 'complaint',
       entities: { noteBody: 'the tech left a mess' },
     });
 
     await ask(h, 'I want to complain about the mess');
-    const second = await ask(h, 'and I really mean it, that mess was unacceptable');
+    expect(h.session.machine.currentState).toBe('escalating');
+    await ask(h, 'and I really mean it, that mess was unacceptable');
 
-    expect(second).toContain('flagged this for the owner');
+    // The escalation is in progress — the paper trail stays one proposal.
     expect(h.proposalRepo.create).toHaveBeenCalledTimes(1);
   });
 });
@@ -158,7 +178,7 @@ describe('bare confirm on the Gather path', () => {
   it('speaks the exported line (the copy is the contract)', async () => {
     // Pin that the spoken text IS the constant, so copy edits stay deliberate.
     expect(CONFIRM_NOTHING_PENDING_LINE).toContain('anything waiting on a yes');
-    expect(COMPLAINT_ACK_LINE).toContain('flagged this for the owner');
+    expect(COMPLAINT_ESCALATION_LINE).toContain('let me get a person on the line');
   });
 });
 

@@ -30,7 +30,7 @@ import type { EntityCandidate } from '../ai/resolution/entity-resolver';
 import type { VoiceLookupAnswer } from '@ai-service-os/shared';
 import { isRuntimeTimezone, localDateKey } from '../shared/timezone';
 import { getDayBoundaries } from './board-query';
-import { triggerEnRoute, resolveTechnicianName, EnRouteEnqueuer } from './routes';
+import { triggerEnRoute, EnRouteEnqueuer } from './routes';
 
 // ---------------------------------------------------------------------------
 // Resolution (AC-2, AC-3)
@@ -427,12 +427,16 @@ function candidateToEntity(c: EnRouteCandidate): EntityCandidate {
 }
 
 /**
- * The names a technician goes by in the customer's branded ETA text.
- * Shared by every en-route surface (memo, SMS keyword, phone, chat) so all
- * legs render the same name for the same user. `undefined` (never '') when
- * the user row carries no usable name.
+ * The name a technician goes by in the customer's branded ETA text, when the
+ * user row carries one — `undefined` (never '') otherwise, so callers spread
+ * it conditionally and the coordinator's own fallback applies. Shared by the
+ * surfaces that call the technician core below (memo wrapper, phone Gather,
+ * media-streams, chat). The SMS keyword leg still inlines its own copy of
+ * this formatting next to its direct `triggerEnRoute` call — folding it in
+ * is a filed follow-up. Distinct from `dispatch/routes.ts#
+ * resolveTechnicianName`, which does a repo LOOKUP and falls back to the id.
  */
-export function technicianDisplayName(
+export function technicianNameIfKnown(
   user: Pick<User, 'firstName' | 'lastName' | 'email'>,
 ): string | undefined {
   const fullName = [user.firstName, user.lastName].filter(Boolean).join(' ').trim();
@@ -444,9 +448,12 @@ export function technicianDisplayName(
  * one appointment, then fire the SAME audited direct status act the app
  * en-route button executes (`triggerEnRoute` → `appointment.
  * en_route_triggered` audit + branded ETA SMS). Identity is the caller's
- * job: every surface resolves WHO is acting its own way (memo creator, SMS
- * sender's registered mobile, phone session actor, chat auth subject) and
- * hands this core a canonical technician id it has already verified. Never
+ * job: each calling surface resolves WHO is acting its own way (the memo
+ * wrapper below via the recording's creator, the phone surface via the
+ * session actor, chat via the auth subject) and hands this core a canonical
+ * technician id it has already verified. (The SMS keyword leg resolves the
+ * sender's registered mobile the same way but predates this core and still
+ * runs its own resolve+trigger inline — a filed follow-up.) Never
  * silent: every reachable outcome is a fired act, a clarification
  * (ambiguous), an explicit "no upcoming appointment" answer (not_found), or
  * a reasoned `unavailable`.
@@ -563,7 +570,7 @@ export async function handleEnRouteVoiceIntent(
   const technician = await resolveCanonicalUser(deps.userRepo, input.tenantId, recording.createdBy);
   if (!technician) return { kind: 'unavailable', reason: 'unknown_technician' };
 
-  const technicianName = technicianDisplayName(technician);
+  const technicianName = technicianNameIfKnown(technician);
   return handleEnRouteForTechnician(deps, {
     tenantId: input.tenantId,
     technicianId: technician.id,
@@ -571,7 +578,3 @@ export async function handleEnRouteVoiceIntent(
     ...(input.jobReference ? { jobReference: input.jobReference } : {}),
   });
 }
-
-// Re-exported so callers of this module never need a second import from
-// dispatch/routes.ts just for the technician display-name helper.
-export { resolveTechnicianName };

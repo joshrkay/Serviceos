@@ -1,13 +1,15 @@
 /**
- * #846 — live-FSM complaint guardrail global guard
- * (src/ai/agents/customer-calling/transitions.ts). Mirrors the negotiation
- * guardrail net one guard up: fixed acknowledgment on every complaint turn,
- * owner follow-up proposal only on the first.
+ * #846 / D-027 — live-FSM complaint guardrail global guard
+ * (src/ai/agents/customer-calling/transitions.ts). A complaint on a live
+ * call ESCALATES TO A HUMAN (owner decision 2026-08-28), mirroring the
+ * operator_request guard: acknowledgment + fast-path to `escalating` +
+ * notify_oncall. The one-shot owner `callback` proposal is kept as the
+ * escalation's paper trail (idempotent via complaintFlagged).
  */
 import { describe, it, expect } from 'vitest';
 import {
   transition,
-  COMPLAINT_ACK_LINE,
+  COMPLAINT_ESCALATION_LINE,
 } from '../../../../src/ai/agents/customer-calling/transitions';
 import type {
   CallingAgentContext,
@@ -32,6 +34,7 @@ const complaintEvent: CallingAgentEvent = {
   entities: { noteBody: 'the tech left the yard a mess and never came back' },
   confidence: 0.95,
   aiRunId: 'run-1',
+  utterance: 'the tech left the yard a mess and never came back, I want someone out here',
 };
 
 function ttsTexts(fx: SideEffect[]): string[] {
@@ -42,14 +45,19 @@ function creates(fx: SideEffect[]): SideEffect[] {
   return fx.filter((f) => f.type === 'create_proposal');
 }
 
-describe('complaint guardrail global guard', () => {
-  it('speaks the acknowledgment and emits one owner-follow-up create_proposal, staying in state', () => {
+describe('complaint guardrail global guard (escalates, D-027)', () => {
+  it('acknowledges, escalates to a human, and emits one paper-trail create_proposal', () => {
     const result = transition('intent_capture', complaintEvent, baseContext);
 
-    // Stays in the current state — a complaint is context for a human, not a
-    // reason to derail the call.
-    expect(result.nextState).toBe('intent_capture');
-    expect(ttsTexts(result.sideEffects)).toContain(COMPLAINT_ACK_LINE);
+    // D-027: an unhappy caller gets a person, like operator_request — not a
+    // deflect-and-continue.
+    expect(result.nextState).toBe('escalating');
+    expect(result.updatedContext.escalationReason).toBe('complaint');
+    expect(result.sideEffects.some((f) => f.type === 'notify_oncall')).toBe(true);
+    const oncall = result.sideEffects.find((f) => f.type === 'notify_oncall');
+    expect((oncall?.payload as { reason?: string }).reason).toBe('complaint');
+
+    expect(ttsTexts(result.sideEffects)).toContain(COMPLAINT_ESCALATION_LINE);
     // Tagged so a settings-aware processor can brand-voice the line.
     const tts = result.sideEffects.find((f) => f.type === 'tts_play');
     expect((tts?.payload as { source?: string }).source).toBe('complaint_ack');
@@ -64,6 +72,11 @@ describe('complaint guardrail global guard', () => {
     // Verified caller-ID identity travels with the proposal.
     expect((payload.entities as Record<string, unknown>).customerId).toBe('cust-1');
     expect(payload.sessionId).toBe('session-test');
+    // The caller's RAW words travel too — severity detection runs over them,
+    // not just classifier-extracted entities (#846 review fix).
+    expect(payload.utterance).toBe(
+      'the tech left the yard a mess and never came back, I want someone out here',
+    );
     // Real classify-run id threaded through for the ai_runs FK.
     expect(payload.aiRunId).toBe('run-1');
 
@@ -77,27 +90,31 @@ describe('complaint guardrail global guard', () => {
     expect((quality?.payload as { eventType?: string }).eventType).toBe('complaint_guardrail');
   });
 
-  it('never escalates to a human (unlike operator_request)', () => {
-    const result = transition('intent_capture', complaintEvent, baseContext);
-    expect(result.nextState).not.toBe('escalating');
-    expect(result.sideEffects.some((f) => f.type === 'notify_oncall')).toBe(false);
+  it('escalates from closing too — the guard is global across live states', () => {
+    const result = transition('closing', complaintEvent, baseContext);
+    expect(result.nextState).toBe('escalating');
+    expect(creates(result.sideEffects)).toHaveLength(1);
   });
 
-  it('is idempotent: when already flagged, it still acknowledges but creates no new follow-up', () => {
+  it('creates no second follow-up when already flagged (paper trail is one-shot)', () => {
     const result = transition('intent_capture', complaintEvent, {
       ...baseContext,
       complaintFlagged: true,
     });
-    expect(ttsTexts(result.sideEffects)).toContain(COMPLAINT_ACK_LINE);
+    expect(result.nextState).toBe('escalating');
+    expect(ttsTexts(result.sideEffects)).toContain(COMPLAINT_ESCALATION_LINE);
     expect(creates(result.sideEffects)).toHaveLength(0);
-    expect(result.nextState).toBe('intent_capture');
   });
 
-  it('no-ops once the call is escalating or terminated', () => {
+  it('no-ops once the call is escalating or terminated (idempotent, like operator_request)', () => {
     for (const state of ['escalating', 'terminated'] as const) {
       const result = transition(state, complaintEvent, baseContext);
       expect(result.nextState).toBe(state);
+      // Nothing observable happens: no second proposal, no second page,
+      // nothing spoken. (An audit-only event_ignored record is fine.)
       expect(creates(result.sideEffects)).toHaveLength(0);
+      expect(result.sideEffects.some((f) => f.type === 'notify_oncall')).toBe(false);
+      expect(ttsTexts(result.sideEffects)).toHaveLength(0);
     }
   });
 });

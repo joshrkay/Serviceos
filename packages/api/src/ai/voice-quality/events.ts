@@ -68,8 +68,8 @@ export function lookupExecutedEvent(
 }
 
 /**
- * #847 — the `en_route` direct status act ran on a live surface (Gather
- * today; media-streams when its branch lands). One event per attempt,
+ * #847 — the `en_route` direct status act ran on a live surface (the Gather
+ * branch, and media-streams finals via speechTurn). One event per attempt,
  * whatever the outcome — see the union member's doc comment.
  */
 export function enRouteExecutedEvent(

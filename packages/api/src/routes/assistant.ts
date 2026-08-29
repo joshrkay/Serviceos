@@ -44,15 +44,17 @@ import {
   type AssistantLookupDeps,
 } from '../ai/orchestration/lookup-dispatch';
 // #847 — en_route ("on my way") from chat: the same technician core the
-// recorded-memo wrapper, the SMS keyword leg and the phone Gather branch
-// drive. A DIRECT status act (F-3), never a proposal — which is why it is
-// dispatched from its own branch below rather than added to
-// CHAT_INTENT_TO_REGISTRY_KEY (that map is intent → proposal type, and its
-// key set is pinned by test/routes/assistant-dropped-intents.test.ts).
+// recorded-memo wrapper and the phone surface (Gather branch + media-streams
+// speechTurn) drive. (The SMS keyword leg fires the same audited
+// `triggerEnRoute` act but still resolves inline rather than through this
+// core — a filed follow-up.) A DIRECT status act (F-3), never a proposal —
+// which is why it is dispatched from its own branch below rather than added
+// to CHAT_INTENT_TO_REGISTRY_KEY (that map is intent → proposal type, and
+// its key set is pinned by test/routes/assistant-dropped-intents.test.ts).
 import { ambiguousReferenceLine } from '../ai/orchestration/lookup-reference';
 import {
   handleEnRouteForTechnician,
-  technicianDisplayName,
+  technicianNameIfKnown,
   type EnRouteTechnicianDeps,
 } from '../dispatch/en-route-voice';
 import { resolveCanonicalUser, type UserRepository } from '../users/user';
@@ -1684,12 +1686,16 @@ async function generateAssistantReply(
                 : 'en_route requires a canonical technician user; none matched your account.',
             );
           }
-          const ee = (classification.extractedEntities ?? {}) as Record<string, unknown>;
+          const extractedEntities = (classification.extractedEntities ?? {}) as Record<
+            string,
+            unknown
+          >;
           const jobReference =
-            typeof ee.jobReference === 'string' && ee.jobReference.trim().length > 0
-              ? ee.jobReference.trim()
+            typeof extractedEntities.jobReference === 'string' &&
+            extractedEntities.jobReference.trim().length > 0
+              ? extractedEntities.jobReference.trim()
               : undefined;
-          const technicianName = technicianDisplayName(actor);
+          const technicianName = technicianNameIfKnown(actor);
           const outcome = await handleEnRouteForTechnician(deps.enRoute, {
             tenantId,
             technicianId: actor.id,

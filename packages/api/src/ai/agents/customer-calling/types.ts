@@ -55,7 +55,13 @@ export type CallingAgentEvent =
   | { type: 'text_input'; text: string }
   | { type: 'session_ended' }
   // Internal events (produced by skills, consumed by the state machine)
-  | { type: 'intent_classified'; intentType: string; entities: Record<string, unknown>; confidence: number; aiRunId?: string }
+  // `utterance` is the caller's raw transcript for the classified turn.
+  // Optional because some producers (eval fixtures, legacy dispatchers) have
+  // no transcript in hand; adapters that do MUST thread it — the complaint
+  // guard forwards it so severity detection sees the caller's actual words
+  // ("refund", "my lawyer"), not just whatever entities the classifier
+  // happened to extract (#846 review fix).
+  | { type: 'intent_classified'; intentType: string; entities: Record<string, unknown>; confidence: number; aiRunId?: string; utterance?: string }
   | { type: 'entity_resolved'; refs: Record<string, string> }
   | {
       type: 'entity_ambiguous';
@@ -294,12 +300,12 @@ export interface CallingAgentContext {
    */
   negotiationFlagged?: boolean;
   /**
-   * #846 — set once the complaint guardrail has fired this session. Mirrors
-   * `negotiationFlagged` exactly: the acknowledgment line is spoken on every
-   * complaint turn (so an unhappy caller is always answered) but the owner
-   * follow-up proposal is created only on the FIRST one, so a caller restating
-   * the complaint doesn't spawn a follow-up per turn. Inert for every other
-   * flow — only the complaint global guard reads it.
+   * #846 (reworked per D-027) — set once the complaint guardrail has fired
+   * this session. Same one-shot role as `negotiationFlagged`: the owner
+   * follow-up `callback` proposal (the escalation's paper trail) is created
+   * only on the FIRST complaint turn, so a caller restating the complaint
+   * while the transfer is arranged doesn't spawn a follow-up per turn. Inert
+   * for every other flow — only the complaint global guard reads it.
    */
   complaintFlagged?: boolean;
   /**
