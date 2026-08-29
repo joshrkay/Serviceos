@@ -97,6 +97,38 @@ describe('PUT /api/onboarding/identity', () => {
     expect(dbRow.rows[0].hourly_rate_cents).toBe(20000);
   });
 
+  // #874 — service_area_radius is tri-state against the REAL upsert SQL
+  // (the CASE/COALESCE split lives in pg-settings.ts, so only Postgres can
+  // prove it): omitted keeps the stored radius, explicit null clears it.
+  it('serviceAreaRadius: omitted keeps the stored value, null clears it (#874)', async () => {
+    const base = {
+      businessName: 'Radius Co',
+      businessHours: { mon: null },
+      jobBufferMinutes: 30,
+      hourlyRateCents: 10000,
+    };
+    await request(app).put('/api/onboarding/identity').send({ ...base, serviceAreaRadius: 30 });
+
+    // Omitted → kept.
+    await request(app).put('/api/onboarding/identity').send(base);
+    let row = await pool.query(
+      'SELECT service_area_radius FROM tenant_settings WHERE tenant_id=$1',
+      [currentTenant.tenantId],
+    );
+    expect(row.rows[0].service_area_radius).toBe(30);
+
+    // Explicit null → cleared.
+    const res = await request(app)
+      .put('/api/onboarding/identity')
+      .send({ ...base, serviceAreaRadius: null });
+    expect(res.status).toBe(200);
+    row = await pool.query(
+      'SELECT service_area_radius FROM tenant_settings WHERE tenant_id=$1',
+      [currentTenant.tenantId],
+    );
+    expect(row.rows[0].service_area_radius).toBeNull();
+  });
+
   it('emits a tenant.identity_set audit event', async () => {
     await request(app).put('/api/onboarding/identity').send({
       businessName: 'A', businessHours: { mon: null }, jobBufferMinutes: 30, hourlyRateCents: 10000,

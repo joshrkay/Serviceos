@@ -31,6 +31,8 @@ export { Skeleton, SkeletonText } from './skeleton';
 export type { SkeletonProps, SkeletonTextProps } from './skeleton';
 export { Modal } from './modal';
 export type { ModalProps, ModalSize } from './modal';
+export { ConfirmDialog } from './confirm-dialog';
+export type { ConfirmDialogProps } from './confirm-dialog';
 export { Sheet } from './sheet';
 export type { SheetProps, SheetSide } from './sheet';
 export { Tabs, TabPanel } from './tabs';

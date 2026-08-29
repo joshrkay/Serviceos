@@ -2,6 +2,7 @@ import { Router, Response } from 'express';
 import { AuthenticatedRequest } from '../auth/clerk';
 import { asyncRoute } from '../middleware/async-route';
 import { requireAuth, requireTenant, requirePermission } from '../middleware/auth';
+import { notFoundOnMalformedId } from '../middleware/validate-uuid-param';
 import { createServiceLocationSchema } from '../shared/contracts';
 import { TenantOwnership } from '../shared/tenant-ownership';
 import {
@@ -62,6 +63,7 @@ export function createLocationRouter(
     requireAuth,
     requireTenant,
     requirePermission('locations:view'),
+    notFoundOnMalformedId('Location not found'),
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
       const result = await getLocation(req.auth!.tenantId, req.params.id, locationRepo);
       if (!result) {
@@ -77,6 +79,7 @@ export function createLocationRouter(
     requireAuth,
     requireTenant,
     requirePermission('locations:update'),
+    notFoundOnMalformedId('Location not found'),
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
       const result = await updateLocation(
         req.auth!.tenantId,
@@ -100,6 +103,7 @@ export function createLocationRouter(
     requireAuth,
     requireTenant,
     requirePermission('locations:delete'),
+    notFoundOnMalformedId('Location not found'),
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
       const result = await archiveLocation(
         req.auth!.tenantId,
@@ -122,6 +126,7 @@ export function createLocationRouter(
     requireAuth,
     requireTenant,
     requirePermission('locations:update'),
+    notFoundOnMalformedId('Location not found'),
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
       const result = await setPrimary(
         req.auth!.tenantId,

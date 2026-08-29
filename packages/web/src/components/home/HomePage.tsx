@@ -760,9 +760,10 @@ export function HomePage() {
               </section>
             )}
 
-            {/* Quick actions — each opens the conversational flow (Epic 12.8):
-                the assistant auto-submits the prefilled `q` and drafts a
-                proposal for approval, so creates stay proposal-first. */}
+            {/* Quick actions — each opens the assistant with a prefilled `q`.
+                The assistant matches the phrase against the voice-command table
+                (useVoiceCommands.ts) and navigates straight to the create form;
+                only unmatched phrases fall through to the chat/proposal flow. */}
             <section className="px-4 py-5">
               <SectionHead label="Quick actions" />
               <div className="grid grid-cols-2 gap-2">

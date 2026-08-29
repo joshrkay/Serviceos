@@ -29,6 +29,7 @@ import { SettingsRepository } from '../settings/settings';
 import { VerticalPackRegistry } from '../shared/vertical-pack-registry';
 import { formatBusinessHoursSummary } from '../public-intake/format-business-hours';
 import { isValidVerticalType } from '../shared/vertical-types';
+import { isTwilioTestNumber } from '../telephony/phone-policy';
 
 const PUBLIC_INTAKE_SOURCE: LeadSource = 'web_form';
 const PUBLIC_INTAKE_ACTOR_ID = 'public_intake';
@@ -224,16 +225,33 @@ export function createPublicIntakeRouter(
       }
     }
 
+    // #880 — never surface a Twilio test magic number publicly. The dev-stub
+    // provisioning path writes {phoneE164: '+15005550006', stub: true} so
+    // onboarding completes without Twilio creds; if such a row reaches a
+    // deployed DB (mis-set NODE_ENV at provisioning time, or a row predating
+    // the env gate), this fallback used to display the non-dialable magic
+    // number to customers. Suppress stub/magic values and return null — every
+    // web render site already guards on `businessPhone && …`, so the honest
+    // empty state falls out for free.
     let businessPhone = settings?.businessPhone?.trim() || null;
+    if (businessPhone && isTwilioTestNumber(businessPhone)) {
+      businessPhone = null;
+    }
     if (!businessPhone && pool) {
-      const twilioRow = await pool.query<{ phone: string | null }>(
-        `SELECT provider_data->>'phoneE164' AS phone
+      const twilioRow = await pool.query<{ phone: string | null; stub: string | null }>(
+        `SELECT provider_data->>'phoneE164' AS phone,
+                provider_data->>'stub' AS stub
          FROM tenant_integrations
          WHERE tenant_id = $1 AND provider = 'twilio'
          LIMIT 1`,
         [tenantId],
       );
-      businessPhone = twilioRow.rows[0]?.phone?.trim() || null;
+      const fallbackPhone = twilioRow.rows[0]?.phone?.trim() || null;
+      const isStubRow = twilioRow.rows[0]?.stub === 'true';
+      businessPhone =
+        fallbackPhone && !isStubRow && !isTwilioTestNumber(fallbackPhone)
+          ? fallbackPhone
+          : null;
     }
 
     let businessHours: unknown = null;

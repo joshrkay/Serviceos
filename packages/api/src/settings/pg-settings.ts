@@ -611,6 +611,7 @@ export class PgSettingsRepository extends PgBaseRepository implements SettingsRe
    * original special-cased semantics (see TenantIdentityUpsertFields):
    * timezone never regresses to unset once chosen; owner_phone is
    * written only when the caller passed the key at all (tri-state).
+   * `service_area_radius` is tri-state too (#874): null clears it.
    */
   async upsertIdentityFields(
     tenantId: string,
@@ -618,6 +619,12 @@ export class PgSettingsRepository extends PgBaseRepository implements SettingsRe
   ): Promise<TenantSettings> {
     return this.withTenantTransaction(tenantId, async (client) => {
       const writeOwnerPhone = Object.prototype.hasOwnProperty.call(fields, 'ownerPhone');
+      // #874 — service_area_radius is tri-state like owner_phone: omitted
+      // (undefined) keeps the stored value, null explicitly CLEARS it (an
+      // emptied radius field must stop the Settings row claiming a stale
+      // "~N mi radius"), a number sets it. COALESCE can't express "write
+      // NULL", hence the CASE below.
+      const writeServiceAreaRadius = fields.serviceAreaRadius !== undefined;
       const result = await client.query(
         `INSERT INTO tenant_settings (
            id, tenant_id, business_name, service_area_text, service_area_radius,
@@ -643,7 +650,10 @@ export class PgSettingsRepository extends PgBaseRepository implements SettingsRe
          ON CONFLICT (tenant_id) DO UPDATE SET
            business_name        = COALESCE($2, tenant_settings.business_name),
            service_area_text    = COALESCE($3, tenant_settings.service_area_text),
-           service_area_radius  = COALESCE($4, tenant_settings.service_area_radius),
+           service_area_radius  = CASE
+             WHEN $12::boolean THEN $4
+             ELSE tenant_settings.service_area_radius
+           END,
            business_hours       = COALESCE($5::jsonb, tenant_settings.business_hours),
            job_buffer_minutes   = COALESCE($6, tenant_settings.job_buffer_minutes),
            hourly_rate_cents    = COALESCE($7, tenant_settings.hourly_rate_cents),
@@ -667,6 +677,7 @@ export class PgSettingsRepository extends PgBaseRepository implements SettingsRe
           writeOwnerPhone ? (fields.ownerPhone ?? null) : null,
           writeOwnerPhone,
           fields.bootstrapAiModel,
+          writeServiceAreaRadius,
         ],
       );
       return mapRow(result.rows[0]);
