@@ -115,3 +115,90 @@ describe('EstimateCreate (P11-006)', () => {
     });
   });
 });
+
+// ─── #876: /estimates/new consumes ?customerId= and ?jobId= ──────────────────
+
+describe('EstimateCreate query-param prefill (#876)', () => {
+  beforeEach(() => {
+    vi.mocked(apiFetch).mockReset();
+    vi.mocked(useListQuery).mockImplementation(((endpoint: string) => {
+      if (endpoint === '/api/jobs') return listQueryResult(mockJobs);
+      return listQueryResult([]);
+    }) as never);
+  });
+
+  it('?jobId= preselects the job and triggers the customer enrichment fetch', async () => {
+    vi.mocked(apiFetch).mockImplementation(((url: string) => {
+      if (typeof url === 'string' && url.startsWith('/api/jobs/')) {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: async () => ({
+            id: 'job-42',
+            jobNumber: 'JOB-0042',
+            summary: 'AC tune-up',
+            customer: { id: 'cust-1', displayName: 'Alice Smith' },
+          }),
+        } as unknown as Response);
+      }
+      return Promise.resolve({ ok: true, status: 200, json: async () => ({ data: [] }) } as unknown as Response);
+    }) as never);
+
+    const { container } = render(
+      <MemoryRouter initialEntries={['/estimates/new?jobId=job-42']}>
+        <EstimateCreate />
+      </MemoryRouter>
+    );
+
+    const jobSelect = container.querySelector('select[required]') as HTMLSelectElement;
+    expect(jobSelect.value).toBe('job-42');
+    await waitFor(() => {
+      expect(vi.mocked(apiFetch)).toHaveBeenCalledWith('/api/jobs/job-42');
+    });
+    // The enrichment panel shows whose estimate this is.
+    await waitFor(() => {
+      expect(screen.getByText(/Alice Smith/)).toBeInTheDocument();
+    });
+  });
+
+  it('?customerId= scopes the job list query to that customer', () => {
+    render(
+      <MemoryRouter initialEntries={['/estimates/new?customerId=cust-1']}>
+        <EstimateCreate />
+      </MemoryRouter>
+    );
+    expect(vi.mocked(useListQuery)).toHaveBeenCalledWith('/api/jobs', {
+      filters: { customerId: 'cust-1' },
+    });
+    // With jobs present there is no empty state.
+    expect(screen.queryByTestId('no-jobs-empty-state')).not.toBeInTheDocument();
+  });
+
+  it('renders an honest empty state linking to /jobs/new when the customer has no jobs', () => {
+    vi.mocked(useListQuery).mockImplementation((() => listQueryResult([])) as never);
+    render(
+      <MemoryRouter initialEntries={['/estimates/new?customerId=cust-9']}>
+        <EstimateCreate />
+      </MemoryRouter>
+    );
+
+    const empty = screen.getByTestId('no-jobs-empty-state');
+    expect(empty).toHaveTextContent(/no jobs yet/i);
+    const link = screen.getByRole('link', { name: /create a job for this customer/i });
+    expect(link).toHaveAttribute('href', '/jobs/new?customerId=cust-9');
+    // 44px tap-target class contract (CLAUDE.md mobile rules).
+    expect(link.className).toContain('min-h-11');
+  });
+
+  it('shows no empty state on a plain /estimates/new visit with no jobs', () => {
+    vi.mocked(useListQuery).mockImplementation((() => listQueryResult([])) as never);
+    render(
+      <MemoryRouter initialEntries={['/estimates/new']}>
+        <EstimateCreate />
+      </MemoryRouter>
+    );
+    // Without a customer scope the blank dropdown is the pre-existing generic
+    // state — the #876 message is specifically about the scoped deep link.
+    expect(screen.queryByTestId('no-jobs-empty-state')).not.toBeInTheDocument();
+  });
+});

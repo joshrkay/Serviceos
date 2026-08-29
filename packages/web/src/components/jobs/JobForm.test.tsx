@@ -185,3 +185,61 @@ describe('JobForm — schedule on create (U7)', () => {
     expect(jobsPostBody().technicianId).toBe('tech-9');
   });
 });
+
+// ─── #878: /jobs/new?customerId=… pre-fills the picker ───────────────────────
+
+describe('JobForm initialCustomerId prefill (#878)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('hydrates the picker with the full customer display name, never the raw id', async () => {
+    vi.mocked(apiFetch).mockImplementation(async (url: RequestInfo | URL) => {
+      const u = String(url);
+      if (u === '/api/customers/cust-1') {
+        return { ok: true, status: 200, json: async () => customer } as unknown as Response;
+      }
+      if (u.startsWith('/api/locations')) {
+        return { ok: true, status: 200, json: async () => locations } as unknown as Response;
+      }
+      return { ok: true, status: 200, json: async () => ({}) } as unknown as Response;
+    });
+
+    render(<JobForm initialCustomerId="cust-1" />);
+
+    // The FULL option is fetched, so the picker shows the display name — the
+    // raw-UUID fallback (#878's symptom) must never render.
+    await waitFor(() => {
+      expect(screen.getByLabelText('customer-search')).toHaveValue('Ada Lovelace');
+    });
+    // The locations cascade fires off the seeded customer and auto-selects
+    // the primary location, exactly as a manual pick would.
+    await screen.findByRole('option', { name: /1 Main St/ });
+    await waitFor(() => {
+      expect(screen.getByLabelText(/Service location/)).toHaveValue('loc-1');
+    });
+  });
+
+  it('leaves the picker empty and the form usable when the id 404s (stale deep link)', async () => {
+    vi.mocked(apiFetch).mockImplementation(async (url: RequestInfo | URL) => {
+      const u = String(url);
+      if (u === '/api/customers/cust-gone') {
+        return { ok: false, status: 404, json: async () => ({ error: 'NOT_FOUND' }) } as unknown as Response;
+      }
+      return { ok: true, status: 200, json: async () => ({}) } as unknown as Response;
+    });
+
+    render(<JobForm initialCustomerId="cust-gone" />);
+
+    await waitFor(() => {
+      expect(vi.mocked(apiFetch)).toHaveBeenCalledWith('/api/customers/cust-gone');
+    });
+    expect(screen.getByLabelText('customer-search')).toHaveValue('');
+
+    // Validation still guards the submit — the form is degraded, not broken.
+    fireEvent.click(screen.getByRole('button', { name: /create job/i }));
+    await waitFor(() => {
+      expect(screen.getByRole('alert')).toHaveTextContent(/Customer is required/i);
+    });
+  });
+});

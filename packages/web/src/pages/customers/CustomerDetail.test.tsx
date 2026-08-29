@@ -1,8 +1,14 @@
 import React from 'react';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { MemoryRouter } from 'react-router';
+import { MemoryRouter, useLocation } from 'react-router';
 import { CustomerDetail } from './CustomerDetail';
+
+/** Renders the router's current URL so navigate() targets can be asserted. */
+function LocationProbe() {
+  const location = useLocation();
+  return <div data-testid="location-probe">{location.pathname + location.search}</div>;
+}
 
 vi.mock('../../hooks/useDetailQuery', () => ({
   useDetailQuery: vi.fn(),
@@ -107,6 +113,43 @@ describe('CustomerDetail', () => {
     expect(screen.getByRole('button', { name: /Schedule/ })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /Estimate/ })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /Message/ })).toBeInTheDocument();
+    await waitFor(() => {
+      expect(vi.mocked(apiFetch)).toHaveBeenCalledWith('/api/locations?customerId=1');
+    });
+  });
+
+  // #876: the Estimate quick action was reported "does nothing" — the wiring
+  // was in fact correct and the real fix is the destination's ?customerId=
+  // prefill. Pin the navigate targets so the deep links can't silently drop.
+  it('quick actions navigate to customer-scoped create/compose URLs (#876)', async () => {
+    render(
+      <MemoryRouter>
+        <CustomerDetail customerId="1" />
+        <LocationProbe />
+      </MemoryRouter>
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: /Estimate/ }));
+    expect(screen.getByTestId('location-probe')).toHaveTextContent(
+      '/estimates/new?customerId=1'
+    );
+    await waitFor(() => {
+      expect(vi.mocked(apiFetch)).toHaveBeenCalledWith('/api/locations?customerId=1');
+    });
+  });
+
+  it('the Schedule quick action navigates to /jobs/new?customerId= (#878)', async () => {
+    render(
+      <MemoryRouter>
+        <CustomerDetail customerId="1" />
+        <LocationProbe />
+      </MemoryRouter>
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: /Schedule/ }));
+    expect(screen.getByTestId('location-probe')).toHaveTextContent(
+      '/jobs/new?customerId=1'
+    );
     await waitFor(() => {
       expect(vi.mocked(apiFetch)).toHaveBeenCalledWith('/api/locations?customerId=1');
     });

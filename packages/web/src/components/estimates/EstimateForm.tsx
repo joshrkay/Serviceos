@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useState } from 'react';
+import { Link } from 'react-router';
 import { Sparkles } from 'lucide-react';
 import { toast } from 'sonner';
 import { apiFetch } from '../../utils/api-fetch';
@@ -16,6 +17,17 @@ import { Button, Field, Input, Select, Textarea } from '../../components/ui';
 export interface EstimateFormProps {
   onCreated?: (estimateId: string) => void;
   onCancel?: () => void;
+  /**
+   * #876: pre-select this job (from /estimates/new?jobId=…). The existing
+   * enrichment effect then fetches the job's customer + location for display.
+   */
+  initialJobId?: string;
+  /**
+   * #876: scope the job dropdown to this customer's jobs (from
+   * /estimates/new?customerId=…) and show an honest empty state when the
+   * customer has none — estimates scope by job, so a job must exist first.
+   */
+  initialCustomerId?: string;
 }
 
 interface ApiJob {
@@ -84,9 +96,14 @@ function makeId() {
   return `li-${Math.random().toString(36).slice(2, 10)}-${Date.now().toString(36)}`;
 }
 
-export function EstimateForm({ onCreated, onCancel }: EstimateFormProps) {
+export function EstimateForm({
+  onCreated,
+  onCancel,
+  initialJobId,
+  initialCustomerId,
+}: EstimateFormProps) {
   const [form, setForm] = useState<State>(() => ({
-    jobId: '',
+    jobId: initialJobId ?? '',
     validUntil: '',
     customerMessage: '',
     internalNotes: '',
@@ -102,7 +119,11 @@ export function EstimateForm({ onCreated, onCancel }: EstimateFormProps) {
   const [aiUsed, setAiUsed] = useState(false);
   const [aiError, setAiError] = useState<string | null>(null);
 
-  const { data: jobs } = useListQuery<ApiJob>('/api/jobs');
+  // #876: a ?customerId= deep link narrows the dropdown to that customer's
+  // jobs (the endpoint already supports the filter — no API change).
+  const { data: jobs, isLoading: jobsLoading } = useListQuery<ApiJob>('/api/jobs', {
+    filters: initialCustomerId ? { customerId: initialCustomerId } : {},
+  });
 
   // When the user picks a job, fetch the enriched job detail (customer + location)
   // and look up any active maintenance agreement for that customer.
@@ -332,6 +353,23 @@ export function EstimateForm({ onCreated, onCancel }: EstimateFormProps) {
             ))}
           </Select>
         </Field>
+
+        {/* #876: a customer-scoped deep link with zero jobs used to render a
+            silent empty dropdown — say so, and offer the next step. */}
+        {initialCustomerId && !jobsLoading && jobs.length === 0 && (
+          <div
+            data-testid="no-jobs-empty-state"
+            className="md:col-span-2 rounded-lg border border-border bg-secondary px-3 py-2.5 text-sm text-muted-foreground"
+          >
+            This customer has no jobs yet — an estimate needs a job to scope to.{' '}
+            <Link
+              to={`/jobs/new?customerId=${encodeURIComponent(initialCustomerId)}`}
+              className="inline-flex min-h-11 items-center text-primary underline"
+            >
+              Create a job for this customer
+            </Link>
+          </div>
+        )}
 
         {/* Customer & service location (auto-populated) */}
         {selectedJob && (
