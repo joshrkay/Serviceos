@@ -88,6 +88,15 @@ export const HAIKU_OUTPUT_CENTS_PER_MTOKEN = 1500;
 // overestimate — if that test fails, bump this constant (don't just raise
 // the test's margin) and re-verify the cost cap semantics still abort
 // before spending.
+//
+// 2026-08-28 (#886/#887): the classifier prompt is now SURFACE-CONDITIONAL
+// (buildClassifierSystemPrompt in
+// packages/api/src/ai/orchestration/classifier-profile.ts). The live eval
+// path passes no `classifierProfile`, so it sends the full 'operator'
+// taxonomy — byte-identical to SYSTEM_PROMPT — and this constant stays
+// sized against that worst-case prompt. The trimmed telephony profiles
+// ('caller' ~4.1k tokens first turn) are strictly smaller, so this remains
+// a safe overestimate for every surface the eval could exercise.
 export const EST_SYSTEM_PROMPT_TOKENS = 20000;
 export const EST_OUTPUT_TOKENS_PER_CALL = 250;
 export const DEFAULT_COST_CAP_CENTS = 500; // $5

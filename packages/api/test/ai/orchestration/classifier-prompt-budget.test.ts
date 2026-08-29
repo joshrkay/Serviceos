@@ -31,13 +31,19 @@ import { formatVerticalForCallerPrompt } from '../../../src/verticals/context-as
 import { createHvacPack } from '../../../src/verticals/packs/hvac';
 import { INTENT_TO_PROPOSAL_TYPE } from '../../../src/proposals/voice-intent-map';
 import { S1_ALLOWED_PROPOSAL_TYPES } from '../../../src/proposals/surface';
+import {
+  CLASSIFY_TURN_INPUT_TOKEN_BUDGET,
+  DEFAULT_TELEPHONY_CAPS,
+  EXPECTED_MAX_CLASSIFY_TURNS,
+} from '../../../src/ai/skills/session-cost-tracker';
 
 /**
- * Per-turn classify input budget in tokens. Local pin until the session-cap
- * re-derivation (#886, next commit) exports it from session-cost-tracker.ts
- * as the documented basis of DEFAULT_TELEPHONY_CAPS.maxInputTokens.
+ * The documented per-turn classify input budget — the basis from which
+ * DEFAULT_TELEPHONY_CAPS.maxInputTokens is derived (#886). Importing the
+ * real constant couples this pin to the caps: growing the prompt past the
+ * budget or shrinking the cap below budget × turns fails here.
  */
-const PER_TURN_CLASSIFY_INPUT_TOKEN_BUDGET = 6000;
+const PER_TURN_CLASSIFY_INPUT_TOKEN_BUDGET = CLASSIFY_TURN_INPUT_TOKEN_BUDGET;
 
 /** chars/4, mirroring packages/voice-eval/live-support.ts estimateTokens. */
 const CHARS_PER_TOKEN = 4;
@@ -81,6 +87,14 @@ describe('classifier prompt budget — per-profile first turn', () => {
 
   it('operator profile remains the historical prompt (byte-identity delegated to its own pin)', () => {
     expect(buildClassifierSystemPrompt('operator')).toBe(SYSTEM_PROMPT);
+  });
+
+  it('the telephony session cap covers the expected classify turns at full budget (#886)', () => {
+    // The cap is CUMULATIVE per session; it must hold budget × turns, or
+    // gating only moves the first-sentence escalation from turn 1 to turn 2.
+    expect(DEFAULT_TELEPHONY_CAPS.maxInputTokens).toBeGreaterThanOrEqual(
+      PER_TURN_CLASSIFY_INPUT_TOKEN_BUDGET * EXPECTED_MAX_CLASSIFY_TURNS,
+    );
   });
 
   it('every caller-profile intent is reachable-or-intercepted on S1 (nothing advertised is dead)', () => {

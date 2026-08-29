@@ -668,3 +668,48 @@ on the phone stays undecided (#833 "entity resolution per surface"). #860 step 2
 calls the same surface adapter from `speechTurn`; the actor is already stamped for that transport by the
 shared establishment core, so step 2 adds the dispatch call and nothing about identity. It is not
 wired here.
+
+### D-027: The classifier prompt is surface-conditional; session input caps are derived from a documented per-turn budget
+**Date:** 2026-08-28
+**Initiative:** P0 voice gate failure (#886, #887; folds #896, #899; PR #902).
+**Decision:** The classifier system prompt is assembled per **surface profile** from a verbatim
+block table (`ai/orchestration/intent-taxonomy-blocks.ts` + `classifier-profile.ts`):
+`'caller'` (anonymous/customer inbound phone, 18 intents + money-ask preamble + 13-field entity
+dictionary), `'field_tech'` (caller-ID-resolved employee, D-026 actor, 15 trade-internal
+intents), `'owner_line'` (RV-070/071 verified owner, full taxonomy minus the 8 customer-scoped
+lookups), and `'operator'` (everything — byte-identical to the historical `SYSTEM_PROMPT`,
+pinned by SHA-256, so the memo worker, in-app voice, chat, evals, and the 74 Layer-1 cassettes
+are untouched). The profile derives from **session identity only** —
+`classifierProfileForSession(session)` reads the trusted-channel allowlist, the `ownerSession`
+flag, and the D-026 phone actor; never transcript content — so a caller cannot talk their way
+into a wider taxonomy, and an unknown future channel fails **closed** to `'caller'`. The prompt
+is a hint, not a gate: a post-parse guard maps any classification outside
+`PROFILE_INTENTS[profile]` to `unknown`/`intent_off_surface`. The guard deliberately does NOT
+pre-empt layers that own their surface behavior downstream of classification: read-only
+`lookup_*` (D-026's dispatch RBAC refuses with purposeful copy), `emergency_dispatch` (the
+RV-140/142 deterministic-scan escalation fast-path — dropped from the S1 prompts, kept as the
+LLM second net), and `approve/reject/edit_proposal` (the RV-071/RV-225 owner hard gates, which
+audit denied attempts). The I6 proposal-type gate remains as defense-in-depth behind all of it.
+**Cap re-derivation:** `SessionCostTracker.maxInputTokens` is cumulative per session, so gating
+alone only moves the first-turn escalation to a later turn. Caps are now derived, never picked:
+`CLASSIFY_TURN_INPUT_TOKEN_BUDGET = 6000` (worst measured gated first turn — caller profile +
+protection section + rich HVAC vertical pack + long utterance ≈ 5,048 tokens chars/4 — × 1.15,
+rounded) × `EXPECTED_MAX_CLASSIFY_TURNS = 8` ⇒ telephony 48,000 (was 5,000, which had fallen to
+~⅓ of ONE ungated turn); in-app 60,000 (was 10,000, also under one full-taxonomy turn).
+Cost reconciliation: `estimateCostCents(48000, 1500) ≈ 17¢` and `estimateCostCents(60000,
+3000) ≈ 23¢` — both well under their 40¢/80¢ money caps, so tokens bind first and cost stays
+the financial backstop. The budget, the caps arithmetic, and the real assembled first turn are
+pinned together by `test/ai/orchestration/classifier-prompt-budget.test.ts` (first turn < 85% of
+budget; cap ≥ budget × turns).
+**Rationale:** The first-turn classifier request measured 60,749 chars ≈ 15,187 tokens against
+the 5,000-token session cap — `cost_cap_exceeded` at inputPct ~3.0 on the caller's first
+sentence, the root cause of the 2026-08-28 QA-matrix voice gate failure (10/20) and the weekly
+Layer-2 reds since 08-10 (#886). 58.5% of that prompt was intents structurally unable to act on
+S1 (#887), and the S1 coercion produced a false "taken care of" line on money asks.
+**Constraints:** Caps stay channel-set at session creation (before identity resolution) — no
+per-surface mutable caps in voice-session-store. The voice-quality harness/text-mode-driver is
+deliberately NOT profile-wired (#888/#897 follow-up; wiring it would invalidate all cassette
+hashes). `owner_line` still burns ~15.2k tokens/turn (~3 classify turns per session cap) —
+further owner-prompt conditioning is a follow-up. Lookup-bullet table compaction is a separate
+PR; #900 is out of scope. Numbering note: this log's latest entry on main is D-026; #883's PR
+also claims D-027 but is unmerged — renumber whichever lands second.

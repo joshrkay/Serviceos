@@ -1,5 +1,5 @@
 export interface SessionCapConfig {
-  maxInputTokens: number;   // default: 5000
+  maxInputTokens: number;   // default: 48000 — see the derivation on DEFAULT_TELEPHONY_CAPS
   maxOutputTokens: number;  // default: 1500
   maxCostCents: number;     // default: 40 ($0.40)
   maxDurationMs: number;    // default: 15 * 60 * 1000 (15 min telephony)
@@ -15,15 +15,61 @@ export interface TokenUsage {
   costCents: number; // caller computes this from token prices
 }
 
+/**
+ * #886 — the documented per-turn basis for `maxInputTokens`. The caps below
+ * are DERIVED (budget × expected turns), never picked by feel.
+ *
+ * The input caps are CUMULATIVE per session (recordUsage sums every turn),
+ * so a cap must be sized as per-turn-budget × expected-turns. The old
+ * `maxInputTokens: 5000` (unchanged since 2026-04-30) predates the taxonomy
+ * growth waves and had become smaller than ONE classify turn (~15.2k tokens
+ * ungated) — every inbound call fired `cost_cap_exceeded` at inputPct ~3.0
+ * on the caller's first sentence, while sitting ~130× tighter than its own
+ * `maxCostCents: 40` sibling (≈133k input tokens at $3/MTok).
+ *
+ * CLASSIFY_TURN_INPUT_TOKEN_BUDGET: worst measured first turn on a gated
+ * surface — 'caller' profile prompt + customer-protection section + a rich
+ * HVAC vertical pack + a long utterance ≈ 5,048 tokens (chars/4, 2026-08-28
+ * audit) — × 1.15 safety margin ≈ 5,805, rounded to 6,000. Pinned by
+ * test/ai/orchestration/classifier-prompt-budget.test.ts, which requires the
+ * real assembled first turn to stay under 85% of this budget.
+ *
+ * EXPECTED_MAX_CLASSIFY_TURNS: a 15-minute telephony session that classifies
+ * on every exchange runs ~8 LLM turns (greeting/confirm/lookup turns are
+ * cheaper than the budget, so 8 full-budget turns is conservative).
+ */
+export const CLASSIFY_TURN_INPUT_TOKEN_BUDGET = 6000;
+export const EXPECTED_MAX_CLASSIFY_TURNS = 8;
+
+/**
+ * Telephony (15 min): input = 6,000 × 8 = 48,000.
+ *
+ * maxCostCents reconciliation: estimateCostCents(48_000, 1_500) =
+ * 14.4 + 2.25 ≈ 17¢ — a session that exhausts the whole input cap still
+ * spends well under the 40¢ money cap, so tokens (the operational
+ * dimension) bind before cost (the financial backstop), in that order by
+ * design. The ungated 'operator'/'owner_line' prompt (~15.2k tokens/turn)
+ * fits ~3 classify turns under this cap — acceptable for an owner burning
+ * budget on their own line; further owner-prompt conditioning is a
+ * follow-up (#887).
+ */
 export const DEFAULT_TELEPHONY_CAPS: SessionCapConfig = {
-  maxInputTokens: 5000,
+  maxInputTokens: CLASSIFY_TURN_INPUT_TOKEN_BUDGET * EXPECTED_MAX_CLASSIFY_TURNS,
   maxOutputTokens: 1500,
   maxCostCents: 40,
   maxDurationMs: 15 * 60 * 1000,
 };
 
+/**
+ * In-app (30 min, trusted 'operator' surface — full taxonomy): the session
+ * is twice as long, so input = 6,000 × 10 = 60,000 (10, not 16: in-app
+ * turns lean on the screen for readbacks, so fewer turns classify).
+ * estimateCostCents(60_000, 3_000) = 18 + 4.5 ≈ 23¢ < the 80¢ money cap.
+ * The old 10,000 was under ONE full-taxonomy classify turn (~14.5k tokens)
+ * — same class of bug as telephony's 5,000.
+ */
 export const DEFAULT_INAPP_CAPS: SessionCapConfig = {
-  maxInputTokens: 10000,
+  maxInputTokens: 60000,
   maxOutputTokens: 3000,
   maxCostCents: 80,
   maxDurationMs: 30 * 60 * 1000,

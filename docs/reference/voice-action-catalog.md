@@ -22,6 +22,23 @@ intent, (2) an entry in `INTENT_TO_PROPOSAL_TYPE`, and (3) an execution handler
 wired with its real dependency. Sections below are organised by which of these
 exist today.
 
+**Advertised on which surface? (#886/#887, D-027)** — since 2026-08-28 the
+classifier prompt is *surface-conditional*: an intent listed here is only
+*offered to the model* on surfaces whose profile advertises it. The
+authoritative per-surface sets are `PROFILE_INTENTS` in
+`packages/api/src/ai/orchestration/classifier-profile.ts` (pinned by
+`test/ai/orchestration/classifier-profile.test.ts`): **operator** (memo, chat,
+in-app voice — the full taxonomy below, byte-identical to the historical
+prompt), **owner_line** (everything minus the 8 customer-scoped `lookup_*`),
+**field_tech** (caller-ID-resolved employee on the phone — the 15
+trade-internal intents), **caller** (anonymous/customer inbound phone — the
+18-intent S1 slice). The prompt is a hint, not the gate: classification
+outside the surface's set becomes `unknown`/`intent_off_surface`, and the S1
+proposal allowlist, D-026 lookup RBAC, and RV-071/RV-225 owner gates keep
+enforcing regardless. This column is deliberately NOT added to the
+machine-readable block below — that block pins intent↔proposal↔class against
+code, and the per-surface truth already has its own executable pin.
+
 ---
 
 ## A) Speakable today — intent + proposal + execution handler all exist
