@@ -27,11 +27,14 @@
 import type { IntentType } from './intent-classifier';
 import {
   CALIBRATION,
+  CALLER_MONEY_PREAMBLE,
   DISTINCTIONS_HEADER,
   DISTINCTION_RULES,
   ENTITY_FIELDS,
+  ENTITY_FIELD_VARIANTS,
   INTENT_BLOCKS,
   INTENT_BLOCK_ORDER,
+  INTENT_BLOCK_VARIANTS,
   INTENT_LIST_HEADER,
   PREAMBLE_HEAD,
   SCHEMA_HEAD,
@@ -224,7 +227,11 @@ const FIELD_TECH_INTENTS: readonly IntentType[] = [
  * 1. `buildClassifierSystemPrompt` assembles the prompt from it (advertise).
  * 2. `classifyIntentRaw`'s post-parse guard maps any classification outside
  *    it to 'unknown' / 'intent_off_surface' (accept) — the prompt is a hint,
- *    this set is the classifier-level gate.
+ *    this set is the classifier-level gate. The guard exempts two families
+ *    that own their surface behavior DOWNSTREAM of classification and must
+ *    not be pre-empted by a generic clarification: read-only lookup_*
+ *    (D-026's dispatch RBAC answers or refuses with purposeful copy) and
+ *    emergency_dispatch (the FSM escalation fast-path, RV-140/142).
  *
  * Section-gated intents (owner approval, protection, extended lookups) are
  * members wherever the section can be appended, so the guard never rejects
@@ -262,9 +269,14 @@ export function buildClassifierSystemPrompt(profile: ClassifierProfile): string 
   if (memoized !== undefined) return memoized;
 
   const allowed = PROFILE_INTENTS[profile];
-  const parts: string[] = [PREAMBLE_HEAD, INTENT_LIST_HEADER];
+  const parts: string[] = [PREAMBLE_HEAD];
+  // The caller surface advertises no money/document intents; one preamble
+  // paragraph tells the model where those asks land (operator_request).
+  if (profile === 'caller') parts.push(CALLER_MONEY_PREAMBLE);
+  parts.push(INTENT_LIST_HEADER);
   for (const intent of INTENT_BLOCK_ORDER) {
-    if (allowed.has(intent)) parts.push(INTENT_BLOCKS[intent]);
+    if (!allowed.has(intent)) continue;
+    parts.push(INTENT_BLOCK_VARIANTS[intent]?.[profile] ?? INTENT_BLOCKS[intent]);
   }
   // 'unknown' is in every profile; the short closing catch-all always ends
   // the list, exactly as in the original literal.
@@ -284,7 +296,7 @@ export function buildClassifierSystemPrompt(profile: ClassifierProfile): string 
   parts.push(SCHEMA_HEAD);
   parts.push(
     ENTITY_FIELDS.filter((f) => f.intents === '*' || f.intents.some((i) => allowed.has(i)))
-      .map((f) => f.line)
+      .map((f) => ENTITY_FIELD_VARIANTS[f.key]?.[profile] ?? f.line)
       .join(',\n'),
   );
   parts.push(SCHEMA_TAIL, CALIBRATION);

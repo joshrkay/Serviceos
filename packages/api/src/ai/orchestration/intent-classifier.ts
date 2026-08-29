@@ -1,6 +1,10 @@
 import { LLMGateway } from '../gateway/gateway';
 import { resolveClassifyIntentDeadlineMs } from '../../config/ai-routing';
-import { buildClassifierSystemPrompt } from './classifier-profile';
+import {
+  buildClassifierSystemPrompt,
+  PROFILE_INTENTS,
+  type ClassifierProfile,
+} from './classifier-profile';
 
 /**
  * Voice-to-action intent classifier.
@@ -603,6 +607,33 @@ export function isLookupIntent(intent: IntentType | undefined | null): boolean {
 }
 
 /**
+ * #887 — intents the post-parse surface guard NEVER intercepts, even when
+ * the profile does not advertise them. Each one has a deliberate,
+ * surface-aware authority downstream of classification whose behavior
+ * (specific denial copy, audit trail, escalation) is strictly better than a
+ * generic "didn't catch that" clarification:
+ *
+ * - emergency_dispatch — the FSM escalation fast-path (RV-140/142). The
+ *   live path is the deterministic keyword scan BEFORE classification; an
+ *   LLM-detected keyword-less emergency must still escalate.
+ * - approve_proposal / reject_proposal / edit_proposal — the RV-071/RV-225
+ *   owner hard gates, which deny non-owner attempts AND emit the
+ *   voice_approval_denied / voice_edit_denied audit events (a prompt-
+ *   injection attempt on a customer line should land in the audit log, not
+ *   dissolve into a reprompt).
+ *
+ * Read-only lookup_* intents are exempt via isLookupIntent for the same
+ * reason (D-026 dispatch RBAC owns them); they are not listed here only
+ * because they are a prefix family, not an enumeration.
+ */
+const SURFACE_GUARD_EXEMPT_INTENTS: ReadonlySet<IntentType> = new Set<IntentType>([
+  'emergency_dispatch',
+  'approve_proposal',
+  'reject_proposal',
+  'edit_proposal',
+]);
+
+/**
  * Customer-side protection intents: complaint + negotiation.
  * These MUST be available on ordinary customer calls (not only owner
  * sessions). Gated by `ClassifyContext.customerProtectionIntents` (or
@@ -913,6 +944,10 @@ export interface ExtractedEntities {
  *   - 'parse_failed'      — classifier output wasn't valid JSON
  *   - 'unknown_intent'    — classifier picked 'unknown' at any confidence
  *   - 'low_confidence'    — classifier picked a real intent, but < 0.6
+ *   - 'intent_off_surface'— classifier picked an intent the calling
+ *                           surface's profile does not offer (#887 post-parse
+ *                           PROFILE_INTENTS guard — the prompt is a hint,
+ *                           the set is the gate)
  *
  * `lowConfidenceIntent` is populated only on 'low_confidence': it is
  * the intent the classifier leaned toward so the clarification card
@@ -922,7 +957,8 @@ export type UnknownReason =
   | 'empty_transcript'
   | 'parse_failed'
   | 'unknown_intent'
-  | 'low_confidence';
+  | 'low_confidence'
+  | 'intent_off_surface';
 
 export interface IntentClassification {
   intentType: IntentType;
@@ -1033,6 +1069,19 @@ export interface ClassifyContext {
    * `extendedIntents: true` also unlocks these for back-compat (assistant).
    */
   customerProtectionIntents?: boolean;
+  /**
+   * #886/#887 — which surface profile's taxonomy slice to advertise (and
+   * accept — see the post-parse PROFILE_INTENTS guard). ABSENT means
+   * 'operator': the full taxonomy, byte-identical to the historical
+   * SYSTEM_PROMPT, so every caller that does not pass a profile (memo
+   * worker, in-app voice, chat, evals, the voice-quality harness) keeps its
+   * exact prompt bytes — cassette hashes and gateway cache keys included.
+   * Live telephony passes `classifierProfileForSession(session)`
+   * (create-voice-turn-processor.ts), which derives the profile from
+   * SESSION IDENTITY (channel / ownerSession / D-026 phone actor), never
+   * from transcript content.
+   */
+  classifierProfile?: ClassifierProfile;
 }
 
 /**
@@ -1752,8 +1801,11 @@ async function classifyIntentRaw(
   // doesn't dilute the canonical intent taxonomy and so per-tenant
   // prompt drift can't break the JSON contract enforced by the base
   // prompt.
+  // #886/#887 — the base taxonomy is surface-conditional. No profile ⇒
+  // 'operator' ⇒ byte-identical to the historical SYSTEM_PROMPT.
+  const profile = context.classifierProfile ?? 'operator';
   const systemMessages: Array<{ role: 'system'; content: string }> = [
-    { role: 'system', content: SYSTEM_PROMPT },
+    { role: 'system', content: buildClassifierSystemPrompt(profile) },
   ];
   if (context.verticalPromptSection && context.verticalPromptSection.trim().length > 0) {
     systemMessages.push({
@@ -1771,19 +1823,28 @@ async function classifyIntentRaw(
   // recognized owner line (caller-ID match; see approver-identity.ts).
   // Appended last so non-owner calls keep
   // byte-identical messages (cassette hashes / gateway cache keys).
-  if (context.ownerSession === true) {
+  // #887: sections gate on the profile AND the flag — an S1 profile
+  // (caller/field_tech) can never be an owner session, so the profile check
+  // is belt-and-braces there, but it keeps the invariant explicit: a
+  // section only appears where PROFILE_INTENTS accepts its intents.
+  const s1Profile = profile === 'caller' || profile === 'field_tech';
+  if (context.ownerSession === true && !s1Profile) {
     systemMessages.push({ role: 'system', content: OWNER_APPROVAL_PROMPT_SECTION });
   }
   // Customer protection (complaint/negotiation): live telephony always opts
   // in. Legacy extendedIntents also unlocks protection for back-compat
-  // (assistant / opted-in recorder).
+  // (assistant / opted-in recorder). #887: not on 'field_tech' — a
+  // caller-ID-resolved employee is not a haggling customer, and
+  // PROFILE_INTENTS.field_tech accepts neither section intent.
   const protectionOn =
-    context.customerProtectionIntents === true || context.extendedIntents === true;
+    (context.customerProtectionIntents === true || context.extendedIntents === true) &&
+    profile !== 'field_tech';
   if (protectionOn) {
     systemMessages.push({ role: 'system', content: CUSTOMER_PROTECTION_PROMPT_SECTION });
   }
   // Owner extended READ-ONLY lookups — separate section, owner-flag only.
-  if (context.extendedIntents === true) {
+  // #887: never on an S1 profile (anonymous caller / phone-actor tech).
+  if (context.extendedIntents === true && !s1Profile) {
     systemMessages.push({ role: 'system', content: EXTENDED_INTENTS_PROMPT_SECTION });
   }
 
@@ -1871,6 +1932,42 @@ async function classifyIntentRaw(
     return overridden;
   }
 
+  // #887 — post-parse surface guard. The profile prompt is a HINT: a model
+  // can still emit an intent its surface was never shown (it knows the
+  // taxonomy from pretraining, or the transcript begs for it). Anything
+  // outside PROFILE_INTENTS for this profile becomes 'unknown' with its own
+  // reason, so routing sees a clean clarification instead of an intent the
+  // surface would coerce into a confusing half-success. Runs AFTER the
+  // sign-up override (create_customer is on every profile — the override's
+  // rescue must keep working even when the LLM guessed an off-surface
+  // intent) and BEFORE the low-confidence guard (off-surface is the more
+  // specific reason). No-op for 'operator' (its set is all intents).
+  //
+  // Some intents pass regardless, because their surface behavior is owned
+  // by a DELIBERATE surface-aware layer downstream of classification that a
+  // generic clarification must not pre-empt:
+  // - read-only lookup_* — D-026's shared dispatch RBAC either answers or
+  //   refuses with purposeful copy (an anonymous caller asking an
+  //   owner-grade question gets the refusal line, not "didn't catch that");
+  // - the SURFACE_GUARD_EXEMPT_INTENTS set (emergency escalation, owner
+  //   approval/edit hard gates) — see its doc comment.
+  if (
+    !PROFILE_INTENTS[profile].has(parsed.intentType) &&
+    !isLookupIntent(parsed.intentType) &&
+    !SURFACE_GUARD_EXEMPT_INTENTS.has(parsed.intentType)
+  ) {
+    const offSurface: IntentClassification = {
+      intentType: 'unknown',
+      confidence: parsed.confidence,
+      reasoning: `classifier picked ${parsed.intentType}, which the '${profile}' surface does not offer`,
+      extractedEntities: parsed.extractedEntities,
+      unknownReason: 'intent_off_surface',
+    };
+    if (tokenUsage) offSurface.tokenUsage = tokenUsage;
+    if (aiRunId) offSurface.aiRunId = aiRunId;
+    return offSurface;
+  }
+
   // Story 3.4 — "log inventory" maps to expense logging (product decision: no
   // inventory domain exists; material/stock intake is recorded as an expense).
   // Deterministic, post-parse: when the transcript is a clear inventory-LOGGING
@@ -1879,7 +1976,14 @@ async function classifyIntentRaw(
   // extracted and defaulting the category to 'materials'. Result is a DRAFT
   // proposal a human approves; nothing is auto-executed. No prompt bytes
   // change, so classify_intent cassettes / cache keys are unaffected.
-  if (parsed.intentType !== 'log_expense' && isInventoryLoggingPhrasing(transcript)) {
+  // #887: only where log_expense is actually offered (operator/owner_line) —
+  // an inbound caller or phone-actor tech saying "log inventory" must not
+  // mint an off-surface expense proposal through the deterministic side door.
+  if (
+    parsed.intentType !== 'log_expense' &&
+    (profile === 'operator' || profile === 'owner_line') &&
+    isInventoryLoggingPhrasing(transcript)
+  ) {
     const entities: ExtractedEntities = { ...(parsed.extractedEntities ?? {}) };
     if (!entities.expenseCategory) entities.expenseCategory = 'materials';
     const mapped: IntentClassification = {

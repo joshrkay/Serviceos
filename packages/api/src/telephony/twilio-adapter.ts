@@ -86,6 +86,7 @@ import type { WhisperCache } from './whisper-cache';
 import { answerPhoneLookup, type PhoneLookupDeps } from '../ai/voice-turn/phone-lookup-surface';
 import {
   createVoiceTurnProcessor,
+  classifierProfileForSession,
   appendAgentTts,
   callerTranscriptText,
   preloadSessionCatalog,
@@ -2303,6 +2304,9 @@ export class TwilioGatherAdapter {
             tenantId: opts.tenantId,
             verticalPromptSection,
             planPromptSection,
+            // #886/#887 — surface-conditional taxonomy: derived from session
+            // identity (owner line / trusted channel / D-026 phone actor).
+            classifierProfile: classifierProfileForSession(session),
             // RV-071 — appended ONLY on verified owner sessions so every
             // other call's prompt stays byte-identical (cassette hashes).
             ...(session.machine.currentContext.ownerSession === true

@@ -48,6 +48,7 @@
 import type { Pool } from 'pg';
 import { appendAgentTts, callerTranscriptText } from './transcript-append';
 import { classifyIntent, isVoiceApprovalIntent, isVoiceEditIntent } from '../orchestration/intent-classifier';
+import type { ClassifierProfile } from '../orchestration/classifier-profile';
 import {
   AI_BUSY_HOLD_LINE,
   classifyInfraFailure,
@@ -441,6 +442,26 @@ function isUntrustedS1Session(session: VoiceSession): boolean {
     !TRUSTED_CHANNELS.has(session.channel) &&
     session.machine.currentContext.ownerSession !== true
   );
+}
+
+/**
+ * #886/#887 — which classifier taxonomy profile this session's turns
+ * advertise. Derived from SESSION IDENTITY ONLY (channel allowlist, RV-070/
+ * 071 owner flag, D-026 phone actor) — never from transcript content, so a
+ * caller cannot talk their way into a wider taxonomy. Mirrors
+ * isUntrustedS1Session above: a trusted channel ('inapp') keeps the full
+ * 'operator' prompt byte-identical; an untrusted channel splits on whether
+ * caller-ID resolved an employee actor (stamped BEFORE the first classify —
+ * twilio-adapter establishment / the shared media-streams core).
+ *
+ * The prompt is a hint: the S1 proposal-type allowlist, the D-026 lookup
+ * RBAC, and the classifier's own PROFILE_INTENTS post-parse guard keep
+ * enforcing regardless of what was advertised.
+ */
+export function classifierProfileForSession(session: VoiceSession): ClassifierProfile {
+  if (session.machine.currentContext.ownerSession === true) return 'owner_line';
+  if (!isUntrustedS1Session(session)) return 'operator'; // trusted channel: 'inapp'
+  return session.actorUserId ? 'field_tech' : 'caller'; // D-026 phone actor
 }
 
 export interface VoiceTurnProcessorDeps {
@@ -3698,6 +3719,9 @@ export function createVoiceTurnProcessor(
             tenantId,
             verticalPromptSection,
             planPromptSection,
+            // #886/#887 — surface-conditional taxonomy: derived from session
+            // identity (owner line / trusted channel / D-026 phone actor).
+            classifierProfile: classifierProfileForSession(session),
             // RV-071 — the owner-approval prompt section is appended ONLY
             // on a recognized owner line (caller-ID match; see
             // approver-identity.ts), keeping every other call's

@@ -791,7 +791,14 @@ describe('Inbound caller — the non-mutating S1 types (control)', () => {
     expect(actuallyHandlerless).toEqual(EXPECTED_HANDLERLESS_S1_TYPES);
   });
 
-  it('an operator-only ask from a caller is coerced to voice_clarification', async () => {
+  it('an operator-only ask from a caller is blocked at classification — nothing minted (#887)', async () => {
+    // Pre-#887 this ask rode the S1 coercion into a voice_clarification
+    // proposal (after a confirm dance that ended in a false success line).
+    // The classifier's post-parse surface guard now maps send_invoice to
+    // unknown/'intent_off_surface' on the caller profile, so the call
+    // reprompts and NO proposal of any kind is persisted. The S1 coercion
+    // itself remains as defense-in-depth behind the classifier gate
+    // (pinned at the side-effect level in voice-turn-processor.test.ts).
     const world = await seedWorld();
     const proposals = await driveRealPathProposal(
       {
@@ -804,7 +811,6 @@ describe('Inbound caller — the non-mutating S1 types (control)', () => {
       world,
     );
 
-    expect(proposals).toHaveLength(1);
-    expect(proposals[0]!.proposalType).toBe('voice_clarification');
+    expect(proposals).toHaveLength(0);
   });
 });

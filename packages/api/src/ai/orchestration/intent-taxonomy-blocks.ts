@@ -22,6 +22,7 @@
  *   (classifier-profile.ts) for every surface that should advertise it.
  */
 import type { IntentType } from './intent-classifier';
+import type { ClassifierProfile } from './classifier-profile';
 
 /** First two prompt lines — role + task framing. */
 export const PREAMBLE_HEAD = `You are an intent classifier for a field service operating system.
@@ -794,6 +795,70 @@ export const INTENT_BLOCK_ORDER = Object.keys(INTENT_BLOCKS) as ReadonlyArray<ke
 export const TRAILING_UNKNOWN_BLOCK = `- "unknown"             — anything else: ambiguous transcripts, or edit
                            commands without a clear reference.
 `;
+
+/**
+ * #887 — one extra preamble paragraph for the 'caller' profile only,
+ * inserted between PREAMBLE_HEAD and INTENT_LIST_HEADER. The caller surface
+ * advertises no money or document-sending intents (record_payment,
+ * record_refund, apply_credit, send_invoice, …) — this line tells the model
+ * where those asks should land instead of letting them fall to 'unknown'.
+ * Corpus 07-out-of-scope/payment-request-escalated.json encodes the desired
+ * outcome.
+ */
+export const CALLER_MONEY_PREAMBLE = `
+When the caller asks to move money (pay, refund, credit, dispute a charge)
+or to change/send a document, classify operator_request — a person handles
+money on this line.
+`;
+
+/**
+ * #887 — per-profile replacement text for an intent block. Same shape as
+ * the INTENT_BLOCKS entry it replaces (leading \`- "intent"\`, trailing
+ * newline). Currently only create_customer carries a caller variant: the
+ * operator block spends ~2.9KB teaching CRM-side phrasings and
+ * address-extraction edge cases that matter when an OPERATOR dictates a
+ * record; an inbound caller signing themself up needs the sign-up framing
+ * and the extraction list, not the CRM lore.
+ */
+export const INTENT_BLOCK_VARIANTS: Partial<
+  Record<keyof typeof INTENT_BLOCKS, Partial<Record<ClassifierProfile, string>>>
+> = {
+  create_customer: {
+    caller: `- "create_customer"     — an inbound CALLER is signing up as a new customer
+                           ("I'd like to sign up", "I'm a new customer",
+                           "first time calling, please add me", "can you set
+                           up an account for me?", "Quisiera registrarme
+                           como nuevo cliente"). If the caller is not
+                           already in the system and wants to become a
+                           customer, classify create_customer with high
+                           confidence — do NOT fall back to "unknown" just
+                           because email/phone or even the name is missing.
+                           Extract displayName plus any stated email, phone,
+                           or address. A new customer stating their own
+                           street address is still create_customer — put the
+                           address VERBATIM in "address".
+`,
+  },
+};
+
+/**
+ * #887/#896 — per-profile replacement text for an entity-dictionary line
+ * (same shape: 4-space indent, no trailing comma). The caller variants trim
+ * guidance that only makes sense for intents the caller surface does not
+ * advertise (warranty/inspection jobTitle prefixes; add_note/log_permit
+ * noteBody rules — a caller's noteBody exists only for the protection
+ * section's complaint intent).
+ */
+export const ENTITY_FIELD_VARIANTS: Partial<
+  Record<string, Partial<Record<ClassifierProfile, string>>>
+> = {
+  jobTitle: {
+    caller: `    "jobTitle": "<string, optional — short name of the new job on create_job, or of the new work being scheduled on create_appointment>"`,
+  },
+  noteBody: {
+    caller: `    "noteBody": "<string, optional — the complaint text on complaint>"`,
+  },
+};
 
 /** Opens the disambiguation section. Emitted only when at least one rule survives gating. */
 export const DISTINCTIONS_HEADER = `

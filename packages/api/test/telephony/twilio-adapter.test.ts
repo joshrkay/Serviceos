@@ -1017,9 +1017,13 @@ describe('TwilioGatherAdapter.handleGather', () => {
   let sessionId: string;
 
   beforeEach(async () => {
+    // #886/#887 — the suite session is an inbound CUSTOMER line ('caller'
+    // profile), so the canned classification must be an intent that surface
+    // offers; draft_estimate is S1-reachable capture (create_invoice would
+    // now be caught by the post-parse intent_off_surface guard).
     gateway = makeGatewayReturning(
       JSON.stringify({
-        intentType: 'create_invoice',
+        intentType: 'draft_estimate',
         confidence: 0.92,
         reasoning: 'clear command',
         extractedEntities: { customerName: 'Acme', amount: 45000 },
@@ -1301,21 +1305,21 @@ describe('TwilioGatherAdapter.handleGather', () => {
     const xml = await adapter.handleGather({
       sessionId,
       callSid: 'CA-gx',
-      speechResult: 'Create an invoice for Acme for 450 dollars',
+      speechResult: 'I need an estimate for a water heater replacement, around 450 dollars',
       confidence: 0.95,
       tenantId: 'tenant-abc',
     });
 
     const snap = await store.snapshot(sessionId);
     expect(snap?.state).toBe('intent_confirm');
-    expect(snap?.context.currentIntent).toBe('create_invoice');
+    expect(snap?.context.currentIntent).toBe('draft_estimate');
     // Readback tts_play surfaced into the TwiML.
     expect(xml).toMatch(/<Say.*confirm/i);
     expect(xml).toContain('<Gather');
 
     // Caller transcript was appended (canonical store stores formatted strings).
     expect(snap?.transcript[0]).toBe(
-      'caller: Create an invoice for Acme for 450 dollars'
+      'caller: I need an estimate for a water heater replacement, around 450 dollars'
     );
   });
 
@@ -1393,7 +1397,7 @@ describe('TwilioGatherAdapter.handleGather', () => {
       const xml = await adapter.handleGather({
         sessionId,
         callSid: 'CA-gx',
-        speechResult: 'Create an invoice for Acme for 450 dollars',
+        speechResult: 'I need an estimate for a water heater replacement, around 450 dollars',
         confidence: 0.95,
         tenantId: 'tenant-abc',
       });
@@ -1408,7 +1412,7 @@ describe('TwilioGatherAdapter.handleGather', () => {
       const xml = await adapter.handleGather({
         sessionId,
         callSid: 'CA-gx',
-        speechResult: 'Create an invoice for Acme for 450 dollars',
+        speechResult: 'I need an estimate for a water heater replacement, around 450 dollars',
         confidence: undefined,
         tenantId: 'tenant-abc',
       });
@@ -1468,7 +1472,7 @@ describe('TwilioGatherAdapter.handleGather', () => {
       await adapter.handleGather({
         sessionId,
         callSid: 'CA-gx',
-        speechResult: 'Create an invoice for Acme for 450 dollars',
+        speechResult: 'I need an estimate for a water heater replacement, around 450 dollars',
         confidence: 0.95,
         tenantId: 'tenant-abc',
       });
@@ -1599,7 +1603,7 @@ describe('TwilioGatherAdapter.handleGather', () => {
       await adapter.handleGather({
         sessionId,
         callSid: 'CA-gx',
-        speechResult: 'Create an invoice for Acme for 450 dollars',
+        speechResult: 'I need an estimate for a water heater replacement, around 450 dollars',
         confidence: 0.95,
         tenantId: 'tenant-abc',
       });
@@ -1665,6 +1669,10 @@ describe('TwilioGatherAdapter.handleGather', () => {
     expect(
       systemMessages.some((m: { content: string }) => m.content.includes('lookup_day_overview')),
     ).toBe(false);
+    // #886/#887 — an anonymous/customer call gets the surface-gated 'caller'
+    // base taxonomy: money-ask escalation line in, money intents out.
+    expect(systemMessages[0].content).toContain('a person handles\nmoney on this line');
+    expect(systemMessages[0].content).not.toContain('"record_payment"');
     const session = await store.get(sid);
     expect(session?.machine.currentContext.customerProtectionIntents).toBe(true);
   });
@@ -1797,6 +1805,10 @@ describe('TwilioGatherAdapter.handleGather', () => {
     expect(
       systemMessages.some((m: { content: string }) => m.content.includes('negotiation')),
     ).toBe(true);
+    // #886/#887 — still the surface-gated 'caller' base when the flag
+    // resolver fails (profile derives from identity, not tenant flags).
+    expect(systemMessages[0].content).toContain('a person handles\nmoney on this line');
+    expect(systemMessages[0].content).not.toContain('"record_payment"');
   });
 
   it('emergency_dispatch fast-paths to escalating and skips intent_confirm', async () => {
@@ -2015,7 +2027,7 @@ describe('TwilioGatherAdapter.handleGather', () => {
     await adapter.handleGather({
       sessionId,
       callSid: 'CA-gx',
-      speechResult: 'Create an invoice for Acme for 450 dollars',
+      speechResult: 'I need an estimate for a water heater replacement, around 450 dollars',
       confidence: 0.95,
       tenantId: 'tenant-abc',
     });

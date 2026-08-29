@@ -22,6 +22,8 @@ import {
 import { INTENT_TO_PROPOSAL_TYPE as ROUTER_REEXPORT } from '../../src/workers/voice-action-router';
 import { S1_ALLOWED_PROPOSAL_TYPES } from '../../src/proposals/surface';
 import { VALID_PROPOSAL_TYPES } from '../../src/proposals/proposal';
+import { PROFILE_INTENTS } from '../../src/ai/orchestration/classifier-profile';
+import type { IntentType } from '../../src/ai/orchestration/intent-classifier';
 
 const SRC = join(__dirname, '../../src');
 /** The one module allowed to define the mapping. */
@@ -119,6 +121,29 @@ describe('voice intent → proposal type: exactly one map', () => {
       'reschedule_appointment',
       'schedule_inspection',
     ]);
+  });
+
+  it('the caller profile advertises every S1-reachable intent except the field-tech aliases (#887)', () => {
+    // Structural coupling between the S1 allowlist computation above and the
+    // surface-conditional prompt (classifier-profile.ts): whatever an inbound
+    // caller can actually get proposed must stay advertised in their prompt.
+    // The two trade-internal phrasings are deliberately field_tech-only —
+    // "schedule the rough-in inspection" / "log a warranty callback" are
+    // spoken by the trade, not by the customer (design decision on #887).
+    const fieldTechAliases = new Set(['schedule_inspection', 'log_warranty_claim']);
+    const s1Reachable = Object.entries(INTENT_TO_PROPOSAL_TYPE)
+      .filter(([, proposalType]) => S1_ALLOWED_PROPOSAL_TYPES.has(proposalType!))
+      .map(([intent]) => intent as IntentType);
+    for (const intent of s1Reachable) {
+      if (fieldTechAliases.has(intent)) {
+        expect(PROFILE_INTENTS.field_tech.has(intent)).toBe(true);
+        continue;
+      }
+      expect(
+        PROFILE_INTENTS.caller.has(intent),
+        `S1 can act on ${intent} but the caller prompt no longer advertises it`,
+      ).toBe(true);
+    }
   });
 });
 
