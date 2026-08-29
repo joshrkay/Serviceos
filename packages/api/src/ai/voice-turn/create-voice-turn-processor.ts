@@ -158,6 +158,10 @@ import {
   evaluateNegotiationDiscount,
 } from '../../proposals/guardrails/negotiation-guardrail';
 import {
+  complaintSeverity,
+  COMPLAINT_HIGH_SEVERITY_REASON,
+} from '../tasks/complaint-task';
+import {
   buildAllowDiscountCallbackContent,
   buildDiscountClarificationPayload,
   discountAuditMetadata,
@@ -1337,6 +1341,91 @@ export function createVoiceTurnProcessor(
         });
         const storedNegotiation = await deps.proposalRepo.create(negotiationProposal);
         session.proposalIds.push(storedNegotiation.id);
+        return;
+      }
+
+      // #846 — complaint guardrail. The FSM emits this when the caller
+      // reports dissatisfaction (transitions.ts, next to the negotiation
+      // guard). The recorded-memo path (ComplaintTaskHandler) mints a
+      // pinned-prefix `add_note` PLUS an owner `callback` — but `add_note`
+      // is NOT S1-allowed, so the generic path below would coerce the live
+      // caller's complaint to a bare clarification: the exact silent degrade
+      // this branch exists to prevent. The live leg therefore mints only the
+      // `callback` follow-up (S1-allowed — it routes a human, never a
+      // mutation), carrying the SAME deterministic severity markers the memo
+      // path stamps, and does NOT dispatch `proposal_queued`: the guard
+      // stays in the current state, so a proposal_queued transition would be
+      // wrong here.
+      if (intent === 'complaint') {
+        const description = typeof entities.noteBody === 'string' ? entities.noteBody : '';
+        const transcript = typeof entities.transcript === 'string' ? entities.transcript : '';
+        const detectText = `${description} ${transcript}`.trim();
+        const customerName =
+          typeof entities.customerName === 'string' ? entities.customerName : undefined;
+        const conversationId =
+          typeof fx.payload.conversationId === 'string' ? fx.payload.conversationId : undefined;
+        // Same deterministic keyword severity the memo path uses, so the
+        // review surfaces (cards, SMS render, digest) flag both legs alike.
+        const severity = complaintSeverity(detectText);
+        const severityMeta =
+          severity === 'high'
+            ? {
+                _meta: {
+                  // Required by the _meta contract; 'medium' is neutral (only
+                  // low/very_low gate anything). The marker is the payload.
+                  overallConfidence: 'medium',
+                  markers: [{ path: 'body', reason: COMPLAINT_HIGH_SEVERITY_REASON }],
+                },
+              }
+            : {};
+        const who = customerName ?? 'the customer';
+        const complaintProposal = buildProposal({
+          tenantId,
+          proposalType: 'callback',
+          payload: {
+            reason: 'customer_complaint_followup',
+            transcript:
+              detectText ||
+              'Caller reported a complaint on a live call — no details were captured; check the call transcript.',
+            ...(conversationId ? { conversationId } : {}),
+            ...severityMeta,
+          },
+          summary:
+            severity === 'high'
+              ? `HIGH-SEVERITY complaint — call ${who} back`
+              : `Complaint follow-up — call ${who} back`,
+          explanation:
+            'Heard on a live call. The transcript carries the details; this callback is the owner follow-up. No note is drafted on the live-caller surface (add_note is operator-only).',
+          sourceContext: {
+            source: 'calling-agent',
+            channel: 'telephony',
+            // A complaint always routes to a human `callback` (S1-safe), but
+            // the surface still travels with the proposal for audit + the
+            // execution-boundary re-check — same convention as negotiation.
+            surface: (session.machine.currentContext.ownerSession === true
+              ? 'S2'
+              : 'S1') as ProposalSurface,
+            sessionId: session.id,
+          },
+          // Real classify-run id or null — never fabricated (FK to ai_runs).
+          ...(typeof fx.payload.aiRunId === 'string' && fx.payload.aiRunId
+            ? { aiRunId: fx.payload.aiRunId }
+            : {}),
+          createdBy:
+            typeof fx.payload.customerId === 'string'
+              ? fx.payload.customerId
+              : deps.systemActorId ?? 'calling-agent',
+          ...(tenantThresholdOverride ? { tenantThresholdOverride } : {}),
+        });
+        const storedComplaint = await deps.proposalRepo.create(complaintProposal);
+        session.proposalIds.push(storedComplaint.id);
+        // Session-bus telemetry: a dead complaint branch must be a metric,
+        // not an audit finding. (The Gather adapter executes no
+        // emit_quality_event, so this is the phone leg's observable signal.)
+        session.events.emit('voice-event', {
+          type: 'proposal_created',
+          proposalId: storedComplaint.id,
+        });
         return;
       }
 

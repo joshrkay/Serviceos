@@ -50,7 +50,11 @@ import { notifyOwner } from '../notifications/owner-notifications-instance';
 import { assembleB2bAccountContext } from '../ai/agents/customer-calling/b2b-account-context';
 import { confirmIntent } from '../ai/skills/confirm-intent';
 import { summarizeSession } from '../ai/skills/summarize-session';
-import { intentClassifiedEvent } from '../ai/voice-quality/events';
+import { intentClassifiedEvent, languageSwitchedEvent } from '../ai/voice-quality/events';
+import {
+  detectLanguageSwitchIntent,
+  isLanguageSupported,
+} from '../ai/orchestration/language-detector';
 import { TAU_INT } from '../ai/agents/customer-calling/transitions';
 import type {
   CallingAgentContext,
@@ -102,11 +106,15 @@ import {
   renderTtsText,
   LOW_STT_CONFIDENCE_REPROMPT_COPY,
   SPEECH_TURN_FAILURE_ESCALATION_COPY,
+  LANGUAGE_SWITCH_ACK,
+  LANGUAGE_UNSUPPORTED_LINE,
+  LANGUAGE_SWITCH_CAP_LINE,
   type SessionLanguage,
 } from '../ai/agents/customer-calling/tts-copy';
 import {
   MIN_STT_CONFIDENCE,
   MAX_CONSECUTIVE_LOW_CONFIDENCE_TURNS,
+  MAX_LANGUAGE_SWITCHES_PER_CALL,
 } from './media-streams/mediastream-adapter';
 import { recordVoiceError } from '../analytics/posthog';
 import {
@@ -2413,6 +2421,21 @@ export class TwilioGatherAdapter {
         return this.finalizeTwiml(session, sideEffectsAll, opts.sessionId);
       }
 
+      // #846 — language_switch is an ADAPTER act, not an FSM transition or a
+      // proposal: the pure FSM cannot mutate session.language, and before
+      // this branch the intent fell through to `intentToProposalType`'s
+      // default and minted a `voice_clarification` card — so Spanish
+      // switching worked on the media-streams transport and silently
+      // degraded here. Same out-of-FSM shape as the lookup branch above:
+      // handle, speak, and do NOT dispatch `intent_classified` — the FSM
+      // stays where it is and the next <Gather> turn (built by finalizeTwiml
+      // from the flipped session.language) listens in the new language.
+      if (classifiedIntentType === 'language_switch') {
+        sideEffectsAll.push(...(await this.handleLanguageSwitchGather(session, opts)));
+        await this.processor.executeSideEffects(session, sideEffectsAll, opts.tenantId);
+        return this.finalizeTwiml(session, sideEffectsAll, opts.sessionId);
+      }
+
       // RV-071 — owner voice approval. Routed OUTSIDE the FSM (the same
       // pattern as the lookup skills above: state stays in
       // intent_capture/closing; the dialogue rides the session). The
@@ -2729,15 +2752,74 @@ export class TwilioGatherAdapter {
   }
 
   /**
-   * P11-001: dispatch a `lookup_*` intent to the corresponding read-only
-   * skill and return its TTS-ready `summary`. Always returns a string —
-   * a missing wiring or error degrades to a generic "let me get someone"
-   * line so the live call never bubbles a 5xx.
+   * #846 — mid-call language switch on the Gather transport.
    *
-   * Caller must guarantee `intentType` starts with `lookup_` (the gate
-   * lives at the call site so the routing branch can stay tight).
+   * Deliberately TINY compared to the media-streams `switchLanguage`: that
+   * method owns a live Deepgram socket (lock, generation bump, reopen,
+   * rollback); on Gather, Twilio does the STT per-turn via
+   * `<Gather language=...>`, so flipping `session.language` is the whole
+   * switch — `finalizeTwiml` already threads it (and `session.ttsVoice`)
+   * into every TwiML build.
+   *
+   * Policy mirrors media-streams: the tenant `supported_languages` opt-in
+   * gates the target, and the SAME per-call flap cap
+   * (MAX_LANGUAGE_SWITCHES_PER_CALL) bounds reopen-style flapping. The TTS
+   * voice is re-resolved for the NEW language — it was resolved once at
+   * session start for the then-current language, and carrying it over would
+   * read Spanish in the English voice.
+   *
+   * Never throws; always returns the side effects to speak.
    */
+  private async handleLanguageSwitchGather(
+    session: VoiceSession,
+    opts: { sessionId: string; tenantId: string; speechResult: string },
+  ): Promise<SideEffect[]> {
+    const current: SessionLanguage = session.language === 'es' ? 'es' : 'en';
+    // The utterance's requested language when the heuristic can extract it,
+    // else the other half of the en/es pair (the classifier already said
+    // this turn IS a switch request) — same fallback as media-streams.
+    const target = detectLanguageSwitchIntent(opts.speechResult) ?? (current === 'es' ? 'en' : 'es');
 
+    if (target === current) {
+      // Already speaking the requested language — just acknowledge; no
+      // counter spend, no event.
+      return [{ type: 'tts_play', payload: { text: LANGUAGE_SWITCH_ACK[current] } }];
+    }
+    // detectLanguageSwitchIntent is an ungated heuristic — the tenant
+    // opt-in gate is applied here (same as the media-streams pre-scan).
+    if (!isLanguageSupported(target, session.supportedLanguages ?? null)) {
+      return [{ type: 'tts_play', payload: { text: LANGUAGE_UNSUPPORTED_LINE[current] } }];
+    }
+    const switchCount = session.languageSwitchCount ?? 0;
+    if (switchCount >= MAX_LANGUAGE_SWITCHES_PER_CALL) {
+      logger.info('gather: language switch refused — flap guard', {
+        sessionId: opts.sessionId,
+        target,
+        switchCount,
+      });
+      return [{ type: 'tts_play', payload: { text: LANGUAGE_SWITCH_CAP_LINE[current] } }];
+    }
+
+    session.language = target;
+    session.languageSwitchCount = switchCount + 1;
+    // Re-resolve the per-language TTS voice (settings.ttsVoiceEn/Es); a
+    // resolver failure clears the override so the language-derived default
+    // Polly voice applies rather than the stale other-language voice.
+    const resolved = await this.resolveTenantLanguage(opts.tenantId, target);
+    session.ttsVoice = resolved.ttsVoice;
+    session.events.emit(
+      'voice-event',
+      languageSwitchedEvent({
+        from: current,
+        to: target,
+        trigger: 'classified_intent',
+        switchCount: session.languageSwitchCount,
+      }),
+    );
+    // Acknowledge in the language being switched TO — the caller just told
+    // us that's the one they understand. Same copy as media-streams.
+    return [{ type: 'tts_play', payload: { text: LANGUAGE_SWITCH_ACK[target] } }];
+  }
 
   private async resolveExtendedIntents(tenantId: string): Promise<boolean> {
     if (!this.deps.extendedIntentsEnabled) return false;

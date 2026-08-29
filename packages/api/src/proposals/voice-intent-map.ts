@@ -76,15 +76,27 @@ import type { ProposalType } from './proposal';
  * generic warn+skip, that emits a `voice_clarification` explaining why —
  * not the same silent skip that branch protects against.
  *
- * This is NOT a gap the live-call/chat text-mode-driver path shares:
- * `text-mode-driver.ts` is not a separate pipeline — it dispatches through
- * `createVoiceActionRouterWorker`, the same worker this map serves — but it
- * intercepts these three intents itself, BEFORE reaching this map's lookup
- * (`evaluateTurn`: `confirm`/`language_switch` → `{kind:'noop'}`,
- * `operator_request` → `{kind:'escalate'}`), because on a live call they
- * DO have a real target (the in-progress dialogue / the on-call human).
- * That earlier interception, not this map, is why the two surfaces don't
- * double-emit for the same intent.
+ * On a live call all three DO have a real target (the in-progress dialogue,
+ * the live call's language, the on-call human), so every live surface must
+ * intercept them BEFORE reaching this map's lookup — an intent that falls
+ * through here silently becomes a clarification card. Who intercepts what:
+ *
+ *   - `operator_request` — FSM global guard (customer-calling/transitions.ts
+ *     checkGlobalGuards) → escalating. All live surfaces.
+ *   - `confirm` — the approval/readback dialogues consume their turns before
+ *     classification; a bare confirm at intent_capture with nothing pending
+ *     is answered by the FSM's spoken re-prompt guard (#846,
+ *     CONFIRM_NOTHING_PENDING_LINE), never a clarification card.
+ *   - `language_switch` — per-transport adapter branches (the FSM is pure
+ *     and cannot mutate session.language): media-streams'
+ *     `switchLanguage`/pre-scan, and the Gather adapter's
+ *     `handleLanguageSwitchGather` (#846 — before it, this one was real: the
+ *     Gather production path had NO branch and degraded to a clarification).
+ *   - The eval harness (`text-mode-driver.ts` `evaluateTurn`) additionally
+ *     intercepts `confirm`/`language_switch` → `{kind:'noop'}` and
+ *     `operator_request` → `{kind:'escalate'}` before dispatching through
+ *     `createVoiceActionRouterWorker`, which is why the harness never
+ *     double-emits against the memo-path branch above.
  */
 export const INTENT_TO_PROPOSAL_TYPE: Partial<Record<Exclude<IntentType, 'unknown'>, ProposalType>> = {
   create_invoice: 'draft_invoice',

@@ -83,6 +83,30 @@ export const POST_QUOTE_REPROMPT_LINE =
 export const NEGOTIATION_HOLDING_LINE =
   "That's a good question — I'll need to check with the owner on that, and we'll get right back to you. Is there anything else I can help with in the meantime?";
 
+/**
+ * #846 — deterministic acknowledgment spoken when the caller reports
+ * dissatisfaction with completed work or service. Same posture as the
+ * negotiation holding line: the agent never argues, promises a remedy, or
+ * improvises an apology beyond this — it acknowledges and routes the
+ * complaint to the owner (a `callback` proposal the voice-turn processor
+ * builds with the same severity markers the recorded-memo path uses).
+ * Exported so adapters/tests share it.
+ */
+export const COMPLAINT_ACK_LINE =
+  "I'm sorry to hear that — I've flagged this for the owner, and someone will follow up with you shortly. Is there anything else I can help with?";
+
+/**
+ * #846 — spoken when the caller answers "yes" (a bare `confirm` intent) at
+ * intent_capture with nothing pending to confirm. There is no question on the
+ * table, so the honest handling is a spoken re-prompt — never a
+ * `voice_clarification` card for an operator to puzzle over. (When a readback
+ * IS pending the FSM is in `intent_confirm`/`entity_confirm` and the adapters
+ * run strict confirmation there, so this line is only reachable with nothing
+ * pending.) Exported so adapters/tests share it.
+ */
+export const CONFIRM_NOTHING_PENDING_LINE =
+  "I don't have anything waiting on a yes from you just yet — what would you like to do?";
+
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 function auditLog(
@@ -359,6 +383,85 @@ function checkGlobalGuards(
       });
     }
     return { nextState: state, sideEffects, updatedContext };
+  }
+
+  // #846 — complaint guardrail. The caller reports dissatisfaction with
+  // completed work or service. Mirrors the negotiation guard above: speak a
+  // fixed acknowledgment and route the complaint to the owner (a `callback`
+  // proposal the voice-turn processor enriches with the shared severity
+  // markers), staying in the current state — a complaint is context for a
+  // human, not a reason to derail the call. Idempotent per session via
+  // `complaintFlagged`: the acknowledgment is spoken every time (an unhappy
+  // caller is always answered) but the owner follow-up is created only on
+  // the first complaint turn. Before this guard the intent fell through to
+  // `intentToProposalType`'s default and became a bare clarification card —
+  // "let me check that" with no signal a complaint was ever heard.
+  if (event.type === 'intent_classified' && event.intentType === 'complaint') {
+    if (state === 'escalating' || state === 'terminated') {
+      return { nextState: state, sideEffects: [], updatedContext: context };
+    }
+    const alreadyFlagged = context.complaintFlagged === true;
+    const updatedContext: CallingAgentContext = { ...context, complaintFlagged: true };
+    const sideEffects: SideEffect[] = [
+      auditLog(updatedContext, state, state, 'complaint_guardrail', { alreadyFlagged }),
+      // Tagged so a settings-aware processor can brand-voice it later, same
+      // convention as `negotiation_holding`.
+      ttsPlay(COMPLAINT_ACK_LINE, { source: 'complaint_ack' }),
+      // Executed by the media-streams / in-app adapters (the Gather path has
+      // no quality-event executor; its complaint telemetry is the
+      // `proposal_created` session-bus event the processor emits).
+      {
+        type: 'emit_quality_event',
+        payload: { eventType: 'complaint_guardrail', alreadyFlagged },
+      },
+    ];
+    if (!alreadyFlagged) {
+      sideEffects.push({
+        type: 'create_proposal',
+        payload: {
+          tenantId: updatedContext.tenantId,
+          intent: 'complaint',
+          entities: {
+            ...updatedContext.extractedEntities,
+            ...event.entities,
+            ...(updatedContext.customerId ? { customerId: updatedContext.customerId } : {}),
+          },
+          sessionId: updatedContext.sessionId,
+          callSid: updatedContext.callSid,
+          conversationId: updatedContext.conversationId,
+          customerId: updatedContext.customerId,
+          // Link the complaint follow-up proposal to the classify call's
+          // ai_runs row (FK-satisfied) instead of null.
+          ...(event.aiRunId ? { aiRunId: event.aiRunId } : {}),
+        },
+      });
+    }
+    return { nextState: state, sideEffects, updatedContext };
+  }
+
+  // #846 — a bare `confirm` ("yes", "that's right") at intent_capture has
+  // nothing on the table to confirm: every real pending question lives in a
+  // different state (`intent_confirm` / `entity_confirm` readbacks, the
+  // adapters' out-of-FSM approval and consent dialogues consume their turns
+  // before classification). Speak a re-prompt and stay — before this guard
+  // the intent fell through to the proposal path and minted a
+  // `voice_clarification` card an operator could never act on. Scoped to
+  // intent_capture ONLY: `intent_confirm` already treats intent_classified
+  // as a correction, and `closing` has its own deterministic post-quote
+  // pre-checks.
+  if (
+    event.type === 'intent_classified' &&
+    event.intentType === 'confirm' &&
+    state === 'intent_capture'
+  ) {
+    return {
+      nextState: 'intent_capture',
+      sideEffects: [
+        auditLog(context, 'intent_capture', 'intent_capture', 'confirm_without_pending'),
+        ttsPlay(CONFIRM_NOTHING_PENDING_LINE),
+      ],
+      updatedContext: context,
+    };
   }
 
   // RV-140/RV-142 — deterministic emergency keyword hit. Fast-paths to
