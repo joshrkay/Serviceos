@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router';
 import { useClerk } from '@clerk/clerk-react';
+import type { LucideIcon } from 'lucide-react';
 import {
   ChevronRight, Building2, Users, Globe, Clock,
   CreditCard, Link, Zap, FileText, Sparkles, Copy, ExternalLink,
@@ -40,6 +41,37 @@ import {
   updateLanguageSettings,
 } from '../../api/settings';
 import { businessInitial } from '../../utils/business-initial';
+import { ConfirmDialog } from '../ui/confirm-dialog';
+
+type SettingsRowBadge = { label: string; color: string };
+
+interface SettingsRowBase {
+  icon: LucideIcon;
+  label: string;
+  description: string;
+  badge?: SettingsRowBadge;
+}
+
+/**
+ * Discriminated row shape (#877) so rows that fire live actions are
+ * structurally — and therefore visually — distinct from rows that open
+ * an in-app panel:
+ * - `panel` (default): opens a sheet/page here — chevron affordance.
+ * - `external`: hands the operator off to another site — external-link
+ *   icon, gated behind a ConfirmDialog before anything fires.
+ * - `toggle`: flips live state — rendered as an explicit switch
+ *   (`role="switch"`), gated behind a ConfirmDialog; a plain click on
+ *   the row body never fires the action.
+ */
+type SettingsRow =
+  | (SettingsRowBase & { kind?: 'panel'; action: () => void })
+  | (SettingsRowBase & { kind: 'external'; action: () => void })
+  | (SettingsRowBase & { kind: 'toggle'; checked: boolean | null; onToggle: () => void });
+
+interface SettingsSection {
+  title: string;
+  items: SettingsRow[];
+}
 
 export function SettingsPage() {
   const navigate = useNavigate();
@@ -53,6 +85,13 @@ export function SettingsPage() {
   const [spanishMode, setSpanishMode] = useState(false);
   const [businessName, setBusinessName] = useState<string | null>(null);
   const [voiceAgentLive, setVoiceAgentLive] = useState<boolean | null>(null);
+  // #877 — live actions are confirm-gated: which voice transition is
+  // awaiting confirmation (null = no dialog), and in-flight markers so
+  // the dialogs can't be double-submitted or dismissed mid-request.
+  const [confirmVoiceAction, setConfirmVoiceAction] = useState<'pause' | 'go-live' | null>(null);
+  const [voicePending, setVoicePending] = useState(false);
+  const [confirmPortalOpen, setConfirmPortalOpen] = useState(false);
+  const [portalPending, setPortalPending] = useState(false);
   // Surface a failure to load the main /api/settings document instead of
   // silently swallowing it (which left the page showing stale defaults with
   // no signal that the user's real preferences never loaded).
@@ -322,6 +361,64 @@ export function SettingsPage() {
     }
   }
 
+  /** Confirmed portal open (#877): runs the portal handoff behind its dialog. */
+  async function confirmOpenBillingPortal() {
+    setPortalPending(true);
+    try {
+      await openBillingPortal();
+    } finally {
+      setPortalPending(false);
+      setConfirmPortalOpen(false);
+    }
+  }
+
+  /**
+   * #877 — the switch never fires the POST directly; it only raises the
+   * matching ConfirmDialog. The POST happens in performVoiceToggle after
+   * an explicit confirm.
+   */
+  function requestVoiceToggle() {
+    if (voiceAgentLive === null || voicePending) return;
+    setConfirmVoiceAction(voiceAgentLive ? 'pause' : 'go-live');
+  }
+
+  async function performVoiceToggle() {
+    const action = confirmVoiceAction;
+    if (action === null) return;
+    setVoicePending(true);
+    try {
+      const path = action === 'pause' ? '/api/voice/pause' : '/api/voice/go-live';
+      const res = await apiFetch(path, { method: 'POST' });
+      if (!res.ok) {
+        let code = '';
+        try {
+          const body = (await res.json()) as { error?: string };
+          if (typeof body?.error === 'string') code = body.error;
+        } catch {
+          /* non-JSON body */
+        }
+        // /go-live returns 402 BILLING_REQUIRED when the subscription
+        // doesn't cover voice — say so instead of a mystery failure.
+        if (res.status === 402 || code === 'BILLING_REQUIRED') {
+          toast.error(
+            'Turning on AI phone answering requires an active subscription — manage your plan under Rivet subscription.',
+          );
+        } else {
+          toast.error('Could not update AI phone answering');
+        }
+        return;
+      }
+      const body = (await res.json()) as { voiceAgentLive: boolean };
+      setVoiceAgentLive(body.voiceAgentLive);
+      toast.success(body.voiceAgentLive ? 'AI phone answering is on' : 'AI phone answering is off');
+    } catch {
+      toast.error('Could not update AI phone answering');
+    } finally {
+      setVoicePending(false);
+      setConfirmVoiceAction(null);
+    }
+  }
+
   async function saveReviewUrls() {
     setSavingReviews(true);
     setReviewsError('');
@@ -392,7 +489,7 @@ export function SettingsPage() {
     setTimeout(() => setBookingCopied(false), 2000);
   }
 
-  const SECTIONS = [
+  const SECTIONS: SettingsSection[] = [
     {
       title: 'Business',
       items: [
@@ -415,28 +512,23 @@ export function SettingsPage() {
       title: 'AI & Automation',
       items: [
         {
+          kind: 'toggle',
           icon: Phone,
           label: 'AI phone answering',
           description:
             voiceAgentLive === null
               ? 'Loading…'
               : voiceAgentLive
-                ? 'On — inbound calls use the AI assistant'
-                : 'Off — callers hear voicemail until you turn this on',
-          action: () => {
-            void (async () => {
-              if (voiceAgentLive === null) return;
-              const path = voiceAgentLive ? '/api/voice/pause' : '/api/voice/go-live';
-              const res = await apiFetch(path, { method: 'POST' });
-              if (!res.ok) {
-                toast.error('Could not update AI phone answering');
-                return;
-              }
-              const body = (await res.json()) as { voiceAgentLive: boolean };
-              setVoiceAgentLive(body.voiceAgentLive);
-              toast.success(body.voiceAgentLive ? 'AI phone answering is on' : 'AI phone answering is off');
-            })();
-          },
+                ? 'Inbound calls are answered by the AI assistant'
+                : 'Callers hear voicemail until you turn this on',
+          badge:
+            voiceAgentLive === null
+              ? undefined
+              : voiceAgentLive
+                ? { label: 'On', color: 'bg-green-100 text-green-700' }
+                : { label: 'Off', color: 'bg-slate-100 text-slate-600' },
+          checked: voiceAgentLive,
+          onToggle: requestVoiceToggle,
         },
         { icon: Zap,      label: 'AI approval rules',               description: 'Set what the AI can apply automatically',    action: () => setAiRulesOpen(true) },
         { icon: ScrollText, label: 'Standing instructions',         description: 'Rules the AI follows on every draft ("always add a trip fee")', action: () => setStandingInstructionsOpen(true) },
@@ -465,7 +557,7 @@ export function SettingsPage() {
         { icon: CreditCard, label: 'Payment methods',        description: 'Connect Stripe to accept card + ACH', action: () => setPaymentMethodsOpen(true) },
         { icon: FileText,   label: 'Deposit rules',          description: 'Require deposit on estimates over $X', action: () => setDepositRulesOpen(true) },
         { icon: FileText,   label: 'Discount policy',        description: 'Bounds for AI-proposed discounts', action: () => setDiscountPolicyOpen(true) },
-        { icon: CreditCard, label: 'Rivet subscription',   description: 'Manage card, plan, invoices', action: () => openBillingPortal() },
+        { kind: 'external', icon: CreditCard, label: 'Rivet subscription',   description: 'Manage card, plan, invoices in the Stripe billing portal', action: () => setConfirmPortalOpen(true) },
       ],
     },
     {
@@ -802,25 +894,63 @@ export function SettingsPage() {
           <div key={section.title} className="mb-4">
             <p className="text-xs text-slate-400 mb-2 px-1">{section.title.toUpperCase()}</p>
             <div className="rounded-xl bg-white border border-slate-200 divide-y divide-slate-100 overflow-hidden">
-              {section.items.map(({ icon: Icon, label, description, action, badge }: any) => (
-                <button
-                  key={label}
-                  onClick={action}
-                  className="flex items-center gap-3 w-full px-4 py-3.5 text-left hover:bg-slate-50 transition-colors"
-                >
-                  <span className="flex size-7 shrink-0 items-center justify-center rounded-lg bg-slate-100">
-                    <Icon size={14} className="text-slate-500" />
-                  </span>
-                  <div className="flex-1 min-w-0">
-                    <p className="text-sm text-slate-800">{label}</p>
-                    <p className="text-xs text-slate-400 mt-0.5">{description}</p>
-                  </div>
-                  {badge && (
-                    <span className={`shrink-0 text-xs rounded-full px-2 py-0.5 ${badge.color}`}>{badge.label}</span>
-                  )}
-                  <ChevronRight size={14} className="shrink-0 text-slate-300" />
-                </button>
-              ))}
+              {section.items.map((item) => {
+                const { icon: Icon, label, description, badge } = item;
+                const iconAndText = (
+                  <>
+                    <span className="flex size-7 shrink-0 items-center justify-center rounded-lg bg-slate-100">
+                      <Icon size={14} className="text-slate-500" />
+                    </span>
+                    <div className="flex-1 min-w-0">
+                      <p className="text-sm text-slate-800">{label}</p>
+                      <p className="text-xs text-slate-400 mt-0.5">{description}</p>
+                    </div>
+                    {badge && (
+                      <span className={`shrink-0 text-xs rounded-full px-2 py-0.5 ${badge.color}`}>{badge.label}</span>
+                    )}
+                  </>
+                );
+                if (item.kind === 'toggle') {
+                  // Live-state row (#877): an explicit switch, not a
+                  // chevron row — the row body itself is inert.
+                  return (
+                    <div key={label} className="flex items-center gap-3 w-full min-h-11 px-4 py-3.5 text-left">
+                      {iconAndText}
+                      <button
+                        type="button"
+                        role="switch"
+                        aria-checked={item.checked === true}
+                        aria-label={label}
+                        disabled={item.checked === null}
+                        onClick={item.onToggle}
+                        className="flex min-h-11 min-w-11 shrink-0 items-center justify-center disabled:opacity-40"
+                      >
+                        <span
+                          aria-hidden="true"
+                          className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors ${item.checked ? 'bg-blue-600' : 'bg-slate-200'}`}
+                        >
+                          <span className={`inline-block size-4 rounded-full bg-white shadow transition-transform ${item.checked ? 'translate-x-4' : 'translate-x-0.5'}`} />
+                        </span>
+                      </button>
+                    </div>
+                  );
+                }
+                return (
+                  <button
+                    key={label}
+                    onClick={item.action}
+                    className="flex items-center gap-3 w-full min-h-11 px-4 py-3.5 text-left hover:bg-slate-50 transition-colors"
+                  >
+                    {iconAndText}
+                    {item.kind === 'external' ? (
+                      // Leaves the app (#877) — external-link, not chevron.
+                      <ExternalLink size={14} className="shrink-0 text-slate-300" />
+                    ) : (
+                      <ChevronRight size={14} className="shrink-0 text-slate-300" />
+                    )}
+                  </button>
+                );
+              })}
             </div>
           </div>
         ))}
@@ -989,6 +1119,35 @@ export function SettingsPage() {
       <DncListSheet
         open={dncListOpen}
         onOpenChange={setDncListOpen}
+      />
+
+      {/* #877 — confirm-gates for the two live-action rows. */}
+      <ConfirmDialog
+        open={confirmVoiceAction !== null}
+        title={
+          confirmVoiceAction === 'pause'
+            ? 'Turn off AI phone answering?'
+            : 'Turn on AI phone answering?'
+        }
+        description={
+          confirmVoiceAction === 'pause'
+            ? 'Callers will hear voicemail until you turn it back on.'
+            : 'The AI assistant will start answering your inbound calls right away.'
+        }
+        confirmLabel={confirmVoiceAction === 'pause' ? 'Turn off' : 'Turn on'}
+        tone={confirmVoiceAction === 'pause' ? 'danger' : 'default'}
+        busy={voicePending}
+        onConfirm={() => void performVoiceToggle()}
+        onCancel={() => setConfirmVoiceAction(null)}
+      />
+      <ConfirmDialog
+        open={confirmPortalOpen}
+        title="Open the Stripe billing portal?"
+        description="You'll leave Rivet to manage your card, plan, and invoices on Stripe, and return here when you close the portal."
+        confirmLabel="Open billing portal"
+        busy={portalPending}
+        onConfirm={() => void confirmOpenBillingPortal()}
+        onCancel={() => setConfirmPortalOpen(false)}
       />
     </div>
   );
