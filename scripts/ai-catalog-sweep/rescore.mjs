@@ -32,6 +32,35 @@
  *    refusal, so C02's verdict is deliberately left PARTIAL — only its
  *    `reason` is relabeled here to name the real cause, for report clarity.
  *
+ * Round 2 (2026-08-29) additions:
+ *
+ * 3. C01 (en_route, technician token, expectedOutcome 'executes') — the
+ *    dedicated `model: 'direct-act'` / `taskType: 'assistant.en_route'`
+ *    branch NEVER creates a proposal by design (a direct audited act, not a
+ *    proposal-driving flow — see corpus.json's own note on C01), but the
+ *    live scorer's `executes|draft_gated` branch treated `!proposalId` as
+ *    PARTIAL unconditionally, with no carve-out for this correct shape.
+ *    Flipped to PASS here, gated strictly on `model === 'data-lookup'`... no
+ *    — on `model === 'direct-act'` (never on content wording alone), so a
+ *    generic-LLM fallthrough using similar "done" language still cannot
+ *    false-PASS (same principle as rule 1's isDataLookup gate; C02 above is
+ *    exactly the counter-example this stays clear of — its `model` is a
+ *    plain LLM id, not `'direct-act'`). Also fixed in run-sweep.mjs's live
+ *    scorer for future runs.
+ *
+ * 4. B04 (update_brand_voice, chat, honest_refusal expected) — the deployed
+ *    reply ("I have not set your brand voice. To update your brand voice,
+ *    please access your account settings or contact your administrator for
+ *    assistance.") is a genuine, correct honest refusal, but corpus.json's
+ *    `refusalHint: "can't do that from here"` is the STALE
+ *    `buildUnmappedCapabilityReply` copy (routes/assistant.ts) — the
+ *    deployed reply now uses different, equally-correct wording. Old shape:
+ *    exact substring "can't do that from here". New shape: "I have not set
+ *    your brand voice". `refusalHint` corrected in corpus.json for future
+ *    runs; this rule reproduces the same widened match here so the ALREADY
+ *    -collected evidence in an existing results file scores correctly
+ *    without a live rerun.
+ *
  * Usage: node scripts/ai-catalog-sweep/rescore.mjs <results.json>
  */
 import fs from 'node:fs';
@@ -78,6 +107,39 @@ const results = src.results.map((row) => {
         "Investigated 2026-08-29: taskType 'assistant.general' / a plain chat model — the same shape as C01's generic-LLM fallthrough, NOT the dedicated assistant.en_route identity-refusal branch (taskType 'assistant.en_route', model 'direct-act'). Verdict intentionally left PARTIAL: the content is generic en-route advice, not a refusal of any kind — flipping it to PASS would misrepresent a real classification miss as a confirmed refusal.",
     };
   }
+  // Round 2 rule 3 — C01: model==='direct-act' never creates a proposal by
+  // design (see this file's header). Gated strictly on model, not content,
+  // so C02 (a plain LLM id) above is never touched by this rule.
+  if (row.id === 'C01' && row.model === 'direct-act' && row.verdict !== 'PASS' && !row.degraded) {
+    const contentOk = typeof row.content === 'string' && row.content.length >= 5;
+    if (contentOk) {
+      flips += 1;
+      return {
+        ...row,
+        verdict: 'PASS',
+        outcomeClass: 'executes',
+        reason: 'direct_act_no_proposal_by_design',
+        rescoreNote:
+          "Round 2 (2026-08-29): model==='direct-act' / taskType==='assistant.en_route' is a direct audited act that never creates a proposal — the generic executes|draft_gated scorer branch had no carve-out for a correct, deliberately-proposal-less reply and scored it PARTIAL ('no_proposal_non_degraded') forever. Gated on model==='direct-act' so a generic-LLM fallthrough (see the C02 rule above) can't false-PASS the same way.",
+      };
+    }
+  }
+  // Round 2 rule 4 — B04: the deployed refusal copy changed shape; the old
+  // refusalHint ("can't do that from here") no longer matches the new
+  // (equally correct) copy.
+  if (row.id === 'B04' && row.verdict !== 'PASS') {
+    const content = typeof row.content === 'string' ? row.content.toLowerCase() : '';
+    if (content.includes('i have not set your brand voice')) {
+      flips += 1;
+      return {
+        ...row,
+        verdict: 'PASS',
+        reason: 'honest_refusal_confirmed_new_copy',
+        rescoreNote:
+          'Round 2 (2026-08-29): reply is a genuine honest refusal ("I have not set your brand voice...") but corpus.json\'s refusalHint ("can\'t do that from here") was the stale buildUnmappedCapabilityReply copy — the deployed refusal now uses different, equally-correct wording. refusalHint corrected in corpus.json for future live runs; this rule reproduces the same match for already-collected evidence.',
+      };
+    }
+  }
   return row;
 });
 
@@ -98,6 +160,8 @@ const out = {
     rulesApplied: [
       'rbac_refusal_copy_widened: R01/R02/R04 flipped PARTIAL -> PASS (model===data-lookup + owner-level/office-level copy)',
       'C02: reason relabeled to generic_llm_fallthrough_not_refusal; verdict deliberately left PARTIAL (see rescoreNote)',
+      'C01: flipped to PASS (direct_act_no_proposal_by_design) when model===direct-act and non-degraded with content — a direct audited act never creates a proposal by design',
+      "B04: flipped to PASS (honest_refusal_confirmed_new_copy) when content contains 'I have not set your brand voice' — the deployed refusal's wording changed shape from the stale refusalHint",
     ],
   },
   counts,

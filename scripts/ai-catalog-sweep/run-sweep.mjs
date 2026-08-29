@@ -243,7 +243,7 @@ async function driveVoiceSession(token, corpusCase) {
   let last;
   for (const text of turns) {
     last = await api('POST', `/api/voice/sessions/${sessionId}/input`, { token, body: { text } });
-    allTurns.push({ text, status: last.status, state: last.json?.state ?? null, usage: last.json?.usage ?? null });
+    allTurns.push({ text, status: last.status, state: last.json?.state ?? null, usage: last.json?.usage ?? null, proposalIds: Array.isArray(last.json?.proposalIds) ? last.json.proposalIds : [] });
   }
   // Automatic FSM continuation for HITL readback turns the scripted array
   // didn't already cover (entity_resolution / entity_confirm / intent_confirm)
@@ -263,18 +263,64 @@ async function driveVoiceSession(token, corpusCase) {
       break;
     }
     last = await api('POST', `/api/voice/sessions/${sessionId}/input`, { token, body: { text: followUp } });
-    allTurns.push({ text: followUp, status: last.status, state: last.json?.state ?? null, usage: last.json?.usage ?? null, auto: true });
+    allTurns.push({ text: followUp, status: last.status, state: last.json?.state ?? null, usage: last.json?.usage ?? null, auto: true, proposalIds: Array.isArray(last.json?.proposalIds) ? last.json.proposalIds : [] });
   }
-  return { sessionId, final: last, allTurns };
+  // 2026-08-29 round-2 (A49/A50/D01) — `session.proposalIds` is supposed to
+  // be cumulative server-side (create-voice-turn-processor.ts pushes onto
+  // the SAME session object and every turn's response echoes it back), but
+  // two failure modes were observed live: (1) A49/A50 — a turn's own array
+  // held more than one id (an earlier `voice_clarification` housekeeping
+  // proposal alongside the real actionable one) and the caller used only
+  // `proposalIds[0]`, approving the housekeeping stub instead of the real
+  // card; (2) D01 — a confusing trailing turn (state left `intent_capture`/
+  // similar after the runner's own "Yes, that's correct." auto-continuation
+  // fired past an already-completed booking) came back with an EMPTY
+  // `proposalIds`, even though an earlier turn's array already carried the
+  // real, successfully-executed proposal id (confirmed live via dbVerify —
+  // the DB row existed, approved+executed, while this extraction returned
+  // null). Scanning every turn and keeping the LAST non-empty array's LAST
+  // id fixes both: most-recent-turn wins over a stale trailing turn, and
+  // most-recent-id-within-that-turn wins over an earlier stub.
+  let lastNonEmptyProposalIds = [];
+  for (const t of allTurns) {
+    if (Array.isArray(t.proposalIds) && t.proposalIds.length > 0) lastNonEmptyProposalIds = t.proposalIds;
+  }
+  return { sessionId, final: last, allTurns, proposalIds: lastNonEmptyProposalIds };
 }
 
 // ─────────────────────────────── approve + await execution ────────────────
 
+// 2026-08-29 round-2 — poll window extended from 15 iterations (30s) to 45
+// (90s): A11/A49/A50 all ended the OLD window still 'executing' (approved,
+// execution worker genuinely in flight, not stuck) — 30s undershoots the
+// worker's real latency under sweep-time load. Capped, not unbounded: an
+// execution that hasn't reached a terminal status in 90s is itself evidence
+// worth recording (`pollExhausted: true`), not something to wait out forever.
+const POLL_MAX_ITERATIONS = 45;
+const POLL_INTERVAL_MS = 2000;
+
 async function approveAndAwaitExecution(token, proposalId) {
-  await api('POST', `/api/proposals/${proposalId}/approve`, { token, body: {} });
+  // 2026-08-29 round-2 — capture the approve call's own response instead of
+  // discarding it. Every row in the A04/A20/A21/A31/A48 cluster stalled at
+  // 'ready_for_review' with no visible cause: approveProposal
+  // (proposals/actions.ts) can throw for several reasons (missingFieldsFor
+  // still non-empty, a permission gate, an expired 48h window, ...) and the
+  // OLD code never looked at this response, so every prior sweep run only
+  // ever recorded "approve_no_terminal_status: ready_for_review" — true, but
+  // silent about WHY. `approveCall` below is now stored on the row's
+  // `approve` evidence so the next sweep either confirms or rules out the
+  // missingFields-gate hypothesis directly, instead of by inference.
+  const approveRes = await api('POST', `/api/proposals/${proposalId}/approve`, { token, body: {} });
+  const approveCall = {
+    status: approveRes.status,
+    ok: approveRes.status >= 200 && approveRes.status < 300,
+    error: approveRes.status >= 400 ? (approveRes.json?.error ?? approveRes.json?.message ?? approveRes.json?.missingFields ?? approveRes.json ?? null) : null,
+  };
   let status = 'pending';
-  for (let i = 0; i < 15; i++) {
-    await new Promise((r) => setTimeout(r, 2000));
+  let iterations = 0;
+  for (let i = 0; i < POLL_MAX_ITERATIONS; i++) {
+    await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
+    iterations = i + 1;
     const res = await api('GET', `/api/proposals/${proposalId}`, { token });
     if (res.status === 200) {
       status = res.json?.status ?? status;
@@ -282,11 +328,20 @@ async function approveAndAwaitExecution(token, proposalId) {
     }
   }
   const final = await api('GET', `/api/proposals/${proposalId}`, { token });
+  const finalStatus = final.json?.status ?? status;
+  const terminal = ['executed', 'execution_failed', 'rejected', 'undone'].includes(finalStatus);
   return {
-    status: final.json?.status ?? status,
+    status: finalStatus,
     resultEntityId: final.json?.resultEntityId,
     proposalType: final.json?.proposalType,
     executionError: final.json?.executionError,
+    approveCall,
+    pollIterations: iterations,
+    // true when every poll ran out and the LAST status observed still isn't
+    // terminal (i.e. this row genuinely needed — or still needs more than —
+    // the extended window, as distinct from a fast-terminal row that just
+    // happens to report a low iteration count).
+    pollExhausted: !terminal && iterations >= POLL_MAX_ITERATIONS,
   };
 }
 
@@ -323,24 +378,50 @@ async function ensureFixtures() {
     // Leads: "Johnson" (convert_lead) and "Nguyen" (mark_lead_lost) — no AI
     // on-ramp creates a lead, so this sweep seeds them directly (same
     // posture e2e/qa-matrix/fixtures/seed.ts uses for its job/location rows).
+    //
+    // 2026-08-29 round-2 (A26 fixture gap) — confirmed root cause of A26's
+    // live "A service location address is required to convert a lead —
+    // provide street1, city, state, and postalCode" execution failure: this
+    // INSERT never populated the leads table's address columns at all
+    // (street1/city/state/postal_code/country all null on the seeded row),
+    // so convert_lead's execution handler — which genuinely needs a service
+    // location address to open the resulting customer's first location —
+    // could never succeed no matter how the AI classified the utterance.
+    // Only "Johnson" needs one (mark_lead_lost never opens a service
+    // location). Backfilled on an ALREADY-seeded row too (self-healing, same
+    // convention as the other fixtures in this function) so a QA tenant from
+    // before this fix picks up the address on the next run without a manual
+    // reset.
+    const LEAD_ADDRESSES = {
+      Johnson: { street1: '88 QA Sweep Lane', city: 'Scottsdale', state: 'AZ', postalCode: '85254', country: 'US' },
+    };
     for (const [last, source, phone] of [
       ['Johnson', 'referral', '555-0177'],
       ['Nguyen', 'phone_call', '555-0178'],
     ]) {
+      const addr = LEAD_ADDRESSES[last];
       const existing = await rw.query(
-        "SELECT id FROM leads WHERE tenant_id = $1 AND last_name = $2 AND stage = 'new' LIMIT 1",
+        "SELECT id, street1 FROM leads WHERE tenant_id = $1 AND last_name = $2 AND stage = 'new' LIMIT 1",
         [TENANT_ID, last],
       );
       if ((existing.rowCount ?? 0) > 0) {
-        summary.push(`leads: exists ${last}`);
+        if (addr && !existing.rows[0].street1) {
+          await rw.query(
+            `UPDATE leads SET street1 = $2, city = $3, state = $4, postal_code = $5, country = $6, updated_at = now() WHERE id = $1`,
+            [existing.rows[0].id, addr.street1, addr.city, addr.state, addr.postalCode, addr.country],
+          );
+          summary.push(`leads: backfilled address on existing ${last}`);
+        } else {
+          summary.push(`leads: exists ${last}`);
+        }
         continue;
       }
       await rw.query(
-        `INSERT INTO leads (id, tenant_id, first_name, last_name, primary_phone, email, source, stage, created_by, created_at, updated_at)
-         VALUES (gen_random_uuid(), $1, 'QA', $2, $3, $4, $5, 'new', 'ai-catalog-sweep-seed', now(), now())`,
-        [TENANT_ID, last, phone, `qa-sweep-${last.toLowerCase()}@qa.serviceos.local`, source],
+        `INSERT INTO leads (id, tenant_id, first_name, last_name, primary_phone, email, source, stage, street1, city, state, postal_code, country, created_by, created_at, updated_at)
+         VALUES (gen_random_uuid(), $1, 'QA', $2, $3, $4, $5, 'new', $6, $7, $8, $9, $10, 'ai-catalog-sweep-seed', now(), now())`,
+        [TENANT_ID, last, phone, `qa-sweep-${last.toLowerCase()}@qa.serviceos.local`, source, addr?.street1 ?? null, addr?.city ?? null, addr?.state ?? null, addr?.postalCode ?? null, addr?.country ?? null],
       );
-      summary.push(`leads: inserted ${last}`);
+      summary.push(`leads: inserted ${last}${addr ? ' (with address)' : ''}`);
     }
     // Business timezone — confirmed root cause (2026-08-29 full sweep) of
     // A03/A33 (create_appointment / schedule_inspection) failing to draft
@@ -367,6 +448,33 @@ async function ensureFixtures() {
         [TENANT_ID, 'QA Sweep Test Business', 'America/New_York'],
       );
       summary.push('tenant_settings: inserted (business_name=QA Sweep Test Business, timezone=America/New_York)');
+    }
+
+    // A46 respond_to_review — 2026-08-29 round-2 fixture gap: this sweep
+    // never seeded a single google_reviews row, so "Reply to the 1-star
+    // review from yesterday" had genuinely nothing to draft a response for —
+    // confirmed root cause of the live execution failure ("payload is
+    // missing the required publicResponse component"), distinct from the
+    // row's own precheck (which only self-skips when a REAL google_business
+    // integration is wired; it is not, on this QA tenant, so the row is
+    // meant to proceed). Self-healing: only inserts when no recent (<=1
+    // star, last 7 days) review already exists, so a review this row itself
+    // causes a reply to be drafted against doesn't get re-seeded forever.
+    const reviewExisting = await rw.query(
+      "SELECT id FROM google_reviews WHERE tenant_id = $1 AND rating <= 1 AND review_create_time > now() - interval '7 days' LIMIT 1",
+      [TENANT_ID],
+    );
+    if ((reviewExisting.rowCount ?? 0) > 0) {
+      summary.push('google_reviews fixture: exists recent 1-star');
+    } else {
+      const reviewId = crypto.randomUUID();
+      const reviewStamp = Date.now();
+      await rw.query(
+        `INSERT INTO google_reviews (id, tenant_id, external_review_id, location_id, reviewer_display_name, rating, comment_text, review_create_time)
+         VALUES ($1, $2, $3, 'qa-sweep-location', 'QA Sweep Reviewer', 1, 'Technician showed up late and the job took way longer than quoted.', now() - interval '1 day')`,
+        [reviewId, TENANT_ID, `qa-sweep-review-${reviewStamp}`],
+      );
+      summary.push(`google_reviews fixture: inserted 1-star review ${reviewId}`);
     }
 
     // A07 batch_invoice — findJobsRequiringInvoicing (invoices/invoicing-queue.ts)
@@ -593,7 +701,31 @@ function extractChatFields(json) {
     proposalId: proposal?.id ?? null,
     proposalType: proposal?.type ?? json?.proposalType ?? null,
     usage: json?.usage ?? null,
+    // 2026-08-29 round-2 — the client-pinned conversation id the server
+    // echoes back (routes/assistant.ts's `envelope = {...result,
+    // conversationId, correlationId}`). Needed so a follow-up answer turn
+    // (see `looksLikeDisambiguationQuestion` / the chat branch of `runRow`)
+    // can thread into the SAME conversation `findPendingClarification`
+    // looks up — without it every follow-up would open a fresh thread and
+    // the server would never find the pending question to answer.
+    conversationId: typeof json?.conversationId === 'string' ? json.conversationId : null,
   };
+}
+
+// 2026-08-29 round-2 (WS-A gap) — detect the #909 gated-reference-resolution
+// loop's ONE disambiguation question (gated-reference-resolution.ts's
+// `buildDisambiguationQuestion`: "Which <kind> did you mean by \"<ref>\"?"
+// followed by a numbered candidate list and "Reply with the number or the
+// name.", or the same-name variant "...all under the same name. Which one —
+// can you give me the address or phone number?"). The runner previously had
+// no way to answer this — a one-turn probe just recorded whatever the
+// question's own text was as the row's final reply and moved on to approve,
+// which always 400s on the still-gated field. Matched loosely (two
+// alternative endings) so wording tweaks to either branch don't silently
+// stop being recognized.
+const DISAMBIGUATION_QUESTION_RE = /reply with the number or the name\.|can you give me the address or phone number\?/i;
+function looksLikeDisambiguationQuestion(content) {
+  return typeof content === 'string' && DISAMBIGUATION_QUESTION_RE.test(content);
 }
 
 async function runRow(corpusCase, ctx) {
@@ -638,6 +770,31 @@ async function runRow(corpusCase, ctx) {
     allUnresolved.push(...r.unresolved);
   }
   if (allUnresolved.length > 0) {
+    // 2026-08-29 round-2 (A05/A18 tolerate A02) — distinguish "this row's own
+    // template references a dependency that never resolved a DB row" from a
+    // genuine corpus-authoring typo. `ctx.<id>.dbRow` is populated only when
+    // that row HAD a `verify` step AND it matched (see the ctx assignment
+    // below); a dependency that ran but whose OWN dbVerify never matched
+    // (e.g. because its proposal never persisted — a product-side bug, not a
+    // fixture defect) leaves `ctx[id]` present but `dbRow` null/undefined.
+    // Reported distinctly so the report attributes the cascade to the
+    // upstream row instead of implying this row's own template is broken.
+    const upstreamUnresolved = [...new Set(allUnresolved)].filter((token) => {
+      const m = /^ctx\.([A-Za-z0-9_]+)\.dbRow(\.|$)/.exec(token);
+      if (!m) return false;
+      const upstream = ctx[m[1]];
+      return upstream !== undefined && (upstream.dbRow === null || upstream.dbRow === undefined);
+    });
+    const genuinelyUnresolved = [...new Set(allUnresolved)].filter((t) => !upstreamUnresolved.includes(t));
+    if (genuinelyUnresolved.length === 0 && upstreamUnresolved.length > 0) {
+      return {
+        ...row,
+        verdict: 'BLOCKED',
+        outcomeClass: null,
+        reason: `upstream_dependency_unresolved: ${upstreamUnresolved.join(', ')} — the upstream row ran but its own dbVerify never matched a DB row (see that row's evidence for the root cause); this row's template cannot be resolved as a result, not because of anything wrong in this row's own corpus definition`,
+        notes: corpusCase.notes,
+      };
+    }
     return { ...row, verdict: 'BLOCKED', outcomeClass: null, reason: `template_unresolved: ${[...new Set(allUnresolved)].join(', ')}`, notes: corpusCase.notes };
   }
   corpusCase._resolvedUtterance = resolved;
@@ -649,10 +806,43 @@ async function runRow(corpusCase, ctx) {
   let voiceOutcome;
   let sessionId;
 
+  let answerTurn = null;
   if (corpusCase.surface === 'chat') {
     const res = await api('POST', '/api/assistant/chat', { token, body: { messages: [{ role: 'user', content: resolved[0] }], inputMode: 'text' } });
     httpStatus = res.status;
     chatFields = extractChatFields(res.json);
+
+    // 2026-08-29 round-2 (WS-A gap, explicitly flagged as a missing runner
+    // capability) — the chat surface's #909 resolution loop asks ONE
+    // disambiguation question and expects the NEXT turn (same
+    // conversationId, plain free text — "the number or the name",
+    // findPendingClarification/applyDisambiguationAnswer in
+    // routes/assistant.ts) to answer it. A one-turn probe used to just
+    // record the question itself as the row's final reply and walk
+    // straight into approve, which can only 400 on the still-gated field.
+    // Answered ONLY when the corpus row opts in with `clarificationAnswer`
+    // (the intended candidate's number or name) — absent that, the
+    // question is left exactly as before so an unexpectedly-ambiguous row
+    // still surfaces as evidence rather than being silently steered.
+    if (
+      looksLikeDisambiguationQuestion(chatFields.content) &&
+      typeof corpusCase.clarificationAnswer === 'string' &&
+      chatFields.conversationId
+    ) {
+      const follow = await api('POST', '/api/assistant/chat', {
+        token,
+        body: {
+          messages: [{ role: 'user', content: corpusCase.clarificationAnswer }],
+          inputMode: 'text',
+          conversationId: chatFields.conversationId,
+        },
+      });
+      answerTurn = { question: chatFields.content, answer: corpusCase.clarificationAnswer, status: follow.status };
+      if (follow.status >= 200 && follow.status < 400) {
+        httpStatus = follow.status;
+        chatFields = extractChatFields(follow.json);
+      }
+    }
   } else if (corpusCase.surface === 'voice-session') {
     voiceOutcome = await driveVoiceSession(token, corpusCase);
     if (voiceOutcome.sessionCreateFailed) {
@@ -666,12 +856,16 @@ async function runRow(corpusCase, ctx) {
       model: 'voice-session',
       taskType: null,
       degraded: false,
-      proposalId: j?.proposalIds?.[0] ?? null,
+      // 2026-08-29 round-2 (A49/A50/D01) — `voiceOutcome.proposalIds` is the
+      // LAST non-empty turn's LAST id (see driveVoiceSession), not blindly
+      // the final turn's own array nor its first entry. See that function's
+      // comment for the two live failure modes this replaces.
+      proposalId: voiceOutcome.proposalIds?.at(-1) ?? j?.proposalIds?.[0] ?? null,
       proposalType: null,
       usage: j?.usage ?? null,
     };
     chatFields._state = j?.state ?? null;
-    chatFields._proposalIds = j?.proposalIds ?? [];
+    chatFields._proposalIds = voiceOutcome.proposalIds ?? j?.proposalIds ?? [];
     // Sum usage across every turn the voice session took (multi-turn FSM
     // rows make several classify/draft calls, not just the final one).
     const turnUsages = (voiceOutcome.allTurns ?? []).map((t) => t.usage).filter(Boolean);
@@ -776,6 +970,24 @@ async function runRow(corpusCase, ctx) {
       verdict = 'DEGRADED';
       outcomeClass = null;
       reason = 'llm_fallback_envelope';
+    } else if (!proposalId && chatFields.model === 'direct-act') {
+      // 2026-08-29 round-2 (bucket-d, C01) — a DIRECT AUDITED ACT
+      // (routes/assistant.ts's dedicated en_route branch: `model:
+      // 'direct-act'`, `taskType: 'assistant.en_route'`) never creates a
+      // proposal BY DESIGN — there is nothing to review/approve, the act
+      // already happened (or, honestly, didn't — "no appointment today").
+      // The generic `!proposalId → PARTIAL` branch below was written for
+      // proposal-driving flows and had no carve-out for this correct,
+      // deliberately-proposal-less shape, so a real PASS scored PARTIAL
+      // forever. Gated strictly on `model === 'direct-act'` — never on
+      // content wording alone — so a generic-LLM fallthrough claiming "done"
+      // in similar words still cannot false-PASS here (same principle as
+      // the isDataLookup gate above; see rescore.mjs's C02 counter-example,
+      // which is exactly a generic-LLM reply that must NOT get this credit).
+      const contentOk = typeof chatFields.content === 'string' && chatFields.content.length >= 5;
+      verdict = contentOk ? 'PASS' : 'DEGRADED';
+      outcomeClass = verdict === 'PASS' ? 'executes' : null;
+      reason = verdict === 'PASS' ? 'direct_act_no_proposal_by_design' : 'direct_act_empty_reply';
     } else if (!proposalId) {
       verdict = 'PARTIAL';
       outcomeClass = null;
@@ -847,6 +1059,7 @@ async function runRow(corpusCase, ctx) {
     usage: chatFields.usage ?? null,
     approve: approveOutcome,
     dbVerify,
+    ...(answerTurn ? { answerTurn } : {}),
     notes: corpusCase.notes,
   };
 }
