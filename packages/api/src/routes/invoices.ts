@@ -2,6 +2,7 @@ import { Router, Response } from 'express';
 import { z } from 'zod';
 import { AuthenticatedRequest } from '../auth/clerk';
 import { requireAuth, requireTenant, requirePermission } from '../middleware/auth';
+import { notFoundOnMalformedId } from '../middleware/validate-uuid-param';
 import { createInvoiceSchema, updateInvoiceSchema } from '../shared/contracts';
 import { toErrorResponse } from '../shared/errors';
 import { TenantOwnership } from '../shared/tenant-ownership';
@@ -386,6 +387,7 @@ export function createInvoiceRouter(
     requireAuth,
     requireTenant,
     requirePermission('invoices:view'),
+    notFoundOnMalformedId('Invoice not found'),
     async (req: AuthenticatedRequest, res: Response) => {
       try {
         const result = await getInvoice(req.auth!.tenantId, req.params.id, invoiceRepo);
@@ -421,6 +423,7 @@ export function createInvoiceRouter(
     requireAuth,
     requireTenant,
     requirePermission('invoices:update'),
+    notFoundOnMalformedId('Invoice not found'),
     updateHandler
   );
 
@@ -429,6 +432,7 @@ export function createInvoiceRouter(
     requireAuth,
     requireTenant,
     requirePermission('invoices:update'),
+    notFoundOnMalformedId('Invoice not found'),
     updateHandler
   );
 
@@ -437,6 +441,7 @@ export function createInvoiceRouter(
     requireAuth,
     requireTenant,
     requirePermission('invoices:update'),
+    notFoundOnMalformedId('Invoice not found'),
     async (req: AuthenticatedRequest, res: Response) => {
       try {
         if (!paymentLinkProvider) {
@@ -467,6 +472,7 @@ export function createInvoiceRouter(
     requireAuth,
     requireTenant,
     requirePermission('invoices:update'),
+    notFoundOnMalformedId('Invoice not found'),
     async (req: AuthenticatedRequest, res: Response) => {
       try {
         // Guarded: a non-numeric value flows into calculateDueDate's
@@ -510,6 +516,7 @@ export function createInvoiceRouter(
     requireAuth,
     requireTenant,
     requirePermission('invoices:update'),
+    notFoundOnMalformedId('Invoice not found'),
     async (req: AuthenticatedRequest, res: Response) => {
       try {
         if (!paymentRepo) {
@@ -552,6 +559,7 @@ export function createInvoiceRouter(
     requireAuth,
     requireTenant,
     requirePermission('invoices:update'),
+    notFoundOnMalformedId('Invoice not found'),
     async (req: AuthenticatedRequest, res: Response) => {
       try {
         const { status } = req.body;
@@ -592,6 +600,7 @@ export function createInvoiceRouter(
     requireAuth,
     requireTenant,
     requirePermission('invoices:update'),
+    notFoundOnMalformedId('Invoice not found'),
     async (req: AuthenticatedRequest, res: Response) => {
       try {
         if (!sendService) {
