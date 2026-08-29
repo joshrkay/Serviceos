@@ -40,7 +40,15 @@ import {
   SCHEMA_HEAD,
   SCHEMA_TAIL,
   TRAILING_UNKNOWN_BLOCK,
+  type EntityFieldVariantTable,
+  type IntentBlockVariantTable,
 } from './intent-taxonomy-blocks';
+
+// The variant tables are exported `as const` (readonly literal types, #902);
+// these table-shaped views allow lookups by arbitrary intent / field key.
+// Readonly-to-mutable assignment is fine here — nothing writes through them.
+const intentBlockVariants: IntentBlockVariantTable = INTENT_BLOCK_VARIANTS;
+const entityFieldVariants: EntityFieldVariantTable = ENTITY_FIELD_VARIANTS;
 
 export type ClassifierProfile = 'caller' | 'field_tech' | 'owner_line' | 'operator';
 
@@ -222,20 +230,25 @@ const FIELD_TECH_INTENTS: readonly IntentType[] = [
 ];
 
 /**
- * Which slice of the taxonomy each profile advertises AND accepts.
- * Used twice by design:
- * 1. `buildClassifierSystemPrompt` assembles the prompt from it (advertise).
- * 2. `classifyIntentRaw`'s post-parse guard maps any classification outside
- *    it to 'unknown' / 'intent_off_surface' (accept) — the prompt is a hint,
- *    this set is the classifier-level gate. The guard exempts two families
- *    that own their surface behavior DOWNSTREAM of classification and must
- *    not be pre-empted by a generic clarification: read-only lookup_*
- *    (D-026's dispatch RBAC answers or refuses with purposeful copy) and
- *    emergency_dispatch (the FSM escalation fast-path, RV-140/142).
+ * Which slice of the taxonomy each profile ACCEPTS — the post-parse gate's
+ * authority. Used twice by design:
+ * 1. `buildClassifierSystemPrompt` assembles the prompt from it (advertise =
+ *    accepted ∩ the base block table; `advertisedIntentsForProfile` below is
+ *    the derived, pinned view — accepted ⊇ advertised by construction).
+ * 2. `classifyIntentRaw`'s post-parse guard (`isIntentAcceptedOnProfile`)
+ *    maps any classification outside it to 'unknown'/'intent_off_surface'
+ *    (accept) — the prompt is a hint, this set is the classifier-level gate.
+ *    The guard exempts two families that own their surface behavior
+ *    DOWNSTREAM of classification and must not be pre-empted by a generic
+ *    clarification: read-only lookup_* (D-026's dispatch RBAC answers or
+ *    refuses with purposeful copy) and the SURFACE_GUARD_EXEMPT_INTENTS set
+ *    (emergency escalation, owner approval/edit hard gates).
  *
  * Section-gated intents (owner approval, protection, extended lookups) are
  * members wherever the section can be appended, so the guard never rejects
- * what a section legitimately advertised.
+ * what a section legitimately advertised — which is why 'caller' accepts 20
+ * while its base prompt advertises 18 (complaint/negotiation have no base
+ * block; the always-appended protection section carries them).
  */
 export const PROFILE_INTENTS: Readonly<Record<ClassifierProfile, ReadonlySet<IntentType>>> = {
   caller: new Set<IntentType>(CALLER_INTENTS),
@@ -276,7 +289,7 @@ export function buildClassifierSystemPrompt(profile: ClassifierProfile): string 
   parts.push(INTENT_LIST_HEADER);
   for (const intent of INTENT_BLOCK_ORDER) {
     if (!allowed.has(intent)) continue;
-    parts.push(INTENT_BLOCK_VARIANTS[intent]?.[profile] ?? INTENT_BLOCKS[intent]);
+    parts.push(intentBlockVariants[intent]?.[profile] ?? INTENT_BLOCKS[intent]);
   }
   // 'unknown' is in every profile; the short closing catch-all always ends
   // the list, exactly as in the original literal.
@@ -296,7 +309,7 @@ export function buildClassifierSystemPrompt(profile: ClassifierProfile): string 
   parts.push(SCHEMA_HEAD);
   parts.push(
     ENTITY_FIELDS.filter((f) => f.intents === '*' || f.intents.some((i) => allowed.has(i)))
-      .map((f) => ENTITY_FIELD_VARIANTS[f.key]?.[profile] ?? f.line)
+      .map((f) => entityFieldVariants[f.key]?.[profile] ?? f.line)
       .join(',\n'),
   );
   parts.push(SCHEMA_TAIL, CALIBRATION);
@@ -304,4 +317,20 @@ export function buildClassifierSystemPrompt(profile: ClassifierProfile): string 
   const prompt = parts.join('');
   promptMemo.set(profile, prompt);
   return prompt;
+}
+
+/**
+ * #902 — the intents a profile's BASE prompt actually advertises as list
+ * blocks: PROFILE_INTENTS ∩ the block table, exactly the filter
+ * `buildClassifierSystemPrompt` applies. DERIVED, never hand-kept, so
+ * advertise-vs-accept cannot drift: accepted (PROFILE_INTENTS) ⊇ advertised
+ * by construction, and the difference is exactly the intents whose prompt
+ * text lives in an appended SECTION rather than a base block — for 'caller',
+ * complaint/negotiation (advertised by the customer-protection section,
+ * which live telephony always appends; accepted here so the guard never
+ * undoes what that section advertised). Counts pinned by
+ * classifier-profile.test.ts: caller 18 advertised / 20 accepted.
+ */
+export function advertisedIntentsForProfile(profile: ClassifierProfile): ReadonlySet<IntentType> {
+  return new Set<IntentType>(INTENT_BLOCK_ORDER.filter((intent) => PROFILE_INTENTS[profile].has(intent)));
 }

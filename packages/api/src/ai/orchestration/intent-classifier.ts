@@ -634,6 +634,30 @@ const SURFACE_GUARD_EXEMPT_INTENTS: ReadonlySet<IntentType> = new Set<IntentType
 ]);
 
 /**
+ * #887/#902 — THE three-way accept rule of the post-parse surface guard, in
+ * one exported, directly-tested place so it cannot drift across call sites:
+ * a classification is accepted on a profile when
+ *   1. the profile's own PROFILE_INTENTS set offers it,
+ *   2. it is a read-only `lookup_*` (D-026's dispatch RBAC owns the
+ *      answer-or-refuse behavior downstream), or
+ *   3. it is in SURFACE_GUARD_EXEMPT_INTENTS (deliberate downstream
+ *      authorities — see that set's doc comment).
+ * Anything else is intercepted as 'unknown'/'intent_off_surface' (carrying
+ * the blocked intent in `offSurfaceIntent`) and audited at the live classify
+ * seams as `voice.intent_off_surface`.
+ */
+export function isIntentAcceptedOnProfile(
+  profile: ClassifierProfile,
+  intent: IntentType,
+): boolean {
+  return (
+    PROFILE_INTENTS[profile].has(intent) ||
+    isLookupIntent(intent) ||
+    SURFACE_GUARD_EXEMPT_INTENTS.has(intent)
+  );
+}
+
+/**
  * Customer-side protection intents: complaint + negotiation.
  * These MUST be available on ordinary customer calls (not only owner
  * sessions). Gated by `ClassifyContext.customerProtectionIntents` (or
@@ -967,6 +991,15 @@ export interface IntentClassification {
   extractedEntities?: ExtractedEntities;
   unknownReason?: UnknownReason;
   lowConfidenceIntent?: IntentType;
+  /**
+   * #887/#902 — populated only on 'intent_off_surface': the intent the
+   * classifier actually picked before the surface guard intercepted it.
+   * The live classify seams (voice-turn processor speechTurn, Twilio
+   * Gather adapter) record it in a `voice.intent_off_surface` audit event
+   * via `auditOffSurfaceClassification`, so the interception leaves a
+   * trail instead of dissolving into a reprompt.
+   */
+  offSurfaceIntent?: IntentType;
   /**
    * Enum-typed fields the LLM returned with a value outside the
    * allowed set (e.g., `cancellationType: "weather"` when only
@@ -1951,17 +1984,20 @@ async function classifyIntentRaw(
   //   owner-grade question gets the refusal line, not "didn't catch that");
   // - the SURFACE_GUARD_EXEMPT_INTENTS set (emergency escalation, owner
   //   approval/edit hard gates) — see its doc comment.
-  if (
-    !PROFILE_INTENTS[profile].has(parsed.intentType) &&
-    !isLookupIntent(parsed.intentType) &&
-    !SURFACE_GUARD_EXEMPT_INTENTS.has(parsed.intentType)
-  ) {
+  // The three-way rule lives in isIntentAcceptedOnProfile — ONE predicate,
+  // exported and pinned, so no second call site can re-derive it wrongly.
+  // The interception is not silent: `offSurfaceIntent` carries what the
+  // model picked, and the live classify seams audit it
+  // (`voice.intent_off_surface`) — a prompt-injection attempt on a customer
+  // line lands in the audit log, it does not dissolve into a reprompt.
+  if (!isIntentAcceptedOnProfile(profile, parsed.intentType)) {
     const offSurface: IntentClassification = {
       intentType: 'unknown',
       confidence: parsed.confidence,
       reasoning: `classifier picked ${parsed.intentType}, which the '${profile}' surface does not offer`,
       extractedEntities: parsed.extractedEntities,
       unknownReason: 'intent_off_surface',
+      offSurfaceIntent: parsed.intentType,
     };
     if (tokenUsage) offSurface.tokenUsage = tokenUsage;
     if (aiRunId) offSurface.aiRunId = aiRunId;

@@ -791,7 +791,7 @@ describe('Inbound caller — the non-mutating S1 types (control)', () => {
     expect(actuallyHandlerless).toEqual(EXPECTED_HANDLERLESS_S1_TYPES);
   });
 
-  it('an operator-only ask from a caller is blocked at classification — nothing minted (#887)', async () => {
+  it('an operator-only ask from a caller is blocked at classification — nothing minted, audited (#887/#902)', async () => {
     // Pre-#887 this ask rode the S1 coercion into a voice_clarification
     // proposal (after a confirm dance that ended in a false success line).
     // The classifier's post-parse surface guard now maps send_invoice to
@@ -812,5 +812,20 @@ describe('Inbound caller — the non-mutating S1 types (control)', () => {
     );
 
     expect(proposals).toHaveLength(0);
+    // #902 — "nothing minted" must not mean "no trail": the interception is
+    // recorded as voice.intent_off_surface (the proposal-gate
+    // voice.surface_violation_blocked can no longer fire here, since nothing
+    // reaches minting).
+    const offSurface = world.auditRepo
+      .getAll()
+      .filter((e) => e.eventType === 'voice.intent_off_surface');
+    expect(offSurface).toHaveLength(1);
+    expect(offSurface[0].metadata).toMatchObject({
+      intent: 'send_invoice',
+      profile: 'caller',
+    });
+    expect(
+      world.auditRepo.getAll().some((e) => e.eventType === 'voice.surface_violation_blocked'),
+    ).toBe(false);
   });
 });

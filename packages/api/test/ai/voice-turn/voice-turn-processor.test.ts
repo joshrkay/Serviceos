@@ -291,13 +291,27 @@ describe('createVoiceTurnProcessor.speechTurn', () => {
     // #887 — the attack is now stopped one layer EARLIER: the classifier's
     // post-parse surface guard converts send_invoice to unknown
     // ('intent_off_surface') on the caller profile, so the confirmed-readback
-    // dance never starts and nothing reaches the I6 proposal gate — no
-    // surface-violation audit event, just a reprompt. The I6 gate itself
-    // stays pinned as defense-in-depth by the executeSideEffects-level test
-    // ("an S2-only proposal side-effect is neutralized...") below.
+    // dance never starts and nothing reaches the I6 proposal gate. The I6
+    // gate itself stays pinned as defense-in-depth by the
+    // executeSideEffects-level test ("an S2-only proposal side-effect is
+    // neutralized...") below.
     expect(
       auditRepo.getAll().some((e) => e.eventType === 'voice.surface_violation_blocked'),
     ).toBe(false);
+    // #902 — but the earlier interception must NOT be silent: an injection
+    // attempt on a customer line lands in the audit log as
+    // voice.intent_off_surface, carrying what was asked and which profile
+    // refused it.
+    const offSurface = auditRepo
+      .getAll()
+      .filter((e) => e.eventType === 'voice.intent_off_surface');
+    expect(offSurface).toHaveLength(1);
+    expect(offSurface[0].tenantId).toBe('tenant-abc');
+    expect(offSurface[0].entityId).toBe(session.id);
+    expect(offSurface[0].metadata).toMatchObject({
+      intent: 'send_invoice',
+      profile: 'caller',
+    });
     // Turn 1 reprompted; the stray "yes" (no pending question) was a second
     // non-routable turn, exhausting the bounded reprompt budget — the call
     // hands off to a human instead of looping. Still: no draft, no S2 write.
@@ -1202,10 +1216,21 @@ describe('I6 — untrusted-surface predicate is a trusted-channel allowlist', ()
     // channel derives the 'caller' profile (classifierProfileForSession
     // mirrors the same TRUSTED_CHANNELS allowlist), so send_invoice is
     // guard-converted before the I6 proposal gate is ever reached — no
-    // surface-violation audit, no S2 draft, just a reprompt.
+    // proposal-gate audit, no S2 draft.
     expect(
       auditRepo.getAll().some((e) => e.eventType === 'voice.surface_violation_blocked'),
     ).toBe(false);
+    // #902 — the classifier-gate interception leaves its own trail, and the
+    // profile it records proves the fail-closed derivation: 'caller', on a
+    // channel nobody trusted.
+    const offSurface = auditRepo
+      .getAll()
+      .filter((e) => e.eventType === 'voice.intent_off_surface');
+    expect(offSurface).toHaveLength(1);
+    expect(offSurface[0].metadata).toMatchObject({
+      intent: 'send_invoice',
+      profile: 'caller',
+    });
     // Turn 1 reprompted; the stray "yes" (no pending question) was a second
     // non-routable turn, exhausting the bounded reprompt budget — the call
     // hands off to a human instead of looping. Still: no draft, no S2 write.

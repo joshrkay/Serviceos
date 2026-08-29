@@ -36,7 +36,11 @@
  * so the caller-reachable proposal set is byte-identical — what changes is that
  * the block is now recorded honestly as `voice.surface_violation_blocked` with
  * the real `requestedProposalType`, instead of masquerading as a contract
- * failure on a `voice_clarification` nobody asked for.
+ * failure on a `voice_clarification` nobody asked for. (#887/#902: on live
+ * caller paths most off-surface intents are now intercepted one layer earlier,
+ * at classification, and audited as `voice.intent_off_surface` — this
+ * proposal-gate event still fires for whatever reaches minting, e.g. the
+ * guard-exempt intents.)
  *
  * The allowlist — not this map — is therefore the security boundary. Adding an
  * intent here can never make a proposal type reachable from an unauthenticated

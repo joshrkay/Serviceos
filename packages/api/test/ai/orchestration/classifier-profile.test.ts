@@ -13,15 +13,19 @@
  */
 import { describe, it, expect, vi } from 'vitest';
 import {
+  advertisedIntentsForProfile,
   buildClassifierSystemPrompt,
   CUSTOMER_SCOPED_LOOKUP_INTENTS,
   PROFILE_INTENTS,
+  type ClassifierProfile,
 } from '../../../src/ai/orchestration/classifier-profile';
 import {
   classifyIntent,
   CUSTOMER_PROTECTION_PROMPT_SECTION,
   EXTENDED_INTENTS_PROMPT_SECTION,
+  isIntentAcceptedOnProfile,
   isInventoryLoggingPhrasing,
+  SUPPORTED_INTENTS,
   SYSTEM_PROMPT,
 } from '../../../src/ai/orchestration/intent-classifier';
 import { classifierProfileForSession } from '../../../src/ai/voice-turn/create-voice-turn-processor';
@@ -288,10 +292,24 @@ describe('classifyIntent — profile wiring', () => {
     );
     expect(result.intentType).toBe('unknown');
     expect(result.unknownReason).toBe('intent_off_surface');
+    // #902 — the interception is not silent: the blocked intent travels on
+    // the result so the live seams can audit it (voice.intent_off_surface).
+    expect(result.offSurfaceIntent).toBe('record_payment');
     // confidence/entities/usage survive for observability + cost tracking
     expect(result.confidence).toBe(0.97);
     expect(result.extractedEntities).toEqual({ customerName: 'Acme' });
     expect(result.tokenUsage).toEqual({ input: 100, output: 50 });
+  });
+
+  it('an accepted classification never carries offSurfaceIntent', async () => {
+    const gateway = mockGateway(ok('create_appointment'));
+    const result = await classifyIntent(
+      'Can you get somebody out here on Thursday?',
+      { tenantId: 't1', classifierProfile: 'caller' },
+      gateway,
+    );
+    expect(result.intentType).toBe('create_appointment');
+    expect(result.offSurfaceIntent).toBeUndefined();
   });
 
   it('post-parse guard: off-surface lookups pass through to the D-026 dispatch layer', async () => {
@@ -403,5 +421,95 @@ describe('classifierProfileForSession — identity-derived, fail-closed', () => 
 
   it('a future untrusted channel fails closed to caller', () => {
     expect(classifierProfileForSession(session({ channel: 'web_chat' }))).toBe('caller');
+  });
+});
+
+// ─── #902 — the one accept rule ──────────────────────────────────────────────
+
+describe('isIntentAcceptedOnProfile — the exported three-way accept rule', () => {
+  // The guard's rule is PROFILE_INTENTS ∪ lookup_* ∪ the exempt set, folded
+  // into ONE exported predicate so no second call site can re-derive it
+  // differently. These pins are the predicate's direct spec.
+  it('accepts what the profile set offers', () => {
+    expect(isIntentAcceptedOnProfile('caller', 'create_appointment')).toBe(true);
+    expect(isIntentAcceptedOnProfile('field_tech', 'lookup_my_day')).toBe(true);
+  });
+
+  it('accepts every read-only lookup_* on every profile (D-026 dispatch RBAC owns them)', () => {
+    for (const profile of ['caller', 'field_tech', 'owner_line', 'operator'] as const) {
+      expect(isIntentAcceptedOnProfile(profile, 'lookup_revenue')).toBe(true);
+      expect(isIntentAcceptedOnProfile(profile, 'lookup_crew_schedule')).toBe(true);
+    }
+  });
+
+  it('accepts the guard-exempt downstream authorities on every profile', () => {
+    for (const profile of ['caller', 'field_tech', 'owner_line', 'operator'] as const) {
+      for (const intent of [
+        'emergency_dispatch',
+        'approve_proposal',
+        'reject_proposal',
+        'edit_proposal',
+      ] as const) {
+        expect(isIntentAcceptedOnProfile(profile, intent)).toBe(true);
+      }
+    }
+  });
+
+  it('rejects an off-surface mutation on the profiles that do not offer it', () => {
+    expect(isIntentAcceptedOnProfile('caller', 'record_payment')).toBe(false);
+    expect(isIntentAcceptedOnProfile('caller', 'send_invoice')).toBe(false);
+    expect(isIntentAcceptedOnProfile('field_tech', 'record_payment')).toBe(false);
+    expect(isIntentAcceptedOnProfile('owner_line', 'record_payment')).toBe(true);
+  });
+
+  it('operator accepts the entire taxonomy — intent_off_surface is unreachable without a profile', () => {
+    // Every caller that omits classifierProfile (memo worker, in-app voice,
+    // chat, evals) classifies as 'operator'; this pin is what makes the
+    // guard a guaranteed no-op for them.
+    for (const intent of SUPPORTED_INTENTS) {
+      expect(isIntentAcceptedOnProfile('operator', intent)).toBe(true);
+    }
+  });
+});
+
+// ─── #902 — advertise vs accept is structural ────────────────────────────────
+
+describe('advertisedIntentsForProfile — derived from the block table, never hand-kept', () => {
+  it('accepted ⊇ advertised for every profile, by construction', () => {
+    for (const profile of ['caller', 'field_tech', 'owner_line', 'operator'] as const) {
+      for (const intent of advertisedIntentsForProfile(profile)) {
+        expect(PROFILE_INTENTS[profile].has(intent)).toBe(true);
+      }
+    }
+  });
+
+  it('caller advertises 18 base-prompt intents and accepts 20', () => {
+    // The delta is exactly the protection-section pair: complaint /
+    // negotiation have no base block (the always-appended customer-
+    // protection section advertises them on live telephony), but the guard
+    // must accept them — the docs (D-027, voice-action-catalog.md) state
+    // both numbers.
+    const advertised = advertisedIntentsForProfile('caller');
+    expect(advertised.size).toBe(18);
+    expect(PROFILE_INTENTS.caller.size).toBe(20);
+    const acceptedNotAdvertised = [...PROFILE_INTENTS.caller].filter((i) => !advertised.has(i));
+    expect(acceptedNotAdvertised.sort()).toEqual(['complaint', 'negotiation']);
+  });
+
+  it('advertised counts per profile match the assembled prompts', () => {
+    const expected: Record<ClassifierProfile, number> = {
+      caller: 18,
+      field_tech: 15,
+      owner_line: 60,
+      operator: 68,
+    };
+    for (const profile of ['caller', 'field_tech', 'owner_line', 'operator'] as const) {
+      const advertised = advertisedIntentsForProfile(profile);
+      expect(advertised.size).toBe(expected[profile]);
+      // The derivation IS the assembly filter: every advertised intent has a
+      // block in the profile's prompt.
+      const blocks = new Set(advertisedBlocks(buildClassifierSystemPrompt(profile)));
+      expect([...advertised].sort()).toEqual([...blocks].sort());
+    }
   });
 });

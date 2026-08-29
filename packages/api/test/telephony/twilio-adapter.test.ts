@@ -1052,6 +1052,53 @@ describe('TwilioGatherAdapter.handleGather', () => {
     }
   });
 
+  it('an off-surface classification on the Gather seam is audited as voice.intent_off_surface (#902)', async () => {
+    // The adapter is the second live classify seam (the first is the
+    // processor speechTurn); both must leave the same trail when the
+    // post-parse guard intercepts an intent the 'caller' profile refuses —
+    // the interception must not dissolve into a bare reprompt.
+    const offAuditRepo = new InMemoryAuditRepository();
+    const offGateway = makeGatewayReturning(
+      JSON.stringify({
+        intentType: 'record_payment',
+        confidence: 0.95,
+        reasoning: 'caller wants to pay',
+        extractedEntities: { customerName: 'Acme' },
+      }),
+    );
+    const built = makeAdapter({ gateway: offGateway, auditRepo: offAuditRepo });
+    await built.adapter.handleInbound({
+      callSid: 'CA-offsurface',
+      from: '+15125550100',
+      to: '+15125550999',
+      tenantId: 'tenant-abc',
+    });
+    const ids = Array.from(
+      (built.store as unknown as { sessions: Map<string, unknown> }).sessions.keys(),
+    );
+    const offSessionId = ids[0] as string;
+    const offSession = await built.store.get(offSessionId);
+    if (offSession && offSession.machine.currentState === 'ask_caller') {
+      offSession.machine.dispatch({ type: 'caller_known', customerId: 'cust-1' });
+    }
+
+    await built.adapter.handleGather({
+      sessionId: offSessionId,
+      callSid: 'CA-offsurface',
+      speechResult: 'I want to pay my invoice over the phone',
+      confidence: 0.95,
+      tenantId: 'tenant-abc',
+    });
+
+    const events = offAuditRepo
+      .getAll()
+      .filter((e) => e.eventType === 'voice.intent_off_surface');
+    expect(events).toHaveLength(1);
+    expect(events[0].tenantId).toBe('tenant-abc');
+    expect(events[0].entityId).toBe(offSessionId);
+    expect(events[0].metadata).toMatchObject({ intent: 'record_payment', profile: 'caller' });
+  });
+
   describe('Phase-2 Track A owner lookup wiring', () => {
     const tenantId = 'tenant-owner';
 

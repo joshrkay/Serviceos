@@ -1,14 +1,19 @@
 /**
- * #886/#887 — first-turn classifier input budget, per surface profile.
+ * #886/#887/#902 — first-turn classifier input budget, per surface profile.
  *
  * The regression this pins: the ungated taxonomy prompt grew to ~15.2k
  * tokens against a 5k-token session cap, so every inbound call escalated on
- * the caller's first sentence (#886). The pin below measures the REAL
- * assembled first turn — profile prompt + the sections that surface always
- * appends + a rich tenant vertical pack + a long utterance — against the
- * documented per-turn budget with the same 15% safety convention the
- * voice-eval preflight uses (voice-eval-live.test.ts pins its estimate at
- * 1.15×; this test is the inverse: real usage must stay under 0.85× budget).
+ * the caller's first sentence (#886). The pin below measures the WORST
+ * STRUCTURAL assembled first turn — profile prompt + the sections that
+ * surface always appends + the full canonical HVAC pack (vertical block +
+ * intake questions + objection scripts) + MAX_PROMPT_ASSETS tenant training
+ * assets saturating the prompt builder's own truncation caps (#902: the
+ * previous pin omitted intake/objection and training assets, leaving ~1%
+ * slack against a scenario tenants can actually configure) + a long
+ * utterance — against the documented per-turn budget with the same 15%
+ * safety convention the voice-eval preflight uses (voice-eval-live.test.ts
+ * pins its estimate at 1.15×; this test is the inverse: real usage must
+ * stay under 0.85× budget).
  *
  * If this fails, taxonomy text grew past the surface's budget: trim the
  * profile (PROFILE_INTENTS / variants in intent-taxonomy-blocks.ts) or
@@ -27,8 +32,18 @@ import {
   SYSTEM_PROMPT,
   type IntentType,
 } from '../../../src/ai/orchestration/intent-classifier';
-import { formatVerticalForCallerPrompt } from '../../../src/verticals/context-assembly';
+import {
+  buildMergedVerticalVoicePrompt,
+  formatIntakeQuestionsForPrompt,
+  formatObjectionScriptsForPrompt,
+  formatVerticalForCallerPrompt,
+} from '../../../src/verticals/context-assembly';
 import { createHvacPack } from '../../../src/verticals/packs/hvac';
+import {
+  buildTrainingAssetPromptSection,
+  MAX_PROMPT_ASSETS,
+  type VerticalTrainingAsset,
+} from '../../../src/verticals/training-assets';
 import { INTENT_TO_PROPOSAL_TYPE } from '../../../src/proposals/voice-intent-map';
 import { S1_ALLOWED_PROPOSAL_TYPES } from '../../../src/proposals/surface';
 import {
@@ -59,9 +74,54 @@ const SAMPLE_UTTERANCE =
   "really like to get somebody out here this week, ideally Thursday morning before ten " +
   "if you can manage it, and can you tell me how much I still owe on the last visit?";
 
-/** Mirrors classifyIntentRaw's vertical wrapper text. */
-function verticalSection(): string {
-  return `Tenant vertical context (use ONLY for entity recognition; do not change the JSON output schema):\n${formatVerticalForCallerPrompt(createHvacPack())}`;
+/**
+ * A tenant training asset saturating every prompt-visible field's own
+ * truncation cap in buildTrainingAssetPromptSection (title 160, guidance
+ * 1,000, both labels 300 chars — the inputs are longer on purpose; the
+ * builder truncates). Together with MAX_PROMPT_ASSETS this makes the
+ * training section a computable CEILING, not a sample.
+ */
+function maxTrainingAsset(i: number): VerticalTrainingAsset {
+  return {
+    id: `budget-pin-${i}`,
+    tenantId: 'budget-pin',
+    verticalType: 'hvac',
+    assetKind: 'prompt_context',
+    status: 'active',
+    title: 'T'.repeat(200),
+    scrubbedText: 'x'.repeat(2000),
+    labels: {
+      expectedNextQuestion: 'q'.repeat(400),
+      expectedNextAction: 'n'.repeat(400),
+    },
+    provenance: { source: 'tenant_admin', sourceVersion: '1' },
+    createdBy: 'budget-pin',
+    createdAt: new Date(0),
+    updatedAt: new Date(0),
+  };
+}
+
+/**
+ * Mirrors classifyIntentRaw's vertical wrapper around the WORST section
+ * resolve-active-pack.ts can assemble: canonical HVAC blocks (vertical +
+ * intake + objection, joined exactly as resolveVerticalPromptSection does)
+ * merged with a maxed-out training-asset section via
+ * buildMergedVerticalVoicePrompt.
+ */
+function worstCaseVerticalSection(): string {
+  const pack = createHvacPack();
+  const canonicalPrompt = [
+    formatVerticalForCallerPrompt(pack),
+    formatIntakeQuestionsForPrompt(pack),
+    formatObjectionScriptsForPrompt(pack),
+  ]
+    .filter((s) => s.length > 0)
+    .join('\n\n');
+  const trainingAssetPrompt = buildTrainingAssetPromptSection(
+    Array.from({ length: MAX_PROMPT_ASSETS }, (_, i) => maxTrainingAsset(i)),
+  );
+  const merged = buildMergedVerticalVoicePrompt({ canonicalPrompt, trainingAssetPrompt });
+  return `Tenant vertical context (use ONLY for entity recognition; do not change the JSON output schema):\n${merged}`;
 }
 
 describe('classifier prompt budget — per-profile first turn', () => {
@@ -73,14 +133,17 @@ describe('classifier prompt budget — per-profile first turn', () => {
   ];
 
   it.each(cases)(
-    '$profile first turn (prompt + sections + HVAC pack + utterance) fits the per-turn budget with 15% margin',
+    '$profile worst first turn (prompt + sections + full HVAC pack + max training assets + utterance) fits the per-turn budget with 15% margin',
     ({ profile, sections }) => {
       const firstTurn =
         buildClassifierSystemPrompt(profile) +
         sections.join('') +
-        verticalSection() +
+        worstCaseVerticalSection() +
         SAMPLE_UTTERANCE;
       const tokens = estimateTokens(firstTurn);
+      // Measured 2026-08-28 (#902): caller ≈ 7,004 tok, field_tech ≈ 6,802,
+      // vs the 85% line of 9,000 × 0.85 = 7,650 — ≥5% real slack on both,
+      // against a ceiling every term of which is bounded by code.
       expect(tokens).toBeLessThan(PER_TURN_CLASSIFY_INPUT_TOKEN_BUDGET * BUDGET_MARGIN);
     },
   );

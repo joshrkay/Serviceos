@@ -812,6 +812,18 @@ money on this line.
 `;
 
 /**
+ * Shape of the per-profile variant tables below. Exported so consumers
+ * (classifier-profile.ts) can take a table-typed view for arbitrary-key
+ * lookups while the tables themselves stay `as const` — matching
+ * INTENT_BLOCKS, so the values that feed the per-profile prompt memo are
+ * readonly at the type level and a later mutation cannot silently diverge
+ * from the memoized prompts (#902).
+ */
+export type IntentBlockVariantTable = Partial<
+  Record<keyof typeof INTENT_BLOCKS, Partial<Record<ClassifierProfile, string>>>
+>;
+
+/**
  * #887 — per-profile replacement text for an intent block. Same shape as
  * the INTENT_BLOCKS entry it replaces (leading \`- "intent"\`, trailing
  * newline). Currently only create_customer carries a caller variant: the
@@ -820,9 +832,7 @@ money on this line.
  * record; an inbound caller signing themself up needs the sign-up framing
  * and the extraction list, not the CRM lore.
  */
-export const INTENT_BLOCK_VARIANTS: Partial<
-  Record<keyof typeof INTENT_BLOCKS, Partial<Record<ClassifierProfile, string>>>
-> = {
+export const INTENT_BLOCK_VARIANTS = {
   create_customer: {
     caller: `- "create_customer"     — an inbound CALLER is signing up as a new customer
                            ("I'd like to sign up", "I'm a new customer",
@@ -839,7 +849,12 @@ export const INTENT_BLOCK_VARIANTS: Partial<
                            address VERBATIM in "address".
 `,
   },
-};
+} as const satisfies IntentBlockVariantTable;
+
+/** Table shape for ENTITY_FIELD_VARIANTS — see IntentBlockVariantTable (#902). */
+export type EntityFieldVariantTable = Partial<
+  Record<string, Partial<Record<ClassifierProfile, string>>>
+>;
 
 /**
  * #887/#896 — per-profile replacement text for an entity-dictionary line
@@ -849,16 +864,14 @@ export const INTENT_BLOCK_VARIANTS: Partial<
  * noteBody rules — a caller's noteBody exists only for the protection
  * section's complaint intent).
  */
-export const ENTITY_FIELD_VARIANTS: Partial<
-  Record<string, Partial<Record<ClassifierProfile, string>>>
-> = {
+export const ENTITY_FIELD_VARIANTS = {
   jobTitle: {
     caller: `    "jobTitle": "<string, optional — short name of the new job on create_job, or of the new work being scheduled on create_appointment>"`,
   },
   noteBody: {
     caller: `    "noteBody": "<string, optional — the complaint text on complaint>"`,
   },
-};
+} as const satisfies EntityFieldVariantTable;
 
 /** Opens the disambiguation section. Emitted only when at least one rule survives gating. */
 export const DISTINCTIONS_HEADER = `
