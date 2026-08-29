@@ -79,11 +79,13 @@ import { ReassignAppointmentExecutionHandler } from '../../src/proposals/executi
 import {
   ConfirmAppointmentExecutionHandler,
   LogTimeEntryExecutionHandler,
+  RequestFeedbackExecutionHandler,
 } from '../../src/proposals/execution/full-app-voice-handlers';
 import {
   AddNoteExecutionHandler,
   SendInvoiceExecutionHandler,
   SendEstimateExecutionHandler,
+  RecordPaymentExecutionHandler,
 } from '../../src/proposals/execution/voice-extended-handlers';
 import { SendPaymentReminderExecutionHandler } from '../../src/proposals/execution/send-payment-reminder-handler';
 import { ApplyLateFeeExecutionHandler } from '../../src/proposals/execution/apply-late-fee-handler';
@@ -976,14 +978,21 @@ const ROWS: Row[] = [
   },
   {
     intent: 'record_payment',
-    mode: 'gated',
-    note: "DEVIATION from the design's suggested 'resolves': RecordPaymentTaskHandler never reads existingEntities.invoiceId (the real resolver seam) at all — only ee.jobReference/ee.customerName, which are classifier free text, not resolver output. So even a resolver-verified invoiceId in existingEntities leaves invoiceId gated; it is not provably resolver-completable today.",
+    mode: 'resolves',
+    // A22 fix (2026-08-29) — this row previously documented a DEVIATION:
+    // RecordPaymentTaskHandler never read existingEntities.invoiceId (the
+    // real resolver seam) at all, only ee.jobReference/ee.customerName
+    // (classifier free text), so even a resolver-verified invoiceId left the
+    // proposal gated. The handler now consumes that seam — see U1 in
+    // SendInvoiceTaskHandler for the identical resolution ladder.
+    note: 'U1 — resolver-verified existingEntities.invoiceId lifts the gate; dep-less RecordPaymentExecutionHandler synthetic-succeeds',
     draft: () =>
       draft(
         { gateway: NOOP_GATEWAY },
         'record_payment',
-        ctx({ existingEntities: { invoiceId: INVOICE_ID, amount: 15000, paymentMethod: 'cash' } }),
+        ctx({ existingEntities: { customerName: 'Henderson', invoiceId: INVOICE_ID, amount: 15000, paymentMethod: 'cash' } }),
       ),
+    execute: (p) => new RecordPaymentExecutionHandler().execute(p, execContext()),
   },
   {
     intent: 'convert_lead',
@@ -1027,9 +1036,23 @@ const ROWS: Row[] = [
   },
   {
     intent: 'request_feedback',
-    mode: 'gated',
-    note: 'jobId is gated with no reference given (the handler carries jobReference/customerReference but never sets payload.jobId itself)',
-    draft: () => draft({ gateway: NOOP_GATEWAY }, 'request_feedback', ctx({ existingEntities: {} })),
+    mode: 'resolves',
+    // A32 fix (2026-08-29) — this row previously proved only the (still
+    // true) "no reference at all" gated case; see
+    // test/ai/tasks/full-app-voice-tasks.test.ts for that case plus the
+    // more severe pre-fix bug this row's mode flip closes: a free-text
+    // jobReference/customerReference alone never set payload.jobId AND
+    // never gated it either, so the proposal shipped fully approvable and
+    // was guaranteed to fail execution on "request_feedback requires a
+    // resolved jobId" (A32).
+    note: 'P8 — resolver-verified existingEntities.jobId lifts the gate; dep-less RequestFeedbackExecutionHandler refuses on wiring, not validation (handler_not_wired:feedbackRepo)',
+    draft: () =>
+      draft(
+        { gateway: NOOP_GATEWAY },
+        'request_feedback',
+        ctx({ existingEntities: { jobId: JOB_ID, jobReference: 'the Johnson job' } }),
+      ),
+    execute: (p) => new RequestFeedbackExecutionHandler(undefined, stubAuditRepo).execute(p, execContext()),
   },
   {
     intent: 'respond_to_review',

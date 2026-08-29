@@ -370,6 +370,7 @@ const REF_KEY_BY_KIND: Record<EntityKind, string | undefined> = {
   estimate: 'estimateId',
   appointment: 'appointmentId',
   technician: 'technicianId',
+  lead: 'leadId',
   pending_proposal: undefined,
 };
 

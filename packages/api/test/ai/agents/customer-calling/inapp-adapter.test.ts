@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { InAppVoiceAdapter, buildInappGreeting } from '../../../../src/ai/agents/customer-calling/inapp-adapter';
 import { VoiceSessionStore } from '../../../../src/ai/agents/customer-calling/voice-session-store';
-import { InMemoryProposalRepository } from '../../../../src/proposals/proposal';
+import { InMemoryProposalRepository, missingFieldsFor } from '../../../../src/proposals/proposal';
 import { InMemoryAuditRepository } from '../../../../src/audit/audit';
 import { InMemoryOnCallRepository } from '../../../../src/oncall/rotation';
 import { InMemoryVoiceSessionRepository } from '../../../../src/voice/voice-session';
@@ -23,6 +23,8 @@ import {
 import { InMemoryCustomerRepository } from '../../../../src/customers/customer';
 import type { Customer } from '../../../../src/customers/customer';
 import type { EntityResolver } from '../../../../src/ai/resolution/entity-resolver';
+import { UpdateBrandVoiceExecutionHandler } from '../../../../src/proposals/execution/brand-voice-handler';
+import { InMemoryBrandVoiceRepository } from '../../../../src/tenants/brand/in-memory-brand-voice-repository';
 
 const TENANT = 'tenant-x';
 const USER = 'user-x';
@@ -508,7 +510,9 @@ describe('InAppVoiceAdapter', () => {
       expect(verticalPromptResolver).toHaveBeenCalledWith(TENANT);
       const call = (gateway.complete as ReturnType<typeof vi.fn>).mock.calls[0][0];
       const systemMessages = call.messages.filter((m: { role: string }) => m.role === 'system');
-      expect(systemMessages).toHaveLength(2);
+      // base + vertical + customerProtectionIntents (#914 — always on for
+      // inapp; appended after vertical/plan — see intent-classifier.ts).
+      expect(systemMessages).toHaveLength(3);
       expect(systemMessages[1].content).toContain('Service vertical: HVAC Professional');
     });
 
@@ -532,7 +536,8 @@ describe('InAppVoiceAdapter', () => {
       await expect(adapter.handleInput(sessionId, 'invoice Acme')).resolves.toBeDefined();
       const call = (gateway.complete as ReturnType<typeof vi.fn>).mock.calls[0][0];
       const systemMessages = call.messages.filter((m: { role: string }) => m.role === 'system');
-      expect(systemMessages).toHaveLength(1);
+      // base + customerProtectionIntents (#914 — always on for inapp).
+      expect(systemMessages).toHaveLength(2);
     });
 
     it('omits the vertical message when resolver returns undefined', async () => {
@@ -553,7 +558,8 @@ describe('InAppVoiceAdapter', () => {
 
       const call = (gateway.complete as ReturnType<typeof vi.fn>).mock.calls[0][0];
       const systemMessages = call.messages.filter((m: { role: string }) => m.role === 'system');
-      expect(systemMessages).toHaveLength(1);
+      // base + customerProtectionIntents (#914 — always on for inapp).
+      expect(systemMessages).toHaveLength(2);
     });
   });
 
@@ -604,9 +610,10 @@ describe('InAppVoiceAdapter', () => {
       expect(callerPlanResolver).toHaveBeenCalledWith(TENANT, 'cust-1');
       const call = (gateway.complete as ReturnType<typeof vi.fn>).mock.calls[0][0];
       const systemMessages = call.messages.filter((m: { role: string }) => m.role === 'system');
-      // Base prompt + plan section = 2 system messages (no vertical
-      // resolver wired in this test).
-      expect(systemMessages).toHaveLength(2);
+      // Base prompt + plan section + customerProtectionIntents (#914 —
+      // always on for inapp) = 3 system messages (no vertical resolver
+      // wired in this test).
+      expect(systemMessages).toHaveLength(3);
       expect(systemMessages[1].content).toContain('Caller plan context');
       expect(systemMessages[1].content).toContain('Gold Membership');
     });
@@ -687,7 +694,124 @@ describe('InAppVoiceAdapter', () => {
       await expect(adapter.handleInput(sessionId, 'invoice Acme')).resolves.toBeDefined();
       const call = (gateway.complete as ReturnType<typeof vi.fn>).mock.calls[0][0];
       const systemMessages = call.messages.filter((m: { role: string }) => m.role === 'system');
-      expect(systemMessages).toHaveLength(1);
+      // base + customerProtectionIntents (#914 — always on for inapp).
+      expect(systemMessages).toHaveLength(2);
+    });
+  });
+
+  describe('#914 (A49/A50) — customer protection (complaint/negotiation) is always on for inapp', () => {
+    // Before this fix, inapp-adapter.ts's startSession() never set
+    // `customerProtectionIntents` on the FSM context (unlike
+    // twilio-adapter.ts's telephony leg, which hardcodes it `true`), and
+    // handleInput() never forwarded it into the classify context even when
+    // it WAS set. classifyIntent's `protectionOn` gate — see
+    // intent-classifier.ts — therefore never appended
+    // CUSTOMER_PROTECTION_PROMPT_SECTION to the prompt for a non-owner (or
+    // extendedIntents-disabled) inapp caller, so the LLM had no guidance to
+    // recognize "I'm really unhappy..." / "knock $50 off..." as
+    // complaint/negotiation and the turn fell through to the generic
+    // low-confidence reprompt instead of the FSM's dedicated guards
+    // (transitions.ts complaint/negotiation branches).
+    it('stamps customerProtectionIntents on the FSM context at startSession, for a NON-owner caller', async () => {
+      const adapter = new InAppVoiceAdapter({
+        store,
+        gateway: scriptedGateway([]),
+        proposalRepo,
+        auditRepo,
+        onCallRepo,
+      });
+      const { sessionId } = await adapter.startSession(TENANT, USER);
+      const session = store.peek(sessionId);
+      expect(session?.machine.currentContext.customerProtectionIntents).toBe(true);
+    });
+
+    it('stamps customerProtectionIntents on the FSM context for an OWNER caller too', async () => {
+      const adapter = new InAppVoiceAdapter({
+        store,
+        gateway: scriptedGateway([]),
+        proposalRepo,
+        auditRepo,
+        onCallRepo,
+      });
+      const { sessionId } = await adapter.startSession(TENANT, USER, undefined, 'owner');
+      const session = store.peek(sessionId);
+      expect(session?.machine.currentContext.customerProtectionIntents).toBe(true);
+    });
+
+    it('forwards customerProtectionIntents into the classify call, so the prompt carries CUSTOMER_PROTECTION_PROMPT_SECTION', async () => {
+      const gateway = scriptedGateway([
+        JSON.stringify({
+          intentType: 'complaint',
+          confidence: 0.9,
+          extractedEntities: {},
+        }),
+      ]);
+      const adapter = new InAppVoiceAdapter({
+        store,
+        gateway,
+        proposalRepo,
+        auditRepo,
+        onCallRepo,
+      });
+      const { sessionId } = await adapter.startSession(TENANT, USER);
+      await adapter.handleInput(
+        sessionId,
+        "I'm really unhappy — the leak came back the day after you left",
+      );
+
+      const call = (gateway.complete as ReturnType<typeof vi.fn>).mock.calls[0][0];
+      const systemMessages = call.messages.filter((m: { role: string }) => m.role === 'system');
+      expect(
+        systemMessages.some((m: { content: string }) =>
+          m.content.includes('Customer protection intents (enabled on this call'),
+        ),
+      ).toBe(true);
+    });
+
+    it('a classified complaint reaches the FSM complaint guard (escalating + pinned note), not the generic reprompt', async () => {
+      const gateway = scriptedGateway([
+        JSON.stringify({
+          intentType: 'complaint',
+          confidence: 0.9,
+          extractedEntities: {},
+        }),
+      ]);
+      const adapter = new InAppVoiceAdapter({
+        store,
+        gateway,
+        proposalRepo,
+        auditRepo,
+        onCallRepo,
+      });
+      const { sessionId } = await adapter.startSession(TENANT, USER);
+      const result = await adapter.handleInput(
+        sessionId,
+        "I'm really unhappy — the leak came back the day after you left",
+      );
+
+      expect(result.state).toBe('escalating');
+      expect(result.ttsText).not.toMatch(/say that again/i);
+    });
+
+    it('a classified negotiation reaches the FSM negotiation guard (holding line), not the generic reprompt', async () => {
+      const gateway = scriptedGateway([
+        JSON.stringify({
+          intentType: 'negotiation',
+          confidence: 0.9,
+          extractedEntities: { negotiationAsk: '50 off' },
+        }),
+      ]);
+      const adapter = new InAppVoiceAdapter({
+        store,
+        gateway,
+        proposalRepo,
+        auditRepo,
+        onCallRepo,
+      });
+      const { sessionId } = await adapter.startSession(TENANT, USER);
+      const result = await adapter.handleInput(sessionId, "Knock 50 off or I'm leaving a 1-star review");
+
+      expect(result.ttsText).not.toMatch(/say that again/i);
     });
   });
 
@@ -1255,6 +1379,126 @@ describe('QA-2026-07-26 — voice-drafted estimate line items (lineItemDescripti
 
       const proposals = await proposalRepo.findByTenant(TENANT);
       expect(proposals[0].payload.channel).toBe('sms');
+    });
+
+    // A48 — before this fix, update_brand_voice's create_proposal effect was
+    // built by the SAME generic buildVoiceProposalPayload scalar-promotion
+    // loop as every other type: it copied the raw `brandVoiceInstruction`
+    // scalar verbatim (not a real brandVoiceSchema field), the contract's
+    // all-optional schema validated that no-op payload as `ok`, so the
+    // proposal shipped with `missingFields: []` — fully approvable — and
+    // UpdateBrandVoiceExecutionHandler's strip-mode parse then discarded it
+    // down to `{}` at execution: "Payload carries no brand-voice fields to
+    // apply (only unmapped free text)" on every in-app voice brand-voice
+    // edit. This is now routed through extractBrandVoiceProposalFields, the
+    // SAME dedicated LLM mapping pass the memo/phone and chat paths already
+    // use (ai/tasks/brand-voice-task.ts UpdateBrandVoiceTaskHandler).
+    it('an update_brand_voice create_proposal effect maps the spoken instruction onto typed fields and executes successfully (A48 fix)', async () => {
+      const gateway = scriptedGateway([
+        JSON.stringify({
+          register: 'friendly',
+          signoff: 'Thanks, QA Sweep HVAC',
+          confidence_score: 0.92,
+        }),
+      ]);
+      const adapter = new InAppVoiceAdapter({ store, gateway, proposalRepo, auditRepo, onCallRepo });
+      const { sessionId } = await adapter.startSession(TENANT, USER);
+      const session = store.peek(sessionId);
+      if (!session) throw new Error('test session missing');
+
+      const proposalId = await callHandleCreateProposal(adapter, session, {
+        type: 'create_proposal',
+        payload: {
+          tenantId: TENANT,
+          intent: 'update_brand_voice',
+          entities: {
+            brandVoiceInstruction: 'friendly, plain-spoken, sign off Thanks, QA Sweep HVAC',
+          },
+          sessionId: session.id,
+          confidence: 0.9,
+        },
+      });
+
+      expect(proposalId).toBeDefined();
+      const proposals = await proposalRepo.findByTenant(TENANT);
+      expect(proposals).toHaveLength(1);
+      const proposal = proposals[0];
+      expect(proposal.proposalType).toBe('update_brand_voice');
+      // BEFORE this fix payload.register was always undefined here — only
+      // the raw brandVoiceInstruction scalar and envelope keys were present.
+      expect(proposal.payload.register).toBe('friendly');
+      expect(proposal.payload.signoff).toBe('Thanks, QA Sweep HVAC');
+      expect(missingFieldsFor(proposal)).toEqual([]);
+
+      const brandVoiceRepo = new InMemoryBrandVoiceRepository();
+      const result = await new UpdateBrandVoiceExecutionHandler(brandVoiceRepo, auditRepo).execute(
+        proposal,
+        { tenantId: TENANT, executedBy: 'operator-1' },
+      );
+      // BEFORE this fix, execution deterministically failed with "Payload
+      // carries no brand-voice fields to apply (only unmapped free text)".
+      expect(result.success).toBe(true);
+      const state = await brandVoiceRepo.getState(TENANT);
+      expect(state.config.register).toBe('friendly');
+      expect(state.config.signoff).toBe('Thanks, QA Sweep HVAC');
+    });
+
+    it('an update_brand_voice effect the model cannot map at all stays gated, never approvable-then-doomed', async () => {
+      const gateway = scriptedGateway([
+        JSON.stringify({ unmapped: 'lock my brand voice', confidence_score: 0.2 }),
+      ]);
+      const adapter = new InAppVoiceAdapter({ store, gateway, proposalRepo, auditRepo, onCallRepo });
+      const { sessionId } = await adapter.startSession(TENANT, USER);
+      const session = store.peek(sessionId);
+      if (!session) throw new Error('test session missing');
+
+      await callHandleCreateProposal(adapter, session, {
+        type: 'create_proposal',
+        payload: {
+          tenantId: TENANT,
+          intent: 'update_brand_voice',
+          entities: { brandVoiceInstruction: 'lock my brand voice' },
+          sessionId: session.id,
+          confidence: 0.9,
+        },
+      });
+
+      const proposals = await proposalRepo.findByTenant(TENANT);
+      expect(proposals).toHaveLength(1);
+      const proposal = proposals[0];
+      expect(proposal.proposalType).toBe('update_brand_voice');
+      // Nothing mapped at all — BRAND_VOICE_GATE_FIELD holds the gate so
+      // approveProposal refuses this, never a doomed approval.
+      expect(missingFieldsFor(proposal)).toContain('register');
+      expect(proposal.status).not.toBe('approved');
+    });
+
+    it("falls back to the last caller transcript line when the classifier didn't extract brandVoiceInstruction", async () => {
+      const gateway = scriptedGateway([
+        JSON.stringify({ register: 'casual', confidence_score: 0.8 }),
+      ]);
+      const adapter = new InAppVoiceAdapter({ store, gateway, proposalRepo, auditRepo, onCallRepo });
+      const { sessionId } = await adapter.startSession(TENANT, USER);
+      const session = store.peek(sessionId);
+      if (!session) throw new Error('test session missing');
+      session.transcript.push('caller: keep it casual from now on');
+
+      await callHandleCreateProposal(adapter, session, {
+        type: 'create_proposal',
+        payload: {
+          tenantId: TENANT,
+          intent: 'update_brand_voice',
+          entities: {},
+          sessionId: session.id,
+        },
+      });
+
+      const proposals = await proposalRepo.findByTenant(TENANT);
+      expect(proposals[0].payload.register).toBe('casual');
+      const complete = gateway.complete as unknown as {
+        mock: { calls: Array<[{ messages: Array<{ content: string }> }]> };
+      };
+      expect(complete.mock.calls[0][0].messages[1].content).toContain('keep it casual from now on');
     });
   });
 });

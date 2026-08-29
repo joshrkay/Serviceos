@@ -235,6 +235,71 @@ const TECH_SCORE_EXPR = `GREATEST(
              strict_word_similarity($2, ${TECH_NAME_EXPR})
            )`;
 
+/**
+ * #909 — document nouns an operator hangs on a spoken/typed LEAD reference:
+ * "the Johnson lead", "the Nguyen prospect". A separate set from
+ * `ESTIMATE_DOC_STOPWORDS` for the same reason that one is separate from
+ * `APPOINTMENT_REFERENCE_STOPWORDS` — each is scoped to the one path whose
+ * phrasing it describes.
+ *
+ * WHY THE STRIP IS LOAD-BEARING (the identical trap `estimateNameNeedle`
+ * documents, re-measured here against a lead named 'Dana Johnson', floor
+ * 0.60): the raw phrase and the merely-stopword-stripped phrase BOTH score
+ * under the floor and answer `not_found`, so a version of this resolver
+ * without the strip would exist and do nothing. Only the fully stripped
+ * needle clears it. This was caught by the real-Postgres test in this
+ * commit and would have been invisible to a mocked Pool.
+ */
+const LEAD_DOC_STOPWORDS = new Set([
+  'lead', 'leads', 'prospect', 'prospects', 'enquiry', 'enquiries', 'inquiry', 'inquiries',
+]);
+
+/**
+ * The person/company needle for a lead reference, or '' when the reference
+ * names nobody ("the lead", "that prospect").
+ *
+ * '' rather than a fallback to the original phrase, exactly as
+ * `estimateNameNeedle` and `resolveJob` do: `strict_word_similarity('', <any
+ * name>)` = 0, so a nameless reference matches NOTHING instead of matching
+ * every lead in the pipeline.
+ */
+function leadNameNeedle(reference: string): string {
+  const base = extractNameLikeToken(reference);
+  if (!base) return '';
+  const kept = base
+    .split(/\s+/)
+    .filter((w) => w.length > 0 && !LEAD_DOC_STOPWORDS.has(w));
+  return kept.length > 0 ? kept.join(' ') : '';
+}
+
+/**
+ * #909 — the lead full-name expression. Deliberately the SAME shape as
+ * `TECH_NAME_EXPR` (leads carry first_name/last_name NOT NULL DEFAULT '',
+ * so the TRIM/COALESCE pair is what turns a company-only lead into an empty
+ * string rather than a NULL that would poison GREATEST).
+ */
+const LEAD_NAME_EXPR = `TRIM(COALESCE(first_name,'') || ' ' || COALESCE(last_name,''))`;
+
+/**
+ * A lead is spoken by person name OR by company ("the Johnson lead", "the
+ * Acme Plumbing lead"), so both are scored — the same GREATEST-of-both shape
+ * `resolveCustomer` uses over display_name/company_name.
+ */
+const LEAD_SCORE_EXPR = `GREATEST(
+             similarity(${LEAD_NAME_EXPR}, $2),
+             strict_word_similarity($2, ${LEAD_NAME_EXPR}),
+             COALESCE(strict_word_similarity($2, company_name), 0)
+           )`;
+
+/**
+ * Most leads a one-tap picker may honestly offer. Same ceiling and same
+ * overflow reasoning as `MAX_TECHNICIAN_CANDIDATES`: a common surname
+ * ("Nguyen") legitimately matches many pipeline rows at once, and handing
+ * back an arbitrary five that need not contain the right one is a guess
+ * wearing a picker's clothes. `resolveLead` reads one extra row to detect it.
+ */
+const MAX_LEAD_CANDIDATES = 5;
+
 export class PgEntityResolver implements EntityResolver {
   constructor(private readonly pool: Pool) {}
 
@@ -264,6 +329,8 @@ export class PgEntityResolver implements EntityResolver {
         return this.resolveEstimate(tenantId, reference);
       case 'technician':
         return this.resolveTechnician(tenantId, reference);
+      case 'lead':
+        return this.resolveLead(tenantId, reference);
       default:
         return { kind: 'skipped' };
     }
@@ -1196,6 +1263,80 @@ export class PgEntityResolver implements EntityResolver {
     if (confident.length > MAX_TECHNICIAN_CANDIDATES) return { kind: 'not_found', reference };
 
     return this.toResult(candidates.slice(0, MAX_TECHNICIAN_CANDIDATES), reference);
+  }
+
+  /**
+   * #909 — resolve a spoken/typed lead reference ("the Johnson lead") to a
+   * concrete `leads.id`.
+   *
+   * `convert_lead` and `mark_lead_lost` both gate approval on a resolved
+   * `leadId` while the classifier can only ever emit a free-text
+   * `leadReference`, so before this method the gate had NO resolver behind
+   * it and both capabilities stalled at `ready_for_review` on every surface.
+   *
+   * Lifecycle filter: `stage NOT IN ('won','lost')`. A won lead has already
+   * become a customer (converting it again would mint a duplicate) and a
+   * lost lead is closed — neither is a legitimate target for "convert the
+   * Johnson lead" or "mark the Nguyen lead lost", and including them would
+   * let a years-old closed row out-score the live one the operator means.
+   * This mirrors the lifecycle filters every sibling resolver applies
+   * (`customers.is_archived = false`, `users.deleted_at IS NULL`,
+   * `appointments.status <> 'canceled'`).
+   */
+  private async resolveLead(
+    tenantId: string,
+    reference: string,
+  ): Promise<EntityResolverResult> {
+    // The needle, not the raw phrase — see `leadNameNeedle`. An empty needle
+    // is answered here rather than sent to Postgres: it can only match
+    // nothing, and saying so costs no round trip.
+    const needle = leadNameNeedle(reference);
+    if (!needle) return { kind: 'not_found', reference };
+
+    const rows = await withTenantConnection(this.pool, tenantId, (client) =>
+      client
+        .query<{
+          id: string;
+          full_name: string;
+          company_name: string | null;
+          stage: string | null;
+          score: number;
+        }>(
+          `SELECT id,
+                  ${LEAD_NAME_EXPR} AS full_name,
+                  company_name,
+                  stage,
+                  ${LEAD_SCORE_EXPR} AS score
+             FROM leads
+            WHERE tenant_id = $1
+              AND stage NOT IN ('won','lost')
+              AND ${LEAD_SCORE_EXPR} > $3
+            ORDER BY score DESC
+            LIMIT ${MAX_LEAD_CANDIDATES + 1}`,
+          [tenantId, needle, SIMILARITY_PREFILTER],
+        )
+        .then((r) => r.rows),
+    );
+
+    const candidates: EntityCandidate[] = rows.map((row) => ({
+      id: row.id,
+      // A company-only lead has an empty full_name (first/last default to
+      // ''), so fall back to the company for a label a human can read in a
+      // picker — never an empty string.
+      label: row.full_name.trim().length > 0 ? row.full_name : (row.company_name ?? 'Lead'),
+      kind: 'lead' as EntityKind,
+      hint: row.stage ?? undefined,
+      score: Number(row.score),
+    }));
+
+    // Same overflow trap the technician/job/estimate resolvers guard: a
+    // shared surname scores identically against every lead carrying it, and
+    // an arbitrary five-of-many is not an honest picker. Counted on the
+    // CONFIDENT band only so weak trigram noise never suppresses a real match.
+    const confident = candidates.filter((c) => c.score >= TAU_ENT);
+    if (confident.length > MAX_LEAD_CANDIDATES) return { kind: 'not_found', reference };
+
+    return this.toResult(candidates.slice(0, MAX_LEAD_CANDIDATES), reference);
   }
 
   // ---------------------------------------------------------------------------
