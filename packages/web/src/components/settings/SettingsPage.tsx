@@ -41,6 +41,7 @@ import {
   updateLanguageSettings,
 } from '../../api/settings';
 import { businessInitial } from '../../utils/business-initial';
+import { parsePortalFailure, type BillingPortalFailure } from '../../utils/billing-error';
 import { ConfirmDialog } from '../ui/confirm-dialog';
 import { ServiceAreaSheet, type ServiceAreaFields } from './ServiceAreaSheet';
 
@@ -96,6 +97,10 @@ export function SettingsPage() {
   const [voicePending, setVoicePending] = useState(false);
   const [confirmPortalOpen, setConfirmPortalOpen] = useState(false);
   const [portalPending, setPortalPending] = useState(false);
+  // #873 — a failed portal-session POST renders a persistent, actionable
+  // alert (the server's reason, e.g. "saved Stripe customer no longer
+  // exists — contact support to re-link billing"), not a transient toast.
+  const [billingPortalError, setBillingPortalError] = useState<BillingPortalFailure | null>(null);
   // Surface a failure to load the main /api/settings document instead of
   // silently swallowing it (which left the page showing stale defaults with
   // no signal that the user's real preferences never loaded).
@@ -345,6 +350,7 @@ export function SettingsPage() {
    * manage card, plan, view invoices, etc. Returns to /settings on close.
    */
   async function openBillingPortal() {
+    setBillingPortalError(null);
     try {
       const returnUrl = `${window.location.origin}/settings`;
       const res = await apiFetch('/api/billing/portal-session', {
@@ -357,20 +363,17 @@ export function SettingsPage() {
         return;
       }
       if (!res.ok) {
-        let detail = '';
-        try {
-          const body = await res.json();
-          detail = typeof body?.message === 'string' ? body.message : '';
-        } catch {
-          /* non-JSON */
-        }
-        throw new Error(detail || `Portal failed (${res.status})`);
+        // #873 — surface the server's structured reason as a persistent
+        // alert instead of discarding it into a transient generic toast.
+        setBillingPortalError(await parsePortalFailure(res));
+        return;
       }
       const data = (await res.json()) as { url: string };
       window.location.assign(data.url);
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : 'Could not open billing portal';
-      toast.error(msg);
+    } catch {
+      setBillingPortalError({
+        message: 'Could not open the billing portal — check your connection and try again.',
+      });
     }
   }
 
@@ -643,6 +646,25 @@ export function SettingsPage() {
               className="shrink-0 rounded-lg bg-red-600 px-3 py-2 text-sm text-white hover:bg-red-700"
             >
               Retry
+            </button>
+          </div>
+        )}
+
+        {/* #873 — billing portal failure: persistent + actionable. */}
+        {billingPortalError && (
+          <div
+            data-testid="billing-portal-error"
+            role="alert"
+            className="mb-5 flex items-start justify-between gap-3 rounded-xl border border-red-200 bg-red-50 px-4 py-3.5"
+          >
+            <p className="text-sm text-red-700">{billingPortalError.message}</p>
+            <button
+              type="button"
+              onClick={() => void openBillingPortal()}
+              data-testid="billing-portal-retry"
+              className="shrink-0 min-h-11 rounded-lg bg-red-600 px-3 py-2 text-sm text-white hover:bg-red-700"
+            >
+              Try again
             </button>
           </div>
         )}
