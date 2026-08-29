@@ -62,7 +62,7 @@ describe('#909 planGatedReferenceLookups — gate ↔ free-text pairing', () => 
     for (const [idField, payload, kind, reference] of cases) {
       const plan = planGatedReferenceLookups(draft(payload, [idField]));
       expect(plan, `${idField} should plan a lookup`).toHaveLength(1);
-      expect(plan[0]).toEqual({ idField, kind, reference });
+      expect(plan[0]).toEqual({ idField, kind, references: [reference] });
     }
   });
 
@@ -74,16 +74,38 @@ describe('#909 planGatedReferenceLookups — gate ↔ free-text pairing', () => 
       customerName: 'qa-matrix-A-customer',
     });
     expect(plan).toEqual([
-      { idField: 'appointmentId', kind: 'appointment', reference: 'qa-matrix-A-customer' },
+      {
+        idField: 'appointmentId',
+        kind: 'appointment',
+        references: ['qa-matrix-A-customer'],
+      },
     ]);
   });
 
-  it('prefers an explicit payload reference over the entity fallback', () => {
+  it('tries the explicit payload reference FIRST, then the entity fallback', () => {
+    // Both are things the operator wrote. The compound phrase is more
+    // specific so it goes first, but a real reschedule utterance scores it
+    // below the trigram floor — the bare customer name behind it is what
+    // actually resolves (pinned against real Postgres in
+    // test/integration/chat-entity-resolution.test.ts).
     const plan = planGatedReferenceLookups(
-      draft({ appointmentReference: "tomorrow's 3pm" }, ['appointmentId']),
+      draft({ appointmentReference: "qa-matrix-A-customer's tune-up appointment" }, [
+        'appointmentId',
+      ]),
       { customerName: 'qa-matrix-A-customer' },
     );
-    expect(plan[0].reference).toBe("tomorrow's 3pm");
+    expect(plan[0].references).toEqual([
+      "qa-matrix-A-customer's tune-up appointment",
+      'qa-matrix-A-customer',
+    ]);
+  });
+
+  it('de-duplicates a reference the payload and the classifier both carry', () => {
+    const plan = planGatedReferenceLookups(
+      draft({ leadReference: 'the Johnson lead' }, ['leadId']),
+      { leadReference: 'The Johnson Lead', customerName: 'Johnson' },
+    );
+    expect(plan[0].references).toEqual(['the Johnson lead', 'Johnson']);
   });
 
   it('leaves gates it does not know how to resolve strictly alone', () => {
@@ -220,6 +242,75 @@ describe('#909 resolveGatedReferences — outcomes', () => {
 
     expect(outcome.unresolved).toEqual(['appointmentId']);
     expect(outcome.filled).toEqual({ technicianId: 'tech-1' });
+  });
+
+  it('falls through to the next reference when the first is not_found', async () => {
+    const tried: string[] = [];
+    const resolver = {
+      resolve: vi.fn(async ({ reference }: { reference: string }) => {
+        tried.push(reference);
+        return reference === 'qa-matrix-A-customer'
+          ? resolvedAs('appt-1', 'appointment')
+          : ({ kind: 'not_found', reference } as EntityResolverResult);
+      }),
+    } as unknown as EntityResolver;
+
+    const outcome = await resolveGatedReferences(
+      resolver,
+      TENANT,
+      draft({ appointmentReference: "qa-matrix-A-customer's tune-up appointment" }, [
+        'appointmentId',
+      ]),
+      { customerName: 'qa-matrix-A-customer' },
+    );
+
+    expect(tried).toEqual([
+      "qa-matrix-A-customer's tune-up appointment",
+      'qa-matrix-A-customer',
+    ]);
+    expect(outcome.filled).toEqual({ appointmentId: 'appt-1' });
+    expect(outcome.unresolved).toEqual([]);
+  });
+
+  it('stops the ladder on an ambiguity — a later reference cannot overrule the question', async () => {
+    const tried: string[] = [];
+    const resolver = {
+      resolve: vi.fn(async ({ reference }: { reference: string }) => {
+        tried.push(reference);
+        return {
+          kind: 'ambiguous',
+          candidates: [
+            { id: 'a', kind: 'appointment', label: 'Tue 9am', score: 0.9 },
+            { id: 'b', kind: 'appointment', label: 'Thu 2pm', score: 0.9 },
+          ],
+        } as EntityResolverResult;
+      }),
+    } as unknown as EntityResolver;
+
+    const outcome = await resolveGatedReferences(
+      resolver,
+      TENANT,
+      draft({ appointmentReference: 'the tune-up' }, ['appointmentId']),
+      { customerName: 'qa-matrix-A-customer' },
+    );
+
+    expect(tried).toEqual(['the tune-up']);
+    expect(outcome.ambiguity?.reference).toBe('the tune-up');
+    expect(outcome.filled).toEqual({});
+  });
+
+  it('reports the field unresolved when every reference misses', async () => {
+    const resolver = resolverFor(({ reference }) =>
+      ({ kind: 'not_found', reference }) as EntityResolverResult,
+    );
+    const outcome = await resolveGatedReferences(
+      resolver,
+      TENANT,
+      draft({ appointmentReference: 'x' }, ['appointmentId']),
+      { customerName: 'y' },
+    );
+    expect(outcome.unresolved).toEqual(['appointmentId']);
+    expect(outcome.filled).toEqual({});
   });
 
   it('is a no-op without a resolver wired', async () => {

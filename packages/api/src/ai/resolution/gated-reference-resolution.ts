@@ -135,11 +135,26 @@ export const GATED_REFERENCE_SOURCES: Readonly<Record<string, GatedReferenceSour
   },
 };
 
-/** One gated id field plus the free text the loop will resolve it from. */
+/**
+ * One gated id field plus the free text the loop will resolve it from.
+ *
+ * `references` is ORDERED and may hold more than one: the operator often
+ * says the same thing two ways in one sentence, and only one of them is a
+ * reference the resolver can actually match. "Move qa-matrix-A-customer's
+ * tune-up appointment to Friday" yields the compound phrase AND the bare
+ * customer name; the compound phrase is the more specific of the two and is
+ * tried first, but it scores below the trigram floor against both the job
+ * summary and the customer name, so without the second the whole row stalls
+ * — measured against real Postgres, not reasoned about.
+ *
+ * Trying the next reference after a `not_found` is not a second guess: each
+ * one is something the operator actually wrote, and an AMBIGUOUS result
+ * still stops the ladder and asks.
+ */
 export interface GatedReferenceLookup {
   idField: string;
   kind: EntityKind;
-  reference: string;
+  references: string[];
 }
 
 export interface GatedReferenceOutcome {
@@ -190,20 +205,23 @@ export function planGatedReferenceLookups(
     // nothing to resolve.
     if (trimmed(payload[idField])) continue;
 
-    let reference: string | undefined;
-    for (const field of source.payloadFields) {
-      reference = trimmed(payload[field]);
-      if (reference) break;
-    }
-    if (!reference && entities) {
-      for (const field of source.entityFields) {
-        reference = trimmed(entities[field]);
-        if (reference) break;
-      }
-    }
-    if (!reference) continue;
+    // Most specific first (what the handler chose), then the classifier's
+    // own fields. Deduped so an identical string is never resolved twice.
+    const references: string[] = [];
+    const seen = new Set<string>();
+    const push = (value: unknown): void => {
+      const text = trimmed(value);
+      if (!text) return;
+      const key = text.toLowerCase();
+      if (seen.has(key)) return;
+      seen.add(key);
+      references.push(text);
+    };
+    for (const field of source.payloadFields) push(payload[field]);
+    if (entities) for (const field of source.entityFields) push(entities[field]);
+    if (references.length === 0) continue;
 
-    lookups.push({ idField, kind: source.kind, reference });
+    lookups.push({ idField, kind: source.kind, references });
   }
 
   return lookups;
@@ -211,11 +229,12 @@ export function planGatedReferenceLookups(
 
 function toPendingAmbiguity(
   lookup: GatedReferenceLookup,
+  reference: string,
   candidates: EntityCandidate[],
 ): PendingEntityAmbiguity {
   return {
     entityKind: lookup.kind,
-    reference: lookup.reference,
+    reference,
     refKey: lookup.idField,
     // The resolver speaks `label`; the follow-up matcher speaks `name`.
     // Mapping here (rather than at each call site) is what lets the chat
@@ -256,46 +275,51 @@ export async function resolveGatedReferences(
   if (lookups.length === 0) return outcome;
 
   for (const lookup of lookups) {
-    let result;
-    try {
-      result = await resolver.resolve({
-        tenantId,
-        reference: lookup.reference,
-        kind: lookup.kind,
-        // A customer resolved earlier in THIS pass anchors a later
-        // appointment lookup, the same way the FSM's sticky `context.jobId`
-        // does (SCH-03). Only `jobId` is a resolver input today.
-        ...(outcome.filled.jobId ? { jobId: outcome.filled.jobId } : {}),
-      });
-    } catch {
-      outcome.unresolved.push(lookup.idField);
-      continue;
+    let settled = false;
+
+    // Ladder: try each reference the operator gave, most specific first.
+    // A `resolved` or `ambiguous` outcome settles the field; only a
+    // not_found / low_confidence / skipped / throw moves on to the next.
+    for (const reference of lookup.references) {
+      let result;
+      try {
+        result = await resolver.resolve({
+          tenantId,
+          reference,
+          kind: lookup.kind,
+          // A job resolved earlier in THIS pass anchors a later appointment
+          // lookup, the same way the FSM's sticky `context.jobId` does
+          // (SCH-03). `jobId` is the only anchor the resolver takes today.
+          ...(outcome.filled.jobId ? { jobId: outcome.filled.jobId } : {}),
+        });
+      } catch {
+        // This reference is unusable; a sibling may still answer.
+        continue;
+      }
+
+      if (result.kind === 'resolved') {
+        outcome.filled[lookup.idField] = result.candidate.id;
+        settled = true;
+        break;
+      }
+      if (result.kind === 'ambiguous') {
+        // ONE question per turn. The first ambiguity becomes the question;
+        // any later one is left gated and asked on the next pass, once this
+        // one is answered.
+        if (!outcome.ambiguity) {
+          outcome.ambiguity = toPendingAmbiguity(lookup, reference, result.candidates);
+        }
+        break;
+      }
+      // `low_confidence` is deliberately NOT auto-adopted. The voice FSM
+      // answers that band with a spoken one-tap confirmation turn
+      // (`entity_confirm`); on a surface where the operator is already
+      // looking at a review card, the honest equivalent is the card they
+      // already get — so the gate stays and the candidate is not silently
+      // taken. `not_found` / `skipped` fall through to the next reference.
     }
 
-    switch (result.kind) {
-      case 'resolved':
-        outcome.filled[lookup.idField] = result.candidate.id;
-        break;
-      case 'ambiguous':
-        // ONE question per turn. The first ambiguity becomes the question;
-        // any later one is simply left gated and will be asked on the next
-        // pass, once this one is answered.
-        if (!outcome.ambiguity) {
-          outcome.ambiguity = toPendingAmbiguity(lookup, result.candidates);
-        }
-        outcome.unresolved.push(lookup.idField);
-        break;
-      case 'low_confidence':
-      case 'not_found':
-      case 'skipped':
-        // A mid-band match is deliberately NOT auto-filled here. The voice
-        // FSM answers it with a spoken one-tap confirmation turn
-        // (`entity_confirm`); on a surface where the operator is looking at
-        // a review card, the honest equivalent is the card they already
-        // get — the gate stays and the candidate is not silently adopted.
-        outcome.unresolved.push(lookup.idField);
-        break;
-    }
+    if (!settled) outcome.unresolved.push(lookup.idField);
   }
 
   return outcome;

@@ -236,6 +236,43 @@ const TECH_SCORE_EXPR = `GREATEST(
            )`;
 
 /**
+ * #909 — document nouns an operator hangs on a spoken/typed LEAD reference:
+ * "the Johnson lead", "the Nguyen prospect". A separate set from
+ * `ESTIMATE_DOC_STOPWORDS` for the same reason that one is separate from
+ * `APPOINTMENT_REFERENCE_STOPWORDS` — each is scoped to the one path whose
+ * phrasing it describes.
+ *
+ * WHY THE STRIP IS LOAD-BEARING (the identical trap `estimateNameNeedle`
+ * documents, re-measured here against a lead named 'Dana Johnson', floor
+ * 0.60): the raw phrase and the merely-stopword-stripped phrase BOTH score
+ * under the floor and answer `not_found`, so a version of this resolver
+ * without the strip would exist and do nothing. Only the fully stripped
+ * needle clears it. This was caught by the real-Postgres test in this
+ * commit and would have been invisible to a mocked Pool.
+ */
+const LEAD_DOC_STOPWORDS = new Set([
+  'lead', 'leads', 'prospect', 'prospects', 'enquiry', 'enquiries', 'inquiry', 'inquiries',
+]);
+
+/**
+ * The person/company needle for a lead reference, or '' when the reference
+ * names nobody ("the lead", "that prospect").
+ *
+ * '' rather than a fallback to the original phrase, exactly as
+ * `estimateNameNeedle` and `resolveJob` do: `strict_word_similarity('', <any
+ * name>)` = 0, so a nameless reference matches NOTHING instead of matching
+ * every lead in the pipeline.
+ */
+function leadNameNeedle(reference: string): string {
+  const base = extractNameLikeToken(reference);
+  if (!base) return '';
+  const kept = base
+    .split(/\s+/)
+    .filter((w) => w.length > 0 && !LEAD_DOC_STOPWORDS.has(w));
+  return kept.length > 0 ? kept.join(' ') : '';
+}
+
+/**
  * #909 — the lead full-name expression. Deliberately the SAME shape as
  * `TECH_NAME_EXPR` (leads carry first_name/last_name NOT NULL DEFAULT '',
  * so the TRIM/COALESCE pair is what turns a company-only lead into an empty
@@ -1250,6 +1287,12 @@ export class PgEntityResolver implements EntityResolver {
     tenantId: string,
     reference: string,
   ): Promise<EntityResolverResult> {
+    // The needle, not the raw phrase — see `leadNameNeedle`. An empty needle
+    // is answered here rather than sent to Postgres: it can only match
+    // nothing, and saying so costs no round trip.
+    const needle = leadNameNeedle(reference);
+    if (!needle) return { kind: 'not_found', reference };
+
     const rows = await withTenantConnection(this.pool, tenantId, (client) =>
       client
         .query<{
@@ -1270,7 +1313,7 @@ export class PgEntityResolver implements EntityResolver {
               AND ${LEAD_SCORE_EXPR} > $3
             ORDER BY score DESC
             LIMIT ${MAX_LEAD_CANDIDATES + 1}`,
-          [tenantId, reference, SIMILARITY_PREFILTER],
+          [tenantId, needle, SIMILARITY_PREFILTER],
         )
         .then((r) => r.rows),
     );
