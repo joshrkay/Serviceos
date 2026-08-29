@@ -508,7 +508,9 @@ describe('InAppVoiceAdapter', () => {
       expect(verticalPromptResolver).toHaveBeenCalledWith(TENANT);
       const call = (gateway.complete as ReturnType<typeof vi.fn>).mock.calls[0][0];
       const systemMessages = call.messages.filter((m: { role: string }) => m.role === 'system');
-      expect(systemMessages).toHaveLength(2);
+      // base + vertical + customerProtectionIntents (#914 — always on for
+      // inapp; appended after vertical/plan — see intent-classifier.ts).
+      expect(systemMessages).toHaveLength(3);
       expect(systemMessages[1].content).toContain('Service vertical: HVAC Professional');
     });
 
@@ -532,7 +534,8 @@ describe('InAppVoiceAdapter', () => {
       await expect(adapter.handleInput(sessionId, 'invoice Acme')).resolves.toBeDefined();
       const call = (gateway.complete as ReturnType<typeof vi.fn>).mock.calls[0][0];
       const systemMessages = call.messages.filter((m: { role: string }) => m.role === 'system');
-      expect(systemMessages).toHaveLength(1);
+      // base + customerProtectionIntents (#914 — always on for inapp).
+      expect(systemMessages).toHaveLength(2);
     });
 
     it('omits the vertical message when resolver returns undefined', async () => {
@@ -553,7 +556,8 @@ describe('InAppVoiceAdapter', () => {
 
       const call = (gateway.complete as ReturnType<typeof vi.fn>).mock.calls[0][0];
       const systemMessages = call.messages.filter((m: { role: string }) => m.role === 'system');
-      expect(systemMessages).toHaveLength(1);
+      // base + customerProtectionIntents (#914 — always on for inapp).
+      expect(systemMessages).toHaveLength(2);
     });
   });
 
@@ -604,9 +608,10 @@ describe('InAppVoiceAdapter', () => {
       expect(callerPlanResolver).toHaveBeenCalledWith(TENANT, 'cust-1');
       const call = (gateway.complete as ReturnType<typeof vi.fn>).mock.calls[0][0];
       const systemMessages = call.messages.filter((m: { role: string }) => m.role === 'system');
-      // Base prompt + plan section = 2 system messages (no vertical
-      // resolver wired in this test).
-      expect(systemMessages).toHaveLength(2);
+      // Base prompt + plan section + customerProtectionIntents (#914 —
+      // always on for inapp) = 3 system messages (no vertical resolver
+      // wired in this test).
+      expect(systemMessages).toHaveLength(3);
       expect(systemMessages[1].content).toContain('Caller plan context');
       expect(systemMessages[1].content).toContain('Gold Membership');
     });
@@ -687,7 +692,124 @@ describe('InAppVoiceAdapter', () => {
       await expect(adapter.handleInput(sessionId, 'invoice Acme')).resolves.toBeDefined();
       const call = (gateway.complete as ReturnType<typeof vi.fn>).mock.calls[0][0];
       const systemMessages = call.messages.filter((m: { role: string }) => m.role === 'system');
-      expect(systemMessages).toHaveLength(1);
+      // base + customerProtectionIntents (#914 — always on for inapp).
+      expect(systemMessages).toHaveLength(2);
+    });
+  });
+
+  describe('#914 (A49/A50) — customer protection (complaint/negotiation) is always on for inapp', () => {
+    // Before this fix, inapp-adapter.ts's startSession() never set
+    // `customerProtectionIntents` on the FSM context (unlike
+    // twilio-adapter.ts's telephony leg, which hardcodes it `true`), and
+    // handleInput() never forwarded it into the classify context even when
+    // it WAS set. classifyIntent's `protectionOn` gate — see
+    // intent-classifier.ts — therefore never appended
+    // CUSTOMER_PROTECTION_PROMPT_SECTION to the prompt for a non-owner (or
+    // extendedIntents-disabled) inapp caller, so the LLM had no guidance to
+    // recognize "I'm really unhappy..." / "knock $50 off..." as
+    // complaint/negotiation and the turn fell through to the generic
+    // low-confidence reprompt instead of the FSM's dedicated guards
+    // (transitions.ts complaint/negotiation branches).
+    it('stamps customerProtectionIntents on the FSM context at startSession, for a NON-owner caller', async () => {
+      const adapter = new InAppVoiceAdapter({
+        store,
+        gateway: scriptedGateway([]),
+        proposalRepo,
+        auditRepo,
+        onCallRepo,
+      });
+      const { sessionId } = await adapter.startSession(TENANT, USER);
+      const session = store.peek(sessionId);
+      expect(session?.machine.currentContext.customerProtectionIntents).toBe(true);
+    });
+
+    it('stamps customerProtectionIntents on the FSM context for an OWNER caller too', async () => {
+      const adapter = new InAppVoiceAdapter({
+        store,
+        gateway: scriptedGateway([]),
+        proposalRepo,
+        auditRepo,
+        onCallRepo,
+      });
+      const { sessionId } = await adapter.startSession(TENANT, USER, undefined, 'owner');
+      const session = store.peek(sessionId);
+      expect(session?.machine.currentContext.customerProtectionIntents).toBe(true);
+    });
+
+    it('forwards customerProtectionIntents into the classify call, so the prompt carries CUSTOMER_PROTECTION_PROMPT_SECTION', async () => {
+      const gateway = scriptedGateway([
+        JSON.stringify({
+          intentType: 'complaint',
+          confidence: 0.9,
+          extractedEntities: {},
+        }),
+      ]);
+      const adapter = new InAppVoiceAdapter({
+        store,
+        gateway,
+        proposalRepo,
+        auditRepo,
+        onCallRepo,
+      });
+      const { sessionId } = await adapter.startSession(TENANT, USER);
+      await adapter.handleInput(
+        sessionId,
+        "I'm really unhappy — the leak came back the day after you left",
+      );
+
+      const call = (gateway.complete as ReturnType<typeof vi.fn>).mock.calls[0][0];
+      const systemMessages = call.messages.filter((m: { role: string }) => m.role === 'system');
+      expect(
+        systemMessages.some((m: { content: string }) =>
+          m.content.includes('Customer protection intents (enabled on this call'),
+        ),
+      ).toBe(true);
+    });
+
+    it('a classified complaint reaches the FSM complaint guard (escalating + pinned note), not the generic reprompt', async () => {
+      const gateway = scriptedGateway([
+        JSON.stringify({
+          intentType: 'complaint',
+          confidence: 0.9,
+          extractedEntities: {},
+        }),
+      ]);
+      const adapter = new InAppVoiceAdapter({
+        store,
+        gateway,
+        proposalRepo,
+        auditRepo,
+        onCallRepo,
+      });
+      const { sessionId } = await adapter.startSession(TENANT, USER);
+      const result = await adapter.handleInput(
+        sessionId,
+        "I'm really unhappy — the leak came back the day after you left",
+      );
+
+      expect(result.state).toBe('escalating');
+      expect(result.ttsText).not.toMatch(/say that again/i);
+    });
+
+    it('a classified negotiation reaches the FSM negotiation guard (holding line), not the generic reprompt', async () => {
+      const gateway = scriptedGateway([
+        JSON.stringify({
+          intentType: 'negotiation',
+          confidence: 0.9,
+          extractedEntities: { negotiationAsk: '50 off' },
+        }),
+      ]);
+      const adapter = new InAppVoiceAdapter({
+        store,
+        gateway,
+        proposalRepo,
+        auditRepo,
+        onCallRepo,
+      });
+      const { sessionId } = await adapter.startSession(TENANT, USER);
+      const result = await adapter.handleInput(sessionId, "Knock 50 off or I'm leaving a 1-star review");
+
+      expect(result.ttsText).not.toMatch(/say that again/i);
     });
   });
 

@@ -8,6 +8,7 @@ import {
   labelForMissingField,
   readStructuredAddress,
   resolveSpokenAddress,
+  EN_ROUTE_SMS_KEYWORDS,
 } from '@ai-service-os/shared';
 import { AuthenticatedRequest } from '../auth/clerk';
 import { requireAuth, requireTenant, requirePermission } from '../middleware/auth';
@@ -1164,6 +1165,27 @@ function proposalReplySuffix(status: AssistantProposal['status']): string {
 
 const UNPAID_QUERY_RE = /(which|what|list|show|any)\b.{0,40}\binvoices?\b.{0,40}\b(unpaid|open|outstanding|overdue|due|owed)|\b(unpaid|outstanding)\s+invoices?/i;
 
+// #914 (C01) — deterministic en_route phrase pre-check. The classifier call
+// below runs the full 'operator'-profile (all 78 intents; D-028) taxonomy
+// with NO actor-role narrowing on this surface — unlike the phone/inapp-
+// voice paths, which resolve a 'field_tech' classifier profile (a 15-intent,
+// trade-internal taxonomy — D-028) for a caller-ID/D-026-resolved
+// technician, giving en_route far less competition to be classified
+// correctly. On chat every authenticated user (owner, dispatcher,
+// technician) gets the SAME broad taxonomy, so a brief "On my way to the
+// job" can miss classification as en_route and fall through to the generic
+// LLM reply. Mirrors the SMS keyword leg's own high-precision phrase list
+// (sms/tech-status/en-route-keyword.ts, EN_ROUTE_SMS_KEYWORDS) — reused
+// here, not duplicated, so the two never drift — with word-boundary
+// matching (SMS matches the WHOLE message; chat needs a substring match
+// inside a longer sentence). Conservative on purpose: an utterance that
+// doesn't match still falls through to the LLM classifier below, same as
+// today.
+const EN_ROUTE_PHRASE_RE = new RegExp(
+  `\\b(${EN_ROUTE_SMS_KEYWORDS.map((k) => k.replace(/\s+/g, '\\s+')).join('|')})\\b`,
+  'i',
+);
+
 async function answerUnpaidInvoicesQuery(
   invoiceRepo: InvoiceRepository,
   tenantId: string
@@ -1664,7 +1686,18 @@ async function generateAssistantReply(
       // every outcome is an honest, deterministic reply — the ambiguous and
       // no-appointment cases included. Gated on the wired bundle so
       // deployments without it keep today's refusal.
-      if (deps.enRoute && classification.intentType === 'en_route') {
+      //
+      // #914 (C01) — OR'd with EN_ROUTE_PHRASE_RE (see its own comment
+      // above): a high-precision deterministic phrase match reaches this
+      // branch even when the classifier missed en_route on the broad
+      // operator-profile taxonomy. `jobReference` (below) still comes from
+      // `classification.extractedEntities` when the classifier DID tag the
+      // turn en_route; a phrase-only match simply resolves the technician's
+      // bare next appointment today, same as the SMS leg.
+      if (
+        deps.enRoute &&
+        (classification.intentType === 'en_route' || EN_ROUTE_PHRASE_RE.test(lastUserText))
+      ) {
         const enRouteReply = (
           content: string,
           reasoning: string,

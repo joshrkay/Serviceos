@@ -195,6 +195,82 @@ describe('#847 — en_route from chat', () => {
     expect(res.body.taskType).toBe('assistant.unhandled.en_route');
     expect(res.body.message.content).toContain("can't do that from here");
   });
+
+  describe('#914 (C01) — deterministic phrase pre-check', () => {
+    // The C01 live-sweep row (corpus.json, technician actor, utterance
+    // "On my way to the job") got a generic assistant.general reply instead
+    // of the en_route act: the classifier runs the full 'operator'-profile
+    // (all 78 intents; D-028) taxonomy on chat with no actor-role narrowing
+    // — unlike the phone/inapp-voice paths' 'field_tech' profile — so a
+    // brief on-my-way utterance can miss classification. These tests build
+    // an app whose SCRIPTED classifier deliberately returns something OTHER
+    // than 'en_route' (reproducing the miss), and assert the deterministic
+    // EN_ROUTE_PHRASE_RE pre-check still routes to the technician core.
+    function buildAppWithMisclassifier(
+      opts: { enRoute?: AssistantEnRouteDeps; wrongIntent?: string } = {},
+    ) {
+      const app = express();
+      app.use(express.json());
+      app.use((req: Request, _res: Response, next: NextFunction) => {
+        (req as AuthenticatedRequest).auth = {
+          userId: TECH_CLERK_ID,
+          sessionId: 'sess-enroute-misclassify',
+          tenantId: TEST_TENANT,
+          role: 'technician',
+        };
+        next();
+      });
+      const proposalRepo = new InMemoryProposalRepository();
+      app.use(
+        '/api/assistant',
+        createAssistantRouter({
+          // The classifier returns a DIFFERENT intent — reproducing the
+          // live-sweep miss — so only the deterministic phrase pre-check
+          // (not `classification.intentType === 'en_route'`) can rescue it.
+          gateway: scriptedGateway([classifierReply(opts.wrongIntent ?? 'unknown')]),
+          proposalRepo,
+          ...(opts.enRoute ? { enRoute: opts.enRoute } : {}),
+        }),
+      );
+      return { app, proposalRepo };
+    }
+
+    it('"On my way to the job" (the exact C01 utterance) still fires the audited act when the classifier misses en_route', async () => {
+      const bundle = enRouteBundle();
+      const { app } = buildAppWithMisclassifier({ enRoute: bundle });
+
+      const res = await chat(app, 'On my way to the job');
+
+      expect(res.status).toBe(200);
+      expect(res.body.taskType).toBe('assistant.en_route');
+      expect(res.body.message.content).toContain('Sent the customer an on-my-way text');
+      expect(bundle.coordinator.enqueueEnRouteNotice).toHaveBeenCalledWith(
+        expect.objectContaining({ tenantId: TEST_TENANT, appointmentId: 'appt-1' }),
+      );
+    });
+
+    it('"OMW" (the SMS keyword, case-insensitive) also fires the act via the same phrase pre-check', async () => {
+      const bundle = enRouteBundle();
+      const { app } = buildAppWithMisclassifier({ enRoute: bundle });
+
+      const res = await chat(app, 'omw');
+
+      expect(res.status).toBe(200);
+      expect(res.body.taskType).toBe('assistant.en_route');
+      expect(bundle.coordinator.enqueueEnRouteNotice).toHaveBeenCalled();
+    });
+
+    it('an unrelated utterance with no en_route phrase and a misclassified intent still gets the generic reply (no over-matching)', async () => {
+      const bundle = enRouteBundle();
+      const { app } = buildAppWithMisclassifier({ enRoute: bundle, wrongIntent: 'unknown' });
+
+      const res = await chat(app, 'What is my schedule looking like today?');
+
+      expect(res.status).toBe(200);
+      expect(res.body.taskType).not.toBe('assistant.en_route');
+      expect(bundle.coordinator.enqueueEnRouteNotice).not.toHaveBeenCalled();
+    });
+  });
 });
 
 // ─── #910 / C02 — deterministic classification, not a scripted-correct one ──
