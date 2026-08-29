@@ -42,6 +42,7 @@ import {
 } from '../../api/settings';
 import { businessInitial } from '../../utils/business-initial';
 import { ConfirmDialog } from '../ui/confirm-dialog';
+import { ServiceAreaSheet, type ServiceAreaFields } from './ServiceAreaSheet';
 
 type SettingsRowBadge = { label: string; color: string };
 
@@ -84,6 +85,9 @@ export function SettingsPage() {
   const [reminders, setReminders]   = useState(true);
   const [spanishMode, setSpanishMode] = useState(false);
   const [businessName, setBusinessName] = useState<string | null>(null);
+  // #874 — live service-area data for the RESOURCES row (null until the
+  // settings document loads; the subtitle must never show made-up data).
+  const [serviceArea, setServiceArea] = useState<ServiceAreaFields | null>(null);
   const [voiceAgentLive, setVoiceAgentLive] = useState<boolean | null>(null);
   // #877 — live actions are confirm-gated: which voice transition is
   // awaiting confirmation (null = no dialog), and in-flight markers so
@@ -113,6 +117,9 @@ export function SettingsPage() {
           businessName?: string;
           googleReviewUrl?: string | null;
           yelpReviewUrl?: string | null;
+          serviceAreaText?: string | null;
+          serviceAreaRadius?: number | null;
+          serviceAreaZips?: string[] | null;
         };
         if (typeof data.autoApplyInternalUpdates === 'boolean') {
           setAiAuto(data.autoApplyInternalUpdates);
@@ -129,6 +136,11 @@ export function SettingsPage() {
         if (typeof data.yelpReviewUrl === 'string') {
           setYelpReviewUrl(data.yelpReviewUrl);
         }
+        setServiceArea({
+          serviceAreaText: data.serviceAreaText ?? '',
+          serviceAreaRadius: typeof data.serviceAreaRadius === 'number' ? data.serviceAreaRadius : null,
+          serviceAreaZips: data.serviceAreaZips ?? [],
+        });
         setSettingsLoadError(false);
       } catch {
         if (cancelled) return;
@@ -232,6 +244,7 @@ export function SettingsPage() {
   const [qbIntegration, setQbIntegration] = useState<AccountingIntegrationSummary | null>(null);
   const qbConnected = qbIntegration?.status === 'active';
   const [suppliersOpen, setSuppliersOpen] = useState(false);
+  const [serviceAreaOpen, setServiceAreaOpen] = useState(false);
   const [businessProfileOpen, setBusinessProfileOpen] = useState(false);
   const [technicianPhoneOpen, setTechnicianPhoneOpen] = useState(false);
   const [terminologyOpen, setTerminologyOpen] = useState(false);
@@ -488,6 +501,25 @@ export function SettingsPage() {
     setBookingCopied(true);
     setTimeout(() => setBookingCopied(false), 2000);
   }
+
+  // #874 — the Service area row subtitle renders live tenant data (the
+  // old hardcoded "Austin & surrounding areas" string was never real and
+  // is what made a Phoenix tenant's settings claim Austin).
+  const serviceAreaSubtitle = (() => {
+    if (!serviceArea) return 'Where you work — travel range and ZIP codes';
+    const parts: string[] = [];
+    if (serviceArea.serviceAreaText) {
+      parts.push(serviceArea.serviceAreaText);
+      if (serviceArea.serviceAreaRadius) {
+        parts.push(`~${serviceArea.serviceAreaRadius} mi radius`);
+      }
+    }
+    if (serviceArea.serviceAreaZips.length > 0) {
+      const n = serviceArea.serviceAreaZips.length;
+      parts.push(`${n} ZIP ${n === 1 ? 'code' : 'codes'}`);
+    }
+    return parts.length > 0 ? parts.join(' · ') : 'Not set — add where you work';
+  })();
 
   const SECTIONS: SettingsSection[] = [
     {
@@ -961,7 +993,7 @@ export function SettingsPage() {
           <div className="rounded-xl bg-white border border-slate-200 divide-y divide-slate-100 overflow-hidden">
             <button
               onClick={() => setSuppliersOpen(true)}
-              className="flex items-center gap-3 w-full px-4 py-3.5 text-left hover:bg-slate-50 transition-colors"
+              className="flex items-center gap-3 w-full min-h-11 px-4 py-3.5 text-left hover:bg-slate-50 transition-colors"
             >
               <span className="flex size-7 shrink-0 items-center justify-center rounded-lg bg-amber-100">
                 <Store size={14} className="text-amber-600" />
@@ -973,14 +1005,15 @@ export function SettingsPage() {
               <ChevronRight size={14} className="shrink-0 text-slate-300" />
             </button>
             <button
-              className="flex items-center gap-3 w-full px-4 py-3.5 text-left hover:bg-slate-50 transition-colors"
+              onClick={() => setServiceAreaOpen(true)}
+              className="flex items-center gap-3 w-full min-h-11 px-4 py-3.5 text-left hover:bg-slate-50 transition-colors"
             >
               <span className="flex size-7 shrink-0 items-center justify-center rounded-lg bg-slate-100">
                 <MapPin size={14} className="text-slate-500" />
               </span>
               <div className="flex-1 min-w-0">
                 <p className="text-sm text-slate-800">Service area</p>
-                <p className="text-xs text-slate-400 mt-0.5">Austin & surrounding areas · ~30 mi radius</p>
+                <p className="text-xs text-slate-400 mt-0.5">{serviceAreaSubtitle}</p>
               </div>
               <ChevronRight size={14} className="shrink-0 text-slate-300" />
             </button>
@@ -1026,6 +1059,14 @@ export function SettingsPage() {
       {/* Suppliers sheet */}
       {suppliersOpen && (
         <SuppliersSheet serviceType="HVAC" onClose={() => setSuppliersOpen(false)} />
+      )}
+
+      {/* Service area sheet (#874) */}
+      {serviceAreaOpen && (
+        <ServiceAreaSheet
+          onClose={() => setServiceAreaOpen(false)}
+          onSaved={(fields) => setServiceArea(fields)}
+        />
       )}
 
       {/* Business profile sheet */}
