@@ -9,8 +9,13 @@ import {
   type EntityResolverResult,
 } from './entity-resolver';
 
+// `lead` is excluded for the same reason `estimate` is: no alias kind is
+// minted for it (see learning/entity-aliases/entity-alias.ts's
+// `EntityAliasKind`), so a lead reference has no alias row to hit and
+// delegates straight through to the trigram resolver. Adding it here without
+// an alias kind behind it would be dead configuration (#909).
 const ENTITY_LABEL_QUERIES: Record<
-  Exclude<EntityKind, 'pending_proposal' | 'estimate'>,
+  Exclude<EntityKind, 'pending_proposal' | 'estimate' | 'lead'>,
   { table: string; labelColumn: string; extraWhere?: string }
 > = {
   customer: {
@@ -58,6 +63,8 @@ export class AliasFirstEntityResolver implements EntityResolver {
     if (
       input.kind === 'pending_proposal' ||
       input.kind === 'estimate' ||
+      // #909 — no `lead` alias kind is minted, so there is nothing to look up.
+      input.kind === 'lead' ||
       !input.reference ||
       input.reference.trim() === ''
     ) {
@@ -90,7 +97,7 @@ export class AliasFirstEntityResolver implements EntityResolver {
 
   private async loadGroundedCandidate(
     tenantId: string,
-    kind: Exclude<EntityKind, 'pending_proposal' | 'estimate'>,
+    kind: Exclude<EntityKind, 'pending_proposal' | 'estimate' | 'lead'>,
     entityId: string,
     sourceAlias: string,
   ): Promise<EntityCandidate | null> {
