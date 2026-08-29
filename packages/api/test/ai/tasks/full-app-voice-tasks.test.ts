@@ -18,6 +18,7 @@ import {
   LogTimeEntryTaskHandler,
   NotifyDelayTaskHandler,
   RequestFeedbackTaskHandler,
+  RecordPaymentTaskHandler,
   RescheduleAppointmentTaskHandler,
   CancelAppointmentTaskHandler,
   DEFAULT_MILEAGE_RATE_CENTS_PER_MILE,
@@ -474,12 +475,93 @@ describe('wave-2 task handlers', () => {
     expect(missingFieldsFor(res.proposal)).toContain('appointmentId');
   });
 
-  it('request_feedback carries the job reference', async () => {
+  it('request_feedback carries the job reference but stays gated when the router never resolved a jobId (A32 fix)', async () => {
     const res = await new RequestFeedbackTaskHandler().handle(
       ctx({ existingEntities: { jobReference: 'the Johnson job' } }),
     );
     expect(res.proposal.proposalType).toBe('request_feedback');
     expect(res.proposal.payload.jobReference).toBe('the Johnson job');
+    expect(res.proposal.payload.jobId).toBeUndefined();
+    // BEFORE the A32 fix this proposal shipped with missingFields: [] —
+    // approvable, then guaranteed to fail execution on
+    // "request_feedback requires a resolved jobId" because payload.jobId was
+    // never set. A free-text reference alone must never lift the gate.
+    expect(missingFieldsFor(res.proposal)).toContain('jobId');
+  });
+
+  it('request_feedback resolves jobId from the router-verified existingEntities.jobId and lifts the gate', async () => {
+    const jobId = '11111111-1111-4111-8111-111111111111';
+    const res = await new RequestFeedbackTaskHandler().handle(
+      ctx({ existingEntities: { jobId, jobReference: 'the Johnson job' } }),
+    );
+    expect(res.proposal.proposalType).toBe('request_feedback');
+    expect(res.proposal.payload.jobId).toBe(jobId);
+    // The spoken reference is still kept for the review card's display.
+    expect(res.proposal.payload.jobReference).toBe('the Johnson job');
+    expect(missingFieldsFor(res.proposal)).not.toContain('jobId');
+  });
+
+  it('request_feedback gates jobId when only a customer reference exists and no job was resolved', async () => {
+    const res = await new RequestFeedbackTaskHandler().handle(
+      ctx({ existingEntities: { customerName: 'Henderson' } }),
+    );
+    expect(res.proposal.proposalType).toBe('request_feedback');
+    expect(res.proposal.payload.customerReference).toBe('Henderson');
+    expect(res.proposal.payload.jobId).toBeUndefined();
+    expect(missingFieldsFor(res.proposal)).toContain('jobId');
+  });
+
+  it('request_feedback gates jobId when nothing was spoken at all', async () => {
+    const res = await new RequestFeedbackTaskHandler().handle(ctx({ existingEntities: {} }));
+    expect(res.proposal.proposalType).toBe('request_feedback');
+    expect(missingFieldsFor(res.proposal)).toContain('jobId');
+  });
+});
+
+describe('RecordPaymentTaskHandler', () => {
+  const INVOICE_ID = '22222222-2222-4222-8222-222222222222';
+
+  it('resolves invoiceId from the router-verified existingEntities.invoiceId and lifts the gate (A22 fix)', async () => {
+    const res = await new RecordPaymentTaskHandler().handle(
+      ctx({
+        existingEntities: {
+          invoiceId: INVOICE_ID,
+          customerName: 'Henderson',
+          amount: 45000,
+          paymentMethod: 'check',
+          paymentReference: 'check 2044',
+        },
+      }),
+    );
+    expect(res.proposal.proposalType).toBe('record_payment');
+    expect(res.proposal.payload.invoiceId).toBe(INVOICE_ID);
+    // The spoken reference is still kept for the review card's display.
+    expect(res.proposal.payload.invoiceReference).toBe('Henderson');
+    expect(res.proposal.payload.amountCents).toBe(45000);
+    expect(res.proposal.payload.paymentMethod).toBe('check');
+    expect(missingFieldsFor(res.proposal)).not.toContain('invoiceId');
+  });
+
+  it('gates invoiceId when only a free-text reference exists and the router never resolved it', async () => {
+    const res = await new RecordPaymentTaskHandler().handle(
+      ctx({ existingEntities: { customerName: 'Henderson', amount: 45000 } }),
+    );
+    expect(res.proposal.proposalType).toBe('record_payment');
+    expect(res.proposal.payload.invoiceReference).toBe('Henderson');
+    expect(res.proposal.payload.invoiceId).toBeUndefined();
+    // BEFORE the A22 fix this handler NEVER read existingEntities.invoiceId
+    // at all, so even a resolver-verified id left invoiceId permanently
+    // gated — see the DEVIATION note this fix removes in
+    // test/proposals/voice-payload-contract.test.ts.
+    expect(missingFieldsFor(res.proposal)).toContain('invoiceId');
+  });
+
+  it('accepts an already-resolved UUID reference directly, with no review-time resolution needed', async () => {
+    const res = await new RecordPaymentTaskHandler().handle(
+      ctx({ existingEntities: { jobReference: INVOICE_ID, amount: 45000 } }),
+    );
+    expect(res.proposal.payload.invoiceId).toBe(INVOICE_ID);
+    expect(missingFieldsFor(res.proposal)).not.toContain('invoiceId');
   });
 });
 

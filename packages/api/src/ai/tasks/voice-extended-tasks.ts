@@ -1461,9 +1461,34 @@ export class RecordPaymentTaskHandler implements TaskHandler {
     };
     const missing: string[] = [];
 
-    if (ee.jobReference) payload.invoiceReference = ee.jobReference;
-    else if (ee.customerName) payload.invoiceReference = ee.customerName;
-    else missing.push('invoiceId');
+    // A22 fix — record_payment is an INVOICE_DOC_INTENT
+    // (ai/agents/customer-calling/entity-resolution.ts), so the router's
+    // entity resolver has ALREADY verified the spoken invoice reference and
+    // threaded the unique match onto existingEntities.invoiceId before this
+    // handler runs — exactly the seam SendInvoiceTaskHandler and
+    // RecordRefundTaskHandler consume for their own INVOICE_DOC_INTENT
+    // siblings. Before this fix the handler never read that seam and gated
+    // invoiceId unconditionally on every draft, even a fully-resolved one:
+    // the proposal approved cleanly and then execution deterministically
+    // failed with "Payload must include a valid invoiceId UUID" (see
+    // RecordPaymentExecutionHandler). See U1 in SendInvoiceTaskHandler above
+    // for the identical resolution ladder.
+    const reference = ee.jobReference ?? ee.customerName;
+    const resolvedInvoiceId = resolvedInvoiceIdFrom(context);
+    if (resolvedInvoiceId) {
+      payload.invoiceId = resolvedInvoiceId;
+      // Keep the spoken reference for the review card's display.
+      if (typeof reference === 'string' && !isUuid(reference)) {
+        payload.invoiceReference = reference;
+      }
+    } else if (isUuid(reference)) {
+      // Already a resolved id — the execution handler can use it directly,
+      // no review-time resolution needed.
+      payload.invoiceId = reference;
+    } else {
+      if (reference) payload.invoiceReference = reference;
+      missing.push('invoiceId');
+    }
 
     if (typeof ee.amount === 'number' && ee.amount > 0) {
       payload.amountCents = ee.amount;
@@ -2052,9 +2077,38 @@ export class RequestFeedbackTaskHandler implements TaskHandler {
     const payload: Record<string, unknown> = {};
     const missing: string[] = [];
 
-    if (ee.jobReference) payload.jobReference = ee.jobReference;
-    else if (ee.customerName) payload.customerReference = ee.customerName;
-    else missing.push('jobId');
+    // A32 fix — request_feedback is a JOB_REF_INTENT
+    // (ai/agents/customer-calling/entity-resolution.ts), so the router's
+    // entity resolver has ALREADY verified a spoken job reference and
+    // threaded it onto existingEntities.jobId before this handler runs —
+    // the same seam LogTimeEntryTaskHandler consumes for `jobId`.
+    //
+    // Before this fix this handler had TWO bugs: it never read that
+    // resolved seam, AND — more severely — it never gated payload.jobId
+    // when a free-text jobReference/customerReference existed, so the
+    // proposal shipped with `missingFields: []` (fully approvable) while
+    // `payload.jobId` was never set, guaranteeing
+    // RequestFeedbackExecutionHandler's "request_feedback requires a
+    // resolved jobId" at execution. A free-text reference on its own is
+    // never enough to lift the gate — only a resolver-verified id does.
+    const resolvedJobId =
+      typeof context.existingEntities?.jobId === 'string'
+        ? context.existingEntities.jobId
+        : undefined;
+
+    if (resolvedJobId) {
+      payload.jobId = resolvedJobId;
+      // Keep the spoken reference for the review card's display.
+      if (ee.jobReference) payload.jobReference = ee.jobReference;
+    } else if (ee.jobReference) {
+      payload.jobReference = ee.jobReference;
+      missing.push('jobId');
+    } else if (ee.customerName) {
+      payload.customerReference = ee.customerName;
+      missing.push('jobId');
+    } else {
+      missing.push('jobId');
+    }
 
     return {
       proposal: createProposal(inputFor(context, this.taskType, payload, missing)),
