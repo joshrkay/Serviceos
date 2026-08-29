@@ -18,6 +18,7 @@ import {
   LogTimeEntryTaskHandler,
   NotifyDelayTaskHandler,
   RequestFeedbackTaskHandler,
+  RecordPaymentTaskHandler,
   RescheduleAppointmentTaskHandler,
   CancelAppointmentTaskHandler,
   DEFAULT_MILEAGE_RATE_CENTS_PER_MILE,
@@ -405,14 +406,56 @@ describe('wave-2 task handlers', () => {
     expect(missingFieldsFor(res.proposal)).toContain('leadId');
   });
 
-  it('add_service_location requires structured address resolution', async () => {
+  it('add_service_location parses a full spoken address and lifts the address gate', async () => {
+    const res = await new AddServiceLocationTaskHandler().handle(
+      ctx({
+        customerId: 'cust-1',
+        existingEntities: { serviceAddress: '9 Elm Court, Mesa, AZ 85201' },
+      }),
+    );
+    expect(res.proposal.proposalType).toBe('add_service_location');
+    expect(res.proposal.payload.addressText).toBe('9 Elm Court, Mesa, AZ 85201');
+    expect(res.proposal.payload.street1).toBe('9 Elm Court');
+    expect(res.proposal.payload.city).toBe('Mesa');
+    expect(res.proposal.payload.state).toBe('AZ');
+    expect(res.proposal.payload.postalCode).toBe('85201');
+    const missing = missingFieldsFor(res.proposal);
+    expect(missing).not.toContain('street1');
+    expect(missing).not.toContain('city');
+    expect(missing).not.toContain('state');
+    expect(missing).not.toContain('postalCode');
+  });
+
+  it('add_service_location fills only what a partial spoken address contains and gates the rest honestly', async () => {
     const res = await new AddServiceLocationTaskHandler().handle(
       ctx({ customerId: 'cust-1', existingEntities: { serviceAddress: '412 Oak St' } }),
     );
     expect(res.proposal.proposalType).toBe('add_service_location');
     expect(res.proposal.payload.addressText).toBe('412 Oak St');
+    // The parser recovers a street from the words actually spoken — it is
+    // never re-gated once genuinely known.
+    expect(res.proposal.payload.street1).toBe('412 Oak St');
+    const missing = missingFieldsFor(res.proposal);
+    expect(missing).not.toContain('street1');
+    expect(missing).toContain('city');
+    expect(missing).toContain('state');
+    expect(missing).toContain('postalCode');
+  });
+
+  it('add_service_location never guesses: no address at all gates all four fields and writes nothing', async () => {
+    const res = await new AddServiceLocationTaskHandler().handle(
+      ctx({ customerId: 'cust-1', existingEntities: {} }),
+    );
+    expect(res.proposal.proposalType).toBe('add_service_location');
+    expect(res.proposal.payload.addressText).toBeUndefined();
+    expect(res.proposal.payload.street1).toBeUndefined();
+    expect(res.proposal.payload.city).toBeUndefined();
+    expect(res.proposal.payload.state).toBeUndefined();
+    expect(res.proposal.payload.postalCode).toBeUndefined();
     const missing = missingFieldsFor(res.proposal);
     expect(missing).toContain('street1');
+    expect(missing).toContain('city');
+    expect(missing).toContain('state');
     expect(missing).toContain('postalCode');
   });
 
@@ -474,12 +517,93 @@ describe('wave-2 task handlers', () => {
     expect(missingFieldsFor(res.proposal)).toContain('appointmentId');
   });
 
-  it('request_feedback carries the job reference', async () => {
+  it('request_feedback carries the job reference but stays gated when the router never resolved a jobId (A32 fix)', async () => {
     const res = await new RequestFeedbackTaskHandler().handle(
       ctx({ existingEntities: { jobReference: 'the Johnson job' } }),
     );
     expect(res.proposal.proposalType).toBe('request_feedback');
     expect(res.proposal.payload.jobReference).toBe('the Johnson job');
+    expect(res.proposal.payload.jobId).toBeUndefined();
+    // BEFORE the A32 fix this proposal shipped with missingFields: [] —
+    // approvable, then guaranteed to fail execution on
+    // "request_feedback requires a resolved jobId" because payload.jobId was
+    // never set. A free-text reference alone must never lift the gate.
+    expect(missingFieldsFor(res.proposal)).toContain('jobId');
+  });
+
+  it('request_feedback resolves jobId from the router-verified existingEntities.jobId and lifts the gate', async () => {
+    const jobId = '11111111-1111-4111-8111-111111111111';
+    const res = await new RequestFeedbackTaskHandler().handle(
+      ctx({ existingEntities: { jobId, jobReference: 'the Johnson job' } }),
+    );
+    expect(res.proposal.proposalType).toBe('request_feedback');
+    expect(res.proposal.payload.jobId).toBe(jobId);
+    // The spoken reference is still kept for the review card's display.
+    expect(res.proposal.payload.jobReference).toBe('the Johnson job');
+    expect(missingFieldsFor(res.proposal)).not.toContain('jobId');
+  });
+
+  it('request_feedback gates jobId when only a customer reference exists and no job was resolved', async () => {
+    const res = await new RequestFeedbackTaskHandler().handle(
+      ctx({ existingEntities: { customerName: 'Henderson' } }),
+    );
+    expect(res.proposal.proposalType).toBe('request_feedback');
+    expect(res.proposal.payload.customerReference).toBe('Henderson');
+    expect(res.proposal.payload.jobId).toBeUndefined();
+    expect(missingFieldsFor(res.proposal)).toContain('jobId');
+  });
+
+  it('request_feedback gates jobId when nothing was spoken at all', async () => {
+    const res = await new RequestFeedbackTaskHandler().handle(ctx({ existingEntities: {} }));
+    expect(res.proposal.proposalType).toBe('request_feedback');
+    expect(missingFieldsFor(res.proposal)).toContain('jobId');
+  });
+});
+
+describe('RecordPaymentTaskHandler', () => {
+  const INVOICE_ID = '22222222-2222-4222-8222-222222222222';
+
+  it('resolves invoiceId from the router-verified existingEntities.invoiceId and lifts the gate (A22 fix)', async () => {
+    const res = await new RecordPaymentTaskHandler().handle(
+      ctx({
+        existingEntities: {
+          invoiceId: INVOICE_ID,
+          customerName: 'Henderson',
+          amount: 45000,
+          paymentMethod: 'check',
+          paymentReference: 'check 2044',
+        },
+      }),
+    );
+    expect(res.proposal.proposalType).toBe('record_payment');
+    expect(res.proposal.payload.invoiceId).toBe(INVOICE_ID);
+    // The spoken reference is still kept for the review card's display.
+    expect(res.proposal.payload.invoiceReference).toBe('Henderson');
+    expect(res.proposal.payload.amountCents).toBe(45000);
+    expect(res.proposal.payload.paymentMethod).toBe('check');
+    expect(missingFieldsFor(res.proposal)).not.toContain('invoiceId');
+  });
+
+  it('gates invoiceId when only a free-text reference exists and the router never resolved it', async () => {
+    const res = await new RecordPaymentTaskHandler().handle(
+      ctx({ existingEntities: { customerName: 'Henderson', amount: 45000 } }),
+    );
+    expect(res.proposal.proposalType).toBe('record_payment');
+    expect(res.proposal.payload.invoiceReference).toBe('Henderson');
+    expect(res.proposal.payload.invoiceId).toBeUndefined();
+    // BEFORE the A22 fix this handler NEVER read existingEntities.invoiceId
+    // at all, so even a resolver-verified id left invoiceId permanently
+    // gated — see the DEVIATION note this fix removes in
+    // test/proposals/voice-payload-contract.test.ts.
+    expect(missingFieldsFor(res.proposal)).toContain('invoiceId');
+  });
+
+  it('accepts an already-resolved UUID reference directly, with no review-time resolution needed', async () => {
+    const res = await new RecordPaymentTaskHandler().handle(
+      ctx({ existingEntities: { jobReference: INVOICE_ID, amount: 45000 } }),
+    );
+    expect(res.proposal.payload.invoiceId).toBe(INVOICE_ID);
+    expect(missingFieldsFor(res.proposal)).not.toContain('invoiceId');
   });
 });
 

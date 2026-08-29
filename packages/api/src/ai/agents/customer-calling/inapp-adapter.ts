@@ -28,6 +28,12 @@ import type { ProposalSurface } from '../../../proposals/surface';
 // promotion / alias / line-item translation exists, and it lives next to the
 // per-type contracts it has to satisfy.
 import { buildVoiceProposalPayload } from '../../../proposals/voice-payload';
+// A48 fix — the dedicated spoken-instruction → typed-payload mapping
+// update_brand_voice needs (see extractBrandVoiceProposalFields's doc
+// comment for why buildVoiceProposalPayload's generic promotion can't do
+// this on its own).
+import { extractBrandVoiceProposalFields } from '../../tasks/brand-voice-task';
+import type { BrandVoiceProposalFields } from '../../tasks/brand-voice-task';
 import {
   intentToProposalType,
   voiceProposalSummary,
@@ -293,6 +299,26 @@ function classifierErrorCode(error: unknown): string | undefined {
   if (typeof error !== 'object' || error === null) return undefined;
   const code = (error as { code?: unknown }).code;
   return typeof code === 'string' ? code : undefined;
+}
+
+function nonEmptyString(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim().length > 0 ? value.trim() : undefined;
+}
+
+/**
+ * A48 fallback — `entities.brandVoiceInstruction` is populated verbatim by
+ * the classifier for every `update_brand_voice` turn (see
+ * ai/orchestration/intent-taxonomy-blocks.ts / intent-classifier.ts), so
+ * this should not normally be reached; kept as defense-in-depth (mirrors
+ * `UpdateBrandVoiceTaskHandler`'s own `context.message` fallback) rather
+ * than assuming the field is always present.
+ */
+function lastCallerTranscriptLine(session: VoiceSession): string | undefined {
+  for (let i = session.transcript.length - 1; i >= 0; i -= 1) {
+    const line = session.transcript[i];
+    if (line.startsWith('caller: ')) return nonEmptyString(line.slice('caller: '.length));
+  }
+  return undefined;
 }
 
 function classifierFailureFromError(
@@ -1588,7 +1614,30 @@ export class InAppVoiceAdapter {
       // session/FSM concerns, the summary, status decisions, sourceContext,
       // and the in-app line-item grounding wrapper injected below.
       const rawConfidence = typeof payload.confidence === 'number' ? payload.confidence : undefined;
-      const built = await buildVoiceProposalPayload(
+
+      // A48 fix — update_brand_voice's payload isn't a flat classifier→
+      // contract alias problem the generic buildVoiceProposalPayload
+      // scalar-promotion loop below can solve: turning "friendly,
+      // plain-spoken, sign off Thanks" into { register, signoff, ... }
+      // needs the SAME dedicated LLM mapping pass ai/tasks/brand-voice-task.ts
+      // already runs for the memo/phone voice path AND the chat path
+      // (extractBrandVoiceProposalFields — see its doc comment for the full
+      // "Payload carries no brand-voice fields to apply" defect history this
+      // closes). `opening_lines`/`banned_phrases` are ARRAYS the generic
+      // promotion loop explicitly never lifts (only scalars), so pre-merging
+      // a mapped payload into `entities` and letting the generic loop run
+      // would silently drop them — this proposal type is routed around that
+      // loop entirely instead, reusing the identical downstream persist/
+      // promote pipeline below via a `built`-shaped result.
+      let brandVoiceFields: BrandVoiceProposalFields | undefined;
+      let built: Awaited<ReturnType<typeof buildVoiceProposalPayload>>;
+      if (proposalType === 'update_brand_voice') {
+        const spoken =
+          nonEmptyString(entities.brandVoiceInstruction) ?? lastCallerTranscriptLine(session) ?? '';
+        brandVoiceFields = await extractBrandVoiceProposalFields(this.deps.gateway, session.tenantId, spoken);
+        built = { payload: brandVoiceFields.payload, confidence: brandVoiceFields.confidenceScore, ok: true };
+      } else {
+        built = await buildVoiceProposalPayload(
         {
           intent,
           proposalType,
@@ -1658,7 +1707,8 @@ export class InAppVoiceAdapter {
             };
           },
         },
-      );
+        );
+      }
       // The module gates every payload on its type's own schema. The inbound
       // CALLER path ACTS on a failure (persist the real type with the unmet
       // keys as `missingFields`, or degrade to a clarification card) because
@@ -1718,7 +1768,10 @@ export class InAppVoiceAdapter {
         // Flat, contract-checked, built by the shared module above (or the
         // canonical clarification, for the unmapped-intent fall-through).
         payload: effectivePayload,
-        summary,
+        // A48 — the brand-voice mapping pass computes its own summary
+        // ("Update brand voice — friendly") from the mapped register/
+        // persona_name; voiceProposalSummary has no notion of those fields.
+        summary: brandVoiceFields?.summary ?? summary,
         // QA-2026-06-04: mirror the AI task handlers (create-appointment-task
         // et al.) — calling-agent proposals are capture-class from the
         // autonomous tier with a real classifier confidence. Without these,
@@ -1731,6 +1784,15 @@ export class InAppVoiceAdapter {
         // estimate-task.ts.
         ...(voiceLineItemOutcome?.missingFields && voiceLineItemOutcome.missingFields.length > 0
           ? { missingFields: voiceLineItemOutcome.missingFields }
+          : {}),
+        // A48 — the brand-voice gate (BRAND_VOICE_GATE_FIELD /
+        // FREE_TEXT_GATE_FIELD; see extractBrandVoiceProposalFields) blocks
+        // approval of a payload that would deterministically fail execution
+        // — an empty patch, or a mapped-but-mixed one that would silently
+        // drop unmapped content. Mutually exclusive with the line-item
+        // missingFields above (different proposal types).
+        ...(brandVoiceFields && brandVoiceFields.missingFields.length > 0
+          ? { missingFields: brandVoiceFields.missingFields }
           : {}),
         sourceTrustTier: 'autonomous',
         sourceContext: {
