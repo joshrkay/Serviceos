@@ -741,8 +741,10 @@ intents). The guard deliberately does NOT
 pre-empt layers that own their surface behavior downstream of classification: read-only
 `lookup_*` (D-026's dispatch RBAC refuses with purposeful copy), `emergency_dispatch` (the
 RV-140/142 deterministic-scan escalation fast-path — dropped from the S1 prompts, kept as the
-LLM second net), and `approve/reject/edit_proposal` (the RV-071/RV-225 owner hard gates, which
-audit denied attempts). The I6 proposal-type gate remains as defense-in-depth behind all of it.
+LLM second net), `approve/reject/edit_proposal` (the RV-071/RV-225 owner hard gates, which
+audit denied attempts), and `en_route` (the #847/D-027 phone surface owns identity — actor
+required, technician role required, honest refusals, en_route_executed audit — added to the
+exempt set at the #883/#902 merge, where the guard was found pre-empting that refusal). The I6 proposal-type gate remains as defense-in-depth behind all of it.
 **Cap re-derivation:** `SessionCostTracker.maxInputTokens` is cumulative per session, so gating
 alone only moves the first-turn escalation to a later turn. Caps are now derived, never picked:
 `CLASSIFY_TURN_INPUT_TOKEN_BUDGET = 9000` (#902 — worst STRUCTURAL gated first turn: caller

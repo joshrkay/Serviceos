@@ -621,6 +621,11 @@ export function isLookupIntent(intent: IntentType | undefined | null): boolean {
  *   voice_approval_denied / voice_edit_denied audit events (a prompt-
  *   injection attempt on a customer line should land in the audit log, not
  *   dissolve into a reprompt).
+ * - en_route — the phone en-route surface (#847/D-027) owns identity: it
+ *   requires a caller-ID-resolved technician actor, refuses a no-actor or
+ *   non-technician caller with its specific identity copy, and emits
+ *   en_route_executed for every outcome. Intercepting here would replace
+ *   that honest refusal with a generic reprompt.
  *
  * Read-only lookup_* intents are exempt via isLookupIntent for the same
  * reason (D-026 dispatch RBAC owns them); they are not listed here only
@@ -631,6 +636,7 @@ const SURFACE_GUARD_EXEMPT_INTENTS: ReadonlySet<IntentType> = new Set<IntentType
   'approve_proposal',
   'reject_proposal',
   'edit_proposal',
+  'en_route',
 ]);
 
 /**
