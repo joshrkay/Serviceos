@@ -294,13 +294,12 @@ describe('#909 — an unambiguous reference lifts the gate that blocked approval
       },
       gate: 'customerId',
       filledWith: RESOLVED.customer,
-      // AddServiceLocationTaskHandler pushes these four UNCONDITIONALLY
-      // ("the executor needs structured fields — always require
-      // resolution"). Parsing a spoken address into street/city/state/zip is
-      // not entity resolution and no resolver kind answers it, so A29's
-      // ENTITY gate is what this issue lifts; the row needs an address
-      // parser as well before it can approve unattended. Flagged, not hidden.
-      residualGates: ['street1', 'city', 'state', 'postalCode'],
+      // #909 lifts A29's ENTITY gate; the four structured address gates
+      // were the pinned residual until fix/a29-address-parsing landed
+      // parseSpokenAddressParts on the draft path — a complete spoken
+      // address like this one now parses fully, so the row approves.
+      // An incomplete address still gates honestly (pinned in
+      // full-app-voice-tasks.test.ts's no-guess case).
     },
     {
       row: 'A31',
