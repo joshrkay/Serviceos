@@ -776,3 +776,52 @@ hashes). `owner_line` still burns ~15.2k tokens/turn (~3 classify turns per sess
 further owner-prompt conditioning is a follow-up. Lookup-bullet table compaction is a separate
 PR; #900 is out of scope. Numbering note: #883's complaint-escalation decision merged first and
 holds D-027; this entry renumbered to D-028 at merge time (2026-08-29).
+
+### D-029: A gate on an entity id must have a resolver behind it; chat asks its clarification in the chat
+**Date:** 2026-08-29
+**Initiative:** #909, from the 2026-08-29 AI-capability live sweep (99 probes against deployed dev).
+**Decision:** Two rules, one structural and one about where the question gets asked.
+
+1. **A `missingFields` gate on an entity id is only legitimate if a resolver can lift it.**
+Every reference-carrying proposal type pairs a required `xId` with the free-text `xReference` the
+classifier can actually produce; the drafting handler writes the reference and gates the id, and
+`approveProposal` refuses until the gate lifts. That gate is correct and stays. What did not exist
+was the thing that LIFTS it for references the proposal is ALREADY carrying: resolution ran only
+BEFORE drafting, over the classifier fields `planVoiceEntityLookups` happens to read. The sweep's
+dominant finding is what that costs — sixteen chat capabilities drafted a proposal carrying only
+free text and stalled at `ready_for_review` permanently, approve answering 400
+`{missingFields:[...]}` every time. `convert_lead` / `mark_lead_lost` were the pure case: they gate
+on `leadId` while no `lead` EntityKind existed at all, so that gate had NO resolver behind it on
+ANY surface and those two capabilities were unreachable by construction. The post-draft loop lives
+in `ai/resolution/gated-reference-resolution.ts` as a core with no surface knowledge and no
+persistence (D-026's "one core, thin adapters"); the chat route is its first and currently only
+adapter, and the voice surfaces keep their pre-draft loop unchanged.
+
+2. **Ambiguity is a clarification on every surface — asked in that surface's own idiom.** Voice asks
+it spoken and resolves it on the next FSM turn; chat asks ONE numbered question and the next chat
+turn answers it. Both run the SAME deterministic follow-up matcher
+(`resolveDisambiguationFollowUp`: ordinal, then distinct name, then address/phone hint, then a
+resolver re-resolve INTERSECTED with the offered candidate set), so neither surface can select a
+record the operator was never shown, and there is one disambiguation parser rather than two that
+drift.
+
+**Rationale:** The alternative for chat was to widen the pre-draft resolver's intent-membership sets
+and the `CHAT_CONTEXT_CUSTOMER_ID_INTENTS` allowlist until every row happened to resolve. That was
+rejected twice over: it is per-intent whack-a-mole that the seventeenth capability re-opens, and for
+the appointment family it would have activated `resolveActiveAppointmentId`'s customer-scoped
+auto-pick — a behavior the repo DELIBERATELY declined (that allowlist's own doc comment: "resolving
+to a different customer's appointment would message the wrong person"). Resolving the reference the
+operator actually gave, and asking when it is ambiguous, gets the same rows to green without
+adopting a guess the product already refused.
+
+**Constraints:** D-004 is untouched and load-bearing here. Resolution fills a field a human is about
+to review; it never approves, never executes, and never re-runs `decideInitialStatus` on the
+now-ungated payload — re-running it is precisely how a resolution loop grows an auto-approve nobody
+asked for. A gate absent from `GATED_REFERENCE_SOURCES` (a parsed time, a path-shaped catalog gate)
+is left strictly alone. A `low_confidence` match is NOT auto-adopted on chat: voice answers that
+band with a spoken one-tap confirm turn, and on a surface where the operator is already looking at
+a review card the honest equivalent is the card they already get. The chat pending question rides
+`sourceContext.pendingEntityAmbiguity` on the proposal it blocks rather than a new session store —
+that row is already persisted, tenant-scoped and conversation-stamped — and is bounded by the
+voice constant `MAX_DISAMBIGUATION_ATTEMPTS`, so an operator who moves on loses at most two turns.
+The four `CHAT_DISPATCH_EXCLUDED_INTENTS` stay excluded and `missingFieldsFor` is not weakened.

@@ -33,7 +33,15 @@ export type EntityKind =
   // Carlos"). Resolved against users (role technician/dispatcher/owner) so
   // reassign/add-crew/remove-crew proposals carry a verified technician id
   // instead of stalling in draft on a free-text name.
-  | 'technician';
+  | 'technician'
+  // #909 — a lead in the pipeline, named by the person or company on it
+  // ("the Johnson lead"). `convert_lead` / `mark_lead_lost` both gate on a
+  // resolved `leadId` while the classifier can only ever emit a
+  // `leadReference`, so without this kind those two capabilities could
+  // never clear their own approval gate on ANY surface: the gate had no
+  // resolver behind it. Won/lost leads are excluded — see
+  // `PgEntityResolver.resolveLead`.
+  | 'lead';
 
 /**
  * Confidence threshold above which a match is considered "resolved"
