@@ -80,6 +80,20 @@ export type VoiceSessionEvent =
       error?: string;
       ts: number;
     }
+  /**
+   * #847: the `en_route` DIRECT status act ran on a live surface. Not a
+   * `lookup_executed` — "on my way" mutates (audit + customer ETA text), so
+   * dashboards must not count it among read-only lookups. Fires for EVERY
+   * outcome, same discipline as lookup_executed: a dead branch is a metric,
+   * not an audit finding.
+   */
+  | {
+      type: 'en_route_executed';
+      outcome: 'sent' | 'no_appointment' | 'ambiguous' | 'refused' | 'unavailable';
+      durationMs: number;
+      error?: string;
+      ts: number;
+    }
   /** VQ-003: escalateToHuman committed. `reason` is the EscalationReason value. */
   | { type: 'escalation_triggered'; reason: string; ts: number }
   /** VQ-003: cost tracker absorbed a turn's usage. */
@@ -244,6 +258,15 @@ export interface VoiceSession {
    * use the default.
    */
   ttsVoice?: string;
+  /**
+   * #846 — per-call count of honored mid-call language switches on the
+   * Gather transport, capped at the same MAX_LANGUAGE_SWITCHES_PER_CALL
+   * the media-streams adapter enforces (its counter lives in adapter
+   * state next to the Deepgram socket; Gather has no adapter-side call
+   * state, so the flap guard rides the session). Adapter-side like
+   * `leadId`: the FSM never reads it.
+   */
+  languageSwitchCount?: number;
   /**
    * RV-071 — in-flight owner voice-approval dialogue (readback awaiting
    * the explicit affirmative, clarification list, or challenge prompt).

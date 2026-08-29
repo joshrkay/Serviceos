@@ -232,6 +232,26 @@ export const LANGUAGE_SWITCH_ACK: Record<SessionLanguage, string> = {
 };
 
 /**
+ * #846 — spoken when the caller asks for a language the tenant hasn't opted
+ * into (`supported_languages` gate). Keyed by the language the call STAYS in
+ * — the requested one is exactly what we can't speak.
+ */
+export const LANGUAGE_UNSUPPORTED_LINE: Record<SessionLanguage, string> = {
+  en: "I'm sorry — I can only help in English on this line. What can I help you with?",
+  es: 'Lo siento — en esta línea solo puedo ayudarle en español. ¿En qué puedo ayudarle?',
+};
+
+/**
+ * #846 — spoken when the per-call language-switch cap
+ * (MAX_LANGUAGE_SWITCHES_PER_CALL) is exhausted: the call keeps its current
+ * language rather than flapping. Keyed by the language the call stays in.
+ */
+export const LANGUAGE_SWITCH_CAP_LINE: Record<SessionLanguage, string> = {
+  en: "Let's keep going in English so I don't lose you — what can I help you with?",
+  es: 'Sigamos en español para no perderle — ¿en qué puedo ayudarle?',
+};
+
+/**
  * VOX-52 — voice a disambiguation prompt for an ambiguous entity reference.
  * `candidates` is the resolver's candidate set mapped to `{ id, name, score }`.
  * Speaks the distinct candidate names so the caller can choose; when the names
