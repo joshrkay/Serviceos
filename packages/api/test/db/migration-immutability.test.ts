@@ -288,7 +288,17 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   // U5 (JTBD #7): widen proposal_sms_events kind CHECK for the digest
   // 'digest_approve_all_rendered' anchor (additive, pre-deploy).
   ['189_proposal_sms_events_digest_approve_all_kind', 'e66034b7738726dc1289801770c998c722b7a13c314f410c38d993b6973c296d'],
-  ['190_dispatch_entity_conversation_reply', 'f68dcf4009222fb5f516bb37d914124ba2e6eb761d3469c7c11eee7cc855641a'],
+  // Deploy-blocker fix (2026-08-29, branch fix/dispatch-vocab-reconciliation):
+  // this migration's ADD CONSTRAINT had no NOT VALID, unlike 092/125/164
+  // above and 070 (see that comment). The runner replays every migration on
+  // every boot with no ledger, so each redeploy re-validated the WHOLE
+  // message_dispatches table against this migration's (pre-269/270)
+  // vocabulary. Once the app started writing 'portal_session'/'custom_message'
+  // rows (legal under the final 270 constraint, applied on a prior deploy),
+  // the next redeploy replayed 190 first and rejected those rows —
+  // ATRewriteTable/SQLSTATE 23514, bricking every subsequent deploy of main.
+  // Added NOT VALID; hash regenerated to lock in the edit.
+  ['190_dispatch_entity_conversation_reply', 'fec82faa1028436ca7b262a44a36d29412bd3270830ec9750e245cd1ff1a1ab3'],
   // CRM two-way comms: extend leads_source_check to admit 'sms' (text-origin leads).
   ['191_extend_leads_source_check_sms', 'a255c4625c8fd00f4f0e1b4335d001f518bc20616e3c60af87ac2d87d836aef2'],
   // Add the missing tenant_dnc_list.source column (DNC UI used it without a migration).
@@ -473,11 +483,20 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['268_call_me_back_session_reason_idempotency', '7807073281dad9a454020843788c85953d0a30f2b047b6ca05812ef3da2c7253'],
   // Portal-link send (PR #802): widen message_dispatches entity_type CHECK
   // for 'portal_session' — deliberate snapshot update for a new migration.
-  ['269_dispatch_entity_portal_session', '60bab4bbcd9c1d371c32bf846dbe52cfd9010ab581e95bd263340ce85acb8f3a'],
+  // Deploy-blocker fix (2026-08-29): also missing NOT VALID (same bug as
+  // 190 above); added, hash regenerated.
+  ['269_dispatch_entity_portal_session', '1a7f66659bc7c1229b306e3daf7d1a27b96f994aab8ceb5c1da661024967d3b7'],
   // Tradesperson wave 1, Task 5 (2026-08-07 plan): widen message_dispatches
   // entity_type CHECK for 'custom_message' (send_customer_message proposal)
   // — deliberate snapshot update for a new migration.
-  ['270_dispatch_entity_custom_message', '3e166dce94eda1ed56ff0f9978f701863d80fd4b8071309ef1c448ced6ae6b9f'],
+  // Deploy-blocker fix (2026-08-29): also missing NOT VALID (same bug as
+  // 190 above) — this is the row that actually broke prod: dev's live
+  // constraint had already validated up through 'custom_message', and the
+  // app was writing 'custom_message' dispatch rows under it, so the very
+  // next redeploy replayed 190/269 (narrower, non-NOT-VALID lists) first
+  // and rejected them. Added NOT VALID here too so a future widening after
+  // 270 doesn't reintroduce the same failure; hash regenerated.
+  ['270_dispatch_entity_custom_message', 'eab55bd6e392d09a8165963967d0a0e406d82e697a70f13b0795f25f3e794ceb'],
   // Tradesperson wave 1, Task 6 (2026-08-07 plan): adds is_change_order to
   // estimates + a partial index for reporting scope-adds separately from
   // original bids (create_change_order proposal) — deliberate snapshot
