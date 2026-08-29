@@ -800,10 +800,30 @@ export class InAppVoiceAdapter {
       ownerSession && this.deps.extendedIntentsEnabled
         ? await this.deps.extendedIntentsEnabled(tenantId).catch(() => false)
         : false;
+    // #914 — customer protection (complaint/negotiation) must be "always
+    // on" for inapp the same way twilio-adapter.ts hardcodes it for
+    // telephony (`const customerProtectionIntents = true`). Before this fix
+    // it was never set here, so `classifyIntent`'s `protectionOn` gate
+    // (customerProtectionIntents === true || extendedIntents === true) —
+    // see intent-classifier.ts — only opened for an OWNER session on a
+    // tenant with extendedIntents enabled, and the CUSTOMER_PROTECTION_
+    // PROMPT_SECTION was omitted for every other inapp caller. D-028 pins
+    // 'inapp' to the 'operator' classifier profile (all 78 intents already
+    // ACCEPTED, complaint/negotiation included) regardless of actor role —
+    // this was purely a missing PROMPT section, not an accept-gate issue,
+    // so a customer or owner's "I'm really unhappy" / "knock $50 off"
+    // silently missed the dedicated _complaint/_negotiation handlers and
+    // fell through to the generic low-confidence reprompt. Safe to set
+    // unconditionally: `protectionOn` also requires `profile !==
+    // 'field_tech'`, and `classifierProfileForSession` never returns
+    // 'field_tech' for the trusted 'inapp' channel (only 'operator' /
+    // 'owner_line'), so this cannot leak the section into a phone-actor
+    // technician's taxonomy.
     const session = this.deps.store.create(tenantId, 'inapp', {
       ...(repairTemplates.length > 0 ? { repairTemplates } : {}),
       ...(ownerSession ? { ownerSession: true } : {}),
       ...(extendedIntents ? { extendedIntents: true } : {}),
+      customerProtectionIntents: true,
     });
     const convId = conversationId ?? session.id;
 
@@ -1036,6 +1056,13 @@ export class InAppVoiceAdapter {
             planPromptSection,
             ...(session.machine.currentContext.ownerSession ? { ownerSession: true } : {}),
             ...(session.machine.currentContext.extendedIntents ? { extendedIntents: true } : {}),
+            // #914 — forward the "always on" flag stamped at startSession()
+            // into the classify call, mirroring create-voice-turn-
+            // processor.ts's speechTurn (the telephony/media-streams seam)
+            // so both live classify seams pass it the same way.
+            ...(session.machine.currentContext.customerProtectionIntents
+              ? { customerProtectionIntents: true }
+              : {}),
           },
         );
         classifierUsage = classification.tokenUsage

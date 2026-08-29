@@ -874,6 +874,12 @@ describe('consistency pin — EXTENDED_INTENT_TYPES', () => {
     'lookup_day_overview',
     'lookup_digest',
     'lookup_pending_items',
+    // #910 — lookup_revenue/lookup_my_day/lookup_leads added to
+    // EXTENDED_INTENT_PHRASES; all three are entity-free/read-only (see
+    // that table's doc comment), same as the three above.
+    'lookup_revenue',
+    'lookup_my_day',
+    'lookup_leads',
   ]);
 
   // Extract quoted intent names from EXTENDED_INTENTS_PROMPT_SECTION.
@@ -923,6 +929,9 @@ describe('consistency pin — EXTENDED_INTENT_TYPES', () => {
       lookup_day_overview: ["What's my day look like?", 'Give me my morning overview'],
       lookup_digest: ['Read me my day', 'give me the daily digest'],
       lookup_pending_items: ['What am I waiting on?', 'what are we still waiting on'],
+      lookup_revenue: ['What did we sell last month?', 'How much did we make this month?'],
+      lookup_my_day: ["What's on my schedule today?", "What's my next job?"],
+      lookup_leads: ['Any new leads?', 'How many open leads do we have?'],
     };
     for (const [intent, transcripts] of Object.entries(triggersByIntent)) {
       expect(PHRASE_MATCH_ALLOWLIST.has(intent), `"${intent}" must be in the phrase-match allowlist`).toBe(true);
@@ -1058,6 +1067,167 @@ describe('Phase-2 Track A — extended operator intents', () => {
     const result = await classifyIntent("What's my day look like?", { tenantId: 't1' }, gateway);
     expect(gateway.complete).toHaveBeenCalledTimes(1);
     expect(result.intentType).toBe('unknown');
+  });
+});
+
+// ─── #910 — lookup routing determinism ─────────────────────────────────────
+//
+// The 2026-08-29 live sweep (issue #910) found L08 (lookup_estimates), L11
+// (lookup_revenue), L19 (lookup_my_day), C02 (en_route) and R03
+// (lookup_leads) intermittently answered from routes/assistant.ts's DB-less
+// generic-LLM fallback (model gpt-4o-mini/assistant.general, content like
+// "I do not have access to...") instead of the data-lookup skill / the
+// en_route direct-act path — non-deterministically (the same corpus case
+// passed on one run and failed on another).
+//
+// Root cause, pinned here: routes/assistant.ts's dispatch order was already
+// correct — `isLookupIntent(classification.intentType)` is checked, and the
+// `en_route` branch is reached, BEFORE any fallback path can run (see
+// routes/assistant.ts's "Lookup path" / "en_route path" comments). The seam
+// was entirely upstream, in THIS module: `classifyIntentRaw`'s LLM call
+// (`gateway.complete({ taskType: 'classify_intent', ... })`) intermittently
+// returned an intentType other than the correct `lookup_*` / `en_route` for
+// these exact stereotyped phrasings — gpt-4o-mini classification is not
+// deterministic. The fix mirrors the EXISTING deterministic-phrase
+// precedent (matchExtendedIntentPhrase, already used for
+// lookup_day_overview/digest/pending_items): a narrow, anchored pre-scan
+// consulted BEFORE the LLM call so these five rows' exact utterances never
+// depend on model luck again. Negative controls below pin that unrelated /
+// entity-bearing phrasings still fall through to the LLM exactly as before
+// — no behavior change for non-lookup, non-en_route utterances.
+describe('#910 — lookup routing determinism (corpus rows L08/L11/L19/C02/R03)', () => {
+  const chatContext = { tenantId: 't1', extendedIntents: true };
+
+  it('L08 — "What estimates does {{FIXTURE_CUSTOMER}} have?" routes to lookup_estimates with customerName extracted, no LLM call', async () => {
+    const gateway = mockGateway('{"intentType":"unknown","confidence":0.2}');
+    const result = await classifyIntent(
+      'What estimates does Jane Doe have?',
+      chatContext,
+      gateway,
+    );
+    expect(result.intentType).toBe('lookup_estimates');
+    expect(result.confidence).toBeGreaterThanOrEqual(CLASSIFIER_CONFIDENCE_THRESHOLD);
+    expect(result.extractedEntities?.customerName).toBe('Jane Doe');
+    expect(gateway.complete).not.toHaveBeenCalled();
+  });
+
+  it('L11 — "What did we sell last month?" routes to lookup_revenue, no LLM call', async () => {
+    const gateway = mockGateway('{"intentType":"unknown","confidence":0.2}');
+    const result = await classifyIntent('What did we sell last month?', chatContext, gateway);
+    expect(result.intentType).toBe('lookup_revenue');
+    expect(result.confidence).toBeGreaterThanOrEqual(CLASSIFIER_CONFIDENCE_THRESHOLD);
+    expect(gateway.complete).not.toHaveBeenCalled();
+  });
+
+  it("L19 — \"What's on my schedule today?\" routes to lookup_my_day, no LLM call", async () => {
+    const gateway = mockGateway('{"intentType":"unknown","confidence":0.2}');
+    const result = await classifyIntent("What's on my schedule today?", chatContext, gateway);
+    expect(result.intentType).toBe('lookup_my_day');
+    expect(result.confidence).toBeGreaterThanOrEqual(CLASSIFIER_CONFIDENCE_THRESHOLD);
+    expect(gateway.complete).not.toHaveBeenCalled();
+  });
+
+  it('R03 — "Any new leads?" routes to lookup_leads, no LLM call (technician actor — same deterministic match regardless of role; RBAC is enforced downstream, not by classification)', async () => {
+    const gateway = mockGateway('{"intentType":"unknown","confidence":0.2}');
+    const result = await classifyIntent('Any new leads?', chatContext, gateway);
+    expect(result.intentType).toBe('lookup_leads');
+    expect(result.confidence).toBeGreaterThanOrEqual(CLASSIFIER_CONFIDENCE_THRESHOLD);
+    expect(gateway.complete).not.toHaveBeenCalled();
+  });
+
+  it('C02 — "On my way to the job" routes to en_route, no LLM call, no extractedEntities (identity gate stays downstream)', async () => {
+    const gateway = mockGateway('{"intentType":"unknown","confidence":0.2}');
+    const result = await classifyIntent('On my way to the job', chatContext, gateway);
+    expect(result.intentType).toBe('en_route');
+    expect(result.confidence).toBeGreaterThanOrEqual(CLASSIFIER_CONFIDENCE_THRESHOLD);
+    expect(result.extractedEntities).toBeUndefined();
+    expect(gateway.complete).not.toHaveBeenCalled();
+  });
+
+  it('en_route phrase variants also short-circuit: "omw", "I\'m on my way", "heading out now"', async () => {
+    for (const transcript of ['omw', "I'm on my way", 'heading out now', 'heading over']) {
+      const gateway = mockGateway('{"intentType":"unknown","confidence":0.2}');
+      const result = await classifyIntent(transcript, chatContext, gateway);
+      expect(result.intentType, `"${transcript}" should route to en_route`).toBe('en_route');
+      expect(gateway.complete).not.toHaveBeenCalled();
+    }
+  });
+
+  it('negative control: en_route pattern does NOT match a named-job utterance (falls through to the LLM, entity extraction unaffected)', async () => {
+    const gateway = mockGateway(
+      JSON.stringify({
+        intentType: 'en_route',
+        confidence: 0.9,
+        extractedEntities: { jobReference: 'the Garcia job' },
+      }),
+    );
+    const result = await classifyIntent('On my way to the Garcia job', chatContext, gateway);
+    expect(gateway.complete).toHaveBeenCalledTimes(1);
+    expect(result.intentType).toBe('en_route');
+    expect(result.extractedEntities?.jobReference).toBe('the Garcia job');
+  });
+
+  it('negative control: ordinary non-lookup, non-en_route utterances still reach the LLM unchanged', async () => {
+    const gateway = mockGateway('{"intentType":"create_invoice","confidence":0.9}');
+    const result = await classifyIntent(
+      'Create an invoice for Acme for 450 dollars',
+      chatContext,
+      gateway,
+    );
+    expect(gateway.complete).toHaveBeenCalledTimes(1);
+    expect(result.intentType).toBe('create_invoice');
+  });
+
+  it('negative control: "I sold my old truck last month" does not collapse into lookup_revenue', async () => {
+    const gateway = mockGateway('{"intentType":"unknown","confidence":0.3}');
+    const result = await classifyIntent('I sold my old truck last month', chatContext, gateway);
+    expect(gateway.complete).toHaveBeenCalledTimes(1);
+    expect(result.intentType).toBe('unknown');
+  });
+
+  it('negative control: a named crew member is NOT captured by the lookup_my_day short-circuit ("Mike\'s schedule" stays LLM-routed → lookup_crew_schedule)', async () => {
+    const gateway = mockGateway(
+      JSON.stringify({
+        intentType: 'lookup_crew_schedule',
+        confidence: 0.9,
+        extractedEntities: { targetTechnicianName: 'Mike' },
+      }),
+    );
+    const result = await classifyIntent("What's on Mike's schedule today?", chatContext, gateway);
+    expect(gateway.complete).toHaveBeenCalledTimes(1);
+    expect(result.intentType).toBe('lookup_crew_schedule');
+  });
+
+  it('negative control: without extendedIntents, none of the five new short-circuits fire (byte-identical legacy behavior)', async () => {
+    for (const transcript of [
+      'What estimates does Jane Doe have?',
+      'What did we sell last month?',
+      "What's on my schedule today?",
+      'Any new leads?',
+      'On my way to the job',
+    ]) {
+      const gateway = mockGateway('{"intentType":"unknown","confidence":0.9}');
+      const result = await classifyIntent(transcript, { tenantId: 't1' }, gateway);
+      expect(gateway.complete, `"${transcript}" without extendedIntents should still call the LLM`).toHaveBeenCalledTimes(1);
+      expect(result.intentType).toBe('unknown');
+    }
+  });
+
+  it('matchLookupEstimatesPhrase / matchEnRoutePhrase unit-level: exact corpus utterances match, empty/unrelated text does not', async () => {
+    const { matchLookupEstimatesPhrase, matchEnRoutePhrase } = await import(
+      '../../../src/ai/orchestration/intent-classifier'
+    );
+    expect(matchLookupEstimatesPhrase('What estimates does Jane Doe have?')).toEqual({
+      customerName: 'Jane Doe',
+    });
+    expect(matchLookupEstimatesPhrase('')).toBeNull();
+    expect(matchLookupEstimatesPhrase('What invoices does Jane Doe have?')).toBeNull();
+
+    expect(matchEnRoutePhrase('On my way to the job')).toBe(true);
+    expect(matchEnRoutePhrase('omw')).toBe(true);
+    expect(matchEnRoutePhrase('')).toBe(false);
+    expect(matchEnRoutePhrase('On my way to the Garcia job')).toBe(false);
+    expect(matchEnRoutePhrase("I'm running 20 minutes late")).toBe(false);
   });
 });
 
