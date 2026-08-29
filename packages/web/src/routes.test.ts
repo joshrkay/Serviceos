@@ -125,6 +125,21 @@ describe('router', () => {
     expect(detailIdx, 'customers/:id must be registered').toBeGreaterThanOrEqual(0);
     expect(newIdx).toBeLessThan(detailIdx);
   });
+
+  // #881 routes "Create a new invoice" voice/quick-action phrases to
+  // /invoices/new — pin that the standalone create route exists and is
+  // declared before invoices/:id so the literal "new" segment can't fall
+  // through to the detail page (same class of bug as customers/new above).
+  it('registers invoices/new as its own route, before invoices/:id', () => {
+    const rootRoute = (router.routes as RouteObject[]).find((r) => r.path === '/');
+    const shellRoute = rootRoute!.children?.find((r) => r.path === '/');
+    const siblings = shellRoute!.children ?? [];
+    const newIdx = siblings.findIndex((r) => r.path === 'invoices/new');
+    const detailIdx = siblings.findIndex((r) => r.path === 'invoices/:id');
+    expect(newIdx, 'invoices/new must be registered').toBeGreaterThanOrEqual(0);
+    expect(detailIdx, 'invoices/:id must be registered').toBeGreaterThanOrEqual(0);
+    expect(newIdx).toBeLessThan(detailIdx);
+  });
 });
 
 /**
