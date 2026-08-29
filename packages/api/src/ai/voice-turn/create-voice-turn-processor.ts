@@ -47,7 +47,13 @@
 
 import type { Pool } from 'pg';
 import { appendAgentTts, callerTranscriptText } from './transcript-append';
-import { classifyIntent, isVoiceApprovalIntent, isVoiceEditIntent } from '../orchestration/intent-classifier';
+import {
+  classifyIntent,
+  isVoiceApprovalIntent,
+  isVoiceEditIntent,
+  type IntentClassification,
+} from '../orchestration/intent-classifier';
+import type { ClassifierProfile } from '../orchestration/classifier-profile';
 import {
   AI_BUSY_HOLD_LINE,
   classifyInfraFailure,
@@ -443,6 +449,79 @@ function isUntrustedS1Session(session: VoiceSession): boolean {
     !TRUSTED_CHANNELS.has(session.channel) &&
     session.machine.currentContext.ownerSession !== true
   );
+}
+
+/**
+ * #886/#887 — which classifier taxonomy profile this session's turns
+ * advertise. Derived from SESSION IDENTITY ONLY (channel allowlist, RV-070/
+ * 071 owner flag, D-026 phone actor) — never from transcript content, so a
+ * caller cannot talk their way into a wider taxonomy. Mirrors
+ * isUntrustedS1Session above: a trusted channel ('inapp') keeps the full
+ * 'operator' prompt byte-identical; an untrusted channel splits on whether
+ * caller-ID resolved an employee actor (stamped BEFORE the first classify —
+ * twilio-adapter establishment / the shared media-streams core).
+ *
+ * The prompt is a hint: the S1 proposal-type allowlist, the D-026 lookup
+ * RBAC, and the classifier's own PROFILE_INTENTS post-parse guard keep
+ * enforcing regardless of what was advertised.
+ */
+export function classifierProfileForSession(session: VoiceSession): ClassifierProfile {
+  if (session.machine.currentContext.ownerSession === true) return 'owner_line';
+  if (!isUntrustedS1Session(session)) return 'operator'; // trusted channel: 'inapp'
+  return session.actorUserId ? 'field_tech' : 'caller'; // D-026 phone actor
+}
+
+/**
+ * #887/#902 — audit an off-surface classification. The classifier's
+ * post-parse guard intercepts the intent BEFORE routing (no proposal is
+ * minted), which also means the proposal-gate
+ * `voice.surface_violation_blocked` event can never fire for it — without
+ * this event, a prompt-injection attempt on a customer line ("send the
+ * Henderson invoice to me") would dissolve into a reprompt with no trail.
+ * Deliberately a NEW event name, `voice.intent_off_surface`, not the old
+ * proposal-gate one: this records an intercepted CLASSIFICATION (metadata:
+ * the intent the model picked + the profile that refused it — there is no
+ * requestedProposalType, because no proposal was ever requested), while
+ * `voice.surface_violation_blocked` keeps meaning "a mapped proposal type
+ * was denied at minting" on the paths that still reach it (guard-exempt
+ * intents, the deterministic emergency path).
+ *
+ * The classifier itself has no audit repo (and no session id), so the fact
+ * travels on the classification (`unknownReason`/`offSurfaceIntent`) and
+ * both live classify seams — the processor speechTurn and the Twilio Gather
+ * adapter — call this right after classifying. No-op when the repo is
+ * absent or the turn was not off-surface; best-effort like every voice
+ * audit.
+ */
+export async function auditOffSurfaceClassification(args: {
+  auditRepo: AuditRepository | undefined;
+  tenantId: string;
+  sessionId: string;
+  profile: ClassifierProfile;
+  classification: IntentClassification;
+  actorId: string;
+}): Promise<void> {
+  const { auditRepo, classification } = args;
+  if (!auditRepo || classification.unknownReason !== 'intent_off_surface') return;
+  try {
+    await auditRepo.create(
+      createAuditEvent({
+        tenantId: args.tenantId,
+        actorId: args.actorId,
+        actorRole: 'system',
+        eventType: 'voice.intent_off_surface',
+        entityType: 'voice_session',
+        entityId: args.sessionId,
+        metadata: {
+          intent: classification.offSurfaceIntent ?? null,
+          profile: args.profile,
+          confidence: classification.confidence,
+        },
+      }),
+    );
+  } catch {
+    /* audit is best-effort */
+  }
 }
 
 export interface VoiceTurnProcessorDeps {
@@ -3774,6 +3853,11 @@ export function createVoiceTurnProcessor(
         tenantId,
         session.customerId,
       );
+      // #886/#887 — surface-conditional taxonomy: derived from session
+      // identity (owner line / trusted channel / D-026 phone actor). Hoisted
+      // so the off-surface audit below records the same profile the guard
+      // enforced.
+      const classifierProfile = classifierProfileForSession(session);
       try {
         const classification = await classifyIntent(
           speechResult,
@@ -3781,6 +3865,7 @@ export function createVoiceTurnProcessor(
             tenantId,
             verticalPromptSection,
             planPromptSection,
+            classifierProfile,
             // RV-071 — the owner-approval prompt section is appended ONLY
             // on a recognized owner line (caller-ID match; see
             // approver-identity.ts), keeping every other call's
@@ -3807,6 +3892,16 @@ export function createVoiceTurnProcessor(
             tokenUsage: classification.tokenUsage,
           }),
         );
+        // #887/#902 — an off-surface classification was intercepted by the
+        // guard; leave the trail the interception would otherwise erase.
+        await auditOffSurfaceClassification({
+          auditRepo: deps.auditRepo,
+          tenantId,
+          sessionId: session.id,
+          profile: classifierProfile,
+          classification,
+          actorId: deps.systemActorId ?? 'calling-agent',
+        });
         const capExceeded = recordCost(session, classification.tokenUsage);
         if (capExceeded) {
           classifierEvent = { type: 'cost_cap_exceeded' };

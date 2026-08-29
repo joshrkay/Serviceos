@@ -1,5 +1,7 @@
 export {
   createVoiceTurnProcessor,
+  classifierProfileForSession,
+  auditOffSurfaceClassification,
   type VoiceTurnProcessor,
   type VoiceTurnProcessorDeps,
 } from './create-voice-turn-processor';

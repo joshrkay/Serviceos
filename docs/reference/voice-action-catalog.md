@@ -22,6 +22,34 @@ intent, (2) an entry in `INTENT_TO_PROPOSAL_TYPE`, and (3) an execution handler
 wired with its real dependency. Sections below are organised by which of these
 exist today.
 
+**Advertised on which surface? (#886/#887/#902, D-028)** — since 2026-08-28
+the classifier prompt is *surface-conditional*: an intent listed here is only
+*offered to the model* on surfaces whose profile advertises it. Two per-surface
+sets exist, and they are deliberately not the same: **accepted** (the
+authoritative `PROFILE_INTENTS` in
+`packages/api/src/ai/orchestration/classifier-profile.ts` — what the
+post-parse guard lets through) and **advertised** (derived as
+`advertisedIntentsForProfile` = accepted ∩ the base block table — what the
+base prompt actually lists; accepted ⊇ advertised by construction, both pinned
+by `test/ai/orchestration/classifier-profile.test.ts`): **operator** (memo,
+chat, in-app voice — 68 base blocks advertised, all 78 intents accepted;
+byte-identical to the historical prompt), **owner_line** (60 advertised / 70
+accepted — everything minus the 8 customer-scoped `lookup_*`, with the
+section-gated approval/protection/extended-lookup intents accepted for their
+appended sections), **field_tech** (caller-ID-resolved employee on the phone —
+15 trade-internal intents, advertised = accepted), **caller**
+(anonymous/customer inbound phone — **18 advertised / 20 accepted**:
+complaint/negotiation have no base block and are advertised by the
+always-appended customer-protection section instead, so the guard accepts
+them). The prompt is a hint, not the gate: classification outside the
+surface's accept rule (`isIntentAcceptedOnProfile`) becomes
+`unknown`/`intent_off_surface` — audited at the live classify seams as
+`voice.intent_off_surface` (#902) — and the S1 proposal allowlist, D-026
+lookup RBAC, and RV-071/RV-225 owner gates keep enforcing regardless. This
+column is deliberately NOT added to the machine-readable block below — that
+block pins intent↔proposal↔class against code, and the per-surface truth
+already has its own executable pin.
+
 ---
 
 ## A) Speakable today — intent + proposal + execution handler all exist

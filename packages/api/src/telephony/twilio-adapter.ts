@@ -91,6 +91,8 @@ import { answerPhoneLookup, type PhoneLookupDeps } from '../ai/voice-turn/phone-
 import { answerPhoneEnRoute, type PhoneEnRouteDeps } from '../ai/voice-turn/phone-en-route-surface';
 import {
   createVoiceTurnProcessor,
+  classifierProfileForSession,
+  auditOffSurfaceClassification,
   appendAgentTts,
   callerTranscriptText,
   preloadSessionCatalog,
@@ -2315,6 +2317,11 @@ export class TwilioGatherAdapter {
         opts.tenantId,
         session.customerId,
       );
+      // #886/#887 — surface-conditional taxonomy: derived from session
+      // identity (owner line / trusted channel / D-026 phone actor). Hoisted
+      // so the off-surface audit below records the same profile the guard
+      // enforced.
+      const classifierProfile = classifierProfileForSession(session);
       try {
         const classification = await classifyIntent(
           opts.speechResult,
@@ -2322,6 +2329,7 @@ export class TwilioGatherAdapter {
             tenantId: opts.tenantId,
             verticalPromptSection,
             planPromptSection,
+            classifierProfile,
             // RV-071 — appended ONLY on verified owner sessions so every
             // other call's prompt stays byte-identical (cassette hashes).
             ...(session.machine.currentContext.ownerSession === true
@@ -2346,6 +2354,16 @@ export class TwilioGatherAdapter {
             tokenUsage: classification.tokenUsage,
           }),
         );
+        // #887/#902 — an off-surface classification was intercepted by the
+        // guard; leave the trail the interception would otherwise erase.
+        await auditOffSurfaceClassification({
+          auditRepo: this.deps.auditRepo,
+          tenantId: opts.tenantId,
+          sessionId: session.id,
+          profile: classifierProfile,
+          classification,
+          actorId: this.deps.systemActorId ?? 'calling-agent',
+        });
         const capExceeded = this.processor.recordCost(session, classification.tokenUsage);
         if (capExceeded) {
           classifierEvent = { type: 'cost_cap_exceeded' };

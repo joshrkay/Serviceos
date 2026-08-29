@@ -2,6 +2,10 @@ import {
   SessionCostTracker,
   DEFAULT_TELEPHONY_CAPS,
   DEFAULT_INAPP_CAPS,
+  CLASSIFY_TURN_INPUT_TOKEN_BUDGET,
+  EXPECTED_MAX_CLASSIFY_TURNS,
+  EXPECTED_MAX_INAPP_CLASSIFY_TURNS,
+  estimateCostCents,
 } from '../../../src/ai/skills/session-cost-tracker';
 import type { SessionCapConfig, SessionCapEvent } from '../../../src/ai/skills/session-cost-tracker';
 
@@ -29,18 +33,45 @@ function eventTypes(events: SessionCapEvent[]): string[] {
 // ---------------------------------------------------------------------------
 
 describe('SessionCostTracker — default caps', () => {
-  it('DEFAULT_TELEPHONY_CAPS has the expected values', () => {
-    expect(DEFAULT_TELEPHONY_CAPS.maxInputTokens).toBe(5000);
+  it('DEFAULT_TELEPHONY_CAPS is derived from the per-turn budget (#886)', () => {
+    // 9,000 tokens/classify-turn × 8 turns — see the derivation comment on
+    // the constants (#902 re-derived the budget from the structural
+    // worst-case first turn incl. MAX_PROMPT_ASSETS training assets). The
+    // pre-#886 5,000 was smaller than ONE ungated classify turn, so every
+    // call escalated on the first sentence.
+    expect(DEFAULT_TELEPHONY_CAPS.maxInputTokens).toBe(
+      CLASSIFY_TURN_INPUT_TOKEN_BUDGET * EXPECTED_MAX_CLASSIFY_TURNS,
+    );
+    expect(DEFAULT_TELEPHONY_CAPS.maxInputTokens).toBe(72000);
     expect(DEFAULT_TELEPHONY_CAPS.maxOutputTokens).toBe(1500);
     expect(DEFAULT_TELEPHONY_CAPS.maxCostCents).toBe(40);
     expect(DEFAULT_TELEPHONY_CAPS.maxDurationMs).toBe(15 * 60 * 1000);
+    // Cost reconciliation: exhausting the token caps still spends well
+    // under the money cap — tokens bind first, cost is the backstop.
+    expect(
+      estimateCostCents(
+        DEFAULT_TELEPHONY_CAPS.maxInputTokens,
+        DEFAULT_TELEPHONY_CAPS.maxOutputTokens,
+      ),
+    ).toBeLessThan(DEFAULT_TELEPHONY_CAPS.maxCostCents);
   });
 
-  it('DEFAULT_INAPP_CAPS has the expected values', () => {
-    expect(DEFAULT_INAPP_CAPS.maxInputTokens).toBe(10000);
+  it('DEFAULT_INAPP_CAPS is derived from the per-turn budget (#886/#902)', () => {
+    // 30-minute trusted 'operator' session (full taxonomy): budget × 10.
+    // Pins the ARITHMETIC, not a literal — the in-app cap must move with
+    // the documented budget exactly as the telephony cap does (a bare
+    // 60,000 here was #902's standards violation: the same product,
+    // detached from its derivation).
+    expect(DEFAULT_INAPP_CAPS.maxInputTokens).toBe(
+      CLASSIFY_TURN_INPUT_TOKEN_BUDGET * EXPECTED_MAX_INAPP_CLASSIFY_TURNS,
+    );
+    expect(EXPECTED_MAX_INAPP_CLASSIFY_TURNS).toBe(10);
     expect(DEFAULT_INAPP_CAPS.maxOutputTokens).toBe(3000);
     expect(DEFAULT_INAPP_CAPS.maxCostCents).toBe(80);
     expect(DEFAULT_INAPP_CAPS.maxDurationMs).toBe(30 * 60 * 1000);
+    expect(
+      estimateCostCents(DEFAULT_INAPP_CAPS.maxInputTokens, DEFAULT_INAPP_CAPS.maxOutputTokens),
+    ).toBeLessThan(DEFAULT_INAPP_CAPS.maxCostCents);
   });
 });
 
