@@ -259,9 +259,16 @@ describe('BillingService', () => {
     expect((err as AppError).statusCode).toBe(502);
     expect((err as AppError).code).toBe('BILLING_PORTAL_FAILED');
     expect((err as AppError).message).toContain("No such customer: 'cus_UswJPdKUh7f1eg'");
+    // The operator-facing message names the recovery path, not a dead end.
+    expect((err as AppError).message).toContain('contact support to re-link billing');
     expect((err as AppError).details).toMatchObject({
       stripeStatus: 404,
       stripeCode: 'resource_missing',
+      // #873 — machine-readable discriminator so the web can render an
+      // actionable "re-link billing" state instead of a transient toast,
+      // and the stale id support needs for the manual re-link.
+      reason: 'stripe_customer_missing',
+      stripeCustomerId: 'cus_UswJPdKUh7f1eg',
     });
     // Full Stripe detail (code + message) reached the server logs even
     // though only a sanitized/derived message reaches the client.
@@ -283,6 +290,46 @@ describe('BillingService', () => {
       typeof c[0] === 'string' && (c[0] as string).includes('SET stripe_customer_id'),
     );
     expect(persistCall).toBeUndefined();
+  });
+
+  it('does not claim the customer is missing for a resource_missing about something else', async () => {
+    // #873 — resource_missing can name OTHER resources (e.g. a bad portal
+    // configuration id). Those must not carry the stripe_customer_missing
+    // discriminator or the "contact support to re-link billing" hint, or
+    // support gets sent down the re-link path for an unrelated misconfig.
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    pool = makePool({ stripe_customer_id: 'cus_existing' });
+    fetchFn.mockResolvedValueOnce(
+      jsonErr(404, {
+        error: {
+          type: 'invalid_request_error',
+          message: "No such billing portal configuration: 'bpc_missing'",
+          code: 'resource_missing',
+          param: 'configuration',
+        },
+      }),
+    );
+    const svc = new BillingService({ pool: pool as never, config: { apiKey: 'sk_test' }, fetchFn });
+
+    const err = await svc
+      .getOrCreatePortalUrl({
+        tenantId: TENANT,
+        ownerEmail: 'o@example.com',
+        returnUrl: 'https://app.example.com/settings',
+      })
+      .catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(AppError);
+    expect((err as AppError).statusCode).toBe(502);
+    expect((err as AppError).message).toContain('No such billing portal configuration');
+    expect((err as AppError).message).not.toContain('re-link billing');
+    expect((err as AppError).details).toMatchObject({
+      stripeStatus: 404,
+      stripeCode: 'resource_missing',
+    });
+    expect((err as AppError).details).not.toHaveProperty('reason');
+    expect((err as AppError).details).not.toHaveProperty('stripeCustomerId');
+    errorSpy.mockRestore();
   });
 
   it('surfaces a Stripe customer create that returns no id', async () => {

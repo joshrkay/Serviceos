@@ -74,15 +74,34 @@ export interface BillingServiceDeps {
  * correctness call a human should make (confirm there's really no
  * matching Stripe subscription before rebinding), not something to paper
  * over automatically. Surfacing the real reason is the safe, contained
- * fix; recovery is a follow-up.
+ * fix; recovery stays a human/operator action (#873 tracks it, including
+ * the re-link of the affected tenant).
+ *
+ * #873 — so the web can render an actionable recovery state instead of a
+ * dead-end toast, the stale-customer case is machine-readable: when the
+ * failure is specifically the SAVED CUSTOMER being gone (not some other
+ * `resource_missing`, e.g. a bad portal configuration id), `details`
+ * carries `reason: 'stripe_customer_missing'` plus the stale
+ * `stripeCustomerId` support needs for the re-link. The status stays 502:
+ * the upstream dependency really did fail, and the pinned no-recreate
+ * decision above means there is nothing the API can honestly succeed at.
  */
-function billingPortalStripeFailure(context: string, status: number, rawBody: string): AppError {
+function billingPortalStripeFailure(
+  context: string,
+  status: number,
+  rawBody: string,
+  customerId?: string,
+): AppError {
   let stripeMessage: string | undefined;
   let stripeCode: string | undefined;
+  let stripeParam: string | undefined;
   try {
-    const parsed = JSON.parse(rawBody) as { error?: { message?: string; code?: string } } | null;
+    const parsed = JSON.parse(rawBody) as {
+      error?: { message?: string; code?: string; param?: string };
+    } | null;
     stripeMessage = parsed?.error?.message?.trim() || undefined;
     stripeCode = parsed?.error?.code?.trim() || undefined;
+    stripeParam = parsed?.error?.param?.trim() || undefined;
   } catch {
     /* Stripe normally returns JSON; keep the raw body for the log below. */
   }
@@ -92,16 +111,27 @@ function billingPortalStripeFailure(context: string, status: number, rawBody: st
     stripeMessage,
     ...(stripeMessage ? {} : { rawBody: rawBody.slice(0, 500) }),
   });
-  const hint =
-    stripeCode === 'resource_missing'
-      ? ' The saved Stripe customer for this account no longer exists — contact support to re-link billing.'
-      : '';
+  // Only claim "the saved customer is gone" when Stripe says the missing
+  // resource IS the customer — a resource_missing about, say, the portal
+  // configuration must not send support down the re-link path.
+  const customerMissing =
+    stripeCode === 'resource_missing' &&
+    (stripeParam === 'customer' || /no such customer/i.test(stripeMessage ?? ''));
+  const hint = customerMissing
+    ? ' The saved Stripe customer for this account no longer exists — contact support to re-link billing.'
+    : '';
   const clientMessage = stripeMessage
     ? `Stripe couldn't open the billing portal: ${stripeMessage}${hint}`
     : `Stripe couldn't open the billing portal (HTTP ${status}). Check the API logs for details.`;
   return new AppError('BILLING_PORTAL_FAILED', clientMessage, 502, {
     stripeStatus: status,
     ...(stripeCode ? { stripeCode } : {}),
+    ...(customerMissing
+      ? {
+          reason: 'stripe_customer_missing',
+          ...(customerId ? { stripeCustomerId: customerId } : {}),
+        }
+      : {}),
   });
 }
 
@@ -180,7 +210,12 @@ export class BillingService {
       body: params,
     });
     if (!sessionRes.ok) {
-      throw billingPortalStripeFailure('portal session', sessionRes.status, await sessionRes.text());
+      throw billingPortalStripeFailure(
+        'portal session',
+        sessionRes.status,
+        await sessionRes.text(),
+        customerId,
+      );
     }
     const session = (await sessionRes.json()) as { url?: string };
     if (!session.url) {

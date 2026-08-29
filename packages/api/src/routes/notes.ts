@@ -2,6 +2,7 @@ import { Router, Response } from 'express';
 import { AuthenticatedRequest } from '../auth/clerk';
 import { asyncRoute } from '../middleware/async-route';
 import { requireAuth, requireTenant, requirePermission } from '../middleware/auth';
+import { notFoundOnMalformedId } from '../middleware/validate-uuid-param';
 import { createNoteSchema } from '../shared/contracts';
 import { OwnedEntityType, TenantOwnership } from '../shared/tenant-ownership';
 import { createNote, updateNote, deleteNote, listNotes, NoteRepository } from '../notes/note';
@@ -65,6 +66,7 @@ export function createNoteRouter(
     requireAuth,
     requireTenant,
     requirePermission('notes:update'),
+    notFoundOnMalformedId('Note not found'),
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
       const { content } = req.body;
       if (!content) {
@@ -93,6 +95,7 @@ export function createNoteRouter(
     requireAuth,
     requireTenant,
     requirePermission('notes:delete'),
+    notFoundOnMalformedId('Note not found'),
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
       const deleted = await deleteNote(
         req.auth!.tenantId,

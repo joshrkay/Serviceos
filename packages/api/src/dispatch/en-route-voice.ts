@@ -30,7 +30,7 @@ import type { EntityCandidate } from '../ai/resolution/entity-resolver';
 import type { VoiceLookupAnswer } from '@ai-service-os/shared';
 import { isRuntimeTimezone, localDateKey } from '../shared/timezone';
 import { getDayBoundaries } from './board-query';
-import { triggerEnRoute, resolveTechnicianName, EnRouteEnqueuer } from './routes';
+import { triggerEnRoute, EnRouteEnqueuer } from './routes';
 
 // ---------------------------------------------------------------------------
 // Resolution (AC-2, AC-3)
@@ -326,9 +326,13 @@ export async function resolveEnRouteAppointment(
 // Router-facing orchestration
 // ---------------------------------------------------------------------------
 
-export interface EnRouteVoiceDeps {
-  userRepo?: Pick<UserRepository, 'findByTenant'>;
-  voiceRepo?: Pick<VoiceRepository, 'findById'>;
+/**
+ * #847 — deps for the surface-agnostic technician core. This is
+ * `EnRouteVoiceDeps` minus the two memo-only members (`voiceRepo`,
+ * `userRepo`): everything a caller needs once it has already resolved WHO is
+ * acting to a canonical technician id.
+ */
+export interface EnRouteTechnicianDeps {
   assignmentRepo?: Pick<AssignmentRepository, 'findByTechnician'>;
   appointmentRepo?: Pick<AppointmentRepository, 'findById'>;
   jobRepo?: Pick<JobRepository, 'findById'>;
@@ -340,6 +344,11 @@ export interface EnRouteVoiceDeps {
   now?: () => Date;
 }
 
+export interface EnRouteVoiceDeps extends EnRouteTechnicianDeps {
+  userRepo?: Pick<UserRepository, 'findByTenant'>;
+  voiceRepo?: Pick<VoiceRepository, 'findById'>;
+}
+
 export interface EnRouteVoiceInput {
   tenantId: string;
   /** The recorded memo this utterance came from — its `createdBy` is the acting technician. */
@@ -347,12 +356,35 @@ export interface EnRouteVoiceInput {
   jobReference?: string;
 }
 
+/** #847 — input for the surface-agnostic core: identity is already resolved. */
+export interface EnRouteTechnicianInput {
+  tenantId: string;
+  /** The ACTING technician's canonical users.id — never another technician's. */
+  technicianId: string;
+  /** Display name for the customer's branded ETA text; omitted when unknown. */
+  technicianName?: string;
+  jobReference?: string;
+}
+
+/**
+ * Why an `unavailable` outcome could not act. Surfaces use it to choose an
+ * honest spoken/written line ('no_timezone' is "I can't tell which
+ * appointments are today", not a wiring gap) and to log the right thing.
+ */
+export type EnRouteUnavailableReason =
+  | 'not_wired'
+  | 'no_recording'
+  | 'unknown_recording'
+  | 'unknown_technician'
+  | 'no_timezone';
+
 export type EnRouteVoiceOutcome =
   | { kind: 'answered'; answer: VoiceLookupAnswer }
   | { kind: 'ambiguous'; reference: string; candidates: EntityCandidate[] }
   // No recording/identity/deps to act on — the caller should treat this
-  // exactly like an intent with no answer surface on this path (skip).
-  | { kind: 'unavailable' };
+  // exactly like an intent with no answer surface on this path (skip, or
+  // say honestly that it cannot act), never guess.
+  | { kind: 'unavailable'; reason: EnRouteUnavailableReason };
 
 /**
  * Tenant-local "today" window, shared by the voice leg above and the
@@ -395,46 +427,50 @@ function candidateToEntity(c: EnRouteCandidate): EntityCandidate {
 }
 
 /**
- * Classify → resolve → act, for the recorded-memo `en_route` path. Never
- * silent: every reachable outcome is either a fired act, a clarification
- * (ambiguous), an explicit "no upcoming appointment" answer (not_found), or
- * `unavailable` when this surface simply cannot act (no recording context,
- * e.g. the eval harness / in-app text path) — the same shape the read-only
- * lookup family already uses for "no answer surface here".
+ * The name a technician goes by in the customer's branded ETA text, when the
+ * user row carries one — `undefined` (never '') otherwise, so callers spread
+ * it conditionally and the coordinator's own fallback applies. Shared by the
+ * surfaces that call the technician core below (memo wrapper, phone Gather,
+ * media-streams, chat). The SMS keyword leg still inlines its own copy of
+ * this formatting next to its direct `triggerEnRoute` call — folding it in
+ * is a filed follow-up. Distinct from `dispatch/routes.ts#
+ * resolveTechnicianName`, which does a repo LOOKUP and falls back to the id.
  */
-export async function handleEnRouteVoiceIntent(
-  deps: EnRouteVoiceDeps,
-  input: EnRouteVoiceInput,
+export function technicianNameIfKnown(
+  user: Pick<User, 'firstName' | 'lastName' | 'email'>,
+): string | undefined {
+  const fullName = [user.firstName, user.lastName].filter(Boolean).join(' ').trim();
+  return fullName || user.email || undefined;
+}
+
+/**
+ * #847 — the surface-agnostic "on my way" core: resolve THIS technician's
+ * one appointment, then fire the SAME audited direct status act the app
+ * en-route button executes (`triggerEnRoute` → `appointment.
+ * en_route_triggered` audit + branded ETA SMS). Identity is the caller's
+ * job: each calling surface resolves WHO is acting its own way (the memo
+ * wrapper below via the recording's creator, the phone surface via the
+ * session actor, chat via the auth subject) and hands this core a canonical
+ * technician id it has already verified. (The SMS keyword leg resolves the
+ * sender's registered mobile the same way but predates this core and still
+ * runs its own resolve+trigger inline — a filed follow-up.) Never
+ * silent: every reachable outcome is a fired act, a clarification
+ * (ambiguous), an explicit "no upcoming appointment" answer (not_found), or
+ * a reasoned `unavailable`.
+ */
+export async function handleEnRouteForTechnician(
+  deps: EnRouteTechnicianDeps,
+  input: EnRouteTechnicianInput,
 ): Promise<EnRouteVoiceOutcome> {
-  if (
-    !input.recordingId ||
-    !deps.voiceRepo ||
-    !deps.userRepo ||
-    !deps.assignmentRepo ||
-    !deps.appointmentRepo ||
-    !deps.enRouteCoordinator
-  ) {
-    return { kind: 'unavailable' };
+  if (!deps.assignmentRepo || !deps.appointmentRepo || !deps.enRouteCoordinator) {
+    return { kind: 'unavailable', reason: 'not_wired' };
   }
-
-  const recording = await deps.voiceRepo.findById(input.tenantId, input.recordingId);
-  if (!recording) return { kind: 'unavailable' };
-
-  // `voice_recordings.created_by` is stamped with the CLERK subject
-  // (`req.auth.userId`), not the canonical `users.id` that
-  // `AssignmentRepository`/`AppointmentRepository` key on —
-  // `resolveCanonicalUser` (src/users/user.ts) does the same dual-check
-  // (`clerkUserId === raw || id === raw`) `app.ts`'s `resolveVoiceMemberRole`
-  // uses for the owner-grade lookup gate, so a memo creator resolves the
-  // same way on both paths.
-  const technician = await resolveCanonicalUser(deps.userRepo, input.tenantId, recording.createdBy);
-  if (!technician) return { kind: 'unavailable' };
 
   const now = deps.now ? deps.now() : new Date();
   // No tenant zone → we cannot say which appointments are "today", so we
   // decline rather than guess a day. See resolveTodayBoundary.
   const dayBoundary = await resolveTodayBoundary(deps.settingsRepo, input.tenantId, now);
-  if (!dayBoundary) return { kind: 'unavailable' };
+  if (!dayBoundary) return { kind: 'unavailable', reason: 'no_timezone' };
 
   const resolution = await resolveEnRouteAppointment(
     {
@@ -445,7 +481,7 @@ export async function handleEnRouteVoiceIntent(
     },
     {
       tenantId: input.tenantId,
-      technicianId: technician.id,
+      technicianId: input.technicianId,
       ...(input.jobReference ? { jobReference: input.jobReference } : {}),
       now,
       dayBoundary,
@@ -473,16 +509,13 @@ export async function handleEnRouteVoiceIntent(
     };
   }
 
-  const technicianName =
-    [technician.firstName, technician.lastName].filter(Boolean).join(' ').trim() || technician.email;
-
   const trigger = await triggerEnRoute(
     { enRouteCoordinator: deps.enRouteCoordinator, auditRepo: deps.auditRepo },
     {
       tenantId: input.tenantId,
       appointmentId: resolution.appointmentId,
-      ...(technicianName ? { technicianName } : {}),
-      actor: { tenantId: input.tenantId, userId: technician.id, role: 'technician' },
+      ...(input.technicianName ? { technicianName: input.technicianName } : {}),
+      actor: { tenantId: input.tenantId, userId: input.technicianId, role: 'technician' },
     },
   );
 
@@ -501,6 +534,47 @@ export async function handleEnRouteVoiceIntent(
   };
 }
 
-// Re-exported so callers of this module never need a second import from
-// dispatch/routes.ts just for the technician display-name helper.
-export { resolveTechnicianName };
+/**
+ * Classify → resolve → act, for the recorded-memo `en_route` path: a thin
+ * identity wrapper over `handleEnRouteForTechnician` that resolves the memo
+ * creator to a canonical technician, then delegates. `unavailable` when this
+ * surface simply cannot act (no recording context, e.g. the eval harness /
+ * in-app text path) — the same shape the read-only lookup family already
+ * uses for "no answer surface here".
+ */
+export async function handleEnRouteVoiceIntent(
+  deps: EnRouteVoiceDeps,
+  input: EnRouteVoiceInput,
+): Promise<EnRouteVoiceOutcome> {
+  if (
+    !deps.voiceRepo ||
+    !deps.userRepo ||
+    !deps.assignmentRepo ||
+    !deps.appointmentRepo ||
+    !deps.enRouteCoordinator
+  ) {
+    return { kind: 'unavailable', reason: 'not_wired' };
+  }
+  if (!input.recordingId) return { kind: 'unavailable', reason: 'no_recording' };
+
+  const recording = await deps.voiceRepo.findById(input.tenantId, input.recordingId);
+  if (!recording) return { kind: 'unavailable', reason: 'unknown_recording' };
+
+  // `voice_recordings.created_by` is stamped with the CLERK subject
+  // (`req.auth.userId`), not the canonical `users.id` that
+  // `AssignmentRepository`/`AppointmentRepository` key on —
+  // `resolveCanonicalUser` (src/users/user.ts) does the same dual-check
+  // (`clerkUserId === raw || id === raw`) `app.ts`'s `resolveVoiceMemberRole`
+  // uses for the owner-grade lookup gate, so a memo creator resolves the
+  // same way on both paths.
+  const technician = await resolveCanonicalUser(deps.userRepo, input.tenantId, recording.createdBy);
+  if (!technician) return { kind: 'unavailable', reason: 'unknown_technician' };
+
+  const technicianName = technicianNameIfKnown(technician);
+  return handleEnRouteForTechnician(deps, {
+    tenantId: input.tenantId,
+    technicianId: technician.id,
+    ...(technicianName ? { technicianName } : {}),
+    ...(input.jobReference ? { jobReference: input.jobReference } : {}),
+  });
+}

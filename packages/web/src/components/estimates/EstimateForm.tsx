@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useState } from 'react';
+import { Link } from 'react-router';
 import { Sparkles } from 'lucide-react';
 import { toast } from 'sonner';
 import { apiFetch } from '../../utils/api-fetch';
@@ -16,6 +17,17 @@ import { Button, Field, Input, Select, Textarea } from '../../components/ui';
 export interface EstimateFormProps {
   onCreated?: (estimateId: string) => void;
   onCancel?: () => void;
+  /**
+   * #876: pre-select this job (from /estimates/new?jobId=…). The existing
+   * enrichment effect then fetches the job's customer + location for display.
+   */
+  initialJobId?: string;
+  /**
+   * #876: scope the job dropdown to this customer's jobs (from
+   * /estimates/new?customerId=…) and show an honest empty state when the
+   * customer has none — estimates scope by job, so a job must exist first.
+   */
+  initialCustomerId?: string;
 }
 
 interface ApiJob {
@@ -84,9 +96,14 @@ function makeId() {
   return `li-${Math.random().toString(36).slice(2, 10)}-${Date.now().toString(36)}`;
 }
 
-export function EstimateForm({ onCreated, onCancel }: EstimateFormProps) {
+export function EstimateForm({
+  onCreated,
+  onCancel,
+  initialJobId,
+  initialCustomerId,
+}: EstimateFormProps) {
   const [form, setForm] = useState<State>(() => ({
-    jobId: '',
+    jobId: initialJobId ?? '',
     validUntil: '',
     customerMessage: '',
     internalNotes: '',
@@ -102,7 +119,45 @@ export function EstimateForm({ onCreated, onCancel }: EstimateFormProps) {
   const [aiUsed, setAiUsed] = useState(false);
   const [aiError, setAiError] = useState<string | null>(null);
 
-  const { data: jobs } = useListQuery<ApiJob>('/api/jobs');
+  // #876: a ?customerId= deep link narrows the dropdown to that customer's
+  // jobs (the endpoint already supports the filter — no API change).
+  const { data: jobs, isLoading: jobsLoading } = useListQuery<ApiJob>('/api/jobs', {
+    filters: initialCustomerId ? { customerId: initialCustomerId } : {},
+  });
+
+  // #876 review — the scoped dropdown alone never said WHO it was scoped
+  // to; fetch the customer's name so the deep link shows "For: <name>"
+  // (mirrors JobForm's full-fetch of ?customerId=). On 404/error the
+  // affordance simply doesn't render — the param may be a stale link.
+  const [scopedCustomerName, setScopedCustomerName] = useState<string | null>(null);
+  useEffect(() => {
+    if (!initialCustomerId) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await apiFetch(`/api/customers/${encodeURIComponent(initialCustomerId)}`);
+        if (!res.ok) return;
+        const c = (await res.json()) as {
+          id?: string;
+          displayName?: string;
+          firstName?: string;
+          lastName?: string;
+          companyName?: string;
+        } | null;
+        if (cancelled || !c?.id) return;
+        const human = [c.firstName, c.lastName].filter(Boolean).join(' ').trim();
+        const name =
+          c.displayName ||
+          (human && c.companyName ? `${human} (${c.companyName})` : human || c.companyName);
+        if (name) setScopedCustomerName(name);
+      } catch {
+        // Leave the affordance off — the scoped dropdown still works.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [initialCustomerId]);
 
   // When the user picks a job, fetch the enriched job detail (customer + location)
   // and look up any active maintenance agreement for that customer.
@@ -125,6 +180,16 @@ export function EstimateForm({ onCreated, onCancel }: EstimateFormProps) {
       .catch(() => { if (!cancelled) { setSelectedJob(null); setActiveContract(null); } });
     return () => { cancelled = true; };
   }, [form.jobId]);
+
+  // #876 review — a ?jobId= deep link can point at a job beyond the first
+  // page of /api/jobs, which left the required Select rendering blank. The
+  // enrichment effect above already fetches the job by id (mirroring
+  // JobForm's full-fetch of its deep-linked entity), so inject it as an
+  // option when the listed page doesn't contain it.
+  const selectableJobs =
+    selectedJob && form.jobId === selectedJob.id && !jobs.some((j) => j.id === selectedJob.id)
+      ? [selectedJob, ...jobs]
+      : jobs;
 
   const serviceAddress = selectedJob?.location
     ? [selectedJob.location.street1, selectedJob.location.city, selectedJob.location.state, selectedJob.location.postalCode]
@@ -317,6 +382,16 @@ export function EstimateForm({ onCreated, onCancel }: EstimateFormProps) {
       )}
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+        {/* #876 review — say WHO the scoped deep link is for, next to the
+            filtered job dropdown. */}
+        {initialCustomerId && scopedCustomerName && (
+          <p
+            data-testid="scoped-customer"
+            className="md:col-span-2 -mb-1 text-xs text-muted-foreground"
+          >
+            For: <span className="font-medium text-foreground">{scopedCustomerName}</span>
+          </p>
+        )}
         {/* Job picker */}
         <Field label="Job *" className="md:col-span-2">
           <Select
@@ -325,13 +400,30 @@ export function EstimateForm({ onCreated, onCancel }: EstimateFormProps) {
             required
           >
             <option value="">— select a job —</option>
-            {jobs.map(j => (
+            {selectableJobs.map(j => (
               <option key={j.id} value={j.id}>
                 {j.jobNumber} — {j.summary}
               </option>
             ))}
           </Select>
         </Field>
+
+        {/* #876: a customer-scoped deep link with zero jobs used to render a
+            silent empty dropdown — say so, and offer the next step. */}
+        {initialCustomerId && !jobsLoading && jobs.length === 0 && (
+          <div
+            data-testid="no-jobs-empty-state"
+            className="md:col-span-2 rounded-lg border border-border bg-secondary px-3 py-2.5 text-sm text-muted-foreground"
+          >
+            This customer has no jobs yet — an estimate needs a job to scope to.{' '}
+            <Link
+              to={`/jobs/new?customerId=${encodeURIComponent(initialCustomerId)}`}
+              className="inline-flex min-h-11 items-center text-primary underline"
+            >
+              Create a job for this customer
+            </Link>
+          </div>
+        )}
 
         {/* Customer & service location (auto-populated) */}
         {selectedJob && (

@@ -33,13 +33,21 @@ import {
   allPathSmokeUtterances,
   runPathSmoke,
 } from '../src/ai/voice-quality/path-smoke';
+import { SYSTEM_PROMPT } from '../src/ai/orchestration/intent-classifier';
 
-// Cost projection mirrors packages/voice-eval/live-support.ts (Haiku rates +
-// conservative system-prompt size). Duplicated as plain constants so this CLI
-// does not depend on the voice-eval package workspace membership.
+// Cost projection mirrors packages/voice-eval/live-support.ts (Haiku rates).
+// Rates stay duplicated as plain constants so this CLI does not depend on the
+// voice-eval package workspace membership.
 const HAIKU_INPUT_CENTS_PER_MTOKEN = 300;
 const HAIKU_OUTPUT_CENTS_PER_MTOKEN = 1500;
-const EST_SYSTEM_PROMPT_TOKENS = 13500;
+// #899 — derived from the REAL prompt instead of a hand-maintained constant
+// (the old literal 13,500 had silently fallen BELOW the actual prompt size,
+// underestimating spend — the unsafe direction for a preflight cost cap).
+// This script already imports api src modules, so it sizes against the same
+// SYSTEM_PROMPT the smoke calls send (path-smoke passes no surface profile ⇒
+// the full 'operator' taxonomy), chars/4 like live-support.estimateTokens,
+// with the same 1.15× safety margin voice-eval-live.test.ts pins.
+const EST_SYSTEM_PROMPT_TOKENS = Math.ceil((SYSTEM_PROMPT.length / 4) * 1.15);
 const EST_OUTPUT_TOKENS_PER_CALL = 250;
 
 const argv = process.argv.slice(2);

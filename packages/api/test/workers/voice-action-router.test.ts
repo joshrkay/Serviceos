@@ -38,7 +38,12 @@ import { InMemoryJobRepository, type Job } from '../../src/jobs/job';
 import { InMemoryUserRepository } from '../../src/users/user';
 import type { Appointment } from '../../src/appointments/appointment';
 import type { LLMGateway, LLMResponse } from '../../src/ai/gateway/gateway';
-import type { IntentClassification } from '../../src/ai/orchestration/intent-classifier';
+import {
+  isIntentAcceptedOnProfile,
+  SUPPORTED_INTENTS,
+  SYSTEM_PROMPT,
+  type IntentClassification,
+} from '../../src/ai/orchestration/intent-classifier';
 import type { QueueMessage } from '../../src/queues/queue';
 import type { Logger } from '../../src/logging/logger';
 import type { SlotConflictCheckerInput } from '../../src/ai/tasks/slot-conflict-checker';
@@ -2117,6 +2122,49 @@ describe('Phase-2 Track A — extended intents routing', () => {
     expect(
       systemMessages.some((m: { content: string }) => m.content.includes('lookup_day_overview')),
     ).toBe(false);
+  });
+
+  it("the memo path always classifies as 'operator' — intent_off_surface is unreachable here (#902)", async () => {
+    // voice-action-router.ts is deliberately NOT touched by the #886/#887
+    // surface gating (memo dictation is a trusted operator surface), so this
+    // pin lives router-adjacent instead: processSegment passes no
+    // `classifierProfile`, which classifyIntent defaults to 'operator'. Two
+    // structural halves make the guard's 'intent_off_surface' interception
+    // unreachable on this path, and both are asserted:
+    // 1. the base system message is the historical full-taxonomy operator
+    //    prompt (a profile ever being threaded in would change these bytes);
+    // 2. 'operator' accepts every supported intent, so even an intent no
+    //    OTHER profile offers routes normally — proven end-to-end with
+    //    record_payment, which the 'caller' guard would intercept.
+    const localRepo = new InMemoryProposalRepository();
+    const gateway = gatewayReturning([
+      JSON.stringify({
+        intentType: 'record_payment',
+        confidence: 0.96,
+        extractedEntities: { jobReference: 'INV-0042', amount: 45000, paymentMethod: 'cash' },
+      }),
+    ]);
+    const worker = createVoiceActionRouterWorker({ gateway, proposalRepo: localRepo });
+
+    await worker.handle(
+      msg({ tenantId: 't-memo', userId: 'u-1', transcript: 'Mark INV-0042 paid — 450 cash' }),
+      silentLogger(),
+    );
+
+    const call = (gateway.complete as ReturnType<typeof vi.fn>).mock.calls[0][0];
+    const systemMessages = call.messages.filter((m: { role: string }) => m.role === 'system');
+    expect(systemMessages[0].content).toBe(SYSTEM_PROMPT);
+
+    const byTenant = await localRepo.findByTenant('t-memo');
+    expect(byTenant).toHaveLength(1);
+    expect(byTenant[0].proposalType).toBe('record_payment');
+
+    for (const intent of SUPPORTED_INTENTS) {
+      expect(
+        isIntentAcceptedOnProfile('operator', intent),
+        `operator profile must accept ${intent} or the memo path could hit intent_off_surface`,
+      ).toBe(true);
+    }
   });
 
   it('extendedIntentsEnabled resolver failure is non-fatal (falls back to legacy prompt)', async () => {

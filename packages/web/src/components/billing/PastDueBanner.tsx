@@ -2,6 +2,11 @@ import { useState } from 'react';
 import { AlertTriangle } from 'lucide-react';
 import { useApiClient } from '../../lib/apiClient';
 import { useOnboardingStatus } from '../../hooks/useOnboardingStatus';
+import {
+  isCustomerMissing,
+  parsePortalFailure,
+  type BillingPortalFailure,
+} from '../../utils/billing-error';
 
 /**
  * Past-due payment banner. Renders whenever the tenant's Stripe
@@ -19,7 +24,7 @@ export function PastDueBanner() {
   const apiFetch = useApiClient();
   const { data } = useOnboardingStatus(60_000);
   const [pending, setPending] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<BillingPortalFailure | null>(null);
 
   if (!data || data.subscriptionStatus !== 'past_due') return null;
 
@@ -32,21 +37,28 @@ export function PastDueBanner() {
         body: JSON.stringify({ returnUrl: window.location.href }),
       });
       if (!res.ok) {
-        setError(`Couldn't open billing (HTTP ${res.status}). Try again in a moment.`);
+        // #873 — render the server's actionable reason (e.g. the saved
+        // Stripe customer no longer exists — contact support to re-link
+        // billing) instead of discarding it for a generic HTTP line.
+        setError(await parsePortalFailure(res));
         return;
       }
       const body = (await res.json()) as { url?: string };
       if (body.url) {
         window.location.href = body.url;
       } else {
-        setError("Couldn't open billing — no portal URL returned.");
+        setError({ message: "Couldn't open billing — no portal URL returned." });
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Network error');
+      setError({ message: err instanceof Error ? err.message : 'Network error' });
     } finally {
       setPending(false);
     }
   }
+
+  // #873 — when the SAVED Stripe customer is gone, opening the portal can
+  // never succeed; hide the CTA and render re-link guidance instead.
+  const customerMissing = error !== null && isCustomerMissing(error);
 
   return (
     <div className="border-b border-red-300 bg-red-50 px-4 py-3 text-sm flex items-center gap-3">
@@ -56,16 +68,35 @@ export function PastDueBanner() {
         <span className="text-red-800">
           Update your card to keep your AI agent answering calls.
         </span>
-        {error && <span className="ml-3 text-red-700">{error}</span>}
+        {error && !customerMissing && (
+          <span role="alert" className="ml-3 text-red-700">
+            {error.message}
+          </span>
+        )}
+        {customerMissing && (
+          <span role="alert" className="ml-3 text-red-700" data-testid="past-due-relink">
+            The saved Stripe billing record
+            {error?.stripeCustomerId && (
+              <>
+                {' '}
+                (<code className="font-mono" data-testid="past-due-stale-id">{error.stripeCustomerId}</code>)
+              </>
+            )}{' '}
+            no longer exists — the account owner needs to contact support to re-link billing
+            before the card can be updated.
+          </span>
+        )}
       </div>
-      <button
-        type="button"
-        onClick={() => void openPortal()}
-        disabled={pending}
-        className="px-3 py-1.5 bg-red-700 text-white rounded text-xs font-medium disabled:opacity-50"
-      >
-        {pending ? 'Opening…' : 'Update payment method'}
-      </button>
+      {!customerMissing && (
+        <button
+          type="button"
+          onClick={() => void openPortal()}
+          disabled={pending}
+          className="px-3 py-1.5 bg-red-700 text-white rounded text-xs font-medium disabled:opacity-50"
+        >
+          {pending ? 'Opening…' : 'Update payment method'}
+        </button>
+      )}
     </div>
   );
 }

@@ -17,6 +17,7 @@ import { AiCheckStep } from './steps/AiCheckStep';
 import { TestCallStep } from './steps/TestCallStep';
 import { ConversationStep } from './steps/ConversationStep';
 import type { OnboardingStepId } from '../../../types/onboarding';
+import { isExplicitRerun } from '../../../utils/onboarding-rerun';
 
 /**
  * Maps the real wizard steps onto the launch-funnel's spec step names.
@@ -47,7 +48,16 @@ export function OnboardingShell() {
   const apiFetch = useApiClient();
   const { userId } = useAuth();
   const { data, isLoading, error, refetch } = useOnboardingStatus(3000);
-  const [override, setOverride] = useState<OnboardingStepId | null>(null);
+  // #875 — "Re-run setup assistant" deep-links here with the shared rerun
+  // param (utils/onboarding-rerun.ts — the same definition the Settings and
+  // Templates entry points link with). Seeding the step override at mount
+  // lands the re-run on the first reviewable step AND lets it past the
+  // completion bounce below, which otherwise redirects every completed
+  // tenant home before the sidebar's handleSelect could ever set an
+  // override. A plain /onboarding visit by a completed tenant still bounces.
+  const [override, setOverride] = useState<OnboardingStepId | null>(() =>
+    isExplicitRerun(searchParams) ? 'identity' : null,
+  );
   const billingToastShown = useRef(false);
 
   // B1.19 — "talk it through" conversational alternative to the form
@@ -256,7 +266,8 @@ export function OnboardingShell() {
 
   // Once complete, bounce to dashboard. The app-shell guard would
   // already block re-entry, but this guards against a user landing on
-  // /onboarding directly after finishing.
+  // /onboarding directly after finishing. An explicit re-run
+  // (?rerun=1) pre-seeds `override` at mount above and passes through.
   if (data.isComplete && !override) {
     navigate('/', { replace: true });
     return null;

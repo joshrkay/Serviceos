@@ -163,9 +163,12 @@ function makeCtx(opts: {
 
 describe('createVoiceTurnProcessor.speechTurn', () => {
   it('classifies a recognized intent and advances the FSM to intent_confirm', async () => {
+    // #886/#887 — the default makeCtx session is untrusted telephony
+    // ('caller' profile), so the canned classification must be an intent
+    // that surface offers (create_invoice would be guard-converted).
     const gateway = makeGatewayReturning(
       JSON.stringify({
-        intentType: 'create_invoice',
+        intentType: 'draft_estimate',
         confidence: 0.95,
         reasoning: 'matches keywords',
         extractedEntities: { customerName: 'Acme' },
@@ -178,7 +181,7 @@ describe('createVoiceTurnProcessor.speechTurn', () => {
 
     const sideEffects = await processor.speechTurn({
       session,
-      speechResult: 'I need an invoice for Acme',
+      speechResult: 'I would like a quote for a water heater replacement',
       callSid: 'CA-test',
       tenantId: 'tenant-abc',
     });
@@ -192,13 +195,13 @@ describe('createVoiceTurnProcessor.speechTurn', () => {
 
     // The intent_confirm placeholder was expanded to a concrete readback.
     const ttsLast = [...sideEffects].reverse().find((fx) => fx.type === 'tts_play');
-    expect(ttsLast?.payload.text).toMatch(/create invoice/);
+    expect(ttsLast?.payload.text).toMatch(/estimate/i);
 
     // The caller utterance landed in the transcript.
     const liveSession = store.get(session.id)!;
     expect(
       liveSession.transcript.some((line) =>
-        line.includes('I need an invoice for Acme'),
+        line.includes('I would like a quote for a water heater replacement'),
       ),
     ).toBe(true);
   });
@@ -285,12 +288,34 @@ describe('createVoiceTurnProcessor.speechTurn', () => {
     for (const p of proposals) {
       expect(p.proposalType).toBe('voice_clarification');
     }
-    // The denial was audited. (main's surface-violation event superseded this
-    // branch's agent.calling.i6_s1_denied_s2_op on the merge — same I6 gate,
-    // one canonical event.)
+    // #887 — the attack is now stopped one layer EARLIER: the classifier's
+    // post-parse surface guard converts send_invoice to unknown
+    // ('intent_off_surface') on the caller profile, so the confirmed-readback
+    // dance never starts and nothing reaches the I6 proposal gate. The I6
+    // gate itself stays pinned as defense-in-depth by the
+    // executeSideEffects-level test ("an S2-only proposal side-effect is
+    // neutralized...") below.
     expect(
       auditRepo.getAll().some((e) => e.eventType === 'voice.surface_violation_blocked'),
-    ).toBe(true);
+    ).toBe(false);
+    // #902 — but the earlier interception must NOT be silent: an injection
+    // attempt on a customer line lands in the audit log as
+    // voice.intent_off_surface, carrying what was asked and which profile
+    // refused it.
+    const offSurface = auditRepo
+      .getAll()
+      .filter((e) => e.eventType === 'voice.intent_off_surface');
+    expect(offSurface).toHaveLength(1);
+    expect(offSurface[0].tenantId).toBe('tenant-abc');
+    expect(offSurface[0].entityId).toBe(session.id);
+    expect(offSurface[0].metadata).toMatchObject({
+      intent: 'send_invoice',
+      profile: 'caller',
+    });
+    // Turn 1 reprompted; the stray "yes" (no pending question) was a second
+    // non-routable turn, exhausting the bounded reprompt budget — the call
+    // hands off to a human instead of looping. Still: no draft, no S2 write.
+    expect(session.machine.currentState).toBe('escalating');
   });
 
   it('maps an update_job intent to an update_job proposal (not the voice_clarification dead-end)', async () => {
@@ -378,7 +403,7 @@ describe('createVoiceTurnProcessor.speechTurn', () => {
 
     await processor.speechTurn({
       session,
-      speechResult: 'I need an invoice for Acme',
+      speechResult: 'I would like a quote for a water heater replacement',
       callSid: 'CA-test',
       tenantId: 'tenant-abc',
     });
@@ -420,7 +445,7 @@ describe('createVoiceTurnProcessor.speechTurn', () => {
 
     await processor.speechTurn({
       session,
-      speechResult: 'I need an invoice for Acme',
+      speechResult: 'I would like a quote for a water heater replacement',
       callSid: 'CA-test',
       tenantId: 'tenant-abc',
     });
@@ -1187,11 +1212,29 @@ describe('I6 — untrusted-surface predicate is a trusted-channel allowlist', ()
 
     const proposals = await proposalRepo.findByTenant('tenant-abc');
     expect(proposals.some((p) => p.proposalType === 'send_invoice')).toBe(false);
-    // main's surface-violation event superseded agent.calling.i6_s1_denied_s2_op
-    // on the merge — same I6 gate, one canonical event.
+    // #887 — fail-closed now manifests at the classifier gate: an unknown
+    // channel derives the 'caller' profile (classifierProfileForSession
+    // mirrors the same TRUSTED_CHANNELS allowlist), so send_invoice is
+    // guard-converted before the I6 proposal gate is ever reached — no
+    // proposal-gate audit, no S2 draft.
     expect(
       auditRepo.getAll().some((e) => e.eventType === 'voice.surface_violation_blocked'),
-    ).toBe(true);
+    ).toBe(false);
+    // #902 — the classifier-gate interception leaves its own trail, and the
+    // profile it records proves the fail-closed derivation: 'caller', on a
+    // channel nobody trusted.
+    const offSurface = auditRepo
+      .getAll()
+      .filter((e) => e.eventType === 'voice.intent_off_surface');
+    expect(offSurface).toHaveLength(1);
+    expect(offSurface[0].metadata).toMatchObject({
+      intent: 'send_invoice',
+      profile: 'caller',
+    });
+    // Turn 1 reprompted; the stray "yes" (no pending question) was a second
+    // non-routable turn, exhausting the bounded reprompt budget — the call
+    // hands off to a human instead of looping. Still: no draft, no S2 write.
+    expect(session.machine.currentState).toBe('escalating');
   });
 
   it('still exempts the trusted in-app owner surface', async () => {

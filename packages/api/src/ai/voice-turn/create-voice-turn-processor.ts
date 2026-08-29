@@ -47,7 +47,13 @@
 
 import type { Pool } from 'pg';
 import { appendAgentTts, callerTranscriptText } from './transcript-append';
-import { classifyIntent, isVoiceApprovalIntent, isVoiceEditIntent } from '../orchestration/intent-classifier';
+import {
+  classifyIntent,
+  isVoiceApprovalIntent,
+  isVoiceEditIntent,
+  type IntentClassification,
+} from '../orchestration/intent-classifier';
+import type { ClassifierProfile } from '../orchestration/classifier-profile';
 import {
   AI_BUSY_HOLD_LINE,
   classifyInfraFailure,
@@ -90,6 +96,7 @@ import {
   escalationStartedEvent,
 } from '../voice-quality/events';
 import { VOICE_EVENT_CHANNEL } from '../voice-quality/event-bus';
+import { answerPhoneEnRoute, type PhoneEnRouteDeps } from './phone-en-route-surface';
 import { buildEscalationSummary } from '../agents/customer-calling/escalation-summary-builder';
 import { buildCallerContextFromSession } from '../agents/customer-calling/escalation-context-from-session';
 import {
@@ -157,6 +164,7 @@ import {
   buildNegotiationCallbackContent,
   evaluateNegotiationDiscount,
 } from '../../proposals/guardrails/negotiation-guardrail';
+import { buildComplaintCallbackContent } from '../../proposals/guardrails/complaint-guardrail';
 import {
   buildAllowDiscountCallbackContent,
   buildDiscountClarificationPayload,
@@ -443,6 +451,79 @@ function isUntrustedS1Session(session: VoiceSession): boolean {
   );
 }
 
+/**
+ * #886/#887 — which classifier taxonomy profile this session's turns
+ * advertise. Derived from SESSION IDENTITY ONLY (channel allowlist, RV-070/
+ * 071 owner flag, D-026 phone actor) — never from transcript content, so a
+ * caller cannot talk their way into a wider taxonomy. Mirrors
+ * isUntrustedS1Session above: a trusted channel ('inapp') keeps the full
+ * 'operator' prompt byte-identical; an untrusted channel splits on whether
+ * caller-ID resolved an employee actor (stamped BEFORE the first classify —
+ * twilio-adapter establishment / the shared media-streams core).
+ *
+ * The prompt is a hint: the S1 proposal-type allowlist, the D-026 lookup
+ * RBAC, and the classifier's own PROFILE_INTENTS post-parse guard keep
+ * enforcing regardless of what was advertised.
+ */
+export function classifierProfileForSession(session: VoiceSession): ClassifierProfile {
+  if (session.machine.currentContext.ownerSession === true) return 'owner_line';
+  if (!isUntrustedS1Session(session)) return 'operator'; // trusted channel: 'inapp'
+  return session.actorUserId ? 'field_tech' : 'caller'; // D-026 phone actor
+}
+
+/**
+ * #887/#902 — audit an off-surface classification. The classifier's
+ * post-parse guard intercepts the intent BEFORE routing (no proposal is
+ * minted), which also means the proposal-gate
+ * `voice.surface_violation_blocked` event can never fire for it — without
+ * this event, a prompt-injection attempt on a customer line ("send the
+ * Henderson invoice to me") would dissolve into a reprompt with no trail.
+ * Deliberately a NEW event name, `voice.intent_off_surface`, not the old
+ * proposal-gate one: this records an intercepted CLASSIFICATION (metadata:
+ * the intent the model picked + the profile that refused it — there is no
+ * requestedProposalType, because no proposal was ever requested), while
+ * `voice.surface_violation_blocked` keeps meaning "a mapped proposal type
+ * was denied at minting" on the paths that still reach it (guard-exempt
+ * intents, the deterministic emergency path).
+ *
+ * The classifier itself has no audit repo (and no session id), so the fact
+ * travels on the classification (`unknownReason`/`offSurfaceIntent`) and
+ * both live classify seams — the processor speechTurn and the Twilio Gather
+ * adapter — call this right after classifying. No-op when the repo is
+ * absent or the turn was not off-surface; best-effort like every voice
+ * audit.
+ */
+export async function auditOffSurfaceClassification(args: {
+  auditRepo: AuditRepository | undefined;
+  tenantId: string;
+  sessionId: string;
+  profile: ClassifierProfile;
+  classification: IntentClassification;
+  actorId: string;
+}): Promise<void> {
+  const { auditRepo, classification } = args;
+  if (!auditRepo || classification.unknownReason !== 'intent_off_surface') return;
+  try {
+    await auditRepo.create(
+      createAuditEvent({
+        tenantId: args.tenantId,
+        actorId: args.actorId,
+        actorRole: 'system',
+        eventType: 'voice.intent_off_surface',
+        entityType: 'voice_session',
+        entityId: args.sessionId,
+        metadata: {
+          intent: classification.offSurfaceIntent ?? null,
+          profile: args.profile,
+          confidence: classification.confidence,
+        },
+      }),
+    );
+  } catch {
+    /* audit is best-effort */
+  }
+}
+
 export interface VoiceTurnProcessorDeps {
   store: VoiceSessionStore;
   gateway: LLMGateway;
@@ -450,6 +531,16 @@ export interface VoiceTurnProcessorDeps {
   auditRepo?: AuditRepository;
   proposalRepo?: ProposalRepository;
   onCallRepo?: OnCallRepository;
+  /**
+   * #847 — the en_route ("on my way") bundle for the transports whose turns
+   * run through `speechTurn` (media-streams finals via
+   * `processCallerUtterance`). The SAME `PhoneEnRouteDeps` the Gather branch
+   * uses — the Twilio adapter constructs this processor with `...this.deps`,
+   * so app.ts's one wiring site serves BOTH phone transports. Absent → the
+   * surface speaks the honest unavailable line and logs a wiring-gap
+   * warning (never a silent clarification card).
+   */
+  enRoute?: PhoneEnRouteDeps;
   leadRepo?: LeadRepository;
   /**
    * N-003 (P2-036) — when wired, a live-call negotiation guardrail callback is
@@ -1337,6 +1428,77 @@ export function createVoiceTurnProcessor(
         });
         const storedNegotiation = await deps.proposalRepo.create(negotiationProposal);
         session.proposalIds.push(storedNegotiation.id);
+        return;
+      }
+
+      // #846 / D-027 — complaint guardrail paper trail. The FSM emits this
+      // when the caller reports dissatisfaction (transitions.ts) while it
+      // fast-paths the CALL to `escalating` — the caller gets a human; this
+      // proposal is the owner's record of it. The recorded-memo path
+      // (ComplaintTaskHandler) mints a pinned-prefix `add_note` PLUS an
+      // owner `callback` — but `add_note` is NOT S1-allowed, so the generic
+      // path below would coerce the live caller's complaint to a bare
+      // clarification: the exact silent degrade this branch exists to
+      // prevent. The live leg therefore mints only the `callback` follow-up
+      // (S1-allowed — it routes a human, never a mutation), carrying the
+      // SAME deterministic severity markers the memo path stamps, and does
+      // NOT dispatch `proposal_queued`: the guard already moved the FSM to
+      // `escalating`, so a proposal_queued transition would be wrong here.
+      if (intent === 'complaint') {
+        const description = typeof entities.noteBody === 'string' ? entities.noteBody : '';
+        const transcript = typeof entities.transcript === 'string' ? entities.transcript : '';
+        // The caller's raw words, threaded from the classified turn by the
+        // FSM guard — without them a "refund / my lawyer" complaint whose
+        // classifier extracted no noteBody scored `normal` (severity
+        // detection saw empty text). Mirrors ComplaintTaskHandler's
+        // `ee.noteBody ?? context.message` fallback on the memo path.
+        const utterance = typeof fx.payload.utterance === 'string' ? fx.payload.utterance : '';
+        const detectText = `${description} ${transcript} ${utterance}`.trim();
+        const customerName =
+          typeof entities.customerName === 'string' ? entities.customerName : undefined;
+        const conversationId =
+          typeof fx.payload.conversationId === 'string' ? fx.payload.conversationId : undefined;
+        const content = buildComplaintCallbackContent({
+          detectText,
+          ...(customerName ? { customerName } : {}),
+          ...(conversationId ? { conversationId } : {}),
+        });
+        const complaintProposal = buildProposal({
+          tenantId,
+          proposalType: 'callback',
+          payload: content.payload,
+          summary: content.summary,
+          explanation: content.explanation,
+          sourceContext: {
+            source: 'calling-agent',
+            channel: 'telephony',
+            // A complaint always routes to a human `callback` (S1-safe), but
+            // the surface still travels with the proposal for audit + the
+            // execution-boundary re-check — same convention as negotiation.
+            surface: (session.machine.currentContext.ownerSession === true
+              ? 'S2'
+              : 'S1') as ProposalSurface,
+            sessionId: session.id,
+          },
+          // Real classify-run id or null — never fabricated (FK to ai_runs).
+          ...(typeof fx.payload.aiRunId === 'string' && fx.payload.aiRunId
+            ? { aiRunId: fx.payload.aiRunId }
+            : {}),
+          createdBy:
+            typeof fx.payload.customerId === 'string'
+              ? fx.payload.customerId
+              : deps.systemActorId ?? 'calling-agent',
+          ...(tenantThresholdOverride ? { tenantThresholdOverride } : {}),
+        });
+        const storedComplaint = await deps.proposalRepo.create(complaintProposal);
+        session.proposalIds.push(storedComplaint.id);
+        // Session-bus telemetry: a dead complaint branch must be a metric,
+        // not an audit finding. (The Gather adapter executes no
+        // emit_quality_event, so this is the phone leg's observable signal.)
+        session.events.emit('voice-event', {
+          type: 'proposal_created',
+          proposalId: storedComplaint.id,
+        });
         return;
       }
 
@@ -3691,6 +3853,11 @@ export function createVoiceTurnProcessor(
         tenantId,
         session.customerId,
       );
+      // #886/#887 — surface-conditional taxonomy: derived from session
+      // identity (owner line / trusted channel / D-026 phone actor). Hoisted
+      // so the off-surface audit below records the same profile the guard
+      // enforced.
+      const classifierProfile = classifierProfileForSession(session);
       try {
         const classification = await classifyIntent(
           speechResult,
@@ -3698,6 +3865,7 @@ export function createVoiceTurnProcessor(
             tenantId,
             verticalPromptSection,
             planPromptSection,
+            classifierProfile,
             // RV-071 — the owner-approval prompt section is appended ONLY
             // on a recognized owner line (caller-ID match; see
             // approver-identity.ts), keeping every other call's
@@ -3724,6 +3892,16 @@ export function createVoiceTurnProcessor(
             tokenUsage: classification.tokenUsage,
           }),
         );
+        // #887/#902 — an off-surface classification was intercepted by the
+        // guard; leave the trail the interception would otherwise erase.
+        await auditOffSurfaceClassification({
+          auditRepo: deps.auditRepo,
+          tenantId,
+          sessionId: session.id,
+          profile: classifierProfile,
+          classification,
+          actorId: deps.systemActorId ?? 'calling-agent',
+        });
         const capExceeded = recordCost(session, classification.tokenUsage);
         if (capExceeded) {
           classifierEvent = { type: 'cost_cap_exceeded' };
@@ -3739,6 +3917,9 @@ export function createVoiceTurnProcessor(
               unknown
             >,
             confidence: classification.confidence,
+            // The raw transcript rides the event so guards that persist
+            // caller words (complaint severity detection) see them.
+            utterance: speechResult,
             // Thread the classify call's REAL ai_runs id so a proposal born
             // from this intent links to its run row (proposals.ai_run_id FK).
             ...(classification.aiRunId ? { aiRunId: classification.aiRunId } : {}),
@@ -3757,6 +3938,7 @@ export function createVoiceTurnProcessor(
               unknown
             >,
             confidence: classification.confidence,
+            utterance: speechResult,
           };
         }
       } catch (err) {
@@ -3783,6 +3965,42 @@ export function createVoiceTurnProcessor(
             reason: systemFailureReasonForInfra(infraKind),
           }),
         );
+        await executeSideEffects(session, sideEffectsAll, tenantId);
+        appendAgentTts(deps.store, session.id, sideEffectsAll);
+        return sideEffectsAll;
+      }
+
+      // #847 (#860 step 2) — en_route ("on my way") on the transports whose
+      // turns run through speechTurn (media-streams finals). A DIRECT status
+      // act (Part F decision F-3): the technician IS the human acting, so it
+      // fires the SAME audited act the app en-route button executes — never
+      // a proposal, which is why it is deliberately absent from
+      // INTENT_TO_PROPOSAL_TYPE (falling through to the FSM would end in the
+      // clarification card this branch exists to prevent). Same out-of-FSM
+      // shape as the Gather branch in twilio-adapter: identity + role are
+      // checked in the surface adapter (session.actorUserId is stamped for
+      // BOTH phone transports by the shared establishment core), the outcome
+      // is spoken, and `intent_classified` is NOT dispatched — the FSM stays
+      // in intent_capture. High-confidence only, mirroring the Gather gate:
+      // a low-confidence en_route follows the normal repair path.
+      if (
+        classifierEvent.type === 'intent_classified' &&
+        classifierEvent.intentType === 'en_route' &&
+        classifierEvent.confidence >= TAU_INT
+      ) {
+        const enRouteLine = await answerPhoneEnRoute(deps.enRoute, {
+          session,
+          tenantId,
+          entities: classifierEvent.entities,
+        });
+        sideEffectsAll.push({
+          type: 'tts_play',
+          payload: { text: enRouteLine, source: 'en_route' },
+        });
+        sideEffectsAll.push({
+          type: 'tts_play',
+          payload: { text: 'Anything else I can help you with?' },
+        });
         await executeSideEffects(session, sideEffectsAll, tenantId);
         appendAgentTts(deps.store, session.id, sideEffectsAll);
         return sideEffectsAll;

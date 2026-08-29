@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { isTwilioTestNumber } from '../telephony/phone-policy';
 
 const TimeOfDay = z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/, 'expected HH:MM');
 const DayHours = z.object({ open: TimeOfDay, close: TimeOfDay }).nullable();
@@ -18,7 +19,9 @@ export const BusinessHoursSchema = z
 export const BusinessIdentityInputSchema = z.object({
   businessName: z.string().min(1).max(120),
   serviceAreaText: z.string().max(200).optional(),
-  serviceAreaRadius: z.number().int().min(1).max(500).optional(),
+  // #874 — tri-state: omit to keep the stored radius, null to explicitly
+  // clear it (an emptied field in the Service-area editor), 1–500 to set.
+  serviceAreaRadius: z.number().int().min(1).max(500).nullable().optional(),
   businessHours: BusinessHoursSchema,
   jobBufferMinutes: z.number().int().min(0).max(240),
   hourlyRateCents: z.number().int().min(100).max(100_000),
@@ -76,9 +79,17 @@ export const PhoneAvailableInputSchema = z.object({
 export type PhoneAvailableInput = z.infer<typeof PhoneAvailableInputSchema>;
 
 // Number picker — claim a specific number the tradesperson chose from the
-// search results. E.164 (+1 + 10 digits for US/Canada).
+// search results. E.164 (+1 + 10 digits for US/Canada). #880 — Twilio's
+// magic test numbers (+1500555xxxx, e.g. +15005550006) pass the E.164 shape
+// but are never real, dialable lines; claiming one would provision a tenant
+// onto a number customers can't call, so reject them at the contract.
 export const PhoneClaimInputSchema = z.object({
-  phoneNumber: z.string().regex(/^\+1\d{10}$/, 'expected an E.164 US/Canada number'),
+  phoneNumber: z
+    .string()
+    .regex(/^\+1\d{10}$/, 'expected an E.164 US/Canada number')
+    .refine((n) => !isTwilioTestNumber(n), {
+      message: 'This is a Twilio test number and cannot be claimed as a business line',
+    }),
 });
 export type PhoneClaimInput = z.infer<typeof PhoneClaimInputSchema>;
 

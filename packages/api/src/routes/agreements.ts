@@ -10,6 +10,7 @@ import {
   requireRole,
 } from '../middleware/auth';
 import { asyncRoute } from '../middleware/async-route';
+import { notFoundOnMalformedId } from '../middleware/validate-uuid-param';
 import { AgreementRepository } from '../agreements/agreement';
 import { AgreementRunRepository } from '../agreements/agreement-run';
 import {
@@ -86,6 +87,7 @@ export function createAgreementsRouter(deps: AgreementsRouterDeps): Router {
     requireAuth,
     requireTenant,
     requirePermission('customers:view'),
+    notFoundOnMalformedId('Agreement not found'),
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
       const tenantId = req.auth!.tenantId;
       const agreement = await agreementRepo.findById(tenantId, req.params.id);
@@ -103,6 +105,7 @@ export function createAgreementsRouter(deps: AgreementsRouterDeps): Router {
     requireAuth,
     requireTenant,
     requirePermission('customers:update'),
+    notFoundOnMalformedId('Agreement not found'),
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
       const parsed = updateAgreementSchema.parse(req.body);
       const result = await updateAgreement(
@@ -124,6 +127,7 @@ export function createAgreementsRouter(deps: AgreementsRouterDeps): Router {
     requireAuth,
     requireTenant,
     requirePermission('customers:update'),
+    notFoundOnMalformedId('Agreement not found'),
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
       const result = await pauseAgreement(req.auth!.tenantId, req.params.id, agreementRepo);
       if (!result) {
@@ -139,6 +143,7 @@ export function createAgreementsRouter(deps: AgreementsRouterDeps): Router {
     requireAuth,
     requireTenant,
     requirePermission('customers:update'),
+    notFoundOnMalformedId('Agreement not found'),
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
       const result = await resumeAgreement(req.auth!.tenantId, req.params.id, agreementRepo);
       if (!result) {
@@ -154,6 +159,7 @@ export function createAgreementsRouter(deps: AgreementsRouterDeps): Router {
     requireAuth,
     requireTenant,
     requirePermission('customers:delete'),
+    notFoundOnMalformedId('Agreement not found'),
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
       const result = await cancelAgreement(req.auth!.tenantId, req.params.id, agreementRepo);
       if (!result) {
@@ -171,6 +177,7 @@ export function createAgreementsRouter(deps: AgreementsRouterDeps): Router {
     requireAuth,
     requireTenant,
     requireRole('owner'),
+    notFoundOnMalformedId('Agreement not found'),
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
       const tenantId = req.auth!.tenantId;
       const agreement = await agreementRepo.findById(tenantId, req.params.id);

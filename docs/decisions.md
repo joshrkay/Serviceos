@@ -668,3 +668,111 @@ on the phone stays undecided (#833 "entity resolution per surface"). #860 step 2
 calls the same surface adapter from `speechTurn`; the actor is already stamped for that transport by the
 shared establishment core, so step 2 adds the dispatch call and nothing about identity. It is not
 wired here.
+
+### D-027: A live-call complaint escalates to a human; bare confirm re-prompts; language_switch ships on Gather
+**Date:** 2026-08-28
+**Initiative:** Voice Phase 0 of #852; #846, review-fix pass on PR #883.
+**Decision:** Three behaviors from #846's Gather-path intent handling, ratified by the owner on
+2026-08-28 after the two-axis code review of PR #883:
+1. **Complaint escalates.** A `complaint` classified on a live call is handled like
+   `operator_request`: the FSM's global guard speaks a fixed acknowledgment
+   (`COMPLAINT_ESCALATION_LINE`) and fast-paths to `escalating` (audit log + `notify_oncall`,
+   `escalationReason: 'complaint'`). This SUPERSEDES the first cut, which deflected and continued
+   the call negotiation-style. The one-shot owner `callback` proposal is RETAINED as the
+   escalation's paper trail (idempotent via `complaintFlagged`), carrying the recorded-memo
+   path's deterministic severity markers — severity detection runs over the caller's raw
+   utterance, threaded through the `intent_classified` event, not just classifier-extracted
+   entities. On the untrusted S1 live-caller surface it stays a `callback` and never an
+   `add_note` (operator-only; coercion would reproduce the silent-degrade bug #846 fixed).
+   Unlike `operator_request` there is no `escalationTriggers` deflect branch: no tenant toggle
+   maps to complaints, and an unhappy caller always reaches a person.
+2. **Bare confirm re-prompts, in speech.** A bare `confirm` ("yes") with nothing pending is
+   answered by the FSM's spoken re-prompt (`CONFIRM_NOTHING_PENDING_LINE`) — never persisted as
+   a `voice_clarification` card. The guard covers BOTH states the adapters classify in,
+   `intent_capture` AND `closing` (the adapters gate on `intent_capture || closing`, so
+   covering only one left the closing "yes" minting cards); `intent_confirm`'s
+   intent-classified-as-correction handling is untouched, and a live post-quote "yes" is still
+   consumed by the deterministic pendingQuote pre-check before the classifier runs.
+3. **language_switch ships on Gather notwithstanding open #838.** The adapter-level Gather
+   branch (flip `session.language`, re-resolve the TTS voice, tenant `supported_languages`
+   gate, shared `MAX_LANGUAGE_SWITCHES_PER_CALL` flap cap) is live; whatever #838 decides about
+   the broader language posture applies on top of it rather than blocking it.
+**Rationale:** The review surfaced that "I've flagged this for the owner, anything else?" reads
+as a brush-off to a caller angry enough to say "complaint" — the cost of a wrongly-escalated call
+is one human minute, the cost of a wrongly-deflected complaint is a churned customer and an
+unheard refund/legal threat. Escalation with a paper-trail proposal keeps both: the human gets
+the call, the owner gets the severity-marked follow-up card.
+**Alternatives considered:**
+- *Deflect-and-continue (the first cut).* Rejected by the owner: a complaint is a request for a
+  person, not context to file.
+- *Escalate without the callback proposal.* Rejected: the on-call transfer is ephemeral; the
+  proposal is the reviewable record and carries the severity markers the digest/cards key on.
+- *Gate complaint escalation on an `escalationTriggers` toggle.* Rejected: `trigger_explicit_request`
+  means "caller asked for a person" and its deflect line ("I can help with scheduling…") would be
+  absurd against a complaint; adding a new toggle would default some tenants into the brush-off.
+
+### D-028: The classifier prompt is surface-conditional; session input caps are derived from a documented per-turn budget
+**Date:** 2026-08-28
+**Initiative:** P0 voice gate failure (#886, #887; folds #896, #899; PR #902).
+**Decision:** The classifier system prompt is assembled per **surface profile** from a verbatim
+block table (`ai/orchestration/intent-taxonomy-blocks.ts` + `classifier-profile.ts`):
+`'caller'` (anonymous/customer inbound phone, **18 advertised / 20 accepted** intents — the
+advertised slice is DERIVED as `PROFILE_INTENTS ∩ the block table`
+(`advertisedIntentsForProfile`), never hand-kept, so accepted ⊇ advertised structurally; the
+caller delta is exactly complaint/negotiation, which have no base block and ride the
+always-appended customer-protection section — plus money-ask preamble + 13-field entity
+dictionary), `'field_tech'` (caller-ID-resolved employee, D-026 actor, 15 trade-internal
+intents, advertised = accepted), `'owner_line'` (RV-070/071 verified owner, full taxonomy minus
+the 8 customer-scoped lookups — 60 advertised / 70 accepted, the delta being the section-gated
+approval/protection/extended-lookup families), and `'operator'` (everything — 68 base blocks,
+all 78 intents accepted; byte-identical to the historical `SYSTEM_PROMPT`, pinned by SHA-256,
+so the memo worker, in-app voice, chat, evals, and the 74 Layer-1 cassettes are untouched). The profile derives from **session identity only** —
+`classifierProfileForSession(session)` reads the trusted-channel allowlist, the `ownerSession`
+flag, and the D-026 phone actor; never transcript content — so a caller cannot talk their way
+into a wider taxonomy, and an unknown future channel fails **closed** to `'caller'`. The prompt
+is a hint, not a gate: a post-parse guard maps any classification outside the exported
+three-way accept rule `isIntentAcceptedOnProfile` (profile set ∪ lookup_* ∪ the exempt set) to
+`unknown`/`intent_off_surface` — and the interception is NOT silent: both live classify seams
+(processor speechTurn, Twilio Gather adapter) audit it as **`voice.intent_off_surface`**
+(session entity, blocked intent, refusing profile, confidence — #902), a new event name because
+the semantics differ from the proposal-gate `voice.surface_violation_blocked` (no proposal type
+was ever requested; that event still fires for whatever reaches minting, e.g. guard-exempt
+intents). The guard deliberately does NOT
+pre-empt layers that own their surface behavior downstream of classification: read-only
+`lookup_*` (D-026's dispatch RBAC refuses with purposeful copy), `emergency_dispatch` (the
+RV-140/142 deterministic-scan escalation fast-path — dropped from the S1 prompts, kept as the
+LLM second net), `approve/reject/edit_proposal` (the RV-071/RV-225 owner hard gates, which
+audit denied attempts), and `en_route` (the #847/D-027 phone surface owns identity — actor
+required, technician role required, honest refusals, en_route_executed audit — added to the
+exempt set at the #883/#902 merge, where the guard was found pre-empting that refusal). The I6 proposal-type gate remains as defense-in-depth behind all of it.
+**Cap re-derivation:** `SessionCostTracker.maxInputTokens` is cumulative per session, so gating
+alone only moves the first-turn escalation to a later turn. Caps are now derived, never picked:
+`CLASSIFY_TURN_INPUT_TOKEN_BUDGET = 9000` (#902 — worst STRUCTURAL gated first turn: caller
+profile + protection section + the full canonical HVAC pack incl. intake questions and
+objection scripts + `MAX_PROMPT_ASSETS` (5) tenant training assets saturating the prompt
+builder's own truncation caps + long utterance ≈ 7,004 tokens chars/4; every term is bounded by
+code, so this is a ceiling, not a sample. × 1.15 ≈ 8,055, rounded up to 9,000 so the 85% pin
+holds with ~8.4% real slack — the earlier 6,000 was derived from a 5,048 sample that omitted
+intake/objection blocks and training assets, leaving ~1% slack against a configuration tenants
+can actually reach) × `EXPECTED_MAX_CLASSIFY_TURNS = 8` ⇒ telephony 72,000 (was 5,000, which
+had fallen to ~⅓ of ONE ungated turn); in-app `× EXPECTED_MAX_INAPP_CLASSIFY_TURNS = 10` ⇒
+90,000 (was 10,000, also under one full-taxonomy turn — and briefly a bare 60,000 literal,
+now derived like its telephony sibling). Cost reconciliation: `estimateCostCents(72000, 1500)
+≈ 24¢` and `estimateCostCents(90000, 3000) ≈ 32¢` — both well under their 40¢/80¢ money caps,
+so tokens bind first and cost stays the financial backstop. The budget, the caps arithmetic,
+and the real assembled worst-case first turn are pinned together by
+`test/ai/orchestration/classifier-prompt-budget.test.ts` (worst first turn < 85% of budget;
+cap ≥ budget × turns) and `test/ai/skills/session-cost-tracker.test.ts` (both caps pinned as
+budget × turns, not literals).
+**Rationale:** The first-turn classifier request measured 60,749 chars ≈ 15,187 tokens against
+the 5,000-token session cap — `cost_cap_exceeded` at inputPct ~3.0 on the caller's first
+sentence, the root cause of the 2026-08-28 QA-matrix voice gate failure (10/20) and the weekly
+Layer-2 reds since 08-10 (#886). 58.5% of that prompt was intents structurally unable to act on
+S1 (#887), and the S1 coercion produced a false "taken care of" line on money asks.
+**Constraints:** Caps stay channel-set at session creation (before identity resolution) — no
+per-surface mutable caps in voice-session-store. The voice-quality harness/text-mode-driver is
+deliberately NOT profile-wired (#888/#897 follow-up; wiring it would invalidate all cassette
+hashes). `owner_line` still burns ~15.2k tokens/turn (~3 classify turns per session cap) —
+further owner-prompt conditioning is a follow-up. Lookup-bullet table compaction is a separate
+PR; #900 is out of scope. Numbering note: #883's complaint-escalation decision merged first and
+holds D-027; this entry renumbered to D-028 at merge time (2026-08-29).
