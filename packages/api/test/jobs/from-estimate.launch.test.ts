@@ -374,8 +374,16 @@ describe('Feature 5 — Estimate → Job conversion', () => {
       next();
     });
     authed.use('/api/jobs', createJobRouter({} as any, {} as any, {} as any, {} as any, {} as any, {} as any));
-    const res503 = await request(authed).post('/api/jobs/from-estimate/abc').send({});
+    // A WELL-FORMED estimate id — a malformed one is now answered 404 by
+    // the #882 guard before the handler's not-configured check runs.
+    const wellFormed = '99999999-9999-4999-8999-999999999999';
+    const res503 = await request(authed).post(`/api/jobs/from-estimate/${wellFormed}`).send({});
     expect(res503.status).toBe(503);
+
+    // …and a malformed id answers the guard's 404 even with no deps wired.
+    const res404 = await request(authed).post('/api/jobs/from-estimate/abc').send({});
+    expect(res404.status).toBe(404);
+    expect(res404.body.message).toBe('Estimate not found');
 
     // No auth -> 401 (route is behind requireAuth).
     const open = express();

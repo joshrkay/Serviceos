@@ -48,6 +48,29 @@ test.describe('job scheduling — mobile viewport', () => {
     }
   });
 
+  test('the schedule New-appointment job picker fits 320px with 44px controls (#879)', async ({ page }) => {
+    await page.goto('/schedule');
+    if (/\/login/.test(page.url())) test.skip(true, 'Not authenticated in this run');
+
+    await page.getByRole('button', { name: /new appointment/i }).click();
+    const search = page.getByLabel('job-search');
+    await expect(search).toBeVisible();
+
+    // The search field meets the ≥44px (min-h-11) tap bar.
+    const box = await search.boundingBox();
+    expect(box?.height ?? 0).toBeGreaterThanOrEqual(44);
+
+    // Open the dropdown with a broad query; whatever renders (results or the
+    // "No matching jobs" empty state) must not overflow the 320px viewport.
+    await search.fill('job');
+    await page.waitForTimeout(500); // debounce + fetch settle
+    const { scrollWidth, clientWidth } = await page.evaluate(() => ({
+      scrollWidth: document.documentElement.scrollWidth,
+      clientWidth: document.documentElement.clientWidth,
+    }));
+    await expectNoHorizontalOverflow(scrollWidth, clientWidth);
+  });
+
   test('a job detail page shows the Schedule panel without overflow', async ({ page }) => {
     await page.goto('/jobs');
     if (/\/login/.test(page.url())) test.skip(true, 'Not authenticated in this run');

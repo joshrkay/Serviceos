@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { AuthenticatedRequest } from '../auth/clerk';
 import { asyncRoute } from '../middleware/async-route';
 import { requireAuth, requireTenant, requirePermission } from '../middleware/auth';
+import { notFoundOnMalformedId } from '../middleware/validate-uuid-param';
 import { createConversationSchema, createMessageSchema } from '../shared/contracts';
 import {
   createConversationWithAudit,
@@ -127,6 +128,7 @@ export function createConversationRouter(
     // Lazily creates a conversation when none exists, so gate on the write
     // permission (matches POST /), not the read-only conversations:view.
     requirePermission('conversations:create'),
+    notFoundOnMalformedId('Customer not found', 'customerId'),
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
       const tenantId = req.auth!.tenantId;
       const customerId = req.params.customerId;
@@ -227,6 +229,7 @@ export function createConversationRouter(
     requireAuth,
     requireTenant,
     requirePermission('conversations:view'),
+    notFoundOnMalformedId('Conversation not found'),
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
       const result = await conversationRepo.findById(req.auth!.tenantId, req.params.id);
       if (!result) {
@@ -255,6 +258,7 @@ export function createConversationRouter(
     requireAuth,
     requireTenant,
     requirePermission('conversations:create'),
+    notFoundOnMalformedId('Conversation not found'),
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
       const parsed = createMessageSchema.parse({
         ...req.body,
@@ -275,6 +279,7 @@ export function createConversationRouter(
     requireAuth,
     requireTenant,
     requirePermission('conversations:view'),
+    notFoundOnMalformedId('Conversation not found'),
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
       const tenantId = req.auth!.tenantId;
       // An empty message list is ambiguous: it can mean either an empty
@@ -299,6 +304,7 @@ export function createConversationRouter(
     requireAuth,
     requireTenant,
     requirePermission('conversations:view'),
+    notFoundOnMalformedId('Conversation not found'),
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
       if (!aiDeps?.gateway) {
         res.status(503).json({ error: 'UNAVAILABLE', message: 'AI suggestions are not configured' });
@@ -374,6 +380,7 @@ export function createConversationRouter(
     requireAuth,
     requireTenant,
     requirePermission('conversations:manage'),
+    notFoundOnMalformedId('Conversation not found'),
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
       if (!replyDeps) {
         res
