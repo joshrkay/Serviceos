@@ -14,7 +14,7 @@ import { requireAuth, requireTenant, requirePermission } from '../middleware/aut
 import { hasPermission, isValidRole, type Permission, type Role } from '../auth/rbac';
 import { toErrorResponse } from '../shared/errors';
 import { LLMGateway } from '../ai/gateway/gateway';
-import { ProposalRepository, ProposalType } from '../proposals/proposal';
+import { Proposal, ProposalRepository, ProposalType } from '../proposals/proposal';
 // Aliased — the card field this feeds is also called `undoExpiresAt`.
 import {
   undoExpiresAt as undoWindowCloseAt,
@@ -88,6 +88,26 @@ import { buildTaskHandlers } from '../ai/orchestration/handler-registry';
 // resolves to a verified invoiceId exactly as the spoken memo does.
 import { resolveVoiceEntityReferences } from '../ai/agents/customer-calling/entity-resolution';
 import type { EntityResolver } from '../ai/resolution/entity-resolver';
+// #909 — the POST-draft half of the same loop. Pre-draft resolution
+// (`resolveVerifiedIdsForDraft` below) can only resolve what the classifier
+// happened to extract into the fields `planVoiceEntityLookups` reads; the
+// gate a handler actually stamps is on the PAYLOAD, and until now nothing
+// resolved that. Sixteen capabilities drafted a proposal carrying only free
+// text and stalled at ready_for_review permanently. See the module doc on
+// ai/resolution/gated-reference-resolution.ts.
+import {
+  resolveGatedReferences,
+  applyGatedReferences,
+  stampPendingAmbiguity,
+  pendingAmbiguityOf,
+  clearPendingAmbiguity,
+  buildDisambiguationQuestion,
+} from '../ai/resolution/gated-reference-resolution';
+import {
+  resolveDisambiguationFollowUp,
+  MAX_DISAMBIGUATION_ATTEMPTS,
+  type PendingEntityAmbiguity,
+} from '../ai/agents/customer-calling/entity-resolution';
 // Phase 12 supervisor gate (commit 1 of the followup-autoapprove-default
 // fix) — mirrors workers/voice-action-router.ts's use of the SAME function:
 // resolve tenant-wide supervisor presence once per turn and thread it onto
@@ -944,6 +964,276 @@ function stampVerifiedIds(
 }
 
 /**
+ * #909 — the chat surface's thin adapter over the gated-reference core.
+ *
+ * Runs AFTER the drafting handler, over the references the PROPOSAL is
+ * carrying, and lifts only the gates it resolves itself. Three outcomes,
+ * mirroring the voice FSM's `entity_resolution` state:
+ *
+ *   unambiguous → the id is filled and that one gate lifts, so the operator's
+ *                 very next tap can approve (the failure mode #909 is about:
+ *                 approve → 400 {missingFields:[...]} forever).
+ *   ambiguous   → NOTHING is filled. The pending question is stamped on the
+ *                 proposal and the caller asks it. Never a guess (CLAUDE.md).
+ *   neither     → the gate stays exactly as it is today: a review card the
+ *                 operator finishes by hand.
+ *
+ * D-004: this can only ever move a proposal from 'draft' toward
+ * 'ready_for_review' (the caller's existing promotion), never toward
+ * 'approved'. `decideInitialStatus` already ran inside the handler, and it is
+ * deliberately NOT re-run here — re-running it on a now-ungated payload is
+ * exactly how a resolution loop would grow an auto-approve it was never
+ * supposed to have.
+ *
+ * Returns the question to ask, when there is one.
+ */
+async function resolveGatedReferencesForChat(
+  deps: AssistantRouterDeps,
+  tenantId: string,
+  userId: string,
+  correlationId: string,
+  proposal: Proposal,
+  entities: Record<string, unknown> | undefined,
+): Promise<string | undefined> {
+  const outcome = await resolveGatedReferences(
+    deps.entityResolver,
+    tenantId,
+    proposal,
+    entities,
+  );
+
+  const filledKeys = applyGatedReferences(proposal, outcome.filled);
+
+  if (outcome.ambiguity) {
+    stampPendingAmbiguity(proposal, outcome.ambiguity);
+  }
+
+  if (filledKeys.length > 0 || outcome.ambiguity) {
+    await emitResolutionAudit(deps, tenantId, userId, correlationId, proposal.id, {
+      filled: filledKeys,
+      unresolved: outcome.unresolved,
+      ...(outcome.ambiguity
+        ? {
+            ambiguousField: outcome.ambiguity.refKey,
+            candidateCount: outcome.ambiguity.candidates.length,
+          }
+        : {}),
+    });
+  }
+
+  return outcome.ambiguity ? buildDisambiguationQuestion(outcome.ambiguity) : undefined;
+}
+
+/**
+ * Every mutation the resolution loop makes is audited (CLAUDE.md: all
+ * mutations emit audit events). Failure-soft, exactly like the route's other
+ * audit call sites — an audit outage must not cost the operator their reply.
+ */
+async function emitResolutionAudit(
+  deps: AssistantRouterDeps,
+  tenantId: string,
+  userId: string,
+  correlationId: string,
+  proposalId: string,
+  metadata: Record<string, unknown>,
+): Promise<void> {
+  if (!deps.auditRepo) return;
+  try {
+    await deps.auditRepo.create(
+      createAuditEvent({
+        tenantId,
+        actorId: userId,
+        actorRole: 'user',
+        eventType: 'assistant.entity_resolution',
+        entityType: 'proposal',
+        entityId: proposalId,
+        correlationId,
+        metadata,
+      }),
+    );
+  } catch {
+    // Audit failures must not block the reply.
+  }
+}
+
+/**
+ * The proposal in this conversation that is waiting on a disambiguation
+ * answer, if any.
+ *
+ * The chat surface has no session store — every turn is classified from
+ * scratch. Rather than add one, the pending question rides `sourceContext`
+ * on the very proposal it blocks, and is recalled here through the SAME
+ * conversation-scoped lookup `IssueInvoiceTaskHandler` already uses for "the
+ * one we just drafted" (ai/orchestration/task-router.ts). Newest first, and
+ * only a still-reviewable proposal counts: an answer to a question about a
+ * proposal the operator has since approved or rejected is stale, and acting
+ * on it would edit a decided record.
+ */
+async function findPendingClarification(
+  deps: AssistantRouterDeps,
+  tenantId: string,
+  conversationId: string | undefined,
+): Promise<{ proposal: Proposal; pending: PendingEntityAmbiguity } | undefined> {
+  if (!conversationId || !deps.proposalRepo.findByConversation) return undefined;
+  let candidates: Proposal[];
+  try {
+    candidates = await deps.proposalRepo.findByConversation(tenantId, conversationId);
+  } catch {
+    return undefined;
+  }
+
+  const reviewable = candidates
+    .filter((p) => p.status === 'draft' || p.status === 'ready_for_review')
+    .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+
+  for (const proposal of reviewable) {
+    const pending = pendingAmbiguityOf(proposal);
+    if (pending) return { proposal, pending };
+  }
+  return undefined;
+}
+
+/**
+ * The reply envelope `generateAssistantReply` returns for a proposal-bearing
+ * turn — the same literal shape the single-intent dispatch builds, named here
+ * so the #909 follow-up leg can be a function rather than an inline block.
+ */
+interface AssistantProposalReply {
+  taskType: string;
+  model: string;
+  usage: { input: number; output: number; total: number };
+  // Never set on this path — a resolution turn is answered deterministically,
+  // not by a degraded model fallback. Declared so this type unions cleanly
+  // with the generic-LLM reply the same variable can hold.
+  degraded?: boolean;
+  fallbackStage?: string | undefined;
+  message: {
+    role: 'assistant';
+    content: string;
+    reasoning?: string;
+    proposal: AssistantProposal;
+  };
+}
+
+/**
+ * #909 — consume one disambiguation answer.
+ *
+ * Returns a reply when the turn was genuinely an answer (matched, or a
+ * re-ask); returns `undefined` to mean "this was not an answer and we have
+ * stopped waiting" — the caller then classifies the turn as an ordinary new
+ * request. Either way the proposal row is left consistent: a matched answer
+ * has its id filled and its gate lifted, an abandoned question is cleared.
+ *
+ * D-004: on a match the proposal is UPDATED, never approved and never
+ * executed. It stays exactly the status it already had, waiting for the
+ * operator's tap — the whole point is that the tap now succeeds instead of
+ * 400-ing on missingFields.
+ */
+async function applyDisambiguationAnswer(
+  deps: AssistantRouterDeps,
+  tenantId: string,
+  userId: string,
+  correlationId: string,
+  proposal: Proposal,
+  pending: PendingEntityAmbiguity,
+  answerText: string,
+): Promise<AssistantProposalReply | undefined> {
+  const match = await resolveDisambiguationFollowUp(
+    deps.entityResolver,
+    tenantId,
+    answerText,
+    pending,
+  );
+
+  if (match.status === 'resolved') {
+    clearPendingAmbiguity(proposal);
+    applyGatedReferences(proposal, { [pending.refKey]: match.candidateId });
+
+    // The answered reference may unblock a SECOND lookup that could not run
+    // before it — an appointment reachable only once its customer is known,
+    // for instance. Run the loop once more so a two-reference utterance
+    // needs one answer, not two round trips per reference.
+    const nextQuestion = await resolveGatedReferencesForChat(
+      deps,
+      tenantId,
+      userId,
+      correlationId,
+      proposal,
+      undefined,
+    );
+
+    await deps.proposalRepo.update(tenantId, proposal.id, {
+      payload: proposal.payload,
+      sourceContext: proposal.sourceContext,
+    });
+    await emitResolutionAudit(deps, tenantId, userId, correlationId, proposal.id, {
+      event: 'disambiguation_answered',
+      field: pending.refKey,
+      candidateId: match.candidateId,
+      entityKind: pending.entityKind,
+    });
+
+    const picked = pending.candidates.find((c) => c.id === match.candidateId);
+    const uiProposal = proposalToUI(proposal, answerText);
+    return {
+      taskType: 'assistant.entity_resolution',
+      model: 'entity-resolver',
+      usage: { input: 0, output: 0, total: 0 },
+      message: {
+        role: 'assistant' as const,
+        content: nextQuestion
+          ? `${picked ? `${picked.name} — got it. ` : ''}${nextQuestion}`
+          : `${picked ? `${picked.name} — got it. ` : ''}${uiProposal.title}. ${proposalReplySuffix(uiProposal.status)}`,
+        reasoning: 'Resolved a pending entity reference from the operator’s answer.',
+        proposal: uiProposal,
+      },
+    };
+  }
+
+  // Not an answer we could match. Re-ask, up to the voice surface's bound.
+  if (pending.attemptCount < MAX_DISAMBIGUATION_ATTEMPTS) {
+    const retried: PendingEntityAmbiguity = {
+      ...pending,
+      attemptCount: pending.attemptCount + 1,
+    };
+    stampPendingAmbiguity(proposal, retried);
+    await deps.proposalRepo.update(tenantId, proposal.id, {
+      sourceContext: proposal.sourceContext,
+    });
+    const uiProposal = proposalToUI(proposal, answerText);
+    return {
+      taskType: 'assistant.entity_resolution',
+      model: 'entity-resolver',
+      usage: { input: 0, output: 0, total: 0 },
+      message: {
+        role: 'assistant' as const,
+        content:
+          match.status === 'still_ambiguous'
+            ? `That still matches more than one. ${buildDisambiguationQuestion(retried)}`
+            : buildDisambiguationQuestion(retried),
+        reasoning: 'Re-asking a pending entity clarification.',
+        proposal: uiProposal,
+      },
+    };
+  }
+
+  // Bound reached — stop waiting. The proposal keeps its gate (and its
+  // candidate picker on the card), and this turn becomes an ordinary
+  // request so the operator is never trapped in a question they have
+  // moved on from.
+  clearPendingAmbiguity(proposal);
+  await deps.proposalRepo.update(tenantId, proposal.id, {
+    sourceContext: proposal.sourceContext,
+  });
+  await emitResolutionAudit(deps, tenantId, userId, correlationId, proposal.id, {
+    event: 'disambiguation_abandoned',
+    field: pending.refKey,
+    attempts: pending.attemptCount,
+  });
+  return undefined;
+}
+
+/**
  * B1 — friendly labels for the flat id-shaped keys the money-path task
  * handlers gate on. Falls back to the raw key (see `editFieldsForMissing`)
  * for any missingFields entry not listed here (e.g. `title`, `jobId`), so a
@@ -1589,6 +1879,44 @@ async function generateAssistantReply(
         };
       }
 
+      // #909 — DISAMBIGUATION FOLLOW-UP, before the classifier.
+      //
+      // When the previous turn asked "which lead did you mean?", this turn is
+      // the answer, and re-classifying "the second one" as a fresh intent is
+      // how the question gets lost. The in-app voice adapter routes on FSM
+      // state for exactly this reason and skips the classifier entirely on a
+      // disambiguation turn (inapp-adapter.ts); chat has no FSM, so the state
+      // is the pending question stamped on the proposal the answer unblocks.
+      //
+      // The matching is `resolveDisambiguationFollowUp` — the SAME
+      // deterministic matcher the voice surface uses (ordinal, then distinct
+      // name, then address/phone hint, then a resolver re-resolve INTERSECTED
+      // with the pending candidate set). It can never return an id outside
+      // the candidates that were offered, so this turn cannot select a record
+      // the operator was never shown.
+      //
+      // Bounded by MAX_DISAMBIGUATION_ATTEMPTS, the voice constant: an
+      // operator who ignores the question and types a new request loses at
+      // most two turns before the pending state is dropped and their message
+      // is classified normally. Unbounded, a stale question would swallow the
+      // conversation.
+      const followUp = await findPendingClarification(deps, tenantId, conversationId);
+      if (followUp) {
+        const reply = await applyDisambiguationAnswer(
+          deps,
+          tenantId,
+          userId,
+          correlationId,
+          followUp.proposal,
+          followUp.pending,
+          lastUserText,
+        );
+        if (reply) return reply;
+        // Fell through: the pending question was abandoned (attempts
+        // exhausted) and has been cleared. This turn is classified as an
+        // ordinary new request below.
+      }
+
       // `extendedIntents` is set unconditionally on THIS surface. That flag's
       // real job is (a) keeping the TELEPHONY classifier's prompt messages
       // byte-identical so voice-quality cassette hashes / gateway cache keys
@@ -1892,6 +2220,24 @@ async function generateAssistantReply(
           stampVerifiedIds(proposal, segVerifiedIds);
           dropUnverifiedIds(proposal.payload, segment, segEntities, proposal.sourceContext);
           proposal.sourceContext = { ...(proposal.sourceContext ?? {}), chainId, chainStep: chainCards.length + 1 };
+          // #909 — the same post-draft resolution the single-intent path
+          // runs, so a chained "reschedule the Miller job, then text them"
+          // gets its ids resolved too and the two surfaces of THIS route
+          // can't drift. Deliberately no clarification question here: a
+          // chain turn already answers with N cards, and interrupting it
+          // with "which Miller?" mid-chain would leave the operator holding
+          // a question and a pile of cards at once. An ambiguous reference
+          // in a chain keeps today's behavior — the gated card with its
+          // candidate picker — and the pending question is still stamped so
+          // a follow-up turn can answer it.
+          await resolveGatedReferencesForChat(
+            deps,
+            tenantId,
+            userId,
+            correlationId,
+            proposal,
+            segEntities,
+          );
           // Dependency gate: steps after the first reference results that
           // don't exist yet (the customer, their job). Auto-approval would
           // send them into doomed executions — hold every dependent step
@@ -2020,6 +2366,19 @@ async function generateAssistantReply(
           extractedEntities,
           proposal.sourceContext,
         );
+        // #909 — post-draft resolution, AFTER the scrub on purpose: a
+        // hallucinated id the scrub just deleted leaves the gate standing,
+        // and this loop then fills it from a real DB lookup instead. Its own
+        // ids are DB-verified by construction, so they are never subject to
+        // the scrub.
+        const clarification = await resolveGatedReferencesForChat(
+          deps,
+          tenantId,
+          userId,
+          correlationId,
+          proposal,
+          extractedEntities,
+        );
         // I4 (post-C1 review) — chokepoint backstop; see the identical
         // comment on the chain-segment path above. Already resolved
         // (memoized) by the dispatch call above.
@@ -2038,7 +2397,13 @@ async function generateAssistantReply(
           usage: { input: 0, output: 0, total: 0 },
           message: {
             role: 'assistant' as const,
-            content: `${uiProposal.title}. ${proposalReplySuffix(uiProposal.status)}`,
+            // #909 — an ambiguous reference asks ONE question instead of
+            // announcing a card the operator cannot approve. The card still
+            // rides along: the question is the fast path, the picker on the
+            // card is the fallback if they would rather point at it.
+            content: clarification
+              ? `${uiProposal.title}.\n\n${clarification}`
+              : `${uiProposal.title}. ${proposalReplySuffix(uiProposal.status)}`,
             reasoning: classification.reasoning,
             proposal: uiProposal,
           },

@@ -31,9 +31,14 @@ D-016). Canonical work goes in /packages only.
   packages/api/src/ai/resolution/catalog-resolver.ts — never trust an
   LLM-emitted price without resolution (uncatalogued lines must cap
   confidence below the auto-approve threshold)
-- All free-text entity references on voice paths: resolved via the
+- All free-text entity references, on EVERY surface: resolved via the
   entity resolver (packages/api/src/ai/resolution); ambiguity becomes a
-  one-tap voice_clarification, never a silent guess
+  clarification, never a silent guess. Voice asks it as a spoken
+  one-tap voice_clarification; chat asks ONE question and the next turn
+  answers it (ai/resolution/gated-reference-resolution.ts). A proposal
+  gated on an entity id it does not have must have a resolver behind
+  that gate — a gate with nothing to lift it is a capability that can
+  never be approved (#909)
 
 ## Code Hygiene & Testing (mandatory)
 - Remove dead code as part of every change: unused exports, imports,
