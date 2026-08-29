@@ -260,6 +260,10 @@ export function createJobRouter(
     requireAuth,
     requireTenant,
     requirePermission('jobs:create'),
+    // #882 — a malformed estimate id can never name an estimate; 404 before
+    // it reaches the Pg uuid cast (same position convention as the :id
+    // routes below: after the permission check, never via router.param).
+    notFoundOnMalformedId('Estimate not found', 'estimateId'),
     async (req: AuthenticatedRequest, res: Response) => {
       try {
         if (!fromEstimateDeps) {

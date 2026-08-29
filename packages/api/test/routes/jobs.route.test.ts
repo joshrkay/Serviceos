@@ -680,4 +680,15 @@ describe('malformed :id never reaches Postgres as a raw uuid comparison (#882)',
     expect(res.status).toBe(404);
     expect(res.body.error).toBe('NOT_FOUND');
   });
+
+  // #882 review — /from-estimate/:estimateId was the one :param route on
+  // this router without the guard. The 404 must answer even before the
+  // handler's own not-configured check (the guard sits in the middleware
+  // chain), with the route's own envelope naming the estimate.
+  it('POST /api/jobs/from-estimate/not-a-uuid returns 404 Estimate not found', async () => {
+    const res = await request(app).post('/api/jobs/from-estimate/not-a-uuid').send({});
+    expect(res.status).toBe(404);
+    expect(res.body.error).toBe('NOT_FOUND');
+    expect(res.body.message).toBe('Estimate not found');
+  });
 });

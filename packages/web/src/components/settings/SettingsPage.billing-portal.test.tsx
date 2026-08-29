@@ -170,4 +170,52 @@ describe('SettingsPage billing portal failure UI (#873)', () => {
     await screen.findByTestId('billing-portal-error');
     expect(screen.getByTestId('billing-portal-retry').className).toContain('min-h-11');
   });
+
+  // #873 review — details.reason marks the stale-customer case as
+  // unrecoverable: retrying can never succeed, so the banner renders
+  // re-link guidance (with the stale id, monospaced) and NO "Try again".
+  it('renders re-link guidance without a retry when the saved customer is gone', async () => {
+    renderPage(() =>
+      jsonResponse(
+        {
+          ...RESOURCE_MISSING_BODY,
+          details: {
+            ...RESOURCE_MISSING_BODY.details,
+            reason: 'stripe_customer_missing',
+            stripeCustomerId: 'cus_UswJPdKUh7f1eg',
+          },
+        },
+        { ok: false, status: 502 },
+      ),
+    );
+    await openPortalViaRow();
+    const alert = await screen.findByTestId('billing-portal-error');
+    expect(alert).toHaveTextContent('no longer exists');
+    expect(alert).toHaveTextContent('contact support to re-link billing');
+    // The stale id is shown monospaced for the support conversation.
+    const staleId = screen.getByTestId('billing-portal-stale-id');
+    expect(staleId).toHaveTextContent('cus_UswJPdKUh7f1eg');
+    expect(staleId.tagName).toBe('CODE');
+    expect(staleId.className).toContain('font-mono');
+    // A retry cannot succeed — the affordance is gone for this reason.
+    expect(screen.queryByTestId('billing-portal-retry')).toBeNull();
+  });
+
+  it('re-link guidance still renders when the stale id is absent', async () => {
+    renderPage(() =>
+      jsonResponse(
+        {
+          error: 'BILLING_PORTAL_FAILED',
+          message: 'No such customer',
+          details: { stripeCode: 'resource_missing', reason: 'stripe_customer_missing' },
+        },
+        { ok: false, status: 502 },
+      ),
+    );
+    await openPortalViaRow();
+    const alert = await screen.findByTestId('billing-portal-error');
+    expect(alert).toHaveTextContent('re-link billing');
+    expect(screen.queryByTestId('billing-portal-stale-id')).toBeNull();
+    expect(screen.queryByTestId('billing-portal-retry')).toBeNull();
+  });
 });

@@ -728,7 +728,11 @@ export interface UpdateSettingsInput {
 export interface TenantIdentityUpsertFields {
   businessName?: string;
   serviceAreaText?: string;
-  serviceAreaRadius?: number;
+  /**
+   * #874 tri-state: omit to keep the stored radius, `null` to explicitly
+   * clear it, a number to set it.
+   */
+  serviceAreaRadius?: number | null;
   businessHours?: Record<string, { open: string; close: string } | null>;
   jobBufferMinutes?: number;
   hourlyRateCents?: number;

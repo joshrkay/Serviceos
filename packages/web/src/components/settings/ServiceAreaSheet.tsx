@@ -141,10 +141,13 @@ export function ServiceAreaSheet({ onClose, onSaved }: ServiceAreaSheetProps) {
           // stored schedule must be echoed or {} would overwrite it.
           ...(echo.businessHours ? { businessHours: echo.businessHours } : {}),
           // The actual edit. Empty text writes '' (an honest "not set");
-          // an empty radius is omitted (the upsert keeps the stored one);
-          // [] clears the ZIP allowlist back to unbounded.
+          // an explicitly emptied radius writes null so the stored value —
+          // and the Settings row's "~N mi radius" subtitle — actually
+          // clears (#874 review; the identity upsert treats null as an
+          // explicit clear, omitted as keep); [] clears the ZIP allowlist
+          // back to unbounded.
           serviceAreaText: areaText.trim(),
-          ...(radiusNumber !== null ? { serviceAreaRadius: radiusNumber } : {}),
+          serviceAreaRadius: radiusNumber,
           serviceAreaZips: parsedZips,
         }),
       });
@@ -177,7 +180,11 @@ export function ServiceAreaSheet({ onClose, onSaved }: ServiceAreaSheetProps) {
   return (
     <div
       className="fixed inset-0 z-50 flex items-end justify-center bg-black/40 md:items-center"
-      onClick={onClose}
+      // Mirror ConfirmDialog's busy guard: a stray backdrop tap must not
+      // dismiss the sheet while the PUT is in flight.
+      onClick={() => {
+        if (!saving) onClose();
+      }}
       role="dialog"
       aria-labelledby="service-area-title"
       aria-modal="true"

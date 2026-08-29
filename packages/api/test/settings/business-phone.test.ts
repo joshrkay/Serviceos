@@ -10,13 +10,14 @@ import {
 } from '../../src/settings/settings';
 
 // #880 — businessPhone is what public intake/booking pages display and
-// tel:-link for customers, yet it was the ONLY phone field on the settings
-// PUT with no normalization or validation: an operator could type a Twilio
-// magic test number (+1 500 555 0006) and it went straight to public pages.
-// These tests pin the same route-boundary treatment ownerPhone and
-// transferNumber already get (normalize to E.164, '' clears, reject junk)
-// plus the magic-number rejection.
-describe('PUT /api/settings — businessPhone normalization (#880)', () => {
+// tel:-link for customers: an operator could type a Twilio magic test
+// number (+1 500 555 0006) and it went straight to public pages. These
+// tests pin the route-boundary policy: reject magic numbers, '' clears —
+// and, unlike ownerPhone/transferNumber, store everything else AS TYPED.
+// businessPhone is a display field that may legitimately be international
+// or carry an extension; the NANP-only normalizeMobileE164 would 400
+// numbers that were previously savable (beyond #880's scope).
+describe('PUT /api/settings — businessPhone policy (#880)', () => {
   const tenantId = 'tenant-business-phone';
   let app: express.Express;
   let settingsRepo: InMemorySettingsRepository;
@@ -39,15 +40,24 @@ describe('PUT /api/settings — businessPhone normalization (#880)', () => {
     app.use('/api/settings', createSettingsRouter(settingsRepo));
   });
 
-  it('normalizes a human-formatted number to E.164 before persisting', async () => {
+  it('stores a human-formatted number as typed (no NANP rewrite)', async () => {
     const res = await request(app)
       .put('/api/settings')
       .send({ businessPhone: '(512) 555-0100' });
 
     expect(res.status).toBe(200);
-    expect(res.body.businessPhone).toBe('+15125550100');
+    expect(res.body.businessPhone).toBe('(512) 555-0100');
     const stored = await getSettings(tenantId, settingsRepo);
-    expect(stored?.businessPhone).toBe('+15125550100');
+    expect(stored?.businessPhone).toBe('(512) 555-0100');
+  });
+
+  it('accepts international and extension numbers that E.164-only validation would reject', async () => {
+    for (const businessPhone of ['+44 20 7946 0958', '512-555-0100 ext. 4']) {
+      const res = await request(app).put('/api/settings').send({ businessPhone });
+      expect(res.status).toBe(200);
+      const stored = await getSettings(tenantId, settingsRepo);
+      expect(stored?.businessPhone).toBe(businessPhone);
+    }
   });
 
   it('clears the business phone when an empty string is sent', async () => {
@@ -55,18 +65,6 @@ describe('PUT /api/settings — businessPhone normalization (#880)', () => {
     const res = await request(app).put('/api/settings').send({ businessPhone: '   ' });
 
     expect(res.status).toBe(200);
-    const stored = await getSettings(tenantId, settingsRepo);
-    expect(stored?.businessPhone ?? null).toBeNull();
-  });
-
-  it('rejects a non-number with VALIDATION_ERROR on the businessPhone field', async () => {
-    const res = await request(app)
-      .put('/api/settings')
-      .send({ businessPhone: 'call the office' });
-
-    expect(res.status).toBe(400);
-    expect(res.body.error).toBe('VALIDATION_ERROR');
-    expect(res.body.details.field).toBe('businessPhone');
     const stored = await getSettings(tenantId, settingsRepo);
     expect(stored?.businessPhone ?? null).toBeNull();
   });

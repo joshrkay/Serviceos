@@ -16,15 +16,35 @@ export interface BillingPortalFailure {
   message: string;
   /** Stripe error code when the server surfaced one. */
   stripeCode?: string;
+  /**
+   * Machine-readable failure reason from `details.reason`.
+   * `'stripe_customer_missing'` means the SAVED customer record is gone —
+   * retrying can never succeed, so the UI should render re-link guidance
+   * instead of a retry affordance (use {@link isCustomerMissing}).
+   */
+  reason?: string;
+  /** The stale Stripe customer id support needs for the re-link. */
+  stripeCustomerId?: string;
+}
+
+/**
+ * True when the failure is specifically "the saved Stripe customer no
+ * longer exists" — the one portal failure a retry cannot fix. Keyed off
+ * the server's machine-readable `details.reason`, never off message text.
+ */
+export function isCustomerMissing(failure: BillingPortalFailure): boolean {
+  return failure.reason === 'stripe_customer_missing';
 }
 
 export async function parsePortalFailure(res: Response): Promise<BillingPortalFailure> {
   let message = '';
   let stripeCode: string | undefined;
+  let reason: string | undefined;
+  let stripeCustomerId: string | undefined;
   try {
     const body = (await res.json()) as {
       message?: unknown;
-      details?: { stripeCode?: unknown } | null;
+      details?: { stripeCode?: unknown; reason?: unknown; stripeCustomerId?: unknown } | null;
       stripeCode?: unknown;
     } | null;
     if (typeof body?.message === 'string' && body.message.trim()) {
@@ -36,6 +56,12 @@ export async function parsePortalFailure(res: Response): Promise<BillingPortalFa
     if (typeof code === 'string' && code.trim()) {
       stripeCode = code.trim();
     }
+    if (typeof body?.details?.reason === 'string' && body.details.reason.trim()) {
+      reason = body.details.reason.trim();
+    }
+    if (typeof body?.details?.stripeCustomerId === 'string' && body.details.stripeCustomerId.trim()) {
+      stripeCustomerId = body.details.stripeCustomerId.trim();
+    }
   } catch {
     /* non-JSON body */
   }
@@ -45,5 +71,10 @@ export async function parsePortalFailure(res: Response): Promise<BillingPortalFa
         ? 'The saved Stripe billing account for this tenant no longer exists — contact support to re-link billing.'
         : `Couldn't open the billing portal (HTTP ${res.status}). Try again in a moment.`;
   }
-  return { message, stripeCode };
+  return {
+    message,
+    stripeCode,
+    ...(reason ? { reason } : {}),
+    ...(stripeCustomerId ? { stripeCustomerId } : {}),
+  };
 }

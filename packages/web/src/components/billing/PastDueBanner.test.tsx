@@ -85,6 +85,39 @@ describe('PastDueBanner (#873)', () => {
     );
   });
 
+  // #873 review — details.reason marks the stale-customer case as
+  // unrecoverable. The banner drops the portal CTA (it can never succeed)
+  // and renders re-link guidance with the stale id, monospaced.
+  it('hides the portal CTA and renders re-link guidance when the saved customer is gone', async () => {
+    apiFetchMock.mockResolvedValueOnce(
+      jsonResponse(
+        {
+          error: 'BILLING_PORTAL_FAILED',
+          message: 'No such customer',
+          details: {
+            stripeStatus: 404,
+            stripeCode: 'resource_missing',
+            reason: 'stripe_customer_missing',
+            stripeCustomerId: 'cus_UswJPdKUh7f1eg',
+          },
+        },
+        { ok: false, status: 502 },
+      ),
+    );
+    render(<PastDueBanner />);
+    fireEvent.click(screen.getByText('Update payment method'));
+
+    const alert = await screen.findByTestId('past-due-relink');
+    expect(alert).toHaveTextContent('no longer exists');
+    expect(alert).toHaveTextContent('re-link billing');
+    const staleId = screen.getByTestId('past-due-stale-id');
+    expect(staleId).toHaveTextContent('cus_UswJPdKUh7f1eg');
+    expect(staleId.tagName).toBe('CODE');
+    expect(staleId.className).toContain('font-mono');
+    // The futile CTA is gone for this reason.
+    expect(screen.queryByText('Update payment method')).toBeNull();
+  });
+
   it('reports a missing portal URL on an OK response', async () => {
     apiFetchMock.mockResolvedValueOnce(jsonResponse({}));
     render(<PastDueBanner />);

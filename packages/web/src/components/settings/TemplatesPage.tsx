@@ -11,6 +11,7 @@ import {
 import { apiFetch } from '../../utils/api-fetch';
 import { useMe } from '../../hooks/useMe';
 import { firstNameFromUser } from '../../utils/greeting';
+import { ONBOARDING_RERUN_PATH } from '../../utils/onboarding-rerun';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 type SuggestionStatus = 'pending' | 'accepted' | 'skipped';
@@ -977,10 +978,10 @@ export function TemplatesPage() {
           </div>
         </div>
 
-        {/* ── Onboarding re-run prompt — ?rerun=1 passes OnboardingShell's
-            completion gate for an explicit re-run (#875) ── */}
+        {/* ── Onboarding re-run prompt — the rerun param passes
+            OnboardingShell's completion gate for an explicit re-run (#875) ── */}
         <button
-          onClick={() => navigate('/onboarding?rerun=1')}
+          onClick={() => navigate(ONBOARDING_RERUN_PATH)}
           className="w-full flex items-center gap-4 rounded-xl border border-indigo-200 bg-indigo-50 px-5 py-4 text-left hover:bg-indigo-100 transition-colors group"
         >
           <span className="flex size-10 shrink-0 items-center justify-center rounded-xl bg-indigo-600">

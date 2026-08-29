@@ -121,10 +121,14 @@ describe('ServiceAreaSheet', () => {
     expect('businessHours' in putBody()).toBe(false);
   });
 
-  it('clearing every field sends "" text and [] zips and omits the radius', async () => {
+  // #874 review — an explicitly emptied radius must WRITE null, not be
+  // omitted: the identity upsert keeps an omitted radius, which left the
+  // Settings row claiming a stale "~N mi radius" forever.
+  it('clearing every field sends "" text, [] zips, and an explicit null radius', async () => {
     apiFetchMock.mockResolvedValueOnce(jsonResponse(LOADED_SETTINGS));
     apiFetchMock.mockResolvedValueOnce(jsonResponse({ ok: true }));
-    render(<ServiceAreaSheet onClose={vi.fn()} />);
+    const onSaved = vi.fn();
+    render(<ServiceAreaSheet onClose={vi.fn()} onSaved={onSaved} />);
     fireEvent.change(await screen.findByLabelText(/Where you work/i), { target: { value: '' } });
     fireEvent.change(screen.getByLabelText(/Radius/i), { target: { value: '' } });
     fireEvent.change(screen.getByLabelText(/ZIP codes you serve/i), { target: { value: '' } });
@@ -133,7 +137,16 @@ describe('ServiceAreaSheet', () => {
     const body = putBody();
     expect(body.serviceAreaText).toBe('');
     expect(body.serviceAreaZips).toEqual([]);
-    expect('serviceAreaRadius' in body).toBe(false);
+    expect('serviceAreaRadius' in body).toBe(true);
+    expect(body.serviceAreaRadius).toBeNull();
+    // The Settings row refresh sees the cleared radius too.
+    await waitFor(() =>
+      expect(onSaved).toHaveBeenCalledWith({
+        serviceAreaText: '',
+        serviceAreaRadius: null,
+        serviceAreaZips: [],
+      }),
+    );
   });
 
   it('rejects malformed ZIPs inline without attempting a PUT', async () => {
@@ -180,6 +193,38 @@ describe('ServiceAreaSheet', () => {
     expect(save).toBeDisabled();
     fireEvent.click(save);
     expect(putCall()).toBeUndefined();
+  });
+
+  // Mirror ConfirmDialog's busy guard: a stray backdrop tap must not
+  // dismiss the sheet while the PUT is in flight (the save's own success
+  // path closes it), but an idle backdrop tap still closes.
+  it('ignores backdrop clicks while saving, honors them when idle', async () => {
+    apiFetchMock.mockResolvedValueOnce(jsonResponse(LOADED_SETTINGS));
+    let resolvePut: (r: Response) => void = () => {};
+    apiFetchMock.mockReturnValueOnce(
+      new Promise<Response>((resolve) => {
+        resolvePut = resolve;
+      }),
+    );
+    const onClose = vi.fn();
+    render(<ServiceAreaSheet onClose={onClose} />);
+    await screen.findByLabelText(/Where you work/i);
+
+    fireEvent.click(screen.getByText('Save'));
+    await waitFor(() => expect(screen.getByText('Saving…')).toBeInTheDocument());
+    fireEvent.click(screen.getByRole('dialog'));
+    expect(onClose).not.toHaveBeenCalled();
+
+    resolvePut(jsonResponse({ ok: true }));
+    await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
+
+    // Idle: the backdrop still dismisses.
+    apiFetchMock.mockResolvedValueOnce(jsonResponse(LOADED_SETTINGS));
+    const onCloseIdle = vi.fn();
+    render(<ServiceAreaSheet onClose={onCloseIdle} />);
+    const dialogs = screen.getAllByRole('dialog');
+    fireEvent.click(dialogs[dialogs.length - 1]);
+    expect(onCloseIdle).toHaveBeenCalledTimes(1);
   });
 
   // Class-contract (CLAUDE.md): ≥44px tap targets on inputs and buttons.

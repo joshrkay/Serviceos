@@ -161,6 +161,110 @@ describe('EstimateCreate query-param prefill (#876)', () => {
     });
   });
 
+  // #876 review — the scoped dropdown alone never said WHO it was scoped
+  // to; the deep link now fetches the customer and shows "For: <name>".
+  it('?customerId= fetches the customer and renders the For: affordance', async () => {
+    vi.mocked(apiFetch).mockImplementation(((url: string) => {
+      if (url === '/api/customers/cust-1') {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: async () => ({ id: 'cust-1', firstName: 'Alice', lastName: 'Smith' }),
+        } as unknown as Response);
+      }
+      return Promise.resolve({ ok: false, status: 404, json: async () => ({}) } as unknown as Response);
+    }) as never);
+
+    render(
+      <MemoryRouter initialEntries={['/estimates/new?customerId=cust-1']}>
+        <EstimateCreate />
+      </MemoryRouter>
+    );
+
+    await waitFor(() => {
+      expect(vi.mocked(apiFetch)).toHaveBeenCalledWith('/api/customers/cust-1');
+    });
+    const affordance = await screen.findByTestId('scoped-customer');
+    expect(affordance).toHaveTextContent('For: Alice Smith');
+  });
+
+  it('hides the For: affordance when the customer fetch fails (stale link)', async () => {
+    vi.mocked(apiFetch).mockResolvedValue(
+      { ok: false, status: 404, json: async () => ({}) } as unknown as Response,
+    );
+    render(
+      <MemoryRouter initialEntries={['/estimates/new?customerId=cust-gone']}>
+        <EstimateCreate />
+      </MemoryRouter>
+    );
+    await waitFor(() => {
+      expect(vi.mocked(apiFetch)).toHaveBeenCalledWith('/api/customers/cust-gone');
+    });
+    expect(screen.queryByTestId('scoped-customer')).not.toBeInTheDocument();
+  });
+
+  // #876 review — a ?jobId= beyond the first page of /api/jobs used to
+  // leave the required Select rendering blank; the by-id fetch now injects
+  // the job as a selectable option.
+  it('?jobId= not in the listed page injects the fetched job into the Select', async () => {
+    vi.mocked(apiFetch).mockImplementation(((url: string) => {
+      if (url === '/api/jobs/job-99') {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: async () => ({
+            id: 'job-99',
+            jobNumber: 'JOB-0099',
+            summary: 'Attic rewire',
+            customer: { id: 'cust-2', displayName: 'Bob Jones' },
+          }),
+        } as unknown as Response);
+      }
+      return Promise.resolve({ ok: true, status: 200, json: async () => ({ data: [] }) } as unknown as Response);
+    }) as never);
+
+    const { container } = render(
+      <MemoryRouter initialEntries={['/estimates/new?jobId=job-99']}>
+        <EstimateCreate />
+      </MemoryRouter>
+    );
+
+    const jobSelect = container.querySelector('select[required]') as HTMLSelectElement;
+    await waitFor(() => {
+      // The injected option renders and is the selected one — not a blank.
+      expect(
+        Array.from(jobSelect.options).some((o) => o.value === 'job-99'),
+      ).toBe(true);
+    });
+    expect(jobSelect.value).toBe('job-99');
+    expect(screen.getByText('JOB-0099 — Attic rewire')).toBeInTheDocument();
+    // The first-page jobs are still offered alongside the injected one.
+    expect(Array.from(jobSelect.options).some((o) => o.value === 'job-42')).toBe(true);
+  });
+
+  it('does not duplicate a deep-linked job that IS in the listed page', async () => {
+    vi.mocked(apiFetch).mockImplementation(((url: string) => {
+      if (url === '/api/jobs/job-42') {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: async () => ({ id: 'job-42', jobNumber: 'JOB-0042', summary: 'AC tune-up' }),
+        } as unknown as Response);
+      }
+      return Promise.resolve({ ok: true, status: 200, json: async () => ({ data: [] }) } as unknown as Response);
+    }) as never);
+
+    const { container } = render(
+      <MemoryRouter initialEntries={['/estimates/new?jobId=job-42']}>
+        <EstimateCreate />
+      </MemoryRouter>
+    );
+    const jobSelect = container.querySelector('select[required]') as HTMLSelectElement;
+    await waitFor(() => expect(jobSelect.value).toBe('job-42'));
+    const occurrences = Array.from(jobSelect.options).filter((o) => o.value === 'job-42');
+    expect(occurrences).toHaveLength(1);
+  });
+
   it('?customerId= scopes the job list query to that customer', () => {
     render(
       <MemoryRouter initialEntries={['/estimates/new?customerId=cust-1']}>

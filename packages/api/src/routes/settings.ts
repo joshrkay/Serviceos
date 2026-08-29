@@ -265,32 +265,35 @@ export function createSettingsRouter(
           }
         }
 
-        // #880 — normalize business_phone to E.164 (or null to clear) at the
-        // boundary, exactly like owner_phone above, and reject Twilio magic
-        // test numbers (+1500555xxxx). businessPhone is what public intake /
-        // booking pages display and tel:-link for customers — an unvalidated
-        // magic number typed here would surface a non-dialable line publicly.
+        // #880 — reject Twilio magic test numbers (+1500555xxxx) as the
+        // business phone: it's what public intake / booking pages display and
+        // tel:-link for customers, and a magic number is never a dialable
+        // line. Unlike owner_phone above, the value is stored AS TYPED —
+        // businessPhone is a display field that may legitimately be
+        // international or carry an extension, which the NANP-only
+        // normalizeMobileE164 would reject; forcing it here 400'd
+        // previously-savable numbers (beyond #880's scope). Normalization is
+        // attempted purely so a human-formatted magic number
+        // ("(500) 555-0006") can't slip past the E.164-shaped predicate.
         if (parsed.businessPhone !== undefined && parsed.businessPhone !== null) {
           const trimmed = parsed.businessPhone.trim();
           if (trimmed === '') {
             parsed.businessPhone = null;
           } else {
-            let normalized: string;
+            let checkable = trimmed;
             try {
-              normalized = normalizeMobileE164(trimmed);
-            } catch (err) {
-              throw new ValidationError(
-                err instanceof Error ? err.message : 'Invalid business phone number',
-                { field: 'businessPhone' },
-              );
+              checkable = normalizeMobileE164(trimmed);
+            } catch {
+              // Not NANP-normalizable (international, extension, …) — check
+              // the raw value and store it verbatim.
             }
-            if (isTwilioTestNumber(normalized)) {
+            if (isTwilioTestNumber(checkable)) {
               throw new ValidationError(
                 'This is a Twilio test number and cannot be used as the business phone',
                 { field: 'businessPhone' },
               );
             }
-            parsed.businessPhone = normalized;
+            parsed.businessPhone = trimmed;
           }
         }
 

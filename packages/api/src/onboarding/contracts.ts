@@ -19,7 +19,9 @@ export const BusinessHoursSchema = z
 export const BusinessIdentityInputSchema = z.object({
   businessName: z.string().min(1).max(120),
   serviceAreaText: z.string().max(200).optional(),
-  serviceAreaRadius: z.number().int().min(1).max(500).optional(),
+  // #874 — tri-state: omit to keep the stored radius, null to explicitly
+  // clear it (an emptied field in the Service-area editor), 1–500 to set.
+  serviceAreaRadius: z.number().int().min(1).max(500).nullable().optional(),
   businessHours: BusinessHoursSchema,
   jobBufferMinutes: z.number().int().min(0).max(240),
   hourlyRateCents: z.number().int().min(100).max(100_000),

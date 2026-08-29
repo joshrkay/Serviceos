@@ -237,7 +237,11 @@ export function createOnboardingRouter(deps: OnboardingRouterDeps): Router {
         await settingsRepo.upsertIdentityFields(tenantId, {
           businessName: v.businessName,
           serviceAreaText: v.serviceAreaText ?? undefined,
-          serviceAreaRadius: v.serviceAreaRadius ?? undefined,
+          // #874 tri-state: forward null (explicit clear) as-is; only an
+          // omitted field keeps the stored radius.
+          ...(v.serviceAreaRadius !== undefined
+            ? { serviceAreaRadius: v.serviceAreaRadius }
+            : {}),
           businessHours: v.businessHours,
           jobBufferMinutes: v.jobBufferMinutes,
           hourlyRateCents: v.hourlyRateCents,

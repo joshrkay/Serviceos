@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { parsePortalFailure } from './billing-error';
+import { isCustomerMissing, parsePortalFailure } from './billing-error';
 
 function response(body: unknown, status = 502, json = true): Response {
   return {
@@ -62,5 +62,46 @@ describe('parsePortalFailure (#873)', () => {
     );
     expect(failure.message).toBe("Couldn't open the billing portal (HTTP 500). Try again in a moment.");
     expect(failure.stripeCode).toBeUndefined();
+  });
+
+  // #873 review — the API marks the unrecoverable stale-customer case with
+  // details.reason + the stale details.stripeCustomerId (subscription.ts
+  // billingPortalStripeFailure). Both must survive parsing so the UI can
+  // render re-link guidance instead of a futile retry.
+  it('parses details.reason and details.stripeCustomerId for the stale-customer case', async () => {
+    const failure = await parsePortalFailure(
+      response({
+        error: 'BILLING_PORTAL_FAILED',
+        message: "Stripe couldn't open the billing portal: No such customer",
+        details: {
+          stripeStatus: 404,
+          stripeCode: 'resource_missing',
+          reason: 'stripe_customer_missing',
+          stripeCustomerId: 'cus_UswJPdKUh7f1eg',
+        },
+      }),
+    );
+    expect(failure.reason).toBe('stripe_customer_missing');
+    expect(failure.stripeCustomerId).toBe('cus_UswJPdKUh7f1eg');
+    expect(isCustomerMissing(failure)).toBe(true);
+  });
+
+  it('reason stays undefined when details carries none (or junk)', async () => {
+    const noReason = await parsePortalFailure(
+      response({ message: 'Stripe failure', details: { stripeCode: 'resource_missing' } }),
+    );
+    expect(noReason.reason).toBeUndefined();
+    expect(isCustomerMissing(noReason)).toBe(false);
+
+    const junk = await parsePortalFailure(
+      response({ message: 'Stripe failure', details: { reason: 42, stripeCustomerId: false } }),
+    );
+    expect(junk.reason).toBeUndefined();
+    expect(junk.stripeCustomerId).toBeUndefined();
+  });
+
+  it('isCustomerMissing is false for every other reason string', () => {
+    expect(isCustomerMissing({ message: 'x', reason: 'portal_config_missing' })).toBe(false);
+    expect(isCustomerMissing({ message: 'x' })).toBe(false);
   });
 });
