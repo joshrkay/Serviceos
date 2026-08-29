@@ -487,7 +487,7 @@ describe('advertisedIntentsForProfile — derived from the block table, never ha
     // The delta is exactly the protection-section pair: complaint /
     // negotiation have no base block (the always-appended customer-
     // protection section advertises them on live telephony), but the guard
-    // must accept them — the docs (D-027, voice-action-catalog.md) state
+    // must accept them — the docs (D-028, voice-action-catalog.md) state
     // both numbers.
     const advertised = advertisedIntentsForProfile('caller');
     expect(advertised.size).toBe(18);

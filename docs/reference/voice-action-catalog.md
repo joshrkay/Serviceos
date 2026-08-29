@@ -22,7 +22,7 @@ intent, (2) an entry in `INTENT_TO_PROPOSAL_TYPE`, and (3) an execution handler
 wired with its real dependency. Sections below are organised by which of these
 exist today.
 
-**Advertised on which surface? (#886/#887/#902, D-027)** — since 2026-08-28
+**Advertised on which surface? (#886/#887/#902, D-028)** — since 2026-08-28
 the classifier prompt is *surface-conditional*: an intent listed here is only
 *offered to the model* on surfaces whose profile advertises it. Two per-surface
 sets exist, and they are deliberately not the same: **accepted** (the

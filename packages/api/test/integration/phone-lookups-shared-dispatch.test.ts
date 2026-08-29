@@ -41,8 +41,28 @@ import { LookupEventService } from '../../src/lookup-events/lookup-event-service
 import { createAuthorizationLoader } from '../../src/auth/authorization-loader';
 import { PgEntityResolver } from '../../src/ai/resolution/pg-entity-resolver';
 import type { PhoneLookupDeps } from '../../src/ai/voice-turn/phone-lookup-surface';
+import { resolveDayWindow } from '../../src/reports/money-dashboard';
+import { localDateString } from '../../src/digest/digest-service';
 
 const TZ = 'America/Chicago';
+
+/**
+ * Deterministic clock: noon today in the tenant timezone, injected into the
+ * lookup dispatch via the `PhoneLookupDeps.now` seam and used as the base for
+ * every relative seed below. lookup_my_day bounds its window to TODAY in
+ * tenant tz (the same resolveDayWindow used here), so a wall-clock
+ * "now + 2h" seeded after 22:00 America/Chicago lands on tomorrow's date and
+ * the honest spoken line is "You have nothing left today." — this file was
+ * red at every CI run between 22:00 and midnight Chicago and green the rest
+ * of the day. Anchoring at noon keeps the ±3h offsets inside today (and
+ * inside this week) at every hour CI runs, without drifting far enough from
+ * the real clock to disturb DB-side defaults.
+ */
+const NOW = new Date(
+  resolveDayWindow(localDateString(new Date(), TZ), TZ).start.getTime() + 12 * 60 * 60 * 1000,
+);
+const hoursFrom = (base: Date, hours: number): Date =>
+  new Date(base.getTime() + hours * 60 * 60 * 1000);
 const OWNER_PHONE = '+15125550100';
 const TECH_MOBILE = '+15125550222';
 const CUSTOMER_PHONE = '+15125559999';
@@ -119,6 +139,7 @@ describe('#866 — phone lookups against real Postgres (Gather seam)', () => {
       shared: { jobRepo, appointmentRepo, customerRepo, proposalRepo, userRepo },
       entityResolver: new PgEntityResolver(pool),
       tenantTimezoneResolver: async () => TZ,
+      now: () => NOW,
     };
   });
 
@@ -267,7 +288,7 @@ describe('#866 — phone lookups against real Postgres (Gather seam)', () => {
   }
 
   async function seedAppointment(s: Seed, hoursFromNow: number): Promise<void> {
-    const start = new Date(Date.now() + hoursFromNow * 60 * 60 * 1000);
+    const start = hoursFrom(NOW, hoursFromNow);
     await appointmentRepo.create({
       id: crypto.randomUUID(),
       tenantId: s.tenantId,
@@ -344,7 +365,7 @@ describe('#866 — phone lookups against real Postgres (Gather seam)', () => {
 
   it("lookup_timesheets: the owner hears Jake's hours this week", async () => {
     const s = await seed();
-    const clockIn = new Date(Date.now() - 3 * 60 * 60 * 1000);
+    const clockIn = hoursFrom(NOW, -3);
     await timeEntryRepo.create({
       id: crypto.randomUUID(),
       tenantId: s.tenantId,
@@ -370,9 +391,9 @@ describe('#866 — phone lookups against real Postgres (Gather seam)', () => {
       tenantId: s.tenantId,
       voiceSessionId: crypto.randomUUID(),
       callerE164: CUSTOMER_PHONE,
-      scheduledFor: new Date(Date.now() - 60 * 60 * 1000),
+      scheduledFor: hoursFrom(NOW, -1),
     });
-    await recoveryRepo.markSent(s.tenantId, row.id, 'SM-test', new Date(Date.now() - 30 * 60 * 1000));
+    await recoveryRepo.markSent(s.tenantId, row.id, 'SM-test', hoursFrom(NOW, -0.5));
 
     const xml = await callAndAsk(s, OWNER_PHONE, 'lookup_pending_items');
 

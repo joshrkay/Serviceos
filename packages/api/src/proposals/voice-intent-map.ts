@@ -57,13 +57,24 @@ import type { ProposalType } from './proposal';
  *
  * B5.5 / Part F decision F-3: `en_route` ("on my way") is ALSO deliberately
  * omitted, for a different reason than lookup_* — it isn't read-only, it's a
- * DIRECT status act. Voice/SMS "on my way" invokes the exact same audited
- * act the shipped app en-route button already executes (dispatch/routes.ts
- * `triggerEnRoute` → `appointment.en_route_triggered` audit + branded ETA
- * SMS) rather than drafting an AI proposal for a human to approve — the
- * technician IS the human acting, the precedent PRD B10.10 already blesses.
- * See workers/voice-action-router.ts (the `en_route` branch, handled before
- * the proposalType lookup below) and dispatch/en-route-voice.ts. Registered
+ * DIRECT status act. "On my way" on any surface invokes the exact same
+ * audited act the shipped app en-route button already executes
+ * (dispatch/routes.ts `triggerEnRoute` → `appointment.en_route_triggered`
+ * audit + branded ETA SMS) rather than drafting an AI proposal for a human
+ * to approve — the technician IS the human acting, the precedent PRD B10.10
+ * already blesses. The shared core is
+ * dispatch/en-route-voice.ts#handleEnRouteForTechnician; its callers (#847)
+ * are workers/voice-action-router.ts (the recorded-memo `en_route` branch,
+ * handled before the proposalType lookup below, via the
+ * handleEnRouteVoiceIntent wrapper), ai/voice-turn/phone-en-route-surface.ts
+ * (BOTH live phone transports: the Gather branch in
+ * telephony/twilio-adapter.ts and media-streams finals via speechTurn in
+ * create-voice-turn-processor.ts), and routes/assistant.ts (the chat branch,
+ * before the unmapped-capability refusal). The SMS OMW keyword
+ * (sms/tech-status/en-route-keyword.ts) fires the SAME audited
+ * `triggerEnRoute` act but predates the core and still resolves inline —
+ * folding it in is a filed follow-up, so don't read it as a caller here.
+ * Registered
  * here, next to lookup_*, so the drift test
  * (test/ai/voice-action-catalog.contract.test.ts) and a human reader both
  * see this as an intentional exclusion, not a gap.
@@ -80,15 +91,28 @@ import type { ProposalType } from './proposal';
  * generic warn+skip, that emits a `voice_clarification` explaining why —
  * not the same silent skip that branch protects against.
  *
- * This is NOT a gap the live-call/chat text-mode-driver path shares:
- * `text-mode-driver.ts` is not a separate pipeline — it dispatches through
- * `createVoiceActionRouterWorker`, the same worker this map serves — but it
- * intercepts these three intents itself, BEFORE reaching this map's lookup
- * (`evaluateTurn`: `confirm`/`language_switch` → `{kind:'noop'}`,
- * `operator_request` → `{kind:'escalate'}`), because on a live call they
- * DO have a real target (the in-progress dialogue / the on-call human).
- * That earlier interception, not this map, is why the two surfaces don't
- * double-emit for the same intent.
+ * On a live call all three DO have a real target (the in-progress dialogue,
+ * the live call's language, the on-call human), so every live surface must
+ * intercept them BEFORE reaching this map's lookup — an intent that falls
+ * through here silently becomes a clarification card. Who intercepts what:
+ *
+ *   - `operator_request` — FSM global guard (customer-calling/transitions.ts
+ *     checkGlobalGuards) → escalating. All live surfaces.
+ *   - `confirm` — the approval/readback dialogues consume their turns before
+ *     classification; a bare confirm with nothing pending, in EITHER state
+ *     the adapters classify in (intent_capture or closing), is answered by
+ *     the FSM's spoken re-prompt guard (#846 + D-027,
+ *     CONFIRM_NOTHING_PENDING_LINE), never a clarification card.
+ *   - `language_switch` — per-transport adapter branches (the FSM is pure
+ *     and cannot mutate session.language): media-streams'
+ *     `switchLanguage`/pre-scan, and the Gather adapter's
+ *     `handleLanguageSwitchGather` (#846 — before it, this one was real: the
+ *     Gather production path had NO branch and degraded to a clarification).
+ *   - The eval harness (`text-mode-driver.ts` `evaluateTurn`) additionally
+ *     intercepts `confirm`/`language_switch` → `{kind:'noop'}` and
+ *     `operator_request` → `{kind:'escalate'}` before dispatching through
+ *     `createVoiceActionRouterWorker`, which is why the harness never
+ *     double-emits against the memo-path branch above.
  */
 export const INTENT_TO_PROPOSAL_TYPE: Partial<Record<Exclude<IntentType, 'unknown'>, ProposalType>> = {
   create_invoice: 'draft_invoice',

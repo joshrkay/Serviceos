@@ -669,7 +669,49 @@ calls the same surface adapter from `speechTurn`; the actor is already stamped f
 shared establishment core, so step 2 adds the dispatch call and nothing about identity. It is not
 wired here.
 
-### D-027: The classifier prompt is surface-conditional; session input caps are derived from a documented per-turn budget
+### D-027: A live-call complaint escalates to a human; bare confirm re-prompts; language_switch ships on Gather
+**Date:** 2026-08-28
+**Initiative:** Voice Phase 0 of #852; #846, review-fix pass on PR #883.
+**Decision:** Three behaviors from #846's Gather-path intent handling, ratified by the owner on
+2026-08-28 after the two-axis code review of PR #883:
+1. **Complaint escalates.** A `complaint` classified on a live call is handled like
+   `operator_request`: the FSM's global guard speaks a fixed acknowledgment
+   (`COMPLAINT_ESCALATION_LINE`) and fast-paths to `escalating` (audit log + `notify_oncall`,
+   `escalationReason: 'complaint'`). This SUPERSEDES the first cut, which deflected and continued
+   the call negotiation-style. The one-shot owner `callback` proposal is RETAINED as the
+   escalation's paper trail (idempotent via `complaintFlagged`), carrying the recorded-memo
+   path's deterministic severity markers — severity detection runs over the caller's raw
+   utterance, threaded through the `intent_classified` event, not just classifier-extracted
+   entities. On the untrusted S1 live-caller surface it stays a `callback` and never an
+   `add_note` (operator-only; coercion would reproduce the silent-degrade bug #846 fixed).
+   Unlike `operator_request` there is no `escalationTriggers` deflect branch: no tenant toggle
+   maps to complaints, and an unhappy caller always reaches a person.
+2. **Bare confirm re-prompts, in speech.** A bare `confirm` ("yes") with nothing pending is
+   answered by the FSM's spoken re-prompt (`CONFIRM_NOTHING_PENDING_LINE`) — never persisted as
+   a `voice_clarification` card. The guard covers BOTH states the adapters classify in,
+   `intent_capture` AND `closing` (the adapters gate on `intent_capture || closing`, so
+   covering only one left the closing "yes" minting cards); `intent_confirm`'s
+   intent-classified-as-correction handling is untouched, and a live post-quote "yes" is still
+   consumed by the deterministic pendingQuote pre-check before the classifier runs.
+3. **language_switch ships on Gather notwithstanding open #838.** The adapter-level Gather
+   branch (flip `session.language`, re-resolve the TTS voice, tenant `supported_languages`
+   gate, shared `MAX_LANGUAGE_SWITCHES_PER_CALL` flap cap) is live; whatever #838 decides about
+   the broader language posture applies on top of it rather than blocking it.
+**Rationale:** The review surfaced that "I've flagged this for the owner, anything else?" reads
+as a brush-off to a caller angry enough to say "complaint" — the cost of a wrongly-escalated call
+is one human minute, the cost of a wrongly-deflected complaint is a churned customer and an
+unheard refund/legal threat. Escalation with a paper-trail proposal keeps both: the human gets
+the call, the owner gets the severity-marked follow-up card.
+**Alternatives considered:**
+- *Deflect-and-continue (the first cut).* Rejected by the owner: a complaint is a request for a
+  person, not context to file.
+- *Escalate without the callback proposal.* Rejected: the on-call transfer is ephemeral; the
+  proposal is the reviewable record and carries the severity markers the digest/cards key on.
+- *Gate complaint escalation on an `escalationTriggers` toggle.* Rejected: `trigger_explicit_request`
+  means "caller asked for a person" and its deflect line ("I can help with scheduling…") would be
+  absurd against a complaint; adding a new toggle would default some tenants into the brush-off.
+
+### D-028: The classifier prompt is surface-conditional; session input caps are derived from a documented per-turn budget
 **Date:** 2026-08-28
 **Initiative:** P0 voice gate failure (#886, #887; folds #896, #899; PR #902).
 **Decision:** The classifier system prompt is assembled per **surface profile** from a verbatim
@@ -730,5 +772,5 @@ per-surface mutable caps in voice-session-store. The voice-quality harness/text-
 deliberately NOT profile-wired (#888/#897 follow-up; wiring it would invalidate all cassette
 hashes). `owner_line` still burns ~15.2k tokens/turn (~3 classify turns per session cap) —
 further owner-prompt conditioning is a follow-up. Lookup-bullet table compaction is a separate
-PR; #900 is out of scope. Numbering note: this log's latest entry on main is D-026; #883's PR
-also claims D-027 but is unmerged — renumber whichever lands second.
+PR; #900 is out of scope. Numbering note: #883's complaint-escalation decision merged first and
+holds D-027; this entry renumbered to D-028 at merge time (2026-08-29).
