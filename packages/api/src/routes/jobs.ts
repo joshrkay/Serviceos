@@ -2,6 +2,7 @@ import { Router, Response } from 'express';
 import { z } from 'zod';
 import { AuthenticatedRequest } from '../auth/clerk';
 import { requireAuth, requireTenant, requirePermission } from '../middleware/auth';
+import { notFoundOnMalformedId } from '../middleware/validate-uuid-param';
 import {
   createJobSchema,
   scheduleJobSchema,
@@ -320,6 +321,7 @@ export function createJobRouter(
     // appointment-create permission (owner/dispatcher) rather than jobs:update —
     // a technician holds jobs:update but must not be able to book/move work.
     requirePermission('appointments:create'),
+    notFoundOnMalformedId('Job not found'),
     async (req: AuthenticatedRequest, res: Response) => {
       try {
         const syncDeps = buildScheduleSyncDeps();
@@ -367,6 +369,7 @@ export function createJobRouter(
     // Reassigning moves an existing appointment to another technician — an
     // appointment mutation, not a job edit. Owner/dispatcher only.
     requirePermission('appointments:update'),
+    notFoundOnMalformedId('Job not found'),
     async (req: AuthenticatedRequest, res: Response) => {
       try {
         const syncDeps = buildScheduleSyncDeps();
@@ -405,6 +408,7 @@ export function createJobRouter(
     // Unscheduling cancels the appointment and clears the dispatch slot — an
     // appointment mutation. Owner/dispatcher only.
     requirePermission('appointments:update'),
+    notFoundOnMalformedId('Job not found'),
     async (req: AuthenticatedRequest, res: Response) => {
       try {
         const syncDeps = buildScheduleSyncDeps();
@@ -504,6 +508,7 @@ export function createJobRouter(
     requireAuth,
     requireTenant,
     requirePermission('jobs:view'),
+    notFoundOnMalformedId('Job not found'),
     async (req: AuthenticatedRequest, res: Response) => {
       try {
         const result = await getJob(req.auth!.tenantId, req.params.id, jobRepo);
@@ -561,6 +566,7 @@ export function createJobRouter(
     requireAuth,
     requireTenant,
     requirePermission('jobs:update'),
+    notFoundOnMalformedId('Job not found'),
     async (req: AuthenticatedRequest, res: Response) => {
       try {
         const result = await updateJob(
@@ -588,6 +594,7 @@ export function createJobRouter(
     requireAuth,
     requireTenant,
     requirePermission('jobs:update'),
+    notFoundOnMalformedId('Job not found'),
     async (req: AuthenticatedRequest, res: Response) => {
       try {
         const { status, reason } = req.body;

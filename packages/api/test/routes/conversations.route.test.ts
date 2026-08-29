@@ -414,3 +414,115 @@ describe('GET /api/conversations/search — Story 3.11 history search', () => {
     expect(res.body.results).toHaveLength(1);
   });
 });
+
+/**
+ * #882 — a non-UUID `:id` (or `:customerId` on the customer-thread route)
+ * used to flow straight into a Pg uuid comparison, so Postgres threw
+ * `invalid input syntax for type uuid` and the route answered a bare 500.
+ * These PgLike doubles throw the same error Postgres would (pattern:
+ * customers.route.test.ts, the #871 precedent); the `notFoundOnMalformedId`
+ * guard must answer the route's 404 envelope first.
+ */
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+class PgLikeConversationRepository extends InMemoryConversationRepository {
+  async findById(tenantId: string, id: string) {
+    if (!UUID_RE.test(id)) {
+      throw new Error(`invalid input syntax for type uuid: "${id}"`);
+    }
+    return super.findById(tenantId, id);
+  }
+}
+
+function buildPgLikeConversationsApp(): Express {
+  const app = express();
+  app.use(express.json());
+  app.use((req: Request, _res: Response, next: NextFunction) => {
+    (req as AuthenticatedRequest).auth = {
+      userId: USER_ID,
+      sessionId: 'session-conv-882',
+      tenantId: TENANT_ID,
+      role: 'owner',
+    };
+    next();
+  });
+  // Pg-like customer lookup for POST /customer/:customerId — the raw param
+  // flows into PgCustomerRepository.findById's uuid comparison.
+  const customerLookup = {
+    findById: async (_tenantId: string, id: string) => {
+      if (!UUID_RE.test(id)) {
+        throw new Error(`invalid input syntax for type uuid: "${id}"`);
+      }
+      return null;
+    },
+  };
+  app.use(
+    '/api/conversations',
+    createConversationRouter(
+      new PgLikeConversationRepository(),
+      new InMemoryAuditRepository(),
+      undefined,
+      undefined,
+      customerLookup,
+    ),
+  );
+  return app;
+}
+
+describe('malformed :id never reaches Postgres as a raw uuid comparison (#882)', () => {
+  let app: Express;
+
+  beforeEach(() => {
+    app = buildPgLikeConversationsApp();
+  });
+
+  it('GET /api/conversations/not-a-uuid returns 404 NOT_FOUND, not 500', async () => {
+    const res = await request(app).get('/api/conversations/not-a-uuid');
+    expect(res.status).toBe(404);
+    expect(res.body.error).toBe('NOT_FOUND');
+    expect(res.body.message).toBe('Conversation not found');
+  });
+
+  it('POST /api/conversations/not-a-uuid/messages returns 404 NOT_FOUND', async () => {
+    const res = await request(app)
+      .post('/api/conversations/not-a-uuid/messages')
+      .send({ messageType: 'text', content: 'hello' });
+    expect(res.status).toBe(404);
+    expect(res.body.error).toBe('NOT_FOUND');
+  });
+
+  it('GET /api/conversations/not-a-uuid/messages returns 404 NOT_FOUND, not 500', async () => {
+    const res = await request(app).get('/api/conversations/not-a-uuid/messages');
+    expect(res.status).toBe(404);
+    expect(res.body.error).toBe('NOT_FOUND');
+  });
+
+  it('POST /api/conversations/not-a-uuid/suggest-reply returns 404 NOT_FOUND', async () => {
+    const res = await request(app).post('/api/conversations/not-a-uuid/suggest-reply').send({});
+    expect(res.status).toBe(404);
+    expect(res.body.error).toBe('NOT_FOUND');
+  });
+
+  it('POST /api/conversations/not-a-uuid/reply returns 404 NOT_FOUND', async () => {
+    const res = await request(app)
+      .post('/api/conversations/not-a-uuid/reply')
+      .send({ content: 'hello' });
+    expect(res.status).toBe(404);
+    expect(res.body.error).toBe('NOT_FOUND');
+  });
+
+  it('POST /api/conversations/customer/not-a-uuid returns 404 NOT_FOUND, not 500', async () => {
+    const res = await request(app).post('/api/conversations/customer/not-a-uuid').send({});
+    expect(res.status).toBe(404);
+    expect(res.body.error).toBe('NOT_FOUND');
+    expect(res.body.message).toBe('Customer not found');
+  });
+
+  it('a well-formed but unknown uuid still answers the ordinary 404', async () => {
+    const res = await request(app).get(
+      '/api/conversations/11111111-1111-1111-1111-111111111111',
+    );
+    expect(res.status).toBe(404);
+    expect(res.body.error).toBe('NOT_FOUND');
+  });
+});

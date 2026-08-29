@@ -11,7 +11,7 @@ import { buildTestApp, TEST_TENANT_ID, TEST_USER_ID } from './test-app';
 import type { Express } from 'express';
 import express, { Request, Response, NextFunction } from 'express';
 import { createJobRouter } from '../../src/routes/jobs';
-import { InMemoryJobRepository } from '../../src/jobs/job';
+import { InMemoryJobRepository, type Job } from '../../src/jobs/job';
 import { InMemoryJobTimelineRepository } from '../../src/jobs/job-lifecycle';
 import { InMemoryAuditRepository } from '../../src/audit/audit';
 import { InMemoryQueue } from '../../src/queues/queue';
@@ -443,7 +443,9 @@ describe('GET /api/jobs/:id', () => {
       ),
     );
     const created = await jobRepo.create({
-      id: 'job-1',
+      // A real uuid — #882's malformed-:id guard 404s fixture-style ids like
+      // 'job-1' before the handler runs, exactly as prod (uuid column) would.
+      id: '3b1c3f3e-8f5a-4a8e-9c1d-2e6f7a9b0c1d',
       tenantId: TEST_TENANT_ID,
       customerId: 'cust-a',
       locationId: 'loc-b',
@@ -567,5 +569,115 @@ describe('POST /api/jobs/:id/transition', () => {
     const s3 = await request(app).post(`/api/jobs/${id}/transition`).send({ status: 'completed' });
     expect(s3.status).toBe(200);
     expect(s3.body.job.status).toBe('completed');
+  });
+});
+
+/**
+ * #882 — a non-UUID `:id` used to flow straight into PgJobRepository's uuid
+ * comparison, so Postgres threw `invalid input syntax for type uuid` and the
+ * route answered a bare 500. This PgLike subclass throws the same error
+ * Postgres would (pattern: customers.route.test.ts, the #871 precedent); the
+ * `notFoundOnMalformedId` guard must answer the route's 404 envelope first.
+ */
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+class PgLikeJobRepository extends InMemoryJobRepository {
+  async findById(tenantId: string, id: string) {
+    if (!UUID_RE.test(id)) {
+      throw new Error(`invalid input syntax for type uuid: "${id}"`);
+    }
+    return super.findById(tenantId, id);
+  }
+
+  async update(tenantId: string, id: string, updates: Partial<Job>) {
+    if (!UUID_RE.test(id)) {
+      throw new Error(`invalid input syntax for type uuid: "${id}"`);
+    }
+    return super.update(tenantId, id, updates);
+  }
+}
+
+function buildPgLikeJobsApp(): Express {
+  const app = express();
+  app.use(express.json());
+  app.use((req: Request, _res: Response, next: NextFunction) => {
+    (req as AuthenticatedRequest).auth = {
+      userId: TEST_USER_ID,
+      sessionId: 'session-jobs-882',
+      tenantId: TEST_TENANT_ID,
+      role: 'owner',
+    };
+    next();
+  });
+  const ownership: TenantOwnership = {
+    async requireExists() {},
+    async requireExistsAndLoad() {
+      return undefined;
+    },
+  };
+  app.use(
+    '/api/jobs',
+    createJobRouter(
+      new PgLikeJobRepository(),
+      new InMemoryJobTimelineRepository(),
+      new InMemoryAuditRepository(),
+      ownership,
+      new InMemoryQueue(),
+      new NoopFeedbackDispatcher(),
+    ),
+  );
+  return app;
+}
+
+describe('malformed :id never reaches Postgres as a raw uuid comparison (#882)', () => {
+  let app: Express;
+
+  beforeEach(() => {
+    app = buildPgLikeJobsApp();
+  });
+
+  it('GET /api/jobs/not-a-uuid returns 404 NOT_FOUND, not 500', async () => {
+    const res = await request(app).get('/api/jobs/not-a-uuid');
+    expect(res.status).toBe(404);
+    expect(res.body.error).toBe('NOT_FOUND');
+    expect(res.body.message).toBe('Job not found');
+  });
+
+  it('PUT /api/jobs/not-a-uuid returns 404 NOT_FOUND, not 500', async () => {
+    const res = await request(app).put('/api/jobs/not-a-uuid').send({ summary: 'X' });
+    expect(res.status).toBe(404);
+    expect(res.body.error).toBe('NOT_FOUND');
+  });
+
+  it('POST /api/jobs/not-a-uuid/transition returns 404 NOT_FOUND, not 500', async () => {
+    const res = await request(app)
+      .post('/api/jobs/not-a-uuid/transition')
+      .send({ status: 'scheduled' });
+    expect(res.status).toBe(404);
+    expect(res.body.error).toBe('NOT_FOUND');
+  });
+
+  it('POST /api/jobs/not-a-uuid/schedule returns 404 NOT_FOUND', async () => {
+    const res = await request(app).post('/api/jobs/not-a-uuid/schedule').send({});
+    expect(res.status).toBe(404);
+    expect(res.body.error).toBe('NOT_FOUND');
+  });
+
+  it('POST /api/jobs/not-a-uuid/reassign returns 404 NOT_FOUND', async () => {
+    const res = await request(app).post('/api/jobs/not-a-uuid/reassign').send({});
+    expect(res.status).toBe(404);
+    expect(res.body.error).toBe('NOT_FOUND');
+  });
+
+  it('POST /api/jobs/not-a-uuid/unschedule returns 404 NOT_FOUND', async () => {
+    const res = await request(app).post('/api/jobs/not-a-uuid/unschedule').send({});
+    expect(res.status).toBe(404);
+    expect(res.body.error).toBe('NOT_FOUND');
+  });
+
+  it('a well-formed but unknown uuid still answers the ordinary 404', async () => {
+    const res = await request(app).get('/api/jobs/11111111-1111-1111-1111-111111111111');
+    expect(res.status).toBe(404);
+    expect(res.body.error).toBe('NOT_FOUND');
   });
 });
