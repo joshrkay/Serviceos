@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { AlertTriangle } from 'lucide-react';
 import { useApiClient } from '../../lib/apiClient';
 import { useOnboardingStatus } from '../../hooks/useOnboardingStatus';
+import { parsePortalFailure } from '../../utils/billing-error';
 
 /**
  * Past-due payment banner. Renders whenever the tenant's Stripe
@@ -32,7 +33,11 @@ export function PastDueBanner() {
         body: JSON.stringify({ returnUrl: window.location.href }),
       });
       if (!res.ok) {
-        setError(`Couldn't open billing (HTTP ${res.status}). Try again in a moment.`);
+        // #873 — render the server's actionable reason (e.g. the saved
+        // Stripe customer no longer exists — contact support to re-link
+        // billing) instead of discarding it for a generic HTTP line.
+        const failure = await parsePortalFailure(res);
+        setError(failure.message);
         return;
       }
       const body = (await res.json()) as { url?: string };
@@ -56,7 +61,11 @@ export function PastDueBanner() {
         <span className="text-red-800">
           Update your card to keep your AI agent answering calls.
         </span>
-        {error && <span className="ml-3 text-red-700">{error}</span>}
+        {error && (
+          <span role="alert" className="ml-3 text-red-700">
+            {error}
+          </span>
+        )}
       </div>
       <button
         type="button"

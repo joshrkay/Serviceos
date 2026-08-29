@@ -47,7 +47,15 @@ export function OnboardingShell() {
   const apiFetch = useApiClient();
   const { userId } = useAuth();
   const { data, isLoading, error, refetch } = useOnboardingStatus(3000);
-  const [override, setOverride] = useState<OnboardingStepId | null>(null);
+  // #875 — "Re-run setup assistant" deep-links here as /onboarding?rerun=1.
+  // Seeding the step override at mount lands the re-run on the first
+  // reviewable step AND lets it past the completion bounce below, which
+  // otherwise redirects every completed tenant home before the sidebar's
+  // handleSelect could ever set an override. A plain /onboarding visit by
+  // a completed tenant still bounces.
+  const [override, setOverride] = useState<OnboardingStepId | null>(() =>
+    searchParams.get('rerun') === '1' ? 'identity' : null,
+  );
   const billingToastShown = useRef(false);
 
   // B1.19 — "talk it through" conversational alternative to the form
@@ -256,7 +264,8 @@ export function OnboardingShell() {
 
   // Once complete, bounce to dashboard. The app-shell guard would
   // already block re-entry, but this guards against a user landing on
-  // /onboarding directly after finishing.
+  // /onboarding directly after finishing. An explicit re-run
+  // (?rerun=1) pre-seeds `override` at mount above and passes through.
   if (data.isComplete && !override) {
     navigate('/', { replace: true });
     return null;

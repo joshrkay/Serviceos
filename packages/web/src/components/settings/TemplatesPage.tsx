@@ -977,9 +977,10 @@ export function TemplatesPage() {
           </div>
         </div>
 
-        {/* ── Onboarding re-run prompt ── */}
+        {/* ── Onboarding re-run prompt — ?rerun=1 passes OnboardingShell's
+            completion gate for an explicit re-run (#875) ── */}
         <button
-          onClick={() => navigate('/onboarding')}
+          onClick={() => navigate('/onboarding?rerun=1')}
           className="w-full flex items-center gap-4 rounded-xl border border-indigo-200 bg-indigo-50 px-5 py-4 text-left hover:bg-indigo-100 transition-colors group"
         >
           <span className="flex size-10 shrink-0 items-center justify-center rounded-xl bg-indigo-600">
