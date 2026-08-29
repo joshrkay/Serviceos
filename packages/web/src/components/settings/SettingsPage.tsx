@@ -647,9 +647,11 @@ export function SettingsPage() {
           </div>
         )}
 
-        {/* Onboarding re-run banner */}
+        {/* Onboarding re-run banner — ?rerun=1 tells OnboardingShell this
+            is an explicit re-run so its completion gate lets it through
+            (#875). */}
         <button
-          onClick={() => navigate('/onboarding')}
+          onClick={() => navigate('/onboarding?rerun=1')}
           className="w-full flex items-center gap-3 rounded-xl border border-indigo-200 bg-indigo-50 px-4 py-3.5 mb-5 text-left hover:bg-indigo-100 transition-colors group"
         >
           <div className="flex size-9 items-center justify-center rounded-xl bg-indigo-600 shrink-0">
