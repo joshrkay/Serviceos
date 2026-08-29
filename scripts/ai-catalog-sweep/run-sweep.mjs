@@ -342,6 +342,32 @@ async function ensureFixtures() {
       );
       summary.push(`leads: inserted ${last}`);
     }
+    // Business timezone — confirmed root cause (2026-08-29 full sweep) of
+    // A03/A33 (create_appointment / schedule_inspection) failing to draft
+    // at all: routes/assistant.ts's create_appointment path honestly
+    // refuses relative-time scheduling ("Cannot book — the business time
+    // zone is not set") when the tenant has no tenant_settings row.
+    // e2e/qa-matrix/fixtures/seed.ts never provisions tenant_settings
+    // (only tenants/users/customers/service_locations/jobs), so this
+    // sweep's QA tenant genuinely has none — the app deliberately has no
+    // app-layer fallback zone (see packages/api/src/settings/pg-settings.ts
+    // TenantIdentityUpsertFields.timezone's own comment). Mirrors the real
+    // onboarding write (pg-settings.ts#upsertIdentityFields's INSERT ...
+    // ON CONFLICT (tenant_id) pattern) but ON CONFLICT DO NOTHING —
+    // idempotent, and never overwrites an operator's real settings if a
+    // row already exists for this tenant.
+    const tzExisting = await rw.query('SELECT timezone FROM tenant_settings WHERE tenant_id = $1 LIMIT 1', [TENANT_ID]);
+    if ((tzExisting.rowCount ?? 0) > 0) {
+      summary.push(`tenant_settings: exists (timezone=${tzExisting.rows[0].timezone})`);
+    } else {
+      await rw.query(
+        `INSERT INTO tenant_settings (id, tenant_id, business_name, timezone, created_at, updated_at)
+         VALUES (gen_random_uuid(), $1, $2, $3, now(), now())
+         ON CONFLICT (tenant_id) DO NOTHING`,
+        [TENANT_ID, 'QA Sweep Test Business', 'America/New_York'],
+      );
+      summary.push('tenant_settings: inserted (business_name=QA Sweep Test Business, timezone=America/New_York)');
+    }
   } finally {
     await rw.end();
   }
@@ -501,9 +527,19 @@ async function runRow(corpusCase, ctx) {
     const isDataLookup = chatFields.model === 'data-lookup' || chatFields.taskType?.startsWith('assistant.lookup') || chatFields.taskType?.startsWith('assistant.query');
     const contentOk = typeof chatFields.content === 'string' && chatFields.content.length >= 10;
     const regexOk = corpusCase.answerRegex ? new RegExp(corpusCase.answerRegex, 'i').test(chatFields.content) : true;
+    // Widened 2026-08-29 after the full 99-row sweep: R01/R02/R04's real
+    // replies ("That's an owner-level report...", "...an office-level
+    // view...") are genuine lookup-dispatch RBAC refusals the narrower
+    // permission|don't have access|... regex missed. Gated on isDataLookup
+    // so a generic-LLM fallthrough using similar words can't false-PASS
+    // (see scripts/ai-catalog-sweep/rescore.mjs's header for the C02
+    // counter-example this gate exists to rule out).
     const looksLikeDenial = corpusCase.refusalHint
       ? chatFields.content.toLowerCase().includes(corpusCase.refusalHint.toLowerCase())
-      : /permission|don't have access|not authorized|can't (share|show|see)/i.test(chatFields.content);
+      : isDataLookup &&
+        /permission|don't have access|not authorized|can't (share|show|see)|owner-level|office-level|ask (an owner|a dispatcher|your owner|your dispatcher)/i.test(
+          chatFields.content,
+        );
     if (corpusCase.expectedOutcome === 'rbac_denied') {
       verdict = httpStatus === 403 || (contentOk && looksLikeDenial) ? 'PASS' : contentOk ? 'PARTIAL' : 'DEGRADED';
       outcomeClass = 'rbac_denied';

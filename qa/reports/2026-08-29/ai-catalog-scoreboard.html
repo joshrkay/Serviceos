@@ -1,0 +1,996 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AI Capability Catalog — Live Sweep Scoreboard</title>
+<style>
+  :root {
+    --bg: #f7f7f8; --panel: #ffffff; --text: #1b1d1f; --muted: #5b6068; --border: #e2e4e8;
+    --pass-bg: #e6f6ea; --pass-fg: #146c2e; --partial-bg: #fff6e0; --partial-fg: #8a5a00;
+    --skip-bg: #eceef1; --skip-fg: #565c66; --degraded-bg: #fde8e8; --degraded-fg: #a3241f;
+    --improved-bg: #e6f6ea; --improved-fg: #146c2e; --noregress-bg: #eaf1fb; --noregress-fg: #1c4e8a;
+    --notingate-bg: #eceef1; --notingate-fg: #565c66; --followup-bg: #fff1e0; --followup-fg: #9a4b00;
+    --code-bg: #f0f1f3;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #16181c; --panel: #1e2126; --text: #e7e9ec; --muted: #9aa1ab; --border: #2c313a;
+      --pass-bg: #163826; --pass-fg: #6fd08c; --partial-bg: #3a2f10; --partial-fg: #e8bd63;
+      --skip-bg: #262a31; --skip-fg: #aab0ba; --degraded-bg: #3a1a1a; --degraded-fg: #f0908c;
+      --improved-bg: #163826; --improved-fg: #6fd08c; --noregress-bg: #16283a; --noregress-fg: #86b6ef;
+      --notingate-bg: #262a31; --notingate-fg: #aab0ba; --followup-bg: #3a2a10; --followup-fg: #eab06b;
+      --code-bg: #23262c;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
+  header { padding: 24px 28px 18px; border-bottom: 1px solid var(--border); background: var(--panel); }
+  h1 { margin: 0 0 4px; font-size: 20px; }
+  .sub { color: var(--muted); font-size: 13px; margin-bottom: 16px; }
+  .tallies { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 14px; }
+  .tally { background: var(--code-bg); border: 1px solid var(--border); border-radius: 8px; padding: 8px 14px; }
+  .tally .n { font-size: 18px; font-weight: 700; }
+  .tally .l { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .03em; }
+  details { margin-top: 10px; }
+  summary { cursor: pointer; color: var(--muted); font-size: 13px; }
+  .legend { margin: 10px 0 0; padding-left: 20px; font-size: 13px; }
+  .legend li { margin-bottom: 4px; }
+  main { padding: 20px 28px 60px; }
+  table { width: 100%; border-collapse: collapse; background: var(--panel); border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
+  thead th { position: sticky; top: 0; background: var(--code-bg); text-align: left; font-size: 11px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); padding: 10px 12px; border-bottom: 1px solid var(--border); }
+  tbody td { padding: 9px 12px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  tbody tr:last-child td { border-bottom: none; }
+  tbody tr:hover { background: var(--code-bg); }
+  td.id { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-weight: 600; white-space: nowrap; }
+  td.surface, td.expected { color: var(--muted); white-space: nowrap; }
+  td.evidence { max-width: 480px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px; color: var(--text); }
+  .verdict { display: inline-block; padding: 2px 8px; border-radius: 999px; font-weight: 700; font-size: 11px; letter-spacing: .02em; }
+  .v-pass { background: var(--pass-bg); color: var(--pass-fg); }
+  .v-partial { background: var(--partial-bg); color: var(--partial-fg); }
+  .v-skip { background: var(--skip-bg); color: var(--skip-fg); }
+  .v-degraded { background: var(--degraded-bg); color: var(--degraded-fg); }
+  .group { display: block; margin-top: 3px; font-size: 11px; color: var(--muted); }
+  .movement { display: inline-block; padding: 2px 8px; border-radius: 6px; font-size: 11px; white-space: nowrap; cursor: help; }
+  .m-improved { background: var(--improved-bg); color: var(--improved-fg); }
+  .m-noregress { background: var(--noregress-bg); color: var(--noregress-fg); }
+  .m-notingate { background: var(--notingate-bg); color: var(--notingate-fg); }
+  .m-followup { background: var(--followup-bg); color: var(--followup-fg); }
+  footer { padding: 18px 28px 40px; color: var(--muted); font-size: 12px; border-top: 1px solid var(--border); }
+  footer code { background: var(--code-bg); padding: 1px 5px; border-radius: 4px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>AI Capability Catalog — Live Sweep Scoreboard</h1>
+  <div class="sub">dev (serviceosapi-development.up.railway.app) · 99 rows · rescored 2026-08-29T18:11:39.244Z · source: <code>sweep-2026-08-29T18-02-00-385Z-rescored.json</code></div>
+  <div class="tallies">
+    <div class="tally"><div class="n">53</div><div class="l">Pass</div></div>
+    <div class="tally"><div class="n">34</div><div class="l">Partial</div></div>
+    <div class="tally"><div class="n">11</div><div class="l">Skip (by design)</div></div>
+    <div class="tally"><div class="n">1</div><div class="l">Degraded</div></div>
+    <div class="tally"><div class="n">6</div><div class="l">Improved vs July</div></div>
+    <div class="tally"><div class="n">17</div><div class="l">No regression</div></div>
+    <div class="tally"><div class="n">11</div><div class="l">Needs follow-up</div></div>
+  </div>
+  <details>
+    <summary>Root-cause group legend (PARTIAL rows)</summary>
+    <ul class="legend">
+        <li><strong>Timezone gate</strong> — QA tenant has no tenant_settings row -&gt; relative-time scheduling honestly refuses (root cause of the appointment-chain stall; fixed for next run in ensureFixtures()).</li>
+        <li><strong>Chat missing-field gate</strong> — Proposal drafts with a free-text entity reference, not a resolved ID; approveProposal’s missingFieldsFor() guard correctly 400s (confirmed live). Chat has no auto entity-resolution turn the way voice-session’s FSM does.</li>
+        <li><strong>Execution chain-ref gap</strong> — Approved fine, but the execution handler could not resolve a chain-ref field (invoiceId/jobId) outside of a real proposal chain.</li>
+        <li><strong>Correct-by-design guard</strong> — The system is working as intended (48h cooldown, missing completed-unbilled-job fixture) — not a capability gap.</li>
+        <li><strong>Generic-LLM fallthrough</strong> — Request fell through to the general assistant (model ≠ data-lookup) instead of the dedicated lookup skill.</li>
+        <li><strong>Classification miss (relabeled)</strong> — Investigated and confirmed NOT a refusal — same generic-LLM-fallthrough shape as en_route’s other miss; verdict intentionally left PARTIAL rather than forced to PASS.</li>
+        <li><strong>Voice-session routing miss</strong> — The in-app voice-session surface did not route to the dedicated handler for this intent.</li>
+        <li><strong>Utterance/matcher mismatch</strong> — The literal phrase in the utterance did not match the handler’s text matcher.</li>
+    </ul>
+  </details>
+</header>
+<main>
+<table>
+  <thead>
+    <tr>
+      <th>ID</th><th>Intent</th><th>Surface</th><th>Expected</th><th>Verdict</th><th>Evidence</th><th>July movement</th>
+    </tr>
+  </thead>
+  <tbody>
+      <tr>
+        <td class="id">A01</td>
+        <td>create_invoice</td>
+        <td class="surface">chat</td>
+        <td class="expected">executes</td>
+        <td><span class="verdict v-pass">PASS</span></td>
+        <td class="evidence">executed → 56771433-d1a2-47dc-87e9-bfe2414d3f28</td>
+        <td><span class="movement m-noregress" title="July: invoice.create — implemented">no-regression</span></td>
+      </tr>
+      <tr>
+        <td class="id">A02</td>
+        <td>draft_estimate</td>
+        <td class="surface">chat</td>
+        <td class="expected">executes</td>
+        <td><span class="verdict v-pass">PASS</span></td>
+        <td class="evidence">executed → a371ccee-090f-400a-b47b-ecfb473db1f9</td>
+        <td><span class="movement m-noregress" title="July: estimate.create — implemented">no-regression</span></td>
+      </tr>
+      <tr>
+        <td class="id">A03</td>
+        <td>create_appointment</td>
+        <td class="surface">chat</td>
+        <td class="expected">executes</td>
+        <td><span class="verdict v-partial">PARTIAL</span><span class="group">Timezone gate</span></td>
+        <td class="evidence">I have NOT booked the appointment for qa-matrix-A-customer. Please check the availability of the technician for tomorrow at 2pm and confirm if that time work…</td>
+        <td><span class="movement m-followup" title="July: job.create_scheduled — implemented">needs-follow-up</span></td>
+      </tr>
+      <tr>
+        <td class="id">A04</td>
+        <td>update_invoice</td>
+        <td class="surface">chat</td>
+        <td class="expected">executes</td>
+        <td><span class="verdict v-partial">PARTIAL</span><span class="group">Chat missing-field gate</span></td>
+        <td class="evidence">Invoice: Add a 75 dollar filter line to invoice INV-0001. Review and approve to proceed.</td>
+        <td><span class="movement m-followup" title="July: invoice.edit — implemented">needs-follow-up</span></td>
+      </tr>
+      <tr>
+        <td class="id">A05</td>
+        <td>update_estimate</td>
+        <td class="surface">chat</td>
+        <td class="expected">executes</td>
+        <td><span class="verdict v-partial">PARTIAL</span><span class="group">Utterance/matcher mismatch</span></td>
+        <td class="evidence">Estimate: Change the second line on estimate EST-0001 to 300 dollars. Review and approve to proceed.</td>
+        <td><span class="movement m-followup" title="July: estimate.edit — implemented">needs-follow-up</span></td>
+      </tr>
+      <tr>
+        <td class="id">A06</td>
+        <td>issue_invoice</td>
+        <td class="surface">chat</td>
+        <td class="expected">executes</td>
+        <td><span class="verdict v-pass">PASS</span></td>
+        <td class="evidence">executed → 56771433-d1a2-47dc-87e9-bfe2414d3f28</td>
+        <td><span class="movement m-notingate" title="No comparable op in the July 62-op registry (new capability, control/lookup row, or refusal spot-check).">not-in-gate</span></td>
+      </tr>
+      <tr>
+        <td class="id">A07</td>
+        <td>batch_invoice</td>
+        <td class="surface">chat</td>
+        <td class="expected">draft_gated</td>
+        <td><span class="verdict v-partial">PARTIAL</span><span class="group">Correct-by-design guard</span></td>
+        <td class="evidence">Follow-up: Invoice all completed unbilled jobs. Review and approve to proceed.</td>
+        <td><span class="movement m-notingate" title="No comparable op in the July 62-op registry (new capability, control/lookup row, or refusal spot-check).">not-in-gate</span></td>
+      </tr>
+      <tr>
+        <td class="id">A08</td>
+        <td>create_customer</td>
+        <td class="surface">chat</td>
+        <td class="expected">executes</td>
+        <td><span class="verdict v-pass">PASS</span></td>
+        <td class="evidence">executed → 8af86776-df7f-4cb7-af00-c066fbe74c60</td>
+        <td><span class="movement m-noregress" title="July: customer.create — implemented">no-regression</span></td>
+      </tr>
+      <tr>
+        <td class="id">A09</td>
+        <td>create_job</td>
+        <td class="surface">chat</td>
+        <td class="expected">executes</td>
+        <td><span class="verdict v-pass">PASS</span></td>
+        <td class="evidence">executed → 4e2650cc-0223-488d-ad48-2936abb71f7a</td>
+        <td><span class="movement m-noregress" title="July: job.create — implemented">no-regression</span></td>
+      </tr>
+      <tr>
+        <td class="id">A10</td>
+        <td>update_job</td>
+        <td class="surface">chat</td>
+        <td class="expected">executes</td>
+        <td><span class="verdict v-pass">PASS</span></td>
+        <td class="evidence">executed → 4e2650cc-0223-488d-ad48-2936abb71f7a</td>
+        <td><span class="movement m-noregress" title="July: job.edit — implemented">no-regression</span></td>
+      </tr>
+      <tr>
+        <td class="id">A11</td>
+        <td>reschedule_appointment</td>
+        <td class="surface">chat</td>
+        <td class="expected">executes</td>
+        <td><span class="verdict v-partial">PARTIAL</span><span class="group">Chat missing-field gate</span></td>
+        <td class="evidence">Schedule: Move qa-matrix-A-customer's tune-up appointment to Friday at 10am. Review and approve to proceed.</td>
+        <td><span class="movement m-followup" title="July: job.reschedule / schedule.move_appointment — implemented">needs-follow-up</span></td>
+      </tr>
+      <tr>
+        <td class="id">A27</td>
+        <td>confirm_appointment</td>
+        <td class="surface">chat</td>
+        <td class="expected">executes</td>
+        <td><span class="verdict v-partial">PARTIAL</span><span class="group">Chat missing-field gate</span></td>
+        <td class="evidence">Schedule: Confirm qa-matrix-A-customer's appointment. Review and approve to proceed.</td>
+        <td><span class="movement m-notingate" title="No comparable op in the July 62-op registry (new capability, control/lookup row, or refusal spot-check).">not-in-gate</span></td>
+      </tr>
+      <tr>
+        <td class="id">A13</td>
+        <td>reassign_appointment</td>
+        <td class="surface">chat</td>
+        <td class="expected">executes</td>
+        <td><span class="verdict v-partial">PARTIAL</span><span class="group">Chat missing-field gate</span></td>
+        <td class="evidence">Schedule: Reassign qa-matrix-A-customer's appointment to Tom Baker. Review and approve to proceed.</td>
+        <td><span class="movement m-followup" title="July: job.reassign_tech — implemented">needs-follow-up</span></td>
+      </tr>
+      <tr>
+        <td class="id">A14</td>
+        <td>add_crew_member</td>
+        <td class="surface">chat</td>
+        <td class="expected">executes</td>
+        <td><span class="verdict v-partial">PARTIAL</span><span class="group">Chat missing-field gate</span></td>
+        <td class="evidence">Follow-up: Add Alex Rivera to qa-matrix-A-customer's appointment as a second technician. Review and approve to proceed.</td>
+        <td><span class="movement m-notingate" title="No comparable op in the July 62-op registry (new capability, control/lookup row, or refusal spot-check).">not-in-gate</span></td>
+      </tr>
+      <tr>
+        <td class="id">A15</td>
+        <td>remove_crew_member</td>
+        <td class="surface">chat</td>
+        <td class="expected">executes</td>
+        <td><span class="verdict v-partial">PARTIAL</span><span class="group">Chat missing-field gate</span></td>
+        <td class="evidence">Follow-up: Take Alex Rivera off qa-matrix-A-customer's appointment. Review and approve to proceed.</td>
+        <td><span class="movement m-notingate" title="No comparable op in the July 62-op registry (new capability, control/lookup row, or refusal spot-check).">not-in-gate</span></td>
+      </tr>
+      <tr>
+        <td class="id">A12</td>
+        <td>cancel_appointment</td>
+        <td class="surface">chat</td>
+        <td class="expected">executes</td>
+        <td><span class="verdict v-partial">PARTIAL</span><span class="group">Chat missing-field gate</span></td>
+        <td class="evidence">Schedule: Cancel qa-matrix-A-customer's appointment, customer request. Review and approve to proceed.</td>
+        <td><span class="movement m-notingate" title="No comparable op in the July 62-op registry (new capability, control/lookup row, or refusal spot-check).">not-in-gate</span></td>
+      </tr>
+      <tr>
+        <td class="id">A16</td>
+        <td>add_note</td>
+        <td class="surface">chat</td>
+        <td class="expected">executes</td>
+        <td><span class="verdict v-pass">PASS</span></td>
+        <td class="evidence">executed → e3eb673d-15b9-41bb-8184-0036cfbd054d</td>
+        <td><span class="movement m-noregress" title="July: customer.add_note / job.add_note — implemented">no-regression</span></td>
+      </tr>
+      <tr>
+        <td class="id">A17</td>
+        <td>send_invoice</td>
+        <td class="surface">chat</td>
+        <td class="expected">executes</td>
+        <td><span class="verdict v-pass">PASS</span></td>
+        <td class="evidence">executed → mem-email-14</td>
+        <td><span class="movement m-noregress" title="July: invoice.send — implemented">no-regression</span></td>
+      </tr>
+      <tr>
+        <td class="id">A18</td>
+        <td>send_estimate</td>
+        <td class="surface">chat</td>
+        <td class="expected">executes</td>
+        <td><span class="verdict v-pass">PASS</span></td>
+        <td class="evidence">executed → mem-email-13</td>
+        <td><span class="movement m-noregress" title="July: estimate.send — implemented">no-regression</span></td>
+      </tr>
+      <tr>
+        <td class="id">A19</td>
+        <td>send_estimate_nudge</td>
+        <td class="surface">chat</td>
+        <td class="expected">executes</td>
+        <td><span class="verdict v-partial">PARTIAL</span><span class="group">Correct-by-design guard</span></td>
+        <td class="evidence">Estimate: Nudge qa-matrix-A-customer about the estimate we sent. Review and approve to proceed.</td>
+        <td><span class="movement m-noregress" title="July: estimate.follow_up — implemented">no-regression</span></td>
+      </tr>
+      <tr>
+        <td class="id">A20</td>
+        <td>send_payment_reminder</td>
+        <td class="surface">chat</td>
+        <td class="expected">executes</td>
+        <td><span class="verdict v-partial">PARTIAL</span><span class="group">Chat missing-field gate</span></td>
+        <td class="evidence">Invoice: Send qa-matrix-A-customer a payment reminder on invoice INV-0001. Review and approve to proceed.</td>
+        <td><span class="movement m-followup" title="July: invoice.send_payment_reminder — implemented">needs-follow-up</span></td>
+      </tr>
+      <tr>
+        <td class="id">A21</td>
+        <td>apply_late_fee</td>
+        <td class="surface">chat</td>
+        <td class="expected">executes</td>
+        <td><span class="verdict v-partial">PARTIAL</span><span class="group">Chat missing-field gate</span></td>
+        <td class="evidence">Invoice: Apply a 25 dollar late fee to invoice INV-0001. Review and approve to proceed.</td>
+        <td><span class="movement m-notingate" title="No comparable op in the July 62-op registry (new capability, control/lookup row, or refusal spot-check).">not-in-gate</span></td>
+      </tr>
+      <tr>
+        <td class="id">A38</td>
+        <td>apply_credit</td>
+        <td class="surface">chat</td>
+        <td class="expected">executes</td>
+        <td><span class="verdict v-pass">PASS</span></td>
+        <td class="evidence">executed → 56771433-d1a2-47dc-87e9-bfe2414d3f28</td>
+        <td><span class="movement m-notingate" title="No comparable op in the July 62-op registry (new capability, control/lookup row, or refusal spot-check).">not-in-gate</span></td>
+      </tr>
+      <tr>
+        <td class="id">A22</td>
+        <td>record_payment</td>
+        <td class="surface">chat</td>
+        <td class="expected">executes</td>
+        <td><span class="verdict v-partial">PARTIAL</span><span class="group">Execution chain-ref gap</span></td>
+        <td class="evidence">Invoice: Record a 450 dollar check payment on invoice INV-0001, check 2044. Review and approve to proceed.</td>
+        <td><span class="movement m-followup" title="July: invoice.record_manual_payment — implemented">needs-follow-up</span></td>
+      </tr>
+      <tr>
+        <td class="id">A37</td>
+        <td>record_refund</td>
+        <td class="surface">chat</td>
+        <td class="expected">executes</td>
+        <td><span class="verdict v-partial">PARTIAL</span><span class="group">Execution chain-ref gap</span></td>
+        <td class="evidence">Follow-up: Record a 100 dollar cash refund on invoice INV-0001, recharge didn't hold. Review and approve to proceed.</td>
+        <td><span class="movement m-notingate" title="No comparable op in the July 62-op registry (new capability, control/lookup row, or refusal spot-check).">not-in-gate</span></td>
+      </tr>
+      <tr>
+        <td class="id">A23</td>
+        <td>emergency_dispatch</td>
+        <td class="surface">voice-session</td>
+        <td class="expected">executes</td>
+        <td><span class="verdict v-skip">SKIP</span></td>
+        <td class="evidence">emergency_dispatch precheck: tenant_settings.owner_phone not verified as a safe 555-pattern test number (owner_phone not set) — self-skipped to avoid a real SMS page</td>
+        <td><span class="movement m-notingate" title="No comparable op in the July 62-op registry (new capability, control/lookup row, or refusal spot-check).">not-in-gate</span></td>
+      </tr>
+      <tr>
+        <td class="id">A24</td>
+        <td>update_customer</td>
+        <td class="surface">chat</td>
+        <td class="expected">executes</td>
+        <td><span class="verdict v-partial">PARTIAL</span><span class="group">Chat missing-field gate</span></td>
+        <td class="evidence">Customer: Update Priya Shah's phone to 480-555-0188. Review and approve to proceed.</td>
+        <td><span class="movement m-followup" title="July: customer.edit — implemented">needs-follow-up</span></td>
+      </tr>
+      <tr>
+        <td class="id">A25</td>
+        <td>log_expense</td>
+        <td class="surface">chat</td>
+        <td class="expected">executes</td>
+        <td><span class="verdict v-pass">PASS</span></td>
+        <td class="evidence">executed → 71400ea2-6f05-4c79-b2c9-3bdb85a2bae8</td>
+        <td><span class="movement m-notingate" title="No comparable op in the July 62-op registry (new capability, control/lookup row, or refusal spot-check).">not-in-gate</span></td>
+      </tr>
+      <tr>
+        <td class="id">A26</td>
+        <td>convert_lead</td>
+        <td class="surface">chat</td>
+        <td class="expected">executes</td>
+        <td><span class="verdict v-partial">PARTIAL</span><span class="group">Chat missing-field gate</span></td>
+        <td class="evidence">Follow-up: Convert the Johnson lead to a customer. Review and approve to proceed.</td>
+        <td><span class="movement m-notingate" title="No comparable op in the July 62-op registry (new capability, control/lookup row, or refusal spot-check).">not-in-gate</span></td>
+      </tr>
+      <tr>
+        <td class="id">A28</td>
+        <td>mark_lead_lost</td>
+        <td class="surface">chat</td>
+        <td class="expected">executes</td>
+        <td><span class="verdict v-partial">PARTIAL</span><span class="group">Chat missing-field gate</span></td>
+        <td class="evidence">Follow-up: Mark the Nguyen lead lost, went with a competitor. Review and approve to proceed.</td>
+        <td><span class="movement m-notingate" title="No comparable op in the July 62-op registry (new capability, control/lookup row, or refusal spot-check).">not-in-gate</span></td>
+      </tr>
+      <tr>
+        <td class="id">A29</td>
+        <td>add_service_location</td>
+        <td class="surface">chat</td>
+        <td class="expected">executes</td>
+        <td><span class="verdict v-partial">PARTIAL</span><span class="group">Chat missing-field gate</span></td>
+        <td class="evidence">Follow-up: Add a service location for Priya Shah: 9 Elm Court, Mesa, AZ 85201. Review and approve to proceed.</td>
+        <td><span class="movement m-followup" title="July: customer.add_service_location — partial">needs-follow-up</span></td>
+      </tr>
+      <tr>
+        <td class="id">A30</td>
+        <td>log_time_entry</td>
+        <td class="surface">chat</td>
+        <td class="expected">executes</td>
+        <td><span class="verdict v-pass">PASS</span></td>
+        <td class="evidence">executed → 8a9031e0-0c77-4a29-9b8f-4b7e78258d54</td>
+        <td><span class="movement m-improved" title="July: team.clock_in_out — partial">improved</span></td>
+      </tr>
+      <tr>
+        <td class="id">A31</td>
+        <td>notify_delay</td>
+        <td class="surface">chat</td>
+        <td class="expected">executes</td>
+        <td><span class="verdict v-partial">PARTIAL</span><span class="group">Chat missing-field gate</span></td>
+        <td class="evidence">Schedule: Tell qa-matrix-A-customer we're running 30 minutes late. Review and approve to proceed.</td>
+        <td><span class="movement m-notingate" title="No comparable op in the July 62-op registry (new capability, control/lookup row, or refusal spot-check).">not-in-gate</span></td>
+      </tr>
+      <tr>
+        <td class="id">A32</td>
+        <td>request_feedback</td>
+        <td class="surface">chat</td>
+        <td class="expected">executes</td>
+        <td><span class="verdict v-partial">PARTIAL</span><span class="group">Execution chain-ref gap</span></td>
+        <td class="evidence">Follow-up: Ask qa-matrix-A-customer for feedback on the QA Sweep Furnace Inspection job. Review and approve to proceed.</td>
+        <td><span class="movement m-notingate" title="No comparable op in the July 62-op registry (new capability, control/lookup row, or refusal spot-check).">not-in-gate</span></td>
+      </tr>
+      <tr>
+        <td class="id">A33</td>
+        <td>schedule_inspection</td>
+        <td class="surface">chat</td>
+        <td class="expected">executes</td>
+        <td><span class="verdict v-partial">PARTIAL</span><span class="group">Timezone gate</span></td>
+        <td class="evidence">Follow-up: Cannot book — the business time zone is not set. Review and approve to proceed.</td>
+        <td><span class="movement m-notingate" title="No comparable op in the July 62-op registry (new capability, control/lookup row, or refusal spot-check).">not-in-gate</span></td>
+      </tr>
+      <tr>
+        <td class="id">A34</td>
+        <td>log_permit</td>
+        <td class="surface">chat</td>
+        <td class="expected">executes</td>
+        <td><span class="verdict v-pass">PASS</span></td>
+        <td class="evidence">executed → 96f7628c-dfb7-4148-92cc-51a5588ed2b4</td>
+        <td><span class="movement m-notingate" title="No comparable op in the July 62-op registry (new capability, control/lookup row, or refusal spot-check).">not-in-gate</span></td>
+      </tr>
+      <tr>
+        <td class="id">A35</td>
+        <td>log_warranty_claim</td>
+        <td class="surface">chat</td>
+        <td class="expected">executes</td>
+        <td><span class="verdict v-pass">PASS</span></td>
+        <td class="evidence">executed → ca6e00b0-31ff-4050-b78e-c5b3548dd2de</td>
+        <td><span class="movement m-notingate" title="No comparable op in the July 62-op registry (new capability, control/lookup row, or refusal spot-check).">not-in-gate</span></td>
+      </tr>
+      <tr>
+        <td class="id">A44</td>
+        <td>add_catalog_item</td>
+        <td class="surface">chat</td>
+        <td class="expected">executes</td>
+        <td><span class="verdict v-pass">PASS</span></td>
+        <td class="evidence">executed → b5c467e9-f406-4d6d-b4c6-a37ebb63953b</td>
+        <td><span class="movement m-improved" title="July: pricebook.create_edit_service — missing">improved</span></td>
+      </tr>
+      <tr>
+        <td class="id">A36</td>
+        <td>update_catalog_item</td>
+        <td class="surface">chat</td>
+        <td class="expected">executes</td>
+        <td><span class="verdict v-pass">PASS</span></td>
+        <td class="evidence">executed → 439a2371-cd82-459c-ad5d-673f03f2d075</td>
+        <td><span class="movement m-improved" title="July: pricebook.create_edit_service — missing">improved</span></td>
+      </tr>
+      <tr>
+        <td class="id">A39</td>
+        <td>send_customer_message</td>
+        <td class="surface">chat</td>
+        <td class="expected">executes</td>
+        <td><span class="verdict v-pass">PASS</span></td>
+        <td class="evidence">executed → bf405cbc-6eb6-464b-b1b2-98ca7c1a6b20</td>
+        <td><span class="movement m-improved" title="July: messaging.send_to_customer — missing">improved</span></td>
+      </tr>
+      <tr>
+        <td class="id">A40</td>
+        <td>create_change_order</td>
+        <td class="surface">chat</td>
+        <td class="expected">executes</td>
+        <td><span class="verdict v-pass">PASS</span></td>
+        <td class="evidence">executed → dad7eb16-4556-4648-a515-a943709ee143</td>
+        <td><span class="movement m-notingate" title="No comparable op in the July 62-op registry (new capability, control/lookup row, or refusal spot-check).">not-in-gate</span></td>
+      </tr>
+      <tr>
+        <td class="id">A41</td>
+        <td>create_service_agreement</td>
+        <td class="surface">chat</td>
+        <td class="expected">executes</td>
+        <td><span class="verdict v-partial">PARTIAL</span><span class="group">Chat missing-field gate</span></td>
+        <td class="evidence">Follow-up: Sign Priya Shah up for the annual maintenance plan, 290 dollars a year. Review and approve to proceed.</td>
+        <td><span class="movement m-notingate" title="No comparable op in the July 62-op registry (new capability, control/lookup row, or refusal spot-check).">not-in-gate</span></td>
+      </tr>
+      <tr>
+        <td class="id">A42</td>
+        <td>add_material</td>
+        <td class="surface">chat</td>
+        <td class="expected">executes</td>
+        <td><span class="verdict v-pass">PASS</span></td>
+        <td class="evidence">executed → 9d1eca52-1210-446b-9031-320a7561c057</td>
+        <td><span class="movement m-notingate" title="No comparable op in the July 62-op registry (new capability, control/lookup row, or refusal spot-check).">not-in-gate</span></td>
+      </tr>
+      <tr>
+        <td class="id">A43</td>
+        <td>log_mileage</td>
+        <td class="surface">chat</td>
+        <td class="expected">executes</td>
+        <td><span class="verdict v-pass">PASS</span></td>
+        <td class="evidence">executed → 7aa873ae-37d5-4eeb-b394-59d456addc81</td>
+        <td><span class="movement m-notingate" title="No comparable op in the July 62-op registry (new capability, control/lookup row, or refusal spot-check).">not-in-gate</span></td>
+      </tr>
+      <tr>
+        <td class="id">A45</td>
+        <td>create_invoice_schedule</td>
+        <td class="surface">chat</td>
+        <td class="expected">executes</td>
+        <td><span class="verdict v-partial">PARTIAL</span><span class="group">Chat missing-field gate</span></td>
+        <td class="evidence">Invoice: Set up milestone billing on the QA Sweep Furnace Inspection job: 50 percent depo. Review and approve to proceed.</td>
+        <td><span class="movement m-notingate" title="No comparable op in the July 62-op registry (new capability, control/lookup row, or refusal spot-check).">not-in-gate</span></td>
+      </tr>
+      <tr>
+        <td class="id">A46</td>
+        <td>respond_to_review</td>
+        <td class="surface">voice-session</td>
+        <td class="expected">draft_gated</td>
+        <td><span class="verdict v-partial">PARTIAL</span><span class="group">Voice-session routing miss</span></td>
+        <td class="evidence">Great, I've got that taken care of. You'll receive a confirmation shortly. Is there anything else I can help you with?</td>
+        <td><span class="movement m-notingate" title="No comparable op in the July 62-op registry (new capability, control/lookup row, or refusal spot-check).">not-in-gate</span></td>
+      </tr>
+      <tr>
+        <td class="id">A47</td>
+        <td>create_standing_instruction</td>
+        <td class="surface">voice-session</td>
+        <td class="expected">executes</td>
+        <td><span class="verdict v-pass">PASS</span></td>
+        <td class="evidence">executed → e73c0ff4-c51c-4d1f-a7c2-db4114fafd45</td>
+        <td><span class="movement m-notingate" title="No comparable op in the July 62-op registry (new capability, control/lookup row, or refusal spot-check).">not-in-gate</span></td>
+      </tr>
+      <tr>
+        <td class="id">A48</td>
+        <td>update_brand_voice</td>
+        <td class="surface">voice-session</td>
+        <td class="expected">executes</td>
+        <td><span class="verdict v-partial">PARTIAL</span><span class="group">Execution chain-ref gap</span></td>
+        <td class="evidence">Great, I've got that taken care of. You'll receive a confirmation shortly. Is there anything else I can help you with?</td>
+        <td><span class="movement m-notingate" title="No comparable op in the July 62-op registry (new capability, control/lookup row, or refusal spot-check).">not-in-gate</span></td>
+      </tr>
+      <tr>
+        <td class="id">A49</td>
+        <td>complaint</td>
+        <td class="surface">voice-session</td>
+        <td class="expected">draft_gated</td>
+        <td><span class="verdict v-partial">PARTIAL</span><span class="group">Voice-session routing miss</span></td>
+        <td class="evidence">I want to make sure I got that right — can you say that again?</td>
+        <td><span class="movement m-notingate" title="No comparable op in the July 62-op registry (new capability, control/lookup row, or refusal spot-check).">not-in-gate</span></td>
+      </tr>
+      <tr>
+        <td class="id">A50</td>
+        <td>negotiation</td>
+        <td class="surface">voice-session</td>
+        <td class="expected">draft_gated</td>
+        <td><span class="verdict v-partial">PARTIAL</span><span class="group">Voice-session routing miss</span></td>
+        <td class="evidence">I want to make sure I got that right — can you say that again?</td>
+        <td><span class="movement m-notingate" title="No comparable op in the July 62-op registry (new capability, control/lookup row, or refusal spot-check).">not-in-gate</span></td>
+      </tr>
+      <tr>
+        <td class="id">B01</td>
+        <td>emergency_dispatch</td>
+        <td class="surface">chat</td>
+        <td class="expected">honest_refusal</td>
+        <td><span class="verdict v-pass">PASS</span></td>
+        <td class="evidence">I understood that as a &quot;emergency dispatch&quot; request, but I can't do that from here yet — I haven't created, changed, or scheduled anything. You can do it dir…</td>
+        <td><span class="movement m-notingate" title="No comparable op in the July 62-op registry (new capability, control/lookup row, or refusal spot-check).">not-in-gate</span></td>
+      </tr>
+      <tr>
+        <td class="id">B02</td>
+        <td>respond_to_review</td>
+        <td class="surface">chat</td>
+        <td class="expected">honest_refusal</td>
+        <td><span class="verdict v-pass">PASS</span></td>
+        <td class="evidence">I understood that as a &quot;respond to review&quot; request, but I can't do that from here yet — I haven't created, changed, or scheduled anything. You can do it dire…</td>
+        <td><span class="movement m-notingate" title="No comparable op in the July 62-op registry (new capability, control/lookup row, or refusal spot-check).">not-in-gate</span></td>
+      </tr>
+      <tr>
+        <td class="id">B03</td>
+        <td>create_standing_instruction</td>
+        <td class="surface">chat</td>
+        <td class="expected">honest_refusal</td>
+        <td><span class="verdict v-pass">PASS</span></td>
+        <td class="evidence">I understood that as a &quot;create standing instruction&quot; request, but I can't do that from here yet — I haven't created, changed, or scheduled anything. You can …</td>
+        <td><span class="movement m-notingate" title="No comparable op in the July 62-op registry (new capability, control/lookup row, or refusal spot-check).">not-in-gate</span></td>
+      </tr>
+      <tr>
+        <td class="id">B04</td>
+        <td>update_brand_voice</td>
+        <td class="surface">chat</td>
+        <td class="expected">honest_refusal</td>
+        <td><span class="verdict v-pass">PASS</span></td>
+        <td class="evidence">I understood that as a &quot;update brand voice&quot; request, but I can't do that from here yet — I haven't created, changed, or scheduled anything. You can do it dir…</td>
+        <td><span class="movement m-notingate" title="No comparable op in the July 62-op registry (new capability, control/lookup row, or refusal spot-check).">not-in-gate</span></td>
+      </tr>
+      <tr>
+        <td class="id">L01</td>
+        <td>lookup_appointments</td>
+        <td class="surface">chat</td>
+        <td class="expected">lookup_answer</td>
+        <td><span class="verdict v-pass">PASS</span></td>
+        <td class="evidence">Which customer do you mean? Tell me their name — for example, &quot;what does Henderson owe me?&quot;. If you meant your own schedule, ask &quot;what does my day look like?…</td>
+        <td><span class="movement m-notingate" title="No comparable op in the July 62-op registry (new capability, control/lookup row, or refusal spot-check).">not-in-gate</span></td>
+      </tr>
+      <tr>
+        <td class="id">L02</td>
+        <td>lookup_invoices</td>
+        <td class="surface">chat</td>
+        <td class="expected">lookup_answer</td>
+        <td><span class="verdict v-pass">PASS</span></td>
+        <td class="evidence">You have one open invoice — INV-0001 for $400.00, due September 28.</td>
+        <td><span class="movement m-noregress" title="July: invoice.query_payment_status — implemented">no-regression</span></td>
+      </tr>
+      <tr>
+        <td class="id">L03</td>
+        <td>lookup_balance</td>
+        <td class="surface">chat</td>
+        <td class="expected">lookup_answer</td>
+        <td><span class="verdict v-pass">PASS</span></td>
+        <td class="evidence">Which customer do you mean? Tell me their name — for example, &quot;what does Henderson owe me?&quot;. If you meant your own schedule, ask &quot;what does my day look like?…</td>
+        <td><span class="movement m-noregress" title="July: payment.query_outstanding_balance / reporting.customer_balance — implemented">no-regression</span></td>
+      </tr>
+      <tr>
+        <td class="id">L04</td>
+        <td>lookup_jobs</td>
+        <td class="surface">chat</td>
+        <td class="expected">lookup_answer</td>
+        <td><span class="verdict v-pass">PASS</span></td>
+        <td class="evidence">You have 3 recent jobs. The latest is JOB-0004 — Warranty — compressor, just opened.</td>
+        <td><span class="movement m-noregress" title="July: reporting.job_status_query — implemented">no-regression</span></td>
+      </tr>
+      <tr>
+        <td class="id">L05</td>
+        <td>lookup_agreements</td>
+        <td class="surface">chat</td>
+        <td class="expected">lookup_answer</td>
+        <td><span class="verdict v-pass">PASS</span></td>
+        <td class="evidence">I'm not seeing an active service agreement on your account.</td>
+        <td><span class="movement m-notingate" title="No comparable op in the July 62-op registry (new capability, control/lookup row, or refusal spot-check).">not-in-gate</span></td>
+      </tr>
+      <tr>
+        <td class="id">L06</td>
+        <td>lookup_account_summary</td>
+        <td class="surface">chat</td>
+        <td class="expected">lookup_answer</td>
+        <td><span class="verdict v-pass">PASS</span></td>
+        <td class="evidence">Which customer do you mean? Tell me their name — for example, &quot;what does Henderson owe me?&quot;. If you meant your own schedule, ask &quot;what does my day look like?…</td>
+        <td><span class="movement m-notingate" title="No comparable op in the July 62-op registry (new capability, control/lookup row, or refusal spot-check).">not-in-gate</span></td>
+      </tr>
+      <tr>
+        <td class="id">L07</td>
+        <td>lookup_customer</td>
+        <td class="surface">chat</td>
+        <td class="expected">lookup_answer</td>
+        <td><span class="verdict v-pass">PASS</span></td>
+        <td class="evidence">More than one match for &quot;qa-matrix-A&quot;: qa-matrix-A-customer; qa-matrix-A-ambiguous-1; qa-matrix-A-ambiguous-2. Which one did you mean?</td>
+        <td><span class="movement m-noregress" title="July: customer.lookup — implemented">no-regression</span></td>
+      </tr>
+      <tr>
+        <td class="id">L08</td>
+        <td>lookup_estimates</td>
+        <td class="surface">chat</td>
+        <td class="expected">lookup_answer</td>
+        <td><span class="verdict v-partial">PARTIAL</span><span class="group">Generic-LLM fallthrough</span></td>
+        <td class="evidence">I do not have access to specific customer estimates or records. To find out the estimates for qa-matrix-A-customer, please check your internal system or cont…</td>
+        <td><span class="movement m-notingate" title="No comparable op in the July 62-op registry (new capability, control/lookup row, or refusal spot-check).">not-in-gate</span></td>
+      </tr>
+      <tr>
+        <td class="id">L09</td>
+        <td>lookup_availability</td>
+        <td class="surface">chat</td>
+        <td class="expected">lookup_answer</td>
+        <td><span class="verdict v-pass">PASS</span></td>
+        <td class="evidence">Free Thursday, September 3: runbook-A@qa.serviceos.local, doctor-probe@qa.serviceos.local, Tom Baker and Alex Rivera.</td>
+        <td><span class="movement m-noregress" title="July: schedule.check_availability — implemented">no-regression</span></td>
+      </tr>
+      <tr>
+        <td class="id">L10</td>
+        <td>lookup_leads</td>
+        <td class="surface">chat</td>
+        <td class="expected">lookup_answer</td>
+        <td><span class="verdict v-pass">PASS</span></td>
+        <td class="evidence">There are 2 open leads in the pipeline.</td>
+        <td><span class="movement m-notingate" title="No comparable op in the July 62-op registry (new capability, control/lookup row, or refusal spot-check).">not-in-gate</span></td>
+      </tr>
+      <tr>
+        <td class="id">L11</td>
+        <td>lookup_revenue</td>
+        <td class="surface">chat</td>
+        <td class="expected">lookup_answer</td>
+        <td><span class="verdict v-partial">PARTIAL</span><span class="group">Generic-LLM fallthrough</span></td>
+        <td class="evidence">I do not have access to sales data or records. Please check your sales reports or accounting system for last month's sales information.</td>
+        <td><span class="movement m-followup" title="July: reporting.revenue_period — implemented">needs-follow-up</span></td>
+      </tr>
+      <tr>
+        <td class="id">L12</td>
+        <td>lookup_catalog</td>
+        <td class="surface">chat</td>
+        <td class="expected">lookup_answer</td>
+        <td><span class="verdict v-pass">PASS</span></td>
+        <td class="evidence">You have 2 catalog items: QA Sweep Smart Thermostat Install, QA Sweep Smart Thermostat Install.</td>
+        <td><span class="movement m-improved" title="July: pricebook.lookup_price — partial">improved</span></td>
+      </tr>
+      <tr>
+        <td class="id">L13</td>
+        <td>lookup_job_profit</td>
+        <td class="surface">chat</td>
+        <td class="expected">lookup_answer</td>
+        <td><span class="verdict v-pass">PASS</span></td>
+        <td class="evidence">More than one match for &quot;QA Matrix job for qa-matrix-A&quot;: QA Matrix job for qa-matrix-A; Draft an estimate for qa-matrix-A-customer, water heater replacement,…</td>
+        <td><span class="movement m-notingate" title="No comparable op in the July 62-op registry (new capability, control/lookup row, or refusal spot-check).">not-in-gate</span></td>
+      </tr>
+      <tr>
+        <td class="id">L14</td>
+        <td>lookup_day_overview</td>
+        <td class="surface">chat</td>
+        <td class="expected">lookup_answer</td>
+        <td><span class="verdict v-pass">PASS</span></td>
+        <td class="evidence">Heads up — 1 high-priority job needs attention: QA Sweep Furnace Inspection. You have no appointments on the calendar today. 16 approvals are waiting on you.…</td>
+        <td><span class="movement m-noregress" title="July: schedule.view_today — implemented">no-regression</span></td>
+      </tr>
+      <tr>
+        <td class="id">L15</td>
+        <td>lookup_digest</td>
+        <td class="surface">chat</td>
+        <td class="expected">lookup_answer</td>
+        <td><span class="verdict v-pass">PASS</span></td>
+        <td class="evidence">I don't have a daily digest for you yet — one is generated at the end of each day.</td>
+        <td><span class="movement m-notingate" title="No comparable op in the July 62-op registry (new capability, control/lookup row, or refusal spot-check).">not-in-gate</span></td>
+      </tr>
+      <tr>
+        <td class="id">L16</td>
+        <td>lookup_pending_items</td>
+        <td class="surface">chat</td>
+        <td class="expected">lookup_answer</td>
+        <td><span class="verdict v-pass">PASS</span></td>
+        <td class="evidence">You're waiting on: 1 estimate is out waiting on a yes: EST-0001 for $22.00, sent today. 1 unpaid invoice: INV-0001 for $400.00 (open).</td>
+        <td><span class="movement m-noregress" title="July: reporting.outstanding_invoices — implemented">no-regression</span></td>
+      </tr>
+      <tr>
+        <td class="id">L17</td>
+        <td>lookup_crew_schedule</td>
+        <td class="surface">chat</td>
+        <td class="expected">lookup_answer</td>
+        <td><span class="verdict v-pass">PASS</span></td>
+        <td class="evidence">Free Thursday, September 3: runbook-A@qa.serviceos.local, doctor-probe@qa.serviceos.local, Tom Baker and Alex Rivera.</td>
+        <td><span class="movement m-improved" title="July: team.view_tech_schedule — missing">improved</span></td>
+      </tr>
+      <tr>
+        <td class="id">L18</td>
+        <td>lookup_timesheets</td>
+        <td class="surface">chat</td>
+        <td class="expected">lookup_answer</td>
+        <td><span class="verdict v-pass">PASS</span></td>
+        <td class="evidence">Hours logged this week — a crew member: 2 hours.</td>
+        <td><span class="movement m-notingate" title="No comparable op in the July 62-op registry (new capability, control/lookup row, or refusal spot-check).">not-in-gate</span></td>
+      </tr>
+      <tr>
+        <td class="id">L19</td>
+        <td>lookup_my_day</td>
+        <td class="surface">chat</td>
+        <td class="expected">lookup_answer</td>
+        <td><span class="verdict v-partial">PARTIAL</span><span class="group">Generic-LLM fallthrough</span></td>
+        <td class="evidence">I cannot access your schedule to provide details about today's appointments. Please check your calendar or scheduling system for the most accurate information.</td>
+        <td><span class="movement m-notingate" title="No comparable op in the July 62-op registry (new capability, control/lookup row, or refusal spot-check).">not-in-gate</span></td>
+      </tr>
+      <tr>
+        <td class="id">L20</td>
+        <td>lookup_materials</td>
+        <td class="surface">chat</td>
+        <td class="expected">lookup_answer</td>
+        <td><span class="verdict v-pass">PASS</span></td>
+        <td class="evidence">1 item on the materials list: half-inch PEX, quantity 3</td>
+        <td><span class="movement m-notingate" title="No comparable op in the July 62-op registry (new capability, control/lookup row, or refusal spot-check).">not-in-gate</span></td>
+      </tr>
+      <tr>
+        <td class="id">R01</td>
+        <td>lookup_revenue</td>
+        <td class="surface">chat</td>
+        <td class="expected">rbac_denied</td>
+        <td><span class="verdict v-pass">PASS</span></td>
+        <td class="evidence">That's an owner-level report. Ask an owner or dispatcher on your team to pull it up.</td>
+        <td><span class="movement m-notingate" title="No comparable op in the July 62-op registry (new capability, control/lookup row, or refusal spot-check).">not-in-gate</span></td>
+      </tr>
+      <tr>
+        <td class="id">R02</td>
+        <td>lookup_digest</td>
+        <td class="surface">chat</td>
+        <td class="expected">rbac_denied</td>
+        <td><span class="verdict v-pass">PASS</span></td>
+        <td class="evidence">That's an owner-level report. Ask an owner or dispatcher on your team to pull it up.</td>
+        <td><span class="movement m-notingate" title="No comparable op in the July 62-op registry (new capability, control/lookup row, or refusal spot-check).">not-in-gate</span></td>
+      </tr>
+      <tr>
+        <td class="id">R03</td>
+        <td>lookup_leads</td>
+        <td class="surface">chat</td>
+        <td class="expected">lookup_answer</td>
+        <td><span class="verdict v-degraded">DEGRADED</span><span class="group">Generic-LLM fallthrough</span></td>
+        <td class="evidence">I can help with invoices, scheduling, follow-ups, estimates, and creating customers. Tell me what you want to do next.</td>
+        <td><span class="movement m-notingate" title="No comparable op in the July 62-op registry (new capability, control/lookup row, or refusal spot-check).">not-in-gate</span></td>
+      </tr>
+      <tr>
+        <td class="id">R04</td>
+        <td>lookup_catalog</td>
+        <td class="surface">chat</td>
+        <td class="expected">rbac_denied</td>
+        <td><span class="verdict v-pass">PASS</span></td>
+        <td class="evidence">The service catalog is an office-level view. Ask an owner or dispatcher on your team to pull it up.</td>
+        <td><span class="movement m-notingate" title="No comparable op in the July 62-op registry (new capability, control/lookup row, or refusal spot-check).">not-in-gate</span></td>
+      </tr>
+      <tr>
+        <td class="id">R05</td>
+        <td>lookup_my_day</td>
+        <td class="surface">chat</td>
+        <td class="expected">lookup_answer</td>
+        <td><span class="verdict v-pass">PASS</span></td>
+        <td class="evidence">You have nothing left today.</td>
+        <td><span class="movement m-notingate" title="No comparable op in the July 62-op registry (new capability, control/lookup row, or refusal spot-check).">not-in-gate</span></td>
+      </tr>
+      <tr>
+        <td class="id">C01</td>
+        <td>en_route</td>
+        <td class="surface">chat</td>
+        <td class="expected">executes</td>
+        <td><span class="verdict v-partial">PARTIAL</span><span class="group">Voice-session routing miss</span></td>
+        <td class="evidence">Make sure to check the job details and any specific instructions before arriving. Ensure you have all necessary tools and materials.</td>
+        <td><span class="movement m-followup" title="July: schedule.mark_en_route — missing">needs-follow-up</span></td>
+      </tr>
+      <tr>
+        <td class="id">C02</td>
+        <td>en_route</td>
+        <td class="surface">chat</td>
+        <td class="expected">honest_refusal</td>
+        <td><span class="verdict v-partial">PARTIAL</span><span class="group">Classification miss (relabeled)</span></td>
+        <td class="evidence">Make sure to check the job details, customer preferences, and any special instructions before arriving. Stay safe on the road!</td>
+        <td><span class="movement m-notingate" title="No comparable op in the July 62-op registry (new capability, control/lookup row, or refusal spot-check).">not-in-gate</span></td>
+      </tr>
+      <tr>
+        <td class="id">C03</td>
+        <td>approve_proposal</td>
+        <td class="surface">voice-session</td>
+        <td class="expected">honest_refusal</td>
+        <td><span class="verdict v-pass">PASS</span></td>
+        <td class="evidence">I want to make sure I got that right — can you say that again?</td>
+        <td><span class="movement m-notingate" title="No comparable op in the July 62-op registry (new capability, control/lookup row, or refusal spot-check).">not-in-gate</span></td>
+      </tr>
+      <tr>
+        <td class="id">C04</td>
+        <td>reject_proposal</td>
+        <td class="surface">voice-session</td>
+        <td class="expected">honest_refusal</td>
+        <td><span class="verdict v-pass">PASS</span></td>
+        <td class="evidence">I want to make sure I got that right — can you say that again?</td>
+        <td><span class="movement m-notingate" title="No comparable op in the July 62-op registry (new capability, control/lookup row, or refusal spot-check).">not-in-gate</span></td>
+      </tr>
+      <tr>
+        <td class="id">C05</td>
+        <td>edit_proposal</td>
+        <td class="surface">voice-session</td>
+        <td class="expected">honest_refusal</td>
+        <td><span class="verdict v-pass">PASS</span></td>
+        <td class="evidence">I want to make sure I got that right — can you say that again?</td>
+        <td><span class="movement m-notingate" title="No comparable op in the July 62-op registry (new capability, control/lookup row, or refusal spot-check).">not-in-gate</span></td>
+      </tr>
+      <tr>
+        <td class="id">C06</td>
+        <td>confirm</td>
+        <td class="surface">voice-session</td>
+        <td class="expected">clarification</td>
+        <td><span class="verdict v-pass">PASS</span></td>
+        <td class="evidence">I want to make sure I got that right — can you say that again?</td>
+        <td><span class="movement m-notingate" title="No comparable op in the July 62-op registry (new capability, control/lookup row, or refusal spot-check).">not-in-gate</span></td>
+      </tr>
+      <tr>
+        <td class="id">C07</td>
+        <td>language_switch</td>
+        <td class="surface">voice-session</td>
+        <td class="expected">clarification</td>
+        <td><span class="verdict v-pass">PASS</span></td>
+        <td class="evidence">I want to make sure I got that right — can you say that again?</td>
+        <td><span class="movement m-notingate" title="No comparable op in the July 62-op registry (new capability, control/lookup row, or refusal spot-check).">not-in-gate</span></td>
+      </tr>
+      <tr>
+        <td class="id">C08</td>
+        <td>operator_request</td>
+        <td class="surface">voice-session</td>
+        <td class="expected">clarification</td>
+        <td><span class="verdict v-pass">PASS</span></td>
+        <td class="evidence">I want to make sure I got that right — can you say that again?</td>
+        <td><span class="movement m-noregress" title="July: inbound.transfer_to_human — implemented">no-regression</span></td>
+      </tr>
+      <tr>
+        <td class="id">C09</td>
+        <td>unknown</td>
+        <td class="surface">chat</td>
+        <td class="expected">clarification</td>
+        <td><span class="verdict v-pass">PASS</span></td>
+        <td class="evidence">It seems like your message is not clear. Could you please provide more details or clarify your request?</td>
+        <td><span class="movement m-notingate" title="No comparable op in the July 62-op registry (new capability, control/lookup row, or refusal spot-check).">not-in-gate</span></td>
+      </tr>
+      <tr>
+        <td class="id">D01</td>
+        <td>create_booking</td>
+        <td class="surface">voice-session</td>
+        <td class="expected">draft_gated</td>
+        <td><span class="verdict v-partial">PARTIAL</span><span class="group">Voice-session routing miss</span></td>
+        <td class="evidence">Great, I've got that taken care of. You'll receive a confirmation shortly. Is there anything else I can help you with?</td>
+        <td><span class="movement m-notingate" title="No comparable op in the July 62-op registry (new capability, control/lookup row, or refusal spot-check).">not-in-gate</span></td>
+      </tr>
+      <tr>
+        <td class="id">D02</td>
+        <td>callback</td>
+        <td class="surface">voice-session</td>
+        <td class="expected">no_onramp_record</td>
+        <td><span class="verdict v-skip">SKIP</span></td>
+        <td class="evidence">Covered by A49 (complaint) and A50 (negotiation), whose companion callback proposals exercise the callback proposal type end to end. No standalone classifier on-ramp exists for 'callback' as its own intent.</td>
+        <td><span class="movement m-notingate" title="No comparable op in the July 62-op registry (new capability, control/lookup row, or refusal spot-check).">not-in-gate</span></td>
+      </tr>
+      <tr>
+        <td class="id">D03</td>
+        <td>voice_clarification</td>
+        <td class="surface">voice-session</td>
+        <td class="expected">no_onramp_record</td>
+        <td><span class="verdict v-skip">SKIP</span></td>
+        <td class="evidence">Has no execution handler by design (createExecutionHandlerRegistry excludes it). Covered by every clarification/honest_refusal probe in sections C and B, which land here as the classifier's fallback proposal type.</td>
+        <td><span class="movement m-notingate" title="No comparable op in the July 62-op registry (new capability, control/lookup row, or refusal spot-check).">not-in-gate</span></td>
+      </tr>
+      <tr>
+        <td class="id">D04</td>
+        <td>adopt_entity_alias</td>
+        <td class="surface">voice-session</td>
+        <td class="expected">no_onramp_record</td>
+        <td><span class="verdict v-skip">SKIP</span></td>
+        <td class="evidence">System-minted only, via the tenant entity-alias-learning correction loop; not voice/chat-drivable by an utterance. Manual action class, owner-approved.</td>
+        <td><span class="movement m-notingate" title="No comparable op in the July 62-op registry (new capability, control/lookup row, or refusal spot-check).">not-in-gate</span></td>
+      </tr>
+      <tr>
+        <td class="id">D05</td>
+        <td>onboarding_bundle</td>
+        <td class="surface">voice-session</td>
+        <td class="expected">no_onramp_record</td>
+        <td><span class="verdict v-skip">SKIP</span></td>
+        <td class="evidence">Bundles onboarding_tenant_settings / _service_category / _estimate_template / _team_member / _schedule (5 ProposalType members). Their on-ramp is a separate conversational onboarding flow, not the voice/chat taxonomy this sweep drives. 00-plan Sec.2d marks these explicitly optional/out of scope for this pass.</td>
+        <td><span class="movement m-notingate" title="No comparable op in the July 62-op registry (new capability, control/lookup row, or refusal spot-check).">not-in-gate</span></td>
+      </tr>
+      <tr>
+        <td class="id">G01</td>
+        <td>send_invoice</td>
+        <td class="surface">voice-session</td>
+        <td class="expected">honest_refusal</td>
+        <td><span class="verdict v-skip">SKIP</span></td>
+        <td class="evidence">Surface-refusal spot-check requires a signed inbound caller-profile call (Twilio Gather webhook signed with TWILIO_AUTH_TOKEN) to prove the D-028 off-surface refusal live from an anonymous caller. TWILIO_AUTH_TOKEN is not available to this harness/environment. The S1 allowlist + post-parse guard (packages/api/src/proposals/surface.ts) are contract-test-pinned in repo (classifier-profile.test.ts).</td>
+        <td><span class="movement m-notingate" title="No comparable op in the July 62-op registry (new capability, control/lookup row, or refusal spot-check).">not-in-gate</span></td>
+      </tr>
+      <tr>
+        <td class="id">G02</td>
+        <td>record_payment</td>
+        <td class="surface">voice-session</td>
+        <td class="expected">honest_refusal</td>
+        <td><span class="verdict v-skip">SKIP</span></td>
+        <td class="evidence">Money-ask-from-caller steer-to-operator_request spot-check — same Twilio-signing blocker as G01.</td>
+        <td><span class="movement m-notingate" title="No comparable op in the July 62-op registry (new capability, control/lookup row, or refusal spot-check).">not-in-gate</span></td>
+      </tr>
+      <tr>
+        <td class="id">G03</td>
+        <td>lookup_day_overview</td>
+        <td class="surface">voice-session</td>
+        <td class="expected">honest_refusal</td>
+        <td><span class="verdict v-skip">SKIP</span></td>
+        <td class="evidence">Caller default-deny spot-check — same Twilio-signing blocker as G01.</td>
+        <td><span class="movement m-notingate" title="No comparable op in the July 62-op registry (new capability, control/lookup row, or refusal spot-check).">not-in-gate</span></td>
+      </tr>
+      <tr>
+        <td class="id">G04</td>
+        <td>lookup_availability</td>
+        <td class="surface">voice-session</td>
+        <td class="expected">lookup_answer</td>
+        <td><span class="verdict v-skip">SKIP</span></td>
+        <td class="evidence">Caller PHONE_PUBLIC availability-answered spot-check — same Twilio-signing blocker as G01 (this one would be a PASS-shaped probe if the transport were available, not a refusal).</td>
+        <td><span class="movement m-notingate" title="No comparable op in the July 62-op registry (new capability, control/lookup row, or refusal spot-check).">not-in-gate</span></td>
+      </tr>
+      <tr>
+        <td class="id">G05</td>
+        <td>schedule_inspection</td>
+        <td class="surface">voice-session</td>
+        <td class="expected">executes</td>
+        <td><span class="verdict v-skip">SKIP</span></td>
+        <td class="evidence">Field-tech (caller-ID-resolved) live-call spot-check — same Twilio-signing blocker as G01.</td>
+        <td><span class="movement m-notingate" title="No comparable op in the July 62-op registry (new capability, control/lookup row, or refusal spot-check).">not-in-gate</span></td>
+      </tr>
+      <tr>
+        <td class="id">G06</td>
+        <td>log_warranty_claim</td>
+        <td class="surface">voice-session</td>
+        <td class="expected">executes</td>
+        <td><span class="verdict v-skip">SKIP</span></td>
+        <td class="evidence">Field-tech live-call spot-check — same Twilio-signing blocker as G01.</td>
+        <td><span class="movement m-notingate" title="No comparable op in the July 62-op registry (new capability, control/lookup row, or refusal spot-check).">not-in-gate</span></td>
+      </tr>
+  </tbody>
+</table>
+</main>
+<footer>
+  Generated by <code>scripts/ai-catalog-sweep/build-scoreboard.mjs</code> from <code>sweep-2026-08-29T18-02-00-385Z-rescored.json</code> (rescored offline from <code>sweep-2026-08-29T18-02-00-385Z.json</code>, no new LLM calls). Filed issues: {{ISSUES}}
+</footer>
+</body>
+</html>
