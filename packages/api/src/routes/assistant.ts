@@ -328,9 +328,17 @@ const assistantChatRequestSchema = z.object({
   inputMode: z.enum(['voice', 'text']).optional(),
 });
 
-/** UB-B3 — deterministic refusal copy for voice-mode approval intents. */
-export const VOICE_APPROVAL_REFUSAL =
-  "Tap the card to approve — I don't take approvals by voice here yet.";
+/**
+ * UB-B3 — deterministic refusal copy for voice-mode approval intents.
+ *
+ * Re-exported, not re-declared: the in-app voice-session adapter refuses the
+ * same three intents with the same sentence (see the constant's doc comment in
+ * `tts-copy.ts`), and two literals would drift the moment either is reworded.
+ * Kept exported from here because this route's tests and callers already
+ * import it by this name.
+ */
+import { VOICE_APPROVAL_REFUSAL } from '../ai/agents/customer-calling/tts-copy';
+export { VOICE_APPROVAL_REFUSAL };
 
 /**
  * The "nothing happened" sentence is no longer assembled here.

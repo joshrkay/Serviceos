@@ -152,6 +152,22 @@ function resolveCandidateLanguage(input: DetectLanguageInput): Language {
 }
 
 /**
+ * UB-C1 — flap guard: the maximum language switches permitted per voice
+ * session, on every transport. Two covers the legitimate shapes (wrong
+ * opening language → correct one, plus one explicit switch back); anything
+ * more is flapping and is refused with {@link LANGUAGE_SWITCH_CAP_LINE}.
+ *
+ * Lives here, with the rest of the language policy, because three surfaces
+ * now enforce it: media-streams (Deepgram finish+reopen cycles, #846), the
+ * Gather adapter, and the in-app voice-session adapter. It was previously
+ * declared inside `telephony/media-streams/mediastream-adapter.ts` and is
+ * still re-exported from there for that module's existing importers — but a
+ * non-telephony surface should not have to import a websocket adapter to
+ * learn a policy number. One policy, every transport.
+ */
+export const MAX_LANGUAGE_SWITCHES_PER_CALL = 2;
+
+/**
  * Lightweight predicate the FSM/adapter uses to detect a mid-call
  * language switch utterance ("english please", "hablo español").
  * Returns the requested target language or null when the utterance
