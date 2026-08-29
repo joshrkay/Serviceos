@@ -43,6 +43,19 @@ import {
   dispatchAssistantLookup,
   type AssistantLookupDeps,
 } from '../ai/orchestration/lookup-dispatch';
+// #847 — en_route ("on my way") from chat: the same technician core the
+// recorded-memo wrapper, the SMS keyword leg and the phone Gather branch
+// drive. A DIRECT status act (F-3), never a proposal — which is why it is
+// dispatched from its own branch below rather than added to
+// CHAT_INTENT_TO_REGISTRY_KEY (that map is intent → proposal type, and its
+// key set is pinned by test/routes/assistant-dropped-intents.test.ts).
+import { ambiguousReferenceLine } from '../ai/orchestration/lookup-reference';
+import {
+  handleEnRouteForTechnician,
+  technicianDisplayName,
+  type EnRouteTechnicianDeps,
+} from '../dispatch/en-route-voice';
+import { resolveCanonicalUser, type UserRepository } from '../users/user';
 // Honest-failure guard (2026-07). The intent path can end without a proposal
 // three different ways, and every one of them used to fall into the same
 // DB-less generic LLM — which cheerfully replied "I've scheduled you for two
@@ -370,6 +383,19 @@ Return JSON only. No markdown. Match this schema exactly:
 Set "proposal" to null when no proposal is needed.
 `;
 
+/**
+ * #847 — everything the chat surface needs to fire "on my way", as ONE
+ * optional bundle (same convention as `AssistantLookupDeps`).
+ * `EnRouteTechnicianDeps` is the shared core's set — app.ts wires its
+ * `enRouteCoordinator` to the SAME DelayNotificationCoordinator instance the
+ * app button / SMS / memo legs use. `userRepo` is this surface's own: it
+ * resolves `req.auth.userId` (a Clerk subject) to the canonical, role-checked
+ * technician row via `resolveCanonicalUser`.
+ */
+export interface AssistantEnRouteDeps extends EnRouteTechnicianDeps {
+  userRepo: Pick<UserRepository, 'findByTenant'>;
+}
+
 export interface AssistantRouterDeps {
   gateway: LLMGateway;
   proposalRepo: ProposalRepository;
@@ -473,6 +499,12 @@ export interface AssistantRouterDeps {
    * through exactly as they did before (tests that don't care omit it).
    */
   lookups?: AssistantLookupDeps;
+  /**
+   * #847 — en_route ("on my way") direct status act from chat. Optional —
+   * absent, the intent keeps falling into the honest unmapped-capability
+   * refusal exactly as before (tests that don't care omit it).
+   */
+  enRoute?: AssistantEnRouteDeps;
   /**
    * Tenant IANA timezone (`tenant_settings.timezone`), resolved once per
    * request and threaded onto every drafting TaskContext.
@@ -1615,6 +1647,100 @@ async function generateAssistantReply(
           tenantId,
           intent: classification.intentType,
         });
+      }
+
+      // ── en_route path (#847) ───────────────────────────────────────
+      // "On my way" is a DIRECT status act (F-3): the technician IS the
+      // human acting, so it fires the SAME audited act as the app en-route
+      // button — never a proposal, never the LLM. Runs before the chain
+      // split for the same reason the lookup path does, and before the
+      // unmapped-capability refusal below, which is where this intent used
+      // to land ("I can't do that from here" — on the surface a technician
+      // in the field is most likely to be holding). Identity is
+      // default-deny: the auth subject must resolve to a canonical
+      // TECHNICIAN row (the SMS keyword leg's anti-spoofing rule), and
+      // every outcome is an honest, deterministic reply — the ambiguous and
+      // no-appointment cases included. Gated on the wired bundle so
+      // deployments without it keep today's refusal.
+      if (deps.enRoute && classification.intentType === 'en_route') {
+        const enRouteReply = (
+          content: string,
+          reasoning: string,
+          degraded?: boolean,
+        ) => ({
+          taskType: 'assistant.en_route',
+          model: 'direct-act',
+          usage: { input: 0, output: 0, total: 0 },
+          ...(degraded ? { degraded: true, fallbackStage: 'en-route-unavailable' } : {}),
+          message: { role: 'assistant' as const, content, reasoning },
+        });
+        try {
+          const actor = await resolveCanonicalUser(deps.enRoute.userRepo, tenantId, userId);
+          if (!actor || actor.role !== 'technician') {
+            return enRouteReply(
+              "On-my-way texts are sent by the technician on the job, and your account isn't matched to one — nothing was sent.",
+              actor
+                ? `en_route requires role 'technician'; your role is '${actor.role}'.`
+                : 'en_route requires a canonical technician user; none matched your account.',
+            );
+          }
+          const ee = (classification.extractedEntities ?? {}) as Record<string, unknown>;
+          const jobReference =
+            typeof ee.jobReference === 'string' && ee.jobReference.trim().length > 0
+              ? ee.jobReference.trim()
+              : undefined;
+          const technicianName = technicianDisplayName(actor);
+          const outcome = await handleEnRouteForTechnician(deps.enRoute, {
+            tenantId,
+            technicianId: actor.id,
+            ...(technicianName ? { technicianName } : {}),
+            ...(jobReference ? { jobReference } : {}),
+          });
+          if (outcome.kind === 'unavailable') {
+            if (outcome.reason === 'no_timezone') {
+              return enRouteReply(
+                "I can't tell which of your appointments is today because this workspace has no timezone set, so nothing was sent. Set the business timezone in Settings and try again.",
+                'Tenant timezone unset — "today" is undefined and a UTC fallback could text the wrong day\'s customer.',
+                true,
+              );
+            }
+            logger.warn('assistant/chat: en_route unavailable — core repos not wired', {
+              correlationId,
+              tenantId,
+              reason: outcome.reason,
+            });
+            return enRouteReply(
+              "I can't send an on-my-way text from here right now — nothing was sent. Use the en-route button on the appointment instead.",
+              `en_route core unavailable: ${outcome.reason}.`,
+              true,
+            );
+          }
+          if (outcome.kind === 'ambiguous') {
+            return enRouteReply(
+              ambiguousReferenceLine(outcome.reference, outcome.candidates),
+              'More than one of your appointments today matches — asked instead of guessing.',
+            );
+          }
+          return enRouteReply(
+            outcome.answer.summary,
+            outcome.answer.result === 'found'
+              ? 'Direct status act — fired the same audited en-route notice as the app button (appointment.en_route_triggered).'
+              : 'No eligible appointment today — said so instead of pretending to act.',
+          );
+        } catch (err) {
+          // A VISIBLE failure — never fall through to the DB-less LLM,
+          // which would happily claim the text was sent.
+          logger.error('assistant/chat: en_route failed', {
+            correlationId,
+            tenantId,
+            error: err instanceof Error ? err.message : String(err),
+          });
+          return enRouteReply(
+            "I couldn't send the on-my-way text just now — that action failed, and nothing was sent. Try the en-route button on the appointment.",
+            `en_route act failed: ${err instanceof Error ? err.message : String(err)}`,
+            true,
+          );
+        }
       }
 
       // UB-B3 — voice-mode approval guard. approve/reject/edit_proposal are

@@ -88,6 +88,7 @@ import { resolveEscalationSettings } from '../settings/settings';
 import { resolvePhoneActor } from './phone-actor';
 import type { WhisperCache } from './whisper-cache';
 import { answerPhoneLookup, type PhoneLookupDeps } from '../ai/voice-turn/phone-lookup-surface';
+import { answerPhoneEnRoute, type PhoneEnRouteDeps } from '../ai/voice-turn/phone-en-route-surface';
 import {
   createVoiceTurnProcessor,
   appendAgentTts,
@@ -262,6 +263,16 @@ export interface TwilioAdapterDeps {
    * the unavailable line and logs a wiring-gap warning.
    */
   lookups?: PhoneLookupDeps;
+  /**
+   * #847 — the en_route ("on my way") bundle: the SAME technician core the
+   * recorded-memo wrapper and the SMS keyword leg drive, plus the userRepo
+   * this surface uses to role-check the session actor. app.ts wires
+   * `enRouteCoordinator` to the SAME DelayNotificationCoordinator instance
+   * as the app button / SMS / memo legs, so every surface fires the
+   * identical audited act. Absent → the intent speaks the unavailable line
+   * and logs a wiring-gap warning (never a silent clarification card).
+   */
+  enRoute?: PhoneEnRouteDeps;
   /**
    * Phase C: per-tenant integration resolver for runtime auth lookups.
    * Wiring is optional in this adapter phase; consumers can inject and
@@ -2412,6 +2423,33 @@ export class TwilioGatherAdapter {
         sideEffectsAll.push({
           type: 'tts_play',
           payload: { text: lookupSummary, source: 'lookup_skill' },
+        });
+        sideEffectsAll.push({
+          type: 'tts_play',
+          payload: { text: 'Anything else I can help you with?' },
+        });
+        await this.processor.executeSideEffects(session, sideEffectsAll, opts.tenantId);
+        return this.finalizeTwiml(session, sideEffectsAll, opts.sessionId);
+      }
+
+      // #847 — en_route ("on my way") is a DIRECT status act (Part F
+      // decision F-3): the technician IS the human acting, so it fires the
+      // SAME audited act the app en-route button executes — never a
+      // proposal, which is why it is deliberately absent from
+      // INTENT_TO_PROPOSAL_TYPE (falling through would mint the
+      // clarification card this branch exists to prevent). Same out-of-FSM
+      // shape as the lookup branch above: identity + role are checked in
+      // the surface adapter, the outcome is spoken, and `intent_classified`
+      // is NOT dispatched — the FSM stays in intent_capture.
+      if (classifiedIntentType === 'en_route') {
+        const enRouteLine = await answerPhoneEnRoute(this.deps.enRoute, {
+          session,
+          tenantId: opts.tenantId,
+          entities: classifiedEntities,
+        });
+        sideEffectsAll.push({
+          type: 'tts_play',
+          payload: { text: enRouteLine, source: 'en_route' },
         });
         sideEffectsAll.push({
           type: 'tts_play',

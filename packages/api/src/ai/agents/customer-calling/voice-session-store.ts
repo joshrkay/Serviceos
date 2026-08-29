@@ -80,6 +80,20 @@ export type VoiceSessionEvent =
       error?: string;
       ts: number;
     }
+  /**
+   * #847: the `en_route` DIRECT status act ran on a live surface. Not a
+   * `lookup_executed` — "on my way" mutates (audit + customer ETA text), so
+   * dashboards must not count it among read-only lookups. Fires for EVERY
+   * outcome, same discipline as lookup_executed: a dead branch is a metric,
+   * not an audit finding.
+   */
+  | {
+      type: 'en_route_executed';
+      outcome: 'sent' | 'no_appointment' | 'ambiguous' | 'refused' | 'unavailable';
+      durationMs: number;
+      error?: string;
+      ts: number;
+    }
   /** VQ-003: escalateToHuman committed. `reason` is the EscalationReason value. */
   | { type: 'escalation_triggered'; reason: string; ts: number }
   /** VQ-003: cost tracker absorbed a turn's usage. */

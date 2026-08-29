@@ -53,13 +53,19 @@ import type { ProposalType } from './proposal';
  *
  * B5.5 / Part F decision F-3: `en_route` ("on my way") is ALSO deliberately
  * omitted, for a different reason than lookup_* — it isn't read-only, it's a
- * DIRECT status act. Voice/SMS "on my way" invokes the exact same audited
- * act the shipped app en-route button already executes (dispatch/routes.ts
- * `triggerEnRoute` → `appointment.en_route_triggered` audit + branded ETA
- * SMS) rather than drafting an AI proposal for a human to approve — the
- * technician IS the human acting, the precedent PRD B10.10 already blesses.
- * See workers/voice-action-router.ts (the `en_route` branch, handled before
- * the proposalType lookup below) and dispatch/en-route-voice.ts. Registered
+ * DIRECT status act. "On my way" on any surface invokes the exact same
+ * audited act the shipped app en-route button already executes
+ * (dispatch/routes.ts `triggerEnRoute` → `appointment.en_route_triggered`
+ * audit + branded ETA SMS) rather than drafting an AI proposal for a human
+ * to approve — the technician IS the human acting, the precedent PRD B10.10
+ * already blesses. The shared core is
+ * dispatch/en-route-voice.ts#handleEnRouteForTechnician; its callers (#847)
+ * are workers/voice-action-router.ts (the recorded-memo `en_route` branch,
+ * handled before the proposalType lookup below, via the
+ * handleEnRouteVoiceIntent wrapper), sms/tech-status/en-route-keyword.ts
+ * (the OMW keyword), ai/voice-turn/phone-en-route-surface.ts (the live
+ * Gather branch in telephony/twilio-adapter.ts), and routes/assistant.ts
+ * (the chat branch, before the unmapped-capability refusal). Registered
  * here, next to lookup_*, so the drift test
  * (test/ai/voice-action-catalog.contract.test.ts) and a human reader both
  * see this as an intentional exclusion, not a gap.

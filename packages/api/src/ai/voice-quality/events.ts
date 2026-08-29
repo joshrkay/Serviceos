@@ -67,6 +67,27 @@ export function lookupExecutedEvent(
   return event;
 }
 
+/**
+ * #847 — the `en_route` direct status act ran on a live surface (Gather
+ * today; media-streams when its branch lands). One event per attempt,
+ * whatever the outcome — see the union member's doc comment.
+ */
+export function enRouteExecutedEvent(
+  outcome: Extract<VoiceSessionEvent, { type: 'en_route_executed' }>['outcome'],
+  durationMs: number,
+  error?: string,
+  ts: number = Date.now(),
+): Extract<VoiceSessionEvent, { type: 'en_route_executed' }> {
+  const event: Extract<VoiceSessionEvent, { type: 'en_route_executed' }> = {
+    type: 'en_route_executed',
+    outcome,
+    durationMs,
+    ts,
+  };
+  if (error !== undefined) event.error = error;
+  return event;
+}
+
 export function escalationTriggeredEvent(
   reason: string,
   ts: number = Date.now(),
