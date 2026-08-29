@@ -368,6 +368,169 @@ async function ensureFixtures() {
       );
       summary.push('tenant_settings: inserted (business_name=QA Sweep Test Business, timezone=America/New_York)');
     }
+
+    // A07 batch_invoice — findJobsRequiringInvoicing (invoices/invoicing-queue.ts)
+    // needs a job with status='completed', money_state='estimate_accepted', an
+    // ACCEPTED estimate carrying a billable (non-optional, non-grouped) line
+    // item, and NO live (non-void/non-canceled) invoice yet. e2e/qa-matrix/
+    // fixtures/seed.ts's one job per tenant starts 'new' and is never
+    // completed/estimated, so this sweep's QA tenant genuinely has zero
+    // completed-unbilled jobs — confirmed root cause of A07's proposal falling
+    // through to BatchInvoiceTaskHandler's empty-candidates voice_clarification
+    // branch (voice-extended-tasks.ts) instead of drafting a real batch_invoice
+    // proposal. Self-healing, not merely idempotent: once a seeded job is
+    // actually invoiced (by a prior sweep's approve+execute — the batch_invoice
+    // execution handler fans out a real draft_invoice per job), it legitimately
+    // drops out of the "requires invoicing" query, so the NOT EXISTS check below
+    // mints a fresh job only when none remains unbilled — the row stays
+    // provable on every run instead of only the first.
+    const a07Location = await rw.query('SELECT location_id FROM jobs WHERE tenant_id = $1 AND id = $2 LIMIT 1', [TENANT_ID, JOB_ID]);
+    const a07LocationId = a07Location.rows?.[0]?.location_id;
+    if (!a07LocationId) {
+      summary.push('batch_invoice fixture: SKIPPED — could not resolve a service_location from E2E_TENANT_A_JOB_ID');
+    } else {
+      const a07Unbilled = await rw.query(
+        `SELECT j.id FROM jobs j
+         WHERE j.tenant_id = $1 AND j.customer_id = $2 AND j.status = 'completed'
+           AND j.money_state = 'estimate_accepted'
+           AND j.summary LIKE 'QA Sweep Batch-Invoice Fixture%'
+           AND NOT EXISTS (
+             SELECT 1 FROM invoices i WHERE i.job_id = j.id AND i.status NOT IN ('void', 'canceled')
+           )
+         LIMIT 1`,
+        [TENANT_ID, CUSTOMER_ID],
+      );
+      if ((a07Unbilled.rowCount ?? 0) > 0) {
+        summary.push(`batch_invoice fixture: exists unbilled (job ${a07Unbilled.rows[0].id})`);
+      } else {
+        const a07Stamp = Date.now();
+        const a07JobId = crypto.randomUUID();
+        const a07EstimateId = crypto.randomUUID();
+        await rw.query(
+          `INSERT INTO jobs (id, tenant_id, customer_id, location_id, job_number, summary, status, money_state, priority, created_by, created_at, updated_at)
+           VALUES ($1, $2, $3, $4, $5, $6, 'completed', 'estimate_accepted', 'normal', $7, now(), now())`,
+          [a07JobId, TENANT_ID, CUSTOMER_ID, a07LocationId, `QA-SWEEP-A07-${a07Stamp}`, `QA Sweep Batch-Invoice Fixture ${a07Stamp}`, 'ai-catalog-sweep-seed'],
+        );
+        await rw.query(
+          `INSERT INTO estimates (id, tenant_id, job_id, estimate_number, status, subtotal_cents, taxable_subtotal_cents, total_cents, created_by, created_at, updated_at)
+           VALUES ($1, $2, $3, $4, 'accepted', $5, $5, $5, $6, now(), now())`,
+          [a07EstimateId, TENANT_ID, a07JobId, `EST-A07-${a07Stamp}`, 45000, 'ai-catalog-sweep-seed'],
+        );
+        await rw.query(
+          `INSERT INTO estimate_line_items (id, tenant_id, estimate_id, description, category, quantity, unit_price_cents, total_cents, sort_order, taxable)
+           VALUES ($1, $2, $3, 'QA Sweep completed-job line item', 'labor', 1, $4, $4, 0, true)`,
+          [crypto.randomUUID(), TENANT_ID, a07EstimateId, 45000],
+        );
+        summary.push(`batch_invoice fixture: inserted completed-unbilled job ${a07JobId} (estimate ${a07EstimateId})`);
+      }
+    }
+
+    // A19/A51 send_estimate_nudge — needs a 'sent', unanswered estimate whose
+    // most recent dispatch is > 48h old (SendEstimateNudgeExecutionHandler's
+    // FUP-002 cooldown, proposals/execution/handlers.ts) so A19's FIRST nudge
+    // this run genuinely executes instead of legitimately hitting the guard
+    // (the correct-refusal case is exercised separately by A51, which nudges
+    // the SAME estimate again immediately after A19 does). Uses a DEDICATED
+    // customer — never FIXTURE_CUSTOMER/CUSTOMER_ID — because
+    // SendEstimateNudgeTaskHandler resolves the target via a customer-anchored
+    // search (voice-extended-tasks.ts): a second 'sent' estimate on the SAME
+    // customer as the A02->A05->A18 chain's freshly-sent estimate would be
+    // genuine ambiguity and the task would clarify instead of executing,
+    // regardless of in-run timing. The SMS send path (dispatchEstimateNudge ->
+    // SendService.sendEstimate; channel is hardcoded 'sms' in the execution
+    // handler) requires the customer to carry BOTH primary_phone (resolveChannels
+    // throws 'Cannot send SMS...' without one) and sms_consent=true (otherwise
+    // the consent gate suppresses the only channel and the send throws
+    // 'Estimate send failed on all channels') — both are seeded below.
+    // Self-healing like the batch_invoice fixture: once A19 actually nudges
+    // this estimate, it plants a fresh dispatch inside the 48h window, so the
+    // NEXT run mints a brand-new eligible estimate rather than reusing one
+    // that would now legitimately refuse.
+    let a19CustomerId;
+    const a19ExistingCust = await rw.query(
+      "SELECT id FROM customers WHERE tenant_id = $1 AND display_name = 'QA Sweep Nudge Fixture' LIMIT 1",
+      [TENANT_ID],
+    );
+    if ((a19ExistingCust.rowCount ?? 0) > 0) {
+      a19CustomerId = a19ExistingCust.rows[0].id;
+      summary.push('nudge fixture customer: exists');
+    } else {
+      a19CustomerId = crypto.randomUUID();
+      await rw.query(
+        `INSERT INTO customers (id, tenant_id, first_name, last_name, display_name, primary_phone, email, sms_consent, created_by, created_at, updated_at)
+         VALUES ($1, $2, 'QA Sweep', 'Nudge Fixture', 'QA Sweep Nudge Fixture', $3, $4, true, $5, now(), now())`,
+        [a19CustomerId, TENANT_ID, '480-555-0195', 'qa-sweep-nudge-fixture@qa.serviceos.local', 'ai-catalog-sweep-seed'],
+      );
+      summary.push(`nudge fixture customer: inserted ${a19CustomerId}`);
+    }
+
+    let a19LocationId;
+    const a19ExistingLoc = await rw.query(
+      'SELECT id FROM service_locations WHERE tenant_id = $1 AND customer_id = $2 LIMIT 1',
+      [TENANT_ID, a19CustomerId],
+    );
+    if ((a19ExistingLoc.rowCount ?? 0) > 0) {
+      a19LocationId = a19ExistingLoc.rows[0].id;
+    } else {
+      a19LocationId = crypto.randomUUID();
+      await rw.query(
+        `INSERT INTO service_locations (id, tenant_id, customer_id, label, street1, city, state, postal_code, country, created_at, updated_at)
+         VALUES ($1, $2, $3, 'QA Sweep Nudge Fixture location', '1 QA Sweep Way', 'Scottsdale', 'AZ', '85254', 'US', now(), now())`,
+        [a19LocationId, TENANT_ID, a19CustomerId],
+      );
+    }
+
+    let a19JobId;
+    const a19ExistingJob = await rw.query(
+      "SELECT id FROM jobs WHERE tenant_id = $1 AND job_number = 'QA-SWEEP-NUDGE-FIXTURE' LIMIT 1",
+      [TENANT_ID],
+    );
+    if ((a19ExistingJob.rowCount ?? 0) > 0) {
+      a19JobId = a19ExistingJob.rows[0].id;
+    } else {
+      a19JobId = crypto.randomUUID();
+      await rw.query(
+        `INSERT INTO jobs (id, tenant_id, customer_id, location_id, job_number, summary, created_by, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, 'QA-SWEEP-NUDGE-FIXTURE', 'QA Sweep nudge-fixture job', $5, now(), now())`,
+        [a19JobId, TENANT_ID, a19CustomerId, a19LocationId, 'ai-catalog-sweep-seed'],
+      );
+    }
+
+    const a19Eligible = await rw.query(
+      `SELECT e.id FROM estimates e
+       WHERE e.tenant_id = $1 AND e.job_id = $2 AND e.status = 'sent'
+         AND (e.last_reminder_at IS NULL OR e.last_reminder_at < now() - interval '48 hours')
+         AND NOT EXISTS (
+           SELECT 1 FROM message_dispatches d
+           WHERE d.entity_type = 'estimate' AND d.entity_id = e.id
+             AND d.status NOT IN ('failed', 'bounced')
+             AND d.sent_at >= now() - interval '48 hours'
+         )
+       ORDER BY e.created_at DESC LIMIT 1`,
+      [TENANT_ID, a19JobId],
+    );
+    if ((a19Eligible.rowCount ?? 0) > 0) {
+      summary.push(`nudge fixture estimate: exists eligible (${a19Eligible.rows[0].id})`);
+    } else {
+      const a19Stamp = Date.now();
+      const a19EstimateId = crypto.randomUUID();
+      await rw.query(
+        `INSERT INTO estimates (id, tenant_id, job_id, estimate_number, status, subtotal_cents, taxable_subtotal_cents, total_cents, sent_at, created_by, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, 'sent', $5, $5, $5, now() - interval '72 hours', $6, now() - interval '72 hours', now() - interval '72 hours')`,
+        [a19EstimateId, TENANT_ID, a19JobId, `EST-NUDGE-${a19Stamp}`, 50000, 'ai-catalog-sweep-seed'],
+      );
+      await rw.query(
+        `INSERT INTO estimate_line_items (id, tenant_id, estimate_id, description, category, quantity, unit_price_cents, total_cents, sort_order, taxable)
+         VALUES ($1, $2, $3, 'QA Sweep nudge fixture line item', 'labor', 1, $4, $4, 0, true)`,
+        [crypto.randomUUID(), TENANT_ID, a19EstimateId, 50000],
+      );
+      await rw.query(
+        `INSERT INTO message_dispatches (id, tenant_id, entity_type, entity_id, channel, recipient, provider, provider_message_id, status, idempotency_key, sent_at)
+         VALUES ($1, $2, 'estimate', $3, 'email', $4, 'in-memory', $5, 'sent', $6, now() - interval '72 hours')`,
+        [crypto.randomUUID(), TENANT_ID, a19EstimateId, 'qa-sweep-nudge-fixture@qa.serviceos.local', `mem-nudge-fixture-${a19Stamp}`, `estimate:${a19EstimateId}:email:${a19Stamp}`],
+      );
+      summary.push(`nudge fixture estimate: inserted fresh sent estimate ${a19EstimateId} (job ${a19JobId}) with a 72h-old dispatch so A19's first nudge this run should execute`);
+    }
   } finally {
     await rw.end();
   }
@@ -399,7 +562,16 @@ async function checkOwnerPhoneSafe(tenantId) {
 
 // ─────────────────────────────── scoring ───────────────────────────────────
 
-const OUTCOME_ENUM = ['executes', 'draft_gated', 'honest_refusal', 'clarification', 'lookup_answer', 'rbac_denied', 'no_onramp_record'];
+// 'guard_pass' (2026-08-29 WS-E honesty pass) — a proposal-driving row whose
+// CORRECT behavior is a post-draft guard refusing execution (e.g. FUP-002's
+// 48h send_estimate_nudge cooldown, proposals/execution/handlers.ts). Distinct
+// from 'executes'/'draft_gated': those two both score PARTIAL on any
+// execution_failed (see runRow below) because most execution_failed results
+// ARE unintended bugs. A guard_pass row expects the SAME execution_failed
+// shape but treats hitting the documented guard as the row's success —
+// without this, a ratified-correct refusal would forever PARTIAL and there
+// would be no honest way to prove the guard fires on demand.
+const OUTCOME_ENUM = ['executes', 'draft_gated', 'honest_refusal', 'clarification', 'lookup_answer', 'rbac_denied', 'no_onramp_record', 'guard_pass'];
 
 function sumUsage(usages) {
   const out = { input: 0, output: 0, total: 0 };
@@ -563,6 +735,41 @@ async function runRow(corpusCase, ctx) {
     verdict = nonError && noProposal && (chatFields.content?.length > 0 || chatFields._state) ? 'PASS' : 'DEGRADED';
     outcomeClass = 'clarification';
     reason = verdict === 'PASS' ? 'clarification_reply' : 'no_clarification_shape';
+  } else if (corpusCase.expectedOutcome === 'guard_pass') {
+    // A proposal-driving row that PASSES when execution genuinely fails
+    // because a documented guard fired (see OUTCOME_ENUM comment above), not
+    // when it reaches 'executed'. Uses refusalHint (same field
+    // honest_refusal/rbac_denied already use) to confirm the failure is the
+    // EXPECTED guard, not some unrelated break.
+    if (chatFields.degraded) {
+      verdict = 'DEGRADED';
+      outcomeClass = null;
+      reason = 'llm_fallback_envelope';
+    } else if (!proposalId) {
+      verdict = 'PARTIAL';
+      outcomeClass = null;
+      reason = 'no_proposal_non_degraded';
+    } else {
+      approveOutcome = await approveAndAwaitExecution(token, proposalId);
+      const errText = (approveOutcome.executionError || '').toLowerCase();
+      const hintOk = corpusCase.refusalHint ? errText.includes(corpusCase.refusalHint.toLowerCase()) : true;
+      if (approveOutcome.status === 'execution_failed' && hintOk) {
+        verdict = 'PASS';
+        outcomeClass = 'guard_pass';
+        reason = 'guard_refusal_confirmed';
+      } else if (approveOutcome.status === 'executed') {
+        // The guard was expected to refuse this and didn't — a real
+        // regression, not a scoring artifact, so this is FAIL rather than a
+        // silent downgrade to PARTIAL.
+        verdict = 'FAIL';
+        outcomeClass = null;
+        reason = 'guard_did_not_fire: executed';
+      } else {
+        verdict = 'PARTIAL';
+        outcomeClass = 'guard_pass';
+        reason = `execution_failed_unexpected_shape: ${approveOutcome.executionError || approveOutcome.status}`;
+      }
+    }
   } else {
     // executes | draft_gated — proposal-driving.
     if (chatFields.degraded) {
