@@ -3539,6 +3539,20 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     // lookup-only repos that used to be listed here fed the deleted
     // per-surface switch; they now reach the skills through `answers`.
     lookups: phoneLookupDeps,
+    // #847 — en_route ("on my way") from the live phone: the SAME technician
+    // core (dispatch/en-route-voice.ts) and the SAME coordinator instance as
+    // the app button (createDispatchRoutes), the SMS keyword and the
+    // recorded-memo worker, so every surface fires the identical audited act.
+    enRoute: {
+      userRepo,
+      assignmentRepo,
+      appointmentRepo,
+      jobRepo,
+      customerRepo,
+      settingsRepo,
+      auditRepo,
+      enRouteCoordinator: delayNotificationCoordinator,
+    },
     // P0 voice-safety — the inbound PHONE path resolves free-text references
     // through the SAME resolver stack the voice-action-router uses above
     // (alias-first, then pg_trgm), NOT the bare PgEntityResolver the in-app
@@ -5510,6 +5524,20 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
         ...(sharedEntityResolver ? { entityResolver: sharedEntityResolver } : {}),
         tenantTimezoneResolver: async (tenantId: string) =>
           (await tenantSchedulingResolver(tenantId))?.timezone,
+      },
+      // #847 — en_route ("on my way") from chat: the SAME technician core
+      // and the SAME coordinator instance as the app button, the SMS
+      // keyword, the recorded-memo worker and the live phone branch, so a
+      // technician typing "on my way" fires the identical audited act.
+      enRoute: {
+        userRepo,
+        assignmentRepo,
+        appointmentRepo,
+        jobRepo,
+        customerRepo,
+        settingsRepo,
+        auditRepo,
+        enRouteCoordinator: delayNotificationCoordinator,
       },
     }),
   );

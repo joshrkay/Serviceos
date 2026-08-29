@@ -430,8 +430,11 @@ const SENTIMENT_MAX_BUDGET_RATIO = 0.8;
  * Two covers the legitimate shapes (wrong opening language → correct one,
  * plus one explicit switch back); anything more is flapping on the
  * revenue path and is refused.
+ *
+ * Exported (#846) so the Gather adapter's language_switch branch enforces
+ * the SAME per-call cap — one policy, both transports.
  */
-const MAX_LANGUAGE_SWITCHES_PER_CALL = 2;
+export const MAX_LANGUAGE_SWITCHES_PER_CALL = 2;
 
 /**
  * VOX-35c — after this many CONSECUTIVE `speechTurn` failures the adapter

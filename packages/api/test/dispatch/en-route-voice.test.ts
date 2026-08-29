@@ -20,6 +20,8 @@ import type { EnRouteEnqueuer } from '../../src/dispatch/routes';
 import {
   resolveEnRouteAppointment,
   handleEnRouteVoiceIntent,
+  handleEnRouteForTechnician,
+  technicianNameIfKnown,
   type EnRouteResolutionDeps,
 } from '../../src/dispatch/en-route-voice';
 
@@ -662,7 +664,7 @@ describe('B5.5 — handleEnRouteVoiceIntent (router orchestration)', () => {
 
   it('unavailable when there is no recordingId (no answer surface on this path)', async () => {
     const outcome = await handleEnRouteVoiceIntent(baseDeps(), { tenantId: TENANT });
-    expect(outcome).toEqual({ kind: 'unavailable' });
+    expect(outcome).toEqual({ kind: 'unavailable', reason: 'no_recording' });
   });
 
   it('resolves the memo creator (Clerk id) to the canonical technician and fires the audited act', async () => {
@@ -759,7 +761,87 @@ describe('B5.5 — handleEnRouteVoiceIntent (router orchestration)', () => {
   it('unavailable when the memo creator cannot be resolved to a canonical technician', async () => {
     const deps = baseDeps({ userRepo: { findByTenant: async () => [] } });
     const outcome = await handleEnRouteVoiceIntent(deps, { tenantId: TENANT, recordingId: RECORDING_ID });
-    expect(outcome).toEqual({ kind: 'unavailable' });
+    expect(outcome).toEqual({ kind: 'unavailable', reason: 'unknown_technician' });
     expect(deps.enRouteCoordinator.enqueueEnRouteNotice).not.toHaveBeenCalled();
+  });
+});
+
+describe('#847 — handleEnRouteForTechnician (surface-agnostic core)', () => {
+  function coreDeps(overrides: Partial<Parameters<typeof handleEnRouteForTechnician>[0]> = {}) {
+    const a1 = assignment({ id: 'a1', appointmentId: 'appt-1', technicianId: TECH });
+    const appt1 = appt({ id: 'appt-1', jobId: 'job-1', scheduledStart: new Date('2026-07-29T15:00:00.000Z') });
+    const enqueueEnRouteNotice = vi.fn(async () => 'appt-1:en_route');
+    const enRouteCoordinator: EnRouteEnqueuer = { enqueueEnRouteNotice };
+    return {
+      assignmentRepo: { findByTechnician: vi.fn(async () => [a1]) },
+      appointmentRepo: { findById: async () => appt1 },
+      enRouteCoordinator,
+      auditRepo: { create: vi.fn(async () => undefined) } as any,
+      settingsRepo: {
+        findByTenant: async () => ({ tenantId: TENANT, timezone: 'America/Chicago' }),
+      } as any,
+      now: () => NOW,
+      ...overrides,
+    };
+  }
+
+  it('scopes resolution to the GIVEN technician id and fires the audited act with that actor', async () => {
+    const deps = coreDeps();
+    const outcome = await handleEnRouteForTechnician(deps, {
+      tenantId: TENANT,
+      technicianId: TECH,
+      technicianName: 'Carlos Ruiz',
+    });
+
+    expect(outcome.kind).toBe('answered');
+    if (outcome.kind === 'answered') expect(outcome.answer.result).toBe('found');
+    // AC-2: the only candidate query is the acting technician's own assignments.
+    expect(deps.assignmentRepo.findByTechnician).toHaveBeenCalledWith(TENANT, TECH);
+    // The customer's ETA text carries the display name the caller resolved.
+    expect(deps.enRouteCoordinator.enqueueEnRouteNotice).toHaveBeenCalledWith(
+      expect.objectContaining({ tenantId: TENANT, appointmentId: 'appt-1', technicianName: 'Carlos Ruiz' }),
+    );
+    expect(deps.auditRepo.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        eventType: 'appointment.en_route_triggered',
+        actorId: TECH,
+        actorRole: 'technician',
+      }),
+    );
+  });
+
+  it('declines with reason no_timezone when the tenant zone is unset (never a UTC fallback)', async () => {
+    const deps = coreDeps({
+      settingsRepo: { findByTenant: async () => ({ tenantId: TENANT, timezone: null }) } as never,
+    });
+    const outcome = await handleEnRouteForTechnician(deps, { tenantId: TENANT, technicianId: TECH });
+
+    expect(outcome).toEqual({ kind: 'unavailable', reason: 'no_timezone' });
+    expect(deps.enRouteCoordinator.enqueueEnRouteNotice).not.toHaveBeenCalled();
+  });
+
+  it('declines with reason not_wired when the coordinator is absent', async () => {
+    const deps = coreDeps({ enRouteCoordinator: undefined });
+    const outcome = await handleEnRouteForTechnician(deps, { tenantId: TENANT, technicianId: TECH });
+    expect(outcome).toEqual({ kind: 'unavailable', reason: 'not_wired' });
+  });
+
+  it('answers an explicit "none" when the technician has nothing eligible today', async () => {
+    const deps = coreDeps({ assignmentRepo: { findByTechnician: vi.fn(async () => []) } });
+    const outcome = await handleEnRouteForTechnician(deps, { tenantId: TENANT, technicianId: TECH });
+
+    expect(outcome.kind).toBe('answered');
+    if (outcome.kind === 'answered') expect(outcome.answer.result).toBe('none');
+    expect(deps.enRouteCoordinator.enqueueEnRouteNotice).not.toHaveBeenCalled();
+  });
+});
+
+describe('#847 — technicianNameIfKnown', () => {
+  it('prefers "First Last", falls back to email, and is undefined when the row has neither', () => {
+    expect(
+      technicianNameIfKnown({ firstName: 'Carlos', lastName: 'Ruiz', email: 't@x.com' } as User),
+    ).toBe('Carlos Ruiz');
+    expect(technicianNameIfKnown({ email: 't@x.com' } as User)).toBe('t@x.com');
+    expect(technicianNameIfKnown({ email: '' } as User)).toBeUndefined();
   });
 });
