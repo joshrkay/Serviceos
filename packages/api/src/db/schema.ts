@@ -4767,6 +4767,20 @@ export const MIGRATIONS = {
   // ledger every other outbound send writes to, so DNC suppression and
   // delivery accounting stay uniform across transactional and conversational
   // sends.
+  //
+  // NOT VALID (deploy-blocker fix, 2026-08-29): the runner has no ledger —
+  // getMigrationSQL() re-executes every migration on every boot — so an
+  // ADD CONSTRAINT without NOT VALID re-validates the ENTIRE table on every
+  // single deploy, against THIS migration's (now-stale, pre-269/270)
+  // vocabulary. Once a later migration (269, 270) legitimately widens the
+  // constraint further and the app starts writing those newer entity_type
+  // values, the NEXT deploy replays this migration first and rejects the
+  // rows a later statement in the very same corpus would have allowed —
+  // ATRewriteTable/SQLSTATE 23514, e.g. on 'portal_session'/'custom_message'
+  // rows. 092/125/164 got this right with NOT VALID; this one (and 269, 270
+  // below) regressed the pattern. NOT VALID only skips validating
+  // pre-existing rows at ADD-CONSTRAINT time — new/updated rows are still
+  // checked immediately, so enforcement for future writes is unchanged.
   '190_dispatch_entity_conversation_reply': `
     ALTER TABLE message_dispatches
       DROP CONSTRAINT IF EXISTS message_dispatches_entity_type_check;
@@ -4777,7 +4791,7 @@ export const MIGRATIONS = {
           'appointment_reschedule', 'appointment_cancel', 'appointment_reminder',
           'payment_receipt', 'invoice_overdue', 'delay_notice', 'appointment_en_route',
           'daily_digest', 'conversation_reply'
-        ));
+        )) NOT VALID;
   `,
 
   // CRM two-way comms follow-up: an inbound text from an unknown number
@@ -6538,6 +6552,11 @@ export const MIGRATIONS = {
   // change stays independently reviewable/reversible. Reuses the same
   // dispatch ledger every other outbound send writes to, so DNC suppression
   // and delivery accounting stay uniform.
+  //
+  // NOT VALID (deploy-blocker fix, 2026-08-29): see the comment on 190 above
+  // — without NOT VALID, every redeploy re-validates the whole table against
+  // THIS (pre-270) vocabulary, which rejects 'custom_message' rows the app
+  // legitimately writes once 270 has been live for a while.
   '269_dispatch_entity_portal_session': `
     ALTER TABLE message_dispatches
       DROP CONSTRAINT IF EXISTS message_dispatches_entity_type_check;
@@ -6548,11 +6567,17 @@ export const MIGRATIONS = {
           'appointment_reschedule', 'appointment_cancel', 'appointment_reminder',
           'payment_receipt', 'invoice_overdue', 'delay_notice', 'appointment_en_route',
           'daily_digest', 'conversation_reply', 'portal_session'
-        ));
+        )) NOT VALID;
   `,
   // Tradesperson wave 1 — free-form owner-approved customer message
   // (send_customer_message proposal). New dispatch entity type so the
   // message_dispatches audit trail can carry it.
+  //
+  // NOT VALID (deploy-blocker fix, 2026-08-29): see the comment on 190 above.
+  // This is currently the LAST widening, so its list already matches
+  // DispatchEntityType in full — but leaving off NOT VALID here still means
+  // every redeploy re-scans the whole table for no benefit, and the next
+  // widening after this one would reintroduce the exact same failure mode.
   '270_dispatch_entity_custom_message': `
     ALTER TABLE message_dispatches
       DROP CONSTRAINT IF EXISTS message_dispatches_entity_type_check;
@@ -6563,7 +6588,7 @@ export const MIGRATIONS = {
           'appointment_reschedule', 'appointment_cancel', 'appointment_reminder',
           'payment_receipt', 'invoice_overdue', 'delay_notice', 'appointment_en_route',
           'daily_digest', 'conversation_reply', 'portal_session', 'custom_message'
-        ));
+        )) NOT VALID;
   `,
   // Tradesperson wave 1 — change orders are estimates pinned to an existing
   // job and flagged so reporting can separate scope-adds from original bids.
