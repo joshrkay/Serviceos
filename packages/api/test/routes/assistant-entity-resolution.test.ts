@@ -33,6 +33,7 @@ import {
 
 const TEST_TENANT = '11111111-1111-4111-8111-111111111111';
 const TEST_USER = '22222222-2222-4222-8222-222222222222';
+const CUSTOMER = 'qa-matrix-A-customer';
 const CONVERSATION = '33333333-3333-4333-8333-333333333333';
 
 function scriptedGateway(responses: string[]): LLMGateway {
@@ -152,6 +153,16 @@ describe('#909 — an unambiguous reference lifts the gate that blocked approval
     entities: Record<string, unknown>;
     gate: string;
     filledWith: string;
+    /** Further entity gates the same turn must also lift (crew/reassign). */
+    alsoFilled?: Record<string, string>;
+    /**
+     * NON-entity gates this row still carries after resolution — a field no
+     * resolver can answer, so approval correctly keeps refusing. Recorded
+     * per row rather than glossed: #909 is scoped to the entity gate, and a
+     * row that needs something else too should say so out loud instead of
+     * looking healed.
+     */
+    residualGates?: string[];
   }> = [
     {
       row: 'A11',
@@ -239,6 +250,95 @@ describe('#909 — an unambiguous reference lifts the gate that blocked approval
       gate: 'invoiceId',
       filledWith: RESOLVED.invoice,
     },
+    {
+      row: 'A04',
+      intent: 'update_invoice',
+      phrase: 'Add a 75 dollar filter line to invoice INV-0001',
+      entities: {
+        jobReference: 'INV-0001',
+        lineItemDescriptions: ['filter'],
+        amount: 7500,
+      },
+      gate: 'invoiceId',
+      filledWith: RESOLVED.invoice,
+    },
+    {
+      row: 'A13',
+      intent: 'reassign_appointment',
+      phrase: "Reassign qa-matrix-A-customer's appointment to Tom Baker",
+      entities: {
+        customerName: CUSTOMER,
+        appointmentReference: `${CUSTOMER}'s appointment`,
+        targetTechnicianName: 'Tom Baker',
+      },
+      gate: 'appointmentId',
+      filledWith: RESOLVED.appointment,
+      alsoFilled: { toTechnicianId: RESOLVED.technician },
+    },
+    {
+      row: 'A15',
+      intent: 'remove_crew_member',
+      phrase: "Take Alex Rivera off qa-matrix-A-customer's appointment",
+      entities: { customerName: CUSTOMER, targetTechnicianName: 'Alex Rivera' },
+      gate: 'appointmentId',
+      filledWith: RESOLVED.appointment,
+      alsoFilled: { technicianId: RESOLVED.technician },
+    },
+    {
+      row: 'A29',
+      intent: 'add_service_location',
+      phrase: 'Add a service location for Priya Shah: 9 Elm Court, Mesa, AZ 85201',
+      entities: {
+        customerName: 'Priya Shah',
+        serviceAddress: '9 Elm Court, Mesa, AZ 85201',
+      },
+      gate: 'customerId',
+      filledWith: RESOLVED.customer,
+      // AddServiceLocationTaskHandler pushes these four UNCONDITIONALLY
+      // ("the executor needs structured fields — always require
+      // resolution"). Parsing a spoken address into street/city/state/zip is
+      // not entity resolution and no resolver kind answers it, so A29's
+      // ENTITY gate is what this issue lifts; the row needs an address
+      // parser as well before it can approve unattended. Flagged, not hidden.
+      residualGates: ['street1', 'city', 'state', 'postalCode'],
+    },
+    {
+      row: 'A31',
+      intent: 'notify_delay',
+      phrase: "Tell qa-matrix-A-customer we're running 30 minutes late",
+      entities: {
+        customerName: CUSTOMER,
+        appointmentReference: `${CUSTOMER}'s appointment`,
+        delayMinutes: 30,
+      },
+      gate: 'appointmentId',
+      filledWith: RESOLVED.appointment,
+    },
+    {
+      row: 'A41',
+      intent: 'create_service_agreement',
+      phrase: 'Sign Priya Shah up for the annual maintenance plan, 290 dollars a year',
+      entities: {
+        customerName: 'Priya Shah',
+        serviceAgreementName: 'Annual Maintenance Plan',
+        serviceAgreementCadence: 'annual',
+        amount: 29000,
+      },
+      gate: 'customerId',
+      filledWith: RESOLVED.customer,
+    },
+    {
+      row: 'A45',
+      intent: 'create_invoice_schedule',
+      phrase:
+        'Set up milestone billing on the QA Sweep Furnace Inspection job: 50 percent deposit, rest on completion',
+      entities: {
+        jobReference: 'QA Sweep Furnace Inspection',
+        scheduleDescription: '50 percent deposit, rest on completion',
+      },
+      gate: 'jobId',
+      filledWith: RESOLVED.job,
+    },
   ];
 
   for (const row of ROWS) {
@@ -265,10 +365,24 @@ describe('#909 — an unambiguous reference lifts the gate that blocked approval
         (persisted.sourceContext as Record<string, unknown>).verifiedIds,
       ).toMatchObject({ [row.gate]: row.filledWith });
 
+      for (const [key, value] of Object.entries(row.alsoFilled ?? {})) {
+        expect((persisted.payload as Record<string, unknown>)[key], key).toBe(value);
+        expect(missingFieldsFor(persisted)).not.toContain(key);
+      }
+
       // THE assertion: the exact call that returned 400 in the sweep.
-      await expect(
-        approveProposal(proposalRepo, TEST_TENANT, persisted.id, TEST_USER, 'owner'),
-      ).resolves.toBeTruthy();
+      if (row.residualGates) {
+        // Still refused — but for a reason that has nothing to do with
+        // entity resolution, and never for the entity gate.
+        await expect(
+          approveProposal(proposalRepo, TEST_TENANT, persisted.id, TEST_USER, 'owner'),
+        ).rejects.toThrow(new RegExp(row.residualGates.join('|')));
+        expect(missingFieldsFor(persisted).sort()).toEqual([...row.residualGates].sort());
+      } else {
+        await expect(
+          approveProposal(proposalRepo, TEST_TENANT, persisted.id, TEST_USER, 'owner'),
+        ).resolves.toBeTruthy();
+      }
     });
   }
 
