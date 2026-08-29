@@ -243,7 +243,7 @@ async function driveVoiceSession(token, corpusCase) {
   let last;
   for (const text of turns) {
     last = await api('POST', `/api/voice/sessions/${sessionId}/input`, { token, body: { text } });
-    allTurns.push({ text, status: last.status, state: last.json?.state ?? null });
+    allTurns.push({ text, status: last.status, state: last.json?.state ?? null, usage: last.json?.usage ?? null });
   }
   // Automatic FSM continuation for HITL readback turns the scripted array
   // didn't already cover (entity_resolution / entity_confirm / intent_confirm)
@@ -263,7 +263,7 @@ async function driveVoiceSession(token, corpusCase) {
       break;
     }
     last = await api('POST', `/api/voice/sessions/${sessionId}/input`, { token, body: { text: followUp } });
-    allTurns.push({ text: followUp, status: last.status, state: last.json?.state ?? null, auto: true });
+    allTurns.push({ text: followUp, status: last.status, state: last.json?.state ?? null, usage: last.json?.usage ?? null, auto: true });
   }
   return { sessionId, final: last, allTurns };
 }
@@ -375,6 +375,16 @@ async function checkOwnerPhoneSafe(tenantId) {
 
 const OUTCOME_ENUM = ['executes', 'draft_gated', 'honest_refusal', 'clarification', 'lookup_answer', 'rbac_denied', 'no_onramp_record'];
 
+function sumUsage(usages) {
+  const out = { input: 0, output: 0, total: 0 };
+  for (const u of usages) {
+    out.input += Number(u?.input) || 0;
+    out.output += Number(u?.output) || 0;
+    out.total += Number(u?.total) || 0;
+  }
+  return out;
+}
+
 function extractChatFields(json) {
   const proposal = json?.message?.proposal ?? json?.proposal ?? null;
   return {
@@ -384,6 +394,7 @@ function extractChatFields(json) {
     degraded: Boolean(json?.degraded),
     proposalId: proposal?.id ?? null,
     proposalType: proposal?.type ?? json?.proposalType ?? null,
+    usage: json?.usage ?? null,
   };
 }
 
@@ -459,9 +470,14 @@ async function runRow(corpusCase, ctx) {
       degraded: false,
       proposalId: j?.proposalIds?.[0] ?? null,
       proposalType: null,
+      usage: j?.usage ?? null,
     };
     chatFields._state = j?.state ?? null;
     chatFields._proposalIds = j?.proposalIds ?? [];
+    // Sum usage across every turn the voice session took (multi-turn FSM
+    // rows make several classify/draft calls, not just the final one).
+    const turnUsages = (voiceOutcome.allTurns ?? []).map((t) => t.usage).filter(Boolean);
+    if (turnUsages.length > 0) chatFields.usage = sumUsage(turnUsages);
   } else {
     return { ...row, verdict: 'FAIL', outcomeClass: null, reason: `unknown surface ${corpusCase.surface}`, notes: corpusCase.notes };
   }
@@ -585,6 +601,7 @@ async function runRow(corpusCase, ctx) {
     proposalType: chatFields.proposalType,
     sessionId,
     voiceState: chatFields._state,
+    usage: chatFields.usage ?? null,
     approve: approveOutcome,
     dbVerify,
     notes: corpusCase.notes,
@@ -741,9 +758,16 @@ async function main() {
   const results = [...resultsMap.values()];
   const counts = {};
   const countsByOutcomeClass = {};
+  const usageTotals = { input: 0, output: 0, total: 0, rowsWithUsage: 0 };
   for (const r of results) {
     counts[r.verdict] = (counts[r.verdict] || 0) + 1;
     if (r.outcomeClass) countsByOutcomeClass[r.outcomeClass] = (countsByOutcomeClass[r.outcomeClass] || 0) + 1;
+    if (r.usage) {
+      usageTotals.input += Number(r.usage.input) || 0;
+      usageTotals.output += Number(r.usage.output) || 0;
+      usageTotals.total += Number(r.usage.total) || 0;
+      usageTotals.rowsWithUsage += 1;
+    }
   }
 
   const out = {
@@ -760,6 +784,7 @@ async function main() {
     concurrency: CONCURRENCY,
     counts,
     countsByOutcomeClass,
+    usageTotals,
     results: cases.filter((c) => runSet.includes(c) || resultsMap.has(c.id)).map((c) => resultsMap.get(c.id)).filter(Boolean),
   };
 
@@ -770,6 +795,7 @@ async function main() {
   console.log('\n=== Scoreboard ===');
   console.log(counts);
   console.log(countsByOutcomeClass);
+  console.log('Usage totals:', usageTotals);
   console.log(`Wrote ${outPath}`);
 
   if (dbClient) await dbClient.end().catch(() => {});
