@@ -37,6 +37,7 @@ import type { Appointment } from '../../src/appointments/appointment';
 import { InMemoryJobRepository, createJob } from '../../src/jobs/job';
 import type { JobRepository } from '../../src/jobs/job';
 import { InMemoryInvoiceRepository, createInvoice } from '../../src/invoices/invoice';
+import { InMemoryEstimateRepository, createEstimate } from '../../src/estimates/estimate';
 import { buildLineItem } from '../../src/shared/billing-engine';
 import { InMemoryMoneyDashboardRepository } from '../../src/reports/money-dashboard';
 import { InMemoryLeadRepository, type Lead } from '../../src/leads/lead';
@@ -468,8 +469,13 @@ describe('POST /api/assistant/chat — U7 parity: lookup_leads / lookup_catalog'
     expect(res.body.taskType).toBe('assistant.lookup.lookup_leads');
     // Real rows out of the repo — won/lost leads excluded.
     expect(res.body.message.content).toBe('There are 2 open leads in the pipeline.');
-    // Exactly ONE gateway call (the classifier) — the generic LLM never ran.
-    expect(gateway.complete as ReturnType<typeof vi.fn>).toHaveBeenCalledTimes(1);
+    // #910 — "How many open leads do we have?" now matches the
+    // deterministic lookup_leads phrase short-circuit (intent-classifier.ts
+    // EXTENDED_INTENT_PHRASES), so the classifier LLM call this comment
+    // used to require doesn't happen at all any more — the scripted
+    // LEADS_CLASSIFICATION response above is unused. Either way the
+    // generic DB-less LLM fallback never runs.
+    expect(gateway.complete as ReturnType<typeof vi.fn>).not.toHaveBeenCalled();
     expect(res.body.degraded).toBeUndefined();
   });
 
@@ -545,6 +551,80 @@ describe('POST /api/assistant/chat — U7 parity: lookup_leads / lookup_catalog'
     expect(res.status).toBe(200);
     expect(res.body.taskType).toBe('assistant.lookup.lookup_catalog');
     expect(res.body.message.content).toBe('Your service catalog is empty right now.');
+  });
+});
+
+// #910 / L08 — "What estimates does {{FIXTURE_CUSTOMER}} have?" (2026-08-29
+// live sweep). Proves the FULL request pipeline for the exact corpus
+// phrasing: the deterministic lookup_estimates phrase match (intent-
+// classifier.ts matchLookupEstimatesPhrase) extracts customerName, the
+// SAME EntityResolver an LLM-classified customerName would go through
+// resolves it to a customerId, and the reply comes from the lookup-estimates
+// SKILL's real DB data — never the generic gpt-4o-mini fallback the sweep
+// observed (model 'assistant.general', "I do not have access to...").
+describe('POST /api/assistant/chat — #910 / L08: lookup_estimates deterministic phrase match', () => {
+  it('answers from the SKILL with real estimate data, even when the gateway is scripted to answer generically', async () => {
+    const jobRepo = new InMemoryJobRepository();
+    const estimateRepo = new InMemoryEstimateRepository();
+    const job = await createJob(
+      {
+        tenantId: TEST_TENANT,
+        customerId: 'cust-jane-doe',
+        locationId: 'loc-jane-doe',
+        summary: 'Furnace tune-up for Jane Doe',
+        createdBy: TEST_USER,
+      } as never,
+      jobRepo,
+    );
+    await createEstimate(
+      {
+        tenantId: TEST_TENANT,
+        jobId: job.id,
+        estimateNumber: 'EST-0099',
+        lineItems: [buildLineItem('li-1', 'Furnace tune-up', 1, 32_500, 0, false)],
+        taxRateBps: 0,
+        createdBy: TEST_USER,
+      } as never,
+      estimateRepo,
+    );
+
+    // Simulates the sweep's OBSERVED failure shape: the classifier would
+    // answer generically instead of lookup_estimates. Because the
+    // deterministic phrase match fires first, this scripted response is
+    // never consumed.
+    const badGateway = scriptedGateway([
+      "I do not have access to specific customer estimates or records. To find out the estimates for Jane Doe, please check your internal system or contact your account manager for assistance.",
+    ]);
+    const entityResolver: EntityResolver = {
+      resolve: vi.fn(async (input: { reference: string; kind: string }) =>
+        input.kind === 'customer' && input.reference === 'Jane Doe'
+          ? { kind: 'resolved', candidate: { id: 'cust-jane-doe', kind: 'customer', label: 'Jane Doe', score: 0.95 } }
+          : { kind: 'not_found', reference: input.reference },
+      ),
+    } as unknown as EntityResolver;
+    const lookups: AssistantLookupDeps = {
+      answers: { estimateRepo },
+      shared: { jobRepo, appointmentRepo: new InMemoryAppointmentRepository(), proposalRepo: new InMemoryProposalRepository() },
+      entityResolver,
+      now: () => NOW,
+    };
+    const app = buildApp(badGateway, { lookups });
+
+    const res = await request(app)
+      .post('/api/assistant/chat')
+      .send({ messages: [{ role: 'user', content: 'What estimates does Jane Doe have?' }] });
+
+    expect(res.status).toBe(200);
+    expect(res.body.model).toBe('data-lookup');
+    expect(res.body.taskType).toBe('assistant.lookup.lookup_estimates');
+    expect(res.body.message.content).toContain('EST-0099');
+    expect(res.body.message.content).toContain('$325.00');
+    expect(entityResolver.resolve).toHaveBeenCalledWith(
+      expect.objectContaining({ reference: 'Jane Doe', kind: 'customer' }),
+    );
+    // The whole point: no LLM call at all — the sweep's non-deterministic
+    // classifier failure can no longer happen for this exact phrasing.
+    expect((badGateway.complete as ReturnType<typeof vi.fn>)).not.toHaveBeenCalled();
   });
 });
 

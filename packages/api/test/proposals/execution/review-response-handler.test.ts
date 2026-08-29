@@ -472,4 +472,61 @@ describe('P7-026 ReviewResponseExecutionHandler', () => {
       expect(repo.size()).toBe(0);
     });
   });
+
+  describe('#911 — malformed payload (missing publicResponse) never crashes execute()', () => {
+    // The 2026-08-29 live sweep (A46, corpus.json) hit executionError
+    // "Cannot read properties of undefined (reading 'approved')" — a raw
+    // TypeError out of `execute()` at `payload.publicResponse.approved`.
+    // `publicResponse` is REQUIRED (non-nullable) in the Zod contract, but
+    // `proposal.payload` is an unvalidated `Record<string, unknown>` at
+    // runtime (neither RespondToReviewTaskHandler nor the google-reviews
+    // polling worker calls assertValidProposalPayload before persisting a
+    // draft — see build-proposal.ts / review-response-task.ts), so the
+    // compile-time cast at the top of execute() provides no runtime
+    // guarantee. This pins the crash: a payload missing publicResponse must
+    // fail loud with a diagnosable ExecutionResult, never throw.
+    it('payload.publicResponse === undefined → returns success=false with a clear reason (no throw)', async () => {
+      const resolver = makeResolver();
+      const replyFn = vi.fn();
+      const handler = new ReviewResponseExecutionHandler(
+        undefined,
+        resolver,
+        undefined,
+        undefined,
+        replyFn,
+      );
+      const malformedPayload = makePayload();
+      // Simulate the malformed/legacy payload shape: publicResponse absent
+      // entirely, as if a caller other than buildReviewResponseProposal
+      // (which always sets it) had persisted the draft.
+      delete (malformedPayload as Partial<typeof malformedPayload>).publicResponse;
+
+      const proposal = makeProposal(malformedPayload);
+
+      // If the pre-fix code path were still in place, this await would
+      // reject with the raw TypeError instead of resolving — that IS the
+      // crash this test pins.
+      const result = await handler.execute(proposal, { tenantId: TENANT, executedBy: 'user' });
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('publicResponse');
+      expect(result.resultEntityId).toBe(PROPOSAL_ID);
+      expect(replyFn).not.toHaveBeenCalled();
+      expect(resolver.resolve).not.toHaveBeenCalled();
+    });
+
+    it('payload.publicResponse === null (a hand-edited/corrupted row) also fails loud instead of crashing', async () => {
+      const handler = new ReviewResponseExecutionHandler();
+      const malformedPayload = makePayload({
+        // @ts-expect-error — deliberately violating the non-nullable contract
+        // to exercise the runtime guard against a corrupted DB row.
+        publicResponse: null,
+      });
+      const result = await handler.execute(makeProposal(malformedPayload), {
+        tenantId: TENANT,
+        executedBy: 'user',
+      });
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('publicResponse');
+    });
+  });
 });

@@ -1415,7 +1415,23 @@ function matchOwnerOperatorCommand(transcript: string): IntentClassification | n
  * (EXTENDED_INTENTS_PROMPT_SECTION) owns classification + entity
  * extraction for all non-read-only extended intents.
  * Permitted phrase-match intents: lookup_day_overview, lookup_digest,
- * lookup_pending_items.
+ * lookup_pending_items, lookup_revenue, lookup_my_day, lookup_leads.
+ *
+ * #910 — lookup_revenue / lookup_my_day / lookup_leads added: the 2026-08-29
+ * live sweep found these stereotyped, entity-free lookup phrasings answered
+ * from the generic LLM (routes/assistant.ts's DB-less chat fallback)
+ * instead of the data-lookup skill on a non-deterministic fraction of runs
+ * — routes/assistant.ts's dispatch order was already correct
+ * (`isLookupIntent(classification.intentType)` is checked before any
+ * fallback path runs), so the seam was entirely upstream: gpt-4o-mini's
+ * `classify_intent` call intermittently returned an intentType other than
+ * the right `lookup_*` for these exact phrasings. None of the three take
+ * entities (lookup_revenue/lookup_leads are tenant-wide; lookup_my_day
+ * self-scopes to the resolved caller, never to a spoken name — see its
+ * skill's module doc comment), so they fit this table's existing
+ * entity-free contract exactly like lookup_day_overview/digest/
+ * pending_items — this closes the same non-determinism gap the P18-001
+ * short-circuit already closed for those three.
  */
 const EXTENDED_INTENT_PHRASES: ReadonlyArray<{ intent: IntentType; patterns: ReadonlyArray<RegExp> }> = [
   {
@@ -1443,6 +1459,40 @@ const EXTENDED_INTENT_PHRASES: ReadonlyArray<{ intent: IntentType; patterns: Rea
       /\bwhat(?:'s| is)\s+(?:still\s+)?(?:out\s+there|outstanding)\s+waiting\b/i,
     ],
   },
+  {
+    // #910 / L11 — "What did we sell last month?" (owner revenue check).
+    // lookup-revenue.ts always speaks the CURRENT month regardless of
+    // wording — matching "last" or "this" here does not change that
+    // behavior, it only removes classifier flakiness for the stereotyped
+    // ask.
+    intent: 'lookup_revenue',
+    patterns: [
+      /^\s*what\s+did\s+we\s+sell\s+(?:last|this)\s+month\s*[?.!]?\s*$/i,
+      /\bhow\s+much\s+(?:did\s+we\s+(?:make|sell|bring\s+in)|have\s+we\s+(?:made|brought\s+in))\s+(?:last|this)\s+month\b/i,
+    ],
+  },
+  {
+    // #910 / L19 — "What's on my schedule today?" (self-scoped; ANY
+    // technician, including an owner who is also a technician row — see
+    // lookup-my-day.ts's module doc comment on self-scoping). Distinct
+    // phrasing from the lookup_day_overview patterns above ("my day look
+    // like" = owner cross-crew overview); "on my schedule" always means
+    // the SPEAKER's own day.
+    intent: 'lookup_my_day',
+    patterns: [
+      /^\s*what(?:'s| is)\s+on\s+my\s+schedule\s+today\s*[?.!]?\s*$/i,
+      /^\s*what(?:'s| is)\s+my\s+next\s+job\s*[?.!]?\s*$/i,
+    ],
+  },
+  {
+    // #910 / R03 — "Any new leads?" Tenant-wide open-lead count; no
+    // customer/lead name to extract.
+    intent: 'lookup_leads',
+    patterns: [
+      /^\s*any\s+new\s+leads\s*[?.!]?\s*$/i,
+      /^\s*how\s+many\s+(?:open\s+)?leads\s+(?:do\s+we\s+have|are\s+there)\s*[?.!]?\s*$/i,
+    ],
+  },
 ];
 
 export function matchExtendedIntentPhrase(transcript: string): IntentType | null {
@@ -1451,6 +1501,65 @@ export function matchExtendedIntentPhrase(transcript: string): IntentType | null
     if (entry.patterns.some((rx) => rx.test(transcript))) return entry.intent;
   }
   return null;
+}
+
+/**
+ * #910 / C02 — deterministic short-circuit for the canonical "on my way"
+ * en_route announcement. Separate from `EXTENDED_INTENT_PHRASES` on
+ * purpose: en_route is NOT read-only (it fires the same audited direct
+ * status act the app en-route button and the SMS keyword leg
+ * (sms/tech-status/en-route-keyword.ts, `EN_ROUTE_SMS_KEYWORDS`) already
+ * trigger), so it doesn't fit that table's documented entity-free
+ * READ-ONLY contract. It's still safe to short-circuit deterministically
+ * because en_route owns its OWN downstream identity gate
+ * (SURFACE_GUARD_EXEMPT_INTENTS — routes/assistant.ts requires a
+ * canonical TECHNICIAN actor before it acts, and gives every other actor,
+ * including a verified owner, an honest identity refusal) — a
+ * misclassification here can never silently execute for the wrong caller.
+ *
+ * Patterns are anchored to the bare "on my way" / "omw" / "heading out"
+ * announcement ONLY — no capture group, no extractedEntities. The instant
+ * a caller names a specific job ("on my way to the Garcia job"), these
+ * patterns stop matching and the utterance falls through to the LLM
+ * exactly like it does today, so job-reference extraction on real en_route
+ * utterances is unaffected.
+ */
+const EN_ROUTE_PHRASES: ReadonlyArray<RegExp> = [
+  /^\s*(?:i'?m\s+)?on\s+my\s+way(?:\s+to\s+the\s+job)?\s*[.!]?\s*$/i,
+  /^\s*omw\s*[.!]?\s*$/i,
+  /^\s*heading\s+(?:over|out)(?:\s+now)?\s*[.!]?\s*$/i,
+];
+
+export function matchEnRoutePhrase(transcript: string): boolean {
+  if (!transcript) return false;
+  return EN_ROUTE_PHRASES.some((rx) => rx.test(transcript));
+}
+
+/**
+ * #910 / L08 — deterministic short-circuit for the stereotyped
+ * `lookup_estimates` phrasing ("What estimates does X have?"). Unlike
+ * `EXTENDED_INTENT_PHRASES`, this DOES extract an entity
+ * (`customerName`) — safe here because `lookup_estimates` is read-only
+ * and the assistant-chat lookup dispatch (ai/orchestration/
+ * lookup-dispatch.ts) already resolves a free-text `customerName` through
+ * the SAME `EntityResolver` the LLM-classified path uses: an unambiguous
+ * match fills the id, an ambiguous one asks "which one?", and a
+ * not-found falls through to an honest refusal — never a guess. Mirrors
+ * `OWNER_OPERATOR_COMMAND_PATTERNS`'s existing `lookup_customer` entry,
+ * which extracts `customerName` deterministically the same way.
+ */
+const LOOKUP_ESTIMATES_PATTERN =
+  /^\s*what\s+estimates?\s+does\s+(.{1,80}?)\s+have\s*[?.!]?\s*$/i;
+
+export function matchLookupEstimatesPhrase(
+  transcript: string,
+): { customerName: string } | null {
+  if (!transcript) return null;
+  const match = LOOKUP_ESTIMATES_PATTERN.exec(transcript);
+  if (!match) return null;
+  const customerName = match[1].trim();
+  if (!customerName) return null;
+  return { customerName };
 }
 
 /** RV-071 — predicate the voice routing layers use to gate owner approval intents. */
@@ -1830,6 +1939,28 @@ async function classifyIntentRaw(
         intentType: matched,
         confidence: 0.95,
         reasoning: 'matched deterministic extended-intent phrasing',
+      };
+    }
+
+    // #910 — same extendedIntents-gated, pre-LLM slot as the block above.
+    // Both new checks are entity-bearing-or-non-read-only, which is why
+    // they're separate functions from matchExtendedIntentPhrase rather than
+    // additions to EXTENDED_INTENT_PHRASES — see each function's doc
+    // comment for why it's still safe to short-circuit deterministically.
+    const lookupEstimatesMatch = matchLookupEstimatesPhrase(transcript);
+    if (lookupEstimatesMatch) {
+      return {
+        intentType: 'lookup_estimates',
+        confidence: 0.95,
+        reasoning: 'matched deterministic lookup_estimates phrasing',
+        extractedEntities: { customerName: lookupEstimatesMatch.customerName },
+      };
+    }
+    if (matchEnRoutePhrase(transcript)) {
+      return {
+        intentType: 'en_route',
+        confidence: 0.95,
+        reasoning: 'matched deterministic en_route phrasing',
       };
     }
   }
