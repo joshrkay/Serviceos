@@ -1,0 +1,75 @@
+{
+  "started": "2026-08-29T17:50:00.114Z",
+  "finished": "2026-08-29T17:50:01.754Z",
+  "corpus": {
+    "version": "v1",
+    "label": "AI-capability catalog live sweep (dev) — proposal-driving + lookup + direct-act + control + no-onramp + surface-refusal",
+    "casesPath": "scripts/ai-catalog-sweep/corpus.json",
+    "rowCount": 99,
+    "ranCount": 1
+  },
+  "targets": {
+    "api": "https://serviceosapi-development.up.railway.app",
+    "note": "AI-capability catalog live sweep (dev) — proposal-driving + lookup + direct-act + control + no-onramp + surface-refusal via scripts/ai-catalog-sweep/corpus.json"
+  },
+  "tenant": {
+    "id": "a948cc66-7279-44bd-9718-4ef7721f9422",
+    "label": "QA matrix tenant A (.env.qa.local)",
+    "ownerSubject": "qa-matrix-user-A",
+    "techSubject": "ai-catalog-sweep-tech-actor"
+  },
+  "auth": {
+    "meStatus": 200
+  },
+  "db": {
+    "reachable": true,
+    "superuserVerify": true
+  },
+  "fixtureBootstrap": {
+    "summary": [
+      "users: exists ai-catalog-sweep-tech-baker",
+      "users: exists ai-catalog-sweep-tech-actor",
+      "leads: exists Johnson",
+      "leads: exists Nguyen"
+    ]
+  },
+  "fixtures": {
+    "customerName": "qa-matrix-A-customer",
+    "jobSummary": "QA Matrix job for qa-matrix-A"
+  },
+  "grep": "L03",
+  "concurrency": 1,
+  "counts": {
+    "PASS": 1
+  },
+  "countsByOutcomeClass": {
+    "lookup_answer": 1
+  },
+  "results": [
+    {
+      "id": "L03",
+      "intent": "lookup_balance",
+      "surface": "chat",
+      "expectedOutcome": "lookup_answer",
+      "verdict": "PASS",
+      "outcomeClass": "lookup_answer",
+      "reason": "data_lookup_answer",
+      "httpStatus": 200,
+      "model": "data-lookup",
+      "taskType": "assistant.lookup.lookup_balance",
+      "content": "Your account is paid in full — nothing currently owed.",
+      "proposalId": null,
+      "proposalType": null,
+      "approve": null,
+      "dbVerify": {
+        "table": "ai_runs",
+        "whereShape": "tenant_id = '{{tenantId}}' AND task_type LIKE 'assistant.lookup%' ORDER BY created_at DESC LIMIT 3",
+        "sql": "SELECT * FROM ai_runs WHERE tenant_id = 'a948cc66-7279-44bd-9718-4ef7721f9422' AND task_type LIKE 'assistant.lookup%' ORDER BY created_at DESC LIMIT 3",
+        "rowCount": 0,
+        "matched": false,
+        "superuserVerify": true,
+        "sampleRow": null
+      }
+    }
+  ]
+}
