@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { InAppVoiceAdapter, buildInappGreeting } from '../../../../src/ai/agents/customer-calling/inapp-adapter';
 import { VoiceSessionStore } from '../../../../src/ai/agents/customer-calling/voice-session-store';
-import { InMemoryProposalRepository } from '../../../../src/proposals/proposal';
+import { InMemoryProposalRepository, missingFieldsFor } from '../../../../src/proposals/proposal';
 import { InMemoryAuditRepository } from '../../../../src/audit/audit';
 import { InMemoryOnCallRepository } from '../../../../src/oncall/rotation';
 import { InMemoryVoiceSessionRepository } from '../../../../src/voice/voice-session';
@@ -23,6 +23,8 @@ import {
 import { InMemoryCustomerRepository } from '../../../../src/customers/customer';
 import type { Customer } from '../../../../src/customers/customer';
 import type { EntityResolver } from '../../../../src/ai/resolution/entity-resolver';
+import { UpdateBrandVoiceExecutionHandler } from '../../../../src/proposals/execution/brand-voice-handler';
+import { InMemoryBrandVoiceRepository } from '../../../../src/tenants/brand/in-memory-brand-voice-repository';
 
 const TENANT = 'tenant-x';
 const USER = 'user-x';
@@ -1255,6 +1257,126 @@ describe('QA-2026-07-26 — voice-drafted estimate line items (lineItemDescripti
 
       const proposals = await proposalRepo.findByTenant(TENANT);
       expect(proposals[0].payload.channel).toBe('sms');
+    });
+
+    // A48 — before this fix, update_brand_voice's create_proposal effect was
+    // built by the SAME generic buildVoiceProposalPayload scalar-promotion
+    // loop as every other type: it copied the raw `brandVoiceInstruction`
+    // scalar verbatim (not a real brandVoiceSchema field), the contract's
+    // all-optional schema validated that no-op payload as `ok`, so the
+    // proposal shipped with `missingFields: []` — fully approvable — and
+    // UpdateBrandVoiceExecutionHandler's strip-mode parse then discarded it
+    // down to `{}` at execution: "Payload carries no brand-voice fields to
+    // apply (only unmapped free text)" on every in-app voice brand-voice
+    // edit. This is now routed through extractBrandVoiceProposalFields, the
+    // SAME dedicated LLM mapping pass the memo/phone and chat paths already
+    // use (ai/tasks/brand-voice-task.ts UpdateBrandVoiceTaskHandler).
+    it('an update_brand_voice create_proposal effect maps the spoken instruction onto typed fields and executes successfully (A48 fix)', async () => {
+      const gateway = scriptedGateway([
+        JSON.stringify({
+          register: 'friendly',
+          signoff: 'Thanks, QA Sweep HVAC',
+          confidence_score: 0.92,
+        }),
+      ]);
+      const adapter = new InAppVoiceAdapter({ store, gateway, proposalRepo, auditRepo, onCallRepo });
+      const { sessionId } = await adapter.startSession(TENANT, USER);
+      const session = store.peek(sessionId);
+      if (!session) throw new Error('test session missing');
+
+      const proposalId = await callHandleCreateProposal(adapter, session, {
+        type: 'create_proposal',
+        payload: {
+          tenantId: TENANT,
+          intent: 'update_brand_voice',
+          entities: {
+            brandVoiceInstruction: 'friendly, plain-spoken, sign off Thanks, QA Sweep HVAC',
+          },
+          sessionId: session.id,
+          confidence: 0.9,
+        },
+      });
+
+      expect(proposalId).toBeDefined();
+      const proposals = await proposalRepo.findByTenant(TENANT);
+      expect(proposals).toHaveLength(1);
+      const proposal = proposals[0];
+      expect(proposal.proposalType).toBe('update_brand_voice');
+      // BEFORE this fix payload.register was always undefined here — only
+      // the raw brandVoiceInstruction scalar and envelope keys were present.
+      expect(proposal.payload.register).toBe('friendly');
+      expect(proposal.payload.signoff).toBe('Thanks, QA Sweep HVAC');
+      expect(missingFieldsFor(proposal)).toEqual([]);
+
+      const brandVoiceRepo = new InMemoryBrandVoiceRepository();
+      const result = await new UpdateBrandVoiceExecutionHandler(brandVoiceRepo, auditRepo).execute(
+        proposal,
+        { tenantId: TENANT, executedBy: 'operator-1' },
+      );
+      // BEFORE this fix, execution deterministically failed with "Payload
+      // carries no brand-voice fields to apply (only unmapped free text)".
+      expect(result.success).toBe(true);
+      const state = await brandVoiceRepo.getState(TENANT);
+      expect(state.config.register).toBe('friendly');
+      expect(state.config.signoff).toBe('Thanks, QA Sweep HVAC');
+    });
+
+    it('an update_brand_voice effect the model cannot map at all stays gated, never approvable-then-doomed', async () => {
+      const gateway = scriptedGateway([
+        JSON.stringify({ unmapped: 'lock my brand voice', confidence_score: 0.2 }),
+      ]);
+      const adapter = new InAppVoiceAdapter({ store, gateway, proposalRepo, auditRepo, onCallRepo });
+      const { sessionId } = await adapter.startSession(TENANT, USER);
+      const session = store.peek(sessionId);
+      if (!session) throw new Error('test session missing');
+
+      await callHandleCreateProposal(adapter, session, {
+        type: 'create_proposal',
+        payload: {
+          tenantId: TENANT,
+          intent: 'update_brand_voice',
+          entities: { brandVoiceInstruction: 'lock my brand voice' },
+          sessionId: session.id,
+          confidence: 0.9,
+        },
+      });
+
+      const proposals = await proposalRepo.findByTenant(TENANT);
+      expect(proposals).toHaveLength(1);
+      const proposal = proposals[0];
+      expect(proposal.proposalType).toBe('update_brand_voice');
+      // Nothing mapped at all — BRAND_VOICE_GATE_FIELD holds the gate so
+      // approveProposal refuses this, never a doomed approval.
+      expect(missingFieldsFor(proposal)).toContain('register');
+      expect(proposal.status).not.toBe('approved');
+    });
+
+    it("falls back to the last caller transcript line when the classifier didn't extract brandVoiceInstruction", async () => {
+      const gateway = scriptedGateway([
+        JSON.stringify({ register: 'casual', confidence_score: 0.8 }),
+      ]);
+      const adapter = new InAppVoiceAdapter({ store, gateway, proposalRepo, auditRepo, onCallRepo });
+      const { sessionId } = await adapter.startSession(TENANT, USER);
+      const session = store.peek(sessionId);
+      if (!session) throw new Error('test session missing');
+      session.transcript.push('caller: keep it casual from now on');
+
+      await callHandleCreateProposal(adapter, session, {
+        type: 'create_proposal',
+        payload: {
+          tenantId: TENANT,
+          intent: 'update_brand_voice',
+          entities: {},
+          sessionId: session.id,
+        },
+      });
+
+      const proposals = await proposalRepo.findByTenant(TENANT);
+      expect(proposals[0].payload.register).toBe('casual');
+      const complete = gateway.complete as unknown as {
+        mock: { calls: Array<[{ messages: Array<{ content: string }> }]> };
+      };
+      expect(complete.mock.calls[0][0].messages[1].content).toContain('keep it casual from now on');
     });
   });
 });

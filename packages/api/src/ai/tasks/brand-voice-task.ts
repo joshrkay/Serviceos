@@ -184,6 +184,166 @@ const BRAND_VOICE_GATE_FIELD = 'register';
  */
 const FREE_TEXT_GATE_FIELD = 'freeText';
 
+/**
+ * LLM extraction pass. Failure-soft: any gateway error or unparseable JSON
+ * degrades to `null`, which `extractBrandVoiceProposalFields` turns into the
+ * verbatim spoken instruction landing in `freeText` at 'very_low' confidence
+ * — never a dropped utterance.
+ */
+async function extractRaw(
+  gateway: LLMGateway,
+  tenantId: string,
+  spoken: string,
+): Promise<Record<string, unknown> | null> {
+  try {
+    const response = await gateway.complete({
+      taskType: 'update_brand_voice',
+      tenantId,
+      messages: [
+        { role: 'system', content: BRAND_VOICE_SYSTEM_PROMPT },
+        { role: 'user', content: JSON.stringify({ instruction: spoken }) },
+      ],
+      responseFormat: 'json',
+      metadata: { tenantId },
+    });
+    return tryParseJson(response.content);
+  } catch {
+    return null;
+  }
+}
+
+export interface BrandVoiceProposalFields {
+  payload: Record<string, unknown>;
+  missingFields: string[];
+  summary: string;
+  confidenceScore: number;
+}
+
+/**
+ * The full spoken-instruction → typed-payload mapping + approval-gate logic
+ * (register/pronoun/persona_name/signoff/opening_lines/banned_phrases +
+ * freeText + the BRAND_VOICE_GATE_FIELD / FREE_TEXT_GATE_FIELD gates — see
+ * the class doc comment above for the full defect history each gate closes).
+ *
+ * Extracted to a standalone function (rather than kept private on
+ * `UpdateBrandVoiceTaskHandler`) so every voice surface that can emit an
+ * `update_brand_voice` proposal runs the SAME mapping, not a re-guessed one.
+ * `UpdateBrandVoiceTaskHandler.handle` below (the memo/phone
+ * `voice-action-router.ts` path, and the chat path) is one caller; the
+ * in-app voice-session FSM (`ai/agents/customer-calling/inapp-adapter.ts
+ * handleCreateProposal`) is the other (A48 fix) — before that fix it built
+ * this proposal type through the generic `buildVoiceProposalPayload`
+ * scalar-promotion mapper instead, which has no notion of "map free text
+ * onto register/signoff/etc" and no brand-voice gate, so a payload carrying
+ * only the raw `brandVoiceInstruction` scalar (not a real
+ * `brandVoiceSchema` field) validated as `ok` with no `missingFields`,
+ * shipped fully approvable, and `UpdateBrandVoiceExecutionHandler`'s
+ * strip-mode parse then discarded it down to `{}` at execution — "Payload
+ * carries no brand-voice fields to apply (only unmapped free text)" on every
+ * in-app voice brand-voice edit.
+ */
+export async function extractBrandVoiceProposalFields(
+  gateway: LLMGateway,
+  tenantId: string,
+  spoken: string,
+): Promise<BrandVoiceProposalFields> {
+  const parsed = await extractRaw(gateway, tenantId, spoken);
+
+  const payload: Record<string, unknown> = {};
+  const markers: Array<{ path: string; reason: string }> = [];
+
+  const register = normalizeRegister(parsed?.register);
+  if (parsed?.register !== undefined && register === undefined) {
+    markers.push({ path: 'register', reason: UNRECOGNIZED_VALUE_REASON });
+  } else if (register) {
+    payload.register = register;
+  }
+
+  const pronoun = normalizePronoun(parsed?.pronoun);
+  if (parsed?.pronoun !== undefined && pronoun === undefined) {
+    markers.push({ path: 'pronoun', reason: UNRECOGNIZED_VALUE_REASON });
+  } else if (pronoun) {
+    payload.pronoun = pronoun;
+  }
+
+  const personaName = normalizeShortString(parsed?.persona_name, MAX_PERSONA_NAME_LEN);
+  if (personaName) payload.persona_name = personaName;
+
+  const signoff = normalizeShortString(parsed?.signoff, MAX_SIGNOFF_LEN);
+  if (signoff) payload.signoff = signoff;
+
+  const openingLines = normalizeStringArray(parsed?.opening_lines, MAX_OPENING_LINES, MAX_OPENING_LINE_LEN);
+  if (openingLines) payload.opening_lines = openingLines;
+
+  const bannedPhrases = normalizeStringArray(parsed?.banned_phrases, MAX_BANNED_PHRASES, MAX_BANNED_PHRASE_LEN);
+  if (bannedPhrases) payload.banned_phrases = bannedPhrases;
+
+  // AC-2 — nothing spoken is dropped: whatever the model flagged as
+  // unmapped, verbatim. If extraction failed outright (no gateway
+  // response, unparseable JSON) OR mapped nothing at all, fall back to the
+  // full spoken instruction so the proposal always preserves what was
+  // said, even when the review card can't offer structured fields.
+  const modelUnmapped = normalizeShortString(parsed?.unmapped, MAX_FREE_TEXT_LEN);
+  // Read the canonical six-field list rather than counting payload keys, so
+  // this stays correct if a field is ever added to the Brand-Voice
+  // Configurator or this block is reordered.
+  const mappedAnything = BRAND_VOICE_FIELDS.some((field) => payload[field] !== undefined);
+  const freeText = modelUnmapped ?? (!mappedAnything ? spoken.slice(0, MAX_FREE_TEXT_LEN) : undefined);
+  if (freeText) payload.freeText = freeText;
+
+  // Confidence: prefer the model's self-report; fall back to the generic
+  // field-coverage heuristic when it's absent/invalid (e.g. a parse
+  // failure). Always stamped — a low-confidence extraction surfaces a
+  // marker rather than silently landing as if it were certain.
+  const rawScore = parsed?.confidence_score;
+  const modelScore =
+    typeof rawScore === 'number' && rawScore >= 0 && rawScore <= 1
+      ? rawScore
+      : assessConfidence(parsed ?? {}).score;
+  // A total extraction failure (no gateway response / unparseable JSON) is
+  // 'very_low' regardless of the generic field-coverage heuristic — there
+  // is no structured output to be confident about.
+  const effectiveScore = parsed === null ? 0 : modelScore;
+  const confidenceLevel = getConfidenceLevel(effectiveScore);
+
+  const meta: Record<string, unknown> = { overallConfidence: confidenceLevel };
+  if (markers.length > 0) meta.markers = markers;
+  payload._meta = meta;
+
+  // Belt-and-braces: the payload always carries SOMETHING (a structured
+  // field or freeText derived from the verbatim instruction), so this
+  // should never trip — but guarantee it structurally rather than assume.
+  if (Object.keys(payload).length === 1 /* only _meta */) {
+    payload.freeText = spoken.slice(0, MAX_FREE_TEXT_LEN) || spoken;
+  }
+
+  const summary = personaName
+    ? `Update brand voice — ${personaName}`
+    : register
+      ? `Update brand voice — ${register}`
+      : 'Update brand voice';
+
+  // missingFields is the APPROVAL gate (decideInitialStatus forces
+  // 'draft'; approveProposal refuses outright).
+  //
+  // Case 1 — nothing mapped: stamped when the extraction produced NONE
+  // of the six persisted brand-voice fields — the freeText-only payload
+  // the execution handler deterministically refuses. See
+  // BRAND_VOICE_GATE_FIELD above.
+  //
+  // Case 2 — mixed: something mapped AND the model explicitly reported
+  // unmapped content alongside it. Without this, the proposal would be
+  // approvable while the unmapped instruction is silently dropped by the
+  // execution handler's strip-mode parse. See FREE_TEXT_GATE_FIELD above.
+  const missingFields = !mappedAnything
+    ? [BRAND_VOICE_GATE_FIELD]
+    : modelUnmapped
+      ? [FREE_TEXT_GATE_FIELD]
+      : [];
+
+  return { payload, missingFields, summary, confidenceScore: effectiveScore };
+}
+
 export class UpdateBrandVoiceTaskHandler implements TaskHandler {
   readonly taskType = 'update_brand_voice' as const;
 
@@ -196,99 +356,11 @@ export class UpdateBrandVoiceTaskHandler implements TaskHandler {
         ? ee.brandVoiceInstruction.trim()
         : context.message.trim();
 
-    const parsed = await this.extract(context, spoken);
-
-    const payload: Record<string, unknown> = {};
-    const markers: Array<{ path: string; reason: string }> = [];
-
-    const register = normalizeRegister(parsed?.register);
-    if (parsed?.register !== undefined && register === undefined) {
-      markers.push({ path: 'register', reason: UNRECOGNIZED_VALUE_REASON });
-    } else if (register) {
-      payload.register = register;
-    }
-
-    const pronoun = normalizePronoun(parsed?.pronoun);
-    if (parsed?.pronoun !== undefined && pronoun === undefined) {
-      markers.push({ path: 'pronoun', reason: UNRECOGNIZED_VALUE_REASON });
-    } else if (pronoun) {
-      payload.pronoun = pronoun;
-    }
-
-    const personaName = normalizeShortString(parsed?.persona_name, MAX_PERSONA_NAME_LEN);
-    if (personaName) payload.persona_name = personaName;
-
-    const signoff = normalizeShortString(parsed?.signoff, MAX_SIGNOFF_LEN);
-    if (signoff) payload.signoff = signoff;
-
-    const openingLines = normalizeStringArray(parsed?.opening_lines, MAX_OPENING_LINES, MAX_OPENING_LINE_LEN);
-    if (openingLines) payload.opening_lines = openingLines;
-
-    const bannedPhrases = normalizeStringArray(parsed?.banned_phrases, MAX_BANNED_PHRASES, MAX_BANNED_PHRASE_LEN);
-    if (bannedPhrases) payload.banned_phrases = bannedPhrases;
-
-    // AC-2 — nothing spoken is dropped: whatever the model flagged as
-    // unmapped, verbatim. If extraction failed outright (no gateway
-    // response, unparseable JSON) OR mapped nothing at all, fall back to the
-    // full spoken instruction so the proposal always preserves what was
-    // said, even when the review card can't offer structured fields.
-    const modelUnmapped = normalizeShortString(parsed?.unmapped, MAX_FREE_TEXT_LEN);
-    // Read the canonical six-field list rather than counting payload keys, so
-    // this stays correct if a field is ever added to the Brand-Voice
-    // Configurator or this block is reordered.
-    const mappedAnything = BRAND_VOICE_FIELDS.some((field) => payload[field] !== undefined);
-    const freeText = modelUnmapped ?? (!mappedAnything ? spoken.slice(0, MAX_FREE_TEXT_LEN) : undefined);
-    if (freeText) payload.freeText = freeText;
-
-    // Confidence: prefer the model's self-report; fall back to the generic
-    // field-coverage heuristic when it's absent/invalid (e.g. a parse
-    // failure). Always stamped — a low-confidence extraction surfaces a
-    // marker rather than silently landing as if it were certain.
-    const rawScore = parsed?.confidence_score;
-    const modelScore =
-      typeof rawScore === 'number' && rawScore >= 0 && rawScore <= 1
-        ? rawScore
-        : assessConfidence(parsed ?? {}).score;
-    // A total extraction failure (no gateway response / unparseable JSON) is
-    // 'very_low' regardless of the generic field-coverage heuristic — there
-    // is no structured output to be confident about.
-    const effectiveScore = parsed === null ? 0 : modelScore;
-    const confidenceLevel = getConfidenceLevel(effectiveScore);
-
-    const meta: Record<string, unknown> = { overallConfidence: confidenceLevel };
-    if (markers.length > 0) meta.markers = markers;
-    payload._meta = meta;
-
-    // Belt-and-braces: the payload always carries SOMETHING (a structured
-    // field or freeText derived from the verbatim instruction), so this
-    // should never trip — but guarantee it structurally rather than assume.
-    if (Object.keys(payload).length === 1 /* only _meta */) {
-      payload.freeText = spoken.slice(0, MAX_FREE_TEXT_LEN) || context.message.slice(0, MAX_FREE_TEXT_LEN);
-    }
-
-    const summary = personaName
-      ? `Update brand voice — ${personaName}`
-      : register
-        ? `Update brand voice — ${register}`
-        : 'Update brand voice';
-
-    // missingFields is the APPROVAL gate (decideInitialStatus forces
-    // 'draft'; approveProposal refuses outright).
-    //
-    // Case 1 — nothing mapped: stamped when the extraction produced NONE
-    // of the six persisted brand-voice fields — the freeText-only payload
-    // the execution handler deterministically refuses. See
-    // BRAND_VOICE_GATE_FIELD above.
-    //
-    // Case 2 — mixed: something mapped AND the model explicitly reported
-    // unmapped content alongside it. Without this, the proposal would be
-    // approvable while the unmapped instruction is silently dropped by the
-    // execution handler's strip-mode parse. See FREE_TEXT_GATE_FIELD above.
-    const missingFields = !mappedAnything
-      ? [BRAND_VOICE_GATE_FIELD]
-      : modelUnmapped
-        ? [FREE_TEXT_GATE_FIELD]
-        : [];
+    const { payload, missingFields, summary, confidenceScore } = await extractBrandVoiceProposalFields(
+      this.gateway,
+      context.tenantId,
+      spoken,
+    );
 
     const input: CreateProposalInput = {
       // No sourceTrustTier (inputFor's default): the action class
@@ -296,37 +368,10 @@ export class UpdateBrandVoiceTaskHandler implements TaskHandler {
       // see AC-1's unit test on decideInitialStatus.
       ...inputFor(context, this.taskType, payload, missingFields),
       summary,
-      confidenceScore: effectiveScore,
+      confidenceScore,
     };
 
     return { proposal: createProposal(input), taskType: this.taskType };
-  }
-
-  /**
-   * LLM extraction pass. Failure-soft: any gateway error or unparseable JSON
-   * degrades to `null`, which `handle()` turns into the verbatim spoken
-   * instruction landing in `freeText` at 'very_low' confidence — never a
-   * dropped utterance.
-   */
-  private async extract(
-    context: TaskContext,
-    spoken: string,
-  ): Promise<Record<string, unknown> | null> {
-    try {
-      const response = await this.gateway.complete({
-        taskType: 'update_brand_voice',
-        tenantId: context.tenantId,
-        messages: [
-          { role: 'system', content: BRAND_VOICE_SYSTEM_PROMPT },
-          { role: 'user', content: JSON.stringify({ instruction: spoken }) },
-        ],
-        responseFormat: 'json',
-        metadata: { tenantId: context.tenantId },
-      });
-      return tryParseJson(response.content);
-    } catch {
-      return null;
-    }
   }
 }
 
