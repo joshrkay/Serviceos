@@ -4,6 +4,7 @@ import { requireAuth, requireTenant, requirePermission } from '../middleware/aut
 import { updateSettingsSchema } from '../shared/contracts';
 import { toErrorResponse, ValidationError } from '../shared/errors';
 import { normalizeMobileE164 } from '../shared/phone/normalize';
+import { isTwilioTestNumber } from '../telephony/phone-policy';
 import { loadActivePackConfigs } from '../shared/pack-config-loader';
 import { VerticalPackRegistry } from '../shared/vertical-pack-registry';
 import { PackActivationRepository } from '../settings/pack-activation';
@@ -261,6 +262,35 @@ export function createSettingsRouter(
                 { field: 'ownerPhone' },
               );
             }
+          }
+        }
+
+        // #880 — normalize business_phone to E.164 (or null to clear) at the
+        // boundary, exactly like owner_phone above, and reject Twilio magic
+        // test numbers (+1500555xxxx). businessPhone is what public intake /
+        // booking pages display and tel:-link for customers — an unvalidated
+        // magic number typed here would surface a non-dialable line publicly.
+        if (parsed.businessPhone !== undefined && parsed.businessPhone !== null) {
+          const trimmed = parsed.businessPhone.trim();
+          if (trimmed === '') {
+            parsed.businessPhone = null;
+          } else {
+            let normalized: string;
+            try {
+              normalized = normalizeMobileE164(trimmed);
+            } catch (err) {
+              throw new ValidationError(
+                err instanceof Error ? err.message : 'Invalid business phone number',
+                { field: 'businessPhone' },
+              );
+            }
+            if (isTwilioTestNumber(normalized)) {
+              throw new ValidationError(
+                'This is a Twilio test number and cannot be used as the business phone',
+                { field: 'businessPhone' },
+              );
+            }
+            parsed.businessPhone = normalized;
           }
         }
 

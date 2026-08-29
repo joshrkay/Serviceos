@@ -215,6 +215,80 @@ describe('provision-twilio worker — number picker', () => {
     expect(fetchFn).toHaveBeenCalledTimes(4);
   });
 
+  it('refuses to persist a Twilio magic test number returned by purchase (#880 — test creds in a real env)', async () => {
+    configureTwilio();
+    const fetchFn = mockFetch(
+      { body: { sid: 'ACsub', auth_token: 'subtoken' } }, // create subaccount
+      { body: { sid: 'MG123' } }, // messaging service
+      { body: { incoming_phone_numbers: [] } }, // list owned (none)
+      // Twilio TEST credentials happily list and "sell" magic numbers — the
+      // only way these responses occur is misconfigured (test) creds on a
+      // real deploy.
+      { body: { available_phone_numbers: [{ phone_number: '+15005550006' }] } }, // auto-pick search
+      { body: { sid: 'PN500', phone_number: '+15005550006' } }, // purchase
+    );
+
+    const { pool, calls } = makePool();
+    const worker = createProvisionTwilioWorker({ pool });
+
+    // No throw: retrying can't fix credentials. The worker records an
+    // operator-actionable failure instead of retry-looping.
+    await expect(
+      worker.handle(
+        buildMessage({ tenantId: TENANT, region: null, baseUrl: 'https://api.test' }),
+        logger,
+      ),
+    ).resolves.toBeUndefined();
+
+    // The magic number was never merged into provider_data as the tenant line.
+    const persisted = calls.find(
+      (c) =>
+        /provider_data = provider_data/i.test(c.sql) &&
+        JSON.stringify(c.params).includes('+15005550006'),
+    );
+    expect(persisted).toBeUndefined();
+
+    // An actionable failure was recorded for the operator.
+    const failedWrite = calls.find(
+      (c) =>
+        /status = 'failed'/i.test(c.sql) &&
+        JSON.stringify(c.params).includes('TEST credentials'),
+    );
+    expect(failedWrite).toBeDefined();
+
+    // It stopped before attaching the number to the messaging service.
+    expect(fetchFn).toHaveBeenCalledTimes(5);
+  });
+
+  it('refuses to persist a magic test number recovered from the subaccount (#880 — orphan-recovery path)', async () => {
+    configureTwilio();
+    mockFetch(
+      { body: { sid: 'ACsub', auth_token: 'subtoken' } }, // create subaccount
+      { body: { sid: 'MG123' } }, // messaging service
+      // A previous run under test creds left a magic number on the subaccount.
+      { body: { incoming_phone_numbers: [{ sid: 'PN500', phone_number: '+15005550006' }] } },
+    );
+
+    const { pool, calls } = makePool();
+    const worker = createProvisionTwilioWorker({ pool });
+
+    await expect(
+      worker.handle(
+        buildMessage({ tenantId: TENANT, region: null, baseUrl: 'https://api.test' }),
+        logger,
+      ),
+    ).resolves.toBeUndefined();
+
+    const persisted = calls.find(
+      (c) =>
+        /provider_data = provider_data/i.test(c.sql) &&
+        JSON.stringify(c.params).includes('+15005550006'),
+    );
+    expect(persisted).toBeUndefined();
+    const failedWrite = calls.find((c) => /status = 'failed'/i.test(c.sql));
+    expect(failedWrite).toBeDefined();
+  });
+
   it('rethrows (so the queue retries) if it cannot even record the unavailable-number failure', async () => {
     configureTwilio();
     mockFetch(
