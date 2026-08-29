@@ -39,6 +39,7 @@
  * clarification question, exactly as CLAUDE.md requires.
  */
 
+import { z } from 'zod';
 import {
   type EntityCandidate,
   type EntityKind,
@@ -136,6 +137,20 @@ export const GATED_REFERENCE_SOURCES: Readonly<Record<string, GatedReferenceSour
 };
 
 /**
+ * Is `key` one of the gated id fields this loop knows how to fill?
+ *
+ * `Object.hasOwn`, never `GATED_REFERENCE_SOURCES[key] !== undefined`: the
+ * table is an object literal, so a plain index lookup answers TRUE for
+ * `__proto__`, `constructor` and `toString` — inherited members that are not
+ * gated fields at all. Since this predicate guards a payload write driven by
+ * persisted JSON, that difference is the difference between a vocabulary
+ * check and a write primitive. Caught by the contract test.
+ */
+export function isGatedReferenceField(key: string): boolean {
+  return Object.hasOwn(GATED_REFERENCE_SOURCES, key);
+}
+
+/**
  * One gated id field plus the free text the loop will resolve it from.
  *
  * `references` is ORDERED and may hold more than one: the operator often
@@ -199,8 +214,8 @@ export function planGatedReferenceLookups(
 
   for (const idField of missingFieldsFor(proposal as Proposal)) {
     if (idField.includes('[') || idField.includes('.')) continue;
+    if (!isGatedReferenceField(idField)) continue;
     const source = GATED_REFERENCE_SOURCES[idField];
-    if (!source) continue;
     // Already filled (another lookup in this same pass, or the handler) —
     // nothing to resolve.
     if (trimmed(payload[idField])) continue;
@@ -349,7 +364,19 @@ export function applyGatedReferences(
   proposal: Pick<Proposal, 'payload' | 'sourceContext'>,
   filled: Record<string, string>,
 ): string[] {
-  const keys = Object.keys(filled);
+  // SECURITY (review finding 3) — only a key that is BOTH a known gated id
+  // field AND currently gated on this proposal may be written. Without both
+  // checks, a `refKey` read back from persisted `sourceContext` JSON could
+  // write an arbitrary payload key and an arbitrary `verifiedIds` entry —
+  // and `verifiedIds` is precisely the marker that tells `dropUnverifiedIds`
+  // a value is DB-verified and must not be scrubbed. In the ordinary
+  // post-draft flow this guard is a no-op (`planGatedReferenceLookups` only
+  // ever plans gated keys); it exists for the disambiguation-answer path,
+  // whose key survives a round trip through the database.
+  const gated = new Set(missingFieldsFor(proposal as Proposal));
+  const keys = Object.keys(filled).filter(
+    (key) => isGatedReferenceField(key) && gated.has(key),
+  );
   if (keys.length === 0) return [];
 
   const payload = (proposal.payload ?? {}) as Record<string, unknown>;
@@ -368,7 +395,12 @@ export function applyGatedReferences(
       keys,
       payload,
     ),
-    verifiedIds: { ...existingVerified, ...filled },
+    // Only the ACCEPTED keys — spreading `filled` here would reintroduce the
+    // arbitrary-key write the guard above exists to stop.
+    verifiedIds: {
+      ...existingVerified,
+      ...Object.fromEntries(keys.map((key) => [key, filled[key]])),
+    },
   };
 
   return keys;
@@ -398,7 +430,62 @@ export function stampPendingAmbiguity(
   };
 }
 
-/** Read back a pending question, if this proposal is carrying one. */
+/**
+ * The persisted shape of a pending question — a RIDE-ALONG CONTRACT, not a
+ * convenience type.
+ *
+ * This blob leaves the process, sits in a JSONB column, and comes back to
+ * drive a payload write. Everything downstream of it must therefore be
+ * validated, not assumed: a `candidates` element without a `name` used to
+ * reach `buildDisambiguationQuestion` and throw on `.trim()` (a 500 on a
+ * perfectly ordinary chat turn), and a `refKey` read back unchecked is a
+ * write primitive pointed at `payload` and `verifiedIds`.
+ *
+ * `refKey` is constrained to the gated-id vocabulary here; that it is still
+ * GATED on this particular proposal is enforced at the write itself, in
+ * `applyGatedReferences` — two different questions, checked in the two
+ * different places that can answer them.
+ */
+const pendingAmbiguitySchema = z.object({
+  entityKind: z.enum([
+    'customer',
+    'job',
+    'appointment',
+    'invoice',
+    'estimate',
+    'pending_proposal',
+    'technician',
+    'lead',
+  ]),
+  reference: z.string().default(''),
+  refKey: z.string().refine(isGatedReferenceField, {
+    message: 'refKey must name a known gated id field',
+  }),
+  candidates: z
+    .array(
+      z.object({
+        id: z.string().trim().min(1),
+        // `.trim().min(1)` and not `.min(1)`: a whitespace-only name passes a
+        // length check and then reads as nameless everywhere downstream —
+        // an option offered to the operator with nothing on it.
+        name: z.string().trim().min(1),
+        score: z.number().default(0),
+        hint: z.string().optional(),
+      }),
+    )
+    .min(1),
+  partialRefs: z.record(z.string(), z.string()).default({}),
+  attemptCount: z.number().int().min(0).default(0),
+});
+
+/**
+ * Read back a pending question, if this proposal is carrying a VALID one.
+ *
+ * Never throws. An invalid blob is treated as no-pending, which the caller
+ * turns into "clear it and classify this turn normally" — the same
+ * degradation as having no question at all, and the only safe reading of
+ * data we cannot trust.
+ */
 export function pendingAmbiguityOf(
   proposal: Pick<Proposal, 'sourceContext'>,
 ): PendingEntityAmbiguity | undefined {
@@ -406,24 +493,108 @@ export function pendingAmbiguityOf(
     PENDING_AMBIGUITY_KEY
   ];
   if (!raw || typeof raw !== 'object') return undefined;
-  const pending = raw as Partial<PendingEntityAmbiguity>;
-  if (
-    typeof pending.refKey !== 'string' ||
-    typeof pending.entityKind !== 'string' ||
-    !Array.isArray(pending.candidates) ||
-    pending.candidates.length === 0
-  ) {
-    return undefined;
-  }
-  return {
-    entityKind: pending.entityKind as EntityKind,
-    reference: typeof pending.reference === 'string' ? pending.reference : '',
-    refKey: pending.refKey,
-    candidates: pending.candidates,
-    partialRefs: pending.partialRefs ?? {},
-    attemptCount: typeof pending.attemptCount === 'number' ? pending.attemptCount : 0,
-  };
+  const parsed = pendingAmbiguitySchema.safeParse(raw);
+  if (!parsed.success) return undefined;
+  return parsed.data as PendingEntityAmbiguity;
 }
+
+/**
+ * Is this turn plausibly an ANSWER to the pending question?
+ *
+ * The hijack this closes (review finding 1): recall used to fire on
+ * pendency alone, handing every subsequent utterance to a matcher whose
+ * seams are deliberately generous for a VOICE turn, where the caller has
+ * just been asked a question out loud and their next words are almost
+ * certainly the answer. Chat is not that. An operator with a question
+ * standing can type anything, and two of the matcher's seams then read an
+ * ordinary request as an answer:
+ *
+ *   - `normalized.includes(label)` (entity-resolution.ts): "Send an invoice
+ *     to Johnson Plumbing for $400" CONTAINS a candidate name, so the lead
+ *     resolved and the invoice request was discarded, unsent and unlogged.
+ *   - `extractStreetNumber`'s `\b(\d{1,5})\b`: "apply a $50 late fee on
+ *     invoice 1042" offers "50", which matches any candidate whose address
+ *     hint contains 50.
+ *   - and in reverse, `label.includes(normalized)`: a bare "ok" is a
+ *     substring of "Brooks".
+ *
+ * So the gate is precision-first and lives HERE rather than in the shared
+ * matcher: voice's behavior is unchanged (it is cassette-pinned and its
+ * looseness is correct for a spoken turn), and chat simply declines to ask
+ * the matcher about turns that do not look like answers. A rejected turn is
+ * classified normally and the question is left standing — never consumed,
+ * never counted as a failed attempt.
+ *
+ * Accepts, in order: a bare candidate id; an ordinal ("the second one",
+ * "2"); an utterance that IS a candidate's name or is entirely made of
+ * words from one ("Dana", "Marcus Johnson"); and a short utterance carrying
+ * a number, which is how an address or phone answer arrives ("9 Elm Court",
+ * "480-555-0188"). Everything else is a request, not an answer.
+ *
+ * This gate is allowed to be slightly BROADER than the matcher behind it,
+ * and the asymmetry is deliberate. Accepting a turn the matcher then cannot
+ * place costs one re-ask. Rejecting a turn the matcher would have placed
+ * costs nothing but a manual pick. Accepting a turn that is not an answer
+ * at all is the hijack. Only the last is unsafe, so the gate errs toward
+ * the first two.
+ */
+export function isDisambiguationAnswer(
+  text: string,
+  pending: PendingEntityAmbiguity,
+): boolean {
+  const normalized = text.trim().toLowerCase().replace(/[.!?,]+$/g, '').trim();
+  if (!normalized) return false;
+
+  if (pending.candidates.some((c) => c.id.toLowerCase() === normalized)) return true;
+
+  if (ORDINAL_ANSWER_RE.test(normalized)) return true;
+
+  // "the residence one" names a candidate exactly as "the second one" names
+  // an ordinal — same wrapper, same intent. `parseOrdinalIndex` strips it
+  // before matching, so this does too; without it a perfectly natural answer
+  // is rejected as a request.
+  const compact = normalized.replace(/^the\s+/, '').replace(/\s+one$/, '').trim();
+
+  for (const form of new Set([normalized, compact].filter(Boolean))) {
+    const words = form.split(/\s+/).filter(Boolean);
+    for (const candidate of pending.candidates) {
+      const name = candidate.name.trim().toLowerCase();
+      if (!name) continue;
+      if (form === name) return true;
+      // Every word the operator typed is part of this candidate's name, and
+      // they typed few enough of them to be naming it rather than using it
+      // in a sentence. "Dana" / "Marcus Johnson" / "the residence one" pass;
+      // "Send an invoice to Johnson Plumbing for $400" does not.
+      if (words.length <= NAME_ANSWER_MAX_WORDS) {
+        const nameTokens = new Set(name.split(/\s+/).filter(Boolean));
+        if (words.every((w) => nameTokens.has(w))) return true;
+      }
+    }
+  }
+
+  const words = normalized.split(/\s+/).filter(Boolean);
+
+  // An address or phone answer ("9 Elm Court", "the one on 480-555-0188").
+  // Short is doing the work here: a real request that happens to contain a
+  // number is longer than this.
+  if (words.length <= HINT_ANSWER_MAX_WORDS && /\d/.test(normalized)) return true;
+
+  return false;
+}
+
+/**
+ * Ordinal answers the follow-up matcher understands. Kept in step with
+ * `parseOrdinalIndex` (ai/agents/customer-calling/entity-resolution.ts) — it
+ * accepts through third, so nothing beyond third is claimed here.
+ */
+const ORDINAL_ANSWER_RE =
+  /^(the\s+)?(first|second|third|1|2|3|one|two|three|option\s+[123]|primero?|segundo|tercero)(\s+one)?$/;
+
+/** Most words an utterance may have and still be read as NAMING a candidate. */
+const NAME_ANSWER_MAX_WORDS = 3;
+
+/** Most words an utterance may have and still be read as an address/phone answer. */
+const HINT_ANSWER_MAX_WORDS = 5;
 
 export function clearPendingAmbiguity(proposal: Pick<Proposal, 'sourceContext'>): void {
   const ctx = { ...((proposal.sourceContext ?? {}) as Record<string, unknown>) };
@@ -434,6 +605,17 @@ export function clearPendingAmbiguity(proposal: Pick<Proposal, 'sourceContext'>)
 /**
  * Human label for a gated entity kind, used in the question copy.
  * Deliberately the operator's word, not the schema's.
+ *
+ * NOTE (review follow-up): this is one of the five places a new `EntityKind`
+ * must be taught about — the others being `REF_KEY_BY_KIND`
+ * (ai/agents/customer-calling/entity-resolution.ts), `PgEntityResolver`'s
+ * dispatch, `ENTITY_LABEL_QUERIES` + its guard
+ * (alias-first-entity-resolver.ts), and `pendingAmbiguitySchema` above. Only
+ * this one fails SOFT: the `default` arm degrades to "record", so a missing
+ * arm costs a slightly generic question rather than a crash. The other four
+ * are compile-time exhaustive or explicitly guarded, which is why they are
+ * left as they are rather than collapsed into a registry — a registry would
+ * trade four compiler errors for one runtime lookup.
  */
 function kindLabel(kind: EntityKind): string {
   switch (kind) {

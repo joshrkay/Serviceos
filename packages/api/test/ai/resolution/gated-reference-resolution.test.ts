@@ -17,6 +17,7 @@ import {
   pendingAmbiguityOf,
   clearPendingAmbiguity,
   buildDisambiguationQuestion,
+  isDisambiguationAnswer,
   GATED_REFERENCE_SOURCES,
 } from '../../../src/ai/resolution/gated-reference-resolution';
 import type { Proposal } from '../../../src/proposals/proposal';
@@ -443,6 +444,162 @@ describe('#909 pending-ambiguity round trip on sourceContext', () => {
         }),
       ),
     ).toBeUndefined();
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────
+// The blob is a RIDE-ALONG CONTRACT: it leaves the process, sits in JSONB,
+// and comes back to drive a payload write. Everything below is about
+// refusing to trust it on the way back in.
+// ─────────────────────────────────────────────────────────────────────────
+describe('#909 pending-ambiguity contract (persisted JSON is untrusted input)', () => {
+  const valid = {
+    entityKind: 'lead',
+    reference: 'the Johnson lead',
+    refKey: 'leadId',
+    candidates: [
+      { id: 'l1', name: 'Dana Johnson', score: 0.9 },
+      { id: 'l2', name: 'Marcus Johnson', score: 0.9 },
+    ],
+    partialRefs: {},
+    attemptCount: 0,
+  };
+
+  const withBlob = (blob: unknown) =>
+    draft({}, ['leadId'], { pendingEntityAmbiguity: blob });
+
+  it('accepts a well-formed blob', () => {
+    expect(pendingAmbiguityOf(withBlob(valid))).toMatchObject({ refKey: 'leadId' });
+  });
+
+  it('rejects a candidate with no name instead of throwing downstream', () => {
+    // This exact blob used to reach buildDisambiguationQuestion and throw on
+    // `.trim()` of undefined — a 500 on an ordinary chat turn.
+    const blob = { ...valid, candidates: [{ id: 'l1', score: 0.9 }] };
+    expect(pendingAmbiguityOf(withBlob(blob))).toBeUndefined();
+    expect(() => pendingAmbiguityOf(withBlob(blob))).not.toThrow();
+  });
+
+  it('rejects a candidate with an empty name or a missing id', () => {
+    expect(
+      pendingAmbiguityOf(withBlob({ ...valid, candidates: [{ id: 'l1', name: '  ', score: 1 }] })),
+    ).toBeUndefined();
+    expect(
+      pendingAmbiguityOf(withBlob({ ...valid, candidates: [{ name: 'Dana', score: 1 }] })),
+    ).toBeUndefined();
+  });
+
+  it('rejects a refKey outside the gated-id vocabulary', () => {
+    // The write primitive: an arbitrary refKey would land on payload AND on
+    // verifiedIds, which is the marker that stops the id being scrubbed.
+    for (const refKey of ['status', 'approvedAt', '__proto__', 'totalCents']) {
+      expect(pendingAmbiguityOf(withBlob({ ...valid, refKey })), refKey).toBeUndefined();
+    }
+  });
+
+  it('rejects an unknown entityKind', () => {
+    expect(pendingAmbiguityOf(withBlob({ ...valid, entityKind: 'tenant' }))).toBeUndefined();
+  });
+
+  it('rejects a non-array or empty candidate list', () => {
+    expect(pendingAmbiguityOf(withBlob({ ...valid, candidates: 'nope' }))).toBeUndefined();
+    expect(pendingAmbiguityOf(withBlob({ ...valid, candidates: [] }))).toBeUndefined();
+  });
+
+  it('never throws on hostile shapes', () => {
+    for (const blob of [null, 0, 'x', [], { candidates: [null] }, { refKey: 42 }]) {
+      expect(() => pendingAmbiguityOf(withBlob(blob))).not.toThrow();
+    }
+  });
+});
+
+describe('#909 applyGatedReferences refuses to write a key it was not gating', () => {
+  it('ignores a key outside GATED_REFERENCE_SOURCES', () => {
+    const proposal = draft({ leadReference: 'x' }, ['leadId']);
+    const applied = applyGatedReferences(proposal, {
+      status: 'approved',
+      totalCents: '1',
+    } as unknown as Record<string, string>);
+
+    expect(applied).toEqual([]);
+    expect((proposal.payload as Record<string, unknown>).status).toBeUndefined();
+    expect((proposal.sourceContext as Record<string, unknown>).verifiedIds).toBeUndefined();
+  });
+
+  it('ignores a known id field that is NOT currently gated on this proposal', () => {
+    // The disambiguation answer path carries a refKey across a DB round
+    // trip; by the time it comes back the gate may already be satisfied.
+    const proposal = draft({ leadReference: 'x' }, ['leadId']);
+    const applied = applyGatedReferences(proposal, {
+      leadId: 'lead-1',
+      customerId: 'cust-1',
+    });
+
+    expect(applied).toEqual(['leadId']);
+    expect((proposal.payload as Record<string, unknown>).customerId).toBeUndefined();
+    expect((proposal.sourceContext as Record<string, unknown>).verifiedIds).toEqual({
+      leadId: 'lead-1',
+    });
+  });
+
+  it('writes nothing at all once every gate is already lifted', () => {
+    const proposal = draft({ leadId: 'lead-1' }, []);
+    expect(applyGatedReferences(proposal, { leadId: 'other' })).toEqual([]);
+    expect((proposal.payload as Record<string, unknown>).leadId).toBe('lead-1');
+  });
+});
+
+describe('#909 isDisambiguationAnswer — the recall gate', () => {
+  const pending = {
+    entityKind: 'lead' as const,
+    reference: 'the Johnson lead',
+    refKey: 'leadId',
+    candidates: [
+      { id: 'l1', name: 'Johnson Plumbing', score: 0.9, hint: 'new · 50 Beech Street' },
+      { id: 'l2', name: 'Brooks', score: 0.9 },
+    ],
+    partialRefs: {},
+    attemptCount: 0,
+  };
+
+  it('accepts the shapes an answer actually takes', () => {
+    for (const answer of [
+      'l1', // a bare candidate id
+      'the second one',
+      'second',
+      '2',
+      'option 2',
+      'Johnson Plumbing', // the full name
+      'Plumbing', // one of its words
+      'brooks',
+      '9 Elm Court', // an address answer
+      '480-555-0188', // a phone answer
+    ]) {
+      expect(isDisambiguationAnswer(answer, pending), answer).toBe(true);
+    }
+  });
+
+  it('rejects the requests that used to be swallowed as answers', () => {
+    for (const request of [
+      'Send an invoice to Johnson Plumbing for $400',
+      'apply a $50 late fee on invoice 1042',
+      'ok',
+      'thanks',
+      'no',
+      'what is the weather',
+      'Reply to the 1-star review from yesterday',
+      'Convert the Nguyen lead and then send them a welcome message',
+      '',
+      '   ',
+    ]) {
+      expect(isDisambiguationAnswer(request, pending), request).toBe(false);
+    }
+  });
+
+  it('does not claim ordinals past what the matcher understands', () => {
+    // parseOrdinalIndex stops at third; the gate must not accept a fourth
+    // and then hand the matcher something it cannot place.
+    expect(isDisambiguationAnswer('the fourth one', pending)).toBe(false);
   });
 });
 

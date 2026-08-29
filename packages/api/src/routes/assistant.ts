@@ -102,6 +102,8 @@ import {
   pendingAmbiguityOf,
   clearPendingAmbiguity,
   buildDisambiguationQuestion,
+  isDisambiguationAnswer,
+  PENDING_AMBIGUITY_KEY,
 } from '../ai/resolution/gated-reference-resolution';
 import {
   resolveDisambiguationFollowUp,
@@ -994,6 +996,15 @@ async function resolveGatedReferencesForChat(
   correlationId: string,
   proposal: Proposal,
   entities: Record<string, unknown> | undefined,
+  /**
+   * Whether this caller will actually ASK the question it is handed.
+   *
+   * A pending question is only legitimate if the operator saw it: it costs
+   * them a turn to answer and, unanswered, it sits on the proposal waiting
+   * to consume a later message. The chain path passes `false` — see the
+   * call site there for why a chain reply deliberately does not ask.
+   */
+  askClarification: boolean,
 ): Promise<string | undefined> {
   const outcome = await resolveGatedReferences(
     deps.entityResolver,
@@ -1004,7 +1015,7 @@ async function resolveGatedReferencesForChat(
 
   const filledKeys = applyGatedReferences(proposal, outcome.filled);
 
-  if (outcome.ambiguity) {
+  if (outcome.ambiguity && askClarification) {
     stampPendingAmbiguity(proposal, outcome.ambiguity);
   }
 
@@ -1016,12 +1027,15 @@ async function resolveGatedReferencesForChat(
         ? {
             ambiguousField: outcome.ambiguity.refKey,
             candidateCount: outcome.ambiguity.candidates.length,
+            askedClarification: askClarification,
           }
         : {}),
     });
   }
 
-  return outcome.ambiguity ? buildDisambiguationQuestion(outcome.ambiguity) : undefined;
+  return outcome.ambiguity && askClarification
+    ? buildDisambiguationQuestion(outcome.ambiguity)
+    : undefined;
 }
 
 /**
@@ -1087,8 +1101,27 @@ async function findPendingClarification(
     .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
 
   for (const proposal of reviewable) {
+    const carriesKey =
+      (proposal.sourceContext as Record<string, unknown> | undefined)?.[
+        PENDING_AMBIGUITY_KEY
+      ] !== undefined;
+    if (!carriesKey) continue;
+
     const pending = pendingAmbiguityOf(proposal);
     if (pending) return { proposal, pending };
+
+    // Present but invalid — a blob that fails its own contract cannot be
+    // trusted to drive a payload write, and leaving it in place would make
+    // every future turn re-fail the same parse. Drop it and move on; the
+    // proposal keeps its gate and its candidate picker.
+    clearPendingAmbiguity(proposal);
+    try {
+      await deps.proposalRepo.update(tenantId, proposal.id, {
+        sourceContext: proposal.sourceContext,
+      });
+    } catch {
+      // Best-effort cleanup — never cost the operator their turn.
+    }
   }
   return undefined;
 }
@@ -1160,6 +1193,9 @@ async function applyDisambiguationAnswer(
       correlationId,
       proposal,
       undefined,
+      // Asks: this reply carries the next question in its own text, so the
+      // operator sees it exactly as they saw the first one.
+      true,
     );
 
     await deps.proposalRepo.update(tenantId, proposal.id, {
@@ -1900,8 +1936,14 @@ async function generateAssistantReply(
       // most two turns before the pending state is dropped and their message
       // is classified normally. Unbounded, a stale question would swallow the
       // conversation.
+      // RECALL IS GATED ON THE TURN, NOT ON PENDENCY. `isDisambiguationAnswer`
+      // is the precision filter (see its doc comment for the three hijack
+      // paths it closes — a request that merely CONTAINS a candidate name
+      // used to resolve the question and discard the request). A turn that
+      // does not look like an answer never reaches the matcher: it is
+      // classified normally and the question is left standing, uncounted.
       const followUp = await findPendingClarification(deps, tenantId, conversationId);
-      if (followUp) {
+      if (followUp && isDisambiguationAnswer(lastUserText, followUp.pending)) {
         const reply = await applyDisambiguationAnswer(
           deps,
           tenantId,
@@ -1912,9 +1954,9 @@ async function generateAssistantReply(
           lastUserText,
         );
         if (reply) return reply;
-        // Fell through: the pending question was abandoned (attempts
-        // exhausted) and has been cleared. This turn is classified as an
-        // ordinary new request below.
+        // Fell through: the operator kept answering with things that did not
+        // match, the attempt bound was reached, and the question has been
+        // cleared. This turn is classified as an ordinary new request below.
       }
 
       // `extendedIntents` is set unconditionally on THIS surface. That flag's
@@ -2222,14 +2264,28 @@ async function generateAssistantReply(
           proposal.sourceContext = { ...(proposal.sourceContext ?? {}), chainId, chainStep: chainCards.length + 1 };
           // #909 — the same post-draft resolution the single-intent path
           // runs, so a chained "reschedule the Miller job, then text them"
-          // gets its ids resolved too and the two surfaces of THIS route
-          // can't drift. Deliberately no clarification question here: a
-          // chain turn already answers with N cards, and interrupting it
-          // with "which Miller?" mid-chain would leave the operator holding
-          // a question and a pile of cards at once. An ambiguous reference
-          // in a chain keeps today's behavior — the gated card with its
-          // candidate picker — and the pending question is still stamped so
-          // a follow-up turn can answer it.
+          // gets its ids resolved too and the two halves of THIS route can't
+          // drift on how a reference is resolved.
+          //
+          // But it does NOT ask, and does NOT stamp a pending question
+          // (`askClarification: false`). Two reasons, and the second is the
+          // decisive one:
+          //
+          //   1. A chain turn answers with N cards. The reply is a summary,
+          //      not a conversation, and appending "which Miller?" to it
+          //      hands the operator a question and a pile of cards at once.
+          //   2. REFERENT COLLISION. In a multi-card reply the most natural
+          //      reading of "the second one" is THE SECOND CARD — which is
+          //      exactly the phrasing the disambiguation matcher treats as
+          //      an ordinal answer about candidates. Stamping a question
+          //      here would arm a matcher whose highest-precision input is
+          //      ambiguous in precisely this context.
+          //
+          // So an ambiguous reference in a chain keeps today's behavior: the
+          // gated card with its own candidate picker, which is unambiguous
+          // no matter how many cards sit beside it. Resolution still runs,
+          // so unambiguous references in a chain are filled exactly as they
+          // are on the single-intent path.
           await resolveGatedReferencesForChat(
             deps,
             tenantId,
@@ -2237,6 +2293,7 @@ async function generateAssistantReply(
             correlationId,
             proposal,
             segEntities,
+            false,
           );
           // Dependency gate: steps after the first reference results that
           // don't exist yet (the customer, their job). Auto-approval would
@@ -2378,6 +2435,9 @@ async function generateAssistantReply(
           correlationId,
           proposal,
           extractedEntities,
+          // This path returns ONE card and speaks the question in its reply,
+          // so a pending question here is one the operator provably saw.
+          true,
         );
         // I4 (post-C1 review) — chokepoint backstop; see the identical
         // comment on the chain-segment path above. Already resolved

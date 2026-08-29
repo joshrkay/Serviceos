@@ -548,7 +548,7 @@ describe('#909 — an ambiguous reference asks one question and the next turn an
     expect((persisted.payload as Record<string, unknown>).leadId).toBe(LEAD_A);
   });
 
-  it('re-asks an unmatched answer, then stops waiting so the operator is never trapped', async () => {
+  it('re-asks an ANSWER-SHAPED but unmatched reply, then stops so the operator is never trapped', async () => {
     const proposalRepo = new InMemoryProposalRepository();
     const app = buildApp({
       gateway: scriptedGateway([
@@ -562,16 +562,18 @@ describe('#909 — an ambiguous reference asks one question and the next turn an
 
     await chat(app, 'Convert the Johnson lead to a customer');
 
-    const first = await chat(app, 'what is the weather');
+    // "the third one" when only two were offered: unmistakably an attempt to
+    // answer, and unmistakably not a match.
+    const first = await chat(app, 'the third one');
     expect(first.body.taskType).toBe('assistant.entity_resolution');
     expect(first.body.message.content).toContain('Which lead did you mean');
 
-    const second = await chat(app, 'still not an answer');
+    const second = await chat(app, 'the third one');
     expect(second.body.taskType).toBe('assistant.entity_resolution');
 
     // Bound reached: the pending question is dropped and this turn is
     // classified as an ordinary request instead.
-    const third = await chat(app, 'never mind, what is the weather');
+    const third = await chat(app, 'the third one');
     expect(third.body.taskType).not.toBe('assistant.entity_resolution');
 
     const [persisted] = await proposalRepo.findByTenant(TEST_TENANT);
@@ -580,6 +582,320 @@ describe('#909 — an ambiguous reference asks one question and the next turn an
     ).toBeUndefined();
     // The gate — and its candidate picker on the card — survive.
     expect(missingFieldsFor(persisted)).toContain('leadId');
+  });
+
+  // ───────────────────────────────────────────────────────────────────────
+  // RECALL HIJACK regressions. A pending question used to hand EVERY later
+  // turn to the follow-up matcher, whose seams are deliberately generous for
+  // a spoken turn. On chat that let an ordinary request be consumed as an
+  // answer: the question resolved and the request was silently discarded —
+  // never drafted, never refused, never logged as anything but a resolution.
+  // ───────────────────────────────────────────────────────────────────────
+  describe('a pending question never consumes an unrelated request', () => {
+    const PLUMBING = '11111111-cccc-4ccc-8ccc-cccccccccccc';
+    const RESIDENCE = '22222222-dddd-4ddd-8ddd-dddddddddddd';
+
+    /** Two candidates whose NAMES appear verbatim inside ordinary requests. */
+    const namedLeadResolver = () =>
+      resolverFor(({ kind }) =>
+        kind === 'lead'
+          ? ({
+              kind: 'ambiguous',
+              candidates: [
+                {
+                  id: PLUMBING,
+                  kind: 'lead',
+                  label: 'Johnson Plumbing',
+                  hint: 'new · 50 Beech Street',
+                  score: 0.9,
+                },
+                {
+                  id: RESIDENCE,
+                  kind: 'lead',
+                  label: 'Johnson Residence',
+                  hint: 'qualified · 12 Oak Lane',
+                  score: 0.9,
+                },
+              ],
+            } as EntityResolverResult)
+          : ({ kind: 'skipped' } as EntityResolverResult),
+      );
+
+    async function withPendingQuestion(followUpClassification: string) {
+      const proposalRepo = new InMemoryProposalRepository();
+      const app = buildApp({
+        gateway: scriptedGateway([
+          classifierReply('convert_lead', { leadReference: 'the Johnson lead' }),
+          followUpClassification,
+        ]),
+        proposalRepo,
+        entityResolver: namedLeadResolver(),
+      });
+      const res = await chat(app, 'Convert the Johnson lead to a customer');
+      expect(res.body.message.content).toContain('Which lead did you mean');
+      return { app, proposalRepo };
+    }
+
+    it('a request CONTAINING a candidate name is classified, not swallowed', async () => {
+      // The proven path: `normalized.includes(label)` matched "Johnson
+      // Plumbing" inside the sentence, resolved the lead, and threw the
+      // invoice request away.
+      const { app, proposalRepo } = await withPendingQuestion(
+        classifierReply('create_invoice', {
+          customerName: 'Johnson Plumbing',
+          amount: 40000,
+          lineItemDescriptions: ['service call'],
+        }),
+      );
+
+      const res = await chat(app, 'Send an invoice to Johnson Plumbing for $400');
+
+      expect(res.body.taskType).not.toBe('assistant.entity_resolution');
+      // The lead question was NOT answered…
+      const convertLead = (await proposalRepo.findByTenant(TEST_TENANT)).find(
+        (p) => p.proposalType === 'convert_lead',
+      )!;
+      expect((convertLead.payload as Record<string, unknown>).leadId).toBeUndefined();
+      // …and it is still standing, un-consumed and un-penalised.
+      const stillPending = (convertLead.sourceContext as Record<string, unknown>)
+        .pendingEntityAmbiguity as { attemptCount: number } | undefined;
+      expect(stillPending).toBeTruthy();
+      expect(stillPending?.attemptCount).toBe(0);
+      // And the turn genuinely went through the classifier rather than
+      // being answered by the resolution leg. (Whether the invoice itself
+      // drafts depends on repo wiring this suite does not provide; what
+      // this test pins is that the request was not swallowed.)
+      expect(res.body.model).not.toBe('entity-resolver');
+    });
+
+    it('a request carrying a stray number does not match an address hint', async () => {
+      // The proven path: extractStreetNumber's \b(\d{1,5})\b offered "50",
+      // which matched the candidate hinted "50 Beech Street".
+      const { app, proposalRepo } = await withPendingQuestion(
+        classifierReply('apply_late_fee', { jobReference: 'invoice 1042', amount: 5000 }),
+      );
+
+      const res = await chat(app, 'apply a $50 late fee on invoice 1042');
+
+      expect(res.body.taskType).not.toBe('assistant.entity_resolution');
+      const convertLead = (await proposalRepo.findByTenant(TEST_TENANT)).find(
+        (p) => p.proposalType === 'convert_lead',
+      )!;
+      expect((convertLead.payload as Record<string, unknown>).leadId).toBeUndefined();
+    });
+
+    it('a bare "ok" is not read as a substring of a candidate name', async () => {
+      // The reverse direction: `label.includes(normalized)` made "ok" a
+      // match for "Brooks".
+      const proposalRepo = new InMemoryProposalRepository();
+      const app = buildApp({
+        gateway: scriptedGateway([
+          classifierReply('convert_lead', { leadReference: 'the Brooks lead' }),
+          classifierReply('unknown', {}),
+        ]),
+        proposalRepo,
+        entityResolver: resolverFor(({ kind }) =>
+          kind === 'lead'
+            ? ({
+                kind: 'ambiguous',
+                candidates: [
+                  { id: 'brooks-1', kind: 'lead', label: 'Brooks', score: 0.9 },
+                  { id: 'brooks-2', kind: 'lead', label: 'Brooksfield', score: 0.9 },
+                ],
+              } as EntityResolverResult)
+            : ({ kind: 'skipped' } as EntityResolverResult),
+        ),
+      });
+
+      await chat(app, 'Convert the Brooks lead');
+      const res = await chat(app, 'ok');
+
+      expect(res.body.taskType).not.toBe('assistant.entity_resolution');
+      const [persisted] = await proposalRepo.findByTenant(TEST_TENANT);
+      expect((persisted.payload as Record<string, unknown>).leadId).toBeUndefined();
+    });
+
+    it('an excluded-intent utterance still gets its deterministic refusal', async () => {
+      // A standing question must not shadow the route's own refusals: the
+      // four CHAT_DISPATCH_EXCLUDED_INTENTS answer deterministically, and
+      // that has to keep working mid-clarification.
+      const { app, proposalRepo } = await withPendingQuestion(
+        classifierReply('respond_to_review', { reviewReference: 'the 1-star from yesterday' }),
+      );
+
+      const res = await chat(app, 'Reply to the 1-star review from yesterday');
+
+      expect(res.status).toBe(200);
+      expect(res.body.taskType).not.toBe('assistant.entity_resolution');
+      // No respond_to_review proposal is minted — it has no handler at all.
+      expect(
+        (await proposalRepo.findByTenant(TEST_TENANT)).some(
+          (p) => p.proposalType === 'respond_to_review',
+        ),
+      ).toBe(false);
+      // And the question survives for a real answer.
+      const convertLead = (await proposalRepo.findByTenant(TEST_TENANT)).find(
+        (p) => p.proposalType === 'convert_lead',
+      )!;
+      expect(
+        (convertLead.sourceContext as Record<string, unknown>).pendingEntityAmbiguity,
+      ).toBeTruthy();
+    });
+
+    it('a genuine short answer still resolves after all that tightening', async () => {
+      const { app, proposalRepo } = await withPendingQuestion(classifierReply('unknown', {}));
+
+      const res = await chat(app, 'Residence');
+      expect(res.body.taskType).toBe('assistant.entity_resolution');
+
+      const [persisted] = await proposalRepo.findByTenant(TEST_TENANT);
+      expect((persisted.payload as Record<string, unknown>).leadId).toBe(RESIDENCE);
+    });
+
+    it('an answer-shaped turn the matcher cannot place is re-asked, never guessed', async () => {
+      // The gate is deliberately allowed to be a little broader than the
+      // matcher. "the residence one" reads as an answer, but the shared
+      // matcher (which voice depends on, so it is not loosened here) cannot
+      // place it. Gate-accept + matcher-reject costs one re-ask; the reverse
+      // asymmetry would be the hijack, so this is the safe direction to err.
+      const { app, proposalRepo } = await withPendingQuestion(classifierReply('unknown', {}));
+
+      const res = await chat(app, 'the residence one');
+      expect(res.body.message.content).toContain('Which lead did you mean');
+
+      const [persisted] = await proposalRepo.findByTenant(TEST_TENANT);
+      expect((persisted.payload as Record<string, unknown>).leadId).toBeUndefined();
+    });
+  });
+
+  // ───────────────────────────────────────────────────────────────────────
+  // CHAIN path ("…, then …"). Resolution runs, but the chain deliberately
+  // does NOT ask — see the call site's comment: in a reply made of N cards,
+  // "the second one" most naturally means the second CARD, which is exactly
+  // the phrasing the answer matcher reads as an ordinal about candidates.
+  // ───────────────────────────────────────────────────────────────────────
+  describe('chain path — resolves, but never arms a question the reply did not ask', () => {
+    const JOHNSON = '33333333-eeee-4eee-8eee-eeeeeeeeeeee';
+    const NGUYEN = '44444444-ffff-4fff-8fff-ffffffffffff';
+
+    it('fills unambiguous references in every segment of a chain', async () => {
+      const proposalRepo = new InMemoryProposalRepository();
+      const app = buildApp({
+        gateway: scriptedGateway([
+          // top-level classification, then one per segment
+          classifierReply('convert_lead', { leadReference: 'the Johnson lead' }),
+          classifierReply('convert_lead', { leadReference: 'the Johnson lead' }),
+          classifierReply('mark_lead_lost', {
+            leadReference: 'the Nguyen lead',
+            lostReason: 'went quiet',
+          }),
+        ]),
+        proposalRepo,
+        entityResolver: resolverFor(({ reference }) =>
+          reference.toLowerCase().includes('nguyen')
+            ? resolvesTo(NGUYEN, 'lead')
+            : resolvesTo(JOHNSON, 'lead'),
+        ),
+      });
+
+      const res = await chat(
+        app,
+        'Convert the Johnson lead to a customer, then mark the Nguyen lead lost',
+      );
+      expect(res.status).toBe(200);
+
+      const persisted = await proposalRepo.findByTenant(TEST_TENANT);
+      expect(persisted).toHaveLength(2);
+      // Both segments share a chain and both got their id resolved.
+      for (const proposal of persisted) {
+        expect((proposal.sourceContext as Record<string, unknown>).chainId).toBeTruthy();
+        expect(missingFieldsFor(proposal)).not.toContain('leadId');
+        await expect(
+          approveProposal(proposalRepo, TEST_TENANT, proposal.id, TEST_USER, 'owner'),
+        ).resolves.toBeTruthy();
+      }
+      expect(
+        persisted.map((p) => (p.payload as Record<string, unknown>).leadId).sort(),
+      ).toEqual([JOHNSON, NGUYEN].sort());
+    });
+
+    it('an ambiguous reference in a chain arms NO pending question', async () => {
+      const proposalRepo = new InMemoryProposalRepository();
+      const app = buildApp({
+        gateway: scriptedGateway([
+          classifierReply('convert_lead', { leadReference: 'the Johnson lead' }),
+          classifierReply('convert_lead', { leadReference: 'the Johnson lead' }),
+          classifierReply('mark_lead_lost', { leadReference: 'the Nguyen lead' }),
+        ]),
+        proposalRepo,
+        entityResolver: resolverFor(({ reference }) =>
+          reference.toLowerCase().includes('johnson')
+            ? ({
+                kind: 'ambiguous',
+                candidates: [
+                  { id: 'j1', kind: 'lead', label: 'Dana Johnson', score: 0.9 },
+                  { id: 'j2', kind: 'lead', label: 'Marcus Johnson', score: 0.9 },
+                ],
+              } as EntityResolverResult)
+            : resolvesTo(NGUYEN, 'lead'),
+        ),
+      });
+
+      const res = await chat(
+        app,
+        'Convert the Johnson lead to a customer, then mark the Nguyen lead lost',
+      );
+
+      // The reply does not ask a question…
+      expect(res.body.message.content).not.toContain('Which lead did you mean');
+      // …so no proposal is left waiting for an answer nobody was invited to
+      // give. The ambiguous one keeps its gate and its candidate picker.
+      const persisted = await proposalRepo.findByTenant(TEST_TENANT);
+      for (const proposal of persisted) {
+        expect(
+          (proposal.sourceContext as Record<string, unknown>).pendingEntityAmbiguity,
+          proposal.proposalType,
+        ).toBeUndefined();
+      }
+      const ambiguous = persisted.find((p) => p.proposalType === 'convert_lead')!;
+      expect(missingFieldsFor(ambiguous)).toContain('leadId');
+      // The unambiguous sibling still resolved.
+      const resolved = persisted.find((p) => p.proposalType === 'mark_lead_lost')!;
+      expect((resolved.payload as Record<string, unknown>).leadId).toBe(NGUYEN);
+    });
+
+    it('a later ordinal is not consumed by a chain segment, because nothing is pending', async () => {
+      const proposalRepo = new InMemoryProposalRepository();
+      const app = buildApp({
+        gateway: scriptedGateway([
+          classifierReply('convert_lead', { leadReference: 'the Johnson lead' }),
+          classifierReply('convert_lead', { leadReference: 'the Johnson lead' }),
+          classifierReply('mark_lead_lost', { leadReference: 'the Nguyen lead' }),
+          classifierReply('unknown', {}),
+        ]),
+        proposalRepo,
+        entityResolver: resolverFor(
+          () =>
+            ({
+              kind: 'ambiguous',
+              candidates: [
+                { id: 'j1', kind: 'lead', label: 'Dana Johnson', score: 0.9 },
+                { id: 'j2', kind: 'lead', label: 'Marcus Johnson', score: 0.9 },
+              ],
+            }) as EntityResolverResult,
+        ),
+      });
+
+      await chat(app, 'Convert the Johnson lead to a customer, then mark the Nguyen lead lost');
+      // In a two-card reply this means "the second card", and it must not be
+      // read as picking a candidate for either of them.
+      const res = await chat(app, 'the second one');
+
+      expect(res.body.taskType).not.toBe('assistant.entity_resolution');
+      for (const proposal of await proposalRepo.findByTenant(TEST_TENANT)) {
+        expect((proposal.payload as Record<string, unknown>).leadId).toBeUndefined();
+      }
+    });
   });
 
   it('ignores a pending question on a proposal that has since been decided', async () => {
