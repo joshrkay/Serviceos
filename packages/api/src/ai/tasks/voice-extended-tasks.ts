@@ -40,7 +40,11 @@ import { candidatesForReference } from '../resolution/reference-candidates';
 import type { EntityCandidate } from '../resolution/entity-resolver';
 import { resolveLineItemToCatalog } from '../resolution/catalog-resolver';
 import { formatCents } from '../skills/spoken-format';
-import { formatUsdCentsFixed } from '@ai-service-os/shared';
+import {
+  formatUsdCentsFixed,
+  parseSpokenAddressParts,
+  REQUIRED_LOCATION_FIELDS,
+} from '@ai-service-os/shared';
 import { entitiesFrom, baseSourceContext, inputFor, resolveTenantTimezone } from './task-input';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -1899,9 +1903,18 @@ export class MarkLeadLostTaskHandler implements TaskHandler {
 
 // ───────────── add_service_location ─────────────
 //
-// Attaches a new service address to a customer. The classifier only has
-// a freeform address string; the structured street/city/state/zip are
-// resolved by the review UI, so they're flagged missing.
+// Attaches a new service address to a customer. The classifier only has a
+// freeform address string, so `parseSpokenAddressParts` (shared/contracts/
+// spoken-address.ts) runs the SAME best-effort deterministic parse used by
+// create_customer's voice path and the review card — reading a trailing ZIP,
+// then a trailing state (abbreviation or spelled out), then whatever's left
+// as city, with the remainder as street1. Parsing a spoken address is not
+// entity resolution (no resolver kind answers it — see #909's A29 note), so
+// this stays a plain deterministic parse rather than a resolver call.
+//
+// Whatever the parser recovers lands on the payload directly; whatever it
+// can't (a bare street with no city/state/zip, or no address at all) is
+// flagged missing for the review UI — never guessed, never invented.
 export class AddServiceLocationTaskHandler implements TaskHandler {
   readonly taskType = 'add_service_location' as const;
 
@@ -1919,9 +1932,14 @@ export class AddServiceLocationTaskHandler implements TaskHandler {
       missing.push('customerId');
     }
 
+    const parts = parseSpokenAddressParts(ee.serviceAddress);
     if (ee.serviceAddress) payload.addressText = ee.serviceAddress;
-    // The executor needs structured fields — always require resolution.
-    missing.push('street1', 'city', 'state', 'postalCode');
+    if (parts.street1) payload.street1 = parts.street1;
+    if (parts.street2) payload.street2 = parts.street2;
+    if (parts.city) payload.city = parts.city;
+    if (parts.state) payload.state = parts.state;
+    if (parts.postalCode) payload.postalCode = parts.postalCode;
+    missing.push(...REQUIRED_LOCATION_FIELDS.filter((field) => !parts[field]));
 
     return {
       proposal: createProposal(inputFor(context, this.taskType, payload, missing)),

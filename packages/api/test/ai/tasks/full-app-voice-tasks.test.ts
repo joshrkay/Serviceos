@@ -406,14 +406,56 @@ describe('wave-2 task handlers', () => {
     expect(missingFieldsFor(res.proposal)).toContain('leadId');
   });
 
-  it('add_service_location requires structured address resolution', async () => {
+  it('add_service_location parses a full spoken address and lifts the address gate', async () => {
+    const res = await new AddServiceLocationTaskHandler().handle(
+      ctx({
+        customerId: 'cust-1',
+        existingEntities: { serviceAddress: '9 Elm Court, Mesa, AZ 85201' },
+      }),
+    );
+    expect(res.proposal.proposalType).toBe('add_service_location');
+    expect(res.proposal.payload.addressText).toBe('9 Elm Court, Mesa, AZ 85201');
+    expect(res.proposal.payload.street1).toBe('9 Elm Court');
+    expect(res.proposal.payload.city).toBe('Mesa');
+    expect(res.proposal.payload.state).toBe('AZ');
+    expect(res.proposal.payload.postalCode).toBe('85201');
+    const missing = missingFieldsFor(res.proposal);
+    expect(missing).not.toContain('street1');
+    expect(missing).not.toContain('city');
+    expect(missing).not.toContain('state');
+    expect(missing).not.toContain('postalCode');
+  });
+
+  it('add_service_location fills only what a partial spoken address contains and gates the rest honestly', async () => {
     const res = await new AddServiceLocationTaskHandler().handle(
       ctx({ customerId: 'cust-1', existingEntities: { serviceAddress: '412 Oak St' } }),
     );
     expect(res.proposal.proposalType).toBe('add_service_location');
     expect(res.proposal.payload.addressText).toBe('412 Oak St');
+    // The parser recovers a street from the words actually spoken — it is
+    // never re-gated once genuinely known.
+    expect(res.proposal.payload.street1).toBe('412 Oak St');
+    const missing = missingFieldsFor(res.proposal);
+    expect(missing).not.toContain('street1');
+    expect(missing).toContain('city');
+    expect(missing).toContain('state');
+    expect(missing).toContain('postalCode');
+  });
+
+  it('add_service_location never guesses: no address at all gates all four fields and writes nothing', async () => {
+    const res = await new AddServiceLocationTaskHandler().handle(
+      ctx({ customerId: 'cust-1', existingEntities: {} }),
+    );
+    expect(res.proposal.proposalType).toBe('add_service_location');
+    expect(res.proposal.payload.addressText).toBeUndefined();
+    expect(res.proposal.payload.street1).toBeUndefined();
+    expect(res.proposal.payload.city).toBeUndefined();
+    expect(res.proposal.payload.state).toBeUndefined();
+    expect(res.proposal.payload.postalCode).toBeUndefined();
     const missing = missingFieldsFor(res.proposal);
     expect(missing).toContain('street1');
+    expect(missing).toContain('city');
+    expect(missing).toContain('state');
     expect(missing).toContain('postalCode');
   });
 
