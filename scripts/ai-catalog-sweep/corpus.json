@@ -325,20 +325,23 @@
       "verify": {
         "table": "invoice_dunning_events",
         "whereShape": "tenant_id = '{{tenantId}}' AND invoice_id = '{{ctx.A01.resultEntityId}}' ORDER BY created_at DESC LIMIT 5"
-      }
+      },
+      "clarificationAnswer": "the most recent one",
+      "notes": "Round-3: post fix/ref-lift-live-misses the resolver correctly finds 2 invoices and asks; clarificationAnswer picks the latest (runner answer-turn support from #925)."
     },
     {
       "id": "A21",
       "intent": "apply_late_fee",
       "surface": "chat",
       "dependsOn": "A20",
-      "utterance": "Apply a 25 dollar late fee to invoice {{ctx.A01.dbRow.invoice_number}}",
+      "utterance": "Apply a late fee to {{FIXTURE_CUSTOMER}}’s overdue invoice",
       "expectedOutcome": "executes",
       "approve": true,
       "verify": {
         "table": "invoices",
         "whereShape": "tenant_id = '{{tenantId}}' AND id = '{{ctx.A01.resultEntityId}}'"
-      }
+      },
+      "notes": "Round-3: utterance now names the customer so the new customer→job→invoice traversal (fix/ref-lift-live-misses) can resolve; the document-number few-shot gap is #931 (pinned-prompt change, separate)."
     },
     {
       "id": "A38",
