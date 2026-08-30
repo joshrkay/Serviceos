@@ -109,6 +109,37 @@ Rules:
 /** A tentative hold survives 24h before the availability finder treats it as free. */
 const HOLD_WINDOW_MS = 24 * 60 * 60 * 1000;
 
+// Round 4b (sweep row A33) — mirrors job-edit-task.ts's `isUuid` /
+// `resolvedJobIdFrom` and LogExpenseTaskHandler's log_mileage jobId handling
+// (voice-extended-tasks.ts): a classifier/LLM-extracted reference is free
+// text ("the QA Sweep Furnace Inspection job") in the overwhelming case, but
+// may already BE the resolved id.
+const UUID_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
+
+function isUuid(value: unknown): value is string {
+  return typeof value === 'string' && UUID_RE.test(value);
+}
+
+/**
+ * The job id the ROUTER's entity resolver already resolved for this turn, if
+ * any. `schedule_inspection` (the classifier intent this handler drafts
+ * `create_appointment` for via `CHAT_INTENT_TO_REGISTRY_KEY`'s alias entry)
+ * is a `JOB_REF_INTENTS` member (ai/agents/customer-calling/entity-
+ * resolution.ts) BECAUSE naming an existing job ("for the QA Sweep Furnace
+ * Inspection job") is exactly what it does — so routes/assistant.ts's
+ * pre-draft `resolveVerifiedIdsForDraft` already tried to resolve that
+ * reference to a real jobId before this handler ever ran. A hit lands on
+ * `existingEntities.jobId`.
+ *
+ * Shape-checked only (no second repo round-trip): the router's resolver is
+ * itself a DB lookup, so a value here is trustworthy by construction —
+ * exactly the same seam LogExpenseTaskHandler's log_mileage branch consumes.
+ */
+function resolvedJobIdFrom(context: TaskContext): string | undefined {
+  const id = context.existingEntities?.jobId;
+  return isUuid(id) ? id : undefined;
+}
+
 function tryParseJson(content: string): Record<string, unknown> | null {
   try {
     const p = JSON.parse(content);
@@ -587,6 +618,40 @@ export class CreateAppointmentAITaskHandler implements TaskHandler {
     // booking is attributed to the verified caller.
     if (context.customerId) payload.customerId = context.customerId;
 
+    // Round 4b (sweep row A33) — jobId verify-or-gate. Precedence: the
+    // ROUTER-resolved id (a repo lookup — see resolvedJobIdFrom) always wins
+    // over whatever this handler's OWN internal drafting LLM call put in
+    // `parsed.jobId`. Without this, the only way a resolver-verified jobId
+    // could ever reach the payload was the model choosing to echo it back
+    // from the "Known entities" JSON blob in `buildUserMessage` — and on
+    // the live sweep the model instead echoed the SPOKEN JOB NAME verbatim
+    // into `jobId` ("QA Sweep Furnace Inspection" — a title, not a uuid,
+    // despite the system prompt's "never invent a jobId"). That payload
+    // previously validated fine (nothing in this handler checked its
+    // shape), reached execution unmodified, and died on Postgres's
+    // `invalid input syntax for type uuid`. A drafting leg that depends on
+    // a model repeating a UUID is not resolution (mirrors job-edit-task.ts's
+    // `resolveJobIdGate` doc comment).
+    const missingFields: string[] = [];
+    let verifiedJobId: string | undefined;
+    const routedJobId = resolvedJobIdFrom(context);
+    if (routedJobId) {
+      payload.jobId = routedJobId;
+      verifiedJobId = routedJobId;
+    } else if (typeof payload.jobId === 'string' && !isUuid(payload.jobId)) {
+      // Never a valid execution target — CreateAppointmentExecutionHandler
+      // and place-hold.ts's ownership guard both require a real uuid.
+      // Preserve the text as the reference the post-draft resolver reads
+      // (`GATED_REFERENCE_SOURCES.jobId.payloadFields`,
+      // ai/resolution/gated-reference-resolution.ts) instead of letting a
+      // malformed id ride an approvable payload — #909 doctrine: an
+      // unresolved reference becomes a gate with a resolver behind it,
+      // never a malformed approvable payload.
+      if (!payload.jobReference) payload.jobReference = payload.jobId;
+      delete payload.jobId;
+      missingFields.push('jobId');
+    }
+
     const confidenceInput = parsed ?? {};
     const confidence = assessConfidence(confidenceInput);
 
@@ -674,6 +739,11 @@ export class CreateAppointmentAITaskHandler implements TaskHandler {
           })
         : undefined;
 
+    // Round 4b — the jobId gate (pushed above, if any) joins the
+    // pre-existing locationId gate. Both block auto-approval and approval
+    // alike (decideInitialStatus / approveProposal read the same array).
+    const allMissingFields = [...missingFields, ...(serviceLocationGap ? ['locationId'] : [])];
+
     const input: CreateProposalInput = {
       tenantId: context.tenantId,
       proposalType: this.taskType,
@@ -682,18 +752,25 @@ export class CreateAppointmentAITaskHandler implements TaskHandler {
       confidenceScore: confidence.score,
       confidenceFactors: confidence.factors,
       sourceContext:
-        context.conversationId || serviceLocationGap
+        context.conversationId || serviceLocationGap || verifiedJobId
           ? {
               ...(context.conversationId ? { conversationId: context.conversationId } : {}),
               // Everything the review card needs to close the gap in place —
               // the preserved address and where it came from — so the operator
               // never has to go looking for it in the database.
               ...(serviceLocationGap ? { serviceLocationGap } : {}),
+              // B4 allowlist — a router-resolved jobId is DB-verified, not
+              // model text, so it must survive routes/assistant.ts's
+              // dropUnverifiedIds scrub (which otherwise deletes any
+              // id-shaped payload value absent from the operator's own
+              // words). Mirrors ConfirmAppointmentTaskHandler's identical
+              // #920 stamp (voice-extended-tasks.ts).
+              ...(verifiedJobId ? { verifiedIds: { jobId: verifiedJobId } } : {}),
             }
           : undefined,
       // Blocks auto-approval (decideInitialStatus → 'draft') and blocks
-      // approveProposal until the operator supplies the location.
-      ...(serviceLocationGap ? { missingFields: ['locationId'] } : {}),
+      // approveProposal until the operator supplies the gated field(s).
+      ...(allMissingFields.length > 0 ? { missingFields: allMissingFields } : {}),
       createdBy: context.userId,
       // Appointments are capture-class — schedule changes are reversible
       // and the undo window provides the human-in-the-loop check. See D3.
