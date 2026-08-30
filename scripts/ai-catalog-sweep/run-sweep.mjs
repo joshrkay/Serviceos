@@ -470,6 +470,33 @@ async function ensureFixtures() {
       [TENANT_ID, CUSTOMER_ID],
     );
     summary.push(`appointments: cancelled ${surplusAppts.rowCount ?? 0} active for the fixture customer (chain-root reset)`);
+    // Round 6 — the corpus needs TWO appointment sources: A03's tune-up
+    // chain (created mid-run, lifecycled by A11/A12) AND a STANDING
+    // appointment for the rows that run after A12's cancel (A31 notify_delay,
+    // A27 confirm — on the 05:16 clean baseline these resolved the seed's
+    // standing appointment). The cancel-all above removes prior-run debris
+    // including any old standing row, so insert a fresh one: neutral notes
+    // (never "tune-up", so A11's named reference stays unambiguous), ~5 days
+    // out on the seed job.
+    await rw.query(
+      `INSERT INTO appointments (id, tenant_id, job_id, scheduled_start, scheduled_end, timezone, status, notes, created_by, created_at, updated_at)
+       VALUES (gen_random_uuid(), $1, $2, now() + interval '5 days', now() + interval '5 days 1 hour', 'America/New_York', 'scheduled', 'QA Sweep standing service visit (fixture)', 'ai-catalog-sweep-seed', now(), now())`,
+      [TENANT_ID, JOB_ID],
+    );
+    summary.push('appointments: inserted fresh standing fixture appointment');
+    // Round 6 — NEW_CUSTOMER_NAME ("Priya Shah") is the create_customer
+    // chain root: each run's execution mints another one, and later
+    // Priya-referencing rows (A24/A29/A41) gate on ambiguity across the
+    // copies. The resolver filters is_archived = false, so archiving prior
+    // copies is the quarantine; this run then creates the one live Priya.
+    const priyas = await rw.query(
+      `UPDATE customers SET is_archived = true, updated_at = now()
+        WHERE tenant_id = $1 AND is_archived = false
+          AND first_name = 'Priya' AND last_name = 'Shah'
+        RETURNING id`,
+      [TENANT_ID],
+    );
+    summary.push(`customers: archived ${priyas.rowCount ?? 0} prior chain-root Priya Shah copies`);
     // Same design one level down: NEW_JOB_SUMMARY ("QA Sweep Furnace
     // Inspection") is a per-run fabricated chain-root JOB, but the
     // resolver's job candidate query has NO status filter, so prior runs'
