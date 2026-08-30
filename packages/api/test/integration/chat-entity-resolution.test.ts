@@ -287,6 +287,57 @@ describe('Integration — #909 chat entity resolution (real Postgres + real reso
     return id;
   }
 
+  /**
+   * #909 (live sweep fix, 2026-08-30) — extra jobs for the SAME customer,
+   * unrelated to scheduling (no appointment of their own). Replicates the
+   * AI-catalog sweep's qa-matrix-A-customer fixture, which accumulates 7
+   * jobs over one run (invoices, estimates, warranty notes, ...) — the
+   * shape that tripped `resolveJob`'s job-count overflow guard and, through
+   * it, blocked appointment resolution entirely (see pg-entity-resolver.ts,
+   * `resolveJobIdsForCustomerName`'s doc comment).
+   */
+  async function seedExtraJobs(seed: Seed, count: number): Promise<void> {
+    for (let i = 0; i < count; i++) {
+      const jobId = crypto.randomUUID();
+      await jobRepo.create({
+        id: jobId,
+        tenantId: seed.tenantId,
+        customerId: seed.customerId,
+        locationId: (await pool.query<{ id: string }>(
+          `SELECT id FROM service_locations WHERE tenant_id = $1 AND customer_id = $2 LIMIT 1`,
+          [seed.tenantId, seed.customerId],
+        )).rows[0]!.id,
+        jobNumber: `JOB-909X-${jobId.slice(0, 8)}`,
+        summary: `Unrelated job ${i}`,
+        status: 'new',
+        priority: 'normal',
+        createdBy: seed.userId,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      });
+    }
+  }
+
+  /**
+   * #909 (live sweep fix, 2026-08-30) — a real `invoices` row for the seed
+   * job, inserted directly (no `InvoiceRepository` wired into this suite)
+   * so the new customer→job→invoice traversal in `resolveInvoice` has a
+   * real row to find. Mirrors migration 024's required columns.
+   */
+  async function seedInvoice(
+    seed: Seed,
+    invoiceNumber: string,
+    status: string = 'open',
+  ): Promise<string> {
+    const id = crypto.randomUUID();
+    await pool.query(
+      `INSERT INTO invoices (id, tenant_id, job_id, invoice_number, status, created_by)
+       VALUES ($1, $2, $3, $4, $5, $6)`,
+      [id, seed.tenantId, seed.jobId, invoiceNumber, status, seed.userId],
+    );
+    return id;
+  }
+
   /** The REAL chat route, wired the way app.ts wires it. */
   function buildApp(seed: Seed, proposalRepo: InMemoryProposalRepository, gateway: LLMGateway) {
     const app = express();
@@ -596,5 +647,243 @@ describe('Integration — #909 chat entity resolution (real Postgres + real reso
     await expect(
       approveProposal(proposalRepo, seed.tenantId, drafted.id, seed.userId, 'owner'),
     ).rejects.toThrow(/leadId/);
+  });
+
+  // ───────────────────────────────────────────────────────────────────────
+  // #909 (live sweep fix, 2026-08-30) — a customer with MANY jobs must not
+  // lose appointment resolution to `resolveJob`'s job-count overflow guard.
+  // Root cause: the 2026-08-30 AI-catalog sweep found cancel_appointment /
+  // reassign_appointment / add_crew_member / remove_crew_member all drafting
+  // with `appointmentReference` present and `missingFields: ['appointmentId']`
+  // NEVER lifting — approve 400 VALIDATION_ERROR forever. The qa-matrix-A-
+  // customer fixture accumulates 7 jobs over one sweep run but has only 2
+  // live appointments; `resolveJob`'s own overflow guard (more than
+  // MAX_JOB_CANDIDATES=5 confident matches) fired on the JOB count and
+  // `resolveAppointment`'s named-reference branch treated that as a
+  // terminal not_found, discarding a lookup that has no real ambiguity at
+  // the APPOINTMENT level at all. These tests replicate that exact shape
+  // against real Postgres.
+  // ───────────────────────────────────────────────────────────────────────
+  describe('appointment resolution — a customer with many jobs (live sweep A12–A15)', () => {
+    it('A12 cancel_appointment by BARE customer name: gate lifts even with 7 unrelated jobs on the account', async () => {
+      const seed = await seedTenant();
+      const appointmentId = await seedAppointment(
+        seed,
+        DateTime.now().setZone(TZ).plus({ days: 1 }).toUTC().toJSDate(),
+      );
+      // 6 more jobs (7 total with seedTenant's own) — one more than
+      // MAX_JOB_CANDIDATES, so `resolveJob`'s SQL (LIMIT 6) returns 6
+      // confident matches and its overflow guard fires. None of these jobs
+      // has an appointment of its own.
+      await seedExtraJobs(seed, 6);
+
+      const proposalRepo = new InMemoryProposalRepository();
+      const app = buildApp(
+        seed,
+        proposalRepo,
+        scriptedGateway([
+          classifierReply('cancel_appointment', {
+            // The EXACT live shape: a bare customer name, no job/date/time
+            // words at all (corpus.json A12: "Cancel {{FIXTURE_CUSTOMER}}'s
+            // appointment, customer request").
+            appointmentReference: CUSTOMER_NAME,
+            cancellationReason: 'customer request',
+          }),
+        ]),
+      );
+
+      const res = await supertest(app)
+        .post('/api/assistant/chat')
+        .send({
+          messages: [
+            { role: 'user', content: `Cancel ${CUSTOMER_NAME}'s appointment, customer request` },
+          ],
+        });
+      expect(res.status).toBe(200);
+
+      const [drafted] = await proposalRepo.findByTenant(seed.tenantId);
+      expect(drafted.proposalType).toBe('cancel_appointment');
+      expect(drafted.payload.appointmentId).toBe(appointmentId);
+      expect(missingFieldsFor(drafted)).toEqual([]);
+
+      // The exact call that answered 400 VALIDATION_ERROR live.
+      const approved = await approveProposal(
+        proposalRepo,
+        seed.tenantId,
+        drafted.id,
+        seed.userId,
+        'owner',
+      );
+      expect(approved.status).toBe('approved');
+
+      const result = await executeApproved(approved);
+      expect(result.success, result.error).toBe(true);
+
+      const { rows } = await pool.query<{ status: string }>(
+        `SELECT status FROM appointments WHERE tenant_id = $1 AND id = $2`,
+        [seed.tenantId, appointmentId],
+      );
+      expect(rows[0]!.status).toBe('canceled');
+    });
+
+    it("A13 reassign_appointment by \"<customer>'s appointment\": both technicianId AND appointmentId lift in one pass", async () => {
+      const seed = await seedTenant();
+      const appointmentId = await seedAppointment(
+        seed,
+        DateTime.now().setZone(TZ).plus({ days: 1 }).toUTC().toJSDate(),
+      );
+      await seedExtraJobs(seed, 6);
+
+      const techId = crypto.randomUUID();
+      await pool.query(
+        `INSERT INTO users (id, tenant_id, clerk_user_id, email, first_name, last_name, role)
+         VALUES ($1, $2, $3, $4, 'Tom', 'Baker', 'technician')`,
+        [techId, seed.tenantId, `clerk-${techId.slice(0, 8)}`, `tom-${techId.slice(0, 8)}@example.test`],
+      );
+
+      const proposalRepo = new InMemoryProposalRepository();
+      const app = buildApp(
+        seed,
+        proposalRepo,
+        scriptedGateway([
+          classifierReply('reassign_appointment', {
+            // corpus.json A13: "Reassign {{FIXTURE_CUSTOMER}}'s appointment
+            // to {{NEW_TECH_NAME}}".
+            appointmentReference: `${CUSTOMER_NAME}'s appointment`,
+            targetTechnicianName: 'Tom Baker',
+          }),
+        ]),
+      );
+
+      const res = await supertest(app)
+        .post('/api/assistant/chat')
+        .send({
+          messages: [
+            { role: 'user', content: `Reassign ${CUSTOMER_NAME}'s appointment to Tom Baker` },
+          ],
+        });
+      expect(res.status).toBe(200);
+
+      const [drafted] = await proposalRepo.findByTenant(seed.tenantId);
+      expect(drafted.proposalType).toBe('reassign_appointment');
+      expect(drafted.payload.toTechnicianId).toBe(techId);
+      expect(drafted.payload.appointmentId).toBe(appointmentId);
+      expect(missingFieldsFor(drafted)).toEqual([]);
+
+      await expect(
+        approveProposal(proposalRepo, seed.tenantId, drafted.id, seed.userId, 'owner'),
+      ).resolves.toBeTruthy();
+    });
+  });
+
+  // ───────────────────────────────────────────────────────────────────────
+  // #909 (live sweep fix, 2026-08-30) — invoice resolution has no
+  // document-number reference to work with when the classifier extracts
+  // (or the handler falls back to) a CUSTOMER NAME instead. Root cause:
+  // send_payment_reminder's `invoiceReference` fallback writes the
+  // customer's name onto the payload when no `jobReference`-shaped document
+  // number was extracted (ApplyLateFeeTaskHandler / SendPaymentReminderTask
+  // Handler, ai/tasks/voice-extended-tasks.ts), and `resolveInvoice` had NO
+  // path from a name to an invoice at all — unlike `resolveEstimate`'s B7.6
+  // customer→job→estimate traversal. These tests pin the new customer→
+  // job→invoice traversal against real Postgres.
+  // ───────────────────────────────────────────────────────────────────────
+  describe('invoice resolution — customer-name traversal (live sweep A20)', () => {
+    it('A20 send_payment_reminder by CUSTOMER NAME (no document number extracted): gate lifts to the one open invoice', async () => {
+      const seed = await seedTenant();
+      const invoiceId = await seedInvoice(seed, 'INV-0001', 'open');
+
+      const proposalRepo = new InMemoryProposalRepository();
+      const app = buildApp(
+        seed,
+        proposalRepo,
+        scriptedGateway([
+          classifierReply('send_payment_reminder', {
+            // The EXACT live shape (2026-08-30 sweep, proposal
+            // 6f0ee847-7465-45e7-887f-3dac092289a8): no jobReference at
+            // all, only customerName — the classifier never extracted
+            // "INV-0001" into the shared jobReference field, so the
+            // handler's fallback wrote the customer's name onto
+            // invoiceReference instead.
+            customerName: CUSTOMER_NAME,
+          }),
+        ]),
+      );
+
+      const res = await supertest(app)
+        .post('/api/assistant/chat')
+        .send({
+          messages: [
+            {
+              role: 'user',
+              content: `Send ${CUSTOMER_NAME} a payment reminder on invoice INV-0001`,
+            },
+          ],
+        });
+      expect(res.status).toBe(200);
+
+      const [drafted] = await proposalRepo.findByTenant(seed.tenantId);
+      expect(drafted.proposalType).toBe('send_payment_reminder');
+      expect(drafted.payload.invoiceReference).toBe(CUSTOMER_NAME);
+      expect(drafted.payload.invoiceId).toBe(invoiceId);
+      expect(missingFieldsFor(drafted)).toEqual([]);
+
+      // The exact call that answered 400 VALIDATION_ERROR live.
+      await expect(
+        approveProposal(proposalRepo, seed.tenantId, drafted.id, seed.userId, 'owner'),
+      ).resolves.toBeTruthy();
+    });
+
+    it('two invoices on the same customer are AMBIGUOUS — one question, never a guess, and approval unblocks after the answer', async () => {
+      const seed = await seedTenant();
+      const first = await seedInvoice(seed, 'INV-0001', 'partially_paid');
+      const second = await seedInvoice(seed, 'INV-0002', 'draft');
+
+      const proposalRepo = new InMemoryProposalRepository();
+      const app = buildApp(
+        seed,
+        proposalRepo,
+        // ONE classifier script entry: the answer turn must not reclassify.
+        scriptedGateway([
+          classifierReply('apply_late_fee', { customerName: CUSTOMER_NAME, amount: 2500 }),
+        ]),
+      );
+      const conversationId = crypto.randomUUID();
+
+      const first_res = await supertest(app)
+        .post('/api/assistant/chat')
+        .send({
+          messages: [
+            { role: 'user', content: `Apply a 25 dollar late fee to ${CUSTOMER_NAME}'s invoice` },
+          ],
+          conversationId,
+        });
+      expect(first_res.status).toBe(200);
+      expect(first_res.body.message.content).toContain('Which invoice did you mean');
+
+      const [gated] = await proposalRepo.findByTenant(seed.tenantId);
+      expect(gated.payload.invoiceId).toBeUndefined();
+      await expect(
+        approveProposal(proposalRepo, seed.tenantId, gated.id, seed.userId, 'owner'),
+      ).rejects.toThrow(/invoiceId/);
+
+      // Both candidates score IDENTICALLY on the customer-name match (same
+      // customer, same needle), so which one Postgres returns "first" on a
+      // tied `ORDER BY score DESC` is not something to assert on. Answer by
+      // NAME instead — a real operator naming the invoice number is exactly
+      // what `isDisambiguationAnswer`/`matchDisambiguationFollowUp` are for,
+      // and it pins a specific, deterministic outcome.
+      const secondRes = await supertest(app)
+        .post('/api/assistant/chat')
+        .send({ messages: [{ role: 'user', content: 'INV-0001' }], conversationId });
+      expect(secondRes.status).toBe(200);
+
+      const [resolved] = await proposalRepo.findByTenant(seed.tenantId);
+      expect(resolved.payload.invoiceId).toBe(first);
+      expect(resolved.payload.invoiceId).not.toBe(second);
+      await expect(
+        approveProposal(proposalRepo, seed.tenantId, resolved.id, seed.userId, 'owner'),
+      ).resolves.toBeTruthy();
+    });
   });
 });

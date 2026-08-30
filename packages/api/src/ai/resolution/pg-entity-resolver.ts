@@ -48,6 +48,14 @@ const MAX_JOB_CANDIDATES = 5;
 const MAX_ESTIMATE_CANDIDATES = 5;
 
 /**
+ * Most invoices a one-tap picker may honestly offer, for the customer-name
+ * traversal `resolveInvoice` falls back to when no document-number-shaped
+ * reference matched. Same ceiling and same overflow reasoning as
+ * `MAX_ESTIMATE_CANDIDATES`.
+ */
+const MAX_INVOICE_CANDIDATES = 5;
+
+/**
  * Most technicians a one-tap picker may honestly offer. Same ceiling and same
  * reasoning as `MAX_JOB_CANDIDATES` / `MAX_ESTIMATE_CANDIDATES`: since
  * `TECH_SCORE_EXPR` scores on first name too, a shared first name (or
@@ -211,6 +219,31 @@ function estimateNameNeedle(reference: string): string {
   const kept = base
     .split(/\s+/)
     .filter((w) => w.length > 0 && !ESTIMATE_DOC_STOPWORDS.has(w));
+  return kept.length > 0 ? kept.join(' ') : '';
+}
+
+/**
+ * #909 (live sweep fix, 2026-08-30) — document nouns an operator hangs on a
+ * spoken/typed INVOICE reference: "the Smith invoice", "the overdue Jones
+ * bill". A separate set from `ESTIMATE_DOC_STOPWORDS`, for the identical
+ * reason that one is separate from `APPOINTMENT_REFERENCE_STOPWORDS` — each
+ * is scoped to the one path whose phrasing it describes.
+ */
+const INVOICE_DOC_STOPWORDS = new Set(['invoice', 'invoices', 'bill', 'bills']);
+
+/**
+ * The person/company needle for an invoice reference, or '' when the
+ * reference names nobody ("the invoice", "that bill"). Same shape and same
+ * reasoning as `estimateNameNeedle`: '' rather than a fallback to the
+ * original phrase, so a nameless reference matches NOTHING instead of every
+ * invoice in the tenant.
+ */
+function invoiceNameNeedle(reference: string): string {
+  const base = extractNameLikeToken(reference);
+  if (!base) return '';
+  const kept = base
+    .split(/\s+/)
+    .filter((w) => w.length > 0 && !INVOICE_DOC_STOPWORDS.has(w));
   return kept.length > 0 ? kept.join(' ') : '';
 }
 
@@ -538,7 +571,68 @@ export class PgEntityResolver implements EntityResolver {
         .then((r) => r.rows),
     );
 
-    const candidates: EntityCandidate[] = rows.map((row) => ({
+    if (rows.length > 0) {
+      const candidates: EntityCandidate[] = rows.map((row) => ({
+        id: row.id,
+        kind: 'invoice' as EntityKind,
+        label: row.invoice_number,
+        hint: row.status ?? undefined,
+        score: Number(row.score),
+      }));
+      return this.toResult(candidates, reference);
+    }
+
+    // #909 (live sweep fix, 2026-08-30, A20/send_payment_reminder) — mirrors
+    // `resolveEstimate`'s B7.6 customer traversal, which this resolver never
+    // got the equivalent of. There is no `invoiceReference` extraction field
+    // anywhere in the classifier taxonomy (INVOICE_DOC_INTENTS' own comment,
+    // ai/agents/customer-calling/entity-resolution.ts) — every invoice-doc
+    // intent reuses `jobReference`, falling back to `customerName` on the
+    // HANDLER side (ApplyLateFeeTaskHandler / SendPaymentReminderTaskHandler,
+    // ai/tasks/voice-extended-tasks.ts) whenever the model didn't extract a
+    // document number. So "Send qa-matrix-A-customer a payment reminder on
+    // invoice INV-0001" — a real transcript from the AI-catalog sweep — can
+    // land with `invoiceReference` holding the CUSTOMER'S name, not a
+    // document number, and until now this resolver had no path from a name
+    // to an invoice at all: the number-similarity query above scores a name
+    // against `invoice_number` and never clears the prefilter. THE
+    // TRAVERSAL is customer → jobs → invoices, the same hop `resolveEstimate`
+    // makes and for the identical reason (`invoices` has no `customer_id`,
+    // only `job_id`).
+    const needle = invoiceNameNeedle(reference);
+    if (needle === '') return { kind: 'not_found', reference };
+
+    const CUSTOMER_SCORE_EXPR = `GREATEST(
+             strict_word_similarity($2, c.display_name),
+             COALESCE(strict_word_similarity($2, c.company_name), 0)
+           )`;
+    const customerRows = await withTenantConnection(this.pool, tenantId, (client) =>
+      client
+        .query<{
+          id: string;
+          invoice_number: string;
+          status: string | null;
+          score: number;
+        }>(
+          `SELECT i.id, i.invoice_number, i.status, ${CUSTOMER_SCORE_EXPR} AS score
+             FROM invoices i
+             JOIN jobs j
+               ON j.id = i.job_id
+              AND j.tenant_id = i.tenant_id
+             JOIN customers c
+               ON c.id = j.customer_id
+              AND c.tenant_id = j.tenant_id
+              AND c.is_archived = false
+            WHERE i.tenant_id = $1
+              AND ${CUSTOMER_SCORE_EXPR} > $3
+            ORDER BY score DESC
+            LIMIT ${MAX_INVOICE_CANDIDATES + 1}`,
+          [tenantId, needle, SIMILARITY_PREFILTER],
+        )
+        .then((r) => r.rows),
+    );
+
+    const customerCandidates: EntityCandidate[] = customerRows.map((row) => ({
       id: row.id,
       kind: 'invoice' as EntityKind,
       label: row.invoice_number,
@@ -546,7 +640,14 @@ export class PgEntityResolver implements EntityResolver {
       score: Number(row.score),
     }));
 
-    return this.toResult(candidates, reference);
+    // Same overflow honesty as `resolveEstimate`/`resolveJob`: a customer's
+    // name matches EVERY invoice of theirs, so a repeat customer with six
+    // open invoices is ordinary, not exotic, and `LIMIT 5` would hand back
+    // an arbitrary five as a picker that need not contain the right one.
+    const confident = customerCandidates.filter((c) => c.score >= TAU_ENT);
+    if (confident.length > MAX_INVOICE_CANDIDATES) return { kind: 'not_found', reference };
+
+    return this.toResult(customerCandidates.slice(0, MAX_INVOICE_CANDIDATES), reference);
   }
 
   /**
@@ -777,19 +878,59 @@ export class PgEntityResolver implements EntityResolver {
             );
           case 'not_found':
           case 'low_confidence':
-          case 'skipped':
-            // The name was searched and matched nothing confidently. This
-            // is the AC-3 defect's exact case: never fall through to the
+          case 'skipped': {
+            // The name was searched against JOBS and matched nothing
+            // confidently enough for `resolveJob` to answer alone. This is
+            // the AC-3 defect's exact case: never fall through to the
             // nameless tenant-wide fallback here — that would silently
             // answer about a different customer's appointment. Fold
-            // low_confidence into not_found too: a single below-τ_ent job
+            // low_confidence into this branch too: a single below-τ_ent job
             // match is not confident enough to silently drive an
             // appointment guess, and the caller (resolveVoiceEntityReferences)
             // has no case for `low_confidence` on this seam today, so
             // returning it here would be silently swallowed rather than
-            // surfaced for review — not_found at least lands as a
-            // pendingReference the operator can see.
+            // surfaced for review.
+            //
+            // #909 (live sweep, 2026-08-30) — a JOB-level miss is not the
+            // same thing as an APPOINTMENT-level miss, and `resolveJob`'s own
+            // result conflates the two. Its `not_found` fires not only when
+            // NO job matches the name, but also on its own overflow guard —
+            // MORE than MAX_JOB_CANDIDATES confident matches, which it
+            // (rightly, for a JOB picker) refuses to trim to an arbitrary
+            // five. But `resolveAppointment` was reusing that job-scoped
+            // verdict as a gate on whether an APPOINTMENT lookup may run at
+            // all, so a customer who simply accumulated more jobs than
+            // MAX_JOB_CANDIDATES over their history — an ordinary state for
+            // any active account, not an edge case — permanently lost
+            // "cancel/reassign/add/remove crew on <customer>'s appointment"
+            // even when that customer had exactly one or two SCHEDULED
+            // appointments to choose between. Measured live: the AI-catalog
+            // sweep's qa-matrix-A-customer fixture accumulates 7 jobs over
+            // one run (invoices, estimates, warranty notes — nothing to do
+            // with scheduling) but has only 2 live appointments; every one of
+            // cancel_appointment / reassign_appointment / add_crew_member /
+            // remove_crew_member's "<customer>('s) appointment" references
+            // hit this exact not_found and could never lift their
+            // `appointmentId` gate.
+            //
+            // Fix: re-scope to this customer's own jobs directly (bypassing
+            // `resolveJob`'s job-picker ceiling entirely — see
+            // `resolveJobIdsForCustomerName`'s doc comment) and hand them to
+            // `resolveAppointmentsForJobs`, which already does the HONEST
+            // overflow/ambiguity accounting for the entity kind that
+            // actually matters here: appointments, not jobs. A customer with
+            // no confident name match still gets `not_found`, exactly as
+            // before — this only adds a path FORWARD, never a new way to
+            // guess.
+            const jobIds = await this.resolveJobIdsForCustomerName(
+              tenantId,
+              stripClockTokens(nameToken),
+            );
+            if (jobIds.length > 0) {
+              return this.resolveAppointmentsForJobs(tenantId, reference, jobIds);
+            }
             return { kind: 'not_found', reference };
+          }
         }
       }
 
@@ -1000,6 +1141,55 @@ export class PgEntityResolver implements EntityResolver {
       return { kind: 'resolved', candidate: candidates[0] };
     }
     return { kind: 'ambiguous', candidates };
+  }
+
+  /**
+   * #909 (live sweep fix, 2026-08-30) — every job the named customer
+   * CONFIDENTLY owns, used only to re-scope an appointment lookup by
+   * APPOINTMENT count rather than by JOB count. See the call site in
+   * `resolveAppointment`'s named-reference branch for the full story.
+   *
+   * `>= TAU_ENT` (the resolved-not-ambiguous floor), not the looser
+   * `SIMILARITY_PREFILTER`, is deliberate: this list feeds
+   * `resolveAppointmentsForJobs`, which does its OWN honest
+   * overflow/ambiguity accounting on the resulting APPOINTMENTS. Pulling in
+   * low-confidence job matches here would let that appointment-level
+   * candidate set drift with jobs that are not actually this customer's,
+   * quietly moving what τ_ent means one layer up. `LIMIT 200` is a
+   * defensive cap on an EXISTENCE lookup, not a picker ceiling — this list
+   * is never shown to the operator; only `resolveAppointmentsForJobs`'s own
+   * `MAX_DISAMBIGUATION_CANDIDATES` ceiling governs what a picker may offer.
+   */
+  private async resolveJobIdsForCustomerName(
+    tenantId: string,
+    needle: string,
+  ): Promise<string[]> {
+    // '' when the reference named nobody — never turn that into "every job
+    // in the tenant", the same guard `resolveEstimate`/`resolveLead` apply
+    // to their own customer/company needles.
+    if (needle === '') return [];
+
+    const SCORE_EXPR = `GREATEST(
+             COALESCE(strict_word_similarity($2, c.display_name), 0),
+             COALESCE(strict_word_similarity($2, c.company_name), 0)
+           )`;
+    const rows = await withTenantConnection(this.pool, tenantId, (client) =>
+      client
+        .query<{ id: string }>(
+          `SELECT j.id
+             FROM jobs j
+             JOIN customers c
+               ON c.id = j.customer_id
+              AND c.tenant_id = j.tenant_id
+              AND c.is_archived = false
+            WHERE j.tenant_id = $1
+              AND ${SCORE_EXPR} >= $3
+            LIMIT 200`,
+          [tenantId, needle, TAU_ENT],
+        )
+        .then((r) => r.rows),
+    );
+    return rows.map((row) => row.id);
   }
 
   /**
