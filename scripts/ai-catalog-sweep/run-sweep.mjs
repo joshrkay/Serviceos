@@ -505,14 +505,29 @@ async function ensureFixtures() {
     // drafts on the fixture customer's jobs at bootstrap — void is
     // excluded from resolution candidates (#944) and rejected by every
     // executor, and this run's A01 creates its own fresh draft afterward.
-    const staleDrafts = await rw.query(
+    // Round 7b (per the fix/chat-invoice-gate-coverage root cause): the
+    // chain leaves ONE NON-VOID invoice PER RUN (open/paid/partially_paid,
+    // never void), so a drafts-only quarantine still lets the candidate set
+    // cross MAX_INVOICE_CANDIDATES (5) within a few rounds and trip the
+    // resolver's overflow refusal. Keep only the two earliest-created
+    // non-void invoices (the seed pair) and void every later one — this
+    // run's A01 then creates its own fresh draft, keeping the set at 3.
+    const staleInvoices = await rw.query(
       `UPDATE invoices i SET status = 'void', updated_at = now()
-        WHERE i.tenant_id = $1 AND i.status = 'draft'
+        WHERE i.tenant_id = $1
+          AND i.status NOT IN ('void', 'canceled')
           AND i.job_id IN (SELECT id FROM jobs WHERE tenant_id = $1 AND customer_id = $2)
+          AND i.id NOT IN (
+            SELECT i2.id FROM invoices i2
+              JOIN jobs j2 ON j2.id = i2.job_id AND j2.tenant_id = i2.tenant_id
+             WHERE i2.tenant_id = $1 AND j2.customer_id = $2
+               AND i2.status NOT IN ('void', 'canceled')
+             ORDER BY i2.created_at ASC LIMIT 2
+          )
         RETURNING i.id`,
       [TENANT_ID, CUSTOMER_ID],
     );
-    summary.push(`invoices: voided ${staleDrafts.rowCount ?? 0} stale drafts (chain-root reset)`);
+    summary.push(`invoices: voided ${staleInvoices.rowCount ?? 0} beyond the seed pair (chain-root reset)`);
     // Same design one level down: NEW_JOB_SUMMARY ("QA Sweep Furnace
     // Inspection") is a per-run fabricated chain-root JOB, but the
     // resolver's job candidate query has NO status filter, so prior runs'
