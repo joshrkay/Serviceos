@@ -449,31 +449,42 @@ async function ensureFixtures() {
     // appointment (the seed's) and cancel the younger surplus — cancelled
     // rows drop out of the resolver's candidate set. Scoped strictly to the
     // fixture customer's jobs on the QA tenant.
-    // Status vocabulary and active-set predicate mirror the resolver's own
-    // candidate query (pg-entity-resolver.ts: status <> 'canceled' AND
-    // scheduled_start >= now()) — single-l 'canceled' per
-    // appointmentStatusSchema (shared/contracts/status.ts).
+    // Round 5 correction — the corpus's appointment rows are a designed
+    // CHAIN: A03 books the tune-up ("Book {{FIXTURE_CUSTOMER}} for a
+    // tune-up tomorrow at 2pm") and A11/A13/A14/A15/A27 operate on THAT
+    // appointment (A11's verify literally targets ctx.A03.resultEntityId).
+    // The bootstrap contract is therefore ZERO active appointments for the
+    // fixture customer — a keep-oldest variant preserved a PRIOR run's A03
+    // tune-up and re-ambiguated every reference against this run's one
+    // (live evidence: sweep-8 A11 gated on appointmentId with two
+    // near-identical tune-ups). Cancel them all; the run then creates and
+    // operates on exactly one. Predicate mirrors the resolver's active set
+    // (status <> 'canceled' AND scheduled_start >= now()).
     const surplusAppts = await rw.query(
       `UPDATE appointments a SET status = 'canceled', updated_at = now()
         WHERE a.tenant_id = $1
           AND a.status <> 'canceled'
           AND a.scheduled_start >= now()
           AND a.job_id IN (SELECT id FROM jobs WHERE tenant_id = $1 AND customer_id = $2)
-          AND a.id <> (
-            SELECT a2.id FROM appointments a2
-              JOIN jobs j2 ON j2.id = a2.job_id AND j2.tenant_id = a2.tenant_id
-             WHERE a2.tenant_id = $1 AND a2.status <> 'canceled'
-               AND a2.scheduled_start >= now() AND j2.customer_id = $2
-             ORDER BY a2.created_at ASC LIMIT 1
-          )
         RETURNING a.id`,
       [TENANT_ID, CUSTOMER_ID],
     );
-    if ((surplusAppts.rowCount ?? 0) > 0) {
-      summary.push(`appointments: cancelled ${surplusAppts.rowCount} surplus scheduled (fixture normalization)`);
-    } else {
-      summary.push('appointments: single scheduled fixture intact');
-    }
+    summary.push(`appointments: cancelled ${surplusAppts.rowCount ?? 0} active for the fixture customer (chain-root reset)`);
+    // Same design one level down: NEW_JOB_SUMMARY ("QA Sweep Furnace
+    // Inspection") is a per-run fabricated chain-root JOB, but the
+    // resolver's job candidate query has NO status filter, so prior runs'
+    // copies stay candidates forever and every job-by-name reference
+    // (A16/A33/...) gates on ambiguity. Renaming is the only removal —
+    // quarantine prior copies with a superseded suffix so this run's
+    // creation is the one exact-title match.
+    const supersededJobs = await rw.query(
+      `UPDATE jobs SET summary = summary || ' [superseded ' || substr(id::text, 1, 8) || ']', updated_at = now()
+        WHERE tenant_id = $1 AND customer_id = $2
+          AND summary = 'QA Sweep Furnace Inspection'
+        RETURNING id`,
+      [TENANT_ID, CUSTOMER_ID],
+    );
+    summary.push(`jobs: quarantined ${supersededJobs.rowCount ?? 0} prior chain-root copies`);
     // Business timezone — confirmed root cause (2026-08-29 full sweep) of
     // A03/A33 (create_appointment / schedule_inspection) failing to draft
     // at all: routes/assistant.ts's create_appointment path honestly
