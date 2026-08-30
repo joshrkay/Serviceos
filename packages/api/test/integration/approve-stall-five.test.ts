@@ -371,19 +371,30 @@ describe('Integration — fix/approve-stall-five (real Postgres + real resolver)
   }
 
   // ─────────────────────────────────────────────────────────────────────
-  // A04 — update_invoice. Wiring check confirmed complete on main:
-  // InvoiceEditTaskHandler's OWN `resolveInvoiceId` never lifts the
-  // `invoiceId` gate for a free-text reference by itself — by design, an
-  // ILIKE-matched invoiceReference is stamped for review-card context only
-  // (see its doc comment) — but the chat route's SHARED post-draft
-  // `resolveGatedReferencesForChat` (#909's generic lifter,
-  // ai/resolution/gated-reference-resolution.ts) runs over EVERY drafted
-  // proposal's `missingFields` afterward, finds `invoiceId` gated with
-  // `payload.invoiceReference` set, and resolves it against the real
-  // invoice row through the SAME entity resolver. This test PROVES that
-  // second layer actually closes the gate end to end.
+  // A04 — update_invoice. Real bug, fixed: InvoiceEditTaskHandler's OWN
+  // `resolveInvoiceId` ran an entirely separate, bespoke free-text search
+  // (over `payload.invoiceReference`, from this handler's OWN internal LLM
+  // extraction pass) and NEVER lifted the `invoiceId` gate for it, by
+  // deliberate design — an ILIKE-matched reference was stamped onto the
+  // payload for review-card display only (see the method's doc comment).
+  // It never once consulted `resolvedInvoiceIdFrom(context)`, the SAME
+  // shared pre-draft resolver seam `ApplyLateFeeTaskHandler` /
+  // `SendPaymentReminderTaskHandler` / `SendInvoiceTaskHandler` already
+  // trust (voice-extended-tasks.ts) — populated from the classifier's OWN
+  // extraction (`entities.jobReference`, the catch-all field every
+  // INVOICE_DOC_INTENTS member reuses) BEFORE `handle()` ever runs, and
+  // already registered in `sourceContext.verifiedIds` so it survives
+  // `dropUnverifiedIds`. A resolver-verified match sat right next to the
+  // gate with nothing wired to lift it (the #909 class):
+  // `missingFields: ['invoiceId']` stuck forever, and `approveProposal`
+  // refused every update_invoice proposal chat ever drafted. Fixed by
+  // checking `resolvedInvoiceIdFrom(context)` first in `resolveInvoiceId`
+  // (invoice-edit-task.ts), falling back to the handler's own search only
+  // when that shared seam comes up empty. This test proves the fixed
+  // mechanism closes the gate end to end against a real resolver + a real
+  // seeded invoice row.
   // ─────────────────────────────────────────────────────────────────────
-  it('A04 update_invoice: chat draft → resolve (post-draft generic lifter) → approve → execute adds the real line item', async () => {
+  it('A04 update_invoice: chat draft → resolve (shared pre-draft resolver seam) → approve → execute adds the real line item', async () => {
     const seed = await seedTenant();
     const invoice = await seedDraftInvoice(seed);
 
