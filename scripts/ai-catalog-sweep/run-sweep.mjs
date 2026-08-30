@@ -449,15 +449,21 @@ async function ensureFixtures() {
     // appointment (the seed's) and cancel the younger surplus — cancelled
     // rows drop out of the resolver's candidate set. Scoped strictly to the
     // fixture customer's jobs on the QA tenant.
+    // Status vocabulary and active-set predicate mirror the resolver's own
+    // candidate query (pg-entity-resolver.ts: status <> 'canceled' AND
+    // scheduled_start >= now()) — single-l 'canceled' per
+    // appointmentStatusSchema (shared/contracts/status.ts).
     const surplusAppts = await rw.query(
-      `UPDATE appointments a SET status = 'cancelled', updated_at = now()
+      `UPDATE appointments a SET status = 'canceled', updated_at = now()
         WHERE a.tenant_id = $1
-          AND a.status = 'scheduled'
+          AND a.status <> 'canceled'
+          AND a.scheduled_start >= now()
           AND a.job_id IN (SELECT id FROM jobs WHERE tenant_id = $1 AND customer_id = $2)
           AND a.id <> (
             SELECT a2.id FROM appointments a2
               JOIN jobs j2 ON j2.id = a2.job_id AND j2.tenant_id = a2.tenant_id
-             WHERE a2.tenant_id = $1 AND a2.status = 'scheduled' AND j2.customer_id = $2
+             WHERE a2.tenant_id = $1 AND a2.status <> 'canceled'
+               AND a2.scheduled_start >= now() AND j2.customer_id = $2
              ORDER BY a2.created_at ASC LIMIT 1
           )
         RETURNING a.id`,
