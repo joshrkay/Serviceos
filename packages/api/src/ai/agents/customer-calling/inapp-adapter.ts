@@ -543,14 +543,18 @@ export function isNegation(text: string): boolean {
 }
 
 /**
- * D01 — the intents whose `intent_confirm` readback may be answered with
- * MORE DETAIL rather than a yes/no. Deliberately just the creation family:
- * these are the requests a caller builds up across turns ("book a visit" →
- * "Jordan Lee, 480-555-0199, next Tuesday" → "furnace diagnostic at their
- * home"), and they are the family for which "no such record yet" is the
- * NORMAL outcome (see `requiresExistingEntity` / toResolutionEvent). Every
- * other intent keeps the pre-D01 behavior byte-for-byte: anything that is
- * not a clear affirmation is a correction.
+ * D01 — the PENDING intents whose `intent_confirm` readback may be answered
+ * with MORE DETAIL rather than a yes/no. Deliberately just the creation
+ * family: these are the requests a caller builds up across turns ("book a
+ * visit" → "Jordan Lee, 480-555-0199, next Tuesday" → "furnace diagnostic at
+ * their home"), and they are the family for which "no such record yet" is
+ * the NORMAL outcome (see `requiresExistingEntity` / toResolutionEvent).
+ * Every other intent keeps the pre-D01 behavior byte-for-byte: anything that
+ * is not a clear affirmation is a correction.
+ *
+ * ('create_booking' is not an `IntentType` — it is a ProposalType only. Kept
+ * here for the same reason entity-resolution.ts keeps it in its own sets:
+ * vacuous today, correct the day the intent exists.)
  */
 const SLOT_FILL_INTENTS: ReadonlySet<string> = new Set([
   'create_appointment',
@@ -558,6 +562,79 @@ const SLOT_FILL_INTENTS: ReadonlySet<string> = new Set([
   'create_job',
   'create_customer',
   'draft_estimate',
+]);
+
+/**
+ * D01 round 2 — the intents a re-classified CONFIRM TURN may come back as
+ * while still describing the request we are confirming. Superset of
+ * `SLOT_FILL_INTENTS`, and the fix for the live turn-3 miss: the deployed
+ * sweep (session 0d1f2025, tenant a948cc66) carried turns 1 and 2 correctly
+ * and then lost the booking on turn 3, "It's for a furnace diagnostic
+ * inspection at their home" → `intent_confirm.correction` → intent_capture →
+ * the apology reprompt, no proposal.
+ *
+ * WHY: a bare job-description fragment classifies as `schedule_inspection`.
+ * Read its taxonomy block (intent-taxonomy-blocks.ts): it "books a
+ * permit/code inspection visit on a job" and extracts customerName /
+ * jobReference / jobTitle / dateTimeDescription — the SAME
+ * who/when/where/what vocabulary a booking is built from, with the
+ * inspection type itself going into `jobTitle`, a field that block
+ * documents as "also the short name of the new work being scheduled on
+ * create_appointment". A caller answering "what is this visit for?" with
+ * "a furnace diagnostic inspection" has not asked for a second proposal.
+ *
+ * `add_service_location` joins for the same reason ("at their home" is the
+ * booking's WHERE), and `confirm_appointment` because "next Tuesday morning
+ * works" is the booking's WHEN in agreement clothing.
+ *
+ * NOT a blanket accept — this is only the first of two gates. The second is
+ * `SLOT_DETAIL_ENTITY_KEYS` below: membership here lets an intent be
+ * considered, but only entities in that vocabulary are ever merged, so a
+ * sibling that arrives carrying nothing a booking can use is still a
+ * correction. Deliberately EXCLUDED: reschedule/cancel/reassign (they
+ * operate on an appointment that already exists — "reschedule the Miller
+ * appointment to Thursday" must not fold its newDateTimeDescription into a
+ * different, unsaved booking), add_note, log_permit, log_warranty_claim
+ * (each writes its own separate record), and every lookup.
+ */
+const SLOT_DETAIL_SIBLING_INTENTS: ReadonlySet<string> = new Set([
+  ...SLOT_FILL_INTENTS,
+  'schedule_inspection',
+  'add_service_location',
+  'confirm_appointment',
+]);
+
+/**
+ * D01 round 2 — the classifier entity keys that are genuinely SLOTS of a
+ * creation-family request: its WHO, WHEN, WHERE and WHAT. Only these are
+ * ever merged into the pending request, so a sibling classification can
+ * never smuggle a foreign field (a `paymentMethod`, an `appointmentReference`
+ * naming somebody else's appointment) into the booking under review.
+ *
+ * This is the "scope by entity overlap" half of the two-gate rule — the
+ * discipline that keeps the widened `SLOT_DETAIL_SIBLING_INTENTS` above from
+ * becoming a blanket accept. Keys are `ExtractedEntities` members
+ * (intent-classifier.ts); `customerId` is included because entity resolution
+ * folds a resolver-VERIFIED id under that key.
+ */
+const SLOT_DETAIL_ENTITY_KEYS: ReadonlySet<string> = new Set([
+  // WHO
+  'customerName',
+  'customerId',
+  'displayName',
+  'phone',
+  'email',
+  // WHEN
+  'dateTimeDescription',
+  'newDateTimeDescription',
+  'scheduleDescription',
+  // WHERE
+  'address',
+  'serviceAddress',
+  // WHAT
+  'jobTitle',
+  'jobReference',
+  'lineItemDescriptions',
 ]);
 
 export class InAppVoiceAdapter {
@@ -839,22 +916,33 @@ export class InAppVoiceAdapter {
    * D01 — decide what a non-yes/no answer to the `intent_confirm` readback
    * MEANS, given the re-classification of that turn.
    *
-   * Slot-fill (`intent_details_supplied`) when the turn produced at least
-   * one usable slot AND does not name a DIFFERENT actionable request:
-   *   - `unknown` — the classifier could not name an intent for a bare
-   *     detail fragment ("Jordan Lee, 480-555-0199, next Tuesday morning
-   *     works"); that is exactly what a slot-only turn looks like;
-   *   - the SAME intent we are confirming;
-   *   - a sibling of the same creation family — while confirming a booking,
-   *     "Jordan Lee, 480-555-0199" reads to the classifier as
-   *     `create_customer` and "furnace diagnostic at their home" as
-   *     `create_job`, but both are describing THIS booking's customer and
-   *     work, not asking for a second proposal.
+   * TWO gates, both of which must pass, so a widened intent family can never
+   * become a blanket accept:
    *
-   * Everything else — no new slots at all, or a clearly different intent
-   * (`send_invoice`, `cancel_appointment`, a lookup) — stays `correction`,
-   * the pre-D01 behavior: re-capture rather than fold a foreign request's
-   * entities into the pending one.
+   *   1. SAME REQUEST — the turn does not name a DIFFERENT actionable
+   *      request. Satisfied by `unknown` (the classifier could not name an
+   *      intent for a bare detail fragment — "Jordan Lee, 480-555-0199, next
+   *      Tuesday morning works" — which is exactly what a slot-only turn
+   *      looks like, and covers the low-confidence path too, since
+   *      `classifyIntent` maps a below-threshold pick to `unknown` while
+   *      KEEPING its extractedEntities); by the same intent we are
+   *      confirming; or by a `SLOT_DETAIL_SIBLING_INTENTS` member — while
+   *      confirming a booking, "Jordan Lee, 480-555-0199" reads as
+   *      `create_customer` and "a furnace diagnostic inspection at their
+   *      home" as `schedule_inspection`, and both are describing THIS
+   *      booking, not asking for a second proposal.
+   *
+   *   2. SLOT OVERLAP — after filtering to `SLOT_DETAIL_ENTITY_KEYS`, at
+   *      least one usable value remains. This is what bounds gate 1: only a
+   *      creation request's own who/when/where/what vocabulary is ever
+   *      merged, so a sibling arriving with a foreign field contributes
+   *      nothing and a sibling arriving with nothing at all is a correction.
+   *
+   * Everything else — a clearly different intent (`send_invoice`,
+   * `cancel_appointment`, a lookup), or a turn that adds no booking slot —
+   * stays `correction`, the pre-D01 behavior: re-capture rather than fold a
+   * foreign request's entities into the pending one, and rather than park
+   * the caller in an unbounded readback loop.
    */
   private confirmTurnSlotFillEvent(
     session: VoiceSession,
@@ -865,13 +953,18 @@ export class InAppVoiceAdapter {
     const entities = (classification.extractedEntities ?? {}) as Record<string, unknown>;
     const newSlots = Object.fromEntries(
       Object.entries(entities).filter(
-        ([, value]) => value !== undefined && value !== null && value !== '',
+        ([key, value]) =>
+          SLOT_DETAIL_ENTITY_KEYS.has(key) &&
+          value !== undefined &&
+          value !== null &&
+          value !== '' &&
+          !(Array.isArray(value) && value.length === 0),
       ),
     );
     const sameRequest =
       classification.intentType === 'unknown' ||
       classification.intentType === pendingIntent ||
-      (SLOT_FILL_INTENTS.has(classification.intentType) &&
+      (SLOT_DETAIL_SIBLING_INTENTS.has(classification.intentType) &&
         SLOT_FILL_INTENTS.has(pendingIntent ?? ''));
     if (!sameRequest || Object.keys(newSlots).length === 0) {
       return { type: 'correction', newTranscript: text };
