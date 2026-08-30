@@ -680,14 +680,14 @@
       "id": "A48",
       "intent": "update_brand_voice",
       "surface": "voice-session",
-      "utterance": "Set my brand voice: friendly, plain-spoken, sign off Thanks, QA Sweep HVAC",
+      "utterance": "Update our brand voice to a friendly tone",
       "expectedOutcome": "executes",
       "approve": true,
       "verify": {
         "table": "brand_voice_versions",
         "whereShape": "tenant_id = '{{tenantId}}' ORDER BY created_at DESC LIMIT 1"
       },
-      "notes": "Manual action class — never auto-approves; approve tail still applies (owner explicitly approves)."
+      "notes": "Manual action class — never auto-approves; approve tail still applies (owner explicitly approves). Round-2: utterance narrowed to one mappable tone word — the prior two-word phrasing landed the HONEST refuse-to-guess gate (verified correct, pinned in fix/approve-stall-five); expectation unchanged, input made mappable (A05 precedent)."
     },
     {
       "id": "A49",
