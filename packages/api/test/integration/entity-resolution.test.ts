@@ -22,6 +22,8 @@ import { PgJobRepository } from '../../src/jobs/pg-job';
 import { PgAppointmentRepository } from '../../src/appointments/pg-appointment';
 import { PgEstimateRepository } from '../../src/estimates/pg-estimate';
 import { createEstimate } from '../../src/estimates/estimate';
+import { PgInvoiceRepository } from '../../src/invoices/pg-invoice';
+import { createInvoice } from '../../src/invoices/invoice';
 import { buildLineItem } from '../../src/shared/billing-engine';
 import { PgAssignmentRepository } from '../../src/appointments/pg-assignment';
 import { assignTechnician } from '../../src/appointments/assignment';
@@ -1926,6 +1928,345 @@ describe('Postgres integration — entity resolution (P8)', () => {
           kind: 'estimate',
         });
         expect(result.kind).toBe('not_found');
+      });
+    });
+
+    // -- kind: 'invoice' -----------------------------------------------------
+    //
+    // #909 live-sweep regression (2026-08-30, A20 send_payment_reminder / A21
+    // apply_late_fee) — `resolveInvoice`'s customer traversal (added on
+    // fix/ref-lift-live-misses, merged as PR #930) shipped with ONLY the
+    // mocked-Pool unit suite behind it (test/ai/resolution/pg-entity-
+    // resolver.test.ts), never against real Postgres. These tests pin it the
+    // same way `kind: estimate` above pins B7.6.
+    describe('kind: invoice — customer → jobs → invoices', () => {
+      async function seedInvoiceForJob(
+        seed: RealisticSeed,
+        jobId: string,
+        opts?: { invoiceNumber?: string },
+      ): Promise<string> {
+        const localInvoiceRepo = new PgInvoiceRepository(pool);
+        const invoice = await createInvoice(
+          {
+            tenantId: seed.tenantId,
+            jobId,
+            invoiceNumber: opts?.invoiceNumber ?? `INV-${crypto.randomUUID().slice(0, 8)}`,
+            lineItems: [buildLineItem('li-1', 'Diagnostic', 1, 9900, 0, true, 'labor')],
+            createdBy: seed.userId,
+          },
+          localInvoiceRepo,
+        );
+        return invoice.id;
+      }
+
+      it('a spoken surname resolves an invoice whose own text names nobody', async () => {
+        const seed = await seedRealisticTenant({
+          displayName: 'Jamie Garcia',
+          jobSummary: 'AC repair',
+        });
+        const invoiceId = await seedInvoiceForJob(seed, seed.jobId);
+
+        // "Garcia" must be unreachable from every column an invoice-number
+        // query could touch. Asserted so the planting cannot creep back in.
+        const planted = await pool.query<{ n: string }>(
+          `SELECT count(*)::text AS n
+             FROM invoices i
+             JOIN jobs j ON j.id = i.job_id
+            WHERE i.tenant_id = $1
+              AND (i.invoice_number ILIKE '%garcia%'
+                   OR COALESCE(i.customer_message,'') ILIKE '%garcia%'
+                   OR j.summary ILIKE '%garcia%'
+                   OR j.job_number ILIKE '%garcia%')`,
+          [seed.tenantId],
+        );
+        expect(planted.rows[0].n).toBe('0');
+
+        const result = await resolver.resolve({
+          tenantId: seed.tenantId,
+          reference: 'the Garcia invoice',
+          kind: 'invoice',
+        });
+
+        expect(result.kind).toBe('resolved');
+        if (result.kind === 'resolved') {
+          expect(result.candidate.id).toBe(invoiceId);
+          expect(result.candidate.kind).toBe('invoice');
+        }
+      });
+
+      it('"the Garcia bill" resolves the same invoice — the document noun is stripped, not matched', async () => {
+        const seed = await seedRealisticTenant({
+          displayName: 'Jamie Garcia',
+          jobSummary: 'AC repair',
+        });
+        const invoiceId = await seedInvoiceForJob(seed, seed.jobId);
+
+        const result = await resolver.resolve({
+          tenantId: seed.tenantId,
+          reference: 'the Garcia bill',
+          kind: 'invoice',
+        });
+        expect(result.kind).toBe('resolved');
+        if (result.kind === 'resolved') expect(result.candidate.id).toBe(invoiceId);
+      });
+
+      it('an exact invoice number still resolves — the fast path is untouched', async () => {
+        const seed = await seedRealisticTenant({
+          displayName: 'Jamie Garcia',
+          jobSummary: 'AC repair',
+        });
+        const invoiceId = await seedInvoiceForJob(seed, seed.jobId, {
+          invoiceNumber: 'INV-0042',
+        });
+
+        const result = await resolver.resolve({
+          tenantId: seed.tenantId,
+          reference: 'INV-0042',
+          kind: 'invoice',
+        });
+        expect(result.kind).toBe('resolved');
+        if (result.kind === 'resolved') {
+          expect(result.candidate.id).toBe(invoiceId);
+          expect(result.candidate.score).toBe(1.0);
+        }
+      });
+
+      it('a prefix-sharing customer is NOT reachable — "Khanna" is a different person', async () => {
+        const seed = await seedRealisticTenant({
+          displayName: 'Aisha Khan',
+          jobSummary: 'Water heater replacement',
+        });
+        const khanInvoiceId = await seedInvoiceForJob(seed, seed.jobId);
+        const khannaJobId = await addRealisticJob(seed, {
+          displayName: 'Priya Khanna',
+          jobSummary: 'Drain cleaning',
+        });
+        await seedInvoiceForJob(seed, khannaJobId);
+
+        const result = await resolver.resolve({
+          tenantId: seed.tenantId,
+          reference: 'the Khan invoice',
+          kind: 'invoice',
+        });
+        expect(result.kind).toBe('resolved');
+        if (result.kind === 'resolved') expect(result.candidate.id).toBe(khanInvoiceId);
+      });
+
+      it('two invoices for the SAME customer stay a one-tap clarification, never a guess', async () => {
+        const seed = await seedRealisticTenant({
+          displayName: 'Jamie Garcia',
+          jobSummary: 'AC repair',
+        });
+        const first = await seedInvoiceForJob(seed, seed.jobId);
+        const second = await seedInvoiceForJob(seed, seed.jobId);
+
+        const result = await resolver.resolve({
+          tenantId: seed.tenantId,
+          reference: 'the Garcia invoice',
+          kind: 'invoice',
+        });
+        expect(result.kind).toBe('ambiguous');
+        if (result.kind === 'ambiguous') {
+          expect(result.candidates.map((c) => c.id).sort()).toEqual([first, second].sort());
+        }
+      });
+
+      // The live-verified fixture shape (e2e/qa-matrix/fixtures/seed.ts):
+      // first_name 'QA', last_name '<slug>', display_name '<slug>-customer'.
+      // The hyphenated display_name is the literal reference the classifier
+      // hands `resolveInvoice` when it extracted no document number — this is
+      // the exact string that stayed gated live on proposal
+      // a3e1d302-fecf-4f8c-bd4b-756eef4131d2 (tenant
+      // a948cc66-7279-44bd-9718-4ef7721f9422) with no pendingEntityAmbiguity
+      // attached. Three invoices, matching the live fixture's 3-invoice count
+      // and MAX_INVOICE_CANDIDATES=5's honest-ambiguity ceiling.
+      it('a hyphenated slug customerName ("qa-matrix-A-customer") with 3 invoices attaches a 3-candidate ambiguity', async () => {
+        const seed = await seedRealisticTenant({
+          displayName: 'qa-matrix-A-customer',
+          jobSummary: 'QA Matrix job for qa-matrix-A',
+        });
+        const first = await seedInvoiceForJob(seed, seed.jobId);
+        const second = await seedInvoiceForJob(seed, seed.jobId);
+        const third = await seedInvoiceForJob(seed, seed.jobId);
+
+        const result = await resolver.resolve({
+          tenantId: seed.tenantId,
+          reference: 'qa-matrix-A-customer',
+          kind: 'invoice',
+        });
+
+        expect(result.kind).toBe('ambiguous');
+        if (result.kind === 'ambiguous') {
+          expect(result.candidates.map((c) => c.id).sort()).toEqual(
+            [first, second, third].sort(),
+          );
+        }
+      });
+
+      it('a customer with MORE invoices than a picker can show escalates instead of offering an arbitrary five', async () => {
+        // Same overflow trap `resolveJob`/`resolveEstimate` already guard: a
+        // customer's name matches EVERY invoice of theirs at 1.000, so a
+        // repeat customer with six is ordinary, not exotic — `LIMIT 5` would
+        // hand back a picker that need not contain the right one.
+        const seed = await seedRealisticTenant({
+          displayName: 'Jamie Garcia',
+          jobSummary: 'AC repair',
+        });
+        for (let i = 0; i < 6; i++) await seedInvoiceForJob(seed, seed.jobId);
+
+        const result = await resolver.resolve({
+          tenantId: seed.tenantId,
+          reference: 'the Garcia invoice',
+          kind: 'invoice',
+        });
+        expect(result.kind).toBe('not_found');
+      });
+
+      it('a purely filler reference matches nothing — an empty needle must not match every customer', async () => {
+        const seed = await seedRealisticTenant({
+          displayName: 'Jamie Garcia',
+          jobSummary: 'AC repair',
+        });
+        await seedInvoiceForJob(seed, seed.jobId);
+
+        const result = await resolver.resolve({
+          tenantId: seed.tenantId,
+          reference: 'the invoice',
+          kind: 'invoice',
+        });
+        expect(result.kind).toBe('not_found');
+      });
+
+      it('never resolves an invoice by customer name across tenants', async () => {
+        const seed = await seedRealisticTenant({
+          displayName: 'Jamie Garcia',
+          jobSummary: 'AC repair',
+        });
+        await seedInvoiceForJob(seed, seed.jobId);
+        const stranger = await createTestTenant(pool);
+
+        const result = await resolver.resolve({
+          tenantId: stranger.tenantId,
+          reference: 'the Garcia invoice',
+          kind: 'invoice',
+        });
+        expect(result.kind).toBe('not_found');
+      });
+
+      it('an ARCHIVED customer cannot answer an invoice reference', async () => {
+        const seed = await seedRealisticTenant({
+          displayName: 'Jamie Garcia',
+          jobSummary: 'AC repair',
+        });
+        await seedInvoiceForJob(seed, seed.jobId);
+        await pool.query(`UPDATE customers SET is_archived = true WHERE id = $1`, [
+          seed.customerId,
+        ]);
+
+        const result = await resolver.resolve({
+          tenantId: seed.tenantId,
+          reference: 'the Garcia invoice',
+          kind: 'invoice',
+        });
+        expect(result.kind).toBe('not_found');
+      });
+
+      // Status floor, grounded in the execution handlers that consume the
+      // resolved invoiceId: apply-late-fee-handler.ts and apply-credit-
+      // handler.ts both hard-reject anything but 'open'/'partially_paid',
+      // and send-payment-reminder's dunning guard treats 'void' as a send
+      // that must never happen. No invoice-doc intent that reaches this
+      // traversal ever wants a 'void' or 'canceled' invoice as its target —
+      // sweep-tooling commit #940 independently observed "the customer->
+      // invoice traversal has no status filter" forcing an unnecessary
+      // disambiguation ask even on a clean two-invoice seed.
+      describe('status floor — void/canceled excluded, draft stays reachable', () => {
+        it('a VOID invoice never becomes a candidate — the one OPEN invoice resolves cleanly', async () => {
+          const seed = await seedRealisticTenant({
+            displayName: 'Jamie Garcia',
+            jobSummary: 'AC repair',
+          });
+          const openId = await seedInvoiceForJob(seed, seed.jobId);
+          const voidId = await seedInvoiceForJob(seed, seed.jobId);
+          await pool.query(`UPDATE invoices SET status = 'void' WHERE id = $1`, [voidId]);
+
+          const result = await resolver.resolve({
+            tenantId: seed.tenantId,
+            reference: 'the Garcia invoice',
+            kind: 'invoice',
+          });
+          expect(result.kind).toBe('resolved');
+          if (result.kind === 'resolved') expect(result.candidate.id).toBe(openId);
+        });
+
+        it('a CANCELED invoice never becomes a candidate either', async () => {
+          const seed = await seedRealisticTenant({
+            displayName: 'Jamie Garcia',
+            jobSummary: 'AC repair',
+          });
+          const openId = await seedInvoiceForJob(seed, seed.jobId);
+          const canceledId = await seedInvoiceForJob(seed, seed.jobId);
+          await pool.query(`UPDATE invoices SET status = 'canceled' WHERE id = $1`, [
+            canceledId,
+          ]);
+
+          const result = await resolver.resolve({
+            tenantId: seed.tenantId,
+            reference: 'the Garcia invoice',
+            kind: 'invoice',
+          });
+          expect(result.kind).toBe('resolved');
+          if (result.kind === 'resolved') expect(result.candidate.id).toBe(openId);
+        });
+
+        it('a customer whose ONLY invoice is void/canceled resolves not_found, never a guess', async () => {
+          const seed = await seedRealisticTenant({
+            displayName: 'Jamie Garcia',
+            jobSummary: 'AC repair',
+          });
+          const voidId = await seedInvoiceForJob(seed, seed.jobId);
+          await pool.query(`UPDATE invoices SET status = 'void' WHERE id = $1`, [voidId]);
+
+          const result = await resolver.resolve({
+            tenantId: seed.tenantId,
+            reference: 'the Garcia invoice',
+            kind: 'invoice',
+          });
+          expect(result.kind).toBe('not_found');
+        });
+
+        // 'draft' is deliberately NOT filtered: send_invoice
+        // (SendInvoiceTaskHandler) resolves this identical `invoiceId` field
+        // to reach a draft invoice that has not gone out yet — the ordinary
+        // case for that intent — and IssueInvoiceExecutionHandler requires
+        // status === 'draft'. Excluding it here would silently break that
+        // intent's resolution while fixing this one.
+        it('a DRAFT invoice still resolves — draft is not in the excluded status set', async () => {
+          const seed = await seedRealisticTenant({
+            displayName: 'Jamie Garcia',
+            jobSummary: 'AC repair',
+          });
+          const localInvoiceRepo = new PgInvoiceRepository(pool);
+          const draft = await createInvoice(
+            {
+              tenantId: seed.tenantId,
+              jobId: seed.jobId,
+              invoiceNumber: `INV-${crypto.randomUUID().slice(0, 8)}`,
+              lineItems: [buildLineItem('li-1', 'Diagnostic', 1, 9900, 0, true, 'labor')],
+              createdBy: seed.userId,
+            },
+            localInvoiceRepo,
+          );
+          expect(draft.status).toBe('draft');
+
+          const result = await resolver.resolve({
+            tenantId: seed.tenantId,
+            reference: 'the Garcia invoice',
+            kind: 'invoice',
+          });
+          expect(result.kind).toBe('resolved');
+          if (result.kind === 'resolved') expect(result.candidate.id).toBe(draft.id);
+        });
       });
     });
   });
