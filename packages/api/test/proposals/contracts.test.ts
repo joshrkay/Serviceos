@@ -60,6 +60,77 @@ describe('P2-002 — Typed proposal contracts', () => {
     expect(result.errors).toBeUndefined();
   });
 
+  // Round 4b (#909-adjacent, sweep row A33) — the live defect: a drafting
+  // handler echoed a job TITLE ("QA Sweep Furnace Inspection") into `jobId`.
+  // These pin the contract-level backstop: a non-uuid, non-chain-ref jobId
+  // is REJECTED (so any producer, not just create-appointment-task.ts, is
+  // caught), while a genuine uuid and the chain-ref sentinel format
+  // (`$ref:chain[N].jobId` — proposals/chain.ts) both still validate.
+  describe('create_appointment.jobId — uuid-or-chain-ref', () => {
+    const base = {
+      scheduledStart: '2026-04-01T09:00:00Z',
+      scheduledEnd: '2026-04-01T11:00:00Z',
+      customerId: validCustomerId,
+    };
+
+    it('rejects a job TITLE (free text) in jobId', () => {
+      const result = validateProposalPayload('create_appointment', {
+        ...base,
+        jobId: 'QA Sweep Furnace Inspection',
+      });
+      expect(result.valid).toBe(false);
+      expect(result.errors?.some((e) => e.startsWith('jobId'))).toBe(true);
+    });
+
+    it('accepts a genuine uuid', () => {
+      const result = validateProposalPayload('create_appointment', {
+        ...base,
+        jobId: validJobId,
+      });
+      expect(result.valid).toBe(true);
+    });
+
+    it('accepts the chain-ref sentinel token (unresolved chained dependent)', () => {
+      const result = validateProposalPayload('create_appointment', {
+        ...base,
+        jobId: '$ref:chain[0].jobId',
+      });
+      expect(result.valid).toBe(true);
+    });
+
+    it('rejects a malformed near-miss chain-ref token', () => {
+      const result = validateProposalPayload('create_appointment', {
+        ...base,
+        jobId: '$ref:chain[0]',
+      });
+      expect(result.valid).toBe(false);
+    });
+  });
+
+  // Round 4b — `customerId` tightened from a bare `z.string()` to `.uuid()`.
+  // Never a chain-ref target (chain.ts's ENTITY_KIND_TO_PAYLOAD_PATH only
+  // maps create_appointment ↔ jobId), so plain uuid rejection is enough.
+  describe('create_appointment.customerId — uuid, no chain-ref carve-out', () => {
+    it('rejects a customer NAME (free text) in customerId', () => {
+      const result = validateProposalPayload('create_appointment', {
+        scheduledStart: '2026-04-01T09:00:00Z',
+        scheduledEnd: '2026-04-01T11:00:00Z',
+        customerId: 'Jane Doe',
+      });
+      expect(result.valid).toBe(false);
+      expect(result.errors?.some((e) => e.startsWith('customerId'))).toBe(true);
+    });
+
+    it('accepts a genuine uuid', () => {
+      const result = validateProposalPayload('create_appointment', {
+        scheduledStart: '2026-04-01T09:00:00Z',
+        scheduledEnd: '2026-04-01T11:00:00Z',
+        customerId: validCustomerId,
+      });
+      expect(result.valid).toBe(true);
+    });
+  });
+
   it('create_appointment — accepts a valid appointmentType, rejects out-of-enum', () => {
     const base = {
       jobId: validJobId,
