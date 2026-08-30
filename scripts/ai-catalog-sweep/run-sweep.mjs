@@ -477,10 +477,13 @@ async function ensureFixtures() {
     // causes a reply to be drafted against doesn't get re-seeded forever.
     // Round 4 (A46 rerun gap): a review this sweep already REPLIED to still
     // matched the bare exists-check, so a rerun without qa:reset had nothing
-    // left to respond to and A46 died with no draft. The fixture's real
-    // contract is "an UNREPLIED recent 1-star review exists" — so only count
-    // reviews not yet targeted by an executed respond_to_review proposal
-    // (payload.reviewId, see execution/review-response-handler.ts).
+    // left to respond to — the drafting path correctly refuses a duplicate
+    // reply via its idempotency key ('review_response:<review row id>',
+    // proposal_type review_response_proposal; live audit evidence:
+    // proposal_persist_failed on session 456c9f89). The fixture's real
+    // contract is "an UNREPLIED recent 1-star review exists" — count only
+    // reviews whose idempotency key is unclaimed by ANY proposal (any
+    // status: persist fails on any existing key, not just executed ones).
     const reviewExisting = await rw.query(
       `SELECT gr.id FROM google_reviews gr
         WHERE gr.tenant_id = $1 AND gr.rating <= 1
@@ -488,9 +491,7 @@ async function ensureFixtures() {
           AND NOT EXISTS (
             SELECT 1 FROM proposals p
              WHERE p.tenant_id = gr.tenant_id
-               AND p.proposal_type = 'respond_to_review'
-               AND p.status = 'executed'
-               AND p.payload->>'reviewId' = gr.id::text
+               AND p.idempotency_key = 'review_response:' || gr.id::text
           )
         LIMIT 1`,
       [TENANT_ID],
@@ -1053,6 +1054,22 @@ async function runRow(corpusCase, ctx) {
         verdict = 'PARTIAL';
         outcomeClass = 'draft_gated';
         reason = `execution_failed: ${approveOutcome.executionError || 'unknown'}`;
+      } else if (
+        corpusCase.expectedOutcome === 'draft_gated' &&
+        approveOutcome.approveCall &&
+        approveOutcome.approveCall.status === 400
+      ) {
+        // Round 4 (D01) — a draft_gated row with approve:true exists to
+        // prove the GATE, and the gate's proof IS the 400 VALIDATION_ERROR
+        // from approveProposal ("cannot approve with unfilled required
+        // fields"). Live evidence: proposal 639012c6 (create_appointment,
+        // ready_for_review, missingFields:['customerId']) — exactly the
+        // expected outcome, previously mis-scored as a poll stall. Only
+        // draft_gated rows get this credit: an `executes` row whose approve
+        // 400s is still a PARTIAL.
+        verdict = 'PASS';
+        outcomeClass = 'draft_gated';
+        reason = 'approve_refused_gate_proven';
       } else {
         verdict = 'PARTIAL';
         outcomeClass = 'draft_gated';
