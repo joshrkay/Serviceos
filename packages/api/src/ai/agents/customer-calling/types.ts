@@ -146,6 +146,27 @@ export type CallingAgentEvent =
   | { type: 'system_failure'; reason: string }
   | { type: 'confirmed' }
   | { type: 'correction'; newTranscript: string }
+  /**
+   * D01 — the caller answered the `intent_confirm` readback with MORE DETAIL
+   * for the request already captured ("Jordan Lee, 480-555-0199, next
+   * Tuesday morning works") instead of a yes/no. Before this event the only
+   * non-affirmative outcome was `correction`, which clears `currentIntent`
+   * AND `extractedEntities` — so a booking that took three turns to describe
+   * threw away turn 1 on turn 2 and turn 2 on turn 3, and the caller ended
+   * back in `intent_capture` hearing the low-confidence reprompt with
+   * nothing drafted (live evidence, sweep row D01).
+   *
+   * Merges the newly extracted slots into `extractedEntities` and re-enters
+   * `entity_resolution`, so the accumulated references go through the SAME
+   * resolver the first turn used — a customer that DOES exist still gets a
+   * verified id, an ambiguous one still asks, and a genuinely new one still
+   * lands as a gated draft. Never a silent guess (CLAUDE.md invariant).
+   *
+   * Emitted only by an adapter that has re-classified the confirm turn and
+   * satisfied itself the caller is still describing the SAME request — see
+   * `InAppVoiceAdapter.confirmTurnSlotFillEvent`.
+   */
+  | { type: 'intent_details_supplied'; entities: Record<string, unknown> }
   | { type: 'closed' }
   | { type: 'second_intent' }
   | {

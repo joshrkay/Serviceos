@@ -1505,6 +1505,159 @@ describe('A02 — draft_estimate routing determinism (2026-08-29 live sweep)', (
   });
 });
 
+describe('D01 — new-booking routing determinism (2026-08-30 live sweep)', () => {
+  const inappContext = { tenantId: 't1' };
+
+  it('the exact D01 opening utterance routes to create_appointment with NO LLM call', async () => {
+    // Live evidence: this turn either took the sign-up override into
+    // create_customer, or came back low-confidence, which left the whole
+    // three-turn booking stuck in intent_capture ("I want to make sure I
+    // got that right — can you say that again?").
+    const gateway = mockGateway('{"intentType":"unknown","confidence":0.3}');
+    const result = await classifyIntent(
+      "I'd like to book a new customer for a diagnostic visit",
+      inappContext,
+      gateway,
+    );
+    expect(result.intentType).toBe('create_appointment');
+    expect(result.confidence).toBeGreaterThanOrEqual(TAU_INT);
+    expect(gateway.complete).not.toHaveBeenCalled();
+  });
+
+  it('fires WITHOUT extendedIntents — create_appointment is on every classifier profile', async () => {
+    for (const context of [
+      { tenantId: 't1' },
+      { tenantId: 't1', extendedIntents: true },
+      { tenantId: 't1', classifierProfile: 'caller' as const },
+      { tenantId: 't1', classifierProfile: 'field_tech' as const },
+    ]) {
+      const gateway = mockGateway('{"intentType":"unknown","confidence":0.2}');
+      const result = await classifyIntent('Book a diagnostic visit', context, gateway);
+      expect(result.intentType).toBe('create_appointment');
+      expect(gateway.complete).not.toHaveBeenCalled();
+    }
+  });
+
+  it('booking phrase variants short-circuit: book/schedule/set up × new customer/visit/appointment', async () => {
+    for (const transcript of [
+      'Book a new customer',
+      'set up a new customer appointment',
+      'Schedule a new customer visit',
+      "Let's set up a new customer for a maintenance visit",
+      'I need to book a diagnostic inspection',
+      'Can you schedule a maintenance visit?',
+    ]) {
+      const gateway = mockGateway('{"intentType":"unknown","confidence":0.2}');
+      const result = await classifyIntent(transcript, inappContext, gateway);
+      expect(result.intentType, `"${transcript}" should route to create_appointment`).toBe(
+        'create_appointment',
+      );
+      expect(gateway.complete).not.toHaveBeenCalled();
+    }
+  });
+
+  it('negative control: an utterance carrying real slots stays LLM-routed so entity extraction survives', async () => {
+    // The whole point of anchoring the patterns: a booking that names a
+    // customer or a date must keep the LLM's extractedEntities.
+    for (const transcript of [
+      'Schedule an appointment for Jordan Lee next Tuesday',
+      'book Jordan Lee for Tuesday morning',
+      'schedule a follow-up visit for the Miller job',
+    ]) {
+      const gateway = mockGateway(
+        '{"intentType":"create_appointment","confidence":0.9,"extractedEntities":{"customerName":"Jordan Lee"}}',
+      );
+      const result = await classifyIntent(transcript, inappContext, gateway);
+      expect(gateway.complete).toHaveBeenCalledTimes(1);
+      expect(result.extractedEntities?.customerName).toBe('Jordan Lee');
+    }
+  });
+
+  it('negative control: reschedule / cancel / lookup phrasings never match', async () => {
+    for (const transcript of [
+      'I need to reschedule my appointment',
+      'Cancel the appointment for the Miller job',
+      'Move my appointment to Thursday',
+      'What appointments are scheduled today?',
+    ]) {
+      const gateway = mockGateway('{"intentType":"reschedule_appointment","confidence":0.9}');
+      await classifyIntent(transcript, inappContext, gateway);
+      expect(gateway.complete, `"${transcript}" must stay LLM-routed`).toHaveBeenCalledTimes(1);
+    }
+  });
+
+  it('matchNewBookingPhrase unit-level: anchored booking openings only', async () => {
+    const { matchNewBookingPhrase } = await import(
+      '../../../src/ai/orchestration/intent-classifier'
+    );
+    expect(matchNewBookingPhrase("I'd like to book a new customer for a diagnostic visit")).toBe(
+      true,
+    );
+    expect(matchNewBookingPhrase('Book a diagnostic visit')).toBe(true);
+    expect(matchNewBookingPhrase('set up a new customer appointment')).toBe(true);
+    expect(matchNewBookingPhrase('')).toBe(false);
+    expect(matchNewBookingPhrase('Jordan Lee, 480-555-0199, next Tuesday morning works')).toBe(
+      false,
+    );
+    expect(matchNewBookingPhrase("It's for a furnace diagnostic inspection at their home")).toBe(
+      false,
+    );
+    expect(matchNewBookingPhrase('Schedule an appointment for Jordan Lee next Tuesday')).toBe(
+      false,
+    );
+    expect(matchNewBookingPhrase('I need to reschedule my appointment')).toBe(false);
+    // The qualifier is required — a bare, unqualified booking ask is one
+    // the classifier already gets right and stays LLM-routed.
+    expect(matchNewBookingPhrase('schedule an appointment')).toBe(false);
+    expect(matchNewBookingPhrase('schedule a visit')).toBe(false);
+  });
+
+  it('the P18-001 sign-up override no longer hijacks a booking that mentions a new customer', async () => {
+    const { isCreateCustomerSignupPhrasing } = await import(
+      '../../../src/ai/orchestration/intent-classifier'
+    );
+    // The D01 shapes: an operator booking work FOR a new customer.
+    expect(isCreateCustomerSignupPhrasing("I'd like to book a new customer for a diagnostic visit"))
+      .toBe(false);
+    expect(
+      isCreateCustomerSignupPhrasing(
+        'Book a new customer, Jordan Lee, for a diagnostic visit next Tuesday',
+      ),
+    ).toBe(false);
+    expect(isCreateCustomerSignupPhrasing('set up a new customer appointment')).toBe(false);
+
+    // …and the P18-001 rescue itself is untouched, including a caller who
+    // announces themselves AND asks for an appointment in one breath.
+    for (const phrasing of [
+      "I'd like to sign up as a new customer",
+      "I'm a new customer",
+      'Can you set up an account for me?',
+      'I want to become a customer',
+      'first time calling, please add me',
+      "I'm a new customer and I'd like to schedule an appointment",
+      'Add a new customer, Jordan Lee, 480-555-0199',
+    ]) {
+      expect(isCreateCustomerSignupPhrasing(phrasing), `"${phrasing}"`).toBe(true);
+    }
+  });
+
+  it('a richer booking that mentions a new customer reaches the LLM and KEEPS create_appointment', async () => {
+    // Too rich for the anchored matcher (it names a customer), so it goes
+    // through the LLM — and the sign-up override must no longer rewrite it.
+    const gateway = mockGateway(
+      '{"intentType":"create_appointment","confidence":0.9,"extractedEntities":{"customerName":"Jordan Lee"}}',
+    );
+    const result = await classifyIntent(
+      'Book a new customer, Jordan Lee, for a diagnostic visit next Tuesday',
+      inappContext,
+      gateway,
+    );
+    expect(gateway.complete).toHaveBeenCalledTimes(1);
+    expect(result.intentType).toBe('create_appointment');
+    expect(result.extractedEntities?.customerName).toBe('Jordan Lee');
+  });
+});
+
 describe('intent-classifier — lookup_job_profit (P22-005)', () => {
   const tenantId = 'tenant-1';
 
