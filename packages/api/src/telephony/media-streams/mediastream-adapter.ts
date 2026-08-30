@@ -64,6 +64,7 @@ import {
   detectLanguageFromTranscript,
   detectLanguageSwitchIntent,
   isLanguageSupported,
+  MAX_LANGUAGE_SWITCHES_PER_CALL,
 } from '../../ai/orchestration/language-detector';
 import {
   renderTtsText,
@@ -426,15 +427,16 @@ const TELEPHONY_LEASE_TTL_MS = 2 * 60 * 60 * 1000;
 const SENTIMENT_MAX_BUDGET_RATIO = 0.8;
 
 /**
- * UB-C1 — flap guard: maximum Deepgram finish+reopen cycles per call.
- * Two covers the legitimate shapes (wrong opening language → correct one,
- * plus one explicit switch back); anything more is flapping on the
- * revenue path and is refused.
+ * UB-C1 — the per-call language flap cap. Defined in
+ * `ai/orchestration/language-detector.ts` alongside the rest of the language
+ * POLICY it belongs to (`detectLanguageSwitchIntent`, `isLanguageSupported`)
+ * and re-exported here so this module's existing importers are unchanged.
  *
- * Exported (#846) so the Gather adapter's language_switch branch enforces
- * the SAME per-call cap — one policy, both transports.
+ * It moved because a third surface now enforces it — the in-app voice-session
+ * adapter — and an in-app turn should not have to import the Deepgram
+ * websocket adapter to learn a number. See that constant's doc comment.
  */
-export const MAX_LANGUAGE_SWITCHES_PER_CALL = 2;
+export { MAX_LANGUAGE_SWITCHES_PER_CALL } from '../../ai/orchestration/language-detector';
 
 /**
  * VOX-35c — after this many CONSECUTIVE `speechTurn` failures the adapter

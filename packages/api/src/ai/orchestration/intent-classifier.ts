@@ -1415,7 +1415,8 @@ function matchOwnerOperatorCommand(transcript: string): IntentClassification | n
  * (EXTENDED_INTENTS_PROMPT_SECTION) owns classification + entity
  * extraction for all non-read-only extended intents.
  * Permitted phrase-match intents: lookup_day_overview, lookup_digest,
- * lookup_pending_items, lookup_revenue, lookup_my_day, lookup_leads.
+ * lookup_pending_items, lookup_revenue, lookup_my_day, lookup_leads,
+ * lookup_materials, lookup_catalog.
  *
  * #910 — lookup_revenue / lookup_my_day / lookup_leads added: the 2026-08-29
  * live sweep found these stereotyped, entity-free lookup phrasings answered
@@ -1432,6 +1433,34 @@ function matchOwnerOperatorCommand(transcript: string): IntentClassification | n
  * entity-free contract exactly like lookup_day_overview/digest/
  * pending_items — this closes the same non-determinism gap the P18-001
  * short-circuit already closed for those three.
+ *
+ * #910 completion (2026-08-29 follow-up sweep) — the SAME class of
+ * classifier flakiness recurred on L20 (`lookup_materials`, "What's on the
+ * shopping list?") post-#916, so the audit was widened to every OTHER
+ * lookup-skill member whose `executeLookupAnswer` case (workers/voice-
+ * lookup-answer.ts) never reads a customer/job/technician id off the input
+ * at all:
+ *   - `lookup_materials` — the BARE ask ("what's on the shopping list?",
+ *     no job named) is genuinely entity-free; the job-scoped phrasing
+ *     ("what materials are open on the Patel job?") still falls through to
+ *     the LLM unchanged, since only the anchored no-job pattern is listed
+ *     below — a spoken job reference is exactly the "produces entities"
+ *     case this table's RULE excludes.
+ *   - `lookup_catalog` — never takes an entity at all (tenant-wide price
+ *     book); "Show the price book" is the exact phrasing R04/L12 already
+ *     exercise live, so short-circuiting it is pure belt-and-braces against
+ *     the same gpt-4o-mini non-determinism, not a response to an observed
+ *     failure.
+ * `lookup_availability` was deliberately NOT added here: the live sweep
+ * (L09, "Who's free Thursday?") shows that phrasing legitimately resolving
+ * to `lookup_crew_schedule` today — it does not "unambiguously map" to
+ * `lookup_availability`, so hard-coding it would overrule a currently-
+ * correct LLM classification rather than fix a bug. `lookup_crew_schedule`
+ * / `lookup_timesheets` were also left alone: both take an OPTIONAL
+ * technician reference and are not evidenced as flaky on their bare
+ * phrasing — see CLAUDE.md's "ambiguity becomes a clarification, never a
+ * silent guess" posture for why an unevidenced, optional-entity intent
+ * doesn't get a preemptive short-circuit here.
  */
 const EXTENDED_INTENT_PHRASES: ReadonlyArray<{ intent: IntentType; patterns: ReadonlyArray<RegExp> }> = [
   {
@@ -1492,6 +1521,19 @@ const EXTENDED_INTENT_PHRASES: ReadonlyArray<{ intent: IntentType; patterns: Rea
       /^\s*any\s+new\s+leads\s*[?.!]?\s*$/i,
       /^\s*how\s+many\s+(?:open\s+)?leads\s+(?:do\s+we\s+have|are\s+there)\s*[?.!]?\s*$/i,
     ],
+  },
+  {
+    // #910 completion / L20 — "What's on the shopping list?" The BARE ask
+    // only — no job name captured (a job-scoped ask keeps its own entity
+    // and stays LLM-routed; see the table's doc comment above).
+    intent: 'lookup_materials',
+    patterns: [/^\s*what(?:'s| is)\s+on\s+the\s+shopping\s+list\s*[?.!]?\s*$/i],
+  },
+  {
+    // #910 completion — "Show the price book" (the exact live phrasing
+    // R04/L12 already exercise). Tenant-wide, never entity-bearing.
+    intent: 'lookup_catalog',
+    patterns: [/^\s*show\s+(?:me\s+)?the\s+price\s+book\s*[?.!]?\s*$/i],
   },
 ];
 
@@ -1560,6 +1602,126 @@ export function matchLookupEstimatesPhrase(
   const customerName = match[1].trim();
   if (!customerName) return null;
   return { customerName };
+}
+
+/**
+ * A02 (2026-08-29 live sweep) — deterministic short-circuit for the
+ * canonical dictated `draft_estimate` phrasing: an explicit "draft/create/
+ * write/prepare/generate an estimate for <customer>: <line items>"
+ * imperative. Colon-delimited `customerName` capture, same shape as
+ * `matchLookupEstimatesPhrase` immediately above.
+ *
+ * WHY THIS EXISTS: routes/assistant.ts's chat surface dispatches a
+ * classified `draft_estimate` straight to the real `EstimateTaskHandler`
+ * (CHAT_INTENT_TO_REGISTRY_KEY) with no confidence gate of its own — so
+ * dispatch was never the seam. The seam was upstream, exactly like #910's
+ * lookup rows: `classify_intent` intermittently missed the mapped
+ * `draft_estimate` intent for this stereotyped two-price phrasing (low
+ * confidence, or an outright wrong pick), which dropped the turn past
+ * BOTH registry maps to routes/assistant.ts's generic LLM fallback — a
+ * path with no database and no tools that fabricated a whole proposal
+ * card (id `estimate-001`, invalid-UUID, 404s on approve) because nothing
+ * upstream of it verified the model's self-reported "I drafted this"
+ * claim. See ai/orchestration/assistant-honesty-guard.ts for the
+ * companion fix that makes that fallback structurally incapable of
+ * emitting a proposal at all, regardless of classification.
+ *
+ * Safe to bypass the LLM here for the same reason `matchLookupEstimatesPhrase`
+ * is, despite `draft_estimate` being a write (unlike that read-only intent):
+ * D-004 — a drafted estimate is proposal-first, never auto-executed, and an
+ * unresolved/ambiguous `customerName` still goes through the SAME
+ * EntityResolver (resolveVerifiedIdsForDraft) the LLM-classified path uses
+ * — unambiguous fills the id, ambiguous asks ONE clarifying question,
+ * not-found lands in `missingFields` and forces 'draft'. A misfire here at
+ * worst drafts an estimate nobody asked for, sitting unapproved; it can
+ * never silently execute or move money.
+ */
+const DRAFT_ESTIMATE_PATTERN =
+  /^\s*(?:draft|create|write|prepare|generate)\s+(?:an?\s+)?estimate\s+for\s+(.{1,80}?)\s*:\s*\S/i;
+
+export function matchDraftEstimatePhrase(
+  transcript: string,
+): { customerName: string } | null {
+  if (!transcript) return null;
+  const match = DRAFT_ESTIMATE_PATTERN.exec(transcript);
+  if (!match) return null;
+  const customerName = match[1].trim();
+  if (!customerName) return null;
+  return { customerName };
+}
+
+/**
+ * #910 completion / L03 — deterministic short-circuit for the stereotyped
+ * `lookup_balance` phrasing ("What does X owe me?") — the exact copy
+ * `lookup-dispatch.ts`'s own `noCustomerReferenceReply` already suggests
+ * back to an operator who asked with no customer named
+ * ("what does Henderson owe me?"). Same posture as
+ * `matchLookupEstimatesPhrase`: extracts `customerName`, resolved
+ * downstream through the SAME `EntityResolver` the LLM-classified path
+ * already uses for `CUSTOMER_SCOPED_LOOKUP_INTENTS` (voice-lookup-
+ * answer.ts) — an unambiguous match fills the id, ambiguous asks "which
+ * one?", not-found refuses honestly. Anchored so a request that names a
+ * balance for something OTHER than the caller ("what does he owe for the
+ * Henderson job?") does not match — it falls through to the LLM unchanged.
+ */
+const LOOKUP_BALANCE_PATTERN = /^\s*what\s+does\s+(.{1,80}?)\s+owe\s+me\s*[?.!]?\s*$/i;
+
+export function matchLookupBalancePhrase(transcript: string): { customerName: string } | null {
+  if (!transcript) return null;
+  const match = LOOKUP_BALANCE_PATTERN.exec(transcript);
+  if (!match) return null;
+  const customerName = match[1].trim();
+  if (!customerName) return null;
+  return { customerName };
+}
+
+/**
+ * #910 completion / L06 — deterministic short-circuit for the stereotyped
+ * `lookup_account_summary` phrasing ("Give me an account summary for X").
+ * Same posture as `matchLookupEstimatesPhrase` / `matchLookupBalancePhrase`
+ * — extracts `customerName`, resolved downstream through the same
+ * `EntityResolver`.
+ */
+const LOOKUP_ACCOUNT_SUMMARY_PATTERN =
+  /^\s*give\s+me\s+an?\s+account\s+summary\s+for\s+(.{1,80}?)\s*[?.!]?\s*$/i;
+
+export function matchLookupAccountSummaryPhrase(
+  transcript: string,
+): { customerName: string } | null {
+  if (!transcript) return null;
+  const match = LOOKUP_ACCOUNT_SUMMARY_PATTERN.exec(transcript);
+  if (!match) return null;
+  const customerName = match[1].trim();
+  if (!customerName) return null;
+  return { customerName };
+}
+
+/**
+ * #910 completion / L13 — deterministic short-circuit for the stereotyped
+ * `lookup_job_profit` phrasing ("Did I make money on the X job?") — the
+ * exact copy `voice-lookup-answer.ts`'s own job-profit "no job named" reply
+ * already suggests back ("Say which job you mean — for example, 'Did I
+ * make money on the Miller job?'"). Unlike `matchLookupEstimatesPhrase`
+ * this extracts `jobReference` (not `customerName`) — resolved downstream
+ * through the SAME `EntityResolver`, `kind: 'job'`, that the LLM-classified
+ * path already uses for `lookup_job_profit` (see `IntentType`'s own doc
+ * comment on the field). Deliberately narrow: only THIS exact stereotyped
+ * phrasing short-circuits — the other job-profit phrasings already covered
+ * by the "routes 5+ distinct profit phrasings" test ("What's my margin on
+ * the Johnson install?", "How'd we do on the Smith water heater?", etc.)
+ * keep going through the LLM unchanged, since they aren't evidenced as
+ * flaky and aren't as unambiguously anchorable as this one.
+ */
+const LOOKUP_JOB_PROFIT_PATTERN =
+  /^\s*did\s+i\s+make\s+money\s+on\s+the\s+(.{1,80}?)\s+job\s*[?.!]?\s*$/i;
+
+export function matchLookupJobProfitPhrase(transcript: string): { jobReference: string } | null {
+  if (!transcript) return null;
+  const match = LOOKUP_JOB_PROFIT_PATTERN.exec(transcript);
+  if (!match) return null;
+  const jobReference = match[1].trim();
+  if (!jobReference) return null;
+  return { jobReference };
 }
 
 /** RV-071 — predicate the voice routing layers use to gate owner approval intents. */
@@ -1956,11 +2118,56 @@ async function classifyIntentRaw(
         extractedEntities: { customerName: lookupEstimatesMatch.customerName },
       };
     }
+
+    // #910 completion — same extendedIntents-gated, pre-LLM slot, closing the
+    // same non-determinism gap for the remaining entity-bearing lookups the
+    // 2026-08-29 follow-up sweep caught (L03/L06/L13) — see each matcher's
+    // own doc comment for its downstream resolution.
+    const lookupBalanceMatch = matchLookupBalancePhrase(transcript);
+    if (lookupBalanceMatch) {
+      return {
+        intentType: 'lookup_balance',
+        confidence: 0.95,
+        reasoning: 'matched deterministic lookup_balance phrasing',
+        extractedEntities: { customerName: lookupBalanceMatch.customerName },
+      };
+    }
+    const lookupAccountSummaryMatch = matchLookupAccountSummaryPhrase(transcript);
+    if (lookupAccountSummaryMatch) {
+      return {
+        intentType: 'lookup_account_summary',
+        confidence: 0.95,
+        reasoning: 'matched deterministic lookup_account_summary phrasing',
+        extractedEntities: { customerName: lookupAccountSummaryMatch.customerName },
+      };
+    }
+    const lookupJobProfitMatch = matchLookupJobProfitPhrase(transcript);
+    if (lookupJobProfitMatch) {
+      return {
+        intentType: 'lookup_job_profit',
+        confidence: 0.95,
+        reasoning: 'matched deterministic lookup_job_profit phrasing',
+        extractedEntities: { jobReference: lookupJobProfitMatch.jobReference },
+      };
+    }
     if (matchEnRoutePhrase(transcript)) {
       return {
         intentType: 'en_route',
         confidence: 0.95,
         reasoning: 'matched deterministic en_route phrasing',
+      };
+    }
+
+    // A02 (2026-08-29 live sweep) — same extendedIntents-gated, pre-LLM slot;
+    // see matchDraftEstimatePhrase's doc comment for why this write intent
+    // is still safe to short-circuit deterministically.
+    const draftEstimateMatch = matchDraftEstimatePhrase(transcript);
+    if (draftEstimateMatch) {
+      return {
+        intentType: 'draft_estimate',
+        confidence: 0.95,
+        reasoning: 'matched deterministic draft_estimate phrasing',
+        extractedEntities: { customerName: draftEstimateMatch.customerName },
       };
     }
   }

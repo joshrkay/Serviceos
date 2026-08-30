@@ -259,12 +259,13 @@ export interface VoiceSession {
    */
   ttsVoice?: string;
   /**
-   * #846 — per-call count of honored mid-call language switches on the
-   * Gather transport, capped at the same MAX_LANGUAGE_SWITCHES_PER_CALL
-   * the media-streams adapter enforces (its counter lives in adapter
-   * state next to the Deepgram socket; Gather has no adapter-side call
-   * state, so the flap guard rides the session). Adapter-side like
-   * `leadId`: the FSM never reads it.
+   * #846 — per-session count of honored mid-session language switches on
+   * the transports that have no adapter-side call state of their own: the
+   * Gather adapter and the in-app voice-session adapter. Both cap it at
+   * MAX_LANGUAGE_SWITCHES_PER_CALL (`ai/orchestration/language-detector.ts`),
+   * the same policy the media-streams adapter enforces — its counter lives
+   * in adapter state next to the Deepgram socket, so it does not ride the
+   * session. Adapter-side like `leadId`: the FSM never reads it.
    */
   languageSwitchCount?: number;
   /**
