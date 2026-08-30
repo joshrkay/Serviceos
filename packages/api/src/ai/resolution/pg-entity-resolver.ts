@@ -606,6 +606,25 @@ export class PgEntityResolver implements EntityResolver {
              strict_word_similarity($2, c.display_name),
              COALESCE(strict_word_similarity($2, c.company_name), 0)
            )`;
+    // Status floor, grounded in the EXECUTION handlers that actually consume
+    // a resolved `invoiceId` (proposals/execution/*): `apply-late-fee-
+    // handler.ts` and `apply-credit-handler.ts` both hard-reject anything but
+    // 'open'/'partially_paid' ("A fee on a paid/void/draft invoice is
+    // wrong"), and `send-payment-reminder`'s dunning guard
+    // (notifications/transactional-comms-service.ts's
+    // `reminderSuppressionReason`) treats 'void' the same way. No handler
+    // that resolves `invoiceId` through this shared kind ever wants a 'void'
+    // or 'canceled' invoice — both are terminal dead ends for every
+    // invoice-doc intent, so offering one as a candidate is a picker the
+    // operator can only ever reject. 'draft' is deliberately LEFT IN: unlike
+    // the money-moving handlers above, `SendInvoiceTaskHandler` (send_invoice)
+    // resolves this same `invoiceId` field to REACH a draft invoice — "send
+    // Rodriguez's invoice" for a draft that hasn't gone out yet is the
+    // ordinary case, and `IssueInvoiceExecutionHandler` requires status ===
+    // 'draft' (issue-invoice-handler.ts:145). Excluding it here would have
+    // silently broken that intent to fix this one — the opposite of this
+    // resolver's job. 'paid'/'open'/'partially_paid' stay reachable for the
+    // same reason: record_refund/record_payment legitimately target them.
     const customerRows = await withTenantConnection(this.pool, tenantId, (client) =>
       client
         .query<{
@@ -624,6 +643,7 @@ export class PgEntityResolver implements EntityResolver {
               AND c.tenant_id = j.tenant_id
               AND c.is_archived = false
             WHERE i.tenant_id = $1
+              AND i.status NOT IN ('void', 'canceled')
               AND ${CUSTOMER_SCORE_EXPR} > $3
             ORDER BY score DESC
             LIMIT ${MAX_INVOICE_CANDIDATES + 1}`,
