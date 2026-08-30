@@ -400,18 +400,33 @@ async function ensureFixtures() {
       ['Nguyen', 'phone_call', '555-0178'],
     ]) {
       const addr = LEAD_ADDRESSES[last];
+      // Find by the key idx_leads_phone_unique_open actually enforces
+      // (tenant_id, phone_normalized) WHERE converted_customer_id IS NULL —
+      // a prior sweep's mark_lead_lost/stage-advance leaves the row
+      // open-by-index but no longer stage='new', so a stage-filtered lookup
+      // misses it and the bare INSERT below collides (23505). Reuse the
+      // open row and self-heal it back to the documented precondition
+      // (stage='new'), same convention as the address backfill.
       const existing = await rw.query(
-        "SELECT id, street1 FROM leads WHERE tenant_id = $1 AND last_name = $2 AND stage = 'new' LIMIT 1",
+        'SELECT id, street1, stage FROM leads WHERE tenant_id = $1 AND last_name = $2 AND converted_customer_id IS NULL ORDER BY created_at DESC LIMIT 1',
         [TENANT_ID, last],
       );
       if ((existing.rowCount ?? 0) > 0) {
-        if (addr && !existing.rows[0].street1) {
+        const row = existing.rows[0];
+        if (row.stage !== 'new') {
+          await rw.query(
+            "UPDATE leads SET stage = 'new', updated_at = now() WHERE id = $1",
+            [row.id],
+          );
+          summary.push(`leads: reset ${last} stage '${row.stage}' -> 'new'`);
+        }
+        if (addr && !row.street1) {
           await rw.query(
             `UPDATE leads SET street1 = $2, city = $3, state = $4, postal_code = $5, country = $6, updated_at = now() WHERE id = $1`,
-            [existing.rows[0].id, addr.street1, addr.city, addr.state, addr.postalCode, addr.country],
+            [row.id, addr.street1, addr.city, addr.state, addr.postalCode, addr.country],
           );
           summary.push(`leads: backfilled address on existing ${last}`);
-        } else {
+        } else if (row.stage === 'new') {
           summary.push(`leads: exists ${last}`);
         }
         continue;

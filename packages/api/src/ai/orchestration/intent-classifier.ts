@@ -1724,6 +1724,83 @@ export function matchLookupJobProfitPhrase(transcript: string): { jobReference: 
   return { jobReference };
 }
 
+/**
+ * D01 (2026-08-30 live sweep) — deterministic short-circuit for the OPENING
+ * turn of a booking a caller/operator starts before naming anybody: "I'd
+ * like to book a new customer for a diagnostic visit", "book a diagnostic
+ * visit", "set up a new customer appointment".
+ *
+ * WHY THIS EXISTS: on the in-app voice session this opening turn was the
+ * point the whole D01 flow died. Two things went wrong on it, and this
+ * matcher closes both by never reaching them:
+ *  1. the P18-001 sign-up override (`isCreateCustomerSignupPhrasing`) fires
+ *     on the bare `\bnew customer\b` pattern and REWRITES the LLM's correct
+ *     `create_appointment` into `create_customer` at a forced 0.85 — a
+ *     booking that merely MENTIONS a new customer is not a sign-up (see
+ *     that function's own booking guard, added alongside this matcher for
+ *     the phrasings too rich to anchor here);
+ *  2. absent the override, gpt-4o-mini is non-deterministic on this
+ *     entity-free shape — the same three turns produced `intent_capture`
+ *     reprompts on one live run and an `entity_not_found` escalation on
+ *     another.
+ *
+ * ANCHORED, AND ENTITY-FREE BY CONSTRUCTION. Both patterns are `^…$`, so
+ * the instant the utterance carries a real slot — a customer name, a date,
+ * a job ("schedule an appointment for Jordan Lee next Tuesday") — they stop
+ * matching and it falls through to the LLM exactly as today, with its
+ * entity extraction intact. That is the same rule `EXTENDED_INTENT_PHRASES`
+ * documents for itself: a short-circuit may not cost us entities.
+ *
+ * NOT gated on `extendedIntents` (unlike the owner lookups above), because
+ * `create_appointment` is a member of EVERY `PROFILE_INTENTS` set —
+ * caller, field_tech, owner_line and operator all advertise it, so there is
+ * no surface on which this could mint an off-surface intent.
+ *
+ * Safe to bypass the LLM for a WRITE intent for the same reasons
+ * `matchDraftEstimatePhrase` is: D-004 (proposal-first, never auto-executed)
+ * plus `create_appointment`'s own draft-time gate — a booking with no
+ * resolvable customerId/jobId is persisted with `missingFields:
+ * ['customerId']` and cannot be approved until an operator resolves the
+ * customer (voice-payload.ts `contractGapFields`; inapp-adapter.ts's D01
+ * gate). A misfire here at worst leaves an unapproved, gated booking draft
+ * in the review queue.
+ */
+const NEW_BOOKING_LEAD =
+  String.raw`(?:i(?:'d|\s+would)\s+like\s+to\s+|i\s+(?:want|need)\s+to\s+|we\s+need\s+to\s+|(?:can|could)\s+(?:you|we)\s+|let'?s\s+|please\s+)?`;
+
+const NEW_BOOKING_PHRASES: ReadonlyArray<RegExp> = [
+  // "(I'd like to) book|schedule|set up a new customer (for a diagnostic visit)"
+  new RegExp(
+    String.raw`^\s*${NEW_BOOKING_LEAD}(?:book|schedule|set\s+up)\s+(?:an?\s+)?new\s+customer` +
+      String.raw`(?:\s+(?:for|with)\s+(?:an?\s+)?[a-z][a-z\s-]{0,40})?\s*[?.!]?\s*$`,
+    'i',
+  ),
+  // "(I'd like to) book|schedule|set up a <qualifier> visit|appointment|…"
+  // — "book a diagnostic visit", "set up a new customer appointment".
+  //
+  // The qualifier is REQUIRED, which is what keeps the bare, unqualified
+  // "schedule an appointment" / "schedule a visit" on the LLM path exactly
+  // as today. Per this file's standing rule, a short-circuit is for
+  // phrasings evidenced as flaky, not a pre-emptive land-grab over every
+  // phrasing the classifier already gets right.
+  new RegExp(
+    String.raw`^\s*${NEW_BOOKING_LEAD}(?:book|schedule|set\s+up)\s+(?:an?\s+)?` +
+      String.raw`(?:(?!(?:an?|the)\s)[a-z][a-z-]{1,20}\s+){1,3}(?:appointment|visit|booking|inspection|service\s+call)\s*[?.!]?\s*$`,
+    'i',
+  ),
+];
+
+/**
+ * True when the transcript is one of the anchored, entity-free new-booking
+ * openings above. `create_appointment` carries no extracted entities out of
+ * this matcher — by design (see the doc comment): the slots arrive on the
+ * following turns.
+ */
+export function matchNewBookingPhrase(transcript: string): boolean {
+  if (!transcript) return false;
+  return NEW_BOOKING_PHRASES.some((rx) => rx.test(transcript));
+}
+
 /** RV-071 — predicate the voice routing layers use to gate owner approval intents. */
 export function isVoiceApprovalIntent(
   intent: IntentType | string | undefined | null,
@@ -2037,8 +2114,29 @@ const CREATE_CUSTOMER_SIGNUP_PATTERNS: ReadonlyArray<RegExp> = [
   /\bnuevo\s+cliente\b/i,
 ];
 
+/**
+ * D01 (2026-08-30 live sweep) — the `\bnew customer\b` pattern above has no
+ * notion of what the sentence is ASKING FOR, so "I'd like to book a new
+ * customer for a diagnostic visit" took the P18-001 rescue and was rewritten
+ * from the LLM's correct `create_appointment` into `create_customer` at a
+ * forced 0.85. That is the SAME defect PR #265 fixed for the "set up an
+ * account" / "open an account" patterns with their `(?!.*\b(?:appointment|
+ * schedule)\b)` lookaheads; a lookahead cannot fix this one because the
+ * booking verb sits BEFORE the phrase, so it gets its own guard.
+ *
+ * Deliberately anchored to the booking verb DIRECTLY governing "new
+ * customer" — the third-person shape, an operator booking work FOR someone.
+ * P18-001 exists for a CALLER announcing THEMSELVES ("I'm a new customer",
+ * "first time calling"), and those keep the rescue unchanged even when the
+ * same sentence goes on to ask for an appointment ("I'm a new customer and
+ * I'd like to schedule an appointment" is still create_customer).
+ */
+const CREATE_CUSTOMER_SIGNUP_BOOKING_GUARD =
+  /\b(?:book|booking|schedule|scheduling|set\s+up)\s+(?:an?\s+)?new\s+customer\b/i;
+
 export function isCreateCustomerSignupPhrasing(transcript: string): boolean {
   if (!transcript) return false;
+  if (CREATE_CUSTOMER_SIGNUP_BOOKING_GUARD.test(transcript)) return false;
   return CREATE_CUSTOMER_SIGNUP_PATTERNS.some((rx) => rx.test(transcript));
 }
 
@@ -2170,6 +2268,20 @@ async function classifyIntentRaw(
         extractedEntities: { customerName: draftEstimateMatch.customerName },
       };
     }
+  }
+
+  // D01 (2026-08-30 live sweep) — the anchored, entity-free new-booking
+  // opening. Deliberately OUTSIDE the `extendedIntents` block above: unlike
+  // the owner lookups, `create_appointment` is a member of every
+  // PROFILE_INTENTS set, so there is no surface this could route
+  // off-surface. See matchNewBookingPhrase's doc comment for why an
+  // anchored write-intent short-circuit is safe here.
+  if (matchNewBookingPhrase(transcript)) {
+    return {
+      intentType: 'create_appointment',
+      confidence: 0.95,
+      reasoning: 'matched deterministic new-booking phrasing',
+    };
   }
 
   // Compose the system prompt: base classifier rules + (optional)
