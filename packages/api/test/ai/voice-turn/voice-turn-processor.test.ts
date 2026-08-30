@@ -15,7 +15,11 @@ import {
 } from '../../../src/ai/voice-turn';
 import { VoiceSessionStore } from '../../../src/ai/agents/customer-calling/voice-session-store';
 import { InMemoryAuditRepository } from '../../../src/audit/audit';
-import { InMemoryProposalRepository, createProposal } from '../../../src/proposals/proposal';
+import {
+  InMemoryProposalRepository,
+  createProposal,
+  missingFieldsFor,
+} from '../../../src/proposals/proposal';
 import { InMemoryVoiceSessionRepository } from '../../../src/voice/voice-session';
 import { InMemoryCallMeBackRepository } from '../../../src/voice/call-me-back/call-me-back';
 import { InMemoryDeviceTokenRepository } from '../../../src/push/device-token-service';
@@ -33,6 +37,7 @@ import {
   type SettingsRepository,
 } from '../../../src/settings/settings';
 import type { CurrentQuoteResolver } from '../../../src/conversations/negotiation/current-quote-resolver';
+import type { TaskHandler } from '../../../src/ai/tasks/task-handlers';
 
 /** A configured (opted-in) discount policy + a grounded $250 quote, for U6 tests. */
 const u6DiscountDeps = {
@@ -112,6 +117,8 @@ function makeCtx(opts: {
    * pin that intent→proposal mapping run with `ownerSession: true`.
    */
   ownerSession?: boolean;
+  /** A46 — respond_to_review's drafting dep. */
+  respondToReviewTaskHandler?: Pick<TaskHandler, 'handle'>;
 } = {
   gateway: makeGatewayReturning('{}'),
   withRepos: true,
@@ -153,6 +160,9 @@ function makeCtx(opts: {
       : {}),
     ...(opts.negotiationQuoteResolver
       ? { negotiationQuoteResolver: opts.negotiationQuoteResolver }
+      : {}),
+    ...(opts.respondToReviewTaskHandler
+      ? { respondToReviewTaskHandler: opts.respondToReviewTaskHandler }
       : {}),
   });
 
@@ -1170,6 +1180,184 @@ describe('createVoiceTurnProcessor — negotiation guardrail (N-003)', () => {
     );
     expect(vc).toBeDefined();
     expect(vc!.payload.reason).toBe('ambiguous_discount_target');
+  });
+});
+
+// ─── A46 — respond_to_review shares the memo on-ramp's drafting path ────────
+
+describe('createVoiceTurnProcessor — respond_to_review (A46)', () => {
+  it('S2 owner session: drafts the SAME review_response_proposal the task handler returns, with publicResponse populated', async () => {
+    const respondToReviewTaskHandler: Pick<TaskHandler, 'handle'> = {
+      handle: vi.fn(async () => ({
+        proposal: createProposal({
+          tenantId: 'tenant-abc',
+          proposalType: 'review_response_proposal',
+          payload: {
+            reviewId: 'review-1',
+            classification: 'vague_complaint',
+            publicResponse: { text: 'Sorry to hear this — please reach out.', approved: false },
+            privateFollowUp: null,
+            serviceCredit: null,
+          },
+          summary: 'Respond to 1★ review from Maria',
+          createdBy: 'test-actor',
+        }),
+        taskType: 'review_response_proposal',
+      })),
+    };
+    const { processor, session, proposalRepo } = makeCtx({
+      gateway: makeGatewayReturning('{}'),
+      withRepos: true,
+      ownerSession: true,
+      respondToReviewTaskHandler,
+    });
+
+    await processor.executeSideEffects(
+      session,
+      [
+        {
+          type: 'create_proposal',
+          payload: {
+            intent: 'respond_to_review',
+            entities: { reviewReference: 'the 1-star review from yesterday' },
+          },
+        },
+      ],
+      'tenant-abc',
+    );
+
+    expect(respondToReviewTaskHandler.handle).toHaveBeenCalledOnce();
+    const stored = (await proposalRepo.findByTenant('tenant-abc')).find(
+      (p) => p.proposalType === 'review_response_proposal',
+    );
+    expect(stored).toBeDefined();
+    expect(
+      (stored!.payload as { publicResponse: { text: string } }).publicResponse.text,
+    ).toBe('Sorry to hear this — please reach out.');
+  });
+
+  it('S1 (unauthenticated caller): never reaches the drafting handler — review_response_proposal is not S1-allowed, coerced to voice_clarification (I6 defense-in-depth)', async () => {
+    const respondToReviewTaskHandler: Pick<TaskHandler, 'handle'> = {
+      handle: vi.fn(async () => {
+        throw new Error('must not be called for an S1 caller');
+      }),
+    };
+    // The default makeCtx session is caller-known but NOT ownerSession — S1,
+    // same setup as the send_invoice coercion test above.
+    const { processor, session, proposalRepo, auditRepo } = makeCtx({
+      gateway: makeGatewayReturning('{}'),
+      withRepos: true,
+      respondToReviewTaskHandler,
+    });
+
+    await processor.executeSideEffects(
+      session,
+      [
+        {
+          type: 'create_proposal',
+          payload: {
+            intent: 'respond_to_review',
+            entities: { reviewReference: 'the 1-star review from yesterday' },
+          },
+        },
+      ],
+      'tenant-abc',
+    );
+
+    expect(respondToReviewTaskHandler.handle).not.toHaveBeenCalled();
+    const proposals = await proposalRepo.findByTenant('tenant-abc');
+    expect(proposals).toHaveLength(1);
+    expect(proposals[0]!.proposalType).toBe('voice_clarification');
+    expect((proposals[0]!.sourceContext as Record<string, unknown>).surface).toBe('S1');
+    const audits = auditRepo.getAll();
+    expect(audits.some((a) => a.eventType === 'voice.surface_violation_blocked')).toBe(true);
+  });
+});
+
+// ─── D01 — create_appointment's missing-customer gap ─────────────────────────
+
+describe('createVoiceTurnProcessor — create_appointment missing-customer gap (D01)', () => {
+  it('a new-caller booking (free-text customerName, no jobId/linkedJobId/customerId) gates on missingFields: ["customerId"] instead of degrading to a bare voice_clarification', async () => {
+    // Before this fix, createAppointmentPayloadSchema's whole-object refine
+    // ("requires jobId ... or a customerId") had no Zod field path, so
+    // `built.missingFieldPaths` came back empty and `gateable` was false —
+    // this fell to the degrade-to-clarification branch. Fixed: the gap is
+    // now named 'customerId' (voice-payload.ts), so this DOES gate.
+    const { processor, session, proposalRepo, auditRepo } = makeCtx({
+      gateway: makeGatewayReturning('{}'),
+      withRepos: true,
+      ownerSession: true,
+    });
+    // makeCtx's default fixture dispatches `caller_known` with a fallback
+    // customerId ('cust-1') — the normal S1 shape, where the caller's OWN
+    // caller-ID identity always backstops `customerId`. This gap is about a
+    // booking for someone OTHER than the identified session (matching D01's
+    // real, S2/in-app shape — see corpus.json's own note on why this is
+    // scored draft_gated rather than executes): clear it so the payload has
+    // no fallback, same as a session whose caller identity never resolved.
+    session.customerId = undefined;
+
+    await processor.executeSideEffects(
+      session,
+      [
+        {
+          type: 'create_proposal',
+          payload: {
+            intent: 'create_appointment',
+            entities: {
+              customerName: 'Jordan Lee',
+              customerPhone: '480-555-0199',
+              scheduledStart: '2026-09-08T12:00:00.000Z',
+              scheduledEnd: '2026-09-08T13:00:00.000Z',
+              jobTitle: 'Furnace diagnostic inspection',
+            },
+          },
+        },
+      ],
+      'tenant-abc',
+    );
+
+    const proposals = await proposalRepo.findByTenant('tenant-abc');
+    expect(proposals).toHaveLength(1);
+    expect(proposals[0]!.proposalType).toBe('create_appointment');
+    expect(missingFieldsFor(proposals[0]!)).toContain('customerId');
+    const audits = auditRepo.getAll();
+    const contractAudit = audits.find((a) => a.eventType === 'voice.payload_contract_failed');
+    expect((contractAudit?.metadata as Record<string, unknown> | undefined)?.outcome).toBe(
+      'gated_with_missing_fields',
+    );
+  });
+
+  it('a resolved customerId clears the gap and the appointment is NOT missingFields-gated', async () => {
+    const { processor, session, proposalRepo } = makeCtx({
+      gateway: makeGatewayReturning('{}'),
+      withRepos: true,
+      ownerSession: true,
+    });
+
+    await processor.executeSideEffects(
+      session,
+      [
+        {
+          type: 'create_proposal',
+          payload: {
+            intent: 'create_appointment',
+            entities: {
+              customerId: '11111111-1111-1111-1111-111111111111',
+              scheduledStart: '2026-09-08T12:00:00.000Z',
+              scheduledEnd: '2026-09-08T13:00:00.000Z',
+              jobTitle: 'Furnace diagnostic inspection',
+            },
+          },
+        },
+      ],
+      'tenant-abc',
+    );
+
+    const proposals = await proposalRepo.findByTenant('tenant-abc');
+    expect(proposals).toHaveLength(1);
+    expect(proposals[0]!.proposalType).toBe('create_appointment');
+    expect(missingFieldsFor(proposals[0]!)).toEqual([]);
   });
 });
 

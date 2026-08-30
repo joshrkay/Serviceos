@@ -335,6 +335,7 @@ import { createEntityAliasCandidateService } from './learning/entity-aliases/can
 import { createEntityAliasesRouter } from './routes/entity-aliases';
 import { DefaultSlotConflictChecker } from './ai/tasks/slot-conflict-checker';
 import { DefaultAvailabilityFinder } from './ai/tasks/availability-finder';
+import { RespondToReviewTaskHandler } from './ai/tasks/review-response-task';
 import { runExecutionSweep } from './workers/execution-worker';
 import {
   createLLMGateway,
@@ -1807,6 +1808,25 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
   // that shipped but was never swapped, so review responses ignored the shop's
   // voice + banned_phrases). Reads tenant_settings.brand_voice, failure-soft.
   const googleReviewsBrandVoiceLoader = new SettingsBrandVoiceLoader(settingsRepo);
+  // A46 — the SAME `respond_to_review` drafting path (deterministic review
+  // resolution + buildReviewResponseProposal, which always fills
+  // publicResponse) threaded into the LIVE voice surfaces too (Twilio's
+  // twilioAdapterDeps below, and inAppVoiceAdapter further down), not just
+  // the recorded-memo on-ramp voice-action-router.ts already wires. Without
+  // this, respond_to_review on a live call fell through to the generic
+  // buildVoiceProposalPayload promotion, which cannot draft publicResponse
+  // (live evidence: sweep row A46, 2026-08-30). `undefined` — never
+  // constructed — when reviewRepo/serviceCreditRepo/customerLoader aren't
+  // wired (no pool): both adapters gate honestly to voice_clarification.
+  const respondToReviewTaskHandler =
+    googleReviewsReviewRepo && serviceCreditRepo && googleReviewsCustomerLoader
+      ? new RespondToReviewTaskHandler(proposalRepo, googleReviewsReviewRepo, {
+          llmGateway,
+          customerLoader: googleReviewsCustomerLoader,
+          brandVoiceLoader: googleReviewsBrandVoiceLoader,
+          serviceCreditRepo,
+        })
+      : undefined;
   // Google client as calendar sync (register BOTH redirect URIs on it).
   const googleBusinessApiUrl =
     process.env.PUBLIC_API_URL ?? process.env.APP_PUBLIC_URL ?? 'http://localhost:3000';
@@ -3470,6 +3490,12 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     // P2-036 V2 — live-call discount engine (fail-closed; dormant until a tenant
     // configures a discount policy). settingsRepo is wired below.
     negotiationQuoteResolver,
+    // A46 — respond_to_review's only correct drafting path (see the
+    // handler's construction comment above). Processor-only key (like
+    // consentEventRepo / autonomousClose below) — not on TwilioAdapterDeps's
+    // type, but the adapter spreads `this.deps` into createVoiceTurnProcessor
+    // at runtime, so it still reaches the processor's dep surface.
+    ...(respondToReviewTaskHandler ? { respondToReviewTaskHandler } : {}),
     auditRepo,
     onCallRepo: sharedOnCallRepo,
     callControl: telephonyCallControl,
@@ -6689,6 +6715,14 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     repairTemplatesResolver,
     voiceSessionRepo,
     voicePersonaResolver,
+    // #883/#914 — same negotiation-guardrail enrichment the telephony leg
+    // wires, so an in-app "knock $50 off" gets the identical LTV-aware
+    // callback content instead of the bare V1 fallback.
+    ...(customerNegotiationContextProvider ? { customerNegotiationContextProvider } : {}),
+    negotiationQuoteResolver,
+    // A46 — respond_to_review's only correct drafting path (see the
+    // handler's construction comment above); shared with the telephony leg.
+    ...(respondToReviewTaskHandler ? { respondToReviewTaskHandler } : {}),
     // QA-2026-07-26 — grounds voice-drafted estimate line items
     // (entities.lineItemDescriptions) against the tenant's real catalog.
     catalogRepo,

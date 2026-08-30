@@ -72,10 +72,8 @@ import {
   type VoiceApprovalTurnResult,
 } from '../tasks/proposal-approval-task';
 import { createLlmEditInterpreter } from '../../proposals/edit-interpreter';
-import type {
-  CustomerNegotiationContext,
-  CustomerNegotiationContextProvider,
-} from '../../customers/customer-negotiation-context';
+import type { TaskHandler } from '../tasks/task-handlers';
+import type { CustomerNegotiationContextProvider } from '../../customers/customer-negotiation-context';
 import {
   brandVoiceNegotiationTts,
   NEGOTIATION_HOLDING_TTS_SOURCE,
@@ -161,16 +159,9 @@ import {
   type ProposalSurface,
 } from '../../proposals/surface';
 import {
-  buildNegotiationCallbackContent,
-  evaluateNegotiationDiscount,
-} from '../../proposals/guardrails/negotiation-guardrail';
-import { buildComplaintCallbackContent } from '../../proposals/guardrails/complaint-guardrail';
-import {
-  buildAllowDiscountCallbackContent,
-  buildDiscountClarificationPayload,
-  discountAuditMetadata,
-  DISCOUNT_CLARIFICATION_QUESTION,
-} from '../../conversations/negotiation/discount-proposal-content';
+  buildAndPersistNegotiationProposal,
+  buildAndPersistComplaintProposal,
+} from '../../proposals/guardrails/voice-protection-proposal';
 import type { CurrentQuoteResolver } from '../../conversations/negotiation/current-quote-resolver';
 import type { LeadRepository } from '../../leads/lead';
 import type { AuditRepository } from '../../audit/audit';
@@ -549,6 +540,27 @@ export interface VoiceTurnProcessorDeps {
   customerNegotiationContextProvider?: CustomerNegotiationContextProvider;
   /** P2-036 V2 — resolves the live caller's current quote for the discount engine. */
   negotiationQuoteResolver?: CurrentQuoteResolver;
+  /**
+   * A46 — `respond_to_review`'s ONLY correct drafting path. Before this dep
+   * existed, `intent === 'respond_to_review'` fell through to the generic
+   * `buildVoiceProposalPayload` scalar-promotion (same as every other
+   * unmapped-shape intent), which cannot synthesize `publicResponse.text` —
+   * that requires an LLM draft over the ACTUAL matched review, not a
+   * classifier-entity promotion. The persisted-but-broken payload then
+   * failed at approval ("review_response_proposal payload is missing the
+   * required publicResponse component" — live evidence, sweep row A46,
+   * 2026-08-30). `RespondToReviewTaskHandler` (ai/tasks/review-response-
+   * task.ts) already implements the correct behavior for the recorded-memo
+   * path — deterministic review resolution (star count / recency), dedup
+   * against a pending draft, `buildReviewResponseProposal` (which always
+   * fills `publicResponse`), and an honest `voice_clarification` degrade on
+   * 0/2+ matches or a drafting failure. Reusing it here — rather than a
+   * second copy of that ladder — gives the live surface the IDENTICAL
+   * behavior the poll worker and the memo on-ramp already have. Optional:
+   * when absent (review-response deps not wired), the branch below degrades
+   * honestly instead of falling through to the broken generic path.
+   */
+  respondToReviewTaskHandler?: Pick<TaskHandler, 'handle'>;
   /**
    * P0 voice-safety — shared, tenant-scoped entity resolver. Production wires
    * the SAME `AliasFirstEntityResolver → PgEntityResolver` the voice-action-
@@ -1295,138 +1307,41 @@ export function createVoiceTurnProcessor(
       // `proposal_queued`: the negotiation guard stays in the current state, so
       // a proposal_queued transition would be wrong here.
       if (intent === 'negotiation') {
-        const askText = typeof entities.negotiationAsk === 'string' ? entities.negotiationAsk : '';
-        const transcript = typeof entities.transcript === 'string' ? entities.transcript : '';
-        const detectText = `${askText} ${transcript}`.trim();
-        const customerName =
-          typeof entities.customerName === 'string' ? entities.customerName : undefined;
-        const conversationId =
-          typeof fx.payload.conversationId === 'string' ? fx.payload.conversationId : undefined;
-        const negotiationCustomerId =
-          typeof fx.payload.customerId === 'string' ? fx.payload.customerId : undefined;
-        // Best-effort LTV/recency enrichment — a read failure never blocks the callback.
-        let customerContext: CustomerNegotiationContext | null = null;
-        if (negotiationCustomerId && deps.customerNegotiationContextProvider) {
-          try {
-            customerContext = await deps.customerNegotiationContextProvider.getContext(
-              tenantId,
-              negotiationCustomerId,
-            );
-          } catch {
-            customerContext = null;
-          }
-        }
-        // U6 (P2-036 V2) — additive discount evaluation on the live call. Only
-        // engages when fully wired AND a customer is resolved; a null result
-        // (unconfigured tenant / no quote / error) keeps the V1 path identical.
-        const evaluation =
-          negotiationCustomerId && deps.settingsRepo && deps.negotiationQuoteResolver
-            ? await evaluateNegotiationDiscount({
-                tenantId,
-                customerId: negotiationCustomerId,
-                askText: detectText || askText,
-                settingsRepo: deps.settingsRepo,
-                quoteResolver: deps.negotiationQuoteResolver,
-              })
-            : null;
-
-        let proposalType: 'callback' | 'voice_clarification' = 'callback';
-        let payload: Record<string, unknown>;
-        let summary: string;
-        let explanation: string;
-        if (evaluation?.decision.kind === 'CLARIFY') {
-          // Couldn't parse the target price — ask, never guess.
-          proposalType = 'voice_clarification';
-          payload = buildDiscountClarificationPayload({
-            transcript: detectText || askText,
-            ...(conversationId ? { conversationId } : {}),
-          });
-          summary = DISCOUNT_CLARIFICATION_QUESTION;
-          explanation =
-            'Heard a discount ask but couldn\'t make out the price they named. Tap to tell me what to quote — I never guess a discount.';
-        } else if (evaluation?.decision.kind === 'ALLOW') {
-          // Within policy — a CONFIDENCE-CAPPED one-tap owner action (never auto-applies).
-          const allow = buildAllowDiscountCallbackContent({
-            decision: evaluation.decision,
-            quote: evaluation.quote,
-            askText: askText || detectText,
-            ...(customerName ? { customerName } : {}),
-            ...(conversationId ? { conversationId } : {}),
-          });
-          payload = allow.payload;
-          summary = allow.summary;
-          explanation = allow.explanation;
-        } else {
-          // NEEDS_APPROVAL / REJECT_WITH_COUNTER → enriched callback; null → V1.
-          const content = buildNegotiationCallbackContent({
-            detectText,
-            ...(askText ? { askText } : {}),
-            ...(customerName ? { customerName } : {}),
-            ...(conversationId ? { conversationId } : {}),
-            customerContext,
-            ...(evaluation
-              ? { decision: evaluation.decision, quote: evaluation.quote }
-              : {}),
-          });
-          payload = content.payload;
-          summary = content.summary;
-          explanation = content.explanation;
-        }
-
-        if (evaluation && deps.auditRepo) {
-          try {
-            await deps.auditRepo.create(
-              createAuditEvent({
-                tenantId,
-                actorId: deps.systemActorId ?? 'calling-agent',
-                actorRole: 'system',
-                eventType: 'negotiation.discount_evaluated',
-                entityType: 'voice_session',
-                entityId: session.id,
-                metadata: discountAuditMetadata(
-                  evaluation.decision,
-                  evaluation.quote.quotedCents,
-                ),
-              }),
-            );
-          } catch {
-            /* audit is best-effort */
-          }
-        }
-
-        const negotiationProposal = buildProposal({
-          tenantId,
-          proposalType,
-          payload,
-          summary,
-          explanation,
-          sourceContext: {
-            source: 'calling-agent',
-            channel: 'telephony',
-            // RIVET P4 — negotiation always routes to a human `callback` /
-            // clarification (both S1-safe), but the surface still travels with
-            // the proposal for audit + the execution-boundary re-check.
-            surface: (session.machine.currentContext.ownerSession === true
-              ? 'S2'
-              : 'S1') as ProposalSurface,
+        // One-core glue shared with the in-app adapter (see
+        // proposals/guardrails/voice-protection-proposal.ts's doc comment —
+        // this branch used to be the ONLY copy, which is exactly how the
+        // in-app surface silently missed it; #883/#914).
+        const negotiationSurface: ProposalSurface =
+          session.machine.currentContext.ownerSession === true ? 'S2' : 'S1';
+        const storedNegotiation = await buildAndPersistNegotiationProposal(
+          entities,
+          {
+            tenantId,
             sessionId: session.id,
+            channel: 'telephony',
+            surface: negotiationSurface,
+            customerId:
+              typeof fx.payload.customerId === 'string' ? fx.payload.customerId : undefined,
+            conversationId:
+              typeof fx.payload.conversationId === 'string' ? fx.payload.conversationId : undefined,
+            aiRunId:
+              typeof fx.payload.aiRunId === 'string' && fx.payload.aiRunId
+                ? fx.payload.aiRunId
+                : undefined,
+            createdBy:
+              typeof fx.payload.customerId === 'string'
+                ? fx.payload.customerId
+                : deps.systemActorId ?? 'calling-agent',
+            tenantThresholdOverride,
           },
-          // proposals.ai_run_id has an FK to ai_runs(id). Use the REAL run id
-          // threaded from the classify call (surfaced via the gateway →
-          // classifyIntent → intent_classified event → side-effect payload);
-          // never fabricate one — a random uuid violates the FK and the
-          // swallowed insert error silently drops the proposal on Postgres.
-          // Left null when no run was persisted for this turn.
-          ...(typeof fx.payload.aiRunId === 'string' && fx.payload.aiRunId
-            ? { aiRunId: fx.payload.aiRunId }
-            : {}),
-          createdBy:
-            typeof fx.payload.customerId === 'string'
-              ? fx.payload.customerId
-              : deps.systemActorId ?? 'calling-agent',
-          ...(tenantThresholdOverride ? { tenantThresholdOverride } : {}),
-        });
-        const storedNegotiation = await deps.proposalRepo.create(negotiationProposal);
+          {
+            proposalRepo: deps.proposalRepo,
+            auditRepo: deps.auditRepo,
+            customerNegotiationContextProvider: deps.customerNegotiationContextProvider,
+            settingsRepo: deps.settingsRepo,
+            negotiationQuoteResolver: deps.negotiationQuoteResolver,
+          },
+        );
         session.proposalIds.push(storedNegotiation.id);
         return;
       }
@@ -1445,52 +1360,35 @@ export function createVoiceTurnProcessor(
       // NOT dispatch `proposal_queued`: the guard already moved the FSM to
       // `escalating`, so a proposal_queued transition would be wrong here.
       if (intent === 'complaint') {
-        const description = typeof entities.noteBody === 'string' ? entities.noteBody : '';
-        const transcript = typeof entities.transcript === 'string' ? entities.transcript : '';
-        // The caller's raw words, threaded from the classified turn by the
-        // FSM guard — without them a "refund / my lawyer" complaint whose
-        // classifier extracted no noteBody scored `normal` (severity
-        // detection saw empty text). Mirrors ComplaintTaskHandler's
-        // `ee.noteBody ?? context.message` fallback on the memo path.
-        const utterance = typeof fx.payload.utterance === 'string' ? fx.payload.utterance : '';
-        const detectText = `${description} ${transcript} ${utterance}`.trim();
-        const customerName =
-          typeof entities.customerName === 'string' ? entities.customerName : undefined;
-        const conversationId =
-          typeof fx.payload.conversationId === 'string' ? fx.payload.conversationId : undefined;
-        const content = buildComplaintCallbackContent({
-          detectText,
-          ...(customerName ? { customerName } : {}),
-          ...(conversationId ? { conversationId } : {}),
-        });
-        const complaintProposal = buildProposal({
-          tenantId,
-          proposalType: 'callback',
-          payload: content.payload,
-          summary: content.summary,
-          explanation: content.explanation,
-          sourceContext: {
-            source: 'calling-agent',
-            channel: 'telephony',
-            // A complaint always routes to a human `callback` (S1-safe), but
-            // the surface still travels with the proposal for audit + the
-            // execution-boundary re-check — same convention as negotiation.
-            surface: (session.machine.currentContext.ownerSession === true
-              ? 'S2'
-              : 'S1') as ProposalSurface,
+        const complaintSurface: ProposalSurface =
+          session.machine.currentContext.ownerSession === true ? 'S2' : 'S1';
+        const storedComplaint = await buildAndPersistComplaintProposal(
+          entities,
+          typeof fx.payload.utterance === 'string' ? fx.payload.utterance : undefined,
+          {
+            tenantId,
             sessionId: session.id,
+            channel: 'telephony',
+            surface: complaintSurface,
+            customerId:
+              typeof fx.payload.customerId === 'string' ? fx.payload.customerId : undefined,
+            conversationId:
+              typeof fx.payload.conversationId === 'string' ? fx.payload.conversationId : undefined,
+            aiRunId:
+              typeof fx.payload.aiRunId === 'string' && fx.payload.aiRunId
+                ? fx.payload.aiRunId
+                : undefined,
+            createdBy:
+              typeof fx.payload.customerId === 'string'
+                ? fx.payload.customerId
+                : deps.systemActorId ?? 'calling-agent',
+            tenantThresholdOverride,
           },
-          // Real classify-run id or null — never fabricated (FK to ai_runs).
-          ...(typeof fx.payload.aiRunId === 'string' && fx.payload.aiRunId
-            ? { aiRunId: fx.payload.aiRunId }
-            : {}),
-          createdBy:
-            typeof fx.payload.customerId === 'string'
-              ? fx.payload.customerId
-              : deps.systemActorId ?? 'calling-agent',
-          ...(tenantThresholdOverride ? { tenantThresholdOverride } : {}),
-        });
-        const storedComplaint = await deps.proposalRepo.create(complaintProposal);
+          {
+            proposalRepo: deps.proposalRepo,
+            auditRepo: deps.auditRepo,
+          },
+        );
         session.proposalIds.push(storedComplaint.id);
         // Session-bus telemetry: a dead complaint branch must be a metric,
         // not an audit finding. (The Gather adapter executes no
@@ -1499,6 +1397,98 @@ export function createVoiceTurnProcessor(
           type: 'proposal_created',
           proposalId: storedComplaint.id,
         });
+        return;
+      }
+
+      // A46 — respond_to_review's only correct drafting path (see
+      // `respondToReviewTaskHandler`'s doc comment above). Reuses the SAME
+      // resolution ladder + `buildReviewResponseProposal` the recorded-memo
+      // on-ramp already runs, so a live-call draft is never missing
+      // `publicResponse`. `.handle()` already returns a fully-built
+      // `Proposal` (including the honest voice_clarification degrade on
+      // 0/2+ review matches or a drafting failure) — persist it as-is.
+      //
+      // `review_response_proposal` is NOT S1-allowed (surface.ts) — an
+      // unauthenticated caller must never trigger an LLM draft of the
+      // owner's public review response for a review they merely NAME. Gate
+      // on the same `isUntrustedS1Session` predicate the generic path below
+      // uses (I6 defense-in-depth) before ever calling the handler, and
+      // coerce to `voice_clarification` — audited the same way the generic
+      // surface gate does — for an S1 caller.
+      if (intent === 'respond_to_review') {
+        const reviewSurface: ProposalSurface = isUntrustedS1Session(session) ? 'S1' : 'S2';
+        const reviewSurfaceAllowed = isProposalTypeAllowedOnSurface(
+          reviewSurface,
+          'review_response_proposal',
+        );
+        if (!deps.respondToReviewTaskHandler || !reviewSurfaceAllowed) {
+          if (!reviewSurfaceAllowed && deps.auditRepo) {
+            try {
+              await deps.auditRepo.create(
+                createAuditEvent({
+                  tenantId,
+                  actorId: deps.systemActorId ?? 'calling-agent',
+                  actorRole: 'system',
+                  eventType: 'voice.surface_violation_blocked',
+                  entityType: 'voice_session',
+                  entityId: session.id,
+                  metadata: {
+                    intent,
+                    requestedProposalType: 'review_response_proposal',
+                    surface: reviewSurface,
+                  },
+                }),
+              );
+            } catch {
+              /* audit is best-effort */
+            }
+          }
+          // Gate honestly rather than falling through to the generic
+          // buildVoiceProposalPayload path below, which cannot draft
+          // publicResponse and would persist the same broken payload A46
+          // caught live.
+          const clarification = buildProposal({
+            tenantId,
+            proposalType: 'voice_clarification',
+            payload: buildVoiceClarificationPayload({
+              transcript: session.transcript,
+              intent,
+              entities,
+              requestedProposalType: 'review_response_proposal',
+              sessionId: session.id,
+            }),
+            summary: "Review response drafting isn't available on this call yet.",
+            sourceContext: {
+              source: 'calling-agent',
+              channel: 'telephony',
+              surface: reviewSurface,
+              sessionId: session.id,
+            },
+            createdBy:
+              typeof fx.payload.customerId === 'string'
+                ? fx.payload.customerId
+                : deps.systemActorId ?? 'calling-agent',
+          });
+          const storedClarification = await deps.proposalRepo.create(clarification);
+          session.proposalIds.push(storedClarification.id);
+          return;
+        }
+        const result = await deps.respondToReviewTaskHandler.handle({
+          tenantId,
+          message: typeof entities.reviewReference === 'string' ? entities.reviewReference : '',
+          ...(typeof fx.payload.conversationId === 'string'
+            ? { conversationId: fx.payload.conversationId }
+            : {}),
+          existingEntities: entities,
+          userId:
+            typeof fx.payload.customerId === 'string'
+              ? fx.payload.customerId
+              : deps.systemActorId ?? 'calling-agent',
+          intent: 'respond_to_review',
+          tenantThresholdOverride,
+        });
+        const storedReview = await deps.proposalRepo.create(result.proposal);
+        session.proposalIds.push(storedReview.id);
         return;
       }
 
