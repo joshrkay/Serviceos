@@ -39,6 +39,13 @@ import {
   voiceProposalSummary,
 } from '../../../proposals/voice-intent-map';
 import { buildVoiceClarificationPayload } from '../../../proposals/voice-clarification';
+import {
+  buildAndPersistNegotiationProposal,
+  buildAndPersistComplaintProposal,
+} from '../../../proposals/guardrails/voice-protection-proposal';
+import type { CustomerNegotiationContextProvider } from '../../../customers/customer-negotiation-context';
+import type { CurrentQuoteResolver } from '../../../conversations/negotiation/current-quote-resolver';
+import type { TaskHandler } from '../../tasks/task-handlers';
 import type { AuditRepository } from '../../../audit/audit';
 import { createAuditEvent } from '../../../audit/audit';
 import type { OnCallRepository } from '../../../oncall/rotation';
@@ -259,6 +266,24 @@ export interface InAppAdapterDeps {
    * guesses — 0 or 2+ matches are left unresolved for the operator to specify.
    */
   customerRepo?: CustomerRepository;
+  /**
+   * #883/#914 — negotiation guardrail enrichment, shared with the telephony
+   * leg (ai/voice-turn/create-voice-turn-processor.ts). Optional and
+   * best-effort: when either is absent, `buildAndPersistNegotiationProposal`
+   * falls back to the V1 bare-callback content (see
+   * proposals/guardrails/voice-protection-proposal.ts).
+   */
+  customerNegotiationContextProvider?: CustomerNegotiationContextProvider;
+  negotiationQuoteResolver?: CurrentQuoteResolver;
+  /**
+   * A46 — `respond_to_review`'s only correct drafting path, shared with the
+   * telephony leg. See the identically-named field's doc comment in
+   * ai/voice-turn/create-voice-turn-processor.ts for the full history.
+   * Optional: when absent, the branch below degrades honestly to a
+   * `voice_clarification` instead of falling through to the generic
+   * payload-promotion path, which cannot draft `publicResponse`.
+   */
+  respondToReviewTaskHandler?: Pick<TaskHandler, 'handle'>;
 }
 
 export interface StartSessionResult {
@@ -1795,6 +1820,129 @@ export class InAppVoiceAdapter {
           tenantThresholdOverride = undefined;
         }
       }
+
+      // #883/#914 (A49/A50) — negotiation/complaint bypass the generic map
+      // entirely, exactly like the telephony leg
+      // (ai/voice-turn/create-voice-turn-processor.ts handleCreateProposal):
+      // neither intent is in `intentToProposalType`'s map (its documented
+      // default is `voice_clarification`), so without this branch the FSM's
+      // complaint/negotiation guard (transitions.ts) — now firing in-app too
+      // via #914's `customerProtectionIntents` fix — minted a dead
+      // `voice_clarification` card with no execution handler instead of the
+      // dedicated owner `callback` (live evidence: sweep rows A49/A50,
+      // 2026-08-30). One core (proposals/guardrails/voice-protection-
+      // proposal.ts) shared with the telephony path so this can't drift a
+      // third time.
+      const protectionCallContext = {
+        tenantId: session.tenantId,
+        sessionId: session.id,
+        channel: 'inapp' as const,
+        // RIVET P4 — in-app voice is always the authenticated operator (S2).
+        surface: 'S2' as ProposalSurface,
+        customerId: typeof payload.customerId === 'string' ? payload.customerId : undefined,
+        conversationId:
+          typeof payload.conversationId === 'string' ? payload.conversationId : undefined,
+        aiRunId: typeof payload.aiRunId === 'string' && payload.aiRunId ? payload.aiRunId : undefined,
+        createdBy:
+          typeof payload.customerId === 'string'
+            ? payload.customerId
+            : this.deps.systemActorId ?? 'calling-agent',
+        tenantThresholdOverride,
+      };
+      const protectionDeps = {
+        proposalRepo: this.deps.proposalRepo,
+        auditRepo: this.deps.auditRepo,
+        customerNegotiationContextProvider: this.deps.customerNegotiationContextProvider,
+        settingsRepo: this.deps.settingsRepo,
+        negotiationQuoteResolver: this.deps.negotiationQuoteResolver,
+      };
+      if (intent === 'negotiation') {
+        const storedNegotiation = await buildAndPersistNegotiationProposal(
+          entities,
+          protectionCallContext,
+          protectionDeps,
+        );
+        session.proposalIds.push(storedNegotiation.id);
+        session.events.emit('voice-event', {
+          type: 'proposal_created',
+          proposalId: storedNegotiation.id,
+        });
+        return storedNegotiation.id;
+      }
+      if (intent === 'complaint') {
+        const storedComplaint = await buildAndPersistComplaintProposal(
+          entities,
+          typeof payload.utterance === 'string' ? payload.utterance : undefined,
+          protectionCallContext,
+          protectionDeps,
+        );
+        session.proposalIds.push(storedComplaint.id);
+        session.events.emit('voice-event', {
+          type: 'proposal_created',
+          proposalId: storedComplaint.id,
+        });
+        return storedComplaint.id;
+      }
+
+      // A46 — respond_to_review's only correct drafting path, shared with
+      // the telephony leg (ai/voice-turn/create-voice-turn-processor.ts —
+      // see its `respondToReviewTaskHandler` doc comment for the full
+      // history). The generic buildVoiceProposalPayload promotion below
+      // cannot draft `publicResponse.text` — that needs the deterministic
+      // review-resolution ladder + an LLM draft over the ACTUAL matched
+      // review, which `RespondToReviewTaskHandler` already does correctly
+      // for the recorded-memo path. Reusing it here (rather than a THIRD
+      // copy of that ladder) is what makes a live-call draft stop being
+      // missing `publicResponse` (sweep row A46, 2026-08-30).
+      if (intent === 'respond_to_review') {
+        if (!this.deps.respondToReviewTaskHandler) {
+          // Gate honestly instead of falling through to the generic path,
+          // which would persist the same broken payload A46 caught live.
+          const clarification = buildProposal({
+            tenantId: session.tenantId,
+            proposalType: 'voice_clarification',
+            payload: buildVoiceClarificationPayload({
+              transcript: session.transcript,
+              intent,
+              entities,
+              requestedProposalType: 'review_response_proposal',
+              sessionId: session.id,
+            }),
+            summary: "Review response drafting isn't available on this call yet.",
+            sourceContext: {
+              source: 'calling-agent',
+              channel: session.channel,
+              surface: 'S2' as ProposalSurface,
+              sessionId: session.id,
+            },
+            createdBy:
+              typeof payload.customerId === 'string'
+                ? payload.customerId
+                : this.deps.systemActorId ?? 'calling-agent',
+          });
+          const storedClarification = await this.deps.proposalRepo.create(clarification);
+          session.proposalIds.push(storedClarification.id);
+          return storedClarification.id;
+        }
+        const result = await this.deps.respondToReviewTaskHandler.handle({
+          tenantId: session.tenantId,
+          message: typeof entities.reviewReference === 'string' ? entities.reviewReference : '',
+          ...(typeof payload.conversationId === 'string'
+            ? { conversationId: payload.conversationId }
+            : {}),
+          existingEntities: entities,
+          userId:
+            typeof payload.customerId === 'string'
+              ? payload.customerId
+              : this.deps.systemActorId ?? 'calling-agent',
+          intent: 'respond_to_review',
+          ...(tenantThresholdOverride ? { tenantThresholdOverride } : {}),
+        });
+        const storedReview = await this.deps.proposalRepo.create(result.proposal);
+        session.proposalIds.push(storedReview.id);
+        return storedReview.id;
+      }
+
       // QA-2026-06-05 / QA-2026-07-26 — THE PAYLOAD CONTRACT. Execution
       // handlers read the FLAT task contract (create_customer wants
       // payload.name; create_appointment wants payload.jobId/scheduledStart —
@@ -1936,8 +2084,21 @@ export class InAppVoiceAdapter {
       // editable draft would be strictly worse than handing them one with a
       // gap in it.
       let effectivePayload = built.payload;
+      // D01 (2026-08-30) — a contract gap this module CAN name (e.g.
+      // create_appointment with neither jobId/linkedJobId nor customerId —
+      // see voice-payload.ts's `contractGapFields`) gates the draft with
+      // `missingFields` instead of "persisted unchanged": without this, a
+      // new-caller booking with a free-text name and no resolvable
+      // customerId sailed through with no missingFields, could auto-approve,
+      // and guaranteed an `execution_failed` downstream
+      // (CreateAppointmentExecutionHandler: "Payload must include a valid
+      // jobId" — live evidence, sweep row D01). Mirrors the telephony leg's
+      // `gateable` decision (create-voice-turn-processor.ts) exactly, so the
+      // two live surfaces stop drifting on this specific gap.
+      let contractMissingFields: string[] = [];
       if (!built.ok) {
         const degradeToClarification = proposalType === 'voice_clarification';
+        const gateable = !degradeToClarification && built.missingFieldPaths.length > 0;
         if (degradeToClarification) {
           effectivePayload = buildVoiceClarificationPayload({
             transcript: session.transcript,
@@ -1946,6 +2107,8 @@ export class InAppVoiceAdapter {
             requestedProposalType: proposalType,
             sessionId: session.id,
           });
+        } else if (gateable) {
+          contractMissingFields = built.missingFieldPaths;
         }
         await this.handleAuditLog(session, {
           type: 'audit_log',
@@ -1987,6 +2150,12 @@ export class InAppVoiceAdapter {
         ...(voiceLineItemOutcome?.missingFields && voiceLineItemOutcome.missingFields.length > 0
           ? { missingFields: voiceLineItemOutcome.missingFields }
           : {}),
+        // D01 — the contract-gap fields identified above (create_appointment
+        // with no jobId/linkedJobId/customerId). Mutually exclusive with the
+        // line-item / brand-voice missingFields (different proposal types) —
+        // only one of the three branches can be non-empty for a given
+        // proposalType.
+        ...(contractMissingFields.length > 0 ? { missingFields: contractMissingFields } : {}),
         // A48 — the brand-voice gate (BRAND_VOICE_GATE_FIELD /
         // FREE_TEXT_GATE_FIELD; see extractBrandVoiceProposalFields) blocks
         // approval of a payload that would deterministically fail execution

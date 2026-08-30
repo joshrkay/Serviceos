@@ -26,6 +26,9 @@ import type { EntityResolver } from '../../../../src/ai/resolution/entity-resolv
 import { UpdateBrandVoiceExecutionHandler } from '../../../../src/proposals/execution/brand-voice-handler';
 import { InMemoryBrandVoiceRepository } from '../../../../src/tenants/brand/in-memory-brand-voice-repository';
 import { approveProposal, editProposal } from '../../../../src/proposals/actions';
+import { RespondToReviewTaskHandler } from '../../../../src/ai/tasks/review-response-task';
+import { InMemoryReviewRepository, Review } from '../../../../src/reputation/review';
+import type { BuildReviewResponseProposalDeps } from '../../../../src/reputation/build-proposal';
 
 const TENANT = 'tenant-x';
 const USER = 'user-x';
@@ -813,6 +816,284 @@ describe('InAppVoiceAdapter', () => {
       const result = await adapter.handleInput(sessionId, "Knock 50 off or I'm leaving a 1-star review");
 
       expect(result.ttsText).not.toMatch(/say that again/i);
+    });
+
+    // A49/A50 — before this fix, inapp-adapter.ts's own `handleCreateProposal`
+    // had no branch for `intent === 'complaint' | 'negotiation'` (unlike
+    // ai/voice-turn/create-voice-turn-processor.ts's #883 dedicated
+    // branches), so the FSM's create_proposal side effect fell through to
+    // the generic `intentToProposalType` lookup — whose documented DEFAULT
+    // for an unmapped intent (neither is in proposals/voice-intent-map.ts)
+    // is `voice_clarification`. That type has NO execution handler, so a
+    // live sweep approve() call polled forever ("No execution handler
+    // registered for proposal type 'voice_clarification'"). Both intents
+    // must mint the dedicated `callback` instead — see
+    // proposals/guardrails/voice-protection-proposal.ts.
+    it('A49 — a classified complaint mints the dedicated callback proposal, not a dead voice_clarification', async () => {
+      const gateway = scriptedGateway([
+        JSON.stringify({
+          intentType: 'complaint',
+          confidence: 0.9,
+          extractedEntities: {},
+        }),
+      ]);
+      const adapter = new InAppVoiceAdapter({
+        store,
+        gateway,
+        proposalRepo,
+        auditRepo,
+        onCallRepo,
+      });
+      const { sessionId } = await adapter.startSession(TENANT, USER);
+      const result = await adapter.handleInput(
+        sessionId,
+        "I'm really unhappy — the leak came back the day after you left",
+      );
+
+      expect(result.state).toBe('escalating');
+      expect(result.proposalIds).toHaveLength(1);
+      const stored = await proposalRepo.findById(TENANT, result.proposalIds[0]);
+      expect(stored?.proposalType).toBe('callback');
+    });
+
+    it('D-027 — a complaint utterance carrying a high-severity marker (e.g. "lawyer") stamps the severity marker on the callback payload', async () => {
+      const gateway = scriptedGateway([
+        JSON.stringify({
+          intentType: 'complaint',
+          confidence: 0.9,
+          extractedEntities: {},
+        }),
+      ]);
+      const adapter = new InAppVoiceAdapter({
+        store,
+        gateway,
+        proposalRepo,
+        auditRepo,
+        onCallRepo,
+      });
+      const { sessionId } = await adapter.startSession(TENANT, USER);
+      const result = await adapter.handleInput(
+        sessionId,
+        "I'm going to get a lawyer and sue you over this leak",
+      );
+
+      expect(result.proposalIds).toHaveLength(1);
+      const stored = await proposalRepo.findById(TENANT, result.proposalIds[0]);
+      expect(stored?.proposalType).toBe('callback');
+      const meta = (stored?.payload as { _meta?: { markers?: Array<{ reason: string }> } })._meta;
+      expect(meta?.markers?.some((m) => m.reason === 'complaint_high_severity')).toBe(true);
+    });
+
+    it('A50 — a classified negotiation mints the dedicated callback proposal, not a dead voice_clarification', async () => {
+      const gateway = scriptedGateway([
+        JSON.stringify({
+          intentType: 'negotiation',
+          confidence: 0.9,
+          extractedEntities: { negotiationAsk: '50 off' },
+        }),
+      ]);
+      const adapter = new InAppVoiceAdapter({
+        store,
+        gateway,
+        proposalRepo,
+        auditRepo,
+        onCallRepo,
+      });
+      const { sessionId } = await adapter.startSession(TENANT, USER);
+      const result = await adapter.handleInput(sessionId, "Knock 50 off or I'm leaving a 1-star review");
+
+      expect(result.proposalIds).toHaveLength(1);
+      const stored = await proposalRepo.findById(TENANT, result.proposalIds[0]);
+      // No customerId is resolved for this session, so discount evaluation
+      // (which requires one) never engages — same V1 fallback the telephony
+      // path uses when a caller isn't a matched CRM customer: a plain
+      // enriched `callback`, never the dead generic-map `voice_clarification`.
+      expect(stored?.proposalType).toBe('callback');
+    });
+  });
+
+  // A46 — before this fix, inapp-adapter.ts's `handleCreateProposal` had no
+  // branch for `intent === 'respond_to_review'`, so it fell through to the
+  // generic buildVoiceProposalPayload promotion — which cannot draft
+  // `publicResponse.text` (that needs a review lookup + an LLM draft, not a
+  // classifier-entity promotion). The persisted-but-broken payload then
+  // failed at approval: "review_response_proposal payload is missing the
+  // required publicResponse component" (live evidence, sweep row A46,
+  // 2026-08-30). The fix reuses `RespondToReviewTaskHandler` — the SAME
+  // deterministic resolution + drafting path the recorded-memo on-ramp
+  // already uses — so a live-call draft is identical to a poll-initiated one.
+  describe('A46 — respond_to_review drafts the same review_response_proposal the memo on-ramp does', () => {
+    function draftDeps(
+      publicText: string,
+    ): BuildReviewResponseProposalDeps {
+      return {
+        llmGateway: {} as never,
+        customerLoader: { findCandidates: vi.fn(async () => []) } as never,
+        brandVoiceLoader: { load: vi.fn(async () => ({ tone: 'neutral' })) } as never,
+        serviceCreditRepo: { sumIssuedInLast12Months: vi.fn(async () => 0) } as never,
+        classifier: async () =>
+          ({ classification: 'vague_complaint', confidence: 1, source: 'regex' }) as never,
+        matcher: async () => null,
+        draftPublic: vi.fn(async () => publicText),
+      };
+    }
+
+    it('the exact A46 utterance ("Reply to the 1-star review from yesterday") drafts a review_response_proposal WITH a populated publicResponse', async () => {
+      const reviewRepo = new InMemoryReviewRepository();
+      const theReview: Review = {
+        id: 'review-1',
+        tenantId: TENANT,
+        externalReviewId: 'ext-1',
+        locationId: 'accounts/a/locations/l',
+        reviewerDisplayName: 'Maria Alvarez',
+        reviewerProfileUrl: null,
+        rating: 1,
+        commentText: 'Terrible service',
+        createTime: new Date(Date.now() - 24 * 60 * 60 * 1000),
+        updateTime: null,
+        firstFetchedAt: new Date(),
+        lastFetchedAt: new Date(),
+      };
+      await reviewRepo.upsert(theReview);
+
+      const respondToReviewTaskHandler = new RespondToReviewTaskHandler(
+        proposalRepo,
+        reviewRepo,
+        draftDeps('We are sorry to hear this — please reach out so we can make it right.'),
+      );
+
+      const gateway = scriptedGateway([
+        JSON.stringify({
+          intentType: 'respond_to_review',
+          confidence: 0.9,
+          extractedEntities: { reviewReference: 'the 1-star review from yesterday' },
+        }),
+      ]);
+      const adapter = new InAppVoiceAdapter({
+        store,
+        gateway,
+        proposalRepo,
+        auditRepo,
+        onCallRepo,
+        respondToReviewTaskHandler,
+      });
+      const { sessionId } = await adapter.startSession(TENANT, USER);
+      // Turn 1: intent resolves and parks at the readback (intent_confirm) —
+      // no proposal without caller confirmation, same as every other intent.
+      const readback = await adapter.handleInput(sessionId, 'Reply to the 1-star review from yesterday');
+      expect(readback.state).toBe('intent_confirm');
+      // Turn 2: confirms — NOW the review-response draft is built.
+      const result = await adapter.handleInput(sessionId, 'yes');
+
+      expect(result.proposalIds).toHaveLength(1);
+      const stored = await proposalRepo.findById(TENANT, result.proposalIds[0]);
+      expect(stored?.proposalType).toBe('review_response_proposal');
+      const publicResponse = (stored?.payload as { publicResponse?: { text?: string } })
+        .publicResponse;
+      expect(publicResponse?.text).toBe(
+        'We are sorry to hear this — please reach out so we can make it right.',
+      );
+    });
+
+    it('gates honestly to a voice_clarification (never a broken review_response_proposal) when the drafting dep is not wired', async () => {
+      const gateway = scriptedGateway([
+        JSON.stringify({
+          intentType: 'respond_to_review',
+          confidence: 0.9,
+          extractedEntities: { reviewReference: 'the 1-star review from yesterday' },
+        }),
+      ]);
+      const adapter = new InAppVoiceAdapter({
+        store,
+        gateway,
+        proposalRepo,
+        auditRepo,
+        onCallRepo,
+        // No respondToReviewTaskHandler wired.
+      });
+      const { sessionId } = await adapter.startSession(TENANT, USER);
+      const readback = await adapter.handleInput(sessionId, 'Reply to the 1-star review from yesterday');
+      expect(readback.state).toBe('intent_confirm');
+      const result = await adapter.handleInput(sessionId, 'yes');
+
+      expect(result.proposalIds).toHaveLength(1);
+      const stored = await proposalRepo.findById(TENANT, result.proposalIds[0]);
+      expect(stored?.proposalType).toBe('voice_clarification');
+    });
+  });
+
+  // D01 — before this fix, a new-caller booking (free-text customerName, no
+  // resolvable customerId or jobId — this row's real shape after its 3
+  // corpus turns: "I'd like to book a new customer...", "Jordan Lee,
+  // 480-555-0199, next Tuesday morning works", "It's for a furnace
+  // diagnostic inspection at their home") had NOTHING nameable to gate on:
+  // `createAppointmentPayloadSchema`'s whole-object refine ("requires jobId
+  // ... or a customerId") has no Zod field path, so it was silently dropped
+  // and the payload persisted unchanged with no missingFields — clearing the
+  // way to auto-approve into a guaranteed execution failure
+  // (CreateAppointmentExecutionHandler: "Payload must include a valid
+  // jobId" — live evidence, sweep row D01, 2026-08-30). The fix names the
+  // gap `customerId` (voice-payload.ts) and this adapter now threads it into
+  // the persisted proposal's `missingFields`, forcing status 'draft' so
+  // `approveProposal` refuses it until an operator resolves the customer.
+  describe('D01 — create_appointment with no resolvable customer gates on missingFields, never auto-approves', () => {
+    it('the accumulated D01 entities (free-text customerName, no customerId/jobId) persist as a DRAFT create_appointment proposal with missingFields: ["customerId"]', async () => {
+      const gateway = scriptedGateway([
+        JSON.stringify({
+          intentType: 'create_appointment',
+          confidence: 0.95,
+          extractedEntities: {
+            customerName: 'Jordan Lee',
+            customerPhone: '480-555-0199',
+            scheduledStart: '2026-09-08T12:00:00.000Z',
+            scheduledEnd: '2026-09-08T13:00:00.000Z',
+            jobTitle: 'Furnace diagnostic inspection',
+          },
+        }),
+        JSON.stringify({ answer: 'yes', reasoning: 'confirmed' }),
+      ]);
+      const adapter = new InAppVoiceAdapter({
+        store,
+        gateway,
+        proposalRepo,
+        auditRepo,
+        onCallRepo,
+      });
+      const { sessionId } = await adapter.startSession(TENANT, USER);
+      // Deliberately avoids the literal phrase "new customer" — the
+      // classifier's deterministic P18-001 sign-up override
+      // (isCreateCustomerSignupPhrasing, intent-classifier.ts) forces intent
+      // to create_customer on that exact phrasing, which is a DIFFERENT,
+      // already-covered path — this test targets create_appointment's own
+      // missing-customer gate, matching the proposal_type the corpus's live
+      // dbVerify evidence actually recorded for D01.
+      const readback = await adapter.handleInput(
+        sessionId,
+        "I'd like to book a diagnostic visit for a caller who isn't in the system yet — Jordan Lee, 480-555-0199, next Tuesday morning, furnace diagnostic inspection at their home",
+      );
+      expect(readback.state).toBe('intent_confirm');
+      const result = await adapter.handleInput(sessionId, 'yes');
+
+      expect(result.proposalIds).toHaveLength(1);
+      const stored = await proposalRepo.findById(TENANT, result.proposalIds[0]);
+      expect(stored?.proposalType).toBe('create_appointment');
+      // Never a bare, unexecutable voice_clarification, and never silently
+      // persisted with no missingFields either — a real, reviewable draft.
+      // `decideInitialStatus` returns 'draft' for a non-empty missingFields
+      // (proposals/proposal.ts), which the adapter's existing QA-2026-06-05
+      // promote step then surfaces to the operator inbox as
+      // 'ready_for_review' — orthogonal to the missingFields gate itself,
+      // which `approveProposal` still enforces regardless of status label.
+      expect(stored?.status).toBe('ready_for_review');
+      expect(missingFieldsFor(stored!)).toContain('customerId');
+
+      // The D-004 guarantee this fix exists for: approval is refused with a
+      // reason an operator can act on, NEVER silently approved into the
+      // guaranteed CreateAppointmentExecutionHandler "Payload must include a
+      // valid jobId" failure the live sweep observed.
+      await expect(
+        approveProposal(proposalRepo, TENANT, stored!.id, USER, 'owner'),
+      ).rejects.toThrow(/customerId/);
     });
   });
 

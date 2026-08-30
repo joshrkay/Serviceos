@@ -233,6 +233,30 @@ export async function buildVoiceProposalPayload(
   const customerId = resolveCustomerId(entities, input.callerCustomerId);
   if (customerId) flat.customerId = customerId;
 
+  // D01 (2026-08-30) — `createAppointmentPayloadSchema`'s SCH-02 refine
+  // ("requires jobId (or linkedJobId), or a customerId the executor can open
+  // a job for") is a WHOLE-OBJECT refine: Zod gives it `path: []`, so
+  // `fieldPathsFrom` below (which keeps only the first path SEGMENT) silently
+  // DROPS it — `missingFieldPaths` came back empty even when this exact
+  // check fails. A new-caller booking ("Jordan Lee, 480-555-0199...") with no
+  // resolvable jobId/customerId therefore had NOTHING nameable to gate on:
+  // the payload either persisted unchanged with no missingFields (S2,
+  // in-app — see inapp-adapter.ts) or degraded to a bare voice_clarification
+  // (S1, telephony), and a scripted/auto approval could reach
+  // `CreateAppointmentExecutionHandler` and fail there instead ("Payload must
+  // include a valid jobId" — live evidence, sweep row D01). Detect the SAME
+  // condition here, proactively — not by parsing Zod internals — and name it
+  // so BOTH surfaces (S1 already threads `missingFieldPaths` into
+  // `buildProposal`; S2 is wired to do the same as of this fix) can gate the
+  // draft instead of guaranteeing an execution failure downstream.
+  const contractGapFields: string[] =
+    proposalType === 'create_appointment' &&
+    !flat.jobId &&
+    !flat.linkedJobId &&
+    !flat.customerId
+      ? ['customerId']
+      : [];
+
   // ── 3. Line items (injected grounding) ────────────────────────────────────
   let lineItemOutcome: VoiceLineItemGrounding | undefined;
   if (GROUNDED_LINE_ITEM_PROPOSAL_TYPES.has(proposalType) && deps.groundLineItems) {
@@ -275,7 +299,11 @@ export async function buildVoiceProposalPayload(
   const validation = validateProposalPayload(proposalType, payload);
   if (!validation.valid) {
     const errors = validation.errors ?? ['payload failed contract validation'];
-    return { ...common, ok: false, errors, missingFieldPaths: fieldPathsFrom(errors) };
+    // D01 — merge in the whole-object-refine gap `fieldPathsFrom` cannot
+    // name (see contractGapFields above); deduped, since a payload can also
+    // independently fail a field-specific check (e.g. scheduledStart).
+    const missingFieldPaths = [...new Set([...fieldPathsFrom(errors), ...contractGapFields])];
+    return { ...common, ok: false, errors, missingFieldPaths };
   }
 
   return { ...common, ok: true };

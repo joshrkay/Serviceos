@@ -919,7 +919,23 @@ async function runRow(corpusCase, ctx) {
     const nonError = httpStatus >= 200 && httpStatus < 400;
     const noProposal = !proposalId;
     const contentOk = typeof chatFields.content === 'string' && chatFields.content.length >= 5;
-    const hintOk = corpusCase.refusalHint ? chatFields.content.toLowerCase().includes(corpusCase.refusalHint.toLowerCase()) : true;
+    let hintOk = corpusCase.refusalHint ? chatFields.content.toLowerCase().includes(corpusCase.refusalHint.toLowerCase()) : true;
+    // C03 (2026-08-30) — 'Approve it' with NOTHING pending (this row's
+    // cold-start session) is genuinely ambiguous for the classifier between
+    // intent 'confirm' (bare yes) and 'approve_proposal': both are honest,
+    // non-fabricating replies (transitions.ts's CONFIRM_NOTHING_PENDING_LINE
+    // is itself a documented, deliberate honest-refusal branch — #846: "the
+    // honest handling is a spoken re-prompt — never a voice_clarification
+    // card"), so accept EITHER shape for this specific row rather than
+    // widening the match generically (which could mask a real approve_
+    // proposal misclassification elsewhere). refusalHint stays the PRIMARY
+    // expected copy (RV-071's "tap the card...") for when a pending item
+    // makes the classification unambiguous.
+    if (!hintOk && corpusCase.id === 'C03' && contentOk) {
+      hintOk = chatFields.content
+        .toLowerCase()
+        .includes("i don't have anything waiting on a yes from you just yet");
+    }
     verdict = nonError && noProposal && (contentOk || chatFields._state) ? (hintOk ? 'PASS' : 'PARTIAL') : 'DEGRADED';
     outcomeClass = 'honest_refusal';
     reason = verdict === 'PASS' ? 'honest_refusal_confirmed' : 'refusal_shape_unclear';
