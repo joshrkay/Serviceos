@@ -497,6 +497,22 @@ async function ensureFixtures() {
       [TENANT_ID],
     );
     summary.push(`customers: archived ${priyas.rowCount ?? 0} prior chain-root Priya Shah copies`);
+    // Round 7 — the INVOICE chain (A01 creates a draft, A06 issues it,
+    // A17/A22/A37/A38 operate on the issued one) is chain-rooted too:
+    // prior runs' sweep-created drafts linger, inflate the resolver's
+    // candidate set, and downstream rows can land on a stale draft
+    // ("INV-0010 is 'draft'" execution failures, sweep 10). Void prior
+    // drafts on the fixture customer's jobs at bootstrap — void is
+    // excluded from resolution candidates (#944) and rejected by every
+    // executor, and this run's A01 creates its own fresh draft afterward.
+    const staleDrafts = await rw.query(
+      `UPDATE invoices i SET status = 'void', updated_at = now()
+        WHERE i.tenant_id = $1 AND i.status = 'draft'
+          AND i.job_id IN (SELECT id FROM jobs WHERE tenant_id = $1 AND customer_id = $2)
+        RETURNING i.id`,
+      [TENANT_ID, CUSTOMER_ID],
+    );
+    summary.push(`invoices: voided ${staleDrafts.rowCount ?? 0} stale drafts (chain-root reset)`);
     // Same design one level down: NEW_JOB_SUMMARY ("QA Sweep Furnace
     // Inspection") is a per-run fabricated chain-root JOB, but the
     // resolver's job candidate query has NO status filter, so prior runs'
