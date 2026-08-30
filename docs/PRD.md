@@ -376,6 +376,12 @@ Packs are loaded per tenant; tenants can be in one or both verticals
 
 **Customer & job management**
 - Customer + B2B account entities
+  - *Verification note (Phase 1, 2026-08-30): the Account / Contact / Location
+    data model described in `spec/RIVET_COMMS_SPEC.md` §1 and §9 is **not built**.
+    There are no `accounts`, `contacts` or `locations` tables; the shipped model is
+    the flat `customers` table. Any §9 entitlement claim that depends on a Contact's
+    role on an Account is unimplemented.
+    `[VERIFY-COMMS-008; packages/api/src/db/schema.ts:306]`*
 - Service location, job, appointment entities
 - Customer history and equipment history (HVAC)
 - Internal notes
@@ -386,6 +392,10 @@ Packs are loaded per tenant; tenants can be in one or both verticals
 - Confidence-surfaced line items
 - SMS approval transport
 - Vertical-pack templates and pricing
+  - *Verification note (Phase 1, 2026-08-30): only **hvac** and **plumbing** are
+    selectable and seeded with catalog items + templates. Painting and electrical are
+    not selectable in the V2 form-wizard onboarding lane.
+    `[VERIFY-EST-003, VERIFY-ONBOARD-005]`*
 
 **Invoicing & payments**
 - Invoice drafting from completed jobs + tech notes
@@ -396,6 +406,11 @@ Packs are loaded per tenant; tenants can be in one or both verticals
 **Daily operations**
 - Schedule visibility (no owner-facing dispatch board)
 - Customer reminders + late-arrival heads-ups
+  - *Verification note (Phase 1, 2026-08-30): the predicted-late half is **not wired**.
+    `computeDispatchLateness` is exported but has zero production callers, so the
+    GPS-ping -> drive-time-ETA -> predicted-late re-ETA chain does not exist end to end.
+    Scheduled reminders are unaffected.
+    `[VERIFY-MOBILE-002; packages/api/src/dispatch/lateness.ts:278]`*
 - End-of-day digest with "what I wasn't sure about" section
 - Tech "I'm out" one-tap status
 
@@ -1318,6 +1333,8 @@ Top 10 risks, ordered by likelihood × impact.
 |---------|------|--------|---------|
 | 1.0 | (pre-2026-05) | Product | Initial 8-phase execution catalog. |
 | 2.0 | 2026-05-17 | Product | Re-framed around the AI back office strategy. Added 11 new stories (SMS approval, supervisor agent, digest, review monitoring, dropped-call recovery, vulnerability triage, correction loop, brand voice, tech status, plus two guardrails). Deferred P6, P10-001, P12, P13, P14, P15–P19. Replaced P10-002 with the digest. Architecture updated. Success metrics re-baselined on owner hours saved. |
+
+| 2.1 | 2026-08-30 | Verification (Phase 1) | Documentation-only reconciliation to an E1 code trace. Corrected three §6 functional-scope claims settled as not-built (Account/Contact/Location model `[VERIFY-COMMS-008]`; predicted-late ETA chain `[VERIFY-MOBILE-002]`; vertical packs 2-of-4 `[VERIFY-EST-003, VERIFY-ONBOARD-005]`), one factual error in `docs/decisions.md` D-016's current-architecture list (Supabase is not a shipped dependency), and added a superseded-by-code status banner to `docs/PRD-execution-catalog.md`. No claim was upgraded to built; no story was re-scoped. Full ledger: `projects/serviceos-verification/run-1/`. |
 
 **Next scheduled review**: After Wave 1 exit, before Wave 2 kick-off.
 
