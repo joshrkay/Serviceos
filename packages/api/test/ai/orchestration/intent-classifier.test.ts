@@ -880,6 +880,12 @@ describe('consistency pin — EXTENDED_INTENT_TYPES', () => {
     'lookup_revenue',
     'lookup_my_day',
     'lookup_leads',
+    // #910 completion — lookup_materials (bare, no-job phrasing only) and
+    // lookup_catalog (never entity-bearing) added; see the table's doc
+    // comment for why lookup_availability/lookup_crew_schedule/
+    // lookup_timesheets were deliberately left out.
+    'lookup_materials',
+    'lookup_catalog',
   ]);
 
   // Extract quoted intent names from EXTENDED_INTENTS_PROMPT_SECTION.
@@ -932,6 +938,8 @@ describe('consistency pin — EXTENDED_INTENT_TYPES', () => {
       lookup_revenue: ['What did we sell last month?', 'How much did we make this month?'],
       lookup_my_day: ["What's on my schedule today?", "What's my next job?"],
       lookup_leads: ['Any new leads?', 'How many open leads do we have?'],
+      lookup_materials: ["What's on the shopping list?"],
+      lookup_catalog: ['Show the price book'],
     };
     for (const [intent, transcripts] of Object.entries(triggersByIntent)) {
       expect(PHRASE_MATCH_ALLOWLIST.has(intent), `"${intent}" must be in the phrase-match allowlist`).toBe(true);
@@ -1228,6 +1236,188 @@ describe('#910 — lookup routing determinism (corpus rows L08/L11/L19/C02/R03)'
     expect(matchEnRoutePhrase('')).toBe(false);
     expect(matchEnRoutePhrase('On my way to the Garcia job')).toBe(false);
     expect(matchEnRoutePhrase("I'm running 20 minutes late")).toBe(false);
+  });
+});
+
+// ─── #910 completion — remaining lookup routing determinism ────────────────
+//
+// The 2026-08-29 FOLLOW-UP live sweep (post-#916) found the SAME
+// generic-LLM-fallthrough failure mode recurring, non-deterministically, on
+// four rows #916 hadn't covered: L03 (lookup_balance), L06
+// (lookup_account_summary), L13 (lookup_job_profit) and L20
+// (lookup_materials) — each scored `lookup_answer_not_confirmed` with a
+// reply from `assistant.general` after passing on an earlier run. Same root
+// cause, same fix shape as #916: a narrow, anchored pre-scan consulted
+// BEFORE the LLM call. Plus a systematic extension to `lookup_catalog`
+// (never entity-bearing) as belt-and-braces against the same class of
+// flakiness, even though it isn't itself evidenced as flaky in this sweep.
+describe('#910 completion — lookup routing determinism (corpus rows L03/L06/L13/L20)', () => {
+  const chatContext = { tenantId: 't1', extendedIntents: true };
+
+  it('L03 — "What does {{FIXTURE_CUSTOMER}} owe me?" routes to lookup_balance with customerName extracted, no LLM call', async () => {
+    const gateway = mockGateway('{"intentType":"unknown","confidence":0.2}');
+    const result = await classifyIntent('What does Henderson owe me?', chatContext, gateway);
+    expect(result.intentType).toBe('lookup_balance');
+    expect(result.confidence).toBeGreaterThanOrEqual(CLASSIFIER_CONFIDENCE_THRESHOLD);
+    expect(result.extractedEntities?.customerName).toBe('Henderson');
+    expect(gateway.complete).not.toHaveBeenCalled();
+  });
+
+  it('L06 — "Give me an account summary for {{FIXTURE_CUSTOMER}}" routes to lookup_account_summary with customerName extracted, no LLM call', async () => {
+    const gateway = mockGateway('{"intentType":"unknown","confidence":0.2}');
+    const result = await classifyIntent(
+      'Give me an account summary for Henderson',
+      chatContext,
+      gateway,
+    );
+    expect(result.intentType).toBe('lookup_account_summary');
+    expect(result.confidence).toBeGreaterThanOrEqual(CLASSIFIER_CONFIDENCE_THRESHOLD);
+    expect(result.extractedEntities?.customerName).toBe('Henderson');
+    expect(gateway.complete).not.toHaveBeenCalled();
+  });
+
+  it('L13 — "Did I make money on the {{FIXTURE_JOB}} job?" routes to lookup_job_profit with jobReference extracted, no LLM call', async () => {
+    const gateway = mockGateway('{"intentType":"unknown","confidence":0.2}');
+    const result = await classifyIntent(
+      'Did I make money on the Miller job?',
+      chatContext,
+      gateway,
+    );
+    expect(result.intentType).toBe('lookup_job_profit');
+    expect(result.confidence).toBeGreaterThanOrEqual(CLASSIFIER_CONFIDENCE_THRESHOLD);
+    expect(result.extractedEntities?.jobReference).toBe('Miller');
+    expect(gateway.complete).not.toHaveBeenCalled();
+  });
+
+  it("L20 — \"What's on the shopping list?\" routes to lookup_materials, no LLM call, no extractedEntities", async () => {
+    const gateway = mockGateway('{"intentType":"unknown","confidence":0.2}');
+    const result = await classifyIntent("What's on the shopping list?", chatContext, gateway);
+    expect(result.intentType).toBe('lookup_materials');
+    expect(result.confidence).toBeGreaterThanOrEqual(CLASSIFIER_CONFIDENCE_THRESHOLD);
+    expect(result.extractedEntities).toBeUndefined();
+    expect(gateway.complete).not.toHaveBeenCalled();
+  });
+
+  it('systematic extension — "Show the price book" routes to lookup_catalog, no LLM call (not evidenced as flaky; belt-and-braces)', async () => {
+    const gateway = mockGateway('{"intentType":"unknown","confidence":0.2}');
+    const result = await classifyIntent('Show the price book', chatContext, gateway);
+    expect(result.intentType).toBe('lookup_catalog');
+    expect(result.confidence).toBeGreaterThanOrEqual(CLASSIFIER_CONFIDENCE_THRESHOLD);
+    expect(gateway.complete).not.toHaveBeenCalled();
+  });
+
+  it('negative control: a job-scoped materials ask still reaches the LLM unchanged (entities stay LLM-routed)', async () => {
+    const gateway = mockGateway(
+      JSON.stringify({
+        intentType: 'lookup_materials',
+        confidence: 0.9,
+        extractedEntities: { jobReference: 'the Patel job' },
+      }),
+    );
+    const result = await classifyIntent(
+      'What materials are open on the Patel job?',
+      chatContext,
+      gateway,
+    );
+    expect(gateway.complete).toHaveBeenCalledTimes(1);
+    expect(result.intentType).toBe('lookup_materials');
+    expect(result.extractedEntities?.jobReference).toBe('the Patel job');
+  });
+
+  it('negative control: "who\'s free Thursday?" is NOT hard-coded to lookup_availability — stays LLM-routed (matches the live sweep\'s legitimate lookup_crew_schedule classification)', async () => {
+    const gateway = mockGateway(
+      JSON.stringify({ intentType: 'lookup_crew_schedule', confidence: 0.88 }),
+    );
+    const result = await classifyIntent("Who's free Thursday?", chatContext, gateway);
+    expect(gateway.complete).toHaveBeenCalledTimes(1);
+    expect(result.intentType).toBe('lookup_crew_schedule');
+  });
+
+  it('negative control: a balance ask naming a DIFFERENT subject than "me" is not captured ("what does he owe for the Henderson job?")', async () => {
+    const gateway = mockGateway(
+      JSON.stringify({ intentType: 'lookup_balance', confidence: 0.85, extractedEntities: {} }),
+    );
+    const result = await classifyIntent(
+      'What does he owe for the Henderson job?',
+      chatContext,
+      gateway,
+    );
+    expect(gateway.complete).toHaveBeenCalledTimes(1);
+    expect(result.intentType).toBe('lookup_balance');
+  });
+
+  it('negative control: the other job-profit phrasings stay LLM-routed (only the exact "did I make money" stereotype short-circuits)', async () => {
+    const gateway = mockGateway(
+      JSON.stringify({
+        intentType: 'lookup_job_profit',
+        confidence: 0.9,
+        extractedEntities: { jobReference: "the Johnson install" },
+      }),
+    );
+    const result = await classifyIntent(
+      "What's my margin on the Johnson install?",
+      chatContext,
+      gateway,
+    );
+    expect(gateway.complete).toHaveBeenCalledTimes(1);
+    expect(result.intentType).toBe('lookup_job_profit');
+  });
+
+  it('negative control: ordinary non-lookup utterances still reach the LLM unchanged', async () => {
+    const gateway = mockGateway('{"intentType":"create_invoice","confidence":0.9}');
+    const result = await classifyIntent(
+      'Create an invoice for Acme for 450 dollars',
+      chatContext,
+      gateway,
+    );
+    expect(gateway.complete).toHaveBeenCalledTimes(1);
+    expect(result.intentType).toBe('create_invoice');
+  });
+
+  it('negative control: without extendedIntents, none of the new short-circuits fire (byte-identical legacy behavior)', async () => {
+    for (const transcript of [
+      'What does Henderson owe me?',
+      'Give me an account summary for Henderson',
+      'Did I make money on the Miller job?',
+      "What's on the shopping list?",
+      'Show the price book',
+    ]) {
+      const gateway = mockGateway('{"intentType":"unknown","confidence":0.9}');
+      const result = await classifyIntent(transcript, { tenantId: 't1' }, gateway);
+      expect(
+        gateway.complete,
+        `"${transcript}" without extendedIntents should still call the LLM`,
+      ).toHaveBeenCalledTimes(1);
+      expect(result.intentType).toBe('unknown');
+    }
+  });
+
+  it('matchLookupBalancePhrase / matchLookupAccountSummaryPhrase / matchLookupJobProfitPhrase unit-level: exact corpus utterances match, empty/unrelated text does not', async () => {
+    const {
+      matchLookupBalancePhrase,
+      matchLookupAccountSummaryPhrase,
+      matchLookupJobProfitPhrase,
+    } = await import('../../../src/ai/orchestration/intent-classifier');
+
+    expect(matchLookupBalancePhrase('What does Henderson owe me?')).toEqual({
+      customerName: 'Henderson',
+    });
+    expect(matchLookupBalancePhrase('')).toBeNull();
+    expect(matchLookupBalancePhrase('What does he owe for the Henderson job?')).toBeNull();
+
+    expect(
+      matchLookupAccountSummaryPhrase('Give me an account summary for Henderson'),
+    ).toEqual({ customerName: 'Henderson' });
+    expect(matchLookupAccountSummaryPhrase('')).toBeNull();
+    expect(matchLookupAccountSummaryPhrase('Give me the Henderson invoice')).toBeNull();
+
+    expect(matchLookupJobProfitPhrase('Did I make money on the Miller job?')).toEqual({
+      jobReference: 'Miller',
+    });
+    expect(matchLookupJobProfitPhrase('')).toBeNull();
+    expect(
+      matchLookupJobProfitPhrase("What's my margin on the Johnson install?"),
+    ).toBeNull();
   });
 });
 
