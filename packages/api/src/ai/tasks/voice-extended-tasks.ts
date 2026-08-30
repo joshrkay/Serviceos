@@ -201,17 +201,35 @@ function resolvedEstimateIdFrom(context: TaskContext): string | undefined {
 
 /**
  * The invoice id the router's entity resolver already verified, if any.
- * `send_invoice` / `send_payment_reminder` / `apply_late_fee` are all
- * `INVOICE_DOC_INTENTS` (ai/agents/customer-calling/entity-resolution.ts), so
- * the router plans an 'invoice' kind lookup for the spoken reference and
+ * `send_invoice` / `send_payment_reminder` / `apply_late_fee` / `update_invoice`
+ * are all `INVOICE_DOC_INTENTS` (ai/agents/customer-calling/entity-resolution.ts),
+ * so the router plans an 'invoice' kind lookup for the spoken reference and
  * threads a unique high-confidence match onto `existingEntities.invoiceId`
- * (workers/voice-action-router.ts, annotation.resolved.invoiceId). Shape check
- * only, mirroring `resolvedAppointmentIdFrom` — an ambiguous reference never
- * reaches a task handler (the router short-circuits to voice_clarification),
- * and a not_found/low-confidence one leaves this seam empty so the legacy
- * missing-fields gate holds.
+ * (workers/voice-action-router.ts, annotation.resolved.invoiceId — and, on
+ * chat, routes/assistant.ts's `resolveVerifiedIdsForDraft`, run BEFORE every
+ * task handler regardless of proposal type). Shape check only, mirroring
+ * `resolvedAppointmentIdFrom` — an ambiguous reference never reaches a task
+ * handler (the router short-circuits to voice_clarification; chat asks one
+ * clarifying question instead), and a not_found/low-confidence one leaves
+ * this seam empty so the legacy missing-fields gate holds.
+ *
+ * Exported (A04 fix, 2026-08-29 AI-catalog sweep, fix/approve-stall-five) —
+ * `InvoiceEditTaskHandler` (invoice-edit-task.ts) now consumes this SAME
+ * seam too. It used to run an entirely separate, internal free-text search
+ * (`resolveInvoiceId`) that — by explicit, deliberate design — never lifted
+ * the `invoiceId` gate for ANY free-text reference, even a resolver-verified
+ * unambiguous one, because a search-resolved id isn't verbatim in the
+ * operator's text and so isn't safe to allowlist against
+ * routes/assistant.ts's `dropUnverifiedIds` scrub *on its own*. But this
+ * shared seam's id IS already safe — `resolveVerifiedIdsForDraft` stamps it
+ * into `sourceContext.verifiedIds` before dropUnverifiedIds ever runs — so
+ * an update_invoice proposal whose invoice reference the shared resolver
+ * unambiguously resolved was gated with `missingFields: ['invoiceId']` it
+ * could NEVER clear: a gate with a lifter sitting right next to it that the
+ * handler simply never consulted (the #909 class). `resolveInvoiceId`'s own
+ * bespoke search stays as the fallback for when this seam comes up empty.
  */
-function resolvedInvoiceIdFrom(context: TaskContext): string | undefined {
+export function resolvedInvoiceIdFrom(context: TaskContext): string | undefined {
   const id = context.existingEntities?.invoiceId;
   return isUuid(id) ? id : undefined;
 }
@@ -2056,6 +2074,20 @@ export class NotifyDelayTaskHandler implements TaskHandler {
     const ee = entitiesFrom(context);
     const payload: Record<string, unknown> = {};
     const missing: string[] = [];
+    // A31 fix — `resolveActiveAppointmentId` is a REPO lookup (customer's
+    // own jobs → appointments), not LLM/classifier text, so a match it
+    // returns is verifiable by construction exactly like
+    // InvoiceEditTaskHandler's repo-confirmed invoiceId. Without stamping it
+    // here, routes/assistant.ts's dropUnverifiedIds scrub — which strips any
+    // id-shaped payload value that doesn't literally appear in the
+    // operator's words — deletes `payload.appointmentId` right back out
+    // (a spoken customer name never contains the appointment's UUID), and
+    // because this branch never pushes 'appointmentId' onto `missing`
+    // either, the proposal ends up with NO appointmentId and NO gate: it
+    // reads as fully approvable but is doomed to fail at execution. See
+    // GatedReferenceSource's B4 verifiedIds allowlist doc comment
+    // (ai/resolution/gated-reference-resolution.ts) for the general pattern.
+    let verifiedIds: Record<string, string> | undefined;
 
     // Scope to the caller's own appointment — notify_delay emits a comms
     // proposal that texts the customer, so resolving to a *different*
@@ -2066,6 +2098,7 @@ export class NotifyDelayTaskHandler implements TaskHandler {
     });
     if (resolvedId) {
       payload.appointmentId = resolvedId;
+      verifiedIds = { appointmentId: resolvedId };
     } else if (ee.appointmentReference) {
       payload.appointmentReference = ee.appointmentReference;
       missing.push('appointmentId');
@@ -2078,7 +2111,11 @@ export class NotifyDelayTaskHandler implements TaskHandler {
     }
 
     return {
-      proposal: createProposal(inputFor(context, this.taskType, payload, missing)),
+      proposal: createProposal(
+        inputFor(context, this.taskType, payload, missing, {
+          ...(verifiedIds ? { sourceContext: { verifiedIds } } : {}),
+        }),
+      ),
       taskType: this.taskType,
     };
   }

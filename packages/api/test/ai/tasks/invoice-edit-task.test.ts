@@ -277,6 +277,55 @@ describe('InvoiceEditTaskHandler', () => {
       ).rejects.toThrow(/unfilled required fields/);
     });
 
+    // A04 fix (2026-08-29 AI-catalog sweep) — when the CHAT surface's shared
+    // pre-draft resolver already verified the invoice reference (the same
+    // `resolvedInvoiceIdFrom(context)` seam ApplyLateFeeTaskHandler /
+    // SendPaymentReminderTaskHandler / SendInvoiceTaskHandler trust), this
+    // handler must consult it too and lift the gate — not run its own
+    // bespoke search that can never lift it. Without this, a reference the
+    // resolver had ALREADY confirmed still landed in the "stays gated"
+    // case above with no way to ever clear it: `dropUnverifiedIds`
+    // preserves the handler's own display-only `payload.invoiceId` because
+    // the pre-draft resolver's `sourceContext.verifiedIds` entry allowlists
+    // it, which then makes `planGatedReferenceLookups`
+    // (ai/resolution/gated-reference-resolution.ts) treat the field as
+    // "already filled — nothing to resolve" and skip it too. A gate with a
+    // verified id sitting right next to it that nothing ever consulted.
+    it('a reference the shared pre-draft resolver already verified (existingEntities.invoiceId) UNGATES immediately', async () => {
+      const invoiceRepo = new InMemoryInvoiceRepository();
+      // A real UUID — `resolvedInvoiceIdFrom` only trusts a shape-valid id.
+      const invoice = await invoiceRepo.create(makeInvoice({ id: 'e6b1f2a0-9c3d-4b7e-8a2f-1d5c6e7f8a9b' }));
+
+      const proposalRepo = new InMemoryProposalRepository();
+      const handler = new InvoiceEditTaskHandler(editGateway(), { invoiceRepo });
+      const result = await handler.handle({
+        tenantId,
+        userId,
+        message: 'Add a trip fee to invoice INV-0042',
+        // What routes/assistant.ts's resolveVerifiedIdsForDraft threads onto
+        // TaskContext.existingEntities BEFORE handle() runs, for every
+        // INVOICE_DOC_INTENTS member — a real DB-verified id, not LLM text.
+        existingEntities: { invoiceId: invoice.id },
+      });
+
+      const payload = result.proposal.payload as Record<string, unknown>;
+      expect(payload.invoiceId).toBe(invoice.id);
+      expect(missingFieldsFor(result.proposal)).toEqual([]);
+      const sc = (result.proposal.sourceContext ?? {}) as Record<string, unknown>;
+      expect(sc.verifiedIds).toEqual({ invoiceId: invoice.id });
+
+      // The exact call that stalled at 'ready_for_review' forever pre-fix.
+      await proposalRepo.create(result.proposal);
+      const approved = await approveProposal(
+        proposalRepo,
+        tenantId,
+        result.proposal.id,
+        userId,
+        'owner',
+      );
+      expect(approved.status).toBe('approved');
+    });
+
     it('an ambiguous reference (>1 match via invoiceRepo search) gates missingFields and does not set invoiceId', async () => {
       const invoiceRepo = new InMemoryInvoiceRepository();
       // Same invoice number on two rows is the simplest way to force >1
