@@ -1562,6 +1562,52 @@ export function matchLookupEstimatesPhrase(
   return { customerName };
 }
 
+/**
+ * A02 (2026-08-29 live sweep) — deterministic short-circuit for the
+ * canonical dictated `draft_estimate` phrasing: an explicit "draft/create/
+ * write/prepare/generate an estimate for <customer>: <line items>"
+ * imperative. Colon-delimited `customerName` capture, same shape as
+ * `matchLookupEstimatesPhrase` immediately above.
+ *
+ * WHY THIS EXISTS: routes/assistant.ts's chat surface dispatches a
+ * classified `draft_estimate` straight to the real `EstimateTaskHandler`
+ * (CHAT_INTENT_TO_REGISTRY_KEY) with no confidence gate of its own — so
+ * dispatch was never the seam. The seam was upstream, exactly like #910's
+ * lookup rows: `classify_intent` intermittently missed the mapped
+ * `draft_estimate` intent for this stereotyped two-price phrasing (low
+ * confidence, or an outright wrong pick), which dropped the turn past
+ * BOTH registry maps to routes/assistant.ts's generic LLM fallback — a
+ * path with no database and no tools that fabricated a whole proposal
+ * card (id `estimate-001`, invalid-UUID, 404s on approve) because nothing
+ * upstream of it verified the model's self-reported "I drafted this"
+ * claim. See ai/orchestration/assistant-honesty-guard.ts for the
+ * companion fix that makes that fallback structurally incapable of
+ * emitting a proposal at all, regardless of classification.
+ *
+ * Safe to bypass the LLM here for the same reason `matchLookupEstimatesPhrase`
+ * is, despite `draft_estimate` being a write (unlike that read-only intent):
+ * D-004 — a drafted estimate is proposal-first, never auto-executed, and an
+ * unresolved/ambiguous `customerName` still goes through the SAME
+ * EntityResolver (resolveVerifiedIdsForDraft) the LLM-classified path uses
+ * — unambiguous fills the id, ambiguous asks ONE clarifying question,
+ * not-found lands in `missingFields` and forces 'draft'. A misfire here at
+ * worst drafts an estimate nobody asked for, sitting unapproved; it can
+ * never silently execute or move money.
+ */
+const DRAFT_ESTIMATE_PATTERN =
+  /^\s*(?:draft|create|write|prepare|generate)\s+(?:an?\s+)?estimate\s+for\s+(.{1,80}?)\s*:\s*\S/i;
+
+export function matchDraftEstimatePhrase(
+  transcript: string,
+): { customerName: string } | null {
+  if (!transcript) return null;
+  const match = DRAFT_ESTIMATE_PATTERN.exec(transcript);
+  if (!match) return null;
+  const customerName = match[1].trim();
+  if (!customerName) return null;
+  return { customerName };
+}
+
 /** RV-071 — predicate the voice routing layers use to gate owner approval intents. */
 export function isVoiceApprovalIntent(
   intent: IntentType | string | undefined | null,
@@ -1961,6 +2007,19 @@ async function classifyIntentRaw(
         intentType: 'en_route',
         confidence: 0.95,
         reasoning: 'matched deterministic en_route phrasing',
+      };
+    }
+
+    // A02 (2026-08-29 live sweep) — same extendedIntents-gated, pre-LLM slot;
+    // see matchDraftEstimatePhrase's doc comment for why this write intent
+    // is still safe to short-circuit deterministically.
+    const draftEstimateMatch = matchDraftEstimatePhrase(transcript);
+    if (draftEstimateMatch) {
+      return {
+        intentType: 'draft_estimate',
+        confidence: 0.95,
+        reasoning: 'matched deterministic draft_estimate phrasing',
+        extractedEntities: { customerName: draftEstimateMatch.customerName },
       };
     }
   }
