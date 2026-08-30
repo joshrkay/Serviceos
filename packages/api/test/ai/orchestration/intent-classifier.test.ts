@@ -1421,6 +1421,90 @@ describe('#910 completion — lookup routing determinism (corpus rows L03/L06/L1
   });
 });
 
+describe('A02 — draft_estimate routing determinism (2026-08-29 live sweep)', () => {
+  const chatContext = { tenantId: 't1', extendedIntents: true };
+
+  it('A02 — the exact sweep utterance routes to draft_estimate with customerName extracted, no LLM call', async () => {
+    // Same shape production's classify_intent missed for this utterance
+    // (a low-confidence 'unknown') — the deterministic match must not even
+    // consult it.
+    const gateway = mockGateway('{"intentType":"unknown","confidence":0.3}');
+    const result = await classifyIntent(
+      'Draft an estimate for qa-matrix-A-customer: water heater replacement for 2200 dollars, plus a permit fee for 150 dollars',
+      chatContext,
+      gateway,
+    );
+    expect(result.intentType).toBe('draft_estimate');
+    expect(result.confidence).toBeGreaterThanOrEqual(CLASSIFIER_CONFIDENCE_THRESHOLD);
+    expect(result.extractedEntities?.customerName).toBe('qa-matrix-A-customer');
+    expect(gateway.complete).not.toHaveBeenCalled();
+  });
+
+  it('draft_estimate phrase variants also short-circuit: create/write/prepare/generate, "an"/"a" estimate', async () => {
+    for (const transcript of [
+      'Create an estimate for Bob Jones: new water heater for 1800 dollars',
+      'Write an estimate for Bob Jones: new water heater for 1800 dollars',
+      'Prepare an estimate for Bob Jones: new water heater for 1800 dollars',
+      'Generate a estimate for Bob Jones: new water heater for 1800 dollars',
+    ]) {
+      const gateway = mockGateway('{"intentType":"unknown","confidence":0.2}');
+      const result = await classifyIntent(transcript, chatContext, gateway);
+      expect(result.intentType, `"${transcript}" should route to draft_estimate`).toBe(
+        'draft_estimate',
+      );
+      expect(gateway.complete).not.toHaveBeenCalled();
+    }
+  });
+
+  it('negative control: without extendedIntents, the short-circuit does not fire (byte-identical legacy behavior)', async () => {
+    const gateway = mockGateway('{"intentType":"unknown","confidence":0.9}');
+    const result = await classifyIntent(
+      'Draft an estimate for qa-matrix-A-customer: water heater replacement for 2200 dollars',
+      { tenantId: 't1' },
+      gateway,
+    );
+    expect(gateway.complete).toHaveBeenCalledTimes(1);
+    expect(result.intentType).toBe('unknown');
+  });
+
+  it('negative control: an estimate mentioned mid-sentence, without the "draft/create/… estimate for X:" imperative shape, stays LLM-routed', async () => {
+    const gateway = mockGateway('{"intentType":"update_estimate","confidence":0.9}');
+    const result = await classifyIntent(
+      'Can you check on the estimate for Bob Jones?',
+      chatContext,
+      gateway,
+    );
+    expect(gateway.complete).toHaveBeenCalledTimes(1);
+    expect(result.intentType).toBe('update_estimate');
+  });
+
+  it('negative control: no colon after the customer name stays LLM-routed', async () => {
+    const gateway = mockGateway('{"intentType":"draft_estimate","confidence":0.9}');
+    const result = await classifyIntent(
+      'Draft an estimate for Bob Jones for a water heater replacement',
+      chatContext,
+      gateway,
+    );
+    expect(gateway.complete).toHaveBeenCalledTimes(1);
+    expect(result.intentType).toBe('draft_estimate');
+  });
+
+  it('matchDraftEstimatePhrase unit-level: exact corpus utterance matches, empty/unrelated/no-colon text does not', async () => {
+    const { matchDraftEstimatePhrase } = await import(
+      '../../../src/ai/orchestration/intent-classifier'
+    );
+    expect(
+      matchDraftEstimatePhrase(
+        'Draft an estimate for qa-matrix-A-customer: water heater replacement for 2200 dollars, plus a permit fee for 150 dollars',
+      ),
+    ).toEqual({ customerName: 'qa-matrix-A-customer' });
+    expect(matchDraftEstimatePhrase('')).toBeNull();
+    expect(matchDraftEstimatePhrase('What estimates does Jane Doe have?')).toBeNull();
+    expect(matchDraftEstimatePhrase('Draft an estimate for Bob Jones for a water heater')).toBeNull();
+    expect(matchDraftEstimatePhrase('Can you check on the estimate for Bob Jones?')).toBeNull();
+  });
+});
+
 describe('intent-classifier — lookup_job_profit (P22-005)', () => {
   const tenantId = 'tenant-1';
 
