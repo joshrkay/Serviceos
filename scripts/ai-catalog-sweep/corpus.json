@@ -297,7 +297,8 @@
         "table": "message_dispatches",
         "whereShape": "tenant_id = '{{tenantId}}' AND channel = 'sms' AND recipient = '480-555-0195' ORDER BY sent_at DESC LIMIT 5"
       },
-      "notes": "2026-08-29 WS-E honesty pass — first-nudge-free path. FUP-002's 48h cooldown (SendEstimateNudgeExecutionHandler, proposals/execution/handlers.ts) is RATIFIED-correct product behavior, so this row nudging the SAME estimate A18 just sent seconds earlier in the SAME run was never a bug, but it made `executes` unprovable — every run legitimately hit the guard. No longer dependsOn A18: ensureFixtures() now seeds a DEDICATED 'QA Sweep Nudge Fixture' customer (own job + estimate, primary_phone + sms_consent set for the SMS nudge channel) with a 'sent', unanswered estimate whose seed dispatch is 72h old (self-healing across runs, see run-sweep.mjs), so THIS row's first nudge against it is genuinely provable as executes. A dedicated customer — not FIXTURE_CUSTOMER — is required: SendEstimateNudgeTaskHandler resolves the target via a customer-anchored estimate search (voice-extended-tasks.ts), so a second 'sent' estimate on the SAME customer as the A02->A05->A18 chain would be genuine ambiguity (a voice_clarification with no execution handler) regardless of in-run timing, not just a cooldown refusal. Companion row A51 proves the OTHER honest half — the cooldown correctly firing — against the SAME estimate this row just nudged."
+      "notes": "2026-08-29 WS-E honesty pass — first-nudge-free path. FUP-002's 48h cooldown (SendEstimateNudgeExecutionHandler, proposals/execution/handlers.ts) is RATIFIED-correct product behavior, so this row nudging the SAME estimate A18 just sent seconds earlier in the SAME run was never a bug, but it made `executes` unprovable — every run legitimately hit the guard. No longer dependsOn A18: ensureFixtures() now seeds a DEDICATED 'QA Sweep Nudge Fixture' customer (own job + estimate, primary_phone + sms_consent set for the SMS nudge channel) with a 'sent', unanswered estimate whose seed dispatch is 72h old (self-healing across runs, see run-sweep.mjs), so THIS row's first nudge against it is genuinely provable as executes. A dedicated customer — not FIXTURE_CUSTOMER — is required: SendEstimateNudgeTaskHandler resolves the target via a customer-anchored estimate search (voice-extended-tasks.ts), so a second 'sent' estimate on the SAME customer as the A02->A05->A18 chain would be genuine ambiguity (a voice_clarification with no execution handler) regardless of in-run timing, not just a cooldown refusal. Companion row A51 proves the OTHER honest half — the cooldown correctly firing — against the SAME estimate this row just nudged. Round-6: answer turn — prior-run sent estimates for the nudge customer legitimately remain candidates, so the ask must be answered (make-input-resolvable; executes expectation unchanged).",
+      "clarificationAnswer": "the most recent one"
     },
     {
       "id": "A51",
@@ -334,14 +335,14 @@
       "intent": "apply_late_fee",
       "surface": "chat",
       "dependsOn": "A20",
-      "utterance": "Apply a late fee to {{FIXTURE_CUSTOMER}}’s overdue invoice",
+      "utterance": "Apply a $25 late fee to {{FIXTURE_CUSTOMER}}’s overdue invoice",
       "expectedOutcome": "executes",
       "approve": true,
       "verify": {
         "table": "invoices",
         "whereShape": "tenant_id = '{{tenantId}}' AND id = '{{ctx.A01.resultEntityId}}'"
       },
-      "notes": "Round-3: utterance now names the customer so the new customer→job→invoice traversal (fix/ref-lift-live-misses) can resolve; the document-number few-shot gap is #931 (pinned-prompt change, separate). Round-5: answer turn added — the customer traversal has no status filter, so even the clean seed pair yields 2 invoice candidates and the row must answer the ask to reach execution (same make-input-resolvable precedent as A20; the executes expectation is unchanged).",
+      "notes": "Round-3: utterance now names the customer so the new customer→job→invoice traversal (fix/ref-lift-live-misses) can resolve; the document-number few-shot gap is #931 (pinned-prompt change, separate). Round-5: answer turn added — the customer traversal has no status filter, so even the clean seed pair yields 2 invoice candidates and the row must answer the ask to reach execution (same make-input-resolvable precedent as A20; the executes expectation is unchanged). Round-6: utterance names the amount — the drafted payload gated on feeCents with no amount anywhere in the input (a human operator would say the fee; executes expectation unchanged).",
       "clarificationAnswer": "the most recent one"
     },
     {
