@@ -86,6 +86,56 @@ describe('P2-005 — Approve / reject / edit interactions', () => {
     expect(approved.executedBy).toBe(actorId);
   });
 
+  // voice_clarification approval wedge — sweep row A49 (2026-08-30):
+  // approving a clarification card moved it to 'approved', the execution
+  // sweep then claimed it (status -> 'executing'), and `ProposalExecutor
+  // .execute` threw HANDLER_NOT_FOUND — voice_clarification is deliberately
+  // the ONE ProposalType with no execution handler (proposals/execution/
+  // handlers.ts; proposals/voice-clarification.ts's own doc comment says so
+  // in as many words). The proposal was left wedged in 'executing' through
+  // several stale-recovery retries before finally landing on
+  // 'execution_failed' — dishonest bookkeeping for a card that was never a
+  // failed action, only an unanswered question. `approveProposal` now
+  // refuses outright: a clarification is answered by the caller speaking
+  // again or dismissed (rejectProposal), never "approved".
+  it('refuses to approve a voice_clarification proposal — it is a question, not an action', async () => {
+    const repo = makeRepo();
+    const proposal = await createReadyProposal(repo, {
+      proposalType: 'voice_clarification',
+      payload: {
+        transcript: 'caller: can you move my appointment',
+        reason: 'missing_entities',
+        sessionId: 'sess-1',
+      },
+    });
+
+    await expect(
+      approveProposal(repo, tenantId, proposal.id, actorId, 'owner'),
+    ).rejects.toThrow(ValidationError);
+    // Never transitioned — still sitting exactly where the operator left it,
+    // available to reject or to be superseded by the caller speaking again.
+    expect((await repo.findById(tenantId, proposal.id))?.status).toBe('ready_for_review');
+  });
+
+  // Rejecting (dismissing) a voice_clarification is the documented close
+  // action (proposal.ts's actionClass comment: "closes when the operator
+  // dismisses it or speaks again") and must keep working exactly as it does
+  // for every other proposal type — the new approve guard is approve-only.
+  it('still allows rejecting (dismissing) a voice_clarification proposal', async () => {
+    const repo = makeRepo();
+    const proposal = await createReadyProposal(repo, {
+      proposalType: 'voice_clarification',
+      payload: {
+        transcript: 'caller: can you move my appointment',
+        reason: 'missing_entities',
+        sessionId: 'sess-1',
+      },
+    });
+
+    const rejected = await rejectProposal(repo, tenantId, proposal.id, actorId, 'owner', 'dismissed');
+    expect(rejected.status).toBe('rejected');
+  });
+
   // Raised in PR review: a dispatcher holds `proposals:approve` but NOT
   // `settings:update`. Without a type-specific guard the approval queue became
   // a way around the route permission model — approving one of these cards
