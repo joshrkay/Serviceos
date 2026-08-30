@@ -1097,6 +1097,205 @@ describe('InAppVoiceAdapter', () => {
     });
   });
 
+  // D01 (2026-08-30 live sweep) — the THREE-TURN new-caller booking, which
+  // never left `intent_capture` live: every turn came back "I want to make
+  // sure I got that right — can you say that again?" and no proposal was
+  // ever minted. Two defects compounded:
+  //   1. turn 1 ("…book a new customer for a diagnostic visit") was rewritten
+  //      by the P18-001 sign-up override into create_customer, or missed
+  //      outright by a non-deterministic gpt-4o-mini — closed by the
+  //      anchored `matchNewBookingPhrase` short-circuit;
+  //   2. turn 2 (the slots) hit `intent_confirm`, was not an affirmation, and
+  //      so became a `correction` that WIPED currentIntent + extractedEntities
+  //      — closed by `intent_details_supplied`, which merges the new slots and
+  //      re-runs the SAME entity resolver over the accumulated set.
+  describe('D01 — the three-turn new-caller booking reaches a gated draft', () => {
+    // Turn 1 short-circuits deterministically (no gateway call). Turns 2 and
+    // 3 are the classifier extracting slots from a readback answer; neither
+    // names create_appointment, which is the point — a bare slot fragment
+    // reads as `unknown`, and "Jordan Lee, 480-555-0199" reads as
+    // create_customer. Both are this booking's own detail, not a new request.
+    const slotFillTurns = [
+      JSON.stringify({
+        intentType: 'create_customer',
+        confidence: 0.8,
+        extractedEntities: {
+          customerName: 'Jordan Lee',
+          phone: '480-555-0199',
+          dateTimeDescription: 'next Tuesday morning',
+        },
+      }),
+      JSON.stringify({
+        intentType: 'unknown',
+        confidence: 0.3,
+        extractedEntities: { jobTitle: 'Furnace diagnostic inspection' },
+      }),
+    ];
+
+    it('all three corpus turns accumulate into ONE create_appointment draft, gated on missingFields: ["customerId"]', async () => {
+      const gateway = scriptedGateway(slotFillTurns);
+      const adapter = new InAppVoiceAdapter({
+        store,
+        gateway,
+        proposalRepo,
+        auditRepo,
+        onCallRepo,
+      });
+      const { sessionId } = await adapter.startSession(TENANT, USER);
+
+      // Turn 1 — the booking opening. Deterministic: no LLM round-trip.
+      const turn1 = await adapter.handleInput(
+        sessionId,
+        "I'd like to book a new customer for a diagnostic visit",
+      );
+      expect(turn1.state).toBe('intent_confirm');
+      expect(gateway.complete).not.toHaveBeenCalled();
+      expect(store.peek(sessionId)?.machine.currentContext.currentIntent).toBe(
+        'create_appointment',
+      );
+
+      // Turn 2 — name / phone / time. Pre-fix this cleared the booking.
+      const turn2 = await adapter.handleInput(
+        sessionId,
+        'Jordan Lee, 480-555-0199, next Tuesday morning works',
+      );
+      expect(turn2.state).toBe('intent_confirm');
+      expect(store.peek(sessionId)?.machine.currentContext.currentIntent).toBe(
+        'create_appointment',
+      );
+
+      // Turn 3 — the work being booked.
+      const turn3 = await adapter.handleInput(
+        sessionId,
+        "It's for a furnace diagnostic inspection at their home",
+      );
+      expect(turn3.state).toBe('intent_confirm');
+
+      // Every turn's slots survived into one accumulated set.
+      const accumulated = store.peek(sessionId)?.machine.currentContext.extractedEntities;
+      expect(accumulated).toMatchObject({
+        customerName: 'Jordan Lee',
+        phone: '480-555-0199',
+        dateTimeDescription: 'next Tuesday morning',
+        jobTitle: 'Furnace diagnostic inspection',
+      });
+
+      // The readback is finally answered — the same auto-continuation the
+      // live sweep harness sends once a session parks in intent_confirm.
+      const result = await adapter.handleInput(sessionId, "Yes, that's correct.");
+
+      expect(result.proposalIds).toHaveLength(1);
+      const stored = await proposalRepo.findById(TENANT, result.proposalIds[0]);
+      expect(stored?.proposalType).toBe('create_appointment');
+      // draft_gated, exactly as corpus row D01 expects: a new caller has no
+      // customerId to resolve, so the proposal is reviewable but NOT
+      // approvable until an operator supplies one (D-004).
+      expect(missingFieldsFor(stored!)).toContain('customerId');
+      await expect(
+        approveProposal(proposalRepo, TENANT, stored!.id, USER, 'owner'),
+      ).rejects.toThrow(/customerId/);
+    });
+
+    it('a plain "no" at the readback still corrects, with no classifier round-trip', async () => {
+      const gateway = scriptedGateway(slotFillTurns);
+      const adapter = new InAppVoiceAdapter({
+        store,
+        gateway,
+        proposalRepo,
+        auditRepo,
+        onCallRepo,
+      });
+      const { sessionId } = await adapter.startSession(TENANT, USER);
+      await adapter.handleInput(sessionId, 'Book a diagnostic visit');
+      const corrected = await adapter.handleInput(sessionId, "No, that's not right");
+      expect(corrected.state).toBe('intent_capture');
+      expect(gateway.complete).not.toHaveBeenCalled();
+      expect(store.peek(sessionId)?.machine.currentContext.currentIntent).toBeUndefined();
+    });
+
+    it('a genuinely DIFFERENT request at the readback is still a correction, not a slot merge', async () => {
+      const gateway = scriptedGateway([
+        JSON.stringify({
+          intentType: 'send_invoice',
+          confidence: 0.93,
+          extractedEntities: { customerName: 'Miller' },
+        }),
+      ]);
+      const adapter = new InAppVoiceAdapter({
+        store,
+        gateway,
+        proposalRepo,
+        auditRepo,
+        onCallRepo,
+      });
+      const { sessionId } = await adapter.startSession(TENANT, USER);
+      await adapter.handleInput(sessionId, 'Book a diagnostic visit');
+      const switched = await adapter.handleInput(
+        sessionId,
+        'Actually, send the invoice for the Miller job',
+      );
+      expect(switched.state).toBe('intent_capture');
+      const ctx = store.peek(sessionId)?.machine.currentContext;
+      expect(ctx?.currentIntent).toBeUndefined();
+      // The foreign request's entities were NOT folded into the booking.
+      expect(ctx?.extractedEntities).toBeUndefined();
+    });
+
+    it('a readback answer carrying no slots at all falls back to correction (pre-D01 behavior)', async () => {
+      const gateway = scriptedGateway([
+        JSON.stringify({ intentType: 'unknown', confidence: 0.2 }),
+      ]);
+      const adapter = new InAppVoiceAdapter({
+        store,
+        gateway,
+        proposalRepo,
+        auditRepo,
+        onCallRepo,
+      });
+      const { sessionId } = await adapter.startSession(TENANT, USER);
+      await adapter.handleInput(sessionId, 'Book a diagnostic visit');
+      const noSlots = await adapter.handleInput(sessionId, 'hmm what were we doing');
+      expect(noSlots.state).toBe('intent_capture');
+    });
+
+    it('slot-fill re-runs the entity resolver, so a customer that DOES exist gets a verified id', async () => {
+      // The invariant this must not break: slot-fill is not a bypass. The
+      // accumulated customerName goes through the SAME resolver turn 1 used.
+      const entityResolver = {
+        resolve: vi.fn(async (input: { kind: string; reference: string }) =>
+          input.kind === 'customer' && input.reference === 'Jordan Lee'
+            ? {
+                kind: 'resolved' as const,
+                candidate: {
+                  id: 'cust-jordan',
+                  label: 'Jordan Lee',
+                  score: 0.98,
+                  kind: 'customer' as const,
+                },
+              }
+            : { kind: 'skipped' as const },
+        ),
+      } as unknown as EntityResolver;
+      const gateway = scriptedGateway(slotFillTurns);
+      const adapter = new InAppVoiceAdapter({
+        store,
+        gateway,
+        proposalRepo,
+        auditRepo,
+        onCallRepo,
+        entityResolver,
+      });
+      const { sessionId } = await adapter.startSession(TENANT, USER);
+      await adapter.handleInput(sessionId, 'Book a diagnostic visit');
+      await adapter.handleInput(sessionId, 'Jordan Lee, 480-555-0199, next Tuesday morning works');
+
+      expect(entityResolver.resolve).toHaveBeenCalled();
+      expect(
+        store.peek(sessionId)?.machine.currentContext.extractedEntities?.customerId,
+      ).toBe('cust-jordan');
+    });
+  });
+
   describe('B2 — voiceSessionRepo outcome stamping', () => {
     it('inserts a voice_sessions row on startSession with channel=inapp_voice', async () => {
       const gateway = scriptedGateway([]);

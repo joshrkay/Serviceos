@@ -1229,6 +1229,33 @@ function transitionIntentConfirm(
     };
   }
 
+  // D01 — the caller supplied MORE DETAIL for the same request instead of a
+  // yes/no. Merge the new slots and re-run entity resolution over the
+  // accumulated set (the adapter's Path A drives the resolver from
+  // entity_resolution and lands us back here with a fresh readback). The
+  // merge order matches entity_resolved's: already-captured entities first,
+  // this turn's values last, so a later correction of a slot wins.
+  if (event.type === 'intent_details_supplied') {
+    return {
+      nextState: 'entity_resolution',
+      sideEffects: [
+        auditLog(context, 'intent_confirm', 'entity_resolution', 'intent_details_supplied', {
+          intentType: context.currentIntent,
+          // Strict tier for the same reason intent_capture's
+          // intent_classified audit uses it: PII_KEY_PATTERNS masks the
+          // customerName/phone this event exists to carry, while keeping
+          // the diagnostic keys (jobTitle, dateTimeDescription) readable.
+          entities: redactByTier(event.entities, 'strict'),
+        }),
+      ],
+      updatedContext: {
+        ...context,
+        extractedEntities: { ...context.extractedEntities, ...event.entities },
+        retryCount: 0,
+      },
+    };
+  }
+
   // correction → back to intent_capture
   if (event.type === 'correction') {
     return {

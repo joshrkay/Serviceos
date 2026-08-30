@@ -513,6 +513,53 @@ export function isAffirmation(text: string): boolean {
   return AFFIRMATION_LEAD_TOKENS.has(first);
 }
 
+/**
+ * D01 — explicit rejections of the intent_confirm readback. Only needed
+ * because the confirm turn is no longer "affirmation or correction": a
+ * non-affirmative answer that carries new SLOTS is now a slot-fill
+ * continuation (see `confirmTurnSlotFillEvent`), so the caller needs a
+ * deterministic way to say "no, that's not it" and get the pre-D01
+ * correction — without paying a classifier round-trip to be told so.
+ */
+const NEGATION_PHRASES = new Set([
+  'no', 'nope', 'nah', 'negative', 'wrong', 'incorrect', 'cancel', 'cancel that',
+  "that's wrong", 'thats wrong', 'that is wrong', "that's not right",
+  'thats not right', 'that is not right', "that's not it", 'thats not it',
+  'not right', 'not correct', 'start over', 'never mind', 'nevermind',
+  // es
+  'no gracias', 'incorrecto', 'no es correcto', 'cancelar', 'olvídalo', 'olvidalo',
+]);
+
+/** Leading negative tokens ("no, that's the wrong customer"). */
+const NEGATION_LEAD_TOKENS = new Set(['no', 'nope', 'nah', 'negative', 'incorrecto']);
+
+/** True when the caller's readback response is a clear rejection. */
+export function isNegation(text: string): boolean {
+  const normalized = text.trim().toLowerCase().replace(/[.!?,]+$/g, '').trim();
+  if (!normalized) return false;
+  if (NEGATION_PHRASES.has(normalized)) return true;
+  const first = normalized.split(/\s+/)[0].replace(/[.!?,]+$/g, '');
+  return NEGATION_LEAD_TOKENS.has(first);
+}
+
+/**
+ * D01 — the intents whose `intent_confirm` readback may be answered with
+ * MORE DETAIL rather than a yes/no. Deliberately just the creation family:
+ * these are the requests a caller builds up across turns ("book a visit" →
+ * "Jordan Lee, 480-555-0199, next Tuesday" → "furnace diagnostic at their
+ * home"), and they are the family for which "no such record yet" is the
+ * NORMAL outcome (see `requiresExistingEntity` / toResolutionEvent). Every
+ * other intent keeps the pre-D01 behavior byte-for-byte: anything that is
+ * not a clear affirmation is a correction.
+ */
+const SLOT_FILL_INTENTS: ReadonlySet<string> = new Set([
+  'create_appointment',
+  'create_booking',
+  'create_job',
+  'create_customer',
+  'draft_estimate',
+]);
+
 export class InAppVoiceAdapter {
   constructor(private readonly deps: InAppAdapterDeps) {}
 
@@ -786,6 +833,50 @@ export class InAppVoiceAdapter {
       partialRefs: resolution.refs,
       attemptCount: 0,
     };
+  }
+
+  /**
+   * D01 — decide what a non-yes/no answer to the `intent_confirm` readback
+   * MEANS, given the re-classification of that turn.
+   *
+   * Slot-fill (`intent_details_supplied`) when the turn produced at least
+   * one usable slot AND does not name a DIFFERENT actionable request:
+   *   - `unknown` — the classifier could not name an intent for a bare
+   *     detail fragment ("Jordan Lee, 480-555-0199, next Tuesday morning
+   *     works"); that is exactly what a slot-only turn looks like;
+   *   - the SAME intent we are confirming;
+   *   - a sibling of the same creation family — while confirming a booking,
+   *     "Jordan Lee, 480-555-0199" reads to the classifier as
+   *     `create_customer` and "furnace diagnostic at their home" as
+   *     `create_job`, but both are describing THIS booking's customer and
+   *     work, not asking for a second proposal.
+   *
+   * Everything else — no new slots at all, or a clearly different intent
+   * (`send_invoice`, `cancel_appointment`, a lookup) — stays `correction`,
+   * the pre-D01 behavior: re-capture rather than fold a foreign request's
+   * entities into the pending one.
+   */
+  private confirmTurnSlotFillEvent(
+    session: VoiceSession,
+    classification: Awaited<ReturnType<typeof classifyIntent>>,
+    text: string,
+  ): CallingAgentEvent {
+    const pendingIntent = session.machine.currentContext.currentIntent;
+    const entities = (classification.extractedEntities ?? {}) as Record<string, unknown>;
+    const newSlots = Object.fromEntries(
+      Object.entries(entities).filter(
+        ([, value]) => value !== undefined && value !== null && value !== '',
+      ),
+    );
+    const sameRequest =
+      classification.intentType === 'unknown' ||
+      classification.intentType === pendingIntent ||
+      (SLOT_FILL_INTENTS.has(classification.intentType) &&
+        SLOT_FILL_INTENTS.has(pendingIntent ?? ''));
+    if (!sameRequest || Object.keys(newSlots).length === 0) {
+      return { type: 'correction', newTranscript: text };
+    }
+    return { type: 'intent_details_supplied', entities: newSlots };
   }
 
   private async classifyIntentWithRetry(
@@ -1189,7 +1280,21 @@ export class InAppVoiceAdapter {
      */
     let adapterActEffects: SideEffect[] | undefined;
 
-    if (stateBeforeTurn === 'intent_confirm') {
+    /**
+     * D01 — a confirm turn that is neither a clear "yes" nor a clear "no",
+     * for an intent whose readback may legitimately be answered with more
+     * detail. It falls through to the classifier below (branch C) purely to
+     * EXTRACT SLOTS; `confirmTurnSlotFillEvent` then decides whether the
+     * caller is still describing the same request (merge + re-resolve) or
+     * has moved on (correction, exactly as before this fix).
+     */
+    const confirmSlotFillTurn =
+      stateBeforeTurn === 'intent_confirm' &&
+      !isAffirmation(text) &&
+      !isNegation(text) &&
+      SLOT_FILL_INTENTS.has(session.machine.currentContext.currentIntent ?? '');
+
+    if (stateBeforeTurn === 'intent_confirm' && !confirmSlotFillTurn) {
       fsmEvent = isAffirmation(text)
         ? { type: 'confirmed' }
         : { type: 'correction', newTranscript: text };
@@ -1292,37 +1397,46 @@ export class InAppVoiceAdapter {
             tokenUsage: classifierUsage,
           }),
         );
-        fsmEvent = classifierToFsmEvent(
-          classification.intentType,
-          classification.confidence,
-          classification.extractedEntities as Record<string, unknown> | undefined,
-          text
-        );
-        // Adapter acts (approve/reject/edit refusal, language switch) are
-        // decided here, before the FSM sees the turn. Gated on TAU_INT for
-        // the same reason the FSM gates on it: below the band we do not
-        // claim to know what was asked, so the bounded reprompt path answers
-        // — and it mints nothing, so the C03/C05/C07 failure cannot recur
-        // through the low-confidence door either.
-        if (classification.confidence >= TAU_INT) {
-          adapterActEffects = this.handleAdapterAct(
-            session,
+        if (confirmSlotFillTurn) {
+          // D01 — the caller is answering OUR readback, not opening a new
+          // request. The classification is used only to tell "more detail"
+          // from "different request"; adapter acts and owner lookups stay
+          // out of a confirm turn exactly as they did before this fix (the
+          // confirm branch never reached them).
+          fsmEvent = this.confirmTurnSlotFillEvent(session, classification, text);
+        } else {
+          fsmEvent = classifierToFsmEvent(
             classification.intentType,
-            text,
+            classification.confidence,
+            classification.extractedEntities as Record<string, unknown> | undefined,
+            text
           );
-        }
-        if (
-          !adapterActEffects &&
-          classification.confidence >= TAU_INT &&
-          session.machine.currentContext.ownerSession === true &&
-          classification.intentType.startsWith('lookup_') &&
-          this.deps.ownerLookupResolver
-        ) {
-          ownerLookupText = await this.deps.ownerLookupResolver(
-            session.tenantId,
-            session.id,
-            classification.intentType,
-          );
+          // Adapter acts (approve/reject/edit refusal, language switch) are
+          // decided here, before the FSM sees the turn. Gated on TAU_INT for
+          // the same reason the FSM gates on it: below the band we do not
+          // claim to know what was asked, so the bounded reprompt path answers
+          // — and it mints nothing, so the C03/C05/C07 failure cannot recur
+          // through the low-confidence door either.
+          if (classification.confidence >= TAU_INT) {
+            adapterActEffects = this.handleAdapterAct(
+              session,
+              classification.intentType,
+              text,
+            );
+          }
+          if (
+            !adapterActEffects &&
+            classification.confidence >= TAU_INT &&
+            session.machine.currentContext.ownerSession === true &&
+            classification.intentType.startsWith('lookup_') &&
+            this.deps.ownerLookupResolver
+          ) {
+            ownerLookupText = await this.deps.ownerLookupResolver(
+              session.tenantId,
+              session.id,
+              classification.intentType,
+            );
+          }
         }
       } catch (error) {
         const failure = classifierFailureFromError(error);
@@ -1332,12 +1446,18 @@ export class InAppVoiceAdapter {
         );
         // Prefer intent_classified/unknown over confidence_low so repair
         // templates use low_intent_confidence (text path), not low_audio.
-        fsmEvent = {
-          type: 'intent_classified',
-          intentType: 'unknown',
-          entities: {},
-          confidence: 0,
-        };
+        // D01 — on a confirm slot-fill turn the classifier is only there to
+        // extract slots; if it fails we have none, so fall back to the
+        // pre-D01 confirm-turn outcome (correction) rather than speaking a
+        // capture-state reprompt at someone answering a readback.
+        fsmEvent = confirmSlotFillTurn
+          ? { type: 'correction', newTranscript: text }
+          : {
+              type: 'intent_classified',
+              intentType: 'unknown',
+              entities: {},
+              confidence: 0,
+            };
       }
 
       // Wire the classifier's token usage into the cost tracker. If the
@@ -1409,20 +1529,38 @@ export class InAppVoiceAdapter {
     //               partial refs — intent_confirm readback; the proposal
     //               carries pendingReference for operator review. A caller
     //               booking NEW work must never be escalated for it.
-    if (
-      session.machine.currentState === 'entity_resolution' &&
+    //
+    // D01 — `intent_details_supplied` re-enters entity_resolution from
+    // intent_confirm with the ACCUMULATED entities, so the same three
+    // outcomes apply to the enriched set: the customer named on turn 2 gets
+    // a verified id if they exist, a "which one?" if several match, and the
+    // gated-draft path if they're genuinely new. The intent/entities are
+    // read off the FSM context (the transition merged them) rather than off
+    // the event, which carries only this turn's delta.
+    const resolutionInput: { intent: string; entities: Record<string, unknown> } | undefined =
       fsmEvent.type === 'intent_classified'
-    ) {
+        ? { intent: fsmEvent.intentType, entities: fsmEvent.entities }
+        : fsmEvent.type === 'intent_details_supplied' &&
+            session.machine.currentContext.currentIntent
+          ? {
+              intent: session.machine.currentContext.currentIntent,
+              entities: (session.machine.currentContext.extractedEntities ?? {}) as Record<
+                string,
+                unknown
+              >,
+            }
+          : undefined;
+    if (session.machine.currentState === 'entity_resolution' && resolutionInput) {
       const resolution = await this.resolveEntities(
         session.tenantId,
-        fsmEvent.intentType,
-        fsmEvent.entities,
+        resolutionInput.intent,
+        resolutionInput.entities,
         session.machine.currentContext.jobId,
         session,
       );
       const resolutionEvent = await this.toResolutionEvent(
         session.tenantId,
-        fsmEvent.intentType,
+        resolutionInput.intent,
         resolution,
       );
       const effects2 = session.machine.dispatch(resolutionEvent);
