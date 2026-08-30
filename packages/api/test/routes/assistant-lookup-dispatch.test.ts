@@ -36,7 +36,7 @@ import { InMemoryAppointmentRepository } from '../../src/appointments/in-memory-
 import type { Appointment } from '../../src/appointments/appointment';
 import { InMemoryJobRepository, createJob } from '../../src/jobs/job';
 import type { JobRepository } from '../../src/jobs/job';
-import { InMemoryInvoiceRepository, createInvoice } from '../../src/invoices/invoice';
+import { InMemoryInvoiceRepository, createInvoice, issueInvoice } from '../../src/invoices/invoice';
 import { InMemoryEstimateRepository, createEstimate } from '../../src/estimates/estimate';
 import { buildLineItem } from '../../src/shared/billing-engine';
 import { InMemoryMoneyDashboardRepository } from '../../src/reports/money-dashboard';
@@ -46,6 +46,11 @@ import {
   InMemoryCatalogItemRepository,
 } from '../../src/catalog/catalog-item';
 import { InMemoryUserRepository } from '../../src/users/user';
+import { InMemoryAgreementRepository } from '../../src/agreements/agreement';
+import { InMemorySettingsRepository } from '../../src/settings/settings';
+import { InMemoryTimeEntryRepository } from '../../src/time-tracking/time-entry';
+import { InMemoryExpenseRepository } from '../../src/expenses/expense';
+import { InMemoryMaterialItemRepository } from '../../src/materials/material-item';
 import type { LLMGateway, LLMResponse } from '../../src/ai/gateway/gateway';
 import type { AuthenticatedRequest } from '../../src/auth/clerk';
 import type { EntityResolver } from '../../src/ai/resolution/entity-resolver';
@@ -624,6 +629,259 @@ describe('POST /api/assistant/chat — #910 / L08: lookup_estimates deterministi
     );
     // The whole point: no LLM call at all — the sweep's non-deterministic
     // classifier failure can no longer happen for this exact phrasing.
+    expect((badGateway.complete as ReturnType<typeof vi.fn>)).not.toHaveBeenCalled();
+  });
+});
+
+// #910 completion (2026-08-29 FOLLOW-UP live sweep) — the SAME
+// generic-LLM-fallthrough failure mode L08 exhibited recurred, non-
+// deterministically, on four rows #916 hadn't covered: L03 (lookup_balance),
+// L06 (lookup_account_summary), L13 (lookup_job_profit), L20
+// (lookup_materials) — each scored `lookup_answer_not_confirmed` with a
+// reply from `assistant.general` after passing an earlier run. Same proof
+// shape as the L08 block above: the deterministic phrase match (intent-
+// classifier.ts) fires first, so the scripted "bad" gateway response
+// (verbatim from the sweep's stored replies) is never consumed and the
+// SKILL's real DB data answers instead.
+describe('POST /api/assistant/chat — #910 completion: L03/L06/L13/L20 deterministic phrase matches', () => {
+  it('L03 — lookup_balance answers from the SKILL with real balance data, even when the gateway is scripted to answer generically', async () => {
+    const jobRepo = new InMemoryJobRepository();
+    const invoiceRepo = new InMemoryInvoiceRepository();
+    const job = await createJob(
+      {
+        tenantId: TEST_TENANT,
+        customerId: '22222222-2222-4222-8222-222222222222',
+        locationId: 'loc-henderson',
+        summary: 'Drain repair for Henderson',
+        createdBy: TEST_USER,
+      } as never,
+      jobRepo,
+    );
+    const invoice = await createInvoice(
+      {
+        tenantId: TEST_TENANT,
+        jobId: job.id,
+        invoiceNumber: 'INV-0201',
+        lineItems: [buildLineItem('li-1', 'Drain repair', 1, 12_050, 0, false)],
+        taxRateBps: 0,
+        createdBy: TEST_USER,
+      } as never,
+      invoiceRepo,
+    );
+    await issueInvoice(TEST_TENANT, invoice.id, 30, invoiceRepo);
+
+    // Verbatim shape of the sweep's OBSERVED failure (L03, model
+    // 'assistant.general'). Because the deterministic phrase match fires
+    // first, this scripted response is never consumed.
+    const badGateway = scriptedGateway([
+      'I do not have access to specific customer billing information. Please check your billing system or records for details on what qa-matrix-A-customer owes you.',
+    ]);
+    const entityResolver: EntityResolver = {
+      resolve: vi.fn(async (input: { reference: string; kind: string }) =>
+        input.kind === 'customer' && input.reference === 'Henderson'
+          ? {
+              kind: 'resolved',
+              candidate: { id: '22222222-2222-4222-8222-222222222222', kind: 'customer', label: 'Henderson', score: 0.95 },
+            }
+          : { kind: 'not_found', reference: input.reference },
+      ),
+    } as unknown as EntityResolver;
+    const lookups: AssistantLookupDeps = {
+      answers: { invoiceRepo },
+      shared: {
+        jobRepo,
+        appointmentRepo: new InMemoryAppointmentRepository(),
+        proposalRepo: new InMemoryProposalRepository(),
+      },
+      entityResolver,
+      now: () => NOW,
+    };
+    const app = buildApp(badGateway, { lookups });
+
+    const res = await request(app)
+      .post('/api/assistant/chat')
+      .send({ messages: [{ role: 'user', content: 'What does Henderson owe me?' }] });
+
+    expect(res.status).toBe(200);
+    expect(res.body.model).toBe('data-lookup');
+    expect(res.body.taskType).toBe('assistant.lookup.lookup_balance');
+    expect(res.body.message.content).toContain('$120.50');
+    expect(entityResolver.resolve).toHaveBeenCalledWith(
+      expect.objectContaining({ reference: 'Henderson', kind: 'customer' }),
+    );
+    expect((badGateway.complete as ReturnType<typeof vi.fn>)).not.toHaveBeenCalled();
+  });
+
+  it('L06 — lookup_account_summary answers from the SKILL with real account data, even when the gateway is scripted to answer generically', async () => {
+    const jobRepo = new InMemoryJobRepository();
+    const appointmentRepo = new InMemoryAppointmentRepository();
+    const invoiceRepo = new InMemoryInvoiceRepository();
+    const agreementRepo = new InMemoryAgreementRepository();
+    const job = await createJob(
+      {
+        tenantId: TEST_TENANT,
+        customerId: '22222222-2222-4222-8222-222222222222',
+        locationId: 'loc-henderson',
+        summary: 'AC repair for Henderson',
+        createdBy: TEST_USER,
+      } as never,
+      jobRepo,
+    );
+    const invoice = await createInvoice(
+      {
+        tenantId: TEST_TENANT,
+        jobId: job.id,
+        invoiceNumber: 'INV-0202',
+        lineItems: [buildLineItem('li-1', 'AC repair', 1, 12_050, 0, false)],
+        taxRateBps: 0,
+        createdBy: TEST_USER,
+      } as never,
+      invoiceRepo,
+    );
+    await issueInvoice(TEST_TENANT, invoice.id, 30, invoiceRepo);
+
+    // Verbatim shape of the sweep's OBSERVED failure (L06).
+    const badGateway = scriptedGateway([
+      'I do not have access to account summaries or customer data. Please check your internal system or contact your account manager for the account summary of qa-matrix-A-customer.',
+    ]);
+    const entityResolver: EntityResolver = {
+      resolve: vi.fn(async (input: { reference: string; kind: string }) =>
+        input.kind === 'customer' && input.reference === 'Henderson'
+          ? {
+              kind: 'resolved',
+              candidate: { id: '22222222-2222-4222-8222-222222222222', kind: 'customer', label: 'Henderson', score: 0.95 },
+            }
+          : { kind: 'not_found', reference: input.reference },
+      ),
+    } as unknown as EntityResolver;
+    const lookups: AssistantLookupDeps = {
+      answers: { invoiceRepo, agreementRepo },
+      shared: { jobRepo, appointmentRepo, proposalRepo: new InMemoryProposalRepository() },
+      entityResolver,
+      now: () => NOW,
+    };
+    const app = buildApp(badGateway, { lookups });
+
+    const res = await request(app)
+      .post('/api/assistant/chat')
+      .send({ messages: [{ role: 'user', content: 'Give me an account summary for Henderson' }] });
+
+    expect(res.status).toBe(200);
+    expect(res.body.model).toBe('data-lookup');
+    expect(res.body.taskType).toBe('assistant.lookup.lookup_account_summary');
+    expect(res.body.message.content).toContain('$120.50');
+    expect(entityResolver.resolve).toHaveBeenCalledWith(
+      expect.objectContaining({ reference: 'Henderson', kind: 'customer' }),
+    );
+    expect((badGateway.complete as ReturnType<typeof vi.fn>)).not.toHaveBeenCalled();
+  });
+
+  it('L13 — lookup_job_profit answers from the SKILL with real P&L data, even when the gateway is scripted to answer generically', async () => {
+    const jobRepo = new InMemoryJobRepository();
+    const settingsRepo = new InMemorySettingsRepository();
+    const invoiceRepo = new InMemoryInvoiceRepository();
+    const timeEntryRepo = new InMemoryTimeEntryRepository();
+    const expenseRepo = new InMemoryExpenseRepository();
+    const job = await createJob(
+      {
+        tenantId: TEST_TENANT,
+        customerId: 'cust-miller',
+        locationId: 'loc-miller',
+        summary: 'Miller',
+        createdBy: TEST_USER,
+      } as never,
+      jobRepo,
+    );
+    const invoice = await createInvoice(
+      {
+        tenantId: TEST_TENANT,
+        jobId: job.id,
+        invoiceNumber: 'INV-0203',
+        lineItems: [buildLineItem('li-1', 'Furnace install', 1, 50_000, 0, false)],
+        taxRateBps: 0,
+        createdBy: TEST_USER,
+      } as never,
+      invoiceRepo,
+    );
+    await issueInvoice(TEST_TENANT, invoice.id, 30, invoiceRepo);
+
+    // Verbatim shape of the sweep's OBSERVED failure (L13, "Owner token —
+    // reports:view granted." per the sweep row's own note).
+    const badGateway = scriptedGateway([
+      'I cannot access financial data or job performance metrics. Please check your financial records or job reports to determine if you made money on the QA Matrix job.',
+    ]);
+    const entityResolver: EntityResolver = {
+      resolve: vi.fn(async (input: { reference: string; kind: string }) =>
+        input.kind === 'job' && input.reference === 'Miller'
+          ? { kind: 'resolved', candidate: { id: job.id, kind: 'job', label: 'Miller', score: 0.95 } }
+          : { kind: 'not_found', reference: input.reference },
+      ),
+    } as unknown as EntityResolver;
+    const lookups: AssistantLookupDeps = {
+      answers: {
+        settingsRepo,
+        invoiceRepo,
+        timeEntryRepo,
+        expenseRepo,
+        resolveMemberRole: async () => 'owner',
+      },
+      shared: { jobRepo, proposalRepo: new InMemoryProposalRepository() },
+      entityResolver,
+      now: () => NOW,
+    };
+    const app = buildApp(badGateway, { lookups });
+
+    const res = await request(app)
+      .post('/api/assistant/chat')
+      .send({ messages: [{ role: 'user', content: 'Did I make money on the Miller job?' }] });
+
+    expect(res.status).toBe(200);
+    expect(res.body.model).toBe('data-lookup');
+    expect(res.body.taskType).toBe('assistant.lookup.lookup_job_profit');
+    expect(res.body.message.content).toContain('Miller job brought in $500.00');
+    expect(entityResolver.resolve).toHaveBeenCalledWith(
+      expect.objectContaining({ reference: 'Miller', kind: 'job' }),
+    );
+    expect((badGateway.complete as ReturnType<typeof vi.fn>)).not.toHaveBeenCalled();
+  });
+
+  it('L20 — lookup_materials answers from the SKILL with the real shopping list, even when the gateway is scripted to answer generically, no entity resolution attempted', async () => {
+    const materialItemRepo = new InMemoryMaterialItemRepository();
+    await materialItemRepo.create({
+      tenantId: TEST_TENANT,
+      description: 'Flue liner kit',
+      quantity: 1,
+      createdBy: TEST_USER,
+    });
+
+    // Verbatim shape of the sweep's OBSERVED failure (L20, "No permission
+    // gate — any operator." per the sweep row's own note).
+    const badGateway = scriptedGateway([
+      "I do not have access to the shopping list. Please check your records or system for the current items on the list.",
+    ]);
+    const entityResolver: EntityResolver = {
+      resolve: vi.fn(async () => ({ kind: 'not_found', reference: 'unused' })),
+    } as unknown as EntityResolver;
+    const lookups: AssistantLookupDeps = {
+      answers: { materialItemRepo },
+      shared: { proposalRepo: new InMemoryProposalRepository() },
+      entityResolver,
+      now: () => NOW,
+    };
+    const app = buildApp(badGateway, { lookups });
+
+    const res = await request(app)
+      .post('/api/assistant/chat')
+      .send({ messages: [{ role: 'user', content: "What's on the shopping list?" }] });
+
+    expect(res.status).toBe(200);
+    expect(res.body.model).toBe('data-lookup');
+    expect(res.body.taskType).toBe('assistant.lookup.lookup_materials');
+    expect(res.body.message.content).toContain('Flue liner kit');
+    // The bare ask has no job/customer to resolve — the deterministic
+    // phrase match returns no extractedEntities, so the resolver is never
+    // even consulted.
+    expect(entityResolver.resolve).not.toHaveBeenCalled();
     expect((badGateway.complete as ReturnType<typeof vi.fn>)).not.toHaveBeenCalled();
   });
 });

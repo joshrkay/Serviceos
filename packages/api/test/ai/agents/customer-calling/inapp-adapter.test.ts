@@ -25,6 +25,7 @@ import type { Customer } from '../../../../src/customers/customer';
 import type { EntityResolver } from '../../../../src/ai/resolution/entity-resolver';
 import { UpdateBrandVoiceExecutionHandler } from '../../../../src/proposals/execution/brand-voice-handler';
 import { InMemoryBrandVoiceRepository } from '../../../../src/tenants/brand/in-memory-brand-voice-repository';
+import { approveProposal, editProposal } from '../../../../src/proposals/actions';
 
 const TENANT = 'tenant-x';
 const USER = 'user-x';
@@ -1443,6 +1444,95 @@ describe('QA-2026-07-26 — voice-drafted estimate line items (lineItemDescripti
       expect(state.config.signoff).toBe('Thanks, QA Sweep HVAC');
     });
 
+    // A48 row of the 2026-08-29 AI-catalog sweep — the sweep drove this
+    // exact utterance through `/api/voice/sessions` (which routes straight
+    // to InAppVoiceAdapter — see routes/voice-sessions.ts) and reported
+    // POST /api/proposals/:id/approve leaving the proposal stuck at
+    // `ready_for_review`. The sweep runner's approve-response body is
+    // discarded (scripts/ai-catalog-sweep/run-sweep.mjs), so it couldn't
+    // say WHY. This test closes the loop the prior test stopped short of
+    // (execution only, no approveProposal call): with the SAME clean
+    // extraction, the owner-approve call the sweep actually made succeeds.
+    // `update_brand_voice` is CONFIG_WRITING (proposals/actions.ts) and
+    // needs `settings:update`, not just `proposals:approve` — 'owner' (the
+    // sweep's default actor) holds both (auth/rbac.ts).
+    it('A48: the exact sweep utterance drafts, approves (owner), and executes end to end', async () => {
+      const gateway = scriptedGateway([
+        JSON.stringify({
+          register: 'friendly',
+          signoff: 'Thanks, QA Sweep HVAC',
+          confidence_score: 0.92,
+        }),
+      ]);
+      const adapter = new InAppVoiceAdapter({ store, gateway, proposalRepo, auditRepo, onCallRepo });
+      const { sessionId } = await adapter.startSession(TENANT, USER);
+      const session = store.peek(sessionId);
+      if (!session) throw new Error('test session missing');
+
+      await callHandleCreateProposal(adapter, session, {
+        type: 'create_proposal',
+        payload: {
+          tenantId: TENANT,
+          intent: 'update_brand_voice',
+          entities: {
+            brandVoiceInstruction: 'friendly, plain-spoken, sign off Thanks, QA Sweep HVAC',
+          },
+          sessionId: session.id,
+          confidence: 0.9,
+        },
+      });
+
+      const [drafted] = await proposalRepo.findByTenant(TENANT);
+      expect(drafted.proposalType).toBe('update_brand_voice');
+      expect(missingFieldsFor(drafted)).toEqual([]);
+
+      // The exact call that stalled at 'ready_for_review' forever in the
+      // live sweep (A48, reason `approve_no_terminal_status: ready_for_review`).
+      const approved = await approveProposal(proposalRepo, TENANT, drafted.id, USER, 'owner');
+      expect(approved.status).toBe('approved');
+
+      const brandVoiceRepo = new InMemoryBrandVoiceRepository();
+      const result = await new UpdateBrandVoiceExecutionHandler(brandVoiceRepo, auditRepo).execute(
+        approved,
+        { tenantId: TENANT, executedBy: USER },
+      );
+      expect(result.success, result.error).toBe(true);
+      const state = await brandVoiceRepo.getState(TENANT);
+      expect(state.config.register).toBe('friendly');
+    });
+
+    // Non-owner actors hold `proposals:approve` but NOT `settings:update` —
+    // the CONFIG_WRITING_PROPOSAL_TYPES guard in approveProposal must still
+    // refuse them for update_brand_voice specifically (proposals/actions.ts),
+    // exactly like the routes/onboarding.ts / brand-voice-router.ts HTTP
+    // routes it mirrors. An honest, actionable 403 — not a silent stall.
+    it('a dispatcher cannot approve update_brand_voice — settings:update required, not just proposals:approve', async () => {
+      const gateway = scriptedGateway([
+        JSON.stringify({ register: 'friendly', confidence_score: 0.9 }),
+      ]);
+      const adapter = new InAppVoiceAdapter({ store, gateway, proposalRepo, auditRepo, onCallRepo });
+      const { sessionId } = await adapter.startSession(TENANT, USER);
+      const session = store.peek(sessionId);
+      if (!session) throw new Error('test session missing');
+
+      await callHandleCreateProposal(adapter, session, {
+        type: 'create_proposal',
+        payload: {
+          tenantId: TENANT,
+          intent: 'update_brand_voice',
+          entities: { brandVoiceInstruction: 'friendly' },
+          sessionId: session.id,
+          confidence: 0.9,
+        },
+      });
+
+      const [drafted] = await proposalRepo.findByTenant(TENANT);
+      expect(missingFieldsFor(drafted)).toEqual([]);
+      await expect(
+        approveProposal(proposalRepo, TENANT, drafted.id, USER, 'dispatcher'),
+      ).rejects.toThrow(/settings/);
+    });
+
     it('an update_brand_voice effect the model cannot map at all stays gated, never approvable-then-doomed', async () => {
       const gateway = scriptedGateway([
         JSON.stringify({ unmapped: 'lock my brand voice', confidence_score: 0.2 }),
@@ -1471,6 +1561,88 @@ describe('QA-2026-07-26 — voice-drafted estimate line items (lineItemDescripti
       // approveProposal refuses this, never a doomed approval.
       expect(missingFieldsFor(proposal)).toContain('register');
       expect(proposal.status).not.toBe('approved');
+    });
+
+    // A48 (2026-08-29 AI-catalog sweep) — the sweep's own utterance ("Set my
+    // brand voice: friendly, plain-spoken, sign off Thanks, QA Sweep HVAC")
+    // names TWO tone descriptions ("friendly" AND "plain-spoken"), not one.
+    // BRAND_VOICE_SYSTEM_PROMPT explicitly names "plain-spoken" as exactly
+    // the kind of tone phrase to map "ONLY when the mapping is unambiguous;
+    // otherwise put the raw phrase in unmapped" — with "friendly" already
+    // claiming the register slot, a real model answering honestly puts
+    // "plain-spoken" in `unmapped` rather than silently discarding it. This
+    // MIXED case (something mapped AND something left unmapped) is the
+    // FREE_TEXT_GATE_FIELD branch neither existing A48 test exercises (one
+    // scripts a fully-clean mapping, the other scripts nothing-mapped-at-all)
+    // — and it is the most likely real-world shape for this exact utterance,
+    // so it is the most plausible explanation for the row's live stall.
+    // Proves this is an HONEST, human-actionable gate (D-004: never
+    // auto-approve, never force status) — not a bug: approveProposal
+    // correctly refuses, and an operator edit unblocks it, exactly the
+    // "gate with a lifter" contract every other row in this suite proves.
+    it('a MIXED extraction (register mapped + a tone phrase the model left unmapped) gates honestly, and an operator edit unblocks it', async () => {
+      const gateway = scriptedGateway([
+        JSON.stringify({
+          register: 'friendly',
+          signoff: 'Thanks, QA Sweep HVAC',
+          unmapped: 'plain-spoken',
+          confidence_score: 0.75,
+        }),
+      ]);
+      const adapter = new InAppVoiceAdapter({ store, gateway, proposalRepo, auditRepo, onCallRepo });
+      const { sessionId } = await adapter.startSession(TENANT, USER);
+      const session = store.peek(sessionId);
+      if (!session) throw new Error('test session missing');
+
+      await callHandleCreateProposal(adapter, session, {
+        type: 'create_proposal',
+        payload: {
+          tenantId: TENANT,
+          intent: 'update_brand_voice',
+          entities: {
+            brandVoiceInstruction: 'friendly, plain-spoken, sign off Thanks, QA Sweep HVAC',
+          },
+          sessionId: session.id,
+          confidence: 0.9,
+        },
+      });
+
+      const proposals = await proposalRepo.findByTenant(TENANT);
+      expect(proposals).toHaveLength(1);
+      const proposal = proposals[0];
+      expect(proposal.proposalType).toBe('update_brand_voice');
+      expect(proposal.payload.register).toBe('friendly');
+      expect(proposal.payload.signoff).toBe('Thanks, QA Sweep HVAC');
+      expect(proposal.payload.freeText).toBe('plain-spoken');
+      // The mixed-content gate — never the "nothing mapped" one.
+      expect(missingFieldsFor(proposal)).toEqual(['freeText']);
+
+      // The exact call the sweep's approve POST resolves to: refuses with a
+      // reason an operator (or the review card's editFields UI) can act on,
+      // never a silent stall.
+      await expect(
+        approveProposal(proposalRepo, TENANT, proposal.id, USER, 'owner'),
+      ).rejects.toThrow(/freeText/);
+
+      // An operator confirms/edits the flagged free text — the SAME
+      // clear-on-fill unblock path every other gated row in this repo uses
+      // (clearSatisfiedMissingFields: editing the exact gated key present
+      // and non-empty lifts it). Still owner-approved after — D-004 intact.
+      await editProposal(proposalRepo, TENANT, proposal.id, USER, 'owner', {
+        freeText: 'plain-spoken (confirmed, no separate style change needed)',
+      });
+      const approved = await approveProposal(proposalRepo, TENANT, proposal.id, USER, 'owner');
+      expect(approved.status).toBe('approved');
+
+      const brandVoiceRepo = new InMemoryBrandVoiceRepository();
+      const result = await new UpdateBrandVoiceExecutionHandler(brandVoiceRepo, auditRepo).execute(
+        approved,
+        { tenantId: TENANT, executedBy: 'operator-1' },
+      );
+      expect(result.success).toBe(true);
+      const state = await brandVoiceRepo.getState(TENANT);
+      expect(state.config.register).toBe('friendly');
+      expect(state.config.signoff).toBe('Thanks, QA Sweep HVAC');
     });
 
     it("falls back to the last caller transcript line when the classifier didn't extract brandVoiceInstruction", async () => {

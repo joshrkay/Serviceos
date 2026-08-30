@@ -328,9 +328,17 @@ const assistantChatRequestSchema = z.object({
   inputMode: z.enum(['voice', 'text']).optional(),
 });
 
-/** UB-B3 — deterministic refusal copy for voice-mode approval intents. */
-export const VOICE_APPROVAL_REFUSAL =
-  "Tap the card to approve — I don't take approvals by voice here yet.";
+/**
+ * UB-B3 — deterministic refusal copy for voice-mode approval intents.
+ *
+ * Re-exported, not re-declared: the in-app voice-session adapter refuses the
+ * same three intents with the same sentence (see the constant's doc comment in
+ * `tts-copy.ts`), and two literals would drift the moment either is reworded.
+ * Kept exported from here because this route's tests and callers already
+ * import it by this name.
+ */
+import { VOICE_APPROVAL_REFUSAL } from '../ai/agents/customer-calling/tts-copy';
+export { VOICE_APPROVAL_REFUSAL };
 
 /**
  * The "nothing happened" sentence is no longer assembled here.
@@ -391,21 +399,14 @@ Return JSON only. No markdown. Match this schema exactly:
   "content": "assistant message text",
   "reasoning": "short optional rationale",
   "autoApplied": false,
-  "proposal": {
-    "id": "proposal-id",
-    "title": "...",
-    "summary": "...",
-    "explanation": "...",
-    "reasoning": ["..."],
-    "editFields": [{"label":"...", "key":"...", "value":"..."}],
-    "confidence": "High",
-    "type": "Invoice",
-    "status": "Pending",
-    "relatedId": "optional-related-id",
-    "impact": "optional impact statement"
-  }
+  "proposal": null
 }
-Set "proposal" to null when no proposal is needed.
+"proposal" must ALWAYS be null on this path. You have no tools and no
+database access, so you cannot draft, price, or persist a reviewable
+proposal — only the field-service handlers this app dispatches to can do
+that. Never invent a "proposal" object, an id, a title, or any other field
+that implies a reviewable card exists. If the user's request needs one,
+say so in "content" instead of fabricating it.
 `;
 
 /**
@@ -1731,12 +1732,30 @@ export const CHAT_INTENT_TO_REGISTRY_KEY: Readonly<Record<string, ProposalType>>
  * typing in chat place a real calendar hold?" is a product decision. The fix
  * is an explicit allowlist rather than a blanket thread: every already-
  * shipped intent's behavior stays byte-for-byte what it was before Task 15.
+ *
+ * `notify_delay` fix (2026-08-29, A31 row of the AI-catalog sweep) — added
+ * to the allowlist. It was one of the byproduct risks named above ("already
+ * wired" for customer-scoping) but deliberately left OUT of Task 15's
+ * allowlist as an unrequested behavior change. The cost of that caution:
+ * `NotifyDelayTaskHandler`'s `resolveActiveAppointmentId` customer-scoping
+ * block never runs on chat (`context.customerId` is always undefined), so
+ * unscoped resolution can only auto-pick when the ENTIRE TENANT has exactly
+ * one active appointment — never true once a shop has more than one
+ * customer on the books. A chat "tell <customer> we're running late" then
+ * has no `appointmentReference` either (nothing in the utterance names a
+ * specific appointment), so the proposal drafts with `missingFields:
+ * ['appointmentId']` it can NEVER clear — approveProposal refuses forever
+ * (a gate with no lifter, the #909 class). Admitting `notify_delay` here
+ * only ADDS scoping (it can never resolve to a WRONG or ambiguous
+ * appointment — see `resolveActiveAppointmentId`'s own doc comment), and is
+ * exactly the fix the handler's own class comment already called for.
  */
 export const CHAT_CONTEXT_CUSTOMER_ID_INTENTS: ReadonlySet<string> = new Set([
   'send_customer_message',
   'create_service_agreement',
   'add_service_location',
   'schedule_inspection',
+  'notify_delay',
 ]);
 
 /**
@@ -2695,18 +2714,33 @@ async function generateAssistantReply(
     const parsed = assistantReplySchema.parse(JSON.parse(response.content));
 
     // ── Honest-failure guard, layer 3 ────────────────────────────────
-    // Nothing on this path persists anything. So a reply that carries no
-    // proposal AND claims a completed action is, by construction, false —
-    // we do not need to guess, we know. Verify rather than trust: the two
-    // production fabrications came from a model that had every opportunity
-    // to behave and didn't, and a prompt instruction cannot be relied on to
-    // change that.
+    // Nothing on this path persists anything — `deps.proposalRepo.create`
+    // is never called anywhere in this function. So a reply that claims a
+    // completed action in its TEXT, or that carries a `proposal` object AT
+    // ALL, is false by construction — we do not need to guess, we know.
+    // Verify rather than trust: the two production fabrications came from a
+    // model that had every opportunity to behave and didn't, and a prompt
+    // instruction cannot be relied on to change that (`outputContract`
+    // above now also tells the model "proposal" must always be null here —
+    // belt, not the buckle).
     //
-    // Scoped to proposal-less replies exactly as the defect is scoped. A
-    // reply that carries a proposal legitimately says "I've drafted…",
-    // because it has.
-    const fabricated = parsed.proposal
-      ? null
+    // 2026-08-29 live sweep, row A02 ("Draft an estimate for {customer}:
+    // two lines…"): this used to read `parsed.proposal ? null :
+    // detectFabricatedActionClaim(...)` — SKIPPING the check entirely
+    // whenever the model included a `proposal` object, on the theory that
+    // "a reply that carries a proposal legitimately says 'I've drafted…',
+    // because it has." That is true on every OTHER path this route returns
+    // from (the registry-dispatch and chain paths below persist a REAL
+    // proposal before building their reply), but false HERE — this
+    // fallback has no handler, no repo call, nothing to draft with. The
+    // model used the opening to invent a whole proposal card, id
+    // "estimate-001" included, that 404'd on approve. So: a `proposal` on
+    // THIS path is stripped unconditionally before it ever reaches the
+    // operator, and its mere presence is itself a fabrication signal —
+    // on top of, not instead of, the text-claim scan.
+    const fabricatedProposalId = parsed.proposal?.id;
+    const fabricated = fabricatedProposalId
+      ? `proposal id "${fabricatedProposalId}"`
       : detectFabricatedActionClaim(parsed.content);
     if (fabricated) {
       logger.error('assistant/chat: suppressed fabricated action confirmation', {
@@ -2736,7 +2770,10 @@ async function generateAssistantReply(
       message: {
         role: 'assistant' as const,
         ...parsed,
-        proposal: parsed.proposal ?? undefined,
+        // This path never persists a proposal (see layer 3 above) — never
+        // forward whatever the model put in `parsed.proposal`, even a
+        // shape that happened to dodge the id check.
+        proposal: undefined,
       },
     };
   } catch (err) {

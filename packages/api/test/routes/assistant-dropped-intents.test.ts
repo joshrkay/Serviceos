@@ -47,12 +47,25 @@
  *          `add_service_location`) read it EXCLUSIVELY and need it; a FOURTH,
  *          `schedule_inspection`, is admitted too as a deliberate, tested
  *          exception (new intent, no shipped behavior to regress); but at
- *          least ten ALREADY-SHIPPED chat intents (`create_appointment`,
- *          `confirm_appointment`, `notify_delay`, `send_payment_reminder`,
- *          …) read the SAME field as an unrelated, exclusive side channel —
- *          a real calendar-hold DB write, an unsupervised appointment
- *          auto-pick — that this task must not silently activate. The fix is
- *          an explicit allowlist, not a blanket thread.
+ *          least nine ALREADY-SHIPPED chat intents (`create_appointment`,
+ *          `confirm_appointment`, `send_payment_reminder`, …) read the SAME
+ *          field as an unrelated, exclusive side channel — a real
+ *          calendar-hold DB write, an unsupervised appointment auto-pick —
+ *          that this task must not silently activate. The fix is an
+ *          explicit allowlist, not a blanket thread. `notify_delay` was a
+ *          FIFTH deliberate exception added later (A31 row of the
+ *          2026-08-29 AI-catalog sweep, fix/approve-stall-five): its
+ *          `NotifyDelayTaskHandler` customer-scoping was one of the named
+ *          byproduct risks here, left out of Task 15's allowlist as an
+ *          unrequested behavior change — but without it, chat's
+ *          `missingFields: ['appointmentId']` gate on notify_delay could
+ *          never clear (no `appointmentReference` in a "tell <customer>
+ *          we're running late" utterance, and unscoped single-active-
+ *          appointment resolution never applies once a tenant has more
+ *          than one customer on the books), so `approveProposal` refused
+ *          every notify_delay proposal chat ever drafted. See
+ *          `packages/api/test/integration/approve-stall-five.test.ts` for
+ *          the real-Postgres proof this fix closes that gate.
  *        - `existingEntities.{jobId,invoiceId,technicianId,appointmentId}`
  *          — already shared via `resolveVoiceEntityReferences` (the SAME
  *          function + membership sets the memo worker uses), confirmed
@@ -76,7 +89,8 @@ import {
   setSupervisorPresenceLoader,
   _resetSupervisorPresenceCache,
 } from '../../src/ai/supervisor-presence';
-import { InMemoryProposalRepository } from '../../src/proposals/proposal';
+import { InMemoryProposalRepository, missingFieldsFor } from '../../src/proposals/proposal';
+import { approveProposal } from '../../src/proposals/actions';
 import {
   InMemoryCatalogItemRepository,
   createCatalogItem,
@@ -739,6 +753,129 @@ describe('C1/C2 — context.customerId is NOT threaded for already-shipped inten
     // auto-picking the resolved customer's one appointment.
     expect(payload.appointmentId).toBeUndefined();
     expect(res.body.message.proposal.missingFields).toContain('appointmentId');
+  });
+});
+
+// ───── A31 fix — notify_delay IS admitted to CHAT_CONTEXT_CUSTOMER_ID_INTENTS
+// (2026-08-29 AI-catalog sweep, fix/approve-stall-five) ─────────────────────
+//
+// Before this fix, a chat "tell <customer> we're running late" utterance
+// never resolved an appointmentId at all: no `appointmentReference` in the
+// utterance (only a customer name), and unscoped `resolveActiveAppointmentId`
+// only auto-picks when the ENTIRE TENANT has exactly one active appointment —
+// never true once a shop has more than one customer on the books. The
+// resulting proposal drafted with `missingFields: ['appointmentId']` it could
+// never clear (no edit path fills a bare appointment reference from a
+// customer name), so `approveProposal` refused it forever — a gate with no
+// lifter (the #909 class). See `CHAT_CONTEXT_CUSTOMER_ID_INTENTS`'s doc
+// comment in `routes/assistant.ts` for the full history, and
+// `packages/api/test/integration/approve-stall-five.test.ts` for the
+// real-Postgres proof of the whole draft → approve → execute chain.
+describe('A31 — notify_delay DOES auto-resolve via customer-scoped appointment lookup', () => {
+  const RESOLVED_CUSTOMER_ID = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc';
+  const OTHER_CUSTOMER_ID = 'dddddddd-dddd-4ddd-8ddd-dddddddddddd';
+
+  it('resolves the NAMED customer\'s own appointment even with a second, unrelated active appointment in the tenant, and the resulting proposal approves', async () => {
+    const proposalRepo = new InMemoryProposalRepository();
+    const appointmentRepo = new InMemoryAppointmentRepository();
+    const jobRepo = new InMemoryJobRepository();
+
+    const jobForResolvedCustomer: Job = {
+      id: 'job-for-notify-delay-customer',
+      tenantId: TEST_TENANT,
+      customerId: RESOLVED_CUSTOMER_ID,
+      locationId: 'loc-1',
+      jobNumber: 'JOB-0031',
+      summary: 'Furnace repair',
+      status: 'scheduled',
+      priority: 'normal',
+      createdBy: TEST_USER,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    };
+    const jobForOtherCustomer: Job = {
+      ...jobForResolvedCustomer,
+      id: 'job-for-other-notify-delay-customer',
+      customerId: OTHER_CUSTOMER_ID,
+      jobNumber: 'JOB-0032',
+    };
+    await jobRepo.create(jobForResolvedCustomer);
+    await jobRepo.create(jobForOtherCustomer);
+
+    // Two active appointments tenant-wide, exactly like the C2 fixture above
+    // — the negative control that proves this is customer-SCOPED resolution,
+    // not the "only one active appointment tenant-wide" fallback.
+    const resolvedAppointmentId = 'appt-for-notify-delay-customer';
+    await appointmentRepo.create({
+      id: resolvedAppointmentId,
+      tenantId: TEST_TENANT,
+      jobId: jobForResolvedCustomer.id,
+      scheduledStart: new Date(Date.now() + 86_400_000),
+      scheduledEnd: new Date(Date.now() + 90_000_000),
+      timezone: 'America/New_York',
+      status: 'scheduled',
+      holdPendingApproval: false,
+    });
+    await appointmentRepo.create({
+      id: 'appt-for-other-notify-delay-customer',
+      tenantId: TEST_TENANT,
+      jobId: jobForOtherCustomer.id,
+      scheduledStart: new Date(Date.now() + 86_400_000),
+      scheduledEnd: new Date(Date.now() + 90_000_000),
+      timezone: 'America/New_York',
+      status: 'scheduled',
+      holdPendingApproval: false,
+    });
+
+    const resolver = resolverFor(async ({ kind }) => {
+      if (kind === 'customer') {
+        return {
+          kind: 'resolved',
+          candidate: {
+            id: RESOLVED_CUSTOMER_ID,
+            kind: 'customer',
+            label: 'qa-matrix-A-customer',
+            score: 0.95,
+          },
+        };
+      }
+      return { kind: 'skipped' };
+    });
+
+    const app = buildApp(
+      strictGateway([
+        classifierReply('notify_delay', {
+          customerName: 'qa-matrix-A-customer',
+          delayMinutes: 30,
+        }),
+      ]),
+      { proposalRepo, entityResolver: resolver, appointmentRepo, jobRepo },
+    );
+
+    const res = await chat(app, "Tell qa-matrix-A-customer we're running 30 minutes late");
+
+    expect(res.status).toBe(200);
+    const persisted = await proposalRepo.findByTenant(TEST_TENANT);
+    expect(persisted).toHaveLength(1);
+    const drafted = persisted[0];
+    expect(drafted.proposalType).toBe('notify_delay');
+    // The fix's defining assertion: customer-scoped resolution auto-picked
+    // the RIGHT appointment despite a second, unrelated one in the tenant.
+    const payload = drafted.payload as Record<string, unknown>;
+    expect(payload.appointmentId).toBe(resolvedAppointmentId);
+    expect(payload.delayMinutes).toBe(30);
+    expect(missingFieldsFor(drafted)).toEqual([]);
+
+    // The exact call that stalled at 'ready_for_review' forever in the live
+    // sweep (A31, reason `approve_no_terminal_status: ready_for_review`).
+    const approved = await approveProposal(
+      proposalRepo,
+      TEST_TENANT,
+      drafted.id,
+      TEST_USER,
+      'owner',
+    );
+    expect(approved.status).toBe('approved');
   });
 });
 

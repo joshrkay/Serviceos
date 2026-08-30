@@ -163,6 +163,30 @@ export const LOW_STT_CONFIDENCE_REPROMPT_COPY =
   "I didn't quite catch that — could you say that again?";
 
 /**
+ * RV-071 / RV-225 — spoken when a proposal approve/reject/edit is asked for
+ * by VOICE on an in-app session.
+ *
+ * D-025 permits owner voice approval, but scopes it to "a human owner on a
+ * transport-identified owner line": the RV-070 caller-ID identity is what
+ * authorises it, and the money-class spoken challenge
+ * (`proposal-approval-task.ts`) is the control that makes a *phone* approval
+ * safe. An in-app session has neither — and needs neither, because the
+ * operator is already authenticated in an app that shows the proposal card
+ * with a tap-to-approve button. Porting the spoken PIN dialogue to a surface
+ * that already has a screen would add a re-spoken static secret (the exposure
+ * D-025's own constraint flags under #850) to buy nothing.
+ *
+ * So in-app voice POINTS AT THE CARD instead. This is the same posture — and
+ * deliberately the same sentence, so the two surfaces can never drift — that
+ * the assistant-chat route already takes for a voice-mode turn (UB-B3,
+ * `routes/assistant.ts`, which re-exports this constant). The refusal is
+ * honest in the strict sense the honesty guard demands: it states that
+ * nothing was approved, and names the one action that does work.
+ */
+export const VOICE_APPROVAL_REFUSAL =
+  "Tap the card to approve — I don't take approvals by voice here yet.";
+
+/**
  * es translations for the FSM's hardcoded sentences (exact-match). Kept
  * small and literal — anything not listed passes through in English rather
  * than risking a bad machine paraphrase.
@@ -218,6 +242,11 @@ export const SENTENCE_CATALOG_ES: Record<string, string> = {
     'Sigo teniendo dificultades para entenderle. ¿Podría describir en pocas palabras lo que necesita?',
   'I can help with scheduling and service questions. What do you need help with today?':
     'Puedo ayudarle con citas y preguntas de servicio. ¿En qué necesita ayuda hoy?',
+  // RV-071/RV-225 — the in-app voice approval refusal. Listed for the same
+  // reason as the UB-C2 block above: a Spanish session must not flip to
+  // English mid-flow just because the operator asked to approve by voice.
+  [VOICE_APPROVAL_REFUSAL]:
+    'Toque la tarjeta para aprobar — aquí todavía no acepto aprobaciones por voz.',
 };
 
 /**

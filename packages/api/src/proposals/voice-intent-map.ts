@@ -105,9 +105,14 @@ import type { ProposalType } from './proposal';
  *     CONFIRM_NOTHING_PENDING_LINE), never a clarification card.
  *   - `language_switch` — per-transport adapter branches (the FSM is pure
  *     and cannot mutate session.language): media-streams'
- *     `switchLanguage`/pre-scan, and the Gather adapter's
+ *     `switchLanguage`/pre-scan, the Gather adapter's
  *     `handleLanguageSwitchGather` (#846 — before it, this one was real: the
- *     Gather production path had NO branch and degraded to a clarification).
+ *     Gather production path had NO branch and degraded to a clarification),
+ *     and the in-app adapter's `switchSessionLanguage`. In-app was the LAST
+ *     live surface missing a branch, and it degraded exactly as predicted
+ *     here — see `handleAdapterAct` in `inapp-adapter.ts` for the live
+ *     evidence (sweep rows C03/C05/C07) and the same-shaped out-of-FSM
+ *     routing it now uses for approve/reject/edit_proposal.
  *   - The eval harness (`text-mode-driver.ts` `evaluateTurn`) additionally
  *     intercepts `confirm`/`language_switch` → `{kind:'noop'}` and
  *     `operator_request` → `{kind:'escalate'}` before dispatching through
