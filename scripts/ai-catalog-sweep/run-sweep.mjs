@@ -475,8 +475,24 @@ async function ensureFixtures() {
     // meant to proceed). Self-healing: only inserts when no recent (<=1
     // star, last 7 days) review already exists, so a review this row itself
     // causes a reply to be drafted against doesn't get re-seeded forever.
+    // Round 4 (A46 rerun gap): a review this sweep already REPLIED to still
+    // matched the bare exists-check, so a rerun without qa:reset had nothing
+    // left to respond to and A46 died with no draft. The fixture's real
+    // contract is "an UNREPLIED recent 1-star review exists" — so only count
+    // reviews not yet targeted by an executed respond_to_review proposal
+    // (payload.reviewId, see execution/review-response-handler.ts).
     const reviewExisting = await rw.query(
-      "SELECT id FROM google_reviews WHERE tenant_id = $1 AND rating <= 1 AND review_create_time > now() - interval '7 days' LIMIT 1",
+      `SELECT gr.id FROM google_reviews gr
+        WHERE gr.tenant_id = $1 AND gr.rating <= 1
+          AND gr.review_create_time > now() - interval '7 days'
+          AND NOT EXISTS (
+            SELECT 1 FROM proposals p
+             WHERE p.tenant_id = gr.tenant_id
+               AND p.proposal_type = 'respond_to_review'
+               AND p.status = 'executed'
+               AND p.payload->>'reviewId' = gr.id::text
+          )
+        LIMIT 1`,
       [TENANT_ID],
     );
     if ((reviewExisting.rowCount ?? 0) > 0) {
