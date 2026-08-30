@@ -1111,10 +1111,17 @@ describe('InAppVoiceAdapter', () => {
   //      re-runs the SAME entity resolver over the accumulated set.
   describe('D01 — the three-turn new-caller booking reaches a gated draft', () => {
     // Turn 1 short-circuits deterministically (no gateway call). Turns 2 and
-    // 3 are the classifier extracting slots from a readback answer; neither
-    // names create_appointment, which is the point — a bare slot fragment
-    // reads as `unknown`, and "Jordan Lee, 480-555-0199" reads as
-    // create_customer. Both are this booking's own detail, not a new request.
+    // 3 are the classifier extracting slots from a readback answer; NEITHER
+    // names create_appointment, which is the point.
+    //
+    // Both shapes are the ones the deployed round-4 sweep actually produced
+    // (session 0d1f2025, tenant a948cc66): "Jordan Lee, 480-555-0199" reads
+    // as create_customer, and the turn-3 job fragment reads as
+    // schedule_inspection — whose own taxonomy block extracts customerName /
+    // jobReference / jobTitle / dateTimeDescription and puts the inspection
+    // type in `jobTitle`, the field that block documents as "also the short
+    // name of the new work being scheduled on create_appointment". Turn 3 is
+    // the regression this round fixes: it was landing as `correction`.
     const slotFillTurns = [
       JSON.stringify({
         intentType: 'create_customer',
@@ -1126,9 +1133,12 @@ describe('InAppVoiceAdapter', () => {
         },
       }),
       JSON.stringify({
-        intentType: 'unknown',
-        confidence: 0.3,
-        extractedEntities: { jobTitle: 'Furnace diagnostic inspection' },
+        intentType: 'schedule_inspection',
+        confidence: 0.91,
+        extractedEntities: {
+          jobTitle: 'Inspection — furnace diagnostic',
+          serviceAddress: 'their home',
+        },
       }),
     ];
 
@@ -1164,12 +1174,17 @@ describe('InAppVoiceAdapter', () => {
         'create_appointment',
       );
 
-      // Turn 3 — the work being booked.
+      // Turn 3 — the work being booked. Live this landed as `correction`
+      // (audit trail: intent_confirm.correction → intent_capture) and the
+      // whole booking was wiped one turn from the finish line.
       const turn3 = await adapter.handleInput(
         sessionId,
         "It's for a furnace diagnostic inspection at their home",
       );
       expect(turn3.state).toBe('intent_confirm');
+      expect(store.peek(sessionId)?.machine.currentContext.currentIntent).toBe(
+        'create_appointment',
+      );
 
       // Every turn's slots survived into one accumulated set.
       const accumulated = store.peek(sessionId)?.machine.currentContext.extractedEntities;
@@ -1177,7 +1192,8 @@ describe('InAppVoiceAdapter', () => {
         customerName: 'Jordan Lee',
         phone: '480-555-0199',
         dateTimeDescription: 'next Tuesday morning',
-        jobTitle: 'Furnace diagnostic inspection',
+        jobTitle: 'Inspection — furnace diagnostic',
+        serviceAddress: 'their home',
       });
 
       // The readback is finally answered — the same auto-continuation the
@@ -1194,6 +1210,159 @@ describe('InAppVoiceAdapter', () => {
       await expect(
         approveProposal(proposalRepo, TENANT, stored!.id, USER, 'owner'),
       ).rejects.toThrow(/customerId/);
+    });
+
+    // The live round-4 regression, isolated: turns 1+2 already worked in
+    // production; this pins turn 3 on its own, driving the FSM through
+    // entity_resolution rather than the `correction` the audit trail showed.
+    it('turn 3 (a job-description fragment classified schedule_inspection) merges as slot detail, never a correction', async () => {
+      const dispatched: string[] = [];
+      const gateway = scriptedGateway(slotFillTurns);
+      const adapter = new InAppVoiceAdapter({
+        store,
+        gateway,
+        proposalRepo,
+        auditRepo,
+        onCallRepo,
+      });
+      const { sessionId } = await adapter.startSession(TENANT, USER);
+      const session = store.peek(sessionId)!;
+      const realDispatch = session.machine.dispatch.bind(session.machine);
+      session.machine.dispatch = (event: CallingAgentEvent): SideEffect[] => {
+        dispatched.push(event.type);
+        return realDispatch(event);
+      };
+
+      await adapter.handleInput(sessionId, "I'd like to book a new customer for a diagnostic visit");
+      await adapter.handleInput(sessionId, 'Jordan Lee, 480-555-0199, next Tuesday morning works');
+      dispatched.length = 0;
+
+      const turn3 = await adapter.handleInput(
+        sessionId,
+        "It's for a furnace diagnostic inspection at their home",
+      );
+
+      expect(dispatched).toContain('intent_details_supplied');
+      expect(dispatched).not.toContain('correction');
+      // Merged, then re-run through the SAME resolver (entity_resolution)
+      // before the readback — slot-fill is not a resolution bypass.
+      expect(dispatched).toContain('entity_resolved');
+      expect(turn3.state).toBe('intent_confirm');
+      const ctx = store.peek(sessionId)?.machine.currentContext;
+      expect(ctx?.currentIntent).toBe('create_appointment');
+      expect(ctx?.extractedEntities).toMatchObject({
+        customerName: 'Jordan Lee',
+        jobTitle: 'Inspection — furnace diagnostic',
+        serviceAddress: 'their home',
+      });
+    });
+
+    it('an address-only fragment classified add_service_location merges as the booking WHERE', async () => {
+      const gateway = scriptedGateway([
+        JSON.stringify({
+          intentType: 'add_service_location',
+          confidence: 0.9,
+          extractedEntities: { serviceAddress: '104 Cedar Lane, Scottsdale' },
+        }),
+      ]);
+      const adapter = new InAppVoiceAdapter({
+        store,
+        gateway,
+        proposalRepo,
+        auditRepo,
+        onCallRepo,
+      });
+      const { sessionId } = await adapter.startSession(TENANT, USER);
+      await adapter.handleInput(sessionId, 'Book a diagnostic visit');
+      const detail = await adapter.handleInput(sessionId, "It's at 104 Cedar Lane, Scottsdale");
+      expect(detail.state).toBe('intent_confirm');
+      expect(
+        store.peek(sessionId)?.machine.currentContext.extractedEntities?.serviceAddress,
+      ).toBe('104 Cedar Lane, Scottsdale');
+    });
+
+    // Coordinator item 3 — a fragment the classifier cannot name. `classifyIntent`
+    // maps a below-threshold pick to `unknown` but KEEPS its extractedEntities,
+    // so the slot content still lands instead of wiping the booking.
+    it('a low-confidence fragment WITH entities slot-fills rather than correcting', async () => {
+      const gateway = scriptedGateway([
+        JSON.stringify({
+          intentType: 'create_job',
+          confidence: 0.35,
+          extractedEntities: { jobTitle: 'Furnace diagnostic' },
+        }),
+      ]);
+      const adapter = new InAppVoiceAdapter({
+        store,
+        gateway,
+        proposalRepo,
+        auditRepo,
+        onCallRepo,
+      });
+      const { sessionId } = await adapter.startSession(TENANT, USER);
+      await adapter.handleInput(sessionId, 'Book a diagnostic visit');
+      const detail = await adapter.handleInput(sessionId, 'furnace diagnostic');
+      expect(detail.state).toBe('intent_confirm');
+      expect(store.peek(sessionId)?.machine.currentContext.extractedEntities?.jobTitle).toBe(
+        'Furnace diagnostic',
+      );
+    });
+
+    // The second gate, doing its job: a sibling intent that arrives carrying
+    // nothing from a booking's own vocabulary contributes nothing, so it is
+    // still a correction — widening the family did not blanket-accept.
+    it('a sibling intent carrying only foreign entities is still a correction', async () => {
+      const gateway = scriptedGateway([
+        JSON.stringify({
+          intentType: 'schedule_inspection',
+          confidence: 0.92,
+          extractedEntities: { appointmentReference: "tomorrow's 3pm" },
+        }),
+      ]);
+      const adapter = new InAppVoiceAdapter({
+        store,
+        gateway,
+        proposalRepo,
+        auditRepo,
+        onCallRepo,
+      });
+      const { sessionId } = await adapter.startSession(TENANT, USER);
+      await adapter.handleInput(sessionId, 'Book a diagnostic visit');
+      const switched = await adapter.handleInput(sessionId, "the inspection on tomorrow's 3pm");
+      expect(switched.state).toBe('intent_capture');
+      expect(store.peek(sessionId)?.machine.currentContext.currentIntent).toBeUndefined();
+    });
+
+    // reschedule/cancel/reassign are deliberately OUT of the sibling family:
+    // they operate on an appointment that already exists, so their
+    // newDateTimeDescription must never be folded into a different, unsaved
+    // booking even though that key IS a booking slot.
+    it('a reschedule of an EXISTING appointment is a correction, not a WHEN slot', async () => {
+      const gateway = scriptedGateway([
+        JSON.stringify({
+          intentType: 'reschedule_appointment',
+          confidence: 0.94,
+          extractedEntities: {
+            appointmentReference: 'the Miller appointment',
+            newDateTimeDescription: 'Thursday at 2',
+          },
+        }),
+      ]);
+      const adapter = new InAppVoiceAdapter({
+        store,
+        gateway,
+        proposalRepo,
+        auditRepo,
+        onCallRepo,
+      });
+      const { sessionId } = await adapter.startSession(TENANT, USER);
+      await adapter.handleInput(sessionId, 'Book a diagnostic visit');
+      const switched = await adapter.handleInput(
+        sessionId,
+        'Actually, move the Miller appointment to Thursday at 2',
+      );
+      expect(switched.state).toBe('intent_capture');
+      expect(store.peek(sessionId)?.machine.currentContext.extractedEntities).toBeUndefined();
     });
 
     it('a plain "no" at the readback still corrects, with no classifier round-trip', async () => {
