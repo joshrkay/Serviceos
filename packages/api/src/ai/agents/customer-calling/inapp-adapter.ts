@@ -52,6 +52,7 @@ import {
   intentClassifiedEvent,
   costIncurredEvent,
   sessionTerminatedEvent,
+  languageSwitchedEvent,
 } from '../../voice-quality/events';
 import { TAU_INT } from './transitions';
 import type { CallingAgentContext, CallingAgentEvent, SideEffect } from './types';
@@ -78,9 +79,25 @@ import {
 } from '../../resolution/catalog-resolver';
 import type { CatalogPricingOutcome } from '../../resolution/catalog-resolver';
 import type { CatalogItemRepository } from '../../../catalog/catalog-item';
-import { detectLanguage, renderTtsText } from './tts-copy';
+import {
+  detectLanguage,
+  renderTtsText,
+  LANGUAGE_SWITCH_ACK,
+  LANGUAGE_SWITCH_CAP_LINE,
+  LANGUAGE_UNSUPPORTED_LINE,
+  VOICE_APPROVAL_REFUSAL,
+} from './tts-copy';
+import type { SessionLanguage } from './tts-copy';
 import type { Language } from '../../i18n/i18n';
-import { isLanguageSupported } from '../../orchestration/language-detector';
+import {
+  detectLanguageSwitchIntent,
+  isLanguageSupported,
+  MAX_LANGUAGE_SWITCHES_PER_CALL,
+} from '../../orchestration/language-detector';
+import {
+  isVoiceApprovalIntent,
+  isVoiceEditIntent,
+} from '../../orchestration/intent-classifier';
 import type { VoicePersona, VoicePersonaResolver } from '../../../settings/voice-persona-resolver';
 import type { RepairTemplate } from '../../../verticals/registry';
 import type { DroppedCallScheduler } from '../../../sms/recovery/scheduler';
@@ -778,6 +795,168 @@ export class InAppVoiceAdapter {
   }
 
   /**
+   * ADAPTER ACTS — the intents a live surface must answer ITSELF, before the
+   * turn reaches the FSM and the proposal path.
+   *
+   * `proposals/voice-intent-map.ts` already states the invariant this
+   * implements. `confirm`, `language_switch` and `operator_request` are
+   * omitted from that map on purpose, and its doc comment says why: they are
+   * "real, understood intents that simply have no recorded-memo action ... On
+   * a live call all three DO have a real target (the in-progress dialogue,
+   * the live call's language, the on-call human), so **every live surface
+   * must intercept them BEFORE reaching this map's lookup** — an intent that
+   * falls through here silently becomes a clarification card." The same holds
+   * for `approve_proposal` / `reject_proposal` / `edit_proposal`, which both
+   * telephony adapters route out-of-FSM to the RV-071/RV-225 owner dialogue.
+   *
+   * In-app was the one live surface with no branch, and the fall-through was
+   * precisely the failure that comment predicts — twice over. Live evidence
+   * (sweep 2026-08-29, rows C03/C05/C07): "Approve it", "Change the amount to
+   * 300" and "Can we talk in Spanish?" were each classified correctly, read
+   * back by the FSM, and the operator's confirming "yes" then minted a
+   * `voice_clarification` card, after which the closing state said "Great,
+   * I've got that taken care of. You'll receive a confirmation shortly." No
+   * proposal was approved, no amount was changed, no language was switched.
+   * A card nobody asked for, plus a sentence claiming work that never
+   * happened — the exact class of lie `assistant-honesty-guard.ts` exists to
+   * make impossible on the chat surface.
+   *
+   * Returns the side effects to speak when this turn is an adapter act, or
+   * `undefined` to dispatch into the FSM as normal. Never throws, never mints
+   * a proposal, and never advances the FSM — the session stays where it is
+   * and the next turn is captured normally, the same shape as the read-only
+   * `ownerLookupText` branch below.
+   */
+  private handleAdapterAct(
+    session: VoiceSession,
+    intentType: string,
+    utterance: string,
+  ): SideEffect[] | undefined {
+    if (isVoiceApprovalIntent(intentType) || isVoiceEditIntent(intentType)) {
+      return this.refuseVoiceApproval(session, intentType);
+    }
+    if (intentType === 'language_switch') {
+      return this.switchSessionLanguage(session, utterance);
+    }
+    return undefined;
+  }
+
+  /**
+   * RV-071 / RV-225 — approve / reject / edit by voice is refused on the
+   * in-app surface, and the operator is pointed at the card.
+   *
+   * WHY A REFUSAL RATHER THAN THE SPOKEN DIALOGUE. D-025 ratified owner voice
+   * approval, but scoped it to "a human owner on a transport-identified owner
+   * line": RV-070 caller-ID is what authorises it, and the money-class spoken
+   * challenge is what makes approving something irreversible over a phone
+   * safe. Neither exists in-app, and neither is needed — the operator is
+   * already authenticated in an app that is showing the proposal card with a
+   * tap-to-approve button. Porting the PIN dialogue here would add a static
+   * secret, re-spoken into a stored transcript on every approval (the
+   * accumulating exposure D-025's own constraints flag under #850), to buy a
+   * capability the screen already provides one tap away.
+   *
+   * The refusal is deliberately the SAME sentence the assistant-chat route
+   * speaks for a voice-mode turn (UB-B3, `VOICE_APPROVAL_REFUSAL`) — one
+   * posture across both in-app voice seams, and one string so they cannot
+   * drift.
+   *
+   * NOT gated on `ownerSession`. That flag CAN be true here (`startSession`
+   * sets it for `role === 'owner'`), and gating on it would read as "we would
+   * have approved it if you were the owner" — which is not the rule. The rule
+   * is about the SURFACE: RV-071's threat model is the caller line, so the
+   * audit reason is `inapp_surface`, distinct from the processor's
+   * `not_owner_session` / `not_configured`. An operator's denied attempt is
+   * still recorded, which is what D-028 means when it lists these intents as
+   * gates "which audit denied attempts".
+   */
+  private refuseVoiceApproval(session: VoiceSession, intentType: string): SideEffect[] {
+    return [
+      {
+        type: 'audit_log',
+        payload: {
+          eventType: 'agent.calling.voice_approval_denied',
+          reason: 'inapp_surface',
+          intentType,
+          sessionId: session.id,
+          tenantId: session.tenantId,
+          ts: Date.now(),
+        },
+      },
+      { type: 'tts_play', payload: { text: VOICE_APPROVAL_REFUSAL } },
+    ];
+  }
+
+  /**
+   * #846 — mid-session language switch on the in-app transport.
+   *
+   * This one WORKS rather than refusing, because the in-app session really
+   * does render in the session language: every spoken line goes through
+   * `renderTtsText(..., session.language)`, which localizes the FSM's
+   * template keys and its fixed sentences via `SENTENCE_CATALOG_ES`. The
+   * surface already flips to Spanish on its own when the operator's words are
+   * Spanish (the sticky `detectLanguage` gate in `_handleInputLocked`), so
+   * honoring an EXPLICIT request is not new capability — it is the same
+   * capability, reachable by asking. Refusing here would have been the
+   * dishonest answer: "I can't" is false when the very next Spanish utterance
+   * would have switched anyway.
+   *
+   * Policy mirrors `TwilioGatherAdapter.handleLanguageSwitchGather` — same
+   * `supported_languages` opt-in gate, same per-call flap cap, same three
+   * copy lines — with two deliberate differences:
+   *
+   *  1. No TTS voice re-resolution. Gather re-resolves `session.ttsVoice`
+   *     because `<Say voice>` would otherwise read Spanish in an English
+   *     Polly voice; the in-app provider is called as
+   *     `synthesize({ text, tenantId })` with no per-language voice, so there
+   *     is nothing to re-resolve. Adding a field the provider ignores would
+   *     be cargo cult.
+   *  2. The unresolved-stack default is PERMISSIVE (`['en', 'es']`), where
+   *     Gather passes `null` (English-only). That is not drift — it is this
+   *     surface's own existing rule: the sticky first-utterance gate a few
+   *     lines into `_handleInputLocked` already uses
+   *     `session.supportedLanguages ?? ['en', 'es']`. Passing `null` here
+   *     would produce an incoherent surface, where a Spanish SENTENCE flips
+   *     the session but "can we talk in Spanish?" is refused.
+   */
+  private switchSessionLanguage(session: VoiceSession, utterance: string): SideEffect[] {
+    const current: SessionLanguage = session.language === 'es' ? 'es' : 'en';
+    // The requested language when the heuristic can name it, else the other
+    // half of the en/es pair — the classifier has already said this turn IS a
+    // switch request, so "not English" means Spanish. Same fallback as both
+    // telephony transports.
+    const target = detectLanguageSwitchIntent(utterance) ?? (current === 'es' ? 'en' : 'es');
+
+    if (target === current) {
+      // Already in the requested language — acknowledge without spending a
+      // switch from the flap budget.
+      return [{ type: 'tts_play', payload: { text: LANGUAGE_SWITCH_ACK[current] } }];
+    }
+    if (!isLanguageSupported(target, session.supportedLanguages ?? ['en', 'es'])) {
+      return [{ type: 'tts_play', payload: { text: LANGUAGE_UNSUPPORTED_LINE[current] } }];
+    }
+    const switchCount = session.languageSwitchCount ?? 0;
+    if (switchCount >= MAX_LANGUAGE_SWITCHES_PER_CALL) {
+      return [{ type: 'tts_play', payload: { text: LANGUAGE_SWITCH_CAP_LINE[current] } }];
+    }
+
+    session.language = target;
+    session.languageSwitchCount = switchCount + 1;
+    session.events.emit(
+      'voice-event',
+      languageSwitchedEvent({
+        from: current,
+        to: target,
+        trigger: 'classified_intent',
+        switchCount: session.languageSwitchCount,
+      }),
+    );
+    // Acknowledge in the language being switched TO — the operator just told
+    // us that's the one they want. Same copy as both telephony transports.
+    return [{ type: 'tts_play', payload: { text: LANGUAGE_SWITCH_ACK[target] } }];
+  }
+
+  /**
    * Open a new in-app session. Drives the FSM through the
    * idle → greeting → identifying transitions and synthesizes the
    * greeting audio if a TTS provider is wired.
@@ -978,6 +1157,12 @@ export class InAppVoiceAdapter {
     let fsmEvent: CallingAgentEvent;
     let classifierFailureEffect: SideEffect | undefined;
     let ownerLookupText: string | undefined;
+    /**
+     * Set when this turn is an adapter act (see `handleAdapterAct`) — the
+     * approve/reject/edit refusal or the language switch. Non-undefined means
+     * the FSM is NOT dispatched for this turn.
+     */
+    let adapterActEffects: SideEffect[] | undefined;
 
     if (stateBeforeTurn === 'intent_confirm') {
       fsmEvent = isAffirmation(text)
@@ -1088,7 +1273,21 @@ export class InAppVoiceAdapter {
           classification.extractedEntities as Record<string, unknown> | undefined,
           text
         );
+        // Adapter acts (approve/reject/edit refusal, language switch) are
+        // decided here, before the FSM sees the turn. Gated on TAU_INT for
+        // the same reason the FSM gates on it: below the band we do not
+        // claim to know what was asked, so the bounded reprompt path answers
+        // — and it mints nothing, so the C03/C05/C07 failure cannot recur
+        // through the low-confidence door either.
+        if (classification.confidence >= TAU_INT) {
+          adapterActEffects = this.handleAdapterAct(
+            session,
+            classification.intentType,
+            text,
+          );
+        }
         if (
+          !adapterActEffects &&
           classification.confidence >= TAU_INT &&
           session.machine.currentContext.ownerSession === true &&
           classification.intentType.startsWith('lookup_') &&
@@ -1156,9 +1355,12 @@ export class InAppVoiceAdapter {
     // Read-only owner lookups answer immediately and leave the FSM ready for
     // the next request. They must never enter intent_confirm, which is the
     // safety gate for proposal-producing mutations.
+    // Adapter acts and read-only owner lookups both answer WITHOUT touching
+    // the FSM: the session stays in intent_capture/closing, ready for the
+    // next request, and no proposal can be minted for this turn.
     const effects1: SideEffect[] = ownerLookupText
       ? [{ type: 'tts_play', payload: { text: ownerLookupText } }]
-      : session.machine.dispatch(fsmEvent);
+      : (adapterActEffects ?? session.machine.dispatch(fsmEvent));
     allSideEffects.push(...effects1);
     const aggregate1 = await this.executeSideEffects(session, effects1);
     let lastProposalId = aggregate1.lastProposalId;
