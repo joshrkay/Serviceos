@@ -1731,12 +1731,30 @@ export const CHAT_INTENT_TO_REGISTRY_KEY: Readonly<Record<string, ProposalType>>
  * typing in chat place a real calendar hold?" is a product decision. The fix
  * is an explicit allowlist rather than a blanket thread: every already-
  * shipped intent's behavior stays byte-for-byte what it was before Task 15.
+ *
+ * `notify_delay` fix (2026-08-29, A31 row of the AI-catalog sweep) — added
+ * to the allowlist. It was one of the byproduct risks named above ("already
+ * wired" for customer-scoping) but deliberately left OUT of Task 15's
+ * allowlist as an unrequested behavior change. The cost of that caution:
+ * `NotifyDelayTaskHandler`'s `resolveActiveAppointmentId` customer-scoping
+ * block never runs on chat (`context.customerId` is always undefined), so
+ * unscoped resolution can only auto-pick when the ENTIRE TENANT has exactly
+ * one active appointment — never true once a shop has more than one
+ * customer on the books. A chat "tell <customer> we're running late" then
+ * has no `appointmentReference` either (nothing in the utterance names a
+ * specific appointment), so the proposal drafts with `missingFields:
+ * ['appointmentId']` it can NEVER clear — approveProposal refuses forever
+ * (a gate with no lifter, the #909 class). Admitting `notify_delay` here
+ * only ADDS scoping (it can never resolve to a WRONG or ambiguous
+ * appointment — see `resolveActiveAppointmentId`'s own doc comment), and is
+ * exactly the fix the handler's own class comment already called for.
  */
 export const CHAT_CONTEXT_CUSTOMER_ID_INTENTS: ReadonlySet<string> = new Set([
   'send_customer_message',
   'create_service_agreement',
   'add_service_location',
   'schedule_inspection',
+  'notify_delay',
 ]);
 
 /**

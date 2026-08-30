@@ -2056,6 +2056,20 @@ export class NotifyDelayTaskHandler implements TaskHandler {
     const ee = entitiesFrom(context);
     const payload: Record<string, unknown> = {};
     const missing: string[] = [];
+    // A31 fix — `resolveActiveAppointmentId` is a REPO lookup (customer's
+    // own jobs → appointments), not LLM/classifier text, so a match it
+    // returns is verifiable by construction exactly like
+    // InvoiceEditTaskHandler's repo-confirmed invoiceId. Without stamping it
+    // here, routes/assistant.ts's dropUnverifiedIds scrub — which strips any
+    // id-shaped payload value that doesn't literally appear in the
+    // operator's words — deletes `payload.appointmentId` right back out
+    // (a spoken customer name never contains the appointment's UUID), and
+    // because this branch never pushes 'appointmentId' onto `missing`
+    // either, the proposal ends up with NO appointmentId and NO gate: it
+    // reads as fully approvable but is doomed to fail at execution. See
+    // GatedReferenceSource's B4 verifiedIds allowlist doc comment
+    // (ai/resolution/gated-reference-resolution.ts) for the general pattern.
+    let verifiedIds: Record<string, string> | undefined;
 
     // Scope to the caller's own appointment — notify_delay emits a comms
     // proposal that texts the customer, so resolving to a *different*
@@ -2066,6 +2080,7 @@ export class NotifyDelayTaskHandler implements TaskHandler {
     });
     if (resolvedId) {
       payload.appointmentId = resolvedId;
+      verifiedIds = { appointmentId: resolvedId };
     } else if (ee.appointmentReference) {
       payload.appointmentReference = ee.appointmentReference;
       missing.push('appointmentId');
@@ -2078,7 +2093,11 @@ export class NotifyDelayTaskHandler implements TaskHandler {
     }
 
     return {
-      proposal: createProposal(inputFor(context, this.taskType, payload, missing)),
+      proposal: createProposal(
+        inputFor(context, this.taskType, payload, missing, {
+          ...(verifiedIds ? { sourceContext: { verifiedIds } } : {}),
+        }),
+      ),
       taskType: this.taskType,
     };
   }
