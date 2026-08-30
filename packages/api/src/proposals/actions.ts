@@ -228,6 +228,30 @@ export async function approveProposal(
     throw new ForbiddenError('Only an owner may approve an entity alias');
   }
 
+  // `voice_clarification` is deliberately the one ProposalType with no
+  // execution handler (proposals/execution/handlers.ts) — it is an ASK
+  // ("caller asked for X but the request was incomplete"), not a mutation,
+  // so there is nothing an approval could greenlight. Before this guard,
+  // tapping Approve on one (the Inbox UI renders the same Approve/Reject
+  // pair for every proposal type, clarification cards included — see
+  // proposal.ts's `voice_clarification` actionClass comment, "closes when
+  // the operator dismisses it or speaks again") transitioned it straight to
+  // 'approved'; the execution sweep then claimed it (status -> 'executing')
+  // and `ProposalExecutor.execute` threw HANDLER_NOT_FOUND, wedging the
+  // card in 'executing' through several stale-recovery retry cycles before
+  // resetStaleExecuting finally terminalized it as 'execution_failed' —
+  // dishonest bookkeeping for a card that never represented a failed
+  // action, only an unanswered question (2026-08-30 sweep row A49). Refuse
+  // the approve outright and point at the actual close actions instead:
+  // Reject (dismiss) or letting the caller answer by speaking again, which
+  // drafts a fresh proposal.
+  if (proposal.proposalType === 'voice_clarification') {
+    throw new ValidationError(
+      'voice_clarification proposals cannot be approved — they ask a question rather than propose an action. Dismiss it (reject), or let the caller answer by speaking again.',
+      { proposalId, proposalType: proposal.proposalType },
+    );
+  }
+
   // Config-writing proposal types need the SAME authority their HTTP routes
   // demand, not merely `proposals:approve`. Without this a dispatcher — who
   // holds `proposals:approve` but not `settings:update` — could approve a
