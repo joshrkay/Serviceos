@@ -341,7 +341,8 @@
         "table": "invoices",
         "whereShape": "tenant_id = '{{tenantId}}' AND id = '{{ctx.A01.resultEntityId}}'"
       },
-      "notes": "Round-3: utterance now names the customer so the new customer→job→invoice traversal (fix/ref-lift-live-misses) can resolve; the document-number few-shot gap is #931 (pinned-prompt change, separate)."
+      "notes": "Round-3: utterance now names the customer so the new customer→job→invoice traversal (fix/ref-lift-live-misses) can resolve; the document-number few-shot gap is #931 (pinned-prompt change, separate). Round-5: answer turn added — the customer traversal has no status filter, so even the clean seed pair yields 2 invoice candidates and the row must answer the ask to reach execution (same make-input-resolvable precedent as A20; the executes expectation is unchanged).",
+      "clarificationAnswer": "the most recent one"
     },
     {
       "id": "A38",
