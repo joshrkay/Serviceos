@@ -258,6 +258,20 @@ export class RescheduleAppointmentTaskHandler implements TaskHandler {
     const payload: Record<string, unknown> = {};
     const missing: string[] = [];
 
+    // #920 fix — both sources below are DB lookups (the router's
+    // entity resolver, or this handler's own single-active-appointment
+    // repo query), never LLM/classifier text, so whichever one answers is
+    // verifiable by construction exactly like NotifyDelayTaskHandler's A31
+    // fix. Without stamping it, a tenant with exactly one active
+    // appointment hits the resolveActiveAppointmentId fallback branch and
+    // routes/assistant.ts's dropUnverifiedIds scrub strips
+    // payload.appointmentId right back out (a spoken customer name never
+    // contains the appointment's UUID) — and because this branch never
+    // pushes 'appointmentId' onto `missing` either, the proposal ends up
+    // with NO appointmentId and NO gate: approvable, but doomed to fail at
+    // execution (`invalid input syntax for type uuid: ""`).
+    let verifiedIds: Record<string, string> | undefined;
+
     // Prefer the id the entity resolver already verified for the spoken
     // reference; only fall back to the caller's single-active-appointment
     // lookup when it could not answer.
@@ -269,6 +283,7 @@ export class RescheduleAppointmentTaskHandler implements TaskHandler {
       }));
     if (resolvedId) {
       payload.appointmentId = resolvedId;
+      verifiedIds = { appointmentId: resolvedId };
     } else if (ee.appointmentReference) {
       payload.appointmentReference = ee.appointmentReference;
       missing.push('appointmentId');
@@ -333,7 +348,11 @@ export class RescheduleAppointmentTaskHandler implements TaskHandler {
     }
 
     return {
-      proposal: createProposal(inputFor(context, this.taskType, payload, missing)),
+      proposal: createProposal(
+        inputFor(context, this.taskType, payload, missing, {
+          ...(verifiedIds ? { sourceContext: { verifiedIds } } : {}),
+        }),
+      ),
       taskType: this.taskType,
     };
   }
@@ -1874,12 +1893,25 @@ export class ConfirmAppointmentTaskHandler implements TaskHandler {
     const payload: Record<string, unknown> = {};
     const missing: string[] = [];
 
+    // #920 fix — `resolveActiveAppointmentId` is a REPO lookup (customer's
+    // own jobs → appointments), not LLM/classifier text, so a match it
+    // returns is verifiable by construction exactly like
+    // NotifyDelayTaskHandler's A31 fix. Without stamping it here,
+    // routes/assistant.ts's dropUnverifiedIds scrub strips
+    // payload.appointmentId right back out (a spoken customer name never
+    // contains the appointment's UUID), and because this branch never
+    // pushes 'appointmentId' onto `missing` either, the proposal ends up
+    // with NO appointmentId and NO gate: approvable, but doomed to fail at
+    // execution ("confirm_appointment requires a resolved appointmentId").
+    let verifiedIds: Record<string, string> | undefined;
+
     const resolvedId = await resolveActiveAppointmentId(this.appointmentRepo, context.tenantId, {
       customerId: context.customerId,
       jobRepo: this.jobRepo,
     });
     if (resolvedId) {
       payload.appointmentId = resolvedId;
+      verifiedIds = { appointmentId: resolvedId };
     } else if (ee.appointmentReference) {
       payload.appointmentReference = ee.appointmentReference;
       missing.push('appointmentId');
@@ -1888,7 +1920,11 @@ export class ConfirmAppointmentTaskHandler implements TaskHandler {
     }
 
     return {
-      proposal: createProposal(inputFor(context, this.taskType, payload, missing)),
+      proposal: createProposal(
+        inputFor(context, this.taskType, payload, missing, {
+          ...(verifiedIds ? { sourceContext: { verifiedIds } } : {}),
+        }),
+      ),
       taskType: this.taskType,
     };
   }
