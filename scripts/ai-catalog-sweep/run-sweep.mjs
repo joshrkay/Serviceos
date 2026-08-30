@@ -438,6 +438,36 @@ async function ensureFixtures() {
       );
       summary.push(`leads: inserted ${last}${addr ? ' (with address)' : ''}`);
     }
+    // Round 5 — appointment fixture normalization (same self-healing class
+    // as the leads-stage reset and unreplied-review checks above): the
+    // resolver rows (A11-A15/A27) document ONE unambiguous scheduled
+    // appointment for the fixture customer, but each run's own
+    // create_appointment executions (A03/A33) leave extra scheduled rows,
+    // and every later appointment reference then gates on ambiguity
+    // (live evidence: proposal 95dc9245's pendingEntityAmbiguity carried 3
+    // candidates incl. a duplicated 18:00 pair). Keep the OLDEST scheduled
+    // appointment (the seed's) and cancel the younger surplus — cancelled
+    // rows drop out of the resolver's candidate set. Scoped strictly to the
+    // fixture customer's jobs on the QA tenant.
+    const surplusAppts = await rw.query(
+      `UPDATE appointments a SET status = 'cancelled', updated_at = now()
+        WHERE a.tenant_id = $1
+          AND a.status = 'scheduled'
+          AND a.job_id IN (SELECT id FROM jobs WHERE tenant_id = $1 AND customer_id = $2)
+          AND a.id <> (
+            SELECT a2.id FROM appointments a2
+              JOIN jobs j2 ON j2.id = a2.job_id AND j2.tenant_id = a2.tenant_id
+             WHERE a2.tenant_id = $1 AND a2.status = 'scheduled' AND j2.customer_id = $2
+             ORDER BY a2.created_at ASC LIMIT 1
+          )
+        RETURNING a.id`,
+      [TENANT_ID, CUSTOMER_ID],
+    );
+    if ((surplusAppts.rowCount ?? 0) > 0) {
+      summary.push(`appointments: cancelled ${surplusAppts.rowCount} surplus scheduled (fixture normalization)`);
+    } else {
+      summary.push('appointments: single scheduled fixture intact');
+    }
     // Business timezone — confirmed root cause (2026-08-29 full sweep) of
     // A03/A33 (create_appointment / schedule_inspection) failing to draft
     // at all: routes/assistant.ts's create_appointment path honestly
