@@ -890,6 +890,149 @@ describe('Integration — #909 chat entity resolution (real Postgres + real reso
         approveProposal(proposalRepo, seed.tenantId, resolved.id, seed.userId, 'owner'),
       ).resolves.toBeTruthy();
     });
+
+    // 2026-08-30 fresh live evidence — proposal a3e1d302 (sweep 9) and its
+    // sweep-10 successor BOTH show `payload.invoiceReference =
+    // "qa-matrix-A-customer"`, `sourceContext = { verifiedIds: { customerId:
+    // <resolved fine> }, missingFields: ['invoiceId'] }`, and
+    // `pendingEntityAmbiguity` ABSENT — no ask ever rendered, so D-029's
+    // answer turn can never fire and `approve` 400s forever. The two tests
+    // above (1 invoice / 2 invoices) do NOT reproduce this: they pass
+    // unmodified today. What DOES reproduce it, pinned here: the shared
+    // AI-catalog-sweep fixture customer's invoices accumulate ONE per sweep
+    // round (A01's create_invoice chain has no cleanup between rounds,
+    // unlike the appointment fixture's own #940-942 "normalize surplus"
+    // self-healing), and by round 9-10 the customer-name traversal's
+    // overflow guard (`MAX_INVOICE_CANDIDATES` = 5, pg-entity-resolver.ts —
+    // a deliberate, repo-wide "escalate rather than guess" refusal, not a
+    // bug in itself) trips: `resolveInvoice` answers `not_found`, not
+    // `ambiguous`, because there is nothing safe to offer a picker. #944's
+    // void/canceled exclusion does not help here — none of these accumulated
+    // invoices are void or canceled, they are the ordinary open/paid/
+    // partially_paid/draft residue of completed prior-round chains.
+    //
+    // The resolver's refusal is honest. What was NOT honest is the CHAT
+    // REPLY: with no ambiguity to ask about, `resolveGatedReferencesForChat`
+    // returned `undefined` and the caller fell back to the exact same
+    // "Review and approve to proceed" text a fully-resolved draft gets — the
+    // operator had zero signal anything needed their input. Fixed in
+    // routes/assistant.ts: `invoiceId` left in `outcome.unresolved` with no
+    // ambiguity now gets a plain-language nudge to reply with the invoice
+    // NUMBER (unlike appointmentId/jobId, invoiceId already has a
+    // document-number fast path an operator can trivially satisfy) — never a
+    // guess, D-004 intact, just an honest "I need more" instead of silence.
+    it('MORE non-void invoices than the picker can show (sweep 9/10 live shape): the reply says so instead of going silent', async () => {
+      const seed = await seedTenant();
+      // One per completed sweep round's A01->A22 chain: never void/canceled
+      // through that normal flow, so #944's status filter does not thin
+      // this out. 7 > MAX_INVOICE_CANDIDATES(5) trips the overflow guard.
+      const statuses = ['open', 'paid', 'partially_paid', 'open', 'paid', 'draft', 'open'];
+      for (const status of statuses) {
+        await seedInvoice(seed, `INV-${1000 + statuses.indexOf(status)}-${crypto.randomUUID().slice(0, 4)}`, status);
+      }
+
+      const proposalRepo = new InMemoryProposalRepository();
+      const app = buildApp(
+        seed,
+        proposalRepo,
+        scriptedGateway([
+          classifierReply('send_payment_reminder', { customerName: CUSTOMER_NAME }),
+        ]),
+      );
+
+      const res = await supertest(app)
+        .post('/api/assistant/chat')
+        .send({
+          messages: [
+            { role: 'user', content: `Send ${CUSTOMER_NAME} a payment reminder on invoice INV-0001` },
+          ],
+        });
+      expect(res.status).toBe(200);
+      // The live-broken behavior this test pins RED against: before the
+      // fix, this content is `${title}. Review and approve to proceed.` —
+      // indistinguishable from a proposal that needs nothing further.
+      expect(res.body.message.content).toContain('reply with the invoice number');
+      expect(res.body.message.content).not.toContain('Which invoice did you mean');
+
+      const [gated] = await proposalRepo.findByTenant(seed.tenantId);
+      expect(gated.payload.invoiceReference).toBe(CUSTOMER_NAME);
+      expect(gated.payload.invoiceId).toBeUndefined();
+      expect(missingFieldsFor(gated)).toEqual(['invoiceId']);
+      // Exactly the live shape: verifiedIds.customerId present (pre-draft
+      // resolution — CUSTOMER_REF_INTENTS — succeeded independently of the
+      // invoiceId gate), no pendingEntityAmbiguity (nothing safe to ask).
+      const ctx = gated.sourceContext as Record<string, unknown>;
+      expect((ctx.verifiedIds as Record<string, unknown> | undefined)?.customerId).toBeTruthy();
+      expect(ctx.pendingEntityAmbiguity).toBeUndefined();
+      await expect(
+        approveProposal(proposalRepo, seed.tenantId, gated.id, seed.userId, 'owner'),
+      ).rejects.toThrow(/invoiceId/);
+
+      // The follow-up turn the nudge asks for: naming the invoice number
+      // directly resolves via the exact-document-number fast path
+      // (unaffected by overflow, since it does not traverse via customer
+      // name at all) and lifts the gate — D-029's answer turn, closed.
+      const exact = await seedInvoice(seed, 'INV-9999', 'open');
+      const gateway2 = scriptedGateway([
+        classifierReply('send_payment_reminder', { customerName: CUSTOMER_NAME }),
+        classifierReply('send_payment_reminder', { jobReference: 'INV-9999' }),
+      ]);
+      const app2 = buildApp(seed, proposalRepo, gateway2);
+      const conversationId = crypto.randomUUID();
+      await supertest(app2)
+        .post('/api/assistant/chat')
+        .send({
+          messages: [
+            { role: 'user', content: `Send ${CUSTOMER_NAME} a payment reminder on invoice INV-9999` },
+          ],
+          conversationId,
+        });
+      const followUp = await supertest(app2)
+        .post('/api/assistant/chat')
+        .send({ messages: [{ role: 'user', content: 'INV-9999' }], conversationId });
+      expect(followUp.status).toBe(200);
+      const proposals = await proposalRepo.findByTenant(seed.tenantId);
+      const secondDraft = proposals.find((p) => p.payload.invoiceId === exact);
+      expect(secondDraft).toBeTruthy();
+      expect(missingFieldsFor(secondDraft!)).toEqual([]);
+      await expect(
+        approveProposal(proposalRepo, seed.tenantId, secondDraft!.id, seed.userId, 'owner'),
+      ).resolves.toBeTruthy();
+    });
+
+    // A21 apply_late_fee shares the identical GATED_REFERENCE_SOURCES entry
+    // and the identical `resolveGatedReferencesForChat` call site, so the
+    // same fix and the same live shape apply — pinned separately since the
+    // coordinator's live evidence named both A20 and A21 explicitly.
+    it('A21 apply_late_fee: the same overflow shape gets the same nudge, not silence', async () => {
+      const seed = await seedTenant();
+      for (let i = 0; i < 7; i++) {
+        await seedInvoice(seed, `INV-${2000 + i}-${crypto.randomUUID().slice(0, 4)}`, 'open');
+      }
+
+      const proposalRepo = new InMemoryProposalRepository();
+      const app = buildApp(
+        seed,
+        proposalRepo,
+        scriptedGateway([
+          classifierReply('apply_late_fee', { customerName: CUSTOMER_NAME, amount: 2500 }),
+        ]),
+      );
+
+      const res = await supertest(app)
+        .post('/api/assistant/chat')
+        .send({
+          messages: [
+            { role: 'user', content: `Apply a 25 dollar late fee to ${CUSTOMER_NAME}'s invoice` },
+          ],
+        });
+      expect(res.status).toBe(200);
+      expect(res.body.message.content).toContain('reply with the invoice number');
+
+      const [gated] = await proposalRepo.findByTenant(seed.tenantId);
+      expect(missingFieldsFor(gated)).toEqual(['invoiceId']);
+      expect((gated.sourceContext as Record<string, unknown>).pendingEntityAmbiguity).toBeUndefined();
+    });
   });
 
   // ───────────────────────────────────────────────────────────────────────

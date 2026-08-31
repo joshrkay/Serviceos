@@ -1801,6 +1801,71 @@ export function matchNewBookingPhrase(transcript: string): boolean {
   return NEW_BOOKING_PHRASES.some((rx) => rx.test(transcript));
 }
 
+/**
+ * A06 (2026-08-30 live sweep, sweep-10) — deterministic short-circuit for the
+ * canonical dictated `issue_invoice` phrasing: "Issue invoice INV-0010" /
+ * "Issue the invoice INV-0010". Anchored, doc-number-shaped capture, same
+ * idiom as `matchLookupJobProfitPhrase` / `matchDraftEstimatePhrase`.
+ *
+ * WHY THIS EXISTS: the exact sweep utterance — "Issue invoice INV-0010" —
+ * fell through to the generic-LLM reply path with NO proposal drafted at
+ * all ("I have not issued invoice INV-0010. Please contact your billing
+ * department...", a hallucination-shaped deflection from a path with no
+ * database and no tools; see ai/orchestration/assistant-honesty-guard.ts's
+ * companion fix for why that fallback can never itself fabricate a
+ * proposal). `classify_intent` intermittently missed the mapped
+ * `issue_invoice` intent for this stereotyped, entity-bearing phrasing —
+ * the same class of non-determinism `matchDraftEstimatePhrase` and the
+ * #910 lookup matchers close for their own intents.
+ *
+ * FIELD CHOICE: extracts into `jobReference`, not a bespoke
+ * `invoiceReference` — `IssueInvoiceTaskHandler` (ai/orchestration/
+ * task-router.ts) reads `existingEntities.invoiceReference ??
+ * existingEntities.jobReference`, and there is no `invoiceReference`
+ * extraction field anywhere in the classifier taxonomy (every invoice-doc
+ * intent reuses `jobReference`/`jobTitle` — see INVOICE_DOC_INTENTS's own
+ * comment, ai/agents/customer-calling/entity-resolution.ts). Because
+ * `issue_invoice` is a member of `INVOICE_DOC_INTENTS`,
+ * `documentKindForReference` there also routes this `jobReference` through
+ * `kind: 'invoice'` pre-draft resolution — an exact document number clears
+ * `resolveExactDocumentNumber`'s fast path deterministically, so the SAME
+ * extraction this matcher performs already flows through the resolver the
+ * LLM-classified path uses; nothing downstream needed to change.
+ *
+ * ANCHORED to an "INV-<digits>" document number specifically (not free
+ * text): a captured token that isn't shaped like a real invoice number
+ * would only ever hand `IssueInvoiceTaskHandler` a reference its own Rung 1
+ * (`looksLikeResolvedInvoiceRef`) rejects anyway, so requiring the shape
+ * here keeps the pattern from firing on phrasings ("issue the invoice we
+ * just drafted") this matcher was never meant to answer — those still fall
+ * through to the LLM/Rung-2 conversation-context resolution unchanged.
+ *
+ * NOT gated on `extendedIntents` (unlike the owner-lookup matchers above),
+ * for the same reason `matchNewBookingPhrase` isn't: the live A06 failure
+ * was on `surface: "chat"`, which never sets that flag (D-028 — chat is the
+ * broad, ungated taxonomy for every authenticated caller), so a
+ * `extendedIntents`-gated matcher would never have run for the exact
+ * utterance this exists to fix.
+ *
+ * Safe to bypass the LLM for a WRITE intent for the same reasons
+ * `matchDraftEstimatePhrase` is: D-004 (proposal-first, never
+ * auto-executed) plus `IssueInvoiceTaskHandler`'s own draft-time gate — an
+ * unresolvable reference is persisted with `missingFields: ['invoiceId']`
+ * and a candidate picker, never silently issued. A misfire here at worst
+ * drafts an issue_invoice proposal nobody asked for, sitting unapproved.
+ */
+const ISSUE_INVOICE_PATTERN =
+  /^\s*issue\s+(?:the\s+)?invoice\s+(INV-\d+)\s*[.!]?\s*$/i;
+
+export function matchIssueInvoicePhrase(
+  transcript: string,
+): { jobReference: string } | null {
+  if (!transcript) return null;
+  const match = ISSUE_INVOICE_PATTERN.exec(transcript);
+  if (!match) return null;
+  return { jobReference: match[1].toUpperCase() };
+}
+
 /** RV-071 — predicate the voice routing layers use to gate owner approval intents. */
 export function isVoiceApprovalIntent(
   intent: IntentType | string | undefined | null,
@@ -2281,6 +2346,22 @@ async function classifyIntentRaw(
       intentType: 'create_appointment',
       confidence: 0.95,
       reasoning: 'matched deterministic new-booking phrasing',
+    };
+  }
+
+  // A06 (2026-08-30 live sweep, sweep-10) — the anchored "issue invoice
+  // INV-####" imperative. Deliberately OUTSIDE the `extendedIntents` block
+  // above, same reasoning as `matchNewBookingPhrase` immediately above: the
+  // live miss was on `surface: "chat"`, which never sets that flag. See
+  // matchIssueInvoicePhrase's doc comment for the full story and why an
+  // anchored write-intent short-circuit is safe here.
+  const issueInvoiceMatch = matchIssueInvoicePhrase(transcript);
+  if (issueInvoiceMatch) {
+    return {
+      intentType: 'issue_invoice',
+      confidence: 0.95,
+      reasoning: 'matched deterministic issue_invoice phrasing',
+      extractedEntities: { jobReference: issueInvoiceMatch.jobReference },
     };
   }
 
