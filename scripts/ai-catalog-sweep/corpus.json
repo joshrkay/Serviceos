@@ -178,8 +178,8 @@
         "table": "appointments",
         "whereShape": "tenant_id = '{{tenantId}}' AND id = '{{ctx.A03.resultEntityId}}'"
       },
-      "clarificationAnswer": "the tune-up one",
-      "notes": "Round-7: with the seed-faithful standing appointment restored, a generic appointment reference is legitimately two-way ambiguous and D-029 asks; the answer names the intended one (dispatcher realism; executes expectation unchanged)."
+      "clarificationAnswer": "the first one",
+      "notes": "Round-7: with the seed-faithful standing appointment restored, a generic appointment reference is legitimately two-way ambiguous and D-029 asks; the answer names the intended one (dispatcher realism; executes expectation unchanged). Round-8: answer switched to an ordinal — the deterministic matcher accepts first/second/third (parseOrdinalIndex), and the rendered candidates are timestamps/numbers a descriptive pick cannot name. Appointment order is scheduled_start ASC (tune-up earliest, standing visit second); invoice order per the rendered list. Expectations unchanged."
     },
     {
       "id": "A27",
@@ -193,8 +193,8 @@
         "table": "appointments",
         "whereShape": "tenant_id = '{{tenantId}}' AND id = '{{ctx.A03.resultEntityId}}'"
       },
-      "clarificationAnswer": "the standing service visit",
-      "notes": "Round-7: with the seed-faithful standing appointment restored, a generic appointment reference is legitimately two-way ambiguous and D-029 asks; the answer names the intended one (dispatcher realism; executes expectation unchanged)."
+      "clarificationAnswer": "the second one",
+      "notes": "Round-7: with the seed-faithful standing appointment restored, a generic appointment reference is legitimately two-way ambiguous and D-029 asks; the answer names the intended one (dispatcher realism; executes expectation unchanged). Round-8: answer switched to an ordinal — the deterministic matcher accepts first/second/third (parseOrdinalIndex), and the rendered candidates are timestamps/numbers a descriptive pick cannot name. Appointment order is scheduled_start ASC (tune-up earliest, standing visit second); invoice order per the rendered list. Expectations unchanged."
     },
     {
       "id": "A13",
@@ -208,8 +208,8 @@
         "table": "appointment_assignments",
         "whereShape": "tenant_id = '{{tenantId}}' AND id = '{{resultEntityId}}'"
       },
-      "clarificationAnswer": "the tune-up one",
-      "notes": "Round-7: with the seed-faithful standing appointment restored, a generic appointment reference is legitimately two-way ambiguous and D-029 asks; the answer names the intended one (dispatcher realism; executes expectation unchanged)."
+      "clarificationAnswer": "the first one",
+      "notes": "Round-7: with the seed-faithful standing appointment restored, a generic appointment reference is legitimately two-way ambiguous and D-029 asks; the answer names the intended one (dispatcher realism; executes expectation unchanged). Round-8: answer switched to an ordinal — the deterministic matcher accepts first/second/third (parseOrdinalIndex), and the rendered candidates are timestamps/numbers a descriptive pick cannot name. Appointment order is scheduled_start ASC (tune-up earliest, standing visit second); invoice order per the rendered list. Expectations unchanged."
     },
     {
       "id": "A14",
@@ -223,8 +223,8 @@
         "table": "appointment_assignments",
         "whereShape": "tenant_id = '{{tenantId}}' AND id = '{{resultEntityId}}'"
       },
-      "clarificationAnswer": "the tune-up one",
-      "notes": "Round-7: with the seed-faithful standing appointment restored, a generic appointment reference is legitimately two-way ambiguous and D-029 asks; the answer names the intended one (dispatcher realism; executes expectation unchanged)."
+      "clarificationAnswer": "the first one",
+      "notes": "Round-7: with the seed-faithful standing appointment restored, a generic appointment reference is legitimately two-way ambiguous and D-029 asks; the answer names the intended one (dispatcher realism; executes expectation unchanged). Round-8: answer switched to an ordinal — the deterministic matcher accepts first/second/third (parseOrdinalIndex), and the rendered candidates are timestamps/numbers a descriptive pick cannot name. Appointment order is scheduled_start ASC (tune-up earliest, standing visit second); invoice order per the rendered list. Expectations unchanged."
     },
     {
       "id": "A15",
@@ -238,8 +238,8 @@
         "table": "appointment_assignments",
         "whereShape": "tenant_id = '{{tenantId}}' AND appointment_id = '{{ctx.A03.resultEntityId}}' ORDER BY updated_at DESC LIMIT 10"
       },
-      "notes": "PASS evidence is inverted here: success means Alex Rivera's assignment row is gone/flagged removed, not present. dbVerify is recorded as informational only — the primary signal is the proposal reaching status executed. Round-7: with the seed-faithful standing appointment restored, a generic appointment reference is legitimately two-way ambiguous and D-029 asks; the answer names the intended one (dispatcher realism; executes expectation unchanged).",
-      "clarificationAnswer": "the tune-up one"
+      "notes": "PASS evidence is inverted here: success means Alex Rivera's assignment row is gone/flagged removed, not present. dbVerify is recorded as informational only — the primary signal is the proposal reaching status executed. Round-7: with the seed-faithful standing appointment restored, a generic appointment reference is legitimately two-way ambiguous and D-029 asks; the answer names the intended one (dispatcher realism; executes expectation unchanged). Round-8: answer switched to an ordinal — the deterministic matcher accepts first/second/third (parseOrdinalIndex), and the rendered candidates are timestamps/numbers a descriptive pick cannot name. Appointment order is scheduled_start ASC (tune-up earliest, standing visit second); invoice order per the rendered list. Expectations unchanged.",
+      "clarificationAnswer": "the first one"
     },
     {
       "id": "A12",
@@ -253,8 +253,8 @@
         "table": "appointments",
         "whereShape": "tenant_id = '{{tenantId}}' AND id = '{{ctx.A03.resultEntityId}}' AND status = 'cancelled'"
       },
-      "notes": "Terminal step of the appointment chain — cancel runs last so every earlier appointment-mutating row still has a live appointment to act on. Round-7: with the seed-faithful standing appointment restored, a generic appointment reference is legitimately two-way ambiguous and D-029 asks; the answer names the intended one (dispatcher realism; executes expectation unchanged).",
-      "clarificationAnswer": "the tune-up one"
+      "notes": "Terminal step of the appointment chain — cancel runs last so every earlier appointment-mutating row still has a live appointment to act on. Round-7: with the seed-faithful standing appointment restored, a generic appointment reference is legitimately two-way ambiguous and D-029 asks; the answer names the intended one (dispatcher realism; executes expectation unchanged). Round-8: answer switched to an ordinal — the deterministic matcher accepts first/second/third (parseOrdinalIndex), and the rendered candidates are timestamps/numbers a descriptive pick cannot name. Appointment order is scheduled_start ASC (tune-up earliest, standing visit second); invoice order per the rendered list. Expectations unchanged.",
+      "clarificationAnswer": "the first one"
     },
     {
       "id": "A16",
@@ -307,8 +307,8 @@
         "table": "message_dispatches",
         "whereShape": "tenant_id = '{{tenantId}}' AND channel = 'sms' AND recipient = '480-555-0195' ORDER BY sent_at DESC LIMIT 5"
       },
-      "notes": "2026-08-29 WS-E honesty pass — first-nudge-free path. FUP-002's 48h cooldown (SendEstimateNudgeExecutionHandler, proposals/execution/handlers.ts) is RATIFIED-correct product behavior, so this row nudging the SAME estimate A18 just sent seconds earlier in the SAME run was never a bug, but it made `executes` unprovable — every run legitimately hit the guard. No longer dependsOn A18: ensureFixtures() now seeds a DEDICATED 'QA Sweep Nudge Fixture' customer (own job + estimate, primary_phone + sms_consent set for the SMS nudge channel) with a 'sent', unanswered estimate whose seed dispatch is 72h old (self-healing across runs, see run-sweep.mjs), so THIS row's first nudge against it is genuinely provable as executes. A dedicated customer — not FIXTURE_CUSTOMER — is required: SendEstimateNudgeTaskHandler resolves the target via a customer-anchored estimate search (voice-extended-tasks.ts), so a second 'sent' estimate on the SAME customer as the A02->A05->A18 chain would be genuine ambiguity (a voice_clarification with no execution handler) regardless of in-run timing, not just a cooldown refusal. Companion row A51 proves the OTHER honest half — the cooldown correctly firing — against the SAME estimate this row just nudged. Round-6: answer turn — prior-run sent estimates for the nudge customer legitimately remain candidates, so the ask must be answered (make-input-resolvable; executes expectation unchanged).",
-      "clarificationAnswer": "the most recent one"
+      "notes": "2026-08-29 WS-E honesty pass — first-nudge-free path. FUP-002's 48h cooldown (SendEstimateNudgeExecutionHandler, proposals/execution/handlers.ts) is RATIFIED-correct product behavior, so this row nudging the SAME estimate A18 just sent seconds earlier in the SAME run was never a bug, but it made `executes` unprovable — every run legitimately hit the guard. No longer dependsOn A18: ensureFixtures() now seeds a DEDICATED 'QA Sweep Nudge Fixture' customer (own job + estimate, primary_phone + sms_consent set for the SMS nudge channel) with a 'sent', unanswered estimate whose seed dispatch is 72h old (self-healing across runs, see run-sweep.mjs), so THIS row's first nudge against it is genuinely provable as executes. A dedicated customer — not FIXTURE_CUSTOMER — is required: SendEstimateNudgeTaskHandler resolves the target via a customer-anchored estimate search (voice-extended-tasks.ts), so a second 'sent' estimate on the SAME customer as the A02->A05->A18 chain would be genuine ambiguity (a voice_clarification with no execution handler) regardless of in-run timing, not just a cooldown refusal. Companion row A51 proves the OTHER honest half — the cooldown correctly firing — against the SAME estimate this row just nudged. Round-6: answer turn — prior-run sent estimates for the nudge customer legitimately remain candidates, so the ask must be answered (make-input-resolvable; executes expectation unchanged). Round-8: answer switched to an ordinal — the deterministic matcher accepts first/second/third (parseOrdinalIndex), and the rendered candidates are timestamps/numbers a descriptive pick cannot name. Appointment order is scheduled_start ASC (tune-up earliest, standing visit second); invoice order per the rendered list. Expectations unchanged.",
+      "clarificationAnswer": "the first one"
     },
     {
       "id": "A51",
@@ -323,8 +323,8 @@
         "table": "message_dispatches",
         "whereShape": "tenant_id = '{{tenantId}}' AND channel = 'sms' AND recipient = '480-555-0195' ORDER BY sent_at DESC LIMIT 5"
       },
-      "notes": "2026-08-29 WS-E honesty pass — companion to A19. Proves FUP-002's 48h cooldown correctly refusing a second nudge on the SAME 'QA Sweep Nudge Fixture' estimate A19 just successfully nudged seconds earlier in this run. Runner change: added expectedOutcome 'guard_pass' (run-sweep.mjs OUTCOME_ENUM + a dedicated scoring branch) because the existing executes/draft_gated scoring always scores ANY execution_failed as PARTIAL — that conflated 'the guard did its job' with 'something actually went wrong', which is exactly the dishonesty this WS-E pass was chartered to remove. guard_pass PASSes only when execution genuinely fails AND the error matches refusalHint; it FAILs outright (not a soft downgrade to PARTIAL) if the guard doesn't fire and the nudge executes instead, so a real regression can never hide behind this label. dependsOn A19 (not the old A18 chain) so this always runs after A19 has actually nudged the SAME estimate, guaranteeing the cooldown is live when this row fires. Round-7: same answer turn as A19 — the guard can only fire once the same estimate resolves; guard_pass expectation unchanged.",
-      "clarificationAnswer": "the most recent one"
+      "notes": "2026-08-29 WS-E honesty pass — companion to A19. Proves FUP-002's 48h cooldown correctly refusing a second nudge on the SAME 'QA Sweep Nudge Fixture' estimate A19 just successfully nudged seconds earlier in this run. Runner change: added expectedOutcome 'guard_pass' (run-sweep.mjs OUTCOME_ENUM + a dedicated scoring branch) because the existing executes/draft_gated scoring always scores ANY execution_failed as PARTIAL — that conflated 'the guard did its job' with 'something actually went wrong', which is exactly the dishonesty this WS-E pass was chartered to remove. guard_pass PASSes only when execution genuinely fails AND the error matches refusalHint; it FAILs outright (not a soft downgrade to PARTIAL) if the guard doesn't fire and the nudge executes instead, so a real regression can never hide behind this label. dependsOn A19 (not the old A18 chain) so this always runs after A19 has actually nudged the SAME estimate, guaranteeing the cooldown is live when this row fires. Round-7: same answer turn as A19 — the guard can only fire once the same estimate resolves; guard_pass expectation unchanged. Round-8: answer switched to an ordinal — the deterministic matcher accepts first/second/third (parseOrdinalIndex), and the rendered candidates are timestamps/numbers a descriptive pick cannot name. Appointment order is scheduled_start ASC (tune-up earliest, standing visit second); invoice order per the rendered list. Expectations unchanged.",
+      "clarificationAnswer": "the first one"
     },
     {
       "id": "A20",
@@ -338,8 +338,8 @@
         "table": "invoice_dunning_events",
         "whereShape": "tenant_id = '{{tenantId}}' AND invoice_id = '{{ctx.A01.resultEntityId}}' ORDER BY created_at DESC LIMIT 5"
       },
-      "clarificationAnswer": "the most recent one",
-      "notes": "Round-3: post fix/ref-lift-live-misses the resolver correctly finds 2 invoices and asks; clarificationAnswer picks the latest (runner answer-turn support from #925)."
+      "clarificationAnswer": "the third one",
+      "notes": "Round-3: post fix/ref-lift-live-misses the resolver correctly finds 2 invoices and asks; clarificationAnswer picks the latest (runner answer-turn support from #925). Round-8: answer switched to an ordinal — the deterministic matcher accepts first/second/third (parseOrdinalIndex), and the rendered candidates are timestamps/numbers a descriptive pick cannot name. Appointment order is scheduled_start ASC (tune-up earliest, standing visit second); invoice order per the rendered list. Expectations unchanged."
     },
     {
       "id": "A21",
@@ -353,8 +353,8 @@
         "table": "invoices",
         "whereShape": "tenant_id = '{{tenantId}}' AND id = '{{ctx.A01.resultEntityId}}'"
       },
-      "notes": "Round-3: utterance now names the customer so the new customer→job→invoice traversal (fix/ref-lift-live-misses) can resolve; the document-number few-shot gap is #931 (pinned-prompt change, separate). Round-5: answer turn added — the customer traversal has no status filter, so even the clean seed pair yields 2 invoice candidates and the row must answer the ask to reach execution (same make-input-resolvable precedent as A20; the executes expectation is unchanged). Round-6: utterance names the amount — the drafted payload gated on feeCents with no amount anywhere in the input (a human operator would say the fee; executes expectation unchanged).",
-      "clarificationAnswer": "the most recent one"
+      "notes": "Round-3: utterance now names the customer so the new customer→job→invoice traversal (fix/ref-lift-live-misses) can resolve; the document-number few-shot gap is #931 (pinned-prompt change, separate). Round-5: answer turn added — the customer traversal has no status filter, so even the clean seed pair yields 2 invoice candidates and the row must answer the ask to reach execution (same make-input-resolvable precedent as A20; the executes expectation is unchanged). Round-6: utterance names the amount — the drafted payload gated on feeCents with no amount anywhere in the input (a human operator would say the fee; executes expectation unchanged). Round-8: answer switched to an ordinal — the deterministic matcher accepts first/second/third (parseOrdinalIndex), and the rendered candidates are timestamps/numbers a descriptive pick cannot name. Appointment order is scheduled_start ASC (tune-up earliest, standing visit second); invoice order per the rendered list. Expectations unchanged.",
+      "clarificationAnswer": "the first one"
     },
     {
       "id": "A38",
@@ -502,8 +502,8 @@
         "table": "audit_events",
         "whereShape": "tenant_id = '{{tenantId}}' AND entity_id = '{{ctx.A03.resultEntityId}}' ORDER BY created_at DESC LIMIT 5"
       },
-      "notes": "NotifyDelayExecutionHandler doesn't write a dedicated dispatch row (packages/api/src/proposals/execution/full-app-voice-handlers.ts) — resultEntityId=appointmentId with status:true is the primary proof; audit_events check is best-effort. Round-7: with the seed-faithful standing appointment restored, a generic appointment reference is legitimately two-way ambiguous and D-029 asks; the answer names the intended one (dispatcher realism; executes expectation unchanged).",
-      "clarificationAnswer": "the standing service visit"
+      "notes": "NotifyDelayExecutionHandler doesn't write a dedicated dispatch row (packages/api/src/proposals/execution/full-app-voice-handlers.ts) — resultEntityId=appointmentId with status:true is the primary proof; audit_events check is best-effort. Round-7: with the seed-faithful standing appointment restored, a generic appointment reference is legitimately two-way ambiguous and D-029 asks; the answer names the intended one (dispatcher realism; executes expectation unchanged). Round-8: answer switched to an ordinal — the deterministic matcher accepts first/second/third (parseOrdinalIndex), and the rendered candidates are timestamps/numbers a descriptive pick cannot name. Appointment order is scheduled_start ASC (tune-up earliest, standing visit second); invoice order per the rendered list. Expectations unchanged.",
+      "clarificationAnswer": "the second one"
     },
     {
       "id": "A32",
