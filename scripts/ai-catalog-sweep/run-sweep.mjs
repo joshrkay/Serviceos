@@ -561,6 +561,28 @@ async function ensureFixtures() {
       [TENANT_ID],
     );
     summary.push(`estimates: rejected ${staleNudgeEstimates.rowCount ?? 0} stale nudge fixtures (chain-root reset)`);
+    // Round 11 — the sweep TECHNICIANS (tech-baker / tech-actor) are
+    // sweep-owned fixtures, and their appointment assignments are pure
+    // sweep artifacts (A13 reassign / A14 add-crew executions). A live
+    // leftover assignment from a prior run double-books the technician
+    // against this run's identical tune-up slot (sweep-14 A13:
+    // DOUBLE_BOOKING on a REAL active assignment — the guard itself was
+    // proven correct at both layers in fix/execution-tails). Contract:
+    // sweep technicians start every run unassigned.
+    const techRows = await rw.query(
+      `SELECT id FROM users WHERE tenant_id = $1 AND clerk_user_id = ANY($2::text[])`,
+      [TENANT_ID, [TECH_BAKER_SUBJECT, TECH_ACTOR_SUBJECT]],
+    );
+    const techIds = techRows.rows.map((r) => r.id);
+    if (techIds.length > 0) {
+      const clearedAssignments = await rw.query(
+        `DELETE FROM appointment_assignments WHERE tenant_id = $1 AND technician_id = ANY($2::uuid[]) RETURNING id`,
+        [TENANT_ID, techIds],
+      );
+      summary.push(`appointment_assignments: cleared ${clearedAssignments.rowCount ?? 0} sweep-technician leftovers`);
+    } else {
+      summary.push('appointment_assignments: no sweep technician users found to clear');
+    }
     // Same design one level down: NEW_JOB_SUMMARY ("QA Sweep Furnace
     // Inspection") is a per-run fabricated chain-root JOB, but the
     // resolver's job candidate query has NO status filter, so prior runs'
