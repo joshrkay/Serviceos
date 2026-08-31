@@ -617,6 +617,58 @@ const SLOT_DETAIL_SIBLING_INTENTS: ReadonlySet<string> = new Set([
  * (intent-classifier.ts); `customerId` is included because entity resolution
  * folds a resolver-VERIFIED id under that key.
  */
+/**
+ * Train-7 regression — the two gates below CONTRADICTED each other for
+ * exactly the utterance #938 cited when it widened the family.
+ *
+ * `confirm_appointment` is a `SLOT_DETAIL_SIBLING_INTENTS` member (gate 1
+ * admits it) on the stated reasoning that "next Tuesday morning works" is a
+ * booking's WHEN in agreement clothing. But its ONLY extraction field is
+ * `appointmentReference` (intent-taxonomy-blocks.ts:341 — "Extract
+ * appointmentReference", with the example "The customer confirmed Tuesday's
+ * visit", the same agreement-plus-a-day shape), and #938 deliberately kept
+ * that key OUT of `SLOT_DETAIL_ENTITY_KEYS` so a reschedule could not fold
+ * its target into an unsaved booking. Net effect: gate 1 said "same
+ * request", gate 2 filtered the only entity away, `newSlots` came back
+ * empty, and the turn fell to `correction` — wiping a booking two turns in.
+ * Live evidence: session 12ccb578, D01 turn 2 ("Jordan Lee, 480-555-0199,
+ * next Tuesday morning works") corrected ~170ms after turn 1's
+ * entity_resolved, i.e. off a cached classification, no LLM call.
+ * (`classify_intent` is cache-eligible — gateway/factory.ts
+ * DEFAULT_DETERMINISTIC_TASK_TYPES — so the model landing on
+ * `confirm_appointment` for this phrasing became sticky rather than
+ * intermittent.)
+ *
+ * Resolved by ALIASING rather than by widening the vocabulary: the
+ * reference `confirm_appointment` extracts IS the booking's date text, so
+ * it lands on `dateTimeDescription`. This cannot leak a reschedule's target
+ * in, because gate 1 already excludes every OTHER intent that emits
+ * `appointmentReference` (reschedule / cancel / reassign / notify_delay —
+ * see the entity-dictionary line for that key). Mirrors the "aliases where
+ * the two vocabularies diverge" section proposals/voice-payload.ts already
+ * maintains for the same class of mismatch.
+ *
+ * Keyed BY SOURCE INTENT, not globally, so the safety argument above is
+ * enforced by the structure rather than merely asserted: the alias is
+ * literally unreachable for any intent other than the one whose taxonomy
+ * block makes the reinterpretation correct. Applied only when the pending
+ * request does not already carry the target slot, so a real value captured
+ * on an earlier turn always wins.
+ */
+const SLOT_DETAIL_ALIASES: ReadonlyMap<string, ReadonlyMap<string, string>> = new Map([
+  ['confirm_appointment', new Map([['appointmentReference', 'dateTimeDescription']])],
+]);
+
+/**
+ * Train-7 regression — how many consecutive confirm turns may fail the slot
+ * gate before we give up and re-capture. Bounds the "ask again instead of
+ * wiping the booking" path in `confirmTurnSlotFillEvent`; a productive turn
+ * resets it (transitions.ts). Deliberately small: two clarifying re-asks is
+ * the most a readback deserves before starting over, and it matches the
+ * spirit of `MAX_INTENT_CAPTURE_RETRIES` / `MAX_DISAMBIGUATION_ATTEMPTS`.
+ */
+const MAX_CONFIRM_DETAIL_RETRIES = 2;
+
 const SLOT_DETAIL_ENTITY_KEYS: ReadonlySet<string> = new Set([
   // WHO
   'customerName',
@@ -932,41 +984,79 @@ export class InAppVoiceAdapter {
    *      home" as `schedule_inspection`, and both are describing THIS
    *      booking, not asking for a second proposal.
    *
-   *   2. SLOT OVERLAP — after filtering to `SLOT_DETAIL_ENTITY_KEYS`, at
-   *      least one usable value remains. This is what bounds gate 1: only a
-   *      creation request's own who/when/where/what vocabulary is ever
-   *      merged, so a sibling arriving with a foreign field contributes
-   *      nothing and a sibling arriving with nothing at all is a correction.
+   *   2. SLOT OVERLAP — after filtering to `SLOT_DETAIL_ENTITY_KEYS` (and
+   *      applying `SLOT_DETAIL_ALIASES`), at least one usable value
+   *      remains. This is what bounds gate 1: only a creation request's own
+   *      who/when/where/what vocabulary is ever merged, so a sibling that
+   *      arrives carrying a foreign field cannot smuggle it into the
+   *      booking.
    *
-   * Everything else — a clearly different intent (`send_invoice`,
-   * `cancel_appointment`, a lookup), or a turn that adds no booking slot —
-   * stays `correction`, the pre-D01 behavior: re-capture rather than fold a
-   * foreign request's entities into the pending one, and rather than park
-   * the caller in an unbounded readback loop.
+   * A clearly different intent (`send_invoice`, `cancel_appointment`, a
+   * lookup) fails gate 1 and is still a `correction` — re-capture rather
+   * than fold a foreign request's entities into the pending one.
+   *
+   * WHAT CHANGED IN TRAIN-7: failing gate 2 is no longer a correction.
+   * Twice running, a gate-2 miss has destroyed a multi-turn booking —
+   * `correction` clears `currentIntent` AND every slot captured so far, so
+   * one bad heuristic guess costs the caller everything they have said. The
+   * caller is answering OUR readback; the honest response to "I heard you
+   * but got nothing new out of that" is to ask again, not to silently throw
+   * the booking away. So a same-request turn with no usable slot now emits
+   * `intent_details_supplied` with EMPTY entities, which the FSM handles by
+   * staying in `intent_confirm` and re-speaking the readback.
+   *
+   * Still bounded, which is why #938 rejected this: after
+   * `MAX_CONFIRM_DETAIL_RETRIES` consecutive no-progress turns we fall back
+   * to `correction`, so an unparseable conversation cannot park the caller
+   * in `intent_confirm` forever. A productive turn resets the counter
+   * (transitions.ts), and an explicit "no" (`isNegation`) still corrects
+   * immediately without any of this.
    */
   private confirmTurnSlotFillEvent(
     session: VoiceSession,
     classification: Awaited<ReturnType<typeof classifyIntent>>,
     text: string,
   ): CallingAgentEvent {
-    const pendingIntent = session.machine.currentContext.currentIntent;
+    const context = session.machine.currentContext;
+    const pendingIntent = context.currentIntent;
     const entities = (classification.extractedEntities ?? {}) as Record<string, unknown>;
-    const newSlots = Object.fromEntries(
-      Object.entries(entities).filter(
-        ([key, value]) =>
-          SLOT_DETAIL_ENTITY_KEYS.has(key) &&
-          value !== undefined &&
-          value !== null &&
-          value !== '' &&
-          !(Array.isArray(value) && value.length === 0),
-      ),
-    );
+    const usable = (value: unknown): boolean =>
+      value !== undefined &&
+      value !== null &&
+      value !== '' &&
+      !(Array.isArray(value) && value.length === 0);
+
+    const aliases = SLOT_DETAIL_ALIASES.get(classification.intentType);
+    const newSlots: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(entities)) {
+      if (!usable(value)) continue;
+      // An alias only fires when the classifier did NOT also emit the
+      // target key this turn, and when the request has not already captured
+      // it on an earlier turn — a real value always beats an aliased one.
+      const aliased = aliases?.get(key);
+      if (
+        aliased !== undefined &&
+        !usable(entities[aliased]) &&
+        !usable(context.extractedEntities?.[aliased])
+      ) {
+        newSlots[aliased] = value;
+        continue;
+      }
+      if (SLOT_DETAIL_ENTITY_KEYS.has(key)) newSlots[key] = value;
+    }
+
     const sameRequest =
       classification.intentType === 'unknown' ||
       classification.intentType === pendingIntent ||
       (SLOT_DETAIL_SIBLING_INTENTS.has(classification.intentType) &&
         SLOT_FILL_INTENTS.has(pendingIntent ?? ''));
-    if (!sameRequest || Object.keys(newSlots).length === 0) {
+    if (!sameRequest) {
+      return { type: 'correction', newTranscript: text };
+    }
+    if (
+      Object.keys(newSlots).length === 0 &&
+      (context.confirmDetailRetryCount ?? 0) >= MAX_CONFIRM_DETAIL_RETRIES
+    ) {
       return { type: 'correction', newTranscript: text };
     }
     return { type: 'intent_details_supplied', entities: newSlots };

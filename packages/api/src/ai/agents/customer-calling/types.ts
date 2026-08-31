@@ -261,6 +261,16 @@ export interface CallingAgentContext {
     partialRefs: Record<string, string>;
   };
   pendingProposalId?: string;
+  /**
+   * Train-7 — consecutive `intent_confirm` turns that were answered with
+   * neither a yes/no nor any usable slot. Bounds the non-destructive
+   * "ask again" path (`intent_details_supplied` with empty entities) so an
+   * unparseable conversation cannot park the caller in `intent_confirm`
+   * forever; the adapter falls back to `correction` once it reaches
+   * `MAX_CONFIRM_DETAIL_RETRIES`. Reset by any productive detail turn and by
+   * the correction/confirm exits out of `intent_confirm`.
+   */
+  confirmDetailRetryCount?: number;
   retryCount: number;
   /**
    * Per-session reprompt counter for empty / low-confidence Gather turns

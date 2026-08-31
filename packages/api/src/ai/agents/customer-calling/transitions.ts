@@ -1225,7 +1225,7 @@ function transitionIntentConfirm(
           },
         },
       ],
-      updatedContext: { ...context, retryCount: 0 },
+      updatedContext: { ...context, retryCount: 0, confirmDetailRetryCount: 0 },
     };
   }
 
@@ -1236,6 +1236,27 @@ function transitionIntentConfirm(
   // merge order matches entity_resolved's: already-captured entities first,
   // this turn's values last, so a later correction of a slot wins.
   if (event.type === 'intent_details_supplied') {
+    // Train-7 — an EMPTY delta means the caller answered the readback with
+    // something we could not turn into a slot. Ask again rather than
+    // correcting: `correction` clears currentIntent AND every slot captured
+    // so far, so one bad guess costs a multi-turn booking everything (live
+    // evidence: D01 turn 2, session 12ccb578). Stay put, re-speak the
+    // readback, and count the no-progress turn — the adapter stops asking
+    // at MAX_CONFIRM_DETAIL_RETRIES and corrects then.
+    if (Object.keys(event.entities).length === 0) {
+      const noProgressCount = (context.confirmDetailRetryCount ?? 0) + 1;
+      return {
+        nextState: 'intent_confirm',
+        sideEffects: [
+          auditLog(context, 'intent_confirm', 'intent_confirm', 'intent_detail_unclear', {
+            intentType: context.currentIntent,
+            confirmDetailRetryCount: noProgressCount,
+          }),
+          ttsPlay('intent_confirm', { template: 'confirm_intent', intent: context.currentIntent }),
+        ],
+        updatedContext: { ...context, confirmDetailRetryCount: noProgressCount },
+      };
+    }
     return {
       nextState: 'entity_resolution',
       sideEffects: [
@@ -1251,6 +1272,8 @@ function transitionIntentConfirm(
       updatedContext: {
         ...context,
         extractedEntities: { ...context.extractedEntities, ...event.entities },
+        // A productive turn clears the no-progress budget.
+        confirmDetailRetryCount: 0,
         retryCount: 0,
       },
     };
@@ -1273,6 +1296,7 @@ function transitionIntentConfirm(
         // Abandon the captured turn's run id so a re-classify can't reuse it.
         lastAiRunId: undefined,
         retryCount: 0,
+        confirmDetailRetryCount: 0,
       },
     };
   }
@@ -1293,6 +1317,7 @@ function transitionIntentConfirm(
         // Abandon the captured turn's run id so a re-classify can't reuse it.
         lastAiRunId: undefined,
         retryCount: 0,
+        confirmDetailRetryCount: 0,
       },
     };
   }
