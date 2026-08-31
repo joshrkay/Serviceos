@@ -547,22 +547,16 @@ async function ensureFixtures() {
     // Round 8 — the nudge-fixture ESTIMATES are chain debris too: each run
     // that consumes the eligible one leaves it behind (nudged/accepted or
     // just stale-sent), and the accumulated set eventually overflows the
-    // resolver's candidate cap, silencing A19/A51's ask. Reject every
-    // prior nudge-fixture estimate except the current eligible one (the
-    // nudge fixture block below re-seeds a fresh eligible estimate when
-    // none remains); rejected estimates leave the candidate set once the
+    // resolver's candidate cap, silencing A19/A51's ask. Reject EVERY prior sent nudge-fixture estimate — keeping 'the newest'
+    // kept one a prior run had already nudged, so A19's first nudge tripped
+    // the 48h cooldown (sweep 13). The nudge fixture block below re-seeds a
+    // fresh eligible estimate whenever none remains; rejected estimates leave the candidate set once the
     // estimate status floor (fix/gate-honesty-all-kinds) lands.
     const staleNudgeEstimates = await rw.query(
       `UPDATE estimates e SET status = 'rejected', updated_at = now()
         WHERE e.tenant_id = $1
           AND e.estimate_number LIKE 'EST-NUDGE-%'
           AND e.status = 'sent'
-          AND e.id <> (
-            SELECT e2.id FROM estimates e2
-             WHERE e2.tenant_id = $1 AND e2.estimate_number LIKE 'EST-NUDGE-%'
-               AND e2.status = 'sent'
-             ORDER BY e2.created_at DESC LIMIT 1
-          )
         RETURNING e.id`,
       [TENANT_ID],
     );
