@@ -1658,6 +1658,99 @@ describe('D01 — new-booking routing determinism (2026-08-30 live sweep)', () =
   });
 });
 
+describe('A06 — issue_invoice routing determinism (2026-08-30 live sweep, sweep-10)', () => {
+  const chatContext = { tenantId: 't1' };
+
+  it('the exact sweep-10 utterance routes to issue_invoice with jobReference extracted, no LLM call', async () => {
+    // Live evidence: this exact utterance fell through to the generic-LLM
+    // reply path with no proposal drafted — "I have not issued invoice
+    // INV-0010. Please contact your billing department..." — a
+    // hallucination-shaped deflection, not an honest refusal.
+    const gateway = mockGateway('{"intentType":"unknown","confidence":0.3}');
+    const result = await classifyIntent('Issue invoice INV-0010', chatContext, gateway);
+    expect(result.intentType).toBe('issue_invoice');
+    expect(result.confidence).toBeGreaterThanOrEqual(TAU_INT);
+    expect(result.extractedEntities?.jobReference).toBe('INV-0010');
+    expect(gateway.complete).not.toHaveBeenCalled();
+  });
+
+  it('fires WITHOUT extendedIntents — the live miss was on plain chat, which never sets that flag', async () => {
+    for (const context of [
+      { tenantId: 't1' },
+      { tenantId: 't1', extendedIntents: true },
+    ]) {
+      const gateway = mockGateway('{"intentType":"unknown","confidence":0.2}');
+      const result = await classifyIntent('Issue invoice INV-0042', context, gateway);
+      expect(result.intentType).toBe('issue_invoice');
+      expect(result.extractedEntities?.jobReference).toBe('INV-0042');
+      expect(gateway.complete).not.toHaveBeenCalled();
+    }
+  });
+
+  it('phrase variants also short-circuit: "the invoice", lowercase document number, trailing punctuation', async () => {
+    for (const [transcript, expected] of [
+      ['Issue the invoice INV-0010', 'INV-0010'],
+      ['issue invoice inv-0010.', 'INV-0010'],
+      ['Issue invoice INV-1234!', 'INV-1234'],
+    ] as const) {
+      const gateway = mockGateway('{"intentType":"unknown","confidence":0.2}');
+      const result = await classifyIntent(transcript, chatContext, gateway);
+      expect(result.intentType, `"${transcript}" should route to issue_invoice`).toBe(
+        'issue_invoice',
+      );
+      expect(result.extractedEntities?.jobReference).toBe(expected);
+      expect(gateway.complete).not.toHaveBeenCalled();
+    }
+  });
+
+  it('negative control: no document number ("issue the invoice we just drafted") stays LLM-routed', async () => {
+    // Not anchored to a document number, so Rung 2's conversation-context
+    // resolution (IssueInvoiceTaskHandler) — not this matcher — is what
+    // must answer it. Falling through to the LLM keeps that path intact.
+    const gateway = mockGateway('{"intentType":"issue_invoice","confidence":0.9}');
+    const result = await classifyIntent('Issue the invoice we just drafted', chatContext, gateway);
+    expect(gateway.complete).toHaveBeenCalledTimes(1);
+    expect(result.intentType).toBe('issue_invoice');
+  });
+
+  it('negative control: a customer-named reference stays LLM-routed so entity extraction survives', async () => {
+    const gateway = mockGateway(
+      '{"intentType":"issue_invoice","confidence":0.9,"extractedEntities":{"customerName":"Bob Jones"}}',
+    );
+    const result = await classifyIntent('Issue the Bob Jones invoice', chatContext, gateway);
+    expect(gateway.complete).toHaveBeenCalledTimes(1);
+    expect(result.extractedEntities?.customerName).toBe('Bob Jones');
+  });
+
+  it('negative control: mentions an invoice mid-sentence without the imperative shape stays LLM-routed', async () => {
+    const gateway = mockGateway('{"intentType":"update_invoice","confidence":0.9}');
+    const result = await classifyIntent(
+      'Add a line item to invoice INV-0010',
+      chatContext,
+      gateway,
+    );
+    expect(gateway.complete).toHaveBeenCalledTimes(1);
+    expect(result.intentType).toBe('update_invoice');
+  });
+
+  it('matchIssueInvoicePhrase unit-level: exact corpus utterance matches, empty/unrelated/no-number text does not', async () => {
+    const { matchIssueInvoicePhrase } = await import(
+      '../../../src/ai/orchestration/intent-classifier'
+    );
+    expect(matchIssueInvoicePhrase('Issue invoice INV-0010')).toEqual({
+      jobReference: 'INV-0010',
+    });
+    expect(matchIssueInvoicePhrase('Issue the invoice INV-0010')).toEqual({
+      jobReference: 'INV-0010',
+    });
+    expect(matchIssueInvoicePhrase('')).toBeNull();
+    expect(matchIssueInvoicePhrase('Issue the invoice we just drafted')).toBeNull();
+    expect(matchIssueInvoicePhrase('Issue the Bob Jones invoice')).toBeNull();
+    expect(matchIssueInvoicePhrase('Add a line item to invoice INV-0010')).toBeNull();
+    expect(matchIssueInvoicePhrase('What invoices does Bob Jones have?')).toBeNull();
+  });
+});
+
 describe('intent-classifier — lookup_job_profit (P22-005)', () => {
   const tenantId = 'tenant-1';
 
