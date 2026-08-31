@@ -876,6 +876,10 @@ describe('PgEntityResolver — estimate', () => {
     expect(traversal!.sql).toMatch(/e\.tenant_id\s*=\s*\$1/);
     expect(traversal!.sql).toMatch(/e\.deleted_at IS NULL/);
     expect(traversal!.sql).toMatch(/c\.is_archived = false/);
+    // Status floor (2026-08-31) — grounded in SendEstimateNudgeExecutionHandler
+    // (only 'sent' is nudgeable) and UpdateEstimateExecutionHandler's
+    // assertEstimateEditable (unconditional 'rejected'/'expired' refusal).
+    expect(traversal!.sql).toMatch(/e\.status NOT IN \('rejected', 'expired'\)/);
     expect(traversal!.sql).toMatch(/strict_word_similarity\(\$2, c\.display_name\)/);
     // "the" is a shared stopword; "estimate" is the document noun. Both are
     // out of the needle — keeping either leaves the score under the confirm

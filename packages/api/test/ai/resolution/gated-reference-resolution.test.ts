@@ -17,9 +17,12 @@ import {
   pendingAmbiguityOf,
   clearPendingAmbiguity,
   buildDisambiguationQuestion,
+  buildUnresolvedPrompt,
+  buildGatedReferenceReply,
   isDisambiguationAnswer,
   GATED_REFERENCE_SOURCES,
 } from '../../../src/ai/resolution/gated-reference-resolution';
+import type { EntityKind } from '../../../src/ai/resolution/entity-resolver';
 import type { Proposal } from '../../../src/proposals/proposal';
 import { missingFieldsFor } from '../../../src/proposals/proposal';
 
@@ -692,5 +695,132 @@ describe('#909 buildDisambiguationQuestion — ONE question', () => {
     });
     expect(q).toContain('all under the same name');
     expect(q).toMatch(/address or phone/i);
+  });
+});
+
+// #909 generalization (2026-08-31) — buildUnresolvedPrompt is the honest
+// "not_found or overflow, no ambiguity to ask about" line for EVERY kind in
+// GATED_REFERENCE_SOURCES, not just invoiceId (#946's original, narrower
+// scope). Table-driven over the REGISTERED kinds so a future kind added to
+// GATED_REFERENCE_SOURCES is covered automatically — the whole point of
+// generalizing rather than hand-adding one kind at a time.
+describe('buildUnresolvedPrompt — every registered kind gets an honest line, never silence', () => {
+  const registeredKinds = [...new Set(Object.values(GATED_REFERENCE_SOURCES).map((s) => s.kind))];
+
+  it('every kind actually registered in GATED_REFERENCE_SOURCES is covered by this test table', () => {
+    // Guards the table below from silently going stale if a new kind is
+    // ever added to the source map without a matching row here.
+    expect(registeredKinds.sort()).toEqual(
+      ['appointment', 'catalogItem', 'customer', 'estimate', 'invoice', 'job', 'lead', 'technician'].sort(),
+    );
+  });
+
+  it.each(registeredKinds)('%s: names something concrete to supply, never a bare apology', (kind) => {
+    const prompt = buildUnresolvedPrompt(kind);
+    expect(prompt).toMatch(/^I couldn't automatically match that — reply with .+ and I'll pick it up\.$/);
+    // Never the vestigial "more detail" fallback for a kind this table
+    // actually knows about — that fallback exists only for an EntityKind
+    // with no GATED_REFERENCE_SOURCES entry at all (pending_proposal).
+    expect(prompt).not.toContain('more detail');
+  });
+
+  it('invoice and estimate ask for the document number specifically', () => {
+    expect(buildUnresolvedPrompt('invoice')).toMatch(/invoice number/i);
+    expect(buildUnresolvedPrompt('estimate')).toMatch(/estimate number/i);
+  });
+
+  it('customer, job, catalogItem, technician, and lead ask for a name', () => {
+    expect(buildUnresolvedPrompt('customer')).toMatch(/name/i);
+    expect(buildUnresolvedPrompt('job')).toMatch(/name|number/i);
+    expect(buildUnresolvedPrompt('catalogItem')).toMatch(/name/i);
+    expect(buildUnresolvedPrompt('technician')).toMatch(/name/i);
+    expect(buildUnresolvedPrompt('lead')).toMatch(/name/i);
+  });
+
+  it('appointment asks for a date/time, not a name', () => {
+    expect(buildUnresolvedPrompt('appointment')).toMatch(/date.*time|time.*date/i);
+  });
+
+  it('an EntityKind with no GATED_REFERENCE_SOURCES entry degrades to a generic (but still non-silent) line', () => {
+    const prompt = buildUnresolvedPrompt('pending_proposal' as EntityKind);
+    expect(prompt).toContain('more detail');
+    expect(prompt).not.toBe('');
+  });
+});
+
+// #909 generalization (2026-08-31, TASK 1) — end-to-end, table-driven over
+// EVERY key registered in GATED_REFERENCE_SOURCES: a gated field whose
+// resolution ends not_found OR overflow (the two collapse to the identical
+// outcome shape — see `buildGatedReferenceReply`'s own doc comment) must
+// produce the honest can't-match line, never silence; a field that ends
+// ambiguous must produce the ONE numbered question. This is the exact
+// decision `routes/assistant.ts`'s `/chat` handler makes after every draft
+// (`resolveGatedReferencesForChat` now just calls `buildGatedReferenceReply`
+// with the real resolver's outcome) — reproduced here without a resolver,
+// a proposal, or an HTTP route, over `resolveGatedReferences`'s real
+// planning/ladder logic so a future gated field is covered automatically.
+describe('buildGatedReferenceReply — every registered kind, not_found/overflow and ambiguous', () => {
+  const registeredFields = Object.keys(GATED_REFERENCE_SOURCES);
+
+  it.each(registeredFields)(
+    '%s: not_found (or overflow — same outcome shape) never goes silent',
+    async (idField) => {
+      const source = GATED_REFERENCE_SOURCES[idField];
+      const referenceField = source.payloadFields[0];
+      const proposal = draft({ [referenceField]: 'something unmatchable' }, [idField]);
+      const resolver = resolverFor(() => ({ kind: 'not_found', reference: 'something unmatchable' }));
+
+      const outcome = await resolveGatedReferences(resolver, TENANT, proposal);
+      // This is the LIVE-BROKEN behavior before #946/this generalization:
+      // `askClarification: true` reaching a silent `undefined` (the caller
+      // then falls back to the generic "Review and approve to proceed"
+      // text a fully-resolved draft gets, with zero signal anything needs
+      // the operator's input).
+      const reply = buildGatedReferenceReply(outcome, true);
+      expect(reply, `${idField} must not go silent on not_found/overflow`).toBeTruthy();
+      expect(reply).toMatch(/^I couldn't automatically match that/);
+    },
+  );
+
+  it.each(registeredFields)('%s: ambiguous asks the ONE numbered question', async (idField) => {
+    const source = GATED_REFERENCE_SOURCES[idField];
+    const referenceField = source.payloadFields[0];
+    const proposal = draft({ [referenceField]: 'Smith' }, [idField]);
+    const resolver = resolverFor(() => ({
+      kind: 'ambiguous',
+      candidates: [
+        { id: 'c1', kind: source.kind, label: 'Smith A', score: 0.9 },
+        { id: 'c2', kind: source.kind, label: 'Smith B', score: 0.85 },
+      ],
+    }));
+
+    const outcome = await resolveGatedReferences(resolver, TENANT, proposal);
+    const reply = buildGatedReferenceReply(outcome, true);
+    expect(reply, `${idField} must ask on ambiguity`).toBeTruthy();
+    expect(reply).toMatch(/^Which .+ did you mean by/);
+  });
+
+  it('askClarification:false (the chain path) never speaks, regardless of outcome', async () => {
+    const proposal = draft({ invoiceReference: 'x' }, ['invoiceId']);
+    const notFoundResolver = resolverFor(() => ({ kind: 'not_found', reference: 'x' }));
+    const notFoundOutcome = await resolveGatedReferences(notFoundResolver, TENANT, proposal);
+    expect(buildGatedReferenceReply(notFoundOutcome, false)).toBeUndefined();
+
+    const ambiguousResolver = resolverFor(() => ({
+      kind: 'ambiguous',
+      candidates: [
+        { id: 'c1', kind: 'invoice', label: 'INV-1', score: 0.9 },
+        { id: 'c2', kind: 'invoice', label: 'INV-2', score: 0.85 },
+      ],
+    }));
+    const ambiguousOutcome = await resolveGatedReferences(ambiguousResolver, TENANT, proposal);
+    expect(buildGatedReferenceReply(ambiguousOutcome, false)).toBeUndefined();
+  });
+
+  it('a fully-resolved outcome says nothing (the caller\'s existing reply stands)', async () => {
+    const proposal = draft({ invoiceReference: 'INV-0001' }, ['invoiceId']);
+    const resolver = resolverFor(() => resolvedAs('inv-1', 'invoice'));
+    const outcome = await resolveGatedReferences(resolver, TENANT, proposal);
+    expect(buildGatedReferenceReply(outcome, true)).toBeUndefined();
   });
 });

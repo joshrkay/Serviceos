@@ -81,7 +81,43 @@ describe('DATA-01/02: jobs + audit_events tenant composite indexes', () => {
     // costs would be.
     it('EXPLAIN for the technicianId job-list filter uses idx_jobs_tenant_assigned_technician', async () => {
       const tenant = await createTestTenant(pool);
-      await seedJob(pool, tenant.tenantId, tenant.userId);
+      // #909 CI blocker (2026-08-31) — root cause + fix. `enable_seqscan =
+      // off` only rules OUT sequential scans; it does NOT force the
+      // COMPOSITE index specifically over idx_jobs_tenant (tenant_id
+      // alone) + an in-memory Filter on assigned_technician_id — both are
+      // "index-capable" plans for this predicate. With the OLD fixture
+      // (a single seeded job), a match via EITHER index costs the planner
+      // about the same, so the choice comes down to whatever `jobs`
+      // table-wide stats (assigned_technician_id's null_frac/n_distinct)
+      // ANALYZE last happened to sample — and `getSharedTestDb()` is ONE
+      // Postgres instance for the entire `vitest run`, so those stats
+      // drift with whatever OTHER integration tests seeded into `jobs`
+      // before this one ran. That made the assertion a coin flip: green
+      // in isolation (nothing else had touched `jobs` yet) and on most
+      // full runs, but reproducibly red on this PR's CI once its own new
+      // fixtures (the A19 chat-entity-resolution work) shifted that
+      // accumulated state enough to tip the flip.
+      //
+      // An explicit ANALYZE alone does not fix this — it makes the
+      // planner's estimate accurate, and an accurate estimate for "1
+      // seeded row, no real competing rows on this tenant" is exactly
+      // what made idx_jobs_tenant (the smaller, simpler index) a
+      // legitimate, sometimes-cheaper choice; the assertion was brittle
+      // BY DESIGN on a single-row table, independent of stats freshness.
+      // The actual fix (mirroring DATA-02's audit_events fix immediately
+      // below, same root cause) is to seed a query shape where the
+      // composite index is genuinely, decisively superior: many jobs on
+      // ONE tenant, only one of them assigned to the technician EXPLAIN
+      // filters for. idx_jobs_tenant + Filter must then visit and reject
+      // every OTHER job on that tenant; the composite index narrows
+      // straight to the one match via its second key column — the real
+      // difference DATA-01 exists to make (`GET /api/jobs?technicianId=`
+      // on a shop with many jobs, most unassigned or assigned elsewhere).
+      // ANALYZE is kept: correct hygiene, and it's what makes the now-
+      // accurate row/selectivity estimate for THIS shape land where it
+      // should regardless of any other test's leftover `jobs` stats.
+      await seedManyJobsOneAssignedToTechnician(pool, tenant.tenantId, tenant.userId, 25);
+      await pool.query('ANALYZE jobs');
 
       const client = await pool.connect();
       try {
@@ -145,7 +181,26 @@ async function explain(
   return rows.map((r: { 'QUERY PLAN': string }) => r['QUERY PLAN']).join('\n');
 }
 
-async function seedJob(pool: Pool, tenantId: string, technicianId: string): Promise<string> {
+/**
+ * ONE customer + location, then `totalJobs` jobs on that tenant — only the
+ * FIRST is assigned to `technicianId` (the id the technicianId-filter test
+ * above EXPLAINs for); the rest are unassigned (`assigned_technician_id
+ * IS NULL`, the ordinary "nobody dispatched yet" state, not a fabricated
+ * one — see migration 244's own doc comment on why the composite index is
+ * plain, not partial: it also serves an IS NULL/IS NOT NULL scan). This
+ * shape is what makes the composite index decisively cheaper than
+ * idx_jobs_tenant + Filter (which must visit and reject every other job on
+ * the tenant) — see the doc comment on the test above for why a single
+ * seeded job made that comparison an unreliable coin flip instead.
+ * Batched via generate_series (mirrors seedAuditEvents below) so 25+ rows
+ * stay fast to seed.
+ */
+async function seedManyJobsOneAssignedToTechnician(
+  pool: Pool,
+  tenantId: string,
+  technicianId: string,
+  totalJobs: number,
+): Promise<void> {
   const customerId = crypto.randomUUID();
   await pool.query(
     `INSERT INTO customers (id, tenant_id, first_name, last_name, display_name, created_by)
@@ -160,15 +215,17 @@ async function seedJob(pool: Pool, tenantId: string, technicianId: string): Prom
     [locationId, tenantId, customerId, '1 Main St', 'Phoenix', 'AZ', '85001', 'US'],
   );
 
-  const jobId = crypto.randomUUID();
-  const jobNumber = `JOB-${jobId.slice(0, 8)}`;
   await pool.query(
     `INSERT INTO jobs (id, tenant_id, customer_id, location_id, job_number, summary,
        status, priority, assigned_technician_id, created_by, created_at, updated_at)
-     VALUES ($1, $2, $3, $4, $5, $6, 'scheduled', 'normal', $7, $8, NOW(), NOW())`,
-    [jobId, tenantId, customerId, locationId, jobNumber, 'Test job', technicianId, technicianId],
+     SELECT gen_random_uuid(), $1, $2, $3,
+            'JOB-' || substr(gen_random_uuid()::text, 1, 8),
+            'Test job', 'scheduled', 'normal',
+            CASE WHEN g = 0 THEN $4::uuid ELSE NULL END,
+            $4, NOW(), NOW()
+       FROM generate_series(0, $5 - 1) AS g`,
+    [tenantId, customerId, locationId, technicianId, totalJobs],
   );
-  return jobId;
 }
 
 async function seedAuditEvents(pool: Pool, tenantId: string, count: number): Promise<void> {

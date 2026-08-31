@@ -103,6 +103,7 @@ import {
   pendingAmbiguityOf,
   clearPendingAmbiguity,
   buildDisambiguationQuestion,
+  buildGatedReferenceReply,
   isDisambiguationAnswer,
   PENDING_AMBIGUITY_KEY,
 } from '../ai/resolution/gated-reference-resolution';
@@ -1035,39 +1036,11 @@ async function resolveGatedReferencesForChat(
     });
   }
 
-  if (outcome.ambiguity && askClarification) {
-    return buildDisambiguationQuestion(outcome.ambiguity);
-  }
-
-  // Fresh live evidence (2026-08-30, sweep 9/10, A20 send_payment_reminder /
-  // A21 apply_late_fee) — a customer-name `invoiceReference` can leave
-  // `invoiceId` in `unresolved` with NO ambiguity to ask about: the shared
-  // AI-catalog-sweep fixture customer's invoices accumulate one per sweep
-  // round (A01's create_invoice chain never voids or archives them between
-  // runs, unlike the appointment fixture's own #940-942 cleanup), so by
-  // round 9-10 the customer-name traversal's overflow guard
-  // (`MAX_INVOICE_CANDIDATES`, pg-entity-resolver.ts) — a deliberate,
-  // repo-wide "escalate rather than guess" refusal, not a bug — trips and
-  // `resolveInvoice` answers `not_found` instead of `ambiguous`. That is
-  // honest at the resolver layer (it truly cannot offer a safe picker), but
-  // the CHAT REPLY above degraded to the identical "Review and approve to
-  // proceed" text a fully-resolved draft gets, so the operator had no signal
-  // anything needed their input — D-029's answer turn never gets a question
-  // to answer, and the gate stays forever (`approve` 400s on `invoiceId`
-  // every time). Unlike appointmentId/jobId (bare UUIDs with no memorable
-  // proxy), invoiceId already has a document-number FAST PATH
-  // (`resolveExactDocumentNumber`) an operator can trivially satisfy by
-  // reading a number off the invoice, so a plain-language nudge — not a
-  // numbered picker, which the resolver correctly refused to fabricate — is
-  // both safe (never guesses; D-004 untouched) and actionable on THIS
-  // surface. Scoped to `invoiceId` only: estimateId shares the same
-  // document-number fast path and could get the identical treatment, but
-  // that is not what this fix was asked to close.
-  if (askClarification && outcome.unresolved.includes('invoiceId') && !outcome.ambiguity) {
-    return "I couldn't automatically match that to one invoice — reply with the invoice number (e.g. \"INV-1005\") and I'll pick it up.";
-  }
-
-  return undefined;
+  // The actual "what does the operator see" decision is a PURE function of
+  // the outcome (ambiguity ask, honest can't-match line, or nothing) — see
+  // `buildGatedReferenceReply`'s own doc comment for why it lives in the
+  // core module rather than here.
+  return buildGatedReferenceReply(outcome, askClarification);
 }
 
 /**

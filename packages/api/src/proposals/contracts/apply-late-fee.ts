@@ -19,9 +19,22 @@ import { z } from 'zod';
  * ledger's accrual-period key (`LATE_FEE_ONE_TIME_KEY` = "initial" for the
  * current one-time-fee policy) so the execution + audit trail ties back to
  * the ledger row that gated this proposal.
+ *
+ * `invoiceReference` (#909, 2026-08-31) — the spoken/typed invoice
+ * reference `ApplyLateFeeTaskHandler` (ai/tasks/voice-extended-tasks.ts,
+ * mirrors `SendPaymentReminderTaskHandler` exactly) already writes onto the
+ * payload whenever `invoiceId` doesn't resolve at draft time. It was never
+ * declared here — same undeclared-field gap `sendPaymentReminderPayloadSchema`
+ * had (see that contract's identical note): invisible on the draft-time
+ * happy path (no Zod validation there), but a real risk on any `editProposal`
+ * edit, which re-validates the full merged payload and strips undeclared
+ * keys. Read by `GATED_REFERENCE_SOURCES.invoiceId.payloadFields`
+ * (ai/resolution/gated-reference-resolution.ts) so the post-draft chat loop
+ * can resolve-or-ask on it.
  */
 export const applyLateFeePayloadSchema = z.object({
   invoiceId: z.string().uuid(),
+  invoiceReference: z.string().optional(),
   /** Late fee to apply, in integer cents. */
   feeCents: z.number().int().positive(),
   /** Dunning ledger accrual-period key (e.g. "initial"). */
