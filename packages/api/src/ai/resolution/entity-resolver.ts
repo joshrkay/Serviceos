@@ -41,7 +41,21 @@ export type EntityKind =
   // never clear their own approval gate on ANY surface: the gate had no
   // resolver behind it. Won/lost leads are excluded — see
   // `PgEntityResolver.resolveLead`.
-  | 'lead';
+  | 'lead'
+  // #909 (live sweeps 9/10) — a priced line in the tenant's catalog, named
+  // by its own name ("the QA Sweep Smart Thermostat Install price").
+  // `update_catalog_item` gates on a resolved `catalogItemId` while its
+  // drafting handler (UpdateCatalogItemTaskHandler, ai/tasks/voice-
+  // extended-tasks.ts) can only ever emit a free-text reference, so without
+  // this kind that gate had no resolver behind it on any surface. Distinct
+  // from `ai/resolution/catalog-resolver.ts`'s `resolveLineItemToCatalog` —
+  // that one grounds an LLM-drafted LINE ITEM's price on an invoice/estimate
+  // (its own scoring model, MAX_CANDIDATES=3, price-tie-break); this kind
+  // answers "which catalog ROW does this reference mean" for the #909
+  // gated-reference chat loop, on the SAME τ_ent contract every other kind
+  // here uses. Archived items are excluded — see `PgEntityResolver.
+  // resolveCatalogItem`.
+  | 'catalogItem';
 
 /**
  * Confidence threshold above which a match is considered "resolved"

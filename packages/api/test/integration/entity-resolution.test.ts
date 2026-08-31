@@ -24,6 +24,8 @@ import { PgEstimateRepository } from '../../src/estimates/pg-estimate';
 import { createEstimate } from '../../src/estimates/estimate';
 import { PgInvoiceRepository } from '../../src/invoices/pg-invoice';
 import { createInvoice } from '../../src/invoices/invoice';
+import { PgCatalogItemRepository } from '../../src/catalog/pg-catalog-item';
+import { createCatalogItem } from '../../src/catalog/catalog-item';
 import { buildLineItem } from '../../src/shared/billing-engine';
 import { PgAssignmentRepository } from '../../src/appointments/pg-assignment';
 import { assignTechnician } from '../../src/appointments/assignment';
@@ -2268,6 +2270,198 @@ describe('Postgres integration — entity resolution (P8)', () => {
           if (result.kind === 'resolved') expect(result.candidate.id).toBe(draft.id);
         });
       });
+    });
+  });
+
+  // #909 (live sweeps 9/10) — catalogItemId gate had no resolver behind it
+  // at all until now. `resolveLineItemToCatalog` (ai/resolution/
+  // catalog-resolver.ts) is pinned by its own real-Postgres-independent unit
+  // suite (it is a pure function over a preloaded array); this pins the NEW
+  // SQL specifically — the exact live sweep's own duplicate-name shape
+  // (`add_catalog_item` minting a fresh identically-named row every run).
+  describe('catalogItem kind (#909, live sweeps 9/10)', () => {
+    let catalogRepo: PgCatalogItemRepository;
+
+    beforeAll(() => {
+      catalogRepo = new PgCatalogItemRepository(pool);
+    });
+
+    async function seedCatalogItem(
+      tenantId: string,
+      name: string,
+      unitPriceCents: number,
+      createdBy: string,
+    ): Promise<string> {
+      const item = await catalogRepo.create(
+        createCatalogItem({
+          tenantId,
+          name,
+          category: 'Labor',
+          unit: 'each',
+          unitPriceCents,
+        }),
+      );
+      return item.id;
+    }
+
+    it('an exact name match resolves with score 1.0', async () => {
+      // A fresh tenant per test — NOT the file's shared `tenant` fixture —
+      // so this suite's own duplicate-name tests below can never pollute
+      // (or be polluted by) this one's candidate count.
+      const seed = await createTestTenant(pool);
+      const id = await seedCatalogItem(
+        seed.tenantId,
+        'QA Sweep Smart Thermostat Install',
+        38500,
+        seed.userId,
+      );
+
+      const result = await resolver.resolve({
+        tenantId: seed.tenantId,
+        reference: 'QA Sweep Smart Thermostat Install',
+        kind: 'catalogItem',
+      });
+
+      expect(result.kind).toBe('resolved');
+      if (result.kind === 'resolved') {
+        expect(result.candidate.id).toBe(id);
+        expect(result.candidate.score).toBe(1);
+        expect(result.candidate.hint).toBe('$385.00');
+      }
+    });
+
+    it('a partial reference ("the thermostat install") still resolves via strict_word_similarity', async () => {
+      const seed = await createTestTenant(pool);
+      const id = await seedCatalogItem(
+        seed.tenantId,
+        'QA Sweep Smart Thermostat Install',
+        38500,
+        seed.userId,
+      );
+
+      const result = await resolver.resolve({
+        tenantId: seed.tenantId,
+        reference: 'the thermostat install',
+        kind: 'catalogItem',
+      });
+
+      expect(result.kind).toBe('resolved');
+      if (result.kind === 'resolved') expect(result.candidate.id).toBe(id);
+    });
+
+    // The exact live-sweep shape: `add_catalog_item` mints a fresh, IDENTICALLY
+    // named row every sweep round with nothing to quarantine the prior
+    // rounds' copies. The resolver must ask, never guess which specific row
+    // "89 dollars" was meant for.
+    it('two duplicate-named ACTIVE items resolve as ambiguous, never a guess', async () => {
+      const seed = await createTestTenant(pool);
+      const first = await seedCatalogItem(
+        seed.tenantId,
+        'QA Sweep Smart Thermostat Install',
+        38500,
+        seed.userId,
+      );
+      const second = await seedCatalogItem(
+        seed.tenantId,
+        'QA Sweep Smart Thermostat Install',
+        8900,
+        seed.userId,
+      );
+
+      const result = await resolver.resolve({
+        tenantId: seed.tenantId,
+        reference: 'QA Sweep Smart Thermostat Install',
+        kind: 'catalogItem',
+      });
+
+      expect(result.kind).toBe('ambiguous');
+      if (result.kind === 'ambiguous') {
+        expect(result.candidates.map((c) => c.id).sort()).toEqual([first, second].sort());
+        // The one thing that tells two identically-named rows apart in a
+        // picker a human can read — see gated-reference-resolution.ts's
+        // `buildDisambiguationQuestion` same-name/distinct-hint branch.
+        expect(result.candidates.map((c) => c.hint).sort()).toEqual(['$385.00', '$89.00'].sort());
+      }
+    });
+
+    // An ARCHIVED duplicate is exactly what quarantining a stale sweep-run
+    // copy looks like (see this file's own header note + the round's
+    // report): `archive()` is the same repo method the Catalog screen's own
+    // archive action calls, setting `archived_at`. Once archived, a
+    // duplicate must stop contributing to the ambiguity — the resolver
+    // should cleanly resolve the one still-active row.
+    it('an ARCHIVED duplicate drops out — resolving cleanly to the one active row', async () => {
+      const seed = await createTestTenant(pool);
+      const active = await seedCatalogItem(
+        seed.tenantId,
+        'QA Sweep Smart Thermostat Install',
+        8900,
+        seed.userId,
+      );
+      const staleId = await seedCatalogItem(
+        seed.tenantId,
+        'QA Sweep Smart Thermostat Install',
+        38500,
+        seed.userId,
+      );
+      const archived = await catalogRepo.archive(seed.tenantId, staleId);
+      expect(archived).toBe(true);
+
+      const result = await resolver.resolve({
+        tenantId: seed.tenantId,
+        reference: 'QA Sweep Smart Thermostat Install',
+        kind: 'catalogItem',
+      });
+
+      expect(result.kind).toBe('resolved');
+      if (result.kind === 'resolved') expect(result.candidate.id).toBe(active);
+    });
+
+    it('no match at all returns not_found', async () => {
+      const seed = await createTestTenant(pool);
+      await seedCatalogItem(seed.tenantId, 'Water heater install', 145000, seed.userId);
+
+      const result = await resolver.resolve({
+        tenantId: seed.tenantId,
+        reference: 'flux capacitor',
+        kind: 'catalogItem',
+      });
+
+      expect(result.kind).toBe('not_found');
+    });
+
+    it('never resolves a catalog item across tenants', async () => {
+      const seed = await createTestTenant(pool);
+      await seedCatalogItem(
+        seed.tenantId,
+        'QA Sweep Smart Thermostat Install',
+        8900,
+        seed.userId,
+      );
+      const stranger = await createTestTenant(pool);
+
+      const result = await resolver.resolve({
+        tenantId: stranger.tenantId,
+        reference: 'QA Sweep Smart Thermostat Install',
+        kind: 'catalogItem',
+      });
+
+      expect(result.kind).toBe('not_found');
+    });
+
+    it('a customer with MORE same-named items than a picker can show escalates instead of offering an arbitrary five', async () => {
+      const seed = await createTestTenant(pool);
+      for (let i = 0; i < 6; i++) {
+        await seedCatalogItem(seed.tenantId, 'Filter replacement', 4500, seed.userId);
+      }
+
+      const result = await resolver.resolve({
+        tenantId: seed.tenantId,
+        reference: 'Filter replacement',
+        kind: 'catalogItem',
+      });
+
+      expect(result.kind).toBe('not_found');
     });
   });
 

@@ -39,6 +39,8 @@ import { PgCustomerRepository } from '../../src/customers/pg-customer';
 import { PgLocationRepository } from '../../src/locations/pg-location';
 import { PgAuditRepository } from '../../src/audit/pg-audit';
 import { PgLeadRepository } from '../../src/leads/pg-lead';
+import { PgCatalogItemRepository } from '../../src/catalog/pg-catalog-item';
+import { createCatalogItem } from '../../src/catalog/catalog-item';
 import { createAssistantRouter } from '../../src/routes/assistant';
 import type { AuthenticatedRequest } from '../../src/middleware/auth';
 import type { LLMGateway, LLMResponse } from '../../src/ai/gateway/gateway';
@@ -94,6 +96,7 @@ describe('Integration — #909 chat entity resolution (real Postgres + real reso
   let locationRepo: PgLocationRepository;
   let auditRepo: PgAuditRepository;
   let leadRepo: PgLeadRepository;
+  let catalogRepo: PgCatalogItemRepository;
 
   beforeAll(async () => {
     pool = await getSharedTestDb();
@@ -105,6 +108,7 @@ describe('Integration — #909 chat entity resolution (real Postgres + real reso
     locationRepo = new PgLocationRepository(pool);
     auditRepo = new PgAuditRepository(pool);
     leadRepo = new PgLeadRepository(pool);
+    catalogRepo = new PgCatalogItemRepository(pool);
     setSupervisorPresenceLoader(async () => true);
   });
 
@@ -361,6 +365,7 @@ describe('Integration — #909 chat entity resolution (real Postgres + real reso
         jobRepo,
         customerRepo,
         auditRepo,
+        catalogRepo,
         tenantTimezoneResolver: async () => TZ,
       }),
     );
@@ -1027,6 +1032,154 @@ describe('Integration — #909 chat entity resolution (real Postgres + real reso
       const [gated] = await proposalRepo.findByTenant(seed.tenantId);
       expect(missingFieldsFor(gated)).toEqual(['invoiceId']);
       expect((gated.sourceContext as Record<string, unknown>).pendingEntityAmbiguity).toBeUndefined();
+    });
+  });
+
+  // ───────────────────────────────────────────────────────────────────────
+  // #909 (live sweeps 9/10) — catalog item resolution, update_catalog_item.
+  //
+  // Root cause: UpdateCatalogItemTaskHandler (ai/tasks/voice-extended-tasks.ts)
+  // dropped BOTH the spoken item reference and the spoken price from the
+  // payload whenever its own draft-time resolution (resolveLineItemToCatalog)
+  // could not confidently pick a row — `payload.proposedUnitPriceCents` was
+  // written ONLY inside `if (resolvedItem)`, so a genuinely valid spoken
+  // price vanished with no trace and no gate to explain the loss. Separately,
+  // `catalogItemId` had no entry in GATED_REFERENCE_SOURCES at all — a gate
+  // with no resolver behind it (#909's own defect class), so even a
+  // preserved reference had nowhere to go on chat. These tests pin the exact
+  // live shape: proposal 4d370bef-08a6-4745-93e0-df3140fc7638 (tenant
+  // a948cc66), "Raise the QA Sweep Smart Thermostat Install price to 89
+  // dollars", against the sweep's own fixture defect — `add_catalog_item`
+  // mints a fresh, identically-named catalog row every run with nothing to
+  // quarantine the prior runs' copies, so by round 9/10 the reference is
+  // genuinely ambiguous, not merely unresolved.
+  // ───────────────────────────────────────────────────────────────────────
+  describe('catalog item resolution — update_catalog_item (live sweep A36, #909)', () => {
+    async function seedCatalogItemFor(
+      seed: Seed,
+      name: string,
+      unitPriceCents: number,
+    ): Promise<string> {
+      const item = await catalogRepo.create(
+        createCatalogItem({
+          tenantId: seed.tenantId,
+          name,
+          category: 'Labor',
+          unit: 'each',
+          unitPriceCents,
+        }),
+      );
+      return item.id;
+    }
+
+    it('the exact live utterance against a DUPLICATE-named catalog (sweep 9/10 shape): asks instead of dropping the price silently', async () => {
+      const seed = await seedTenant();
+      const first = await seedCatalogItemFor(seed, 'QA Sweep Smart Thermostat Install', 38500);
+      const second = await seedCatalogItemFor(seed, 'QA Sweep Smart Thermostat Install', 8900);
+
+      const proposalRepo = new InMemoryProposalRepository();
+      const app = buildApp(
+        seed,
+        proposalRepo,
+        // ONE classifier script entry: the answer turn must not reclassify.
+        scriptedGateway([
+          classifierReply('update_catalog_item', {
+            catalogItemReference: 'QA Sweep Smart Thermostat Install',
+            unitPriceCents: 8900,
+          }),
+        ]),
+      );
+      const conversationId = crypto.randomUUID();
+
+      const res = await supertest(app)
+        .post('/api/assistant/chat')
+        .send({
+          messages: [
+            {
+              role: 'user',
+              content: 'Raise the QA Sweep Smart Thermostat Install price to 89 dollars',
+            },
+          ],
+          conversationId,
+        });
+      expect(res.status).toBe(200);
+      // The live-broken behavior this test pins RED against: before the
+      // fix, payload carried nothing but `_meta` and the reply never asked
+      // anything — approve just 400'd forever with no way to tell why. Both
+      // candidates share a name, so this hits `buildDisambiguationQuestion`'s
+      // same-name branch ("Which one?"), not the distinct-names phrasing.
+      expect(res.body.message.content).toContain('matching "QA Sweep Smart Thermostat Install"');
+      expect(res.body.message.content).toContain('Which one?');
+
+      const [gated] = await proposalRepo.findByTenant(seed.tenantId);
+      expect(missingFieldsFor(gated)).toEqual(['catalogItemId']);
+      expect(gated.payload.itemReference).toBe('QA Sweep Smart Thermostat Install');
+      expect(gated.payload.proposedUnitPriceCents).toBe(8900);
+      const pending = (gated.sourceContext as Record<string, unknown>).pendingEntityAmbiguity as
+        | Record<string, unknown>
+        | undefined;
+      expect(pending).toBeTruthy();
+      const candidateIds = (pending!.candidates as Array<{ id: string }>).map((c) => c.id).sort();
+      expect(candidateIds).toEqual([first, second].sort());
+      await expect(
+        approveProposal(proposalRepo, seed.tenantId, gated.id, seed.userId, 'owner'),
+      ).rejects.toThrow(/catalogItemId/);
+
+      // The two candidates share a name, so `buildDisambiguationQuestion`'s
+      // same-name branch must fall back to the one thing that DOES tell
+      // them apart — price — rather than the customer-shaped "address or
+      // phone number" prompt.
+      expect(res.body.message.content).toMatch(/\$385\.00/);
+      expect(res.body.message.content).toMatch(/\$89\.00/);
+      expect(res.body.message.content).not.toMatch(/address or phone/i);
+
+      // Answer by ordinal — `parseOrdinalIndex`/`matchDisambiguationFollowUp`
+      // resolve "1"/"2" deterministically regardless of which candidate a
+      // tied `ORDER BY score DESC` happened to return first, so this does
+      // not assert WHICH of the two same-priced-looking-but-not rows won —
+      // only that the gate lifts to ONE of them and the proposal then
+      // approves, D-029's answer turn closed.
+      const secondRes = await supertest(app)
+        .post('/api/assistant/chat')
+        .send({ messages: [{ role: 'user', content: '1' }], conversationId });
+      expect(secondRes.status).toBe(200);
+
+      const [resolved] = await proposalRepo.findByTenant(seed.tenantId);
+      expect([first, second]).toContain(resolved.payload.catalogItemId);
+      expect(missingFieldsFor(resolved)).toEqual([]);
+      await expect(
+        approveProposal(proposalRepo, seed.tenantId, resolved.id, seed.userId, 'owner'),
+      ).resolves.toBeTruthy();
+    });
+
+    it('a unique item name resolves the gate unambiguously — no ask needed', async () => {
+      const seed = await seedTenant();
+      const itemId = await seedCatalogItemFor(seed, 'AC diagnostic fee', 7900);
+
+      const proposalRepo = new InMemoryProposalRepository();
+      const app = buildApp(
+        seed,
+        proposalRepo,
+        scriptedGateway([
+          classifierReply('update_catalog_item', {
+            catalogItemReference: 'AC diagnostic fee',
+            unitPriceCents: 8900,
+          }),
+        ]),
+      );
+
+      const res = await supertest(app)
+        .post('/api/assistant/chat')
+        .send({ messages: [{ role: 'user', content: 'Raise the AC diagnostic fee to 89 dollars' }] });
+      expect(res.status).toBe(200);
+
+      const [resolved] = await proposalRepo.findByTenant(seed.tenantId);
+      expect(resolved.payload.catalogItemId).toBe(itemId);
+      expect(resolved.payload.proposedUnitPriceCents).toBe(8900);
+      expect(missingFieldsFor(resolved)).toEqual([]);
+      await expect(
+        approveProposal(proposalRepo, seed.tenantId, resolved.id, seed.userId, 'owner'),
+      ).resolves.toBeTruthy();
     });
   });
 });

@@ -2438,12 +2438,14 @@ export class UpdateCatalogItemTaskHandler implements TaskHandler {
           explanationParts.push(
             `No confident single match for "${reference}" — edit the proposal with the correct catalog item.`,
           );
-          // Not `EntityCandidate[]` — 'catalogItem' isn't a member of
-          // `EntityKind` (entity-resolver.ts), which is out of this task's
-          // scope to extend. Same field SHAPE (id/kind/label/hint/score) as
-          // the AC-3/B2 pattern for display purposes only; this type has no
-          // resolve-entity.ts redraft handler, so nothing depends on `kind`
-          // being a real EntityKind member.
+          // 'catalogItem' is NOW a real `EntityKind` (#909, GATED_REFERENCE_
+          // SOURCES.catalogItemId) — but this shape stays exactly what it was
+          // (id/kind/label/hint/score, display-only): this type still has no
+          // resolve-entity.ts redraft handler, so a chat operator answers
+          // through the post-draft #909 loop below instead (payload.
+          // itemReference → PgEntityResolver.resolveCatalogItem), not through
+          // this candidate list. Kept for the review-card UI picker, which
+          // predates and is independent of the chat answer path.
           sourceContext = {
             entityCandidates: resolution.candidates.map((c) => ({
               id: c.item.id,
@@ -2459,6 +2461,22 @@ export class UpdateCatalogItemTaskHandler implements TaskHandler {
           explanationParts.push(`No catalog item matches "${reference}".`);
         }
       }
+    }
+
+    // #909 — a reference that did NOT resolve to a real row must still ride
+    // the payload as the free text a resolver can work from, mirroring
+    // PR #935's A33 verify-or-gate pattern (create-appointment-task.ts): a
+    // malformed/unresolved id is never persisted, and the raw text survives
+    // on the field `GATED_REFERENCE_SOURCES.catalogItemId.payloadFields`
+    // reads (gated-reference-resolution.ts) so the post-draft chat loop
+    // (routes/assistant.ts's resolveGatedReferencesForChat, already called
+    // unconditionally for every registry-dispatched proposal) picks it up
+    // with no further wiring. Root cause this closes (live sweeps 9 and 10,
+    // proposal 4d370bef-...): without this, an unresolved reference left
+    // `missingFields: ['catalogItemId']` with literally nothing on the
+    // payload a resolver — or a human reading the card — could act on.
+    if (!resolvedItem && reference) {
+      payload.itemReference = reference;
     }
 
     // Only a stated, non-negative, in-range integer cents value is a real
@@ -2518,6 +2536,22 @@ export class UpdateCatalogItemTaskHandler implements TaskHandler {
       // change" value the schema's required field accepts) rather than a
       // fabricated number.
       payload.proposedUnitPriceCents = requestedPriceCents ?? resolvedItem.unitPriceCents;
+    } else if (requestedPriceCents !== undefined) {
+      // #909 root cause (live sweeps 9/10) — a REAL, validated, in-range
+      // spoken price must not vanish just because the item ALSO failed to
+      // resolve. Before this branch, `proposedUnitPriceCents` was written
+      // ONLY inside `if (resolvedItem)`, so an unresolved reference dropped
+      // it from BOTH the payload AND `missing` (the two `if`/`else if`
+      // blocks above only push the gate when the price itself was invalid
+      // or absent — a valid price does neither, so nothing signaled the
+      // loss). "Raise the QA Sweep Smart Thermostat Install price to 89
+      // dollars" against a not-yet-resolved item drafted a proposal whose
+      // payload carried NOTHING but `_meta` — no item reference (fixed
+      // above), no price. There is no `currentUnitPriceCents` to report
+      // here (no resolved item to read it from); the operator sees the
+      // spoken figure once they supply `catalogItemId` and re-approves, or
+      // once the post-draft resolver fills it for them.
+      payload.proposedUnitPriceCents = requestedPriceCents;
     }
 
     if (hasName) {

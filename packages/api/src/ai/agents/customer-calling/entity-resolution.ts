@@ -371,6 +371,11 @@ const REF_KEY_BY_KIND: Record<EntityKind, string | undefined> = {
   appointment: 'appointmentId',
   technician: 'technicianId',
   lead: 'leadId',
+  // #909 — catalogItemId is gated only via the post-draft chat loop
+  // (GATED_REFERENCE_SOURCES.catalogItemId); `update_catalog_item` is not a
+  // member of any of `planVoiceEntityLookups`'s intent sets above, so this
+  // entry exists solely to keep this Record exhaustive over `EntityKind`.
+  catalogItem: 'catalogItemId',
   pending_proposal: undefined,
 };
 

@@ -13,9 +13,12 @@ import {
 // minted for it (see learning/entity-aliases/entity-alias.ts's
 // `EntityAliasKind`), so a lead reference has no alias row to hit and
 // delegates straight through to the trigram resolver. Adding it here without
-// an alias kind behind it would be dead configuration (#909).
+// an alias kind behind it would be dead configuration (#909). `catalogItem`
+// is excluded for the identical reason — `ENTITY_ALIAS_ENTITY_KINDS`
+// (@ai-service-os/shared) has no 'catalogItem' member, so there is no
+// tenant_entity_aliases row a catalog reference could ever hit.
 const ENTITY_LABEL_QUERIES: Record<
-  Exclude<EntityKind, 'pending_proposal' | 'estimate' | 'lead'>,
+  Exclude<EntityKind, 'pending_proposal' | 'estimate' | 'lead' | 'catalogItem'>,
   { table: string; labelColumn: string; extraWhere?: string }
 > = {
   customer: {
@@ -65,6 +68,9 @@ export class AliasFirstEntityResolver implements EntityResolver {
       input.kind === 'estimate' ||
       // #909 — no `lead` alias kind is minted, so there is nothing to look up.
       input.kind === 'lead' ||
+      // #909 (live sweeps 9/10) — no `catalogItem` alias kind is minted
+      // either, same reason as `lead`/`estimate` above.
+      input.kind === 'catalogItem' ||
       !input.reference ||
       input.reference.trim() === ''
     ) {
@@ -97,7 +103,7 @@ export class AliasFirstEntityResolver implements EntityResolver {
 
   private async loadGroundedCandidate(
     tenantId: string,
-    kind: Exclude<EntityKind, 'pending_proposal' | 'estimate' | 'lead'>,
+    kind: Exclude<EntityKind, 'pending_proposal' | 'estimate' | 'lead' | 'catalogItem'>,
     entityId: string,
     sourceAlias: string,
   ): Promise<EntityCandidate | null> {
