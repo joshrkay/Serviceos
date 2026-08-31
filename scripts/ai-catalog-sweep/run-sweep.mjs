@@ -528,6 +528,22 @@ async function ensureFixtures() {
       [TENANT_ID, CUSTOMER_ID],
     );
     summary.push(`invoices: voided ${staleInvoices.rowCount ?? 0} beyond the seed pair (chain-root reset)`);
+    // Round 7c — NEW_CATALOG_ITEM ("QA Sweep Smart Thermostat Install") is
+    // the create_catalog_item chain root (A44 mints one per run) and the
+    // new catalogItem resolver (fix/catalog-item-gate) excludes only
+    // archived_at IS NOT NULL rows, so prior copies must be ARCHIVED (the
+    // same operation the Catalog screen's archive action performs — never
+    // renamed or deleted; catalog_items has no created_by column). Archive
+    // all active copies at bootstrap; this run's A44 creates the one live
+    // item its own later rows reference.
+    const staleCatalog = await rw.query(
+      `UPDATE catalog_items SET archived_at = now(), updated_at = now()
+        WHERE tenant_id = $1 AND archived_at IS NULL
+          AND name = 'QA Sweep Smart Thermostat Install'
+        RETURNING id`,
+      [TENANT_ID],
+    );
+    summary.push(`catalog_items: archived ${staleCatalog.rowCount ?? 0} prior chain-root copies`);
     // Same design one level down: NEW_JOB_SUMMARY ("QA Sweep Furnace
     // Inspection") is a per-run fabricated chain-root JOB, but the
     // resolver's job candidate query has NO status filter, so prior runs'
