@@ -1309,9 +1309,14 @@ describe('InAppVoiceAdapter', () => {
     });
 
     // The second gate, doing its job: a sibling intent that arrives carrying
-    // nothing from a booking's own vocabulary contributes nothing, so it is
-    // still a correction — widening the family did not blanket-accept.
-    it('a sibling intent carrying only foreign entities is still a correction', async () => {
+    // nothing from a booking's own vocabulary contributes NOTHING — widening
+    // the family did not blanket-accept. Note the alias is keyed by source
+    // intent, so `appointmentReference` is reinterpreted as the booking's
+    // date ONLY for `confirm_appointment`, never for another sibling.
+    // Train-7: contributing nothing is now a bounded re-ask rather than an
+    // immediate wipe, so the assertion is on what was (not) merged, plus the
+    // eventual give-up.
+    it('a sibling intent carrying only foreign entities merges nothing, then corrects once bounded', async () => {
       const gateway = scriptedGateway([
         JSON.stringify({
           intentType: 'schedule_inspection',
@@ -1328,8 +1333,17 @@ describe('InAppVoiceAdapter', () => {
       });
       const { sessionId } = await adapter.startSession(TENANT, USER);
       await adapter.handleInput(sessionId, 'Book a diagnostic visit');
-      const switched = await adapter.handleInput(sessionId, "the inspection on tomorrow's 3pm");
-      expect(switched.state).toBe('intent_capture');
+
+      const first = await adapter.handleInput(sessionId, "the inspection on tomorrow's 3pm");
+      expect(first.state).toBe('intent_confirm');
+      const merged = store.peek(sessionId)?.machine.currentContext.extractedEntities ?? {};
+      // Neither verbatim nor aliased — this sibling has no claim on that key.
+      expect(merged.appointmentReference).toBeUndefined();
+      expect(merged.dateTimeDescription).toBeUndefined();
+
+      await adapter.handleInput(sessionId, "the inspection on tomorrow's 3pm");
+      const exhausted = await adapter.handleInput(sessionId, "the inspection on tomorrow's 3pm");
+      expect(exhausted.state).toBe('intent_capture');
       expect(store.peek(sessionId)?.machine.currentContext.currentIntent).toBeUndefined();
     });
 
@@ -1410,7 +1424,11 @@ describe('InAppVoiceAdapter', () => {
       expect(ctx?.extractedEntities).toBeUndefined();
     });
 
-    it('a readback answer carrying no slots at all falls back to correction (pre-D01 behavior)', async () => {
+    // Train-7 — this used to assert `intent_capture` on the FIRST no-slot
+    // turn. That wipe is the regression itself: one bad heuristic guess
+    // destroyed everything the caller had said. A no-slot turn now re-asks,
+    // and only gives up (correcting) once the bounded budget is spent.
+    it('a readback answer carrying no slots re-asks instead of wiping, then corrects once bounded', async () => {
       const gateway = scriptedGateway([
         JSON.stringify({ intentType: 'unknown', confidence: 0.2 }),
       ]);
@@ -1423,8 +1441,152 @@ describe('InAppVoiceAdapter', () => {
       });
       const { sessionId } = await adapter.startSession(TENANT, USER);
       await adapter.handleInput(sessionId, 'Book a diagnostic visit');
-      const noSlots = await adapter.handleInput(sessionId, 'hmm what were we doing');
-      expect(noSlots.state).toBe('intent_capture');
+
+      // MAX_CONFIRM_DETAIL_RETRIES = 2 no-progress turns are absorbed…
+      for (const attempt of [1, 2]) {
+        const noSlots = await adapter.handleInput(sessionId, 'hmm what were we doing');
+        expect(noSlots.state, `attempt ${attempt} must not wipe the booking`).toBe(
+          'intent_confirm',
+        );
+        expect(store.peek(sessionId)?.machine.currentContext.currentIntent).toBe(
+          'create_appointment',
+        );
+      }
+
+      // …and the third gives up, exactly as the pre-Train-7 first turn did,
+      // so an unparseable conversation can never park here forever.
+      const exhausted = await adapter.handleInput(sessionId, 'hmm what were we doing');
+      expect(exhausted.state).toBe('intent_capture');
+      expect(store.peek(sessionId)?.machine.currentContext.currentIntent).toBeUndefined();
+    });
+
+    // THE TRAIN-7 REGRESSION, isolated. "…next Tuesday morning works" is
+    // agreement-shaped, so the classifier reads it as `confirm_appointment`
+    // — whose ONLY extraction field is `appointmentReference`
+    // (intent-taxonomy-blocks.ts:341, example "The customer confirmed
+    // Tuesday's visit"). #938 admitted that intent through gate 1 while
+    // excluding that key from gate 2, so the slots came back empty and the
+    // booking was corrected away two turns in (live: session 12ccb578).
+    it('turn 2 read as confirm_appointment merges its appointmentReference as the booking WHEN', async () => {
+      const dispatched: string[] = [];
+      const gateway = scriptedGateway([
+        JSON.stringify({
+          intentType: 'confirm_appointment',
+          confidence: 0.9,
+          extractedEntities: { appointmentReference: 'next Tuesday morning' },
+        }),
+      ]);
+      const adapter = new InAppVoiceAdapter({
+        store,
+        gateway,
+        proposalRepo,
+        auditRepo,
+        onCallRepo,
+      });
+      const { sessionId } = await adapter.startSession(TENANT, USER);
+      await adapter.handleInput(sessionId, "I'd like to book a new customer for a diagnostic visit");
+      const session = store.peek(sessionId)!;
+      const realDispatch = session.machine.dispatch.bind(session.machine);
+      session.machine.dispatch = (event: CallingAgentEvent): SideEffect[] => {
+        dispatched.push(event.type);
+        return realDispatch(event);
+      };
+
+      const turn2 = await adapter.handleInput(
+        sessionId,
+        'Jordan Lee, 480-555-0199, next Tuesday morning works',
+      );
+
+      expect(dispatched).toContain('intent_details_supplied');
+      expect(dispatched).not.toContain('correction');
+      expect(turn2.state).toBe('intent_confirm');
+      const ctx = store.peek(sessionId)?.machine.currentContext;
+      expect(ctx?.currentIntent).toBe('create_appointment');
+      // Aliased onto the booking's own vocabulary, not merged verbatim.
+      expect(ctx?.extractedEntities?.dateTimeDescription).toBe('next Tuesday morning');
+      expect(ctx?.extractedEntities?.appointmentReference).toBeUndefined();
+    });
+
+    // End-to-end with BOTH live classifications this campaign has actually
+    // observed for these turns — confirm_appointment on turn 2 (train-7)
+    // and schedule_inspection on turn 3 (round-4). Neither is
+    // create_appointment; the booking must survive both and still gate.
+    it('the three turns survive the live confirm_appointment + schedule_inspection readings and gate', async () => {
+      const gateway = scriptedGateway([
+        JSON.stringify({
+          intentType: 'confirm_appointment',
+          confidence: 0.9,
+          extractedEntities: { appointmentReference: 'next Tuesday morning' },
+        }),
+        JSON.stringify({
+          intentType: 'schedule_inspection',
+          confidence: 0.91,
+          extractedEntities: { jobTitle: 'Inspection — furnace diagnostic' },
+        }),
+      ]);
+      const adapter = new InAppVoiceAdapter({
+        store,
+        gateway,
+        proposalRepo,
+        auditRepo,
+        onCallRepo,
+      });
+      const { sessionId } = await adapter.startSession(TENANT, USER);
+      await adapter.handleInput(sessionId, "I'd like to book a new customer for a diagnostic visit");
+      await adapter.handleInput(sessionId, 'Jordan Lee, 480-555-0199, next Tuesday morning works');
+      const turn3 = await adapter.handleInput(
+        sessionId,
+        "It's for a furnace diagnostic inspection at their home",
+      );
+      expect(turn3.state).toBe('intent_confirm');
+      expect(store.peek(sessionId)?.machine.currentContext.extractedEntities).toMatchObject({
+        dateTimeDescription: 'next Tuesday morning',
+        jobTitle: 'Inspection — furnace diagnostic',
+      });
+
+      const result = await adapter.handleInput(sessionId, "Yes, that's correct.");
+      expect(result.proposalIds).toHaveLength(1);
+      const stored = await proposalRepo.findById(TENANT, result.proposalIds[0]);
+      expect(stored?.proposalType).toBe('create_appointment');
+      expect(missingFieldsFor(stored!)).toContain('customerId');
+      await expect(
+        approveProposal(proposalRepo, TENANT, stored!.id, USER, 'owner'),
+      ).rejects.toThrow(/customerId/);
+    });
+
+    it('the alias never overwrites a date the booking already captured', async () => {
+      const gateway = scriptedGateway([
+        JSON.stringify({
+          intentType: 'create_customer',
+          confidence: 0.8,
+          extractedEntities: {
+            customerName: 'Jordan Lee',
+            dateTimeDescription: 'next Tuesday morning',
+          },
+        }),
+        JSON.stringify({
+          intentType: 'confirm_appointment',
+          confidence: 0.9,
+          extractedEntities: { appointmentReference: 'the one on the calendar' },
+        }),
+      ]);
+      const adapter = new InAppVoiceAdapter({
+        store,
+        gateway,
+        proposalRepo,
+        auditRepo,
+        onCallRepo,
+      });
+      const { sessionId } = await adapter.startSession(TENANT, USER);
+      await adapter.handleInput(sessionId, 'Book a diagnostic visit');
+      await adapter.handleInput(sessionId, 'Jordan Lee, next Tuesday morning');
+      await adapter.handleInput(sessionId, "yep the one on the calendar, that's the visit");
+
+      // The real value from the earlier turn survives — an aliased
+      // reference is a fallback, never an overwrite.
+      expect(
+        store.peek(sessionId)?.machine.currentContext.extractedEntities?.dateTimeDescription,
+      ).toBe('next Tuesday morning');
     });
 
     it('slot-fill re-runs the entity resolver, so a customer that DOES exist gets a verified id', async () => {
