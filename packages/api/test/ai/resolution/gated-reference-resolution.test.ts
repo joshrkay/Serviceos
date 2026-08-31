@@ -131,8 +131,21 @@ describe('#909 planGatedReferenceLookups — gate ↔ free-text pairing', () => 
     expect(plan).toEqual([]);
   });
 
-  it('plans nothing when there is no free text to resolve from', () => {
-    expect(planGatedReferenceLookups(draft({}, ['leadId']))).toEqual([]);
+  it('A21/#909 (2026-08-31 live sweep) — a gated field with NO free text anywhere still plans a lookup, with an empty references list, so it can still land in `unresolved`', () => {
+    // Root cause of the A21 apply_late_fee silent card: this used to
+    // `continue` (skip the field from the plan entirely) whenever neither
+    // `payloadFields` nor `entityFields` produced any text — e.g. "add a
+    // $25 late fee" names no invoice at all, so the handler has nothing to
+    // write to `invoiceReference` (there is no reference to preserve).
+    // Skipping the field meant it never reached `resolveGatedReferences`'s
+    // `outcome.unresolved` push, so `buildGatedReferenceReply` had nothing
+    // to say — not an ambiguity ask, not the honest can't-match line,
+    // silence. This field's own `unresolved` doc comment already names "no
+    // reference at all" as a legitimate reason to land there; the fix
+    // makes the implementation match that contract instead of short-
+    // circuiting past it.
+    const plan = planGatedReferenceLookups(draft({}, ['leadId']));
+    expect(plan).toEqual([{ idField: 'leadId', kind: 'lead', references: [] }]);
   });
 
   it('every source entry names a payload field and at least one entity fallback', () => {
@@ -315,6 +328,34 @@ describe('#909 resolveGatedReferences — outcomes', () => {
     );
     expect(outcome.unresolved).toEqual(['appointmentId']);
     expect(outcome.filled).toEqual({});
+  });
+
+  it('A21/#909 (2026-08-31 live sweep) — a gate with literally NO reference anywhere (not payload, not entities) is reported unresolved, not silently dropped', async () => {
+    // Live shape: an apply_late_fee utterance that names neither a job nor
+    // a customer ("add a $25 late fee") — the handler correctly has
+    // nothing to write to `invoiceReference` (there is nothing spoken to
+    // preserve), so the payload carries no reference field at all, exactly
+    // as `payload has NO reference field at all` was reported live. The
+    // resolver is never even called (nothing to resolve against), and the
+    // field must still surface as `unresolved` so the reply layer can give
+    // the honest "reply with the invoice number" line instead of silence.
+    const resolver = resolverFor(() => {
+      throw new Error('must not be called — there is no reference to resolve');
+    });
+    const outcome = await resolveGatedReferences(
+      resolver,
+      TENANT,
+      draft({ stepKey: 'manual', feeCents: 2500 }, ['invoiceId']),
+      {},
+    );
+    expect(outcome.unresolved).toEqual(['invoiceId']);
+    expect(outcome.filled).toEqual({});
+    expect(outcome.ambiguity).toBeUndefined();
+    expect(resolver.resolve).not.toHaveBeenCalled();
+
+    // And the reply layer turns that into the honest line, never silence.
+    const reply = buildGatedReferenceReply(outcome, true);
+    expect(reply).toMatch(/^I couldn't automatically match that — reply with the invoice number/);
   });
 
   it('is a no-op without a resolver wired', async () => {

@@ -1751,6 +1751,98 @@ describe('A06 — issue_invoice routing determinism (2026-08-30 live sweep, swee
   });
 });
 
+describe('A10 — update_job priority routing determinism (2026-08-31 live sweep)', () => {
+  const chatContext = { tenantId: 't1' };
+
+  it('the exact sweep utterance routes to update_job with jobReference extracted, no LLM call', async () => {
+    // Live evidence: this exact utterance fell through to the generic-LLM
+    // reply path with no proposal drafted — "I have NOT marked... please
+    // contact your supervisor" — a hallucination-shaped deflection, not an
+    // honest refusal. The identical utterance shape had passed on many
+    // prior sweeps, so this is non-determinism in the LLM call, not a
+    // taxonomy gap.
+    const gateway = mockGateway('{"intentType":"unknown","confidence":0.3}');
+    const result = await classifyIntent(
+      'Mark the QA Sweep Furnace Inspection job as high priority',
+      chatContext,
+      gateway,
+    );
+    expect(result.intentType).toBe('update_job');
+    expect(result.confidence).toBeGreaterThanOrEqual(TAU_INT);
+    expect(result.extractedEntities?.jobReference).toBe('QA Sweep Furnace Inspection');
+    expect(gateway.complete).not.toHaveBeenCalled();
+  });
+
+  it('fires WITHOUT extendedIntents — the live miss was on plain chat, which never sets that flag', async () => {
+    for (const context of [
+      { tenantId: 't1' },
+      { tenantId: 't1', extendedIntents: true },
+    ]) {
+      const gateway = mockGateway('{"intentType":"unknown","confidence":0.2}');
+      const result = await classifyIntent(
+        'Mark the Henderson job as urgent priority',
+        context,
+        gateway,
+      );
+      expect(result.intentType).toBe('update_job');
+      expect(result.extractedEntities?.jobReference).toBe('Henderson');
+      expect(gateway.complete).not.toHaveBeenCalled();
+    }
+  });
+
+  it('phrase variants also short-circuit: no "as", every priority value, trailing punctuation', async () => {
+    for (const [transcript, expected] of [
+      ['Mark the Henderson job high priority', 'Henderson'],
+      ['mark the Garcia job as low priority.', 'Garcia'],
+      ['Mark the water heater install job as normal priority!', 'water heater install'],
+      ['Mark the Smith job as urgent priority', 'Smith'],
+    ] as const) {
+      const gateway = mockGateway('{"intentType":"unknown","confidence":0.2}');
+      const result = await classifyIntent(transcript, chatContext, gateway);
+      expect(result.intentType, `"${transcript}" should route to update_job`).toBe('update_job');
+      expect(result.extractedEntities?.jobReference).toBe(expected);
+      expect(gateway.complete).not.toHaveBeenCalled();
+    }
+  });
+
+  it('negative control: status/title/description edits stay LLM-routed (not this matcher\'s shape)', async () => {
+    const gateway = mockGateway('{"intentType":"update_job","confidence":0.9}');
+    const result = await classifyIntent('Mark the Henderson job in progress', chatContext, gateway);
+    expect(gateway.complete).toHaveBeenCalledTimes(1);
+    expect(result.intentType).toBe('update_job');
+  });
+
+  it('negative control: a differently-phrased priority command stays LLM-routed', async () => {
+    const gateway = mockGateway(
+      '{"intentType":"update_job","confidence":0.9,"extractedEntities":{"jobReference":"Henderson"}}',
+    );
+    const result = await classifyIntent(
+      "Set the Henderson job's priority to urgent",
+      chatContext,
+      gateway,
+    );
+    expect(gateway.complete).toHaveBeenCalledTimes(1);
+    expect(result.extractedEntities?.jobReference).toBe('Henderson');
+  });
+
+  it('matchUpdateJobPriorityPhrase unit-level: exact corpus utterance matches, empty/unrelated/no-priority text does not', async () => {
+    const { matchUpdateJobPriorityPhrase } = await import(
+      '../../../src/ai/orchestration/intent-classifier'
+    );
+    expect(
+      matchUpdateJobPriorityPhrase('Mark the QA Sweep Furnace Inspection job as high priority'),
+    ).toEqual({ jobReference: 'QA Sweep Furnace Inspection' });
+    expect(matchUpdateJobPriorityPhrase('Mark the Henderson job high priority')).toEqual({
+      jobReference: 'Henderson',
+    });
+    expect(matchUpdateJobPriorityPhrase('')).toBeNull();
+    expect(matchUpdateJobPriorityPhrase('Mark the Henderson job in progress')).toBeNull();
+    expect(matchUpdateJobPriorityPhrase("Set the Henderson job's priority to urgent")).toBeNull();
+    expect(matchUpdateJobPriorityPhrase('Rename the Henderson job')).toBeNull();
+    expect(matchUpdateJobPriorityPhrase('Mark the invoice INV-0010 as paid')).toBeNull();
+  });
+});
+
 describe('intent-classifier — lookup_job_profit (P22-005)', () => {
   const tenantId = 'tenant-1';
 

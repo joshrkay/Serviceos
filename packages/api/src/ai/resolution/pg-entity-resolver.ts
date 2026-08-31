@@ -248,6 +248,73 @@ function invoiceNameNeedle(reference: string): string {
   return kept.length > 0 ? kept.join(' ') : '';
 }
 
+/**
+ * A11 (2026-08-31 live sweep) — work-type descriptor nouns an operator hangs
+ * on a spoken APPOINTMENT/JOB reference alongside the customer's name: "the
+ * Henderson tune-up", "Mrs Garcia's furnace inspection appointment". Same
+ * discipline as `ESTIMATE_DOC_STOPWORDS` / `INVOICE_DOC_STOPWORDS` — a
+ * SEPARATE, narrowly-scoped set rather than more entries in
+ * `APPOINTMENT_REFERENCE_STOPWORDS`, because that set ALSO decides whether a
+ * reference is nameless enough to reach SCH-03's tenant-wide fallback, and
+ * folding work-type words into it would make "the tune-up" alone (no name
+ * stated) look nameless in a way it isn't — out of scope here, left
+ * untouched. This set is used ONLY to build the CUSTOMER-NAME needle
+ * `resolveAppointment`'s named branch feeds into `resolveJob` /
+ * `resolveJobIdsForCustomerName` for their customer-half scoring — never to
+ * touch the reference text those methods ALSO match against JOB SUMMARIES,
+ * which want the full phrase (a job's own summary legitimately contains
+ * "tune-up").
+ *
+ * Grounded in the work-type vocabulary already used across this repo's own
+ * job/appointment fixtures and prompts (grep counts: install/installation,
+ * repair, replacement, maintenance, inspection, diagnostic, follow-up,
+ * tune-up/tuneup, service call, cleaning, checkup).
+ *
+ * WHY THE STRIP IS LOAD-BEARING, measured on pgvector/pgvector:pg16 with
+ * pg_trgm against a customer named 'qa-matrix-A-customer' (τ_ent: 0.80):
+ *   strict_word_similarity("qa matrix customer's tune up", ...) = 0.613
+ *   strict_word_similarity("qa matrix customer's", ...)         = 0.826
+ * The polluted needle scores BELOW τ_ent — and into the `low_confidence`
+ * band, which `resolveAppointment`'s named branch already folds into "not
+ * confident enough to answer" (see its own doc comment on why) — while the
+ * stripped needle clears τ_ent outright. This is the exact live A11 defect:
+ * "<customer>'s tune-up appointment" silently degrades to not_found while
+ * the bare "<customer>'s appointment" form resolves (or asks) normally,
+ * purely because of this leftover descriptor noise diluting the trigram
+ * match — not a different, stricter resolution branch, and not anything
+ * #951 touched (#951 only changed whether a not_found gets an honest reply;
+ * this is why it WAS a not_found in the first place).
+ */
+const APPOINTMENT_WORK_TYPE_STOPWORDS = new Set([
+  'tune', 'tuneup', 'up',
+  'inspection', 'inspections',
+  'repair', 'repairs',
+  'replacement', 'replacements',
+  'maintenance',
+  'diagnostic', 'diagnostics',
+  'install', 'installation', 'installations',
+  'follow', 'followup',
+  'service', 'call', 'calls',
+  'cleaning', 'checkup', 'checkups',
+]);
+
+/**
+ * The customer-name needle for an appointment reference's named branch —
+ * `extractNameLikeToken`'s output with work-type descriptor nouns ALSO
+ * stripped. '' when nothing survives (same empty-needle guard as
+ * `estimateNameNeedle` / `invoiceNameNeedle`: strict_word_similarity('',
+ * <any name>) = 0, so a reference that names no customer at all matches
+ * nobody instead of everybody).
+ */
+function appointmentCustomerNeedle(reference: string): string {
+  const base = extractNameLikeToken(reference);
+  if (!base) return '';
+  const kept = base
+    .split(/\s+/)
+    .filter((w) => w.length > 0 && !APPOINTMENT_WORK_TYPE_STOPWORDS.has(w));
+  return kept.length > 0 ? kept.join(' ') : '';
+}
+
 // Technicians are named the way customers are: an operator says "assign
 // CARLOS", not "assign Carlos Vega". Whole-string similarity cannot see that —
 // `similarity('Carlos Vega','Carlos')` = 0.583, under TAU_ENT_CONFIRM_LOW, so
@@ -490,15 +557,25 @@ export class PgEntityResolver implements EntityResolver {
    * and whole-string similarity is kept inside the GREATEST, so every reference
    * that resolved before resolves at an identical score: strictly additive,
    * with no threshold moved.
+   *
+   * A11 (2026-08-31 live sweep) — `customerNeedleOverride` lets
+   * `resolveAppointment`'s named branch (below) supply
+   * `appointmentCustomerNeedle`'s work-type-stripped needle instead of the
+   * plain `extractNameLikeToken` one computed here, so "the Henderson
+   * tune-up appointment" scores its customer half the same as "the
+   * Henderson appointment" would. Optional and additive: every OTHER
+   * caller (the direct `kind: 'job'` entry point) omits it and gets
+   * byte-identical behavior to before.
    */
   private async resolveJob(
     tenantId: string,
     reference: string,
+    customerNeedleOverride?: string,
   ): Promise<EntityResolverResult> {
     // '' when the reference is pure filler ("that job"): strict_word_similarity
     // of an empty needle is 0, so such a reference keeps exactly today's
     // summary-only behavior instead of matching every customer.
-    const needle = stripClockTokens(extractNameLikeToken(reference) ?? '');
+    const needle = stripClockTokens(customerNeedleOverride ?? extractNameLikeToken(reference) ?? '');
 
     // Archived customers are excluded on the customer half for the same reason
     // `resolveCustomer` excludes them — they must not become voice targets.
@@ -921,11 +998,19 @@ export class PgEntityResolver implements EntityResolver {
         // Named reference, no job anchor yet: resolve the name against jobs —
         // by their own summary AND by their linked CUSTOMER — and build on
         // `resolveAppointmentByJob` for the unique-match case, exactly the
-        // AC-3 positive path. `resolveJob` derives the same customer needle
-        // from the same `extractNameLikeToken(reference)` computed just above,
-        // which is why this branch and the `kind: 'job'` entry point can share
-        // ONE implementation instead of two that drift.
-        const jobResult = await this.resolveJob(tenantId, reference);
+        // AC-3 positive path. A11 — the customer half uses
+        // `appointmentCustomerNeedle`, not the plain `extractNameLikeToken`
+        // `resolveJob` would otherwise derive itself, so a work-type
+        // descriptor riding along with the name ("the Henderson tune-up
+        // appointment") doesn't dilute the customer-name score below τ_ent —
+        // see `appointmentCustomerNeedle`'s doc comment for the measured
+        // numbers. The job-SUMMARY half is unaffected: `resolveJob` still
+        // matches it against the ORIGINAL `reference` passed here.
+        const jobResult = await this.resolveJob(
+          tenantId,
+          reference,
+          appointmentCustomerNeedle(reference),
+        );
         switch (jobResult.kind) {
           case 'resolved':
             return this.resolveAppointmentByJob(tenantId, reference, jobResult.candidate.id);
@@ -989,9 +1074,15 @@ export class PgEntityResolver implements EntityResolver {
             // no confident name match still gets `not_found`, exactly as
             // before — this only adds a path FORWARD, never a new way to
             // guess.
+            //
+            // A11 — same `appointmentCustomerNeedle` swap as the `resolveJob`
+            // call above, for the identical reason: this is a pure
+            // customer-name lookup (no job-summary half to preserve), so a
+            // work-type descriptor left in `nameToken` would dilute it here
+            // exactly as it would there.
             const jobIds = await this.resolveJobIdsForCustomerName(
               tenantId,
-              stripClockTokens(nameToken),
+              stripClockTokens(appointmentCustomerNeedle(reference)),
             );
             if (jobIds.length > 0) {
               return this.resolveAppointmentsForJobs(tenantId, reference, jobIds);

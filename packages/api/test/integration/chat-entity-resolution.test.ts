@@ -1135,6 +1135,51 @@ describe('Integration — #909 chat entity resolution (real Postgres + real reso
       expect(missingFieldsFor(gated)).toEqual(['invoiceId']);
       expect((gated.sourceContext as Record<string, unknown>).pendingEntityAmbiguity).toBeUndefined();
     });
+
+    // A21 (2026-08-31 live sweep) — the ACTUAL live shape (proposal
+    // 24f7a26d): the coordinator's own evidence across two rounds was that
+    // this row's payload carries NO reference field at all — unlike the
+    // overflow test above (which always named a customer), this utterance
+    // names neither a customer nor a job. ApplyLateFeeTaskHandler correctly
+    // has nothing to write to `invoiceReference` when nothing was spoken —
+    // that part was never the bug. The bug was one layer down:
+    // `planGatedReferenceLookups` (gated-reference-resolution.ts) used to
+    // `continue` past a gated field with zero candidate reference text
+    // instead of still reporting it `unresolved`, so it never reached
+    // `buildGatedReferenceReply` at all — the exact "gated missingFields:
+    // ['invoiceId'], no ask, no honest line" symptom, reproduced here
+    // end-to-end through the real chat route.
+    it('A21 apply_late_fee with NO reference at all (the actual live shape) still gets the honest line, never silence', async () => {
+      const seed = await seedTenant();
+      await seedInvoice(seed, `INV-3001-${crypto.randomUUID().slice(0, 4)}`, 'open');
+
+      const proposalRepo = new InMemoryProposalRepository();
+      const app = buildApp(
+        seed,
+        proposalRepo,
+        scriptedGateway([classifierReply('apply_late_fee', { amount: 2500 })]),
+      );
+
+      const res = await supertest(app)
+        .post('/api/assistant/chat')
+        .send({
+          messages: [{ role: 'user', content: 'Apply a 25 dollar late fee' }],
+        });
+      expect(res.status).toBe(200);
+      // The live-broken behavior this test pins RED against: before this
+      // round, this content is `${title}. Review and approve to proceed.`
+      // — indistinguishable from a proposal that needs nothing further.
+      expect(res.body.message.content).toContain('reply with the invoice number');
+
+      const [gated] = await proposalRepo.findByTenant(seed.tenantId);
+      expect(gated.proposalType).toBe('apply_late_fee');
+      expect(gated.payload.invoiceReference).toBeUndefined();
+      expect(missingFieldsFor(gated)).toEqual(['invoiceId']);
+      expect((gated.sourceContext as Record<string, unknown>).pendingEntityAmbiguity).toBeUndefined();
+      await expect(
+        approveProposal(proposalRepo, seed.tenantId, gated.id, seed.userId, 'owner'),
+      ).rejects.toThrow(/invoiceId/);
+    });
   });
 
   // ───────────────────────────────────────────────────────────────────────
