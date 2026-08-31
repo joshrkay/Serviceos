@@ -29,6 +29,8 @@ interface MockRow {
   doc_number?: string;
   scheduled_start?: string;
   job_id?: string;
+  name?: string;
+  unit_price_cents?: number;
   score?: number;
 }
 
@@ -900,6 +902,135 @@ describe('PgEntityResolver — estimate', () => {
     // An empty needle must not fan out across the tenant — the traversal is
     // skipped entirely rather than run with ''.
     expect(calls.find((c) => c.sql.includes('JOIN customers'))).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Catalog item resolution (#909, live sweeps 9/10)
+// ---------------------------------------------------------------------------
+//
+// Mocked-Pool coverage only — per CLAUDE.md this is NOT sufficient alone for
+// a new SQL path; see the Docker-gated integration suite in
+// test/integration/entity-resolution.test.ts for the real-Postgres proof
+// (real columns, real pg_trgm scoring, real archived_at exclusion).
+
+describe('PgEntityResolver — catalogItem', () => {
+  it('an exact name match resolves with score 1.0, priced hint', async () => {
+    const { pool, calls } = makeMockPool([
+      undefined,
+      [{ id: 'ci-1', name: 'QA Sweep Smart Thermostat Install', unit_price_cents: 38500, score: 1.0 }],
+    ]);
+
+    const resolver = new PgEntityResolver(pool);
+    const result = await resolver.resolve({
+      tenantId: TENANT_ID,
+      reference: 'QA Sweep Smart Thermostat Install',
+      kind: 'catalogItem',
+    });
+
+    expect(result.kind).toBe('resolved');
+    if (result.kind === 'resolved') {
+      expect(result.candidate.id).toBe('ci-1');
+      expect(result.candidate.label).toBe('QA Sweep Smart Thermostat Install');
+      expect(result.candidate.hint).toBe('$385.00');
+      expect(result.candidate.score).toBe(1.0);
+    }
+
+    const businessQuery = calls.find((c) => c.sql.includes('FROM catalog_items'));
+    expect(businessQuery!.sql).toMatch(/tenant_id\s*=\s*\$1/);
+    expect(businessQuery!.sql).toMatch(/archived_at IS NULL/);
+    expect(businessQuery!.params[0]).toBe(TENANT_ID);
+  });
+
+  // The AI-catalog sweep's own live shape: `add_catalog_item` mints a fresh
+  // "QA Sweep Smart Thermostat Install" every run with no cleanup between
+  // runs, so by sweep round 9/10 the tenant carries two+ ACTIVE rows under
+  // the identical name — the resolver must ask, never guess which one the
+  // operator meant, even though the disambiguating detail (price) lives on
+  // `hint`, not `label`.
+  it('two identically-named duplicates (different prices) return ambiguous, never a guess', async () => {
+    const { pool } = makeMockPool([
+      undefined,
+      [
+        { id: 'ci-1', name: 'QA Sweep Smart Thermostat Install', unit_price_cents: 38500, score: 1.0 },
+        { id: 'ci-2', name: 'QA Sweep Smart Thermostat Install', unit_price_cents: 8900, score: 1.0 },
+      ],
+    ]);
+
+    const resolver = new PgEntityResolver(pool);
+    const result = await resolver.resolve({
+      tenantId: TENANT_ID,
+      reference: 'QA Sweep Smart Thermostat Install',
+      kind: 'catalogItem',
+    });
+
+    expect(result.kind).toBe('ambiguous');
+    if (result.kind === 'ambiguous') {
+      expect(result.candidates).toHaveLength(2);
+      expect(result.candidates.map((c) => c.hint)).toEqual(
+        expect.arrayContaining(['$385.00', '$89.00']),
+      );
+    }
+  });
+
+  it('a partial name still resolves via strict_word_similarity', async () => {
+    const { pool, calls } = makeMockPool([
+      undefined,
+      [{ id: 'ci-1', name: 'QA Sweep Smart Thermostat Install', unit_price_cents: 38500, score: 0.9 }],
+    ]);
+
+    const resolver = new PgEntityResolver(pool);
+    const result = await resolver.resolve({
+      tenantId: TENANT_ID,
+      reference: 'the thermostat install',
+      kind: 'catalogItem',
+    });
+
+    expect(result.kind).toBe('resolved');
+    const businessQuery = calls.find((c) => c.sql.includes('FROM catalog_items'));
+    expect(businessQuery!.sql).toMatch(/strict_word_similarity\(\$2, name\)/);
+  });
+
+  it('no candidate above the prefilter returns not_found', async () => {
+    const { pool } = makeMockPool([undefined, []]);
+    const resolver = new PgEntityResolver(pool);
+
+    const result = await resolver.resolve({
+      tenantId: TENANT_ID,
+      reference: 'flux capacitor',
+      kind: 'catalogItem',
+    });
+
+    expect(result.kind).toBe('not_found');
+  });
+
+  it('excludes archived items from the candidate query', async () => {
+    const { pool, calls } = makeMockPool([undefined, []]);
+    const resolver = new PgEntityResolver(pool);
+
+    await resolver.resolve({ tenantId: TENANT_ID, reference: 'anything', kind: 'catalogItem' });
+
+    const businessQuery = calls.find((c) => c.sql.includes('FROM catalog_items'));
+    expect(businessQuery!.sql).toMatch(/archived_at IS NULL/);
+  });
+
+  it('more confident matches than the picker ceiling escalates to not_found instead of an arbitrary five', async () => {
+    const rows = Array.from({ length: 6 }, (_, i) => ({
+      id: `ci-${i}`,
+      name: 'Filter replacement',
+      unit_price_cents: 4500,
+      score: 0.95,
+    }));
+    const { pool } = makeMockPool([undefined, rows]);
+
+    const resolver = new PgEntityResolver(pool);
+    const result = await resolver.resolve({
+      tenantId: TENANT_ID,
+      reference: 'filter',
+      kind: 'catalogItem',
+    });
+
+    expect(result.kind).toBe('not_found');
   });
 });
 

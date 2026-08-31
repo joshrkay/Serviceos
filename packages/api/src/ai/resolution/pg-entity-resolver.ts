@@ -21,6 +21,7 @@ import { Pool } from 'pg';
 import { withTenantConnection } from '../../db/tenant-transaction';
 import { resolveDateTime } from '../scheduling/resolve-datetime';
 import { isRuntimeTimezone } from '../../shared/timezone';
+import { formatUsdCentsFixed } from '@ai-service-os/shared';
 import {
   EntityCandidate,
   EntityKind,
@@ -333,6 +334,19 @@ const LEAD_SCORE_EXPR = `GREATEST(
  */
 const MAX_LEAD_CANDIDATES = 5;
 
+/**
+ * Most catalog items a one-tap picker may honestly offer. Same ceiling and
+ * same overflow reasoning as the other kinds above. Deliberately reachable
+ * even by a SINGLE name: the AI-catalog sweep's own fixture customer
+ * demonstrates why — `add_catalog_item` mints a fresh row named "QA Sweep
+ * Smart Thermostat Install" every run with no cleanup between runs, so a
+ * shop whose fixture (or, honestly, a real multi-location tenant reusing a
+ * SKU name across price lists) has drifted past this ceiling gets an honest
+ * escalation instead of an arbitrary five-of-many. `resolveCatalogItem`
+ * reads one extra row to detect it.
+ */
+const MAX_CATALOG_ITEM_CANDIDATES = 5;
+
 export class PgEntityResolver implements EntityResolver {
   constructor(private readonly pool: Pool) {}
 
@@ -364,6 +378,8 @@ export class PgEntityResolver implements EntityResolver {
         return this.resolveTechnician(tenantId, reference);
       case 'lead':
         return this.resolveLead(tenantId, reference);
+      case 'catalogItem':
+        return this.resolveCatalogItem(tenantId, reference);
       default:
         return { kind: 'skipped' };
     }
@@ -1547,6 +1563,86 @@ export class PgEntityResolver implements EntityResolver {
     if (confident.length > MAX_LEAD_CANDIDATES) return { kind: 'not_found', reference };
 
     return this.toResult(candidates.slice(0, MAX_LEAD_CANDIDATES), reference);
+  }
+
+  /**
+   * #909 (live sweeps 9/10) — a catalog item named by the reference the
+   * `update_catalog_item` chat drafting handler preserved on
+   * `payload.itemReference` when its own resolution (`resolveLineItemToCatalog`,
+   * ai/resolution/catalog-resolver.ts) could not confidently pick one. That
+   * function is deliberately NOT reused here — it grounds an LLM-drafted
+   * LINE ITEM's price on an invoice/estimate (its own TAU_HIGH=0.85/
+   * MARGIN=0.15 scoring, a same-price tie-break that treats two identically-
+   * priced duplicates as interchangeable) — a different question from "which
+   * catalog ROW does this chat reference resolve to", which belongs on the
+   * SAME τ_ent contract every other kind in this class answers, so the
+   * gated-reference loop (ai/resolution/gated-reference-resolution.ts) never
+   * has to special-case one kind's confidence bands.
+   *
+   * SCORE_EXPR mirrors `resolveJob`'s customer-half reasoning: whole-string
+   * `similarity()` alone misses a reference that names only PART of a
+   * longer catalog name ("the thermostat item" against "QA Sweep Smart
+   * Thermostat Install"), so `strict_word_similarity` is GREATEST-ed in
+   * exactly as it is for every other name-bearing kind here. Whole-string
+   * similarity stays in the GREATEST so an exact/near-exact reference (the
+   * overwhelmingly common case — an operator reading the catalog name back)
+   * scores no differently than before.
+   *
+   * Archived items are excluded (`archived_at IS NULL`, the same partial
+   * index `idx_catalog_items_active` covers) for the same reason
+   * `resolveCustomer` excludes archived customers — an archived line is not
+   * a legitimate price-update target. DUPLICATE active names (the AI-catalog
+   * sweep's own fixture: `add_catalog_item` mints a fresh "QA Sweep Smart
+   * Thermostat Install" every run with nothing to quarantine the prior
+   * runs' copies) score identically and fall out as `ambiguous` — never a
+   * guess at which specific row the operator meant, even when their prices
+   * still happen to match.
+   */
+  private async resolveCatalogItem(
+    tenantId: string,
+    reference: string,
+  ): Promise<EntityResolverResult> {
+    const SCORE_EXPR = `GREATEST(
+             similarity(name, $2),
+             strict_word_similarity($2, name)
+           )`;
+    const rows = await withTenantConnection(this.pool, tenantId, (client) =>
+      client
+        .query<{
+          id: string;
+          name: string;
+          unit_price_cents: number;
+          score: number;
+        }>(
+          `SELECT id, name, unit_price_cents, ${SCORE_EXPR} AS score
+             FROM catalog_items
+            WHERE tenant_id = $1
+              AND archived_at IS NULL
+              AND ${SCORE_EXPR} > $3
+            ORDER BY score DESC
+            LIMIT ${MAX_CATALOG_ITEM_CANDIDATES + 1}`,
+          [tenantId, reference, SIMILARITY_PREFILTER],
+        )
+        .then((r) => r.rows),
+    );
+
+    const candidates: EntityCandidate[] = rows.map((row) => ({
+      id: row.id,
+      kind: 'catalogItem' as EntityKind,
+      label: row.name,
+      // The one thing that distinguishes two identically-named duplicates
+      // in a picker a human can actually read — see the class doc comment.
+      hint: formatUsdCentsFixed(row.unit_price_cents),
+      score: Number(row.score),
+    }));
+
+    // Same overflow trap every sibling resolver guards: a shared/duplicated
+    // name scores identically against every row carrying it, and an
+    // arbitrary five-of-many is not an honest picker.
+    const confident = candidates.filter((c) => c.score >= TAU_ENT);
+    if (confident.length > MAX_CATALOG_ITEM_CANDIDATES) return { kind: 'not_found', reference };
+
+    return this.toResult(candidates.slice(0, MAX_CATALOG_ITEM_CANDIDATES), reference);
   }
 
   // ---------------------------------------------------------------------------

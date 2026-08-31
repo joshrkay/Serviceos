@@ -650,4 +650,47 @@ describe('#909 buildDisambiguationQuestion — ONE question', () => {
     expect(q).toContain('all under the same name');
     expect(q).toMatch(/address or phone/i);
   });
+
+  // #909 (live sweeps 9/10) — "address or phone number" is nonsensical for
+  // a catalog item (the AI-catalog sweep's own fixture: `add_catalog_item`
+  // mints a fresh, identically-named row every run). When candidates share
+  // a name but carry their own DISTINCT hint (price, for catalogItem), that
+  // hint is what actually tells them apart — list it instead.
+  it('lists numbered options with hints when every candidate shares a name but hints differ', () => {
+    const q = buildDisambiguationQuestion({
+      entityKind: 'catalogItem',
+      reference: 'QA Sweep Smart Thermostat Install',
+      refKey: 'catalogItemId',
+      candidates: [
+        { id: 'ci-1', name: 'QA Sweep Smart Thermostat Install', score: 1.0, hint: '$385.00' },
+        { id: 'ci-2', name: 'QA Sweep Smart Thermostat Install', score: 1.0, hint: '$89.00' },
+      ],
+      partialRefs: {},
+      attemptCount: 0,
+    });
+    expect(q).toContain('all under the same name');
+    expect(q).not.toMatch(/address or phone/i);
+    expect(q).toContain('1. QA Sweep Smart Thermostat Install ($385.00)');
+    expect(q).toContain('2. QA Sweep Smart Thermostat Install ($89.00)');
+    expect(q).toMatch(/reply with the number/i);
+  });
+
+  // Same-name AND same-hint (or no hint at all) is exactly as unhelpful as
+  // no hint — must still fall back to the generic prompt rather than list
+  // two visually-identical options with nothing to tell them apart.
+  it('still falls back to the generic prompt when same-name candidates ALSO share the same hint', () => {
+    const q = buildDisambiguationQuestion({
+      entityKind: 'catalogItem',
+      reference: 'AC tune-up',
+      refKey: 'catalogItemId',
+      candidates: [
+        { id: 'ci-1', name: 'AC tune-up', score: 1.0, hint: '$89.00' },
+        { id: 'ci-2', name: 'AC tune-up', score: 1.0, hint: '$89.00' },
+      ],
+      partialRefs: {},
+      attemptCount: 0,
+    });
+    expect(q).toContain('all under the same name');
+    expect(q).toMatch(/address or phone/i);
+  });
 });

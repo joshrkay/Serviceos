@@ -134,6 +134,22 @@ export const GATED_REFERENCE_SOURCES: Readonly<Record<string, GatedReferenceSour
     payloadFields: ['leadReference'],
     entityFields: ['leadReference', 'customerName'],
   },
+  // #909 (live sweeps 9/10) — `update_catalog_item`'s only producer on chat
+  // (UpdateCatalogItemTaskHandler, ai/tasks/voice-extended-tasks.ts) writes
+  // the spoken/typed item name onto `payload.itemReference` when its own
+  // draft-time resolution can't confidently pick a row. `catalogItemReference`
+  // is the classifier's own extraction field for the same text (the handler
+  // builds `itemReference` FROM it), so in the ordinary case this fallback
+  // is a same-string no-op (deduped by `push()` below) — it exists as the
+  // same belt-and-braces the other entries carry: if a future producer ever
+  // set `missingFields: ['catalogItemId']` without also setting
+  // `payload.itemReference`, this is what keeps the gate resolvable instead
+  // of silently unfillable.
+  catalogItemId: {
+    kind: 'catalogItem',
+    payloadFields: ['itemReference'],
+    entityFields: ['catalogItemReference'],
+  },
 };
 
 /**
@@ -456,6 +472,7 @@ const pendingAmbiguitySchema = z.object({
     'pending_proposal',
     'technician',
     'lead',
+    'catalogItem',
   ]),
   reference: z.string().default(''),
   refKey: z.string().refine(isGatedReferenceField, {
@@ -633,6 +650,8 @@ function kindLabel(kind: EntityKind): string {
       return 'team member';
     case 'lead':
       return 'lead';
+    case 'catalogItem':
+      return 'catalog item';
     default:
       return 'record';
   }
@@ -658,7 +677,27 @@ export function buildDisambiguationQuestion(pending: PendingEntityAmbiguity): st
   const quoted = pending.reference ? `"${pending.reference}"` : `that ${label}`;
 
   if (distinctNames.size < 2) {
-    // Same name on every candidate — listing them back is no help at all.
+    // Same name on every candidate. "Address or phone number" is a real
+    // follow-up ONLY for a person/company kind (customer, lead) — it is
+    // meaningless for a catalog item, a job, an invoice. #909 (live sweeps
+    // 9/10) — the AI-catalog sweep's own fixture reproduces this exactly:
+    // `add_catalog_item` mints a fresh, identically-named catalog row every
+    // run with nothing to quarantine the prior runs' copies, so
+    // `update_catalog_item` routinely lands here for a kind that was never
+    // going to have an address or phone. When every candidate instead
+    // carries its own DISTINCT hint (a catalog item's price, an invoice's
+    // status), that hint is the thing that actually tells them apart —
+    // list it instead of asking for a detail this kind cannot answer.
+    const distinctHints = new Set(listed.map((c) => (c.hint ?? '').trim().toLowerCase()));
+    if (distinctHints.size >= 2 && !distinctHints.has('')) {
+      const hinted = listed.map((c, i) => `${i + 1}. ${c.name} (${c.hint})`).join('\n');
+      return (
+        `I found ${pending.candidates.length} ${label}s matching ${quoted}, all under the same name. ` +
+        `Which one?\n${hinted}\n\nReply with the number.`
+      );
+    }
+    // Nothing else distinguishes them either — listing them back is no
+    // help at all.
     return (
       `I found ${pending.candidates.length} ${label}s matching ${quoted}, all under the same name. ` +
       `Which one — can you give me the address or phone number?`
