@@ -1843,6 +1843,206 @@ describe('A10 — update_job priority routing determinism (2026-08-31 live sweep
   });
 });
 
+describe('A14 — add_crew_member routing determinism (2026-08-31 live sweep)', () => {
+  const chatContext = { tenantId: 't1' };
+
+  it('the exact sweep utterance routes to add_crew_member with targetTechnicianName + appointmentReference extracted, no LLM call', async () => {
+    // Live evidence: this exact utterance fell through to the generic-LLM
+    // reply path with no proposal drafted — "I have NOT added Alex Rivera
+    // to the appointment. Please contact the field-service team..." — a
+    // hallucination-shaped deflection, not an honest refusal. The
+    // identical utterance shape had passed sweeps 13-14, so this is
+    // non-determinism in the LLM call, not a taxonomy gap.
+    const gateway = mockGateway('{"intentType":"unknown","confidence":0.3}');
+    const result = await classifyIntent(
+      "Add Alex Rivera to qa-matrix-A-customer's appointment as a second technician",
+      chatContext,
+      gateway,
+    );
+    expect(result.intentType).toBe('add_crew_member');
+    expect(result.confidence).toBeGreaterThanOrEqual(TAU_INT);
+    expect(result.extractedEntities?.targetTechnicianName).toBe('Alex Rivera');
+    expect(result.extractedEntities?.appointmentReference).toBe('qa-matrix-A-customer');
+    expect(gateway.complete).not.toHaveBeenCalled();
+  });
+
+  it('fires WITHOUT extendedIntents — the live miss was on plain chat, which never sets that flag', async () => {
+    for (const context of [
+      { tenantId: 't1' },
+      { tenantId: 't1', extendedIntents: true },
+    ]) {
+      const gateway = mockGateway('{"intentType":"unknown","confidence":0.2}');
+      const result = await classifyIntent(
+        "Add Priya Shah to the Henderson job's appointment as another technician",
+        context,
+        gateway,
+      );
+      expect(result.intentType).toBe('add_crew_member');
+      expect(result.extractedEntities?.targetTechnicianName).toBe('Priya Shah');
+      expect(result.extractedEntities?.appointmentReference).toBe('the Henderson job');
+      expect(gateway.complete).not.toHaveBeenCalled();
+    }
+  });
+
+  it('phrase variants also short-circuit: no possessive, "additional"/"extra" technician, trailing punctuation', async () => {
+    for (const [transcript, tech, ref] of [
+      ['Add Carlos Vega to Henderson appointment as an additional technician', 'Carlos Vega', 'Henderson'],
+      ['add tom baker to the garcia appointment as extra technician.', 'tom baker', 'the garcia'],
+      ['Add Alex Rivera to qa-matrix-A-customer\'s appointment as a second technician!', 'Alex Rivera', 'qa-matrix-A-customer'],
+    ] as const) {
+      const gateway = mockGateway('{"intentType":"unknown","confidence":0.2}');
+      const result = await classifyIntent(transcript, chatContext, gateway);
+      expect(result.intentType, `"${transcript}" should route to add_crew_member`).toBe(
+        'add_crew_member',
+      );
+      expect(result.extractedEntities?.targetTechnicianName).toBe(tech);
+      expect(result.extractedEntities?.appointmentReference).toBe(ref);
+      expect(gateway.complete).not.toHaveBeenCalled();
+    }
+  });
+
+  it('negative control: "add ... to ...\'s appointment" with NO technician-role qualifier stays LLM-routed (collides with add_note otherwise)', async () => {
+    const gateway = mockGateway('{"intentType":"add_note","confidence":0.9}');
+    const result = await classifyIntent(
+      "Add a note to qa-matrix-A-customer's appointment",
+      chatContext,
+      gateway,
+    );
+    expect(gateway.complete).toHaveBeenCalledTimes(1);
+    expect(result.intentType).toBe('add_note');
+  });
+
+  it('negative control: a differently-phrased crew-add command stays LLM-routed', async () => {
+    const gateway = mockGateway(
+      '{"intentType":"add_crew_member","confidence":0.9,"extractedEntities":{"targetTechnicianName":"Alex Rivera"}}',
+    );
+    const result = await classifyIntent(
+      'Put Alex Rivera on the qa-matrix-A-customer job as backup',
+      chatContext,
+      gateway,
+    );
+    expect(gateway.complete).toHaveBeenCalledTimes(1);
+    expect(result.extractedEntities?.targetTechnicianName).toBe('Alex Rivera');
+  });
+
+  it('matchAddCrewMemberPhrase unit-level: exact corpus utterance matches, empty/unrelated/unqualified text does not', async () => {
+    const { matchAddCrewMemberPhrase } = await import(
+      '../../../src/ai/orchestration/intent-classifier'
+    );
+    expect(
+      matchAddCrewMemberPhrase(
+        "Add Alex Rivera to qa-matrix-A-customer's appointment as a second technician",
+      ),
+    ).toEqual({ targetTechnicianName: 'Alex Rivera', appointmentReference: 'qa-matrix-A-customer' });
+    expect(matchAddCrewMemberPhrase('')).toBeNull();
+    expect(matchAddCrewMemberPhrase("Add a note to qa-matrix-A-customer's appointment")).toBeNull();
+    expect(matchAddCrewMemberPhrase('Put Alex Rivera on the job as backup')).toBeNull();
+    expect(matchAddCrewMemberPhrase('Remove Alex Rivera from the appointment')).toBeNull();
+  });
+});
+
+describe('A21 — apply_late_fee routing determinism (2026-08-31 live sweep)', () => {
+  const chatContext = { tenantId: 't1' };
+
+  it('the exact sweep utterance routes to apply_late_fee with customerName + amount extracted, no LLM call', async () => {
+    // Live evidence: this exact utterance drew NO reference field at all
+    // and no entities in sourceContext from the classifier — amount
+    // extraction alone worked (feeCents:2500 on the resulting payload),
+    // but with neither customerName nor jobReference, ApplyLateFeeTaskHandler
+    // has nothing to write to invoiceReference, so the gate can never
+    // lift. Unlike A10/A14 this reproduces on every run (#931's known
+    // few-shot territory), not intermittently.
+    const gateway = mockGateway('{"intentType":"unknown","confidence":0.3}');
+    const result = await classifyIntent(
+      "Apply a $25 late fee to qa-matrix-A-customer's overdue invoice",
+      chatContext,
+      gateway,
+    );
+    expect(result.intentType).toBe('apply_late_fee');
+    expect(result.confidence).toBeGreaterThanOrEqual(TAU_INT);
+    expect(result.extractedEntities?.customerName).toBe('qa-matrix-A-customer');
+    expect(result.extractedEntities?.amount).toBe(2500);
+    expect(gateway.complete).not.toHaveBeenCalled();
+  });
+
+  it('fires WITHOUT extendedIntents — the live miss was on plain chat, which never sets that flag', async () => {
+    for (const context of [
+      { tenantId: 't1' },
+      { tenantId: 't1', extendedIntents: true },
+    ]) {
+      const gateway = mockGateway('{"intentType":"unknown","confidence":0.2}');
+      const result = await classifyIntent(
+        "Apply a $50 late fee to Henderson's invoice",
+        context,
+        gateway,
+      );
+      expect(result.intentType).toBe('apply_late_fee');
+      expect(result.extractedEntities?.customerName).toBe('Henderson');
+      expect(result.extractedEntities?.amount).toBe(5000);
+      expect(gateway.complete).not.toHaveBeenCalled();
+    }
+  });
+
+  it('phrase variants also short-circuit: no possessive, no "$", cents, status-descriptor words, trailing punctuation', async () => {
+    for (const [transcript, name, cents] of [
+      ['Apply a $25 late fee to Henderson invoice', 'Henderson', 2500],
+      ['apply a 25 dollar late fee to garcia unpaid invoice.', 'garcia', 2500],
+      ["Apply a $12.50 late fee to qa-matrix-A-customer's outstanding invoice!", 'qa-matrix-A-customer', 1250],
+      ["Apply a $25 late fee to qa-matrix-A-customer's past due invoice", 'qa-matrix-A-customer', 2500],
+    ] as const) {
+      const gateway = mockGateway('{"intentType":"unknown","confidence":0.2}');
+      const result = await classifyIntent(transcript, chatContext, gateway);
+      expect(result.intentType, `"${transcript}" should route to apply_late_fee`).toBe(
+        'apply_late_fee',
+      );
+      expect(result.extractedEntities?.customerName).toBe(name);
+      expect(result.extractedEntities?.amount).toBe(cents);
+      expect(gateway.complete).not.toHaveBeenCalled();
+    }
+  });
+
+  it('negative control: a differently-phrased late-fee command stays LLM-routed', async () => {
+    const gateway = mockGateway(
+      '{"intentType":"apply_late_fee","confidence":0.9,"extractedEntities":{"customerName":"Henderson","amount":2500}}',
+    );
+    const result = await classifyIntent(
+      "Tack a $25 late charge onto Henderson's account",
+      chatContext,
+      gateway,
+    );
+    expect(gateway.complete).toHaveBeenCalledTimes(1);
+    expect(result.extractedEntities?.customerName).toBe('Henderson');
+  });
+
+  it('negative control: send_payment_reminder (no "late fee" phrase) stays LLM-routed', async () => {
+    const gateway = mockGateway('{"intentType":"send_payment_reminder","confidence":0.9}');
+    const result = await classifyIntent(
+      "Send qa-matrix-A-customer a payment reminder on their overdue invoice",
+      chatContext,
+      gateway,
+    );
+    expect(gateway.complete).toHaveBeenCalledTimes(1);
+    expect(result.intentType).toBe('send_payment_reminder');
+  });
+
+  it('matchApplyLateFeePhrase unit-level: exact corpus utterance matches, empty/unrelated/zero-amount text does not', async () => {
+    const { matchApplyLateFeePhrase } = await import(
+      '../../../src/ai/orchestration/intent-classifier'
+    );
+    expect(
+      matchApplyLateFeePhrase("Apply a $25 late fee to qa-matrix-A-customer's overdue invoice"),
+    ).toEqual({ customerName: 'qa-matrix-A-customer', amount: 2500 });
+    expect(matchApplyLateFeePhrase('Apply a $12.50 late fee to Henderson invoice')).toEqual({
+      customerName: 'Henderson',
+      amount: 1250,
+    });
+    expect(matchApplyLateFeePhrase('')).toBeNull();
+    expect(matchApplyLateFeePhrase("Send Henderson a payment reminder on their invoice")).toBeNull();
+    expect(matchApplyLateFeePhrase("Tack a $25 late charge onto Henderson's account")).toBeNull();
+    expect(matchApplyLateFeePhrase('Apply a late fee to the invoice')).toBeNull();
+  });
+});
+
 describe('intent-classifier — lookup_job_profit (P22-005)', () => {
   const tenantId = 'tenant-1';
 

@@ -1934,6 +1934,163 @@ export function matchUpdateJobPriorityPhrase(
   return { jobReference };
 }
 
+/**
+ * A14 (2026-08-31 live sweep) — deterministic short-circuit for the
+ * canonical dictated `add_crew_member` imperative: "Add <technician> to
+ * <appointment reference>('s) appointment as a(nother) <second/additional>
+ * technician". Same idiom as `matchUpdateJobPriorityPhrase` (A10) /
+ * `matchIssueInvoicePhrase` (A06) — this file's standing pattern for a
+ * stereotyped, entity-bearing phrasing `classify_intent` has been caught
+ * intermittently missing (passed sweeps 13-14, missed sweep 15).
+ *
+ * WHY THIS EXISTS: the live utterance — "Add Alex Rivera to qa-matrix-A-
+ * customer's appointment as a second technician" — fell through to the
+ * generic-LLM reply path with no proposal drafted at all ("I have NOT
+ * added Alex Rivera to the appointment. Please contact the field-service
+ * team...", a hallucination-shaped deflection; see ai/orchestration/
+ * assistant-honesty-guard.ts's companion fix for why that fallback can
+ * never itself fabricate a proposal). Same class of intermittent LLM miss
+ * `matchIssueInvoicePhrase` / `matchUpdateJobPriorityPhrase` / the #910
+ * lookup matchers close for their own intents — not a taxonomy gap
+ * (`add_crew_member`, `targetTechnicianName`, and `appointmentReference`
+ * are all already documented in the taxonomy).
+ *
+ * FIELD CHOICE: extracts `targetTechnicianName` and `appointmentReference`
+ * — the exact two fields `AddCrewMemberTaskHandler` reads
+ * (voice-extended-tasks.ts), and `add_crew_member` is already a member of
+ * BOTH `TECHNICIAN_REF_INTENTS` and `APPOINTMENT_REF_INTENTS`
+ * (ai/agents/customer-calling/entity-resolution.ts), so the SAME pre-draft
+ * resolvers (`existingEntities.technicianId` / `.appointmentId`) the
+ * LLM-classified path uses already pick these fields up unchanged — no
+ * downstream code needed to change. `appointmentReference` captures the
+ * bare customer-name form ("qa-matrix-A-customer", not "...'s
+ * appointment") — `resolveAppointment`'s named branch (pg-entity-
+ * resolver.ts) already resolves a bare customer name exactly as well as a
+ * fuller phrase (A11, #954/#956).
+ *
+ * ANCHORED to the FULL evidenced shape, trailing technician-role clause
+ * REQUIRED (not optional): "add <X> to <Y>'s appointment" ALONE, with no
+ * "as a(nother) technician" qualifier, is genuinely ambiguous with
+ * add_note ("add a note to the customer's appointment") and other
+ * "add ... to ..." phrasings — requiring the trailing clause is what
+ * keeps this pattern from false-firing on those, per this file's standing
+ * rule against pre-emptive land-grabs over phrasings the classifier
+ * already gets right.
+ *
+ * NOT gated on `extendedIntents`, for the same reason `matchIssueInvoicePhrase`
+ * / `matchUpdateJobPriorityPhrase` aren't: the live A14 failure was on
+ * `surface: "chat"`, which never sets that flag.
+ *
+ * Safe to bypass the LLM for a WRITE intent for the same reasons those
+ * matchers are: D-004 (proposal-first, never auto-executed) plus
+ * `AddCrewMemberTaskHandler`'s own draft-time gate — an unresolved
+ * technician name or appointment reference is persisted with
+ * `missingFields` set, never silently applied. A misfire here at worst
+ * drafts an add_crew_member proposal nobody asked for, sitting unapproved
+ * — capture-class, always human-approved regardless.
+ */
+const ADD_CREW_MEMBER_PATTERN =
+  /^\s*add\s+(.{1,60}?)\s+to\s+(.{1,80}?)(?:'s)?\s+appointment\s+as\s+(?:an?\s+)?(?:second|another|additional|extra)\s+technician\s*[.!]?\s*$/i;
+
+export function matchAddCrewMemberPhrase(
+  transcript: string,
+): { targetTechnicianName: string; appointmentReference: string } | null {
+  if (!transcript) return null;
+  const match = ADD_CREW_MEMBER_PATTERN.exec(transcript);
+  if (!match) return null;
+  const targetTechnicianName = match[1].trim();
+  const appointmentReference = match[2].trim();
+  if (!targetTechnicianName || !appointmentReference) return null;
+  return { targetTechnicianName, appointmentReference };
+}
+
+/** "$1,234.5" -> 123450 integer cents via string math (no float drift, per
+ *  CLAUDE.md "all money: integer cents"). Mirrors invoices/milestone-
+ *  sentence-parser.ts's private `dollarsToCents` — not imported from there
+ *  (that module's helper is unexported and scoped to its own parser), kept
+ *  local here for the identical reason every matcher in this file is
+ *  self-contained. */
+function parseDollarsToCents(raw: string): number | null {
+  const cleaned = raw.replace(/,/g, '');
+  const m = cleaned.match(/^(\d+)(?:\.(\d{1,2}))?$/);
+  if (!m) return null;
+  const cents = Number(m[1]) * 100 + Number((m[2] ?? '').padEnd(2, '0') || '0');
+  return Number.isSafeInteger(cents) ? cents : null;
+}
+
+/**
+ * A21 (2026-08-31 live sweep) — deterministic short-circuit for the
+ * canonical dictated `apply_late_fee` imperative: "Apply a $<amount> late
+ * fee to <customer reference>('s) (overdue/unpaid/...) invoice". Same
+ * idiom as `matchAddCrewMemberPhrase` (A14) / `matchUpdateJobPriorityPhrase`
+ * (A10) — this file's standing pattern for a stereotyped, entity-bearing
+ * phrasing `classify_intent` has been caught missing (this is now the
+ * deterministic case, not intermittent — see the class comment below).
+ *
+ * WHY THIS EXISTS: the live utterance — "Apply a $25 late fee to
+ * qa-matrix-A-customer's overdue invoice" — draws NO reference field at
+ * all and no entities in sourceContext from the classifier: `amount`
+ * extracts fine (feeCents:2500 on the resulting payload), but neither
+ * `customerName` nor `jobReference` comes back, so `ApplyLateFeeTaskHandler`
+ * (ee.jobReference ?? ee.customerName) has nothing to write to
+ * `invoiceReference`, and the #954 honest-line fix (gated-reference-
+ * resolution.ts) correctly reports "I couldn't automatically match that"
+ * for a gate with genuinely no reference text anywhere — working as
+ * designed, but the gate can never lift either way. This is #931's known
+ * few-shot territory for this exact phrasing; the campaign convention
+ * (per #946/#951/#954/#956) is to close a known LLM-extraction gap
+ * deterministically for the evidenced phrasing rather than touch the
+ * pinned classifier prompt.
+ *
+ * FIELD CHOICE: extracts `customerName` (mirrors `matchLookupBalancePhrase`
+ * / `matchLookupAccountSummaryPhrase` — a spoken possessive customer
+ * reference, not a document number) and `amount` (integer cents — the
+ * taxonomy's own field, `ExtractedEntities.amount`; `ApplyLateFeeTaskHandler`
+ * already reads `ee.amount` into `payload.feeCents` unchanged, so this
+ * does not duplicate anything the handler computes — it only supplies the
+ * classifier-contract field the handler already expects). No dedicated
+ * `invoiceReference` extraction field exists anywhere in the taxonomy
+ * (confirmed: every invoice-doc intent reuses `jobReference`/`customerName`
+ * — INVOICE_DOC_INTENTS' own comment, ai/agents/customer-calling/
+ * entity-resolution.ts) — `apply_late_fee` is a CUSTOMER_REF_INTENTS
+ * member, so `customerName` resolves to `existingEntities.customerId`
+ * pre-draft the same way it does for the LLM-classified path, and the
+ * generic post-draft gated-reference loop's `entityFields` fallback
+ * (GATED_REFERENCE_SOURCES.invoiceId) also reads raw `customerName` when
+ * `payload.invoiceReference` alone doesn't resolve.
+ *
+ * ANCHORED to "apply a $<amount> late fee to <reference>('s) invoice" —
+ * the "late fee" phrase pair is specific enough that no other intent's
+ * ordinary phrasing collides with it.
+ *
+ * NOT gated on `extendedIntents`, for the same reason the other write-intent
+ * matchers in this file aren't: the live A21 failure was on `surface:
+ * "chat"`, which never sets that flag.
+ *
+ * Safe to bypass the LLM for a WRITE intent for the same reasons those
+ * matchers are: D-004 (proposal-first, never auto-executed) plus
+ * `ApplyLateFeeTaskHandler`'s own draft-time gate — an unresolved customer
+ * reference is persisted with `missingFields: ['invoiceId']` and the honest
+ * can't-match reply, never silently applied. A misfire here at worst
+ * drafts an apply_late_fee proposal nobody asked for, sitting unapproved —
+ * money-class, never auto-approves regardless.
+ */
+const APPLY_LATE_FEE_PATTERN =
+  /^\s*apply\s+(?:an?\s+)?\$?(\d+(?:\.\d{1,2})?)\s*(?:dollars?\s+)?late\s+fee\s+to\s+(.{1,80}?)(?:'s)?\s+(?:(?:overdue|unpaid|outstanding|past\s+due|delinquent)\s+)?invoice\s*[.!]?\s*$/i;
+
+export function matchApplyLateFeePhrase(
+  transcript: string,
+): { customerName: string; amount: number } | null {
+  if (!transcript) return null;
+  const match = APPLY_LATE_FEE_PATTERN.exec(transcript);
+  if (!match) return null;
+  const customerName = match[2].trim();
+  if (!customerName) return null;
+  const amount = parseDollarsToCents(match[1]);
+  if (amount === null || amount <= 0) return null;
+  return { customerName, amount };
+}
+
 /** RV-071 — predicate the voice routing layers use to gate owner approval intents. */
 export function isVoiceApprovalIntent(
   intent: IntentType | string | undefined | null,
@@ -2446,6 +2603,45 @@ async function classifyIntentRaw(
       confidence: 0.95,
       reasoning: 'matched deterministic update_job priority phrasing',
       extractedEntities: { jobReference: updateJobPriorityMatch.jobReference },
+    };
+  }
+
+  // A14 (2026-08-31 live sweep) — the anchored "add <technician> to
+  // <reference>'s appointment as a(nother) technician" imperative.
+  // Deliberately OUTSIDE the `extendedIntents` block above, same reasoning
+  // as `matchUpdateJobPriorityPhrase` immediately above: the live miss was
+  // on `surface: "chat"`, which never sets that flag. See
+  // matchAddCrewMemberPhrase's doc comment for the full story and why an
+  // anchored write-intent short-circuit is safe here.
+  const addCrewMemberMatch = matchAddCrewMemberPhrase(transcript);
+  if (addCrewMemberMatch) {
+    return {
+      intentType: 'add_crew_member',
+      confidence: 0.95,
+      reasoning: 'matched deterministic add_crew_member phrasing',
+      extractedEntities: {
+        targetTechnicianName: addCrewMemberMatch.targetTechnicianName,
+        appointmentReference: addCrewMemberMatch.appointmentReference,
+      },
+    };
+  }
+
+  // A21 (2026-08-31 live sweep) — the anchored "apply a $<amount> late fee
+  // to <reference>('s) invoice" imperative. Deliberately OUTSIDE the
+  // `extendedIntents` block above, same reasoning as the matchers
+  // immediately above: the live miss was on `surface: "chat"`, which never
+  // sets that flag. See matchApplyLateFeePhrase's doc comment for the full
+  // story and why an anchored write-intent short-circuit is safe here.
+  const applyLateFeeMatch = matchApplyLateFeePhrase(transcript);
+  if (applyLateFeeMatch) {
+    return {
+      intentType: 'apply_late_fee',
+      confidence: 0.95,
+      reasoning: 'matched deterministic apply_late_fee phrasing',
+      extractedEntities: {
+        customerName: applyLateFeeMatch.customerName,
+        amount: applyLateFeeMatch.amount,
+      },
     };
   }
 
