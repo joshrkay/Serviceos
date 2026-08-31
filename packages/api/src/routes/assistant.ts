@@ -2889,6 +2889,34 @@ export function createAssistantRouter(deps: AssistantRouterDeps): Router {
         req.header('x-correlation-id') || `assistant-${req.auth!.userId}-${uuidv4()}`;
       try {
         const parsed = assistantChatRequestSchema.parse(req.body);
+
+        // #909 (2026-08-31) — resolve (or MINT) the conversation id BEFORE
+        // drafting, not after. This used to draft with `parsed.
+        // conversationId` verbatim (undefined on a brand-new conversation's
+        // first turn) and only resolve/mint the REAL id afterward via
+        // `recordAssistantTurn`, returning THAT id to the client — so a
+        // proposal drafted on a conversation's opening turn was stamped
+        // with NO conversation id at all (task-input.ts's
+        // `baseSourceContext` only stamps `sourceContext.conversationId`
+        // when one is present). `findPendingClarification` (below) and
+        // `ProposalRepository.findByConversation` key on exactly that
+        // field, so a D-029 clarification ask drafted on turn 1 could never
+        // be found by turn 2's plain-text answer — it landed as a fresh,
+        // unrelated utterance instead (live sweep 2026-08-31T01-33, rows
+        // A12/A20: "the tune-up one" / "the most recent one" both got
+        // generic-LLM confusion, never `applyDisambiguationAnswer`).
+        //
+        // Only the ABSENT case is minted here — a present value (whatever
+        // shape) passes through unchanged, exactly as before: a caller that
+        // already tracks conversations by its own non-UUID key (a test
+        // fixture, or a future non-Postgres-backed caller) must keep
+        // working unmodified. `recordAssistantTurn` below still
+        // self-corrects a value it can't honor (see the reassignment and
+        // its own doc comment, conversations/conversation-service.ts) —
+        // this fix is strictly about the one case that was never resolved
+        // AT ALL before drafting: absent.
+        let conversationId = parsed.conversationId ?? uuidv4();
+
         const result = await generateAssistantReply(
           parsed.messages,
           req.auth!.tenantId,
@@ -2897,11 +2925,13 @@ export function createAssistantRouter(deps: AssistantRouterDeps): Router {
           correlationId,
           sharedHandlers,
           parsed.inputMode,
-          // B4 — the client-pinned conversation id (undefined on a fresh
-          // conversation's first turn); threads into TaskContext.conversationId
-          // for handlers like IssueInvoiceTaskHandler that resolve "the one we
-          // just drafted" from same-conversation proposal history.
-          parsed.conversationId,
+          // B4 — threads into TaskContext.conversationId for every drafting
+          // handler (baseSourceContext stamps sourceContext.conversationId
+          // from this), and for handlers like IssueInvoiceTaskHandler that
+          // resolve "the one we just drafted" from same-conversation
+          // proposal history. Always defined now (see above) — never the
+          // bare, possibly-absent `parsed.conversationId`.
+          conversationId,
           // DB-authoritative role (requireTenant overwrites req.auth.role with
           // the membership row's role), so a stale/forged `owner` token claim
           // cannot buy a self-executing proposal.
@@ -2920,7 +2950,16 @@ export function createAssistantRouter(deps: AssistantRouterDeps): Router {
         // Story 3.11 — persist the turn so the conversation survives reload and
         // is searchable. Failure-soft: a persistence error must not drop the
         // reply the operator is waiting on.
-        let conversationId = parsed.conversationId;
+        //
+        // Still reassigns `conversationId` from the result, same as before
+        // this fix — `recordAssistantTurn` is the SOURCE OF TRUTH for what
+        // actually got persisted, and in the one case it can legitimately
+        // still diverge (a present-but-non-UUID-shaped value it can't
+        // safely reuse as a primary key — see its own doc comment) this is
+        // what makes the client-visible id match reality. In the common
+        // case (absent → minted above, or an already-real conversation id)
+        // it is a no-op: `recordAssistantTurn` returns exactly what it was
+        // given.
         if (deps.conversationRepo) {
           try {
             const lastUserText =
@@ -2930,7 +2969,7 @@ export function createAssistantRouter(deps: AssistantRouterDeps): Router {
               {
                 tenantId: req.auth!.tenantId,
                 userId: req.auth!.userId,
-                conversationId: parsed.conversationId,
+                conversationId,
                 userText: lastUserText,
                 assistantText: result.message.content,
               },

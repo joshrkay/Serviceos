@@ -52,7 +52,7 @@ export class PgConversationRepository extends PgBaseRepository implements Conver
   }
 
   async createConversation(input: CreateConversationInput): Promise<Conversation> {
-    const id = uuidv4();
+    const id = input.id ?? uuidv4();
     const now = new Date();
     return this.withTenant(input.tenantId, async (client) => {
       const result = await client.query(
@@ -159,7 +159,7 @@ export class PgConversationRepository extends PgBaseRepository implements Conver
     conversation: CreateConversationInput,
     messages: Array<Omit<CreateMessageInput, 'conversationId'>>,
   ): Promise<{ conversation: Conversation; messages: Message[] }> {
-    const convId = uuidv4();
+    const convId = conversation.id ?? uuidv4();
     const now = new Date();
     return this.withTenantTransaction(conversation.tenantId, async (client) => {
       const convResult = await client.query(
