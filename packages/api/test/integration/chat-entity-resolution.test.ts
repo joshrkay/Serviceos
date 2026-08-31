@@ -41,6 +41,7 @@ import { PgAuditRepository } from '../../src/audit/pg-audit';
 import { PgLeadRepository } from '../../src/leads/pg-lead';
 import { PgCatalogItemRepository } from '../../src/catalog/pg-catalog-item';
 import { createCatalogItem } from '../../src/catalog/catalog-item';
+import { PgConversationRepository } from '../../src/conversations/pg-conversation';
 import { createAssistantRouter } from '../../src/routes/assistant';
 import type { AuthenticatedRequest } from '../../src/middleware/auth';
 import type { LLMGateway, LLMResponse } from '../../src/ai/gateway/gateway';
@@ -97,6 +98,7 @@ describe('Integration — #909 chat entity resolution (real Postgres + real reso
   let auditRepo: PgAuditRepository;
   let leadRepo: PgLeadRepository;
   let catalogRepo: PgCatalogItemRepository;
+  let conversationRepo: PgConversationRepository;
 
   beforeAll(async () => {
     pool = await getSharedTestDb();
@@ -109,6 +111,7 @@ describe('Integration — #909 chat entity resolution (real Postgres + real reso
     auditRepo = new PgAuditRepository(pool);
     leadRepo = new PgLeadRepository(pool);
     catalogRepo = new PgCatalogItemRepository(pool);
+    conversationRepo = new PgConversationRepository(pool);
     setSupervisorPresenceLoader(async () => true);
   });
 
@@ -366,6 +369,14 @@ describe('Integration — #909 chat entity resolution (real Postgres + real reso
         customerRepo,
         auditRepo,
         catalogRepo,
+        // #909 (2026-08-31) — real conversation persistence, matching
+        // production wiring (app.ts always threads a conversationRepo).
+        // Load-bearing for the LIVE-ARRANGEMENT test below: without this,
+        // recordAssistantTurn never runs at all and turn 1 returns NO
+        // conversationId — an even more severe symptom than the live one,
+        // which DOES get an id back (conversation persistence IS wired in
+        // production) but the WRONG one relative to the drafted proposal.
+        conversationRepo,
         tenantTimezoneResolver: async () => TZ,
       }),
     );
@@ -617,6 +628,77 @@ describe('Integration — #909 chat entity resolution (real Postgres + real reso
       .post('/api/assistant/chat')
       .send({ messages: [{ role: 'user', content: 'Marcus' }], conversationId });
     expect(second.status).toBe(200);
+    expect(second.body.taskType).toBe('assistant.entity_resolution');
+
+    const [resolved] = await proposalRepo.findByTenant(seed.tenantId);
+    expect(resolved.payload.leadId).toBe(marcus);
+    await expect(
+      approveProposal(proposalRepo, seed.tenantId, resolved.id, seed.userId, 'owner'),
+    ).resolves.toBeTruthy();
+  });
+
+  // ───────────────────────────────────────────────────────────────────────
+  // #909 (live sweep 2026-08-31T01-33, rows A12/A20) — the LIVE arrangement,
+  // not the one above. The test above pre-generates `conversationId`
+  // CLIENT-SIDE and sends it on turn 1 already — sidestepping the actual
+  // defect entirely, since a client-supplied id is already defined at
+  // draft time. A real chat client's (and the sweep runner's) first-ever
+  // turn on a NEW conversation sends NO conversationId — the server mints
+  // one and returns it in the response envelope, and the client is
+  // expected to send that SAME id back on the next turn. Before this
+  // round's fix, the id used to draft (and stamp `sourceContext.
+  // conversationId`) was resolved separately from — and BEFORE — the id
+  // `recordAssistantTurn` minted and returned to the client, so the two
+  // never matched: the answer turn's `findByConversation` lookup found
+  // nothing and fell through to generic classification ("Please provide
+  // more details about the tune-up service you are referring to...", live
+  // evidence — never `applyDisambiguationAnswer`).
+  // ───────────────────────────────────────────────────────────────────────
+  it('LIVE ARRANGEMENT: no conversationId on turn 1 (server mints it) — the SAME id returned is what the answer turn must resolve against', async () => {
+    const seed = await seedTenant();
+    await seedLead(seed, 'Dana', 'Johnson');
+    const marcus = await seedLead(seed, 'Marcus', 'Johnson');
+
+    const proposalRepo = new InMemoryProposalRepository();
+    const app = buildApp(
+      seed,
+      proposalRepo,
+      // ONE classifier script entry: the answer turn must not reclassify.
+      scriptedGateway([classifierReply('convert_lead', { leadReference: 'the Johnson lead' })]),
+    );
+
+    // Turn 1 — no conversationId in the request body at all.
+    const first = await supertest(app)
+      .post('/api/assistant/chat')
+      .send({ messages: [{ role: 'user', content: 'Convert the Johnson lead to a customer' }] });
+    expect(first.status).toBe(200);
+    expect(first.body.message.content).toContain('Which lead did you mean');
+    // The server MUST hand back a usable conversation id for the client to
+    // pin — this is the API's own documented contract ("The reply envelope
+    // carries the conversation id so the client pins the thread").
+    const returnedConversationId = first.body.conversationId as string | undefined;
+    expect(returnedConversationId).toBeTruthy();
+
+    const [gated] = await proposalRepo.findByTenant(seed.tenantId);
+    expect(gated.payload.leadId).toBeUndefined();
+
+    // Turn 2 — the EXACT id the server returned from turn 1, precisely what
+    // a spec-following client (and the sweep runner) sends.
+    const second = await supertest(app)
+      .post('/api/assistant/chat')
+      .send({
+        messages: [{ role: 'user', content: 'Marcus' }],
+        conversationId: returnedConversationId,
+      });
+    expect(second.status).toBe(200);
+    // The live-broken behavior this test pins RED against: before the fix,
+    // `findPendingClarification` finds nothing (the drafted proposal was
+    // never stamped with the id turn 2 sends back), so this turn is
+    // classified as a brand-new utterance instead of resolving the pending
+    // ambiguity — verified red via `git stash` (taskType came back
+    // 'assistant.convert_lead', the scripted classifier's lone queued
+    // response, standing in here for the live path's real-LLM
+    // generic-confusion reply to a bare "Marcus" with no context).
     expect(second.body.taskType).toBe('assistant.entity_resolution');
 
     const [resolved] = await proposalRepo.findByTenant(seed.tenantId);
