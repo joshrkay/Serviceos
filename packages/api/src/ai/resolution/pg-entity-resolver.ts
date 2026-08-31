@@ -750,6 +750,36 @@ export class PgEntityResolver implements EntityResolver {
              strict_word_similarity($2, c.display_name),
              COALESCE(strict_word_similarity($2, c.company_name), 0)
            )`;
+    // Status floor (2026-08-31), grounded in the EXECUTION handlers that
+    // actually consume a resolved `estimateId` (proposals/execution/*), the
+    // same way #944 grounded invoiceId's: `SendEstimateNudgeExecutionHandler`
+    // hard-rejects anything but 'sent' ("only a sent, still-unanswered
+    // estimate can be nudged"); `UpdateEstimateExecutionHandler` (via
+    // `assertEstimateEditable`, estimates/estimate.ts) hard-rejects 'rejected'
+    // and 'expired' unconditionally ("Reopen it to draft first") — no
+    // `allowSent`/`allowAccepted` opt-out reaches those two, unlike 'sent'
+    // (revise flow) and 'accepted' (RV-042 invalidation). 'rejected'/
+    // 'expired' are therefore the ONLY two statuses genuinely dead across
+    // every consumer that resolves this traversal's output into a mutation
+    // target, so they are excluded here.
+    //
+    // 'draft' and 'accepted' are deliberately LEFT IN, for the identical
+    // reason invoice's 'draft' was: `update_estimate` resolves this same
+    // `estimateId` field to reach BOTH — a draft is its single most ordinary
+    // edit target, and an accepted estimate is RV-042's own documented edit
+    // path (acceptance invalidation). Excluding either would have silently
+    // broken update_estimate to fix send_estimate_nudge. 'sent' and
+    // 'ready_for_review' stay reachable too: nudge requires 'sent'
+    // specifically, and `SendEstimateExecutionHandler` (send_estimate) has NO
+    // status check at all — it will happily send an estimate in any status,
+    // 'rejected'/'expired' included. That is a real, live gap (this fix does
+    // not narrow what an OPERATOR can act on by EXACT estimate number —
+    // `resolveExactDocumentNumber` above is untouched — only what the fuzzy
+    // customer-name fallback offers), reported rather than silently
+    // resolved: a rejected/expired estimate is not a defensible "which one
+    // did you mean" candidate for a bare customer-name reference the same
+    // way a void/canceled invoice never was, and the operator can still
+    // reach a specific dead one by its number.
     const rows = await withTenantConnection(this.pool, tenantId, (client) =>
       client
         .query<{
@@ -769,6 +799,7 @@ export class PgEntityResolver implements EntityResolver {
               AND c.is_archived = false
             WHERE e.tenant_id = $1
               AND e.deleted_at IS NULL
+              AND e.status NOT IN ('rejected', 'expired')
               AND ${SCORE_EXPR} > $3
             ORDER BY score DESC
             LIMIT ${MAX_ESTIMATE_CANDIDATES + 1}`,

@@ -657,6 +657,104 @@ function kindLabel(kind: EntityKind): string {
   }
 }
 
+/**
+ * Kind-appropriate "here's what would help" phrase for
+ * `buildUnresolvedPrompt` below — what a human would actually read off the
+ * record to answer with, not the schema's own field name.
+ */
+function whatToSupply(kind: EntityKind): string {
+  switch (kind) {
+    case 'invoice':
+      return 'the invoice number (e.g. "INV-1005")';
+    case 'estimate':
+      return 'the estimate number (e.g. "EST-1005")';
+    case 'customer':
+      return "the customer's name";
+    case 'job':
+      return 'the job name or number';
+    case 'catalogItem':
+      return 'the exact catalog item name';
+    case 'appointment':
+      return 'the date and time';
+    case 'technician':
+      return "the team member's name";
+    case 'lead':
+      return "the lead's name (or company)";
+    default:
+      return 'more detail';
+  }
+}
+
+/**
+ * #909 generalization (2026-08-31) — the honest line for a gated field that
+ * resolved to neither a fill nor an ambiguity: `not_found` (nothing
+ * matched) and the resolver's own overflow refusal (too many confident
+ * matches to safely offer a picker — the MAX_X_CANDIDATES escalation every
+ * kind in pg-entity-resolver.ts applies, a deliberate "escalate rather than
+ * guess" design, not a bug) both collapse to this SAME outcome shape: no
+ * candidates to list, nothing for `buildDisambiguationQuestion` to render.
+ *
+ * Originally shipped (#946) scoped to `invoiceId` only, after the identical
+ * defect reproduced live for send_payment_reminder/apply_late_fee: an
+ * unresolved gate silently degraded the chat reply to the SAME "Review and
+ * approve to proceed" text a fully-resolved draft gets, so the operator had
+ * no signal anything needed their input and D-029's answer turn never got a
+ * question to answer. That same silence reproduces for ANY kind whose
+ * candidate set can grow past its picker ceiling (estimateId did, live —
+ * send_estimate_nudge's fixture customer accumulates 'sent' estimates
+ * across sweep runs the same way the invoice fixture accumulates invoices)
+ * or that simply matches nothing — so this generalizes the fix to every
+ * kind in `GATED_REFERENCE_SOURCES` at once, rather than adding kinds
+ * one-by-one as each one's own live failure surfaces.
+ *
+ * Deliberately NOT a numbered picker — the resolver already refused to
+ * fabricate one (that is exactly what `not_found`/overflow means here); a
+ * plain-language nudge naming what would let a human resolve it themselves
+ * is the honest, safe alternative (never guesses; D-004 untouched).
+ */
+export function buildUnresolvedPrompt(kind: EntityKind): string {
+  return `I couldn't automatically match that — reply with ${whatToSupply(kind)} and I'll pick it up.`;
+}
+
+/**
+ * The ONE thing the chat surface says back after a post-draft resolution
+ * pass, given its outcome. Pure — no I/O, no proposal mutation (the caller
+ * already applied `outcome.filled`/stamped the ambiguity before calling
+ * this) — so the full "what does the operator see" decision for EVERY
+ * registered kind is unit-testable without a resolver, a proposal, or an
+ * HTTP route. Extracted from routes/assistant.ts's `resolveGatedReferencesForChat`
+ * (2026-08-31) specifically so a table-driven test could cover every kind
+ * in `GATED_REFERENCE_SOURCES` at once (D-026's "one core, thin adapters" —
+ * this IS the core; the chat route is the thin adapter that applies the
+ * outcome and calls this for the copy).
+ *
+ * Three outcomes, in priority order:
+ *   ambiguous, and this caller is asking → the ONE numbered question
+ *     (`buildDisambiguationQuestion`).
+ *   otherwise, something is still unresolved → the honest can't-match line
+ *     for the FIRST such field (`buildUnresolvedPrompt`) — covers BOTH
+ *     `not_found` (nothing matched) and the resolver's own overflow refusal
+ *     (too many confident matches to safely offer a picker): both collapse
+ *     to the identical `unresolved`-with-no-`ambiguity` shape at this
+ *     layer, so there is nothing that distinguishes them for this function
+ *     to special-case — the honest line covers both by construction.
+ *   nothing left unresolved (fully resolved, or this caller isn't asking —
+ *     the chain path passes `askClarification: false`) → undefined, the
+ *     caller's existing reply stands unchanged.
+ */
+export function buildGatedReferenceReply(
+  outcome: GatedReferenceOutcome,
+  askClarification: boolean,
+): string | undefined {
+  if (!askClarification) return undefined;
+  if (outcome.ambiguity) return buildDisambiguationQuestion(outcome.ambiguity);
+  if (outcome.unresolved.length > 0) {
+    const source = GATED_REFERENCE_SOURCES[outcome.unresolved[0]];
+    if (source) return buildUnresolvedPrompt(source.kind);
+  }
+  return undefined;
+}
+
 /** How many options a single question may list before it stops being one question. */
 export const MAX_LISTED_CANDIDATES = 3;
 

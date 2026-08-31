@@ -41,6 +41,9 @@ import { PgAuditRepository } from '../../src/audit/pg-audit';
 import { PgLeadRepository } from '../../src/leads/pg-lead';
 import { PgCatalogItemRepository } from '../../src/catalog/pg-catalog-item';
 import { createCatalogItem } from '../../src/catalog/catalog-item';
+import { PgEstimateRepository } from '../../src/estimates/pg-estimate';
+import { createEstimate } from '../../src/estimates/estimate';
+import { buildLineItem } from '../../src/shared/billing-engine';
 import { PgConversationRepository } from '../../src/conversations/pg-conversation';
 import { createAssistantRouter } from '../../src/routes/assistant';
 import type { AuthenticatedRequest } from '../../src/middleware/auth';
@@ -99,6 +102,7 @@ describe('Integration — #909 chat entity resolution (real Postgres + real reso
   let leadRepo: PgLeadRepository;
   let catalogRepo: PgCatalogItemRepository;
   let conversationRepo: PgConversationRepository;
+  let estimateRepo: PgEstimateRepository;
 
   beforeAll(async () => {
     pool = await getSharedTestDb();
@@ -112,6 +116,7 @@ describe('Integration — #909 chat entity resolution (real Postgres + real reso
     leadRepo = new PgLeadRepository(pool);
     catalogRepo = new PgCatalogItemRepository(pool);
     conversationRepo = new PgConversationRepository(pool);
+    estimateRepo = new PgEstimateRepository(pool);
     setSupervisorPresenceLoader(async () => true);
   });
 
@@ -377,6 +382,21 @@ describe('Integration — #909 chat entity resolution (real Postgres + real reso
         // which DOES get an id back (conversation persistence IS wired in
         // production) but the WRONG one relative to the drafted proposal.
         conversationRepo,
+        // #909 (2026-08-31, TASK 1 generalization) — matching production
+        // wiring (app.ts threads estimateRepo into createAssistantRouter).
+        // With it wired, SendEstimateNudgeTaskHandler's OWN customer ->
+        // jobs -> estimates candidate search (candidateEstimates /
+        // estimatesForResolvedCustomer) runs on chat too — `send_estimate_
+        // nudge` IS a CUSTOMER_REF_INTENTS member, so a resolvable spoken
+        // name reaches it via `existingEntities.customerId`, independent of
+        // the separate CHAT_CONTEXT_CUSTOMER_ID_INTENTS allowlist (which
+        // only gates the top-level `context.customerId` field). See the
+        // describe-block comment on the A19 test below for why that makes
+        // the handler's own resolution the one that fires in the ordinary
+        // case, and what it actually takes to reach the GENERIC post-draft
+        // loop (PgEntityResolver.resolveEstimate, via entityResolver above)
+        // instead.
+        estimateRepo,
         tenantTimezoneResolver: async () => TZ,
       }),
     );
@@ -1114,6 +1134,165 @@ describe('Integration — #909 chat entity resolution (real Postgres + real reso
       const [gated] = await proposalRepo.findByTenant(seed.tenantId);
       expect(missingFieldsFor(gated)).toEqual(['invoiceId']);
       expect((gated.sourceContext as Record<string, unknown>).pendingEntityAmbiguity).toBeUndefined();
+    });
+  });
+
+  // ───────────────────────────────────────────────────────────────────────
+  // #909 generalization (2026-08-31, TASK 1) — send_estimate_nudge, live
+  // sweep 2026-08-31T01-33, row A19 (proposal ec527f8c). Root cause: the
+  // nudge-fixture customer accumulates 'sent' estimates across sweep rounds
+  // (nothing quarantines a prior round's) — by round 9/10 there are 5+, so
+  // PgEntityResolver.resolveEstimate's customer-name traversal trips its
+  // own overflow guard (MAX_ESTIMATE_CANDIDATES=5) and answers not_found
+  // instead of ambiguous. The generic post-draft loop
+  // (resolveGatedReferencesForChat -> buildGatedReferenceReply) then had
+  // nothing to say — before this round, only invoiceId got the honest
+  // can't-match line (#946); estimateId silently degraded to the same
+  // "Review and approve to proceed" text a fully-resolved draft gets.
+  //
+  // CORRECTION (this round, found by actually running the naive version of
+  // this test): SendEstimateNudgeTaskHandler's OWN candidate search
+  // (customer -> jobs -> estimates) is NOT blocked on chat the way an
+  // earlier draft of this comment claimed. `send_estimate_nudge` IS a
+  // member of `CUSTOMER_REF_INTENTS` (ai/agents/customer-calling/
+  // entity-resolution.ts) specifically so a spoken customer name resolves
+  // to `existingEntities.customerId` BEFORE drafting
+  // (resolveVerifiedIdsForDraft -> resolveVoiceEntityReferences, called
+  // for every chat turn regardless of CHAT_CONTEXT_CUSTOMER_ID_INTENTS —
+  // that separate allowlist only gates the TOP-LEVEL `context.customerId`
+  // field, a different seam). With exactly one "qa-matrix-A-customer" row,
+  // that pre-draft resolution succeeds, `estimatesForResolvedCustomer`
+  // finds all 6 sent estimates on the one seeded job, and the handler's
+  // own AC-2 `clarify()` branch asks a perfectly good question by itself —
+  // the generic loop is never reached, and a test built that way would
+  // prove nothing (see docs/solutions/test-failures/
+  // a-fixture-arranged-to-pass-proves-nothing.md).
+  //
+  // So reaching the ACTUAL live shape needs the thing the sweep's own
+  // accumulation is doing to the CUSTOMER table too, not just the
+  // estimates table: `resolveCustomer` (unlike resolveEstimate/resolveJob/
+  // resolveInvoice) has NO overflow escalation — `toResult` just returns
+  // `ambiguous` once 2+ candidates clear TAU_ENT — and an ambiguous
+  // pre-draft resolution is silently discarded, not asked about
+  // (`resolveVerifiedIdsForDraft`: `if (annotation.kind !== 'ok') return
+  // {}`, assistant.ts — a separate, unaddressed gap, out of scope here).
+  // A second customer row sharing the exact same display name reproduces
+  // that discard: `existingEntities.customerId` never populates,
+  // `estimatesForResolvedCustomer` returns `[]` (nothing to scope jobs by),
+  // the ILIKE fallback on the plain customer-name text matches nothing
+  // (estimate_number/customer_message never carry it, by design), and the
+  // handler gates blank (AC-4) with only `estimateReference` carrying the
+  // spoken name. ONLY THEN does the generic post-draft loop's independent
+  // `resolveEstimate` SQL traversal run — scoring straight off
+  // `customers.display_name` via its own SCORE_EXPR, unrelated to
+  // resolveCustomer's ambiguity — and with 6 sent estimates confidently
+  // matching, it trips MAX_ESTIMATE_CANDIDATES(5) exactly like #946's
+  // invoiceId case. That is what this test actually seeds.
+  // ───────────────────────────────────────────────────────────────────────
+  describe('estimate resolution — send_estimate_nudge (live sweep A19, #909)', () => {
+    async function seedSentEstimateFor(seed: Seed): Promise<string> {
+      const estimate = await createEstimate(
+        {
+          tenantId: seed.tenantId,
+          jobId: seed.jobId,
+          estimateNumber: `EST-${crypto.randomUUID().slice(0, 8)}`,
+          lineItems: [buildLineItem('li-1', 'Diagnostic', 1, 9900, 0, true, 'labor')],
+          createdBy: seed.userId,
+        },
+        estimateRepo,
+      );
+      await pool.query(`UPDATE estimates SET status = 'sent' WHERE id = $1`, [estimate.id]);
+      return estimate.id;
+    }
+
+    it('A19: MORE sent estimates than the picker can show (sweep 9/10 live shape) — the reply says so instead of going silent', async () => {
+      const seed = await seedTenant();
+      // A SECOND customer sharing the exact same display name — see the
+      // describe-block comment above for why this is required to reach the
+      // generic post-draft loop at all (without it, SendEstimateNudgeTask
+      // Handler's own customer -> jobs -> estimates search resolves
+      // cleanly and asks its own perfectly good question; this fixture
+      // reproduces the sweep's own "same-named fixture accumulates" shape
+      // one level up, on the customer itself, so the PRE-draft resolution
+      // is what goes ambiguous-and-silently-discarded).
+      await customerRepo.create({
+        id: crypto.randomUUID(),
+        tenantId: seed.tenantId,
+        firstName: CUSTOMER_NAME,
+        lastName: '',
+        displayName: CUSTOMER_NAME,
+        preferredChannel: 'phone',
+        smsConsent: false,
+        isArchived: false,
+        createdBy: seed.userId,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      });
+      // One per completed sweep round, never quarantined between runs —
+      // 6 > MAX_ESTIMATE_CANDIDATES(5) trips the overflow guard.
+      for (let i = 0; i < 6; i++) {
+        await seedSentEstimateFor(seed);
+      }
+
+      const proposalRepo = new InMemoryProposalRepository();
+      const app = buildApp(
+        seed,
+        proposalRepo,
+        scriptedGateway([
+          classifierReply('send_estimate_nudge', { customerName: CUSTOMER_NAME }),
+        ]),
+      );
+
+      const res = await supertest(app)
+        .post('/api/assistant/chat')
+        .send({
+          messages: [
+            { role: 'user', content: `Nudge ${CUSTOMER_NAME} about the estimate we sent` },
+          ],
+        });
+      expect(res.status).toBe(200);
+      // The live-broken behavior this test pins RED against: before this
+      // round, this content is `${title}. Review and approve to proceed.`
+      // — indistinguishable from a proposal that needs nothing further.
+      expect(res.body.message.content).toContain('reply with the estimate number');
+      expect(res.body.message.content).not.toContain('Which estimate did you mean');
+
+      const [gated] = await proposalRepo.findByTenant(seed.tenantId);
+      expect(gated.proposalType).toBe('send_estimate_nudge');
+      expect(gated.payload.estimateReference).toBe(CUSTOMER_NAME);
+      expect(gated.payload.estimateId).toBeUndefined();
+      expect(missingFieldsFor(gated)).toEqual(['estimateId']);
+      expect((gated.sourceContext as Record<string, unknown>).pendingEntityAmbiguity).toBeUndefined();
+      await expect(
+        approveProposal(proposalRepo, seed.tenantId, gated.id, seed.userId, 'owner'),
+      ).rejects.toThrow(/estimateId/);
+    });
+
+    it('a UNIQUE sent estimate resolves the gate unambiguously — no ask needed', async () => {
+      const seed = await seedTenant();
+      const estimateId = await seedSentEstimateFor(seed);
+
+      const proposalRepo = new InMemoryProposalRepository();
+      const app = buildApp(
+        seed,
+        proposalRepo,
+        scriptedGateway([
+          classifierReply('send_estimate_nudge', { customerName: CUSTOMER_NAME }),
+        ]),
+      );
+
+      const res = await supertest(app)
+        .post('/api/assistant/chat')
+        .send({
+          messages: [
+            { role: 'user', content: `Nudge ${CUSTOMER_NAME} about the estimate we sent` },
+          ],
+        });
+      expect(res.status).toBe(200);
+
+      const [resolved] = await proposalRepo.findByTenant(seed.tenantId);
+      expect(resolved.payload.estimateId).toBe(estimateId);
+      expect(missingFieldsFor(resolved)).toEqual([]);
     });
   });
 

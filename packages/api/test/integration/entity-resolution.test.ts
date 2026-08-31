@@ -1931,6 +1931,115 @@ describe('Postgres integration — entity resolution (P8)', () => {
         });
         expect(result.kind).toBe('not_found');
       });
+
+      // Status floor (2026-08-31), grounded in the execution handlers that
+      // consume the resolved estimateId: SendEstimateNudgeExecutionHandler
+      // hard-rejects anything but 'sent', and UpdateEstimateExecutionHandler
+      // (assertEstimateEditable, estimates/estimate.ts) hard-rejects
+      // 'rejected'/'expired' unconditionally — no consumer's opt-out
+      // ('sent' via revise, 'accepted' via RV-042 invalidation) ever reaches
+      // those two. This is what the sweep harness's own quarantine strategy
+      // depends on: declining a stale nudge-fixture estimate must actually
+      // remove it from the candidate set, the same way voiding an invoice
+      // does (#944).
+      describe('status floor — rejected/expired excluded, draft and accepted stay reachable', () => {
+        it('a REJECTED estimate never becomes a candidate — the one DRAFT estimate resolves cleanly', async () => {
+          const seed = await seedRealisticTenant({
+            displayName: 'Jamie Garcia',
+            jobSummary: 'AC repair',
+          });
+          const draftId = await seedEstimateForJob(seed, seed.jobId);
+          const rejectedId = await seedEstimateForJob(seed, seed.jobId);
+          await pool.query(`UPDATE estimates SET status = 'rejected' WHERE id = $1`, [
+            rejectedId,
+          ]);
+
+          const result = await resolver.resolve({
+            tenantId: seed.tenantId,
+            reference: 'the Garcia estimate',
+            kind: 'estimate',
+          });
+          expect(result.kind).toBe('resolved');
+          if (result.kind === 'resolved') expect(result.candidate.id).toBe(draftId);
+        });
+
+        it('an EXPIRED estimate never becomes a candidate either', async () => {
+          const seed = await seedRealisticTenant({
+            displayName: 'Jamie Garcia',
+            jobSummary: 'AC repair',
+          });
+          const draftId = await seedEstimateForJob(seed, seed.jobId);
+          const expiredId = await seedEstimateForJob(seed, seed.jobId);
+          await pool.query(`UPDATE estimates SET status = 'expired' WHERE id = $1`, [expiredId]);
+
+          const result = await resolver.resolve({
+            tenantId: seed.tenantId,
+            reference: 'the Garcia estimate',
+            kind: 'estimate',
+          });
+          expect(result.kind).toBe('resolved');
+          if (result.kind === 'resolved') expect(result.candidate.id).toBe(draftId);
+        });
+
+        it('a customer whose ONLY estimate is rejected/expired resolves not_found, never a guess', async () => {
+          const seed = await seedRealisticTenant({
+            displayName: 'Jamie Garcia',
+            jobSummary: 'AC repair',
+          });
+          const rejectedId = await seedEstimateForJob(seed, seed.jobId);
+          await pool.query(`UPDATE estimates SET status = 'rejected' WHERE id = $1`, [
+            rejectedId,
+          ]);
+
+          const result = await resolver.resolve({
+            tenantId: seed.tenantId,
+            reference: 'the Garcia estimate',
+            kind: 'estimate',
+          });
+          expect(result.kind).toBe('not_found');
+        });
+
+        // 'accepted' is deliberately NOT filtered: update_estimate resolves
+        // this identical estimateId field to reach an accepted estimate via
+        // RV-042's own documented acceptance-invalidation edit path.
+        it('an ACCEPTED estimate still resolves — accepted is not in the excluded status set', async () => {
+          const seed = await seedRealisticTenant({
+            displayName: 'Jamie Garcia',
+            jobSummary: 'AC repair',
+          });
+          const acceptedId = await seedEstimateForJob(seed, seed.jobId);
+          await pool.query(`UPDATE estimates SET status = 'accepted' WHERE id = $1`, [
+            acceptedId,
+          ]);
+
+          const result = await resolver.resolve({
+            tenantId: seed.tenantId,
+            reference: 'the Garcia estimate',
+            kind: 'estimate',
+          });
+          expect(result.kind).toBe('resolved');
+          if (result.kind === 'resolved') expect(result.candidate.id).toBe(acceptedId);
+        });
+
+        // 'sent' is deliberately NOT filtered either: send_estimate_nudge
+        // REQUIRES it, and send_estimate has no status restriction at all.
+        it('a SENT estimate still resolves — sent is not in the excluded status set', async () => {
+          const seed = await seedRealisticTenant({
+            displayName: 'Jamie Garcia',
+            jobSummary: 'AC repair',
+          });
+          const sentId = await seedEstimateForJob(seed, seed.jobId);
+          await pool.query(`UPDATE estimates SET status = 'sent' WHERE id = $1`, [sentId]);
+
+          const result = await resolver.resolve({
+            tenantId: seed.tenantId,
+            reference: 'the Garcia estimate',
+            kind: 'estimate',
+          });
+          expect(result.kind).toBe('resolved');
+          if (result.kind === 'resolved') expect(result.candidate.id).toBe(sentId);
+        });
+      });
     });
 
     // -- kind: 'invoice' -----------------------------------------------------
