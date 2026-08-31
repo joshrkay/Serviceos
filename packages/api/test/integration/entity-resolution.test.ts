@@ -2507,6 +2507,66 @@ describe('Postgres integration — entity resolution (P8)', () => {
           if (result.kind === 'resolved') expect(result.candidate.id).toBe(draft.id);
         });
       });
+
+      // A21 (2026-08-31 live sweep) — same class one kind over from A11's
+      // APPOINTMENT_WORK_TYPE_STOPWORDS fix: "qa-matrix-A-customer's
+      // overdue invoice" got the honest can't-match line (#951/#954's
+      // generalized reply layer working correctly) because the underlying
+      // resolution genuinely came back not_found/low_confidence — the
+      // status descriptor "overdue" polluted `invoiceNameNeedle`'s
+      // customer-name needle exactly the way "tune-up" polluted the
+      // appointment one.
+      describe('qualified invoice reference — status descriptor stripped from the customer needle (A21)', () => {
+        it('"<customer>\'s overdue invoice" resolves — the qualified form matches the bare form', async () => {
+          const seed = await seedRealisticTenant({
+            displayName: 'qa-matrix-A-customer',
+            jobSummary: 'Furnace tune-up',
+          });
+          const invoiceId = await seedInvoiceForJob(seed, seed.jobId);
+
+          const bare = await resolver.resolve({
+            tenantId: seed.tenantId,
+            reference: "qa-matrix-A-customer's invoice",
+            kind: 'invoice',
+          });
+          const qualified = await resolver.resolve({
+            tenantId: seed.tenantId,
+            reference: "qa-matrix-A-customer's overdue invoice",
+            kind: 'invoice',
+          });
+
+          expect(bare.kind).toBe('resolved');
+          expect(qualified.kind).toBe('resolved');
+          if (bare.kind === 'resolved' && qualified.kind === 'resolved') {
+            expect(bare.candidate.id).toBe(invoiceId);
+            expect(qualified.candidate.id).toBe(invoiceId);
+          }
+        });
+
+        it('other evidenced status descriptors ("unpaid", "outstanding", "past due") resolve the same invoice', async () => {
+          const seed = await seedRealisticTenant({
+            displayName: 'Jamie Garcia',
+            jobSummary: 'AC repair',
+          });
+          const invoiceId = await seedInvoiceForJob(seed, seed.jobId);
+
+          for (const phrase of [
+            'the Garcia unpaid invoice',
+            'the Garcia outstanding bill',
+            'the Garcia past due invoice',
+          ]) {
+            const result = await resolver.resolve({
+              tenantId: seed.tenantId,
+              reference: phrase,
+              kind: 'invoice',
+            });
+            expect(result.kind, `"${phrase}" should resolve`).toBe('resolved');
+            if (result.kind === 'resolved') {
+              expect(result.candidate.id, `"${phrase}"`).toBe(invoiceId);
+            }
+          }
+        });
+      });
     });
   });
 

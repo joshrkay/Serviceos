@@ -233,6 +233,34 @@ function estimateNameNeedle(reference: string): string {
 const INVOICE_DOC_STOPWORDS = new Set(['invoice', 'invoices', 'bill', 'bills']);
 
 /**
+ * A21 (2026-08-31 live sweep) — status descriptor words an operator hangs
+ * on a spoken INVOICE reference alongside the customer's name: "qa-matrix-
+ * A-customer's OVERDUE invoice" — the exact motivating example
+ * `INVOICE_DOC_STOPWORDS`'s own doc comment already used ("the overdue
+ * Jones bill") without actually stripping the word. Same discipline as
+ * `APPOINTMENT_WORK_TYPE_STOPWORDS`: a separate, narrowly-scoped set (not
+ * folded into `INVOICE_DOC_STOPWORDS`, kept distinct for what class of word
+ * each documents — document noun vs. status descriptor — even though both
+ * feed the identical single-purpose `invoiceNameNeedle` below). Used ONLY
+ * to build the CUSTOMER-NAME needle `resolveInvoice`'s traversal scores
+ * against `customers.display_name` — never to touch anything matched
+ * against `invoices.invoice_number` or job summaries.
+ *
+ * WHY THE STRIP IS LOAD-BEARING, measured on pgvector/pgvector:pg16 with
+ * pg_trgm against a customer named 'qa-matrix-A-customer' (τ_ent: 0.80) —
+ * identical numbers to `APPOINTMENT_WORK_TYPE_STOPWORDS`'s "tune-up"
+ * measurement, since strict_word_similarity's dilution from one extra
+ * unstripped word is the same regardless of which word it is:
+ *   strict_word_similarity("qa matrix customer's overdue", ...) = 0.613
+ *   strict_word_similarity("qa matrix customer's", ...)         = 0.826
+ * The polluted needle lands in `low_confidence` (below τ_ent); the
+ * stripped needle clears it outright.
+ */
+const INVOICE_STATUS_DESCRIPTOR_STOPWORDS = new Set([
+  'overdue', 'unpaid', 'outstanding', 'delinquent', 'late', 'past', 'due',
+]);
+
+/**
  * The person/company needle for an invoice reference, or '' when the
  * reference names nobody ("the invoice", "that bill"). Same shape and same
  * reasoning as `estimateNameNeedle`: '' rather than a fallback to the
@@ -244,7 +272,12 @@ function invoiceNameNeedle(reference: string): string {
   if (!base) return '';
   const kept = base
     .split(/\s+/)
-    .filter((w) => w.length > 0 && !INVOICE_DOC_STOPWORDS.has(w));
+    .filter(
+      (w) =>
+        w.length > 0 &&
+        !INVOICE_DOC_STOPWORDS.has(w) &&
+        !INVOICE_STATUS_DESCRIPTOR_STOPWORDS.has(w),
+    );
   return kept.length > 0 ? kept.join(' ') : '';
 }
 
