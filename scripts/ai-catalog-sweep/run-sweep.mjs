@@ -547,13 +547,13 @@ async function ensureFixtures() {
     // Round 8 — the nudge-fixture ESTIMATES are chain debris too: each run
     // that consumes the eligible one leaves it behind (nudged/accepted or
     // just stale-sent), and the accumulated set eventually overflows the
-    // resolver's candidate cap, silencing A19/A51's ask. Decline every
+    // resolver's candidate cap, silencing A19/A51's ask. Reject every
     // prior nudge-fixture estimate except the current eligible one (the
     // nudge fixture block below re-seeds a fresh eligible estimate when
-    // none remains); declined estimates leave the candidate set once the
+    // none remains); rejected estimates leave the candidate set once the
     // estimate status floor (fix/gate-honesty-all-kinds) lands.
     const staleNudgeEstimates = await rw.query(
-      `UPDATE estimates e SET status = 'declined', updated_at = now()
+      `UPDATE estimates e SET status = 'rejected', updated_at = now()
         WHERE e.tenant_id = $1
           AND e.estimate_number LIKE 'EST-NUDGE-%'
           AND e.status = 'sent'
@@ -566,7 +566,7 @@ async function ensureFixtures() {
         RETURNING e.id`,
       [TENANT_ID],
     );
-    summary.push(`estimates: declined ${staleNudgeEstimates.rowCount ?? 0} stale nudge fixtures (chain-root reset)`);
+    summary.push(`estimates: rejected ${staleNudgeEstimates.rowCount ?? 0} stale nudge fixtures (chain-root reset)`);
     // Same design one level down: NEW_JOB_SUMMARY ("QA Sweep Furnace
     // Inspection") is a per-run fabricated chain-root JOB, but the
     // resolver's job candidate query has NO status filter, so prior runs'
