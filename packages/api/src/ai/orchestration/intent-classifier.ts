@@ -1866,6 +1866,74 @@ export function matchIssueInvoicePhrase(
   return { jobReference: match[1].toUpperCase() };
 }
 
+/**
+ * A10 (2026-08-31 live sweep) — deterministic short-circuit for the
+ * canonical dictated `update_job` priority-change imperative: "Mark the
+ * <job> job as <priority> priority". Same idiom as `matchIssueInvoicePhrase`
+ * immediately above (A06) — this file's standing pattern for a stereotyped,
+ * entity-bearing phrasing that `classify_intent` has been caught missing.
+ *
+ * WHY THIS EXISTS: the live utterance — "Mark the QA Sweep Furnace
+ * Inspection job as high priority" — fell through to the generic-LLM reply
+ * path with no proposal drafted at all ("I have NOT marked... please
+ * contact your supervisor", a hallucination-shaped deflection; see
+ * ai/orchestration/assistant-honesty-guard.ts's companion fix for why that
+ * fallback can never itself fabricate a proposal). It's the SAME class of
+ * intermittent miss `matchDraftEstimatePhrase` / `matchIssueInvoicePhrase` /
+ * the #910 lookup matchers close for their own intents — the sweep report
+ * that caught it noted the identical utterance SHAPE had passed on many
+ * prior sweeps, so this is non-determinism in the LLM call, not a taxonomy
+ * gap (`update_job` and the priority-edit shape are both already
+ * documented in `JOB_EDIT_SYSTEM_PROMPT`, job-edit-task.ts).
+ *
+ * FIELD CHOICE: extracts only `jobReference`. Unlike `UpdateJobTaskHandler`
+ * (job-edit-task.ts), the CLASSIFIER's own `ExtractedEntities` taxonomy has
+ * no `priority`/`status`/`title`/`description` fields at all — those are
+ * extracted downstream by that handler's OWN LLM call
+ * (`JOB_EDIT_SYSTEM_PROMPT`) against the full raw transcript, not from
+ * `classification.extractedEntities`. So this matcher's only job is
+ * routing: get the turn to `update_job` (with a job reference an operator
+ * can resolve) at all, instead of past both registry maps into the generic
+ * fallback — the priority itself is re-extracted correctly once
+ * `UpdateJobTaskHandler.handle` actually runs. `jobReference` matches
+ * `job-edit-task.ts`'s own field name, and `update_job` is already a
+ * `JOB_REF_INTENTS` member (ai/agents/customer-calling/entity-resolution.ts),
+ * so the SAME pre-draft resolver traversal the LLM-classified path uses
+ * picks this reference up unchanged.
+ *
+ * NOT gated on `extendedIntents`, for the same reason `matchIssueInvoicePhrase`
+ * isn't: the live A10 failure was on `surface: "chat"`, which never sets
+ * that flag (D-028 — chat is the broad, ungated taxonomy for every
+ * authenticated caller).
+ *
+ * Safe to bypass the LLM for a WRITE intent for the same reasons
+ * `matchIssueInvoicePhrase` is: D-004 (proposal-first, never
+ * auto-executed) plus `UpdateJobTaskHandler`'s own draft-time gate — an
+ * unresolvable/ambiguous job reference is persisted with `missingFields:
+ * ['jobId']` (or a clarification question), never silently applied. A
+ * misfire here at worst drafts an update_job proposal nobody asked for,
+ * sitting unapproved — capture-class, always human-approved regardless.
+ *
+ * ANCHORED to "mark ... job (as) <priority> priority" specifically — the
+ * one phrasing evidenced as flaky. Status/title/description edits, and any
+ * other priority phrasing ("set the X job's priority to urgent"), stay on
+ * the LLM path unchanged, per this file's standing rule against pre-emptive
+ * land-grabs over phrasings the classifier already gets right.
+ */
+const UPDATE_JOB_PRIORITY_PATTERN =
+  /^\s*mark\s+(?:the\s+)?(.{1,80}?)\s+job\s+(?:as\s+)?(?:low|normal|high|urgent)\s+priority\s*[.!]?\s*$/i;
+
+export function matchUpdateJobPriorityPhrase(
+  transcript: string,
+): { jobReference: string } | null {
+  if (!transcript) return null;
+  const match = UPDATE_JOB_PRIORITY_PATTERN.exec(transcript);
+  if (!match) return null;
+  const jobReference = match[1].trim();
+  if (!jobReference) return null;
+  return { jobReference };
+}
+
 /** RV-071 — predicate the voice routing layers use to gate owner approval intents. */
 export function isVoiceApprovalIntent(
   intent: IntentType | string | undefined | null,
@@ -2362,6 +2430,22 @@ async function classifyIntentRaw(
       confidence: 0.95,
       reasoning: 'matched deterministic issue_invoice phrasing',
       extractedEntities: { jobReference: issueInvoiceMatch.jobReference },
+    };
+  }
+
+  // A10 (2026-08-31 live sweep) — the anchored "mark the X job as
+  // <priority> priority" imperative. Deliberately OUTSIDE the
+  // `extendedIntents` block above, same reasoning as `matchIssueInvoicePhrase`
+  // immediately above: the live miss was on `surface: "chat"`, which never
+  // sets that flag. See matchUpdateJobPriorityPhrase's doc comment for the
+  // full story and why an anchored write-intent short-circuit is safe here.
+  const updateJobPriorityMatch = matchUpdateJobPriorityPhrase(transcript);
+  if (updateJobPriorityMatch) {
+    return {
+      intentType: 'update_job',
+      confidence: 0.95,
+      reasoning: 'matched deterministic update_job priority phrasing',
+      extractedEntities: { jobReference: updateJobPriorityMatch.jobReference },
     };
   }
 

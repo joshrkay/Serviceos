@@ -2042,6 +2042,134 @@ describe('Postgres integration — entity resolution (P8)', () => {
       });
     });
 
+    // -- A11 (2026-08-31 live sweep) ------------------------------------
+    //
+    // Live evidence: proposal ebb0067d (tenant a948cc66, sweep
+    // 2026-08-31T05-59) — "qa-matrix-A-customer's tune-up appointment"
+    // resolved not_found even though the tune-up appointment existed and a
+    // PRIOR sweep resolved the same reference SHAPE to a 2-candidate ask.
+    // Root cause: `extractNameLikeToken` does not strip work-type
+    // descriptor nouns ("tune-up" → "tune up" once hyphens are normalized
+    // to spaces), so they ride along into the customer-name needle
+    // `resolveJob` / `resolveJobIdsForCustomerName` score against
+    // `customers.display_name` — diluting a confident match into
+    // `low_confidence`, which `resolveAppointment`'s named branch already
+    // (correctly) treats as "not confident enough to answer" rather than
+    // guess. Not a #951 regression: #951 only made the resulting
+    // not_found honest instead of silent; this pins why it WAS a
+    // not_found underneath that honest reply.
+    describe('qualified appointment reference — work-type descriptor stripped from the customer needle (A11)', () => {
+      it('"<customer>\'s tune-up appointment" resolves — the qualified form matches the bare form', async () => {
+        const seed = await seedRealisticTenant({
+          displayName: 'qa-matrix-A-customer',
+          jobSummary: 'Furnace tune-up',
+        });
+        const appointmentId = await seedAppointmentAt(seed, seed.jobId, daysOut(3));
+
+        const bare = await resolver.resolve({
+          tenantId: seed.tenantId,
+          reference: "qa-matrix-A-customer's appointment",
+          kind: 'appointment',
+        });
+        const qualified = await resolver.resolve({
+          tenantId: seed.tenantId,
+          reference: "qa-matrix-A-customer's tune-up appointment",
+          kind: 'appointment',
+        });
+
+        expect(bare.kind).toBe('resolved');
+        expect(qualified.kind).toBe('resolved');
+        if (bare.kind === 'resolved' && qualified.kind === 'resolved') {
+          expect(bare.candidate.id).toBe(appointmentId);
+          expect(qualified.candidate.id).toBe(appointmentId);
+        }
+      });
+
+      it('other evidenced work-type qualifiers ("inspection", "repair", "follow-up") resolve the same appointment', async () => {
+        const seed = await seedRealisticTenant({
+          displayName: 'Jamie Garcia',
+          jobSummary: 'AC repair',
+        });
+        const appointmentId = await seedAppointmentAt(seed, seed.jobId, daysOut(2));
+
+        for (const phrase of [
+          "the Garcia inspection appointment",
+          "the Garcia repair appointment",
+          "the Garcia follow-up appointment",
+          "the Garcia maintenance visit",
+        ]) {
+          const result = await resolver.resolve({
+            tenantId: seed.tenantId,
+            reference: phrase,
+            kind: 'appointment',
+          });
+          expect(result.kind, `"${phrase}" should resolve`).toBe('resolved');
+          if (result.kind === 'resolved') {
+            expect(result.candidate.id, `"${phrase}"`).toBe(appointmentId);
+          }
+        }
+      });
+
+      it('a qualified reference to a customer with TWO appointments asks — the same 2-candidate ambiguity the bare form gets, not a silent not_found', async () => {
+        const seed = await seedRealisticTenant({
+          displayName: 'qa-matrix-A-customer',
+          jobSummary: 'Furnace tune-up',
+        });
+        const first = await seedAppointmentAt(seed, seed.jobId, daysOut(2));
+        const secondJobId = await addRealisticJob(seed, {
+          displayName: 'qa-matrix-A-customer',
+          jobSummary: 'Duct cleaning',
+        });
+        const second = await seedAppointmentAt(seed, secondJobId, daysOut(5));
+
+        const result = await resolver.resolve({
+          tenantId: seed.tenantId,
+          reference: "qa-matrix-A-customer's tune-up appointment",
+          kind: 'appointment',
+        });
+
+        expect(result.kind).toBe('ambiguous');
+        if (result.kind === 'ambiguous') {
+          const ids = result.candidates.map((c) => c.id).sort();
+          expect(ids).toEqual([first, second].sort());
+        }
+      });
+
+      it('the job-SUMMARY half is unaffected — a work-type word matches a job summary directly, driven by the RAW reference, not the stripped customer needle', async () => {
+        // Guards against an over-broad fix: `appointmentCustomerNeedle` only
+        // replaces the CUSTOMER-half needle (SCORE_EXPR's `strict_word_
+        // similarity($4, c.display_name)` argument) — the job-SUMMARY half
+        // (`similarity(j.summary, $2)`) must keep seeing the ORIGINAL,
+        // unstripped reference, so a job actually summarized with a
+        // work-type word is still reachable by it. Deliberately a bare,
+        // near-exact phrase (not a full sentence): `similarity()` is
+        // whole-string and dilutes with any surrounding words REGARDLESS of
+        // this fix (measured: similarity('Tune-up','the tune-up
+        // appointment') = 0.35, well under τ_ent_confirm_low, on customer
+        // 'Priya Nair' whose name shares nothing with 'tune-up' — every
+        // OTHER test in this describe block resolves through the customer
+        // half for exactly that reason), so isolating the summary half on
+        // its own requires a tight match, not a realistic sentence.
+        const seed = await seedRealisticTenant({
+          displayName: 'Priya Nair',
+          jobSummary: 'Tune-up',
+        });
+        const appointmentId = await seedAppointmentAt(seed, seed.jobId, daysOut(4));
+
+        // customerNeedleOverride resolves to '' here (both "tune" and "up"
+        // are APPOINTMENT_WORK_TYPE_STOPWORDS), so a resolve is only
+        // possible via the summary half — proving it independently of the
+        // customer-needle change this test guards.
+        const result = await resolver.resolve({
+          tenantId: seed.tenantId,
+          reference: 'tune-up',
+          kind: 'appointment',
+        });
+        expect(result.kind).toBe('resolved');
+        if (result.kind === 'resolved') expect(result.candidate.id).toBe(appointmentId);
+      });
+    });
+
     // -- kind: 'invoice' -----------------------------------------------------
     //
     // #909 live-sweep regression (2026-08-30, A20 send_payment_reminder / A21

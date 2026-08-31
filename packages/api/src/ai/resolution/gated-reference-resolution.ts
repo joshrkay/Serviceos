@@ -250,8 +250,27 @@ export function planGatedReferenceLookups(
     };
     for (const field of source.payloadFields) push(payload[field]);
     if (entities) for (const field of source.entityFields) push(entities[field]);
-    if (references.length === 0) continue;
 
+    // A11/#909 generalization (2026-08-31 live sweep, A21 apply_late_fee) —
+    // deliberately NOT skipped when `references` is empty. This field's own
+    // doc comment already documents "no reference at all" as one of the
+    // reasons a gate lands in `unresolved` (and therefore gets the honest
+    // `buildUnresolvedPrompt` line via `buildGatedReferenceReply`), but an
+    // early `continue` here used to drop the field from `lookups` entirely
+    // whenever NEITHER `payloadFields` NOR `entityFields` produced any text
+    // — so it never reached `resolveGatedReferences`'s `outcome.unresolved`
+    // push at all, and the reply came back silent: not an ambiguity ask, not
+    // an honest can't-match line, nothing. Live evidence: apply_late_fee
+    // proposals whose utterance named neither a job nor a customer at all
+    // ("add a $25 late fee") had `payload.invoiceReference` genuinely absent
+    // (the handler has nothing to preserve when nothing was said — #935/
+    // #947's verify-or-gate fix doesn't apply; there is no reference to
+    // verify), so this exact field always hit the old early-continue. An
+    // empty `references` array here is harmless downstream:
+    // `resolveGatedReferences`'s inner `for (const reference of
+    // lookup.references)` simply doesn't iterate, `settled` stays false, and
+    // the field correctly lands in `outcome.unresolved` — no resolver call
+    // is ever attempted for text that doesn't exist.
     lookups.push({ idField, kind: source.kind, references });
   }
 
