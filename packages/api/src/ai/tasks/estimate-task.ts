@@ -26,6 +26,10 @@ import {
   intersectAppliedStandingInstructions,
 } from '../standing-instructions-context';
 import { contractErrorsFrom, contractGapFields } from './task-input';
+import {
+  correctDollarScaleIfSpoken,
+  extractSpokenWholeDollarAmounts,
+} from '../resolution/price-scale-guard';
 
 /**
  * Story 7.2 — confidence ceiling for a draft that still has open clarifications
@@ -205,6 +209,28 @@ export class EstimateTaskHandler implements TaskHandler {
       const reference = customerReferenceFrom(context);
       if (reference) payload.customerReference = reference;
       missingFields.push('customerId');
+    }
+
+    // #909 (2026-08-31 live sweep, INV-0022) — same price-scale guard
+    // draft_invoice applies (invoice-task.ts), added here because this
+    // path previously forwarded `parsed.lineItems` completely unmodified
+    // (see buildPartialPayload above) — no rounding, no scale check at
+    // all — unlike invoice-task.ts's pre-existing (but scale-blind)
+    // Number()/Math.round() cast. See price-scale-guard.ts's own doc
+    // comment for the live shape (the SAME drafting LLM response
+    // converting one line's dollars->cents correctly and another line
+    // not) and why the correction is evidence-gated against the spoken
+    // utterance rather than a blind "small price -> multiply" floor.
+    if (Array.isArray(payload.lineItems)) {
+      const spokenDollarAmounts = extractSpokenWholeDollarAmounts(context.message);
+      payload.lineItems = (payload.lineItems as Array<Record<string, unknown>>).map((li) => {
+        const rawPrice = Number(li.unitPrice);
+        if (!Number.isFinite(rawPrice) || rawPrice < 0) return li;
+        return {
+          ...li,
+          unitPrice: correctDollarScaleIfSpoken(Math.round(rawPrice), spokenDollarAmounts),
+        };
+      });
     }
 
     // P22 catalog grounding: same pass as the invoice handler, but this

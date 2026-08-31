@@ -514,6 +514,128 @@ describe('P22 — EstimateTaskHandler catalog grounding', () => {
     expect(proposal.confidenceScore).toBeLessThanOrEqual(0.85);
     expect(proposal.confidenceFactors).toContain('uncatalogued_line_item');
   });
+
+  /**
+   * #909 (2026-08-31 live sweep, invoice INV-0022 — same class on the
+   * estimate path). Unlike invoice-task.ts, this handler forwarded
+   * `parsed.lineItems` completely unmodified before this fix — no rounding,
+   * no scale check at all. See price-scale-guard.ts's own doc comment for
+   * the full live shape and why the correction is evidence-gated against
+   * the spoken utterance rather than a blind "small price -> multiply"
+   * floor.
+   */
+  describe('price-scale guard (#909, live sweep invoice INV-0022, same class on draft_estimate)', () => {
+    it('an uncatalogued line priced 450 (meant $450) corrects to 45000 when "450 dollars" was spoken', async () => {
+      const { repo } = seededCatalog(); // no matching item for "AC repair"
+      const stub = new StubProvider('stub');
+      stub.setResponse({
+        content: estimateJson([{ description: 'AC repair', quantity: 1, unitPrice: 450 }]),
+      });
+      const handler = new EstimateTaskHandler(makeGateway(stub), repo);
+
+      const { proposal } = await handler.handle(
+        makeContext({ message: 'Estimate for the AC job, 450 dollars for the AC repair' }),
+      );
+
+      const line = (proposal.payload.lineItems as Array<Record<string, unknown>>)[0];
+      expect(line.unitPrice).toBe(45_000);
+    });
+
+    it('a second line in the SAME draft, priced 79 (meant $79), also corrects', async () => {
+      const { repo } = seededCatalog();
+      const stub = new StubProvider('stub');
+      stub.setResponse({
+        content: estimateJson([
+          { description: 'AC repair', quantity: 1, unitPrice: 450 },
+          { description: 'Diagnostic fee', quantity: 1, unitPrice: 79 },
+        ]),
+      });
+      const handler = new EstimateTaskHandler(makeGateway(stub), repo);
+
+      const { proposal } = await handler.handle(
+        makeContext({
+          message:
+            'Estimate for the AC job, 450 dollars for the AC repair and 79 dollars for the diagnostic fee',
+        }),
+      );
+
+      const lines = proposal.payload.lineItems as Array<Record<string, unknown>>;
+      expect(lines[0].unitPrice).toBe(45_000);
+      expect(lines[1].unitPrice).toBe(7_900);
+    });
+
+    it('a line already correctly scaled (7500 for $75.00, with "$75.00" spoken) is left unchanged', async () => {
+      const { repo } = seededCatalog();
+      const stub = new StubProvider('stub');
+      stub.setResponse({
+        content: estimateJson([{ description: 'Filter replacement', quantity: 1, unitPrice: 7500 }]),
+      });
+      const handler = new EstimateTaskHandler(makeGateway(stub), repo);
+
+      const { proposal } = await handler.handle(
+        makeContext({ message: 'Estimate for the job, $75.00 for the filter' }),
+      );
+
+      const line = (proposal.payload.lineItems as Array<Record<string, unknown>>)[0];
+      expect(line.unitPrice).toBe(7_500);
+    });
+
+    it('a genuine sub-dollar line with NO matching spoken figure stays sub-dollar — the guard is evidence-gated, not a blind floor', async () => {
+      const { repo } = seededCatalog();
+      const stub = new StubProvider('stub');
+      stub.setResponse({
+        content: estimateJson([{ description: 'Fastener', quantity: 1, unitPrice: 79 }]),
+      });
+      const handler = new EstimateTaskHandler(makeGateway(stub), repo);
+
+      const { proposal } = await handler.handle(
+        makeContext({ message: 'Estimate for the job for the tune-up' }),
+      );
+
+      const line = (proposal.payload.lineItems as Array<Record<string, unknown>>)[0];
+      expect(line.unitPrice).toBe(79);
+    });
+
+    it('confidence hygiene: a scale-corrected uncatalogued line STILL caps confidence below auto-approve', async () => {
+      const { repo } = seededCatalog(); // no match for "AC repair"
+      const stub = new StubProvider('stub');
+      stub.setResponse({
+        content: estimateJson([{ description: 'AC repair', quantity: 1, unitPrice: 450 }], 0.97),
+      });
+      const handler = new EstimateTaskHandler(makeGateway(stub), repo);
+
+      const { proposal } = await handler.handle(
+        makeContext({ message: 'Estimate for the AC job, 450 dollars for the AC repair' }),
+      );
+
+      const line = (proposal.payload.lineItems as Array<Record<string, unknown>>)[0];
+      expect(line.unitPrice).toBe(45_000); // scale-corrected
+      expect(line.pricingSource).toBe('uncatalogued'); // still ungrounded
+      expect(proposal.confidenceFactors).toContain('uncatalogued_line_item');
+      expect(proposal.confidenceScore).toBeLessThanOrEqual(0.85);
+      expect(proposal.status).not.toBe('approved');
+    });
+
+    it('a scale-corrected line that NOW matches the catalog gets overridden by the catalog price anyway', async () => {
+      const { repo, heater } = seededCatalog(); // catalog price 185_000
+      const stub = new StubProvider('stub');
+      stub.setResponse({
+        // LLM wrote the spoken $1,850 as raw cents (scale bug) — corrects to
+        // 185_000, which then matches the catalog exactly.
+        content: estimateJson([{ description: 'Water Heater Install', quantity: 1, unitPrice: 1850 }]),
+      });
+      const handler = new EstimateTaskHandler(makeGateway(stub), repo);
+
+      const { proposal } = await handler.handle(
+        makeContext({ message: 'Estimate for the job, 1850 dollars for the water heater install' }),
+      );
+
+      const line = (proposal.payload.lineItems as Array<Record<string, unknown>>)[0];
+      expect(line.unitPrice).toBe(185_000);
+      expect(line.catalogItemId).toBe(heater.id);
+      expect(line.pricingSource).toBe('catalog');
+    });
+  });
 });
 
 // ─── RV-007 (F-4): Confidence Marker `_meta` ─────────────────────────────
