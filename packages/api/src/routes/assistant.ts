@@ -16,6 +16,12 @@ import { hasPermission, isValidRole, type Permission, type Role } from '../auth/
 import { toErrorResponse } from '../shared/errors';
 import { LLMGateway } from '../ai/gateway/gateway';
 import { Proposal, ProposalRepository, ProposalType } from '../proposals/proposal';
+// PR-0a (#967, #962) — the shared chain-metadata stamper the voice/memo
+// path (workers/voice-action-router.ts) already uses. The chat chain block
+// below previously wrote sourceContext.chainId only, never the TOP-LEVEL
+// Proposal.chainId column this helper sets — the column findByChain and
+// the web Inbox's groupIntoFeed both key on.
+import { applyChainMetadata } from '../proposals/chain';
 // Aliased — the card field this feeds is also called `undoExpiresAt`.
 import {
   undoExpiresAt as undoWindowCloseAt,
@@ -2223,7 +2229,12 @@ async function generateAssistantReply(
       // invoice without approval contradicts 'money never auto-approves').
       const chainSegments = lastUserText.split(/(?:,\s*)?\bthen\b\s+/i).map((seg) => seg.trim()).filter(Boolean);
       if (chainSegments.length >= 2 && chainSegments.length <= 4) {
-        const chainId = `chain_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+        // PR-0a (#967, #962) — a real uuid, matching the id shape
+        // applyChainMetadata/findByChain expect elsewhere (voice/memo
+        // chains already mint theirs via uuidv4 in voice-action-router.ts).
+        // Nothing parses the old `chain_${Date.now()}_${random}` string
+        // format, so switching it is safe.
+        const chainId = uuidv4();
         const chainCards: AssistantProposal[] = [];
         const carried: Record<string, unknown> = {};
         for (const segment of chainSegments) {
@@ -2316,7 +2327,33 @@ async function generateAssistantReply(
           if (!proposal) continue;
           stampVerifiedIds(proposal, segVerifiedIds);
           dropUnverifiedIds(proposal.payload, segment, segEntities, proposal.sourceContext);
-          proposal.sourceContext = { ...(proposal.sourceContext ?? {}), chainId, chainStep: chainCards.length + 1 };
+          // PR-0a (#967, #962) — stamp the TOP-LEVEL chainId (the same
+          // helper + column the voice/memo path uses) so
+          // ProposalRepository.findByChain and the web Inbox's
+          // groupIntoFeed (which both key on Proposal.chainId, not
+          // sourceContext) actually find chat-produced chains.
+          //
+          // chainRefs stays empty here: the chat path threads dependent
+          // entities forward via the `carried` object below (customerName
+          // only, resolved before drafting), not applyChainMetadata's
+          // `$ref:chain[n]` token machinery — so `chainRefs.length > 0`
+          // never fires and this can't force a proposal back to 'draft'
+          // out from under the dependency-gate status handling that
+          // follows.
+          applyChainMetadata(proposal, {
+            chainId,
+            chainIndex: chainCards.length,
+            chainLength: chainSegments.length,
+            dependsOnChainIndices: [],
+            chainRefs: [],
+          });
+          // Back-compat: chainStep (1-based) predates chainIndex
+          // (0-based, applyChainMetadata's convention) — keep both so any
+          // existing reader of the old field still works.
+          proposal.sourceContext = {
+            ...(proposal.sourceContext ?? {}),
+            chainStep: chainCards.length + 1,
+          };
           // #909 — the same post-draft resolution the single-intent path
           // runs, so a chained "reschedule the Miller job, then text them"
           // gets its ids resolved too and the two halves of THIS route can't
