@@ -1529,6 +1529,73 @@ describe('I2 — the chain path threads intent + customerId exactly like the sin
 });
 
 /**
+ * PR-0a (issues #967, #962) — chat-produced chains persist `chain_id =
+ * NULL` on the TOP-LEVEL `Proposal.chainId` column, because the chain
+ * block above only ever writes `sourceContext.chainId` — it never calls
+ * `applyChainMetadata` (proposals/chain.ts) or sets `proposal.chainId`
+ * the way the voice/memo path (workers/voice-action-router.ts) does. The
+ * web Inbox's `groupIntoFeed` groups cards on the TOP-LEVEL field, and
+ * `ProposalRepository.findByChain` queries the indexed `chain_id`
+ * column — both silently miss chat chains, which render as scattered,
+ * ungrouped cards instead of one linked chain.
+ *
+ * This test drives the real chain path (same scenario as I2 above) and
+ * asserts on the top-level column + `findByChain`, not just
+ * `sourceContext`.
+ */
+describe('PR-0a — the chain path stamps a top-level Proposal.chainId (#967, #962)', () => {
+  it('"log 32 miles to the Patel job then text the Hendersons the part arrived" shares one top-level chainId', async () => {
+    const RESOLVED_CUSTOMER_ID = 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee';
+    const proposalRepo = new InMemoryProposalRepository();
+    const entityResolver = resolverFor(async ({ kind }) =>
+      kind === 'customer'
+        ? {
+            kind: 'resolved',
+            candidate: { id: RESOLVED_CUSTOMER_ID, kind: 'customer', label: 'Henderson', score: 0.95 },
+          }
+        : { kind: 'skipped' },
+    );
+    const app = buildApp(
+      strictGateway([
+        classifierReply('unknown', {}),
+        classifierReply('log_mileage', { mileageMiles: 32, jobReference: 'the Patel job' }),
+        classifierReply('send_customer_message', {
+          customerName: 'Henderson',
+          customerMessageBody: 'The part arrived',
+        }),
+        'The part arrived at our shop.',
+      ]),
+      { proposalRepo, entityResolver },
+    );
+
+    const res = await chat(app, 'Log 32 miles to the Patel job then text the Hendersons the part arrived');
+
+    expect(res.status).toBe(200);
+    const persisted = await proposalRepo.findByTenant(TEST_TENANT);
+    expect(persisted).toHaveLength(2);
+
+    const mileage = persisted.find((p) => p.proposalType === 'log_expense');
+    const message = persisted.find((p) => p.proposalType === 'send_customer_message');
+    expect(mileage).toBeTruthy();
+    expect(message).toBeTruthy();
+
+    // The bug: this is the TOP-LEVEL column (Proposal.chainId /
+    // proposals.chain_id), the same field the Inbox's groupIntoFeed and
+    // ProposalRepository.findByChain read — NOT sourceContext.chainId,
+    // which the buggy chat path already sets correctly.
+    expect(mileage!.chainId).toBeTruthy();
+    expect(message!.chainId).toBeTruthy();
+    expect(message!.chainId).toBe(mileage!.chainId);
+
+    // findByChain is exactly what the web Inbox route would use to fetch
+    // a chain's siblings — must return both members via the top-level
+    // column, not zero.
+    const chainMembers = await proposalRepo.findByChain(TEST_TENANT, mileage!.chainId!);
+    expect(chainMembers.map((p) => p.id).sort()).toEqual([mileage!.id, message!.id].sort());
+  });
+});
+
+/**
  * A4 (2026-08-10) — the false channel claim IS operator-visible on chat.
  *
  * F1's rider deleted "Caller" from `create_customer`'s default EXPLANATION
