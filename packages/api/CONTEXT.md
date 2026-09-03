@@ -20,6 +20,8 @@ terms float.
   owns only what is genuinely surface-specific: identity, reference
   resolution, response shape, failure copy, telemetry. It never contains a
   switch. Adding a surface means adding an adapter, not copying the switch.
+  What an adapter serves versus refuses per intent family is declared in the
+  coverage table.
 - **Actor** — the tenant user a request is authorised AS. Chat: the signed-in
   operator. Memo: the recording's creator. Phone: resolved once from caller-ID
   at session establishment (`telephony/phone-actor.ts`) and stored as
@@ -35,9 +37,20 @@ terms float.
   about making their surface coverage structural.
 - **Parity** — the same capability behaves the same on every surface it
   targets. Structural parity means a new capability cannot land on one surface
-  and silently miss another.
+  and silently miss another. Until parity is structural, the coverage table
+  declares where today's behavior diverges; the turn pipeline is where it
+  stops being able to.
 - **Proven** — a capability has a real-database integration test on the
   surface in question (`test/integration/`), not only an in-memory one.
 - **Proposal-first** (D-004) — the AI never writes to operational entities;
   it drafts a typed proposal a human approves. Lookups are read-only and are
   never proposals.
+- **Turn pipeline** — the one per-turn implementation every live voice
+  surface runs through; the guard-ladder order and intent-family precedence
+  live here and nowhere else. Today it is being consolidated onto
+  `ai/voice-turn/create-voice-turn-processor.ts#speechTurn`; until parity is
+  structural, the coverage table declares what runs where.
+- **Coverage table** — the declared cell per (intent family, surface):
+  reachable, or refuse with the honest copy
+  (`ai/voice-turn/coverage-table.ts`). A structural test forbids undeclared
+  cells, so refusals happen on purpose and silence is impossible.
