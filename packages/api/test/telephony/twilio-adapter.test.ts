@@ -2299,6 +2299,59 @@ describe('TwilioGatherAdapter.processCallerUtterance — frustration detector', 
   });
 });
 
+// ─── PR-0b (#968/#962) — Gather must not silently drop the turn when the
+// tenant's keyword-frustration toggle is off ──────────────────────────────
+
+describe('TwilioGatherAdapter.handleGather — frustration toggle OFF must not drop the turn', () => {
+  it('tenant toggle off: a frustration keyword still reaches classification and the TwiML speaks (turn not silently dropped)', async () => {
+    const tenantId = 'tenant-toggle-off';
+    const gateway = makeGatewayReturning(
+      JSON.stringify({
+        intentType: 'draft_estimate',
+        confidence: 0.92,
+        reasoning: 'clear command',
+        extractedEntities: { customerName: 'Acme', amount: 45000 },
+      }),
+    );
+    const { adapter, store } = makeAdapter({ gateway });
+    const session = store.create(tenantId, 'telephony', {
+      callSid: 'CA-toggle-off',
+      escalationTriggers: {
+        trigger_low_confidence: true,
+        trigger_explicit_request: true,
+        trigger_keyword_frustration: false,
+      },
+    });
+    session.machine.dispatch({
+      type: 'incoming_call',
+      tenantId,
+      callSid: 'CA-toggle-off',
+      from: '+15125550100',
+      to: '+15125550999',
+    });
+    session.machine.dispatch({ type: 'greeted_ok' });
+    session.machine.dispatch({ type: 'caller_known', customerId: 'cust-1' });
+
+    const xml = await adapter.handleGather({
+      sessionId: session.id,
+      callSid: 'CA-toggle-off',
+      speechResult: 'this is ridiculous',
+      confidence: 0.95,
+      tenantId,
+    });
+
+    // With the toggle OFF, the keyword must not silently eat the turn: the
+    // caller must hear a normal turn outcome (a <Say>), not bare silence —
+    // today's bug returns a bare <Response><Gather .../></Response> with no
+    // <Say> at all, because the Gather path dispatches frustration_detected
+    // unconditionally and the FSM re-gate (transitions.ts) no-ops it into
+    // zero side effects when the toggle is off.
+    expect(xml).toContain('<Say');
+    // And with the toggle off, this keyword must not have escalated at all.
+    expect(xml).not.toContain('Let me get a person on the line for you right away');
+  });
+});
+
 // ─── RV-140/RV-142 — emergency keyword interrupt (shared safety scan) ────────
 
 describe('RV-140 — deterministic emergency scan (both transcript entry points)', () => {
