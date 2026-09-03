@@ -2184,8 +2184,20 @@ export class TwilioGatherAdapter {
     // B3.2 — keyword frustration check on the PSTN/Gather path, mirroring
     // the same guard in processCallerUtterance (WS path). Runs after the
     // transcript append so the triggering utterance is always captured.
+    // PR-0b (#968/#962) — gate on the tenant's trigger_keyword_frustration
+    // toggle BEFORE dispatching, same as the media-streams path (see
+    // `triggers` in processCallerUtterance above). Without this, the FSM
+    // re-gate (transitions.ts) still no-ops a keyword match when the toggle
+    // is off (returns zero side effects), but this path unconditionally
+    // RETURNED that empty-effects TwiML — a bare <Gather> with no <Say> —
+    // silently eating the caller's turn instead of falling through to
+    // normal classification below.
     const gatherFrustration = detectFrustration(opts.speechResult);
-    if (gatherFrustration.matched) {
+    const gatherTriggers = session.machine.currentContext.escalationTriggers;
+    if (
+      gatherFrustration.matched &&
+      (!gatherTriggers || gatherTriggers.trigger_keyword_frustration)
+    ) {
       const frustrationEffects = session.machine.dispatch({
         type: 'frustration_detected',
         source: 'keyword',
