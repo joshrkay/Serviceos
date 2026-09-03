@@ -49,9 +49,11 @@ import type { Pool } from 'pg';
 import { appendAgentTts, callerTranscriptText } from './transcript-append';
 import {
   classifyIntent,
+  isLookupIntent,
   isVoiceApprovalIntent,
   isVoiceEditIntent,
   type IntentClassification,
+  type IntentType,
 } from '../orchestration/intent-classifier';
 import type { ClassifierProfile } from '../orchestration/classifier-profile';
 import {
@@ -92,9 +94,32 @@ import {
   costIncurredEvent,
   sessionTerminatedEvent,
   escalationStartedEvent,
+  languageSwitchedEvent,
 } from '../voice-quality/events';
 import { VOICE_EVENT_CHANNEL } from '../voice-quality/event-bus';
 import { answerPhoneEnRoute, type PhoneEnRouteDeps } from './phone-en-route-surface';
+import { answerPhoneLookup, type PhoneLookupDeps } from './phone-lookup-surface';
+import { COVERAGE_TABLE, type CoverageSurface, type IntentFamilyId } from './coverage-table';
+import {
+  detectLanguageSwitchIntent,
+  isLanguageSupported,
+  MAX_LANGUAGE_SWITCHES_PER_CALL,
+} from '../orchestration/language-detector';
+import {
+  renderTtsText,
+  LANGUAGE_SWITCH_ACK,
+  LANGUAGE_UNSUPPORTED_LINE,
+  LANGUAGE_SWITCH_CAP_LINE,
+  LOW_STT_CONFIDENCE_REPROMPT_COPY,
+  SPEECH_TURN_FAILURE_ESCALATION_COPY,
+  type SessionLanguage,
+} from '../agents/customer-calling/tts-copy';
+import {
+  CreateCustomerVoiceTaskHandler,
+  CREATE_CUSTOMER_CONFIRMATION_TTS,
+} from '../tasks/create-customer-task';
+import { isCustomerDuplicateLoader } from '../../customers/dedup';
+import { recordVoiceError } from '../../analytics/posthog';
 import { buildEscalationSummary } from '../agents/customer-calling/escalation-summary-builder';
 import { buildCallerContextFromSession } from '../agents/customer-calling/escalation-context-from-session';
 import {
@@ -215,7 +240,11 @@ import { isRuntimeTimezone } from '../../shared/timezone';
 import type { CallMeBackRepository } from '../../voice/call-me-back/call-me-back';
 import type { DeviceTokenRepository } from '../../push/device-token-service';
 import type { PushDeliveryProvider } from '../../notifications/push-delivery-provider';
-import type { SpeechTurnHandler } from '../../telephony/media-streams/mediastream-adapter';
+import {
+  MIN_STT_CONFIDENCE,
+  MAX_CONSECUTIVE_LOW_CONFIDENCE_TURNS,
+  type SpeechTurnHandler,
+} from '../../telephony/media-streams/mediastream-adapter';
 import { createLogger } from '../../logging/logger';
 
 const logger = createLogger({
@@ -443,6 +472,77 @@ function isUntrustedS1Session(session: VoiceSession): boolean {
 }
 
 /**
+ * #962 (PR-B) — the coverage-table gate for the per-family turn branches.
+ *
+ * The processor is CAPABLE of every family Gather's own loop serves
+ * (lookup, language_switch, P18-001 create_customer, the silence/low-STT
+ * ladder) plus the families it already served; the table decides, per
+ * surface, whether a branch RUNS. A branch runs only when the surface's
+ * cell (a) is `reachable` AND (b) declares THIS branch as the serving
+ * module — status alone is not enough, because a `reachable` cell may be
+ * served by a different module (media-streams language_switch = the
+ * adapter pre-scan; media-streams create_customer = the generic FSM path;
+ * media-streams silence ladder = the adapter-side A3/T2-F05 handling), and
+ * running the ported branch there would CHANGE behavior — the exact drift
+ * this campaign closes on purpose, not by accident (#963/#966).
+ *
+ * `refuse` and `n/a` cells both leave the gate closed: the pipeline then
+ * takes exactly the path that surface takes today (for media-streams
+ * lookup, the fall-through into the drafting funnel — never a new spoken
+ * refusal line; introducing one is a phase-2 cell flip, not this port).
+ *
+ * The token is matched against the cell's declared `module` string. The
+ * table is TRUTH: when a later PR moves a family's serving branch (the
+ * Gather cutover), it updates the CELL in the same PR and this map's token
+ * for that family alongside it — never the other way around.
+ */
+const PORTED_BRANCH_TOKENS = {
+  lookup: 'answerPhoneLookup',
+  en_route: 'answerPhoneEnRoute',
+  language_switch: 'handleLanguageSwitchGather',
+  voice_approval: 'handleVoiceApprovalIntent',
+  voice_edit: 'handleVoiceEditIntent',
+  create_customer: 'handleCreateCustomerVoiceIntent',
+  emergency_immediate_dial: 'emergencyImmediateDial',
+  ws18_consent_capture: 'handlePendingConsentCapture',
+  ws18_post_quote_refinement: 'classifyPostQuoteUtterance',
+  silence_low_stt_ladder: 'runLowSttConfidenceGatherLadder',
+} as const satisfies Partial<Record<IntentFamilyId, string>>;
+
+type GatedIntentFamily = keyof typeof PORTED_BRANCH_TOKENS;
+
+function familyServedByDeclaredCell(
+  family: GatedIntentFamily,
+  surface: CoverageSurface,
+): boolean {
+  const cell = COVERAGE_TABLE[family][surface];
+  return cell.status === 'reachable' && cell.module.includes(PORTED_BRANCH_TOKENS[family]);
+}
+
+/**
+ * P18-001: detect a Twilio `From` value that represents a withheld /
+ * blocked / private caller-id. Mirrors `twilio-adapter.ts#isBlockedCallerId`
+ * — re-implemented locally (the `xmlEscape` precedent above) so this module
+ * never imports back from `telephony/twilio-adapter`, which would create a
+ * circular import. Returns true ONLY for explicitly blocked indicators — a
+ * plain missing string returns false so the caller can prompt for a
+ * callback rather than assuming the caller chose to withhold.
+ */
+function isBlockedCallerId(from: string | undefined): boolean {
+  if (!from) return false;
+  const v = from.trim().toLowerCase();
+  if (v.length === 0) return false;
+  return (
+    v === 'restricted' ||
+    v === 'private' ||
+    v === 'blocked' ||
+    v === 'unknown' ||
+    v === 'anonymous' ||
+    v === 'unavailable'
+  );
+}
+
+/**
  * #886/#887 — which classifier taxonomy profile this session's turns
  * advertise. Derived from SESSION IDENTITY ONLY (channel allowlist, RV-070/
  * 071 owner flag, D-026 phone actor) — never from transcript content, so a
@@ -522,6 +622,28 @@ export interface VoiceTurnProcessorDeps {
   auditRepo?: AuditRepository;
   proposalRepo?: ProposalRepository;
   onCallRepo?: OnCallRepository;
+  /**
+   * #962 (PR-B) — the live surface whose turns this processor instance
+   * serves. Every per-family branch consults the coverage table's
+   * (family, surface) cell before running (see PORTED_BRANCH_TOKENS), so
+   * the processor is capable of everything Gather's loop does while each
+   * surface keeps exactly its declared behavior. Defaults to
+   * 'media_streams' — today's only production `speechTurn` surface (the
+   * adapter-constructed processor serves media-streams finals via
+   * `processCallerUtterance`; the Layer 2 harness drives the same path).
+   * The Gather cutover PR passes 'gather'.
+   */
+  coverageSurface?: CoverageSurface;
+  /**
+   * #962 (PR-B) — the phone lookup bundle (#866 shared dispatch). The SAME
+   * `PhoneLookupDeps` the Gather branch uses: app.ts wires ONE bundle onto
+   * the adapter deps and the adapter spreads `...this.deps` into this
+   * processor, so both phone transports dispatch through the identical
+   * instance. Consulted only when the surface's lookup cell declares the
+   * ported branch; absent → `answerPhoneLookup` speaks its own
+   * unavailable line (same degradation as Gather without the bundle).
+   */
+  lookups?: PhoneLookupDeps;
   /**
    * #847 — the en_route ("on my way") bundle for the transports whose turns
    * run through `speechTurn` (media-streams finals via
@@ -861,6 +983,26 @@ export interface VoiceTurnProcessor {
     session: VoiceSession,
     tenantId: string,
   ): Promise<SideEffect[]>;
+  /**
+   * #962 (PR-B) — the transport-side entry of the ported Gather
+   * silence/low-STT ladder for a NON-empty turn: the acoustic confidence
+   * score arrives with the transport's webhook/final (outside the
+   * `SpeechTurnHandler` contract), so the transport gates the turn here
+   * BEFORE dispatching `speechTurn` (mirroring
+   * `maybeHandleLowSttConfidenceGather`'s position in the Gather loop).
+   * Returns the reprompt/hand-off side effects when the gate fires (caller:
+   * render them, do NOT dispatch the turn), or null when the turn should
+   * proceed (confidence high enough or absent — absent is treated as HIGH
+   * and clears the streak, so a turn is never blocked on missing data).
+   * Shares ONE streak with the empty-utterance ladder inside `speechTurn`
+   * (T2-F03), deliberately separate from the FSM's `confidence_low` cap
+   * (#965). No-op (null) on a surface whose silence-ladder cell does not
+   * declare the ported branch.
+   */
+  maybeHandleLowSttConfidence(
+    session: VoiceSession,
+    confidence: number | undefined,
+  ): SideEffect[] | null;
 }
 
 export function createVoiceTurnProcessor(
@@ -868,6 +1010,26 @@ export function createVoiceTurnProcessor(
 ): VoiceTurnProcessor {
   const pendingTransferTwiml =
     deps.pendingTransferTwiml ?? new Map<string, string>();
+
+  /**
+   * #962 (PR-B) — the surface whose declared coverage cells gate every
+   * per-family branch below. See the `coverageSurface` dep doc; default is
+   * today's only production `speechTurn` surface.
+   */
+  const coverageSurface: CoverageSurface = deps.coverageSurface ?? 'media_streams';
+
+  const servesFamilyHere = (family: GatedIntentFamily): boolean =>
+    familyServedByDeclaredCell(family, coverageSurface);
+
+  /**
+   * #962 (PR-B) — the ported Gather ladder's PRIVATE streak counter
+   * (`lowConfidenceGatherStreak` on the adapter), keyed by session id.
+   * Silence (empty SpeechResult) and low acoustic confidence share this ONE
+   * streak (T2-F03); it is deliberately NOT the FSM's `confidence_low`
+   * retry cap — counter unification is a separate, explicit decision
+   * (#965).
+   */
+  const lowConfidenceStreak = new Map<string, number>();
 
   /**
    * U4 (Part E punch #1) — tenant timezone for spoken-datetime resolution,
@@ -3668,6 +3830,315 @@ export function createVoiceTurnProcessor(
 
   // ─── Speech turn (formerly processCallerUtterance) ──────────────────
 
+  /**
+   * #962 (PR-B) — the bounded reprompt→escalate ladder ported VERBATIM from
+   * `twilio-adapter.ts#runLowSttConfidenceGatherLadder` (Gather keeps its
+   * copy until the cutover PR removes it — expected strangler duplication).
+   * Shared by the two turn-failure modes: an empty utterance (silence,
+   * inside `speechTurn`) and low acoustic confidence (via
+   * `maybeHandleLowSttConfidence`). One streak for both, so a caller
+   * alternating silence and mumbling still terminates at
+   * {@link MAX_CONSECUTIVE_LOW_CONFIDENCE_TURNS}. At the cap this path
+   * never touches the FSM, so the terminated-session finalize is called
+   * explicitly here (the same pattern Gather's ladder uses). The
+   * `recordVoiceError` channel stays 'gather' — the only surface whose cell
+   * declares this branch today.
+   */
+  function runLowSttConfidenceLadder(session: VoiceSession): SideEffect[] {
+    const lang: SessionLanguage = session.language === 'es' ? 'es' : 'en';
+    const streak = (lowConfidenceStreak.get(session.id) ?? 0) + 1;
+
+    if (streak >= MAX_CONSECUTIVE_LOW_CONFIDENCE_TURNS) {
+      lowConfidenceStreak.delete(session.id);
+      const effects: SideEffect[] = [
+        {
+          type: 'tts_play',
+          payload: { text: renderTtsText(SPEECH_TURN_FAILURE_ESCALATION_COPY, {}, lang) },
+        },
+        { type: 'end_session', payload: { reason: 'low_stt_confidence_max_retries' } },
+      ];
+      if (!session.ended) {
+        session.ended = true;
+        finalizeTerminatedSession(session, effects, 'low_stt_confidence_max_retries');
+      }
+      recordVoiceError({
+        errorKind: 'low_stt_confidence_repeated',
+        channel: 'gather',
+        callSid: session.callSid ?? undefined,
+        tenantId: session.tenantId,
+      });
+      return effects;
+    }
+
+    lowConfidenceStreak.set(session.id, streak);
+    const effects: SideEffect[] = [
+      {
+        type: 'tts_play',
+        payload: { text: renderTtsText(LOW_STT_CONFIDENCE_REPROMPT_COPY, {}, lang) },
+      },
+    ];
+    recordVoiceError({
+      errorKind: 'low_stt_confidence',
+      channel: 'gather',
+      callSid: session.callSid ?? undefined,
+      tenantId: session.tenantId,
+    });
+    return effects;
+  }
+
+  /**
+   * #962 (PR-B) — A3 confidence gate, ported from
+   * `twilio-adapter.ts#maybeHandleLowSttConfidenceGather`. See the
+   * interface doc; gated on the surface's silence-ladder cell first so a
+   * surface whose ladder lives elsewhere (media-streams' adapter-side A3)
+   * is never double-gated.
+   */
+  function maybeHandleLowSttConfidence(
+    session: VoiceSession,
+    confidence: number | undefined,
+  ): SideEffect[] | null {
+    if (!servesFamilyHere('silence_low_stt_ladder')) return null;
+    if (
+      typeof confidence !== 'number' ||
+      !Number.isFinite(confidence) ||
+      confidence >= MIN_STT_CONFIDENCE
+    ) {
+      // High confidence (or no signal at all) clears the streak so a later
+      // isolated blip on this session gets its own reprompt budget.
+      lowConfidenceStreak.delete(session.id);
+      return null;
+    }
+
+    return runLowSttConfidenceLadder(session);
+  }
+
+  /**
+   * #962 (PR-B) — #846 mid-call language switch, ported from
+   * `twilio-adapter.ts#handleLanguageSwitchGather` (Gather keeps its copy
+   * until cutover). An ADAPTER-SHAPE act, out-of-FSM: the pure FSM cannot
+   * mutate `session.language`; the transport's next listen turn follows the
+   * flipped session fields. Policy identical to both telephony transports:
+   * the tenant `supported_languages` opt-in gates the target, the SAME
+   * per-call flap cap bounds flapping, and the TTS voice is re-resolved for
+   * the NEW language via the same settings read the adapter's
+   * `resolveTenantLanguage` performs (failure clears the override so the
+   * language-derived default voice applies). Never throws; always returns
+   * the side effects to speak.
+   */
+  async function handleLanguageSwitchTurn(
+    session: VoiceSession,
+    tenantId: string,
+    speechResult: string,
+  ): Promise<SideEffect[]> {
+    const current: SessionLanguage = session.language === 'es' ? 'es' : 'en';
+    // The utterance's requested language when the heuristic can extract it,
+    // else the other half of the en/es pair (the classifier already said
+    // this turn IS a switch request) — same fallback as both adapters.
+    const target = detectLanguageSwitchIntent(speechResult) ?? (current === 'es' ? 'en' : 'es');
+
+    if (target === current) {
+      // Already speaking the requested language — just acknowledge; no
+      // counter spend, no event.
+      return [{ type: 'tts_play', payload: { text: LANGUAGE_SWITCH_ACK[current] } }];
+    }
+    // detectLanguageSwitchIntent is an ungated heuristic — the tenant
+    // opt-in gate is applied here (same as the media-streams pre-scan).
+    if (!isLanguageSupported(target, session.supportedLanguages ?? null)) {
+      return [{ type: 'tts_play', payload: { text: LANGUAGE_UNSUPPORTED_LINE[current] } }];
+    }
+    const switchCount = session.languageSwitchCount ?? 0;
+    if (switchCount >= MAX_LANGUAGE_SWITCHES_PER_CALL) {
+      logger.info('speechTurn: language switch refused — flap guard', {
+        sessionId: session.id,
+        target,
+        switchCount,
+      });
+      return [{ type: 'tts_play', payload: { text: LANGUAGE_SWITCH_CAP_LINE[current] } }];
+    }
+
+    session.language = target;
+    session.languageSwitchCount = switchCount + 1;
+    // Re-resolve the per-language TTS voice (settings.ttsVoiceEn/Es); a
+    // resolver failure clears the override so the language-derived default
+    // Polly voice applies rather than the stale other-language voice.
+    let ttsVoice: string | undefined;
+    if (deps.settingsRepo) {
+      try {
+        const settings = await deps.settingsRepo.findByTenant(tenantId);
+        ttsVoice = (target === 'es' ? settings?.ttsVoiceEs : settings?.ttsVoiceEn) ?? undefined;
+      } catch {
+        ttsVoice = undefined;
+      }
+    }
+    session.ttsVoice = ttsVoice;
+    session.events.emit(
+      'voice-event',
+      languageSwitchedEvent({
+        from: current,
+        to: target,
+        trigger: 'classified_intent',
+        switchCount: session.languageSwitchCount,
+      }),
+    );
+    // Acknowledge in the language being switched TO — the caller just told
+    // us that's the one they understand. Same copy as both adapters.
+    return [{ type: 'tts_play', payload: { text: LANGUAGE_SWITCH_ACK[target] } }];
+  }
+
+  /**
+   * #962 (PR-B) — P18-001 `create_customer` one-turn flow, ported from
+   * `twilio-adapter.ts#handleCreateCustomerVoiceIntent` (Gather keeps its
+   * copy until cutover). Runs the `CreateCustomerVoiceTaskHandler` to build
+   * a contract-shaped proposal (name + caller-id phone + optional email)
+   * and persists it via the wired proposalRepo. Always asks a human to
+   * approve — money / identity creation is never auto-executed (D3,
+   * CLAUDE.md). The caller-id comes from `deps.callerPhoneResolver` — the
+   * adapter wires it to the SAME `callerIdBySession` map its own branch
+   * reads.
+   *
+   * Returns true when the flow handled this turn end-to-end (the caller
+   * renders the pushed effects and skips the FSM `intent_classified` →
+   * `intent_confirm` round-trip). Returns false when the precondition
+   * isn't met so the turn falls back to the standard FSM dispatch.
+   */
+  async function handleCreateCustomerVoiceIntentTurn(
+    session: VoiceSession,
+    classifierEntities: Record<string, unknown>,
+    classifierConfidence: number,
+    speechResult: string,
+    tenantId: string,
+    sideEffectsAll: SideEffect[],
+  ): Promise<boolean> {
+    // Caller already matched — confirm identity instead.
+    if (session.customerId) {
+      sideEffectsAll.push({
+        type: 'tts_play',
+        payload: {
+          text:
+            "I've got you in our system already. Let me know what you'd like help with today.",
+        },
+      });
+      return true;
+    }
+
+    const callerIdRaw = deps.callerPhoneResolver?.(session);
+    const phoneBlocked = isBlockedCallerId(callerIdRaw);
+    const callerIdPhone = phoneBlocked ? undefined : callerIdRaw;
+
+    // 4.3 — wire the read-only dedup loader so the proposal card surfaces
+    // "possible duplicate" before a human approves the write.
+    const duplicateLoader =
+      deps.customerRepo && isCustomerDuplicateLoader(deps.customerRepo)
+        ? deps.customerRepo
+        : undefined;
+    const handler = new CreateCustomerVoiceTaskHandler({ duplicateLoader });
+    const outcome = await handler.run({
+      tenantId,
+      message: speechResult,
+      conversationId: session.id,
+      userId: deps.systemActorId ?? 'voice_agent',
+      existingEntities: {
+        ...classifierEntities,
+        callerIdPhone,
+        phoneBlocked,
+        sessionId: session.id,
+        callSid: session.callSid,
+        correlationId: session.id,
+        classifierConfidence,
+        ...(session.leadId ? { existingLeadId: session.leadId } : {}),
+      },
+    });
+
+    if (outcome.status === 'needs_name') {
+      sideEffectsAll.push({
+        type: 'tts_play',
+        payload: {
+          text: "Of course — could I get your name to get you set up?",
+        },
+      });
+      return true;
+    }
+
+    if (outcome.status === 'needs_callback') {
+      sideEffectsAll.push({
+        type: 'tts_play',
+        payload: {
+          text:
+            "I'm sorry, I couldn't see your number. What's the best phone number to reach you on?",
+        },
+      });
+      return true;
+    }
+
+    if (!outcome.proposal) {
+      return false;
+    }
+
+    // Persist the proposal directly so we control the payload shape
+    // (instead of going through `handleCreateProposal` which builds
+    // the generic { intent, entities } envelope).
+    if (!deps.proposalRepo) {
+      logger.warn('create_customer: proposalRepo not wired; skipping persist', {
+        sessionId: session.id,
+      });
+      sideEffectsAll.push({
+        type: 'tts_play',
+        payload: { text: CREATE_CUSTOMER_CONFIRMATION_TTS },
+      });
+      return true;
+    }
+
+    try {
+      const stored = await deps.proposalRepo.create(outcome.proposal);
+      session.proposalIds.push(stored.id);
+      // Audit row tying the proposal back to the voice session.
+      if (deps.auditRepo) {
+        try {
+          const ev = createAuditEvent({
+            tenantId,
+            actorId: deps.systemActorId ?? 'voice_agent',
+            actorRole: 'system',
+            eventType: 'proposal.created',
+            entityType: 'proposal',
+            entityId: stored.id,
+            correlationId: session.id,
+            metadata: {
+              proposalType: 'create_customer',
+              source: 'voice',
+              sessionId: session.id,
+              callSid: session.callSid,
+              classifierConfidence,
+            },
+          });
+          await deps.auditRepo.create(ev);
+        } catch (err) {
+          logger.warn('create_customer: audit persist failed', {
+            error: err instanceof Error ? err.message : String(err),
+            sessionId: session.id,
+          });
+        }
+      }
+      sideEffectsAll.push({
+        type: 'tts_play',
+        payload: { text: CREATE_CUSTOMER_CONFIRMATION_TTS },
+      });
+      return true;
+    } catch (err) {
+      logger.warn('create_customer: persist failed', {
+        error: err instanceof Error ? err.message : String(err),
+        sessionId: session.id,
+      });
+      sideEffectsAll.push({
+        type: 'tts_play',
+        payload: {
+          text:
+            "I'm having trouble saving that. Let me get a person to help you finish signing up.",
+        },
+      });
+      return true;
+    }
+  }
+
   const speechTurn: SpeechTurnHandler = async ({
     session,
     speechResult,
@@ -3698,16 +4169,32 @@ export function createVoiceTurnProcessor(
     // adapter routes through TwilioGatherAdapter#processCallerUtterance, which
     // appends first), so an unguarded append here re-leaked the secret that
     // the other site had just redacted.
-    deps.store.appendTranscript(session.id, {
-      speaker: 'caller',
-      text: callerTranscriptText(session, speechResult),
-      ts: Date.now(),
-    });
+    // #962 (PR-B) — on a surface whose silence ladder is served HERE (the
+    // ported Gather ladder), an empty SpeechResult is a no-speech timeout:
+    // Gather's loop deliberately skips the empty `caller:` line so
+    // deriveCallOutcome reads a fully silent call as silent, and the ported
+    // ladder keeps that rule. Surfaces whose ladder lives elsewhere
+    // (media-streams: adapter-side A3/T2-F05) keep the unconditional
+    // append, byte-identical to main.
+    if (
+      speechResult.trim().length > 0 ||
+      !servesFamilyHere('silence_low_stt_ladder')
+    ) {
+      deps.store.appendTranscript(session.id, {
+        speaker: 'caller',
+        text: callerTranscriptText(session, speechResult),
+        ts: Date.now(),
+      });
+    }
 
     // RV-071 — an in-flight owner approval dialogue consumes the turn
     // BEFORE the FSM-state branch (including silence: an empty utterance
-    // is "anything else" → no action, keep for later).
-    const approvalTurn = await handlePendingVoiceApproval(session, speechResult, tenantId);
+    // is "anything else" → no action, keep for later). #962 (PR-B): gated
+    // on the (voice_approval, surface) cell — declared for both phone
+    // transports today.
+    const approvalTurn = servesFamilyHere('voice_approval')
+      ? await handlePendingVoiceApproval(session, speechResult, tenantId)
+      : null;
     if (approvalTurn) {
       await executeSideEffects(session, approvalTurn, tenantId);
       appendAgentTts(deps.store, session.id, approvalTurn);
@@ -3716,7 +4203,13 @@ export function createVoiceTurnProcessor(
 
     // WS18 — an in-flight on-call SMS consent capture also consumes the turn
     // before the FSM-state branch (the caller's utterance is the yes/no answer).
-    const consentTurn = await handlePendingConsentCapture(session, speechResult, tenantId);
+    // #962 (PR-B): gated on the (ws18_consent_capture, surface) cell — on a
+    // surface whose cell refuses (Gather today, its declared hole), the
+    // yes/no goes to the classifier and the capture stays pending, exactly
+    // as that surface behaves on main.
+    const consentTurn = servesFamilyHere('ws18_consent_capture')
+      ? await handlePendingConsentCapture(session, speechResult, tenantId)
+      : null;
     if (consentTurn) {
       await executeSideEffects(session, consentTurn, tenantId);
       appendAgentTts(deps.store, session.id, consentTurn);
@@ -3727,6 +4220,18 @@ export function createVoiceTurnProcessor(
     const currentState = session.machine.currentState;
 
     if (speechResult.trim().length === 0) {
+      // #962 (PR-B) — the surface's declared silence handler decides. When
+      // the (silence_low_stt_ladder, surface) cell names the ported Gather
+      // ladder, silence joins the same bounded streak as low acoustic
+      // confidence (T2-F03) — reprompt below the cap, graceful escalation +
+      // end_session at it — never touching the FSM. Every other surface
+      // keeps today's `confidence_low` dispatch (media-streams' own ladder
+      // is adapter-side).
+      if (servesFamilyHere('silence_low_stt_ladder')) {
+        const ladderFx = runLowSttConfidenceLadder(session);
+        appendAgentTts(deps.store, session.id, ladderFx);
+        return ladderFx;
+      }
       sideEffectsAll.push(
         ...session.machine.dispatch({
           type: 'confidence_low',
@@ -3736,6 +4241,17 @@ export function createVoiceTurnProcessor(
       );
       await executeSideEffects(session, sideEffectsAll, tenantId);
       return sideEffectsAll;
+    }
+
+    // #962 (PR-B) — a non-empty turn that proceeds clears the ported
+    // ladder's streak: the Gather loop treats an absent acoustic confidence
+    // as HIGH (maybeHandleLowSttConfidenceGather), and a transport that HAS
+    // a score gates the turn through `maybeHandleLowSttConfidence` before
+    // dispatching here. Turns consumed by the pending dialogues above never
+    // reach this line — same as the Gather loop, where the approval branch
+    // returns before the confidence gate.
+    if (servesFamilyHere('silence_low_stt_ladder')) {
+      lowConfidenceStreak.delete(session.id);
     }
 
     if (currentState === 'ask_caller') {
@@ -3788,9 +4304,17 @@ export function createVoiceTurnProcessor(
       // live pendingQuote, BEFORE the classifier (the classifier prompt/schema
       // stay byte-stable). Closes the discard bug: "yes, book it" and "make it
       // two" are handled here instead of being misread as a second intent that
-      // silently drops the quote.
+      // silently drops the quote. #962 (PR-B): gated on the
+      // (ws18_post_quote_refinement, surface) cell — a refuse-cell surface
+      // (Gather today, its declared hole) sends the turn to the classifier
+      // and silently drops the quote, exactly as that surface behaves on
+      // main.
       const pendingQuote = session.machine.currentContext.pendingQuote;
-      if (currentState === 'closing' && pendingQuote) {
+      if (
+        currentState === 'closing' &&
+        pendingQuote &&
+        servesFamilyHere('ws18_post_quote_refinement')
+      ) {
         const decision = classifyPostQuoteUtterance(speechResult);
         if (decision.kind === 'affirmative') {
           sideEffectsAll.push(...(await handlePostQuoteClose(session, tenantId, speechResult)));
@@ -3960,6 +4484,40 @@ export function createVoiceTurnProcessor(
         return sideEffectsAll;
       }
 
+      // #962 (PR-B) / P11-001 / #866 — lookup intents bypass the
+      // proposal-draft path, ported from the Gather branch (which keeps its
+      // copy until cutover). Routes through the SAME shared dispatch bundle
+      // (phone-lookup-surface → workers/voice-lookup-answer), speaks the
+      // line, and does NOT dispatch `intent_classified` — the FSM stays in
+      // `intent_capture` so the next turn can be another question. Gated on
+      // the (lookup, surface) cell: a refuse-cell surface (media-streams,
+      // the live D-026 hole) takes today's exact fall-through into the
+      // drafting funnel below — never a new spoken refusal line.
+      if (
+        classifierEvent.type === 'intent_classified' &&
+        classifierEvent.confidence >= TAU_INT &&
+        isLookupIntent(classifierEvent.intentType as IntentType) &&
+        servesFamilyHere('lookup')
+      ) {
+        const lookupSummary = await answerPhoneLookup(deps.lookups, {
+          session,
+          tenantId,
+          intent: classifierEvent.intentType as IntentType,
+          entities: classifierEvent.entities,
+        });
+        sideEffectsAll.push({
+          type: 'tts_play',
+          payload: { text: lookupSummary, source: 'lookup_skill' },
+        });
+        sideEffectsAll.push({
+          type: 'tts_play',
+          payload: { text: 'Anything else I can help you with?' },
+        });
+        await executeSideEffects(session, sideEffectsAll, tenantId);
+        appendAgentTts(deps.store, session.id, sideEffectsAll);
+        return sideEffectsAll;
+      }
+
       // #847 (#860 step 2) — en_route ("on my way") on the transports whose
       // turns run through speechTurn (media-streams finals). A DIRECT status
       // act (Part F decision F-3): the technician IS the human acting, so it
@@ -3972,11 +4530,14 @@ export function createVoiceTurnProcessor(
       // BOTH phone transports by the shared establishment core), the outcome
       // is spoken, and `intent_classified` is NOT dispatched — the FSM stays
       // in intent_capture. High-confidence only, mirroring the Gather gate:
-      // a low-confidence en_route follows the normal repair path.
+      // a low-confidence en_route follows the normal repair path. #962
+      // (PR-B): gated on the (en_route, surface) cell — declared for both
+      // phone transports today.
       if (
         classifierEvent.type === 'intent_classified' &&
         classifierEvent.intentType === 'en_route' &&
-        classifierEvent.confidence >= TAU_INT
+        classifierEvent.confidence >= TAU_INT &&
+        servesFamilyHere('en_route')
       ) {
         const enRouteLine = await answerPhoneEnRoute(deps.enRoute, {
           session,
@@ -3996,13 +4557,36 @@ export function createVoiceTurnProcessor(
         return sideEffectsAll;
       }
 
+      // #962 (PR-B) / #846 — language_switch, ported from the Gather branch
+      // (which keeps its copy until cutover). An ADAPTER-SHAPE act, not an
+      // FSM transition or a proposal: handle, speak, and do NOT dispatch
+      // `intent_classified` — the FSM stays where it is and the transport's
+      // next listen turn follows the flipped session.language. Gated on the
+      // (language_switch, surface) cell: on media-streams the cell declares
+      // the ADAPTER (pre-scan + the classifier fallback that reads this
+      // turn's audit_log intentType), so the gate stays closed there and
+      // the intent keeps flowing to the FSM/audit_log exactly as on main.
+      if (
+        classifierEvent.type === 'intent_classified' &&
+        classifierEvent.intentType === 'language_switch' &&
+        classifierEvent.confidence >= TAU_INT &&
+        servesFamilyHere('language_switch')
+      ) {
+        sideEffectsAll.push(...(await handleLanguageSwitchTurn(session, tenantId, speechResult)));
+        await executeSideEffects(session, sideEffectsAll, tenantId);
+        appendAgentTts(deps.store, session.id, sideEffectsAll);
+        return sideEffectsAll;
+      }
+
       // RV-071 — owner voice approval. Routed OUTSIDE the FSM (the
       // lookup-skill pattern: the FSM state is untouched and the dialogue
       // lives on the session). handleVoiceApprovalIntent hard-gates on
       // ownerSession — a non-owner "approve" gets the normal reprompt.
+      // #962 (PR-B): also gated on the (voice_approval, surface) cell.
       if (
         classifierEvent.type === 'intent_classified' &&
-        isVoiceApprovalIntent(classifierEvent.intentType)
+        isVoiceApprovalIntent(classifierEvent.intentType) &&
+        servesFamilyHere('voice_approval')
       ) {
         const approvalFx = await handleVoiceApprovalIntent(session, {
           intentType: classifierEvent.intentType,
@@ -4018,9 +4602,11 @@ export function createVoiceTurnProcessor(
 
       // RV-225 — owner voice edit. Same out-of-FSM routing as the approval
       // dialogue; handleVoiceEditIntent hard-gates on ownerSession.
+      // #962 (PR-B): also gated on the (voice_edit, surface) cell.
       if (
         classifierEvent.type === 'intent_classified' &&
-        isVoiceEditIntent(classifierEvent.intentType)
+        isVoiceEditIntent(classifierEvent.intentType) &&
+        servesFamilyHere('voice_edit')
       ) {
         const editFx = await handleVoiceEditIntent(session, {
           entities: classifierEvent.entities,
@@ -4033,17 +4619,54 @@ export function createVoiceTurnProcessor(
         return sideEffectsAll;
       }
 
+      // #962 (PR-B) / P18-001 — `create_customer` through the dedicated
+      // task handler, ported from the Gather branch (which keeps its copy
+      // until cutover): a contract-validated payload (name + caller-ID
+      // phone + optional email) minted in ONE turn, bypassing the FSM's
+      // `entity_resolution` → `intent_confirm` round-trip — identity
+      // creation always asks a human, so we go straight from "intent
+      // classified" to "proposal queued" + the confirmation TTS (AC-5).
+      // Gated on the (create_customer, surface) cell: on media-streams the
+      // cell declares the generic FSM path (reachable + hole — the declared
+      // drift), so the gate stays closed there and the intent takes the
+      // multi-turn confirm round-trip below, exactly as on main.
+      if (
+        classifierEvent.type === 'intent_classified' &&
+        classifierEvent.intentType === 'create_customer' &&
+        classifierEvent.confidence >= TAU_INT &&
+        servesFamilyHere('create_customer')
+      ) {
+        const handled = await handleCreateCustomerVoiceIntentTurn(
+          session,
+          classifierEvent.entities,
+          classifierEvent.confidence,
+          speechResult,
+          tenantId,
+          sideEffectsAll,
+        );
+        if (handled) {
+          await executeSideEffects(session, sideEffectsAll, tenantId);
+          appendAgentTts(deps.store, session.id, sideEffectsAll);
+          return sideEffectsAll;
+        }
+      }
+
       // P12-004 — emergency-intent immediate Dial. When the classified
       // intent is in the emergency set AND the tenant is unsupervised
       // (checked inside the wrapper via isSupervisorPresent), bypass the
       // FSM/booking path entirely and Dial the on-call rotation now.
       // The wrapper emits the `emergency_immediate_dial` audit event.
       // Supervised tenants and non-emergency intents fall through to the
-      // unchanged FSM dispatch below.
+      // unchanged FSM dispatch below. #962 (PR-B): gated on the
+      // (emergency_immediate_dial, surface) cell — a refuse-cell surface
+      // (Gather today, its declared hole) keeps the FSM's own emergency
+      // fast-path (notify_oncall page ladder) with no immediate <Dial>,
+      // exactly as that surface behaves on main.
       if (
         classifierEvent.type === 'intent_classified' &&
         EMERGENCY_INTENTS.has(classifierEvent.intentType) &&
-        deps.onCallRepo
+        deps.onCallRepo &&
+        servesFamilyHere('emergency_immediate_dial')
       ) {
         try {
           const immediate = await emergencyImmediateDial({
@@ -4171,5 +4794,6 @@ export function createVoiceTurnProcessor(
     handleVoiceApprovalIntent,
     handleVoiceEditIntent,
     handleAskCaller,
+    maybeHandleLowSttConfidence,
   };
 }
