@@ -109,6 +109,7 @@ import {
   renderTtsText,
   LOW_STT_CONFIDENCE_REPROMPT_COPY,
   SPEECH_TURN_FAILURE_ESCALATION_COPY,
+  MAX_CALL_DURATION_WRAP_UP_COPY,
   LANGUAGE_SWITCH_ACK,
   LANGUAGE_UNSUPPORTED_LINE,
   LANGUAGE_SWITCH_CAP_LINE,
@@ -118,6 +119,7 @@ import {
   MIN_STT_CONFIDENCE,
   MAX_CONSECUTIVE_LOW_CONFIDENCE_TURNS,
   MAX_LANGUAGE_SWITCHES_PER_CALL,
+  DEFAULT_MAX_CALL_DURATION_MS,
 } from './media-streams/mediastream-adapter';
 import { recordVoiceError } from '../analytics/posthog';
 import {
@@ -154,6 +156,14 @@ const logger = createLogger({
 export interface TwilioAdapterDeps {
   store: VoiceSessionStore;
   gateway: LLMGateway;
+  /**
+   * U5 — absolute per-call wall-clock cap (ms), wired from
+   * `VOICE_MAX_CALL_DURATION_MS`. Gather has no timer of its own (every turn
+   * is a fresh webhook), so `_handleGatherLocked` compares the session age
+   * against this on each turn and hangs up with the wrap-up line once it is
+   * exceeded. Default {@link DEFAULT_MAX_CALL_DURATION_MS}.
+   */
+  maxCallDurationMs?: number;
   /**
    * U4 — per-turn vulnerability triage on the Gather/PSTN path. Fired
    * fire-and-forget after the deterministic safety scan, symmetric to the
@@ -1910,15 +1920,22 @@ export class TwilioGatherAdapter {
       ];
     }
 
-    // Always append utterance to transcript first so it is captured
+    // Append the utterance to the transcript first so it is captured
     // regardless of the path below (frustration escalation or normal turn).
-    this.deps.store.appendTranscript(opts.sessionId, {
-      speaker: 'caller',
-      // #850 — a spoken money-approval challenge is redacted here rather than
-      // at each consumer, so every derived summary inherits it.
-      text: callerTranscriptText(session, opts.speechResult),
-      ts: Date.now(),
-    });
+    // #859 — this is the ONLY append for the utterance: the `speechTurn`
+    // delegation below is told `transcriptAppended: true`. An empty
+    // media-streams final is skipped for the same reason Gather skips it
+    // (_handleGatherLocked): an empty `caller:` line would make
+    // deriveCallOutcome read a silent call as caller speech.
+    if (opts.speechResult.trim().length > 0) {
+      this.deps.store.appendTranscript(opts.sessionId, {
+        speaker: 'caller',
+        // #850 — a spoken money-approval challenge is redacted here rather than
+        // at each consumer, so every derived summary inherits it.
+        text: callerTranscriptText(session, opts.speechResult),
+        ts: Date.now(),
+      });
+    }
 
     // RV-140 — ONE shared deterministic safety scan (emergency keywords),
     // BEFORE the frustration check and BEFORE any LLM call. Shared with the
@@ -1957,6 +1974,7 @@ export class TwilioGatherAdapter {
       speechResult: opts.speechResult,
       callSid: opts.callSid,
       tenantId: opts.tenantId,
+      transcriptAppended: true,
     });
   }
 
@@ -2181,6 +2199,15 @@ export class TwilioGatherAdapter {
       return this.finalizeTwiml(session, gatherSafetyEffects, opts.sessionId);
     }
 
+    // U5 — absolute per-call duration cap. Checked after the transcript
+    // append (the utterance is never lost) and the deterministic safety scan
+    // (a life-safety utterance on the last turn still transfers), BEFORE any
+    // LLM call. Same speak-then-end shape as the low-STT-confidence ladder
+    // below: wrap-up <Say> + the builder's end_session → <Hangup/> branch,
+    // and an explicit finalize because this path never touches the FSM.
+    const maxCallDurationTwiml = await this.maybeEndForMaxCallDuration(session, opts.sessionId);
+    if (maxCallDurationTwiml) return maxCallDurationTwiml;
+
     // B3.2 — keyword frustration check on the PSTN/Gather path, mirroring
     // the same guard in processCallerUtterance (WS path). Runs after the
     // transcript append so the triggering utterance is always captured.
@@ -2339,6 +2366,9 @@ export class TwilioGatherAdapter {
           opts.speechResult,
           {
             tenantId: opts.tenantId,
+            // U10 — trace-session grouping (metadata only; prompt unchanged).
+            sessionId: session.id,
+            ...(session.callSid ? { callSid: session.callSid } : {}),
             verticalPromptSection,
             planPromptSection,
             classifierProfile,
@@ -2647,6 +2677,48 @@ export class TwilioGatherAdapter {
    * would never fire — the manual call here is required, same pattern
    * `/dial-result`'s successful-transfer branch already uses).
    */
+  /**
+   * U5 — end a Gather call whose age (`Date.now() - session.createdAt`, the
+   * same elapsed-time basis `runSummary` uses) has passed
+   * `deps.maxCallDurationMs`. Returns the terminal TwiML, or null when the
+   * call is still within its limit.
+   */
+  private async maybeEndForMaxCallDuration(
+    session: VoiceSession,
+    sessionId: string,
+  ): Promise<string | null> {
+    const limitMs = this.deps.maxCallDurationMs ?? DEFAULT_MAX_CALL_DURATION_MS;
+    const elapsedMs = Date.now() - session.createdAt.getTime();
+    if (elapsedMs < limitMs) return null;
+
+    logger.info('handleGather: max call duration reached — ending call', {
+      sessionId,
+      callSid: session.callSid,
+      elapsedMs,
+      limitMs,
+    });
+    const lang: SessionLanguage = session.language === 'es' ? 'es' : 'en';
+    const effects: SideEffect[] = [
+      {
+        type: 'tts_play',
+        payload: { text: renderTtsText(MAX_CALL_DURATION_WRAP_UP_COPY, {}, lang) },
+      },
+      { type: 'end_session', payload: { reason: 'max_call_duration' } },
+    ];
+    const twiml = await this.finalizeTwiml(session, effects, sessionId);
+    if (!session.ended) {
+      session.ended = true;
+      this.finalizeTerminatedSession(session, effects, 'max_call_duration');
+      // PR #975 F5 — every terminal Gather branch kicks off the summary so
+      // call_summaries captures the capped call too (parity with the FSM
+      // `terminated` branches in handleInbound / _handleGatherLocked).
+      void this.processor.runSummary(session).catch(() => {
+        /* swallow — summary is best-effort */
+      });
+    }
+    return twiml;
+  }
+
   private async maybeHandleLowSttConfidenceGather(
     session: VoiceSession,
     opts: { sessionId: string; confidence: number | undefined },
@@ -2691,6 +2763,11 @@ export class TwilioGatherAdapter {
       if (!session.ended) {
         session.ended = true;
         this.finalizeTerminatedSession(session, effects, 'low_stt_confidence_max_retries');
+        // PR #975 F5 — same omission as the max-duration end: without this a
+        // ladder hand-off left no call_summaries row.
+        void this.processor.runSummary(session).catch(() => {
+          /* swallow — summary is best-effort */
+        });
       }
       recordVoiceError({
         errorKind: 'low_stt_confidence_repeated',

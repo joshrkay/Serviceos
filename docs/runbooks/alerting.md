@@ -78,6 +78,52 @@ The daily real-call workflow (Task 16) needs these GitHub Actions secrets:
 - `STAGING_DB_URL` — read-only Postgres URL for the staging assertion query.
 - `SLACK_ALERTS_WEBHOOK` — Incoming Webhook URL for `#alerts` (on-failure notification).
 
+## Scheduled gates → `gate-red` GitHub issue (no Slack required)
+
+Slack is best-effort (`continue-on-error: true` on every Slack step). The
+durable signal that a scheduled gate is red is a GitHub issue, opened and
+closed automatically by `.github/scripts/report-gate-failure.ts`, which runs
+as the last `if: always()` step of each of these workflows:
+
+| Workflow | Issue title |
+|----------|-------------|
+| `voice-smoke-real.yml` | `gate-red: Voice smoke (real call, daily)` |
+| `qa-matrix-gate.yml` | `gate-red: QA Matrix Gate` |
+| `voice-quality-weekly-trend.yml` | `gate-red: Voice Quality Layer 2 (weekly trend)` |
+
+Behaviour, driven by `${{ job.status }}`:
+
+- **Red run** — if an open issue with that title and the `gate-red` label
+  exists, a `Still red: <run URL>` comment is added; otherwise the issue is
+  created with the label and the run URL. One issue per gate, never
+  duplicates.
+- **Green run** — an open matching issue gets a `Green again: <run URL>`
+  comment and is closed (`state_reason: completed`). No open issue → no
+  API write at all.
+- **Cancelled run** — nothing is touched.
+
+The `gate-red` label does not need to exist in advance: if issue creation is
+rejected with 422 the script creates the label (colour `b60205`) and retries
+once. Renaming or deleting the label is safe; it will be recreated.
+
+Failure model: any non-2xx GitHub response, or a missing env var, prints a
+`[report-gate-failure] ...` error and exits 1. The step deliberately has no
+`continue-on-error`: a red gate is already red, and a green run whose
+reporter cannot reach GitHub turns red so the breakage is seen (usual causes:
+the workflow lost `permissions: issues: write`, or a fork/PR token). Each
+workflow grants `permissions: { contents: read, issues: write }` — keep
+`contents: read`, a permissions block zeroes every scope it does not list and
+`actions/checkout` needs it.
+
+Triage: an open `gate-red` issue means the gate has been red since the first
+comment's run. Fix the cause and re-run the workflow (`workflow_dispatch`); the
+green run closes the issue. Do not close it by hand while the gate still
+fails — the next red run opens a fresh one.
+
+Verification (plan 2026-09-05-001 U2): dispatch one gate with a required
+secret deliberately blank → the issue appears; restore the secret and re-run →
+the issue closes.
+
 ## Known limitations
 
 - The queue-depth alert is deferred to tier 2 (requires emitting a metric;

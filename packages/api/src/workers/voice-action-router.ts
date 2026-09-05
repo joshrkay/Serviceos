@@ -1183,6 +1183,9 @@ async function processSegment(
     segmentText,
     {
       tenantId,
+      // U10 — the memo's conversation groups its segment classifies as one
+      // trace session (metadata only; prompt unchanged).
+      ...(conversationId ? { sessionId: conversationId } : {}),
       ...(params.verticalPromptSection ? { verticalPromptSection: params.verticalPromptSection } : {}),
       // Owner extended lookups — opt-in only (cassette stability).
       ...(params.extendedIntents ? { extendedIntents: true } : {}),

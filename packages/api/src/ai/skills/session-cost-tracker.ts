@@ -2,18 +2,31 @@ export interface SessionCapConfig {
   maxInputTokens: number;   // default: 72000 — see the derivation on DEFAULT_TELEPHONY_CAPS
   maxOutputTokens: number;  // default: 1500
   maxCostCents: number;     // default: 40 ($0.40)
-  maxDurationMs: number;    // default: 15 * 60 * 1000 (15 min telephony)
 }
 
 export type SessionCapEvent =
-  | { type: 'cost_cap_approached'; remainingPct: number; dimension: 'tokens' | 'cost' | 'duration' }
-  | { type: 'cost_cap_exceeded'; dimension: 'tokens' | 'cost' | 'duration' };
+  | { type: 'cost_cap_approached'; remainingPct: number; dimension: 'tokens' | 'cost' }
+  | { type: 'cost_cap_exceeded'; dimension: 'tokens' | 'cost' };
 
-export interface TokenUsage {
+interface TokenCounts {
   inputTokens: number;
   outputTokens: number;
-  costCents: number; // caller computes this from token prices
 }
+
+/**
+ * One LLM turn's usage. Cost is supplied EITHER as integer cents (the
+ * directional estimate the main voice turn records) OR as exact micro-cents
+ * (1¢ = 1,000,000 µ¢ — the gateway's own pricing unit, see
+ * gateway/model-pricing.ts), never both. Sub-cent completions must use
+ * `costMicroCents`: rounding each to cents before recording stores 0 every
+ * time, so a long call's classifier spend never reaches the cap it guards
+ * (PR #975 review finding 4; U6 / #895).
+ */
+export type TokenUsage =
+  | (TokenCounts & { costCents: number; costMicroCents?: never })
+  | (TokenCounts & { costMicroCents: number; costCents?: never });
+
+const MICRO_CENTS_PER_CENT = 1_000_000;
 
 /**
  * #886 — the documented per-turn basis for `maxInputTokens`. The caps below
@@ -73,7 +86,6 @@ export const DEFAULT_TELEPHONY_CAPS: SessionCapConfig = {
   maxInputTokens: CLASSIFY_TURN_INPUT_TOKEN_BUDGET * EXPECTED_MAX_CLASSIFY_TURNS,
   maxOutputTokens: 1500,
   maxCostCents: 40,
-  maxDurationMs: 15 * 60 * 1000,
 };
 
 /**
@@ -87,37 +99,48 @@ export const DEFAULT_INAPP_CAPS: SessionCapConfig = {
   maxInputTokens: CLASSIFY_TURN_INPUT_TOKEN_BUDGET * EXPECTED_MAX_INAPP_CLASSIFY_TURNS,
   maxOutputTokens: 3000,
   maxCostCents: 80,
-  maxDurationMs: 30 * 60 * 1000,
 };
 
 const WARN_THRESHOLD = 0.8;
 
 /**
- * Conservative blended cost estimate in integer cents from token counts.
+ * Conservative blended cost estimate in exact micro-cents from token counts.
  *
  * Wave 8B doesn't yet have per-model pricing wired through the gateway
  * response, so we use a single rate that approximates Sonnet-class
- * pricing ($3/MTok input, $15/MTok output) as a directional signal —
- * enough to fire the per-session cost cap when usage grows. Replace
- * with provider-reported pricing once the gateway threads it through.
- *
- * Returns 0 (not a fractional value) when usage is below 1 cent so
- * the cap math still works on integers.
+ * pricing ($3/MTok input = 300 µ¢/token, $15/MTok output = 1,500 µ¢/token)
+ * as a directional signal — enough to fire the per-session cost cap when
+ * usage grows. Integer multiplication, never rounded, never zero for a
+ * nonzero token count — the form to record on the tracker for sub-cent
+ * calls. Negative counts floor to 0.
  */
-export function estimateCostCents(input: number, output: number): number {
-  const inputCents = (input * 0.0003);  // $3 per 1M = 0.0003¢/token
-  const outputCents = (output * 0.0015); // $15 per 1M = 0.0015¢/token
-  return Math.max(0, Math.round(inputCents + outputCents));
+export function estimateCostMicroCents(input: number, output: number): number {
+  return Math.max(0, input) * 300 + Math.max(0, output) * 1500;
 }
 
-type CapDimension = 'tokens' | 'cost' | 'duration';
+/**
+ * `estimateCostMicroCents` rounded to integer cents, for callers that
+ * genuinely need a coarse per-turn cents figure (the voice turn's
+ * cost_incurred event). Returns 0 when usage is below half a cent — record
+ * sub-cent calls via `estimateCostMicroCents` instead, or they vanish.
+ */
+export function estimateCostCents(input: number, output: number): number {
+  return Math.round(estimateCostMicroCents(input, output) / MICRO_CENTS_PER_CENT);
+}
+
+type CapDimension = 'tokens' | 'cost';
 
 export class SessionCostTracker {
   private readonly _config: SessionCapConfig;
 
   private _inputTokens = 0;
   private _outputTokens = 0;
-  private _costCents = 0;
+  /**
+   * Spend accumulated in micro-cents so many sub-cent calls sum correctly;
+   * `totals.costCents` is derived from this by integer division and the
+   * sub-cent remainder stays here, carried into the next call.
+   */
+  private _costMicroCents = 0;
 
   // Track which warning / exceeded events have already been emitted so we
   // never fire the same event twice for the same dimension in one session.
@@ -132,7 +155,8 @@ export class SessionCostTracker {
   recordUsage(usage: TokenUsage): SessionCapEvent[] {
     this._inputTokens += usage.inputTokens;
     this._outputTokens += usage.outputTokens;
-    this._costCents += usage.costCents;
+    this._costMicroCents +=
+      usage.costMicroCents ?? usage.costCents * MICRO_CENTS_PER_CENT;
 
     const events: SessionCapEvent[] = [];
 
@@ -146,25 +170,25 @@ export class SessionCostTracker {
 
     events.push(...this._evaluate('tokens', tokensPct));
 
-    // Cost
-    const costPct = this._costCents / this._config.maxCostCents;
+    // Cost — evaluated on the exact micro-cent total so the cap fires on
+    // accumulated sub-cent spend, not only on whole cents already accrued.
+    const costPct =
+      this._costMicroCents / (this._config.maxCostCents * MICRO_CENTS_PER_CENT);
     events.push(...this._evaluate('cost', costPct));
 
     return events;
   }
 
-  /** Record elapsed time. Returns any cap events triggered. */
-  checkDuration(elapsedMs: number): SessionCapEvent[] {
-    const pct = elapsedMs / this._config.maxDurationMs;
-    return this._evaluate('duration', pct);
-  }
-
-  /** Current totals snapshot. */
+  /**
+   * Current totals snapshot. `costCents` is always an integer (CLAUDE.md:
+   * money is integer cents): whole cents accrued so far, the sub-cent
+   * remainder carried internally rather than dropped.
+   */
   get totals(): { inputTokens: number; outputTokens: number; costCents: number } {
     return {
       inputTokens: this._inputTokens,
       outputTokens: this._outputTokens,
-      costCents: this._costCents,
+      costCents: Math.floor(this._costMicroCents / MICRO_CENTS_PER_CENT),
     };
   }
 
@@ -181,7 +205,7 @@ export class SessionCostTracker {
   reset(): void {
     this._inputTokens = 0;
     this._outputTokens = 0;
-    this._costCents = 0;
+    this._costMicroCents = 0;
     this._warnedDimensions.clear();
     this._exceededDimensions.clear();
   }

@@ -1550,6 +1550,9 @@ export class InAppVoiceAdapter {
           text,
           {
             tenantId: session.tenantId,
+            // U10 — trace-session grouping (metadata only; prompt unchanged).
+            sessionId: session.id,
+            ...(session.callSid ? { callSid: session.callSid } : {}),
             verticalPromptSection,
             planPromptSection,
             ...(session.machine.currentContext.ownerSession ? { ownerSession: true } : {}),

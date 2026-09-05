@@ -28,6 +28,7 @@ import type {
 import type { RepairTemplate } from '../../../verticals/registry';
 import { SessionCostTracker, DEFAULT_INAPP_CAPS, DEFAULT_TELEPHONY_CAPS } from '../../skills/session-cost-tracker';
 import type { CallOutcome } from '../../../voice/voice-service';
+import type { CallTranscriptTurnRepository } from '../../../voice/call-transcript-turn';
 import type {
   EscalationStartedEvent,
   EscalationSummaryBuiltEvent,
@@ -379,6 +380,13 @@ export interface VoiceSessionStoreOptions {
    * mirror (single-replica behavior unchanged).
    */
   transport?: VoiceEventTransport;
+  /**
+   * U8 (R8) — mid-call transcript persistence. When provided, every
+   * `appendTranscript` on a session with a `callSid` is also written to
+   * call_transcript_turns keyed by call SID + session id (fire-and-forget).
+   * Omitted ⇒ in-memory only (tests, in-app-only deployments).
+   */
+  callTranscriptTurnRepo?: Pick<CallTranscriptTurnRepository, 'recordTurn'>;
 }
 
 export class VoiceSessionStore {
@@ -414,9 +422,11 @@ export class VoiceSessionStore {
   private readonly transport?: VoiceEventTransport;
   private readonly replicaId: string;
   private readonly sweepHandle: ReturnType<typeof setInterval> | null;
+  private readonly callTranscriptTurnRepo?: Pick<CallTranscriptTurnRepository, 'recordTurn'>;
 
   constructor(options: VoiceSessionStoreOptions = {}) {
     this.idleTtlMs = options.idleTtlMs ?? DEFAULT_IDLE_TTL_MS;
+    this.callTranscriptTurnRepo = options.callTranscriptTurnRepo;
     this.replicaId = options.replicaId ?? REPLICA_ID;
     const sweepIntervalMs = options.sweepIntervalMs ?? DEFAULT_SWEEP_INTERVAL_MS;
     const startInterval = options.startInterval ?? true;
@@ -672,12 +682,54 @@ export class VoiceSessionStore {
     if (session) session.lastActivityAt = new Date();
   }
 
-  /** Append a turn to the session transcript as a formatted string. No-op if session unknown. */
+  /**
+   * Append a turn to the session transcript as a formatted string. No-op if
+   * session unknown.
+   *
+   * U8 (R8): when a `callTranscriptTurnRepo` is injected and the session is
+   * a Twilio call (has a `callSid`), the turn is also persisted keyed by
+   * `(tenantId, callSid, sessionId, turnIndex)` so the transcript survives a
+   * restart / reap before the recording webhook fires. The index is the
+   * transcript position at append time — the same index the recording hook
+   * derives when it has to fall back to this in-memory array. Fire-and-forget:
+   * a failing write is logged and never reaches the call path.
+   */
   appendTranscript(sessionId: string, entry: TranscriptEntry): void {
     const session = this.sessions.get(sessionId);
     if (!session) return;
+    const turnIndex = session.transcript.length;
     session.transcript.push(`${entry.speaker}: ${entry.text}`);
     session.lastActivityAt = new Date();
+    this.persistTurn(session, turnIndex, entry);
+  }
+
+  private persistTurn(session: VoiceSession, turnIndex: number, entry: TranscriptEntry): void {
+    const repo = this.callTranscriptTurnRepo;
+    if (!repo || !session.callSid) return; // in-app sessions have no CallSid: nothing to key on
+    const text = entry.text.trim();
+    if (text.length === 0) return; // an empty utterance still consumed its index above
+    const { callSid } = session;
+    // Promise.resolve().then(...) also contains a synchronous throw from the repo.
+    void Promise.resolve()
+      .then(() =>
+        repo.recordTurn({
+          tenantId: session.tenantId,
+          callSid,
+          sessionId: session.id,
+          turnIndex,
+          speaker: entry.speaker,
+          text,
+        }),
+      )
+      .catch((err: unknown) => {
+        // eslint-disable-next-line no-console
+        console.error('voice-session-store: mid-call transcript persist failed', {
+          sessionId: session.id,
+          callSid,
+          turnIndex,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      });
   }
 
   /** Read-only snapshot of session state. Returns null if unknown. */

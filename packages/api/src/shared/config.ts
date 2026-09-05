@@ -41,6 +41,20 @@ const configSchema = z.object({
   AI_FALLBACK_COMPLEX_MODEL: z.string().min(1).optional(),
   AI_DEFAULT_MODEL: z.string().default('gpt-4o-mini'),
   SENTRY_DSN: z.string().optional(),
+  // U10 — Langfuse LLM trace export (ai/gateway/trace-exporter.ts). BOTH keys
+  // present ⇒ every gateway completion (success / failure / cache hit) is
+  // exported; either absent ⇒ noop with zero network calls (the PostHog /
+  // Sentry off-by-default posture). Prompt/reply content is exported ONLY
+  // when LANGFUSE_CAPTURE_CONTENT=true — voice traces carry caller
+  // transcripts — and then only after redaction. Base URL is configurable
+  // for a self-hosted instance. No prod hard-requirement.
+  LANGFUSE_PUBLIC_KEY: z.string().min(1).optional(),
+  LANGFUSE_SECRET_KEY: z.string().min(1).optional(),
+  LANGFUSE_BASE_URL: z.string().url().default('https://cloud.langfuse.com'),
+  LANGFUSE_CAPTURE_CONTENT: z
+    .enum(['true', 'false'])
+    .default('false')
+    .transform((v) => v === 'true'),
   LOG_LEVEL: z.enum(['debug', 'info', 'warn', 'error']).default('info'),
   WEBHOOK_SIGNING_SECRET: z.string().optional(),
   CORS_ORIGIN: z.string().optional(),
@@ -128,6 +142,14 @@ const configSchema = z.object({
   SLO_ALERT_COOLDOWN_MIN: z.coerce.number().positive().default(60),
   // Operator phone (E.164) for SLO breach SMS pages. Unset → Sentry-only.
   ALERT_SMS_TO: z.string().min(1).optional(),
+  // ── U5 — absolute per-call wall-clock cap for the voice path (ms). Enforced
+  // by BOTH transports: the media-streams adapter arms one absolute timer per
+  // leg (the audio-idle timer never fires on a live call because Twilio
+  // streams comfort-noise frames continuously) and the Gather adapter checks
+  // the session age on every turn. The call is wrapped up and ended with
+  // terminal reason `max_call_duration`. Default 15 min; 0/negative is
+  // rejected at boot — an unbounded call is never a valid configuration.
+  VOICE_MAX_CALL_DURATION_MS: z.coerce.number().int().positive().default(15 * 60 * 1000),
   // ── FAIL-VIS — silent-failure monitor (workers/failure-rate-monitor.ts).
   // Watches `ai_runs` and `proposals` for the failure shapes that shipped
   // SILENTLY (a 26,894-call task that completed zero times; estimate

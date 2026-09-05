@@ -27,6 +27,7 @@ import { createUserPhoneDispatcherResolver, createBusinessPhoneFallback } from '
 import { PgPhoneNumberRepository } from './integrations/twilio/phone-number-repository';
 import { attachMediaStreamServer } from './telephony/media-streams';
 import { createTwilioCallRedirector } from './telephony/twilio-call-redirect';
+import { createRecordingTranscriptHook } from './telephony/recording-transcript-hook';
 import { RealtimeHealthCircuit } from './telephony/realtime-health-circuit';
 import { attachClientGateway, setChannelGate } from './ws/client-gateway';
 import { setDraining, isDraining as isDrainingFlag } from './ws/drain-state';
@@ -144,6 +145,7 @@ import { PgMoneyDashboardRepository } from './reports/pg-money-dashboard';
 import { createFeedbackResponsesRouter } from './routes/feedback';
 import { createInteractionsRouter } from './routes/interactions';
 import { initSentry, setSentryClient } from './monitoring/sentry';
+import { captureServerError } from './monitoring/capture-server-error';
 import { dbPoolConnections, pgQueueDepth, voiceTurnLatencyMs } from './monitoring/metrics';
 // WS15 — platform SLO monitor + drain-abandonment alarm.
 import { createAlertOperator, emitDrainAbandonment } from './monitoring/alert-operator';
@@ -407,6 +409,7 @@ import type { FeasibilityDependencies } from './scheduling/feasibility-types';
 import { createDiffAnalysisWorker } from './ai/diff-analysis';
 import { e1ScriptReadiness } from './ai/agents/customer-calling/emergency-tier';
 import { createLogger } from './logging/logger';
+import { createTraceExporterFromConfig } from './ai/gateway/trace-exporter';
 import { createRequestLoggingMiddleware, captureRequestError } from './middleware/request-logging';
 import {
   createDelayNotificationWorker,
@@ -1245,8 +1248,19 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
   // Falls back to a hermetic MockLLMProvider in dev/test so the app boots
   // without an AI_PROVIDER_API_KEY and Assistant can still draft proposals
   // (fixed "unknown" mock permanently degraded the chat path).
+  // U10 — no logger was passed here before, so every best-effort
+  // `this.logger?.error` in gateway.ts (ai_runs AND trace-export failures)
+  // was silent in production. One logger, shared with the exporter.
+  const llmGatewayLogger = createLogger({
+    service: 'llm-gateway',
+    environment: process.env.NODE_ENV || 'development',
+  });
+  // U10 — Langfuse trace export. NoopTraceExporter (zero network) unless
+  // LANGFUSE_PUBLIC_KEY + LANGFUSE_SECRET_KEY are both set; flushed in the
+  // shutdown handler beside shutdownAnalytics().
+  const traceExporter = createTraceExporterFromConfig(config, llmGatewayLogger);
   const llmGateway = config.AI_PROVIDER_API_KEY
-    ? createLLMGateway(config, { aiRunRepo, shadowStore })
+    ? createLLMGateway(config, { aiRunRepo, shadowStore, logger: llmGatewayLogger, traceExporter })
     : createHermeticMockLLMGateway().gateway;
   // Wire completion probe for GET /api/health/ai/completion (even hermetic mock
   // — probe then proves the mock path responds, which is useful in local boot).
@@ -3197,7 +3211,13 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
   const voiceEventTransport = createVoiceEventTransport(
     process.env.VOICE_FANOUT_ENABLED === 'true' ? process.env.REDIS_URL : undefined,
   );
-  const voiceSessionStore = new VoiceSessionStore({ transport: voiceEventTransport });
+  // U8 (R8): every appended Twilio turn is also persisted to
+  // call_transcript_turns keyed by CallSid + session id, so the recording
+  // webhook can recover the transcript after a restart / reap.
+  const voiceSessionStore = new VoiceSessionStore({
+    transport: voiceEventTransport,
+    callTranscriptTurnRepo,
+  });
   // F6b: Process-local whisper TwiML cache. Shared between:
   //   - whisperRouter (serves TwiML to Twilio when dispatcher answers)
   //   - MediaStreamAdapter (stores whisper text after escalation_started)
@@ -3484,6 +3504,8 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
   const twilioAdapterDeps = {
     store: voiceSessionStore,
     gateway: llmGateway,
+    // U5 — absolute per-call duration cap, checked on every Gather turn.
+    maxCallDurationMs: config.VOICE_MAX_CALL_DURATION_MS,
     ...(pool ? { pool } : {}),
     proposalRepo,
     ...(customerNegotiationContextProvider ? { customerNegotiationContextProvider } : {}),
@@ -3852,56 +3874,25 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
         ...(process.env.TWILIO_AUTH_TOKEN
           ? { twilioAuthToken: process.env.TWILIO_AUTH_TOKEN }
           : {}),
-        // Phase 4a-1: enqueue transcript-ingestion when the recording row
-        // first lands. Skipped on Twilio retries (`inserted=false`) so
-        // we don't double-process the same call. Skipped silently when
-        // the embedding provider is unwired (no AI_PROVIDER_API_KEY).
-        ...(embeddingProvider
-          ? {
-              options: {
-                onPersisted: async (event) => {
-                  if (!event.inserted) return;
-                  const session = voiceSessionStore.findByCallSid(event.callSid);
-                  if (!session) {
-                    // Session was reaped (>30 min idle) before the
-                    // recording webhook fired. Known data-loss edge
-                    // case from the in-memory session store; not
-                    // something Phase 4a-1 fixes. Phase 4 architecture
-                    // doc covers persistent FSM state as a follow-up.
-                    return;
-                  }
-                  try {
-                    await queue.send(
-                      'transcript_ingestion',
-                      {
-                        tenantId: event.tenantId,
-                        voiceRecordingId: event.voiceRecordingId,
-                        transcript: [...session.transcript],
-                        ...(session.machine.currentContext.currentIntent
-                          ? { intent: session.machine.currentContext.currentIntent }
-                          : {}),
-                        // B2: thread the typed CallOutcome into the worker
-                        // payload so voice_recordings.outcome gets stamped
-                        // alongside voice_sessions.outcome. Optional —
-                        // the worker no-ops when undefined.
-                        ...(session.terminalOutcome
-                          ? { outcome: session.terminalOutcome }
-                          : {}),
-                        durationMs: Date.now() - session.createdAt.getTime(),
-                      },
-                      `transcript:${event.voiceRecordingId}:v1`,
-                    );
-                  } catch (err) {
-                    // eslint-disable-next-line no-console
-                    console.error('app: failed to enqueue transcript_ingestion', {
-                      voiceRecordingId: event.voiceRecordingId,
-                      error: err instanceof Error ? err.message : String(err),
-                    });
-                  }
-                },
-              },
-            }
-          : {}),
+        // U8 (R8): attach the turns persisted mid-call to the new recording
+        // and enqueue transcript-ingestion from them (falling back to the
+        // in-memory session, ended or not). Runs on every first delivery —
+        // the attach and the `voice.transcript_unrecoverable` audit do NOT
+        // depend on AI_PROVIDER_API_KEY; only the enqueue does, because the
+        // ingestion worker is registered only when an embedding provider is
+        // wired (see createTranscriptIngestionWorker above).
+        options: {
+          onPersisted: createRecordingTranscriptHook({
+            store: voiceSessionStore,
+            callTranscriptTurnRepo,
+            auditRepo,
+            ...(embeddingProvider ? { queue } : {}),
+            logger: createLogger({
+              service: 'recording-transcript-hook',
+              environment: process.env.NODE_ENV || 'development',
+            }),
+          }),
+        },
       },
       // U9 (voicemail → action) — replay-receipt store for the lead leg plus
       // the transcription enqueue for persisted voicemail recordings. The
@@ -4164,9 +4155,11 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
       // `frustration_detected` back into the FSM out-of-band.
       //
       // The sentiment function expects `deps.llm.complete({ prompt })` returning
-      // `{ text }`. We adapt the LLM gateway (which uses messages arrays) into
-      // that interface here using the `call_sentiment` task type so routing
-      // config can target it separately from main call-flow completions.
+      // `{ text, tokenUsage, model }` (#895 — usage + model id so the
+      // classifier can record its own spend on the session cost tracker). We
+      // adapt the LLM gateway (which uses messages arrays) into that interface
+      // here using the `call_sentiment` task type so routing config can target
+      // it separately from main call-flow completions.
       //
       // escalationSettings is per-tenant and resolved per-session: the
       // `resolveEscalationSettings` resolver (passed into attachMediaStreamServer
@@ -4188,7 +4181,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
                     tenantId: input.tenantId,
                     messages: [{ role: 'user' as const, content: prompt }],
                   });
-                  return { text: res.content };
+                  return { text: res.content, tokenUsage: res.tokenUsage, model: res.model };
                 },
               },
               // Per-session cost-cap inputs threaded in by the adapter so the
@@ -4233,7 +4226,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
                       tenantId: input.tenantId,
                       messages: [{ role: 'user' as const, content: prompt }],
                     });
-                    return { text: res.content };
+                    return { text: res.content, tokenUsage: res.tokenUsage, model: res.model };
                   },
                 },
                 ...budget,
@@ -4376,6 +4369,10 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
             },
             fillerEngine,
             fillerCache,
+            // U5 — absolute per-call duration cap: one timer per leg, armed
+            // at start() and never re-armed by media frames (the audio-idle
+            // timer is, so it never fires on a live call).
+            maxCallDurationMs: config.VOICE_MAX_CALL_DURATION_MS,
             speechTurn: async ({ session, speechResult, callSid, tenantId }) =>
               twilioAdapter.processCallerUtterance({
                 sessionId: session.id,
@@ -6996,6 +6993,9 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
       } catch {
         // analytics must never break the error response
       }
+      // R1 — every unhandled 5xx reaches Sentry (shared with asyncRoute, which
+      // maps its own rejections and never reaches this handler).
+      captureServerError(err, req);
     }
     res.status(statusCode).json(body);
   });
@@ -7090,6 +7090,10 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
         const { shutdownAnalytics } = await import('./analytics/posthog');
         await shutdownAnalytics();
       }
+      // U10 — drain queued Langfuse trace events (noop when unconfigured;
+      // never rejects) in the same queued-telemetry slot, before the cache,
+      // Redis and pool teardown below.
+      await traceExporter.flush();
       // Disconnect Redis cache store(s) before draining the DB pool so Railway
       // shutdown is not slowed by lingering Redis connections.
       await shutdownCacheStores();

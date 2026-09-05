@@ -5,6 +5,13 @@ on:
     - cron: '0 9 * * *'  # 09:00 UTC daily
   workflow_dispatch: {}
 
+# `contents: read` is mandatory: a permissions block drops every unlisted
+# scope to none and actions/checkout needs it. `issues: write` is for the
+# gate-red issue step at the end of the job (plan 2026-09-05-001 U2).
+permissions:
+  contents: read
+  issues: write
+
 jobs:
   real-call:
     runs-on: ubuntu-latest
@@ -55,6 +62,9 @@ jobs:
           STAGING_DB_URL: ${{ secrets.STAGING_DB_URL }}
       - name: Notify Slack on failure
         if: failure()
+        # Slack is best-effort: a missing/rotated webhook must not hide the
+        # real failure or keep the gate-red step below from running.
+        continue-on-error: true
         uses: slackapi/slack-github-action@v1.27.1
         with:
           payload: |
@@ -64,3 +74,18 @@ jobs:
         env:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_ALERTS_WEBHOOK }}
           SLACK_WEBHOOK_TYPE: INCOMING_WEBHOOK
+      # U2 (R3) — a red gate is visible without Slack. `if: always()` so
+      # the green run closes the issue; job.status carries the conclusion.
+      # No continue-on-error on purpose: a reporter that cannot reach
+      # GitHub must be loud (see the script header). Only packages/api ran
+      # `npm ci` in this job, so tsx is invoked from there.
+      - name: Open or close gate-red issue
+        if: always()
+        run: npx tsx ../../.github/scripts/report-gate-failure.ts
+        working-directory: packages/api
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GATE_NAME: ${{ github.workflow }}
+          JOB_STATUS: ${{ job.status }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
