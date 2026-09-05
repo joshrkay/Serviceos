@@ -145,6 +145,13 @@ export type SpeechTurnHandler = (args: {
   speechResult: string;
   callSid: string;
   tenantId: string;
+  /**
+   * #859 — the host owns the transcript append for this utterance: it has
+   * already written the `caller:` line (or deliberately skipped an empty
+   * one), so the handler must not append again. Defaults to `false` — a
+   * caller that passes nothing gets the handler's own single append.
+   */
+  transcriptAppended?: boolean;
 }) => Promise<SideEffect[]>;
 
 export interface MediaStreamAdapterDeps {

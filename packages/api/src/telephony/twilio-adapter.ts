@@ -1910,15 +1910,22 @@ export class TwilioGatherAdapter {
       ];
     }
 
-    // Always append utterance to transcript first so it is captured
+    // Append the utterance to the transcript first so it is captured
     // regardless of the path below (frustration escalation or normal turn).
-    this.deps.store.appendTranscript(opts.sessionId, {
-      speaker: 'caller',
-      // #850 — a spoken money-approval challenge is redacted here rather than
-      // at each consumer, so every derived summary inherits it.
-      text: callerTranscriptText(session, opts.speechResult),
-      ts: Date.now(),
-    });
+    // #859 — this is the ONLY append for the utterance: the `speechTurn`
+    // delegation below is told `transcriptAppended: true`. An empty
+    // media-streams final is skipped for the same reason Gather skips it
+    // (_handleGatherLocked): an empty `caller:` line would make
+    // deriveCallOutcome read a silent call as caller speech.
+    if (opts.speechResult.trim().length > 0) {
+      this.deps.store.appendTranscript(opts.sessionId, {
+        speaker: 'caller',
+        // #850 — a spoken money-approval challenge is redacted here rather than
+        // at each consumer, so every derived summary inherits it.
+        text: callerTranscriptText(session, opts.speechResult),
+        ts: Date.now(),
+      });
+    }
 
     // RV-140 — ONE shared deterministic safety scan (emergency keywords),
     // BEFORE the frustration check and BEFORE any LLM call. Shared with the
@@ -1957,6 +1964,7 @@ export class TwilioGatherAdapter {
       speechResult: opts.speechResult,
       callSid: opts.callSid,
       tenantId: opts.tenantId,
+      transcriptAppended: true,
     });
   }
 
