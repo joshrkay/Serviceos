@@ -18,6 +18,9 @@
 # `if: always()` and `continue-on-error: true` — the run itself is
 # informational (no gate). The Layer 2 step's outcome is what the
 # weekly run is reporting on; downstream alerting must not mask it.
+# The final gate-red step (plan 2026-09-05-001 U2) is the exception: it
+# reads `job.status` — which continue-on-error steps do not affect — and
+# opens/closes a `gate-red` issue so a red week is visible without Slack.
 name: Voice Quality Layer 2 (weekly trend)
 
 on:
@@ -27,7 +30,7 @@ on:
 
 permissions:
   contents: read
-  issues: write   # so the workflow can open regression issues
+  issues: write   # regression issues + the gate-red issue step
 
 jobs:
   trend:
@@ -91,3 +94,15 @@ jobs:
           GITHUB_REPOSITORY: ${{ github.repository }}
           REPORT_PATH: packages/api/voice-quality-layer2-report.json
           TREND_PATH: packages/api/voice-quality-trend-report.json
+      # U2 (R3) — see the failure-model note in the header. No
+      # continue-on-error on purpose: a reporter that cannot reach GitHub
+      # must be loud (see the script header).
+      - name: Open or close gate-red issue
+        if: always()
+        run: npx tsx .github/scripts/report-gate-failure.ts
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GATE_NAME: ${{ github.workflow }}
+          JOB_STATUS: ${{ job.status }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
