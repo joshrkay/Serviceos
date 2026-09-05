@@ -41,6 +41,20 @@ const configSchema = z.object({
   AI_FALLBACK_COMPLEX_MODEL: z.string().min(1).optional(),
   AI_DEFAULT_MODEL: z.string().default('gpt-4o-mini'),
   SENTRY_DSN: z.string().optional(),
+  // U10 — Langfuse LLM trace export (ai/gateway/trace-exporter.ts). BOTH keys
+  // present ⇒ every gateway completion (success / failure / cache hit) is
+  // exported; either absent ⇒ noop with zero network calls (the PostHog /
+  // Sentry off-by-default posture). Prompt/reply content is exported ONLY
+  // when LANGFUSE_CAPTURE_CONTENT=true — voice traces carry caller
+  // transcripts — and then only after redaction. Base URL is configurable
+  // for a self-hosted instance. No prod hard-requirement.
+  LANGFUSE_PUBLIC_KEY: z.string().min(1).optional(),
+  LANGFUSE_SECRET_KEY: z.string().min(1).optional(),
+  LANGFUSE_BASE_URL: z.string().url().default('https://cloud.langfuse.com'),
+  LANGFUSE_CAPTURE_CONTENT: z
+    .enum(['true', 'false'])
+    .default('false')
+    .transform((v) => v === 'true'),
   LOG_LEVEL: z.enum(['debug', 'info', 'warn', 'error']).default('info'),
   WEBHOOK_SIGNING_SECRET: z.string().optional(),
   CORS_ORIGIN: z.string().optional(),

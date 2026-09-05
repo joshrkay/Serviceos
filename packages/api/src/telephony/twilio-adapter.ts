@@ -2366,6 +2366,9 @@ export class TwilioGatherAdapter {
           opts.speechResult,
           {
             tenantId: opts.tenantId,
+            // U10 — trace-session grouping (metadata only; prompt unchanged).
+            sessionId: session.id,
+            ...(session.callSid ? { callSid: session.callSid } : {}),
             verticalPromptSection,
             planPromptSection,
             classifierProfile,

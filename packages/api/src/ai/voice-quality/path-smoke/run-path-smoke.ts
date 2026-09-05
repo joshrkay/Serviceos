@@ -55,6 +55,8 @@ export interface RunPathSmokeOptions {
       tenantId: string;
       extendedIntents?: boolean;
       ownerSession?: boolean;
+      /** U10 — trace-session grouping (one smoke case = one session). */
+      sessionId?: string;
     },
     gateway: LLMGateway,
   ) => Promise<{ intentType: string; confidence: number }>;
@@ -66,6 +68,7 @@ async function defaultClassify(
     tenantId: string;
     extendedIntents?: boolean;
     ownerSession?: boolean;
+    sessionId?: string;
   },
   gateway: LLMGateway,
 ): Promise<{ intentType: string; confidence: number }> {
@@ -76,6 +79,7 @@ async function defaultClassify(
     utterance,
     {
       tenantId: context.tenantId,
+      ...(context.sessionId ? { sessionId: context.sessionId } : {}),
       ...(context.extendedIntents ? { extendedIntents: true } : {}),
       ...(context.ownerSession ? { ownerSession: true } : {}),
     },
@@ -116,6 +120,8 @@ export async function runPathSmoke(
             tenantId: PATH_SMOKE_TENANT_ID,
             extendedIntents: c.extendedIntents,
             ownerSession: c.ownerSession,
+            // U10 — one multi-turn smoke case = one trace session.
+            sessionId: `path-smoke:${c.pathId}`,
           },
           opts.gateway,
         );

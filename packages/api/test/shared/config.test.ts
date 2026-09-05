@@ -1005,3 +1005,46 @@ describe('WS7 — resolveMediaStreamsEnabled (auto mode)', () => {
     ).toBe(false);
   });
 });
+
+describe('U10 — LANGFUSE_* trace export config', () => {
+  beforeEach(() => {
+    resetConfig();
+  });
+
+  it('defaults: no keys, the Langfuse cloud base URL, content capture OFF', () => {
+    const config = loadConfig({ NODE_ENV: 'dev' });
+    expect(config.LANGFUSE_PUBLIC_KEY).toBeUndefined();
+    expect(config.LANGFUSE_SECRET_KEY).toBeUndefined();
+    expect(config.LANGFUSE_BASE_URL).toBe('https://cloud.langfuse.com');
+    expect(config.LANGFUSE_CAPTURE_CONTENT).toBe(false);
+  });
+
+  it('reads both keys, a self-hosted base URL and the capture flag as a real boolean', () => {
+    const config = loadConfig({
+      NODE_ENV: 'dev',
+      LANGFUSE_PUBLIC_KEY: 'pk-lf-live',
+      LANGFUSE_SECRET_KEY: 'sk-lf-live',
+      LANGFUSE_BASE_URL: 'https://langfuse.internal.example',
+      LANGFUSE_CAPTURE_CONTENT: 'true',
+    });
+    expect(config.LANGFUSE_PUBLIC_KEY).toBe('pk-lf-live');
+    expect(config.LANGFUSE_SECRET_KEY).toBe('sk-lf-live');
+    expect(config.LANGFUSE_BASE_URL).toBe('https://langfuse.internal.example');
+    expect(config.LANGFUSE_CAPTURE_CONTENT).toBe(true);
+  });
+
+  it('empty-string keys are unset (an unset Railway secret never half-configures the exporter)', () => {
+    const config = loadConfig({ NODE_ENV: 'dev', LANGFUSE_PUBLIC_KEY: '', LANGFUSE_SECRET_KEY: '' });
+    expect(config.LANGFUSE_PUBLIC_KEY).toBeUndefined();
+    expect(config.LANGFUSE_SECRET_KEY).toBeUndefined();
+  });
+
+  it('rejects a non-URL base URL and a non-boolean capture flag', () => {
+    expect(() => loadConfig({ NODE_ENV: 'dev', LANGFUSE_BASE_URL: 'not a url' })).toThrow(
+      'Configuration validation failed',
+    );
+    expect(() => loadConfig({ NODE_ENV: 'dev', LANGFUSE_CAPTURE_CONTENT: 'yes' })).toThrow(
+      'Configuration validation failed',
+    );
+  });
+});

@@ -1121,6 +1121,16 @@ export interface ClassifyContext {
    * from transcript content.
    */
   classifierProfile?: ClassifierProfile;
+  /**
+   * U10 — trace-session grouping for LLM trace export (the Langfuse
+   * sessionId). Voice surfaces pass the voice session id (+ the Twilio
+   * CallSid when present); chat passes the conversation id; the memo router
+   * passes its conversation id. Carried in `request.metadata` ONLY — never
+   * in the prompt — so voice-quality cassette hashes and gateway cache keys
+   * are unaffected.
+   */
+  sessionId?: string;
+  callSid?: string;
 }
 
 /**
@@ -2720,7 +2730,12 @@ async function classifyIntentRaw(
     // Kept in metadata too: some downstream logging/consumers still read
     // tenantId from here (see gateway.ts correlationId/promptVersionId
     // metadata reads for the pattern this follows).
-    metadata: { tenantId: context.tenantId },
+    // U10 — session identifiers ride in metadata only (trace grouping).
+    metadata: {
+      tenantId: context.tenantId,
+      ...(context.sessionId ? { sessionId: context.sessionId } : {}),
+      ...(context.callSid ? { callSid: context.callSid } : {}),
+    },
   });
 
   const tokenUsage = response.tokenUsage

@@ -409,6 +409,7 @@ import type { FeasibilityDependencies } from './scheduling/feasibility-types';
 import { createDiffAnalysisWorker } from './ai/diff-analysis';
 import { e1ScriptReadiness } from './ai/agents/customer-calling/emergency-tier';
 import { createLogger } from './logging/logger';
+import { createTraceExporterFromConfig } from './ai/gateway/trace-exporter';
 import { createRequestLoggingMiddleware, captureRequestError } from './middleware/request-logging';
 import {
   createDelayNotificationWorker,
@@ -1247,8 +1248,19 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
   // Falls back to a hermetic MockLLMProvider in dev/test so the app boots
   // without an AI_PROVIDER_API_KEY and Assistant can still draft proposals
   // (fixed "unknown" mock permanently degraded the chat path).
+  // U10 — no logger was passed here before, so every best-effort
+  // `this.logger?.error` in gateway.ts (ai_runs AND trace-export failures)
+  // was silent in production. One logger, shared with the exporter.
+  const llmGatewayLogger = createLogger({
+    service: 'llm-gateway',
+    environment: process.env.NODE_ENV || 'development',
+  });
+  // U10 — Langfuse trace export. NoopTraceExporter (zero network) unless
+  // LANGFUSE_PUBLIC_KEY + LANGFUSE_SECRET_KEY are both set; flushed in the
+  // shutdown handler beside shutdownAnalytics().
+  const traceExporter = createTraceExporterFromConfig(config, llmGatewayLogger);
   const llmGateway = config.AI_PROVIDER_API_KEY
-    ? createLLMGateway(config, { aiRunRepo, shadowStore })
+    ? createLLMGateway(config, { aiRunRepo, shadowStore, logger: llmGatewayLogger, traceExporter })
     : createHermeticMockLLMGateway().gateway;
   // Wire completion probe for GET /api/health/ai/completion (even hermetic mock
   // — probe then proves the mock path responds, which is useful in local boot).
@@ -7078,6 +7090,10 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
         const { shutdownAnalytics } = await import('./analytics/posthog');
         await shutdownAnalytics();
       }
+      // U10 — drain queued Langfuse trace events (noop when unconfigured;
+      // never rejects) in the same queued-telemetry slot, before the cache,
+      // Redis and pool teardown below.
+      await traceExporter.flush();
       // Disconnect Redis cache store(s) before draining the DB pool so Railway
       // shutdown is not slowed by lingering Redis connections.
       await shutdownCacheStores();

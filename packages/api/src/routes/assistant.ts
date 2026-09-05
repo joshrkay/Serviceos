@@ -2047,6 +2047,9 @@ async function generateAssistantReply(
         tenantId,
         extendedIntents: true,
         ...(verticalPromptSection ? { verticalPromptSection } : {}),
+        // U10 — trace-session grouping: the conversation id (always minted
+        // by the route before drafting, #909 — so turn one is grouped too).
+        ...(conversationId ? { sessionId: conversationId } : {}),
       };
 
       const classification = await classifyIntent(lastUserText, classifyContext, deps.gateway);
@@ -2777,7 +2780,13 @@ async function generateAssistantReply(
       ],
       temperature: 0.2,
       maxTokens: 700,
-      metadata: { source: 'assistant-chat-route', tenantId, correlationId },
+      metadata: {
+        source: 'assistant-chat-route',
+        tenantId,
+        correlationId,
+        // U10 — same trace session as this turn's classify call(s).
+        ...(conversationId ? { sessionId: conversationId } : {}),
+      },
     });
 
     const parsed = assistantReplySchema.parse(JSON.parse(response.content));

@@ -19,6 +19,7 @@ import {
   shouldWarnForUnmappedTaskType,
 } from './router';
 import { computeCostMicroCents } from './model-pricing';
+import type { LLMTraceCompletionEvent, LLMTraceExporter } from './trace-exporter';
 
 /** Image detail hint passed through to vision-capable providers. */
 export type LLMImageDetail = 'low' | 'high' | 'auto';
@@ -363,17 +364,37 @@ export class LLMGateway {
   private readonly providers: Map<string, LLMProvider>;
   private readonly logger?: LLMGatewayLogger;
   private readonly aiRunRepo?: AiRunRepository;
+  private readonly traceExporter?: LLMTraceExporter;
 
   constructor(
     config: LLMGatewayConfig,
     providers: Map<string, LLMProvider>,
     logger?: LLMGatewayLogger,
-    aiRunRepo?: AiRunRepository
+    aiRunRepo?: AiRunRepository,
+    traceExporter?: LLMTraceExporter,
   ) {
     this.config = config;
     this.providers = providers;
     this.logger = logger;
     this.aiRunRepo = aiRunRepo;
+    this.traceExporter = traceExporter;
+  }
+
+  /**
+   * U10 — export one completion to the trace sink. Best-effort, exactly like
+   * the aiRunRepo calls: a throw is logged with the correlation id and never
+   * reaches the completion (or the error the caller is about to receive).
+   */
+  private exportTrace(event: LLMTraceCompletionEvent): void {
+    if (!this.traceExporter) return;
+    try {
+      this.traceExporter.recordCompletion(event);
+    } catch (exportErr) {
+      this.logger?.error('LLM trace export failed (best-effort)', {
+        correlationId: event.correlationId,
+        error: exportErr instanceof Error ? exportErr.message : String(exportErr),
+      });
+    }
   }
 
   async complete(request: LLMRequest): Promise<LLMResponse> {
@@ -456,6 +477,8 @@ export class LLMGateway {
     const correlationId =
       (request.metadata?.correlationId as string | undefined) ?? uuidv4();
     const promptVersionId = request.metadata?.promptVersionId as string | undefined;
+    // U10 — trace-session grouping (voice session id / chat conversation id).
+    const sessionId = request.metadata?.sessionId as string | undefined;
 
     // Create the ai_runs row (best-effort — failure must not abort the LLM call).
     // A single create() writes the run with status 'pending' and startedAt already
@@ -588,6 +611,30 @@ export class LLMGateway {
         }
       }
 
+      // U10 — trace export (best-effort). Built from the same values the
+      // ai_runs row and the metrics above already use: served model/provider
+      // post-failover, the response's own providerPath/fallbackStage/degraded.
+      this.exportTrace({
+        correlationId,
+        tenantId,
+        taskType: request.taskType,
+        sessionId,
+        resolvedModel,
+        servedModel: costModel,
+        provider: costProvider,
+        providerPath: result.providerPath,
+        fallbackStage: result.fallbackStage,
+        cached: result.cached ?? false,
+        degraded: result.degraded ?? false,
+        promptVersionId,
+        tokenUsage: result.tokenUsage,
+        costMicroCents,
+        latencyMs,
+        startedAt: new Date(startTime),
+        input: request.messages,
+        output: result.content,
+      });
+
       return result;
     } catch (err) {
       const latencyMs = Date.now() - startTime;
@@ -638,6 +685,25 @@ export class LLMGateway {
           });
         }
       }
+
+      // U10 — trace export of the failure (best-effort): message + latency,
+      // no usage/cost (none was reported).
+      this.exportTrace({
+        correlationId,
+        tenantId,
+        taskType: request.taskType,
+        sessionId,
+        resolvedModel,
+        servedModel: resolvedModel,
+        provider: providerName,
+        cached: false,
+        degraded: false,
+        promptVersionId,
+        latencyMs,
+        startedAt: new Date(startTime),
+        input: request.messages,
+        error: err instanceof Error ? err.message : String(err),
+      });
 
       if (err instanceof AppError) {
         throw err;
