@@ -138,6 +138,9 @@ the evidence that ranked it.
 - R9. No `ADD CONSTRAINT … CHECK` in `schema.ts` lacks `NOT VALID`, a
   schema-wide test pins that, and the widened constraints carry a
   vocabulary-pin test.
+- R10. When Langfuse keys are set, every gateway completion is exported
+  as a redacted, tenant-tagged trace grouped by session; when they are
+  not set, nothing is exported and no network call is made.
 
 ## Key Technical Decisions
 
@@ -186,10 +189,24 @@ the evidence that ranked it.
   `pg_get_constraintdef` is unchanged) is the durable root-cause fix and
   is deferred to its own plan because it changes every deploy's
   behaviour.
+- **Langfuse as a second sink behind the existing gateway seam, not a
+  replacement for `ai_runs`** — the gateway already builds a redacted
+  input snapshot, computes cost and carries `correlationId` and
+  `promptVersionId`, so export is one best-effort call on each path.
+  `ai_runs` stays the tenant-scoped system of record (it feeds
+  `proposals.ai_run_id`); Langfuse is for opening a session's calls as
+  one trace and for prompt-version and eval workflows. Content export is
+  off by default because voice traces contain caller transcripts, and
+  the base URL is configurable so a self-hosted instance can be used.
+  (Alternatives considered: PostHog `$ai_generation`, rejected for now
+  because it lacks prompt management and dataset evals, though the same
+  exporter interface can feed it later; LangSmith, rejected because the
+  platform is closed and self-hosting is enterprise-only, and the repo
+  has no LangChain dependency to justify it.)
 
 ## Scope Boundaries
 
-**In scope:** the nine units below, the prod env checklist and the two
+**In scope:** the ten units below, the prod env checklist and the two
 ops runbooks they reference.
 
 **Non-goals:** the JSON-404 for unmatched `/api/*` (C-1), Stripe request
@@ -220,7 +237,9 @@ below so they are not lost; they are not among the five.
   the existing tenant-scoped `callTranscriptTurnRepo`; the Docker-gated
   test pins the real columns.
 - **LLM gateway:** U6 keeps every call inside the gateway and only
-  widens the returned shape; no direct provider calls.
+  widens the returned shape; no direct provider calls. U10 hangs off
+  the gateway's existing success and error paths, so it sees every call
+  by construction and nothing can bypass it.
 - **Human approval / proposals:** untouched. No proposal or approval
   path changes.
 - **Integer cents:** cost tracker totals stay integer cents.
@@ -407,6 +426,84 @@ below so they are not lost; they are not among the five.
   `tools/ai-catalog-sweep`) reports non-zero usage for lookup and
   proposal probes.
 
+### U10. Langfuse trace export from the LLM gateway
+- **Goal:** every completion that passes through the gateway, success
+  or failure, is exported as a Langfuse trace and generation carrying
+  tenant, task, model, prompt version, usage, cost, latency and the
+  session it belongs to, with the same redaction the `ai_runs` snapshot
+  already applies, so a voice turn or chat exchange can be opened as one
+  trace instead of reconstructed from Prometheus aggregates (R10).
+- **Requirements:** R10
+- **Dependencies:** U6 (the exported usage must be the real provider
+  counts, not the zeros #913 describes; landing this first would export
+  wrong numbers). U1 and U3 are not hard dependencies but should land
+  first so the new data has someone watching it.
+- **Files:** `packages/api/src/ai/gateway/trace-exporter.ts` (new:
+  `LLMTraceExporter` interface with `recordCompletion(event)` and
+  `flush()`, a `LangfuseTraceExporter`, and a `NoopTraceExporter`),
+  `packages/api/src/ai/gateway/gateway.ts` (optional exporter dep next
+  to `aiRunRepo`; one call on the success path beside the `ai_runs`
+  completion update and one on the error path beside `failAiRun`),
+  `packages/api/src/ai/gateway/factory.ts` (`CreateLLMGatewayOptions.traceExporter`,
+  threaded through both `new LLMGateway(...)` sites),
+  `packages/api/src/app.ts` (construct the Langfuse exporter only when
+  `LANGFUSE_PUBLIC_KEY` and `LANGFUSE_SECRET_KEY` are set; call
+  `flush()` in the shutdown sequence beside the pool close),
+  `packages/api/src/ai/orchestration/intent-classifier.ts:2723` and
+  `packages/api/src/routes/assistant.ts:2751` (add `sessionId` to the
+  request `metadata`: the voice session id or call SID, and the chat
+  conversation id), the API config module that declares optional env
+  (add `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY`, `LANGFUSE_BASE_URL`,
+  `LANGFUSE_CAPTURE_CONTENT`), `.env.production.example`,
+  `docs/prod-env-checklist.md`, `packages/api/package.json` (the
+  `langfuse` SDK), tests `packages/api/test/ai/gateway/trace-exporter.test.ts`
+  (new) and `packages/api/test/ai/gateway/gateway-trace-export.test.ts`
+  (new).
+- **Approach:** mirror the `aiRunRepo` pattern exactly: the exporter is
+  optional, every call is wrapped so a throw is logged and never reaches
+  the completion, and the payload is built from values the gateway
+  already has. Trace id is the request's `correlationId`; Langfuse
+  `sessionId` comes from `request.metadata.sessionId`; the tenant id is
+  a tag and metadata field, never a Langfuse user id. Generation fields:
+  `taskType`, resolved and served model, provider, `providerPath`,
+  `fallbackStage`, `cached`, `degraded`, `promptVersionId`, `tokenUsage`,
+  `costMicroCents` (converted to the SDK's cost unit at the boundary
+  only), `latencyMs`, and on failure the error message. Input and output
+  content are exported only when `LANGFUSE_CAPTURE_CONTENT=true`, and
+  then only after `redactMessagesForSnapshot` and `redactByTier('strict')`;
+  the default exports metadata and usage alone. No keys means the noop
+  exporter and zero network calls, matching the off-by-default posture
+  of PostHog and Sentry. Keep the SDK import inside `ai/gateway/` so the
+  AI-gateway CI guard's view of provider imports is unchanged; confirm
+  the guard's rule at implementation.
+- **Patterns to follow:** the `aiRunRepo` create/complete/fail calls in
+  `gateway.ts:464-600` (best-effort wrapping, correlation id on the
+  failure log); `redactMessagesForSnapshot` and
+  `packages/api/test/ai/gateway/snapshot-redaction.test.ts` for the
+  redaction contract; `packages/api/test/ai/gateway/gateway-metrics.test.ts`
+  for driving the gateway with a mock provider and asserting side
+  effects; `initSentry` in `packages/api/src/monitoring/sentry.ts` for
+  the no-op-without-key shape.
+- **Test scenarios:**
+  - Happy path: mock provider succeeds → exporter receives one event
+    with the response's `tokenUsage`, `costMicroCents`, `latencyMs`,
+    `promptVersionId`, `correlationId` and `sessionId`.
+  - Failure path: mock provider throws → exporter receives an error
+    event with the message and latency; the gateway still rethrows.
+  - Isolation: exporter's `recordCompletion` throws → completion result
+    is unchanged and the failure is logged with the correlation id.
+  - Redaction: with content capture on, an input message containing a
+    phone number and an `Authorization` value is exported redacted;
+    with capture off (default), the event carries no `input`/`output`.
+  - Config: no keys → `NoopTraceExporter`; keys present → Langfuse
+    exporter constructed with the configured base URL.
+  - Session threading: the voice classifier's request carries the
+    session id and the chat route's carries the conversation id.
+  - Shutdown: `flush()` is awaited before the process exits.
+- **Verification:** with keys set on the dev service, one assistant
+  probe and one in-app voice turn appear in Langfuse as traces grouped
+  by session, with non-zero usage and the prompt version attached.
+
 ### U7. Single transcript append per caller utterance
 - **Goal:** one append per utterance on every transport (R7).
 - **Requirements:** R7
@@ -540,6 +637,10 @@ below so they are not lost; they are not among the five.
   (one new migration) is stated in the unit.
 - U8 adds a write per caller turn; fire-and-forget keeps latency
   unaffected but must never throw into the call path.
+- U10 exports data off-platform. Content capture is off by default and
+  strict-redacted when on; the self-hosted versus Langfuse Cloud choice
+  is an operator decision that must be made before enabling it in prod,
+  given caller transcripts and the #850 PIN history.
 
 ## Open Questions (deferred to implementation)
 
@@ -551,3 +652,8 @@ below so they are not lost; they are not among the five.
   text (decides U9's shape).
 - Whether `checkDuration()` has any external consumer in
   `packages/voice-eval` before deletion (re-grep at implementation).
+- Which value the voice path should use as the Langfuse session id
+  (the in-memory voice session id or the Twilio call SID); the call SID
+  matches what U8 persists and is the safer default.
+- Whether the AI-gateway CI guard flags the `langfuse` import; if so,
+  the exporter needs an allowlist entry rather than a workaround.
