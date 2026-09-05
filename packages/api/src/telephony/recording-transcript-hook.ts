@@ -10,10 +10,12 @@
  *      mid-call for this CallSid, renumber them across session legs, point
  *      them at the new recording. First-writer-wins, so the voicemail
  *      leg's second recording never steals the call's turns.
- *   2. Build the ingestion payload from the persisted rows (authoritative:
- *      their indices are the renumbered ones the worker must upsert onto),
- *      falling back to the in-memory session — ended or not — only when
- *      nothing was persisted for this recording.
+ *   2. Build the ingestion payload from the persisted rows (their indices
+ *      are the renumbered ones the worker must upsert onto) unless the
+ *      in-memory session — ended or not — still holds MORE lines than were
+ *      persisted: a fire-and-forget persist that failed or is in flight
+ *      must not shrink the transcript while the full one is in memory. The
+ *      session is also the fallback when nothing was persisted at all.
  *   3. Enqueue `transcript_ingestion` when the worker is registered
  *      (`queue` present ⇔ an embedding provider is wired). Attach and the
  *      audit below never depend on it.
@@ -76,8 +78,20 @@ export function createRecordingTranscriptHook(
     }
     const persisted = persistedForCall.filter((t) => t.voiceRecordingId === voiceRecordingId);
 
+    // Source of the ingestion payload. The persisted rows carry the
+    // renumbered indices the worker upserts onto, so they win when they are
+    // at least as complete as the in-memory transcript. But a mid-call
+    // persist is fire-and-forget: one that failed or is still in flight
+    // leaves a gap the rows cannot show, while the session still holds every
+    // line. When the session is live and longer, it is the more complete
+    // record — ingest it in full rather than a transcript missing a turn
+    // (PR #975 review finding 2). The attach above ran either way, so the
+    // worker's (voice_recording_id, turn_index) upserts land on the rows
+    // that do exist and fill in the rest.
     let turns: TranscriptIngestionTurn[];
-    if (persisted.length > 0) {
+    if (session && session.transcript.length > persisted.length) {
+      turns = session.transcript.map((line, index) => ({ index, ...parseTranscriptLine(line) }));
+    } else if (persisted.length > 0) {
       turns = persisted.map((t) => ({ index: t.turnIndex, speaker: t.speaker, text: t.text }));
     } else if (session) {
       turns = session.transcript.map((line, index) => ({ index, ...parseTranscriptLine(line) }));

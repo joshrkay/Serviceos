@@ -151,14 +151,21 @@ export class PgCallTranscriptTurnRepository
       // call_sid, session_id, turn_index) is checked per row as an UPDATE
       // proceeds, so compacting a leg with a gap (0,2 → 0,1) or offsetting a
       // second leg (0,1 → 3,4) in one statement can transiently collide with
-      // a not-yet-rewritten sibling. Lifting every row above the current
-      // maximum first makes the final assignment collision-free.
+      // a not-yet-rewritten sibling. Lifting every row first makes the final
+      // assignment collision-free — but only if the lifted range sits above
+      // EVERY final value, not just above the current maximum. The finals
+      // are 0..n-1, so the lift must exceed n-1 as well as maxIndex: with a
+      // 1-turn leg followed by a 3-turn leg, maxIndex+1 (=3) lifts leg-2 to
+      // 3,4,5 while its finals are 1,2,3, and the final UPDATE — which walks
+      // rows in heap order, not array order — could write 5→3 before 3→1 and
+      // trip the index (PR #975 review finding 1).
       const maxIndex = Math.max(...ordered.map((t) => t.turnIndex));
+      const lift = maxIndex + 1 + ordered.length;
       await client.query(
         `UPDATE call_transcript_turns
             SET turn_index = turn_index + $3
           WHERE tenant_id = $1 AND id = ANY($2::uuid[]) AND voice_recording_id IS NULL`,
-        [tenantId, ids, maxIndex + 1],
+        [tenantId, ids, lift],
       );
       const attached = await client.query(
         `UPDATE call_transcript_turns AS t

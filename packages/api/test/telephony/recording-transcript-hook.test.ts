@@ -1,8 +1,9 @@
 /**
  * U8 (R8) — the recording webhook's onPersisted hook: attach mid-call turns
  * to the freshly-inserted voice_recordings row, then enqueue ingestion from
- * the persisted rows (authoritative) or the in-memory session (fallback),
- * and audit `voice.transcript_unrecoverable` only when neither exists.
+ * the persisted rows — or the in-memory session when it is the more complete
+ * record (more lines than were persisted) or nothing was persisted — and
+ * audit `voice.transcript_unrecoverable` only when neither exists.
  *
  * The hook is the app-layer wiring behind `createRecordingRouter`'s
  * `options.onPersisted` (test/telephony/recording-webhook.test.ts covers the
@@ -192,6 +193,58 @@ describe('createRecordingTranscriptHook (U8)', () => {
       { index: 2, speaker: 'agent', text: 'welcome back' },
       { index: 3, speaker: 'caller', text: 'still broken' },
     ]);
+  });
+
+  it('a live session with MORE lines than the persisted rows wins: a turn lost to a failed fire-and-forget persist is still ingested', async () => {
+    // PR #975 review finding 2. Turn 1's mid-call persist failed (or is still
+    // in flight); the session still holds all three lines.
+    const session = fakeSession({
+      transcript: ['agent: hi', 'caller: my AC is broken', 'agent: when did it start'],
+      intent: 'create_appointment',
+    });
+    const { hook, repo, send } = harness({ session });
+    await repo.recordTurn({
+      tenantId: TENANT, callSid: CALL_SID, sessionId: SESSION_1, turnIndex: 0, speaker: 'agent', text: 'hi',
+    });
+    await repo.recordTurn({
+      tenantId: TENANT, callSid: CALL_SID, sessionId: SESSION_1, turnIndex: 2, speaker: 'agent', text: 'when did it start',
+    });
+
+    await hook(event());
+
+    // Attach still happened — the rows the worker upserts onto are claimed.
+    expect((await repo.listByRecording(TENANT, RECORDING_1)).map((t) => [t.turnIndex, t.text])).toEqual([
+      [0, 'hi'],
+      [1, 'when did it start'],
+    ]);
+    expect(send).toHaveBeenCalledTimes(1);
+    const payload = send.mock.calls[0][1] as unknown as Record<string, unknown>;
+    expect(payload.turns).toEqual([
+      { index: 0, speaker: 'agent', text: 'hi' },
+      { index: 1, speaker: 'caller', text: 'my AC is broken' },
+      { index: 2, speaker: 'agent', text: 'when did it start' },
+    ]);
+    expect(payload.intent).toBe('create_appointment');
+  });
+
+  it('session gone + a persisted row missing: the N-1 persisted rows are ingested as-is (unchanged behaviour)', async () => {
+    const { hook, repo, send, auditRepo } = harness({ session: undefined });
+    await repo.recordTurn({
+      tenantId: TENANT, callSid: CALL_SID, sessionId: SESSION_1, turnIndex: 0, speaker: 'agent', text: 'hi',
+    });
+    await repo.recordTurn({
+      tenantId: TENANT, callSid: CALL_SID, sessionId: SESSION_1, turnIndex: 2, speaker: 'agent', text: 'when did it start',
+    });
+
+    await hook(event());
+
+    expect(send).toHaveBeenCalledTimes(1);
+    const payload = send.mock.calls[0][1] as unknown as { turns: unknown[] };
+    expect(payload.turns).toEqual([
+      { index: 0, speaker: 'agent', text: 'hi' },
+      { index: 1, speaker: 'agent', text: 'when did it start' },
+    ]);
+    expect(await unrecoverableAudits(auditRepo, RECORDING_1)).toEqual([]);
   });
 
   it('voicemail leg: a second recording for the same call never steals turns and enqueues nothing without a session', async () => {

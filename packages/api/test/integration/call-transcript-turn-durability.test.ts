@@ -229,6 +229,33 @@ describe('Postgres integration — call_transcript_turns mid-call durability (U8
       expect(byCall.every((r) => r.voiceRecordingId === recordingId)).toBe(true);
     });
 
+    it('renumbers when an earlier leg is shorter than a later one (1 turn, then 3) without a 23505', async () => {
+      // PR #975 review finding 1. Lifting by maxIndex+1 (=3 here) put leg-2 at
+      // 3,4,5 while its final indices are 1,2,3 — the ranges overlap. The final
+      // UPDATE ... FROM unnest drives off a bitmap heap scan of the table (rows
+      // in heap order, not array order), so when leg-2's fire-and-forget
+      // persists landed out of index order the 5→3 write ran before 3→1 and
+      // tripped idx_call_transcript_turns_call_leg, aborting the attach.
+      const callSid = newCallSid();
+      const recordingId = await makeRecording();
+      await seedLeg(callSid, 'leg-1', [['agent', 'a0']]);
+      for (const [turnIndex, text] of [[2, 'b2'], [1, 'b1'], [0, 'b0']] as const) {
+        await repo.recordTurn({
+          tenantId: tenant.tenantId, callSid, sessionId: 'leg-2', turnIndex, speaker: 'agent', text,
+        });
+      }
+
+      expect(await repo.attachRecording(tenant.tenantId, callSid, recordingId)).toBe(4);
+
+      const attached = await repo.listByRecording(tenant.tenantId, recordingId);
+      expect(attached.map((r) => [r.turnIndex, r.sessionId, r.text])).toEqual([
+        [0, 'leg-1', 'a0'],
+        [1, 'leg-2', 'b0'],
+        [2, 'leg-2', 'b1'],
+        [3, 'leg-2', 'b2'],
+      ]);
+    });
+
     it('renumbers a leg with a gap without tripping the partial unique index mid-update', async () => {
       const callSid = newCallSid();
       const recordingId = await makeRecording();
