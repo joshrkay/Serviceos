@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 import { classifyTurnSentiment } from '../../../../src/ai/agents/customer-calling/sentiment-classifier';
+import { SessionCostTracker } from '../../../../src/ai/skills/session-cost-tracker';
 
 describe('classifyTurnSentiment', () => {
   it('returns frustrationScore from the LLM response', async () => {
@@ -66,7 +67,8 @@ describe('#895 — classifyTurnSentiment records its completion usage on the cos
     const llm = {
       complete: vi.fn(async (_args: { prompt: string }) => ({
         text: SENTIMENT_JSON,
-        // claude-haiku-4-5: 100¢/M input, 500¢/M output → 2¢ + 2¢ = 4¢.
+        // claude-haiku-4-5: 100¢/M input, 500¢/M output → 2¢ + 2¢ = 4¢
+        // = 4,000,000 µ¢, passed raw (PR #975 finding 4: never pre-rounded).
         tokenUsage: { input: 20_000, output: 4_000 },
         model: 'claude-haiku-4-5-20251001',
       })),
@@ -83,7 +85,7 @@ describe('#895 — classifyTurnSentiment records its completion usage on the cos
     expect(costTracker.recordUsage).toHaveBeenCalledWith({
       inputTokens: 20_000,
       outputTokens: 4_000,
-      costCents: 4,
+      costMicroCents: 4_000_000,
     });
   });
 
@@ -91,7 +93,7 @@ describe('#895 — classifyTurnSentiment records its completion usage on the cos
     const llm = {
       complete: vi.fn(async (_args: { prompt: string }) => ({
         text: SENTIMENT_JSON,
-        // estimateCostCents: 10_000 × 0.0003¢ + 2_000 × 0.0015¢ = 3¢ + 3¢ = 6¢.
+        // estimateCostMicroCents: 10_000 × 300 µ¢ + 2_000 × 1,500 µ¢ = 6,000,000 µ¢ (6¢).
         tokenUsage: { input: 10_000, output: 2_000 },
         model: 'mock',
       })),
@@ -101,8 +103,47 @@ describe('#895 — classifyTurnSentiment records its completion usage on the cos
     expect(costTracker.recordUsage).toHaveBeenCalledWith({
       inputTokens: 10_000,
       outputTokens: 2_000,
-      costCents: 6,
+      costMicroCents: 6_000_000,
     });
+  });
+
+  // PR #975 review finding 4 — a typical per-turn sentiment call is
+  // sub-cent (≈600 input / 10 output tokens). Rounding each call to integer
+  // cents before recording it stored 0 every time, so a long call's
+  // classifier spend never moved `totals.costCents` and the budget-ratio
+  // guard stayed blind to its own cost.
+  it('records a sub-cent completion as non-zero micro-cents', async () => {
+    const llm = {
+      complete: vi.fn(async (_args: { prompt: string }) => ({
+        text: SENTIMENT_JSON,
+        // claude-haiku-4-5: 600 × 100 µ¢ + 10 × 500 µ¢ = 65,000 µ¢ (0.065¢).
+        tokenUsage: { input: 600, output: 10 },
+        model: 'claude-haiku-4-5',
+      })),
+    };
+    const costTracker = tracker();
+    await classifyTurnSentiment(INPUT, { llm, costTracker });
+    expect(costTracker.recordUsage).toHaveBeenCalledWith({
+      inputTokens: 600,
+      outputTokens: 10,
+      costMicroCents: 65_000,
+    });
+  });
+
+  it('a real SessionCostTracker accumulates many sub-cent classifications into whole cents', async () => {
+    const llm = {
+      complete: vi.fn(async (_args: { prompt: string }) => ({
+        text: SENTIMENT_JSON,
+        tokenUsage: { input: 600, output: 10 },
+        model: 'claude-haiku-4-5',
+      })),
+    };
+    const costTracker = new SessionCostTracker({ maxCostCents: 40 });
+    const deps = { llm, costTracker, sessionCostCapCents: 40, maxSentimentBudgetRatio: 0.8 };
+    for (let i = 0; i < 20; i++) await classifyTurnSentiment(INPUT, deps);
+    // 20 × 65,000 = 1,300,000 µ¢ → 1¢ (was 0 when each call pre-rounded).
+    expect(costTracker.totals.costCents).toBe(1);
+    expect(llm.complete).toHaveBeenCalledTimes(20);
   });
 
   it('records nothing when the completion carries no token usage or the call throws', async () => {

@@ -12,8 +12,8 @@
  * #895: the classifier's OWN completion is recorded on that same tracker
  * (`recordCompletionUsage`), so its spend counts against the cap it guards.
  */
-import { estimateCostCents, type TokenUsage } from '../../skills/session-cost-tracker';
-import { computeCostMicroCents, microCentsToCents } from '../../gateway/model-pricing';
+import { estimateCostMicroCents, type TokenUsage } from '../../skills/session-cost-tracker';
+import { computeCostMicroCents } from '../../gateway/model-pricing';
 
 /**
  * What the customer-calling classifiers (this one and the vulnerability
@@ -40,7 +40,13 @@ export interface ClassifierCostTracker {
  * Record one completion's spend on the session tracker. Priced from the
  * gateway's model table when the model id is known; otherwise the same
  * directional estimate the main voice turn records — never a silent zero.
- * Integer cents, like every other tracker write.
+ *
+ * Recorded as raw micro-cents, never pre-rounded: a typical per-turn
+ * classification is sub-cent (~600 input / 10 output tokens on a cheap
+ * model), so rounding each call to integer cents here stored 0 every time
+ * and a long call's classifier spend never moved `totals.costCents` — the
+ * budget-ratio guard above was blind to its own cost (PR #975 review
+ * finding 4). The tracker accumulates micro-cents and derives whole cents.
  */
 export function recordCompletionUsage(
   costTracker: ClassifierCostTracker | undefined,
@@ -48,10 +54,10 @@ export function recordCompletionUsage(
 ): void {
   if (!costTracker || !completion.tokenUsage) return;
   const { input, output } = completion.tokenUsage;
-  const microCents = computeCostMicroCents(completion.model, completion.tokenUsage);
-  const costCents =
-    microCents == null ? estimateCostCents(input, output) : microCentsToCents(microCents);
-  costTracker.recordUsage({ inputTokens: input, outputTokens: output, costCents });
+  const costMicroCents =
+    computeCostMicroCents(completion.model, completion.tokenUsage) ??
+    estimateCostMicroCents(input, output);
+  costTracker.recordUsage({ inputTokens: input, outputTokens: output, costMicroCents });
 }
 
 export interface SentimentInput {

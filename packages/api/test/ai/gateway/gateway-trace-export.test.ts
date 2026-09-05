@@ -20,6 +20,7 @@ import {
   type LLMResponse,
 } from '../../../src/ai/gateway/gateway';
 import { computeCostMicroCents } from '../../../src/ai/gateway/model-pricing';
+import { ProviderFailoverWrapper } from '../../../src/ai/gateway/compose-resilience';
 import type {
   LLMTraceCompletionEvent,
   LLMTraceExporter,
@@ -168,6 +169,92 @@ describe('LLMGateway — trace export', () => {
       degraded: false,
     });
     expect(e.input).toEqual(request.messages);
+    // No resilience wrapper in the chain → no attempt trail; the routed
+    // provider is the only candidate and the event stays un-annotated.
+    expect(e.provider).toBe('stub');
+    expect(e.providerPath).toBeUndefined();
+    expect(e.fallbackStage).toBeUndefined();
+  });
+
+  // PR #975 review finding 6 — the failure-path event used to stamp the
+  // PRIMARY resolved provider even when the request had failed over and it
+  // was the FALLBACK that failed last, and it carried no providerPath /
+  // fallbackStage at all. The resilience stack wraps the provider, so the
+  // gateway only sees the error the failover wrapper gives up with — that
+  // error now carries the attempt trail and the event is built from it.
+  describe('failure after failover names the provider that actually failed', () => {
+    function failing(name: string, err: Error & { status?: number }): LLMProvider {
+      return {
+        name,
+        complete: async () => {
+          throw err;
+        },
+        isAvailable: async () => true,
+      };
+    }
+
+    it('primary and fallback both throw → provider = fallback, providerPath = [primary, fallback]', async () => {
+      const { exporter, events } = spyExporter();
+      const primaryErr = Object.assign(new Error('openai 503'), { status: 503 });
+      const fallbackErr = Object.assign(new Error('openrouter 502'), { status: 502 });
+      const stack = new ProviderFailoverWrapper([
+        failing('openai', primaryErr),
+        failing('openrouter', fallbackErr),
+      ]);
+      const gateway = gatewayWith(stack, exporter);
+
+      await expect(gateway.complete(request)).rejects.toThrow('openrouter 502');
+
+      expect(events).toHaveLength(1);
+      const e = events[0];
+      const model = e.resolvedModel;
+      expect(e).toMatchObject({
+        provider: 'openrouter',
+        providerPath: [`openai:${model}`, `openrouter:${model}`],
+        fallbackStage: 'fallback-provider',
+        degraded: true,
+        servedModel: model,
+      });
+      expect(e.error).toContain('openrouter 502');
+    });
+
+    it('primary throws 5xx, fallback rejects with a 4xx (re-thrown raw, no failover) → still attributed to the fallback', async () => {
+      const { exporter, events } = spyExporter();
+      const primaryErr = Object.assign(new Error('openai 503'), { status: 503 });
+      const fallbackErr = Object.assign(new Error('openrouter 400 bad request'), { status: 400 });
+      const stack = new ProviderFailoverWrapper([
+        failing('openai', primaryErr),
+        failing('openrouter', fallbackErr),
+      ]);
+      const gateway = gatewayWith(stack, exporter);
+
+      await expect(gateway.complete(request)).rejects.toThrow('openrouter 400 bad request');
+
+      const e = events[0];
+      const model = e.resolvedModel;
+      expect(e).toMatchObject({
+        provider: 'openrouter',
+        providerPath: [`openai:${model}`, `openrouter:${model}`],
+        fallbackStage: 'fallback-provider',
+        degraded: true,
+      });
+    });
+
+    it('single provider in the stack fails → provider = that provider, one-entry providerPath, no fallback stage', async () => {
+      const { exporter, events } = spyExporter();
+      const stack = new ProviderFailoverWrapper([
+        failing('openai', Object.assign(new Error('openai 503'), { status: 503 })),
+      ]);
+      const gateway = gatewayWith(stack, exporter);
+
+      await expect(gateway.complete(request)).rejects.toThrow('openai 503');
+
+      const e = events[0];
+      expect(e.provider).toBe('openai');
+      expect(e.providerPath).toEqual([`openai:${e.resolvedModel}`]);
+      expect(e.fallbackStage).toBeUndefined();
+      expect(e.degraded).toBe(false);
+    });
   });
 
   it('isolation: an exporter that throws leaves the completion unchanged and is logged with the correlation id', async () => {

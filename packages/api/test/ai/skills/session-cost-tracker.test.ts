@@ -6,6 +6,7 @@ import {
   EXPECTED_MAX_CLASSIFY_TURNS,
   EXPECTED_MAX_INAPP_CLASSIFY_TURNS,
   estimateCostCents,
+  estimateCostMicroCents,
 } from '../../../src/ai/skills/session-cost-tracker';
 import type { SessionCapConfig, SessionCapEvent } from '../../../src/ai/skills/session-cost-tracker';
 
@@ -277,5 +278,93 @@ describe('SessionCostTracker — totals', () => {
     tracker.recordUsage({ inputTokens: 10, outputTokens: 5, costCents: 3 });
     tracker.recordUsage({ inputTokens: 7, outputTokens: 2, costCents: 1 });
     expect(tracker.totals).toEqual({ inputTokens: 17, outputTokens: 7, costCents: 4 });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Micro-cent accumulation (PR #975 review finding 4; U6 / #895)
+//
+// Sub-cent completions (a sentiment or vulnerability-grader call is ~9,000
+// micro-cents on a cheap model) used to be rounded to integer cents BEFORE
+// they reached the tracker, so every one of them recorded 0 and a long call
+// never moved `totals.costCents` for its own classifier spend. The tracker
+// now accumulates micro-cents and derives the integer-cent total, carrying
+// the sub-cent remainder across calls.
+// ---------------------------------------------------------------------------
+
+describe('SessionCostTracker — micro-cent accumulation', () => {
+  const SUB_CENT_CALL = { inputTokens: 600, outputTokens: 10, costMicroCents: 9_000 } as const;
+
+  it('120 calls of 9,000 micro-cents sum to 1 integer cent, not 0', () => {
+    const tracker = makeTracker();
+    for (let i = 0; i < 120; i++) tracker.recordUsage(SUB_CENT_CALL);
+    // 120 × 9,000 = 1,080,000 µ¢ = 1.08¢ → 1 (remainder carried, not dropped)
+    expect(tracker.totals.costCents).toBe(1);
+    expect(Number.isInteger(tracker.totals.costCents)).toBe(true);
+  });
+
+  it('carries the sub-cent remainder across calls instead of dropping it', () => {
+    const tracker = makeTracker();
+    // 3 × 400,000 = 1,200,000 µ¢ → 1¢ with 200,000 µ¢ carried…
+    for (let i = 0; i < 3; i++) {
+      tracker.recordUsage({ inputTokens: 0, outputTokens: 0, costMicroCents: 400_000 });
+    }
+    expect(tracker.totals.costCents).toBe(1);
+    // …so two more 400,000 µ¢ calls (2,000,000 total) land exactly on 2¢.
+    tracker.recordUsage({ inputTokens: 0, outputTokens: 0, costMicroCents: 400_000 });
+    tracker.recordUsage({ inputTokens: 0, outputTokens: 0, costMicroCents: 400_000 });
+    expect(tracker.totals.costCents).toBe(2);
+  });
+
+  it('integer-cent callers and micro-cent callers accumulate into one total', () => {
+    const tracker = makeTracker();
+    tracker.recordUsage({ inputTokens: 10, outputTokens: 5, costCents: 3 });
+    tracker.recordUsage({ inputTokens: 600, outputTokens: 10, costMicroCents: 500_000 });
+    tracker.recordUsage({ inputTokens: 600, outputTokens: 10, costMicroCents: 500_000 });
+    expect(tracker.totals).toEqual({ inputTokens: 1210, outputTokens: 25, costCents: 4 });
+  });
+
+  it('cap events fire on the accumulated micro-cent total', () => {
+    const tracker = makeTracker({ maxCostCents: 2 });
+    const fired: string[] = [];
+    // 2¢ cap = 2,000,000 µ¢. 80% = 1,600,000 µ¢ → call 178 (1,602,000);
+    // 100% → call 223 (2,007,000).
+    let approachedAt: number | undefined;
+    let exceededAt: number | undefined;
+    for (let i = 1; i <= 230; i++) {
+      const events = tracker.recordUsage(SUB_CENT_CALL);
+      for (const type of eventTypes(events)) {
+        fired.push(type);
+        if (type === 'cost_cap_approached:cost') approachedAt = i;
+        if (type === 'cost_cap_exceeded:cost') exceededAt = i;
+      }
+    }
+    expect(approachedAt).toBe(178);
+    expect(exceededAt).toBe(223);
+    expect(fired.filter((t) => t === 'cost_cap_approached:cost')).toHaveLength(1);
+    expect(fired.filter((t) => t === 'cost_cap_exceeded:cost')).toHaveLength(1);
+    expect(tracker.isExceeded).toBe(true);
+    expect(tracker.totals.costCents).toBe(2);
+  });
+
+  it('reset() clears the micro-cent accumulation too', () => {
+    const tracker = makeTracker();
+    for (let i = 0; i < 120; i++) tracker.recordUsage(SUB_CENT_CALL);
+    expect(tracker.totals.costCents).toBe(1);
+    tracker.reset();
+    expect(tracker.totals.costCents).toBe(0);
+    // A fresh remainder — the pre-reset 80,000 µ¢ carry must not survive.
+    for (let i = 0; i < 110; i++) tracker.recordUsage(SUB_CENT_CALL);
+    expect(tracker.totals.costCents).toBe(0);
+  });
+
+  it('estimateCostMicroCents keeps sub-cent estimates non-zero; estimateCostCents still rounds to whole cents', () => {
+    // 600 × 300 µ¢ + 10 × 1,500 µ¢ = 180,000 + 15,000
+    expect(estimateCostMicroCents(600, 10)).toBe(195_000);
+    expect(estimateCostCents(600, 10)).toBe(0);
+    // 10,000 × 300 + 2,000 × 1,500 = 6,000,000 µ¢ = 6¢ on both paths.
+    expect(estimateCostMicroCents(10_000, 2_000)).toBe(6_000_000);
+    expect(estimateCostCents(10_000, 2_000)).toBe(6);
+    expect(estimateCostMicroCents(-5, -5)).toBe(0);
   });
 });

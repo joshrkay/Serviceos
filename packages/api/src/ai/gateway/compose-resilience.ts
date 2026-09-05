@@ -62,6 +62,7 @@ import {
 } from '../../monitoring/metrics';
 import {
   SYSTEM_TENANT_ID,
+  stampProviderAttemptTrail,
   type LLMProvider,
   type LLMRequest,
   type LLMResponse,
@@ -217,9 +218,16 @@ export class ProviderFailoverWrapper implements LLMProvider {
   async complete(request: LLMRequest): Promise<LLMResponse> {
     const path: string[] = [];
     let lastErr: unknown;
+    // The provider whose error this wrapper ends up surfacing. Every error
+    // that leaves here carries `{ providerPath, lastProvider }` (as AppError
+    // details on exhaustion, stamped onto a raw 4xx re-throw) so the gateway
+    // attributes the failure to the provider that failed last, not the
+    // primary route (PR #975 finding 6).
+    let lastProvider = this.name;
 
     for (const provider of this.providers) {
       path.push(`${provider.name}:${request.model}`);
+      lastProvider = provider.name;
       try {
         const response = await provider.complete(request);
         // Annotate the response with the accumulated providerPath
@@ -229,7 +237,7 @@ export class ProviderFailoverWrapper implements LLMProvider {
 
         // 4xx validation errors → do not failover, re-throw immediately
         if (!isFailoverEligible(err)) {
-          throw err;
+          throw stampProviderAttemptTrail(err, { providerPath: path, lastProvider });
         }
 
         // Record failover metric (from → to) if there is a next provider
@@ -272,6 +280,7 @@ export class ProviderFailoverWrapper implements LLMProvider {
         429,
         {
           providerPath: path,
+          lastProvider,
           rateLimited: true,
           ...(retryAfterMs !== undefined ? { retryAfterMs } : {}),
           ...(rl.providerErrorType ? { providerErrorType: rl.providerErrorType } : {}),
@@ -289,6 +298,7 @@ export class ProviderFailoverWrapper implements LLMProvider {
       503,
       {
         providerPath: path,
+        lastProvider,
         retryAfterMs,
       },
     );

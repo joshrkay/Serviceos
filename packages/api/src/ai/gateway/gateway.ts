@@ -146,6 +146,55 @@ export interface LLMGatewayLogger {
 export const SYSTEM_TENANT_ID = 'system';
 
 /**
+ * The attempt trail a resilience wrapper leaves on the error it gives up
+ * with: the ordered `provider:model` entries it tried (same shape as
+ * `LLMResponse.providerPath`) and the provider whose failure it surfaced.
+ * `ProviderFailoverWrapper` (compose-resilience.ts) puts both on the
+ * `details` of the AppError it throws on exhaustion, and stamps them onto a
+ * raw provider error it re-throws without failing over (4xx). The gateway's
+ * failure-path trace export reads it so the error event names the provider
+ * that actually failed last, not the primary route (PR #975 finding 6).
+ */
+export interface ProviderAttemptTrail {
+  providerPath: string[];
+  lastProvider: string;
+}
+
+/** Stamp the trail onto an error object (no-op for non-object throwables). */
+export function stampProviderAttemptTrail<T>(err: T, trail: ProviderAttemptTrail): T {
+  if (err && typeof err === 'object') {
+    Object.assign(err, {
+      providerPath: [...trail.providerPath],
+      lastProvider: trail.lastProvider,
+    });
+  }
+  return err;
+}
+
+function readTrailFrom(source: unknown): ProviderAttemptTrail | undefined {
+  if (!source || typeof source !== 'object') return undefined;
+  const { providerPath, lastProvider } = source as {
+    providerPath?: unknown;
+    lastProvider?: unknown;
+  };
+  if (
+    !Array.isArray(providerPath) ||
+    providerPath.length === 0 ||
+    !providerPath.every((p): p is string => typeof p === 'string') ||
+    typeof lastProvider !== 'string'
+  ) {
+    return undefined;
+  }
+  return { providerPath: [...providerPath], lastProvider };
+}
+
+/** Read the trail off an AppError's `details` or a stamped raw error. */
+export function readProviderAttemptTrail(err: unknown): ProviderAttemptTrail | undefined {
+  const details = err instanceof AppError ? err.details : undefined;
+  return readTrailFrom(details) ?? readTrailFrom(err);
+}
+
+/**
  * taskTypes carried in the canonical `TASK_TYPES` list purely so the
  * lightweight/standard/complex tier mapping in `config/ai-routing.ts` covers
  * them, but whose ONLY real call sites are the offline voice-quality eval
@@ -638,6 +687,17 @@ export class LLMGateway {
       return result;
     } catch (err) {
       const latencyMs = Date.now() - startTime;
+      // Attribution mirrors the success path: when the resilience stack
+      // failed over before giving up, the error it throws carries the
+      // attempt trail, and the provider that FAILED LAST is the one the
+      // failure belongs to — not the primary route (PR #975 finding 6). With
+      // no trail (no wrapper in the chain) the routed provider is the only
+      // candidate and stays the attribution.
+      const trail = readProviderAttemptTrail(err);
+      const failedProvider = trail?.lastProvider ?? providerName;
+      const providerPath = trail?.providerPath;
+      const failedOver = (providerPath?.length ?? 0) > 1;
+      const fallbackStage = failedOver ? 'fallback-provider' : undefined;
       gatewayRequestsTotal.inc({
         tenant_tier: tier,
         model: resolvedModel,
@@ -660,10 +720,12 @@ export class LLMGateway {
         // is traceable end-to-end (it keys the ai_runs row written below).
         correlationId,
         taskType: request.taskType,
-        provider: providerName,
+        provider: failedProvider,
         model: resolvedModel,
         latencyMs,
         error: err instanceof Error ? err.message : String(err),
+        fallbackStage,
+        providerPath,
       });
 
       // Persist failed ai_run (best-effort).
@@ -687,7 +749,10 @@ export class LLMGateway {
       }
 
       // U10 — trace export of the failure (best-effort): message + latency,
-      // no usage/cost (none was reported).
+      // no usage/cost (none was reported). Provider / providerPath /
+      // fallbackStage come from the attempt trail above, so a failure after
+      // failover is filed under the provider that failed, like a success
+      // after failover is filed under the provider that served it.
       this.exportTrace({
         correlationId,
         tenantId,
@@ -695,9 +760,11 @@ export class LLMGateway {
         sessionId,
         resolvedModel,
         servedModel: resolvedModel,
-        provider: providerName,
+        provider: failedProvider,
+        providerPath,
+        fallbackStage,
         cached: false,
-        degraded: false,
+        degraded: failedOver,
         promptVersionId,
         latencyMs,
         startedAt: new Date(startTime),
