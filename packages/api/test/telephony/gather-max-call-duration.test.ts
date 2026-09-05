@@ -17,6 +17,10 @@ import {
   renderTtsText,
   MAX_CALL_DURATION_WRAP_UP_COPY,
 } from '../../src/ai/agents/customer-calling/tts-copy';
+import {
+  MIN_STT_CONFIDENCE,
+  MAX_CONSECUTIVE_LOW_CONFIDENCE_TURNS,
+} from '../../src/telephony/media-streams/mediastream-adapter';
 
 const TENANT = 't-max-duration';
 const MINUTE_MS = 60_000;
@@ -63,9 +67,19 @@ async function startCall(
   return session.id;
 }
 
+/** White-box spy on the shared turn processor's summary entry point (PR #975 F5). */
+function spyRunSummary(adapter: TwilioGatherAdapter) {
+  const processor = (adapter as unknown as { processor: { runSummary: (s: unknown) => Promise<void> } })
+    .processor;
+  return vi.spyOn(processor, 'runSummary').mockResolvedValue(undefined);
+}
+
 describe('U5 Gather max call duration', () => {
   it('a turn past the limit gets the wrap-up <Say> + <Hangup/> and the session ends with max_call_duration', async () => {
     const h = makeHarness({ maxCallDurationMs: MINUTE_MS });
+    // The terminal branch fires the (best-effort, LLM-backed) call summary;
+    // stub it so the gateway assertion below isolates the turn pipeline.
+    spyRunSummary(h.adapter);
     const sessionId = await startCall(h, 'CA-cap-g1', MINUTE_MS + 1_000);
 
     const twiml = await h.adapter.handleGather({
@@ -155,5 +169,52 @@ describe('U5 Gather max call duration', () => {
     });
     expect(overTwiml).toContain('<Hangup/>');
     expect(h.store.get(over)!.terminalReason).toBe('max_call_duration');
+  });
+
+  // PR #975 review finding 5 — the cap's end path finalized the session but
+  // never kicked off `processor.runSummary`, unlike the adapter's other
+  // terminal branches, so a capped Gather call got no call_summaries row.
+  // The low-STT ladder's terminal branch had the same omission.
+  describe('terminal Gather branches kick off the call summary', () => {
+    it('a capped call runs the summary once with the session', async () => {
+      const h = makeHarness({ maxCallDurationMs: MINUTE_MS });
+      const runSummary = spyRunSummary(h.adapter);
+      const sessionId = await startCall(h, 'CA-cap-sum-1', MINUTE_MS + 1);
+
+      await h.adapter.handleGather({
+        sessionId,
+        callSid: 'CA-cap-sum-1',
+        speechResult: 'one last thing',
+        confidence: 0.9,
+        tenantId: TENANT,
+      });
+
+      const session = h.store.get(sessionId)!;
+      expect(session.terminalReason).toBe('max_call_duration');
+      expect(runSummary).toHaveBeenCalledTimes(1);
+      expect(runSummary).toHaveBeenCalledWith(session);
+    });
+
+    it('the low-STT-confidence ladder end runs the summary once with the session', async () => {
+      const h = makeHarness();
+      const runSummary = spyRunSummary(h.adapter);
+      const sessionId = await startCall(h, 'CA-stt-sum-1', 5_000);
+
+      for (let turn = 0; turn < MAX_CONSECUTIVE_LOW_CONFIDENCE_TURNS; turn++) {
+        await h.adapter.handleGather({
+          sessionId,
+          callSid: 'CA-stt-sum-1',
+          speechResult: 'mmhm',
+          confidence: MIN_STT_CONFIDENCE / 2,
+          tenantId: TENANT,
+        });
+      }
+
+      const session = h.store.get(sessionId)!;
+      expect(session.ended).toBe(true);
+      expect(session.terminalReason).toBe('low_stt_confidence_max_retries');
+      expect(runSummary).toHaveBeenCalledTimes(1);
+      expect(runSummary).toHaveBeenCalledWith(session);
+    });
   });
 });

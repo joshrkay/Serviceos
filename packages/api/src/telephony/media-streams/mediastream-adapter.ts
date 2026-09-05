@@ -557,8 +557,21 @@ interface RuntimeState {
    */
   maxCallDurationWarnTimer: NodeJS.Timeout | null;
   maxCallDurationTimer: NodeJS.Timeout | null;
-  /** U5 — the wrap-up line has been spoken (or attempted) on this leg. */
-  maxCallDurationWrapUpSpoken: boolean;
+  /**
+   * U5 / PR #975 F3 — where the wrap-up line is in its lifecycle on this leg:
+   *   'idle'     — not spoken yet (initial; also after the caller talked over it),
+   *   'pending'  — the warn timer fired while an agent turn's TTS was in
+   *                flight; the end of that turn's `emitSideEffects` retries it,
+   *   'speaking' — the line is being rendered right now,
+   *   'spoken'   — it completed (or its TTS failed) with no caller
+   *                interruption — the only state that suppresses a re-speak.
+   * Latched to 'spoken' on completion, never on scheduling, so a barge-in
+   * `clear` that drops the queued audio leaves the leg 'idle' and the close at
+   * the limit speaks the warning once more before ending.
+   */
+  maxCallDurationWrapUp: 'idle' | 'pending' | 'speaking' | 'spoken';
+  /** U5 — the in-flight wrap-up, so the close at the limit lets it finish rather than doubling it. */
+  maxCallDurationWrapUpInFlight: Promise<void> | null;
   /**
    * U5 — set immediately before the cap's `handleClose('end_session')`. A
    * forced cut is not evidence about transport health either way, so
@@ -977,7 +990,8 @@ export class TwilioMediaStreamAdapter {
       audioIdleTimer: null,
       maxCallDurationWarnTimer: null,
       maxCallDurationTimer: null,
-      maxCallDurationWrapUpSpoken: false,
+      maxCallDurationWrapUp: 'idle',
+      maxCallDurationWrapUpInFlight: null,
       maxCallDurationReached: false,
       silenceRepromptTimer: null,
       pendingSilenceRepromptTurnId: null,
@@ -2501,6 +2515,12 @@ export class TwilioMediaStreamAdapter {
         this.state.disclosureTurnId = turnId;
       }
     }
+    // PR #975 F3 — this turn's TTS has finished streaming. If the max-duration
+    // wrap-up was deferred behind it, speak it now as its own turn, never
+    // concurrently with the one that just ended.
+    if (this.state.maxCallDurationWrapUp === 'pending') {
+      void this.speakMaxCallDurationWrapUp();
+    }
   }
 
   /**
@@ -3201,16 +3221,69 @@ export class TwilioMediaStreamAdapter {
   }
 
   /**
-   * Speak the wrap-up line once through the normal recovery-line path
-   * (`speakRecoveryLine` → `emitSideEffects` → TTS + transcript append). A
-   * TTS failure is absorbed inside the turn runner, so this never throws
-   * into the timer callback and never blocks the close that follows.
+   * Speak the wrap-up line once, serialized with the turn pipeline (PR #975
+   * review finding 3). The warn timer is a bare timer: it used to render the
+   * line straight over whatever the agent was already saying (two overlapping
+   * utterances) and latched "spoken" on scheduling, so a barge-in `clear` that
+   * flushed the audio still left the caller hard-closed later with no warning
+   * heard. Now the line
+   *   - runs under `withSessionLock`, queued behind an in-flight `speechTurn`
+   *     exactly like the silence-reprompt expiry;
+   *   - is deferred while an agent turn's TTS is still streaming
+   *     (`agentSpeaking` — the same in-flight signal barge-in keys off; TTS
+   *     streams outside the lock, so the lock alone cannot order them) and
+   *     retried by the end of that turn's `emitSideEffects`;
+   *   - latches 'spoken' only once it completed with no caller activity during
+   *     it (`callerActivityGeneration` unchanged — the interruption signal
+   *     every transcript bumps before barge-in). An interrupted line drops
+   *     back to 'idle' so {@link endForMaxCallDuration} speaks it once more.
+   * A TTS failure is absorbed inside the turn runner and still counts as
+   * attempted, so a dead TTS never throws into the timer callback and never
+   * blocks the close that follows.
    */
   private async speakMaxCallDurationWrapUp(): Promise<void> {
     const session = this.state.session;
-    if (this.state.closed || !session || this.state.maxCallDurationWrapUpSpoken) return;
-    this.state.maxCallDurationWrapUpSpoken = true;
-    await this.speakRecoveryLine(session, MAX_CALL_DURATION_WRAP_UP_COPY);
+    if (this.state.closed || !session) return;
+    const phase = this.state.maxCallDurationWrapUp;
+    if (phase === 'speaking' || phase === 'spoken') return;
+    this.state.maxCallDurationWrapUp = 'pending';
+    try {
+      await this.deps.store.withSessionLock(session.id, async () => {
+        if (this.state.closed || this.state.maxCallDurationWrapUp !== 'pending') return;
+        // An agent turn's TTS is still streaming: leave the wrap-up pending
+        // and let that turn's emitSideEffects retry once it has finished.
+        if (this.state.agentSpeaking) return;
+        await this.speakMaxCallDurationWrapUpLine(session);
+      });
+    } catch (err) {
+      logger.warn('mediastream: max call duration wrap-up failed', {
+        error: err instanceof Error ? err.message : String(err),
+        callSid: this.state.callSid,
+      });
+    }
+  }
+
+  /**
+   * Render the wrap-up line now and record whether the caller actually got to
+   * hear it (see {@link speakMaxCallDurationWrapUp}). Idempotent while in
+   * flight: a second caller joins the same utterance instead of doubling it.
+   */
+  private speakMaxCallDurationWrapUpLine(session: VoiceSession): Promise<void> {
+    if (this.state.maxCallDurationWrapUpInFlight) return this.state.maxCallDurationWrapUpInFlight;
+    const run = async (): Promise<void> => {
+      this.state.maxCallDurationWrapUp = 'speaking';
+      const generationAtStart = this.state.callerActivityGeneration;
+      try {
+        await this.speakRecoveryLine(session, MAX_CALL_DURATION_WRAP_UP_COPY);
+      } finally {
+        this.state.maxCallDurationWrapUpInFlight = null;
+        this.state.maxCallDurationWrapUp =
+          this.state.callerActivityGeneration === generationAtStart ? 'spoken' : 'idle';
+      }
+    };
+    const inFlight = run();
+    this.state.maxCallDurationWrapUpInFlight = inFlight;
+    return inFlight;
   }
 
   /**
@@ -3221,13 +3294,23 @@ export class TwilioMediaStreamAdapter {
    * `voice_sessions.terminal_reason = 'max_call_duration'`. A NEW bare
    * `handleClose` reason is deliberately not introduced —
    * `mapCloseReasonToFinalize` would fall through to `caller_hangup` and vote
-   * the health circuit `success`. A short limit that skipped the pre-warning
-   * gets the wrap-up here so the caller is never cut in silence.
+   * the health circuit `success`. The caller is never cut in silence: a
+   * wrap-up still mid-utterance is allowed to finish, and one that was never
+   * spoken (short limit that skipped the pre-warning, deferred behind a turn
+   * that never ended in time, or flushed by a barge-in `clear`) is spoken
+   * here — directly, preempting any in-flight agent turn the way the
+   * escalation hand-off does — before the leg ends.
    */
   private async endForMaxCallDuration(limitMs: number): Promise<void> {
     if (this.state.closed) return;
-    if (this.state.session && !this.state.maxCallDurationWrapUpSpoken) {
-      await this.speakMaxCallDurationWrapUp();
+    const session = this.state.session;
+    if (session) {
+      if (this.state.maxCallDurationWrapUpInFlight) {
+        await this.state.maxCallDurationWrapUpInFlight;
+      }
+      if (!this.state.closed && this.state.maxCallDurationWrapUp !== 'spoken') {
+        await this.speakMaxCallDurationWrapUpLine(session);
+      }
       if (this.state.closed) return;
     }
     logger.info('mediastream: max call duration reached — ending call', {

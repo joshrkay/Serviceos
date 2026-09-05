@@ -2709,6 +2709,12 @@ export class TwilioGatherAdapter {
     if (!session.ended) {
       session.ended = true;
       this.finalizeTerminatedSession(session, effects, 'max_call_duration');
+      // PR #975 F5 — every terminal Gather branch kicks off the summary so
+      // call_summaries captures the capped call too (parity with the FSM
+      // `terminated` branches in handleInbound / _handleGatherLocked).
+      void this.processor.runSummary(session).catch(() => {
+        /* swallow — summary is best-effort */
+      });
     }
     return twiml;
   }
@@ -2757,6 +2763,11 @@ export class TwilioGatherAdapter {
       if (!session.ended) {
         session.ended = true;
         this.finalizeTerminatedSession(session, effects, 'low_stt_confidence_max_retries');
+        // PR #975 F5 — same omission as the max-duration end: without this a
+        // ladder hand-off left no call_summaries row.
+        void this.processor.runSummary(session).catch(() => {
+          /* swallow — summary is best-effort */
+        });
       }
       recordVoiceError({
         errorKind: 'low_stt_confidence_repeated',

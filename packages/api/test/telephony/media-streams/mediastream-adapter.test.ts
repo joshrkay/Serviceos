@@ -3536,17 +3536,36 @@ describe('U5 absolute per-call duration cap', () => {
 
   async function setupCappedCall(
     callSid: string,
-    opts: { maxCallDurationMs?: number; ttsFails?: boolean; language?: 'en' | 'es' } = {},
+    opts: {
+      maxCallDurationMs?: number;
+      ttsFails?: boolean;
+      language?: 'en' | 'es';
+      /**
+       * Hold the FIRST synthesize() of this exact text open until the test
+       * calls `releaseDeferredTts()` — models an agent turn (or the wrap-up
+       * itself) whose TTS is still in flight when a timer fires.
+       */
+      deferText?: string;
+      speechTurn?: () => Promise<SideEffect[]>;
+    } = {},
   ) {
     const session = store.create('t', 'telephony', { callSid });
     if (opts.language) session.language = opts.language;
     const ws = new FakeWs();
     const { provider, handle } = makeStreamingProvider();
     const texts: string[] = [];
+    let releaseDeferredTts: () => void = () => {};
+    let deferred = false;
     const tts: TtsProvider = {
       synthesize: vi.fn(async (input: TtsSynthesizeInput): Promise<TtsSynthesizeResult> => {
         texts.push(input.text);
         if (opts.ttsFails) throw new Error('tts down');
+        if (opts.deferText !== undefined && input.text === opts.deferText && !deferred) {
+          deferred = true;
+          await new Promise<void>((r) => {
+            releaseDeferredTts = r;
+          });
+        }
         return { audio: Buffer.alloc(640), contentType: 'audio/pcm', provider: 'test' };
       }),
     };
@@ -3556,7 +3575,7 @@ describe('U5 absolute per-call duration cap', () => {
       {
         store,
         streamingProvider: provider,
-        speechTurn: async () => [],
+        speechTurn: opts.speechTurn ?? (async () => []),
         ttsProvider: tts,
         finalizeOnClose,
         realtimeCircuit: circuit,
@@ -3573,7 +3592,21 @@ describe('U5 absolute per-call duration cap', () => {
     });
     await flush();
     await flush();
-    return { adapter, ws, handle, texts, finalizeOnClose, circuit, session };
+    return {
+      adapter,
+      ws,
+      handle,
+      texts,
+      finalizeOnClose,
+      circuit,
+      session,
+      releaseDeferredTts: () => releaseDeferredTts(),
+    };
+  }
+
+  /** Drain several microtask/immediate rounds so chained awaits settle. */
+  async function settle(): Promise<void> {
+    for (let i = 0; i < 6; i++) await flush();
   }
 
   /** Advance the clock in 1 s steps, feeding a media frame each step. */
@@ -3692,5 +3725,109 @@ describe('U5 absolute per-call duration cap', () => {
     expect(ws.closed).toBe(true);
     expect(circuit.recordSuccess).not.toHaveBeenCalled();
     expect(circuit.recordFailure).not.toHaveBeenCalled();
+  });
+
+  // PR #975 review finding 3 — the pre-limit wrap-up used to be spoken from a
+  // bare timer, outside the session lock and outside the turn pipeline: it
+  // could overlap an in-flight agent turn's TTS, and a barge-in `clear` could
+  // drop its audio while the "spoken" flag was already latched on scheduling,
+  // so the caller was hard-closed at the limit with no warning heard.
+  describe('wrap-up is serialized with the turn pipeline (PR #975 finding 3)', () => {
+    const AGENT_LINE = 'Sure, let me look that up for you.';
+
+    it('a wrap-up timer that fires during an in-flight agent turn plays AFTER that turn finishes, not over it', async () => {
+      const { adapter, ws, handle, texts, finalizeOnClose, releaseDeferredTts } =
+        await setupCappedCall('CA-cap-a', {
+          maxCallDurationMs: 90_000,
+          deferText: AGENT_LINE,
+          speechTurn: async () => [{ type: 'tts_play', payload: { text: AGENT_LINE } }],
+        });
+
+      // Caller speaks at t=50s; the agent's reply TTS is held in flight.
+      await vi.advanceTimersByTimeAsync(50_000);
+      handle.emit({ type: 'final', isFinal: true, transcript: 'what time do you open', confidence: 0.95 });
+      await settle();
+      expect(texts).toEqual([AGENT_LINE]);
+      expect(adapter._debugState().agentSpeaking).toBe(true);
+
+      // t=60s: the wrap-up timer fires while the agent turn is still speaking.
+      // It must NOT start a second, concurrent utterance.
+      await vi.advanceTimersByTimeAsync(10_000);
+      await settle();
+      expect(texts).toEqual([AGENT_LINE]);
+      expect(ws.sent.some((m) => (m as Record<string, unknown>).event === 'clear')).toBe(false);
+
+      // The agent turn completes → the deferred wrap-up plays next.
+      releaseDeferredTts();
+      await settle();
+      expect(texts).toEqual([AGENT_LINE, WRAP_UP_EN]);
+      expect(adapter._debugState().agentSpeaking).toBe(false);
+      expect(ws.closed).toBe(false);
+
+      // The completed wrap-up is latched: the close at the limit does not repeat it.
+      await vi.advanceTimersByTimeAsync(30_000);
+      await settle();
+      expect(ws.closed).toBe(true);
+      expect(texts).toEqual([AGENT_LINE, WRAP_UP_EN]);
+      expect(finalizeOnClose).toHaveBeenCalledTimes(1);
+      expect(finalizeOnClose.mock.calls[0][2]).toEqual(MAX_DURATION_EFFECTS);
+    });
+
+    it('a barge-in that drops the wrap-up un-latches it: the close at the limit speaks it once more before hanging up', async () => {
+      const { adapter, ws, handle, texts, finalizeOnClose, releaseDeferredTts, session } =
+        await setupCappedCall('CA-cap-b', {
+          maxCallDurationMs: 90_000,
+          deferText: WRAP_UP_EN,
+        });
+
+      // t=60s: idle caller → the wrap-up starts speaking (TTS held in flight).
+      await vi.advanceTimersByTimeAsync(60_000);
+      await settle();
+      expect(texts).toEqual([WRAP_UP_EN]);
+      expect(adapter._debugState().agentSpeaking).toBe(true);
+
+      // Caller talks over it → barge-in sends Twilio `clear`, dropping the wrap-up audio.
+      handle.emit({ type: 'interim', isFinal: false, transcript: 'wait', confidence: 0.5 });
+      await settle();
+      expect(ws.sent.some((m) => (m as Record<string, unknown>).event === 'clear')).toBe(true);
+      releaseDeferredTts();
+      await settle();
+      expect(texts).toEqual([WRAP_UP_EN]);
+      expect(ws.closed).toBe(false);
+
+      // t=90s: the caller never heard the warning, so the close speaks it again first.
+      await vi.advanceTimersByTimeAsync(30_000);
+      await settle();
+      expect(ws.closed).toBe(true);
+      expect(texts).toEqual([WRAP_UP_EN, WRAP_UP_EN]);
+      expect(finalizeOnClose).toHaveBeenCalledTimes(1);
+      expect(finalizeOnClose.mock.calls[0][1]).toBe('session_ended');
+      expect(finalizeOnClose.mock.calls[0][2]).toEqual(MAX_DURATION_EFFECTS);
+      expect(session.transcript.filter((l) => l === `agent: ${WRAP_UP_EN}`)).toHaveLength(2);
+    });
+
+    it('idle at limit-30s: the wrap-up is spoken immediately, under the session lock', async () => {
+      const { ws, texts, finalizeOnClose, session } = await setupCappedCall('CA-cap-c', {
+        maxCallDurationMs: 90_000,
+      });
+      const lockSpy = vi.spyOn(store, 'withSessionLock');
+
+      await vi.advanceTimersByTimeAsync(59_999);
+      await settle();
+      expect(texts).toEqual([]);
+      expect(lockSpy).not.toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(1);
+      await settle();
+      expect(texts).toEqual([WRAP_UP_EN]);
+      expect(lockSpy).toHaveBeenCalledWith(session.id, expect.any(Function));
+      expect(ws.closed).toBe(false);
+
+      await vi.advanceTimersByTimeAsync(30_000);
+      await settle();
+      expect(ws.closed).toBe(true);
+      expect(texts).toEqual([WRAP_UP_EN]);
+      expect(finalizeOnClose).toHaveBeenCalledTimes(1);
+    });
   });
 });
