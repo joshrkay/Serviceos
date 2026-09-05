@@ -1,6 +1,12 @@
 import { describe, it, expect, vi } from 'vitest';
-import { createTranscriptIngestionWorker } from '../../src/workers/transcript-ingestion-worker';
-import { InMemoryCallTranscriptTurnRepository } from '../../src/voice/call-transcript-turn';
+import {
+  createTranscriptIngestionWorker,
+  type TranscriptIngestionTurn,
+} from '../../src/workers/transcript-ingestion-worker';
+import {
+  InMemoryCallTranscriptTurnRepository,
+  parseTranscriptLine,
+} from '../../src/voice/call-transcript-turn';
 import { InMemoryVoiceRepository, createVoiceRecording } from '../../src/voice/voice-service';
 import {
   EMBEDDING_DIMENSIONS,
@@ -49,6 +55,15 @@ function stubEmbedder(opts: { fail?: boolean } = {}): EmbeddingProvider & {
 
 const logger = createLogger({ service: 'test', environment: 'test', level: 'error' });
 
+/**
+ * U8: the queue payload carries already-parsed turns with their append-time
+ * index (what the recording hook builds from persisted rows or, as a
+ * fallback, from the in-memory session). This mirrors the session fallback.
+ */
+function turnsFrom(lines: string[]): TranscriptIngestionTurn[] {
+  return lines.map((line, index) => ({ index, ...parseTranscriptLine(line) }));
+}
+
 function buildMessage(payload: Record<string, unknown>): QueueMessage<any> {
   return {
     id: 'msg-1',
@@ -74,7 +89,7 @@ async function seedRecording(
 }
 
 describe('transcript-ingestion-worker', () => {
-  it('parses agent: / caller: prefixes and persists ordered turns', async () => {
+  it('persists ordered turns from the carried payload', async () => {
     const callTranscriptTurnRepo = new InMemoryCallTranscriptTurnRepository();
     const voiceRepo = new InMemoryVoiceRepository();
     const knowledgeChunkRepo = new InMemoryKnowledgeChunkRepository();
@@ -92,7 +107,7 @@ describe('transcript-ingestion-worker', () => {
       buildMessage({
         tenantId: TENANT_A,
         voiceRecordingId: recordingId,
-        transcript: ['agent: hi how can I help', 'caller: my AC is broken', 'agent: when did it start'],
+        turns: turnsFrom(['agent: hi how can I help', 'caller: my AC is broken', 'agent: when did it start']),
         summary: 'Customer reports broken AC',
         intent: 'create_appointment',
       }),
@@ -104,6 +119,80 @@ describe('transcript-ingestion-worker', () => {
       { speaker: 'agent', text: 'hi how can I help' },
       { speaker: 'caller', text: 'my AC is broken' },
       { speaker: 'agent', text: 'when did it start' },
+    ]);
+  });
+
+  // ── U8: persisted rows are authoritative; the worker upserts by carried index ──
+
+  it('upserts each turn at its carried index, so end-of-call ingestion updates the rows persisted mid-call', async () => {
+    const callTranscriptTurnRepo = new InMemoryCallTranscriptTurnRepository();
+    const voiceRepo = new InMemoryVoiceRepository();
+    const recordingId = await seedRecording(voiceRepo);
+    // Mid-call persistence + attach already produced rows 0..2 for this recording.
+    for (const [turnIndex, speaker, text] of [
+      [0, 'agent', 'hi'],
+      [1, 'caller', 'interim'],
+      [2, 'agent', 'ok'],
+    ] as const) {
+      await callTranscriptTurnRepo.recordTurn({
+        tenantId: TENANT_A, voiceRecordingId: recordingId, turnIndex, speaker, text,
+      });
+    }
+
+    const worker = createTranscriptIngestionWorker({
+      callTranscriptTurnRepo,
+      voiceRepo,
+      knowledgeChunkRepo: new InMemoryKnowledgeChunkRepository(),
+      embeddings: stubEmbedder(),
+    });
+    await worker.handle(
+      buildMessage({
+        tenantId: TENANT_A,
+        voiceRecordingId: recordingId,
+        // Renumbered rows arrive with their own indices — NOT positional.
+        turns: [
+          { index: 0, speaker: 'agent', text: 'hi' },
+          { index: 1, speaker: 'caller', text: 'final' },
+          { index: 2, speaker: 'agent', text: 'ok' },
+        ],
+      }),
+      logger,
+    );
+
+    const rows = await callTranscriptTurnRepo.listByRecording(TENANT_A, recordingId);
+    expect(rows.map((r) => [r.turnIndex, r.text])).toEqual([
+      [0, 'hi'],
+      [1, 'final'],
+      [2, 'ok'],
+    ]);
+  });
+
+  it('a turn whose text is empty is skipped WITHOUT shifting the indices of later turns', async () => {
+    const callTranscriptTurnRepo = new InMemoryCallTranscriptTurnRepository();
+    const voiceRepo = new InMemoryVoiceRepository();
+    const recordingId = await seedRecording(voiceRepo);
+
+    const worker = createTranscriptIngestionWorker({
+      callTranscriptTurnRepo,
+      voiceRepo,
+      knowledgeChunkRepo: new InMemoryKnowledgeChunkRepository(),
+      embeddings: stubEmbedder(),
+    });
+    await worker.handle(
+      buildMessage({
+        tenantId: TENANT_A,
+        voiceRecordingId: recordingId,
+        turns: turnsFrom(['agent: hi', 'caller:   ', 'agent: still there?']),
+      }),
+      logger,
+    );
+
+    const rows = await callTranscriptTurnRepo.listByRecording(TENANT_A, recordingId);
+    // Pre-U8 the worker filtered first and numbered the filtered array, so
+    // 'still there?' landed at index 1 and fought with the mid-call row at 2.
+    expect(rows.map((r) => [r.turnIndex, r.text])).toEqual([
+      [0, 'hi'],
+      [2, 'still there?'],
     ]);
   });
 
@@ -130,10 +219,10 @@ describe('transcript-ingestion-worker', () => {
         tenantId: TENANT_A,
         voiceRecordingId: recordingId,
         // Long enough Spanish text to clear MIN_DETECTION_BYTES.
-        transcript: [
+        turns: turnsFrom([
           'agent: Hola buenos días en qué le puedo ayudar el día de hoy señor',
           'caller: Mi aire acondicionado no funciona puede enviar alguien para arreglarlo',
-        ],
+        ]),
       }),
       logger,
     );
@@ -166,7 +255,7 @@ describe('transcript-ingestion-worker', () => {
       buildMessage({
         tenantId: TENANT_A,
         voiceRecordingId: recordingId,
-        transcript: ['agent: hi', 'caller: bye'],
+        turns: turnsFrom(['agent: hi', 'caller: bye']),
       }),
       logger,
     );
@@ -193,10 +282,10 @@ describe('transcript-ingestion-worker', () => {
       buildMessage({
         tenantId: TENANT_A,
         voiceRecordingId: recordingId,
-        transcript: [
+        turns: turnsFrom([
           'agent: how can I help today',
           'caller: my air conditioner stopped working last night',
-        ],
+        ]),
       }),
       logger,
     );
@@ -222,7 +311,7 @@ describe('transcript-ingestion-worker', () => {
       buildMessage({
         tenantId: TENANT_A,
         voiceRecordingId: recordingId,
-        transcript: ['agent: hi', 'caller: thanks'],
+        turns: turnsFrom(['agent: hi', 'caller: thanks']),
         // outcome intentionally omitted
       }),
       logger,
@@ -248,7 +337,7 @@ describe('transcript-ingestion-worker', () => {
       buildMessage({
         tenantId: TENANT_A,
         voiceRecordingId: recordingId,
-        transcript: ['agent: hi', 'caller: bye'],
+        turns: turnsFrom(['agent: hi', 'caller: bye']),
         outcome: 'escalated_to_human',
       }),
       logger,
@@ -277,7 +366,7 @@ describe('transcript-ingestion-worker', () => {
       buildMessage({
         tenantId: TENANT_A,
         voiceRecordingId: recordingId,
-        transcript: ['agent: hi how can I help', 'caller: my AC is broken'],
+        turns: turnsFrom(['agent: hi how can I help', 'caller: my AC is broken']),
       }),
       logger,
     );
@@ -306,7 +395,7 @@ describe('transcript-ingestion-worker', () => {
         buildMessage({
           tenantId: TENANT_A,
           voiceRecordingId: recordingId,
-          transcript: [...transcript],
+          turns: turnsFrom([...transcript]),
         }),
         logger,
       );
@@ -332,7 +421,7 @@ describe('transcript-ingestion-worker', () => {
         buildMessage({
           tenantId: TENANT_A,
           voiceRecordingId: recordingId,
-          transcript: ['agent: hi', 'caller: hello'],
+          turns: turnsFrom(['agent: hi', 'caller: hello']),
         }),
         logger,
       ),
@@ -358,7 +447,7 @@ describe('transcript-ingestion-worker', () => {
       buildMessage({
         tenantId: TENANT_A,
         voiceRecordingId: recordingId,
-        transcript: ['   ', ''],
+        turns: turnsFrom(['   ', '']),
       }),
       logger,
     );
@@ -382,7 +471,7 @@ describe('transcript-ingestion-worker', () => {
       buildMessage({
         tenantId: TENANT_A,
         voiceRecordingId: recordingId,
-        transcript: ['agent: hi', 'caller: hello'],
+        turns: turnsFrom(['agent: hi', 'caller: hello']),
         summary: 'Brief greeting',
         intent: 'small_talk',
         outcome: 'completed',
@@ -424,7 +513,7 @@ describe('transcript-ingestion-worker', () => {
       buildMessage({
         tenantId: TENANT_A,
         voiceRecordingId: recordingId,
-        transcript,
+        turns: turnsFrom(transcript),
       }),
       logger,
     );
@@ -456,7 +545,7 @@ describe('transcript-ingestion-worker', () => {
     const message = buildMessage({
       tenantId: TENANT_A,
       voiceRecordingId: recordingId,
-      transcript: ['agent: hi', 'caller: hello'],
+      turns: turnsFrom(['agent: hi', 'caller: hello']),
       summary: 'short',
     });
 
@@ -485,7 +574,7 @@ describe('transcript-ingestion-worker', () => {
         buildMessage({
           tenantId: TENANT_A,
           voiceRecordingId: recordingId,
-          transcript: ['agent: hi', 'caller: hello'],
+          turns: turnsFrom(['agent: hi', 'caller: hello']),
           summary: 'short',
         }),
         logger,
@@ -495,32 +584,5 @@ describe('transcript-ingestion-worker', () => {
     // Turns still persisted (Step 1 doesn't depend on embedder).
     const turns = await callTranscriptTurnRepo.listByRecording(TENANT_A, recordingId);
     expect(turns.length).toBe(2);
-  });
-
-  it('falls back to speaker=caller for unprefixed turns', async () => {
-    const callTranscriptTurnRepo = new InMemoryCallTranscriptTurnRepository();
-    const voiceRepo = new InMemoryVoiceRepository();
-    const knowledgeChunkRepo = new InMemoryKnowledgeChunkRepository();
-    const recordingId = await seedRecording(voiceRepo);
-
-    const worker = createTranscriptIngestionWorker({
-      callTranscriptTurnRepo,
-      voiceRepo,
-      knowledgeChunkRepo,
-      embeddings: stubEmbedder(),
-    });
-
-    await worker.handle(
-      buildMessage({
-        tenantId: TENANT_A,
-        voiceRecordingId: recordingId,
-        transcript: ['agent: hi', 'unprefixed thing', 'caller: hello'],
-      }),
-      logger,
-    );
-
-    const turns = await callTranscriptTurnRepo.listByRecording(TENANT_A, recordingId);
-    expect(turns[1].speaker).toBe('caller');
-    expect(turns[1].text).toBe('unprefixed thing');
   });
 });

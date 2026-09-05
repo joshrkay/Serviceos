@@ -48,16 +48,25 @@ import { classifyTranscriptTurnProvenance } from '../ai/content-provenance';
  * corpus simply accumulates.
  */
 
+/**
+ * One turn as carried in the queue payload. `index` is authoritative — it
+ * is the turn_index of the row persisted mid-call (after the recording
+ * webhook's attach/renumber) or, when no rows were persisted, the turn's
+ * position in the in-memory session transcript. The worker upserts at that
+ * index rather than renumbering, so a turn that parses empty never shifts
+ * the ones after it (plan U8, R8).
+ */
+export interface TranscriptIngestionTurn {
+  index: number;
+  speaker: CallTurnSpeaker;
+  text: string;
+}
+
 export interface TranscriptIngestionPayload {
   tenantId: string;
   voiceRecordingId: string;
-  /**
-   * Speaker-prefixed turns from `VoiceSessionStore.transcript`. Format:
-   * `["agent: greeting", "caller: hi", ...]`. Anything without a
-   * recognised prefix is recorded as `speaker='caller'` to preserve
-   * the row but flagged in the worker logs.
-   */
-  transcript: string[];
+  /** Built by `createRecordingTranscriptHook` (telephony/recording-transcript-hook.ts). */
+  turns: TranscriptIngestionTurn[];
   /** From `call_summaries.summary` — the 3-sentence LLM summary. */
   summary?: string;
   /** From `call_summaries.detected_intent`. */
@@ -96,28 +105,6 @@ const WINDOW_OVERLAP_CHARS = 200;
 
 const SUMMARY_SOURCE_TYPE: KnowledgeChunkSourceType = 'call_summary';
 const WINDOW_SOURCE_TYPE: KnowledgeChunkSourceType = 'transcript_window';
-
-interface ParsedTurn {
-  speaker: CallTurnSpeaker;
-  text: string;
-}
-
-/**
- * Parse "agent: hi" / "caller: hello" prefixes. Falls back to
- * speaker='caller' for unprefixed lines so a single weird turn
- * doesn't drop the whole transcript.
- */
-function parseTurn(raw: string): ParsedTurn {
-  const colon = raw.indexOf(':');
-  if (colon > 0) {
-    const prefix = raw.slice(0, colon).trim().toLowerCase();
-    const text = raw.slice(colon + 1).trim();
-    if (prefix === 'agent' || prefix === 'caller') {
-      return { speaker: prefix, text };
-    }
-  }
-  return { speaker: 'caller', text: raw.trim() };
-}
 
 /**
  * Slice the joined transcript into overlapping windows. Windows snap
@@ -173,29 +160,27 @@ export function createTranscriptIngestionWorker(
       message: QueueMessage<TranscriptIngestionPayload>,
       logger: Logger,
     ): Promise<void> {
-      const { tenantId, voiceRecordingId, transcript, summary, intent, outcome, knownEntities } =
+      const { tenantId, voiceRecordingId, summary, intent, outcome, knownEntities } =
         message.payload;
 
       logger.info('Starting transcript ingestion', {
         voiceRecordingId,
-        turnCount: transcript.length,
+        turnCount: message.payload.turns.length,
         hasSummary: !!summary,
         hasOutcome: !!outcome,
       });
 
       // ── Step 1: persist per-turn rows ──────────────────────────────────
-      const turns = transcript.map(parseTurn).filter((t) => t.text.length > 0);
-      let unprefixed = 0;
-      for (let i = 0; i < turns.length; i++) {
-        const turn = turns[i];
-        if (turn.speaker === 'caller' && !transcript[i].toLowerCase().startsWith('caller:')) {
-          unprefixed++;
-        }
+      // Upsert at each turn's CARRIED index. Empty turns are skipped but
+      // keep their index reserved, so the rows written mid-call (U8) are
+      // updated in place — never renumbered from a filtered array.
+      const turns = message.payload.turns.filter((t) => t.text.trim().length > 0);
+      for (const turn of turns) {
         try {
           await deps.callTranscriptTurnRepo.recordTurn({
             tenantId,
             voiceRecordingId,
-            turnIndex: i,
+            turnIndex: turn.index,
             speaker: turn.speaker,
             text: turn.text,
           });
@@ -205,16 +190,10 @@ export function createTranscriptIngestionWorker(
           const error = err instanceof Error ? err : new Error(String(err));
           logger.warn('recordTurn failed', {
             voiceRecordingId,
-            turnIndex: i,
+            turnIndex: turn.index,
             error: error.message,
           });
         }
-      }
-      if (unprefixed > 0) {
-        logger.warn('transcript turns missing speaker prefix', {
-          voiceRecordingId,
-          unprefixedCount: unprefixed,
-        });
       }
 
       // ── Step 2: stamp the outcome enum ────────────────────────────────

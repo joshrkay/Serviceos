@@ -6669,6 +6669,29 @@ export const MIGRATIONS = {
       ON material_items (tenant_id, needed_by, created_at, id)
       WHERE status = 'pending';
   `,
+
+  // U8 (R8) — transcripts survive restarts. VoiceSessionStore.appendTranscript
+  // persists each turn mid-call, before Twilio's recording webhook has created
+  // the voice_recordings row, so voice_recording_id must be nullable and the
+  // row needs its own key: (tenant_id, call_sid, session_id, turn_index). The
+  // key includes session_id because a second session can be created for the
+  // same CallSid (gather-fallback after a restart, Twilio re-delivery after a
+  // reap) and restarts its index at 0. The recording webhook's attachRecording
+  // later sets voice_recording_id and renumbers across legs, after which the
+  // original UNIQUE (voice_recording_id, turn_index) from 060 holds again.
+  // Partial index (WHERE call_sid IS NOT NULL) so the worker's direct
+  // recording-keyed writes (call_sid NULL) never participate. Every statement
+  // is idempotent — the runner replays the whole registry on every boot.
+  '274_call_transcript_turns_call_sid': `
+    ALTER TABLE call_transcript_turns ALTER COLUMN voice_recording_id DROP NOT NULL;
+    ALTER TABLE call_transcript_turns ADD COLUMN IF NOT EXISTS call_sid TEXT;
+    ALTER TABLE call_transcript_turns ADD COLUMN IF NOT EXISTS session_id TEXT;
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_call_transcript_turns_call_leg
+      ON call_transcript_turns (tenant_id, call_sid, session_id, turn_index)
+      WHERE call_sid IS NOT NULL;
+    CREATE INDEX IF NOT EXISTS idx_call_transcript_turns_call_sid
+      ON call_transcript_turns (tenant_id, call_sid);
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

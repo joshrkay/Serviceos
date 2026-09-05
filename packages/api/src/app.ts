@@ -27,6 +27,7 @@ import { createUserPhoneDispatcherResolver, createBusinessPhoneFallback } from '
 import { PgPhoneNumberRepository } from './integrations/twilio/phone-number-repository';
 import { attachMediaStreamServer } from './telephony/media-streams';
 import { createTwilioCallRedirector } from './telephony/twilio-call-redirect';
+import { createRecordingTranscriptHook } from './telephony/recording-transcript-hook';
 import { RealtimeHealthCircuit } from './telephony/realtime-health-circuit';
 import { attachClientGateway, setChannelGate } from './ws/client-gateway';
 import { setDraining, isDraining as isDrainingFlag } from './ws/drain-state';
@@ -3198,7 +3199,13 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
   const voiceEventTransport = createVoiceEventTransport(
     process.env.VOICE_FANOUT_ENABLED === 'true' ? process.env.REDIS_URL : undefined,
   );
-  const voiceSessionStore = new VoiceSessionStore({ transport: voiceEventTransport });
+  // U8 (R8): every appended Twilio turn is also persisted to
+  // call_transcript_turns keyed by CallSid + session id, so the recording
+  // webhook can recover the transcript after a restart / reap.
+  const voiceSessionStore = new VoiceSessionStore({
+    transport: voiceEventTransport,
+    callTranscriptTurnRepo,
+  });
   // F6b: Process-local whisper TwiML cache. Shared between:
   //   - whisperRouter (serves TwiML to Twilio when dispatcher answers)
   //   - MediaStreamAdapter (stores whisper text after escalation_started)
@@ -3855,62 +3862,25 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
         ...(process.env.TWILIO_AUTH_TOKEN
           ? { twilioAuthToken: process.env.TWILIO_AUTH_TOKEN }
           : {}),
-        // Phase 4a-1: enqueue transcript-ingestion when the recording row
-        // first lands. Skipped on Twilio retries (`inserted=false`) so
-        // we don't double-process the same call. Skipped silently when
-        // the embedding provider is unwired (no AI_PROVIDER_API_KEY).
-        ...(embeddingProvider
-          ? {
-              options: {
-                onPersisted: async (event) => {
-                  if (!event.inserted) return;
-                  // Ended-inclusive lookup (precedent: TwilioGatherAdapter
-                  // #stampCallOutcomeByCallSid): by the time Twilio's recording
-                  // webhook fires, the FSM has terminated and `ended === true`
-                  // on every normal hangup path, so findByCallSid returned
-                  // undefined and ingestion was dropped for nearly every
-                  // completed call — not only reaped ones (plan U8 step 0, R8).
-                  const session = voiceSessionStore.findByCallSidIncludingEnded(event.callSid);
-                  if (!session) {
-                    // Session was reaped (>30 min idle) before the
-                    // recording webhook fired. Known data-loss edge
-                    // case from the in-memory session store; not
-                    // something Phase 4a-1 fixes. Phase 4 architecture
-                    // doc covers persistent FSM state as a follow-up.
-                    return;
-                  }
-                  try {
-                    await queue.send(
-                      'transcript_ingestion',
-                      {
-                        tenantId: event.tenantId,
-                        voiceRecordingId: event.voiceRecordingId,
-                        transcript: [...session.transcript],
-                        ...(session.machine.currentContext.currentIntent
-                          ? { intent: session.machine.currentContext.currentIntent }
-                          : {}),
-                        // B2: thread the typed CallOutcome into the worker
-                        // payload so voice_recordings.outcome gets stamped
-                        // alongside voice_sessions.outcome. Optional —
-                        // the worker no-ops when undefined.
-                        ...(session.terminalOutcome
-                          ? { outcome: session.terminalOutcome }
-                          : {}),
-                        durationMs: Date.now() - session.createdAt.getTime(),
-                      },
-                      `transcript:${event.voiceRecordingId}:v1`,
-                    );
-                  } catch (err) {
-                    // eslint-disable-next-line no-console
-                    console.error('app: failed to enqueue transcript_ingestion', {
-                      voiceRecordingId: event.voiceRecordingId,
-                      error: err instanceof Error ? err.message : String(err),
-                    });
-                  }
-                },
-              },
-            }
-          : {}),
+        // U8 (R8): attach the turns persisted mid-call to the new recording
+        // and enqueue transcript-ingestion from them (falling back to the
+        // in-memory session, ended or not). Runs on every first delivery —
+        // the attach and the `voice.transcript_unrecoverable` audit do NOT
+        // depend on AI_PROVIDER_API_KEY; only the enqueue does, because the
+        // ingestion worker is registered only when an embedding provider is
+        // wired (see createTranscriptIngestionWorker above).
+        options: {
+          onPersisted: createRecordingTranscriptHook({
+            store: voiceSessionStore,
+            callTranscriptTurnRepo,
+            auditRepo,
+            ...(embeddingProvider ? { queue } : {}),
+            logger: createLogger({
+              service: 'recording-transcript-hook',
+              environment: process.env.NODE_ENV || 'development',
+            }),
+          }),
+        },
       },
       // U9 (voicemail → action) — replay-receipt store for the lead leg plus
       // the transcription enqueue for persisted voicemail recordings. The

@@ -530,6 +530,7 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   // schema.ts's comment on the key for why it flipped. Deliberate snapshot
   // update for a NEW migration — 272 was NOT edited.
   ['273_material_items_urgency_index', '0327e1316d8935b47272f639f98836551172168c4150eb8b6fed648a6c7242f0'],
+  ['274_call_transcript_turns_call_sid', '10b6695fe7b6da9106c56fa21f0445d46b41c7125ef2670d891701efafaf5e5a'],
 ];
 
 function hashMigration(value: string): string {

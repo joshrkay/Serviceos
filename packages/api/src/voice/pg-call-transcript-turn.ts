@@ -5,12 +5,16 @@ import {
   CallTranscriptTurnRepository,
   CallTurnSpeaker,
   RecordTurnInput,
+  sortTurnsAcrossLegs,
+  validateRecordTurnInput,
 } from './call-transcript-turn';
 
 interface CallTranscriptTurnRow {
   id: string;
   tenant_id: string;
-  voice_recording_id: string;
+  voice_recording_id: string | null;
+  call_sid: string | null;
+  session_id: string | null;
   turn_index: number;
   speaker: CallTurnSpeaker;
   text: string;
@@ -23,7 +27,9 @@ function rowToTurn(row: CallTranscriptTurnRow): CallTranscriptTurn {
   return {
     id: row.id,
     tenantId: row.tenant_id,
-    voiceRecordingId: row.voice_recording_id,
+    voiceRecordingId: row.voice_recording_id ?? undefined,
+    callSid: row.call_sid ?? undefined,
+    sessionId: row.session_id ?? undefined,
     turnIndex: row.turn_index,
     speaker: row.speaker,
     text: row.text,
@@ -31,20 +37,6 @@ function rowToTurn(row: CallTranscriptTurnRow): CallTranscriptTurn {
     completedAt: row.completed_at ?? undefined,
     createdAt: row.created_at,
   };
-}
-
-function validateInput(input: RecordTurnInput): void {
-  if (!input.tenantId) throw new Error('call_transcript_turns: tenantId is required');
-  if (!input.voiceRecordingId) throw new Error('call_transcript_turns: voiceRecordingId is required');
-  if (!Number.isInteger(input.turnIndex) || input.turnIndex < 0) {
-    throw new Error('call_transcript_turns: turnIndex must be a non-negative integer');
-  }
-  if (input.speaker !== 'agent' && input.speaker !== 'caller') {
-    throw new Error(`call_transcript_turns: speaker must be 'agent' or 'caller' (got ${input.speaker})`);
-  }
-  if (input.text.length === 0) {
-    throw new Error('call_transcript_turns: text must be non-empty');
-  }
 }
 
 export class PgCallTranscriptTurnRepository
@@ -56,29 +48,38 @@ export class PgCallTranscriptTurnRepository
   }
 
   async recordTurn(input: RecordTurnInput): Promise<CallTranscriptTurn> {
-    validateInput(input);
+    validateRecordTurnInput(input);
+    // Two keys, one upsert each (migration 274). The mid-call key conflicts
+    // on the partial unique index, so its ON CONFLICT target must repeat the
+    // index predicate for the planner to match it.
+    const conflictTarget = input.voiceRecordingId
+      ? '(voice_recording_id, turn_index)'
+      : '(tenant_id, call_sid, session_id, turn_index) WHERE call_sid IS NOT NULL';
     return this.withTenantTransaction(input.tenantId, async (client) => {
       // started_at semantics, codex P2 on PR #233:
-      //   - On INSERT: COALESCE($6, NOW()) so the new row is always stamped.
+      //   - On INSERT: COALESCE($8, NOW()) so the new row is always stamped.
       //   - On CONFLICT (interim→final replacement): preserve the original
       //     started_at unless the caller explicitly supplied a new value.
-      //     We test the *parameter* $6 directly here, NOT EXCLUDED.started_at,
+      //     We test the *parameter* $8 directly here, NOT EXCLUDED.started_at,
       //     because EXCLUDED carries the COALESCE'd value (always non-null)
       //     and would otherwise overwrite the original timestamp on every
       //     retry.
       const result = await client.query<CallTranscriptTurnRow>(
         `INSERT INTO call_transcript_turns (
-           tenant_id, voice_recording_id, turn_index, speaker, text, started_at, completed_at
-         ) VALUES ($1, $2, $3, $4, $5, COALESCE($6, NOW()), $7)
-         ON CONFLICT (voice_recording_id, turn_index) DO UPDATE SET
+           tenant_id, voice_recording_id, call_sid, session_id, turn_index, speaker, text,
+           started_at, completed_at
+         ) VALUES ($1, $2, $3, $4, $5, $6, $7, COALESCE($8, NOW()), $9)
+         ON CONFLICT ${conflictTarget} DO UPDATE SET
            text         = EXCLUDED.text,
            speaker      = EXCLUDED.speaker,
-           started_at   = COALESCE($6, call_transcript_turns.started_at),
+           started_at   = COALESCE($8, call_transcript_turns.started_at),
            completed_at = EXCLUDED.completed_at
          RETURNING *`,
         [
           input.tenantId,
-          input.voiceRecordingId,
+          input.voiceRecordingId ?? null,
+          input.callSid ?? null,
+          input.sessionId ?? null,
           input.turnIndex,
           input.speaker,
           input.text,
@@ -109,6 +110,65 @@ export class PgCallTranscriptTurnRepository
         [voiceRecordingId, tenantId],
       );
       return result.rows.map(rowToTurn);
+    });
+  }
+
+  async listByCallSid(tenantId: string, callSid: string): Promise<CallTranscriptTurn[]> {
+    return this.withTenant(tenantId, async (client) => {
+      const result = await client.query<CallTranscriptTurnRow>(
+        `SELECT *
+           FROM call_transcript_turns
+          WHERE tenant_id = $1 AND call_sid = $2`,
+        [tenantId, callSid],
+      );
+      return sortTurnsAcrossLegs(result.rows.map(rowToTurn));
+    });
+  }
+
+  async attachRecording(
+    tenantId: string,
+    callSid: string,
+    voiceRecordingId: string,
+  ): Promise<number> {
+    return this.withTenantTransaction(tenantId, async (client) => {
+      // Lock this call's unattached rows so a concurrent attach (the
+      // voicemail leg's webhook racing the call's) serialises behind us and
+      // then finds nothing left to claim: first-writer-wins.
+      const pending = await client.query<CallTranscriptTurnRow>(
+        `SELECT *
+           FROM call_transcript_turns
+          WHERE tenant_id = $1 AND call_sid = $2 AND voice_recording_id IS NULL
+          FOR UPDATE`,
+        [tenantId, callSid],
+      );
+      if (pending.rows.length === 0) return 0;
+
+      const ordered = sortTurnsAcrossLegs(pending.rows.map(rowToTurn));
+      const ids = ordered.map((t) => t.id);
+      const indices = ordered.map((_, index) => index);
+
+      // Renumber in two passes. The partial unique index on (tenant_id,
+      // call_sid, session_id, turn_index) is checked per row as an UPDATE
+      // proceeds, so compacting a leg with a gap (0,2 → 0,1) or offsetting a
+      // second leg (0,1 → 3,4) in one statement can transiently collide with
+      // a not-yet-rewritten sibling. Lifting every row above the current
+      // maximum first makes the final assignment collision-free.
+      const maxIndex = Math.max(...ordered.map((t) => t.turnIndex));
+      await client.query(
+        `UPDATE call_transcript_turns
+            SET turn_index = turn_index + $3
+          WHERE tenant_id = $1 AND id = ANY($2::uuid[]) AND voice_recording_id IS NULL`,
+        [tenantId, ids, maxIndex + 1],
+      );
+      const attached = await client.query(
+        `UPDATE call_transcript_turns AS t
+            SET turn_index = v.turn_index,
+                voice_recording_id = $4
+           FROM unnest($2::uuid[], $3::int[]) AS v(id, turn_index)
+          WHERE t.id = v.id AND t.tenant_id = $1 AND t.voice_recording_id IS NULL`,
+        [tenantId, ids, indices, voiceRecordingId],
+      );
+      return attached.rowCount ?? 0;
     });
   }
 }
