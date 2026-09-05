@@ -3864,7 +3864,13 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
               options: {
                 onPersisted: async (event) => {
                   if (!event.inserted) return;
-                  const session = voiceSessionStore.findByCallSid(event.callSid);
+                  // Ended-inclusive lookup (precedent: TwilioGatherAdapter
+                  // #stampCallOutcomeByCallSid): by the time Twilio's recording
+                  // webhook fires, the FSM has terminated and `ended === true`
+                  // on every normal hangup path, so findByCallSid returned
+                  // undefined and ingestion was dropped for nearly every
+                  // completed call — not only reaped ones (plan U8 step 0, R8).
+                  const session = voiceSessionStore.findByCallSidIncludingEnded(event.callSid);
                   if (!session) {
                     // Session was reaped (>30 min idle) before the
                     // recording webhook fired. Known data-loss edge
