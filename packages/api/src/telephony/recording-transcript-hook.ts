@@ -16,6 +16,8 @@
  *      persisted: a fire-and-forget persist that failed or is in flight
  *      must not shrink the transcript while the full one is in memory. The
  *      session is also the fallback when nothing was persisted at all.
+ *      Turns an earlier recording of the same call already claimed are
+ *      never re-ingested under a later one, session or not.
  *   3. Enqueue `transcript_ingestion` when the worker is registered
  *      (`queue` present ⇔ an embedding provider is wired). Attach and the
  *      audit below never depend on it.
@@ -88,22 +90,29 @@ export function createRecordingTranscriptHook(
     // (PR #975 review finding 2). The attach above ran either way, so the
     // worker's (voice_recording_id, turn_index) upserts land on the rows
     // that do exist and fill in the rest.
+    //
+    // Two voice_recordings rows per call are legal (the voicemail leg is a
+    // second recording for the same CallSid). Rows another recording already
+    // claimed belong to THAT recording's ingestion, which has run: they are
+    // never re-ingested under this one, whether or not a session is still in
+    // memory — the session-wins rule only applies when every persisted row
+    // for the call is this recording's, otherwise a live session would
+    // duplicate the first recording's turns under the second id (found at
+    // runtime verification of PR #975).
+    const heldByOtherRecordings = persistedForCall.length > persisted.length;
     let turns: TranscriptIngestionTurn[];
-    if (session && session.transcript.length > persisted.length) {
-      turns = session.transcript.map((line, index) => ({ index, ...parseTranscriptLine(line) }));
-    } else if (persisted.length > 0) {
-      turns = persisted.map((t) => ({ index: t.turnIndex, speaker: t.speaker, text: t.text }));
-    } else if (session) {
-      turns = session.transcript.map((line, index) => ({ index, ...parseTranscriptLine(line) }));
-    } else if (persistedForCall.length > 0) {
-      // The call's turns are attached to an earlier recording (the voicemail
-      // leg is a second voice_recordings row for the same CallSid). Nothing
-      // to ingest for THIS recording, and nothing was lost.
+    if (persisted.length === 0 && heldByOtherRecordings) {
       logger.info('recording-transcript-hook: turns already attached to another recording of this call', {
         callSid,
         voiceRecordingId,
       });
       return;
+    } else if (session && !heldByOtherRecordings && session.transcript.length > persisted.length) {
+      turns = session.transcript.map((line, index) => ({ index, ...parseTranscriptLine(line) }));
+    } else if (persisted.length > 0) {
+      turns = persisted.map((t) => ({ index: t.turnIndex, speaker: t.speaker, text: t.text }));
+    } else if (session) {
+      turns = session.transcript.map((line, index) => ({ index, ...parseTranscriptLine(line) }));
     } else {
       try {
         await auditRepo.create(

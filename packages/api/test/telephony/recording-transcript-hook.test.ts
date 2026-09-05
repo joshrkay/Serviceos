@@ -263,6 +263,56 @@ describe('createRecordingTranscriptHook (U8)', () => {
     expect(await unrecoverableAudits(auditRepo, RECORDING_2)).toEqual([]);
   });
 
+  it('voicemail leg WITH a live session: the second recording never re-ingests turns the first one claimed', async () => {
+    // Found at runtime verification of PR #975: the session-wins rule saw
+    // zero rows for RECORDING_2, decided the session was "more complete",
+    // and enqueued the whole transcript again under the second id — four
+    // duplicate rows with no call_sid/session_id.
+    const session = fakeSession({
+      transcript: ['agent: hi', 'caller: leave a message'],
+      ended: false,
+      outcome: 'no_intent',
+    });
+    const { hook, repo, send, auditRepo } = harness({ session });
+    await seedLeg(repo, SESSION_1, [['agent', 'hi'], ['caller', 'leave a message']]);
+    await hook(event({ voiceRecordingId: RECORDING_1 }));
+    expect(send).toHaveBeenCalledTimes(1);
+
+    await hook(event({ voiceRecordingId: RECORDING_2 }));
+
+    expect((await repo.listByRecording(TENANT, RECORDING_1)).length).toBe(2);
+    expect(await repo.listByRecording(TENANT, RECORDING_2)).toEqual([]);
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(await unrecoverableAudits(auditRepo, RECORDING_2)).toEqual([]);
+  });
+
+  it('rows split across two recordings: a longer live session does not re-ingest the first recording\'s turns under the second', async () => {
+    // Leg 1 was attached to RECORDING_1; leg 2 persisted afterwards and is
+    // claimed by RECORDING_2. The session holds every line of both legs plus
+    // one that never persisted — but the session-wins rule must not fire
+    // when another recording holds part of the call, or leg 1 would be
+    // ingested twice. RECORDING_2 ingests exactly its own rows.
+    const session = fakeSession({
+      transcript: ['agent: hi', 'caller: my AC is broken', 'agent: leave a message', 'caller: call me back', 'caller: thanks'],
+      ended: false,
+    });
+    const { hook, repo, send } = harness({ session });
+    await seedLeg(repo, SESSION_1, [['agent', 'hi'], ['caller', 'my AC is broken']]);
+    await hook(event({ voiceRecordingId: RECORDING_1 }));
+    await seedLeg(repo, SESSION_2, [['agent', 'leave a message'], ['caller', 'call me back']]);
+
+    await hook(event({ voiceRecordingId: RECORDING_2 }));
+
+    expect((await repo.listByRecording(TENANT, RECORDING_1)).map((t) => t.text)).toEqual(['hi', 'my AC is broken']);
+    expect(send).toHaveBeenCalledTimes(2);
+    const payload = send.mock.calls[1][1] as unknown as { voiceRecordingId: string; turns: unknown[] };
+    expect(payload.voiceRecordingId).toBe(RECORDING_2);
+    expect(payload.turns).toEqual([
+      { index: 0, speaker: 'agent', text: 'leave a message' },
+      { index: 1, speaker: 'caller', text: 'call me back' },
+    ]);
+  });
+
   it('no session and no rows → audit voice.transcript_unrecoverable, no enqueue, resolves (200 to Twilio)', async () => {
     const { hook, send, auditRepo } = harness({ session: undefined });
 
