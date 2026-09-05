@@ -4164,9 +4164,11 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
       // `frustration_detected` back into the FSM out-of-band.
       //
       // The sentiment function expects `deps.llm.complete({ prompt })` returning
-      // `{ text }`. We adapt the LLM gateway (which uses messages arrays) into
-      // that interface here using the `call_sentiment` task type so routing
-      // config can target it separately from main call-flow completions.
+      // `{ text, tokenUsage, model }` (#895 — usage + model id so the
+      // classifier can record its own spend on the session cost tracker). We
+      // adapt the LLM gateway (which uses messages arrays) into that interface
+      // here using the `call_sentiment` task type so routing config can target
+      // it separately from main call-flow completions.
       //
       // escalationSettings is per-tenant and resolved per-session: the
       // `resolveEscalationSettings` resolver (passed into attachMediaStreamServer
@@ -4188,7 +4190,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
                     tenantId: input.tenantId,
                     messages: [{ role: 'user' as const, content: prompt }],
                   });
-                  return { text: res.content };
+                  return { text: res.content, tokenUsage: res.tokenUsage, model: res.model };
                 },
               },
               // Per-session cost-cap inputs threaded in by the adapter so the
@@ -4233,7 +4235,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
                       tenantId: input.tenantId,
                       messages: [{ role: 'user' as const, content: prompt }],
                     });
-                    return { text: res.content };
+                    return { text: res.content, tokenUsage: res.tokenUsage, model: res.model };
                   },
                 },
                 ...budget,

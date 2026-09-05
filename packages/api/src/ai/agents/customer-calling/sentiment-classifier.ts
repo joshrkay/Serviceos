@@ -8,7 +8,51 @@
  * Cost cap: if the cumulative session cost has already consumed
  * `maxSentimentBudgetRatio` of `sessionCostCapCents`, skip the LLM
  * call (returns score=0) to protect tenant budgets.
+ *
+ * #895: the classifier's OWN completion is recorded on that same tracker
+ * (`recordCompletionUsage`), so its spend counts against the cap it guards.
  */
+import { estimateCostCents, type TokenUsage } from '../../skills/session-cost-tracker';
+import { computeCostMicroCents, microCentsToCents } from '../../gateway/model-pricing';
+
+/**
+ * What the customer-calling classifiers (this one and the vulnerability
+ * grader) need from one LLM completion: the gateway's `content`, its
+ * provider-reported `tokenUsage` and the resolved `model` id, adapted at the
+ * wiring site (app.ts). `tokenUsage` absent → the call is not recorded.
+ */
+export interface ClassifierCompletion {
+  text: string;
+  tokenUsage?: { input: number; output: number };
+  model?: string;
+}
+
+/**
+ * The slice of `SessionCostTracker` these classifiers use: `totals` for the
+ * budget guard, `recordUsage` so their own spend is visible to that guard.
+ */
+export interface ClassifierCostTracker {
+  totals: { costCents: number };
+  recordUsage(usage: TokenUsage): unknown;
+}
+
+/**
+ * Record one completion's spend on the session tracker. Priced from the
+ * gateway's model table when the model id is known; otherwise the same
+ * directional estimate the main voice turn records — never a silent zero.
+ * Integer cents, like every other tracker write.
+ */
+export function recordCompletionUsage(
+  costTracker: ClassifierCostTracker | undefined,
+  completion: ClassifierCompletion,
+): void {
+  if (!costTracker || !completion.tokenUsage) return;
+  const { input, output } = completion.tokenUsage;
+  const microCents = computeCostMicroCents(completion.model, completion.tokenUsage);
+  const costCents =
+    microCents == null ? estimateCostCents(input, output) : microCentsToCents(microCents);
+  costTracker.recordUsage({ inputTokens: input, outputTokens: output, costCents });
+}
 
 export interface SentimentInput {
   transcript: string;
@@ -24,8 +68,8 @@ export interface SentimentInput {
 }
 
 export interface SentimentDeps {
-  llm: { complete(args: { prompt: string }): Promise<{ text: string }> };
-  costTracker?: { totals: { costCents: number } };
+  llm: { complete(args: { prompt: string }): Promise<ClassifierCompletion> };
+  costTracker?: ClassifierCostTracker;
   sessionCostCapCents?: number;
   maxSentimentBudgetRatio?: number;
 }
@@ -82,6 +126,9 @@ export async function classifyTurnSentiment(
   let raw: string;
   try {
     const res = await deps.llm.complete({ prompt });
+    // #895 — record before parsing: the tokens were bought even if the
+    // text turns out to be unparseable.
+    recordCompletionUsage(deps.costTracker, res);
     raw = res.text;
   } catch {
     return { frustrationScore: 0 };
