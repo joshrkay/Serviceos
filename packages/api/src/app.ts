@@ -143,7 +143,7 @@ import { TimeEntryService } from './time-tracking/time-entry-service';
 import { PgMoneyDashboardRepository } from './reports/pg-money-dashboard';
 import { createFeedbackResponsesRouter } from './routes/feedback';
 import { createInteractionsRouter } from './routes/interactions';
-import { initSentry, setSentryClient } from './monitoring/sentry';
+import { initSentry, setSentryClient, getSentryClient } from './monitoring/sentry';
 import { dbPoolConnections, pgQueueDepth, voiceTurnLatencyMs } from './monitoring/metrics';
 // WS15 — platform SLO monitor + drain-abandonment alarm.
 import { createAlertOperator, emitDrainAbandonment } from './monitoring/alert-operator';
@@ -6982,19 +6982,41 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     // covers the backend too. Off-by-default; wrapped so analytics can never
     // turn an error response into a thrown handler. No body/headers/message.
     if (statusCode >= 500) {
+      const anyReq = req as unknown as {
+        safeRequestLog?: { route?: string; correlation_id?: string };
+        auth?: { tenantId?: string; userId?: string };
+      };
+      const route = anyReq.safeRequestLog?.route ?? req.path;
+      const tenantId = anyReq.auth?.tenantId;
       try {
-        const anyReq = req as unknown as {
-          safeRequestLog?: { route?: string };
-          auth?: { tenantId?: string; userId?: string };
-        };
         recordApiError({
-          route: anyReq.safeRequestLog?.route ?? req.path,
+          route,
           status: statusCode,
-          tenantId: anyReq.auth?.tenantId ?? null,
+          tenantId: tenantId ?? null,
           userId: anyReq.auth?.userId ?? null,
         });
       } catch {
         // analytics must never break the error response
+      }
+      // R1 — every unhandled 5xx reaches Sentry. Tags are set per event via
+      // withScope (no leakage between concurrent requests) from already-
+      // redacted sources: scope tags bypass the beforeSend redaction, so the
+      // route is safeRequestLog.route (redactUrlValue'd), never
+      // req.originalUrl; the request id is the correlation_id minted by
+      // request logging; the tenant comes from req.auth (webhook/telephony
+      // paths have no tenant store — the tag is simply omitted). 4xx never
+      // captures. No-op client when SENTRY_DSN is unset.
+      try {
+        const error = err instanceof Error ? err : new Error(String(err));
+        getSentryClient().withScope((scope) => {
+          scope.setTag('route', route);
+          const requestId = anyReq.safeRequestLog?.correlation_id;
+          if (requestId) scope.setTag('request_id', requestId);
+          if (tenantId) scope.setTag('tenant_id', tenantId);
+          scope.captureException(error);
+        });
+      } catch {
+        // monitoring must never break the error response
       }
     }
     res.status(statusCode).json(body);
