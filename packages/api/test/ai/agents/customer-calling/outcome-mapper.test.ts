@@ -270,6 +270,44 @@ describe('deriveCallOutcome — escalating / degraded', () => {
   });
 });
 
+describe('deriveCallOutcome — max_call_duration (U5)', () => {
+  it('completed when a proposal was queued before the cap cut the call', () => {
+    expect(
+      deriveCallOutcome({
+        finalState: TERMINATED,
+        endedReason: 'max_call_duration',
+        context: ctx({ currentIntent: 'x' }),
+        transcript: ['caller: yes'],
+        proposalIds: ['p-1'],
+      }),
+    ).toBe('completed');
+  });
+
+  it('no_intent when the caller spoke but no intent or proposal — never the infra "failed" bucket', () => {
+    expect(
+      deriveCallOutcome({
+        finalState: TERMINATED,
+        endedReason: 'max_call_duration',
+        context: ctx(),
+        transcript: ['agent: hi', 'caller: umm'],
+        proposalIds: [],
+      }),
+    ).toBe('no_intent');
+  });
+
+  it('dropped when the caller never spoke', () => {
+    expect(
+      deriveCallOutcome({
+        finalState: TERMINATED,
+        endedReason: 'max_call_duration',
+        context: ctx(),
+        transcript: ['agent: hi'],
+        proposalIds: [],
+      }),
+    ).toBe('dropped');
+  });
+});
+
 describe('deriveCallOutcome — transport_failure', () => {
   it("maps transport_failure to 'failed' regardless of state, intent, or proposals", () => {
     expect(

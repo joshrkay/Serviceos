@@ -24,6 +24,7 @@ vi.mock('../../../src/analytics/posthog', () => ({
 import {
   TwilioMediaStreamAdapter,
   DEFAULT_SILENCE_REPROMPT_MS,
+  DEFAULT_MAX_CALL_DURATION_MS,
   type WsLike,
 } from '../../../src/telephony/media-streams/mediastream-adapter';
 import { VoiceSessionStore } from '../../../src/ai/agents/customer-calling/voice-session-store';
@@ -40,6 +41,7 @@ import {
   SPEECH_TURN_FAILURE_REPROMPT_COPY,
   SPEECH_TURN_FAILURE_ESCALATION_COPY,
   LOW_STT_CONFIDENCE_REPROMPT_COPY,
+  MAX_CALL_DURATION_WRAP_UP_COPY,
 } from '../../../src/ai/agents/customer-calling/tts-copy';
 import type { SideEffect, EscalateWithContextPayload } from '../../../src/ai/agents/customer-calling/types';
 import { escalateWithContextPayloadSchema } from '../../../src/ai/agents/customer-calling/types';
@@ -3501,5 +3503,194 @@ describe('C5 capture gate', () => {
       .value as Promise<StreamingSession>);
     ws.inboundJson({ event: 'media', media: { payload: 'AAAA' } });
     expect(session.send).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ─── U5 — absolute per-call duration cap ─────────────────────────────────────
+//
+// The 30-minute audio-idle timer is re-armed on EVERY inbound `media` frame,
+// and Twilio streams comfort-noise frames for the whole call, so nothing on
+// this transport ever cut a live call: a wedged caller, a looping test dialer
+// or a runaway dialogue ran until Twilio's own limit. These pins assert ONE
+// absolute wall-clock timer armed at `start()`, never touched by media frames,
+// that speaks a wrap-up line 30 s before the limit and then ends the leg
+// through the existing FSM end_session path with terminal reason
+// `max_call_duration`.
+describe('U5 absolute per-call duration cap', () => {
+  const flush = () => new Promise((r) => setImmediate(r));
+  const WRAP_UP_EN = renderTtsText(MAX_CALL_DURATION_WRAP_UP_COPY, {}, 'en');
+  const MAX_DURATION_EFFECTS: SideEffect[] = [
+    { type: 'end_session', payload: { reason: 'max_call_duration' } },
+  ];
+
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  function makeCircuit() {
+    return { recordFailure: vi.fn(), recordSuccess: vi.fn(), isOpen: vi.fn(() => false) };
+  }
+
+  async function setupCappedCall(
+    callSid: string,
+    opts: { maxCallDurationMs?: number; ttsFails?: boolean; language?: 'en' | 'es' } = {},
+  ) {
+    const session = store.create('t', 'telephony', { callSid });
+    if (opts.language) session.language = opts.language;
+    const ws = new FakeWs();
+    const { provider, handle } = makeStreamingProvider();
+    const texts: string[] = [];
+    const tts: TtsProvider = {
+      synthesize: vi.fn(async (input: TtsSynthesizeInput): Promise<TtsSynthesizeResult> => {
+        texts.push(input.text);
+        if (opts.ttsFails) throw new Error('tts down');
+        return { audio: Buffer.alloc(640), contentType: 'audio/pcm', provider: 'test' };
+      }),
+    };
+    const finalizeOnClose = vi.fn();
+    const circuit = makeCircuit();
+    const adapter = new TwilioMediaStreamAdapter(
+      {
+        store,
+        streamingProvider: provider,
+        speechTurn: async () => [],
+        ttsProvider: tts,
+        finalizeOnClose,
+        realtimeCircuit: circuit,
+        connectionRegistry: new InMemoryConnectionRegistry(),
+        ...(opts.maxCallDurationMs !== undefined ? { maxCallDurationMs: opts.maxCallDurationMs } : {}),
+      },
+      ws,
+    );
+    adapter.start();
+    ws.inboundJson({
+      event: 'start',
+      streamSid: `MZ-${callSid}`,
+      start: { callSid, accountSid: 'AC', streamSid: `MZ-${callSid}`, tracks: ['inbound'] },
+    });
+    await flush();
+    await flush();
+    return { adapter, ws, handle, texts, finalizeOnClose, circuit, session };
+  }
+
+  /** Advance the clock in 1 s steps, feeding a media frame each step. */
+  async function streamFor(ws: FakeWs, ms: number): Promise<void> {
+    for (let t = 0; t < ms; t += 1_000) {
+      ws.inboundJson({ event: 'media', media: { payload: 'AAAA' } });
+      await vi.advanceTimersByTimeAsync(Math.min(1_000, ms - t));
+      await flush();
+    }
+  }
+
+  it('exports a 15-minute default', () => {
+    expect(DEFAULT_MAX_CALL_DURATION_MS).toBe(15 * 60 * 1000);
+  });
+
+  it('speaks the wrap-up once at limit-30s and ends the call at the limit despite continuous media frames', async () => {
+    const { ws, texts, finalizeOnClose, session } = await setupCappedCall('CA-cap-1', {
+      maxCallDurationMs: 90_000,
+    });
+
+    // Continuous frames re-arm the idle timer every second; the absolute
+    // cap must be unaffected by that.
+    await streamFor(ws, 59_000);
+    expect(texts).toEqual([]);
+    expect(ws.closed).toBe(false);
+
+    await streamFor(ws, 1_000);
+    expect(texts).toEqual([WRAP_UP_EN]);
+    expect(ws.closed).toBe(false);
+    expect(finalizeOnClose).not.toHaveBeenCalled();
+
+    await streamFor(ws, 29_000);
+    expect(ws.closed).toBe(false);
+
+    await streamFor(ws, 1_000);
+    expect(ws.closed).toBe(true);
+    expect(texts).toEqual([WRAP_UP_EN]);
+    expect(finalizeOnClose).toHaveBeenCalledTimes(1);
+    const [, reason, sideEffects] = finalizeOnClose.mock.calls[0];
+    expect(reason).toBe('session_ended');
+    expect(sideEffects).toEqual(MAX_DURATION_EFFECTS);
+    // The spoken wrap-up is on the transcript as an agent line.
+    expect(session.transcript).toContain(`agent: ${WRAP_UP_EN}`);
+  });
+
+  it('a normal end before the limit clears the timers — no wrap-up, no second finalize', async () => {
+    const { ws, texts, finalizeOnClose } = await setupCappedCall('CA-cap-2', {
+      maxCallDurationMs: 90_000,
+    });
+    await streamFor(ws, 10_000);
+    ws.inboundJson({ event: 'stop', streamSid: 'MZ-CA-cap-2' });
+    await flush();
+    expect(ws.closed).toBe(true);
+    expect(finalizeOnClose).toHaveBeenCalledTimes(1);
+    expect(finalizeOnClose.mock.calls[0][1]).toBe('caller_hangup');
+
+    await vi.advanceTimersByTimeAsync(200_000);
+    await flush();
+    expect(texts).toEqual([]);
+    expect(finalizeOnClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('limits under 60s skip the pre-warning: the wrap-up is spoken at the limit, then the call ends', async () => {
+    const { ws, texts, finalizeOnClose } = await setupCappedCall('CA-cap-3', {
+      maxCallDurationMs: 5_000,
+    });
+    await vi.advanceTimersByTimeAsync(4_999);
+    await flush();
+    expect(texts).toEqual([]);
+    expect(ws.closed).toBe(false);
+
+    await vi.advanceTimersByTimeAsync(1);
+    await flush();
+    await flush();
+    expect(texts).toEqual([WRAP_UP_EN]);
+    expect(ws.closed).toBe(true);
+    expect(finalizeOnClose).toHaveBeenCalledTimes(1);
+    expect(finalizeOnClose.mock.calls[0][2]).toEqual(MAX_DURATION_EFFECTS);
+  });
+
+  it('localizes the wrap-up to the session language', async () => {
+    const { texts } = await setupCappedCall('CA-cap-es', {
+      maxCallDurationMs: 90_000,
+      language: 'es',
+    });
+    await vi.advanceTimersByTimeAsync(60_000);
+    await flush();
+    expect(texts).toEqual([renderTtsText(MAX_CALL_DURATION_WRAP_UP_COPY, {}, 'es')]);
+    expect(texts[0]).not.toBe(WRAP_UP_EN);
+  });
+
+  it('a TTS failure during the wrap-up does not prevent the close at the limit', async () => {
+    const { ws, texts, finalizeOnClose } = await setupCappedCall('CA-cap-4', {
+      maxCallDurationMs: 90_000,
+      ttsFails: true,
+    });
+    await vi.advanceTimersByTimeAsync(60_000);
+    await flush();
+    expect(texts).toEqual([WRAP_UP_EN]);
+    expect(ws.closed).toBe(false);
+
+    await vi.advanceTimersByTimeAsync(30_000);
+    await flush();
+    await flush();
+    expect(ws.closed).toBe(true);
+    expect(finalizeOnClose).toHaveBeenCalledTimes(1);
+    expect(finalizeOnClose.mock.calls[0][1]).toBe('session_ended');
+    expect(finalizeOnClose.mock.calls[0][2]).toEqual(MAX_DURATION_EFFECTS);
+  });
+
+  it('a max-duration close never votes the realtime health circuit', async () => {
+    const { ws, circuit } = await setupCappedCall('CA-cap-5', { maxCallDurationMs: 5_000 });
+    await vi.advanceTimersByTimeAsync(5_000);
+    await flush();
+    await flush();
+    expect(ws.closed).toBe(true);
+    expect(circuit.recordSuccess).not.toHaveBeenCalled();
+    expect(circuit.recordFailure).not.toHaveBeenCalled();
   });
 });

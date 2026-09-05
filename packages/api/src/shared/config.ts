@@ -128,6 +128,14 @@ const configSchema = z.object({
   SLO_ALERT_COOLDOWN_MIN: z.coerce.number().positive().default(60),
   // Operator phone (E.164) for SLO breach SMS pages. Unset → Sentry-only.
   ALERT_SMS_TO: z.string().min(1).optional(),
+  // ── U5 — absolute per-call wall-clock cap for the voice path (ms). Enforced
+  // by BOTH transports: the media-streams adapter arms one absolute timer per
+  // leg (the audio-idle timer never fires on a live call because Twilio
+  // streams comfort-noise frames continuously) and the Gather adapter checks
+  // the session age on every turn. The call is wrapped up and ended with
+  // terminal reason `max_call_duration`. Default 15 min; 0/negative is
+  // rejected at boot — an unbounded call is never a valid configuration.
+  VOICE_MAX_CALL_DURATION_MS: z.coerce.number().int().positive().default(15 * 60 * 1000),
   // ── FAIL-VIS — silent-failure monitor (workers/failure-rate-monitor.ts).
   // Watches `ai_runs` and `proposals` for the failure shapes that shipped
   // SILENTLY (a 26,894-call task that completed zero times; estimate

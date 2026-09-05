@@ -2,12 +2,11 @@ export interface SessionCapConfig {
   maxInputTokens: number;   // default: 72000 — see the derivation on DEFAULT_TELEPHONY_CAPS
   maxOutputTokens: number;  // default: 1500
   maxCostCents: number;     // default: 40 ($0.40)
-  maxDurationMs: number;    // default: 15 * 60 * 1000 (15 min telephony)
 }
 
 export type SessionCapEvent =
-  | { type: 'cost_cap_approached'; remainingPct: number; dimension: 'tokens' | 'cost' | 'duration' }
-  | { type: 'cost_cap_exceeded'; dimension: 'tokens' | 'cost' | 'duration' };
+  | { type: 'cost_cap_approached'; remainingPct: number; dimension: 'tokens' | 'cost' }
+  | { type: 'cost_cap_exceeded'; dimension: 'tokens' | 'cost' };
 
 export interface TokenUsage {
   inputTokens: number;
@@ -73,7 +72,6 @@ export const DEFAULT_TELEPHONY_CAPS: SessionCapConfig = {
   maxInputTokens: CLASSIFY_TURN_INPUT_TOKEN_BUDGET * EXPECTED_MAX_CLASSIFY_TURNS,
   maxOutputTokens: 1500,
   maxCostCents: 40,
-  maxDurationMs: 15 * 60 * 1000,
 };
 
 /**
@@ -87,7 +85,6 @@ export const DEFAULT_INAPP_CAPS: SessionCapConfig = {
   maxInputTokens: CLASSIFY_TURN_INPUT_TOKEN_BUDGET * EXPECTED_MAX_INAPP_CLASSIFY_TURNS,
   maxOutputTokens: 3000,
   maxCostCents: 80,
-  maxDurationMs: 30 * 60 * 1000,
 };
 
 const WARN_THRESHOLD = 0.8;
@@ -110,7 +107,7 @@ export function estimateCostCents(input: number, output: number): number {
   return Math.max(0, Math.round(inputCents + outputCents));
 }
 
-type CapDimension = 'tokens' | 'cost' | 'duration';
+type CapDimension = 'tokens' | 'cost';
 
 export class SessionCostTracker {
   private readonly _config: SessionCapConfig;
@@ -151,12 +148,6 @@ export class SessionCostTracker {
     events.push(...this._evaluate('cost', costPct));
 
     return events;
-  }
-
-  /** Record elapsed time. Returns any cap events triggered. */
-  checkDuration(elapsedMs: number): SessionCapEvent[] {
-    const pct = elapsedMs / this._config.maxDurationMs;
-    return this._evaluate('duration', pct);
   }
 
   /** Current totals snapshot. */

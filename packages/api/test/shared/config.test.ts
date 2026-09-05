@@ -788,6 +788,26 @@ describe('P0-006 — Secrets/config framework', () => {
       ).toThrow();
     });
   });
+
+  describe('U5 — VOICE_MAX_CALL_DURATION_MS', () => {
+    it('defaults to 15 minutes when unset', () => {
+      const c = loadConfig({ NODE_ENV: 'dev' });
+      expect(c.VOICE_MAX_CALL_DURATION_MS).toBe(15 * 60 * 1000);
+    });
+
+    it('coerces a string override to a number', () => {
+      const c = loadConfig({ NODE_ENV: 'dev', VOICE_MAX_CALL_DURATION_MS: '600000' });
+      expect(c.VOICE_MAX_CALL_DURATION_MS).toBe(600000);
+    });
+
+    it('rejects 0, negative and non-integer values at boot', () => {
+      expect(() => loadConfig({ NODE_ENV: 'dev', VOICE_MAX_CALL_DURATION_MS: '0' })).toThrow();
+      resetConfig();
+      expect(() => loadConfig({ NODE_ENV: 'dev', VOICE_MAX_CALL_DURATION_MS: '-1' })).toThrow();
+      resetConfig();
+      expect(() => loadConfig({ NODE_ENV: 'dev', VOICE_MAX_CALL_DURATION_MS: '1.5' })).toThrow();
+    });
+  });
 });
 
 describe('P0-026 — validateEnvSchema (Zod startup validation)', () => {

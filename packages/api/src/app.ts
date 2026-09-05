@@ -3485,6 +3485,8 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
   const twilioAdapterDeps = {
     store: voiceSessionStore,
     gateway: llmGateway,
+    // U5 — absolute per-call duration cap, checked on every Gather turn.
+    maxCallDurationMs: config.VOICE_MAX_CALL_DURATION_MS,
     ...(pool ? { pool } : {}),
     proposalRepo,
     ...(customerNegotiationContextProvider ? { customerNegotiationContextProvider } : {}),
@@ -4379,6 +4381,10 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
             },
             fillerEngine,
             fillerCache,
+            // U5 — absolute per-call duration cap: one timer per leg, armed
+            // at start() and never re-armed by media frames (the audio-idle
+            // timer is, so it never fires on a live call).
+            maxCallDurationMs: config.VOICE_MAX_CALL_DURATION_MS,
             speechTurn: async ({ session, speechResult, callSid, tenantId }) =>
               twilioAdapter.processCallerUtterance({
                 sessionId: session.id,

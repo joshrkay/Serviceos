@@ -72,6 +72,7 @@ import {
   SPEECH_TURN_FAILURE_REPROMPT_COPY,
   SPEECH_TURN_FAILURE_ESCALATION_COPY,
   LOW_STT_CONFIDENCE_REPROMPT_COPY,
+  MAX_CALL_DURATION_WRAP_UP_COPY,
   type SessionLanguage,
 } from '../../ai/agents/customer-calling/tts-copy';
 import { detectEmergency } from '../../ai/agents/customer-calling/emergency-detector';
@@ -201,6 +202,13 @@ export interface MediaStreamAdapterDeps {
   }) => Promise<SideEffect[] | null>;
   /** Audio inactivity teardown (ms). Default 30 minutes. */
   audioIdleTimeoutMs?: number;
+  /**
+   * U5 — absolute per-call wall-clock cap (ms), wired from
+   * `VOICE_MAX_CALL_DURATION_MS`. Unlike `audioIdleTimeoutMs` it is armed
+   * ONCE at `start()` and never re-armed by media frames. Default 15 minutes
+   * ({@link DEFAULT_MAX_CALL_DURATION_MS}).
+   */
+  maxCallDurationMs?: number;
   /** T2-F05 — caller-silence reprompt window after an agent turn ends (ms). Default 8 s. */
   silenceRepromptTimeoutMs?: number;
   /**
@@ -538,6 +546,25 @@ interface RuntimeState {
   /** Last time we received an inbound `media` frame. */
   lastMediaAt: number;
   audioIdleTimer: NodeJS.Timeout | null;
+  /**
+   * U5 — the absolute per-call cap. `maxCallDurationWarnTimer` fires the
+   * spoken wrap-up {@link MAX_CALL_DURATION_WRAP_UP_LEAD_MS} before the
+   * limit (skipped for limits too short to fit it); `maxCallDurationTimer`
+   * ends the leg at the limit. Both are armed once in `start()`, are never
+   * touched by `handleMedia` (which re-arms the idle timer on every frame —
+   * the reason that timer can never cut a live call), and are cleared in
+   * `handleClose` with every other timer.
+   */
+  maxCallDurationWarnTimer: NodeJS.Timeout | null;
+  maxCallDurationTimer: NodeJS.Timeout | null;
+  /** U5 — the wrap-up line has been spoken (or attempted) on this leg. */
+  maxCallDurationWrapUpSpoken: boolean;
+  /**
+   * U5 — set immediately before the cap's `handleClose('end_session')`. A
+   * forced cut is not evidence about transport health either way, so
+   * `handleClose` skips the realtime-circuit vote when this is set.
+   */
+  maxCallDurationReached: boolean;
   /**
    * T2-F05 — per-turn caller-silence reprompt timer. Armed when the
    * dedicated end-of-utterance `silence-arm-${turnId}` mark of an agent
@@ -902,6 +929,22 @@ function observeTurnLatency(startMs: number | null): void {
 export const DEFAULT_AUDIO_IDLE_TIMEOUT_MS = 30 * 60 * 1000;
 
 /**
+ * U5 — default absolute per-call duration cap: 15 minutes, matching the
+ * intent of the never-wired `DEFAULT_TELEPHONY_CAPS.maxDurationMs` this cap
+ * replaces. Overridden per process by `VOICE_MAX_CALL_DURATION_MS` (wired
+ * into `deps.maxCallDurationMs` by app.ts); shared with the Gather adapter so
+ * both transports cut at the same wall-clock limit.
+ */
+export const DEFAULT_MAX_CALL_DURATION_MS = 15 * 60 * 1000;
+
+/**
+ * U5 — how long before the cap the wrap-up line is spoken, so the caller is
+ * not cut mid-sentence without warning. Limits shorter than twice this lead
+ * skip the pre-warning and speak the wrap-up at the limit instead.
+ */
+export const MAX_CALL_DURATION_WRAP_UP_LEAD_MS = 30_000;
+
+/**
  * T2-F05 — how long after the agent finishes speaking a totally silent caller
  * waits before the reprompt fires. Default 8 s: long enough for a caller
  * checking a calendar or conferring with a spouse, short enough that the line
@@ -932,6 +975,10 @@ export class TwilioMediaStreamAdapter {
       closed: false,
       lastMediaAt: Date.now(),
       audioIdleTimer: null,
+      maxCallDurationWarnTimer: null,
+      maxCallDurationTimer: null,
+      maxCallDurationWrapUpSpoken: false,
+      maxCallDurationReached: false,
       silenceRepromptTimer: null,
       pendingSilenceRepromptTurnId: null,
       callerActivityGeneration: 0,
@@ -1006,6 +1053,7 @@ export class TwilioMediaStreamAdapter {
       this.handleClose('ws_error');
     });
     this.armIdleTimer();
+    this.armMaxCallDurationTimers();
   }
 
   // ─── Inbound message dispatch ──────────────────────────────────────────────
@@ -3115,6 +3163,84 @@ export class TwilioMediaStreamAdapter {
     }
   }
 
+  // ─── U5 — absolute per-call duration cap ───────────────────────────────────
+
+  /**
+   * Arm the ONE absolute wall-clock cap for this leg. Called once from
+   * `start()`; nothing re-arms it — a call that keeps streaming audio (which
+   * every Twilio call does, silence included) still ends at the limit.
+   */
+  private armMaxCallDurationTimers(): void {
+    const limitMs = this.deps.maxCallDurationMs ?? DEFAULT_MAX_CALL_DURATION_MS;
+    const unref = (t: NodeJS.Timeout) => {
+      if (typeof t.unref === 'function') t.unref();
+    };
+    if (limitMs >= MAX_CALL_DURATION_WRAP_UP_LEAD_MS * 2) {
+      this.state.maxCallDurationWarnTimer = setTimeout(() => {
+        this.state.maxCallDurationWarnTimer = null;
+        void this.speakMaxCallDurationWrapUp();
+      }, limitMs - MAX_CALL_DURATION_WRAP_UP_LEAD_MS);
+      unref(this.state.maxCallDurationWarnTimer);
+    }
+    this.state.maxCallDurationTimer = setTimeout(() => {
+      this.state.maxCallDurationTimer = null;
+      void this.endForMaxCallDuration(limitMs);
+    }, limitMs);
+    unref(this.state.maxCallDurationTimer);
+  }
+
+  private clearMaxCallDurationTimers(): void {
+    if (this.state.maxCallDurationWarnTimer) {
+      clearTimeout(this.state.maxCallDurationWarnTimer);
+      this.state.maxCallDurationWarnTimer = null;
+    }
+    if (this.state.maxCallDurationTimer) {
+      clearTimeout(this.state.maxCallDurationTimer);
+      this.state.maxCallDurationTimer = null;
+    }
+  }
+
+  /**
+   * Speak the wrap-up line once through the normal recovery-line path
+   * (`speakRecoveryLine` → `emitSideEffects` → TTS + transcript append). A
+   * TTS failure is absorbed inside the turn runner, so this never throws
+   * into the timer callback and never blocks the close that follows.
+   */
+  private async speakMaxCallDurationWrapUp(): Promise<void> {
+    const session = this.state.session;
+    if (this.state.closed || !session || this.state.maxCallDurationWrapUpSpoken) return;
+    this.state.maxCallDurationWrapUpSpoken = true;
+    await this.speakRecoveryLine(session, MAX_CALL_DURATION_WRAP_UP_COPY);
+  }
+
+  /**
+   * The limit hit. Same speak-then-end shape as
+   * {@link speakAndEndAfterRepeatedSpeechTurnFailures}: stash a synthetic
+   * `end_session` carrying the real reason and close through the existing
+   * `end_session` path, so `finalizeOnClose` persists
+   * `voice_sessions.terminal_reason = 'max_call_duration'`. A NEW bare
+   * `handleClose` reason is deliberately not introduced —
+   * `mapCloseReasonToFinalize` would fall through to `caller_hangup` and vote
+   * the health circuit `success`. A short limit that skipped the pre-warning
+   * gets the wrap-up here so the caller is never cut in silence.
+   */
+  private async endForMaxCallDuration(limitMs: number): Promise<void> {
+    if (this.state.closed) return;
+    if (this.state.session && !this.state.maxCallDurationWrapUpSpoken) {
+      await this.speakMaxCallDurationWrapUp();
+      if (this.state.closed) return;
+    }
+    logger.info('mediastream: max call duration reached — ending call', {
+      callSid: this.state.callSid,
+      limitMs,
+    });
+    this.state.maxCallDurationReached = true;
+    this.state.pendingFinalizeEffects = [
+      { type: 'end_session', payload: { reason: 'max_call_duration' } },
+    ];
+    this.handleClose('end_session');
+  }
+
   /**
    * T2-F05 — per-turn caller-silence reprompt. The 30-minute audioIdleTimer
    * can NEVER catch a silent caller: Twilio Media Streams delivers `media`
@@ -3244,7 +3370,14 @@ export class TwilioMediaStreamAdapter {
     // earlier, more precise signal (deepgram_unexpected_close,
     // disclosure_init_failed, deepgram_reopen_failed) already recorded and this
     // blunt terminal signal is suppressed.
-    if (this.state.session && this.state.deepgramGeneration > 0) {
+    // U5 — a max-duration cut is neither: the platform ended the call, not
+    // the transport and not the caller, so it casts no vote at all (a
+    // `success` here would let a wedged realtime path reset the circuit).
+    if (
+      this.state.session &&
+      this.state.deepgramGeneration > 0 &&
+      !this.state.maxCallDurationReached
+    ) {
       if (mapCloseReasonToFinalize(reason) === 'transport_failure') {
         this.recordCircuitOutcomeOnce('failure', reason);
       } else {
@@ -3278,6 +3411,7 @@ export class TwilioMediaStreamAdapter {
       clearTimeout(this.state.audioIdleTimer);
       this.state.audioIdleTimer = null;
     }
+    this.clearMaxCallDurationTimers();
     this.clearSilenceRepromptTimer();
     if (this.state.slowConsumerTimer) {
       clearTimeout(this.state.slowConsumerTimer);

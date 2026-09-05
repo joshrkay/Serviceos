@@ -19,7 +19,6 @@ function makeTracker(overrides: Partial<SessionCapConfig> = {}): SessionCostTrac
     maxInputTokens: 100,
     maxOutputTokens: 100,
     maxCostCents: 100,
-    maxDurationMs: 1000,
     ...overrides,
   });
 }
@@ -45,7 +44,6 @@ describe('SessionCostTracker — default caps', () => {
     expect(DEFAULT_TELEPHONY_CAPS.maxInputTokens).toBe(72000);
     expect(DEFAULT_TELEPHONY_CAPS.maxOutputTokens).toBe(1500);
     expect(DEFAULT_TELEPHONY_CAPS.maxCostCents).toBe(40);
-    expect(DEFAULT_TELEPHONY_CAPS.maxDurationMs).toBe(15 * 60 * 1000);
     // Cost reconciliation: exhausting the token caps still spends well
     // under the money cap — tokens bind first, cost is the backstop.
     expect(
@@ -68,7 +66,6 @@ describe('SessionCostTracker — default caps', () => {
     expect(EXPECTED_MAX_INAPP_CLASSIFY_TURNS).toBe(10);
     expect(DEFAULT_INAPP_CAPS.maxOutputTokens).toBe(3000);
     expect(DEFAULT_INAPP_CAPS.maxCostCents).toBe(80);
-    expect(DEFAULT_INAPP_CAPS.maxDurationMs).toBe(30 * 60 * 1000);
     expect(
       estimateCostCents(DEFAULT_INAPP_CAPS.maxInputTokens, DEFAULT_INAPP_CAPS.maxOutputTokens),
     ).toBeLessThan(DEFAULT_INAPP_CAPS.maxCostCents);
@@ -90,12 +87,6 @@ describe('SessionCostTracker — no events below 80%', () => {
   it('returns no events when cost usage is below 80%', () => {
     const tracker = makeTracker();
     const events = tracker.recordUsage({ inputTokens: 0, outputTokens: 0, costCents: 79 });
-    expect(events).toHaveLength(0);
-  });
-
-  it('returns no events when duration is below 80%', () => {
-    const tracker = makeTracker();
-    const events = tracker.checkDuration(799); // 799/1000 = 79.9%
     expect(events).toHaveLength(0);
   });
 
@@ -227,52 +218,11 @@ describe('SessionCostTracker — multiple dimensions in same session', () => {
     expect(eventTypes(second)).toContain('cost_cap_exceeded:cost');
   });
 
-  it('all three dimensions can be approached in a single session', () => {
+  it('both dimensions can be approached in a single session', () => {
     const tracker = makeTracker();
     const tokenEvents = tracker.recordUsage({ inputTokens: 80, outputTokens: 0, costCents: 80 });
     expect(eventTypes(tokenEvents)).toContain('cost_cap_approached:tokens');
     expect(eventTypes(tokenEvents)).toContain('cost_cap_approached:cost');
-
-    const durationEvents = tracker.checkDuration(800);
-    expect(eventTypes(durationEvents)).toContain('cost_cap_approached:duration');
-  });
-});
-
-// ---------------------------------------------------------------------------
-// Duration check
-// ---------------------------------------------------------------------------
-
-describe('SessionCostTracker — checkDuration', () => {
-  it('fires cost_cap_approached at 80% of maxDurationMs', () => {
-    const tracker = makeTracker(); // maxDurationMs: 1000
-    const events = tracker.checkDuration(800); // 80%
-    expect(eventTypes(events)).toContain('cost_cap_approached:duration');
-  });
-
-  it('fires cost_cap_exceeded at 100% of maxDurationMs', () => {
-    const tracker = makeTracker();
-    const events = tracker.checkDuration(1000);
-    expect(eventTypes(events)).toContain('cost_cap_exceeded:duration');
-  });
-
-  it('fires both approached and exceeded when elapsedMs jumps past both thresholds', () => {
-    const tracker = makeTracker();
-    const events = tracker.checkDuration(1001); // beyond 100%
-    expect(eventTypes(events)).toContain('cost_cap_approached:duration');
-    expect(eventTypes(events)).toContain('cost_cap_exceeded:duration');
-  });
-
-  it('does not re-fire duration events on subsequent checks', () => {
-    const tracker = makeTracker();
-    tracker.checkDuration(1000);
-    const second = tracker.checkDuration(2000);
-    expect(eventTypes(second)).toHaveLength(0);
-  });
-
-  it('isExceeded becomes true after duration exceeded', () => {
-    const tracker = makeTracker();
-    tracker.checkDuration(1000);
-    expect(tracker.isExceeded).toBe(true);
   });
 });
 
@@ -314,15 +264,6 @@ describe('SessionCostTracker — reset()', () => {
 
     const events = tracker.recordUsage({ inputTokens: 100, outputTokens: 0, costCents: 0 });
     expect(eventTypes(events)).toContain('cost_cap_exceeded:tokens');
-  });
-
-  it('re-arms duration cap after reset', () => {
-    const tracker = makeTracker();
-    tracker.checkDuration(1000);
-    tracker.reset();
-
-    const events = tracker.checkDuration(1000);
-    expect(eventTypes(events)).toContain('cost_cap_exceeded:duration');
   });
 });
 
