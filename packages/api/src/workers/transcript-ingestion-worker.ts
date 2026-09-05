@@ -1,6 +1,10 @@
 import { WorkerHandler, QueueMessage } from '../queues/queue';
 import { Logger } from '../logging/logger';
-import { CallTranscriptTurnRepository, CallTurnSpeaker } from '../voice/call-transcript-turn';
+import {
+  CallTranscriptTurnRepository,
+  CallTurnSpeaker,
+  parseTranscriptLine,
+} from '../voice/call-transcript-turn';
 import { CallOutcome, VoiceRepository } from '../voice/voice-service';
 import type { LanguageDetector } from '../voice/language-detector';
 import {
@@ -83,6 +87,28 @@ export interface TranscriptIngestionPayload {
   knownEntities?: KnownEntities;
 }
 
+/**
+ * COMPAT SHIM — remove after one release. A `transcript_ingestion` message
+ * queued by the pre-U8 recording hook carries `transcript: string[]`
+ * (speaker-prefixed lines) and no `turns`. Derive `turns` the way the old
+ * worker did — parse each line, drop empties, index by position in the
+ * parsed array — so a message straddling the deploy is ingested instead of
+ * dead-lettered. A payload with neither field is malformed: throw so the
+ * queue retries and dead-letters it.
+ */
+function resolveTurns(
+  payload: TranscriptIngestionPayload & { transcript?: string[] },
+): TranscriptIngestionTurn[] {
+  if (Array.isArray(payload.turns)) return payload.turns;
+  if (Array.isArray(payload.transcript)) {
+    return payload.transcript
+      .map(parseTranscriptLine)
+      .filter((t) => t.text.length > 0)
+      .map((t, index) => ({ index, ...t }));
+  }
+  throw new Error('transcript_ingestion: payload has neither `turns` nor legacy `transcript`');
+}
+
 export interface TranscriptIngestionDeps {
   callTranscriptTurnRepo: CallTranscriptTurnRepository;
   voiceRepo: VoiceRepository;
@@ -162,10 +188,11 @@ export function createTranscriptIngestionWorker(
     ): Promise<void> {
       const { tenantId, voiceRecordingId, summary, intent, outcome, knownEntities } =
         message.payload;
+      const carriedTurns = resolveTurns(message.payload);
 
       logger.info('Starting transcript ingestion', {
         voiceRecordingId,
-        turnCount: message.payload.turns.length,
+        turnCount: carriedTurns.length,
         hasSummary: !!summary,
         hasOutcome: !!outcome,
       });
@@ -174,7 +201,7 @@ export function createTranscriptIngestionWorker(
       // Upsert at each turn's CARRIED index. Empty turns are skipped but
       // keep their index reserved, so the rows written mid-call (U8) are
       // updated in place — never renumbered from a filtered array.
-      const turns = message.payload.turns.filter((t) => t.text.trim().length > 0);
+      const turns = carriedTurns.filter((t) => t.text.trim().length > 0);
       for (const turn of turns) {
         try {
           await deps.callTranscriptTurnRepo.recordTurn({

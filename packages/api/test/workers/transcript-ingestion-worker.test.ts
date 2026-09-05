@@ -196,6 +196,57 @@ describe('transcript-ingestion-worker', () => {
     ]);
   });
 
+  // ── Deploy-boundary compat shim (remove after one release) ──────────────
+
+  it('legacy payload (`transcript: string[]`, no `turns`) queued before the deploy is still ingested', async () => {
+    const callTranscriptTurnRepo = new InMemoryCallTranscriptTurnRepository();
+    const voiceRepo = new InMemoryVoiceRepository();
+    const recordingId = await seedRecording(voiceRepo);
+
+    const worker = createTranscriptIngestionWorker({
+      callTranscriptTurnRepo,
+      voiceRepo,
+      knowledgeChunkRepo: new InMemoryKnowledgeChunkRepository(),
+      embeddings: stubEmbedder(),
+    });
+    await expect(
+      worker.handle(
+        buildMessage({
+          tenantId: TENANT_A,
+          voiceRecordingId: recordingId,
+          transcript: ['agent: hi', 'caller:   ', 'unprefixed thing', 'caller: bye'],
+          outcome: 'completed',
+        }),
+        logger,
+      ),
+    ).resolves.toBeUndefined();
+
+    const rows = await callTranscriptTurnRepo.listByRecording(TENANT_A, recordingId);
+    // Old-worker numbering: empties dropped, position in the parsed array.
+    expect(rows.map((r) => [r.turnIndex, r.speaker, r.text])).toEqual([
+      [0, 'agent', 'hi'],
+      [1, 'caller', 'unprefixed thing'],
+      [2, 'caller', 'bye'],
+    ]);
+    expect((await voiceRepo.findById(TENANT_A, recordingId))?.outcome).toBe('completed');
+  });
+
+  it('a payload with neither `turns` nor `transcript` throws so the queue retries and dead-letters it', async () => {
+    const callTranscriptTurnRepo = new InMemoryCallTranscriptTurnRepository();
+    const voiceRepo = new InMemoryVoiceRepository();
+    const recordingId = await seedRecording(voiceRepo);
+    const worker = createTranscriptIngestionWorker({
+      callTranscriptTurnRepo,
+      voiceRepo,
+      knowledgeChunkRepo: new InMemoryKnowledgeChunkRepository(),
+      embeddings: stubEmbedder(),
+    });
+    await expect(
+      worker.handle(buildMessage({ tenantId: TENANT_A, voiceRecordingId: recordingId }), logger),
+    ).rejects.toThrow(/turns/);
+    expect(await callTranscriptTurnRepo.listByRecording(TENANT_A, recordingId)).toEqual([]);
+  });
+
   it('stamps voice_recordings.detected_language from the joined transcript when languageDetector is wired', async () => {
     const callTranscriptTurnRepo = new InMemoryCallTranscriptTurnRepository();
     const voiceRepo = new InMemoryVoiceRepository();
