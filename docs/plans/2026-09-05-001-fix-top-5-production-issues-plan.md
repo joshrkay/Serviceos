@@ -174,8 +174,11 @@ the evidence that ranked it.
   detection. (Alternative: dedupe in `appendTranscript`; rejected
   because a legitimately repeated utterance must still record.)
 - **Persist transcript turns incrementally, keyed on (call_sid,
-  turn_index)** — cheap, tenant-scoped, idempotent, and the recording
-  webhook can rebuild from it. (Alternative: re-transcribe from storage;
+  turn_index) and attached to the recording later** — the
+  `call_transcript_turns` table is keyed on `voice_recording_id` today,
+  which only exists after the recording webhook, so the call SID is the
+  only key available mid-call; cheap, tenant-scoped, idempotent, and the
+  recording webhook can rebuild from it. (Alternative: re-transcribe from storage;
   rejected as a second STT spend for data the process already had.)
 - **`NOT VALID` on every CHECK, pinned schema-wide** — new rows are
   still checked; only the whole-table re-validation on every boot is
@@ -261,9 +264,13 @@ below so they are not lost; they are not among the five.
   `.github/workflows/voice-quality-weekly-trend.yml`, test
   `.github/scripts/report-gate-failure.test.ts`, doc
   `docs/runbooks/alerting.md`.
-- **Approach:** one script, `if: failure()`, that finds-or-creates an
-  issue labelled `gate-red` titled by workflow name, appends the run
-  URL and the failing step name, and closes it on the next green run.
+- **Approach:** one script run as an `if: always()` post-step that
+  receives the job conclusion (`${{ job.status }}`) and the workflow
+  name. On failure it finds-or-creates an issue labelled `gate-red`
+  titled by workflow name and appends the run URL and the failing step;
+  on success it closes any open `gate-red` issue for that workflow. An
+  `if: failure()` step would never run on the green run that should
+  close the issue, so the conclusion must be passed in explicitly.
   Extract the issue-search/create helper the trend script already has.
   Keep the Slack steps but make them `continue-on-error`.
 - **Patterns to follow:** `.github/scripts/voice-quality-trend-report.ts`
@@ -287,10 +294,16 @@ below so they are not lost; they are not among the five.
   create if missing and list every secret each gate needs).
 - **Approach:** on Railway prod set `SENTRY_DSN`, `POSTHOG_API_KEY`,
   `TWILIO_BUSINESS_NAME` (API + voice services) and `VITE_POSTHOG_KEY`
-  (web service, triggers a rebuild). In GitHub Actions set
-  `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `SLACK_WEBHOOK_URL`, the six
-  `TWILIO_*`/`STAGING_*` secrets for the real-call smoke, and the
-  `E2E_*` set for the QA matrix (staging targets, never prod).
+  (web service, triggers a rebuild). In GitHub Actions set the
+  repository secrets the workflows actually read: `ANTHROPIC_API_KEY`
+  and `OPENAI_API_KEY` (weekly trend), `SLACK_ALERTS_WEBHOOK` (read by
+  `voice-smoke-real.yml` and `mms-vision-smoke.yml` into the
+  `SLACK_WEBHOOK_URL` env var), `SLACK_VOICE_QUALITY_WEBHOOK` (read by
+  `voice-quality-weekly-trend.yml`), the six `TWILIO_*`/`STAGING_*`
+  secrets for the real-call smoke, and the `E2E_*` set for the QA
+  matrix (staging targets, never prod). There is no repository secret
+  named `SLACK_WEBHOOK_URL`; that is only the env var name inside the
+  jobs.
 - **Test expectation:** none — operator configuration. Verification is
   the checklist's live probes.
 - **Verification:** `$pageview` events from prod appear in PostHog;
@@ -430,25 +443,40 @@ below so they are not lost; they are not among the five.
 - **Requirements:** R8
 - **Dependencies:** U7 (so persisted turns are not duplicated)
 - **Files:** `packages/api/src/voice/call-transcript-turn.ts`,
-  `packages/api/src/voice/pg-call-transcript-turn.ts` (idempotent
-  `recordTurn` on `(call_sid, turn_index)`; migration in
-  `packages/api/src/db/schema.ts` adding the unique index with
-  `NOT VALID`-safe pattern for any CHECK), `packages/api/src/voice/voice-session-store.ts`
-  (`appendTranscript` → also enqueue/persist the turn),
+  `packages/api/src/voice/pg-call-transcript-turn.ts` (the repository
+  today requires `voiceRecordingId` and is UNIQUE on
+  `(voice_recording_id, turn_index)`; add `callSid` to `RecordTurnInput`,
+  a `listByCallSid(tenantId, callSid)` method, and an
+  `attachRecording(tenantId, callSid, voiceRecordingId)` backfill),
+  migration in `packages/api/src/db/schema.ts` (make
+  `voice_recording_id` nullable, add `call_sid TEXT`, a partial unique
+  index on `(call_sid, turn_index) WHERE call_sid IS NOT NULL`, and an
+  index on `(tenant_id, call_sid)`; any CHECK added here carries
+  `NOT VALID` per U9), `packages/api/src/voice/voice-session-store.ts`
+  (`appendTranscript` → also persist the turn keyed by call SID),
   `packages/api/src/app.ts` (recording webhook `:3864`: when the session
-  is missing, load turns by call sid and continue ingestion),
-  `packages/api/src/workers/transcript-ingestion-worker.ts` (skip turns
-  already persisted), tests
+  is missing, load turns by call SID, backfill `voice_recording_id`, and
+  continue ingestion), `packages/api/src/workers/transcript-ingestion-worker.ts`
+  (upsert by recording id as today; rows already attached to the
+  recording are updated, not duplicated), tests
   `packages/api/test/workers/transcript-ingestion-worker.test.ts`
   (extend), `packages/api/test/integration/call-transcript-turn-durability.test.ts`
   (new, Docker-gated).
-- **Approach:** persist each turn as it is appended, tenant-scoped,
-  fire-and-forget with error logging so the call path never blocks on
-  the DB. The webhook's missing-session branch becomes: load persisted
-  turns → build the ingestion payload → enqueue as today; only when no
-  turns exist does it log a `transcript_unrecoverable` audit (never a
-  bare return). The worker upserts, so end-of-call ingestion stays
-  idempotent.
+- **Approach:** the recording row (and therefore `voice_recording_id`)
+  does not exist until Twilio's recording webhook fires, so incremental
+  writes during the call cannot use today's key. Persist each turn as it
+  is appended keyed by `call_sid` (known from the first webhook),
+  tenant-scoped, fire-and-forget with error logging so the call path
+  never blocks on the DB. At recording-webhook time `attachRecording`
+  sets `voice_recording_id` on that call's rows in one UPDATE, after
+  which the existing `listByRecording` contract holds. The webhook's
+  missing-session branch becomes: load persisted turns by call SID →
+  attach the recording → build the ingestion payload → enqueue as today;
+  only when no turns exist does it log a `transcript_unrecoverable`
+  audit (never a bare return). (Alternative considered: create a
+  placeholder `voice_recordings` row at call start so the current key
+  works unchanged; rejected because it invents a recording before Twilio
+  reports one and muddles the recording lifecycle.)
 - **Patterns to follow:** `pg-call-transcript-turn.ts` column names;
   `docs/solutions/database-issues/mocked-pool-hides-real-schema-mismatch.md`
   (pin real columns in the integration test).
