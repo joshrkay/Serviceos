@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { getMigrationSQL } from '../../src/db/schema';
 import type { DispatchEntityType } from '../../src/notifications/dispatch-repository';
 import type { JobStatus } from '../../src/jobs/job';
+import type { ProposalStatus } from '../../src/proposals/proposal';
 import { LEAD_SOURCES } from '../../src/leads/enums';
 
 /**
@@ -36,11 +37,10 @@ import { LEAD_SOURCES } from '../../src/leads/enums';
  *      silently drift (code writing a value the DB constraint doesn't
  *      allow, or vice versa).
  *
- * NOT pinned here: `proposals_status_check`. The plan (U9, Open Questions)
- * records that there is no single agreed source for it — the API declares
- * `ProposalStatus` in proposals/proposal.ts while packages/shared exports a
- * separate `proposalStatusSchema` — so which one is authoritative is an
- * open question rather than a test to write blind.
+ * `proposals_status_check` is pinned to the API-side `ProposalStatus` union
+ * (proposals/proposal.ts): that union is what pg-proposal.ts writes, and
+ * packages/shared's `proposalStatusSchema` is already pinned to it by
+ * status.test.ts, so pinning the constraint here transitively pins all three.
  */
 
 // Exhaustive by construction: TypeScript's excess/missing-property check on
@@ -72,6 +72,18 @@ const ALL_JOB_STATUSES: Record<JobStatus, true> = {
   invoiced: true,
   closed: true,
   canceled: true,
+};
+
+const ALL_PROPOSAL_STATUSES: Record<ProposalStatus, true> = {
+  draft: true,
+  ready_for_review: true,
+  approved: true,
+  executing: true,
+  rejected: true,
+  expired: true,
+  executed: true,
+  execution_failed: true,
+  undone: true,
 };
 
 interface VocabularyPin {
@@ -107,6 +119,13 @@ const PINS: VocabularyPin[] = [
     column: 'source',
     codeSource: 'LEAD_SOURCES (leads/enums.ts)',
     codeValues: LEAD_SOURCES,
+    minOccurrences: 2,
+  },
+  {
+    constraint: 'proposals_status_check',
+    column: 'status',
+    codeSource: 'ProposalStatus (proposals/proposal.ts)',
+    codeValues: Object.keys(ALL_PROPOSAL_STATUSES),
     minOccurrences: 2,
   },
 ];
