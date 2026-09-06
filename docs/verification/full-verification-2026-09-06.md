@@ -34,9 +34,9 @@
 | Cassette seed idempotence | `voice-quality:seed-cassettes` + `git status` | ✅ PASS | `Seeded 73/73 cassettes.`, zero file changes |
 | Playwright hermetic tier (CI `e2e.yml` equivalent) | `npm run e2e` (default chromium project) | ✅ PASS | 19 passed, 0 failed, 0 flaky, 59 skipped (credential-gated, see §3) |
 | API runtime proof (real HTTP against booted API) | 11 workflows, §4 | ✅ 11/11 PASS | 1 defect confirmed (D-1, pre-existing C-1) |
-| Web runtime proof (headless Chromium against booted SPA) | §5 | see §5 | — |
+| Web runtime proof (headless Chromium against booted SPA) | 10 steps / 25 page loads, §5 | ✅ 25/25 rendered, flows PASS | 1 money-display defect (D-7), 1 dev-harness gap (D-8), 2 minor (D-9, D-10) |
 
-**Bottom line:** every automated gate the repository defines is green on this commit, including the two lanes CI runs only with Docker (integration) and a browser (Playwright). No product regression was found. Two pre-existing, documented non-blocking corpus checks remain red. One pre-existing defect (unmatched `/api/*` falls into the SPA catch-all) was re-confirmed at runtime and is planned in §7.
+**Bottom line:** every automated gate the repository defines is green on this commit, including the two lanes CI runs only with Docker (integration) and a browser (Playwright). No regression was found in any automated suite. Two pre-existing, documented non-blocking corpus checks remain red. The runtime lanes found one pre-existing defect (D-1, unmatched `/api/*` falls into the SPA catch-all) and one new customer-facing money-display defect (D-7, estimate detail shows the untaxed subtotal as the total). Both are P1 in §7 and were dispatched to worker agents in this session.
 
 **Infra events during the run (not product):** (a) the first integration run died at T+91 s with Postgres `57P01` because a sibling agent force-removed "leftover" pgvector/ryuk containers during its own probe; the isolated re-run passed 1 218/1 218. (b) Playwright 1.62.1 expects `chromium_headless_shell-1234`; the container ships build 1194. The repo's own `QA_CHROMIUM_PATH` escape hatch in `playwright.config.ts` fixed it with no file change.
 
@@ -313,9 +313,27 @@ All 11 workflows passed; full request/response tables are in the run report. Sum
 
 ## 5. Web runtime proof (booted SPA in `VITE_AUTH_MODE=dev`, headless Chromium)
 
-_Pending: the web runtime lane is still executing at the time of writing; this section is updated when its report lands._
+Setup: API on :3000 (`NODE_ENV=dev DEV_AUTH_BYPASS=true`, InMemory), Vite on :5173 with the Clerk dev shim, seeded by `packages/api/scripts/verify-seed.mjs` (1 customer, 3 jobs, 2 appointments today incl. one at 23:30 local, 1 estimate with 8 % tax, 1 draft invoice; tenant tz America/New_York). 1280×900 desktop context unless noted; one screenshot per step retained in the session scratchpad. The first pass was discarded because the API process died before the driver started (every page showed connection resets); the API was relaunched detached with a health watchdog, re-seeded, and the whole driver re-run cleanly. All rows below are from the clean run.
 
----
+| Step | URL | Rendered | Failed `/api` calls (besides the documented `/api/onboarding/status` 503) | Verdict |
+|---|---|---|---|---|
+| 1 Home, owner | `/` | "Active today: 2" = the two seeded appointments | `503 /api/analytics/jobs-booked` ×2 (D-9) | PASS |
+| 2a Jobs list | `/jobs` | JOB-0001/0002/0003 present | none | PASS |
+| 2b Job detail | `/jobs/:id` | Estimate, Invoice, Schedule sections show the seeded records | none | PASS |
+| 3 Cancel job | More → Customer Canceled → reason → Continue → Confirm | `POST /api/jobs/:id/transition {status:'canceled', reason:'Customer Canceled: Financial reasons'}` → 200; badge "Canceled" after reload | none | PASS |
+| 4a Customers list | `/customers` | seeded customer present | none | PASS |
+| 4b Clear email | `/customers/:id/edit` → clear → Save | `PUT /api/customers/:id` carried `email:""` → 200; reload shows no email | none | PASS |
+| 5 Tenant-tz day | `/schedule` in an `Australia/Sydney` browser context | both appointments, including 23:30, render under "Sun Sep 6" (the New York day) | none | PASS |
+| 6a Estimates list | `/estimates` | EST-0001 present | none | PASS |
+| 6b Estimate detail | `/estimates/:id` | line items 129 + 135 + 89 render exactly (no float artifacts) **but header, table Total row and "Estimate total" card all show $353 = untaxed subtotal; no Tax row although `taxRateBps=800` and all lines taxable** | none | PASS render / **DEFECT D-7** |
+| 7a Invoices list | `/invoices` | INV present | none | PASS |
+| 7b Invoice detail | `/invoices/:id` | draft invoice renders | none | PASS |
+| 8 Sweep | `/dispatch`, `/inbox`, `/comms-inbox`, `/leads`, `/contracts`, `/reports/money`, `/settings`, `/settings/price-book`, `/settings/templates`, `/assistant`, `/technician/day` | all render, no error boundary | none | PASS ×11 |
+| 8 Sweep | `/digest` | renders empty state | `404 /api/digests/latest` (no digest generated yet, expected) | PASS |
+| 9 Technician role | second Vite on :5174 with `VITE_DEV_AUTH_ROLE=technician` | home shows "My Schedule" tech view; `/invoices` → server 403 (billing hidden from technicians) but the page shows a generic "Something went wrong" | `403 GET /api/invoices` (correct) | PASS (D-10 UX) |
+| 10 Mobile 375 px | `/`, `/jobs`, `/schedule`, `/estimates/:id` | `document.documentElement.scrollWidth === 375` on all four (no horizontal overflow) | — | PASS |
+
+Every page load logged one console error: the realtime socket `ws://…/api/ws?token=<unsigned dev JWT>` is rejected with "HTTP Authentication failed" (D-8). REST calls with the same token succeed, so this is the WebSocket upgrade path not honouring `DEV_AUTH_BYPASS`; it means dispatch presence and live escalations are never exercised under the dev harness.
 
 ## 6. Defects and open items
 
@@ -329,6 +347,10 @@ _Pending: the web runtime lane is still executing at the time of writing; this s
 | D-4 | Low | Mobile dependency tree reports 56 advisories (1 critical) on `npm ci`. Root workspace reports 9 (5 high). | web/mobile lane | Planned, §7 P2 |
 | D-5 | Low | `corpus:dedup` (600 near-duplicates) and `test:corpus-schema` (legacy `unknown` intents) remain red and `continue-on-error`. | guards lane | Planned, §7 P3 |
 | D-6 | Low | Playwright's pinned browser build (1234) does not match the container image (1194); works only via `QA_CHROMIUM_PATH`. Not a product defect; note for the session-start hook. | e2e lane | Planned, §7 P3 |
+| D-7 | **High (money display)** | Estimate detail view shows the untaxed subtotal as the estimate total in three places and never renders a Tax row. `EstimatesPage.tsx:1103` computes `total = Σ qty × rate` in floating dollars from the UI line model, ignoring `est.totals.taxCents`/`discountCents`, while the API stores `totalCents` including tax (35 300 subtotal + 2 824 tax = 38 124 for the seeded estimate; the page shows $353). The list view in the same file already uses `totals.totalCents`. Violates "all money integer cents". | §5 step 6b screenshot; API lane §4.4 | **Dispatched, §7 P1-3** |
+| D-8 | Medium (harness) | `/api/ws` upgrade rejects the unsigned dev JWT that `DEV_AUTH_BYPASS` accepts on REST, so no realtime feature runs under the dev harness or the planned dev-auth Playwright project. | §5 console errors | Planned, §7 P2-7 |
+| D-9 | Low (harness) | `GET /api/analytics/jobs-booked?month=…` returns 503 on InMemory repos; the home page degrades gracefully. Should be documented alongside the onboarding-status 503 or given an in-memory implementation. | §5 step 1 | Planned, §7 P3 |
+| D-10 | Low (UX) | A technician opening `/invoices` gets a generic "Something went wrong" instead of a permission message; server gating (403) is correct. | §5 step 9 | Planned, §7 P3 |
 
 ### Pre-existing, still open (from `docs/RIVET_DEFERRED_QUEUE.md`, not re-tested here)
 
@@ -350,7 +372,7 @@ Execution model: Fable 5.1 writes the story, allowed files, and acceptance test 
 |---|---|---|---|
 | P1-1 | **JSON 404 for unmatched `/api/*` and `/public/*`** (D-1 / C-1). Mount `app.all(['/api/*','/public/*','/webhooks/*'])` → `404 {error:'NOT_FOUND', message:'Route not found'}` immediately before the SPA catch-all; keep the catch-all for non-API paths. | `packages/api/src/app.ts`, new `packages/api/test/routes/api-404.test.ts`, `docs/RIVET_DEFERRED_QUEUE.md` (close C-1) | Supertest: authenticated `GET /api/nope` → 404 JSON with and without `web/dist`; `GET /some/spa/path` still serves `index.html` when dist exists; API integration + unit suites green; `tsc --project tsconfig.build.json` clean. |
 | P1-2 | **Run the skipped UI specs in CI via the dev-auth shim** (D-2). Add a `chromium-devauth` Playwright project that starts vite with `VITE_AUTH_MODE=dev` and the API with `DEV_AUTH_BYPASS=true`, seeds with `scripts/verify-seed.mjs`, and lifts the "needs real Clerk key" guard when the shim is active. Wire into `e2e.yml`. | `playwright.config.ts`, `e2e/helpers/*`, the 10 `e2e/*-mobile.spec.ts` guards, `.github/workflows/e2e.yml`, `packages/api/scripts/verify-seed.mjs` | `npm run e2e` locally with no secrets: previously-skipped mobile specs execute (target ≥ 40 of the 59 skips become passes); `e2e.yml` green; no spec weakened. |
-| P1-3 | **Web runtime findings** from §5, if any defect is recorded there. | per finding | per finding |
+| P1-3 | **Estimate detail total must come from `totals` in integer cents** (D-7). Display subtotal / discount / tax (rate) / total from `est.totals`; when line items are being edited locally, preview in integer cents (Σ `totalCents`, tax = round((taxable − discount) × bps / 10000)) via one pure helper; fix the other `Math.round(qty × rate × 100)` float sites that feed displayed or persisted money. | `packages/web/src/components/estimates/EstimatesPage.tsx`, a totals helper in `packages/web/src/utils` or `packages/shared`, new tests beside them | jsdom test renders "Tax (8.00%)" and $381.24 for a fixture with `taxCents=2824` and never shows $353 as the total; pure test covers zero tax, half-cent rounding, discount, non-taxable line; web vitest and `tsc --noEmit` green. |
 
 ### P2 — this sprint
 
@@ -362,6 +384,7 @@ Execution model: Fable 5.1 writes the story, allowed files, and acceptance test 
 | P2-4 | **Leads web component tests** (G-3): jsdom tests for `LeadList`, `LeadCreate`, `LeadDetail` covering render, validation, convert-to-customer and mark-lost actions. | `packages/web/src/pages/leads/*.test.tsx` | Web vitest green; ≥70 % line coverage on those files. |
 | P2-5 | **Stripe fetch timeouts** (C-2): add `AbortSignal.timeout(…)` to the nine Stripe fetches; unit-test the timeout path with a mocked fetch. | `packages/api/src/payments/stripe-*.ts` + tests | Unit tests prove a stalled fetch rejects within the budget. |
 | P2-6 | **Dispatch presence async wrapper** (C-3). | `packages/api/src/dispatch/presence-routes.ts` + test | A thrown handler yields a JSON 500, not a hung request. |
+| P2-7 | **WebSocket upgrade honours `DEV_AUTH_BYPASS`** (D-8) so realtime surfaces run under the dev harness and the P1-2 Playwright project; production path unchanged and still refused when bypass is off. | `packages/api/src/**/ws*` auth hook + test | Unit test: bypass on + unsigned JWT → upgrade accepted; bypass off → rejected as today; `/dispatch` under dev-auth shows presence without console auth errors. |
 
 ### P3 — backlog
 
@@ -369,12 +392,23 @@ Execution model: Fable 5.1 writes the story, allowed files, and acceptance test 
 |---|---|
 | P3-1 | Corpus follow-ups (D-5): relabel the legacy `unknown`-intent rows (T6-F03) and add dedup to the utterance generator; flip both `pr-checks.yml` steps to blocking in the same commits. |
 | P3-2 | Session-start hook (D-6): symlink or pin `QA_CHROMIUM_PATH` so `npm run e2e` works without manual env. |
+| P3-7 | InMemory `analytics/jobs-booked` (D-9) and a permission-specific error state for technician-forbidden pages (D-10). |
 | P3-3 | Wire `loadtest/http-load-selfcheck.ts` into a nightly workflow with a p95 budget assertion (G-1). |
 | P3-4 | jest-expo config scoped to RN component specs so `test:rn` can gate (G-6). |
 | P3-5 | Voice call wall-clock cap (C-4) and transcript persistence before session reap (C-5) — need a design note first. |
 | P3-6 | Staging sign-off run of the credential-gated workflows (G-7) once secrets are provisioned in the environment; record results in `docs/QA_LOG.md`. |
 
 ---
+
+### Execution status (this session)
+
+| Story | Worker | State |
+|---|---|---|
+| P1-1 JSON 404 for unmatched `/api/*` | Sonnet, isolated worktree | implemented + supertest tests; full API unit suite re-run in progress before commit |
+| P1-2 dev-auth Playwright project | Sonnet, isolated worktree | in progress |
+| P1-3 estimate total from `totals` | Sonnet, isolated worktree | in progress |
+
+Fable reviews each worktree diff against Core Patterns / Code Hygiene before merging into `claude/feature-workflow-testing-s8dbhs`.
 
 ## 8. How to reproduce this run
 
