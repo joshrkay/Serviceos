@@ -145,7 +145,7 @@ import { PgMoneyDashboardRepository } from './reports/pg-money-dashboard';
 import { createFeedbackResponsesRouter } from './routes/feedback';
 import { createInteractionsRouter } from './routes/interactions';
 import { initSentry, setSentryClient } from './monitoring/sentry';
-import { captureServerError } from './monitoring/capture-server-error';
+import { captureServerError, redactedRoute } from './monitoring/capture-server-error';
 import { dbPoolConnections, pgQueueDepth, voiceTurnLatencyMs } from './monitoring/metrics';
 // WS15 — platform SLO monitor + drain-abandonment alarm.
 import { createAlertOperator, emitDrainAbandonment } from './monitoring/alert-operator';
@@ -6981,11 +6981,10 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     if (statusCode >= 500) {
       try {
         const anyReq = req as unknown as {
-          safeRequestLog?: { route?: string };
           auth?: { tenantId?: string; userId?: string };
         };
         recordApiError({
-          route: anyReq.safeRequestLog?.route ?? req.path,
+          route: redactedRoute(req),
           status: statusCode,
           tenantId: anyReq.auth?.tenantId ?? null,
           userId: anyReq.auth?.userId ?? null,
