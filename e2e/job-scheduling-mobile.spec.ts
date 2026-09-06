@@ -1,4 +1,5 @@
-import { test, expect } from '@playwright/test';
+import { expect } from '@playwright/test';
+import { test, skipUnlessAuthedStack, dismissWhatsNewModal } from './helpers/dev-auth';
 import { hasRealClerkPublishableKey } from './helpers/clerk-key';
 
 /**
@@ -8,18 +9,25 @@ import { hasRealClerkPublishableKey } from './helpers/clerk-key';
  * no horizontal overflow at 320px and ≥44px tap targets on the new controls.
  *
  * Gated like the UI smoke tests — these routes are auth-gated, so they need a
- * real running stack with auth (E2E_BASE_URL pointing at a deployed env, or a
- * real Clerk testing pk). `hasRealClerkPublishableKey()` returns false for the
- * CI placeholder key, so on a bare PR runner this describe SKIPS rather than
- * failing to find an authenticated create form. The verifiable tap-target
- * contract also has fast jsdom coverage in
- * packages/web/src/components/jobs/JobForm.test.tsx and
- * JobSchedulePanel.test.tsx.
+ * real running stack with auth (E2E_BASE_URL pointing at a deployed env, a
+ * real Clerk testing pk, or the chromium-devauth project —
+ * e2e/helpers/dev-auth.ts, D-2 — which boots the authenticated SPA with no
+ * Clerk cloud and seeds real jobs via verify-seed.mjs).
+ * `hasRealClerkPublishableKey()` returns false for the CI placeholder key,
+ * so on a bare PR runner this describe SKIPS rather than failing to find an
+ * authenticated create form. The verifiable tap-target contract also has
+ * fast jsdom coverage in packages/web/src/components/jobs/JobForm.test.tsx
+ * and JobSchedulePanel.test.tsx.
  */
-const hasStack = hasRealClerkPublishableKey();
 
 test.describe('job scheduling — mobile viewport', () => {
-  test.skip(!hasStack, 'Set E2E_BASE_URL or a real Clerk pk to run authenticated UI tests');
+  test.beforeEach(async ({ devAuthActive }) => {
+    skipUnlessAuthedStack(
+      devAuthActive,
+      hasRealClerkPublishableKey(),
+      'Set E2E_BASE_URL or a real Clerk pk to run authenticated UI tests (or run under the chromium-devauth project)',
+    );
+  });
   test.use({ viewport: { width: 320, height: 720 } });
 
   async function expectNoHorizontalOverflow(pageScrollWidth: number, clientWidth: number) {
@@ -31,6 +39,7 @@ test.describe('job scheduling — mobile viewport', () => {
     await page.goto('/jobs/new');
     // Auth-gated route: if it bounced to login, the stack isn't authenticated.
     if (/\/login/.test(page.url())) test.skip(true, 'Not authenticated in this run');
+    await dismissWhatsNewModal(page);
 
     await expect(page.getByRole('heading', { name: /new job/i })).toBeVisible();
 
@@ -51,6 +60,7 @@ test.describe('job scheduling — mobile viewport', () => {
   test('the schedule New-appointment job picker fits 320px with 44px controls (#879)', async ({ page }) => {
     await page.goto('/schedule');
     if (/\/login/.test(page.url())) test.skip(true, 'Not authenticated in this run');
+    await dismissWhatsNewModal(page);
 
     await page.getByRole('button', { name: /new appointment/i }).click();
     const search = page.getByLabel('job-search');
@@ -74,13 +84,23 @@ test.describe('job scheduling — mobile viewport', () => {
   test('a job detail page shows the Schedule panel without overflow', async ({ page }) => {
     await page.goto('/jobs');
     if (/\/login/.test(page.url())) test.skip(true, 'Not authenticated in this run');
+    await dismissWhatsNewModal(page);
 
-    // Open the first job in the list, if any are seeded.
-    const firstJob = page.getByRole('link', { name: /JOB-/ }).first();
+    // Open the first job in the list, if any are seeded. Job cards are
+    // clickable `role="button"` divs (JobsList.tsx: "#JOB-0003"), not
+    // links — matching on role="button" instead of the never-actually-
+    // rendered `getByRole('link', { name: /JOB-/ })` this used before
+    // dev-auth first exercised this spec for real.
+    const firstJob = page.getByRole('button', { name: /JOB-/ }).first();
     if (!(await firstJob.count())) test.skip(true, 'No jobs seeded to open');
     await firstJob.click();
 
-    await expect(page.getByText(/Schedule/i).first()).toBeVisible();
+    // getByText(/Schedule/i) also matches the sidebar's "Schedule" nav link
+    // (always in the DOM, hidden at this 320px mobile viewport where the app
+    // shell swaps to a bottom bar) ahead of the job detail page's own visible
+    // "Schedule" label in DOM order, so `.first()` alone grabbed the hidden
+    // nav link. Filter to actually-visible matches first.
+    await expect(page.getByText(/Schedule/i).filter({ visible: true }).first()).toBeVisible();
 
     const { scrollWidth, clientWidth } = await page.evaluate(() => ({
       scrollWidth: document.documentElement.scrollWidth,
