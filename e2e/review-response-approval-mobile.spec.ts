@@ -1,4 +1,5 @@
-import { test, expect, Page } from '@playwright/test';
+import { Page } from '@playwright/test';
+import { test, expect, skipUnlessAuthedStack, dismissWhatsNewModal } from './helpers/dev-auth';
 
 /**
  * U6 — mobile/glove hardening for the inbox review-response approval card
@@ -12,11 +13,11 @@ import { test, expect, Page } from '@playwright/test';
  *   - the draft text block stays inside the viewport
  *
  * Like the comms inbox (comms-inbox-mobile.spec.ts), /inbox lives behind
- * auth, so this only runs against an authenticated E2E_BASE_URL; without one
- * it skips (the jsdom test still guards the contract on every run). The
+ * auth, so this only runs against an authenticated E2E_BASE_URL, or the
+ * chromium-devauth project (e2e/helpers/dev-auth.ts, D-2); without either it
+ * skips (the jsdom test still guards the contract on every run). The
  * proposals API is mocked via page.route so the assertions are pure layout.
  */
-const hasAuthedBase = !!process.env.E2E_BASE_URL;
 
 const LONG_TOKEN =
   'ThanksSoMuchForTheKindWordsAboutTheTanklessWaterHeaterInstallRTGH95DVLN2WeLovedWorkingWithYou0123456789';
@@ -80,6 +81,7 @@ async function mockProposalsApi(page: Page): Promise<void> {
 async function openInbox(page: Page): Promise<void> {
   await mockProposalsApi(page);
   await page.goto('/inbox');
+  await dismissWhatsNewModal(page);
   await expect(page.getByTestId('review-response-review')).toBeVisible();
 }
 
@@ -90,7 +92,13 @@ async function horizontalOverflow(page: Page): Promise<number> {
 }
 
 test.describe('review-response approval — mobile layout', () => {
-  test.skip(!hasAuthedBase, 'Set E2E_BASE_URL (authenticated) to run the inbox UI E2E test');
+  test.beforeEach(async ({ devAuthActive }) => {
+    skipUnlessAuthedStack(
+      devAuthActive,
+      !!process.env.E2E_BASE_URL,
+      'Set E2E_BASE_URL (authenticated) to run the inbox UI E2E test (or run under the chromium-devauth project)',
+    );
+  });
 
   test.describe('320px (smallest supported phone)', () => {
     test.use({ viewport: { width: 320, height: 690 } });

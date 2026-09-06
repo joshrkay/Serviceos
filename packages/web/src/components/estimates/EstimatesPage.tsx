@@ -17,6 +17,7 @@ import { useTenantTimezone } from '../../hooks/useTenantTimezone';
 import { useEstimateTerm } from '../../hooks/useEstimateTerm';
 import { formatDateInTenantTz, formatDateTimeInTenantTz } from '../../utils/formatInTenantTz';
 import { normalizeEstimateStatus, centsToDisplay } from '../../utils/statusNormalize';
+import { computeEstimatePreviewTotals, type EstimatePreviewTotals } from '../../utils/estimateMoney';
 import { StatusBadge } from '../shared/StatusBadge';
 import { NewEstimateFlow } from './NewEstimateFlow';
 import { ConvertToInvoiceSheet } from './ConvertToInvoiceSheet';
@@ -87,12 +88,13 @@ export function apiLineToUi(item: EstimateLineItem): LineItem {
 
 /** Convert UI LineItem back to a shared line item for saving */
 export function uiLineToApi(item: LineItem, sortOrder: number): Partial<EstimateLineItem> {
+  const unitPriceCents = lineUnitPriceCents(item);
   return {
     ...(item.id ? { id: item.id } : {}),
     description: item.description,
     quantity: item.qty,
-    unitPriceCents: Math.round(item.rate * 100),
-    totalCents: Math.round(item.qty * item.rate * 100),
+    unitPriceCents,
+    totalCents: lineTotalCents(item),
     sortOrder,
     taxable: item.taxable ?? false,
     groupKey: item.groupKey,
@@ -118,6 +120,33 @@ type LineItem = {
   /** B7.5 — descriptive unit of measure; never read by money math. */
   unit?: CatalogUnitValue;
 };
+
+/**
+ * A line's unit price in integer cents, rounded from the editable dollar
+ * `rate` — the single source of truth an editor row (or a test/caller
+ * constructing a LineItem directly) can set. Round HERE, once, rather than
+ * inline at each call site, so `lineTotalCents` below never has to redo it.
+ */
+function lineUnitPriceCents(item: LineItem): number {
+  return Math.round(item.rate * 100);
+}
+
+/**
+ * A line's total in integer cents, computed exactly the way the server does
+ * (`calculateLineItemTotal` in packages/api/src/shared/billing-engine.ts:
+ * `Math.round(quantity * unitPriceCents)`) — round the unit price to cents
+ * FIRST, then multiply by quantity and round again. D-7 — the previous
+ * `Math.round(qty * rate * 100)` rounds only once, AFTER both floats have
+ * already compounded their own epsilon error, and can land a cent off on a
+ * fractional quantity (e.g. 0.5 × $0.29: two-step gives round(0.5×29)=15,
+ * matching the server; the old one-step gives round(14.499999999999998)=14
+ * — see the P0-2 comment on `normalizeLineItemTotals`). Never derive a
+ * persisted or displayed line total any other way — CLAUDE.md "All money:
+ * integer cents, never floating point".
+ */
+function lineTotalCents(item: LineItem): number {
+  return Math.round(item.qty * lineUnitPriceCents(item));
+}
 
 // ─── AI suggestion types ──────────────────────────────────────────────────
 interface AISuggestion {
@@ -280,11 +309,14 @@ function AIPricingSuggestions({ estimateId, items, onLineItemAccepted }: {
       // keeps the PATCH payload valid against the Postgres schema.
       // The AI hint becomes a brand-new standalone line (no tier metadata),
       // fresh UUID since it has no existing row.
+      const hintUnitPriceCents = Math.round(hint.lineItem.rate * 100);
       const newItem = {
         description: hint.lineItem.description,
         quantity: hint.lineItem.qty,
-        unitPriceCents: Math.round(hint.lineItem.rate * 100),
-        totalCents: Math.round(hint.lineItem.qty * hint.lineItem.rate * 100),
+        unitPriceCents: hintUnitPriceCents,
+        // D-7 — round qty*unitPriceCents in cents, not qty*rate*100 in float
+        // dollars, so this matches the server's calculateLineItemTotal.
+        totalCents: Math.round(hint.lineItem.qty * hintUnitPriceCents),
         sortOrder: items.length,
         taxable: false,
         id: crypto.randomUUID(),
@@ -378,15 +410,36 @@ function AIPricingSuggestions({ estimateId, items, onLineItemAccepted }: {
 }
 
 // ─── Line Items Editor ────────────────────────────────────────────────────
-function LineItemsEditor({ items, editable, onChange, onAddRow }: {
+function LineItemsEditor({ items, editable, onChange, onAddRow, totals }: {
   items: LineItem[]; editable: boolean;
   onChange?: (items: LineItem[]) => void;
   onAddRow?: () => void;
+  /**
+   * D-7 — the document-level totals (subtotal/discount/tax/total) that own
+   * the "Total" footer row. Passed down from the parent so this footer never
+   * disagrees with the header badge / "Estimate total" card that also derive
+   * from it. Defaults to a sum of `items` with no tax/discount for any other
+   * caller that doesn't have a full totals object.
+   */
+  totals?: EstimatePreviewTotals;
 }) {
   const [editing, setEditing]   = useState(false);
   const [draft,   setDraft]     = useState<LineItem[]>(items);
-  const total                   = items.reduce((s, i) => s + i.qty * i.rate, 0);
-  const draftTotal              = draft.reduce((s, i) => s + i.qty * i.rate, 0);
+  const fallbackTotals = computeEstimatePreviewTotals(
+    items.map(i => ({ totalCents: lineTotalCents(i), taxable: i.taxable ?? false })),
+    0,
+    0,
+  );
+  const baseTotals = totals ?? fallbackTotals;
+  // While actively editing rows, preview against the DRAFT items (not yet
+  // saved) but keep the document's own discount/tax rate — those don't
+  // change from editing line items.
+  const draftTotals = computeEstimatePreviewTotals(
+    draft.map(i => ({ totalCents: lineTotalCents(i), taxable: i.taxable ?? false })),
+    baseTotals.discountCents,
+    baseTotals.taxRateBps,
+  );
+  const displayTotals = editing ? draftTotals : baseTotals;
 
   function update(idx: number, field: keyof LineItem, val: string) {
     setDraft(prev => prev.map((item, i) =>
@@ -448,7 +501,7 @@ function LineItemsEditor({ items, editable, onChange, onAddRow }: {
                   type="number" min="0" step="0.01"
                   className="text-sm text-foreground border border-border rounded-lg px-2 py-1.5 text-right focus:outline-none focus:border-primary w-full"
                 />
-                <p className="text-sm text-foreground text-right">${(item.qty * item.rate).toFixed(2)}</p>
+                <p className="text-sm text-foreground text-right">${(lineTotalCents(item) / 100).toFixed(2)}</p>
                 <button onClick={() => removeRow(i)} className="text-muted-foreground hover:text-destructive transition-colors">
                   <Trash2 size={13} />
                 </button>
@@ -477,7 +530,7 @@ function LineItemsEditor({ items, editable, onChange, onAddRow }: {
                   )}
                 </p>
                 <p className="text-sm text-muted-foreground text-right">${item.rate.toLocaleString()}</p>
-                <p className="text-sm text-foreground text-right">${(item.qty * item.rate).toLocaleString()}</p>
+                <p className="text-sm text-foreground text-right">${(lineTotalCents(item) / 100).toLocaleString()}</p>
               </>
             )}
           </div>
@@ -494,10 +547,29 @@ function LineItemsEditor({ items, editable, onChange, onAddRow }: {
         </button>
       )}
 
-      {/* Totals */}
-      <div className="px-4 py-3.5 border-t border-border bg-secondary flex items-center justify-between">
-        <p className="text-sm text-foreground">Total</p>
-        <p className="text-sm text-foreground">${(editing ? draftTotal : total).toLocaleString()}</p>
+      {/* Totals — D-7: full subtotal/discount/tax/total breakdown in
+          integer cents, never the untaxed sum of float dollar rates. */}
+      <div className="px-4 py-3.5 border-t border-border bg-secondary flex flex-col gap-1">
+        <div className="flex items-center justify-between">
+          <p className="text-sm text-muted-foreground">Subtotal</p>
+          <p className="text-sm text-foreground">{centsToDisplay(displayTotals.subtotalCents)}</p>
+        </div>
+        {displayTotals.discountCents > 0 && (
+          <div className="flex items-center justify-between">
+            <p className="text-sm text-muted-foreground">Discount</p>
+            <p className="text-sm text-foreground">-{centsToDisplay(displayTotals.discountCents)}</p>
+          </div>
+        )}
+        {displayTotals.taxRateBps > 0 && (
+          <div className="flex items-center justify-between">
+            <p className="text-sm text-muted-foreground">Tax ({(displayTotals.taxRateBps / 100).toFixed(2)}%)</p>
+            <p className="text-sm text-foreground">{centsToDisplay(displayTotals.taxCents)}</p>
+          </div>
+        )}
+        <div className="flex items-center justify-between">
+          <p className="text-sm text-foreground">Total</p>
+          <p className="text-sm text-foreground">{centsToDisplay(displayTotals.totalCents)}</p>
+        </div>
       </div>
 
       {/* Edit actions */}
@@ -1100,7 +1172,30 @@ function EstimateDetail({ estimateId, onBack }: { estimateId: string; onBack: ()
   })();
   const uiLineItems = lineItems.length > 0 ? lineItems : apiLineItems.map(apiLineToUi);
 
-  const total    = uiLineItems.reduce((s, i) => s + i.qty * i.rate, 0);
+  // D-7 — the detail view's totals in integer cents. While the operator has
+  // no local edit in flight (`lineItems` empty), trust the server's own
+  // `est.totals` verbatim — that is what actually persisted. Once they save
+  // an edit locally (`lineItems` populated) but before the next refetch
+  // lands the server's recompute, preview against the edited items with the
+  // same tax/discount rule the server uses (computeEstimatePreviewTotals).
+  // This single object feeds the header badge, the "Estimate total" card,
+  // and the line-items table footer, so none of them can disagree — the
+  // runtime bug (docs/verification/full-verification-2026-09-06.md D-7) was
+  // exactly that: three renderers of the SAME untaxed-subtotal-as-total.
+  const totals: EstimatePreviewTotals = lineItems.length > 0
+    ? computeEstimatePreviewTotals(
+        uiLineItems.map(i => ({ totalCents: lineTotalCents(i), taxable: i.taxable ?? false })),
+        est?.totals.discountCents ?? 0,
+        est?.totals.taxRateBps ?? 0,
+      )
+    : {
+        subtotalCents: est?.totals.subtotalCents ?? 0,
+        taxableSubtotalCents: est?.totals.taxableSubtotalCents ?? 0,
+        discountCents: est?.totals.discountCents ?? 0,
+        taxRateBps: est?.totals.taxRateBps ?? 0,
+        taxCents: est?.totals.taxCents ?? 0,
+        totalCents: est?.totals.totalCents ?? 0,
+      };
   const customer = est?.customer;
   const apiStatus = wasSent ? 'sent' : (est?.status ?? 'draft');
   const status   = normalizeEstimateStatus(apiStatus) as EstimateStatus;
@@ -1172,7 +1267,7 @@ function EstimateDetail({ estimateId, onBack }: { estimateId: string; onBack: ()
             </div>
             <div className="flex items-center gap-2 shrink-0">
               <StatusBadge status={status} />
-              <p className="text-sm text-foreground">${total.toLocaleString()}</p>
+              <p className="text-sm text-foreground">{centsToDisplay(totals.totalCents)}</p>
             </div>
           </div>
 
@@ -1184,6 +1279,7 @@ function EstimateDetail({ estimateId, onBack }: { estimateId: string; onBack: ()
               <LineItemsEditor
                 items={uiLineItems}
                 editable={editable}
+                totals={totals}
                 onChange={async (items) => {
                   setLineItems(items);
                   try {
@@ -1352,7 +1448,7 @@ function EstimateDetail({ estimateId, onBack }: { estimateId: string; onBack: ()
                   <p className="text-sm text-primary-foreground/60">Estimate total</p>
                   <p className="text-sm text-primary-foreground/60">{uiLineItems.length} items</p>
                 </div>
-                <p className="text-3xl text-primary-foreground mb-1">${total.toLocaleString()}</p>
+                <p className="text-3xl text-primary-foreground mb-1">{centsToDisplay(totals.totalCents)}</p>
                 {est.validUntil && <p className="text-xs text-primary-foreground/40">Valid until {est.validUntil}</p>}
               </div>
 
@@ -1465,7 +1561,10 @@ function EstimateDetail({ estimateId, onBack }: { estimateId: string; onBack: ()
       {sendOpen && (
         <SendEstimateSheet
           est={estCompat}
-          total={total}
+          // D-7 — SendEstimateSheet's `total` prop is dollars; feed it from
+          // the same authoritative-cents `totals` the rest of this view uses
+          // (was the untaxed float `total` before this fix).
+          total={totals.totalCents / 100}
           apiId={est.id}
           onClose={() => setSendOpen(false)}
           onSent={async () => {
