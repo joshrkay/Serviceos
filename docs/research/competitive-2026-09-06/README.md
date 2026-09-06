@@ -55,6 +55,19 @@ shops, franchises) are not optimised for, so rows that only matter to them are m
    the claim ledger, the exact gates, and the staging scripts; §4.2 gives the plan for
    verifying the competitor rows, all of which were built from search excerpts because
    this sandbox's egress proxy blocks every vendor and review site.
+6. **The Rivet column is now graded on evidence, not inventory (§5).** Six operator
+   lanes drove every surface that could run here (web, public pages, voice webhooks,
+   SMS, money loop and workers on real Postgres, mobile) and captured 200+ screenshots
+   and responses. Of 77 rows: 44 verified at the surface, 6 failed, 17 blocked on a
+   credential or an unbuildable app, 10 absent or not driven. The drives found six real
+   bugs, three of which are fixed on PR #975: milestone billing silently dropped every
+   invoice after the deposit (a5f6500), a voice transcript could be ingested under
+   another tenant (97ecb6a), and Sentry route tags could carry a live token (ea3f46d).
+   Still open: state-aware recording disclosure and inbound DNC are not wired on the
+   Gather path, the call-status webhook never schedules dropped-call recovery, the
+   dispatcher escalation stream filters on an event nothing emits, the vertical-pack
+   Activate button 404s for every pack, and "Suggest reply" leaks a raw mock payload
+   without an LLM key.
 
 ## 0.1 Method and confidence
 
@@ -212,7 +225,10 @@ under the Code Hygiene rule.
 
 Cell key: **✅** shipped and included · **◐** partial, flagged-off, or env-gated · **❌**
 absent · **$** paid add-on or higher tier · **?** unverified from available sources ·
-**n/a** not in the ICP's decision. Verdict is from the 1–3-truck owner-operator's
+**n/a** not in the ICP's decision. **The Rivet column was regraded on 2026-09-06 from
+runtime drives only (§5): a cell that could not be exercised at its surface reads `?`
+(unverified) and a cell whose drive failed reads `❌`, whatever the code inventory says.
+The last column names the drive and its verdict.** Verdict is from the 1–3-truck owner-operator's
 seat: **WIN** we are ahead, **PARITY** equivalent, **GAP** they are ahead on something the
 ICP expects, **POLICY** the gap is a product decision not a missing capability,
 **WON'T** deliberately not built (see §3.3). Rivet pricing: one flat monthly plan
@@ -221,105 +237,105 @@ page was not reachable from here — verify, §4.2).
 
 ### 2.1 AI phone and messaging
 
-| # | Capability | Rivet | ServiceTitan | Jobber | Housecall Pro | Workiz | Avoca | Verdict |
-|---|---|---|---|---|---|---|---|---|
-| 1 | AI answers inbound calls 24/7 | ✅ flat | ✅ $ (~$2.75/call) | ✅ $ ($29/mo + $0.79/convo; free on Plus) | ✅ $ (unpublished) | ✅ $ (~$200/mo, needs Workiz Phone) | ✅ (quote-only, ~$1–3.5k/mo) | **WIN on price**, PARITY on presence |
-| 2 | Books the job itself, no human tap | ◐ default holds slot + owner tap; autonomous lane flagged off | ✅ | ✅ | ✅ | ✅ | ✅ | **POLICY** (flip `autonomous_booking_enabled`; undo + audit they lack) |
-| 3 | Quotes prices on the call from the price book | ✅ grounded, no-number when uncatalogued | ❌ dispatch fee only | ❌ creates a work request | ◐ reads booking-catalog prices | ◐ Q&A from account data | ? | **WIN** |
-| 4 | Life-safety / emergency triage with 911 script and on-call dispatch | ✅ deterministic E1/E2/E3 | ? | ❌ keyword transfer only | ❌ | ❌ | ✅ | **WIN** vs FSMs, PARITY vs Avoca |
-| 5 | Vulnerable-caller detection with owner patch-through | ◐ flagged off | ❌ | ❌ | ❌ | ❌ | ❌ | latent WIN |
-| 6 | Warm transfer with context to a human | ✅ whisper + SMS brief | ✅ | ✅ (no context evidenced) | ✅ | ✅ | ✅ | PARITY |
-| 7 | Spanish on the call | ✅ (realtime path flagged) | ✅ | ? | ✅ | ✅ + French | ? | PARITY; Workiz leads on languages |
-| 8 | After-hours mode choice (voicemail vs AI) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | PARITY |
-| 9 | Recognises returning callers and their history | ✅ incl. B2B hierarchy, membership | ✅ | ✅ | ✅ | ✅ | ✅ | PARITY |
-| 10 | Recording disclosure by state + consent ledger + "stop recording" | ✅ | ✅ recording | ? | ? | ✅ recording | ? | **WIN on compliance depth** |
-| 11 | Dropped-call SMS recovery | ✅ (per-tenant flag) | ◐ Second Chance Leads (post-hoc flag, not outreach) | ❌ | ❌ | ❌ | ❌ | **WIN** |
-| 12 | AI answers inbound SMS and web chat autonomously | ◐ SMS captured, reply is draft-only; no chat widget | ✅ $ SMS agent + chat | ✅ texts (Receptionist) | ✅ chat on all plans, texts | ✅ | ✅ | **GAP** |
-| 13 | Outbound AI voice (speed-to-lead call, estimate follow-up, renewals) | ❌ SMS/email only; human click-to-call bridge | ✅ $ SMS agent, outbound support | ❌ | ◐ AI texts | ◐ automations | ✅ Nurture | GAP vs Avoca/ST; **WON'T** for voice dialer this cycle |
-| 14 | Owner assistant that executes tasks by voice/chat | ✅ 30+ actions + lookups, proposal-gated; memo is record-then-poll | ✅ Atlas | ✅ Voice/Chat 100+ tasks, live, all plans | ◐ advisory AIs | ◐ Smart Messaging | ❌ | PARITY on capability, GAP on live-conversational feel |
-| 15 | Trust architecture: typed proposals, approval, undo, audit, catalog grounding, clarification not guessing | ✅ | ❌ not evidenced | ❌ | ❌ | ❌ | ❌ | **WIN** (structural) |
-| 16 | Standing instructions / automations | ✅ ≤20 directives, proposal-gated | ✅ | ✅ $ builder (Grow) | ◐ pipeline automations | ✅ | ❌ | PARITY (different shape) |
-| 17 | Learns from owner corrections | ✅ lessons cascade to config | ? | ❌ | ❌ | ❌ | ◐ CSR feedback loop | **WIN** |
-| 18 | Human-CSR call scoring and coaching | ❌ | ✅ $ | ❌ | ❌ | ✅ Call Insights | ✅ Coach | n/a (ICP has no CSRs) |
-| 19 | Photo-to-quote from a customer MMS | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | **WIN** |
-| 20 | Voice-quality launch gate in CI (73 scripts, 11 buckets) | ✅ | internal | internal | internal | internal | internal | n/a (our moat for quality claims) |
+| # | Capability | Rivet | ServiceTitan | Jobber | Housecall Pro | Workiz | Avoca | Verdict | Driven 2026-09-06 |
+|---|---|---|---|---|---|---|---|---|---|
+| 1 | AI answers inbound calls 24/7 | ✅ flat | ✅ $ (~$2.75/call) | ✅ $ ($29/mo + $0.79/convo; free on Plus) | ✅ $ (unpublished) | ✅ $ (~$200/mo, needs Workiz Phone) | ✅ (quote-only, ~$1–3.5k/mo) | **WIN on price**, PARITY on presence | ✅ VERIFIED · V2 V3 V7 — Gather path answered with the mock LLM; real-LLM answering needs a key |
+| 2 | Books the job itself, no human tap | ◐ default holds slot + owner tap; autonomous lane flagged off | ✅ | ✅ | ✅ | ✅ | ✅ | **POLICY** (flip `autonomous_booking_enabled`; undo + audit they lack) | ✅ VERIFIED · W1 P1 — default holds slot + owner tap; autonomous toggle off by default |
+| 3 | Quotes prices on the call from the price book | ? grounded, no-number when uncatalogued — unverified | ❌ dispatch fee only | ❌ creates a work request | ◐ reads booking-catalog prices | ◐ Q&A from account data | ? | **WIN** | ⛔ BLOCKED · — — needs LLM key |
+| 4 | Life-safety / emergency triage with 911 script and on-call dispatch | ✅ deterministic E1/E2/E3 | ? | ❌ keyword transfer only | ❌ | ❌ | ✅ | **WIN** vs FSMs, PARITY vs Avoca | ✅ VERIFIED · V3 S8 — E1/E2 triage verified; dispatcher SSE never fires (bug) |
+| 5 | Vulnerable-caller detection with owner patch-through | ? flagged off — unverified | ❌ | ❌ | ❌ | ❌ | ❌ | latent WIN | ⛔ BLOCKED · — — flagged off + needs LLM key |
+| 6 | Warm transfer with context to a human | ✅ whisper + SMS brief | ✅ | ✅ (no context evidenced) | ✅ | ✅ | ✅ | PARITY | ✅ VERIFIED · V7 — whisper + call-me-back fallback |
+| 7 | Spanish on the call | ? (realtime path flagged) — unverified | ✅ | ? | ✅ | ✅ + French | ? | PARITY; Workiz leads on languages | ⛔ BLOCKED · V4 — realtime transport only, flagged off |
+| 8 | After-hours mode choice (voicemail vs AI) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | PARITY | ✅ VERIFIED · S6 — voicemail vs AI TwiML + voicemail recording pipeline |
+| 9 | Recognises returning callers and their history | ✅ incl. B2B hierarchy, membership | ✅ | ✅ | ✅ | ✅ | ✅ | PARITY | ✅ VERIFIED · V2 — returning caller recognised, degraded clarification |
+| 10 | Recording disclosure by state + consent ledger + "stop recording" | ❌ failed drive | ✅ recording | ? | ? | ✅ recording | ? | **WIN on compliance depth** (failed drive, §5) | ❌ FAILED · V1 V6 — state-aware disclosure copy not wired; inbound DNC not enforced |
+| 11 | Dropped-call SMS recovery | ❌ (per-tenant flag) — failed drive | ◐ Second Chance Leads (post-hoc flag, not outreach) | ❌ | ❌ | ❌ | ❌ | **WIN** (failed drive, §5) | ❌ FAILED · S7 V10 — call-status webhook has no dropped-call logic on the Gather path |
+| 12 | AI answers inbound SMS and web chat autonomously | ◐ SMS captured, reply is draft-only; no chat widget | ✅ $ SMS agent + chat | ✅ texts (Receptionist) | ✅ chat on all plans, texts | ✅ | ✅ | **GAP** | ✅ VERIFIED · S1 S3 W7 — SMS captured to thread + lead; reply is draft-only; AI suggestion FAILED (row 52) |
+| 13 | Outbound AI voice (speed-to-lead call, estimate follow-up, renewals) | ❌ SMS/email only; human click-to-call bridge | ✅ $ SMS agent, outbound support | ❌ | ◐ AI texts | ◐ automations | ✅ Nurture | GAP vs Avoca/ST; **WON'T** for voice dialer this cycle | — ABSENT · — — absent, not driven |
+| 14 | Owner assistant that executes tasks by voice/chat | ✅ 30+ actions + lookups, proposal-gated; memo is record-then-poll | ✅ Atlas | ✅ Voice/Chat 100+ tasks, live, all plans | ◐ advisory AIs | ◐ Smart Messaging | ❌ | PARITY on capability, GAP on live-conversational feel | ✅ VERIFIED · W13 — honest-failure copy without a key; task execution needs LLM key |
+| 15 | Trust architecture: typed proposals, approval, undo, audit, catalog grounding, clarification not guessing | ✅ | ❌ not evidenced | ❌ | ❌ | ❌ | ❌ | **WIN** (structural) | ✅ VERIFIED · W1 P7 V13 D13 — approve, 5 s undo, one-tap HMAC links, 31 audit event types |
+| 16 | Standing instructions / automations | ✅ ≤20 directives, proposal-gated | ✅ | ✅ $ builder (Grow) | ◐ pipeline automations | ✅ | ❌ | PARITY (different shape) | ✅ VERIFIED · W14 — standing instruction saved and listed |
+| 17 | Learns from owner corrections | ? lessons cascade to config — unverified | ? | ❌ | ❌ | ❌ | ◐ CSR feedback loop | **WIN** | ⛔ BLOCKED · — — needs LLM key |
+| 18 | Human-CSR call scoring and coaching | ❌ | ✅ $ | ❌ | ❌ | ✅ Call Insights | ✅ Coach | n/a (ICP has no CSRs) | — ABSENT · — — absent |
+| 19 | Photo-to-quote from a customer MMS | ?  — unverified | ❌ | ❌ | ❌ | ❌ | ❌ | **WIN** | ⛔ BLOCKED · — — needs LLM vision key |
+| 20 | Voice-quality launch gate in CI (73 scripts, 11 buckets) | ✅ | internal | internal | internal | internal | internal | n/a (our moat for quality claims) | ✅ VERIFIED · CI V8 — 73/73 on every pushed head; per-call cap fired |
 
 ### 2.2 Scheduling and dispatch
 
-| # | Capability | Rivet | ServiceTitan | Jobber | Housecall Pro | Workiz | Avoca | Verdict |
-|---|---|---|---|---|---|---|---|---|
-| 21 | Drag-and-drop dispatch board | ✅ proposal-confirmed drops | ✅ | ✅ | ✅ | ✅ | n/a | PARITY |
-| 22 | Week / month calendar views | ❌ 7-day agenda only | ✅ | ✅ | ✅ | ✅ | n/a | **GAP** |
-| 23 | Map view / live technician map | ❌ GPS ingested, never plotted | ✅ | ✅ | ✅ | ✅ | n/a | **GAP** |
-| 24 | Live "track my tech" link for the customer | ❌ | ✅ | ❌ | ◐ with GPS add-on | ◐ | n/a | GAP (minor for ICP) |
-| 25 | Route optimisation | ❌ pairwise drive time only | ✅ $ Dispatch Pro | ✅ Grow | ◐ alpha / MAX | ◐ | n/a | **WON'T** (PRD out of scope) |
-| 26 | AI slot / tech suggestion | ◐ feasibility + auto-pick for voice bookings | ✅ $ | ◐ nearest tech | ◐ | ✅ Genius Scheduling | n/a | PARITY− |
-| 27 | Online booking from real availability | ✅ held + approved | ✅ $ Scheduling Pro | ✅ | ✅ | ✅ | ✅ Simple Scheduler | PARITY |
-| 28 | On-my-way, running-late, reminders, confirmations | ✅ 3 surfaces + auto-late | ✅ | ✅ | ✅ | ✅ | n/a | PARITY+ |
-| 29 | Recurring visits / service plans | ◐ agreements sweep ✅; recurring jobs manual; contracts thin | ✅ | ✅ | ✅ MAX | ✅ | n/a | PARITY− |
-| 30 | GPS timers / geofence clock-in | ◐ arrival detection on tech day view; no geofence timers | ✅ | ✅ Grow | ✅ Essentials | ✅ | n/a | PARITY− |
+| # | Capability | Rivet | ServiceTitan | Jobber | Housecall Pro | Workiz | Avoca | Verdict | Driven 2026-09-06 |
+|---|---|---|---|---|---|---|---|---|---|
+| 21 | Drag-and-drop dispatch board | ? proposal-confirmed drops — unverified | ✅ | ✅ | ✅ | ✅ | n/a | PARITY | ⛔ BLOCKED · W2 — board renders; second technician user needs Postgres + Clerk |
+| 22 | Week / month calendar views | ❌ 7-day agenda only | ✅ | ✅ | ✅ | ✅ | n/a | **GAP** | ✅ VERIFIED · W3 — absence confirmed: 7-day strip, no week/month control |
+| 23 | Map view / live technician map | ❌ GPS ingested, never plotted | ✅ | ✅ | ✅ | ✅ | n/a | **GAP** | ✅ VERIFIED · W2 — absence confirmed: no map anywhere |
+| 24 | Live "track my tech" link for the customer | ❌ | ✅ | ❌ | ◐ with GPS add-on | ◐ | n/a | GAP (minor for ICP) | — ABSENT · — — absent |
+| 25 | Route optimisation | ❌ pairwise drive time only | ✅ $ Dispatch Pro | ✅ Grow | ◐ alpha / MAX | ◐ | n/a | **WON'T** (PRD out of scope) | — ABSENT · — — absent |
+| 26 | AI slot / tech suggestion | ◐ feasibility + auto-pick for voice bookings | ✅ $ | ◐ nearest tech | ◐ | ✅ Genius Scheduling | n/a | PARITY− | ✅ VERIFIED · P1 D12 — real availability + feasibility; voice auto-pick not driven |
+| 27 | Online booking from real availability | ✅ held + approved | ✅ $ Scheduling Pro | ✅ | ✅ | ✅ | ✅ Simple Scheduler | PARITY | ✅ VERIFIED · P1 D12 — held appointment, owner proposal, never auto-confirmed |
+| 28 | On-my-way, running-late, reminders, confirmations | ✅ 3 surfaces + auto-late | ✅ | ✅ | ✅ | ✅ | n/a | PARITY+ | ✅ VERIFIED · W4 — technician day view, On my way fires en-route; sends blocked by channel switch |
+| 29 | Recurring visits / service plans | ◐ agreements sweep ✅; recurring jobs manual; contracts thin | ✅ | ✅ | ✅ MAX | ✅ | n/a | PARITY− | ✅ VERIFIED · D1 — agreement run-now + recurring generate; agreement without location fails late |
+| 30 | GPS timers / geofence clock-in | ? arrival detection on tech day view; no geofence timers — unverified | ✅ | ✅ Grow | ✅ Essentials | ✅ | n/a | PARITY− | ⛔ BLOCKED · M5 — mobile app unbuildable here (no Expo deps, Clerk-gated) |
 
 ### 2.3 Estimates, invoicing, payments
 
-| # | Capability | Rivet | ServiceTitan | Jobber | Housecall Pro | Workiz | Avoca | Verdict |
-|---|---|---|---|---|---|---|---|---|
-| 31 | Good/better/best + optional add-ons, customer picks online | ✅ included | ✅ | ✅ Grow | ✅ $ proposal tool | ✅ $ proposals | n/a | **WIN on price** |
-| 32 | E-signature on approval | ✅ drawn canvas (not audit-certificate grade) | ✅ | ✅ | ✅ with IP/timestamp PDF | ✅ required | n/a | PARITY |
-| 33 | Deposits at approval, before or after | ✅ rules engine | ✅ | ✅ | ✅ | ✅ | n/a | PARITY |
-| 34 | Consumer financing | ◐ Wisetack, env-gated | ✅ six lenders | ✅ Wisetack | ✅ Wisetack | ✅ Wisetack + Sunbit | n/a | PARITY once keyed |
-| 35 | AI-drafted quotes from a request | ✅ voice, chat, photo | ◐ Atlas | ✅ auto-draft from requests | ❌ | ❌ | n/a | PARITY+ |
-| 36 | Quote follow-ups and expiry | ✅ | ✅ $ Marketing Pro | ✅ | ◐ | ✅ automations | n/a | PARITY |
-| 37 | Price book with flat-rate content / price benchmarks | ◐ catalog + pack seeds, no benchmarks | ✅ $ Pricebook Pro + Price Insights | ❌ | ◐ announced | ❌ | n/a | n/a |
-| 38 | Online card + wallets | ✅ Stripe Connect | ✅ in-house | ✅ Stripe | ✅ | ✅ Workiz Pay | n/a | PARITY |
-| 39 | ACH / bank debit | ✅ one-time (no recurring mandate) | ✅ | ✅ 1% | ✅ | ✅ 1% | n/a | PARITY |
-| 40 | Tap to Pay / card reader in the field | ◐ Stripe Terminal wired in mobile, unproven with hardware | ✅ | ✅ 2.7% | ✅ $5/user | ✅ | n/a | PARITY− (needs hardware proof) |
-| 41 | Tips at checkout | ❌ | ? | ✅ | ✅ | ? | n/a | **GAP** (small build) |
-| 42 | Instant payouts | ❌ standard Stripe | next-day | ✅ 1% | ✅ 1% | 3–4 days | n/a | GAP (minor) |
-| 43 | Saved card + auto-charge memberships | ✅ off-session dues | ✅ | ✅ | ✅ MAX | ✅ | n/a | PARITY |
-| 44 | Progress / milestone billing and batch invoicing | ✅ both, spoken on-ramp | ✅ | ✅ Grow | ❌? | ❌? | n/a | **WIN** vs HCP/Workiz |
-| 45 | Reminders, late fees, dunning | ✅ multi-step + late fees | ✅ | ✅ reminders | ✅ reminders | ✅ automations | n/a | PARITY+ |
-| 46 | Refunds / void / disputes | ◐ API has partial refunds and disputes; **no web UI** | ✅ | ✅ | ✅ | ✅ | n/a | **GAP** (UI only) |
-| 47 | Customer-side partial payment | ❌ full balance only | ✅ | ✅ schedules | ? | ? | n/a | GAP (minor) |
-| 48 | Tax rate configuration | ◐ per-document bps, no settings UI | ✅ | ✅ | ✅ | ✅ | n/a | **GAP** |
-| 49 | QuickBooks sync | ◐ one-way paid invoices, manual trigger | ✅ two-way, near real-time | ✅ one-way auto (+ Xero) | ✅ QBO + Desktop | ✅ two-way | n/a | **GAP** |
-| 50 | Payroll / commissions | ❌ time entries only | ✅ | Gusto | ✅ $ | ❌ | n/a | **WON'T** (PRD out of scope, ever) |
+| # | Capability | Rivet | ServiceTitan | Jobber | Housecall Pro | Workiz | Avoca | Verdict | Driven 2026-09-06 |
+|---|---|---|---|---|---|---|---|---|---|
+| 31 | Good/better/best + optional add-ons, customer picks online | ✅ included | ✅ | ✅ Grow | ✅ $ proposal tool | ✅ $ proposals | n/a | **WIN on price** | ✅ VERIFIED · W5 P3 — tiers + optional add-on in editor and on public approval |
+| 32 | E-signature on approval | ✅ drawn canvas (not audit-certificate grade) | ✅ | ✅ | ✅ with IP/timestamp PDF | ✅ required | n/a | PARITY | ✅ VERIFIED · P3 — drawn signature canvas |
+| 33 | Deposits at approval, before or after | ✅ rules engine | ✅ | ✅ | ✅ | ✅ | n/a | PARITY | ✅ VERIFIED · P3 W15 — deposit at approval; deposit rules sheet |
+| 34 | Consumer financing | ? Wisetack, env-gated — unverified | ✅ six lenders | ✅ Wisetack | ✅ Wisetack | ✅ Wisetack + Sunbit | n/a | PARITY once keyed | ⛔ BLOCKED · D9 — offer 201 with manual provider; Wisetack needs creds |
+| 35 | AI-drafted quotes from a request | ? voice, chat, photo — unverified | ◐ Atlas | ✅ auto-draft from requests | ❌ | ❌ | n/a | PARITY+ | ⛔ BLOCKED · — — needs LLM key |
+| 36 | Quote follow-ups and expiry | ?  — unverified | ✅ $ Marketing Pro | ✅ | ◐ | ✅ automations | n/a | PARITY | ? NOT DRIVEN · — — follow-up worker not driven |
+| 37 | Price book with flat-rate content / price benchmarks | ❌ catalog + pack seeds, no benchmarks — failed drive | ✅ $ Pricebook Pro + Price Insights | ❌ | ◐ announced | ❌ | n/a | n/a (failed drive, §5) | ❌ FAILED · W14 — price book screen works but pack Activate is broken and packs seed no catalog |
+| 38 | Online card + wallets | ? Stripe Connect — unverified | ✅ in-house | ✅ Stripe | ✅ | ✅ Workiz Pay | n/a | PARITY | ⛔ BLOCKED · P4 — pay page renders; charge needs Stripe |
+| 39 | ACH / bank debit | ? one-time (no recurring mandate) — unverified | ✅ | ✅ 1% | ✅ | ✅ 1% | n/a | PARITY | ⛔ BLOCKED · P4 — needs Stripe |
+| 40 | Tap to Pay / card reader in the field | ? Stripe Terminal wired in mobile, unproven with hardware — unverified | ✅ | ✅ 2.7% | ✅ $5/user | ✅ | n/a | PARITY− (needs hardware proof) | ⛔ BLOCKED · M7 — mobile unbuildable; needs Terminal hardware |
+| 41 | Tips at checkout | ❌ | ? | ✅ | ✅ | ? | n/a | **GAP** (small build) | — ABSENT · — — absent |
+| 42 | Instant payouts | ❌ standard Stripe | next-day | ✅ 1% | ✅ 1% | 3–4 days | n/a | GAP (minor) | — ABSENT · — — absent |
+| 43 | Saved card + auto-charge memberships | ? off-session dues — unverified | ✅ | ✅ | ✅ MAX | ✅ | n/a | PARITY | ⛔ BLOCKED · — — needs Stripe |
+| 44 | Progress / milestone billing and batch invoicing | ❌ both, spoken on-ramp — failed drive | ✅ | ✅ Grow | ❌? | ❌? | n/a | **WIN** vs HCP/Workiz (failed drive, §5) | ❌ FAILED · D2 W6 — milestone balance silently never billed (fixed a5f6500, Postgres test); batch sweep verified |
+| 45 | Reminders, late fees, dunning | ✅ multi-step + late fees | ✅ | ✅ reminders | ✅ reminders | ✅ automations | n/a | PARITY+ | ✅ VERIFIED · D3 — overdue flip, reminder + late-fee line, no duplicates |
+| 46 | Refunds / void / disputes | ◐ API has partial refunds and disputes; **no web UI** | ✅ | ✅ | ✅ | ✅ | n/a | **GAP** (UI only) | ✅ VERIFIED · D4 W6 — API refund + over-refund guard verified; no web UI confirmed |
+| 47 | Customer-side partial payment | ❌ full balance only | ✅ | ✅ schedules | ? | ? | n/a | GAP (minor) | ✅ VERIFIED · P4 W6 — absence confirmed; operator Mark-as-paid also has no amount field |
+| 48 | Tax rate configuration | ◐ per-document bps, no settings UI | ✅ | ✅ | ✅ | ✅ | n/a | **GAP** | ✅ VERIFIED · W6 W15 — absence confirmed |
+| 49 | QuickBooks sync | ? one-way paid invoices, manual trigger — unverified | ✅ two-way, near real-time | ✅ one-way auto (+ Xero) | ✅ QBO + Desktop | ✅ two-way | n/a | **GAP** | ⛔ BLOCKED · D9 — 400 not configured; needs QuickBooks OAuth |
+| 50 | Payroll / commissions | ❌ time entries only | ✅ | Gusto | ✅ $ | ❌ | n/a | **WON'T** (PRD out of scope, ever) | — ABSENT · — — absent |
 
 ### 2.4 Communications, CRM, retention
 
-| # | Capability | Rivet | ServiceTitan | Jobber | Housecall Pro | Workiz | Avoca | Verdict |
-|---|---|---|---|---|---|---|---|---|
-| 51 | Two-way SMS unified inbox | ✅ flat | ✅ | ✅ Grow ($149+) | ✅ | ✅ | ✅ | **WIN on price** |
-| 52 | AI-suggested replies | ✅ draft, never auto-send | ✅ Atlas | ✅ Rewrite | ✅ Marketing AI | ✅ Smart Messaging | ✅ | PARITY |
-| 53 | Review requests + Google review response drafting | ✅ poll, classify, draft, credit tiers | ✅ $ Marketing Pro | ✅ $39/mo | ✅ | ✅ | ✅ (via Nurture) | **WIN on price and depth** |
-| 54 | Email/SMS campaign builder | ◐ segment email, no scheduling or tracking | ✅ $$ | ✅ $79/mo | ✅ $ | ✅ $ Genius Marketing | ✅ | **WON'T** (campaign treadmill) |
-| 55 | Postcards / direct mail | ❌ | ✅ $ | ❌ | ✅ | ❌ | ❌ | n/a |
-| 56 | Google LSA / Reserve with Google / Thumbtack / Yelp / Angi lead ingestion | ❌ public intake + UTM only | ✅ | ✅ LSA, Thumbtack | ✅ all, Job Inbox | ✅ all | n/a | **GAP** (Tier 1) |
-| 57 | Sales pipeline kanban | ✅ included | ✅ 2026 residential CRM | ✅ $49/mo | ✅ $ | ✅ | n/a | **WIN on price** |
-| 58 | Customer portal | ✅ token: pay, approve, book, cards, agreements, request | ✅ | ✅ Client Hub (+ tips, referrals) | ✅ passwordless | ✅ | n/a | PARITY |
-| 59 | Custom fields, tags, groups, merge, B2B hierarchy | ✅ | ✅ | ✅ | ❌ no custom fields | ✅ | n/a | PARITY+ |
-| 60 | Equipment / asset registry per location | ❌ | ✅ | ◐ notes | ? | ✅ | ✅ reads from FSM | **GAP** (Tier 2; P24) |
-| 61 | Referral programme | ❌ | ❌ | ✅ $ | ◐ | ❌ | ❌ | **WON'T** |
-| 62 | Hosted website / booking widget | ❌ hosted `/book` page only | ✅ $ | ✅ free site | ✅ $ | ✅ hosted page | ✅ web chat | GAP (minor) |
-| 63 | Data import from a previous system | ❌ | ✅ (paid implementation) | ✅ CSV | ✅ | ✅ | n/a | **GAP** (Tier 1: switching cost) |
+| # | Capability | Rivet | ServiceTitan | Jobber | Housecall Pro | Workiz | Avoca | Verdict | Driven 2026-09-06 |
+|---|---|---|---|---|---|---|---|---|---|
+| 51 | Two-way SMS unified inbox | ✅ flat | ✅ | ✅ Grow ($149+) | ✅ | ✅ | ✅ | **WIN on price** | ✅ VERIFIED · W7 S1 — thread renders two-way; Customer "Message" action ignores its customerId |
+| 52 | AI-suggested replies | ❌ draft, never auto-send — failed drive | ✅ Atlas | ✅ Rewrite | ✅ Marketing AI | ✅ Smart Messaging | ✅ | PARITY (failed drive, §5) | ❌ FAILED · W7 — raw mock JSON leaks into compose box without a key; real suggestion needs LLM key |
+| 53 | Review requests + Google review response drafting | ✅ poll, classify, draft, credit tiers | ✅ $ Marketing Pro | ✅ $39/mo | ✅ | ✅ | ✅ (via Nurture) | **WIN on price and depth** | ✅ VERIFIED · W8 D6 P6 — dashboard + request worker verified; Google handoff needs live review URL |
+| 54 | Email/SMS campaign builder | ◐ segment email, no scheduling or tracking | ✅ $$ | ✅ $79/mo | ✅ $ | ✅ $ Genius Marketing | ✅ | **WON'T** (campaign treadmill) | ✅ VERIFIED · W8 — campaign saved; send degrades to "0 sent, 1 failed" without a provider |
+| 55 | Postcards / direct mail | ❌ | ✅ $ | ❌ | ✅ | ❌ | ❌ | n/a | — ABSENT · — — absent |
+| 56 | Google LSA / Reserve with Google / Thumbtack / Yelp / Angi lead ingestion | ❌ public intake + UTM only | ✅ | ✅ LSA, Thumbtack | ✅ all, Job Inbox | ✅ all | n/a | **GAP** (Tier 1) | — ABSENT · P2 — absent; UTM intake verified |
+| 57 | Sales pipeline kanban | ✅ included | ✅ 2026 residential CRM | ✅ $49/mo | ✅ $ | ✅ | n/a | **WIN on price** | ✅ VERIFIED · W9 — lead → kanban → convert with address prompt |
+| 58 | Customer portal | ✅ token: pay, approve, book, cards, agreements, request | ✅ | ✅ Client Hub (+ tips, referrals) | ✅ passwordless | ✅ | n/a | PARITY | ✅ VERIFIED · P5 D12 — all 8 tabs, book, cancel request, cards |
+| 59 | Custom fields, tags, groups, merge, B2B hierarchy | ✅ | ✅ | ✅ | ❌ no custom fields | ✅ | n/a | PARITY+ | ✅ VERIFIED · W10 D5 — tags, groups, dedup, merge; customer-level custom fields not demonstrated |
+| 60 | Equipment / asset registry per location | ❌ | ✅ | ◐ notes | ? | ✅ | ✅ reads from FSM | **GAP** (Tier 2; P24) | — ABSENT · — — absent |
+| 61 | Referral programme | ❌ | ❌ | ✅ $ | ◐ | ❌ | ❌ | **WON'T** | — ABSENT · — — absent |
+| 62 | Hosted website / booking widget | ❌ hosted `/book` page only | ✅ $ | ✅ free site | ✅ $ | ✅ hosted page | ✅ web chat | GAP (minor) | ✅ VERIFIED · P1 — hosted /book page only |
+| 63 | Data import from a previous system | ❌ | ✅ (paid implementation) | ✅ CSV | ✅ | ✅ | n/a | **GAP** (Tier 1: switching cost) | ✅ VERIFIED · D10 — absence confirmed: no import endpoint |
 
 ### 2.5 Job execution, mobile, platform
 
-| # | Capability | Rivet | ServiceTitan | Jobber | Housecall Pro | Workiz | Avoca | Verdict |
-|---|---|---|---|---|---|---|---|---|
-| 64 | Forms / checklists with photos and signature | ✅ forms; no signature on forms | ✅ | ✅ Connect | ✅ | ✅ | n/a | PARITY− |
-| 65 | Job photos before/after, annotation | ✅ pairing; no annotation | ✅ | ✅ | ✅ annotation, reports | ✅ | n/a | PARITY− |
-| 66 | Time tracking + job costing / profit | ✅ job, customer, tech P&L; voice lookup | ✅ | ✅ Grow | ◐ | ✅ | n/a | PARITY+ |
-| 67 | Expenses with receipts | ◐ voice-only write, no screen | ✅ | ✅ Connect | ◐ | ◐ | n/a | PARITY− |
-| 68 | Inventory / purchase orders | ❌ materials list only | ✅ | ❌ | ◐ | ✅ $ | n/a | **WON'T** |
-| 69 | Offline mobile | ✅ durable queue for voice + approvals | ? | ✅ | ◐ view-only | ✅ | n/a | PARITY |
-| 70 | Push notifications | ✅ native; no web push | ✅ | ✅ | ✅ | ✅ | n/a | PARITY |
-| 71 | Dashboards / custom reports | ◐ digest-as-dashboard + fixed reports | ✅ custom | ✅ 20+ | ✅ Analyst AI | ✅ | ✅ | GAP by design |
-| 72 | Ask questions of your data in plain language | ✅ voice/chat lookups | ✅ Atlas | ✅ AI chat | ✅ Analyst AI | ◐ | ✅ | PARITY |
-| 73 | Open API, outbound webhooks, Zapier | ❌ inbound only; partial Swagger | ✅ gated | ✅ GraphQL + webhooks | ✅ MAX | ✅ | ◐ | **GAP** (Tier 2) |
-| 74 | Custom roles | ❌ 3 fixed roles | ✅ | ✅ | ◐ | ✅ | n/a | n/a for ICP |
-| 75 | Multi-location / franchise | ❌ B2B customer hierarchy only | ✅ | ❌ | ❌ | ✅ $ | ✅ roll-up | **WON'T** (anti-persona) |
-| 76 | Vertical packs (HVAC, plumbing, electrical, painting) with seeded catalog, terminology, intake questions | ✅ (2 of 4 fully built) | ✅ trade packages | ❌ | ✅ trade packages (Jul 2026) | ❌ | ✅ HVAC-native | PARITY |
-| 77 | Price | flat monthly, everything included | ~$245–500/tech/mo + add-ons + $5–50k setup | $29–$399+/mo + $29/user + add-ons | $59–$299/mo + unpublished add-ons | ~$187–270/mo + $100 phone + $200 AI | ~$1,000–3,500/mo, quote-only | **WIN** (structural) |
+| # | Capability | Rivet | ServiceTitan | Jobber | Housecall Pro | Workiz | Avoca | Verdict | Driven 2026-09-06 |
+|---|---|---|---|---|---|---|---|---|---|
+| 64 | Forms / checklists with photos and signature | ✅ forms; no signature on forms | ✅ | ✅ Connect | ✅ | ✅ | n/a | PARITY− | ✅ VERIFIED · W11 — form attached and filled; no signature on forms |
+| 65 | Job photos before/after, annotation | ✅ pairing; no annotation | ✅ | ✅ | ✅ annotation, reports | ✅ | n/a | PARITY− | ✅ VERIFIED · W11 — camera capture only (no file picker) |
+| 66 | Time tracking + job costing / profit | ✅ job, customer, tech P&L; voice lookup | ✅ | ✅ Grow | ◐ | ✅ | n/a | PARITY+ | ✅ VERIFIED · W11 D8 — time entries, job P&L card, job-profit report |
+| 67 | Expenses with receipts | ? voice-only write, no screen — unverified | ✅ | ✅ Connect | ◐ | ◐ | n/a | PARITY− | ⛔ BLOCKED · — — voice-only write, needs LLM key |
+| 68 | Inventory / purchase orders | ❌ materials list only | ✅ | ❌ | ◐ | ✅ $ | n/a | **WON'T** | — ABSENT · — — absent |
+| 69 | Offline mobile | ? durable queue for voice + approvals — unverified | ? | ✅ | ◐ view-only | ✅ | n/a | PARITY | ⛔ BLOCKED · M3 — mobile unbuildable here |
+| 70 | Push notifications | ? native; no web push — unverified | ✅ | ✅ | ✅ | ✅ | n/a | PARITY | ⛔ BLOCKED · M11 — mobile unbuildable here |
+| 71 | Dashboards / custom reports | ◐ digest-as-dashboard + fixed reports | ✅ custom | ✅ 20+ | ✅ Analyst AI | ✅ | ✅ | GAP by design | ✅ VERIFIED · W12 D8 — money dashboard nets refunds; CSV export |
+| 72 | Ask questions of your data in plain language | ? voice/chat lookups — unverified | ✅ Atlas | ✅ AI chat | ✅ Analyst AI | ◐ | ✅ | PARITY | ⛔ BLOCKED · W13 — needs LLM key |
+| 73 | Open API, outbound webhooks, Zapier | ❌ inbound only; partial Swagger | ✅ gated | ✅ GraphQL + webhooks | ✅ MAX | ✅ | ◐ | **GAP** (Tier 2) | ✅ VERIFIED · D10 — Swagger up; /api/v1 prefix unmounted; no webhooks |
+| 74 | Custom roles | ❌ 3 fixed roles | ✅ | ✅ | ◐ | ✅ | n/a | n/a for ICP | ✅ VERIFIED · W15 — absence confirmed: 3 fixed roles |
+| 75 | Multi-location / franchise | ❌ B2B customer hierarchy only | ✅ | ❌ | ❌ | ✅ $ | ✅ roll-up | **WON'T** (anti-persona) | — ABSENT · — — absent |
+| 76 | Vertical packs (HVAC, plumbing, electrical, painting) with seeded catalog, terminology, intake questions | ❌ (2 of 4 fully built) — failed drive | ✅ trade packages | ❌ | ✅ trade packages (Jul 2026) | ❌ | ✅ HVAC-native | PARITY (failed drive, §5) | ❌ FAILED · W14 — Activate 404s for every pack: web ids hvac/plumbing vs registry hvac-v1/plumbing-v1 |
+| 77 | Price | ? flat monthly, everything included — unverified | ~$245–500/tech/mo + add-ons + $5–50k setup | $29–$399+/mo + $29/user + add-ons | $59–$299/mo + unpublished add-ons | ~$187–270/mo + $100 phone + $200 AI | ~$1,000–3,500/mo, quote-only | **WIN** (structural) | ? NOT DRIVEN · — — price not verifiable from here |
 
 ### 2.6 What moved since the July review
 
@@ -515,3 +531,51 @@ finalises §3.1.
 Total new engineering for verification itself is small — the harnesses exist. The cost
 is calendar time for trials and the operator secrets. The Tier 1 build list in §3.1 is a
 separate plan and should go through `ce-plan` with this ledger as its input.
+
+## 5. Visual verification 2026-09-06 — what actually ran
+
+Rule applied: **if it could not be driven at its surface and captured, it does not
+work.** Six lanes ran in this sandbox (no LLM, Stripe, Clerk, Twilio, QuickBooks or
+Wisetack credentials; Docker Postgres available; Chromium available). Each lane left
+`results.json`, a narrative report and per-step captures under the session scratchpad
+(`scratchpad/visual/<lane>/`); the counts below are from those files.
+
+| Lane | Harness | Drove | Verified | Failed | Blocked |
+|---|---|---|---|---|---|
+| Web operator (W1–W16) | in-memory API :3100, Vite dev auth :5100/:5101, Playwright, 111 PNGs | inbox + undo, dispatch board, schedule, technician day, estimates, invoices, comms inbox, feedback + campaigns, leads, customers, jobs, reports, assistant, settings tour, 375 px pass | 14 | 2 (rows 52, 76) | 1 (row 21) |
+| Public pages (P1–P8) | in-memory API, Playwright, 44 PNGs | booking, intake, estimate approval + signature + deposit, pay page, portal, one-tap pages, 390 px pass | 7 | 0 | 1 (P6 review handoff) |
+| Voice webhooks (V1–V14) | in-memory API, signed Twilio Gather webhooks | answer, recognition, E1/E2 triage, warm transfer, call cap, click-to-call, one-tap, health | 7 | 3 (V1, V6, V11) | 4 (re-driven by the SMS lane where Postgres was the blocker) |
+| SMS + after-hours (S1–S8) | Postgres :55434, API :3600, signed webhooks | inbound capture, STOP/START, unknown sender, OMW/OUT, Y/N/EDIT, after-hours, dropped call, escalation stream | 6 | 2 (S7, S8) | 0 |
+| Money loop + workers (D1–D13) | Postgres :55433, API :3400, fake AI provider, real sweep intervals (65 min) | agreements, milestone + batch billing, dunning, refunds, dedup/merge, post-job comms + DNC, digest, reports, integrations, API surface, isolation, portal API, audit | 13 | 1 (D2 milestone) | 0 |
+| Mobile (M1–M11) | Expo app | nothing: no installed Expo deps in the workspace and a Clerk-gated sign-in with no dev shim | 0 | 0 | 11 |
+
+### 5.1 Bugs the drives found
+
+| # | Where | What the capture shows | Status |
+|---|---|---|---|
+| 1 | `invoices/schedule-completion.ts`, `proposals/execution/invoice-schedule-handler.ts` | 50/50 schedule on an accepted estimate: deposit minted, job completed via HTTP, balance never created, no error or audit. Second INSERT trips `uq_invoices_estimate`; catch swallowed every 23505 as "already minted". | **Fixed a5f6500** (estimate link on first milestone only; catch matches the milestone index by constraint name; Postgres integration test) |
+| 2 | `telephony/recording-transcript-hook.ts` | Session looked up by CallSid alone; a webhook resolving a different tenant would ingest the other tenant's transcript. | **Fixed 97ecb6a** (tenant guard + test) |
+| 3 | `monitoring/capture-server-error.ts`, global handler | Route tag fell back to raw `req.path`; Sentry tags bypass `beforeSend`, so a 5xx on a token route carried the token. | **Fixed ea3f46d** (shared redacted-route helper + tests) |
+| 4 | `escalations/events-route.ts:73` vs `voice-session-store.ts:99` | A real flooding emergency escalated server-side while a dispatcher was on the SSE stream; only `: hb` keepalives arrived in 40 s. Route filters `escalation_started`; only `escalation_triggered` is ever emitted. | Open (row 4) |
+| 5 | `webhooks/routes.ts` status branch; `DroppedCallScheduler` | `CallStatus=completed` on the status webhook returns 200 and does nothing: no session close, no recovery row, ten sweeps `due:0`. The scheduler is only reached from in-band Gather/WS teardown. | Open (row 11) |
+| 6 | `ai/agents/customer-calling/*` disclosure; inbound DNC | CA and NY callers get identical recording copy; a DNC-listed caller is answered normally on the Gather path. | Open (row 10) |
+| 7 | `packages/web/.../VerticalPacksSheet.tsx` vs `shared/canonical-vertical-packs.ts` | Activate on HVAC or Plumbing always toasts "Could not update pack": web sends `hvac`, registry knows `hvac-v1`. Reproduced by request; `hvac-v1` succeeds. | Open (row 76) |
+| 8 | `ai/providers/mock.ts` | "Suggest reply" without an LLM key fills the composer with `{"ok":true,"mock":true,"taskType":"suggest_reply",...}`. | Open (row 52) |
+
+Smaller findings recorded in the lane reports: the Customer-detail "Message" action links to a page that ignores its `customerId`; the operator "Mark as paid" modal has no amount field so partial payments are API-only; public-booking proposals can never be approved by SMS because only the unsupervised-routing path records the outbound render row; START does not resync `customers.consent_status`; an agreement created without a location fails only at run time; `PgSettingsRepository.create()` does not persist `milestone_billing_enabled`; `DEV_AUTH_BYPASS` on a Postgres boot accepts an unsigned JWT and bootstraps tenant rows (dev-only, but the skill said it would be rejected).
+
+### 5.2 What stays unverified until the operator work lands
+
+| Needs | Rows |
+|---|---|
+| LLM key (real answering, quoting, drafting, learning, photo-to-quote, assistant execution, data questions) | 1 (real LLM), 3, 5, 14 (execution), 17, 19, 35, 52 (real suggestion), 67, 72 |
+| Stripe (cards, ACH, saved cards, Terminal) | 38, 39, 40, 43 |
+| Clerk + Postgres second user (dispatch drag-and-drop) | 21 |
+| Expo dependencies + Clerk (whole mobile app) | 30, 40, 69, 70 |
+| Realtime transport flag (Spanish) | 7 |
+| QuickBooks OAuth, Wisetack, Google Business | 34, 49, 53 (handoff) |
+| Live number / real Twilio (everything above re-run against a real call) | §4.1 staging scripts |
+
+Re-run order once secrets exist: the twelve §4.1 staging call scripts on a real number,
+then rows 38/39 with a test card and a test bank, then the mobile lane on a device.
+
