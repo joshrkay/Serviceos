@@ -65,7 +65,21 @@ export function createRecordingTranscriptHook(
     // Ended-inclusive lookup: by the time Twilio's recording webhook fires,
     // the FSM has terminated and `ended === true` on every normal hangup
     // path (precedent: TwilioGatherAdapter#stampCallOutcomeByCallSid).
-    const session = store.findByCallSidIncludingEnded(callSid);
+    // The store is keyed by CallSid alone, while the webhook resolves its
+    // tenant independently (live session, else phone-number lookup, else
+    // TWILIO_DEFAULT_TENANT_ID). If the two disagree, the session's transcript
+    // belongs to ANOTHER tenant and must never be ingested under this one —
+    // treat it as absent and let the persisted-rows / unrecoverable paths run.
+    let session = store.findByCallSidIncludingEnded(callSid);
+    if (session && session.tenantId !== tenantId) {
+      logger.warn('recording-transcript-hook: session tenant differs from webhook tenant — ignoring session transcript', {
+        callSid,
+        voiceRecordingId,
+        webhookTenantId: tenantId,
+        sessionTenantId: session.tenantId,
+      });
+      session = undefined;
+    }
 
     let persistedForCall: Awaited<ReturnType<CallTranscriptTurnRepository['listByCallSid']>> = [];
     try {

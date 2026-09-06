@@ -103,6 +103,21 @@ async function unrecoverableAudits(auditRepo: InMemoryAuditRepository, recording
 }
 
 describe('createRecordingTranscriptHook (U8)', () => {
+  it('never ingests a session whose tenant differs from the webhook tenant (cross-tenant guard)', async () => {
+    // The store is keyed by CallSid only; the webhook may resolve a different
+    // tenant (phone-number fallback, TWILIO_DEFAULT_TENANT_ID). The other
+    // tenant's transcript must not land in this tenant's recording or index.
+    const OTHER_TENANT = '22222222-2222-2222-2222-222222222222';
+    const foreign = { ...fakeSession({ transcript: ['agent: hi', 'caller: my address is 1 Main St'] }), tenantId: OTHER_TENANT } as VoiceSession;
+    const { hook, send, auditRepo, repo } = harness({ session: foreign });
+
+    await hook(event());
+
+    expect(send).not.toHaveBeenCalled();
+    expect(await repo.listByCallSid(TENANT, CALL_SID)).toHaveLength(0);
+    expect(await unrecoverableAudits(auditRepo, RECORDING_1)).toHaveLength(1);
+  });
+
   it('Twilio retry (inserted=false): touches nothing — the first delivery already handled it', async () => {
     const { hook, repo, send, store, auditRepo } = harness({
       session: fakeSession({ transcript: ['agent: hi'] }),
