@@ -15,7 +15,12 @@
  */
 import { v4 as uuidv4 } from 'uuid';
 import { Invoice, InvoiceRepository, createInvoiceWithNextNumber } from './invoice';
-import { InvoiceScheduleRepository, splitMilestones } from './invoice-schedule';
+import {
+  InvoiceScheduleRepository,
+  isDuplicateMilestoneError,
+  milestoneEstimateLink,
+  splitMilestones,
+} from './invoice-schedule';
 import { SettingsRepository } from '../settings/settings';
 import { withRequestSavepoint } from '../middleware/tenant-context';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
@@ -62,6 +67,10 @@ export async function mintCompletionMilestones(
   const created: Invoice[] = [];
   for (const schedule of schedules) {
     const allocations = splitMilestones(schedule.totalAmountCents, schedule.milestones);
+    // Only one invoice per estimate may carry estimate_id (uq_invoices_estimate).
+    // The deposit minted at approval normally holds it; if nothing does yet, the
+    // first milestone minted here takes it and the rest go without.
+    let estimateId = milestoneEstimateLink(schedule.estimateId, existing);
     for (const alloc of allocations) {
       if (alloc.trigger !== 'on_completion') continue;
       if (alloc.amountCents <= 0) continue;
@@ -81,7 +90,7 @@ export async function mintCompletionMilestones(
             {
               tenantId: job.tenantId,
               jobId: job.id,
-              estimateId: schedule.estimateId,
+              estimateId,
               lineItems: [buildLineItem(uuidv4(), alloc.label, 1, alloc.amountCents, 0, true)],
               createdBy: COMPLETION_ACTOR,
               scheduleId: schedule.id,
@@ -96,16 +105,19 @@ export async function mintCompletionMilestones(
         // milestone: the partial unique index uniq_invoices_schedule_milestone
         // (schedule_id, milestone_index) rejects the duplicate INSERT with
         // 23505 before any invoice number is allocated. Treat it as already
-        // minted and move on — the other run owns the invoice. Any other error
-        // is a real failure and must propagate.
-        if (err && typeof err === 'object' && (err as { code?: string }).code === '23505') {
+        // minted and move on — the other run owns the invoice (and the
+        // estimate link, if any). Any other error — including a 23505 from a
+        // different index — is a real failure and must propagate.
+        if (isDuplicateMilestoneError(err)) {
           minted.add(key);
+          estimateId = undefined;
           continue;
         }
         throw err;
       }
       created.push(invoice);
       minted.add(key);
+      estimateId = undefined;
 
       if (deps.auditRepo) {
         await deps.auditRepo.create(

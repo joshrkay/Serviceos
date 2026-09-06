@@ -151,6 +151,39 @@ export function splitMilestones(
   }));
 }
 
+/**
+ * Name of the partial unique index on invoices(schedule_id, milestone_index).
+ * Both mint paths (schedule approval and job completion) treat a 23505 from
+ * THIS index as "another run already minted this milestone". A 23505 from any
+ * other index (notably uq_invoices_estimate) is a real failure and must
+ * propagate: swallowing it once silently dropped every milestone invoice after
+ * the first on schedules that carry an estimateId.
+ */
+export const MILESTONE_UNIQUE_INDEX = 'uniq_invoices_schedule_milestone';
+
+/** True only for the (schedule_id, milestone_index) duplicate-key violation. */
+export function isDuplicateMilestoneError(err: unknown): boolean {
+  if (!err || typeof err !== 'object') return false;
+  const e = err as { code?: string; constraint?: string };
+  return e.code === '23505' && e.constraint === MILESTONE_UNIQUE_INDEX;
+}
+
+/**
+ * `invoices.estimate_id` is UNIQUE (uq_invoices_estimate): an estimate
+ * converts to exactly one invoice. A milestone plan bills one estimate across
+ * several invoices, so only the FIRST invoice minted for the schedule's
+ * estimate carries the link; later milestones reach the estimate through
+ * their schedule row. Returns the estimateId to stamp on the next milestone
+ * invoice, or undefined when an invoice on the job already holds the link.
+ */
+export function milestoneEstimateLink(
+  estimateId: string | undefined,
+  jobInvoices: ReadonlyArray<{ estimateId?: string }>,
+): string | undefined {
+  if (!estimateId) return undefined;
+  return jobInvoices.some((inv) => inv.estimateId === estimateId) ? undefined : estimateId;
+}
+
 export interface CreateInvoiceScheduleInput {
   tenantId: string;
   jobId: string;
