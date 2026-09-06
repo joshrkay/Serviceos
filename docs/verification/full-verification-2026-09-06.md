@@ -384,6 +384,7 @@ Execution model: Fable 5.1 writes the story, allowed files, and acceptance test 
 | P2-4 | **Leads web component tests** (G-3): jsdom tests for `LeadList`, `LeadCreate`, `LeadDetail` covering render, validation, convert-to-customer and mark-lost actions. | `packages/web/src/pages/leads/*.test.tsx` | Web vitest green; ≥70 % line coverage on those files. |
 | P2-5 | **Stripe fetch timeouts** (C-2): add `AbortSignal.timeout(…)` to the nine Stripe fetches; unit-test the timeout path with a mocked fetch. | `packages/api/src/payments/stripe-*.ts` + tests | Unit tests prove a stalled fetch rejects within the budget. |
 | P2-6 | **Dispatch presence async wrapper** (C-3). | `packages/api/src/dispatch/presence-routes.ts` + test | A thrown handler yields a JSON 500, not a hung request. |
+| P2-8 | **Same money-display class as D-7 in the remaining estimate surfaces**: `EstimateDocPreview` (customer preview modal) and `SendEstimateSheet`'s internal rows still sum `qty × rate` float dollars with no tax; the AI-suggestion advisory string does too. Route all three through `computeEstimatePreviewTotals` / `totals`. | `packages/web/src/components/estimates/EstimatesPage.tsx`, `SendEstimateSheet.tsx` + tests | jsdom tests assert the preview modal and send sheet show the taxed total for the D-7 fixture. |
 | P2-7 | **WebSocket upgrade honours `DEV_AUTH_BYPASS`** (D-8) so realtime surfaces run under the dev harness and the P1-2 Playwright project; production path unchanged and still refused when bypass is off. | `packages/api/src/**/ws*` auth hook + test | Unit test: bypass on + unsigned JWT → upgrade accepted; bypass off → rejected as today; `/dispatch` under dev-auth shows presence without console auth errors. |
 
 ### P3 — backlog
@@ -404,9 +405,9 @@ Execution model: Fable 5.1 writes the story, allowed files, and acceptance test 
 
 | Story | Worker | State |
 |---|---|---|
-| P1-1 JSON 404 for unmatched `/api/*` | Sonnet, isolated worktree | implemented + supertest tests; full API unit suite re-run in progress before commit |
+| P1-1 JSON 404 for unmatched `/api/*` | Sonnet, isolated worktree | **merged** as `7ed1cc5` (tsc build, lint, 14 163 API unit tests green; route-manifest snapshot +1 layer; C-1 closed in the deferred queue) |
 | P1-2 dev-auth Playwright project | Sonnet, isolated worktree | in progress |
-| P1-3 estimate total from `totals` | Sonnet, isolated worktree | in progress |
+| P1-3 estimate total from `totals` | Sonnet, isolated worktree | **merged** as `c310786` (`computeEstimatePreviewTotals` + 7 unit tests, jsdom test renders "Tax (8.00%)" and $381.24; web suite 2 067 passed; line totals now round unit price to cents before multiplying) |
 
 Fable reviews each worktree diff against Core Patterns / Code Hygiene before merging into `claude/feature-workflow-testing-s8dbhs`.
 
