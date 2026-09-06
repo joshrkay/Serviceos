@@ -1,4 +1,5 @@
-import { test, expect, Page } from '@playwright/test';
+import { Page } from '@playwright/test';
+import { test, expect, skipUnlessAuthedStack } from './helpers/dev-auth';
 import { hasRealClerkPublishableKey } from './helpers/clerk-key';
 
 /**
@@ -17,17 +18,12 @@ import { hasRealClerkPublishableKey } from './helpers/clerk-key';
  * The backend is mocked via page.route — the page is public
  * (view-token-gated) — so no DB or Clerk journey secrets are needed beyond
  * the UI bundle booting with a real Clerk publishable key (CI placeholder
- * is not enough, hence hasRealClerkPublishableKey()).
- *
- * NOTE (honesty): this spec was written but NOT executed in this session —
- * VITE_CLERK_PUBLISHABLE_KEY / E2E_BASE_URL are unset here, so
- * hasRealClerkPublishableKey() is false and every test below self-skips.
- * The 320px verification actually performed in this session is the jsdom
- * class-contract test (InvoicePaymentPage.layout.test.tsx) plus the
- * explicit grid-track-budget arithmetic in that same file — see the report.
+ * is not enough, hence hasRealClerkPublishableKey()) OR the chromium-devauth
+ * project (e2e/helpers/dev-auth.ts, D-2), which boots the same public
+ * bundle without touching Clerk's CDN — this page is outside the auth-gated
+ * route tree, so dev-auth's always-"signed in" shim is harmless here. As of
+ * D-2 this now actually executes under chromium-devauth — see e2e/README.md.
  */
-
-const hasClerk = hasRealClerkPublishableKey();
 
 const invoiceView = {
   id: 'inv-e2e-1',
@@ -84,10 +80,13 @@ async function horizontalOverflow(page: Page): Promise<number> {
 }
 
 test.describe('invoice payment page — mobile layout / B7.5 descriptive unit', () => {
-  test.skip(
-    !hasClerk,
-    'Set VITE_CLERK_PUBLISHABLE_KEY locally or E2E_BASE_URL to run UI E2E tests',
-  );
+  test.beforeEach(async ({ devAuthActive }) => {
+    skipUnlessAuthedStack(
+      devAuthActive,
+      hasRealClerkPublishableKey(),
+      'Set VITE_CLERK_PUBLISHABLE_KEY locally or E2E_BASE_URL to run UI E2E tests (or run under the chromium-devauth project)',
+    );
+  });
 
   test.describe('320px (smallest supported phone)', () => {
     test.use({ viewport: { width: 320, height: 690 } });

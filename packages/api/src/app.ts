@@ -7005,6 +7005,24 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
   // catch-all can serve index.html for them.
   registerMarketingRedirects(app);
 
+  // RIVET C-1 — JSON 404 for unmatched API-shaped routes.
+  //
+  // Without this, an unmatched `/api/*`, `/public/*`, or `/webhooks/*` path
+  // fell through to the SPA catch-all below: 200 text/html (SPA shell) when
+  // packages/web/dist is built, or the "Frontend assets unavailable" 500
+  // when it isn't. Mobile hooks do `if (!res.ok) throw` then `res.json()`,
+  // so an unexpected 200 HTML body surfaces as an opaque SyntaxError.
+  //
+  // Mounted on the three API-shaped prefixes (not a bare '*') so every
+  // non-API path (client-side SPA routes like /jobs, /customers/123) still
+  // falls through unchanged to the catch-all below. Express's path-prefix
+  // matching requires a '/' or end-of-string boundary after the mount path,
+  // so this does NOT intercept `/api-docs` (Swagger UI, mounted earlier and
+  // meant to stay public).
+  app.use(['/api', '/public', '/webhooks'], (_req, res) => {
+    res.status(404).json({ error: 'NOT_FOUND', message: 'Route not found' });
+  });
+
   // Catch-all route for client-side routing — serves index.html for all non-API routes
   // This allows the React SPA to handle routing on the client side.
   // This route sits AFTER the global error handler, so sendFile's next(err)

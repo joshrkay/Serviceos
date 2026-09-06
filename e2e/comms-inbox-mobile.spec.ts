@@ -1,4 +1,5 @@
-import { test, expect, Page } from '@playwright/test';
+import { Page } from '@playwright/test';
+import { test, expect, skipUnlessAuthedStack, dismissWhatsNewModal } from './helpers/dev-auth';
 
 /**
  * Mobile/glove hardening for the unified communication inbox (/comms-inbox, U5).
@@ -10,11 +11,12 @@ import { test, expect, Page } from '@playwright/test';
  *   - ≥44px tap targets for the thread rows and the mobile "Back" control
  *
  * Unlike the public estimate page, the inbox lives behind auth, so this only
- * runs against an authenticated E2E_BASE_URL; without one it skips (the jsdom
- * test still guards the layout contract on every run). The conversations API
- * is mocked via page.route so the assertions are pure layout.
+ * runs against an authenticated E2E_BASE_URL, or the chromium-devauth
+ * project (e2e/helpers/dev-auth.ts, D-2), which boots the whole authenticated
+ * SPA with no Clerk cloud; without either it skips (the jsdom test still
+ * guards the layout contract on every run). The conversations API is mocked
+ * via page.route so the assertions are pure layout.
  */
-const hasAuthedBase = !!process.env.E2E_BASE_URL;
 
 const THREADS = {
   threads: [
@@ -52,24 +54,36 @@ const MESSAGES = [
   },
 ];
 
+// Anchored to the URL path (not a bare "contains" glob): under a real,
+// unbundled vite dev server (chromium-devauth — D-2) the app's OWN source
+// module is served at `/src/api/conversations.ts`, which a `**/api/conversations**`
+// glob also matches (it contains the substring "api/conversations"),
+// intercepting the module script itself and returning JSON in its place —
+// a blank white page (module graph fails to load). Matching on `pathname`
+// instead only catches the real `/api/conversations...` network calls.
+const CONVERSATIONS_API_PATH = /^\/api\/conversations(\/|\?|$)/;
+
 async function mockConversationsApi(page: Page): Promise<void> {
-  await page.route('**/api/conversations**', async (route) => {
-    const url = route.request().url();
-    const method = route.request().method();
-    if (url.includes('/messages')) {
-      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(MESSAGES) });
-      return;
-    }
-    if (url.includes('/reply') || url.includes('/suggest-reply')) {
-      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ draft: 'ok' }) });
-      return;
-    }
-    if (method === 'GET') {
-      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(THREADS) });
-      return;
-    }
-    await route.fulfill({ status: 200, contentType: 'application/json', body: '{}' });
-  });
+  await page.route(
+    (url) => CONVERSATIONS_API_PATH.test(url.pathname),
+    async (route) => {
+      const url = route.request().url();
+      const method = route.request().method();
+      if (url.includes('/messages')) {
+        await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(MESSAGES) });
+        return;
+      }
+      if (url.includes('/reply') || url.includes('/suggest-reply')) {
+        await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ draft: 'ok' }) });
+        return;
+      }
+      if (method === 'GET') {
+        await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(THREADS) });
+        return;
+      }
+      await route.fulfill({ status: 200, contentType: 'application/json', body: '{}' });
+    },
+  );
 }
 
 async function horizontalOverflow(page: Page): Promise<number> {
@@ -81,11 +95,18 @@ async function horizontalOverflow(page: Page): Promise<number> {
 async function openInbox(page: Page): Promise<void> {
   await mockConversationsApi(page);
   await page.goto('/comms-inbox');
+  await dismissWhatsNewModal(page);
   await expect(page.getByText('Dana Diaz')).toBeVisible();
 }
 
 test.describe('comms inbox — mobile layout', () => {
-  test.skip(!hasAuthedBase, 'Set E2E_BASE_URL (authenticated) to run the comms-inbox UI E2E test');
+  test.beforeEach(async ({ devAuthActive }) => {
+    skipUnlessAuthedStack(
+      devAuthActive,
+      !!process.env.E2E_BASE_URL,
+      'Set E2E_BASE_URL (authenticated) to run the comms-inbox UI E2E test (or run under the chromium-devauth project)',
+    );
+  });
 
   test.describe('320px (smallest supported phone)', () => {
     test.use({ viewport: { width: 320, height: 690 } });

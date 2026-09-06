@@ -1,4 +1,5 @@
-import { test, expect, Page } from '@playwright/test';
+import { Page } from '@playwright/test';
+import { test, expect, skipUnlessAuthedStack } from './helpers/dev-auth';
 import { hasRealClerkPublishableKey } from './helpers/clerk-key';
 
 /**
@@ -14,11 +15,12 @@ import { hasRealClerkPublishableKey } from './helpers/clerk-key';
  * The page is public (token-less, tenant in the ?t= query param) and these
  * are pure layout assertions, so the API is mocked via page.route — no DB or
  * Clerk journey secrets are needed beyond a real Clerk publishable key for
- * the UI bundle (CI placeholder is not enough — see clerk-key.ts).
+ * the UI bundle (CI placeholder is not enough — see clerk-key.ts) OR the
+ * chromium-devauth project (e2e/helpers/dev-auth.ts), which boots the same
+ * public bundle without touching Clerk's CDN at all — this page renders
+ * outside the auth-gated route tree either way, so it doesn't matter that
+ * dev-auth's shim is always "signed in".
  */
-
-// Real Clerk pk (or deployed base) — same gate as estimate-approval mobile.
-const hasClerk = hasRealClerkPublishableKey();
 
 const TENANT_ID = '11111111-1111-4111-8111-111111111111';
 
@@ -69,10 +71,13 @@ async function horizontalOverflow(page: Page): Promise<number> {
 }
 
 test.describe('public booking — mobile layout', () => {
-  test.skip(
-    !hasClerk,
-    'Set VITE_CLERK_PUBLISHABLE_KEY locally or E2E_BASE_URL to run UI E2E tests',
-  );
+  test.beforeEach(async ({ devAuthActive }) => {
+    skipUnlessAuthedStack(
+      devAuthActive,
+      hasRealClerkPublishableKey(),
+      'Set VITE_CLERK_PUBLISHABLE_KEY locally or E2E_BASE_URL to run UI E2E tests (or run under the chromium-devauth project)',
+    );
+  });
 
   test.describe('320px (smallest supported phone)', () => {
     test.use({ viewport: { width: 320, height: 690 } });
