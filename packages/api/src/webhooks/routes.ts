@@ -655,10 +655,12 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
             });
           }
 
-          // Enqueue Twilio subaccount provisioning for new tenants only.
-          // Idempotent — the worker checks tenant_integrations.status and
-          // skips if already active, so safe to re-enqueue on webhook replay.
-          if (result.created && deps.queue) {
+          // Retry enqueue even when bootstrapTenant finds an existing tenant:
+          // an earlier delivery may have persisted it before enqueue failed.
+          // Awaiting send propagates failures to the webhook retry handler.
+          // Keep the stable tenant key to dedupe a message still in the queue;
+          // the worker also checks existing provisioning before doing work.
+          if (deps.queue) {
             const region = (userData.unsafe_metadata as Record<string, unknown>)?.region as string | undefined;
             // Twilio callbacks land on the API origin and signatures are
             // verified against PUBLIC_API_URL (see reconstructWebhookUrl in
