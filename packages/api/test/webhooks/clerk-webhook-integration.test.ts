@@ -18,6 +18,7 @@ import { createWebhookRouter } from '../../src/webhooks/routes';
 import { Tenant, TenantRepository } from '../../src/auth/clerk';
 import type { AppConfig } from '../../src/shared/config';
 import { InMemoryAuditRepository } from '../../src/audit/audit';
+import { InMemoryQueue } from '../../src/queues/queue';
 
 const WEBHOOK_SECRET = 'whsec_dGVzdC1zZWNyZXQ='; // base64("test-secret")
 
@@ -385,15 +386,19 @@ describe('EXP-3 — Clerk webhook → tenant bootstrap integration', () => {
     });
   });
 
-  it('returns signup response without waiting for downstream provisioning enqueue', async () => {
+  it('awaits the durable provisioning enqueue (not downstream worker processing) before responding', async () => {
+    // The webhook now waits for provisioningQueue.send() — a single durable
+    // write, same contract as PgQueue.send()/InMemoryQueue.send() — because
+    // its failure must be able to fail the response (see the "root
+    // provisioning enqueue" describe block below). It must NOT wait for a
+    // worker to later receive/process the message: no worker runs in this
+    // test at all, proving the wait is bounded to the durable write itself.
     const auditRepo = new InMemoryAuditRepository();
-    let releaseEnqueue: (() => void) | undefined;
-    const enqueueStarted = new Promise<void>((resolve) => {
-      releaseEnqueue = resolve;
-    });
+    const order: string[] = [];
     const provisioningQueue = {
       send: async () => {
-        await enqueueStarted;
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        order.push('enqueue-settled');
         return 'msg-tenant-provisioning-1';
       },
     };
@@ -404,27 +409,26 @@ describe('EXP-3 — Clerk webhook → tenant bootstrap integration', () => {
     const payload = userCreatedPayload('user_async_1', 'async@example.com');
     const { signature } = signSvixPayload(payload, svixId, svixTimestamp, WEBHOOK_SECRET);
 
-    const responsePromise = request(appWithQueue)
+    const res = await request(appWithQueue)
       .post('/webhooks/clerk')
       .set('svix-id', svixId)
       .set('svix-timestamp', svixTimestamp)
       .set('svix-signature', signature)
       .send(payload);
+    order.push('response-received');
 
-    const res = await responsePromise;
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ received: true });
+    // The response arrived only AFTER the durable send() resolved.
+    expect(order).toEqual(['enqueue-settled', 'response-received']);
 
     const bootstrapEvents = auditRepo.getAll().filter((e) => e.eventType === 'tenant.signup.bootstrap.completed');
     expect(bootstrapEvents).toHaveLength(1);
     expect(bootstrapEvents[0].correlationId).toBe(`signup:${svixId}`);
 
-    // Unblock enqueue completion after HTTP response has already returned.
-    releaseEnqueue?.();
-    await new Promise((resolve) => setTimeout(resolve, 0));
-
-    const allEvents = auditRepo.getAll();
-    const queuedEvent = allEvents.find((e) => e.eventType === 'tenant.signup.provisioning.enqueued');
+    // Already present by the time the response returns — no manual flush
+    // needed, since the enqueue (and its audit event) is awaited in-request.
+    const queuedEvent = auditRepo.getAll().find((e) => e.eventType === 'tenant.signup.provisioning.enqueued');
     expect(queuedEvent).toBeTruthy();
     expect(queuedEvent?.correlationId).toBe(`signup:${svixId}`);
     expect(queuedEvent?.metadata?.queueMessageId).toBe('msg-tenant-provisioning-1');
@@ -530,5 +534,156 @@ describe('owner membership insert — webhook failure semantics', () => {
     expect(queries.some((q) => q.includes("set_config('app.current_tenant_id'"))).toBe(true);
     expect(queries.filter((q) => q.includes('COMMIT'))).toHaveLength(1);
     expect(client.release).toHaveBeenCalled();
+  });
+});
+
+/**
+ * Provisioning recovery — the root-provisioning enqueue (deps.provisioningQueue)
+ * is now AWAITED (the durable `send()` write, not worker completion) and no
+ * longer gated on `result.created`, so:
+ *   1. A standalone enqueue failure (nothing else on the request fails) now
+ *      fails the webhook (500) instead of silently swallowing the error and
+ *      returning 200 with no durable trace of the attempt.
+ *   2. bootstrapTenant's idempotent re-check makes `result.created` false on
+ *      any retry (own-enqueue-triggered or forced by a later failure, e.g.
+ *      the owner-insert) — the enqueue must still re-attempt, since gating on
+ *      `created` would permanently skip a tenant whose first send never
+ *      landed.
+ *   3. The queue's per-tenant idempotency key (`tenant-provisioning:${tenantId}`)
+ *      makes re-sending on retry safe: a successful prior send no-ops via
+ *      ON CONFLICT DO NOTHING, so a retry never produces a second message.
+ */
+describe('root provisioning enqueue — durable, awaited, and retry-safe', () => {
+  class UuidTenantRepository extends FakeTenantRepository {
+    async create(data: { ownerId: string; ownerEmail: string; name: string }): Promise<Tenant> {
+      const tenant = await super.create(data);
+      tenant.id = `650e8400-e29b-41d4-a716-44665544${String(this.created.length).padStart(4, '0')}`;
+      return tenant;
+    }
+  }
+
+  function makeFakePool(behavior: { failInsert: boolean }) {
+    const queries: string[] = [];
+    const client = {
+      query: vi.fn(async (sql: string) => {
+        queries.push(typeof sql === 'string' ? sql : String(sql));
+        if (behavior.failInsert && typeof sql === 'string' && sql.includes('INSERT INTO users')) {
+          throw new Error('transient insert failure');
+        }
+        return { rows: [], rowCount: 0 };
+      }),
+      release: vi.fn(),
+    };
+    const pool = { connect: vi.fn(async () => client) };
+    return { pool, queries };
+  }
+
+  function signedRequest(app: express.Express, svixId: string, userId: string, email: string) {
+    const svixTimestamp = String(Math.floor(Date.now() / 1000));
+    const payload = userCreatedPayload(userId, email);
+    const { signature } = signSvixPayload(payload, svixId, svixTimestamp, WEBHOOK_SECRET);
+    return request(app)
+      .post('/webhooks/clerk')
+      .set('svix-id', svixId)
+      .set('svix-timestamp', svixTimestamp)
+      .set('svix-signature', signature)
+      .send(payload);
+  }
+
+  it('a standalone enqueue failure (nothing else fails) still fails the webhook, and the retry lands the job', async () => {
+    // Owner-insert never fails in this test — isolates the enqueue as the
+    // ONLY failing step, reproducing the exact gap flagged in
+    // docs/plans/2026-09-08-provisioning-recovery.md ("A provisioning-only
+    // failure still can't self-heal"): pre-fix, this returned 200 and the
+    // tenant never got a root-provisioning message, with no way to recover
+    // since the event would be marked 'processed' and never retry again.
+    const tenantRepo = new UuidTenantRepository();
+    const { pool, queries } = makeFakePool({ failInsert: false });
+
+    const sendCalls: Array<{ idempotencyKey?: string }> = [];
+    const provisioningQueue = {
+      send: async <T>(_type: string, _payload: T, idempotencyKey?: string) => {
+        sendCalls.push({ idempotencyKey });
+        if (sendCalls.length === 1) {
+          throw new Error('queue unavailable');
+        }
+        return 'msg-provisioning-retry-1';
+      },
+    };
+
+    const app = express();
+    app.use(express.json());
+    const config = { CLERK_WEBHOOK_SECRET: WEBHOOK_SECRET, CLERK_SECRET_KEY: undefined } as unknown as AppConfig;
+    app.use('/webhooks', createWebhookRouter(config, {
+      tenantRepo,
+      pool: pool as never,
+      provisioningQueue,
+    }));
+
+    // Attempt 1: tenant bootstraps (created=true); the enqueue is AWAITED and
+    // rejects — that alone must fail the webhook so Clerk retries. Nothing
+    // downstream of the enqueue (the owner-insert) runs on this attempt: the
+    // rejection is synchronous with the response, not a detached rejection
+    // that needs a tick to settle.
+    const first = await signedRequest(
+      app, 'svix_provisioning_only_1', 'user_provisioning_only_1', 'provisiononly@example.com',
+    );
+    expect(first.status).toBe(500);
+    expect(sendCalls).toHaveLength(1);
+    expect(tenantRepo.created).toHaveLength(1); // tenant already durably persisted
+    expect(queries.some((q) => q.includes('INSERT INTO users'))).toBe(false); // short-circuited before owner-insert
+
+    // Attempt 2 (Clerk retry, same svix-id): bootstrapTenant is idempotent so
+    // result.created is false this time — the un-gated enqueue must still
+    // re-attempt with the SAME idempotency key, and now succeeds.
+    const second = await signedRequest(
+      app, 'svix_provisioning_only_1', 'user_provisioning_only_1', 'provisiononly@example.com',
+    );
+    expect(second.status).toBe(200);
+    expect(tenantRepo.created).toHaveLength(1); // idempotent — no second tenant
+    expect(queries.some((q) => q.includes('INSERT INTO users'))).toBe(true); // owner-insert now reached and runs
+
+    expect(sendCalls).toHaveLength(2);
+    expect(sendCalls[0].idempotencyKey).toBe(sendCalls[1].idempotencyKey);
+  });
+
+  it('a successful enqueue is deduped, not duplicated, when a later failure forces a retry', async () => {
+    // Uses the REAL InMemoryQueue (same ON CONFLICT (idempotency_key) DO
+    // NOTHING contract as PgQueue — see src/queues/queue.ts) instead of a
+    // call-counting mock, so the dedupe assertion below exercises the actual
+    // queue contract, not a restatement of it.
+    const tenantRepo = new UuidTenantRepository();
+    const behavior = { failInsert: true };
+    const { pool } = makeFakePool(behavior);
+    const provisioningQueue = new InMemoryQueue();
+
+    const app = express();
+    app.use(express.json());
+    const config = { CLERK_WEBHOOK_SECRET: WEBHOOK_SECRET, CLERK_SECRET_KEY: undefined } as unknown as AppConfig;
+    app.use('/webhooks', createWebhookRouter(config, {
+      tenantRepo,
+      pool: pool as never,
+      provisioningQueue,
+    }));
+
+    // Attempt 1: enqueue succeeds and durably lands; owner-insert then fails,
+    // forcing a Clerk retry of the same event.
+    const first = await signedRequest(
+      app, 'svix_provisioning_dedupe_1', 'user_provisioning_dedupe_1', 'dedupe@example.com',
+    );
+    expect(first.status).toBe(500);
+    expect(provisioningQueue.size()).toBe(1);
+
+    // Attempt 2 (Clerk retry, same svix-id): owner-insert now succeeds;
+    // bootstrapTenant is idempotent (created=false), so the un-gated enqueue
+    // re-attempts send() with the SAME idempotency key. The queue must dedupe
+    // it — no second message, even though send() is called again and
+    // "succeeds" (returns a fresh id per the ON CONFLICT DO NOTHING contract).
+    behavior.failInsert = false;
+    const second = await signedRequest(
+      app, 'svix_provisioning_dedupe_1', 'user_provisioning_dedupe_1', 'dedupe@example.com',
+    );
+    expect(second.status).toBe(200);
+    expect(provisioningQueue.size()).toBe(1); // still exactly one — deduped, not duplicated
   });
 });
