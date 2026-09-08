@@ -10,14 +10,14 @@ interface PackActivation {
 
 const AVAILABLE_PACKS = [
   {
-    id: 'hvac',
+    id: 'hvac-v1',
     label: 'HVAC',
     emoji: '❄️',
     description: 'Heating, ventilation & air conditioning service types',
     examples: ['AC repair', 'Furnace tune-up', 'Duct cleaning', 'Refrigerant recharge'],
   },
   {
-    id: 'plumbing',
+    id: 'plumbing-v1',
     label: 'Plumbing',
     emoji: '🔧',
     description: 'Plumbing installation, repair & maintenance service types',
