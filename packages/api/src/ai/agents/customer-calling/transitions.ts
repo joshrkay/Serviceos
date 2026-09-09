@@ -1593,25 +1593,38 @@ function transitionClosing(
   }
 
   // operator_request is handled by checkGlobalGuards and never reaches here.
-  // intent_classified in closing → treat as second intent (loop back)
+  // intent_classified in closing → a SECOND request in the same session.
+  //
+  // inapp-50 runtime verification (2026-09-09): this used to loop back to
+  // intent_capture and DROP the classified event — the operator's second
+  // request ("Open a job for Khan…" right after a booking closed) produced
+  // no readback, no speech and no proposal: dead air, and a following "yes"
+  // hit the nothing-pending guard. Every session-scoped harness case starts
+  // a fresh session, which is why it never surfaced there. Reset the
+  // per-request context exactly as `second_intent` does, then hand the SAME
+  // event to the intent_capture handler so the new request proceeds through
+  // entity_resolution → readback like a first request would (emergency
+  // fast-path, τ_int gating and the reprompt budget all apply unchanged).
   if (event.type === 'intent_classified') {
+    const resetContext: CallingAgentContext = {
+      ...context,
+      currentIntent: undefined,
+      extractedEntities: undefined,
+      pendingProposalId: undefined,
+      // WS18 — a genuine second intent abandons the live quote.
+      pendingQuote: undefined,
+      // Abandon the prior turn's run id so the second intent's proposal
+      // can't inherit the first turn's ai_runs record.
+      lastAiRunId: undefined,
+      retryCount: 0,
+    };
+    const captured = transitionIntentCapture(event, resetContext);
     return {
-      nextState: 'intent_capture',
+      ...captured,
       sideEffects: [
-        auditLog(context, 'closing', 'intent_capture', 'second_intent_via_classify'),
+        auditLog(context, 'closing', captured.nextState, 'second_intent_via_classify'),
+        ...captured.sideEffects,
       ],
-      updatedContext: {
-        ...context,
-        currentIntent: undefined,
-        extractedEntities: undefined,
-        pendingProposalId: undefined,
-        // WS18 — a genuine second intent abandons the live quote.
-        pendingQuote: undefined,
-        // Abandon the prior turn's run id so the second intent's proposal
-        // can't inherit the first turn's ai_runs record.
-        lastAiRunId: undefined,
-        retryCount: 0,
-      },
     };
   }
 

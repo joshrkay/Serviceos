@@ -196,7 +196,10 @@ describe('WS18a — second intent + low confidence', () => {
     // Deferred to the classifier → create_appointment → FSM treats as second
     // intent → back to intent_capture, pendingQuote dropped.
     expect(ctx.complete.mock.calls.length).toBe(before + 1);
-    expect(ctx.session.machine.currentState).toBe('intent_capture');
+    // The second intent is PROCESSED, not dropped (inapp-50 runtime finding,
+    // 2026-09-09): a classified second request leaves closing and rides the
+    // intent_capture path, so a high-confidence intent lands at the readback.
+    expect(ctx.session.machine.currentState).not.toBe('closing');
     expect(ctx.session.machine.currentContext.pendingQuote).toBeUndefined();
   });
 
