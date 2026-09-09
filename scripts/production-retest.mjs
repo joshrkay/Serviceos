@@ -37,8 +37,14 @@ const jwtFileArg = process.argv.includes('--jwt-file')
   : process.env.SERVICEOS_JWT_FILE || null;
 const voiceOnly = process.argv.includes('--voice-only') || process.env.VOICE_ONLY === '1';
 const waitClosed = process.argv.includes('--wait-closed') || process.env.WAIT_AI_CLOSED === '1';
+// `--probe v2..v6` → the operator-voice corpora; `--probe inapp-50` → the
+// in-app 50-case register (fixtures/voice/inapp-50-cases.json), the SAME
+// file the hermetic harness (packages/api/scripts/run-inapp-50.ts) drives, so
+// a live run and a hermetic run score one register.
 const CORPUS_PATH = probeArg
-  ? path.join(ROOT, `fixtures/voice/operator-voice-top-50-${probeArg}-cases.json`)
+  ? probeArg === 'inapp-50'
+    ? path.join(ROOT, 'fixtures/voice/inapp-50-cases.json')
+    : path.join(ROOT, `fixtures/voice/operator-voice-top-50-${probeArg}-cases.json`)
   : null;
 
 export function loadServiceosJwtFromFile(jwtFile) {
