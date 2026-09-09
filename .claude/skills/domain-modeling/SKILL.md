@@ -37,6 +37,8 @@ If a `CONTEXT-MAP.md` exists at the root, the repo has multiple contexts. The ma
 │       └── docs/adr/
 ```
 
+If `docs/agents/domain.md` exists (written by `/setup-matt-pocock-skills`), it overrides the layouts above: it names the glossary files and the ADR location for this repo, which may be a single decision log rather than a `docs/adr/` directory. Read it first and write decisions where it says.
+
 Create files lazily: only when you have something to write. If no `CONTEXT.md` exists, create one when the first term is resolved. If no `docs/adr/` exists, create it when the first ADR is needed.
 
 ## During the session

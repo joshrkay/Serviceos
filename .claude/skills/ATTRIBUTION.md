@@ -45,7 +45,7 @@ SOFTWARE.
 
 ---
 
-The following skills are vendored verbatim from **Matt Pocock's skills**
+The following skills are vendored from **Matt Pocock's skills**
 repository (the promoted `engineering/` and `productivity/` buckets, i.e.
 exactly the set shipped by the `mattpocock-skills` Claude Code plugin):
 
@@ -62,6 +62,15 @@ exactly the set shipped by the `mattpocock-skills` Claude Code plugin):
 - Vendored from: v1.2.3, commit `3cca18b368ae95cdbdebbff572ccafa662551015`
 
 The `misc/`, `in-progress/`, and `deprecated/` buckets were not vendored.
+
+Local edits to the vendored copies (re-apply when pulling upstream):
+
+- `improve-codebase-architecture`, `tdd`, `diagnosing-bugs`, `domain-modeling`:
+  read `docs/agents/domain.md` for the glossary and ADR locations before
+  falling back to a root `CONTEXT.md` and `docs/adr/`, so they pick up this
+  repo's `CONTEXT-MAP.md` layout and `docs/decisions.md` log.
+- `setup-matt-pocock-skills`: step 1b stops when the repo is already
+  configured instead of re-asking and rewriting `docs/agents/*.md`.
 The per-repo configuration these skills read (`docs/agents/issue-tracker.md`,
 `docs/agents/triage-labels.md`, `docs/agents/domain.md`, and the
 `## Agent skills` section of `CLAUDE.md`) was produced by

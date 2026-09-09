@@ -29,6 +29,10 @@ Look at the current repo to understand its starting state. Read whatever exists;
 - Is the `triage` skill installed? (a `triage` skill folder alongside this one, or `triage` in your available skills.) This decides whether Section B runs at all.
 - Monorepo signals: a `pnpm-workspace.yaml`, a `workspaces` field in `package.json`, or a populated `packages/*` with its own `src/`. These are present only in a genuinely large multi-package repo; their absence means single-context, which is almost every repo.
 
+### 1b. Stop if already configured
+
+If exploration found `docs/agents/issue-tracker.md`, `docs/agents/domain.md`, and an `## Agent skills` block in `CLAUDE.md` or `AGENTS.md`, this repo is already set up. Report what those files configure (issue tracker, label vocabulary if `docs/agents/triage-labels.md` exists, domain doc layout) and stop. Do not re-ask the sections below or rewrite the files: they may carry customisations the seed templates don't have. Continue past this point only when the user explicitly asks to reconfigure or start from scratch.
+
 ### 2. Present findings and ask
 
 Summarise what's present and what's missing. Then take the sections in order. One section, one answer, then the next.
