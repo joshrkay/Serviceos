@@ -40,7 +40,7 @@ Fifty in-app operator voice/assistant cases drawn from real usage (PostHog: cust
 | 1 | `book-01` | critical | `create_appointment` | “Book Garcia for Tuesday at 2 pm for the HVAC install” | `create_appointment` proposal, status `ready_for_review`, payload has `customerId` | customer.garcia, location.garcia |
 | 2 | `book-02` | critical | `create_appointment` | “Slot Carlos at Garcia Tuesday two o'clock for the install” | `create_appointment` proposal, status `ready_for_review`, payload has `customerId`, `technicianId` | customer.garcia, technician.carlos |
 | 3 | `book-03` | critical | `create_appointment` | “Book Smith furnace maintenance Tuesday at two” | `create_appointment` proposal, status `ready_for_review`, payload has `customerId`, after ONE which-one question | customer.smith-a, customer.smith-b, #ambiguous-name, follow-up: “104 Cedar” |
-| 4 | `book-04` | critical | `create_appointment` | “Book a furnace tune-up for Elena Ruiz Thursday at 10 am” | `create_appointment` proposal, status `draft`, payload has `customerName`, gated on `customerId` | #net-new-entity |
+| 4 | `book-04` | critical | `create_appointment` | “Book a furnace tune-up for Elena Ruiz Thursday at 10 am” | `create_appointment` proposal, payload has `customerName`, gated on `customerId` | #net-new-entity |
 | 5 | `book-05` | critical | `create_appointment` | “Book a service visit” → “It's for Khan, Tuesday at 2 pm, condenser install” | `create_appointment` proposal, status `ready_for_review`, payload has `customerId` | customer.khan |
 | 6 | `resched-01` | critical | `reschedule_appointment` | “Move Garcia's Tuesday appointment to Thursday at 10 am” | `reschedule_appointment` proposal, status `ready_for_review`, payload has `appointmentId` | appointment.garcia-tuesday, customer.garcia |
 | 7 | `cancel-01` | critical | `cancel_appointment` | “Cancel Garcia's Tuesday appointment, the customer asked” | `cancel_appointment` proposal, status `ready_for_review`, payload has `appointmentId` | appointment.garcia-tuesday, customer.garcia |
@@ -87,7 +87,7 @@ Fifty in-app operator voice/assistant cases drawn from real usage (PostHog: cust
 - **conf-02** — A duplicated confirm (client retry / double tap) must not mint a second proposal and must not escalate.
 - **conf-03** — The same sentence submitted twice (double-submit / echo) must keep the readback pending with its slots intact, then commit once on yes.
 - **conf-04** — A rejected readback followed by the corrected request must produce exactly one proposal carrying the corrected slot.
-- **noise-01** — Filler / mic-check noise gets one gentle reprompt (no LLM needed, no escalation); the next real request proceeds normally.
+- **noise-01** — Filler / mic-check noise gets one gentle reprompt (no LLM needed, no escalation); the next real request proceeds normally. LLM entries are keyed by `for` (utterance substring), so the filler entry is simply never consumed when the deterministic noise filter answers turn 1.
 
 ### Estimates & quote acceptance
 
@@ -136,7 +136,7 @@ Fifty in-app operator voice/assistant cases drawn from real usage (PostHog: cust
 | # | Key | Sev | Intent | Operator says | Must produce | Fixtures / tags |
 |---:|---|---|---|---|---|---|
 | 11 | `reassign-01` | critical | `reassign_appointment` | “Hand Garcia's Tuesday visit to Carlos” | `reassign_appointment` proposal, status `ready_for_review`, payload has `appointmentId`, `technicianId` | appointment.garcia-tuesday, technician.carlos, customer.garcia |
-| 12 | `dispatch-03` | core | `en_route` | “On my way to the Garcia job” | audited direct act (en-route) with spoken confirmation, no proposal | appointment.garcia-tuesday, customer.garcia |
+| 12 | `dispatch-03` | core | `en_route` | “On my way to the Khan install” | audited direct act (en-route) with spoken confirmation, no proposal | appointment.khan-today, customer.khan, job.khan-install |
 | 49 | `dispatch-01` | critical | `emergency_dispatch` | “No heat at the Hayes house, this is an emergency, page on-call now” | immediate escalation with on-call notification | #emergency, #seed-gap |
 | 50 | `dispatch-02` | growth | `add_crew_member` | “Add Carlos to the Garcia Tuesday job as a helper” | `add_crew_member` proposal, payload has `appointmentId`, `technicianId` | appointment.garcia-tuesday, technician.carlos, customer.garcia |
 
