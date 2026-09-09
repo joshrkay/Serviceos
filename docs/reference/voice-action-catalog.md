@@ -1330,8 +1330,19 @@ proposal (correct by design).
 > |---|---|
 > | recorded memo | `workers/voice-action-router.ts` |
 > | in-app chat (mic + typed) | `ai/orchestration/lookup-dispatch.ts` |
+> | in-app VOICE session (`/api/voice/sessions`) | `ai/voice-turn/inapp-lookup-surface.ts` → the chat dispatch above |
 > | live phone (Gather today; media-streams when #860 step 2 lands) | `ai/voice-turn/phone-lookup-surface.ts` |
 > | Voice Quality Layer 1 harness (not a production surface) | `ai/voice-quality/text-mode-driver.ts` |
+>
+> In-app VOICE is a **caller of the chat adapter**, not a fifth adapter: both
+> in-app seams have the same identity model (an authenticated OPERATOR asking
+> ABOUT a customer by name), so they share reference resolution, the
+> which-one / which-customer questions and the not-found copy; the voice
+> surface adds only speech and the `lookup_executed` session event. Until
+> 2026-09 it had no dispatch at all — an `ownerSession`-gated resolver
+> answered exactly ONE intent (`lookup_day_overview`) and every other
+> `lookup_*` fell into the drafting FSM and minted a dead `voice_clarification`
+> card.
 >
 > The Layer 1 harness (#869) is a fourth **caller**, not a fourth surface: it
 > reaches the switch through the phone's own surface adapter, with a synthetic

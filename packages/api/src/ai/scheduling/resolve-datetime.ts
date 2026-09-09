@@ -111,6 +111,54 @@ function clampDuration(min: number): number {
   return Math.min(min, MAX_DURATION_MIN);
 }
 
+/**
+ * SPOKEN clock hours written as WORDS: "Tuesday two o'clock".
+ *
+ * chrono reads "2 o'clock" as a certain hour but ignores "two o'clock"
+ * entirely, so the phrase parsed as a bare date and came back
+ * `ambiguous_no_time` — the caller was asked "what time on Tuesday?" for a
+ * sentence that stated the time out loud. That is a VOICE-shaped failure:
+ * an operator dictating a booking says "two o'clock", they do not say "2".
+ *
+ * Strictly additive by construction. The substitution is ANCHORED to the
+ * `o'clock` token (straight or curly apostrophe, or the bare "oclock"
+ * spelling) and only rewrites the number word immediately before it, so:
+ *   - no phrase that resolves today can change (they contain no "<word>
+ *     o'clock" pair — if they did, they would be failing today);
+ *   - a stray "two" anywhere else in the phrase is untouched, because a
+ *     bare word number is genuinely ambiguous ("two hours", "two of them")
+ *     and guessing at it is exactly what this module refuses to do.
+ * Nothing else about parsing, the meridiem bias, or the ambiguity report
+ * changes — an hour that is still unstated still asks.
+ */
+const SPOKEN_HOUR_WORDS: Record<string, string> = {
+  one: '1',
+  two: '2',
+  three: '3',
+  four: '4',
+  five: '5',
+  six: '6',
+  seven: '7',
+  eight: '8',
+  nine: '9',
+  ten: '10',
+  eleven: '11',
+  twelve: '12',
+};
+
+const SPOKEN_OCLOCK_RE = new RegExp(
+  `\\b(${Object.keys(SPOKEN_HOUR_WORDS).join('|')})\\b(\\s+o[’']?clock\\b)`,
+  'gi',
+);
+
+function normalizeSpokenClockWords(text: string): string {
+  return text.replace(
+    SPOKEN_OCLOCK_RE,
+    (_match, word: string, tail: string) =>
+      `${SPOKEN_HOUR_WORDS[word.toLowerCase()]}${tail}`,
+  );
+}
+
 /** Detect an explicit daypart word so "tomorrow morning" resolves to a window. */
 function detectDaypart(text: string): keyof typeof DAYPARTS | undefined {
   const lower = text.toLowerCase();
@@ -162,7 +210,10 @@ export function resolveDateTime(
   const now = opts.now ?? new Date();
   const durationMin = clampDuration(opts.defaultDurationMin ?? DEFAULT_DURATION_MIN);
 
-  const text = (phrase ?? '').trim();
+  // A spoken "two o'clock" is normalized to "2 o'clock" before chrono sees
+  // it — see normalizeSpokenClockWords for why this cannot change any phrase
+  // that resolves today.
+  const text = normalizeSpokenClockWords((phrase ?? '').trim());
   if (!text) return { ok: false, reason: 'empty' };
 
   // chrono is timezone-naive: feed it a reference Date whose LOCAL fields

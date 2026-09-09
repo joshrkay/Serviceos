@@ -73,7 +73,18 @@ export type CallingAgentEvent =
       /** True when the caller's follow-up did not resolve the ambiguity. */
       retry?: boolean;
     }
-  | { type: 'entity_not_found' }
+  /**
+   * A free-text entity reference resolved to nothing.
+   *
+   * `entityKind`/`reference` are OPTIONAL and carry WHAT was not found, so
+   * an authenticated operator surface can say it out loud ("I couldn't find
+   * a matching customer for Patel") instead of the generic caller-facing
+   * escalation line. Optional because producers that have no
+   * resolution detail in hand (fixtures, legacy dispatchers) still dispatch
+   * this event; the copy falls back to the generic noun in that case, and
+   * the TELEPHONY escalation path never reads either field.
+   */
+  | { type: 'entity_not_found'; entityKind?: string; reference?: string }
   /**
    * A free-text entity reference resolved to exactly one candidate in the
    * middle confidence band [τ_ent_confirm_low, τ_ent) — probably right, but

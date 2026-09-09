@@ -455,12 +455,19 @@ export class PgEntityResolver implements EntityResolver {
     reference: string;
     kind: EntityKind;
     jobId?: string;
+    customerId?: string;
   }): Promise<EntityResolverResult> {
-    const { tenantId, reference, kind, jobId } = input;
+    const { tenantId, reference, kind, jobId, customerId } = input;
 
-    // Guard: empty/null/whitespace-only references are not resolvable.
+    // Guard: empty/null/whitespace-only references are not resolvable —
+    // EXCEPT a customer-anchored appointment lookup, where the anchor IS the
+    // scope and the empty reference simply means "that customer's upcoming
+    // appointment" ("text Garcia that I'm running late" names no visit at
+    // all). See `customerId` on the EntityResolver interface.
     if (!reference || reference.trim() === '') {
-      return { kind: 'skipped' };
+      if (!(kind === 'appointment' && customerId)) {
+        return { kind: 'skipped' };
+      }
     }
 
     switch (kind) {
@@ -471,7 +478,7 @@ export class PgEntityResolver implements EntityResolver {
       case 'invoice':
         return this.resolveInvoice(tenantId, reference);
       case 'appointment':
-        return this.resolveAppointment(tenantId, reference, jobId);
+        return this.resolveAppointment(tenantId, reference, jobId, customerId);
       case 'estimate':
         return this.resolveEstimate(tenantId, reference);
       case 'technician':
@@ -990,6 +997,7 @@ export class PgEntityResolver implements EntityResolver {
     tenantId: string,
     reference: string,
     jobId?: string,
+    customerId?: string,
   ): Promise<EntityResolverResult> {
     const parsed = parseDateReference(reference);
     if (!parsed) {
@@ -1013,6 +1021,18 @@ export class PgEntityResolver implements EntityResolver {
       // A job anchor is the tighter scope, so it wins when we have one.
       if (jobId) {
         return this.resolveAppointmentByJob(tenantId, reference, jobId);
+      }
+
+      // SCH-D2 — no job anchor, but the SAME turn resolved a CUSTOMER
+      // ("text Garcia that I'm running twenty minutes late"). Their own
+      // upcoming appointments are the honest scope: without this the empty /
+      // nameless reference fell through to `resolveUpcomingAppointment`'s
+      // TENANT-WIDE "soonest upcoming" fallback, which would happily attach
+      // a delay notice for Garcia to a different customer's visit. Same
+      // honesty rules as every sibling fallback (one resolves, two-to-five
+      // ask, zero or overflow is not_found).
+      if (customerId) {
+        return this.resolveAppointmentByCustomer(tenantId, reference, customerId);
       }
 
       // B5.3 (AC-3, the delicate fix — see b5.3-design.md §3). Before this
@@ -1134,6 +1154,18 @@ export class PgEntityResolver implements EntityResolver {
       // by the AC-3 fix above — a genuinely nameless reference still
       // reaches here, exactly as SCH-03 requires.
       return this.resolveUpcomingAppointment(tenantId, reference);
+    }
+
+    // SCH-D2 — the reference IS a day phrase AND the turn resolved a
+    // customer ("running late for Garcia's Thursday visit"). Narrow the day
+    // window to that customer rather than searching the whole tenant's day:
+    // strictly tighter than the query below, never wider, and it keeps a
+    // one-appointment day from silently answering about someone else.
+    if (customerId) {
+      return this.resolveAppointmentByCustomer(tenantId, reference, customerId, {
+        start: parsed.start,
+        end: parsed.end,
+      });
     }
 
     // Schema column is `scheduled_start`; appointments have no title — label is
@@ -1436,6 +1468,95 @@ export class PgEntityResolver implements EntityResolver {
       kind: 'appointment' as EntityKind,
       label: new Date(row.scheduled_start).toISOString(),
       hint: row.tech_name ? `assigned to ${row.tech_name}` : 'unassigned',
+      score: 1.0,
+    }));
+
+    if (candidates.length === 1) {
+      return { kind: 'resolved', candidate: candidates[0] };
+    }
+    return { kind: 'ambiguous', candidates };
+  }
+
+  /**
+   * SCH-D2 — the CUSTOMER-anchored appointment lookup: "text Garcia that I'm
+   * running twenty minutes late" / "confirm Garcia for Tuesday". Operators
+   * name the person, not the visit, so the planner
+   * (`ai/agents/customer-calling/entity-resolution.ts`) anchors an
+   * appointment lookup on the customerId the SAME turn resolved whenever the
+   * classifier extracted no `appointmentReference`.
+   *
+   * Reached by two routes, and the ONLY difference is the time window:
+   *   - no day phrase → every UPCOMING appointment (`scheduled_start >=
+   *     now()`), which is what "running late" means with nothing else said;
+   *   - a day phrase  → that day's window, exactly the shape the tenant-wide
+   *     date branch uses, minus the tenant-wide part.
+   *
+   * The traversal is customer → jobs → appointments because `appointments`
+   * has no customer column: `appointments.job_id → jobs.customer_id` is the
+   * only real link (the same traversal `resolveJobIdsForCustomerName` +
+   * `resolveAppointmentsForJobs` already make in two hops for a NAME; here
+   * the id is already verified, so one indexed join does it). Canceled
+   * appointments are excluded, as on every other appointment branch.
+   *
+   * Honesty rules are the shared ones, so no new way to guess is introduced:
+   * exactly one row resolves; two to five become the existing one-tap
+   * `entity_ambiguous` picker carrying date + assigned tech; zero — or more
+   * than five, where reading back an arbitrary five would be a guess wearing
+   * a picker's costume — is `not_found`.
+   */
+  private async resolveAppointmentByCustomer(
+    tenantId: string,
+    reference: string,
+    customerId: string,
+    window?: { start: Date; end: Date },
+  ): Promise<EntityResolverResult> {
+    const MAX_DISAMBIGUATION_CANDIDATES = 5;
+    const rows = await withTenantConnection(this.pool, tenantId, (client) =>
+      client
+        .query<{
+          id: string;
+          scheduled_start: string;
+          status: string | null;
+          tech_name: string | null;
+        }>(
+          `SELECT a.id, a.scheduled_start, a.status,
+                  NULLIF(TRIM(COALESCE(u.first_name,'') || ' ' || COALESCE(u.last_name,'')), '') AS tech_name
+             FROM appointments a
+             JOIN jobs j
+               ON j.id = a.job_id AND j.tenant_id = a.tenant_id
+             LEFT JOIN appointment_assignments aa
+               ON aa.appointment_id = a.id AND aa.tenant_id = a.tenant_id AND aa.is_primary = true
+             LEFT JOIN users u ON u.id = aa.technician_id
+            WHERE a.tenant_id = $1
+              AND j.customer_id = $2
+              AND a.status <> 'canceled'
+              AND (
+                    ($3::timestamptz IS NULL AND a.scheduled_start >= now())
+                 OR ($3::timestamptz IS NOT NULL
+                     AND a.scheduled_start >= $3::timestamptz
+                     AND a.scheduled_start < $4::timestamptz)
+                  )
+            ORDER BY a.scheduled_start ASC
+            LIMIT ${MAX_DISAMBIGUATION_CANDIDATES + 1}`,
+          [
+            tenantId,
+            customerId,
+            window ? window.start.toISOString() : null,
+            window ? window.end.toISOString() : null,
+          ],
+        )
+        .then((r) => r.rows),
+    );
+
+    if (rows.length === 0 || rows.length > MAX_DISAMBIGUATION_CANDIDATES) {
+      return { kind: 'not_found', reference };
+    }
+
+    const candidates: EntityCandidate[] = rows.map((row) => ({
+      id: row.id,
+      kind: 'appointment' as EntityKind,
+      label: new Date(row.scheduled_start).toISOString(),
+      hint: row.tech_name ? `assigned to ${row.tech_name}` : (row.status ?? 'unassigned'),
       score: 1.0,
     }));
 

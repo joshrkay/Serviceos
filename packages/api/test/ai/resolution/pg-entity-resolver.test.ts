@@ -1064,3 +1064,199 @@ describe('PgEntityResolver — connection management', () => {
     expect(errorClient.release).toHaveBeenCalledTimes(1);
   });
 });
+
+// ---------------------------------------------------------------------------
+// SCH-D2 — customer-anchored appointment lookup ("text Garcia that I'm late")
+// ---------------------------------------------------------------------------
+//
+// These pin the BRANCHING and the parameter binding only. The SQL itself is
+// pinned against the real schema by the Docker-gated integration test
+// (test/integration/customer-anchored-appointment.test.ts) — a mocked Pool
+// cannot tell a real column from an imagined one (CLAUDE.md; see
+// docs/solutions/database-issues/mocked-pool-hides-real-schema-mismatch.md).
+
+describe('PgEntityResolver — appointment customer-anchored fallback (SCH-D2)', () => {
+  const CUSTOMER_ID = '22222222-2222-2222-2222-222222222222';
+
+  function futureIso(daysOut: number): string {
+    const d = new Date();
+    d.setUTCDate(d.getUTCDate() + daysOut);
+    return d.toISOString();
+  }
+
+  it('EMPTY reference + customerId + one upcoming appointment → resolved (not skipped)', async () => {
+    const { pool, calls } = makeMockPool([
+      undefined,
+      [{ id: 'appt-garcia', scheduled_start: futureIso(2), status: 'scheduled' }],
+    ]);
+
+    const resolver = new PgEntityResolver(pool);
+    const result = await resolver.resolve({
+      tenantId: TENANT_ID,
+      reference: '',
+      kind: 'appointment',
+      customerId: CUSTOMER_ID,
+    });
+
+    // The empty-reference guard must NOT swallow this: the anchor is the
+    // scope, and "" means "that customer's upcoming appointment".
+    expect(result.kind).toBe('resolved');
+    if (result.kind === 'resolved') {
+      expect(result.candidate.id).toBe('appt-garcia');
+      expect(result.candidate.kind).toBe('appointment');
+      expect(result.candidate.score).toBe(1.0);
+    }
+
+    const businessQuery = calls.find((c) => c.sql.includes('FROM appointments'));
+    expect(businessQuery).toBeDefined();
+    expect(businessQuery!.sql).toMatch(/tenant_id\s*=\s*\$1/);
+    // customer → jobs → appointments is the only real link (appointments has
+    // no customer column).
+    expect(businessQuery!.sql).toMatch(/JOIN jobs j/);
+    expect(businessQuery!.sql).toMatch(/j\.customer_id\s*=\s*\$2/);
+    expect(businessQuery!.sql).toMatch(/status\s*<>\s*'canceled'/);
+    expect(businessQuery!.sql).toMatch(/scheduled_start\s*>=\s*now\(\)/);
+    // No day phrase → the window params are null and the now() branch runs.
+    expect(businessQuery!.params).toEqual([TENANT_ID, CUSTOMER_ID, null, null]);
+  });
+
+  it('empty reference + NO customerId stays skipped (the guard is unchanged for everything else)', async () => {
+    const { pool, calls } = makeMockPool([undefined, []]);
+    const resolver = new PgEntityResolver(pool);
+
+    const result = await resolver.resolve({
+      tenantId: TENANT_ID,
+      reference: '   ',
+      kind: 'appointment',
+    });
+
+    expect(result.kind).toBe('skipped');
+    expect(calls).toHaveLength(0);
+  });
+
+  it('customerId + two upcoming appointments → ambiguous (the existing one-tap picker), never a pick', async () => {
+    const { pool } = makeMockPool([
+      undefined,
+      [
+        { id: 'appt-1', scheduled_start: futureIso(1), status: 'scheduled' },
+        { id: 'appt-2', scheduled_start: futureIso(4), status: 'scheduled' },
+      ],
+    ]);
+
+    const resolver = new PgEntityResolver(pool);
+    const result = await resolver.resolve({
+      tenantId: TENANT_ID,
+      reference: '',
+      kind: 'appointment',
+      customerId: CUSTOMER_ID,
+    });
+
+    expect(result.kind).toBe('ambiguous');
+    if (result.kind === 'ambiguous') {
+      expect(result.candidates.map((c) => c.id)).toEqual(['appt-1', 'appt-2']);
+      expect(result.candidates.every((c) => c.kind === 'appointment')).toBe(true);
+    }
+  });
+
+  it('customerId + zero upcoming appointments → not_found (honest, never the tenant-wide fallback)', async () => {
+    const { pool, calls } = makeMockPool([undefined, []]);
+
+    const resolver = new PgEntityResolver(pool);
+    const result = await resolver.resolve({
+      tenantId: TENANT_ID,
+      reference: '',
+      kind: 'appointment',
+      customerId: CUSTOMER_ID,
+    });
+
+    expect(result.kind).toBe('not_found');
+    // Exactly ONE appointment query — it must not fall through to
+    // resolveUpcomingAppointment's tenant-wide "soonest upcoming" scan,
+    // which would answer about a different customer.
+    expect(calls.filter((c) => c.sql.includes('FROM appointments'))).toHaveLength(1);
+  });
+
+  it('customerId + more than five upcoming → not_found, never an arbitrary five-of-many', async () => {
+    const { pool } = makeMockPool([
+      undefined,
+      Array.from({ length: 6 }, (_, i) => ({
+        id: `appt-${i}`,
+        scheduled_start: futureIso(i + 1),
+        status: 'scheduled',
+      })),
+    ]);
+
+    const resolver = new PgEntityResolver(pool);
+    const result = await resolver.resolve({
+      tenantId: TENANT_ID,
+      reference: '',
+      kind: 'appointment',
+      customerId: CUSTOMER_ID,
+    });
+
+    expect(result.kind).toBe('not_found');
+  });
+
+  it('a DAY phrase + customerId narrows the day window to that customer (never the whole tenant day)', async () => {
+    const { pool, calls } = makeMockPool([
+      undefined,
+      [{ id: 'appt-tuesday', scheduled_start: futureIso(2), status: 'scheduled' }],
+    ]);
+
+    const resolver = new PgEntityResolver(pool);
+    const result = await resolver.resolve({
+      tenantId: TENANT_ID,
+      reference: 'Tuesday',
+      kind: 'appointment',
+      customerId: CUSTOMER_ID,
+    });
+
+    expect(result.kind).toBe('resolved');
+    const businessQuery = calls.find((c) => c.sql.includes('FROM appointments'));
+    expect(businessQuery!.sql).toMatch(/j\.customer_id\s*=\s*\$2/);
+    // Window params bound (not null), so the ranged branch of the predicate runs.
+    expect(businessQuery!.params[0]).toBe(TENANT_ID);
+    expect(businessQuery!.params[1]).toBe(CUSTOMER_ID);
+    expect(typeof businessQuery!.params[2]).toBe('string');
+    expect(typeof businessQuery!.params[3]).toBe('string');
+  });
+
+  it('a JOB anchor still wins over the customer anchor (the tighter scope, unchanged)', async () => {
+    const { pool, calls } = makeMockPool([
+      undefined,
+      [{ id: 'appt-job', job_id: 'job-9', scheduled_start: futureIso(1), status: 'scheduled' }],
+    ]);
+
+    const resolver = new PgEntityResolver(pool);
+    const result = await resolver.resolve({
+      tenantId: TENANT_ID,
+      reference: 'that job',
+      kind: 'appointment',
+      jobId: 'job-9',
+      customerId: CUSTOMER_ID,
+    });
+
+    expect(result.kind).toBe('resolved');
+    const businessQuery = calls.find((c) => c.sql.includes('FROM appointments'));
+    expect(businessQuery!.sql).toMatch(/a\.job_id\s*=\s*\$2/);
+    expect(businessQuery!.params).toEqual([TENANT_ID, 'job-9']);
+  });
+
+  it('customerId is ignored for every other kind (customer lookups are unaffected)', async () => {
+    const { pool, calls } = makeMockPool([
+      undefined,
+      [{ id: 'cust-1', display_name: 'Garcia', primary_phone: null, score: 1.0 }],
+    ]);
+
+    const resolver = new PgEntityResolver(pool);
+    const result = await resolver.resolve({
+      tenantId: TENANT_ID,
+      reference: 'Garcia',
+      kind: 'customer',
+      customerId: CUSTOMER_ID,
+    });
+
+    expect(result.kind).toBe('resolved');
+    expect(calls.every((c) => !c.sql.includes('FROM appointments'))).toBe(true);
+  });
+});

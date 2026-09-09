@@ -351,7 +351,6 @@ import { PgShadowComparisonStore } from './ai/evaluation/pg-shadow-comparison';
 import { InMemoryShadowComparisonStore } from './ai/evaluation/shadow-comparison';
 import { createTtsProvider, assertTtsProviderSupportsMediaStreams } from './ai/tts/tts-provider';
 import { InAppVoiceAdapter } from './ai/agents/customer-calling/inapp-adapter';
-import { lookupDayOverview } from './ai/skills/lookup-day-overview';
 import { VoiceSessionStore } from './ai/agents/customer-calling/voice-session-store';
 import { createVoiceEventTransport } from './ai/agents/customer-calling/voice-event-transport';
 import { createVoiceSessionsRouter } from './routes/voice-sessions';
@@ -6740,18 +6739,33 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
       return s?.supportedLanguages;
     },
     extendedIntentsEnabled: voiceExtendedIntentsFlagShim,
-    ownerLookupResolver: async (tenantId, sessionId, intentType) => {
-      if (intentType !== 'lookup_day_overview') return undefined;
-      const result = await lookupDayOverview(
-        { tenantId, sessionId },
-        {
-          appointmentRepo,
-          jobRepo,
-          proposalRepo,
-          userRepo,
-        },
-      );
-      return result.summary;
+    // Read-only `lookup_*` dispatch for in-app operator voice — the SAME
+    // bundle the assistant-chat router and the live phone get (see
+    // `phoneLookupDeps` above), so the surfaces cannot drift on which repos
+    // a skill gets. Replaces `ownerLookupResolver`, which answered exactly
+    // ONE intent (`lookup_day_overview`) for owner sessions only; every
+    // other lookup fell into the FSM and minted a dead `voice_clarification`
+    // card. `lookup_day_overview` is answered by the shared switch itself
+    // (workers/voice-lookup-answer.ts), so nothing is lost.
+    lookups: phoneLookupDeps,
+    // SCH-D4 — en_route ("on my way") from in-app voice. Deliberately the
+    // SAME object set as the assistant router's `enRoute` bundle above (and
+    // the same `delayNotificationCoordinator` instance `createDispatchRoutes`
+    // wires as `enRouteCoordinator` for the app button), so the app button,
+    // the SMS keyword, the recorded memo, the live phone, chat and now
+    // in-app voice all fire ONE identical audited act. Without this bundle
+    // the intent fell through the FSM and minted a dead `voice_clarification`
+    // card — the exact failure `proposals/voice-intent-map.ts` predicts for a
+    // live surface with no en_route branch.
+    enRoute: {
+      userRepo,
+      assignmentRepo,
+      appointmentRepo,
+      jobRepo,
+      customerRepo,
+      settingsRepo,
+      auditRepo,
+      enRouteCoordinator: delayNotificationCoordinator,
     },
   });
   app.use(

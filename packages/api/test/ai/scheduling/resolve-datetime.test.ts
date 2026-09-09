@@ -213,3 +213,54 @@ describe('resolveSpokenDay', () => {
     ).toBe('2026-06-12');
   });
 });
+
+// ---------------------------------------------------------------------------
+// SPOKEN clock hours written as words ("Tuesday two o'clock") — register case
+// book-02. An operator DICTATING a booking says "two o'clock"; chrono only
+// understands "2 o'clock", so the phrase used to come back
+// `ambiguous_no_time` and the caller was asked for a time they had just said.
+// ---------------------------------------------------------------------------
+
+describe('resolveDateTime — spoken "<word> o\'clock"', () => {
+  const TZ = 'America/Phoenix'; // no DST, so the offset is fixed at -7
+
+  it('resolves "Tuesday two o\'clock" to the same instant as "Tuesday 2 o\'clock"', () => {
+    const spoken = resolveDateTime("Tuesday two o'clock", { timezone: TZ, now: NOW });
+    const digits = resolveDateTime("Tuesday 2 o'clock", { timezone: TZ, now: NOW });
+    expect(spoken.ok).toBe(true);
+    expect(digits.ok).toBe(true);
+    if (spoken.ok && digits.ok) {
+      expect(spoken.startUtc).toBe(digits.startUtc);
+      expect(spoken.precision).toBe('exact');
+      // The bare-hour service bias still applies (1–7 → PM), unchanged.
+      expect(spoken.startUtc).toBe('2026-06-02T21:00:00.000Z');
+    }
+  });
+
+  it('accepts the curly apostrophe and the bare "oclock" spelling', () => {
+    for (const phrase of ['Tuesday two o’clock', 'Tuesday two oclock']) {
+      const res = resolveDateTime(phrase, { timezone: TZ, now: NOW });
+      expect(res.ok).toBe(true);
+      if (res.ok) expect(res.startUtc).toBe('2026-06-02T21:00:00.000Z');
+    }
+  });
+
+  it('covers the whole one–twelve range', () => {
+    const eleven = resolveDateTime("Tuesday eleven o'clock", { timezone: TZ, now: NOW });
+    expect(eleven.ok).toBe(true);
+    // 8–12 stay as spoken (a bare "11" is morning) — 11:00 MST = 18:00 UTC.
+    if (eleven.ok) expect(eleven.startUtc).toBe('2026-06-02T18:00:00.000Z');
+  });
+
+  it('leaves a bare number word alone — "Tuesday at two" is still ambiguous, never guessed', () => {
+    const res = resolveDateTime('Tuesday at two', { timezone: TZ, now: NOW });
+    expect(res.ok).toBe(false);
+    if (!res.ok) expect(res.reason).toBe('ambiguous_no_time');
+  });
+
+  it('does not touch a number word that is not an hour ("two hours")', () => {
+    const res = resolveDateTime('tomorrow at 2pm for two hours', { timezone: TZ, now: NOW });
+    expect(res.ok).toBe(true);
+    if (res.ok) expect(res.startUtc).toBe('2026-06-02T21:00:00.000Z');
+  });
+});

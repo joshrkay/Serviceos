@@ -291,6 +291,19 @@ const CATALOG_REFUSAL_SUMMARY =
 const LEADS_REFUSAL_SUMMARY =
   "I couldn't verify your access to the lead pipeline. Ask an owner or dispatcher on your team to pull it up.";
 
+/**
+ * Spoken by a VOICE surface when the lookup could not run at all: the skill
+ * failed, this deployment lacks the repos for it (`unsupported`), or no
+ * lookups bundle is wired. Lives here — with the switch and the refusal copy
+ * — rather than in one surface adapter, because BOTH voice surfaces speak it
+ * (`ai/voice-turn/phone-lookup-surface.ts`, which re-exports it for its
+ * existing consumers, and `ai/voice-turn/inapp-lookup-surface.ts`). The chat
+ * surface does not use it: it renders `failureReply`'s visible, typed copy
+ * instead (`ai/orchestration/lookup-dispatch.ts`).
+ */
+export const LOOKUP_UNAVAILABLE_LINE =
+  "I'm having trouble pulling that up right now. Let me get a person to help.";
+
 /** Honest per-intent refusal copy — never data, never a fabricated answer. */
 export function refusalSummary(intent: IntentType): string {
   if (intent === 'lookup_catalog') return CATALOG_REFUSAL_SUMMARY;

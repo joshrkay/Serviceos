@@ -262,6 +262,17 @@ const APPOINTMENT_REF_INTENTS = new Set([
   'reschedule_appointment',
   'confirm_appointment',
   'reassign_appointment',
+  // SCH-D2 — a delay notice IS about an appointment: `notifyDelayPayload
+  // Schema` gates on `appointmentId || appointmentReference`, and
+  // `NotifyDelayExecutionHandler` needs the id to know which customer to
+  // text. Before this membership the spoken reference ("running late for
+  // the 2pm") was never resolved at all — it reached the proposal as raw
+  // free text — and a delay turn that named only the CUSTOMER had nothing
+  // to anchor on either (see the customer-anchored plan below).
+  // requiresExistingEntity('notify_delay') was ALREADY true (the intent is
+  // in both CUSTOMER_REF_INTENTS and JOB_REF_INTENTS), so this changes no
+  // escalation posture — it only gives the gate a resolver behind it (#909).
+  'notify_delay',
   // U2 (B7.10) — crew add/remove name an appointment ("add Jake to the 2pm
   // tomorrow"). Route the spoken reference through the same appointment
   // resolver reassign uses; a unique match rides
@@ -315,6 +326,33 @@ export const TECHNICIAN_REF_INTENTS = new Set([
   // schedule`/`lookup_timesheets` cases).
   'lookup_crew_schedule',
   'lookup_timesheets',
+]);
+
+/**
+ * SCH-D1 — scheduling CREATE intents that may NAME the technician the new
+ * visit is for ("slot Carlos at Garcia Tuesday two o'clock"). Consulted
+ * ONLY by `planVoiceEntityLookups` for the `targetTechnicianName` lookup,
+ * deliberately NOT folded into `TECHNICIAN_REF_INTENTS`.
+ *
+ * WHY A SEPARATE SET. `TECHNICIAN_REF_INTENTS` feeds TWO different things:
+ * the technician lookup here AND `requiresExistingEntity` below. Adding
+ * `create_appointment` there would make it a record-OPERATING intent, so a
+ * booking for a BRAND-NEW customer (whose customer lookup legitimately
+ * returns not_found — the whole point of ENTITY_CREATION_INTENTS) would
+ * start escalating to on-call instead of drafting a gated proposal. This
+ * set answers only the first question: "may a spoken technician name on
+ * this intent be resolved to a verified id?"
+ *
+ * The resolved id lands on `createAppointmentPayloadSchema.technicianId`
+ * (an optional uuid) via the payload builder's scalar promotion, so an
+ * UNRESOLVED name never gates the booking — it simply doesn't assign
+ * anyone, exactly as before this set existed. `schedule_inspection` is an
+ * alias onto the same proposal type and gets the same treatment (Task 1's
+ * per-alias adjudication: mirror the target).
+ */
+const SCHEDULING_TECHNICIAN_INTENTS = new Set([
+  'create_appointment',
+  'schedule_inspection',
 ]);
 
 /**
@@ -389,6 +427,13 @@ export interface VoiceEntityLookup {
    * when the caller supplied a stickyJobId to `planVoiceEntityLookups`.
    */
   jobId?: string;
+  /**
+   * SCH-D2 — customer anchor threaded to the resolver for `kind:
+   * 'appointment'` lookups planned by
+   * `planCustomerAnchoredAppointmentLookup` (an operator who named the
+   * PERSON but no visit). Never set by `planVoiceEntityLookups`.
+   */
+  customerId?: string;
 }
 
 export interface ParsedWindow {
@@ -540,7 +585,10 @@ export function planVoiceEntityLookups(
   }
 
   const targetTechnicianName = trimReference(entities.targetTechnicianName);
-  if (targetTechnicianName && TECHNICIAN_REF_INTENTS.has(intent)) {
+  if (
+    targetTechnicianName &&
+    (TECHNICIAN_REF_INTENTS.has(intent) || SCHEDULING_TECHNICIAN_INTENTS.has(intent))
+  ) {
     lookups.push({
       kind: 'technician',
       reference: targetTechnicianName,
@@ -564,6 +612,53 @@ export function planVoiceEntityLookups(
   }
 
   return lookups;
+}
+
+/**
+ * SCH-D2 — the SECOND-PASS appointment lookup for an operator who named the
+ * PERSON and no visit: "text Garcia that I'm running twenty minutes late",
+ * "confirm Garcia", "cancel Garcia's appointment".
+ *
+ * Why a second pass rather than another entry in `planVoiceEntityLookups`:
+ * the anchor is the customerId THIS TURN resolved, which does not exist yet
+ * when the first-pass plan is built. `resolveSchedulingEntities` therefore
+ * calls this after the planned lookups have run, with the customerId that
+ * came back (or the explicit uuid the caller already had).
+ *
+ * Deliberately narrow — every condition below is load-bearing:
+ *   - APPOINTMENT_REF_INTENTS only: these are the intents whose contract
+ *     needs an appointmentId (cancel / reschedule / confirm / reassign /
+ *     notify_delay / add-crew / remove-crew). Nothing else gains an
+ *     appointment reference it never asked for.
+ *   - ONLY when the classifier extracted NO `appointmentReference`. A
+ *     spoken reference is the operator's own words and keeps its existing
+ *     resolution path (date phrase → clock time → job name), untouched.
+ *   - The reference passed through is the spoken day phrase when there is
+ *     one ("confirm Garcia for Tuesday" with the day in
+ *     `dateTimeDescription`), else `''` — the resolver reads `''` as "that
+ *     customer's upcoming appointment", which is exactly what was said.
+ *
+ * Resolution stays honest end to end: the resolver answers one / several /
+ * none, and several is the EXISTING one-tap disambiguation, never a pick.
+ */
+export function planCustomerAnchoredAppointmentLookup(
+  intent: string,
+  entities: Record<string, unknown>,
+  customerId: string,
+): VoiceEntityLookup | undefined {
+  if (!APPOINTMENT_REF_INTENTS.has(intent)) return undefined;
+  if (trimReference(entities.appointmentReference)) return undefined;
+
+  const dayPhrase =
+    trimReference(entities.dateTimeDescription) ??
+    (typeof entities.datetime === 'string' ? trimReference(entities.datetime) : undefined);
+
+  return {
+    kind: 'appointment',
+    reference: dayPhrase ?? '',
+    refKey: 'appointmentId',
+    customerId,
+  };
 }
 
 function foldResolution(
@@ -613,6 +708,7 @@ async function resolvePlannedLookups(
       reference: lookup.reference,
       kind: lookup.kind,
       ...(lookup.jobId ? { jobId: lookup.jobId } : {}),
+      ...(lookup.customerId ? { customerId: lookup.customerId } : {}),
     });
     const terminal = foldResolution(
       result,
@@ -720,6 +816,18 @@ export async function resolveSchedulingEntities(
 
   const terminal = await resolvePlannedLookups(resolver, tenantId, planned, refs);
   if (terminal) return terminal;
+
+  // SCH-D2 — SECOND PASS: the operator named the PERSON, not the visit.
+  // `refs.customerId` is whatever the first pass just resolved (or the
+  // explicit uuid folded in above), so this runs only when a real, verified
+  // customer is in hand and the intent still has no appointmentId.
+  if (refs.customerId && !refs.appointmentId) {
+    const anchored = planCustomerAnchoredAppointmentLookup(intent, entities, refs.customerId);
+    if (anchored) {
+      const anchoredTerminal = await resolvePlannedLookups(resolver, tenantId, [anchored], refs);
+      if (anchoredTerminal) return anchoredTerminal;
+    }
+  }
 
   if (intent === 'cancel_appointment' && typeof entities.reason !== 'string') {
     refs.reason = 'Requested by caller via voice session';

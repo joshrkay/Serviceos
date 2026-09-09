@@ -171,12 +171,62 @@ function notifyOncall(context: CallingAgentContext, reason: string): SideEffect 
  * same on-call notification, same escalationReason — the caller experience
  * is identical either way: "couldn't find/confirm the record, connecting
  * you with a team member."
+ *
+ * TWO audiences, split on `context.channel` (SCH-D3):
+ *
+ *   TELEPHONY — unchanged, and deliberately so. An inbound CALLER cannot
+ *   see a screen, cannot retype a name, and has no other way forward: the
+ *   only honest recovery is a human, so the call escalates and on-call is
+ *   paged. `escalationReason: 'entity_not_found'` is untouched.
+ *
+ *   IN-APP (`channel: 'inapp'`) — the authenticated operator's own app
+ *   surface, the same channel `TRUSTED_CHANNELS` (create-voice-turn-
+ *   processor.ts, I6) already treats as the owner's. Here the escalation
+ *   was actively wrong: an operator who mistyped/misspoke a name ("cancel
+ *   the Patel appointment" for a customer who does not exist) got their
+ *   session terminated into `escalating` AND paged the on-call human — for
+ *   their own typo, on a surface where they can simply say another name.
+ *   So: say honestly what was not found, return to `intent_capture` with
+ *   the session intact, and page nobody. No proposal is minted on either
+ *   path, and nothing is guessed on either path — the only difference is
+ *   who is asked to recover.
  */
 function escalateEntityNotFound(
   fromState: CallingAgentState,
   eventType: string,
-  context: CallingAgentContext
+  context: CallingAgentContext,
+  notFound?: { entityKind?: string; reference?: string },
 ): TransitionResult {
+  if (context.channel === 'inapp') {
+    return {
+      nextState: 'intent_capture',
+      sideEffects: [
+        auditLog(context, fromState, 'intent_capture', 'entity_not_found_operator', {
+          ...(notFound?.entityKind ? { entityKind: notFound.entityKind } : {}),
+          ...(notFound?.reference ? { reference: notFound.reference } : {}),
+          // Which of the two seams asked (resolution miss vs. a declined
+          // confirmation) — the old audit encoded this in the event type.
+          resolutionEvent: eventType,
+        }),
+        ttsPlay('entity_not_found_operator', {
+          template: 'entity_not_found_operator',
+          ...(notFound?.entityKind ? { entityKind: notFound.entityKind } : {}),
+          ...(notFound?.reference ? { reference: notFound.reference } : {}),
+        }),
+      ],
+      updatedContext: {
+        ...context,
+        // The request is over; the next utterance is a fresh one. Clear the
+        // pending confirmation (as the escalation does) and the parked
+        // intent/entities, so a follow-up name is captured cleanly instead
+        // of being merged into the request that just failed.
+        pendingEntityConfirmation: undefined,
+        pendingEntityAmbiguity: undefined,
+        currentIntent: undefined,
+        extractedEntities: undefined,
+      },
+    };
+  }
   return {
     nextState: 'escalating',
     sideEffects: [
@@ -1103,9 +1153,12 @@ function transitionEntityResolution(
     };
   }
 
-  // entity_not_found → escalate
+  // entity_not_found → escalate (telephony) / honest not-found (in-app)
   if (event.type === 'entity_not_found') {
-    return escalateEntityNotFound('entity_resolution', 'entity_not_found', context);
+    return escalateEntityNotFound('entity_resolution', 'entity_not_found', context, {
+      ...(event.entityKind ? { entityKind: event.entityKind } : {}),
+      ...(event.reference ? { reference: event.reference } : {}),
+    });
   }
 
   // entity_confirm_candidate → a single middle-confidence match. Ask the
@@ -1173,9 +1226,16 @@ function transitionEntityConfirm(
   }
 
   // Declined / unclear / timeout / no pending candidate → escalate, same
-  // path and effects as entity_not_found.
+  // path and effects as entity_not_found. On the in-app operator surface
+  // that is the honest not-found line + `intent_capture`, not a page — the
+  // candidate we offered was wrong, and the operator can just say another
+  // name (see escalateEntityNotFound).
   if (event.type === 'entity_confirm_declined') {
-    return escalateEntityNotFound('entity_confirm', 'entity_confirm_declined', context);
+    const pending = context.pendingEntityConfirmation;
+    return escalateEntityNotFound('entity_confirm', 'entity_confirm_declined', context, {
+      ...(pending?.entityKind ? { entityKind: pending.entityKind } : {}),
+      ...(pending?.reference ? { reference: pending.reference } : {}),
+    });
   }
 
   return ignoredTransition('entity_confirm', event, context);

@@ -103,6 +103,43 @@ describe('voice-sessions routes', () => {
     expect(inputRes.body.proposalIds.length).toBe(1);
   });
 
+  it('POST /:id/input returns the R1 turn trace on every turn', async () => {
+    const app = buildApp('tenant-a', 'user-a', store, adapter);
+    const startRes = await request(app).post('/api/voice/sessions').send({});
+    const id = startRes.body.sessionId;
+
+    const readbackRes = await request(app)
+      .post(`/api/voice/sessions/${id}/input`)
+      .send({ text: 'Invoice Acme for 450' });
+    expect(readbackRes.body.trace).toMatchObject({
+      stage: 'confirmation_asked',
+      intent: 'create_invoice',
+      confidence: 0.92,
+    });
+
+    const confirmRes = await request(app)
+      .post(`/api/voice/sessions/${id}/input`)
+      .send({ text: 'yes' });
+    // `proposalType` is the PROPOSAL type actually minted, not the intent —
+    // `create_invoice` maps to `draft_invoice` (proposals/voice-intent-map.ts).
+    expect(confirmRes.body.trace).toMatchObject({
+      stage: 'committed',
+      proposalType: 'draft_invoice',
+    });
+
+    // A deterministic recovery turn is traced too — the duplicated "yes"
+    // after the proposal was queued is guarded, not re-minted.
+    const repeatRes = await request(app)
+      .post(`/api/voice/sessions/${id}/input`)
+      .send({ text: 'yes' });
+    expect(repeatRes.body.trace).toMatchObject({
+      stage: 'guarded',
+      dedup: 'duplicate_turn',
+      fallbackReason: 'guard',
+    });
+    expect(repeatRes.body.proposalIds.length).toBe(1);
+  });
+
   it('returns 404 when input is sent to another tenant\'s session', async () => {
     const appA = buildApp('tenant-a', 'user-a', store, adapter);
     const startRes = await request(appA).post('/api/voice/sessions').send({});
