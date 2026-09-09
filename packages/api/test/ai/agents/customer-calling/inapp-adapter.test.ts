@@ -23,6 +23,8 @@ import {
 import { InMemoryCustomerRepository } from '../../../../src/customers/customer';
 import type { Customer } from '../../../../src/customers/customer';
 import { InMemoryMoneyDashboardRepository } from '../../../../src/reports/money-dashboard';
+import { InMemoryJobRepository } from '../../../../src/jobs/job';
+import { InMemoryInvoiceRepository } from '../../../../src/invoices/invoice';
 import { LOOKUP_UNAVAILABLE_LINE } from '../../../../src/workers/voice-lookup-answer';
 import type { EntityResolver } from '../../../../src/ai/resolution/entity-resolver';
 import { UpdateBrandVoiceExecutionHandler } from '../../../../src/proposals/execution/brand-voice-handler';
@@ -242,11 +244,26 @@ describe('InAppVoiceAdapter', () => {
           answers: {},
           shared: { customerRepo: new InMemoryCustomerRepository(), proposalRepo },
           entityResolver: {
+            // Two records with the SAME display name — the case that made the
+            // old copy unanswerable ("Smith; Smith"). The hint is what the
+            // operator can actually choose between.
             resolve: vi.fn(async ({ kind }: { kind: string }) => ({
               kind: 'ambiguous' as const,
               candidates: [
-                { id: 'c-1', kind: kind as never, label: 'Priya Khan (555-1230)', score: 0.86 },
-                { id: 'c-2', kind: kind as never, label: 'Sam Khan (555-9876)', score: 0.84 },
+                {
+                  id: 'c-1',
+                  kind: kind as never,
+                  label: 'Khan Household',
+                  hint: '104 QA Cedar Avenue',
+                  score: 0.86,
+                },
+                {
+                  id: 'c-2',
+                  kind: kind as never,
+                  label: 'Khan Household',
+                  hint: '77 Mill Road',
+                  score: 0.84,
+                },
               ],
             })),
           } as unknown as EntityResolver,
@@ -257,7 +274,41 @@ describe('InAppVoiceAdapter', () => {
       const result = await adapter.handleInput(sessionId, 'What does Khan owe?');
 
       expect(result.ttsText).toContain('More than one match for "Khan"');
+      expect(result.ttsText).toContain('Khan Household (104 QA Cedar Avenue)');
+      expect(result.ttsText).toContain('Khan Household (77 Mill Road)');
       expect(result.ttsText).toMatch(/which one did you mean\?/i);
+      expect(result.state).toBe('intent_capture');
+      expect(result.proposalIds).toHaveLength(0);
+    });
+
+    it('"what does Khan owe us" is answered ABOUT Khan — never "your account"', async () => {
+      const customerRepo = await seededCustomerRepo();
+      const adapter = new InAppVoiceAdapter({
+        store,
+        gateway: scriptedGateway([
+          JSON.stringify({
+            intentType: 'lookup_balance',
+            confidence: 0.95,
+            extractedEntities: { customerName: 'Khan' },
+          }),
+        ]),
+        proposalRepo,
+        auditRepo,
+        onCallRepo,
+        lookups: {
+          answers: { invoiceRepo: new InMemoryInvoiceRepository() },
+          shared: { customerRepo, jobRepo: new InMemoryJobRepository(), proposalRepo },
+          entityResolver: resolvesTo(CUSTOMER_ID, 'Priya Khan'),
+        },
+      });
+
+      const { sessionId } = await adapter.startSession(TENANT, USER);
+      const result = await adapter.handleInput(sessionId, 'What does Khan owe us?');
+
+      // The skill's phone-shaped copy is "Your account is paid in full —
+      // nothing currently owed"; the operator is not the customer.
+      expect(result.ttsText).not.toMatch(/\byour\b/i);
+      expect(result.ttsText).toContain("Priya Khan's account is paid in full");
       expect(result.state).toBe('intent_capture');
       expect(result.proposalIds).toHaveLength(0);
     });
