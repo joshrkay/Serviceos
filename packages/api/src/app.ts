@@ -6702,6 +6702,12 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     auditRepo,
     onCallRepo: sharedOnCallRepo,
     ...(pool ? { pool } : {}),
+    // U3 — service locations for the customer disambiguation hint. The SAME
+    // repo the assistant-chat router is wired with (~5484 above), so the two
+    // in-app surfaces cannot drift on what an ambiguous "Smith" is spoken/
+    // written back as, or on what a "104 Cedar" answer is matched against.
+    // Replaces the adapter's own `service_locations` query.
+    locationRepo,
     // U4 (Part E punch #1) — tenant timezone for spoken-datetime resolution,
     // read once per session, so the in-app live path books "Thursday at 2pm"
     // in the tenant's zone exactly like the recorded-memo path.

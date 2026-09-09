@@ -1288,19 +1288,40 @@ describe('Integration — #909 chat entity resolution (real Postgres + real reso
         ]),
       );
 
+      const ask = `Nudge ${CUSTOMER_NAME} about the estimate we sent`;
       const res = await supertest(app)
+        .post('/api/assistant/chat')
+        .send({ messages: [{ role: 'user', content: ask }] });
+      expect(res.status).toBe(200);
+      // TURN 1 — the ambiguous CUSTOMER is asked about first, in the order
+      // `planVoiceEntityLookups` fixes (customer → job → document): the second
+      // same-named customer this fixture seeds is a genuine ambiguity, and
+      // since the chat surface stopped discarding pre-draft ambiguity (U2) it
+      // is answered with ONE question instead of being stepped over on the way
+      // to a document lookup that could have belonged to either of them.
+      expect(res.body.message.content).toContain(`matching "${CUSTOMER_NAME}"`);
+      const conversationId: string = res.body.conversationId;
+      expect(conversationId).toBeTruthy();
+
+      // TURN 2 — with the customer picked, the SAME draft's remaining gate is
+      // the estimate, and THAT is what this test is really about: six sent
+      // estimates confidently match, which trips MAX_ESTIMATE_CANDIDATES(5),
+      // and the reply has to SAY so rather than going silent. Before this
+      // round, this content was `${title}. Review and approve to proceed.` —
+      // indistinguishable from a proposal that needs nothing further.
+      const answer = await supertest(app)
         .post('/api/assistant/chat')
         .send({
           messages: [
-            { role: 'user', content: `Nudge ${CUSTOMER_NAME} about the estimate we sent` },
+            { role: 'user', content: ask },
+            { role: 'assistant', content: res.body.message.content },
+            { role: 'user', content: 'the first one' },
           ],
+          conversationId,
         });
-      expect(res.status).toBe(200);
-      // The live-broken behavior this test pins RED against: before this
-      // round, this content is `${title}. Review and approve to proceed.`
-      // — indistinguishable from a proposal that needs nothing further.
-      expect(res.body.message.content).toContain('reply with the estimate number');
-      expect(res.body.message.content).not.toContain('Which estimate did you mean');
+      expect(answer.status).toBe(200);
+      expect(answer.body.message.content).toContain('reply with the estimate number');
+      expect(answer.body.message.content).not.toContain('Which estimate did you mean');
 
       const [gated] = await proposalRepo.findByTenant(seed.tenantId);
       expect(gated.proposalType).toBe('send_estimate_nudge');

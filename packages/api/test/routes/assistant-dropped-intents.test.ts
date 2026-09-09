@@ -232,7 +232,12 @@ describe('Task 15 — dropped intents now dispatch (no special context needed)',
     const persisted = await proposalRepo.findByTenant(TEST_TENANT);
     expect(persisted).toHaveLength(1);
     expect(persisted[0].proposalType).toBe('convert_lead');
-    expect((persisted[0].payload as Record<string, unknown>).leadReference).toBe('the Johnson lead');
+    // U5 — an owner typing one of the canonical owner commands is classified
+    // deterministically (`matchOwnerOperatorCommand`), the same way the voice
+    // session has always classified it, so the preserved reference is that
+    // matcher's `leadReference`. What this test is about — the intent is
+    // dispatched and the spoken reference rides the card — is unchanged.
+    expect((persisted[0].payload as Record<string, unknown>).leadReference).toBe('Johnson');
     expect(res.body.message.proposal).toBeTruthy();
     expect(res.body.taskType).not.toMatch(/unhandled|not_understood/);
   });

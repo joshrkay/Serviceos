@@ -88,8 +88,15 @@ import {
   resolveDisambiguationFollowUp,
 } from './entity-resolution';
 import type { PendingEntityAmbiguity } from './entity-resolution';
-import { withTenantConnection } from '../../../db/tenant-transaction';
 import { PgEntityResolver } from '../../resolution/pg-entity-resolver';
+// U3 — the SHARED customer address hint (`"phone · street, city"`). This
+// adapter used to build that string itself from a private `service_locations`
+// query, so the chat surface — which cannot reach a private method — asked an
+// address-free question and could not match an address answer. ONE decorator,
+// applied where each surface composes its resolver, now feeds both in-app
+// surfaces the identical candidate shape.
+import { withCustomerAddressHints } from '../../resolution/customer-address-hint';
+import type { LocationRepository } from '../../../locations/location';
 import type { EntityCandidate, EntityResolver } from '../../resolution/entity-resolver';
 import {
   groundLineItemPricing,
@@ -160,6 +167,21 @@ export interface InAppAdapterDeps {
    * unresolved (proposal surfaces for operator review) — never guessed.
    */
   entityResolver?: EntityResolver;
+  /**
+   * U3 — service locations, for the customer disambiguation hint.
+   *
+   * When present, `getEntityResolver()` wraps whatever resolver this adapter
+   * ends up using in `withCustomerAddressHints`, so an ambiguous customer is
+   * spoken back as "Smith, 104 QA Cedar Avenue" and the caller's "104 Cedar"
+   * is matched against that address rather than against a phone-digit
+   * coincidence. Replaces the private pool-backed query this adapter used to
+   * carry, so the chat surface gets the identical hint from the identical
+   * code.
+   *
+   * Optional and failure-soft: absent ⇒ the phone-only question the resolver
+   * itself produces (today's behaviour on a dev boot with no DB).
+   */
+  locationRepo?: LocationRepository;
   /**
    * U4 (Part E punch #1) — tenant settings for spoken-datetime resolution.
    * The tenant's IANA zone is resolved ONCE per session and threaded into
@@ -859,6 +881,28 @@ const SLOT_DETAIL_ENTITY_KEYS: ReadonlySet<string> = new Set([
   'lineItemDescriptions',
 ]);
 
+/**
+ * The resolver speaks `label`; the FSM's `entity_ambiguous` event and the
+ * follow-up matcher speak `name`. Nothing else is translated — the hint
+ * arrives already enriched from `withCustomerAddressHints`, which is what
+ * replaced the pool-backed enrichment this mapper used to be tangled up in
+ * (the two jobs, "rename a field" and "fetch an address", had no business
+ * being one method).
+ *
+ * The twin of `toPendingAmbiguity`'s mapping in
+ * ai/resolution/gated-reference-resolution.ts, which does the same for chat.
+ */
+function toPendingCandidates(
+  candidates: readonly EntityCandidate[],
+): Array<{ id: string; name: string; score: number; hint?: string }> {
+  return candidates.map((candidate) => ({
+    id: candidate.id,
+    name: candidate.label,
+    score: candidate.score,
+    ...(candidate.hint ? { hint: candidate.hint } : {}),
+  }));
+}
+
 export class InAppVoiceAdapter {
   constructor(private readonly deps: InAppAdapterDeps) {}
 
@@ -868,19 +912,35 @@ export class InAppVoiceAdapter {
    */
   private pgResolver?: EntityResolver;
 
+  /** The resolver actually handed out — `pgResolver`/injected, plus the U3 hint decorator. */
+  private hintedResolver?: EntityResolver;
+
   /**
    * Resolve the entity resolver to use: an explicitly injected one (tests),
    * else a PgEntityResolver built from the pool (production), else undefined
    * (dev/no-DB — resolution is skipped, never guessed).
    */
   private getEntityResolver(): EntityResolver | undefined {
-    if (this.deps.entityResolver) return this.deps.entityResolver;
+    if (this.hintedResolver) return this.hintedResolver;
+    const base = this.deps.entityResolver ?? this.buildPgResolver();
+    if (!base) return undefined;
+    // U3 — the address hint is applied HERE, once, so every consumer of this
+    // resolver (the pre-draft scheduling resolution, the FSM's
+    // `entity_ambiguous` question, and `resolveDisambiguationFollowUp`'s
+    // re-resolve on the answer turn) sees the same candidate hints. Cached
+    // alongside the resolver itself — the decorator is stateless, but
+    // re-wrapping per turn would allocate one per utterance.
+    this.hintedResolver = this.deps.locationRepo
+      ? withCustomerAddressHints(base, this.deps.locationRepo)
+      : base;
+    return this.hintedResolver;
+  }
+
+  private buildPgResolver(): EntityResolver | undefined {
     if (this.pgResolver) return this.pgResolver;
-    if (this.deps.pool) {
-      this.pgResolver = new PgEntityResolver(this.deps.pool);
-      return this.pgResolver;
-    }
-    return undefined;
+    if (!this.deps.pool) return undefined;
+    this.pgResolver = new PgEntityResolver(this.deps.pool);
+    return this.pgResolver;
   }
 
   /**
@@ -973,11 +1033,7 @@ export class InAppVoiceAdapter {
       if (!refKey) {
         return { type: 'entity_resolved', refs: resolution.refs };
       }
-      const candidates = await this.enrichCandidatesForDisambiguation(
-        tenantId,
-        resolution.ambiguous.entityKind,
-        resolution.ambiguous.candidates,
-      );
+      const candidates = toPendingCandidates(resolution.ambiguous.candidates);
       return {
         type: 'entity_ambiguous',
         candidates,
@@ -1031,55 +1087,6 @@ export class InAppVoiceAdapter {
     return { type: 'entity_resolved', refs: resolution.refs };
   }
 
-  /**
-   * Attach service-location addresses to customer candidates so address-style
-   * follow-ups ("104 Cedar") can be matched deterministically.
-   */
-  private async enrichCandidatesForDisambiguation(
-    tenantId: string,
-    entityKind: EntityCandidate['kind'],
-    candidates: EntityCandidate[],
-  ): Promise<Array<{ id: string; name: string; score: number; hint?: string }>> {
-    if (entityKind !== 'customer' || !this.deps.pool || candidates.length === 0) {
-      return candidates.map((candidate) => ({
-        id: candidate.id,
-        name: candidate.label,
-        score: candidate.score,
-        hint: candidate.hint,
-      }));
-    }
-
-    const customerIds = candidates.map((candidate) => candidate.id);
-    const rows = await withTenantConnection(this.deps.pool, tenantId, (client) =>
-      client
-        .query<{ customer_id: string; street1: string; city: string }>(
-          `SELECT customer_id, street1, city
-             FROM service_locations
-            WHERE tenant_id = $1
-              AND customer_id = ANY($2::uuid[])
-              AND is_archived = false`,
-          [tenantId, customerIds],
-        )
-        .then((result) => result.rows),
-    );
-    const addressByCustomer = new Map(
-      rows.map((row) => [row.customer_id, `${row.street1}, ${row.city}`]),
-    );
-
-    return candidates.map((candidate) => {
-      const address = addressByCustomer.get(candidate.id);
-      const hintParts = [candidate.hint, address].filter(
-        (part): part is string => typeof part === 'string' && part.length > 0,
-      );
-      return {
-        id: candidate.id,
-        name: candidate.label,
-        score: candidate.score,
-        hint: hintParts.length > 0 ? hintParts.join(' · ') : undefined,
-      };
-    });
-  }
-
   private buildDisambiguationRetryEvent(
     pending: NonNullable<CallingAgentContext['pendingEntityAmbiguity']>,
   ): CallingAgentEvent {
@@ -1127,11 +1134,7 @@ export class InAppVoiceAdapter {
     const refKey = refKeyForEntityKind(resolution.ambiguous.entityKind);
     if (!refKey) return undefined;
 
-    const candidates = await this.enrichCandidatesForDisambiguation(
-      tenantId,
-      resolution.ambiguous.entityKind,
-      resolution.ambiguous.candidates,
-    );
+    const candidates = toPendingCandidates(resolution.ambiguous.candidates);
 
     return {
       entityKind: resolution.ambiguous.entityKind,

@@ -1411,10 +1411,24 @@ const OWNER_OPERATOR_COMMAND_PATTERNS: ReadonlyArray<OwnerOperatorCommandPattern
     }),
   },
   {
+    // "Text Smith the invoice link". BOTH alternations of the verb — "sms"
+    // and "text" — name the SMS channel, and the operator naming a channel is
+    // the whole difference between this and "email Smith the invoice link".
+    //
+    // U5 (owner-command parity audit): this extract used to emit only
+    // `customerName`, which was harmless while the pattern was reachable on
+    // the voice session alone (buildVoiceProposalPayload gates `channel` and
+    // the operator picks it on the card). Reached from chat it is not:
+    // `SendInvoiceTaskHandler` reads `ee.sendChannel ?? 'email'`, so dropping
+    // the channel silently turned "TEXT Smith the invoice link" into an
+    // EMAIL — a deterministic path producing a worse payload than the LLM it
+    // short-circuits. The register (inv-05) scripts `sendChannel: 'sms'` for
+    // this exact sentence; the pattern now agrees with it rather than the
+    // register being edited down to the pattern.
     intentType: 'send_invoice',
     pattern:
       /^\s*(?:sms|text)\s+([a-z][a-z .'-]{0,58}?)\s+(?:the\s+)?invoice\s+link\s*[.!?]?\s*$/i,
-    extract: (match) => ({ customerName: match[1].trim() }),
+    extract: (match) => ({ customerName: match[1].trim(), sendChannel: 'sms' }),
   },
 ];
 

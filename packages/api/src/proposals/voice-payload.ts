@@ -273,6 +273,22 @@ function namedContractGap(
     // case est-06).
     case 'send_estimate_nudge':
       return !flat.estimateId && !flat.estimateReference ? ['estimateId'] : [];
+    // `sendInvoicePayloadSchema`'s "invoiceId or invoiceReference" refine —
+    // the same shape as `send_estimate_nudge` above, and it had no entry here.
+    //
+    // The gate is on `invoiceId`, not on the refine: `SendInvoiceExecutionHandler`
+    // (proposals/execution/voice-extended-handlers.ts) requires
+    // `payload.invoiceId` to ALREADY be a uuid and never reads
+    // `invoiceReference` at all, so a payload carrying only the spoken name is
+    // contract-valid and still cannot execute. `SendInvoiceTaskHandler` has
+    // always gated exactly this way on the memo/chat leg (`missing.push
+    // ('invoiceId')` whenever the reference is not a resolved id); the
+    // live-turn leg had no equivalent, which is the drift this module exists
+    // to prevent. The gate is liftable: `GATED_REFERENCE_SOURCES.invoiceId`
+    // resolves it from `invoiceReference` (#909 — never a gate with nothing
+    // behind it).
+    case 'send_invoice':
+      return flat.invoiceId ? [] : ['invoiceId'];
     // NOT a refine — `updateCustomerPayloadSchema` requires only
     // `customerId`, so an edit that changes NOTHING is contract-VALID and
     // then executes as a silent no-op ("I updated Khan's email" and nothing
@@ -411,6 +427,25 @@ export async function buildVoiceProposalPayload(
         nonEmptyString(entities.jobReference) ?? nonEmptyString(entities.customerName);
       if (reference) flat.invoiceReference = reference;
     }
+  }
+
+  // send_invoice: preserve the spoken document reference, exactly as
+  // `SendInvoiceTaskHandler` does on the memo/chat leg (`ee.jobReference ??
+  // ee.customerName`; there is no `invoiceReference` extraction field in the
+  // taxonomy — every invoice-doc intent reuses `jobReference`). Without it,
+  // "text Smith the invoice link" built a payload naming NO document at all,
+  // and `sendInvoicePayloadSchema`'s whole-object refine ("Either invoiceId or
+  // invoiceReference is required") then failed with `path: []` — the exact
+  // unnameable shape `namedContractGap` exists for. It was masked only while
+  // `channel` happened to be absent too, so the gate had something else to
+  // name; the moment the classifier extracts a `sendChannel` (which it does,
+  // for "TEXT Smith…"), the live-turn leg minted a contract-INVALID
+  // send_invoice with an EMPTY gate — an approve-to-fail card, caught by the
+  // register's own "mints no approve-to-fail proposal on any surface" guard.
+  if (proposalType === 'send_invoice' && flat.invoiceReference === undefined) {
+    const reference =
+      nonEmptyString(entities.jobReference) ?? nonEmptyString(entities.customerName);
+    if (reference) flat.invoiceReference = reference;
   }
 
   // Whole-object contract refines carry `path: []`, so `fieldPathsFrom` below

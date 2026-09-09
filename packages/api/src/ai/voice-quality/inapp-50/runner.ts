@@ -199,6 +199,13 @@ export function buildAdapter(world: World, script: readonly ScriptedLlmTurn[]): 
     customerRepo: world.customerRepo,
     catalogRepo: world.catalogRepo,
     entityResolver: world.entityResolver,
+    // U4 — the SAME repo the chat driver hands `createAssistantRouter`, and
+    // the same one app.ts hands the live adapter. The fixture resolver returns
+    // phone-only hints (like `PgEntityResolver`), so the address in the spoken
+    // which-one question — and in whatever "104 Cedar" is matched against — is
+    // produced by the shipped `withCustomerAddressHints` decorator on both
+    // surfaces or by nothing at all.
+    locationRepo: world.locationRepo,
     extendedIntentsEnabled: async () => true,
     lookups: world.lookups,
     // SCH-D4 — the same object set app.ts hands the adapter, so "on my way"

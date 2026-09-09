@@ -94,8 +94,59 @@ export const GENERIC_LLM_REPLY = {
  * model repeating a UUID is not resolution"). This model repeats no uuid, so a
  * case that only passes because the model echoed one cannot exist here.
  */
-export function draftingEcho(entry: ScriptedLlmTurn | undefined): Record<string, unknown> {
-  const entities = (entry?.extractedEntities ?? {}) as Record<string, unknown>;
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const CONTEXT_ENTITIES_RE = /<context_entities>([\s\S]*?)<\/context_entities>/g;
+
+/**
+ * The entities the DRAFTING call was actually handed, read off its own prompt.
+ *
+ * A real model drafts from what it is shown. The stand-in used to draft from
+ * the SCRIPT instead — the classifier entry most recently served — and those
+ * two are the same thing only while every turn reaches the classifier. They
+ * are not: the route short-circuits the stereotyped owner commands
+ * deterministically (`matchOwnerOperatorCommand`), so on those turns the
+ * script is never served, `lastServed` is stale-or-absent, and the stand-in
+ * drafted from nothing while the handler had been handed a full entity set.
+ * That produced a harness-invented miss (est-01: "payload.lineItems is absent"
+ * for a request whose line item the route had extracted and threaded) — the
+ * fixture measuring itself, in the direction that fails rather than passes.
+ *
+ * Reading the prompt fixes it at the seam where the divergence exists and
+ * nowhere else: when the handler wrote a `<context_entities>` blob, that IS
+ * the raw material, whatever produced it.
+ *
+ * Ids are stripped on the way through. The stand-in must repeat no uuid — a
+ * case that only passes because the model echoed an id back is exactly the
+ * kind of pass this register refuses to count (see the note above on why
+ * resolution is the pipeline's job, never the model's).
+ */
+export function entitiesFromDraftingPrompt(request: LLMRequest): Record<string, unknown> | undefined {
+  const prompt = (request.messages ?? [])
+    .filter((m) => m.role === 'user')
+    .map((m) => m.content)
+    .join('\n');
+  let parsed: Record<string, unknown> | undefined;
+  for (const match of prompt.matchAll(CONTEXT_ENTITIES_RE)) {
+    try {
+      const value: unknown = JSON.parse(match[1]);
+      if (value && typeof value === 'object' && !Array.isArray(value)) {
+        parsed = value as Record<string, unknown>;
+      }
+    } catch {
+      // Not JSON — nothing to echo from this block.
+    }
+  }
+  if (!parsed) return undefined;
+  return Object.fromEntries(
+    Object.entries(parsed).filter(([, v]) => !(typeof v === 'string' && UUID_RE.test(v))),
+  );
+}
+
+export function draftingEcho(
+  entry: ScriptedLlmTurn | undefined,
+  fromPrompt?: Record<string, unknown>,
+): Record<string, unknown> {
+  const entities = (fromPrompt ?? entry?.extractedEntities ?? {}) as Record<string, unknown>;
   const descriptions = Array.isArray(entities.lineItemDescriptions)
     ? entities.lineItemDescriptions.filter(
         (d): d is string => typeof d === 'string' && d.trim().length > 0,
@@ -131,7 +182,7 @@ export function chatScriptedGateway(script: readonly ScriptedLlmTurn[]): LLMGate
     complete: async (request: LLMRequest): Promise<LLMResponse> => {
       if (request.taskType === 'classify_intent') return classifier.complete(request);
       return {
-        content: JSON.stringify(draftingEcho(lastServed)),
+        content: JSON.stringify(draftingEcho(lastServed, entitiesFromDraftingPrompt(request))),
         model: 'scripted-drafting',
         provider: 'inapp-50-harness',
         tokenUsage: { input: 1, output: 1, total: 2 },

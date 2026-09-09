@@ -252,15 +252,70 @@ describe('resolveDateTime — spoken "<word> o\'clock"', () => {
     if (eleven.ok) expect(eleven.startUtc).toBe('2026-06-02T18:00:00.000Z');
   });
 
-  it('leaves a bare number word alone — "Tuesday at two" is still ambiguous, never guessed', () => {
-    const res = resolveDateTime('Tuesday at two', { timezone: TZ, now: NOW });
-    expect(res.ok).toBe(false);
-    if (!res.ok) expect(res.reason).toBe('ambiguous_no_time');
-  });
-
   it('does not touch a number word that is not an hour ("two hours")', () => {
     const res = resolveDateTime('tomorrow at 2pm for two hours', { timezone: TZ, now: NOW });
     expect(res.ok).toBe(true);
     if (res.ok) expect(res.startUtc).toBe('2026-06-02T21:00:00.000Z');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The SECOND anchor for the same voice-shaped failure: the temporal
+// preposition "at". Register case book-03, "Book Smith furnace maintenance
+// Tuesday at two" — a mic transcript of the phrasing book-01 writes as
+// "Tuesday at 2 pm". Until this landed, the identical booking resolved when
+// typed with digits and asked "what time of day?" when dictated, on a surface
+// (the assistant's mic button) whose whole job is to accept dictation.
+// ---------------------------------------------------------------------------
+
+describe('resolveDateTime — spoken "at <word>"', () => {
+  const TZ = 'America/Phoenix'; // no DST, so the offset is fixed at -7
+
+  it('resolves "Tuesday at two" to the same instant as "Tuesday at 2"', () => {
+    const spoken = resolveDateTime('Tuesday at two', { timezone: TZ, now: NOW });
+    const digits = resolveDateTime('Tuesday at 2', { timezone: TZ, now: NOW });
+    expect(spoken.ok).toBe(true);
+    expect(digits.ok).toBe(true);
+    if (spoken.ok && digits.ok) {
+      expect(spoken.startUtc).toBe(digits.startUtc);
+      // The bare-hour service bias still applies (1–7 → PM), unchanged.
+      expect(spoken.startUtc).toBe('2026-06-02T21:00:00.000Z');
+      expect(spoken.precision).toBe('exact');
+    }
+  });
+
+  it('reads the whole booking sentence, not just the date phrase', () => {
+    const res = resolveDateTime('Book Smith furnace maintenance Tuesday at two', {
+      timezone: TZ,
+      now: NOW,
+    });
+    expect(res.ok).toBe(true);
+    if (res.ok) expect(res.startUtc).toBe('2026-06-02T21:00:00.000Z');
+  });
+
+  it('honours an explicit meridiem after the word hour ("at eight am")', () => {
+    const res = resolveDateTime('Tuesday at eight am', { timezone: TZ, now: NOW });
+    expect(res.ok).toBe(true);
+    if (res.ok) expect(res.startUtc).toBe('2026-06-02T15:00:00.000Z');
+  });
+
+  it('still asks when the minutes are spoken as words — never books 2:00 for "two thirty"', () => {
+    for (const phrase of ['Tuesday at two thirty', 'Tuesday at two fifteen']) {
+      const res = resolveDateTime(phrase, { timezone: TZ, now: NOW });
+      expect(res.ok).toBe(false);
+      if (!res.ok) expect(res.reason).toBe('ambiguous_no_time');
+    }
+  });
+
+  it('leaves an UNANCHORED number word alone — a bare "two" is still never guessed', () => {
+    const res = resolveDateTime('Tuesday two', { timezone: TZ, now: NOW });
+    expect(res.ok).toBe(false);
+    if (!res.ok) expect(res.reason).toBe('ambiguous_no_time');
+  });
+
+  it('does not rewrite "at" followed by a non-hour word', () => {
+    const res = resolveDateTime('Tuesday at noon', { timezone: TZ, now: NOW });
+    expect(res.ok).toBe(true);
+    if (res.ok) expect(res.startUtc).toBe('2026-06-02T19:00:00.000Z');
   });
 });

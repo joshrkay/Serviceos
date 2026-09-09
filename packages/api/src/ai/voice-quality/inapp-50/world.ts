@@ -272,25 +272,28 @@ export class FixtureEntityResolver implements EntityResolver {
     const tokens = contentTokens(reference);
     if (tokens.length === 0) return { kind: 'not_found', reference };
     const customers = await w.customerRepo.findByTenant(w.tenantId);
-    const locations = await w.locationRepo.findByTenant(w.tenantId);
     const candidates: EntityCandidate[] = [];
     for (const c of customers) {
       const hay = new Set(tokenize(`${c.displayName} ${c.firstName} ${c.lastName}`));
       const hits = tokens.filter((t) => hay.has(t)).length;
       if (hits === 0) continue;
-      const address = locations.find((l) => l.customerId === c.id);
-      // Hint shape mirrors what production hands the disambiguation matcher:
-      // PgEntityResolver puts the phone here and the in-app adapter appends
-      // "street, city" separated by ' · ' (inapp-adapter.ts#enrichCandidates).
-      const hintParts = [
-        c.primaryPhone,
-        address ? `${address.street1}, ${address.city}` : undefined,
-      ].filter((p): p is string => typeof p === 'string' && p.length > 0);
       candidates.push({
         id: c.id,
         kind: 'customer',
         label: c.displayName,
-        ...(hintParts.length > 0 ? { hint: hintParts.join(' · ') } : {}),
+        // U4 — PHONE ONLY, exactly like `PgEntityResolver.resolveCustomer`
+        // (pg-entity-resolver.ts: `hint: row.primary_phone ?? undefined`).
+        //
+        // This used to append "street, city" itself, with a comment saying it
+        // "mirrors what production hands the matcher" — which was true of the
+        // in-app voice adapter's private enrichment and NOT of the chat
+        // surface, so `book-03`/`inv-05` could pass here on a hint no chat
+        // caller would ever have received. A fixture arranged to pass proves
+        // nothing (docs/solutions/test-failures/). The address now comes from
+        // the SHIPPED `withCustomerAddressHints` decorator, which both drivers
+        // wire over this world's `locationRepo` exactly as app.ts wires it —
+        // so a green register is evidence about the product, not the fixture.
+        ...(c.primaryPhone ? { hint: c.primaryPhone } : {}),
         score: hits === tokens.length ? 1 : 0.85,
       });
     }

@@ -453,9 +453,14 @@ describe('#909 — an unambiguous reference lifts the gate that blocked approval
     await chat(app, 'Convert the Johnson lead to a customer');
     const [persisted] = await proposalRepo.findByTenant(TEST_TENANT);
     expect(missingFieldsFor(persisted)).toContain('leadId');
-    expect((persisted.payload as Record<string, unknown>).leadReference).toBe(
-      'the Johnson lead',
-    );
+    // U5 — this sentence is one of the canonical OWNER commands, so an owner
+    // caller now takes `matchOwnerOperatorCommand` (the same deterministic
+    // path the voice session has always taken) and the reference on the card
+    // is that matcher's `leadReference`, not the scripted model's verbatim
+    // phrase. The point of this test is unchanged and still holds: with no
+    // resolver wired, the gate stands and the spoken reference is preserved
+    // for the review card to resolve.
+    expect((persisted.payload as Record<string, unknown>).leadReference).toBe('Johnson');
   });
 });
 
@@ -790,8 +795,12 @@ describe('#909 — an ambiguous reference asks one question and the next turn an
       const proposalRepo = new InMemoryProposalRepository();
       const app = buildApp({
         gateway: scriptedGateway([
-          // top-level classification, then one per segment
-          classifierReply('convert_lead', { leadReference: 'the Johnson lead' }),
+          // Top-level classification, then one per segment that REACHES the
+          // model. U5 — "Convert the <X> lead into a customer" is a canonical
+          // owner command, so that segment is classified deterministically for
+          // an owner caller and draws no gateway call; only the second segment
+          // does. (The chain-splitting top-level call is not anchored to a
+          // single command and still runs.)
           classifierReply('convert_lead', { leadReference: 'the Johnson lead' }),
           classifierReply('mark_lead_lost', {
             leadReference: 'the Nguyen lead',
@@ -831,7 +840,8 @@ describe('#909 — an ambiguous reference asks one question and the next turn an
       const proposalRepo = new InMemoryProposalRepository();
       const app = buildApp({
         gateway: scriptedGateway([
-          classifierReply('convert_lead', { leadReference: 'the Johnson lead' }),
+          // See the sibling test above: the convert_lead segment is matched
+          // deterministically for an owner and draws no gateway call.
           classifierReply('convert_lead', { leadReference: 'the Johnson lead' }),
           classifierReply('mark_lead_lost', { leadReference: 'the Nguyen lead' }),
         ]),
