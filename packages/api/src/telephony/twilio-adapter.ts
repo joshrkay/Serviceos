@@ -1042,6 +1042,7 @@ export class TwilioGatherAdapter {
    * channel before Twilio finishes the connect.
    */
   async handleInboundForStream(opts: {
+    accountSid?: string;
     callSid: string;
     from: string;
     tenantId: string;
@@ -1057,7 +1058,13 @@ export class TwilioGatherAdapter {
       from: opts.from,
       tenantId: opts.tenantId,
     });
-    return this.buildStreamTwiML({ sessionId: session.id, callSid: opts.callSid });
+    if (opts.accountSid) {
+      if (session.twilioAccountSid && session.twilioAccountSid !== opts.accountSid) {
+        throw new Error('Twilio account mismatch on replayed call');
+      }
+      session.twilioAccountSid = opts.accountSid;
+    }
+    return this.buildStreamTwiML({ sessionId: session.id, callSid: opts.callSid, accountSid: session.twilioAccountSid });
   }
 
   /**
@@ -1481,14 +1488,17 @@ export class TwilioGatherAdapter {
    * `publicBaseUrl`'s host when set; otherwise emits an explicit
    * placeholder so a missing publicBaseUrl is loud at deploy time.
    */
-  buildStreamTwiML(opts: { sessionId: string; callSid: string }): string {
+  buildStreamTwiML(opts: { sessionId: string; callSid: string; accountSid?: string }): string {
     const baseRaw = this.deps.publicBaseUrl?.replace(/\/+$/, '') ?? '';
     // Translate http(s):// → ws(s):// so Twilio gets a valid ws URL even
     // when the operator only configured PUBLIC_API_URL.
     const wsBase = baseRaw
       ? baseRaw.replace(/^http(s?):\/\//, 'ws$1://')
       : 'wss://media-streams-base-url-not-configured';
-    const streamUrl = `${wsBase}${MEDIA_STREAM_PATH}`;
+    // Stream URLs cannot carry query parameters. Bind the upgrade to the
+    // authenticated call via its path; the server resolves its account token.
+    const callPath = opts.accountSid ? `/${encodeURIComponent(opts.callSid)}` : '';
+    const streamUrl = `${wsBase}${MEDIA_STREAM_PATH}${callPath}`;
     return (
       `<?xml version="1.0" encoding="UTF-8"?>` +
       `<Response>` +

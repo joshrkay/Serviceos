@@ -4421,10 +4421,8 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
             // with the dialogue stranded.
             handlePendingDialogueSilence: (session, tenantId) =>
               twilioAdapter.handlePendingDialogueSilence(session, tenantId),
-            // WS upgrades don't carry AccountSid; fall back to the master
-            // token. Per-tenant subaccount auth for media streams is a
-            // future-phase change (auth at first `start` message).
-            authTokenGetter: () => process.env.TWILIO_AUTH_TOKEN,
+            // Resolve the account bound by the verified inbound webhook.
+            authTokenGetter: ({ accountSid }) => resolveTwilioAuthTokenForSubaccount(accountSid),
             ...(process.env.PUBLIC_API_URL ? { publicBaseUrl: process.env.PUBLIC_API_URL } : {}),
             // Section 7 (CRITICAL): wire the gather adapter's shared Map so
             // Dial TwiML built inside handleEscalateWithContext is visible to
