@@ -108,3 +108,68 @@ outside `.env.production.example`, `packages/mobile/package.json`,
 ## Independent coordinator verification
 
 Codex reran the API production typecheck, mobile typecheck, and production env coverage guard: all passed. Expo compatibility check (`npx expo install --check`) reported dependencies up to date. Mobile Vitest: 116 files / 826 tests passed; expected error-boundary fixture errors appeared on stderr. Separate checkout/webhook/provisioning tests: 68 passed. Native iOS/Android builds were not run; this verifies dependency resolution, compatibility metadata and JavaScript tests, not a device release.
+
+## Failure 3 — `npm run check:dependency-audit` (new CI failure after PR #984)
+
+Root cause: `packages/api/package.json` pinned `sharp: "^0.35.1"`, which the
+committed root `package-lock.json` resolved to exactly `0.35.1`. That
+version is vulnerable to a bundled-libvips issue tracked as
+`GHSA-rgj7-g3m4-5g8c` (wraps `GHSA-g89c-p67h-r497` and
+`GHSA-2jg2-4ch7-h545`), fixed upstream in `sharp@0.35.4`. The project's
+own blocking-severity gate (`docs/quality/dependency-audit-policy.md`,
+run via `scripts/check-dependency-audit.ts`) flags this as `[high]` with
+no exception on file, so the build fails rather than silently passing.
+
+Reproduced locally:
+```
+npm run check:dependency-audit
+...
+BLOCKING:
+  ✗ sharp [high] — no matching exception
+      sharp: Vulnerabilities in libheif: GHSA-g89c-p67h-r497 and GHSA-2jg2-4ch7-h545
+      https://github.com/advisories/GHSA-rgj7-g3m4-5g8c  (vulnerable: <0.35.4)
+FAIL — 1 blocking, 1 excepted, 4 informational
+```
+
+Authoritative source: npm registry metadata for `sharp` —
+`dist-tags.latest` = `0.35.4`, and `0.35.4` is the first release at or
+above the advisory's fixed boundary (`versions` list confirms no
+`0.35.2`/`0.35.3`/`0.35.4` release exists below the fix; `0.35.4` is the
+patch that resolves the advisory).
+
+Fix: bumped `packages/api/package.json` `sharp` from `^0.35.1` to
+`^0.35.4` only (no other dependency touched), then regenerated the root
+`package-lock.json` with `npm install --package-lock-only` so npm's own
+resolver produces the lockfile (no manual edits to lock entries).
+
+Limitation: regenerating the lockfile moved `sharp` (and its `@img/sharp-*`
+platform/libvips optional dependencies) from being hoisted at the lockfile
+root to nested under `packages/api/node_modules/sharp`, which npm's
+resolver reports consistently across repeated `npm install
+--package-lock-only` runs (with or without `-w packages/api` scoping) —
+this is deterministic dedup output from the version bump, not an
+artifact of how the command was invoked, but it does make the
+`package-lock.json` diff far larger (~2,400 lines) than the single
+version bump would suggest. No `package.json` outside
+`packages/api/package.json` was edited, and no `--force` /
+`--legacy-peer-deps` flags were used.
+
+### Verification
+
+1. `npm run check:dependency-audit` — PASS, 0 blocking (previously 1
+   blocking on `sharp`), 1 pre-existing excepted (`react-router`, until
+   2026-10-23), 4 pre-existing informational findings, all unchanged.
+2. `packages/api`: `npx tsc --project tsconfig.build.json --noEmit` — no
+   errors (production build config per root `CLAUDE.md`).
+3. `packages/api`: `vitest run test/workers/image-post-process-worker.test.ts
+   test/proposals/sms/reply-handler.test.ts` (the two suites touching
+   sharp/image processing) — 2 files, 77 tests, all passed.
+
+Not run: no code paths in `packages/api` call `sharp` with the specific
+libheif-related APIs the advisory concerns, and this repair does not add
+new usage — the fix is a version bump plus the existing test coverage
+above, not new test coverage. No commit, push, or deploy was made; the
+working tree changes are `packages/api/package.json`, root
+`package-lock.json`, and this plan file only.
+
+Coordinator review of the Sharp update: a clean root npm ci passed; resolving Sharp from the API confirmed installed version0.35.4. The original Sonnet image-test run used the old installed package, so the coordinator repeated the image tests against the patched library. Retained pre-existing libc metadata on14 unrelated optional platform packages that the local npm version had dropped; no unrelated dependency versions changed. Dependency audit passes with0 blocking findings under the existing policy (one pre-existing react-router exception remains).
