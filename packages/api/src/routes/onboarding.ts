@@ -1,4 +1,5 @@
 import { Router, Response } from 'express';
+import { z } from 'zod';
 import type { Pool } from 'pg';
 import { AuthenticatedRequest } from '../auth/clerk';
 import { resolveOwnerEmail } from '../auth/resolve-owner-email';
@@ -25,7 +26,7 @@ import { searchAvailableNumbers } from '../integrations/twilio/provisioning';
 import { saveVoiceConfig } from '../voice/voice-config';
 import { VOICE_PRESETS } from '../integrations/vapi/assistant-config';
 import { getVapiClient, type VapiClient } from '../integrations/vapi/client';
-import { BillingService } from '../billing/subscription';
+import { BillingService, BILLING_PLAN_IDS } from '../billing/subscription';
 import type { Queue } from '../queues/queue';
 import {
   PROVISION_TWILIO_JOB_TYPE,
@@ -69,6 +70,13 @@ export function createOnboardingRouter(deps: OnboardingRouterDeps): Router {
     packSeedDeps,
   } = deps;
   const router = Router();
+
+  // Explicit plan selection only — the browser sends an id from this
+  // allowlist, never a Stripe price. See billing/subscription.ts
+  // BILLING_PLAN_IDS / createTrialCheckoutSession.
+  const BillingCheckoutInputSchema = z.object({
+    planId: z.enum(BILLING_PLAN_IDS),
+  });
 
   router.get(
     '/status',
@@ -775,10 +783,53 @@ export function createOnboardingRouter(deps: OnboardingRouterDeps): Router {
   );
 
   /**
+   * GET /api/onboarding/billing/plans
+   *
+   * Validated, display-safe list of sellable plans (basic/enterprise) for
+   * the billing step's plan picker: id, canonical Stripe product name,
+   * and amount/interval — no price ids, no secrets. A plan whose env var
+   * is unset or whose Stripe price fails validation is simply omitted
+   * (see BillingService.listPlans); if nothing validates, this fails
+   * closed with an actionable, non-secret 503 rather than silently
+   * showing an empty/broken picker.
+   */
+  router.get(
+    '/billing/plans',
+    requireAuth,
+    requireTenant,
+    async (_req: AuthenticatedRequest, res: Response) => {
+      try {
+        if (!billingService) {
+          res.status(503).json({
+            error: 'BILLING_NOT_CONFIGURED',
+            message: 'Subscription billing is not configured',
+          });
+          return;
+        }
+        const { plans } = await billingService.listPlans();
+        if (plans.length === 0) {
+          res.status(503).json({
+            error: 'BILLING_PLANS_UNAVAILABLE',
+            message: 'No billing plans are currently configured. Contact support.',
+          });
+          return;
+        }
+        res.json({ plans });
+      } catch (err) {
+        const { statusCode, body } = toErrorResponse(err);
+        res.status(statusCode).json(body);
+      }
+    },
+  );
+
+  /**
    * POST /api/onboarding/billing/checkout-session
    *
    * Mints a Stripe Checkout Session for the 14-day trial subscription.
-   * Requires billingService (503 when Stripe is not configured).
+   * Requires billingService (503 when Stripe is not configured) AND an
+   * explicit `planId` (basic|enterprise) in the body — there is no
+   * default plan and no fallback price, so a missing/invalid selection
+   * 400s instead of ever charging the wrong plan.
    * Returns { url } for the operator to redirect to.
    */
   router.post(
@@ -796,6 +847,16 @@ export function createOnboardingRouter(deps: OnboardingRouterDeps): Router {
           res.status(503).json({
             error: 'BILLING_NOT_CONFIGURED',
             message: 'Subscription billing is not configured',
+          });
+          return;
+        }
+
+        const parsed = BillingCheckoutInputSchema.safeParse(req.body);
+        if (!parsed.success) {
+          res.status(400).json({
+            error: 'VALIDATION_ERROR',
+            message: 'A valid plan (basic or enterprise) is required.',
+            issues: parsed.error.issues,
           });
           return;
         }
@@ -822,6 +883,7 @@ export function createOnboardingRouter(deps: OnboardingRouterDeps): Router {
           ownerEmail: email,
           successUrl,
           cancelUrl,
+          planId: parsed.data.planId,
         });
         res.json(result);
       } catch (err: unknown) {

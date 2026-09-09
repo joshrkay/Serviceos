@@ -26,6 +26,50 @@ export interface BillingConfig {
   portalConfigurationId?: string;
 }
 
+/**
+ * Server-side plan allowlist for the onboarding trial checkout. The
+ * browser only ever sends one of these ids — never a raw Stripe price —
+ * so a compromised/buggy client can at worst pick the WRONG allowed plan,
+ * never an arbitrary price. Each id maps to its own env var (never
+ * STRIPE_PRICE_ID, the single legacy price) and expected monthly USD
+ * amount, which `validatePlanPrice` checks against live Stripe data
+ * before every checkout.
+ */
+export const BILLING_PLAN_IDS = ['basic', 'enterprise'] as const;
+export type BillingPlanId = (typeof BILLING_PLAN_IDS)[number];
+
+export interface BillingPlanView {
+  id: BillingPlanId;
+  /** Canonical Stripe product name, falling back to the plan's display name. */
+  name: string;
+  amountCents: number;
+  currency: string;
+  interval: string;
+}
+
+interface PlanSpec {
+  envVar: string;
+  expectedAmountCents: number;
+  displayName: string;
+}
+
+const PLAN_SPECS: Record<BillingPlanId, PlanSpec> = {
+  basic: { envVar: 'STRIPE_BASIC_PRICE_ID', expectedAmountCents: 5_000, displayName: 'Basic' },
+  enterprise: { envVar: 'STRIPE_ENTERPRISE_PRICE_ID', expectedAmountCents: 15_000, displayName: 'Enterprise' },
+};
+
+/** Fails closed with a non-secret, actionable message — never the env value. */
+function resolvePlanPriceId(planId: BillingPlanId): string {
+  const spec = PLAN_SPECS[planId];
+  const priceId = process.env[spec.envVar];
+  if (!priceId) {
+    throw new ValidationError(
+      `Billing plan "${planId}" is not configured (${spec.envVar} is not set). Contact support.`,
+    );
+  }
+  return priceId;
+}
+
 export type BillingFetch = typeof fetch;
 
 export interface BillingSubscriptionView {
@@ -225,23 +269,176 @@ export class BillingService {
   }
 
   /**
+   * Looks up a plan's Stripe price (with its product expanded) and checks
+   * it is exactly what onboarding is allowed to charge: active, USD,
+   * recurring monthly (interval_count 1 — never quarterly/annual),
+   * licensed (never metered/usage-based — a metered price has no fixed
+   * unit_amount to compare against and can't be sold as a flat-fee plan),
+   * the expected amount, on an active product with a real (expanded)
+   * product id. Never trusts the env-configured price id at face value —
+   * a stale/wrong Stripe-side price must fail closed here rather than
+   * silently checking out a tenant for the wrong amount, cadence, or
+   * billing model.
+   *
+   * The lookup is bounded to 10s (AbortSignal.timeout) so a slow/hanging
+   * Stripe response can't hang the onboarding billing-plans request or a
+   * checkout attempt forever.
+   *
+   * Logs a safe structured diagnostic (phase, plan, Stripe status/request
+   * id, and a shape summary) on any failure — no full response body, no
+   * customer info, no keys.
+   */
+  private async validatePlanPrice(
+    planId: BillingPlanId,
+    priceId: string,
+  ): Promise<{ priceId: string; productId: string; name: string; amountCents: number }> {
+    const spec = PLAN_SPECS[planId];
+    const apiKey = this.deps.config!.apiKey;
+    const fetchFn = this.deps.fetchFn ?? fetch;
+    const res = await fetchFn(
+      `https://api.stripe.com/v1/prices/${encodeURIComponent(priceId)}?expand[]=product`,
+      {
+        headers: { Authorization: `Bearer ${apiKey}` },
+        signal: AbortSignal.timeout(10_000),
+      },
+    );
+    const requestId = res.headers?.get?.('request-id') ?? undefined;
+    if (!res.ok) {
+      // eslint-disable-next-line no-console
+      console.error('[billing-subscription] plan price lookup failed', {
+        phase: 'plan_price_lookup',
+        planId,
+        stripeStatus: res.status,
+        requestId,
+      });
+      throw new ValidationError(`Billing plan "${planId}" is misconfigured. Contact support.`);
+    }
+    const price = (await res.json()) as {
+      active?: boolean;
+      currency?: string;
+      type?: string;
+      unit_amount?: number | null;
+      recurring?: { interval?: string; interval_count?: number; usage_type?: string } | null;
+      product?: { id?: string; active?: boolean; name?: string } | string | null;
+    };
+    const product = price.product && typeof price.product === 'object' ? price.product : null;
+    const productId = product?.id?.trim() || undefined;
+    const valid =
+      price.active === true &&
+      price.currency === 'usd' &&
+      price.type === 'recurring' &&
+      price.recurring?.interval === 'month' &&
+      price.recurring?.interval_count === 1 &&
+      price.recurring?.usage_type === 'licensed' &&
+      price.unit_amount === spec.expectedAmountCents &&
+      product?.active === true &&
+      Boolean(productId);
+    if (!valid) {
+      // eslint-disable-next-line no-console
+      console.error('[billing-subscription] plan price failed validation', {
+        phase: 'plan_price_validation',
+        planId,
+        requestId,
+        active: price.active,
+        currency: price.currency,
+        type: price.type,
+        interval: price.recurring?.interval,
+        intervalCount: price.recurring?.interval_count,
+        usageType: price.recurring?.usage_type,
+        unitAmount: price.unit_amount,
+        productActive: product?.active,
+        productIdPresent: Boolean(productId),
+      });
+      throw new ValidationError(
+        `Billing plan "${planId}" is misconfigured (expected an active, USD, monthly ` +
+          `(not quarterly/annual), licensed (not metered) $${(spec.expectedAmountCents / 100).toFixed(2)} ` +
+          `price on an active product). Contact support.`,
+      );
+    }
+    return {
+      priceId,
+      productId: productId!,
+      name: product?.name?.trim() || spec.displayName,
+      amountCents: spec.expectedAmountCents,
+    };
+  }
+
+  /**
+   * Validated, display-safe view of the sellable plans (basic/enterprise)
+   * for the onboarding billing step. Only ids whose env var is set AND
+   * whose Stripe price passes `validatePlanPrice` are included — a
+   * misconfigured plan is omitted (and logged) rather than shown broken
+   * or charged wrong. No secrets in the response (price ids are not
+   * secret, but are omitted anyway — the frontend only needs id/name/amount).
+   */
+  async listPlans(): Promise<{ plans: BillingPlanView[] }> {
+    if (!this.deps.config?.apiKey) {
+      throw new ValidationError('Subscription billing is not configured');
+    }
+    const plans: BillingPlanView[] = [];
+    for (const planId of BILLING_PLAN_IDS) {
+      let priceId: string;
+      try {
+        priceId = resolvePlanPriceId(planId);
+      } catch {
+        continue;
+      }
+      try {
+        const validated = await this.validatePlanPrice(planId, priceId);
+        plans.push({
+          id: planId,
+          name: validated.name,
+          amountCents: validated.amountCents,
+          currency: 'usd',
+          interval: 'month',
+        });
+      } catch {
+        continue;
+      }
+    }
+    return { plans };
+  }
+
+  /**
    * Creates a Stripe Checkout Session for a 14-day trial subscription.
    * The operator is redirected to Stripe-hosted checkout where they
    * enter card details. Trial starts immediately; billing begins after
-   * 14 days. Requires STRIPE_PRICE_ID to be set in the environment.
+   * 14 days.
+   *
+   * `planId` (basic|enterprise) is the ONLY caller-controlled plan
+   * selection: the price id is resolved server-side from the matching
+   * STRIPE_<PLAN>_PRICE_ID env var and validated live against Stripe
+   * (see `validatePlanPrice`) — a caller can never point checkout at an
+   * arbitrary Stripe price. Omitting `planId` keeps the legacy,
+   * DEPRECATED single-price path (STRIPE_PRICE_ID, unvalidated — no
+   * live Stripe check, no plan/product metadata) alive only for
+   * `scripts/provision-tenant.ts`; the HTTP route always supplies
+   * `planId` and never exercises this branch.
    */
   async createTrialCheckoutSession(input: {
     tenantId: string;
     ownerEmail: string;
     successUrl: string;
     cancelUrl: string;
+    planId?: BillingPlanId;
   }): Promise<{ url: string }> {
     if (!this.deps.config?.apiKey) {
       throw new ValidationError('Subscription billing is not configured');
     }
-    const priceId = process.env.STRIPE_PRICE_ID;
-    if (!priceId) {
-      throw new ValidationError('STRIPE_PRICE_ID is not set');
+    let priceId: string;
+    let validatedPlan: { productId: string } | null = null;
+    if (input.planId) {
+      const resolved = resolvePlanPriceId(input.planId);
+      const validated = await this.validatePlanPrice(input.planId, resolved);
+      priceId = validated.priceId;
+      validatedPlan = { productId: validated.productId };
+    } else {
+      // DEPRECATED legacy path — see docstring above.
+      const legacy = process.env.STRIPE_PRICE_ID;
+      if (!legacy) {
+        throw new ValidationError('STRIPE_PRICE_ID is not set');
+      }
+      priceId = legacy;
     }
     const fetchFn = this.deps.fetchFn ?? fetch;
 
@@ -334,7 +531,19 @@ export class BillingService {
       body.set('line_items[0][quantity]', '1');
       body.set('subscription_data[trial_period_days]', '14');
       body.set('subscription_data[metadata][tenant_id]', input.tenantId);
+      if (input.planId && validatedPlan) {
+        body.set('subscription_data[metadata][plan_id]', input.planId);
+        body.set('subscription_data[metadata][stripe_price_id]', priceId);
+        body.set('subscription_data[metadata][stripe_product_id]', validatedPlan.productId);
+      }
       body.set('payment_method_collection', 'always');
+      // Collect name + billing address on the Stripe-hosted page. We
+      // already pass an existing `customer` (created with just an email),
+      // so `customer_update` must explicitly opt each field in — without
+      // it Checkout silently skips both fields for a pre-existing customer.
+      body.set('billing_address_collection', 'required');
+      body.set('customer_update[name]', 'auto');
+      body.set('customer_update[address]', 'auto');
       body.set('customer', customerId);
       body.set('success_url', input.successUrl);
       body.set('cancel_url', input.cancelUrl);
@@ -357,6 +566,13 @@ export class BillingService {
       });
       if (!res.ok) {
         const text = await res.text();
+        // eslint-disable-next-line no-console
+        console.error('[billing-subscription] checkout session create failed', {
+          phase: 'checkout_session_create',
+          planId: input.planId ?? null,
+          stripeStatus: res.status,
+          requestId: res.headers?.get?.('request-id') ?? undefined,
+        });
         throw new Error(`Stripe checkout session failed (${res.status}): ${text}`);
       }
       const session = (await res.json()) as { id?: string; url?: string };
